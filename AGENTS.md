@@ -54,7 +54,7 @@ Each agent owns folders. **Never edit a file you do not own.**
 | A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**` |
 | A6 | `tasks/A6-web.md` | `web/**` |
 | C1 (cloud) | `tasks/C1-ci-repo.md` | `.github/**`, `README.md`, `docs/runbook.md`, `Makefile` |
-| C2 (cloud) | `tasks/C2-agent-memory.md` | `internal/agent/**` (not `contract.go`) while C2 is open; A4 meanwhile only `cmd/investigate/**` |
+| C2 (cloud) | `tasks/C2-agent-memory.md` | done — merged `9519d23`; `internal/agent/**` belongs to A4 again |
 | C3 (cloud) | `tasks/C3-snowflake.md` | `internal/clients/snowflake/**` |
 | C4 (cloud) | `tasks/C4-security.md` | `docs/security/**` (no code changes) |
 | Claude leads | — | `AGENTS.md`, `tasks/**`, `docs/**`, `reviews/**`, and every **contract file** below |
