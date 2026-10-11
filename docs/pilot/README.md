@@ -20,9 +20,14 @@ pilot around them instead of discovering them in an incident:
 - **Approvers see a description, not parameters (F2).** The approval UI shows the model's
   free-text description of a fix, not the exact connector/subject it will act on. Before
   approving, ask the agent (or read the `proposal.created` event) for the exact `params`.
-- **Room service not on `main` yet.** `cmd/server`, the HTTP API, the store and the executor
-  (A5) have not merged. Until they do, only `cmd/investigate` runs, and [setup.md](setup.md)
-  marks the steps that need the server.
+- **Room service is in a separate PR.** `cmd/server`, the HTTP API, the store and the executor
+  are in [#15](https://github.com/utkarsh199708/piperoom/pull/15). Until it merges only
+  `cmd/investigate` runs, and [setup.md](setup.md) marks the steps that need the server. It has
+  been tested with a scripted demo agent and fakes, not against a real stack.
+- **Restarts do not resume work.** After a server restart the agent is not resumed, and a fix
+  that was approved but not finished is not re-run; owners re-propose it.
+- **The server refuses to listen on a non-loopback address** unless started with
+  `--insecure-listen` (there is no real login).
 - **Write actions are scoped to the room's pipeline** (F10, fixed on `main`:
   `actions.Scoped.CheckScope`). Still use narrow Connect/Registry credentials as defence in
   depth; the credential, not the code, should be the last line.

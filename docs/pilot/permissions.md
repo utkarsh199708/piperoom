@@ -117,9 +117,10 @@ pipeline: record values may contain customer data (see [data-handling.md](data-h
 
 Use TLS and SASL on the listener if your cluster has them. The settings exist
 (`KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_*`, `KAFKA_TLS_*`, and the same for Schema Registry
-and Connect; see [setup.md](setup.md#1-configure-the-environment)), but **the wiring is pending**:
-`cmd/investigate/wire.go` still builds plain clients (A4). Until that lands, connect only to
-a network-isolated replica or staging cluster that does not require TLS/SASL.
+and Connect; see [setup.md](setup.md#1-configure-the-environment)), and `internal/wiring`
+builds the Kafka, Schema Registry and Connect clients from them (`netsec`). Basic auth is
+refused over plain `http://`, and Kafka PLAIN needs TLS. This was checked in unit tests with
+fake servers only, not against a real secured cluster, so try it on staging first.
 
 ## Kafka Connect
 

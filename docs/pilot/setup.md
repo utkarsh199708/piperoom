@@ -38,8 +38,10 @@ at the local dev stack, so **set every one** you rely on.
 | `CONNECT_PASSWORD`, `CONNECT_TLS_KEY_FILE` | **secrets** |
 | `ANTHROPIC_API_KEY` | read by the SDK from the environment; never stored in config |
 
-The TLS/SASL/auth variables are read by `config.Load()`, but `cmd/investigate/wire.go` does
-not use them yet (wiring pending, A4), so they have no effect today.
+The TLS/SASL/auth variables are read by `config.Load()` and applied by `internal/wiring`. A
+wrong combination (for example a password with an `http://` URL) fails at startup with an
+error that names the setting, never its value. Unit-tested with fakes; not yet tried against a
+real secured cluster.
 
 Put secrets in your secret manager and inject them into the process environment. Do not
 commit them, and do not put DSNs with passwords in shell history or tickets. Use
@@ -93,13 +95,18 @@ Rules of thumb:
 
 ## 4. Start the service
 
-> **Status:** `cmd/server`, `migrations/` and the web UI's server API (A5/A6) were not on
-> `main` when this was written. Until they land, use step 5.1 (`cmd/investigate`) only and
-> skip the HTTP/room steps. Check `git log -- cmd/server` before relying on this section.
+> **Status:** the room service (`cmd/server`, `migrations/`, HTTP API, WebSocket, executor) is
+> in a separate PR ([#15](https://github.com/utkarsh199708/piperoom/pull/15)) and was not on
+> `main` when this was written. Check `git log -- cmd/server` before relying on this section.
+> Until it merges, use step 5.1 (`cmd/investigate`) only. It has been tested with the scripted
+> `--demo` agent and fakes, not against a real stack or a real Claude run.
+
+Apply the schema first: `goose -dir migrations postgres "$PIPEROOM_DB_URL" up`.
 
 ```sh
 go build ./...
-go run ./cmd/server          # serves the HTTP API and WebSocket on PIPEROOM_HTTP_ADDR
+go run ./cmd/server --demo   # try it first: scripted agent, in-memory log, no stack or API key
+go run ./cmd/server          # real mode: serves the HTTP API and WebSocket on PIPEROOM_HTTP_ADDR
 cd web && npm ci && npm run build
 ```
 
@@ -129,7 +136,13 @@ reverse proxy that sets `X-User` itself and strips the header from client reques
 
 ## 6. Wire up alerts
 
-Point your alerting system (Alertmanager, PagerDuty, etc.) at `POST /api/alerts/webhook`.
+Point your alerting system at `POST /api/alerts/{source}` where source is `alertmanager`,
+`grafana`, `pagerduty`, `datadog` or `generic` (`POST /api/alerts/webhook` is the generic form).
+Each source is **disabled until its secret is set** in the server's environment:
+`PIPEROOM_ALERTMANAGER_TOKEN`, `PIPEROOM_GRAFANA_SECRET`, `PIPEROOM_PAGERDUTY_SECRET`,
+`PIPEROOM_DATADOG_TOKEN`, `PIPEROOM_GENERIC_SECRET` (all secrets), and optionally
+`PIPEROOM_DEFAULT_PIPELINE`. The signature rules per sender are in `internal/alertin/README.md`.
+The same incident sent again opens no second room.
 The body is mapped to `title` / `severity` / `pipeline_id`, and the whole body is stored in
 the room event log, so do not include secrets in alert payloads. See `docs/design/webhook-auth.md`
 (if present; it is the webhook authentication design, C9) and, until it lands, keep this endpoint unreachable from
