@@ -168,7 +168,7 @@ func (b *builder) connectorForTable(ctx context.Context, p owners.Pipeline, tabl
 			lastErr = err
 			continue
 		}
-		if streamsTable(cfg["table.include.list"], table) {
+		if streamsTable(cfg, table) {
 			return cn, cfg["topic.prefix"] + "." + table, nil
 		}
 	}

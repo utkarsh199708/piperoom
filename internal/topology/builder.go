@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"piperoom/internal/clients"
@@ -84,7 +87,7 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 		var ts []string
 		isFallback := false
 		if snap, ok := info.connect[cn]; ok && snap.err == nil {
-			ts = deriveTopics(snap.config["topic.prefix"], snap.config["table.include.list"], p.SourceTables)
+			ts = deriveTopics(snap.config, p.SourceTables)
 		} else {
 			// Connect unreachable: keep the graph shape with placeholder
 			// topics so the topic node and its edges still exist.
@@ -202,7 +205,7 @@ func (b *builder) slotName(p owners.Pipeline, tbl string, info *collected) strin
 		if !ok || snap.err != nil {
 			continue
 		}
-		if streamsTable(snap.config["table.include.list"], tbl) {
+		if streamsTable(snap.config, tbl) {
 			return slotNameFor(cn, snap.config)
 		}
 	}
@@ -296,11 +299,126 @@ func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {
 	return n
 }
 
-// streamsTable reports whether a Debezium table.include.list includes tbl.
+// ---- Debezium include/exclude lists ----
+//
+// Debezium interprets table.include.list, table.exclude.list, schema.include.list
+// and schema.exclude.list as comma-separated regular expressions, each
+// anchored to the whole identifier: table lists match the fully-qualified
+// schema.table id, schema lists match the schema name. Exclude lists win over
+// include lists. See "Advanced PostgreSQL connector configuration properties"
+// in https://debezium.io/documentation/reference/stable/connectors/postgresql.html
+
+// regexMetaChars are the RE2 metacharacters. An entry without any of them can
+// only match itself, so it takes the literal fast path and skips compilation.
+const regexMetaChars = `\.+*?()|[]{}^$`
+
+// listPattern is one entry of a Debezium include or exclude list.
+type listPattern struct {
+	literal string         // compared byte-wise when re is nil
+	re      *regexp.Regexp // nil for entries with no regex metacharacters
+}
+
+func (p listPattern) matches(id string) bool {
+	if p.re == nil {
+		return p.literal == id
+	}
+	return p.re.MatchString(id)
+}
+
+// listMatcher matches identifiers against one include/exclude list pair
+// (table-level or schema-level) the way the Debezium connector would: any
+// include entry must match (an empty include list accepts everything) and no
+// exclude entry may match.
+type listMatcher struct {
+	includes []listPattern
+	excludes []listPattern
+}
+
+func newListMatcher(include, exclude string) listMatcher {
+	return listMatcher{
+		includes: compileList(include),
+		excludes: compileList(exclude),
+	}
+}
+
+func (m listMatcher) matches(id string) bool {
+	if len(m.includes) > 0 && !anyPatternMatches(m.includes, id) {
+		return false
+	}
+	return !anyPatternMatches(m.excludes, id)
+}
+
+func anyPatternMatches(ps []listPattern, id string) bool {
+	for _, p := range ps {
+		if p.matches(id) {
+			return true
+		}
+	}
+	return false
+}
+
+// compileList turns a comma-separated Debezium list into patterns. Each entry
+// that compiles as RE2 is anchored with ^(?:entry)$ so it must match the whole
+// identifier, like Debezium's matcher. An entry that does not compile is
+// compared literally and reported once.
+func compileList(list string) []listPattern {
+	entries := splitCSV(list)
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]listPattern, 0, len(entries))
+	for _, e := range entries {
+		if !strings.ContainsAny(e, regexMetaChars) {
+			out = append(out, listPattern{literal: e})
+			continue
+		}
+		re, err := regexp.Compile("^(?:" + e + ")$")
+		if err != nil {
+			warnBadListEntry(e)
+			out = append(out, listPattern{literal: e})
+			continue
+		}
+		out = append(out, listPattern{re: re})
+	}
+	return out
+}
+
+// badListEntries dedupes the warning below. It is a diagnostics-only cache: it
+// never affects matching, it just keeps one broken config entry from logging
+// on every Build and Trace.
+var badListEntries sync.Map
+
+func warnBadListEntry(entry string) {
+	if _, loaded := badListEntries.LoadOrStore(entry, struct{}{}); loaded {
+		return
+	}
+	slog.Warn("topology: include/exclude list entry is not a valid regex, comparing literally", "entry", entry)
+}
+
+// streamMatcher decides which pipeline tables a connector streams, following
+// Debezium: the table lists match the whole schema.table id, the schema lists
+// match its schema part.
+type streamMatcher struct {
+	tables  listMatcher
+	schemas listMatcher
+}
+
+func newStreamMatcher(cfg map[string]string) streamMatcher {
+	return streamMatcher{
+		tables:  newListMatcher(cfg["table.include.list"], cfg["table.exclude.list"]),
+		schemas: newListMatcher(cfg["schema.include.list"], cfg["schema.exclude.list"]),
+	}
+}
+
+func (m streamMatcher) streams(tbl string) bool {
+	schema, _, _ := strings.Cut(tbl, ".")
+	return m.tables.matches(tbl) && m.schemas.matches(schema)
+}
+
+// streamsTable reports whether a connector with the given config streams tbl.
 // An empty include list streams every table in the pipeline.
-func streamsTable(includeList, tbl string) bool {
-	inc := splitCSV(includeList)
-	return len(inc) == 0 || slices.Contains(inc, tbl)
+func streamsTable(cfg map[string]string, tbl string) bool {
+	return newStreamMatcher(cfg).streams(tbl)
 }
 
 func slotNameFor(_ string, cfg map[string]string) string {
@@ -319,14 +437,15 @@ func fallbackTopics(tables []string) []string {
 
 // deriveTopics returns the Debezium topic names for the pipeline tables this
 // connector streams: <topic.prefix>.<schema>.<table>.
-func deriveTopics(prefix, includeList string, tables []string) []string {
+func deriveTopics(cfg map[string]string, tables []string) []string {
+	prefix := cfg["topic.prefix"]
 	if prefix == "" {
 		return nil
 	}
-	inc := splitCSV(includeList)
+	m := newStreamMatcher(cfg)
 	var topics []string
 	for _, t := range tables {
-		if len(inc) == 0 || slices.Contains(inc, t) {
+		if m.streams(t) {
 			topics = append(topics, prefix+"."+t)
 		}
 	}
