@@ -7,8 +7,8 @@ export interface DevUser {
 }
 
 export const DEV_USERS: DevUser[] = [
-  { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka', 'schema-registry'] },
-  { id: 'priya', name: 'Priya', layers: ['postgres'] },
+  { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] },
+  { id: 'priya', name: 'Priya', layers: ['postgres', 'schema-registry'] },
   { id: 'meera', name: 'Meera', layers: ['warehouse'] },
   { id: 'kabir', name: 'Kabir', layers: ['consumer'] },
 ]

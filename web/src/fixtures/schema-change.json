@@ -26,6 +26,14 @@
     {
       "room_id": "r_schema_change",
       "seq": 2,
+      "type": "control.granted",
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "payload": { "to": { "kind": "human", "id": "arjun", "name": "Arjun" }, "lease_until": "2026-10-11T10:30:00Z" },
+      "at": "2026-10-11T10:00:01Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 3,
       "type": "agent.status",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "state": "working", "detail": "step 1" },
@@ -33,7 +41,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 3,
+      "seq": 4,
       "type": "agent.step.started",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "step_id": "s_1", "title": "Check the Debezium connector" },
@@ -41,7 +49,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 4,
+      "seq": 5,
       "type": "agent.tool_call",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "step_id": "s_1", "tool_use_id": "tu_1", "tool": "connect_status", "input": { "connector": "pg-orders-connector" } },
@@ -49,15 +57,26 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 5,
+      "seq": 6,
       "type": "agent.tool_result",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": {
         "step_id": "s_1",
         "tool_use_id": "tu_1",
         "tool": "connect_status",
-        "summary": "pg-orders-connector (source): RUNNING. Tasks: 0=FAILED on 172.19.0.5:8083.\nTask 0 error: org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders\n  Caused by: ... Schema being registered is incompatible with an earlier schema for subject pg.public.orders-value, details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path /fields/0/type/1 in the old schema'}, {oldSchemaVersion: 1}, {validateFields: 'false', compatibility: 'BACKWARD'}]; error code: 409\nRejected schema vs pg.public.orders-value v1: amount: int → bytes(decimal 12,2)",
-        "data": { "connector": "pg-orders-connector", "state": "RUNNING", "tasks": [{ "id": 0, "state": "FAILED", "worker": "172.19.0.5:8083" }] },
+        "summary": "pg-orders-connector (source): RUNNING on 172.19.0.5:8083.\nTask 0: FAILED:\norg.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders\nCaused by: Schema being registered is incompatible with an earlier schema for subject pg.public.orders-value, details: [{oldSchemaVersion: 1}, {compatibility: 'BACKWARD'}]; error code: 409",
+        "data": {
+          "name": "pg-orders-connector",
+          "state": "RUNNING",
+          "worker": "172.19.0.5:8083",
+          "tasks": [
+            {
+              "id": 0,
+              "state": "FAILED",
+              "error": "org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders\nCaused by: Schema being registered is incompatible with an earlier schema for subject pg.public.orders-value, details: [{oldSchemaVersion: 1}, {compatibility: 'BACKWARD'}]; error code: 409"
+            }
+          ]
+        },
         "is_error": false,
         "took_ms": 412
       },
@@ -65,7 +84,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 6,
+      "seq": 7,
       "type": "agent.step.started",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "step_id": "s_2", "title": "Inspect the Schema Registry subject" },
@@ -73,7 +92,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 7,
+      "seq": 8,
       "type": "agent.tool_call",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "step_id": "s_2", "tool_use_id": "tu_2", "tool": "schema_registry_versions", "input": { "subject": "pg.public.orders-value" } },
@@ -81,15 +100,15 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 8,
+      "seq": 9,
       "type": "agent.tool_result",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": {
         "step_id": "s_2",
         "tool_use_id": "tu_2",
         "tool": "schema_registry_versions",
-        "summary": "subject pg.public.orders-value: versions [1], latest id 1, compatibility BACKWARD (subject-level)",
-        "data": { "subject": "pg.public.orders-value", "versions": [1], "latest_id": 1, "compatibility": "BACKWARD", "level": "subject" },
+        "summary": "pg.public.orders-value: versions [1], latest id 1, compatibility BACKWARD (subject)",
+        "data": { "subject": "pg.public.orders-value", "versions": [1], "latest_id": 1, "compatibility": "BACKWARD", "compatibility_scope": "subject" },
         "is_error": false,
         "took_ms": 89
       },
@@ -97,7 +116,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 9,
+      "seq": 10,
       "type": "agent.step.started",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "step_id": "s_3", "title": "Diff the attempted schema against v1" },
@@ -105,7 +124,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 10,
+      "seq": 11,
       "type": "agent.tool_call",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": {
@@ -114,7 +133,6 @@
         "tool": "schema_registry_diff",
         "input": {
           "subject": "pg.public.orders-value",
-          "from_version": 1,
           "schema": "{\"type\":\"record\",\"name\":\"Value\",\"fields\":[{\"name\":\"amount\",\"type\":[\"null\",{\"type\":\"bytes\",\"logicalType\":\"decimal\",\"precision\":12,\"scale\":2}]}]}"
         }
       },
@@ -122,7 +140,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 11,
+      "seq": 12,
       "type": "agent.tool_result",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": {
@@ -130,7 +148,12 @@
         "tool_use_id": "tu_3",
         "tool": "schema_registry_diff",
         "summary": "amount: int → bytes(decimal 12,2)",
-        "data": { "subject": "pg.public.orders-value", "from_version": 1, "field_diffs": [{ "field": "amount", "from": "int", "to": "bytes(decimal 12,2)" }] },
+        "data": {
+          "subject": "pg.public.orders-value",
+          "from_version": 0,
+          "to_version": 1,
+          "changes": [{ "field": "amount", "kind": "changed", "from": "int", "to": "bytes(decimal 12,2)" }]
+        },
         "is_error": false,
         "took_ms": 57
       },
@@ -138,7 +161,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 12,
+      "seq": 13,
       "type": "comment.added",
       "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
       "payload": { "comment_id": "c_1", "step_id": "s_1", "text": "Wrong service? I'd expect Connect to be down, not the schema.", "mentions_agent": false },
@@ -146,7 +169,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 13,
+      "seq": 14,
       "type": "agent.message",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "text": "Connect is up; task 0 is failed on a Schema Registry compatibility error.", "step_id": "s_2", "reply_to": "c_1" },
@@ -154,7 +177,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 14,
+      "seq": 15,
       "type": "steer.suggested",
       "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
       "payload": { "suggestion_id": "g_1", "text": "Check the connector config first, not the topic." },
@@ -162,7 +185,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 15,
+      "seq": 16,
       "type": "steer.sent",
       "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
       "payload": { "suggestion_id": "g_1", "text": "Check the connector config first, not the topic." },
@@ -170,7 +193,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 16,
+      "seq": 17,
       "type": "agent.message",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "text": "Connector config is unchanged; the failure is the value schema subject.", "step_id": "s_1" },
@@ -178,7 +201,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 17,
+      "seq": 18,
       "type": "agent.step.started",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "step_id": "s_4", "title": "Check consumer lag" },
@@ -186,7 +209,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 18,
+      "seq": 19,
       "type": "agent.tool_call",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "step_id": "s_4", "tool_use_id": "tu_4", "tool": "kafka_consumer_lag", "input": { "group": "order-sync" } },
@@ -194,15 +217,15 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 19,
+      "seq": 20,
       "type": "agent.tool_result",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": {
         "step_id": "s_4",
         "tool_use_id": "tu_4",
         "tool": "kafka_consumer_lag",
-        "summary": "group order-sync: state Stable, members 1, total lag 0",
-        "data": { "group": "order-sync", "state": "Stable", "members": 1, "total_lag": 0 },
+        "summary": "order-sync: Stable, 1 members, total lag 0",
+        "data": { "group": "order-sync", "state": "Stable", "members": 1, "total_lag": 0, "worst_partitions": [] },
         "is_error": false,
         "took_ms": 133
       },
@@ -210,7 +233,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 20,
+      "seq": 21,
       "type": "agent.step.started",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "step_id": "s_5", "title": "Check the DDL log" },
@@ -218,7 +241,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 21,
+      "seq": 22,
       "type": "agent.tool_call",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "step_id": "s_5", "tool_use_id": "tu_5", "tool": "pg_recent_ddl", "input": { "since": "2026-10-11T09:00:00Z" } },
@@ -226,15 +249,23 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 22,
+      "seq": 23,
       "type": "agent.tool_result",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": {
         "step_id": "s_5",
         "tool_use_id": "tu_5",
         "tool": "pg_recent_ddl",
-        "summary": "2026-10-11T09:47:00Z ALTER TABLE public.orders: ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) by etl",
-        "data": { "command": "ALTER TABLE", "object": "public.orders", "sql": "ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)", "username": "etl", "at": "2026-10-11T09:47:00Z" },
+        "summary": "2026-10-11T09:47:00Z ALTER TABLE public.orders | ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) | etl",
+        "data": [
+          {
+            "at": "2026-10-11T09:47:00Z",
+            "command_tag": "ALTER TABLE",
+            "object_identity": "public.orders",
+            "query": "ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)",
+            "username": "etl"
+          }
+        ],
         "is_error": false,
         "took_ms": 64
       },
@@ -242,7 +273,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 23,
+      "seq": 24,
       "type": "agent.hypothesis",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": {
@@ -255,7 +286,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 24,
+      "seq": 25,
       "type": "proposal.created",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": {
@@ -277,37 +308,37 @@
         ],
         "risk": "low",
         "rollback": "set compatibility back to BACKWARD",
-        "required_layers": ["schema-registry", "warehouse"]
+        "required_layers": ["schema-registry", "kafka-connect"]
       },
       "at": "2026-10-11T10:00:45Z"
     },
     {
       "room_id": "r_schema_change",
-      "seq": 25,
+      "seq": 26,
       "type": "approval.given",
-      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "actor": { "kind": "human", "id": "priya", "name": "Priya" },
       "payload": { "proposal_id": "p_1", "layer": "schema-registry" },
       "at": "2026-10-11T10:01:10Z"
     },
     {
       "room_id": "r_schema_change",
-      "seq": 26,
+      "seq": 27,
       "type": "approval.given",
-      "actor": { "kind": "human", "id": "meera", "name": "Meera" },
-      "payload": { "proposal_id": "p_1", "layer": "warehouse" },
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "payload": { "proposal_id": "p_1", "layer": "kafka-connect" },
       "at": "2026-10-11T10:01:32Z"
     },
     {
       "room_id": "r_schema_change",
-      "seq": 27,
+      "seq": 28,
       "type": "action.executed",
       "actor": { "kind": "system", "id": "executor", "name": "Executor" },
-      "payload": { "proposal_id": "p_1", "step_index": 0, "ok": true, "output": "Compatibility set to NONE for pg.public.orders-value" },
+      "payload": { "proposal_id": "p_1", "step_index": 0, "ok": true, "output": "pg.public.orders-value compatibility now NONE" },
       "at": "2026-10-11T10:01:34Z"
     },
     {
       "room_id": "r_schema_change",
-      "seq": 28,
+      "seq": 29,
       "type": "action.executed",
       "actor": { "kind": "system", "id": "executor", "name": "Executor" },
       "payload": { "proposal_id": "p_1", "step_index": 1, "ok": true, "output": "restarted pg-orders-connector task 0 (state now RUNNING)" },
@@ -315,7 +346,7 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 29,
+      "seq": 30,
       "type": "agent.status",
       "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
       "payload": { "state": "done", "detail": "fix applied" },
@@ -323,26 +354,25 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 30,
+      "seq": 31,
       "type": "trace.pinned",
       "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
       "payload": {
-        "table": "orders",
-        "key": "id=10042",
+        "table": "public.orders",
+        "key": "10042",
         "stages": [
-          { "layer": "postgres", "name": "public.orders", "status": "seen", "facts": { "row": "id=10042" } },
-          { "layer": "kafka-connect", "name": "pg-orders-connector", "status": "seen", "facts": { "task": "0" } },
-          { "layer": "schema-registry", "name": "pg.public.orders-value", "status": "seen" },
-          { "layer": "kafka", "name": "pg.public.orders", "status": "seen", "facts": { "partition": "0", "offset": "48213" } },
-          { "layer": "consumer", "name": "order-sync", "status": "not_seen" },
-          { "layer": "warehouse", "name": "analytics.orders", "status": "stopped_here", "facts": { "reason": "no row for id=10042" } }
+          { "layer": "postgres", "name": "public.orders", "status": "seen", "facts": { "updated_at": "2026-10-11T09:47:00Z" } },
+          { "layer": "kafka-connect", "name": "pg-orders-connector", "status": "seen" },
+          { "layer": "kafka", "name": "pg.public.orders", "status": "seen", "facts": { "offset": "48213", "partition": "0" } },
+          { "layer": "consumer", "name": "order-sync", "status": "stopped_here", "facts": { "committed": "48212" } },
+          { "layer": "warehouse", "name": "analytics.orders", "status": "not_seen" }
         ]
       },
       "at": "2026-10-11T10:02:00Z"
     },
     {
       "room_id": "r_schema_change",
-      "seq": 31,
+      "seq": 32,
       "type": "handoff.created",
       "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
       "payload": {
@@ -351,7 +381,7 @@
         "summary": {
           "what_broke": "Debezium task 0 failed after orders.amount was altered to numeric(12,2).",
           "why": "New schema is incompatible under BACKWARD compatibility for subject pg.public.orders-value.",
-          "done": ["Set compatibility to NONE", "Restarted task 0", "Warehouse caught up"],
+          "done": ["Set compatibility to NONE", "Restarted task 0", "Warehouse catching up"],
           "ruled_out": ["Kafka brokers", "Consumer group config"],
           "open": ["Consider pinning decimal.handling.mode"],
           "risks": ["BACKWARD compatibility is off until re-enabled"]
@@ -362,15 +392,15 @@
     },
     {
       "room_id": "r_schema_change",
-      "seq": 32,
+      "seq": 33,
       "type": "control.granted",
-      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
       "payload": { "to": { "kind": "human", "id": "kabir", "name": "Kabir" }, "lease_until": "2026-10-11T10:35:00Z" },
       "at": "2026-10-11T10:05:01Z"
     },
     {
       "room_id": "r_schema_change",
-      "seq": 33,
+      "seq": 34,
       "type": "handoff.accepted",
       "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
       "payload": { "handoff_id": "h_1" },

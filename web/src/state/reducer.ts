@@ -401,7 +401,14 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
     ...next,
     last_seq: event.seq,
     activity: [
-      { seq: event.seq, at: event.at, actor: event.actor, text: describeEvent(event) },
+      {
+        seq: event.seq,
+        at: event.at,
+        actor: event.actor,
+        // state is the pre-event state: describeEvent needs the driver before
+        // this event to tell a lease renewal from a take-over.
+        text: describeEvent(event, state.driver?.id ?? null),
+      },
       ...next.activity,
     ].slice(0, 20),
   }

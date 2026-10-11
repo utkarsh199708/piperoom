@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Event, RoomSnapshot } from '../api/types'
+import { FIXTURE_ROOM_ID, fixtureEvents } from '../fixtures/player'
 import { applyEvent, detectGap } from './reducer'
 import { emptyRoomState, fromSnapshot } from './types'
 
@@ -172,13 +173,13 @@ describe('applyEvent — every event type', () => {
         steps: [],
         risk: 'low',
         rollback: 'undo',
-        required_layers: ['schema-registry', 'warehouse'],
+        required_layers: ['schema-registry', 'kafka-connect'],
       }),
     )
     expect(s.proposals[0].approvals['schema-registry']).toBe('pending')
     s = applyEvent(s, ev(2, 'approval.given', { proposal_id: 'p1', layer: 'schema-registry' }, human))
     expect(s.proposals[0].status).toBe('open')
-    s = applyEvent(s, ev(3, 'approval.given', { proposal_id: 'p1', layer: 'warehouse' }, human))
+    s = applyEvent(s, ev(3, 'approval.given', { proposal_id: 'p1', layer: 'kafka-connect' }, human))
     expect(s.proposals[0].status).toBe('approved')
   })
 
@@ -191,12 +192,12 @@ describe('applyEvent — every event type', () => {
         steps: [],
         risk: 'low',
         rollback: 'undo',
-        required_layers: ['warehouse'],
+        required_layers: ['kafka-connect'],
       }),
     )
-    s = applyEvent(s, ev(2, 'approval.rejected', { proposal_id: 'p1', layer: 'warehouse', reason: 'nope' }, human))
+    s = applyEvent(s, ev(2, 'approval.rejected', { proposal_id: 'p1', layer: 'kafka-connect', reason: 'nope' }, human))
     expect(s.proposals[0].status).toBe('rejected')
-    expect(s.proposals[0].approvals['warehouse']).toBe('rejected')
+    expect(s.proposals[0].approvals['kafka-connect']).toBe('rejected')
   })
 
   it('action.executed appends to the proposal', () => {
@@ -284,6 +285,56 @@ describe('applyEvent — robustness', () => {
 
     s = applyEvent(s, ev(3, 'trace.pinned', { table: 't', key: 'k', stages: null }))
     expect(s.trace?.stages).toEqual([])
+  })
+})
+
+describe('applyEvent — control.granted wording', () => {
+  const arjun = { kind: 'human' as const, id: 'arjun', name: 'Arjun' }
+  const kabir = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+  const created = (seq = 1) =>
+    ev(seq, 'room.created', { title: 'T', severity: 'sev2', pipeline_id: 'orders' }, arjun)
+
+  it('a self-grant by the sitting driver reads as a lease renewal', () => {
+    let s = applyEvent(base(), created())
+    s = applyEvent(
+      s,
+      ev(2, 'control.granted', { to: arjun, lease_until: '2026-10-11T10:30:00Z' }, arjun),
+    )
+    expect(s.activity[0].text).toBe('Arjun renewed the lease')
+    expect(s.driver?.id).toBe('arjun')
+  })
+
+  it('a self-grant by a non-driver reads as taking control', () => {
+    let s = applyEvent(base(), created())
+    s = applyEvent(
+      s,
+      ev(2, 'control.granted', { to: kabir, lease_until: '2026-10-11T10:35:00Z' }, kabir),
+    )
+    expect(s.activity[0].text).toBe('Kabir took control')
+    expect(s.driver?.id).toBe('kabir')
+  })
+
+  it('a grant to another user still reads as a hand-over', () => {
+    let s = applyEvent(base(), created())
+    s = applyEvent(
+      s,
+      ev(2, 'control.granted', { to: kabir, lease_until: '2026-10-11T10:35:00Z' }, arjun),
+    )
+    expect(s.activity[0].text).toBe('Arjun handed control to Kabir')
+  })
+})
+
+describe('schema-change fixture activity', () => {
+  it('renders seq 2 as a renewal and seq 33 as taking control', () => {
+    let s = emptyRoomState(FIXTURE_ROOM_ID)
+    const textBySeq = new Map<number, string>()
+    for (const e of fixtureEvents(FIXTURE_ROOM_ID)) {
+      s = applyEvent(s, e)
+      textBySeq.set(e.seq, s.activity[0].text)
+    }
+    expect(s.last_seq).toBe(34)
+    expect(textBySeq.get(2)).toBe('Arjun renewed the lease')
+    expect(textBySeq.get(33)).toBe('Kabir took control')
   })
 })
 
