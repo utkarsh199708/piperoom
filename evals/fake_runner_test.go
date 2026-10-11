@@ -137,7 +137,7 @@ func depsFor(reg *tools.Registry, areg *actions.Registry, rec *recorder, inbox *
 }
 
 func pipelineOrders() owners.Pipeline {
-	return owners.Pipeline{ID: "orders", SourceTables: []string{"public.orders"}, Connectors: []string{"pg-orders-connector"}}
+	return owners.Pipeline{ID: "orders", TopicPrefix: "pg", SourceTables: []string{"public.orders"}, Connectors: []string{"pg-orders-connector"}}
 }
 
 func timeZero() time.Time { return time.Time{} }

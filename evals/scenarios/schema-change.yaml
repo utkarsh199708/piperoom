@@ -16,6 +16,7 @@ description: >-
 pipeline:
   id: orders
   title: Orders CDC
+  topic_prefix: pg
   source_tables: [public.orders]
   connectors: [pg-orders-connector]
   consumer_groups: [order-sync]

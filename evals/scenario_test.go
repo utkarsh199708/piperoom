@@ -39,7 +39,7 @@ func TestLoadScenariosErrors(t *testing.T) {
 	if _, err := LoadScenarios(dir); err == nil {
 		t.Error("empty dir accepted")
 	}
-	body := "name: dup\npipeline: {id: p}\nalert: {title: t}\nexpect: {root_cause: [[a]]}\n"
+	body := "name: dup\npipeline: {id: p, topic_prefix: t}\nalert: {title: t}\nexpect: {root_cause: [[a]]}\n"
 	for _, f := range []string{"a.yaml", "b.yaml"} {
 		if err := os.WriteFile(filepath.Join(dir, f), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
@@ -85,6 +85,7 @@ func TestValidate(t *testing.T) {
 	}{
 		{"valid", func(*Scenario) {}, ""},
 		{"no pipeline", func(s *Scenario) { s.Pipeline.ID = "" }, "pipeline.id"},
+		{"no topic prefix", func(s *Scenario) { s.Pipeline.TopicPrefix = "" }, "pipeline.topic_prefix"},
 		{"no title", func(s *Scenario) { s.Alert.Title = " " }, "alert.title"},
 		{"no root cause", func(s *Scenario) { s.Expect.RootCause = nil }, "root_cause is empty"},
 		{"empty group", func(s *Scenario) { s.Expect.RootCause = [][]string{{}} }, "empty group"},

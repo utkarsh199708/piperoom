@@ -62,7 +62,7 @@ against the live tool and action names.
 |---|---|---|---|
 | `name` | string | no (defaults to file name) | unique scenario name |
 | `description` | string | no | what broke, for humans |
-| `pipeline` | object | yes (`id`) | the room's pipeline, same fields as `owners.yaml`: `id`, `title`, `source_tables`, `connectors`, `consumer_groups`, `sink_tables`, `sink_ts_column`. Used for `alert.pipeline_id` and for `CheckScope` on every proposed step |
+| `pipeline` | object | yes (`id`, `topic_prefix`) | the room's pipeline, same fields as `owners.yaml`: `id`, `title`, `topic_prefix` (required: subject scope checks compare `<topic_prefix>.<source_table>`), `source_tables`, `connectors`, `consumer_groups`, `sink_tables`, `sink_ts_column`. Used for `alert.pipeline_id` and for `CheckScope` on every proposed step |
 | `resources.connectors` | []string | no | connectors that exist on the recorded stack (action `Validate` checks against these) |
 | `resources.subjects` | []string | no | Schema Registry subjects that exist |
 | `alert.title` | string | yes | alert title the room opens with |
@@ -112,6 +112,7 @@ name: connector-down
 description: Connector paused; slot stays active, retained WAL grows.
 pipeline:
   id: orders
+  topic_prefix: pg
   source_tables: [public.orders]
   connectors: [pg-orders-connector]
   consumer_groups: [order-sync]

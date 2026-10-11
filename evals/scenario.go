@@ -222,6 +222,11 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 	if s.Pipeline.ID == "" {
 		errs = append(errs, errors.New("pipeline.id is empty"))
 	}
+	// owners.Load requires it too; without it every subject fails CheckScope
+	// and a correct schema fix would score as out of scope.
+	if s.Pipeline.TopicPrefix == "" {
+		errs = append(errs, errors.New("pipeline.topic_prefix is empty"))
+	}
 	if strings.TrimSpace(s.Alert.Title) == "" {
 		errs = append(errs, errors.New("alert.title is empty"))
 	}
