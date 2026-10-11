@@ -24,6 +24,7 @@ import type {
   TracePinnedPayload,
 } from '../api/types'
 import { describeEvent } from './describe'
+import { alertSource } from '../lib/alerts'
 import type { RoomState, StepState } from './types'
 
 function as<T>(e: Event): T {
@@ -56,6 +57,12 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         event.actor.kind === 'human'
           ? { id: event.actor.id, name: event.actor.name }
           : state.driver
+      // Webhook-opened rooms carry the raw alert body here; a room created via
+      // POST /api/rooms has no alert at all.
+      const alert =
+        p.alert === undefined || p.alert === null
+          ? null
+          : { source: alertSource(p.alert) }
       next = {
         ...state,
         title: p.title,
@@ -64,6 +71,7 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         status: 'open',
         opened_at: event.at,
         driver,
+        alert,
         members:
           event.actor.kind === 'human'
             ? [{ id: event.actor.id, name: event.actor.name, role: 'driver' }]

@@ -16,6 +16,7 @@ import { PresencePanel } from './PresencePanel'
 import { ActivityFeed } from './ActivityFeed'
 import { TracePanel } from './TracePanel'
 import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
+import { NoDriverBanner } from './NoDriverBanner'
 
 export function RoomScreen() {
   const { roomId = '' } = useParams()
@@ -94,6 +95,11 @@ export function RoomScreen() {
         <div className="topbar__room">
           <h1 className="topbar__title">{state.title}</h1>
           <Chip tone={severityTone(state.severity)}>{state.severity}</Chip>
+          {state.alert && (
+            <Chip tone="info" title="This room was opened by an alert webhook">
+              {state.alert.source ? `alert · ${state.alert.source}` : 'alert'}
+            </Chip>
+          )}
           <span className="muted topbar__id mono">#{state.id}</span>
           <span className="muted topbar__age">open {ageLabel(state.opened_at)}</span>
         </div>
@@ -121,6 +127,7 @@ export function RoomScreen() {
       </header>
 
       {error && <div className="banner banner--error">{error}</div>}
+      <NoDriverBanner state={state} user={user} actions={actions} />
       <HandoffAcceptBanner state={state} user={user} actions={actions} />
 
       <main className={`room-grid ${hasPendingApproval ? 'room-grid--approve-first' : ''}`}>

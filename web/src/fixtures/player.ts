@@ -16,6 +16,40 @@ export const fixtureTopology: Topology = topologyRaw as unknown as Topology
 
 export const FIXTURE_ROOM_ID = schemaChange.snapshot.id
 
+// A webhook-opened room (no driver) whose room.created event carries the raw
+// alert body, so fixture mode exercises the no-driver banner and the alert
+// chip in the room header.
+const webhookAlertEvents: Record<string, Event[]> = {
+  r_webhook_alert: [
+    {
+      room_id: 'r_webhook_alert',
+      seq: 1,
+      type: 'room.created',
+      actor: { kind: 'system', id: 'alertin', name: 'Alert webhook' },
+      payload: {
+        title: 'ConsumerLag firing on orders-pipeline',
+        severity: 'sev1',
+        pipeline_id: 'orders',
+        alert: {
+          version: '4',
+          groupKey: '{}:{alertname="ConsumerLag"}',
+          status: 'firing',
+          commonLabels: { alertname: 'ConsumerLag', severity: 'critical', pipeline: 'orders' },
+          commonAnnotations: { summary: 'Consumer lag above threshold for 10m' },
+          alerts: [
+            {
+              status: 'firing',
+              labels: { alertname: 'ConsumerLag', severity: 'critical', pipeline: 'orders' },
+              annotations: { summary: 'Consumer lag above threshold for 10m' },
+            },
+          ],
+        },
+      },
+      at: '2026-10-11T10:05:00Z',
+    },
+  ],
+}
+
 export function fixtureRoom(id: string): RoomSnapshot | undefined {
   if (id === schemaChange.snapshot.id) return schemaChange.snapshot
   return fixtureRooms.find((r) => r.id === id)
@@ -23,7 +57,7 @@ export function fixtureRoom(id: string): RoomSnapshot | undefined {
 
 export function fixtureEvents(id: string): Event[] {
   if (id === schemaChange.snapshot.id) return schemaChange.events
-  return []
+  return webhookAlertEvents[id] ?? []
 }
 
 export function addFixtureRoom(snapshot: RoomSnapshot): void {

@@ -7,6 +7,7 @@ import { addFixtureRoom, emptySnapshot } from '../fixtures/player'
 import { useRoomList } from '../hooks/useRoomList'
 import { useCurrentUser } from '../context/user'
 import { ageLabel } from '../lib/time'
+import { sortRoomsForList } from '../lib/rooms'
 import { Chip, Empty } from './ui'
 import { severityTone } from '../lib/tones'
 import { UserSwitcher } from './UserSwitcher'
@@ -22,8 +23,11 @@ export function RoomList() {
   const [pipelineId, setPipelineId] = useState('orders')
   const [busy, setBusy] = useState(false)
 
-  const openRooms = rooms.filter((r) => r.status === 'open')
-  const closedRooms = rooms.filter((r) => r.status !== 'open')
+  // Open rooms first, then newest opened first (lib/rooms.ts); the two sections
+  // below share the same order within their group.
+  const sorted = sortRoomsForList(rooms)
+  const openRooms = sorted.filter((r) => r.status === 'open')
+  const closedRooms = sorted.filter((r) => r.status !== 'open')
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()

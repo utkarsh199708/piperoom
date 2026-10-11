@@ -324,6 +324,60 @@ describe('applyEvent — control.granted wording', () => {
   })
 })
 
+describe('applyEvent — room.created from an alert webhook', () => {
+  const system = { kind: 'system' as const, id: 'alertin', name: 'Alert webhook' }
+
+  it('keeps the room driverless and stores the detected alert source', () => {
+    const s = applyEvent(
+      base(),
+      ev(
+        1,
+        'room.created',
+        {
+          title: 'ConsumerLag firing',
+          severity: 'sev1',
+          pipeline_id: 'orders',
+          alert: { version: '4', groupKey: 'g', alerts: [{ status: 'firing' }] },
+        },
+        system,
+      ),
+    )
+    expect(s.driver).toBeNull()
+    expect(s.alert).toEqual({ source: 'Alertmanager' })
+  })
+
+  it('leaves alert null without an alert body, and source null for unknown shapes', () => {
+    const plain = applyEvent(
+      base(),
+      ev(1, 'room.created', { title: 'T', severity: 'sev2', pipeline_id: 'orders' }, human),
+    )
+    expect(plain.alert).toBeNull()
+
+    const unknown = applyEvent(
+      base(),
+      ev(
+        1,
+        'room.created',
+        { title: 'T', severity: 'sev2', pipeline_id: 'orders', alert: 'plain text alert' },
+        system,
+      ),
+    )
+    expect(unknown.alert).toEqual({ source: null })
+  })
+})
+
+describe('webhook-alert fixture room', () => {
+  it('replays to a driverless room whose header shows the alert source', () => {
+    let s = emptyRoomState('r_webhook_alert')
+    const events = fixtureEvents('r_webhook_alert')
+    expect(events.length).toBeGreaterThan(0)
+    for (const e of events) s = applyEvent(s, e)
+    expect(s.status).toBe('open')
+    expect(s.driver).toBeNull()
+    expect(s.alert?.source).toBe('Alertmanager')
+  })
+})
+
 describe('schema-change fixture activity', () => {
   it('renders seq 2 as a renewal and seq 33 as taking control', () => {
     let s = emptyRoomState(FIXTURE_ROOM_ID)
