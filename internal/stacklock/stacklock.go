@@ -8,21 +8,21 @@
 package stacklock
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 // EnvPath overrides the lock file location (used by tests and non-default
 // checkouts).
 const EnvPath = "PIPEROOM_STACK_LOCK"
-
-// DefaultPath is the lock file shared by all agents through the bus directory.
-const DefaultPath = `C:\Users\Utkarsh\Desktop\interview\piperoom-bus\stack.lock`
 
 // Record is the content of the lock file.
 type Record struct {
@@ -36,12 +36,52 @@ type Lock struct {
 }
 
 // Path returns the configured lock file path: $PIPEROOM_STACK_LOCK if set,
-// otherwise DefaultPath.
+// otherwise the default derived from the git common dir.
 func Path() string {
 	if p := os.Getenv(EnvPath); p != "" {
 		return p
 	}
-	return DefaultPath
+	return DefaultPath()
+}
+
+// DefaultPath derives the shared lock file location from the git common dir.
+// The bus directory (piperoom-bus) is a sibling of the shared repo, so the lock
+// lives at <repo-parent>/piperoom-bus/stack.lock, where <repo-parent> is the
+// parent of the repo root (the parent of the .git directory). When git is
+// unavailable it falls back to a relative piperoom-bus/stack.lock.
+func DefaultPath() string {
+	common, err := gitCommonDir()
+	if err != nil {
+		return filepath.Join("piperoom-bus", "stack.lock")
+	}
+	return defaultPath(common)
+}
+
+// defaultPath maps a git common dir (<repo>/.git) to the bus lock path:
+// <repo-parent>/piperoom-bus/stack.lock.
+func defaultPath(commonDir string) string {
+	repoRoot := filepath.Dir(filepath.Clean(commonDir))
+	return filepath.Join(filepath.Dir(repoRoot), "piperoom-bus", "stack.lock")
+}
+
+// gitCommonDir runs `git rev-parse --git-common-dir` and resolves it to an
+// absolute path.
+func gitCommonDir() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir").Output()
+	if err != nil {
+		return "", fmt.Errorf("stacklock: git rev-parse --git-common-dir: %w", err)
+	}
+	dir := strings.TrimSpace(string(out))
+	if dir == "" {
+		return "", errors.New("stacklock: empty git common dir")
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("stacklock: resolve git common dir %q: %w", dir, err)
+	}
+	return abs, nil
 }
 
 // New returns a Lock for path. An empty path means Path().
