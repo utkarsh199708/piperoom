@@ -145,7 +145,7 @@ func testOwners() *owners.Owners {
 		Layers: map[string]string{
 			"postgres":        "priya",
 			"kafka-connect":   "arjun",
-			"schema-registry": "arjun",
+			"schema-registry": "priya",
 			"kafka":           "arjun",
 			"consumer":        "kabir",
 			"warehouse":       "meera",

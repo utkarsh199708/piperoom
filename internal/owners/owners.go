@@ -15,8 +15,11 @@ import (
 
 // Pipeline is one named data pipeline.
 type Pipeline struct {
-	ID             string   `yaml:"id"`
-	Title          string   `yaml:"title"`
+	ID    string `yaml:"id"`
+	Title string `yaml:"title"`
+	// TopicPrefix is the Debezium topic prefix; pipeline topics are named
+	// "<TopicPrefix>.<schema>.<table>".
+	TopicPrefix    string   `yaml:"topic_prefix"`
 	SourceTables   []string `yaml:"source_tables"`
 	Connectors     []string `yaml:"connectors"`
 	ConsumerGroups []string `yaml:"consumer_groups"`
@@ -77,6 +80,9 @@ func (o *Owners) validate() error {
 			return fmt.Errorf("duplicate pipeline id %q", p.ID)
 		}
 		seen[p.ID] = true
+		if p.TopicPrefix == "" {
+			return fmt.Errorf("pipeline %q: topic_prefix is required", p.ID)
+		}
 		if len(p.SourceTables) == 0 {
 			return fmt.Errorf("pipeline %q: no source tables", p.ID)
 		}

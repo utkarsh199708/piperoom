@@ -141,7 +141,7 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 func pgRowTool(d Deps) tools.Tool {
 	return &tool{
 		name: "pg_row",
-		desc: "Read one row by primary key from the source Postgres.",
+		desc: "Read one row by primary key from the source Postgres. Pipeline-scoped: pipeline_id is required and table must be one of the pipeline's source tables. Returns only the key and timestamp column values.",
 		schema: objSchema(map[string]any{
 			"pipeline_id": strProp("Pipeline id from owners.yaml."),
 			"table":       strProp("\"schema.table\" to read."),
