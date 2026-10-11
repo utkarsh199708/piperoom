@@ -1,0 +1,22 @@
+{
+  "version": "4",
+  "groupKey": "{}:{alertname=\"ConnectorTaskFailed\"}",
+  "truncatedAlerts": 0,
+  "status": "firing",
+  "receiver": "piperoom",
+  "groupLabels": {"alertname": "ConnectorTaskFailed"},
+  "commonLabels": {"alertname": "ConnectorTaskFailed", "severity": "critical", "pipeline": "orders"},
+  "commonAnnotations": {"summary": "Debezium task orders-cdc/0 FAILED"},
+  "externalURL": "http://alertmanager:9093",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {"alertname": "ConnectorTaskFailed", "connector": "orders-cdc", "severity": "critical", "pipeline": "orders"},
+      "annotations": {"summary": "Debezium task orders-cdc/0 FAILED"},
+      "startsAt": "2026-10-11T10:58:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "http://prometheus:9090/graph?g0.expr=kafka_connect_task_status",
+      "fingerprint": "c4f6a1e2b3d40912"
+    }
+  ]
+}

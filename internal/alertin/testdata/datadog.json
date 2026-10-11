@@ -1,0 +1,15 @@
+{
+  "id": "7712345678901234567",
+  "title": "[Triggered] Kafka Connect task failed on pg-orders-connector",
+  "transition": "Triggered",
+  "alert_type": "error",
+  "priority": "P2",
+  "cycle_key": "7712345678900000001",
+  "aggreg_key": "a1b2c3d4e5f6",
+  "alert_id": "12345678",
+  "tags": "env:prod,pipeline:orders,team:data",
+  "scope": "connector:pg-orders-connector",
+  "pipeline_id": "orders",
+  "date": "1791716280",
+  "link": "https://app.datadoghq.com/event/event?id=7712345678901234567"
+}
