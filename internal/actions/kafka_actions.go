@@ -85,6 +85,12 @@ func subjectTopic(subject string) (string, bool) {
 // accept another pipeline's topic that merely ends with the same table name,
 // e.g. "billing.public.orders-value" for the "pg" prefix.
 func inScopeSubject(p owners.Pipeline, subject string) error {
+	// owners.Load refuses an empty prefix, but a Pipeline built in code
+	// (demo mode, tests) skips that check; with an empty prefix the rule
+	// would accept any subject starting with a bare ".".
+	if p.TopicPrefix == "" {
+		return fmt.Errorf("actions: pipeline %q has no topic_prefix", p.ID)
+	}
 	topic, ok := subjectTopic(subject)
 	if !ok {
 		return fmt.Errorf("actions: subject %q is not a -key or -value subject", subject)
