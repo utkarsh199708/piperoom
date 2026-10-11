@@ -23,7 +23,7 @@ func main() {
 	var (
 		pipeline  = flag.String("pipeline", "orders", "pipeline id to investigate")
 		title     = flag.String("title", "orders stale", "alert title")
-		fakeTools = flag.Bool("fake-tools", true, "use the built-in schema-change replay tools instead of real clients")
+		fakeTools = flag.Bool("fake-tools", false, "use the built-in schema-change replay tools instead of real clients")
 		model     = flag.String("model", "", "model override (default from config)")
 		effort    = flag.String("effort", "", "effort override (default from config)")
 		maxTurns  = flag.Int("max-turns", 0, "max turns (default 40)")
@@ -46,9 +46,11 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 			return fmt.Errorf("investigate: register fake tools: %w", err)
 		}
 	} else {
-		if err := wireRealTools(cfg, reg, areg); err != nil {
+		cleanup, err := wireRealTools(cfg, reg, areg)
+		if err != nil {
 			return err
 		}
+		defer cleanup()
 	}
 
 	opts := agent.Options{Model: model, Effort: effort, MaxTurns: maxTurns}
