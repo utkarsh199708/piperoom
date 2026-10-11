@@ -176,6 +176,19 @@ func (s *stack) setCompatibility(ctx context.Context, subject, level string) err
 	return err
 }
 
+// schemaVersions returns the registered version numbers of a subject.
+func (s *stack) schemaVersions(ctx context.Context, subject string) ([]int, error) {
+	b, err := s.do(ctx, http.MethodGet, s.cfg.SchemaRegistryURL+"/subjects/"+url.PathEscape(subject)+"/versions", nil, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	var vs []int
+	if err := json.Unmarshal(b, &vs); err != nil {
+		return nil, fmt.Errorf("devctl: decode schema versions: %w", err)
+	}
+	return vs, nil
+}
+
 func (s *stack) restartTask(ctx context.Context, task int) error {
 	_, err := s.do(ctx, http.MethodPost, fmt.Sprintf("%s/connectors/%s/tasks/%d/restart", s.cfg.ConnectURL, connectorName, task), nil, http.StatusOK, http.StatusNoContent, http.StatusAccepted)
 	return err

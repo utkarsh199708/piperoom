@@ -28,7 +28,7 @@ func (s *stack) status(ctx context.Context, w io.Writer) error {
 		fmt.Fprintf(w, "connector   %s: %s, tasks %s\n", connectorName, st.Connector.State, strings.Join(tasks, " "))
 	}
 
-	if out, err := s.psql(ctx, "orders", "SELECT slot_name || ' active=' || active || ' retained=' || pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) FROM pg_replication_slots"); err != nil {
+	if out, err := s.psql(ctx, "orders", "SELECT coalesce(slot_name, '-') || ' active=' || coalesce(active::text, '-') || ' retained=' || coalesce(pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)), '-') FROM pg_replication_slots"); err != nil {
 		fmt.Fprintf(w, "slot        unreachable (%v)\n", err)
 	} else {
 		fmt.Fprintf(w, "slot        %s\n", out)
@@ -49,23 +49,44 @@ func (s *stack) status(ctx context.Context, w io.Writer) error {
 }
 
 func (s *stack) groupLag(ctx context.Context, group string) (string, error) {
+	l, err := s.describeGroup(ctx, group)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s: state %s, members %d, total lag %d", group, l.State, len(l.Members), l.Lag.Total()), nil
+}
+
+// describeGroup returns the described group lag (state, members, total lag).
+func (s *stack) describeGroup(ctx context.Context, group string) (*kadm.DescribedGroupLag, error) {
 	cl, err := kgo.NewClient(kgo.SeedBrokers(strings.Split(s.cfg.KafkaBrokers, ",")...))
 	if err != nil {
-		return "", fmt.Errorf("devctl: kafka client: %w", err)
+		return nil, fmt.Errorf("devctl: kafka client: %w", err)
 	}
 	defer cl.Close()
 	lags, err := kadm.NewClient(cl).Lag(ctx, group)
 	if err != nil {
-		return "", fmt.Errorf("devctl: lag: %w", err)
+		return nil, fmt.Errorf("devctl: lag: %w", err)
 	}
 	l, ok := lags[group]
 	if !ok {
-		return "", fmt.Errorf("devctl: group %s not found", group)
+		return nil, fmt.Errorf("devctl: group %s not found", group)
 	}
 	if l.Error() != nil {
-		return "", fmt.Errorf("devctl: group %s: %w", group, l.Error())
+		return nil, fmt.Errorf("devctl: group %s: %w", group, l.Error())
 	}
-	return fmt.Sprintf("%s: state %s, members %d, total lag %d", group, l.State, len(l.Members), l.Lag.Total()), nil
+	return &l, nil
+}
+
+// waitGroup waits until the consumer group reaches state with at least
+// minMembers members (used to wait for a restarted devconsumer to rejoin).
+func (s *stack) waitGroup(ctx context.Context, group, state string, minMembers int, timeout time.Duration) error {
+	return s.waitFor(ctx, timeout, func() (bool, error) {
+		l, err := s.describeGroup(ctx, group)
+		if err != nil {
+			return false, nil
+		}
+		return l.State == state && len(l.Members) >= minMembers, nil
+	})
 }
 
 // load inserts and updates orders at the given rate until ctx ends.

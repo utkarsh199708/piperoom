@@ -20,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"piperoom/internal/config"
 )
 
 type options struct {
@@ -33,15 +35,31 @@ type options struct {
 }
 
 func main() {
+	// Read shared settings through the contract config.Load(); brokers,
+	// registry and warehouse URL use the same env names as the rest of the repo.
+	// TOPIC / GROUP / FAIL_ON_ID / DELAY are devconsumer-only knobs.
+	cfg := config.Load()
 	var o options
-	flag.StringVar(&o.brokers, "brokers", env("KAFKA_BROKERS", "localhost:29092"), "Kafka brokers, comma separated")
-	flag.StringVar(&o.registry, "registry", env("SCHEMA_REGISTRY_URL", "http://localhost:8081"), "Schema Registry URL")
-	flag.StringVar(&o.warehouse, "warehouse", env("WAREHOUSE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/warehouse?sslmode=disable"), "warehouse Postgres URL")
+	flag.StringVar(&o.brokers, "brokers", cfg.KafkaBrokers, "Kafka brokers, comma separated")
+	flag.StringVar(&o.registry, "registry", cfg.SchemaRegistryURL, "Schema Registry URL")
+	flag.StringVar(&o.warehouse, "warehouse", cfg.WarehouseDBURL, "warehouse Postgres URL")
 	flag.StringVar(&o.topic, "topic", env("TOPIC", "pg.public.orders"), "topic to consume")
 	flag.StringVar(&o.group, "group", env("GROUP", "order-sync"), "consumer group")
-	failOn, _ := strconv.ParseInt(env("FAIL_ON_ID", "0"), 10, 64)
+
+	failOnRaw := env("FAIL_ON_ID", "0")
+	failOn, err := strconv.ParseInt(failOnRaw, 10, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "devconsumer: bad FAIL_ON_ID %q: %v\n", failOnRaw, err)
+		os.Exit(2)
+	}
 	flag.Int64Var(&o.failOnID, "fail-on-id", failOn, "crash when this order id arrives (poison pill); 0 = off")
-	delay, _ := time.ParseDuration(env("DELAY", "0s"))
+
+	delayRaw := env("DELAY", "0s")
+	delay, err := time.ParseDuration(delayRaw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "devconsumer: bad DELAY %q: %v\n", delayRaw, err)
+		os.Exit(2)
+	}
 	flag.DurationVar(&o.delay, "delay", delay, "sleep per record (to build lag)")
 	flag.Parse()
 
@@ -80,7 +98,9 @@ func run(ctx context.Context, o options, log *slog.Logger) error {
 	log.Info("devconsumer started", "topic", o.topic, "group", o.group, "fail_on_id", o.failOnID, "delay", o.delay)
 
 	for {
-		fetches := cl.PollFetches(ctx)
+		// PollRecords caps each batch, so a large --delay cannot make a single
+		// poll hang for minutes or accumulate an unbounded batch in memory.
+		fetches := cl.PollRecords(ctx, 100)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -94,9 +114,17 @@ func run(ctx context.Context, o options, log *slog.Logger) error {
 			}
 			procErr = handle(ctx, r, schemas, pool, o)
 			if o.delay > 0 {
-				time.Sleep(o.delay)
+				// Wait in a ctx-aware way so SIGTERM stops a delayed batch.
+				select {
+				case <-ctx.Done():
+				case <-time.After(o.delay):
+				}
 			}
 		})
+		if ctx.Err() != nil {
+			// SIGTERM arrived mid-batch (or during a delay): shut down cleanly.
+			return nil
+		}
 		if procErr != nil {
 			// Crash without committing: the record is redelivered on restart,
 			// which is how a real poison pill behaves.

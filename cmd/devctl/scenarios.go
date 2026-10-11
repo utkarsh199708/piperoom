@@ -49,14 +49,29 @@ func fixSchemaChange(ctx context.Context, s *stack) error {
 	if err := s.setCompatibility(ctx, valueSubject, "NONE"); err != nil {
 		return err
 	}
+	// Count the registered versions before restarting, so we can tell when the
+	// task has registered the new one.
+	before, err := s.schemaVersions(ctx, valueSubject)
+	if err != nil {
+		return err
+	}
 	if err := s.restartTask(ctx, 0); err != nil {
 		return err
 	}
 	if err := s.waitConnector(ctx, "RUNNING", 60*time.Second); err != nil {
 		return err
 	}
-	// Give the task time to register the new schema before restoring the rule.
-	time.Sleep(10 * time.Second)
+	// Wait until the new schema version is registered before restoring BACKWARD;
+	// otherwise the task fails again on the next record.
+	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
+		vs, err := s.schemaVersions(ctx, valueSubject)
+		if err != nil {
+			return false, nil
+		}
+		return len(vs) > len(before), nil
+	}); err != nil {
+		return fmt.Errorf("devctl: new schema version was not registered: %w", err)
+	}
 	if err := s.setCompatibility(ctx, valueSubject, "BACKWARD"); err != nil {
 		return err
 	}
@@ -100,7 +115,11 @@ func breakConsumerStuck(ctx context.Context, s *stack) error {
 	if err := s.compose(ctx, map[string]string{"DEVCONSUMER_FAIL_ON_ID": next}, "up", "-d", "devconsumer"); err != nil {
 		return err
 	}
-	time.Sleep(5 * time.Second) // let the consumer rejoin the group first
+	// Wait until the poison-pill consumer rejoined the group, so the inserted
+	// row actually reaches it and it starts crash-looping on it.
+	if err := s.waitGroup(ctx, "order-sync", "Stable", 1, 60*time.Second); err != nil {
+		return fmt.Errorf("devctl: consumer did not rejoin the group: %w", err)
+	}
 	if _, err := s.psql(ctx, "orders", "INSERT INTO orders (customer_id, amount) VALUES (7, 500)"); err != nil {
 		return err
 	}
@@ -131,10 +150,18 @@ func breakLongTransaction(ctx context.Context, s *stack) error {
 	if err != nil {
 		return err
 	}
+	var lastErr error
 	if err := s.waitFor(ctx, 15*time.Second, func() (bool, error) {
 		n, err := s.psql(ctx, "orders", "SELECT count(*) FROM pg_stat_activity WHERE application_name = '"+longTxApp+"' AND xact_start IS NOT NULL")
-		return err == nil && n != "0", nil
+		if err != nil {
+			lastErr = err
+			return false, nil
+		}
+		return n != "0", nil
 	}); err != nil {
+		if lastErr != nil {
+			return fmt.Errorf("devctl: long transaction did not start: %w (last error: %v)", err, lastErr)
+		}
 		return fmt.Errorf("devctl: long transaction did not start: %w", err)
 	}
 	s.log.Info("broken: a transaction holds WAL for 10 min — run `devctl load` to grow retained WAL")

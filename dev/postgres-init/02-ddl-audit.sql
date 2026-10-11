@@ -12,7 +12,7 @@ CREATE TABLE piperoom_audit.ddl_log (
 );
 
 CREATE FUNCTION piperoom_audit.log_ddl() RETURNS event_trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 DECLARE
   r record;
 BEGIN
