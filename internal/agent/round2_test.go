@@ -401,6 +401,53 @@ func TestRunContextWindowExceeded(t *testing.T) {
 	}
 }
 
+// TestRunContextWindowExceededWithPendingToolUseCarriesResult covers the
+// [LEAD-ARCH] round-1 must-fix: a turn that stops on
+// model_context_window_exceeded can still carry a tool_use block (the model
+// ran a tool, then ran out of room before it could stop normally). The
+// pause-and-wait path must send that tool's result back before — in the same
+// user message as — the human input that resumes the loop, or the next
+// request has a tool_use with no matching tool_result and the API rejects it
+// outright.
+func TestRunContextWindowExceededWithPendingToolUseCarriesResult(t *testing.T) {
+	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
+		mustMessage(t, `{"stop_reason":"model_context_window_exceeded","content":[
+			{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"check connect","connector":"pg-orders-connector"}}
+		]}`),
+		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}`),
+	}}
+	sink := &fakeSink{}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil, // before turn 0
+			{{Kind: "steer", Actor: events.Actor{Name: "Arjun"}, Text: "keep going"}},
+		},
+		waitErr: context.Canceled,
+	}
+	r := newTestRunner(t, model, inbox, sink, rec, Options{MaxTurns: 5})
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(model.calls) < 2 {
+		t.Fatalf("expected at least 2 model calls, got %d", len(model.calls))
+	}
+	// The second request's last message must carry both the pending
+	// tool_result for tu1 and the human steer, in that order, in one message.
+	last := lastMessage(model.calls)
+	js := messagesJSON([]anthropic.BetaMessageParam{last})
+	if !strings.Contains(js, `"tool_use_id":"tu1"`) {
+		t.Fatalf("pending tool_result for tu1 missing from the resumed request: %s", js)
+	}
+	if !strings.Contains(js, "keep going") {
+		t.Fatalf("human input missing from the resumed request: %s", js)
+	}
+	if len(rec.inputsAsJSON()) != 1 {
+		t.Fatalf("expected the tool to have run once before the window was exceeded, got %d", len(rec.inputsAsJSON()))
+	}
+}
+
 // ---- cancel mid-turn ----
 
 func TestRunCancelMidTurnIsClean(t *testing.T) {

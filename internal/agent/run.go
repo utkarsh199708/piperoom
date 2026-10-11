@@ -182,7 +182,7 @@ func (r *runner) run(ctx context.Context) error {
 			})
 			// Do not append the refused turn; a refusal must never end the
 			// investigation for everyone. Go idle and wait like end_turn.
-			if stop, err := r.pauseForHumanInput(ctx, &messages, &turns); stop {
+			if stop, err := r.pauseForHumanInput(ctx, &messages, &turns, nil); stop {
 				return err
 			}
 			continue
@@ -202,7 +202,13 @@ func (r *runner) run(ctx context.Context) error {
 
 		switch resp.StopReason {
 		case anthropic.BetaStopReasonEndTurn, anthropic.BetaStopReasonStopSequence:
-			if stop, err := r.pauseForHumanInput(ctx, &messages, &turns); stop {
+			// resultBlocks is empty here in practice (the model does not stop
+			// with end_turn while also requesting a tool), but pass it anyway:
+			// if a turn's content ever did carry a tool_use with one of these
+			// stop reasons, dropping its result would leave a tool_use in
+			// history with no matching tool_result, which the API rejects on
+			// the very next request.
+			if stop, err := r.pauseForHumanInput(ctx, &messages, &turns, resultBlocks); stop {
 				return err
 			}
 		case anthropic.BetaStopReasonModelContextWindowExceeded:
@@ -210,7 +216,11 @@ func (r *runner) run(ctx context.Context) error {
 			// the same as a refusal. Server-side compaction (see request())
 			// should make this rare, but a single turn's input can still
 			// exceed the window (for example right after a burst of human
-			// steers), and the room must stay usable.
+			// steers), and the room must stay usable. The turn's tool results
+			// (resultBlocks) must still go back first: the assistant turn was
+			// already appended above, and any tool_use in it needs a matching
+			// tool_result in the very next message or the API rejects the
+			// next request outright.
 			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
 				State:  "error",
 				Detail: "model context window exceeded",
@@ -218,7 +228,7 @@ func (r *runner) run(ctx context.Context) error {
 			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{
 				Text: "I've exceeded the model's context window for this turn and can't continue. Please steer me or confirm before I continue.",
 			})
-			if stop, err := r.pauseForHumanInput(ctx, &messages, &turns); stop {
+			if stop, err := r.pauseForHumanInput(ctx, &messages, &turns, resultBlocks); stop {
 				return err
 			}
 		default:
@@ -337,12 +347,21 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 	}
 }
 
-// pauseForHumanInput emits an idle status and waits for human input. When
-// input arrives it is appended as the next user message and the turn counter
+// pauseForHumanInput emits an idle status and waits for human input. pending
+// is any tool_result (and similar) blocks still owed to the model for the
+// assistant turn just appended to history — every tool_use in that turn must
+// be matched by a tool_result in the very next message, or the API rejects
+// the next request outright, so pending always goes out first, ahead of the
+// human input, in the same user message. Pass nil when the turn had no
+// pending tool calls.
+//
+// When input arrives, that combined message is appended and the turn counter
 // resets. The bool return reports whether Run should return now (the room
 // closed while waiting); when it is true, the error return is what Run
-// should return.
-func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int) (bool, error) {
+// should return. If the room closes before input arrives, pending is
+// dropped along with everything else: Run is about to return, so no further
+// request will ever need it.
+func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int, pending []anthropic.BetaContentBlockParamUnion) (bool, error) {
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
 	inputs, err := r.waitForInput(ctx)
 	if err != nil {
@@ -351,7 +370,8 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 	if len(inputs) == 0 {
 		return true, nil
 	}
-	*messages = append(*messages, r.humanMessage(inputs))
+	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.humanBlocks(inputs)...)
+	*messages = append(*messages, anthropic.NewBetaUserMessage(blocks...))
 	*turns = 0
 	return false, nil
 }
