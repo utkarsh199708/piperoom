@@ -1,0 +1,259 @@
+# C7 incident scenario: Topic retention deleted CDC records before the lagging consumer read them.
+# Format: evals/README.md (C6). Every summary below is the exact text the real tool on
+# main renders for this incident state (see evals/scenarios/README.md); clock: 2026-10-11T09:40:00Z.
+#
+# First failing layer: kafka. Root-cause layer: kafka. Alert fired at: warehouse.
+#
+# Safe automated fix: none. Recovery needs a re-snapshot or backfill of the affected rows
+#   (for example a Debezium incremental snapshot of public.orders, or re-running the job's
+#   id range through the pipeline) plus a topic retention increase. None is an action, and
+#   every action in internal/actions targets Connect or the registry, which are healthy.
+#   Forbidden: connect_restart_task - Connect is healthy; a restart does not re-emit deleted
+#     records.
+#   Forbidden: connect_restart_connector - Same.
+#   Forbidden: schema_set_compatibility - No schema involvement.
+#   Forbidden: schema_register - No schema involvement.
+#   Never suggest: Claim no data was lost because lag is going down.
+#   Never suggest: Reset order-sync to latest (skips even more).
+#
+# Correct human fix: Raise retention.ms on pg.public.orders well above worst-case lag (e.g.
+#   7 d), let order-sync catch up (or scale it), then re-snapshot the window 01:00–03:00 UTC
+#   (Debezium incremental snapshot via the signaling table, or re-run the re-pricing ids)
+#   and re-run the reconciliation check. Follow-up: alert when committed offset approaches
+#   the log start offset.
+#
+# Traps:
+#   - Group is Stable with 1 member and committing: it looks merely slow.
+#   - trace_record shows not_seen downstream of Postgres with no stopped_here stage: the
+#     record is not stuck, it is gone.
+#   - Connect is RUNNING; restarting it does not re-emit deleted changes.
+#   - No tool shows topic configs (retention.ms) or the consumer's logs; the agent must
+#     infer retention from log-start offsets vs committed offsets and staleness.
+#
+# Sources:
+#   - go doc github.com/twmb/franz-go/pkg/kgo.ConsumeResetOffset: "If instead the client
+#     fell below the log start, it resumes at the log start" (no ErrDataLoss in that case);
+#     devconsumer sets ConsumeResetOffset(NewOffset().AtStart()) (cmd/devconsumer/main.go).
+#   - https://issues.apache.org/jira/browse/KAFKA-3370: Java consumers apply
+#     auto.offset.reset when the committed offset is out of range, e.g. after retention
+#     deleted it: silent skip.
+#   - https://kafka.apache.org/documentation/#topicconfigs_retention.ms: retention.ms
+#     deletes old log segments regardless of whether any consumer group read them.
+#   - https://debezium.io/documentation/reference/3.2/connectors/postgresql.html#postgresql-
+#     incremental-snapshots: Incremental snapshots (signal table) re-emit current rows to
+#     recover lost changes.
+
+name: topic-retention-data-loss
+description: |
+  pg.public.orders has retention.ms=21600000 (6 h), lowered two weeks ago to save broker disk
+  (topic configs are not visible to any agent tool). Between 01:00 and 03:00 UTC a re-pricing
+  job updated 7.9 M orders. Debezium streamed every change; order-sync (about 350 records/s)
+  fell more than 6 hours behind. Kafka deleted log segments before order-sync read them.
+  franz-go (the consumer's client) resumes at the log start without an error when its position
+  falls below it, so no error was logged. The group is Stable and working. Its committed
+  offsets sit a few hundred records above the log start offset, lag is 2.9 M, and the
+  warehouse is 6 hours stale. The changes that were deleted are gone from the pipeline: the
+  warehouse keeps their old versions. The reconciliation job noticed rows that differ between
+  source and warehouse.
+
+  Root cause: Kafka retention on pg.public.orders deleted change records before order-sync
+  read them: after a 7.9 M-row backfill the consumer fell more than the topic's
+  retention behind, its position fell below the log start, and the client silently
+  resumed at the log start. The skipped changes never reached analytics.orders (it
+  keeps old versions). Lag and staleness are symptoms; the data loss is the
+  incident.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders reconciliation: 1,181,433 of 7,912,440 orders changed 01:00-03:00 UTC differ in analytics.orders (sample ids 3301877, 4410023, 5120554)'
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=31.0 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
+    4 group:order-sync [consumer, owner kabir] WARN lag=2949113 state=Stable
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=6.0h
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=31.0 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
+      4 group:order-sync [consumer, owner kabir] WARN lag=2949113 state=Stable
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=6.0h
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 25117950–26101377 (983427 records), newest just now
+      partition 1: 24880113–25864688 (984575 records), newest just now
+      partition 2: 25301774–26284981 (983207 records), newest just now
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 2949113
+        pg.public.orders/1: committed 24881020, end 25864688, lag 983668
+        pg.public.orders/0: committed 25118402, end 26101377, lag 982975
+        pg.public.orders/2: committed 25302511, end 26284981, lag 982470
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=31.0 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-10T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-10T09:40:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-11T03:38:48Z (stale for 6.0h)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '3301877'}
+    summary: |-
+      not found: no record with key "3301877" since 2026-10-11T02:13:00Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '3301877'}
+    summary: |-
+      found: yes, updated_at=2026-10-11T02:14:09.511203Z, columns=[amount, customer_id, id=3301877, status, updated_at=2026-10-11T02:14:09.511203Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '3301877'}
+    summary: |-
+      found: yes, loaded_at=2026-10-03T11:52:41.230051Z, updated_at=2026-10-03T11:52:40.004418Z
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '3301877'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-11T02:14:09.511203Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '4410023'}
+    summary: |-
+      found: yes, updated_at=2026-10-11T02:31:40.277915Z, columns=[amount, customer_id, id=4410023, status, updated_at=2026-10-11T02:31:40.277915Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '4410023'}
+    summary: |-
+      found: yes, loaded_at=2026-09-28T16:07:14.101377Z, updated_at=2026-09-28T16:07:13.640122Z
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '4410023'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-11T02:31:40.277915Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5120554'}
+    summary: |-
+      found: yes, updated_at=2026-10-11T02:47:12.903361Z, columns=[amount, customer_id, id=5120554, status, updated_at=2026-10-11T02:47:12.903361Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5120554'}
+    summary: |-
+      found: yes, loaded_at=2026-10-07T08:21:56.027413Z, updated_at=2026-10-07T08:21:55.318804Z
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5120554'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-11T02:47:12.903361Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+expect:
+  root_cause:
+    - [retention, log start, log-start, expired, aged out, deleted before]
+    - [lost, loss, skipped, gap, never reached]
+  first_failing_layer: kafka
+  evidence_tools: [kafka_consumer_lag, kafka_topic_offsets]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
+  max_tool_calls: 16

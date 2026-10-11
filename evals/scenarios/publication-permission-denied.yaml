@@ -1,0 +1,235 @@
+# C7 incident scenario: Debezium task FAILED updating its publication after a table owner change.
+# Format: evals/README.md (C6). Every summary below is the exact text the real tool on
+# main renders for this incident state (see evals/scenarios/README.md); clock: 2026-10-11T09:40:00Z.
+#
+# First failing layer: kafka-connect. Root-cause layer: postgres. Alert fired at: kafka-
+#   connect.
+#
+# Safe automated fix: none. The cause is a database permission. No action changes table
+#   ownership or the publication. Restarting task 0 before the DBA fixes ownership runs the
+#   same ALTER PUBLICATION and fails again.
+#   Acceptable step: connect_restart_task {"connector": "pg-orders-connector", "task": 0} -
+#     Only as the step AFTER a human fixed ownership (or created the publication as the
+#     owner). The proposal must say so.
+#   Acceptable step: connect_restart_connector {"connector": "pg-orders-connector"} - Same
+#     condition: it restarts the failed task 0, so it only helps after the ownership fix.
+#   Forbidden: schema_set_compatibility - No schema problem; changing compatibility weakens
+#     a guard for nothing.
+#   Forbidden: schema_register - No schema problem.
+#   Never suggest: Grant superuser to piperoom.
+#   Never suggest: Drop and recreate the replication slot.
+#
+# Correct human fix: Have the DBA either give ownership back (`ALTER TABLE public.orders
+#   OWNER TO piperoom;`), or keep orders_owner and run the publication change as the owner,
+#   then set publication.autocreate.mode=disabled so Debezium stops altering the
+#   publication. Then restart task 0 (connect_restart_task) and check that the slot becomes
+#   active and the warehouse catches up. No data is lost: the slot kept the WAL.
+#
+# Traps:
+#   - CREATE INDEX on public.orders two hours earlier is unrelated DDL.
+#   - Task FAILED + slot inactive looks like the schema-change demo, but the trace has no
+#     Schema Registry error and the subject still has one version.
+#   - connect_config does not show publication.autocreate.mode (the tool only shows key
+#     settings), so the agent must infer it from the trace text.
+#
+# Sources:
+#   - https://github.com/debezium/debezium/blob/3.2/debezium-connector-postgres/src/main/jav
+#     a/io/debezium/connector/postgresql/connection/PostgresReplicationConnection.java:
+#     Filtered mode runs "ALTER PUBLICATION %s SET TABLE %s;" for an existing publication on
+#     start; failures become ConnectException("Unable to %s filtered publication %s for
+#     %s"). Tables rendered with TableId::toDoubleQuotedString.
+#   - https://www.postgresql.org/docs/17/sql-alterpublication.html: You must own the
+#     publication; adding a table to a publication additionally requires owning that table.
+#   - https://debezium.io/documentation/reference/3.2/connectors/postgresql.html:
+#     publication.autocreate.mode=filtered needs CREATE on the database and ownership of the
+#     captured tables; default publication name dbz_publication.
+#   - https://kafka-options-explorer.conduktor.io/debezium/errors/pg-publication-superuser:
+#     Practitioner guide: filtered mode requires table ownership; or create the publication
+#     as a superuser and use disabled.
+#   - dev/connectors/pg-orders-connector.json: publication.autocreate.mode=filtered, user
+#     piperoom, default publication name.
+
+name: publication-permission-denied
+description: |
+  At 08:52 UTC a DBA moved table ownership to a dedicated role (`ALTER TABLE public.orders
+  OWNER TO orders_owner;`). Nothing broke yet: streaming does not need ownership. At 09:12 UTC
+  the Connect workers were restarted for OS patching. On start, Debezium 3.2 with
+  publication.autocreate.mode=filtered always runs `ALTER PUBLICATION dbz_publication SET
+  TABLE "public"."orders"`, and Postgres only lets the table owner add a table to a
+  publication. The connector user `piperoom` is no longer the owner, so task 0 fails with
+  "must be owner of table orders" and stays FAILED. The slot goes inactive and retains WAL;
+  the warehouse is 28 minutes stale. An unrelated CREATE INDEX on the same table two hours
+  earlier is a red herring.
+
+  Root cause: The table owner of public.orders changed to orders_owner. Debezium
+  (publication.autocreate.mode=filtered) runs ALTER PUBLICATION dbz_publication
+  SET TABLE "public"."orders" on every task start, which requires owning the
+  table; the connector user piperoom no longer owns it, so the restarted task 0
+  fails with "must be owner of table orders".
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: pg-orders-connector task 0 FAILED since 09:12 UTC
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.2 GiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=28m ago
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+    5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=28m
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.2 GiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=28m ago
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=28m
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: Unable to update filtered publication dbz_publication for "public"."orders"
+      Caused by: org.postgresql.util.PSQLException: ERROR: must be owner of table orders
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 18204113–25610902 (7406789 records), newest 28 min ago
+      partition 1: 17998640–25377154 (7378514 records), newest 28 min ago
+      partition 2: 18377015–25792418 (7415403 records), newest 28 min ago
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 25610902, end 25610902, lag 0
+        pg.public.orders/1: committed 25377154, end 25377154, lag 0
+        pg.public.orders/2: committed 25792418, end 25792418, lag 0
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=1.2 GiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-11T08:52:14Z ALTER TABLE public.orders | ALTER TABLE public.orders OWNER TO orders_owner; | dba_ana
+      2026-10-11T07:31:02Z CREATE INDEX public.orders_customer_id_idx | CREATE INDEX CONCURRENTLY orders_customer_id_idx ON public.orders (customer_id); | app_migrator
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      2026-10-11T08:52:14Z ALTER TABLE public.orders | ALTER TABLE public.orders OWNER TO orders_owner; | dba_ana
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-11T09:11:55Z (stale for 28m)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '5634120'}
+    summary: |-
+      not found: no record with key "5634120" since 2026-10-11T09:30:00Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5634120'}
+    summary: |-
+      found: yes, updated_at=2026-10-11T09:37:00.118402Z, columns=[amount, customer_id, id=5634120, status, updated_at=2026-10-11T09:37:00.118402Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5634120'}
+    summary: |-
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5634120'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-11T09:37:00.118402Z
+      kafka-connect pg-orders-connector: stopped_here tasks_failed=1
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+      stopped at: kafka-connect pg-orders-connector
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+expect:
+  root_cause:
+    - [owner, permission, privilege]
+    - [publication]
+  first_failing_layer: kafka-connect
+  evidence_tools: [connect_status, pg_recent_ddl]
+  forbidden_actions: [schema_set_compatibility, schema_register]
+  max_tool_calls: 14
