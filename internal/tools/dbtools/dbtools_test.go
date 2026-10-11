@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,32 @@ func (f *fakeSource) PublicationTables(_ context.Context, _, _ string, _ []strin
 	return f.pubTables, f.pubErr
 }
 
+// fakeConnect implements clients.ConnectClient. Config looks up the connector
+// in configs and reports clients.ErrNotFound (wrapped) for unknown names, so
+// the publication tool's connector-selection rule is exercised like the real
+// Connect REST client.
+type fakeConnect struct {
+	configs   map[string]map[string]string
+	configErr error
+}
+
+func (f *fakeConnect) ListConnectors(context.Context) ([]string, error) { return nil, nil }
+func (f *fakeConnect) Status(context.Context, string) (clients.ConnectorStatus, error) {
+	return clients.ConnectorStatus{}, nil
+}
+func (f *fakeConnect) Config(_ context.Context, name string) (map[string]string, error) {
+	if f.configErr != nil {
+		return nil, f.configErr
+	}
+	cfg, ok := f.configs[name]
+	if !ok {
+		return nil, fmt.Errorf("connect: connector %q: %w", name, clients.ErrNotFound)
+	}
+	return cfg, nil
+}
+func (f *fakeConnect) RestartTask(context.Context, string, int) error { return nil }
+func (f *fakeConnect) RestartConnector(context.Context, string) error { return nil }
+
 type fakeWarehouse struct {
 	rows     map[string]map[string]any
 	fresh    time.Time
@@ -79,8 +106,8 @@ func (f *fakeBuilder) LayerOwner(string, string) (string, bool) { return "", fal
 func testOwners() *owners.Owners {
 	return &owners.Owners{
 		Pipelines: []owners.Pipeline{
-			{ID: "orders", SourceTables: []string{"public.orders"}, SinkTables: []string{"analytics.orders"}},
-			{ID: "payments", SourceTables: []string{"public.payments"}, SinkTables: []string{"analytics.payments"}},
+			{ID: "orders", SourceTables: []string{"public.orders"}, SinkTables: []string{"analytics.orders"}, Connectors: []string{"pg-orders-connector"}},
+			{ID: "payments", SourceTables: []string{"public.payments"}, SinkTables: []string{"analytics.payments"}, Connectors: []string{"pg-payments-connector"}},
 		},
 	}
 }
@@ -98,7 +125,19 @@ func testDeps() Deps {
 			fresh: time.Now().Add(-2 * time.Minute),
 		},
 		Builder: &fakeBuilder{graph: topology.Graph{PipelineID: "orders"}},
-		Owners:  testOwners(),
+		Connect: &fakeConnect{configs: map[string]map[string]string{
+			"pg-orders-connector": {
+				"connector.class":      "io.debezium.connector.postgresql.PostgresConnector",
+				"database.user":        "piperoom",
+				"database.server.name": "pg",
+			},
+			"pg-payments-connector": {
+				"connector.class":      "io.debezium.connector.postgresql.PostgresConnector",
+				"database.user":        "piperoom",
+				"database.server.name": "pg",
+			},
+		}},
+		Owners: testOwners(),
 	}
 }
 
@@ -406,10 +445,13 @@ func TestCutShortRuneSafe(t *testing.T) {
 	}
 }
 
-func publicationTool(t *testing.T, src clients.SourceDB) tools.Tool {
+func publicationTool(t *testing.T, src clients.SourceDB, connects ...clients.ConnectClient) tools.Tool {
 	t.Helper()
 	d := testDeps()
 	d.Src = src
+	if len(connects) > 0 {
+		d.Connect = connects[0]
+	}
 	reg := tools.NewRegistry()
 	if err := Register(reg, d); err != nil {
 		t.Fatal(err)
@@ -440,11 +482,14 @@ func TestPgPublicationTablesHappyPath(t *testing.T) {
 	if data["publication"] != defaultPublication {
 		t.Fatalf("publication = %v, want %q", data["publication"], defaultPublication)
 	}
-	if data["connector_user"] != defaultConnectorRole {
-		t.Fatalf("connector_user = %v, want %q", data["connector_user"], defaultConnectorRole)
+	if data["publication_source"] != "default" {
+		t.Fatalf("publication_source = %v, want %q (config has no publication.name)", data["publication_source"], "default")
 	}
-	if data["connector_user_source"] == "" {
-		t.Fatal("connector_user_source must be non-empty")
+	if data["connector_user"] != "piperoom" {
+		t.Fatalf("connector_user = %v, want %q", data["connector_user"], "piperoom")
+	}
+	if data["connector_user_source"] != "connector pg-orders-connector config database.user" {
+		t.Fatalf("connector_user_source = %v", data["connector_user_source"])
 	}
 	members, ok := data["publication_tables"].([]postgres.PublicationTable)
 	if !ok || len(members) != 1 || !members[0].InPublication {
@@ -544,5 +589,125 @@ func TestPgPublicationTablesUnsupportedClient(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "does not support PublicationTables") {
 		t.Fatalf("error %q does not name the missing capability", err)
+	}
+}
+
+func TestPgPublicationTablesReadsRoleAndPublicationFromConfig(t *testing.T) {
+	src := &fakeSource{pubTables: []postgres.PublicationTable{
+		{Schema: "public", Table: "orders", InPublication: true, Selectable: true},
+	}}
+	connect := &fakeConnect{configs: map[string]map[string]string{
+		"pg-orders-connector": {
+			"connector.class":      "io.debezium.connector.postgresql.PostgresConnector",
+			"database.user":        "alice",
+			"database.server.name": "pg",
+			"publication.name":     "orders_pub",
+		},
+	}}
+	tt := publicationTool(t, src, connect)
+	res, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
+	if err != nil {
+		t.Fatalf("pg_publication_tables: %v", err)
+	}
+	data := res.Data.(map[string]any)
+	if data["connector_user"] != "alice" {
+		t.Fatalf("connector_user = %v, want %q", data["connector_user"], "alice")
+	}
+	if data["publication"] != "orders_pub" {
+		t.Fatalf("publication = %v, want %q", data["publication"], "orders_pub")
+	}
+	if data["publication_source"] == "default" {
+		t.Fatalf("publication_source = %v, must not be default when publication.name is set", data["publication_source"])
+	}
+}
+
+func TestPgPublicationTablesPublicationDefaulted(t *testing.T) {
+	src := &fakeSource{pubTables: []postgres.PublicationTable{
+		{Schema: "public", Table: "orders", InPublication: true, Selectable: true},
+	}}
+	connect := &fakeConnect{configs: map[string]map[string]string{
+		"pg-orders-connector": {
+			"connector.class":      "io.debezium.connector.postgresql.PostgresConnector",
+			"database.user":        "alice",
+			"database.server.name": "pg",
+		},
+	}}
+	tt := publicationTool(t, src, connect)
+	res, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
+	if err != nil {
+		t.Fatalf("pg_publication_tables: %v", err)
+	}
+	data := res.Data.(map[string]any)
+	if data["publication"] != defaultPublication {
+		t.Fatalf("publication = %v, want %q", data["publication"], defaultPublication)
+	}
+	if data["publication_source"] != "default" {
+		t.Fatalf("publication_source = %v, want %q", data["publication_source"], "default")
+	}
+}
+
+func TestPgPublicationTablesNoDatabaseUser(t *testing.T) {
+	connect := &fakeConnect{configs: map[string]map[string]string{
+		"pg-orders-connector": {
+			"connector.class":      "io.debezium.connector.postgresql.PostgresConnector",
+			"database.server.name": "pg",
+		},
+	}}
+	tt := publicationTool(t, &fakeSource{}, connect)
+	_, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
+	if err == nil {
+		t.Fatal("expected error when database.user is absent")
+	}
+	if !strings.Contains(err.Error(), "database.user") || !strings.Contains(err.Error(), "pg-orders-connector") {
+		t.Fatalf("error %q must name the missing database.user and the connector", err)
+	}
+	if errors.Is(err, tools.ErrBadInput) {
+		t.Fatalf("wiring/config error must not wrap ErrBadInput: %v", err)
+	}
+}
+
+func TestPgPublicationTablesNilConnect(t *testing.T) {
+	d := testDeps()
+	d.Src = &fakeSource{}
+	d.Connect = nil
+	reg := tools.NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	tt, _ := reg.Get("pg_publication_tables")
+	_, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
+	if err == nil {
+		t.Fatal("expected error when Connect is nil")
+	}
+	if !strings.Contains(err.Error(), "Connect client is nil") || !strings.Contains(err.Error(), "orders") {
+		t.Fatalf("error %q must name the nil Connect client and the pipeline", err)
+	}
+}
+
+func TestPgPublicationTablesConnectorNotFound(t *testing.T) {
+	// The pipeline lists a connector the Connect client does not know.
+	connect := &fakeConnect{configs: map[string]map[string]string{}}
+	tt := publicationTool(t, &fakeSource{}, connect)
+	_, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
+	if err == nil {
+		t.Fatal("expected error when no Debezium source connector is found")
+	}
+	if !strings.Contains(err.Error(), "pg-orders-connector") {
+		t.Fatalf("error %q must name the missing connector", err)
+	}
+}
+
+func TestPgPublicationTablesNoSourceConnector(t *testing.T) {
+	// The only listed connector is a sink, so no Debezium source is found.
+	connect := &fakeConnect{configs: map[string]map[string]string{
+		"pg-orders-connector": {"connector.class": "org.apache.kafka.connect.sink.SomeSink"},
+	}}
+	tt := publicationTool(t, &fakeSource{}, connect)
+	_, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
+	if err == nil {
+		t.Fatal("expected error when no Debezium source connector is found")
+	}
+	if !strings.Contains(err.Error(), "no Debezium Postgres source connector") {
+		t.Fatalf("error %q must explain the missing source connector", err)
 	}
 }

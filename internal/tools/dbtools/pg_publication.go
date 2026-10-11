@@ -6,32 +6,34 @@ import (
 	"fmt"
 	"strings"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/clients/postgres"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
 
-// Defaults for the Debezium publication name and connector role. dbtools.Deps
-// has no Connect client, so the tool cannot read the live connector config; it
-// assumes the dev connector's values and reports the connector-user source
-// explicitly in its Data output. See dev/connectors/pg-orders-connector.json:
-// database.user = "piperoom" and no publication.name, which Debezium defaults
-// to "dbz_publication".
-const (
-	defaultPublication   = "dbz_publication"
-	defaultConnectorRole = "piperoom"
-)
-
-// connectorUserSource names where defaultConnectorRole comes from, surfaced in
-// Data so the agent and reviewers can see the assumption.
-const connectorUserSource = "default (dev/connectors/pg-orders-connector.json database.user); dbtools.Deps has no Connect client to read the live config"
+// defaultPublication is the publication name Debezium creates when the source
+// connector config sets no publication.name. It is only a fallback and is
+// reported as publication_source:"default" in Data.
+const defaultPublication = "dbz_publication"
 
 // publicationTablesClient is the local adapter for PublicationTables until the
-// method lands on clients.SourceDB (contract change request in the PR): the
-// real client (internal/clients/postgres) and the test fake implement it, and
-// the tool reports a clear error when the injected client does not. This is
-// the same pattern kafkatools uses for topicConfigAdmin.
+// method lands on the contract (contract change request in the PR): the real
+// client (internal/clients/postgres) and the test fake implement it, and the
+// tool reports a clear error when the injected client does not. This is the
+// same pattern kafkatools uses for topicConfigAdmin.
 type publicationTablesClient interface {
 	PublicationTables(ctx context.Context, publication, role string, tables []string) ([]postgres.PublicationTable, error)
+}
+
+// connectorConfig is the Debezium source connector configuration resolved from
+// Connect for a pipeline: the connector name, its database.user role, and the
+// publication name it publishes to together with where that name came from.
+type connectorConfig struct {
+	name              string
+	role              string
+	publication       string
+	publicationSource string
 }
 
 // pgPublicationTablesTool shows, for a pipeline, the Debezium publication and
@@ -65,19 +67,82 @@ func pgPublicationTablesTool(d Deps) tools.Tool {
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
-			tables, err := src.PublicationTables(ctx, defaultPublication, defaultConnectorRole, p.SourceTables)
+			conn, err := resolveConnector(ctx, p, d.Connect)
+			if err != nil {
+				return tools.Result{}, err
+			}
+
+			tables, err := src.PublicationTables(ctx, conn.publication, conn.role, p.SourceTables)
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_publication_tables: %w", err)
 			}
 
-			summary, truncated := tools.Truncate(publicationSummary(defaultPublication, defaultConnectorRole, p.SourceTables, tables))
+			summary, truncated := tools.Truncate(publicationSummary(conn.publication, conn.role, p.SourceTables, tables))
 			return tools.Result{
 				Summary:   summary,
-				Data:      publicationData(defaultPublication, defaultConnectorRole, p.SourceTables, tables),
+				Data:      publicationData(conn, p.SourceTables, tables),
 				Truncated: truncated,
 			}, nil
 		},
 	}
+}
+
+// resolveConnector reads the pipeline's Debezium Postgres source connector
+// config via Connect and returns the connector role (database.user) and the
+// publication name. The role has no default: a nil Connect client, a connector
+// that cannot be found or read, or a config without database.user is an error
+// naming the pipeline (and the connector where known). The publication falls
+// back to defaultPublication, marked publicationSource "default", when the
+// config has no publication.name.
+func resolveConnector(ctx context.Context, p owners.Pipeline, connect clients.ConnectClient) (connectorConfig, error) {
+	if connect == nil {
+		return connectorConfig{}, fmt.Errorf("dbtools: pg_publication_tables: pipeline %q: Connect client is nil, cannot read the Debezium connector config", p.ID)
+	}
+	name, cfg, err := debeziumSourceConnector(ctx, connect, p.Connectors)
+	if err != nil {
+		return connectorConfig{}, fmt.Errorf("dbtools: pg_publication_tables: pipeline %q: %w", p.ID, err)
+	}
+	role := cfg["database.user"]
+	if role == "" {
+		return connectorConfig{}, fmt.Errorf("dbtools: pg_publication_tables: pipeline %q: connector %q config has no database.user", p.ID, name)
+	}
+	c := connectorConfig{
+		name:        name,
+		role:        role,
+		publication: cfg["publication.name"],
+	}
+	if c.publication == "" {
+		c.publication = defaultPublication
+		c.publicationSource = "default"
+	} else {
+		c.publicationSource = "connector " + name + " config publication.name"
+	}
+	return c, nil
+}
+
+// debeziumSourceConnector returns the name and config of the pipeline's
+// Debezium Postgres source connector. Selection rule: a connector is the source
+// connector when its config's connector.class contains "PostgresConnector", or
+// — for connectors that omit connector.class — when its config has
+// database.server.name or database.user. The first matching connector wins; a
+// pipeline with no matching connector is an error.
+func debeziumSourceConnector(ctx context.Context, connect clients.ConnectClient, names []string) (string, map[string]string, error) {
+	for _, name := range names {
+		cfg, err := connect.Config(ctx, name)
+		if err != nil {
+			return "", nil, fmt.Errorf("read connector %q config: %w", name, err)
+		}
+		if strings.Contains(cfg["connector.class"], "PostgresConnector") {
+			return name, cfg, nil
+		}
+		if _, ok := cfg["database.server.name"]; ok {
+			return name, cfg, nil
+		}
+		if _, ok := cfg["database.user"]; ok {
+			return name, cfg, nil
+		}
+	}
+	return "", nil, fmt.Errorf("no Debezium Postgres source connector found among %v", names)
 }
 
 // publicationSummary renders one line per pipeline source table with its
@@ -100,10 +165,11 @@ func publicationSummary(pub, role string, sourceTables []string, tables []postgr
 	return sb.String()
 }
 
-// publicationData is the structured Data payload: the publication name, the
-// connector user and where it came from, the publication's member tables, and
-// the per-source-table membership + SELECT view.
-func publicationData(pub, role string, sourceTables []string, tables []postgres.PublicationTable) map[string]any {
+// publicationData is the structured Data payload: the publication name and its
+// source, the connector name, the connector user and where it came from, the
+// publication's member tables, and the per-source-table membership + SELECT
+// view.
+func publicationData(c connectorConfig, sourceTables []string, tables []postgres.PublicationTable) map[string]any {
 	byName := map[string]postgres.PublicationTable{}
 	var members []postgres.PublicationTable
 	for _, t := range tables {
@@ -121,9 +187,11 @@ func publicationData(pub, role string, sourceTables []string, tables []postgres.
 		sources = append(sources, t)
 	}
 	return map[string]any{
-		"publication":           pub,
-		"connector_user":        role,
-		"connector_user_source": connectorUserSource,
+		"publication":           c.publication,
+		"publication_source":    c.publicationSource,
+		"connector":             c.name,
+		"connector_user":        c.role,
+		"connector_user_source": "connector " + c.name + " config database.user",
 		"publication_tables":    members,
 		"source_tables":         sources,
 	}
