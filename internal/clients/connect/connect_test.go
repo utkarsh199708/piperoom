@@ -3,6 +3,7 @@ package connect
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -146,5 +147,35 @@ func TestDeadline(t *testing.T) {
 	defer cancel()
 	if _, err := c.ListConnectors(ctx); err == nil {
 		t.Fatal("want error from deadline, got nil")
+	}
+}
+
+func TestInternalErrorHTML(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("<html>boom</html>"))
+	})
+	if _, err := c.ListConnectors(context.Background()); err == nil || !strings.Contains(err.Error(), "status 500") {
+		t.Fatalf("want status 500 error, got %v", err)
+	}
+}
+
+func TestTargetDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	c := New(srv.URL, srv.Client())
+	srv.Close()
+	if _, err := c.ListConnectors(context.Background()); err == nil {
+		t.Fatal("want error for closed server")
+	}
+}
+
+func TestOversizedBody(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, strings.Repeat("x", 5<<20))
+	})
+	if _, err := c.ListConnectors(context.Background()); err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("want decode error, got %v", err)
 	}
 }

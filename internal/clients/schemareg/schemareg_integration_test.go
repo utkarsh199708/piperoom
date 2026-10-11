@@ -5,18 +5,37 @@ package schemareg
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
 	"piperoom/internal/testenv"
 )
 
-// Registers two versions under a temp subject and diffs them. The temp subject
-// persists in the dev registry (the contract has no subject delete).
+// deleteSubject removes a test subject (soft then permanent). The client
+// interface has no delete method, so this is a test-only raw HTTP helper.
+func deleteSubject(t *testing.T, baseURL, subject string) {
+	t.Helper()
+	for _, perm := range []string{"", "?permanent=true"} {
+		u := baseURL + "/subjects/" + url.PathEscape(subject) + perm
+		req, err := http.NewRequest(http.MethodDelete, u, nil)
+		if err != nil {
+			t.Fatalf("delete request: %v", err)
+		}
+		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatalf("delete %s: %v", u, err)
+		}
+		resp.Body.Close()
+	}
+}
+
+// Registers two versions under a temp subject and diffs them, then cleans up.
 func TestIntegrationRegisterAndVersions(t *testing.T) {
 	cfg := testenv.Require(t)
 	c := New(cfg.SchemaRegistryURL, &http.Client{Timeout: 5 * time.Second})
 	subject := testenv.Name("it-schemareg")
+	t.Cleanup(func() { deleteSubject(t, cfg.SchemaRegistryURL, subject) })
 
 	// Register under NONE so the two test schemas can differ freely.
 	if err := c.SetCompatibility(context.Background(), subject, "NONE"); err != nil {

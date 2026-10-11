@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/tools"
@@ -112,7 +113,7 @@ func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.R
 				}
 			}
 			if len(cond) > 2000 {
-				cond = cond[:2000] + "\n…"
+				cond = truncateRunes(cond, 2000) + "\n…"
 			}
 			tr.Error = cond
 			sb.WriteString(":\n" + cond)
@@ -198,6 +199,17 @@ func sensitiveKey(k string) bool {
 		return true
 	}
 	return false
+}
+
+// truncateRunes returns s truncated to n bytes on a UTF-8 rune boundary.
+func truncateRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // condenseTrace keeps the top exception line and every "Caused by:" line,

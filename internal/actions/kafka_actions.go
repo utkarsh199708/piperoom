@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/hamba/avro/v2"
+
 	"piperoom/internal/clients"
 )
 
@@ -109,6 +111,8 @@ func (a *restartTask) Execute(ctx context.Context, raw json.RawMessage) (string,
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", err
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	if err := a.d.Connect.RestartTask(ctx, p.Connector, p.Task); err != nil {
 		return "", err
 	}
@@ -157,6 +161,8 @@ func (a *restartConnector) Execute(ctx context.Context, raw json.RawMessage) (st
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", err
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	if err := a.d.Connect.RestartConnector(ctx, p.Connector); err != nil {
 		return "", err
 	}
@@ -211,12 +217,14 @@ func (a *setCompatibility) Execute(ctx context.Context, raw json.RawMessage) (st
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", err
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	if err := a.d.Registry.SetCompatibility(ctx, p.Subject, p.Level); err != nil {
 		return "", err
 	}
 	level, _, err := a.d.Registry.Compatibility(ctx, p.Subject)
 	if err != nil {
-		level = p.Level
+		return fmt.Sprintf("%s compatibility now %s (set; re-read failed: %v)", p.Subject, p.Level, err), nil
 	}
 	return fmt.Sprintf("%s compatibility now %s", p.Subject, level), nil
 }
@@ -247,9 +255,8 @@ func (a *registerSchema) Validate(raw json.RawMessage) error {
 	if err := json.Unmarshal(raw, &p); err != nil || p.Subject == "" || p.Schema == "" {
 		return fmt.Errorf("subject and schema are required")
 	}
-	var v any
-	if err := json.Unmarshal([]byte(p.Schema), &v); err != nil {
-		return fmt.Errorf("schema is not valid JSON: %v", err)
+	if _, err := avro.Parse(p.Schema); err != nil {
+		return fmt.Errorf("schema is not valid Avro: %v", err)
 	}
 	return nil
 }
@@ -259,6 +266,8 @@ func (a *registerSchema) Execute(ctx context.Context, raw json.RawMessage) (stri
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", err
 	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	id, err := a.d.Registry.Register(ctx, p.Subject, p.Schema)
 	if err != nil {
 		return "", err

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"piperoom/internal/clients"
 )
@@ -34,8 +35,13 @@ type Client struct {
 	hc      *http.Client
 }
 
+var _ clients.SchemaRegistryClient = (*Client)(nil)
+
 // New returns a Schema Registry client for baseURL (e.g. http://localhost:8081).
 func New(baseURL string, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
 	return &Client{baseURL: strings.TrimRight(baseURL, "/"), hc: httpClient}
 }
 
@@ -161,12 +167,16 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 	}
 
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusNotFound {
+		var serr Error
+		if err := json.Unmarshal(b, &serr); err == nil && serr.Code != 0 {
+			return fmt.Errorf("schemareg: %s %s: %w: %w", method, path, clients.ErrNotFound, &serr)
+		}
+		return fmt.Errorf("schemareg: %s %s: %w", method, path, clients.ErrNotFound)
+	}
 	var serr Error
 	if err := json.Unmarshal(b, &serr); err != nil || serr.Code == 0 {
 		return fmt.Errorf("schemareg: %s %s: status %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(b)))
-	}
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("schemareg: %s %s: %w: %w", method, path, clients.ErrNotFound, &serr)
 	}
 	return fmt.Errorf("schemareg: %s %s: %w", method, path, &serr)
 }

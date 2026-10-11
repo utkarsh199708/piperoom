@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"piperoom/internal/clients"
 )
@@ -19,8 +20,13 @@ type Client struct {
 	hc      *http.Client
 }
 
+var _ clients.ConnectClient = (*Client)(nil)
+
 // New returns a Connect client for baseURL (e.g. http://localhost:8083).
 func New(baseURL string, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
 	return &Client{baseURL: strings.TrimRight(baseURL, "/"), hc: httpClient}
 }
 

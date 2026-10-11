@@ -195,3 +195,50 @@ func TestIncompatibilityTypedError(t *testing.T) {
 		t.Fatalf("want typed Error 409, got %v", err)
 	}
 }
+
+func TestNotFoundNonJSONBody(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("plain text 404"))
+	})
+	_, err := c.Schema(context.Background(), "nope", 1)
+	if !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+func TestInternalErrorHTML(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("<html>boom</html>"))
+	})
+	_, err := c.Subjects(context.Background())
+	if err == nil {
+		t.Fatal("want error for 500")
+	}
+	var serr *Error
+	if errors.As(err, &serr) {
+		t.Fatalf("HTML 500 must not parse as typed Error: %v", err)
+	}
+}
+
+func TestTargetDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	c := New(srv.URL, srv.Client())
+	srv.Close() // connection refused from here on
+	if _, err := c.Subjects(context.Background()); err == nil {
+		t.Fatal("want error for closed server")
+	}
+}
+
+func TestOversizedBody(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.Copy(w, strings.NewReader(strings.Repeat("x", 5<<20))) // 5 MB > 4 MB cap
+	})
+	_, err := c.Subjects(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("want decode error for oversized body, got %v", err)
+	}
+}

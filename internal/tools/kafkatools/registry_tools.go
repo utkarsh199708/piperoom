@@ -233,21 +233,31 @@ func recordFields(schema string) (map[string]string, error) {
 func walkFields(node any, out map[string]string) {
 	switch v := node.(type) {
 	case map[string]any:
-		if fields, ok := v["fields"].([]any); ok {
-			for _, f := range fields {
-				fm, ok := f.(map[string]any)
-				if !ok {
-					continue
-				}
-				if name, _ := fm["name"].(string); name != "" {
-					if _, exists := out[name]; !exists {
-						out[name] = canonType(fm["type"])
-					}
-				}
+		fields, hasFields := v["fields"].([]any)
+		if !hasFields {
+			for _, val := range v {
+				walkFields(val, out)
 			}
+			return
 		}
-		for _, val := range v {
-			walkFields(val, out)
+		recordName, _ := v["name"].(string)
+		for _, f := range fields {
+			fm, ok := f.(map[string]any)
+			if !ok {
+				continue
+			}
+			fname, _ := fm["name"].(string)
+			if fname == "" {
+				continue
+			}
+			key := fname
+			if recordName != "" {
+				key = recordName + "." + fname
+			}
+			if _, exists := out[key]; !exists {
+				out[key] = canonType(fm["type"])
+			}
+			walkFields(fm["type"], out)
 		}
 	case []any:
 		for _, x := range v {

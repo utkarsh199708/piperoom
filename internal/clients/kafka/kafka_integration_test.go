@@ -9,11 +9,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kgo"
+
+	"piperoom/internal/clients"
 	"piperoom/internal/clients/schemareg"
 	"piperoom/internal/testenv"
 )
 
-// Runs against the dev stack; fails (does not skip) if it is unreachable.
+// Runs against the dev stack; testenv.Require skips when it is unreachable.
 
 func newClient(t *testing.T) *Client {
 	t.Helper()
@@ -109,5 +113,104 @@ func TestFindByKeyRealData(t *testing.T) {
 	}
 	if refs[0].Key != "1" {
 		t.Fatalf("decoded key %q, want 1", refs[0].Key)
+	}
+}
+
+// TestTempTopicProduceOffsetsAndLag creates a temp topic, produces records,
+// and verifies TopicOffsets, FindByKey and GroupLag (no-commit partition) on it.
+func TestTempTopicProduceOffsetsAndLag(t *testing.T) {
+	cfg := testenv.Require(t)
+	brokers := strings.Split(cfg.KafkaBrokers, ",")
+	c := newClient(t)
+
+	producer, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		t.Fatalf("producer client: %v", err)
+	}
+	defer producer.Close()
+	adm := kadm.NewClient(producer)
+
+	topic := testenv.Name("it-kafka")
+	resps, err := adm.CreateTopics(context.Background(), 1, 1, nil, topic)
+	if err != nil {
+		t.Fatalf("CreateTopics: %v", err)
+	}
+	if err := resps.Error(); err != nil {
+		t.Fatalf("CreateTopics response: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := adm.DeleteTopics(context.Background(), topic); err != nil {
+			t.Logf("DeleteTopics: %v", err)
+		}
+	})
+
+	ctx := context.Background()
+	rs := producer.ProduceSync(ctx,
+		&kgo.Record{Topic: topic, Key: []byte("k1"), Value: []byte("v1")},
+		&kgo.Record{Topic: topic, Key: []byte("k2"), Value: []byte("v2")},
+		&kgo.Record{Topic: topic, Key: []byte("k3"), Value: []byte("v3")},
+	)
+	if err := rs.FirstErr(); err != nil {
+		t.Fatalf("produce: %v", err)
+	}
+
+	offs, err := c.TopicOffsets(ctx, topic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offs) != 1 || offs[0].Start != 0 || offs[0].End != 3 {
+		t.Fatalf("offsets: %+v", offs)
+	}
+	if offs[0].LastTimestamp.IsZero() {
+		t.Fatalf("missing last timestamp: %+v", offs[0])
+	}
+
+	refs, err := c.FindByKey(ctx, topic, "k2", time.Now().Add(-time.Hour), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 1 || refs[0].Key != "k2" {
+		t.Fatalf("FindByKey k2: %+v", refs)
+	}
+
+	group := testenv.Name("it-group")
+	consumer, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.ConsumerGroup(group),
+		kgo.ConsumeTopics(topic),
+		kgo.DisableAutoCommit(),
+	)
+	if err != nil {
+		t.Fatalf("consumer client: %v", err)
+	}
+	defer consumer.Close()
+
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	for n := 0; n < 3; {
+		fetches := consumer.PollFetches(cctx)
+		n += fetches.NumRecords()
+		if cctx.Err() != nil {
+			t.Fatalf("consume: %v", cctx.Err())
+		}
+	}
+
+	var lag clients.GroupLag
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		lag, err = c.GroupLag(ctx, group)
+		if err == nil && len(lag.Partitions) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("GroupLag never populated: %v (lag %+v)", err, lag)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	t.Logf("group %s: state=%s members=%d totalLag=%d", group, lag.State, lag.Members, lag.TotalLag)
+	for _, p := range lag.Partitions {
+		if p.Topic == topic && p.Committed != -1 {
+			t.Fatalf("expected Committed=-1 (no commit), got %+v", p)
+		}
 	}
 }

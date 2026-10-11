@@ -3,6 +3,7 @@ package actions
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -39,6 +40,7 @@ func (f *fakeConnect) RestartConnector(_ context.Context, n string) error {
 type fakeRegistry struct {
 	subjects    []string
 	compatLevel string
+	compatErr   error
 	regID       int
 }
 
@@ -48,6 +50,9 @@ func (f *fakeRegistry) Schema(context.Context, string, int) (clients.SchemaVersi
 	return clients.SchemaVersion{}, nil
 }
 func (f *fakeRegistry) Compatibility(context.Context, string) (string, bool, error) {
+	if f.compatErr != nil {
+		return "", false, f.compatErr
+	}
 	return f.compatLevel, true, nil
 }
 func (f *fakeRegistry) SetCompatibility(_ context.Context, _ string, level string) error {
@@ -119,5 +124,66 @@ func TestSchemaRegisterRejectsBadJSON(t *testing.T) {
 	a, _ := reg.Get("schema_register")
 	if err := a.Validate(json.RawMessage(`{"subject":"x","schema":"not json"}`)); err == nil {
 		t.Fatal("want error for invalid schema JSON")
+	}
+}
+
+func TestSchemaRegisterRejectsNonAvro(t *testing.T) {
+	reg := NewRegistry()
+	if err := Register(reg, testDeps()); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := reg.Get("schema_register")
+	// Valid JSON but not a valid Avro schema.
+	if err := a.Validate(json.RawMessage(`{"subject":"x","schema":"{\"foo\": 1}"}`)); err == nil {
+		t.Fatal("want error for non-Avro schema")
+	}
+}
+
+func TestRestartConnectorExecute(t *testing.T) {
+	d := testDeps()
+	reg := NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := reg.Get("connect_restart_connector")
+	out, err := a.Execute(context.Background(), json.RawMessage(`{"connector":"pg-orders-connector"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "restarted failed tasks of pg-orders-connector") {
+		t.Fatalf("out %q", out)
+	}
+}
+
+func TestSetCompatibilityExecute(t *testing.T) {
+	d := testDeps()
+	reg := NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := reg.Get("schema_set_compatibility")
+	out, err := a.Execute(context.Background(), json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "compatibility now NONE") {
+		t.Fatalf("out %q", out)
+	}
+}
+
+func TestSetCompatibilityReReadFails(t *testing.T) {
+	d := testDeps()
+	d.Registry = &fakeRegistry{compatErr: errors.New("registry down")}
+	reg := NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := reg.Get("schema_set_compatibility")
+	out, err := a.Execute(context.Background(), json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "set; re-read failed") {
+		t.Fatalf("out %q", out)
 	}
 }
