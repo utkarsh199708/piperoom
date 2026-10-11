@@ -10,17 +10,18 @@ import (
 	"time"
 
 	"piperoom/internal/clients/schemareg"
+	"piperoom/internal/testenv"
 )
 
-// Runs against the dev stack (Kafka localhost:29092, Schema Registry localhost:8081).
-// Skip if unreachable.
+// Runs against the dev stack; fails (does not skip) if it is unreachable.
 
 func newClient(t *testing.T) *Client {
 	t.Helper()
-	sr := schemareg.New("http://localhost:8081", &http.Client{Timeout: 5 * time.Second})
-	c, err := New([]string{"localhost:29092"}, sr)
+	cfg := testenv.Require(t)
+	sr := schemareg.New(cfg.SchemaRegistryURL, &http.Client{Timeout: 5 * time.Second})
+	c, err := New(strings.Split(cfg.KafkaBrokers, ","), sr)
 	if err != nil {
-		t.Skipf("kafka unreachable: %v", err)
+		t.Fatalf("kafka client: %v", err)
 	}
 	t.Cleanup(c.Close)
 	return c
