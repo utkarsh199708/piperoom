@@ -14,6 +14,7 @@ import (
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/dbtools"
 	"piperoom/internal/tools/kafkatools"
+	"piperoom/internal/tools/runbooks"
 )
 
 // errNoRecording is what the model sees when it calls a tool with an input the
@@ -49,6 +50,9 @@ func LiveTools() ([]tools.Tool, error) {
 	// for definitions.
 	if err := dbtools.Register(reg, dbtools.Deps{Owners: &owners.Owners{}}); err != nil {
 		return nil, fmt.Errorf("evals: db tool definitions: %w", err)
+	}
+	if err := runbooks.Register(reg); err != nil {
+		return nil, fmt.Errorf("evals: runbook tool definitions: %w", err)
 	}
 	return reg.All(), nil
 }
