@@ -258,7 +258,10 @@ func (r *runner) run(ctx context.Context) error {
 // a stop. Run keeps history append-only either way — resp.ToParam() carries
 // that block back in the next request's messages exactly like any other
 // content block, never specially — which is what lets a room survive hours
-// of steers and tool calls without hitting the model's context window.
+// of steers and tool calls without hitting the model's context window. The
+// edit carries compactionInstructions() so the summary keeps step ids,
+// hypotheses, proposals and driver instructions, and keeps untrusted text
+// data instead of laundering its instructions into trusted history.
 func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMessageNewParams {
 	return anthropic.BetaMessageNewParams{
 		Model:     r.opts.Model,
@@ -278,7 +281,9 @@ func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMe
 		},
 		ContextManagement: anthropic.BetaContextManagementConfigParam{
 			Edits: []anthropic.BetaContextManagementConfigEditUnionParam{
-				{OfCompact20260112: &anthropic.BetaCompact20260112EditParam{}},
+				{OfCompact20260112: &anthropic.BetaCompact20260112EditParam{
+					Instructions: anthropic.String(compactionInstructions()),
+				}},
 			},
 		},
 		// Top-level cache control applies a breakpoint to the last cacheable
