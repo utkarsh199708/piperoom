@@ -27,21 +27,34 @@ type toolList struct {
 	byName map[string]toolEntry
 }
 
+// maxStrictTools is the API's per-request cap on tools with strict: true; the
+// 21st is rejected with "Too many strict tools (21). The maximum number of
+// strict tools supported is 20." Room tools take the strict slots first:
+// propose_fix carries the nested action params, where a malformed input costs
+// the most. Read tools fill the remaining slots in registration order. The rest
+// are sent without strict; validateInput still checks every read-tool input in
+// code before Tool.Run, so nothing goes unvalidated.
+const maxStrictTools = 20
+
 // buildToolList assembles the model-facing tool definitions. Registry (read)
 // tools keep their registration order; room tools follow in a fixed order. The
 // order is stable so the tool list is byte-identical across requests and the
 // prompt cache stays warm.
 func buildToolList(reg *tools.Registry, room []tools.Tool) toolList {
 	tl := toolList{byName: map[string]toolEntry{}}
+	var reads []tools.Tool
 	if reg != nil {
-		for _, t := range reg.All() {
-			tl.byName[t.Name()] = toolEntry{tool: t, schema: t.InputSchema(), wrapWhy: true}
-			tl.params = append(tl.params, toolParam(t, true))
-		}
+		reads = reg.All()
 	}
-	for _, t := range room {
+	// Room tools claim strict slots first; read tools get what is left.
+	readStrict := max(maxStrictTools-len(room), 0)
+	for i, t := range reads {
+		tl.byName[t.Name()] = toolEntry{tool: t, schema: t.InputSchema(), wrapWhy: true}
+		tl.params = append(tl.params, toolParam(t, true, i < readStrict))
+	}
+	for i, t := range room {
 		tl.byName[t.Name()] = toolEntry{tool: t, schema: t.InputSchema(), isRoom: true}
-		tl.params = append(tl.params, toolParam(t, false))
+		tl.params = append(tl.params, toolParam(t, false, i < maxStrictTools))
 	}
 	// Put a cache breakpoint after the tool list (the last tool).
 	if n := len(tl.params); n > 0 {
@@ -56,8 +69,10 @@ func buildToolList(reg *tools.Registry, room []tools.Tool) toolList {
 // toolParam converts one Piperoom tool into an SDK tool definition. When
 // wrapWhy is set, an extra required string property "why" is injected into the
 // schema; the agent strips it before calling Tool.Run and uses it as the step
-// title.
-func toolParam(t tools.Tool, wrapWhy bool) anthropic.BetaToolUnionParam {
+// title. strict asks the API to validate inputs against the schema (see
+// maxStrictTools); the schema is shaped the same either way, so what the model
+// sees does not depend on which slot the tool landed in.
+func toolParam(t tools.Tool, wrapWhy, strict bool) anthropic.BetaToolUnionParam {
 	schema := t.InputSchema()
 
 	props := map[string]any{}
@@ -96,9 +111,11 @@ func toolParam(t tools.Tool, wrapWhy bool) anthropic.BetaToolUnionParam {
 			Required:    required,
 			ExtraFields: map[string]any{"additionalProperties": false},
 		},
-		Strict:              anthropic.Bool(true),
 		EagerInputStreaming: anthropic.Bool(true),
 		Type:                anthropic.BetaToolTypeCustom,
+	}
+	if strict {
+		tp.Strict = anthropic.Bool(true)
 	}
 	return anthropic.BetaToolUnionParam{OfTool: &tp}
 }
