@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
 // model is the seam between the investigation loop and the Claude API. It
@@ -32,15 +35,45 @@ type anthropicModel struct {
 	log    *slog.Logger
 }
 
+// workspaceEnv names the variable holding the Anthropic workspace id. A user
+// API key (sk-ant-usr-...) is not scoped to a workspace, so the API rejects
+// its requests unless they carry the anthropic-workspace-id header. The id is
+// not a secret. It moves into internal/config later.
+const workspaceEnv = "ANTHROPIC_WORKSPACE_ID"
+
+// workspaceHeader is the request header the API reads the workspace id from.
+const workspaceHeader = "anthropic-workspace-id"
+
+// clientOptions returns the SDK request options for the production client.
+// getenv is os.Getenv in production. An empty (or blank) workspace id adds
+// nothing, so a workspace-scoped key behaves exactly as before. The API key is
+// left to the SDK (ANTHROPIC_API_KEY) and is never read or logged here.
+func clientOptions(getenv func(string) string) []option.RequestOption {
+	var opts []option.RequestOption
+	if id := strings.TrimSpace(getenv(workspaceEnv)); id != "" {
+		opts = append(opts, option.WithHeader(workspaceHeader, id))
+	}
+	return opts
+}
+
 // newModel builds the production model client. opts.Effort/model selection
 // happens when the request params are assembled, so the client itself only
-// needs the SDK defaults (which read ANTHROPIC_API_KEY from the environment).
+// needs the SDK defaults (which read ANTHROPIC_API_KEY from the environment)
+// plus the workspace header when ANTHROPIC_WORKSPACE_ID is set. Both the agent
+// loop and the hand-off writer build their client here, so both send it.
 func newModel(opts Options, log *slog.Logger) model {
+	return newModelWith(os.Getenv, log)
+}
+
+// newModelWith is newModel with the environment lookup and extra SDK options
+// (a test server's base URL and key) injected.
+func newModelWith(getenv func(string) string, log *slog.Logger, extra ...option.RequestOption) model {
 	if log == nil {
 		log = slog.Default()
 	}
+	reqOpts := append(clientOptions(getenv), extra...)
 	return &anthropicModel{
-		client: anthropic.NewClient(),
+		client: anthropic.NewClient(reqOpts...),
 		log:    log,
 	}
 }
