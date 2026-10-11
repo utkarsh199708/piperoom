@@ -1,12 +1,10 @@
 # C5 — Alert ingestion adapters (Claude cloud agent, Sonnet)
 
-> **Status (lead, 2026-10-11 23:50 IST):** in flight as the claude.ai/code session "Alert signature verification"
-> (its own `claude/...` branch is fine). No PR yet — this file is the spec. Webhook secrets stay function
-> arguments (`DefaultAuth(source, secrets...)`); C9's `docs/design/webhook-auth.md` proposes the config fields.
-> Use the names below (`DeliveryID`, `DedupKey`, `Verify`, `DefaultAuth`) exactly — C9 references them.
-> Extra test vector (HMAC-SHA256, hex): secret `piperoom-test-secret-0001`, body `{"title":"x"}` →
-> `95a6873552c9e949aba8fd05d33ea7d220124a8fd1acea80df9ccc721d890e36`. Skip tag entries without `:`.
-> If the PR grows past ~1000 lines, split: parsers + pipeline resolver first, then verify/auth.
+> **Status (lead, 2026-10-12 00:00 IST):** implemented as **PR #11** (`claude/dazzling-volta-8xn3f3`) before
+> this file landed. Its API **supersedes the names below**: `Config.Ingest(src Source, h http.Header, body []byte)
+> (Alert, error)` (verify → parse → staleness), `Alert{Source, Status, Title, Severity, PipelineID, PipelineVia,
+> DedupKey, URL, OccurredAt, Raw}`, `Alert.Agent(roomID, pipelineMap) agent.Alert`, `Alert.RoomCreated()`,
+> `SignGeneric`, `ErrUnauthenticated`; a source with no secret is disabled. C9 and A5 use these names.
 
 
 Read these first: `AGENTS.md`, `docs/collab.md`, `docs/api.md` (the `/api/alerts/webhook` row), `docs/security/findings.md` (F9),
