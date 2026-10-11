@@ -116,6 +116,23 @@ func TestFindByKeyRealData(t *testing.T) {
 	}
 }
 
+// TestFindByKeyAbsentKey proves an absent key returns (nil, nil) after scanning
+// the whole window — not a "scan incomplete" deadline error.
+func TestFindByKeyAbsentKey(t *testing.T) {
+	c := newClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	start := time.Now()
+	refs, err := c.FindByKey(ctx, "pg.public.orders", "99999999", time.Now().Add(-24*time.Hour), 5000)
+	if err != nil {
+		t.Fatalf("absent key should scan cleanly, got: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("want 0 refs, got %+v", refs)
+	}
+	t.Logf("absent-key scan finished in %s", time.Since(start))
+}
+
 // TestTempTopicProduceOffsetsAndLag creates a temp topic, produces records,
 // and verifies TopicOffsets, FindByKey and GroupLag (no-commit partition) on it.
 func TestTempTopicProduceOffsetsAndLag(t *testing.T) {

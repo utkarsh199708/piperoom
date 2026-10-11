@@ -230,14 +230,8 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 				continue
 			}
 			scanned[r.Partition]++
-			if scanned[r.Partition] >= maxScan {
-				finished[r.Partition] = true
-			}
 			dk, derr := c.decodeKey(cctx, r.Key)
-			if derr != nil {
-				continue
-			}
-			if dk == key {
+			if derr == nil && dk == key {
 				found = append(found, clients.RecordRef{
 					Topic:     r.Topic,
 					Partition: r.Partition,
@@ -245,6 +239,10 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 					Timestamp: r.Timestamp,
 					Key:       dk,
 				})
+			}
+			// This is the last record in the scan window for this partition.
+			if r.Offset+1 >= stopAt[r.Partition] {
+				finished[r.Partition] = true
 			}
 		}
 		if len(found) > 0 {
