@@ -13,7 +13,8 @@ import {
 } from './permissions'
 import type { CurrentUser } from './permissions'
 
-const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka', 'schema-registry'] }
+const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] }
+const priya: CurrentUser = { id: 'priya', name: 'Priya', layers: ['postgres', 'schema-registry'] }
 const kabir: CurrentUser = { id: 'kabir', name: 'Kabir', layers: ['consumer'] }
 const meera: CurrentUser = { id: 'meera', name: 'Meera', layers: ['warehouse'] }
 
@@ -58,17 +59,20 @@ describe('permissions', () => {
   })
 
   it('a pending layer can be decided only by its owner', () => {
-    expect(canDecideLayer(proposal, arjun, 'schema-registry')).toBe(true)
+    expect(canDecideLayer(proposal, priya, 'schema-registry')).toBe(true)
     expect(canDecideLayer(proposal, arjun, 'kafka-connect')).toBe(true)
+    expect(canDecideLayer(proposal, arjun, 'schema-registry')).toBe(false)
     expect(canDecideLayer(proposal, meera, 'schema-registry')).toBe(false)
     expect(canDecideLayer(proposal, kabir, 'kafka-connect')).toBe(false)
   })
 
   it('canApprove requires ownership of a still-pending layer', () => {
     expect(canApprove(proposal, arjun, 'kafka-connect')).toBe(true)
+    expect(canApprove(proposal, priya, 'schema-registry')).toBe(true)
+    expect(canApprove(proposal, arjun, 'schema-registry')).toBe(false)
     expect(canApprove(proposal, meera, 'schema-registry')).toBe(false)
     const decided: ProposalState = { ...proposal, approvals: { 'schema-registry': 'approved', 'kafka-connect': 'pending' } }
-    expect(canApprove(decided, arjun, 'schema-registry')).toBe(false)
+    expect(canApprove(decided, priya, 'schema-registry')).toBe(false)
   })
 
   it('a closed or decided proposal can no longer be decided', () => {

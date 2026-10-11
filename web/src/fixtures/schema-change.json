@@ -316,7 +316,7 @@
       "room_id": "r_schema_change",
       "seq": 26,
       "type": "approval.given",
-      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "actor": { "kind": "human", "id": "priya", "name": "Priya" },
       "payload": { "proposal_id": "p_1", "layer": "schema-registry" },
       "at": "2026-10-11T10:01:10Z"
     },

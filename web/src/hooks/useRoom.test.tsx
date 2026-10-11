@@ -6,7 +6,7 @@ import type { Event, EventsPage, RoomSnapshot } from '../api/types'
 // render without a router/provider.
 vi.mock('../context/user', () => ({
   useCurrentUser: () => ({
-    user: { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka', 'schema-registry'] },
+    user: { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] },
     setUserId: vi.fn(),
   }),
 }))

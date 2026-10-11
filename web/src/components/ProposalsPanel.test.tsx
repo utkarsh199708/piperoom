@@ -32,7 +32,8 @@ const proposal: ProposalState = {
   executed: [],
 }
 
-const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka', 'schema-registry'] }
+const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] }
+const priya: CurrentUser = { id: 'priya', name: 'Priya', layers: ['postgres', 'schema-registry'] }
 const meera: CurrentUser = { id: 'meera', name: 'Meera', layers: ['warehouse'] }
 const kabir: CurrentUser = { id: 'kabir', name: 'Kabir', layers: ['consumer'] }
 
@@ -64,10 +65,14 @@ const proposalWithParams: ProposalState = {
 describe('ProposalsPanel approval gating', () => {
   it('shows an Approve and Reject pair on every required layer the user owns', () => {
     const state = { ...emptyRoomState('r1'), proposals: [proposal] }
-    render(<ProposalsPanel state={state} user={arjun} actions={actions} />)
-    // Arjun owns kafka-connect and schema-registry (dev/users.yaml).
-    expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(2)
-    expect(screen.getAllByRole('button', { name: 'Reject' })).toHaveLength(2)
+    // Arjun owns kafka-connect and Priya owns schema-registry (dev/users.yaml).
+    const arjunView = render(<ProposalsPanel state={state} user={arjun} actions={actions} />)
+    expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Reject' })).toHaveLength(1)
+    arjunView.unmount()
+    render(<ProposalsPanel state={state} user={priya} actions={actions} />)
+    expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Reject' })).toHaveLength(1)
   })
 
   it('shows no Approve buttons for a user who owns none of the layers', () => {
