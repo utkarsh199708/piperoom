@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/postgres"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -17,9 +18,11 @@ import (
 )
 
 type fakeSource struct {
-	slots    []clients.ReplicationSlot
-	rows     map[string]map[string]any
-	rowCalls int
+	slots     []clients.ReplicationSlot
+	rows      map[string]map[string]any
+	rowCalls  int
+	pubTables []postgres.PublicationTable
+	pubErr    error
 }
 
 func (f *fakeSource) ReplicationSlots(context.Context) ([]clients.ReplicationSlot, error) {
@@ -35,6 +38,9 @@ func (f *fakeSource) Row(_ context.Context, table, _, key string) (map[string]an
 	f.rowCalls++
 	row, ok := f.rows[table+"|"+key]
 	return row, ok, nil
+}
+func (f *fakeSource) PublicationTables(_ context.Context, _, _ string, _ []string) ([]postgres.PublicationTable, error) {
+	return f.pubTables, f.pubErr
 }
 
 type fakeWarehouse struct {
@@ -102,10 +108,10 @@ func TestRegister(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	all := reg.All()
-	if len(all) != 8 {
-		t.Fatalf("registered %d tools, want 8", len(all))
+	if len(all) != 9 {
+		t.Fatalf("registered %d tools, want 9", len(all))
 	}
-	want := []string{"pg_replication_slots", "pg_recent_ddl", "pg_long_transactions", "pg_row", "warehouse_freshness", "warehouse_row", "pipeline_map", "trace_record"}
+	want := []string{"pg_replication_slots", "pg_recent_ddl", "pg_long_transactions", "pg_row", "pg_publication_tables", "warehouse_freshness", "warehouse_row", "pipeline_map", "trace_record"}
 	for i, name := range want {
 		if all[i].Name() != name {
 			t.Fatalf("tool %d = %s, want %s", i, all[i].Name(), name)
@@ -397,5 +403,146 @@ func TestCutShortRuneSafe(t *testing.T) {
 	// The UTF-8 sequence must not be split mid-rune.
 	if !utf8.ValidString(got) {
 		t.Fatalf("cutShort produced invalid UTF-8: %q", got)
+	}
+}
+
+func publicationTool(t *testing.T, src clients.SourceDB) tools.Tool {
+	t.Helper()
+	d := testDeps()
+	d.Src = src
+	reg := tools.NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	tt, ok := reg.Get("pg_publication_tables")
+	if !ok {
+		t.Fatal("pg_publication_tables not registered")
+	}
+	return tt
+}
+
+func TestPgPublicationTablesHappyPath(t *testing.T) {
+	src := &fakeSource{pubTables: []postgres.PublicationTable{
+		{Schema: "public", Table: "orders", InPublication: true, Selectable: true},
+	}}
+	tt := publicationTool(t, src)
+	res, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
+	if err != nil {
+		t.Fatalf("pg_publication_tables: %v", err)
+	}
+	if !strings.Contains(res.Summary, "public.orders: in_publication=yes, selectable=yes") {
+		t.Fatalf("summary missing expected line: %q", res.Summary)
+	}
+	data, ok := res.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("data type %T, want map[string]any", res.Data)
+	}
+	if data["publication"] != defaultPublication {
+		t.Fatalf("publication = %v, want %q", data["publication"], defaultPublication)
+	}
+	if data["connector_user"] != defaultConnectorRole {
+		t.Fatalf("connector_user = %v, want %q", data["connector_user"], defaultConnectorRole)
+	}
+	if data["connector_user_source"] == "" {
+		t.Fatal("connector_user_source must be non-empty")
+	}
+	members, ok := data["publication_tables"].([]postgres.PublicationTable)
+	if !ok || len(members) != 1 || !members[0].InPublication {
+		t.Fatalf("publication_tables = %v", data["publication_tables"])
+	}
+}
+
+func TestPgPublicationTablesUnknownPipeline(t *testing.T) {
+	tt := publicationTool(t, &fakeSource{})
+	_, err := runTool(t, tt, `{"pipeline_id":"nope"}`)
+	if err == nil {
+		t.Fatal("expected error for unknown pipeline")
+	}
+	if !errors.Is(err, tools.ErrBadInput) {
+		t.Fatalf("error %v does not wrap ErrBadInput", err)
+	}
+}
+
+func TestPgPublicationTablesMissingPublication(t *testing.T) {
+	src := &fakeSource{pubErr: clients.ErrNotFound}
+	tt := publicationTool(t, src)
+	_, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
+	if err == nil {
+		t.Fatal("expected error for missing publication")
+	}
+	if !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("error %v does not wrap clients.ErrNotFound", err)
+	}
+	if errors.Is(err, tools.ErrBadInput) {
+		t.Fatalf("missing publication must not be reported as bad input: %v", err)
+	}
+}
+
+func TestPgPublicationTablesPrivilegeDenied(t *testing.T) {
+	src := &fakeSource{pubTables: []postgres.PublicationTable{
+		{Schema: "public", Table: "orders", InPublication: true, Selectable: false},
+	}}
+	tt := publicationTool(t, src)
+	res, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
+	if err != nil {
+		t.Fatalf("privilege-denied must be a result, not an error: %v", err)
+	}
+	if !strings.Contains(res.Summary, "selectable=no") {
+		t.Fatalf("summary should report selectable=no: %q", res.Summary)
+	}
+}
+
+func TestPgPublicationTablesSourceMissingFromPublication(t *testing.T) {
+	// The source table is not in the publication but the role can still SELECT it.
+	src := &fakeSource{pubTables: []postgres.PublicationTable{
+		{Schema: "public", Table: "orders", InPublication: false, Selectable: true},
+	}}
+	tt := publicationTool(t, src)
+	res, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
+	if err != nil {
+		t.Fatalf("pg_publication_tables: %v", err)
+	}
+	if !strings.Contains(res.Summary, "in_publication=no, selectable=yes") {
+		t.Fatalf("summary should report in_publication=no: %q", res.Summary)
+	}
+}
+
+func TestPgPublicationTablesDBError(t *testing.T) {
+	src := &fakeSource{pubErr: errors.New("postgres: connection refused")}
+	tt := publicationTool(t, src)
+	_, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if errors.Is(err, tools.ErrBadInput) {
+		t.Fatalf("DB error must not wrap ErrBadInput: %v", err)
+	}
+}
+
+// plainSource implements clients.SourceDB but not publicationTablesClient, to
+// exercise the type-assertion fallback.
+type plainSource struct{}
+
+func (plainSource) ReplicationSlots(context.Context) ([]clients.ReplicationSlot, error) {
+	return nil, nil
+}
+func (plainSource) RecentDDL(context.Context, time.Time, int) ([]clients.DDLChange, error) {
+	return nil, nil
+}
+func (plainSource) LongTransactions(context.Context, time.Duration) ([]clients.Transaction, error) {
+	return nil, nil
+}
+func (plainSource) Row(context.Context, string, string, string) (map[string]any, bool, error) {
+	return nil, false, nil
+}
+
+func TestPgPublicationTablesUnsupportedClient(t *testing.T) {
+	tt := publicationTool(t, plainSource{})
+	_, err := runTool(t, tt, `{"pipeline_id":"orders"}`)
+	if err == nil {
+		t.Fatal("expected error for a source client without PublicationTables")
+	}
+	if !strings.Contains(err.Error(), "does not support PublicationTables") {
+		t.Fatalf("error %q does not name the missing capability", err)
 	}
 }

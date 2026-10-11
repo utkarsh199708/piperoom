@@ -67,6 +67,7 @@ func Register(reg *tools.Registry, d Deps) error {
 		pgRecentDDLTool(d),
 		pgLongTransactionsTool(d),
 		pgRowTool(d),
+		pgPublicationTablesTool(d),
 		warehouseFreshnessTool(d),
 		warehouseRowTool(d),
 		pipelineMapTool(d),
