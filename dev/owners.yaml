@@ -1,6 +1,7 @@
 pipelines:
   - id: orders
     title: Orders CDC
+    topic_prefix: pg # Debezium topic.prefix of pg-orders-connector (topics span pg.public.orders)
     source_tables: [public.orders]
     connectors: [pg-orders-connector]
     consumer_groups: [order-sync]
@@ -9,7 +10,7 @@ pipelines:
 layers:
   postgres: priya
   kafka-connect: arjun
-  schema-registry: arjun
+  schema-registry: priya
   kafka: arjun
   consumer: kabir
   warehouse: meera

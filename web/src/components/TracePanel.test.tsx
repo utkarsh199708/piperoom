@@ -19,11 +19,13 @@ const actions: RoomActions = {
 }
 
 const trace: TraceState = {
-  table: 'orders',
-  key: 'id=10042',
+  table: 'public.orders',
+  key: '10042',
   stages: [
-    { layer: 'postgres', name: 'public.orders', status: 'seen' },
-    { layer: 'kafka', name: 'pg.public.orders', status: 'seen' },
+    { layer: 'postgres', name: 'public.orders', status: 'seen', facts: { updated_at: '2026-10-11T09:47:00Z' } },
+    { layer: 'kafka-connect', name: 'pg-orders-connector', status: 'seen' },
+    { layer: 'kafka', name: 'pg.public.orders', status: 'seen', facts: { offset: '48213', partition: '0' } },
+    { layer: 'consumer', name: 'order-sync', status: 'seen', facts: { committed: '48214' } },
     { layer: 'warehouse', name: 'analytics.orders', status: 'stopped_here' },
   ],
 }

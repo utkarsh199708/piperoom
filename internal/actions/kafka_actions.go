@@ -81,14 +81,16 @@ func subjectTopic(subject string) (string, bool) {
 
 // inScopeSubject returns an error when subject is not derived from one of
 // p.SourceTables. A subject names "<topic>-key" or "<topic>-value", and the
-// topic must end with "." + sourceTable.
+// topic must be exactly "<p.TopicPrefix>.<sourceTable>": a suffix match would
+// accept another pipeline's topic that merely ends with the same table name,
+// e.g. "billing.public.orders-value" for the "pg" prefix.
 func inScopeSubject(p owners.Pipeline, subject string) error {
 	topic, ok := subjectTopic(subject)
 	if !ok {
 		return fmt.Errorf("actions: subject %q is not a -key or -value subject", subject)
 	}
 	for _, st := range p.SourceTables {
-		if strings.HasSuffix(topic, "."+st) {
+		if topic == p.TopicPrefix+"."+st {
 			return nil
 		}
 	}
@@ -157,7 +159,7 @@ func (a *restartTask) Validate(raw json.RawMessage) error {
 func (a *restartTask) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
 	var params restartTaskParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return fmt.Errorf("actions: bad params: %v", err)
+		return fmt.Errorf("actions: bad params: %w", err)
 	}
 	return inScopeConnector(p, params.Connector)
 }
@@ -215,7 +217,7 @@ func (a *restartConnector) Validate(raw json.RawMessage) error {
 func (a *restartConnector) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
 	var params restartConnectorParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return fmt.Errorf("actions: bad params: %v", err)
+		return fmt.Errorf("actions: bad params: %w", err)
 	}
 	return inScopeConnector(p, params.Connector)
 }
@@ -279,7 +281,7 @@ func (a *setCompatibility) Validate(raw json.RawMessage) error {
 func (a *setCompatibility) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
 	var params setCompatibilityParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return fmt.Errorf("actions: bad params: %v", err)
+		return fmt.Errorf("actions: bad params: %w", err)
 	}
 	return inScopeSubject(p, params.Subject)
 }
@@ -338,7 +340,7 @@ func (a *registerSchema) Validate(raw json.RawMessage) error {
 func (a *registerSchema) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
 	var params registerSchemaParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return fmt.Errorf("actions: bad params: %v", err)
+		return fmt.Errorf("actions: bad params: %w", err)
 	}
 	return inScopeSubject(p, params.Subject)
 }

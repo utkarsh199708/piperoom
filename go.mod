@@ -9,6 +9,7 @@ require (
 	github.com/snowflakedb/gosnowflake v1.19.1
 	github.com/twmb/franz-go v1.22.1
 	github.com/twmb/franz-go/pkg/kadm v1.19.0
+	github.com/twmb/franz-go/pkg/kmsg v1.14.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -77,7 +78,6 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
-	github.com/twmb/franz-go/pkg/kmsg v1.14.0 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	go.opentelemetry.io/otel v1.37.0 // indirect
 	go.opentelemetry.io/otel/trace v1.37.0 // indirect

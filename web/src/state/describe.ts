@@ -25,7 +25,9 @@ function as<T>(e: Event): T {
   return e.payload as T
 }
 
-export function describeEvent(e: Event): string {
+// One short sentence for the activity feed. `driverBefore` is the driver id just
+// before this event was applied; it distinguishes a lease renewal from a take-over.
+export function describeEvent(e: Event, driverBefore: string | null = null): string {
   const who = e.actor.kind === 'agent' ? 'Agent' : e.actor.name || e.actor.id
   switch (e.type) {
     case 'room.created': {
@@ -77,6 +79,13 @@ export function describeEvent(e: Event): string {
       return `${who} requested control`
     case 'control.granted': {
       const p = as<ControlGrantedPayload>(e)
+      if (e.actor.id === p.to.id) {
+        // A self-grant is either the sitting driver renewing their lease or
+        // someone taking over (no driver, or an expired lease) — never a hand-over.
+        return e.actor.id === driverBefore
+          ? `${who} renewed the lease`
+          : `${who} took control`
+      }
       return `${who} handed control to ${p.to.name}`
     }
     case 'proposal.created': {
