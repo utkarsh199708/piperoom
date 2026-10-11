@@ -4,6 +4,7 @@ import { api, isFixtures, openRoomWs } from '../api/client'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../dev/users'
+import { errorText, friendlyError } from '../lib/errors'
 import { applyEvent } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
 import type { RoomState } from '../state/types'
@@ -207,7 +208,7 @@ export function useRoom(roomId: string) {
         } else if (msg.type === 'presence') {
           setPresence(msg.members)
         } else if (msg.type === 'error') {
-          setError(msg.error.message)
+          setError(friendlyError(msg.error.code, msg.error.message))
         }
       }
       ws.onclose = () => {
@@ -233,7 +234,7 @@ export function useRoom(roomId: string) {
       } catch (e) {
         if (cancelled) return
         setConn('error')
-        setError(e instanceof Error ? e.message : String(e))
+        setError(errorText(e))
       }
     })()
     const presenceTimer = window.setInterval(() => sendPresence('viewing'), 20000)
@@ -254,9 +255,7 @@ export function useRoom(roomId: string) {
   }, [roomId, user.id, user.name])
 
   const runAction = useCallback((p: Promise<unknown>) => {
-    p.then(() => setError(null)).catch((e: unknown) =>
-      setError(e instanceof Error ? e.message : String(e)),
-    )
+    p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))
   }, [])
 
   const synthesize = useCallback(

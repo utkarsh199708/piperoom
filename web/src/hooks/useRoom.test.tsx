@@ -173,4 +173,25 @@ describe('useRoom transport', () => {
     expect(api.events).toHaveBeenNthCalledWith(1, 'arjun', 'r1', 0)
     expect(api.events).toHaveBeenNthCalledWith(2, 'arjun', 'r1', 2)
   })
+
+  it('shows short user text for a lease_held error instead of the raw message', async () => {
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+
+    const { result } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 'arjun', 0))
+    socket.onopen?.()
+
+    await act(async () => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'error',
+          error: { code: 'lease_held', message: 'control/grant: someone holds the lease' },
+        }),
+      })
+    })
+
+    expect(result.current.error).toBe('someone else holds control')
+  })
 })
