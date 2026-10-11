@@ -8,7 +8,6 @@ package wiring
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +16,7 @@ import (
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
 	"piperoom/internal/clients/kafka"
+	"piperoom/internal/clients/netsec"
 	"piperoom/internal/clients/postgres"
 	"piperoom/internal/clients/schemareg"
 	"piperoom/internal/clients/warehouse"
@@ -32,8 +32,6 @@ const (
 	// openTimeout caps the whole construction phase (owners file, DB pings,
 	// Kafka client) so a dead stack fails fast instead of hanging startup.
 	openTimeout = 10 * time.Second
-	// httpTimeout caps every Connect and Schema Registry request.
-	httpTimeout = 10 * time.Second
 )
 
 // Wired holds the constructed clients. They are shared by the topology
@@ -58,6 +56,67 @@ type Wired struct {
 	Close func()
 }
 
+// a2Clients groups the three A2 clients that talk to Kafka, Kafka Connect
+// and the Schema Registry. Only the Kafka client holds a resource that needs
+// closing; the HTTP clients are stateless.
+type a2Clients struct {
+	Connect  *connect.Client
+	Kafka    *kafka.Client
+	Registry *schemareg.Client
+}
+
+// buildA2Clients constructs the A2 clients from the C8 security settings
+// (internal/clients/netsec). Building performs no network I/O — kgo dials
+// lazily — so a bad security configuration fails here, before the database
+// pings in Open. The caller owns the Kafka client and must close it.
+func buildA2Clients(cfg config.Config) (*a2Clients, error) {
+	// The Schema Registry client comes first: the Kafka client uses it to
+	// decode Avro keys.
+	registry, err := schemareg.NewSecure(cfg.SchemaRegistryURL, netsec.HTTP{
+		Username: cfg.SchemaRegistryUsername,
+		Password: netsec.Secret(cfg.SchemaRegistryPassword),
+		TLS: netsec.TLS{
+			CAFile:   cfg.SchemaRegistryTLSCAFile,
+			CertFile: cfg.SchemaRegistryTLSCertFile,
+			KeyFile:  cfg.SchemaRegistryTLSKeyFile,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wiring: schema registry client: %w", err)
+	}
+
+	connectClient, err := connect.NewSecure(cfg.ConnectURL, netsec.HTTP{
+		Username: cfg.ConnectUsername,
+		Password: netsec.Secret(cfg.ConnectPassword),
+		TLS: netsec.TLS{
+			CAFile:   cfg.ConnectTLSCAFile,
+			CertFile: cfg.ConnectTLSCertFile,
+			KeyFile:  cfg.ConnectTLSKeyFile,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wiring: connect client: %w", err)
+	}
+
+	kafkaClient, err := kafka.NewSecure(splitBrokers(cfg.KafkaBrokers), registry, netsec.Kafka{
+		Protocol:  cfg.KafkaSecurityProtocol,
+		Mechanism: cfg.KafkaSASLMechanism,
+		Username:  cfg.KafkaSASLUsername,
+		Password:  netsec.Secret(cfg.KafkaSASLPassword),
+		TLS: netsec.TLS{
+			CAFile:     cfg.KafkaTLSCAFile,
+			CertFile:   cfg.KafkaTLSCertFile,
+			KeyFile:    cfg.KafkaTLSKeyFile,
+			ServerName: cfg.KafkaTLSServerName,
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wiring: kafka client: %w", err)
+	}
+
+	return &a2Clients{Connect: connectClient, Kafka: kafkaClient, Registry: registry}, nil
+}
+
 // Open constructs every client Wired needs. On a partial failure it closes
 // what it already opened and returns a wrapped error naming the failing step.
 func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
@@ -69,6 +128,13 @@ func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
 		return nil, fmt.Errorf("wiring: load owners: %w", err)
 	}
 
+	// Build the A2 clients before any database ping so a bad security
+	// configuration fails Open even when no stack is reachable at all.
+	a2, err := buildA2Clients(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	// opened collects the cleanup steps of the clients constructed so far so
 	// any later failure leaves nothing running behind.
 	var opened []func()
@@ -77,9 +143,11 @@ func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
 			opened[i]()
 		}
 	}
+	opened = append(opened, a2.Kafka.Close)
 
 	src, err := postgres.New(ctx, cfg.SourceDBURL)
 	if err != nil {
+		closeOpened()
 		return nil, fmt.Errorf("wiring: source postgres: %w", err)
 	}
 	opened = append(opened, src.Close)
@@ -91,25 +159,14 @@ func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
 	}
 	opened = append(opened, wh.Close)
 
-	httpClient := &http.Client{Timeout: httpTimeout}
-	connectClient := connect.New(cfg.ConnectURL, httpClient)
-	registryClient := schemareg.New(cfg.SchemaRegistryURL, httpClient)
-
-	kafkaClient, err := kafka.New(splitBrokers(cfg.KafkaBrokers), registryClient)
-	if err != nil {
-		closeOpened()
-		return nil, fmt.Errorf("wiring: kafka client: %w", err)
-	}
-	opened = append(opened, kafkaClient.Close)
-
 	var once sync.Once
 	return &Wired{
 		Source:    src,
 		Warehouse: wh,
-		Connect:   connectClient,
-		Kafka:     kafkaClient,
-		Registry:  registryClient,
-		Builder:   topology.NewBuilder(o, connectClient, kafkaClient, src, wh),
+		Connect:   a2.Connect,
+		Kafka:     a2.Kafka,
+		Registry:  a2.Registry,
+		Builder:   topology.NewBuilder(o, a2.Connect, a2.Kafka, src, wh),
 		Owners:    o,
 		Close:     func() { once.Do(closeOpened) },
 	}, nil
