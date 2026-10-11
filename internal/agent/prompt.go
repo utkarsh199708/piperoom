@@ -103,21 +103,20 @@ func wrapUntrusted(text string) string {
 // sanitizeLabel makes a name or id safe to embed inside a "[...]" prompt
 // label: brackets, angle brackets and the em dash are replaced with plain
 // lookalikes and newlines collapse to spaces, so a forged display name cannot
-// close the label, open a fake one, or inject markup around it.
+// close the label, open a fake one, or inject markup around it. The Unicode
+// lookalikes of those characters are mapped too — en dash, horizontal bar and
+// the fullwidth brackets — because the label [name — driver] is only
+// distinguishable if every dash in a name renders as plain ASCII.
 func sanitizeLabel(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
 		switch r {
-		case '[':
+		case '[', '［', '<', '＜': // U+FF3B, U+FF1C
 			b.WriteRune('(')
-		case ']':
+		case ']', '］', '>', '＞': // U+FF3D, U+FF1E
 			b.WriteRune(')')
-		case '<':
-			b.WriteRune('(')
-		case '>':
-			b.WriteRune(')')
-		case '—':
+		case '—', '–', '―': // em dash, en dash U+2013, horizontal bar U+2015
 			b.WriteRune('-')
 		case '\n', '\r':
 			b.WriteRune(' ')
@@ -178,17 +177,31 @@ const (
 	// outputs are short summaries; a single verbose one must not crowd the
 	// rest of the room out of the prompt.
 	handoffToolSummaryBytes = 300
+	// handoffActionOutputBytes caps one action output in the hand-off. An
+	// action output is a single outcome line, like a tool summary.
+	handoffActionOutputBytes = 300
+	// handoffFreeTextBytes caps every free-text field of a hand-off line:
+	// agent messages, comments, steers, suggestions, hypothesis text, titles,
+	// ids and rejection reasons. The room service accepts megabyte bodies, so
+	// without a cap one comment could make the hand-off request fail.
+	handoffFreeTextBytes = 1024
+	// handoffBudgetBytes is the size the rendered room-event text of the
+	// hand-off must never exceed — headers, labels and untrusted wrappers
+	// included. A long incident is bounded by folding the oldest events into
+	// the omitted marker, never by shipping a request the API refuses.
+	handoffBudgetBytes = 32 * 1024
 )
 
 // renderRoomEvents turns the room log into the compact text the hand-off model
-// reads. The newest events matter most, so the log is bounded without losing
-// the end of the incident: every critical event (hypothesis, proposal,
-// approval, action) is always kept, and of the remaining events only the
-// newest handoffTailEvents are; the dropped middle is marked with a single
-// "(N events omitted)" line where it was. It renders chosen fields only — tool
-// summaries, hypothesis text, comments, approvals — never raw payloads, so
-// secrets and bulky record values stay out of the prompt. Untrusted text is
-// wrapped and escaped.
+// reads. The newest events matter most, so the log is bounded three ways
+// without losing the end of the incident: every rendered line is capped, the
+// window keeps every critical event (hypothesis, proposal, approval, action)
+// plus the newest handoffTailEvents other events, and the whole text is held
+// under handoffBudgetBytes — when even the kept window is over budget the
+// oldest kept events are folded into the omitted marker first, so the newest
+// events survive. It renders chosen fields only — tool summaries, hypothesis
+// text, comments, approvals — never raw payloads, so secrets and bulky record
+// values stay out of the prompt. Untrusted text is wrapped and escaped.
 func renderRoomEvents(evs []events.Event) string {
 	lines := make([]string, len(evs))
 	for i, e := range evs {
@@ -212,6 +225,40 @@ func renderRoomEvents(evs []events.Event) string {
 		kept++
 	}
 
+	out := renderHandoffWindow(evs, lines, keep)
+	for len(out) > handoffBudgetBytes {
+		keptIdx := make([]int, 0, len(evs))
+		for i := range evs {
+			if keep[i] {
+				keptIdx = append(keptIdx, i)
+			}
+		}
+		if len(keptIdx) <= 1 {
+			// Only the newest event is left and every line is capped, so one
+			// line always fits the budget.
+			break
+		}
+		// Over budget: drop the oldest kept events until the removed lines
+		// cover the excess, never the newest event itself. Each pass removes
+		// at least one event, so this ends even when a re-render grows the
+		// text a little by merging omitted runs.
+		excess := len(out) - handoffBudgetBytes
+		freed := 0
+		for _, i := range keptIdx[:len(keptIdx)-1] {
+			if freed >= excess {
+				break
+			}
+			keep[i] = false
+			freed += len(lines[i]) + len("- \n")
+		}
+		out = renderHandoffWindow(evs, lines, keep)
+	}
+	return out
+}
+
+// renderHandoffWindow renders the chosen events, runs of dropped events folded
+// into a single "(N events omitted)" marker where they sat.
+func renderHandoffWindow(evs []events.Event, lines []string, keep []bool) string {
 	var b strings.Builder
 	b.WriteString("Room events (oldest first):\n")
 	omitted := 0
@@ -251,22 +298,41 @@ func isHandoffCritical(t events.Type) bool {
 	}
 }
 
-// truncatePromptLine cuts one rendered tool summary to
-// handoffToolSummaryBytes without splitting a UTF-8 rune.
-func truncatePromptLine(s string) string {
-	if len(s) <= handoffToolSummaryBytes {
+// truncatePromptField cuts s to max bytes without splitting a UTF-8 rune,
+// marking the cut with " …[truncated]". It bounds every free-text field of a
+// hand-off line: the room service accepts megabyte bodies, and one unbounded
+// line would blow the hand-off request past the API limit.
+func truncatePromptField(s string, max int) string {
+	if len(s) <= max {
 		return s
 	}
 	const marker = " …[truncated]"
-	cut := handoffToolSummaryBytes - len(marker)
+	cut := max - len(marker)
+	if cut < 0 {
+		cut = 0
+	}
 	for cut > 0 && s[cut]&0xC0 == 0x80 {
 		cut--
 	}
 	return s[:cut] + marker
 }
 
-// renderRoomEvent renders one event as a short, field-chosen line. It returns
-// an empty string for events that carry nothing useful for the hand-off.
+// capFreeText bounds one free-text field to handoffFreeTextBytes.
+func capFreeText(s string) string {
+	return truncatePromptField(s, handoffFreeTextBytes)
+}
+
+// truncatePromptLine cuts one rendered tool summary to
+// handoffToolSummaryBytes without splitting a UTF-8 rune.
+func truncatePromptLine(s string) string {
+	return truncatePromptField(s, handoffToolSummaryBytes)
+}
+
+// renderRoomEvent renders one event as a short, field-chosen line. Every
+// variable field is capped (free text at handoffFreeTextBytes, tool and action
+// output at 300 B), so no single line can outgrow the hand-off budget. It
+// returns an empty string for events that carry nothing useful for the
+// hand-off.
 func renderRoomEvent(e events.Event) string {
 	switch e.Type {
 	case events.RoomCreated:
@@ -276,19 +342,19 @@ func renderRoomEvent(e events.Event) string {
 		}
 		// The title is the external alert title, the same untrusted text as in
 		// firstUserMessage.
-		return "room created: " + wrapUntrusted(p.Title)
+		return "room created: " + wrapUntrusted(capFreeText(p.Title))
 	case events.AgentStepStart:
 		p, err := events.Decode[events.AgentStepStartPayload](e)
 		if err != nil {
 			return ""
 		}
-		return fmt.Sprintf("step %s: %s", p.StepID, wrapUntrusted(p.Title))
+		return fmt.Sprintf("step %s: %s", capFreeText(p.StepID), wrapUntrusted(capFreeText(p.Title)))
 	case events.AgentToolCall:
 		p, err := events.Decode[events.AgentToolCallPayload](e)
 		if err != nil {
 			return ""
 		}
-		return "tool call " + p.Tool
+		return "tool call " + capFreeText(p.Tool)
 	case events.AgentToolResult:
 		p, err := events.Decode[events.AgentToolResultPayload](e)
 		if err != nil {
@@ -296,65 +362,65 @@ func renderRoomEvent(e events.Event) string {
 		}
 		summary := truncatePromptLine(p.Summary)
 		if p.IsError {
-			return "tool " + p.Tool + " error: " + wrapUntrusted(summary)
+			return "tool " + capFreeText(p.Tool) + " error: " + wrapUntrusted(summary)
 		}
-		return "tool " + p.Tool + ": " + wrapUntrusted(summary)
+		return "tool " + capFreeText(p.Tool) + ": " + wrapUntrusted(summary)
 	case events.AgentMessage:
 		p, err := events.Decode[events.AgentMessagePayload](e)
 		if err != nil {
 			return ""
 		}
-		return "agent: " + wrapUntrusted(p.Text)
+		return "agent: " + wrapUntrusted(capFreeText(p.Text))
 	case events.AgentHypothesis:
 		p, err := events.Decode[events.AgentHypothesisPayload](e)
 		if err != nil {
 			return ""
 		}
-		return fmt.Sprintf("hypothesis (%s): %s", p.Confidence, wrapUntrusted(p.Text))
+		return fmt.Sprintf("hypothesis (%s): %s", capFreeText(p.Confidence), wrapUntrusted(capFreeText(p.Text)))
 	case events.CommentAdded:
 		p, err := events.Decode[events.CommentAddedPayload](e)
 		if err != nil {
 			return ""
 		}
-		return "comment " + p.CommentID + ": " + wrapUntrusted(p.Text)
+		return "comment " + capFreeText(p.CommentID) + ": " + wrapUntrusted(capFreeText(p.Text))
 	case events.SteerSent:
 		p, err := events.Decode[events.SteerSentPayload](e)
 		if err != nil {
 			return ""
 		}
-		return "steer: " + wrapUntrusted(p.Text)
+		return "steer: " + wrapUntrusted(capFreeText(p.Text))
 	case events.SteerSuggested:
 		p, err := events.Decode[events.SteerSuggestedPayload](e)
 		if err != nil {
 			return ""
 		}
-		return "suggestion: " + wrapUntrusted(p.Text)
+		return "suggestion: " + wrapUntrusted(capFreeText(p.Text))
 	case events.ProposalCreated:
 		p, err := events.Decode[events.ProposalCreatedPayload](e)
 		if err != nil {
 			return ""
 		}
-		return "proposal " + p.ProposalID + ": " + wrapUntrusted(p.Title)
+		return "proposal " + capFreeText(p.ProposalID) + ": " + wrapUntrusted(capFreeText(p.Title))
 	case events.ApprovalGiven:
 		p, err := events.Decode[events.ApprovalGivenPayload](e)
 		if err != nil {
 			return ""
 		}
-		return fmt.Sprintf("approval %s by %s", p.ProposalID, wrapUntrusted(p.Layer))
+		return fmt.Sprintf("approval %s by %s", capFreeText(p.ProposalID), wrapUntrusted(capFreeText(p.Layer)))
 	case events.ApprovalRejected:
 		p, err := events.Decode[events.ApprovalRejectedPayload](e)
 		if err != nil {
 			return ""
 		}
-		return fmt.Sprintf("rejection %s by %s: %s", p.ProposalID, wrapUntrusted(p.Layer), wrapUntrusted(p.Reason))
+		return fmt.Sprintf("rejection %s by %s: %s", capFreeText(p.ProposalID), wrapUntrusted(capFreeText(p.Layer)), wrapUntrusted(capFreeText(p.Reason)))
 	case events.ActionExecuted:
 		p, err := events.Decode[events.ActionExecutedPayload](e)
 		if err != nil {
 			return ""
 		}
-		return fmt.Sprintf("action %s step %d: %s", p.ProposalID, p.StepIndex, wrapUntrusted(p.Output))
+		return fmt.Sprintf("action %s step %d: %s", capFreeText(p.ProposalID), p.StepIndex, wrapUntrusted(truncatePromptField(p.Output, handoffActionOutputBytes)))
 	default:
-		return string(e.Type) + " by " + wrapUntrusted(actorName(e.Actor))
+		return string(e.Type) + " by " + wrapUntrusted(capFreeText(actorName(e.Actor)))
 	}
 }
 
