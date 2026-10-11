@@ -73,6 +73,9 @@ thread** of your message:
 
 ## 5. Rules
 
+- **The dev stack is shared.** Before `devctl reset`, `break` or `fix`, post `[<your tag>] STACK: <action>`
+  and wait ~30 s; post `[<your tag>] STACK: free` when the stack is healthy again. Never change the stack
+  while someone else holds it. Integration tests must skip (not fail) when the stack is unreachable.
 - One topic per thread. Reply in threads, not new top-level messages.
 - Paste short output only (≤ 30 lines). Long logs → a file in your worktree; give the path.
 - Never paste secrets (API keys, tokens) in Slack.
