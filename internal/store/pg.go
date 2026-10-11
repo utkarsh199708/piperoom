@@ -30,7 +30,9 @@ const (
 
 var errClosed = errors.New("store: closed")
 
-// PG is the Postgres-backed store. The schema is migrations/001_init.sql.
+// PG is the Postgres-backed store. The schema is migrations/001_init.sql
+// (plus 002_slack_threads.sql for SlackThreads); they are goose-format files
+// and the server does not apply them itself.
 type PG struct {
 	pool *pgxpool.Pool
 	log  *slog.Logger

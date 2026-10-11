@@ -26,6 +26,7 @@ import (
 	"piperoom/internal/httpapi"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
+	"piperoom/internal/slackbridge"
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
 	"piperoom/internal/tools"
@@ -68,6 +69,7 @@ func run(demo bool, demoDelay time.Duration, addrFlag string, insecure bool, log
 	rc := room.Config{Owners: own, Logger: logger, AgentOptions: agent.Options{Model: cfg.Model, Effort: cfg.Effort}}
 	var st store.Store
 	var verifier alertin.Config
+	var threads slackbridge.Threads
 
 	if demo {
 		logger.Info("demo mode: scripted agent, in-memory log, built-in users")
@@ -82,6 +84,9 @@ func run(demo bool, demoDelay time.Duration, addrFlag string, insecure bool, log
 		rc.Runner = demoRunner(demoDelay)
 		rc.Handoff = demoHandoff
 		rc.ExecTimeout = 10 * time.Second
+		// The bridge stays off unless the Slack env vars are set; then the
+		// demo mirrors into a real channel, forgetting threads on restart.
+		threads = slackbridge.NewMemThreads()
 	} else {
 		pg, err := store.NewPG(ctx, cfg.RoomDBURL, logger)
 		if err != nil {
@@ -89,6 +94,7 @@ func run(demo bool, demoDelay time.Duration, addrFlag string, insecure bool, log
 		}
 		defer pg.Close()
 		st = pg
+		threads = pg.SlackThreads()
 		if rc.Users, err = room.LoadUsers(cfg.UsersFile); err != nil {
 			return err
 		}
@@ -110,6 +116,16 @@ func run(demo bool, demoDelay time.Duration, addrFlag string, insecure bool, log
 	// Webhook sources stay disabled (401) until their secret is set in the environment.
 	verifier = webhookConfig(own)
 
+	slack, err := newMirrors(ctx, st, threads, slackEnv(), logger)
+	if err != nil {
+		return err
+	}
+	if slack != nil {
+		// Deferred after the store's Close, so it runs first: mirrors read the log.
+		defer slack.stop(mirrorStopTimeout)
+		rc.OnRoomOpened = slack.onRoomOpened
+	}
+
 	svc, err := room.New(rc)
 	if err != nil {
 		return err
@@ -117,6 +133,11 @@ func run(demo bool, demoDelay time.Duration, addrFlag string, insecure bool, log
 	defer svc.Shutdown()
 	if err := svc.Start(ctx); err != nil {
 		return err
+	}
+	if slack != nil {
+		if err := slack.startOpen(ctx, svc); err != nil {
+			return err
+		}
 	}
 
 	wsh := ws.New(ws.Config{Subscribe: st.Subscribe, Authenticate: svc.Authenticate, RoomExists: svc.RoomExists, Logger: logger})

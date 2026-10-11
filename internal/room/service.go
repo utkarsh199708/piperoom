@@ -44,6 +44,13 @@ type Config struct {
 	ExecTimeout time.Duration
 	// HandoffTimeout bounds the hand-off summary call; default 3 min.
 	HandoffTimeout time.Duration
+	// OnRoomOpened, when set, is called once per new room after its
+	// room.created event is in the log, for rooms opened by the API and by
+	// alert webhooks alike. It runs on its own goroutine under the service's
+	// context, so it may be called concurrently for different rooms. It must
+	// not block: start any long work on your own goroutine and return. ctx
+	// ends at Shutdown, which waits for the hook to return.
+	OnRoomOpened func(ctx context.Context, roomID string)
 }
 
 // Service implements the room rules.
@@ -52,7 +59,7 @@ type Service struct {
 	log  *slog.Logger
 	base context.Context
 	stop context.CancelFunc
-	wg   sync.WaitGroup // agents and executors
+	wg   sync.WaitGroup // agents, executors and OnRoomOpened hooks
 	exec sync.WaitGroup // executors only
 
 	mu    sync.Mutex

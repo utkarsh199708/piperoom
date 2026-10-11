@@ -93,7 +93,7 @@ var (
 	kabir, arjun, meera, priya room.User
 )
 
-func newEnv(t *testing.T, withRunner bool) *env {
+func newEnv(t *testing.T, withRunner bool, mods ...func(*room.Config)) *env {
 	t.Helper()
 	clk := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
 	st := memstore.NewWithClock(clk.Now)
@@ -143,6 +143,9 @@ func newEnv(t *testing.T, withRunner bool) *env {
 			<-ctx.Done()
 			return nil
 		}
+	}
+	for _, m := range mods {
+		m(&cfg)
 	}
 	svc, err := room.New(cfg)
 	if err != nil {

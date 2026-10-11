@@ -62,12 +62,18 @@ func admin(t *testing.T) *pgx.Conn {
 	return conn
 }
 
-// upSQL returns the statements of the Up section of the migration.
+// upSQL returns the statements of the Up section of migration 001.
 func upSQL(t *testing.T) string {
 	t.Helper()
-	b, err := os.ReadFile("../../migrations/001_init.sql")
+	return upSQLOf(t, "001_init.sql")
+}
+
+// upSQLOf returns the statements of the Up section of one migration file.
+func upSQLOf(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile("../../migrations/" + name)
 	if err != nil {
-		t.Fatalf("read migration: %v", err)
+		t.Fatalf("read migration %s: %v", name, err)
 	}
 	text := string(b)
 	const up, down = "-- +goose Up", "-- +goose Down"
@@ -100,6 +106,16 @@ func ensureSchema(t *testing.T) {
 	if !have {
 		if _, err := tx.Exec(ctx, upSQL(t)); err != nil {
 			t.Fatalf("apply migration 001 Up: %v", err)
+		}
+	}
+	// Migrations run in file order, the same order goose uses.
+	var haveThreads bool
+	if err := tx.QueryRow(ctx, `SELECT to_regclass('public.slack_threads') IS NOT NULL`).Scan(&haveThreads); err != nil {
+		t.Fatalf("check schema 002: %v", err)
+	}
+	if !haveThreads {
+		if _, err := tx.Exec(ctx, upSQLOf(t, "002_slack_threads.sql")); err != nil {
+			t.Fatalf("apply migration 002 Up: %v", err)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {

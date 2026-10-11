@@ -144,7 +144,22 @@ func (s *Service) openRoom(ctx context.Context, actor events.Actor, pl events.Ro
 	if _, ok := s.cfg.Owners.Pipeline(pl.PipelineID); ok {
 		s.startAgent(r, pl.Title, pl.PipelineID, pl.Alert)
 	}
+	s.roomOpened(id)
 	return snap, nil
+}
+
+// roomOpened runs the OnRoomOpened hook off the request path, so a slow hook
+// never delays the HTTP response that opened the room.
+func (s *Service) roomOpened(id string) {
+	hook := s.cfg.OnRoomOpened
+	if hook == nil {
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		hook(s.base, id)
+	}()
 }
 
 // Comment adds a human comment, optionally anchored to a step.
