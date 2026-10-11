@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"piperoom/internal/clients/kafka/netsec"
+	"piperoom/internal/clients/netsec"
 )
 
 const secureTestSecret = "cc-api-secret"

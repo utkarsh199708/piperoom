@@ -8,7 +8,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl"
 
-	"piperoom/internal/clients/kafka/netsec"
+	"piperoom/internal/clients/netsec"
 )
 
 // TestNewSecureOptsReachEveryClient checks the SASL/TLS options are on the

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/kafka/netsec"
+	"piperoom/internal/clients/netsec"
 )
 
 // Client is a thin Kafka Connect REST client.

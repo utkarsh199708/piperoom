@@ -10,9 +10,7 @@
 //   - Schema Registry / Connect: an https URL, HTTP basic auth (Confluent
 //     Cloud API key + secret), a private CA, mutual TLS.
 //
-// It lives under internal/clients/kafka because the kafka, schemareg and
-// connect clients share it and that folder is where C8 owns code; it has no
-// Kafka-only logic in http.go and netsec.go.
+// The kafka, schemareg and connect clients all build on it.
 //
 // The package refuses settings that would send a password in clear text:
 // SASL/PLAIN without TLS and basic auth to an http:// URL are errors, not

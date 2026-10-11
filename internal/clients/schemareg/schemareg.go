@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/kafka/netsec"
+	"piperoom/internal/clients/netsec"
 )
 
 const mediaType = "application/vnd.schemaregistry.v1+json"

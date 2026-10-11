@@ -19,7 +19,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"piperoom/internal/clients"
-	"piperoom/internal/clients/kafka/netsec"
+	"piperoom/internal/clients/netsec"
 	"piperoom/internal/clients/schemareg"
 )
 
