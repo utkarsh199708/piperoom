@@ -1,0 +1,1 @@
+{"error_code":409,"message":"Schema being registered is incompatible with an earlier schema for subject \"pg.public.orders-value\""}
