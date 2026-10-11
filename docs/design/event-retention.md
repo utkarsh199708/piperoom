@@ -70,10 +70,23 @@ If option C were chosen, `GET /api/rooms/{id}/events?after=N` on a deleted room 
 3. **Audit rows outlive content.** A second, shorter list is kept for `PIPEROOM_RETENTION_AUDIT_DAYS` after close: in the same transaction as each audit-type append, A5 also inserts into an append-only `audit_log` table
    (`room_id, seq, type, actor, at, retained fields, prev_hash, hash`) where `hash = SHA-256(prev_hash || canonical row)`, one chain per room. The application role gets `INSERT, SELECT` only (no `UPDATE`/`DELETE`)
    (OWASP Logging cheat sheet, "Protection"). After the audit period the room and its audit rows are deleted together.
+   Honest limit: a chain inside the same database is tamper-evident only against someone without `UPDATE` on it; a DBA or a restored backup can rewrite a whole chain.
+   So once a day the service writes every room's current chain head (`room_id, seq, hash`) as one line to an **external, append-only store** the application role cannot
+   modify (object storage with retention lock, or a separate write-only log account). `verify-audit` recomputes a chain and compares it with the last external head.
 4. **Defaults.** Both settings empty = nothing is compacted or deleted (development). The pilot proposal: content 30 days, audit 400 days (Open question 1).
-5. **Erasure (Art. 17).** `cmd/server erase --user <id>`: replaces `Actor.Name` with `(removed)` in that user's events and clears `Subject`; the internal `Actor.ID` stays as a pseudonym, and removing the user's entry in `users.yaml` severs it from a person.
-6. **Rebuild must tolerate compaction.** `rebuild` (`service.go:199`) uses only fields that survive for closed rooms (`title`, `severity`, `pipeline_id`, `status`, `opened_at`, `closed_at`, `resolution`, driver, approvals). Hypothesis text and open suggestions are empty after compaction. A5 tests this.
-7. **Clients** treat `payload._redacted == true` as "content removed by retention policy" and render the event row without its text.
+5. **Erasure (Art. 17).** `cmd/server erase --user <id>`: replaces `Actor.Name` with `(removed)` in that user's events and clears `Subject`; the internal `Actor.ID` stays as a pseudonym, and clearing `iss`/`sub`/`name` on the `users` row (`auth.md` §3.7) severs it from a person.
+6. **Rebuild must tolerate compaction, and must stop folding from seq 0.** `rebuild` (`service.go:199`) uses only fields that survive for closed rooms (`title`, `severity`, `pipeline_id`,
+   `status`, `opened_at`, `closed_at`, `resolution`, driver, approvals). Hypothesis text and open suggestions are empty after compaction. A5 tests this.
+   Folding the whole log on every snapshot read is O(events) per request and is the real limit on long rooms. Add `room_checkpoints(room_id, seq, state jsonb, at)`:
+   after every 500 appends (and at `room.closed`) the service stores the folded state at that `seq`; `rebuild` loads the latest checkpoint and folds only events after it.
+   Checkpoints are derived data: deleting them is always safe, and the compactor deletes a room's checkpoints when it deletes the room. The **client contract is unchanged**
+   (`after=0` still replays the whole log); a client-side checkpoint (`GET /api/rooms/{id}` returning `last_seq` + state, then `after=last_seq`) is Open question 7.
+7. **Compaction runs on one replica at a time.** The loop takes `pg_try_advisory_lock(<constant>)` per tick and skips the tick if another replica holds it. Redaction and deletion
+   go in batches of 1,000 events per transaction, oldest rooms first, so a large room never holds a long lock. Metrics: events compacted, rooms deleted, lag between a room's due
+   date and its compaction.
+8. **Growth.** With caps from rule 1, a busy room is ~5–20 MB of JSON; at 1,000 rooms a month the table is tens of GB a year before compaction and a few GB after. That fits one
+   Postgres; range-partitioning `room_events` by month of `at` (purge = drop partition) is worth it only past ~100 M rows and is not proposed now (Open question 8).
+9. **Clients** treat `payload._redacted == true` as "content removed by retention policy" and render the event row without its text.
 
 ## 5. Contract changes
 
@@ -152,8 +165,9 @@ If option C were chosen, `GET /api/rooms/{id}/events?after=N` on a deleted room 
 ## 7. Tasks per owner
 
 - **A5 (1)** Redaction in `Store.Append`: caps, key-based and URL redaction, per-type policy table; unit test that **every** `events.Type` has a policy (new types fail the test until classified).
-- **A5 (2)** `Compactor` implementation, loop in `cmd/server` (stops with ctx), idempotence test, replay test (`after=0` returns contiguous seqs after compaction), rebuild test.
-- **A5 (3)** `audit_log` migration with hash chain and an `INSERT, SELECT` role grant; `verify-audit` subcommand that walks a chain.
+- **A5 (2)** `Compactor` implementation, loop in `cmd/server` (stops with ctx, advisory lock, batches of 1,000), idempotence test, replay test (`after=0` returns contiguous seqs after compaction), rebuild test, two-replica test (second loop skips).
+- **A5 (2b)** `room_checkpoints` table and checkpoint every 500 appends; `rebuild` folds from the latest checkpoint; benchmark: a 20,000-event room renders in < 50 ms from a checkpoint.
+- **A5 (3)** `audit_log` migration with hash chain and an `INSERT, SELECT` role grant; daily export of chain heads to the external store (interface + a file-backed dev implementation); `verify-audit` subcommand that walks a chain and checks the external head.
 - **A5 (4)** `erase --user` subcommand; stop storing a fresh `Actor.Name` copy if the lead agrees (Open question 3).
 - **A3** Strip literals from `Query` and drop `Username` in `pg_long_transactions` / `pg_recent_ddl` results before they reach `Data`.
 - **A4** Make `Sink` and hand-off input use only `Summary`, never `Data` (already true for hand-off, `renderRoomEvents`); add a test.
@@ -169,6 +183,11 @@ If option C were chosen, `GET /api/rooms/{id}/events?after=N` on a deleted room 
 4. Is a per-room legal hold needed in the first release? Not designed here.
 5. Backups: compaction does not touch backups. State the backup retention in the customer contract.
 6. Anthropic-side retention of requests is a contract matter and was not verified here.
+7. Client-side checkpoints: should `GET /api/rooms/{id}` return the folded state plus `last_seq` so a first open sends `after=last_seq` instead of `after=0`? It makes first paint O(1) in
+   room length but changes the contract in `docs/api.md:62-66` ("the client replays the full event log"). Not proposed now; the server-side checkpoint already fixes the server cost.
+8. Partition `room_events` by month of `at` once it passes ~100 M rows? Needs `at` in the primary key; decide from real volume.
+9. Where does the external chain-head store live for the pilot (object storage bucket with retention lock, or a file on a separate host)? A1 may need to add it to the dev stack.
+10. Live fan-out across replicas (`Store.Subscribe` is per process) is not retention and not designed here, but it is the other thing that keeps the room service on one replica today.
 
 ## 9. References
 

@@ -52,13 +52,17 @@ Task C9, doc 1 of 3 (`webhook-auth.md`, `event-retention.md`). Design only, no c
 | Effort | same cookie code as REST | ticket store | handshake state machine |
 | Needs | production web and API on one origin | | |
 
-### 2e. User → layer owner
+### 2e. User directory and user → layer owner
 
-| | A. `owners.yaml` `layers:` is the source, mapped to IdP identity (recommended) | B. IdP groups |
-|---|---|---|
-| Security | one reviewed file in git; no dependence on provider claims | `groups` is not a standard OIDC claim; its name and shape differ per provider |
-| Effort | small: drop `layers` from users file, derive it | per-provider config, and group → layer mapping still needed |
-| Ops burden | edit a file to change an owner | change in the IdP, but outside git review |
+| | A. `users.yaml` lists every user (today) | B. `users` table, provisioned at first login; `owners.yaml` `layers:` maps layers to user ids (recommended) | C. IdP groups |
+|---|---|---|---|
+| Security | one reviewed file | identity from the IdP, ownership from one reviewed file; no dependence on provider claims | `groups` is not a standard OIDC claim; name and shape differ per provider |
+| Scale | a git commit and redeploy per new engineer | no deploy for a new user; only ownership changes touch git | changes in the IdP, outside git review |
+| Effort | none | one table, one lookup at login | per-provider config plus a group → layer map |
+| Ops burden | grows with headcount | edit a file to change an owner | IdP admin involved for each change |
+
+Single owner per layer is a gap on its own: `owners.yaml` holds one user per layer (`layers: postgres: priya`), so an approval
+blocks when that person is away. Every option above needs **lists** of owners per layer (additive: a string or a list).
 
 ## 3. Recommendation
 
@@ -68,21 +72,34 @@ Task C9, doc 1 of 3 (`webhook-auth.md`, `event-retention.md`). Design only, no c
    `github.com/coreos/go-oidc/v3/oidc` `NewProvider`, `Provider.Verifier(&oidc.Config{ClientID: ...})`, `IDTokenVerifier.Verify`,
    `IDToken.Claims`, `IDToken.Nonce`. (`go doc` confirms `Verify` does **not** check the nonce.) go-oidc is a **new module**; oauth2 comes with it.
 2. **User id = `iss` + `#` + `sub`.** OIDC Core §5.7 says email MUST NOT be the identifier. `users.yaml` maps `oidc: {iss, sub}` to the internal user id.
-3. **Server-side session** in a new `sessions` table: `id` = 32 random bytes (store only SHA-256), `user_id`, `created_at`, `last_seen_at`.
+3. **Server-side session** in a new `sessions` table: `id` = 32 random bytes (store only SHA-256), `user_id`, `tenant_id`, `created_at`, `last_seen_at`, `auth_time`.
    Cookie `__Host-piperoom_session`: `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, no `Domain` (OWASP Session Management).
    Idle timeout 8 h, absolute 12 h (code constants, adjustable in review). **A new session id is issued at login.** Logout deletes the row.
-4. **Pre-login cookie** `__Host-piperoom_login` (an opaque id; state, nonce, PKCE verifier and return path sit in a `login_states` row, 10 min) must be **`SameSite=Lax`, not `Strict`**:
+   Scale rules: `last_seen_at` is written at most once per minute per session (not per request); each replica keeps a 30 s in-process cache of
+   `session hash → principal` so a page load does not cost one Postgres round trip per call; logout and revocation delete the row and the cache
+   entry on the replica that handled it (other replicas see it within 30 s, which is inside the idle window's tolerance).
+   `tenant_id` is added now, as a single default value, so multi-tenancy (F7) later is a column fill, not a schema rewrite.
+4. **Pre-login cookie** `__Host-piperoom_login` (an opaque id; state, nonce, PKCE verifier and return path sit in a `login_states` row, 10 min, **deleted on first use** so a callback cannot be replayed; expired rows swept hourly) must be **`SameSite=Lax`, not `Strict`**:
    the IdP returns the user with a cross-site top-level redirect, and `Strict` cookies are not sent on it.
 5. **CSRF:** `http.CrossOriginProtection` around every route except `/auth/callback` and the alert webhook. In production the web build is served from
    the **same origin** as the API (reverse proxy or Go `embed`), so no CORS is needed. If they ever stay cross-origin: `fetch(..., {credentials:'include'})`,
    `Access-Control-Allow-Credentials: true`, one explicit `Access-Control-Allow-Origin` (never `*`), and `AddTrustedOrigin` for it.
 6. **WebSocket:** cookie on the handshake; `websocket.AcceptOptions.OriginPatterns` = host of `PIPEROOM_PUBLIC_URL` only; `?user=` is read in dev mode only.
    Close the socket when the session row is gone (checked on the 20 s presence tick).
-7. **Layers:** the approver's layers = `{ l : owners.yaml layers[l] == user.id }`. `users.yaml` `layers` becomes deprecated. The `approve` check uses this set.
+7. **Users and layers:** a `users` table (`id`, `iss`, `sub`, `name`, `tenant_id`, `created_at`, `disabled`) is filled at first login; `users.yaml` becomes a seed that maps
+   known `iss`+`sub` pairs to the short ids `owners.yaml` uses (so `priya` stays `priya`). A user not in the seed gets an id derived from the IdP (`u_<ulid>`) and can watch,
+   comment and suggest but owns nothing. The approver's layers = `{ l : user.id ∈ owners.yaml layers[l] }`, where `layers[l]` is a string or a list. `users.yaml` `layers` is deprecated.
 8. **Approver identity in the log:** the actor of `approval.given` / `approval.rejected` is the session user, and both payloads gain `subject` (`iss#sub`).
 9. **Dev mode:** `X-User` / `?user=` work only when `PIPEROOM_DEV_AUTH=1` **and** the listener host is loopback; otherwise the server exits at start-up.
+   A reverse proxy on the same host would make a loopback listener reachable, so dev mode also refuses any request carrying `X-Forwarded-For` or `Forwarded`.
+10. **Approvals need a recent login.** Approve/reject require `now - session.auth_time ≤ 8 h` (the idle window); `auth_time` is the ID token's `auth_time` claim when
+    present, else the session's `created_at`. Longer than that → `401 reauth_required`, and the web app sends the user through `/auth/login` with the return path.
+    Asking the IdP to re-prompt (OIDC `max_age` / `prompt=login`) is left as Open question 3 because the spec text could not be checked here.
+11. **Login audit and limits.** `auth_log(at, kind, user_id, tenant_id, remote, detail)` records login ok/failed, logout, session revoke, reauth required; it is the same
+    append-only shape as `audit_log` in `event-retention.md`. `/auth/*` is rate-limited at the ingress (10/min per address); the callback also fails closed on an unknown `state`.
+    Metrics: logins by outcome, active sessions, reauth prompts.
    `devctl` sets the flag. Production builds omit `UserSwitcher` (Vite replaces `import.meta.env.DEV` at build time; `isDev` is already used).
-10. **Dev IdP:** no container image is pinned here because registry tags could not be checked from this sandbox. A1 builds a **fake IdP with
+12. **Dev IdP:** no container image is pinned here because registry tags could not be checked from this sandbox. A1 builds a **fake IdP with
     `httptest`** (discovery, JWKS, authorize, token endpoints) in `internal/testenv`, used by A5's tests.
 
 ## 4. Contract changes
@@ -192,13 +209,14 @@ The `webhook-auth.md` and `event-retention.md` config diffs each apply to `main`
 
 ## 6. Tasks per owner
 
-- **A5 (1)** `internal/auth`: OIDC login, callback, logout, `sessions` + `login_states` tables in one migration, session cookie, pre-login cookie.
+- **A5 (1)** `internal/auth`: OIDC login, callback, logout, `sessions`, `login_states`, `users`, `auth_log` tables in one migration (all with `tenant_id`), session cookie, pre-login cookie, JIT user creation.
 - **A5 (2)** Replace `authenticate` with the session lookup; dev mode behind `PIPEROOM_DEV_AUTH` + loopback check at start-up; fail closed otherwise.
 - **A5 (3)** Wrap routes in `CrossOriginProtection`; same-origin static serving; WS `OriginPatterns`; close WS on session end; remove `X-User` from CORS in production.
-- **A5 (4)** Derive layers from `owners.yaml`; set `subject` on approval events; tests: forged `X-User` → 401, wrong layer → 403, foreign `Origin` on WS → rejected, expired session → 401.
+- **A5 (4)** Derive layers from `owners.yaml` (string or list per layer); `reauth_required` on stale `auth_time`; set `subject` on approval events; tests: forged `X-User` → 401, wrong layer → 403, foreign `Origin` on WS → rejected, expired session → 401, replayed callback → 401, session cache invalidated on logout.
 - **A6 (1)** Handle `401`: navigate to `/auth/login`; drop the user id argument from `request()` outside dev; `/api/me` is the only identity source.
 - **A6 (2)** Same-origin base URL in production (`VITE_API_BASE` empty); `credentials: 'include'` only if cross-origin; show the approver name from the event.
-- **A1 (1)** `devctl` sets `PIPEROOM_DEV_AUTH=1`; add `oidc:` placeholders to `dev/users.yaml` (additive).
+- **A1 (1)** `devctl` sets `PIPEROOM_DEV_AUTH=1`; add `oidc:` placeholders to `dev/users.yaml`; allow a list per layer in `dev/owners.yaml` `layers:` (both additive; `internal/owners` is A3's to accept the list).
+- **A3** `owners.LayerOwner` → `LayerOwners(layer) []string`, accepting a string or a list in YAML; keep `LayerOwner` returning the first for the topology map.
 - **A1 (2)** Fake IdP (`httptest`) in `internal/testenv` for A5's login tests.
 
 ## 7. Open questions
@@ -208,7 +226,8 @@ The `webhook-auth.md` and `event-retention.md` config diffs each apply to `main`
 3. Re-authentication before an approval (OIDC `max_age` / `auth_time`): not specified here because OIDC Core §3.1.2.1 and §2 could not be fetched. Decide whether the pilot needs it, then verify against the spec.
 4. Who may close or take over a session in an emergency (admin role)? Out of scope here.
 5. Dev `users.yaml` still lists `schema-registry` under `arjun` while `docs/api.md:18-21` shows it under `priya`; A1 owns that file.
-6. Multi-tenant (F7): one issuer = one tenant is assumed and not designed here.
+6. Multi-tenant (F7): one issuer = one tenant is assumed; `tenant_id` columns are added now, the per-tenant IdP configuration and row filtering are a separate design.
+7. Should the 30 s session cache be dropped in favour of a Postgres hit per request until there is a measured need? (Proposed: keep it; it is ~20 lines.)
 
 ## 8. References
 

@@ -57,15 +57,23 @@ Rules the room service (A5) follows:
 5. **Rotation with two live secrets.** `alertin.Config` holds one secret per source. A5 builds one `Config` per secret in the list and calls `Ingest` on each in order until one does
    not return `ErrUnauthenticated`. Order: new secret first, old second. PagerDuty already accepts several `v1=` values in one header.
    Procedure: add new in front → update the sender → watch the log for the old secret's use (log the list index that matched, never the value) → drop the old.
-6. **Dedupe and replay.** A5 keeps `alert_dedup(source, dedup_key, room_id)`. A firing alert whose `DedupKey` has an **open** room returns that room with `created:false`;
-   it does not open another. This also makes a replayed, validly signed request harmless while the room is open. A resolved alert (`Alert.Status != firing`) → `202`, no room change.
-   A replay of a valid body after the room closed, inside `MaxEventAge`, can open one new room (accepted; bounded by rule 7).
-7. **Caps.** Per source: 60 requests/min (after auth, so unauthenticated floods do not use a real source's quota) and 20 new rooms/hour; over either → `429 rate_limited`
-   with `Retry-After`. Failed auth: 30/min per remote address, at the proxy or in A5. Numbers are proposals (Open question 3).
-8. **Untrusted fields.** `Title` and `Severity` are already cleaned by alertin; A5 treats them as data and shows them as text. `PipelineID` is looked up with `owners.Pipeline(id)`;
+6. **Dedupe and replay, race-free.** A5 keeps `alert_dedup(source, dedup_key, room_id, created_at)` with a **unique index on `(source, dedup_key)`** restricted to open rooms.
+   Room creation and the dedup insert run in **one transaction**: `INSERT ... ON CONFLICT (source, dedup_key) DO NOTHING RETURNING room_id`; no row returned → read the existing
+   `room_id` and answer `200 {room_id, created:false}`; a row returned → create the room and answer `201 {room_id, created:true}`. Two concurrent deliveries of the same alert
+   therefore cannot open two rooms, and a replayed, validly signed request is harmless while the room is open. A resolved alert (`Alert.Status != firing`) → `202`, no room change.
+   A replay after the room closed, inside `MaxEventAge`, can open one new room (accepted; bounded by rule 7).
+7. **Respond fast, start the agent later.** Senders retry on timeouts (PagerDuty and Alertmanager both resend after a few seconds), so the handler does only verify → parse →
+   dedupe → insert room and `room.created`, then answers. The agent start (first model call, tool wiring) is queued to the room service's existing worker, exactly as `POST /api/rooms`
+   starts its agent. Target: answer within 1 s at p99; never hold the sender's connection on the model.
+8. **Caps that hold across replicas.** New rooms per source per hour: a `COUNT(*)` over `rooms` (`created_by = 'webhook:<source>'`, last hour) inside the same transaction as rule 6,
+   over → `429 rate_limited` with `Retry-After`. Request rate per source and failed-auth rate per remote address (30/min) belong at the ingress (any reverse proxy or gateway),
+   because an in-process limiter is per replica and resets on deploy; A5 keeps a per-replica token bucket (60/min per source) only as a backstop. Numbers are proposals (Open question 3).
+9. **Metrics.** Counters `piperoom_alerts_total{source,outcome}` (`created`, `reused`, `ignored`, `unauthenticated`, `stale`, `too_large`, `bad_payload`, `rate_limited`) and a
+   histogram of handler latency; alert on a spike of `unauthenticated` per source (a secret rotation gone wrong or an attack).
+10. **Untrusted fields.** `Title` and `Severity` are already cleaned by alertin; A5 treats them as data and shows them as text. `PipelineID` is looked up with `owners.Pipeline(id)`;
    an id that is not in `owners.yaml` is dropped and the room opens with a system message and proposals disabled (the existing `docs/api.md` behaviour). `Raw` is never put in
    a prompt without the `<untrusted>` wrapper (A4 `firstUserMessage` ignores `agent.Alert.Raw` today; keep a test for it).
-9. **Actor.** The `room.created` event's actor is `{kind:"system", id:"webhook:<source>", name:"<source>"}`. Response: `{room_id, created}` only (no snapshot).
+11. **Actor.** The `room.created` event's actor is `{kind:"system", id:"webhook:<source>", name:"<source>"}`. Response: `{room_id, created}` only (no snapshot).
 
 Standard Webhooks (`webhook-id`, `webhook-timestamp`, `webhook-signature: v1,<base64>`) is **not** chosen: no listed sender uses it, and C5 does not implement it. It stays an
 option if the generic form is revised (Open question 4).
@@ -167,7 +175,8 @@ Values contain no commas (generate with 32 random bytes, hex). `file:<path>` is 
 
 - **A5 (1)** Build `[]alertin.Config` from `cfg.WebhookSecrets` (`file:` support, comma split, current first), plus `Owners`; fail start-up on an unreadable `file:`.
 - **A5 (2)** Route `/api/alerts/{source}` outside the user middleware; `MaxBytesReader`; map errors; uniform `401` body; response `{room_id, created}`.
-- **A5 (3)** `alert_dedup` migration and logic; per-source rate limit and hourly room cap; log which list index matched.
+- **A5 (3)** `alert_dedup` migration with the unique index; dedupe + room creation in one transaction; hourly room cap as a count query; per-replica backstop limiter; log which list index matched.
+- **A5 (3b)** Async agent start for webhook rooms (reuse the `POST /api/rooms` path); handler latency histogram and `piperoom_alerts_total` counter; test: 50 concurrent identical deliveries → one room.
 - **A5 (4)** `owners.Pipeline(id)` check after `Ingest`; system actor `webhook:<source>`; tests: no/wrong secret, rotated secret both accepted, stale event, oversize body, replay → same room, resolved → 202.
 - **C5 (1)** Validate a `ViaLabel` pipeline id against `Config.Owners` when it is set (drop it if absent). Optional if A5 does it; decide once.
 - **C5 (2)** Export the matched-secret check or a `VerifyAny(secrets...)` if the lead prefers it to A5's loop (Open question 2).
@@ -183,6 +192,9 @@ Values contain no commas (generate with 32 random bytes, hex). `file:<path>` is 
 5. Where do `PagerDutyServices` and `DefaultPipeline` live? Proposal: an additive `alerts:` block in `owners.yaml`; A1 owns that file.
 6. Should a resolved alert write an event (e.g. `alert.resolved`) so the room shows it? Not proposed here (`events.go` has no such type).
 7. A replayed PagerDuty body after the room closes can open one new room. A 15-minute re-open cooldown per `DedupKey` would close that; is it worth it?
+8. Multi-tenant (F7): `PIPEROOM_WEBHOOK_SECRETS_<SOURCE>` is one secret set per deployment. A tenant-aware version is an `integrations` table (`tenant_id, source, secrets, enabled`) addressed as
+   `/api/alerts/{source}/{integration_id}`; the env form stays as the single-tenant bootstrap. Decide when the second tenant is real, not before.
+9. Ingress rate limiting assumes a reverse proxy in front of the Go server in production (also needed for TLS). Confirm that this is the deployment shape.
 
 ## 8. References
 
