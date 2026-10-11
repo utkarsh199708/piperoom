@@ -94,18 +94,29 @@ func runTool(t *testing.T, tool tools.Tool, input string) tools.Result {
 // ---- tests ----
 
 func TestConnectStatusCondensesTrace(t *testing.T) {
+	trace := `org.apache.kafka.connect.errors.ConnectException: Tolerance exceeded in error handler
+	at org.apache.kafka.connect.runtime.errors.RetryWithToleranceOperator.execAndHandleError(RetryWithToleranceOperator.java:220)
+Caused by: org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders
+	at io.confluent.connect.avro.AvroConverter.fromConnectData(AvroConverter.java:96)
+Caused by: org.apache.kafka.common.errors.SerializationException: Error registering Avro schema{"type":"record","name":"Envelope","fields":[{"name":"id","type":"long"},{"name":"amount","type":{"type":"bytes","logicalType":"decimal","precision":12,"scale":2}}]}
+	at io.confluent.kafka.serializers.AbstractKafkaAvroSerializer.serializeImpl(AbstractKafkaAvroSerializer.java:121)
+Caused by: RestClientException: Schema being registered is incompatible with an earlier schema for subject "pg.public.orders-value", details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type'}, {oldSchemaVersion: 1}, {oldSchema: '{"type":"record","name":"Envelope","fields":[{"name":"id","type":"long"},{"name":"amount","type":"int"}]}'}, {compatibility: 'BACKWARD'}]; error code: 409`
 	fc := &fakeConnect{
 		statusFn: func(ctx context.Context, n string) (clients.ConnectorStatus, error) {
 			return clients.ConnectorStatus{
-				Name:  "pg-orders-connector",
-				Type:  "source",
-				State: "RUNNING",
-				Tasks: []clients.TaskStatus{{ID: 0, State: "FAILED", Trace: "org.apache.kafka.connect.errors.ConnectException: Tolerance exceeded in error handler\n\tat x.java:1\nCaused by: org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data\n\tat y.java:2\nCaused by: RestClientException: incompatible, details: [{errorType:'MISSING_UNION_BRANCH'}, {oldSchema: '{...FULL OLD SCHEMA JSON...}'}, {compatibility: 'BACKWARD'}]"}},
+				Name: "pg-orders-connector", Type: "source", State: "RUNNING",
+				Tasks: []clients.TaskStatus{{ID: 0, State: "FAILED", Trace: trace}},
 			}, nil
 		},
 	}
+	fr := &fakeRegistry{
+		schemaFn: func(ctx context.Context, s string, v int) (clients.SchemaVersion, error) {
+			return clients.SchemaVersion{Subject: s, Version: 1, ID: 1,
+				Schema: `{"type":"record","name":"Envelope","fields":[{"name":"id","type":"long"},{"name":"amount","type":"int"}]}`}, nil
+		},
+	}
 	reg := tools.NewRegistry()
-	if err := Register(reg, Deps{Connect: fc}); err != nil {
+	if err := Register(reg, Deps{Connect: fc, Registry: fr}); err != nil {
 		t.Fatal(err)
 	}
 	tool, _ := reg.Get("connect_status")
@@ -113,13 +124,19 @@ func TestConnectStatusCondensesTrace(t *testing.T) {
 	if !strings.Contains(r.Summary, "Task 0: FAILED") {
 		t.Fatalf("summary %q", r.Summary)
 	}
-	if strings.Contains(r.Summary, "at x.java") || strings.Contains(r.Summary, "FULL OLD SCHEMA") {
+	if strings.Contains(r.Summary, "at x.java") || strings.Contains(r.Summary, "logicalType") || strings.Contains(r.Summary, `"type":"record"`) {
 		t.Fatalf("did not strip: %q", r.Summary)
 	}
-	for _, want := range []string{"ConnectException: Tolerance exceeded", "Caused by:", "MISSING_UNION_BRANCH"} {
+	for _, want := range []string{"ConnectException: Tolerance exceeded", "Caused by:", "MISSING_UNION_BRANCH", "error code: 409"} {
 		if !strings.Contains(r.Summary, want) {
 			t.Fatalf("summary missing %q: %q", want, r.Summary)
 		}
+	}
+	if !strings.Contains(r.Summary, "Rejected schema vs pg.public.orders-value v1") {
+		t.Fatalf("missing rejected-schema diff: %q", r.Summary)
+	}
+	if !strings.Contains(r.Summary, "amount: int → bytes(decimal 12,2)") {
+		t.Fatalf("missing field change: %q", r.Summary)
 	}
 }
 

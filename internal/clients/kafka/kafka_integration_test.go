@@ -93,3 +93,20 @@ func TestConsumerGroupsAndLag(t *testing.T) {
 		t.Fatalf("group %q", lag.Group)
 	}
 }
+
+func TestFindByKeyRealData(t *testing.T) {
+	c := newClient(t)
+	ctx := context.Background()
+	// After devctl reset, pg.public.orders holds 100 rows with Debezium Avro keys {"id": N}.
+	refs, err := c.FindByKey(ctx, "pg.public.orders", "1", time.Now().Add(-24*time.Hour), 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("found %d record(s) for id=1", len(refs))
+	if len(refs) == 0 {
+		t.Fatal("expected to find id=1 in pg.public.orders")
+	}
+	if refs[0].Key != "1" {
+		t.Fatalf("decoded key %q, want 1", refs[0].Key)
+	}
+}

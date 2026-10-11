@@ -23,14 +23,14 @@ func (t *registrySubjects) Description() string {
 	return "Lists schema registry subjects, optionally filtered by a prefix."
 }
 
-func (t *registrySubjects) Run(_ context.Context, input json.RawMessage) (tools.Result, error) {
+func (t *registrySubjects) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 	var p struct {
 		Prefix string `json:"prefix"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil {
 		return tools.Result{}, fmt.Errorf("%w: %v", tools.ErrBadInput, err)
 	}
-	cctx, cancel := ctx()
+	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	subjects, err := t.d.Registry.Subjects(cctx)
 	if err != nil {
@@ -58,14 +58,14 @@ func (t *registryVersions) Description() string {
 	return "Lists a subject's versions, its latest schema id, and its compatibility level (subject or global)."
 }
 
-func (t *registryVersions) Run(_ context.Context, input json.RawMessage) (tools.Result, error) {
+func (t *registryVersions) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 	var p struct {
 		Subject string `json:"subject"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Subject == "" {
 		return tools.Result{}, fmt.Errorf("%w: subject is required", tools.ErrBadInput)
 	}
-	cctx, cancel := ctx()
+	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	versions, err := t.d.Registry.Versions(cctx, p.Subject)
 	if err != nil {
@@ -100,31 +100,30 @@ func (t *registryDiff) Kind() tools.Kind { return tools.KindRead }
 func (t *registryDiff) InputSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"subject":      strProp("subject name"),
-		"from_version": map[string]any{"type": "integer"},
-		"to_version":   map[string]any{"type": "integer"},
-	}, "subject", "from_version")
+		"from_version": map[string]any{"type": "integer", "description": "registered version to diff from"},
+		"to_version":   map[string]any{"type": "integer", "description": "registered version to diff to (default latest)"},
+		"schema":       strProp("optional raw Avro schema JSON; when set, diffs it against to_version (default latest) instead of from_version"),
+	}, "subject")
 }
 func (t *registryDiff) Description() string {
-	return "Field-level diff of two Avro record schema versions: added, removed and type-changed fields."
+	return "Field-level diff of two Avro record schemas (added/removed/type-changed). Diff either two registered versions, or a raw schema against a version."
 }
 
-func (t *registryDiff) Run(_ context.Context, input json.RawMessage) (tools.Result, error) {
+func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 	var p struct {
 		Subject     string `json:"subject"`
 		FromVersion int    `json:"from_version"`
 		ToVersion   int    `json:"to_version"`
+		Schema      string `json:"schema"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Subject == "" {
-		return tools.Result{}, fmt.Errorf("%w: subject and from_version are required", tools.ErrBadInput)
+		return tools.Result{}, fmt.Errorf("%w: subject is required", tools.ErrBadInput)
 	}
-	cctx, cancel := ctx()
+	cctx, cancel := withTimeout(ctx)
 	defer cancel()
-	from, err := t.d.Registry.Schema(cctx, p.Subject, p.FromVersion)
-	if err != nil {
-		return tools.Result{}, err
-	}
+
 	toVersion := p.ToVersion
-	if toVersion == 0 {
+	if toVersion <= 0 {
 		latest, err := t.d.Registry.Schema(cctx, p.Subject, -1)
 		if err != nil {
 			return tools.Result{}, err
@@ -136,59 +135,88 @@ func (t *registryDiff) Run(_ context.Context, input json.RawMessage) (tools.Resu
 		return tools.Result{}, err
 	}
 
-	fromFields, err := recordFields(from.Schema)
-	if err != nil {
-		return tools.Result{}, fmt.Errorf("parse from schema: %w", err)
-	}
-	toFields, err := recordFields(to.Schema)
-	if err != nil {
-		return tools.Result{}, fmt.Errorf("parse to schema: %w", err)
+	var fromSchema string
+	fromVersion := p.FromVersion
+	if p.Schema != "" {
+		fromSchema = p.Schema
+		fromVersion = 0 // 0 = raw schema, not a registered version
+	} else {
+		if p.FromVersion <= 0 {
+			return tools.Result{}, fmt.Errorf("%w: from_version or schema is required", tools.ErrBadInput)
+		}
+		from, err := t.d.Registry.Schema(cctx, p.Subject, p.FromVersion)
+		if err != nil {
+			return tools.Result{}, err
+		}
+		fromSchema = from.Schema
 	}
 
-	type change struct {
-		Field string `json:"field"`
-		Kind  string `json:"kind"` // added | removed | changed
-		From  string `json:"from,omitempty"`
-		To    string `json:"to,omitempty"`
+	changes, err := diffFields(fromSchema, to.Schema)
+	if err != nil {
+		return tools.Result{}, fmt.Errorf("diff schemas: %w", err)
 	}
-	var changes []change
+	return res(formatChanges(changes), map[string]any{
+		"subject": p.Subject, "from_version": fromVersion, "to_version": toVersion, "changes": changes,
+	}), nil
+}
+
+// fieldChange is one field-level difference between two Avro schemas.
+type fieldChange struct {
+	Field string `json:"field"`
+	Kind  string `json:"kind"` // added | removed | changed
+	From  string `json:"from,omitempty"`
+	To    string `json:"to,omitempty"`
+}
+
+// diffFields compares two Avro record schemas field by field.
+func diffFields(fromSchema, toSchema string) ([]fieldChange, error) {
+	fromFields, err := recordFields(fromSchema)
+	if err != nil {
+		return nil, err
+	}
+	toFields, err := recordFields(toSchema)
+	if err != nil {
+		return nil, err
+	}
+	var changes []fieldChange
 	for name, toType := range toFields {
 		fromType, ok := fromFields[name]
 		switch {
 		case !ok:
-			changes = append(changes, change{Field: name, Kind: "added", To: toType})
+			changes = append(changes, fieldChange{Field: name, Kind: "added", To: toType})
 		case fromType != toType:
-			changes = append(changes, change{Field: name, Kind: "changed", From: fromType, To: toType})
+			changes = append(changes, fieldChange{Field: name, Kind: "changed", From: fromType, To: toType})
 		}
 	}
 	for name, fromType := range fromFields {
 		if _, ok := toFields[name]; !ok {
-			changes = append(changes, change{Field: name, Kind: "removed", From: fromType})
+			changes = append(changes, fieldChange{Field: name, Kind: "removed", From: fromType})
 		}
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Field < changes[j].Field })
+	return changes, nil
+}
 
-	var sb strings.Builder
+// formatChanges renders changes one per line, e.g. "amount: int → bytes(decimal 12,2)".
+func formatChanges(changes []fieldChange) string {
 	if len(changes) == 0 {
-		sb.WriteString("no field changes")
-	} else {
-		for i, c := range changes {
-			if i > 0 {
-				sb.WriteString("\n")
-			}
-			switch c.Kind {
-			case "added":
-				fmt.Fprintf(&sb, "+ %s: %s", c.Field, c.To)
-			case "removed":
-				fmt.Fprintf(&sb, "- %s: %s", c.Field, c.From)
-			case "changed":
-				fmt.Fprintf(&sb, "%s: %s → %s", c.Field, c.From, c.To)
-			}
+		return "no field changes"
+	}
+	var sb strings.Builder
+	for i, c := range changes {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		switch c.Kind {
+		case "added":
+			fmt.Fprintf(&sb, "+ %s: %s", c.Field, c.To)
+		case "removed":
+			fmt.Fprintf(&sb, "- %s: %s", c.Field, c.From)
+		case "changed":
+			fmt.Fprintf(&sb, "%s: %s → %s", c.Field, c.From, c.To)
 		}
 	}
-	return res(sb.String(), map[string]any{
-		"subject": p.Subject, "from_version": p.FromVersion, "to_version": toVersion, "changes": changes,
-	}), nil
+	return sb.String()
 }
 
 // recordFields flattens every record field in an Avro schema into name→canonical type.

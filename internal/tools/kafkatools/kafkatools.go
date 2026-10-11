@@ -43,9 +43,10 @@ func Register(reg *tools.Registry, d Deps) error {
 	return nil
 }
 
-// ctx returns a fresh context with the tool timeout.
-func ctx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), timeout)
+// withTimeout derives a timeout context from the caller's context so in-flight
+// calls stop when the room closes or the agent stops.
+func withTimeout(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, timeout)
 }
 
 // parse decodes input into T, wrapping ErrBadInput on failure.

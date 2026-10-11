@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/tools"
 )
 
@@ -24,8 +25,8 @@ func (t *connectList) Description() string {
 	return "Lists all Kafka Connect connectors with their type, state and failed task count."
 }
 
-func (t *connectList) Run(_ context.Context, _ json.RawMessage) (tools.Result, error) {
-	cctx, cancel := ctx()
+func (t *connectList) Run(ctx context.Context, _ json.RawMessage) (tools.Result, error) {
+	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	names, err := t.d.Connect.ListConnectors(cctx)
 	if err != nil {
@@ -75,14 +76,14 @@ func (t *connectStatus) Description() string {
 	return "Returns a connector's state and each task's state; for FAILED tasks the exception class, message and every 'Caused by:' line (stack frames and schema blobs stripped)."
 }
 
-func (t *connectStatus) Run(_ context.Context, input json.RawMessage) (tools.Result, error) {
+func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 	var p struct {
 		Connector string `json:"connector"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Connector == "" {
 		return tools.Result{}, fmt.Errorf("%w: connector is required", tools.ErrBadInput)
 	}
-	cctx, cancel := ctx()
+	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	st, err := t.d.Connect.Status(cctx, p.Connector)
 	if err != nil {
@@ -105,6 +106,11 @@ func (t *connectStatus) Run(_ context.Context, input json.RawMessage) (tools.Res
 		tr := taskRow{ID: ts.ID, State: ts.State}
 		if ts.State == "FAILED" && ts.Trace != "" {
 			cond := condenseTrace(ts.Trace)
+			if t.d.Registry != nil {
+				if line := rejectedSchemaLine(cctx, t.d.Registry, ts.Trace); line != "" {
+					cond += "\n" + line
+				}
+			}
 			if len(cond) > 2000 {
 				cond = cond[:2000] + "\n…"
 			}
@@ -131,14 +137,14 @@ func (t *connectConfig) Description() string {
 	return "Returns the key settings of a connector config, redacting any credential value (keys containing password, secret, token or .key)."
 }
 
-func (t *connectConfig) Run(_ context.Context, input json.RawMessage) (tools.Result, error) {
+func (t *connectConfig) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 	var p struct {
 		Connector string `json:"connector"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Connector == "" {
 		return tools.Result{}, fmt.Errorf("%w: connector is required", tools.ErrBadInput)
 	}
-	cctx, cancel := ctx()
+	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	cfg, err := t.d.Connect.Config(cctx, p.Connector)
 	if err != nil {
@@ -196,11 +202,6 @@ func sensitiveKey(k string) bool {
 
 // condenseTrace keeps the top exception line and every "Caused by:" line,
 // dropping stack frames and stripping embedded schema JSON blobs.
-var (
-	schemaBlobRe = regexp.MustCompile(`\{\.\.\.[^}]*\.\.\.\}`)
-	oldSchemaRe  = regexp.MustCompile(`oldSchema\s*:\s*'\{[^']*\}'`)
-)
-
 func condenseTrace(trace string) string {
 	var out []string
 	for _, line := range strings.Split(trace, "\n") {
@@ -215,8 +216,155 @@ func condenseTrace(trace string) string {
 	return strings.Join(out, "\n")
 }
 
+// sanitizeTrace strips the embedded Avro schema JSON blobs from a trace line.
 func sanitizeTrace(s string) string {
-	s = schemaBlobRe.ReplaceAllString(s, "<schema>")
-	s = oldSchemaRe.ReplaceAllString(s, "oldSchema: <schema>")
+	s = stripSchemaAfter(s, "Error registering Avro schema")
+	s = stripOldSchema(s)
 	return s
+}
+
+// stripSchemaAfter replaces the balanced {…} JSON that follows marker with <schema>.
+func stripSchemaAfter(s, marker string) string {
+	idx := strings.Index(s, marker)
+	if idx < 0 {
+		return s
+	}
+	rest := s[idx+len(marker):]
+	j := 0
+	for j < len(rest) && (rest[j] == ' ' || rest[j] == '\t') {
+		j++
+	}
+	if j >= len(rest) || rest[j] != '{' {
+		return s
+	}
+	end := balancedBrace(rest, j)
+	return s[:idx+len(marker)] + "<schema>" + rest[end:]
+}
+
+// stripOldSchema replaces oldSchema: '{…}' (single-quoted JSON) with oldSchema: <schema>.
+func stripOldSchema(s string) string {
+	idx := strings.Index(s, "oldSchema:")
+	if idx < 0 {
+		return s
+	}
+	rest := s[idx+len("oldSchema:"):]
+	j := 0
+	for j < len(rest) && (rest[j] == ' ' || rest[j] == '\t') {
+		j++
+	}
+	if j >= len(rest) || rest[j] != '\'' {
+		return s
+	}
+	k := closingQuote(rest, j)
+	return s[:idx+len("oldSchema:")] + " <schema>" + rest[k+1:]
+}
+
+// balancedBrace returns the index just past the balanced {…} starting at start (points at '{').
+func balancedBrace(s string, start int) int {
+	depth, inStr, esc := 0, false, false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			if esc {
+				esc = false
+				continue
+			}
+			if c == '\\' {
+				esc = true
+				continue
+			}
+			if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i + 1
+			}
+		}
+	}
+	return len(s)
+}
+
+// closingQuote returns the index of the closing single quote after start (points at the opening ').
+func closingQuote(s string, start int) int {
+	inStr := false
+	for i := start + 1; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		if c == '"' {
+			inStr = true
+			continue
+		}
+		if c == '\'' {
+			return i
+		}
+	}
+	return len(s) - 1
+}
+
+// extractRejectedSchema returns the Avro schema JSON from an "Error registering Avro schema{…}" trace.
+func extractRejectedSchema(trace string) (string, bool) {
+	idx := strings.Index(trace, "Error registering Avro schema")
+	if idx < 0 {
+		return "", false
+	}
+	rest := trace[idx+len("Error registering Avro schema"):]
+	j := 0
+	for j < len(rest) && (rest[j] == ' ' || rest[j] == '\t') {
+		j++
+	}
+	if j >= len(rest) || rest[j] != '{' {
+		return "", false
+	}
+	end := balancedBrace(rest, j)
+	return rest[j:end], true
+}
+
+var subjectRe = regexp.MustCompile(`subject\s+"([^"]+)"`)
+
+// extractSubject returns the subject name from a registry error trace.
+func extractSubject(trace string) (string, bool) {
+	m := subjectRe.FindStringSubmatch(trace)
+	if len(m) < 2 {
+		return "", false
+	}
+	return m[1], true
+}
+
+// rejectedSchemaLine diffs a rejected schema (from a trace) against the subject's latest version.
+func rejectedSchemaLine(ctx context.Context, reg clients.SchemaRegistryClient, trace string) string {
+	schema, ok := extractRejectedSchema(trace)
+	if !ok {
+		return ""
+	}
+	subject, ok := extractSubject(trace)
+	if !ok {
+		return ""
+	}
+	latest, err := reg.Schema(ctx, subject, -1)
+	if err != nil {
+		return ""
+	}
+	changes, err := diffFields(latest.Schema, schema)
+	if err != nil || len(changes) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Rejected schema vs %s v%d:\n%s", subject, latest.Version, formatChanges(changes))
 }

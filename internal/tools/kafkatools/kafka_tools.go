@@ -25,14 +25,14 @@ func (t *topicOffsets) Description() string {
 	return "Per-partition start/end offsets, total record count and the newest record's age."
 }
 
-func (t *topicOffsets) Run(_ context.Context, input json.RawMessage) (tools.Result, error) {
+func (t *topicOffsets) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 	var p struct {
 		Topic string `json:"topic"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Topic == "" {
 		return tools.Result{}, fmt.Errorf("%w: topic is required", tools.ErrBadInput)
 	}
-	cctx, cancel := ctx()
+	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	offs, err := t.d.Kafka.TopicOffsets(cctx, p.Topic)
 	if err != nil {
@@ -79,14 +79,14 @@ func (t *listGroups) Description() string {
 	return "Lists consumer groups with their state; optionally only those reading a given topic."
 }
 
-func (t *listGroups) Run(_ context.Context, input json.RawMessage) (tools.Result, error) {
+func (t *listGroups) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 	var p struct {
 		Topic string `json:"topic"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil {
 		return tools.Result{}, fmt.Errorf("%w: %v", tools.ErrBadInput, err)
 	}
-	cctx, cancel := ctx()
+	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	groups, err := t.d.Kafka.ConsumerGroups(cctx)
 	if err != nil {
@@ -140,14 +140,14 @@ func (t *consumerLag) Description() string {
 	return "Consumer group state, member count, total lag and the 5 worst partitions."
 }
 
-func (t *consumerLag) Run(_ context.Context, input json.RawMessage) (tools.Result, error) {
+func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 	var p struct {
 		Group string `json:"group"`
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Group == "" {
 		return tools.Result{}, fmt.Errorf("%w: group is required", tools.ErrBadInput)
 	}
-	cctx, cancel := ctx()
+	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	lag, err := t.d.Kafka.GroupLag(cctx, p.Group)
 	if err != nil {
@@ -188,7 +188,7 @@ func (t *findByKey) Description() string {
 	return "Finds records whose decoded key matches, scanning from the first offset at or after 'since'. Returns where each was found."
 }
 
-func (t *findByKey) Run(_ context.Context, input json.RawMessage) (tools.Result, error) {
+func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 	var p struct {
 		Topic   string `json:"topic"`
 		Key     string `json:"key"`
@@ -202,7 +202,7 @@ func (t *findByKey) Run(_ context.Context, input json.RawMessage) (tools.Result,
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("%w: since must be RFC 3339: %v", tools.ErrBadInput, err)
 	}
-	cctx, cancel := ctx()
+	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	refs, err := t.d.Kafka.FindByKey(cctx, p.Topic, p.Key, since, p.MaxScan)
 	if err != nil {
