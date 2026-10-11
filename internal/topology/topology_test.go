@@ -286,7 +286,7 @@ func TestDeriveTopics(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := deriveTopics(tc.cfg, tc.tables)
+			got := deriveTopics(tc.cfg, tc.tables, nil)
 			if len(got) != len(tc.want) {
 				t.Fatalf("topics = %v, want %v", got, tc.want)
 			}
@@ -299,7 +299,7 @@ func TestDeriveTopics(t *testing.T) {
 	}
 }
 
-// ---- Debezium include/exclude lists (regex, anchored to the whole id) ----
+// ---- Debezium include/exclude lists (regex, anchored to the whole id, case-insensitive) ----
 
 func TestStreamsTableLists(t *testing.T) {
 	cases := []struct {
@@ -332,6 +332,16 @@ func TestStreamsTableLists(t *testing.T) {
 		{"exclude keeps the rest", map[string]string{"table.include.list": "public.*", "table.exclude.list": "public.order_items"}, "public.orders", true},
 		{"exclude alone filters", map[string]string{"table.exclude.list": `public\.orders`}, "public.orders", false},
 		{"exclude alone keeps others", map[string]string{"table.exclude.list": `public\.orders`}, "public.items", true},
+		// Case-insensitive, like Debezium (Pattern.CASE_INSENSITIVE over the
+		// whole identifier), for both the regex and the literal fast path.
+		{"mixed-case literal include", map[string]string{"table.include.list": "Public.Orders"}, "public.orders", true},
+		{"mixed-case id matches lowercase include", map[string]string{"table.include.list": "public.orders"}, "Public.Orders", true},
+		{"mixed-case regex include", map[string]string{"table.include.list": `Public\.Order.*`}, "public.order_items", true},
+		{"mixed-case regex include filters others", map[string]string{"table.include.list": `Public\.Order.*`}, "public.items", false},
+		{"mixed-case regex exclude wins", map[string]string{"table.include.list": "public.*", "table.exclude.list": `Public\.Order_Items`}, "public.order_items", false},
+		{"mixed-case regex exclude keeps the rest", map[string]string{"table.include.list": "public.*", "table.exclude.list": `Public\.Order_Items`}, "public.orders", true},
+		{"mixed-case fast-path literal include", map[string]string{"schema.include.list": "Public"}, "public.orders", true},
+		{"mixed-case fast-path literal exclude wins", map[string]string{"schema.exclude.list": "PUBLIC"}, "public.orders", false},
 		// Invalid regex entries fall back to literal comparison.
 		{"invalid regex matches literally", map[string]string{"table.include.list": "public.["}, "public.[", true},
 		{"invalid regex is not a wildcard", map[string]string{"table.include.list": "public.["}, "public.orders", false},
@@ -351,7 +361,7 @@ func TestStreamsTableLists(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := streamsTable(tc.cfg, tc.table); got != tc.want {
+			if got := streamsTable(tc.cfg, tc.table, nil); got != tc.want {
 				t.Fatalf("streamsTable(%q) = %v, want %v", tc.table, got, tc.want)
 			}
 		})
@@ -360,21 +370,56 @@ func TestStreamsTableLists(t *testing.T) {
 
 func TestInvalidListEntryWarnsOnce(t *testing.T) {
 	var buf strings.Builder
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	b := newBuilder(testOwners(), nil, nil, nil, nil,
+		slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 
-	// Unique entry so the process-wide log-once cache cannot collide with
-	// other tests.
+	// Unique entry so a stray shared cache could not influence the count.
 	cfg := map[string]string{"table.include.list": "logonce_test_entry.["}
 	want := []bool{true, true, true}
 	for i := range want {
-		if got := streamsTable(cfg, "logonce_test_entry.["); got != want[i] {
+		if got := streamsTable(cfg, "logonce_test_entry.[", b.warnBadListEntry); got != want[i] {
 			t.Fatalf("call %d: streamsTable = %v, want %v (literal fallback)", i, got, want[i])
 		}
 	}
 	if n := strings.Count(buf.String(), "logonce_test_entry.["); n != 1 {
 		t.Fatalf("bad entry logged %d times, want 1:\n%s", n, buf.String())
+	}
+}
+
+// TestBadListEntryWarnsOncePerBuilder proves the warn dedupe lives on the
+// builder instance and covers both the Build and the Trace matching paths:
+// one Build + one Trace warn once, Trace alone on a fresh builder warns again
+// (nothing is shared module-wide).
+func TestBadListEntryWarnsOncePerBuilder(t *testing.T) {
+	cfg := map[string]string{"topic.prefix": "pg", "table.include.list": "public.["}
+	connect := &fakeConnect{config: map[string]map[string]string{"pg-orders-connector": cfg}}
+	newTestBuilder := func(buf *strings.Builder) *builder {
+		return newBuilder(testOwners(), connect, &fakeKafka{}, &fakeSource{}, &fakeWarehouse{},
+			slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	}
+
+	var buf strings.Builder
+	b := newTestBuilder(&buf)
+	if _, err := b.Build(context.Background(), "orders"); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// Trace resolves its connector through the same matching; the builder has
+	// already reported this entry, so Trace must not log it again.
+	if _, err := b.Trace(context.Background(), "orders", "public.orders", "7"); !errors.Is(err, ErrBadInput) {
+		t.Fatalf("Trace err = %v, want ErrBadInput", err)
+	}
+	if n := strings.Count(buf.String(), "public.["); n != 1 {
+		t.Fatalf("bad entry logged %d times for one builder, want 1:\n%s", n, buf.String())
+	}
+
+	// A new builder has its own dedupe set: Trace alone warns once again.
+	var buf2 strings.Builder
+	b2 := newTestBuilder(&buf2)
+	if _, err := b2.Trace(context.Background(), "orders", "public.orders", "7"); !errors.Is(err, ErrBadInput) {
+		t.Fatalf("Trace err = %v, want ErrBadInput", err)
+	}
+	if n := strings.Count(buf2.String(), "public.["); n != 1 {
+		t.Fatalf("bad entry logged %d times from Trace on a fresh builder, want 1:\n%s", n, buf2.String())
 	}
 }
 

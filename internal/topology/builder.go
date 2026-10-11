@@ -53,11 +53,35 @@ type builder struct {
 	src     clients.SourceDB
 	wh      clients.Warehouse
 	t       Thresholds
+	log     *slog.Logger
+
+	// warnMu guards warned, the set of invalid include/exclude list entries
+	// already reported by this builder instance.
+	warnMu sync.Mutex
+	warned map[string]bool
 }
 
 // NewBuilder constructs a Builder with default thresholds.
 func NewBuilder(o *owners.Owners, connect clients.ConnectClient, kafka clients.KafkaAdmin, src clients.SourceDB, wh clients.Warehouse) Builder {
-	return &builder{o: o, connect: connect, kafka: kafka, src: src, wh: wh, t: DefaultThresholds()}
+	return newBuilder(o, connect, kafka, src, wh, slog.Default())
+}
+
+// newBuilder is NewBuilder with an explicit logger; same-package tests use it
+// to capture warnings on their own logger.
+func newBuilder(o *owners.Owners, connect clients.ConnectClient, kafka clients.KafkaAdmin, src clients.SourceDB, wh clients.Warehouse, log *slog.Logger) *builder {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &builder{
+		o:       o,
+		connect: connect,
+		kafka:   kafka,
+		src:     src,
+		wh:      wh,
+		t:       DefaultThresholds(),
+		log:     log,
+		warned:  map[string]bool{},
+	}
 }
 
 // Build returns the current graph for a pipeline with live health. Unreachable
@@ -87,7 +111,7 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 		var ts []string
 		isFallback := false
 		if snap, ok := info.connect[cn]; ok && snap.err == nil {
-			ts = deriveTopics(snap.config, p.SourceTables)
+			ts = deriveTopics(snap.config, p.SourceTables, b.warnBadListEntry)
 		} else {
 			// Connect unreachable: keep the graph shape with placeholder
 			// topics so the topic node and its edges still exist.
@@ -205,7 +229,7 @@ func (b *builder) slotName(p owners.Pipeline, tbl string, info *collected) strin
 		if !ok || snap.err != nil {
 			continue
 		}
-		if streamsTable(snap.config, tbl) {
+		if streamsTable(snap.config, tbl, b.warnBadListEntry) {
 			return slotNameFor(cn, snap.config)
 		}
 	}
@@ -303,9 +327,10 @@ func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {
 //
 // Debezium interprets table.include.list, table.exclude.list, schema.include.list
 // and schema.exclude.list as comma-separated regular expressions, each
-// anchored to the whole identifier: table lists match the fully-qualified
-// schema.table id, schema lists match the schema name. Exclude lists win over
-// include lists. See "Advanced PostgreSQL connector configuration properties"
+// anchored to the whole identifier and matched case-insensitively: table lists
+// match the fully-qualified schema.table id, schema lists match the schema
+// name. Exclude lists win over include lists. See "Advanced PostgreSQL
+// connector configuration properties"
 // in https://debezium.io/documentation/reference/stable/connectors/postgresql.html
 
 // regexMetaChars are the RE2 metacharacters. An entry without any of them can
@@ -314,13 +339,13 @@ const regexMetaChars = `\.+*?()|[]{}^$`
 
 // listPattern is one entry of a Debezium include or exclude list.
 type listPattern struct {
-	literal string         // compared byte-wise when re is nil
+	literal string         // compared case-insensitively when re is nil
 	re      *regexp.Regexp // nil for entries with no regex metacharacters
 }
 
 func (p listPattern) matches(id string) bool {
 	if p.re == nil {
-		return p.literal == id
+		return strings.EqualFold(p.literal, id)
 	}
 	return p.re.MatchString(id)
 }
@@ -334,10 +359,10 @@ type listMatcher struct {
 	excludes []listPattern
 }
 
-func newListMatcher(include, exclude string) listMatcher {
+func newListMatcher(include, exclude string, warn func(string)) listMatcher {
 	return listMatcher{
-		includes: compileList(include),
-		excludes: compileList(exclude),
+		includes: compileList(include, warn),
+		excludes: compileList(exclude, warn),
 	}
 }
 
@@ -357,11 +382,14 @@ func anyPatternMatches(ps []listPattern, id string) bool {
 	return false
 }
 
-// compileList turns a comma-separated Debezium list into patterns. Each entry
-// that compiles as RE2 is anchored with ^(?:entry)$ so it must match the whole
-// identifier, like Debezium's matcher. An entry that does not compile is
-// compared literally and reported once.
-func compileList(list string) []listPattern {
+// compileList turns a comma-separated Debezium list into patterns. Debezium
+// compiles these lists with Pattern.CASE_INSENSITIVE and matches the whole
+// identifier (Strings.setOfRegex + Matcher.matches in its Predicates), so
+// every entry is compiled as "(?i)^(?:entry)$". Entries without regex
+// metacharacters take the literal fast path and match case-insensitively via
+// EqualFold. warn, when non-nil, is called for each entry that fails to
+// compile; callers dedupe.
+func compileList(list string, warn func(string)) []listPattern {
 	entries := splitCSV(list)
 	if len(entries) == 0 {
 		return nil
@@ -372,9 +400,11 @@ func compileList(list string) []listPattern {
 			out = append(out, listPattern{literal: e})
 			continue
 		}
-		re, err := regexp.Compile("^(?:" + e + ")$")
+		re, err := regexp.Compile("(?i)^(?:" + e + ")$")
 		if err != nil {
-			warnBadListEntry(e)
+			if warn != nil {
+				warn(e)
+			}
 			out = append(out, listPattern{literal: e})
 			continue
 		}
@@ -383,16 +413,25 @@ func compileList(list string) []listPattern {
 	return out
 }
 
-// badListEntries dedupes the warning below. It is a diagnostics-only cache: it
-// never affects matching, it just keeps one broken config entry from logging
-// on every Build and Trace.
-var badListEntries sync.Map
-
-func warnBadListEntry(entry string) {
-	if _, loaded := badListEntries.LoadOrStore(entry, struct{}{}); loaded {
+// warnBadListEntry reports once per builder instance that a list entry did not
+// compile as a regex and was compared literally. The dedupe set lives on the
+// builder (no package-level state), so it covers both the Build and the Trace
+// matching paths and disappears with the builder.
+func (b *builder) warnBadListEntry(entry string) {
+	b.warnMu.Lock()
+	defer b.warnMu.Unlock()
+	if b.warned == nil {
+		b.warned = map[string]bool{}
+	}
+	if b.warned[entry] {
 		return
 	}
-	slog.Warn("topology: include/exclude list entry is not a valid regex, comparing literally", "entry", entry)
+	b.warned[entry] = true
+	log := b.log
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Warn("topology: include/exclude list entry is not a valid regex, comparing literally", "entry", entry)
 }
 
 // streamMatcher decides which pipeline tables a connector streams, following
@@ -403,10 +442,10 @@ type streamMatcher struct {
 	schemas listMatcher
 }
 
-func newStreamMatcher(cfg map[string]string) streamMatcher {
+func newStreamMatcher(cfg map[string]string, warn func(string)) streamMatcher {
 	return streamMatcher{
-		tables:  newListMatcher(cfg["table.include.list"], cfg["table.exclude.list"]),
-		schemas: newListMatcher(cfg["schema.include.list"], cfg["schema.exclude.list"]),
+		tables:  newListMatcher(cfg["table.include.list"], cfg["table.exclude.list"], warn),
+		schemas: newListMatcher(cfg["schema.include.list"], cfg["schema.exclude.list"], warn),
 	}
 }
 
@@ -416,9 +455,10 @@ func (m streamMatcher) streams(tbl string) bool {
 }
 
 // streamsTable reports whether a connector with the given config streams tbl.
-// An empty include list streams every table in the pipeline.
-func streamsTable(cfg map[string]string, tbl string) bool {
-	return newStreamMatcher(cfg).streams(tbl)
+// An empty include list streams every table in the pipeline. warn, when
+// non-nil, receives invalid list entries for reporting.
+func streamsTable(cfg map[string]string, tbl string, warn func(string)) bool {
+	return newStreamMatcher(cfg, warn).streams(tbl)
 }
 
 func slotNameFor(_ string, cfg map[string]string) string {
@@ -436,13 +476,14 @@ func fallbackTopics(tables []string) []string {
 }
 
 // deriveTopics returns the Debezium topic names for the pipeline tables this
-// connector streams: <topic.prefix>.<schema>.<table>.
-func deriveTopics(cfg map[string]string, tables []string) []string {
+// connector streams: <topic.prefix>.<schema>.<table>. warn is passed to the
+// matching for invalid list entries.
+func deriveTopics(cfg map[string]string, tables []string, warn func(string)) []string {
 	prefix := cfg["topic.prefix"]
 	if prefix == "" {
 		return nil
 	}
-	m := newStreamMatcher(cfg)
+	m := newStreamMatcher(cfg, warn)
 	var topics []string
 	for _, t := range tables {
 		if m.streams(t) {
