@@ -62,7 +62,7 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	inbox := newStdinInbox(stop)
+	inbox := newStdinInbox()
 	sink := newTerminalSink(os.Stdout)
 	proposals := &rejectProposals{}
 

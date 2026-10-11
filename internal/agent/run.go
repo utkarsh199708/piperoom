@@ -18,14 +18,24 @@ import (
 )
 
 const (
-	// toolTimeout bounds a single read tool call. The turn continues with the
-	// other results if one tool times out.
-	toolTimeout = 10 * time.Second
 	// maxParallelTools caps how many read tools run at once.
 	maxParallelTools = 4
 	// maxTokens bounds one model turn.
 	maxTokens = 16000
 )
+
+var (
+	// toolTimeout bounds a single read tool call. The turn continues with the
+	// other results if one tool times out. A var so tests can shorten it.
+	toolTimeout = 10 * time.Second
+	// roomToolTimeout bounds one room tool call (hypothesis, proposal, message).
+	roomToolTimeout = 10 * time.Second
+)
+
+// ErrInboxClosed reports that the Inbox will deliver no more input (for
+// example stdin reached EOF). Run treats it as a clean shutdown once any
+// pending input has been consumed.
+var ErrInboxClosed = errors.New("agent: inbox closed")
 
 // runner carries the per-investigation state.
 type runner struct {
@@ -43,7 +53,8 @@ type runner struct {
 
 // Run investigates a pipeline incident: it calls Claude, executes read-only
 // tools, reads human input between turns, proposes fixes, and turns everything
-// into room events. It runs until ctx ends or MaxTurns is reached.
+// into room events. It runs until ctx ends or the inbox closes; MaxTurns acts
+// as a per-episode runaway guard that pauses for fresh human input.
 func Run(ctx context.Context, alert Alert, deps Deps, opts Options) error {
 	r, err := newRunner(alert, deps, opts)
 	if err != nil {
@@ -87,23 +98,74 @@ func (r *runner) run(ctx context.Context) error {
 	// part of the opening prompt.
 	messages := []anthropic.MessageParam{r.initialMessage(r.drain(ctx))}
 
-	for turn := 0; turn < r.opts.MaxTurns; turn++ {
+	// turns counts model turns since the last human input. It is a per-episode
+	// runaway guard, not a lifetime cap: fresh human input resets it.
+	turns := 0
+	for {
 		if err := ctx.Err(); err != nil {
 			return stopErr(err)
 		}
 
-		resp, err := r.model.Turn(ctx, r.request(messages))
-		if err != nil {
-			return fmt.Errorf("agent: model turn: %w", stopErr(err))
-		}
-		if resp.StopReason == anthropic.StopReasonRefusal {
+		if turns >= r.opts.MaxTurns {
+			// Runaway guard: pause and wait for a human instead of abandoning the
+			// room. The room stays usable while someone is still steering it.
 			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
-				State:  "error",
-				Detail: "model refused the request",
+				State:  "idle",
+				Detail: "max turns reached; waiting for human input",
 			})
-			return errors.New("agent: model refused the request")
+			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{
+				Text: "I have reached the turn limit for this episode and am pausing. Please steer me or confirm before I continue.",
+			})
+			inputs, err := r.waitForInput(ctx)
+			if err != nil {
+				return stopErr(err)
+			}
+			if len(inputs) == 0 {
+				return nil
+			}
+			messages = append(messages, r.humanMessage(inputs))
+			turns = 0
+			continue
 		}
 
+		resp, err := r.model.Turn(ctx, r.request(messages))
+		if err != nil {
+			// A cancelled context is a clean shutdown (room closed), not an error.
+			if ctx.Err() != nil {
+				return stopErr(err)
+			}
+			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
+				State:  "error",
+				Detail: "model request failed",
+			})
+			return fmt.Errorf("agent: model turn: %w", err)
+		}
+
+		if resp.StopReason == anthropic.StopReasonRefusal {
+			reason := refusalReason(resp)
+			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
+				State:  "error",
+				Detail: reason,
+			})
+			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{
+				Text: "I cannot proceed with this request: " + reason,
+			})
+			// Do not append the refused turn; a refusal must never end the
+			// investigation for everyone. Go idle and wait like end_turn.
+			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
+			inputs, err := r.waitForInput(ctx)
+			if err != nil {
+				return stopErr(err)
+			}
+			if len(inputs) == 0 {
+				return nil
+			}
+			messages = append(messages, r.humanMessage(inputs))
+			turns = 0
+			continue
+		}
+
+		turns++
 		// History is append-only: keep the assistant turn exactly as returned.
 		messages = append(messages, resp.ToParam())
 
@@ -118,12 +180,15 @@ func (r *runner) run(ctx context.Context) error {
 		switch resp.StopReason {
 		case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence:
 			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
-			if err := r.deps.Inbox.Wait(ctx); err != nil {
+			inputs, err := r.waitForInput(ctx)
+			if err != nil {
 				return stopErr(err)
 			}
-			if inputs := r.drain(ctx); len(inputs) > 0 {
-				messages = append(messages, r.humanMessage(inputs))
+			if len(inputs) == 0 {
+				return nil
 			}
+			messages = append(messages, r.humanMessage(inputs))
+			turns = 0
 		case anthropic.StopReasonModelContextWindowExceeded:
 			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
 				State:  "error",
@@ -134,20 +199,18 @@ func (r *runner) run(ctx context.Context) error {
 			// tool_use, max_tokens and pause_turn all continue: the next user
 			// message carries the tool results plus any human input that arrived
 			// while we were running.
+			inputs := r.drain(ctx)
 			blocks := append([]anthropic.ContentBlockParamUnion(nil), resultBlocks...)
-			blocks = append(blocks, r.humanBlocks(r.drain(ctx))...)
+			blocks = append(blocks, r.humanBlocks(inputs)...)
 			if len(blocks) == 0 {
 				blocks = append(blocks, anthropic.NewTextBlock("Continue."))
 			}
 			messages = append(messages, anthropic.NewUserMessage(blocks...))
+			if len(inputs) > 0 {
+				turns = 0
+			}
 		}
 	}
-
-	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
-		State:  "done",
-		Detail: "max turns reached",
-	})
-	return nil
 }
 
 // request assembles one model request. The system prompt and tool list are
@@ -168,6 +231,9 @@ func (r *runner) request(messages []anthropic.MessageParam) anthropic.MessageNew
 		ToolChoice: anthropic.ToolChoiceUnionParam{
 			OfAuto: &anthropic.ToolChoiceAutoParam{},
 		},
+		// Top-level cache control applies a breakpoint to the last cacheable
+		// block, so each turn re-reads the conversation history from cache.
+		CacheControl: anthropic.NewCacheControlEphemeralParam(),
 	}
 }
 
@@ -199,6 +265,21 @@ func (r *runner) drain(ctx context.Context) []HumanInput {
 	return inputs
 }
 
+// waitForInput blocks until at least one human input is pending or the context
+// ends. A spurious Wake (or a stale notify token) with nothing to drain must
+// not end the loop: wait again, so the next request never ends with an
+// assistant turn (which Opus rejects as a prefill with HTTP 400).
+func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
+	for {
+		if inputs := r.drain(ctx); len(inputs) > 0 {
+			return inputs, nil
+		}
+		if err := r.deps.Inbox.Wait(ctx); err != nil {
+			return nil, err
+		}
+	}
+}
+
 // emit writes one event to the sink, serialized so parallel tool steps cannot
 // interleave their payloads. Emit failures are logged, not fatal.
 func (r *runner) emit(ctx context.Context, typ events.Type, payload any) {
@@ -209,13 +290,29 @@ func (r *runner) emit(ctx context.Context, typ events.Type, payload any) {
 	}
 }
 
-// stopErr maps a clean shutdown (context.Canceled) to nil so the room service
-// does not treat a closed room as a failure.
+// stopErr maps a clean shutdown (context.Canceled or a closed inbox) to nil so
+// the room service does not treat a closed room as a failure.
 func stopErr(err error) error {
-	if err == nil || errors.Is(err, context.Canceled) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, ErrInboxClosed) {
 		return nil
 	}
 	return err
+}
+
+// refusalReason renders the structured refusal details into a short, stable
+// reason string for the room log and the agent's message.
+func refusalReason(m anthropic.Message) string {
+	d := m.StopDetails
+	if d.Category == "" && d.Explanation == "" {
+		return "model refused the request"
+	}
+	if d.Category == "" {
+		return d.Explanation
+	}
+	if d.Explanation == "" {
+		return string(d.Category)
+	}
+	return string(d.Category) + ": " + d.Explanation
 }
 
 // splitContent separates an assistant turn into text and tool_use blocks.
@@ -334,6 +431,8 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	if res.Data != nil {
 		if b, mErr := json.Marshal(res.Data); mErr == nil {
 			data = b
+		} else {
+			r.log.Warn("agent: tool data marshal failed", "tool", u.name, "err", mErr)
 		}
 	}
 
@@ -356,19 +455,22 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		}
 	}
 
+	// Defensively re-cap the summary before it reaches the model; a tool that
+	// ignores MaxSummaryBytes must not be able to bloat the request.
+	summary, reTruncated := tools.Truncate(res.Summary)
 	r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 		StepID:    stepID,
 		ToolUseID: u.id,
 		Tool:      u.name,
-		Summary:   res.Summary,
+		Summary:   summary,
 		Data:      data,
 		IsError:   false,
-		Truncated: res.Truncated,
+		Truncated: res.Truncated || reTruncated,
 		TookMS:    took,
 	})
 	return toolResult{
 		toolUseID: u.id,
-		content:   wrapToolOutput(u.name, res.Summary),
+		content:   wrapToolOutput(u.name, summary),
 		isError:   false,
 	}
 }
@@ -422,7 +524,9 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 			isError:   true,
 		}
 	}
-	res, err := entry.tool.Run(ctx, u.input)
+	tctx, cancel := context.WithTimeout(ctx, roomToolTimeout)
+	defer cancel()
+	res, err := entry.tool.Run(tctx, u.input)
 	if err != nil {
 		return toolResult{
 			toolUseID: u.id,
@@ -439,6 +543,8 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 
 // wrapToolOutput marks tool output as untrusted data. The system prompt tells
 // the model to treat anything inside this wrapper as data, never instructions.
+// The text is escaped so a value containing </tool_output> cannot break out of
+// the wrapper.
 func wrapToolOutput(tool, text string) string {
-	return fmt.Sprintf("<tool_output tool=%q untrusted=\"true\">%s</tool_output>", tool, text)
+	return fmt.Sprintf("<tool_output tool=%q untrusted=\"true\">%s</tool_output>", tool, escapeToolText(text))
 }

@@ -5,11 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
+
+// proposalTimeout bounds the Proposals.Create call so a stalled proposal store
+// cannot hang the investigation.
+var proposalTimeout = 10 * time.Second
 
 // newRoomTools builds the three room tools the agent itself owns. These are
 // tools.KindRoom: they only write to the room log or create proposals, never
@@ -181,16 +186,40 @@ func (t *proposeFixTool) InputSchema() map[string]any {
 	return roomObjectSchema(map[string]any{
 		"title": map[string]any{"type": "string", "description": "short title for the proposal"},
 		"steps": map[string]any{
-			"type": "array",
-			"items": roomObjectSchema(map[string]any{
-				"action":      map[string]any{"type": "string", "description": "action name"},
-				"params":      map[string]any{"type": "object", "description": "action params object"},
-				"description": map[string]any{"type": "string", "description": "what this step does"},
-			}, "action", "params", "description"),
+			"type":  "array",
+			"items": t.stepsItemSchema(),
 		},
 		"risk":     map[string]any{"type": "string", "description": "what could go wrong"},
 		"rollback": map[string]any{"type": "string", "description": "how to undo this fix"},
 	}, "title", "steps", "risk", "rollback")
+}
+
+// stepsItemSchema builds the schema for one proposal step. With actions
+// registered it is an anyOf of one variant per action (action fixed via const,
+// params taken from the action's own schema) so every nested object is strictly
+// typed. Without actions it falls back to a generic strict step object.
+func (t *proposeFixTool) stepsItemSchema() map[string]any {
+	acts := t.actionsList()
+	if len(acts) == 0 {
+		return roomObjectSchema(map[string]any{
+			"action":      map[string]any{"type": "string", "description": "action name"},
+			"params":      map[string]any{"type": "object", "additionalProperties": false},
+			"description": map[string]any{"type": "string", "description": "what this step does"},
+		}, "action", "params", "description")
+	}
+	variants := make([]any, 0, len(acts))
+	for _, a := range acts {
+		params := a.ParamsSchema()
+		if params == nil {
+			params = map[string]any{"type": "object", "additionalProperties": false}
+		}
+		variants = append(variants, roomObjectSchema(map[string]any{
+			"action":      map[string]any{"type": "string", "const": a.Name()},
+			"params":      params,
+			"description": map[string]any{"type": "string", "description": "what this step does"},
+		}, "action", "params", "description"))
+	}
+	return map[string]any{"anyOf": variants}
 }
 
 type proposeFixInput struct {
@@ -247,7 +276,9 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 		}
 	}
 
-	id, err := t.proposals.Create(ctx, events.ProposalCreatedPayload{
+	createCtx, cancel := context.WithTimeout(ctx, proposalTimeout)
+	defer cancel()
+	id, err := t.proposals.Create(createCtx, events.ProposalCreatedPayload{
 		Title:          in.Title,
 		Steps:          steps,
 		Risk:           in.Risk,

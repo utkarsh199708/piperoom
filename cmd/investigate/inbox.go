@@ -12,17 +12,18 @@ import (
 
 // stdinInbox turns stdin lines into driver steers. A background goroutine
 // reads stdin so Drain never blocks and Wait blocks until a line arrives.
-// When stdin reaches EOF, onEOF is called once so the caller can end the run.
+// When stdin reaches EOF the inbox reports agent.ErrInboxClosed from Wait once
+// every pending line has been drained, so the run finishes its work and stops
+// cleanly instead of being cancelled mid-turn.
 type stdinInbox struct {
 	mu     sync.Mutex
 	lines  []agent.HumanInput
 	notify chan struct{}
-	onEOF  func()
-	once   sync.Once
+	eof    bool
 }
 
-func newStdinInbox(onEOF func()) *stdinInbox {
-	in := &stdinInbox{notify: make(chan struct{}, 1), onEOF: onEOF}
+func newStdinInbox() *stdinInbox {
+	in := &stdinInbox{notify: make(chan struct{}, 1)}
 	go in.read()
 	return in
 }
@@ -44,12 +45,12 @@ func (in *stdinInbox) read() {
 		in.mu.Unlock()
 		in.signal()
 	}
-	// stdin closed: stop the run cleanly.
-	in.once.Do(func() {
-		if in.onEOF != nil {
-			in.onEOF()
-		}
-	})
+	// stdin closed: no more input will arrive. Wake any waiter so it can see the
+	// EOF state and stop.
+	in.mu.Lock()
+	in.eof = true
+	in.mu.Unlock()
+	in.signal()
 }
 
 func (in *stdinInbox) signal() {
@@ -59,7 +60,9 @@ func (in *stdinInbox) signal() {
 	}
 }
 
-// Drain returns every pending steer without blocking.
+// Drain returns every pending steer without blocking and consumes any stale
+// notify token, so a token left over from an earlier signal cannot make a later
+// Wait return with nothing to drain.
 func (in *stdinInbox) Drain(_ context.Context) ([]agent.HumanInput, error) {
 	in.mu.Lock()
 	defer in.mu.Unlock()
@@ -68,15 +71,32 @@ func (in *stdinInbox) Drain(_ context.Context) ([]agent.HumanInput, error) {
 	}
 	out := in.lines
 	in.lines = nil
+	select {
+	case <-in.notify:
+	default:
+	}
 	return out, nil
 }
 
-// Wait blocks until a steer is pending or ctx ends.
+// Wait blocks until a steer is pending or ctx ends. Once stdin has reached EOF
+// and every pending line is drained it returns agent.ErrInboxClosed.
 func (in *stdinInbox) Wait(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-in.notify:
-		return nil
+	for {
+		in.mu.Lock()
+		pending := len(in.lines) > 0
+		eof := in.eof
+		in.mu.Unlock()
+		if pending {
+			return nil
+		}
+		if eof {
+			return agent.ErrInboxClosed
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-in.notify:
+			// Re-check lines and EOF; a stale token wakes us without input.
+		}
 	}
 }

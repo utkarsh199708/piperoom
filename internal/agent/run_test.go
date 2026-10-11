@@ -119,6 +119,7 @@ type recordingTool struct {
 	name   string
 	schema map[string]any
 	result tools.Result
+	err    error
 
 	mu     sync.Mutex
 	inputs []json.RawMessage
@@ -132,7 +133,7 @@ func (t *recordingTool) Run(_ context.Context, input json.RawMessage) (tools.Res
 	t.mu.Lock()
 	t.inputs = append(t.inputs, append([]byte(nil), input...))
 	t.mu.Unlock()
-	return t.result, nil
+	return t.result, t.err
 }
 
 func (t *recordingTool) inputsAsJSON() []string {
@@ -356,61 +357,90 @@ func TestRunHistoryNeverMutated(t *testing.T) {
 	}
 }
 
-func TestRunRefusalEmitsErrorStatus(t *testing.T) {
+func TestRunRefusalGoesIdleAndWaits(t *testing.T) {
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
 	model := &scriptedModel{turns: []anthropic.Message{
-		mustMessage(t, `{"stop_reason":"refusal","content":[]}`),
+		mustMessage(t, `{"stop_reason":"refusal","content":[],"stop_details":{"category":"general_harms","explanation":"cannot do this"}}`),
 	}}
 	sink := &fakeSink{}
-	inbox := &fakeInbox{}
+	inbox := &fakeInbox{waitErr: context.Canceled}
 	r := newTestRunner(t, model, inbox, sink, rec, Options{MaxTurns: 3})
 
-	err := r.run(context.Background())
-	if err == nil {
-		t.Fatal("expected an error on refusal")
+	// A refusal no longer ends the investigation: it goes idle and waits. The
+	// cancelled inbox ends the run cleanly.
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(model.calls) != 1 {
+		t.Fatalf("refused turn must not be appended; expected 1 model call, got %d", len(model.calls))
 	}
 	statuses := sink.ofType(events.AgentStatus)
-	found := false
+	var errDetail string
+	var sawIdle bool
 	for _, s := range statuses {
 		var p events.AgentStatusPayload
-		if json.Unmarshal(s.payload, &p) == nil && p.State == "error" {
-			found = true
+		if json.Unmarshal(s.payload, &p) != nil {
+			continue
+		}
+		if p.State == "error" {
+			errDetail = p.Detail
+		}
+		if p.State == "idle" {
+			sawIdle = true
 		}
 	}
-	if !found {
+	if errDetail == "" {
 		t.Fatalf("expected agent.status error, got %v", statuses)
+	}
+	if !strings.Contains(errDetail, "general_harms") || !strings.Contains(errDetail, "cannot do this") {
+		t.Fatalf("error detail should use stop_details, got %q", errDetail)
+	}
+	if !sawIdle {
+		t.Fatalf("expected agent.status idle after refusal, got %v", statuses)
+	}
+	if msgs := sink.ofType(events.AgentMessage); len(msgs) == 0 {
+		t.Fatalf("expected an agent.message after refusal")
 	}
 }
 
-func TestRunMaxTurnsStops(t *testing.T) {
+func TestRunMaxTurnsPausesAndResetsOnInput(t *testing.T) {
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
 	model := &scriptedModel{turns: []anthropic.Message{
 		mustMessage(t, `{"stop_reason":"tool_use","content":[
 			{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"check connect","connector":"pg-orders-connector"}}
 		]}`),
-		mustMessage(t, `{"stop_reason":"tool_use","content":[
-			{"type":"tool_use","id":"tu2","name":"connect_status","input":{"why":"check again","connector":"other"}}
-		]}`),
 	}}
 	sink := &fakeSink{}
-	inbox := &fakeInbox{}
+	inbox := &stagedInbox{inputOnDrain: 4, text: "keep going"}
 	r := newTestRunner(t, model, inbox, sink, rec, Options{MaxTurns: 1})
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if len(model.calls) != 1 {
-		t.Fatalf("expected exactly 1 model call, got %d", len(model.calls))
+	// After hitting the limit the agent pauses, receives a steer, and runs one
+	// more turn (the scripted model's end_turn default) before the inbox ends.
+	if len(model.calls) != 2 {
+		t.Fatalf("expected 2 model calls, got %d", len(model.calls))
 	}
 	statuses := sink.ofType(events.AgentStatus)
-	found := false
 	for _, s := range statuses {
 		var p events.AgentStatusPayload
 		if json.Unmarshal(s.payload, &p) == nil && p.State == "done" {
-			found = true
+			t.Fatalf("run must not end with done while humans are steering; got %v", statuses)
 		}
 	}
-	if !found {
-		t.Fatalf("expected agent.status done, got %v", statuses)
+	var sawPause bool
+	for _, s := range statuses {
+		var p events.AgentStatusPayload
+		if json.Unmarshal(s.payload, &p) == nil && p.State == "idle" && strings.Contains(p.Detail, "max turns") {
+			sawPause = true
+		}
+	}
+	if !sawPause {
+		t.Fatalf("expected an idle status noting max turns, got %v", statuses)
+	}
+	last := lastMessage(model.calls)
+	if !strings.Contains(messagesJSON([]anthropic.MessageParam{last}), "keep going") {
+		t.Fatalf("resumed request should carry the human steer: %s", messagesJSON([]anthropic.MessageParam{last}))
 	}
 }
