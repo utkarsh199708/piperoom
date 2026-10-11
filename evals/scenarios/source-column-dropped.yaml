@@ -230,7 +230,7 @@ recordings:
 expect:
   root_cause:
     - [amount]
-    - [drop, removed, missing]
+    - [drop, removed, no longer]
   first_failing_layer: consumer
   evidence_tools: [pg_recent_ddl, kafka_consumer_lag]
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]

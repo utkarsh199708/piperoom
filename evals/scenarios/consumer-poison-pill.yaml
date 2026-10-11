@@ -220,7 +220,7 @@ inputs:
 expect:
   root_cause:
     - ['25377154', poison, wire format, deserializ, decode, magic byte, stuck]
-    - [partition 1, /1, partition=1]
+    - [partition 1, partition=1, orders/1]
   first_failing_layer: consumer
   evidence_tools: [kafka_consumer_lag]
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]

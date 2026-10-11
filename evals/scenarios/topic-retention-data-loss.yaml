@@ -250,8 +250,8 @@ recordings:
 
 expect:
   root_cause:
-    - [retention, deleted, expired, log start, log-start, aged out]
-    - [lost, loss, skipped, missing, gap]
+    - [retention, log start, log-start, expired, aged out, deleted before]
+    - [lost, loss, skipped, gap, never reached]
   first_failing_layer: kafka
   evidence_tools: [kafka_consumer_lag, kafka_topic_offsets]
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
