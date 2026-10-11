@@ -31,7 +31,7 @@ func main() {
 	flag.Parse()
 
 	if err := run(*pipeline, *title, *fakeTools, *model, *effort, *maxTurns); err != nil {
-		fmt.Fprintln(os.Stderr, "investigate:", err)
+		fmt.Fprintln(os.Stderr, "investigate:", truncatePrinted(sanitizeTerminal(err.Error())))
 		os.Exit(1)
 	}
 }
