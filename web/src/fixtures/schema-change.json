@@ -1,0 +1,379 @@
+{
+  "snapshot": {
+    "id": "r_schema_change",
+    "title": "Warehouse orders stale",
+    "severity": "sev2",
+    "pipeline_id": "orders",
+    "status": "open",
+    "opened_at": "2026-10-11T10:00:00Z",
+    "last_seq": 0,
+    "driver": null,
+    "agent_status": { "state": "idle" },
+    "hypothesis": null,
+    "open_proposals": [],
+    "pending_suggestions": [],
+    "members": []
+  },
+  "events": [
+    {
+      "room_id": "r_schema_change",
+      "seq": 1,
+      "type": "room.created",
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "payload": { "title": "Warehouse orders stale", "severity": "sev2", "pipeline_id": "orders" },
+      "at": "2026-10-11T10:00:00Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 2,
+      "type": "agent.status",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "state": "working", "detail": "step 1" },
+      "at": "2026-10-11T10:00:02Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 3,
+      "type": "agent.step.started",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_1", "title": "Check the Debezium connector" },
+      "at": "2026-10-11T10:00:03Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 4,
+      "type": "agent.tool_call",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_1", "tool_use_id": "tu_1", "tool": "connect.status", "input": { "connector": "pg-orders-connector" } },
+      "at": "2026-10-11T10:00:04Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 5,
+      "type": "agent.tool_result",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": {
+        "step_id": "s_1",
+        "tool_use_id": "tu_1",
+        "tool": "connect.status",
+        "summary": "task 0 FAILED: schema being registered is incompatible with an earlier schema for subject pg.public.orders-value",
+        "data": { "connector": "pg-orders-connector", "task": 0, "state": "FAILED" },
+        "is_error": false,
+        "took_ms": 412
+      },
+      "at": "2026-10-11T10:00:05Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 6,
+      "type": "agent.step.started",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_2", "title": "Inspect Schema Registry subject" },
+      "at": "2026-10-11T10:00:07Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 7,
+      "type": "agent.tool_call",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_2", "tool_use_id": "tu_2", "tool": "schemareg.subject", "input": { "subject": "pg.public.orders-value" } },
+      "at": "2026-10-11T10:00:08Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 8,
+      "type": "agent.tool_result",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": {
+        "step_id": "s_2",
+        "tool_use_id": "tu_2",
+        "tool": "schemareg.subject",
+        "summary": "SchemaRegistryException: incompatible schema for subject pg.public.orders-value",
+        "data": { "subject": "pg.public.orders-value", "compatibility": "BACKWARD" },
+        "is_error": true,
+        "took_ms": 89
+      },
+      "at": "2026-10-11T10:00:09Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 9,
+      "type": "comment.added",
+      "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
+      "payload": { "comment_id": "c_1", "step_id": "s_1", "text": "Wrong service? I'd expect Connect to be down, not the schema.", "mentions_agent": false },
+      "at": "2026-10-11T10:00:11Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 10,
+      "type": "agent.message",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "text": "Connect is up; task 0 is failed on a Schema Registry compatibility error.", "step_id": "s_2", "reply_to": "c_1" },
+      "at": "2026-10-11T10:00:13Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 11,
+      "type": "steer.suggested",
+      "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
+      "payload": { "suggestion_id": "g_1", "text": "Check the connector config first, not the topic." },
+      "at": "2026-10-11T10:00:15Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 12,
+      "type": "steer.sent",
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "payload": { "suggestion_id": "g_1", "text": "Check the connector config first, not the topic." },
+      "at": "2026-10-11T10:00:17Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 13,
+      "type": "agent.message",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "text": "Connector config is unchanged; the failure is the value schema subject.", "step_id": "s_1" },
+      "at": "2026-10-11T10:00:20Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 14,
+      "type": "agent.step.started",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_3", "title": "Check topic traffic" },
+      "at": "2026-10-11T10:00:22Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 15,
+      "type": "agent.tool_call",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_3", "tool_use_id": "tu_3", "tool": "kafka.lag", "input": { "group": "order-sync", "topic": "pg.public.orders" } },
+      "at": "2026-10-11T10:00:23Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 16,
+      "type": "agent.tool_result",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_3", "tool_use_id": "tu_3", "tool": "kafka.lag", "summary": "group lag 0, no new records since 09:47", "data": { "lag": 0 }, "is_error": false, "took_ms": 133 },
+      "at": "2026-10-11T10:00:24Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 17,
+      "type": "agent.step.started",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_4", "title": "Check warehouse freshness" },
+      "at": "2026-10-11T10:00:26Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 18,
+      "type": "agent.tool_call",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_4", "tool_use_id": "tu_4", "tool": "warehouse.freshness", "input": { "table": "analytics.orders" } },
+      "at": "2026-10-11T10:00:27Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 19,
+      "type": "agent.tool_result",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_4", "tool_use_id": "tu_4", "tool": "warehouse.freshness", "summary": "last loaded_at 09:48, 12 min stale", "data": { "last_loaded_at": "2026-10-11T09:48:00Z" }, "is_error": false, "took_ms": 201 },
+      "at": "2026-10-11T10:00:28Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 20,
+      "type": "agent.step.started",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_5", "title": "Check slot retention" },
+      "at": "2026-10-11T10:00:30Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 21,
+      "type": "agent.tool_call",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_5", "tool_use_id": "tu_5", "tool": "postgres.slot", "input": { "slot": "debezium" } },
+      "at": "2026-10-11T10:00:31Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 22,
+      "type": "agent.tool_result",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_5", "tool_use_id": "tu_5", "tool": "postgres.slot", "summary": "slot retained WAL 12.4 GB and growing", "data": { "slot_retained": "12.4 GB" }, "is_error": false, "took_ms": 97 },
+      "at": "2026-10-11T10:00:32Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 23,
+      "type": "agent.step.started",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_6", "title": "Check the DDL log" },
+      "at": "2026-10-11T10:00:34Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 24,
+      "type": "agent.tool_call",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "step_id": "s_6", "tool_use_id": "tu_6", "tool": "postgres.ddl", "input": { "since": "2026-10-11T09:00:00Z" } },
+      "at": "2026-10-11T10:00:35Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 25,
+      "type": "agent.tool_result",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": {
+        "step_id": "s_6",
+        "tool_use_id": "tu_6",
+        "tool": "postgres.ddl",
+        "summary": "ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) at 09:47 by etl",
+        "data": { "command_tag": "ALTER TABLE", "object_identity": "public.orders", "username": "etl" },
+        "is_error": false,
+        "took_ms": 64
+      },
+      "at": "2026-10-11T10:00:36Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 26,
+      "type": "agent.hypothesis",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": {
+        "text": "A schema change to orders.amount broke the pg-orders-connector on a Schema Registry incompatibility; no new rows reach the warehouse.",
+        "based_on_steps": ["s_2", "s_6"],
+        "confidence": "high",
+        "confirmed": false
+      },
+      "at": "2026-10-11T10:00:40Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 27,
+      "type": "proposal.created",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": {
+        "proposal_id": "p_1",
+        "title": "Set subject compatibility to NONE and restart the connector task",
+        "steps": [
+          {
+            "action": "set_compatibility",
+            "layer": "schema-registry",
+            "params": { "subject": "pg.public.orders-value", "compatibility": "NONE" },
+            "description": "Allow the new decimal schema to register under the same subject."
+          },
+          {
+            "action": "restart_task",
+            "layer": "kafka-connect",
+            "params": { "connector": "pg-orders-connector", "task": 0 },
+            "description": "Restart Debezium task 0 so it picks up the new schema."
+          }
+        ],
+        "risk": "low",
+        "rollback": "set compatibility back to BACKWARD",
+        "required_layers": ["schema-registry", "warehouse"]
+      },
+      "at": "2026-10-11T10:00:45Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 28,
+      "type": "approval.given",
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "payload": { "proposal_id": "p_1", "layer": "schema-registry" },
+      "at": "2026-10-11T10:01:10Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 29,
+      "type": "approval.given",
+      "actor": { "kind": "human", "id": "meera", "name": "Meera" },
+      "payload": { "proposal_id": "p_1", "layer": "warehouse" },
+      "at": "2026-10-11T10:01:32Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 30,
+      "type": "action.executed",
+      "actor": { "kind": "system", "id": "executor", "name": "Executor" },
+      "payload": { "proposal_id": "p_1", "step_index": 0, "ok": true, "output": "Compatibility set to NONE for pg.public.orders-value" },
+      "at": "2026-10-11T10:01:34Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 31,
+      "type": "action.executed",
+      "actor": { "kind": "system", "id": "executor", "name": "Executor" },
+      "payload": { "proposal_id": "p_1", "step_index": 1, "ok": true, "output": "Task 0 restarted" },
+      "at": "2026-10-11T10:01:36Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 32,
+      "type": "agent.status",
+      "actor": { "kind": "agent", "id": "agent", "name": "Agent" },
+      "payload": { "state": "done", "detail": "fix applied" },
+      "at": "2026-10-11T10:01:40Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 33,
+      "type": "trace.pinned",
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "payload": {
+        "table": "orders",
+        "key": "id=10042",
+        "stages": [
+          { "layer": "postgres", "name": "public.orders", "status": "seen", "facts": { "row": "id=10042" } },
+          { "layer": "kafka-connect", "name": "pg-orders-connector", "status": "seen", "facts": { "task": "0" } },
+          { "layer": "schema-registry", "name": "pg.public.orders-value", "status": "seen" },
+          { "layer": "kafka", "name": "pg.public.orders", "status": "seen", "facts": { "partition": "0", "offset": "48213" } },
+          { "layer": "consumer", "name": "order-sync", "status": "not_seen" },
+          { "layer": "warehouse", "name": "analytics.orders", "status": "stopped_here", "facts": { "reason": "no row for id=10042" } }
+        ]
+      },
+      "at": "2026-10-11T10:02:00Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 34,
+      "type": "handoff.created",
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "payload": {
+        "handoff_id": "h_1",
+        "to": { "kind": "human", "id": "kabir", "name": "Kabir" },
+        "summary": {
+          "what_broke": "Debezium task 0 failed after orders.amount was altered to numeric(12,2).",
+          "why": "New schema is incompatible under BACKWARD compatibility for subject pg.public.orders-value.",
+          "done": ["Set compatibility to NONE", "Restarted task 0", "Warehouse caught up"],
+          "ruled_out": ["Kafka brokers", "Consumer group config"],
+          "open": ["Consider pinning decimal.handling.mode"],
+          "risks": ["BACKWARD compatibility is off until re-enabled"]
+        },
+        "stay_as_watcher": false
+      },
+      "at": "2026-10-11T10:05:00Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 35,
+      "type": "control.granted",
+      "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
+      "payload": { "to": { "kind": "human", "id": "kabir", "name": "Kabir" }, "lease_until": "2026-10-11T10:35:00Z" },
+      "at": "2026-10-11T10:05:01Z"
+    },
+    {
+      "room_id": "r_schema_change",
+      "seq": 36,
+      "type": "handoff.accepted",
+      "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
+      "payload": { "handoff_id": "h_1" },
+      "at": "2026-10-11T10:05:02Z"
+    }
+  ]
+}

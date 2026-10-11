@@ -1,0 +1,408 @@
+// The single reducer that folds one room event into UI state, mirroring A5's
+// Apply(snapshot, event) semantics. Dedupe (seq <= last_seq) happens here; gap
+// filling (seq > last_seq + 1) is the transport's job (see hooks/useRoom.ts).
+import type {
+  ActionExecutedPayload,
+  AgentHypothesisPayload,
+  AgentMessagePayload,
+  AgentStatusPayload,
+  AgentStepStartPayload,
+  AgentToolCallPayload,
+  AgentToolResultPayload,
+  ApprovalGivenPayload,
+  ApprovalRejectedPayload,
+  CommentAddedPayload,
+  ControlGrantedPayload,
+  Event,
+  HandoffAcceptedPayload,
+  HandoffCreatedPayload,
+  ProposalCreatedPayload,
+  RoomClosedPayload,
+  RoomCreatedPayload,
+  SteerSentPayload,
+  SteerSuggestedPayload,
+  TracePinnedPayload,
+} from '../api/types'
+import { describeEvent } from './describe'
+import type { RoomState, StepState } from './types'
+
+function as<T>(e: Event): T {
+  return e.payload as T
+}
+
+// True when the event's seq skips ahead — the transport must fetch the missing
+// events (/events?after=lastSeq) before applying.
+export function detectGap(lastSeq: number, event: Event): boolean {
+  return event.seq > lastSeq + 1
+}
+
+function updateStep(
+  steps: StepState[],
+  stepId: string,
+  fn: (s: StepState) => StepState,
+): StepState[] {
+  return steps.map((s) => (s.id === stepId ? fn(s) : s))
+}
+
+export function applyEvent(state: RoomState, event: Event): RoomState {
+  if (event.seq <= state.last_seq) return state
+
+  let next: RoomState = state
+
+  switch (event.type) {
+    case 'room.created': {
+      const p = as<RoomCreatedPayload>(event)
+      const driver =
+        event.actor.kind === 'human'
+          ? { id: event.actor.id, name: event.actor.name }
+          : state.driver
+      next = {
+        ...state,
+        title: p.title,
+        severity: p.severity as RoomState['severity'],
+        pipeline_id: p.pipeline_id,
+        status: 'open',
+        opened_at: event.at,
+        driver,
+        members:
+          event.actor.kind === 'human'
+            ? [{ id: event.actor.id, name: event.actor.name, role: 'driver' }]
+            : state.members,
+      }
+      break
+    }
+
+    case 'room.closed': {
+      const p = as<RoomClosedPayload>(event)
+      next = {
+        ...state,
+        status: 'closed',
+        closed_at: event.at,
+        resolution: p.resolution,
+      }
+      break
+    }
+
+    case 'agent.status': {
+      const p = as<AgentStatusPayload>(event)
+      next = { ...state, agent_status: { state: p.state, detail: p.detail } }
+      break
+    }
+
+    case 'agent.step.started': {
+      const p = as<AgentStepStartPayload>(event)
+      if (state.steps.some((s) => s.id === p.step_id)) break
+      next = {
+        ...state,
+        steps: [
+          ...state.steps,
+          { id: p.step_id, title: p.title, tool_calls: [], messages: [] },
+        ],
+      }
+      break
+    }
+
+    case 'agent.tool_call': {
+      const p = as<AgentToolCallPayload>(event)
+      next = {
+        ...state,
+        steps: updateStep(state.steps, p.step_id, (s) => {
+          if (s.tool_calls.some((t) => t.tool_use_id === p.tool_use_id)) return s
+          return {
+            ...s,
+            tool_calls: [
+              ...s.tool_calls,
+              { tool_use_id: p.tool_use_id, tool: p.tool, input: p.input },
+            ],
+          }
+        }),
+      }
+      break
+    }
+
+    case 'agent.tool_result': {
+      const p = as<AgentToolResultPayload>(event)
+      next = {
+        ...state,
+        steps: updateStep(state.steps, p.step_id, (s) => ({
+          ...s,
+          tool_calls: s.tool_calls.map((t) =>
+            t.tool_use_id === p.tool_use_id
+              ? {
+                  ...t,
+                  tool: p.tool,
+                  summary: p.summary,
+                  data: p.data,
+                  is_error: p.is_error,
+                  truncated: p.truncated,
+                  took_ms: p.took_ms,
+                }
+              : t,
+          ),
+        })),
+      }
+      break
+    }
+
+    case 'agent.message': {
+      const p = as<AgentMessagePayload>(event)
+      if (p.reply_to) {
+        next = {
+          ...state,
+          comments: state.comments.map((c) =>
+            c.id === p.reply_to
+              ? { ...c, replies: [...c.replies, { text: p.text, at: event.at }] }
+              : c,
+          ),
+        }
+      } else if (p.step_id) {
+        next = {
+          ...state,
+          steps: updateStep(state.steps, p.step_id, (s) => ({
+            ...s,
+            messages: [...s.messages, { text: p.text, at: event.at }],
+          })),
+        }
+      } else {
+        next = {
+          ...state,
+          messages: [...state.messages, { text: p.text, at: event.at }],
+        }
+      }
+      break
+    }
+
+    case 'agent.hypothesis': {
+      const p = as<AgentHypothesisPayload>(event)
+      next = {
+        ...state,
+        hypothesis: {
+          text: p.text,
+          based_on_steps: p.based_on_steps,
+          confidence: p.confidence,
+          confirmed: p.confirmed,
+        },
+      }
+      break
+    }
+
+    case 'comment.added': {
+      const p = as<CommentAddedPayload>(event)
+      next = {
+        ...state,
+        comments: [
+          ...state.comments,
+          {
+            id: p.comment_id,
+            step_id: p.step_id,
+            text: p.text,
+            mentions_agent: p.mentions_agent,
+            author: event.actor,
+            at: event.at,
+            replies: [],
+          },
+        ],
+      }
+      break
+    }
+
+    case 'steer.suggested': {
+      const p = as<SteerSuggestedPayload>(event)
+      next = {
+        ...state,
+        suggestions: [
+          ...state.suggestions,
+          { suggestion_id: p.suggestion_id, from: event.actor, text: p.text },
+        ],
+      }
+      break
+    }
+
+    case 'steer.sent': {
+      const p = as<SteerSentPayload>(event)
+      if (p.suggestion_id) {
+        next = {
+          ...state,
+          suggestions: state.suggestions.filter(
+            (s) => s.suggestion_id !== p.suggestion_id,
+          ),
+        }
+      }
+      break
+    }
+
+    case 'control.requested': {
+      if (state.control_requests.some((r) => r.from.id === event.actor.id)) break
+      next = {
+        ...state,
+        control_requests: [...state.control_requests, { from: event.actor }],
+      }
+      break
+    }
+
+    case 'control.granted': {
+      const p = as<ControlGrantedPayload>(event)
+      const members = state.members.some((m) => m.id === p.to.id)
+        ? state.members.map((m) =>
+            m.id === p.to.id
+              ? { ...m, role: 'driver' }
+              : m.role === 'driver'
+                ? { ...m, role: 'watching' }
+                : m,
+          )
+        : [
+            ...state.members.map((m) =>
+              m.role === 'driver' ? { ...m, role: 'watching' } : m,
+            ),
+            { id: p.to.id, name: p.to.name, role: 'driver' },
+          ]
+      next = {
+        ...state,
+        driver: { id: p.to.id, name: p.to.name, lease_until: p.lease_until },
+        members,
+        control_requests: state.control_requests.filter((r) => r.from.id !== p.to.id),
+      }
+      break
+    }
+
+    case 'proposal.created': {
+      const p = as<ProposalCreatedPayload>(event)
+      const approvals: Record<string, 'pending'> = {}
+      for (const layer of p.required_layers) approvals[layer] = 'pending'
+      next = {
+        ...state,
+        proposals: [
+          ...state.proposals,
+          {
+            proposal_id: p.proposal_id,
+            title: p.title,
+            steps: p.steps,
+            risk: p.risk,
+            rollback: p.rollback,
+            required_layers: p.required_layers,
+            approvals,
+            status: 'open',
+            executed: [],
+          },
+        ],
+      }
+      break
+    }
+
+    case 'approval.given': {
+      const p = as<ApprovalGivenPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) => {
+          if (prop.proposal_id !== p.proposal_id) return prop
+          const approvals = { ...prop.approvals, [p.layer]: 'approved' as const }
+          const allApproved = prop.required_layers.every(
+            (l) => approvals[l] === 'approved',
+          )
+          return { ...prop, approvals, status: allApproved ? 'approved' : 'open' }
+        }),
+      }
+      break
+    }
+
+    case 'approval.rejected': {
+      const p = as<ApprovalRejectedPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) =>
+          prop.proposal_id === p.proposal_id
+            ? {
+                ...prop,
+                approvals: { ...prop.approvals, [p.layer]: 'rejected' as const },
+                status: 'rejected',
+              }
+            : prop,
+        ),
+      }
+      break
+    }
+
+    case 'action.executed': {
+      const p = as<ActionExecutedPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) =>
+          prop.proposal_id === p.proposal_id
+            ? { ...prop, executed: [...prop.executed, p] }
+            : prop,
+        ),
+      }
+      break
+    }
+
+    case 'handoff.created': {
+      const p = as<HandoffCreatedPayload>(event)
+      next = {
+        ...state,
+        handoffs: [
+          ...state.handoffs,
+          {
+            handoff_id: p.handoff_id,
+            to: p.to,
+            summary: p.summary,
+            stay_as_watcher: p.stay_as_watcher,
+            status: 'pending' as const,
+          },
+        ],
+      }
+      break
+    }
+
+    case 'handoff.accepted': {
+      const p = as<HandoffAcceptedPayload>(event)
+      const accepted = state.handoffs.find((h) => h.handoff_id === p.handoff_id)
+      next = {
+        ...state,
+        handoffs: state.handoffs.map((h) =>
+          h.handoff_id === p.handoff_id ? { ...h, status: 'accepted' as const } : h,
+        ),
+        driver: accepted
+          ? { id: accepted.to.id, name: accepted.to.name }
+          : state.driver,
+        members: accepted
+          ? state.members.some((m) => m.id === accepted.to.id)
+            ? state.members.map((m) =>
+                m.id === accepted.to.id
+                  ? { ...m, role: 'driver' }
+                  : m.role === 'driver'
+                    ? { ...m, role: 'watching' }
+                    : m,
+              )
+            : [
+                ...state.members.map((m) =>
+                  m.role === 'driver' ? { ...m, role: 'watching' } : m,
+                ),
+                { id: accepted.to.id, name: accepted.to.name, role: 'driver' },
+              ]
+          : state.members,
+      }
+      break
+    }
+
+    case 'trace.pinned': {
+      const p = as<TracePinnedPayload>(event)
+      next = {
+        ...state,
+        trace: { table: p.table, key: p.key, stages: p.stages },
+      }
+      break
+    }
+
+    default:
+      break
+  }
+
+  return {
+    ...next,
+    last_seq: event.seq,
+    activity: [
+      { seq: event.seq, at: event.at, actor: event.actor, text: describeEvent(event) },
+      ...next.activity,
+    ].slice(0, 20),
+  }
+}

@@ -1,0 +1,47 @@
+[
+  {
+    "id": "r_schema_change",
+    "title": "Warehouse orders stale",
+    "severity": "sev2",
+    "pipeline_id": "orders",
+    "status": "open",
+    "opened_at": "2026-10-11T10:00:00Z",
+    "last_seq": 36,
+    "driver": { "id": "kabir", "name": "Kabir", "lease_until": "2026-10-11T10:35:00Z" },
+    "agent_status": { "state": "done", "detail": "fix applied" },
+    "hypothesis": {
+      "text": "A schema change to orders.amount broke the pg-orders-connector on a Schema Registry incompatibility; no new rows reach the warehouse.",
+      "based_on_steps": ["s_2", "s_6"],
+      "confidence": "high",
+      "confirmed": true
+    },
+    "open_proposals": [],
+    "pending_suggestions": [],
+    "members": [
+      { "id": "kabir", "name": "Kabir", "role": "driver" },
+      { "id": "arjun", "name": "Arjun", "role": "watching" },
+      { "id": "priya", "name": "Priya", "role": "watching" },
+      { "id": "meera", "name": "Meera", "role": "watching" }
+    ]
+  },
+  {
+    "id": "r_consumer_lag",
+    "title": "Consumer lag on order-sync",
+    "severity": "sev3",
+    "pipeline_id": "orders",
+    "status": "closed",
+    "opened_at": "2026-10-10T09:12:00Z",
+    "closed_at": "2026-10-10T10:03:00Z",
+    "resolution": "Restarted devconsumer without --fail-on-id",
+    "last_seq": 21,
+    "driver": { "id": "kabir", "name": "Kabir", "lease_until": "2026-10-10T09:42:00Z" },
+    "agent_status": { "state": "done" },
+    "hypothesis": null,
+    "open_proposals": [],
+    "pending_suggestions": [],
+    "members": [
+      { "id": "kabir", "name": "Kabir", "role": "driver" },
+      { "id": "arjun", "name": "Arjun", "role": "watching" }
+    ]
+  }
+]
