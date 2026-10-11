@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -221,9 +222,10 @@ func TestLeaseExpiryAllowsTakeover(t *testing.T) {
 	svc, _, c := newTestService(t)
 	roomID := createRoom(t, svc, "arjun").ID
 
-	// While the lease is held, a non-driver cannot grant control.
+	// While the lease is held, a non-driver cannot grant control: 409
+	// lease_held, not 403 (docs/api.md).
 	_, err := svc.GrantControl(context.Background(), mustUser(t, svc, "kabir"), roomID, "kabir")
-	wantCode(t, err, "not_driver")
+	wantCode(t, err, "lease_held")
 
 	// After the lease expires, anyone can take control.
 	c.Advance(31 * time.Minute)
@@ -233,6 +235,82 @@ func TestLeaseExpiryAllowsTakeover(t *testing.T) {
 	snap, _ := svc.GetRoom(context.Background(), roomID)
 	if snap.Driver == nil || snap.Driver.ID != "kabir" {
 		t.Fatalf("driver not moved: %+v", snap.Driver)
+	}
+}
+
+func TestExpiredLeaseDriverStillDrives(t *testing.T) {
+	svc, _, c := newTestService(t)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	// arjun's lease lapses but nobody replaces him: he is still the driver and
+	// his next action renews the lease (docs/api.md).
+	c.Advance(31 * time.Minute)
+	ev, err := svc.Steer(context.Background(), mustUser(t, svc, "arjun"), roomID, "still here")
+	if err != nil {
+		t.Fatalf("steer after lease expiry: %v", err)
+	}
+	if ev.Type != events.SteerSent {
+		t.Fatalf("expired-lease driver must steer directly, got %s", ev.Type)
+	}
+	snap, _ := svc.GetRoom(context.Background(), roomID)
+	if snap.Driver == nil || !snap.Driver.LeaseUntil.After(c.Now().Add(room.DriverLease-time.Minute)) {
+		t.Fatalf("lease was not renewed: %+v", snap.Driver)
+	}
+}
+
+func TestCreateHandoffDriverOnly(t *testing.T) {
+	svc, _, c := newTestService(t)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	// A non-driver cannot trigger a hand-off, even the intended recipient.
+	_, err := svc.CreateHandoff(context.Background(), mustUser(t, svc, "priya"), roomID, "kabir", false)
+	wantCode(t, err, "not_driver")
+
+	// An expired-lease driver was not replaced, so he may still hand off.
+	c.Advance(31 * time.Minute)
+	if _, err := svc.CreateHandoff(context.Background(), mustUser(t, svc, "arjun"), roomID, "priya", false); err != nil {
+		t.Fatalf("expired-lease driver handoff: %v", err)
+	}
+}
+
+func TestHandoffSummarySanitized(t *testing.T) {
+	long := strings.Repeat("raw tool output ", 200)
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	svc := room.New(room.Deps{
+		Store: st,
+		Users: room.DefaultUsers(),
+		Run:   fakeRun,
+		Now:   c.Now,
+		WriteHandoff: func(ctx context.Context, evs []events.Event, opts agent.Options) (events.HandoffSummary, error) {
+			items := make([]string, 0, 40)
+			for i := 0; i < 40; i++ {
+				items = append(items, long)
+			}
+			return events.HandoffSummary{WhatBroke: long, Why: long, Done: items, Open: items}, nil
+		},
+	})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	ev, err := svc.CreateHandoff(context.Background(), mustUser(t, svc, "arjun"), roomID, "priya", false)
+	if err != nil {
+		t.Fatalf("handoff: %v", err)
+	}
+	p, err := events.Decode[events.HandoffCreatedPayload](ev)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(p.Summary.WhatBroke) > 600 || len(p.Summary.Why) > 600 {
+		t.Fatalf("summary fields not bounded: %d/%d", len(p.Summary.WhatBroke), len(p.Summary.Why))
+	}
+	if len(p.Summary.Done) > 10 || len(p.Summary.Open) > 10 {
+		t.Fatalf("summary lists not bounded: done=%d open=%d", len(p.Summary.Done), len(p.Summary.Open))
+	}
+	for _, item := range p.Summary.Done {
+		if len(item) > 600 {
+			t.Fatalf("summary list item not bounded: %d bytes", len(item))
+		}
 	}
 }
 

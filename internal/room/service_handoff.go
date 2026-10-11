@@ -10,6 +10,37 @@ import (
 	"piperoom/internal/store"
 )
 
+// handoffSummaryTimeout bounds the hand-off summary generation. docs/api.md
+// allows up to 3 minutes for this route.
+const handoffSummaryTimeout = 3 * time.Minute
+
+// handoffListMax caps the number of items in each hand-off list (review item
+// 12: a runaway model must not dump raw tool output into the log).
+const handoffListMax = 10
+
+// sanitizeHandoff bounds every agent-written summary string and list before it
+// is stored, so raw tool output blobs cannot leak into the log or the UI.
+func sanitizeHandoff(s events.HandoffSummary) events.HandoffSummary {
+	s.WhatBroke = truncateDetail(s.WhatBroke)
+	s.Why = truncateDetail(s.Why)
+	s.Done = sanitizeHandoffList(s.Done)
+	s.RuledOut = sanitizeHandoffList(s.RuledOut)
+	s.Open = sanitizeHandoffList(s.Open)
+	s.Risks = sanitizeHandoffList(s.Risks)
+	return s
+}
+
+func sanitizeHandoffList(in []string) []string {
+	if len(in) > handoffListMax {
+		in = in[:handoffListMax]
+	}
+	out := make([]string, 0, len(in))
+	for _, item := range in {
+		out = append(out, truncateDetail(item))
+	}
+	return out
+}
+
 // CreateHandoff asks the agent for a shift summary and emits handoff.created.
 func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID string, stayAsWatcher bool) (events.Event, error) {
 	to, ok := s.users.Get(toID)
@@ -41,12 +72,13 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 	if err != nil {
 		return events.Event{}, fmt.Errorf("room: handoff: read events: %w", err)
 	}
-	wctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	wctx, cancel := context.WithTimeout(ctx, handoffSummaryTimeout)
 	summary, err := s.writeHandoff(wctx, roomEvents, s.opts)
 	cancel()
 	if err != nil {
 		return events.Event{}, fmt.Errorf("room: handoff: write summary: %w", err)
 	}
+	summary = sanitizeHandoff(summary)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

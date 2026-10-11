@@ -305,11 +305,16 @@ func (s *Service) emitAs(ctx context.Context, roomID string, actor events.Actor,
 	return err
 }
 
+// isDriver reports whether userID holds the driver role. The role survives an
+// expired lease: docs/api.md says a driver whose lease expired and who was not
+// replaced is still treated as the driver, and their next action renews the
+// lease.
 func (s *Service) isDriver(st *roomState, userID string) bool {
 	d := st.snap.Driver
-	return d != nil && d.ID == userID && s.now().Before(d.LeaseUntil)
+	return d != nil && d.ID == userID
 }
 
+// leaseExpired reports whether the driver lease has lapsed (or nobody drives).
 func (s *Service) leaseExpired(st *roomState) bool {
 	d := st.snap.Driver
 	return d == nil || !s.now().Before(d.LeaseUntil)

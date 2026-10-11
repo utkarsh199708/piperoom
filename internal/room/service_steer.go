@@ -131,7 +131,8 @@ func (s *Service) RequestControl(ctx context.Context, user User, roomID string) 
 }
 
 // GrantControl moves the driver role: the driver can grant, or anyone when
-// there is no driver or the lease has expired.
+// there is no driver or the lease has expired. A non-driver while another
+// user's lease is still live gets 409 lease_held (docs/api.md).
 func (s *Service) GrantControl(ctx context.Context, user User, roomID, toID string) (events.Event, error) {
 	to, ok := s.users.Get(toID)
 	if !ok {
@@ -146,8 +147,8 @@ func (s *Service) GrantControl(ctx context.Context, user User, roomID, toID stri
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
-	if !s.leaseExpired(st) && !s.isDriver(st, user.ID) {
-		return events.Event{}, ErrNotDriver()
+	if !s.isDriver(st, user.ID) && !s.leaseExpired(st) {
+		return events.Event{}, leaseHeld("another user's driver lease is still live")
 	}
 	lease := s.now().UTC().Add(DriverLease)
 	e, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, humanActor(user), events.ControlGrantedPayload{

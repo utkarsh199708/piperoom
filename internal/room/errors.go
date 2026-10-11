@@ -19,6 +19,7 @@ const (
 	codeAlreadyDecided = "already_decided"
 	codeRoomClosed     = "room_closed"
 	codeStaleHandoff   = "stale_handoff"
+	codeLeaseHeld      = "lease_held"
 )
 
 func validation(msg string) *Error {
@@ -52,4 +53,10 @@ func staleHandoff(msg string) *Error {
 
 func roomClosed(msg string) *Error {
 	return &Error{Status: 409, Code: codeRoomClosed, Msg: msg}
+}
+
+// leaseHeld is "control/grant by a non-driver while another user's lease is
+// still live" (docs/api.md error table).
+func leaseHeld(msg string) *Error {
+	return &Error{Status: 409, Code: codeLeaseHeld, Msg: msg}
 }
