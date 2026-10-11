@@ -1,9 +1,3 @@
-// Package slackbridge mirrors each incident room into one Slack thread and
-// turns human replies in that thread into room comments.
-//
-// Slack is a window onto the room, not a second control plane: replies become
-// plain comments only. Steering, control and approvals stay in the room UI,
-// where the driver and layer-owner checks live.
 package slackbridge
 
 import (
@@ -15,101 +9,206 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
+
+	"piperoom/internal/clients/netsec"
 )
 
 const (
 	maxResponseBytes = 4 << 20
-	maxRetries       = 3
-	maxRetryWait     = 30 * time.Second
+	attemptTimeout   = 10 * time.Second
+	maxAttempts      = 5
+	maxBackoff       = 30 * time.Second
+	maxRetryAfter    = 120 * time.Second
+	// minGap is Slack's "about one message per second per channel" guidance for
+	// chat.postMessage (https://docs.slack.dev/apis/web-api/rate-limits).
+	minGap = time.Second
 )
 
-// ErrSlack wraps an error reported by the Slack Web API (ok=false).
-var ErrSlack = errors.New("slackbridge: slack api error")
+// ErrRateLimited means Slack asked us to wait longer than we are willing to.
+var ErrRateLimited = errors.New("slackbridge: rate limited by slack")
 
-// Poster posts messages to Slack. *Client implements it; tests use a fake.
-type Poster interface {
-	// Post sends text to channel. A non-empty threadTS makes it a thread reply.
-	// It returns the message timestamp, which doubles as the thread id.
-	Post(ctx context.Context, channel, threadTS, text string) (ts string, err error)
+// APIError is a Slack Web API reply with ok=false. Code is Slack's error code
+// (https://docs.slack.dev/reference/methods/chat.postMessage#errors).
+type APIError struct{ Code string }
+
+func (e *APIError) Error() string { return "slackbridge: chat.postMessage: slack error " + e.Code }
+
+type textObj struct {
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	Verbatim bool   `json:"verbatim"`
 }
 
-// Client is a minimal Slack Web API client (chat.postMessage only).
-type Client struct {
-	token   string
-	baseURL string
-	http    *http.Client
+type block struct {
+	Type     string    `json:"type"` // "section" or "context"
+	Text     *textObj  `json:"text,omitempty"`
+	Elements []textObj `json:"elements,omitempty"`
 }
 
-// NewClient builds a client. baseURL is "https://slack.com/api" in production.
-// The token is never logged or included in errors.
-func NewClient(token, baseURL string) *Client {
-	return &Client{token: token, baseURL: baseURL, http: &http.Client{Timeout: 10 * time.Second}}
+// message is one chat.postMessage call. text is the notification fallback.
+type message struct {
+	Channel        string
+	Text           string
+	Blocks         []block
+	ThreadTS       string
+	ReplyBroadcast bool
 }
 
-// Post implements Poster. It retries on HTTP 429 using Retry-After.
-func (c *Client) Post(ctx context.Context, channel, threadTS, text string) (string, error) {
-	body, err := json.Marshal(map[string]any{
-		"channel":      channel,
-		"thread_ts":    threadTS,
-		"text":         text,
-		"unfurl_links": false,
-		"unfurl_media": false,
-	})
+type postResult struct{ Channel, TS string }
+
+// client calls chat.postMessage, the only Slack method the bridge uses.
+type client struct {
+	hc    *http.Client
+	base  string
+	token netsec.Secret
+
+	now   func() time.Time
+	sleep func(context.Context, time.Duration) error
+
+	mu   sync.Mutex
+	next time.Time // earliest start of the next post, across all rooms
+}
+
+func newClient(hc *http.Client, base string, token netsec.Secret) *client {
+	return &client{hc: hc, base: base, token: token, now: time.Now, sleep: sleepCtx}
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// pace reserves the next send slot under the lock and sleeps outside it, so a
+// room waiting for its slot never blocks another room's cancelled ctx.
+func (c *client) pace(ctx context.Context) error {
+	c.mu.Lock()
+	now := c.now()
+	start := c.next
+	if start.Before(now) {
+		start = now
+	}
+	c.next = start.Add(minGap)
+	c.mu.Unlock()
+	if d := start.Sub(now); d > 0 {
+		return c.sleep(ctx, d)
+	}
+	return nil
+}
+
+// post sends m. Only HTTP 429, 5xx and Slack's own rate-limit codes are
+// retried: those mean the message was not accepted. After a transport error
+// or timeout it may have been, and chat.postMessage is not idempotent, so
+// that error is returned as is.
+func (c *client) post(ctx context.Context, m message) (postResult, error) {
+	fields := map[string]any{
+		"channel":         m.Channel,
+		"text":            m.Text,
+		"blocks":          m.Blocks,
+		"reply_broadcast": m.ReplyBroadcast,
+		"unfurl_links":    false,
+		"unfurl_media":    false,
+		"parse":           "none",
+	}
+	if m.ThreadTS != "" { // only replies carry it, and always the parent ts
+		fields["thread_ts"] = m.ThreadTS
+	}
+	body, err := json.Marshal(fields)
 	if err != nil {
-		return "", fmt.Errorf("slackbridge: marshal message: %w", err)
+		return postResult{}, fmt.Errorf("slackbridge: encode message: %w", err)
 	}
-	for attempt := 0; ; attempt++ {
-		ts, wait, err := c.postOnce(ctx, body)
-		if wait == 0 || attempt >= maxRetries-1 {
-			return ts, err
+	for attempt := 1; ; attempt++ {
+		if err := c.pace(ctx); err != nil {
+			return postResult{}, fmt.Errorf("slackbridge: chat.postMessage: waiting for send slot: %w", err)
 		}
-		select {
-		case <-ctx.Done():
-			return "", fmt.Errorf("slackbridge: waiting for rate limit: %w", ctx.Err())
-		case <-time.After(wait):
+		o := c.once(ctx, body)
+		if !o.retry {
+			return o.res, o.err
+		}
+		wait := backoff(attempt)
+		if o.retryAfter != "" {
+			if secs, err := strconv.Atoi(o.retryAfter); err == nil && secs > 0 {
+				wait = time.Duration(secs) * time.Second
+				if wait > maxRetryAfter {
+					return postResult{}, fmt.Errorf("%w: retry-after %ds is too long: %w", ErrRateLimited, secs, o.err)
+				}
+			}
+		}
+		if attempt >= maxAttempts {
+			return postResult{}, fmt.Errorf("slackbridge: chat.postMessage: gave up after %d attempts: %w", attempt, o.err)
+		}
+		if err := c.sleep(ctx, wait); err != nil {
+			return postResult{}, fmt.Errorf("slackbridge: chat.postMessage: waiting to retry: %w", err)
 		}
 	}
 }
 
-// postOnce returns wait > 0 when Slack asked us to retry later.
-func (c *Client) postOnce(ctx context.Context, body []byte) (string, time.Duration, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat.postMessage", bytes.NewReader(body))
-	if err != nil {
-		return "", 0, fmt.Errorf("slackbridge: build request: %w", err)
+func backoff(attempt int) time.Duration {
+	d := time.Second << (attempt - 1)
+	if d > maxBackoff || d <= 0 {
+		return maxBackoff
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	return d
+}
+
+type outcome struct {
+	res        postResult
+	err        error
+	retry      bool
+	retryAfter string
+}
+
+func (c *client) once(ctx context.Context, body []byte) outcome {
+	ctx, cancel := context.WithTimeout(ctx, attemptTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/chat.postMessage", bytes.NewReader(body))
+	if err != nil {
+		return outcome{err: fmt.Errorf("slackbridge: chat.postMessage: build request: %w", err)}
+	}
+	// Slack takes the token as a bearer header on JSON calls, never in the body.
+	req.Header.Set("Authorization", "Bearer "+c.token.Reveal())
 	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	resp, err := c.http.Do(req)
+	resp, err := c.hc.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("slackbridge: chat.postMessage: %w", err)
+		return outcome{err: fmt.Errorf("slackbridge: chat.postMessage: %w", err)}
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return "", 0, fmt.Errorf("slackbridge: read response: %w", err)
+		return outcome{err: fmt.Errorf("slackbridge: chat.postMessage: read response: %w", err)}
 	}
-	if resp.StatusCode == http.StatusTooManyRequests {
-		secs, _ := strconv.Atoi(resp.Header.Get("Retry-After"))
-		wait := time.Duration(secs) * time.Second
-		if wait <= 0 {
-			wait = time.Second
-		}
-		return "", min(wait, maxRetryWait), fmt.Errorf("slackbridge: rate limited (retry after %s)", wait)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("slackbridge: chat.postMessage: HTTP %d", resp.StatusCode)
+	ra := resp.Header.Get("Retry-After")
+	switch {
+	case resp.StatusCode == http.StatusTooManyRequests:
+		return outcome{retry: true, retryAfter: ra, err: fmt.Errorf("slackbridge: chat.postMessage: HTTP 429: %w", ErrRateLimited)}
+	case resp.StatusCode >= 500:
+		return outcome{retry: true, retryAfter: ra, err: fmt.Errorf("slackbridge: chat.postMessage: HTTP %d", resp.StatusCode)}
+	case resp.StatusCode != http.StatusOK:
+		return outcome{err: fmt.Errorf("slackbridge: chat.postMessage: HTTP %d", resp.StatusCode)}
 	}
 	var out struct {
-		OK    bool   `json:"ok"`
-		TS    string `json:"ts"`
-		Error string `json:"error"`
+		OK      bool   `json:"ok"`
+		Error   string `json:"error"`
+		Channel string `json:"channel"`
+		TS      string `json:"ts"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return "", 0, fmt.Errorf("slackbridge: decode response: %w", err)
+		return outcome{err: fmt.Errorf("slackbridge: chat.postMessage: decode response: %w", err)}
 	}
 	if !out.OK {
-		return "", 0, fmt.Errorf("%w: %s", ErrSlack, out.Error)
+		apiErr := &APIError{Code: out.Error}
+		rl := out.Error == "ratelimited" || out.Error == "rate_limited"
+		return outcome{err: apiErr, retry: rl, retryAfter: ra}
 	}
-	return out.TS, 0, nil
+	if out.TS == "" {
+		return outcome{err: errors.New("slackbridge: chat.postMessage: ok reply without ts")}
+	}
+	return outcome{res: postResult{Channel: out.Channel, TS: out.TS}}
 }

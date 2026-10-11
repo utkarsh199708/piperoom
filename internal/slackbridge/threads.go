@@ -1,58 +1,46 @@
 package slackbridge
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
-// Thread links one room to its Slack thread and remembers how far the room's
-// event log has been mirrored, so a restart resumes instead of replaying.
+// Thread links a room to its Slack thread. LastSeq is the highest room event
+// seq handled, so a restart resumes instead of replaying.
 type Thread struct {
-	TS      string // Slack ts of the root message
-	LastSeq int64  // last room event seq handled
+	Channel string // from the parent post's reply; replies always go here
+	TS      string // ts of the parent message, kept as the string Slack sent
+	LastSeq int64
 }
 
-// ThreadStore persists the room↔thread link.
-type ThreadStore interface {
-	Get(roomID string) (Thread, bool)
-	Put(roomID string, t Thread)
-	// RoomByThread finds the room for a Slack thread ts.
-	RoomByThread(ts string) (roomID string, ok bool)
+// Threads persists room→thread links. A5 can back it with Postgres later.
+type Threads interface {
+	Get(ctx context.Context, roomID string) (Thread, bool, error)
+	Put(ctx context.Context, roomID string, t Thread) error
 }
 
-// MemThreads is an in-memory ThreadStore. It loses state on restart, so after
-// a restart a room is mirrored again into a fresh thread; a Postgres-backed
-// store (owned by the room service) is the follow-up.
+// MemThreads is the default in-memory Threads. It forgets everything on
+// restart, so the room then gets a new parent message.
 type MemThreads struct {
-	mu     sync.Mutex
-	byRoom map[string]Thread
-	byTS   map[string]string
+	mu sync.Mutex
+	m  map[string]Thread
 }
 
-// NewMemThreads returns an empty store.
-func NewMemThreads() *MemThreads {
-	return &MemThreads{byRoom: map[string]Thread{}, byTS: map[string]string{}}
+// NewMemThreads returns an empty MemThreads.
+func NewMemThreads() *MemThreads { return &MemThreads{m: map[string]Thread{}} }
+
+// Get implements Threads.
+func (t *MemThreads) Get(_ context.Context, roomID string) (Thread, bool, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	th, ok := t.m[roomID]
+	return th, ok, nil
 }
 
-// Get implements ThreadStore.
-func (m *MemThreads) Get(roomID string) (Thread, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	t, ok := m.byRoom[roomID]
-	return t, ok
-}
-
-// Put implements ThreadStore.
-func (m *MemThreads) Put(roomID string, t Thread) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.byRoom[roomID] = t
-	if t.TS != "" {
-		m.byTS[t.TS] = roomID
-	}
-}
-
-// RoomByThread implements ThreadStore.
-func (m *MemThreads) RoomByThread(ts string) (string, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	r, ok := m.byTS[ts]
-	return r, ok
+// Put implements Threads.
+func (t *MemThreads) Put(_ context.Context, roomID string, th Thread) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.m[roomID] = th
+	return nil
 }

@@ -1,77 +1,140 @@
+// Package slackbridge mirrors each incident room into one Slack thread.
+//
+// The bridge is outbound only: nothing typed in Slack reaches a room, and
+// approvals happen only in Piperoom. Use a PRIVATE channel: Slack reaches more
+// people than the room does, and the thread repeats proposals and hand-offs.
+// A crash between a Slack post and saving the thread state can repeat one
+// message after a restart.
+//
+// Slack API references: chat.postMessage (arguments, errors)
+// https://docs.slack.dev/reference/methods/chat.postMessage ; rate limits
+// https://docs.slack.dev/apis/web-api/rate-limits ; Block Kit text limits
+// https://docs.slack.dev/reference/block-kit/composition-objects/text-object .
 package slackbridge
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 
+	"piperoom/internal/clients/netsec"
 	"piperoom/internal/events"
 )
 
-const (
-	pageLimit      = 500
-	maxInboundKeys = 1000
-)
+// ErrDisabled means no Slack settings are configured; callers skip the bridge.
+var ErrDisabled = errors.New("slackbridge: disabled (no token and no channel)")
 
-// Bridge mirrors room events into Slack threads.
+// ErrAlreadyRunning means Run is already mirroring that room.
+var ErrAlreadyRunning = errors.New("slackbridge: room is already being mirrored")
+
+const defaultAPIBase = "https://slack.com/api"
+
+// Options configures a Bridge. Settings arrive here, not from config.Load.
+type Options struct {
+	Token      netsec.Secret // bot token with the chat:write scope
+	ChannelID  string        // a channel ID such as C0123, never a #name
+	PublicURL  string        // base URL of the web UI; empty = no room links
+	APIBaseURL string        // tests only; default https://slack.com/api
+	HTTPClient *http.Client  // optional; redirects are never followed
+	Threads    Threads       // default NewMemThreads()
+	Logger     *slog.Logger  // default discards
+}
+
+// Bridge mirrors room events to Slack.
 type Bridge struct {
-	store   events.Store
-	poster  Poster
-	threads ThreadStore
-	channel string
-	roomURL string // base URL of the web UI, "" to omit links
-	log     *slog.Logger
+	store     events.Store
+	client    *client
+	channel   string
+	publicURL string
+	threads   Threads
+	log       *slog.Logger
 
 	mu      sync.Mutex
-	inbound map[string]int // comments that came from Slack; not echoed back
+	running map[string]bool
 }
 
-// New builds a Bridge posting into channel.
-func New(store events.Store, poster Poster, threads ThreadStore, channel, roomURL string, log *slog.Logger) *Bridge {
-	return &Bridge{store: store, poster: poster, threads: threads, channel: channel,
-		roomURL: roomURL, log: log, inbound: map[string]int{}}
-}
-
-func inboundKey(roomID, actorID, text string) string {
-	return roomID + "\x00" + actorID + "\x00" + text
-}
-
-// markInbound records a comment about to be written from Slack so the mirror
-// skips it; otherwise the reply would be posted into its own thread again.
-// It returns a func that undoes the mark if the comment write fails.
-func (b *Bridge) markInbound(roomID, actorID, text string) (undo func()) {
-	k := inboundKey(roomID, actorID, text)
-	b.mu.Lock()
-	if len(b.inbound) >= maxInboundKeys {
-		b.inbound = map[string]int{}
+// New validates o and builds a Bridge.
+func New(store events.Store, o Options) (*Bridge, error) {
+	if o.Token == "" && o.ChannelID == "" {
+		return nil, ErrDisabled
 	}
-	b.inbound[k]++
-	b.mu.Unlock()
-	return func() { b.consumeInbound(k) }
+	if o.Token == "" || o.ChannelID == "" {
+		return nil, errors.New("slackbridge: token and channel id must be set together")
+	}
+	if strings.HasPrefix(o.ChannelID, "#") || strings.ContainsAny(o.ChannelID, " \t\n") {
+		return nil, errors.New("slackbridge: channel must be a channel ID (like C0123ABC), not a name")
+	}
+	pub := strings.TrimRight(o.PublicURL, "/")
+	if pub != "" {
+		u, err := url.Parse(pub)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.ContainsAny(pub, "<>| \t\n") {
+			return nil, errors.New("slackbridge: public url must be an absolute http(s) URL")
+		}
+	}
+	hc := &http.Client{Timeout: attemptTimeout}
+	if o.HTTPClient != nil {
+		cp := *o.HTTPClient
+		hc = &cp
+	}
+	// Never follow redirects: the bearer header must not reach another host.
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	base := strings.TrimRight(o.APIBaseURL, "/")
+	if base == "" {
+		base = defaultAPIBase
+	}
+	if o.Threads == nil {
+		o.Threads = NewMemThreads()
+	}
+	if o.Logger == nil {
+		o.Logger = slog.New(slog.DiscardHandler)
+	}
+	return &Bridge{
+		store: store, client: newClient(hc, base, o.Token), channel: o.ChannelID, publicURL: pub,
+		threads: o.Threads, log: o.Logger, running: map[string]bool{},
+	}, nil
 }
 
-func (b *Bridge) consumeInbound(k string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.inbound[k] == 0 {
-		return false
-	}
-	if b.inbound[k]--; b.inbound[k] == 0 {
-		delete(b.inbound, k)
-	}
-	return true
+// fatalCodes stop one room's mirror: retrying cannot help until someone fixes
+// the token, scope or channel membership.
+var fatalCodes = map[string]bool{
+	"invalid_auth": true, "not_authed": true, "token_revoked": true, "token_expired": true,
+	"account_inactive": true, "missing_scope": true, "channel_not_found": true,
+	"not_in_channel": true, "is_archived": true,
 }
 
-// Run mirrors one room until ctx ends or the room closes. Mirroring is best
-// effort: a failed Slack post is logged and skipped so Slack trouble never
-// blocks the room.
+// Run mirrors one room until it closes, ctx ends or Slack reports a fatal error.
 func (b *Bridge) Run(ctx context.Context, roomID string) error {
-	th, _ := b.threads.Get(roomID)
+	b.mu.Lock()
+	if b.running[roomID] {
+		b.mu.Unlock()
+		return ErrAlreadyRunning
+	}
+	b.running[roomID] = true
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		delete(b.running, roomID)
+		b.mu.Unlock()
+	}()
+
+	ctx, cancel := context.WithCancel(ctx) // ends the subscription when we return
+	defer cancel()
+
+	th, _, err := b.threads.Get(ctx, roomID)
+	if err != nil {
+		return fmt.Errorf("slackbridge: load thread for room %s: %w", roomID, err)
+	}
 	ch, err := b.store.Subscribe(ctx, roomID, th.LastSeq)
 	if err != nil {
-		return fmt.Errorf("slackbridge: subscribe room %s: %w", roomID, err)
+		return fmt.Errorf("slackbridge: subscribe to room %s: %w", roomID, err)
 	}
+	r := newRenderer(b.publicURL)
 	for {
 		select {
 		case <-ctx.Done():
@@ -80,8 +143,17 @@ func (b *Bridge) Run(ctx context.Context, roomID string) error {
 			if !ok {
 				return ctx.Err()
 			}
-			th = b.handle(ctx, e, th)
-			b.threads.Put(roomID, th)
+			if !Important(e.Type) || e.Seq <= th.LastSeq {
+				continue
+			}
+			if e.Type == events.RoomCreated && th.TS != "" {
+				continue
+			}
+			next, err := b.mirror(ctx, r, e, th)
+			if err != nil {
+				return err
+			}
+			th = next
 			if e.Type == events.RoomClosed {
 				return nil
 			}
@@ -89,31 +161,82 @@ func (b *Bridge) Run(ctx context.Context, roomID string) error {
 	}
 }
 
-func (b *Bridge) handle(ctx context.Context, e events.Event, th Thread) Thread {
-	th.LastSeq = e.Seq
-	if e.Type == events.CommentAdded && b.consumeInbound(inboundKey(e.RoomID, e.Actor.ID, commentText(e))) {
-		return th
+// mirror posts one event and saves progress. It returns an error only for
+// fatal Slack failures; other failures are logged and the event is skipped.
+func (b *Bridge) mirror(ctx context.Context, r *renderer, e events.Event, th Thread) (Thread, error) {
+	if th.TS == "" && e.Type != events.RoomCreated {
+		res, err := b.send(ctx, e, r.minimalParent(e.RoomID), b.channel, "")
+		if err != nil {
+			if isFatal(err) {
+				return th, err
+			}
+		} else {
+			th.Channel, th.TS = res.Channel, res.TS
+		}
 	}
-	text, ok := Format(e, b.roomURL)
-	if !ok {
-		return th
+	var (
+		msg message
+		ok  bool
+		err error
+	)
+	if e.Type == events.RoomCreated {
+		msg, err = r.parent(e)
+		ok = err == nil
+	} else {
+		msg, ok, err = r.reply(e)
 	}
-	// Replies before a root exists (room.created missed) become the root.
-	ts, err := b.poster.Post(ctx, b.channel, th.TS, text)
 	if err != nil {
-		b.log.Warn("slack post failed", "room", e.RoomID, "seq", e.Seq, "type", string(e.Type), "err", err)
-		return th
+		b.log.Warn("slack render failed", "room_id", e.RoomID, "seq", e.Seq, "type", string(e.Type))
 	}
-	if th.TS == "" {
-		th.TS = ts
+	if ok && (e.Type == events.RoomCreated || th.TS != "") {
+		channel, thread := b.channel, ""
+		if e.Type != events.RoomCreated {
+			// A thread stays where it started even if the config changed since.
+			channel, thread = cmp.Or(th.Channel, b.channel), th.TS
+		}
+		res, err := b.send(ctx, e, msg, channel, thread)
+		switch {
+		case err == nil && e.Type == events.RoomCreated:
+			th.Channel, th.TS = res.Channel, res.TS
+		case err != nil && isFatal(err):
+			return th, err
+		}
 	}
-	return th
+	th.LastSeq = e.Seq
+	if err := b.threads.Put(ctx, e.RoomID, th); err != nil {
+		b.log.Warn("slack thread state not saved", "room_id", e.RoomID, "seq", e.Seq)
+	}
+	return th, nil
 }
 
-func commentText(e events.Event) string {
-	p, err := events.Decode[events.CommentAddedPayload](e)
+// send posts m to channel. Log lines hold only ids and the Slack code, never text or the token.
+func (b *Bridge) send(ctx context.Context, e events.Event, m message, channel, threadTS string) (postResult, error) {
+	m.Channel, m.ThreadTS = channel, threadTS
+	res, err := b.client.post(ctx, m)
 	if err != nil {
-		return ""
+		code := errCode(err)
+		if isFatal(err) {
+			b.log.Error("slack mirror stopped", "room_id", e.RoomID, "seq", e.Seq, "type", string(e.Type), "code", code)
+		} else {
+			b.log.Warn("slack post failed", "room_id", e.RoomID, "seq", e.Seq, "type", string(e.Type), "code", code)
+		}
+		return res, err
 	}
-	return p.Text
+	if res.Channel == "" {
+		res.Channel = channel
+	}
+	return res, nil
+}
+
+func errCode(err error) string {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		return ae.Code
+	}
+	return "error"
+}
+
+func isFatal(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && fatalCodes[ae.Code]
 }
