@@ -60,6 +60,8 @@ thread** of your message:
   **A round-N post must list every must-fix item from BOTH leads by number** (`LEAD-REVIEW #4: …`,
   `LEAD-ARCH #2: …`) with one line on how it was fixed (or why not). A round that skips items is sent back.
 - Both leads save full reviews in the **main folder**: `C:\Users\Utkarsh\Desktop\interview\piperoom\reviews\`.
+- **Every verdict, answer and merge notice @mentions Qoder (`<@U0C8GM1SUVA>`).** Qoder only acts on
+  messages that mention it — a verdict without the mention is never seen (lost ~2 h on 2026-10-11).
 - `[LEAD-ARCH] → merged to main @ <sha>` — only after both approvals. Rebase your other branches on `main`.
 - `[LEAD-ARCH] ANSWER` — answer to a QUESTION or BLOCKED.
 - `[LEAD-ARCH] CONTRACT UPDATE` — a contract file changed on `main`; every agent rebases.

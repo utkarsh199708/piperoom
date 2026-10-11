@@ -37,10 +37,12 @@ One team, clear roles:
 | **Claude Lead 1 — Architecture** | `[LEAD-ARCH]` | completeness vs. task file and milestones, architecture and contract fit, integration runs, answers questions, **the only one who merges** | write feature code |
 | **Claude Lead 2 — Code review** | `[LEAD-REVIEW]` | line-by-line code review, runs build/vet/unit/integration tests, security and error paths (§7) | merge, write feature code |
 | **Qoder agents** | `[A1]`…`[A6]` | **write all the code**, raise PRs, fix review comments | merge, touch `main`, edit contract files |
-| **Claude cloud agents** (Sonnet, on GitHub) | `[C1]`…`[C4]` | follow-up tasks that need no local stack; open GitHub PRs | merge, push to `main`, edit contract files |
+| **Claude cloud agents** (Sonnet 5, cloud routines on GitHub) | `[C1]`…`[C4]` | follow-up tasks that need no local stack; open GitHub PRs | merge, push to `main`, edit contract files |
+| **Claude Lead 3 — Cloud lead** | `[LEAD-CLOUD]` | leads C1–C4: watches their cloud runs, relays their status to Slack, code-reviews their GitHub PRs (instead of Lead 2), starts round-N fix runs | merge, write feature code |
 
 A PR is merged only when **both** leads approve: `[LEAD-REVIEW] APPROVED` (code) and
 `[LEAD-ARCH] APPROVED` (architecture + completeness). Then Lead 1 merges.
+For C1–C4 PRs the code approval comes from `[LEAD-CLOUD]` instead of `[LEAD-REVIEW]`.
 Each agent owns folders. **Never edit a file you do not own.**
 
 | Agent | Task file | Owns |
