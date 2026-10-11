@@ -29,6 +29,13 @@ const usage = `devctl — local pipeline control
   devctl load [--rate N]    insert/update orders N per second until Ctrl+C
   devctl break <scenario>   cause a failure
   devctl fix <scenario>     apply the correct manual fix
+  devctl lock --owner <tag> take the shared stack lock
+  devctl unlock --owner <tag>  release the shared stack lock
+  devctl lock status        show who holds the lock
+  devctl lock --steal       steal a stale (>15m) lock
+
+up/down/reset/load/break/fix mutate the shared stack and require --owner <tag>
+(or PIPEROOM_STACK_OWNER) to match the current lock holder.
 
 scenarios: %s
 `
@@ -56,25 +63,79 @@ func main() {
 func runCommand(ctx context.Context, st *stack, cmd string, args []string) error {
 	switch cmd {
 	case "up":
+		owner, rest, err := splitOwner(args)
+		if err != nil {
+			return err
+		}
+		if len(rest) != 0 {
+			return fmt.Errorf("usage: devctl up")
+		}
+		if err := requireLock(owner); err != nil {
+			return err
+		}
 		return st.up(ctx)
 	case "down":
+		owner, rest, err := splitOwner(args)
+		if err != nil {
+			return err
+		}
+		if len(rest) != 0 {
+			return fmt.Errorf("usage: devctl down")
+		}
+		if err := requireLock(owner); err != nil {
+			return err
+		}
 		return st.compose(ctx, nil, "down")
 	case "reset":
+		owner, rest, err := splitOwner(args)
+		if err != nil {
+			return err
+		}
+		if len(rest) != 0 {
+			return fmt.Errorf("usage: devctl reset")
+		}
+		if err := requireLock(owner); err != nil {
+			return err
+		}
 		return st.reset(ctx)
 	case "status":
 		return st.status(ctx, os.Stdout)
 	case "load":
-		fs := flag.NewFlagSet("load", flag.ExitOnError)
+		owner, rest, err := splitOwner(args)
+		if err != nil {
+			return err
+		}
+		fs := flag.NewFlagSet("load", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
 		rate := fs.Int("rate", 5, "changes per second")
-		_ = fs.Parse(args)
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("usage: devctl load [--rate N] [--owner <tag>]")
+		}
+		if err := requireLock(owner); err != nil {
+			return err
+		}
 		return st.load(ctx, *rate)
+	case "lock":
+		return lockCmd(args)
+	case "unlock":
+		return unlockCmd(args)
 	case "break", "fix":
-		if len(args) != 1 {
+		owner, rest, err := splitOwner(args)
+		if err != nil {
+			return err
+		}
+		if len(rest) != 1 {
 			return fmt.Errorf("usage: devctl %s <scenario> (%s)", cmd, strings.Join(scenarioNames(), ", "))
 		}
-		sc, ok := scenarios[args[0]]
+		sc, ok := scenarios[rest[0]]
 		if !ok {
-			return fmt.Errorf("unknown scenario %q (%s)", args[0], strings.Join(scenarioNames(), ", "))
+			return fmt.Errorf("unknown scenario %q (%s)", rest[0], strings.Join(scenarioNames(), ", "))
+		}
+		if err := requireLock(owner); err != nil {
+			return err
 		}
 		if cmd == "break" {
 			return sc.breakIt(ctx, st)

@@ -9,16 +9,24 @@ import (
 	"encoding/hex"
 	"net"
 	"net/url"
+	"os"
 	"testing"
 	"time"
 
 	"piperoom/internal/config"
+	"piperoom/internal/stacklock"
 )
 
 // Require returns the dev config, or skips the test when the stack is not
-// reachable (Kafka Connect is the last service to come up).
+// reachable (Kafka Connect is the last service to come up) or when another
+// agent holds the shared stack lock.
 func Require(t *testing.T) config.Config {
 	t.Helper()
+	lk := stacklock.New(stacklock.Path())
+	if msg := lockConflict(lk, os.Getenv(stackOwner)); msg != "" {
+		t.Skipf("testenv: %s", msg)
+	}
+
 	cfg := config.Load()
 	u, err := url.Parse(cfg.ConnectURL)
 	if err != nil {

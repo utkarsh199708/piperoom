@@ -5,6 +5,22 @@ in a second terminal to create traffic (needed to grow WAL or lag).
 
 Everything below was **observed**, not guessed. If you see something different, update this file.
 
+## Shared stack lock
+
+The dev stack is shared by several agents, so every mutating command (`reset`, `break`, `fix`, `down`,
+`up`) refuses to run unless you hold the lock file (`piperoom-bus/stack.lock`):
+
+```
+go run ./cmd/devctl lock --owner <your-tag>    # take the lock
+go run ./cmd/devctl lock status                # who holds it
+go run ./cmd/devctl reset --owner <your-tag>   # now allowed
+go run ./cmd/devctl unlock --owner <your-tag>  # release when done
+```
+
+`--owner` may be replaced by the `PIPEROOM_STACK_OWNER` env var. If someone else holds the lock,
+the command fails and names the holder — wait for them, or (only when the lock is older than 15 min,
+e.g. a crashed run) take it with `go run ./cmd/devctl lock --steal` (it prints who it stole from).
+
 Normal state:
 ```
 connector   pg-orders-connector: RUNNING, tasks 0=RUNNING
