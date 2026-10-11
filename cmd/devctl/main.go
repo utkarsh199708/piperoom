@@ -34,8 +34,8 @@ const usage = `devctl — local pipeline control
   devctl lock status        show who holds the lock
   devctl lock --steal       steal a stale (>15m) lock
 
-up/down/reset/break/fix mutate the shared stack and require --owner <tag> (or
-PIPEROOM_STACK_OWNER) to match the current lock holder.
+up/down/reset/load/break/fix mutate the shared stack and require --owner <tag>
+(or PIPEROOM_STACK_OWNER) to match the current lock holder.
 
 scenarios: %s
 `
@@ -101,9 +101,22 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 	case "status":
 		return st.status(ctx, os.Stdout)
 	case "load":
-		fs := flag.NewFlagSet("load", flag.ExitOnError)
+		owner, rest, err := splitOwner(args)
+		if err != nil {
+			return err
+		}
+		fs := flag.NewFlagSet("load", flag.ContinueOnError)
+		fs.SetOutput(os.Stderr)
 		rate := fs.Int("rate", 5, "changes per second")
-		_ = fs.Parse(args)
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("usage: devctl load [--rate N] [--owner <tag>]")
+		}
+		if err := requireLock(owner); err != nil {
+			return err
+		}
 		return st.load(ctx, *rate)
 	case "lock":
 		return lockCmd(args)

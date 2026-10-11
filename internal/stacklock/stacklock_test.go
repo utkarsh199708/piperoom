@@ -187,13 +187,76 @@ func TestPathEnvOverride(t *testing.T) {
 	}
 }
 
+func TestStatusEmptyFile(t *testing.T) {
+	l := tmpLock(t)
+	if err := os.WriteFile(l.path, nil, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	rec, err := l.Status()
+	if err != nil {
+		t.Fatalf("Status on empty file = %v, want nil error", err)
+	}
+	if rec == nil || rec.Owner != "?" {
+		t.Fatalf("Status on empty file = %+v, want owner %q", rec, "?")
+	}
+	if rec != nil && rec.At.IsZero() {
+		t.Fatalf("Status on empty file At = zero, want file mtime")
+	}
+}
+
 func TestStatusCorruptFile(t *testing.T) {
 	l := tmpLock(t)
 	if err := os.WriteFile(l.path, []byte("not json"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if _, err := l.Status(); err == nil {
-		t.Fatal("Status on corrupt file = nil, want error")
+	// An unreadable lock is reported as an unknown holder, not an error, so the
+	// lock remains stealable and callers skip instead of failing.
+	rec, err := l.Status()
+	if err != nil {
+		t.Fatalf("Status on corrupt file = %v, want nil error", err)
+	}
+	if rec == nil || rec.Owner != "?" {
+		t.Fatalf("Status on corrupt file = %+v, want owner %q", rec, "?")
+	}
+}
+
+func TestStealEmptyFileAfterAge(t *testing.T) {
+	l := tmpLock(t)
+	if err := os.WriteFile(l.path, nil, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// Backdate the mtime so the empty remnant counts as stale.
+	old := time.Now().Add(-20 * time.Minute)
+	if err := os.Chtimes(l.path, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	rec, err := l.Steal(15 * time.Minute)
+	if err != nil {
+		t.Fatalf("Steal empty stale lock: %v", err)
+	}
+	if rec == nil || rec.Owner != "?" {
+		t.Fatalf("stolen record = %+v, want owner %q", rec, "?")
+	}
+	got, err := l.Status()
+	if err != nil {
+		t.Fatalf("Status after steal: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("lock still present after steal: %+v", got)
+	}
+}
+
+func TestStealEmptyFileFreshRefuses(t *testing.T) {
+	l := tmpLock(t)
+	if err := os.WriteFile(l.path, nil, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// A freshly-created empty remnant (mtime now) must not be stealable.
+	if _, err := l.Steal(15 * time.Minute); err == nil {
+		t.Fatal("Steal empty fresh lock = nil, want error")
+	}
+	if rec, _ := l.Status(); rec == nil {
+		t.Fatal("empty lock was removed by steal of a fresh file")
 	}
 }
 

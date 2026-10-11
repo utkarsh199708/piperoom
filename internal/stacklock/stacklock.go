@@ -3,8 +3,8 @@
 // Several agents share one local dev stack (Docker Compose). Destructive
 // commands such as `devctl reset` must be serialized behind an explicit owner,
 // otherwise two agents can reset the stack at the same time and corrupt both
-// runs. The lock is a small file created atomically with O_EXCL and holding a
-// JSON record of {owner, time}.
+// runs. The lock is a small JSON file ({owner, time}) published atomically via
+// a hard link, so readers never observe a partially-written lock.
 package stacklock
 
 import (
@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -66,8 +67,29 @@ func (l *Lock) Acquire(owner string) (*Record, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stacklock: encode lock: %w", err)
 	}
-	f, err := os.OpenFile(l.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	// Write the record to a temp file in the same directory, then hard-link it
+	// into place. os.Link fails atomically if the destination already exists
+	// (works on NTFS), so a crash between the two steps leaves only the temp
+	// file, and readers never observe an empty or partially-written lock.
+	dir := filepath.Dir(l.path)
+	tmp, err := os.CreateTemp(dir, ".stacklock-*.tmp")
 	if err != nil {
+		return nil, fmt.Errorf("stacklock: create temp lock: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // best-effort cleanup of the temp hard link
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("stacklock: write temp lock: %w", err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("stacklock: chmod temp lock: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("stacklock: close temp lock: %w", err)
+	}
+	if err := os.Link(tmpName, l.path); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			cur, rerr := l.Status()
 			if rerr != nil {
@@ -78,12 +100,7 @@ func (l *Lock) Acquire(owner string) (*Record, error) {
 			}
 			return nil, fmt.Errorf("stacklock: already locked by %q", holderName(cur))
 		}
-		return nil, fmt.Errorf("stacklock: create lock: %w", err)
-	}
-	defer f.Close()
-	if _, err := f.Write(b); err != nil {
-		_ = os.Remove(l.path) // best-effort cleanup of a partial lock
-		return nil, fmt.Errorf("stacklock: write lock: %w", err)
+		return nil, fmt.Errorf("stacklock: link lock: %w", err)
 	}
 	return &rec, nil
 }
@@ -107,6 +124,10 @@ func (l *Lock) Release(owner string) error {
 }
 
 // Status returns the current lock record, or (nil, nil) when there is no lock.
+// A lock file that cannot be decoded (empty or partial, e.g. left behind by a
+// crash during an old non-atomic write) is reported as an unknown holder "?"
+// timestamped with the file's modification time, so it stays stealable and
+// callers can skip rather than fail.
 func (l *Lock) Status() (*Record, error) {
 	b, err := os.ReadFile(l.path)
 	if err != nil {
@@ -117,7 +138,11 @@ func (l *Lock) Status() (*Record, error) {
 	}
 	var rec Record
 	if err := json.Unmarshal(b, &rec); err != nil {
-		return nil, fmt.Errorf("stacklock: decode lock %s: %w", l.path, err)
+		st, sterr := os.Stat(l.path)
+		if sterr != nil {
+			return nil, fmt.Errorf("stacklock: stat lock: %w", sterr)
+		}
+		return &Record{Owner: "?", At: st.ModTime()}, nil
 	}
 	return &rec, nil
 }
@@ -135,6 +160,19 @@ func (l *Lock) Steal(maxAge time.Duration) (*Record, error) {
 	if age := time.Since(cur.At); age < maxAge {
 		return nil, fmt.Errorf("stacklock: lock held by %q is %s old; only steal locks older than %s",
 			cur.Owner, age.Round(time.Second), maxAge)
+	}
+	// Re-read just before removing: the stale holder may have released and a
+	// third agent re-acquired since the first Status. Only remove when the
+	// record is unchanged, so a fresh lock is never deleted.
+	cur2, err := l.Status()
+	if err != nil {
+		return nil, fmt.Errorf("stacklock: re-read lock: %w", err)
+	}
+	if cur2 == nil {
+		return nil, errors.New("stacklock: no lock to steal")
+	}
+	if cur2.Owner != cur.Owner || !cur2.At.Equal(cur.At) {
+		return nil, fmt.Errorf("stacklock: lock changed while stealing (%q -> %q); retry", cur.Owner, cur2.Owner)
 	}
 	if err := os.Remove(l.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("stacklock: remove stale lock: %w", err)

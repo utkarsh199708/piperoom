@@ -23,13 +23,8 @@ import (
 func Require(t *testing.T) config.Config {
 	t.Helper()
 	lk := stacklock.New(stacklock.Path())
-	rec, err := lk.Status()
-	if err != nil {
-		t.Fatalf("testenv: read stack lock: %v", err)
-	}
-	if rec != nil && rec.Owner != os.Getenv("PIPEROOM_STACK_OWNER") {
-		t.Skipf("testenv: stack is locked by %q (set PIPEROOM_STACK_OWNER=%s to use it, or wait for them to run `devctl unlock --owner %s`)",
-			rec.Owner, rec.Owner, rec.Owner)
+	if msg := lockConflict(lk, os.Getenv(stackOwner)); msg != "" {
+		t.Skipf("testenv: %s", msg)
 	}
 
 	cfg := config.Load()

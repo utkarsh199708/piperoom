@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"piperoom/internal/stacklock"
@@ -16,23 +17,25 @@ const ownerEnv = "PIPEROOM_STACK_OWNER"
 // staleAfter is how old a lock must be before `devctl lock --steal` may remove it.
 const staleAfter = 15 * time.Minute
 
-// splitOwner pulls a leading-or-embedded `--owner <tag>` flag out of args and
-// falls back to $PIPEROOM_STACK_OWNER. It returns the owner and the remaining
-// positional args.
+// splitOwner pulls a `--owner <tag>` or `--owner=<tag>` flag out of args (in
+// either form, anywhere in the list) and falls back to $PIPEROOM_STACK_OWNER.
+// It returns the owner and the remaining positional args.
 func splitOwner(args []string) (owner string, rest []string, err error) {
 	owner = os.Getenv(ownerEnv)
 	for i := 0; i < len(args); i++ {
-		if args[i] != "--owner" {
-			continue
+		switch {
+		case args[i] == "--owner":
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("devctl: --owner requires a value")
+			}
+			owner = args[i+1]
+			rest = append(append([]string(nil), args[:i]...), args[i+2:]...)
+			return owner, rest, nil
+		case strings.HasPrefix(args[i], "--owner="):
+			owner = strings.TrimPrefix(args[i], "--owner=")
+			rest = append(append([]string(nil), args[:i]...), args[i+1:]...)
+			return owner, rest, nil
 		}
-		if i+1 >= len(args) {
-			return "", nil, fmt.Errorf("devctl: --owner requires a value")
-		}
-		owner = args[i+1]
-		rest = make([]string, 0, len(args)-2)
-		rest = append(rest, args[:i]...)
-		rest = append(rest, args[i+2:]...)
-		return owner, rest, nil
 	}
 	return owner, args, nil
 }
@@ -81,6 +84,15 @@ func lockCmd(args []string) error {
 			return fmt.Errorf("devctl: steal lock: %w", err)
 		}
 		fmt.Printf("stole stack lock from %q (held since %s)\n", rec.Owner, rec.At.Format(time.RFC3339))
+		// With --owner, steal AND acquire in one command so nobody else can grab
+		// the lock between the steal and the next `devctl lock`.
+		if *owner != "" {
+			rec, err = lk.Acquire(*owner)
+			if err != nil {
+				return fmt.Errorf("devctl: lock: %w", err)
+			}
+			fmt.Printf("stack locked by %q (since %s)\n", rec.Owner, rec.At.Format(time.RFC3339))
+		}
 		return nil
 	}
 	if *owner == "" {
