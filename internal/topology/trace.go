@@ -1,0 +1,302 @@
+package topology
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"piperoom/internal/events"
+	"piperoom/internal/owners"
+)
+
+// pkColumner is implemented by SourceDB implementations that can report a
+// table's primary key column. Others fall back to "id".
+type pkColumner interface {
+	PrimaryKeyColumn(ctx context.Context, table string) (string, error)
+}
+
+// maxScan bounds FindByKey scans per partition during a trace.
+const maxScan = 1000
+
+// traceFacts holds the observations Trace gathers before deciding statuses.
+type traceFacts struct {
+	table           string
+	connector       string
+	topic           string
+	group           string
+	sink            string
+	sourceFound     bool
+	sourceTS        time.Time
+	connectorErr    error
+	connectorState  string
+	connectorFailed bool
+	tasksFailed     int
+	topicErr        error
+	topicFound      bool
+	topicOffset     int64
+	topicPartition  int32
+	groupErr        error
+	groupCommitted  int64 // committed offset for the record's partition; -1 if unknown
+	sinkErr         error
+	sinkFound       bool
+	sinkDiff        []string
+}
+
+// Trace follows one source row by primary key through every pipeline stage.
+func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]events.TraceStage, error) {
+	p, ok := b.o.Pipeline(pipelineID)
+	if !ok {
+		return nil, fmt.Errorf("topology: pipeline %q not found", pipelineID)
+	}
+	if key == "" {
+		return nil, fmt.Errorf("topology: trace: empty key")
+	}
+	if len(p.ConsumerGroups) == 0 || len(p.SinkTables) == 0 {
+		return nil, fmt.Errorf("topology: pipeline %q has no consumer group or sink table", pipelineID)
+	}
+
+	f := traceFacts{
+		table:          table,
+		group:          p.ConsumerGroups[0],
+		sink:           p.SinkTables[0],
+		groupCommitted: -1,
+	}
+
+	conn, topic, err := b.connectorForTable(ctx, p, table)
+	if err != nil {
+		return nil, err
+	}
+	f.connector, f.topic = conn, topic
+
+	pk, err := b.pkColumn(ctx, table)
+	if err != nil {
+		return nil, err
+	}
+
+	// 1. Source row.
+	srcRow, found, err := b.src.Row(ctx, table, pk, key)
+	if err != nil {
+		return nil, fmt.Errorf("topology: trace source row: %w", err)
+	}
+	f.sourceFound = found
+	if found {
+		f.sourceTS = tsFromRow(srcRow)
+	}
+
+	// 2. Connector status.
+	st, err := b.connect.Status(ctx, conn)
+	f.connectorErr = err
+	if err == nil {
+		f.connectorState = st.State
+		f.connectorFailed = st.State == "FAILED"
+		for _, task := range st.Tasks {
+			if task.State == "FAILED" {
+				f.connectorFailed = true
+				f.tasksFailed++
+			}
+		}
+	}
+
+	// 3. Topic: search for the record from just before it was written.
+	since := f.sourceTS.Add(-time.Minute)
+	if f.sourceTS.IsZero() {
+		since = time.Now().Add(-time.Hour)
+	}
+	refs, err := b.kafka.FindByKey(ctx, topic, key, since, maxScan)
+	f.topicErr = err
+	if err == nil && len(refs) > 0 {
+		// Use the newest matching record: the consumer commits past it.
+		last := refs[len(refs)-1]
+		f.topicFound = true
+		f.topicOffset = last.Offset
+		f.topicPartition = last.Partition
+	}
+
+	// 4. Consumer group: committed offset for the record's partition.
+	if f.topicFound {
+		lag, err := b.kafka.GroupLag(ctx, f.group)
+		f.groupErr = err
+		if err == nil {
+			for _, pl := range lag.Partitions {
+				if pl.Topic == topic && pl.Partition == f.topicPartition {
+					f.groupCommitted = pl.Committed
+					break
+				}
+			}
+		}
+	}
+
+	// 5. Sink row and column diff.
+	sinkRow, found, err := b.wh.Row(ctx, f.sink, pk, key)
+	f.sinkErr = err
+	f.sinkFound = found
+	if found && f.sourceFound {
+		f.sinkDiff = diffColumns(srcRow, sinkRow)
+	}
+
+	return decideTrace(f), nil
+}
+
+// connectorForTable returns the connector that streams table and its Debezium
+// topic name.
+func (b *builder) connectorForTable(ctx context.Context, p owners.Pipeline, table string) (string, string, error) {
+	var lastErr error
+	for _, cn := range p.Connectors {
+		cfg, err := b.connect.Config(ctx, cn)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if streamsTable(cfg["table.include.list"], table) {
+			return cn, cfg["topic.prefix"] + "." + table, nil
+		}
+	}
+	if lastErr != nil {
+		return "", "", fmt.Errorf("topology: connector config: %w", lastErr)
+	}
+	return "", "", fmt.Errorf("topology: no connector streams table %q in pipeline %q", table, p.ID)
+}
+
+func (b *builder) pkColumn(ctx context.Context, table string) (string, error) {
+	if d, ok := b.src.(pkColumner); ok {
+		col, err := d.PrimaryKeyColumn(ctx, table)
+		if err != nil {
+			return "", fmt.Errorf("topology: primary key of %s: %w", table, err)
+		}
+		if col != "" {
+			return col, nil
+		}
+	}
+	return "id", nil
+}
+
+// decideTrace maps gathered facts to one TraceStage per layer. Exactly one
+// stage is "stopped_here" when the record is stuck.
+func decideTrace(f traceFacts) []events.TraceStage {
+	stages := make([]events.TraceStage, 0, 5)
+	stage := func(layer, name, status string, facts map[string]string) {
+		stages = append(stages, events.TraceStage{Layer: layer, Name: name, Status: status, Facts: facts})
+	}
+
+	// 1. Source.
+	if !f.sourceFound {
+		stage("postgres", f.table, "not_seen", nil)
+		stage("kafka-connect", f.connector, "not_seen", nil)
+		stage("kafka", f.topic, "not_seen", nil)
+		stage("consumer", f.group, "not_seen", nil)
+		stage("warehouse", f.sink, "not_seen", nil)
+		return stages
+	}
+	srcFacts := map[string]string{}
+	if !f.sourceTS.IsZero() {
+		srcFacts["updated_at"] = formatTS(f.sourceTS)
+	}
+	stage("postgres", f.table, "seen", srcFacts)
+
+	// 2. Connector.
+	connStatus := "seen"
+	connFacts := map[string]string{}
+	if f.connectorErr != nil {
+		connStatus = "unknown"
+	} else if f.connectorFailed {
+		connFacts["state"] = f.connectorState
+		connFacts["tasks_failed"] = strconv.Itoa(f.tasksFailed)
+	}
+	stage("kafka-connect", f.connector, connStatus, connFacts)
+
+	// 3. Topic.
+	topicStatus := "not_seen"
+	topicFacts := map[string]string{}
+	if f.topicErr != nil {
+		topicStatus = "unknown"
+	} else if f.topicFound {
+		topicStatus = "seen"
+		topicFacts["offset"] = strconv.FormatInt(f.topicOffset, 10)
+		topicFacts["partition"] = strconv.FormatInt(int64(f.topicPartition), 10)
+	}
+	stage("kafka", f.topic, topicStatus, topicFacts)
+
+	// 4. Consumer group.
+	consumed := f.topicFound && f.groupErr == nil && f.groupCommitted > f.topicOffset
+	groupStatus := "not_seen"
+	groupFacts := map[string]string{}
+	if f.groupErr != nil {
+		groupStatus = "unknown"
+	} else if f.topicFound {
+		if f.groupCommitted >= 0 {
+			groupFacts["committed"] = strconv.FormatInt(f.groupCommitted, 10)
+		}
+		if consumed {
+			groupStatus = "seen"
+		}
+	}
+	stage("consumer", f.group, groupStatus, groupFacts)
+
+	// 5. Sink.
+	sinkStatus := "not_seen"
+	sinkFacts := map[string]string{}
+	if f.sinkErr != nil {
+		sinkStatus = "unknown"
+	} else if consumed && f.sinkFound {
+		sinkStatus = "seen"
+		if len(f.sinkDiff) > 0 {
+			sinkFacts["diff_columns"] = strings.Join(f.sinkDiff, ",")
+		}
+	}
+	stage("warehouse", f.sink, sinkStatus, sinkFacts)
+
+	// Decide the single stuck point.
+	switch {
+	case f.connectorFailed && f.connectorErr == nil && !f.topicFound:
+		stages[1].Status = "stopped_here"
+	case f.topicFound && f.groupErr == nil && !consumed:
+		stages[3].Status = "stopped_here"
+	case f.topicFound && f.groupErr == nil && consumed && !f.sinkFound && f.sinkErr == nil:
+		stages[4].Status = "stopped_here"
+	}
+	return stages
+}
+
+func tsFromRow(row map[string]any) time.Time {
+	v, ok := row["updated_at"]
+	if !ok {
+		return time.Time{}
+	}
+	s, ok := v.(string)
+	if !ok {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+// diffColumns returns the names of columns present in both maps whose string
+// forms differ. Values never leave this function.
+func diffColumns(a, b map[string]any) []string {
+	var diffs []string
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok {
+			continue
+		}
+		if fmt.Sprint(av) != fmt.Sprint(bv) {
+			diffs = append(diffs, k)
+		}
+	}
+	sort.Strings(diffs)
+	return diffs
+}
+
+func formatTS(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
