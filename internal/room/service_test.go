@@ -174,6 +174,125 @@ func TestSteerNonDriverBecomesSuggestion(t *testing.T) {
 	}
 }
 
+// TestSteerInputOnlyAfterDriverCheck pins C13 audit item (a): the agent inbox
+// only ever sees Kind "steer" for a steer.sent produced by the server's own
+// driver check. A non-driver's steer stays a suggestion and must not reach the
+// agent; no client-supplied field can set the inbox kind (HTTP /steer accepts
+// only {text}, suggestion send accepts no body, WS accepts only presence).
+func TestSteerInputOnlyAfterDriverCheck(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	inboxCh := make(chan agent.Inbox, 1)
+	svc := room.New(room.Deps{
+		Store: st,
+		Users: room.DefaultUsers(),
+		Now:   c.Now,
+		Run: func(ctx context.Context, _ agent.Alert, deps agent.Deps, _ agent.Options) error {
+			inboxCh <- deps.Inbox
+			<-ctx.Done()
+			return nil
+		},
+	})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	var inbox agent.Inbox
+	select {
+	case inbox = <-inboxCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("agent run did not start")
+	}
+
+	// Non-driver steer: steer.suggested, nothing in the agent inbox.
+	ev, err := svc.Steer(context.Background(), mustUser(t, svc, "priya"), roomID, "look at the connector")
+	if err != nil {
+		t.Fatalf("non-driver steer: %v", err)
+	}
+	if ev.Type != events.SteerSuggested {
+		t.Fatalf("want steer.suggested, got %s", ev.Type)
+	}
+	inputs, err := inbox.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if len(inputs) != 0 {
+		t.Fatalf("non-driver steer reached the agent: %+v", inputs)
+	}
+	for _, e := range allEvents(t, st, roomID) {
+		if e.Type == events.SteerSent {
+			t.Fatalf("steer.sent recorded without a driver check (seq %d)", e.Seq)
+		}
+	}
+
+	// Driver steer: steer.sent in the log and exactly one Kind "steer" input.
+	ev, err = svc.Steer(context.Background(), mustUser(t, svc, "arjun"), roomID, "check the topic")
+	if err != nil {
+		t.Fatalf("driver steer: %v", err)
+	}
+	if ev.Type != events.SteerSent {
+		t.Fatalf("want steer.sent, got %s", ev.Type)
+	}
+	inputs, err = inbox.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if len(inputs) != 1 {
+		t.Fatalf("want exactly one agent input, got %+v", inputs)
+	}
+	if inputs[0].Kind != "steer" || inputs[0].Text != "check the topic" || inputs[0].Actor.ID != "arjun" {
+		t.Fatalf("bad agent input: %+v", inputs[0])
+	}
+}
+
+// TestCreateRoomValidatesPipelineID pins C13 audit item (b): pipeline_id must
+// match ^[a-zA-Z0-9_.-]+$ on POST /api/rooms, even with no owners config
+// loaded, and an unknown but well-formed id is still rejected once owners are.
+func TestCreateRoomValidatesPipelineID(t *testing.T) {
+	tests := []struct {
+		name    string
+		id      string
+		owners  bool // load an owners config that only knows "orders"
+		wantErr bool
+	}{
+		// Shape check, owners nil (demo/unit mode): valid charset accepted.
+		{name: "letters", id: "orders"},
+		{name: "digits", id: "orders2"},
+		{name: "underscore", id: "orders_prod"},
+		{name: "dot", id: "orders.prod"},
+		{name: "dash", id: "orders-prod"},
+		// Shape check, owners nil: invalid ids rejected.
+		{name: "space", id: "orders prod", wantErr: true},
+		{name: "slash", id: "orders/prod", wantErr: true},
+		{name: "star", id: "orders*", wantErr: true},
+		{name: "semicolon", id: "orders;drop", wantErr: true},
+		{name: "empty", id: "", wantErr: true},
+		// Owners loaded: known id accepted, unknown well-formed id rejected.
+		{name: "known with owners", id: "orders", owners: true},
+		{name: "unknown with owners", id: "orders-2", owners: true, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+			st := memstore.NewWithClock(c.Now)
+			deps := room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun, Now: c.Now}
+			if tc.owners {
+				deps.Owners = &owners.Owners{Pipelines: []owners.Pipeline{{ID: "orders"}}}
+			}
+			svc := room.New(deps)
+			t.Cleanup(svc.Close)
+
+			_, err := svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "Incident", "sev2", tc.id)
+			if tc.wantErr {
+				wantCode(t, err, "validation")
+				return
+			}
+			if err != nil {
+				t.Fatalf("create room with pipeline_id %q: %v", tc.id, err)
+			}
+		})
+	}
+}
+
 func TestApproveRequiresLayerOwnership(t *testing.T) {
 	act := &fakeAction{name: "postgres_action", layer: "postgres"}
 	svc, _, _ := newTestService(t, act)

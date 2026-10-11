@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 
 	"piperoom/internal/events"
@@ -12,10 +13,20 @@ import (
 
 var severities = map[string]bool{"sev1": true, "sev2": true, "sev3": true, "sev4": true}
 
+// pipelineIDRe is the accepted shape of pipeline_id on POST /api/rooms. The
+// id flows into logs, prompts and identifier-based lookups, so only a safe
+// charset may pass (C13 prompt audit, item (b)).
+var pipelineIDRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
+
 // CreateRoom opens a room; the creator becomes driver and the agent starts.
 func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pipelineID string) (RoomSnapshot, error) {
 	if title == "" || pipelineID == "" {
 		return RoomSnapshot{}, validation("title and pipeline_id are required")
+	}
+	// The shape check applies even without an owners config (demo, unit
+	// tests): it does not depend on anything being loaded.
+	if !pipelineIDRe.MatchString(pipelineID) {
+		return RoomSnapshot{}, validation(fmt.Sprintf("pipeline_id %q must match ^[a-zA-Z0-9_.-]+$", pipelineID))
 	}
 	if !severities[severity] {
 		return RoomSnapshot{}, validation("severity must be sev1..sev4")
