@@ -1,0 +1,201 @@
+// UI state derived from the room snapshot + the event log. This is the shape
+// the reducer (state/reducer.ts) folds events into.
+import type {
+  ActionExecutedPayload,
+  Actor,
+  AgentStatusPayload,
+  HandoffSummary,
+  HypothesisSummary,
+  ProposalStep,
+  RoomSnapshot,
+  TraceStage,
+} from '../api/types'
+
+export type Severity = 'sev1' | 'sev2' | 'sev3' | 'sev4'
+export type RoomStatus = 'open' | 'closed'
+export type ApprovalValue = 'approved' | 'rejected' | 'pending'
+
+export interface DriverInfo {
+  id: string
+  name: string
+  lease_until?: string
+}
+
+export interface AgentStatusState {
+  state: AgentStatusPayload['state']
+  detail?: string
+}
+
+export interface HypothesisState {
+  text: string
+  based_on_steps: string[]
+  confidence: HypothesisSummary['confidence']
+  confirmed: boolean
+}
+
+export interface ToolCallState {
+  tool_use_id: string
+  tool: string
+  input: unknown
+  summary?: string
+  data?: unknown
+  is_error?: boolean
+  truncated?: boolean
+  took_ms?: number
+}
+
+export interface AgentMessageState {
+  text: string
+  at: string
+}
+
+export interface StepState {
+  id: string
+  title: string
+  tool_calls: ToolCallState[]
+  messages: AgentMessageState[]
+}
+
+export interface CommentState {
+  id: string
+  step_id?: string
+  text: string
+  mentions_agent: boolean
+  author: Actor
+  at: string
+  replies: AgentMessageState[]
+}
+
+export interface SuggestionState {
+  suggestion_id: string
+  from: Actor
+  text: string
+}
+
+export interface ProposalState {
+  proposal_id: string
+  title: string
+  steps: ProposalStep[]
+  risk: string
+  rollback: string
+  required_layers: string[]
+  approvals: Record<string, ApprovalValue>
+  status: 'open' | 'approved' | 'rejected'
+  executed: ActionExecutedPayload[]
+}
+
+export interface MemberState {
+  id: string
+  name: string
+  role: string
+}
+
+export interface ControlRequestState {
+  from: Actor
+}
+
+export interface TraceState {
+  table: string
+  key: string
+  stages: TraceStage[]
+}
+
+export interface HandoffState {
+  handoff_id: string
+  to: Actor
+  summary: HandoffSummary
+  stay_as_watcher: boolean
+  status: 'pending' | 'accepted'
+}
+
+export interface ActivityEntry {
+  seq: number
+  at: string
+  actor: Actor
+  text: string
+}
+
+export interface RoomState {
+  id: string
+  title: string
+  severity: Severity
+  pipeline_id: string
+  status: RoomStatus
+  opened_at: string
+  closed_at?: string
+  resolution?: string
+  last_seq: number
+  driver: DriverInfo | null
+  agent_status: AgentStatusState
+  hypothesis: HypothesisState | null
+  steps: StepState[]
+  messages: AgentMessageState[]
+  comments: CommentState[]
+  suggestions: SuggestionState[]
+  proposals: ProposalState[]
+  members: MemberState[]
+  control_requests: ControlRequestState[]
+  trace: TraceState | null
+  handoffs: HandoffState[]
+  activity: ActivityEntry[]
+}
+
+export function emptyRoomState(id: string): RoomState {
+  return {
+    id,
+    title: '',
+    severity: 'sev3',
+    pipeline_id: '',
+    status: 'open',
+    opened_at: '',
+    last_seq: 0,
+    driver: null,
+    agent_status: { state: 'idle' },
+    hypothesis: null,
+    steps: [],
+    messages: [],
+    comments: [],
+    suggestions: [],
+    proposals: [],
+    members: [],
+    control_requests: [],
+    trace: null,
+    handoffs: [],
+    activity: [],
+  }
+}
+
+export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
+  // The snapshot only carries header/derived state for a fast first paint; the
+  // timeline, comments, proposals, suggestions, members, trace and hand-offs are
+  // rebuilt from the full event log (WebSocket after=0). So we seed last_seq at 0
+  // (letting the replay fold every event) and leave the event-derived collections
+  // empty — seeding them here would duplicate on replay.
+  return {
+    ...emptyRoomState(snapshot.id),
+    id: snapshot.id,
+    title: snapshot.title,
+    severity: snapshot.severity as Severity,
+    pipeline_id: snapshot.pipeline_id,
+    status: snapshot.status as RoomStatus,
+    opened_at: snapshot.opened_at,
+    closed_at: snapshot.closed_at,
+    resolution: snapshot.resolution,
+    last_seq: 0,
+    driver: snapshot.driver
+      ? { id: snapshot.driver.id, name: snapshot.driver.name, lease_until: snapshot.driver.lease_until }
+      : null,
+    agent_status: {
+      state: snapshot.agent_status.state,
+      detail: snapshot.agent_status.detail,
+    },
+    hypothesis: snapshot.hypothesis
+      ? {
+          text: snapshot.hypothesis.text,
+          based_on_steps: snapshot.hypothesis.based_on_steps ?? [],
+          confidence: snapshot.hypothesis.confidence,
+          confirmed: snapshot.hypothesis.confirmed,
+        }
+      : null,
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "pipeline_id": "orders",
+  "nodes": [
+    {
+      "id": "pg:public.orders",
+      "kind": "source_table",
+      "name": "public.orders",
+      "layer": "postgres",
+      "owner": "priya",
+      "health": "ok",
+      "facts": { "slot_retained": "12.4 GB" }
+    },
+    {
+      "id": "connect:pg-orders-connector",
+      "kind": "connector",
+      "name": "pg-orders-connector",
+      "layer": "kafka-connect",
+      "owner": "arjun",
+      "health": "fail",
+      "facts": { "task_0": "FAILED", "error": "SchemaRegistryException" }
+    },
+    {
+      "id": "topic:pg.public.orders",
+      "kind": "topic",
+      "name": "pg.public.orders",
+      "layer": "kafka",
+      "owner": "arjun",
+      "health": "warn",
+      "facts": { "new_records": "none since 09:47" }
+    },
+    {
+      "id": "cg:order-sync",
+      "kind": "consumer_group",
+      "name": "order-sync",
+      "layer": "consumer",
+      "owner": "kabir",
+      "health": "warn",
+      "facts": { "lag": "0" }
+    },
+    {
+      "id": "dw:analytics.orders",
+      "kind": "sink_table",
+      "name": "analytics.orders",
+      "layer": "warehouse",
+      "owner": "meera",
+      "health": "warn",
+      "facts": { "last_loaded_at": "2026-10-11T09:48:00Z" }
+    }
+  ],
+  "edges": [
+    { "from": "pg:public.orders", "to": "connect:pg-orders-connector" },
+    { "from": "connect:pg-orders-connector", "to": "topic:pg.public.orders" },
+    { "from": "topic:pg.public.orders", "to": "cg:order-sync" },
+    { "from": "cg:order-sync", "to": "dw:analytics.orders" }
+  ]
+}
