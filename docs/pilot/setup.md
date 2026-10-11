@@ -29,7 +29,17 @@ at the local dev stack, so **set every one** you rely on.
 | `USERS_FILE` | users and the layers each owns (step 2) |
 | `PIPEROOM_MODEL` | model id, default `claude-opus-5-5` |
 | `PIPEROOM_EFFORT` | reasoning effort, default `high` |
+| `KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_MECHANISM`, `KAFKA_SASL_USERNAME` | Kafka TLS/SASL (empty = plaintext) |
+| `KAFKA_SASL_PASSWORD` | **secret** |
+| `KAFKA_TLS_CA_FILE`, `KAFKA_TLS_CERT_FILE`, `KAFKA_TLS_KEY_FILE`, `KAFKA_TLS_SERVER_NAME` | Kafka TLS files (the key file is a secret; mount read-only) |
+| `SCHEMA_REGISTRY_USERNAME`, `SCHEMA_REGISTRY_TLS_CA_FILE`, `SCHEMA_REGISTRY_TLS_CERT_FILE` | Registry basic auth / TLS |
+| `SCHEMA_REGISTRY_PASSWORD`, `SCHEMA_REGISTRY_TLS_KEY_FILE` | **secrets** |
+| `CONNECT_USERNAME`, `CONNECT_TLS_CA_FILE`, `CONNECT_TLS_CERT_FILE` | Connect basic auth / TLS |
+| `CONNECT_PASSWORD`, `CONNECT_TLS_KEY_FILE` | **secrets** |
 | `ANTHROPIC_API_KEY` | read by the SDK from the environment; never stored in config |
+
+The TLS/SASL/auth variables are read by `config.Load()`, but `cmd/investigate/wire.go` does
+not use them yet (wiring pending, A4), so they have no effect today.
 
 Put secrets in your secret manager and inject them into the process environment. Do not
 commit them, and do not put DSNs with passwords in shell history or tickets. Use

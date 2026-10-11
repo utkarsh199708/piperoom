@@ -23,9 +23,9 @@ pilot around them instead of discovering them in an incident:
 - **Room service not on `main` yet.** `cmd/server`, the HTTP API, the store and the executor
   (A5) have not merged. Until they do, only `cmd/investigate` runs, and [setup.md](setup.md)
   marks the steps that need the server.
-- **Write actions are not pipeline-scoped (F10).** `connect_restart_*`, `schema_set_compatibility`
-  and `schema_register` accept any connector/subject that exists. Least-privilege credentials
-  (below) and a dedicated Connect/Registry user are the real boundary today.
+- **Write actions are scoped to the room's pipeline** (F10, fixed on `main`:
+  `actions.Scoped.CheckScope`). Still use narrow Connect/Registry credentials as defence in
+  depth; the credential, not the code, should be the last line.
 - **Row values are redacted, but identifiers are not.** `pg_row` / `warehouse_row` return only
   the key and timestamp values to the model and the room log (F3, fixed on `main`); other
   columns appear as names only. Keys, topic names and timestamps still appear. See

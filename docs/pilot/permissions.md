@@ -115,10 +115,11 @@ Do **not** grant `Write`, `Create`, `Delete`, `Alter`, `AlterConfigs`, `ClusterA
 on groups (that would allow committing offsets). Do not grant `Read` on topics outside the
 pipeline: record values may contain customer data (see [data-handling.md](data-handling.md)).
 
-Use TLS and SASL on the listener if your cluster has them. The client config in
-`internal/config` currently only takes `KAFKA_BROKERS`, so check that TLS/SASL support is
-available in your Piperoom build (see `docs/security/` and the secure-clients task) before
-pointing it at a secured cluster. If it is not, use a network-isolated replica cluster.
+Use TLS and SASL on the listener if your cluster has them. The settings exist
+(`KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_*`, `KAFKA_TLS_*`, and the same for Schema Registry
+and Connect; see [setup.md](setup.md#1-configure-the-environment)), but **the wiring is pending**:
+`cmd/investigate/wire.go` still builds plain clients (A4). Until that lands, connect only to
+a network-isolated replica or staging cluster that does not require TLS/SASL.
 
 ## Kafka Connect
 
@@ -126,20 +127,24 @@ Connect's REST API usually has no per-endpoint authorization, so scope it with t
 and, where available, a proxy or the Connect REST extension that your platform provides.
 
 - **Read-only mode (recommended default):** allow only `GET /connectors`,
-  `GET /connectors/{name}`, `GET /connectors/{name}/status`. Piperoom reads connector config
+  `GET /connectors/{name}/status`, `GET /connectors/{name}/config`. Piperoom reads connector config
   and **redacts** keys containing `password`, `secret`, `token`, or `.key` before showing
   them, but still prefer connectors whose secrets use config providers
   (`${file:...}` / `${vault:...}`) so no secret is in the REST output at all.
 - **Write mode (only to allow approved fixes):** additionally allow
-  `POST /connectors/{name}/restart` and `POST /connectors/{name}/tasks/{id}/restart`.
+  `POST /connectors/{name}/restart?includeTasks=true&onlyFailed=true` and
+  `POST /connectors/{name}/tasks/{id}/restart`.
   Piperoom's actions use nothing else: no create, delete, pause, or config `PUT`.
 
-Restrict the allowed `{name}` values to the pipeline's connectors if your proxy can. Today
-Piperoom does not do this for you (finding F10).
+Also restrict the allowed `{name}` values to the pipeline's connectors if your proxy can.
+Piperoom already scopes every write action to the room's pipeline (`actions.Scoped.CheckScope`);
+this is defence in depth.
 
 ## Schema Registry
 
-- **Read-only:** `GET /subjects`, `GET /subjects/{subject}/versions[/{version}]`.
+- **Read-only:** `GET /subjects`, `GET /subjects/{subject}/versions[/{version}]`,
+  `GET /schemas/ids/{id}` (decoding Avro records for `kafka_find_by_key` / `trace_record`),
+  `GET /config/{subject}` and `GET /config` (compatibility).
 - **Write mode:** additionally `PUT /config/{subject}` (set compatibility) and
   `POST /subjects/{subject}/versions` (register schema).
 
