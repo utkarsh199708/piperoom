@@ -1,0 +1,200 @@
+// Package ws implements the WebSocket gateway: replay events after seq N,
+// then stream live, plus an in-memory presence hub.
+package ws
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/go-chi/chi/v5"
+
+	"piperoom/internal/events"
+	"piperoom/internal/room"
+	"piperoom/internal/store"
+)
+
+// sendBuffer is the per-connection outbound queue. When it fills, the
+// connection is closed with a policy violation so the client reconnects with
+// after= (docs/api.md).
+const sendBuffer = 256
+
+// Gateway serves /api/rooms/{id}/ws.
+type Gateway struct {
+	svc   *room.Service
+	store store.Store
+	log   *slog.Logger
+	now   func() time.Time
+
+	mu    sync.Mutex
+	rooms map[string]*roomHub
+}
+
+// NewGateway builds the gateway and starts its presence loop.
+func NewGateway(svc *room.Service, st store.Store, log *slog.Logger) *Gateway {
+	if log == nil {
+		log = slog.Default()
+	}
+	g := &Gateway{svc: svc, store: st, log: log, now: time.Now, rooms: map[string]*roomHub{}}
+	go g.presenceLoop()
+	return g
+}
+
+type serverMsg struct {
+	Type    string        `json:"type"`
+	Event   *events.Event `json:"event,omitempty"`
+	Members []Member      `json:"members,omitempty"`
+	Error   *serverError  `json:"error,omitempty"`
+}
+
+type serverError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type clientMsg struct {
+	Type  string `json:"type"`
+	State string `json:"state"`
+}
+
+// Member is one presence entry.
+type Member struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	State string `json:"state"` // "viewing" | "away"
+}
+
+// ServeHTTP authenticates (?user=), verifies the room, upgrades, replays and
+// then streams live events.
+func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	userID := r.URL.Query().Get("user")
+	user, ok := g.svc.LookupUser(userID)
+	if !ok {
+		writeHTTPError(w, http.StatusUnauthorized, "unauthenticated", "unknown user")
+		return
+	}
+	roomID := chi.URLParam(r, "id")
+	if _, err := g.svc.GetRoom(r.Context(), roomID); err != nil {
+		writeHTTPError(w, http.StatusNotFound, "not_found", "room not found")
+		return
+	}
+	after, err := parseAfterQuery(r)
+	if err != nil {
+		writeHTTPError(w, http.StatusBadRequest, "bad_request", "after must be a non-negative integer")
+		return
+	}
+
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		OriginPatterns: []string{"localhost:5173", "127.0.0.1:5173"},
+	})
+	if err != nil {
+		// Accept already wrote the response.
+		return
+	}
+	conn.SetReadLimit(4096)
+
+	c := &client{
+		userID:   user.ID,
+		userName: user.Name,
+		state:    "viewing",
+		lastSeen: g.now(),
+		send:     make(chan []byte, sendBuffer),
+		conn:     conn,
+		once:     sync.Once{},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	c.cancel = cancel
+	c.onClose = func() { g.removeClient(roomID, c) }
+
+	ch, err := g.store.Subscribe(ctx, roomID, after)
+	if err != nil {
+		c.shutdown(websocket.StatusInternalError, "subscribe failed")
+		return
+	}
+
+	g.addClient(roomID, c)
+
+	go g.writeLoop(ctx, c)
+	go g.readLoop(ctx, roomID, c)
+	go g.eventLoop(ctx, c, ch)
+}
+
+func (g *Gateway) writeLoop(ctx context.Context, c *client) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-c.send:
+			wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := c.conn.Write(wctx, websocket.MessageText, msg)
+			cancel()
+			if err != nil {
+				c.shutdown(websocket.StatusInternalError, "write failed")
+				return
+			}
+		}
+	}
+}
+
+func (g *Gateway) readLoop(ctx context.Context, roomID string, c *client) {
+	for {
+		typ, data, err := c.conn.Read(ctx)
+		if err != nil {
+			c.shutdown(websocket.StatusNormalClosure, "")
+			return
+		}
+		if typ != websocket.MessageText {
+			continue
+		}
+		var msg clientMsg
+		if err := json.Unmarshal(data, &msg); err != nil || msg.Type != "presence" {
+			continue
+		}
+		g.setPresence(roomID, c, msg.State)
+	}
+}
+
+func (g *Gateway) eventLoop(ctx context.Context, c *client, ch <-chan events.Event) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case e, ok := <-ch:
+			if !ok {
+				return
+			}
+			b, err := json.Marshal(serverMsg{Type: "event", Event: &e})
+			if err != nil {
+				continue
+			}
+			if !c.trySend(b) {
+				c.shutdown(websocket.StatusPolicyViolation, "send buffer full")
+				return
+			}
+		}
+	}
+}
+
+func parseAfterQuery(r *http.Request) (int64, error) {
+	q := r.URL.Query().Get("after")
+	if q == "" {
+		return 0, nil
+	}
+	n, err := strconv.ParseInt(q, 10, 64)
+	if err != nil || n < 0 {
+		return 0, err
+	}
+	return n, nil
+}
+
+func writeHTTPError(w http.ResponseWriter, status int, code, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": code, "message": msg}})
+}
