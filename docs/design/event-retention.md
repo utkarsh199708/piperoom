@@ -1,6 +1,6 @@
 # Design: what the room log stores, and for how long
 
-Task C9, doc 3 of 3 (`auth.md`, `webhook-auth.md`). Design only, no code changed. Written against `main` @ `8e326a3`+;
+Task C9, doc 3 of 3 (`auth.md`, `webhook-auth.md`). Design only, no code changed. Written against `main` @ `f417abf`;
 A5 facts are cited "(a5 @ 935f17d)" from the lead's task file.
 **Findings:** F3 (record values in a permanent, broadcast log), F6 (no limit on log growth). Audit needs for F1/F2/F10.
 GDPR is cited as a reason for limits (Art. 5(1)(c) data minimisation, 5(1)(e) storage limitation, 17 erasure); this is not legal advice and the customer's own obligations win.
@@ -78,7 +78,7 @@ If option C were chosen, `GET /api/rooms/{id}/events?after=N` on a deleted room 
 ## 5. Contract changes
 
 `internal/events/events.go` (caps, marker, `Compactor`; additive, `Store` is unchanged):
-```diff
+````diff
 --- a/internal/events/events.go
 +++ b/internal/events/events.go
 @@ -86,6 +86,24 @@
@@ -106,9 +106,9 @@ If option C were chosen, `GET /api/rooms/{id}/events?after=N` on a deleted room 
  // Decode unmarshals an event payload into T.
  func Decode[T any](e Event) (T, error) {
  	var v T
-```
+````
 `docs/api.md` (replay rule):
-```diff
+````diff
 --- a/docs/api.md
 +++ b/docs/api.md
 @@ -140,4 +140,4 @@
@@ -117,9 +117,9 @@ If option C were chosen, `GET /api/rooms/{id}/events?after=N` on a deleted room 
  The server marks a member `away` after 45 s without any client message (2× the heartbeat plus slack).
 -Rules: the server first replays every event with `seq > after`, then streams live events. Events are never skipped or repeated. **On first open of a room the client connects with `after=0`** (full replay); on reconnect it passes its highest seen seq. Presence is not stored in the event log.
 +Rules: the server first replays every event with `seq > after`, then streams live events. After the retention period (`docs/design/event-retention.md`) the events of a closed room stay in the log with the same `seq`, `type`, `actor` and `at`, but free-text and data fields in `payload` are removed and `payload._redacted` is `true`; clients must render such events without those fields. Events are never skipped or repeated. **On first open of a room the client connects with `after=0`** (full replay); on reconnect it passes its highest seen seq. Presence is not stored in the event log.
-```
+````
 `internal/config/config.go` (empty = off):
-```diff
+````diff
 --- a/internal/config/config.go
 +++ b/internal/config/config.go
 @@ -18,6 +18,8 @@
@@ -129,18 +129,18 @@ If option C were chosen, `GET /api/rooms/{id}/events?after=N` on a deleted room 
 +	RetentionContent  string // PIPEROOM_RETENTION_CONTENT_DAYS (days after room.closed; "" = never redact content)
 +	RetentionAudit    string // PIPEROOM_RETENTION_AUDIT_DAYS (days after room.closed; "" = never delete)
  	// The Anthropic SDK reads ANTHROPIC_API_KEY itself; it is never stored here.
- }
  
-@@ -35,6 +37,8 @@
+ 	// Kafka connection security (internal/clients/netsec). Empty = PLAINTEXT, no login (dev stack).
+@@ -60,6 +62,8 @@
  		UsersFile:         get("USERS_FILE", "dev/users.yaml"),
  		Model:             get("PIPEROOM_MODEL", "claude-opus-5-5"),
  		Effort:            get("PIPEROOM_EFFORT", "high"),
 +		RetentionContent:  get("PIPEROOM_RETENTION_CONTENT_DAYS", ""),
 +		RetentionAudit:    get("PIPEROOM_RETENTION_AUDIT_DAYS", ""),
- 	}
- }
  
-```
+ 		KafkaSecurityProtocol: get("KAFKA_SECURITY_PROTOCOL", ""),
+ 		KafkaSASLMechanism:    get("KAFKA_SASL_MECHANISM", ""),
+````
 
 ## 6. Migration from today's dev mode
 

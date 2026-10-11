@@ -1,6 +1,6 @@
 # Design: alert webhook authentication
 
-Task C9, doc 2 of 3 (`auth.md`, `event-retention.md`). Design only, no code changed. Written against `main` @ `8e326a3`+.
+Task C9, doc 2 of 3 (`auth.md`, `event-retention.md`). Design only, no code changed. Written against `main` @ `f417abf`.
 **Findings:** F9 (webhook auth undefined). Related: F4/F10 (pipeline scoping), F6 (a flood grows the log).
 
 **Depends on C5.** C5 builds the verification and parsing helpers in `internal/alertin` (PR #11, branch
@@ -73,7 +73,7 @@ option if the generic form is revised (Open question 4).
 ## 4. Contract changes
 
 `docs/api.md` (this is the single `docs/api.md` proposal for the webhook; it replaces the `/api/alerts/webhook` row and adds error rows):
-```diff
+````diff
 --- a/docs/api.md
 +++ b/docs/api.md
 @@ -43,7 +43,9 @@
@@ -96,9 +96,9 @@ option if the generic form is revised (Open question 4).
  | GET | `/api/rooms/{id}` | – | `RoomSnapshot` | |
  | GET | `/api/rooms/{id}/events?after=0&limit=500` | – | `{events:[Event], last_seq}` | limit max 1000; `events` is `[]` when nothing is after `after` |
  | POST | `/api/rooms/{id}/comments` | `{step_id?, text}` | `Event` | `@agent` in text sets `mentions_agent` |
-```
+````
 `internal/config/config.go` (secrets; current first; empty = source off):
-```diff
+````diff
 --- a/internal/config/config.go
 +++ b/internal/config/config.go
 @@ -3,7 +3,10 @@
@@ -122,13 +122,17 @@ option if the generic form is revised (Open question 4).
 +	// secret first; "" = that source is off. A value "file:<path>" is read from that file by the server (one per line).
 +	WebhookSecrets map[string]string
  	// The Anthropic SDK reads ANTHROPIC_API_KEY itself; it is never stored here.
- }
  
-@@ -35,9 +42,21 @@
+ 	// Kafka connection security (internal/clients/netsec). Empty = PLAINTEXT, no login (dev stack).
+@@ -60,6 +67,7 @@
  		UsersFile:         get("USERS_FILE", "dev/users.yaml"),
  		Model:             get("PIPEROOM_MODEL", "claude-opus-5-5"),
  		Effort:            get("PIPEROOM_EFFORT", "high"),
 +		WebhookSecrets:    webhookSecrets(),
+ 
+ 		KafkaSecurityProtocol: get("KAFKA_SECURITY_PROTOCOL", ""),
+ 		KafkaSASLMechanism:    get("KAFKA_SASL_MECHANISM", ""),
+@@ -84,6 +92,17 @@
  	}
  }
  
@@ -146,7 +150,7 @@ option if the generic form is revised (Open question 4).
  func get(key, def string) string {
  	if v, ok := os.LookupEnv(key); ok && v != "" {
  		return v
-```
+````
 `internal/events/events.go`: none. Setting names: `PIPEROOM_WEBHOOK_SECRETS_ALERTMANAGER`, `_GRAFANA`, `_PAGERDUTY`, `_DATADOG`, `_GENERIC`.
 Values contain no commas (generate with 32 random bytes, hex). `file:<path>` is resolved by A5, one secret per line.
 `PagerDutyServices` and `DefaultPipeline` (alertin config, not secrets) are read from `owners.yaml`; their shape is an Open question.

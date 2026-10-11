@@ -1,7 +1,7 @@
 # Design: real login (replaces `X-User`)
 
 Task C9, doc 1 of 3 (`webhook-auth.md`, `event-retention.md`). Design only, no code changed. Written against `main`
-@ `8e326a3`+; unmerged A5 facts are cited "(a5 @ 935f17d)" from the lead's task file.
+@ `f417abf`; unmerged A5 facts are cited "(a5 @ 935f17d)" from the lead's task file.
 **Findings:** F1 (any caller can become any layer owner). Also gives F2/F10 their "who approved" (approver identity).
 
 ## 1. Problem
@@ -15,7 +15,7 @@ Task C9, doc 1 of 3 (`webhook-auth.md`, `event-retention.md`). Design only, no c
   from `web/src/api/client.ts:34`. The dev-only `UserSwitcher` is already gated by `isDev` (`web/src/components/UserSwitcher.tsx`).
 - `approval.given` / `approval.rejected` events carry only `Actor`; the `approvals` table has no approver column (a5 @ 935f17d).
   With a spoofable actor, the audit trail proves nothing.
-- The default listener is now loopback (`config.go:27`), which only hides the problem.
+- The default listener is now loopback (`config.go:52`), which only hides the problem.
 
 ## 2. Options
 
@@ -88,7 +88,7 @@ Task C9, doc 1 of 3 (`webhook-auth.md`, `event-retention.md`). Design only, no c
 ## 4. Contract changes
 
 `docs/api.md` (Auth section, WebSocket line):
-```diff
+````diff
 --- a/docs/api.md
 +++ b/docs/api.md
 @@ -7,9 +7,15 @@
@@ -128,9 +128,9 @@ Task C9, doc 1 of 3 (`webhook-auth.md`, `event-retention.md`). Design only, no c
  
  Server → client messages:
  ```json
-```
+````
 `internal/events/events.go` (who approved):
-```diff
+````diff
 --- a/internal/events/events.go
 +++ b/internal/events/events.go
 @@ -209,6 +209,7 @@
@@ -149,9 +149,9 @@ Task C9, doc 1 of 3 (`webhook-auth.md`, `event-retention.md`). Design only, no c
  }
  
  // ActionExecutedPayload is the result of running one approved step.
-```
+````
 `internal/config/config.go` (empty = off; the client secret is read from a file):
-```diff
+````diff
 --- a/internal/config/config.go
 +++ b/internal/config/config.go
 @@ -16,6 +16,11 @@
@@ -166,7 +166,7 @@ Task C9, doc 1 of 3 (`webhook-auth.md`, `event-retention.md`). Design only, no c
  	Model             string // PIPEROOM_MODEL
  	Effort            string // PIPEROOM_EFFORT
  	// The Anthropic SDK reads ANTHROPIC_API_KEY itself; it is never stored here.
-@@ -33,6 +38,11 @@
+@@ -58,6 +63,11 @@
  		SchemaRegistryURL: get("SCHEMA_REGISTRY_URL", "http://localhost:8081"),
  		OwnersFile:        get("OWNERS_FILE", "dev/owners.yaml"),
  		UsersFile:         get("USERS_FILE", "dev/users.yaml"),
@@ -177,8 +177,8 @@ Task C9, doc 1 of 3 (`webhook-auth.md`, `event-retention.md`). Design only, no c
 +		OIDCClientSecret:  get("PIPEROOM_OIDC_CLIENT_SECRET_FILE", ""),
  		Model:             get("PIPEROOM_MODEL", "claude-opus-5-5"),
  		Effort:            get("PIPEROOM_EFFORT", "high"),
- 	}
-```
+ 
+````
 `dev/users.yaml` (additive): each user may gain `oidc: {iss: <issuer-url>, sub: <subject>}`. Existing keys stay.
 The `webhook-auth.md` and `event-retention.md` config diffs each apply to `main` on their own; the three edit the same struct, so the lead merges them by hand.
 
