@@ -116,6 +116,14 @@ func TestRegister(t *testing.T) {
 	}
 }
 
+func TestRegisterRequiresOwners(t *testing.T) {
+	d := testDeps()
+	d.Owners = nil
+	if err := Register(tools.NewRegistry(), d); err == nil {
+		t.Fatal("Register with nil Owners must fail at wiring time")
+	}
+}
+
 func runTool(t *testing.T, tt tools.Tool, input string) (tools.Result, error) {
 	t.Helper()
 	return tt.Run(context.Background(), json.RawMessage(input))

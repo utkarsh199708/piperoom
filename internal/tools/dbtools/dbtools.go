@@ -55,8 +55,13 @@ func scopedTable(pipelineID, table string, tables []string) error {
 	return fmt.Errorf("%w: table %q is not in pipeline %q", tools.ErrBadInput, table, pipelineID)
 }
 
-// Register adds every db tool to reg in a stable order.
+// Register adds every db tool to reg in a stable order. It fails fast when
+// Owners is nil, so a mis-wired server refuses to start instead of every row
+// tool erroring at call time.
 func Register(reg *tools.Registry, d Deps) error {
+	if d.Owners == nil {
+		return fmt.Errorf("dbtools: Owners is nil (wiring error)")
+	}
 	list := []tools.Tool{
 		pgReplicationSlotsTool(d),
 		pgRecentDDLTool(d),
