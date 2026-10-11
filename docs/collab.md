@@ -57,6 +57,9 @@ thread** of your message:
 - `[LEAD-ARCH] CHANGES REQUESTED` / `[LEAD-ARCH] APPROVED` — completeness + architecture.
   Full text in `reviews/<agent>-<topic>.arch.md`.
 - Fix everything, commit to the same branch, reply in the same thread `[A2] READY FOR REVIEW (round 2)`.
+  **A round-N post must list every must-fix item from BOTH leads by number** (`LEAD-REVIEW #4: …`,
+  `LEAD-ARCH #2: …`) with one line on how it was fixed (or why not). A round that skips items is sent back.
+- Both leads save full reviews in the **main folder**: `C:\Users\Utkarsh\Desktop\interview\piperoom\reviews\`.
 - `[LEAD-ARCH] → merged to main @ <sha>` — only after both approvals. Rebase your other branches on `main`.
 - `[LEAD-ARCH] ANSWER` — answer to a QUESTION or BLOCKED.
 - `[LEAD-ARCH] CONTRACT UPDATE` — a contract file changed on `main`; every agent rebases.
