@@ -8,6 +8,7 @@ import { useRoomList } from '../hooks/useRoomList'
 import { useCurrentUser } from '../context/user'
 import { ageLabel } from '../lib/time'
 import { sortRoomsForList } from '../lib/rooms'
+import { errorText } from '../lib/errors'
 import { Chip, Empty } from './ui'
 import { severityTone } from '../lib/tones'
 import { UserSwitcher } from './UserSwitcher'
@@ -22,6 +23,7 @@ export function RoomList() {
   const [severity, setSeverity] = useState('sev2')
   const [pipelineId, setPipelineId] = useState('orders')
   const [busy, setBusy] = useState(false)
+  const [createError, setCreateError] = useState<string | null>(null)
 
   // Open rooms first, then newest opened first (lib/rooms.ts); the two sections
   // below share the same order within their group.
@@ -33,6 +35,7 @@ export function RoomList() {
     e.preventDefault()
     if (!title.trim()) return
     setBusy(true)
+    setCreateError(null)
     try {
       if (isFixtures()) {
         const snapshot = emptySnapshot(
@@ -51,6 +54,8 @@ export function RoomList() {
         pipeline_id: pipelineId.trim() || 'orders',
       })
       navigate(`/rooms/${room.id}`)
+    } catch (err) {
+      setCreateError(errorText(err))
     } finally {
       setBusy(false)
     }
@@ -104,6 +109,7 @@ export function RoomList() {
                 Open room
               </button>
             </form>
+            {createError && <p className="error-text">{createError}</p>}
           </div>
         </section>
 

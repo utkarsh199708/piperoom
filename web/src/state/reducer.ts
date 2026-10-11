@@ -3,6 +3,7 @@
 // filling (seq > last_seq + 1) is the transport's job (see hooks/useRoom.ts).
 import type {
   ActionExecutedPayload,
+  Actor,
   AgentHypothesisPayload,
   AgentMessagePayload,
   AgentStatusPayload,
@@ -25,7 +26,7 @@ import type {
 } from '../api/types'
 import { describeEvent } from './describe'
 import { alertSource } from '../lib/alerts'
-import type { RoomState, StepState } from './types'
+import type { MemberState, RoomState, StepState } from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
@@ -43,6 +44,16 @@ function updateStep(
   fn: (s: StepState) => StepState,
 ): StepState[] {
   return steps.map((s) => (s.id === stepId ? fn(s) : s))
+}
+
+// upsertMember mirrors the server's snapshot.Apply: every human actor is a room
+// member. New actors join as "watching"; an actor already in the list is never
+// downgraded (a driver who acts stays the driver).
+function upsertMember(members: MemberState[], actor: Actor): MemberState[] {
+  const existing = members.find((m) => m.id === actor.id)
+  if (!existing) return [...members, { id: actor.id, name: actor.name, role: 'watching' }]
+  if (existing.name === actor.name) return members
+  return members.map((m) => (m.id === actor.id ? { ...m, name: actor.name } : m))
 }
 
 export function applyEvent(state: RoomState, event: Event): RoomState {
@@ -369,8 +380,14 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         handoffs: state.handoffs.map((h) =>
           h.handoff_id === p.handoff_id ? { ...h, status: 'accepted' as const } : h,
         ),
+        // The server emits control.granted (driver + lease) immediately before
+        // handoff.accepted; keep that lease rather than replacing it with a
+        // lease-less driver object. Only move the driver here as a fallback for
+        // a log that never saw the control.granted.
         driver: accepted
-          ? { id: accepted.to.id, name: accepted.to.name }
+          ? state.driver?.id === accepted.to.id
+            ? state.driver
+            : { id: accepted.to.id, name: accepted.to.name }
           : state.driver,
         members: accepted
           ? state.members.some((m) => m.id === accepted.to.id)
@@ -405,8 +422,15 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       break
   }
 
+  // Every human actor is a room member, mirroring the server's snapshot.Apply
+  // (which upserts the actor as "watching" before handling the event). Applied
+  // after the switch so no case's members rebuild can discard it.
+  const members =
+    event.actor.kind === 'human' ? upsertMember(next.members, event.actor) : next.members
+
   return {
     ...next,
+    members,
     last_seq: event.seq,
     activity: [
       {

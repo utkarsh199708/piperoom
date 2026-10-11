@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import type { RoomSnapshot } from '../api/types'
 
@@ -10,8 +10,22 @@ vi.mock('../context/user', () => ({
   }),
 }))
 vi.mock('../hooks/useRoomList', () => ({ useRoomList: vi.fn() }))
+vi.mock('../api/client', () => {
+  class ApiClientError extends Error {
+    code: string
+    status: number
+    constructor(status: number, code: string, message: string) {
+      super(message)
+      this.name = 'ApiClientError'
+      this.code = code
+      this.status = status
+    }
+  }
+  return { api: { createRoom: vi.fn() }, isFixtures: () => false, ApiClientError }
+})
 
 import { useRoomList } from '../hooks/useRoomList'
+import { api } from '../api/client'
 import { RoomList } from './RoomList'
 
 function room(over: Partial<RoomSnapshot> & { id: string }): RoomSnapshot {
@@ -70,5 +84,26 @@ describe('RoomList', () => {
 
     const older = screen.getByRole('link', { name: /Older open/ })
     expect(within(older).getByText(/no driver/)).toBeInTheDocument()
+  })
+
+  it('shows an error when creating a room fails', async () => {
+    vi.mocked(useRoomList).mockReturnValue({
+      rooms: [],
+      loading: false,
+      error: null,
+      reload: vi.fn(),
+    })
+    vi.mocked(api.createRoom).mockRejectedValueOnce(new Error('validation: unknown pipeline'))
+
+    render(
+      <MemoryRouter>
+        <RoomList />
+      </MemoryRouter>,
+    )
+
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Broken room' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Open room' }))
+
+    expect(await screen.findByText(/validation: unknown pipeline/)).toBeInTheDocument()
   })
 })

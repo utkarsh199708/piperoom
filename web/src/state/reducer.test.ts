@@ -392,6 +392,52 @@ describe('schema-change fixture activity', () => {
   })
 })
 
+describe('applyEvent — membership and hand-off lease', () => {
+  const kabir = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+
+  it('adds non-driver human actors as members when they comment or suggest', () => {
+    let s = applyEvent(
+      base(),
+      ev(1, 'room.created', { title: 'T', severity: 'sev2', pipeline_id: 'orders' }, human),
+    )
+    s = applyEvent(
+      s,
+      ev(2, 'comment.added', { comment_id: 'c1', text: 'hi', mentions_agent: false }, kabir),
+    )
+    expect(s.members.some((m) => m.id === 'kabir' && m.role === 'watching')).toBe(true)
+
+    // A driver who acts stays the driver (never downgraded to "watching").
+    s = applyEvent(s, ev(3, 'steer.sent', { text: 'go' }, human))
+    expect(s.members.find((m) => m.id === 'arjun')?.role).toBe('driver')
+  })
+
+  it('keeps the driver lease set by the control.granted before handoff.accepted', () => {
+    let s = applyEvent(
+      base(),
+      ev(1, 'room.created', { title: 'T', severity: 'sev2', pipeline_id: 'orders' }, human),
+    )
+    s = applyEvent(
+      s,
+      ev(2, 'handoff.created', {
+        handoff_id: 'h1',
+        to: { kind: 'human', id: 'kabir', name: 'Kabir' },
+        summary: { what_broke: '', why: '', done: [], ruled_out: [], open: [], risks: [] },
+        stay_as_watcher: false,
+      }, human),
+    )
+    s = applyEvent(
+      s,
+      ev(3, 'control.granted', {
+        to: { kind: 'human', id: 'kabir', name: 'Kabir' },
+        lease_until: '2026-10-11T10:35:00Z',
+      }, kabir),
+    )
+    s = applyEvent(s, ev(4, 'handoff.accepted', { handoff_id: 'h1' }, kabir))
+    expect(s.driver?.id).toBe('kabir')
+    expect(s.driver?.lease_until).toBe('2026-10-11T10:35:00Z')
+  })
+})
+
 describe('fromSnapshot', () => {
   it('defaults null slices and starts last_seq at 0 for the full event replay', () => {
     const snap: RoomSnapshot = {
