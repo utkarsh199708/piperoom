@@ -5,6 +5,54 @@ import { canDecideLayer } from '../state/permissions'
 import type { RoomActions } from '../hooks/useRoom'
 import { Chip, Empty, Panel } from './ui'
 
+// Fields that identify what an action actually targets. Approvers must see these
+// highlighted (F2): the layer owner should never rubber-stamp a description
+// without noticing which connector/subject/table/task the step will touch.
+const TARGET_KEYS = new Set(['connector', 'subject', 'table', 'task', 'task_id'])
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function formatParamValue(value: unknown): string {
+  if (typeof value === 'string') return value
+  return JSON.stringify(value) ?? String(value)
+}
+
+function StepParams({ params }: { params: unknown }) {
+  if (params === null || params === undefined) {
+    return <div className="proposal__params proposal__params--empty">no parameters</div>
+  }
+  if (!isRecord(params)) {
+    return (
+      <div className="proposal__params" data-testid="step-params">
+        {JSON.stringify(params, null, 2)}
+      </div>
+    )
+  }
+  const entries = Object.entries(params)
+  if (entries.length === 0) {
+    return <div className="proposal__params proposal__params--empty">{'{}'}</div>
+  }
+  return (
+    <div className="proposal__params" data-testid="step-params">
+      {entries.map(([key, value]) => {
+        const target = TARGET_KEYS.has(key.toLowerCase())
+        return (
+          <div key={key} className="proposal__param">
+            <span className={`proposal__param-key${target ? ' proposal__param-key--target' : ''}`}>
+              {key}
+            </span>
+            <span className={`proposal__param-val${target ? ' proposal__param-val--target' : ''}`}>
+              {formatParamValue(value)}
+            </span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function LayerDecision({
   proposal,
   layer,
@@ -90,10 +138,12 @@ function Proposal({ proposal, user, actions }: {
       <ul className="proposal__steps">
         {proposal.steps.map((s, i) => (
           <li key={i} className="proposal__step">
-            <span className="mono">{s.action}</span>
-            <span className="muted">
-              {s.layer} · {s.description}
-            </span>
+            <div className="proposal__step-head">
+              <span className="mono">{s.action}</span>
+              <span className="muted">{s.layer}</span>
+            </div>
+            <span className="muted">{s.description}</span>
+            <StepParams params={s.params} />
           </li>
         ))}
       </ul>
