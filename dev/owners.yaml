@@ -1,0 +1,15 @@
+pipelines:
+  - id: orders
+    title: Orders CDC
+    source_tables: [public.orders]
+    connectors: [pg-orders-connector]
+    consumer_groups: [order-sync]
+    sink_tables: [analytics.orders]
+    sink_ts_column: updated_at
+layers:
+  postgres: priya
+  kafka-connect: arjun
+  schema-registry: arjun
+  kafka: arjun
+  consumer: kabir
+  warehouse: meera
