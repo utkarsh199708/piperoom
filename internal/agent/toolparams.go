@@ -27,14 +27,18 @@ type toolList struct {
 	byName map[string]toolEntry
 }
 
-// maxStrictTools is the API's per-request cap on tools with strict: true; the
-// 21st is rejected with "Too many strict tools (21). The maximum number of
-// strict tools supported is 20." Room tools take the strict slots first:
-// propose_fix carries the nested action params, where a malformed input costs
-// the most. Read tools fill the remaining slots in registration order. The rest
-// are sent without strict; validateInput still checks every read-tool input in
-// code before Tool.Run, so nothing goes unvalidated.
-const maxStrictTools = 20
+// maxStrictTools caps how many tools are sent with strict: true. The API
+// compiles every strict schema into one grammar per request and enforces two
+// limits on it: a count ("Too many strict tools (21). The maximum number of
+// strict tools supported is 20.") and a size ("The compiled grammar is too
+// large ... reduce the number of strict tools"). With our schemas the size
+// limit bites well below 20, so the cap is 8: room tools take the strict
+// slots first, because propose_fix carries the nested action params, where a
+// malformed input costs the most; read tools fill the remaining slots in
+// registration order. The rest are sent without strict; validateInput still
+// checks every read-tool input in code before Tool.Run, so nothing goes
+// unvalidated. Raise this only after a live run proves the grammar fits.
+const maxStrictTools = 8
 
 // buildToolList assembles the model-facing tool definitions. Registry (read)
 // tools keep their registration order; room tools follow in a fixed order. The

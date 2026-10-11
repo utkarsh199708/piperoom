@@ -109,6 +109,21 @@ func TestStrictToolCapWithManyReadTools(t *testing.T) {
 	}
 }
 
+// The cap is set by the compiled-grammar size limit, not by the count limit:
+// a live run with 20 strict tools was rejected with "The compiled grammar is
+// too large", so the cap must stay small until a live run proves a higher one.
+// This pins the number so a later edit cannot silently raise it back.
+func TestStrictToolCapStaysBelowGrammarLimit(t *testing.T) {
+	const liveCap = 8
+	if maxStrictTools > liveCap {
+		t.Fatalf("maxStrictTools = %d; the cap chosen from the live-test diagnosis is %d (compiled grammar size, not the 20-tool count limit); raise it only after a live run passes", maxStrictTools, liveCap)
+	}
+	room := newRoomTools(Deps{Actions: actions.NewRegistry()})
+	if maxStrictTools < len(room) {
+		t.Fatalf("maxStrictTools = %d is smaller than the %d room tools; propose_fix must always be strict", maxStrictTools, len(room))
+	}
+}
+
 // Room tools alone (no registry) are all strict: the cap never removes strict
 // where there is room for it.
 func TestStrictToolCapRoomOnly(t *testing.T) {
