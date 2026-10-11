@@ -53,7 +53,9 @@ Exactly `events.Event` from `internal/events/events.go`:
 ```
 
 ### RoomSnapshot
-Derived state, so the UI can render without replaying everything:
+Derived state for room lists and a fast first paint. **It does not contain the timeline, comments,
+trace or activity feed** — to render a room, the client replays the full event log (WebSocket with
+`after=0`, see below) and folds it with the same reducer:
 ```json
 {
   "id": "r_01J...", "title": "Warehouse orders stale", "severity": "sev2",
@@ -119,4 +121,4 @@ Client → server:
 ```json
 { "type": "presence", "state": "viewing" }    // send every 20 s; "away" when tab hidden
 ```
-Rules: the server first replays every event with `seq > after`, then streams live events. Events are never skipped or repeated. On reconnect, the client passes its highest seen seq. Presence is not stored in the event log.
+Rules: the server first replays every event with `seq > after`, then streams live events. Events are never skipped or repeated. **On first open of a room the client connects with `after=0`** (full replay); on reconnect it passes its highest seen seq. Presence is not stored in the event log.

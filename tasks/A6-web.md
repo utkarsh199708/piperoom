@@ -41,7 +41,9 @@ API contract: `docs/api.md`. Event payload types: `internal/events/events.go` (m
 
 ## State model (important)
 
-- On open: `GET /api/rooms/{id}` (snapshot) then WebSocket with `after = snapshot.last_seq`.
+- On open: `GET /api/rooms/{id}` (snapshot) for the header / first paint, then WebSocket with **`after=0`**
+  so the full log replays — the snapshot has no timeline, comments or activity, so the room must be built
+  from events. (Corrected 2026-10-11: the earlier `after = snapshot.last_seq` left the timeline empty.)
 - One reducer `applyEvent(state, event)` folds events into UI state (the same idea as A5's `Apply`).
   Ignore events with `seq <= lastSeq` (dedupe). On a gap (`seq > lastSeq + 1`) fetch
   `/events?after=lastSeq` before applying.
