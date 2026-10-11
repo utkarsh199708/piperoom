@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 
+	"piperoom/internal/actions"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
 
@@ -133,5 +135,35 @@ func TestLiveActionsValidateButNeverWrite(t *testing.T) {
 	}
 	if _, err := compat.Execute(ctx, json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`)); err == nil {
 		t.Error("set compatibility executed in replay")
+	}
+}
+
+func TestRecordingActionKeepsScope(t *testing.T) {
+	live, err := LiveActions(Resources{Connectors: []string{"pg-orders-connector"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := &attemptLog{}
+	reg, err := log.wrap(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := reg.Get("connect_restart_task")
+	scoped, ok := a.(actions.Scoped)
+	if !ok {
+		t.Fatal("wrapped action lost actions.Scoped")
+	}
+	p := owners.Pipeline{ID: "orders", Connectors: []string{"pg-orders-connector"}}
+	if err := scoped.CheckScope(p, json.RawMessage(`{"connector":"pg-orders-connector","task":0}`)); err != nil {
+		t.Errorf("in-scope refused: %v", err)
+	}
+	if err := scoped.CheckScope(p, json.RawMessage(`{"connector":"billing","task":0}`)); err == nil {
+		t.Error("out-of-scope accepted")
+	}
+	_ = a.Validate(json.RawMessage(`{"connector":"pg-orders-connector","task":0}`))
+	_ = a.Validate(json.RawMessage(`{"connector":"nope","task":0}`))
+	got := log.snapshot()
+	if len(got) != 2 || got[0].Error != "" || got[1].Error == "" || got[1].Action != "connect_restart_task" {
+		t.Errorf("attempts = %+v", got)
 	}
 }

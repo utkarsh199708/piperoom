@@ -38,6 +38,7 @@ type Summary struct {
 	MeanToolCallsToRootCause float64 `json:"mean_tool_calls_to_root_cause"`
 	MeanDurationMS           float64 `json:"mean_duration_ms"`
 	Misses                   int     `json:"misses"`
+	RejectedAttempts         int     `json:"rejected_attempts"`
 	Errors                   int     `json:"errors"`
 }
 
@@ -102,6 +103,7 @@ func summarize(rs []RunResult) Summary {
 		calls += float64(r.ToolCalls)
 		dur += float64(r.DurationMS)
 		s.Misses += len(r.Misses)
+		s.RejectedAttempts += r.RejectedAttempts
 	}
 	n := float64(len(rs))
 	s.PassRate = float64(s.Passes) / n
@@ -128,6 +130,7 @@ func combine(ss []Summary) Summary {
 		out.Runs += s.Runs
 		out.Passes += s.Passes
 		out.Misses += s.Misses
+		out.RejectedAttempts += s.RejectedAttempts
 		out.Errors += s.Errors
 		out.PassRate += s.PassRate
 		out.MeanScore += s.MeanScore
@@ -183,8 +186,8 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 	fmt.Fprintf(&b, "model `%s` · effort `%s` · %d run(s) per scenario · took %s\n\n",
 		orDefault(r.Model), orDefault(r.Effort), r.Runs,
 		(time.Duration(r.DurationMS) * time.Millisecond).Round(time.Second))
-	b.WriteString("| scenario | pass | score | root cause | layer | tool calls | calls to cause | misses | errors |\n")
-	b.WriteString("|---|---|---|---|---|---|---|---|---|\n")
+	b.WriteString("| scenario | pass | score | root cause | layer | tool calls | calls to cause | misses | rejected fixes | errors |\n")
+	b.WriteString("|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, s := range r.Scenarios {
 		writeSummaryRow(&b, s.Name, s.Summary)
 	}
@@ -205,9 +208,9 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 }
 
 func writeSummaryRow(b *strings.Builder, name string, s Summary) {
-	fmt.Fprintf(b, "| %s | %d/%d | %.1f | %.0f%% | %.0f%% | %.1f | %s | %d | %d |\n",
+	fmt.Fprintf(b, "| %s | %d/%d | %.1f | %.0f%% | %.0f%% | %.1f | %s | %d | %d | %d |\n",
 		mdCell(name), s.Passes, s.Runs, s.MeanScore, 100*s.RootCauseRate, 100*s.LayerRate,
-		s.MeanToolCalls, callsToCause(s.MeanToolCallsToRootCause), s.Misses, s.Errors)
+		s.MeanToolCalls, callsToCause(s.MeanToolCallsToRootCause), s.Misses, s.RejectedAttempts, s.Errors)
 }
 
 // mdCell keeps text from breaking a markdown table row. Failure reasons can

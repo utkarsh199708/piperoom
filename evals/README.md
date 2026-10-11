@@ -15,7 +15,7 @@ with tool results replayed from a YAML file. It scores every run and compares tw
 ## Run it
 
 ```sh
-go run ./evals/cmd/evalrun -check                                    # validate scenarios; no API key, no model calls
+go run ./evals/cmd/evalrun -validate                                 # (alias -check) validate scenarios; no API key, no model calls
 go run ./evals/cmd/evalrun -scenarios evals/scenarios -out report.json   # needs ANTHROPIC_API_KEY
 ```
 
@@ -77,14 +77,15 @@ against the live tool and action names.
 |---|---|---|
 | `tool` | string | a live tool name, e.g. `connect_status` (required) |
 | `input` | map | fields the call must have, with equal values. Fields not listed are ignored, so leave out ones the model picks freely (e.g. `since`). Empty/absent = matches any call to the tool. Every key must be a property of the tool's live input schema (e.g. `connector` for `connect_status`, not `connector_name`); `-check` rejects anything else with `recordings[i] (tool): unknown input field "x"`, because such a recording could never match a real call |
-| `summary` | string | `Result.Summary` the model reads |
+| `summary` | string | `Result.Summary` the model reads. Write it **byte for byte** as the real tool would print it: same format string as in `internal/tools/{kafkatools,dbtools}` / `internal/topology/render.go`, including the trailing newline. YAML `|` keeps one final newline (`pg_*` tools, `pipeline_map`, `trace_record`); `|-` keeps none (all kafkatools: `connect_*`, `schema_registry_*`, `kafka_*`; `warehouse_freshness`) |
 | `data` | any | `Result.Data` (structured detail for the UI) |
 | `truncated` | bool | `Result.Truncated` |
 | `error` | string | if set, the call fails with this text, as if the target failed (e.g. `"connect: connector not found (404)"`) |
 
 Each recording needs `summary` or `error`. If several recordings match, the one with the most
-`input` fields wins; on a tie, the earlier one in the file wins. A good pattern: exact recordings
-for the real names, then one wildcard `error` recording per tool for anything else. A call that
+`input` fields wins; on a tie, the earlier one in the file wins. Write `error` text in the real
+client's format too (e.g. `schemareg: GET /subjects/x/versions/2: not found: …`); when the real message
+would name the input, use an exact recording rather than a wildcard. A call that
 matches nothing returns the error `no data available for this request` and is counted as a **miss**
 in the report. Misses mean the scenario should cover more inputs.
 
@@ -101,7 +102,7 @@ of its terms appears (case-insensitive substring).
 | `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`. The final hypothesis must name it (the words per layer are `layerTerms` in `score.go`) |
 | `evidence_tools` | []string | tools that must each be called at least once |
 | `fix` | [][]string | action-name groups that must all appear among the proposed steps. Absent = no particular fix expected |
-| `forbidden_actions` | []string | actions that must never be proposed in this scenario |
+| `forbidden_actions` | []string | actions that must never be proposed in this scenario. A **rejected attempt** counts too: `propose_fix` drops a proposal whose step fails `Validate` and leaves no event, so the harness records every `Validate` call and fails a run that even tried a forbidden action |
 | `max_tool_calls` | int | read-tool budget; 0 = none |
 
 ### Example
@@ -127,13 +128,14 @@ alert:
 recordings:
   - tool: connect_status
     input: {connector: pg-orders-connector}
-    summary: |
-      pg-orders-connector (source): PAUSED on connect:8083.
+    summary: |-
+      pg-orders-connector (source): PAUSED on 172.18.0.6:8083.
       Task 0: PAUSED
-  - tool: connect_status
-    error: "connect: connector not found (404)"
   - tool: kafka_consumer_lag
-    summary: "order-sync: Stable, 1 members, total lag 0"
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 34, end 34, lag 0
 inputs:
   - kind: steer
     text: "Who paused it? Check before proposing anything."
@@ -165,12 +167,13 @@ A run **passes** when all of the following hold:
 - the root cause matches and the layer is named
 - no evidence tool is missing
 - the expected fix is proposed
-- no forbidden or invalid/out-of-scope step is proposed
+- no forbidden action is proposed or attempted, and no invalid or out-of-scope step is proposed
 - it stays within the tool budget
 
 The report also gives:
 - `tool_calls_to_root_cause`: read-tool calls made before the first hypothesis that matched
 - misses
+- action attempts and how many `Validate` rejected (`rejected_attempts`, the "rejected fixes" column)
 - tool errors
 - idles
 - duration

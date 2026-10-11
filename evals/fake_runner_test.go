@@ -60,6 +60,20 @@ func scriptedRunner(script []step) agent.Runner {
 					Text: s.hypothesis, BasedOnSteps: cite, Confidence: "high",
 				})
 			case s.proposal != nil:
+				// Like propose_fix: validate every step through the
+				// registry and drop the whole proposal on the first
+				// failure; only a fully valid one is created.
+				valid := true
+				for _, st := range s.proposal.Steps {
+					a, ok := d.Actions.Get(st.Action)
+					if !ok || a.Validate(st.Params) != nil {
+						valid = false
+						break
+					}
+				}
+				if !valid {
+					continue
+				}
 				if _, err := d.Proposals.Create(ctx, *s.proposal); err != nil {
 					return err
 				}

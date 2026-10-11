@@ -5,7 +5,7 @@
 //	go run ./evals/cmd/evalrun -scenarios evals/scenarios -out report.json
 //	go run ./evals/cmd/evalrun -runs 3 -label prompt-v2 -baseline base.json -out cand.json
 //	go run ./evals/cmd/evalrun -compare base.json,cand.json
-//	go run ./evals/cmd/evalrun -check   # validate scenarios, no model calls
+//	go run ./evals/cmd/evalrun -validate   # (or -check) validate scenarios, no model calls
 package main
 
 import (
@@ -57,27 +57,13 @@ type flags struct {
 }
 
 func main() {
-	var f flags
-	flag.StringVar(&f.scenarios, "scenarios", "evals/scenarios", "directory of *.yaml scenarios")
-	flag.StringVar(&f.only, "only", "", "comma-separated scenario names to run (default all)")
-	flag.IntVar(&f.runs, "runs", 1, "runs per scenario; use 3+ when comparing, the model is not deterministic")
-	flag.IntVar(&f.parallel, "parallel", 1, "runs at once")
-	flag.DurationVar(&f.timeout, "timeout", 15*time.Minute, "timeout per run")
-	flag.StringVar(&f.model, "model", "", "model (default PIPEROOM_MODEL / claude-opus-5-5)")
-	flag.StringVar(&f.effort, "effort", "", "effort (default PIPEROOM_EFFORT / high)")
-	flag.IntVar(&f.maxTurns, "max-turns", 0, "agent max turns per episode (default 40)")
-	flag.StringVar(&f.label, "label", "", "name for this configuration in the report, e.g. main or prompt-v2")
-	flag.StringVar(&f.out, "out", "", "write the JSON report here")
-	flag.StringVar(&f.md, "md", "", "also write the markdown table here")
-	flag.StringVar(&f.transcripts, "transcripts", "", "write each run's full transcript and result as JSON into this directory")
-	flag.StringVar(&f.baseline, "baseline", "", "after the run, compare against this earlier report")
-	flag.StringVar(&f.compare, "compare", "", "BASE.json,CANDIDATE.json: compare two reports and exit; no model calls")
-	flag.Float64Var(&f.tolerance, "tolerance", evals.DefaultScoreTolerance, "score drop per scenario that counts as a regression")
-	flag.BoolVar(&f.failOnRegr, "fail-on-regression", false, "exit 2 when a comparison finds a regression")
-	flag.BoolVar(&f.check, "check", false, "validate scenarios against the live tool and action definitions and exit; no model calls")
-	flag.BoolVar(&f.verbose, "v", false, "show the agent's own logs")
-	flag.Parse()
-
+	f, err := parseFlags(os.Args[1:], os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		os.Exit(0)
+	}
+	if err != nil {
+		os.Exit(1) // flag already printed the error and usage
+	}
 	code, err := run(f, os.Stdout, os.Stderr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "evalrun:", err)
@@ -86,6 +72,35 @@ func main() {
 		}
 	}
 	os.Exit(code)
+}
+
+func parseFlags(args []string, stderr io.Writer) (flags, error) {
+	var f flags
+	fs := flag.NewFlagSet("evalrun", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.StringVar(&f.scenarios, "scenarios", "evals/scenarios", "directory of *.yaml scenarios")
+	fs.StringVar(&f.only, "only", "", "comma-separated scenario names to run (default all)")
+	fs.IntVar(&f.runs, "runs", 1, "runs per scenario; use 3+ when comparing, the model is not deterministic")
+	fs.IntVar(&f.parallel, "parallel", 1, "runs at once")
+	fs.DurationVar(&f.timeout, "timeout", 15*time.Minute, "timeout per run")
+	fs.StringVar(&f.model, "model", "", "model (default PIPEROOM_MODEL / claude-opus-5-5)")
+	fs.StringVar(&f.effort, "effort", "", "effort (default PIPEROOM_EFFORT / high)")
+	fs.IntVar(&f.maxTurns, "max-turns", 0, "agent max turns per episode (default 40)")
+	fs.StringVar(&f.label, "label", "", "name for this configuration in the report, e.g. main or prompt-v2")
+	fs.StringVar(&f.out, "out", "", "write the JSON report here")
+	fs.StringVar(&f.md, "md", "", "also write the markdown table here")
+	fs.StringVar(&f.transcripts, "transcripts", "", "write each run's full transcript and result as JSON into this directory")
+	fs.StringVar(&f.baseline, "baseline", "", "after the run, compare against this earlier report")
+	fs.StringVar(&f.compare, "compare", "", "BASE.json,CANDIDATE.json: compare two reports and exit; no model calls")
+	fs.Float64Var(&f.tolerance, "tolerance", evals.DefaultScoreTolerance, "score drop per scenario that counts as a regression")
+	fs.BoolVar(&f.failOnRegr, "fail-on-regression", false, "exit 2 when a comparison finds a regression")
+	fs.BoolVar(&f.check, "check", false, "validate scenarios against the live tool and action definitions and exit; no model calls")
+	fs.BoolVar(&f.check, "validate", false, "same as -check")
+	fs.BoolVar(&f.verbose, "v", false, "show the agent's own logs")
+	if err := fs.Parse(args); err != nil {
+		return flags{}, err
+	}
+	return f, nil
 }
 
 func run(f flags, stdout, stderr io.Writer) (int, error) {

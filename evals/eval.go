@@ -189,7 +189,12 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
-	areg, err := LiveActions(sc.Resources)
+	live, err := LiveActions(sc.Resources)
+	if err != nil {
+		return RunResult{}, Transcript{}, err
+	}
+	attempts := &attemptLog{}
+	areg, err := attempts.wrap(live)
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
@@ -219,7 +224,7 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 		return RunResult{}, Transcript{}, ctx.Err()
 	}
 
-	tr := Transcript{Events: rec.snapshot(), Misses: rp.Misses(), Idles: inbox.idleCount()}
+	tr := Transcript{Events: rec.snapshot(), Misses: rp.Misses(), Attempts: attempts.snapshot(), Idles: inbox.idleCount()}
 	res := Judge(sc, tr, err, timedOut)
 	res.Run = run
 	res.DurationMS = took.Milliseconds()

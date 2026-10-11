@@ -24,7 +24,10 @@ type RecordedEvent struct {
 type Transcript struct {
 	Events []RecordedEvent `json:"events"`
 	Misses []Miss          `json:"misses,omitempty"`
-	Idles  int             `json:"idles"`
+	// Attempts are every action Validate call, including the rejected ones
+	// that never became a proposal.
+	Attempts []ActionAttempt `json:"action_attempts,omitempty"`
+	Idles    int             `json:"idles"`
 }
 
 // recorder is the run's Sink and Proposals: it keeps every event in order.

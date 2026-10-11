@@ -182,3 +182,35 @@ func TestToolInputsUsesLiveSchemas(t *testing.T) {
 		t.Errorf("connect_list_connectors fields = %v (present %v)", got, ok)
 	}
 }
+
+// TestSeedMatchesRealFormats pins the format rules the seed must follow so
+// replayed summaries stay byte-identical to the real tools'.
+func TestSeedMatchesRealFormats(t *testing.T) {
+	seed := loadSeed()
+	// dbtools and the topology renderer end every line with "\n"; kafkatools
+	// join lines and end without one.
+	endsWithNewline := map[string]bool{
+		"pipeline_map": true, "trace_record": true,
+		"pg_replication_slots": true, "pg_recent_ddl": true, "pg_long_transactions": true,
+	}
+	for i, r := range seed.Recordings {
+		if r.Error != "" {
+			continue
+		}
+		if got, want := strings.HasSuffix(r.Summary, "\n"), endsWithNewline[r.Tool]; got != want {
+			t.Errorf("recordings[%d] (%s): trailing newline = %v, want %v", i, r.Tool, got, want)
+		}
+		if strings.HasSuffix(r.Summary, "\n\n") {
+			t.Errorf("recordings[%d] (%s): more than one trailing newline", i, r.Tool)
+		}
+	}
+	var mapSummary string
+	for _, r := range seed.Recordings {
+		if r.Tool == "pipeline_map" && r.Input["pipeline_id"] == seed.Pipeline.ID {
+			mapSummary = r.Summary
+		}
+	}
+	if mapSummary == "" || seed.Alert.PipelineMap != mapSummary {
+		t.Errorf("alert.pipeline_map differs from the pipeline_map recording:\n%q\n%q", seed.Alert.PipelineMap, mapSummary)
+	}
+}

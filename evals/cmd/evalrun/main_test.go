@@ -72,3 +72,19 @@ func TestRunCompare(t *testing.T) {
 		t.Error("missing report accepted")
 	}
 }
+
+func TestParseFlagsValidateAlias(t *testing.T) {
+	for _, arg := range []string{"-validate", "-check"} {
+		f, err := parseFlags([]string{arg, "-scenarios", "x"}, &bytes.Buffer{})
+		if err != nil || !f.check || f.scenarios != "x" {
+			t.Errorf("%s: f = %+v, err %v", arg, f, err)
+		}
+	}
+	f, err := parseFlags(nil, &bytes.Buffer{})
+	if err != nil || f.check || f.scenarios != "evals/scenarios" || f.runs != 1 {
+		t.Errorf("defaults: f = %+v, err %v", f, err)
+	}
+	if _, err := parseFlags([]string{"-nope"}, &bytes.Buffer{}); err == nil {
+		t.Error("unknown flag accepted")
+	}
+}

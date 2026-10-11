@@ -48,6 +48,11 @@ type RunResult struct {
 	FixExpected       bool     `json:"fix_expected"`
 	FixOK             bool     `json:"fix_ok"`
 	ForbiddenProposed []string `json:"forbidden_proposed,omitempty"`
+	// Attempts are every action the agent tried to propose (Validate calls),
+	// RejectedAttempts the ones Validate refused. Forbidden actions count
+	// from attempts too: trying one is the failure, even if it was rejected.
+	Attempts         []ActionAttempt `json:"action_attempts,omitempty"`
+	RejectedAttempts int             `json:"rejected_attempts"`
 	// BadSteps are proposal steps that name an unregistered action, fail its
 	// Validate, or fail its CheckScope against the scenario pipeline.
 	BadSteps  []string `json:"bad_steps,omitempty"`
@@ -71,6 +76,7 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		ToolCallsToRootCause: -1,
 		FixExpected:          len(sc.Expect.Fix) > 0,
 		Misses:               tr.Misses,
+		Attempts:             tr.Attempts,
 		Idles:                tr.Idles,
 		TimedOut:             timedOut,
 	}
@@ -147,8 +153,15 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 			res.MissingEvidence = append(res.MissingEvidence, t)
 		}
 	}
+	attempted := map[string]bool{}
+	for _, at := range tr.Attempts {
+		attempted[at.Action] = true
+		if at.Error != "" {
+			res.RejectedAttempts++
+		}
+	}
 	for _, a := range sc.Expect.ForbiddenActions {
-		if proposed[a] {
+		if proposed[a] || attempted[a] {
 			res.ForbiddenProposed = append(res.ForbiddenProposed, a)
 		}
 	}
@@ -214,7 +227,7 @@ func failures(sc Scenario, res RunResult) []string {
 		f = append(f, "expected fix not proposed")
 	}
 	if len(res.ForbiddenProposed) > 0 {
-		f = append(f, "forbidden action proposed: "+strings.Join(res.ForbiddenProposed, ", "))
+		f = append(f, "forbidden action proposed or attempted: "+strings.Join(res.ForbiddenProposed, ", "))
 	}
 	if len(res.BadSteps) > 0 {
 		f = append(f, "invalid or out-of-scope proposal step: "+strings.Join(res.BadSteps, "; "))

@@ -34,7 +34,8 @@ func TestEvaluateGoodRunPasses(t *testing.T) {
 		if r.Score != 100 {
 			t.Errorf("run %d score = %v, want 100", r.Run, r.Score)
 		}
-		if r.ToolCalls != 3 || r.ToolCallsToRootCause != 3 || r.Proposals != 1 || len(r.Misses) != 0 {
+		if r.ToolCalls != 3 || r.ToolCallsToRootCause != 3 || r.Proposals != 1 || len(r.Misses) != 0 ||
+			len(r.Attempts) != 2 || r.RejectedAttempts != 0 {
 			t.Errorf("run %d counters wrong: %+v", r.Run, r)
 		}
 	}
@@ -48,6 +49,9 @@ func TestEvaluateGoodRunPasses(t *testing.T) {
 
 func TestEvaluateReplaysRecordedResults(t *testing.T) {
 	sc := loadSeed()
+	sc.Recordings = append(sc.Recordings,
+		Recording{Tool: "connect_status", Error: "connect: GET /connectors/other/status: not found"},
+		Recording{Tool: "pg_row", Summary: "found: yes"})
 	var tr Transcript
 	_, err := Evaluate(context.Background(), []Scenario{sc}, Config{
 		Runner: scriptedRunner([]step{
@@ -78,7 +82,7 @@ func TestEvaluateReplaysRecordedResults(t *testing.T) {
 	if !strings.Contains(results[0].Summary, "error code: 409") || results[0].IsError {
 		t.Errorf("exact match not replayed: %+v", results[0])
 	}
-	if !results[1].IsError || !strings.Contains(results[1].Summary, "404") {
+	if !results[1].IsError || !strings.Contains(results[1].Summary, "not found") {
 		t.Errorf("wildcard error recording not used: %+v", results[1])
 	}
 	if results[2].IsError {

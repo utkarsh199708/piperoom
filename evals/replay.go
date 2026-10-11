@@ -235,3 +235,65 @@ func (replayRegistry) SetCompatibility(context.Context, string, string) error {
 func (replayRegistry) Register(context.Context, string, string) (int, error) {
 	return 0, errWritesDisabled
 }
+
+// ActionAttempt is one Validate call made while the agent proposed a fix.
+// propose_fix validates every step before it creates the proposal, and a
+// rejected proposal leaves no event in the room log, so this log is the only
+// record of what the agent tried.
+type ActionAttempt struct {
+	Action string          `json:"action"`
+	Params json.RawMessage `json:"params"`
+	Error  string          `json:"error,omitempty"` // empty when Validate passed
+}
+
+// attemptLog records every Validate call on the wrapped actions of one run.
+type attemptLog struct {
+	mu       sync.Mutex
+	attempts []ActionAttempt
+}
+
+// wrap returns a registry whose actions record each Validate call in l and
+// otherwise behave exactly like reg's.
+func (l *attemptLog) wrap(reg *actions.Registry) (*actions.Registry, error) {
+	out := actions.NewRegistry()
+	for _, a := range reg.All() {
+		if err := out.Register(&recordingAction{Action: a, log: l}); err != nil {
+			return nil, fmt.Errorf("evals: wrap action: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func (l *attemptLog) snapshot() []ActionAttempt {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]ActionAttempt(nil), l.attempts...)
+}
+
+// recordingAction is an action whose Validate calls are logged.
+type recordingAction struct {
+	actions.Action
+	log *attemptLog
+}
+
+func (a *recordingAction) Validate(params json.RawMessage) error {
+	err := a.Action.Validate(params)
+	at := ActionAttempt{Action: a.Name(), Params: append(json.RawMessage(nil), params...)}
+	if err != nil {
+		at.Error = err.Error()
+	}
+	a.log.mu.Lock()
+	a.log.attempts = append(a.log.attempts, at)
+	a.log.mu.Unlock()
+	return err
+}
+
+// CheckScope keeps the wrapper honest about scope: it delegates when the
+// wrapped action is scoped and refuses otherwise, as the room service would.
+func (a *recordingAction) CheckScope(p owners.Pipeline, params json.RawMessage) error {
+	s, ok := a.Action.(actions.Scoped)
+	if !ok {
+		return fmt.Errorf("evals: action %q is not scope-checked", a.Name())
+	}
+	return s.CheckScope(p, params)
+}

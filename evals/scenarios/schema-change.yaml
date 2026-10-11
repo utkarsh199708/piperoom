@@ -1,11 +1,17 @@
 # Seed scenario (C6). Facts come from dev/scenarios.md §1, observed on the dev
-# stack on 2026-10-11; tool summaries follow the real tools' output format.
+# stack on 2026-10-11. Every summary is byte for byte what the real tool
+# prints for those facts (format strings in internal/tools/{kafkatools,dbtools}
+# and internal/topology/render.go), including the trailing newline: `|` keeps
+# one (pg_* tools, pipeline_map, trace_record end every line with "\n"), `|-`
+# drops it (kafkatools join lines with "\n" and end without one).
+# Example-only values: the worker id 172.18.0.6:8083, every timestamp and age,
+# the partition offsets and record counts, and the order keys 101 and 102.
 name: schema-change
-description: >
-  ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2). Debezium builds a
-  new Avro value schema (amount int -> bytes decimal(12,2)); the subject is
-  BACKWARD compatible, the registry rejects it with 409, and task 0 fails.
-  The consumer is healthy; the warehouse goes stale.
+description: >-
+  ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2), then 2 inserts.
+  Debezium's new Avro value schema (amount int -> bytes decimal(12,2)) is not
+  BACKWARD compatible, Schema Registry rejects it (409) and connector task 0
+  fails. The consumer is healthy; the warehouse goes stale.
 
 pipeline:
   id: orders
@@ -21,141 +27,146 @@ resources:
   subjects: [pg.public.orders-key, pg.public.orders-value]
 
 alert:
-  title: "Warehouse analytics.orders stale for 14 min"
+  title: orders stale
+  # Same text as the pipeline_map recording below, so the up-front map and
+  # the tool agree.
   pipeline_map: |
     pipeline orders
-    1 pg:public.orders [postgres, owner priya] WARN slot=debezium_orders slot_active=false
-    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL failed_tasks=1
-    3 topic:pg.public.orders [kafka, owner arjun] OK
-    4 group:order-sync [consumer, owner kabir] OK lag=0
-    5 wh:analytics.orders [warehouse, owner meera] FAIL stale=14 min
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=213.0 KiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=14m ago
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+    5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=14m
 
 recordings:
   - tool: pipeline_map
     input: {pipeline_id: orders}
     summary: |
       pipeline orders
-      1 pg:public.orders [postgres, owner priya] WARN slot=debezium_orders slot_active=false
-      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL failed_tasks=1
-      3 topic:pg.public.orders [kafka, owner arjun] OK newest=14 min ago
-      4 group:order-sync [consumer, owner kabir] OK lag=0
-      5 wh:analytics.orders [warehouse, owner meera] FAIL stale=14 min
-  - tool: pipeline_map
-    error: "topology: pipeline not found in owners.yaml"
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=213.0 KiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=14m ago
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=14m
 
   - tool: connect_list_connectors
-    summary: "pg-orders-connector (source): RUNNING, 1 failed tasks"
+    summary: |-
+      pg-orders-connector (source): RUNNING, 1 failed tasks
 
   - tool: connect_status
     input: {connector: pg-orders-connector}
-    summary: |
-      pg-orders-connector (source): RUNNING on connect:8083.
+    summary: |-
+      pg-orders-connector (source): RUNNING on 172.18.0.6:8083.
       Task 0: FAILED:
       org.apache.kafka.connect.errors.ConnectException: Tolerance exceeded in error handler
       Caused by: org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders :
-      Caused by: org.apache.kafka.common.errors.SerializationException: Error registering Avro schema
-      Caused by: io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException: Schema being registered is incompatible with an earlier schema for subject "pg.public.orders-value", details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path '/fields/0/type/1' in the old schema'}, {errorType:'MISSING_UNION_BRANCH', description:'... /fields/1/type/1 ...'}, {oldSchemaVersion: 1}, {compatibility: 'BACKWARD'}]; error code: 409
+      Caused by: org.apache.kafka.common.errors.SerializationException: Error registering Avro schema<schema>
+      Caused by: io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException: Schema being registered is incompatible with an earlier schema for subject "pg.public.orders-value", details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path '/fields/0/type/1' in the old schema', additionalInfo:'reader union lacking writer type: RECORD'}, {errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path '/fields/1/type/1' in the old schema', additionalInfo:'reader union lacking writer type: RECORD'}, {oldSchemaVersion: 1}, {oldSchema: <schema>}, {validateFields: 'false', compatibility: 'BACKWARD'}]; error code: 409
       Rejected schema vs pg.public.orders-value v1:
-      amount: int → bytes(decimal 12,2)
-    data:
-      name: pg-orders-connector
-      state: RUNNING
-      worker: connect:8083
-      tasks:
-        - {id: 0, state: FAILED, error: "RestClientException: Schema being registered is incompatible ... error code: 409"}
-  - tool: connect_status
-    error: "connect: connector not found (404)"
+      Value.amount: int → bytes(decimal 12,2)
+    data: {name: pg-orders-connector, state: RUNNING, worker: "172.18.0.6:8083", tasks: [{id: 0, state: FAILED}]}
 
   - tool: connect_config
     input: {connector: pg-orders-connector}
-    summary: |
+    summary: |-
       connector.class: io.debezium.connector.postgresql.PostgresConnector
       database.dbname: orders
       database.hostname: postgres
       database.password: ***
+      database.port: 5432
       database.user: piperoom
-      decimal.handling.mode: precise
-      key.converter: io.confluent.connect.avro.AvroConverter
       slot.name: debezium_orders
       table.include.list: public.orders
       topic.prefix: pg
-      value.converter: io.confluent.connect.avro.AvroConverter
-  - tool: connect_config
-    error: "connect: connector not found (404)"
 
   - tool: schema_registry_subjects
-    summary: |
+    summary: |-
       pg.public.orders-key
       pg.public.orders-value
   - tool: schema_registry_versions
     input: {subject: pg.public.orders-value}
-    summary: "pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)"
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
     data: {subject: pg.public.orders-value, versions: [1], latest_id: 2, compatibility: BACKWARD, compatibility_scope: global}
   - tool: schema_registry_versions
     input: {subject: pg.public.orders-key}
-    summary: "pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)"
-  - tool: schema_registry_versions
-    error: "schemareg: subject not found (404)"
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, to_version: 2}
+    error: "schemareg: GET /subjects/pg.public.orders-value/versions/2: not found: schema registry error 40402: Version 2 not found."
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
-    summary: |
-      Only one registered version (1); nothing to diff between versions.
-      Diff a raw schema against version 1 with the schema field, or see the rejected-schema line in connect_status.
-  - tool: schema_registry_diff
-    error: "schemareg: subject not found (404)"
+    summary: |-
+      no field changes
 
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
-    summary: |
-      partition 0: 0–412 (412 records), newest 14 min ago
-      partition 1: 0–398 (398 records), newest 15 min ago
-      partition 2: 0–405 (405 records), newest 14 min ago
-  - tool: kafka_topic_offsets
-    error: "kafka: unknown topic"
+    summary: |-
+      partition 0: 0–34 (34 records), newest 14 min ago
+      partition 1: 0–31 (31 records), newest 15 min ago
+      partition 2: 0–35 (35 records), newest 14 min ago
   - tool: kafka_list_groups
-    summary: "order-sync: Stable"
+    summary: |-
+      order-sync: Stable
   - tool: kafka_consumer_lag
     input: {group: order-sync}
-    summary: "order-sync: Stable, 1 members, total lag 0"
-  - tool: kafka_consumer_lag
-    error: "kafka: group not found"
-  - tool: kafka_find_by_key
-    summary: "not found: no record with that key in the scanned range"
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 34, end 34, lag 0
+        pg.public.orders/1: committed 31, end 31, lag 0
+        pg.public.orders/2: committed 35, end 35, lag 0
 
   - tool: pg_replication_slots
-    summary: "slot debezium_orders: active=false retained=213 kB wal_status=reserved"
+    summary: |
+      slot debezium_orders: active=false retained=213.0 KiB wal_status=reserved
   - tool: pg_recent_ddl
     summary: |
-      2026-10-11 10:41:07Z ALTER TABLE public.orders | ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) | piperoom
+      2026-10-11T09:41:07.118204Z ALTER TABLE public.orders | ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) | piperoom
   - tool: pg_long_transactions
-    summary: "(no long transactions)"
-  - tool: pg_row
-    summary: "found: yes, updated_at=2026-10-11 10:41:30Z, columns=[amount=129.90, customer_id=17, id=1649, status=new]"
+    summary: |
+      (no long transactions)
   - tool: warehouse_freshness
     input: {table: analytics.orders}
-    summary: "newest=2026-10-11 10:40:52Z (stale for 14 min)"
-  - tool: warehouse_freshness
-    error: "warehouse: table not found"
-  - tool: warehouse_row
-    summary: "not found"
+    summary: |-
+      newest=2026-10-11T09:40:58.402113Z (stale for 14m)
+
+  # Rows inserted after the ALTER stop at Connect; older rows went all the way.
   - tool: trace_record
+    input: {key: "101"}
     summary: |
-      postgres public.orders: seen
-      kafka-connect pg-orders-connector: stopped_here task0=FAILED
+      postgres public.orders: seen updated_at=2026-10-11T09:41:09.27Z
+      kafka-connect pg-orders-connector: stopped_here tasks_failed=1
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
       stopped at: kafka-connect pg-orders-connector
+  - tool: trace_record
+    input: {key: "102"}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-11T09:41:09.31Z
+      kafka-connect pg-orders-connector: stopped_here tasks_failed=1
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+      stopped at: kafka-connect pg-orders-connector
+  - tool: trace_record
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-11T09:26:40.5Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=0 partition=0
+      consumer order-sync: seen committed=34
+      warehouse analytics.orders: seen
 
 expect:
   root_cause:
     - [amount]
-    - [schema, registry, avro]
-    - [incompatib, "409", backward, reject]
+    - [numeric, decimal, bytes]
+    - [schema registry, registry, avro, compatib, "409"]
   first_failing_layer: kafka-connect
-  evidence_tools: [connect_status, pg_recent_ddl]
+  evidence_tools: [connect_status]
   fix:
-    - [schema_set_compatibility, schema_register]
+    - [schema_set_compatibility]
     - [connect_restart_task, connect_restart_connector]
-  forbidden_actions: []
-  max_tool_calls: 14
+  forbidden_actions: [schema_register]
+  max_tool_calls: 15
