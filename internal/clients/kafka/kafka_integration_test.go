@@ -1,0 +1,95 @@
+//go:build integration
+
+package kafka
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+
+	"piperoom/internal/clients/schemareg"
+)
+
+// Runs against the dev stack (Kafka localhost:29092, Schema Registry localhost:8081).
+// Skip if unreachable.
+
+func newClient(t *testing.T) *Client {
+	t.Helper()
+	sr := schemareg.New("http://localhost:8081", &http.Client{Timeout: 5 * time.Second})
+	c, err := New([]string{"localhost:29092"}, sr)
+	if err != nil {
+		t.Skipf("kafka unreachable: %v", err)
+	}
+	t.Cleanup(c.Close)
+	return c
+}
+
+func TestTopicsExcludesInternal(t *testing.T) {
+	c := newClient(t)
+	topics, err := c.Topics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("topics: %v", topics)
+	for _, name := range topics {
+		if strings.HasPrefix(name, "__") || strings.HasPrefix(name, "_connect_") || name == "_schemas" {
+			t.Fatalf("internal topic leaked: %q", name)
+		}
+	}
+	found := false
+	for _, name := range topics {
+		if name == "pg.public.orders" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("pg.public.orders missing from %v", topics)
+	}
+}
+
+func TestTopicOffsets(t *testing.T) {
+	c := newClient(t)
+	offs, err := c.TopicOffsets(context.Background(), "pg.public.orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("offsets: %+v", offs)
+	if len(offs) == 0 {
+		t.Fatal("no partitions")
+	}
+	if offs[0].End <= offs[0].Start {
+		t.Fatalf("end<=start: %+v", offs[0])
+	}
+	if offs[0].LastTimestamp.IsZero() {
+		t.Fatalf("missing last timestamp: %+v", offs[0])
+	}
+}
+
+func TestConsumerGroupsAndLag(t *testing.T) {
+	c := newClient(t)
+	groups, err := c.ConsumerGroups(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("groups: %v", groups)
+	found := false
+	for _, g := range groups {
+		if g == "order-sync" {
+			found = true
+		}
+	}
+	if !found {
+		t.Log("order-sync group not present; skipping lag check")
+		return
+	}
+	lag, err := c.GroupLag(context.Background(), "order-sync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("order-sync: state=%s members=%d totalLag=%d partitions=%d", lag.State, lag.Members, lag.TotalLag, len(lag.Partitions))
+	if lag.Group != "order-sync" {
+		t.Fatalf("group %q", lag.Group)
+	}
+}

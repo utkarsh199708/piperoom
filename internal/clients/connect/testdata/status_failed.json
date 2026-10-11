@@ -1,0 +1,13 @@
+{
+  "name": "pg-orders-connector",
+  "connector": {"state": "RUNNING", "worker_id": "172.19.0.5:8083"},
+  "tasks": [
+    {
+      "id": 0,
+      "state": "FAILED",
+      "worker_id": "172.19.0.5:8083",
+      "trace": "org.apache.kafka.connect.errors.ConnectException: Tolerance exceeded in error handler\n\tat org.apache.kafka.connect.runtime.errors.RetryWithToleranceOperator.execAndHandleError(RetryWithToleranceOperator.java:220)\nCaused by: org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders\n\tat io.confluent.connect.avro.AvroConverter.fromConnectData(AvroConverter.java:96)\nCaused by: org.apache.kafka.common.errors.SerializationException: Error registering Avro schema{...FULL NEW SCHEMA JSON...}\n\tat io.confluent.kafka.serializers.AbstractKafkaAvroSerializer.serializeImpl(AbstractKafkaAvroSerializer.java:121)\nCaused by: io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException: Schema being registered is incompatible with an earlier schema for subject \"pg.public.orders-value\", details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path '/fields/0/type/1' in the old schema'...}, {oldSchemaVersion: 1}, {oldSchema: '{...FULL OLD SCHEMA JSON...}'}, {compatibility: 'BACKWARD'}]; error code: 409\n\tat io.confluent.kafka.schemaregistry.client.rest.RestService.registerSchema(RestService.java:377)"
+    }
+  ],
+  "type": "source"
+}
