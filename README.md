@@ -14,7 +14,7 @@ A UI mockup of the target room view is linked from `AGENTS.md`.
 
 ```
 cmd/
-  devctl/        local pipeline control (up/down/reset/status/load/break/fix)
+  devctl/        local pipeline control (lock/unlock/up/down/reset/status/load/break/fix)
   devconsumer/   sample order-sync consumer used by the dev stack and scenarios
   investigate/   CLI entry point for a one-shot agent investigation
 dev/
@@ -22,8 +22,12 @@ dev/
   scenarios.md         the 4 observed failure scenarios devctl can break/fix
   owners.yaml, users.yaml   pipeline layer ownership and dev users
 internal/
+  actions/       action implementations an approved proposal runs (the only writes)
   agent/         the Claude investigation loop and its contract
-  clients/       Postgres, warehouse, (and in-progress) Connect/Schema Registry/Kafka clients
+  clients/       Postgres, warehouse, Connect, Schema Registry, and Kafka clients
+  owners/        who owns which pipeline layer, for approvals
+  stacklock/      the shared dev-stack lock devctl uses
+  testenv/       integration-test helpers (skip when the stack is unreachable or locked)
   tools/         read-only tools the agent calls, grouped by area
   topology/      the pipeline graph used to localize a fault
   events/        the append-only room event log types
@@ -35,23 +39,27 @@ AGENTS.md        rules for coding agents working on this repo — read it first
 ```
 
 See `AGENTS.md` for the full architecture diagram, team roles, and file ownership, and
-`docs/collab.md` for how agents and the two reviewing leads work together.
+`docs/collab.md` for how agents and the three reviewing leads work together.
 
 ## Running the dev stack
 
-Requires Docker. From the repo root:
+Requires Docker. From the repo root — `devctl` shares one dev stack across everyone working
+locally, so every mutating command needs the shared lock first (`docs/runbook.md` has the
+full story):
 
 ```sh
-go run ./cmd/devctl reset    # start clean: stack up, connector registered, devconsumer running
-go run ./cmd/devctl status   # one-screen health: connector, replication slot, consumer group, warehouse
-go run ./cmd/devctl load --rate 20   # generate traffic in a second terminal
-go run ./cmd/devctl break schema-change   # trigger a failure scenario
-go run ./cmd/devctl fix schema-change     # apply its real-world fix
-go run ./cmd/devctl down     # stop the stack
+go run ./cmd/devctl lock --owner <tag>          # take the shared stack lock
+go run ./cmd/devctl reset --owner <tag>         # start clean: stack up, connector registered, devconsumer running
+go run ./cmd/devctl status                      # one-screen health: connector, replication slot, consumer group, warehouse
+go run ./cmd/devctl load --rate 20 --owner <tag>        # generate traffic in a second terminal
+go run ./cmd/devctl break schema-change --owner <tag>   # trigger a failure scenario
+go run ./cmd/devctl fix schema-change --owner <tag>     # apply its real-world fix
+go run ./cmd/devctl down --owner <tag>          # stop the stack
+go run ./cmd/devctl unlock --owner <tag>        # release the lock when you're done
 ```
 
 See `dev/scenarios.md` for what each of the 4 scenarios does and looks like, and
-`docs/runbook.md` for day-to-day operation and common errors.
+`docs/runbook.md` for day-to-day operation, the stack lock, and common errors.
 
 ## Running tests
 
@@ -76,7 +84,8 @@ works fine for local development.
 
 ## How the team works
 
-Six coding agents own separate parts of the codebase and raise pull requests; two Claude
-leads review every PR (code review and architecture/completeness), and only one of them
-merges to `main`. Roles, ownership, and the contract files nobody but the leads may edit are
-in `AGENTS.md` §2; the day-to-day collaboration protocol is in `docs/collab.md`.
+Ten coding agents own separate parts of the codebase and raise pull requests; three Claude
+leads review every PR — architecture/completeness, code review for local agents, and code
+review for cloud agents — and only one of them merges to `main`. Roles, ownership, and the
+contract files nobody but the leads may edit are in `AGENTS.md` §2; the day-to-day
+collaboration protocol is in `docs/collab.md`.

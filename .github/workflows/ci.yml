@@ -10,7 +10,9 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Only cancel in-progress runs for PR pushes. On push to main, every run is a
+  # distinct merge and its result matters even if a newer merge follows fast.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   go:
@@ -19,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
@@ -34,6 +38,10 @@ jobs:
           fi
       - name: go vet
         run: go vet ./...
+      - name: go vet (integration-tagged files; compile only, these need the dev stack to run)
+        run: go vet -tags integration ./...
+      - name: go vet (claude-tagged files; compile only, these need ANTHROPIC_API_KEY to run)
+        run: go vet -tags claude ./internal/agent/...
       - name: go build
         run: go build ./...
       - name: go test (unit only; integration tests are build-tagged and need the dev stack)
@@ -48,6 +56,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - name: Set up Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:

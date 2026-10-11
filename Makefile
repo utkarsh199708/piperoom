@@ -11,6 +11,8 @@ fmt:
 
 vet:
 	go vet ./...
+	go vet -tags integration ./...
+	go vet -tags claude ./internal/agent/...
 
 build:
 	go build ./...
@@ -21,7 +23,7 @@ test:
 web-ci: web-install web-lint web-build web-test
 
 web-install:
-	cd web && npm ci
+	cd web && npm ci --ignore-scripts && node node_modules/esbuild/install.js
 
 web-lint:
 	cd web && npm run lint
