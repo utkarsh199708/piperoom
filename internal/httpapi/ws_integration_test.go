@@ -3,6 +3,8 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -21,10 +23,10 @@ func TestRealWebSocketHandlerBehindTheRouter(t *testing.T) {
 	feed := make(chan events.Event, 4)
 	feed <- events.Event{RoomID: "r_1", Seq: 1, Type: events.CommentAdded, Payload: json.RawMessage(`{"text":"hi"}`),
 		At: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
-	var gotRoom string
+	gotRoom := make(chan string, 1)
 	wsh := ws.New(ws.Config{
 		Subscribe: func(_ context.Context, roomID string, after int64) (<-chan events.Event, error) {
-			gotRoom = roomID
+			gotRoom <- roomID
 			return feed, nil
 		},
 		Authenticate: func(id string) (room.User, bool) {
@@ -34,7 +36,8 @@ func TestRealWebSocketHandlerBehindTheRouter(t *testing.T) {
 		RoomExists: func(_ context.Context, id string) bool { return id == "r_1" },
 	})
 	h := newHarness(t, func(c *Config) { c.WS = wsh })
-	srv := newTestServer(t, h)
+	srv := httptest.NewServer(h.h)
+	defer srv.Close()
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -69,12 +72,12 @@ func TestRealWebSocketHandlerBehindTheRouter(t *testing.T) {
 		}
 		sawEvent = f.Type == "event" && f.Event.Seq == 1
 	}
-	if gotRoom != "r_1" {
-		t.Fatalf("WS handler saw room %q", gotRoom)
+	if got := <-gotRoom; got != "r_1" {
+		t.Fatalf("WS handler saw room %q", got)
 	}
 
 	// A plain GET with an unknown ?user= is a 401 JSON error from the WS handler.
-	bad, err := newTestClient().Get(srv.URL + "/api/rooms/r_1/ws?user=mallory")
+	bad, err := http.Get(srv.URL + "/api/rooms/r_1/ws?user=mallory")
 	if err != nil {
 		t.Fatal(err)
 	}

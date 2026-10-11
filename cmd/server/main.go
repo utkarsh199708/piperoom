@@ -105,9 +105,10 @@ func run(demo bool, demoDelay time.Duration, addrFlag string, insecure bool, log
 		rc.Topology = b
 		rc.Runner = agent.Run
 		rc.Handoff = agent.WriteHandoff
-		verifier = webhookConfig(own)
 	}
 	rc.Store = st
+	// Webhook sources stay disabled (401) until their secret is set in the environment.
+	verifier = webhookConfig(own)
 
 	svc, err := room.New(rc)
 	if err != nil {
@@ -139,8 +140,13 @@ func run(demo bool, demoDelay time.Duration, addrFlag string, insecure bool, log
 	}
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// http.Server.Shutdown does not close hijacked WebSocket connections.
+	wsErr := wsh.Shutdown(sctx)
 	if err := srv.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("server: shutdown: %w", err)
+	}
+	if wsErr != nil {
+		return fmt.Errorf("server: close websockets: %w", wsErr)
 	}
 	return nil
 }

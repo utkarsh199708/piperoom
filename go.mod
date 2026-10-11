@@ -4,6 +4,8 @@ go 1.27.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.80.0
+	github.com/coder/websocket v1.8.15
+	github.com/go-chi/chi/v5 v5.3.2
 	github.com/hamba/avro/v2 v2.31.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/snowflakedb/gosnowflake v1.19.1
@@ -44,11 +46,9 @@ require (
 	github.com/aws/smithy-go v1.22.5 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
-	github.com/coder/websocket v1.8.15 // indirect
 	github.com/danieljoos/wincred v1.2.2 // indirect
 	github.com/dvsekhvalnov/jose2go v1.7.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.7 // indirect
-	github.com/go-chi/chi/v5 v5.3.2 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/godbus/dbus v0.0.0-20190726142602-4481cbc300e2 // indirect
