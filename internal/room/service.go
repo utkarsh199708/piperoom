@@ -29,17 +29,14 @@ const DriverLease = 30 * time.Minute
 // written to the log as control.granted (docs/api.md).
 const leaseLogThreshold = 25 * time.Minute
 
-// DefaultProposalTTL is how long a proposal may wait for all of its layers
-// before the service records a proposal.expired event (review item 16).
-const DefaultProposalTTL = 30 * time.Minute
-
 // ErrStepOrder reports a proposal step used out of order: started twice, or
 // finished without being started. It is the same sentinel as
 // store.ErrStepOrder so both layers can be matched with errors.Is.
 var ErrStepOrder = store.ErrStepOrder
 
 // Deps wires the room service to its collaborators. Any field may be nil to
-// get a safe default (used by tests and --demo).
+// get a safe default (used by tests), except Owners: scope checks fail closed
+// without it.
 type Deps struct {
 	Store        store.Store
 	Actions      *actions.Registry
@@ -52,17 +49,13 @@ type Deps struct {
 	Options      agent.Options
 	Logger       *slog.Logger
 	Now          func() time.Time
-	// ProposalTTL overrides how long a proposal may wait for approvals before
-	// it is reported expired; zero means DefaultProposalTTL.
-	ProposalTTL time.Duration
 }
 
 type roomState struct {
 	snap        RoomSnapshot
 	inbox       *inbox
 	agentCancel context.CancelFunc
-	exec        *execQueue      // nil until the first proposal is approved
-	expired     map[string]bool // proposals already reported expired
+	exec        *execQueue // nil until the first proposal is approved
 }
 
 // Service is the room domain logic. All state derives from the event log; the
@@ -77,13 +70,12 @@ type Service struct {
 	run          agent.Runner
 	writeHandoff agent.HandoffWriter
 	opts         agent.Options
-	proposalTTL  time.Duration
 	log          *slog.Logger
 	now          func() time.Time
 
 	// ctx is the service lifetime: every goroutine the service starts (agent
-	// supervisors, executor queues, the expiry sweeper) derives from it.
-	// Close cancels it and waits.
+	// supervisors, executor queues) derives from it. Close cancels it and
+	// waits.
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -127,10 +119,6 @@ func New(d Deps) *Service {
 	if topo == nil {
 		topo = noopTopology{}
 	}
-	ttl := d.ProposalTTL
-	if ttl <= 0 {
-		ttl = DefaultProposalTTL
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
 		store:        d.Store,
@@ -142,22 +130,18 @@ func New(d Deps) *Service {
 		run:          run,
 		writeHandoff: wh,
 		opts:         d.Options,
-		proposalTTL:  ttl,
 		log:          log,
 		now:          now,
 		ctx:          ctx,
 		cancel:       cancel,
 		rooms:        map[string]*roomState{},
 	}
-	// One sweeper for the whole service, not one per room.
-	s.wg.Add(1)
-	go s.expiryLoop(ttl)
 	return s
 }
 
 // Close cancels the service lifetime context and waits for every goroutine it
-// started (agent supervisors, executor queues, the expiry sweeper) to stop.
-// It is idempotent and returns promptly once all of them have exited.
+// started (agent supervisors, executor queues) to stop. It is idempotent and
+// returns promptly once all of them have exited.
 func (s *Service) Close() {
 	s.mu.Lock()
 	if s.closed {
@@ -210,11 +194,10 @@ func (s *Service) ensureAllLoadedLocked(ctx context.Context) error {
 
 // interruptStaleProposalsLocked records the outcome of proposals that were
 // fully approved but never finished before this (re)start (review item 6):
-// without it they would stay "open" forever in the snapshot and the expiry
-// sweeper would fire on them later. For each stale proposal it finishes every
-// claimed store step (best effort), emits one action.executed with OK=false
-// naming the step that was in flight, and sets the proposal status to
-// "failed". Caller must hold s.mu.
+// without it they would stay "open" forever in the snapshot. For each stale
+// proposal it finishes every claimed store step (best effort), emits one
+// action.executed with OK=false naming the step that was in flight, and sets
+// the proposal status to "failed". Caller must hold s.mu.
 func (s *Service) interruptStaleProposalsLocked(ctx context.Context, roomID string, st *roomState) {
 	for _, p := range append([]Proposal{}, st.snap.OpenProposals...) {
 		if !fullyApproved(p) {

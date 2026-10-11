@@ -812,74 +812,6 @@ func TestCreateRoomFromAlertStoresRawBody(t *testing.T) {
 	}
 }
 
-type expiredPayload struct {
-	ProposalID string `json:"proposal_id"`
-	Title      string `json:"title"`
-	AgeSeconds int64  `json:"age_seconds"`
-}
-
-const expiredType = events.Type("proposal.expired")
-
-func TestProposalExpiryRecordsEventOnce(t *testing.T) {
-	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
-	st := memstore.NewWithClock(c.Now)
-	reg := actions.NewRegistry()
-	if err := reg.Register(&fakeAction{name: "pg_act", layer: "postgres"}); err != nil {
-		t.Fatalf("register: %v", err)
-	}
-	svc := room.New(room.Deps{
-		Store: st, Actions: reg, Users: room.DefaultUsers(), Run: fakeRun, Now: c.Now,
-		ProposalTTL: 40 * time.Millisecond,
-	})
-	t.Cleanup(svc.Close)
-
-	roomID := createRoom(t, svc, "arjun").ID
-	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
-		Title: "expiring fix",
-		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
-	}, events.AgentActor)
-	if err != nil {
-		t.Fatalf("create proposal: %v", err)
-	}
-
-	countExpired := func() []events.Event {
-		var out []events.Event
-		for _, e := range allEvents(t, st, roomID) {
-			if e.Type == expiredType {
-				out = append(out, e)
-			}
-		}
-		return out
-	}
-
-	// The clock has not moved: the proposal is old only after Advance.
-	if got := countExpired(); len(got) != 0 {
-		t.Fatalf("premature expiry: %d events", len(got))
-	}
-	c.Advance(time.Second)
-	waitFor(t, 2*time.Second, func() bool { return len(countExpired()) == 1 })
-
-	// Exactly once, even though the sweeper keeps running.
-	time.Sleep(60 * time.Millisecond)
-	got := countExpired()
-	if len(got) != 1 {
-		t.Fatalf("expiry must be recorded exactly once, got %d", len(got))
-	}
-	p, err := events.Decode[expiredPayload](got[0])
-	if err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if p.ProposalID != pid || p.Title != "expiring fix" || p.AgeSeconds < 1 {
-		t.Fatalf("bad expiry payload: %+v", p)
-	}
-
-	// Expiry records a fact only: the proposal stays open for approvals.
-	snap, _ := svc.GetRoom(context.Background(), roomID)
-	if len(snap.OpenProposals) != 1 {
-		t.Fatalf("snapshot must keep the proposal open: %+v", snap.OpenProposals)
-	}
-}
-
 func TestCloseStopsGoroutinesIdempotent(t *testing.T) {
 	act := &fakeAction{name: "pg_act", layer: "postgres"}
 	svc, st, _ := newTestService(t, act)
@@ -1310,8 +1242,8 @@ func (a *closeRoomAction) Execute(context.Context, json.RawMessage) (string, err
 
 // TestExecutorRoomClosedPathRecordsOutcome pins review item 13 for the
 // room-closed stop path: the executor must mark the proposal failed with an
-// outcome event (so the snapshot and the expiry sweeper see it) and must not
-// run the remaining steps.
+// outcome event (so the snapshot sees it) and must not run the remaining
+// steps.
 func TestExecutorRoomClosedPathRecordsOutcome(t *testing.T) {
 	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
 	st := memstore.NewWithClock(c.Now)
