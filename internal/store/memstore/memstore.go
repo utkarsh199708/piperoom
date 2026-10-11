@@ -165,7 +165,7 @@ func (s *Store) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<
 		},
 		Wake:      wake,
 		SlowAfter: slowAfter,
-		Log:       s.log,
+		Log:       s.log.With("room_id", roomID),
 		OnExit: func() {
 			s.mu.Lock()
 			delete(r.subs, wake)

@@ -52,7 +52,8 @@ type Service struct {
 	log  *slog.Logger
 	base context.Context
 	stop context.CancelFunc
-	wg   sync.WaitGroup
+	wg   sync.WaitGroup // agents and executors
+	exec sync.WaitGroup // executors only
 
 	mu    sync.Mutex
 	rooms map[string]*roomEntry
@@ -138,6 +139,9 @@ func (s *Service) Shutdown() {
 
 // Wait blocks until background executors and agents have finished. Tests use it.
 func (s *Service) Wait() { s.wg.Wait() }
+
+// WaitIdle blocks until running executors have finished; agents may still run.
+func (s *Service) WaitIdle() { s.exec.Wait() }
 
 func (s *Service) now() time.Time { return s.cfg.Now().UTC() }
 

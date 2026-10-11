@@ -573,7 +573,7 @@ func TestApprovalFlowRunsStepsInOrderOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := waitExecuted(t, e, s.ID, 2)
-	e.svc.Wait()
+	e.svc.WaitIdle()
 	if !res[0].OK || !res[1].OK || res[0].StepIndex != 0 || res[1].StepIndex != 1 || res[0].Output != "compat ok" {
 		t.Fatalf("results = %+v", res)
 	}
@@ -620,7 +620,7 @@ func TestConcurrentApprovalsRunEachStepOnce(t *testing.T) {
 	}
 	wg.Wait()
 	waitExecuted(t, e, s.ID, 3)
-	e.svc.Wait()
+	e.svc.WaitIdle()
 	for n, a := range e.acts {
 		if r := a.runs.Load(); (n == "compat" || n == "backfill" || n == "restart") && r != 1 {
 			t.Fatalf("%s ran %d times", n, r)
@@ -643,7 +643,7 @@ func TestExecutorStopsAtFirstFailure(t *testing.T) {
 		}
 	}
 	res := waitExecuted(t, e, s.ID, 2)
-	e.svc.Wait()
+	e.svc.WaitIdle()
 	if len(res) != 2 || !res[0].OK || res[1].OK || res[1].StepIndex != 1 || res[1].Output != "boom" {
 		t.Fatalf("results = %+v", res)
 	}
@@ -670,7 +670,7 @@ func TestRejectStopsProposal(t *testing.T) {
 	// The other owner can no longer approve it, so nothing can ever run.
 	_, err = e.svc.Approve(ctx, priya, pid, "schema-registry")
 	wantErr(t, err, 409, "already_decided")
-	e.svc.Wait()
+	e.svc.WaitIdle()
 	if e.acts["compat"].runs.Load() != 0 {
 		t.Fatal("a rejected proposal must not run")
 	}
@@ -689,7 +689,7 @@ func TestExecutorRechecksScopeBeforeExecute(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := waitExecuted(t, e, s.ID, 1)
-	e.svc.Wait()
+	e.svc.WaitIdle()
 	if res[0].OK || e.acts["compat"].runs.Load() != 0 {
 		t.Fatalf("a step that fails the scope check must be refused, got %+v (ran %d)", res[0], e.acts["compat"].runs.Load())
 	}

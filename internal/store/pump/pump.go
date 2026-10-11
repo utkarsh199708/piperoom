@@ -45,7 +45,8 @@ type Config struct {
 	SlowAfter time.Duration
 	// Page is the read size (DefaultPage when <= 0).
 	Page int
-	// Log receives read failures and slow-consumer drops. Required.
+	// Log receives read failures and slow-consumer drops. Required. The caller
+	// adds the room id (Log.With) so every line says which room it is about.
 	Log *slog.Logger
 	// OnExit, when set, runs once when the goroutine ends, before the output
 	// channel is closed, so a consumer that sees the close can rely on the
@@ -137,7 +138,7 @@ func run(ctx context.Context, cfg Config, cursor int64, first []events.Event, ou
 				case canceled:
 					return
 				case tooSlow:
-					cfg.Log.Warn("store: dropping slow subscriber, it must resubscribe", "room_id", ev.RoomID, "last_sent_seq", cursor)
+					cfg.Log.Warn("store: dropping slow subscriber, it must resubscribe", "last_sent_seq", cursor)
 					return
 				}
 				cursor = ev.Seq

@@ -68,12 +68,12 @@ func (a *api) listEvents(w http.ResponseWriter, r *http.Request) {
 		after = n
 	}
 	if v := q.Get("limit"); v != "" {
-		n, err := strconv.Atoi(v)
+		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil || n < 1 {
 			a.fail(w, r, badRequest("limit must be a positive integer."))
 			return
 		}
-		limit = min(n, maxEventsLimit)
+		limit = int(min(n, maxEventsLimit))
 	}
 	page, err := a.svc.Events(r.Context(), chi.URLParam(r, "id"), after, limit)
 	if err != nil {

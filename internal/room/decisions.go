@@ -79,8 +79,10 @@ func (s *Service) decide(ctx context.Context, u User, pid, layer string, reject 
 	if ps.allApproved() && !ps.started {
 		ps.started = true
 		s.wg.Add(1)
+		s.exec.Add(1)
 		go func() {
 			defer s.wg.Done()
+			defer s.exec.Done()
 			s.execute(r, pid)
 		}()
 	}
