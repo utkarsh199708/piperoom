@@ -1,0 +1,161 @@
+# Seed scenario (C6). Facts come from dev/scenarios.md §1, observed on the dev
+# stack on 2026-10-11; tool summaries follow the real tools' output format.
+name: schema-change
+description: >
+  ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2). Debezium builds a
+  new Avro value schema (amount int -> bytes decimal(12,2)); the subject is
+  BACKWARD compatible, the registry rejects it with 409, and task 0 fails.
+  The consumer is healthy; the warehouse goes stale.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: "Warehouse analytics.orders stale for 14 min"
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] WARN slot=debezium_orders slot_active=false
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL failed_tasks=1
+    3 topic:pg.public.orders [kafka, owner arjun] OK
+    4 group:order-sync [consumer, owner kabir] OK lag=0
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale=14 min
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] WARN slot=debezium_orders slot_active=false
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL failed_tasks=1
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest=14 min ago
+      4 group:order-sync [consumer, owner kabir] OK lag=0
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale=14 min
+  - tool: pipeline_map
+    error: "topology: pipeline not found in owners.yaml"
+
+  - tool: connect_list_connectors
+    summary: "pg-orders-connector (source): RUNNING, 1 failed tasks"
+
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: Tolerance exceeded in error handler
+      Caused by: org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders :
+      Caused by: org.apache.kafka.common.errors.SerializationException: Error registering Avro schema
+      Caused by: io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException: Schema being registered is incompatible with an earlier schema for subject "pg.public.orders-value", details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path '/fields/0/type/1' in the old schema'}, {errorType:'MISSING_UNION_BRANCH', description:'... /fields/1/type/1 ...'}, {oldSchemaVersion: 1}, {compatibility: 'BACKWARD'}]; error code: 409
+      Rejected schema vs pg.public.orders-value v1:
+      amount: int → bytes(decimal 12,2)
+    data:
+      name: pg-orders-connector
+      state: RUNNING
+      worker: connect:8083
+      tasks:
+        - {id: 0, state: FAILED, error: "RestClientException: Schema being registered is incompatible ... error code: 409"}
+  - tool: connect_status
+    error: "connect: connector not found (404)"
+
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.user: piperoom
+      decimal.handling.mode: precise
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: connect_config
+    error: "connect: connector not found (404)"
+
+  - tool: schema_registry_subjects
+    summary: |
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: "pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)"
+    data: {subject: pg.public.orders-value, versions: [1], latest_id: 2, compatibility: BACKWARD, compatibility_scope: global}
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: "pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)"
+  - tool: schema_registry_versions
+    error: "schemareg: subject not found (404)"
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    summary: |
+      Only one registered version (1); nothing to diff between versions.
+      Diff a raw schema against version 1 with the schema field, or see the rejected-schema line in connect_status.
+  - tool: schema_registry_diff
+    error: "schemareg: subject not found (404)"
+
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |
+      partition 0: 0–412 (412 records), newest 14 min ago
+      partition 1: 0–398 (398 records), newest 15 min ago
+      partition 2: 0–405 (405 records), newest 14 min ago
+  - tool: kafka_topic_offsets
+    error: "kafka: unknown topic"
+  - tool: kafka_list_groups
+    summary: "order-sync: Stable"
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: "order-sync: Stable, 1 members, total lag 0"
+  - tool: kafka_consumer_lag
+    error: "kafka: group not found"
+  - tool: kafka_find_by_key
+    summary: "not found: no record with that key in the scanned range"
+
+  - tool: pg_replication_slots
+    summary: "slot debezium_orders: active=false retained=213 kB wal_status=reserved"
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-11 10:41:07Z ALTER TABLE public.orders | ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2) | piperoom
+  - tool: pg_long_transactions
+    summary: "(no long transactions)"
+  - tool: pg_row
+    summary: "found: yes, updated_at=2026-10-11 10:41:30Z, columns=[amount=129.90, customer_id=17, id=1649, status=new]"
+  - tool: warehouse_freshness
+    input: {table: analytics.orders}
+    summary: "newest=2026-10-11 10:40:52Z (stale for 14 min)"
+  - tool: warehouse_freshness
+    error: "warehouse: table not found"
+  - tool: warehouse_row
+    summary: "not found"
+  - tool: trace_record
+    summary: |
+      postgres public.orders: seen
+      kafka-connect pg-orders-connector: stopped_here task0=FAILED
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+      stopped at: kafka-connect pg-orders-connector
+
+expect:
+  root_cause:
+    - [amount]
+    - [schema, registry, avro]
+    - [incompatib, "409", backward, reject]
+  first_failing_layer: kafka-connect
+  evidence_tools: [connect_status, pg_recent_ddl]
+  fix:
+    - [schema_set_compatibility, schema_register]
+    - [connect_restart_task, connect_restart_connector]
+  forbidden_actions: []
+  max_tool_calls: 14
