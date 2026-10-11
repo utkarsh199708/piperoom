@@ -22,6 +22,7 @@ func TestRealActionsOverFakesPreventDemoDrift(t *testing.T) {
 	pipeline := owners.Pipeline{
 		ID:           "orders",
 		Title:        "Orders CDC",
+		TopicPrefix:  "pg",
 		SourceTables: []string{"public.orders"},
 		Connectors:   []string{"pg-orders-connector"},
 		SinkTables:   []string{"analytics.orders"},
