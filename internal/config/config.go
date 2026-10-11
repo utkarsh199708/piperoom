@@ -7,7 +7,7 @@ import "os"
 
 // Config holds every setting. Defaults match dev/docker-compose.yml.
 type Config struct {
-	HTTPAddr          string // PIPEROOM_HTTP_ADDR
+	HTTPAddr          string // PIPEROOM_HTTP_ADDR (loopback by default: no real login yet, security F1)
 	RoomDBURL         string // PIPEROOM_DB_URL (room service state + event log)
 	SourceDBURL       string // SOURCE_DB_URL (the CDC source Postgres)
 	WarehouseDBURL    string // WAREHOUSE_DB_URL (dev warehouse; Postgres)
@@ -24,7 +24,7 @@ type Config struct {
 // Load reads the environment and applies dev defaults.
 func Load() Config {
 	return Config{
-		HTTPAddr:          get("PIPEROOM_HTTP_ADDR", ":8090"),
+		HTTPAddr:          get("PIPEROOM_HTTP_ADDR", "127.0.0.1:8090"),
 		RoomDBURL:         get("PIPEROOM_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/piperoom?sslmode=disable"),
 		SourceDBURL:       get("SOURCE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/orders?sslmode=disable"),
 		WarehouseDBURL:    get("WAREHOUSE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/warehouse?sslmode=disable"),
