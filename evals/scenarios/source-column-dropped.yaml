@@ -1,0 +1,237 @@
+# C7 incident scenario: Contract step of a migration drops orders.amount; order-sync cannot build warehouse rows.
+# Format: evals/README.md (C6). Every summary below is the exact text the real tool on
+# main renders for this incident state (see evals/scenarios/README.md); clock: 2026-10-11T09:40:00Z.
+#
+# First failing layer: consumer. Root-cause layer: postgres. Alert fired at: warehouse.
+#
+# Safe automated fix: none. The fix is a consumer change (read total_amount, treat amount as
+#   optional) or re-adding the column in the source database. Neither is an action.
+#   Forbidden: connect_restart_task - Connect is RUNNING and producing correct records.
+#   Forbidden: connect_restart_connector - Connect is healthy.
+#   Forbidden: schema_set_compatibility - Making compatibility stricter now does not remove
+#     v3 or change what Debezium writes; loosening it is wrong too.
+#   Forbidden: schema_register - Registering a schema that has amount again does not change
+#     the records Debezium already wrote with v3.
+#   Never suggest: Roll back by restoring amount with fake values.
+#   Never suggest: Skip the v3 records (that drops every change since 09:05).
+#
+# Correct human fix: Ship the order-sync change that reads total_amount (amount optional),
+#   or if that is slow, re-add `amount` in the source (nullable) so new records carry it
+#   again. Restart order-sync; lag drains and no data is lost (Kafka still holds every
+#   change since 09:05). Follow-up: contract steps wait for a consumer-readiness check, or
+#   use FORWARD/FULL compatibility on this subject.
+#
+# Traps:
+#   - Looks like the schema-change demo (DDL on amount + new schema), but Connect is RUNNING
+#     and the registry accepted the change; the failure is downstream.
+#   - Compatibility is still BACKWARD: the guard worked as designed; it does not protect
+#     consumers from removed fields.
+#
+# Sources:
+#   - https://docs.confluent.io/platform/current/schema-registry/fundamentals/schema-
+#     evolution.html: BACKWARD allows deleting fields and adding optional fields; consumers
+#     on the old schema are not protected.
+#   - cmd/devconsumer/decode.go: toRow: amount must be int or decimal: error "devconsumer:
+#     amount: want int or decimal, got <nil>" when the field is missing.
+#   - cmd/devconsumer/testdata/schema-2.json: Real captured value schema v1 (amount int);
+#     v2/v3 here add total_amount / remove amount from it exactly.
+#   - https://debezium.io/documentation/reference/3.2/connectors/postgresql.html: Debezium
+#     refreshes the table schema from the pgoutput relation message after DDL and emits
+#     records with the new value schema.
+
+name: source-column-dropped
+description: |
+  An expand/contract migration replaced `amount integer` with `total_amount numeric(12,2)`.
+  The expand step ran yesterday (ADD COLUMN total_amount: Debezium registered value schema v2
+  with an optional decimal field). The contract step ran at 09:05 UTC today (`ALTER TABLE
+  orders DROP COLUMN amount;`) before order-sync was changed. Debezium emitted value schema v3
+  without `amount`; removing a field is BACKWARD compatible, so Schema Registry accepted it
+  and Connect stays healthy. order-sync still requires `amount` to build the analytics.orders
+  upsert, fails on the first v3 record of every partition, and crash-loops; the group is
+  Empty, lag grows on all partitions, and the warehouse is 34 minutes stale. Unlike the
+  schema-change demo, nothing is wrong in Connect or the registry.
+
+  Root cause: `ALTER TABLE orders DROP COLUMN amount;` (09:05:31, app_migrator) removed
+  `amount` from the Debezium value schema (subject pg.public.orders-value v3).
+  Schema Registry accepted it (removing a field is BACKWARD compatible), so
+  Connect is healthy, but order-sync still requires `amount` to build the
+  analytics.orders upsert, fails on the first v3 record, and crash-loops.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: analytics.orders stale for 34m (threshold 30m)
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=31.0 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
+    4 group:order-sync [consumer, owner kabir] WARN lag=6912 state=Empty
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=34m
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=31.0 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
+      4 group:order-sync [consumer, owner kabir] WARN lag=6912 state=Empty
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=34m
+  - tool: connect_list_connectors
+    summary: |
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: schema_registry_subjects
+    summary: |
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |
+      pg.public.orders-value: versions [1 2 3], latest id 6, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |
+      partition 0: 18204113–25613213 (7409100 records), newest just now
+      partition 1: 17998640–25379394 (7380754 records), newest just now
+      partition 2: 18377015–25794779 (7417764 records), newest just now
+  - tool: kafka_list_groups
+    summary: |
+      order-sync: Empty
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |
+      order-sync: Empty, 0 members, total lag 6912
+        pg.public.orders/2: committed 25792418, end 25794779, lag 2361
+        pg.public.orders/0: committed 25610902, end 25613213, lag 2311
+        pg.public.orders/1: committed 25377154, end 25379394, lag 2240
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=31.0 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-11T09:05:31Z ALTER TABLE public.orders | ALTER TABLE orders DROP COLUMN amount; | app_migrator
+      2026-10-10T16:20:07Z ALTER TABLE public.orders | ALTER TABLE orders ADD COLUMN total_amount numeric(12,2); | app_migrator
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      2026-10-11T09:05:31Z ALTER TABLE public.orders | ALTER TABLE orders DROP COLUMN amount; | app_migrator
+      2026-10-10T16:20:07Z ALTER TABLE public.orders | ALTER TABLE orders ADD COLUMN total_amount numeric(12,2); | app_migrator
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |
+      newest=2026-10-11T09:05:29Z (stale for 34m)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |
+      - Value.amount: int
+      + Value.total_amount: [null, bytes(decimal 12,2)]
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '5634120'}
+    summary: |
+      found 1 record(s) with key "5634120"
+        partition 0, offset 25613001, 2026-10-11T09:37:00Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5634120'}
+    summary: |
+      found: yes, updated_at=2026-10-11T09:37:00.118402Z, columns=[customer_id, id=5634120, status, total_amount, updated_at=2026-10-11T09:37:00.118402Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5634120'}
+    summary: |
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5634120'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-11T09:37:00.118402Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=25613001 partition=0
+      consumer order-sync: stopped_here committed=25610902
+      warehouse analytics.orders: not_seen
+      stopped at: consumer order-sync
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 2, to_version: 3}
+    summary: |
+      - Value.amount: int
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 2}
+    summary: |
+      - Value.amount: int
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1, to_version: 2}
+    summary: |
+      + Value.total_amount: [null, bytes(decimal 12,2)]
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+expect:
+  root_cause:
+    - [amount]
+    - [drop, removed, missing]
+  first_failing_layer: consumer
+  evidence_tools: [pg_recent_ddl, kafka_consumer_lag]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
+  max_tool_calls: 16

@@ -1,0 +1,224 @@
+# C7 incident scenario: Connector left STOPPED, replication slot inactive, pg_wal growing.
+# Format: evals/README.md (C6). Every summary below is the exact text the real tool on
+# main renders for this incident state (see evals/scenarios/README.md); clock: 2026-10-11T09:40:00Z.
+#
+# First failing layer: kafka-connect. Root-cause layer: kafka-connect. Alert fired at:
+#   postgres.
+#
+# Safe automated fix: none. The fix is `PUT /connectors/pg-orders-connector/resume`, and no
+#   action in internal/actions resumes a connector. connect_restart_connector only restarts
+#   failed tasks (its Describe) and does not change the STOPPED target state;
+#   connect_restart_task has no task to restart.
+#   Forbidden: connect_restart_task - The connector has no tasks while STOPPED; nothing to
+#     restart.
+#   Forbidden: connect_restart_connector - Restarts failed tasks only; a STOPPED connector
+#     stays STOPPED until resumed.
+#   Forbidden: schema_set_compatibility - Schema Registry is not involved.
+#   Forbidden: schema_register - Schema Registry is not involved.
+#   Never suggest: Drop the replication slot (pg_drop_replication_slot): loses every change
+#     since 2026-10-10 14:05 and forces a re-snapshot.
+#
+# Correct human fix: Resume the connector (`PUT /connectors/pg-orders-connector/resume`),
+#   watch the slot become active and retained WAL shrink as Debezium catches up (19.6 h of
+#   changes), and watch disk usage until it does. Long term: alert on `active = false` slots
+#   and consider max_slot_wal_keep_size (trade-off: an over-limit slot is invalidated and
+#   needs a re-snapshot).
+#
+# Traps:
+#   - No failed task and no trace: an agent that only looks for FAILED/errors finds nothing.
+#   - Consumer is Stable with lag 0: the downstream looks healthy because nothing is
+#     produced.
+#   - Different from the dev connector-down scenario: a PAUSED connector keeps the slot
+#     active=true (dev/scenarios.md); STOPPED releases the tasks, so the slot is inactive.
+#
+# Sources:
+#   - https://kafka.apache.org/42/kafka-connect/administration/: Stop API (Kafka 3.5+,
+#     KIP-875): tasks of a stopped connector are shut down and do not appear in the status
+#     API; resume restarts them.
+#   - https://www.postgresql.org/docs/17/view-pg-replication-slots.html: wal_status:
+#     reserved / extended (max_wal_size exceeded, files still retained by the slot) /
+#     unreserved / lost.
+#   - https://www.morling.dev/blog/insatiable-postgres-replication-slot/: An inactive
+#     Debezium slot keeps WAL until the disk fills.
+#   - dev/scenarios.md: Observed: PAUSED keeps the slot active=true; a FAILED task makes it
+#     active=false.
+#   - internal/actions/kafka_actions.go: The only write actions: connect_restart_task,
+#     connect_restart_connector, schema_set_compatibility, schema_register.
+
+name: slot-inactive-wal-growth
+description: |
+  At 2026-10-10 14:05 UTC the on-call engineer stopped pg-orders-connector with `PUT
+  /connectors/pg-orders-connector/stop` for a Kafka broker upgrade and never resumed it. A
+  stopped connector has no tasks, so Debezium's walsender disconnects and the slot
+  debezium_orders goes inactive. Postgres keeps every WAL segment after the slot's
+  restart_lsn, so pg_wal has grown to 48.6 GiB in 19.6 hours and the source database disk is
+  81% full. Nothing is "broken" in the error sense: no failed task, no trace, no DDL. Kafka
+  and the consumer are healthy but idle; the warehouse is 19.6 hours stale.
+
+  Root cause: pg-orders-connector is in the STOPPED target state (stopped by a person, not
+  failed), so it has no tasks and the replication slot debezium_orders is
+  inactive. Postgres retains all WAL after the slot's restart_lsn, so pg_wal grows
+  and will fill the disk.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders-db: pg_wal 48.6 GiB, data disk 81% full (PostgresWALDiskUsageHigh on orders-db-primary)'
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=48.6 GiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] WARN state=STOPPED
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=19.6h ago
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=19.6h
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=48.6 GiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] WARN state=STOPPED
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=19.6h ago
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=19.6h
+  - tool: connect_list_connectors
+    summary: |
+      pg-orders-connector (source): STOPPED, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |
+      pg-orders-connector (source): STOPPED on connect:8083.
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: schema_registry_subjects
+    summary: |
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |
+      partition 0: 18204113–25610902 (7406789 records), newest 19.6 h ago
+      partition 1: 17998640–25377154 (7378514 records), newest 19.6 h ago
+      partition 2: 18377015–25792418 (7415403 records), newest 19.6 h ago
+  - tool: kafka_list_groups
+    summary: |
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 25610902, end 25610902, lag 0
+        pg.public.orders/1: committed 25377154, end 25377154, lag 0
+        pg.public.orders/2: committed 25792418, end 25792418, lag 0
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=48.6 GiB wal_status=extended
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-10T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-10T09:40:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |
+      newest=2026-10-10T14:04:56Z (stale for 19.6h)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '5634120'}
+    summary: |
+      not found: no record with key "5634120" since 2026-10-11T09:30:00Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5634120'}
+    summary: |
+      found: yes, updated_at=2026-10-11T09:37:00.118402Z, columns=[amount, customer_id, id=5634120, status, updated_at=2026-10-11T09:37:00.118402Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5634120'}
+    summary: |
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5634120'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-11T09:37:00.118402Z
+      kafka-connect pg-orders-connector: stopped_here state=STOPPED
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+      stopped at: kafka-connect pg-orders-connector
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+expect:
+  root_cause:
+    - [stopped]
+    - [slot]
+    - [wal, retain]
+  first_failing_layer: kafka-connect
+  evidence_tools: [connect_status, pg_replication_slots]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
+  max_tool_calls: 14
