@@ -26,13 +26,13 @@ const proposal: ProposalState = {
   steps: [],
   risk: 'low',
   rollback: 'undo',
-  required_layers: ['schema-registry', 'warehouse'],
-  approvals: { 'schema-registry': 'pending', warehouse: 'pending' },
+  required_layers: ['schema-registry', 'kafka-connect'],
+  approvals: { 'schema-registry': 'pending', 'kafka-connect': 'pending' },
   status: 'open',
   executed: [],
 }
 
-const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka', 'schema-registry'] }
+const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka', 'schema-registry'] }
 const meera: CurrentUser = { id: 'meera', name: 'Meera', layers: ['warehouse'] }
 const kabir: CurrentUser = { id: 'kabir', name: 'Kabir', layers: ['consumer'] }
 
@@ -55,19 +55,19 @@ const proposalWithParams: ProposalState = {
   ],
   risk: 'low',
   rollback: 'undo',
-  required_layers: ['schema-registry', 'warehouse'],
-  approvals: { 'schema-registry': 'pending', warehouse: 'pending' },
+  required_layers: ['schema-registry', 'kafka-connect'],
+  approvals: { 'schema-registry': 'pending', 'kafka-connect': 'pending' },
   status: 'open',
   executed: [],
 }
 
 describe('ProposalsPanel approval gating', () => {
-  it('shows Approve only on the layers the user owns', () => {
+  it('shows an Approve and Reject pair on every required layer the user owns', () => {
     const state = { ...emptyRoomState('r1'), proposals: [proposal] }
-    render(<ProposalsPanel state={state} user={meera} actions={actions} />)
-    // One Approve (warehouse) and one Reject (warehouse) visible.
-    expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(1)
-    expect(screen.getAllByRole('button', { name: 'Reject' })).toHaveLength(1)
+    render(<ProposalsPanel state={state} user={arjun} actions={actions} />)
+    // Arjun owns kafka-connect and schema-registry (dev/users.yaml).
+    expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Reject' })).toHaveLength(2)
   })
 
   it('shows no Approve buttons for a user who owns none of the layers', () => {
@@ -77,12 +77,12 @@ describe('ProposalsPanel approval gating', () => {
     expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
   })
 
-  it('Arjun owns schema-registry only', () => {
+  it('renders every required layer even for a user who cannot decide', () => {
     const state = { ...emptyRoomState('r1'), proposals: [proposal] }
-    render(<ProposalsPanel state={state} user={arjun} actions={actions} />)
+    render(<ProposalsPanel state={state} user={meera} actions={actions} />)
     expect(screen.getByText('schema-registry')).toBeInTheDocument()
-    expect(screen.getByText('warehouse')).toBeInTheDocument()
-    expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(1)
+    expect(screen.getByText('kafka-connect')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
   })
 })
 
@@ -116,7 +116,7 @@ describe('ProposalsPanel params rendering', () => {
       ...proposalWithParams,
       steps: [
         {
-          action: 'restart_connector',
+          action: 'connect_restart_connector',
           layer: 'kafka-connect',
           params: null,
           description: 'This step has no parameters.',

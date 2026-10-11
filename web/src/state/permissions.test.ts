@@ -31,8 +31,8 @@ const proposal: ProposalState = {
   steps: [],
   risk: 'low',
   rollback: 'undo',
-  required_layers: ['schema-registry', 'warehouse'],
-  approvals: { 'schema-registry': 'pending', warehouse: 'pending' },
+  required_layers: ['schema-registry', 'kafka-connect'],
+  approvals: { 'schema-registry': 'pending', 'kafka-connect': 'pending' },
   status: 'open',
   executed: [],
 }
@@ -59,22 +59,23 @@ describe('permissions', () => {
 
   it('a pending layer can be decided only by its owner', () => {
     expect(canDecideLayer(proposal, arjun, 'schema-registry')).toBe(true)
+    expect(canDecideLayer(proposal, arjun, 'kafka-connect')).toBe(true)
     expect(canDecideLayer(proposal, meera, 'schema-registry')).toBe(false)
-    expect(canDecideLayer(proposal, arjun, 'warehouse')).toBe(false)
+    expect(canDecideLayer(proposal, kabir, 'kafka-connect')).toBe(false)
   })
 
   it('canApprove requires ownership of a still-pending layer', () => {
-    expect(canApprove(proposal, meera, 'warehouse')).toBe(true)
+    expect(canApprove(proposal, arjun, 'kafka-connect')).toBe(true)
     expect(canApprove(proposal, meera, 'schema-registry')).toBe(false)
-    const decided: ProposalState = { ...proposal, approvals: { 'schema-registry': 'approved', warehouse: 'pending' } }
+    const decided: ProposalState = { ...proposal, approvals: { 'schema-registry': 'approved', 'kafka-connect': 'pending' } }
     expect(canApprove(decided, arjun, 'schema-registry')).toBe(false)
   })
 
   it('a closed or decided proposal can no longer be decided', () => {
     const rejected: ProposalState = { ...proposal, status: 'rejected' }
-    expect(canDecideLayer(rejected, meera, 'warehouse')).toBe(false)
+    expect(canDecideLayer(rejected, arjun, 'kafka-connect')).toBe(false)
     const approved: ProposalState = { ...proposal, status: 'approved' }
-    expect(canDecideLayer(approved, meera, 'warehouse')).toBe(false)
+    expect(canDecideLayer(approved, arjun, 'kafka-connect')).toBe(false)
   })
 
   it('anyone can take control when there is no driver or the lease expired', () => {

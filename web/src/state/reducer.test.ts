@@ -172,13 +172,13 @@ describe('applyEvent — every event type', () => {
         steps: [],
         risk: 'low',
         rollback: 'undo',
-        required_layers: ['schema-registry', 'warehouse'],
+        required_layers: ['schema-registry', 'kafka-connect'],
       }),
     )
     expect(s.proposals[0].approvals['schema-registry']).toBe('pending')
     s = applyEvent(s, ev(2, 'approval.given', { proposal_id: 'p1', layer: 'schema-registry' }, human))
     expect(s.proposals[0].status).toBe('open')
-    s = applyEvent(s, ev(3, 'approval.given', { proposal_id: 'p1', layer: 'warehouse' }, human))
+    s = applyEvent(s, ev(3, 'approval.given', { proposal_id: 'p1', layer: 'kafka-connect' }, human))
     expect(s.proposals[0].status).toBe('approved')
   })
 
@@ -191,12 +191,12 @@ describe('applyEvent — every event type', () => {
         steps: [],
         risk: 'low',
         rollback: 'undo',
-        required_layers: ['warehouse'],
+        required_layers: ['kafka-connect'],
       }),
     )
-    s = applyEvent(s, ev(2, 'approval.rejected', { proposal_id: 'p1', layer: 'warehouse', reason: 'nope' }, human))
+    s = applyEvent(s, ev(2, 'approval.rejected', { proposal_id: 'p1', layer: 'kafka-connect', reason: 'nope' }, human))
     expect(s.proposals[0].status).toBe('rejected')
-    expect(s.proposals[0].approvals['warehouse']).toBe('rejected')
+    expect(s.proposals[0].approvals['kafka-connect']).toBe('rejected')
   })
 
   it('action.executed appends to the proposal', () => {

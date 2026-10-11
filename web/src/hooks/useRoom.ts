@@ -392,9 +392,11 @@ export function useRoom(roomId: string) {
           table,
           key,
           stages: [
-            { layer: 'postgres', name: table, status: 'seen' },
+            { layer: 'postgres', name: table, status: 'seen', facts: { updated_at: '2026-10-11T09:47:00Z' } },
             { layer: 'kafka-connect', name: 'pg-orders-connector', status: 'seen' },
-            { layer: 'warehouse', name: 'analytics.orders', status: 'stopped_here' },
+            { layer: 'kafka', name: `pg.${table}`, status: 'seen', facts: { offset: '48213', partition: '0' } },
+            { layer: 'consumer', name: 'order-sync', status: 'stopped_here', facts: { committed: '48212' } },
+            { layer: 'warehouse', name: 'analytics.orders', status: 'not_seen' },
           ],
         })
         return
