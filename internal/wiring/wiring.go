@@ -25,6 +25,7 @@ import (
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/dbtools"
 	"piperoom/internal/tools/kafkatools"
+	"piperoom/internal/tools/runbooks"
 	"piperoom/internal/topology"
 )
 
@@ -182,8 +183,8 @@ func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
 	}, nil
 }
 
-// RegisterTools registers the A3 db tools plus A2's read-only Kafka/Connect/
-// Schema Registry tools and the write actions the agent may propose (never
+// RegisterTools registers the A3 db tools, A2's read-only Kafka/Connect/
+// Schema Registry tools, C11's runbook_lookup and the write actions the agent may propose (never
 // run), reading every client from w. If w.Builder is nil it is built from
 // w's clients and stored back on w, so callers can use it afterwards.
 func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error {
@@ -197,6 +198,10 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 	}
 	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: w.Connect, Registry: w.Registry, Kafka: w.Kafka}); err != nil {
 		return fmt.Errorf("wiring: register kafka tools: %w", err)
+	}
+	// The runbook library is embedded in the binary, so it needs no client.
+	if err := runbooks.Register(reg); err != nil {
+		return fmt.Errorf("wiring: register runbooks: %w", err)
 	}
 	if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: w.Registry}); err != nil {
 		return fmt.Errorf("wiring: register actions: %w", err)

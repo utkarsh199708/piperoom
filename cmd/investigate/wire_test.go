@@ -155,6 +155,7 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"connect_list_connectors", "connect_status", "connect_config",
 		"schema_registry_subjects", "schema_registry_versions", "schema_registry_diff",
 		"kafka_topic_offsets", "kafka_list_groups", "kafka_consumer_lag", "kafka_find_by_key",
+		"runbook_lookup",
 	}
 	got := make([]string, 0, len(reg.All()))
 	for _, tl := range reg.All() {

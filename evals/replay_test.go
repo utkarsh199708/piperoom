@@ -9,6 +9,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/runbooks"
 )
 
 func TestReplayLookup(t *testing.T) {
@@ -165,5 +166,45 @@ func TestRecordingActionKeepsScope(t *testing.T) {
 	got := log.snapshot()
 	if len(got) != 2 || got[0].Error != "" || got[1].Error == "" || got[1].Action != "connect_restart_task" {
 		t.Errorf("attempts = %+v", got)
+	}
+}
+
+// runbook_lookup is pure (embedded text, no I/O), so an eval runs it for real:
+// a call gets runbook text and is never counted as a replay miss.
+func TestRunbookLookupRunsLive(t *testing.T) {
+	rp, err := newReplayer(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defs, err := LiveTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := rp.registry(defs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, ok := reg.Get(runbooks.ToolName)
+	if !ok {
+		t.Fatal("runbook_lookup not registered")
+	}
+	if _, wrapped := tool.(*replayTool); wrapped {
+		t.Fatal("runbook_lookup is wrapped in a replay tool")
+	}
+	res, err := tool.Run(context.Background(), json.RawMessage(`{"query":"replication slot WAL growth"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Summary == "" {
+		t.Fatal("empty runbook summary")
+	}
+	if m := rp.Misses(); len(m) != 0 {
+		t.Fatalf("misses = %+v, want none", m)
+	}
+	// Tools that read live systems are still replayed.
+	if ct, _ := reg.Get("connect_status"); ct == nil {
+		t.Fatal("connect_status missing")
+	} else if _, wrapped := ct.(*replayTool); !wrapped {
+		t.Fatal("connect_status must stay replayed")
 	}
 }
