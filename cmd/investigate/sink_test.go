@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
@@ -113,5 +115,30 @@ func TestEmitSanitizesPayload(t *testing.T) {
 	}
 	if strings.ContainsRune(out, 0x9b) {
 		t.Errorf("output still contains C1 U+009B: %q", out)
+	}
+}
+
+// TestProposalOutputSanitized proves the auto-rejected proposal path strips C1
+// controls (F8 round 2: a proposal title must not reach the terminal raw).
+func TestProposalOutputSanitized(t *testing.T) {
+	r := &rejectProposals{}
+	p := events.ProposalCreatedPayload{Title: "fix \u009b31m style", RequiredLayers: []string{"schema-registry"}}
+
+	old := os.Stdout
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = pw
+	_, _ = r.Create(context.Background(), p)
+	pw.Close()
+	os.Stdout = old
+
+	out, _ := io.ReadAll(pr)
+	if strings.ContainsRune(string(out), 0x9b) {
+		t.Fatalf("proposal output not sanitized (C1 U+009B present): %q", out)
+	}
+	if !strings.Contains(string(out), "fix ") {
+		t.Fatalf("proposal output lost the title: %q", out)
 	}
 }
