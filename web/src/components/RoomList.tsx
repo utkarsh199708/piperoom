@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import type { FormEvent } from 'react'
 import type { RoomSnapshot } from '../api/types'
 import { api, isFixtures } from '../api/client'
@@ -114,7 +114,7 @@ export function RoomList() {
             {!loading && !error && openRooms.length === 0 && <Empty>No open rooms.</Empty>}
             <ul className="room-cards">
               {openRooms.map((r) => (
-                <RoomCard key={r.id} room={r} onOpen={() => navigate(`/rooms/${r.id}`)} />
+                <RoomCard key={r.id} room={r} />
               ))}
             </ul>
           </div>
@@ -129,7 +129,7 @@ export function RoomList() {
             <div className="panel__body">
               <ul className="room-cards">
                 {closedRooms.map((r) => (
-                  <RoomCard key={r.id} room={r} onOpen={() => navigate(`/rooms/${r.id}`)} />
+                  <RoomCard key={r.id} room={r} />
                 ))}
               </ul>
             </div>
@@ -140,10 +140,10 @@ export function RoomList() {
   )
 }
 
-function RoomCard({ room, onOpen }: { room: RoomSnapshot; onOpen: () => void }) {
+function RoomCard({ room }: { room: RoomSnapshot }) {
   return (
     <li>
-      <button type="button" className="room-card" onClick={onOpen}>
+      <Link to={`/rooms/${room.id}`} className="room-card">
         <span className="room-card__main">
           <span className="room-card__title">{room.title}</span>
           <span className="room-card__meta muted">
@@ -158,7 +158,7 @@ function RoomCard({ room, onOpen }: { room: RoomSnapshot; onOpen: () => void }) 
             {room.agent_status.detail ? ` · ${room.agent_status.detail}` : ''}
           </Chip>
         </span>
-      </button>
+      </Link>
     </li>
   )
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { Event } from '../api/types'
+import type { Event, RoomSnapshot } from '../api/types'
 import { applyEvent, detectGap } from './reducer'
-import { emptyRoomState } from './types'
+import { emptyRoomState, fromSnapshot } from './types'
 
 const human = { kind: 'human' as const, id: 'arjun', name: 'Arjun' }
 const agent = { kind: 'agent' as const, id: 'agent', name: 'Agent' }
@@ -244,5 +244,76 @@ describe('applyEvent — every event type', () => {
     const s = applyEvent(base(), ev(1, 'agent.status', { state: 'working' }))
     expect(s.activity).toHaveLength(1)
     expect(s.activity[0].seq).toBe(1)
+  })
+})
+
+describe('applyEvent — robustness', () => {
+  it('ignores unknown event types without throwing', () => {
+    const s = applyEvent(base(), ev(1, 'does.not.exist' as Event['type'], {}))
+    expect(s.last_seq).toBe(1)
+    expect(s.activity).toHaveLength(1)
+    expect(s.activity[0].text).toBe('does.not.exist')
+  })
+
+  it('tolerates null slices in proposal/hypothesis/trace payloads', () => {
+    let s = base()
+    s = applyEvent(
+      s,
+      ev(1, 'proposal.created', {
+        proposal_id: 'p1',
+        title: 'fix',
+        steps: null,
+        risk: 'low',
+        rollback: 'undo',
+        required_layers: null,
+      }),
+    )
+    expect(s.proposals[0].steps).toEqual([])
+    expect(s.proposals[0].required_layers).toEqual([])
+
+    s = applyEvent(
+      s,
+      ev(2, 'agent.hypothesis', {
+        text: 'g',
+        based_on_steps: null,
+        confidence: 'high',
+        confirmed: false,
+      }),
+    )
+    expect(s.hypothesis?.based_on_steps).toEqual([])
+
+    s = applyEvent(s, ev(3, 'trace.pinned', { table: 't', key: 'k', stages: null }))
+    expect(s.trace?.stages).toEqual([])
+  })
+})
+
+describe('fromSnapshot', () => {
+  it('defaults null slices and starts last_seq at 0 for the full event replay', () => {
+    const snap: RoomSnapshot = {
+      id: 'r1',
+      title: 'T',
+      severity: 'sev2',
+      pipeline_id: 'orders',
+      status: 'open',
+      opened_at: '2026-10-11T10:00:00Z',
+      last_seq: 42,
+      driver: null,
+      agent_status: { state: 'idle' },
+      hypothesis: {
+        text: 'g',
+        based_on_steps: null as unknown as string[],
+        confidence: 'high',
+        confirmed: false,
+      },
+      open_proposals: null as unknown as RoomSnapshot['open_proposals'],
+      pending_suggestions: null as unknown as RoomSnapshot['pending_suggestions'],
+      members: null as unknown as RoomSnapshot['members'],
+    }
+    const s = fromSnapshot(snap)
+    expect(s.last_seq).toBe(0)
+    expect(s.hypothesis?.based_on_steps).toEqual([])
+    expect(s.proposals).toEqual([])
+    expect(s.suggestions).toEqual([])
+    expect(s.members).toEqual([])
   })
 })

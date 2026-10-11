@@ -178,7 +178,7 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         ...state,
         hypothesis: {
           text: p.text,
-          based_on_steps: p.based_on_steps,
+          based_on_steps: p.based_on_steps ?? [],
           confidence: p.confidence,
           confirmed: p.confirmed,
         },
@@ -268,7 +268,7 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(event)
       const approvals: Record<string, 'pending'> = {}
-      for (const layer of p.required_layers) approvals[layer] = 'pending'
+      for (const layer of p.required_layers ?? []) approvals[layer] = 'pending'
       next = {
         ...state,
         proposals: [
@@ -276,10 +276,10 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
           {
             proposal_id: p.proposal_id,
             title: p.title,
-            steps: p.steps,
+            steps: p.steps ?? [],
             risk: p.risk,
             rollback: p.rollback,
-            required_layers: p.required_layers,
+            required_layers: p.required_layers ?? [],
             approvals,
             status: 'open',
             executed: [],
@@ -296,7 +296,7 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         proposals: state.proposals.map((prop) => {
           if (prop.proposal_id !== p.proposal_id) return prop
           const approvals = { ...prop.approvals, [p.layer]: 'approved' as const }
-          const allApproved = prop.required_layers.every(
+          const allApproved = (prop.required_layers ?? []).every(
             (l) => approvals[l] === 'approved',
           )
           return { ...prop, approvals, status: allApproved ? 'approved' : 'open' }
@@ -388,7 +388,7 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       const p = as<TracePinnedPayload>(event)
       next = {
         ...state,
-        trace: { table: p.table, key: p.key, stages: p.stages },
+        trace: { table: p.table, key: p.key, stages: p.stages ?? [] },
       }
       break
     }

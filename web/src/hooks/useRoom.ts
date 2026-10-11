@@ -4,7 +4,7 @@ import { api, isFixtures, openRoomWs } from '../api/client'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../dev/users'
-import { applyEvent, detectGap } from '../state/reducer'
+import { applyEvent } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
 import type { RoomState } from '../state/types'
 
@@ -50,6 +50,10 @@ export function useRoom(roomId: string) {
   const lastSeqRef = useRef(0)
   const stateRef = useRef<RoomState | null>(null)
   const localIdRef = useRef(0)
+  // Fixture mode: buffer synthetic (user) events until the story replay ends so
+  // their seq can never collide with an upcoming story event's seq.
+  const storyPlayingRef = useRef(false)
+  const synthQueueRef = useRef<Array<{ type: Event['type']; payload: unknown; at: string }>>([])
 
   useEffect(() => {
     stateRef.current = state
@@ -66,27 +70,41 @@ export function useRoom(roomId: string) {
     setError(null)
     setPresence([])
 
-    const applyEvents = (events: Event[]) => {
-      for (const ev of events) {
-        if (ev.seq <= lastSeqRef.current) continue
-        dispatch({ type: 'event', event: ev })
-        lastSeqRef.current = ev.seq
-      }
-    }
-
     if (isFixtures()) {
       const snapshot = fixtureRoom(roomId) ?? emptySnapshot(roomId, roomId, 'sev3', 'orders')
       const events = fixtureEvents(roomId)
       dispatch({ type: 'init', snapshot })
-      lastSeqRef.current = snapshot.last_seq
+      lastSeqRef.current = 0
       setPresence(snapshot.members.map((m) => ({ id: m.id, name: m.name, state: 'viewing' })))
       setConn('live')
+
+      storyPlayingRef.current = events.length > 0
+      synthQueueRef.current = []
+
+      const drainSynth = () => {
+        for (const item of synthQueueRef.current) {
+          const ev: Event = {
+            room_id: roomId,
+            seq: lastSeqRef.current + 1,
+            type: item.type,
+            actor: { kind: 'human', id: user.id, name: user.name },
+            payload: item.payload,
+            at: item.at,
+          }
+          dispatch({ type: 'event', event: ev })
+          lastSeqRef.current = ev.seq
+        }
+        synthQueueRef.current = []
+      }
 
       let i = 0
       const playNext = () => {
         if (cancelled) return
-        while (i < events.length && events[i].seq <= lastSeqRef.current) i += 1
-        if (i >= events.length) return
+        if (i >= events.length) {
+          storyPlayingRef.current = false
+          drainSynth()
+          return
+        }
         const ev = events[i]
         i += 1
         dispatch({ type: 'event', event: ev })
@@ -101,10 +119,12 @@ export function useRoom(roomId: string) {
       }
     }
 
-    // Live mode: snapshot, then WebSocket replay + live.
+    // ---- live mode: snapshot header, then full-log replay over WebSocket ----
     setConn('loading')
 
-    const backoffRef = { current: 1000 }
+    let backoff = 1000
+    let firstConnect = true
+    let queue: Promise<void> = Promise.resolve()
 
     const sendPresence = (pstate: PresenceMember['state']) => {
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -112,31 +132,68 @@ export function useRoom(roomId: string) {
       }
     }
 
-    const handleEvent = async (ev: Event) => {
+    const applyEventSeq = (ev: Event) => {
       if (ev.seq <= lastSeqRef.current) return
-      if (detectGap(lastSeqRef.current, ev)) {
-        // Gap: fetch the missing events before applying.
-        try {
-          const page = await api.events(user.id, roomId, lastSeqRef.current)
-          const missing = page.events
-            .filter((e) => e.seq > lastSeqRef.current)
-            .sort((a, b) => a.seq - b.seq)
-          applyEvents(missing)
-        } catch {
-          // leave the gap; the next reconnect replays from lastSeq
-        }
-        if (ev.seq <= lastSeqRef.current) return
-      }
       dispatch({ type: 'event', event: ev })
       lastSeqRef.current = ev.seq
     }
 
+    // Page /events until the gap before `ev` closes. On failure (fetch throws or
+    // makes no progress) close the socket so the reconnect replays from lastSeq.
+    const fillGap = async (ev: Event): Promise<boolean> => {
+      while (ev.seq > lastSeqRef.current + 1) {
+        if (cancelled) return false
+        let page
+        try {
+          page = await api.events(user.id, roomId, lastSeqRef.current)
+        } catch {
+          ws?.close()
+          return false
+        }
+        if (cancelled) return false
+        const missing = page.events
+          .filter((e) => e.seq > lastSeqRef.current)
+          .sort((a, b) => a.seq - b.seq)
+        if (missing.length === 0) {
+          ws?.close()
+          return false
+        }
+        let advanced = false
+        for (const e of missing) {
+          if (e.seq <= lastSeqRef.current) continue
+          if (e.seq !== lastSeqRef.current + 1) break // a hole remains; page again
+          applyEventSeq(e)
+          advanced = true
+        }
+        if (!advanced) {
+          ws?.close()
+          return false
+        }
+      }
+      return ev.seq === lastSeqRef.current + 1
+    }
+
+    // One event through the single queue, so messages that arrive during a gap
+    // fetch still apply in seq order.
+    const processEvent = async (ev: Event) => {
+      if (cancelled) return
+      if (ev.seq <= lastSeqRef.current) return // duplicate or older — drop
+      const ready = await fillGap(ev)
+      if (cancelled || !ready) return
+      applyEventSeq(ev)
+    }
+
     const connect = () => {
       if (cancelled) return
-      ws = openRoomWs(roomId, user.id, lastSeqRef.current)
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+      ws = openRoomWs(roomId, user.id, firstConnect ? 0 : lastSeqRef.current)
+      firstConnect = false
       ws.onopen = () => {
         if (cancelled) return
+        backoff = 1000
         setConn('live')
+        setError(null)
+        sendPresence('viewing')
       }
       ws.onmessage = (m) => {
         let msg: WsServerMessage
@@ -146,7 +203,7 @@ export function useRoom(roomId: string) {
           return
         }
         if (msg.type === 'event') {
-          void handleEvent(msg.event)
+          queue = queue.then(() => processEvent(msg.event)).catch(() => undefined)
         } else if (msg.type === 'presence') {
           setPresence(msg.members)
         } else if (msg.type === 'error') {
@@ -156,8 +213,8 @@ export function useRoom(roomId: string) {
       ws.onclose = () => {
         if (cancelled) return
         setConn('reconnecting')
-        reconnectTimer = window.setTimeout(connect, backoffRef.current)
-        backoffRef.current = Math.min(backoffRef.current * 2, 10000)
+        reconnectTimer = window.setTimeout(connect, backoff)
+        backoff = Math.min(backoff * 2, 10000)
       }
       ws.onerror = () => {
         // onclose handles reconnect
@@ -169,7 +226,8 @@ export function useRoom(roomId: string) {
         const snapshot = await api.room(user.id, roomId)
         if (cancelled) return
         dispatch({ type: 'init', snapshot })
-        lastSeqRef.current = snapshot.last_seq
+        // lastSeqRef stays 0: open with after=0 so the full log replays and the
+        // reducer rebuilds timeline/comments/proposals/trace/handoffs (item D).
         setConn('connecting')
         connect()
       } catch (e) {
@@ -193,10 +251,20 @@ export function useRoom(roomId: string) {
       ws?.close()
       ws = null
     }
-  }, [roomId, user.id])
+  }, [roomId, user.id, user.name])
+
+  const runAction = useCallback((p: Promise<unknown>) => {
+    p.then(() => setError(null)).catch((e: unknown) =>
+      setError(e instanceof Error ? e.message : String(e)),
+    )
+  }, [])
 
   const synthesize = useCallback(
     (type: Event['type'], payload: unknown) => {
+      if (isFixtures() && storyPlayingRef.current) {
+        synthQueueRef.current.push({ type, payload, at: new Date().toISOString() })
+        return
+      }
       const ev: Event = {
         room_id: roomId,
         seq: lastSeqRef.current + 1,
@@ -227,9 +295,7 @@ export function useRoom(roomId: string) {
         })
         return
       }
-      void api.comment(user.id, roomId, { step_id: stepId, text }).catch((e) =>
-        setError(e instanceof Error ? e.message : String(e)),
-      )
+      void runAction(api.comment(user.id, roomId, { step_id: stepId, text }))
     },
     steer: (text) => {
       if (isFixtures()) {
@@ -241,9 +307,7 @@ export function useRoom(roomId: string) {
         )
         return
       }
-      void api.steer(user.id, roomId, text).catch((e) =>
-        setError(e instanceof Error ? e.message : String(e)),
-      )
+      void runAction(api.steer(user.id, roomId, text))
     },
     sendSuggestion: (suggestionId) => {
       if (isFixtures()) {
@@ -254,65 +318,53 @@ export function useRoom(roomId: string) {
         })
         return
       }
-      void api.sendSuggestion(user.id, roomId, suggestionId).catch((e) =>
-        setError(e instanceof Error ? e.message : String(e)),
-      )
+      void runAction(api.sendSuggestion(user.id, roomId, suggestionId))
     },
     requestControl: () => {
       if (isFixtures()) {
         synthesize('control.requested', {})
         return
       }
-      void api.requestControl(user.id, roomId).catch((e) =>
-        setError(e instanceof Error ? e.message : String(e)),
-      )
+      void runAction(api.requestControl(user.id, roomId))
     },
     grantControl: (to) => {
       if (isFixtures()) {
         const target = findUser(to)
         synthesize('control.granted', {
-          to: { kind: 'human', id: target.id, name: target.name },
+          to: { kind: 'human', id: target?.id ?? to, name: target?.name ?? to },
           lease_until: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
         })
         return
       }
-      void api.grantControl(user.id, roomId, to).catch((e) =>
-        setError(e instanceof Error ? e.message : String(e)),
-      )
+      void runAction(api.grantControl(user.id, roomId, to))
     },
     close: (resolution) => {
       if (isFixtures()) {
         synthesize('room.closed', { resolution })
         return
       }
-      void api.closeRoom(user.id, roomId, resolution).catch((e) =>
-        setError(e instanceof Error ? e.message : String(e)),
-      )
+      void runAction(api.closeRoom(user.id, roomId, resolution))
     },
     approve: (proposalId, layer) => {
       if (isFixtures()) {
         synthesize('approval.given', { proposal_id: proposalId, layer })
         return
       }
-      void api.approve(user.id, proposalId, layer).catch((e) =>
-        setError(e instanceof Error ? e.message : String(e)),
-      )
+      void runAction(api.approve(user.id, proposalId, layer))
     },
     reject: (proposalId, layer, reason) => {
       if (isFixtures()) {
         synthesize('approval.rejected', { proposal_id: proposalId, layer, reason })
         return
       }
-      void api.reject(user.id, proposalId, layer, reason).catch((e) =>
-        setError(e instanceof Error ? e.message : String(e)),
-      )
+      void runAction(api.reject(user.id, proposalId, layer, reason))
     },
     handoff: (to, stayAsWatcher) => {
       if (isFixtures()) {
         const target = findUser(to)
         synthesize('handoff.created', {
           handoff_id: nextLocalId(),
-          to: { kind: 'human', id: target.id, name: target.name },
+          to: { kind: 'human', id: target?.id ?? to, name: target?.name ?? to },
           summary: {
             what_broke: '',
             why: '',
@@ -325,18 +377,14 @@ export function useRoom(roomId: string) {
         })
         return
       }
-      void api.handoff(user.id, roomId, to, stayAsWatcher).catch((e) =>
-        setError(e instanceof Error ? e.message : String(e)),
-      )
+      void runAction(api.handoff(user.id, roomId, to, stayAsWatcher))
     },
     acceptHandoff: (handoffId) => {
       if (isFixtures()) {
         synthesize('handoff.accepted', { handoff_id: handoffId })
         return
       }
-      void api.acceptHandoff(user.id, handoffId).catch((e) =>
-        setError(e instanceof Error ? e.message : String(e)),
-      )
+      void runAction(api.acceptHandoff(user.id, handoffId))
     },
     trace: (table, key) => {
       if (isFixtures()) {
@@ -351,9 +399,7 @@ export function useRoom(roomId: string) {
         })
         return
       }
-      void api.trace(user.id, roomId, table, key).catch((e) =>
-        setError(e instanceof Error ? e.message : String(e)),
-      )
+      void runAction(api.trace(user.id, roomId, table, key))
     },
   }
 

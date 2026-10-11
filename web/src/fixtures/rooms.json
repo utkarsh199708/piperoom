@@ -6,12 +6,12 @@
     "pipeline_id": "orders",
     "status": "open",
     "opened_at": "2026-10-11T10:00:00Z",
-    "last_seq": 36,
+    "last_seq": 33,
     "driver": { "id": "kabir", "name": "Kabir", "lease_until": "2026-10-11T10:35:00Z" },
     "agent_status": { "state": "done", "detail": "fix applied" },
     "hypothesis": {
       "text": "A schema change to orders.amount broke the pg-orders-connector on a Schema Registry incompatibility; no new rows reach the warehouse.",
-      "based_on_steps": ["s_2", "s_6"],
+      "based_on_steps": ["s_1", "s_3", "s_5"],
       "confidence": "high",
       "confirmed": true
     },

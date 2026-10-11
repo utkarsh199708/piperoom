@@ -62,56 +62,65 @@ export const api = {
       body: JSON.stringify(body),
     }),
   room: (userId: string, roomId: string) =>
-    request<RoomSnapshot>(`/api/rooms/${roomId}`, userId),
+    request<RoomSnapshot>(`/api/rooms/${encodeURIComponent(roomId)}`, userId),
   events: (userId: string, roomId: string, after: number, limit = 500) =>
-    request<EventsPage>(`/api/rooms/${roomId}/events?after=${after}&limit=${limit}`, userId),
+    request<EventsPage>(
+      `/api/rooms/${encodeURIComponent(roomId)}/events?after=${after}&limit=${limit}`,
+      userId,
+    ),
   topology: (userId: string, pipelineId: string) =>
-    request<Topology>(`/api/pipelines/${pipelineId}/topology`, userId),
+    request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`, userId),
   comment: (userId: string, roomId: string, body: { step_id?: string; text: string }) =>
-    request<Event>(`/api/rooms/${roomId}/comments`, userId, {
+    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/comments`, userId, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
   steer: (userId: string, roomId: string, text: string) =>
-    request<Event>(`/api/rooms/${roomId}/steer`, userId, {
+    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/steer`, userId, {
       method: 'POST',
       body: JSON.stringify({ text }),
     }),
   sendSuggestion: (userId: string, roomId: string, suggestionId: string) =>
-    request<Event>(`/api/rooms/${roomId}/suggestions/${suggestionId}/send`, userId, {
+    request<Event>(
+      `/api/rooms/${encodeURIComponent(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/send`,
+      userId,
+      { method: 'POST' },
+    ),
+  requestControl: (userId: string, roomId: string) =>
+    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/control/request`, userId, {
       method: 'POST',
     }),
-  requestControl: (userId: string, roomId: string) =>
-    request<Event>(`/api/rooms/${roomId}/control/request`, userId, { method: 'POST' }),
   grantControl: (userId: string, roomId: string, to: string) =>
-    request<Event>(`/api/rooms/${roomId}/control/grant`, userId, {
+    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/control/grant`, userId, {
       method: 'POST',
       body: JSON.stringify({ to }),
     }),
   closeRoom: (userId: string, roomId: string, resolution: string) =>
-    request<Event>(`/api/rooms/${roomId}/close`, userId, {
+    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/close`, userId, {
       method: 'POST',
       body: JSON.stringify({ resolution }),
     }),
   approve: (userId: string, proposalId: string, layer: string) =>
-    request<Event>(`/api/proposals/${proposalId}/approve`, userId, {
+    request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/approve`, userId, {
       method: 'POST',
       body: JSON.stringify({ layer }),
     }),
   reject: (userId: string, proposalId: string, layer: string, reason: string) =>
-    request<Event>(`/api/proposals/${proposalId}/reject`, userId, {
+    request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/reject`, userId, {
       method: 'POST',
       body: JSON.stringify({ layer, reason }),
     }),
   handoff: (userId: string, roomId: string, to: string, stayAsWatcher: boolean) =>
-    request<Event>(`/api/rooms/${roomId}/handoffs`, userId, {
+    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/handoffs`, userId, {
       method: 'POST',
       body: JSON.stringify({ to, stay_as_watcher: stayAsWatcher }),
     }),
   acceptHandoff: (userId: string, handoffId: string) =>
-    request<Event>(`/api/handoffs/${handoffId}/accept`, userId, { method: 'POST' }),
+    request<Event>(`/api/handoffs/${encodeURIComponent(handoffId)}/accept`, userId, {
+      method: 'POST',
+    }),
   trace: (userId: string, roomId: string, table: string, key: string) =>
-    request<Event>(`/api/rooms/${roomId}/trace`, userId, {
+    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/trace`, userId, {
       method: 'POST',
       body: JSON.stringify({ table, key }),
     }),
@@ -122,7 +131,7 @@ export function openRoomWs(
   userId: string,
   after: number,
 ): WebSocket {
-  const url = new URL(`${BASE}/api/rooms/${roomId}/ws`)
+  const url = new URL(`${BASE}/api/rooms/${encodeURIComponent(roomId)}/ws`)
   if (url.protocol === 'https:') url.protocol = 'wss:'
   else url.protocol = 'ws:'
   url.searchParams.set('user', userId)

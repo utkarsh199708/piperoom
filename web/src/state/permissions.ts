@@ -17,6 +17,14 @@ export function isOpen(state: RoomState): boolean {
   return state.status === 'open'
 }
 
+// A driver lease expires after 30 minutes (docs/api.md). When it has expired
+// (or there is no driver at all, e.g. a webhook room), anyone may take control.
+export function isLeaseExpired(state: RoomState): boolean {
+  const until = state.driver?.lease_until
+  if (!until) return false
+  return Date.parse(until) <= Date.now()
+}
+
 export function canSteer(state: RoomState, user: CurrentUser): boolean {
   return isOpen(state) && isDriver(state, user)
 }
@@ -29,7 +37,17 @@ export function canRequestControl(state: RoomState, user: CurrentUser): boolean 
   return (
     isOpen(state) &&
     !isDriver(state, user) &&
+    state.driver != null &&
+    !isLeaseExpired(state) &&
     !state.control_requests.some((r) => r.from.id === user.id)
+  )
+}
+
+export function canTakeControl(state: RoomState, user: CurrentUser): boolean {
+  return (
+    isOpen(state) &&
+    !isDriver(state, user) &&
+    (state.driver == null || isLeaseExpired(state))
   )
 }
 
@@ -67,7 +85,11 @@ export function canDecideLayer(
   user: CurrentUser,
   layer: string,
 ): boolean {
-  return proposal.approvals[layer] === 'pending' && user.layers.includes(layer)
+  return (
+    proposal.status === 'open' &&
+    proposal.approvals[layer] === 'pending' &&
+    user.layers.includes(layer)
+  )
 }
 
 export function canApprove(

@@ -26,6 +26,13 @@ export function useTopology(pipelineId: string) {
       }
     }
 
+    // The pipeline id is not known until the room snapshot/event log loads; do
+    // not fetch a topology for an empty/placeholder id.
+    if (!pipelineId) {
+      setTopology(null)
+      return
+    }
+
     void load()
     const timer = window.setInterval(load, 30000)
     return () => {

@@ -9,6 +9,7 @@ import {
   canSendSuggestionToAgent,
   canSteer,
   canSuggest,
+  canTakeControl,
 } from './permissions'
 import type { CurrentUser } from './permissions'
 
@@ -67,6 +68,23 @@ describe('permissions', () => {
     expect(canApprove(proposal, meera, 'schema-registry')).toBe(false)
     const decided: ProposalState = { ...proposal, approvals: { 'schema-registry': 'approved', warehouse: 'pending' } }
     expect(canApprove(decided, arjun, 'schema-registry')).toBe(false)
+  })
+
+  it('a closed or decided proposal can no longer be decided', () => {
+    const rejected: ProposalState = { ...proposal, status: 'rejected' }
+    expect(canDecideLayer(rejected, meera, 'warehouse')).toBe(false)
+    const approved: ProposalState = { ...proposal, status: 'approved' }
+    expect(canDecideLayer(approved, meera, 'warehouse')).toBe(false)
+  })
+
+  it('anyone can take control when there is no driver or the lease expired', () => {
+    expect(canTakeControl(room(null), kabir)).toBe(true)
+    const expired = room('arjun', {
+      driver: { id: 'arjun', name: 'Arjun', lease_until: '2020-01-01T00:00:00Z' },
+    })
+    expect(canTakeControl(expired, kabir)).toBe(true)
+    expect(canTakeControl(room('arjun'), kabir)).toBe(false)
+    expect(canTakeControl(room('arjun'), arjun)).toBe(false)
   })
 
   it('only the driver can forward a suggestion', () => {

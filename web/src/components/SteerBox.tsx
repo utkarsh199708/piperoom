@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import type { RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
-import { canRequestControl, canSteer } from '../state/permissions'
+import { canRequestControl, canSteer, canTakeControl } from '../state/permissions'
 import type { RoomActions } from '../hooks/useRoom'
 
 export function SteerBox({
@@ -62,7 +62,16 @@ export function SteerBox({
             rows={2}
           />
           <div className="steer__actions">
-            {!isDriver && canRequestControl(state, user) && (
+            {!isDriver && canTakeControl(state, user) && (
+              <button
+                type="button"
+                className="btn btn--ghost"
+                onClick={() => actions.grantControl(user.id)}
+              >
+                Take control
+              </button>
+            )}
+            {!isDriver && !canTakeControl(state, user) && canRequestControl(state, user) && (
               <button type="button" className="btn btn--ghost" onClick={actions.requestControl}>
                 Request control
               </button>

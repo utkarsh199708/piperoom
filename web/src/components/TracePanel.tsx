@@ -51,7 +51,7 @@ export function TracePanel({
 
         {trace && (
           <div className="trace__stages">
-            {trace.stages.map((s, i) => (
+            {(trace.stages ?? []).map((s, i) => (
               <div key={i} className={`trace-stage trace-stage--${s.status}`}>
                 {i > 0 && <span className="trace-stage__arrow" aria-hidden="true">→</span>}
                 <div className="trace-stage__card">

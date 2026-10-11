@@ -166,6 +166,11 @@ export function emptyRoomState(id: string): RoomState {
 }
 
 export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
+  // The snapshot only carries header/derived state for a fast first paint; the
+  // timeline, comments, proposals, suggestions, members, trace and hand-offs are
+  // rebuilt from the full event log (WebSocket after=0). So we seed last_seq at 0
+  // (letting the replay fold every event) and leave the event-derived collections
+  // empty — seeding them here would duplicate on replay.
   return {
     ...emptyRoomState(snapshot.id),
     id: snapshot.id,
@@ -176,7 +181,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     opened_at: snapshot.opened_at,
     closed_at: snapshot.closed_at,
     resolution: snapshot.resolution,
-    last_seq: snapshot.last_seq,
+    last_seq: 0,
     driver: snapshot.driver
       ? { id: snapshot.driver.id, name: snapshot.driver.name, lease_until: snapshot.driver.lease_until }
       : null,
@@ -187,31 +192,10 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     hypothesis: snapshot.hypothesis
       ? {
           text: snapshot.hypothesis.text,
-          based_on_steps: snapshot.hypothesis.based_on_steps,
+          based_on_steps: snapshot.hypothesis.based_on_steps ?? [],
           confidence: snapshot.hypothesis.confidence,
           confirmed: snapshot.hypothesis.confirmed,
         }
       : null,
-    proposals: (snapshot.open_proposals ?? []).map((p) => ({
-      proposal_id: p.proposal_id,
-      title: p.title,
-      steps: p.steps,
-      risk: p.risk,
-      rollback: p.rollback,
-      required_layers: p.required_layers,
-      approvals: { ...p.approvals },
-      status: 'open',
-      executed: [],
-    })),
-    suggestions: (snapshot.pending_suggestions ?? []).map((s) => ({
-      suggestion_id: s.suggestion_id,
-      from: { kind: 'human', id: s.from.id, name: s.from.name },
-      text: s.text,
-    })),
-    members: (snapshot.members ?? []).map((m) => ({
-      id: m.id,
-      name: m.name,
-      role: m.role,
-    })),
   }
 }

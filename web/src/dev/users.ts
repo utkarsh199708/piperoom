@@ -15,6 +15,6 @@ export const DEV_USERS: DevUser[] = [
 
 export const DEFAULT_USER_ID = 'arjun'
 
-export function findUser(id: string | null | undefined): DevUser {
-  return DEV_USERS.find((u) => u.id === id) ?? DEV_USERS[0]
+export function findUser(id: string | null | undefined): DevUser | undefined {
+  return DEV_USERS.find((u) => u.id === id)
 }

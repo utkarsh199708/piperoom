@@ -21,7 +21,7 @@ export function RoomScreen() {
   const { roomId = '' } = useParams()
   const { user } = useCurrentUser()
   const { state, presence, conn, error, actions } = useRoom(roomId)
-  const { topology } = useTopology(state?.pipeline_id ?? 'orders')
+  const { topology } = useTopology(state?.pipeline_id ?? '')
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -29,7 +29,7 @@ export function RoomScreen() {
   const hasPendingApproval = useMemo(() => {
     if (!state) return false
     return state.proposals.some((p) =>
-      p.required_layers.some(
+      (p.required_layers ?? []).some(
         (l) => p.approvals[l] === 'pending' && user.layers.includes(l),
       ),
     )
@@ -139,7 +139,7 @@ export function RoomScreen() {
               </header>
               <div className="panel__body">
                 <p className="hypothesis__text">{state.hypothesis.text}</p>
-                {state.hypothesis.based_on_steps.length > 0 && (
+                {(state.hypothesis.based_on_steps ?? []).length > 0 && (
                   <p className="muted hypothesis__based">
                     based on {state.hypothesis.based_on_steps.join(', ')}
                   </p>
