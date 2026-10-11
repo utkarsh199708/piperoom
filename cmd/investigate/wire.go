@@ -83,7 +83,7 @@ func wireRealTools(cfg config.Config, reg *tools.Registry, areg *actions.Registr
 // wireRealTools so tests can drive the wiring with fakes and no live stack.
 func registerTools(reg *tools.Registry, areg *actions.Registry, src clients.SourceDB, wh clients.Warehouse, o *owners.Owners, a2 *a2Clients) error {
 	b := topology.NewBuilder(o, a2.connect, a2.kafka, src, wh)
-	if err := dbtools.Register(reg, dbtools.Deps{Src: src, Wh: wh, Builder: b}); err != nil {
+	if err := dbtools.Register(reg, dbtools.Deps{Src: src, Wh: wh, Builder: b, Owners: o}); err != nil {
 		return fmt.Errorf("investigate: register db tools: %w", err)
 	}
 	if err := wireA2(reg, areg, a2); err != nil {
