@@ -37,6 +37,7 @@ One team, clear roles:
 | **Claude Lead 1 — Architecture** | `[LEAD-ARCH]` | completeness vs. task file and milestones, architecture and contract fit, integration runs, answers questions, **the only one who merges** | write feature code |
 | **Claude Lead 2 — Code review** | `[LEAD-REVIEW]` | line-by-line code review, runs build/vet/unit/integration tests, security and error paths (§7) | merge, write feature code |
 | **Qoder agents** | `[A1]`…`[A6]` | **write all the code**, raise PRs, fix review comments | merge, touch `main`, edit contract files |
+| **Claude cloud agents** (Sonnet, on GitHub) | `[C1]`…`[C4]` | follow-up tasks that need no local stack; open GitHub PRs | merge, push to `main`, edit contract files |
 
 A PR is merged only when **both** leads approve: `[LEAD-REVIEW] APPROVED` (code) and
 `[LEAD-ARCH] APPROVED` (architecture + completeness). Then Lead 1 merges.
@@ -50,6 +51,10 @@ Each agent owns folders. **Never edit a file you do not own.**
 | A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`), `cmd/investigate/**` |
 | A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**` |
 | A6 | `tasks/A6-web.md` | `web/**` |
+| C1 (cloud) | `tasks/C1-ci-repo.md` | `.github/**`, `README.md`, `docs/runbook.md`, `Makefile` |
+| C2 (cloud) | `tasks/C2-agent-memory.md` | `internal/agent/**` (not `contract.go`) while C2 is open; A4 meanwhile only `cmd/investigate/**` |
+| C3 (cloud) | `tasks/C3-snowflake.md` | `internal/clients/snowflake/**` |
+| C4 (cloud) | `tasks/C4-security.md` | `docs/security/**` (no code changes) |
 | Claude leads | — | `AGENTS.md`, `tasks/**`, `docs/**`, `reviews/**`, and every **contract file** below |
 
 ### Contract files (read them, code against them, never edit them)
