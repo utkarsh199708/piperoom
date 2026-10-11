@@ -101,18 +101,18 @@ recordings:
       4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
       5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=28m
   - tool: connect_list_connectors
-    summary: |
+    summary: |-
       pg-orders-connector (source): RUNNING, 1 failed tasks
   - tool: connect_status
     input: {connector: pg-orders-connector}
-    summary: |
+    summary: |-
       pg-orders-connector (source): RUNNING on connect:8083.
       Task 0: FAILED:
       org.apache.kafka.connect.errors.ConnectException: Unable to update filtered publication dbz_publication for "public"."orders"
       Caused by: org.postgresql.util.PSQLException: ERROR: must be owner of table orders
   - tool: connect_config
     input: {connector: pg-orders-connector}
-    summary: |
+    summary: |-
       connector.class: io.debezium.connector.postgresql.PostgresConnector
       database.dbname: orders
       database.hostname: postgres
@@ -123,29 +123,29 @@ recordings:
       table.include.list: public.orders
       topic.prefix: pg
   - tool: schema_registry_subjects
-    summary: |
+    summary: |-
       pg.public.orders-key
       pg.public.orders-value
   - tool: schema_registry_versions
     input: {subject: pg.public.orders-value}
-    summary: |
+    summary: |-
       pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
   - tool: schema_registry_versions
     input: {subject: pg.public.orders-key}
-    summary: |
+    summary: |-
       pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
-    summary: |
+    summary: |-
       partition 0: 18204113–25610902 (7406789 records), newest 28 min ago
       partition 1: 17998640–25377154 (7378514 records), newest 28 min ago
       partition 2: 18377015–25792418 (7415403 records), newest 28 min ago
   - tool: kafka_list_groups
-    summary: |
+    summary: |-
       order-sync: Stable
   - tool: kafka_consumer_lag
     input: {group: order-sync}
-    summary: |
+    summary: |-
       order-sync: Stable, 1 members, total lag 0
         pg.public.orders/0: committed 25610902, end 25610902, lag 0
         pg.public.orders/1: committed 25377154, end 25377154, lag 0
@@ -166,26 +166,26 @@ recordings:
       (no long transactions)
   - tool: warehouse_freshness
     input: {table: analytics.orders, ts_column: updated_at}
-    summary: |
+    summary: |-
       newest=2026-10-11T09:11:55Z (stale for 28m)
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value, from_version: 1}
-    summary: |
+    summary: |-
       no field changes
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
     error: 'bad tool input: from_version or schema is required'
   - tool: kafka_find_by_key
     input: {topic: pg.public.orders, key: '5634120'}
-    summary: |
+    summary: |-
       not found: no record with key "5634120" since 2026-10-11T09:30:00Z
   - tool: pg_row
     input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5634120'}
-    summary: |
+    summary: |-
       found: yes, updated_at=2026-10-11T09:37:00.118402Z, columns=[amount, customer_id, id=5634120, status, updated_at=2026-10-11T09:37:00.118402Z]
   - tool: warehouse_row
     input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5634120'}
-    summary: |
+    summary: |-
       not found
   - tool: trace_record
     input: {pipeline_id: orders, table: public.orders, key: '5634120'}

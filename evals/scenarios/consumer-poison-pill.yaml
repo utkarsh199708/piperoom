@@ -91,16 +91,16 @@ recordings:
       4 group:order-sync [consumer, owner kabir] WARN lag=14307 state=Empty
       5 wh:analytics.orders [warehouse, owner meera] OK stale_for=1m
   - tool: connect_list_connectors
-    summary: |
+    summary: |-
       pg-orders-connector (source): RUNNING, 0 failed tasks
   - tool: connect_status
     input: {connector: pg-orders-connector}
-    summary: |
+    summary: |-
       pg-orders-connector (source): RUNNING on connect:8083.
       Task 0: RUNNING
   - tool: connect_config
     input: {connector: pg-orders-connector}
-    summary: |
+    summary: |-
       connector.class: io.debezium.connector.postgresql.PostgresConnector
       database.dbname: orders
       database.hostname: postgres
@@ -111,29 +111,29 @@ recordings:
       table.include.list: public.orders
       topic.prefix: pg
   - tool: schema_registry_subjects
-    summary: |
+    summary: |-
       pg.public.orders-key
       pg.public.orders-value
   - tool: schema_registry_versions
     input: {subject: pg.public.orders-value}
-    summary: |
+    summary: |-
       pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
   - tool: schema_registry_versions
     input: {subject: pg.public.orders-key}
-    summary: |
+    summary: |-
       pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
-    summary: |
+    summary: |-
       partition 0: 18204113–25611131 (7407018 records), newest just now
       partition 1: 17998640–25391062 (7392422 records), newest just now
       partition 2: 18377015–25792602 (7415587 records), newest just now
   - tool: kafka_list_groups
-    summary: |
+    summary: |-
       order-sync: Empty
   - tool: kafka_consumer_lag
     input: {group: order-sync}
-    summary: |
+    summary: |-
       order-sync: Empty, 0 members, total lag 14307
         pg.public.orders/1: committed 25377154, end 25391062, lag 13908
         pg.public.orders/0: committed 25610919, end 25611131, lag 212
@@ -153,27 +153,27 @@ recordings:
       (no long transactions)
   - tool: warehouse_freshness
     input: {table: analytics.orders, ts_column: updated_at}
-    summary: |
+    summary: |-
       newest=2026-10-11T09:38:50Z (stale for 1m)
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value, from_version: 1}
-    summary: |
+    summary: |-
       no field changes
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
     error: 'bad tool input: from_version or schema is required'
   - tool: kafka_find_by_key
     input: {topic: pg.public.orders, key: '5634120'}
-    summary: |
+    summary: |-
       found 1 record(s) with key "5634120"
         partition 1, offset 25390877, 2026-10-11T09:37:00Z
   - tool: pg_row
     input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5634120'}
-    summary: |
+    summary: |-
       found: yes, updated_at=2026-10-11T09:37:00.118402Z, columns=[amount, customer_id, id=5634120, status, updated_at=2026-10-11T09:37:00.118402Z]
   - tool: warehouse_row
     input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5634120'}
-    summary: |
+    summary: |-
       not found
   - tool: trace_record
     input: {pipeline_id: orders, table: public.orders, key: '5634120'}

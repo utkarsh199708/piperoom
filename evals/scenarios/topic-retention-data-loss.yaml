@@ -97,16 +97,16 @@ recordings:
       4 group:order-sync [consumer, owner kabir] WARN lag=2949113 state=Stable
       5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=6.0h
   - tool: connect_list_connectors
-    summary: |
+    summary: |-
       pg-orders-connector (source): RUNNING, 0 failed tasks
   - tool: connect_status
     input: {connector: pg-orders-connector}
-    summary: |
+    summary: |-
       pg-orders-connector (source): RUNNING on connect:8083.
       Task 0: RUNNING
   - tool: connect_config
     input: {connector: pg-orders-connector}
-    summary: |
+    summary: |-
       connector.class: io.debezium.connector.postgresql.PostgresConnector
       database.dbname: orders
       database.hostname: postgres
@@ -117,29 +117,29 @@ recordings:
       table.include.list: public.orders
       topic.prefix: pg
   - tool: schema_registry_subjects
-    summary: |
+    summary: |-
       pg.public.orders-key
       pg.public.orders-value
   - tool: schema_registry_versions
     input: {subject: pg.public.orders-value}
-    summary: |
+    summary: |-
       pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
   - tool: schema_registry_versions
     input: {subject: pg.public.orders-key}
-    summary: |
+    summary: |-
       pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
-    summary: |
+    summary: |-
       partition 0: 25117950–26101377 (983427 records), newest just now
       partition 1: 24880113–25864688 (984575 records), newest just now
       partition 2: 25301774–26284981 (983207 records), newest just now
   - tool: kafka_list_groups
-    summary: |
+    summary: |-
       order-sync: Stable
   - tool: kafka_consumer_lag
     input: {group: order-sync}
-    summary: |
+    summary: |-
       order-sync: Stable, 1 members, total lag 2949113
         pg.public.orders/1: committed 24881020, end 25864688, lag 983668
         pg.public.orders/0: committed 25118402, end 26101377, lag 982975
@@ -159,26 +159,26 @@ recordings:
       (no long transactions)
   - tool: warehouse_freshness
     input: {table: analytics.orders, ts_column: updated_at}
-    summary: |
+    summary: |-
       newest=2026-10-11T03:38:48Z (stale for 6.0h)
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value, from_version: 1}
-    summary: |
+    summary: |-
       no field changes
   - tool: schema_registry_diff
     input: {subject: pg.public.orders-value}
     error: 'bad tool input: from_version or schema is required'
   - tool: kafka_find_by_key
     input: {topic: pg.public.orders, key: '3301877'}
-    summary: |
+    summary: |-
       not found: no record with key "3301877" since 2026-10-11T02:13:00Z
   - tool: pg_row
     input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '3301877'}
-    summary: |
+    summary: |-
       found: yes, updated_at=2026-10-11T02:14:09.511203Z, columns=[amount, customer_id, id=3301877, status, updated_at=2026-10-11T02:14:09.511203Z]
   - tool: warehouse_row
     input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '3301877'}
-    summary: |
+    summary: |-
       found: yes, loaded_at=2026-10-03T11:52:41.230051Z, updated_at=2026-10-03T11:52:40.004418Z
   - tool: trace_record
     input: {pipeline_id: orders, table: public.orders, key: '3301877'}
@@ -190,11 +190,11 @@ recordings:
       warehouse analytics.orders: not_seen
   - tool: pg_row
     input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '4410023'}
-    summary: |
+    summary: |-
       found: yes, updated_at=2026-10-11T02:31:40.277915Z, columns=[amount, customer_id, id=4410023, status, updated_at=2026-10-11T02:31:40.277915Z]
   - tool: warehouse_row
     input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '4410023'}
-    summary: |
+    summary: |-
       found: yes, loaded_at=2026-09-28T16:07:14.101377Z, updated_at=2026-09-28T16:07:13.640122Z
   - tool: trace_record
     input: {pipeline_id: orders, table: public.orders, key: '4410023'}
@@ -206,11 +206,11 @@ recordings:
       warehouse analytics.orders: not_seen
   - tool: pg_row
     input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5120554'}
-    summary: |
+    summary: |-
       found: yes, updated_at=2026-10-11T02:47:12.903361Z, columns=[amount, customer_id, id=5120554, status, updated_at=2026-10-11T02:47:12.903361Z]
   - tool: warehouse_row
     input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5120554'}
-    summary: |
+    summary: |-
       found: yes, loaded_at=2026-10-07T08:21:56.027413Z, updated_at=2026-10-07T08:21:55.318804Z
   - tool: trace_record
     input: {pipeline_id: orders, table: public.orders, key: '5120554'}
