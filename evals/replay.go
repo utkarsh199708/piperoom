@@ -38,9 +38,10 @@ type Miss struct {
 }
 
 // LiveTools returns the read-only tools the agent gets in production, in
-// production order. Only their names, descriptions and schemas are used: the
-// harness wraps each one and never calls its Run, which is why the clients
-// can be nil here.
+// production order. For tools that read live systems only the names,
+// descriptions and schemas are used: the harness wraps each one and never
+// calls its Run, which is why the clients can be nil here. Pure tools (see
+// runsLive) are the exception and run for real.
 func LiveTools() ([]tools.Tool, error) {
 	reg := tools.NewRegistry()
 	if err := kafkatools.Register(reg, kafkatools.Deps{}); err != nil {
@@ -102,11 +103,21 @@ func newReplayer(recs []Recording) (*replayer, error) {
 	return r, nil
 }
 
-// registry wraps every definition in a replay tool.
+// runsLive reports whether a tool runs for real during an eval instead of
+// from recordings. runbook_lookup reads only text embedded in the binary, so
+// its live answer is the production answer and no scenario has to record it.
+func runsLive(name string) bool { return name == runbooks.ToolName }
+
+// registry wraps every definition in a replay tool, except pure tools, which
+// are registered as they are.
 func (r *replayer) registry(defs []tools.Tool) (*tools.Registry, error) {
 	reg := tools.NewRegistry()
 	for _, d := range defs {
-		if err := reg.Register(&replayTool{def: d, r: r}); err != nil {
+		var t tools.Tool = &replayTool{def: d, r: r}
+		if runsLive(d.Name()) {
+			t = d
+		}
+		if err := reg.Register(t); err != nil {
 			return nil, fmt.Errorf("evals: register replay tool: %w", err)
 		}
 	}
