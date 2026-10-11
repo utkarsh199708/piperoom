@@ -1,0 +1,14 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "database.hostname": "postgres",
+  "database.port": "5432",
+  "database.user": "piperoom",
+  "database.password": "piperoom-dev",
+  "database.dbname": "orders",
+  "topic.prefix": "pg",
+  "plugin.name": "pgoutput",
+  "slot.name": "debezium_orders",
+  "publication.autocreate.mode": "filtered",
+  "table.include.list": "public.orders",
+  "tasks.max": "1"
+}

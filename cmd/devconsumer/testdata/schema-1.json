@@ -1,0 +1,1 @@
+{"subject":"pg.public.orders-key","version":1,"guid":"ee3cd47f-28ac-f4be-68a5-13d1750cc56d","schemaType":"AVRO","schema":"{\"type\":\"record\",\"name\":\"Key\",\"namespace\":\"pg.public.orders\",\"fields\":[{\"name\":\"id\",\"type\":{\"type\":\"long\",\"connect.default\":0},\"default\":0}],\"connect.name\":\"pg.public.orders.Key\"}","ts":1791716101167,"deleted":false}
