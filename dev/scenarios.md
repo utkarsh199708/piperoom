@@ -1,4 +1,4 @@
-# Failure scenarios (observed on the dev stack, 2026-10-11)
+# Failure scenarios (observed on the dev stack, 2026-10-11/12)
 
 Start clean with `go run ./cmd/devctl reset`. Use `devctl status` to watch, and `devctl load --rate 20`
 in a second terminal to create traffic (needed to grow WAL or lag).
@@ -120,3 +120,54 @@ warehouse   fresh (stale 1 s) — new data still flows!
 Nothing looks broken except `restart_lsn` not moving and retained WAL rising. `pg_stat_activity` shows the
 open transaction (`xact_start` minutes ago, state `idle in transaction` or running `pg_sleep`).
 **Fix:** `pg_terminate_backend(pid)`. Retained WAL dropped to 96 kB right away.
+
+---
+
+## 5. `slot-inactive` — stopped connector, WAL piling up
+
+**Break:** `PUT /connectors/pg-orders-connector/stop` (Connect REST `stop`). `pause` is *not* enough:
+a paused connector keeps its replication connection, so the slot stays active (see §2).
+
+**Symptoms** (observed 2026-10-12 with `load --rate 20` running; before the break the status showed
+`slot debezium_orders active=true retained=965 kB`). `devctl break slot-inactive` logs:
+```
+level=INFO msg="broken: connector STOPPED, slot debezium_orders inactive — run `devctl load` to grow retained WAL further" retained_before_bytes=1089824 retained_after_bytes=1129008
+```
+(the two byte counts are its own proof: one 100-row INSERT while stopped; the base is larger than the
+965 kB above because `load` kept writing in between). After ~40 s of load:
+```
+connector   pg-orders-connector: STOPPED, tasks                 ← stopped connector has no tasks
+slot        debezium_orders active=false retained=1332 kB      ← slot INACTIVE; grows with every commit
+consumer    order-sync: state Stable, members 1, total lag 0   ← Kafka side healthy: problem is upstream
+warehouse   analytics.orders: 648 rows, newest updated_at …, stale 59 s
+```
+`pg_stat_replication` is empty: nothing confirms WAL, `restart_lsn` stops moving, and retained
+(`pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)`) grows with the load.
+
+**Fix (`devctl fix slot-inactive`):** `PUT …/resume`. Debezium keeps the slot and its offsets
+(no re-snapshot) and replays the retained WAL: slot back `active=true`, retained fell 1332 kB → 804 kB
+right after resume and order-sync lag drained to 0; the warehouse caught up (648 → 1725 rows, stale 1 s).
+No data loss.
+
+---
+
+## 6. `consumer-lag` — stopped consumer, lag grows
+
+**Break:** `docker compose stop devconsumer` (the `order-sync` group leaves; `docker ps` shows
+`piperoom-dev-devconsumer-1 Exited (0)`), while `load --rate 20` keeps writing. Before the break:
+`consumer order-sync: state Stable, members 1, total lag 0` and a fresh warehouse.
+
+**Symptoms** (observed 2026-10-12). `devctl break consumer-lag` logs
+`total_lag=204` from its own 50-row proof INSERT; after ~45 s of load:
+```
+connector   pg-orders-connector: RUNNING, tasks 0=RUNNING   ← upstream healthy (unlike §2/§5)
+slot        debezium_orders active=true retained=417 kB
+consumer    order-sync: state Empty, members 0, total lag 1471  ← grows with load
+warehouse   analytics.orders: 3495 rows, newest updated_at …, stale 78 s  ← nothing consumes
+```
+
+**Fix (`devctl fix consumer-lag`):** `docker compose start devconsumer`. It rejoins the group,
+lag 1471 → 0, warehouse catches up (3495 → 5295 rows, stale 0 s).
+Do **not** use `docker compose up -d devconsumer` here: `up` recreates any container that does not
+match the compose file (we hit this once — it recreated Postgres and killed the running `devctl load`).
+`compose start` only starts the stopped container.
