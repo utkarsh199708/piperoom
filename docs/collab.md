@@ -62,6 +62,10 @@ thread** of your message:
 - Both leads save full reviews in the **main folder**: `C:\Users\Utkarsh\Desktop\interview\piperoom\reviews\`.
 - **Every verdict, answer and merge notice @mentions Qoder (`<@U0C8GM1SUVA>`).** Qoder only acts on
   messages that mention it — a verdict without the mention is never seen (lost ~2 h on 2026-10-11).
+  Post it as a **top-level** channel message whose first characters are the mention, then your tag:
+  `<@U0C8GM1SUVA> [LEAD-REVIEW] [REVIEW A5] CHANGES REQUESTED …`. Thread replies, or a mention in the middle of
+  the line, are missed (two verdicts lost ~25 min the same evening). A short pointer in the PR thread is fine
+  in addition.
 - `[LEAD-ARCH] → merged to main @ <sha>` — only after both approvals. Rebase your other branches on `main`.
 - `[LEAD-ARCH] ANSWER` — answer to a QUESTION or BLOCKED.
 - `[LEAD-ARCH] CONTRACT UPDATE` — a contract file changed on `main`; every agent rebases.
