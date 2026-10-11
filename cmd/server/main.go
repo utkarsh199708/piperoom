@@ -1,20 +1,24 @@
 // Command server runs the Piperoom room service. With --demo it uses a
 // scripted fake agent (and fake topology/actions) so the UI can be built
-// against it with no stack; without --demo it opens the real stack clients
-// (source Postgres, warehouse, Connect, Schema Registry, Kafka) via openStack,
-// registers the real tools/actions and runs the real agent (agent.Run).
+// against it with no stack; without --demo it applies the migrations, opens
+// the real stack clients via wiring.Open, registers the real tools/actions
+// and runs the real agent (agent.Run).
 package main
 
 import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
@@ -27,9 +31,20 @@ import (
 	"piperoom/internal/store/memstore"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
+	"piperoom/internal/wiring"
+	"piperoom/migrations"
 )
 
 func main() {
+	if err := run(); err != nil {
+		slog.Error("server: failed", "err", err)
+		os.Exit(1)
+	}
+}
+
+// run is main's body so every cleanup defer runs on every exit path,
+// including the listen-error path.
+func run() error {
 	demoMode := flag.Bool("demo", false, "run a scripted fake agent (no real tools/agent)")
 	flag.Parse()
 
@@ -48,20 +63,21 @@ func main() {
 
 	// --demo is fully self-contained (in-memory store + scripted agent) so A6
 	// can build the UI against it with no database or migrations. The real
-	// mode uses Postgres and requires the migrations applied via goose.
+	// mode uses Postgres: migrations first (goose on migrations.FS), then the
+	// store.
 	var st store.Store
-	var closeStore func()
 	if *demoMode {
 		st = memstore.New()
 	} else {
+		if err := migrateRoomDB(ctx, cfg.RoomDBURL, log); err != nil {
+			return err
+		}
 		pg, err := store.New(ctx, cfg.RoomDBURL, log)
 		if err != nil {
-			log.Error("server: cannot connect to room store", "err", err)
-			os.Exit(1)
+			return fmt.Errorf("server: connect room store: %w", err)
 		}
 		st = pg
-		closeStore = pg.Close
-		defer closeStore()
+		defer pg.Close()
 	}
 
 	var (
@@ -78,16 +94,17 @@ func main() {
 		run = demo.Run
 		write = demo.WriteHandoff
 	} else {
-		stack, err := openStack(ctx, cfg)
+		w, err := wiring.Open(ctx, cfg)
 		if err != nil {
-			log.Error("server: cannot open the data stack", "err", err)
-			os.Exit(1)
+			return fmt.Errorf("server: open the data stack: %w", err)
 		}
-		defer stack.Close()
-		acts = stack.Actions
-		toolsReg = stack.Tools
-		topo = stack.Builder
-		ownersCfg = stack.Owners
+		defer w.Close()
+		acts = actions.NewRegistry()
+		if err := wiring.RegisterTools(toolsReg, acts, w); err != nil {
+			return fmt.Errorf("server: register tools and actions: %w", err)
+		}
+		topo = w.Builder
+		ownersCfg = w.Owners
 	}
 
 	svc := room.New(room.Deps{
@@ -120,7 +137,12 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	// done closes only after Shutdown AND handler.Close (WS connections, the
+	// room service and every goroutine it owns) have returned, so main can
+	// wait for them before its defers close the store and the stack.
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -135,8 +157,38 @@ func main() {
 		mode = "demo"
 	}
 	log.Info("server: listening", "addr", cfg.HTTPAddr, "mode", mode)
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Error("server: failed", "err", err)
-		os.Exit(1)
+	serveErr := server.ListenAndServe()
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		// There was no signal; trigger the same shutdown path, then report.
+		log.Error("server: listen failed", "err", serveErr)
+		stop()
 	}
+	<-done
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		return fmt.Errorf("server: listen: %w", serveErr)
+	}
+	return nil
+}
+
+// migrateRoomDB applies the embedded goose migrations before the store opens,
+// so a fresh database works with no manual `goose up`.
+func migrateRoomDB(ctx context.Context, dbURL string, log *slog.Logger) error {
+	cc, err := pgx.ParseConfig(dbURL)
+	if err != nil {
+		return fmt.Errorf("server: parse db url: %w", err)
+	}
+	db := stdlib.OpenDB(*cc)
+	defer db.Close()
+
+	mctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if err := db.PingContext(mctx); err != nil {
+		return fmt.Errorf("server: ping for migrations: %w", err)
+	}
+	n, err := migrations.Up(mctx, db)
+	if err != nil {
+		return err
+	}
+	log.Info("server: migrations applied", "count", n)
+	return nil
 }
