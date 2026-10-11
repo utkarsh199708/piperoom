@@ -139,7 +139,7 @@ func (b *builder) collectTopics(ctx context.Context, topics []string, c *collect
 // sourceHealth decides a source table's health from its replication slot.
 func sourceHealth(slot clients.ReplicationSlot, t Thresholds) (Health, map[string]string) {
 	facts := map[string]string{
-		"slot_retained": humanBytes(slot.RetainedWALBytes),
+		"slot_retained": HumanBytes(slot.RetainedWALBytes),
 		"slot_active":   strconv.FormatBool(slot.Active),
 	}
 	if !slot.Active || slot.RetainedWALBytes > t.SlotRetainedWarnBytes {
@@ -153,10 +153,14 @@ func connectorHealth(s clients.ConnectorStatus) (Health, map[string]string) {
 	facts := map[string]string{}
 	failed := s.State == "FAILED"
 	failedTasks := 0
+	pausedTasks := 0
 	for _, task := range s.Tasks {
-		if task.State == "FAILED" {
+		switch task.State {
+		case "FAILED":
 			failed = true
 			failedTasks++
+		case "PAUSED", "UNASSIGNED", "STOPPED":
+			pausedTasks++
 		}
 	}
 	if failed {
@@ -169,6 +173,10 @@ func connectorHealth(s clients.ConnectorStatus) (Health, map[string]string) {
 	switch s.State {
 	case "PAUSED", "UNASSIGNED", "STOPPED":
 		facts["state"] = s.State
+		return HealthWarn, facts
+	}
+	if pausedTasks > 0 {
+		facts["tasks_paused"] = strconv.Itoa(pausedTasks)
 		return HealthWarn, facts
 	}
 	return HealthOK, facts
@@ -194,7 +202,7 @@ func topicHealth(err error, newest, now time.Time) (Health, map[string]string) {
 	if newest.IsZero() {
 		return HealthOK, map[string]string{"newest_record": "never"}
 	}
-	return HealthOK, map[string]string{"newest_record": humanAge(now.Sub(newest)) + " ago"}
+	return HealthOK, map[string]string{"newest_record": HumanAge(now.Sub(newest)) + " ago"}
 }
 
 // sinkHealth decides a sink table's health from its newest row timestamp.
@@ -203,7 +211,7 @@ func sinkHealth(ts, now time.Time, t Thresholds) (Health, map[string]string) {
 		return HealthWarn, map[string]string{"stale_for": "never"}
 	}
 	stale := now.Sub(ts)
-	facts := map[string]string{"stale_for": humanAge(stale)}
+	facts := map[string]string{"stale_for": HumanAge(stale)}
 	switch {
 	case stale > t.SinkStaleFail:
 		return HealthFail, facts
@@ -214,8 +222,8 @@ func sinkHealth(ts, now time.Time, t Thresholds) (Health, map[string]string) {
 	}
 }
 
-// humanBytes renders a byte count in binary units.
-func humanBytes(n int64) string {
+// HumanBytes renders a byte count in binary units.
+func HumanBytes(n int64) string {
 	if n < 1024 {
 		return fmt.Sprintf("%d B", n)
 	}
@@ -233,8 +241,8 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), suffixes[exp])
 }
 
-// humanAge renders a duration compactly, clamped to zero.
-func humanAge(d time.Duration) string {
+// HumanAge renders a duration compactly, clamped to zero.
+func HumanAge(d time.Duration) string {
 	if d < 0 {
 		d = 0
 	}

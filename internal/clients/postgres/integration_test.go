@@ -4,11 +4,13 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"piperoom/internal/testenv"
 )
@@ -133,6 +135,90 @@ func TestRowIntegration(t *testing.T) {
 	}
 	if _, err := time.Parse(time.RFC3339Nano, ts); err != nil {
 		t.Fatalf("ts %q not RFC 3339: %v", ts, err)
+	}
+}
+
+func TestRowAfterAlterIntegration(t *testing.T) {
+	db := sourceDB(t)
+	conn := writeConn(t, testenv.Require(t).SourceDBURL)
+
+	table := testenv.Name("alter")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS public."+table)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := conn.Exec(ctx, "CREATE TABLE public."+table+" (id bigint primary key, amount numeric(10,2))"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := conn.Exec(ctx, "INSERT INTO public."+table+" (id, amount) VALUES ($1, $2)", 1, 50); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// Prime the SELECT * statement on the pooled connection.
+	row, found, err := db.Row(context.Background(), "public."+table, "id", "1")
+	if err != nil {
+		t.Fatalf("first Row: %v", err)
+	}
+	if !found || row["amount"] != "50.00" {
+		t.Fatalf("first Row = %v (found=%v)", row, found)
+	}
+
+	// A schema change must not break the next Row on the cached statement.
+	if _, err := conn.Exec(ctx, "ALTER TABLE public."+table+" ALTER COLUMN amount TYPE numeric(12,2)"); err != nil {
+		t.Fatalf("alter: %v", err)
+	}
+	if _, found, err = db.Row(context.Background(), "public."+table, "id", "1"); err != nil {
+		t.Fatalf("Row after ALTER failed: %v", err)
+	}
+	if !found {
+		t.Fatal("row not found after ALTER")
+	}
+}
+
+func TestReadOnlyPoolIntegration(t *testing.T) {
+	db := sourceDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := db.pool.Exec(ctx, "CREATE TABLE public.should_not_exist (id int)")
+	if err == nil {
+		t.Fatal("write on the read-only pool should fail")
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("error is not a PgError: %v", err)
+	}
+	if pgErr.Code != "25006" {
+		t.Fatalf("SQLSTATE = %s, want 25006 (read_only_sql_transaction)", pgErr.Code)
+	}
+}
+
+func TestRowNonNumericKeyIntegration(t *testing.T) {
+	db := sourceDB(t)
+	conn := writeConn(t, testenv.Require(t).SourceDBURL)
+
+	table := testenv.Name("key")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS public."+table)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := conn.Exec(ctx, "CREATE TABLE public."+table+" (id bigint primary key, n int)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := conn.Exec(ctx, "INSERT INTO public."+table+" (id, n) VALUES ($1, $2)", 1, 5); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	_, _, err := db.Row(context.Background(), "public."+table, "id", "not-a-number")
+	if err == nil {
+		t.Fatal("expected an error for a non-numeric key on a bigint column")
 	}
 }
 

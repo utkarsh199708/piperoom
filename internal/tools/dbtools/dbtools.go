@@ -5,11 +5,13 @@ package dbtools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/tools"
@@ -80,6 +82,15 @@ func intProp(desc string) map[string]any {
 	return map[string]any{"type": "integer", "description": desc}
 }
 
+// wrapErr maps a topology bad-input sentinel onto tools.ErrBadInput so the
+// agent reports it as an input problem, not a target-system failure.
+func wrapErr(toolName string, err error) error {
+	if errors.Is(err, topology.ErrBadInput) {
+		return fmt.Errorf("%w: %v", tools.ErrBadInput, err)
+	}
+	return fmt.Errorf("dbtools: %s: %w", toolName, err)
+}
+
 // decode unmarshals tool input, reporting bad input with tools.ErrBadInput.
 func decode(input json.RawMessage, v any) error {
 	if len(input) == 0 {
@@ -109,52 +120,18 @@ func parseRFC3339(s string) (time.Time, error) {
 	return t, nil
 }
 
-// toolCtx guarantees the caller's ctx has a deadline.
+// toolCtx caps the caller's ctx at 10 s even when the parent already has a
+// deadline: context.WithTimeout keeps the earlier of the two.
 func toolCtx(ctx context.Context) (context.Context, context.CancelFunc) {
-	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
-	}
 	return context.WithTimeout(ctx, 10*time.Second)
 }
 
-func humanBytes(n int64) string {
-	if n < 1024 {
-		return fmt.Sprintf("%d B", n)
-	}
-	const unit = 1024
-	div := int64(unit)
-	exp := 0
-	for m := n / unit; m >= unit; m /= unit {
-		div *= unit
-		exp++
-	}
-	suffixes := []string{"KiB", "MiB", "GiB", "TiB", "PiB"}
-	if exp >= len(suffixes) {
-		exp = len(suffixes) - 1
-	}
-	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), suffixes[exp])
-}
-
-func humanAge(d time.Duration) string {
-	if d < 0 {
-		d = 0
-	}
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	default:
-		return fmt.Sprintf("%.1fh", d.Hours())
-	}
-}
-
-// cutShort truncates s to at most n runes.
+// cutShort truncates s to at most n runes, never splitting a UTF-8 sequence.
 func cutShort(s string, n int) string {
-	if len(s) <= n {
+	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string([]rune(s)[:n]) + "…"
 }
 
 func isTimestampColumn(name string) bool {
@@ -168,11 +145,4 @@ func sortedKeys(m map[string]any) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-func formatTS(t time.Time) string {
-	if t.IsZero() {
-		return ""
-	}
-	return t.UTC().Format(time.RFC3339Nano)
 }

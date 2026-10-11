@@ -2,6 +2,7 @@ package topology
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -10,6 +11,11 @@ import (
 	"piperoom/internal/clients"
 	"piperoom/internal/owners"
 )
+
+// ErrBadInput marks a request whose pipeline id or table is not known to the
+// owners config. Tools wrap it in tools.ErrBadInput so the agent reports it as
+// an input problem, not a target-system failure.
+var ErrBadInput = errors.New("topology: bad input")
 
 // Thresholds holds the boundaries used to decide node health.
 type Thresholds struct {
@@ -56,7 +62,7 @@ func NewBuilder(o *owners.Owners, connect clients.ConnectClient, kafka clients.K
 func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	p, ok := b.o.Pipeline(pipelineID)
 	if !ok {
-		return Graph{}, fmt.Errorf("topology: pipeline %q not found", pipelineID)
+		return Graph{}, fmt.Errorf("%w: pipeline %q not found", ErrBadInput, pipelineID)
 	}
 
 	cctx, cancel := context.WithTimeout(ctx, b.t.HealthBudget)
@@ -72,24 +78,46 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 
 	var topics []string
 	connTopics := map[string][]string{}
+	placeholder := map[string]bool{}
 	for _, cn := range p.Connectors {
 		g.Nodes = append(g.Nodes, b.connectorNode(p, cn, info))
 		var ts []string
+		isFallback := false
 		if snap, ok := info.connect[cn]; ok && snap.err == nil {
 			ts = deriveTopics(snap.config["topic.prefix"], snap.config["table.include.list"], p.SourceTables)
+		} else {
+			// Connect unreachable: keep the graph shape with placeholder
+			// topics so the topic node and its edges still exist.
+			ts = fallbackTopics(p.SourceTables)
+			isFallback = true
 		}
 		connTopics[cn] = ts
 		for _, t := range ts {
 			if !slices.Contains(topics, t) {
 				topics = append(topics, t)
 			}
+			if isFallback {
+				placeholder[t] = true
+			}
 		}
 	}
 
-	b.collectTopics(cctx, topics, info)
+	// Only query Kafka for topics we actually derived; placeholder topics have
+	// unknown health because their real names are unavailable.
+	var realTopics []string
+	for _, t := range topics {
+		if !placeholder[t] {
+			realTopics = append(realTopics, t)
+		}
+	}
+	b.collectTopics(cctx, realTopics, info)
 
 	for _, t := range topics {
-		g.Nodes = append(g.Nodes, b.topicNode(p, t, info))
+		if placeholder[t] {
+			g.Nodes = append(g.Nodes, b.placeholderTopicNode(p, t))
+		} else {
+			g.Nodes = append(g.Nodes, b.topicNode(p, t, info))
+		}
 	}
 	for _, gr := range p.ConsumerGroups {
 		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info))
@@ -192,6 +220,11 @@ func (b *builder) connectorNode(p owners.Pipeline, cn string, info *collected) N
 	}
 	snap := info.connect[cn]
 	if snap.err != nil {
+		if errors.Is(snap.err, clients.ErrNotFound) {
+			n.Health = HealthFail
+			n.Facts = map[string]string{"missing": "true"}
+			return n
+		}
 		n.Facts = map[string]string{"error": "unreachable"}
 		return n
 	}
@@ -209,6 +242,21 @@ func (b *builder) topicNode(p owners.Pipeline, topic string, info *collected) No
 		Health: HealthUnknown,
 	}
 	n.Health, n.Facts = topicHealth(info.topicErr[topic], info.topicNewest[topic], info.now)
+	return n
+}
+
+// placeholderTopicNode is used when connector config is unavailable: the topic
+// node exists to keep the graph shape but its real name and health are unknown.
+func (b *builder) placeholderTopicNode(p owners.Pipeline, topic string) Node {
+	n := Node{
+		ID:     "topic:" + topic,
+		Kind:   KindTopic,
+		Name:   topic,
+		Layer:  "kafka",
+		Owner:  b.layerOwner("kafka"),
+		Health: HealthUnknown,
+		Facts:  map[string]string{"error": "unreachable"},
+	}
 	return n
 }
 
@@ -255,11 +303,18 @@ func streamsTable(includeList, tbl string) bool {
 	return len(inc) == 0 || slices.Contains(inc, tbl)
 }
 
-func slotNameFor(connector string, cfg map[string]string) string {
+func slotNameFor(_ string, cfg map[string]string) string {
 	if n := cfg["slot.name"]; n != "" {
 		return n
 	}
-	return connector
+	return "debezium"
+}
+
+// fallbackTopics returns placeholder topic names when connector config is
+// unavailable, so the graph keeps its shape. The Debezium topic prefix is
+// unknown, so the fully-qualified table names stand in for the topics.
+func fallbackTopics(tables []string) []string {
+	return append([]string(nil), tables...)
 }
 
 // deriveTopics returns the Debezium topic names for the pipeline tables this

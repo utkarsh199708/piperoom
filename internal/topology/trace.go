@@ -2,6 +2,7 @@ package topology
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -23,36 +24,39 @@ const maxScan = 1000
 
 // traceFacts holds the observations Trace gathers before deciding statuses.
 type traceFacts struct {
-	table           string
-	connector       string
-	topic           string
-	group           string
-	sink            string
-	sourceFound     bool
-	sourceTS        time.Time
-	connectorErr    error
-	connectorState  string
-	connectorFailed bool
-	tasksFailed     int
-	topicErr        error
-	topicFound      bool
-	topicOffset     int64
-	topicPartition  int32
-	groupErr        error
-	groupCommitted  int64 // committed offset for the record's partition; -1 if unknown
-	sinkErr         error
-	sinkFound       bool
-	sinkDiff        []string
+	table          string
+	connector      string
+	topic          string
+	group          string
+	sink           string
+	sourceErr      error
+	sourceFound    bool
+	sourceTS       time.Time
+	connectorErr   error
+	connectorState string
+	connectorStuck bool // connector or any task is not RUNNING
+	tasksFailed    int
+	topicErr       error
+	topicFound     bool
+	topicOffset    int64
+	topicPartition int32
+	groupErr       error
+	groupCommitted int64 // committed offset for the record's partition; -1 if unknown
+	sinkErr        error
+	sinkFound      bool
+	sinkDiff       []string
 }
 
 // Trace follows one source row by primary key through every pipeline stage.
+// Unreachable systems produce "unknown" stages, never an error for the whole
+// trace.
 func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]events.TraceStage, error) {
 	p, ok := b.o.Pipeline(pipelineID)
 	if !ok {
-		return nil, fmt.Errorf("topology: pipeline %q not found", pipelineID)
+		return nil, fmt.Errorf("%w: pipeline %q not found", ErrBadInput, pipelineID)
 	}
 	if key == "" {
-		return nil, fmt.Errorf("topology: trace: empty key")
+		return nil, fmt.Errorf("%w: trace: empty key", ErrBadInput)
 	}
 	if len(p.ConsumerGroups) == 0 || len(p.SinkTables) == 0 {
 		return nil, fmt.Errorf("topology: pipeline %q has no consumer group or sink table", pipelineID)
@@ -65,37 +69,51 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 		groupCommitted: -1,
 	}
 
-	conn, topic, err := b.connectorForTable(ctx, p, table)
-	if err != nil {
-		return nil, err
+	// Resolve the connector and topic. A Connect outage must not fail the
+	// trace: fall back to placeholder names and mark the connector unknown.
+	conn, topic, cerr := b.connectorForTable(ctx, p, table)
+	if cerr != nil {
+		if errors.Is(cerr, ErrBadInput) {
+			return nil, cerr
+		}
+		conn = p.Connectors[0]
+		topic = fallbackTopic(table)
+		f.connectorErr = cerr
 	}
 	f.connector, f.topic = conn, topic
 
+	// Primary key lookup. A failure here means the source DB is unreachable;
+	// fall back to "id" and let the source row read report the problem.
 	pk, err := b.pkColumn(ctx, table)
 	if err != nil {
-		return nil, err
+		pk = "id"
 	}
 
 	// 1. Source row.
 	srcRow, found, err := b.src.Row(ctx, table, pk, key)
 	if err != nil {
-		return nil, fmt.Errorf("topology: trace source row: %w", err)
-	}
-	f.sourceFound = found
-	if found {
-		f.sourceTS = tsFromRow(srcRow)
+		f.sourceErr = err
+	} else {
+		f.sourceFound = found
+		if found {
+			f.sourceTS = tsFromRow(srcRow)
+		}
 	}
 
-	// 2. Connector status.
-	st, err := b.connect.Status(ctx, conn)
-	f.connectorErr = err
-	if err == nil {
-		f.connectorState = st.State
-		f.connectorFailed = st.State == "FAILED"
-		for _, task := range st.Tasks {
-			if task.State == "FAILED" {
-				f.connectorFailed = true
-				f.tasksFailed++
+	// 2. Connector status (skip when Connect is already known unreachable).
+	if f.connectorErr == nil {
+		st, err := b.connect.Status(ctx, conn)
+		f.connectorErr = err
+		if err == nil {
+			f.connectorState = st.State
+			f.connectorStuck = st.State != "RUNNING"
+			for _, task := range st.Tasks {
+				if task.State == "FAILED" {
+					f.tasksFailed++
+				}
+				if task.State != "RUNNING" {
+					f.connectorStuck = true
+				}
 			}
 		}
 	}
@@ -157,7 +175,14 @@ func (b *builder) connectorForTable(ctx context.Context, p owners.Pipeline, tabl
 	if lastErr != nil {
 		return "", "", fmt.Errorf("topology: connector config: %w", lastErr)
 	}
-	return "", "", fmt.Errorf("topology: no connector streams table %q in pipeline %q", table, p.ID)
+	return "", "", fmt.Errorf("%w: no connector streams table %q in pipeline %q", ErrBadInput, table, p.ID)
+}
+
+// fallbackTopic is used when connector config is unavailable, so the trace
+// keeps a topic stage. The Debezium topic prefix is unknown, so the
+// fully-qualified table name stands in for the topic.
+func fallbackTopic(table string) string {
+	return table
 }
 
 func (b *builder) pkColumn(ctx context.Context, table string) (string, error) {
@@ -182,28 +207,42 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	}
 
 	// 1. Source.
-	if !f.sourceFound {
+	if f.sourceErr != nil {
+		stage("postgres", f.table, "unknown", map[string]string{"error": "unreachable"})
+	} else if !f.sourceFound {
 		stage("postgres", f.table, "not_seen", nil)
 		stage("kafka-connect", f.connector, "not_seen", nil)
 		stage("kafka", f.topic, "not_seen", nil)
 		stage("consumer", f.group, "not_seen", nil)
 		stage("warehouse", f.sink, "not_seen", nil)
 		return stages
+	} else {
+		srcFacts := map[string]string{}
+		if !f.sourceTS.IsZero() {
+			srcFacts["updated_at"] = FormatTS(f.sourceTS)
+		}
+		stage("postgres", f.table, "seen", srcFacts)
 	}
-	srcFacts := map[string]string{}
-	if !f.sourceTS.IsZero() {
-		srcFacts["updated_at"] = formatTS(f.sourceTS)
-	}
-	stage("postgres", f.table, "seen", srcFacts)
 
-	// 2. Connector.
-	connStatus := "seen"
+	// 2. Connector. It is "seen" only when the record actually reached the
+	// topic; a non-RUNNING connector/task while the record is missing from
+	// the topic is the stuck point.
+	connStatus := "not_seen"
 	connFacts := map[string]string{}
-	if f.connectorErr != nil {
+	switch {
+	case f.connectorErr != nil:
 		connStatus = "unknown"
-	} else if f.connectorFailed {
-		connFacts["state"] = f.connectorState
-		connFacts["tasks_failed"] = strconv.Itoa(f.tasksFailed)
+		connFacts["error"] = "unreachable"
+	case f.topicFound:
+		connStatus = "seen"
+	case f.sourceFound && f.topicErr == nil && f.connectorStuck:
+		connStatus = "stopped_here"
+		if f.connectorState != "" && f.connectorState != "RUNNING" {
+			connFacts["state"] = f.connectorState
+		}
+		if f.tasksFailed > 0 {
+			connFacts["tasks_failed"] = strconv.Itoa(f.tasksFailed)
+		}
 	}
 	stage("kafka-connect", f.connector, connStatus, connFacts)
 
@@ -212,6 +251,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	topicFacts := map[string]string{}
 	if f.topicErr != nil {
 		topicStatus = "unknown"
+		topicFacts["error"] = "unreachable"
 	} else if f.topicFound {
 		topicStatus = "seen"
 		topicFacts["offset"] = strconv.FormatInt(f.topicOffset, 10)
@@ -225,6 +265,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	groupFacts := map[string]string{}
 	if f.groupErr != nil {
 		groupStatus = "unknown"
+		groupFacts["error"] = "unreachable"
 	} else if f.topicFound {
 		if f.groupCommitted >= 0 {
 			groupFacts["committed"] = strconv.FormatInt(f.groupCommitted, 10)
@@ -240,6 +281,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	sinkFacts := map[string]string{}
 	if f.sinkErr != nil {
 		sinkStatus = "unknown"
+		sinkFacts["error"] = "unreachable"
 	} else if consumed && f.sinkFound {
 		sinkStatus = "seen"
 		if len(f.sinkDiff) > 0 {
@@ -248,10 +290,8 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	}
 	stage("warehouse", f.sink, sinkStatus, sinkFacts)
 
-	// Decide the single stuck point.
+	// Decide the single stuck point downstream of the connector.
 	switch {
-	case f.connectorFailed && f.connectorErr == nil && !f.topicFound:
-		stages[1].Status = "stopped_here"
 	case f.topicFound && f.groupErr == nil && !consumed:
 		stages[3].Status = "stopped_here"
 	case f.topicFound && f.groupErr == nil && consumed && !f.sinkFound && f.sinkErr == nil:
@@ -305,7 +345,8 @@ func canonical(v any) string {
 	return s
 }
 
-func formatTS(t time.Time) string {
+// FormatTS renders a timestamp as RFC 3339, or "" for the zero time.
+func FormatTS(t time.Time) string {
 	if t.IsZero() {
 		return ""
 	}

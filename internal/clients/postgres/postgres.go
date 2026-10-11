@@ -5,17 +5,15 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"math/big"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/pgconv"
 )
 
 // DB is a read-only connection pool to the source Postgres.
@@ -31,13 +29,16 @@ func New(ctx context.Context, url string) (*DB, error) {
 	}
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		_, err := conn.Exec(ctx, "SET default_transaction_read_only = on")
-		return err
+		if err != nil {
+			return fmt.Errorf("postgres: set read-only: %w", err)
+		}
+		return nil
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: connect: %w", err)
 	}
-	pctx, cancel := withDeadline(ctx, 10*time.Second)
+	pctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 	if err := pool.Ping(pctx); err != nil {
 		pool.Close()
@@ -55,7 +56,7 @@ func (d *DB) Close() {
 
 // ReplicationSlots lists logical replication slots with the retained WAL size.
 func (d *DB) ReplicationSlots(ctx context.Context) ([]clients.ReplicationSlot, error) {
-	ctx, cancel := withDeadline(ctx, 10*time.Second)
+	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
 	rows, err := d.pool.Query(ctx, `
@@ -88,7 +89,21 @@ func (d *DB) ReplicationSlots(ctx context.Context) ([]clients.ReplicationSlot, e
 // RecentDDL returns DDL audit rows newer than since, newest first. If the
 // audit table is missing it reports that the trigger is not installed.
 func (d *DB) RecentDDL(ctx context.Context, since time.Time, limit int) ([]clients.DDLChange, error) {
-	ctx, cancel := withDeadline(ctx, 10*time.Second)
+	return d.recentDDL(ctx, since, "", limit)
+}
+
+// RecentDDLTable returns DDL audit rows for one table ("schema.table") newer
+// than since, newest first. The table filter is applied in SQL as an exact
+// object_identity match so rows older than limit are not missed.
+func (d *DB) RecentDDLTable(ctx context.Context, since time.Time, table string, limit int) ([]clients.DDLChange, error) {
+	if _, _, err := splitTable(table); err != nil {
+		return nil, err
+	}
+	return d.recentDDL(ctx, since, table, limit)
+}
+
+func (d *DB) recentDDL(ctx context.Context, since time.Time, table string, limit int) ([]clients.DDLChange, error) {
+	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
 	if limit <= 0 || limit > 1000 {
@@ -103,16 +118,21 @@ func (d *DB) RecentDDL(ctx context.Context, since time.Time, limit int) ([]clien
 		return nil, fmt.Errorf("postgres: DDL audit trigger is not installed: table piperoom_audit.ddl_log does not exist")
 	}
 
-	rows, err := d.pool.Query(ctx, `
+	const cols = `
 		SELECT at,
 		       COALESCE(command_tag, ''),
 		       COALESCE(object_identity, ''),
 		       COALESCE(query, ''),
 		       COALESCE(username, '')
 		FROM piperoom_audit.ddl_log
-		WHERE at >= $1
-		ORDER BY at DESC
-		LIMIT $2`, since, limit)
+		WHERE at >= $1`
+	var rows pgx.Rows
+	var err error
+	if table == "" {
+		rows, err = d.pool.Query(ctx, cols+` ORDER BY at DESC LIMIT $2`, since, limit)
+	} else {
+		rows, err = d.pool.Query(ctx, cols+` AND object_identity = $2 ORDER BY at DESC LIMIT $3`, since, table, limit)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("postgres: read ddl log: %w", err)
 	}
@@ -135,7 +155,7 @@ func (d *DB) RecentDDL(ctx context.Context, since time.Time, limit int) ([]clien
 // LongTransactions lists transactions open longer than olderThan, excluding
 // this backend.
 func (d *DB) LongTransactions(ctx context.Context, olderThan time.Duration) ([]clients.Transaction, error) {
-	ctx, cancel := withDeadline(ctx, 10*time.Second)
+	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
 	rows, err := d.pool.Query(ctx, `
@@ -174,14 +194,16 @@ func (d *DB) LongTransactions(ctx context.Context, olderThan time.Duration) ([]c
 // converted to JSON-friendly types: numbers become strings, times become RFC
 // 3339 strings.
 func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]any, bool, error) {
-	ctx, cancel := withDeadline(ctx, 10*time.Second)
+	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
 	q, err := rowQuery(table, pkColumn)
 	if err != nil {
 		return nil, false, err
 	}
-	rows, err := d.pool.Query(ctx, q, pk)
+	// DescribeExec re-describes the statement on every call, so a concurrent
+	// schema change (ALTER COLUMN ... TYPE) cannot break a cached plan.
+	rows, err := d.pool.Query(ctx, q, pgx.QueryExecModeDescribeExec, pk)
 	if err != nil {
 		return nil, false, fmt.Errorf("postgres: query row: %w", err)
 	}
@@ -201,7 +223,7 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 	m := make(map[string]any, len(cols))
 	for i, fd := range cols {
 		if i < len(vals) {
-			m[fd.Name] = toJSON(vals[i])
+			m[fd.Name] = pgconv.ToJSON(vals[i])
 		}
 	}
 	return m, true, nil
@@ -211,7 +233,7 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 // optional capability used by the record trace to look up rows without the
 // caller knowing the key column name ahead of time.
 func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error) {
-	ctx, cancel := withDeadline(ctx, 10*time.Second)
+	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
 	schema, tbl, err := splitTable(table)
@@ -274,103 +296,6 @@ func validateIdent(name string) (string, error) {
 		return "", fmt.Errorf("postgres: invalid identifier %q", name)
 	}
 	return name, nil
-}
-
-// toJSON converts a decoded pgx value into a JSON-friendly one.
-func toJSON(v any) any {
-	switch t := v.(type) {
-	case nil:
-		return nil
-	case time.Time:
-		return t.UTC().Format(time.RFC3339Nano)
-	case int64:
-		return strconv.FormatInt(t, 10)
-	case int32:
-		return strconv.FormatInt(int64(t), 10)
-	case int16:
-		return strconv.FormatInt(int64(t), 10)
-	case int8:
-		return strconv.FormatInt(int64(t), 10)
-	case int:
-		return strconv.Itoa(t)
-	case uint64:
-		return strconv.FormatUint(t, 10)
-	case uint32:
-		return strconv.FormatUint(uint64(t), 10)
-	case uint16:
-		return strconv.FormatUint(uint64(t), 10)
-	case uint8:
-		return strconv.FormatUint(uint64(t), 10)
-	case uint:
-		return strconv.FormatUint(uint64(t), 10)
-	case float64:
-		return strconv.FormatFloat(t, 'f', -1, 64)
-	case float32:
-		return strconv.FormatFloat(float64(t), 'f', -1, 32)
-	case pgtype.Numeric:
-		return numericString(t)
-	case []byte:
-		return string(t)
-	case string:
-		return t
-	case bool:
-		return t
-	default:
-		return fmt.Sprintf("%v", t)
-	}
-}
-
-// numericString renders a PostgreSQL numeric without float rounding.
-func numericString(n pgtype.Numeric) string {
-	if !n.Valid {
-		return ""
-	}
-	if n.NaN {
-		return "NaN"
-	}
-	switch n.InfinityModifier {
-	case pgtype.Infinity:
-		return "Infinity"
-	case pgtype.NegativeInfinity:
-		return "-Infinity"
-	}
-	if n.Int == nil {
-		return "0"
-	}
-	neg := n.Int.Sign() < 0
-	abs := new(big.Int).Abs(n.Int)
-	s := abs.String()
-	if n.Exp > 0 {
-		e := int(n.Exp)
-		if e > 100000 {
-			return s + "e+" + strconv.Itoa(e)
-		}
-		s += strings.Repeat("0", e)
-	} else if n.Exp < 0 {
-		e := -int(n.Exp)
-		if e > 100000 {
-			return s + "e" + strconv.Itoa(int(n.Exp))
-		}
-		point := len(s) - e
-		if point <= 0 {
-			s = "0." + strings.Repeat("0", -point) + s
-		} else {
-			s = s[:point] + "." + s[point:]
-		}
-	}
-	if neg {
-		s = "-" + s
-	}
-	return s
-}
-
-// withDeadline returns ctx unchanged when it already has a deadline, and
-// otherwise applies a default timeout.
-func withDeadline(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
-	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, d)
 }
 
 var _ = clients.SourceDB((*DB)(nil))

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/events"
@@ -184,5 +185,107 @@ func TestTraceSummaryNamesStoppedStage(t *testing.T) {
 	got := renderTraceSummary(stages)
 	if !strings.Contains(got, "stopped at: kafka-connect pg-orders-connector") {
 		t.Fatalf("summary missing stopped stage: %q", got)
+	}
+}
+
+func TestPipelineMapTargetError(t *testing.T) {
+	d := testDeps()
+	d.Builder = &fakeBuilder{buildErr: errors.New("connect: EOF")}
+	reg := tools.NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	tt, _ := reg.Get("pipeline_map")
+	_, err := tt.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders"}`))
+	if err == nil {
+		t.Fatal("expected target error")
+	}
+	if errors.Is(err, tools.ErrBadInput) {
+		t.Fatalf("target-system error must not wrap ErrBadInput: %v", err)
+	}
+}
+
+func TestTraceRecordTargetError(t *testing.T) {
+	d := testDeps()
+	d.Builder = &fakeBuilder{traceErr: errors.New("connect: EOF")}
+	reg := tools.NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	tt, _ := reg.Get("trace_record")
+	_, err := tt.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"public.orders","key":"7"}`))
+	if err == nil {
+		t.Fatal("expected target error")
+	}
+	if errors.Is(err, tools.ErrBadInput) {
+		t.Fatalf("target-system error must not wrap ErrBadInput: %v", err)
+	}
+}
+
+func TestPipelineMapUnknownPipelineBadInput(t *testing.T) {
+	d := testDeps()
+	d.Builder = &fakeBuilder{buildErr: topology.ErrBadInput}
+	reg := tools.NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	tt, _ := reg.Get("pipeline_map")
+	_, err := tt.Run(context.Background(), json.RawMessage(`{"pipeline_id":"nope"}`))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, tools.ErrBadInput) {
+		t.Fatalf("unknown pipeline must wrap ErrBadInput: %v", err)
+	}
+}
+
+type ctxErrBuilder struct{ fakeBuilder }
+
+func (b *ctxErrBuilder) Build(ctx context.Context, _ string) (topology.Graph, error) {
+	return topology.Graph{}, ctx.Err()
+}
+
+func TestPipelineMapCancelledCtx(t *testing.T) {
+	d := testDeps()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.Builder = &ctxErrBuilder{}
+	reg := tools.NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	tt, _ := reg.Get("pipeline_map")
+	_, err := tt.Run(ctx, json.RawMessage(`{"pipeline_id":"orders"}`))
+	if err == nil {
+		t.Fatal("expected context-cancelled error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error %v does not wrap context.Canceled", err)
+	}
+}
+
+func TestToolCtxCapsDeadline(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	ctx, cf := toolCtx(parent)
+	defer cf()
+	dl, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected a deadline")
+	}
+	if d := time.Until(dl); d > 10*time.Second {
+		t.Fatalf("deadline = %v, want <= 10s", d)
+	}
+}
+
+func TestCutShortRuneSafe(t *testing.T) {
+	in := "héllo wörld"
+	got := cutShort(in, 5)
+	if got != "héllo…" {
+		t.Fatalf("cutShort = %q, want %q", got, "héllo…")
+	}
+	// The UTF-8 sequence must not be split mid-rune.
+	if !utf8.ValidString(got) {
+		t.Fatalf("cutShort produced invalid UTF-8: %q", got)
 	}
 }

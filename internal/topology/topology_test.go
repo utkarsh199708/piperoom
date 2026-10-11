@@ -84,6 +84,7 @@ type fakeSource struct {
 	slots     []clients.ReplicationSlot
 	slotsErr  error
 	rows      map[string]map[string]any
+	rowErr    error
 	pk        map[string]string
 	recentDDL []clients.DDLChange
 	recentErr error
@@ -101,6 +102,9 @@ func (f *fakeSource) LongTransactions(context.Context, time.Duration) ([]clients
 	return f.longTxns, f.longErr
 }
 func (f *fakeSource) Row(_ context.Context, table, _, key string) (map[string]any, bool, error) {
+	if f.rowErr != nil {
+		return nil, false, f.rowErr
+	}
 	row, ok := f.rows[table+"|"+key]
 	return row, ok, nil
 }
@@ -186,6 +190,8 @@ func TestConnectorHealth(t *testing.T) {
 		{"failed connector", clients.ConnectorStatus{State: "FAILED"}, HealthFail},
 		{"paused", clients.ConnectorStatus{State: "PAUSED"}, HealthWarn},
 		{"unassigned", clients.ConnectorStatus{State: "UNASSIGNED"}, HealthWarn},
+		{"task paused", clients.ConnectorStatus{State: "RUNNING", Tasks: []clients.TaskStatus{{State: "PAUSED"}}}, HealthWarn},
+		{"task unassigned", clients.ConnectorStatus{State: "RUNNING", Tasks: []clients.TaskStatus{{State: "UNASSIGNED"}}}, HealthWarn},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -355,6 +361,8 @@ func TestBuildUnknownPipeline(t *testing.T) {
 	b := NewBuilder(testOwners(), nil, nil, nil, nil)
 	if _, err := b.Build(context.Background(), "nope"); err == nil {
 		t.Fatal("expected error for unknown pipeline")
+	} else if !errors.Is(err, ErrBadInput) {
+		t.Fatalf("error %v does not wrap ErrBadInput", err)
 	}
 }
 
@@ -371,11 +379,24 @@ func TestBuildUnreachableSystems(t *testing.T) {
 		t.Fatalf("Build must not fail on unreachable systems: %v", err)
 	}
 	// Connector, group, sink are unknown; source is unknown (slot unreachable).
-	// Topic may be absent because config failed.
 	for _, n := range g.Nodes {
 		if n.Kind == KindConnector && n.Health != HealthUnknown {
 			t.Fatalf("connector should be unknown, got %s", n.Health)
 		}
+	}
+	// The graph shape must stay: an unknown-health topic node still exists even
+	// though the connector config was unreachable.
+	found := false
+	for _, n := range g.Nodes {
+		if n.Kind == KindTopic {
+			found = true
+			if n.Health != HealthUnknown {
+				t.Fatalf("placeholder topic health = %s, want unknown", n.Health)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("topic node missing when Connect is unreachable: %+v", g.Nodes)
 	}
 }
 
@@ -410,9 +431,34 @@ func TestDecideTrace(t *testing.T) {
 			name: "connector failed before record",
 			f: func() traceFacts {
 				f := traceFactsOK()
-				f.connectorFailed = true
+				f.connectorStuck = true
 				f.connectorState = "FAILED"
 				f.tasksFailed = 1
+				f.topicFound = false
+				return f
+			}(),
+			wantStatus: []string{"seen", "stopped_here", "not_seen", "not_seen", "not_seen"},
+			stoppedAt:  1,
+		},
+		{
+			name: "task failed connector running",
+			f: func() traceFacts {
+				f := traceFactsOK()
+				f.connectorStuck = true
+				f.connectorState = "RUNNING"
+				f.tasksFailed = 1
+				f.topicFound = false
+				return f
+			}(),
+			wantStatus: []string{"seen", "stopped_here", "not_seen", "not_seen", "not_seen"},
+			stoppedAt:  1,
+		},
+		{
+			name: "connector paused before record",
+			f: func() traceFacts {
+				f := traceFactsOK()
+				f.connectorStuck = true
+				f.connectorState = "PAUSED"
 				f.topicFound = false
 				return f
 			}(),
@@ -522,6 +568,128 @@ func TestTraceSourceMissing(t *testing.T) {
 	for _, s := range stages {
 		if s.Status != "not_seen" {
 			t.Fatalf("stage %s = %s, want not_seen", s.Layer, s.Status)
+		}
+	}
+}
+
+func TestTraceTaskFailedConnectorRunning(t *testing.T) {
+	// The schema-change shape: connector RUNNING, task FAILED, record not in
+	// the topic. The connector must be stopped_here (not "seen").
+	b := NewBuilder(
+		testOwners(),
+		&fakeConnect{
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "FAILED"}}}},
+		},
+		&fakeKafka{},
+		&fakeSource{rows: map[string]map[string]any{"public.orders|7": {"id": "7", "updated_at": time.Now().Format(time.RFC3339Nano)}}},
+		&fakeWarehouse{},
+	)
+	stages, err := b.Trace(context.Background(), "orders", "public.orders", "7")
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+	if stages[1].Status != "stopped_here" {
+		t.Fatalf("connector stage = %s, want stopped_here: %+v", stages[1].Status, stages)
+	}
+}
+
+func TestTraceConnectorPaused(t *testing.T) {
+	// connector-down: connector + task PAUSED, record not in the topic. The
+	// connector must be stopped_here and must NOT be marked seen.
+	b := NewBuilder(
+		testOwners(),
+		&fakeConnect{
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "PAUSED", Tasks: []clients.TaskStatus{{State: "PAUSED"}}}},
+		},
+		&fakeKafka{},
+		&fakeSource{rows: map[string]map[string]any{"public.orders|7": {"id": "7", "updated_at": time.Now().Format(time.RFC3339Nano)}}},
+		&fakeWarehouse{},
+	)
+	stages, err := b.Trace(context.Background(), "orders", "public.orders", "7")
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+	if stages[1].Status != "stopped_here" {
+		t.Fatalf("connector stage = %s, want stopped_here: %+v", stages[1].Status, stages)
+	}
+	if stages[2].Status != "not_seen" {
+		t.Fatalf("topic stage = %s, want not_seen", stages[2].Status)
+	}
+}
+
+func TestTraceConnectUnreachable(t *testing.T) {
+	// Connect down must not fail the trace: every stage is returned, with the
+	// connector and topic unknown.
+	b := NewBuilder(
+		testOwners(),
+		&fakeConnect{configErr: map[string]error{"pg-orders-connector": errors.New("EOF")}},
+		&fakeKafka{},
+		&fakeSource{rows: map[string]map[string]any{"public.orders|7": {"id": "7", "updated_at": time.Now().Format(time.RFC3339Nano)}}},
+		&fakeWarehouse{},
+	)
+	stages, err := b.Trace(context.Background(), "orders", "public.orders", "7")
+	if err != nil {
+		t.Fatalf("Trace must not fail when Connect is unreachable: %v", err)
+	}
+	if len(stages) != 5 {
+		t.Fatalf("stages = %d, want 5", len(stages))
+	}
+	if stages[1].Status != "unknown" {
+		t.Fatalf("connector stage = %s, want unknown: %+v", stages[1].Status, stages)
+	}
+	if stages[1].Facts["error"] == "" {
+		t.Fatalf("connector unknown stage missing error fact: %+v", stages[1])
+	}
+}
+
+func TestTraceSourceReadError(t *testing.T) {
+	b := NewBuilder(
+		testOwners(),
+		&fakeConnect{config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders"}}},
+		&fakeKafka{},
+		&fakeSource{rowErr: errors.New("down")},
+		&fakeWarehouse{},
+	)
+	stages, err := b.Trace(context.Background(), "orders", "public.orders", "7")
+	if err != nil {
+		t.Fatalf("Trace must not fail when the source row read fails: %v", err)
+	}
+	if stages[0].Status != "unknown" {
+		t.Fatalf("source stage = %s, want unknown: %+v", stages[0].Status, stages)
+	}
+}
+
+func TestSlotNameFor(t *testing.T) {
+	if got := slotNameFor("c1", map[string]string{}); got != "debezium" {
+		t.Fatalf("default slot = %q, want debezium", got)
+	}
+	if got := slotNameFor("c1", map[string]string{"slot.name": "custom_slot"}); got != "custom_slot" {
+		t.Fatalf("slot = %q, want custom_slot", got)
+	}
+}
+
+func TestBuildConnectorMissing(t *testing.T) {
+	b := NewBuilder(
+		testOwners(),
+		&fakeConnect{configErr: map[string]error{"pg-orders-connector": clients.ErrNotFound}},
+		&fakeKafka{},
+		&fakeSource{},
+		&fakeWarehouse{},
+	)
+	g, err := b.Build(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, n := range g.Nodes {
+		if n.Kind == KindConnector {
+			if n.Health != HealthFail {
+				t.Fatalf("deleted connector health = %s, want fail: %+v", n.Health, n)
+			}
+			if n.Facts["missing"] != "true" {
+				t.Fatalf("deleted connector facts = %v, want missing=true", n.Facts)
+			}
 		}
 	}
 }

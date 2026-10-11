@@ -6,17 +6,15 @@ package warehouse
 import (
 	"context"
 	"fmt"
-	"math/big"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/pgconv"
 )
 
 // DB is a read-only connection pool to the warehouse.
@@ -32,13 +30,16 @@ func New(ctx context.Context, url string) (*DB, error) {
 	}
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		_, err := conn.Exec(ctx, "SET default_transaction_read_only = on")
-		return err
+		if err != nil {
+			return fmt.Errorf("warehouse: set read-only: %w", err)
+		}
+		return nil
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("warehouse: connect: %w", err)
 	}
-	pctx, cancel := withDeadline(ctx, 10*time.Second)
+	pctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 	if err := pool.Ping(pctx); err != nil {
 		pool.Close()
@@ -57,7 +58,7 @@ func (d *DB) Close() {
 // Freshness returns max(tsColumn) of table. A zero time means the table has
 // no rows.
 func (d *DB) Freshness(ctx context.Context, table, tsColumn string) (time.Time, error) {
-	ctx, cancel := withDeadline(ctx, 10*time.Second)
+	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
 	schema, tbl, col, err := validateTableColumn(table, tsColumn)
@@ -78,7 +79,7 @@ func (d *DB) Freshness(ctx context.Context, table, tsColumn string) (time.Time, 
 // Row reads one row by primary key. table is "schema.table". Values are
 // converted to JSON-friendly types (numbers -> strings, times -> RFC 3339).
 func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]any, bool, error) {
-	ctx, cancel := withDeadline(ctx, 10*time.Second)
+	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
 	schema, tbl, col, err := validateTableColumn(table, pkColumn)
@@ -87,7 +88,9 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 	}
 	q := fmt.Sprintf("SELECT * FROM %s WHERE %s = $1 LIMIT 1", pgx.Identifier{schema, tbl}.Sanitize(), pgx.Identifier{col}.Sanitize())
 
-	rows, err := d.pool.Query(ctx, q, pk)
+	// DescribeExec re-describes the statement on every call, so a concurrent
+	// schema change cannot break a cached plan.
+	rows, err := d.pool.Query(ctx, q, pgx.QueryExecModeDescribeExec, pk)
 	if err != nil {
 		return nil, false, fmt.Errorf("warehouse: query row: %w", err)
 	}
@@ -107,7 +110,7 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 	m := make(map[string]any, len(cols))
 	for i, fd := range cols {
 		if i < len(vals) {
-			m[fd.Name] = toJSON(vals[i])
+			m[fd.Name] = pgconv.ToJSON(vals[i])
 		}
 	}
 	return m, true, nil
@@ -129,103 +132,6 @@ func validateTableColumn(table, column string) (schema, tbl, col string, err err
 		return "", "", "", fmt.Errorf("warehouse: invalid column identifier %q", column)
 	}
 	return parts[0], parts[1], column, nil
-}
-
-// toJSON converts a decoded pgx value into a JSON-friendly one.
-func toJSON(v any) any {
-	switch t := v.(type) {
-	case nil:
-		return nil
-	case time.Time:
-		return t.UTC().Format(time.RFC3339Nano)
-	case int64:
-		return strconv.FormatInt(t, 10)
-	case int32:
-		return strconv.FormatInt(int64(t), 10)
-	case int16:
-		return strconv.FormatInt(int64(t), 10)
-	case int8:
-		return strconv.FormatInt(int64(t), 10)
-	case int:
-		return strconv.Itoa(t)
-	case uint64:
-		return strconv.FormatUint(t, 10)
-	case uint32:
-		return strconv.FormatUint(uint64(t), 10)
-	case uint16:
-		return strconv.FormatUint(uint64(t), 10)
-	case uint8:
-		return strconv.FormatUint(uint64(t), 10)
-	case uint:
-		return strconv.FormatUint(uint64(t), 10)
-	case float64:
-		return strconv.FormatFloat(t, 'f', -1, 64)
-	case float32:
-		return strconv.FormatFloat(float64(t), 'f', -1, 32)
-	case pgtype.Numeric:
-		return numericString(t)
-	case []byte:
-		return string(t)
-	case string:
-		return t
-	case bool:
-		return t
-	default:
-		return fmt.Sprintf("%v", t)
-	}
-}
-
-// numericString renders a PostgreSQL numeric without float rounding.
-func numericString(n pgtype.Numeric) string {
-	if !n.Valid {
-		return ""
-	}
-	if n.NaN {
-		return "NaN"
-	}
-	switch n.InfinityModifier {
-	case pgtype.Infinity:
-		return "Infinity"
-	case pgtype.NegativeInfinity:
-		return "-Infinity"
-	}
-	if n.Int == nil {
-		return "0"
-	}
-	neg := n.Int.Sign() < 0
-	abs := new(big.Int).Abs(n.Int)
-	s := abs.String()
-	if n.Exp > 0 {
-		e := int(n.Exp)
-		if e > 100000 {
-			return s + "e+" + strconv.Itoa(e)
-		}
-		s += strings.Repeat("0", e)
-	} else if n.Exp < 0 {
-		e := -int(n.Exp)
-		if e > 100000 {
-			return s + "e" + strconv.Itoa(int(n.Exp))
-		}
-		point := len(s) - e
-		if point <= 0 {
-			s = "0." + strings.Repeat("0", -point) + s
-		} else {
-			s = s[:point] + "." + s[point:]
-		}
-	}
-	if neg {
-		s = "-" + s
-	}
-	return s
-}
-
-// withDeadline returns ctx unchanged when it already has a deadline, and
-// otherwise applies a default timeout.
-func withDeadline(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
-	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, d)
 }
 
 var _ = clients.Warehouse((*DB)(nil))

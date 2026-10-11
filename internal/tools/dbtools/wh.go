@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"piperoom/internal/tools"
+	"piperoom/internal/topology"
 )
 
 func warehouseFreshnessTool(d Deps) tools.Tool {
@@ -47,9 +48,9 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 				data["newest"] = nil
 			} else {
 				stale := time.Since(ts)
-				summary = fmt.Sprintf("newest=%s (stale for %s)", formatTS(ts), humanAge(stale))
-				data["newest"] = formatTS(ts)
-				data["stale_for"] = humanAge(stale)
+				summary = fmt.Sprintf("newest=%s (stale for %s)", topology.FormatTS(ts), topology.HumanAge(stale))
+				data["newest"] = topology.FormatTS(ts)
+				data["stale_for"] = topology.HumanAge(stale)
 			}
 			summary, truncated := tools.Truncate(summary)
 			return tools.Result{Summary: summary, Data: data, Truncated: truncated}, nil

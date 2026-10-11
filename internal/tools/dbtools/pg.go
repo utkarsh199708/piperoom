@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/tools"
+	"piperoom/internal/topology"
 )
 
 func pgReplicationSlotsTool(d Deps) tools.Tool {
@@ -25,7 +27,7 @@ func pgReplicationSlotsTool(d Deps) tools.Tool {
 			var sb strings.Builder
 			for _, s := range slots {
 				fmt.Fprintf(&sb, "slot %s: active=%t retained=%s wal_status=%s\n",
-					s.Name, s.Active, humanBytes(s.RetainedWALBytes), s.WALStatus)
+					s.Name, s.Active, topology.HumanBytes(s.RetainedWALBytes), s.WALStatus)
 			}
 			if len(slots) == 0 {
 				sb.WriteString("(no replication slots)\n")
@@ -62,31 +64,34 @@ func pgRecentDDLTool(d Deps) tools.Tool {
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
-			changes, err := d.Src.RecentDDL(ctx, since, 100)
+
+			var changes []clients.DDLChange
+			if input.Table != "" {
+				if f, ok := d.Src.(tableDDLFilterer); ok {
+					changes, err = f.RecentDDLTable(ctx, since, input.Table, 100)
+				} else {
+					changes, err = d.Src.RecentDDL(ctx, since, 100)
+					if err == nil {
+						changes = filterDDL(changes, input.Table)
+					}
+				}
+			} else {
+				changes, err = d.Src.RecentDDL(ctx, since, 100)
+			}
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_recent_ddl: %w", err)
 			}
 
-			filtered := changes
-			if input.Table != "" {
-				filtered = filtered[:0]
-				for _, c := range changes {
-					if strings.Contains(c.ObjectIdentity, input.Table) {
-						filtered = append(filtered, c)
-					}
-				}
-			}
-
 			var sb strings.Builder
-			for _, c := range filtered {
+			for _, c := range changes {
 				fmt.Fprintf(&sb, "%s %s %s | %s | %s\n",
-					formatTS(c.At), c.CommandTag, c.ObjectIdentity, cutShort(c.Query, 300), c.Username)
+					topology.FormatTS(c.At), c.CommandTag, c.ObjectIdentity, cutShort(c.Query, 300), c.Username)
 			}
-			if len(filtered) == 0 {
-				sb.WriteString("(no DDL since " + formatTS(since) + ")\n")
+			if len(changes) == 0 {
+				sb.WriteString("(no DDL since " + topology.FormatTS(since) + ")\n")
 			}
 			summary, truncated := tools.Truncate(sb.String())
-			return tools.Result{Summary: summary, Data: filtered, Truncated: truncated}, nil
+			return tools.Result{Summary: summary, Data: changes, Truncated: truncated}, nil
 		},
 	}
 }
@@ -122,7 +127,7 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 			var sb strings.Builder
 			for _, t := range txns {
 				fmt.Fprintf(&sb, "pid=%d user=%s state=%s age=%s query=%s\n",
-					t.PID, t.Username, t.State, humanAge(t.Age), cutShort(t.Query, 200))
+					t.PID, t.Username, t.State, topology.HumanAge(t.Age), cutShort(t.Query, 200))
 			}
 			if len(txns) == 0 {
 				sb.WriteString("(no long transactions)\n")
@@ -206,4 +211,22 @@ func tsValue(row map[string]any, name string) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return s
+}
+
+// tableDDLFilterer is implemented by SourceDB implementations that can filter
+// DDL by table inside SQL (exact object_identity match, before LIMIT).
+type tableDDLFilterer interface {
+	RecentDDLTable(ctx context.Context, since time.Time, table string, limit int) ([]clients.DDLChange, error)
+}
+
+// filterDDL is the exact-match fallback for SourceDB implementations without a
+// SQL table filter.
+func filterDDL(changes []clients.DDLChange, table string) []clients.DDLChange {
+	out := changes[:0]
+	for _, c := range changes {
+		if c.ObjectIdentity == table {
+			out = append(out, c)
+		}
+	}
+	return out
 }

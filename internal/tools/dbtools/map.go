@@ -33,7 +33,7 @@ func pipelineMapTool(d Deps) tools.Tool {
 			defer cancel()
 			g, err := d.Builder.Build(ctx, input.PipelineID)
 			if err != nil {
-				return tools.Result{}, fmt.Errorf("dbtools: pipeline_map: %w", err)
+				return tools.Result{}, wrapErr("pipeline_map", err)
 			}
 			summary, truncated := tools.Truncate(d.Builder.Render(g))
 			return tools.Result{Summary: summary, Data: g, Truncated: truncated}, nil
@@ -73,7 +73,7 @@ func traceRecordTool(d Deps) tools.Tool {
 			defer cancel()
 			stages, err := d.Builder.Trace(ctx, input.PipelineID, input.Table, input.Key)
 			if err != nil {
-				return tools.Result{}, fmt.Errorf("dbtools: trace_record: %w", err)
+				return tools.Result{}, wrapErr("trace_record", err)
 			}
 
 			summary, truncated := tools.Truncate(renderTraceSummary(stages))
