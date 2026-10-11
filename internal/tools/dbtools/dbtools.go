@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
 )
@@ -23,6 +25,34 @@ type Deps struct {
 	Src     clients.SourceDB
 	Wh      clients.Warehouse
 	Builder topology.Builder
+	// Owners is the loaded owners config, used by the row tools to scope reads
+	// to the pipeline named by pipeline_id (security finding F4). It must be
+	// non-nil; the row tools refuse to run without it.
+	Owners *owners.Owners
+}
+
+// pipeline resolves the owners.Pipeline for id. A nil Owners is a wiring fault
+// (not the agent's input); an unknown id is ErrBadInput so the agent reports it
+// as an input problem.
+func (d Deps) pipeline(id string) (owners.Pipeline, error) {
+	if d.Owners == nil {
+		return owners.Pipeline{}, fmt.Errorf("dbtools: owners not configured")
+	}
+	p, ok := d.Owners.Pipeline(id)
+	if !ok {
+		return owners.Pipeline{}, fmt.Errorf("%w: pipeline %q not found", tools.ErrBadInput, id)
+	}
+	return p, nil
+}
+
+// scopedTable returns an ErrBadInput error when table is not one of the
+// pipeline's own tables (finding F4). tables is SourceTables for the source
+// row tool and SinkTables for the warehouse row tool.
+func scopedTable(pipelineID, table string, tables []string) error {
+	if slices.Contains(tables, table) {
+		return nil
+	}
+	return fmt.Errorf("%w: table %q is not in pipeline %q", tools.ErrBadInput, table, pipelineID)
 }
 
 // Register adds every db tool to reg in a stable order.
