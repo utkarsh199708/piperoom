@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/hamba/avro/v2"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/owners"
 )
 
 const timeout = 10 * time.Second
@@ -45,6 +47,52 @@ func Register(reg *Registry, d Deps) error {
 		}
 	}
 	return nil
+}
+
+// Compile-time checks that every write action is scope-checked (F10).
+var (
+	_ Scoped = (*restartTask)(nil)
+	_ Scoped = (*restartConnector)(nil)
+	_ Scoped = (*setCompatibility)(nil)
+	_ Scoped = (*registerSchema)(nil)
+)
+
+// inScopeConnector returns an error when name is not one of p.Connectors.
+func inScopeConnector(p owners.Pipeline, name string) error {
+	for _, c := range p.Connectors {
+		if c == name {
+			return nil
+		}
+	}
+	return fmt.Errorf("actions: connector %q is not part of pipeline %q", name, p.ID)
+}
+
+// subjectTopic strips the "-key"/"-value" suffix from a Schema Registry
+// subject, returning the topic it names.
+func subjectTopic(subject string) (string, bool) {
+	if strings.HasSuffix(subject, "-key") {
+		return strings.TrimSuffix(subject, "-key"), true
+	}
+	if strings.HasSuffix(subject, "-value") {
+		return strings.TrimSuffix(subject, "-value"), true
+	}
+	return "", false
+}
+
+// inScopeSubject returns an error when subject is not derived from one of
+// p.SourceTables. A subject names "<topic>-key" or "<topic>-value", and the
+// topic must end with "." + sourceTable.
+func inScopeSubject(p owners.Pipeline, subject string) error {
+	topic, ok := subjectTopic(subject)
+	if !ok {
+		return fmt.Errorf("actions: subject %q is not a -key or -value subject", subject)
+	}
+	for _, st := range p.SourceTables {
+		if strings.HasSuffix(topic, "."+st) {
+			return nil
+		}
+	}
+	return fmt.Errorf("actions: subject %q is not part of pipeline %q", subject, p.ID)
 }
 
 // connectorExists checks a connector exists (read-only, for validation).
@@ -106,6 +154,14 @@ func (a *restartTask) Validate(raw json.RawMessage) error {
 	return a.d.connectorExists(ctx, p.Connector)
 }
 
+func (a *restartTask) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
+	var params restartTaskParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return fmt.Errorf("actions: bad params: %v", err)
+	}
+	return inScopeConnector(p, params.Connector)
+}
+
 func (a *restartTask) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
 	var p restartTaskParams
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -154,6 +210,14 @@ func (a *restartConnector) Validate(raw json.RawMessage) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return a.d.connectorExists(ctx, p.Connector)
+}
+
+func (a *restartConnector) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
+	var params restartConnectorParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return fmt.Errorf("actions: bad params: %v", err)
+	}
+	return inScopeConnector(p, params.Connector)
 }
 
 func (a *restartConnector) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -212,6 +276,14 @@ func (a *setCompatibility) Validate(raw json.RawMessage) error {
 	return a.d.subjectExists(ctx, p.Subject)
 }
 
+func (a *setCompatibility) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
+	var params setCompatibilityParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return fmt.Errorf("actions: bad params: %v", err)
+	}
+	return inScopeSubject(p, params.Subject)
+}
+
 func (a *setCompatibility) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
 	var p setCompatibilityParams
 	if err := json.Unmarshal(raw, &p); err != nil {
@@ -258,7 +330,17 @@ func (a *registerSchema) Validate(raw json.RawMessage) error {
 	if _, err := avro.Parse(p.Schema); err != nil {
 		return fmt.Errorf("actions: schema is not valid Avro: %v", err)
 	}
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return a.d.subjectExists(ctx, p.Subject)
+}
+
+func (a *registerSchema) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
+	var params registerSchemaParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return fmt.Errorf("actions: bad params: %v", err)
+	}
+	return inScopeSubject(p, params.Subject)
 }
 
 func (a *registerSchema) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
