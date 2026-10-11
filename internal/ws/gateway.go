@@ -37,12 +37,23 @@ const writeTimeout = 10 * time.Second
 // replayBatch is the page size when replaying the backlog.
 const replayBatch = 500
 
+// replayTimeout bounds the whole replay phase. A client that neither reads its
+// backlog nor goes away is disconnected instead of blocking a goroutine and
+// holding an unbounded write path (review item a). Replay pages are read with
+// this deadline and every frame is written with writeTimeout.
+const replayTimeout = 30 * time.Second
+
 // Gateway serves /api/rooms/{id}/ws.
 type Gateway struct {
 	svc   *room.Service
 	store store.Store
 	log   *slog.Logger
 	now   func() time.Time
+
+	// ReplayTimeout overrides how long the replay phase may take before the
+	// connection is closed with a policy violation; zero means replayTimeout.
+	// Set it before the gateway serves traffic.
+	ReplayTimeout time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -158,12 +169,30 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.onClose = func() { g.removeClient(roomID, c) }
 
 	// Replay the backlog with blocking writes so a slow client cannot overflow
-	// the live send buffer while catching up.
+	// the live send buffer while catching up. The whole replay is bounded by
+	// replayTimeout: a client that cannot catch up is closed with a policy
+	// violation and reconnects with after= (docs/api.md). Every batch is
+	// strictly seq > lastSeq, so events are never skipped or repeated; a full
+	// page triggers the next page (item 19).
 	lastSeq := after
+	rto := g.ReplayTimeout
+	if rto <= 0 {
+		rto = replayTimeout
+	}
+	// The deadline hangs off the connection context (not r.Context(), which
+	// net/http cancels around the hijacked connection); both a stuck store and
+	// a client that never reads release the goroutine within rto.
+	rctx, rcancel := context.WithTimeout(ctx, rto)
 	for {
-		evs, err := g.store.Since(r.Context(), roomID, lastSeq, replayBatch)
+		evs, err := g.store.Since(rctx, roomID, lastSeq, replayBatch)
 		if err != nil {
-			c.shutdown(websocket.StatusInternalError, "replay failed")
+			timedOut := rctx.Err() != nil
+			rcancel()
+			if timedOut {
+				c.shutdown(websocket.StatusPolicyViolation, "replay timeout")
+			} else {
+				c.shutdown(websocket.StatusInternalError, "replay failed")
+			}
 			return
 		}
 		if len(evs) == 0 {
@@ -174,8 +203,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			if err := c.write(ctx, b); err != nil {
-				c.shutdown(websocket.StatusInternalError, "write failed")
+			if err := c.write(rctx, b); err != nil {
+				timedOut := rctx.Err() != nil
+				rcancel()
+				if timedOut {
+					c.shutdown(websocket.StatusPolicyViolation, "replay timeout")
+				} else {
+					c.shutdown(websocket.StatusInternalError, "write failed")
+				}
 				return
 			}
 			lastSeq = e.Seq
@@ -184,6 +219,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	rcancel()
 
 	// Start the writer before announcing presence so presence messages are
 	// drained immediately.

@@ -136,6 +136,11 @@ func (g *Gateway) broadcastLocked(roomID string) {
 	}
 }
 
+// awayAfter is how long a connection may go without any client message
+// before it is marked away: 2x the 20 s presence heartbeat plus slack
+// (docs/api.md).
+const awayAfter = 45 * time.Second
+
 // presenceLoop marks idle clients away every 20 seconds, until Close.
 func (g *Gateway) presenceLoop() {
 	tick := time.NewTicker(20 * time.Second)
@@ -150,7 +155,7 @@ func (g *Gateway) presenceLoop() {
 			for roomID, hub := range g.rooms {
 				changed := false
 				for c := range hub.conns {
-					if c.state == "viewing" && now.After(c.lastSeen.Add(20*time.Second)) {
+					if c.state == "viewing" && now.After(c.lastSeen.Add(awayAfter)) {
 						c.state = "away"
 						changed = true
 					}

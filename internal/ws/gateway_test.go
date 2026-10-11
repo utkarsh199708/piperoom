@@ -11,12 +11,15 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/go-chi/chi/v5"
 
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
 	"piperoom/internal/httpapi"
 	"piperoom/internal/room"
+	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
+	"piperoom/internal/ws"
 )
 
 func fakeRun(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Options) error {
@@ -180,4 +183,157 @@ func mustUser(t *testing.T, svc *room.Service, id string) room.User {
 		t.Fatalf("user %q not found", id)
 	}
 	return u
+}
+
+// readPresence reads until the next presence message, skipping events.
+func readPresence(t *testing.T, conn *websocket.Conn) []presenceMember {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var msg struct {
+			Type    string           `json:"type"`
+			Members []presenceMember `json:"members"`
+		}
+		if err := json.Unmarshal(data, &msg); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if msg.Type == "presence" {
+			return msg.Members
+		}
+	}
+}
+
+type presenceMember struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	State string `json:"state"`
+}
+
+// TestWebSocketReplaySeqBoundary pins the exact boundary: with the log at N
+// events, a client at N-1 receives the Nth event exactly once, and a client at
+// N receives no replay — neither duplicates nor gaps at the seam.
+func TestWebSocketReplaySeqBoundary(t *testing.T) {
+	srv, svc := newRoomServer(t)
+	snap, err := svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "t", "sev2", "orders")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := snap.ID
+
+	// Events 1 and 2 exist (room.created, control.granted); add 3..5.
+	for i := 0; i < 3; i++ {
+		if _, err := svc.AddComment(context.Background(), mustUser(t, svc, "priya"), roomID, "", "msg"); err != nil {
+			t.Fatalf("comment: %v", err)
+		}
+	}
+	const n = 5
+
+	// Client at N-1: replay must deliver exactly n, then the live n+1.
+	connA := dialWS(t, srv, roomID, "arjun", n-1)
+	e := readEvent(t, connA)
+	if e.Seq != n {
+		t.Fatalf("after=N-1: first event must be N=%d, got %d", n, e.Seq)
+	}
+	if _, err := svc.AddComment(context.Background(), mustUser(t, svc, "priya"), roomID, "", "live"); err != nil {
+		t.Fatalf("live comment: %v", err)
+	}
+	if e = readEvent(t, connA); e.Seq != n+1 {
+		t.Fatalf("after=N-1: duplicate or gap at the seam: want %d, got %d", n+1, e.Seq)
+	}
+
+	// Client at N (highest seen): nothing replayed, stream continues at N+2.
+	connB := dialWS(t, srv, roomID, "arjun", n+1)
+	if _, err := svc.AddComment(context.Background(), mustUser(t, svc, "priya"), roomID, "", "more"); err != nil {
+		t.Fatalf("live comment 2: %v", err)
+	}
+	if e = readEvent(t, connB); e.Seq != n+2 {
+		t.Fatalf("after=N: want first live event %d, got %d", n+2, e.Seq)
+	}
+	// connA must see the same single event next.
+	if e = readEvent(t, connA); e.Seq != n+2 {
+		t.Fatalf("after=N-1 stream: want %d, got %d", n+2, e.Seq)
+	}
+}
+
+// slowStore makes Since block until its context ends, so the replay deadline
+// can be observed deterministically.
+type slowStore struct{ store.Store }
+
+func (s slowStore) Since(ctx context.Context, roomID string, afterSeq int64, limit int) ([]events.Event, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestWebSocketReplayDeadline: a store that never answers must not hold the
+// connection forever; the replay is aborted with a policy violation.
+func TestWebSocketReplayDeadline(t *testing.T) {
+	st := memstore.New()
+	svc := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})
+	snap, err := svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "t", "sev2", "orders")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	gw := ws.NewGateway(svc, slowStore{st}, nil)
+	gw.ReplayTimeout = 200 * time.Millisecond
+	mux := chi.NewRouter()
+	mux.Get("/api/rooms/{id}/ws", gw.ServeHTTP)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(func() { srv.Close(); gw.Close() })
+
+	url := strings.Replace(srv.URL, "http", "ws", 1) + "/api/rooms/" + snap.ID + "/ws?user=arjun&after=0"
+	conn, _, err := websocket.Dial(context.Background(), url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		_, _, err := conn.Read(ctx)
+		if err == nil {
+			continue // discard anything until the server gives up
+		}
+		if got := websocket.CloseStatus(err); got != websocket.StatusPolicyViolation {
+			t.Fatalf("want policy violation close, got %v (err %v)", got, err)
+		}
+		return
+	}
+}
+
+// TestWebSocketPresenceJoinLeave: presence is broadcast when members join and
+// leave (item 15).
+func TestWebSocketPresenceJoinLeave(t *testing.T) {
+	srv, svc := newRoomServer(t)
+	snap, err := svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "t", "sev2", "orders")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := snap.ID
+
+	// after=2 skips the two creation events, so only presence arrives.
+	connA := dialWS(t, srv, roomID, "arjun", 2)
+	members := readPresence(t, connA)
+	if len(members) != 1 || members[0].ID != "arjun" || members[0].State != "viewing" {
+		t.Fatalf("join presence wrong: %+v", members)
+	}
+
+	connB := dialWS(t, srv, roomID, "priya", 2)
+	members = readPresence(t, connA)
+	if len(members) != 2 {
+		t.Fatalf("want 2 members after join, got %+v", members)
+	}
+	_ = connB
+
+	connB.Close(websocket.StatusNormalClosure, "")
+	members = readPresence(t, connA)
+	if len(members) != 1 || members[0].ID != "arjun" {
+		t.Fatalf("want 1 member after leave, got %+v", members)
+	}
 }
