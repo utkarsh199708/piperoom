@@ -577,3 +577,48 @@ func TestRedirectNotFollowed(t *testing.T) {
 }
 
 func (f *fakeSlack) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.reqs) }
+
+func TestCancelKeepsLastSeq(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	fs := &fakeSlack{reply: func(n int, w http.ResponseWriter) {
+		if n == 1 {
+			_, _ = io.WriteString(w, `{"ok":true,"channel":"C","ts":"1.1"}`)
+			return
+		}
+		cancel() // shutdown while the reply is being retried
+		w.WriteHeader(503)
+	}}
+	th := NewMemThreads()
+	evs := []events.Event{
+		ev(1, events.RoomCreated, "ana", payloadFor(events.RoomCreated)),
+		ev(2, events.AgentHypothesis, "ana", payloadFor(events.AgentHypothesis)),
+	}
+	b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) { o.Threads = th })
+	if err := b.Run(ctx, "r1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	if got, _, _ := th.Get(context.Background(), "r1"); got.LastSeq != 1 {
+		t.Errorf("LastSeq = %d, want 1", got.LastSeq)
+	}
+}
+
+type closingStore struct{ fakeStore }
+
+func (s *closingStore) Subscribe(context.Context, string, int64) (<-chan events.Event, error) {
+	ch := make(chan events.Event)
+	close(ch)
+	return ch, nil
+}
+
+func TestUnexpectedCloseIsError(t *testing.T) {
+	b, _, _ := newBridge(t, &closingStore{}, &fakeSlack{}, nil)
+	if err := b.Run(context.Background(), "r1"); err == nil {
+		t.Error("want error when the subscription closes under a live ctx")
+	}
+}
+
+func TestCleanDropsFormatChars(t *testing.T) {
+	if got := clean("a‮b​c"); got != "abc" {
+		t.Errorf("clean = %q", got)
+	}
+}

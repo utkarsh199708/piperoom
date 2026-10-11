@@ -141,7 +141,10 @@ func (b *Bridge) Run(ctx context.Context, roomID string) error {
 			return ctx.Err()
 		case e, ok := <-ch:
 			if !ok {
-				return ctx.Err()
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				return fmt.Errorf("slackbridge: subscription for room %s closed unexpectedly", roomID)
 			}
 			if !Important(e.Type) || e.Seq <= th.LastSeq {
 				continue
@@ -167,8 +170,8 @@ func (b *Bridge) mirror(ctx context.Context, r *renderer, e events.Event, th Thr
 	if th.TS == "" && e.Type != events.RoomCreated {
 		res, err := b.send(ctx, e, r.minimalParent(e.RoomID), b.channel, "")
 		if err != nil {
-			if isFatal(err) {
-				return th, err
+			if isFatal(err) || ctx.Err() != nil {
+				return th, cmp.Or(ctx.Err(), err)
 			}
 		} else {
 			th.Channel, th.TS = res.Channel, res.TS
@@ -200,6 +203,9 @@ func (b *Bridge) mirror(ctx context.Context, r *renderer, e events.Event, th Thr
 			th.Channel, th.TS = res.Channel, res.TS
 		case err != nil && isFatal(err):
 			return th, err
+		case err != nil && ctx.Err() != nil:
+			// Shutdown, not a Slack verdict: keep LastSeq so a restart re-posts it.
+			return th, ctx.Err()
 		}
 	}
 	th.LastSeq = e.Seq

@@ -2,6 +2,7 @@ package slackbridge
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -19,7 +20,8 @@ func clean(s string) string {
 		if r == '\n' || r == '\t' {
 			return r
 		}
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+		// Cf covers bidi overrides and zero-width characters.
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || unicode.Is(unicode.Cf, r) {
 			return -1
 		}
 		return r
