@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"piperoom/internal/owners"
 )
 
 // Action is one write operation.
@@ -28,6 +30,19 @@ type Action interface {
 	Validate(params json.RawMessage) error
 	// Execute performs the write and returns a short human-readable result.
 	Execute(ctx context.Context, params json.RawMessage) (string, error)
+}
+
+// Scoped is implemented by every action that writes to a named resource
+// (connector, schema subject, table, consumer group). Approvers in a room only
+// own and watch that room's pipeline, so a step aimed at another pipeline's
+// resource must be refused even when the resource exists (security finding
+// F10). The room service calls CheckScope with the room's pipeline after
+// Validate, both when a proposal is created and right before Execute; an
+// action that does not implement Scoped is refused.
+type Scoped interface {
+	// CheckScope returns an error when params target anything outside p.
+	// It must not do I/O: decide from params and p alone.
+	CheckScope(p owners.Pipeline, params json.RawMessage) error
 }
 
 // Registry holds actions in registration order.
