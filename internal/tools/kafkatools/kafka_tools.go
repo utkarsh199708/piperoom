@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/kafka"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
 
@@ -218,4 +221,83 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 		}
 	}
 	return res(sb.String(), map[string]any{"topic": p.Topic, "key": p.Key, "found": len(refs) > 0, "records": refs}), nil
+}
+
+// ---- kafka_topic_config ----
+
+// topicConfigAdmin is the local adapter for DescribeTopicConfigs until the
+// method lands on clients.KafkaAdmin (contract change request in the PR): the
+// real client (internal/clients/kafka) and the test fake implement it, and the
+// tool reports a clear error when the injected client does not.
+type topicConfigAdmin interface {
+	DescribeTopicConfigs(ctx context.Context, topic string) (kafka.TopicConfig, error)
+}
+
+// topicConfig returns one pipeline topic's key configuration. The topic is
+// scoped to the pipeline: "<topic_prefix>.<source_table>" (see the owners
+// config), so the agent can only read topics the pipeline owns.
+type topicConfig struct{ d Deps }
+
+func (t *topicConfig) Name() string     { return "kafka_topic_config" }
+func (t *topicConfig) Kind() tools.Kind { return tools.KindRead }
+func (t *topicConfig) InputSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"pipeline_id": strProp("pipeline id from owners.yaml"),
+		"table":       strProp(`source table "schema.table"; optional when the pipeline has exactly one source table`),
+	}, "pipeline_id")
+}
+func (t *topicConfig) Description() string {
+	return "A pipeline topic's key configuration: retention.ms, retention.bytes, cleanup.policy, min.insync.replicas, partition count and replication factor."
+}
+
+func (t *topicConfig) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
+	var p struct {
+		PipelineID string `json:"pipeline_id"`
+		Table      string `json:"table"`
+	}
+	if err := json.Unmarshal(input, &p); err != nil || p.PipelineID == "" {
+		return tools.Result{}, fmt.Errorf("%w: pipeline_id is required", tools.ErrBadInput)
+	}
+	topic, err := pipelineTopic(t.d.Owners, p.PipelineID, p.Table)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	adm, ok := t.d.Kafka.(topicConfigAdmin)
+	if !ok {
+		return tools.Result{}, fmt.Errorf("kafkatools: kafka_topic_config: kafka client does not support DescribeTopicConfigs")
+	}
+	cctx, cancel := withTimeout(ctx)
+	defer cancel()
+	cfg, err := adm.DescribeTopicConfigs(cctx, topic)
+	if err != nil {
+		return tools.Result{}, fmt.Errorf("kafkatools: kafka_topic_config %s: %w", topic, err)
+	}
+	summary := fmt.Sprintf("%s: retention.ms=%s, retention.bytes=%s, cleanup.policy=%s, min.insync.replicas=%s, %d partitions, replication factor %d",
+		cfg.Topic, cfg.RetentionMS, cfg.RetentionBytes, cfg.CleanupPolicy, cfg.MinInsyncReplicas, cfg.Partitions, cfg.ReplicationFactor)
+	return res(summary, cfg), nil
+}
+
+// pipelineTopic resolves the topic for a pipeline's source table:
+// "<topic_prefix>.<source_table>". table may be empty when the pipeline has
+// exactly one source table. An unknown pipeline or a table the pipeline does
+// not own is ErrBadInput (the agent's input); a missing owners config is a
+// wiring fault and a plain error.
+func pipelineTopic(o *owners.Owners, pipelineID, table string) (string, error) {
+	if o == nil {
+		return "", fmt.Errorf("kafkatools: owners not configured (wiring must pass Deps.Owners)")
+	}
+	p, ok := o.Pipeline(pipelineID)
+	if !ok {
+		return "", fmt.Errorf("%w: pipeline %q not found", tools.ErrBadInput, pipelineID)
+	}
+	switch {
+	case table == "" && len(p.SourceTables) == 1:
+		table = p.SourceTables[0]
+	case table == "":
+		return "", fmt.Errorf("%w: table is required: pipeline %q has %d source tables", tools.ErrBadInput, pipelineID, len(p.SourceTables))
+	}
+	if !slices.Contains(p.SourceTables, table) {
+		return "", fmt.Errorf("%w: table %q is not a source table of pipeline %q", tools.ErrBadInput, table, pipelineID)
+	}
+	return p.TopicPrefix + "." + table, nil
 }
