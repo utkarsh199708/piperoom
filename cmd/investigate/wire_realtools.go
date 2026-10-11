@@ -17,29 +17,37 @@ import (
 	"piperoom/internal/tools/kafkatools"
 )
 
-// wireRealTools builds the A2 clients, tools and actions from config.Load().
-// It compiles only with -tags realtools, once the A2/A3 packages are merged.
-func wireRealTools(cfg config.Config, reg *tools.Registry, areg *actions.Registry) error {
+// newA2Clients builds the real Connect, Schema Registry and Kafka clients from
+// config. Only compiled with -tags realtools, once A2's packages merge.
+func newA2Clients(cfg config.Config) (*a2Clients, func(), error) {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 
 	connectClient := connect.New(cfg.ConnectURL, httpClient)
 	registryClient := schemareg.New(cfg.SchemaRegistryURL, httpClient)
 	kafkaClient, err := kafka.New(splitBrokers(cfg.KafkaBrokers), registryClient)
 	if err != nil {
-		return fmt.Errorf("investigate: kafka client: %w", err)
+		return nil, nil, fmt.Errorf("investigate: kafka client: %w", err)
 	}
-	_ = kafkaClient // the agent loop owns no shutdown hook; the process ends with it.
+	return &a2Clients{
+		connect:  connectClient,
+		kafka:    kafkaClient,
+		registry: registryClient,
+	}, func() { kafkaClient.Close() }, nil
+}
 
+// wireA2 registers A2's read-only Kafka/Connect/Schema Registry tools and the
+// write actions the agent may propose (never run).
+func wireA2(reg *tools.Registry, areg *actions.Registry, a2 *a2Clients) error {
 	if err := kafkatools.Register(reg, kafkatools.Deps{
-		Connect:  connectClient,
-		Registry: registryClient,
-		Kafka:    kafkaClient,
+		Connect:  a2.connect,
+		Registry: a2.registry,
+		Kafka:    a2.kafka,
 	}); err != nil {
 		return fmt.Errorf("investigate: register kafka tools: %w", err)
 	}
 	if err := actions.Register(areg, actions.Deps{
-		Connect:  connectClient,
-		Registry: registryClient,
+		Connect:  a2.connect,
+		Registry: a2.registry,
 	}); err != nil {
 		return fmt.Errorf("investigate: register actions: %w", err)
 	}
