@@ -41,7 +41,6 @@ hardening, or dev-only exposure).
   A6 (`web/src/components/UserSwitcher.tsx`) to remove/guard the dev switcher in production
   builds. (Flagged in the contract today at `docs/api.md`, owned by the leads.)
 
-- **Design:** `docs/security/auth.md` (OIDC + server-side session, step-up for approvals).
 ---
 
 ## F2 — Layer owners approve a free-text description, never the actual action parameters
@@ -177,7 +176,6 @@ hardening, or dev-only exposure).
   archival story for closed rooms.
 - **Owner:** A5 (`internal/store`, `internal/room`) — needs confirmation once merged.
 
-- **Design:** `docs/security/retention.md` (payload redaction, 30 d content / 13 mo audit proposed).
 ---
 
 ## F7 — No tenant/pipeline isolation in client wiring; one process's credentials can see everything
@@ -247,7 +245,6 @@ hardening, or dev-only exposure).
 - **Owner:** A5 (`internal/httpapi`) to implement; leads to decide and record the contract in
   `docs/api.md`.
 
-- **Design:** `docs/security/webhook.md` (per-integration HMAC or bearer, replay/rate/pipeline limits).
 ---
 
 ## F10 — Write actions are not scoped to the incident's own pipeline either

@@ -1,8 +1,8 @@
 # Design: how long room logs are kept
 
-Task C9, part 3 of 3 (see also `auth.md`, `webhook.md`). Design only — no code changed.
-Closes the design gap behind **F6** (unbounded log growth, no retention policy) and the "forever" side of
-**F3** (full row values in a permanent, broadcast log). Written against `main` @ `270377c`; the store
+Task C9, part 3 of 3 (see also `auth.md`, `webhook-auth.md`). Design only — no code changed.
+**Findings covered:** F6, F3 (and F5 for what must stay out of logs). Closes the design gap behind **F6** (unbounded log growth, no retention policy) and the "forever" side of
+**F3** (full row values in a permanent, broadcast log). Written against `main` @ `15f7aca`; the store
 (`internal/store`, `migrations/`) is A5's and unmerged.
 
 All durations below are **proposed defaults**; section 9 lists what the leads and the pilot customer must
@@ -31,13 +31,14 @@ That keeps replay (`after=0`), seq continuity, and "who did what, when" intact, 
 | `agent.message`, `agent.hypothesis`, `agent.tool_call.input`, tool_result `summary` | `room_events.payload` | Low–medium — derived; summaries show keys, not values | C |
 | `proposal.created` (params), `approval.*`, `action.executed`, `control.*`, `handoff.*`, `room.*` | `room_events.payload` | Low content, **high audit value** — who approved what change to production | **A: audit** |
 | Hand-off summaries | event + any derived table | Medium — written from events without `Data` | A (but see §4) |
-| Sessions, integrations, replay cache | auth tables (`auth.md`, `webhook.md`) | Credential-adjacent | own TTLs (§6) |
+| Sessions, integrations, replay cache | auth tables (`auth.md`, `webhook-auth.md`) | Credential-adjacent | own TTLs (§6) |
 | Application logs | stdout / log pipeline | Must hold no payloads (AGENTS.md §7) | own TTL (§6) |
 | Presence | memory only (contract: "not stored in the event log") | Low | not kept |
 | Model-provider side | requests sent to the Anthropic API | Medium | contractual (§7) |
 
-Minimising at the source comes first and is not optional: apply the F3 fix (store only key + timestamp
-column values in `Data`) and the F6 per-event size cap, so less content exists to be retained at all.
+Minimising at the source comes first and is not optional. The A3 row-scope change (F3/F4/F5) has merged, so row
+tool `Data` is already redacted to key + timestamp columns; the retention classes below therefore treat `Data` as
+lower risk than first assessed, but still class C (config tools and future tools can carry values). Keep that redaction and add the F6 per-event size cap, so less content exists to be retained at all.
 
 ## 3. Policy
 
@@ -102,7 +103,7 @@ Tombstone payload (fixed shape so the UI and reducers can rely on it):
 |---|---|---|
 | Application logs | **30 days** | holds ids, outcomes, sizes only; no payloads, secrets, row values |
 | Sessions | until expiry (12 h) + 7 d for audit of login events | `auth.md` §5; store hashes only |
-| Webhook replay cache | 10 min TTL | `webhook.md` §5 |
+| Webhook replay cache | 10 min TTL | `webhook-auth.md` §5 |
 | Webhook integrations | until deleted; secrets destroyed on deletion | |
 | **Database backups** | **35 days** | redacted/purged data remains in backups until they expire. State this plainly to customers; erasure SLA = redaction time + 35 days. |
 | Event export (if added) | none stored | exports are generated on demand, not kept |

@@ -1,8 +1,11 @@
 # Design: webhook security
 
-Task C9, part 2 of 3 (see also `auth.md`, `retention.md`). Design only — no code changed.
-Closes **F9** (undefined webhook auth). Written against `main` @ `270377c`; `internal/httpapi` is
-unmerged, so file names are proposals for A5.
+Task C9, part 2 of 3 (see also `auth.md`, `event-retention.md`). Design only — no code changed.
+**Findings covered:** F9 (undefined webhook auth). Related: F4/F10 (pipeline scoping, now fixed in the tools and
+actions; this doc applies the same idea to inbound alerts).
+Written against `main` @ `15f7aca`; `docs/api.md` v0.1 points to this file for webhook auth. Verification helpers
+are being built by C5 in `internal/alertin`; this design must be reconciled with them before A5 implements it
+(open question 5 below). File names are proposals for A5.
 
 ## 1. What is being protected
 
@@ -22,7 +25,7 @@ a room".
 | Field | Taken from payload? | Why |
 |---|---|---|
 | `tenant_id` | **No** — comes from the integration record the credential belongs to | no cross-tenant injection |
-| `pipeline_id` | Only if it is in the integration's **allowlist**; else the integration's default; else reject | stops pointing the agent at an unrelated pipeline (ties to F4/F10) |
+| `pipeline_id` | Only if it is in the integration's **allowlist**; else the integration's default; else reject | stops pointing the agent at an unrelated pipeline. `api.md` v0.1 says an unknown pipeline opens a room with proposals disabled; that stays the fallback for a *missing* id, an id outside the allowlist is rejected |
 | `severity` | Yes, clamped to `sev1..sev4`, invalid → `sev3`, and capped at the integration's `max_severity` | a low-trust source cannot page everyone as sev1 |
 | `title` | Yes, trimmed, control chars stripped, ≤120 runes | it is displayed everywhere |
 | everything else | Stored as `alert` on `room.created` (size-capped), **never** put in the model prompt | the F9 analysis found `agent.Alert.Raw` is not used by `firstUserMessage`; keep it that way and add a test |
@@ -152,3 +155,7 @@ room, not approve in place. Check the current Slack signing docs when implementi
 3. Decide: do we require HMAC for every production integration and allow bearer only with an IP
    allowlist? (Proposed: yes.)
 4. Decide the default room/hour and per-tenant caps in §6 with the pilot customer's on-call volume in hand.
+5. Reconcile with C5's `internal/alertin` helpers (header names, signing string, tolerance, adapter interface). Where
+   they differ, the code that lands first wins and this doc is updated, not the other way round.
+6. `api.md` v0.1 says the raw body is stored verbatim in `room.created.alert`; this design caps it (256 KB, see §6) —
+   confirm the cap with the leads.

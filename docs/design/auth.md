@@ -1,9 +1,11 @@
 # Design: real login (replacing `X-User`)
 
-Task C9, part 1 of 3 (see also `webhook.md`, `retention.md`). Design only — no code changed.
+Task C9, part 1 of 3 (see also `webhook-auth.md`, `event-retention.md`). Design only — no code changed.
+**Findings covered:** F1 (any user can become any owner). Related: F7 (tenant isolation), F2 (approval binds to params).
 Closes the design gap behind **F1** (critical) and the production notes in `threat-model.md` §4.3.
-Written against `main` @ `270377c`. `internal/httpapi` (A5) is still unmerged, so file names below are
-proposals for A5, not descriptions of existing code.
+Written against `main` @ `15f7aca`. `docs/api.md` v0.1 already defaults the server to `127.0.0.1:8090`, requires
+`USERS_FILE` in real mode, and checks `dev/users.yaml` against `dev/owners.yaml` at start-up. File names below
+are proposals for A5, not descriptions of existing code.
 
 ## 1. Goals and non-goals
 
@@ -105,7 +107,7 @@ production mode. The upgrade handler must:
 - `now - authenticated_at <= 15 min`. If older, return `401 reauth_required` and the UI sends the user
   through `/auth/login?prompt=login&return=...` (OIDC `prompt=login`, `max_age=0`). The approval is
   re-submitted after.
-- the proposal's current params hash equals the hash shown to the approver (the F2 immutability fix);
+- the proposal's current params hash equals the hash shown to the approver (F2 is fixed in the UI and `api.md` v0.1 freezes params at creation; the hash makes the approver's view verifiable);
   a changed proposal resets approvals.
 
 The `approval.given` event payload records `user_key` (iss+sub), display name, `auth_time`, and a session
@@ -115,11 +117,12 @@ Add the same actor identity to `action.executed`.
 ## 9. Dev mode and fail-closed rules
 
 - New env var `PIPEROOM_AUTH` = `oidc` (default) or `dev`. `dev` keeps `X-User` / `?user=` and
-  `dev/users.yaml`. (`internal/config/config.go` is a contract file: this is a **contract change
+  `dev/users.yaml` (which `api.md` v0.1 requires to agree with `dev/owners.yaml`). (`internal/config/config.go` is a contract file: this is a **contract change
   request** — add `AuthMode`, `PublicURL`, `OIDCIssuer`, `OIDCClientID`, `OIDCClientSecretFile`,
   `TenantsFile`. The client secret is read from a file or secret manager, never a plain env var that
   ends up in process listings.)
-- `dev` refuses to start unless `PIPEROOM_HTTP_ADDR` binds loopback, and logs a loud banner. A production
+- `dev` refuses to start unless `PIPEROOM_HTTP_ADDR` binds loopback (the default is now `127.0.0.1:8090` in
+  `config.go`; this makes it enforced rather than just a default), and logs a loud banner. A production
   deployment that forgets to set `oidc` therefore fails to boot rather than running open.
 - The web `UserSwitcher` is compiled out of production builds (`import.meta.env.DEV` guard) — A6,
   see F1. In `oidc` mode `/api/me` is the only source of identity in the UI.
