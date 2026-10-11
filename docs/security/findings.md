@@ -1,9 +1,13 @@
 # Piperoom security findings
 
-Reviewed against `main` @ `c5ee2e9` (2026-10-11). Every finding below was checked against the
-actual code at the given file:line, not inferred from the task files. Where the relevant code
-has not merged yet (A2 kafka tools/actions, A5 room/httpapi/ws/store), that is stated explicitly
-and the item is marked **needs confirmation** instead of asserted as fact.
+Reviewed against `main` @ `c5ee2e9`, then updated against `b14b930` (2026-10-11), which merged
+A2 (Kafka/Connect/Schema Registry clients, tools, actions) mid-review — F10 and the connect_config
+redaction/SSRF check in the threat model were added/resolved against that commit. A5 (room
+service, httpapi, ws, store) still has not merged; anything depending on it stays marked
+**needs confirmation**. Every finding below was checked against the actual code at the given
+file:line, not inferred from the task files. F4 and F8 were corrected after an initial review
+pass (`[LEAD-CLOUD]` review on PR #1) found they overstated what the code actually does —
+corrections are noted inline.
 
 Severity scale: **critical** (defeats the human-approval safety model or leaks broad customer
 data with no auth), **high** (real exposure or bypass with a plausible, low-effort scenario),
@@ -94,7 +98,7 @@ hardening, or dev-only exposure).
 
 ---
 
-## F4 — `pg_row` / `warehouse_row` / `trace_record` are not scoped to the incident's own pipeline tables
+## F4 — `pg_row` / `warehouse_row` are not scoped to the incident's own pipeline tables
 
 - **Severity:** high
 - **Where:** `internal/tools/dbtools/pg.go:141-182` (`pgRowTool`), `wh.go:61-102`
@@ -103,6 +107,10 @@ hardening, or dev-only exposure).
   79-137` (`Row`, `validateTableColumn`) validate `table`/`pk_column` only against an
   **identifier-syntax regex**, never against `owners.yaml`'s `Pipeline.SourceTables` /
   `SinkTables` (`internal/owners/owners.go`).
+  `trace_record` does **not** have this problem (correction after review): `topology.Trace`
+  (`internal/topology/trace.go:163-179`, `connectorForTable`) rejects any `table` that no
+  connector in the room's own pipeline streams, before it ever reaches `b.src.Row`/`b.wh.Row` —
+  so it is effectively scoped by `owners.yaml` already. Only the two tools below are not.
 - **Scenario:** The DB connection the tools use is one shared, process-wide, read-only pool
   (`internal/config/config.go` `SourceDBURL`/`WarehouseDBURL`) — it can read every table that
   role can see, not just the one pipeline's tables. Any syntactically-valid `schema.table` is
@@ -126,7 +134,11 @@ hardening, or dev-only exposure).
 - **Where:** `internal/clients/warehouse/integration_test.go:22`
   (`t.Fatalf("warehouse unreachable (%s): %v", cfg.WarehouseDBURL, err)`); identical pattern at
   `internal/clients/postgres/integration_test.go:23`
-  (`t.Fatalf("source postgres unreachable (%s): %v", cfg.SourceDBURL, err)`).
+  (`t.Fatalf("source postgres unreachable (%s): %v", cfg.SourceDBURL, err)`). The shared
+  `writeConn` test helper in both files repeats it on its own write connection:
+  `internal/clients/warehouse/integration_test.go:28-37` and
+  `internal/clients/postgres/integration_test.go:29-38`
+  (`t.Fatalf("cannot open write connection to %s: %v", url, err)`).
 - **Scenario:** `cfg.SourceDBURL`/`WarehouseDBURL` are full connection strings with the password
   embedded (`postgres://piperoom:piperoom-dev@...` by default, per
   `internal/config/config.go:28-30`; a real deployment would set these to real credentials via
@@ -197,12 +209,15 @@ hardening, or dev-only exposure).
   is low. `Summary` is capped by `tools.MaxSummaryBytes` (8000 bytes) but `Data` is not (see
   F3) — a large tool result (e.g. `pg_recent_ddl` with many rows, or a wide `pg_row`) is printed
   to the terminal in full. Checked for a terminal-escape-sequence injection concern specifically:
-  `encoding/json` escapes all control bytes below `0x20` (including ESC, `0x1b`) as `\u00XX`
-  when marshalling, so this does **not** allow raw ANSI/terminal escape injection via record
-  values — confirmed by reading the standard library's `json.Marshal` escaping behavior, not
-  assumed. The remaining issue is purely an unbounded-output/readability one.
-- **Fix:** Low priority given this is a dev CLI; if kept, truncate the printed JSON similarly to
-  `tools.Truncate`.
+  `encoding/json` escapes `<`, `>`, `&`, U+2028/U+2029 and every control byte **below `0x20`**
+  (including ESC, `0x1b`) as `\u00XX` when marshalling — but it does **not** escape DEL (`0x7F`)
+  or the C1 control range U+0080–U+009F (e.g. U+009B, the 8-bit CSI, which some terminals treat
+  the same as ESC `[`). *(Correction after review: my first pass over-stated this as "every
+  control byte", which is not accurate — only `< 0x20` is covered.)* A record value or error
+  trace containing one of those bytes could therefore reach the terminal un-escaped. Still low
+  severity (dev CLI, requires a terminal that acts on C1 codes), but not a clean "no issue."
+- **Fix:** Low priority given this is a dev CLI; if kept, strip C1 controls and DEL and cap the
+  printed length (similarly to `tools.Truncate`) in `cmd/investigate/sink.go`.
 - **Owner:** A4 (`cmd/investigate/sink.go`).
 
 ---
@@ -232,6 +247,37 @@ hardening, or dev-only exposure).
 
 ---
 
+## F10 — Write actions are not scoped to the incident's own pipeline either
+
+- **Severity:** high
+- **Where:** `internal/actions/kafka_actions.go` — `restartTask.Validate` (lines 99-107) and
+  `restartConnector.Validate` (149-157) call `d.connectorExists` (50-62), which checks the
+  `connector` param against `d.Connect.ListConnectors(ctx)` — **every** connector Kafka Connect
+  knows about, not just the ones in the room's `owners.Pipeline.Connectors`.
+  `setCompatibility.Validate` (202-213) does the same via `subjectExists` (64-76) against
+  `d.Registry.Subjects(ctx)` — every subject, not just this pipeline's. `registerSchema.Validate`
+  (253-262) is the most permissive: it only checks that `schema` parses as valid Avro, not that
+  `subject` exists or belongs to this pipeline at all, so it can create a brand-new schema
+  version under any subject name. (This finding only became checkable once A2 merged to `main`
+  mid-review, at `b14b930`; the threat model's §7 placeholder for it is now resolved.)
+- **Scenario:** The read-side scoping gap (F4) has a write-side twin. A proposal for the
+  `orders` incident's `kafka-connect` layer could carry `connector: "other-team-connector"` and
+  still pass `Validate` (it exists, just not in this pipeline), and the approver — who per F2
+  sees only the layer name and a free-text description, never `connector` — has no way to
+  notice from the UI that the step targets a connector that has nothing to do with the incident
+  they're looking at. Once approved, `Execute` really does restart that other connector/task or
+  change that other subject's compatibility (or register a new, possibly incompatible, schema
+  under it), causing a production incident in a pipeline nobody in this room owns or was
+  watching.
+- **Fix:** In `internal/actions/kafka_actions.go`, thread the room's `pipeline_id` (or its
+  resolved `owners.Pipeline`) into `Deps`/`Validate` and check `connector ∈
+  Pipeline.Connectors`, `subject` derived from `Pipeline.SourceTables`/the pipeline's own topic
+  prefix, before falling back to "exists at all." This is the same fix shape as F4, applied to
+  the write path, which is the one that actually matters most given F1/F2.
+- **Owner:** A2 (`internal/actions/kafka_actions.go`, not `action.go`).
+
+---
+
 ## Summary of critical/high findings
 
 | ID | Severity | One-line |
@@ -239,4 +285,5 @@ hardening, or dev-only exposure).
 | F1 | critical | Any `X-User` value impersonates any user, including every layer owner — no password, UI even offers a dropdown to do it |
 | F2 | high | Approval UI shows the model's free-text description, never the real action `params` being approved |
 | F3 | high | Full row values (not the redacted summary) are broadcast to every room watcher and stored forever |
-| F4 | high | `pg_row`/`warehouse_row`/`trace_record` can read any syntactically-valid table, not just the pipeline's own tables |
+| F4 | high | `pg_row`/`warehouse_row` can read any syntactically-valid table, not just the pipeline's own tables |
+| F10 | high | Write actions (`connect_restart_*`, `schema_set_compatibility`, `schema_register`) can target any connector/subject that exists, not just the pipeline's own |

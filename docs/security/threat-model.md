@@ -1,9 +1,10 @@
 # Piperoom threat model
 
-C4 security review, against `main` @ `c5ee2e9` (2026-10-11). Scope: the code that exists on
-`main` today. A2 (Kafka/Connect/Schema Registry clients, tools, actions) and A5 (room service,
-HTTP API, WebSocket, executor) have **not merged yet** — sections below say so explicitly and
-are marked "needs confirmation" rather than stated as fact. Re-review once they land.
+C4 security review, against `main` @ `c5ee2e9`, then updated against `b14b930` (2026-10-11) once
+A2 (Kafka/Connect/Schema Registry clients, tools, actions) merged mid-review — see §7, now
+checked rather than deferred. A5 (room service, HTTP API, WebSocket, store, executor) still has
+**not merged** — sections below say so explicitly and are marked "needs confirmation" rather
+than stated as fact. Re-review once it lands.
 
 ## 1. What Piperoom is, for threat-modeling purposes
 
@@ -94,7 +95,7 @@ Boundary-by-boundary:
 - **Investigation read path:** alert → `agent.Run` → read tool (dbtools/kafkatools) → target
   system → `tools.Result{Summary, Data}` → `AgentToolResultPayload` event → room log → every
   connected browser. `Summary` is what the model sees and is redaction-aware; `Data` is not and
-  is strictly more exposed (goes to every browser) than the model's own view (F4).
+  is strictly more exposed (goes to every browser) than the model's own view (F3).
 - **Propose path:** model `propose_fix` tool_use → `actions.Registry.Get/Validate` (read-only
   checks) → `Proposals.Create` → `ProposalCreatedPayload` event (full `Params` included) → UI
   renders the proposal but **not the params**, only a free-text `description` the model wrote
@@ -108,7 +109,7 @@ Boundary-by-boundary:
 - **Hand-off path:** room events → `renderRoomEvents` (field-selected, untrusted-wrapped,
   excludes `Data`) → one Claude call with structured output → `HandoffSummary` → new event.
   This path is well built: it is the one place that deliberately avoids re-exposing raw `Data`,
-  which makes the contrast with the live broadcast path (F4) more notable, not less.
+  which makes the contrast with the live broadcast path (F3) more notable, not less.
 
 ## 6. What's already well-mitigated (so reviewers don't re-flag it)
 
@@ -126,14 +127,30 @@ Boundary-by-boundary:
 - History is genuinely append-only in the loop (`messages = append(messages, resp.ToParam())`,
   never mutated) — matches the Anthropic API's append-only requirement and the audit-trail goal.
 
-## 7. Open items to re-review once A2 / A5 land
+## 7. Open items — A2 checked now that it merged; A5 still pending
 
-- SSRF in the Connect / Schema Registry / Kafka HTTP clients (base URLs come from config, but
-  confirm no tool takes a user/model-supplied URL or host).
+**Checked against `main` @ `b14b930` (A2 merged mid-review):**
+
+- SSRF in the Connect / Schema Registry HTTP clients: clear. `internal/clients/connect/
+  connect.go` and `internal/clients/schemareg/schemareg.go` only ever build requests against
+  their own constructor's `baseURL` (from `config.Load()`); every tool/action parameter
+  (`connector`, `subject`, `name`) is `url.PathEscape`d into the *path*, never used to choose a
+  different host. No tool or action takes a model- or user-supplied URL.
+- `connect_config` redaction: clear. `internal/tools/kafkatools/connect_tools.go`
+  `sensitiveKey` (191-202) redacts any key containing `password`, `secret`, `token`, or `.key`
+  to `***`, matching the task spec, and only an explicit allow-list of non-secret keys (plus
+  `transforms*`) is ever shown.
+- Pipeline scoping of the Kafka/Connect/Schema-Registry **write actions**: not clear — found a
+  new issue, now **F10**. `connect_restart_task`/`connect_restart_connector`/
+  `schema_set_compatibility`/`schema_register` (`internal/actions/kafka_actions.go`) validate
+  that a `connector`/`subject` *exists* globally, never that it belongs to the room's own
+  pipeline. This is F4's gap on the write side, which — combined with F1 (unauthenticated
+  approval) and F2 (approvers never see params) — matters more than the read-side version.
+
+**Still pending (A5 not merged):**
+
 - WebSocket origin checks and CORS configuration (`internal/ws`, `internal/httpapi` — task says
   CORS should allow only `http://localhost:5173`; verify in code once merged).
 - Approval bypass / idempotency / replay in the executor (`internal/room`), and whether layer
   ownership checks are enforced server-side against the same unauthenticated `X-User`.
-- Whether `connect_config` actually redacts `password`/`secret`/`token`/`key`-named config
-  values as its task file requires (`internal/tools/kafkatools`, not merged).
 - The webhook endpoint's authentication model (F9).
