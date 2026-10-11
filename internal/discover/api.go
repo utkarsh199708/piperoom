@@ -14,6 +14,7 @@ package discover
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"piperoom/internal/clients"
@@ -62,6 +63,7 @@ type Deps struct {
 type Options struct {
 	CallTimeout time.Duration // per client call; default 10 s
 	MaxGroups   int           // consumer groups checked; default 1000
+	Logger      *slog.Logger  // error details; default slog.Default()
 }
 
 const (
