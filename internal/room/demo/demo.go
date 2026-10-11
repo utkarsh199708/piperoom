@@ -243,12 +243,13 @@ func (Builder) Trace(ctx context.Context, pipelineID, table, key string) ([]even
 	}, nil
 }
 
-// LayerOwner maps demo layers to demo owners.
+// LayerOwner maps demo layers to demo owners, following dev/owners.yaml
+// (schema-registry belongs to priya's source team).
 func (Builder) LayerOwner(pipelineID, layer string) (string, bool) {
 	m := map[string]string{
 		"postgres":        "priya",
 		"kafka-connect":   "arjun",
-		"schema-registry": "arjun",
+		"schema-registry": "priya",
 		"kafka":           "arjun",
 		"consumer":        "kabir",
 		"warehouse":       "meera",

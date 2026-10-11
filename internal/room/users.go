@@ -50,12 +50,13 @@ func LoadUsers(path string) (*Users, error) {
 	return ParseUsers(data)
 }
 
-// DefaultUsers returns the demo directory from docs/api.md. Used by --demo
-// when dev/users.yaml has not landed yet.
+// DefaultUsers returns the demo directory from docs/api.md, matching
+// dev/users.yaml (both moved schema-registry to priya's source team). Used by
+// --demo and tests when the users file has not landed yet.
 func DefaultUsers() *Users {
 	return mustUsers([]User{
-		{ID: "arjun", Name: "Arjun", Layers: []string{"kafka-connect", "kafka", "schema-registry"}},
-		{ID: "priya", Name: "Priya", Layers: []string{"postgres"}},
+		{ID: "arjun", Name: "Arjun", Layers: []string{"kafka-connect", "kafka"}},
+		{ID: "priya", Name: "Priya", Layers: []string{"postgres", "schema-registry"}},
 		{ID: "meera", Name: "Meera", Layers: []string{"warehouse"}},
 		{ID: "kabir", Name: "Kabir", Layers: []string{"consumer"}},
 	})
