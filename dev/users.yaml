@@ -1,10 +1,10 @@
 users:
   - id: arjun
     name: Arjun
-    layers: [kafka-connect, kafka, schema-registry]
+    layers: [kafka-connect, kafka]
   - id: priya
     name: Priya
-    layers: [postgres]
+    layers: [postgres, schema-registry]
   - id: meera
     name: Meera
     layers: [warehouse]
