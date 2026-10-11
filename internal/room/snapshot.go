@@ -49,6 +49,10 @@ type Proposal struct {
 	Rollback       string                `json:"rollback"`
 	RequiredLayers []string              `json:"required_layers"`
 	Approvals      map[string]string     `json:"approvals"` // layer -> approved|pending|rejected
+
+	// CreatedAt is the event time of proposal.created, used by the expiry
+	// sweeper. Not part of the wire shape.
+	CreatedAt time.Time `json:"-"`
 }
 
 // Suggestion is a non-driver's pending steer.
@@ -218,6 +222,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			Rollback:       p.Rollback,
 			RequiredLayers: p.RequiredLayers,
 			Approvals:      approvals,
+			CreatedAt:      e.At,
 		})
 
 	case events.ApprovalGiven:

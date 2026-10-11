@@ -11,6 +11,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/room"
 	"piperoom/internal/store/memstore"
 )
@@ -44,6 +45,7 @@ func fakeWrite(ctx context.Context, evs []events.Event, opts agent.Options) (eve
 type fakeAction struct {
 	name, layer string
 	fail        bool
+	scopeErr    error
 	mu          sync.Mutex
 	calls       int
 }
@@ -55,6 +57,10 @@ func (a *fakeAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}
 }
 func (a *fakeAction) Validate(json.RawMessage) error { return nil }
+
+func (a *fakeAction) CheckScope(p owners.Pipeline, params json.RawMessage) error {
+	return a.scopeErr
+}
 func (a *fakeAction) Execute(ctx context.Context, params json.RawMessage) (string, error) {
 	a.mu.Lock()
 	a.calls++
@@ -73,7 +79,7 @@ func (a *fakeAction) Calls() int {
 func newTestService(t *testing.T, act ...actions.Action) (*room.Service, *memstore.Store, *clock) {
 	t.Helper()
 	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
-	st := memstore.New()
+	st := memstore.NewWithClock(c.Now)
 	reg := actions.NewRegistry()
 	for _, a := range act {
 		if err := reg.Register(a); err != nil {
@@ -505,5 +511,167 @@ func TestSendSuggestionForwards(t *testing.T) {
 	snap, _ := svc.GetRoom(context.Background(), roomID)
 	if len(snap.PendingSuggestions) != 0 {
 		t.Fatalf("suggestion should be consumed: %+v", snap.PendingSuggestions)
+	}
+}
+
+// unscopedAction implements actions.Action but not actions.Scoped; the room
+// service must refuse proposals that use it.
+type unscopedAction struct{}
+
+func (unscopedAction) Name() string     { return "unscoped" }
+func (unscopedAction) Layer() string    { return "postgres" }
+func (unscopedAction) Describe() string { return "unscoped" }
+func (unscopedAction) ParamsSchema() map[string]any {
+	return map[string]any{"type": "object"}
+}
+func (unscopedAction) Validate(json.RawMessage) error { return nil }
+func (unscopedAction) Execute(context.Context, json.RawMessage) (string, error) {
+	return "", nil
+}
+
+func TestCreateProposalRejectsUnscopedAction(t *testing.T) {
+	svc, _, _ := newTestService(t, unscopedAction{})
+	roomID := createRoom(t, svc, "arjun").ID
+
+	_, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{{Action: "unscoped", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor)
+	wantCode(t, err, "validation")
+}
+
+func TestCreateProposalScopeViolation(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	reg := actions.NewRegistry()
+	if err := reg.Register(&fakeAction{name: "pg_act", layer: "postgres", scopeErr: errors.New("subject targets another pipeline")}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	ownerCfg := &owners.Owners{Pipelines: []owners.Pipeline{{ID: "orders", SourceTables: []string{"public.orders"}}}}
+	svc := room.New(room.Deps{
+		Store: st, Actions: reg, Users: room.DefaultUsers(), Run: fakeRun, Now: c.Now, Owners: ownerCfg,
+	})
+	t.Cleanup(svc.Close)
+
+	roomID := createRoom(t, svc, "arjun").ID
+	_, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor)
+	wantCode(t, err, "validation")
+
+	// A room whose pipeline is not in the owners config is refused as well.
+	snap2, err := svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "t2", "sev2", "not-configured")
+	if err != nil {
+		t.Fatalf("create room 2: %v", err)
+	}
+	_, err = svc.CreateProposal(context.Background(), snap2.ID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor)
+	wantCode(t, err, "validation")
+}
+
+type expiredPayload struct {
+	ProposalID string `json:"proposal_id"`
+	Title      string `json:"title"`
+	AgeSeconds int64  `json:"age_seconds"`
+}
+
+const expiredType = events.Type("proposal.expired")
+
+func TestProposalExpiryRecordsEventOnce(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	reg := actions.NewRegistry()
+	if err := reg.Register(&fakeAction{name: "pg_act", layer: "postgres"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	svc := room.New(room.Deps{
+		Store: st, Actions: reg, Users: room.DefaultUsers(), Run: fakeRun, Now: c.Now,
+		ProposalTTL: 40 * time.Millisecond,
+	})
+	t.Cleanup(svc.Close)
+
+	roomID := createRoom(t, svc, "arjun").ID
+	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Title: "expiring fix",
+		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor)
+	if err != nil {
+		t.Fatalf("create proposal: %v", err)
+	}
+
+	countExpired := func() []events.Event {
+		var out []events.Event
+		for _, e := range allEvents(t, st, roomID) {
+			if e.Type == expiredType {
+				out = append(out, e)
+			}
+		}
+		return out
+	}
+
+	// The clock has not moved: the proposal is old only after Advance.
+	if got := countExpired(); len(got) != 0 {
+		t.Fatalf("premature expiry: %d events", len(got))
+	}
+	c.Advance(time.Second)
+	waitFor(t, 2*time.Second, func() bool { return len(countExpired()) == 1 })
+
+	// Exactly once, even though the sweeper keeps running.
+	time.Sleep(60 * time.Millisecond)
+	got := countExpired()
+	if len(got) != 1 {
+		t.Fatalf("expiry must be recorded exactly once, got %d", len(got))
+	}
+	p, err := events.Decode[expiredPayload](got[0])
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if p.ProposalID != pid || p.Title != "expiring fix" || p.AgeSeconds < 1 {
+		t.Fatalf("bad expiry payload: %+v", p)
+	}
+
+	// Expiry records a fact only: the proposal stays open for approvals.
+	snap, _ := svc.GetRoom(context.Background(), roomID)
+	if len(snap.OpenProposals) != 1 {
+		t.Fatalf("snapshot must keep the proposal open: %+v", snap.OpenProposals)
+	}
+}
+
+func TestCloseStopsGoroutinesIdempotent(t *testing.T) {
+	act := &fakeAction{name: "pg_act", layer: "postgres"}
+	svc, st, _ := newTestService(t, act)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor)
+	if err != nil {
+		t.Fatalf("create proposal: %v", err)
+	}
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		p, err := st.GetProposal(context.Background(), pid)
+		return err == nil && p.Status == "executed"
+	})
+
+	// At this point the agent supervisor, the room executor and the expiry
+	// sweeper are all running. Close cancels the service context and must let
+	// every one of them exit promptly; a second Close is a no-op.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.Close()
+		svc.Close()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not stop all goroutines within 5s")
 	}
 }

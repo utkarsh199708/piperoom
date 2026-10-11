@@ -14,17 +14,14 @@ import (
 // stepTimeout bounds each action execution (rule 4).
 const stepTimeout = 30 * time.Second
 
-// CreateProposal validates every step against the actions registry, derives
-// the required approval layers from the step layers, and stores the proposal
-// (and its proposal.created event). It never executes anything.
+// CreateProposal validates every step against the actions registry and its
+// scope, derives the required approval layers from the step layers, and stores
+// the proposal (and its proposal.created event). It never executes anything.
 func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor) (string, error) {
 	if len(p.Steps) == 0 {
 		return "", validation("proposal requires at least one step")
 	}
-	// The required layers are the union of the step layers: a proposal needs
-	// approval from every layer it writes to, never fewer.
-	required := make([]string, 0, len(p.Steps))
-	seen := map[string]bool{}
+	// Structural checks first: they do not need the room.
 	for i, step := range p.Steps {
 		a, ok := s.actions.Get(step.Action)
 		if !ok {
@@ -39,12 +36,7 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 		if err := a.Validate(step.Params); err != nil {
 			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
-		if !seen[step.Layer] {
-			seen[step.Layer] = true
-			required = append(required, step.Layer)
-		}
 	}
-	p.RequiredLayers = required
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -55,6 +47,28 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 	if !s.roomOpen(st) {
 		return "", roomClosed("room is closed")
 	}
+
+	// Scope check against the room's pipeline (docs/api.md): a step must
+	// implement actions.Scoped and must stay inside that pipeline. A scope
+	// violation is a validation error, not a server error.
+	for i, step := range p.Steps {
+		a, _ := s.actions.Get(step.Action)
+		if err := s.scopeCheck(st.snap.PipelineID, a, step.Params); err != nil {
+			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
+		}
+	}
+
+	// The required layers are the union of the step layers: a proposal needs
+	// approval from every layer it writes to, never fewer.
+	required := make([]string, 0, len(p.Steps))
+	seen := map[string]bool{}
+	for _, step := range p.Steps {
+		if !seen[step.Layer] {
+			seen[step.Layer] = true
+			required = append(required, step.Layer)
+		}
+	}
+	p.RequiredLayers = required
 
 	p.ProposalID = NewID("p_")
 	stepsJSON, err := json.Marshal(p.Steps)
@@ -90,7 +104,6 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 func (s *Service) ApproveProposal(ctx context.Context, user User, proposalID, layer string) (events.Event, error) {
 	var prow store.ProposalRow
 	var ev events.Event
-	var shouldRun bool
 
 	if err := func() error {
 		s.mu.Lock()
@@ -136,20 +149,15 @@ func (s *Service) ApproveProposal(ctx context.Context, user User, proposalID, la
 			return err
 		}
 		if allApproved(st.snap, proposalID) {
-			shouldRun = true
+			// Approved in full: queue the steps on the room's single executor so
+			// no two actions ever run at the same time in one room.
+			s.enqueueExecutionLocked(st, prow)
 		}
 		return nil
 	}(); err != nil {
 		return events.Event{}, err
 	}
 
-	if shouldRun {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			s.executeProposal(prow.RoomID, prow)
-		}()
-	}
 	return ev, nil
 }
 
@@ -202,118 +210,8 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	return ev, nil
 }
 
-// executeProposal runs the approved steps in order, stopping at the first
-// failure. Each step is marked "started" in proposal_steps BEFORE it runs so a
-// crash or duplicate executor can never run it twice. It runs on the service
-// lifetime context with a per-step deadline.
-func (s *Service) executeProposal(roomID string, p store.ProposalRow) {
-	s.mu.Lock()
-	st := s.rooms[roomID]
-	if st == nil {
-		s.mu.Unlock()
-		return
-	}
-	if st.running[p.ProposalID] {
-		s.mu.Unlock()
-		return
-	}
-	st.running[p.ProposalID] = true
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(st.running, p.ProposalID)
-		s.mu.Unlock()
-	}()
-
-	ctx := s.ctx
-
-	var steps []events.ProposalStep
-	if err := json.Unmarshal(p.Steps, &steps); err != nil {
-		s.failStep(ctx, roomID, p.ProposalID, 0, "cannot decode steps: "+err.Error())
-		s.setProposalStatus(ctx, p.ProposalID, "failed")
-		return
-	}
-
-	for i, step := range steps {
-		if !s.isRoomOpen(ctx, roomID) {
-			s.setProposalStatus(ctx, p.ProposalID, "failed")
-			return
-		}
-		// Claim the step before running it; skip an already-started step so it
-		// is never re-run.
-		if err := s.store.StartProposalStep(ctx, p.ProposalID, i); err != nil {
-			if errors.Is(err, store.ErrAlreadyExists) {
-				s.log.Warn("room: executor step already started, skipping", "proposal", p.ProposalID, "step", i)
-				continue
-			}
-			s.failStep(ctx, roomID, p.ProposalID, i, fmt.Sprintf("cannot mark step %d started: %v", i, err))
-			s.setProposalStatus(ctx, p.ProposalID, "failed")
-			return
-		}
-		action, ok := s.actions.Get(step.Action)
-		if !ok {
-			s.finishStep(ctx, roomID, p.ProposalID, i, false, "unknown action "+step.Action)
-			s.setProposalStatus(ctx, p.ProposalID, "failed")
-			return
-		}
-		if err := action.Validate(step.Params); err != nil {
-			s.finishStep(ctx, roomID, p.ProposalID, i, false, "validation failed: "+err.Error())
-			s.setProposalStatus(ctx, p.ProposalID, "failed")
-			return
-		}
-		sctx, cancel := context.WithTimeout(ctx, stepTimeout)
-		out, err := action.Execute(sctx, step.Params)
-		cancel()
-		output := out
-		if err != nil {
-			output = err.Error()
-		}
-		s.finishStep(ctx, roomID, p.ProposalID, i, err == nil, output)
-		if err != nil {
-			s.setProposalStatus(ctx, p.ProposalID, "failed")
-			return
-		}
-	}
-	s.setProposalStatus(ctx, p.ProposalID, "executed")
-}
-
-// finishStep records a step result and emits the action.executed event.
-func (s *Service) finishStep(ctx context.Context, roomID, proposalID string, i int, ok bool, output string) {
-	status := "done"
-	if !ok {
-		status = "failed"
-	}
-	if err := s.store.FinishProposalStep(ctx, proposalID, i, status, output); err != nil {
-		s.log.Warn("room: record step result failed", "proposal", proposalID, "step", i, "err", err)
-	}
-	if err := s.executorEmit(ctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
-		ProposalID: proposalID, StepIndex: i, OK: ok, Output: output,
-	}); err != nil {
-		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", err)
-	}
-}
-
-// failStep emits a failing action.executed for a step that never ran.
-func (s *Service) failStep(ctx context.Context, roomID, proposalID string, i int, output string) {
-	if err := s.executorEmit(ctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
-		ProposalID: proposalID, StepIndex: i, OK: false, Output: output,
-	}); err != nil {
-		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", err)
-	}
-}
-
-func (s *Service) setProposalStatus(ctx context.Context, proposalID, status string) {
-	if err := s.store.SetProposalStatus(ctx, proposalID, status); err != nil {
-		s.log.Warn("room: set proposal status failed", "proposal", proposalID, "status", status, "err", err)
-	}
-}
-
-func (s *Service) isRoomOpen(ctx context.Context, roomID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st := s.rooms[roomID]
-	return st != nil && st.snap.Status == "open"
-}
+// executeProposal, finishStep, failStep, setProposalStatus, isRoomOpen and the
+// step state machine live in service_executor.go.
 
 func isKnownLayer(layer string) bool {
 	for _, l := range events.Layers {

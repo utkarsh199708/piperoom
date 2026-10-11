@@ -31,7 +31,7 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 		s.mu.Unlock()
 		return RoomSnapshot{}, fmt.Errorf("room: create: %w", err)
 	}
-	st := &roomState{snap: NewSnapshot(), inbox: newInbox(), running: map[string]bool{}}
+	st := &roomState{snap: NewSnapshot(), inbox: newInbox()}
 	st.snap.ID = roomID
 	s.rooms[roomID] = st
 
@@ -79,7 +79,7 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 		s.mu.Unlock()
 		return RoomSnapshot{}, fmt.Errorf("room: create from alert: %w", err)
 	}
-	st := &roomState{snap: NewSnapshot(), inbox: newInbox(), running: map[string]bool{}}
+	st := &roomState{snap: NewSnapshot(), inbox: newInbox()}
 	st.snap.ID = roomID
 	s.rooms[roomID] = st
 

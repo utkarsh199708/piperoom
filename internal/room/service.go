@@ -16,6 +16,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/store"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
@@ -23,6 +24,15 @@ import (
 
 // DriverLease is how long control lasts; renewed by any driver action.
 const DriverLease = 30 * time.Minute
+
+// DefaultProposalTTL is how long a proposal may wait for all of its layers
+// before the service records a proposal.expired event (review item 16).
+const DefaultProposalTTL = 30 * time.Minute
+
+// ErrStepOrder reports a proposal step used out of order: started twice, or
+// finished without being started. It is the same sentinel as
+// store.ErrStepOrder so both layers can be matched with errors.Is.
+var ErrStepOrder = store.ErrStepOrder
 
 // Deps wires the room service to its collaborators. Any field may be nil to
 // get a safe default (used by tests and --demo).
@@ -32,18 +42,23 @@ type Deps struct {
 	Tools        *tools.Registry
 	Topology     topology.Builder
 	Users        *Users
+	Owners       *owners.Owners // pipeline definitions for actions.Scoped checks
 	Run          agent.Runner
 	WriteHandoff agent.HandoffWriter
 	Options      agent.Options
 	Logger       *slog.Logger
 	Now          func() time.Time
+	// ProposalTTL overrides how long a proposal may wait for approvals before
+	// it is reported expired; zero means DefaultProposalTTL.
+	ProposalTTL time.Duration
 }
 
 type roomState struct {
 	snap        RoomSnapshot
 	inbox       *inbox
 	agentCancel context.CancelFunc
-	running     map[string]bool // proposalID -> executor running guard
+	exec        *execQueue      // nil until the first proposal is approved
+	expired     map[string]bool // proposals already reported expired
 }
 
 // Service is the room domain logic. All state derives from the event log; the
@@ -54,20 +69,24 @@ type Service struct {
 	tools        *tools.Registry
 	topo         topology.Builder
 	users        *Users
+	owners       *owners.Owners
 	run          agent.Runner
 	writeHandoff agent.HandoffWriter
 	opts         agent.Options
+	proposalTTL  time.Duration
 	log          *slog.Logger
 	now          func() time.Time
 
 	// ctx is the service lifetime: every goroutine the service starts (agent
-	// supervisors, executors) derives from it. Close cancels it and waits.
+	// supervisors, executor queues, the expiry sweeper) derives from it.
+	// Close cancels it and waits.
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu    sync.Mutex
-	rooms map[string]*roomState
+	mu     sync.Mutex
+	closed bool
+	rooms  map[string]*roomState
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -104,27 +123,45 @@ func New(d Deps) *Service {
 	if topo == nil {
 		topo = noopTopology{}
 	}
+	ttl := d.ProposalTTL
+	if ttl <= 0 {
+		ttl = DefaultProposalTTL
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Service{
+	s := &Service{
 		store:        d.Store,
 		actions:      acts,
 		tools:        tls,
 		topo:         topo,
 		users:        users,
+		owners:       d.Owners,
 		run:          run,
 		writeHandoff: wh,
 		opts:         d.Options,
+		proposalTTL:  ttl,
 		log:          log,
 		now:          now,
 		ctx:          ctx,
 		cancel:       cancel,
 		rooms:        map[string]*roomState{},
 	}
+	// One sweeper for the whole service, not one per room.
+	s.wg.Add(1)
+	go s.expiryLoop(ttl)
+	return s
 }
 
 // Close cancels the service lifetime context and waits for every goroutine it
-// started (agent supervisors and executors) to stop.
+// started (agent supervisors, executor queues, the expiry sweeper) to stop.
+// It is idempotent and returns promptly once all of them have exited.
 func (s *Service) Close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	s.mu.Unlock()
 	s.cancel()
 	s.wg.Wait()
 }
@@ -157,7 +194,7 @@ func (s *Service) ensureAllLoadedLocked(ctx context.Context) error {
 			s.log.Warn("room: rebuild failed", "room", r.ID, "err", err)
 			continue
 		}
-		st := &roomState{snap: snap, inbox: newInbox(), running: map[string]bool{}}
+		st := &roomState{snap: snap, inbox: newInbox()}
 		s.rooms[r.ID] = st
 		if snap.Status == "open" {
 			s.startAgentLocked(r.ID, snap.Title, snap.PipelineID, s.rawAlert(ctx, r.ID), st)
@@ -191,7 +228,7 @@ func (s *Service) getStateLocked(ctx context.Context, roomID string) (*roomState
 	if err != nil {
 		return nil, fmt.Errorf("room: rebuild %s: %w", roomID, err)
 	}
-	st := &roomState{snap: snap, inbox: newInbox(), running: map[string]bool{}}
+	st := &roomState{snap: snap, inbox: newInbox()}
 	s.rooms[roomID] = st
 	return st, nil
 }
@@ -421,8 +458,12 @@ func (p proposalCreator) Create(ctx context.Context, payload events.ProposalCrea
 	return p.s.CreateProposal(ctx, p.roomID, payload, events.AgentActor)
 }
 
-// startAgentLocked starts agent.Run for an open room. Caller holds s.mu.
+// startAgentLocked starts agent.Run for an open room. Caller holds s.mu. It
+// does nothing after Close, so a shutting-down service never adds goroutines.
 func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.RawMessage, st *roomState) {
+	if s.closed {
+		return
+	}
 	ctx, cancel := context.WithCancel(s.ctx)
 	st.agentCancel = cancel
 	s.wg.Add(1)

@@ -10,11 +10,13 @@ package demo
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/topology"
 )
 
@@ -177,6 +179,15 @@ func (a demoAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}
 }
 func (a demoAction) Validate(params json.RawMessage) error { return nil }
+
+// CheckScope keeps the demo actions inside the demo pipeline (dev/owners.yaml
+// id "orders"), mirroring the real actions' actions.Scoped behavior.
+func (a demoAction) CheckScope(p owners.Pipeline, params json.RawMessage) error {
+	if p.ID != "orders" {
+		return fmt.Errorf("demo: %s is scoped to the orders pipeline, not %q", a.name, p.ID)
+	}
+	return nil
+}
 func (a demoAction) Execute(ctx context.Context, params json.RawMessage) (string, error) {
 	select {
 	case <-ctx.Done():
