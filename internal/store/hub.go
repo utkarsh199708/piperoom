@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,25 +30,37 @@ type subscriber struct {
 type hub struct {
 	store      *PG
 	connString string
+	appName    string
 	log        *slog.Logger
 	mu         sync.Mutex
 	subs       map[string]map[*subscriber]struct{}
 }
 
-func newHub(store *PG, connString string, log *slog.Logger) *hub {
+func newHub(store *PG, connString, appName string, log *slog.Logger) *hub {
 	return &hub{
 		store:      store,
 		connString: connString,
+		appName:    appName,
 		log:        log,
 		subs:       map[string]map[*subscriber]struct{}{},
 	}
 }
 
+// listenAppName builds the unique application_name of one hub's LISTEN
+// connection: a recognizable prefix plus random bytes, unique per instance
+// and process.
+func listenAppName() string {
+	var b [6]byte
+	rand.Read(b[:]) // never returns an error (crypto/rand docs)
+	return fmt.Sprintf("%s-%d-%x", listenAppNamePrefix, os.Getpid(), b)
+}
+
 // run owns the LISTEN connection, reconnecting on error and re-arming every
 // subscriber so it re-reads from its last seq (no events lost on reconnect).
-// listenAppName identifies the hub's LISTEN connection so tests can find and
-// terminate it to exercise reconnection.
-const listenAppName = "piperoom-listen"
+// The connection's application_name starts with listenAppNamePrefix and ends
+// with a per-instance suffix so a test can terminate exactly its own hub's
+// backend without killing a running dev server's LISTEN connection.
+const listenAppNamePrefix = "piperoom-listen"
 
 func (h *hub) run(ctx context.Context) {
 	for ctx.Err() == nil {
@@ -101,7 +115,7 @@ func (h *hub) connect(ctx context.Context) (*pgx.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: parse listen config: %w", err)
 	}
-	cfg.RuntimeParams["application_name"] = listenAppName
+	cfg.RuntimeParams["application_name"] = h.appName
 	conn, err := pgx.ConnectConfig(cc, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("store: listen connect: %w", err)

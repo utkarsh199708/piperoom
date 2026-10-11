@@ -116,7 +116,7 @@ func (s *Store) Since(ctx context.Context, roomID string, afterSeq int64, limit 
 	if !ok {
 		return nil, fmt.Errorf("memstore: room %q not found: %w", roomID, store.ErrNotFound)
 	}
-	var out []events.Event
+	out := []events.Event{}
 	for _, e := range log.events {
 		if e.Seq > afterSeq {
 			out = append(out, e)
@@ -366,6 +366,16 @@ func (s *Store) SetProposalStatus(ctx context.Context, proposalID, status string
 	}
 	p.Status = status
 	return nil
+}
+
+// ProposalStepStatus returns the recorded status of one proposal step
+// ("started" | "done" | "failed"), or "" when the step has no row. It exists
+// so unit tests can assert that a cancelled executor finished its step
+// (review item 3) without a database.
+func (s *Store) ProposalStepStatus(proposalID string, stepIndex int) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.steps[fmt.Sprintf("%s\x00%d", proposalID, stepIndex)]
 }
 
 // ---- suggestions ----

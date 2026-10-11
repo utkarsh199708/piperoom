@@ -141,7 +141,7 @@ func newPG(pool *pgxpool.Pool, connString string, log *slog.Logger) *PG {
 		now:        time.Now,
 		cancel:     cancel,
 	}
-	s.hub = newHub(s, connString, log)
+	s.hub = newHub(s, connString, listenAppName(), log)
 	s.hubWg.Add(1)
 	go func() {
 		defer s.hubWg.Done()
@@ -149,6 +149,11 @@ func newPG(pool *pgxpool.Pool, connString string, log *slog.Logger) *PG {
 	}()
 	return s
 }
+
+// ListenAppName returns this instance's LISTEN connection application_name.
+// Tests use it to terminate exactly this hub's backend (integration test
+// reconnection); it also shows up in pg_stat_activity for ops.
+func (s *PG) ListenAppName() string { return s.hub.appName }
 
 // Close releases the pool and waits for the hub to stop.
 func (s *PG) Close() {
@@ -328,7 +333,7 @@ func (s *PG) Since(ctx context.Context, roomID string, afterSeq int64, limit int
 		return nil, fmt.Errorf("store: since %s: %w", roomID, err)
 	}
 	defer rows.Close()
-	var out []events.Event
+	out := []events.Event{}
 	for rows.Next() {
 		e, err := scanEvent(roomID, rows)
 		if err != nil {
@@ -353,6 +358,9 @@ func scanEvent(roomID string, row scanner) (events.Event, error) {
 	if err := row.Scan(&e.Seq, &typ, &actorRaw, &payloadRaw, &e.At); err != nil {
 		return events.Event{}, fmt.Errorf("store: scan event: %w", err)
 	}
+	// Snapshots rebuilt after a restart must be UTC like the live ones
+	// (docs/api.md: times are RFC 3339 UTC), whatever the session timezone.
+	e.At = e.At.UTC()
 	e.RoomID = roomID
 	e.Type = events.Type(typ)
 	if err := json.Unmarshal(actorRaw, &e.Actor); err != nil {

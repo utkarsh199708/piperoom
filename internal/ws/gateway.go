@@ -59,8 +59,9 @@ type Gateway struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu    sync.Mutex
-	rooms map[string]*roomHub
+	mu     sync.Mutex
+	closed bool
+	rooms  map[string]*roomHub
 }
 
 // NewGateway builds the gateway and starts its presence loop.
@@ -79,10 +80,17 @@ func NewGateway(svc *room.Service, st store.Store, log *slog.Logger) *Gateway {
 }
 
 // Close stops the presence loop, closes every live connection and waits for
-// all per-connection goroutines to finish.
+// all per-connection goroutines to finish. It is idempotent. Connections are
+// shut down in parallel: closing one connection waits for the peer's close
+// frame (bounded by the library's timeouts), so a dead peer must not delay
+// every other client (review item 12).
 func (g *Gateway) Close() {
-	g.cancel()
 	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return
+	}
+	g.closed = true
 	var clients []*client
 	for _, hub := range g.rooms {
 		for c := range hub.conns {
@@ -90,10 +98,32 @@ func (g *Gateway) Close() {
 		}
 	}
 	g.mu.Unlock()
+	g.cancel()
+	var closing sync.WaitGroup
 	for _, c := range clients {
-		c.shutdown(websocket.StatusGoingAway, "server shutting down")
+		closing.Add(1)
+		go func(c *client) {
+			defer closing.Done()
+			c.shutdown(websocket.StatusGoingAway, "server shutting down")
+		}(c)
 	}
+	closing.Wait()
 	g.wg.Wait()
+}
+
+// trackConn registers one per-connection goroutine with g.wg unless the
+// gateway is already closing, in which case it returns false and the caller
+// must not start the goroutine. Running under g.mu makes the registration
+// atomic with Close's closed flag and its subsequent wg.Wait (review item 12:
+// no wg.Add after Wait has begun).
+func (g *Gateway) trackConn() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return false
+	}
+	g.wg.Add(1)
+	return true
 }
 
 type serverMsg struct {
@@ -223,7 +253,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Start the writer before announcing presence so presence messages are
 	// drained immediately.
-	g.wg.Add(1)
+	if !g.trackConn() {
+		c.shutdown(websocket.StatusGoingAway, "server shutting down")
+		return
+	}
 	go func() {
 		defer g.wg.Done()
 		g.writeLoop(ctx, c)
@@ -237,11 +270,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	g.wg.Add(2)
+	if !g.trackConn() {
+		c.shutdown(websocket.StatusGoingAway, "server shutting down")
+		return
+	}
 	go func() {
 		defer g.wg.Done()
 		g.readLoop(ctx, roomID, c)
 	}()
+	if !g.trackConn() {
+		c.shutdown(websocket.StatusGoingAway, "server shutting down")
+		return
+	}
 	go func() {
 		defer g.wg.Done()
 		g.eventLoop(ctx, c, ch)

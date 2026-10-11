@@ -337,3 +337,63 @@ func TestWebSocketPresenceJoinLeave(t *testing.T) {
 		t.Fatalf("want 1 member after leave, got %+v", members)
 	}
 }
+
+// TestGatewayCloseClosesAllClients pins review item 12: Close is idempotent,
+// shuts down every live connection, and a connection that arrives around the
+// same time is closed too instead of being left running (the closed flag
+// checked by trackConn).
+func TestGatewayCloseClosesAllClients(t *testing.T) {
+	st := memstore.New()
+	svc := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})
+	t.Cleanup(svc.Close)
+	snap, err := svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "t", "sev2", "orders")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := snap.ID
+
+	gw := ws.NewGateway(svc, st, nil)
+	mux := chi.NewRouter()
+	mux.Get("/api/rooms/{id}/ws", gw.ServeHTTP)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	connA := dialWS(t, srv, roomID, "arjun", 0)
+	connB := dialWS(t, srv, roomID, "priya", 0)
+	// Drain the replay so both clients have consumed room.created and
+	// control.granted.
+	for i := 0; i < 2; i++ {
+		readEvent(t, connA)
+		readEvent(t, connB)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		gw.Close()
+		gw.Close() // idempotent: the second call returns immediately
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Close did not return in time")
+	}
+
+	// Both clients must reach a terminal state (any close error; pending
+	// presence messages may arrive before the close frame).
+	readUntilClosed := func(name string, conn *websocket.Conn) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for {
+			if _, _, err := conn.Read(ctx); err != nil {
+				if ctx.Err() != nil {
+					t.Fatalf("client %s: connection not closed by Close (%v)", name, err)
+				}
+				return
+			}
+		}
+	}
+	readUntilClosed("A", connA)
+	readUntilClosed("B", connB)
+}

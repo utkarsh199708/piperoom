@@ -225,6 +225,16 @@ func TestEventsEndpoint(t *testing.T) {
 	if body["last_seq"].(float64) != 2 {
 		t.Fatalf("bad last_seq: %v", body["last_seq"])
 	}
+
+	// After the last seq, events is an empty array, never null (docs/api.md;
+	// review item 4). The type assertion fails on nil, so this checks the JSON
+	// really contains [].
+	resp = doJSON(t, http.MethodGet, srv.URL+"/api/rooms/"+roomID+"/events?after=2", "arjun", "")
+	body = decode[map[string]any](t, resp)
+	empty, ok := body["events"].([]any)
+	if !ok || len(empty) != 0 {
+		t.Fatalf("events after last seq must be [], got %#v", body["events"])
+	}
 }
 
 // TestEveryRouteRequiresXUser: every handler (and the ws handshake) answers
