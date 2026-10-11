@@ -4,8 +4,6 @@ go 1.27.0
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.80.0
-	github.com/coder/websocket v1.8.15
-	github.com/go-chi/chi/v5 v5.3.2
 	github.com/hamba/avro/v2 v2.31.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/snowflakedb/gosnowflake v1.19.1
