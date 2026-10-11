@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -15,12 +16,22 @@ import (
 	"piperoom/internal/testenv"
 )
 
+// hostPort returns only the host:port of a DSN so a failing test never prints
+// the embedded password (finding F5).
+func hostPort(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil || u.Host == "" {
+		return "(invalid dsn)"
+	}
+	return u.Host
+}
+
 func sourceDB(t *testing.T) *DB {
 	t.Helper()
 	cfg := testenv.Require(t)
 	db, err := New(context.Background(), cfg.SourceDBURL)
 	if err != nil {
-		t.Fatalf("source postgres unreachable (%s): %v", cfg.SourceDBURL, err)
+		t.Fatalf("source postgres unreachable (%s): %v", hostPort(cfg.SourceDBURL), err)
 	}
 	t.Cleanup(db.Close)
 	return db
@@ -32,7 +43,7 @@ func writeConn(t *testing.T, url string) *pgx.Conn {
 	defer cancel()
 	conn, err := pgx.Connect(ctx, url)
 	if err != nil {
-		t.Fatalf("cannot open write connection to %s: %v", url, err)
+		t.Fatalf("cannot open write connection to %s: %v", hostPort(url), err)
 	}
 	t.Cleanup(func() { _ = conn.Close(context.Background()) })
 	return conn

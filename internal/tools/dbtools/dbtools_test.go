@@ -11,13 +11,15 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
 )
 
 type fakeSource struct {
-	slots []clients.ReplicationSlot
-	rows  map[string]map[string]any
+	slots    []clients.ReplicationSlot
+	rows     map[string]map[string]any
+	rowCalls int
 }
 
 func (f *fakeSource) ReplicationSlots(context.Context) ([]clients.ReplicationSlot, error) {
@@ -30,16 +32,19 @@ func (f *fakeSource) LongTransactions(context.Context, time.Duration) ([]clients
 	return []clients.Transaction{{PID: 1, Username: "u", State: "active", Age: time.Minute, Query: "SELECT 1"}}, nil
 }
 func (f *fakeSource) Row(_ context.Context, table, _, key string) (map[string]any, bool, error) {
+	f.rowCalls++
 	row, ok := f.rows[table+"|"+key]
 	return row, ok, nil
 }
 
 type fakeWarehouse struct {
-	rows  map[string]map[string]any
-	fresh time.Time
+	rows     map[string]map[string]any
+	fresh    time.Time
+	rowCalls int
 }
 
 func (f *fakeWarehouse) Row(_ context.Context, table, _, key string) (map[string]any, bool, error) {
+	f.rowCalls++
 	row, ok := f.rows[table+"|"+key]
 	return row, ok, nil
 }
@@ -65,6 +70,15 @@ func (f *fakeBuilder) Trace(context.Context, string, string, string) ([]events.T
 }
 func (f *fakeBuilder) LayerOwner(string, string) (string, bool) { return "", false }
 
+func testOwners() *owners.Owners {
+	return &owners.Owners{
+		Pipelines: []owners.Pipeline{
+			{ID: "orders", SourceTables: []string{"public.orders"}, SinkTables: []string{"analytics.orders"}},
+			{ID: "payments", SourceTables: []string{"public.payments"}, SinkTables: []string{"analytics.payments"}},
+		},
+	}
+}
+
 func testDeps() Deps {
 	return Deps{
 		Src: &fakeSource{
@@ -78,6 +92,7 @@ func testDeps() Deps {
 			fresh: time.Now().Add(-2 * time.Minute),
 		},
 		Builder: &fakeBuilder{graph: topology.Graph{PipelineID: "orders"}},
+		Owners:  testOwners(),
 	}
 }
 
@@ -101,6 +116,14 @@ func TestRegister(t *testing.T) {
 	}
 }
 
+func TestRegisterRequiresOwners(t *testing.T) {
+	d := testDeps()
+	d.Owners = nil
+	if err := Register(tools.NewRegistry(), d); err == nil {
+		t.Fatal("Register with nil Owners must fail at wiring time")
+	}
+}
+
 func runTool(t *testing.T, tt tools.Tool, input string) (tools.Result, error) {
 	t.Helper()
 	return tt.Run(context.Background(), json.RawMessage(input))
@@ -115,8 +138,14 @@ func TestValidationErrors(t *testing.T) {
 		name  string
 		input string
 	}{
-		{"pg_row bad table", `{"table":"orders; drop","pk_column":"id","key":"7"}`},
-		{"pg_row missing key", `{"table":"public.orders","pk_column":"id"}`},
+		{"pg_row bad table", `{"pipeline_id":"orders","table":"orders; drop","pk_column":"id","key":"7"}`},
+		{"pg_row missing key", `{"pipeline_id":"orders","table":"public.orders","pk_column":"id"}`},
+		{"pg_row missing pipeline", `{"table":"public.orders","pk_column":"id","key":"7"}`},
+		{"pg_row unknown pipeline", `{"pipeline_id":"nope","table":"public.orders","pk_column":"id","key":"7"}`},
+		{"pg_row other pipeline table", `{"pipeline_id":"orders","table":"public.payments","pk_column":"id","key":"7"}`},
+		{"warehouse_row missing pipeline", `{"table":"analytics.orders","pk_column":"id","key":"7"}`},
+		{"warehouse_row unknown pipeline", `{"pipeline_id":"nope","table":"analytics.orders","pk_column":"id","key":"7"}`},
+		{"warehouse_row other pipeline table", `{"pipeline_id":"orders","table":"analytics.payments","pk_column":"id","key":"7"}`},
 		{"pg_recent_ddl bad since", `{"since":"not-a-time"}`},
 		{"pg_long_transactions negative", `{"older_than_minutes":-1}`},
 		{"warehouse_freshness bad ts_column", `{"table":"analytics.orders","ts_column":"1=1"}`},
@@ -145,7 +174,7 @@ func TestPgRowSummaryRestrictsValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	tt2, _ := reg.Get("pg_row")
-	res, err := runTool(t, tt2, `{"table":"public.orders","pk_column":"id","key":"7"}`)
+	res, err := runTool(t, tt2, `{"pipeline_id":"orders","table":"public.orders","pk_column":"id","key":"7"}`)
 	if err != nil {
 		t.Fatalf("pg_row: %v", err)
 	}
@@ -158,6 +187,87 @@ func TestPgRowSummaryRestrictsValues(t *testing.T) {
 	}
 	if strings.Contains(res.Summary, "customer_id=100") {
 		t.Fatalf("summary leaked a non-key value: %q", res.Summary)
+	}
+}
+
+func TestRowToolsRefuseOtherPipelineWithoutQuery(t *testing.T) {
+	src := &fakeSource{rows: map[string]map[string]any{"public.payments|7": {"id": "7", "note": "secret"}}}
+	wh := &fakeWarehouse{rows: map[string]map[string]any{"analytics.payments|7": {"id": "7"}}}
+	d := testDeps()
+	d.Src = src
+	d.Wh = wh
+	reg := tools.NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+
+	pg, _ := reg.Get("pg_row")
+	if _, err := runTool(t, pg, `{"pipeline_id":"orders","table":"public.payments","pk_column":"id","key":"7"}`); !errors.Is(err, tools.ErrBadInput) {
+		t.Fatalf("pg_row other-pipeline table: err = %v, want ErrBadInput", err)
+	}
+	if src.rowCalls != 0 {
+		t.Fatalf("pg_row queried the source %d time(s) for an out-of-scope table", src.rowCalls)
+	}
+
+	whTool, _ := reg.Get("warehouse_row")
+	if _, err := runTool(t, whTool, `{"pipeline_id":"orders","table":"analytics.payments","pk_column":"id","key":"7"}`); !errors.Is(err, tools.ErrBadInput) {
+		t.Fatalf("warehouse_row other-pipeline table: err = %v, want ErrBadInput", err)
+	}
+	if wh.rowCalls != 0 {
+		t.Fatalf("warehouse_row queried the warehouse %d time(s) for an out-of-scope table", wh.rowCalls)
+	}
+}
+
+func TestRowToolsRedactData(t *testing.T) {
+	reg := tools.NewRegistry()
+	if err := Register(reg, testDeps()); err != nil {
+		t.Fatal(err)
+	}
+
+	pg, _ := reg.Get("pg_row")
+	res, err := runTool(t, pg, `{"pipeline_id":"orders","table":"public.orders","pk_column":"id","key":"7"}`)
+	if err != nil {
+		t.Fatalf("pg_row: %v", err)
+	}
+	data, ok := res.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("pg_row data type %T, want map[string]any", res.Data)
+	}
+	if data["id"] != "7" {
+		t.Fatalf("data[id] = %v, want \"7\"", data["id"])
+	}
+	if data["updated_at"] == nil {
+		t.Fatal("data[updated_at] should keep its timestamp value")
+	}
+	if v := data["customer_id"]; v != nil {
+		t.Fatalf("data[customer_id] = %v, want nil (name only)", v)
+	}
+	if v := data["amount"]; v != nil {
+		t.Fatalf("data[amount] = %v, want nil (name only)", v)
+	}
+	// Every Data key is a column the Summary also names; no extra columns.
+	for k := range data {
+		if !strings.Contains(res.Summary, k) {
+			t.Fatalf("pg_row data key %q not present in summary %q", k, res.Summary)
+		}
+	}
+
+	wh, _ := reg.Get("warehouse_row")
+	wres, err := runTool(t, wh, `{"pipeline_id":"orders","table":"analytics.orders","pk_column":"id","key":"7"}`)
+	if err != nil {
+		t.Fatalf("warehouse_row: %v", err)
+	}
+	wdata, ok := wres.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("warehouse_row data type %T, want map[string]any", wres.Data)
+	}
+	for k := range wdata {
+		if !strings.Contains(wres.Summary, k) {
+			t.Fatalf("warehouse_row data key %q not present in summary %q", k, wres.Summary)
+		}
+	}
+	if _, leaked := wdata["id"]; leaked {
+		t.Fatalf("warehouse_row data leaked non-timestamp column id: %v", wdata)
 	}
 }
 

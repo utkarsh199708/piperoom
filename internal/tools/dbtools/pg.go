@@ -143,17 +143,26 @@ func pgRowTool(d Deps) tools.Tool {
 		name: "pg_row",
 		desc: "Read one row by primary key from the source Postgres.",
 		schema: objSchema(map[string]any{
-			"table":     strProp("\"schema.table\" to read."),
-			"pk_column": strProp("Primary key column name."),
-			"key":       strProp("Primary key value."),
-		}, "table", "pk_column", "key"),
+			"pipeline_id": strProp("Pipeline id from owners.yaml."),
+			"table":       strProp("\"schema.table\" to read."),
+			"pk_column":   strProp("Primary key column name."),
+			"key":         strProp("Primary key value."),
+		}, "pipeline_id", "table", "pk_column", "key"),
 		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
 			var input struct {
-				Table    string `json:"table"`
-				PKColumn string `json:"pk_column"`
-				Key      string `json:"key"`
+				PipelineID string `json:"pipeline_id"`
+				Table      string `json:"table"`
+				PKColumn   string `json:"pk_column"`
+				Key        string `json:"key"`
 			}
 			if err := decode(in, &input); err != nil {
+				return tools.Result{}, err
+			}
+			if input.PipelineID == "" {
+				return tools.Result{}, fmt.Errorf("%w: pipeline_id is required", tools.ErrBadInput)
+			}
+			p, err := d.pipeline(input.PipelineID)
+			if err != nil {
 				return tools.Result{}, err
 			}
 			if !validTable(input.Table) {
@@ -164,6 +173,9 @@ func pgRowTool(d Deps) tools.Tool {
 			}
 			if input.Key == "" {
 				return tools.Result{}, fmt.Errorf("%w: key is required", tools.ErrBadInput)
+			}
+			if err := scopedTable(input.PipelineID, input.Table, p.SourceTables); err != nil {
+				return tools.Result{}, err
 			}
 
 			ctx, cancel := toolCtx(ctx)
@@ -176,9 +188,24 @@ func pgRowTool(d Deps) tools.Tool {
 				return tools.Result{Summary: "not found", Data: map[string]any{"found": false}}, nil
 			}
 			summary, truncated := tools.Truncate(rowSummary(row, input.PKColumn))
-			return tools.Result{Summary: summary, Data: row, Truncated: truncated}, nil
+			return tools.Result{Summary: summary, Data: redactRow(row, input.PKColumn), Truncated: truncated}, nil
 		},
 	}
+}
+
+// redactRow returns the same values rowSummary exposes: the primary-key and
+// timestamp column values, with every other column kept as a name only (nil
+// value), so the full row never leaves the tool (finding F3).
+func redactRow(row map[string]any, pkColumn string) map[string]any {
+	out := make(map[string]any, len(row))
+	for name, v := range row {
+		if name == pkColumn || isTimestampColumn(name) {
+			out[name] = v
+		} else {
+			out[name] = nil
+		}
+	}
+	return out
 }
 
 // rowSummary lists column names, with values only for the key column and
