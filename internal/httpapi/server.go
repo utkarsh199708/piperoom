@@ -23,6 +23,14 @@ import (
 // maxBody is the request body cap (docs/api.md: 1 MB).
 const maxBody = 1 << 20
 
+// requestTimeout is the default per-request budget (docs/api.md).
+const requestTimeout = 60 * time.Second
+
+// handoffTimeout matches the hand-off allowance in docs/api.md: the summary
+// generation may take up to 3 minutes and this route is exempt from the 60 s
+// request timeout.
+const handoffTimeout = 3 * time.Minute
+
 // Server wires the chi router to the room service.
 type Server struct {
 	svc     *room.Service
@@ -44,37 +52,56 @@ func New(svc *room.Service, st store.Store, log *slog.Logger) *Server {
 	r.Use(middleware.Recoverer)
 	r.Use(cors)
 	r.Use(requestLog(log))
-	r.Use(middleware.Timeout(60 * time.Second))
+	// Router-level misses use the same JSON envelope as every other error.
+	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusNotFound, "not_found", "not found")
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	})
 
 	r.Route("/api", func(api chi.Router) {
-		// WebSocket authenticates via ?user= (browsers cannot set headers).
+		// WebSocket authenticates via ?user= (browsers cannot set headers) and
+		// runs outside the request timeout: the connection outlives the
+		// request. Replay has its own deadline in the gateway.
 		api.Get("/rooms/{id}/ws", s.gw.ServeHTTP)
 
 		api.Group(func(protected chi.Router) {
 			protected.Use(authenticate(svc))
 
-			protected.Get("/me", s.handleMe)
-			protected.Get("/rooms", s.handleListRooms)
-			protected.Post("/rooms", s.handleCreateRoom)
-			protected.Post("/alerts/webhook", s.handleAlertWebhook)
-			protected.Get("/rooms/{id}", s.handleGetRoom)
-			protected.Get("/rooms/{id}/events", s.handleRoomEvents)
-			protected.Post("/rooms/{id}/comments", s.handleAddComment)
-			protected.Post("/rooms/{id}/steer", s.handleSteer)
-			protected.Post("/rooms/{id}/suggestions/{sid}/send", s.handleSendSuggestion)
-			protected.Post("/rooms/{id}/control/request", s.handleRequestControl)
-			protected.Post("/rooms/{id}/control/grant", s.handleGrantControl)
-			protected.Post("/rooms/{id}/close", s.handleCloseRoom)
-			protected.Post("/rooms/{id}/handoffs", s.handleCreateHandoff)
-			protected.Post("/rooms/{id}/trace", s.handleTrace)
-			protected.Post("/proposals/{pid}/approve", s.handleApproveProposal)
-			protected.Post("/proposals/{pid}/reject", s.handleRejectProposal)
-			protected.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)
-			protected.Get("/pipelines/{pid}/topology", s.handleTopology)
+			// The hand-off route is exempt from the default budget.
+			protected.Post("/rooms/{id}/handoffs", withTimeout(handoffTimeout, s.handleCreateHandoff))
+
+			protected.Group(func(short chi.Router) {
+				short.Use(middleware.Timeout(requestTimeout))
+
+				short.Get("/me", s.handleMe)
+				short.Get("/rooms", s.handleListRooms)
+				short.Post("/rooms", s.handleCreateRoom)
+				short.Post("/alerts/webhook", s.handleAlertWebhook)
+				short.Get("/rooms/{id}", s.handleGetRoom)
+				short.Get("/rooms/{id}/events", s.handleRoomEvents)
+				short.Post("/rooms/{id}/comments", s.handleAddComment)
+				short.Post("/rooms/{id}/steer", s.handleSteer)
+				short.Post("/rooms/{id}/suggestions/{sid}/send", s.handleSendSuggestion)
+				short.Post("/rooms/{id}/control/request", s.handleRequestControl)
+				short.Post("/rooms/{id}/control/grant", s.handleGrantControl)
+				short.Post("/rooms/{id}/close", s.handleCloseRoom)
+				short.Post("/rooms/{id}/trace", s.handleTrace)
+				short.Post("/proposals/{pid}/approve", s.handleApproveProposal)
+				short.Post("/proposals/{pid}/reject", s.handleRejectProposal)
+				short.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)
+				short.Get("/pipelines/{pid}/topology", s.handleTopology)
+			})
 		})
 	})
 	s.handler = r
 	return s
+}
+
+// withTimeout applies the chi timeout middleware to a single handler.
+func withTimeout(d time.Duration, h http.HandlerFunc) http.HandlerFunc {
+	return middleware.Timeout(d)(h).ServeHTTP
 }
 
 // ServeHTTP implements http.Handler.

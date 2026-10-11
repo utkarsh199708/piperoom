@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"piperoom/internal/agent"
@@ -223,5 +224,157 @@ func TestEventsEndpoint(t *testing.T) {
 	}
 	if body["last_seq"].(float64) != 2 {
 		t.Fatalf("bad last_seq: %v", body["last_seq"])
+	}
+}
+
+// TestEveryRouteRequiresXUser: every handler (and the ws handshake) answers
+// 401 unauthenticated for a missing or unknown X-User (review item 4).
+func TestEveryRouteRequiresXUser(t *testing.T) {
+	srv, _ := newServer(t)
+	routes := []struct {
+		method, path, body string
+	}{
+		{http.MethodGet, "/api/me", ""},
+		{http.MethodGet, "/api/rooms", ""},
+		{http.MethodPost, "/api/rooms", `{"title":"t","severity":"sev2","pipeline_id":"orders"}`},
+		{http.MethodPost, "/api/alerts/webhook", `{}`},
+		{http.MethodGet, "/api/rooms/r1", ""},
+		{http.MethodGet, "/api/rooms/r1/events", ""},
+		{http.MethodPost, "/api/rooms/r1/comments", `{"text":"x"}`},
+		{http.MethodPost, "/api/rooms/r1/steer", `{"text":"x"}`},
+		{http.MethodPost, "/api/rooms/r1/suggestions/s1/send", ""},
+		{http.MethodPost, "/api/rooms/r1/control/request", ""},
+		{http.MethodPost, "/api/rooms/r1/control/grant", `{"to":"arjun"}`},
+		{http.MethodPost, "/api/rooms/r1/close", `{"resolution":"x"}`},
+		{http.MethodPost, "/api/rooms/r1/handoffs", `{"to":"priya"}`},
+		{http.MethodPost, "/api/rooms/r1/trace", `{"table":"t","key":"k"}`},
+		{http.MethodPost, "/api/proposals/p1/approve", `{"layer":"postgres"}`},
+		{http.MethodPost, "/api/proposals/p1/reject", `{"layer":"postgres"}`},
+		{http.MethodPost, "/api/handoffs/h1/accept", ""},
+		{http.MethodGet, "/api/pipelines/orders/topology", ""},
+	}
+	for _, rt := range routes {
+		for _, user := range []string{"", "nobody"} {
+			resp := doJSON(t, rt.method, srv.URL+rt.path, user, rt.body)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("%s %s (user %q): want 401, got %d", rt.method, rt.path, user, resp.StatusCode)
+			}
+			body := decode[map[string]any](t, resp)
+			if body["error"].(map[string]any)["code"] != "unauthenticated" {
+				t.Fatalf("%s %s: bad envelope %+v", rt.method, rt.path, body)
+			}
+		}
+	}
+	// The WebSocket handshake authenticates via ?user= and needs it too.
+	resp := doJSON(t, http.MethodGet, srv.URL+"/api/rooms/r1/ws", "", "")
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("ws without user: want 401, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// TestBodyCap: request bodies over 1 MB are refused with 400 validation.
+func TestBodyCap(t *testing.T) {
+	srv, _ := newServer(t)
+	big := strings.Repeat("a", 2<<20)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/rooms", "arjun",
+		`{"title":"`+big+`","severity":"sev2","pipeline_id":"orders"}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized create: want 400, got %d", resp.StatusCode)
+	}
+	body := decode[map[string]any](t, resp)
+	if body["error"].(map[string]any)["code"] != "validation" {
+		t.Fatalf("oversized create: bad envelope %+v", body)
+	}
+
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/alerts/webhook", "arjun", `{"x":"`+big+`"}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized webhook: want 400, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// TestUnknownRoomReturns404Not403: a missing room is 404 even when the caller
+// is not the driver (the room check wins over the role check, docs/api.md).
+func TestUnknownRoomReturns404Not403(t *testing.T) {
+	srv, _ := newServer(t)
+	// priya is a non-driver everywhere; the rooms do not exist.
+	routes := []struct{ method, path, body string }{
+		{http.MethodPost, "/api/rooms/nope/close", `{"resolution":"x"}`},
+		{http.MethodPost, "/api/rooms/nope/steer", `{"text":"x"}`},
+		{http.MethodPost, "/api/rooms/nope/comments", `{"text":"x"}`},
+		{http.MethodPost, "/api/rooms/nope/handoffs", `{"to":"arjun"}`},
+		{http.MethodPost, "/api/rooms/nope/control/grant", `{"to":"arjun"}`},
+	}
+	for _, rt := range routes {
+		resp := doJSON(t, rt.method, srv.URL+rt.path, "priya", rt.body)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s: want 404, got %d", rt.path, resp.StatusCode)
+		}
+		body := decode[map[string]any](t, resp)
+		if body["error"].(map[string]any)["code"] != "not_found" {
+			t.Fatalf("%s: bad envelope %+v", rt.path, body)
+		}
+	}
+}
+
+// TestWebhookPassesRawBody: the handler forwards the raw JSON body verbatim
+// (docs/api.md) and accepts non-object JSON.
+func TestWebhookPassesRawBody(t *testing.T) {
+	srv, svc := newServer(t)
+	raw := `{"title":"Webhook room","severity":"sev1","pipeline_id":"orders","extra":[1,2]}`
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/alerts/webhook", "arjun", raw)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("webhook: want 201, got %d", resp.StatusCode)
+	}
+	snap := decode[map[string]any](t, resp)
+	if snap["pipeline_id"] != "orders" || snap["severity"] != "sev1" {
+		t.Fatalf("webhook fields not mapped: %+v", snap)
+	}
+
+	evs, _, err := svc.Events(context.Background(), snap["id"].(string), 0, 10)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	p, err := events.Decode[events.RoomCreatedPayload](evs[0])
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if string(p.Alert) != raw {
+		t.Fatalf("raw body not verbatim:\n got %s\nwant %s", p.Alert, raw)
+	}
+
+	// A non-object body maps nothing but still opens a room.
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/alerts/webhook", "arjun", `[1,2,3]`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("array webhook: want 201, got %d", resp.StatusCode)
+	}
+	snap = decode[map[string]any](t, resp)
+	if snap["pipeline_id"] != "unknown" {
+		t.Fatalf("array webhook defaults: %+v", snap)
+	}
+}
+
+// TestRouterErrorEnvelopes: router-level 404/405 use the same JSON envelope.
+func TestRouterErrorEnvelopes(t *testing.T) {
+	srv, _ := newServer(t)
+
+	resp := doJSON(t, http.MethodGet, srv.URL+"/api/nope", "arjun", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown route: want 404, got %d", resp.StatusCode)
+	}
+	body := decode[map[string]any](t, resp)
+	if body["error"].(map[string]any)["code"] != "not_found" {
+		t.Fatalf("unknown route envelope: %+v", body)
+	}
+
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/me", "arjun", "")
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("wrong method: want 405, got %d", resp.StatusCode)
+	}
+	body = decode[map[string]any](t, resp)
+	if body["error"].(map[string]any)["code"] != "method_not_allowed" {
+		t.Fatalf("wrong method envelope: %+v", body)
 	}
 }
