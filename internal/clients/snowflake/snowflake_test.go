@@ -85,8 +85,11 @@ func TestFreshnessHappyPath(t *testing.T) {
 	if !got.Equal(ts) {
 		t.Fatalf("Freshness = %v, want %v", got, ts)
 	}
-	if !strings.Contains(fq.lastQuery, `"public"."orders"`) || !strings.Contains(fq.lastQuery, `"updated_at"`) {
-		t.Fatalf("query %q did not reference the quoted table/column", fq.lastQuery)
+	if !strings.Contains(fq.lastQuery, "PUBLIC.ORDERS") || !strings.Contains(fq.lastQuery, "UPDATED_AT") {
+		t.Fatalf("query %q did not reference the upper-cased table/column", fq.lastQuery)
+	}
+	if strings.Contains(fq.lastQuery, `"`) {
+		t.Fatalf("query %q quotes the identifier, which would make it case-sensitive", fq.lastQuery)
 	}
 }
 
