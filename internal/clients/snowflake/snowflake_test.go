@@ -152,6 +152,39 @@ func TestRowFound(t *testing.T) {
 	}
 }
 
+// TestRowLowerCasesColumnNames pins down the fix for LEAD-CLOUD #1 on PR #4:
+// Snowflake returns an unquoted column's name upper-cased (e.g. "AMOUNT"),
+// but internal/topology's trace diff and internal/tools/dbtools' timestamp
+// detection assume lower-case keys like the Postgres warehouse client
+// produces. Without folding, every sink-side diff and freshness check
+// silently sees no matching column.
+func TestRowLowerCasesColumnNames(t *testing.T) {
+	fq := &fakeQuerier{rows: &fakeRows{
+		cols: []string{"ID", "AMOUNT", "UPDATED_AT"},
+		data: [][]any{{"42", "19.99", "2026-01-02T03:04:05Z"}},
+	}}
+	db := &DB{q: fq}
+
+	row, found, err := db.Row(context.Background(), "public.orders", "id", "42")
+	if err != nil {
+		t.Fatalf("Row: %v", err)
+	}
+	if !found {
+		t.Fatal("Row: expected found")
+	}
+	want := map[string]any{"id": "42", "amount": "19.99", "updated_at": "2026-01-02T03:04:05Z"}
+	for k, v := range want {
+		if row[k] != v {
+			t.Errorf("row[%q] = %v, want %v (row = %v)", k, row[k], v, row)
+		}
+	}
+	for k := range row {
+		if k != strings.ToLower(k) {
+			t.Errorf("row has an un-folded key %q", k)
+		}
+	}
+}
+
 func TestRowNotFound(t *testing.T) {
 	fq := &fakeQuerier{rows: &fakeRows{cols: []string{"id"}, data: nil}}
 	db := &DB{q: fq}

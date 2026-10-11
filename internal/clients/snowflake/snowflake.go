@@ -14,6 +14,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/snowflakedb/gosnowflake" // registers the "snowflake" sql.DB driver on import
@@ -95,6 +96,15 @@ func (d *DB) Freshness(ctx context.Context, table, tsColumn string) (time.Time, 
 // Row reads one row by primary key. table is "schema.table" or
 // "db.schema.table". Values are converted to JSON-friendly types (numbers
 // and high-precision values -> strings, times -> RFC 3339).
+//
+// Column names are lower-cased, matching internal/clients/warehouse (the
+// Postgres implementation of this same interface): Snowflake returns an
+// unquoted column's name upper-cased, e.g. "AMOUNT", and both the topology
+// builder's trace diff and the DB tools' timestamp-column detection assume
+// lower-case keys like "amount" or "updated_at". A column created WITH
+// quotes, preserving mixed/lower case, would have its name folded here too
+// — there is no way to tell that case apart from the normal unquoted one
+// once the driver has already returned the name as a plain string.
 func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]any, bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
@@ -137,7 +147,7 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 
 	m := make(map[string]any, len(cols))
 	for i, name := range cols {
-		m[name] = toJSON(vals[i])
+		m[strings.ToLower(name)] = toJSON(vals[i])
 	}
 	return m, true, nil
 }

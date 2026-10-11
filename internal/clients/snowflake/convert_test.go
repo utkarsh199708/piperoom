@@ -1,6 +1,7 @@
 package snowflake
 
 import (
+	"math"
 	"math/big"
 	"testing"
 	"time"
@@ -20,6 +21,12 @@ func TestToJSON(t *testing.T) {
 		{"time", ts, "2026-03-04T12:00:00Z"},
 		{"int64", int64(42), "42"},
 		{"float64 no exponent", float64(12345.5), "12345.5"},
+		// LEAD-CLOUD #2 on PR #4: big.NewFloat(f) panics on NaN; must go through
+		// strconv.FormatFloat instead, which also handles +/-Inf.
+		{"float64 NaN", math.NaN(), "NaN"},
+		{"float64 +Inf", math.Inf(1), "+Inf"},
+		{"float64 -Inf", math.Inf(-1), "-Inf"},
+		{"float32 no binary noise", float32(0.1), "0.1"},
 		{"big.Int", big.NewInt(9223372036854775807), "9223372036854775807"},
 		{"big.Float", newBigFloat("12345678901234567890.123"), "12345678901234567890.123"},
 		{"nil big.Int", (*big.Int)(nil), nil},

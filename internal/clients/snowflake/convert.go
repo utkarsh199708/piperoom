@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"strconv"
 	"time"
 )
 
@@ -29,9 +30,9 @@ func toJSON(v any) any {
 	case int:
 		return fmt.Sprintf("%d", t)
 	case float64:
-		return formatFloat(t)
+		return strconv.FormatFloat(t, 'f', -1, 64)
 	case float32:
-		return formatFloat(float64(t))
+		return strconv.FormatFloat(float64(t), 'f', -1, 32)
 	case *big.Int:
 		if t == nil {
 			return nil
@@ -48,10 +49,4 @@ func toJSON(v any) any {
 		}
 		return fmt.Sprintf("%v", t)
 	}
-}
-
-// formatFloat renders a float64 in plain decimal form (no exponent) so a
-// freshly-converted NUMBER value reads the way it would in Snowflake.
-func formatFloat(f float64) string {
-	return big.NewFloat(f).Text('f', -1)
 }
