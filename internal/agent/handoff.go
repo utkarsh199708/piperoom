@@ -27,21 +27,21 @@ func writeHandoff(ctx context.Context, roomEvents []events.Event, opts Options, 
 		return events.HandoffSummary{}, fmt.Errorf("agent: cannot write handoff from an empty room")
 	}
 
-	params := anthropic.MessageNewParams{
+	params := anthropic.BetaMessageNewParams{
 		Model:     opts.Model,
 		MaxTokens: handoffMaxTokens,
-		System: []anthropic.TextBlockParam{
-			{Text: handoffPrompt(), CacheControl: anthropic.NewCacheControlEphemeralParam()},
+		System: []anthropic.BetaTextBlockParam{
+			{Text: handoffPrompt(), CacheControl: anthropic.NewBetaCacheControlEphemeralParam()},
 		},
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(renderRoomEvents(roomEvents))),
+		Messages: []anthropic.BetaMessageParam{
+			anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(renderRoomEvents(roomEvents))),
 		},
-		OutputConfig: anthropic.OutputConfigParam{
-			Effort: anthropic.OutputConfigEffort(opts.effort()),
-			Format: anthropic.JSONOutputFormatParam{Schema: handoffSchema()},
+		OutputConfig: anthropic.BetaOutputConfigParam{
+			Effort: anthropic.BetaOutputConfigEffort(opts.effort()),
+			Format: anthropic.BetaJSONOutputFormatParam{Schema: handoffSchema()},
 		},
-		Thinking: anthropic.ThinkingConfigParamUnion{
-			OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{},
+		Thinking: anthropic.BetaThinkingConfigParamUnion{
+			OfAdaptive: &anthropic.BetaThinkingConfigAdaptiveParam{},
 		},
 	}
 
@@ -49,7 +49,7 @@ func writeHandoff(ctx context.Context, roomEvents []events.Event, opts Options, 
 	if err != nil {
 		return events.HandoffSummary{}, fmt.Errorf("agent: handoff request: %w", err)
 	}
-	if msg.StopReason == anthropic.StopReasonRefusal {
+	if msg.StopReason == anthropic.BetaStopReasonRefusal {
 		return events.HandoffSummary{}, fmt.Errorf("agent: handoff: model refused the request")
 	}
 
@@ -72,7 +72,7 @@ func writeHandoff(ctx context.Context, roomEvents []events.Event, opts Options, 
 }
 
 // extractText concatenates the text blocks of a message.
-func extractText(content []anthropic.ContentBlockUnion) string {
+func extractText(content []anthropic.BetaContentBlockUnion) string {
 	var b strings.Builder
 	for _, block := range content {
 		if block.Type == "text" {

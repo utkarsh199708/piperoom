@@ -52,16 +52,16 @@ func (s *stagedInbox) Wait(ctx context.Context) error {
 
 type errorModel struct{ err error }
 
-func (m *errorModel) Turn(context.Context, anthropic.MessageNewParams) (anthropic.Message, error) {
-	return anthropic.Message{}, m.err
+func (m *errorModel) Turn(context.Context, anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
+	return anthropic.BetaMessage{}, m.err
 }
 
 type blockingModel struct{ entered chan struct{} }
 
-func (m *blockingModel) Turn(ctx context.Context, _ anthropic.MessageNewParams) (anthropic.Message, error) {
+func (m *blockingModel) Turn(ctx context.Context, _ anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
 	close(m.entered)
 	<-ctx.Done()
-	return anthropic.Message{}, ctx.Err()
+	return anthropic.BetaMessage{}, ctx.Err()
 }
 
 // blockingTool blocks until its context ends, simulating a tool that never
@@ -84,7 +84,7 @@ func (b *blockingTool) Run(ctx context.Context, _ json.RawMessage) (tools.Result
 
 func TestRunEndTurnSpuriousWakeDoesNotPrefill(t *testing.T) {
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
-	model := &scriptedModel{turns: []anthropic.Message{
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
 		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}`),
 	}}
 	sink := &fakeSink{}
@@ -100,11 +100,11 @@ func TestRunEndTurnSpuriousWakeDoesNotPrefill(t *testing.T) {
 	// The second request must end with a user turn, never an assistant turn
 	// (assistant prefill is rejected with HTTP 400).
 	last := lastMessage(model.calls)
-	if last.Role != anthropic.MessageParamRoleUser {
+	if last.Role != anthropic.BetaMessageParamRoleUser {
 		t.Fatalf("last message role = %v, want user", last.Role)
 	}
-	if !strings.Contains(messagesJSON([]anthropic.MessageParam{last}), "check order_items") {
-		t.Fatalf("human input missing from resumed request: %s", messagesJSON([]anthropic.MessageParam{last}))
+	if !strings.Contains(messagesJSON([]anthropic.BetaMessageParam{last}), "check order_items") {
+		t.Fatalf("human input missing from resumed request: %s", messagesJSON([]anthropic.BetaMessageParam{last}))
 	}
 }
 
@@ -273,7 +273,7 @@ func TestRunToolErrorIsError(t *testing.T) {
 		schema: testSchema("connector"),
 		err:    errors.New("kafka unreachable"),
 	}
-	model := &scriptedModel{turns: []anthropic.Message{
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
 		mustMessage(t, `{"stop_reason":"tool_use","content":[
 			{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"check","connector":"pg-orders-connector"}}
 		]}`),
@@ -306,7 +306,7 @@ func TestRunToolTimeoutIsError(t *testing.T) {
 	defer func() { toolTimeout = old }()
 
 	bt := &blockingTool{name: "blocking", schema: testSchema("connector")}
-	model := &scriptedModel{turns: []anthropic.Message{
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
 		mustMessage(t, `{"stop_reason":"tool_use","content":[
 			{"type":"tool_use","id":"tu1","name":"blocking","input":{"why":"probe","connector":"x"}}
 		]}`),
@@ -337,7 +337,7 @@ func TestRunMaxTokensAndPauseTurnContinue(t *testing.T) {
 	for _, reason := range []string{"max_tokens", "pause_turn"} {
 		t.Run(reason, func(t *testing.T) {
 			rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
-			model := &scriptedModel{turns: []anthropic.Message{
+			model := &scriptedModel{turns: []anthropic.BetaMessage{
 				mustMessage(t, fmt.Sprintf(`{"stop_reason":%q,"content":[{"type":"text","text":"partial"}]}`, reason)),
 				mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}`),
 			}}
@@ -352,8 +352,8 @@ func TestRunMaxTokensAndPauseTurnContinue(t *testing.T) {
 				t.Fatalf("expected the turn to continue, got %d calls", len(model.calls))
 			}
 			last := lastMessage(model.calls)
-			if !strings.Contains(messagesJSON([]anthropic.MessageParam{last}), "Continue.") {
-				t.Fatalf("expected a Continue. nudge after %s: %s", reason, messagesJSON([]anthropic.MessageParam{last}))
+			if !strings.Contains(messagesJSON([]anthropic.BetaMessageParam{last}), "Continue.") {
+				t.Fatalf("expected a Continue. nudge after %s: %s", reason, messagesJSON([]anthropic.BetaMessageParam{last}))
 			}
 		})
 	}
@@ -363,26 +363,88 @@ func TestRunMaxTokensAndPauseTurnContinue(t *testing.T) {
 
 func TestRunContextWindowExceeded(t *testing.T) {
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
-	model := &scriptedModel{turns: []anthropic.Message{
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
 		mustMessage(t, `{"stop_reason":"model_context_window_exceeded","content":[]}`),
 	}}
 	sink := &fakeSink{}
-	inbox := &fakeInbox{}
+	inbox := &fakeInbox{waitErr: context.Canceled}
 	r := newTestRunner(t, model, inbox, sink, rec, Options{MaxTurns: 3})
 
-	err := r.run(context.Background())
-	if err == nil {
-		t.Fatal("expected an error when the context window is exceeded")
+	// model_context_window_exceeded must never end the room: it reports the
+	// error and goes idle like a refusal, waiting for a human. The cancelled
+	// inbox ends this run cleanly once it starts waiting.
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
 	}
-	found := false
+	var errDetail string
+	var sawIdle bool
 	for _, s := range sink.ofType(events.AgentStatus) {
 		var p events.AgentStatusPayload
-		if json.Unmarshal(s.payload, &p) == nil && p.State == "error" {
-			found = true
+		if json.Unmarshal(s.payload, &p) != nil {
+			continue
+		}
+		if p.State == "error" {
+			errDetail = p.Detail
+		}
+		if p.State == "idle" {
+			sawIdle = true
 		}
 	}
-	if !found {
+	if errDetail == "" {
 		t.Fatalf("expected agent.status error, got %v", sink.ofType(events.AgentStatus))
+	}
+	if !sawIdle {
+		t.Fatalf("expected agent.status idle after context window exceeded, got %v", sink.ofType(events.AgentStatus))
+	}
+	if msgs := sink.ofType(events.AgentMessage); len(msgs) == 0 {
+		t.Fatalf("expected an agent.message after context window exceeded")
+	}
+}
+
+// TestRunContextWindowExceededWithPendingToolUseCarriesResult covers the
+// [LEAD-ARCH] round-1 must-fix: a turn that stops on
+// model_context_window_exceeded can still carry a tool_use block (the model
+// ran a tool, then ran out of room before it could stop normally). The
+// pause-and-wait path must send that tool's result back before — in the same
+// user message as — the human input that resumes the loop, or the next
+// request has a tool_use with no matching tool_result and the API rejects it
+// outright.
+func TestRunContextWindowExceededWithPendingToolUseCarriesResult(t *testing.T) {
+	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
+		mustMessage(t, `{"stop_reason":"model_context_window_exceeded","content":[
+			{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"check connect","connector":"pg-orders-connector"}}
+		]}`),
+		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}`),
+	}}
+	sink := &fakeSink{}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil, // before turn 0
+			{{Kind: "steer", Actor: events.Actor{Name: "Arjun"}, Text: "keep going"}},
+		},
+		waitErr: context.Canceled,
+	}
+	r := newTestRunner(t, model, inbox, sink, rec, Options{MaxTurns: 5})
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(model.calls) < 2 {
+		t.Fatalf("expected at least 2 model calls, got %d", len(model.calls))
+	}
+	// The second request's last message must carry both the pending
+	// tool_result for tu1 and the human steer, in that order, in one message.
+	last := lastMessage(model.calls)
+	js := messagesJSON([]anthropic.BetaMessageParam{last})
+	if !strings.Contains(js, `"tool_use_id":"tu1"`) {
+		t.Fatalf("pending tool_result for tu1 missing from the resumed request: %s", js)
+	}
+	if !strings.Contains(js, "keep going") {
+		t.Fatalf("human input missing from the resumed request: %s", js)
+	}
+	if len(rec.inputsAsJSON()) != 1 {
+		t.Fatalf("expected the tool to have run once before the window was exceeded, got %d", len(rec.inputsAsJSON()))
 	}
 }
 
@@ -454,8 +516,8 @@ func TestProposeFixNilProposals(t *testing.T) {
 // ---- handoff refusal ----
 
 func TestWriteHandoffRefusal(t *testing.T) {
-	m := &handoffModel{msg: anthropic.Message{
-		StopReason: anthropic.StopReasonRefusal,
+	m := &handoffModel{msg: anthropic.BetaMessage{
+		StopReason: anthropic.BetaStopReasonRefusal,
 		Content:    nil,
 	}}
 	_, err := writeHandoff(context.Background(), []events.Event{{Type: events.RoomCreated}}, Options{}, m)

@@ -23,7 +23,7 @@ type toolEntry struct {
 // toolList is the stable, ordered set of tools sent to the model plus the
 // lookup table used to execute tool_use blocks.
 type toolList struct {
-	params []anthropic.ToolUnionParam
+	params []anthropic.BetaToolUnionParam
 	byName map[string]toolEntry
 }
 
@@ -46,8 +46,8 @@ func buildToolList(reg *tools.Registry, room []tools.Tool) toolList {
 	// Put a cache breakpoint after the tool list (the last tool).
 	if n := len(tl.params); n > 0 {
 		if tp := tl.params[n-1].OfTool; tp != nil {
-			tp.CacheControl = anthropic.NewCacheControlEphemeralParam()
-			tl.params[n-1] = anthropic.ToolUnionParam{OfTool: tp}
+			tp.CacheControl = anthropic.NewBetaCacheControlEphemeralParam()
+			tl.params[n-1] = anthropic.BetaToolUnionParam{OfTool: tp}
 		}
 	}
 	return tl
@@ -57,7 +57,7 @@ func buildToolList(reg *tools.Registry, room []tools.Tool) toolList {
 // wrapWhy is set, an extra required string property "why" is injected into the
 // schema; the agent strips it before calling Tool.Run and uses it as the step
 // title.
-func toolParam(t tools.Tool, wrapWhy bool) anthropic.ToolUnionParam {
+func toolParam(t tools.Tool, wrapWhy bool) anthropic.BetaToolUnionParam {
 	schema := t.InputSchema()
 
 	props := map[string]any{}
@@ -88,19 +88,19 @@ func toolParam(t tools.Tool, wrapWhy bool) anthropic.ToolUnionParam {
 		addAdditionalPropertiesFalse(v)
 	}
 
-	tp := anthropic.ToolParam{
+	tp := anthropic.BetaToolParam{
 		Name:        t.Name(),
 		Description: anthropic.String(t.Description()),
-		InputSchema: anthropic.ToolInputSchemaParam{
+		InputSchema: anthropic.BetaToolInputSchemaParam{
 			Properties:  props,
 			Required:    required,
 			ExtraFields: map[string]any{"additionalProperties": false},
 		},
 		Strict:              anthropic.Bool(true),
 		EagerInputStreaming: anthropic.Bool(true),
-		Type:                anthropic.ToolTypeCustom,
+		Type:                anthropic.BetaToolTypeCustom,
 	}
-	return anthropic.ToolUnionParam{OfTool: &tp}
+	return anthropic.BetaToolUnionParam{OfTool: &tp}
 }
 
 // cloneSchema deep-copies a JSON Schema fragment so adding strictness flags to

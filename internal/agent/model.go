@@ -12,8 +12,13 @@ import (
 // model is the seam between the investigation loop and the Claude API. It
 // returns one accumulated assistant turn per call. The production
 // implementation streams; tests replace it with a scripted fake.
+//
+// It talks to the Beta Messages API (anthropic.Client.Beta.Messages), not the
+// stable one: server-side compaction (beta compact-2026-01-12) is only
+// available there. See run.go's request() for the beta header and context
+// management config.
 type model interface {
-	Turn(ctx context.Context, params anthropic.MessageNewParams) (anthropic.Message, error)
+	Turn(ctx context.Context, params anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error)
 }
 
 // modelTimeout bounds a single model turn. The SDK itself recommends allowing
@@ -40,12 +45,12 @@ func newModel(opts Options, log *slog.Logger) model {
 	}
 }
 
-func (m *anthropicModel) Turn(ctx context.Context, params anthropic.MessageNewParams) (anthropic.Message, error) {
+func (m *anthropicModel) Turn(ctx context.Context, params anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, modelTimeout)
 	defer cancel()
 
-	stream := m.client.Messages.NewStreaming(ctx, params)
-	var msg anthropic.Message
+	stream := m.client.Beta.Messages.NewStreaming(ctx, params)
+	var msg anthropic.BetaMessage
 	for stream.Next() {
 		if err := msg.Accumulate(stream.Current()); err != nil {
 			return msg, fmt.Errorf("agent: accumulate stream event: %w", err)

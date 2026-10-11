@@ -18,39 +18,39 @@ import (
 // scriptedModel returns a fixed sequence of assistant turns and records the
 // messages each request sent, so tests can assert history is append-only.
 type scriptedModel struct {
-	turns []anthropic.Message
-	calls [][]anthropic.MessageParam
+	turns []anthropic.BetaMessage
+	calls [][]anthropic.BetaMessageParam
 }
 
-func (m *scriptedModel) Turn(_ context.Context, p anthropic.MessageNewParams) (anthropic.Message, error) {
+func (m *scriptedModel) Turn(_ context.Context, p anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
 	m.calls = append(m.calls, cloneMessages(p.Messages))
 	i := len(m.calls) - 1
 	if i < len(m.turns) {
 		return m.turns[i], nil
 	}
-	return anthropic.Message{
-		StopReason: anthropic.StopReasonEndTurn,
-		Content:    []anthropic.ContentBlockUnion{{Type: "text", Text: "done"}},
+	return anthropic.BetaMessage{
+		StopReason: anthropic.BetaStopReasonEndTurn,
+		Content:    []anthropic.BetaContentBlockUnion{{Type: "text", Text: "done"}},
 	}, nil
 }
 
 // cloneMessages deep-copies via JSON so the captured history is immune to any
 // later append reallocating the backing array.
-func cloneMessages(ms []anthropic.MessageParam) []anthropic.MessageParam {
+func cloneMessages(ms []anthropic.BetaMessageParam) []anthropic.BetaMessageParam {
 	b, err := json.Marshal(ms)
 	if err != nil {
 		return nil
 	}
-	var out []anthropic.MessageParam
+	var out []anthropic.BetaMessageParam
 	if err := json.Unmarshal(b, &out); err != nil {
 		return nil
 	}
 	return out
 }
 
-func mustMessage(t *testing.T, s string) anthropic.Message {
+func mustMessage(t *testing.T, s string) anthropic.BetaMessage {
 	t.Helper()
-	var m anthropic.Message
+	var m anthropic.BetaMessage
 	if err := json.Unmarshal([]byte(s), &m); err != nil {
 		t.Fatalf("bad scripted message: %v", err)
 	}
@@ -62,11 +62,25 @@ type fakeInbox struct {
 	drains     [][]HumanInput
 	drainCalls int
 	waitErr    error
+
+	// drainErr, when set, is returned by the next drainErrTimes calls to
+	// Drain (consumed before drains), so tests can script a flaky store.
+	drainErr      error
+	drainErrTimes int
+	// waitImmediate, when set, makes Wait return nil at once instead of
+	// blocking on ctx.Done() — a "wait says something changed" signal that
+	// carries no information of its own, used to test that a Drain error
+	// does not spin the loop.
+	waitImmediate bool
 }
 
 func (f *fakeInbox) Drain(_ context.Context) ([]HumanInput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.drainErrTimes > 0 {
+		f.drainErrTimes--
+		return nil, f.drainErr
+	}
 	if f.drainCalls < len(f.drains) {
 		out := f.drains[f.drainCalls]
 		f.drainCalls++
@@ -78,6 +92,9 @@ func (f *fakeInbox) Drain(_ context.Context) ([]HumanInput, error) {
 func (f *fakeInbox) Wait(ctx context.Context) error {
 	if f.waitErr != nil {
 		return f.waitErr
+	}
+	if f.waitImmediate {
+		return nil
 	}
 	<-ctx.Done()
 	return ctx.Err()
@@ -178,12 +195,12 @@ func newTestRunner(t *testing.T, model model, inbox Inbox, sink Sink, tool tools
 
 // ---- helpers ----
 
-func messagesJSON(ms []anthropic.MessageParam) string {
+func messagesJSON(ms []anthropic.BetaMessageParam) string {
 	b, _ := json.Marshal(ms)
 	return string(b)
 }
 
-func countToolResults(m anthropic.MessageParam) int {
+func countToolResults(m anthropic.BetaMessageParam) int {
 	n := 0
 	for _, b := range m.Content {
 		if b.OfToolResult != nil {
@@ -193,7 +210,7 @@ func countToolResults(m anthropic.MessageParam) int {
 	return n
 }
 
-func lastMessage(calls [][]anthropic.MessageParam) anthropic.MessageParam {
+func lastMessage(calls [][]anthropic.BetaMessageParam) anthropic.BetaMessageParam {
 	last := calls[len(calls)-1]
 	return last[len(last)-1]
 }
@@ -202,7 +219,7 @@ func lastMessage(calls [][]anthropic.MessageParam) anthropic.MessageParam {
 
 func TestRunParallelToolCallsProduceOneUserMessage(t *testing.T) {
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
-	model := &scriptedModel{turns: []anthropic.Message{
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
 		mustMessage(t, `{"stop_reason":"tool_use","content":[
 			{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"check connect","connector":"pg-orders-connector"}},
 			{"type":"tool_use","id":"tu2","name":"connect_status","input":{"why":"check again","connector":"other"}}
@@ -229,7 +246,7 @@ func TestRunParallelToolCallsProduceOneUserMessage(t *testing.T) {
 
 func TestRunWhyIsStripped(t *testing.T) {
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
-	model := &scriptedModel{turns: []anthropic.Message{
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
 		mustMessage(t, `{"stop_reason":"tool_use","content":[
 			{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"check connect","connector":"pg-orders-connector"}}
 		]}`),
@@ -267,7 +284,7 @@ func TestRunWhyIsStripped(t *testing.T) {
 
 func TestRunUnknownToolIsError(t *testing.T) {
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
-	model := &scriptedModel{turns: []anthropic.Message{
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
 		mustMessage(t, `{"stop_reason":"tool_use","content":[
 			{"type":"tool_use","id":"tu1","name":"no_such_tool","input":{"why":"probe"}}
 		]}`),
@@ -297,7 +314,7 @@ func TestRunUnknownToolIsError(t *testing.T) {
 
 func TestRunInboxInputLandsInNextUserMessage(t *testing.T) {
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
-	model := &scriptedModel{turns: []anthropic.Message{
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
 		mustMessage(t, `{"stop_reason":"tool_use","content":[
 			{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"check connect","connector":"pg-orders-connector"}}
 		]}`),
@@ -320,7 +337,7 @@ func TestRunInboxInputLandsInNextUserMessage(t *testing.T) {
 		t.Fatalf("expected at least 2 model calls, got %d", len(model.calls))
 	}
 	last := lastMessage(model.calls)
-	js := messagesJSON([]anthropic.MessageParam{last})
+	js := messagesJSON([]anthropic.BetaMessageParam{last})
 	if !strings.Contains(js, "also check order_items") {
 		t.Fatalf("human input missing from next user message: %s", js)
 	}
@@ -328,7 +345,7 @@ func TestRunInboxInputLandsInNextUserMessage(t *testing.T) {
 
 func TestRunHistoryNeverMutated(t *testing.T) {
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
-	model := &scriptedModel{turns: []anthropic.Message{
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
 		mustMessage(t, `{"stop_reason":"tool_use","content":[
 			{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"check connect","connector":"pg-orders-connector"}}
 		]}`),
@@ -359,7 +376,7 @@ func TestRunHistoryNeverMutated(t *testing.T) {
 
 func TestRunRefusalGoesIdleAndWaits(t *testing.T) {
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
-	model := &scriptedModel{turns: []anthropic.Message{
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
 		mustMessage(t, `{"stop_reason":"refusal","content":[],"stop_details":{"category":"general_harms","explanation":"cannot do this"}}`),
 	}}
 	sink := &fakeSink{}
@@ -405,7 +422,7 @@ func TestRunRefusalGoesIdleAndWaits(t *testing.T) {
 
 func TestRunMaxTurnsPausesAndResetsOnInput(t *testing.T) {
 	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "ok"}}
-	model := &scriptedModel{turns: []anthropic.Message{
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
 		mustMessage(t, `{"stop_reason":"tool_use","content":[
 			{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"check connect","connector":"pg-orders-connector"}}
 		]}`),
@@ -440,7 +457,7 @@ func TestRunMaxTurnsPausesAndResetsOnInput(t *testing.T) {
 		t.Fatalf("expected an idle status noting max turns, got %v", statuses)
 	}
 	last := lastMessage(model.calls)
-	if !strings.Contains(messagesJSON([]anthropic.MessageParam{last}), "keep going") {
-		t.Fatalf("resumed request should carry the human steer: %s", messagesJSON([]anthropic.MessageParam{last}))
+	if !strings.Contains(messagesJSON([]anthropic.BetaMessageParam{last}), "keep going") {
+		t.Fatalf("resumed request should carry the human steer: %s", messagesJSON([]anthropic.BetaMessageParam{last}))
 	}
 }

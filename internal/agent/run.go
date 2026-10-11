@@ -30,7 +30,35 @@ var (
 	toolTimeout = 10 * time.Second
 	// roomToolTimeout bounds one room tool call (hypothesis, proposal, message).
 	roomToolTimeout = 10 * time.Second
+	// drainBackoffMin/Max bound the backoff waitForInput applies when
+	// Inbox.Drain keeps failing while Wait keeps returning at once: without a
+	// backoff that combination spins the loop at full speed. Vars so tests can
+	// shrink them.
+	drainBackoffMin = 250 * time.Millisecond
+	drainBackoffMax = 5 * time.Second
 )
+
+// clock abstracts time so tests can verify backoff behavior without waiting
+// on a real timer.
+type clock interface {
+	// Sleep blocks for d or until ctx ends, whichever comes first, and
+	// reports ctx.Err() when ctx ends first.
+	Sleep(ctx context.Context, d time.Duration) error
+}
+
+// realClock sleeps for real; it is the production clock.
+type realClock struct{}
+
+func (realClock) Sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // ErrInboxClosed reports that the Inbox will deliver no more input (for
 // example stdin reached EOF). Run treats it as a clean shutdown once any
@@ -44,6 +72,7 @@ type runner struct {
 	opts  Options
 	log   *slog.Logger
 	model model
+	clk   clock
 
 	toolList toolList
 	system   string
@@ -85,6 +114,7 @@ func newRunner(alert Alert, deps Deps, opts Options) (*runner, error) {
 		opts:  opts,
 		log:   deps.Logger,
 		model: newModel(opts, deps.Logger),
+		clk:   realClock{},
 	}, nil
 }
 
@@ -96,7 +126,7 @@ func (r *runner) run(ctx context.Context) error {
 
 	// Drain anything already waiting before the first turn so an early steer is
 	// part of the opening prompt.
-	messages := []anthropic.MessageParam{r.initialMessage(r.drain(ctx))}
+	messages := []anthropic.BetaMessageParam{r.initialMessage(r.drain(ctx))}
 
 	// turns counts model turns since the last human input. It is a per-episode
 	// runaway guard, not a lifetime cap: fresh human input resets it.
@@ -141,7 +171,7 @@ func (r *runner) run(ctx context.Context) error {
 			return fmt.Errorf("agent: model turn: %w", err)
 		}
 
-		if resp.StopReason == anthropic.StopReasonRefusal {
+		if resp.StopReason == anthropic.BetaStopReasonRefusal {
 			reason := refusalReason(resp)
 			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
 				State:  "error",
@@ -152,16 +182,9 @@ func (r *runner) run(ctx context.Context) error {
 			})
 			// Do not append the refused turn; a refusal must never end the
 			// investigation for everyone. Go idle and wait like end_turn.
-			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
-			inputs, err := r.waitForInput(ctx)
-			if err != nil {
-				return stopErr(err)
+			if stop, err := r.pauseForHumanInput(ctx, &messages, &turns, nil); stop {
+				return err
 			}
-			if len(inputs) == 0 {
-				return nil
-			}
-			messages = append(messages, r.humanMessage(inputs))
-			turns = 0
 			continue
 		}
 
@@ -178,34 +201,47 @@ func (r *runner) run(ctx context.Context) error {
 		}
 
 		switch resp.StopReason {
-		case anthropic.StopReasonEndTurn, anthropic.StopReasonStopSequence:
-			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
-			inputs, err := r.waitForInput(ctx)
-			if err != nil {
-				return stopErr(err)
+		case anthropic.BetaStopReasonEndTurn, anthropic.BetaStopReasonStopSequence:
+			// resultBlocks is empty here in practice (the model does not stop
+			// with end_turn while also requesting a tool), but pass it anyway:
+			// if a turn's content ever did carry a tool_use with one of these
+			// stop reasons, dropping its result would leave a tool_use in
+			// history with no matching tool_result, which the API rejects on
+			// the very next request.
+			if stop, err := r.pauseForHumanInput(ctx, &messages, &turns, resultBlocks); stop {
+				return err
 			}
-			if len(inputs) == 0 {
-				return nil
-			}
-			messages = append(messages, r.humanMessage(inputs))
-			turns = 0
-		case anthropic.StopReasonModelContextWindowExceeded:
+		case anthropic.BetaStopReasonModelContextWindowExceeded:
+			// This must never end the room: report it and wait for a human,
+			// the same as a refusal. Server-side compaction (see request())
+			// should make this rare, but a single turn's input can still
+			// exceed the window (for example right after a burst of human
+			// steers), and the room must stay usable. The turn's tool results
+			// (resultBlocks) must still go back first: the assistant turn was
+			// already appended above, and any tool_use in it needs a matching
+			// tool_result in the very next message or the API rejects the
+			// next request outright.
 			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
 				State:  "error",
 				Detail: "model context window exceeded",
 			})
-			return errors.New("agent: model context window exceeded")
+			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{
+				Text: "I've exceeded the model's context window for this turn and can't continue. Please steer me or confirm before I continue.",
+			})
+			if stop, err := r.pauseForHumanInput(ctx, &messages, &turns, resultBlocks); stop {
+				return err
+			}
 		default:
 			// tool_use, max_tokens and pause_turn all continue: the next user
 			// message carries the tool results plus any human input that arrived
 			// while we were running.
 			inputs := r.drain(ctx)
-			blocks := append([]anthropic.ContentBlockParamUnion(nil), resultBlocks...)
+			blocks := append([]anthropic.BetaContentBlockParamUnion(nil), resultBlocks...)
 			blocks = append(blocks, r.humanBlocks(inputs)...)
 			if len(blocks) == 0 {
-				blocks = append(blocks, anthropic.NewTextBlock("Continue."))
+				blocks = append(blocks, anthropic.NewBetaTextBlock("Continue."))
 			}
-			messages = append(messages, anthropic.NewUserMessage(blocks...))
+			messages = append(messages, anthropic.NewBetaUserMessage(blocks...))
 			if len(inputs) > 0 {
 				turns = 0
 			}
@@ -215,42 +251,56 @@ func (r *runner) run(ctx context.Context) error {
 
 // request assembles one model request. The system prompt and tool list are
 // stable so the prompt cache stays warm.
-func (r *runner) request(messages []anthropic.MessageParam) anthropic.MessageNewParams {
-	return anthropic.MessageNewParams{
+//
+// It asks for server-side compaction (beta compact-2026-01-12): once the
+// conversation passes the server's input-token trigger, the response gets an
+// extra compaction content block summarizing the oldest messages, in place of
+// a stop. Run keeps history append-only either way — resp.ToParam() carries
+// that block back in the next request's messages exactly like any other
+// content block, never specially — which is what lets a room survive hours
+// of steers and tool calls without hitting the model's context window.
+func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMessageNewParams {
+	return anthropic.BetaMessageNewParams{
 		Model:     r.opts.Model,
 		MaxTokens: maxTokens,
-		System:    []anthropic.TextBlockParam{{Text: r.system, CacheControl: anthropic.NewCacheControlEphemeralParam()}},
+		Betas:     []anthropic.AnthropicBeta{anthropic.AnthropicBetaCompact2026_01_12},
+		System:    []anthropic.BetaTextBlockParam{{Text: r.system, CacheControl: anthropic.NewBetaCacheControlEphemeralParam()}},
 		Tools:     r.toolList.params,
 		Messages:  messages,
-		OutputConfig: anthropic.OutputConfigParam{
-			Effort: anthropic.OutputConfigEffort(r.opts.effort()),
+		OutputConfig: anthropic.BetaOutputConfigParam{
+			Effort: anthropic.BetaOutputConfigEffort(r.opts.effort()),
 		},
-		Thinking: anthropic.ThinkingConfigParamUnion{
-			OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{},
+		Thinking: anthropic.BetaThinkingConfigParamUnion{
+			OfAdaptive: &anthropic.BetaThinkingConfigAdaptiveParam{},
 		},
-		ToolChoice: anthropic.ToolChoiceUnionParam{
-			OfAuto: &anthropic.ToolChoiceAutoParam{},
+		ToolChoice: anthropic.BetaToolChoiceUnionParam{
+			OfAuto: &anthropic.BetaToolChoiceAutoParam{},
+		},
+		ContextManagement: anthropic.BetaContextManagementConfigParam{
+			Edits: []anthropic.BetaContextManagementConfigEditUnionParam{
+				{OfCompact20260112: &anthropic.BetaCompact20260112EditParam{}},
+			},
 		},
 		// Top-level cache control applies a breakpoint to the last cacheable
 		// block, so each turn re-reads the conversation history from cache.
-		CacheControl: anthropic.NewCacheControlEphemeralParam(),
+		CacheControl: anthropic.NewBetaCacheControlEphemeralParam(),
 	}
 }
 
-func (r *runner) initialMessage(inputs []HumanInput) anthropic.MessageParam {
-	blocks := []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(firstUserMessage(r.alert))}
+func (r *runner) initialMessage(inputs []HumanInput) anthropic.BetaMessageParam {
+	blocks := []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(firstUserMessage(r.alert))}
 	blocks = append(blocks, r.humanBlocks(inputs)...)
-	return anthropic.NewUserMessage(blocks...)
+	return anthropic.NewBetaUserMessage(blocks...)
 }
 
-func (r *runner) humanMessage(inputs []HumanInput) anthropic.MessageParam {
-	return anthropic.NewUserMessage(r.humanBlocks(inputs)...)
+func (r *runner) humanMessage(inputs []HumanInput) anthropic.BetaMessageParam {
+	return anthropic.NewBetaUserMessage(r.humanBlocks(inputs)...)
 }
 
-func (r *runner) humanBlocks(inputs []HumanInput) []anthropic.ContentBlockParamUnion {
-	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(inputs))
+func (r *runner) humanBlocks(inputs []HumanInput) []anthropic.BetaContentBlockParamUnion {
+	blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(inputs))
 	for _, in := range inputs {
-		blocks = append(blocks, anthropic.NewTextBlock(formatHumanInput(in)))
+		blocks = append(blocks, anthropic.NewBetaTextBlock(formatHumanInput(in)))
 	}
 	return blocks
 }
@@ -269,15 +319,61 @@ func (r *runner) drain(ctx context.Context) []HumanInput {
 // ends. A spurious Wake (or a stale notify token) with nothing to drain must
 // not end the loop: wait again, so the next request never ends with an
 // assistant turn (which Opus rejects as a prefill with HTTP 400).
+//
+// If Drain itself keeps failing (for example a flaky store) while Wait keeps
+// returning at once, draining again immediately would spin the loop at full
+// speed; an increasing backoff between failed drains bounds that.
 func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
+	backoff := drainBackoffMin
 	for {
-		if inputs := r.drain(ctx); len(inputs) > 0 {
+		inputs, err := r.deps.Inbox.Drain(ctx)
+		if err != nil {
+			r.log.Warn("agent: inbox drain failed", "err", err)
+			if serr := r.clk.Sleep(ctx, backoff); serr != nil {
+				return nil, serr
+			}
+			if backoff *= 2; backoff > drainBackoffMax {
+				backoff = drainBackoffMax
+			}
+			continue
+		}
+		if len(inputs) > 0 {
 			return inputs, nil
 		}
+		backoff = drainBackoffMin
 		if err := r.deps.Inbox.Wait(ctx); err != nil {
 			return nil, err
 		}
 	}
+}
+
+// pauseForHumanInput emits an idle status and waits for human input. pending
+// is any tool_result (and similar) blocks still owed to the model for the
+// assistant turn just appended to history — every tool_use in that turn must
+// be matched by a tool_result in the very next message, or the API rejects
+// the next request outright, so pending always goes out first, ahead of the
+// human input, in the same user message. Pass nil when the turn had no
+// pending tool calls.
+//
+// When input arrives, that combined message is appended and the turn counter
+// resets. The bool return reports whether Run should return now (the room
+// closed while waiting); when it is true, the error return is what Run
+// should return. If the room closes before input arrives, pending is
+// dropped along with everything else: Run is about to return, so no further
+// request will ever need it.
+func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int, pending []anthropic.BetaContentBlockParamUnion) (bool, error) {
+	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
+	inputs, err := r.waitForInput(ctx)
+	if err != nil {
+		return true, stopErr(err)
+	}
+	if len(inputs) == 0 {
+		return true, nil
+	}
+	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.humanBlocks(inputs)...)
+	*messages = append(*messages, anthropic.NewBetaUserMessage(blocks...))
+	*turns = 0
+	return false, nil
 }
 
 // emit writes one event to the sink, serialized so parallel tool steps cannot
@@ -301,7 +397,7 @@ func stopErr(err error) error {
 
 // refusalReason renders the structured refusal details into a short, stable
 // reason string for the room log and the agent's message.
-func refusalReason(m anthropic.Message) string {
+func refusalReason(m anthropic.BetaMessage) string {
 	d := m.StopDetails
 	if d.Category == "" && d.Explanation == "" {
 		return "model refused the request"
@@ -316,7 +412,7 @@ func refusalReason(m anthropic.Message) string {
 }
 
 // splitContent separates an assistant turn into text and tool_use blocks.
-func splitContent(content []anthropic.ContentBlockUnion) (texts []string, uses []toolUse) {
+func splitContent(content []anthropic.BetaContentBlockUnion) (texts []string, uses []toolUse) {
 	for _, block := range content {
 		switch block.Type {
 		case "text":
@@ -347,7 +443,7 @@ type toolResult struct {
 // runToolUses executes every tool_use. Room tools run inline in order; read
 // tools run in parallel (max 4). The returned blocks preserve the model's
 // original order.
-func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.ContentBlockParamUnion {
+func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.BetaContentBlockParamUnion {
 	results := make([]toolResult, len(uses))
 
 	// Room tools first: they are fast and often steer the turn.
@@ -384,9 +480,9 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Co
 	}
 	wg.Wait()
 
-	blocks := make([]anthropic.ContentBlockParamUnion, 0, len(results))
+	blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(results))
 	for _, res := range results {
-		blocks = append(blocks, anthropic.NewToolResultBlock(res.toolUseID, res.content, res.isError))
+		blocks = append(blocks, anthropic.NewBetaToolResultBlock(res.toolUseID, res.content, res.isError))
 	}
 	return blocks
 }
