@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -620,5 +621,125 @@ func TestUnexpectedCloseIsError(t *testing.T) {
 func TestCleanDropsFormatChars(t *testing.T) {
 	if got := clean("a‮b​c"); got != "abc" {
 		t.Errorf("clean = %q", got)
+	}
+}
+
+func TestLayersCapped(t *testing.T) {
+	layers := make([]string, 200)
+	for i := range layers {
+		layers[i] = strings.Repeat("l", 60)
+	}
+	evs := []events.Event{
+		ev(1, events.RoomCreated, "ana", payloadFor(events.RoomCreated)),
+		ev(2, events.ProposalCreated, "ana", events.ProposalCreatedPayload{ProposalID: "p", Title: "t", RequiredLayers: layers}),
+		ev(3, events.ProposalCreated, "ana", events.ProposalCreatedPayload{ProposalID: "q", Title: "t"}),
+		ev(4, events.RoomClosed, "ana", payloadFor(events.RoomClosed)),
+	}
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, nil)
+	if err := b.Run(context.Background(), "r1"); err != nil {
+		t.Fatal(err)
+	}
+	var sawMore, sawNone bool
+	for _, tx := range allTexts(fs.reqs[1]) {
+		s := tx["text"].(string)
+		if len(s) > 3000 {
+			t.Errorf("text %d bytes", len(s))
+		}
+		sawMore = sawMore || strings.Contains(s, "+190 more")
+	}
+	for _, tx := range allTexts(fs.reqs[2]) {
+		sawNone = sawNone || strings.Contains(tx["text"].(string), "(none)")
+	}
+	if !sawMore || !sawNone {
+		t.Errorf("more=%v none=%v", sawMore, sawNone)
+	}
+}
+
+func TestMinimalParentSavedBeforeReply(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	fs := &fakeSlack{reply: func(n int, w http.ResponseWriter) {
+		if n == 1 { // the minimal parent
+			_, _ = io.WriteString(w, `{"ok":true,"channel":"C","ts":"7.7"}`)
+			return
+		}
+		cancel() // shutdown while the reply is in flight
+		w.WriteHeader(503)
+	}}
+	th := NewMemThreads()
+	evs := []events.Event{ev(3, events.AgentHypothesis, "ana", payloadFor(events.AgentHypothesis))}
+	b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) { o.Threads = th })
+	if err := b.Run(ctx, "r1"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v", err)
+	}
+	got, ok, _ := th.Get(context.Background(), "r1")
+	if !ok || got.TS != "7.7" || got.Channel != "C" || got.LastSeq != 0 {
+		t.Errorf("thread = %+v; the parent must be saved and the event left for the restart", got)
+	}
+}
+
+type failingThreads struct{ MemThreads }
+
+func (f *failingThreads) Put(context.Context, string, Thread) error { return errors.New("db down") }
+
+func TestPutFailureIsLoggedNotFatal(t *testing.T) {
+	var logs bytes.Buffer
+	evs := []events.Event{
+		ev(1, events.RoomCreated, "ana", payloadFor(events.RoomCreated)),
+		ev(2, events.RoomClosed, "ana", payloadFor(events.RoomClosed)),
+	}
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) {
+		o.Threads = &failingThreads{MemThreads: *NewMemThreads()}
+		o.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	})
+	if err := b.Run(context.Background(), "r1"); err != nil {
+		t.Fatal(err)
+	}
+	if fs.count() != 2 || !strings.Contains(logs.String(), "db down") {
+		t.Errorf("reqs=%d logs=%s", fs.count(), logs.String())
+	}
+}
+
+func TestHandoffLists(t *testing.T) {
+	open := []string{"a", "b", "c", "d", "e", "f", "g"}
+	evs := []events.Event{
+		ev(1, events.RoomCreated, "ana", payloadFor(events.RoomCreated)),
+		ev(2, events.HandoffCreated, "ana", events.HandoffCreatedPayload{To: events.Actor{ID: "u2"},
+			Summary: events.HandoffSummary{WhatBroke: "x", Why: "y", Open: open, Risks: []string{"<r>"}}}),
+		ev(3, events.RoomClosed, "ana", payloadFor(events.RoomClosed)),
+	}
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, nil)
+	if err := b.Run(context.Background(), "r1"); err != nil {
+		t.Fatal(err)
+	}
+	var all string
+	for _, tx := range allTexts(fs.reqs[1]) {
+		all += tx["text"].(string) + "\n"
+	}
+	for _, want := range []string{"to u2", "• e", "+2 more", "• &lt;r&gt;"} {
+		if !strings.Contains(all, want) {
+			t.Errorf("missing %q in %q", want, all)
+		}
+	}
+	if strings.Contains(all, "• f") {
+		t.Error("list not capped at 5")
+	}
+}
+
+func TestErrCode(t *testing.T) {
+	cases := map[string]error{
+		"not_in_channel": &APIError{Code: "not_in_channel"},
+		"rate_limited":   fmt.Errorf("x: %w", ErrRateLimited),
+		"http_503":       fmt.Errorf("x: %w", &httpError{503}),
+		"timeout":        fmt.Errorf("x: %w", context.DeadlineExceeded),
+		"canceled":       context.Canceled,
+		"transport":      errors.New("connection reset"),
+	}
+	for want, err := range cases {
+		if got := errCode(err); got != want {
+			t.Errorf("errCode(%v) = %q, want %q", err, got, want)
+		}
 	}
 }

@@ -108,7 +108,9 @@ var fatalCodes = map[string]bool{
 	"not_in_channel": true, "is_archived": true,
 }
 
-// Run mirrors one room until it closes, ctx ends or Slack reports a fatal error.
+// Run mirrors one room until it closes, ctx ends or Slack reports a fatal
+// error. Call it only for open rooms: for a room whose close was already
+// mirrored it waits for new events until ctx ends.
 func (b *Bridge) Run(ctx context.Context, roomID string) error {
 	b.mu.Lock()
 	if b.running[roomID] {
@@ -154,7 +156,7 @@ func (b *Bridge) Run(ctx context.Context, roomID string) error {
 			}
 			next, err := b.mirror(ctx, r, e, th)
 			if err != nil {
-				return err
+				return fmt.Errorf("slackbridge: room %s: %w", roomID, err)
 			}
 			th = next
 			if e.Type == events.RoomClosed {
@@ -175,6 +177,9 @@ func (b *Bridge) mirror(ctx context.Context, r *renderer, e events.Event, th Thr
 			}
 		} else {
 			th.Channel, th.TS = res.Channel, res.TS
+			// Save the parent now: if ctx ends before the reply below is
+			// posted, a restart must reuse this parent, not post another.
+			b.put(ctx, e, th)
 		}
 	}
 	var (
@@ -189,7 +194,7 @@ func (b *Bridge) mirror(ctx context.Context, r *renderer, e events.Event, th Thr
 		msg, ok, err = r.reply(e)
 	}
 	if err != nil {
-		b.log.Warn("slack render failed", "room_id", e.RoomID, "seq", e.Seq, "type", string(e.Type))
+		b.log.Warn("slack render failed", "room_id", e.RoomID, "seq", e.Seq, "type", string(e.Type), "err", err)
 	}
 	if ok && (e.Type == events.RoomCreated || th.TS != "") {
 		channel, thread := b.channel, ""
@@ -209,10 +214,16 @@ func (b *Bridge) mirror(ctx context.Context, r *renderer, e events.Event, th Thr
 		}
 	}
 	th.LastSeq = e.Seq
-	if err := b.threads.Put(ctx, e.RoomID, th); err != nil {
-		b.log.Warn("slack thread state not saved", "room_id", e.RoomID, "seq", e.Seq)
-	}
+	b.put(ctx, e, th)
 	return th, nil
+}
+
+// put saves thread state. A failure is logged, not returned: the Slack post
+// already happened, and a restart then repeats at most this one message.
+func (b *Bridge) put(ctx context.Context, e events.Event, th Thread) {
+	if err := b.threads.Put(ctx, e.RoomID, th); err != nil {
+		b.log.Warn("slack thread state not saved", "room_id", e.RoomID, "seq", e.Seq, "err", err)
+	}
 }
 
 // send posts m to channel. Log lines hold only ids and the Slack code, never text or the token.
@@ -234,12 +245,23 @@ func (b *Bridge) send(ctx context.Context, e events.Event, m message, channel, t
 	return res, nil
 }
 
+// errCode names a failure for logs without quoting any message text.
 func errCode(err error) string {
 	var ae *APIError
-	if errors.As(err, &ae) {
+	var he *httpError
+	switch {
+	case errors.As(err, &ae):
 		return ae.Code
+	case errors.Is(err, ErrRateLimited):
+		return "rate_limited"
+	case errors.As(err, &he):
+		return fmt.Sprintf("http_%d", he.Status)
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
 	}
-	return "error"
+	return "transport"
 }
 
 func isFatal(err error) bool {

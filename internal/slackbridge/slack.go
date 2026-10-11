@@ -35,6 +35,13 @@ type APIError struct{ Code string }
 
 func (e *APIError) Error() string { return "slackbridge: chat.postMessage: slack error " + e.Code }
 
+// httpError is a non-200 reply with no Slack JSON verdict (429, 5xx, redirects).
+type httpError struct{ Status int }
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("slackbridge: chat.postMessage: HTTP %d", e.Status)
+}
+
 type textObj struct {
 	Type     string `json:"type"`
 	Text     string `json:"text"`
@@ -187,11 +194,11 @@ func (c *client) once(ctx context.Context, body []byte) outcome {
 	ra := resp.Header.Get("Retry-After")
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
-		return outcome{retry: true, retryAfter: ra, err: fmt.Errorf("slackbridge: chat.postMessage: HTTP 429: %w", ErrRateLimited)}
+		return outcome{retry: true, retryAfter: ra, err: fmt.Errorf("%w: %w", &httpError{resp.StatusCode}, ErrRateLimited)}
 	case resp.StatusCode >= 500:
-		return outcome{retry: true, retryAfter: ra, err: fmt.Errorf("slackbridge: chat.postMessage: HTTP %d", resp.StatusCode)}
+		return outcome{retry: true, retryAfter: ra, err: &httpError{resp.StatusCode}}
 	case resp.StatusCode != http.StatusOK:
-		return outcome{err: fmt.Errorf("slackbridge: chat.postMessage: HTTP %d", resp.StatusCode)}
+		return outcome{err: &httpError{resp.StatusCode}}
 	}
 	var out struct {
 		OK      bool   `json:"ok"`

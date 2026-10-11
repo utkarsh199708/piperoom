@@ -12,6 +12,7 @@ import (
 
 const (
 	maxSteps       = 10
+	maxLayers      = 10
 	maxListItems   = 5
 	fallbackBytes  = 300
 	maxProposalMap = 200
@@ -135,9 +136,18 @@ func (r *renderer) reply(e events.Event) (m message, ok bool, err error) {
 		if len(r.titles) < maxProposalMap {
 			r.titles[p.ProposalID] = p.Title
 		}
-		layers := make([]string, 0, len(p.RequiredLayers))
-		for _, l := range p.RequiredLayers {
+		// The list length comes from the payload, so cap it or the section
+		// can pass Slack's 3000-character text limit.
+		layers := make([]string, 0, min(len(p.RequiredLayers), maxLayers+1))
+		for i, l := range p.RequiredLayers {
+			if i == maxLayers {
+				layers = append(layers, fmt.Sprintf("+%d more", len(p.RequiredLayers)-maxLayers))
+				break
+			}
 			layers = append(layers, inlineCode(l, 60))
+		}
+		if len(layers) == 0 {
+			layers = append(layers, "(none)")
 		}
 		blocks := []block{
 			section("*Proposed fix:* " + clip(p.Title, 200) + "\nProposal: " + inlineCode(p.ProposalID, 100) +
