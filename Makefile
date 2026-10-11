@@ -1,10 +1,10 @@
 SHELL := /bin/sh
 
-.PHONY: ci go-ci web-ci fmt vet build test web-install web-lint web-build web-test
+.PHONY: ci go-ci web-ci fmt vet build test evals discover-draft web-install web-lint web-build web-test
 
 ci: go-ci web-ci
 
-go-ci: fmt vet build test
+go-ci: fmt vet build test evals
 
 fmt:
 	test -z "$$(gofmt -l .)"
@@ -19,6 +19,16 @@ build:
 
 test:
 	go test ./...
+
+# Validates evals/scenarios against the live tool definitions; no model calls,
+# no API key, no network, so it is safe in go-ci.
+evals:
+	go run ./evals/cmd/evalrun -validate
+
+# Reads the cluster from the config env vars; refuses to overwrite an existing
+# draft (run cmd/discover with -force for that). Not part of ci: needs a cluster.
+discover-draft:
+	go run ./cmd/discover -out owners.draft.yaml
 
 web-ci: web-install web-lint web-build web-test
 

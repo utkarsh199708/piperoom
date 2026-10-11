@@ -46,6 +46,8 @@ jobs:
         run: go build ./...
       - name: go test (unit only; integration tests are build-tagged and need the dev stack)
         run: go test ./...
+      - name: eval scenarios (validate only; no model calls, no API key, no network)
+        run: go run ./evals/cmd/evalrun -validate
 
   web:
     name: Web
