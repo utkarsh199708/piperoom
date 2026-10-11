@@ -58,7 +58,7 @@ func (d Deps) connectorExists(ctx context.Context, name string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("connector %q not found", name)
+	return fmt.Errorf("actions: connector %q not found", name)
 }
 
 // subjectExists checks a subject exists (read-only, for validation).
@@ -72,7 +72,7 @@ func (d Deps) subjectExists(ctx context.Context, subject string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("subject %q not found", subject)
+	return fmt.Errorf("actions: subject %q not found", subject)
 }
 
 // ---- connect_restart_task ----
@@ -99,7 +99,7 @@ type restartTaskParams struct {
 func (a *restartTask) Validate(raw json.RawMessage) error {
 	var p restartTaskParams
 	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" || p.Task < 0 {
-		return fmt.Errorf("connector and non-negative task are required")
+		return fmt.Errorf("actions: connector and non-negative task are required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -149,7 +149,7 @@ type restartConnectorParams struct {
 func (a *restartConnector) Validate(raw json.RawMessage) error {
 	var p restartConnectorParams
 	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" {
-		return fmt.Errorf("connector is required")
+		return fmt.Errorf("actions: connector is required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -202,10 +202,10 @@ type setCompatibilityParams struct {
 func (a *setCompatibility) Validate(raw json.RawMessage) error {
 	var p setCompatibilityParams
 	if err := json.Unmarshal(raw, &p); err != nil || p.Subject == "" {
-		return fmt.Errorf("subject is required")
+		return fmt.Errorf("actions: subject is required")
 	}
 	if !compatLevels[p.Level] {
-		return fmt.Errorf("level %q is not a valid compatibility level", p.Level)
+		return fmt.Errorf("actions: level %q is not a valid compatibility level", p.Level)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -253,10 +253,10 @@ type registerSchemaParams struct {
 func (a *registerSchema) Validate(raw json.RawMessage) error {
 	var p registerSchemaParams
 	if err := json.Unmarshal(raw, &p); err != nil || p.Subject == "" || p.Schema == "" {
-		return fmt.Errorf("subject and schema are required")
+		return fmt.Errorf("actions: subject and schema are required")
 	}
 	if _, err := avro.Parse(p.Schema); err != nil {
-		return fmt.Errorf("schema is not valid Avro: %v", err)
+		return fmt.Errorf("actions: schema is not valid Avro: %v", err)
 	}
 	return nil
 }
