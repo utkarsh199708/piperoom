@@ -61,7 +61,7 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 func warehouseRowTool(d Deps) tools.Tool {
 	return &tool{
 		name: "warehouse_row",
-		desc: "Read one row by primary key from the warehouse.",
+		desc: "Read one row by primary key from the warehouse. Pipeline-scoped: pipeline_id is required and table must be one of the pipeline's sink tables. Returns only timestamp column values.",
 		schema: objSchema(map[string]any{
 			"pipeline_id": strProp("Pipeline id from owners.yaml."),
 			"table":       strProp("\"schema.table\" to read."),
