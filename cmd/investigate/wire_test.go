@@ -15,6 +15,7 @@ import (
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
+	"piperoom/internal/wiring"
 )
 
 // fakeClients implements every client interface the wiring touches, replaying
@@ -130,9 +131,16 @@ func wireFakes(t *testing.T) (*tools.Registry, *actions.Registry, *fakeClients) 
 	f := newFakeClients()
 	reg := tools.NewRegistry()
 	areg := actions.NewRegistry()
-	a2 := &a2Clients{connect: f, kafka: f, registry: f}
-	if err := registerTools(reg, areg, f, f, testOwners(), a2); err != nil {
-		t.Fatalf("registerTools: %v", err)
+	w := &wiring.Wired{
+		Source:    f,
+		Warehouse: f,
+		Connect:   f,
+		Kafka:     f,
+		Registry:  f,
+		Owners:    testOwners(),
+	}
+	if err := wiring.RegisterTools(reg, areg, w); err != nil {
+		t.Fatalf("wiring.RegisterTools: %v", err)
 	}
 	return reg, areg, f
 }
@@ -245,16 +253,5 @@ func TestPgRowScopedToPipeline(t *testing.T) {
 
 	if _, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"public.payments","pk_column":"id","key":"1"}`)); !errors.Is(err, tools.ErrBadInput) {
 		t.Fatalf("pg_row other-table: err = %v, want ErrBadInput", err)
-	}
-}
-
-func TestSplitBrokers(t *testing.T) {
-	got := splitBrokers(" localhost:29092 , broker2:9092 , ")
-	want := []string{"localhost:29092", "broker2:9092"}
-	if !slices.Equal(got, want) {
-		t.Errorf("splitBrokers = %v, want %v", got, want)
-	}
-	if n := splitBrokers("  , , "); len(n) != 0 {
-		t.Errorf("splitBrokers(blanks) = %v, want empty", n)
 	}
 }
