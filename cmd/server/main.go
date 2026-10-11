@@ -1,7 +1,8 @@
 // Command server runs the Piperoom room service. With --demo it uses a
 // scripted fake agent (and fake topology/actions) so the UI can be built
-// against it before A2/A3/A4 land; without --demo it wires the real agent
-// (agent.Run) and empty registries.
+// against it with no stack; without --demo it opens the real stack clients
+// (source Postgres, warehouse, Connect, Schema Registry, Kafka) via openStack,
+// registers the real tools/actions and runs the real agent (agent.Run).
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 	"piperoom/internal/agent"
 	"piperoom/internal/config"
 	"piperoom/internal/httpapi"
+	"piperoom/internal/owners"
 	"piperoom/internal/room"
 	"piperoom/internal/room/demo"
 	"piperoom/internal/store"
@@ -63,10 +65,12 @@ func main() {
 	}
 
 	var (
-		acts  *actions.Registry
-		topo  topology.Builder // nil until A3 lands; room.Service falls back to a no-op
-		run   = agent.Run
-		write = agent.WriteHandoff
+		acts      *actions.Registry
+		toolsReg  = tools.NewRegistry()
+		topo      topology.Builder
+		ownersCfg *owners.Owners
+		run       = agent.Run
+		write     = agent.WriteHandoff
 	)
 	if *demoMode {
 		acts = demo.Actions()
@@ -74,15 +78,25 @@ func main() {
 		run = demo.Run
 		write = demo.WriteHandoff
 	} else {
-		acts = actions.NewRegistry()
+		stack, err := openStack(ctx, cfg)
+		if err != nil {
+			log.Error("server: cannot open the data stack", "err", err)
+			os.Exit(1)
+		}
+		defer stack.Close()
+		acts = stack.Actions
+		toolsReg = stack.Tools
+		topo = stack.Builder
+		ownersCfg = stack.Owners
 	}
 
 	svc := room.New(room.Deps{
 		Store:        st,
 		Actions:      acts,
-		Tools:        tools.NewRegistry(),
+		Tools:        toolsReg,
 		Topology:     topo,
 		Users:        users,
+		Owners:       ownersCfg,
 		Run:          run,
 		WriteHandoff: write,
 		Options: agent.Options{
