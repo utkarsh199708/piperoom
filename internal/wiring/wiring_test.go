@@ -118,3 +118,20 @@ func TestOpenRejectsBadKafkaSecurity(t *testing.T) {
 		t.Fatalf("Open error = %v, want the netsec PLAIN-without-TLS error before any DB ping", err)
 	}
 }
+
+func TestWiredCloseNilSafe(t *testing.T) {
+	// Callers defer Close as soon as they hold the value, and tests build
+	// Wired literals without a closer, so Close must be a no-op on a nil or
+	// zero *Wired instead of a nil-func panic.
+	var nilW *Wired
+	nilW.Close()
+	var zero Wired
+	zero.Close()
+
+	called := 0
+	w := &Wired{close: func() { called++ }}
+	w.Close()
+	if called != 1 {
+		t.Errorf("Close called the closer %d times, want 1", called)
+	}
+}

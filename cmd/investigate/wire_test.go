@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/agent"
 	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
@@ -118,7 +119,7 @@ func testOwners() *owners.Owners {
 		Layers: map[string]string{
 			"postgres":        "priya",
 			"kafka-connect":   "arjun",
-			"schema-registry": "arjun",
+			"schema-registry": "priya",
 			"kafka":           "arjun",
 			"consumer":        "kabir",
 			"warehouse":       "meera",
@@ -253,5 +254,32 @@ func TestPgRowScopedToPipeline(t *testing.T) {
 
 	if _, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"public.payments","pk_column":"id","key":"1"}`)); !errors.Is(err, tools.ErrBadInput) {
 		t.Fatalf("pg_row other-table: err = %v, want ErrBadInput", err)
+	}
+}
+
+// TestSystemPromptNamesOnlyRealTools covers C13 P11: every tool name the
+// agent's system prompt mentions must be a tool the model can really call with
+// this wiring — a read tool registered here, or one of the agent's room tools.
+// A prompt edit that names a nonexistent tool fails this test.
+func TestSystemPromptNamesOnlyRealTools(t *testing.T) {
+	reg, _, _ := wireFakes(t)
+
+	available := map[string]bool{}
+	for _, tl := range reg.All() {
+		available[tl.Name()] = true
+	}
+	// The agent builds these on top of the registry it is given.
+	for _, name := range agent.RoomToolNames() {
+		available[name] = true
+	}
+
+	names := agent.PromptToolNames()
+	if len(names) == 0 {
+		t.Fatal("no tool names found in the system prompt; the extraction may be broken")
+	}
+	for _, name := range names {
+		if !available[name] {
+			t.Errorf("system prompt tells the model to call %q, which is not a real tool", name)
+		}
 	}
 }

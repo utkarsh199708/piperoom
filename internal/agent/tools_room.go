@@ -27,6 +27,18 @@ func newRoomTools(d Deps) []tools.Tool {
 	}
 }
 
+// RoomToolNames returns the names of the room tools the agent adds on top of
+// the read-tool registry. Exported for cmd/investigate's wiring test, which
+// checks the system prompt only ever names tools the model can really call.
+func RoomToolNames() []string {
+	room := newRoomTools(Deps{})
+	names := make([]string, 0, len(room))
+	for _, t := range room {
+		names = append(names, t.Name())
+	}
+	return names
+}
+
 func roomObjectSchema(props map[string]any, required ...string) map[string]any {
 	return map[string]any{
 		"type":                 "object",
