@@ -1,0 +1,4 @@
+# Keep LF everywhere: files are mounted into Linux containers and shared by many agents.
+* text=auto eol=lf
+*.png binary
+*.jpg binary

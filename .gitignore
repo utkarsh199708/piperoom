@@ -1,0 +1,11 @@
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+.env
+.env.*
+web/node_modules/
+web/dist/
+.idea/
+.vscode/
