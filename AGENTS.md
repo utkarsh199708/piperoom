@@ -30,11 +30,13 @@ WebSocket gateway → browser (React) — replays events after seq N, then live
 
 ## 2. Team and ownership
 
-Six agents work **at the same time**. Each agent owns folders. **Never edit a file you do not own.**
+We are one team: **Claude** (tech lead, builds A1, reviews everything) and **Qoder** (runs the
+agents for A2–A6). Claude's own branches are reviewed by a Qoder agent the same way.
+Each agent owns folders. **Never edit a file you do not own.**
 
 | Agent | Task file | Owns |
 |---|---|---|
-| A1 | `tasks/A1-devstack.md` | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**` |
+| A1 (Claude) | `tasks/A1-devstack.md` | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**` |
 | A2 | `tasks/A2-kafka-tools.md` | `internal/clients/connect/**`, `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/tools/kafkatools/**`, `internal/actions/**` (not `action.go`) |
 | A3 | `tasks/A3-db-tools-topology.md` | `internal/clients/postgres/**`, `internal/clients/warehouse/**`, `internal/tools/dbtools/**`, `internal/topology/**` (not `graph.go`), `internal/owners/**` |
 | A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`), `cmd/investigate/**` |

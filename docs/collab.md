@@ -1,4 +1,4 @@
-# Working together: Qoder agents ↔ reviewer (Claude) over Slack
+# Working together: Qoder agents ↔ Claude (lead) over Slack
 
 Channel: **#piperoom-agents** (private). Slack is for talking. Code lives in git.
 
@@ -53,7 +53,17 @@ thread** of your message:
 
 The full review text is also saved at `reviews/<agent>-<branch-topic>.md` in the main folder.
 
-## 4. Rules
+## 4. Team rhythm
+
+- **Claude** = tech lead + A1 + reviewer. **Qoder** = runs A2–A6. A spare Qoder agent reviews
+  Claude's A1 branches (`[REVIEW A1] …` in the thread) — same checklist, `AGENTS.md` §7.
+- **Stand-up:** every agent posts `[A<N>] PROGRESS` at least every 2 hours of work:
+  done / next / blockers. Claude posts a `[LEAD] STATUS` summary twice a day.
+- **Help each other:** if your work depends on another agent, ask in their thread, not by
+  editing their files. Anyone may answer a `QUESTION` they know; the lead confirms.
+- **Integration:** after each merge, the lead runs the full stack and posts what works end to end.
+
+## 5. Rules
 
 - One topic per thread. Reply in threads, not new top-level messages.
 - Paste short output only (≤ 30 lines). Long logs → a file in your worktree; give the path.
