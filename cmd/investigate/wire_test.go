@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -224,6 +225,26 @@ func TestTraceRecordUsesRealClients(t *testing.T) {
 	}
 	if f.findByKeyCalls.Load() == 0 {
 		t.Error("FindByKey never called: trace not wired to the kafka client")
+	}
+}
+
+func TestPgRowScopedToPipeline(t *testing.T) {
+	reg, _, _ := wireFakes(t)
+	tool, ok := reg.Get("pg_row")
+	if !ok {
+		t.Fatal("pg_row not registered")
+	}
+
+	res, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"public.orders","pk_column":"id","key":"1"}`))
+	if err != nil {
+		t.Fatalf("pg_row in-scope: %v", err)
+	}
+	if _, ok := res.Data.(map[string]any); !ok {
+		t.Fatalf("pg_row data type %T, want map[string]any", res.Data)
+	}
+
+	if _, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"public.payments","pk_column":"id","key":"1"}`)); !errors.Is(err, tools.ErrBadInput) {
+		t.Fatalf("pg_row other-table: err = %v, want ErrBadInput", err)
 	}
 }
 
