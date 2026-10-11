@@ -1,4 +1,10 @@
-# Working together: Qoder agents ↔ Claude (lead) over Slack
+# Working together: Qoder agents ↔ two Claude leads over Slack
+
+**Roles** (details in `AGENTS.md` §2):
+- **Qoder agents** `[A1]`…`[A6]` write all the code and raise PRs.
+- **Claude Lead 1 — Architecture** `[LEAD-ARCH]`: completeness, architecture, integration; the only one who merges.
+- **Claude Lead 2 — Code review** `[LEAD-REVIEW]`: line-by-line review, tests, security.
+- Merge needs both `[LEAD-REVIEW] APPROVED` and `[LEAD-ARCH] APPROVED`.
 
 Channel: **#piperoom-agents** (private). Slack is for talking. Code lives in git.
 
@@ -13,8 +19,8 @@ git worktree add ..\piperoom-a2 -b a2/connect-client main   # example for A2
 cd ..\piperoom-a2
 ```
 
-Do not commit on `main`. Do not touch other agents' worktrees. **Only the lead (Claude) merges.**
-`main` changes only when the lead merges an approved PR; a git hook blocks everyone else.
+Do not commit on `main`. Do not touch other agents' worktrees. **Only Lead 1 (Claude) merges.**
+`main` changes only when Lead 1 merges a PR both leads approved; a git hook blocks everyone else.
 Agents raise PRs (branch + `READY FOR REVIEW` post, or a GitHub pull request) — never merge them.
 
 ## 2. What agents post (start every message with your tag)
@@ -41,25 +47,26 @@ contract change: none
 
 Keep the same text in your commit / PR description (template in `AGENTS.md` §6).
 
-## 3. What the reviewer posts
+## 3. What the leads post
 
-The reviewer checks the channel and all `a*/` branches every 15 minutes, then answers **in the
+Both leads watch the channel and all `a*/` branches live (every ~2 minutes) and answer **in the
 thread** of your message:
 
-- `[REVIEW A2] CHANGES REQUESTED` — numbered list, each with `file:line`, the problem, and what to do.
-  Fix everything, push to the same branch, reply in the same thread `[A2] READY FOR REVIEW (round 2)`.
-- `[REVIEW A2] APPROVED → merged to main` — rebase your other branches on `main`.
-- `[REVIEWER] ANSWER` — answer to a QUESTION or BLOCKED.
-- `[REVIEWER] CONTRACT UPDATE` — a contract file changed on `main`; every agent rebases.
-
-The full review text is also saved at `reviews/<agent>-<branch-topic>.md` in the main folder.
+- `[LEAD-REVIEW] CHANGES REQUESTED` / `[LEAD-REVIEW] APPROVED` — code review: numbered list,
+  each with `file:line`, the problem, and what to do. Full text in `reviews/<agent>-<topic>.code.md`.
+- `[LEAD-ARCH] CHANGES REQUESTED` / `[LEAD-ARCH] APPROVED` — completeness + architecture.
+  Full text in `reviews/<agent>-<topic>.arch.md`.
+- Fix everything, commit to the same branch, reply in the same thread `[A2] READY FOR REVIEW (round 2)`.
+- `[LEAD-ARCH] → merged to main @ <sha>` — only after both approvals. Rebase your other branches on `main`.
+- `[LEAD-ARCH] ANSWER` — answer to a QUESTION or BLOCKED.
+- `[LEAD-ARCH] CONTRACT UPDATE` — a contract file changed on `main`; every agent rebases.
 
 ## 4. Team rhythm
 
-- **Claude** = tech lead + A1 + reviewer. **Qoder** = runs A2–A6. A spare Qoder agent reviews
-  Claude's A1 branches (`[REVIEW A1] …` in the thread) — same checklist, `AGENTS.md` §7.
+- **Qoder** writes all code (A1–A6). The first A1 version was written by Claude before this
+  split; it goes through the same two-lead review, and Qoder owns any follow-up work on A1.
 - **Stand-up:** every agent posts `[A<N>] PROGRESS` at least every 2 hours of work:
-  done / next / blockers. Claude posts a `[LEAD] STATUS` summary twice a day.
+  done / next / blockers. Lead 1 posts a `[LEAD-ARCH] STATUS` summary twice a day.
 - **Help each other:** if your work depends on another agent, ask in their thread, not by
   editing their files. Anyone may answer a `QUESTION` they know; the lead confirms.
 - **Integration:** after each merge, the lead runs the full stack and posts what works end to end.

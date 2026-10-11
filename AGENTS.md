@@ -30,19 +30,27 @@ WebSocket gateway → browser (React) — replays events after seq N, then live
 
 ## 2. Team and ownership
 
-We are one team: **Claude** (tech lead, builds A1, reviews everything) and **Qoder** (runs the
-agents for A2–A6). Claude's own branches are reviewed by a Qoder agent the same way.
+One team, clear roles:
+
+| Who | Slack tag | Does | Never does |
+|---|---|---|---|
+| **Claude Lead 1 — Architecture** | `[LEAD-ARCH]` | completeness vs. task file and milestones, architecture and contract fit, integration runs, answers questions, **the only one who merges** | write feature code |
+| **Claude Lead 2 — Code review** | `[LEAD-REVIEW]` | line-by-line code review, runs build/vet/unit/integration tests, security and error paths (§7) | merge, write feature code |
+| **Qoder agents** | `[A1]`…`[A6]` | **write all the code**, raise PRs, fix review comments | merge, touch `main`, edit contract files |
+
+A PR is merged only when **both** leads approve: `[LEAD-REVIEW] APPROVED` (code) and
+`[LEAD-ARCH] APPROVED` (architecture + completeness). Then Lead 1 merges.
 Each agent owns folders. **Never edit a file you do not own.**
 
 | Agent | Task file | Owns |
 |---|---|---|
-| A1 (Claude) | `tasks/A1-devstack.md` | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**` |
+| A1 (first version by Claude, branch `a1/devstack`; Qoder owns follow-ups) | `tasks/A1-devstack.md` | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**` |
 | A2 | `tasks/A2-kafka-tools.md` | `internal/clients/connect/**`, `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/tools/kafkatools/**`, `internal/actions/**` (not `action.go`) |
 | A3 | `tasks/A3-db-tools-topology.md` | `internal/clients/postgres/**`, `internal/clients/warehouse/**`, `internal/tools/dbtools/**`, `internal/topology/**` (not `graph.go`), `internal/owners/**` |
 | A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`), `cmd/investigate/**` |
 | A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**` |
 | A6 | `tasks/A6-web.md` | `web/**` |
-| Reviewer | — | `AGENTS.md`, `tasks/**`, `docs/**`, `reviews/**`, and every **contract file** below |
+| Claude leads | — | `AGENTS.md`, `tasks/**`, `docs/**`, `reviews/**`, and every **contract file** below |
 
 ### Contract files (read them, code against them, never edit them)
 
@@ -110,7 +118,7 @@ use fakes that implement the interfaces (put fakes in a `fake` sub-package or `_
 
 - **Talking to the reviewer happens in Slack #piperoom-agents — read `docs/collab.md` now.**
 - Work in your own **git worktree** (`docs/collab.md` §1), never in the main folder.
-- **Only the lead (Claude) merges into `main`.** Agents never commit, merge, rebase onto, reset or
+- **Only Lead 1 (Claude, `[LEAD-ARCH]`) merges into `main`**, after both leads approve. Agents never commit, merge, rebase onto, reset or
   push `main`. You raise a PR: commit on your branch, then post `[A<N>] READY FOR REVIEW` (local repo)
   or open a pull request (if the repo is on GitHub). A git hook rejects any change to `main` from agents.
 - Base branch: `main`. Your branch: `a<N>/<short-topic>` (e.g. `a2/connect-client`).
@@ -129,9 +137,11 @@ use fakes that implement the interfaces (put fakes in a `fake` sub-package or `_
 ## Contract change request   (only if needed)
 ```
 
-## 7. How the reviewer checks your PR
+## 7. How the leads check your PR
 
-I review every PR before merge. I reject PRs that fail any of these:
+Lead 2 (code review) checks every item below; Lead 1 (architecture) checks the task file's
+"Done when", the milestone, and fit with the contracts and other parts. A PR that fails any item
+gets `CHANGES REQUESTED`:
 
 - [ ] Builds, vets, unit tests pass on Windows; integration tests pass against the dev stack.
 - [ ] Only owned files changed. Contract files untouched.
