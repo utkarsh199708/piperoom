@@ -70,17 +70,36 @@ func TestSinceLimitZeroReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestStartProposalStepUnique(t *testing.T) {
+// TestProposalStepStateMachine pins the step state machine: a step can be
+// started once, finished only while started, and finished only once.
+func TestProposalStepStateMachine(t *testing.T) {
 	s := New()
 	ctx := context.Background()
 	if err := s.CreateProposal(ctx, store.ProposalRow{ProposalID: "p1", RoomID: "r", Title: "t", Status: "open"}); err != nil {
 		t.Fatalf("create proposal: %v", err)
 	}
+
+	// Finish before start is an order violation.
+	err := s.FinishProposalStep(ctx, "p1", 0, "done", "")
+	if !errors.Is(err, store.ErrStepOrder) {
+		t.Fatalf("finish before start: want ErrStepOrder, got %v", err)
+	}
+
 	if err := s.StartProposalStep(ctx, "p1", 0); err != nil {
 		t.Fatalf("start step: %v", err)
 	}
-	err := s.StartProposalStep(ctx, "p1", 0)
-	if !errors.Is(err, store.ErrAlreadyExists) {
-		t.Fatalf("want ErrAlreadyExists, got %v", err)
+	// Starting twice is an order violation.
+	err = s.StartProposalStep(ctx, "p1", 0)
+	if !errors.Is(err, store.ErrStepOrder) {
+		t.Fatalf("start twice: want ErrStepOrder, got %v", err)
+	}
+
+	if err := s.FinishProposalStep(ctx, "p1", 0, "done", "ok"); err != nil {
+		t.Fatalf("finish step: %v", err)
+	}
+	// A finished step is terminal.
+	err = s.FinishProposalStep(ctx, "p1", 0, "failed", "")
+	if !errors.Is(err, store.ErrStepOrder) {
+		t.Fatalf("finish twice: want ErrStepOrder, got %v", err)
 	}
 }

@@ -26,6 +26,12 @@ var ErrNotFound = errors.New("store: not found")
 // (e.g. a second decision on the same proposal layer).
 var ErrAlreadyExists = errors.New("store: already exists")
 
+// ErrStepOrder is returned when a proposal step is used out of order: started
+// twice, or finished without having been started (or finished twice). The
+// room service re-exports it as room.ErrStepOrder and surfaces it instead of
+// silently skipping the step.
+var ErrStepOrder = errors.New("store: step order violation")
+
 // defaultDBTimeout bounds any store call whose caller supplied no deadline.
 const defaultDBTimeout = 10 * time.Second
 
@@ -197,13 +203,14 @@ func (s *PG) GetRoom(ctx context.Context, id string) (Room, error) {
 	return r, nil
 }
 
-// ListRooms returns all rooms ordered by opened_at descending.
+// ListRooms returns all rooms ordered by opened_at descending. Rows with the
+// same opened_at are tie-broken by id so the order is total and stable.
 func (s *PG) ListRooms(ctx context.Context) ([]Room, error) {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, title, severity, pipeline_id, status, opened_at, closed_at, last_seq, driver_id, driver_name, driver_lease_until
-		 FROM rooms ORDER BY opened_at DESC`)
+		 FROM rooms ORDER BY opened_at DESC, id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list rooms: %w", err)
 	}
@@ -306,7 +313,8 @@ func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor e
 	}, nil
 }
 
-// Since returns events with Seq > afterSeq in order, at most limit.
+// Since returns events with Seq > afterSeq in order, at most limit. Seq is the
+// room's primary key part, so (room_id, seq) is total and the order is stable.
 func (s *PG) Since(ctx context.Context, roomID string, afterSeq int64, limit int) ([]events.Event, error) {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
@@ -457,7 +465,7 @@ func (s *PG) DeleteApproval(ctx context.Context, proposalID, layer string) error
 }
 
 // StartProposalStep marks a step as started so it never runs twice. A second
-// call for the same (proposal, step) returns ErrAlreadyExists.
+// call for the same (proposal, step) returns ErrStepOrder.
 func (s *PG) StartProposalStep(ctx context.Context, proposalID string, stepIndex int) error {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
@@ -469,20 +477,26 @@ func (s *PG) StartProposalStep(ctx context.Context, proposalID string, stepIndex
 		return fmt.Errorf("store: start step %s/%d: %w", proposalID, stepIndex, err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("store: step %s/%d: %w", proposalID, stepIndex, ErrAlreadyExists)
+		return fmt.Errorf("store: step %s/%d already started: %w", proposalID, stepIndex, ErrStepOrder)
 	}
 	return nil
 }
 
 // FinishProposalStep records the final state of a step ("done" or "failed").
+// Only a step in state "started" can be finished; finishing a step that was
+// never started (or finishing it twice) returns ErrStepOrder.
 func (s *PG) FinishProposalStep(ctx context.Context, proposalID string, stepIndex int, status, output string) error {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
-	_, err := s.pool.Exec(ctx,
-		`UPDATE proposal_steps SET status = $3, output = $4 WHERE proposal_id = $1 AND step_index = $2`,
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE proposal_steps SET status = $3, output = $4
+		 WHERE proposal_id = $1 AND step_index = $2 AND status = 'started'`,
 		proposalID, stepIndex, status, output)
 	if err != nil {
 		return fmt.Errorf("store: finish step %s/%d: %w", proposalID, stepIndex, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("store: step %s/%d is not started: %w", proposalID, stepIndex, ErrStepOrder)
 	}
 	return nil
 }

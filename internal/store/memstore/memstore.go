@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -231,7 +232,8 @@ func (s *Store) GetRoom(ctx context.Context, id string) (store.Room, error) {
 	return log.meta, nil
 }
 
-// ListRooms returns all rooms.
+// ListRooms returns all rooms in the same total order as the Postgres store:
+// newest first, ties broken by id.
 func (s *Store) ListRooms(ctx context.Context) ([]store.Room, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -239,6 +241,12 @@ func (s *Store) ListRooms(ctx context.Context) ([]store.Room, error) {
 	for _, log := range s.rooms {
 		out = append(out, log.meta)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].OpenedAt.Equal(out[j].OpenedAt) {
+			return out[i].OpenedAt.After(out[j].OpenedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out, nil
 }
 
@@ -323,23 +331,28 @@ func (s *Store) DeleteApproval(ctx context.Context, proposalID, layer string) er
 }
 
 // StartProposalStep marks a step started; a second call returns
-// store.ErrAlreadyExists.
+// store.ErrStepOrder, exactly like the Postgres store.
 func (s *Store) StartProposalStep(ctx context.Context, proposalID string, stepIndex int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := fmt.Sprintf("%s\x00%d", proposalID, stepIndex)
 	if _, ok := s.steps[key]; ok {
-		return fmt.Errorf("memstore: step %s/%d: %w", proposalID, stepIndex, store.ErrAlreadyExists)
+		return fmt.Errorf("memstore: step %s/%d already started: %w", proposalID, stepIndex, store.ErrStepOrder)
 	}
 	s.steps[key] = "started"
 	return nil
 }
 
-// FinishProposalStep records the final state of a step.
+// FinishProposalStep records the final state of a step. Only a "started" step
+// can be finished; anything else returns store.ErrStepOrder.
 func (s *Store) FinishProposalStep(ctx context.Context, proposalID string, stepIndex int, status, output string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.steps[fmt.Sprintf("%s\x00%d", proposalID, stepIndex)] = status
+	key := fmt.Sprintf("%s\x00%d", proposalID, stepIndex)
+	if st, ok := s.steps[key]; !ok || st != "started" {
+		return fmt.Errorf("memstore: step %s/%d is not started: %w", proposalID, stepIndex, store.ErrStepOrder)
+	}
+	s.steps[key] = status
 	return nil
 }
 
