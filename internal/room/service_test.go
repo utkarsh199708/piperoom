@@ -638,16 +638,50 @@ func TestCreateProposalScopeViolation(t *testing.T) {
 	}, events.AgentActor)
 	wantCode(t, err, "validation")
 
-	// A room whose pipeline is not in the owners config is refused as well.
-	snap2, err := svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "t2", "sev2", "not-configured")
+	// POST /api/rooms rejects an unknown pipeline when owners are loaded.
+	_, err = svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "t2", "sev2", "not-configured")
+	wantCode(t, err, "validation")
+
+	// A room opened by an alert webhook may carry an unknown pipeline; its
+	// proposals are disabled because the scope check cannot resolve it.
+	snap2, err := svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "not-configured", json.RawMessage(`{"title":"t2"}`))
 	if err != nil {
-		t.Fatalf("create room 2: %v", err)
+		t.Fatalf("create room from alert: %v", err)
 	}
 	_, err = svc.CreateProposal(context.Background(), snap2.ID, events.ProposalCreatedPayload{
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
 	wantCode(t, err, "validation")
+}
+
+func TestCreateRoomFromAlertStoresRawBody(t *testing.T) {
+	svc, st, _ := newTestService(t)
+	raw := json.RawMessage(`{"title":"DB down","severity":"sev1","pipeline_id":"orders","extra":[1,2]}`)
+
+	snap, err := svc.CreateRoomFromAlert(context.Background(), "DB down", "sev1", "orders", raw)
+	if err != nil {
+		t.Fatalf("create from alert: %v", err)
+	}
+	if snap.Status != "open" || snap.Driver != nil {
+		t.Fatalf("webhook room should be open with no driver: %+v", snap)
+	}
+	p, err := events.Decode[events.RoomCreatedPayload](allEvents(t, st, snap.ID)[0])
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if string(p.Alert) != string(raw) {
+		t.Fatalf("raw alert not stored verbatim:\n got %s\nwant %s", p.Alert, raw)
+	}
+
+	// A garbage (non-mapped) body still opens a room with the default pipeline.
+	snap2, err := svc.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
+	if err != nil {
+		t.Fatalf("create from array alert: %v", err)
+	}
+	if snap2.PipelineID != "unknown" || snap2.Severity != "sev3" {
+		t.Fatalf("bad defaults: %+v", snap2)
+	}
 }
 
 type expiredPayload struct {

@@ -20,6 +20,14 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	if !severities[severity] {
 		return RoomSnapshot{}, validation("severity must be sev1..sev4")
 	}
+	// With an owners config loaded, the pipeline must be known (docs/api.md:
+	// unknown pipeline on POST /api/rooms → 400 validation). Without one
+	// (--demo, unit tests) there is nothing to validate against.
+	if s.owners != nil {
+		if _, ok := s.owners.Pipeline(pipelineID); !ok {
+			return RoomSnapshot{}, validation(fmt.Sprintf("unknown pipeline %q", pipelineID))
+		}
+	}
 	roomID := NewID("r_")
 	now := s.now().UTC()
 	lease := now.Add(DriverLease)
@@ -56,9 +64,12 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	return snap, nil
 }
 
-// CreateRoomFromAlert handles the generic alert webhook: maps title/severity/
-// pipeline_id when present, no driver until someone takes control.
-func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipelineID string, raw map[string]any) (RoomSnapshot, error) {
+// CreateRoomFromAlert handles the generic alert webhook: it maps title/
+// severity/pipeline_id when present and stores the raw body verbatim in
+// room.created.alert. Unknown pipelines still open a room (proposals stay
+// disabled because actions are scope-checked), with no driver until someone
+// takes control.
+func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipelineID string, raw json.RawMessage) (RoomSnapshot, error) {
 	if title == "" {
 		title = "New alert"
 	}
@@ -70,7 +81,6 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 	}
 	roomID := NewID("r_")
 	now := s.now().UTC()
-	rawJSON := marshalRaw(raw)
 
 	s.mu.Lock()
 	if err := s.store.CreateRoom(ctx, store.Room{
@@ -84,26 +94,15 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 	s.rooms[roomID] = st
 
 	if _, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, systemActor, events.RoomCreatedPayload{
-		Title: title, Severity: severity, PipelineID: pipelineID, Alert: rawJSON,
+		Title: title, Severity: severity, PipelineID: pipelineID, Alert: raw,
 	}); err != nil {
 		s.mu.Unlock()
 		return RoomSnapshot{}, err
 	}
 	snap := st.snap.Clone()
-	s.startAgentLocked(roomID, title, pipelineID, rawJSON, st)
+	s.startAgentLocked(roomID, title, pipelineID, raw, st)
 	s.mu.Unlock()
 	return snap, nil
-}
-
-func marshalRaw(raw map[string]any) []byte {
-	if raw == nil {
-		return nil
-	}
-	b, err := json.Marshal(raw)
-	if err != nil {
-		return nil
-	}
-	return b
 }
 
 // GetRoom returns a room snapshot or a not-found error.

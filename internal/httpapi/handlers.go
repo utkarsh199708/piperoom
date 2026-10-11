@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -39,16 +41,28 @@ func (s *Server) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, snap)
 }
 
+// handleAlertWebhook accepts any JSON body, maps title/severity/pipeline_id
+// when present and stores the raw body verbatim in room.created.alert
+// (docs/api.md).
 func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
-	var raw map[string]any
-	if err := decodeBody(w, r, &raw); err != nil {
-		s.writeErr(w, err)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.writeErr(w, validation("request body too large or unreadable"))
 		return
 	}
-	title, _ := raw["title"].(string)
-	severity, _ := raw["severity"].(string)
-	pipelineID, _ := raw["pipeline_id"].(string)
-	snap, err := s.svc.CreateRoomFromAlert(r.Context(), title, severity, pipelineID, raw)
+	if !json.Valid(raw) {
+		s.writeErr(w, validation("invalid JSON body"))
+		return
+	}
+	// Field mapping is best effort: a non-object body simply maps nothing.
+	var probe struct {
+		Title      string `json:"title"`
+		Severity   string `json:"severity"`
+		PipelineID string `json:"pipeline_id"`
+	}
+	_ = json.Unmarshal(raw, &probe)
+	snap, err := s.svc.CreateRoomFromAlert(r.Context(), probe.Title, probe.Severity, probe.PipelineID, json.RawMessage(raw))
 	if err != nil {
 		s.writeErr(w, err)
 		return
