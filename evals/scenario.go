@@ -210,10 +210,11 @@ func defaultActor(kind string) events.Actor {
 	}
 }
 
-// Validate checks the scenario against the tool and action names the agent
-// will actually have, so a stale scenario fails loudly before any model call
-// instead of quietly producing replay misses.
-func (s Scenario) Validate(toolNames, actionNames []string) error {
+// Validate checks the scenario against the tools and actions the agent will
+// actually have, so a stale scenario fails loudly before any model call
+// instead of quietly producing replay misses. toolInputs maps each tool name
+// to the property names of its input schema (see ToolInputs).
+func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string) error {
 	var errs []error
 	if s.Name == "" {
 		errs = append(errs, errors.New("name is empty"))
@@ -233,10 +234,20 @@ func (s Scenario) Validate(toolNames, actionNames []string) error {
 		errs = append(errs, fmt.Errorf("expect.first_failing_layer: unknown layer %q (want one of %s)", l, strings.Join(events.Layers, ", ")))
 	}
 
-	isTool := set(toolNames)
 	for i, r := range s.Recordings {
-		if !isTool[r.Tool] {
+		fields, isTool := toolInputs[r.Tool]
+		if !isTool {
 			errs = append(errs, fmt.Errorf("recordings[%d]: unknown tool %q", i, r.Tool))
+		} else {
+			// A key the schema does not have can never appear in a real call
+			// (schemas set additionalProperties: false), so the recording
+			// would never match and every run would count a miss.
+			known := set(fields)
+			for _, k := range sortedKeys(r.Input) {
+				if !known[k] {
+					errs = append(errs, fmt.Errorf("recordings[%d] (%s): unknown input field %q", i, r.Tool, k))
+				}
+			}
 		}
 		if r.Error == "" && r.Summary == "" {
 			errs = append(errs, fmt.Errorf("recordings[%d] (%s): needs summary or error", i, r.Tool))
@@ -248,7 +259,7 @@ func (s Scenario) Validate(toolNames, actionNames []string) error {
 		}
 	}
 	for _, t := range s.Expect.EvidenceTools {
-		if !isTool[t] {
+		if _, ok := toolInputs[t]; !ok {
 			errs = append(errs, fmt.Errorf("expect.evidence_tools: unknown tool %q", t))
 		}
 	}
@@ -303,4 +314,14 @@ func set(xs []string) map[string]bool {
 		m[x] = true
 	}
 	return m
+}
+
+// sortedKeys returns m's keys in order, so validation errors are stable.
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }

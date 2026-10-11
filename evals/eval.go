@@ -148,10 +148,7 @@ feeding:
 // ValidateAll checks every scenario against the given tool definitions and
 // the production action names.
 func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
-	toolNames := make([]string, 0, len(defs))
-	for _, d := range defs {
-		toolNames = append(toolNames, d.Name())
-	}
+	toolInputs := ToolInputs(defs)
 	areg, err := LiveActions(Resources{})
 	if err != nil {
 		return err
@@ -162,9 +159,23 @@ func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 	}
 	var errs []error
 	for _, sc := range scenarios {
-		errs = append(errs, sc.Validate(toolNames, actionNames))
+		errs = append(errs, sc.Validate(toolInputs, actionNames))
 	}
 	return errors.Join(errs...)
+}
+
+// ToolInputs maps each tool name to the property names of its input schema.
+func ToolInputs(defs []tools.Tool) map[string][]string {
+	out := make(map[string][]string, len(defs))
+	for _, d := range defs {
+		props, _ := d.InputSchema()["properties"].(map[string]any)
+		fields := make([]string, 0, len(props))
+		for k := range props {
+			fields = append(fields, k)
+		}
+		out[d.Name()] = fields
+	}
+	return out
 }
 
 // runOne runs the agent once on sc. The returned error is a harness failure

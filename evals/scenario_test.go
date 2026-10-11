@@ -65,7 +65,7 @@ func TestLoadScenarioDefaultsNameToFile(t *testing.T) {
 }
 
 func TestValidate(t *testing.T) {
-	tools := []string{"connect_status"}
+	tools := map[string][]string{"connect_status": {"connector"}, "connect_list_connectors": {}}
 	acts := []string{"connect_restart_task"}
 	base := func() Scenario {
 		return Scenario{
@@ -90,6 +90,11 @@ func TestValidate(t *testing.T) {
 		{"empty group", func(s *Scenario) { s.Expect.RootCause = [][]string{{}} }, "empty group"},
 		{"blank term", func(s *Scenario) { s.Expect.RootCause = [][]string{{" "}} }, "blank term"},
 		{"unknown tool", func(s *Scenario) { s.Recordings[0].Tool = "nope" }, `unknown tool "nope"`},
+		{"known input field", func(s *Scenario) { s.Recordings[0].Input = map[string]any{"connector": "c"} }, ""},
+		{"typo in input field", func(s *Scenario) { s.Recordings[0].Input = map[string]any{"connector_name": "c"} }, `recordings[0] (connect_status): unknown input field "connector_name"`},
+		{"input on tool without inputs", func(s *Scenario) {
+			s.Recordings = append(s.Recordings, Recording{Tool: "connect_list_connectors", Input: map[string]any{"prefix": "pg"}, Summary: "x"})
+		}, `recordings[1] (connect_list_connectors): unknown input field "prefix"`},
 		{"no result", func(s *Scenario) { s.Recordings[0].Summary = "" }, "needs summary or error"},
 		{"bad data", func(s *Scenario) { s.Recordings[0].Data = map[string]any{"f": func() {}} }, "data does not convert"},
 		{"unknown evidence", func(s *Scenario) { s.Expect.EvidenceTools = []string{"nope"} }, "evidence_tools"},
@@ -161,5 +166,19 @@ func TestReadmeExampleIsValid(t *testing.T) {
 	}
 	if err := ValidateAll([]Scenario{s}, defs); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestToolInputsUsesLiveSchemas(t *testing.T) {
+	defs, err := LiveTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := ToolInputs(defs)
+	if got := in["connect_status"]; len(got) != 1 || got[0] != "connector" {
+		t.Errorf("connect_status fields = %v", got)
+	}
+	if got, ok := in["connect_list_connectors"]; !ok || len(got) != 0 {
+		t.Errorf("connect_list_connectors fields = %v (present %v)", got, ok)
 	}
 }

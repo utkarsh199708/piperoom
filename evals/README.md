@@ -76,7 +76,7 @@ against the live tool and action names.
 | field | type | meaning |
 |---|---|---|
 | `tool` | string | a live tool name, e.g. `connect_status` (required) |
-| `input` | map | fields the call must have, with equal values. Fields not listed are ignored, so leave out ones the model picks freely (e.g. `since`). Empty/absent = matches any call to the tool |
+| `input` | map | fields the call must have, with equal values. Fields not listed are ignored, so leave out ones the model picks freely (e.g. `since`). Empty/absent = matches any call to the tool. Every key must be a property of the tool's live input schema (e.g. `connector` for `connect_status`, not `connector_name`); `-check` rejects anything else with `recordings[i] (tool): unknown input field "x"`, because such a recording could never match a real call |
 | `summary` | string | `Result.Summary` the model reads |
 | `data` | any | `Result.Data` (structured detail for the UI) |
 | `truncated` | bool | `Result.Truncated` |
