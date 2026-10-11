@@ -110,6 +110,9 @@ use fakes that implement the interfaces (put fakes in a `fake` sub-package or `_
 
 - **Talking to the reviewer happens in Slack #piperoom-agents — read `docs/collab.md` now.**
 - Work in your own **git worktree** (`docs/collab.md` §1), never in the main folder.
+- **Only the lead (Claude) merges into `main`.** Agents never commit, merge, rebase onto, reset or
+  push `main`. You raise a PR: commit on your branch, then post `[A<N>] READY FOR REVIEW` (local repo)
+  or open a pull request (if the repo is on GitHub). A git hook rejects any change to `main` from agents.
 - Base branch: `main`. Your branch: `a<N>/<short-topic>` (e.g. `a2/connect-client`).
 - Small PRs (aim < 600 changed lines, excluding generated code and lockfiles).
 - Rebase on `main` before asking for review. `go.mod`/`go.sum` conflicts: re-run `go mod tidy` after rebase.

@@ -13,8 +13,9 @@ git worktree add ..\piperoom-a2 -b a2/connect-client main   # example for A2
 cd ..\piperoom-a2
 ```
 
-Do not commit on `main`. Do not touch other agents' worktrees. `main` changes only when the
-reviewer merges an approved branch.
+Do not commit on `main`. Do not touch other agents' worktrees. **Only the lead (Claude) merges.**
+`main` changes only when the lead merges an approved PR; a git hook blocks everyone else.
+Agents raise PRs (branch + `READY FOR REVIEW` post, or a GitHub pull request) — never merge them.
 
 ## 2. What agents post (start every message with your tag)
 
