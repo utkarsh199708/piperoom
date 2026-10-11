@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/hamba/avro/v2"
+	"github.com/twmb/franz-go/pkg/kadm"
 
 	"piperoom/internal/clients/schemareg"
 )
@@ -76,5 +77,69 @@ func TestDecodeKeyRaw(t *testing.T) {
 	}
 	if got != "plain-key" {
 		t.Fatalf("decoded %q, want plain-key", got)
+	}
+}
+
+// TestTopicConfigFrom pins the mapping from kadm's DescribeConfigs entries and
+// metadata partitions onto the TopicConfig DTO, including the keys it must
+// ignore.
+func TestTopicConfigFrom(t *testing.T) {
+	rc := kadm.ResourceConfig{Name: "pg.public.orders", Configs: []kadm.Config{
+		{Key: "cleanup.policy", Value: kadm.StringPtr("compact,delete")},
+		{Key: "retention.ms", Value: kadm.StringPtr("259200000")},
+		{Key: "retention.bytes", Value: kadm.StringPtr("-1")},
+		{Key: "min.insync.replicas", Value: kadm.StringPtr("2")},
+		{Key: "segment.bytes", Value: kadm.StringPtr("1073741824")},
+	}}
+	td := kadm.TopicDetail{Topic: "pg.public.orders", Partitions: kadm.PartitionDetails{
+		0: {Topic: "pg.public.orders", Partition: 0, Replicas: []int32{1, 2, 3}},
+		1: {Topic: "pg.public.orders", Partition: 1, Replicas: []int32{2, 3, 1}},
+		2: {Topic: "pg.public.orders", Partition: 2, Replicas: []int32{3, 1, 2}},
+	}}
+	want := TopicConfig{
+		Topic: "pg.public.orders", Partitions: 3, ReplicationFactor: 3,
+		RetentionMS: "259200000", RetentionBytes: "-1",
+		CleanupPolicy: "compact,delete", MinInsyncReplicas: "2",
+	}
+	if got := topicConfigFrom("pg.public.orders", rc, td); got != want {
+		t.Fatalf("topicConfigFrom = %+v, want %+v", got, want)
+	}
+}
+
+func TestTopicConfigFromEdges(t *testing.T) {
+	tests := []struct {
+		name string
+		rc   kadm.ResourceConfig
+		td   kadm.TopicDetail
+		want TopicConfig
+	}{
+		{
+			name: "missing config keys leave empty strings",
+			rc:   kadm.ResourceConfig{Name: "t", Configs: []kadm.Config{{Key: "segment.ms", Value: kadm.StringPtr("1")}}},
+			td:   kadm.TopicDetail{Partitions: kadm.PartitionDetails{0: {Replicas: []int32{1, 2}}}},
+			want: TopicConfig{Topic: "t", Partitions: 1, ReplicationFactor: 2},
+		},
+		{
+			name: "nil value is empty, other keys still map",
+			rc: kadm.ResourceConfig{Name: "t", Configs: []kadm.Config{
+				{Key: "retention.ms"},
+				{Key: "cleanup.policy", Value: kadm.StringPtr("compact")},
+			}},
+			td:   kadm.TopicDetail{Partitions: kadm.PartitionDetails{0: {Replicas: []int32{1}}}},
+			want: TopicConfig{Topic: "t", Partitions: 1, ReplicationFactor: 1, CleanupPolicy: "compact"},
+		},
+		{
+			name: "no partitions",
+			rc:   kadm.ResourceConfig{Name: "t"},
+			td:   kadm.TopicDetail{},
+			want: TopicConfig{Topic: "t"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := topicConfigFrom("t", tt.rc, tt.td); got != tt.want {
+				t.Fatalf("topicConfigFrom = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }
