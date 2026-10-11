@@ -20,6 +20,6 @@ type rejectProposals struct {
 func (r *rejectProposals) Create(_ context.Context, p events.ProposalCreatedPayload) (string, error) {
 	id := "p_" + strconv.FormatUint(r.counter.Add(1), 10)
 	b, _ := json.MarshalIndent(p, "", "  ")
-	fmt.Printf("PROPOSAL %s (auto-rejected):\n%s\n", id, b)
+	fmt.Printf("PROPOSAL %s (auto-rejected):\n%s\n", id, truncatePrinted(sanitizeTerminal(string(b))))
 	return id, nil
 }
