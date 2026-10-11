@@ -65,6 +65,9 @@ thread** of your message:
 
 - **Qoder** writes all code (A1–A6). The first A1 version was written by Claude before this
   split; it goes through the same two-lead review, and Qoder owns any follow-up work on A1.
+- **Dispatch:** Lead 1 hands out work as **one top-level message per agent**, starting with the tag
+  (`[A3] TASK — …`). Qoder runs **as many agents in parallel as the work needs**; a task that is too big
+  for one agent is split into more agents with clear folder ownership (e.g. A5a / A5b).
 - **Stand-up:** every agent posts `[A<N>] PROGRESS` at least every 2 hours of work:
   done / next / blockers. Lead 1 posts a `[LEAD-ARCH] STATUS` summary twice a day.
 - **Help each other:** if your work depends on another agent, ask in their thread, not by
