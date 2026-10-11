@@ -1,22 +1,21 @@
 // Package demo provides a deterministic scripted agent, fake topology builder
-// and fake actions so cmd/server --demo works before A2 lands. It tells the
-// real schema-change story from dev/owners.yaml (public.orders →
-// pg-orders-connector → pg.public.orders → order-sync → analytics.orders): an
-// amount int → numeric(12,2) change registers an incompatible Avro schema and
-// kills the Debezium task; the agent diagnoses it and proposes
-// schema_set_compatibility + connect_restart_task.
+// and fake clients (fakes.go) so cmd/server --demo works before the dev stack
+// is needed. The scripted agent runs the REAL actions from internal/actions
+// over the in-memory clients, so the demo exercises the same write path as
+// production. It tells the real schema-change story from dev/owners.yaml
+// (public.orders → pg-orders-connector → pg.public.orders → order-sync →
+// analytics.orders): an amount int → numeric(12,2) change registers an
+// incompatible Avro schema and kills the Debezium task; the agent diagnoses it
+// and proposes schema_set_compatibility + connect_restart_task.
 package demo
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
 
-	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
-	"piperoom/internal/owners"
 	"piperoom/internal/topology"
 )
 
@@ -158,43 +157,6 @@ func WriteHandoff(ctx context.Context, roomEvents []events.Event, opts agent.Opt
 		Open:      []string{"Consider pinning decimal.handling.mode"},
 		Risks:     []string{"BACKWARD compatibility is off until re-enabled"},
 	}, nil
-}
-
-// Actions returns a registry with the two demo actions the proposal needs.
-func Actions() *actions.Registry {
-	r := actions.NewRegistry()
-	_ = r.Register(demoAction{name: ActionSchemaSetCompatibility, layer: "schema-registry", desc: "Set subject compatibility level", result: "Compatibility set to NONE for pg.public.orders-value"})
-	_ = r.Register(demoAction{name: ActionConnectRestartTask, layer: "kafka-connect", desc: "Restart a Connect task", result: "restarted pg-orders-connector task 0 (state now RUNNING)"})
-	return r
-}
-
-type demoAction struct {
-	name, layer, desc, result string
-}
-
-func (a demoAction) Name() string     { return a.name }
-func (a demoAction) Layer() string    { return a.layer }
-func (a demoAction) Describe() string { return a.desc }
-func (a demoAction) ParamsSchema() map[string]any {
-	return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}
-}
-func (a demoAction) Validate(params json.RawMessage) error { return nil }
-
-// CheckScope keeps the demo actions inside the demo pipeline (dev/owners.yaml
-// id "orders"), mirroring the real actions' actions.Scoped behavior.
-func (a demoAction) CheckScope(p owners.Pipeline, params json.RawMessage) error {
-	if p.ID != "orders" {
-		return fmt.Errorf("demo: %s is scoped to the orders pipeline, not %q", a.name, p.ID)
-	}
-	return nil
-}
-func (a demoAction) Execute(ctx context.Context, params json.RawMessage) (string, error) {
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-time.After(200 * time.Millisecond):
-	}
-	return a.result, nil
 }
 
 // Builder is a fake topology.Builder for the orders pipeline.

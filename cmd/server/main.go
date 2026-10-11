@@ -1,8 +1,10 @@
 // Command server runs the Piperoom room service. With --demo it uses a
-// scripted fake agent (and fake topology/actions) so the UI can be built
-// against it with no stack; without --demo it applies the migrations, opens
-// the real stack clients via wiring.Open, registers the real tools/actions
-// and runs the real agent (agent.Run).
+// scripted fake agent and fake topology over the REAL actions running on
+// in-memory clients, so the UI can be built against it with no stack; without
+// --demo it applies the migrations, opens the real stack clients via
+// wiring.Open, registers the real tools/actions and runs the real agent
+// (agent.Run). Owners are loaded and cross-checked against the users file in
+// both modes.
 package main
 
 import (
@@ -55,10 +57,28 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Real mode refuses to start without a usable users file: it is the
+	// directory of who may approve and drive (LEAD-ARCH round 4, item 7).
+	// Demo mode stays self-contained for the users file only, falling back to
+	// the dev directory so the UI can be built with no config.
 	users, err := room.LoadUsers(cfg.UsersFile)
 	if err != nil {
+		if !*demoMode {
+			return fmt.Errorf("server: load users file %s: %w", cfg.UsersFile, err)
+		}
 		log.Warn("server: users file unavailable, using demo users", "path", cfg.UsersFile, "err", err)
 		users = room.DefaultUsers()
+	}
+	// Owners are required in both modes: every action's scope check runs
+	// against them, so a room can only ever write inside its own pipeline.
+	// Users and owners must agree (a layer owner in owners.yaml must exist in
+	// users.yaml and actually own that layer), otherwise start is refused.
+	own, err := owners.Load(cfg.OwnersFile)
+	if err != nil {
+		return fmt.Errorf("server: load owners file %s: %w", cfg.OwnersFile, err)
+	}
+	if err := room.ValidateUsers(users, own); err != nil {
+		return fmt.Errorf("server: users/owners config: %w", err)
 	}
 
 	// --demo is fully self-contained (in-memory store + scripted agent) so A6
@@ -81,15 +101,20 @@ func run() error {
 	}
 
 	var (
-		acts      *actions.Registry
-		toolsReg  = tools.NewRegistry()
-		topo      topology.Builder
-		ownersCfg *owners.Owners
-		run       = agent.Run
-		write     = agent.WriteHandoff
+		acts     *actions.Registry
+		toolsReg = tools.NewRegistry()
+		topo     topology.Builder
+		run      = agent.Run
+		write    = agent.WriteHandoff
 	)
 	if *demoMode {
-		acts = demo.Actions()
+		// The real actions over the demo's in-memory clients (LEAD-ARCH round
+		// 4, item 3): the proposal path -- scope check, approval, executor --
+		// is identical to production.
+		acts = actions.NewRegistry()
+		if err := actions.Register(acts, demo.FakeActionDeps()); err != nil {
+			return fmt.Errorf("server: register demo actions: %w", err)
+		}
 		topo = demo.Builder{}
 		run = demo.Run
 		write = demo.WriteHandoff
@@ -104,7 +129,6 @@ func run() error {
 			return fmt.Errorf("server: register tools and actions: %w", err)
 		}
 		topo = w.Builder
-		ownersCfg = w.Owners
 	}
 
 	svc := room.New(room.Deps{
@@ -113,7 +137,7 @@ func run() error {
 		Tools:        toolsReg,
 		Topology:     topo,
 		Users:        users,
-		Owners:       ownersCfg,
+		Owners:       own,
 		Run:          run,
 		WriteHandoff: write,
 		Options: agent.Options{

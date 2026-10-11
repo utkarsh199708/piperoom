@@ -3,8 +3,12 @@ package room
 import (
 	"fmt"
 	"os"
+	"sort"
 
 	"gopkg.in/yaml.v3"
+
+	"piperoom/internal/events"
+	"piperoom/internal/owners"
 )
 
 // User is a person who can watch, steer, approve and drive a room.
@@ -48,6 +52,43 @@ func LoadUsers(path string) (*Users, error) {
 		return nil, fmt.Errorf("room: read users file: %w", err)
 	}
 	return ParseUsers(data)
+}
+
+// ValidateUsers checks the users directory against the loaded owners config
+// (LEAD-ARCH round 4, item 7). Every layer a user claims must be one of
+// events.Layers, and every layer in the owners config must name a user who
+// exists in the users file and actually lists that layer. Any disagreement is
+// returned as an error so the server refuses to start: an approver that can
+// never approve, or a layer with no owner, would otherwise stall proposals
+// forever with no visible cause. own may be nil (no owners config loaded),
+// in which case only the users file itself is checked.
+func ValidateUsers(users *Users, own *owners.Owners) error {
+	for _, user := range users.order {
+		for _, layer := range user.Layers {
+			if !isKnownLayer(layer) {
+				return fmt.Errorf("users file: user %q claims unknown layer %q (known: %v)", user.ID, layer, events.Layers)
+			}
+		}
+	}
+	if own == nil {
+		return nil
+	}
+	layers := make([]string, 0, len(own.Layers))
+	for layer := range own.Layers {
+		layers = append(layers, layer)
+	}
+	sort.Strings(layers) // deterministic error for the same config
+	for _, layer := range layers {
+		ownerID := own.Layers[layer]
+		user, ok := users.Get(ownerID)
+		if !ok {
+			return fmt.Errorf("owners file assigns layer %q to %q, who is not in the users file", layer, ownerID)
+		}
+		if !user.OwnsLayer(layer) {
+			return fmt.Errorf("users file and owners file disagree: %q owns layer %q in the owners file but lists layers %v", ownerID, layer, user.Layers)
+		}
+	}
+	return nil
 }
 
 // DefaultUsers returns the demo directory from docs/api.md, matching
