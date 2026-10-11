@@ -34,6 +34,7 @@ Write these exactly (A3 and A5 parse them):
 pipelines:
   - id: orders
     title: Orders CDC
+    topic_prefix: pg   # Debezium topic.prefix; actions scope subjects to <prefix>.<table>-key|-value
     source_tables: [public.orders]
     connectors: [pg-orders-connector]
     consumer_groups: [order-sync]
@@ -42,7 +43,7 @@ pipelines:
 layers:
   postgres: priya
   kafka-connect: arjun
-  schema-registry: arjun
+  schema-registry: priya   # source team owns its schemas (api.md v0.1)
   kafka: arjun
   consumer: kabir
   warehouse: meera
