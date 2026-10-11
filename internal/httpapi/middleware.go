@@ -83,6 +83,11 @@ func requestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 			case status >= 400:
 				level = slog.LevelWarn
 			}
+			// Probes hit the server every few seconds; logging each one would
+			// drown real traffic. Readiness failures reach Config.OnNotReady.
+			if isProbePath(r.URL.Path) {
+				level = slog.LevelDebug
+			}
 			log.LogAttrs(r.Context(), level, "http request",
 				slog.String("method", r.Method),
 				slog.String("route", routePattern(r)),

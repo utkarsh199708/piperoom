@@ -105,6 +105,20 @@ func (p *PG) Close() {
 	})
 }
 
+// pingTimeout bounds Ping; a readiness probe must answer inside its own budget.
+const pingTimeout = 2 * time.Second
+
+// Ping checks that the database answers a trivial query. It backs GET /readyz.
+func (p *PG) Ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, pingTimeout)
+	defer cancel()
+	var one int
+	if err := p.pool.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
+		return fmt.Errorf("store: ping: %w", err)
+	}
+	return nil
+}
+
 // CreateRoom registers an empty log for roomID.
 func (p *PG) CreateRoom(ctx context.Context, roomID string) error {
 	if roomID == "" {

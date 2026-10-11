@@ -68,6 +68,8 @@ func run(demo bool, demoDelay time.Duration, addrFlag string, insecure bool, log
 	rc := room.Config{Owners: own, Logger: logger, AgentOptions: agent.Options{Model: cfg.Model, Effort: cfg.Effort}}
 	var st store.Store
 	var verifier alertin.Config
+	// ready stays nil in demo mode: the in-memory store is always ready.
+	var ready httpapi.Pinger
 
 	if demo {
 		logger.Info("demo mode: scripted agent, in-memory log, built-in users")
@@ -88,7 +90,7 @@ func run(demo bool, demoDelay time.Duration, addrFlag string, insecure bool, log
 			return err
 		}
 		defer pg.Close()
-		st = pg
+		st, ready = pg, pg
 		if rc.Users, err = room.LoadUsers(cfg.UsersFile); err != nil {
 			return err
 		}
@@ -120,7 +122,10 @@ func run(demo bool, demoDelay time.Duration, addrFlag string, insecure bool, log
 	}
 
 	wsh := ws.New(ws.Config{Subscribe: st.Subscribe, Authenticate: svc.Authenticate, RoomExists: svc.RoomExists, Logger: logger})
-	api := httpapi.New(httpapi.Config{Service: svc, Verifier: verifier, WS: wsh, Logger: logger})
+	api := httpapi.New(httpapi.Config{
+		Service: svc, Verifier: verifier, WS: wsh, Logger: logger,
+		Ready: ready, OnNotReady: newReadyLogger(logger, readyLogEvery, time.Now).notReady,
+	})
 	srv := &http.Server{
 		Addr: addr, Handler: api,
 		ReadHeaderTimeout: 10 * time.Second,

@@ -44,12 +44,25 @@ type Config struct {
 	// than HandoffTimeout or it cuts the hand-off short.
 	RequestTimeout time.Duration
 	HandoffTimeout time.Duration
+	// Ready backs GET /readyz. When nil, the server always reports ready
+	// (the in-memory store has nothing to check).
+	Ready Pinger
+	// ProbeTimeout bounds the Ready check; default DefaultProbeTimeout.
+	ProbeTimeout time.Duration
+	// OnNotReady, when set, is called after each failed readiness check with
+	// the fixed reason and the underlying error, so the caller can log it
+	// (rate-limited). The error never reaches the HTTP response.
+	OnNotReady func(reason string, err error)
 }
 
 type api struct {
 	svc Service
 	ver Verifier
 	log *slog.Logger
+
+	ready        Pinger
+	probeTimeout time.Duration
+	onNotReady   func(reason string, err error)
 }
 
 // New returns the router for docs/api.md.
@@ -66,7 +79,13 @@ func New(cfg Config) http.Handler {
 	if cfg.HandoffTimeout <= 0 {
 		cfg.HandoffTimeout = DefaultHandoffTimeout
 	}
-	a := &api{svc: cfg.Service, ver: cfg.Verifier, log: cfg.Logger}
+	if cfg.ProbeTimeout <= 0 {
+		cfg.ProbeTimeout = DefaultProbeTimeout
+	}
+	a := &api{
+		svc: cfg.Service, ver: cfg.Verifier, log: cfg.Logger,
+		ready: cfg.Ready, probeTimeout: cfg.ProbeTimeout, onNotReady: cfg.OnNotReady,
+	}
 	timeout := timeoutMiddleware(cfg.RequestTimeout)
 
 	r := chi.NewRouter()
@@ -79,6 +98,11 @@ func New(cfg Config) http.Handler {
 	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, codeMethod, "That method is not allowed here.")
 	})
+
+	// Liveness and readiness probes: no X-User (a probe has no user) and not
+	// under the 60 s request timeout; readyz bounds its own check.
+	r.Get(pathHealthz, a.healthz)
+	r.Get(pathReadyz, a.readyz)
 
 	// WebSocket: no X-User (the handler checks ?user=) and no request
 	// timeout (the connection lives for as long as the tab is open).
