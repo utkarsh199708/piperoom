@@ -550,6 +550,14 @@ func (p proposalCreator) Create(ctx context.Context, payload events.ProposalCrea
 	return p.s.CreateProposal(ctx, p.roomID, payload, events.AgentActor)
 }
 
+// Agent auto-restart bounds (LEAD-ARCH round 4, arch should-fix): a failed
+// agent run is retried with growing backoff so a transient error does not
+// leave the room without an agent forever.
+const (
+	maxAgentAttempts  = 3
+	agentRetryBackoff = 1 * time.Second // doubled after every failed attempt
+)
+
 // startAgentLocked starts agent.Run for an open room. Caller holds s.mu. It
 // does nothing after Close, so a shutting-down service never adds goroutines.
 func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.RawMessage, st *roomState) {
@@ -577,11 +585,26 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			Proposals: proposalCreator{s: s, roomID: roomID},
 			Logger:    s.log,
 		}
-		if err := s.run(ctx, alert, deps, s.opts); err != nil && ctx.Err() == nil {
-			s.log.Warn("room: agent run returned error", "room", roomID, "err", err)
+		backoff := agentRetryBackoff
+		for attempt := 1; ; attempt++ {
+			err := s.run(ctx, alert, deps, s.opts)
+			if err == nil || ctx.Err() != nil {
+				return
+			}
+			s.log.Warn("room: agent run returned error", "room", roomID, "attempt", attempt, "err", err)
 			ectx, ecancel := context.WithTimeout(s.ctx, 5*time.Second)
 			_ = s.agentEmit(ectx, roomID, events.AgentStatus, events.AgentStatusPayload{State: "error", Detail: truncateDetail(err.Error())})
 			ecancel()
+			if attempt >= maxAgentAttempts {
+				s.log.Error("room: agent gave up after repeated failures", "room", roomID, "attempts", attempt)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff *= 2
 		}
 	}()
 }

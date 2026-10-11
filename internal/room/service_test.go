@@ -79,6 +79,13 @@ func (a *fakeAction) Calls() int {
 	return a.calls
 }
 
+// testOwners is the minimal owners config unit tests scope action steps
+// against (the room service now always scope-checks; a nil config fails
+// closed).
+func testOwners() *owners.Owners {
+	return &owners.Owners{Pipelines: []owners.Pipeline{{ID: "orders", SourceTables: []string{"public.orders"}}}}
+}
+
 func newTestService(t *testing.T, act ...actions.Action) (*room.Service, *memstore.Store, *clock) {
 	t.Helper()
 	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
@@ -93,6 +100,7 @@ func newTestService(t *testing.T, act ...actions.Action) (*room.Service, *memsto
 		Store:        st,
 		Actions:      reg,
 		Users:        room.DefaultUsers(),
+		Owners:       testOwners(),
 		Run:          fakeRun,
 		WriteHandoff: fakeWrite,
 		Now:          c.Now,
@@ -802,8 +810,17 @@ func TestCreateRoomFromAlertStoresRawBody(t *testing.T) {
 		t.Fatalf("raw alert not stored verbatim:\n got %s\nwant %s", p.Alert, raw)
 	}
 
-	// A garbage (non-mapped) body still opens a room with the default pipeline.
-	snap2, err := svc.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
+	// With the owners config loaded, a garbage (non-mapped) body uses the
+	// default pipeline "unknown" and is refused like any unknown pipeline
+	// (review item 8).
+	_, err = svc.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
+	wantCode(t, err, "validation")
+
+	// Without an owners config (unit mode) the same body opens a room with
+	// the defaults.
+	bare := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})
+	t.Cleanup(bare.Close)
+	snap2, err := bare.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
 	if err != nil {
 		t.Fatalf("create from array alert: %v", err)
 	}
@@ -1256,7 +1273,7 @@ func TestExecutorRoomClosedPathRecordsOutcome(t *testing.T) {
 	if err := reg.Register(second); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	svc := room.New(room.Deps{Store: st, Actions: reg, Users: room.DefaultUsers(), Run: fakeRun, Now: c.Now})
+	svc := room.New(room.Deps{Store: st, Actions: reg, Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, Now: c.Now})
 	t.Cleanup(svc.Close)
 
 	roomID := createRoom(t, svc, "arjun").ID
@@ -1305,4 +1322,98 @@ func TestExecutorRoomClosedPathRecordsOutcome(t *testing.T) {
 	if snap.Status != "closed" {
 		t.Fatalf("room should be closed: %+v", snap.Status)
 	}
+}
+
+// TestScopeCheckFailsClosedWithoutOwners pins LEAD-ARCH round 4, item 3: the
+// old "--demo skips the scope check" bypass is gone; a service with no owners
+// config refuses to create scoped proposals instead of running them unchecked.
+func TestScopeCheckFailsClosedWithoutOwners(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	reg := actions.NewRegistry()
+	if err := reg.Register(&fakeAction{name: "pg_act", layer: "postgres"}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	svc := room.New(room.Deps{Store: st, Actions: reg, Users: room.DefaultUsers(), Run: fakeRun, Now: c.Now})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	_, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor)
+	wantCode(t, err, "validation")
+	if err == nil || !strings.Contains(err.Error(), "owners") {
+		t.Fatalf("want an owners-config error, got %v", err)
+	}
+}
+
+// TestAgentAutoRestartsAfterFailure pins the arch should-fix "no auto-restart
+// of agents": a run that fails transiently is retried (bounded, with backoff)
+// and every failure is surfaced as agent.status "error".
+func TestAgentAutoRestartsAfterFailure(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	var mu sync.Mutex
+	attempts := 0
+	third := make(chan struct{})
+	svc := room.New(room.Deps{
+		Store: st, Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
+		Run: func(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
+			mu.Lock()
+			attempts++
+			n := attempts
+			mu.Unlock()
+			if n < 3 {
+				return errors.New("provider down")
+			}
+			close(third)
+			<-ctx.Done()
+			return nil
+		},
+	})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	select {
+	case <-third:
+	case <-time.After(15 * time.Second):
+		t.Fatal("agent was not restarted after its failures")
+	}
+	// One agent.status "error" per failed attempt, with the cause.
+	waitFor(t, 5*time.Second, func() bool {
+		n := 0
+		for _, e := range allEvents(t, st, roomID) {
+			if e.Type != events.AgentStatus {
+				continue
+			}
+			if p, err := events.Decode[events.AgentStatusPayload](e); err == nil && p.State == "error" {
+				n++
+			}
+		}
+		return n == 2
+	})
+}
+
+// TestTopologyUnknownPipelineNotFound pins docs/api.md: an unknown pipeline is
+// a 404 from the API, not a 500 from the builder.
+func TestTopologyUnknownPipelineNotFound(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	_, err := svc.Topology(context.Background(), "nope")
+	wantCode(t, err, "not_found")
+	if _, err := svc.Topology(context.Background(), "bad id!"); err == nil {
+		t.Fatal("malformed pipeline id returned a graph")
+	}
+	if _, err := svc.Topology(context.Background(), "orders"); err != nil {
+		t.Fatalf("known pipeline: %v", err)
+	}
+}
+
+// TestTraceRejectsMalformedTable pins the 400 (not 500) mapping for a bad
+// table argument.
+func TestTraceRejectsMalformedTable(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	roomID := createRoom(t, svc, "arjun").ID
+	_, err := svc.Trace(context.Background(), mustUser(t, svc, "arjun"), roomID, "not a table!", "k")
+	wantCode(t, err, "validation")
 }

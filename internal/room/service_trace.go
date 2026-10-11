@@ -3,14 +3,29 @@ package room
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"time"
 
 	"piperoom/internal/events"
 	"piperoom/internal/topology"
 )
 
-// Topology returns the live pipeline map.
+// tableRe is the accepted shape of a table argument ("schema.table"). The
+// value flows into tool prompts and identifier lookups, and a malformed name
+// is a client error, not an internal one.
+var tableRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// Topology returns the live pipeline map. An unknown pipeline is a 404
+// (docs/api.md), not a 500 from the builder.
 func (s *Service) Topology(ctx context.Context, pipelineID string) (topology.Graph, error) {
+	if !pipelineIDRe.MatchString(pipelineID) {
+		return topology.Graph{}, notFound("pipeline not found")
+	}
+	if s.owners != nil {
+		if _, ok := s.owners.Pipeline(pipelineID); !ok {
+			return topology.Graph{}, notFound("pipeline not found")
+		}
+	}
 	tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	g, err := s.topo.Build(tctx, pipelineID)
@@ -24,6 +39,9 @@ func (s *Service) Topology(ctx context.Context, pipelineID string) (topology.Gra
 func (s *Service) Trace(ctx context.Context, user User, roomID, table, key string) (events.Event, error) {
 	if table == "" || key == "" {
 		return events.Event{}, validation("table and key are required")
+	}
+	if !tableRe.MatchString(table) {
+		return events.Event{}, validation(fmt.Sprintf("table %q must be schema.name", table))
 	}
 
 	s.mu.Lock()

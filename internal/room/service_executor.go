@@ -153,9 +153,9 @@ func (s *Service) resultCtx() (context.Context, context.CancelFunc) {
 //
 // Every stop path records an outcome: the step (when claimed) is finished as
 // "failed", an action.executed event with OK=false is emitted and the proposal
-// status becomes "failed", so the snapshot and the expiry sweeper see the
-// result instead of a proposal stuck open (review item 13). Result writes use
-// resultCtx and therefore survive a concurrent Close (review item 3).
+// status becomes "failed", so the snapshot sees the result instead of a
+// proposal stuck open (review item 13). Result writes use resultCtx and
+// therefore survive a concurrent Close (review item 3).
 //
 // A non-nil return means the executor itself could not proceed (decode error,
 // step order violation, store failure): that is an operational problem, not a
@@ -299,15 +299,16 @@ func (s *Service) finishClaimedStep(proposalID string, i int, output string) {
 }
 
 // scopeCheck enforces actions.Scoped for a step against the room's pipeline.
-// It returns a nil error when no owners config is loaded (--demo, tests):
-// there is no pipeline definition to scope against then.
+// It fails closed: when no owners config is loaded there is nothing to scope
+// against, so the action is refused instead of running unchecked (LEAD-ARCH
+// round 4, item 3 removed the "--demo skips scope" bypass).
 func (s *Service) scopeCheck(pipelineID string, a actions.Action, params json.RawMessage) error {
 	sc, ok := a.(actions.Scoped)
 	if !ok {
 		return fmt.Errorf("action %q does not support scope checks", a.Name())
 	}
 	if s.owners == nil {
-		return nil
+		return fmt.Errorf("action %q cannot be scope-checked: no owners config is loaded", a.Name())
 	}
 	p, ok := s.owners.Pipeline(pipelineID)
 	if !ok {
