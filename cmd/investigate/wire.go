@@ -3,34 +3,40 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/connect"
+	"piperoom/internal/clients/kafka"
 	"piperoom/internal/clients/postgres"
+	"piperoom/internal/clients/schemareg"
 	"piperoom/internal/clients/warehouse"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/dbtools"
+	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/topology"
 )
 
 // a2Clients bundles the Connect, Kafka and Schema Registry clients. They are
 // shared by the topology builder (so pipeline_map/trace_record read real state)
-// and, behind -tags realtools, by A2's tools and actions. Without the tag they
-// are unreachable stubs, because A2's packages have not merged yet.
+// and by A2's tools and actions.
 type a2Clients struct {
 	connect  clients.ConnectClient
 	kafka    clients.KafkaAdmin
 	registry clients.SchemaRegistryClient
 }
 
-// wireRealTools opens the read-only A3 clients (source Postgres, warehouse,
-// owners), builds the topology builder and registers the A3 db tools. When
-// built with -tags realtools it also registers A2's tools and actions. The
-// returned cleanup closes the database pools and the Kafka client; the caller
-// must defer it so the clients stay open for the whole agent run.
+// wireRealTools opens the read-only clients (source Postgres, warehouse,
+// Connect, Kafka, Schema Registry), loads owners, builds the topology builder
+// and registers the A3 db tools plus A2's Kafka/Connect/Schema Registry tools
+// and actions. The returned cleanup closes the database pools and the Kafka
+// client; the caller must defer it so the clients stay open for the whole
+// agent run.
 func wireRealTools(cfg config.Config, reg *tools.Registry, areg *actions.Registry) (func(), error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -73,9 +79,8 @@ func wireRealTools(cfg config.Config, reg *tools.Registry, areg *actions.Registr
 }
 
 // registerTools builds the topology builder over the given clients and
-// registers the A3 db tools plus (behind -tags realtools) A2's tools and
-// actions. It is separate from wireRealTools so tests can drive the wiring
-// with fakes and no live stack.
+// registers the A3 db tools plus A2's tools and actions. It is separate from
+// wireRealTools so tests can drive the wiring with fakes and no live stack.
 func registerTools(reg *tools.Registry, areg *actions.Registry, src clients.SourceDB, wh clients.Warehouse, o *owners.Owners, a2 *a2Clients) error {
 	b := topology.NewBuilder(o, a2.connect, a2.kafka, src, wh)
 	if err := dbtools.Register(reg, dbtools.Deps{Src: src, Wh: wh, Builder: b}); err != nil {
@@ -85,4 +90,52 @@ func registerTools(reg *tools.Registry, areg *actions.Registry, src clients.Sour
 		return err
 	}
 	return nil
+}
+
+// newA2Clients builds the real Connect, Schema Registry and Kafka clients from
+// config.
+func newA2Clients(cfg config.Config) (*a2Clients, func(), error) {
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+
+	connectClient := connect.New(cfg.ConnectURL, httpClient)
+	registryClient := schemareg.New(cfg.SchemaRegistryURL, httpClient)
+	kafkaClient, err := kafka.New(splitBrokers(cfg.KafkaBrokers), registryClient)
+	if err != nil {
+		return nil, nil, fmt.Errorf("investigate: kafka client: %w", err)
+	}
+	return &a2Clients{
+		connect:  connectClient,
+		kafka:    kafkaClient,
+		registry: registryClient,
+	}, func() { kafkaClient.Close() }, nil
+}
+
+// wireA2 registers A2's read-only Kafka/Connect/Schema Registry tools and the
+// write actions the agent may propose (never run).
+func wireA2(reg *tools.Registry, areg *actions.Registry, a2 *a2Clients) error {
+	if err := kafkatools.Register(reg, kafkatools.Deps{
+		Connect:  a2.connect,
+		Registry: a2.registry,
+		Kafka:    a2.kafka,
+	}); err != nil {
+		return fmt.Errorf("investigate: register kafka tools: %w", err)
+	}
+	if err := actions.Register(areg, actions.Deps{
+		Connect:  a2.connect,
+		Registry: a2.registry,
+	}); err != nil {
+		return fmt.Errorf("investigate: register actions: %w", err)
+	}
+	return nil
+}
+
+// splitBrokers splits a comma-separated broker list, trimming blanks.
+func splitBrokers(s string) []string {
+	var out []string
+	for _, b := range strings.Split(s, ",") {
+		if b = strings.TrimSpace(b); b != "" {
+			out = append(out, b)
+		}
+	}
+	return out
 }

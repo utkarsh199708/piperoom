@@ -10,7 +10,6 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
-	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -137,12 +136,15 @@ func wireFakes(t *testing.T) (*tools.Registry, *actions.Registry, *fakeClients) 
 	return reg, areg, f
 }
 
-func TestRegisterToolsWiresDBTools(t *testing.T) {
+func TestRegisterToolsWiresAllTools(t *testing.T) {
 	reg, areg, _ := wireFakes(t)
 
 	want := []string{
 		"pg_replication_slots", "pg_recent_ddl", "pg_long_transactions", "pg_row",
 		"warehouse_freshness", "warehouse_row", "pipeline_map", "trace_record",
+		"connect_list_connectors", "connect_status", "connect_config",
+		"schema_registry_subjects", "schema_registry_versions", "schema_registry_diff",
+		"kafka_topic_offsets", "kafka_list_groups", "kafka_consumer_lag", "kafka_find_by_key",
 	}
 	got := make([]string, 0, len(reg.All()))
 	for _, tl := range reg.All() {
@@ -154,8 +156,17 @@ func TestRegisterToolsWiresDBTools(t *testing.T) {
 	if !slices.Equal(want, got) {
 		t.Errorf("registered tools = %v, want %v", got, want)
 	}
-	if n := len(areg.All()); n != 0 {
-		t.Errorf("default build registered %d actions, want 0 (A2 actions are realtools-only)", n)
+
+	wantActions := []string{
+		"connect_restart_task", "connect_restart_connector",
+		"schema_set_compatibility", "schema_register",
+	}
+	gotActions := make([]string, 0, len(areg.All()))
+	for _, a := range areg.All() {
+		gotActions = append(gotActions, a.Name())
+	}
+	if !slices.Equal(wantActions, gotActions) {
+		t.Errorf("registered actions = %v, want %v", gotActions, wantActions)
 	}
 }
 
@@ -216,26 +227,13 @@ func TestTraceRecordUsesRealClients(t *testing.T) {
 	}
 }
 
-func TestDefaultBuildStubsReportUnreachable(t *testing.T) {
-	a2, cleanup, err := newA2Clients(config.Config{})
-	if err != nil {
-		t.Fatalf("newA2Clients: %v", err)
+func TestSplitBrokers(t *testing.T) {
+	got := splitBrokers(" localhost:29092 , broker2:9092 , ")
+	want := []string{"localhost:29092", "broker2:9092"}
+	if !slices.Equal(got, want) {
+		t.Errorf("splitBrokers = %v, want %v", got, want)
 	}
-	cleanup()
-
-	if _, err := a2.connect.Status(context.Background(), "x"); err == nil {
-		t.Error("stub connect Status returned nil error, want unreachable")
-	}
-	if _, err := a2.kafka.GroupLag(context.Background(), "g"); err == nil {
-		t.Error("stub kafka GroupLag returned nil error, want unreachable")
-	}
-
-	reg := tools.NewRegistry()
-	areg := actions.NewRegistry()
-	if err := wireA2(reg, areg, a2); err != nil {
-		t.Fatalf("wireA2: %v", err)
-	}
-	if len(reg.All()) != 0 || len(areg.All()) != 0 {
-		t.Error("default build wireA2 registered tools or actions, want none")
+	if n := splitBrokers("  , , "); len(n) != 0 {
+		t.Errorf("splitBrokers(blanks) = %v, want empty", n)
 	}
 }
