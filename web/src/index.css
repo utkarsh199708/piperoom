@@ -839,6 +839,56 @@ textarea:focus {
   font-size: 13px;
 }
 
+.proposal__step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.proposal__params {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 140px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.proposal__params--empty {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.proposal__param {
+  display: flex;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.proposal__param-key {
+  color: var(--muted);
+}
+
+.proposal__param-key--target {
+  color: var(--orange);
+  font-weight: 600;
+}
+
+.proposal__param-val--target {
+  color: var(--orange);
+}
+
 .proposal__approvals {
   display: flex;
   flex-direction: column;
