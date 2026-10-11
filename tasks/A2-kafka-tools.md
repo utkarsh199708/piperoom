@@ -49,7 +49,12 @@ interfaces (not the concrete types), so tests use fakes.
 | `connect_config` | `connector` | key settings: class, table include list, topic prefix, slot name, converters, decimal mode. **Redact** any key containing `password`, `secret`, `token`, `key` (value → `***`) |
 | `schema_registry_subjects` | `prefix?` | matching subjects |
 | `schema_registry_versions` | `subject` | versions, latest id, compatibility level and whether it is subject-level or global |
-| `schema_registry_diff` | `subject`, `from_version`, `to_version?` (default latest) | field-level diff for Avro record schemas: added / removed / type-changed fields (e.g. `amount: int → bytes(decimal 12,2)`) |
+| `schema_registry_diff` | `subject`, `from_version`, `to_version?` (default latest), `schema?` (Avro JSON; diff this instead of `to_version`) | field-level diff for Avro record schemas: added / removed / type-changed fields (e.g. `amount: int → bytes(decimal 12,2)`) |
+
+**Important (observed on the live stack):** a schema that Schema Registry **rejects is never registered**, so a
+version-to-version diff shows nothing. The attempted schema appears only inside the FAILED task trace
+(`Error registering Avro schema{…}`). Therefore `connect_status` must parse that schema from the trace, diff it
+against the subject's latest version, and print the field changes — that is how the agent finds the real cause.
 | `kafka_topic_offsets` | `topic` | per partition start/end, total records, newest record time and "N min ago" |
 | `kafka_list_groups` | `topic?` | groups (optionally only those reading the topic) with state |
 | `kafka_consumer_lag` | `group` | state, members, total lag, worst 5 partitions |
