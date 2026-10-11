@@ -277,8 +277,10 @@ func tsFromRow(row map[string]any) time.Time {
 	return time.Time{}
 }
 
-// diffColumns returns the names of columns present in both maps whose string
-// forms differ. Values never leave this function.
+// diffColumns returns the names of columns present in both maps whose values
+// differ. Values never leave this function. Numbers are compared numerically
+// so an integer source column and a numeric sink column (e.g. 50 vs 50.00)
+// are not flagged as different.
 func diffColumns(a, b map[string]any) []string {
 	var diffs []string
 	for k, av := range a {
@@ -286,12 +288,21 @@ func diffColumns(a, b map[string]any) []string {
 		if !ok {
 			continue
 		}
-		if fmt.Sprint(av) != fmt.Sprint(bv) {
+		if canonical(av) != canonical(bv) {
 			diffs = append(diffs, k)
 		}
 	}
 	sort.Strings(diffs)
 	return diffs
+}
+
+// canonical renders a value for comparison, normalizing numbers.
+func canonical(v any) string {
+	s := fmt.Sprint(v)
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return strconv.FormatFloat(f, 'f', -1, 64)
+	}
+	return s
 }
 
 func formatTS(t time.Time) string {

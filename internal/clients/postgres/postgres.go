@@ -372,3 +372,5 @@ func withDeadline(ctx context.Context, d time.Duration) (context.Context, contex
 	}
 	return context.WithTimeout(ctx, d)
 }
+
+var _ = clients.SourceDB((*DB)(nil))

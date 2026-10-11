@@ -535,3 +535,16 @@ func TestLayerOwner(t *testing.T) {
 		t.Fatal("bogus layer should not resolve")
 	}
 }
+
+func TestDiffColumnsNormalizesNumbers(t *testing.T) {
+	src := map[string]any{"id": "7", "amount": "50", "status": "placed", "updated_at": "2026-10-11T10:00:00Z"}
+	sink := map[string]any{"id": "7", "amount": "50.00", "status": "placed", "updated_at": "2026-10-11T10:00:00Z", "loaded_at": "x"}
+	got := diffColumns(src, sink)
+	if len(got) != 0 {
+		t.Fatalf("diff = %v, want none (50 vs 50.00 should match)", got)
+	}
+	sink["amount"] = "99.00"
+	if got := diffColumns(src, sink); len(got) != 1 || got[0] != "amount" {
+		t.Fatalf("diff = %v, want [amount]", got)
+	}
+}
