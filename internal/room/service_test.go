@@ -88,7 +88,20 @@ func newTestService(t *testing.T, act ...actions.Action) (*room.Service, *memsto
 		WriteHandoff: fakeWrite,
 		Now:          c.Now,
 	})
+	t.Cleanup(svc.Close)
 	return svc, st, c
+}
+
+func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("condition not met within %s", timeout)
 }
 
 func mustUser(t *testing.T, svc *room.Service, id string) room.User {
@@ -244,6 +257,13 @@ func TestExecutorStopsAtFirstFailure(t *testing.T) {
 		t.Fatalf("approve warehouse: %v", err)
 	}
 
+	// The executor runs asynchronously on the service context; wait for the
+	// terminal proposal status (step 1 fails, so the proposal is failed).
+	waitFor(t, 5*time.Second, func() bool {
+		p, err := st.GetProposal(context.Background(), pid)
+		return err == nil && p.Status == "failed"
+	})
+
 	executed := map[int]bool{}
 	for _, e := range allEvents(t, st, roomID) {
 		if e.Type != events.ActionExecuted {
@@ -315,13 +335,149 @@ func TestHandoffMovesDriver(t *testing.T) {
 	if snap.Driver == nil || snap.Driver.ID != "priya" {
 		t.Fatalf("driver not moved: %+v", snap.Driver)
 	}
-	// arjun left (stay_as_watcher false).
+	// The old driver stays listed (membership derives from the event log; there
+	// is no member-left event), demoted to watching.
+	roles := map[string]string{}
 	for _, m := range snap.Members {
-		if m.ID == "arjun" {
-			t.Fatalf("arjun should have left: %+v", snap.Members)
-		}
+		roles[m.ID] = m.Role
+	}
+	if roles["priya"] != "driver" || roles["arjun"] != "watching" {
+		t.Fatalf("bad roles after handoff: %+v", roles)
 	}
 	_ = st
+}
+
+func TestRequiredLayersDerivedFromSteps(t *testing.T) {
+	pgAct := &fakeAction{name: "pg_act", layer: "postgres"}
+	whAct := &fakeAction{name: "wh_act", layer: "warehouse"}
+	svc, st, _ := newTestService(t, pgAct, whAct)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{
+			{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")},
+			{Action: "wh_act", Layer: "warehouse", Params: json.RawMessage("{}")},
+		},
+		// Wrong: this layer is not touched by any step, so it must be replaced
+		// by the derived layers.
+		RequiredLayers: []string{"consumer"},
+	}, events.AgentActor)
+	if err != nil {
+		t.Fatalf("create proposal: %v", err)
+	}
+	prow, err := st.GetProposal(context.Background(), pid)
+	if err != nil {
+		t.Fatalf("get proposal: %v", err)
+	}
+	if len(prow.RequiredLayers) != 2 || prow.RequiredLayers[0] != "postgres" || prow.RequiredLayers[1] != "warehouse" {
+		t.Fatalf("derived layers wrong: %+v", prow.RequiredLayers)
+	}
+
+	// Approving an unrelated layer is rejected.
+	_, err = svc.ApproveProposal(context.Background(), mustUser(t, svc, "kabir"), pid, "consumer")
+	wantCode(t, err, "validation")
+
+	// Approving only postgres must not execute anything.
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+		t.Fatalf("approve postgres: %v", err)
+	}
+	if pgAct.Calls() != 0 || whAct.Calls() != 0 {
+		t.Fatalf("executor ran before all layers approved: pg=%d wh=%d", pgAct.Calls(), whAct.Calls())
+	}
+
+	// Approving warehouse executes both steps.
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "meera"), pid, "warehouse"); err != nil {
+		t.Fatalf("approve warehouse: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool {
+		p, err := st.GetProposal(context.Background(), pid)
+		return err == nil && p.Status == "executed"
+	})
+	if pgAct.Calls() != 1 || whAct.Calls() != 1 {
+		t.Fatalf("unexpected call counts: pg=%d wh=%d", pgAct.Calls(), whAct.Calls())
+	}
+}
+
+func TestExecutorFailureMarksFailed(t *testing.T) {
+	failAct := &fakeAction{name: "fail_act", layer: "postgres", fail: true}
+	svc, st, _ := newTestService(t, failAct)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{
+			{Action: "fail_act", Layer: "postgres", Params: json.RawMessage("{}")},
+		},
+		RequiredLayers: []string{"postgres"},
+	}, events.AgentActor)
+	if err != nil {
+		t.Fatalf("create proposal: %v", err)
+	}
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	waitFor(t, 5*time.Second, func() bool {
+		p, err := st.GetProposal(context.Background(), pid)
+		return err == nil && p.Status == "failed"
+	})
+
+	executed := map[int]bool{}
+	for _, e := range allEvents(t, st, roomID) {
+		if e.Type != events.ActionExecuted {
+			continue
+		}
+		p, err := events.Decode[events.ActionExecutedPayload](e)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		executed[p.StepIndex] = p.OK
+	}
+	if len(executed) != 1 || executed[0] {
+		t.Fatalf("want exactly one failing step, got %v", executed)
+	}
+}
+
+func TestStaleHandoffRejected(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	ev, err := svc.CreateHandoff(context.Background(), mustUser(t, svc, "arjun"), roomID, "priya", false)
+	if err != nil {
+		t.Fatalf("handoff: %v", err)
+	}
+	h, _ := events.Decode[events.HandoffCreatedPayload](ev)
+
+	// arjun hands control to kabir; the pending handoff is now stale.
+	if _, err := svc.GrantControl(context.Background(), mustUser(t, svc, "arjun"), roomID, "kabir"); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	_, err = svc.AcceptHandoff(context.Background(), mustUser(t, svc, "priya"), h.HandoffID)
+	wantCode(t, err, "stale_handoff")
+}
+
+func TestAcceptHandoffVoidsOtherPending(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	ev1, err := svc.CreateHandoff(context.Background(), mustUser(t, svc, "arjun"), roomID, "priya", false)
+	if err != nil {
+		t.Fatalf("handoff 1: %v", err)
+	}
+	ev2, err := svc.CreateHandoff(context.Background(), mustUser(t, svc, "arjun"), roomID, "kabir", false)
+	if err != nil {
+		t.Fatalf("handoff 2: %v", err)
+	}
+	h1, _ := events.Decode[events.HandoffCreatedPayload](ev1)
+	h2, _ := events.Decode[events.HandoffCreatedPayload](ev2)
+
+	if _, err := svc.AcceptHandoff(context.Background(), mustUser(t, svc, "priya"), h1.HandoffID); err != nil {
+		t.Fatalf("accept 1: %v", err)
+	}
+	// The second handoff was voided and can no longer be accepted.
+	_, err = svc.AcceptHandoff(context.Background(), mustUser(t, svc, "kabir"), h2.HandoffID)
+	wantCode(t, err, "already_decided")
 }
 
 func TestSendSuggestionForwards(t *testing.T) {

@@ -18,6 +18,7 @@ const (
 	codeNotFound       = "not_found"
 	codeAlreadyDecided = "already_decided"
 	codeRoomClosed     = "room_closed"
+	codeStaleHandoff   = "stale_handoff"
 )
 
 func validation(msg string) *Error {
@@ -43,6 +44,10 @@ func notRecipient(msg string) *Error {
 
 func alreadyDecided(msg string) *Error {
 	return &Error{Status: 409, Code: codeAlreadyDecided, Msg: msg}
+}
+
+func staleHandoff(msg string) *Error {
+	return &Error{Status: 409, Code: codeStaleHandoff, Msg: msg}
 }
 
 func roomClosed(msg string) *Error {

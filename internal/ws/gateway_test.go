@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -115,6 +116,60 @@ func TestWebSocketReplayThenLiveThenReconnect(t *testing.T) {
 	e4 := readEvent(t, conn2)
 	if e4.Seq != 4 || e4.Type != events.CommentAdded {
 		t.Fatalf("reconnect live: got %s/%d", e4.Type, e4.Seq)
+	}
+}
+
+// TestWebSocketReplayManyEvents replays more events than the live send buffer
+// (256) and verifies the connection survives the backlog and still streams a
+// live event afterwards.
+func TestWebSocketReplayManyEvents(t *testing.T) {
+	srv, svc := newRoomServer(t)
+
+	snap, err := svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "t", "sev2", "orders")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	roomID := snap.ID
+
+	const extra = 1000
+	for i := 0; i < extra; i++ {
+		if _, err := svc.AddComment(context.Background(), mustUser(t, svc, "priya"), roomID, "", "msg"); err != nil {
+			t.Fatalf("comment %d: %v", i, err)
+		}
+	}
+
+	conn := dialWS(t, srv, roomID, "arjun", 0)
+	// room.created (1) + control.granted (2) + 1000 comments.
+	for i := 1; i <= extra+2; i++ {
+		e := readEvent(t, conn)
+		if e.Seq != int64(i) {
+			t.Fatalf("replay: want seq %d, got %d", i, e.Seq)
+		}
+	}
+
+	// The connection must still be live after the replay.
+	if _, err := svc.AddComment(context.Background(), mustUser(t, svc, "priya"), roomID, "", "live"); err != nil {
+		t.Fatalf("live comment: %v", err)
+	}
+	e := readEvent(t, conn)
+	if e.Seq != int64(extra+3) {
+		t.Fatalf("live: want seq %d, got %d", extra+3, e.Seq)
+	}
+}
+
+func TestWebSocketNegativeAfterRejected(t *testing.T) {
+	srv, svc := newRoomServer(t)
+	snap, err := svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "t", "sev2", "orders")
+	if err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	resp, err := http.Get(srv.URL + "/api/rooms/" + snap.ID + "/ws?user=arjun&after=-5")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d", resp.StatusCode)
 	}
 }
 

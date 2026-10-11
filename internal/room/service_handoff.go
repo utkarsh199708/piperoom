@@ -66,9 +66,12 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 	if err != nil {
 		return events.Event{}, fmt.Errorf("room: handoff: marshal summary: %w", err)
 	}
+	// Row first; if the event append fails we remove the row (compensation).
 	if err := s.store.CreateHandoff(ctx, store.HandoffRow{
 		HandoffID:     handoffID,
 		RoomID:        roomID,
+		FromID:        user.ID,
+		FromName:      user.Name,
 		ToID:          to.ID,
 		ToName:        to.Name,
 		Summary:       summaryJSON,
@@ -82,15 +85,19 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 		Summary:       summary,
 		StayAsWatcher: stayAsWatcher,
 	})
-	if err == nil {
-		s.touchDriverLease(ctx, st2, roomID)
+	if err != nil {
+		if delErr := s.store.DeleteHandoff(ctx, handoffID); delErr != nil {
+			s.log.Warn("room: compensate failed handoff row", "handoff", handoffID, "err", delErr)
+		}
+		return events.Event{}, err
 	}
-	return e, err
+	s.touchDriverLease(ctx, st2, roomID)
+	return e, nil
 }
 
 // AcceptHandoff completes a hand-off: it moves the driver role
 // (control.granted) and emits handoff.accepted. Only the handoff recipient may
-// accept.
+// accept, and only while the handoff's creator is still the driver.
 func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string) (events.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -112,7 +119,11 @@ func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
-	oldDriver := st.snap.Driver
+	// A stale hand-off (the creator is no longer the driver) must not move the
+	// role.
+	if !s.isDriver(st, h.FromID) {
+		return events.Event{}, staleHandoff("the handoff creator is no longer the driver")
+	}
 	to := events.Actor{Kind: events.ActorHuman, ID: h.ToID, Name: h.ToName}
 	lease := s.now().UTC().Add(DriverLease)
 
@@ -121,13 +132,14 @@ func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string
 	}); err != nil {
 		return events.Event{}, err
 	}
-	_ = s.store.UpdateDriver(ctx, h.RoomID, h.ToID, h.ToName, lease)
-	if !h.StayAsWatcher && oldDriver != nil {
-		st.snap.Members = removeMember(st.snap.Members, oldDriver.ID)
+	if err := s.store.UpdateDriver(ctx, h.RoomID, h.ToID, h.ToName, lease); err != nil {
+		s.log.Warn("room: persist accepted driver failed", "room", h.RoomID, "err", err)
 	}
-
 	if err := s.store.SetHandoffStatus(ctx, handoffID, "accepted"); err != nil {
 		return events.Event{}, err
+	}
+	if err := s.store.VoidHandoffs(ctx, h.RoomID, handoffID); err != nil {
+		s.log.Warn("room: void other handoffs failed", "room", h.RoomID, "err", err)
 	}
 	return s.emitLocked(ctx, st, h.RoomID, events.HandoffAccepted, humanActor(user), events.HandoffAcceptedPayload{
 		HandoffID: handoffID,

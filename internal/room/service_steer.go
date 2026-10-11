@@ -54,13 +54,7 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 		return e, err
 	}
 	suggestionID := NewID("g_")
-	e, err := s.emitLocked(ctx, st, roomID, events.SteerSuggested, humanActor(user), events.SteerSuggestedPayload{
-		SuggestionID: suggestionID,
-		Text:         text,
-	})
-	if err != nil {
-		return events.Event{}, err
-	}
+	// Row first; if the event append fails we remove the row (compensation).
 	if err := s.store.CreateSuggestion(ctx, store.SuggestionRow{
 		SuggestionID: suggestionID,
 		RoomID:       roomID,
@@ -68,6 +62,16 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 		FromName:     user.Name,
 		Text:         text,
 	}); err != nil {
+		return events.Event{}, err
+	}
+	e, err := s.emitLocked(ctx, st, roomID, events.SteerSuggested, humanActor(user), events.SteerSuggestedPayload{
+		SuggestionID: suggestionID,
+		Text:         text,
+	})
+	if err != nil {
+		if delErr := s.store.DeleteSuggestion(ctx, suggestionID); delErr != nil {
+			s.log.Warn("room: compensate failed suggestion row", "suggestion", suggestionID, "err", delErr)
+		}
 		return events.Event{}, err
 	}
 	return e, nil
@@ -101,10 +105,15 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 		SuggestionID: suggestionID,
 		Text:         sugg.Text,
 	})
-	if err == nil {
-		s.touchDriverLease(ctx, st, roomID)
+	if err != nil {
+		// Revert the side-table write so the suggestion stays pending.
+		if revErr := s.store.SetSuggestionStatus(ctx, suggestionID, "pending"); revErr != nil {
+			s.log.Warn("room: revert suggestion status failed", "suggestion", suggestionID, "err", revErr)
+		}
+		return events.Event{}, err
 	}
-	return e, err
+	s.touchDriverLease(ctx, st, roomID)
+	return e, nil
 }
 
 // RequestControl asks the current driver for control.
@@ -148,6 +157,8 @@ func (s *Service) GrantControl(ctx context.Context, user User, roomID, toID stri
 	if err != nil {
 		return events.Event{}, err
 	}
-	_ = s.store.UpdateDriver(ctx, roomID, to.ID, to.Name, lease)
+	if err := s.store.UpdateDriver(ctx, roomID, to.ID, to.Name, lease); err != nil {
+		s.log.Warn("room: persist granted driver failed", "room", roomID, "err", err)
+	}
 	return e, nil
 }

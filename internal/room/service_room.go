@@ -47,7 +47,9 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 		s.mu.Unlock()
 		return RoomSnapshot{}, err
 	}
-	_ = s.store.UpdateDriver(ctx, roomID, user.ID, user.Name, lease)
+	if err := s.store.UpdateDriver(ctx, roomID, user.ID, user.Name, lease); err != nil {
+		s.log.Warn("room: persist creator driver failed", "room", roomID, "err", err)
+	}
 	snap := st.snap.Clone()
 	s.startAgentLocked(roomID, title, pipelineID, nil, st)
 	s.mu.Unlock()
@@ -183,7 +185,9 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 		s.mu.Unlock()
 		return events.Event{}, err
 	}
-	_ = s.store.CloseRoom(ctx, roomID, s.now().UTC())
+	if err := s.store.CloseRoom(ctx, roomID, s.now().UTC()); err != nil {
+		s.log.Warn("room: persist close failed", "room", roomID, "err", err)
+	}
 	cancel := st.agentCancel
 	s.mu.Unlock()
 	if cancel != nil {

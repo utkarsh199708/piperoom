@@ -127,6 +127,11 @@ func cloneProposals(in []Proposal) []Proposal {
 // It is a pure function: the input is not mutated.
 func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	snap.LastSeq = e.Seq
+	// Copy the slice headers whose elements Apply may mutate, so the input
+	// snapshot is never modified (Apply is a pure function).
+	snap.Members = append([]Member(nil), snap.Members...)
+	snap.OpenProposals = append([]Proposal(nil), snap.OpenProposals...)
+	snap.PendingSuggestions = append([]Suggestion(nil), snap.PendingSuggestions...)
 	if e.Actor.Kind == events.ActorHuman {
 		snap.Members = upsertMember(snap.Members, e.Actor.ID, e.Actor.Name, "watching")
 	}
@@ -255,33 +260,42 @@ func decode[T any](e events.Event) (T, bool) {
 	return v, true
 }
 
+// upsertMember adds or updates a member without mutating the input slice.
 func upsertMember(members []Member, id, name, role string) []Member {
 	for i := range members {
 		if members[i].ID == id {
-			if members[i].Name != name {
-				members[i].Name = name
+			if members[i].Name == name && (role != "driver" || members[i].Role == "driver") {
+				return members
 			}
+			// Copy-on-write so a shared backing array is not mutated.
+			out := append([]Member(nil), members...)
+			out[i].Name = name
 			if role == "driver" {
-				members[i].Role = "driver"
+				out[i].Role = "driver"
 			}
-			return members
+			return out
 		}
 	}
 	return append(members, Member{ID: id, Name: name, Role: role})
 }
 
+// setRole changes a member's role without mutating the input slice.
 func setRole(members []Member, id, role string) []Member {
 	for i := range members {
 		if members[i].ID == id {
-			members[i].Role = role
-			return members
+			if members[i].Role == role {
+				return members
+			}
+			out := append([]Member(nil), members...)
+			out[i].Role = role
+			return out
 		}
 	}
 	return members
 }
 
 func removeSuggestion(suggestions []Suggestion, id string) []Suggestion {
-	out := suggestions[:0]
+	out := make([]Suggestion, 0, len(suggestions))
 	for _, s := range suggestions {
 		if s.SuggestionID != id {
 			out = append(out, s)
@@ -291,7 +305,7 @@ func removeSuggestion(suggestions []Suggestion, id string) []Suggestion {
 }
 
 func removeProposal(proposals []Proposal, id string) []Proposal {
-	out := proposals[:0]
+	out := make([]Proposal, 0, len(proposals))
 	for _, p := range proposals {
 		if p.ProposalID != id {
 			out = append(out, p)
@@ -309,23 +323,17 @@ func isLastStep(proposals []Proposal, proposalID string, stepIndex int) bool {
 	return false
 }
 
-func removeMember(members []Member, id string) []Member {
-	out := members[:0]
-	for _, m := range members {
-		if m.ID != id {
-			out = append(out, m)
-		}
-	}
-	return out
-}
-
+// setApproval records a decision on a proposal's approvals map without
+// mutating a shared map.
 func setApproval(proposals []Proposal, proposalID, layer, decision string) {
 	for i := range proposals {
 		if proposals[i].ProposalID == proposalID {
-			if proposals[i].Approvals == nil {
-				proposals[i].Approvals = map[string]string{}
+			m := make(map[string]string, len(proposals[i].Approvals)+1)
+			for k, v := range proposals[i].Approvals {
+				m[k] = v
 			}
-			proposals[i].Approvals[layer] = decision
+			m[layer] = decision
+			proposals[i].Approvals = m
 			return
 		}
 	}

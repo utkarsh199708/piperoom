@@ -110,7 +110,10 @@ func main() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		// Shutdown waits for non-hijacked requests; WS connections are
+		// hijacked, so close them (and the room service) explicitly.
 		_ = server.Shutdown(shutdownCtx)
+		handler.Close()
 	}()
 
 	mode := "real"

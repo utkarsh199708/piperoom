@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"piperoom/internal/events"
 	"piperoom/internal/httpapi"
 	"piperoom/internal/room"
+	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
 )
 
@@ -163,6 +165,46 @@ func TestSteerAndCommentAndErrors(t *testing.T) {
 	}
 
 	_ = svc
+}
+
+// failingStore returns an error from GetRoom so the 500 path is exercised.
+type failingStore struct {
+	*memstore.Store
+}
+
+func (f failingStore) GetRoom(ctx context.Context, id string) (store.Room, error) {
+	return store.Room{}, errors.New("db down")
+}
+
+func TestStoreDownReturns500(t *testing.T) {
+	st := memstore.New()
+	fs := failingStore{Store: st}
+	svc := room.New(room.Deps{Store: fs, Users: room.DefaultUsers(), Run: fakeRun})
+	srv := httptest.NewServer(httpapi.New(svc, fs, nil))
+	t.Cleanup(srv.Close)
+
+	resp := doJSON(t, http.MethodGet, srv.URL+"/api/rooms/r1", "arjun", "")
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("want 500, got %d", resp.StatusCode)
+	}
+	body := decode[map[string]any](t, resp)
+	if body["error"].(map[string]any)["code"] != "internal_error" {
+		t.Fatalf("bad error: %+v", body)
+	}
+}
+
+func TestUnknownProposalAndHandoffReturn404(t *testing.T) {
+	srv, _ := newServer(t)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/proposals/nope/approve", "arjun", `{"layer":"postgres"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("proposal approve: want 404, got %d", resp.StatusCode)
+	}
+
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/handoffs/nope/accept", "arjun", "")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("handoff accept: want 404, got %d", resp.StatusCode)
+	}
 }
 
 func TestEventsEndpoint(t *testing.T) {

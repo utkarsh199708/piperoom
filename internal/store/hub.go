@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -43,9 +44,13 @@ func newHub(store *PG, connString string, log *slog.Logger) *hub {
 
 // run owns the LISTEN connection, reconnecting on error and re-arming every
 // subscriber so it re-reads from its last seq (no events lost on reconnect).
+// listenAppName identifies the hub's LISTEN connection so tests can find and
+// terminate it to exercise reconnection.
+const listenAppName = "piperoom-listen"
+
 func (h *hub) run(ctx context.Context) {
 	for ctx.Err() == nil {
-		conn, err := pgx.Connect(ctx, h.connString)
+		conn, err := h.connect(ctx)
 		if err != nil {
 			h.log.Warn("store: listen connect failed", "err", err)
 			h.signalAll()
@@ -69,6 +74,9 @@ func (h *hub) run(ctx context.Context) {
 		for ctx.Err() == nil {
 			n, err := conn.WaitForNotification(ctx)
 			if err != nil {
+				if ctx.Err() != nil {
+					break // shutting down
+				}
 				h.log.Warn("store: notification wait failed", "err", err)
 				break
 			}
@@ -82,6 +90,23 @@ func (h *hub) run(ctx context.Context) {
 		closeConn(conn)
 		h.signalAll()
 	}
+}
+
+// connect opens the LISTEN connection with a deadline and a recognizable
+// application_name (for tests and ops).
+func (h *hub) connect(ctx context.Context) (*pgx.Conn, error) {
+	cc, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cfg, err := pgx.ParseConfig(h.connString)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse listen config: %w", err)
+	}
+	cfg.RuntimeParams["application_name"] = listenAppName
+	conn, err := pgx.ConnectConfig(cc, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("store: listen connect: %w", err)
+	}
+	return conn, nil
 }
 
 func closeConn(conn *pgx.Conn) {

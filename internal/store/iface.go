@@ -20,16 +20,22 @@ type Store interface {
 	CloseRoom(ctx context.Context, id string, closedAt time.Time) error
 
 	CreateProposal(ctx context.Context, p ProposalRow) error
+	DeleteProposal(ctx context.Context, proposalID string) error
 	GetProposal(ctx context.Context, proposalID string) (ProposalRow, error)
 	RecordApproval(ctx context.Context, proposalID, layer, decision, reason string) error
-	RecordExecution(ctx context.Context, proposalID string, executedCount int) error
+	DeleteApproval(ctx context.Context, proposalID, layer string) error
+	StartProposalStep(ctx context.Context, proposalID string, stepIndex int) error
+	FinishProposalStep(ctx context.Context, proposalID string, stepIndex int, status, output string) error
 	SetProposalStatus(ctx context.Context, proposalID, status string) error
 
 	CreateSuggestion(ctx context.Context, r SuggestionRow) error
+	DeleteSuggestion(ctx context.Context, suggestionID string) error
 	GetSuggestion(ctx context.Context, suggestionID string) (SuggestionRow, error)
 	SetSuggestionStatus(ctx context.Context, suggestionID, status string) error
 
 	CreateHandoff(ctx context.Context, h HandoffRow) error
+	DeleteHandoff(ctx context.Context, handoffID string) error
 	GetHandoff(ctx context.Context, handoffID string) (HandoffRow, error)
 	SetHandoffStatus(ctx context.Context, handoffID, status string) error
+	VoidHandoffs(ctx context.Context, roomID, exceptHandoffID string) error
 }

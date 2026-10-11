@@ -25,14 +25,16 @@ const maxBody = 1 << 20
 
 // Server wires the chi router to the room service.
 type Server struct {
-	svc *room.Service
-	gw  *ws.Gateway
-	log *slog.Logger
+	svc     *room.Service
+	gw      *ws.Gateway
+	log     *slog.Logger
+	handler http.Handler
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
-// gateway for replay + live events.
-func New(svc *room.Service, st store.Store, log *slog.Logger) http.Handler {
+// gateway for replay + live events. The returned Server must be closed with
+// Close so WebSocket connections and the room service shut down cleanly.
+func New(svc *room.Service, st store.Store, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -71,7 +73,20 @@ func New(svc *room.Service, st store.Store, log *slog.Logger) http.Handler {
 			protected.Get("/pipelines/{pid}/topology", s.handleTopology)
 		})
 	})
-	return r
+	s.handler = r
+	return s
+}
+
+// ServeHTTP implements http.Handler.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.handler.ServeHTTP(w, r)
+}
+
+// Close shuts the WebSocket gateway down (closing every live connection) and
+// stops the room service.
+func (s *Server) Close() {
+	s.gw.Close()
+	s.svc.Close()
 }
 
 // ---- auth ----
@@ -151,13 +166,14 @@ func writeEvent(w http.ResponseWriter, status int, v any) {
 }
 
 // writeErr maps a room error to its HTTP status and code; anything else is a
-// 500 internal_error.
-func writeErr(w http.ResponseWriter, err error) {
+// 500 internal_error and is logged with its cause.
+func (s *Server) writeErr(w http.ResponseWriter, err error) {
 	var re *room.Error
 	if errors.As(err, &re) {
 		writeError(w, re.Status, re.Code, re.Msg)
 		return
 	}
+	s.log.Error("http: request failed", "err", err)
 	writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 }
 

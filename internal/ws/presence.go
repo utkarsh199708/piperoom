@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
 	"sort"
 	"sync"
@@ -27,6 +28,16 @@ type roomHub struct {
 	conns map[*client]struct{}
 }
 
+// write sends one message directly (blocking, with a deadline). Used during
+// replay so the backlog is delivered in order without buffering.
+func (c *client) write(ctx context.Context, b []byte) error {
+	wctx, cancel := context.WithTimeout(ctx, writeTimeout)
+	defer cancel()
+	return c.conn.Write(wctx, websocket.MessageText, b)
+}
+
+// trySend enqueues one message without blocking. Live events use it: a client
+// that cannot keep up is closed and reconnects with after=.
 func (c *client) trySend(b []byte) bool {
 	select {
 	case c.send <- b:
@@ -36,11 +47,12 @@ func (c *client) trySend(b []byte) bool {
 	}
 }
 
-// shutdown ends the connection exactly once.
+// shutdown ends the connection exactly once. The connection is closed BEFORE
+// cancelling the context so the close frame carries the right status code.
 func (c *client) shutdown(code websocket.StatusCode, reason string) {
 	c.once.Do(func() {
-		c.cancel()
 		_ = c.conn.Close(code, reason)
+		c.cancel()
 		if c.onClose != nil {
 			c.onClose()
 		}
@@ -124,25 +136,30 @@ func (g *Gateway) broadcastLocked(roomID string) {
 	}
 }
 
-// presenceLoop marks idle clients away every 20 seconds.
+// presenceLoop marks idle clients away every 20 seconds, until Close.
 func (g *Gateway) presenceLoop() {
 	tick := time.NewTicker(20 * time.Second)
 	defer tick.Stop()
-	for range tick.C {
-		g.mu.Lock()
-		now := g.now()
-		for roomID, hub := range g.rooms {
-			changed := false
-			for c := range hub.conns {
-				if c.state == "viewing" && now.After(c.lastSeen.Add(20*time.Second)) {
-					c.state = "away"
-					changed = true
+	for {
+		select {
+		case <-g.ctx.Done():
+			return
+		case <-tick.C:
+			g.mu.Lock()
+			now := g.now()
+			for roomID, hub := range g.rooms {
+				changed := false
+				for c := range hub.conns {
+					if c.state == "viewing" && now.After(c.lastSeen.Add(20*time.Second)) {
+						c.state = "away"
+						changed = true
+					}
+				}
+				if changed {
+					g.broadcastLocked(roomID)
 				}
 			}
-			if changed {
-				g.broadcastLocked(roomID)
-			}
+			g.mu.Unlock()
 		}
-		g.mu.Unlock()
 	}
 }

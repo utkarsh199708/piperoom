@@ -161,6 +161,51 @@ func TestApplyEveryEventType(t *testing.T) {
 		}
 	})
 
+	t.Run("apply does not mutate its input", func(t *testing.T) {
+		kabir := human("kabir", "Kabir")
+		lease := time.Date(2026, 10, 11, 10, 30, 0, 0, time.UTC)
+		base := room.NewSnapshot()
+		base = room.Apply(base, ev(events.RoomCreated, 1, arjun, events.RoomCreatedPayload{Title: "t", Severity: "sev2", PipelineID: "orders"}))
+		base = room.Apply(base, ev(events.ControlGranted, 2, arjun, events.ControlGrantedPayload{To: arjun, LeaseUntil: lease}))
+		base = room.Apply(base, ev(events.ProposalCreated, 3, events.AgentActor, events.ProposalCreatedPayload{
+			ProposalID: "p_1", Title: "fix", Steps: []events.ProposalStep{{Action: "a", Layer: "postgres"}},
+			RequiredLayers: []string{"postgres", "warehouse"},
+		}))
+		base = room.Apply(base, ev(events.ApprovalGiven, 4, priya, events.ApprovalGivenPayload{ProposalID: "p_1", Layer: "postgres"}))
+
+		beforeDriver := base.Driver.ID
+		beforeRoles := map[string]string{}
+		for _, m := range base.Members {
+			beforeRoles[m.ID] = m.Role
+		}
+		beforeApproval := base.OpenProposals[0].Approvals["postgres"]
+		beforeSuggestion := append([]room.Suggestion(nil), base.PendingSuggestions...)
+
+		// Mutating applies.
+		_ = room.Apply(base, ev(events.ControlGranted, 5, arjun, events.ControlGrantedPayload{To: priya, LeaseUntil: lease}))
+		_ = room.Apply(base, ev(events.ApprovalGiven, 6, priya, events.ApprovalGivenPayload{ProposalID: "p_1", Layer: "warehouse"}))
+		_ = room.Apply(base, ev(events.SteerSuggested, 7, kabir, events.SteerSuggestedPayload{SuggestionID: "g_1", Text: "go"}))
+		_ = room.Apply(base, ev(events.SteerSent, 8, arjun, events.SteerSentPayload{SuggestionID: "g_1", Text: "go"}))
+
+		if base.Driver.ID != beforeDriver {
+			t.Fatalf("driver mutated: %+v", base.Driver)
+		}
+		for _, m := range base.Members {
+			if beforeRoles[m.ID] != m.Role {
+				t.Fatalf("member role mutated: %+v (before %+v)", base.Members, beforeRoles)
+			}
+		}
+		if base.OpenProposals[0].Approvals["postgres"] != beforeApproval {
+			t.Fatalf("approval map mutated: %+v", base.OpenProposals[0].Approvals)
+		}
+		if base.OpenProposals[0].Approvals["warehouse"] != "pending" {
+			t.Fatalf("approval map shared: %+v", base.OpenProposals[0].Approvals)
+		}
+		if len(base.PendingSuggestions) != len(beforeSuggestion) {
+			t.Fatalf("suggestions mutated: %+v", base.PendingSuggestions)
+		}
+	})
+
 	t.Run("comment adds member", func(t *testing.T) {
 		s := room.Apply(room.NewSnapshot(), ev(events.CommentAdded, 1, priya, events.CommentAddedPayload{CommentID: "c_1", Text: "hi"}))
 		if len(s.Members) != 1 || s.Members[0].Role != "watching" {

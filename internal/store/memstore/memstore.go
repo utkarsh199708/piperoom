@@ -25,6 +25,7 @@ type Store struct {
 	suggestions map[string]*store.SuggestionRow
 	handoffs    map[string]*store.HandoffRow
 	approvals   map[string]struct{}
+	steps       map[string]string // proposalID + "\x00" + stepIndex -> status
 }
 
 type roomLog struct {
@@ -50,6 +51,7 @@ func New() *Store {
 		suggestions: map[string]*store.SuggestionRow{},
 		handoffs:    map[string]*store.HandoffRow{},
 		approvals:   map[string]struct{}{},
+		steps:       map[string]string{},
 	}
 }
 
@@ -103,6 +105,9 @@ func (s *Store) Append(ctx context.Context, roomID string, typ events.Type, acto
 func (s *Store) Since(ctx context.Context, roomID string, afterSeq int64, limit int) ([]events.Event, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if limit <= 0 {
+		return []events.Event{}, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -278,6 +283,14 @@ func (s *Store) CreateProposal(ctx context.Context, p store.ProposalRow) error {
 	return nil
 }
 
+// DeleteProposal removes a proposal row.
+func (s *Store) DeleteProposal(ctx context.Context, proposalID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.proposals, proposalID)
+	return nil
+}
+
 // GetProposal returns a proposal row or store.ErrNotFound.
 func (s *Store) GetProposal(ctx context.Context, proposalID string) (store.ProposalRow, error) {
 	s.mu.Lock()
@@ -301,17 +314,32 @@ func (s *Store) RecordApproval(ctx context.Context, proposalID, layer, decision,
 	return nil
 }
 
-// RecordExecution bumps the executed step count.
-func (s *Store) RecordExecution(ctx context.Context, proposalID string, executedCount int) error {
+// DeleteApproval removes one approval.
+func (s *Store) DeleteApproval(ctx context.Context, proposalID, layer string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok := s.proposals[proposalID]
-	if !ok {
-		return fmt.Errorf("memstore: proposal %q not found: %w", proposalID, store.ErrNotFound)
+	delete(s.approvals, proposalID+"\x00"+layer)
+	return nil
+}
+
+// StartProposalStep marks a step started; a second call returns
+// store.ErrAlreadyExists.
+func (s *Store) StartProposalStep(ctx context.Context, proposalID string, stepIndex int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := fmt.Sprintf("%s\x00%d", proposalID, stepIndex)
+	if _, ok := s.steps[key]; ok {
+		return fmt.Errorf("memstore: step %s/%d: %w", proposalID, stepIndex, store.ErrAlreadyExists)
 	}
-	if p.ExecutedCount < executedCount {
-		p.ExecutedCount = executedCount
-	}
+	s.steps[key] = "started"
+	return nil
+}
+
+// FinishProposalStep records the final state of a step.
+func (s *Store) FinishProposalStep(ctx context.Context, proposalID string, stepIndex int, status, output string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.steps[fmt.Sprintf("%s\x00%d", proposalID, stepIndex)] = status
 	return nil
 }
 
@@ -339,6 +367,14 @@ func (s *Store) CreateSuggestion(ctx context.Context, r store.SuggestionRow) err
 	cp := r
 	cp.Status = "pending"
 	s.suggestions[r.SuggestionID] = &cp
+	return nil
+}
+
+// DeleteSuggestion removes a suggestion row.
+func (s *Store) DeleteSuggestion(ctx context.Context, suggestionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.suggestions, suggestionID)
 	return nil
 }
 
@@ -380,6 +416,14 @@ func (s *Store) CreateHandoff(ctx context.Context, h store.HandoffRow) error {
 	return nil
 }
 
+// DeleteHandoff removes a handoff row.
+func (s *Store) DeleteHandoff(ctx context.Context, handoffID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.handoffs, handoffID)
+	return nil
+}
+
 // GetHandoff returns a handoff row or store.ErrNotFound.
 func (s *Store) GetHandoff(ctx context.Context, handoffID string) (store.HandoffRow, error) {
 	s.mu.Lock()
@@ -391,7 +435,7 @@ func (s *Store) GetHandoff(ctx context.Context, handoffID string) (store.Handoff
 	return *h, nil
 }
 
-// SetHandoffStatus marks a handoff accepted.
+// SetHandoffStatus marks a handoff accepted or voided.
 func (s *Store) SetHandoffStatus(ctx context.Context, handoffID, status string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -400,5 +444,17 @@ func (s *Store) SetHandoffStatus(ctx context.Context, handoffID, status string) 
 		return fmt.Errorf("memstore: handoff %q not found: %w", handoffID, store.ErrNotFound)
 	}
 	h.Status = status
+	return nil
+}
+
+// VoidHandoffs voids every pending handoff in a room except the accepted one.
+func (s *Store) VoidHandoffs(ctx context.Context, roomID, exceptHandoffID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, h := range s.handoffs {
+		if h.RoomID == roomID && h.Status == "pending" && id != exceptHandoffID {
+			h.Status = "voided"
+		}
+	}
 	return nil
 }

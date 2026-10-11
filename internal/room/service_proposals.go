@@ -5,20 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"piperoom/internal/events"
 	"piperoom/internal/store"
 )
 
-// CreateProposal validates every step against the actions registry and stores
-// the proposal (and its proposal.created event). It never executes anything.
+// stepTimeout bounds each action execution (rule 4).
+const stepTimeout = 30 * time.Second
+
+// CreateProposal validates every step against the actions registry, derives
+// the required approval layers from the step layers, and stores the proposal
+// (and its proposal.created event). It never executes anything.
 func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor) (string, error) {
-	if len(p.RequiredLayers) == 0 {
-		return "", validation("proposal requires at least one approving layer")
-	}
 	if len(p.Steps) == 0 {
 		return "", validation("proposal requires at least one step")
 	}
+	// The required layers are the union of the step layers: a proposal needs
+	// approval from every layer it writes to, never fewer.
+	required := make([]string, 0, len(p.Steps))
+	seen := map[string]bool{}
 	for i, step := range p.Steps {
 		a, ok := s.actions.Get(step.Action)
 		if !ok {
@@ -27,10 +33,18 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 		if step.Layer != a.Layer() {
 			return "", validation(fmt.Sprintf("step %d (%s): layer %q does not match the action's layer %q", i, step.Action, step.Layer, a.Layer()))
 		}
+		if !isKnownLayer(step.Layer) {
+			return "", validation(fmt.Sprintf("step %d (%s): layer %q is not a known layer", i, step.Action, step.Layer))
+		}
 		if err := a.Validate(step.Params); err != nil {
 			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
+		if !seen[step.Layer] {
+			seen[step.Layer] = true
+			required = append(required, step.Layer)
+		}
 	}
+	p.RequiredLayers = required
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -43,13 +57,12 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 	}
 
 	p.ProposalID = NewID("p_")
-	if _, err := s.emitLocked(ctx, st, roomID, events.ProposalCreated, actor, p); err != nil {
-		return "", err
-	}
 	stepsJSON, err := json.Marshal(p.Steps)
 	if err != nil {
 		return "", fmt.Errorf("room: marshal proposal steps: %w", err)
 	}
+	// Row first so a crash cannot leave an event with no backing row; if the
+	// event append fails we remove the row again (compensation).
 	if err := s.store.CreateProposal(ctx, store.ProposalRow{
 		ProposalID:     p.ProposalID,
 		RoomID:         roomID,
@@ -62,11 +75,18 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 	}); err != nil {
 		return "", err
 	}
+	if _, err := s.emitLocked(ctx, st, roomID, events.ProposalCreated, actor, p); err != nil {
+		if delErr := s.store.DeleteProposal(ctx, p.ProposalID); delErr != nil {
+			s.log.Warn("room: compensate failed proposal row", "proposal", p.ProposalID, "err", delErr)
+		}
+		return "", err
+	}
 	return p.ProposalID, nil
 }
 
 // ApproveProposal records a layer owner's approval. When every required layer
-// is approved the executor runs the steps in order.
+// is approved the executor runs the steps in order (asynchronously, on the
+// service lifetime context, not the request context).
 func (s *Service) ApproveProposal(ctx context.Context, user User, proposalID, layer string) (events.Event, error) {
 	var prow store.ProposalRow
 	var ev events.Event
@@ -110,6 +130,9 @@ func (s *Service) ApproveProposal(ctx context.Context, user User, proposalID, la
 			ProposalID: proposalID, Layer: layer,
 		})
 		if err != nil {
+			if delErr := s.store.DeleteApproval(ctx, proposalID, layer); delErr != nil {
+				s.log.Warn("room: compensate failed approval", "proposal", proposalID, "layer", layer, "err", delErr)
+			}
 			return err
 		}
 		if allApproved(st.snap, proposalID) {
@@ -121,7 +144,11 @@ func (s *Service) ApproveProposal(ctx context.Context, user User, proposalID, la
 	}
 
 	if shouldRun {
-		s.executeProposal(ctx, prow.RoomID, prow)
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.executeProposal(prow.RoomID, prow)
+		}()
 	}
 	return ev, nil
 }
@@ -164,16 +191,22 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 		ProposalID: proposalID, Layer: layer, Reason: reason,
 	})
 	if err != nil {
+		if delErr := s.store.DeleteApproval(ctx, proposalID, layer); delErr != nil {
+			s.log.Warn("room: compensate failed rejection", "proposal", proposalID, "layer", layer, "err", delErr)
+		}
 		return events.Event{}, err
 	}
-	_ = s.store.SetProposalStatus(ctx, proposalID, "rejected")
+	if err := s.store.SetProposalStatus(ctx, proposalID, "rejected"); err != nil {
+		s.log.Warn("room: set proposal rejected failed", "proposal", proposalID, "err", err)
+	}
 	return ev, nil
 }
 
 // executeProposal runs the approved steps in order, stopping at the first
-// failure. Each step is executed at most once: executed_count is persisted in
-// the proposals table so a crash cannot cause a re-run.
-func (s *Service) executeProposal(ctx context.Context, roomID string, p store.ProposalRow) {
+// failure. Each step is marked "started" in proposal_steps BEFORE it runs so a
+// crash or duplicate executor can never run it twice. It runs on the service
+// lifetime context with a per-step deadline.
+func (s *Service) executeProposal(roomID string, p store.ProposalRow) {
 	s.mu.Lock()
 	st := s.rooms[roomID]
 	if st == nil {
@@ -192,43 +225,87 @@ func (s *Service) executeProposal(ctx context.Context, roomID string, p store.Pr
 		s.mu.Unlock()
 	}()
 
+	ctx := s.ctx
+
 	var steps []events.ProposalStep
 	if err := json.Unmarshal(p.Steps, &steps); err != nil {
-		_ = s.systemEmit(ctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{ProposalID: p.ProposalID, StepIndex: 0, OK: false, Output: "cannot decode steps: " + err.Error()})
+		s.failStep(ctx, roomID, p.ProposalID, 0, "cannot decode steps: "+err.Error())
+		s.setProposalStatus(ctx, p.ProposalID, "failed")
 		return
 	}
 
-	for i := p.ExecutedCount; i < len(steps); i++ {
-		step := steps[i]
-		emit := func(ok bool, output string) {
-			_ = s.systemEmit(ctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
-				ProposalID: p.ProposalID, StepIndex: i, OK: ok, Output: output,
-			})
-		}
+	for i, step := range steps {
 		if !s.isRoomOpen(ctx, roomID) {
+			s.setProposalStatus(ctx, p.ProposalID, "failed")
+			return
+		}
+		// Claim the step before running it; skip an already-started step so it
+		// is never re-run.
+		if err := s.store.StartProposalStep(ctx, p.ProposalID, i); err != nil {
+			if errors.Is(err, store.ErrAlreadyExists) {
+				s.log.Warn("room: executor step already started, skipping", "proposal", p.ProposalID, "step", i)
+				continue
+			}
+			s.failStep(ctx, roomID, p.ProposalID, i, fmt.Sprintf("cannot mark step %d started: %v", i, err))
+			s.setProposalStatus(ctx, p.ProposalID, "failed")
 			return
 		}
 		action, ok := s.actions.Get(step.Action)
 		if !ok {
-			emit(false, "unknown action "+step.Action)
-			_ = s.store.RecordExecution(ctx, p.ProposalID, i+1)
-			break
+			s.finishStep(ctx, roomID, p.ProposalID, i, false, "unknown action "+step.Action)
+			s.setProposalStatus(ctx, p.ProposalID, "failed")
+			return
 		}
 		if err := action.Validate(step.Params); err != nil {
-			emit(false, "validation failed: "+err.Error())
-			_ = s.store.RecordExecution(ctx, p.ProposalID, i+1)
-			break
+			s.finishStep(ctx, roomID, p.ProposalID, i, false, "validation failed: "+err.Error())
+			s.setProposalStatus(ctx, p.ProposalID, "failed")
+			return
 		}
-		out, err := action.Execute(ctx, step.Params)
+		sctx, cancel := context.WithTimeout(ctx, stepTimeout)
+		out, err := action.Execute(sctx, step.Params)
+		cancel()
+		output := out
 		if err != nil {
-			emit(false, outOrErr(out, err))
-			_ = s.store.RecordExecution(ctx, p.ProposalID, i+1)
-			break
+			output = err.Error()
 		}
-		emit(true, out)
-		_ = s.store.RecordExecution(ctx, p.ProposalID, i+1)
+		s.finishStep(ctx, roomID, p.ProposalID, i, err == nil, output)
+		if err != nil {
+			s.setProposalStatus(ctx, p.ProposalID, "failed")
+			return
+		}
 	}
-	_ = s.store.SetProposalStatus(ctx, p.ProposalID, "executed")
+	s.setProposalStatus(ctx, p.ProposalID, "executed")
+}
+
+// finishStep records a step result and emits the action.executed event.
+func (s *Service) finishStep(ctx context.Context, roomID, proposalID string, i int, ok bool, output string) {
+	status := "done"
+	if !ok {
+		status = "failed"
+	}
+	if err := s.store.FinishProposalStep(ctx, proposalID, i, status, output); err != nil {
+		s.log.Warn("room: record step result failed", "proposal", proposalID, "step", i, "err", err)
+	}
+	if err := s.executorEmit(ctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
+		ProposalID: proposalID, StepIndex: i, OK: ok, Output: output,
+	}); err != nil {
+		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", err)
+	}
+}
+
+// failStep emits a failing action.executed for a step that never ran.
+func (s *Service) failStep(ctx context.Context, roomID, proposalID string, i int, output string) {
+	if err := s.executorEmit(ctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
+		ProposalID: proposalID, StepIndex: i, OK: false, Output: output,
+	}); err != nil {
+		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", err)
+	}
+}
+
+func (s *Service) setProposalStatus(ctx context.Context, proposalID, status string) {
+	if err := s.store.SetProposalStatus(ctx, proposalID, status); err != nil {
+		s.log.Warn("room: set proposal status failed", "proposal", proposalID, "status", status, "err", err)
+	}
 }
 
 func (s *Service) isRoomOpen(ctx context.Context, roomID string) bool {
@@ -238,11 +315,13 @@ func (s *Service) isRoomOpen(ctx context.Context, roomID string) bool {
 	return st != nil && st.snap.Status == "open"
 }
 
-func outOrErr(out string, err error) string {
-	if err != nil {
-		return err.Error()
+func isKnownLayer(layer string) bool {
+	for _, l := range events.Layers {
+		if l == layer {
+			return true
+		}
 	}
-	return out
+	return false
 }
 
 func contains(layers []string, layer string) bool {

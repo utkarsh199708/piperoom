@@ -5,6 +5,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -19,10 +20,22 @@ import (
 	"piperoom/internal/store"
 )
 
-// sendBuffer is the per-connection outbound queue. When it fills, the
-// connection is closed with a policy violation so the client reconnects with
-// after= (docs/api.md).
+// sendBuffer is the per-connection outbound queue for live events. When it
+// fills, the connection is closed with a policy violation so the client
+// reconnects with after= (docs/api.md). Replay events are written directly
+// (blocking) and never go through this buffer.
 const sendBuffer = 256
+
+// readTimeout bounds each read; clients send presence every 20 s, so a peer
+// that stops reading (and sending presence) is closed rather than left "away"
+// forever.
+const readTimeout = 60 * time.Second
+
+// writeTimeout bounds each WebSocket write.
+const writeTimeout = 10 * time.Second
+
+// replayBatch is the page size when replaying the backlog.
+const replayBatch = 500
 
 // Gateway serves /api/rooms/{id}/ws.
 type Gateway struct {
@@ -30,6 +43,10 @@ type Gateway struct {
 	store store.Store
 	log   *slog.Logger
 	now   func() time.Time
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
 
 	mu    sync.Mutex
 	rooms map[string]*roomHub
@@ -40,9 +57,32 @@ func NewGateway(svc *room.Service, st store.Store, log *slog.Logger) *Gateway {
 	if log == nil {
 		log = slog.Default()
 	}
-	g := &Gateway{svc: svc, store: st, log: log, now: time.Now, rooms: map[string]*roomHub{}}
-	go g.presenceLoop()
+	ctx, cancel := context.WithCancel(context.Background())
+	g := &Gateway{svc: svc, store: st, log: log, now: time.Now, ctx: ctx, cancel: cancel, rooms: map[string]*roomHub{}}
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		g.presenceLoop()
+	}()
 	return g
+}
+
+// Close stops the presence loop, closes every live connection and waits for
+// all per-connection goroutines to finish.
+func (g *Gateway) Close() {
+	g.cancel()
+	g.mu.Lock()
+	var clients []*client
+	for _, hub := range g.rooms {
+		for c := range hub.conns {
+			clients = append(clients, c)
+		}
+	}
+	g.mu.Unlock()
+	for _, c := range clients {
+		c.shutdown(websocket.StatusGoingAway, "server shutting down")
+	}
+	g.wg.Wait()
 }
 
 type serverMsg struct {
@@ -80,12 +120,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	roomID := chi.URLParam(r, "id")
 	if _, err := g.svc.GetRoom(r.Context(), roomID); err != nil {
-		writeHTTPError(w, http.StatusNotFound, "not_found", "room not found")
+		var re *room.Error
+		if errors.As(err, &re) && re.Code == "not_found" {
+			writeHTTPError(w, http.StatusNotFound, "not_found", "room not found")
+			return
+		}
+		g.log.Error("ws: get room failed", "room", roomID, "err", err)
+		writeHTTPError(w, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 	after, err := parseAfterQuery(r)
 	if err != nil {
-		writeHTTPError(w, http.StatusBadRequest, "bad_request", "after must be a non-negative integer")
+		writeHTTPError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
 
@@ -107,22 +153,63 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		conn:     conn,
 		once:     sync.Once{},
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(g.ctx)
 	c.cancel = cancel
 	c.onClose = func() { g.removeClient(roomID, c) }
 
-	ch, err := g.store.Subscribe(ctx, roomID, after)
+	// Replay the backlog with blocking writes so a slow client cannot overflow
+	// the live send buffer while catching up.
+	lastSeq := after
+	for {
+		evs, err := g.store.Since(r.Context(), roomID, lastSeq, replayBatch)
+		if err != nil {
+			c.shutdown(websocket.StatusInternalError, "replay failed")
+			return
+		}
+		if len(evs) == 0 {
+			break
+		}
+		for _, e := range evs {
+			b, err := json.Marshal(serverMsg{Type: "event", Event: &e})
+			if err != nil {
+				continue
+			}
+			if err := c.write(ctx, b); err != nil {
+				c.shutdown(websocket.StatusInternalError, "write failed")
+				return
+			}
+			lastSeq = e.Seq
+		}
+		if len(evs) < replayBatch {
+			break
+		}
+	}
+
+	// Start the writer before announcing presence so presence messages are
+	// drained immediately.
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		g.writeLoop(ctx, c)
+	}()
+
+	g.addClient(roomID, c)
+
+	ch, err := g.store.Subscribe(ctx, roomID, lastSeq)
 	if err != nil {
 		c.shutdown(websocket.StatusInternalError, "subscribe failed")
 		return
 	}
 
-	g.addClient(roomID, c)
-
-	go g.writeLoop(ctx, c)
-	go g.readLoop(ctx, roomID, c)
-	go g.eventLoop(ctx, c, ch)
+	g.wg.Add(2)
+	go func() {
+		defer g.wg.Done()
+		g.readLoop(ctx, roomID, c)
+	}()
+	go func() {
+		defer g.wg.Done()
+		g.eventLoop(ctx, c, ch)
+	}()
 }
 
 func (g *Gateway) writeLoop(ctx context.Context, c *client) {
@@ -131,10 +218,7 @@ func (g *Gateway) writeLoop(ctx context.Context, c *client) {
 		case <-ctx.Done():
 			return
 		case msg := <-c.send:
-			wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			err := c.conn.Write(wctx, websocket.MessageText, msg)
-			cancel()
-			if err != nil {
+			if err := c.write(ctx, msg); err != nil {
 				c.shutdown(websocket.StatusInternalError, "write failed")
 				return
 			}
@@ -144,9 +228,15 @@ func (g *Gateway) writeLoop(ctx context.Context, c *client) {
 
 func (g *Gateway) readLoop(ctx context.Context, roomID string, c *client) {
 	for {
-		typ, data, err := c.conn.Read(ctx)
+		rctx, cancel := context.WithTimeout(ctx, readTimeout)
+		typ, data, err := c.conn.Read(rctx)
+		cancel()
 		if err != nil {
-			c.shutdown(websocket.StatusNormalClosure, "")
+			if errors.Is(err, context.DeadlineExceeded) {
+				c.shutdown(websocket.StatusPolicyViolation, "read timeout")
+			} else {
+				c.shutdown(websocket.StatusNormalClosure, "")
+			}
 			return
 		}
 		if typ != websocket.MessageText {
@@ -188,7 +278,7 @@ func parseAfterQuery(r *http.Request) (int64, error) {
 	}
 	n, err := strconv.ParseInt(q, 10, 64)
 	if err != nil || n < 0 {
-		return 0, err
+		return 0, errors.New("after must be a non-negative integer")
 	}
 	return n, nil
 }

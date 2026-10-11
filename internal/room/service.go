@@ -60,6 +60,12 @@ type Service struct {
 	log          *slog.Logger
 	now          func() time.Time
 
+	// ctx is the service lifetime: every goroutine the service starts (agent
+	// supervisors, executors) derives from it. Close cancels it and waits.
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+
 	mu    sync.Mutex
 	rooms map[string]*roomState
 }
@@ -98,6 +104,7 @@ func New(d Deps) *Service {
 	if topo == nil {
 		topo = noopTopology{}
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{
 		store:        d.Store,
 		actions:      acts,
@@ -109,8 +116,17 @@ func New(d Deps) *Service {
 		opts:         d.Options,
 		log:          log,
 		now:          now,
+		ctx:          ctx,
+		cancel:       cancel,
 		rooms:        map[string]*roomState{},
 	}
+}
+
+// Close cancels the service lifetime context and waits for every goroutine it
+// started (agent supervisors and executors) to stop.
+func (s *Service) Close() {
+	s.cancel()
+	s.wg.Wait()
 }
 
 // LookupUser returns a user by id (for auth and the /api/me endpoint).
@@ -236,15 +252,19 @@ func (s *Service) agentEmit(ctx context.Context, roomID string, typ events.Type,
 	return err
 }
 
-// systemEmit appends an event on behalf of the server (executor, etc.).
-func (s *Service) systemEmit(ctx context.Context, roomID string, typ events.Type, payload any) error {
+// executorEmit appends an event on behalf of the action executor.
+func (s *Service) executorEmit(ctx context.Context, roomID string, typ events.Type, payload any) error {
+	return s.emitAs(ctx, roomID, executorActor, typ, payload)
+}
+
+func (s *Service) emitAs(ctx context.Context, roomID string, actor events.Actor, typ events.Type, payload any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, ok := s.rooms[roomID]
 	if !ok {
-		return fmt.Errorf("room: system emit on unknown room %q", roomID)
+		return fmt.Errorf("room: emit on unknown room %q", roomID)
 	}
-	_, err := s.emitLocked(ctx, st, roomID, typ, systemActor, payload)
+	_, err := s.emitLocked(ctx, st, roomID, typ, actor, payload)
 	return err
 }
 
@@ -266,7 +286,9 @@ func (s *Service) touchDriverLease(ctx context.Context, st *roomState, roomID st
 	}
 	lease := s.now().UTC().Add(DriverLease)
 	st.snap.Driver.LeaseUntil = lease
-	_ = s.store.UpdateDriver(ctx, roomID, st.snap.Driver.ID, st.snap.Driver.Name, lease)
+	if err := s.store.UpdateDriver(ctx, roomID, st.snap.Driver.ID, st.snap.Driver.Name, lease); err != nil {
+		s.log.Warn("room: persist driver lease failed", "room", roomID, "err", err)
+	}
 }
 
 func (s *Service) roomOpen(st *roomState) bool {
@@ -401,9 +423,11 @@ func (p proposalCreator) Create(ctx context.Context, payload events.ProposalCrea
 
 // startAgentLocked starts agent.Run for an open room. Caller holds s.mu.
 func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.RawMessage, st *roomState) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.ctx)
 	st.agentCancel = cancel
+	s.wg.Add(1)
 	go func() {
+		defer s.wg.Done()
 		alert := agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw}
 		if s.topo != nil {
 			tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
@@ -422,7 +446,7 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 		}
 		if err := s.run(ctx, alert, deps, s.opts); err != nil && ctx.Err() == nil {
 			s.log.Warn("room: agent run returned error", "room", roomID, "err", err)
-			ectx, ecancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ectx, ecancel := context.WithTimeout(s.ctx, 5*time.Second)
 			_ = s.agentEmit(ectx, roomID, events.AgentStatus, events.AgentStatusPayload{State: "error", Detail: truncateDetail(err.Error())})
 			ecancel()
 		}
@@ -434,7 +458,12 @@ func truncateDetail(s string) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	cut := max
+	// Do not split a UTF-8 rune.
+	for cut > 0 && s[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 // ---- topology fallback (until A3 lands) ----
