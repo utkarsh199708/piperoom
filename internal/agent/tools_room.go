@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,6 +17,14 @@ import (
 // cannot hang the investigation.
 var proposalTimeout = 10 * time.Second
 
+// roomToolNames are the names of the room tools newRoomTools builds, kept
+// beside it so both are edited together. RoomToolNames serves callers that
+// only need the names from this list, so it never constructs a tool — a room
+// tool constructor may one day dereference its deps, and a name lookup must
+// not panic on a zero Deps. TestRoomToolNamesMatchRoomTools keeps the list in
+// sync with what the constructor really builds.
+var roomToolNames = []string{"update_hypothesis", "propose_fix", "post_message"}
+
 // newRoomTools builds the three room tools the agent itself owns. These are
 // tools.KindRoom: they only write to the room log or create proposals, never
 // to customer systems.
@@ -25,6 +34,15 @@ func newRoomTools(d Deps) []tools.Tool {
 		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink},
 		&postMessageTool{sink: d.Sink},
 	}
+}
+
+// RoomToolNames returns the names of the room tools the agent adds on top of
+// the read-tool registry, from the static list above. Exported for
+// cmd/investigate's wiring test, which checks the system prompt only ever
+// names tools the model can really call. The returned slice is a copy callers
+// may keep or modify.
+func RoomToolNames() []string {
+	return slices.Clone(roomToolNames)
 }
 
 func roomObjectSchema(props map[string]any, required ...string) map[string]any {

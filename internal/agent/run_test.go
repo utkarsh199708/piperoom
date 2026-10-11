@@ -461,3 +461,59 @@ func TestRunMaxTurnsPausesAndResetsOnInput(t *testing.T) {
 		t.Fatalf("resumed request should carry the human steer: %s", messagesJSON([]anthropic.BetaMessageParam{last}))
 	}
 }
+
+// TestRunToolResultCarriesStepID covers C13 P1: the step id is emitted to the
+// room, but the model only sees the tool_result block, so the wrapper must
+// carry the same step id — the system prompt tells the model to cite it.
+func TestRunToolResultCarriesStepID(t *testing.T) {
+	rec := &recordingTool{name: "connect_status", schema: testSchema("connector"), result: tools.Result{Summary: "task 0 FAILED"}}
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
+		mustMessage(t, `{"stop_reason":"tool_use","content":[
+			{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"check connect","connector":"pg-orders-connector"}}
+		]}`),
+	}}
+	sink := &fakeSink{}
+	inbox := &fakeInbox{waitErr: context.Canceled}
+	r := newTestRunner(t, model, inbox, sink, rec, Options{MaxTurns: 3})
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	steps := sink.ofType(events.AgentStepStart)
+	if len(steps) != 1 {
+		t.Fatalf("expected 1 step, got %d", len(steps))
+	}
+	var sp events.AgentStepStartPayload
+	if err := json.Unmarshal(steps[0].payload, &sp); err != nil {
+		t.Fatalf("decode step: %v", err)
+	}
+	if !strings.HasPrefix(sp.StepID, "s_") {
+		t.Fatalf("step id %q must use the s_ prefix", sp.StepID)
+	}
+
+	results := sink.ofType(events.AgentToolResult)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 tool result, got %d", len(results))
+	}
+	var rp events.AgentToolResultPayload
+	if err := json.Unmarshal(results[0].payload, &rp); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if rp.StepID != sp.StepID {
+		t.Fatalf("tool result step id %q != step start step id %q", rp.StepID, sp.StepID)
+	}
+
+	// The model-visible tool result must contain the emitted step id, both as
+	// the wrapper attribute and as the raw id the model can quote.
+	if len(model.calls) < 2 {
+		t.Fatalf("expected at least 2 model calls, got %d", len(model.calls))
+	}
+	js := messagesJSON([]anthropic.BetaMessageParam{lastMessage(model.calls)})
+	if !strings.Contains(js, sp.StepID) {
+		t.Fatalf("step id %q missing from the model-visible tool result: %s", sp.StepID, js)
+	}
+	if !strings.Contains(js, `step=\"`+sp.StepID+`\"`) {
+		t.Fatalf("wrapper must carry step=%q on the tool result: %s", sp.StepID, js)
+	}
+}

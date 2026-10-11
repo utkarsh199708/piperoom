@@ -50,10 +50,20 @@ type Wired struct {
 	// Owners is the loaded owners config.
 	Owners *owners.Owners
 
-	// Close releases the database pools and the Kafka client. It never
-	// returns an error and is safe to call more than once; the caller must
-	// defer it so the clients stay open for the whole run.
-	Close func()
+	// close is the closer built by Open: it releases the database pools and
+	// the Kafka client. Only Open sets it, so a zero Wired is safe to Close.
+	close func()
+}
+
+// Close releases the database pools and the Kafka client. It never returns an
+// error and is safe to call more than once, and on a zero or nil *Wired, so a
+// caller may defer it as soon as it holds the value. The caller must defer it
+// so the clients stay open for the whole run.
+func (w *Wired) Close() {
+	if w == nil || w.close == nil {
+		return
+	}
+	w.close()
 }
 
 // a2Clients groups the three A2 clients that talk to Kafka, Kafka Connect
@@ -168,7 +178,7 @@ func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
 		Registry:  a2.Registry,
 		Builder:   topology.NewBuilder(o, a2.Connect, a2.Kafka, src, wh),
 		Owners:    o,
-		Close:     func() { once.Do(closeOpened) },
+		close:     func() { once.Do(closeOpened) },
 	}, nil
 }
 
