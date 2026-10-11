@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
@@ -134,9 +135,27 @@ func (t *stepTracker) finish(i int, ok bool) error {
 	return nil
 }
 
+// resultWriteTimeout bounds the result writes (step finish, proposal status,
+// action.executed event) that must complete even while the service shuts down.
+const resultWriteTimeout = 5 * time.Second
+
+// resultCtx returns a context for result writes. It is detached from the
+// service lifetime context (context.WithoutCancel) so Close cancelling s.ctx
+// mid-run cannot leave a step "started" forever, and carries a short deadline
+// so a hung database cannot block shutdown indefinitely (review item 3).
+func (s *Service) resultCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(s.ctx), resultWriteTimeout)
+}
+
 // executeProposal runs the approved steps in order, stopping at the first
 // failure. Each step is claimed in the store (status "started") BEFORE it
 // runs, so a crash or a duplicate executor can never run it twice.
+//
+// Every stop path records an outcome: the step (when claimed) is finished as
+// "failed", an action.executed event with OK=false is emitted and the proposal
+// status becomes "failed", so the snapshot and the expiry sweeper see the
+// result instead of a proposal stuck open (review item 13). Result writes use
+// resultCtx and therefore survive a concurrent Close (review item 3).
 //
 // A non-nil return means the executor itself could not proceed (decode error,
 // step order violation, store failure): that is an operational problem, not a
@@ -147,15 +166,14 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 
 	var steps []events.ProposalStep
 	if err := json.Unmarshal(p.Steps, &steps); err != nil {
-		s.failStep(ctx, p.RoomID, p.ProposalID, 0, "cannot decode steps: "+err.Error())
-		s.setProposalStatus(ctx, p.ProposalID, "failed")
+		s.failProposal(p.RoomID, p.ProposalID, 0, "cannot decode steps: "+err.Error())
 		return fmt.Errorf("room: decode proposal %s steps: %w", p.ProposalID, err)
 	}
 	tracker := newStepTracker(len(steps))
 
 	for i, step := range steps {
 		if !s.isRoomOpen(ctx, p.RoomID) {
-			s.setProposalStatus(ctx, p.ProposalID, "failed")
+			s.failProposal(p.RoomID, p.ProposalID, i, "room closed before this step ran")
 			return nil
 		}
 		if err := tracker.claim(i); err != nil {
@@ -163,28 +181,28 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 		}
 		// Persist the claim before any side effect. ErrStepOrder here means the
 		// step was already claimed by an earlier executor (crash + restart):
-		// never run it again, stop explicitly instead of silently skipping.
+		// never run it again. Finish the stale claim and record the outcome so
+		// the proposal does not stay open.
 		if err := s.store.StartProposalStep(ctx, p.ProposalID, i); err != nil {
-			s.setProposalStatus(ctx, p.ProposalID, "failed")
+			output := fmt.Sprintf("step %d was already claimed by an earlier run: %v", i, err)
+			s.finishClaimedStep(p.ProposalID, i, output)
+			s.failProposal(p.RoomID, p.ProposalID, i, output)
 			return fmt.Errorf("room: proposal %s: claim step %d: %w", p.ProposalID, i, err)
 		}
 
 		action, ok := s.actions.Get(step.Action)
 		if !ok {
-			s.stopOnStep(ctx, tracker, p, i, false, "unknown action "+step.Action)
-			s.setProposalStatus(ctx, p.ProposalID, "failed")
+			s.stopOnStep(tracker, p, i, "unknown action "+step.Action)
 			return nil
 		}
 		if err := action.Validate(step.Params); err != nil {
-			s.stopOnStep(ctx, tracker, p, i, false, "validation failed: "+err.Error())
-			s.setProposalStatus(ctx, p.ProposalID, "failed")
+			s.stopOnStep(tracker, p, i, "validation failed: "+err.Error())
 			return nil
 		}
 		// Re-check the scope right before the write, per docs/api.md: an
 		// approved proposal must not write outside the room's pipeline.
 		if err := s.scopeCheck(s.roomPipeline(ctx, p.RoomID), action, step.Params); err != nil {
-			s.stopOnStep(ctx, tracker, p, i, false, "scope check failed: "+err.Error())
-			s.setProposalStatus(ctx, p.ProposalID, "failed")
+			s.stopOnStep(tracker, p, i, "scope check failed: "+err.Error())
 			return nil
 		}
 
@@ -195,29 +213,37 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 		if err != nil {
 			output = err.Error()
 		}
-		if err := s.finishStep(ctx, p.RoomID, p.ProposalID, tracker, i, err == nil, output); err != nil {
-			s.setProposalStatus(ctx, p.ProposalID, "failed")
+		if err := s.finishStep(p.RoomID, p.ProposalID, tracker, i, err == nil, output); err != nil {
+			// The local or store transition failed: finish the store row
+			// directly (best effort) and record the outcome anyway, so the
+			// proposal never stays open without an event.
+			s.finishClaimedStep(p.ProposalID, i, output)
+			s.failProposal(p.RoomID, p.ProposalID, i, output)
 			return err
 		}
 		if err != nil {
-			s.setProposalStatus(ctx, p.ProposalID, "failed")
+			s.setProposalStatus(p.ProposalID, "failed")
 			return nil
 		}
 	}
-	s.setProposalStatus(ctx, p.ProposalID, "executed")
+	s.setProposalStatus(p.ProposalID, "executed")
 	return nil
 }
 
-// stopOnStep finishes a claimed step as failed and emits its action.executed.
-func (s *Service) stopOnStep(ctx context.Context, t *stepTracker, p store.ProposalRow, i int, ok bool, output string) {
-	if err := s.finishStep(ctx, p.RoomID, p.ProposalID, t, i, ok, output); err != nil {
+// stopOnStep finishes a claimed step as failed (which emits its
+// action.executed event) and marks the proposal failed.
+func (s *Service) stopOnStep(t *stepTracker, p store.ProposalRow, i int, output string) {
+	if err := s.finishStep(p.RoomID, p.ProposalID, t, i, false, output); err != nil {
 		s.log.Warn("room: record step stop failed", "proposal", p.ProposalID, "step", i, "err", err)
+		s.finishClaimedStep(p.ProposalID, i, output)
 	}
+	s.setProposalStatus(p.ProposalID, "failed")
 }
 
-// finishStep checks the local transition, records the step result in the
-// store and emits the action.executed event.
-func (s *Service) finishStep(ctx context.Context, roomID, proposalID string, t *stepTracker, i int, ok bool, output string) error {
+// finishStep checks the local transition, records the step result in the store
+// and emits the action.executed event. The store write and the event use
+// resultCtx so they complete even while the service shuts down (review item 3).
+func (s *Service) finishStep(roomID, proposalID string, t *stepTracker, i int, ok bool, output string) error {
 	status := "done"
 	if !ok {
 		status = "failed"
@@ -225,11 +251,13 @@ func (s *Service) finishStep(ctx context.Context, roomID, proposalID string, t *
 	if err := t.finish(i, ok); err != nil {
 		return fmt.Errorf("room: proposal %s step %d: %w", proposalID, i, err)
 	}
-	if err := s.store.FinishProposalStep(ctx, proposalID, i, status, output); err != nil {
+	rctx, cancel := s.resultCtx()
+	defer cancel()
+	if err := s.store.FinishProposalStep(rctx, proposalID, i, status, output); err != nil {
 		return fmt.Errorf("room: proposal %s step %d: %w", proposalID, i, err)
 	}
 	// The DB state is authoritative; a failed event append must not undo it.
-	if err := s.executorEmit(ctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
+	if err := s.executorEmit(rctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
 		ProposalID: proposalID, StepIndex: i, OK: ok, Output: output,
 	}); err != nil {
 		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", err)
@@ -237,13 +265,36 @@ func (s *Service) finishStep(ctx context.Context, roomID, proposalID string, t *
 	return nil
 }
 
+// failProposal records a proposal failure with its outcome event (review item
+// 13): a failing action.executed for the given step plus proposal status
+// "failed". It is used on stop paths where the local tracker did not (or could
+// not) finish a step: decode error, closed room, failed claim.
+func (s *Service) failProposal(roomID, proposalID string, stepIndex int, output string) {
+	s.failStep(roomID, proposalID, stepIndex, output)
+	s.setProposalStatus(proposalID, "failed")
+}
+
 // failStep emits a failing action.executed for a step that was never claimed
 // (so there is no step state to finish).
-func (s *Service) failStep(ctx context.Context, roomID, proposalID string, i int, output string) {
-	if err := s.executorEmit(ctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
+func (s *Service) failStep(roomID, proposalID string, i int, output string) {
+	rctx, cancel := s.resultCtx()
+	defer cancel()
+	if err := s.executorEmit(rctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
 		ProposalID: proposalID, StepIndex: i, OK: false, Output: output,
 	}); err != nil {
 		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", err)
+	}
+}
+
+// finishClaimedStep marks a claimed store step "failed" without a local
+// tracker transition. It is used when the claim belongs to an earlier run (or
+// to this run but the local transition failed): ErrStepOrder simply means
+// there is no "started" row to finish. The write uses resultCtx (review item 3).
+func (s *Service) finishClaimedStep(proposalID string, i int, output string) {
+	rctx, cancel := s.resultCtx()
+	defer cancel()
+	if err := s.store.FinishProposalStep(rctx, proposalID, i, "failed", output); err != nil && !errors.Is(err, ErrStepOrder) {
+		s.log.Warn("room: finish claimed step failed", "proposal", proposalID, "step", i, "err", err)
 	}
 }
 
@@ -279,8 +330,12 @@ func (s *Service) roomPipeline(ctx context.Context, roomID string) string {
 	return st.snap.PipelineID
 }
 
-func (s *Service) setProposalStatus(ctx context.Context, proposalID, status string) {
-	if err := s.store.SetProposalStatus(ctx, proposalID, status); err != nil {
+// setProposalStatus persists a proposal status using resultCtx, so the write
+// survives a concurrent Close.
+func (s *Service) setProposalStatus(proposalID, status string) {
+	rctx, cancel := s.resultCtx()
+	defer cancel()
+	if err := s.store.SetProposalStatus(rctx, proposalID, status); err != nil {
 		s.log.Warn("room: set proposal status failed", "proposal", proposalID, "status", status, "err", err)
 	}
 }

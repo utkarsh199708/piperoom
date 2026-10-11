@@ -245,18 +245,23 @@ func approvalFor(snap RoomSnapshot, proposalID, layer string) string {
 
 func allApproved(snap RoomSnapshot, proposalID string) bool {
 	for _, p := range snap.OpenProposals {
-		if p.ProposalID != proposalID {
-			continue
+		if p.ProposalID == proposalID {
+			return fullyApproved(p)
 		}
-		if len(p.RequiredLayers) == 0 {
-			return false
-		}
-		for _, l := range p.RequiredLayers {
-			if p.Approvals[l] != "approved" {
-				return false
-			}
-		}
-		return true
 	}
 	return false
+}
+
+// fullyApproved reports whether every required layer of the proposal has
+// approved it.
+func fullyApproved(p Proposal) bool {
+	if len(p.RequiredLayers) == 0 {
+		return false
+	}
+	for _, l := range p.RequiredLayers {
+		if p.Approvals[l] != "approved" {
+			return false
+		}
+	}
+	return true
 }

@@ -25,6 +25,10 @@ import (
 // DriverLease is how long control lasts; renewed by any driver action.
 const DriverLease = 30 * time.Minute
 
+// leaseLogThreshold is the remaining-lease threshold under which a renewal is
+// written to the log as control.granted (docs/api.md).
+const leaseLogThreshold = 25 * time.Minute
+
 // DefaultProposalTTL is how long a proposal may wait for all of its layers
 // before the service records a proposal.expired event (review item 16).
 const DefaultProposalTTL = 30 * time.Minute
@@ -197,10 +201,73 @@ func (s *Service) ensureAllLoadedLocked(ctx context.Context) error {
 		st := &roomState{snap: snap, inbox: newInbox()}
 		s.rooms[r.ID] = st
 		if snap.Status == "open" {
+			s.interruptStaleProposalsLocked(ctx, r.ID, st)
 			s.startAgentLocked(r.ID, snap.Title, snap.PipelineID, s.rawAlert(ctx, r.ID), st)
 		}
 	}
 	return nil
+}
+
+// interruptStaleProposalsLocked records the outcome of proposals that were
+// fully approved but never finished before this (re)start (review item 6):
+// without it they would stay "open" forever in the snapshot and the expiry
+// sweeper would fire on them later. For each stale proposal it finishes every
+// claimed store step (best effort), emits one action.executed with OK=false
+// naming the step that was in flight, and sets the proposal status to
+// "failed". Caller must hold s.mu.
+func (s *Service) interruptStaleProposalsLocked(ctx context.Context, roomID string, st *roomState) {
+	for _, p := range append([]Proposal{}, st.snap.OpenProposals...) {
+		if !fullyApproved(p) {
+			continue
+		}
+		next := s.interruptedStep(ctx, roomID, p)
+		for i := range p.Steps {
+			s.finishClaimedStep(p.ProposalID, i, "interrupted by a service restart")
+		}
+		if _, err := s.emitLocked(ctx, st, roomID, events.ActionExecuted, executorActor, events.ActionExecutedPayload{
+			ProposalID: p.ProposalID,
+			StepIndex:  next,
+			OK:         false,
+			Output:     "proposal was interrupted by a service restart before it finished; create a new proposal to retry",
+		}); err != nil {
+			s.log.Warn("room: emit interruption failed", "proposal", p.ProposalID, "err", err)
+		}
+		s.setProposalStatus(p.ProposalID, "failed")
+	}
+}
+
+// interruptedStep returns the index of the step that had not finished: the
+// first step with no recorded successful action.executed event, since steps
+// run in order. It reads the log because the store keeps no per-proposal step
+// list.
+func (s *Service) interruptedStep(ctx context.Context, roomID string, p Proposal) int {
+	done := map[int]bool{}
+	after := int64(0)
+	for {
+		evs, err := s.store.Since(ctx, roomID, after, 1000)
+		if err != nil || len(evs) == 0 {
+			break
+		}
+		for _, e := range evs {
+			after = e.Seq
+			if e.Type != events.ActionExecuted {
+				continue
+			}
+			pay, ok := decode[events.ActionExecutedPayload](e)
+			if ok && pay.ProposalID == p.ProposalID && pay.OK {
+				done[pay.StepIndex] = true
+			}
+		}
+		if len(evs) < 1000 {
+			break
+		}
+	}
+	for i := range p.Steps {
+		if !done[i] {
+			return i
+		}
+	}
+	return 0
 }
 
 func (s *Service) rawAlert(ctx context.Context, roomID string) json.RawMessage {
@@ -277,8 +344,27 @@ func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, 
 	return e, nil
 }
 
+// agentEventTypes is the set of event types the investigation agent may append
+// through its Sink (review item 9). The agent's own events are exactly the
+// agent.* families (internal/agent: run.go and tools_room.go); proposals go
+// through agent.Proposals (CreateProposal), which validates them, not through
+// the Sink.
+var agentEventTypes = map[events.Type]bool{
+	events.AgentStatus:     true,
+	events.AgentStepStart:  true,
+	events.AgentToolCall:   true,
+	events.AgentToolResult: true,
+	events.AgentMessage:    true,
+	events.AgentHypothesis: true,
+}
+
 // agentEmit is the agent Sink: the agent's events enter the same log and cache.
+// Only agent.* event types are accepted, so the sink cannot forge
+// control-plane events (control.granted, approval.given, ...).
 func (s *Service) agentEmit(ctx context.Context, roomID string, typ events.Type, payload any) error {
+	if !agentEventTypes[typ] {
+		return fmt.Errorf("room: agent sink refused event type %q", typ)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, ok := s.rooms[roomID]
@@ -321,16 +407,34 @@ func (s *Service) leaseExpired(st *roomState) bool {
 }
 
 // touchDriverLease renews the driver lease in the snapshot and persists it.
-// Caller must hold s.mu.
+// Per docs/api.md a renewal that happens while less than 25 minutes remain is
+// written to the log as control.granted with the same driver and the new
+// lease_until; since the renewal resets the lease to a full 30 minutes, that
+// test by construction logs at most one such event per 5 minutes (review item
+// 11). Caller must hold s.mu.
 func (s *Service) touchDriverLease(ctx context.Context, st *roomState, roomID string) {
-	if st.snap.Driver == nil {
+	d := st.snap.Driver
+	if d == nil {
 		return
 	}
-	lease := s.now().UTC().Add(DriverLease)
+	now := s.now().UTC()
+	lease := now.Add(DriverLease)
+	remaining := d.LeaseUntil.Sub(now)
 	st.snap.Driver.LeaseUntil = lease
-	if err := s.store.UpdateDriver(ctx, roomID, st.snap.Driver.ID, st.snap.Driver.Name, lease); err != nil {
+	if err := s.store.UpdateDriver(ctx, roomID, d.ID, d.Name, lease); err != nil {
 		s.log.Warn("room: persist driver lease failed", "room", roomID, "err", err)
 	}
+	if remaining >= leaseLogThreshold {
+		return
+	}
+	if _, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, humanActor(User{ID: d.ID, Name: d.Name}), events.ControlGrantedPayload{
+		To:         events.Actor{Kind: events.ActorHuman, ID: d.ID, Name: d.Name},
+		LeaseUntil: lease,
+	}); err != nil {
+		s.log.Warn("room: emit lease renewal failed", "room", roomID, "err", err)
+		return
+	}
+	s.log.Info("room: renewed driver lease", "room", roomID, "driver", d.ID, "lease_until", lease)
 }
 
 func (s *Service) roomOpen(st *roomState) bool {

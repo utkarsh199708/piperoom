@@ -124,6 +124,11 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 		return events.Event{}, err
 	}
 	s.touchDriverLease(ctx, st2, roomID)
+	// A new handoff supersedes every older pending one (review item 10):
+	// accepting a superseded handoff is stale, never driver-moving.
+	if err := s.store.VoidHandoffs(ctx, roomID, handoffID); err != nil {
+		s.log.Warn("room: void older handoffs failed", "room", roomID, "handoff", handoffID, "err", err)
+	}
 	return e, nil
 }
 
@@ -137,6 +142,11 @@ func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string
 	h, err := s.store.GetHandoff(ctx, handoffID)
 	if err != nil {
 		return events.Event{}, mapStoreErr(err)
+	}
+	if h.Status == "voided" {
+		// A handoff is voided when a newer one supersedes it (review item 10):
+		// accepting it can never move the driver role.
+		return events.Event{}, staleHandoff("the handoff was voided by a newer one")
 	}
 	if h.Status != "pending" {
 		return events.Event{}, alreadyDecided("handoff already accepted")

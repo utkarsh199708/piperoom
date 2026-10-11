@@ -77,9 +77,11 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 
 // CreateRoomFromAlert handles the generic alert webhook: it maps title/
 // severity/pipeline_id when present and stores the raw body verbatim in
-// room.created.alert. Unknown pipelines still open a room (proposals stay
-// disabled because actions are scope-checked), with no driver until someone
-// takes control.
+// room.created.alert. The pipeline_id takes the same shape check and, when an
+// owners config is loaded, the same known-pipeline check as POST /api/rooms
+// (review item 8; docs/api.md:103 still describes the older behaviour — see
+// the contract note in the PR). With no owners config (--demo, unit tests)
+// there is nothing to validate against. No driver until someone takes control.
 func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipelineID string, raw json.RawMessage) (RoomSnapshot, error) {
 	if title == "" {
 		title = "New alert"
@@ -89,6 +91,14 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 	}
 	if pipelineID == "" {
 		pipelineID = "unknown"
+	}
+	if !pipelineIDRe.MatchString(pipelineID) {
+		return RoomSnapshot{}, validation(fmt.Sprintf("pipeline_id %q must match ^[a-zA-Z0-9_.-]+$", pipelineID))
+	}
+	if s.owners != nil {
+		if _, ok := s.owners.Pipeline(pipelineID); !ok {
+			return RoomSnapshot{}, validation(fmt.Sprintf("unknown pipeline %q", pipelineID))
+		}
 	}
 	roomID := NewID("r_")
 	now := s.now().UTC()

@@ -2,6 +2,7 @@ package room_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,6 +136,14 @@ func TestApplyEveryEventType(t *testing.T) {
 		if s.Status != "closed" {
 			t.Fatalf("room not closed: %+v", s.Status)
 		}
+		// closed_at and resolution are part of the snapshot (review item 5).
+		want := time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)
+		if s.ClosedAt == nil || !s.ClosedAt.Equal(want) {
+			t.Fatalf("closed_at not set from the event time: %+v", s.ClosedAt)
+		}
+		if s.Resolution != "done" {
+			t.Fatalf("resolution not set: %q", s.Resolution)
+		}
 	})
 
 	t.Run("no-op events do not panic", func(t *testing.T) {
@@ -212,4 +221,63 @@ func TestApplyEveryEventType(t *testing.T) {
 			t.Fatalf("commenter not a member: %+v", s.Members)
 		}
 	})
+}
+
+// TestSnapshotJSONArraysNeverNull pins review item 4 / docs/api.md: the
+// marshalled snapshot never contains null arrays, a new room's agent state is
+// "idle", and based_on_steps/steps/required_layers are [] not null. It checks
+// both a fresh snapshot and the Clone()ed snapshots the service actually
+// returns to HTTP callers.
+func TestSnapshotJSONArraysNeverNull(t *testing.T) {
+	wants := []string{
+		`"members":[]`,
+		`"open_proposals":[]`,
+		`"pending_suggestions":[]`,
+		`"agent_status":{"state":"idle"}`,
+		`"closed_at":null`,
+		`"resolution":""`,
+	}
+	for _, tc := range []struct {
+		name string
+		snap room.RoomSnapshot
+	}{
+		{name: "fresh", snap: room.NewSnapshot()},
+		{name: "clone", snap: room.NewSnapshot().Clone()},
+	} {
+		b, err := json.Marshal(tc.snap)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", tc.name, err)
+		}
+		for _, want := range wants {
+			if !strings.Contains(string(b), want) {
+				t.Fatalf("%s: snapshot JSON missing %s:\n%s", tc.name, want, b)
+			}
+		}
+	}
+
+	// A proposal with no explicit steps/layers and a hypothesis with no
+	// based_on_steps still marshal their arrays as [].
+	s := room.Apply(room.NewSnapshot(), ev(events.ProposalCreated, 1, events.AgentActor, events.ProposalCreatedPayload{
+		ProposalID: "p_1", Title: "fix",
+	}))
+	s = room.Apply(s, ev(events.AgentHypothesis, 2, events.AgentActor, events.AgentHypothesisPayload{Text: "h"}))
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, want := range []string{`"steps":[]`, `"required_layers":[]`, `"approvals":{}`, `"based_on_steps":[]`} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("snapshot JSON missing %s:\n%s", want, b)
+		}
+	}
+
+	// Folded events never turn closed_at into anything but null before close.
+	s2 := room.Apply(s, ev(events.RoomCreated, 3, human("arjun", "Arjun"), events.RoomCreatedPayload{Title: "t", Severity: "sev2", PipelineID: "orders"}))
+	b, err = json.Marshal(s2)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), `"closed_at":null`) {
+		t.Fatalf("open snapshot closed_at must be null:\n%s", b)
+	}
 }

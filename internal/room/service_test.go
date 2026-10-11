@@ -1,9 +1,11 @@
 package room_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -675,10 +677,21 @@ func TestAcceptHandoffVoidsOtherPending(t *testing.T) {
 	h1, _ := events.Decode[events.HandoffCreatedPayload](ev1)
 	h2, _ := events.Decode[events.HandoffCreatedPayload](ev2)
 
-	if _, err := svc.AcceptHandoff(context.Background(), mustUser(t, svc, "priya"), h1.HandoffID); err != nil {
-		t.Fatalf("accept 1: %v", err)
+	// Creating the second handoff voided the first (review item 10): it can
+	// no longer be accepted, and that is a stale (not an already-decided)
+	// handoff.
+	_, err = svc.AcceptHandoff(context.Background(), mustUser(t, svc, "priya"), h1.HandoffID)
+	wantCode(t, err, "stale_handoff")
+
+	// The newer handoff is still pending and moves the driver role.
+	if _, err := svc.AcceptHandoff(context.Background(), mustUser(t, svc, "kabir"), h2.HandoffID); err != nil {
+		t.Fatalf("accept 2: %v", err)
 	}
-	// The second handoff was voided and can no longer be accepted.
+	snap, _ := svc.GetRoom(context.Background(), roomID)
+	if snap.Driver == nil || snap.Driver.ID != "kabir" {
+		t.Fatalf("driver should be kabir: %+v", snap.Driver)
+	}
+	// Accepting again is already decided.
 	_, err = svc.AcceptHandoff(context.Background(), mustUser(t, svc, "kabir"), h2.HandoffID)
 	wantCode(t, err, "already_decided")
 }
@@ -761,16 +774,12 @@ func TestCreateProposalScopeViolation(t *testing.T) {
 	_, err = svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "t2", "sev2", "not-configured")
 	wantCode(t, err, "validation")
 
-	// A room opened by an alert webhook may carry an unknown pipeline; its
-	// proposals are disabled because the scope check cannot resolve it.
-	snap2, err := svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "not-configured", json.RawMessage(`{"title":"t2"}`))
-	if err != nil {
-		t.Fatalf("create room from alert: %v", err)
-	}
-	_, err = svc.CreateProposal(context.Background(), snap2.ID, events.ProposalCreatedPayload{
-		Title: "fix",
-		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
-	}, events.AgentActor)
+	// The alert webhook takes the same check (review item 8; contract note:
+	// docs/api.md:103 still describes the older "room opens" behaviour).
+	_, err = svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "not-configured", json.RawMessage(`{"title":"t2"}`))
+	wantCode(t, err, "validation")
+	// A malformed pipeline_id is rejected by shape on both paths.
+	_, err = svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "bad id!", json.RawMessage(`{"title":"t2"}`))
 	wantCode(t, err, "validation")
 }
 
@@ -904,5 +913,464 @@ func TestCloseStopsGoroutinesIdempotent(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close did not stop all goroutines within 5s")
+	}
+}
+
+// blockingAction blocks in Execute until its context ends, so a test can close
+// the service mid-run.
+type blockingAction struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func newBlockingAction() *blockingAction { return &blockingAction{started: make(chan struct{})} }
+
+func (a *blockingAction) Name() string     { return "blocking_action" }
+func (a *blockingAction) Layer() string    { return "postgres" }
+func (a *blockingAction) Describe() string { return "blocks until the context ends" }
+func (a *blockingAction) ParamsSchema() map[string]any {
+	return map[string]any{"type": "object"}
+}
+func (a *blockingAction) Validate(json.RawMessage) error                    { return nil }
+func (a *blockingAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
+func (a *blockingAction) Execute(ctx context.Context, _ json.RawMessage) (string, error) {
+	a.once.Do(func() { close(a.started) })
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// TestCloseDuringExecutionFinishesStep pins review items 3 and 13: with a
+// Close while a step is running, the result writes (step finish, proposal
+// status, action.executed event) still land because they are detached from
+// the service context (context.WithoutCancel + timeout); the step ends
+// "failed", never "started" forever.
+func TestCloseDuringExecutionFinishesStep(t *testing.T) {
+	act := newBlockingAction()
+	svc, st, _ := newTestService(t, act)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{{Action: "blocking_action", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor)
+	if err != nil {
+		t.Fatalf("create proposal: %v", err)
+	}
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	select {
+	case <-act.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("action never started")
+	}
+
+	svc.Close()
+
+	if got := st.ProposalStepStatus(pid, 0); got != "failed" {
+		t.Fatalf("step state after Close: got %q, want failed", got)
+	}
+	if p, err := st.GetProposal(context.Background(), pid); err != nil || p.Status != "failed" {
+		t.Fatalf("proposal status after Close: %+v err=%v", p, err)
+	}
+	found := false
+	for _, e := range allEvents(t, st, roomID) {
+		if e.Type != events.ActionExecuted {
+			continue
+		}
+		p, err := events.Decode[events.ActionExecutedPayload](e)
+		if err == nil && p.ProposalID == pid && !p.OK {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no failing action.executed recorded for %s", pid)
+	}
+	snap, err := svc.GetRoom(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("get room: %v", err)
+	}
+	if len(snap.OpenProposals) != 0 {
+		t.Fatalf("proposal must leave open_proposals on failure: %+v", snap.OpenProposals)
+	}
+}
+
+// TestExecutorNeverRunsAPreClaimedStep pins the no-double-run rule end to end
+// (review round 2, item 4): a step claimed by an earlier (crashed) run is
+// never executed again; it is finished as failed and the proposal is marked
+// failed WITH an outcome event (review item 13).
+func TestExecutorNeverRunsAPreClaimedStep(t *testing.T) {
+	act := &fakeAction{name: "pg_act", layer: "postgres"}
+	svc, st, _ := newTestService(t, act)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor)
+	if err != nil {
+		t.Fatalf("create proposal: %v", err)
+	}
+	// Simulate a crashed earlier run: the step was claimed, never finished.
+	if err := st.StartProposalStep(context.Background(), pid, 0); err != nil {
+		t.Fatalf("pre-claim step: %v", err)
+	}
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	waitFor(t, 5*time.Second, func() bool {
+		p, err := st.GetProposal(context.Background(), pid)
+		return err == nil && p.Status == "failed"
+	})
+	if act.Calls() != 0 {
+		t.Fatalf("pre-claimed step ran again: %d calls", act.Calls())
+	}
+	if got := st.ProposalStepStatus(pid, 0); got != "failed" {
+		t.Fatalf("stale claim state: got %q, want failed", got)
+	}
+	found := false
+	for _, e := range allEvents(t, st, roomID) {
+		if e.Type != events.ActionExecuted {
+			continue
+		}
+		p, err := events.Decode[events.ActionExecutedPayload](e)
+		if err == nil && p.ProposalID == pid && !p.OK {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no failing action.executed for the pre-claimed proposal")
+	}
+	snap, _ := svc.GetRoom(context.Background(), roomID)
+	if len(snap.OpenProposals) != 0 {
+		t.Fatalf("proposal must leave open_proposals: %+v", snap.OpenProposals)
+	}
+}
+
+// TestLoadInterruptsStaleProposals pins review item 6: a proposal that was
+// fully approved but never finished before a (re)start is marked failed with
+// an outcome event on Load instead of staying open forever; a proposal still
+// waiting for approvals is untouched.
+func TestLoadInterruptsStaleProposals(t *testing.T) {
+	pg := &fakeAction{name: "pg_act", layer: "postgres"}
+	wh := &fakeAction{name: "wh_act", layer: "warehouse"}
+	svc, st, c := newTestService(t, pg, wh)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	mk := func(title string, steps ...events.ProposalStep) string {
+		t.Helper()
+		pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+			Title: title, Steps: steps,
+		}, events.AgentActor)
+		if err != nil {
+			t.Fatalf("create proposal %s: %v", title, err)
+		}
+		return pid
+	}
+	// p1: fully approved, step 0 claimed, never finished — crash mid-run.
+	p1 := mk("one", events.ProposalStep{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")})
+	// p2: no approvals — must stay open after Load.
+	p2 := mk("two", events.ProposalStep{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")})
+	// p3: two steps, step 0 recorded done, step 1 claimed but unfinished.
+	p3 := mk("three",
+		events.ProposalStep{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")},
+		events.ProposalStep{Action: "wh_act", Layer: "warehouse", Params: json.RawMessage("{}")},
+	)
+
+	// The approvals and p3's finished step 0 happened before the crash; write
+	// them straight to the store so no executor runs in this process.
+	prior := events.Actor{Kind: events.ActorHuman, ID: "priya", Name: "Priya"}
+	for _, a := range []struct {
+		typ     events.Type
+		payload any
+	}{
+		{events.ApprovalGiven, events.ApprovalGivenPayload{ProposalID: p1, Layer: "postgres"}},
+		{events.ApprovalGiven, events.ApprovalGivenPayload{ProposalID: p3, Layer: "postgres"}},
+		{events.ApprovalGiven, events.ApprovalGivenPayload{ProposalID: p3, Layer: "warehouse"}},
+		{events.ActionExecuted, events.ActionExecutedPayload{ProposalID: p3, StepIndex: 0, OK: true, Output: "done"}},
+	} {
+		if _, err := st.Append(context.Background(), roomID, a.typ, prior, a.payload); err != nil {
+			t.Fatalf("append %s: %v", a.typ, err)
+		}
+	}
+	if err := st.StartProposalStep(context.Background(), p1, 0); err != nil {
+		t.Fatalf("claim p1 step 0: %v", err)
+	}
+	if err := st.StartProposalStep(context.Background(), p3, 1); err != nil {
+		t.Fatalf("claim p3 step 1: %v", err)
+	}
+	svc.Close() // the old process dies here
+
+	// A new process loads the same store.
+	svc2 := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun, Now: c.Now})
+	t.Cleanup(svc2.Close)
+	if err := svc2.Load(context.Background()); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	for _, pid := range []string{p1, p3} {
+		if p, err := st.GetProposal(context.Background(), pid); err != nil || p.Status != "failed" {
+			t.Fatalf("proposal after Load: %+v err=%v", p, err)
+		}
+	}
+	if got := st.ProposalStepStatus(p1, 0); got != "failed" {
+		t.Fatalf("p1 step 0 after Load: got %q, want failed", got)
+	}
+	if got := st.ProposalStepStatus(p3, 1); got != "failed" {
+		t.Fatalf("p3 step 1 after Load: got %q, want failed", got)
+	}
+
+	snap, err := svc2.GetRoom(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("get room: %v", err)
+	}
+	if len(snap.OpenProposals) != 1 || snap.OpenProposals[0].ProposalID != p2 {
+		t.Fatalf("only the unapproved proposal stays open: %+v", snap.OpenProposals)
+	}
+
+	// The interruption events point at the step that was in flight: 0 for p1
+	// (no finished steps), 1 for p3 (step 0 recorded done).
+	interrupted := map[string]int{}
+	for _, e := range allEvents(t, st, roomID) {
+		if e.Type != events.ActionExecuted {
+			continue
+		}
+		p, err := events.Decode[events.ActionExecutedPayload](e)
+		if err == nil && !p.OK && strings.Contains(p.Output, "interrupted") {
+			interrupted[p.ProposalID] = p.StepIndex
+		}
+	}
+	if interrupted[p1] != 0 || interrupted[p3] != 1 {
+		t.Fatalf("interruption steps: %v", interrupted)
+	}
+}
+
+// TestAgentSinkOnlyAcceptsAgentEvents pins review item 9: the agent Sink
+// refuses every non-agent.* event type, so the agent cannot forge
+// control-plane events; the agent's own families (internal/agent) still pass.
+func TestAgentSinkOnlyAcceptsAgentEvents(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	sinks := make(chan agent.Sink, 1)
+	svc := room.New(room.Deps{
+		Store: st, Users: room.DefaultUsers(), Now: c.Now,
+		Run: func(ctx context.Context, _ agent.Alert, deps agent.Deps, _ agent.Options) error {
+			sinks <- deps.Sink
+			<-ctx.Done()
+			return nil
+		},
+	})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	var sink agent.Sink
+	select {
+	case sink = <-sinks:
+	case <-time.After(5 * time.Second):
+		t.Fatal("agent run did not start")
+	}
+
+	ctx := context.Background()
+	for _, typ := range []events.Type{
+		events.ControlGranted, events.ControlRequested, events.ApprovalGiven,
+		events.ApprovalRejected, events.RoomClosed, events.HandoffCreated,
+		events.ProposalCreated, events.CommentAdded, events.SteerSent,
+	} {
+		if err := sink.Emit(ctx, typ, map[string]any{}); err == nil {
+			t.Fatalf("agent sink accepted %s", typ)
+		}
+	}
+	// The agent's own families still pass; proposals go through
+	// Proposals.Create, not the sink.
+	if err := sink.Emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: "hello"}); err != nil {
+		t.Fatalf("agent.message refused: %v", err)
+	}
+	if err := sink.Emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"}); err != nil {
+		t.Fatalf("agent.status refused: %v", err)
+	}
+	evs := allEvents(t, st, roomID)
+	last := evs[len(evs)-1]
+	if last.Type != events.AgentStatus || last.Actor.Kind != events.ActorAgent {
+		t.Fatalf("bad agent event: %+v", last)
+	}
+}
+
+// TestLeaseRenewalLoggedWhenCloseToExpiry pins review item 11 / docs/api.md:
+// renewing while less than 25 minutes remain writes a control.granted with the
+// same driver and the new lease_until (at most one per 5 minutes) and logs it;
+// renewals with plenty of lease left stay silent.
+func TestLeaseRenewalLoggedWhenCloseToExpiry(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	var logBuf bytes.Buffer
+	svc := room.New(room.Deps{
+		Store: st, Users: room.DefaultUsers(), Run: fakeRun, Now: c.Now,
+		Logger: slog.New(slog.NewTextHandler(&logBuf, nil)),
+	})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "arjun").ID
+	arjun := mustUser(t, svc, "arjun")
+
+	granted := func() []events.ControlGrantedPayload {
+		var out []events.ControlGrantedPayload
+		for _, e := range allEvents(t, st, roomID) {
+			if e.Type != events.ControlGranted {
+				continue
+			}
+			if p, err := events.Decode[events.ControlGrantedPayload](e); err == nil {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	steer := func() {
+		t.Helper()
+		if _, err := svc.Steer(context.Background(), arjun, roomID, "check the topic"); err != nil {
+			t.Fatalf("steer: %v", err)
+		}
+	}
+
+	// t0: the creation grant is the only control.granted; a fresh renewal has
+	// ~30 minutes left and stays silent.
+	steer()
+	if got := granted(); len(got) != 1 {
+		t.Fatalf("want only the creation grant, got %d", len(got))
+	}
+
+	c.Advance(time.Minute) // t+1: 29 min remain → silent
+	steer()
+	if got := granted(); len(got) != 1 {
+		t.Fatalf("renewal with 29 min left emitted an event (got %d)", len(got))
+	}
+
+	// t+11: only 20 minutes remain → the renewal is written to the log with
+	// the same driver and the new lease_until, and logged via slog.
+	c.Advance(10 * time.Minute)
+	steer()
+	got := granted()
+	if len(got) != 2 {
+		t.Fatalf("want a renewal event below 25 min, got %d", len(got))
+	}
+	if got[1].To.ID != "arjun" || got[1].To.Name != "Arjun" {
+		t.Fatalf("renewal must name the current driver: %+v", got[1])
+	}
+	if want := c.Now().Add(room.DriverLease); !got[1].LeaseUntil.Equal(want) {
+		t.Fatalf("lease_until: got %s, want %s", got[1].LeaseUntil, want)
+	}
+	if !strings.Contains(logBuf.String(), "renewed driver lease") {
+		t.Fatalf("renewal not logged: %s", logBuf.String())
+	}
+
+	// Immediately after the renewal a full lease remains: no second event.
+	steer()
+	if got := granted(); len(got) != 2 {
+		t.Fatalf("renewal right after an event must stay silent, got %d", len(got))
+	}
+
+	// Exactly 5 minutes after the renewal the lease has 25 minutes left → not
+	// "less than 25" → still silent (this is the "at most one per 5 minutes"
+	// spacing).
+	c.Advance(5 * time.Minute)
+	steer()
+	if got := granted(); len(got) != 2 {
+		t.Fatalf("renewal with exactly 25 min left must stay silent, got %d", len(got))
+	}
+
+	// Six minutes later less than 25 remain again → the next renewal event.
+	c.Advance(6 * time.Minute)
+	steer()
+	if got := granted(); len(got) != 3 {
+		t.Fatalf("want the next renewal event after 5+ silent minutes, got %d", len(got))
+	}
+}
+
+// closeRoomAction closes its room from inside Execute, so the executor's
+// room-closed stop path runs deterministically.
+type closeRoomAction struct {
+	svc    *room.Service
+	roomID string
+	user   room.User
+}
+
+func (a *closeRoomAction) Name() string     { return "close_room" }
+func (a *closeRoomAction) Layer() string    { return "postgres" }
+func (a *closeRoomAction) Describe() string { return "closes the room" }
+func (a *closeRoomAction) ParamsSchema() map[string]any {
+	return map[string]any{"type": "object"}
+}
+func (a *closeRoomAction) Validate(json.RawMessage) error                    { return nil }
+func (a *closeRoomAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
+func (a *closeRoomAction) Execute(context.Context, json.RawMessage) (string, error) {
+	if _, err := a.svc.CloseRoom(context.Background(), a.user, a.roomID, "closed by the action"); err != nil {
+		return "", err
+	}
+	return "closed", nil
+}
+
+// TestExecutorRoomClosedPathRecordsOutcome pins review item 13 for the
+// room-closed stop path: the executor must mark the proposal failed with an
+// outcome event (so the snapshot and the expiry sweeper see it) and must not
+// run the remaining steps.
+func TestExecutorRoomClosedPathRecordsOutcome(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	cr := &closeRoomAction{}
+	second := &fakeAction{name: "second_act", layer: "postgres"}
+	reg := actions.NewRegistry()
+	if err := reg.Register(cr); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := reg.Register(second); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	svc := room.New(room.Deps{Store: st, Actions: reg, Users: room.DefaultUsers(), Run: fakeRun, Now: c.Now})
+	t.Cleanup(svc.Close)
+
+	roomID := createRoom(t, svc, "arjun").ID
+	cr.svc = svc
+	cr.roomID = roomID
+	cr.user = mustUser(t, svc, "arjun")
+
+	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{
+			{Action: "close_room", Layer: "postgres", Params: json.RawMessage("{}")},
+			{Action: "second_act", Layer: "postgres", Params: json.RawMessage("{}")},
+		},
+	}, events.AgentActor)
+	if err != nil {
+		t.Fatalf("create proposal: %v", err)
+	}
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+
+	waitFor(t, 5*time.Second, func() bool {
+		p, err := st.GetProposal(context.Background(), pid)
+		return err == nil && p.Status == "failed"
+	})
+	if second.Calls() != 0 {
+		t.Fatalf("step after the closed room ran: %d calls", second.Calls())
+	}
+	found := false
+	for _, e := range allEvents(t, st, roomID) {
+		if e.Type != events.ActionExecuted {
+			continue
+		}
+		p, err := events.Decode[events.ActionExecutedPayload](e)
+		if err == nil && p.ProposalID == pid && !p.OK && strings.Contains(p.Output, "room closed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no room-closed outcome event for %s", pid)
+	}
+	snap, _ := svc.GetRoom(context.Background(), roomID)
+	if len(snap.OpenProposals) != 0 {
+		t.Fatalf("proposal must leave open_proposals: %+v", snap.OpenProposals)
+	}
+	if snap.Status != "closed" {
+		t.Fatalf("room should be closed: %+v", snap.Status)
 	}
 }
