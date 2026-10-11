@@ -1,160 +1,221 @@
-# Design: real login (replacing `X-User`)
+# Design: real login (replaces `X-User`)
 
-Task C9, part 1 of 3 (see also `webhook-auth.md`, `event-retention.md`). Design only — no code changed.
-**Findings covered:** F1 (any user can become any owner). Related: F7 (tenant isolation), F2 (approval binds to params).
-Closes the design gap behind **F1** (critical) and the production notes in `threat-model.md` §4.3.
-Written against `main` @ `15f7aca`. `docs/api.md` v0.1 already defaults the server to `127.0.0.1:8090`, requires
-`USERS_FILE` in real mode, and checks `dev/users.yaml` against `dev/owners.yaml` at start-up. File names below
-are proposals for A5, not descriptions of existing code.
+Task C9, doc 1 of 3 (`webhook-auth.md`, `event-retention.md`). Design only, no code changed. Written against `main`
+@ `8e326a3`+; unmerged A5 facts are cited "(a5 @ 935f17d)" from the lead's task file.
+**Findings:** F1 (any caller can become any layer owner). Also gives F2/F10 their "who approved" (approver identity).
 
-## 1. Goals and non-goals
+## 1. Problem
 
-**Goals**
-1. The server decides who a caller is and which layers they own. The client never supplies either.
-2. An approval is attributable to one authenticated human, with a recent proof of presence.
-3. One deployment can serve more than one customer without rooms or data crossing over.
-4. Local dev stays one command (`dev/users.yaml`), but cannot be switched on in production by accident.
+- Identity is a header the client chooses. `authenticate` reads `X-User` (a5 @ 935f17d, `internal/httpapi/server.go:102`); the
+  WebSocket reads `?user=` (`internal/ws/gateway.go:115-118`). `docs/api.md:12,30` makes this the contract.
+- Approval rights come from `dev/users.yaml` `layers` (`internal/room/users.go`, `service_proposals.go:114,175`, a5 @ 935f17d).
+  `dev/owners.yaml` has a second `layers:` map (`internal/owners/owners.go:30,60`). The two can disagree. `docs/api.md:31-33`
+  adds a start-up check for it.
+- CORS hard-codes `http://localhost:5173` and allows `X-User` (`server.go:125-127`, a5 @ 935f17d); the web app sends `X-User`
+  from `web/src/api/client.ts:34`. The dev-only `UserSwitcher` is already gated by `isDev` (`web/src/components/UserSwitcher.tsx`).
+- `approval.given` / `approval.rejected` events carry only `Actor`; the `approvals` table has no approver column (a5 @ 935f17d).
+  With a spoofable actor, the audit trail proves nothing.
+- The default listener is now loopback (`config.go:27`), which only hides the problem.
 
-**Non-goals (v1):** passwords or MFA inside Piperoom (the customer's IdP does that), fine-grained
-per-room ACLs, SCIM provisioning (we re-read group claims at login instead, §5).
+## 2. Options
 
-## 2. Decision
+### 2a. Login flow
 
-**OpenID Connect, Authorization Code + PKCE, handled by the Go server (backend-for-frontend).**
-The browser never holds an access token. After login the server sets an opaque session cookie and
-every API call and WebSocket upgrade is authenticated by that cookie.
+| | A. OIDC Authorization Code + PKCE, server-side (recommended) | B. Reverse proxy sets `X-User` (oauth2-proxy style) | C. Own passwords |
+|---|---|---|---|
+| Security | server verifies the ID token itself (OIDC Core 1.0 §3.1, §3.1.3.7); no trusted header | safe only if the app is unreachable except via the proxy; one mis-route = full bypass | we own hashing, reset, MFA |
+| Effort | medium: one new module, ~500 lines | low code, high deploy coupling | highest |
+| Dev-mode impact | dev flag keeps `X-User` | dev flag keeps `X-User` | needs seed users |
+| Ops burden | needs an IdP client registration | needs a proxy per deployment | password/MFA support |
 
-Rejected: JWT-in-localStorage (XSS steals it; cannot be revoked); SAML-only (OIDC covers Okta, Entra,
-Google Workspace; add SAML later through a broker such as Dex if a customer needs it); client-supplied
-header behind a trusted proxy (works only if every deployment has one, and it silently fails open).
+### 2b. Session cookie
 
-## 3. Login flow
-
-```
-browser ── GET /auth/login ──────────────► server: create state, nonce, PKCE verifier (stored server-side,
-                                                    10 min TTL, bound to a short-lived pre-login cookie)
-        ◄── 302 IdP /authorize ───────────
-        ── user signs in at IdP (MFA is the IdP's job) ──
-        ── GET /auth/callback?code&state ─► server: check state, exchange code with verifier,
-                                                    verify ID token (iss, aud, exp, nonce, signature via JWKS),
-                                                    map claims → user + tenant + layers (§4),
-                                                    create session row, Set-Cookie
-        ◄── 302 /  ───────────────────────
-```
-
-Routes (all new; add to `docs/api.md` through the leads): `GET /auth/login`, `GET /auth/callback`,
-`POST /auth/logout`, `GET /api/me` (already exists; now returns `{id,name,tenant,layers,auth_age_s}`).
-
-Library: `github.com/coreos/go-oidc/v3` + `golang.org/x/oauth2` (both standard choices; confirm every
-symbol with `go doc` per AGENTS.md rule 9). Do not hand-roll JWT verification.
-
-## 4. Identity, tenant and layer mapping
-
-| Thing | Source | Notes |
+| | A. Server-side session in Postgres (recommended) | B. Signed stateless cookie |
 |---|---|---|
-| user id | `iss` + `sub` from the ID token | Stable key. Email and name are display only — emails get reused. |
-| tenant | configured per issuer (`tenants.yaml`: issuer → `tenant_id`), or the `hd`/org claim | One IdP issuer = one tenant. Never taken from a request field. |
-| layers a user may approve | **server-side** mapping from IdP group → layer, in the same file family as `owners.yaml` | e.g. group `data-platform-kafka` → `[kafka-connect, kafka, schema-registry]`. Unmapped groups grant nothing. |
+| Security | opaque random id; revoke by deleting the row; new id at login | cannot be revoked before expiry; key rotation logs everyone out |
+| Effort | one table `sessions` | no table, but key management |
+| Ops burden | a row per login (small) | a signing key to protect |
 
-Rules:
-- Layer membership is resolved at login and again on refresh (§5), then stored on the session. The approve
-  endpoint reads layers from the session, **never** from the request body. `{layer}` in the body only
-  names which layer the caller is approving *as*, and must be in the session's set.
-- Every room, proposal, hand-off and event row carries `tenant_id`; every query filters on the session's
-  tenant (F7). A missing filter is a bug the tests in §10 must catch.
-- A user with no mapped layer can still watch, comment and suggest; they can never approve.
+### 2c. CSRF defence
 
-## 5. Sessions
-
-- Cookie: `__Host-piperoom_session`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, no `Domain`.
-- Value: 32 random bytes, base64url. Postgres stores only `sha256(value)` in a `sessions` table
-  (`id_hash, user_key, tenant_id, layers, created_at, last_seen_at, expires_at, authenticated_at`),
-  so a DB read leak does not leak live sessions.
-- Idle timeout 8 h (an incident shift), absolute timeout 12 h, then full re-login. Both configurable
-  downward only for v1.
-- Re-resolve group claims when the session is older than 1 h, using the IdP's refresh token or a silent
-  re-auth. If the user lost a group, their layers shrink immediately; if the IdP is unreachable, keep the
-  old set until the absolute timeout (availability during an incident outranks instant revocation) and
-  log a warning.
-- `POST /auth/logout` deletes the row. An admin can delete all of a user's sessions (offboarding).
-- No refresh/access tokens are exposed to the browser or written to logs.
-
-## 6. CSRF and CORS
-
-Cookies make CSRF real. Layers of defence, all required:
-1. `SameSite=Lax` cookie.
-2. Every state-changing request (`POST`) must carry `X-Piperoom-CSRF: 1`. Browsers cannot add a custom
-   header cross-site without a CORS preflight, which we refuse.
-3. Server checks `Origin` (falling back to `Referer`) equals the configured public origin on every
-   `POST` and on the WebSocket upgrade.
-4. CORS: allow exactly one origin (`PIPEROOM_PUBLIC_URL`), `Access-Control-Allow-Credentials: true`,
-   never `*`. In dev the allowed origin is `http://localhost:5173` as the A5 task already says.
-
-## 7. WebSocket
-
-`GET /api/rooms/{id}/ws` authenticates with the same cookie. The `?user=<id>` parameter is removed in
-production mode. The upgrade handler must:
-- verify the `Origin` header against `PIPEROOM_PUBLIC_URL` (`coder/websocket` checks origin by default;
-  A5 must not set `InsecureSkipVerify` or add wildcard `OriginPatterns` — add a test that a foreign origin
-  gets 403);
-- verify the session's tenant owns the room;
-- close the socket when the session expires or is deleted (check on the 20 s presence tick).
-
-## 8. Approvals need fresh proof
-
-`POST /api/proposals/{pid}/approve` and `/reject` require:
-- session layer set contains `layer`;
-- `now - authenticated_at <= 15 min`. If older, return `401 reauth_required` and the UI sends the user
-  through `/auth/login?prompt=login&return=...` (OIDC `prompt=login`, `max_age=0`). The approval is
-  re-submitted after.
-- the proposal's current params hash equals the hash shown to the approver (F2 is fixed in the UI and `api.md` v0.1 freezes params at creation; the hash makes the approver's view verifiable);
-  a changed proposal resets approvals.
-
-The `approval.given` event payload records `user_key` (iss+sub), display name, `auth_time`, and a session
-id *hash prefix* — enough to answer "who approved this, and how recently did they log in" months later.
-Add the same actor identity to `action.executed`.
-
-## 9. Dev mode and fail-closed rules
-
-- New env var `PIPEROOM_AUTH` = `oidc` (default) or `dev`. `dev` keeps `X-User` / `?user=` and
-  `dev/users.yaml` (which `api.md` v0.1 requires to agree with `dev/owners.yaml`). (`internal/config/config.go` is a contract file: this is a **contract change
-  request** — add `AuthMode`, `PublicURL`, `OIDCIssuer`, `OIDCClientID`, `OIDCClientSecretFile`,
-  `TenantsFile`. The client secret is read from a file or secret manager, never a plain env var that
-  ends up in process listings.)
-- `dev` refuses to start unless `PIPEROOM_HTTP_ADDR` binds loopback (the default is now `127.0.0.1:8090` in
-  `config.go`; this makes it enforced rather than just a default), and logs a loud banner. A production
-  deployment that forgets to set `oidc` therefore fails to boot rather than running open.
-- The web `UserSwitcher` is compiled out of production builds (`import.meta.env.DEV` guard) — A6,
-  see F1. In `oidc` mode `/api/me` is the only source of identity in the UI.
-- Missing or invalid session → `401 unauthenticated`, same body for every cause (no user enumeration).
-
-## 10. Threats this addresses, and tests that prove it
-
-| Threat | Control | Test (A5 unless noted) |
+| | A. `net/http.CrossOriginProtection` + same origin in production (recommended) | B. Signed double-submit token |
 |---|---|---|
-| Caller claims to be another user | identity only from session | request with forged `X-User` in `oidc` mode → 401 |
-| Owner of layer A approves layer B | layers from session | approve `{layer: B}` as A-owner → 403 `not_layer_owner` |
-| Cross-tenant read | `tenant_id` filter everywhere | tenant X session reads tenant Y room/event/ws → 404 |
-| CSRF on approve | Lax + custom header + Origin | POST without header → 403; wrong `Origin` → 403 |
-| Cross-site WebSocket hijack | Origin check | upgrade with `Origin: https://evil.example` → 403 |
-| Stolen old session approves | 15 min step-up | approve with `authenticated_at` 20 min ago → `reauth_required` |
-| Offboarded user keeps access | ≤1 h group refresh, admin session purge | removed group → layers empty after refresh |
-| Session DB leak | store hashes only | unit test: plaintext cookie value never in any column |
-| Dev auth left on | loopback-only guard | boot with `dev` on `0.0.0.0` → exits non-zero |
-| Tokens in logs | redaction | log-capture test over a login round trip finds no `code`, `id_token`, cookie |
+| Security | rejects unsafe cross-origin requests by `Sec-Fetch-Site`, else `Origin` vs `Host`; allows requests with neither header (non-browser or same-origin) | works on any browser, but every client must send the token |
+| Effort | a few lines (`go doc net/http.CrossOriginProtection`; `AddTrustedOrigin` for the dev web origin) | token issue + check + web change |
+| Gap | safe methods are never checked, so the WebSocket `GET` needs its own `Origin` check (see 2d) | none |
 
-## 11. Rollout
+### 2d. WebSocket auth
 
-1. Contracts (leads): `docs/api.md` auth section + `/auth/*` routes; `config.go` fields.
-2. A5: `internal/auth` package behind an `Authenticator` interface (`Authenticate(*http.Request) (Principal, error)`);
-   `dev` and `oidc` implementations; httpapi middleware injects `Principal{UserKey, Name, TenantID, Layers, AuthTime}`.
-   Do dev first so A6 is not blocked.
-3. A6: remove `UserSwitcher` from prod build; handle `reauth_required`.
-4. Integration test against a local OIDC provider container (e.g. Dex in `dev/`, A1) so CI needs no external IdP.
+| | A. Session cookie on the handshake + `OriginPatterns` (recommended) | B. One-time ticket in the URL | C. Token in the first message |
+|---|---|---|---|
+| Security | no secret in the URL; Origin allow-list blocks cross-site hijack (OWASP WebSocket cheat sheet) | URL ticket is short-lived but is logged by proxies | server accepts an unauthenticated socket until the message |
+| Effort | same cookie code as REST | ticket store | handshake state machine |
+| Needs | production web and API on one origin | | |
 
-## 12. Decisions needed from the leads
+### 2e. User → layer owner
 
-1. Confirm OIDC-first (SAML via broker later).
-2. Confirm one IdP issuer = one tenant for the pilot.
-3. Idle/absolute session timeouts (proposed 8 h / 12 h) and step-up window (proposed 15 min).
-4. Who owns the IdP-group → layer mapping file: customer admin (self-serve) or us (pilot).
+| | A. `owners.yaml` `layers:` is the source, mapped to IdP identity (recommended) | B. IdP groups |
+|---|---|---|
+| Security | one reviewed file in git; no dependence on provider claims | `groups` is not a standard OIDC claim; its name and shape differ per provider |
+| Effort | small: drop `layers` from users file, derive it | per-provider config, and group → layer mapping still needed |
+| Ops burden | edit a file to change an owner | change in the IdP, but outside git review |
+
+## 3. Recommendation
+
+1. **OIDC Authorization Code with PKCE**, handled by the Go server. Redirect to the IdP with `state`, `nonce` and a PKCE
+   challenge; on callback exchange the code, verify the ID token (signature, `iss`, `aud`, `exp`; **nonce checked by us**), then create a session.
+   Go: `golang.org/x/oauth2` `GenerateVerifier`, `S256ChallengeOption` (auth URL), `VerifierOption` + `Config.Exchange` (callback);
+   `github.com/coreos/go-oidc/v3/oidc` `NewProvider`, `Provider.Verifier(&oidc.Config{ClientID: ...})`, `IDTokenVerifier.Verify`,
+   `IDToken.Claims`, `IDToken.Nonce`. (`go doc` confirms `Verify` does **not** check the nonce.) go-oidc is a **new module**; oauth2 comes with it.
+2. **User id = `iss` + `#` + `sub`.** OIDC Core §5.7 says email MUST NOT be the identifier. `users.yaml` maps `oidc: {iss, sub}` to the internal user id.
+3. **Server-side session** in a new `sessions` table: `id` = 32 random bytes (store only SHA-256), `user_id`, `created_at`, `last_seen_at`.
+   Cookie `__Host-piperoom_session`: `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`, no `Domain` (OWASP Session Management).
+   Idle timeout 8 h, absolute 12 h (code constants, adjustable in review). **A new session id is issued at login.** Logout deletes the row.
+4. **Pre-login cookie** `__Host-piperoom_login` (an opaque id; state, nonce, PKCE verifier and return path sit in a `login_states` row, 10 min) must be **`SameSite=Lax`, not `Strict`**:
+   the IdP returns the user with a cross-site top-level redirect, and `Strict` cookies are not sent on it.
+5. **CSRF:** `http.CrossOriginProtection` around every route except `/auth/callback` and the alert webhook. In production the web build is served from
+   the **same origin** as the API (reverse proxy or Go `embed`), so no CORS is needed. If they ever stay cross-origin: `fetch(..., {credentials:'include'})`,
+   `Access-Control-Allow-Credentials: true`, one explicit `Access-Control-Allow-Origin` (never `*`), and `AddTrustedOrigin` for it.
+6. **WebSocket:** cookie on the handshake; `websocket.AcceptOptions.OriginPatterns` = host of `PIPEROOM_PUBLIC_URL` only; `?user=` is read in dev mode only.
+   Close the socket when the session row is gone (checked on the 20 s presence tick).
+7. **Layers:** the approver's layers = `{ l : owners.yaml layers[l] == user.id }`. `users.yaml` `layers` becomes deprecated. The `approve` check uses this set.
+8. **Approver identity in the log:** the actor of `approval.given` / `approval.rejected` is the session user, and both payloads gain `subject` (`iss#sub`).
+9. **Dev mode:** `X-User` / `?user=` work only when `PIPEROOM_DEV_AUTH=1` **and** the listener host is loopback; otherwise the server exits at start-up.
+   `devctl` sets the flag. Production builds omit `UserSwitcher` (Vite replaces `import.meta.env.DEV` at build time; `isDev` is already used).
+10. **Dev IdP:** no container image is pinned here because registry tags could not be checked from this sandbox. A1 builds a **fake IdP with
+    `httptest`** (discovery, JWKS, authorize, token endpoints) in `internal/testenv`, used by A5's tests.
+
+## 4. Contract changes
+
+`docs/api.md` (Auth section, WebSocket line):
+```diff
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -7,9 +7,15 @@
+ real login yet). All bodies are JSON. Times are RFC 3339 **UTC** (`Z`), also when read back from Postgres.
+ Arrays in responses are always JSON arrays (`[]`), never `null`.
+ 
+-## Auth (MVP)
++## Auth
+ 
+-No SSO yet. Every request sends `X-User: <user id>`. Users come from `dev/users.yaml`:
++Production: OIDC login (`docs/design/auth.md`). `GET /auth/login` starts it, `GET /auth/callback` finishes it and sets
++the session cookie `__Host-piperoom_session`, `POST /auth/logout` ends the session. The server derives the user from
++the cookie; the client sends no identity. No valid session → `401 unauthenticated` and the web app goes to `/auth/login`.
++
++### Dev mode (`PIPEROOM_DEV_AUTH=1`, loopback listener only)
++
++Every request sends `X-User: <user id>`. Users come from `dev/users.yaml`:
+ 
+ ```yaml
+ users:
+@@ -27,7 +33,8 @@
+     layers: [consumer]
+ ```
+ 
+-Unknown or missing `X-User` → `401`. The WebSocket takes `?user=<id>` instead (browsers cannot set headers on WS).
++In dev mode, unknown or missing `X-User` → `401`. The WebSocket takes `?user=<id>` instead (browsers cannot set headers on WS).
++Outside dev mode both are ignored.
+ `dev/users.yaml` (who may approve a layer) and the `layers:` map in `dev/owners.yaml` (owner shown on the pipeline
+ map) must agree; the server checks this at start-up and refuses to start on a mismatch. Real mode requires
+ `USERS_FILE`; the built-in users are for `--demo` only. Real login is designed in `docs/design/auth.md` (C9).
+@@ -127,7 +134,7 @@
+ 
+ ## WebSocket
+ 
+-`GET /api/rooms/{id}/ws?user=<id>&after=<seq>`
++`GET /api/rooms/{id}/ws?after=<seq>` (session cookie; the `Origin` header must be the web app's origin; dev mode adds `&user=<id>`)
+ 
+ Server → client messages:
+ ```json
+```
+`internal/events/events.go` (who approved):
+```diff
+--- a/internal/events/events.go
++++ b/internal/events/events.go
+@@ -209,6 +209,7 @@
+ type ApprovalGivenPayload struct {
+ 	ProposalID string `json:"proposal_id"`
+ 	Layer      string `json:"layer"`
++	Subject    string `json:"subject,omitempty"` // OIDC iss + "#" + sub of the approver; "" in dev mode
+ }
+ 
+ // ApprovalRejectedPayload is one layer owner's rejection.
+@@ -216,6 +217,7 @@
+ 	ProposalID string `json:"proposal_id"`
+ 	Layer      string `json:"layer"`
+ 	Reason     string `json:"reason"`
++	Subject    string `json:"subject,omitempty"` // as ApprovalGivenPayload.Subject
+ }
+ 
+ // ActionExecutedPayload is the result of running one approved step.
+```
+`internal/config/config.go` (empty = off; the client secret is read from a file):
+```diff
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -16,6 +16,11 @@
+ 	SchemaRegistryURL string // SCHEMA_REGISTRY_URL
+ 	OwnersFile        string // OWNERS_FILE
+ 	UsersFile         string // USERS_FILE
++	DevAuth           string // PIPEROOM_DEV_AUTH ("1" = accept X-User / ?user=, loopback listener only; "" = off)
++	PublicURL         string // PIPEROOM_PUBLIC_URL (https origin users open; used for cookies, redirect URI, Origin check)
++	OIDCIssuer        string // PIPEROOM_OIDC_ISSUER ("" = login off)
++	OIDCClientID      string // PIPEROOM_OIDC_CLIENT_ID
++	OIDCClientSecret  string // PIPEROOM_OIDC_CLIENT_SECRET_FILE (path to a file; never the secret itself)
+ 	Model             string // PIPEROOM_MODEL
+ 	Effort            string // PIPEROOM_EFFORT
+ 	// The Anthropic SDK reads ANTHROPIC_API_KEY itself; it is never stored here.
+@@ -33,6 +38,11 @@
+ 		SchemaRegistryURL: get("SCHEMA_REGISTRY_URL", "http://localhost:8081"),
+ 		OwnersFile:        get("OWNERS_FILE", "dev/owners.yaml"),
+ 		UsersFile:         get("USERS_FILE", "dev/users.yaml"),
++		DevAuth:           get("PIPEROOM_DEV_AUTH", ""),
++		PublicURL:         get("PIPEROOM_PUBLIC_URL", ""),
++		OIDCIssuer:        get("PIPEROOM_OIDC_ISSUER", ""),
++		OIDCClientID:      get("PIPEROOM_OIDC_CLIENT_ID", ""),
++		OIDCClientSecret:  get("PIPEROOM_OIDC_CLIENT_SECRET_FILE", ""),
+ 		Model:             get("PIPEROOM_MODEL", "claude-opus-5-5"),
+ 		Effort:            get("PIPEROOM_EFFORT", "high"),
+ 	}
+```
+`dev/users.yaml` (additive): each user may gain `oidc: {iss: <issuer-url>, sub: <subject>}`. Existing keys stay.
+The `webhook-auth.md` and `event-retention.md` config diffs each apply to `main` on their own; the three edit the same struct, so the lead merges them by hand.
+
+## 5. Migration from today's dev mode
+
+1. Ship the code with `PIPEROOM_DEV_AUTH` unset: the dev stack breaks unless `devctl` sets it. A1 updates `devctl` in the same week.
+2. While `users.yaml` still has `layers`, keep the start-up agreement check from `docs/api.md:31-33`. When all users carry `oidc:`, drop `layers` and the check.
+3. `--demo` keeps its built-in users and implies dev mode.
+4. Existing events keep their `actor`; `subject` is empty for them. No data migration; add the `sessions` table in a new migration.
+5. First production deploy: set `PIPEROOM_PUBLIC_URL`, `PIPEROOM_OIDC_*`; leave `PIPEROOM_DEV_AUTH` empty.
+
+## 6. Tasks per owner
+
+- **A5 (1)** `internal/auth`: OIDC login, callback, logout, `sessions` + `login_states` tables in one migration, session cookie, pre-login cookie.
+- **A5 (2)** Replace `authenticate` with the session lookup; dev mode behind `PIPEROOM_DEV_AUTH` + loopback check at start-up; fail closed otherwise.
+- **A5 (3)** Wrap routes in `CrossOriginProtection`; same-origin static serving; WS `OriginPatterns`; close WS on session end; remove `X-User` from CORS in production.
+- **A5 (4)** Derive layers from `owners.yaml`; set `subject` on approval events; tests: forged `X-User` → 401, wrong layer → 403, foreign `Origin` on WS → rejected, expired session → 401.
+- **A6 (1)** Handle `401`: navigate to `/auth/login`; drop the user id argument from `request()` outside dev; `/api/me` is the only identity source.
+- **A6 (2)** Same-origin base URL in production (`VITE_API_BASE` empty); `credentials: 'include'` only if cross-origin; show the approver name from the event.
+- **A1 (1)** `devctl` sets `PIPEROOM_DEV_AUTH=1`; add `oidc:` placeholders to `dev/users.yaml` (additive).
+- **A1 (2)** Fake IdP (`httptest`) in `internal/testenv` for A5's login tests.
+
+## 7. Open questions
+
+1. Which IdP does the pilot customer use, and does it return a stable `sub`? (Needed to fill `users.yaml`.)
+2. Timeouts: 8 h idle / 12 h absolute — confirm.
+3. Re-authentication before an approval (OIDC `max_age` / `auth_time`): not specified here because OIDC Core §3.1.2.1 and §2 could not be fetched. Decide whether the pilot needs it, then verify against the spec.
+4. Who may close or take over a session in an emergency (admin role)? Out of scope here.
+5. Dev `users.yaml` still lists `schema-registry` under `arjun` while `docs/api.md:18-21` shows it under `priya`; A1 owns that file.
+6. Multi-tenant (F7): one issuer = one tenant is assumed and not designed here.
+
+## 8. References
+
+Verified in this sandbox with `go doc`: `golang.org/x/oauth2` v0.37.0, `github.com/coreos/go-oidc/v3` v3.21.0, `net/http.CrossOriginProtection` (Go 1.27).
+The pages below could not be fetched from here (network blocked); claims about them come from the lead's task file.
+- OpenID Connect Core 1.0: https://openid.net/specs/openid-connect-core-1_0.html (§3.1, §3.1.3.7, §5.7)
+- RFC 7636 (PKCE): https://www.rfc-editor.org/rfc/rfc7636
+- OWASP Session Management: https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html
+- OWASP CSRF Prevention: https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html
+- OWASP WebSocket Security: https://cheatsheetseries.owasp.org/cheatsheets/WebSocket_Security_Cheat_Sheet.html

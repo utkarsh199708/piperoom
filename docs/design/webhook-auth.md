@@ -1,161 +1,192 @@
-# Design: webhook security
+# Design: alert webhook authentication
 
-Task C9, part 2 of 3 (see also `auth.md`, `event-retention.md`). Design only — no code changed.
-**Findings covered:** F9 (undefined webhook auth). Related: F4/F10 (pipeline scoping, now fixed in the tools and
-actions; this doc applies the same idea to inbound alerts).
-Written against `main` @ `15f7aca`; `docs/api.md` v0.1 points to this file for webhook auth. Verification helpers
-are being built by C5 in `internal/alertin`; this design must be reconciled with them before A5 implements it
-(open question 5 below). File names are proposals for A5.
+Task C9, doc 2 of 3 (`auth.md`, `event-retention.md`). Design only, no code changed. Written against `main` @ `8e326a3`+.
+**Findings:** F9 (webhook auth undefined). Related: F4/F10 (pipeline scoping), F6 (a flood grows the log).
 
-## 1. What is being protected
+**Depends on C5.** C5 builds the verification and parsing helpers in `internal/alertin` (PR #11, branch
+`claude/dazzling-volta-8xn3f3`, head `9903240`). This doc uses **C5's real names from that branch**:
+`alertin.Config` (`AlertmanagerToken`, `GrafanaSecret`, `PagerDutySecret`, `DatadogToken`, `GenericSecret`, `Owners`,
+`PagerDutyServices`, `DefaultPipeline`), `Config.Ingest(src Source, h http.Header, body []byte) (Alert, error)`, `Config.Enabled`,
+`Alert{Source, Status, Title, Severity, PipelineID, PipelineVia, DedupKey, URL, OccurredAt, Raw}`, `Alert.RoomCreated()`,
+`Alert.Agent(roomID, pipelineMap)`, `SignGeneric`, and the errors `ErrUnauthenticated`, `ErrStale`, `ErrTooLarge`, `ErrIgnored`.
+Header names and checks are C5's (`internal/alertin/README.md`). Nothing is redefined here. `tasks/C5-alert-ingest.md` still names an older
+API (`Incoming`, `DefaultAuth`, `Verify`); see Open question 1.
 
-`POST /api/alerts/webhook` lets an outside system start a room, which starts a billed agent
-investigation against production read tools. The contract today is "any JSON, no stated auth".
-Without auth, anyone who can reach the endpoint can:
-- open unlimited rooms (Anthropic cost, DB/Kafka load, noisy on-call);
-- post a believable fake sev1 about a real pipeline (social engineering of the on-call team);
-- replay a captured real alert to re-open work.
+## 1. Problem
 
-The endpoint cannot use the human login in `auth.md`: callers are machines with no browser.
-It gets its own, narrower, credential model. It must also never grant more than "create or append to
-a room".
+- `POST /api/alerts/webhook` sits in the same `X-User` group as human routes (a5 @ 935f17d, `internal/httpapi/server.go:59`). A real alert
+  sender cannot send `X-User`, so today either the endpoint is unusable by Alertmanager/Grafana/PagerDuty, or an operator hands out a user id.
+  `docs/api.md:103` says nothing about credentials.
+- Anyone who reaches the endpoint can open rooms, which start billed agent runs against production read tools, and can post a believable fake sev1 (F9).
+- The body is stored verbatim in `room.created.alert` (`events.go:105`) and capped at 1 MB (`server.go:24,150`, a5 @ 935f17d). `alertin.MaxBodyBytes`
+  is the same 1 MiB.
+- `title`, `severity` and `pipeline_id` come from the sender. C5 cleans title and severity, but accepts a label-supplied pipeline id if it only
+  matches `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$` (`validPipelineID`, `alertin.go`); it is **not** checked against `owners.yaml` for `ViaLabel`.
 
-## 2. Rule zero: what a webhook is allowed to influence
+## 2. Options
 
-| Field | Taken from payload? | Why |
+| | A. Bearer token per source | B. HMAC signature per source | C. Network controls only (mTLS / IP allow-list) |
+|---|---|---|---|
+| Security | the token is the whole secret; stolen from a log or proxy = full access until rotated; replayable | body is bound to the secret; with a signed timestamp (Grafana, generic) replay is bounded; no secret on the wire | strong against outsiders; useless against anyone inside the allowed range; Alertmanager/Grafana/PagerDuty cloud IPs change |
+| Effort | trivial | needs a sender that can sign | proxy config, per customer |
+| Sender support | Alertmanager (no signing, `http_config.authorization`), Datadog (custom header) | Grafana, PagerDuty V3, our generic form | any |
+| Dev-mode impact | `curl -H 'Authorization: Bearer ...'` | `alertin.SignGeneric` helper | none |
+| Ops burden | one secret per source | one secret per source | certificates / lists to maintain |
+
+## 3. Recommendation
+
+**Use the strongest method each source supports (A or B per source, exactly as C5 implements it), require TLS, and treat network controls as an
+optional extra layer at the reverse proxy, not as the control.**
+
+| Source | Check (C5) | Replay bound |
 |---|---|---|
-| `tenant_id` | **No** — comes from the integration record the credential belongs to | no cross-tenant injection |
-| `pipeline_id` | Only if it is in the integration's **allowlist**; else the integration's default; else reject | stops pointing the agent at an unrelated pipeline. `api.md` v0.1 says an unknown pipeline opens a room with proposals disabled; that stays the fallback for a *missing* id, an id outside the allowlist is rejected |
-| `severity` | Yes, clamped to `sev1..sev4`, invalid → `sev3`, and capped at the integration's `max_severity` | a low-trust source cannot page everyone as sev1 |
-| `title` | Yes, trimmed, control chars stripped, ≤120 runes | it is displayed everywhere |
-| everything else | Stored as `alert` on `room.created` (size-capped), **never** put in the model prompt | the F9 analysis found `agent.Alert.Raw` is not used by `firstUserMessage`; keep it that way and add a test |
+| Alertmanager | `Authorization: Bearer <token>` | none from the credential; `DedupKey` (group key) |
+| Grafana | hex HMAC-SHA256 of `<ts>:<body>` in `X-Grafana-Alerting-Signature`; `X-Grafana-Alerting-Timestamp` required | ±5 min (`DefaultMaxSkew`) |
+| PagerDuty V3 | `X-PagerDuty-Signature: v1=<hex>[,v1=<hex>]` over the body | no signed timestamp; `occurred_at` ≤ 1 h (`DefaultMaxEventAge`) → `ErrStale`; `DedupKey` |
+| Datadog | token in `X-Piperoom-Token` | `date` ≤ 1 h; `DedupKey` |
+| Generic | `X-Piperoom-Signature: t=<unix>,v1=<hex HMAC("<t>.<body>")>` | ±5 min |
 
-Treat all webhook text as untrusted data. If a later feature wants to show it to the model, it goes
-through the same `<untrusted>` wrapper as comments (A4).
+Rules the room service (A5) follows:
+1. **Route and auth.** `POST /api/alerts/{source}` (and `/api/alerts/webhook` as an alias of `generic`) is **outside** the `X-User`/session middleware and does not
+   read cookies. The path chooses the `alertin.Source`; an unknown source → `404`.
+2. **Raw bytes first.** Read the body with `http.MaxBytesReader(w, r.Body, alertin.MaxBodyBytes)`; pass those exact bytes to `Config.Ingest` (verify happens before
+   JSON decode inside alertin). Comparisons are constant time in alertin (`hmac.Equal`, `subtle.ConstantTimeCompare`); A5 must not add its own.
+3. **Errors → HTTP:** `ErrUnauthenticated`, `ErrStale` → `401` (same body for both); `ErrTooLarge` → `413`; `ErrIgnored` → `202`; anything else → `400`.
+   A source with no secret is disabled and answers `401`. Log source, outcome, body size and a request id. Never log the body, headers or any secret.
+4. **Secrets** come only from the environment or a file (§4). Not in the repo, `dev/`, logs, events or the UI.
+5. **Rotation with two live secrets.** `alertin.Config` holds one secret per source. A5 builds one `Config` per secret in the list and calls `Ingest` on each in order until one does
+   not return `ErrUnauthenticated`. Order: new secret first, old second. PagerDuty already accepts several `v1=` values in one header.
+   Procedure: add new in front → update the sender → watch the log for the old secret's use (log the list index that matched, never the value) → drop the old.
+6. **Dedupe and replay.** A5 keeps `alert_dedup(source, dedup_key, room_id)`. A firing alert whose `DedupKey` has an **open** room returns that room with `created:false`;
+   it does not open another. This also makes a replayed, validly signed request harmless while the room is open. A resolved alert (`Alert.Status != firing`) → `202`, no room change.
+   A replay of a valid body after the room closed, inside `MaxEventAge`, can open one new room (accepted; bounded by rule 7).
+7. **Caps.** Per source: 60 requests/min (after auth, so unauthenticated floods do not use a real source's quota) and 20 new rooms/hour; over either → `429 rate_limited`
+   with `Retry-After`. Failed auth: 30/min per remote address, at the proxy or in A5. Numbers are proposals (Open question 3).
+8. **Untrusted fields.** `Title` and `Severity` are already cleaned by alertin; A5 treats them as data and shows them as text. `PipelineID` is looked up with `owners.Pipeline(id)`;
+   an id that is not in `owners.yaml` is dropped and the room opens with a system message and proposals disabled (the existing `docs/api.md` behaviour). `Raw` is never put in
+   a prompt without the `<untrusted>` wrapper (A4 `firstUserMessage` ignores `agent.Alert.Raw` today; keep a test for it).
+9. **Actor.** The `room.created` event's actor is `{kind:"system", id:"webhook:<source>", name:"<source>"}`. Response: `{room_id, created}` only (no snapshot).
 
-## 3. Authentication
+Standard Webhooks (`webhook-id`, `webhook-timestamp`, `webhook-signature: v1,<base64>`) is **not** chosen: no listed sender uses it, and C5 does not implement it. It stays an
+option if the generic form is revised (Open question 4).
 
-Each sender is an **integration** row: `id, tenant_id, name, kind, allowed_pipelines, default_pipeline,
-max_severity, auth_mode, secret(s), enabled, created_at`. Created by an admin; not editable by the
-webhook itself. Two auth modes, chosen per integration:
+## 4. Contract changes
 
-### 3a. Signed (preferred) — HMAC-SHA256
-Headers:
+`docs/api.md` (this is the single `docs/api.md` proposal for the webhook; it replaces the `/api/alerts/webhook` row and adds error rows):
+```diff
+--- a/docs/api.md
++++ b/docs/api.md
+@@ -43,7 +43,9 @@
+ | 400 | `bad_request`, `validation` |
+ | 401 | `unauthenticated` |
+ | 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`) |
+-| 404 | `not_found` |
++| 404 | `not_found` (also an unknown alert `source`) |
++| 413 | `payload_too_large` |
++| 429 | `rate_limited` |
+ | 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff` |
+ 
+ `lease_held`: `control/grant` called by a non-driver while another user's lease is still live. All other
+@@ -100,7 +102,7 @@
+ | GET | `/api/me` | – | `{id,name,layers}` | |
+ | GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first |
+ | POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation` |
+-| POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. Webhook auth: see `docs/design/webhook-auth.md` (C9) |
++| POST | `/api/alerts/{source}` | the sender's own JSON | `{room_id,created}` | `source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`; `/api/alerts/webhook` is an alias of `generic`. **Not** under `X-User`: authenticated per source (`docs/design/webhook-auth.md`); a source with no secret → `401`. Only a firing alert opens a room; a repeat of an open incident returns that room with `created:false`; a resolved or ignored event → `202`. The raw body is stored in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none |
+ | GET | `/api/rooms/{id}` | – | `RoomSnapshot` | |
+ | GET | `/api/rooms/{id}/events?after=0&limit=500` | – | `{events:[Event], last_seq}` | limit max 1000; `events` is `[]` when nothing is after `after` |
+ | POST | `/api/rooms/{id}/comments` | `{step_id?, text}` | `Event` | `@agent` in text sets `mentions_agent` |
 ```
-X-Piperoom-Integration: int_01J...
-X-Piperoom-Timestamp:   1760180000            (unix seconds)
-X-Piperoom-Signature:   v1=<hex hmac-sha256>
+`internal/config/config.go` (secrets; current first; empty = source off):
+```diff
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -3,7 +3,10 @@
+ // CONTRACT FILE — owned by the reviewer. Do not edit; request changes in your PR.
+ package config
+ 
+-import "os"
++import (
++	"os"
++	"strings"
++)
+ 
+ // Config holds every setting. Defaults match dev/docker-compose.yml.
+ type Config struct {
+@@ -18,6 +21,10 @@
+ 	UsersFile         string // USERS_FILE
+ 	Model             string // PIPEROOM_MODEL
+ 	Effort            string // PIPEROOM_EFFORT
++	// WebhookSecrets holds the alert-webhook secrets per alertin source (alertmanager, grafana, pagerduty, datadog,
++	// generic), read from PIPEROOM_WEBHOOK_SECRETS_<SOURCE> (upper case). Each value is comma-separated, current
++	// secret first; "" = that source is off. A value "file:<path>" is read from that file by the server (one per line).
++	WebhookSecrets map[string]string
+ 	// The Anthropic SDK reads ANTHROPIC_API_KEY itself; it is never stored here.
+ }
+ 
+@@ -35,9 +42,21 @@
+ 		UsersFile:         get("USERS_FILE", "dev/users.yaml"),
+ 		Model:             get("PIPEROOM_MODEL", "claude-opus-5-5"),
+ 		Effort:            get("PIPEROOM_EFFORT", "high"),
++		WebhookSecrets:    webhookSecrets(),
+ 	}
+ }
+ 
++// webhookSecrets reads PIPEROOM_WEBHOOK_SECRETS_<SOURCE> for every alertin source. Only sources that are set appear.
++func webhookSecrets() map[string]string {
++	m := map[string]string{}
++	for _, src := range []string{"alertmanager", "grafana", "pagerduty", "datadog", "generic"} {
++		if v := get("PIPEROOM_WEBHOOK_SECRETS_"+strings.ToUpper(src), ""); v != "" {
++			m[src] = v
++		}
++	}
++	return m
++}
++
+ func get(key, def string) string {
+ 	if v, ok := os.LookupEnv(key); ok && v != "" {
+ 		return v
 ```
-`signature = HMAC_SHA256(secret, timestamp + "." + raw_body)`.
-Server steps, in this order, all failures return the same `401` with a generic body:
-1. Look up integration by header; unknown/disabled → 401.
-2. Reject if `|now - timestamp| > 5 min`.
-3. Recompute over the **raw bytes** (read once with `io.LimitReader`, before JSON parsing) and compare with
-   `hmac.Equal`. Never compare with `==`.
-4. Replay check (§5).
+`internal/events/events.go`: none. Setting names: `PIPEROOM_WEBHOOK_SECRETS_ALERTMANAGER`, `_GRAFANA`, `_PAGERDUTY`, `_DATADOG`, `_GENERIC`.
+Values contain no commas (generate with 32 random bytes, hex). `file:<path>` is resolved by A5, one secret per line.
+`PagerDutyServices` and `DefaultPipeline` (alertin config, not secrets) are read from `owners.yaml`; their shape is an Open question.
 
-Why this shape: the timestamp is inside the signed string so it cannot be swapped; the separator prevents
-ambiguity; a version prefix lets us move to a new scheme later.
+## 5. Migration from today's dev mode
 
-### 3b. Bearer token — for senders that cannot sign
-Some sources (Prometheus Alertmanager's webhook receiver is the common one) can send a static
-`Authorization: Bearer <token>` but not compute an HMAC. Allowed, with extra rules:
-- Token is 32 random bytes (base64url), shown **once** at creation; Postgres stores `sha256(token)`.
-- Lookup by hash, constant-time compare, TLS required.
-- Optional per-integration source-IP/CIDR allowlist (recommended; applied to the connection address,
-  or to the left-most-trusted `X-Forwarded-For` only if the proxy is configured as trusted — never a raw
-  client-sent header).
-- No replay protection from the token itself, so the dedupe/rate rules in §5–§6 matter more here.
+1. Today's callers use `X-User` on `/api/alerts/webhook` (a5 @ 935f17d). After the change that route needs a secret: `devctl` sets `PIPEROOM_WEBHOOK_SECRETS_GENERIC=<dev-secret>`
+   in its environment and `devctl alert` (A1) signs with `alertin.SignGeneric`.
+2. `/api/alerts/webhook` keeps working as the `generic` alias; its old `X-User` form is dropped (a deliberate breaking change, dev only).
+3. No secret set → every source off → `401`. The server logs once at start-up which sources are on.
+4. Existing rooms are untouched; add the `alert_dedup` table in a new migration.
 
-For vendors that ship their own signature scheme (PagerDuty v3 webhooks, GitHub-style `sha256=` headers),
-add a small **adapter** per `kind` that verifies the vendor's scheme and then maps to the common alert
-struct. Confirm each vendor's header names and algorithm against its current docs when writing the adapter
-— do not copy them from this file.
+## 6. Tasks per owner
 
-## 4. Secret handling
+- **A5 (1)** Build `[]alertin.Config` from `cfg.WebhookSecrets` (`file:` support, comma split, current first), plus `Owners`; fail start-up on an unreadable `file:`.
+- **A5 (2)** Route `/api/alerts/{source}` outside the user middleware; `MaxBytesReader`; map errors; uniform `401` body; response `{room_id, created}`.
+- **A5 (3)** `alert_dedup` migration and logic; per-source rate limit and hourly room cap; log which list index matched.
+- **A5 (4)** `owners.Pipeline(id)` check after `Ingest`; system actor `webhook:<source>`; tests: no/wrong secret, rotated secret both accepted, stale event, oversize body, replay → same room, resolved → 202.
+- **C5 (1)** Validate a `ViaLabel` pipeline id against `Config.Owners` when it is set (drop it if absent). Optional if A5 does it; decide once.
+- **C5 (2)** Export the matched-secret check or a `VerifyAny(secrets...)` if the lead prefers it to A5's loop (Open question 2).
+- **A1** `devctl alert --source generic|...` that signs and posts; dev secret in the compose/`devctl` environment.
+- **A6** none (the webhook has no UI). The room list shows the system actor as it shows any actor.
 
-- HMAC secrets must be recoverable, so they cannot be hashed. Store them encrypted (envelope
-  encryption with a key from the deployment's KMS/secret manager; for the pilot, an AES-GCM key from a
-  file path in config, never an env var literal).
-- Rotation: an integration may hold **two** active secrets; verification tries both; admin retires the
-  old one after the sender is updated. No downtime, no shared "rotate everything" flag day.
-- Never log a secret, token, signature, or the request body. Log `integration_id`, outcome, body size,
-  and a short request id.
-- Generated secrets are ≥ 32 random bytes. Reject user-chosen short secrets.
+## 7. Open questions
 
-## 5. Replay and duplicate protection
+1. `tasks/C5-alert-ingest.md` names `Incoming`, `DeliveryID`, `Verify(a Auth, ...)`, `DefaultAuth(source, secrets...)`; the branch implements `Config.Ingest` / `Alert`. This doc follows the branch. If C5 changes the API again, update §3 and §6 only.
+2. Rotation by looping over `[]Config` costs one HMAC per secret and gives A5 the matched index. Prefer that, or a `secrets ...string` API in alertin?
+3. Rate and cap numbers (60/min, 20 rooms/hour, 30 failed/min/address): confirm with the pilot's alert volume.
+4. Do we want Standard Webhooks for the generic form, so senders can use an existing library?
+5. Where do `PagerDutyServices` and `DefaultPipeline` live? Proposal: an additive `alerts:` block in `owners.yaml`; A1 owns that file.
+6. Should a resolved alert write an event (e.g. `alert.resolved`) so the room shows it? Not proposed here (`events.go` has no such type).
+7. A replayed PagerDuty body after the room closes can open one new room. A 15-minute re-open cooldown per `DedupKey` would close that; is it worth it?
 
-- **Replay window:** within the ±5 min window, remember `sha256(signature)` in a table/cache with 10 min
-  TTL; a repeat returns `200` with the original room (idempotent), not a second room.
-- **Alert dedupe (also solves noisy alert storms):** each adapter derives a `dedupe_key` (Alertmanager
-  `groupKey`, PagerDuty incident key, else `sha256(title + pipeline_id)`). Unique on
-  `(integration_id, dedupe_key)` while a room for it is open. A repeat appends an `agent`-free
-  system comment event ("alert fired again, N times") instead of opening a new room.
-- A re-fire after the room is **closed** opens a new room and links the previous room id in `alert`.
+## 8. References
 
-## 6. Abuse and cost limits
-
-| Limit | Default | On exceed |
-|---|---|---|
-| request body | 256 KB (`http.MaxBytesReader`) | `413` |
-| per-integration rate | 30 requests/min | `429` + `Retry-After` |
-| new rooms per integration | 6/hour | accept the alert as a comment on the newest open room; flag |
-| open auto-created rooms per tenant | 10 | stop starting agents; room opens but agent stays `idle` until a human takes control |
-| agent budget per auto room | cap on loop steps/tokens before a human confirms (A4 `Options`) | agent pauses with `waiting` status |
-| global unauthenticated-failure rate | 60/min per source address | `429`; no per-attempt work beyond the lookup |
-
-Rule of thumb: a flood must cost us a few DB rows, not Anthropic tokens. Agent start for webhook rooms is
-the expensive step, so it is the one that is rate-limited hardest. Auto-started agents run with the same
-read-only tools as manual rooms; a webhook can never trigger an action.
-
-## 7. Response behaviour
-
-- All auth failures: `401 {"error":{"code":"unauthenticated","message":"invalid credentials"}}` — no hint
-  whether the integration id, timestamp, or signature was wrong.
-- Success: `201` with a **minimal** body for webhook callers (`{room_id, status}`), not the full
-  `RoomSnapshot` the contract returns today (it includes members and proposals that an alert sender has no
-  business seeing). **Contract change request** for `docs/api.md`.
-- Room is created with actor `{kind:"system", id:"webhook:<integration_id>", name:<integration name>}`,
-  `driver = none` as the contract already says.
-- The route is mounted **outside** the human-auth middleware and **inside** its own middleware; it must
-  not honor a session cookie (otherwise a logged-in browser could be tricked into CSRF-ing it).
-
-## 8. Inbound Slack (if/when added)
-
-Same pattern, different verifier. Slack requests are signed with the app's signing secret over
-`v0:<timestamp>:<body>`; reject timestamps older than 5 min and compare constant-time. Map the Slack user
-to a Piperoom user through the authenticated identity link from `auth.md` — a Slack user id alone must
-never grant approval rights. Approvals from Slack are out of scope for v1: Slack can notify and link to the
-room, not approve in place. Check the current Slack signing docs when implementing.
-
-## 9. Tests (A5 unless noted)
-
-| Case | Expect |
-|---|---|
-| no credential / unknown integration | 401, identical body |
-| valid HMAC, body altered by 1 byte | 401 |
-| valid HMAC, timestamp 6 min old / 6 min in the future | 401 |
-| same signed request sent twice | second returns same room, no new room, no new agent |
-| bearer token, wrong token / hash mismatch | 401; timing test not required, `subtle.ConstantTimeCompare` used |
-| `pipeline_id` not in allowlist | rejected or defaulted per config, never accepted |
-| `severity: "sev0"`, 10 KB title, control chars | clamped / truncated / stripped |
-| body > 256 KB | 413, nothing stored |
-| 100 distinct alerts in a minute | rate-limited; rooms ≤ cap; agent starts ≤ cap |
-| alert body containing "ignore previous instructions" | stored in `alert`, absent from the model's first message (A4 test on `firstUserMessage`) |
-| request with a valid session cookie but no webhook credential | 401 |
-| secret rotation: old and new secret both accepted, then old retired | old → 401 |
-| log capture over all of the above | contains no secret, token, signature, or body |
-
-## 10. Rollout and decisions needed
-
-1. Leads: add the `docs/api.md` webhook section (headers, 201 minimal body, error shape) and an admin
-   path to create integrations. For the pilot a CLI (`cmd/server integration create`) is enough; no
-   admin UI.
-2. A5: `internal/httpapi/webhook.go`, `internal/store` tables `integrations`, `webhook_replays`.
-3. Decide: do we require HMAC for every production integration and allow bearer only with an IP
-   allowlist? (Proposed: yes.)
-4. Decide the default room/hour and per-tenant caps in §6 with the pilot customer's on-call volume in hand.
-5. Reconcile with C5's `internal/alertin` helpers (header names, signing string, tolerance, adapter interface). Where
-   they differ, the code that lands first wins and this doc is updated, not the other way round.
-6. `api.md` v0.1 says the raw body is stored verbatim in `room.created.alert`; this design caps it (256 KB, see §6) —
-   confirm the cap with the leads.
+Header names, signing strings and field names are taken from C5's README and code (read from its branch) and from the lead's task file. The vendor pages below could not be fetched
+from this sandbox (network blocked), so they are **not independently verified here**; the reviewer should check them.
+- Prometheus Alertmanager configuration (`webhook_config`, `http_config`): https://prometheus.io/docs/alerting/latest/configuration/
+- PagerDuty webhook signatures (V3): https://developer.pagerduty.com/docs/verifying-webhook-signatures
+- Grafana webhook contact point: https://grafana.com/docs/grafana/latest/alerting/configure-notifications/manage-contact-points/integrations/webhook-notifier/
+- Datadog webhooks integration: https://docs.datadoghq.com/integrations/webhooks/
+- Standard Webhooks: https://www.standardwebhooks.com/
+- OWASP Logging cheat sheet (what not to log): https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html
