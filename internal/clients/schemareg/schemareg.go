@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/kafka/netsec"
 )
 
 const mediaType = "application/vnd.schemaregistry.v1+json"
@@ -43,6 +44,17 @@ func New(baseURL string, httpClient *http.Client) *Client {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
 	return &Client{baseURL: strings.TrimRight(baseURL, "/"), hc: httpClient}
+}
+
+// NewSecure returns a Schema Registry client for a real cluster: TLS when baseURL is
+// https (custom CA and client certificate from sec.TLS) and HTTP basic auth
+// from sec.Username/sec.Password. It refuses basic auth over plain http.
+func NewSecure(baseURL string, sec netsec.HTTP) (*Client, error) {
+	hc, err := sec.Client(baseURL, netsec.DefaultHTTPTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("schemareg: %w", err)
+	}
+	return New(baseURL, hc), nil
 }
 
 // Subjects lists all registered subjects.

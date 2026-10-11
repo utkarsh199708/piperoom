@@ -19,15 +19,19 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/kafka/netsec"
 	"piperoom/internal/clients/schemareg"
 )
 
 // Client is a Kafka admin + small-reads client.
 type Client struct {
 	brokers []string
-	adm     *kadm.Client
-	cl      *kgo.Client
-	sr      *schemareg.Client
+	// connOpts (TLS, SASL) go to every kgo client this Client creates,
+	// including the short-lived consumers in FindRecord and TopicOffsets.
+	connOpts []kgo.Opt
+	adm      *kadm.Client
+	cl       *kgo.Client
+	sr       *schemareg.Client
 
 	srMu    sync.Mutex
 	srCache map[int]avro.Schema
@@ -36,12 +40,37 @@ type Client struct {
 var _ clients.KafkaAdmin = (*Client)(nil)
 
 // New connects to brokers (e.g. localhost:29092). sr is used to decode Avro keys.
-func New(brokers []string, sr *schemareg.Client) (*Client, error) {
-	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+// connOpts are connection options such as kgo.DialTLSConfig and kgo.SASL; most
+// callers want NewSecure instead.
+func New(brokers []string, sr *schemareg.Client, connOpts ...kgo.Opt) (*Client, error) {
+	c := &Client{brokers: brokers, connOpts: append([]kgo.Opt(nil), connOpts...), sr: sr, srCache: map[int]avro.Schema{}}
+	cl, err := c.newKgo()
 	if err != nil {
 		return nil, fmt.Errorf("kafka: new client: %w", err)
 	}
-	return &Client{brokers: brokers, adm: kadm.NewClient(cl), cl: cl, sr: sr, srCache: map[int]avro.Schema{}}, nil
+	c.cl, c.adm = cl, kadm.NewClient(cl)
+	return c, nil
+}
+
+// NewSecure connects to brokers of a real cluster with TLS and/or SASL
+// (PLAIN, SCRAM-SHA-256, SCRAM-SHA-512) from sec. The zero netsec.Kafka is
+// PLAINTEXT, the same as New.
+func NewSecure(brokers []string, sr *schemareg.Client, sec netsec.Kafka) (*Client, error) {
+	opts, err := sec.Opts()
+	if err != nil {
+		return nil, fmt.Errorf("kafka: %w", err)
+	}
+	return New(brokers, sr, opts...)
+}
+
+// newKgo builds a kgo client for this cluster with the connection options
+// plus extra (e.g. which partitions to consume).
+func (c *Client) newKgo(extra ...kgo.Opt) (*kgo.Client, error) {
+	opts := make([]kgo.Opt, 0, 1+len(c.connOpts)+len(extra))
+	opts = append(opts, kgo.SeedBrokers(c.brokers...))
+	opts = append(opts, c.connOpts...)
+	opts = append(opts, extra...)
+	return kgo.NewClient(opts...)
 }
 
 // Close releases the underlying client.
@@ -204,10 +233,7 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 		return nil, nil
 	}
 
-	cl, err := kgo.NewClient(
-		kgo.SeedBrokers(c.brokers...),
-		kgo.ConsumePartitions(partOffsets),
-	)
+	cl, err := c.newKgo(kgo.ConsumePartitions(partOffsets))
 	if err != nil {
 		return nil, fmt.Errorf("kafka: scan client: %w", err)
 	}
@@ -278,7 +304,7 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 	for p, off := range at {
 		partOffsets[topic][p] = kgo.NewOffset().At(off)
 	}
-	cl, err := kgo.NewClient(kgo.SeedBrokers(c.brokers...), kgo.ConsumePartitions(partOffsets))
+	cl, err := c.newKgo(kgo.ConsumePartitions(partOffsets))
 	if err != nil {
 		return nil, err
 	}
