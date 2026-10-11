@@ -46,7 +46,7 @@ Each agent owns folders. **Never edit a file you do not own.**
 |---|---|---|
 | A1 (first version by Claude, branch `a1/devstack`; Qoder owns follow-ups) | `tasks/A1-devstack.md` | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**` |
 | A2 | `tasks/A2-kafka-tools.md` | `internal/clients/connect/**`, `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/tools/kafkatools/**`, `internal/actions/**` (not `action.go`) |
-| A3 | `tasks/A3-db-tools-topology.md` | `internal/clients/postgres/**`, `internal/clients/warehouse/**`, `internal/tools/dbtools/**`, `internal/topology/**` (not `graph.go`), `internal/owners/**` |
+| A3 | `tasks/A3-db-tools-topology.md` | `internal/clients/postgres/**`, `internal/clients/warehouse/**`, `internal/tools/dbtools/**`, `internal/topology/**` (not `graph.go`), `internal/owners/**`, `internal/clients/pgconv/**` |
 | A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`), `cmd/investigate/**` |
 | A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**` |
 | A6 | `tasks/A6-web.md` | `web/**` |
