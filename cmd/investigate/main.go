@@ -17,6 +17,7 @@ import (
 	"piperoom/internal/agent/fake"
 	"piperoom/internal/config"
 	"piperoom/internal/tools"
+	"piperoom/internal/wiring"
 )
 
 func main() {
@@ -39,6 +40,9 @@ func main() {
 func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns int) error {
 	cfg := config.Load()
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	reg := tools.NewRegistry()
 	areg := actions.NewRegistry()
 	if fakeTools {
@@ -46,11 +50,14 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 			return fmt.Errorf("investigate: register fake tools: %w", err)
 		}
 	} else {
-		cleanup, err := wireRealTools(cfg, reg, areg)
+		w, err := wiring.Open(ctx, cfg)
 		if err != nil {
 			return err
 		}
-		defer cleanup()
+		defer w.Close()
+		if err := wiring.RegisterTools(reg, areg, w); err != nil {
+			return err
+		}
 	}
 
 	opts := agent.Options{Model: model, Effort: effort, MaxTurns: maxTurns}
@@ -60,9 +67,6 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 	if opts.Effort == "" {
 		opts.Effort = cfg.Effort
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	inbox := newStdinInbox()
 	sink := newTerminalSink(os.Stdout)

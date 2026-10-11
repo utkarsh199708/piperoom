@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -138,5 +139,26 @@ func TestProposeFixUnknownAction(t *testing.T) {
 	_, err := tool.Run(context.Background(), raw)
 	if !errors.Is(err, tools.ErrBadInput) {
 		t.Fatalf("expected ErrBadInput, got %v", err)
+	}
+}
+
+// TestRoomToolNamesMatchRoomTools keeps the static roomToolNames list — what
+// RoomToolNames() serves without constructing any tool — in sync with the
+// tools newRoomTools really builds. Add, rename or drop a room tool without
+// touching the list and this fails.
+func TestRoomToolNamesMatchRoomTools(t *testing.T) {
+	built := newRoomTools(Deps{})
+	names := make([]string, 0, len(built))
+	for _, tl := range built {
+		names = append(names, tl.Name())
+	}
+	if got := RoomToolNames(); !slices.Equal(got, names) {
+		t.Fatalf("RoomToolNames() = %v, but newRoomTools builds %v", got, names)
+	}
+	// The returned slice must be a copy: callers cannot corrupt the list.
+	got := RoomToolNames()
+	got[0] = "mutated"
+	if RoomToolNames()[0] != names[0] {
+		t.Fatal("RoomToolNames() must return a copy of the static list")
 	}
 }

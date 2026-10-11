@@ -10,11 +10,13 @@ import (
 	"time"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/agent"
 	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
+	"piperoom/internal/wiring"
 )
 
 // fakeClients implements every client interface the wiring touches, replaying
@@ -117,7 +119,7 @@ func testOwners() *owners.Owners {
 		Layers: map[string]string{
 			"postgres":        "priya",
 			"kafka-connect":   "arjun",
-			"schema-registry": "arjun",
+			"schema-registry": "priya",
 			"kafka":           "arjun",
 			"consumer":        "kabir",
 			"warehouse":       "meera",
@@ -130,9 +132,16 @@ func wireFakes(t *testing.T) (*tools.Registry, *actions.Registry, *fakeClients) 
 	f := newFakeClients()
 	reg := tools.NewRegistry()
 	areg := actions.NewRegistry()
-	a2 := &a2Clients{connect: f, kafka: f, registry: f}
-	if err := registerTools(reg, areg, f, f, testOwners(), a2); err != nil {
-		t.Fatalf("registerTools: %v", err)
+	w := &wiring.Wired{
+		Source:    f,
+		Warehouse: f,
+		Connect:   f,
+		Kafka:     f,
+		Registry:  f,
+		Owners:    testOwners(),
+	}
+	if err := wiring.RegisterTools(reg, areg, w); err != nil {
+		t.Fatalf("wiring.RegisterTools: %v", err)
 	}
 	return reg, areg, f
 }
@@ -248,13 +257,29 @@ func TestPgRowScopedToPipeline(t *testing.T) {
 	}
 }
 
-func TestSplitBrokers(t *testing.T) {
-	got := splitBrokers(" localhost:29092 , broker2:9092 , ")
-	want := []string{"localhost:29092", "broker2:9092"}
-	if !slices.Equal(got, want) {
-		t.Errorf("splitBrokers = %v, want %v", got, want)
+// TestSystemPromptNamesOnlyRealTools covers C13 P11: every tool name the
+// agent's system prompt mentions must be a tool the model can really call with
+// this wiring — a read tool registered here, or one of the agent's room tools.
+// A prompt edit that names a nonexistent tool fails this test.
+func TestSystemPromptNamesOnlyRealTools(t *testing.T) {
+	reg, _, _ := wireFakes(t)
+
+	available := map[string]bool{}
+	for _, tl := range reg.All() {
+		available[tl.Name()] = true
 	}
-	if n := splitBrokers("  , , "); len(n) != 0 {
-		t.Errorf("splitBrokers(blanks) = %v, want empty", n)
+	// The agent builds these on top of the registry it is given.
+	for _, name := range agent.RoomToolNames() {
+		available[name] = true
+	}
+
+	names := agent.PromptToolNames()
+	if len(names) == 0 {
+		t.Fatal("no tool names found in the system prompt; the extraction may be broken")
+	}
+	for _, name := range names {
+		if !available[name] {
+			t.Errorf("system prompt tells the model to call %q, which is not a real tool", name)
+		}
 	}
 }

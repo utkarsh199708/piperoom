@@ -470,7 +470,7 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 			case <-ctx.Done():
 				results[i] = toolResult{
 					toolUseID: u.id,
-					content:   wrapToolOutput(u.name, "error: "+ctx.Err().Error()),
+					content:   wrapToolOutput(u.name, "", "error: "+ctx.Err().Error()),
 					isError:   true,
 				}
 				return
@@ -546,7 +546,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		})
 		return toolResult{
 			toolUseID: u.id,
-			content:   wrapToolOutput(u.name, msg),
+			content:   wrapToolOutput(u.name, stepID, msg),
 			isError:   true,
 		}
 	}
@@ -566,7 +566,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	})
 	return toolResult{
 		toolUseID: u.id,
-		content:   wrapToolOutput(u.name, summary),
+		content:   wrapToolOutput(u.name, stepID, summary),
 		isError:   false,
 	}
 }
@@ -596,7 +596,7 @@ func (r *runner) failReadTool(ctx context.Context, u toolUse, title, msg string)
 	})
 	return toolResult{
 		toolUseID: u.id,
-		content:   wrapToolOutput(u.name, "error: "+msg),
+		content:   wrapToolOutput(u.name, stepID, "error: "+msg),
 		isError:   true,
 	}
 }
@@ -609,14 +609,14 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 	if !ok {
 		return toolResult{
 			toolUseID: u.id,
-			content:   wrapToolOutput(u.name, "error: unknown tool"),
+			content:   wrapToolOutput(u.name, "", "error: unknown tool"),
 			isError:   true,
 		}
 	}
 	if err := validateInput(entry.schema, u.input); err != nil {
 		return toolResult{
 			toolUseID: u.id,
-			content:   wrapToolOutput(u.name, "error: invalid input: "+err.Error()),
+			content:   wrapToolOutput(u.name, "", "error: invalid input: "+err.Error()),
 			isError:   true,
 		}
 	}
@@ -626,21 +626,27 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 	if err != nil {
 		return toolResult{
 			toolUseID: u.id,
-			content:   wrapToolOutput(u.name, "error: "+err.Error()),
+			content:   wrapToolOutput(u.name, "", "error: "+err.Error()),
 			isError:   true,
 		}
 	}
 	return toolResult{
 		toolUseID: u.id,
-		content:   wrapToolOutput(u.name, res.Summary),
+		content:   wrapToolOutput(u.name, "", res.Summary),
 		isError:   false,
 	}
 }
 
 // wrapToolOutput marks tool output as untrusted data. The system prompt tells
 // the model to treat anything inside this wrapper as data, never instructions.
-// The text is escaped so a value containing </tool_output> cannot break out of
-// the wrapper.
-func wrapToolOutput(tool, text string) string {
-	return fmt.Sprintf("<tool_output tool=%q untrusted=\"true\">%s</tool_output>", tool, escapeToolText(text))
+// stepID is the room step the tool ran under (empty for room tools, which open
+// no step); the model cites it when it states evidence, so it must be visible
+// here. The text is escaped so a value containing </tool_output> cannot break
+// out of the wrapper.
+func wrapToolOutput(tool, stepID, text string) string {
+	attrs := fmt.Sprintf("tool=%q", tool)
+	if stepID != "" {
+		attrs += fmt.Sprintf(" step=%q", stepID)
+	}
+	return fmt.Sprintf("<tool_output %s untrusted=\"true\">%s</tool_output>", attrs, escapeToolText(text))
 }

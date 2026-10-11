@@ -61,6 +61,58 @@ func (f *fakeRegistry) SetCompatibility(_ context.Context, _ string, level strin
 }
 func (f *fakeRegistry) Register(context.Context, string, string) (int, error) { return f.regID, nil }
 
+// TestInScopeSubject pins the exact-match rule: a subject is in scope only
+// when it is "<TopicPrefix>.<source_table>-key" or "-value" for one of the
+// pipeline's tables. "billing.public.orders-value" was wrongly accepted by
+// the old suffix match.
+func TestInScopeSubject(t *testing.T) {
+	p := testPipeline()
+	tests := []struct {
+		name    string
+		subject string
+		wantErr bool
+	}{
+		{name: "value subject", subject: "pg.public.orders-value"},
+		{name: "key subject", subject: "pg.public.orders-key"},
+		{name: "foreign prefix refused", subject: "billing.public.orders-value", wantErr: true},
+		{name: "missing prefix refused", subject: "public.orders-value", wantErr: true},
+		{name: "wrong table refused", subject: "pg.public.other-value", wantErr: true},
+		{name: "no key or value suffix refused", subject: "pg.public.orders", wantErr: true},
+		{name: "empty subject refused", subject: "", wantErr: true},
+		{name: "prefix must match exactly refused", subject: "xpg.public.orders-value", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := inScopeSubject(p, tc.subject)
+			if tc.wantErr && err == nil {
+				t.Fatalf("inScopeSubject(%q): want error, got nil", tc.subject)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("inScopeSubject(%q): want nil, got %v", tc.subject, err)
+			}
+		})
+	}
+}
+
+// TestCheckScopeBadParamsWrapsJSONError checks that CheckScope wraps the
+// decoding error so callers can unwrap it with errors.As.
+func TestCheckScopeBadParamsWrapsJSONError(t *testing.T) {
+	reg := NewRegistry()
+	if err := Register(reg, testDeps()); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := reg.Get("schema_set_compatibility")
+	scoped, ok := a.(Scoped)
+	if !ok {
+		t.Fatal("schema_set_compatibility does not implement Scoped")
+	}
+	err := scoped.CheckScope(testPipeline(), json.RawMessage(`{`))
+	var syntaxErr *json.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Fatalf("want wrapped *json.SyntaxError, got %v", err)
+	}
+}
+
 func TestValidateUnknownConnector(t *testing.T) {
 	reg := NewRegistry()
 	if err := Register(reg, testDeps()); err != nil {

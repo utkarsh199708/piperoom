@@ -13,8 +13,8 @@ export function TracePanel({
   actions: RoomActions
   onClose: () => void
 }) {
-  const [table, setTable] = useState('orders')
-  const [key, setKey] = useState('id=10042')
+  const [table, setTable] = useState('public.orders')
+  const [key, setKey] = useState('10042')
   const [busy, setBusy] = useState(false)
 
   const submit = (e: FormEvent) => {

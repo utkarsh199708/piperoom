@@ -5,7 +5,8 @@
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
 //
-// Scenarios: schema-change, connector-down, consumer-stuck, long-transaction.
+// Scenarios: schema-change, connector-down, consumer-stuck, long-transaction,
+// slot-inactive, consumer-lag.
 // See dev/scenarios.md for what each one does and what it looks like.
 package main
 

@@ -38,11 +38,11 @@ One team, clear roles:
 | **Claude Lead 2 — Code review** | `[LEAD-REVIEW]` | line-by-line code review, runs build/vet/unit/integration tests, security and error paths (§7) | merge, write feature code |
 | **Qoder agents** | `[A1]`…`[A6]` | **write all the code**, raise PRs, fix review comments | merge, touch `main`, edit contract files |
 | **Claude cloud agents** (Sonnet 5, cloud routines on GitHub) | `[C1]`…`[C4]` | follow-up tasks that need no local stack; open GitHub PRs | merge, push to `main`, edit contract files |
-| **Claude Lead 3 — Cloud lead** | `[LEAD-CLOUD]` | leads C1–C4: watches their cloud runs, relays their status to Slack, code-reviews their GitHub PRs (instead of Lead 2), starts round-N fix runs | merge, write feature code |
+| **Claude Lead 3 — Cloud lead** | `[LEAD-CLOUD]` | leads the cloud agents (C1…): watches their cloud sessions, relays their status to Slack, code-reviews their GitHub PRs (instead of Lead 2), starts round-N fix runs | merge, write feature code |
 
 A PR is merged only when **both** leads approve: `[LEAD-REVIEW] APPROVED` (code) and
 `[LEAD-ARCH] APPROVED` (architecture + completeness). Then Lead 1 merges.
-For C1–C4 PRs the code approval comes from `[LEAD-CLOUD]` instead of `[LEAD-REVIEW]`.
+For cloud-agent (C*) PRs the code approval comes from `[LEAD-CLOUD]` instead of `[LEAD-REVIEW]`.
 Each agent owns folders. **Never edit a file you do not own.**
 
 | Agent | Task file | Owns |
@@ -50,13 +50,26 @@ Each agent owns folders. **Never edit a file you do not own.**
 | A1 (first version by Claude, branch `a1/devstack`; Qoder owns follow-ups) | `tasks/A1-devstack.md` | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**` |
 | A2 | `tasks/A2-kafka-tools.md` | `internal/clients/connect/**`, `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/tools/kafkatools/**`, `internal/actions/**` (not `action.go`) |
 | A3 | `tasks/A3-db-tools-topology.md` | `internal/clients/postgres/**`, `internal/clients/warehouse/**`, `internal/tools/dbtools/**`, `internal/topology/**` (not `graph.go`), `internal/owners/**`, `internal/clients/pgconv/**` |
-| A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`), `cmd/investigate/**` |
+| A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`), `cmd/investigate/**`, `internal/wiring/**` (shared client/tool wiring) |
 | A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**` |
 | A6 | `tasks/A6-web.md` | `web/**` |
 | C1 (cloud) | `tasks/C1-ci-repo.md` | `.github/**`, `README.md`, `docs/runbook.md`, `Makefile` |
 | C2 (cloud) | `tasks/C2-agent-memory.md` | done — merged `9519d23`; `internal/agent/**` belongs to A4 again |
 | C3 (cloud) | `tasks/C3-snowflake.md` | `internal/clients/snowflake/**` |
 | C4 (cloud) | `tasks/C4-security.md` | `docs/security/**` (no code changes) |
+| C5 (cloud) | `tasks/C5-alert-ingest.md` | `internal/alertin/**` |
+| C6 (cloud) | `tasks/C6-agent-evals.md` | `evals/**` except `evals/scenarios/*.yaml` (other than `schema-change.yaml`) and `evals/scenarios/README.md` |
+| C7 (cloud) | `tasks/C7-incident-scenarios.md` | `evals/scenarios/*.yaml` (not `schema-change.yaml`), `evals/scenarios/README.md` |
+| C8 (cloud) | `tasks/C8-secure-clients.md` | done — merged `7c7bdac`; client folders back to A2, `internal/clients/netsec/**` to A2 |
+| C9 (cloud) | `tasks/C9-security-design.md` | `docs/design/**` (no code changes) |
+| C10 (cloud) | `tasks/C10-pipeline-discovery.md` | `cmd/discover/**`, `internal/discover/**` |
+| C11 (cloud) | `tasks/C11-runbook-tool.md` | `internal/tools/runbooks/**` |
+| C12 (cloud) | `tasks/C12-slack-bridge.md` | `internal/slackbridge/**` |
+| C13 (cloud) | `tasks/C13-prompt-audit.md` | `docs/audits/**` — delivered as PR #12 |
+| C14 (cloud) | `tasks/C14-pilot-onboarding.md` | `docs/pilot/**` (no code changes) |
+
+Cloud sessions started from claude.ai/code are bound to their own `claude/...` branch; that is accepted. Their PR
+title starts with `[C<N>]`.
 | Claude leads | — | `AGENTS.md`, `tasks/**`, `docs/**`, `reviews/**`, and every **contract file** below |
 
 ### Contract files (read them, code against them, never edit them)
