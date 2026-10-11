@@ -56,7 +56,9 @@ func firstUserMessage(alert Alert) string {
 	var b strings.Builder
 	b.WriteString("Investigate this pipeline incident.\n\n")
 	b.WriteString("Alert: ")
-	b.WriteString(alert.Title)
+	// The title comes from an external alert webhook, so it is data, never
+	// instructions.
+	b.WriteString(wrapUntrusted(alert.Title))
 	b.WriteString("\n")
 	if alert.PipelineID != "" {
 		b.WriteString("Pipeline: ")
@@ -167,7 +169,8 @@ func renderRoomEvent(e events.Event) string {
 		if err != nil {
 			return ""
 		}
-		return "room created: " + p.Title
+		// The title is the same external alert title as in firstUserMessage.
+		return "room created: " + wrapUntrusted(p.Title)
 	case events.AgentStepStart:
 		p, err := events.Decode[events.AgentStepStartPayload](e)
 		if err != nil {
