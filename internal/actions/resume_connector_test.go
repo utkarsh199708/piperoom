@@ -3,6 +3,7 @@ package actions
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -133,5 +134,56 @@ func TestResumeConnectorUnsupportedClient(t *testing.T) {
 	_, err := a.Execute(context.Background(), json.RawMessage(`{"connector":"pg-orders-connector"}`))
 	if err == nil || !strings.Contains(err.Error(), "does not support Resume") {
 		t.Fatalf("want unsupported-client error, got %v", err)
+	}
+}
+
+func TestResumeConnectorValidateKnownConnector(t *testing.T) {
+	d := resumeTestDeps(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/connectors" {
+			w.Write([]byte(`["pg-orders-connector"]`))
+			return
+		}
+		http.NotFound(w, r)
+	})
+	reg := resumeRegistry(t, d)
+	a, _ := reg.Get("connect_resume_connector")
+	if err := a.Validate(json.RawMessage(`{"connector":"pg-orders-connector"}`)); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestResumeConnectorExecuteNotFound(t *testing.T) {
+	d := resumeTestDeps(t, func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	reg := resumeRegistry(t, d)
+	a, _ := reg.Get("connect_resume_connector")
+	_, err := a.Execute(context.Background(), json.RawMessage(`{"connector":"pg-orders-connector"}`))
+	if !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+func TestResumeConnectorExecuteConflict(t *testing.T) {
+	d := resumeTestDeps(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		w.Write([]byte("rebalance in progress"))
+	})
+	reg := resumeRegistry(t, d)
+	a, _ := reg.Get("connect_resume_connector")
+	_, err := a.Execute(context.Background(), json.RawMessage(`{"connector":"pg-orders-connector"}`))
+	if err == nil || !strings.Contains(err.Error(), "status 409") {
+		t.Fatalf("want status 409 error, got %v", err)
+	}
+}
+
+func TestResumeConnectorDescribe(t *testing.T) {
+	reg := resumeRegistry(t, testDeps())
+	a, ok := reg.Get("connect_resume_connector")
+	if !ok {
+		t.Fatal("connect_resume_connector not registered")
+	}
+	if a.Layer() != "kafka-connect" || a.Describe() == "" {
+		t.Fatalf("layer %q, describe %q", a.Layer(), a.Describe())
 	}
 }
