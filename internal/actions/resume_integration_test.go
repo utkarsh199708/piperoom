@@ -5,6 +5,7 @@ package actions
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -69,6 +70,29 @@ func TestResumeConnectorIntegration(t *testing.T) {
 	c := connect.New(cfg.ConnectURL, &http.Client{Timeout: 10 * time.Second})
 
 	stopConnector(t, cfg.ConnectURL)
+	// The shared pg-orders-connector is used instead of an it_ connector: a
+	// Debezium replication slot per test would be too heavy. If the test fails
+	// before the action resumes it, this cleanup resumes it so the next run
+	// starts from a RUNNING connector. Resume is idempotent, so a second resume
+	// after success is harmless.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, cfg.ConnectURL+"/connectors/"+resumeConnectorName+"/resume", nil)
+		if err != nil {
+			t.Logf("cleanup resume %s: %v", resumeConnectorName, err)
+			return
+		}
+		hc := &http.Client{Timeout: 10 * time.Second}
+		resp, err := hc.Do(req)
+		if err != nil {
+			t.Logf("cleanup resume %s: %v", resumeConnectorName, err)
+			return
+		}
+		defer resp.Body.Close()
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		t.Logf("cleanup resume %s: status %d", resumeConnectorName, resp.StatusCode)
+	})
 
 	testenv.WaitFor(t, 60*time.Second, func() (bool, error) {
 		st, err := c.Status(context.Background(), resumeConnectorName)
@@ -77,11 +101,12 @@ func TestResumeConnectorIntegration(t *testing.T) {
 		}
 		return st.State == "STOPPED", nil
 	})
-	beforeActive := slotActive(t, cfg.SourceDBURL)
-	t.Logf("before resume: connector STOPPED, slot %s active=%v", resumeSlotName, beforeActive)
-	if beforeActive {
-		t.Fatal("slot still active after stop; expected it to go inactive")
-	}
+	// The slot goes inactive asynchronously after the stop, so poll for it
+	// rather than reading it once.
+	testenv.WaitFor(t, 60*time.Second, func() (bool, error) {
+		return !slotActive(t, cfg.SourceDBURL), nil
+	})
+	t.Logf("before resume: connector STOPPED, slot %s inactive", resumeSlotName)
 
 	reg := NewRegistry()
 	if err := Register(reg, Deps{Connect: c, Registry: nil}); err != nil {
