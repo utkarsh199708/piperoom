@@ -50,20 +50,29 @@ var strictReadTools = []string{
 // order is stable so the tool list is byte-identical across requests and the
 // prompt cache stays warm.
 func buildToolList(reg *tools.Registry, room []tools.Tool) toolList {
+	return buildToolListWithCap(reg, room, maxStrictTools)
+}
+
+// buildToolListWithCap is buildToolList with the strict cap as a parameter, so
+// the live claude-tagged test can vary only the cap while reusing the exact
+// strict-set selection and schema shaping production sends. cap < len(room)
+// leaves the last room tools non-strict; cap > len(room) hands the leftover
+// slots to read tools via strictReadSet exactly as buildToolList does.
+func buildToolListWithCap(reg *tools.Registry, room []tools.Tool, cap int) toolList {
 	tl := toolList{byName: map[string]toolEntry{}}
 	var reads []tools.Tool
 	if reg != nil {
 		reads = reg.All()
 	}
 	// Room tools claim strict slots first; read tools get what is left.
-	strictReads := strictReadSet(reads, max(maxStrictTools-len(room), 0))
+	strictReads := strictReadSet(reads, max(cap-len(room), 0))
 	for _, t := range reads {
 		tl.byName[t.Name()] = toolEntry{tool: t, schema: t.InputSchema(), wrapWhy: true}
 		tl.params = append(tl.params, toolParam(t, true, strictReads[t.Name()]))
 	}
 	for i, t := range room {
 		tl.byName[t.Name()] = toolEntry{tool: t, schema: t.InputSchema(), isRoom: true}
-		tl.params = append(tl.params, toolParam(t, false, i < maxStrictTools))
+		tl.params = append(tl.params, toolParam(t, false, i < cap))
 	}
 	// Put a cache breakpoint after the tool list (the last tool).
 	if n := len(tl.params); n > 0 {
