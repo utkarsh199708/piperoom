@@ -56,6 +56,14 @@ func run() error {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
 
+	// The agent cap is cost control: parse it first so a bad value stops the
+	// server before it connects to anything.
+	maxAgents, err := parseMaxAgents(cfg.MaxAgents)
+	if err != nil {
+		return err
+	}
+	log.Info("server: agent cap", "max_agents", maxAgents)
+
 	// Refuse a reachable-from-outside listen address before anything else
 	// starts: the only auth is the X-User stub (security F1).
 	remote, err := checkListenAddr(cfg.HTTPAddr, *allowRemote)
@@ -177,6 +185,7 @@ func run() error {
 			MaxTurns: 40,
 		},
 		Logger:       log,
+		MaxAgents:    maxAgents,
 		OnRoomOpened: slack.onRoomOpened(),
 	})
 

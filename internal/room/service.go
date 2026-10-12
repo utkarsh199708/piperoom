@@ -50,6 +50,10 @@ type Deps struct {
 	Logger       *slog.Logger
 	Now          func() time.Time
 
+	// MaxAgents caps agent runs working at the same time across all rooms; a
+	// room over the cap waits in a FIFO queue. 0 or less means DefaultMaxAgents.
+	MaxAgents int
+
 	// OnRoomOpened, when set, is called once per room opened by CreateRoom or
 	// CreateRoomFromAlert, after room.created is appended. Each call runs in
 	// its own goroutine with the service lifetime ctx, so calls may overlap;
@@ -82,6 +86,7 @@ type Service struct {
 	log          *slog.Logger
 	now          func() time.Time
 	onRoomOpened func(ctx context.Context, roomID string)
+	slots        *agentSlots // global cap on concurrent agent runs
 
 	// ctx is the service lifetime: every goroutine the service starts (agent
 	// supervisors, executor queues) derives from it. Close cancels it and
@@ -146,6 +151,7 @@ func New(d Deps) *Service {
 		log:          log,
 		now:          now,
 		onRoomOpened: d.OnRoomOpened,
+		slots:        newAgentSlots(d.MaxAgents),
 		ctx:          ctx,
 		cancel:       cancel,
 		rooms:        map[string]*roomState{},
@@ -545,6 +551,13 @@ func newInbox() *inbox {
 	return &inbox{wake: make(chan struct{}, 1)}
 }
 
+// hasPending reports whether input is waiting to be drained.
+func (in *inbox) hasPending() bool {
+	in.mu.Lock()
+	defer in.mu.Unlock()
+	return len(in.items) > 0
+}
+
 func (in *inbox) push(inp agent.HumanInput) {
 	in.mu.Lock()
 	in.items = append(in.items, inp)
@@ -644,10 +657,30 @@ func (s *Service) feedInbox(st *roomState, e events.Event) {
 type roomSink struct {
 	s      *Service
 	roomID string
+	gate   *agentGate
 }
 
 func (r roomSink) Emit(ctx context.Context, typ events.Type, payload any) error {
-	return r.s.agentEmit(ctx, r.roomID, typ, payload)
+	err := r.s.agentEmit(ctx, r.roomID, typ, payload)
+	// An agent that reports idle, done or waiting_approval is parked on a
+	// human and costs no model calls: give its slot to a queued room. It takes
+	// a slot again in gatedInbox.Drain before the next input reaches it.
+	if err == nil && typ == events.AgentStatus && r.gate != nil {
+		if p, ok := payload.(events.AgentStatusPayload); ok && parkedState(p.State) {
+			r.gate.release()
+		}
+	}
+	return err
+}
+
+// parkedState reports whether an agent.status state means the agent is waiting
+// for a human rather than working.
+func parkedState(state string) bool {
+	switch state {
+	case "idle", "done", "waiting_approval":
+		return true
+	}
+	return false
 }
 
 // proposalCreator implements agent.Proposals.
@@ -668,8 +701,11 @@ const (
 	agentRetryBackoff = 1 * time.Second // doubled after every failed attempt
 )
 
-// startAgentLocked starts agent.Run for an open room. Caller holds s.mu. It
-// does nothing after Close, so a shutting-down service never adds goroutines.
+// startAgentLocked starts the supervisor for an open room's agent. Caller holds
+// s.mu. It does nothing after Close, so a shutting-down service never adds
+// goroutines. The supervisor first waits for a global agent slot (agentSlots).
+// The room counts as having a run from this call on, so more steers or
+// mentions while it is queued do not queue it again.
 func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.RawMessage, st *roomState) {
 	if s.closed {
 		return
@@ -678,28 +714,41 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	st.agentCancel = cancel
 	st.agentRun++
 	run := st.agentRun
+	gate := &agentGate{s: s, st: st, roomID: roomID}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
+		// However the supervisor ends, its slot or queue entry goes back.
+		defer gate.release()
 		alert := agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw}
-		if s.topo != nil {
-			tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
-			if g, err := s.topo.Build(tctx, pipelineID); err == nil {
-				alert.PipelineMap = s.topo.Render(g)
-			}
-			tcancel()
-		}
 		deps := agent.Deps{
 			Tools:     s.tools,
 			Actions:   s.actions,
-			Inbox:     st.inbox,
-			Sink:      roomSink{s: s, roomID: roomID},
+			Inbox:     gatedInbox{in: st.inbox, g: gate},
+			Sink:      roomSink{s: s, roomID: roomID, gate: gate},
 			Proposals: proposalCreator{s: s, roomID: roomID},
 			Logger:    s.log,
 		}
 		backoff := agentRetryBackoff
+		mapped := false
 		for attempt := 1; ; attempt++ {
-			err := s.run(ctx, alert, deps, s.opts)
+			if err := gate.acquire(ctx); err != nil {
+				return // room closed or service stopped while queued
+			}
+			if !mapped {
+				// Built once the slot is granted, so a queued room does not
+				// run on a topology that went stale while it waited.
+				mapped = true
+				if s.topo != nil {
+					tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
+					if g, err := s.topo.Build(tctx, pipelineID); err == nil {
+						alert.PipelineMap = s.topo.Render(g)
+					}
+					tcancel()
+				}
+			}
+			err := s.runGuarded(ctx, roomID, alert, deps)
+			gate.release()
 			if err == nil || ctx.Err() != nil {
 				return
 			}
@@ -720,6 +769,18 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			backoff *= 2
 		}
 	}()
+}
+
+// runGuarded calls the agent runner and turns a panic into an error, so a bug
+// in one room's run neither takes the server down nor leaves its slot held.
+func (s *Service) runGuarded(ctx context.Context, roomID string, alert agent.Alert, deps agent.Deps) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("room: agent run panicked", "room", roomID, "panic", r)
+			err = fmt.Errorf("room: agent run panicked: %v", r)
+		}
+	}()
+	return s.run(ctx, alert, deps, s.opts)
 }
 
 // releaseAgent frees the room's agent slot when its supervisor gives up, so the
