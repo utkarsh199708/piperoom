@@ -59,17 +59,72 @@ func LiveTools() ([]tools.Tool, error) {
 }
 
 // LiveActions returns the production write actions, backed by replay clients
-// that know only res. The agent can propose them (their real Validate runs
-// against res) but nothing can execute: every write returns an error.
-func LiveActions(res Resources) (*actions.Registry, error) {
+// that know only res and the connector states in recs. The agent can propose
+// them (their real Validate runs against that) but nothing can execute: every
+// write returns an error.
+func LiveActions(res Resources, recs []Recording) (*actions.Registry, error) {
+	statuses, err := connectStatuses(recs)
+	if err != nil {
+		return nil, err
+	}
 	reg := actions.NewRegistry()
 	if err := actions.Register(reg, actions.Deps{
-		Connect:  replayConnect{connectors: res.Connectors},
+		Connect:  replayConnect{connectors: res.Connectors, statuses: statuses},
 		Registry: replayRegistry{subjects: res.Subjects},
 	}); err != nil {
 		return nil, fmt.Errorf("evals: action definitions: %w", err)
 	}
 	return reg, nil
+}
+
+// connectStatusData is the part of connect_status's Data that action
+// validation reads (see kafkatools connectStatus: name, state, worker, tasks).
+type connectStatusData struct {
+	Name   string `json:"name"`
+	State  string `json:"state"`
+	Worker string `json:"worker"`
+	Tasks  []struct {
+		ID    int    `json:"id"`
+		State string `json:"state"`
+	} `json:"tasks"`
+}
+
+// connectStatuses returns the connector state each connect_status recording
+// with Data reports, keyed by connector. Validate of connect_resume_connector
+// and connect_restart_* reads that state, so a scenario that wants those
+// actions to validate records it in the status data, as the real tool returns
+// it. The first recording for a connector wins.
+func connectStatuses(recs []Recording) (map[string]clients.ConnectorStatus, error) {
+	out := map[string]clients.ConnectorStatus{}
+	for i, r := range recs {
+		if r.Tool != "connect_status" || r.Data == nil {
+			continue
+		}
+		name, _ := r.Input["connector"].(string)
+		if name == "" {
+			continue
+		}
+		if _, dup := out[name]; dup {
+			continue
+		}
+		b, err := json.Marshal(r.Data)
+		if err != nil {
+			return nil, fmt.Errorf("evals: recordings[%d] (connect_status): data: %w", i, err)
+		}
+		var d connectStatusData
+		if err := json.Unmarshal(b, &d); err != nil {
+			return nil, fmt.Errorf("evals: recordings[%d] (connect_status): data is not a connector status: %w", i, err)
+		}
+		st := clients.ConnectorStatus{Name: d.Name, State: d.State, WorkerID: d.Worker}
+		if st.Name == "" {
+			st.Name = name
+		}
+		for _, t := range d.Tasks {
+			st.Tasks = append(st.Tasks, clients.TaskStatus{ID: t.ID, State: t.State})
+		}
+		out[name] = st
+	}
+	return out, nil
 }
 
 // replayer serves recordings for one run and remembers the misses.
@@ -215,13 +270,20 @@ func (t *replayTool) Run(ctx context.Context, input json.RawMessage) (tools.Resu
 	return res, nil
 }
 
-// replayConnect answers the one Connect read that action validation needs.
-type replayConnect struct{ connectors []string }
+// replayConnect answers the Connect reads that action validation needs: the
+// connector names and, where a recording gives it, each connector's status.
+type replayConnect struct {
+	connectors []string
+	statuses   map[string]clients.ConnectorStatus
+}
 
 func (c replayConnect) ListConnectors(context.Context) ([]string, error) {
 	return append([]string(nil), c.connectors...), nil
 }
-func (replayConnect) Status(context.Context, string) (clients.ConnectorStatus, error) {
+func (c replayConnect) Status(_ context.Context, name string) (clients.ConnectorStatus, error) {
+	if st, ok := c.statuses[name]; ok {
+		return st, nil
+	}
 	return clients.ConnectorStatus{}, errNotReplayed
 }
 func (replayConnect) Config(context.Context, string) (map[string]string, error) {

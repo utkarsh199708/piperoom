@@ -149,7 +149,7 @@ feeding:
 // the production action names.
 func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 	toolInputs := ToolInputs(defs)
-	areg, err := LiveActions(Resources{})
+	areg, err := LiveActions(Resources{}, nil)
 	if err != nil {
 		return err
 	}
@@ -189,7 +189,7 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
-	live, err := LiveActions(sc.Resources)
+	live, err := LiveActions(sc.Resources, sc.Recordings)
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}

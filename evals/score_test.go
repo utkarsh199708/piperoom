@@ -26,7 +26,7 @@ func transcriptOf(t *testing.T, sc Scenario, script []step) Transcript {
 	if err != nil {
 		t.Fatal(err)
 	}
-	live, err := LiveActions(sc.Resources)
+	live, err := LiveActions(sc.Resources, sc.Recordings)
 	if err != nil {
 		t.Fatal(err)
 	}

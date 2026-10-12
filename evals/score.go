@@ -284,7 +284,7 @@ func checkSteps(sc Scenario, steps []events.ProposalStep) []string {
 	if len(steps) == 0 {
 		return nil
 	}
-	reg, err := LiveActions(sc.Resources)
+	reg, err := LiveActions(sc.Resources, sc.Recordings)
 	if err != nil {
 		return []string{err.Error()}
 	}
