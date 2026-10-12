@@ -128,14 +128,25 @@ func markInvisible(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		switch r {
-		case 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, 0xFF3B, 0xFF3D:
+		if r == 0xFF3B || r == 0xFF3D || invisibleRune(r) {
 			fmt.Fprintf(&b, "{U+%04X}", r)
-		default:
-			b.WriteRune(r)
+			continue
 		}
+		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// invisibleRune reports the characters that show nothing or reorder the text
+// around them: zero-width spaces and joiners, the word joiner, the BOM, soft
+// hyphen, the Mongolian vowel separator, variation selector-16, and the bidi
+// embedding, override and isolate controls.
+func invisibleRune(r rune) bool {
+	switch r {
+	case 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, 0x180E, 0xFE0F:
+		return true
+	}
+	return (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
 }
 
 // escapeToolText escapes the three characters that can break out of an

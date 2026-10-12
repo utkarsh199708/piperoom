@@ -702,8 +702,13 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 
 	stepID := newStepID()
 	toolUseID := "tu_" + newULID()
-	r.emit(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: verb + " " + name})
-	r.emit(ctx, events.AgentToolCall, events.AgentToolCallPayload{
+	// The room log must get every tool_call its tool_result pairs with, even when
+	// the deadline below has passed: the real stores refuse events on a done
+	// context. So events are emitted without the deadline, and only the tool
+	// call itself is bounded by it.
+	emitCtx := context.WithoutCancel(ctx)
+	r.emit(emitCtx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: verb + " " + name})
+	r.emit(emitCtx, events.AgentToolCall, events.AgentToolCallPayload{
 		StepID:    stepID,
 		ToolUseID: toolUseID,
 		Tool:      name,
@@ -726,14 +731,14 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 	}
 	if err != nil {
 		summary, truncated := tools.Truncate("error: " + err.Error())
-		r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
+		r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
 			StepID: stepID, ToolUseID: toolUseID, Tool: name,
 			Summary: summary, IsError: true, Truncated: truncated, TookMS: took,
 		})
 		return tools.Result{}, err
 	}
 	summary, reTruncated := tools.Truncate(res.Summary)
-	r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
+	r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
 		StepID: stepID, ToolUseID: toolUseID, Tool: name,
 		Summary: summary, Data: data, IsError: false,
 		Truncated: res.Truncated || reTruncated, TookMS: took,

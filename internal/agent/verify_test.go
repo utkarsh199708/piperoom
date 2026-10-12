@@ -1523,6 +1523,31 @@ func TestEscapeToolTextMarksInvisibleCharacters(t *testing.T) {
 			string(rune(0xFF1C)) + "b" + string(rune(0xFF1E)),
 			string(rune(0xFF1C)) + "b" + string(rune(0xFF1E)),
 		},
+		{
+			"byte-order mark is marked",
+			"a" + string(rune(0xFEFF)) + "b",
+			"a{U+FEFF}b",
+		},
+		{
+			"soft hyphen is marked",
+			"sub" + string(rune(0x00AD)) + "scribe",
+			"sub{U+00AD}scribe",
+		},
+		{
+			"Mongolian vowel separator and variation selector-16 are marked",
+			"a" + string(rune(0x180E)) + "b" + string(rune(0xFE0F)),
+			"a{U+180E}b{U+FE0F}",
+		},
+		{
+			"bidi override control is marked, so the text cannot reorder unseen",
+			"abc" + string(rune(0x202E)) + "xyz",
+			"abc{U+202E}xyz",
+		},
+		{
+			"bidi embedding and isolate controls are marked",
+			string(rune(0x202A)) + "x" + string(rune(0x2066)) + "y" + string(rune(0x2069)),
+			"{U+202A}x{U+2066}y{U+2069}",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1530,6 +1555,62 @@ func TestEscapeToolTextMarksInvisibleCharacters(t *testing.T) {
 				t.Fatalf("escapeToolText = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// closingSink refuses an event whose context is done, as the real room stores do,
+// and keeps the events it accepts.
+type closingSink struct {
+	events []sinkEvent
+}
+
+func (s *closingSink) Emit(ctx context.Context, typ events.Type, payload any) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	b, _ := json.Marshal(payload)
+	s.events = append(s.events, sinkEvent{typ: typ, payload: b})
+	return nil
+}
+
+func (s *closingSink) count(typ events.Type) int {
+	var n int
+	for _, e := range s.events {
+		if e.typ == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// When the baseline's deadline passes during a read, every tool_call in the room
+// log still gets its tool_result: the closing event is emitted without the
+// expired deadline, so a store that refuses done contexts keeps the pair whole.
+func TestBaselineStepsPairWhenDeadlinePasses(t *testing.T) {
+	saved := baselineTimeout
+	baselineTimeout = 50 * time.Millisecond
+	defer func() { baselineTimeout = saved }()
+
+	reads := tools.NewRegistry()
+	if err := reads.Register(pipelineMapTool("analytics.orders")); err != nil {
+		t.Fatal(err)
+	}
+	if err := reads.Register(&blockingReadTool{name: "warehouse_freshness", schema: whSchema()}); err != nil {
+		t.Fatal(err)
+	}
+	sink := &closingSink{}
+	r, _ := newProposeRunner(t, reads, sink)
+	res := r.runRoomTool(context.Background(), toolUse{id: "tu_1", name: "propose_fix", input: proposeFixJSON})
+	if res.isError {
+		t.Fatalf("propose_fix failed: %s", res.content)
+	}
+	calls := sink.count(events.AgentToolCall)
+	results := sink.count(events.AgentToolResult)
+	if calls == 0 {
+		t.Fatal("the baseline reads must emit tool calls")
+	}
+	if calls != results {
+		t.Fatalf("every tool_call needs its tool_result: %d calls, %d results", calls, results)
 	}
 }
 
