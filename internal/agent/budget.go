@@ -66,6 +66,10 @@ func budgetText(used, limit int64) string {
 // process. The Endpoint owns one per room, so it survives agent restarts. It is
 // not persisted: a server restart starts the count again at zero.
 //
+// The unit is raw tokens: input, cache creation, cache reads, output and
+// compaction passes, each counted once at face value. Cache reads and writes
+// are not weighted by price, so the cap bounds model work, not dollars.
+//
 // The cap is soft. It is checked before each call, so one call can run past the
 // limit by its own output, and calls that run at the same time (a hand-off next
 // to the loop) are not serialized.

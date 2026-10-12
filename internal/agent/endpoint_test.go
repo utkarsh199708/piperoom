@@ -164,16 +164,56 @@ func TestNewEndpointCredentialErrorsAreStartupErrors(t *testing.T) {
 			t.Fatalf("%s: got %v, want the credential error wrapped", cfg.Provider, err)
 		}
 	}
-	// A config with no credentials is rejected by the SDK when the option applies.
-	empty := providerLoaders{awsConfig: func(_ context.Context, r string) (aws.Config, error) { return aws.Config{Region: r}, nil }}
-	ep, err := newEndpoint(context.Background(), EndpointConfig{Provider: "bedrock", AWSRegion: "ap-south-1"}, envOf(nil), empty, discardLogger())
-	if err != nil {
-		t.Fatalf("building does not apply the option: %v", err)
+}
+
+// Missing AWS credentials stop the server at startup. The check fetches the
+// credentials once; it sends no model request.
+func TestBedrockMissingCredentialsFailAtStartup(t *testing.T) {
+	cfg := EndpointConfig{Provider: "bedrock", AWSRegion: "ap-south-1"}
+	withCreds := func(p aws.CredentialsProvider) providerLoaders {
+		return providerLoaders{awsConfig: func(_ context.Context, r string) (aws.Config, error) {
+			return aws.Config{Region: r, Credentials: p}, nil
+		}}
 	}
-	if _, err := ep.model.Turn(context.Background(), anthropic.BetaMessageNewParams{Model: "m", MaxTokens: 1,
-		Messages: []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock("hi"))}}); err == nil {
-		t.Fatal("a Bedrock client with no AWS credentials must fail its first request")
-	}
+
+	t.Run("no provider at all", func(t *testing.T) {
+		_, err := newEndpoint(context.Background(), cfg, envOf(nil), withCreds(nil), discardLogger())
+		if err == nil || !strings.Contains(err.Error(), "AWS credentials") {
+			t.Fatalf("err = %v, want one about AWS credentials", err)
+		}
+	})
+
+	t.Run("retrieve fails", func(t *testing.T) {
+		boom := errors.New("no valid providers in chain")
+		p := aws.CredentialsProviderFunc(func(context.Context) (aws.Credentials, error) { return aws.Credentials{}, boom })
+		_, err := newEndpoint(context.Background(), cfg, envOf(nil), withCreds(p), discardLogger())
+		if !errors.Is(err, boom) {
+			t.Fatalf("err = %v, want the retrieve error wrapped", err)
+		}
+	})
+
+	t.Run("retrieve is called once with a deadline", func(t *testing.T) {
+		var calls int
+		var hasDeadline bool
+		p := aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
+			calls++
+			_, hasDeadline = ctx.Deadline()
+			return aws.Credentials{AccessKeyID: "AKIDTEST", SecretAccessKey: "s"}, nil
+		})
+		if _, err := newEndpoint(context.Background(), cfg, envOf(nil), withCreds(p), discardLogger()); err != nil {
+			t.Fatal(err)
+		}
+		if calls != 1 || !hasDeadline {
+			t.Fatalf("calls = %d, deadline = %v, want 1 call with a deadline", calls, hasDeadline)
+		}
+	})
+
+	t.Run("a Bedrock API key needs no AWS credentials", func(t *testing.T) {
+		env := envOf(map[string]string{bedrockTokenEnv: "bedrock-api-key-test"})
+		if _, err := newEndpoint(context.Background(), cfg, env, withCreds(nil), discardLogger()); err != nil {
+			t.Fatalf("with %s set: %v", bedrockTokenEnv, err)
+		}
+	})
 }
 
 func TestEndpointConfigDefaults(t *testing.T) {
@@ -225,6 +265,7 @@ func TestAnthropicProviderKeepsWorkspaceHeader(t *testing.T) {
 
 func TestBedrockProviderBuildsSignedBedrockRequests(t *testing.T) {
 	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "") // keep SigV4 regardless of the machine's env
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-must-not-leak")
 	ws := newWireServer(t)
 	var regionSeen string
 	// The workspace id and an API key are set on purpose: neither may reach Bedrock.
@@ -263,6 +304,7 @@ func TestBedrockProviderBuildsSignedBedrockRequests(t *testing.T) {
 
 func TestBedrockProviderUsesBearerTokenWhenTheEnvironmentHasOne(t *testing.T) {
 	t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-api-key-test")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-must-not-leak")
 	ws := newWireServer(t)
 	ep, err := newEndpoint(context.Background(), EndpointConfig{Provider: "bedrock", AWSRegion: "us-east-1"},
 		envOf(nil), testLoaders(nil), discardLogger(), option.WithBaseURL(ws.URL), option.WithMaxRetries(0))
@@ -276,6 +318,7 @@ func TestBedrockProviderUsesBearerTokenWhenTheEnvironmentHasOne(t *testing.T) {
 }
 
 func TestVertexProviderBuildsVertexRequests(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-must-not-leak")
 	ws := newWireServer(t)
 	ep, err := newEndpoint(context.Background(), EndpointConfig{Provider: "vertex", VertexProject: "acme-prod", VertexRegion: "europe-west1"},
 		envOf(map[string]string{workspaceEnv: "wrkspc_123"}), testLoaders(nil), discardLogger(),
@@ -327,6 +370,7 @@ func TestLoopRequestPassesThroughTheCloudAdapters(t *testing.T) {
 	} {
 		t.Run(cfg.Provider, func(t *testing.T) {
 			t.Setenv("AWS_BEARER_TOKEN_BEDROCK", "")
+			t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test-must-not-leak")
 			ws := newWireServer(t)
 			ep, err := newEndpoint(context.Background(), cfg, envOf(nil), testLoaders(nil), discardLogger(),
 				option.WithBaseURL(ws.URL), option.WithMaxRetries(0))

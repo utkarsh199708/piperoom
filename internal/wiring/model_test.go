@@ -66,6 +66,19 @@ func TestNewAgentEndpointDefaultIsAnthropicWithTheDefaultCap(t *testing.T) {
 	}
 }
 
+func TestNewAgentEndpointWarnsAboutIncompatibleTriageModel(t *testing.T) {
+	for model, wantWarn := range map[string]bool{"claude-haiku-4-5": true, "claude-haiku-5-5": false} {
+		var buf bytes.Buffer
+		_, err := NewAgentEndpoint(context.Background(), config.Config{TriageModel: model}, slog.New(slog.NewTextHandler(&buf, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(buf.String(), "PIPEROOM_TRIAGE_MODEL"); got != wantWarn {
+			t.Errorf("triage %q: warned=%v, want %v\n%s", model, got, wantWarn, buf.String())
+		}
+	}
+}
+
 func TestWarnIfNotBedrockModelID(t *testing.T) {
 	for id, wantWarn := range map[string]bool{
 		"claude-opus-5-5":                   true,

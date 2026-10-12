@@ -41,6 +41,11 @@ func NewAgentEndpoint(ctx context.Context, cfg config.Config, log *slog.Logger) 
 			warnIfNotBedrockModelID(log, "PIPEROOM_TRIAGE_MODEL", cfg.TriageModel)
 		}
 	}
+	if cfg.TriageModel != "" {
+		if why := agent.TriageModelWarning(cfg.TriageModel); why != "" {
+			log.Warn("PIPEROOM_TRIAGE_MODEL is known not to work with the investigation loop", "value", cfg.TriageModel, "why", why)
+		}
+	}
 	limit := "no cap"
 	if n := ep.TokenLimit(); n > 0 {
 		limit = fmt.Sprint(n)

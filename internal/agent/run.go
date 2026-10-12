@@ -91,6 +91,11 @@ type runner struct {
 	triageTurns int
 	triageRan   int
 	verified    bool
+	// escalated turns true once a triage turn asked for propose_fix and was
+	// re-run on the main model; the run stays on the main model after that.
+	escalated bool
+	// triageSw is the endpoint-wide "triage is off" flag; nil outside an Endpoint.
+	triageSw *triageSwitch
 }
 
 // Run investigates a pipeline incident: it calls Claude, executes read-only

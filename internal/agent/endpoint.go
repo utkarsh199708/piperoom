@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/bedrock"
@@ -29,6 +31,12 @@ const (
 // defaultTriageTurns is how many turns run on the triage model before the
 // investigation moves to the main model.
 const defaultTriageTurns = 6
+
+// credentialCheckTimeout bounds the startup fetch of AWS credentials.
+const credentialCheckTimeout = 5 * time.Second
+
+// bedrockTokenEnv is the Bedrock API key variable the SDK reads itself.
+const bedrockTokenEnv = "AWS_BEARER_TOKEN_BEDROCK"
 
 // googleCloudScope is the OAuth scope Vertex AI calls need.
 const googleCloudScope = "https://www.googleapis.com/auth/cloud-platform"
@@ -118,9 +126,15 @@ func (c EndpointConfig) normalized() (EndpointConfig, int64, error) {
 // added for "anthropic" only: the cloud providers sign their own requests and
 // ignore first-party credentials.
 //
-// The SDK's own bedrock.WithLoadDefaultConfig and vertex.WithGoogleAuth panic
-// when credentials are missing, so this loads them itself and passes the
-// result to bedrock.WithConfig and vertex.WithCredentials.
+// The SDK's bedrock.WithLoadDefaultConfig panics when the AWS config cannot be
+// loaded, and vertex.WithGoogleAuth panics when no Google default credentials
+// are found. So this loads both itself, returns those failures as errors, and
+// passes the result to bedrock.WithConfig and vertex.WithCredentials.
+//
+// For Bedrock it also fetches the credentials once (bounded by
+// credentialCheckTimeout) so that missing or broken AWS credentials stop the
+// server at startup instead of failing the first alert. That is a credential
+// lookup (environment, shared files, instance/role metadata), not a model call.
 func (c EndpointConfig) providerOptions(ctx context.Context, getenv func(string) string, ld providerLoaders) (opts []option.RequestOption, err error) {
 	switch c.Provider {
 	case ProviderBedrock:
@@ -130,8 +144,18 @@ func (c EndpointConfig) providerOptions(ctx context.Context, getenv func(string)
 			return nil, fmt.Errorf("agent: load AWS config for bedrock: %w", err)
 		}
 		cfg.Region = c.AWSRegion
-		// Credentials are resolved lazily on the first request; bedrock.WithConfig
-		// reports a config with none.
+		// A Bedrock API key (AWS_BEARER_TOKEN_BEDROCK) replaces AWS credentials.
+		if getenv(bedrockTokenEnv) == "" {
+			if cfg.Credentials == nil {
+				return nil, errors.New("agent: bedrock needs AWS credentials (environment, shared config, or an instance/task role); none were found")
+			}
+			cctx, cancel := context.WithTimeout(ctx, credentialCheckTimeout)
+			_, err = cfg.Credentials.Retrieve(cctx)
+			cancel()
+			if err != nil {
+				return nil, fmt.Errorf("agent: retrieve AWS credentials for bedrock: %w", err)
+			}
+		}
 		return []option.RequestOption{bedrock.WithConfig(cfg)}, nil
 	case ProviderVertex:
 		var creds *google.Credentials
@@ -161,6 +185,10 @@ type Endpoint struct {
 	limit       int64
 	model       model
 	log         *slog.Logger
+
+	// triageSw is shared by every run: the first rejected triage request turns
+	// triage off for all rooms (see modelTurn).
+	triageSw triageSwitch
 
 	mu      sync.Mutex
 	budgets map[string]*tokenBudget
@@ -216,6 +244,15 @@ func (e *Endpoint) budget(roomID string) *tokenBudget {
 	return b
 }
 
+// Forget drops a room's token count. Call it when a room closes so the map does
+// not grow for the life of the process. A run that is still going keeps its own
+// pointer and finishes its count; a later run for the same room id starts at 0.
+func (e *Endpoint) Forget(roomID string) {
+	e.mu.Lock()
+	delete(e.budgets, roomID)
+	e.mu.Unlock()
+}
+
 // Run is an agent.Runner: the investigation loop on this endpoint, with the
 // room's token budget and, when configured, the triage model.
 func (e *Endpoint) Run(ctx context.Context, alert Alert, deps Deps, opts Options) error {
@@ -228,6 +265,7 @@ func (e *Endpoint) Run(ctx context.Context, alert Alert, deps Deps, opts Options
 	if e.triageModel != "" && e.triageModel != opts.Model {
 		r.triageModel = e.triageModel
 		r.triageTurns = e.triageTurns
+		r.triageSw = &e.triageSw
 	}
 	return r.run(ctx)
 }
