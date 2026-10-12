@@ -30,7 +30,7 @@ for those before you plan the install.
 - **Settings for real mode:** `SOURCE_DB_URL`, `WAREHOUSE_DB_URL`, `WAREHOUSE_KIND` (default
   `postgres`), `PIPEROOM_DB_URL`, `KAFKA_BROKERS`, `CONNECT_URL`, `SCHEMA_REGISTRY_URL`,
   `OWNERS_FILE`, `USERS_FILE`, and the model provider's settings (section 1). Unset, each of the URL
-  and file settings falls back to the localhost dev stack (`internal/config/config.go:97-107`), so
+  and file settings falls back to the localhost dev stack (`internal/config/config.go:109-119`), so
   set every one you rely on. **`ANTHROPIC_API_KEY` has no localhost fallback**: unset, the SDK falls
   back only to its other credential sources (`anthropic-sdk-go@v1.80.0/client.go:30-82`), and model
   calls fail if none is set. It is needed only for the `anthropic` provider.
@@ -46,12 +46,12 @@ for those before you plan the install.
 ## 1. Configure the environment
 
 All settings are environment variables read by `internal/config/config.go` (`config.Load()`).
-`config.go:9-92` holds the fields and `config.go:95-157` the defaults. The settings are grouped below.
+`config.go:14-104` holds the fields and `config.go:107-174` the defaults. The settings are grouped below.
 The Docker path reads `deploy/.env` (which starts from `deploy/pilot.env.example`), but the compose
 file passes only the variables it lists in its `environment:` block (`deploy/docker-compose.pilot.yml`).
 On current `main` that list has no model-provider, triage, token-budget, `AWS_*`, `VERTEX_*`,
 `GOOGLE_APPLICATION_CREDENTIALS` or retention variables. So on the Docker path, Bedrock, Vertex, the
-triage model and the token budget need the deploy update (in progress, branch `a1/deploy-model-vars`)
+triage model and the token budget need the deploy update (not on main yet)
 before they work in the container. Compose also never passes `ANTHROPIC_BASE_URL`, so a value on the
 host cannot leak into the container.
 
@@ -62,7 +62,7 @@ host cannot leak into the container.
 | `PIPEROOM_HTTP_ADDR` | listen address of the room service. Default `127.0.0.1:8090`. Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. Any other host, including an empty host or `0.0.0.0`, is refused unless you pass `--allow-remote` (`cmd/server/listen.go:19-41`). The Docker image listens on `0.0.0.0` and passes `--allow-remote` (`Dockerfile:67`) |
 | `PIPEROOM_DB_URL` | Piperoom's own database: room events, proposals, Slack thread state. Use a role that owns only this database. Migrated automatically at start-up |
 | `SOURCE_DB_URL` | source Postgres, the **read-only** role |
-| `WAREHOUSE_KIND` | `postgres` (default) or `snowflake`. Any other value stops the start (`internal/wiring/warehouse.go:50-60`). Read from `config.go:134` |
+| `WAREHOUSE_KIND` | `postgres` (default) or `snowflake`. Any other value stops the start (`internal/wiring/warehouse.go:50-60`). Read from `config.go:146` |
 | `WAREHOUSE_DB_URL` | the warehouse, read-only role. With `postgres`: a Postgres URL. With `snowflake`: a gosnowflake DSN, `user:password@account/database/schema?warehouse=...&role=...`, with the password **URL-encoded** (a raw `%`, `+`, `?`, `@`, `/` or `:` breaks it, `internal/clients/snowflake/README.md`). Startup errors are redacted of the DSN (`internal/wiring/warehouse.go:74`). Read-only access comes only from the DSN's role (`internal/clients/snowflake/snowflake.go:6-10`). See [permissions.md](permissions.md#warehouse) |
 | `KAFKA_BROKERS` | comma-separated brokers |
 | `CONNECT_URL` | Kafka Connect REST base URL |
@@ -71,15 +71,15 @@ host cannot leak into the container.
 | `USERS_FILE` | users and the layers each owns (step 2) |
 | `PIPEROOM_PUBLIC_URL` | optional. The externally visible base URL, used for room links in Slack. It is a WebSocket origin only when `PIPEROOM_WEB_DIR` is set; without a web dir the WebSocket ignores it (section 4). Its host is also the public host in the served UI's content-security policy. Must be a plain `http(s)` host, with no wildcard. An invalid value stops the start (`cmd/server/main.go:84-87`; `internal/httpapi/static.go:41-75`; `internal/httpapi/server.go:150-158`; `internal/ws/gateway.go:186-189`; `internal/httpapi/static.go:195-197`). Empty means no links |
 | `PIPEROOM_WEB_DIR` | **Live.** When set, the server also serves the built web UI (`web/dist`) at `/`, and refuses to start if the directory has no `index.html` (`cmd/server/main.go:242-249`, `checkWebDir` at `:292`; `internal/httpapi/static.go:16-20`). The Docker image sets it to `/web` (`Dockerfile:44`). Unset, the server serves the API and the probes only |
-| `PIPEROOM_RETENTION_DAYS` | **Not live.** Read into config only (`config.go:91,155`). Nothing on `main` deletes events by age |
+| `PIPEROOM_RETENTION_DAYS` | **Not live.** Read into config only (`config.go:103,172`). Nothing on `main` deletes events by age |
 
 **Model provider, triage and token budget**
 
 | Variable | Meaning |
 |---|---|
-| `PIPEROOM_MODEL_PROVIDER` | `anthropic` (default), `bedrock` or `vertex`. Any other value stops the start (`internal/agent/endpoint.go:86-137`). Field at `config.go:78`, default at `config.go:148` |
-| `PIPEROOM_MODEL` | model id, default `claude-opus-5-5` (`config.go:106`). With `bedrock`, use a Bedrock model or inference-profile id: the default first-party name is rejected by Bedrock on the first request, and a warning is logged when it is left in place (`internal/wiring/model.go:57-62`) |
-| `PIPEROOM_EFFORT` | reasoning effort, default `high` (`config.go:107`) |
+| `PIPEROOM_MODEL_PROVIDER` | `anthropic` (default), `bedrock` or `vertex`. Any other value stops the start (`internal/agent/endpoint.go:86-137`). Field at `config.go:90`, default at `config.go:165` |
+| `PIPEROOM_MODEL` | model id, default `claude-opus-5-5` (`config.go:118`). With `bedrock`, use a Bedrock model or inference-profile id: the default first-party name is rejected by Bedrock on the first request, and a warning is logged when it is left in place (`internal/wiring/model.go:57-62`) |
+| `PIPEROOM_EFFORT` | reasoning effort, default `high` (`config.go:119`) |
 | `PIPEROOM_TRIAGE_MODEL` | optional. A second model id for the first turns of an investigation (reading tools, forming a hypothesis). Default: none, so the main model runs every turn. The rules are in section 1a |
 | `PIPEROOM_ROOM_TOKEN_BUDGET` | per-room cap on model tokens. Empty = `2000000` (`internal/agent/budget.go:13-15`). `0` = no cap. Any other value must be a whole number of at least 1, or the start stops (`budget.go:24-43`). The count is kept in memory and restarts from zero when the server restarts (`budget.go:65-67`) |
 | `AWS_REGION` | required with `bedrock`. The Bedrock runtime endpoint is `bedrock-runtime.<AWS_REGION>.amazonaws.com` (`internal/agent/endpoint.go:138-165`; SDK `anthropic-sdk-go@v1.80.0/bedrock/bedrock.go:257`) |
@@ -102,8 +102,22 @@ host cannot leak into the container.
 | Variable | Meaning |
 |---|---|
 | `PIPEROOM_MAX_AGENTS` | caps concurrent agent runs across all rooms; the others queue. Empty or `0` means the default, 3 (`internal/room/agentslots.go:16`; `cmd/server/maxagents.go:12-32`). The start-up log prints the value (`cmd/server/main.go:70`) |
-| `ALERTMANAGER_TOKEN`, `GRAFANA_ALERT_SECRET`, `PAGERDUTY_ALERT_SECRET`, `DATADOG_ALERT_TOKEN`, `GENERIC_ALERT_SECRET` | Secrets for the signed alert routes `POST /api/alerts/{source}` (section 6). A source is enabled only when its secret is set (`internal/alertin/verify.go:90-102`); unset, its route answers 401 (`internal/httpapi/alerts.go:31-41`). Read in `cmd/server/alerts.go:17-40` (`config.go:136-141`) |
-| `PAGERDUTY_SERVICES`, `DEFAULT_ALERT_PIPELINE` | Used by the signed routes. `PAGERDUTY_SERVICES` maps service ids to pipelines, and a bad entry stops the start. `DEFAULT_ALERT_PIPELINE` is used when an alert names no pipeline, and a bad value stops the start (`cmd/server/alerts.go:17-40`; `config.go:139,142`) |
+| `ALERTMANAGER_TOKEN`, `GRAFANA_ALERT_SECRET`, `PAGERDUTY_ALERT_SECRET`, `DATADOG_ALERT_TOKEN`, `GENERIC_ALERT_SECRET` | Secrets for the signed alert routes `POST /api/alerts/{source}` (section 6). A source is enabled only when its secret is set (`internal/alertin/verify.go:90-102`); unset, its route answers 401 (`internal/httpapi/alerts.go:31-41`). Read in `cmd/server/alerts.go:17-40` (`config.go:148-153`) |
+| `PAGERDUTY_SERVICES`, `DEFAULT_ALERT_PIPELINE` | Used by the signed routes. `PAGERDUTY_SERVICES` maps service ids to pipelines, and a bad entry stops the start. `DEFAULT_ALERT_PIPELINE` is used when an alert names no pipeline, and a bad value stops the start (`cmd/server/alerts.go:17-40`; `config.go:151,154`) |
+
+**Built-in watcher (not live yet)**
+
+The watcher's design is in [docs/design/watcher.md](../design/watcher.md). The settings below are read
+into config on `main`, and `ParseWatch` validates them (`internal/config/config.go:213`). Nothing on
+`main` calls `ParseWatch`, and no code starts the watcher. So these variables have no effect yet, and
+an invalid value is not rejected yet. The watcher's core and wiring are still in review.
+
+| Variable | Meaning |
+|---|---|
+| `PIPEROOM_WATCH_MODE` | `off`, `log` or `rooms`. Default `log`, which is shadow mode: it only writes log lines. `ParseWatch` rejects other values, but nothing calls it yet (`config.go:78`) |
+| `PIPEROOM_WATCH_INTERVAL` | how often the watcher checks. Go duration, default `60s`, minimum `15s` (`config.go:79`) |
+| `PIPEROOM_WATCH_CHECK_TIMEOUT` | deadline for one check, default `10s`, at most `10s` (the source role's statement timeout) (`config.go:80`) |
+| `PIPEROOM_WATCH_COOLDOWN` | quiet time after a watcher room is closed, default `60m` (`config.go:81`) |
 
 **Slack, Kafka, Connect and Registry**
 
@@ -151,18 +165,20 @@ short triage phase saves less than the token prices suggest.
 (input, cache creation, cache reads, output and compaction, counted at face value). The check runs
 before each call, so one call can go past the cap by its own output (`internal/agent/budget.go:65-99`).
 When a room is over budget, its investigation loop stops with a `BudgetError` and the room says so
-(`budget.go:48-49`; `internal/agent/run.go:216`). Hand-offs are counted but never refused, so a
-person taking over a stopped room still gets a summary (`budget.go:160-167`;
-`internal/agent/endpoint.go:273-281`). A stopped room stays stopped until the server restarts:
-`Endpoint.Forget` drops a room's count, but nothing calls it when a room closes
-(`internal/agent/endpoint.go:250`). The count lives in the server process and is not saved. Set `0`
-only if you accept an uncapped cost per room.
+(`budget.go:48-49`; `internal/agent/run.go:216`). Each room's count is kept on the Endpoint for the
+life of the process (`internal/agent/endpoint.go:236-245`). Once the count reaches the limit, every
+investigation call is refused at once (`budget.go:88-98`), so a new run for that room is refused
+too. Only a server restart resets the count, and changing `PIPEROOM_ROOM_TOKEN_BUDGET` also needs a
+restart. Hand-offs are counted but never refused, so a person taking over a stopped room still gets a
+summary (`budget.go:160-167`; `internal/agent/endpoint.go:273-281`). Separately, `Endpoint.Forget`
+(`internal/agent/endpoint.go:250`) is not wired: nothing calls it when a room closes. The counts of
+closed rooms stay in memory until restart. Set `0` only if you accept an uncapped cost per room.
 
 ## 2. Describe your pipeline: `owners.yaml` and `users.yaml`
 
 Start from `dev/owners.yaml` and `dev/users.yaml`. The loader refuses a pipeline that has no
 `topic_prefix`, no `source_tables` or no `connectors`, and refuses `sink_tables` without
-`sink_ts_column` (`internal/owners/owners.go:84-93`).
+`sink_ts_column` (`internal/owners/owners.go:89-101`).
 
 ```yaml
 # owners.yaml  (shape copied from dev/owners.yaml)
@@ -197,12 +213,17 @@ Rules of thumb:
 - Every layer a fix can touch must have an owner who is actually on call and reachable.
   A fix needs **all** of its required layers' owners to approve. The six layers are
   `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer` and `warehouse`
-  (`internal/events/events.go:275`).
+  (`internal/events/events.go:276`).
 - `source_tables` and `sink_tables` bound the row tools, and the read tools are scoped to the
   room's pipeline (its connectors, topics, consumer groups, subjects and tables). Keep `SELECT`
   grants identical to these lists
   ([data-handling.md](data-handling.md#3-prompt-injection-and-untrusted-text), F4, F11).
 - Put the real people in `users.yaml`; remove the dev users.
+- A pipeline may also have an optional `watch:` block. On `main` it is parsed (`internal/owners/watch.go`),
+  and it sets the slot-WAL warning threshold for the pipeline map (`watch.slot_wal.fire`,
+  `internal/topology/builder.go:55`). Its other settings (enabled, replication slot, WAL headroom, and
+  per-signal action, `for`, `fire`, `clear`) belong to the watcher, which is not live yet. See
+  [docs/design/watcher.md](../design/watcher.md).
 
 ## 3. Prepare the source database
 
@@ -364,7 +385,7 @@ no authentication. The Docker image uses `--allow-remote` because the server mus
 ## 6. Wire up alerts
 
 Use the signed route when you can: `POST /api/alerts/{source}`, where `{source}` is one of
-`alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic` (`internal/alertin/alertin.go:51`,
+`alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic` (`internal/alertin/alertin.go:55`,
 `Sources`). The route is registered at `internal/httpapi/server.go:119`. Each source checks its own
 token or HMAC signature, and only a source whose secret is set is accepted (section 1). A failed
 check answers 401, and an oversized body 413 (`internal/httpapi/alerts.go:31-75`). Repeats and
@@ -465,7 +486,7 @@ an identical body (`service_room.go:109-125`; index key at `:196`);
 | Proposal cannot execute | write mode not granted on Connect/Registry (by design) |
 | `connect_update_connector_config` fails with a 405 | Connect older than 3.5 does not support `PATCH /connectors/{name}/config` (`connect.go:119-140`) |
 | Server exits at start with "users/owners config" | `users.yaml` and `owners.yaml` disagree about a layer owner (step 4). The message names the user and layer |
-| Server exits at start with "topic_prefix is required", "no source tables", "no connectors" or "sink_ts_column is required" | fix the named pipeline in `owners.yaml` (`internal/owners/owners.go:84-93`) |
+| Server exits at start with "topic_prefix is required", "no source tables", "no connectors" or "sink_ts_column is required" | fix the named pipeline in `owners.yaml` (`internal/owners/owners.go:89-101`) |
 | Server exits at start with "ping for migrations" | `PIPEROOM_DB_URL` cannot be reached, or the role lacks rights to create tables |
 | Server exits at start with "unknown WAREHOUSE_KIND" | `WAREHOUSE_KIND` is not `postgres` or `snowflake` (`internal/wiring/warehouse.go:50-60`) |
 | Server exits at start with "warehouse (snowflake)" | the DSN is wrong, the password is not URL-encoded, or the account host is unreachable. The error is redacted, so check the DSN by hand (`internal/wiring/warehouse.go:74`) |

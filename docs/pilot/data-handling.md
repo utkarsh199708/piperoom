@@ -1,7 +1,7 @@
 # Data handling
 
 What Piperoom reads from your systems, what reaches the model, where it goes, who can see it, and
-how to limit it. Based on the code on `main` at `d6b83aa`. Under `cmd/investigate` events are
+how to limit it. Based on the code on `main` at `a91d2bd`. Under `cmd/investigate` events are
 printed to the terminal. Under `cmd/server` they go to the room event log and, if Slack is
 configured, to a Slack thread.
 
@@ -26,8 +26,8 @@ your systems ──read-only tools──► Summary (text) ──► model provi
     the Vertex AI endpoint for `VERTEX_REGION`, in `VERTEX_PROJECT_ID`
     (`anthropic-sdk-go@v1.80.0/vertex/vertex.go:96-106`). The region does not by itself fix where
     processing happens. A Bedrock cross-region profile, such as an `in.` profile
-    (`internal/config/config.go:77`), can route requests to other regions. The Vertex values `global`,
-    `us` and `eu` are multi-region endpoints (`vertex/vertex.go:96-106`). Choose the profile or region
+    (`internal/config/config.go:89`), can route requests to other regions. The Vertex values `global`,
+    `us` and `eu` are multi-region endpoints (`anthropic-sdk-go@v1.80.0/vertex/vertex.go:96-106`). Choose the profile or region
     that matches where your data may be processed. Usage is billed to your account.
   - **`anthropic`: where the requests go.** The Anthropic SDK reads `ANTHROPIC_BASE_URL` from the
     environment and sends every request there (`anthropic-sdk-go@v1.80.0/client.go:52-58`). It reads
@@ -42,14 +42,16 @@ your systems ──read-only tools──► Summary (text) ──► model provi
 - **Per-room token cap.** A room stops when it has used `PIPEROOM_ROOM_TOKEN_BUDGET` model tokens
   (default `2000000`). The count is in memory and starts again at zero after a restart. It counts
   input, cache creation, cache reads, output and compaction at face value, so the cap limits model
-  work, not dollars (`internal/agent/budget.go:13-15,65-67`). Hand-offs are counted but never refused.
-A stopped room stays stopped until restart, because nothing calls `Endpoint.Forget` when a room closes
-(`internal/agent/endpoint.go:250`).
+  work, not dollars (`internal/agent/budget.go:13-15,65-67`). Once a room reaches the limit, its calls
+are refused until the server restarts, and a restart is also needed to change the limit
+(`internal/agent/budget.go:88-98`). Hand-offs are counted but never refused.
+`Endpoint.Forget` is not wired. The counts of closed rooms stay in memory until restart
+(`internal/agent/endpoint.go:236-250`).
 - **Room event log (`room_events`, `migrations/00001_init.sql:16`).** Every tool call, result `Data`,
   comment, steer, proposal and approval is stored **permanently** in the Piperoom database and shown
   to everyone who can open the room. There is no per-event redaction after the fact. Redaction
   happens before the event is written: `pg_row` and `warehouse_row` return redacted `Data`
-  (`internal/tools/dbtools/pg.go:257`, `wh.go:124`).
+  (`internal/tools/dbtools/pg.go:264`, `wh.go:124`).
 - **Warehouse (Snowflake, only with `WAREHOUSE_KIND=snowflake`).** Warehouse queries go to the
   Snowflake account named in `WAREHOUSE_DB_URL`. The DSN holds the password, and startup errors
   are redacted of it (`internal/wiring/warehouse.go:74`; `internal/clients/snowflake/redact.go`).
@@ -116,7 +118,7 @@ Two more things follow from this list:
 | `pg_replication_slots` | slot name, plugin, active flag, WAL retained | data |
 | `pg_recent_ddl` | DDL command, object, **full statement text**, user, time | row data |
 | `pg_long_transactions` | pid, user, application name (client-set free text, shown as-is), state, transaction age, wait event, and at most the statement verb (first keyword, e.g. `UPDATE`). Database-wide: it lists sessions of every pipeline, because it cannot be tied to one pipeline. Each row has `has_xid` (summary `writer=yes\|no`): only writers hold the WAL horizon, but long read-only sessions are listed too since they block DDL and VACUUM | query text (never selected, never returned) |
-| `pg_row` | row **column names**; values only for the key and timestamp columns, others `null` (`pg.go:257,265-275`). Key and timestamp columns are chosen **by name**: the key is the column you pass in, and timestamp columns are `at` or names ending in `_at` (`dbtools.go:242-244`) | other column values |
+| `pg_row` | row **column names**; values only for the key and timestamp columns, others `null` (`pg.go:264,272-282`). Key and timestamp columns are chosen **by name**: the key is the column you pass in, and timestamp columns are `at` or names ending in `_at` (`dbtools.go:242-244`) | other column values |
 | `pg_publication_tables` | the publication name, the connector role, and only the pipeline's own source tables | other tables of a `FOR ALL TABLES` publication |
 | `warehouse_freshness` | max timestamp of the sink table, lag | row data |
 | `warehouse_row` | **timestamp-named columns only** (`at` or `*_at`), by name, not by type. The key and every other column are dropped, from both Summary and Data (`wh.go:124,132-140`; `dbtools.go:242-244`). The same on Snowflake, where column names come back lower-cased (`internal/clients/snowflake/snowflake.go:148`) | key value, all other columns |

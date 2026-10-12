@@ -57,7 +57,7 @@ Notes:
 
 - **Do not** grant `SELECT` on all tables or on schemas (`GRANT ... ON ALL TABLES`).
   `pg_row` is limited to the pipeline's `source_tables` in code
-  (`internal/tools/dbtools/pg.go:243`), but the credential is the real boundary: a bug or a
+  (`internal/tools/dbtools/pg.go:250`), but the credential is the real boundary: a bug or a
   changed `owners.yaml` must not widen what the role can read.
 - `pg_replication_slots` is readable by any role. No `REPLICATION` attribute is needed or wanted.
 - `pg_long_transactions` reads `pg_stat_activity`. The tool never returns query text: the
