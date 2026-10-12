@@ -19,6 +19,7 @@ hardening, or dev-only exposure).
 ## F1 — Any room participant can become any user, including every layer owner, with zero credentials
 
 - **Severity:** critical
+- **Status (2026-10-13):** design in `docs/design/auth.md` (OIDC login, server-side session, `X-User` dev-only on loopback). Not built.
 - **Where:** `docs/api.md` §Auth (contract); `web/src/components/UserSwitcher.tsx:1-18`;
   `web/src/context/UserContext.tsx:9-49`
 - **Scenario:** The entire approval model rests on "only the owner of a layer may approve a
@@ -46,6 +47,7 @@ hardening, or dev-only exposure).
 ## F2 — Layer owners approve a free-text description, never the actual action parameters
 
 - **Severity:** high
+- **Status (2026-10-13):** design in `docs/design/auth.md` §3 (`params_hash` sent with each approval, `409 params_mismatch`, approver identity in the event). Params display is merged (857f059); the hash binding is not built.
 - **Where:** `web/src/components/ProposalsPanel.tsx:90-98` (`Proposal` renders `s.action`,
   `s.layer`, `s.description` only); confirmed `params` is present on the wire type
   (`web/src/api/types.ts:128`, `ProposalStep.params: unknown`) but is never read anywhere in

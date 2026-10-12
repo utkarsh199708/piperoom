@@ -9,6 +9,10 @@
 > current secret first, "" = webhook source off). `webhook-auth.md` is the single `docs/api.md` proposal.
 
 
+> **Status (C9, 2026-10-13):** `docs/design/auth.md` rewritten against `main` @ 2a7bc34 on branch `c9/auth-design`
+> (OIDC + PKCE, server-side session, owners.yaml principals/groups/backup, solo mode, `params_hash` on approvals,
+> 4-PR split). It replaces PR #10's `auth.md`; `webhook-auth.md` and `event-retention.md` stay in PR #10.
+
 Read these first: `AGENTS.md`, `docs/collab.md`, `docs/security/findings.md` (F1–F10), `docs/security/threat-model.md`, `docs/api.md`,
 `internal/events/events.go`, `internal/config/config.go`, `internal/owners/owners.go`, `dev/users.yaml`, `dev/owners.yaml`,
 `web/src/api/client.ts` and C5's task file (`tasks/C5-*.md`). You own a **new** folder, `docs/design/**`. Branch: `c9/security-design`.
