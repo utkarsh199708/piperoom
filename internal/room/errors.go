@@ -1,5 +1,13 @@
 package room
 
+import "errors"
+
+// ErrResolvedAlertNoRoom is returned by CreateRoomFromAlert for an alert the
+// source reports resolved that matches no open room. A resolved notice never
+// opens a room, so nothing is stored, no agent starts and no hook runs. The
+// HTTP layer answers 202 Accepted with "ignored": true (docs/api.md).
+var ErrResolvedAlertNoRoom = errors.New("resolved alert with no open room")
+
 // Error is a domain error that the HTTP layer maps to a status code and a
 // stable machine-readable code (docs/api.md).
 type Error struct {
