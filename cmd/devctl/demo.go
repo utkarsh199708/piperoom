@@ -10,14 +10,15 @@ import (
 )
 
 // demoCmd implements `devctl demo [--fix] <scenario>`. It is a one-command live
-// demo: it takes the shared stack lock (owner a1 by default), resets to a clean
-// seeded state, loads a short burst of traffic so the healthy pipeline is
-// visible, breaks the scenario, and prints what to watch. `--fix` repairs the
-// scenario and releases the lock.
+// demo: it takes the shared stack lock (owner from --owner or
+// PIPEROOM_STACK_OWNER, like the other commands), resets to a clean seeded
+// state, loads a short burst of traffic so the healthy pipeline is visible,
+// breaks the scenario, and prints what to watch. `--fix` repairs the scenario
+// and releases the lock.
 func demoCmd(ctx context.Context, s *stack, args []string) error {
 	fs := flag.NewFlagSet("demo", flag.ContinueOnError)
 	fix := fs.Bool("fix", false, "repair the scenario and release the stack lock")
-	owner := fs.String("owner", "a1", "lock owner tag")
+	owner := fs.String("owner", os.Getenv(ownerEnv), "lock owner tag")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return err
