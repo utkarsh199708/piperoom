@@ -77,20 +77,70 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	return snap, nil
 }
 
-// CreateRoomFromAlert handles the generic alert webhook: it maps title/
-// severity/pipeline_id when present and stores the raw body verbatim in
-// room.created.alert. The pipeline_id takes the same shape check as POST
-// /api/rooms, but a missing or unknown pipeline NEVER drops the alert
-// (docs/api.md:103, LEAD-ARCH round 1 #10): the room opens anyway with a
-// system message and proposals disabled, so the agent cannot propose a fix
-// against a pipeline it knows nothing about. The 400 for an unknown pipeline
-// stays only on POST /api/rooms (CreateRoom). With no owners config (unit
-// tests) there is nothing to validate against, so every pipeline is treated as
-// known. No driver until someone takes control. created is false when the alert
-// joined the open room for it (see alertIndexKey) instead of opening one.
-// A resolved alert that matches no open room returns ErrResolvedAlertNoRoom and
-// changes nothing: it never opens a room.
+// CreateRoomFromAlert handles the generic alert webhook (POST
+// /api/alerts/webhook): the caller has mapped title/severity/pipeline_id from
+// the body, and the dedup key and resolved flag are read from the raw body by
+// alertDedup. It builds an alertin.Alert from those and opens it through the
+// same code as OpenAlertRoom, recorded as source "webhook". Its dedup key gets
+// the webhook prefix, so an X-User caller can never hold or join the key of a
+// signed source, even with an identical body. created is false when the alert
+// joined the open room for it instead of opening one.
 func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipelineID string, raw json.RawMessage) (RoomSnapshot, bool, error) {
+	dedupKey, resolved := alertDedup(raw)
+	status := alertin.StatusFiring
+	if resolved {
+		status = alertin.StatusResolved
+	}
+	if dedupKey != "" {
+		dedupKey = webhookKeyPrefix + dedupKey
+	}
+	return s.openAlertRoom(ctx, alertin.Alert{
+		Source:     alertin.Generic,
+		Status:     status,
+		Title:      title,
+		Severity:   severity,
+		PipelineID: pipelineID,
+		DedupKey:   dedupKey,
+		Raw:        raw,
+	}, alertSourceWebhook)
+}
+
+// alertSourceWebhook is room.created.alert_source for the dev X-User webhook.
+// Signed rooms record the alertin source name instead.
+const alertSourceWebhook = "webhook"
+
+// webhookKeyPrefix separates the dev webhook's dedup keys from every signed
+// source's ("alertmanager:...", "generic:..."), which alertin builds itself.
+const webhookKeyPrefix = "webhook:"
+
+// OpenAlertRoom opens a room for a, or joins the open room that already holds
+// a.DedupKey for the same pipeline. It is the single entry point for every alert
+// source: the dev webhook goes through CreateRoomFromAlert, the signed routes
+// pass the alertin.Alert they verified. It maps a.Title/Severity/PipelineID
+// and stores a.Raw verbatim in room.created.alert. The pipeline id takes the
+// same shape check as POST /api/rooms, but a missing or unknown pipeline NEVER
+// drops the alert (docs/api.md:103, LEAD-ARCH round 1 #10): the room opens
+// anyway with a system message and proposals disabled, so the agent cannot
+// propose a fix against a pipeline it knows nothing about. The 400 for an
+// unknown pipeline stays only on POST /api/rooms (CreateRoom). With no owners
+// config (unit tests) there is nothing to validate against, so every pipeline
+// is treated as known. No driver until someone takes control. created is false
+// when the alert joined the open room for it (see alertIndexKey) instead of
+// opening one. A resolved alert (a.Status) that matches no open room returns
+// ErrResolvedAlertNoRoom and changes nothing: it never opens a room. An empty
+// a.DedupKey turns dedup off for that alert.
+func (s *Service) OpenAlertRoom(ctx context.Context, a alertin.Alert) (RoomSnapshot, bool, error) {
+	src := string(a.Source)
+	if src == "" {
+		// An empty source would read back as a pre-source room after a restart.
+		src = "alert"
+	}
+	return s.openAlertRoom(ctx, a, src)
+}
+
+// openAlertRoom is OpenAlertRoom with the route recorded in room.created.
+func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSource string) (RoomSnapshot, bool, error) {
+	title, severity, pipelineID, raw := a.Title, a.Severity, a.PipelineID, a.Raw
 	if title == "" {
 		title = "New alert"
 	}
@@ -104,8 +154,8 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 		return RoomSnapshot{}, false, validation(fmt.Sprintf("pipeline_id %q must match ^[a-zA-Z0-9_.-]+$", pipelineID))
 	}
 	pipelineKnown := s.owners == nil || s.knownPipeline(pipelineID)
-	dedupKey, resolved := alertDedup(raw)
-	indexKey := alertIndexKey(pipelineID, dedupKey)
+	resolved := a.Status == alertin.StatusResolved
+	indexKey := alertIndexKey(pipelineID, a.DedupKey)
 	roomID := NewID("r_")
 	now := s.now().UTC()
 
@@ -135,6 +185,7 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 
 	if _, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, systemActor, events.RoomCreatedPayload{
 		Title: title, Severity: severity, PipelineID: pipelineID, Alert: raw,
+		AlertSource: alertSource, DedupKey: indexKey,
 	}); err != nil {
 		s.mu.Unlock()
 		return RoomSnapshot{}, false, err
@@ -182,11 +233,14 @@ func alertDedup(raw json.RawMessage) (key string, resolved bool) {
 
 // alertIndexKey scopes an alert dedup key to its pipeline: the same key sent for
 // two pipelines is two incidents. An empty dedup key stays empty (no dedup).
+// The key is stored in room.created (Postgres jsonb), so the separator must be
+// printable: jsonb rejects \u0000. "|" cannot occur in a pipeline id
+// ([a-zA-Z0-9_.-]), so pipeline and key never run together.
 func alertIndexKey(pipelineID, dedupKey string) string {
 	if dedupKey == "" {
 		return ""
 	}
-	return pipelineID + "\x00" + dedupKey
+	return pipelineID + "|" + dedupKey
 }
 
 // openAlertRoomLocked returns the open room that already holds indexKey (see
@@ -222,19 +276,51 @@ func (s *Service) joinAlertRoomLocked(ctx context.Context, roomID string, st *ro
 	return st.snap.Clone(), nil
 }
 
-// indexAlertRoomLocked puts an open webhook room under its alert index key
-// (pipeline and dedup key), so a repeat of the alert joins it after a restart
-// too. A key shared by several open rooms (rooms opened before dedup existed)
-// keeps the first one. Caller must hold s.mu.
+// indexAlertRoomLocked puts an open alert room under the index key it was
+// opened under, so a repeat of the alert joins it after a restart too. The key
+// is read back exactly as stored in room.created (DedupKey); it is never
+// re-derived from the body, so a dev-webhook room cannot end up under a signed
+// source's key. A room from before the source was recorded (AlertSource empty)
+// can only have come from the dev webhook, so it gets the webhook key. A key
+// shared by several open rooms (rooms opened before dedup existed) goes to the
+// first; the others stay recorded in st.dedupKey and take over when it closes
+// (see releaseAlertKeyLocked). Caller must hold s.mu.
 func (s *Service) indexAlertRoomLocked(ctx context.Context, roomID string, st *roomState) {
-	dedupKey, _ := alertDedup(s.rawAlert(ctx, roomID))
-	key := alertIndexKey(st.snap.PipelineID, dedupKey)
+	p, ok := s.roomCreated(ctx, roomID)
+	if !ok {
+		return
+	}
+	key := p.DedupKey
+	if p.AlertSource == "" {
+		dedupKey, _ := alertDedup(p.Alert)
+		key = ""
+		if dedupKey != "" {
+			key = alertIndexKey(st.snap.PipelineID, webhookKeyPrefix+dedupKey)
+		}
+	}
 	if key == "" {
 		return
 	}
 	st.dedupKey = key
 	if _, taken := s.alertRooms[key]; !taken {
 		s.alertRooms[key] = roomID
+	}
+}
+
+// releaseAlertKeyLocked drops a closed room's alert key and hands it to another
+// open room that holds the same key, if there is one (only possible for rooms
+// opened before dedup existed). Caller must hold s.mu.
+func (s *Service) releaseAlertKeyLocked(roomID string, st *roomState) {
+	key := st.dedupKey
+	if key == "" || s.alertRooms[key] != roomID {
+		return
+	}
+	delete(s.alertRooms, key)
+	for id, other := range s.rooms {
+		if id != roomID && other.dedupKey == key && s.roomOpen(other) {
+			s.alertRooms[key] = id
+			return
+		}
 	}
 }
 
@@ -333,9 +419,7 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 	}
 	// A closed room no longer takes repeats of its alert: the next one opens a
 	// new room.
-	if st.dedupKey != "" && s.alertRooms[st.dedupKey] == roomID {
-		delete(s.alertRooms, st.dedupKey)
-	}
+	s.releaseAlertKeyLocked(roomID, st)
 	if err := s.store.CloseRoom(ctx, roomID, s.now().UTC()); err != nil {
 		s.log.Warn("room: persist close failed", "room", roomID, "err", err)
 	}

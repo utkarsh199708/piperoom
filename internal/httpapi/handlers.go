@@ -2,14 +2,12 @@ package httpapi
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
 	"piperoom/internal/events"
-	"piperoom/internal/room"
 )
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
@@ -66,26 +64,7 @@ func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(raw, &probe)
 	snap, created, err := s.svc.CreateRoomFromAlert(r.Context(), probe.Title, probe.Severity, probe.PipelineID, json.RawMessage(raw))
-	if errors.Is(err, room.ErrResolvedAlertNoRoom) {
-		// A resolved notice with no open room to join is accepted and dropped:
-		// nothing was stored, so 202 rather than an error (docs/api.md).
-		writeJSON(w, http.StatusAccepted, map[string]any{
-			"ignored": true,
-			"reason":  room.ErrResolvedAlertNoRoom.Error(),
-		})
-		return
-	}
-	if err != nil {
-		s.writeErr(w, err)
-		return
-	}
-	// 201 when a room was opened; 200 with the already-open room when the alert
-	// joined it (see room.CreateRoomFromAlert).
-	status := http.StatusOK
-	if created {
-		status = http.StatusCreated
-	}
-	writeJSON(w, status, snap)
+	s.writeAlertRoom(w, snap, created, err)
 }
 
 func (s *Server) handleGetRoom(w http.ResponseWriter, r *http.Request) {

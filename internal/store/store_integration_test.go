@@ -11,6 +11,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -125,6 +126,41 @@ func appendComment(ctx context.Context, t *testing.T, s *store.PG, roomID string
 	})
 	if err != nil {
 		t.Fatalf("store: append: %v", err)
+	}
+}
+
+// room.created with alert_source and dedup_key (the room's alert index key,
+// "<pipeline>|<key>") is written to the jsonb payload column and read back
+// unchanged, with the raw alert body intact.
+func TestAppendRoomCreatedWithAlertKey(t *testing.T) {
+	s, _ := requireStore(t)
+	roomID := createTestRoom(t, s)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	in := events.RoomCreatedPayload{
+		Title: "Lag", Severity: "sev1", PipelineID: "orders",
+		Alert:       json.RawMessage(`{"groupKey":"{}:{alertname=\"Lag\"}","status":"firing"}`),
+		AlertSource: "alertmanager",
+		DedupKey:    `orders|alertmanager:{}:{alertname="Lag"}`,
+	}
+	if _, err := s.Append(ctx, roomID, events.RoomCreated, events.Actor{Kind: events.ActorSystem, ID: "system", Name: "System"}, in); err != nil {
+		t.Fatalf("store: append room.created: %v", err)
+	}
+	evs, err := s.Since(ctx, roomID, 0, 10)
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("store: since: %v (%d events)", err, len(evs))
+	}
+	out, err := events.Decode[events.RoomCreatedPayload](evs[0])
+	if err != nil {
+		t.Fatalf("store: decode: %v", err)
+	}
+	if out.AlertSource != in.AlertSource || out.DedupKey != in.DedupKey || out.PipelineID != "orders" {
+		t.Fatalf("store: read back %+v, want source %q key %q", out, in.AlertSource, in.DedupKey)
+	}
+	var alert map[string]any
+	if err := json.Unmarshal(out.Alert, &alert); err != nil || alert["status"] != "firing" {
+		t.Fatalf("store: alert body not intact: %s (%v)", out.Alert, err)
 	}
 }
 

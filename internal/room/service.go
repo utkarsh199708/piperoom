@@ -64,7 +64,7 @@ type roomState struct {
 	agentRun    uint64             // generation of the latest agent start; see releaseAgent
 	execCancel  context.CancelFunc // cancels the room's executor on close
 	exec        *execQueue         // nil until the first proposal is approved
-	dedupKey    string             // alert dedup key of a webhook room; "" otherwise
+	dedupKey    string             // alert index key of an alert room; "" otherwise
 }
 
 // Service is the room domain logic. All state derives from the event log; the
@@ -321,15 +321,17 @@ func (s *Service) interruptedStep(ctx context.Context, roomID string, p Proposal
 }
 
 func (s *Service) rawAlert(ctx context.Context, roomID string) json.RawMessage {
+	p, _ := s.roomCreated(ctx, roomID)
+	return p.Alert
+}
+
+// roomCreated returns the payload of a room's room.created event.
+func (s *Service) roomCreated(ctx context.Context, roomID string) (events.RoomCreatedPayload, bool) {
 	first, err := s.store.Since(ctx, roomID, 0, 1)
 	if err != nil || len(first) == 0 || first[0].Type != events.RoomCreated {
-		return nil
+		return events.RoomCreatedPayload{}, false
 	}
-	p, ok := decode[events.RoomCreatedPayload](first[0])
-	if !ok {
-		return nil
-	}
-	return p.Alert
+	return decode[events.RoomCreatedPayload](first[0])
 }
 
 // getStateLocked returns the cached room state, rebuilding it from the log if

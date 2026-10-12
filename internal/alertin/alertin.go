@@ -134,9 +134,10 @@ func (a Alert) RoomCreated() events.RoomCreatedPayload {
 
 var pipelineIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
-// validPipelineID reports whether id looks like an owners.yaml pipeline id.
+// ValidPipelineID reports whether id looks like an owners.yaml pipeline id
+// (the room service and cmd/server use it too, so the shape lives in one place).
 // Anything else in an alert label is ignored rather than trusted.
-func validPipelineID(id string) bool {
+func ValidPipelineID(id string) bool {
 	return pipelineIDRe.MatchString(id)
 }
 

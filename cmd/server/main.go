@@ -93,6 +93,15 @@ func run() error {
 		return fmt.Errorf("server: users/owners config: %w", err)
 	}
 
+	// Signed alert routes (POST /api/alerts/{source}). Built before anything
+	// is opened so a bad PAGERDUTY_SERVICES refuses start at once. Only the
+	// names of the enabled sources are logged, never a secret.
+	alerts, err := alertConfig(cfg, own)
+	if err != nil {
+		return err
+	}
+	log.Info("server: alert sources", "enabled", enabledAlertSources(alerts))
+
 	// --demo is fully self-contained (in-memory store + scripted agent) so A6
 	// can build the UI against it with no database or migrations. The real
 	// mode uses Postgres: migrations first (goose on migrations.FS), then the
@@ -199,7 +208,7 @@ func run() error {
 		return err
 	}
 
-	handler := httpapi.New(svc, st, log, httpapi.WithReady(ready))
+	handler := httpapi.New(svc, st, log, httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts))
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,

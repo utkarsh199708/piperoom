@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"piperoom/internal/alertin"
 	"piperoom/internal/room"
 	"piperoom/internal/store"
 	"piperoom/internal/ws"
@@ -38,9 +39,11 @@ type Server struct {
 	log     *slog.Logger
 	handler http.Handler
 
+	alerts       alertin.Config // signed alert sources; the zero value has every source disabled
 	ready        Pinger
 	probeTimeout time.Duration
 	readyWarn    readyWarner
+	refuseWarn   refuseWarner
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -57,6 +60,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 		log:          log,
 		probeTimeout: DefaultProbeTimeout,
 		readyWarn:    readyWarner{every: readyWarnEvery, now: time.Now},
+		refuseWarn:   refuseWarner{every: refuseWarnEvery, now: time.Now},
 	}
 	for _, o := range opts {
 		o(s)
@@ -84,6 +88,10 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 		// runs outside the request timeout: the connection outlives the
 		// request. Replay has its own deadline in the gateway.
 		api.Get("/rooms/{id}/ws", s.gw.ServeHTTP)
+
+		// Signed alert routes: the sender's signature or token is the auth, so
+		// no X-User. A source without a secret answers 401.
+		api.With(middleware.Timeout(requestTimeout)).Post("/alerts/{source}", s.handleSignedAlert)
 
 		api.Group(func(protected chi.Router) {
 			protected.Use(authenticate(svc))
