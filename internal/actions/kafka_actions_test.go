@@ -220,6 +220,7 @@ func TestRestartConnectorExecute(t *testing.T) {
 
 func TestSetCompatibilityExecute(t *testing.T) {
 	d := testDeps()
+	d.Registry = &fakeRegistry{compatLevel: "FULL"}
 	reg := NewRegistry()
 	if err := Register(reg, d); err != nil {
 		t.Fatal(err)
@@ -229,7 +230,7 @@ func TestSetCompatibilityExecute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "compatibility now NONE") {
+	if out != "pg.public.orders-value compatibility FULL → NONE" {
 		t.Fatalf("out %q", out)
 	}
 }
