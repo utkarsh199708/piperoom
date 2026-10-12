@@ -310,21 +310,51 @@ func (a *restartConnector) Execute(ctx context.Context, raw json.RawMessage) (st
 	if err := a.d.Connect.RestartConnector(ctx, p.Connector); err != nil {
 		return "", err
 	}
-	// Same rule as restartTask: the restart is accepted once the call succeeds.
+	// The call uses onlyFailed=true, so it restarts the connector and its
+	// failed tasks. Success needs the connector and every listed task RUNNING:
+	// a RUNNING connector with a FAILED task is not a fix.
+	taskCount := 0
 	state, running, err := awaitRunning(ctx, pollEvery(a.pollInterval), func(ctx context.Context) (string, error) {
 		st, err := a.d.Connect.Status(ctx, p.Connector)
 		if err != nil {
 			return "", err
 		}
-		return st.State, nil
+		desc, n, ok := connectorAndTasks(st)
+		taskCount = n
+		if ok {
+			return "RUNNING", nil
+		}
+		return desc, nil
 	})
 	switch {
 	case err != nil:
 		return fmt.Sprintf("restart accepted for %s; status read failed: %v", p.Connector, err), nil
 	case running:
-		return fmt.Sprintf("restarted failed tasks of %s (connector RUNNING)", p.Connector), nil
+		return fmt.Sprintf("restarted failed tasks of %s (connector and %d tasks RUNNING)", p.Connector, taskCount), nil
 	}
-	return fmt.Sprintf("restart accepted for %s; state now %s (Connect applies restarts asynchronously)", p.Connector, orUnknown(state)), nil
+	return fmt.Sprintf("restart accepted for %s; %s (Connect applies restarts asynchronously)", p.Connector, orUnknown(state)), nil
+}
+
+// connectorAndTasks describes a connector status for connect_restart_connector.
+// ok is true only when the connector and every listed task are RUNNING and at
+// least one task is listed. Otherwise desc names each part that is not
+// RUNNING, for example "connector RUNNING, task 0 FAILED".
+func connectorAndTasks(st clients.ConnectorStatus) (desc string, n int, ok bool) {
+	parts := []string{"connector " + orUnknown(st.State)}
+	allRunning := st.State == "RUNNING" && len(st.Tasks) > 0
+	for _, t := range st.Tasks {
+		if t.State != "RUNNING" {
+			allRunning = false
+			parts = append(parts, fmt.Sprintf("task %d %s", t.ID, orUnknown(t.State)))
+		}
+	}
+	if len(st.Tasks) == 0 {
+		parts = append(parts, "no tasks listed")
+	}
+	if allRunning {
+		return "RUNNING", len(st.Tasks), true
+	}
+	return strings.Join(parts, ", "), len(st.Tasks), false
 }
 
 // ---- connect_resume_connector ----

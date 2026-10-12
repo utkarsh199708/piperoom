@@ -57,13 +57,14 @@ func taskStates(states ...string) []clients.ConnectorStatus {
 	return out
 }
 
-// connectorStates builds one connector-level status per state, with no tasks.
-func connectorStates(states ...string) []clients.ConnectorStatus {
-	var out []clients.ConnectorStatus
-	for _, s := range states {
-		out = append(out, clients.ConnectorStatus{Name: "pg-orders-connector", State: s})
+// connectorWithTasks builds a connector status with one task per entry in
+// taskStates, numbered from 0.
+func connectorWithTasks(state string, taskStates ...string) clients.ConnectorStatus {
+	st := clients.ConnectorStatus{Name: "pg-orders-connector", State: state}
+	for i, s := range taskStates {
+		st.Tasks = append(st.Tasks, clients.TaskStatus{ID: i, State: s})
 	}
-	return out
+	return st
 }
 
 // pollCtx returns a context that ends after d, so a never-RUNNING state takes
@@ -175,14 +176,20 @@ func TestRestartTaskRestartCallFails(t *testing.T) {
 	}
 }
 
-func TestRestartConnectorReportsRunningAfterPolling(t *testing.T) {
-	sc := &scriptedConnect{script: connectorStates("RESTARTING", "RESTARTING", "RUNNING")}
+// A connector that is RUNNING while its task 0 is still FAILED is not a success.
+// Success waits until the connector and every task are RUNNING.
+func TestRestartConnectorWaitsForTasksToRun(t *testing.T) {
+	sc := &scriptedConnect{script: []clients.ConnectorStatus{
+		connectorWithTasks("RUNNING", "FAILED"),
+		connectorWithTasks("RUNNING", "RESTARTING"),
+		connectorWithTasks("RUNNING", "RUNNING"),
+	}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
 	out, err := a.Execute(context.Background(), json.RawMessage(restartConnectorIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if out != "restarted failed tasks of pg-orders-connector (connector RUNNING)" {
+	if out != "restarted failed tasks of pg-orders-connector (connector and 1 tasks RUNNING)" {
 		t.Fatalf("out %q", out)
 	}
 	if sc.statusCalls != 3 {
@@ -190,14 +197,30 @@ func TestRestartConnectorReportsRunningAfterPolling(t *testing.T) {
 	}
 }
 
-func TestRestartConnectorNeverRunningTimesOut(t *testing.T) {
-	sc := &scriptedConnect{script: connectorStates("FAILED")}
+// Task 0 stays FAILED: the timeout result names it, and it is still not an error.
+func TestRestartConnectorTaskStaysFailedTimesOut(t *testing.T) {
+	sc := &scriptedConnect{script: []clients.ConnectorStatus{connectorWithTasks("RUNNING", "FAILED")}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
 	out, err := a.Execute(pollCtx(t, 30*time.Millisecond), json.RawMessage(restartConnectorIn))
 	if err != nil {
 		t.Fatalf("Execute after an accepted restart returned error: %v", err)
 	}
-	want := "restart accepted for pg-orders-connector; state now FAILED (Connect applies restarts asynchronously)"
+	want := "restart accepted for pg-orders-connector; connector RUNNING, task 0 FAILED (Connect applies restarts asynchronously)"
+	if out != want {
+		t.Fatalf("out %q, want %q", out, want)
+	}
+}
+
+// With no tasks listed, the connector cannot be confirmed as RUNNING with its
+// tasks, so the action keeps waiting and reports that no tasks are listed.
+func TestRestartConnectorNoTasksListedTimesOut(t *testing.T) {
+	sc := &scriptedConnect{script: []clients.ConnectorStatus{connectorWithTasks("RUNNING")}}
+	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	out, err := a.Execute(pollCtx(t, 30*time.Millisecond), json.RawMessage(restartConnectorIn))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	want := "restart accepted for pg-orders-connector; connector RUNNING, no tasks listed (Connect applies restarts asynchronously)"
 	if out != want {
 		t.Fatalf("out %q, want %q", out, want)
 	}
@@ -218,7 +241,7 @@ func TestRestartConnectorStatusReadFailsAfterRestart(t *testing.T) {
 
 func TestRestartConnectorRestartCallFails(t *testing.T) {
 	boom := errors.New("connect 500")
-	sc := &scriptedConnect{restartErr: boom, script: connectorStates("RUNNING")}
+	sc := &scriptedConnect{restartErr: boom, script: []clients.ConnectorStatus{connectorWithTasks("RUNNING", "RUNNING")}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
 	_, err := a.Execute(context.Background(), json.RawMessage(restartConnectorIn))
 	if !errors.Is(err, boom) {
