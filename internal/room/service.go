@@ -64,7 +64,7 @@ type roomState struct {
 	agentRun    uint64             // generation of the latest agent start; see releaseAgent
 	execCancel  context.CancelFunc // cancels the room's executor on close
 	exec        *execQueue         // nil until the first proposal is approved
-	dedupKey    string             // alert dedup key of a webhook room; "" otherwise
+	dedupKeys   []string           // alert index keys of an alert room; nil otherwise
 }
 
 // Service is the room domain logic. All state derives from the event log; the
