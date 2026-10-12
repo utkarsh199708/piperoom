@@ -47,8 +47,13 @@ for those before you plan the install.
 
 All settings are environment variables read by `internal/config/config.go` (`config.Load()`).
 `config.go:9-92` holds the fields and `config.go:95-157` the defaults. The settings are grouped below.
-The Docker path reads the same names from `deploy/.env`, which starts from
-`deploy/pilot.env.example`.
+The Docker path reads `deploy/.env` (which starts from `deploy/pilot.env.example`), but the compose
+file passes only the variables it lists in its `environment:` block (`deploy/docker-compose.pilot.yml`).
+On current `main` that list has no model-provider, triage, token-budget, `AWS_*`, `VERTEX_*`,
+`GOOGLE_APPLICATION_CREDENTIALS` or retention variables. So on the Docker path, Bedrock, Vertex, the
+triage model and the token budget need the deploy update (in progress, branch `a1/deploy-model-vars`)
+before they work in the container. Compose also never passes `ANTHROPIC_BASE_URL`, so a value on the
+host cannot leak into the container.
 
 **Core and database**
 
@@ -64,7 +69,7 @@ The Docker path reads the same names from `deploy/.env`, which starts from
 | `SCHEMA_REGISTRY_URL` | Schema Registry base URL |
 | `OWNERS_FILE` | pipelines and layer owners (step 2) |
 | `USERS_FILE` | users and the layers each owns (step 2) |
-| `PIPEROOM_PUBLIC_URL` | optional. The externally visible base URL of the web UI. Used for room links in Slack, as the WebSocket origin allowed for it, and in the content-security policy of the served UI. Must be a plain `http(s)` host, with no wildcard (`internal/httpapi/static.go:41-75`; `internal/httpapi/server.go:154-156`). Empty means no links |
+| `PIPEROOM_PUBLIC_URL` | optional. The externally visible base URL, used for room links in Slack. It is a WebSocket origin only when `PIPEROOM_WEB_DIR` is set; without a web dir the WebSocket ignores it (section 4). Its host is also the public host in the served UI's content-security policy. Must be a plain `http(s)` host, with no wildcard. An invalid value stops the start (`cmd/server/main.go:84-87`; `internal/httpapi/static.go:41-75`; `internal/httpapi/server.go:150-158`; `internal/ws/gateway.go:186-189`; `internal/httpapi/static.go:195-197`). Empty means no links |
 | `PIPEROOM_WEB_DIR` | **Live.** When set, the server also serves the built web UI (`web/dist`) at `/`, and refuses to start if the directory has no `index.html` (`cmd/server/main.go:242-249`, `checkWebDir` at `:292`; `internal/httpapi/static.go:16-20`). The Docker image sets it to `/web` (`Dockerfile:44`). Unset, the server serves the API and the probes only |
 | `PIPEROOM_RETENTION_DAYS` | **Not live.** Read into config only (`config.go:91,155`). Nothing on `main` deletes events by age |
 
@@ -138,15 +143,20 @@ triage model. The main model (`PIPEROOM_MODEL`) takes over for good when any of 
 A triage request that the provider rejects (a 4xx other than 401, 408, 409 or 429) is redone on the
 main model for that run. Triage is turned off for every room only when the main model accepted the
 same request and the error is about the model or the request shape, so a wrong triage model id
-costs one failed request, not one per room (`triage.go:126-147`). Prompt caches are per model, so a
+costs one failed request, not one per room (`triage.go:126-147`; the test that decides it is
+`modelRejection`, `triage.go:161-190`). Prompt caches are per model, so a
 short triage phase saves less than the token prices suggest.
 
 **Token budget** (`PIPEROOM_ROOM_TOKEN_BUDGET`). Each room may use `2000000` model tokens by default
 (input, cache creation, cache reads, output and compaction, counted at face value). The check runs
 before each call, so one call can go past the cap by its own output (`internal/agent/budget.go:65-99`).
-When a room is over budget its run stops with a `BudgetError` and the room says so
-(`budget.go:48-49`; `internal/agent/run.go:216`). The count lives in the server process and is
-not saved: a restart starts it again at zero. Set `0` only if you accept an uncapped cost per room.
+When a room is over budget, its investigation loop stops with a `BudgetError` and the room says so
+(`budget.go:48-49`; `internal/agent/run.go:216`). Hand-offs are counted but never refused, so a
+person taking over a stopped room still gets a summary (`budget.go:160-167`;
+`internal/agent/endpoint.go:273-281`). A stopped room stays stopped until the server restarts:
+`Endpoint.Forget` drops a room's count, but nothing calls it when a room closes
+(`internal/agent/endpoint.go:250`). The count lives in the server process and is not saved. Set `0`
+only if you accept an uncapped cost per room.
 
 ## 2. Describe your pipeline: `owners.yaml` and `users.yaml`
 
@@ -250,6 +260,8 @@ the web UI, and starts it with a compose file that includes its own Postgres. It
 under `deploy/config/`, then start the compose file. The image runs `/piperoom --allow-remote`
 (`Dockerfile:67`), and its health check calls `--healthcheck` (`Dockerfile:54`). The compose file
 publishes the port on `PIPEROOM_BIND`, which defaults to `127.0.0.1` (`deploy/docker-compose.pilot.yml:98`).
+Read the compose note in section 1 before you rely on the model-provider, triage or budget settings on
+this path: compose passes only the variables it lists.
 
 **`--demo`** (`go run ./cmd/server --demo`) needs no database, stack or API key. It uses an
 in-memory store, a scripted agent and a fake topology. It runs the **real** write actions over
@@ -265,8 +277,10 @@ Unset them for a demo, or use a throwaway channel.
 (`web/src/api/client.ts:14`, override with `VITE_API_BASE`). Or set `PIPEROOM_WEB_DIR` to a built
 `web/dist` and the server serves the UI at `/` itself (step 7, `cmd/server/main.go:242-249`).
 CORS allows only the origin `http://localhost:5173` (`internal/httpapi/server.go:216`). WebSocket
-origins allowed by default are `localhost:5173` and `127.0.0.1:5173` (`internal/ws/gateway.go:188`),
-or the host of `PIPEROOM_PUBLIC_URL` when it is set (`server.go:154-156`). These origin checks stop
+origins are `localhost:5173` and `127.0.0.1:5173` (`internal/ws/gateway.go:186-189`) when no web dir
+is set, and `PIPEROOM_PUBLIC_URL` is ignored for the WebSocket then. With `PIPEROOM_WEB_DIR` set, the
+dev origins are dropped, the request's own host is accepted, and the `PIPEROOM_PUBLIC_URL` host is
+added (`internal/httpapi/server.go:150-158`). These origin checks stop
 browsers only. A non-browser client is not blocked by them. A UI served from any other origin is
 blocked until a reverse proxy puts both under one origin.
 
@@ -380,7 +394,9 @@ Point your alerting system at `POST /api/alerts/webhook` only if you cannot use 
   refused (`internal/room/service_proposals.go:83-86`). The agent still runs, but its tools are
   scoped to a pipeline, so expect it to find little.
 - **De-duplication.** A repeat has the same `dedup_key`, or the same bytes when the body has no
-  `dedup_key`, for the same `pipeline_id` (`service_room.go:118,233-235`;
+  `dedup_key`, for the same `pipeline_id` (`service_room.go:118,233-235`; signed sources build their own keys, and
+the webhook's keys carry a `webhook:` prefix, so a webhook alert never matches a signed one even with
+an identical body (`service_room.go:109-125`; index key at `:196`);
   `internal/alertin/parse.go:335-340,355-359`). If a room is still open for that key, the repeat
   joins it. A system message says the alert fired again, and the response is `200` with that room.
   No second room and no second agent start (`service_room.go:204-210,307-312`;

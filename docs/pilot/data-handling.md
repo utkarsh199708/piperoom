@@ -8,7 +8,7 @@ configured, to a Slack thread.
 ## 1. Where data goes
 
 ```
-your systems ──read-only tools──► Summary (text) ──► Claude API   (agent's view)
+your systems ──read-only tools──► Summary (text) ──► model provider   (agent's view)
                     │
                     ├───────────► Data (structured) ──► room event log ──► every room member
                     │                                   (permanent, append-only)
@@ -20,11 +20,15 @@ your systems ──read-only tools──► Summary (text) ──► Claude API 
   with `PIPEROOM_MODEL_PROVIDER` (`internal/agent/endpoint.go:86-137`): `anthropic` (the default),
   `bedrock` or `vertex`. Review that provider's current commercial terms and data-retention
   settings for your organisation before the pilot. Piperoom does not change them.
-  - **`bedrock` and `vertex` run in your cloud account.** The requests carry your AWS or Google
-    credentials and go to the regional endpoint: the Bedrock runtime in `AWS_REGION`
-    (`bedrock-runtime.<region>.amazonaws.com`, `anthropic-sdk-go@v1.80.0/bedrock/bedrock.go:257`),
-    or the Vertex AI endpoint in `VERTEX_REGION` for `VERTEX_PROJECT_ID`
-    (`anthropic-sdk-go@v1.80.0/vertex/vertex.go:96-106`). Usage is billed to that account.
+  - **`bedrock` and `vertex` use your cloud account and identity.** The requests carry your AWS or
+    Google credentials. The endpoint is in the region you set: the Bedrock runtime in `AWS_REGION`
+    (`bedrock-runtime.<region>.amazonaws.com`, `anthropic-sdk-go@v1.80.0/bedrock/bedrock.go:257`), or
+    the Vertex AI endpoint for `VERTEX_REGION`, in `VERTEX_PROJECT_ID`
+    (`anthropic-sdk-go@v1.80.0/vertex/vertex.go:96-106`). The region does not by itself fix where
+    processing happens. A Bedrock cross-region profile, such as an `in.` profile
+    (`internal/config/config.go:77`), can route requests to other regions. The Vertex values `global`,
+    `us` and `eu` are multi-region endpoints (`vertex/vertex.go:96-106`). Choose the profile or region
+    that matches where your data may be processed. Usage is billed to your account.
   - **`anthropic`: where the requests go.** The Anthropic SDK reads `ANTHROPIC_BASE_URL` from the
     environment and sends every request there (`anthropic-sdk-go@v1.80.0/client.go:52-58`). It reads
     `ANTHROPIC_API_KEY` first, then `ANTHROPIC_AUTH_TOKEN`, then `ANTHROPIC_PROFILE` and other
@@ -38,7 +42,9 @@ your systems ──read-only tools──► Summary (text) ──► Claude API 
 - **Per-room token cap.** A room stops when it has used `PIPEROOM_ROOM_TOKEN_BUDGET` model tokens
   (default `2000000`). The count is in memory and starts again at zero after a restart. It counts
   input, cache creation, cache reads, output and compaction at face value, so the cap limits model
-  work, not dollars (`internal/agent/budget.go:13-15,65-67`).
+  work, not dollars (`internal/agent/budget.go:13-15,65-67`). Hand-offs are counted but never refused.
+A stopped room stays stopped until restart, because nothing calls `Endpoint.Forget` when a room closes
+(`internal/agent/endpoint.go:250`).
 - **Room event log (`room_events`, `migrations/00001_init.sql:16`).** Every tool call, result `Data`,
   comment, steer, proposal and approval is stored **permanently** in the Piperoom database and shown
   to everyone who can open the room. There is no per-event redaction after the fact. Redaction
@@ -70,12 +76,13 @@ your systems ──read-only tools──► Summary (text) ──► Claude API 
     Slack post and the save can repeat one message after a restart (`bridge.go:6-7`).
   - Everyone in the Slack channel can see every room mirrored into it. Use a **private** channel
     (`bridge.go:4-5`).
-- **Logs.** Piperoom logs with `log/slog`. It is designed not to log secrets (the Anthropic key,
+- **Logs.** Piperoom logs with `log/slog`. It is designed not to log secrets (the model key,
   DSN passwords) or full record values. Report any place that does.
 
 ## What reaches the model
 
-These are the sources of text the model reads. Everything here goes to the Anthropic API.
+These are the sources of text the model reads. Everything here goes to the model provider
+(Anthropic, Bedrock or Vertex, per `PIPEROOM_MODEL_PROVIDER`).
 
 | Source | What the model gets | Code |
 |---|---|---|
@@ -169,7 +176,7 @@ guarantee. The controls that do not depend on the model are:
   (`internal/store/store.go:299`). Decide how long you keep closed rooms and delete them at the
   database level; there is no UI for deletion.
 - Deleting the Piperoom database deletes the room history, the Slack thread state and everything
-  else in it. Data sent to the Anthropic API, and messages already posted to Slack, are governed by
+  else in it. Data sent to the model provider (Anthropic, Bedrock or Vertex), and messages already posted to Slack, are governed by
   your agreements with those providers, not by Piperoom.
 - Back up and encrypt the room database like any other store that holds incident detail.
 
@@ -186,13 +193,15 @@ guarantee. The controls that do not depend on the model are:
 - Pin or unset `ANTHROPIC_BASE_URL`; unset `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_PROFILE` on the host
   (section 1).
 - Keep the HTTP port on loopback or behind your VPN ([setup.md](setup.md#network-exposure)).
-- Use a dedicated Anthropic key with a spend limit; rotate it at the end of the pilot.
+- Use a dedicated key or cloud identity for the model provider (an Anthropic key, or the AWS or Google
+  identity for Bedrock or Vertex), with a spend limit where the provider offers one. Rotate it at the
+  end of the pilot.
 - At the end of the pilot, revoke all Piperoom credentials, remove the Slack bot, and delete the
   room database.
 
 ## 6. Questions to answer before go-live
 
-- [ ] Is it allowed to send the fields in sections 1 and 2 (keys, statement text, error traces, proposal params, hypotheses, action output, the hand-off digest) to the Anthropic API?
+- [ ] Is it allowed to send the fields in sections 1 and 2 (keys, statement text, error traces, proposal params, hypotheses, action output, the hand-off digest) to the model provider (Anthropic, Bedrock or Vertex)?
 - [ ] Is it allowed to post proposals, params, hypotheses, approver names and close resolutions to a Slack channel, and who is in that channel?
 - [ ] Who may view incident history, and for how long is it kept?
 - [ ] Who are the approvers per layer, and are they reachable out of hours?
