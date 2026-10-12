@@ -265,24 +265,6 @@ func run() error {
 	stopRetention := startRetention(ctx, svc, retentionDays, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopRetention()
 
-	// The watcher starts after Load, so it never sees a half-built room cache.
-	// Shutdown stops it before the room service closes (the done goroutine
-	// below); the defer covers the early returns after this point.
-	watchDeps := watch.Deps{
-		Owners:       own,
-		Rooms:        watchRooms{svc: svc},
-		Config:       watchCfg,
-		MaxOpenRooms: maxAgents,
-	}
-	if wired != nil {
-		watchDeps.Source, watchDeps.Connect = wired.Source, wired.Connect
-	}
-	stopWatch, err := startWatcher(ctx, watchDeps, closedHook, log)
-	if err != nil {
-		return err
-	}
-	defer stopWatch()
-
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin)}
 	if cfg.WebDir != "" {
 		// Fail at start, not at the first page load, when the image or the
@@ -299,6 +281,27 @@ func run() error {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+
+	// The watcher starts after Load (so it never sees a half-built room cache)
+	// and after every check that can still refuse the start (web dir, handler),
+	// just before the server listens, so a start that is about to fail never
+	// runs a tick. Shutdown stops it before the room service closes (the done
+	// goroutine below); the defer covers the early returns after this point.
+	watchDeps := watch.Deps{
+		Owners:       own,
+		Rooms:        watchRooms{svc: svc},
+		Config:       watchCfg,
+		MaxOpenRooms: maxAgents,
+	}
+	if wired != nil {
+		watchDeps.Source, watchDeps.Connect = wired.Source, wired.Connect
+	}
+	stopWatch, err := startWatcher(ctx, watchDeps, closedHook, log)
+	if err != nil {
+		handler.Close()
+		return err
+	}
+	defer stopWatch()
 
 	// done closes only after Shutdown AND handler.Close (WS connections, the
 	// room service and every goroutine it owns) have returned, so main can

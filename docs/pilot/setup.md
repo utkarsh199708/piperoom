@@ -129,7 +129,8 @@ Modes:
 - `rooms`: the same checks, and a firing signal opens a room (or joins the room that is already open
   for the pipeline). The agent investigates from the evidence. When the signal clears, the room gets a
   "resolved" note and stays open until the driver closes it. A room the driver closed is not opened
-  again while the same signal still fires.
+  again while the same signal still fires. One exception: if the signal rises to sev1, the watcher
+  opens a room once more, and that one skips the cooldown.
 
 To switch from `log` to `rooms`: set `PIPEROOM_WATCH_MODE=rooms` and restart the server. At start it
 logs one line, `server: watcher starting`, with the mode, the interval and the number of pipelines
@@ -198,9 +199,9 @@ life of the process (`internal/agent/endpoint.go:236-245`). Once the count reach
 investigation call is refused at once (`budget.go:88-98`), so a new run for that room is refused
 too. Only a server restart resets the count, and changing `PIPEROOM_ROOM_TOKEN_BUDGET` also needs a
 restart. Hand-offs are counted but never refused, so a person taking over a stopped room still gets a
-summary (`budget.go:160-167`; `internal/agent/endpoint.go:273-281`). Separately, `Endpoint.Forget`
-(`internal/agent/endpoint.go:250`) is not wired: nothing calls it when a room closes. The counts of
-closed rooms stay in memory until restart. Set `0` only if you accept an uncapped cost per room.
+summary (`budget.go:160-167`; `internal/agent/endpoint.go:273-281`). Closing a room drops
+its count: the server calls `Endpoint.Forget` (`internal/agent/endpoint.go:250`) from the room-closed
+hook (`cmd/server/watch.go`), so the counts of closed rooms do not pile up in memory. Set `0` only if you accept an uncapped cost per room.
 
 ## 2. Describe your pipeline: `owners.yaml` and `users.yaml`
 

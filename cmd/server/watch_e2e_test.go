@@ -190,8 +190,12 @@ func newWatchHarness(t *testing.T) *watchHarness {
 	hook := &roomClosedHook{}
 	forget := &recForget{}
 	hook.setForget(forget)
+	// One fake clock for the watcher, the service and the store. If the service
+	// kept the real clock, "now - closedAt" would depend on the date the test
+	// runs on, and a cooldown could hide a broken ack.
+	clk := newFakeClock()
 	svc := room.New(room.Deps{
-		Store: memstore.New(), Users: room.DefaultUsers(), Owners: o,
+		Store: memstore.NewWithClock(clk.Now), Now: clk.Now, Users: room.DefaultUsers(), Owners: o,
 		Run: func(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
 			<-ctx.Done()
 			return nil
@@ -204,7 +208,7 @@ func newWatchHarness(t *testing.T) *watchHarness {
 	// Registered first, so it runs last: the watcher stops before the service closes.
 	t.Cleanup(svc.Close)
 
-	h := &watchHarness{t: t, clk: newFakeClock(), conn: &fakeConnect{state: "RUNNING"}, svc: svc, forget: forget}
+	h := &watchHarness{t: t, clk: clk, conn: &fakeConnect{state: "RUNNING"}, svc: svc, forget: forget}
 	stop, err := startWatcher(context.Background(), watch.Deps{
 		Source: fakeSource{}, Connect: h.conn, Owners: o, Rooms: watchRooms{svc: svc},
 		Config:       config.Watch{Mode: config.WatchRooms, Interval: time.Minute, CheckTimeout: 5 * time.Second, Cooldown: time.Hour},
@@ -386,7 +390,9 @@ func TestWatcherIsAckedWhenTheDriverClosesTheRoom(t *testing.T) {
 	}
 
 	// 75 more minutes of the same failure: past "still firing" (15m) and past
-	// the cooldown (60m), so only the ack can be what keeps the room closed.
+	// the cooldown (60m). The room stays closed because the signal is acked (and
+	// because the watcher already marked it as notified); a cooldown alone would
+	// not hold for this long.
 	for range 75 {
 		h.tick()
 	}
@@ -410,8 +416,8 @@ func TestWatcherIsAckedWhenTheDriverClosesTheRoom(t *testing.T) {
 		t.Fatalf("PostEvidence into a closed room = %v, want watch.ErrRoomClosed", err)
 	}
 	err = watchRooms{svc: h.svc}.PostEvidence(context.Background(), "r_does_not_exist", "x")
-	if !errors.Is(err, watch.ErrNoRoom) {
-		t.Fatalf("PostEvidence into an unknown room = %v, want watch.ErrNoRoom", err)
+	if !errors.Is(err, watch.ErrNoRoom) || !errors.Is(err, watch.ErrRoomClosed) {
+		t.Fatalf("PostEvidence into an unknown room = %v, want watch.ErrNoRoom and watch.ErrRoomClosed", err)
 	}
 }
 

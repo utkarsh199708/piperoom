@@ -37,6 +37,9 @@ services:
       dockerfile: Dockerfile
     image: piperoom:pilot
     restart: unless-stopped
+    # Shutdown stops the watcher (up to 15s) and then the HTTP server (up to 10s),
+    # which is more than Docker's default 10s before it kills the container.
+    stop_grace_period: 30s
     depends_on:
       postgres:
         condition: service_healthy
