@@ -172,7 +172,7 @@ func (r *runner) run(ctx context.Context) error {
 				if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
 					return err
 				}
-			} else if recovered {
+			} else if recovered && !outcome.statusSet {
 				r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 			}
 			continue
@@ -427,7 +427,7 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 		}
 		return r.holdAfterRecovery(ctx, messages, turns)
 	}
-	if recovered {
+	if recovered && !outcome.statusSet {
 		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 	}
 	return false, nil
@@ -450,7 +450,9 @@ func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.Be
 		*messages = appendUser(*messages, r.inputBlocks(inputs, outcome.notes)...)
 		*turns = 0
 		if !r.parked(outcome) {
-			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
+			if !outcome.statusSet {
+				r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
+			}
 			return false, nil
 		}
 	}

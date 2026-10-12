@@ -311,22 +311,26 @@ func TestVerifyChecksMapLayers(t *testing.T) {
 		{Action: "wh_something", Layer: "warehouse", Params: json.RawMessage(`{"table":"analytics.orders","ts_column":"updated_at"}`)},
 	}
 	checks := verifyChecks(steps)
-	// schema-registry has no check, kafka-connect is de-duplicated, and the
-	// warehouse is checked by the data-flow stage, not as a layer check.
-	if len(checks) != 2 {
-		t.Fatalf("checks = %d, want 2 (connect_status, pg_replication_slots)", len(checks))
+	// The compatibility step is checked per subject with schema_registry_versions,
+	// kafka-connect is de-duplicated, and the warehouse is checked by the
+	// data-flow stage, not as a layer check.
+	if len(checks) != 3 {
+		t.Fatalf("checks = %d, want 3 (schema_registry_versions, connect_status, pg_replication_slots)", len(checks))
 	}
-	if checks[0].name != "connect_status" || checks[1].name != "pg_replication_slots" {
-		t.Fatalf("checks = %q, %q", checks[0].name, checks[1].name)
+	if checks[0].name != "schema_registry_versions" || checks[1].name != "connect_status" || checks[2].name != "pg_replication_slots" {
+		t.Fatalf("checks = %q, %q, %q", checks[0].name, checks[1].name, checks[2].name)
 	}
-	if got := string(checks[0].input); !strings.Contains(got, "pg-orders-connector") {
+	if got := string(checks[0].input); !strings.Contains(got, "x-value") {
+		t.Fatalf("schema_registry_versions input should carry the subject, got %s", got)
+	}
+	if got := string(checks[1].input); !strings.Contains(got, "pg-orders-connector") {
 		t.Fatalf("connect_status input should reuse the connector param, got %s", got)
 	}
-	if !checks[0].settle {
+	if !checks[1].settle {
 		t.Fatal("connect_status must settle: it has to pass twice")
 	}
-	if checks[1].settle {
-		t.Fatal("pg_replication_slots must not settle")
+	if checks[0].settle || checks[2].settle {
+		t.Fatal("only connect_status settles")
 	}
 }
 
