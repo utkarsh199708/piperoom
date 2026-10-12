@@ -171,7 +171,7 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 	}
 
 	wantActions := []string{
-		"connect_restart_task", "connect_restart_connector",
+		"connect_restart_task", "connect_restart_connector", "connect_resume_connector",
 		"schema_set_compatibility", "schema_register",
 	}
 	gotActions := make([]string, 0, len(areg.All()))

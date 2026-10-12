@@ -36,6 +36,7 @@ func (f *fakeConnect) RestartConnector(_ context.Context, n string) error {
 	f.restarted = n
 	return nil
 }
+func (f *fakeConnect) Resume(context.Context, string) error { return nil }
 
 type fakeRegistry struct {
 	subjects    []string
