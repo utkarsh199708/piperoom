@@ -63,7 +63,7 @@ func TestWarehouseToolsPostgresThreePartIsBadInput(t *testing.T) {
 		"warehouse_row":       `{"pipeline_id":"orders","table":"dwh.analytics.orders","pk_column":"id","key":"7"}`,
 	} {
 		tt, _ := reg.Get(name)
-		if _, err := tt.Run(context.Background(), json.RawMessage(in)); !errors.Is(err, tools.ErrBadInput) {
+		if _, err := tt.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(in)); !errors.Is(err, tools.ErrBadInput) {
 			t.Errorf("%s: err = %v, want ErrBadInput", name, err)
 		}
 	}
