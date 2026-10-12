@@ -17,7 +17,7 @@ The names below match the code: tools in `internal/tools/{dbtools,kafkatools}`, 
 | Kafka | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag`, `kafka_find_by_key`, `trace_record` | describe topics/groups, read pipeline topics | **none** |
 | Kafka Connect | `connect_list_connectors`, `connect_status`, `connect_config` | REST `GET` | restart connector/task (`connect_restart_*`) |
 | Schema Registry | `schema_registry_subjects`, `_versions`, `_diff` | REST `GET` | set compatibility, register schema |
-| Room database | room service (not on `main` yet) | n/a | full access to its **own** database only |
+| Room database | room service | n/a | full access to its **own** database only (it creates its tables itself) |
 | Anthropic API | agent | API key (env var) | n/a |
 
 Everything in the "write" column other than the room database is touched **only** by
@@ -156,11 +156,15 @@ the approval process in your team.
 
 ## Room database
 
-The room service (not on `main` yet, A5 in review) is designed to use a separate Postgres
-database (`PIPEROOM_DB_URL`) that Piperoom owns: it writes the room event log and related
-tables there (`docs/api.md`, `AGENTS.md`). Nothing in this section is needed until it lands. Give it its own database and role. That
-role must not have access to any pipeline data. It holds the permanent room history, so
-treat it with the same care as the data in it (see [data-handling.md](data-handling.md)).
+The room service uses a separate Postgres database (`PIPEROOM_DB_URL`) that Piperoom owns.
+At start-up `cmd/server` applies the embedded goose migrations itself (`cmd/server/main.go:92`,
+`:210-231`, `migrations/migrate.go:20`), so the role in `PIPEROOM_DB_URL` needs rights to
+create tables and indexes in that database (migration `00001_init.sql` creates `rooms`,
+`room_events`, `proposals`, `approvals`, `suggestions`, `handoffs`; `00002` adds
+`proposal_steps`; goose adds its own `goose_db_version` table). It also needs `LISTEN`/`NOTIFY`,
+which any role has. Give it its own database and role. That role must not have access to any
+pipeline data. It holds the permanent room history, so treat it with the same care as the data
+in it (see [data-handling.md](data-handling.md)).
 
 ## Anthropic API key
 
@@ -175,4 +179,4 @@ with a spend limit, so it can be revoked or capped on its own.
 - [ ] Kafka principal has no write/group-read/alter ACLs, only pipeline-prefixed topics.
 - [ ] Connect and Registry are in read-only mode unless you deliberately enabled write mode.
 - [ ] Network: Piperoom can reach only the five systems above, the Anthropic API, and its own DB.
-- [ ] Once the room service exists: its HTTP port is not reachable from outside the pilot team's network.
+- [ ] The room service's HTTP port (`PIPEROOM_HTTP_ADDR`) is not reachable from outside the pilot team's network.

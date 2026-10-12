@@ -86,8 +86,11 @@ func run() error {
 	// can build the UI against it with no database or migrations. The real
 	// mode uses Postgres: migrations first (goose on migrations.FS), then the
 	// store.
-	var st store.Store
-	var threads slackbridge.Threads = slackbridge.NewMemThreads()
+	var (
+		st      store.Store
+		ready   httpapi.Pinger      // nil in demo mode: the in-memory store is always ready
+		threads slackbridge.Threads = slackbridge.NewMemThreads()
+	)
 	if *demoMode {
 		st = memstore.New()
 	} else {
@@ -103,6 +106,7 @@ func run() error {
 			return fmt.Errorf("server: connect room store: %w", err)
 		}
 		st = pg
+		ready = pg
 		threads = pg.SlackThreads()
 		defer pg.Close()
 	}
@@ -184,7 +188,7 @@ func run() error {
 		return err
 	}
 
-	handler := httpapi.New(svc, st, log)
+	handler := httpapi.New(svc, st, log, httpapi.WithReady(ready))
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
