@@ -2,6 +2,7 @@
 package connect
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -113,13 +114,60 @@ func (c *Client) Resume(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodPut, path, nil)
 }
 
-// do performs a request and decodes the JSON body into out; nil out skips decoding.
+// hiddenValue is what Connect prints in place of a secret it masks. Writing it
+// back would overwrite the real secret, so UpdateConfig refuses to send it.
+const hiddenValue = "[hidden]"
+
+// UpdateConfig sets one key in a connector's config. Connect's PUT replaces the
+// whole config, so it reads the current config, changes only key, and writes
+// the full map back. Connect restarts the connector's tasks on a config change.
+// It is not on clients.ConnectClient yet (contract change request); the
+// connect_update_connector_config action asserts for it.
+func (c *Client) UpdateConfig(ctx context.Context, name string, key, value string) error {
+	if key == "" {
+		return fmt.Errorf("connect: update config %s: empty key", name)
+	}
+	cfg, err := c.Config(ctx, name)
+	if err != nil {
+		return fmt.Errorf("connect: update config %s: read current config: %w", name, err)
+	}
+	if cfg == nil {
+		cfg = map[string]string{}
+	}
+	for k, v := range cfg {
+		if v == hiddenValue {
+			return fmt.Errorf("connect: update config %s: key %q is masked by Connect; refusing to write the config back", name, k)
+		}
+	}
+	cfg[key] = value
+	path := "/connectors/" + url.PathEscape(name) + "/config"
+	return c.doBody(ctx, http.MethodPut, path, cfg, nil)
+}
+
+// do performs a request without a body and decodes the JSON response into out;
+// nil out skips decoding.
 func (c *Client) do(ctx context.Context, method, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)
+	return c.doBody(ctx, method, path, nil, out)
+}
+
+// doBody is do with an optional JSON request body (nil sends none).
+func (c *Client) doBody(ctx context.Context, method, path string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return fmt.Errorf("connect: %s %s: encode body: %w", method, path, err)
+		}
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return fmt.Errorf("connect: %s %s: %w", method, path, err)
 	}
 	req.Header.Set("Accept", "application/json")
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("connect: %s %s: %w", method, path, err)
