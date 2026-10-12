@@ -13,11 +13,11 @@ for those before you plan the install.
 - **Node.js** to build and serve the web UI in `web/` (`npm ci`). `web/package.json` pins no
   version. The dev machine used Node 24 (`AGENTS.md` §3). You can skip Node if you use only the API.
 - **A Postgres database for Piperoom's own state**, separate from the source and the warehouse.
-  Its URL is `PIPEROOM_DB_URL`. The service creates its own tables at start-up
-  (`cmd/server/main.go:108`), so the role needs rights to create tables in that database.
+  Its URL is `PIPEROOM_DB_URL`. Use a role that owns only this database. The service creates its own
+  tables at start-up (`cmd/server/main.go:108`), so the role needs rights to create tables in it.
 - **Network access** from the Piperoom host to: source Postgres, warehouse Postgres, Kafka brokers,
-  Kafka Connect REST, Schema Registry, the room database, `api.anthropic.com`, and `slack.com`
-  only if you enable Slack.
+  Kafka Connect REST, Schema Registry, the room database, the Anthropic API host (`api.anthropic.com`
+  unless you pin `ANTHROPIC_BASE_URL`, section 1), and `slack.com` only if you enable Slack.
 - **Settings for real mode:** `SOURCE_DB_URL`, `WAREHOUSE_DB_URL`, `PIPEROOM_DB_URL`,
   `KAFKA_BROKERS`, `CONNECT_URL`, `SCHEMA_REGISTRY_URL`, `OWNERS_FILE`, `USERS_FILE` and
   `ANTHROPIC_API_KEY` (section 1). Unset, each one falls back to the localhost dev stack
@@ -31,12 +31,13 @@ for those before you plan the install.
 
 ## 1. Configure the environment
 
-All settings are environment variables read by `internal/config/config.go` (`config.Load()`).
+All settings are environment variables read by `internal/config/config.go` (`config.Load()`,
+`config.go:9-52` for the fields and `:57-92` for the defaults).
 
 | Variable | Meaning |
 |---|---|
-| `PIPEROOM_HTTP_ADDR` | listen address of the room service. Default `127.0.0.1:8090`. Only loopback (`127.0.0.1`, `::1`, `localhost`) starts without `--allow-remote`. Any other host, including an empty host or `0.0.0.0`, is refused without it (`cmd/server/listen.go:19-41`) |
-| `PIPEROOM_DB_URL` | Piperoom's own database: room events, proposals, Slack thread state. Migrated automatically at start-up |
+| `PIPEROOM_HTTP_ADDR` | listen address of the room service. Default `127.0.0.1:8090`. Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. Any other host, including an empty host or `0.0.0.0`, is refused unless you pass `--allow-remote` (`cmd/server/listen.go:19-41`) |
+| `PIPEROOM_DB_URL` | Piperoom's own database: room events, proposals, Slack thread state. Use a role that owns only this database. Migrated automatically at start-up |
 | `SOURCE_DB_URL` | source Postgres, the **read-only** role |
 | `WAREHOUSE_DB_URL` | warehouse, the **read-only** role. Postgres only today ([permissions.md](permissions.md#warehouse)) |
 | `KAFKA_BROKERS` | comma-separated brokers |
@@ -56,7 +57,9 @@ All settings are environment variables read by `internal/config/config.go` (`con
 | `SCHEMA_REGISTRY_PASSWORD`, `SCHEMA_REGISTRY_TLS_KEY_FILE` | **secrets** |
 | `CONNECT_USERNAME`, `CONNECT_TLS_CA_FILE`, `CONNECT_TLS_CERT_FILE` | Connect basic auth / TLS |
 | `CONNECT_PASSWORD`, `CONNECT_TLS_KEY_FILE` | **secrets** |
-| `ANTHROPIC_API_KEY` | read by the SDK from the environment; never stored in config |
+| `ANTHROPIC_API_KEY` | read by the Anthropic SDK, not by Piperoom. Piperoom does not write it to config files, events or logs. If it is unset, the SDK tries `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE` and other sources (`anthropic-sdk-go@v1.80.0/client.go:30-82`) |
+| `ANTHROPIC_BASE_URL` | **read by the SDK** (`client.go:58`). Every prompt goes to this host. Leave it unset, or pin it to the Anthropic host you approved |
+| `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE` | read by the SDK when `ANTHROPIC_API_KEY` is not set. Leave them unset on the Piperoom host, so the key used is the one you chose |
 | `ANTHROPIC_WORKSPACE_ID` | only if the key is a user key (`internal/agent/model.go:42`) |
 
 The client code refuses unsafe combinations at start-up: basic auth over `http://` and TLS files
@@ -71,18 +74,21 @@ commit them, and do not put DSNs with passwords in shell history or tickets. Use
 
 ## 2. Describe your pipeline: `owners.yaml` and `users.yaml`
 
-Start from `dev/owners.yaml` and `dev/users.yaml`.
+Start from `dev/owners.yaml` and `dev/users.yaml`. The loader refuses a pipeline that has no
+`topic_prefix`, no `source_tables` or no `connectors`, and refuses `sink_tables` without
+`sink_ts_column` (`internal/owners/owners.go:84-93`).
 
 ```yaml
-# owners.yaml
+# owners.yaml  (shape copied from dev/owners.yaml)
 pipelines:
-  - id: orders                       # used as pipeline_id in rooms/alerts
+  - id: orders                       # used as pipeline_id in rooms and alerts
     title: Orders CDC
-    source_tables: [public.orders]   # the ONLY tables pg_row/trace may read at the source
+    topic_prefix: pg                 # required: Debezium topic.prefix of the connector
+    source_tables: [public.orders]   # the ONLY tables pg_row and trace may read at the source
     connectors: [pg-orders-connector]
     consumer_groups: [order-sync]
     sink_tables: [analytics.orders]  # the ONLY tables warehouse_row may read
-    sink_ts_column: updated_at       # used for freshness
+    sink_ts_column: updated_at       # required when sink_tables is set
 layers:                              # the default owner of each layer
   postgres: <user id>
   kafka-connect: <user id>
@@ -106,9 +112,10 @@ Rules of thumb:
   A fix needs **all** of its required layers' owners to approve. The six layers are
   `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer` and `warehouse`
   (`internal/events/events.go:268`).
-- `source_tables` and `sink_tables` are a security boundary for the row tools. List only
-  tables the agent legitimately needs, and keep `SELECT` grants identical to these lists.
-  The row tools check only the pipeline the agent names (see [data-handling.md](data-handling.md#3-prompt-injection-and-untrusted-text)).
+- `source_tables` and `sink_tables` bound the row tools, but only for the pipeline the agent names.
+  The room's pipeline is not checked, so any pipeline in this file can be read. Keep the file to
+  the pipelines the room may see, and keep `SELECT` grants identical to these lists
+  ([data-handling.md](data-handling.md#3-prompt-injection-and-untrusted-text), F4).
 - Put the real people in `users.yaml`; remove the dev users.
 
 ## 3. Prepare the source database
@@ -144,7 +151,8 @@ environment above.
    It then registers the read-only tools and the six write actions (`wiring.RegisterTools`, `:159`;
    `internal/wiring/wiring.go:190-210`). This needs the credentials from
    [permissions.md](permissions.md) and `ANTHROPIC_API_KEY`.
-6. Reloads every room from the log (`:183`). A failure stops the start in real mode. Then it
+6. Reloads every room from the log (`:183`). A failure stops the start in real mode, but one room
+   that cannot be rebuilt is only logged and skipped (`internal/room/service.go:201-204`). Then it
    listens on `PIPEROOM_HTTP_ADDR` (`:229`).
 
 ```sh
@@ -158,14 +166,17 @@ in-memory store, a scripted agent and a fake topology. It runs the **real** writ
 fake clients, so the propose / approve / execute path is the real one (`cmd/server/main.go:1-8,105-151`).
 It still loads `OWNERS_FILE` and cross-checks it against the users (falling back to built-in
 demo users if `USERS_FILE` is missing). Use it to try the UI and the approval flow safely.
-Nothing in it touches your systems, but do not use it for a real incident.
+Nothing in it touches your systems. **But demo mode does post to the real Slack channel if the
+`SLACK_*` variables are set**, because the Slack mirror starts in both modes (`main.go:125-132`).
+Unset them for a demo, or use a throwaway channel.
 
 **The web UI** is not served by `cmd/server`. Run it separately: `cd web && npm ci && npm run dev`
 serves it on `localhost:5173` (`web/package.json:7`). It calls `http://localhost:8090` by default
 (`web/src/api/client.ts:12`, override with `VITE_API_BASE`). CORS allows only the origin
 `http://localhost:5173` (`internal/httpapi/server.go:171`). WebSocket origins allowed are
-`localhost:5173` and `127.0.0.1:5173` (`internal/ws/gateway.go:180`). A UI served from any other
-origin is blocked until a reverse proxy puts both under one origin.
+`localhost:5173` and `127.0.0.1:5173` (`internal/ws/gateway.go:180`). These origin checks stop
+browsers only. A non-browser client is not blocked by them. A UI served from any other origin is
+blocked until a reverse proxy puts both under one origin.
 
 Verify startup: `curl -H 'X-User: <user id>' http://127.0.0.1:8090/api/me` returns that user.
 The same call with an unknown id returns `401` (`internal/httpapi/server.go:145-160`).
@@ -173,7 +184,7 @@ The same call with an unknown id returns `401` (`internal/httpapi/server.go:145-
 ### Routes you need
 
 All under `/api`, all JSON, and all (except the WebSocket) require `X-User`
-(`internal/httpapi/server.go:62-100`; the full contract is `docs/api.md`):
+(`internal/httpapi/server.go:82-116`; the full contract is `docs/api.md`):
 
 | Purpose | Route |
 |---|---|
@@ -181,11 +192,12 @@ All under `/api`, all JSON, and all (except the WebSocket) require `X-User`
 | open a room by hand | `POST /api/rooms` `{title, severity, pipeline_id}` |
 | open a room from an alert | `POST /api/alerts/webhook` (see step 6) |
 | list / read rooms | `GET /api/rooms`, `GET /api/rooms/{id}`, `GET /api/rooms/{id}/events?after=&limit=` |
-| live view | `GET /api/rooms/{id}/ws?user=<id>&after=<seq>` (WebSocket) |
+| live view | `GET /api/rooms/{id}/ws?user=<id>&after=<seq>` (WebSocket; `?user=` is the identity, `internal/ws/gateway.go:156-160`) |
 | talk to the room | `POST /api/rooms/{id}/comments`, `/steer`, `/suggestions/{sid}/send`, `/control/request`, `/control/grant`, `/close`, `/trace` |
 | fixes | `POST /api/proposals/{pid}/approve`, `/reject` |
 | shift change | `POST /api/rooms/{id}/handoffs`, `POST /api/handoffs/{hid}/accept` |
 | pipeline map | `GET /api/pipelines/{pid}/topology` |
+| probes (no `X-User`, outside `/api`) | `GET /healthz`, `GET /readyz`; `/readyz` checks the room store with a timeout (`server.go:79-80`; `internal/httpapi/health.go:85-90`) |
 
 ### What happens on a restart
 
@@ -197,7 +209,7 @@ suggestion (`internal/room/service_steer.go:44,68,137`; `service.go:243-251`). T
 from the room's original alert, not from where the old run stopped (`service.go:247-251`).
 
 A failing agent run is retried, up to 3 runs in total, with a pause that starts at 1 second and
-doubles. Each failure posts an `agent.status` `error` event (`service.go:652-705`).
+doubles. Each failure posts an `agent.status` `error` event (`service.go:663-723`).
 
 A fix that was fully approved but had not finished when the server stopped is **not re-run**.
 It is marked failed. The service writes one `action.executed` event with `ok=false` and the text
@@ -208,11 +220,12 @@ far the interrupted step got, before you ask for a new proposal.
 ### Network exposure
 
 There is no real login yet (F1). `docs/api.md` §Auth identifies users by the `X-User` header.
-`cmd/server` refuses to listen on any address other than loopback (`127.0.0.1`, `::1`,
-`localhost`) unless you pass `--allow-remote`. With that flag it starts and logs a warning
-(`cmd/server/main.go:59-67`; `cmd/server/listen.go:19-31`). Keep `PIPEROOM_HTTP_ADDR` on loopback.
-Reach it through an SSH tunnel, a VPN, or an authenticating reverse proxy that sets `X-User`
-itself and strips the header from client requests. `--allow-remote` adds no authentication.
+`cmd/server` refuses to listen on any address other than loopback unless you pass `--allow-remote`.
+Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. With the flag it starts
+and logs a warning (`cmd/server/main.go:59-67`; `cmd/server/listen.go:19-41`). Keep
+`PIPEROOM_HTTP_ADDR` on loopback. Reach it through an SSH tunnel, a VPN, or an authenticating
+reverse proxy that sets `X-User` itself and strips the header from client requests. The WebSocket
+takes the same unverified `?user=` value. `--allow-remote` adds no authentication.
 
 ## 5. Verify with a dry run (no real alert needed)
 
@@ -262,7 +275,8 @@ handler `internal/httpapi/handlers.go:50-92`). What it does on `main`:
   No second room and no second agent start (`service_room.go:116-121,214-223`;
   `handlers.go:82-88`). A new room returns `201`. Closing the room frees the key, so the next repeat
   opens a new room (`service_room.go:336-338`). The key is rebuilt after a restart
-  (`service.go:209,229-239`).
+  (`service.go:209,229-239`). If several open rooms hold the same key, the first one keeps it
+  (`service_room.go:229-239`).
   - **Watch out:** the body alone decides whether a repeat is a repeat. A body with no `dedup_key`
     is a repeat only if it is byte-identical to the first one. If the body has a timestamp or any
     other changing field, every send opens a new room. Put a stable `dedup_key` in the body.
@@ -271,7 +285,10 @@ handler `internal/httpapi/handlers.go:50-92`). What it does on `main`:
 - **Resolved alerts.** A body with `"status": "resolved"` that matches an open room is noted in
   that room. The room stays open, because only the driver closes rooms (`service_room.go:219-222`).
   A resolved alert with no open match returns `202` with `{"ignored": true, "reason": "resolved alert with no open room"}`.
-  It stores nothing and starts no agent (`service_room.go:122-125`; `handlers.go:68-78`).
+  It stores nothing and starts no agent (`service_room.go:122-125`; `handlers.go:68-78`). A resolved
+  alert **without** a `dedup_key` always takes this path, unless its bytes are identical to an open
+  room's first alert. A resolved body is normally not identical, because its `status` differs.
+  The generic key is a hash of the body (`internal/alertin/parse.go:335-340`).
 - **Driver.** The room has no driver until someone takes control (`POST /api/rooms/{id}/control/grant`).
 
 ## 6b. Slack (optional, outbound only)
@@ -286,12 +303,14 @@ handler `internal/httpapi/handlers.go:50-92`). What it does on `main`:
   (`internal/slackbridge/bridge.go:3-4`). Approvals happen only in Piperoom.
 - Each room gets one thread. After a restart the bridge reads its saved thread state and
   continues from the last event it posted (`bridge.go:131-139`; `internal/store/slackthreads.go`).
-- What it posts, and what it never posts, is in [data-handling.md](data-handling.md#1-where-data-goes).
+  A crash between a Slack post and the save can repeat one message (`bridge.go:6-7`).
+- What it posts, including approver names, the close resolution and the byte limits, is in
+  [data-handling.md](data-handling.md#1-where-data-goes).
 
 ## 6c. Not built yet
 
 - **Real login** (F1; the design doc named in `docs/api.md` is not on `main`). Until it exists,
-  anyone who can reach the API can act as any user.
+  anyone who can reach the API or the WebSocket can act as any user.
 - **Snowflake warehouse.** Not selectable yet. See [permissions.md](permissions.md#warehouse).
 
 ## 7. Run the pilot
@@ -308,17 +327,19 @@ handler `internal/httpapi/handlers.go:50-92`). What it does on `main`:
 |---|---|
 | `pg_recent_ddl` says the audit log is not installed | trigger not installed, or role lacks `USAGE`/`SELECT` on `piperoom_audit` |
 | `kafka_consumer_lag` permission error | missing `Describe` on that consumer group |
+| `kafka_topic_config` permission error | missing `DescribeConfigs` on the pipeline's topics (see [permissions.md](permissions.md#kafka)) |
 | `pg_row` / `warehouse_row` "table is not in pipeline" | table is missing from `source_tables` / `sink_tables`, or the `pipeline_id` the agent used is not the one you expect |
-| `connect_config` shows `***` | expected: secret-looking keys are redacted (`connect_tools.go:155-170`) |
+| `connect_config` shows `***` | expected: secret-looking keys are redacted; their values are never shown (`connect_tools.go:155-170`) |
 | Proposal cannot execute | write mode not granted on Connect/Registry (by design) |
 | `connect_update_connector_config` fails with a 405 | Connect older than 3.5 does not support `PATCH /connectors/{name}/config` (`connect.go:119-140`) |
 | Server exits at start with "users/owners config" | `users.yaml` and `owners.yaml` disagree about a layer owner (step 4). The message names the user and layer |
+| Server exits at start with "topic_prefix is required", "no source tables", "no connectors" or "sink_ts_column is required" | fix the named pipeline in `owners.yaml` (`internal/owners/owners.go:84-93`) |
 | Server exits at start with "ping for migrations" | `PIPEROOM_DB_URL` cannot be reached, or the role lacks rights to create tables |
 | Server exits at start with "slack bridge" | only one of `SLACK_BOT_TOKEN` / `SLACK_CHANNEL_ID` is set, or the channel is a `#name` not an ID |
 | Slack thread never appears | bot not in the channel (`not_in_channel` in the log), or the room was opened before Slack was enabled and the server was not restarted |
 | A repeat alert opened a second room | the body differs between sends (no `dedup_key`, or a changing field), the `pipeline_id` differs, or the first room was already closed |
 | Web UI shows CORS errors | the UI is not on `http://localhost:5173`. CORS allows only that origin (`server.go:171`) |
-| Web UI shows WebSocket errors | the UI is not on `localhost:5173` or `127.0.0.1:5173` (`ws/gateway.go:180`) |
+| Web UI shows WebSocket errors | the UI is not on `localhost:5173` or `127.0.0.1:5173` (`ws/gateway.go:180`). These checks are browser-only |
 | A fix shows "interrupted by a service restart" | the server restarted mid-fix; check the system, then re-propose |
 | No agent response after a restart | the agent is idle until a driver steers or someone mentions `@agent` (step 4) |
-| No agent response | `ANTHROPIC_API_KEY` missing, or egress to the API is blocked |
+| No agent response | `ANTHROPIC_API_KEY` missing, `ANTHROPIC_BASE_URL` pointing somewhere unexpected, or egress to the API is blocked |

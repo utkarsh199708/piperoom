@@ -13,9 +13,10 @@ The names below match the code: tools in `internal/tools/{dbtools,kafkatools}`, 
 
 | System | Used by | Read access needed | Write access needed |
 |---|---|---|---|
-| Source Postgres | `pg_replication_slots`, `pg_recent_ddl`, `pg_long_transactions`, `pg_row`, `trace_record` | pipeline tables (`SELECT`), `piperoom_audit.ddl_log`, stat views | **none** |
+| Source Postgres | `pg_replication_slots`, `pg_recent_ddl`, `pg_long_transactions`, `pg_row`, `pg_publication_tables`, `trace_record` | pipeline tables (`SELECT`), `piperoom_audit.ddl_log`, stat views, catalog views | **none** |
 | Warehouse (**Postgres only today**) | `warehouse_freshness`, `warehouse_row`, `trace_record` | `SELECT` on the pipeline's sink tables | **none** |
-| Kafka | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag`, `kafka_find_by_key`, `trace_record` | describe topics/groups, read pipeline topics | **none** |
+| Kafka | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag`, `kafka_find_by_key`, `kafka_topic_config`, `trace_record` | describe topics/groups, describe topic configs, read pipeline topics | **none** |
+| Other tools | `pipeline_map` reads the clients above and no new grant; `runbook_lookup` reads only the runbook text embedded in the binary (`internal/tools/runbooks/runbooks.go:42-43`) | none | none |
 | Kafka Connect | `connect_list_connectors`, `connect_status`, `connect_config` | REST `GET` | 4 actions: `connect_restart_task`, `connect_restart_connector`, `connect_resume_connector`, `connect_update_connector_config` |
 | Schema Registry | `schema_registry_subjects`, `_versions`, `_diff` | REST `GET` | 2 actions: `schema_set_compatibility`, `schema_register` |
 | Room database | room service | n/a | full access to its **own** database only (it creates its tables itself) |
@@ -65,6 +66,12 @@ Notes:
   seeing live query text (which can contain literal values).
 - Primary-key discovery uses `information_schema`, which only lists tables the role can
   access, so the grants above are enough.
+- `pg_publication_tables` reads catalog views only (`pg_publication_tables`, `pg_class`,
+  `pg_namespace`, and `has_table_privilege` for the connector role) (`internal/clients/postgres/publication.go:85-89,138-153`).
+  It adds no table grant. It reports the publication name and the connector's database role
+  name, taken from the Connect config (`internal/tools/dbtools/pg_publication.go:30-35`). It also
+  reports, per source table, whether that table is in the publication and whether the role can
+  SELECT it. Its `Data` lists the publication's member tables. It exposes no row data.
 - Never use the Debezium replication user or the application user here.
 
 ### DDL audit (optional, recommended)
@@ -119,6 +126,7 @@ Minimum ACLs for a principal such as `User:piperoom`:
 |---|---|---|
 | Topic `<prefix>*` (prefixed, only the pipeline's topics) | `Describe` | list topics, start/end offsets |
 | Topic `<prefix>*` | `Read` | `kafka_find_by_key`, `trace_record` |
+| Topic `<prefix>*` | `DescribeConfigs` | `kafka_topic_config` (retention, cleanup policy, min in-sync replicas, partitions, replication factor). Calls `DescribeTopicConfigs` (`internal/clients/kafka/kafka.go:164-170`; `internal/tools/kafkatools/kafka_tools.go:236-270`) |
 | Group `<consumer group>` (literal, one per consumer in `owners.yaml`) | `Describe` | `kafka_consumer_lag` |
 | Cluster | `Describe` only if your brokers require it for group listing | `kafka_list_groups` |
 
@@ -170,8 +178,9 @@ Notes on the table:
   reported as an error. There is no `PUT` fallback (`connect.go:119-140`).
 - Connect restarts the connector's tasks when its config changes, so the update is not free.
 
-**Read-only mode (recommended default):** allow only the three `GET` paths above and
-`GET /connectors`. Proposals that need a write will then fail, by design.
+**Read-only mode (recommended default):** allow only these three `GET` calls:
+`GET /connectors`, `GET /connectors/{name}/status` and `GET /connectors/{name}/config`.
+Proposals that need a write will then fail, by design.
 
 **Write mode (only to allow approved fixes):** additionally allow exactly these four calls:
 
@@ -185,10 +194,11 @@ Piperoom already checks every write action against the room's pipeline (the `Sco
 `internal/actions/kafka_actions.go:55-61`, run at proposal time and before execution); this is
 defence in depth.
 
-Connector config is also read by the agent. `connect_config` shows only a fixed list of keys, and
-credential-like keys as `***` (`internal/tools/kafkatools/connect_tools.go:155-170`). Still prefer
-connectors whose secrets come from config providers (`${file:...}` / `${vault:...}`), so no secret
-is in the REST output at all.
+Connector config is also read by the agent. `connect_config` shows a fixed list of key names, every
+`transforms*` key **in full**, and secret-looking keys as `***`, so the presence of a secret key is
+shown, never its value (`internal/tools/kafkatools/connect_tools.go:155-170`). Put secrets in
+connector config providers (`${file:...}` / `${vault:...}`), not in `transforms*` settings, so no
+secret is in the REST output at all.
 
 ## Schema Registry
 
@@ -223,10 +233,18 @@ permanent room history, so treat it with the same care as the data in it (see
 
 ## Anthropic API key
 
-Set `ANTHROPIC_API_KEY` in the process environment from your secret manager. It is never
-written to config files, events, or logs by Piperoom. Use a dedicated key for the pilot
+Set `ANTHROPIC_API_KEY` in the process environment from your secret manager. Piperoom does not
+write it to config files, events or logs. The Anthropic SDK reads it, and if it is unset the SDK
+falls back to `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE` and other sources
+(`anthropic-sdk-go@v1.80.0/client.go:30-82`). Use a dedicated key for the pilot
 with a spend limit, so it can be revoked or capped on its own. If the key is a user key rather
 than a workspace key, also set `ANTHROPIC_WORKSPACE_ID` (`internal/agent/model.go:42`).
+
+**Where the prompts go.** The SDK sends every request to `ANTHROPIC_BASE_URL` when that variable is
+set (`client.go:52-58`). Prompts include the alert, human comments, proposal results and the
+hand-off digest (see [data-handling.md](data-handling.md#what-reaches-the-model)). Leave
+`ANTHROPIC_BASE_URL` unset, or pin it to the Anthropic host you approved. Leave
+`ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_PROFILE` unset on the Piperoom host.
 
 ## Review checklist
 
@@ -234,5 +252,6 @@ than a workspace key, also set `ANTHROPIC_WORKSPACE_ID` (`internal/agent/model.g
 - [ ] Postgres and warehouse roles cannot write (`INSERT` as that role fails), and see only pipeline tables.
 - [ ] Kafka principal has no write/group-read/alter ACLs, only pipeline-prefixed topics.
 - [ ] Connect and Registry are in read-only mode unless you deliberately enabled write mode. In write mode the proxy allows only the four Connect calls and two Registry calls listed above.
-- [ ] Network: Piperoom can reach only the five systems above, the Anthropic API, its own DB, and, only if Slack is configured, `https://slack.com/api` (`internal/slackbridge/bridge.go:36`).
+- [ ] Network: Piperoom can reach only the five systems above, the Anthropic API host (or the pinned `ANTHROPIC_BASE_URL` host), its own DB, and, only if Slack is configured, `https://slack.com/api` (`internal/slackbridge/bridge.go:36`).
+- [ ] `ANTHROPIC_BASE_URL` is unset or pinned, and `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_PROFILE` are unset on the host (`anthropic-sdk-go@v1.80.0/client.go:52-82`).
 - [ ] The room service's HTTP port (`PIPEROOM_HTTP_ADDR`) is not reachable from outside the pilot team's network.
