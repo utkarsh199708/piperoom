@@ -37,9 +37,11 @@ func TestSlotWalProposesResumeWithRollback(t *testing.T) {
 		"Action `connect_resume_connector`",
 		"approval flow",
 		"kafka-connect owner approves",
-		"Rollback: pause it again with `PUT /connectors/{name}/pause`",
+		"Rollback is manual, because no pause or stop action exists",
+		"`PUT /connectors/{name}/stop`",
+		"`PUT /connectors/{name}/pause`",
 		"Resuming a connector that someone stopped on purpose",
-		"Rollback is not a clean undo",
+		"Rollback is manual and not a clean undo",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("slot-wal.md lacks %q", want)

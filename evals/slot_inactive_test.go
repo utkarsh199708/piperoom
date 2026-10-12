@@ -3,6 +3,7 @@ package evals
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -120,8 +121,13 @@ func TestLiveActionsStatusIsReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	a, _ := reg.Get("connect_resume_connector")
-	if _, err := a.Execute(context.Background(), json.RawMessage(`{"connector":"pg-orders-connector"}`)); err == nil {
-		t.Error("resume executed in replay")
+	params := json.RawMessage(`{"connector":"pg-orders-connector"}`)
+	if err := a.Validate(params); err != nil {
+		t.Fatalf("resume of a recorded STOPPED connector refused: %v", err)
+	}
+	_, err = a.Execute(context.Background(), params)
+	if !errors.Is(err, errWritesDisabled) {
+		t.Errorf("resume Execute err = %v, want the replay write refusal", err)
 	}
 }
 

@@ -91,9 +91,9 @@ type connectStatusData struct {
 
 // connectStatuses returns the connector state each connect_status recording
 // with Data reports, keyed by connector. Validate of connect_resume_connector
-// and connect_restart_* reads that state, so a scenario that wants those
-// actions to validate records it in the status data, as the real tool returns
-// it. The first recording for a connector wins.
+// reads that state (the restart actions only check the connector exists), so
+// a scenario that proposes a resume records it in the status data, as the real
+// tool returns it. The first recording for a connector wins.
 func connectStatuses(recs []Recording) (map[string]clients.ConnectorStatus, error) {
 	out := map[string]clients.ConnectorStatus{}
 	for i, r := range recs {
@@ -291,6 +291,11 @@ func (replayConnect) Config(context.Context, string) (map[string]string, error) 
 }
 func (replayConnect) RestartTask(context.Context, string, int) error { return errWritesDisabled }
 func (replayConnect) RestartConnector(context.Context, string) error { return errWritesDisabled }
+
+// Resume matches the connectorResumer interface that connect_resume_connector
+// Execute asserts for, so a replayed resume reaches this refusal and never a
+// client that does not know the method.
+func (replayConnect) Resume(context.Context, string) error { return errWritesDisabled }
 
 // replayRegistry answers the one Schema Registry read that action validation
 // needs.

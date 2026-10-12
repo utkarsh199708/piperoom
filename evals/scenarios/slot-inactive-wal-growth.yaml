@@ -21,7 +21,8 @@
 # Correct fix: Resume the connector (`PUT /connectors/pg-orders-connector/resume`, the same
 #   call connect_resume_connector makes after approval), watch the slot become active and
 #   retained WAL shrink as Debezium catches up (19.6 h of changes), and watch disk usage until
-#   it does. Rollback if the resumed connector fails: `PUT /connectors/pg-orders-connector/pause`. Long term: alert on `active = false` slots
+#   it does. Rollback is manual (no pause or stop action exists): `PUT /connectors/pg-orders-connector/stop`
+#   restores the STOPPED state, `PUT .../pause` if it was PAUSED. Long term: alert on `active = false` slots
 #   and consider max_slot_wal_keep_size (trade-off: an over-limit slot is invalidated and
 #   needs a re-snapshot).
 #

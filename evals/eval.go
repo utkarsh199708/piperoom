@@ -160,6 +160,10 @@ func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 	var errs []error
 	for _, sc := range scenarios {
 		errs = append(errs, sc.Validate(toolInputs, actionNames))
+		// Malformed connect_status data would only surface mid-run otherwise.
+		if _, err := connectStatuses(sc.Recordings); err != nil {
+			errs = append(errs, fmt.Errorf("evals: scenario %q: %w", sc.Name, err))
+		}
 	}
 	return errors.Join(errs...)
 }
