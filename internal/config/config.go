@@ -70,6 +70,25 @@ type Config struct {
 
 	// WebDir, when set, makes the server serve the built web UI (web/dist) at /.
 	WebDir string // PIPEROOM_WEB_DIR
+
+	// Model endpoint. "anthropic" (default) calls the Anthropic API with
+	// ANTHROPIC_API_KEY; "bedrock" uses AWS credentials from the default chain in
+	// AWSRegion (PIPEROOM_MODEL must then be a Bedrock model or inference-profile
+	// id, e.g. an India "in." profile); "vertex" uses Google ADC.
+	ModelProvider string // PIPEROOM_MODEL_PROVIDER: anthropic | bedrock | vertex
+	AWSRegion     string // AWS_REGION (bedrock)
+	VertexProject string // VERTEX_PROJECT_ID (vertex)
+	VertexRegion  string // VERTEX_REGION (vertex)
+	// TriageModel, when set, runs the first investigation turns on a cheaper
+	// model; empty = always Model.
+	TriageModel string // PIPEROOM_TRIAGE_MODEL
+	// RoomTokenBudget caps model tokens (input + output) per room; when reached
+	// the agent stops and says so. Empty = default 2000000; "0" = no cap.
+	RoomTokenBudget string // PIPEROOM_ROOM_TOKEN_BUDGET
+
+	// RetentionDays deletes closed rooms' events older than this many days.
+	// Empty or "0" = keep forever.
+	RetentionDays string // PIPEROOM_RETENTION_DAYS
 }
 
 // Load reads the environment and applies dev defaults.
@@ -125,6 +144,15 @@ func Load() Config {
 		MaxAgents: get("PIPEROOM_MAX_AGENTS", ""),
 
 		WebDir: get("PIPEROOM_WEB_DIR", ""),
+
+		ModelProvider:   get("PIPEROOM_MODEL_PROVIDER", "anthropic"),
+		AWSRegion:       get("AWS_REGION", ""),
+		VertexProject:   get("VERTEX_PROJECT_ID", ""),
+		VertexRegion:    get("VERTEX_REGION", ""),
+		TriageModel:     get("PIPEROOM_TRIAGE_MODEL", ""),
+		RoomTokenBudget: get("PIPEROOM_ROOM_TOKEN_BUDGET", ""),
+
+		RetentionDays: get("PIPEROOM_RETENTION_DAYS", ""),
 	}
 }
 

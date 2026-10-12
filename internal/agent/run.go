@@ -83,6 +83,19 @@ type runner struct {
 	noneSubjects map[string]bool
 
 	emitMu sync.Mutex
+
+	// triageModel, when set, runs the first triageTurns turns (see triage.go).
+	// triageRan counts the turns that did, and verified turns true once a
+	// [verification] verdict has gone to the model.
+	triageModel string
+	triageTurns int
+	triageRan   int
+	verified    bool
+	// escalated turns true once a triage turn asked for propose_fix and was
+	// re-run on the main model; the run stays on the main model after that.
+	escalated bool
+	// triageSw is the endpoint-wide "triage is off" flag; nil outside an Endpoint.
+	triageSw *triageSwitch
 }
 
 // Run investigates a pipeline incident: it calls Claude, executes read-only
@@ -100,6 +113,12 @@ func Run(ctx context.Context, alert Alert, deps Deps, opts Options) error {
 // newRunner validates dependencies and builds the loop state. Tests call it
 // and then swap in a scripted model.
 func newRunner(alert Alert, deps Deps, opts Options) (*runner, error) {
+	return newRunnerWith(alert, deps, opts, nil)
+}
+
+// newRunnerWith is newRunner with the model injected. A nil m builds the
+// production client from the environment (Anthropic API).
+func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, error) {
 	opts = opts.withDefaults()
 	if deps.Tools == nil {
 		return nil, errors.New("agent: Deps.Tools is nil")
@@ -113,12 +132,15 @@ func newRunner(alert Alert, deps Deps, opts Options) (*runner, error) {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
+	if m == nil {
+		m = newModel(opts, deps.Logger)
+	}
 	return &runner{
 		alert:     alert,
 		deps:      deps,
 		opts:      opts,
 		log:       deps.Logger,
-		model:     newModel(opts, deps.Logger),
+		model:     m,
 		clk:       realClock{},
 		timing:    defaultTiming(),
 		proposals: newProposalTracker(),
@@ -187,8 +209,14 @@ func (r *runner) run(ctx context.Context) error {
 			continue
 		}
 
-		resp, err := r.model.Turn(ctx, r.request(messages))
+		resp, err := r.modelTurn(ctx, messages)
 		if err != nil {
+			// The room's token budget is spent: stop here, between turns. Tool
+			// calls of the previous turn have all finished by now.
+			if be, ok := asBudgetError(err); ok {
+				r.stopForBudget(ctx, be)
+				return nil
+			}
 			// A cancelled context is a clean shutdown (room closed), not an error.
 			if ctx.Err() != nil {
 				return stopErr(err)

@@ -179,6 +179,15 @@ func run() error {
 		run = demo.Run
 		write = demo.WriteHandoff
 	} else {
+		// The model endpoint first: a wrong provider, region, project or token
+		// budget should stop the server before it opens any connection.
+		ep, err := wiring.NewAgentEndpoint(ctx, cfg, log)
+		if err != nil {
+			return fmt.Errorf("server: %w", err)
+		}
+		run = ep.Run
+		write = ep.WriteHandoff
+
 		w, err := wiring.Open(ctx, cfg)
 		if err != nil {
 			return fmt.Errorf("server: open the data stack: %w", err)
