@@ -265,7 +265,7 @@ func (s *PG) ListRooms(ctx context.Context) ([]Room, error) {
 
 // LastRoomByDedupKey returns the newest room whose room.created payload holds
 // dedupKey (see Store.LastRoomByDedupKey). It uses the partial index on
-// payload->>'dedup_key' (migration 00004).
+// payload->>'dedup_key' (migration 00005).
 func (s *PG) LastRoomByDedupKey(ctx context.Context, dedupKey string) (Room, error) {
 	if dedupKey == "" {
 		return Room{}, fmt.Errorf("store: last room by dedup key: empty key: %w", ErrNotFound)

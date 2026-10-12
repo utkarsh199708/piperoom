@@ -62,7 +62,9 @@ const lastRoomLookupTimeout = 5 * time.Second
 // "watcher:<pipeline>"). closedAt is nil while the room is open. ok is false
 // when no such room exists, when dedupKey is empty (no dedup), or when the
 // lookup fails: the failure is logged at warn, and the caller sees "no room", so
-// a database outage makes a cooldown check fail open for that tick.
+// a database outage makes a cooldown check fail open for that tick. That is
+// accepted: with the database down, opening a room would fail as well, so no
+// duplicate room can result.
 func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, closedAt *time.Time, ok bool) {
 	indexKey := alertIndexKey(pipelineID, dedupKey)
 	if indexKey == "" {
