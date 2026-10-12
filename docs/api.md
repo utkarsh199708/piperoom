@@ -127,6 +127,27 @@ Proposals: a step's action must implement `actions.Scoped`; the server calls `Va
 `CheckScope(room's pipeline, params)` when the proposal is created and again right before `Execute`. Params are
 frozen at creation; approvals bind to those exact steps.
 
+### Watcher alerts (`alert_source: "watcher"`) — server wiring in a later PR
+
+The built-in watcher (`internal/watch`, design in `docs/design/watcher.md`) opens rooms **inside the
+process**. It has no HTTP route and no secret: `POST /api/alerts/watcher` is `404 not_found`, like any
+unknown `{source}`. The contract below is fixed now; the server calls and the `room.Service` methods land
+in a later PR (W3).
+
+- `room.created.alert_source` is `"watcher"`. `dedup_key` is `watcher:<pipeline>`, for example
+  `watcher:orders`. There is **one open watcher room per pipeline**; every signal (connector down, slot
+  inactive, slot WAL) shares that key. `room.created.alert` holds the watcher's evidence JSON.
+- **Join-on-open-room.** Before it opens a room, the watcher asks whether any room for that pipeline is
+  already open, including one opened by Alertmanager or a person. If so it posts its evidence into that room
+  as a join and opens nothing. A later signal or re-fire on the same pipeline joins the same room the same
+  way. While a signal keeps firing, at most one "still firing" join is posted every 15 minutes.
+- **Resolved.** When every signal of the pipeline has cleared, the watcher sends the same alert with
+  `status: "resolved"`. The service posts a resolved note in the open room and leaves the room **open**; a
+  resolved alert with no open room opens nothing and is dropped (same rule as the signed sources above).
+- **After a restart** the watcher joins a room that is still open but does not wake the agent. A room closed
+  less than `PIPEROOM_WATCH_COOLDOWN` ago (default 60 min) is not re-opened by the same incident.
+- Modes: `PIPEROOM_WATCH_MODE` = `off`, `log` (default: log transitions, open nothing) or `rooms`.
+
 ## WebSocket
 
 `GET /api/rooms/{id}/ws?user=<id>&after=<seq>`

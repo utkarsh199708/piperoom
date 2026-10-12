@@ -112,7 +112,7 @@ func pgRecentDDLTool(d Deps) tools.Tool {
 func pgLongTransactionsTool(d Deps) tools.Tool {
 	return &tool{
 		name: "pg_long_transactions",
-		desc: "List transactions on the source Postgres that have been open longer than a threshold (pid, user, application, state, age, wait event, statement verb; no query text).",
+		desc: "List write transactions (those holding a transaction id; read-only sessions are not listed) on the source Postgres that have been open longer than a threshold (pid, user, application, state, age, wait event, statement verb; no query text).",
 		schema: objSchema(map[string]any{
 			"older_than_minutes": intProp("Minimum transaction age in minutes. Default 5."),
 		}),

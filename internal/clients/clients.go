@@ -113,6 +113,9 @@ type SourceDB interface {
 	// RecentDDL reads the DDL audit table written by an event trigger
 	// (see dev/postgres-init). Newest first.
 	RecentDDL(ctx context.Context, since time.Time, limit int) ([]DDLChange, error)
+	// LongTransactions lists open transactions older than olderThan that hold a
+	// transaction id (writers). Read-only transactions are left out: they pin
+	// no WAL for a replication slot, so they are noise for CDC trouble.
 	LongTransactions(ctx context.Context, olderThan time.Duration) ([]Transaction, error)
 	// Row reads one row by primary key. table is "schema.table".
 	Row(ctx context.Context, table, pkColumn, pk string) (map[string]any, bool, error)
@@ -126,6 +129,10 @@ type ReplicationSlot struct {
 	ConfirmedFlushLSN string `json:"confirmed_flush_lsn"`
 	RetainedWALBytes  int64  `json:"retained_wal_bytes"` // pg_current_wal_lsn() - restart_lsn
 	WALStatus         string `json:"wal_status"`         // reserved | extended | unreserved | lost
+	// SafeWALBytes is pg_replication_slots.safe_wal_size (PG13+): bytes of WAL
+	// that can still be written before the slot becomes "unreserved". nil when
+	// Postgres reports NULL (max_slot_wal_keep_size = -1, or the slot is lost).
+	SafeWALBytes *int64 `json:"safe_wal_bytes,omitempty"`
 }
 
 type DDLChange struct {
@@ -149,6 +156,9 @@ type Transaction struct {
 	// Query is at most the statement verb (the first keyword, upper case, e.g.
 	// "UPDATE"), never the statement text.
 	Query string `json:"query"`
+	// HasXID is true when the backend holds a transaction id (backend_xid), so
+	// it has written. LongTransactions returns only such rows.
+	HasXID bool `json:"has_xid"`
 }
 
 // ---- Warehouse (Snowflake in production; Postgres in dev) ----

@@ -45,6 +45,15 @@ func DefaultThresholds() Thresholds {
 	}
 }
 
+// ThresholdsFor returns base with the pipeline's watch settings applied. It is
+// the one owners -> Thresholds mapping: the slot_wal "fire" size in owners.yaml
+// is also the retained-WAL level where pipeline_map warns, so the map and the
+// watcher cannot disagree about what "too much WAL" means.
+func ThresholdsFor(base Thresholds, p owners.Pipeline) Thresholds {
+	base.SlotRetainedWarnBytes = p.Watch().SlotWAL.FireBytes
+	return base
+}
+
 // builder builds pipeline graphs and traces records.
 type builder struct {
 	o       *owners.Owners
@@ -218,7 +227,7 @@ func (b *builder) sourceNode(p owners.Pipeline, tbl string, info *collected) Nod
 		n.Facts = map[string]string{"slot": "missing"}
 		return n
 	}
-	n.Health, n.Facts = sourceHealth(*slot, b.t)
+	n.Health, n.Facts = sourceHealth(*slot, ThresholdsFor(b.t, p))
 	return n
 }
 
