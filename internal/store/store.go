@@ -155,6 +155,21 @@ func newPG(pool *pgxpool.Pool, connString string, log *slog.Logger) *PG {
 // reconnection); it also shows up in pg_stat_activity for ops.
 func (s *PG) ListenAppName() string { return s.hub.appName }
 
+// pingTimeout caps Ping even when the caller's deadline is longer: a
+// readiness probe must answer quickly.
+const pingTimeout = 2 * time.Second
+
+// Ping checks that the database answers a trivial query. The readiness probe
+// (GET /readyz) uses it.
+func (s *PG) Ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, pingTimeout)
+	defer cancel()
+	if _, err := s.pool.Exec(ctx, "SELECT 1"); err != nil {
+		return fmt.Errorf("store: ping: %w", err)
+	}
+	return nil
+}
+
 // Close releases the pool and waits for the hub to stop.
 func (s *PG) Close() {
 	if s.cancel != nil {
