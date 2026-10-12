@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -17,36 +19,42 @@ import (
 	"piperoom/internal/config"
 )
 
-// Avro amount types as Debezium writes them: "int" before the numeric(12,2)
-// migration, bytes with logicalType decimal after it.
+// The two value schemas are real Schema Registry responses captured from the dev
+// stack (copies of cmd/devconsumer/testdata): version 1 has amount as int, version
+// 2 has amount as bytes with logicalType decimal. Debezium defines the row record
+// once, in before, and refers to it from after as "Value".
 const (
-	intAmount     = `["null","int"]`
-	decimalAmount = `["null",{"type":"bytes","scale":2,"precision":12,"connect.name":"org.apache.kafka.connect.data.Decimal","logicalType":"decimal"}]`
+	intSchemaFile     = "schema-2.json"
+	decimalSchemaFile = "schema-3.json"
 )
 
-// rowRecord is one row of the envelope: the "before" and "after" payload.
-func rowRecord(amount string) string {
-	return `{"type":"record","name":"Value","fields":[{"name":"id","type":"long"},{"name":"amount","type":` + amount + `,"default":null}]}`
-}
-
-// valueSchema is a Debezium value schema (envelope) for orders with the given amount type.
-func valueSchema(amount string) string {
-	return `{"type":"record","name":"Envelope","namespace":"pg.public.orders","fields":[` +
-		`{"name":"before","type":["null",` + rowRecord(amount) + `],"default":null},` +
-		`{"name":"after","type":["null",` + rowRecord(amount) + `],"default":null},` +
-		`{"name":"op","type":"string"}]}`
+// capturedSchema returns the schema text of a captured registry response.
+func capturedSchema(t testing.TB, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatalf("read capture: %v", err)
+	}
+	var v struct {
+		Schema string `json:"schema"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil || v.Schema == "" {
+		t.Fatalf("capture %s has no schema: %v", name, err)
+	}
+	return v.Schema
 }
 
 // fakeLayers plays Kafka Connect and Schema Registry for fixSchemaChange on one
-// server. Restarting task 0 registers the new schema, as Debezium does, but only
-// while the subject allows it (compatibility NONE).
+// server. Restarting task 0 registers nextSchema, as Debezium does, but only while
+// the subject allows it (compatibility NONE).
 type fakeLayers struct {
-	mu        sync.Mutex
-	connState string
-	taskState string
-	compat    string
-	schemas   []string // value schema per version; schemas[0] is version 1
-	restarts  int
+	mu         sync.Mutex
+	connState  string
+	taskState  string
+	compat     string
+	schemas    []string // value schema per version; schemas[0] is version 1
+	nextSchema string   // what a task restart registers
+	restarts   int
 
 	noRegister bool // a restart does not register the new schema (timeout path)
 	failLatest bool // GET .../versions/latest returns 500 (registry down path)
@@ -63,7 +71,7 @@ func (f *fakeLayers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.restarts++
 		f.taskState = "RUNNING"
 		if f.compat == "NONE" && !f.noRegister && !f.latestIsDecimal() {
-			f.schemas = append(f.schemas, valueSchema(decimalAmount))
+			f.schemas = append(f.schemas, f.nextSchema)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodPut && path == "/config/"+valueSubject:
@@ -100,7 +108,7 @@ func (f *fakeLayers) latestIsDecimal() bool {
 	return err == nil && ok
 }
 
-// snapshot returns the state the test asserts on, under the lock the handler uses.
+// snapshot returns the state the tests assert on, under the lock the handler uses.
 func (f *fakeLayers) snapshot() (compat, taskState string, versions, restarts int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -128,28 +136,28 @@ func newTestStack(t *testing.T, f *fakeLayers) (*stack, *bytes.Buffer) {
 
 // brokenLayers is the stack right after the migration: version 1 has int, the
 // subject is BACKWARD, and task 0 has FAILED.
-func brokenLayers() *fakeLayers {
+func brokenLayers(t testing.TB) *fakeLayers {
 	return &fakeLayers{
-		connState: "RUNNING",
-		taskState: "FAILED",
-		compat:    "BACKWARD",
-		schemas:   []string{valueSchema(intAmount)},
+		connState:  "RUNNING",
+		taskState:  "FAILED",
+		compat:     "BACKWARD",
+		schemas:    []string{capturedSchema(t, intSchemaFile)},
+		nextSchema: capturedSchema(t, decimalSchemaFile),
 	}
 }
 
 // fixedLayers is the stack after a complete fix: version 2 has decimal, the
-// connector and task are RUNNING, and the subject is back on BACKWARD.
-func fixedLayers(compat string) *fakeLayers {
-	return &fakeLayers{
-		connState: "RUNNING",
-		taskState: "RUNNING",
-		compat:    compat,
-		schemas:   []string{valueSchema(intAmount), valueSchema(decimalAmount)},
-	}
+// connector and task are RUNNING, and the subject is on the given compatibility.
+func fixedLayers(t testing.TB, compat string) *fakeLayers {
+	f := brokenLayers(t)
+	f.schemas = append(f.schemas, f.nextSchema)
+	f.taskState = "RUNNING"
+	f.compat = compat
+	return f
 }
 
 func TestFixSchemaChangeOnBrokenStack(t *testing.T) {
-	f := brokenLayers()
+	f := brokenLayers(t)
 	s, logs := newTestStack(t, f)
 	if err := fixSchemaChange(context.Background(), s); err != nil {
 		t.Fatalf("fixSchemaChange on broken stack: %v", err)
@@ -172,12 +180,12 @@ func TestFixSchemaChangeOnBrokenStack(t *testing.T) {
 	}
 }
 
-// Already-fixed stacks must succeed without touching the task. Only the
-// compatibility setting differs between the cases.
+// Already fixed (schema registered, task RUNNING): succeed without a restart and
+// end on BACKWARD, whatever compatibility the stack was left on.
 func TestFixSchemaChangeAlreadyFixed(t *testing.T) {
 	for _, compat := range []string{"NONE", "BACKWARD"} {
 		t.Run("compat "+compat, func(t *testing.T) {
-			f := fixedLayers(compat)
+			f := fixedLayers(t, compat)
 			s, logs := newTestStack(t, f)
 			if err := fixSchemaChange(context.Background(), s); err != nil {
 				t.Fatalf("fixSchemaChange on fixed stack: %v", err)
@@ -190,7 +198,7 @@ func TestFixSchemaChangeAlreadyFixed(t *testing.T) {
 				t.Errorf("task 0 state = %q, want RUNNING", task)
 			}
 			if restarts != 0 {
-				t.Errorf("task restarts = %d, want 0 (task was already RUNNING)", restarts)
+				t.Errorf("task restarts = %d, want 0 (schema registered and task RUNNING)", restarts)
 			}
 			if versions != 2 {
 				t.Errorf("registered versions = %d, want 2 (nothing new registered)", versions)
@@ -205,10 +213,10 @@ func TestFixSchemaChangeAlreadyFixed(t *testing.T) {
 	}
 }
 
-// The new schema is registered, but the task is FAILED (someone registered the
-// schema and did not restart). The fix restarts it once and does not wait.
+// The schema is registered but the task is FAILED (someone registered it and did
+// not restart). The fix restarts the task once and does not wait.
 func TestFixSchemaChangeRegisteredButTaskFailed(t *testing.T) {
-	f := fixedLayers("NONE")
+	f := fixedLayers(t, "NONE")
 	f.taskState = "FAILED"
 	s, logs := newTestStack(t, f)
 	if err := fixSchemaChange(context.Background(), s); err != nil {
@@ -229,10 +237,29 @@ func TestFixSchemaChangeRegisteredButTaskFailed(t *testing.T) {
 	}
 }
 
+// The schema is not registered yet, and task 0 shows RUNNING. The task can still
+// fail again on the 409, so the fix restarts it anyway, then registers the schema.
+func TestFixSchemaChangeNotRegisteredTaskRunning(t *testing.T) {
+	f := brokenLayers(t)
+	f.taskState = "RUNNING"
+	f.compat = "NONE"
+	s, _ := newTestStack(t, f)
+	if err := fixSchemaChange(context.Background(), s); err != nil {
+		t.Fatalf("fixSchemaChange: %v", err)
+	}
+	compat, task, versions, restarts := f.snapshot()
+	if compat != "BACKWARD" || task != "RUNNING" || versions != 2 {
+		t.Errorf("end state compat=%q task=%q versions=%d, want BACKWARD RUNNING 2", compat, task, versions)
+	}
+	if restarts != 1 {
+		t.Errorf("task restarts = %d, want 1 (not registered: always restart)", restarts)
+	}
+}
+
 // Partly fixed: compatibility is NONE and the schema is not registered yet. The
 // fix finishes the job: restart, wait for the new version, restore BACKWARD.
 func TestFixSchemaChangePartlyFixed(t *testing.T) {
-	f := brokenLayers()
+	f := brokenLayers(t)
 	f.compat = "NONE"
 	s, _ := newTestStack(t, f)
 	if err := fixSchemaChange(context.Background(), s); err != nil {
@@ -247,7 +274,7 @@ func TestFixSchemaChangePartlyFixed(t *testing.T) {
 
 // Running the fix twice: the second run sees the fixed stack and changes nothing.
 func TestFixSchemaChangeRunTwice(t *testing.T) {
-	f := brokenLayers()
+	f := brokenLayers(t)
 	s, _ := newTestStack(t, f)
 	ctx := context.Background()
 	for i := 1; i <= 2; i++ {
@@ -267,10 +294,10 @@ func TestFixSchemaChangeRunTwice(t *testing.T) {
 	}
 }
 
-// Error path: the new schema never registers. The fix must fail, and must not
-// restore BACKWARD, since that would make the task fail again on the next record.
+// Error path: the new schema never registers. The fix must fail and must not
+// restore BACKWARD, which would make the task fail again on the next record.
 func TestFixSchemaChangeNewSchemaNeverRegistered(t *testing.T) {
-	f := brokenLayers()
+	f := brokenLayers(t)
 	f.noRegister = true
 	s, _ := newTestStack(t, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
@@ -288,7 +315,7 @@ func TestFixSchemaChangeNewSchemaNeverRegistered(t *testing.T) {
 // Error path: the registry cannot answer the latest-version read. The fix must
 // stop before it changes anything.
 func TestFixSchemaChangeRegistryDown(t *testing.T) {
-	f := brokenLayers()
+	f := brokenLayers(t)
 	f.failLatest = true
 	s, _ := newTestStack(t, f)
 	err := fixSchemaChange(context.Background(), s)
@@ -301,18 +328,29 @@ func TestFixSchemaChangeRegistryDown(t *testing.T) {
 	}
 }
 
+// TestAmountIsDecimal runs on the real captured schemas. The "after" reference is
+// changed in the text to cover the fully qualified name and an unknown name.
 func TestAmountIsDecimal(t *testing.T) {
+	intSchema := capturedSchema(t, intSchemaFile)
+	decSchema := capturedSchema(t, decimalSchemaFile)
+	const bareRef = `["null","Value"]`
+	if strings.Count(decSchema, bareRef) != 1 {
+		t.Fatalf("capture no longer has exactly one %s; update the fixture edits", bareRef)
+	}
 	tests := []struct {
 		name    string
 		schema  string
 		want    bool
 		wantErr bool
 	}{
-		{"int before the migration", valueSchema(intAmount), false, false},
-		{"decimal after the migration", valueSchema(decimalAmount), true, false},
-		{"bytes without decimal logical type", valueSchema(`["null","bytes"]`), false, false},
+		{"captured int (version 1)", intSchema, false, false},
+		{"captured decimal (version 2)", decSchema, true, false},
+		{"decimal, after by fully qualified name", strings.Replace(decSchema, bareRef, `["null","pg.public.orders.Value"]`, 1), true, false},
+		{"int, after by fully qualified name", strings.Replace(intSchema, bareRef, `["null","pg.public.orders.Value"]`, 1), false, false},
+		{"after names an undefined record", strings.Replace(decSchema, bareRef, `["null","Missing"]`, 1), false, true},
 		{"not JSON", "not-json", false, true},
-		{"no after field", `{"type":"record","name":"Envelope","fields":[{"name":"op","type":"string"}]}`, false, true},
+		{"not a record", `"string"`, false, true},
+		{"no after field", `{"type":"record","name":"E","fields":[{"name":"op","type":"string"}]}`, false, true},
 		{"after has no amount", `{"type":"record","name":"E","fields":[{"name":"after","type":["null",{"type":"record","name":"V","fields":[{"name":"id","type":"long"}]}]}]}`, false, true},
 	}
 	for _, tt := range tests {

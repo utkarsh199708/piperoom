@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hamba/avro/v2"
 )
 
 type scenario struct {
@@ -80,15 +82,24 @@ func fixSchemaChange(ctx context.Context, s *stack) error {
 			return err
 		}
 	}
-	st, err := s.connectorStatus(ctx)
-	if err != nil {
-		return err
+	// Restart unless the schema is registered and task 0 is already RUNNING. A
+	// task that shows RUNNING can still fail again on the 409, so when the schema
+	// is not registered the restart always happens.
+	restart := true
+	if registered {
+		st, err := s.connectorStatus(ctx)
+		if err != nil {
+			return err
+		}
+		restart = len(st.Tasks) == 0 || st.Tasks[0].State != "RUNNING"
+		if !restart {
+			s.log.Info("skipped: task 0 already RUNNING, no restart")
+		}
 	}
-	// A RUNNING task is left alone: restarting it would only replay the same work.
-	if len(st.Tasks) > 0 && st.Tasks[0].State == "RUNNING" {
-		s.log.Info("skipped: task 0 already RUNNING, no restart")
-	} else if err := s.restartTask(ctx, 0); err != nil {
-		return err
+	if restart {
+		if err := s.restartTask(ctx, 0); err != nil {
+			return err
+		}
 	}
 	if err := s.waitConnector(ctx, "RUNNING", 60*time.Second); err != nil {
 		return err
@@ -135,81 +146,68 @@ func (s *stack) latestAmountIsDecimal(ctx context.Context, subject string) (bool
 	return ok, nil
 }
 
-// avroField and avroRecord decode only what is needed to find a field by name in
-// an Avro record schema.
-type avroField struct {
-	Name string          `json:"name"`
-	Type json.RawMessage `json:"type"`
-}
-
-type avroRecord struct {
-	Type   string      `json:"type"`
-	Fields []avroField `json:"fields"`
-}
-
-// amountIsDecimal walks a Debezium value schema (an envelope record with before
-// and after fields) down to after.amount and reports whether it is bytes with
-// logicalType decimal. Unions are searched branch by branch, so the "null"
-// branches are skipped.
+// amountIsDecimal reports whether the value schema's after record has amount as
+// Avro bytes with logicalType decimal. Debezium defines the row record once,
+// inside before, and refers to it by name from after, so the schema is parsed
+// with hamba/avro (which resolves those references) before the fields are read.
 func amountIsDecimal(schema string) (bool, error) {
-	var root avroRecord
-	if err := json.Unmarshal([]byte(schema), &root); err != nil {
-		return false, fmt.Errorf("decode value schema: %w", err)
+	root, err := avro.Parse(schema)
+	if err != nil {
+		return false, fmt.Errorf("parse value schema: %w", err)
 	}
-	after, ok := fieldType(root.Fields, "after")
+	env, ok := root.(*avro.RecordSchema)
+	if !ok {
+		return false, fmt.Errorf("value schema is %s, want a record", root.Type())
+	}
+	after, ok := fieldByName(env, "after")
 	if !ok {
 		return false, errors.New("value schema has no after field")
 	}
-	for _, branch := range unionBranches(after) {
-		var rec avroRecord
-		if json.Unmarshal(branch, &rec) != nil || rec.Type != "record" {
-			continue
-		}
-		amount, ok := fieldType(rec.Fields, "amount")
-		if !ok {
-			return false, errors.New("after record has no amount field")
-		}
-		for _, t := range unionBranches(amount) {
-			if isDecimalBytes(t) {
-				return true, nil
+	row, ok := rowRecord(after)
+	if !ok {
+		return false, errors.New("after field has no record branch")
+	}
+	amount, ok := fieldByName(row, "amount")
+	if !ok {
+		return false, errors.New("row record has no amount field")
+	}
+	return isDecimalBytes(amount), nil
+}
+
+// rowRecord returns the record a field type points to: the record itself, a
+// named reference to it, or the record inside a union such as ["null", Value].
+func rowRecord(t avro.Schema) (*avro.RecordSchema, bool) {
+	switch v := t.(type) {
+	case *avro.RecordSchema:
+		return v, true
+	case *avro.RefSchema:
+		rec, ok := v.Schema().(*avro.RecordSchema)
+		return rec, ok
+	case *avro.UnionSchema:
+		for _, m := range v.Types() {
+			if rec, ok := rowRecord(m); ok {
+				return rec, true
 			}
-		}
-		return false, nil
-	}
-	return false, errors.New("after field is not a record")
-}
-
-// isDecimalBytes reports whether one Avro type is bytes with logicalType decimal.
-// A bare name such as "int" is a JSON string and does not decode into the struct.
-func isDecimalBytes(raw json.RawMessage) bool {
-	var t struct {
-		Type        string `json:"type"`
-		LogicalType string `json:"logicalType"`
-	}
-	if json.Unmarshal(raw, &t) != nil {
-		return false
-	}
-	return t.Type == "bytes" && t.LogicalType == "decimal"
-}
-
-// fieldType returns the declared type of the named field.
-func fieldType(fields []avroField, name string) (json.RawMessage, bool) {
-	for _, f := range fields {
-		if f.Name == name {
-			return f.Type, true
 		}
 	}
 	return nil, false
 }
 
-// unionBranches returns the branches of an Avro union, or the type itself when it
-// is not a union.
-func unionBranches(t json.RawMessage) []json.RawMessage {
-	var branches []json.RawMessage
-	if json.Unmarshal(t, &branches) == nil {
-		return branches
+// fieldByName returns the declared type of a field of rec.
+func fieldByName(rec *avro.RecordSchema, name string) (avro.Schema, bool) {
+	for _, f := range rec.Fields() {
+		if f.Name() == name {
+			return f.Type(), true
+		}
 	}
-	return []json.RawMessage{t}
+	return nil, false
+}
+
+// isDecimalBytes reports whether an Avro type is bytes with logicalType decimal.
+// Debezium writes numeric columns this way (precise decimal mode).
+func isDecimalBytes(t avro.Schema) bool {
+	p, ok := t.(*avro.PrimitiveSchema)
+	return ok && p.Type() == avro.Bytes && p.Logical() != nil && p.Logical().Type() == avro.Decimal
 }
 
 // connector-down: the connector is paused, so the replication slot goes
