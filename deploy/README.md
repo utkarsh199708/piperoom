@@ -132,7 +132,7 @@ use (empty is 2,000,000; `0` is no cap).
 - A **cross-region** inference profile (a prefix such as `in.`, `us.`, `eu.`, `apac.` or
   `global.`) can process a request in another region than `AWS_REGION`. If data must not leave
   a region or country, check the profile's list of regions before you use it.
-- Credentials, in the order that is easiest to harder: a Bedrock API key in
+- Credentials, from easiest to hardest: a Bedrock API key in
   `AWS_BEARER_TOKEN_BEDROCK`; static keys in `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
   (plus `AWS_SESSION_TOKEN` for temporary ones); an instance or task **role**, with nothing
   set (on EC2 the IMDSv2 hop limit must be 2 for containers); on Kubernetes **IRSA**, whose
@@ -140,6 +140,11 @@ use (empty is 2,000,000; `0` is no cap).
   only `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on the models you use.
 - `AWS_PROFILE` works only if you mount a config file. `~/.aws` is **not** mounted by default;
   the commented lines under `volumes` in the compose file show how to mount one profile file.
+  The container runs as uid 65532, so give those files to that user:
+  `sudo chown 65532:65532 <file> && chmod 0400 <file>`. A file that is mode 0600 and owned
+  by you cannot be read inside the container.
+- With an instance or task role, add `169.254.169.254` (EC2 IMDS) and `169.254.170.2` (ECS
+  credentials) to `NO_PROXY` if you use a proxy (see [Outbound proxy](#outbound-proxy)).
 - The server checks that credentials resolve at start-up, so a missing credential fails the
   start rather than the first alert. It does not call the model at start-up.
 
@@ -153,7 +158,9 @@ use (empty is 2,000,000; `0` is no cap).
   `deploy/config/gcp-sa.json` (git-ignored; `deploy/config` is already mounted at `/config`),
   set `GOOGLE_APPLICATION_CREDENTIALS=/config/gcp-sa.json`, and give the service account only
   the Vertex AI User role. To keep the key outside `deploy/config`, use the commented extra
-  mount in the compose file. Treat the key file as a secret.
+  mount in the compose file. Treat the key file as a secret. The container runs as uid 65532,
+  and a bind-mounted file that is mode 0600 and owned by you is unreadable to it, so run
+  `sudo chown 65532:65532 deploy/config/gcp-sa.json && chmod 0400 deploy/config/gcp-sa.json`.
 
 `ANTHROPIC_BASE_URL` is deliberately not passed to the container (see the comment in the
 compose file): a value in the host environment must not be able to redirect model traffic.
@@ -167,10 +174,34 @@ Connect, Schema Registry. Kafka and Postgres use plain TCP and do not use the pr
 container must reach them directly. A proxy that re-signs TLS needs its CA in the image; that
 is not covered here.
 
-## Data retention
+- Use the UPPER-CASE names. Lower-case `https_proxy` or `no_proxy` in `deploy/.env` are
+  ignored, and a lower-case variable exported in your shell is not passed to the container.
+- **Bedrock with an instance or task role:** add `169.254.169.254` (EC2 IMDS) and
+  `169.254.170.2` (ECS credentials) to `NO_PROXY`. The AWS SDK fetches role credentials over
+  plain HTTP and follows the proxy variables, so without this the request goes to your proxy
+  and fails.
+- Google's metadata client ignores the proxy variables, so Vertex on a GCE VM needs nothing.
 
-`PIPEROOM_RETENTION_DAYS` deletes the events of closed rooms older than that many days. Empty
-or `0` keeps everything. Open rooms are never deleted.
+## Run compose from a clean shell
+
+Compose gives a variable exported in your shell priority over `deploy/.env`. A developer's own
+`AWS_*`, `ANTHROPIC_*`, `HTTPS_PROXY` or `PIPEROOM_*` could therefore reach the container
+without being in the file. Run compose from a clean shell (for example
+`env -i PATH="$PATH" HOME="$HOME" docker compose ...`), or check first with
+`docker compose -f deploy/docker-compose.pilot.yml config`, which prints the values the
+container will get (it shows secrets, so do not paste the output).
+
+## Data retention (not active yet)
+
+`PIPEROOM_RETENTION_DAYS` is passed to the server, but it **has no effect yet**: it takes effect
+when the retention feature lands (PR in review). Until then nothing is deleted. When active, it
+deletes the events of closed rooms older than that many days; empty or `0` keeps everything,
+and open rooms are never deleted.
+
+## Watcher (not active yet)
+
+The four `PIPEROOM_WATCH_*` settings are also passed through but **not active yet** (watcher in
+review). Leave them empty until it lands.
 
 ## Try the UI with no stack (demo mode)
 

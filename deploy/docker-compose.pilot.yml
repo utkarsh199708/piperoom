@@ -147,7 +147,9 @@ services:
       # Optional, Bedrock with a named AWS profile (AWS_PROFILE). Off by default so
       # the container never sees a developer's whole ~/.aws. Prefer a Bedrock API
       # key, static keys in deploy/.env, or an instance role. Mount only a file
-      # that holds the one profile:
+      # that holds the one profile. The container runs as uid 65532: give it the
+      # files with  sudo chown 65532:65532 <file> && chmod 0400 <file>  (a 0600
+      # file owned by you is unreadable inside the container).
       # - ./secrets/aws-config:/home/nonroot/.aws/config:ro
       # - ./secrets/aws-credentials:/home/nonroot/.aws/credentials:ro
     # The image has a HEALTHCHECK (GET /healthz). Logs: docker compose logs -f piperoom
