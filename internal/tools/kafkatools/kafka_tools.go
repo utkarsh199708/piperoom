@@ -290,6 +290,9 @@ func pipelineTopic(o *owners.Owners, pipelineID, table string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("%w: pipeline %q not found", tools.ErrBadInput, pipelineID)
 	}
+	if p.TopicPrefix == "" {
+		return "", fmt.Errorf("%w: pipeline %q has no topic_prefix", tools.ErrBadInput, pipelineID)
+	}
 	switch {
 	case table == "" && len(p.SourceTables) == 1:
 		table = p.SourceTables[0]
