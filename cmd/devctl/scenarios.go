@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hamba/avro/v2"
 )
 
 type scenario struct {
@@ -49,38 +54,160 @@ func breakSchemaChange(ctx context.Context, s *stack) error {
 
 // The fix: allow the new schema version, restart the task, then restore the
 // compatibility rule so the next breaking change is caught again.
+//
+// The fix is idempotent. The break may still be active, half-fixed (compatibility
+// NONE, schema not registered yet) or fully fixed by someone else. Every case
+// ends with task 0 RUNNING and compatibility BACKWARD.
 func fixSchemaChange(ctx context.Context, s *stack) error {
-	if err := s.setCompatibility(ctx, valueSubject, "NONE"); err != nil {
-		return err
-	}
-	// Count the registered versions before restarting, so we can tell when the
-	// task has registered the new one.
-	before, err := s.schemaVersions(ctx, valueSubject)
+	// "New schema already registered" is decided from the latest value version,
+	// not from a version count. A count taken before a restart cannot tell a new
+	// version from an old one, and on an already fixed stack no new version comes,
+	// so waiting for one would time out. The schema from before the migration has
+	// amount as Avro int, so amount as bytes/decimal in the latest version means
+	// the new schema is in the registry.
+	registered, err := s.latestAmountIsDecimal(ctx, valueSubject)
 	if err != nil {
 		return err
 	}
-	if err := s.restartTask(ctx, 0); err != nil {
-		return err
+	var before []int
+	if registered {
+		s.log.Info("skipped: new schema version already registered, no wait for a new version")
+	} else {
+		if err := s.setCompatibility(ctx, valueSubject, "NONE"); err != nil {
+			return err
+		}
+		// Count the registered versions before restarting, so we can tell when the
+		// task has registered the new one.
+		if before, err = s.schemaVersions(ctx, valueSubject); err != nil {
+			return err
+		}
+	}
+	// Restart unless the schema is registered and task 0 is already RUNNING. A
+	// task that shows RUNNING can still fail again on the 409, so when the schema
+	// is not registered the restart always happens.
+	restart := true
+	if registered {
+		st, err := s.connectorStatus(ctx)
+		if err != nil {
+			return err
+		}
+		restart = len(st.Tasks) == 0 || st.Tasks[0].State != "RUNNING"
+		if !restart {
+			s.log.Info("skipped: task 0 already RUNNING, no restart")
+		}
+	}
+	if restart {
+		if err := s.restartTask(ctx, 0); err != nil {
+			return err
+		}
 	}
 	if err := s.waitConnector(ctx, "RUNNING", 60*time.Second); err != nil {
 		return err
 	}
 	// Wait until the new schema version is registered before restoring BACKWARD;
 	// otherwise the task fails again on the next record.
-	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
-		vs, err := s.schemaVersions(ctx, valueSubject)
-		if err != nil {
-			return false, nil
+	if !registered {
+		if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
+			vs, err := s.schemaVersions(ctx, valueSubject)
+			if err != nil {
+				return false, nil
+			}
+			return len(vs) > len(before), nil
+		}); err != nil {
+			return fmt.Errorf("devctl: new schema version was not registered: %w", err)
 		}
-		return len(vs) > len(before), nil
-	}); err != nil {
-		return fmt.Errorf("devctl: new schema version was not registered: %w", err)
 	}
 	if err := s.setCompatibility(ctx, valueSubject, "BACKWARD"); err != nil {
 		return err
 	}
 	s.log.Info("fixed: new schema registered, task 0 RUNNING, compatibility back to BACKWARD")
 	return nil
+}
+
+// latestAmountIsDecimal reports whether the latest value schema of subject has
+// orders.amount as Avro bytes with logicalType decimal, the shape Debezium
+// registers after the numeric(12,2) migration.
+func (s *stack) latestAmountIsDecimal(ctx context.Context, subject string) (bool, error) {
+	b, err := s.do(ctx, http.MethodGet, s.cfg.SchemaRegistryURL+"/subjects/"+url.PathEscape(subject)+"/versions/latest", nil, http.StatusOK)
+	if err != nil {
+		return false, err
+	}
+	var v struct {
+		Version int    `json:"version"`
+		Schema  string `json:"schema"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return false, fmt.Errorf("devctl: decode latest schema of %s: %w", subject, err)
+	}
+	ok, err := amountIsDecimal(v.Schema)
+	if err != nil {
+		return false, fmt.Errorf("devctl: latest schema of %s (version %d): %w", subject, v.Version, err)
+	}
+	return ok, nil
+}
+
+// amountIsDecimal reports whether the value schema's after record has amount as
+// Avro bytes with logicalType decimal. Debezium defines the row record once,
+// inside before, and refers to it by name from after, so the schema is parsed
+// with hamba/avro (which resolves those references) before the fields are read.
+func amountIsDecimal(schema string) (bool, error) {
+	root, err := avro.Parse(schema)
+	if err != nil {
+		return false, fmt.Errorf("parse value schema: %w", err)
+	}
+	env, ok := root.(*avro.RecordSchema)
+	if !ok {
+		return false, fmt.Errorf("value schema is %s, want a record", root.Type())
+	}
+	after, ok := fieldByName(env, "after")
+	if !ok {
+		return false, errors.New("value schema has no after field")
+	}
+	row, ok := rowRecord(after)
+	if !ok {
+		return false, errors.New("after field has no record branch")
+	}
+	amount, ok := fieldByName(row, "amount")
+	if !ok {
+		return false, errors.New("row record has no amount field")
+	}
+	return isDecimalBytes(amount), nil
+}
+
+// rowRecord returns the record a field type points to: the record itself, a
+// named reference to it, or the record inside a union such as ["null", Value].
+func rowRecord(t avro.Schema) (*avro.RecordSchema, bool) {
+	switch v := t.(type) {
+	case *avro.RecordSchema:
+		return v, true
+	case *avro.RefSchema:
+		rec, ok := v.Schema().(*avro.RecordSchema)
+		return rec, ok
+	case *avro.UnionSchema:
+		for _, m := range v.Types() {
+			if rec, ok := rowRecord(m); ok {
+				return rec, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// fieldByName returns the declared type of a field of rec.
+func fieldByName(rec *avro.RecordSchema, name string) (avro.Schema, bool) {
+	for _, f := range rec.Fields() {
+		if f.Name() == name {
+			return f.Type(), true
+		}
+	}
+	return nil, false
+}
+
+// isDecimalBytes reports whether an Avro type is bytes with logicalType decimal.
+// Debezium writes numeric columns this way (precise decimal mode).
+func isDecimalBytes(t avro.Schema) bool {
+	p, ok := t.(*avro.PrimitiveSchema)
+	return ok && p.Type() == avro.Bytes && p.Logical() != nil && p.Logical().Type() == avro.Decimal
 }
 
 // connector-down: the connector is paused, so the replication slot goes
