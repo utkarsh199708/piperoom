@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"piperoom/internal/clients"
 )
@@ -16,16 +16,14 @@ import (
 // local connectorConfigUpdater interface the action asserts for.
 type configConnect struct {
 	scriptedConnect
-	cfg         map[string]string
-	updateErr   error
-	storeAs     string // when set, UpdateConfig stores this instead of the value
-	rereadErr   error  // Config fails after the first successful write
-	updates     []string
-	configCalls int
+	cfg       map[string]string
+	updateErr error
+	storeAs   string // when set, UpdateConfig stores this instead of the value
+	rereadErr error  // Config fails after the first successful write
+	updates   []string
 }
 
 func (f *configConnect) Config(context.Context, string) (map[string]string, error) {
-	f.configCalls++
 	if f.rereadErr != nil && len(f.updates) > 0 {
 		return nil, f.rereadErr
 	}
@@ -51,56 +49,76 @@ func (f *configConnect) UpdateConfig(_ context.Context, name, key, value string)
 func newConfigConnect(script ...clients.ConnectorStatus) *configConnect {
 	return &configConnect{
 		scriptedConnect: scriptedConnect{script: script},
-		cfg:             map[string]string{"connector.class": "x", "decimal.handling.mode": "precise"},
+		cfg:             map[string]string{"connector.class": "x", "decimal.handling.mode": "precise", "database.password": "hunter2"},
 	}
 }
 
 func configAction(c *configConnect) *updateConnectorConfig {
-	return &updateConnectorConfig{d: Deps{Connect: c, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	return &updateConnectorConfig{d: Deps{Connect: c, Registry: &fakeRegistry{}}}
 }
 
 const updateIn = `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"double"}`
 
+// Live behaviour: right after the PATCH the first status read still shows the
+// old RUNNING tasks, so the result says "at first read" and makes no claim
+// that a restart finished.
 func TestUpdateConnectorConfigExecuteHappyPath(t *testing.T) {
-	c := newConfigConnect(connectorWithTasks("RUNNING", "RESTARTING"), connectorWithTasks("RUNNING", "RUNNING"))
+	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
 	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	want := "pg-orders-connector decimal.handling.mode: precise → double; connector and 1 tasks RUNNING"
+	want := "pg-orders-connector decimal.handling.mode: precise → double; status RUNNING at first read (Connect restarts tasks asynchronously)"
 	if out != want {
 		t.Fatalf("out %q, want %q", out, want)
 	}
 	if len(c.updates) != 1 || c.updates[0] != "pg-orders-connector decimal.handling.mode=double" {
 		t.Fatalf("updates %v", c.updates)
 	}
-	if c.statusCalls != 2 {
-		t.Fatalf("status calls %d, want 2", c.statusCalls)
+	if c.statusCalls != 1 {
+		t.Fatalf("status calls %d, want 1 (no polling)", c.statusCalls)
+	}
+	if strings.Contains(out, "hunter2") || strings.Contains(out, "database.password") {
+		t.Fatalf("result leaks other config keys: %q", out)
 	}
 }
 
-// The full path with the real connect client: the PUT body is the whole config
-// with only the one key changed.
-func TestUpdateConnectorConfigPutBodyHasFullMap(t *testing.T) {
-	stored := map[string]string{
-		"name": "pg-orders-connector", "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-		"decimal.handling.mode": "precise", "slot.name": "orders_slot",
+// A task that is not RUNNING at the first read is reported, not an error.
+func TestUpdateConnectorConfigTaskNotRunningAtFirstRead(t *testing.T) {
+	c := newConfigConnect(connectorWithTasks("RUNNING", "FAILED"))
+	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
+	if err != nil {
+		t.Fatalf("a non-RUNNING task after the write must not be an error: %v", err)
 	}
-	var putBody map[string]string
+	want := "pg-orders-connector decimal.handling.mode: precise → double; status connector RUNNING, task 0 FAILED at first read (Connect restarts tasks asynchronously)"
+	if out != want {
+		t.Fatalf("out %q, want %q", out, want)
+	}
+}
+
+// The full path with the real connect client: one PATCH carrying only the one
+// key, so the rest of the config (including the password) is never written.
+func TestUpdateConnectorConfigSendsOnlyOneKey(t *testing.T) {
+	var patchBody, patchMethod string
+	patches := 0
 	d := resumeTestDeps(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/connectors":
 			w.Write([]byte(`["pg-orders-connector"]`))
 		case r.URL.Path == "/connectors/pg-orders-connector/config" && r.Method == http.MethodGet:
-			json.NewEncoder(w).Encode(stored)
-		case r.URL.Path == "/connectors/pg-orders-connector/config" && r.Method == http.MethodPut:
-			if err := json.NewDecoder(r.Body).Decode(&putBody); err != nil {
-				t.Errorf("bad PUT body: %v", err)
+			v := "precise"
+			if patches > 0 {
+				v = "double"
 			}
-			stored = putBody
+			w.Write([]byte(`{"name":"pg-orders-connector","decimal.handling.mode":"` + v + `","database.password":"hunter2"}`))
+		case r.URL.Path == "/connectors/pg-orders-connector/config" && r.Method == http.MethodPatch:
+			patches++
+			patchMethod = r.Method
+			b, _ := io.ReadAll(r.Body)
+			patchBody = string(b)
 			w.Write([]byte(`{}`))
 		case r.URL.Path == "/connectors/pg-orders-connector/status":
-			w.Write([]byte(`{"name":"pg-orders-connector","connector":{"state":"RUNNING"},"tasks":[{"id":0,"state":"RUNNING"},{"id":1,"state":"RUNNING"}]}`))
+			w.Write([]byte(`{"name":"pg-orders-connector","connector":{"state":"RUNNING"},"tasks":[{"id":0,"state":"RUNNING"}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -113,13 +131,11 @@ func TestUpdateConnectorConfigPutBodyHasFullMap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if out != "pg-orders-connector decimal.handling.mode: precise → double; connector and 2 tasks RUNNING" {
+	if out != "pg-orders-connector decimal.handling.mode: precise → double; status RUNNING at first read (Connect restarts tasks asynchronously)" {
 		t.Fatalf("out %q", out)
 	}
-	if len(putBody) != 4 || putBody["decimal.handling.mode"] != "double" ||
-		putBody["slot.name"] != "orders_slot" || putBody["name"] != "pg-orders-connector" ||
-		putBody["connector.class"] != "io.debezium.connector.postgresql.PostgresConnector" {
-		t.Fatalf("PUT body %v", putBody)
+	if patchMethod != http.MethodPatch || patchBody != `{"decimal.handling.mode":"double"}` {
+		t.Fatalf("%s body %q", patchMethod, patchBody)
 	}
 }
 
@@ -183,22 +199,8 @@ func TestUpdateConnectorConfigStatusFailsIsNotError(t *testing.T) {
 	}
 }
 
-// Tasks that never come back RUNNING: the write succeeded, so the result is a
-// non-error with the restart wording.
-func TestUpdateConnectorConfigTasksNeverRunning(t *testing.T) {
-	c := newConfigConnect(connectorWithTasks("RUNNING", "FAILED"))
-	out, err := configAction(c).Execute(pollCtx(t, 40*time.Millisecond), json.RawMessage(updateIn))
-	if err != nil {
-		t.Fatalf("timeout after the write must not be an error: %v", err)
-	}
-	want := "pg-orders-connector decimal.handling.mode: precise → double; connector RUNNING, task 0 FAILED (Connect applies restarts asynchronously)"
-	if out != want {
-		t.Fatalf("out %q, want %q", out, want)
-	}
-}
-
 func TestUpdateConnectorConfigClientErrorsAreWrapped(t *testing.T) {
-	sentinel := errors.New("connect: PUT /connectors/pg-orders-connector/config: status 409")
+	sentinel := errors.New("connect: PATCH /connectors/pg-orders-connector/config: status 409")
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
 	c.updateErr = sentinel
 	_, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
@@ -215,6 +217,15 @@ func TestUpdateConnectorConfigClientWithoutUpdateConfig(t *testing.T) {
 	}
 }
 
+func paramsJSON(t *testing.T, key, value string) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(updateConnectorConfigParams{Connector: "pg-orders-connector", Key: key, Value: value})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func TestUpdateConnectorConfigValidate(t *testing.T) {
 	a := &updateConnectorConfig{d: testDeps()}
 	tests := []struct {
@@ -224,12 +235,14 @@ func TestUpdateConnectorConfigValidate(t *testing.T) {
 	}{
 		{"ok double", updateIn, ""},
 		{"ok string", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"string"}`, ""},
+		{"ok precise", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"precise"}`, ""},
 		{"ok time precision", `{"connector":"pg-orders-connector","key":"time.precision.mode","value":"connect"}`, ""},
 		{"ok tombstones", `{"connector":"pg-orders-connector","key":"tombstones.on.delete","value":"false"}`, ""},
-		{"ok errors tolerance", `{"connector":"pg-orders-connector","key":"errors.tolerance","value":"all"}`, ""},
+		{"errors.tolerance removed", `{"connector":"pg-orders-connector","key":"errors.tolerance","value":"none"}`, "not allowed"},
+		{"errors.tolerance all removed", `{"connector":"pg-orders-connector","key":"errors.tolerance","value":"all"}`, "not allowed"},
 		{"key not allowed", `{"connector":"pg-orders-connector","key":"tasks.max","value":"4"}`, "not allowed"},
 		{"bad value", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"float"}`, "not allowed for"},
-		{"value of another key", `{"connector":"pg-orders-connector","key":"errors.tolerance","value":"double"}`, "not allowed for"},
+		{"value of another key", `{"connector":"pg-orders-connector","key":"tombstones.on.delete","value":"double"}`, "not allowed for"},
 		{"empty value", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":""}`, "not allowed for"},
 		{"password key", `{"connector":"pg-orders-connector","key":"database.password","value":"x"}`, "credential"},
 		{"secret key", `{"connector":"pg-orders-connector","key":"client.secret","value":"x"}`, "credential"},
@@ -237,8 +250,8 @@ func TestUpdateConnectorConfigValidate(t *testing.T) {
 		{"jaas key", `{"connector":"pg-orders-connector","key":"sasl.jaas.config","value":"x"}`, "credential"},
 		{"key converter", `{"connector":"pg-orders-connector","key":"key.converter.basic.auth.user.info","value":"x"}`, "credential"},
 		{"mixed case secret", `{"connector":"pg-orders-connector","key":"Database.PASSWORD","value":"x"}`, "credential"},
-		{"unknown connector", `{"connector":"pg-inventory-connector","key":"errors.tolerance","value":"all"}`, "not found"},
-		{"missing connector", `{"key":"errors.tolerance","value":"all"}`, "required"},
+		{"unknown connector", `{"connector":"pg-inventory-connector","key":"tombstones.on.delete","value":"true"}`, "not found"},
+		{"missing connector", `{"key":"tombstones.on.delete","value":"true"}`, "required"},
 		{"bad json", `{`, "required"},
 	}
 	for _, tc := range tests {
@@ -254,15 +267,78 @@ func TestUpdateConnectorConfigValidate(t *testing.T) {
 	}
 }
 
-// Even a list entry added later cannot open up a credential key.
+// Keys and values match exactly: no case folding, no trimming, no Unicode
+// normalisation. Both Validate and Execute refuse every variant.
+func TestUpdateConnectorConfigExactMatchOnly(t *testing.T) {
+	const (
+		key = "decimal.handling.mode"
+		val = "double"
+	)
+	cases := []struct{ name, key, value string }{
+		{"key mixed case", "Decimal.Handling.Mode", val},
+		{"key upper case", "DECIMAL.HANDLING.MODE", val},
+		{"key leading space", " " + key, val},
+		{"key trailing space", key + " ", val},
+		{"key trailing zero width space", key + "​", val},
+		{"key cyrillic e", "dеcimal.handling.mode", val}, // U+0435
+		{"value upper case", key, "DOUBLE"},
+		{"value leading space", key, " double"},
+		{"value trailing space", key, "double "},
+		{"value trailing zero width space", key, "double​"},
+		{"value cyrillic lookalike", key, "dоuble"}, // U+043E
+		{"value newline", key, "double\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
+			a := configAction(c)
+			p := paramsJSON(t, tc.key, tc.value)
+			if err := a.Validate(p); err == nil {
+				t.Fatal("Validate accepted a lookalike")
+			}
+			if _, err := a.Execute(context.Background(), p); err == nil {
+				t.Fatal("Execute accepted a lookalike")
+			}
+			if len(c.updates) != 0 {
+				t.Fatalf("a write happened: %v", c.updates)
+			}
+		})
+	}
+}
+
+// Even a list entry added later cannot open up a credential key. The list is
+// swapped through the action's test-only field, not a shared variable.
 func TestUpdateConnectorConfigSecretCheckBeatsAllowList(t *testing.T) {
-	const key = "database.password"
-	connectorConfigAllowList[key] = map[string]bool{"x": true}
-	t.Cleanup(func() { delete(connectorConfigAllowList, key) })
-	a := &updateConnectorConfig{d: testDeps()}
+	a := &updateConnectorConfig{
+		d:     testDeps(),
+		allow: map[string]map[string]bool{"database.password": {"x": true}, "decimal.handling.mode": {"double": true}},
+	}
 	err := a.Validate(json.RawMessage(`{"connector":"pg-orders-connector","key":"database.password","value":"x"}`))
 	if err == nil || !strings.Contains(err.Error(), "credential") {
 		t.Fatalf("err %v", err)
+	}
+	// The override really is in force: only its own entries pass.
+	if err := a.Validate(json.RawMessage(updateIn)); err != nil {
+		t.Fatalf("override entry refused: %v", err)
+	}
+	if err := a.Validate(json.RawMessage(`{"connector":"pg-orders-connector","key":"tombstones.on.delete","value":"true"}`)); err == nil {
+		t.Fatal("default entry accepted despite the override")
+	}
+}
+
+func TestDefaultAllowListIsFreshEachCall(t *testing.T) {
+	first := defaultConnectorConfigAllowList()
+	first["tasks.max"] = map[string]bool{"1": true}
+	delete(first, "decimal.handling.mode")
+	second := defaultConnectorConfigAllowList()
+	if _, bad := second["tasks.max"]; bad {
+		t.Fatal("allow-list is shared state")
+	}
+	if len(second) != 3 {
+		t.Fatalf("allow-list %v, want the 3 default keys", sortedKeys(second))
+	}
+	if _, ok := second["errors.tolerance"]; ok {
+		t.Fatal("errors.tolerance must not be allow-listed")
 	}
 }
 
@@ -272,7 +348,7 @@ func TestLooksSecret(t *testing.T) {
 			t.Errorf("looksSecret(%q) = false", k)
 		}
 	}
-	for _, k := range connectorConfigKeys() {
+	for _, k := range sortedKeys(defaultConnectorConfigAllowList()) {
 		if looksSecret(k) {
 			t.Errorf("allow-listed key %q looks secret", k)
 		}
@@ -305,16 +381,24 @@ func TestUpdateConnectorConfigSchemaAndRegistry(t *testing.T) {
 	if _, ok := a.(Scoped); !ok {
 		t.Error("action is not Scoped")
 	}
-	if !strings.Contains(a.Describe(), "old value") {
-		t.Errorf("Describe %q should say how to undo", a.Describe())
+	d := a.Describe()
+	for _, want := range []string{"old value", "new events only", "output schema or precision"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("Describe %q lacks %q", d, want)
+		}
 	}
-	props := a.ParamsSchema()["properties"].(map[string]any)
-	// Describe names every allowed key, since the schema carries no enum.
-	for _, k := range connectorConfigKeys() {
-		if !strings.Contains(a.Describe(), k) {
+	// The schema has no enum, so Describe must name every allowed key.
+	for _, k := range sortedKeys(defaultConnectorConfigAllowList()) {
+		if !strings.Contains(d, k) {
 			t.Errorf("Describe does not name %q", k)
 		}
 	}
+	for _, bad := range []string{"low-risk", "errors.tolerance"} {
+		if strings.Contains(d, bad) {
+			t.Errorf("Describe contains %q", bad)
+		}
+	}
+	props := a.ParamsSchema()["properties"].(map[string]any)
 	for _, name := range []string{"connector", "key", "value"} {
 		if _, ok := props[name]; !ok {
 			t.Errorf("schema lacks %q", name)

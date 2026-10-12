@@ -2,7 +2,6 @@ package connect
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -12,78 +11,41 @@ import (
 	"piperoom/internal/clients"
 )
 
-const updateCfgBody = `{"name":"pg-orders-connector","connector.class":"io.debezium.connector.postgresql.PostgresConnector","decimal.handling.mode":"precise","slot.name":"orders_slot"}`
-
-func TestUpdateConfigPutsFullMapWithOneKeyChanged(t *testing.T) {
-	var gotMethod, gotPath, gotCT string
-	var gotBody map[string]string
-	var gets int
+func TestUpdateConfigPatchesOneKey(t *testing.T) {
+	var gotMethod, gotPath, gotCT, gotBody string
+	requests := 0
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			gets++
-			w.Write([]byte(updateCfgBody))
-		case http.MethodPut:
-			gotMethod, gotPath, gotCT = r.Method, r.URL.Path, r.Header.Get("Content-Type")
-			b, _ := io.ReadAll(r.Body)
-			if err := json.Unmarshal(b, &gotBody); err != nil {
-				t.Errorf("body not JSON: %v", err)
-			}
-			w.Write([]byte(`{"name":"pg-orders-connector"}`))
-		}
+		requests++
+		gotMethod, gotPath, gotCT = r.Method, r.URL.Path, r.Header.Get("Content-Type")
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Write([]byte(`{"name":"pg-orders-connector"}`))
 	})
 	if err := c.UpdateConfig(context.Background(), "pg-orders-connector", "decimal.handling.mode", "double"); err != nil {
 		t.Fatalf("UpdateConfig: %v", err)
 	}
-	if gets != 1 || gotMethod != http.MethodPut || gotPath != "/connectors/pg-orders-connector/config" {
-		t.Fatalf("gets=%d %s %s", gets, gotMethod, gotPath)
+	// Exactly one request: no GET of the config, so no other key is read.
+	if requests != 1 {
+		t.Fatalf("%d requests, want 1", requests)
+	}
+	if gotMethod != http.MethodPatch || gotPath != "/connectors/pg-orders-connector/config" {
+		t.Fatalf("%s %s", gotMethod, gotPath)
 	}
 	if gotCT != "application/json" {
 		t.Errorf("content-type %q", gotCT)
 	}
-	var want map[string]string
-	if err := json.Unmarshal([]byte(updateCfgBody), &want); err != nil {
-		t.Fatal(err)
-	}
-	want["decimal.handling.mode"] = "double"
-	if len(gotBody) != len(want) {
-		t.Fatalf("body %v, want %v", gotBody, want)
-	}
-	for k, v := range want {
-		if gotBody[k] != v {
-			t.Errorf("body[%q] = %q, want %q", k, gotBody[k], v)
-		}
-	}
-}
-
-func TestUpdateConfigAddsAbsentKey(t *testing.T) {
-	var gotBody map[string]string
-	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			w.Write([]byte(`{"name":"x"}`))
-			return
-		}
-		json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(`{}`))
-	})
-	if err := c.UpdateConfig(context.Background(), "x", "errors.tolerance", "all"); err != nil {
-		t.Fatal(err)
-	}
-	if gotBody["errors.tolerance"] != "all" || gotBody["name"] != "x" {
-		t.Fatalf("body %v", gotBody)
+	if gotBody != `{"decimal.handling.mode":"double"}` {
+		t.Fatalf("body %q", gotBody)
 	}
 }
 
 func TestUpdateConfigPathEscapesName(t *testing.T) {
 	var gotRaw string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut {
-			gotRaw = r.URL.EscapedPath()
-		}
+		gotRaw = r.URL.EscapedPath()
 		w.Write([]byte(`{}`))
 	})
-	if err := c.UpdateConfig(context.Background(), "a/b c", "errors.tolerance", "none"); err != nil {
+	if err := c.UpdateConfig(context.Background(), "a/b c", "tombstones.on.delete", "false"); err != nil {
 		t.Fatal(err)
 	}
 	if gotRaw != "/connectors/a%2Fb%20c/config" {
@@ -91,47 +53,44 @@ func TestUpdateConfigPathEscapesName(t *testing.T) {
 	}
 }
 
-func TestUpdateConfigPutStatusErrors(t *testing.T) {
-	for _, code := range []int{http.StatusConflict, http.StatusInternalServerError} {
-		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodGet {
-				w.Write([]byte(updateCfgBody))
-				return
-			}
-			w.WriteHeader(code)
-			w.Write([]byte(`{"error_code":409,"message":"Cannot complete request momentarily due to stale configuration"}`))
-		})
-		err := c.UpdateConfig(context.Background(), "pg-orders-connector", "decimal.handling.mode", "double")
-		if err == nil || !strings.Contains(err.Error(), "status ") {
-			t.Fatalf("code %d: want status error, got %v", code, err)
-		}
-	}
-}
-
-func TestUpdateConfigNotFoundOnRead(t *testing.T) {
+// A connector deleted meanwhile answers 404: PATCH never re-creates it.
+func TestUpdateConfigNotFound(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut {
-			t.Error("PUT sent although the read failed")
-		}
 		http.NotFound(w, r)
 	})
-	err := c.UpdateConfig(context.Background(), "nope", "errors.tolerance", "all")
+	err := c.UpdateConfig(context.Background(), "nope", "tombstones.on.delete", "true")
 	if !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
 
-// Writing a masked value back would replace the real secret with "[hidden]".
-func TestUpdateConfigRefusesMaskedConfig(t *testing.T) {
+// Connect older than 3.5 has no PATCH. There is no PUT fallback.
+func TestUpdateConfigMethodNotAllowed(t *testing.T) {
+	var methods []string
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut {
-			t.Error("PUT sent for a masked config")
-		}
-		w.Write([]byte(`{"name":"x","database.password":"[hidden]"}`))
+		methods = append(methods, r.Method)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte(`{"error_code":405,"message":"HTTP 405 Method Not Allowed"}`))
 	})
-	err := c.UpdateConfig(context.Background(), "x", "errors.tolerance", "all")
-	if err == nil || !strings.Contains(err.Error(), "masked") {
-		t.Fatalf("want masked error, got %v", err)
+	err := c.UpdateConfig(context.Background(), "pg-orders-connector", "tombstones.on.delete", "true")
+	if err == nil || !strings.Contains(err.Error(), "does not support PATCH config; needs Kafka Connect 3.5+") {
+		t.Fatalf("err %v", err)
+	}
+	if len(methods) != 1 || methods[0] != http.MethodPatch {
+		t.Fatalf("methods %v, want one PATCH and no fallback", methods)
+	}
+}
+
+func TestUpdateConfigOtherStatusErrors(t *testing.T) {
+	for _, code := range []int{http.StatusConflict, http.StatusInternalServerError} {
+		c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+			w.Write([]byte(`{"error_code":409,"message":"rebalance in progress"}`))
+		})
+		err := c.UpdateConfig(context.Background(), "pg-orders-connector", "tombstones.on.delete", "true")
+		if err == nil || !strings.Contains(err.Error(), "status ") || strings.Contains(err.Error(), "PATCH config; needs") {
+			t.Fatalf("code %d: err %v", code, err)
+		}
 	}
 }
 

@@ -6,27 +6,31 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"piperoom/internal/owners"
 )
 
-// connectorConfigAllowList names the only connector settings this action may
-// change, with the values each accepts. Every entry is a low-risk Debezium or
-// Connect setting that changes how data is encoded or how errors are handled
-// and is undone by writing the old value back. Anything not listed is refused:
-// the action must never become a general "edit any connector config" tool.
-var connectorConfigAllowList = map[string]map[string]bool{
-	"decimal.handling.mode": {"precise": true, "double": true, "string": true},
-	"time.precision.mode":   {"adaptive": true, "adaptive_time_microseconds": true, "connect": true},
-	"tombstones.on.delete":  {"true": true, "false": true},
-	"errors.tolerance":      {"none": true, "all": true},
+// defaultConnectorConfigAllowList returns the only connector settings this
+// action may change, with the exact values each accepts. Each one changes how a
+// connector encodes its output (schema or precision) for NEW events; events
+// already emitted keep their old form, so "reversible" applies to the setting,
+// not to past events. errors.tolerance is deliberately absent: on a source
+// connector "all" drops CDC events for good and setting it back does not
+// restore them. Anything not listed is refused: the action must never become a
+// general "edit any connector config" tool. A function, not a package variable,
+// so nothing can mutate the list at run time.
+func defaultConnectorConfigAllowList() map[string]map[string]bool {
+	return map[string]map[string]bool{
+		"decimal.handling.mode": {"precise": true, "double": true, "string": true},
+		"time.precision.mode":   {"adaptive": true, "adaptive_time_microseconds": true, "connect": true},
+		"tombstones.on.delete":  {"true": true, "false": true},
+	}
 }
 
-// connectorConfigKeys returns the allow-listed keys, sorted, for the schema.
-func connectorConfigKeys() []string {
-	keys := make([]string, 0, len(connectorConfigAllowList))
-	for k := range connectorConfigAllowList {
+// sortedKeys returns the keys of an allow-list, sorted.
+func sortedKeys(allow map[string]map[string]bool) []string {
+	keys := make([]string, 0, len(allow))
+	for k := range allow {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
@@ -57,8 +61,8 @@ func looksSecret(key string) bool {
 	return false
 }
 
-// connectorConfigUpdater is the local adapter for the client methods that
-// change a connector's config until they land on clients.ConnectClient
+// connectorConfigUpdater is the local adapter for the client method that
+// changes a connector's config until it lands on clients.ConnectClient
 // (contract change request in the PR). The concrete connect client implements
 // it; Execute reports a clear error when the injected client does not.
 type connectorConfigUpdater interface {
@@ -69,22 +73,29 @@ type connectorConfigUpdater interface {
 
 type updateConnectorConfig struct {
 	d Deps
-	// pollInterval overrides resumePollInterval in tests; zero means the default.
-	pollInterval time.Duration
+	// allow replaces the default allow-list; tests only. Nil means the default.
+	allow map[string]map[string]bool
 }
 
 var _ Scoped = (*updateConnectorConfig)(nil)
 
+// allowList returns the allow-list in force.
+func (a *updateConnectorConfig) allowList() map[string]map[string]bool {
+	if a.allow != nil {
+		return a.allow
+	}
+	return defaultConnectorConfigAllowList()
+}
+
 func (a *updateConnectorConfig) Name() string  { return "connect_update_connector_config" }
 func (a *updateConnectorConfig) Layer() string { return "kafka-connect" }
 func (a *updateConnectorConfig) Describe() string {
-	return "Sets one connector setting: decimal.handling.mode precise|double|string; time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; errors.tolerance none|all. Connect restarts the tasks. Reversible: set the old value."
+	return "Changes one setting that sets the connector's output schema or precision: decimal.handling.mode precise|double|string; time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false. Takes effect for new events only; events already emitted keep the old form. Connect restarts the tasks. To undo the setting, set the old value."
 }
 func (a *updateConnectorConfig) ParamsSchema() map[string]any {
-	// No property descriptions: propose_fix nests every action's schema, and
-	// the strict-schema byte budget in internal/agent is tight. The allowed
-	// keys and values are in Describe; Validate enforces the allow-list, so the
-	// schema needs no enum.
+	// No enum and no property descriptions: propose_fix nests every action's
+	// schema, and the strict-schema byte budget in internal/agent is tight.
+	// Describe names the keys; Validate enforces the allow-list.
 	return objectSchema(map[string]any{
 		"connector": map[string]any{"type": "string"},
 		"key":       map[string]any{"type": "string"},
@@ -98,8 +109,10 @@ type updateConnectorConfigParams struct {
 	Value     string `json:"value"`
 }
 
-// parseConfigParams decodes and checks params without I/O.
-func parseConfigParams(raw json.RawMessage) (updateConnectorConfigParams, error) {
+// parseParams decodes and checks params without I/O. Keys and values must
+// match the allow-list exactly: no trimming, no case folding, so a lookalike
+// ("Decimal.Handling.Mode", a trailing U+200B, a Cyrillic letter) is refused.
+func (a *updateConnectorConfig) parseParams(raw json.RawMessage) (updateConnectorConfigParams, error) {
 	var p updateConnectorConfigParams
 	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" || p.Key == "" {
 		return p, fmt.Errorf("actions: connector, key and value are required")
@@ -107,9 +120,10 @@ func parseConfigParams(raw json.RawMessage) (updateConnectorConfigParams, error)
 	if looksSecret(p.Key) {
 		return p, fmt.Errorf("actions: key %q looks like a credential and cannot be changed", p.Key)
 	}
-	values, ok := connectorConfigAllowList[p.Key]
+	allow := a.allowList()
+	values, ok := allow[p.Key]
 	if !ok {
-		return p, fmt.Errorf("actions: key %q is not allowed; allowed keys: %s", p.Key, strings.Join(connectorConfigKeys(), ", "))
+		return p, fmt.Errorf("actions: key %q is not allowed; allowed keys: %s", p.Key, strings.Join(sortedKeys(allow), ", "))
 	}
 	if !values[p.Value] {
 		return p, fmt.Errorf("actions: value %q is not allowed for %s", p.Value, p.Key)
@@ -118,7 +132,7 @@ func parseConfigParams(raw json.RawMessage) (updateConnectorConfigParams, error)
 }
 
 func (a *updateConnectorConfig) Validate(raw json.RawMessage) error {
-	p, err := parseConfigParams(raw)
+	p, err := a.parseParams(raw)
 	if err != nil {
 		return err
 	}
@@ -135,8 +149,10 @@ func (a *updateConnectorConfig) CheckScope(p owners.Pipeline, raw json.RawMessag
 	return inScopeConnector(p, params.Connector)
 }
 
-// configText renders a config value for the result: "unset" when the key is
-// absent, and capped so an odd stored value cannot flood the result.
+// configText renders one config value for the result: "unset" when the key is
+// absent, and capped so an odd stored value cannot flood the result. It reads
+// only key: the rest of the config (which can hold passwords in plaintext)
+// never leaves this function.
 func configText(cfg map[string]string, key string) string {
 	v, ok := cfg[key]
 	if !ok {
@@ -150,7 +166,7 @@ func configText(cfg map[string]string, key string) string {
 }
 
 func (a *updateConnectorConfig) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
-	p, err := parseConfigParams(raw)
+	p, err := a.parseParams(raw)
 	if err != nil {
 		return "", err
 	}
@@ -182,26 +198,16 @@ func (a *updateConnectorConfig) Execute(ctx context.Context, raw json.RawMessage
 	if got := configText(after, p.Key); got != p.Value {
 		return fmt.Sprintf("%s (written, but the re-read shows %s = %s; check the connector config)", head, p.Key, got), nil
 	}
-	// Connect restarts the tasks after a config change; success needs the
-	// connector and every listed task RUNNING again.
-	taskCount := 0
-	state, running, err := awaitRunning(ctx, pollEvery(a.pollInterval), func(ctx context.Context) (string, error) {
-		st, err := a.d.Connect.Status(ctx, p.Connector)
-		if err != nil {
-			return "", err
-		}
-		desc, n, ok := connectorAndTasks(st)
-		taskCount = n
-		if ok {
-			return "RUNNING", nil
-		}
-		return desc, nil
-	})
-	switch {
-	case err != nil:
+	// One status read, not a poll: right after the PATCH the first read often
+	// still shows the old RUNNING tasks, so waiting for RUNNING proves nothing.
+	// The wording says exactly that; the agent re-checks with connect_status.
+	st, err := a.d.Connect.Status(ctx, p.Connector)
+	if err != nil {
 		return fmt.Sprintf("%s (written; status read failed: %v)", head, err), nil
-	case running:
-		return fmt.Sprintf("%s; connector and %d tasks RUNNING", head, taskCount), nil
 	}
-	return fmt.Sprintf("%s; %s (Connect applies restarts asynchronously)", head, orUnknown(state)), nil
+	desc, _, running := connectorAndTasks(st)
+	if running {
+		desc = "RUNNING"
+	}
+	return fmt.Sprintf("%s; status %s at first read (Connect restarts tasks asynchronously)", head, desc), nil
 }
