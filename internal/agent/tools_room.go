@@ -192,7 +192,7 @@ func (t *proposeFixTool) Description() string {
 	for _, a := range acts {
 		fmt.Fprintf(&b, "- %s (layer %s): %s params=%s\n", a.Name(), a.Layer(), a.Describe(), compactSchema(a.ParamsSchema()))
 	}
-	b.WriteString("steps is an array; each step names an action, gives its params object and a short description. risk and rollback are short text.")
+	b.WriteString("steps is an array; each step names an action, gives its params object and a short description. risk and rollback are required short text: never empty and never a placeholder such as n/a.")
 	return b.String()
 }
 
@@ -265,6 +265,12 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	if len(in.Steps) == 0 {
 		return tools.Result{}, fmt.Errorf("%w: at least one step is required", tools.ErrBadInput)
 	}
+	if err := checkProposalText("risk", in.Risk); err != nil {
+		return tools.Result{}, err
+	}
+	if err := checkProposalText("rollback", in.Rollback); err != nil {
+		return tools.Result{}, err
+	}
 	if t.proposals == nil {
 		return tools.Result{}, fmt.Errorf("agent: proposals are not available")
 	}
@@ -313,6 +319,28 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 		t.track.record(id, steps)
 	}
 	return tools.Result{Summary: fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(layers, ", "))}, nil
+}
+
+// placeholderTexts are the values a model sends when it has nothing real to put
+// in risk or rollback. A live run stored them as "<no value>" for the approvers
+// to read, so they are refused the same as an empty string.
+var placeholderTexts = map[string]bool{
+	"<no value>": true,
+	"n/a":        true,
+	"none":       true,
+	"-":          true,
+	"tbd":        true,
+}
+
+// checkProposalText refuses a risk or rollback that is empty, whitespace-only or
+// a placeholder (compared case-insensitively). The error wraps tools.ErrBadInput
+// so the model sees it as a failed tool call and retries with a real answer.
+func checkProposalText(field, value string) error {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "" || placeholderTexts[v] {
+		return fmt.Errorf("%w: %s must describe the actual %s in words; empty or placeholder values such as n/a are refused", tools.ErrBadInput, field, field)
+	}
+	return nil
 }
 
 // compactSchema renders a JSON Schema object as a compact string for tool

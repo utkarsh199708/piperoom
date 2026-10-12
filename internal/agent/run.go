@@ -129,17 +129,20 @@ func (r *runner) run(ctx context.Context) error {
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 
-	// Drain anything already waiting before the first turn so an early steer is
-	// part of the opening prompt.
-	initialInputs := r.drain(ctx)
-	if r.handleActionResults(ctx, initialInputs) {
-		return nil
-	}
-	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs)}
-
 	// turns counts model turns since the last human input. It is a per-episode
 	// runaway guard, not a lifetime cap: fresh human input resets it.
 	turns := 0
+
+	// Drain anything already waiting before the first turn so an early steer is
+	// part of the opening prompt.
+	initialInputs := r.drain(ctx)
+	recovered := r.handleActionResults(ctx, initialInputs)
+	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs)}
+	if recovered {
+		if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
+			return err
+		}
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return stopErr(err)
@@ -162,11 +165,14 @@ func (r *runner) run(ctx context.Context) error {
 			if len(inputs) == 0 {
 				return nil
 			}
-			if r.handleActionResults(ctx, inputs) {
-				return nil
-			}
+			recovered := r.handleActionResults(ctx, inputs)
 			messages = append(messages, r.humanMessage(inputs))
 			turns = 0
+			if recovered {
+				if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
+					return err
+				}
+			}
 			continue
 		}
 
@@ -248,9 +254,7 @@ func (r *runner) run(ctx context.Context) error {
 			// message carries the tool results plus any human input that arrived
 			// while we were running.
 			inputs := r.drain(ctx)
-			if r.handleActionResults(ctx, inputs) {
-				return nil
-			}
+			recovered := r.handleActionResults(ctx, inputs)
 			blocks := append([]anthropic.BetaContentBlockParamUnion(nil), resultBlocks...)
 			blocks = append(blocks, r.humanBlocks(inputs)...)
 			if len(blocks) == 0 {
@@ -259,6 +263,11 @@ func (r *runner) run(ctx context.Context) error {
 			messages = append(messages, anthropic.NewBetaUserMessage(blocks...))
 			if len(inputs) > 0 {
 				turns = 0
+			}
+			if recovered {
+				if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
+					return err
+				}
 			}
 		}
 	}
@@ -390,13 +399,49 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 	if len(inputs) == 0 {
 		return true, nil
 	}
-	if r.handleActionResults(ctx, inputs) {
-		return true, nil
-	}
+	recovered := r.handleActionResults(ctx, inputs)
 	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.humanBlocks(inputs)...)
 	*messages = append(*messages, anthropic.NewBetaUserMessage(blocks...))
 	*turns = 0
+	if recovered {
+		return r.holdAfterRecovery(ctx, messages, turns)
+	}
 	return false, nil
+}
+
+// holdAfterRecovery runs after a recovery verdict. The pipeline is fixed, so the
+// model is not called again until something needs an answer, but the run must
+// stay alive: a later steer or comment still gets a reply. It waits on the
+// Inbox exactly like the idle path. It returns stop=false when the model should
+// run again (a human spoke, or a failed or unknown step needs investigating)
+// and stop=true when the room closed, with the error Run should return.
+func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int) (bool, error) {
+	for {
+		inputs, err := r.waitForInput(ctx)
+		if err != nil {
+			return true, stopErr(err)
+		}
+		recovered := r.handleActionResults(ctx, inputs)
+		*messages = append(*messages, r.humanMessage(inputs))
+		*turns = 0
+		// Another recovery from an executor result alone keeps the hold. Any
+		// human input, or a step that did not confirm recovery, runs the model.
+		if !recovered || hasHumanInput(inputs) {
+			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
+			return false, nil
+		}
+	}
+}
+
+// hasHumanInput reports whether inputs contain anything a person said, as
+// opposed to executor results. A person's words always get a model turn.
+func hasHumanInput(inputs []HumanInput) bool {
+	for _, in := range inputs {
+		if in.Kind != "action_result" {
+			return true
+		}
+	}
+	return false
 }
 
 // emit writes one event to the sink, serialized so parallel tool steps cannot

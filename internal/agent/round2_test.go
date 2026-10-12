@@ -514,7 +514,7 @@ func TestProposeFixNilProposals(t *testing.T) {
 		t.Fatal(err)
 	}
 	tool := &proposeFixTool{actions: reg, proposals: nil, sink: &fakeSink{}}
-	_, err := tool.Run(context.Background(), json.RawMessage(`{"title":"restart","steps":[{"action":"connect_restart_task","params":{},"description":"d"}],"risk":"","rollback":""}`))
+	_, err := tool.Run(context.Background(), json.RawMessage(`{"title":"restart","steps":[{"action":"connect_restart_task","params":{},"description":"d"}],"risk":"low","rollback":"restore the old task"}`))
 	if err == nil {
 		t.Fatal("expected an error when Proposals is nil")
 	}

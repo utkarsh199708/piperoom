@@ -105,28 +105,38 @@ func parseActionResult(text string) (id string, step int, ok bool) {
 	return id, n, true
 }
 
-// handleActionResults runs verify-after-fix for every action_result in inputs
-// that marks the last step of a proposal the agent created. It returns true
-// when the pipeline is confirmed recovered and Run should end (the done status
-// has already been emitted).
+// handleActionResults runs verify-after-fix for every action_result in inputs.
+// It reports whether any of them confirmed recovery (the done status has then
+// already been emitted). It never ends the run: a caller that gets true holds
+// for the next human input (see holdAfterRecovery).
 func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) bool {
+	recovered := false
 	for _, in := range inputs {
 		if in.Kind != "action_result" {
 			continue
 		}
 		if r.verifyActionResult(ctx, in) {
-			return true
+			recovered = true
 		}
 	}
-	return false
+	return recovered
 }
 
 // verifyActionResult handles one action_result input. It returns true only when
-// the input was the last step of a tracked proposal and the pipeline was
-// confirmed recovered, in which case the done status has already been emitted.
+// the input was a successful last step of a tracked proposal and the pipeline
+// was confirmed recovered, in which case the done status has already been
+// emitted. Recovery is verified only from OK == true: a failed step is reported
+// and a nil OK (unknown outcome) is never turned into a recovery claim.
 func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) bool {
-	id, step, ok := parseActionResult(in.Text)
-	if !ok {
+	id, step, parsed := parseActionResult(in.Text)
+	if in.OK == nil {
+		return false
+	}
+	if !*in.OK {
+		r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: failedStepText(id, step, parsed)})
+		return false
+	}
+	if !parsed {
 		return false
 	}
 	rec, ok := r.proposals.get(id)
@@ -160,6 +170,15 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) bool {
 	}
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "done", Detail: "pipeline recovered"})
 	return true
+}
+
+// failedStepText tells the room a fix step did not succeed. Recovery is not
+// checked in that case, and the agent keeps investigating.
+func failedStepText(id string, step int, parsed bool) string {
+	if !parsed {
+		return "A fix step failed. I have not verified recovery and will keep investigating."
+	}
+	return fmt.Sprintf("Fix step failed: proposal %q step %d did not succeed. I have not verified recovery and will keep investigating.", id, step)
 }
 
 // verifyProposal runs the layer checks for a proposal and returns whether every

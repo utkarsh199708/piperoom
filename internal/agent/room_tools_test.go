@@ -135,10 +135,73 @@ func TestProposeFix(t *testing.T) {
 func TestProposeFixUnknownAction(t *testing.T) {
 	reg := actions.NewRegistry()
 	tool := &proposeFixTool{actions: reg, proposals: &fakeProposals{id: "p_1"}}
-	raw := json.RawMessage(`{"title":"x","steps":[{"action":"nope","params":{},"description":"d"}],"risk":"","rollback":""}`)
+	raw := json.RawMessage(`{"title":"x","steps":[{"action":"nope","params":{},"description":"d"}],"risk":"low","rollback":"restore the old task"}`)
 	_, err := tool.Run(context.Background(), raw)
 	if !errors.Is(err, tools.ErrBadInput) {
 		t.Fatalf("expected ErrBadInput, got %v", err)
+	}
+}
+
+// TestProposeFixRejectsEmptyOrPlaceholderRiskRollback: a model that sends an
+// empty or placeholder risk or rollback gets an error tool result (is_error) so
+// it retries. Nothing is stored, and the text "<no value>" never reaches the
+// approvers.
+func TestProposeFixRejectsEmptyOrPlaceholderRiskRollback(t *testing.T) {
+	cases := []struct {
+		name     string
+		risk     string
+		rollback string
+	}{
+		{"empty risk", "", "restore BACKWARD"},
+		{"whitespace risk", "   ", "restore BACKWARD"},
+		{"no value risk", "<no value>", "restore BACKWARD"},
+		{"n/a risk", "N/A", "restore BACKWARD"},
+		{"none risk", "None", "restore BACKWARD"},
+		{"dash risk", "-", "restore BACKWARD"},
+		{"tbd risk", " TBD ", "restore BACKWARD"},
+		{"empty rollback", "low", ""},
+		{"whitespace rollback", "low", "\t\n"},
+		{"no value rollback", "low", "<NO VALUE>"},
+		{"n/a rollback", "low", "n/a"},
+		{"tbd rollback", "low", "tbd"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			reg := actions.NewRegistry()
+			if err := reg.Register(&fakeAction{name: "connect_restart_task", layer: "kafka-connect"}); err != nil {
+				t.Fatal(err)
+			}
+			proposals := &fakeProposals{id: "p_1"}
+			r, err := newRunner(Alert{}, Deps{
+				Tools:     tools.NewRegistry(),
+				Actions:   reg,
+				Inbox:     &fakeInbox{},
+				Sink:      &fakeSink{},
+				Proposals: proposals,
+				Logger:    discardLogger(),
+			}, Options{})
+			if err != nil {
+				t.Fatalf("newRunner: %v", err)
+			}
+			r.toolList = buildToolList(r.deps.Tools, newRoomTools(r.deps, r.proposals))
+
+			raw, err := json.Marshal(map[string]any{
+				"title":    "restart task",
+				"steps":    []map[string]any{{"action": "connect_restart_task", "params": map[string]any{}, "description": "restart"}},
+				"risk":     c.risk,
+				"rollback": c.rollback,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			res := r.runRoomTool(context.Background(), toolUse{id: "tu_1", name: "propose_fix", input: raw})
+			if !res.isError {
+				t.Fatalf("expected an error tool result, got %q", res.content)
+			}
+			if proposals.created.Title != "" {
+				t.Fatal("a proposal with an empty or placeholder risk/rollback must not be created")
+			}
+		})
 	}
 }
 

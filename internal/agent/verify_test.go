@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
+
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
@@ -155,8 +157,28 @@ func assertVerdict(t *testing.T, msgs []string, wantRecovered bool) {
 	}
 }
 
+// lastActionResult is an action_result whose step succeeded (OK == true).
 func lastActionResult(text string) []HumanInput {
-	return []HumanInput{{Kind: "action_result", Text: text}}
+	return []HumanInput{{Kind: "action_result", Text: text, OK: okPtr(true)}}
+}
+
+// actionResult is an action_result with an explicit outcome: ok may be nil for
+// an unknown outcome.
+func actionResult(text string, ok *bool) []HumanInput {
+	return []HumanInput{{Kind: "action_result", Text: text, OK: ok}}
+}
+
+func okPtr(b bool) *bool { return &b }
+
+// assertNoRecoveryClaim fails when any message claims recovery or reports a
+// recovery verdict. Messages that only say recovery is not verified are fine.
+func assertNoRecoveryClaim(t *testing.T, msgs []string) {
+	t.Helper()
+	for _, m := range msgs {
+		if strings.Contains(m, "recovered") {
+			t.Fatalf("must not claim recovery, got %q", msgs)
+		}
+	}
 }
 
 // ---- unit tests ----
@@ -247,7 +269,7 @@ func TestProposeFixRecordsIntoTracker(t *testing.T) {
 	track := newProposalTracker()
 	tool := &proposeFixTool{actions: reg, proposals: &fakeProposals{id: "p_9"}, sink: &fakeSink{}, track: track}
 
-	raw := json.RawMessage(`{"title":"restart task","steps":[{"action":"connect_restart_task","params":{"connector":"c","task":0},"description":"restart"}],"risk":"","rollback":""}`)
+	raw := json.RawMessage(`{"title":"restart task","steps":[{"action":"connect_restart_task","params":{"connector":"c","task":0},"description":"restart"}],"risk":"low","rollback":"restore the old task"}`)
 	if _, err := tool.Run(context.Background(), raw); err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -288,8 +310,9 @@ func TestVerifyAfterFixRecoveredEmitsDone(t *testing.T) {
 	if connect.calls != 1 {
 		t.Fatalf("expected 1 connect_status verification call, got %d", connect.calls)
 	}
+	// After recovery the model is not called again until a human speaks.
 	if len(model.calls) != 1 {
-		t.Fatalf("run must stop after recovery (1 model call), got %d", len(model.calls))
+		t.Fatalf("model must not run again after recovery without human input (1 call), got %d", len(model.calls))
 	}
 }
 
@@ -325,16 +348,17 @@ func TestVerifyAfterFixNotRecoveredKeepsInvestigating(t *testing.T) {
 	}
 }
 
-func TestVerifyAfterFixFailedStepNoRecoveredClaim(t *testing.T) {
-	// The last step failed (the executor stopped there). The verification tools
-	// still report the pipeline broken, so the agent must not claim recovery.
-	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectBrokenResult()}
+func TestVerifyAfterFixFailedLastStepNoRecoveredClaim(t *testing.T) {
+	// The last step reports OK == false, yet the read checks would pass. The
+	// agent must say the step failed, must not run recovery checks or claim
+	// recovery, and must keep investigating (the model runs again).
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
 	model := &scriptedModel{}
 	sink := &fakeSink{}
 	inbox := &fakeInbox{
 		drains: [][]HumanInput{
 			nil,
-			lastActionResult("proposal p_1 step 1: boom: task restart failed"),
+			actionResult("proposal p_1 step 1: task restart failed: connector busy", okPtr(false)),
 		},
 		waitErr: context.Canceled,
 	}
@@ -350,7 +374,107 @@ func TestVerifyAfterFixFailedStepNoRecoveredClaim(t *testing.T) {
 	if hasStatus(sink, "done") {
 		t.Fatal("a failed step must never end with done")
 	}
-	assertVerdict(t, messageTexts(sink), false)
+	msgs := messageTexts(sink)
+	assertNoRecoveryClaim(t, msgs)
+	var sawFailed bool
+	for _, m := range msgs {
+		if strings.Contains(m, `Fix step failed: proposal "p_1" step 1`) {
+			sawFailed = true
+		}
+	}
+	if !sawFailed {
+		t.Fatalf("expected a message that the fix step failed, got %q", msgs)
+	}
+	if connect.calls != 0 {
+		t.Fatalf("recovery checks must not run after a failed step, got %d calls", connect.calls)
+	}
+	if len(model.calls) < 2 {
+		t.Fatalf("expected the loop to keep investigating (>=2 model calls), got %d", len(model.calls))
+	}
+	if !strings.Contains(messagesJSON(model.calls[1]), "proposal p_1 step 1") {
+		t.Fatalf("resumed request should carry the failed action_result: %s", messagesJSON(model.calls[1]))
+	}
+}
+
+func TestVerifyAfterFixUnknownOutcomeNoRecoveredClaim(t *testing.T) {
+	// OK == nil means the outcome is unknown. Even with passing read checks the
+	// agent must never claim recovery, and it does not run the checks.
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	model := &scriptedModel{}
+	sink := &fakeSink{}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil,
+			actionResult("proposal p_1 step 1: done", nil),
+		},
+		waitErr: context.Canceled,
+	}
+	steps := []events.ProposalStep{
+		{Action: "schema_set_compatibility", Layer: "schema-registry", Params: json.RawMessage(`{"subject":"x-value","level":"NONE"}`)},
+		{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"connector":"pg-orders-connector","task":0}`)},
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect}, steps)
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if hasStatus(sink, "done") {
+		t.Fatal("an unknown outcome must never end with done")
+	}
+	assertNoRecoveryClaim(t, messageTexts(sink))
+	if connect.calls != 0 {
+		t.Fatalf("recovery checks must not run for an unknown outcome, got %d calls", connect.calls)
+	}
+	if len(model.calls) < 2 {
+		t.Fatalf("expected the loop to keep going (>=2 model calls), got %d", len(model.calls))
+	}
+}
+
+func TestVerifyAfterFixRecoveredThenSteerGetsReply(t *testing.T) {
+	// Recovery emits done, but the run stays alive: a steer that arrives later
+	// gets a model turn and a reply. The model is not called before the steer.
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
+		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"Waiting on the fix."}]}`),
+		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"Lag is back to normal."}]}`),
+	}}
+	sink := &fakeSink{}
+	steer := HumanInput{Kind: "steer", Actor: events.Actor{Name: "driver"}, Text: "is the lag back to normal?"}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil,
+			lastActionResult("proposal p_1 step 0: restarted pg-orders-connector task 0 (state now RUNNING)"),
+			{steer},
+		},
+		waitErr: context.Canceled,
+	}
+	steps := []events.ProposalStep{
+		{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"connector":"pg-orders-connector","task":0}`), Description: "restart task 0"},
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect}, steps)
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !hasStatus(sink, "done") {
+		t.Fatalf("expected agent.status done, got %v", sink.ofType(events.AgentStatus))
+	}
+	assertVerdict(t, messageTexts(sink), true)
+	if len(model.calls) != 2 {
+		t.Fatalf("expected 2 model calls (before and after the steer), got %d", len(model.calls))
+	}
+	if !strings.Contains(messagesJSON(model.calls[1]), "is the lag back to normal?") {
+		t.Fatalf("the steer must reach the model after recovery: %s", messagesJSON(model.calls[1]))
+	}
+	var replied bool
+	for _, m := range messageTexts(sink) {
+		if m == "Lag is back to normal." {
+			replied = true
+		}
+	}
+	if !replied {
+		t.Fatalf("expected the reply to the steer after recovery, got %q", messageTexts(sink))
+	}
 }
 
 func TestVerifyAfterFixFollowupSafety(t *testing.T) {
