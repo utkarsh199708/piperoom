@@ -191,12 +191,22 @@ without being in the file. Run compose from a clean shell (for example
 `docker compose -f deploy/docker-compose.pilot.yml config`, which prints the values the
 container will get (it shows secrets, so do not paste the output).
 
-## Data retention (not active yet)
+## Data retention
 
-`PIPEROOM_RETENTION_DAYS` is passed to the server, but it **has no effect yet**: it takes effect
-when the retention feature lands (PR in review). Until then nothing is deleted. When active, it
-deletes the events of closed rooms older than that many days; empty or `0` keeps everything,
-and open rooms are never deleted.
+`PIPEROOM_RETENTION_DAYS` is **live**. It deletes whole closed rooms (events, proposals,
+approvals and hand-offs) that were closed more than that many days ago. The check runs every
+6 hours. Open rooms are never deleted. Empty or `0` keeps everything. A value that is not a whole
+number stops the server at start-up.
+
+Deletion cannot be undone. If you must keep a room, export it before it ages out:
+
+```sh
+curl -H 'X-User: alice' http://localhost:8090/api/rooms/<room id>/export > room.json
+```
+
+The export carries a SHA-256 over the JCS (RFC 8785) form of the room (also sent in the
+`X-Piperoom-Export-SHA256` header), so you can check later that the file was not changed.
+Any user in `users.yaml` may export.
 
 ## Watcher (not active yet)
 

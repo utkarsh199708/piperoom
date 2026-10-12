@@ -49,11 +49,12 @@ All settings are environment variables read by `internal/config/config.go` (`con
 `config.go:14-104` holds the fields and `config.go:107-174` the defaults. The settings are grouped below.
 The Docker path reads `deploy/.env` (which starts from `deploy/pilot.env.example`), but the compose
 file passes only the variables it lists in its `environment:` block (`deploy/docker-compose.pilot.yml`).
-On current `main` that list has no model-provider, triage, token-budget, `AWS_*`, `VERTEX_*`,
-`GOOGLE_APPLICATION_CREDENTIALS` or retention variables. So on the Docker path, Bedrock, Vertex, the
-triage model and the token budget need the deploy update (not on main yet)
-before they work in the container. Compose also never passes `ANTHROPIC_BASE_URL`, so a value on the
-host cannot leak into the container.
+That list carries the model-provider, triage, token-budget, `AWS_*`, `VERTEX_*`,
+`GOOGLE_APPLICATION_CREDENTIALS`, retention and proxy variables, so Bedrock, Vertex, the triage model,
+the token budget and retention work in the container once you set them in `deploy/.env`. Compose also
+never passes `ANTHROPIC_BASE_URL`, so a value on the host cannot leak into the container. A variable
+exported in the shell that runs compose overrides `deploy/.env`, so run compose from a clean shell
+(see [deploy/README.md](../../deploy/README.md)).
 
 **Core and database**
 
@@ -71,7 +72,7 @@ host cannot leak into the container.
 | `USERS_FILE` | users and the layers each owns (step 2) |
 | `PIPEROOM_PUBLIC_URL` | optional. The externally visible base URL, used for room links in Slack. It is a WebSocket origin only when `PIPEROOM_WEB_DIR` is set; without a web dir the WebSocket ignores it (section 4). Its host is also the public host in the served UI's content-security policy. Must be a plain `http(s)` host, with no wildcard. An invalid value stops the start (`cmd/server/main.go:84-87`; `internal/httpapi/static.go:41-75`; `internal/httpapi/server.go:150-158`; `internal/ws/gateway.go:186-189`; `internal/httpapi/static.go:195-197`). Empty means no links |
 | `PIPEROOM_WEB_DIR` | **Live.** When set, the server also serves the built web UI (`web/dist`) at `/`, and refuses to start if the directory has no `index.html` (`cmd/server/main.go:242-249`, `checkWebDir` at `:292`; `internal/httpapi/static.go:16-20`). The Docker image sets it to `/web` (`Dockerfile:44`). Unset, the server serves the API and the probes only |
-| `PIPEROOM_RETENTION_DAYS` | **Not live.** Read into config only (`config.go:103,172`). Nothing on `main` deletes events by age |
+| `PIPEROOM_RETENTION_DAYS` | **Live.** Deletes whole closed rooms (events, proposals, approvals, hand-offs) closed more than this many days ago, checked every 6 hours (`cmd/server/retention.go`; `internal/store/retention.go`). Open rooms are never deleted. Empty or `0` keeps everything; a value that is not a whole number stops the start. Deletion cannot be undone: export a room first with `GET /api/rooms/{id}/export` (SHA-256 over the JCS form, `internal/room/service_export.go`) |
 
 **Model provider, triage and token budget**
 
@@ -280,9 +281,9 @@ the web UI, and starts it with a compose file that includes its own Postgres. It
 10-minute path: copy `deploy/pilot.env.example` to `deploy/.env`, copy the two example YAML files
 under `deploy/config/`, then start the compose file. The image runs `/piperoom --allow-remote`
 (`Dockerfile:67`), and its health check calls `--healthcheck` (`Dockerfile:54`). The compose file
-publishes the port on `PIPEROOM_BIND`, which defaults to `127.0.0.1` (`deploy/docker-compose.pilot.yml:98`).
-Read the compose note in section 1 before you rely on the model-provider, triage or budget settings on
-this path: compose passes only the variables it lists.
+publishes the port on `PIPEROOM_BIND`, which defaults to `127.0.0.1` (`deploy/docker-compose.pilot.yml:133`).
+Compose passes only the variables it lists; the list covers every setting in section 1 (see the compose
+note there).
 
 **`--demo`** (`go run ./cmd/server --demo`) needs no database, stack or API key. It uses an
 in-memory store, a scripted agent and a fake topology. It runs the **real** write actions over
@@ -459,8 +460,8 @@ an identical body (`service_room.go:109-125`; index key at `:196`);
 
 - **Real login** (F1; the design doc named in `docs/api.md` is not on `main`). Until it exists,
   anyone who can reach the API or the WebSocket can act as any user.
-- **Room retention and export** are in review and are not on `main`. `PIPEROOM_RETENTION_DAYS` is
-  read into config only (section 1), and nothing deletes closed rooms by age.
+- **Room retention and export** are live (section 1). With `PIPEROOM_RETENTION_DAYS` unset or `0`,
+  nothing deletes closed rooms by age.
 - **Snowflake** is selectable with `WAREHOUSE_KIND=snowflake` (section 1 and
   [permissions.md](permissions.md#warehouse)).
 
