@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"piperoom/internal/agent"
 	"piperoom/internal/alertin"
@@ -27,6 +28,17 @@ type watchHarness struct {
 	runs   *atomic.Int32
 	mu     sync.Mutex
 	closed []closedCall
+	// inboxes holds the Inbox each agent run was given, in start order.
+	inboxes []agent.Inbox
+}
+
+func (h *watchHarness) inbox(i int) agent.Inbox {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if i >= len(h.inboxes) {
+		h.t.Fatalf("agent run %d never started", i)
+	}
+	return h.inboxes[i]
 }
 
 type closedCall struct{ roomID, pipelineID, dedupKey string }
@@ -41,7 +53,10 @@ func (h *watchHarness) build() *room.Service {
 	h.t.Helper()
 	svc := room.New(room.Deps{
 		Store: h.store, Users: room.DefaultUsers(), Owners: testOwners(), Now: h.clock.Now,
-		Run: func(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
+		Run: func(ctx context.Context, _ agent.Alert, d agent.Deps, _ agent.Options) error {
+			h.mu.Lock()
+			h.inboxes = append(h.inboxes, d.Inbox)
+			h.mu.Unlock()
 			h.runs.Add(1)
 			<-ctx.Done()
 			return nil
@@ -160,29 +175,74 @@ func TestOnRoomClosedFiresWithIDs(t *testing.T) {
 	}
 }
 
-// A hook that calls back into the service must not deadlock: it runs outside s.mu.
-func TestOnRoomClosedMayCallService(t *testing.T) {
+// The close hook runs outside s.mu: it may re-enter the service through
+// OpenRoomForPipeline, LastRoomForKey and OpenAlertRoom without deadlocking
+// CloseRoom, and it already sees the room as closed.
+func TestOnRoomClosedMayReenterService(t *testing.T) {
+	type seen struct {
+		openFound  bool
+		lastID     string
+		lastClosed bool
+		lastOK     bool
+		reopened   bool
+		reopenErr  error
+	}
 	var svc *room.Service
-	done := make(chan bool, 1)
+	got := make(chan seen, 1)
 	svc = room.New(room.Deps{
 		Store: memstore.New(), Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, WriteHandoff: fakeWrite,
-		OnRoomClosed: func(_ context.Context, _, pipelineID, _ string) {
-			_, ok := svc.OpenRoomForPipeline(pipelineID)
-			done <- ok
+		OnRoomClosed: func(ctx context.Context, _, pipelineID, dedupKey string) {
+			var r seen
+			_, r.openFound = svc.OpenRoomForPipeline(pipelineID)
+			var at *time.Time
+			r.lastID, at, r.lastOK = svc.LastRoomForKey(pipelineID, dedupKey)
+			r.lastClosed = at != nil
+			// The watcher fires again at once: a new room, not a join of the closed one.
+			var snap room.RoomSnapshot
+			snap, r.reopened, r.reopenErr = svc.OpenAlertRoom(ctx, watcherAlert(pipelineID, alertin.StatusFiring))
+			if snap.ID == r.lastID {
+				r.reopened = false
+			}
+			got <- r
 		},
 	})
 	t.Cleanup(svc.Close)
-	r := createRoom(t, svc, "arjun")
-	if _, err := svc.CloseRoom(context.Background(), mustUser(t, svc, "arjun"), r.ID, "done"); err != nil {
-		t.Fatalf("close: %v", err)
+
+	ctx := context.Background()
+	w, _, err := svc.OpenAlertRoom(ctx, watcherAlert("orders", alertin.StatusFiring))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	arjun := mustUser(t, svc, "arjun")
+	if _, err := svc.GrantControl(ctx, arjun, w.ID, "arjun"); err != nil {
+		t.Fatalf("take control: %v", err)
+	}
+	closeDone := make(chan error, 1)
+	go func() {
+		_, err := svc.CloseRoom(ctx, arjun, w.ID, "done")
+		closeDone <- err
+	}()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("CloseRoom did not return: the hook deadlocked")
 	}
 	select {
-	case ok := <-done:
-		if ok {
-			t.Fatal("OpenRoomForPipeline in the close hook found the room that just closed")
+	case r := <-got:
+		if r.openFound {
+			t.Error("OpenRoomForPipeline in the hook found the room that just closed")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("hook never ran, or deadlocked")
+		if !r.lastOK || r.lastID != w.ID || !r.lastClosed {
+			t.Errorf("LastRoomForKey in the hook = %q ok=%v closed=%v, want %q closed", r.lastID, r.lastOK, r.lastClosed, w.ID)
+		}
+		if r.reopenErr != nil || !r.reopened {
+			t.Errorf("OpenAlertRoom in the hook: opened a new room = %v, err %v", r.reopened, r.reopenErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hook never ran")
 	}
 }
 
@@ -404,6 +464,11 @@ func TestPostRoomNote(t *testing.T) {
 	if n := h.runs.Load(); n != 1 {
 		t.Fatalf("note started an agent: %d starts, want 1", n)
 	}
+	// The running agent's inbox stays empty: a note is for humans.
+	in := h.inbox(0)
+	if items, err := in.Drain(ctx); err != nil || len(items) != 0 {
+		t.Fatalf("agent inbox after a note: %d items, err %v; want empty", len(items), err)
+	}
 
 	// After a restart, a note still starts nothing.
 	svc2 := h.build()
@@ -441,7 +506,89 @@ func TestPostRoomNote(t *testing.T) {
 		t.Fatalf("long note: %v", err)
 	}
 	notes = systemTexts(t, svc2, other.ID)
-	if len(notes) != 1 || len(notes[0]) > 4096+len("…") || !strings.HasSuffix(notes[0], "…") {
-		t.Fatalf("long note stored %d bytes, want <= 4099 ending in …", len(notes[0]))
+	if len(notes) != 1 || len(notes[0]) > 4096 || len(notes[0]) < 4096-3 || !strings.HasSuffix(notes[0], "…") || !utf8.ValidString(notes[0]) {
+		t.Fatalf("long note stored %d bytes, want 4093..4096 bytes of valid UTF-8 ending in …", len(notes[0]))
+	}
+	// ASCII text over the cap is cut to exactly 4096 bytes with the ellipsis.
+	if err := svc2.PostRoomNote(ctx, other.ID, strings.Repeat("a", 6000)); err != nil {
+		t.Fatalf("long ascii note: %v", err)
+	}
+	notes = systemTexts(t, svc2, other.ID)
+	if got := notes[len(notes)-1]; len(got) != 4096 || !strings.HasSuffix(got, "a…") {
+		t.Fatalf("long ascii note stored %d bytes, want exactly 4096 ending in a…", len(got))
+	}
+}
+
+// Evidence with NUL bytes or invalid UTF-8 (Connect trace text) is kept with
+// U+FFFD in their place, never refused and never lost: Postgres text and jsonb
+// reject both. The replacement happens before the length cut.
+func TestPostRoomNoteMakesTextStorable(t *testing.T) {
+	rep := string(rune(0xFFFD))
+	h := newWatchHarness(t)
+	svc := h.build()
+	ctx := context.Background()
+	w, _, err := svc.OpenAlertRoom(ctx, watcherAlert("orders", alertin.StatusFiring))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := svc.PostRoomNote(ctx, w.ID, "task 0 failed: \x00org.apache.kafka\x00 \xff\xfe trace"); err != nil {
+		t.Fatalf("note with NUL and bad UTF-8: %v", err)
+	}
+	if err := svc.PostRoomNote(ctx, w.ID, "\x00\x00\x00"); err != nil {
+		t.Fatalf("note of only NULs: %v", err)
+	}
+	// NULs right at the cut: the text is replaced first, so the cut sees the
+	// 3-byte replacement characters and still lands on a boundary.
+	if err := svc.PostRoomNote(ctx, w.ID, strings.Repeat("\x00", 3000)); err != nil {
+		t.Fatalf("long note of NULs: %v", err)
+	}
+	notes := systemTexts(t, svc, w.ID)
+	if len(notes) != 3 {
+		t.Fatalf("notes = %q, want 3", notes)
+	}
+	if want := "task 0 failed: " + rep + "org.apache.kafka" + rep + " " + rep + " trace"; notes[0] != want {
+		t.Fatalf("note 0 = %q, want %q", notes[0], want)
+	}
+	if notes[1] != rep+rep+rep {
+		t.Fatalf("note 1 = %q, want three U+FFFD", notes[1])
+	}
+	for i, n := range notes {
+		if strings.ContainsRune(n, 0) || !utf8.ValidString(n) || len(n) > 4096 {
+			t.Fatalf("note %d is not storable: %d bytes", i, len(n))
+		}
+	}
+}
+
+func TestOpenRoomForPipelineTieAndBadID(t *testing.T) {
+	h := newWatchHarness(t)
+	svc := h.build()
+	ctx := context.Background()
+	arjun := mustUser(t, svc, "arjun")
+
+	// Two rooms opened at the same instant: the smaller id wins, as in the stores.
+	a, err := svc.CreateRoom(ctx, arjun, "a", "sev3", "orders")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	b, err := svc.CreateRoom(ctx, arjun, "b", "sev3", "orders")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	want := a.ID
+	if b.ID < a.ID {
+		want = b.ID
+	}
+	if id, ok := svc.OpenRoomForPipeline("orders"); !ok || id != want {
+		t.Fatalf("tie: got %q %v, want smaller id %q", id, ok, want)
+	}
+
+	// A pipeline id outside the accepted charset matches nothing.
+	for _, bad := range []string{"", "or ders", "orders|x", "ord\x00ers", "a/b"} {
+		if id, ok := svc.OpenRoomForPipeline(bad); ok {
+			t.Errorf("OpenRoomForPipeline(%q) = %q, want none", bad, id)
+		}
+		if id, _, ok := svc.LastRoomForKey(bad, "watcher:orders"); ok {
+			t.Errorf("LastRoomForKey(%q) = %q, want none", bad, id)
+		}
 	}
 }
