@@ -14,7 +14,7 @@ for those before you plan the install.
   version. The dev machine used Node 24 (`AGENTS.md` §3). You can skip Node if you use only the API.
 - **A Postgres database for Piperoom's own state**, separate from the source and the warehouse.
   Its URL is `PIPEROOM_DB_URL`. Use a role that owns only this database. The service creates its own
-  tables at start-up (`cmd/server/main.go:108`), so the role needs rights to create tables in it.
+  tables at start-up (`cmd/server/main.go:125`), so the role needs rights to create tables in it.
 - **Network access** from the Piperoom host to: the source Postgres, the warehouse (Postgres, or
   the Snowflake account if `WAREHOUSE_KIND=snowflake`), Kafka brokers, Kafka Connect REST, Schema
   Registry, the room database, the Anthropic API host (`api.anthropic.com` unless you pin
@@ -37,8 +37,8 @@ for those before you plan the install.
 ## 1. Configure the environment
 
 All settings are environment variables read by `internal/config/config.go` (`config.Load()`,
-`config.go:9-73` for the fields and `:76-128` for the defaults). The alert and web variables at the
-end of the table are read into config only: nothing on `main` uses them yet.
+`config.go:9-73` for the fields and `:76-128` for the defaults). The alert variables at the end of the
+table are used by the signed alert routes. `PIPEROOM_WEB_DIR` is read into config only.
 
 | Variable | Meaning |
 |---|---|
@@ -54,7 +54,7 @@ end of the table are read into config only: nothing on `main` uses them yet.
 | `USERS_FILE` | users and the layers each owns (step 2) |
 | `PIPEROOM_MODEL` | model id, default `claude-opus-5-5` (`config.go:87`) |
 | `PIPEROOM_EFFORT` | reasoning effort, default `high` (`config.go:88`) |
-| `SLACK_BOT_TOKEN` | optional, **secret**. Bot token with `chat:write`. Slack is on only when this and `SLACK_CHANNEL_ID` are both set. One without the other stops the start (`cmd/server/main.go:128-132`; `internal/slackbridge/bridge.go:63-69`) |
+| `SLACK_BOT_TOKEN` | optional, **secret**. Bot token with `chat:write`. Slack is on only when this and `SLACK_CHANNEL_ID` are both set. One without the other stops the start (`cmd/server/main.go:145-149`; `internal/slackbridge/bridge.go:63-69`) |
 | `SLACK_CHANNEL_ID` | optional. A channel **ID** such as `C0123ABC`, never `#name` (`bridge.go:70-71`). Use a private channel |
 | `PIPEROOM_PUBLIC_URL` | optional. Base URL of the web UI, used for room links in Slack. Must be an absolute `http(s)` URL (`bridge.go:73-79`). Empty means no links (`config.go:113`) |
 | `KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_MECHANISM`, `KAFKA_SASL_USERNAME` | Kafka TLS/SASL (empty = plaintext) |
@@ -65,13 +65,13 @@ end of the table are read into config only: nothing on `main` uses them yet.
 | `CONNECT_USERNAME`, `CONNECT_TLS_CA_FILE`, `CONNECT_TLS_CERT_FILE` | Connect basic auth / TLS |
 | `CONNECT_PASSWORD`, `CONNECT_TLS_KEY_FILE` | **secrets** |
 | `ANTHROPIC_API_KEY` | read by the Anthropic SDK, not by Piperoom. **No localhost fallback.** Piperoom does not write it to config files, events or logs. If it is unset, the SDK falls back to `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE` and other sources (`anthropic-sdk-go@v1.80.0/client.go:30-82`) |
-| `ANTHROPIC_BASE_URL` | **read by the SDK** (`client.go:58`). Every prompt goes to this host. Leave it unset, or pin it to the Anthropic host you approved |
+| `ANTHROPIC_BASE_URL` | **read by the SDK** (`anthropic-sdk-go@v1.80.0/client.go:58`). Every prompt goes to this host. Leave it unset, or pin it to the Anthropic host you approved |
 | `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE` | read by the SDK when `ANTHROPIC_API_KEY` is not set. Leave them unset on the Piperoom host, so the key used is the one you chose |
 | `ANTHROPIC_WORKSPACE_ID` | only if the key is a user key (`internal/agent/model.go:42`) |
-| `ALERTMANAGER_TOKEN`, `GRAFANA_ALERT_SECRET`, `PAGERDUTY_ALERT_SECRET`, `DATADOG_ALERT_TOKEN`, `GENERIC_ALERT_SECRET` | **Not live.** Read into config (`internal/config/config.go:117-122`), but no code on `main` uses them. Signed alert senders are in review (not on `main`), and F9 stays open until then: today the webhook has no sender check (section 6) |
-| `PAGERDUTY_SERVICES`, `DEFAULT_ALERT_PIPELINE` | **Not live.** Read into config (`config.go:120,123`); nothing on `main` uses them yet |
-| `PIPEROOM_MAX_AGENTS` | **Not live.** Read into config (`config.go:125`); no agent cap is enforced on `main` yet |
-| `PIPEROOM_WEB_DIR` | **Not live.** Read into config (`config.go:127`). The room service does not serve the web UI on `main`; run the UI separately (step 4) |
+| `ALERTMANAGER_TOKEN`, `GRAFANA_ALERT_SECRET`, `PAGERDUTY_ALERT_SECRET`, `DATADOG_ALERT_TOKEN`, `GENERIC_ALERT_SECRET` | Secrets for the signed alert routes `POST /api/alerts/{source}` (section 6). A source is enabled only when its secret is set (`internal/alertin/verify.go:90-102`); unset, its route answers 401 (`internal/httpapi/alerts.go:31-41`). Read in `cmd/server/alerts.go:17-40` (`internal/config/config.go:117-122`) |
+| `PAGERDUTY_SERVICES`, `DEFAULT_ALERT_PIPELINE` | Used by the signed routes. `PAGERDUTY_SERVICES` maps service ids to pipelines, and a bad entry stops the start. `DEFAULT_ALERT_PIPELINE` is used when an alert names no pipeline, and a bad value stops the start (`cmd/server/alerts.go:17-40`; `internal/config/config.go:120,123`) |
+| `PIPEROOM_MAX_AGENTS` | Caps concurrent agent runs; the others queue. Empty or `0` means the default, 3 (`internal/room/agentslots.go:16`; `cmd/server/maxagents.go:12-32`). The start-up log prints the value (`cmd/server/main.go:65`) |
+| `PIPEROOM_WEB_DIR` | **Not live.** Read into config only (`internal/config/config.go:127`). No code on `main` serves the web UI; run the UI separately (step 4) |
 
 The client code refuses unsafe combinations at start-up: basic auth over `http://` and TLS files
 with an `http://` URL (`internal/clients/netsec/http.go:53-56`), and SASL PLAIN without TLS
@@ -122,7 +122,7 @@ Rules of thumb:
 - Every layer a fix can touch must have an owner who is actually on call and reachable.
   A fix needs **all** of its required layers' owners to approve. The six layers are
   `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer` and `warehouse`
-  (`internal/events/events.go:268`).
+  (`internal/events/events.go:275`).
 - `source_tables` and `sink_tables` bound the row tools, and the read tools are scoped to the
   room's pipeline (its connectors, topics, consumer groups, subjects and tables). Keep `SELECT`
   grants identical to these lists
@@ -147,25 +147,25 @@ environment above.
 
 **Real mode** (no flag) does this, in order (`cmd/server/main.go`):
 
-1. Loads `USERS_FILE` and `OWNERS_FILE` (`:76-91`). A missing or unreadable file stops the start.
-2. Cross-checks the two (`room.ValidateUsers`, `internal/room/users.go:70`, called at `:92`).
+1. Loads `USERS_FILE` and `OWNERS_FILE` (`:84-102`). A missing or unreadable file stops the start.
+2. Cross-checks the two (`room.ValidateUsers`, `internal/room/users.go:70`, called at `:100`).
    Any disagreement stops the start, in **both** directions: every layer in `owners.yaml` must name
    a user who exists in `users.yaml` and lists that layer, and every layer a user lists must be
    assigned to that same user in `owners.yaml`. A layer name that is not one of the six known
    layers also stops the start. The error names the user and the layer.
-3. Applies the goose migrations to `PIPEROOM_DB_URL` (`:108`, `migrations/migrate.go`), then opens
-   the room store (`:114`). A database that cannot be reached stops the start.
-4. Starts the Slack mirror if `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` are set (`:128`). A wrong
-   Slack setting stops the start. Mirrors then run for every open room (`:198`).
-5. Opens the data stack (`wiring.Open`, `:153`; `internal/wiring/wiring.go:135-193`): source
+3. Applies the goose migrations to `PIPEROOM_DB_URL` (`:125`, `migrations/migrate.go`), then opens
+   the room store (`:131`). A database that cannot be reached stops the start.
+4. Starts the Slack mirror if `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` are set (`:145`). A wrong
+   Slack setting stops the start. Mirrors then run for every open room (`:216`).
+5. Opens the data stack (`wiring.Open`, `:170`; `internal/wiring/wiring.go:135-193`): source
    Postgres, the warehouse (`WAREHOUSE_KIND`), Kafka, Connect and Schema Registry, with the
    TLS/SASL/auth settings above. Source and warehouse are pinged here. It then registers the
-   read-only tools and the six write actions (`wiring.RegisterTools`, `:159`;
+   read-only tools and the six write actions (`wiring.RegisterTools`, `:176`;
    `internal/wiring/wiring.go:199-219`). This needs the credentials from
    [permissions.md](permissions.md) and `ANTHROPIC_API_KEY`.
-6. Reloads every room from the log (`:183`). A failure stops the start in real mode, but one room
-   that cannot be rebuilt is only logged and skipped (`internal/room/service.go:201-204`). Then it
-   listens on `PIPEROOM_HTTP_ADDR` (`:229`).
+6. Reloads every room from the log (`:202`). A failure stops the start in real mode, but one room
+   that cannot be rebuilt is only logged and skipped (`internal/room/service.go:207-211`). Then it
+   listens on `PIPEROOM_HTTP_ADDR` (`:247`).
 
 ```sh
 export PIPEROOM_DB_URL=... SOURCE_DB_URL=... WAREHOUSE_DB_URL=... KAFKA_BROKERS=... \
@@ -175,58 +175,59 @@ go run ./cmd/server
 
 **`--demo`** (`go run ./cmd/server --demo`) needs no database, stack or API key. It uses an
 in-memory store, a scripted agent and a fake topology. It runs the **real** write actions over
-fake clients, so the propose / approve / execute path is the real one (`cmd/server/main.go:1-8,105-151`).
+fake clients, so the propose / approve / execute path is the real one (`cmd/server/main.go:1-8,122-124,158-167`).
 It still loads `OWNERS_FILE` and cross-checks it against the users (falling back to built-in
 demo users if `USERS_FILE` is missing). Use it to try the UI and the approval flow safely.
 Nothing in it touches your systems. **But demo mode does post to the real Slack channel if the
-`SLACK_*` variables are set**, because the Slack mirror starts in both modes (`main.go:125-132`).
+`SLACK_*` variables are set**, because the Slack mirror starts in both modes (`cmd/server/main.go:145-149`).
 Unset them for a demo, or use a throwaway channel.
 
 **The web UI** is not served by `cmd/server`. Run it separately: `cd web && npm ci && npm run dev`
 serves it on `localhost:5173` (`web/package.json:7`). It calls `http://localhost:8090` by default
 (`web/src/api/client.ts:12`, override with `VITE_API_BASE`). CORS allows only the origin
-`http://localhost:5173` (`internal/httpapi/server.go:171`). WebSocket origins allowed are
+`http://localhost:5173` (`internal/httpapi/server.go:179`). WebSocket origins allowed are
 `localhost:5173` and `127.0.0.1:5173` (`internal/ws/gateway.go:180`). These origin checks stop
 browsers only. A non-browser client is not blocked by them. A UI served from any other origin is
 blocked until a reverse proxy puts both under one origin.
 
 Verify startup: `curl -H 'X-User: <user id>' http://127.0.0.1:8090/api/me` returns that user.
-The same call with an unknown id returns `401` (`internal/httpapi/server.go:145-160`).
+The same call with an unknown id returns `401` (`internal/httpapi/server.go:153-169`).
 
 ### Routes you need
 
 All under `/api`, all JSON, and all (except the WebSocket) require `X-User`
-(`internal/httpapi/server.go:82-116`; the full contract is `docs/api.md`):
+(`internal/httpapi/server.go:86-127`; the full contract is `docs/api.md`):
 
 | Purpose | Route |
 |---|---|
 | who am I | `GET /api/me` |
 | open a room by hand | `POST /api/rooms` `{title, severity, pipeline_id}` |
-| open a room from an alert | `POST /api/alerts/webhook` (see step 6) |
+| open a room from a signed alert | `POST /api/alerts/{source}`, `source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic` (section 6) |
+| open a room from an unsigned dev alert | `POST /api/alerts/webhook` (section 6; no sender check, F9) |
 | list / read rooms | `GET /api/rooms`, `GET /api/rooms/{id}`, `GET /api/rooms/{id}/events?after=&limit=` |
 | live view | `GET /api/rooms/{id}/ws?user=<id>&after=<seq>` (WebSocket; `?user=` is the identity, `internal/ws/gateway.go:156-160`) |
 | talk to the room | `POST /api/rooms/{id}/comments`, `/steer`, `/suggestions/{sid}/send`, `/control/request`, `/control/grant`, `/close`, `/trace` |
 | fixes | `POST /api/proposals/{pid}/approve`, `/reject` |
 | shift change | `POST /api/rooms/{id}/handoffs`, `POST /api/handoffs/{hid}/accept` |
 | pipeline map | `GET /api/pipelines/{pid}/topology` |
-| probes (no `X-User`, outside `/api`) | `GET /healthz`, `GET /readyz`; `/readyz` checks the room store with a timeout (`server.go:79-80`; `internal/httpapi/health.go:85-90`) |
+| probes (no `X-User`, outside `/api`) | `GET /healthz`, `GET /readyz`; `/readyz` checks the room store with a timeout (`server.go:83-84`; `internal/httpapi/health.go:86-95`) |
 
 ### What happens on a restart
 
-On start-up the service reloads every room from the event log (`internal/room/service.go:183-221`).
+On start-up the service reloads every room from the event log (`internal/room/service.go:189-225`).
 An open room comes back with its agent **idle**. The service writes an `agent.status` `idle` event
-with the detail "server restarted", and a system message (`service.go:223-240`). The agent does not
+with the detail "server restarted", and a system message (`service.go:229-248`). The agent does not
 run again until someone resumes it: a driver's steer, a comment that mentions `@agent`, or a sent
-suggestion (`internal/room/service_steer.go:44,68,137`; `service.go:243-251`). The new run starts
-from the room's original alert, not from where the old run stopped (`service.go:247-251`).
+suggestion (`internal/room/service_steer.go:44,68,137`; `service.go:250-258`). The new run starts
+from the room's original alert, not from where the old run stopped (`service.go:257`).
 
 A failing agent run is retried, up to 3 runs in total, with a pause that starts at 1 second and
-doubles. Each failure posts an `agent.status` `error` event (`service.go:663-723`).
+doubles. Each failure posts an `agent.status` `error` event (`service.go:697-700,717-769`).
 
 A fix that was fully approved but had not finished when the server stopped is **not re-run**.
 It is marked failed. The service writes one `action.executed` event with `ok=false` and the text
 "proposal was interrupted by a service restart before it finished; create a new proposal to retry",
-and sets the proposal to failed (`service.go:260-290`). Check the target system yourself to see how
+and sets the proposal to failed (`service.go:266-293`). Check the target system yourself to see how
 far the interrupted step got, before you ask for a new proposal.
 
 ### Network exposure
@@ -234,7 +235,7 @@ far the interrupted step got, before you ask for a new proposal.
 There is no real login yet (F1). `docs/api.md` §Auth identifies users by the `X-User` header.
 `cmd/server` refuses to listen on any address other than loopback unless you pass `--allow-remote`.
 Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. With the flag it starts
-and logs a warning (`cmd/server/main.go:59-67`; `cmd/server/listen.go:19-41`). Keep
+and logs a warning (`cmd/server/main.go:67-75`; `cmd/server/listen.go:19-41`). Keep
 `PIPEROOM_HTTP_ADDR` on loopback. Reach it through an SSH tunnel, a VPN, or an authenticating
 reverse proxy that sets `X-User` itself and strips the header from client requests. The WebSocket
 takes the same unverified `?user=` value. `--allow-remote` adds no authentication.
@@ -262,44 +263,50 @@ takes the same unverified `?user=` value. `--allow-remote` adds no authenticatio
 
 ## 6. Wire up alerts
 
-Point your alerting system at `POST /api/alerts/webhook` (`internal/httpapi/server.go:100`,
-handler `internal/httpapi/handlers.go:50-92`). What it does on `main`:
+Use the signed route when you can: `POST /api/alerts/{source}`, where `{source}` is one of
+`alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic` (`internal/alertin/alertin.go:51`,
+`Sources`). Each source checks its own token or HMAC signature, and only a source whose secret is
+set is accepted (section 1). A failed check answers 401, and an oversized body 413
+(`internal/httpapi/alerts.go:31-75`). Repeats and resolved alerts are handled the same way as the
+webhook below. The unsigned dev route, `POST /api/alerts/webhook`, is described next.
+
+Point your alerting system at `POST /api/alerts/webhook` (`internal/httpapi/server.go:108`,
+handler `internal/httpapi/handlers.go:48-68`). What it does on `main`:
 
 - **Auth.** It needs `X-User: <user id>` of a user in `users.yaml`, like every other route
-  (`server.go:145-160`). **It does not verify the sender.** Nothing checks a signature or a token.
-  `internal/alertin` has the verification code for Alertmanager, Grafana, PagerDuty, Datadog and
-  a generic form, but the server never calls it (`internal/alertin/verify.go:109-115`). Treat the
+  (`server.go:153-169`). **It does not verify the sender.** Nothing checks a signature or a token.
+  The signed routes call `internal/alertin` (`verify.go:109-115`); this route does not. Treat the
   endpoint as open to anyone who can reach it and send that header. Keep it reachable only from
-  your alerting system (F9).
-- **Body.** Valid JSON, up to 1 MiB (`internal/httpapi/server.go:24`, `handlers.go:52-64`). Piperoom
+  your alerting system, or do not expose it (F9).
+- **Body.** Valid JSON, up to 1 MiB (`internal/httpapi/server.go:25`, `handlers.go:49-56`). Piperoom
   reads `title`, `severity` and `pipeline_id` if the body is an object. The whole body is stored
-  unchanged in the room's `room.created` event (`internal/room/service_room.go:136-138`), so do not
+  unchanged in the room's `room.created` event (`internal/room/service_room.go:186-188`), so do not
   put secrets in alert payloads.
 - **Defaults.** No title becomes "New alert". An unknown severity becomes `sev3`. A missing
-  `pipeline_id` becomes `unknown` (`service_room.go:93-102`). A `pipeline_id` with characters other
-  than letters, digits, `_`, `.`, `-` is rejected with `400` (`service_room.go:103-105`).
+  `pipeline_id` becomes `unknown` (`service_room.go:144-152`). A `pipeline_id` with characters other
+  than letters, digits, `_`, `.`, `-` is rejected with `400` (`service_room.go:153-155`).
 - **Unknown pipeline.** A missing or unknown pipeline still opens a room. The room gets a system
-  message that proposals are disabled (`service_room.go:150-157`). Any proposal the agent tries is
+  message that proposals are disabled (`service_room.go:201-208`). Any proposal the agent tries is
   refused (`internal/room/service_proposals.go:83-86`). The agent still runs, but its tools are
   scoped to a pipeline, so expect it to find little.
 - **De-duplication.** A repeat has the same `dedup_key`, or the same bytes when the body has no
-  `dedup_key`, for the same `pipeline_id` (`service_room.go:106-108,172-190`;
+  `dedup_key`, for the same `pipeline_id` (`service_room.go:89,172-175,193-196`;
   `internal/alertin/parse.go:335-340,355-359`). If a room is still open for that key, the repeat
   joins it. A system message says the alert fired again, and the response is `200` with that room.
-  No second room and no second agent start (`service_room.go:116-121,214-223`;
-  `handlers.go:82-88`). A new room returns `201`. Closing the room frees the key, so the next repeat
-  opens a new room (`service_room.go:336-338`). The key is rebuilt after a restart
-  (`service.go:209,229-239`). If several open rooms hold the same key, the first one keeps it
-  (`service_room.go:229-239`).
+  No second room and no second agent start (`service_room.go:166-171,268-277`;
+  `internal/httpapi/alerts.go:100-104`). A new room returns `201`. Closing the room frees the key, so the next repeat
+  opens a new room (`service_room.go:313-326,422`). The key is rebuilt after a restart
+  (`service.go:215,229-248`). If several open rooms hold the same key, the first one keeps it
+  (`service_room.go:288-308`).
   - **Watch out:** the body alone decides whether a repeat is a repeat. A body with no `dedup_key`
     is a repeat only if it is byte-identical to the first one. If the body has a timestamp or any
     other changing field, every send opens a new room. Put a stable `dedup_key` in the body.
     Your alerting system's own grouping and repeat settings still decide how many requests it
     sends.
 - **Resolved alerts.** A body with `"status": "resolved"` that matches an open room is noted in
-  that room. The room stays open, because only the driver closes rooms (`service_room.go:219-222`).
+  that room. The room stays open, because only the driver closes rooms (`service_room.go:268-277`).
   A resolved alert with no open match returns `202` with `{"ignored": true, "reason": "resolved alert with no open room"}`.
-  It stores nothing and starts no agent (`service_room.go:122-125`; `handlers.go:68-78`). A resolved
+  It stores nothing and starts no agent (`service_room.go:172-175`; `internal/httpapi/alerts.go:89-95`). A resolved
   alert **without** a `dedup_key` always takes this path, unless its bytes are identical to an open
   room's first alert. A resolved body is normally not identical, because its `status` differs.
   The generic key is a hash of the body (`internal/alertin/parse.go:335-340`).
@@ -325,10 +332,8 @@ handler `internal/httpapi/handlers.go:50-92`). What it does on `main`:
 
 - **Real login** (F1; the design doc named in `docs/api.md` is not on `main`). Until it exists,
   anyone who can reach the API or the WebSocket can act as any user.
-- **Signed alert senders, a cap on agents, room retention and export, and a web UI served by the
-  room service.** These are in review and are not on `main`. F9 stays open until signed alerts
-  land. Until then, use the webhook with the limits in section 6. The variables for these are
-  marked "Not live" in section 1.
+- **Room retention and export, and a web UI served by the room service,** are in review and are
+  not on `main`. `PIPEROOM_WEB_DIR` is read into config only (section 1).
 - **Snowflake** is selectable with `WAREHOUSE_KIND=snowflake` (section 1 and
   [permissions.md](permissions.md#warehouse)).
 
@@ -348,7 +353,7 @@ handler `internal/httpapi/handlers.go:50-92`). What it does on `main`:
 | `kafka_consumer_lag` permission error | missing `Describe` on that consumer group |
 | `kafka_topic_config` permission error | missing `DescribeConfigs` on the pipeline's topics (see [permissions.md](permissions.md#kafka)) |
 | `pg_row` / `warehouse_row` "table is not in pipeline" | table is missing from `source_tables` / `sink_tables`, or the `pipeline_id` the agent used is not the one you expect |
-| `connect_config` shows `***` | expected: secret-looking keys are redacted; their values are never shown (`connect_tools.go:155-170`) |
+| `connect_config` shows `***` | expected: secret-looking keys are redacted; their values are never shown (`connect_tools.go:175-196`) |
 | Proposal cannot execute | write mode not granted on Connect/Registry (by design) |
 | `connect_update_connector_config` fails with a 405 | Connect older than 3.5 does not support `PATCH /connectors/{name}/config` (`connect.go:119-140`) |
 | Server exits at start with "users/owners config" | `users.yaml` and `owners.yaml` disagree about a layer owner (step 4). The message names the user and layer |
@@ -360,7 +365,7 @@ handler `internal/httpapi/handlers.go:50-92`). What it does on `main`:
 | Server exits at start with "slack bridge" | only one of `SLACK_BOT_TOKEN` / `SLACK_CHANNEL_ID` is set, or the channel is a `#name` not an ID |
 | Slack thread never appears | bot not in the channel (`not_in_channel` in the log), or the room was opened before Slack was enabled and the server was not restarted |
 | A repeat alert opened a second room | the body differs between sends (no `dedup_key`, or a changing field), the `pipeline_id` differs, or the first room was already closed |
-| Web UI shows CORS errors | the UI is not on `http://localhost:5173`. CORS allows only that origin (`server.go:171`) |
+| Web UI shows CORS errors | the UI is not on `http://localhost:5173`. CORS allows only that origin (`server.go:179`) |
 | Web UI shows WebSocket errors | the UI is not on `localhost:5173` or `127.0.0.1:5173` (`ws/gateway.go:180`). These checks are browser-only |
 | A fix shows "interrupted by a service restart" | the server restarted mid-fix; check the system, then re-propose |
 | No agent response after a restart | the agent is idle until a driver steers or someone mentions `@agent` (step 4) |

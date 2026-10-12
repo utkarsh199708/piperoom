@@ -57,7 +57,7 @@ Notes:
 
 - **Do not** grant `SELECT` on all tables or on schemas (`GRANT ... ON ALL TABLES`).
   `pg_row` is limited to the pipeline's `source_tables` in code
-  (`internal/tools/dbtools/pg.go:177`), but the credential is the real boundary: a bug or a
+  (`internal/tools/dbtools/pg.go:243`), but the credential is the real boundary: a bug or a
   changed `owners.yaml` must not widen what the role can read.
 - `pg_replication_slots` is readable by any role. No `REPLICATION` attribute is needed or wanted.
 - `pg_long_transactions` reads `pg_stat_activity`. The tool never returns query text: the
@@ -150,7 +150,7 @@ Minimum ACLs for a principal such as `User:piperoom`:
 |---|---|---|
 | Topic `<prefix>*` (prefixed, only the pipeline's topics) | `Describe` | list topics, start/end offsets |
 | Topic `<prefix>*` | `Read` | `kafka_find_by_key`, `trace_record` |
-| Topic `<prefix>*` | `DescribeConfigs` | `kafka_topic_config` (retention, cleanup policy, min in-sync replicas, partitions, replication factor). Calls `DescribeTopicConfigs` (`internal/clients/kafka/kafka.go:164-170`; `internal/tools/kafkatools/kafka_tools.go:236-270`) |
+| Topic `<prefix>*` | `DescribeConfigs` | `kafka_topic_config` (retention, cleanup policy, min in-sync replicas, partitions, replication factor). Calls `DescribeTopicConfigs` (`internal/clients/kafka/kafka.go:164-170`; `internal/tools/kafkatools/kafka_tools.go:297-328`) |
 | Group `<consumer group>` (literal, one per consumer in `owners.yaml`) | `Describe` | `kafka_consumer_lag` |
 | Cluster | `Describe` only if your brokers require it for group listing | `kafka_list_groups` |
 
@@ -178,7 +178,7 @@ The Piperoom client in `internal/clients/connect/connect.go` makes exactly these
 |---|---|---|
 | `GET /connectors` | `connect_list_connectors`; actions check that a connector exists | `connect.go:50` |
 | `GET /connectors/{name}/status` | `connect_status`; actions read state and poll it | `connect.go:72` |
-| `GET /connectors/{name}/config` | `connect_config`; the config action reads it before and after its write | `connect.go:93`, `internal/actions/connector_config.go:179,194` |
+| `GET /connectors/{name}/config` | `connect_config`; the config action reads it before and after its write | `connect.go:93`, `internal/actions/connector_config.go:182,197` |
 
 **Write calls (only for approved fixes, one per action):**
 
@@ -247,7 +247,7 @@ the approval process in your team.
 ## Room database
 
 The room service uses a separate Postgres database (`PIPEROOM_DB_URL`) that Piperoom owns.
-At start-up `cmd/server` applies the embedded goose migrations itself (`cmd/server/main.go:108`,
+At start-up `cmd/server` applies the embedded goose migrations itself (`cmd/server/main.go:125`,
 `migrations/migrate.go:20`), so the role in `PIPEROOM_DB_URL` needs rights to
 create tables and indexes in that database. The migrations create `rooms`, `room_events`,
 `proposals`, `approvals`, `suggestions`, `handoffs` (`00001_init.sql`), `proposal_steps`
@@ -267,7 +267,7 @@ with a spend limit, so it can be revoked or capped on its own. If the key is a u
 than a workspace key, also set `ANTHROPIC_WORKSPACE_ID` (`internal/agent/model.go:42`).
 
 **Where the prompts go.** The SDK sends every request to `ANTHROPIC_BASE_URL` when that variable is
-set (`client.go:52-58`). Prompts include the alert, human comments, proposal results and the
+set (`anthropic-sdk-go@v1.80.0/client.go:52-58`). Prompts include the alert, human comments, proposal results and the
 hand-off digest (see [data-handling.md](data-handling.md#what-reaches-the-model)). Leave
 `ANTHROPIC_BASE_URL` unset, or pin it to the Anthropic host you approved. Leave
 `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_PROFILE` unset on the Piperoom host.
