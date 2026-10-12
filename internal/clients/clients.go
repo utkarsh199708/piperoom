@@ -136,12 +136,19 @@ type DDLChange struct {
 	Username       string    `json:"username"`
 }
 
+// Transaction is one open transaction. It never carries query text: pg_stat_activity
+// queries often hold literal row values, and the sessions belong to any pipeline.
 type Transaction struct {
-	PID      int           `json:"pid"`
-	Username string        `json:"username"`
-	State    string        `json:"state"`
-	Age      time.Duration `json:"age"`
-	Query    string        `json:"query"`
+	PID             int           `json:"pid"`
+	Username        string        `json:"username"`
+	ApplicationName string        `json:"application_name"`
+	State           string        `json:"state"`
+	Age             time.Duration `json:"age"`
+	// WaitEvent is "<wait_event_type>:<wait_event>", empty when not waiting.
+	WaitEvent string `json:"wait_event"`
+	// Query is at most the statement verb (the first keyword, upper case, e.g.
+	// "UPDATE"), never the statement text.
+	Query string `json:"query"`
 }
 
 // ---- Warehouse (Snowflake in production; Postgres in dev) ----
