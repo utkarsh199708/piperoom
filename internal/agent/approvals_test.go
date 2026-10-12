@@ -17,7 +17,20 @@ import (
 // approvalInput is the approval_result the room writes when a layer owner
 // approves (see internal/room feedInbox).
 func approvalInput(layer, proposal string) HumanInput {
-	return HumanInput{Kind: "approval_result", Text: fmt.Sprintf("layer %q approved proposal %s", layer, proposal)}
+	approved := true
+	return HumanInput{
+		Kind: "approval_result", Text: fmt.Sprintf("layer %q approved proposal %s", layer, proposal),
+		ProposalID: proposal, Layer: layer, Approved: &approved,
+	}
+}
+
+// rejectionInput is the approval_result of a rejecting layer owner.
+func rejectionInput(layer, proposal string) HumanInput {
+	approved := false
+	return HumanInput{
+		Kind: "approval_result", Text: fmt.Sprintf("layer %q rejected proposal %s: no", layer, proposal),
+		ProposalID: proposal, Layer: layer, Approved: &approved,
+	}
 }
 
 // firstWaitBlocks is an inbox whose first Wait blocks until its context ends,
@@ -59,8 +72,8 @@ func TestApprovalFullThenResultsGivesOneTurnBoth(t *testing.T) {
 		drains: [][]HumanInput{
 			{approvalInput("schema-registry", "p_1"), approvalInput("kafka-connect", "p_1")},
 			{
-				{Kind: "action_result", Text: "proposal p_1 step 0: " + resultSetNoneFromGlobal, OK: okPtr(true)},
-				{Kind: "action_result", Text: "proposal p_1 step 1: restarted task 0 (RUNNING)", OK: okPtr(true)},
+				actionInput("proposal p_1 step 0: "+resultSetNoneFromGlobal, okPtr(true)),
+				actionInput("proposal p_1 step 1: restarted task 0 (RUNNING)", okPtr(true)),
 			},
 		},
 		waitErr: context.Canceled,
@@ -132,7 +145,7 @@ func TestApprovalFullWaitEndsOnFailedStep(t *testing.T) {
 		drains: [][]HumanInput{
 			{approvalInput("schema-registry", "p_1"), approvalInput("kafka-connect", "p_1")},
 			{{Kind: "steer", Text: "check the connector too"}},
-			{{Kind: "action_result", Text: "proposal p_1 step 0: boom", OK: okPtr(false)}},
+			{actionInput("proposal p_1 step 0: boom", okPtr(false))},
 		},
 		waitErr: context.Canceled,
 	}
@@ -206,26 +219,29 @@ func TestApprovalForUnknownProposalDoesNotWait(t *testing.T) {
 	}
 }
 
-func TestParseApproval(t *testing.T) {
-	cases := []struct {
-		text      string
-		layer, id string
-		ok        bool
-	}{
-		{`layer "schema-registry" approved proposal p_1`, "schema-registry", "p_1", true},
-		{`layer "kafka-connect" approved proposal 01JABC`, "kafka-connect", "01JABC", true},
-		{`layer "kafka-connect" rejected proposal p_1: not now`, "", "", false},
-		{`layer "kafka-connect" approved proposal p_1 and more`, "", "", false},
-		{`layer "kafka-connect" approved proposal `, "", "", false},
-		{`layer kafka-connect approved proposal p_1`, "", "", false},
-		{`proposal p_1 step 0: ok`, "", "", false},
-		{``, "", "", false},
+// Only the fields identify an approval. The same text without fields (an old
+// event replayed after a restart) completes nothing, so there is no wait.
+func TestApprovalWithoutFieldsDoesNotComplete(t *testing.T) {
+	tr := newProposalTracker()
+	tr.record("p_1", compatSteps("BACKWARD"))
+	for _, layer := range []string{"schema-registry", "kafka-connect"} {
+		tr.observe(HumanInput{Kind: "approval_result", Text: fmt.Sprintf("layer %q approved proposal p_1", layer)})
 	}
-	for _, c := range cases {
-		layer, id, ok := parseApproval(c.text)
-		if layer != c.layer || id != c.id || ok != c.ok {
-			t.Errorf("parseApproval(%q) = %q, %q, %v; want %q, %q, %v", c.text, layer, id, ok, c.layer, c.id, c.ok)
-		}
+	if len(tr.awaiting()) != 0 {
+		t.Fatal("approval text without fields must not complete a proposal")
+	}
+	// Approved unset, layer unset or proposal unset: ignored as well.
+	yes := true
+	for _, in := range []HumanInput{
+		{Kind: "approval_result", ProposalID: "p_1", Layer: "schema-registry"},
+		{Kind: "approval_result", ProposalID: "p_1", Approved: &yes},
+		{Kind: "approval_result", Layer: "schema-registry", Approved: &yes},
+	} {
+		tr.observe(in)
+	}
+	tr.observe(approvalInput("kafka-connect", "p_1"))
+	if len(tr.awaiting()) != 0 {
+		t.Fatal("one valid approval of two layers must not complete the proposal")
 	}
 }
 
@@ -258,11 +274,11 @@ func TestApprovalFlowStates(t *testing.T) {
 		tr := newTracker()
 		tr.observe(approvalInput("schema-registry", "p_1"))
 		tr.observe(approvalInput("kafka-connect", "p_1"))
-		tr.observe(HumanInput{Kind: "action_result", Text: "proposal p_1 step 0: ok", OK: okPtr(true)})
+		tr.observe(actionInput("proposal p_1 step 0: ok", okPtr(true)))
 		if !pending(tr) {
 			t.Fatal("step 0 of 2 is not the end of the results")
 		}
-		tr.observe(HumanInput{Kind: "action_result", Text: "proposal p_1 step 1: ok", OK: okPtr(true)})
+		tr.observe(actionInput("proposal p_1 step 1: ok", okPtr(true)))
 		if pending(tr) {
 			t.Fatal("the last step settles the proposal")
 		}
@@ -271,7 +287,7 @@ func TestApprovalFlowStates(t *testing.T) {
 		tr := newTracker()
 		tr.observe(approvalInput("schema-registry", "p_1"))
 		tr.observe(approvalInput("kafka-connect", "p_1"))
-		tr.observe(HumanInput{Kind: "action_result", Text: "proposal p_1 step 0: ?", OK: nil})
+		tr.observe(actionInput("proposal p_1 step 0: ?", nil))
 		if pending(tr) {
 			t.Fatal("an unknown outcome is a result")
 		}
@@ -291,7 +307,7 @@ func TestApprovalFlowStates(t *testing.T) {
 	t.Run("a rejection never completes", func(t *testing.T) {
 		tr := newTracker()
 		tr.observe(approvalInput("schema-registry", "p_1"))
-		tr.observe(HumanInput{Kind: "approval_result", Text: `layer "kafka-connect" rejected proposal p_1: no`})
+		tr.observe(rejectionInput("kafka-connect", "p_1"))
 		if pending(tr) {
 			t.Fatal("a rejected proposal never runs")
 		}

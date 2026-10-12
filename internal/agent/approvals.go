@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"sort"
-	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -21,10 +20,12 @@ import (
 // arrived, for at most timing.stepResultWait. On a timeout the turn starts with a
 // note that the results are pending.
 //
-// HumanInput carries no structured proposal or layer, so the agent reads both
-// back from the approval text the room writes (see internal/room feedInbox) and
-// compares the approved layers with the layers it stored when it created the
-// proposal. Those are the layers the room requires: the union of the step layers.
+// The room names the proposal, the layer and the step in HumanInput fields, so
+// nothing here parses message text. The agent compares the approved layers with
+// the layers it stored when it created the proposal. Those are the layers the
+// room requires: the union of the step layers. An input with a field missing (an
+// event replayed from before the fields existed) is ignored, and the turn then
+// starts as it always did.
 
 // execFlow follows one proposal from its approvals to its executed steps.
 type execFlow struct {
@@ -56,32 +57,6 @@ func newExecFlow(steps []events.ProposalStep) *execFlow {
 	return f
 }
 
-// parseApproval splits the room's approval text back into its parts:
-//
-//	layer "<layer>" approved proposal <id>
-//
-// A rejection ("... rejected proposal <id>: <reason>") is not an approval and
-// does not parse. The layer is quoted with %q, so it is read back with Unquote.
-func parseApproval(text string) (layer, proposalID string, ok bool) {
-	rest, found := strings.CutPrefix(text, "layer ")
-	if !found {
-		return "", "", false
-	}
-	quoted, err := strconv.QuotedPrefix(rest)
-	if err != nil {
-		return "", "", false
-	}
-	layer, err = strconv.Unquote(quoted)
-	if err != nil || layer == "" {
-		return "", "", false
-	}
-	id, found := strings.CutPrefix(rest[len(quoted):], " approved proposal ")
-	if !found || id == "" || strings.ContainsAny(id, " \t\r\n:") {
-		return "", "", false
-	}
-	return layer, id, true
-}
-
 // observe updates the flow of the proposal an input is about. Inputs about
 // proposals the agent did not create are ignored: it knows no required layers
 // for them, so it cannot tell when they are fully approved.
@@ -91,10 +66,10 @@ func (t *proposalTracker) observe(in HumanInput) {
 	}
 	switch in.Kind {
 	case "approval_result":
-		layer, id, ok := parseApproval(in.Text)
-		if !ok {
+		if in.Approved == nil || !*in.Approved || in.Layer == "" || in.ProposalID == "" {
 			return
 		}
+		layer, id := in.Layer, in.ProposalID
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		f := t.flows[id]
@@ -110,7 +85,7 @@ func (t *proposalTracker) observe(in HumanInput) {
 		f.complete = true
 		f.waiting = !f.settled
 	case "action_result":
-		id, step, ok := parseActionResult(in.Text)
+		id, step, ok := actionResultFields(in)
 		if !ok {
 			return
 		}

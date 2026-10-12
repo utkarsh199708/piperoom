@@ -222,8 +222,8 @@ func TestRecoveredVerdictAfterNoneProposesRestore(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			sink := &fakeSink{}
 			batch := []HumanInput{
-				{Kind: "action_result", Text: "proposal p_1 step 0: " + setResult, OK: okPtr(true)},
-				{Kind: "action_result", Text: "proposal p_1 step 1: restarted task 0 (RUNNING)", OK: okPtr(true)},
+				actionInput("proposal p_1 step 0: "+setResult, okPtr(true)),
+				actionInput("proposal p_1 step 1: restarted task 0 (RUNNING)", okPtr(true)),
 			}
 			inbox := &fakeInbox{drains: [][]HumanInput{nil, batch}, waitErr: context.Canceled}
 			model := &hookModel{scriptedModel: &scriptedModel{turns: []anthropic.BetaMessage{

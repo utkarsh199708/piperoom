@@ -601,13 +601,23 @@ func (s *Service) feedInbox(st *roomState, e events.Event) {
 		if !ok {
 			return
 		}
-		input = &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "approval_result", Text: fmt.Sprintf("layer %q approved proposal %s", p.Layer, p.ProposalID)}
+		approved := true
+		input = &agent.HumanInput{
+			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
+			Text:       fmt.Sprintf("layer %q approved proposal %s", p.Layer, p.ProposalID),
+			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
+		}
 	case events.ApprovalRejected:
 		p, ok := decode[events.ApprovalRejectedPayload](e)
 		if !ok {
 			return
 		}
-		input = &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "approval_result", Text: fmt.Sprintf("layer %q rejected proposal %s: %s", p.Layer, p.ProposalID, p.Reason)}
+		approved := false
+		input = &agent.HumanInput{
+			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
+			Text:       fmt.Sprintf("layer %q rejected proposal %s: %s", p.Layer, p.ProposalID, p.Reason),
+			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
+		}
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)
 		if !ok {
@@ -616,7 +626,12 @@ func (s *Service) feedInbox(st *roomState, e events.Event) {
 		// OK tells the agent whether the step succeeded; it must not claim the
 		// pipeline recovered from a failed step (agent.HumanInput.OK).
 		stepOK := p.OK
-		input = &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "action_result", Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, p.StepIndex, p.Output), OK: &stepOK}
+		stepIndex := p.StepIndex
+		input = &agent.HumanInput{
+			Seq: e.Seq, Actor: e.Actor, Kind: "action_result",
+			Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, p.StepIndex, p.Output),
+			OK:   &stepOK, ProposalID: p.ProposalID, StepIndex: &stepIndex,
+		}
 	default:
 		return
 	}

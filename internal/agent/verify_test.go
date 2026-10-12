@@ -254,13 +254,13 @@ func assertVerdict(t *testing.T, msgs []string, wantRecovered bool) {
 
 // lastActionResult is an action_result whose step succeeded (OK == true).
 func lastActionResult(text string) []HumanInput {
-	return []HumanInput{{Kind: "action_result", Text: text, OK: okPtr(true)}}
+	return []HumanInput{actionInput(text, okPtr(true))}
 }
 
 // actionResult is an action_result with an explicit outcome: ok may be nil for
 // an unknown outcome.
 func actionResult(text string, ok *bool) []HumanInput {
-	return []HumanInput{{Kind: "action_result", Text: text, OK: ok}}
+	return []HumanInput{actionInput(text, ok)}
 }
 
 func okPtr(b bool) *bool { return &b }
@@ -278,26 +278,55 @@ func assertNoRecoveryClaim(t *testing.T, msgs []string) {
 
 // ---- unit tests ----
 
-func TestParseActionResult(t *testing.T) {
+// actionInput builds an action_result the way the room does: the proposal and
+// step come in fields, and the text ("proposal <id> step <n>: <output>") is for
+// display. Text that does not have that shape leaves the fields empty, like an
+// event replayed from before the fields existed.
+func actionInput(text string, ok *bool) HumanInput {
+	in := HumanInput{Kind: "action_result", Text: text, OK: ok}
+	rest, found := strings.CutPrefix(text, "proposal ")
+	if !found {
+		return in
+	}
+	id, rest, found := strings.Cut(rest, " step ")
+	if !found || id == "" {
+		return in
+	}
+	stepStr, _, found := strings.Cut(rest, ": ")
+	if !found {
+		return in
+	}
+	n, err := strconv.Atoi(stepStr)
+	if err != nil {
+		return in
+	}
+	in.ProposalID, in.StepIndex = id, &n
+	return in
+}
+
+// The proposal step comes from the fields only. A result without them (an old
+// event replayed after a restart) cannot be matched to a proposal, whatever its
+// text says.
+func TestActionResultFields(t *testing.T) {
+	step := 12
 	cases := []struct {
-		in   string
+		name string
+		in   HumanInput
 		id   string
 		step int
 		ok   bool
 	}{
-		{"proposal p_01JABC step 0: restarted task", "p_01JABC", 0, true},
-		{"proposal p_01JABC step 1: done", "p_01JABC", 1, true},
-		{"proposal p_01JABC step 12: done", "p_01JABC", 12, true},
-		{"proposal p_01JABC step x: done", "", 0, false},
-		{"approval p_1 step 0: done", "", 0, false},
-		{"proposal p_1 ste 0: done", "", 0, false},
-		{"proposal p_1 step 0", "", 0, false},
-		{"step 0: done", "", 0, false},
+		{"fields set", HumanInput{Kind: "action_result", ProposalID: "p_1", StepIndex: &step}, "p_1", 12, true},
+		{"text only", HumanInput{Kind: "action_result", Text: "proposal p_1 step 1: done", OK: okPtr(true)}, "", 0, false},
+		{"missing step", HumanInput{Kind: "action_result", ProposalID: "p_1"}, "", 0, false},
+		{"missing proposal", HumanInput{Kind: "action_result", StepIndex: &step}, "", 0, false},
+		{"helper parses room text", actionInput("proposal p_01JABC step 3: done", okPtr(true)), "p_01JABC", 3, true},
+		{"helper leaves odd text unmatched", actionInput("proposal p_1 step x: done", okPtr(true)), "", 0, false},
 	}
 	for _, c := range cases {
-		id, step, ok := parseActionResult(c.in)
-		if id != c.id || step != c.step || ok != c.ok {
-			t.Errorf("parseActionResult(%q) = (%q, %d, %v), want (%q, %d, %v)", c.in, id, step, ok, c.id, c.step, c.ok)
+		id, got, ok := actionResultFields(c.in)
+		if id != c.id || got != c.step || ok != c.ok {
+			t.Errorf("%s: actionResultFields = (%q, %d, %v), want (%q, %d, %v)", c.name, id, got, ok, c.id, c.step, c.ok)
 		}
 	}
 }
@@ -697,7 +726,7 @@ func TestSameBatchRecoveryAndSteerRunsModel(t *testing.T) {
 		drains: [][]HumanInput{
 			nil,
 			{
-				{Kind: "action_result", Text: "proposal p_1 step 1: backfilled analytics.orders", OK: okPtr(true)},
+				actionInput("proposal p_1 step 1: backfilled analytics.orders", okPtr(true)),
 				steer,
 			},
 		},
@@ -741,8 +770,8 @@ func TestSameBatchRecoveryAndFailedStepRunsModel(t *testing.T) {
 		drains: [][]HumanInput{
 			nil,
 			{
-				{Kind: "action_result", Text: "proposal p_1 step 1: backfilled analytics.orders", OK: okPtr(true)},
-				{Kind: "action_result", Text: "proposal p_2 step 0: connector rejected the change", OK: okPtr(false)},
+				actionInput("proposal p_1 step 1: backfilled analytics.orders", okPtr(true)),
+				actionInput("proposal p_2 step 0: connector rejected the change", okPtr(false)),
 			},
 		},
 		waitErr: context.Canceled,
@@ -1194,7 +1223,7 @@ func TestVerdictNoteWrapsEvidence(t *testing.T) {
 		drains: [][]HumanInput{
 			nil,
 			{
-				{Kind: "action_result", Text: "proposal p_1 step 1: backfilled analytics.orders", OK: okPtr(true)},
+				actionInput("proposal p_1 step 1: backfilled analytics.orders", okPtr(true)),
 				{Kind: "steer", Actor: events.Actor{Name: "driver"}, Text: "is it fixed?"},
 			},
 		},
@@ -1382,8 +1411,8 @@ func TestBrokenResultClearsRecoveredIdle(t *testing.T) {
 		drains: [][]HumanInput{
 			nil,
 			lastActionResult("proposal p_1 step 1: backfilled analytics.orders"),
-			{{Kind: "action_result", Text: "proposal p_2 step 0: connector rejected the change", OK: okPtr(false)}},
-			{{Kind: "action_result", Text: "proposal p_1 step 0: restarted task", OK: okPtr(true)}},
+			{actionInput("proposal p_2 step 0: connector rejected the change", okPtr(false))},
+			{actionInput("proposal p_1 step 0: restarted task", okPtr(true))},
 		},
 		waitErr: context.Canceled,
 	}

@@ -134,25 +134,14 @@ func (t *proposalTracker) setBaseline(id string, baseline map[string]time.Time) 
 	t.byID[id] = rec
 }
 
-// parseActionResult splits the room's action_result text back into its parts.
-func parseActionResult(text string) (id string, step int, ok bool) {
-	rest, found := strings.CutPrefix(text, "proposal ")
-	if !found {
+// actionResultFields reads which proposal step an action_result is about from
+// the input's fields. ok is false when a field is missing (for example an event
+// replayed from before the fields existed); the text is only for display.
+func actionResultFields(in HumanInput) (id string, step int, ok bool) {
+	if in.ProposalID == "" || in.StepIndex == nil {
 		return "", 0, false
 	}
-	id, rest, found = strings.Cut(rest, " step ")
-	if !found {
-		return "", 0, false
-	}
-	stepStr, _, found := strings.Cut(rest, ": ")
-	if !found {
-		return "", 0, false
-	}
-	n, err := strconv.Atoi(stepStr)
-	if err != nil || id == "" {
-		return "", 0, false
-	}
-	return id, n, true
+	return in.ProposalID, *in.StepIndex, true
 }
 
 // actionOutcome is what a batch of inputs means for the loop.
@@ -208,7 +197,7 @@ func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) a
 // reported and the model runs; an unknown outcome is never turned into a
 // recovery claim.
 func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOutcome {
-	id, step, parsed := parseActionResult(in.Text)
+	id, step, parsed := actionResultFields(in)
 	switch {
 	case in.OK == nil:
 		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + unknownOutcomeText(id, step, parsed)}}
