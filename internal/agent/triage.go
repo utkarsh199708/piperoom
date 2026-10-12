@@ -31,10 +31,14 @@ import (
 //
 // The triage model gets the same request as the main model (adaptive thinking,
 // effort, strict tools, compaction, top-level cache_control, eager input
-// streaming). A model that rejects that shape answers 4xx on every turn. The
-// first such answer turns triage off for the whole endpoint and the turn is
-// redone on the main model (see modelTurn), so a wrong PIPEROOM_TRIAGE_MODEL
-// costs one failed request, not every room's first alert.
+// streaming). A model that rejects that shape answers 4xx on every turn. So a
+// 4xx from a triage call (see triageRejected) is redone on the main model and
+// that run stays on the main model. Triage goes off for the whole endpoint only
+// when the main model accepted the same request and the error is about the
+// model or request shape (see modelRejection); a "prompt is too long", a 413
+// or a low credit balance concerns one run, not the triage model. A wrong
+// PIPEROOM_TRIAGE_MODEL therefore costs one failed request, not every room's
+// first alert.
 
 // triageSwitch is the endpoint-wide "triage is off" flag, shared by every run.
 type triageSwitch struct{ off atomic.Bool }
@@ -84,16 +88,29 @@ func (r *runner) modelTurn(ctx context.Context, messages []anthropic.BetaMessage
 		return resp, err
 	}
 	if err != nil {
-		if ctx.Err() == nil && rejectsRequestShape(err) {
-			// Only the first run to see this logs it.
-			if r.triageSw.turnOff() {
-				r.log.Warn("agent: the triage model rejected the request; triage is off until restart, turns run on the main model",
-					"triage_model", name, "model", r.opts.Model, "err", err)
-			}
-			req.Model = r.opts.Model
-			return r.model.Turn(ctx, req)
+		if ctx.Err() != nil || !triageRejected(err) {
+			return resp, err
 		}
-		return resp, err
+		// (a) Redo the turn on the main model; this run stays on it.
+		triageErr := err
+		r.escalated = true
+		req.Model = r.opts.Model
+		resp, err = r.model.Turn(ctx, req)
+		if err != nil {
+			// (d) The main model fails too, so the problem was not the triage
+			// model. Return the main model's error and leave the switch alone.
+			return resp, err
+		}
+		// (b) Triage goes off for every room only when the main model took the
+		// same request and the error is about the model or the request shape.
+		if modelRejection(triageErr) && r.triageSw.turnOff() {
+			r.log.Warn("agent: the triage model rejected the request, the main model accepted it; triage is off until restart",
+				"triage_model", name, "model", r.opts.Model, "err", triageErr)
+		} else {
+			r.log.Info("agent: the triage model rejected a request; this run continues on the main model",
+				"triage_model", name, "model", r.opts.Model, "err", triageErr)
+		}
+		return resp, nil
 	}
 	if !callsWriteProposal(resp.Content) {
 		return resp, nil
@@ -106,23 +123,78 @@ func (r *runner) modelTurn(ctx context.Context, messages []anthropic.BetaMessage
 	return r.model.Turn(ctx, req)
 }
 
-// rejectsRequestShape reports whether err is the API refusing the request
-// itself (bad shape, unknown model) rather than a condition the main model
-// would hit too: 401/403 (credentials), 408, 409 and 429 (retry later) are
-// not.
-func rejectsRequestShape(err error) bool {
-	var apierr *anthropic.Error
-	if !errors.As(err, &apierr) {
+// triageRejected reports whether a failed triage call is worth redoing on the
+// main model: any 4xx except 401 (bad credentials, the main model has the same
+// ones), 408, 409 and 429 (retry later, not a verdict on the request). 403 is
+// included: Bedrock AccessDeniedException and Vertex PERMISSION_DENIED are the
+// usual way a triage model id is wrong for the account.
+func triageRejected(err error) bool {
+	apierr := asAPIError(err)
+	if apierr == nil {
 		return false
 	}
 	switch c := apierr.StatusCode; {
 	case c < 400 || c >= 500:
 		return false
-	case c == http.StatusUnauthorized, c == http.StatusForbidden, c == http.StatusRequestTimeout,
+	case c == http.StatusUnauthorized, c == http.StatusRequestTimeout,
 		c == http.StatusConflict, c == http.StatusTooManyRequests:
 		return false
 	}
 	return true
+}
+
+// modelRejectionMarkers are lower-case fragments of the API error body that say
+// the model, or the request shape for this model, is the problem.
+var modelRejectionMarkers = []string{
+	"model", "not supported", "does not support", "unsupported",
+	"thinking", "effort", "adaptive", "context_management", "compact",
+	"cache_control", "eager_input_streaming", "extra inputs",
+	"access to the model", // Bedrock AccessDeniedException
+}
+
+// perRunMarkers are fragments of errors that depend on one conversation, not on
+// the model: a history longer than the triage model's window (Haiku 200K vs the
+// main model's 1M) or an empty credit balance. They win over the markers above
+// (the text often says "model" too).
+var perRunMarkers = []string{"prompt is too long", "too long", "credit balance"}
+
+// modelRejection reports whether a triage error means the triage model itself
+// cannot serve the loop, so no room should try it: a 404, or a 400/403 whose
+// body names the model or the request shape. 413 and "prompt is too long" are
+// about one run's history and never qualify. The caller has already seen the
+// main model accept the same request.
+func modelRejection(err error) bool {
+	apierr := asAPIError(err)
+	if apierr == nil {
+		return false
+	}
+	switch apierr.StatusCode {
+	case http.StatusNotFound:
+		return true
+	case http.StatusBadRequest, http.StatusForbidden:
+	default:
+		return false
+	}
+	body := strings.ToLower(apierr.RawJSON())
+	for _, m := range perRunMarkers {
+		if strings.Contains(body, m) {
+			return false
+		}
+	}
+	for _, m := range modelRejectionMarkers {
+		if strings.Contains(body, m) {
+			return true
+		}
+	}
+	return false
+}
+
+func asAPIError(err error) *anthropic.Error {
+	var apierr *anthropic.Error
+	if errors.As(err, &apierr) {
+		return apierr
+	}
+	return nil
 }
 
 // callsWriteProposal reports whether a turn asks for a write-proposal tool.
