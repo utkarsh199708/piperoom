@@ -1,21 +1,37 @@
+import { useEffect, useState } from 'react'
 import type { Topology } from '../api/types'
+import { updatedAgoLabel } from '../lib/time'
 import { Panel } from './ui'
 
 export function PipelineMap({
   topology,
+  updatedAt = null,
   onTrace,
 }: {
   topology: Topology | null
+  updatedAt?: number | null
   onTrace: () => void
 }) {
+  // Re-render once a second so "updated Ns ago" stays fresh between fetches.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+
   return (
     <Panel
       className="pipeline"
       title="Pipeline"
       right={
-        <button type="button" className="btn btn--ghost" onClick={onTrace}>
-          Trace one record
-        </button>
+        <>
+          {updatedAt != null && (
+            <span className="muted pipeline__updated">{updatedAgoLabel(updatedAt, now)}</span>
+          )}
+          <button type="button" className="btn btn--ghost" onClick={onTrace}>
+            Trace one record
+          </button>
+        </>
       }
     >
       {!topology ? (

@@ -12,9 +12,10 @@ vi.mock('../context/user', () => ({
   }),
 }))
 vi.mock('../hooks/useRoom', () => ({ useRoom: vi.fn() }))
-vi.mock('../hooks/useTopology', () => ({ useTopology: () => ({ topology: null, error: null }) }))
+vi.mock('../hooks/useTopology', () => ({ useTopology: vi.fn() }))
 
 import { useRoom } from '../hooks/useRoom'
+import { useTopology } from '../hooks/useTopology'
 import { RoomScreen } from './RoomScreen'
 
 const actions: RoomActions = {
@@ -51,6 +52,7 @@ function show(state: RoomState) {
     error: null,
     actions,
   })
+  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null })
   return render(
     <MemoryRouter initialEntries={['/rooms/r_webhook']}>
       <Routes>
@@ -96,5 +98,50 @@ describe('RoomScreen — alert room header and no-driver banner', () => {
     show(webhookRoom({ alert: null }))
     expect(screen.queryByText('alert')).not.toBeInTheDocument()
     expect(screen.queryByText(/alert ·/)).not.toBeInTheDocument()
+  })
+})
+
+describe('RoomScreen — agent done status and resolution', () => {
+  it('shows a green "resolved — verified" chip when the agent posts done', () => {
+    show(webhookRoom({ agent_status: { state: 'done', detail: 'fix applied' } }))
+    const chip = screen.getByText('resolved — verified')
+    expect(chip).toBeInTheDocument()
+    expect(chip).toHaveClass('chip--ok')
+  })
+
+  it('shows the resolution once the room is closed', () => {
+    show(webhookRoom({ status: 'closed', resolution: 'Compatibility set to NONE' }))
+    expect(screen.getByText('Resolved')).toBeInTheDocument()
+    expect(screen.getByText('Compatibility set to NONE')).toBeInTheDocument()
+  })
+})
+
+describe('RoomScreen — topology refresh wiring', () => {
+  it('passes one refresh key per executed action and active only while open', () => {
+    show(
+      webhookRoom({
+        status: 'open',
+        proposals: [
+          {
+            proposal_id: 'p1',
+            title: 'fix',
+            steps: [],
+            risk: 'low',
+            rollback: 'undo',
+            required_layers: [],
+            approvals: {},
+            status: 'approved',
+            executed: [
+              { proposal_id: 'p1', step_index: 0, ok: true, output: 'a' },
+              { proposal_id: 'p1', step_index: 1, ok: true, output: 'b' },
+            ],
+          },
+        ],
+      }),
+    )
+    expect(useTopology).toHaveBeenLastCalledWith('orders', { refreshKey: 2, active: true })
+
+    show(webhookRoom({ status: 'closed', resolution: 'done' }))
+    expect(useTopology).toHaveBeenLastCalledWith('orders', { refreshKey: 0, active: false })
   })
 })
