@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
 	"piperoom/internal/store/memstore"
+	"piperoom/internal/topology"
 )
 
 type clock struct {
@@ -782,10 +784,12 @@ func TestCreateProposalScopeViolation(t *testing.T) {
 	_, err = svc.CreateRoom(context.Background(), mustUser(t, svc, "arjun"), "t2", "sev2", "not-configured")
 	wantCode(t, err, "validation")
 
-	// The alert webhook takes the same check (review item 8; contract note:
-	// docs/api.md:103 still describes the older "room opens" behaviour).
-	_, err = svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "not-configured", json.RawMessage(`{"title":"t2"}`))
-	wantCode(t, err, "validation")
+	// The alert webhook never drops an alert: an unknown (but well-formed)
+	// pipeline opens a room with proposals disabled (docs/api.md:103); only
+	// POST /api/rooms keeps the 400.
+	if _, err := svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "not-configured", json.RawMessage(`{"title":"t2"}`)); err != nil {
+		t.Fatalf("webhook with unknown pipeline must open a room: %v", err)
+	}
 	// A malformed pipeline_id is rejected by shape on both paths.
 	_, err = svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "bad id!", json.RawMessage(`{"title":"t2"}`))
 	wantCode(t, err, "validation")
@@ -811,10 +815,24 @@ func TestCreateRoomFromAlertStoresRawBody(t *testing.T) {
 	}
 
 	// With the owners config loaded, a garbage (non-mapped) body uses the
-	// default pipeline "unknown" and is refused like any unknown pipeline
-	// (review item 8).
-	_, err = svc.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
-	wantCode(t, err, "validation")
+	// default pipeline "unknown": the room still opens (docs/api.md:103) with a
+	// system message explaining the pipeline is unknown.
+	snapUnknown, err := svc.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
+	if err != nil {
+		t.Fatalf("unknown-pipeline webhook must open a room: %v", err)
+	}
+	if snapUnknown.PipelineID != "unknown" || snapUnknown.Severity != "sev3" {
+		t.Fatalf("bad defaults: %+v", snapUnknown)
+	}
+	sawSystem := false
+	for _, e := range allEvents(t, st, snapUnknown.ID) {
+		if e.Type == events.AgentMessage && e.Actor.Kind == events.ActorSystem {
+			sawSystem = true
+		}
+	}
+	if !sawSystem {
+		t.Fatal("no system message on the unknown-pipeline room")
+	}
 
 	// Without an owners config (unit mode) the same body opens a room with
 	// the defaults.
@@ -1416,4 +1434,178 @@ func TestTraceRejectsMalformedTable(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 	_, err := svc.Trace(context.Background(), mustUser(t, svc, "arjun"), roomID, "not a table!", "k")
 	wantCode(t, err, "validation")
+}
+
+// fakeTopo is a topology.Builder whose Trace returns a canned error.
+type fakeTopo struct {
+	traceErr error
+}
+
+func (fakeTopo) Build(ctx context.Context, pipelineID string) (topology.Graph, error) {
+	return topology.Graph{PipelineID: pipelineID}, nil
+}
+func (fakeTopo) Render(topology.Graph) string { return "" }
+func (f fakeTopo) Trace(ctx context.Context, pipelineID, table, key string) ([]events.TraceStage, error) {
+	if f.traceErr != nil {
+		return nil, f.traceErr
+	}
+	return []events.TraceStage{{Layer: "postgres", Name: table}}, nil
+}
+func (fakeTopo) LayerOwner(pipelineID, layer string) (string, bool) { return "", false }
+
+// TestTraceOutOfPipelineTableIsValidation pins review item 7: a well-formed
+// table outside the pipeline (topology.ErrBadInput) maps to 400 validation,
+// not 500.
+func TestTraceOutOfPipelineTableIsValidation(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	svc := room.New(room.Deps{
+		Store: st, Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, Now: c.Now,
+		Topology: fakeTopo{traceErr: fmt.Errorf("%w: no connector streams table %q", topology.ErrBadInput, "public.payments")},
+	})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	_, err := svc.Trace(context.Background(), mustUser(t, svc, "arjun"), roomID, "public.payments", "1")
+	wantCode(t, err, "validation")
+}
+
+// TestWebhookUnknownPipelineDisablesProposals pins review item 2: a webhook
+// with an unknown pipeline opens the room, but the agent cannot propose a fix
+// against a pipeline nothing can be scoped to.
+func TestWebhookUnknownPipelineDisablesProposals(t *testing.T) {
+	act := &fakeAction{name: "pg_act", layer: "postgres"}
+	svc, _, _ := newTestService(t, act)
+
+	snap, err := svc.CreateRoomFromAlert(context.Background(), "", "", "orders-2", json.RawMessage(`{"pipeline_id":"orders-2"}`))
+	if err != nil {
+		t.Fatalf("webhook with unknown pipeline must open a room: %v", err)
+	}
+	if snap.PipelineID != "orders-2" {
+		t.Fatalf("bad pipeline: %+v", snap)
+	}
+	_, err = svc.CreateProposal(context.Background(), snap.ID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor)
+	wantCode(t, err, "validation")
+	if err == nil || !strings.Contains(err.Error(), "proposals are disabled") {
+		t.Fatalf("want proposals-disabled error, got %v", err)
+	}
+
+	// A known pipeline keeps proposals enabled.
+	snap2 := createRoom(t, svc, "arjun")
+	if _, err := svc.CreateProposal(context.Background(), snap2.ID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor); err != nil {
+		t.Fatalf("known pipeline must allow proposals: %v", err)
+	}
+}
+
+// TestSendSuggestionAlreadySentConflict pins review item 3 / docs/api.md:51: a
+// second send of an already-sent suggestion is 409 already_decided, while a
+// suggestion sent to the wrong room stays 404 not_found.
+func TestSendSuggestionAlreadySentConflict(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	sugg, err := svc.Steer(context.Background(), mustUser(t, svc, "priya"), roomID, "look here")
+	if err != nil {
+		t.Fatalf("steer: %v", err)
+	}
+	sp, _ := events.Decode[events.SteerSuggestedPayload](sugg)
+
+	if _, err := svc.SendSuggestion(context.Background(), mustUser(t, svc, "arjun"), roomID, sp.SuggestionID); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	_, err = svc.SendSuggestion(context.Background(), mustUser(t, svc, "arjun"), roomID, sp.SuggestionID)
+	wantCode(t, err, "already_decided")
+
+	// A suggestion that exists but belongs to a different room is not found.
+	room2 := createRoom(t, svc, "arjun").ID
+	_, err = svc.SendSuggestion(context.Background(), mustUser(t, svc, "arjun"), room2, sp.SuggestionID)
+	wantCode(t, err, "not_found")
+}
+
+// TestLoadSkipsAlreadyExecutedProposals pins review item 6: a proposal whose
+// store status already says "executed" (its last action.executed append
+// failed) must not be re-marked failed by the interruption sweep on Load.
+func TestLoadSkipsAlreadyExecutedProposals(t *testing.T) {
+	pg := &fakeAction{name: "pg_act", layer: "postgres"}
+	svc, st, c := newTestService(t, pg)
+	roomID := createRoom(t, svc, "arjun").ID
+
+	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Title: "fix",
+		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor)
+	if err != nil {
+		t.Fatalf("create proposal: %v", err)
+	}
+	// Fully approved in the log, but the action.executed append "failed" while
+	// the store status write succeeded: the DB says executed, the snapshot
+	// still shows the proposal open.
+	prior := events.Actor{Kind: events.ActorHuman, ID: "priya", Name: "Priya"}
+	if _, err := st.Append(context.Background(), roomID, events.ApprovalGiven, prior, events.ApprovalGivenPayload{ProposalID: pid, Layer: "postgres"}); err != nil {
+		t.Fatalf("append approval: %v", err)
+	}
+	if err := st.SetProposalStatus(context.Background(), pid, "executed"); err != nil {
+		t.Fatalf("set executed: %v", err)
+	}
+	svc.Close() // the old process dies here
+
+	svc2 := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun, Now: c.Now})
+	t.Cleanup(svc2.Close)
+	if err := svc2.Load(context.Background()); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	if p, err := st.GetProposal(context.Background(), pid); err != nil || p.Status != "executed" {
+		t.Fatalf("proposal after Load: %+v err=%v", p, err)
+	}
+	for _, e := range allEvents(t, st, roomID) {
+		if e.Type != events.ActionExecuted {
+			continue
+		}
+		p, err := events.Decode[events.ActionExecutedPayload](e)
+		if err == nil && p.ProposalID == pid && !p.OK && strings.Contains(p.Output, "interrupted") {
+			t.Fatalf("executed proposal was re-marked failed by Load")
+		}
+	}
+}
+
+// TestRebuildDriverLeaseUTC pins review item 5: a driver lease read back from
+// the store in a non-UTC zone is normalised to UTC when the snapshot is
+// rebuilt after a restart (docs/api.md:7).
+func TestRebuildDriverLeaseUTC(t *testing.T) {
+	svc, st, c := newTestService(t)
+	roomID := createRoom(t, svc, "arjun").ID
+	svc.Close()
+
+	// A lease persisted by a non-UTC host: later than the control.granted
+	// event's lease, but carried in a fixed non-UTC zone.
+	later := c.Now().Add(40 * time.Minute).In(time.FixedZone("UTC+1", 3600))
+	if err := st.UpdateDriver(context.Background(), roomID, "arjun", "Arjun", later); err != nil {
+		t.Fatalf("update driver: %v", err)
+	}
+
+	svc2 := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun, Now: c.Now})
+	t.Cleanup(svc2.Close)
+	if err := svc2.Load(context.Background()); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	snap, err := svc2.GetRoom(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("get room: %v", err)
+	}
+	if snap.Driver == nil {
+		t.Fatal("no driver after load")
+	}
+	if snap.Driver.LeaseUntil.Location() != time.UTC {
+		t.Fatalf("lease not UTC after rebuild: %v", snap.Driver.LeaseUntil.Location())
+	}
+	if !snap.Driver.LeaseUntil.Equal(later.UTC()) {
+		t.Fatalf("lease: got %s want %s", snap.Driver.LeaseUntil, later.UTC())
+	}
 }

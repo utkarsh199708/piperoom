@@ -7,10 +7,12 @@ package demo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/owners"
+	"piperoom/internal/topology"
 )
 
 func TestRealActionsOverFakesPreventDemoDrift(t *testing.T) {
@@ -74,5 +76,22 @@ func TestRealActionsOverFakesPreventDemoDrift(t *testing.T) {
 	a, _ := reg.Get(ActionConnectRestartTask)
 	if err := a.(actions.Scoped).CheckScope(pipeline, json.RawMessage(`{"connector":"other-connector","task":0}`)); err == nil {
 		t.Fatal("out-of-pipeline connector passed the scope check")
+	}
+}
+
+// TestBuilderTraceRejectsOutOfPipelineTable pins review item 7 for the demo
+// mode: the demo builder rejects a table outside the orders pipeline with
+// topology.ErrBadInput so the room service maps it to 400, exactly like the
+// real builder.
+func TestBuilderTraceRejectsOutOfPipelineTable(t *testing.T) {
+	var b Builder
+	if _, err := b.Trace(context.Background(), "orders", "public.payments", "1"); !errors.Is(err, topology.ErrBadInput) {
+		t.Fatalf("out-of-pipeline table: err = %v, want topology.ErrBadInput", err)
+	}
+	if _, err := b.Trace(context.Background(), "nope", "public.orders", "1"); !errors.Is(err, topology.ErrBadInput) {
+		t.Fatalf("unknown pipeline: err = %v, want topology.ErrBadInput", err)
+	}
+	if _, err := b.Trace(context.Background(), "orders", "public.orders", "1"); err != nil {
+		t.Fatalf("in-pipeline table: %v", err)
 	}
 }
