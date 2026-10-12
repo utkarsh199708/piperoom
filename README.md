@@ -33,6 +33,7 @@ internal/
   testenv/       integration-test helpers (skip when the stack is unreachable or locked)
   tools/         read-only tools the agent calls, grouped by area
   topology/      the pipeline graph used to localize a fault
+  watch/         the built-in watcher: polls Connect and the source DB and opens a room when a pipeline is in trouble (PIPEROOM_WATCH_MODE)
   events/        the append-only room event log types
   config/        environment variable loading (read config only through config.Load())
 web/             the React room UI
