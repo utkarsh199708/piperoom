@@ -1,7 +1,7 @@
 ---
 id: slot-wal
 title: Replication slot inactive or WAL retention growing
-keywords: replication slot, slot, inactive, wal, growing, retained, restart_lsn, wal_status, lost, long transaction, max_slot_wal_keep_size, idle_replication_slot_timeout, heartbeat
+keywords: replication slot, slot, inactive, wal, growing, retained, restart_lsn, wal_status, lost, long transaction, max_slot_wal_keep_size, idle_replication_slot_timeout, heartbeat, resume, stopped, paused
 ---
 ## Symptoms
 - Disk use on the source Postgres grows; `pg_wal` takes more and more space.
@@ -27,7 +27,7 @@ Read-only SQL on the source database:
 
 ## Fixes
 - Action `connect_restart_task` / `connect_restart_connector` — only when a task is FAILED and its cause is fixed; `connect_restart_connector` restarts only failed tasks (`onlyFailed=true`).
-- Manual — resume a paused or stopped connector with `PUT /connectors/{name}/resume`; the slot replays the WAL it kept.
+- Action `connect_resume_connector` — resume a STOPPED or PAUSED connector (`PUT /connectors/{name}/resume`) once the reason for the stop is known and safe to lift; the slot then replays the WAL it kept. Proposed through the approval flow: the kafka-connect owner approves before it runs. Rollback: pause it again with `PUT /connectors/{name}/pause`.
 - Manual — end a blocking transaction with `SELECT pg_terminate_backend(pid);` (DBA, after checking whose session it is).
 - Manual — prevent idle transactions with `idle_in_transaction_session_timeout`.
 - Manual — for databases where the captured tables are quiet, set Debezium `heartbeat.interval.ms` and `heartbeat.action.query` so the connector can confirm a newer LSN.
@@ -39,6 +39,10 @@ Read-only SQL on the source database:
 - `pg_terminate_backend` rolls back that session's open transaction.
 - `max_slot_wal_keep_size` and `idle_replication_slot_timeout` protect the disk by invalidating the slot (`wal_status` `lost`), which also needs a new snapshot.
 - Restarting a task whose cause is not fixed fails again in the same way.
+- Resuming a connector that someone stopped on purpose (for example for maintenance) starts work they meant to hold. Check with the owner first; the approval step is where that check happens.
+- A resume replays the whole backlog the slot kept. A large backlog adds catch-up load on the source and the consumers.
+- Rollback is not a clean undo: pausing keeps the slot `active=true` and WAL keeps being retained until the connector runs again.
+- If `wal_status` is `lost`, resuming cannot bring the changes back; the slot needs a new snapshot.
 
 ## Sources
 - https://www.postgresql.org/docs/current/view-pg-replication-slots.html — slot columns, `wal_status` values, `inactive_since`, `invalidation_reason`
