@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -50,9 +51,13 @@ func main() {
 func run() error {
 	demoMode := flag.Bool("demo", false, "run a scripted fake agent (no real tools/agent)")
 	allowRemote := flag.Bool("allow-remote", false, "allow PIPEROOM_HTTP_ADDR to be non-loopback (auth is the dev X-User stub)")
+	probe := flag.Bool("healthcheck", false, "probe GET /healthz on PIPEROOM_HTTP_ADDR and exit 0 if healthy (for the container HEALTHCHECK)")
 	flag.Parse()
 
 	cfg := config.Load()
+	if *probe {
+		return healthcheck(context.Background(), cfg.HTTPAddr)
+	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
 
@@ -72,6 +77,13 @@ func run() error {
 	}
 	if remote {
 		log.Warn("server: listening on a non-loopback address; auth is the dev X-User stub, so any client that can reach it can act as any user", "addr", cfg.HTTPAddr)
+	}
+
+	// PIPEROOM_PUBLIC_URL becomes an allowed WebSocket origin, so a malformed
+	// value (a wildcard, say) must stop the start rather than widen access.
+	publicOrigin, err := httpapi.ParsePublicURL(cfg.PublicURL)
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -217,7 +229,17 @@ func run() error {
 		return err
 	}
 
-	handler := httpapi.New(svc, st, log, httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts))
+	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin)}
+	if cfg.WebDir != "" {
+		// Fail at start, not at the first page load, when the image or the
+		// mount has no built UI.
+		if err := checkWebDir(cfg.WebDir); err != nil {
+			return err
+		}
+		httpOpts = append(httpOpts, httpapi.WithWebDir(cfg.WebDir))
+		log.Info("server: serving the web UI", "dir", cfg.WebDir)
+	}
+	handler := httpapi.New(svc, st, log, httpOpts...)
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
@@ -253,6 +275,14 @@ func run() error {
 	<-done
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		return fmt.Errorf("server: listen: %w", serveErr)
+	}
+	return nil
+}
+
+// checkWebDir verifies that dir holds a built web UI (an index.html).
+func checkWebDir(dir string) error {
+	if _, err := os.Stat(filepath.Join(dir, "index.html")); err != nil {
+		return fmt.Errorf("server: PIPEROOM_WEB_DIR %s has no index.html (run `npm run build` in web/): %w", dir, err)
 	}
 	return nil
 }

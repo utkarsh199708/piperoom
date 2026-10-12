@@ -1,5 +1,7 @@
 // REST + WebSocket client for the Piperoom API (docs/api.md).
-// Base URL defaults to the local room service; override with VITE_API_BASE.
+// Base URL: VITE_API_BASE if set; else the local room service under `npm run
+// dev` (the UI is on :5173, the API on :8090); else same-origin, which is how
+// the built UI is served by the server itself (PIPEROOM_WEB_DIR).
 import type {
   ApiError,
   Event,
@@ -9,7 +11,9 @@ import type {
   Topology,
 } from './types'
 
-const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:8090'
+const BASE =
+  (import.meta.env.VITE_API_BASE as string | undefined) ??
+  (import.meta.env.DEV ? 'http://localhost:8090' : '')
 
 export const isFixtures = () => import.meta.env.VITE_FIXTURES === '1'
 
@@ -131,9 +135,11 @@ export function openRoomWs(
   userId: string,
   after: number,
 ): WebSocket {
-  const url = new URL(`${BASE}/api/rooms/${encodeURIComponent(roomId)}/ws`)
-  if (url.protocol === 'https:') url.protocol = 'wss:'
-  else url.protocol = 'ws:'
+  const url = new URL(
+    `${BASE}/api/rooms/${encodeURIComponent(roomId)}/ws`,
+    window.location.href, // resolves a same-origin (empty) BASE
+  )
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   url.searchParams.set('user', userId)
   url.searchParams.set('after', String(after))
   return new WebSocket(url.toString())

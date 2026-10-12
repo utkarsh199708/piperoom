@@ -1,0 +1,19 @@
+# users.yaml: the people who may use Piperoom, and the layers each may approve.
+# Copy to deploy/config/users.yaml and put in your real people (remove these).
+# A fix runs only after the owner of EVERY layer it touches approves.
+#
+# Today a person is identified by the X-User header alone (no password), so keep
+# the port on the customer VPN. See deploy/README.md.
+users:
+  - id: alice
+    name: Alice
+    layers: [postgres, schema-registry]
+  - id: bob
+    name: Bob
+    layers: [kafka-connect, kafka]
+  - id: carol
+    name: Carol
+    layers: [consumer]
+  - id: dave
+    name: Dave
+    layers: [warehouse]
