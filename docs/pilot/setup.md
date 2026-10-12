@@ -18,7 +18,7 @@ at the local dev stack, so **set every one** you rely on.
 
 | Variable | Meaning |
 |---|---|
-| `PIPEROOM_HTTP_ADDR` | listen address of the room service. Default `127.0.0.1:8090` (loopback). Nothing enforces loopback; keep it loopback, see below |
+| `PIPEROOM_HTTP_ADDR` | listen address of the room service. Default `127.0.0.1:8090` (loopback). `cmd/server` refuses a non-loopback address unless started with `--allow-remote`, see below |
 | `PIPEROOM_DB_URL` | Piperoom's own database for the room service: room events, proposals. Migrated automatically at start-up |
 | `SOURCE_DB_URL` | source Postgres, the **read-only** role |
 | `WAREHOUSE_DB_URL` | warehouse, the **read-only** role |
@@ -98,7 +98,7 @@ Rules of thumb:
 ## 4. Start the service
 
 `cmd/server` is the room service: HTTP API, WebSocket, agent supervisor and the executor for
-approved fixes. It takes one flag, `--demo` (`cmd/server/main.go:50`), and reads everything
+approved fixes. It takes two flags, `--demo` and `--allow-remote` (see above), and reads everything
 else from the environment above.
 
 **Real mode** (no flag) does this, in order (`cmd/server/main.go`):
@@ -177,8 +177,8 @@ system yourself to see how far the interrupted step got before asking for a new 
 ### Network exposure
 
 There is no real authentication yet (finding F1; `docs/api.md` §Auth identifies users by the
-`X-User` header). Keep `PIPEROOM_HTTP_ADDR` on its loopback default; nothing stops you binding
-it to `0.0.0.0` (no check in `cmd/server/main.go`), so this is your responsibility. Reach it
+`X-User` header). Keep `PIPEROOM_HTTP_ADDR` on its loopback default: `cmd/server` refuses to start on a
+non-loopback address unless you pass `--allow-remote` (it then logs a warning). Reach it
 through an SSH tunnel, VPN, or an authenticating reverse proxy that sets `X-User` itself and
 strips the header from client requests.
 
