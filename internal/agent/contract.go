@@ -26,6 +26,15 @@ type HumanInput struct {
 	// false when it failed. Nil means the outcome is unknown, and the agent must
 	// then never claim the pipeline recovered.
 	OK *bool `json:"ok,omitempty"`
+	// ProposalID, Layer and StepIndex identify what an "approval_result" or
+	// "action_result" is about, so the runner never parses Text for them.
+	// Layer is set for approval_result; StepIndex for action_result.
+	ProposalID string `json:"proposal_id,omitempty"`
+	Layer      string `json:"layer,omitempty"`
+	StepIndex  *int   `json:"step_index,omitempty"`
+	// Approved is set only for Kind "approval_result": true for an approval,
+	// false for a rejection.
+	Approved *bool `json:"approved,omitempty"`
 }
 
 // Inbox delivers human input to the agent between model turns.
