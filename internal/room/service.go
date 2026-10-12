@@ -63,6 +63,7 @@ type roomState struct {
 	agentCancel context.CancelFunc
 	execCancel  context.CancelFunc // cancels the room's executor on close
 	exec        *execQueue         // nil until the first proposal is approved
+	dedupKey    string             // alert dedup key of a webhook room; "" otherwise
 }
 
 // Service is the room domain logic. All state derives from the event log; the
@@ -91,6 +92,9 @@ type Service struct {
 	mu     sync.Mutex
 	closed bool
 	rooms  map[string]*roomState
+	// alertRooms maps the dedup key of each open webhook room to that room, so
+	// a repeat of the same alert joins the room instead of opening another.
+	alertRooms map[string]string
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -144,6 +148,7 @@ func New(d Deps) *Service {
 		ctx:          ctx,
 		cancel:       cancel,
 		rooms:        map[string]*roomState{},
+		alertRooms:   map[string]string{},
 	}
 	return s
 }
@@ -200,6 +205,7 @@ func (s *Service) ensureAllLoadedLocked(ctx context.Context, restarted bool) err
 		st := &roomState{snap: snap, inbox: newInbox()}
 		s.rooms[r.ID] = st
 		if snap.Status == "open" {
+			s.indexAlertRoomLocked(ctx, r.ID, st)
 			s.interruptStaleProposalsLocked(ctx, r.ID, st)
 			if restarted {
 				if err := s.noteRestartLocked(ctx, r.ID, st); err != nil {
@@ -332,6 +338,9 @@ func (s *Service) getStateLocked(ctx context.Context, roomID string) (*roomState
 	}
 	st := &roomState{snap: snap, inbox: newInbox()}
 	s.rooms[roomID] = st
+	if snap.Status == "open" {
+		s.indexAlertRoomLocked(ctx, roomID, st)
+	}
 	return st, nil
 }
 

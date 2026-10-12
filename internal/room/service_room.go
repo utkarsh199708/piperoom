@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 
+	"piperoom/internal/alertin"
 	"piperoom/internal/events"
 	"piperoom/internal/store"
 )
@@ -100,10 +101,20 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 		return RoomSnapshot{}, validation(fmt.Sprintf("pipeline_id %q must match ^[a-zA-Z0-9_.-]+$", pipelineID))
 	}
 	pipelineKnown := s.owners == nil || s.knownPipeline(pipelineID)
+	dedupKey := alertDedupKey(raw)
 	roomID := NewID("r_")
 	now := s.now().UTC()
 
 	s.mu.Lock()
+	// The same alert while its room is still open joins that room: no second
+	// room, no second agent, and the hook is not called again (the room was
+	// opened before).
+	if existing, ok := s.openAlertRoomLocked(dedupKey); ok {
+		st := s.rooms[existing]
+		snap, err := s.joinAlertRoomLocked(ctx, existing, st, title)
+		s.mu.Unlock()
+		return snap, err
+	}
 	if err := s.store.CreateRoom(ctx, store.Room{
 		ID: roomID, Title: title, Severity: severity, PipelineID: pipelineID, Status: "open", OpenedAt: now,
 	}); err != nil {
@@ -119,6 +130,10 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 	}); err != nil {
 		s.mu.Unlock()
 		return RoomSnapshot{}, err
+	}
+	if dedupKey != "" {
+		st.dedupKey = dedupKey
+		s.alertRooms[dedupKey] = roomID
 	}
 	// A missing/unknown pipeline opens with a system message so the room shows
 	// why no fix is proposed. events.go has no dedicated system-message type,
@@ -137,6 +152,64 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 	s.notifyRoomOpenedLocked(roomID)
 	s.mu.Unlock()
 	return snap, nil
+}
+
+// alertDedupKey is the key that makes a repeat of the same alert join the room
+// already open for it (alertin.Alert.DedupKey). It is derived from the raw body
+// alone, so a restart rebuilds the same keys. A body alertin cannot parse, or
+// no body, gets no key and always opens a room.
+func alertDedupKey(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	a, err := alertin.Config{}.Parse(alertin.Generic, raw)
+	if err != nil {
+		return ""
+	}
+	return a.DedupKey
+}
+
+// openAlertRoomLocked returns the open room that already holds dedupKey, if
+// any. A key whose room is closed is not a match. Caller must hold s.mu.
+func (s *Service) openAlertRoomLocked(dedupKey string) (string, bool) {
+	if dedupKey == "" {
+		return "", false
+	}
+	roomID, ok := s.alertRooms[dedupKey]
+	if !ok {
+		return "", false
+	}
+	st, ok := s.rooms[roomID]
+	if !ok || !s.roomOpen(st) {
+		return "", false
+	}
+	return roomID, true
+}
+
+// joinAlertRoomLocked records a repeat of an alert in the room that is already
+// open for it, as a system message, and returns that room. Caller must hold s.mu.
+func (s *Service) joinAlertRoomLocked(ctx context.Context, roomID string, st *roomState, title string) (RoomSnapshot, error) {
+	if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
+		Text: fmt.Sprintf("alert %q fired again; joined this room instead of opening a new one", title),
+	}); err != nil {
+		return RoomSnapshot{}, err
+	}
+	return st.snap.Clone(), nil
+}
+
+// indexAlertRoomLocked puts an open webhook room under its alert dedup key, so
+// a repeat of the alert joins it after a restart too. A key shared by several
+// open rooms (rooms opened before dedup existed) keeps the first one. Caller
+// must hold s.mu.
+func (s *Service) indexAlertRoomLocked(ctx context.Context, roomID string, st *roomState) {
+	key := alertDedupKey(s.rawAlert(ctx, roomID))
+	if key == "" {
+		return
+	}
+	st.dedupKey = key
+	if _, taken := s.alertRooms[key]; !taken {
+		s.alertRooms[key] = roomID
+	}
 }
 
 // notifyRoomOpenedLocked runs the OnRoomOpened hook off the request path, so
@@ -231,6 +304,11 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 	if err != nil {
 		s.mu.Unlock()
 		return events.Event{}, err
+	}
+	// A closed room no longer takes repeats of its alert: the next one opens a
+	// new room.
+	if st.dedupKey != "" && s.alertRooms[st.dedupKey] == roomID {
+		delete(s.alertRooms, st.dedupKey)
 	}
 	if err := s.store.CloseRoom(ctx, roomID, s.now().UTC()); err != nil {
 		s.log.Warn("room: persist close failed", "room", roomID, "err", err)

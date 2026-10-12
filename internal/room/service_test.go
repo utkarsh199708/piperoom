@@ -1826,3 +1826,105 @@ func TestRestartWaitsForSteer(t *testing.T) {
 	}
 	waitFor(t, 5*time.Second, func() bool { return runsOf(roomB) == 1 })
 }
+
+// TestRepeatedAlertJoinsOpenRoom pins webhook dedup: an identical alert while
+// its room is open joins that room (no second room, a system message, the
+// hook not called again). Once that room is closed the same alert opens a new
+// room, and the key survives a restart.
+func TestRepeatedAlertJoinsOpenRoom(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	var mu sync.Mutex
+	hooked := 0
+	hookCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return hooked
+	}
+	deps := func() room.Deps {
+		return room.Deps{
+			Store: st, Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, Now: c.Now,
+			OnRoomOpened: func(context.Context, string) {
+				mu.Lock()
+				hooked++
+				mu.Unlock()
+			},
+		}
+	}
+	svc := room.New(deps())
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+	arjun := mustUser(t, svc, "arjun")
+	raw := json.RawMessage(`{"title":"consumer lag","pipeline_id":"orders"}`)
+
+	first, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
+	if err != nil {
+		t.Fatalf("first alert: %v", err)
+	}
+	second, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
+	if err != nil {
+		t.Fatalf("repeat alert: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("repeat opened room %s, want the open room %s", second.ID, first.ID)
+	}
+	if rooms, _ := svc.ListRooms(ctx); len(rooms) != 1 {
+		t.Fatalf("want one room after a repeat, got %d", len(rooms))
+	}
+	joined := false
+	for _, e := range allEvents(t, st, first.ID) {
+		if e.Type != events.AgentMessage {
+			continue
+		}
+		if p, err := events.Decode[events.AgentMessagePayload](e); err == nil && strings.Contains(p.Text, "fired again") {
+			joined = true
+		}
+	}
+	if !joined {
+		t.Fatal("repeat was not recorded as a system message in the open room")
+	}
+	waitFor(t, 5*time.Second, func() bool { return hookCount() == 1 })
+
+	// Close the room; the same alert then opens a new one.
+	if _, err := svc.GrantControl(ctx, arjun, first.ID, "arjun"); err != nil {
+		t.Fatalf("take control: %v", err)
+	}
+	if _, err := svc.CloseRoom(ctx, arjun, first.ID, "fixed"); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	third, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
+	if err != nil {
+		t.Fatalf("alert after close: %v", err)
+	}
+	if third.ID == first.ID {
+		t.Fatal("alert for a closed room joined that room")
+	}
+	waitFor(t, 5*time.Second, func() bool { return hookCount() == 2 })
+
+	// A different body is a different alert and opens its own room.
+	other, err := svc.CreateRoomFromAlert(ctx, "disk full", "sev2", "orders", json.RawMessage(`{"title":"disk full","pipeline_id":"orders"}`))
+	if err != nil {
+		t.Fatalf("other alert: %v", err)
+	}
+	if other.ID == third.ID {
+		t.Fatal("a different alert joined an unrelated room")
+	}
+
+	// After a restart the open room is still found by its key.
+	svc.Close()
+	svc2 := room.New(deps())
+	t.Cleanup(svc2.Close)
+	if err := svc2.Load(ctx); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	again, err := svc2.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
+	if err != nil {
+		t.Fatalf("alert after restart: %v", err)
+	}
+	if again.ID != third.ID {
+		t.Fatalf("after restart opened room %s, want the open room %s", again.ID, third.ID)
+	}
+	if rooms, _ := svc2.ListRooms(ctx); len(rooms) != 3 {
+		t.Fatalf("want three rooms in total, got %d", len(rooms))
+	}
+}
