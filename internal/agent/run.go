@@ -81,6 +81,12 @@ type runner struct {
 	// action_result can be matched to its last step and verified.
 	proposals *proposalTracker
 
+	// recoveredIdle is true while the pipeline is verified recovered and nothing
+	// since has broken that (a failed or unknown step, or a NOT recovered
+	// verdict). An episode that ends while it is set stays "done" and waits for
+	// a human, instead of reporting idle.
+	recoveredIdle bool
+
 	emitMu sync.Mutex
 }
 
@@ -136,13 +142,10 @@ func (r *runner) run(ctx context.Context) error {
 	// Drain anything already waiting before the first turn so an early steer is
 	// part of the opening prompt.
 	initialInputs := r.drain(ctx)
+	// The model reads the verdict of an early recovery in its first turn. Only
+	// an episode that ends after a recovery parks, in pauseForHumanInput.
 	outcome := r.handleActionResults(ctx, initialInputs)
 	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs, outcome.notes)}
-	if outcome.holds() {
-		if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
-			return err
-		}
-	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return stopErr(err)
@@ -151,10 +154,12 @@ func (r *runner) run(ctx context.Context) error {
 		if turns >= r.opts.MaxTurns {
 			// Runaway guard: pause and wait for a human instead of abandoning the
 			// room. The room stays usable while someone is still steering it.
-			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
-				State:  "idle",
-				Detail: "max turns reached; waiting for human input",
-			})
+			if !r.recoveredIdle {
+				r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
+					State:  "idle",
+					Detail: "max turns reached; waiting for human input",
+				})
+			}
 			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{
 				Text: "I have reached the turn limit for this episode and am pausing. Please steer me or confirm before I continue.",
 			})
@@ -168,7 +173,7 @@ func (r *runner) run(ctx context.Context) error {
 			outcome := r.handleActionResults(ctx, inputs)
 			messages = appendUser(messages, r.inputBlocks(inputs, outcome.notes)...)
 			turns = 0
-			if outcome.holds() {
+			if r.parked(outcome) {
 				if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
 					return err
 				}
@@ -264,11 +269,8 @@ func (r *runner) run(ctx context.Context) error {
 			if len(inputs) > 0 {
 				turns = 0
 			}
-			if outcome.holds() {
-				if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
-					return err
-				}
-			}
+			// No park here: a recovered episode keeps running until the model
+			// reaches end_turn, so it can read the verification note and reply.
 		}
 	}
 }
@@ -404,7 +406,11 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 // dropped along with everything else: Run is about to return, so no further
 // request will ever need it.
 func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int, pending []anthropic.BetaContentBlockParamUnion) (bool, error) {
-	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
+	// A recovered episode ends "done", not "idle": the recovery already said so.
+	recovered := r.recoveredIdle
+	if !recovered {
+		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
+	}
 	inputs, err := r.waitForInput(ctx)
 	if err != nil {
 		return true, stopErr(err)
@@ -416,18 +422,22 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.inputBlocks(inputs, outcome.notes)...)
 	*messages = appendUser(*messages, blocks...)
 	*turns = 0
-	if outcome.holds() {
+	if r.parked(outcome) {
 		return r.holdAfterRecovery(ctx, messages, turns)
+	}
+	if recovered {
+		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 	}
 	return false, nil
 }
 
-// holdAfterRecovery runs after a recovery verdict. The pipeline is fixed, so the
-// model is not called again until something needs an answer, but the run must
+// holdAfterRecovery keeps a recovered episode alive. The pipeline is fixed, so
+// the model is not called until something needs an answer, but the run must
 // stay alive: a later steer or comment still gets a reply. It waits on the
-// Inbox exactly like the idle path. It returns stop=false when the model should
-// run again (a human spoke, or a step failed or is unknown) and stop=true when
-// the room closed, with the error Run should return.
+// Inbox exactly like the idle path and keeps the done status. It returns
+// stop=false when the model should run again (a human spoke, or a step failed
+// or is unknown) and stop=true when the room closed, with the error Run should
+// return.
 func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int) (bool, error) {
 	for {
 		inputs, err := r.waitForInput(ctx)
@@ -437,7 +447,7 @@ func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.Be
 		outcome := r.handleActionResults(ctx, inputs)
 		*messages = appendUser(*messages, r.inputBlocks(inputs, outcome.notes)...)
 		*turns = 0
-		if !outcome.holds() {
+		if !r.parked(outcome) {
 			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 			return false, nil
 		}

@@ -24,15 +24,18 @@ import (
 // that text back to the proposal and know whether n is the last step.
 //
 // Recovery needs two things. The layer checks of the touched layers must pass,
-// and the data must flow end to end: every sink table of the alert's pipeline
-// must be fresh. A pipeline with no known sink table, or a sink table whose
-// timestamp column is not known, is "data flow not verified" and never counts
+// and the data must flow: every sink table of the alert's pipeline must receive
+// rows after the fix. A sink table with no known timestamp column, or a pipeline
+// with no or too many sink tables, is "data flow not verified" and never counts
 // as recovered.
 
 const (
-	// freshnessRetries is the total number of warehouse_freshness attempts
-	// (including the first) before giving up on newer rows arriving.
-	freshnessRetries = 3
+	// freshnessAttempts is how many warehouse_freshness reads follow the baseline
+	// read. Rows must show up in one of them for the data flow to pass.
+	freshnessAttempts = 3
+	// maxSinkTables bounds the data-flow check so one alert never fans out into
+	// an unbounded run of warehouse reads.
+	maxSinkTables = 5
 	// verifyEvidenceBytes caps one tool summary quoted in the verdict message.
 	verifyEvidenceBytes = 500
 	// verifyTag opens every verification line given to the model, so the model
@@ -43,12 +46,9 @@ const (
 )
 
 var (
-	// freshnessWait is the pause between warehouse_freshness retries. A var so
+	// freshnessWait is the pause between warehouse_freshness reads. A var so
 	// tests can shrink it.
-	freshnessWait = 2 * time.Second
-	// warehouseFreshLimit is the maximum age a warehouse row may have for the
-	// warehouse check to count as recovered. A var so tests can widen it.
-	warehouseFreshLimit = 15 * time.Minute
+	freshnessWait = 10 * time.Second
 	// settleWait is the pause between the two connector reads that a recovery
 	// needs, so a connector that only just came back is not counted as healthy.
 	// A var so tests can shrink it.
@@ -140,6 +140,10 @@ type actionOutcome struct {
 	// recovered is true when a last step is verified as recovered in this batch,
 	// or was verified as recovered before (a repeat).
 	recovered bool
+	// broken is true when the batch says the pipeline is not known to be
+	// recovered: a step failed or is unknown, or a last step was verified as not
+	// recovered.
+	broken bool
 	// needsModel is true when the model must read this batch: a person spoke,
 	// or a step's outcome is failed or unknown.
 	needsModel bool
@@ -148,16 +152,10 @@ type actionOutcome struct {
 	notes []string
 }
 
-// holds reports whether the run should wait for human input instead of calling
-// the model: the pipeline is recovered and nothing in the batch needs a turn.
-func (o actionOutcome) holds() bool {
-	return o.recovered && !o.needsModel
-}
-
-// handleActionResults runs verify-after-fix for every input in the batch. The
-// done status is emitted by verifyActionResult when a recovery is first
-// confirmed. It never ends the run: callers use holds() to decide whether to
-// wait for human input.
+// handleActionResults runs verify-after-fix for every input in the batch and
+// updates recoveredIdle: set by a recovery, cleared by anything that breaks it.
+// It never ends the run. The done status is emitted by verifyActionResult when
+// a recovery is first confirmed.
 func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) actionOutcome {
 	var out actionOutcome
 	out.needsModel = hasHumanInput(inputs)
@@ -167,8 +165,15 @@ func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) a
 		}
 		one := r.verifyActionResult(ctx, in)
 		out.recovered = out.recovered || one.recovered
+		out.broken = out.broken || one.broken
 		out.needsModel = out.needsModel || one.needsModel
 		out.notes = append(out.notes, one.notes...)
+	}
+	switch {
+	case out.broken:
+		r.recoveredIdle = false
+	case out.recovered:
+		r.recoveredIdle = true
 	}
 	return out
 }
@@ -181,10 +186,10 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	id, step, parsed := parseActionResult(in.Text)
 	switch {
 	case in.OK == nil:
-		return actionOutcome{needsModel: true, notes: []string{verifyTag + unknownOutcomeText(id, step, parsed)}}
+		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + unknownOutcomeText(id, step, parsed)}}
 	case !*in.OK:
 		r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: failedStepText(id, step, parsed)})
-		return actionOutcome{needsModel: true, notes: []string{verifyTag + failedStepText(id, step, parsed)}}
+		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + failedStepText(id, step, parsed)}}
 	}
 	if !parsed {
 		return actionOutcome{}
@@ -203,6 +208,7 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		// emits done again; it reports the verdict already reached.
 		return actionOutcome{
 			recovered: rec.recovered,
+			broken:    !rec.recovered,
 			notes:     []string{verifyTag + "already verified: " + verdictWord(rec.recovered) + "; no checks were run again"},
 		}
 	}
@@ -212,12 +218,19 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	r.proposals.markVerified(id, recovered)
 	out := actionOutcome{
 		recovered: recovered,
+		broken:    !recovered,
 		notes:     []string{verifyTag + head + wrapToolOutput("verify", "", evidence)},
 	}
 	if recovered {
 		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "done", Detail: "pipeline recovered"})
 	}
 	return out
+}
+
+// parked reports whether the run waits for human input instead of calling the
+// model: the pipeline is recovered and nothing in the batch needs a turn.
+func (r *runner) parked(o actionOutcome) bool {
+	return r.recoveredIdle && !o.needsModel
 }
 
 // verdictWord names a stored verdict for the model.
@@ -263,25 +276,23 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) (bool, 
 		return false, strings.Join(lines, "\n"), "NOT recovered: a layer check did not pass.\n"
 	}
 
-	flow := r.verifyDataFlow(ctx, rec)
+	flow := r.verifyDataFlow(ctx)
 	lines = append(lines, flow.lines...)
 	evidence := strings.Join(lines, "\n")
 	switch {
 	case !flow.verified:
 		return false, evidence, "NOT recovered: data flow not verified.\n"
 	case !flow.fresh:
-		return false, evidence, "NOT recovered: data flow did not pass; a sink table is stale.\n"
+		return false, evidence, "NOT recovered: data flow did not pass; no new rows since the fix.\n"
 	}
 	return true, evidence, recoveredHead
 }
 
-// verifyCheck is one read-tool check in the verification pass.
+// verifyCheck is one read-tool check of a layer in the verification pass.
 type verifyCheck struct {
 	name  string
 	input json.RawMessage
 	judge func(tools.Result) bool
-	// retry repeats the read a bounded number of times before failing.
-	retry bool
 	// settle makes a passing check count only if it still passes after
 	// settleWait, so a transient healthy state does not count as recovery.
 	settle bool
@@ -290,7 +301,8 @@ type verifyCheck struct {
 // verifyChecks maps the layers a proposal touched to read-tool checks, in step
 // order and de-duplicated by layer. A layer is marked seen only once a check was
 // built for it, so a later step on the same layer with usable parameters still
-// gets its check. Layers without a known check contribute none.
+// gets its check. Layers without a known check contribute none. The warehouse
+// layer is not here: its freshness is judged by the data-flow check.
 func verifyChecks(steps []events.ProposalStep) []verifyCheck {
 	seen := map[string]bool{}
 	var checks []verifyCheck
@@ -310,7 +322,6 @@ func verifyChecks(steps []events.ProposalStep) []verifyCheck {
 
 // checkForStep returns the recovery check for one proposal step's layer, or ok
 // false when the layer has no check or the step carries no usable parameters.
-// The warehouse layer is not here: its freshness is part of the data-flow check.
 func checkForStep(s events.ProposalStep) (verifyCheck, bool) {
 	switch s.Layer {
 	case "kafka-connect":
@@ -329,20 +340,27 @@ func checkForStep(s events.ProposalStep) (verifyCheck, bool) {
 // flowResult is the outcome of the data-flow check.
 type flowResult struct {
 	// verified is true when every sink table of the pipeline could be checked:
-	// the pipeline's sink tables are known and each has a timestamp column.
+	// the sink tables are known, within the cap, and each has a timestamp column.
 	verified bool
-	// fresh is true when every sink table passed its freshness check.
+	// fresh is true when every sink table received rows after the fix.
 	fresh bool
 	// lines is the evidence, one line per sink table or per reason it was not
 	// verified.
 	lines []string
 }
 
-// verifyDataFlow checks that every sink table of the alert's pipeline is fresh,
-// with the bounded freshness retry. It needs the sink tables from pipeline_map
-// and each table's timestamp column from the proposal's warehouse step for that
-// table. Without either it reports the data flow as not verified.
-func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord) flowResult {
+// sinkTable is one warehouse table the alert's pipeline loads, with the column
+// that says how fresh its rows are.
+type sinkTable struct {
+	name     string
+	tsColumn string
+}
+
+// verifyDataFlow checks that every sink table of the alert's pipeline received
+// rows after the fix. The sink tables and their timestamp columns come from
+// pipeline_map. Without them, or with more than maxSinkTables, the data flow is
+// not verified.
+func (r *runner) verifyDataFlow(ctx context.Context) flowResult {
 	pipeline := r.alert.PipelineID
 	if pipeline == "" {
 		return flowResult{lines: []string{"data flow not verified: the alert names no pipeline"}}
@@ -354,70 +372,107 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord) flowRes
 	if len(sinks) == 0 {
 		return flowResult{lines: []string{"data flow not verified: pipeline " + pipeline + " has no sink tables"}}
 	}
+	if len(sinks) > maxSinkTables {
+		return flowResult{lines: []string{fmt.Sprintf("data flow not verified: too many sink tables (%d, the limit is %d)", len(sinks), maxSinkTables)}}
+	}
+	for _, s := range sinks {
+		if s.tsColumn == "" {
+			return flowResult{lines: []string{"data flow not verified: no timestamp column known for sink table " + s.name}}
+		}
+	}
 
 	res := flowResult{verified: true, fresh: true}
-	for _, table := range sinks {
-		ts, ok := sinkTSColumn(rec.steps, table)
-		if !ok {
-			res.verified = false
-			res.fresh = false
-			res.lines = append(res.lines, "data flow not verified: no timestamp column known for sink table "+table)
-			return res
-		}
-		c := verifyCheck{
-			name:  "warehouse_freshness",
-			input: jsonObject("table", table, "ts_column", ts),
-			judge: warehouseRecovered,
-			retry: true,
-		}
-		ok, line := r.runVerifyCheck(ctx, c)
+	for _, s := range sinks {
+		ok, line := r.checkNewRows(ctx, s)
 		res.fresh = res.fresh && ok
-		res.lines = append(res.lines, "data flow "+table+": "+line)
+		res.lines = append(res.lines, "data flow "+s.name+": "+line)
 	}
 	return res
 }
 
-// sinkTables reads the sink tables of one pipeline from pipeline_map. It is a
-// read tool like any other, so the call is traced in the room.
-func (r *runner) sinkTables(ctx context.Context, pipelineID string) ([]string, error) {
+// checkNewRows judges one sink table against the fix. The first read is the
+// baseline. The check passes only when a later read shows a newest row strictly
+// later than the baseline: rows that arrived after the fix. It makes at most
+// freshnessAttempts later reads, freshnessWait apart.
+func (r *runner) checkNewRows(ctx context.Context, s sinkTable) (bool, string) {
+	input := jsonObject("table", s.name, "ts_column", s.tsColumn)
+	base, baseSummary, err := r.readNewest(ctx, input)
+	if err != nil {
+		return false, "error: " + err.Error()
+	}
+	last := baseSummary
+	for i := 0; i < freshnessAttempts; i++ {
+		if err := r.clk.Sleep(ctx, freshnessWait); err != nil {
+			return false, "waiting for new rows: " + err.Error()
+		}
+		newest, summary, err := r.readNewest(ctx, input)
+		if err != nil {
+			return false, "error: " + err.Error()
+		}
+		last = summary
+		if newest.After(base) {
+			return true, fmt.Sprintf("newest %s is later than the baseline %s", newest.Format(time.RFC3339Nano), formatBaseline(base))
+		}
+	}
+	return false, "no new rows since the fix: " + clipLine(last)
+}
+
+// formatBaseline renders the baseline newest row, or "none" for an empty table.
+func formatBaseline(t time.Time) string {
+	if t.IsZero() {
+		return "none (empty table)"
+	}
+	return t.Format(time.RFC3339Nano)
+}
+
+// readNewest reads warehouse_freshness once and returns the newest row time,
+// which is the zero time for an empty table, plus the tool summary.
+func (r *runner) readNewest(ctx context.Context, input json.RawMessage) (time.Time, string, error) {
+	res, err := r.runVerifyTool(ctx, "warehouse_freshness", input)
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	var d struct {
+		Newest *string `json:"newest"`
+	}
+	if err := decodeData(res.Data, &d); err != nil {
+		return time.Time{}, res.Summary, fmt.Errorf("warehouse_freshness gave no readable newest: %w", err)
+	}
+	if d.Newest == nil || *d.Newest == "" {
+		return time.Time{}, res.Summary, nil
+	}
+	ts, err := time.Parse(time.RFC3339Nano, *d.Newest)
+	if err != nil {
+		return time.Time{}, res.Summary, fmt.Errorf("warehouse_freshness newest is not a timestamp: %w", err)
+	}
+	return ts, res.Summary, nil
+}
+
+// sinkTables reads the sink tables of one pipeline from pipeline_map, with the
+// timestamp column each one carries in its facts. It is a read tool like any
+// other, so the call is traced in the room.
+func (r *runner) sinkTables(ctx context.Context, pipelineID string) ([]sinkTable, error) {
 	res, err := r.runVerifyTool(ctx, "pipeline_map", jsonObject("pipeline_id", pipelineID))
 	if err != nil {
 		return nil, err
 	}
 	var g struct {
 		Nodes []struct {
-			Kind string `json:"kind"`
-			Name string `json:"name"`
+			Kind  string            `json:"kind"`
+			Name  string            `json:"name"`
+			Facts map[string]string `json:"facts"`
 		} `json:"nodes"`
 	}
 	if err := decodeData(res.Data, &g); err != nil {
 		return nil, fmt.Errorf("pipeline_map gave no readable topology: %w", err)
 	}
-	var out []string
+	var out []sinkTable
 	for _, n := range g.Nodes {
 		if n.Kind == "sink_table" && n.Name != "" {
-			out = append(out, n.Name)
+			out = append(out, sinkTable{name: n.Name, tsColumn: n.Facts["ts_column"]})
 		}
 	}
 	return out, nil
-}
-
-// sinkTSColumn returns the timestamp column the proposal names for one warehouse
-// table, if any step names that table.
-func sinkTSColumn(steps []events.ProposalStep, table string) (string, bool) {
-	for _, s := range steps {
-		if s.Layer != "warehouse" {
-			continue
-		}
-		t, ok := stringParam(s.Params, "table")
-		if !ok || t != table {
-			continue
-		}
-		if ts, ok := stringParam(s.Params, "ts_column"); ok {
-			return ts, true
-		}
-	}
-	return "", false
 }
 
 // decodeData round-trips a tool's Data through JSON so judges can read it
@@ -474,61 +529,29 @@ func pgSlotsRecovered(res tools.Result) bool {
 	return strings.Contains(res.Summary, "active=true")
 }
 
-// warehouseRecovered reports whether warehouse_freshness shows rows no older
-// than warehouseFreshLimit.
-func warehouseRecovered(res tools.Result) bool {
-	var d struct {
-		Newest string `json:"newest"`
-	}
-	if err := decodeData(res.Data, &d); err != nil || d.Newest == "" {
-		return false
-	}
-	ts, err := time.Parse(time.RFC3339Nano, d.Newest)
-	if err != nil {
-		return false
-	}
-	return time.Since(ts) <= warehouseFreshLimit
-}
-
-// runVerifyCheck runs one check. A settling check must also pass a second read
-// after settleWait. It returns whether the check passed and an evidence line.
+// runVerifyCheck runs one layer check. A settling check must also pass a second
+// read after settleWait. It returns whether the check passed and an evidence
+// line.
 func (r *runner) runVerifyCheck(ctx context.Context, c verifyCheck) (bool, string) {
-	ok, line := r.attemptCheck(ctx, c)
+	ok, line := r.readCheck(ctx, c)
 	if !ok || !c.settle {
 		return ok, line
 	}
 	if err := r.clk.Sleep(ctx, settleWait); err != nil {
 		return false, "settling: " + err.Error()
 	}
-	ok, again := r.attemptCheck(ctx, c)
+	ok, again := r.readCheck(ctx, c)
 	return ok, line + "; read again after " + settleWait.String() + ": " + again
 }
 
-// attemptCheck reads one check, retrying a bounded number of times when the
-// check asks for it. It returns whether the check passed and the evidence line
-// (a tool summary, or an error message).
-func (r *runner) attemptCheck(ctx context.Context, c verifyCheck) (bool, string) {
-	attempts := 1
-	if c.retry {
-		attempts = freshnessRetries
+// readCheck reads one layer check once and judges it. It returns whether the
+// check passed and the evidence line (a tool summary, or an error message).
+func (r *runner) readCheck(ctx context.Context, c verifyCheck) (bool, string) {
+	res, err := r.runVerifyTool(ctx, c.name, c.input)
+	if err != nil {
+		return false, "error: " + err.Error()
 	}
-	var last tools.Result
-	for i := 0; i < attempts; i++ {
-		res, err := r.runVerifyTool(ctx, c.name, c.input)
-		if err != nil {
-			return false, "error: " + err.Error()
-		}
-		last = res
-		if c.judge(res) {
-			return true, clipLine(res.Summary)
-		}
-		if i < attempts-1 {
-			if err := r.clk.Sleep(ctx, freshnessWait); err != nil {
-				return false, "waiting for freshness: " + err.Error()
-			}
-		}
-	}
-	return false, clipLine(last.Summary)
+	return c.judge(res), clipLine(res.Summary)
 }
 
 // runVerifyTool executes one read tool for verification, emitting the same
