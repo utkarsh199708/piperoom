@@ -318,7 +318,16 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	if t.track != nil {
 		t.track.record(id, steps)
 	}
-	return tools.Result{Summary: fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(layers, ", "))}, nil
+	return tools.Result{
+		Summary: fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(layers, ", ")),
+		Data:    proposeFixResult{ProposalID: id},
+	}, nil
+}
+
+// proposeFixResult is the structured result of a created proposal. The runner
+// reads the ID to take the proposal's creation baseline.
+type proposeFixResult struct {
+	ProposalID string `json:"proposal_id"`
 }
 
 // placeholderTexts are the values a model sends when it has nothing real to put

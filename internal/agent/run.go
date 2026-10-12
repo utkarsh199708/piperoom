@@ -154,7 +154,10 @@ func (r *runner) run(ctx context.Context) error {
 		if turns >= r.opts.MaxTurns {
 			// Runaway guard: pause and wait for a human instead of abandoning the
 			// room. The room stays usable while someone is still steering it.
-			if !r.recoveredIdle {
+			recovered := r.recoveredIdle
+			if recovered {
+				r.emitWaiting(ctx)
+			} else {
 				r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
 					State:  "idle",
 					Detail: "max turns reached; waiting for human input",
@@ -174,9 +177,14 @@ func (r *runner) run(ctx context.Context) error {
 			messages = appendUser(messages, r.inputBlocks(inputs, outcome.notes)...)
 			turns = 0
 			if r.parked(outcome) {
+				if !recovered {
+					r.emitWaiting(ctx)
+				}
 				if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
 					return err
 				}
+			} else if recovered {
+				r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 			}
 			continue
 		}
@@ -406,9 +414,11 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 // dropped along with everything else: Run is about to return, so no further
 // request will ever need it.
 func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int, pending []anthropic.BetaContentBlockParamUnion) (bool, error) {
-	// A recovered episode ends "done", not "idle": the recovery already said so.
+	// A recovered episode ends "done" with the reason, not "idle".
 	recovered := r.recoveredIdle
-	if !recovered {
+	if recovered {
+		r.emitWaiting(ctx)
+	} else {
 		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
 	}
 	inputs, err := r.waitForInput(ctx)
@@ -423,6 +433,9 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 	*messages = appendUser(*messages, blocks...)
 	*turns = 0
 	if r.parked(outcome) {
+		if !recovered {
+			r.emitWaiting(ctx)
+		}
 		return r.holdAfterRecovery(ctx, messages, turns)
 	}
 	if recovered {
@@ -718,6 +731,11 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 			content:   wrapToolOutput(u.name, "", "error: "+err.Error()),
 			isError:   true,
 		}
+	}
+	// A new proposal gets its creation baseline now, before anyone approves it,
+	// so rows that arrive during approval and execution count as the fix's.
+	if pr, ok := res.Data.(proposeFixResult); ok {
+		r.snapshotBaseline(ctx, pr.ProposalID)
 	}
 	return toolResult{
 		toolUseID: u.id,

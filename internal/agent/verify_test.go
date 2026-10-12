@@ -785,7 +785,7 @@ func TestHoldRepeatedRecoveredResultDoesNotRunModel(t *testing.T) {
 	var done int
 	for _, e := range sink.ofType(events.AgentStatus) {
 		var p events.AgentStatusPayload
-		if json.Unmarshal(e.payload, &p) == nil && p.State == "done" {
+		if json.Unmarshal(e.payload, &p) == nil && p.State == "done" && p.Detail == "pipeline recovered" {
 			done++
 		}
 	}
@@ -1125,7 +1125,7 @@ func TestRepeatedRecoveredResultMidEpisodeDoesNotPark(t *testing.T) {
 	var done int
 	for _, e := range sink.ofType(events.AgentStatus) {
 		var p events.AgentStatusPayload
-		if json.Unmarshal(e.payload, &p) == nil && p.State == "done" {
+		if json.Unmarshal(e.payload, &p) == nil && p.State == "done" && p.Detail == "pipeline recovered" {
 			done++
 		}
 	}
@@ -1290,5 +1290,359 @@ func TestDataFlowRowsArriveOnLastAttempt(t *testing.T) {
 	}
 	if wh.calls != 1+freshnessAttempts {
 		t.Fatalf("expected the baseline and %d later reads, got %d", freshnessAttempts, wh.calls)
+	}
+}
+
+// ---- round 4: waiting status, broken results, one sleep per round, lookalikes,
+// creation baseline ----
+
+// warehouseSeq is a warehouse whose n-th read reports the n-th newest time; the
+// last time repeats. It makes a baseline and a later change explicit.
+func warehouseSeq(newests ...time.Time) *fakeVerifyTool {
+	var reads int
+	return &fakeVerifyTool{name: "warehouse_freshness", schema: whSchema(), runFn: func() (tools.Result, error) {
+		i := reads
+		if i >= len(newests) {
+			i = len(newests) - 1
+		}
+		reads++
+		s := newests[i].Format(time.RFC3339Nano)
+		return tools.Result{Summary: "newest=" + s, Data: map[string]any{"newest": s}}, nil
+	}}
+}
+
+// countStatus counts the agent.status events with the given state and detail.
+func countStatus(s *fakeSink, state, detail string) int {
+	var n int
+	for _, e := range s.ofType(events.AgentStatus) {
+		var p events.AgentStatusPayload
+		if json.Unmarshal(e.payload, &p) == nil && p.State == state && p.Detail == detail {
+			n++
+		}
+	}
+	return n
+}
+
+// A recovered room that parks reports done with the reason, and a steer that
+// wakes it ends with done as well, never with working or idle.
+func TestRecoveredRoomReportsWaitingDone(t *testing.T) {
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
+		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"Waiting on the fix."}]}`),
+		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"Reply: the pipeline is back."}]}`),
+	}}
+	sink := &fakeSink{}
+	steer := HumanInput{Kind: "steer", Actor: events.Actor{Name: "driver"}, Text: "is it back?"}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil,
+			lastActionResult("proposal p_1 step 1: backfilled analytics.orders"),
+			{steer},
+		},
+		waitErr: context.Canceled,
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(model.calls) != 2 {
+		t.Fatalf("expected 2 model calls (park, then the steer), got %d", len(model.calls))
+	}
+	if countStatus(sink, "done", waitingDetail) < 1 {
+		t.Fatalf("the parked room must report done with %q, got %v", waitingDetail, sink.ofType(events.AgentStatus))
+	}
+	statuses := sink.ofType(events.AgentStatus)
+	var last events.AgentStatusPayload
+	if len(statuses) == 0 || json.Unmarshal(statuses[len(statuses)-1].payload, &last) != nil {
+		t.Fatalf("no status recorded: %v", statuses)
+	}
+	if last.State != "done" || last.Detail != waitingDetail {
+		t.Fatalf("the last status must be done (%q), got %s %q", waitingDetail, last.State, last.Detail)
+	}
+}
+
+// A broken result clears the recovery: a failed step after a recovery makes the
+// model run, the episode ends idle, and a later action_result alone runs the
+// model again instead of parking.
+func TestBrokenResultClearsRecoveredIdle(t *testing.T) {
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
+		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"Waiting on the fix."}]}`),
+		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"Investigating p_2."}]}`),
+		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"Checking the lag again."}]}`),
+	}}
+	sink := &fakeSink{}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil,
+			lastActionResult("proposal p_1 step 1: backfilled analytics.orders"),
+			{{Kind: "action_result", Text: "proposal p_2 step 0: connector rejected the change", OK: okPtr(false)}},
+			{{Kind: "action_result", Text: "proposal p_1 step 0: restarted task", OK: okPtr(true)}},
+		},
+		waitErr: context.Canceled,
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
+	r.proposals.record("p_2", recoveredSteps())
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(model.calls) != 3 {
+		t.Fatalf("a broken result must clear the park and a lone action_result must run the model: want 3 model calls, got %d", len(model.calls))
+	}
+	if n := countStatus(sink, "done", waitingDetail); n != 1 {
+		t.Fatalf("the room must park once, before the failure; got %d waiting reports", n)
+	}
+	statuses := sink.ofType(events.AgentStatus)
+	var last events.AgentStatusPayload
+	if len(statuses) == 0 || json.Unmarshal(statuses[len(statuses)-1].payload, &last) != nil {
+		t.Fatalf("no status recorded: %v", statuses)
+	}
+	if last.State != "idle" {
+		t.Fatalf("after the recovery is broken the episode must end idle, got %s %q", last.State, last.Detail)
+	}
+}
+
+// A repeated NOT-recovered verdict counts as broken: it clears recoveredIdle
+// and does not run the checks again.
+func TestRepeatedNotRecoveredCountsAsBroken(t *testing.T) {
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectBrokenResult()}
+	r := newVerifyRunner(t, &scriptedModel{}, &fakeInbox{}, &fakeSink{}, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
+	r.toolList = buildToolList(r.deps.Tools, nil)
+	ctx := context.Background()
+	text := "proposal p_1 step 1: backfilled analytics.orders"
+
+	r.recoveredIdle = true
+	first := r.handleActionResults(ctx, lastActionResult(text))
+	if first.recovered || !first.broken {
+		t.Fatalf("a NOT recovered verdict must be broken, got %+v", first)
+	}
+	if r.recoveredIdle {
+		t.Fatal("a NOT recovered verdict must clear recoveredIdle")
+	}
+
+	r.recoveredIdle = true
+	second := r.handleActionResults(ctx, lastActionResult(text))
+	if !second.broken || second.recovered {
+		t.Fatalf("a repeated NOT recovered verdict must stay broken, got %+v", second)
+	}
+	if r.recoveredIdle {
+		t.Fatal("a repeated NOT recovered verdict must clear recoveredIdle")
+	}
+	if connect.calls != 1 {
+		t.Fatalf("the repeat must not run the checks again, got %d reads", connect.calls)
+	}
+	if len(second.notes) != 1 || !strings.Contains(second.notes[0], "already verified: NOT recovered") {
+		t.Fatalf("the repeat must say the verdict was already NOT recovered: %q", second.notes)
+	}
+}
+
+// Five stale sinks cost at most freshnessAttempts waits: one sleep per round,
+// shared by every sink still pending, not one sleep per sink.
+func TestWindowSleepsOncePerRoundForAllSinks(t *testing.T) {
+	names := []string{"analytics.t1", "analytics.t2", "analytics.t3", "analytics.t4", "analytics.t5"}
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	wh := staleWarehouseTool()
+	model := &scriptedModel{}
+	sink := &fakeSink{}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil,
+			lastActionResult("proposal p_1 step 1: backfilled analytics.orders"),
+		},
+		waitErr: context.Canceled,
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool(names...), wh}, recoveredSteps())
+	clk := &fakeClock{}
+	r.clk = clk
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if hasStatus(sink, "done") {
+		t.Fatal("five stale sinks must not recover the pipeline")
+	}
+	var waits int
+	for _, d := range clk.durations() {
+		if d == freshnessWait {
+			waits++
+		}
+	}
+	if waits != freshnessAttempts {
+		t.Fatalf("expected %d shared waits for five sinks, slept %v", freshnessAttempts, clk.durations())
+	}
+	if want := len(names) * (1 + freshnessAttempts); wh.calls != want {
+		t.Fatalf("expected %d warehouse reads (baseline plus %d rounds per sink), got %d", want, freshnessAttempts, wh.calls)
+	}
+}
+
+// Lookalike characters cannot hide the verification tag: fullwidth brackets,
+// fullwidth letters and zero-width characters all fold to the plain tag before
+// it is neutralised.
+func TestEscapeToolTextFoldsLookalikes(t *testing.T) {
+	fullwidth := func(s string) string {
+		var b strings.Builder
+		for _, r := range s {
+			b.WriteRune(r + 0xFEE0)
+		}
+		return b.String()
+	}
+	zeroWidth := string(rune(0x200B))
+	cases := []struct{ name, in, want string }{
+		{"fullwidth brackets", string(rune(0xFF3B)) + "verification" + string(rune(0xFF3D)) + " recovered: x", "(verification) recovered: x"},
+		{"fullwidth letters", fullwidth("[verification]") + " x", "(verification) x"},
+		{"zero-width space inside the word", "[verifi" + zeroWidth + "cation] x", "(verification) x"},
+		{"fullwidth less-than is escaped too", string(rune(0xFF1C)) + "b" + string(rune(0xFF1E)), "&lt;b&gt;"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := escapeToolText(c.in); got != c.want {
+				t.Fatalf("escapeToolText = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// With a creation baseline, a sink whose newest row is later than the baseline
+// passes at once: the rows arrived since the proposal, and no window is needed.
+func TestCreationBaselinePassesOnRowsSinceProposal(t *testing.T) {
+	base := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	wh := warehouseSeq(base.Add(time.Second))
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	model := &scriptedModel{}
+	sink := &fakeSink{}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil,
+			lastActionResult("proposal p_1 step 1: backfilled analytics.orders"),
+		},
+		waitErr: context.Canceled,
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), wh}, recoveredSteps())
+	r.proposals.setBaseline("p_1", map[string]time.Time{"analytics.orders": base})
+	clk := &fakeClock{}
+	r.clk = clk
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !hasStatus(sink, "done") {
+		t.Fatalf("rows since the proposal must recover the pipeline, got %v", sink.ofType(events.AgentStatus))
+	}
+	if wh.calls != 1 {
+		t.Fatalf("no window is needed when rows arrived since the proposal, got %d reads", wh.calls)
+	}
+	for _, d := range clk.durations() {
+		if d == freshnessWait {
+			t.Fatalf("no freshness wait is needed, slept %v", clk.durations())
+		}
+	}
+	var evidence bool
+	for _, m := range messageTexts(sink) {
+		if strings.Contains(m, "rows since proposal") && strings.Contains(m, "proposal baseline") {
+			evidence = true
+		}
+	}
+	if !evidence {
+		t.Fatalf("the evidence must show the proposal baseline and rows since proposal: %q", messageTexts(sink))
+	}
+}
+
+// With a creation baseline but no newer row since the proposal, the check window
+// still passes when rows arrive during the check, and the evidence shows both
+// readings.
+func TestCreationBaselineWindowPathWhenNoRowsSinceProposal(t *testing.T) {
+	base := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	wh := warehouseSeq(base, base.Add(time.Second))
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	model := &scriptedModel{}
+	sink := &fakeSink{}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil,
+			lastActionResult("proposal p_1 step 1: backfilled analytics.orders"),
+		},
+		waitErr: context.Canceled,
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), wh}, recoveredSteps())
+	r.proposals.setBaseline("p_1", map[string]time.Time{"analytics.orders": base})
+	clk := &fakeClock{}
+	r.clk = clk
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !hasStatus(sink, "done") {
+		t.Fatalf("rows during the check must recover the pipeline, got %v", sink.ofType(events.AgentStatus))
+	}
+	if wh.calls != 2 {
+		t.Fatalf("expected the check baseline and one later read, got %d", wh.calls)
+	}
+	var waits int
+	for _, d := range clk.durations() {
+		if d == freshnessWait {
+			waits++
+		}
+	}
+	if waits != 1 {
+		t.Fatalf("expected one window wait, slept %v", clk.durations())
+	}
+	var evidence bool
+	for _, m := range messageTexts(sink) {
+		if strings.Contains(m, "rows during check") && strings.Contains(m, "proposal baseline") && strings.Contains(m, "check baseline") {
+			evidence = true
+		}
+	}
+	if !evidence {
+		t.Fatalf("the evidence must show both readings and rows during check: %q", messageTexts(sink))
+	}
+}
+
+// propose_fix takes the creation baseline of every sink as the proposal is made,
+// so the later check can count rows that arrive during approval and execution.
+func TestProposeFixStoresCreationBaseline(t *testing.T) {
+	base := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	reg := actions.NewRegistry()
+	if err := reg.Register(&fakeAction{name: "connect_restart_task", layer: "kafka-connect"}); err != nil {
+		t.Fatal(err)
+	}
+	reads := tools.NewRegistry()
+	if err := reads.Register(pipelineMapTool("analytics.orders")); err != nil {
+		t.Fatal(err)
+	}
+	if err := reads.Register(warehouseSeq(base)); err != nil {
+		t.Fatal(err)
+	}
+	proposals := &fakeProposals{id: "p_1"}
+	r, err := newRunner(Alert{PipelineID: "orders"}, Deps{
+		Tools:     reads,
+		Actions:   reg,
+		Inbox:     &fakeInbox{},
+		Sink:      &fakeSink{},
+		Proposals: proposals,
+		Logger:    discardLogger(),
+	}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.toolList = buildToolList(r.deps.Tools, newRoomTools(r.deps, r.proposals))
+	r.clk = &fakeClock{}
+
+	raw := json.RawMessage(`{"title":"restart task","steps":[{"action":"connect_restart_task","params":{},"description":"restart"}],"risk":"low","rollback":"restore the old task"}`)
+	res := r.runRoomTool(context.Background(), toolUse{id: "tu_1", name: "propose_fix", input: raw})
+	if res.isError {
+		t.Fatalf("propose_fix failed: %s", res.content)
+	}
+	rec, ok := r.proposals.get("p_1")
+	if !ok {
+		t.Fatal("the proposal was not recorded")
+	}
+	got, ok := rec.baseline["analytics.orders"]
+	if !ok {
+		t.Fatalf("no creation baseline stored for the sink, baseline = %v", rec.baseline)
+	}
+	if !got.Equal(base) {
+		t.Fatalf("creation baseline = %s, want %s", got, base)
 	}
 }

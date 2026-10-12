@@ -30,8 +30,8 @@ import (
 // as recovered.
 
 const (
-	// freshnessAttempts is how many warehouse_freshness reads follow the baseline
-	// read. Rows must show up in one of them for the data flow to pass.
+	// freshnessAttempts is how many warehouse_freshness reads follow the check
+	// baseline. Rows must show up in one of them for a sink to pass.
 	freshnessAttempts = 3
 	// maxSinkTables bounds the data-flow check so one alert never fans out into
 	// an unbounded run of warehouse reads.
@@ -43,11 +43,13 @@ const (
 	verifyTag = "[verification] "
 	// recoveredHead opens the verdict of a proposal whose checks all passed.
 	recoveredHead = "recovered: every layer check passed and data flow is verified.\n"
+	// waitingDetail is the status detail of a recovered episode parked for input.
+	waitingDetail = "pipeline recovered; waiting for input"
 )
 
 var (
-	// freshnessWait is the pause between warehouse_freshness reads. A var so
-	// tests can shrink it.
+	// freshnessWait is the pause between warehouse_freshness read rounds. One
+	// round sleeps once for all sinks still pending. A var so tests can shrink it.
 	freshnessWait = 10 * time.Second
 	// settleWait is the pause between the two connector reads that a recovery
 	// needs, so a connector that only just came back is not counted as healthy.
@@ -64,12 +66,17 @@ type proposalRecord struct {
 	// recovered holds that verdict. A repeated last-step result reuses it.
 	verified  bool
 	recovered bool
+	// baseline is each sink table's newest row time when the proposal was made.
+	// Nil when none was taken (for example after an agent restart), and then the
+	// check window alone decides the data flow.
+	baseline map[string]time.Time
 }
 
 // proposalTracker remembers the proposals the agent created during this run. It
 // is per-runner state, never global. It does not survive a restart: after a
 // restart the agent has no record of earlier proposals, so their action results
-// are not verified (the room waits for a steer after a restart).
+// are not verified (the room waits for a steer after a restart), and their
+// creation baselines are gone too.
 type proposalTracker struct {
 	mu   sync.Mutex
 	byID map[string]proposalRecord
@@ -114,6 +121,21 @@ func (t *proposalTracker) markVerified(id string, recovered bool) {
 	t.byID[id] = rec
 }
 
+// setBaseline stores the creation baseline of a proposal already recorded.
+func (t *proposalTracker) setBaseline(id string, baseline map[string]time.Time) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rec, ok := t.byID[id]
+	if !ok {
+		return
+	}
+	rec.baseline = baseline
+	t.byID[id] = rec
+}
+
 // parseActionResult splits the room's action_result text back into its parts.
 func parseActionResult(text string) (id string, step int, ok bool) {
 	rest, found := strings.CutPrefix(text, "proposal ")
@@ -142,7 +164,7 @@ type actionOutcome struct {
 	recovered bool
 	// broken is true when the batch says the pipeline is not known to be
 	// recovered: a step failed or is unknown, or a last step was verified as not
-	// recovered.
+	// recovered (including a repeat of that verdict).
 	broken bool
 	// needsModel is true when the model must read this batch: a person spoke,
 	// or a step's outcome is failed or unknown.
@@ -153,9 +175,9 @@ type actionOutcome struct {
 }
 
 // handleActionResults runs verify-after-fix for every input in the batch and
-// updates recoveredIdle: set by a recovery, cleared by anything that breaks it.
-// It never ends the run. The done status is emitted by verifyActionResult when
-// a recovery is first confirmed.
+// updates recoveredIdle: a recovery sets it, and anything that breaks the
+// recovery clears it. It never ends the run. The done status is emitted by
+// verifyActionResult when a recovery is first confirmed.
 func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) actionOutcome {
 	var out actionOutcome
 	out.needsModel = hasHumanInput(inputs)
@@ -233,6 +255,12 @@ func (r *runner) parked(o actionOutcome) bool {
 	return r.recoveredIdle && !o.needsModel
 }
 
+// emitWaiting reports a recovered episode that is parked for input. It stays
+// done, with the reason, rather than reporting idle.
+func (r *runner) emitWaiting(ctx context.Context) {
+	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "done", Detail: waitingDetail})
+}
+
 // verdictWord names a stored verdict for the model.
 func verdictWord(recovered bool) string {
 	if recovered {
@@ -276,7 +304,7 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) (bool, 
 		return false, strings.Join(lines, "\n"), "NOT recovered: a layer check did not pass.\n"
 	}
 
-	flow := r.verifyDataFlow(ctx)
+	flow := r.verifyDataFlow(ctx, rec)
 	lines = append(lines, flow.lines...)
 	evidence := strings.Join(lines, "\n")
 	switch {
@@ -356,68 +384,152 @@ type sinkTable struct {
 	tsColumn string
 }
 
-// verifyDataFlow checks that every sink table of the alert's pipeline received
-// rows after the fix. The sink tables and their timestamp columns come from
-// pipeline_map. Without them, or with more than maxSinkTables, the data flow is
-// not verified.
-func (r *runner) verifyDataFlow(ctx context.Context) flowResult {
+// pipelineSinks returns the sink tables the data-flow check can judge. When it
+// cannot, the reason is returned instead, and the data flow is not verified.
+func (r *runner) pipelineSinks(ctx context.Context) ([]sinkTable, string) {
 	pipeline := r.alert.PipelineID
 	if pipeline == "" {
-		return flowResult{lines: []string{"data flow not verified: the alert names no pipeline"}}
+		return nil, "the alert names no pipeline"
 	}
 	sinks, err := r.sinkTables(ctx, pipeline)
 	if err != nil {
-		return flowResult{lines: []string{"data flow not verified: " + err.Error()}}
+		return nil, err.Error()
 	}
 	if len(sinks) == 0 {
-		return flowResult{lines: []string{"data flow not verified: pipeline " + pipeline + " has no sink tables"}}
+		return nil, "pipeline " + pipeline + " has no sink tables"
 	}
 	if len(sinks) > maxSinkTables {
-		return flowResult{lines: []string{fmt.Sprintf("data flow not verified: too many sink tables (%d, the limit is %d)", len(sinks), maxSinkTables)}}
+		return nil, fmt.Sprintf("too many sink tables (%d, the limit is %d)", len(sinks), maxSinkTables)
 	}
 	for _, s := range sinks {
 		if s.tsColumn == "" {
-			return flowResult{lines: []string{"data flow not verified: no timestamp column known for sink table " + s.name}}
+			return nil, "no timestamp column known for sink table " + s.name
+		}
+	}
+	return sinks, ""
+}
+
+// sinkState is one sink table's progress through the data-flow check.
+type sinkState struct {
+	table       sinkTable
+	input       json.RawMessage
+	proposalAt  time.Time // creation baseline; meaningful only when hasProposal
+	hasProposal bool
+	checkAt     time.Time // check baseline: the newest row when the check began
+	passed      bool
+	passedBy    string // "rows since proposal" or "rows during check"
+	lastSummary string
+}
+
+// readings renders both baselines for the evidence, so a verdict shows what the
+// newest row was at proposal time and at check time.
+func (st sinkState) readings() string {
+	check := "check baseline " + formatBaseline(st.checkAt)
+	if st.hasProposal {
+		return "proposal baseline " + formatBaseline(st.proposalAt) + "; " + check
+	}
+	return check
+}
+
+// verifyDataFlow checks that every sink table of the alert's pipeline received
+// rows after the fix. A sink passes when its newest row is later than the
+// creation baseline (rows since proposal), or when a later read inside the check
+// window shows a newest row later than the check baseline (rows during check).
+// Without a creation baseline (the agent restarted) only the window applies.
+//
+// The check baselines are read for every sink first. Each window round then
+// sleeps once and re-reads only the sinks still pending, so the whole check
+// sleeps at most freshnessAttempts × freshnessWait.
+func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord) flowResult {
+	sinks, why := r.pipelineSinks(ctx)
+	if why != "" {
+		return flowResult{lines: []string{"data flow not verified: " + why}}
+	}
+
+	states := make([]sinkState, len(sinks))
+	for i, s := range sinks {
+		st := sinkState{table: s, input: jsonObject("table", s.name, "ts_column", s.tsColumn)}
+		st.proposalAt, st.hasProposal = rec.baseline[s.name]
+		newest, summary, err := r.readNewest(ctx, st.input)
+		if err != nil {
+			return flowResult{lines: []string{"data flow not verified: reading " + s.name + ": " + err.Error()}}
+		}
+		st.checkAt = newest
+		st.lastSummary = summary
+		if st.hasProposal && newest.After(st.proposalAt) {
+			st.passed = true
+			st.passedBy = "rows since proposal"
+		}
+		states[i] = st
+	}
+
+	for attempt := 0; attempt < freshnessAttempts && anyPending(states); attempt++ {
+		if err := r.clk.Sleep(ctx, freshnessWait); err != nil {
+			return flowResult{lines: []string{"data flow not verified: waiting for new rows: " + err.Error()}}
+		}
+		for i := range states {
+			st := &states[i]
+			if st.passed {
+				continue
+			}
+			newest, summary, err := r.readNewest(ctx, st.input)
+			if err != nil {
+				return flowResult{lines: []string{"data flow not verified: reading " + st.table.name + ": " + err.Error()}}
+			}
+			st.lastSummary = summary
+			if newest.After(st.checkAt) {
+				st.passed = true
+				st.passedBy = "rows during check"
+			}
 		}
 	}
 
 	res := flowResult{verified: true, fresh: true}
-	for _, s := range sinks {
-		ok, line := r.checkNewRows(ctx, s)
-		res.fresh = res.fresh && ok
-		res.lines = append(res.lines, "data flow "+s.name+": "+line)
+	for _, st := range states {
+		if st.passed {
+			res.lines = append(res.lines, fmt.Sprintf("data flow %s: %s (%s)", st.table.name, st.passedBy, st.readings()))
+			continue
+		}
+		res.fresh = false
+		res.lines = append(res.lines, fmt.Sprintf("data flow %s: no new rows since the fix (%s); last read %s", st.table.name, st.readings(), clipLine(st.lastSummary)))
 	}
 	return res
 }
 
-// checkNewRows judges one sink table against the fix. The first read is the
-// baseline. The check passes only when a later read shows a newest row strictly
-// later than the baseline: rows that arrived after the fix. It makes at most
-// freshnessAttempts later reads, freshnessWait apart.
-func (r *runner) checkNewRows(ctx context.Context, s sinkTable) (bool, string) {
-	input := jsonObject("table", s.name, "ts_column", s.tsColumn)
-	base, baseSummary, err := r.readNewest(ctx, input)
-	if err != nil {
-		return false, "error: " + err.Error()
-	}
-	last := baseSummary
-	for i := 0; i < freshnessAttempts; i++ {
-		if err := r.clk.Sleep(ctx, freshnessWait); err != nil {
-			return false, "waiting for new rows: " + err.Error()
-		}
-		newest, summary, err := r.readNewest(ctx, input)
-		if err != nil {
-			return false, "error: " + err.Error()
-		}
-		last = summary
-		if newest.After(base) {
-			return true, fmt.Sprintf("newest %s is later than the baseline %s", newest.Format(time.RFC3339Nano), formatBaseline(base))
+// anyPending reports whether some sink has not passed yet.
+func anyPending(states []sinkState) bool {
+	for _, st := range states {
+		if !st.passed {
+			return true
 		}
 	}
-	return false, "no new rows since the fix: " + clipLine(last)
+	return false
 }
 
-// formatBaseline renders the baseline newest row, or "none" for an empty table.
+// snapshotBaseline records each sink table's newest row as the proposal is
+// made, so the later check can count rows that arrived since the proposal. It is
+// best effort: when a sink cannot be read or judged, no baseline is kept and the
+// check falls back to its window alone.
+func (r *runner) snapshotBaseline(ctx context.Context, proposalID string) {
+	sinks, why := r.pipelineSinks(ctx)
+	if why != "" {
+		r.log.Info("agent: no creation baseline for proposal", "proposal", proposalID, "reason", why)
+		return
+	}
+	base := make(map[string]time.Time, len(sinks))
+	for _, s := range sinks {
+		newest, _, err := r.readNewest(ctx, jsonObject("table", s.name, "ts_column", s.tsColumn))
+		if err != nil {
+			r.log.Info("agent: no creation baseline for proposal", "proposal", proposalID, "table", s.name, "err", err)
+			return
+		}
+		base[s.name] = newest
+	}
+	r.proposals.setBaseline(proposalID, base)
+}
+
+// formatBaseline renders a newest-row time, or "none (empty table)" for a table
+// with no rows.
 func formatBaseline(t time.Time) string {
 	if t.IsZero() {
 		return "none (empty table)"
