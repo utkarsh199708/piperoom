@@ -204,6 +204,15 @@ func (s *Service) ensureAllLoadedLocked(ctx context.Context, restarted bool) err
 		if _, ok := s.rooms[r.ID]; ok {
 			continue
 		}
+		if r.LastSeq == 0 {
+			// A row with no events is a leftover of a room.created append that
+			// failed (or a crash before it); creation holds s.mu, so a live
+			// room is never seen here without events. It is not a room.
+			if restarted {
+				s.log.Warn("room: skipping room row with no events", "room", r.ID)
+			}
+			continue
+		}
 		snap, err := s.rebuild(ctx, r.ID)
 		if err != nil {
 			s.log.Warn("room: rebuild failed", "room", r.ID, "err", err)

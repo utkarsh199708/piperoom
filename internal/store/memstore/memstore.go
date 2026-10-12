@@ -250,6 +250,21 @@ func (s *Store) ListRooms(ctx context.Context) ([]store.Room, error) {
 	return out, nil
 }
 
+// DeleteEmptyRoom removes a room that has no events; see store.Store.
+func (s *Store) DeleteEmptyRoom(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	log, ok := s.rooms[id]
+	if !ok {
+		return nil
+	}
+	if len(log.events) > 0 {
+		return fmt.Errorf("memstore: delete empty room %q: %w", id, store.ErrRoomNotEmpty)
+	}
+	delete(s.rooms, id)
+	return nil
+}
+
 // UpdateDriver records the current driver on the room row.
 func (s *Store) UpdateDriver(ctx context.Context, id, driverID, driverName string, leaseUntil time.Time) error {
 	s.mu.Lock()

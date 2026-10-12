@@ -532,6 +532,51 @@ func TestSignedAlertRefusalsAreLoggedOncePerMinute(t *testing.T) {
 	}
 }
 
+// A body Postgres jsonb cannot store (a \u0000 escape, an unpaired surrogate)
+// is 400 validation on both routes and creates nothing.
+func TestAlertBodyJSONBGuardIs400(t *testing.T) {
+	bodies := map[string]string{
+		"nul escape":         `{"title":"x\u0000y","pipeline_id":"orders","dedup_key":"k"}`,
+		"unpaired surrogate": `{"title":"\ud83d","pipeline_id":"orders","dedup_key":"k"}`,
+		"invalid utf-8":      "{\"title\":\"x\xffy\",\"pipeline_id\":\"orders\"}",
+	}
+	gen := alertCases()[4]
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			srv, svc := newAlertServer(t, alertCfg(gen.now))
+
+			resp := doJSON(t, http.MethodPost, srv.URL+"/api/alerts/webhook", "arjun", body)
+			wantStatus(t, resp, http.StatusBadRequest)
+			if got := decode[map[string]any](t, resp); got["error"].(map[string]any)["code"] != "validation" {
+				t.Fatalf("webhook error body = %v", got)
+			}
+
+			resp = postAlert(t, srv, gen.src, gen.sign(gen.secret, []byte(body), gen.now), []byte(body))
+			wantStatus(t, resp, http.StatusBadRequest)
+			if got := decode[map[string]any](t, resp); got["error"].(map[string]any)["code"] != "validation" {
+				t.Fatalf("signed error body = %v", got)
+			}
+
+			if rooms, _ := svc.ListRooms(context.Background()); len(rooms) != 0 {
+				t.Fatalf("refused bodies created %d rooms", len(rooms))
+			}
+		})
+	}
+}
+
+// POST /api/rooms refuses a title with a NUL: 400 validation, no room.
+func TestCreateRoomTitleNULIs400(t *testing.T) {
+	srv, svc := newAlertServer(t, alertCfg(time.Now()))
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/rooms", "arjun", `{"title":"a\u0000b","severity":"sev2","pipeline_id":"orders"}`)
+	wantStatus(t, resp, http.StatusBadRequest)
+	if got := decode[map[string]any](t, resp); got["error"].(map[string]any)["code"] != "validation" {
+		t.Fatalf("error body = %v", got)
+	}
+	if rooms, _ := svc.ListRooms(context.Background()); len(rooms) != 0 {
+		t.Fatalf("refused title created %d rooms", len(rooms))
+	}
+}
+
 // With no WithAlertIngest option every signed source is disabled.
 func TestSignedAlertsDisabledByDefault(t *testing.T) {
 	srv, _ := newServer(t)

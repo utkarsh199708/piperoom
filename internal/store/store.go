@@ -22,6 +22,9 @@ import (
 // does not exist.
 var ErrNotFound = errors.New("store: not found")
 
+// ErrRoomNotEmpty is returned by DeleteEmptyRoom for a room that has events.
+var ErrRoomNotEmpty = errors.New("store: room has events")
+
 // ErrAlreadyExists is returned when a uniqueness rule is violated
 // (e.g. a second decision on the same proposal layer).
 var ErrAlreadyExists = errors.New("store: already exists")
@@ -282,6 +285,30 @@ func (s *PG) CloseRoom(ctx context.Context, id string, closedAt time.Time) error
 		`UPDATE rooms SET status = 'closed', closed_at = $2 WHERE id = $1`, id, closedAt)
 	if err != nil {
 		return fmt.Errorf("store: close room %s: %w", id, err)
+	}
+	return nil
+}
+
+// DeleteEmptyRoom deletes the room row only while it has no events
+// (last_seq = 0), so a failed room.created append leaves no orphan row that
+// would show up as a room with an empty log. A room with events is kept and
+// reported as ErrRoomNotEmpty; a missing room is a no-op.
+func (s *PG) DeleteEmptyRoom(ctx context.Context, id string) error {
+	ctx, cancel := dbCtx(ctx)
+	defer cancel()
+	tag, err := s.pool.Exec(ctx, `DELETE FROM rooms WHERE id = $1 AND last_seq = 0`, id)
+	if err != nil {
+		return fmt.Errorf("store: delete empty room %s: %w", id, err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM rooms WHERE id = $1)`, id).Scan(&exists); err != nil {
+		return fmt.Errorf("store: delete empty room %s: %w", id, err)
+	}
+	if exists {
+		return fmt.Errorf("store: delete empty room %s: %w", id, ErrRoomNotEmpty)
 	}
 	return nil
 }
