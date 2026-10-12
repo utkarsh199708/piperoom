@@ -29,6 +29,7 @@ import (
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
 	"piperoom/internal/room/demo"
+	"piperoom/internal/slackbridge"
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
 	"piperoom/internal/tools"
@@ -86,6 +87,7 @@ func run() error {
 	// mode uses Postgres: migrations first (goose on migrations.FS), then the
 	// store.
 	var st store.Store
+	var threads slackbridge.Threads = slackbridge.NewMemThreads()
 	if *demoMode {
 		st = memstore.New()
 	} else {
@@ -101,8 +103,18 @@ func run() error {
 			return fmt.Errorf("server: connect room store: %w", err)
 		}
 		st = pg
+		threads = pg.SlackThreads()
 		defer pg.Close()
 	}
+
+	// Slack mirroring is on only when SLACK_BOT_TOKEN/SLACK_CHANNEL_ID are set,
+	// in both modes; a wrong setting refuses start. The deferred stop runs
+	// before the store's Close (defers are LIFO), so no mirror outlives it.
+	slack, err := newMirrors(ctx, st, threads, slackEnv(), log)
+	if err != nil {
+		return err
+	}
+	defer slack.stop(mirrorStopTimeout)
 
 	var (
 		acts     *actions.Registry
@@ -149,7 +161,8 @@ func run() error {
 			Effort:   cfg.Effort,
 			MaxTurns: 40,
 		},
-		Logger: log,
+		Logger:       log,
+		OnRoomOpened: slack.onRoomOpened(),
 	})
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
@@ -165,6 +178,10 @@ func run() error {
 			// rebuilt lazily without their agent (review nit 9).
 			return fmt.Errorf("server: load room cache: %w", loadErr)
 		}
+	}
+
+	if err := slack.startOpen(ctx, svc); err != nil {
+		return err
 	}
 
 	handler := httpapi.New(svc, st, log)

@@ -71,6 +71,7 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	}
 	snap := st.snap.Clone()
 	s.startAgentLocked(roomID, title, pipelineID, nil, st)
+	s.notifyRoomOpenedLocked(roomID)
 	s.mu.Unlock()
 	return snap, nil
 }
@@ -133,8 +134,23 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 	}
 	snap := st.snap.Clone()
 	s.startAgentLocked(roomID, title, pipelineID, raw, st)
+	s.notifyRoomOpenedLocked(roomID)
 	s.mu.Unlock()
 	return snap, nil
+}
+
+// notifyRoomOpenedLocked runs the OnRoomOpened hook off the request path, so
+// a slow hook never delays the HTTP response. Caller holds s.mu, which keeps
+// wg.Add from racing Close; after Close the hook is not called.
+func (s *Service) notifyRoomOpenedLocked(roomID string) {
+	if s.onRoomOpened == nil || s.closed {
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.onRoomOpened(s.ctx, roomID)
+	}()
 }
 
 // GetRoom returns a room snapshot or a not-found error.

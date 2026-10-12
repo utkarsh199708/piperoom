@@ -49,6 +49,12 @@ type Deps struct {
 	Options      agent.Options
 	Logger       *slog.Logger
 	Now          func() time.Time
+
+	// OnRoomOpened, when set, is called once per room opened by CreateRoom or
+	// CreateRoomFromAlert, after room.created is appended. Each call runs in
+	// its own goroutine with the service lifetime ctx, so calls may overlap;
+	// the hook must return promptly once ctx ends because Close waits for it.
+	OnRoomOpened func(ctx context.Context, roomID string)
 }
 
 type roomState struct {
@@ -73,6 +79,7 @@ type Service struct {
 	opts         agent.Options
 	log          *slog.Logger
 	now          func() time.Time
+	onRoomOpened func(ctx context.Context, roomID string)
 
 	// ctx is the service lifetime: every goroutine the service starts (agent
 	// supervisors, executor queues) derives from it. Close cancels it and
@@ -133,6 +140,7 @@ func New(d Deps) *Service {
 		opts:         d.Options,
 		log:          log,
 		now:          now,
+		onRoomOpened: d.OnRoomOpened,
 		ctx:          ctx,
 		cancel:       cancel,
 		rooms:        map[string]*roomState{},
