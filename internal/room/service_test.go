@@ -335,6 +335,7 @@ func TestDoubleApprovalConflict(t *testing.T) {
 	svc, _, _ := newTestService(t, &fakeAction{name: "postgres_action", layer: "postgres"})
 	roomID := createRoom(t, svc, "arjun").ID
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title:          "fix",
 		Steps:          []events.ProposalStep{{Action: "postgres_action", Layer: "postgres", Params: json.RawMessage("{}")}},
 		RequiredLayers: []string{"postgres"},
@@ -453,6 +454,7 @@ func TestExecutorStopsAtFirstFailure(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{
 			{Action: "ok_action", Layer: "postgres", Params: json.RawMessage("{}")},
@@ -569,6 +571,7 @@ func TestRequiredLayersDerivedFromSteps(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{
 			{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")},
@@ -620,6 +623,7 @@ func TestExecutorFailureMarksFailed(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{
 			{Action: "fail_act", Layer: "postgres", Params: json.RawMessage("{}")},
@@ -754,6 +758,7 @@ func TestCreateProposalRejectsUnscopedAction(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	_, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "unscoped", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -775,6 +780,7 @@ func TestCreateProposalScopeViolation(t *testing.T) {
 
 	roomID := createRoom(t, svc, "arjun").ID
 	_, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -853,6 +859,7 @@ func TestCloseStopsGoroutinesIdempotent(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -917,6 +924,7 @@ func TestCloseDuringExecutionFinishesStep(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "blocking_action", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -972,6 +980,7 @@ func TestExecutorNeverRunsAPreClaimedStep(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -1028,6 +1037,7 @@ func TestLoadInterruptsStaleProposals(t *testing.T) {
 	mk := func(title string, steps ...events.ProposalStep) string {
 		t.Helper()
 		pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+			Risk: "low", Rollback: "revert the change",
 			Title: title, Steps: steps,
 		}, events.AgentActor)
 		if err != nil {
@@ -1300,6 +1310,7 @@ func TestExecutorRoomClosedPathRecordsOutcome(t *testing.T) {
 	cr.user = mustUser(t, svc, "arjun")
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{
 			{Action: "close_room", Layer: "postgres", Params: json.RawMessage("{}")},
@@ -1357,6 +1368,7 @@ func TestScopeCheckFailsClosedWithoutOwners(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	_, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -1485,6 +1497,7 @@ func TestWebhookUnknownPipelineDisablesProposals(t *testing.T) {
 		t.Fatalf("bad pipeline: %+v", snap)
 	}
 	_, err = svc.CreateProposal(context.Background(), snap.ID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -1496,6 +1509,7 @@ func TestWebhookUnknownPipelineDisablesProposals(t *testing.T) {
 	// A known pipeline keeps proposals enabled.
 	snap2 := createRoom(t, svc, "arjun")
 	if _, err := svc.CreateProposal(context.Background(), snap2.ID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor); err != nil {
@@ -1537,6 +1551,7 @@ func TestLoadSkipsAlreadyExecutedProposals(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -1640,6 +1655,7 @@ func TestActionResultCarriesStepOutcome(t *testing.T) {
 	propose := func(action string) string {
 		t.Helper()
 		pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+			Risk: "low", Rollback: "revert the change",
 			Title: action,
 			Steps: []events.ProposalStep{{Action: action, Layer: "postgres", Params: json.RawMessage("{}")}},
 		}, events.AgentActor)
@@ -1687,5 +1703,50 @@ func TestActionResultCarriesStepOutcome(t *testing.T) {
 	}
 	if v := got[failPID]; v == nil || *v {
 		t.Fatalf("failed step: OK = %v, want false", v)
+	}
+}
+
+// TestProposalRejectsEmptyOrPlaceholderPlan pins that a proposal's risk and
+// rollback must be real text: empty, whitespace-only and placeholder values
+// (case-insensitive) are validation errors, and a refused proposal stores
+// nothing and logs no event.
+func TestProposalRejectsEmptyOrPlaceholderPlan(t *testing.T) {
+	pg := &fakeAction{name: "pg_act", layer: "postgres"}
+	svc, st, _ := newTestService(t, pg)
+	roomID := createRoom(t, svc, "arjun").ID
+	ctx := context.Background()
+	steps := []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}}
+	bad := []string{"", "   ", "\t\n", "<no value>", "N/A", "none", "NONE", " - ", "tbd", "Tbd"}
+
+	before := len(allEvents(t, st, roomID))
+	for _, v := range bad {
+		for _, field := range []string{"risk", "rollback"} {
+			p := events.ProposalCreatedPayload{Title: "fix", Steps: steps, Risk: "low", Rollback: "revert the change"}
+			if field == "risk" {
+				p.Risk = v
+			} else {
+				p.Rollback = v
+			}
+			_, err := svc.CreateProposal(ctx, roomID, p, events.AgentActor)
+			if err == nil {
+				t.Fatalf("%s=%q: proposal accepted", field, v)
+			}
+			wantCode(t, err, "validation")
+		}
+	}
+	if got := len(allEvents(t, st, roomID)); got != before {
+		t.Fatalf("refused proposals appended %d events", got-before)
+	}
+	snap, err := svc.GetRoom(ctx, roomID)
+	if err != nil {
+		t.Fatalf("get room: %v", err)
+	}
+	if len(snap.OpenProposals) != 0 {
+		t.Fatalf("refused proposal was stored: %+v", snap.OpenProposals)
+	}
+
+	ok := events.ProposalCreatedPayload{Title: "fix", Steps: steps, Risk: "low", Rollback: "revert the change"}
+	if _, err := svc.CreateProposal(ctx, roomID, ok, events.AgentActor); err != nil {
+		t.Fatalf("valid proposal refused: %v", err)
 	}
 }
