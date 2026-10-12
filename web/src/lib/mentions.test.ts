@@ -11,11 +11,24 @@ describe('mentionsAgent', () => {
     'check this\n@agent',
     '@agent-ops', // "-" is not a word character, so the mention ends at "t"
     '@agenté', // ASCII \b: "é" is not a word character here, same as the Go regex
+    '@agentK', // Kelvin sign after the word: trailing \b is ASCII, so it still matches
+    '@agentſ', // long s after the word: same
   ])('matches %j', (text) => {
     expect(mentionsAgent(text)).toBe(true)
   })
 
-  it.each(['@agentless', 'mail@agent', '@agent_x', '', 'agent', 'hi @bot'])('does not match %j', (text) => {
+  // Go's (?i) folds U+212A (Kelvin sign) and U+017F (long s) into \w, so they are not
+  // "non-word" characters before "@agent" on the server.
+  it.each([
+    'mail@agent',
+    '@agentless',
+    '@agent_x',
+    '',
+    'agent',
+    'hi @bot',
+    'K@agent', // Kelvin sign + "@agent": Go does not match
+    'ſ@agent', // long s + "@agent": Go does not match
+  ])('does not match %j', (text) => {
     expect(mentionsAgent(text)).toBe(false)
   })
 
