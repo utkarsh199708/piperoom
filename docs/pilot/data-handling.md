@@ -1,7 +1,10 @@
 # Data handling
 
 What Piperoom reads from your systems, where it goes, who can see it, and how to limit it.
-Based on the code on `main`; verify against `docs/security/` for changes.
+Based on the code on `main`; verify against `docs/security/` for changes. The room event log
+and room members below are the **design** of the room service (`docs/api.md`, `AGENTS.md`),
+which is not on `main` yet (A5, in review). Today only `cmd/investigate` runs, and it prints
+events to the terminal instead.
 
 ## 1. Where data goes
 
@@ -16,7 +19,7 @@ your systems ──read-only tools──► Summary (text) ──► Claude API 
   human messages in the room. Anything in those is sent to the Anthropic API. Review
   Anthropic's current commercial terms and data-retention settings for your organisation
   before the pilot; Piperoom does not change them.
-- **Room event log (`room_events`).** Every tool call, result `Data`, comment, steer,
+- **Room event log (`room_events`, room service design).** Every tool call, result `Data`, comment, steer,
   proposal and approval is stored **permanently** in the Piperoom database and shown to
   everyone who can open the room. There is no per-event redaction after the fact.
 - **Logs.** Piperoom logs with `log/slog`; it is designed not to log secrets (the Anthropic
