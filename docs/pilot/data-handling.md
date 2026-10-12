@@ -1,7 +1,7 @@
 # Data handling
 
 What Piperoom reads from your systems, what reaches the model, where it goes, who can see it, and
-how to limit it. Based on the code on `main` at `2a7bc34`. Under `cmd/investigate` events are
+how to limit it. Based on the code on `main` at `d372943`. Under `cmd/investigate` events are
 printed to the terminal. Under `cmd/server` they go to the room event log and, if Slack is
 configured, to a Slack thread.
 
@@ -31,6 +31,11 @@ your systems ──read-only tools──► Summary (text) ──► Claude API 
   to everyone who can open the room. There is no per-event redaction after the fact. Redaction
   happens before the event is written: `pg_row` and `warehouse_row` return redacted `Data`
   (`internal/tools/dbtools/pg.go:191`, `wh.go:111`).
+- **Warehouse (Snowflake, only with `WAREHOUSE_KIND=snowflake`).** Warehouse queries go to the
+  Snowflake account named in `WAREHOUSE_DB_URL`. The DSN holds the password, and startup errors
+  are redacted of it (`internal/wiring/warehouse.go:74`; `internal/clients/snowflake/redact.go`).
+  Warehouse queries run with the role in that DSN, so the account's network path is part of
+  your egress review (section 5).
 - **Slack (optional, outbound only).** Off unless **both** `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID`
   are set. A half setting stops the server at start (`cmd/server/main.go:128-132`;
   `internal/slackbridge/bridge.go:63-69`). It posts into one thread per room in one channel
@@ -62,7 +67,7 @@ These are the sources of text the model reads. Everything here goes to the Anthr
 | Source | What the model gets | Code |
 |---|---|---|
 | First message | the alert **title**, the **pipeline id**, the **room id** and the **pipeline map** (text). Severity is not in this message | `internal/agent/prompt.go:91-113` |
-| Human input, live | every comment and steer, in full, with the author's name. Suggestions are sent when the driver sends them | `internal/room/service.go:580-600`; `internal/agent/prompt.go:228-262` |
+| Human input, live | a driver's steer, including a sent suggestion, in full, with the author's name and **without** the untrusted wrapper. A comment reaches the agent live only when it mentions `@agent`; comments are wrapped. | `internal/room/service.go:593-598`; `internal/agent/prompt.go:238-239` (steer), `:251-253` (comment) |
 | Approvals and rejections | the layer and proposal id; on rejection, the reason | `internal/room/service.go:600-620` |
 | Action results | the output of each step, in full, with the ok flag | `internal/room/service.go:625-635` (no cap on this path) |
 | Tool results | each tool's `Summary` text (never `Data`) | the tool's `Summary`, capped by `tools.MaxSummaryBytes` |
@@ -78,8 +83,11 @@ summaries and display names (`prompt.go:429-520`).
 Two more things follow from this list:
 
 - A tool's `Summary` can contain the key values and timestamps that the tool returns (section 2).
-- Anything an engineer types is sent, verbatim, to the model. Tell the team not to paste secrets or
-  customer data.
+- Anything an engineer types is sent to the model in some form. A comment reaches the agent live
+  only when it mentions `@agent`. Comments also reach the model through the hand-off digest, which
+  keeps the newest 30 non-critical events, so an older comment can be folded out of it
+  (`prompt.go:478`, `:265-297`). Steers are sent verbatim, unwrapped. Tell the team not to paste
+  secrets or customer data.
 
 ## 2. What each tool exposes
 
@@ -88,10 +96,10 @@ Two more things follow from this list:
 | `pg_replication_slots` | slot name, plugin, active flag, WAL retained | data |
 | `pg_recent_ddl` | DDL command, object, **full statement text**, user, time | row data |
 | `pg_long_transactions` | in the **Summary** sent to the model: pid, user, state, age, and the first 200 characters of the query, only if the role may see query text. In the **Data** stored in the room log: the query text up to 500 characters (`internal/clients/postgres/postgres.go:166`; Summary cut at `internal/tools/dbtools/pg.go:130`) | query text beyond 500 characters |
-| `pg_row` | row **column names**; values only for the key and timestamp columns, others `null` (`pg.go:191,199`). Key and timestamp columns are chosen **by name**: the key is the column you pass in, and timestamp columns are `at` or names ending in `_at` (`dbtools.go:177-179`) | other column values |
+| `pg_row` | row **column names**; values only for the key and timestamp columns, others `null` (`pg.go:191,199`). Key and timestamp columns are chosen **by name**: the key is the column you pass in, and timestamp columns are `at` or names ending in `_at` (`dbtools.go:220-222`) | other column values |
 | `pg_publication_tables` | for a pipeline: the Debezium publication name, the connector's database role name (from its config), and for each source table whether it is in the publication and whether that role can SELECT it. `Data` lists the publication's member tables (`pg_publication.go:151-190`) | row data |
 | `warehouse_freshness` | max timestamp of the sink table, lag | row data |
-| `warehouse_row` | **timestamp-named columns only** (`at` or `*_at`), by name, not by type. The key and every other column are dropped, from both Summary and Data (`wh.go:111,119-127`; `dbtools.go:177-179`) | key value, all other columns |
+| `warehouse_row` | **timestamp-named columns only** (`at` or `*_at`), by name, not by type. The key and every other column are dropped, from both Summary and Data (`wh.go:111,119-127`; `dbtools.go:220-222`). The same on Snowflake, where column names come back lower-cased (`internal/clients/snowflake/snowflake.go:148`) | key value, all other columns |
 | `pipeline_map` | the pipeline's tables, connectors, topics, consumer groups and sink tables, with owners and health (`map.go:17-26`) | row data |
 | `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag` | topic/group names, offsets, lag | record payloads |
 | `kafka_topic_config` | for a pipeline's own topic: retention, cleanup policy, min in-sync replicas, partition count and replication factor (`kafka_tools.go:236-270`) | record payloads |
@@ -113,10 +121,13 @@ Things to know:
 
 ## 3. Prompt injection and untrusted text
 
-Record keys, error traces, log lines and comments are attacker-influenced text. Piperoom
-wraps tool output and human input in `untrusted` markers with escaping, and tells the model to
-treat them as data. That reduces risk but is not a guarantee. The controls that do not depend on
-the model are:
+Record keys, error traces, log lines and comments are attacker-influenced text. Piperoom wraps
+tool output, comments (whoever writes them), approval and action results, and every hand-off
+digest line in `untrusted` markers with escaping, and tells the model to treat them as data
+(`internal/agent/prompt.go:176-259`, `:429-520`). A driver's **steer**, including a sent
+suggestion, reaches the live agent **without** the wrapper (`prompt.go:238-239`). The hand-off
+digest does wrap steers and suggestions (`prompt.go:484,490`). That reduces risk but is not a
+guarantee. The controls that do not depend on the model are:
 
 1. **Read-only credentials** ([permissions.md](permissions.md)): even a fooled agent cannot write.
 2. **Human approval:** the agent can only *propose* a fix. It runs only after every required

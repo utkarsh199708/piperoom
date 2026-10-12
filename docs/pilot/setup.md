@@ -15,15 +15,20 @@ for those before you plan the install.
 - **A Postgres database for Piperoom's own state**, separate from the source and the warehouse.
   Its URL is `PIPEROOM_DB_URL`. Use a role that owns only this database. The service creates its own
   tables at start-up (`cmd/server/main.go:108`), so the role needs rights to create tables in it.
-- **Network access** from the Piperoom host to: source Postgres, warehouse Postgres, Kafka brokers,
-  Kafka Connect REST, Schema Registry, the room database, the Anthropic API host (`api.anthropic.com`
-  unless you pin `ANTHROPIC_BASE_URL`, section 1), and `slack.com` only if you enable Slack.
-- **Settings for real mode:** `SOURCE_DB_URL`, `WAREHOUSE_DB_URL`, `PIPEROOM_DB_URL`,
-  `KAFKA_BROKERS`, `CONNECT_URL`, `SCHEMA_REGISTRY_URL`, `OWNERS_FILE`, `USERS_FILE` and
-  `ANTHROPIC_API_KEY` (section 1). Unset, each one falls back to the localhost dev stack
-  (`internal/config/config.go:57-67`), so set every one you rely on.
+- **Network access** from the Piperoom host to: the source Postgres, the warehouse (Postgres, or
+  the Snowflake account if `WAREHOUSE_KIND=snowflake`), Kafka brokers, Kafka Connect REST, Schema
+  Registry, the room database, the Anthropic API host (`api.anthropic.com` unless you pin
+  `ANTHROPIC_BASE_URL`, section 1), and `slack.com` only if you enable Slack. For Snowflake, that is
+  the account host in the DSN, for example `<account>.snowflakecomputing.com`.
+- **Settings for real mode:** `SOURCE_DB_URL`, `WAREHOUSE_DB_URL`, `WAREHOUSE_KIND` (default
+  `postgres`), `PIPEROOM_DB_URL`, `KAFKA_BROKERS`, `CONNECT_URL`, `SCHEMA_REGISTRY_URL`,
+  `OWNERS_FILE`, `USERS_FILE` and `ANTHROPIC_API_KEY` (section 1). Unset, each of the URL and file
+  settings falls back to the localhost dev stack (`internal/config/config.go:78-88`), so set every
+  one you rely on. **`ANTHROPIC_API_KEY` has no localhost fallback**: unset, the SDK falls back only to its other
+  credential sources (`anthropic-sdk-go@v1.80.0/client.go:30-82`), and model calls fail if none is set.
 - **Start-up checks are partial.** The source and warehouse Postgres are pinged when opened
-  (`internal/clients/postgres/postgres.go:43`, `internal/clients/warehouse/warehouse.go:44`). Connect
+  (`internal/clients/postgres/postgres.go:43`, `internal/clients/warehouse/warehouse.go:44`). A
+  Snowflake warehouse is pinged when opened too (`internal/clients/snowflake/snowflake.go:45`). Connect
   and Schema Registry are not contacted at start-up, so a wrong URL shows up on the first tool or
   action that uses it.
 - **The credentials** from [permissions.md](permissions.md). One credential set per process (F7).
@@ -32,24 +37,26 @@ for those before you plan the install.
 ## 1. Configure the environment
 
 All settings are environment variables read by `internal/config/config.go` (`config.Load()`,
-`config.go:9-52` for the fields and `:57-92` for the defaults).
+`config.go:9-73` for the fields and `:76-128` for the defaults). The alert and web variables at the
+end of the table are read into config only: nothing on `main` uses them yet.
 
 | Variable | Meaning |
 |---|---|
 | `PIPEROOM_HTTP_ADDR` | listen address of the room service. Default `127.0.0.1:8090`. Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. Any other host, including an empty host or `0.0.0.0`, is refused unless you pass `--allow-remote` (`cmd/server/listen.go:19-41`) |
 | `PIPEROOM_DB_URL` | Piperoom's own database: room events, proposals, Slack thread state. Use a role that owns only this database. Migrated automatically at start-up |
 | `SOURCE_DB_URL` | source Postgres, the **read-only** role |
-| `WAREHOUSE_DB_URL` | warehouse, the **read-only** role. Postgres only today ([permissions.md](permissions.md#warehouse)) |
+| `WAREHOUSE_KIND` | `postgres` (default) or `snowflake`. Any other value stops the start (`internal/wiring/warehouse.go:50-60`). Set it with `WAREHOUSE_DB_URL` (`config.go:115`) |
+| `WAREHOUSE_DB_URL` | the warehouse, read-only role. With `postgres`: a Postgres URL. With `snowflake`: a gosnowflake DSN, `user:password@account/database/schema?warehouse=...&role=...`, with the password **URL-encoded** (a raw `%`, `+`, `?`, `@`, `/` or `:` breaks it, `internal/clients/snowflake/README.md`). Startup errors are redacted of the DSN (`internal/wiring/warehouse.go:74`). Read-only access comes only from the DSN's role (`internal/clients/snowflake/snowflake.go:6-10`). See [permissions.md](permissions.md#warehouse) |
 | `KAFKA_BROKERS` | comma-separated brokers |
 | `CONNECT_URL` | Kafka Connect REST base URL |
 | `SCHEMA_REGISTRY_URL` | Schema Registry base URL |
 | `OWNERS_FILE` | pipelines and layer owners (step 2) |
 | `USERS_FILE` | users and the layers each owns (step 2) |
-| `PIPEROOM_MODEL` | model id, default `claude-opus-5-5` (`config.go:66`) |
-| `PIPEROOM_EFFORT` | reasoning effort, default `high` (`config.go:67`) |
+| `PIPEROOM_MODEL` | model id, default `claude-opus-5-5` (`config.go:87`) |
+| `PIPEROOM_EFFORT` | reasoning effort, default `high` (`config.go:88`) |
 | `SLACK_BOT_TOKEN` | optional, **secret**. Bot token with `chat:write`. Slack is on only when this and `SLACK_CHANNEL_ID` are both set. One without the other stops the start (`cmd/server/main.go:128-132`; `internal/slackbridge/bridge.go:63-69`) |
 | `SLACK_CHANNEL_ID` | optional. A channel **ID** such as `C0123ABC`, never `#name` (`bridge.go:70-71`). Use a private channel |
-| `PIPEROOM_PUBLIC_URL` | optional. Base URL of the web UI, used for room links in Slack. Must be an absolute `http(s)` URL (`bridge.go:73-79`). Empty means no links (`config.go:51`) |
+| `PIPEROOM_PUBLIC_URL` | optional. Base URL of the web UI, used for room links in Slack. Must be an absolute `http(s)` URL (`bridge.go:73-79`). Empty means no links (`config.go:113`) |
 | `KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_MECHANISM`, `KAFKA_SASL_USERNAME` | Kafka TLS/SASL (empty = plaintext) |
 | `KAFKA_SASL_PASSWORD` | **secret** |
 | `KAFKA_TLS_CA_FILE`, `KAFKA_TLS_CERT_FILE`, `KAFKA_TLS_KEY_FILE`, `KAFKA_TLS_SERVER_NAME` | Kafka TLS files (the key file is a secret; mount read-only) |
@@ -57,10 +64,14 @@ All settings are environment variables read by `internal/config/config.go` (`con
 | `SCHEMA_REGISTRY_PASSWORD`, `SCHEMA_REGISTRY_TLS_KEY_FILE` | **secrets** |
 | `CONNECT_USERNAME`, `CONNECT_TLS_CA_FILE`, `CONNECT_TLS_CERT_FILE` | Connect basic auth / TLS |
 | `CONNECT_PASSWORD`, `CONNECT_TLS_KEY_FILE` | **secrets** |
-| `ANTHROPIC_API_KEY` | read by the Anthropic SDK, not by Piperoom. Piperoom does not write it to config files, events or logs. If it is unset, the SDK tries `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE` and other sources (`anthropic-sdk-go@v1.80.0/client.go:30-82`) |
+| `ANTHROPIC_API_KEY` | read by the Anthropic SDK, not by Piperoom. **No localhost fallback.** Piperoom does not write it to config files, events or logs. If it is unset, the SDK falls back to `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE` and other sources (`anthropic-sdk-go@v1.80.0/client.go:30-82`) |
 | `ANTHROPIC_BASE_URL` | **read by the SDK** (`client.go:58`). Every prompt goes to this host. Leave it unset, or pin it to the Anthropic host you approved |
 | `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE` | read by the SDK when `ANTHROPIC_API_KEY` is not set. Leave them unset on the Piperoom host, so the key used is the one you chose |
 | `ANTHROPIC_WORKSPACE_ID` | only if the key is a user key (`internal/agent/model.go:42`) |
+| `ALERTMANAGER_TOKEN`, `GRAFANA_ALERT_SECRET`, `PAGERDUTY_ALERT_SECRET`, `DATADOG_ALERT_TOKEN`, `GENERIC_ALERT_SECRET` | **Not live.** Read into config (`internal/config/config.go:117-122`), but no code on `main` uses them. Signed alert senders are in review (not on `main`), and F9 stays open until then: today the webhook has no sender check (section 6) |
+| `PAGERDUTY_SERVICES`, `DEFAULT_ALERT_PIPELINE` | **Not live.** Read into config (`config.go:120,123`); nothing on `main` uses them yet |
+| `PIPEROOM_MAX_AGENTS` | **Not live.** Read into config (`config.go:125`); no agent cap is enforced on `main` yet |
+| `PIPEROOM_WEB_DIR` | **Not live.** Read into config (`config.go:127`). The room service does not serve the web UI on `main`; run the UI separately (step 4) |
 
 The client code refuses unsafe combinations at start-up: basic auth over `http://` and TLS files
 with an `http://` URL (`internal/clients/netsec/http.go:53-56`), and SASL PLAIN without TLS
@@ -146,10 +157,11 @@ environment above.
    the room store (`:114`). A database that cannot be reached stops the start.
 4. Starts the Slack mirror if `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` are set (`:128`). A wrong
    Slack setting stops the start. Mirrors then run for every open room (`:198`).
-5. Opens the data stack (`wiring.Open`, `:153`): source Postgres, warehouse, Kafka, Connect and
-   Schema Registry, with the TLS/SASL/auth settings above. Source and warehouse are pinged here.
-   It then registers the read-only tools and the six write actions (`wiring.RegisterTools`, `:159`;
-   `internal/wiring/wiring.go:190-210`). This needs the credentials from
+5. Opens the data stack (`wiring.Open`, `:153`; `internal/wiring/wiring.go:135-193`): source
+   Postgres, the warehouse (`WAREHOUSE_KIND`), Kafka, Connect and Schema Registry, with the
+   TLS/SASL/auth settings above. Source and warehouse are pinged here. It then registers the
+   read-only tools and the six write actions (`wiring.RegisterTools`, `:159`;
+   `internal/wiring/wiring.go:199-219`). This needs the credentials from
    [permissions.md](permissions.md) and `ANTHROPIC_API_KEY`.
 6. Reloads every room from the log (`:183`). A failure stops the start in real mode, but one room
    that cannot be rebuilt is only logged and skipped (`internal/room/service.go:201-204`). Then it
@@ -236,8 +248,10 @@ takes the same unverified `?user=` value. `--allow-remote` adds no authenticatio
    here means a missing grant, so fix the grant, not the code.
 2. Start `cmd/server --demo` first to see the flow with no risk, then real mode. Open a room
    (`POST /api/rooms`), open the web UI, and watch the agent work.
-3. Confirm **read-only**: as the Piperoom DB role run `INSERT` on a pipeline table. It must
-   fail. Same for Kafka produce with the Piperoom principal.
+3. Confirm **read-only**: as the **source** read-only role (`SOURCE_DB_URL`) run `INSERT` on a
+   pipeline table, and as the **warehouse** read-only role (`WAREHOUSE_DB_URL`) run an `INSERT` on a
+   sink table. Both must fail. Do not test with the room-database role (`PIPEROOM_DB_URL`); that
+   role is meant to write. Same for Kafka produce with the Piperoom principal.
 4. Confirm the approval gate: have the agent propose a fix and confirm it does not run
    until every required owner has approved. Reject it, and confirm nothing changed.
    Note that `X-User` is not proof of identity (F1), so the approval check is only as good as
@@ -311,7 +325,12 @@ handler `internal/httpapi/handlers.go:50-92`). What it does on `main`:
 
 - **Real login** (F1; the design doc named in `docs/api.md` is not on `main`). Until it exists,
   anyone who can reach the API or the WebSocket can act as any user.
-- **Snowflake warehouse.** Not selectable yet. See [permissions.md](permissions.md#warehouse).
+- **Signed alert senders, a cap on agents, room retention and export, and a web UI served by the
+  room service.** These are in review and are not on `main`. F9 stays open until signed alerts
+  land. Until then, use the webhook with the limits in section 6. The variables for these are
+  marked "Not live" in section 1.
+- **Snowflake** is selectable with `WAREHOUSE_KIND=snowflake` (section 1 and
+  [permissions.md](permissions.md#warehouse)).
 
 ## 7. Run the pilot
 
@@ -335,6 +354,9 @@ handler `internal/httpapi/handlers.go:50-92`). What it does on `main`:
 | Server exits at start with "users/owners config" | `users.yaml` and `owners.yaml` disagree about a layer owner (step 4). The message names the user and layer |
 | Server exits at start with "topic_prefix is required", "no source tables", "no connectors" or "sink_ts_column is required" | fix the named pipeline in `owners.yaml` (`internal/owners/owners.go:84-93`) |
 | Server exits at start with "ping for migrations" | `PIPEROOM_DB_URL` cannot be reached, or the role lacks rights to create tables |
+| Server exits at start with "unknown WAREHOUSE_KIND" | `WAREHOUSE_KIND` is not `postgres` or `snowflake` (`internal/wiring/warehouse.go:50-60`) |
+| Server exits at start with "warehouse (snowflake)" | the DSN is wrong, the password is not URL-encoded, or the account host is unreachable. The error is redacted, so check the DSN by hand (`internal/wiring/warehouse.go:74`) |
+| Snowflake sink table reports not found | a missing table, or one the role cannot see, maps to `clients.ErrNotFound`. Names are upper-cased and double-quoted, so a table created with quotes and a mixed case cannot be reached (`internal/clients/snowflake/README.md`, `identifier.go`) |
 | Server exits at start with "slack bridge" | only one of `SLACK_BOT_TOKEN` / `SLACK_CHANNEL_ID` is set, or the channel is a `#name` not an ID |
 | Slack thread never appears | bot not in the channel (`not_in_channel` in the log), or the room was opened before Slack was enabled and the server was not restarted |
 | A repeat alert opened a second room | the body differs between sends (no `dedup_key`, or a changing field), the `pipeline_id` differs, or the first room was already closed |
