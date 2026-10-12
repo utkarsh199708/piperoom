@@ -386,9 +386,12 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) (bool, 
 		return false, strings.Join(lines, "\n"), "NOT recovered: a layer check did not pass.\n"
 	}
 
-	if schemaConfigOnly(rec.steps) {
-		// The layer checks decide. Data flow is read once for the evidence and is
-		// not waited for: a compatibility change adds no rows by itself.
+	if r.recoveredIdle && schemaConfigOnly(rec.steps) {
+		// The episode was already verified recovered, and this proposal only
+		// tightens schema configuration (the restore after a fix). The layer
+		// checks decide. Data flow is read once for the evidence and is not waited
+		// for: a compatibility change adds no rows by itself. From a broken state
+		// nothing has been verified yet, so the data-flow rule applies.
 		flow := r.verifyDataFlow(ctx, rec, false)
 		lines = append(lines, "data flow (information only, not part of this verdict):")
 		lines = append(lines, flow.lines...)
@@ -484,11 +487,14 @@ func compatibilityIs(want string) func(tools.Result) bool {
 	}
 }
 
-// schemaConfigOnly reports whether every step of a proposal is a
-// schema_set_compatibility step with a check. Such a proposal changes no data
-// path, so its layer checks decide recovery and data flow is only information:
-// a quiet pipeline gets no new rows from a compatibility change. Any other step,
-// even a schema_register, keeps the data-flow rule.
+// schemaConfigOnly reports whether a proposal is a pure tightening of schema
+// configuration: every step is a schema_set_compatibility step with a check, and
+// no subject ends at NONE. Such a proposal changes no data path, so once the
+// episode is already recovered its layer checks decide and data flow is only
+// information: a quiet pipeline gets no new rows from a compatibility change.
+// Any other step, even a schema_register, keeps the data-flow rule, and so does
+// a proposal that loosens a subject to NONE: that one is a fix attempt, and only
+// data flow shows whether it worked.
 func schemaConfigOnly(steps []events.ProposalStep) bool {
 	if len(steps) == 0 {
 		return false
@@ -498,6 +504,12 @@ func schemaConfigOnly(steps []events.ProposalStep) bool {
 			return false
 		}
 		if _, _, ok := compatCheck(s, steps); !ok {
+			return false
+		}
+	}
+	_, final := compatFinalLevels(steps)
+	for _, level := range final {
+		if level == "NONE" {
 			return false
 		}
 	}

@@ -514,6 +514,12 @@ func TestSchemaConfigOnly(t *testing.T) {
 		want  bool
 	}{
 		{"restore alone", restoreSteps(), true},
+		{"NONE alone is a fix attempt, not a restore", compatSteps("NONE")[:1], false},
+		{"NONE on one of two subjects", []events.ProposalStep{
+			restoreSteps()[0],
+			{Action: "schema_set_compatibility", Layer: "schema-registry", Params: json.RawMessage(`{"subject":"b-value","level":"none"}`)},
+		}, false},
+		{"NONE set then restored in the same proposal", []events.ProposalStep{compatSteps("NONE")[0], restoreSteps()[0]}, true},
 		{"compat plus restart", compatSteps("NONE"), false},
 		{"schema_register is not config-only", []events.ProposalStep{{Action: "schema_register", Layer: "schema-registry", Params: json.RawMessage(`{"subject":"a"}`)}}, false},
 		{"compat plus register", []events.ProposalStep{restoreSteps()[0], {Action: "schema_register", Layer: "schema-registry", Params: json.RawMessage(`{}`)}}, false},
@@ -529,8 +535,9 @@ func TestSchemaConfigOnly(t *testing.T) {
 	}
 }
 
-// A restore proposal on a quiet pipeline: the compatibility is back, no rows
-// arrive, and that is a recovery. Data flow is only information.
+// A restore proposal on a quiet pipeline, after the episode was already verified
+// recovered: the compatibility is back, no rows arrive, and that is a recovery.
+// Data flow is only information.
 func TestRestoreProposalOnStaleWarehouseIsRecovered(t *testing.T) {
 	sink := &fakeSink{}
 	inbox := &fakeInbox{
@@ -539,6 +546,7 @@ func TestRestoreProposalOnStaleWarehouseIsRecovered(t *testing.T) {
 	}
 	model := &scriptedModel{}
 	r, _ := newCompatRunner(t, model, inbox, sink, restoreSteps(), compatEnv{warehouse: staleWarehouseTool()})
+	r.recoveredIdle = true // an earlier proposal of this episode was verified recovered
 	clk := &fakeClock{}
 	r.clk = clk
 
@@ -572,6 +580,83 @@ func TestRestoreProposalOnStaleWarehouseIsRecovered(t *testing.T) {
 		if d == defaultFreshnessWait {
 			t.Fatalf("information-only data flow must not wait for rows, slept %v", clk.durations())
 		}
+	}
+}
+
+// From a broken state nothing is verified yet. A proposal that only sets NONE
+// changes the registry and nothing else, so with the connector failed and a stale
+// warehouse it must not be called recovered, whether or not the episode had
+// recovered before: it loosens a subject, so it is a fix attempt.
+func TestNoneOnlyProposalFromBrokenStateIsNotRecovered(t *testing.T) {
+	for name, alreadyRecovered := range map[string]bool{"broken state": false, "recovered state": true} {
+		t.Run(name, func(t *testing.T) {
+			sink := &fakeSink{}
+			inbox := &fakeInbox{
+				drains:  [][]HumanInput{nil, lastActionResult("proposal p_1 step 0: " + resultSetNoneFromGlobal)},
+				waitErr: context.Canceled,
+			}
+			model := &scriptedModel{}
+			r, _ := newCompatRunner(t, model, inbox, sink, compatSteps("NONE")[:1], compatEnv{warehouse: staleWarehouseTool()})
+			r.recoveredIdle = alreadyRecovered
+
+			if err := r.run(context.Background()); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			var verdict string
+			for _, m := range messageTexts(sink) {
+				if strings.HasPrefix(m, "NOT recovered:") {
+					verdict = m
+				}
+			}
+			if !strings.Contains(verdict, "no new rows since the fix") {
+				t.Fatalf("the data-flow rule must decide a NONE-only proposal, got %q", messageTexts(sink))
+			}
+			if countDoneStatuses(sink, "pipeline recovered") != 0 {
+				t.Fatalf("a NONE-only proposal on a stale warehouse must not be done, got %v", statusList(sink))
+			}
+			if r.recoveredIdle {
+				t.Fatal("recoveredIdle must be cleared")
+			}
+			if strings.Contains(requestText(model.calls[len(model.calls)-1]), "follow-up") {
+				t.Fatal("a NOT recovered verdict carries no follow-up")
+			}
+		})
+	}
+}
+
+// A restore with the episode not yet verified recovered keeps the data-flow
+// rule: nothing has shown the pipeline works.
+func TestRestoreFromBrokenStateKeepsDataFlowRule(t *testing.T) {
+	cases := map[string]struct {
+		warehouse *fakeVerifyTool
+		recovered bool
+	}{
+		"stale warehouse":   {staleWarehouseTool(), false},
+		"rows are arriving": {freshWarehouseTool(), true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			sink := &fakeSink{}
+			inbox := &fakeInbox{
+				drains:  [][]HumanInput{nil, lastActionResult("proposal p_1 step 0: " + resultRestoreBackward)},
+				waitErr: context.Canceled,
+			}
+			r, _ := newCompatRunner(t, &scriptedModel{}, inbox, sink, restoreSteps(), compatEnv{warehouse: c.warehouse})
+			// recoveredIdle stays false: no earlier proposal was verified.
+
+			if err := r.run(context.Background()); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			assertVerdict(t, messageTexts(sink), c.recovered)
+			for _, m := range messageTexts(sink) {
+				if strings.Contains(m, "information only") {
+					t.Fatalf("data flow must not be information only here, got %q", m)
+				}
+			}
+			if hasStatus(sink, "done") != c.recovered {
+				t.Fatalf("done = %v, want %v (%v)", hasStatus(sink, "done"), c.recovered, statusList(sink))
+			}
+		})
 	}
 }
 
