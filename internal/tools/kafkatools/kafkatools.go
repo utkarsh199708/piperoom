@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
 
@@ -18,6 +19,10 @@ type Deps struct {
 	Connect  clients.ConnectClient
 	Registry clients.SchemaRegistryClient
 	Kafka    clients.KafkaAdmin
+	// Owners resolves pipeline_id + source table to the pipeline's topic
+	// ("<topic_prefix>.<source_table>") for kafka_topic_config. The wiring
+	// must pass it; the tool reports a clear error when it is missing.
+	Owners *owners.Owners
 }
 
 const timeout = 10 * time.Second
@@ -35,6 +40,7 @@ func Register(reg *tools.Registry, d Deps) error {
 		&listGroups{d: d},
 		&consumerLag{d: d},
 		&findByKey{d: d},
+		&topicConfig{d: d},
 	} {
 		if err := reg.Register(t); err != nil {
 			return err

@@ -193,10 +193,10 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 		b = topology.NewBuilder(w.Owners, w.Connect, w.Kafka, w.Source, w.Warehouse)
 		w.Builder = b
 	}
-	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, Builder: b, Owners: w.Owners}); err != nil {
+	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, Builder: b, Owners: w.Owners, Connect: w.Connect}); err != nil {
 		return fmt.Errorf("wiring: register db tools: %w", err)
 	}
-	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: w.Connect, Registry: w.Registry, Kafka: w.Kafka}); err != nil {
+	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: w.Connect, Registry: w.Registry, Kafka: w.Kafka, Owners: w.Owners}); err != nil {
 		return fmt.Errorf("wiring: register kafka tools: %w", err)
 	}
 	// The runbook library is embedded in the binary, so it needs no client.

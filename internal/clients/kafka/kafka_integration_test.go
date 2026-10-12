@@ -4,6 +4,7 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -131,6 +132,36 @@ func TestFindByKeyAbsentKey(t *testing.T) {
 		t.Fatalf("want 0 refs, got %+v", refs)
 	}
 	t.Logf("absent-key scan finished in %s", time.Since(start))
+}
+
+// TestDescribeTopicConfigs reads the real pipeline topic's key configs: what
+// the retention scenario needs (retention.ms, cleanup.policy) plus shape.
+func TestDescribeTopicConfigs(t *testing.T) {
+	c := newClient(t)
+	cfg, err := c.DescribeTopicConfigs(context.Background(), "pg.public.orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("pg.public.orders: %+v", cfg)
+	if cfg.Topic != "pg.public.orders" {
+		t.Fatalf("topic = %q", cfg.Topic)
+	}
+	if cfg.Partitions <= 0 || cfg.ReplicationFactor <= 0 {
+		t.Fatalf("bad shape: %+v", cfg)
+	}
+	if cfg.RetentionMS == "" || cfg.RetentionBytes == "" || cfg.CleanupPolicy == "" || cfg.MinInsyncReplicas == "" {
+		t.Fatalf("missing key configs: %+v", cfg)
+	}
+}
+
+// TestDescribeTopicConfigsUnknownTopic proves an absent topic surfaces as
+// clients.ErrNotFound, not a broker failure.
+func TestDescribeTopicConfigsUnknownTopic(t *testing.T) {
+	c := newClient(t)
+	_, err := c.DescribeTopicConfigs(context.Background(), testenv.Name("it-missing"))
+	if !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("unknown topic: err = %v, want ErrNotFound", err)
+	}
 }
 
 // TestTempTopicProduceOffsetsAndLag creates a temp topic, produces records,

@@ -92,6 +92,16 @@ func TestInScopeSubject(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("empty topic_prefix refused", func(t *testing.T) {
+		empty := p
+		empty.TopicPrefix = ""
+		// ".public.orders-value" matches the bare "." + table rule an empty
+		// prefix produces; the guard must refuse before comparing.
+		if err := inScopeSubject(empty, ".public.orders-value"); err == nil {
+			t.Fatal(`want error for ".public.orders-value" with no topic_prefix`)
+		}
+	})
 }
 
 // TestCheckScopeBadParamsWrapsJSONError checks that CheckScope wraps the

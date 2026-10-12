@@ -203,7 +203,7 @@ func TestBadInput(t *testing.T) {
 	if err := Register(reg, Deps{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"connect_status", "connect_config", "schema_registry_versions", "schema_registry_diff", "kafka_topic_offsets", "kafka_consumer_lag", "kafka_find_by_key"} {
+	for _, name := range []string{"connect_status", "connect_config", "schema_registry_versions", "schema_registry_diff", "kafka_topic_offsets", "kafka_consumer_lag", "kafka_find_by_key", "kafka_topic_config"} {
 		tool, _ := reg.Get(name)
 		if _, err := tool.Run(context.Background(), json.RawMessage(`{}`)); err == nil || !errors.Is(err, tools.ErrBadInput) {
 			t.Errorf("%s: want ErrBadInput, got %v", name, err)
