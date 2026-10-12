@@ -22,6 +22,10 @@ type HumanInput struct {
 	StepID    string       `json:"step_id,omitempty"`
 	CommentID string       `json:"comment_id,omitempty"`
 	Text      string       `json:"text"`
+	// OK is set only for Kind "action_result": true when the step succeeded,
+	// false when it failed. Nil means the outcome is unknown, and the agent must
+	// then never claim the pipeline recovered.
+	OK *bool `json:"ok,omitempty"`
 }
 
 // Inbox delivers human input to the agent between model turns.
