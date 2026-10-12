@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -74,11 +75,21 @@ func runRetention(ctx context.Context, svc expirer, days int, timeout time.Durat
 		"slack_threads", res.SlackThreads,
 	}
 	if err != nil {
-		if ctx.Err() != nil {
+		switch {
+		case ctx.Err() != nil:
 			log.Info("retention: stopped by shutdown", attrs...)
-			return
+		case len(res.Failed) > 0:
+			// Some rooms failed (each already logged at Error with its id); the
+			// rest were handled. That is a partial success, not a failed run.
+			log.Warn("retention: run finished with failed rooms",
+				append(attrs, "purged", len(res.RoomIDs), "failed", len(res.Failed), "err", err)...)
+		case errors.Is(err, context.DeadlineExceeded):
+			// The run's own deadline fired. No room is to blame; the rooms not
+			// reached are picked up by the next run.
+			log.Warn("retention: run hit its deadline; remaining rooms wait for the next run", attrs...)
+		default:
+			log.Error("retention: purge failed", append(attrs, "err", err)...)
 		}
-		log.Error("retention: purge failed", append(attrs, "err", err)...)
 		return
 	}
 	if len(res.RoomIDs) == 0 {

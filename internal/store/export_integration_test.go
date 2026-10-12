@@ -14,8 +14,42 @@ import (
 	"github.com/gowebpki/jcs"
 
 	"piperoom/internal/agent"
+	"piperoom/internal/events"
 	"piperoom/internal/room"
 )
+
+// TestExportRoomHoldingOutOfRangeNumber: jsonb accepts 1e400, so a room stored
+// before the ingest guard can hold it. Its export must still work.
+func TestExportRoomHoldingOutOfRangeNumber(t *testing.T) {
+	s, _ := requireStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	roomID := createTestRoom(t, s)
+	if _, err := s.Append(ctx, roomID, events.RoomCreated, commentActor(), events.RoomCreatedPayload{
+		Title: "t", Severity: "sev2", PipelineID: "orders", Alert: json.RawMessage(`{"v":1e400,"w":9007199254740993}`),
+	}); err != nil {
+		t.Fatalf("jsonb should accept 1e400: %v", err)
+	}
+	svc := room.New(room.Deps{
+		Store: s, Users: room.DefaultUsers(),
+		Run: func(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
+			<-ctx.Done()
+			return nil
+		},
+	})
+	t.Cleanup(svc.Close)
+	ex, err := svc.PrepareExport(ctx, roomID)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := ex.Write(ctx, &buf); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte(`"inexact_numbers":2`)) {
+		t.Fatalf("want inexact_numbers 2 in %s", buf.Bytes())
+	}
+}
 
 // TestExportFromPostgresIsStableAndVerifies runs the audit export over the real
 // store: jsonb reorders payload keys and truncates times to microseconds, and

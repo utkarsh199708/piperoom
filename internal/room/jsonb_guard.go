@@ -51,6 +51,12 @@ func checkJSONBStorable(raw []byte) error {
 	if bytes.IndexByte(raw, 0) >= 0 {
 		return validation("alert body contains a NUL byte")
 	}
+	// jsonb stores 1e400, but it is not finite as a float64: the audit export's
+	// canonical form (RFC 8785) writes numbers as doubles, so refuse it here.
+	// Rooms that already hold such a number still export (see service_export.go).
+	if hasOutOfRangeNumber(raw) {
+		return validation("alert body contains a number outside the double range (for example 1e400)")
+	}
 	for i := 0; i < len(raw); i++ {
 		if raw[i] != '\\' {
 			continue

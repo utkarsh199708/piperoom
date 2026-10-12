@@ -163,7 +163,11 @@ func TestCreateRoomTitleGuard(t *testing.T) {
 // Any other store error stays a plain error.
 func TestUnstorableAppendErrorIs400(t *testing.T) {
 	ctx := context.Background()
-	body := json.RawMessage(`{"n":1e131072}`)
+	// The body is plain on purpose: numbers outside double range (1e131072) are
+	// now refused by the guard before any write (see number_guard_test.go), so
+	// this test feeds the store error directly to cover the SQLSTATE mapping that
+	// backs up the guard for anything else Postgres rejects.
+	body := json.RawMessage(`{"n":1}`)
 	for _, code := range []string{"22003", "22P02", "22P05", "22021"} {
 		t.Run(code, func(t *testing.T) {
 			mem := memstore.New()

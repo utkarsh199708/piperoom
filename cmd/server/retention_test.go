@@ -105,8 +105,29 @@ func TestRetentionRunTimeoutBoundsOneRun(t *testing.T) {
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("run was not bounded by its timeout")
 	}
-	if !strings.Contains(buf.String(), "retention: purge failed") {
-		t.Fatalf("a timeout must be logged as a failure: %s", buf.String())
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "run hit its deadline") || strings.Contains(out, "purge failed") {
+		t.Fatalf("the run deadline is a warning with no blame, not a failure: %s", out)
+	}
+}
+
+// A run where some rooms failed and others were purged is a partial success: one
+// Warn line with purged and failed counts, not "purge failed".
+func TestRetentionPartialSuccessIsAWarning(t *testing.T) {
+	f := &fakeExpirer{
+		res: store.PurgeResult{
+			RoomIDs: []string{"r_a", "r_b"},
+			Failed:  []store.PurgeFailure{{RoomID: "r_x", Err: errors.New("boom")}},
+		},
+		err: errors.New("room r_x: boom"),
+	}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	runRetention(context.Background(), f, 30, time.Second, time.Now, log)
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "run finished with failed rooms") ||
+		!strings.Contains(out, "purged=2") || !strings.Contains(out, "failed=1") || strings.Contains(out, "purge failed") {
+		t.Fatalf("partial success not logged as a warning with counts: %s", out)
 	}
 }
 

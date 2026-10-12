@@ -37,6 +37,16 @@ const exportPage = 1000
 // (the auth design uses it for params_hash too).
 const exportCanonicalization = "RFC 8785 (JCS)"
 
+// exportCovers and exportNumbersNote are the wording of the integrity block.
+// Keep them in step with docs/api.md.
+const (
+	exportCovers = `SHA-256 of the RFC 8785 (JCS) form of this document with the top-level "integrity" member removed. ` +
+		`It is not the hash of the file bytes; sha256sum of the file will differ.`
+	exportNumbersNote = "JCS writes numbers as IEEE 754 doubles; this document shows numbers exactly as stored. " +
+		"Numbers a double cannot hold exactly are covered only at double precision, and numbers outside double range " +
+		"are hashed as their exact text. See inexact_numbers."
+)
+
 // ErrExportChanged is returned by Export.Write when the log no longer matches
 // what PrepareExport hashed (for example retention deleted the room in
 // between). The caller must not present the bytes it already wrote as a valid
@@ -129,6 +139,7 @@ type Export struct {
 	results     []exportActionResult
 	handoffs    []*exportHandoff
 	eventCount  int64
+	inexact     int // numbers in the document the hash covers only approximately; see integrity.inexact_numbers
 	proposalIdx map[string]*exportProposal
 	handoffIdx  map[string]*exportHandoff
 }
@@ -176,7 +187,8 @@ func (s *Service) PrepareExport(ctx context.Context, roomID string) (*Export, er
 	e.finish()
 
 	h := sha256.New()
-	if err := e.writeDocument(ctx, io.Discard, h, nil); err != nil {
+	e.inexact, err = e.writeDocument(ctx, io.Discard, h, nil)
+	if err != nil {
 		return nil, fmt.Errorf("room: export %s: hash: %w", roomID, err)
 	}
 	e.sum = hex.EncodeToString(h.Sum(nil))
@@ -187,10 +199,12 @@ func (s *Service) PrepareExport(ctx context.Context, roomID string) (*Export, er
 // hashed on the way differ from the hash PrepareExport computed. The caller
 // should abort the connection in that case.
 func (e *Export) Write(ctx context.Context, w io.Writer) error {
-	integrity, _, err := canonicalJSON(map[string]string{
+	integrity, _, _, err := canonicalJSON(map[string]any{
 		"algorithm":        "sha256",
 		"canonicalization": exportCanonicalization,
-		"covers":           `the document without its top-level "integrity" member`,
+		"covers":           exportCovers,
+		"inexact_numbers":  e.inexact,
+		"numbers":          exportNumbersNote,
 		"sha256":           e.sum,
 	})
 	if err != nil {
@@ -198,13 +212,14 @@ func (e *Export) Write(ctx context.Context, w io.Writer) error {
 	}
 	bw := bufio.NewWriterSize(w, 64<<10)
 	h := sha256.New()
-	if err := e.writeDocument(ctx, bw, h, integrity); err != nil {
+	inexact, err := e.writeDocument(ctx, bw, h, integrity)
+	if err != nil {
 		return err
 	}
 	if err := bw.Flush(); err != nil {
 		return fmt.Errorf("room: export: flush: %w", err)
 	}
-	if hex.EncodeToString(h.Sum(nil)) != e.sum {
+	if hex.EncodeToString(h.Sum(nil)) != e.sum || inexact != e.inexact {
 		return ErrExportChanged
 	}
 	return nil
@@ -399,9 +414,13 @@ func nonNilSteps(s []events.ProposalStep) []events.ProposalStep {
 // same document in RFC 8785 form, which is what the hash covers. The structural
 // bytes are identical in both. The "integrity" member (when given) goes to out
 // only, which is why the hash covers "the document without integrity". A
-// hash-only pass uses io.Discard for out and a nil integrity.
-func (e *Export) writeDocument(ctx context.Context, out io.Writer, h hash.Hash, integrity []byte) error {
-	var werr error
+// hash-only pass uses io.Discard for out and a nil integrity. It returns how
+// many numbers the hash covers only approximately (integrity.inexact_numbers).
+func (e *Export) writeDocument(ctx context.Context, out io.Writer, h hash.Hash, integrity []byte) (int, error) {
+	var (
+		werr    error
+		inexact int
+	)
 	put := func(w io.Writer, p []byte) {
 		if werr != nil {
 			return
@@ -418,11 +437,12 @@ func (e *Export) writeDocument(ctx context.Context, out io.Writer, h hash.Hash, 
 		if werr != nil {
 			return
 		}
-		exact, canon, err := canonicalJSON(v)
+		exact, canon, n, err := canonicalJSON(v)
 		if err != nil {
 			werr = err
 			return
 		}
+		inexact += n
 		put(out, exact)
 		put(h, canon)
 	}
@@ -437,7 +457,7 @@ func (e *Export) writeDocument(ctx context.Context, out io.Writer, h hash.Hash, 
 	section("approvals", nonNilApprovals(e.approvals))
 	both(`,"event_count":` + strconv.FormatInt(e.eventCount, 10) + `,"events":[`)
 	if werr != nil {
-		return fmt.Errorf("room: export: %w", werr)
+		return 0, fmt.Errorf("room: export: %w", werr)
 	}
 
 	first := true
@@ -450,10 +470,10 @@ func (e *Export) writeDocument(ctx context.Context, out io.Writer, h hash.Hash, 
 		return werr
 	})
 	if err != nil {
-		return fmt.Errorf("room: export: %w", err)
+		return 0, fmt.Errorf("room: export: %w", err)
 	}
 	if n != e.eventCount {
-		return ErrExportChanged
+		return 0, ErrExportChanged
 	}
 
 	both("],")
@@ -469,9 +489,9 @@ func (e *Export) writeDocument(ctx context.Context, out io.Writer, h hash.Hash, 
 	section("room", e.room)
 	both(`,"schema":` + strconv.Quote(ExportSchema) + "}")
 	if werr != nil {
-		return fmt.Errorf("room: export: %w", werr)
+		return 0, fmt.Errorf("room: export: %w", werr)
 	}
-	return nil
+	return inexact, nil
 }
 
 func nonNilResults(s []exportActionResult) []exportActionResult {
@@ -502,38 +522,42 @@ func nonNilProposals(s []*exportProposal) []*exportProposal {
 	return s
 }
 
-// canonicalJSON returns v twice: exact is compact JSON with sorted keys and
-// numbers kept verbatim (what the export shows), canon is its RFC 8785 (JCS)
-// form (what the hash covers). A generic round trip comes first: it makes
-// duplicate object keys in a verbatim payload (an alert body may have them;
-// Postgres jsonb keeps the last) resolve the same way on every store, which
-// jcs.Transform alone rejects.
+// canonicalJSON returns v in two forms: exact is compact JSON with sorted keys
+// and numbers kept verbatim (what the export shows), canon is the RFC 8785
+// (JCS) form of it (what the hash covers). inexact counts the numbers that canon
+// covers only approximately.
 //
-// Numbers: JCS serialises every number as an IEEE 754 double, so an integer
-// above 2^53 (12345678901234567890 becomes 12345678901234567000) or a decimal
-// finer than a double is hashed in its double form. The document still shows
-// the digits as stored; only the hash is blind to changes below double
-// precision.
-func canonicalJSON(v any) (exact, canon []byte, err error) {
+// A generic round trip comes first: it makes duplicate object keys in a
+// verbatim payload (an alert body may have them; Postgres jsonb keeps the last)
+// resolve the same way on every store, which jcs.Transform alone rejects.
+//
+// Numbers: JCS writes every number as an IEEE 754 double. An integer above 2^53
+// (12345678901234567890 becomes 12345678901234567000) or a decimal finer than a
+// double is hashed in its double form, and counted in inexact. A number outside
+// double range (1e400; jsonb stores it) would make jcs.Transform fail, so in
+// the hash input only it is replaced by a string holding its exact text, and
+// counted. The document itself always shows the digits as stored.
+func canonicalJSON(v any) (exact, canon []byte, inexact int, err error) {
 	raw, err := encodeJSON(v)
 	if err != nil {
-		return nil, nil, fmt.Errorf("room: canonical json: %w", err)
+		return nil, nil, 0, fmt.Errorf("room: canonical json: %w", err)
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var generic any
 	if err := dec.Decode(&generic); err != nil {
-		return nil, nil, fmt.Errorf("room: canonical json: %w", err)
+		return nil, nil, 0, fmt.Errorf("room: canonical json: %w", err)
 	}
 	exact, err = encodeJSON(generic)
 	if err != nil {
-		return nil, nil, fmt.Errorf("room: canonical json: %w", err)
+		return nil, nil, 0, fmt.Errorf("room: canonical json: %w", err)
 	}
-	canon, err = jcs.Transform(exact)
+	forHash, inexact := hashForm(exact)
+	canon, err = jcs.Transform(forHash)
 	if err != nil {
-		return nil, nil, fmt.Errorf("room: canonical json: %w", err)
+		return nil, nil, 0, fmt.Errorf("room: canonical json: %w", err)
 	}
-	return exact, canon, nil
+	return exact, canon, inexact, nil
 }
 
 func encodeJSON(v any) ([]byte, error) {
