@@ -142,7 +142,10 @@ func sourceHealth(slot clients.ReplicationSlot, t Thresholds) (Health, map[strin
 		"slot_retained": HumanBytes(slot.RetainedWALBytes),
 		"slot_active":   strconv.FormatBool(slot.Active),
 	}
-	if !slot.Active || slot.RetainedWALBytes > t.SlotRetainedWarnBytes {
+	// >= matches the watcher's slot_wal rule ("retained >= fire"). t comes from
+	// ThresholdsFor, so the per-pipeline watch.slot_wal.fire overrides the base
+	// SlotRetainedWarnBytes default.
+	if !slot.Active || slot.RetainedWALBytes >= t.SlotRetainedWarnBytes {
 		return HealthWarn, facts
 	}
 	return HealthOK, facts

@@ -280,8 +280,9 @@ func TestLongTransactionsIntegration(t *testing.T) {
 	t.Fatalf("did not find the open transaction in %+v", txns)
 }
 
-// A read-only transaction holds no xid and pins no WAL, so it must not be listed.
-func TestLongTransactionsSkipsReadOnlyIntegration(t *testing.T) {
+// A read-only transaction is listed with HasXID=false (it blocks DDL and
+// VACUUM); a writer is listed with HasXID=true (it holds the WAL horizon).
+func TestLongTransactionsHasXIDIntegration(t *testing.T) {
 	db := sourceDB(t)
 	readConn := writeConn(t, testenv.Require(t).SourceDBURL)
 	writeC := writeConn(t, testenv.Require(t).SourceDBURL)
@@ -313,17 +314,23 @@ func TestLongTransactionsSkipsReadOnlyIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LongTransactions: %v", err)
 	}
-	foundWriter := false
+	foundReader, foundWriter := false, false
 	for _, tx := range txns {
-		if tx.PID == readPID {
-			t.Fatalf("read-only transaction was listed: %+v", tx)
-		}
-		if tx.PID == writePID {
+		switch tx.PID {
+		case readPID:
+			foundReader = true
+			if tx.HasXID {
+				t.Fatalf("read-only transaction has HasXID=true: %+v", tx)
+			}
+		case writePID:
 			foundWriter = true
 			if !tx.HasXID {
 				t.Fatalf("writer has HasXID=false: %+v", tx)
 			}
 		}
+	}
+	if !foundReader {
+		t.Fatalf("read-only transaction (pid %d) not listed in %+v", readPID, txns)
 	}
 	if !foundWriter {
 		t.Fatalf("writer transaction (pid %d) not listed in %+v", writePID, txns)
@@ -331,7 +338,8 @@ func TestLongTransactionsSkipsReadOnlyIntegration(t *testing.T) {
 }
 
 // SafeWALBytes mirrors pg_replication_slots.safe_wal_size: nil when Postgres
-// reports NULL (max_slot_wal_keep_size = -1), a non-negative number otherwise.
+// reports NULL (max_slot_wal_keep_size = -1), a number otherwise (it goes
+// negative only after the slot is past its limit; a fresh slot is not).
 func TestReplicationSlotsSafeWALIntegration(t *testing.T) {
 	db := sourceDB(t)
 	conn := writeConn(t, testenv.Require(t).SourceDBURL)

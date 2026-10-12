@@ -118,6 +118,36 @@ func TestWatchClearDerivedFromFire(t *testing.T) {
 	}
 }
 
+// Only `clear` set: fire stays at its default, clear must sit at or below it.
+func TestWatchClearOnly(t *testing.T) {
+	o, err := Load(writeTemp(t, withWatch(`    watch:
+      signals:
+        slot_wal: {clear: 512MiB}
+`)))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	p, _ := o.Pipeline("orders")
+	s := p.Watch().SlotWAL
+	if s.FireBytes != 1<<30 || s.ClearBytes != 512<<20 {
+		t.Fatalf("fire/clear = %d/%d, want 1GiB/512MiB", s.FireBytes, s.ClearBytes)
+	}
+}
+
+// An empty `watch: {}` block is the same as no block.
+func TestWatchEmptyBlock(t *testing.T) {
+	for _, block := range []string{"    watch: {}\n", "    watch:\n      signals: {}\n", "    watch:\n"} {
+		o, err := Load(writeTemp(t, withWatch(block)))
+		if err != nil {
+			t.Fatalf("Load(%q): %v", block, err)
+		}
+		p, _ := o.Pipeline("orders")
+		if p.Watch() != DefaultWatch() {
+			t.Fatalf("%q: Watch() = %+v, want defaults", block, p.Watch())
+		}
+	}
+}
+
 func TestWatchBadValues(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -137,6 +167,14 @@ func TestWatchBadValues(t *testing.T) {
 		{"clear above fire", "signals:\n        slot_wal: {fire: 1GiB, clear: 2GiB}\n", []string{"clear", "above fire"}},
 		{"unknown signal", "signals:\n        slot_wall: {fire: 1GiB}\n", []string{"watch.signals.slot_wall", "unknown signal"}},
 		{"bad slot name", "slot: Debezium-Orders\n", []string{"watch.slot"}},
+		{"slot name over 63 bytes", "slot: " + strings.Repeat("a", 64) + "\n", []string{"watch.slot"}},
+		{"bad field in slot_wal", "signals:\n        slot_wal: {fier: 2GiB}\n", []string{"watch.signals.slot_wal", `unknown field "fier"`, "fire"}},
+		{"slot_wal field on another signal", "signals:\n        connector_down: {fire: 2GiB}\n", []string{"watch.signals.connector_down", `unknown field "fire"`}},
+		{"bad field in slot_inactive", "signals:\n        slot_inactive: {four: 5m}\n", []string{"watch.signals.slot_inactive", `unknown field "four"`}},
+		{"bad field in watch block", "wal_headroom: 50GiB\n", []string{"watch", `unknown field "wal_headroom"`, "wal_headroom_bytes"}},
+		{"fire too small to derive clear", "signals:\n        slot_wal: {fire: 3 bytes}\n", []string{"slot_wal", "clear"}},
+		{"clear only, above default fire", "signals:\n        slot_wal: {clear: 2GiB}\n", []string{"clear", "above fire"}},
+		{"fractional bytes", "wal_headroom_bytes: 0.5 bytes\n", []string{"whole number of bytes"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,7 +209,14 @@ func TestParseSize(t *testing.T) {
 		{" 7MiB ", 7 << 20, false},
 		{"1GB", 0, true},
 		{"1MB", 0, true},
-		{"1TiB", 0, true},
+		{"1TiB", 1 << 40, false},
+		{"0.5 bytes", 0, true},
+		{"1.0000000001KiB", 0, true},
+		{"9007199254740993", 9007199254740993, false}, // 2^53+1: a float64 would round it
+		{"8191PiB", 0, true},
+		{"9223372036854775807", 1<<63 - 1, false},
+		{"9223372036854775808", 0, true},
+		{"8388608TiB", 0, true}, // 2^63 bytes
 		{"", 0, true},
 		{"GiB", 0, true},
 		{"-1MiB", 0, true},

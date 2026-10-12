@@ -2,10 +2,9 @@ package owners
 
 import (
 	"fmt"
-	"math"
+	"math/big"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +42,31 @@ type WatchSpec struct {
 	// Signals maps a signal name to its settings. Decoded in validate so v2
 	// signals can be accepted and ignored.
 	Signals map[string]yaml.Node `yaml:"signals"`
+}
+
+// UnmarshalYAML rejects unknown keys in the watch block: yaml.Unmarshal ignores
+// them, so a typo such as `wal_headroom:` would silently keep the default.
+func (s *WatchSpec) UnmarshalYAML(node *yaml.Node) error {
+	if err := checkKeys(node, "watch", "enabled", "slot", "wal_headroom_bytes", "signals"); err != nil {
+		return err
+	}
+	type plain WatchSpec // no methods, so Decode does not recurse into this one
+	return node.Decode((*plain)(s))
+}
+
+// checkKeys fails when mapping node has a key outside allowed. A non-mapping
+// node is left for the normal decoder to report.
+func checkKeys(node *yaml.Node, where string, allowed ...string) error {
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		k := node.Content[i]
+		if !slices.Contains(allowed, k.Value) {
+			return fmt.Errorf("line %d: %s: unknown field %q (allowed: %s)", k.Line, where, k.Value, strings.Join(allowed, ", "))
+		}
+	}
+	return nil
 }
 
 // signalSpec is one v1 signal's raw settings. Sizes and durations stay text
@@ -150,6 +174,15 @@ func resolveWatch(spec *WatchSpec) (WatchConfig, error) {
 			return WatchConfig{}, fmt.Errorf("watch.signals.%s: unknown signal (known: %s, %s, %s; later: %s)",
 				name, SignalConnectorDown, SignalSlotInactive, SignalSlotWAL, strings.Join(v2Signals, ", "))
 		}
+		// node.Decode ignores unknown keys, so check them first: `{fier: 2GiB}`
+		// must not silently keep the default.
+		allowed := []string{"enabled", "action", "for"}
+		if name == SignalSlotWAL {
+			allowed = append(allowed, "fire", "clear", "eta_sev1")
+		}
+		if err := checkKeys(&node, "watch.signals."+name, allowed...); err != nil {
+			return WatchConfig{}, err
+		}
 		if err := node.Decode(&s); err != nil {
 			return WatchConfig{}, fmt.Errorf("watch.signals.%s: %w", name, err)
 		}
@@ -217,6 +250,9 @@ func applySlotWAL(dst *SlotWALSignal, s signalSpec) error {
 	} else if fireSet {
 		// A custom fire with no clear: derive clear so it never sits above fire.
 		dst.ClearBytes = dst.FireBytes / 4 * 3
+		if dst.ClearBytes <= 0 {
+			return fmt.Errorf("fire %q is too small to derive clear (75%% rounds to 0): set clear explicitly", s.Fire)
+		}
 	}
 	if dst.ClearBytes > dst.FireBytes {
 		return fmt.Errorf("clear (%d bytes) must not be above fire (%d bytes)", dst.ClearBytes, dst.FireBytes)
@@ -241,19 +277,22 @@ func sortedKeys(m map[string]yaml.Node) []string {
 }
 
 var (
-	identRE = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+	// identRE is Postgres's rule for a replication slot name: lower-case
+	// letters, digits and underscore, at most 63 bytes (NAMEDATALEN - 1).
+	identRE = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
 	sizeRE  = regexp.MustCompile(`^\s*([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]*)\s*$`)
 )
 
 // ParseSize reads a byte size such as "1GiB", "768MiB", "64 KiB", "4096" or
-// "4096 bytes". Units are binary (KiB, MiB, GiB); "GB" and "MB" are rejected
-// because they are ambiguous. A bare number is bytes.
+// "4096 bytes". Units are binary (KiB, MiB, GiB, TiB); "GB" and "MB" are
+// rejected because they are ambiguous. A bare number is bytes. The result must
+// be a whole number of bytes that fits int64.
 func ParseSize(s string) (int64, error) {
 	m := sizeRE.FindStringSubmatch(s)
 	if m == nil {
 		return 0, fmt.Errorf("size %q: want a number with a unit, like 1GiB, 512MiB, 64KiB or 4096 bytes", s)
 	}
-	var mult float64
+	var mult int64
 	switch strings.ToLower(m[2]) {
 	case "", "b", "byte", "bytes":
 		mult = 1
@@ -263,18 +302,24 @@ func ParseSize(s string) (int64, error) {
 		mult = 1 << 20
 	case "gib":
 		mult = 1 << 30
+	case "tib":
+		mult = 1 << 40
 	default:
-		return 0, fmt.Errorf("size %q: unknown unit %q (use bytes, KiB, MiB or GiB)", s, m[2])
+		return 0, fmt.Errorf("size %q: unknown unit %q (use bytes, KiB, MiB, GiB or TiB)", s, m[2])
 	}
-	n, err := strconv.ParseFloat(m[1], 64)
-	if err != nil {
-		return 0, fmt.Errorf("size %q: %w", s, err)
+	// Exact arithmetic: a float would round sizes above 2^53 bytes.
+	r, ok := new(big.Rat).SetString(m[1])
+	if !ok {
+		return 0, fmt.Errorf("size %q: not a number", s)
 	}
-	v := n * mult
-	if v >= math.MaxInt64 {
+	r.Mul(r, new(big.Rat).SetInt64(mult))
+	if !r.IsInt() {
+		return 0, fmt.Errorf("size %q: is not a whole number of bytes", s)
+	}
+	if !r.Num().IsInt64() {
 		return 0, fmt.Errorf("size %q: too large", s)
 	}
-	return int64(v), nil
+	return r.Num().Int64(), nil
 }
 
 // ParseDuration reads a positive duration such as "30s", "3m" or "6h". A bare

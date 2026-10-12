@@ -33,6 +33,20 @@ pipelines:
 %s
 `
 
+// The watcher fires on "retained >= fire"; pipeline_map must warn at the same point.
+func TestSourceHealthWarnsAtThreshold(t *testing.T) {
+	th := Thresholds{SlotRetainedWarnBytes: 100}
+	for _, tc := range []struct {
+		retained int64
+		want     Health
+	}{{99, HealthOK}, {100, HealthWarn}, {101, HealthWarn}} {
+		slot := clients.ReplicationSlot{Name: "s", Active: true, RetainedWALBytes: tc.retained}
+		if h, _ := sourceHealth(slot, th); h != tc.want {
+			t.Errorf("retained %d: health = %v, want %v", tc.retained, h, tc.want)
+		}
+	}
+}
+
 func TestThresholdsForDefaults(t *testing.T) {
 	o := loadOwners(t, fmt.Sprintf(pipelineYAML, ""))
 	p, _ := o.Pipeline("orders")

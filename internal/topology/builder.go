@@ -22,7 +22,9 @@ var ErrBadInput = errors.New("topology: bad input")
 
 // Thresholds holds the boundaries used to decide node health.
 type Thresholds struct {
-	// SlotRetainedWarnBytes is the retained WAL size above which a slot warns.
+	// SlotRetainedWarnBytes is the retained WAL size at or above which a slot
+	// warns. Build overrides it per pipeline with owners watch.slot_wal.fire
+	// (ThresholdsFor); this value is only the base default.
 	SlotRetainedWarnBytes int64
 	// GroupLagWarn is the consumer lag above which a group warns.
 	GroupLagWarn int64

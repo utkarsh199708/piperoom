@@ -157,9 +157,9 @@ func (d *DB) recentDDL(ctx context.Context, since time.Time, table string, limit
 // LongTransactions lists transactions open longer than olderThan, excluding
 // this backend. It never returns query text: pg_stat_activity.query often holds
 // literal row values, so only the statement verb (first keyword) is selected.
-// Only transactions that hold a transaction id (backend_xid IS NOT NULL) are
-// returned: a read-only transaction has no xid and pins no WAL for a
-// replication slot, so listing BI reads would only add noise.
+// Read-only transactions are listed too (they block DDL and VACUUM); HasXID
+// (backend_xid IS NOT NULL) tells writers apart, because only a writer holds
+// the WAL horizon for a replication slot. Callers that care filter on HasXID.
 func (d *DB) LongTransactions(ctx context.Context, olderThan time.Duration) ([]clients.Transaction, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
@@ -175,7 +175,6 @@ func (d *DB) LongTransactions(ctx context.Context, olderThan time.Duration) ([]c
 		       backend_xid IS NOT NULL
 		FROM pg_stat_activity
 		WHERE xact_start IS NOT NULL
-		  AND backend_xid IS NOT NULL
 		  AND xact_start < now() - make_interval(secs => $1)
 		  AND pid <> pg_backend_pid()
 		ORDER BY xact_start ASC`, olderThan.Seconds())
