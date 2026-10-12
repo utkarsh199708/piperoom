@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -43,10 +44,12 @@ type execFlow struct {
 	// owed. It is cleared when they arrive and when a wait gives up, so a proposal
 	// is waited on once.
 	waiting bool
+	// arrived holds the step indexes whose result has been seen.
+	arrived map[int]bool
 }
 
 func newExecFlow(steps []events.ProposalStep) *execFlow {
-	f := &execFlow{approved: map[string]bool{}, lastStep: len(steps) - 1}
+	f := &execFlow{approved: map[string]bool{}, arrived: map[int]bool{}, lastStep: len(steps) - 1}
 	seen := map[string]bool{}
 	for _, s := range steps {
 		if s.Layer != "" && !seen[s.Layer] {
@@ -95,6 +98,7 @@ func (t *proposalTracker) observe(in HumanInput) {
 		if f == nil {
 			return
 		}
+		f.arrived[step] = true
 		if in.OK == nil || !*in.OK || step >= f.lastStep {
 			f.settled = true
 			f.waiting = false
@@ -120,19 +124,36 @@ func (t *proposalTracker) awaiting() []string {
 	return ids
 }
 
+// lateProposal is a proposal approved in full whose wait ended without every step
+// result: the steps still missing.
+type lateProposal struct {
+	id      string
+	missing []int
+}
+
 // giveUpWaiting ends the wait for every proposal still awaiting and returns
-// their IDs.
-func (t *proposalTracker) giveUpWaiting() []string {
+// them, each with the steps whose result has not arrived. A step result that did
+// arrive is not listed, so the note never contradicts what the model can read.
+func (t *proposalTracker) giveUpWaiting() []lateProposal {
 	ids := t.awaiting()
 	if t == nil {
 		return nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	late := make([]lateProposal, 0, len(ids))
 	for _, id := range ids {
-		t.flows[id].waiting = false
+		f := t.flows[id]
+		f.waiting = false
+		lp := lateProposal{id: id}
+		for i := 0; i <= f.lastStep; i++ {
+			if !f.arrived[i] {
+				lp.missing = append(lp.missing, i)
+			}
+		}
+		late = append(late, lp)
 	}
-	return ids
+	return late
 }
 
 func contains(list []string, s string) bool {
@@ -148,7 +169,7 @@ func contains(list []string, s string) bool {
 // first holds the batch while a fully approved proposal still owes its step
 // results, then runs verify-after-fix on everything it collected. The inputs it
 // returns are the batch plus whatever arrived while it waited; the outcome notes
-// carry the pending-results note when the wait timed out.
+// carry the pending-results note when the wait ended without every result.
 func (r *runner) handleInputs(ctx context.Context, inputs []HumanInput) ([]HumanInput, actionOutcome) {
 	inputs, pending := r.awaitStepResults(ctx, inputs)
 	out := r.handleActionResults(ctx, inputs)
@@ -158,10 +179,13 @@ func (r *runner) handleInputs(ctx context.Context, inputs []HumanInput) ([]Human
 	return inputs, out
 }
 
+// waitingDetailResults is the status detail while a turn waits for step results.
+const waitingDetailResults = "waiting for step results"
+
 // awaitStepResults returns inputs once no proposal approved in full still owes
 // its step results, or once timing.stepResultWait has passed. Approvals that do
-// not complete a proposal never wait. On a timeout the returned note says the
-// results are pending; otherwise it is empty.
+// not complete a proposal never wait. When the wait ends with results missing,
+// the returned note says which, and why the wait ended; otherwise it is empty.
 func (r *runner) awaitStepResults(ctx context.Context, inputs []HumanInput) ([]HumanInput, string) {
 	for _, in := range inputs {
 		r.proposals.observe(in)
@@ -170,9 +194,16 @@ func (r *runner) awaitStepResults(ctx context.Context, inputs []HumanInput) ([]H
 		return inputs, ""
 	}
 
+	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working", Detail: waitingDetailResults})
+	defer func() {
+		// The detail must not outlive the wait.
+		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
+	}()
+
 	// One timer covers the whole wait: it cancels wctx when it fires, which ends
 	// the blocking Inbox.Wait below. Other input waking the wait does not restart
-	// it.
+	// it, and a steady stream of input cannot extend it: wctx is checked on every
+	// round.
 	wctx, cancel := context.WithCancel(ctx)
 	var timedOut atomic.Bool
 	done := make(chan struct{})
@@ -188,7 +219,8 @@ func (r *runner) awaitStepResults(ctx context.Context, inputs []HumanInput) ([]H
 		<-done
 	}()
 
-	for len(r.proposals.awaiting()) > 0 {
+	closed := false
+	for len(r.proposals.awaiting()) > 0 && wctx.Err() == nil {
 		if more := r.drain(ctx); len(more) > 0 {
 			for _, in := range more {
 				r.proposals.observe(in)
@@ -197,6 +229,7 @@ func (r *runner) awaitStepResults(ctx context.Context, inputs []HumanInput) ([]H
 			continue
 		}
 		if err := r.deps.Inbox.Wait(wctx); err != nil {
+			closed = wctx.Err() == nil && ctx.Err() == nil
 			break
 		}
 	}
@@ -208,23 +241,51 @@ func (r *runner) awaitStepResults(ctx context.Context, inputs []HumanInput) ([]H
 		}
 	}
 
-	ids := r.proposals.giveUpWaiting()
-	if len(ids) == 0 {
+	late := r.proposals.giveUpWaiting()
+	if len(late) == 0 || ctx.Err() != nil {
 		return inputs, ""
 	}
-	return inputs, pendingResultsNote(ids, r.timing.stepResultWait.String())
-}
-
-// pendingResultsNote tells the model that approval is complete but the executor
-// has not reported yet, so it claims neither that steps ran nor that they did
-// not. The IDs are the agent's own proposal IDs, not human text.
-func pendingResultsNote(ids []string, waited string) string {
-	return verifyTag + "approval is complete for " + proposalList(ids) + ", but the step results have not arrived yet (waited " + waited + "). Do not say that any step ran or did not run, and do not say approval is missing. Say the results are pending."
-}
-
-func proposalList(ids []string) string {
-	if len(ids) == 1 {
-		return "proposal " + ids[0]
+	why := "the wait limit of " + r.timing.stepResultWait.String() + " was reached"
+	if closed {
+		why = "the inbox closed while waiting"
 	}
-	return "proposals " + strings.Join(ids, ", ")
+	return inputs, pendingResultsNote(late, why)
+}
+
+// maxMissingListed caps how many missing steps the note names per proposal.
+const maxMissingListed = 6
+
+// pendingResultsNote tells the model that approval is complete but not every
+// step result has arrived. The results that did arrive are in the same message,
+// so the note only asks the model to report those and to say nothing about the
+// steps still missing. The IDs and indexes are the agent's own, not human text.
+func pendingResultsNote(late []lateProposal, why string) string {
+	parts := make([]string, 0, len(late))
+	for _, lp := range late {
+		parts = append(parts, "proposal "+lp.id+" ("+missingSteps(lp.missing)+")")
+	}
+	return verifyTag + "approval is complete for " + strings.Join(parts, "; ") + ", but not every step result has arrived: " + why + ". " +
+		"Report only the step results shown in this message. Say nothing about whether the missing steps ran, and do not say approval is missing. Say only that their results are pending."
+}
+
+// missingSteps renders step indexes such as "missing: steps 1, 2".
+func missingSteps(missing []int) string {
+	shown := missing
+	extra := 0
+	if len(shown) > maxMissingListed {
+		shown, extra = shown[:maxMissingListed], len(missing)-maxMissingListed
+	}
+	nums := make([]string, len(shown))
+	for i, n := range shown {
+		nums[i] = strconv.Itoa(n)
+	}
+	label := "missing: step "
+	if len(missing) > 1 {
+		label = "missing: steps "
+	}
+	s := label + strings.Join(nums, ", ")
+	if extra > 0 {
+		s += " and " + strconv.Itoa(extra) + " more"
+	}
+	return s
 }

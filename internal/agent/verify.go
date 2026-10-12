@@ -18,10 +18,11 @@ import (
 
 // verify-after-fix: once the last step of a proposal has succeeded, the agent
 // re-checks the pipeline before it claims recovery. The room delivers each
-// executed step as a HumanInput{Kind:"action_result"} whose Text is "proposal
-// <id> step <n>: <output>" and whose OK says whether the step succeeded (see
-// internal/room). Because the agent created the proposal itself, it can match
-// that text back to the proposal and know whether n is the last step.
+// executed step as a HumanInput{Kind:"action_result"} whose ProposalID and
+// StepIndex name the step and whose OK says whether it succeeded (see
+// internal/room); Text is only for display. Because the agent created the
+// proposal itself, it can match those fields back to the proposal and know
+// whether the step is the last one.
 //
 // Recovery needs two things. The layer checks of the touched layers must pass,
 // and the data must flow: every sink table of the alert's pipeline must receive

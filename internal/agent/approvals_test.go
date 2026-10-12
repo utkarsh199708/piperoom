@@ -33,28 +33,6 @@ func rejectionInput(layer, proposal string) HumanInput {
 	}
 }
 
-// firstWaitBlocks is an inbox whose first Wait blocks until its context ends,
-// like the room inbox with nothing pending, and whose later Waits report the room
-// closed. The first Wait is the bounded wait for step results; the later one
-// ends the run after the model's turn.
-type firstWaitBlocks struct {
-	*fakeInbox
-	mu    sync.Mutex
-	waits int
-}
-
-func (f *firstWaitBlocks) Wait(ctx context.Context) error {
-	f.mu.Lock()
-	f.waits++
-	n := f.waits
-	f.mu.Unlock()
-	if n == 1 {
-		<-ctx.Done()
-		return ctx.Err()
-	}
-	return context.Canceled
-}
-
 func sleptFor(c *fakeClock, d time.Duration) bool {
 	for _, got := range c.durations() {
 		if got == d {
@@ -64,24 +42,156 @@ func sleptFor(c *fakeClock, d time.Duration) bool {
 	return false
 }
 
-// The last owner approves, the executor reports a moment later: the first turn
+// gatedClock blocks the step-result timer until the test releases it, so the
+// test decides when the wait times out. Every other sleep (the verification
+// windows) returns at once. It honours the context like the real clock, so a
+// wait that ends early leaves no goroutine behind.
+type gatedClock struct {
+	mu     sync.Mutex
+	slept  []time.Duration
+	gate   chan struct{}
+	opened sync.Once
+}
+
+func newGatedClock() *gatedClock { return &gatedClock{gate: make(chan struct{})} }
+
+func (c *gatedClock) Sleep(ctx context.Context, d time.Duration) error {
+	c.mu.Lock()
+	c.slept = append(c.slept, d)
+	c.mu.Unlock()
+	if d != defaultStepResultWait {
+		return ctx.Err()
+	}
+	select {
+	case <-c.gate:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// release fires the step-result timer.
+func (c *gatedClock) release() { c.opened.Do(func() { close(c.gate) }) }
+
+// timers counts the step-result timers started.
+func (c *gatedClock) timers() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var n int
+	for _, d := range c.slept {
+		if d == defaultStepResultWait {
+			n++
+		}
+	}
+	return n
+}
+
+// pushInbox is an inbox where each Wait runs the next scripted step, which
+// pushes input (or blocks, or fails) the way the room does. A Wait with pending
+// input returns at once. When the script is spent, Wait runs rest if set and
+// otherwise reports the room closed, which ends the run after the model's turn.
+type pushInbox struct {
+	mu      sync.Mutex
+	pending []HumanInput
+	steps   []func(ctx context.Context) error
+	rest    func(ctx context.Context) error
+	waits   int
+}
+
+func (p *pushInbox) push(in ...HumanInput) {
+	p.mu.Lock()
+	p.pending = append(p.pending, in...)
+	p.mu.Unlock()
+}
+
+func (p *pushInbox) Drain(context.Context) ([]HumanInput, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := p.pending
+	p.pending = nil
+	return out, nil
+}
+
+func (p *pushInbox) Wait(ctx context.Context) error {
+	p.mu.Lock()
+	p.waits++
+	if len(p.pending) > 0 {
+		p.mu.Unlock()
+		return nil
+	}
+	var step func(ctx context.Context) error
+	switch {
+	case len(p.steps) > 0:
+		step, p.steps = p.steps[0], p.steps[1:]
+	case p.rest != nil:
+		step = p.rest
+	}
+	p.mu.Unlock()
+	if step == nil {
+		return context.Canceled
+	}
+	return step(ctx)
+}
+
+// deliver is a step where input arrives while the agent waits.
+func (p *pushInbox) deliver(in ...HumanInput) func(context.Context) error {
+	return func(context.Context) error {
+		p.push(in...)
+		return nil
+	}
+}
+
+// timeout is a step where nothing more arrives and the timer fires: Wait blocks
+// until the wait context ends, as the room inbox does.
+func timeoutStep(clk *gatedClock) func(context.Context) error {
+	return func(ctx context.Context) error {
+		clk.release()
+		<-ctx.Done()
+		return ctx.Err()
+	}
+}
+
+// bothApprove is the batch where the last owner approves proposal id (steps in
+// schema-registry and kafka-connect).
+func bothApprove(id string) []HumanInput {
+	return []HumanInput{approvalInput("schema-registry", id), approvalInput("kafka-connect", id)}
+}
+
+func bothResults(id string) []HumanInput {
+	return []HumanInput{
+		actionInput("proposal "+id+" step 0: "+resultSetNoneFromGlobal, okPtr(true)),
+		actionInput("proposal "+id+" step 1: restarted task 0 (RUNNING)", okPtr(true)),
+	}
+}
+
+// waitRunner is a compat runner on a gated clock, fed by a push inbox.
+func waitRunner(t *testing.T, model model, inbox Inbox) (*runner, *gatedClock, *fakeSink) {
+	t.Helper()
+	sink := &fakeSink{}
+	r, _ := newCompatRunner(t, model, inbox, sink, compatSteps("BACKWARD"), compatEnv{})
+	clk := newGatedClock()
+	r.clk = clk
+	return r, clk, sink
+}
+
+// noteLine is the pending-results note in a request, or "".
+func noteLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(line, verifyTag+"approval is complete") {
+			return line
+		}
+	}
+	return ""
+}
+
+// The last owner approves, the executor reports while the agent waits: Wait
+// blocks, the results are pushed, the next drain gets them, and the first turn
 // sees the approvals and both step results together, with no pending note.
 func TestApprovalFullThenResultsGivesOneTurnBoth(t *testing.T) {
-	sink := &fakeSink{}
-	inbox := &fakeInbox{
-		drains: [][]HumanInput{
-			{approvalInput("schema-registry", "p_1"), approvalInput("kafka-connect", "p_1")},
-			{
-				actionInput("proposal p_1 step 0: "+resultSetNoneFromGlobal, okPtr(true)),
-				actionInput("proposal p_1 step 1: restarted task 0 (RUNNING)", okPtr(true)),
-			},
-		},
-		waitErr: context.Canceled,
-	}
+	inbox := &pushInbox{pending: bothApprove("p_1")}
+	inbox.steps = []func(context.Context) error{inbox.deliver(bothResults("p_1")...)}
 	model := &scriptedModel{}
-	r, _ := newCompatRunner(t, model, inbox, sink, compatSteps("BACKWARD"), compatEnv{})
-	clk := &fakeClock{}
-	r.clk = clk
+	r, clk, sink := waitRunner(t, model, inbox)
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
@@ -95,64 +205,276 @@ func TestApprovalFullThenResultsGivesOneTurnBoth(t *testing.T) {
 			t.Fatalf("the first turn must carry %q, got:\n%s", want, text)
 		}
 	}
-	if strings.Contains(text, "have not arrived") {
+	if noteLine(text) != "" {
 		t.Fatalf("the results arrived, so no pending note is expected, got:\n%s", text)
+	}
+	if clk.timers() != 1 {
+		t.Fatalf("want one timer, got %d", clk.timers())
+	}
+	st := statusList(sink)
+	if !containsString(st, "working/"+waitingDetailResults) {
+		t.Fatalf("the wait must show a status, got %v", st)
 	}
 }
 
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
 // The executor reports nothing within the bound: the turn starts anyway, with
-// one note that the results are pending, so the model claims nothing about the
-// steps.
+// one note that names the proposal and every missing step and says why the wait
+// ended.
 func TestApprovalFullNoResultsBeforeTimeoutGetsPendingNote(t *testing.T) {
-	sink := &fakeSink{}
-	inbox := &firstWaitBlocks{fakeInbox: &fakeInbox{
-		drains: [][]HumanInput{{approvalInput("schema-registry", "p_1"), approvalInput("kafka-connect", "p_1")}},
-	}}
+	inbox := &pushInbox{pending: bothApprove("p_1")}
 	model := &scriptedModel{}
-	r, _ := newCompatRunner(t, model, inbox, sink, compatSteps("BACKWARD"), compatEnv{})
-	clk := &fakeClock{}
-	r.clk = clk
+	r, clk, sink := waitRunner(t, model, inbox)
+	inbox.steps = []func(context.Context) error{timeoutStep(clk)}
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
-	}
-	if !sleptFor(clk, defaultStepResultWait) {
-		t.Fatalf("the wait must be bounded by the step-result timeout (%v), slept %v", defaultStepResultWait, clk.durations())
 	}
 	if len(model.calls) != 1 {
 		t.Fatalf("want 1 model call, got %d", len(model.calls))
 	}
 	text := requestText(model.calls[0])
-	if n := strings.Count(text, "have not arrived yet"); n != 1 {
+	if n := strings.Count(text, "not every step result has arrived"); n != 1 {
 		t.Fatalf("want exactly one pending note, got %d in:\n%s", n, text)
 	}
-	if !strings.Contains(text, verifyTag+"approval is complete for proposal p_1") || !strings.Contains(text, "waited 45s") {
-		t.Fatalf("the note must name the proposal and the wait, got:\n%s", text)
+	note := noteLine(text)
+	for _, want := range []string{"proposal p_1 (missing: steps 0, 1)", "the wait limit of 45s was reached"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("the note must contain %q, got %q", want, note)
+		}
 	}
 	for _, m := range messageTexts(sink) {
 		if strings.HasPrefix(m, "recovered:") || strings.HasPrefix(m, "NOT recovered:") {
 			t.Fatalf("no step ran as far as the agent knows, so no verdict is expected, got %q", m)
 		}
 	}
+	if st := statusList(sink); !containsString(st, "working/") {
+		t.Fatalf("the waiting detail must be cleared after the wait, got %v", st)
+	}
 }
 
-// A step result that lands while waiting counts, even when other input wakes the
-// wait first. A failed step settles the proposal at once: the executor stops at
-// the first failure and reports nothing more.
-func TestApprovalFullWaitEndsOnFailedStep(t *testing.T) {
-	sink := &fakeSink{}
-	inbox := &fakeInbox{
-		drains: [][]HumanInput{
-			{approvalInput("schema-registry", "p_1"), approvalInput("kafka-connect", "p_1")},
-			{{Kind: "steer", Text: "check the connector too"}},
-			{actionInput("proposal p_1 step 0: boom", okPtr(false))},
-		},
-		waitErr: context.Canceled,
-	}
+// Some results arrive and the last step is late: the note names only the steps
+// still missing and does not contradict the results shown with it.
+func TestApprovalPartialResultsThenTimeoutNamesMissingStepsOnly(t *testing.T) {
+	first := actionInput("proposal p_1 step 0: "+resultSetNoneFromGlobal, okPtr(true))
+	inbox := &pushInbox{pending: append(bothApprove("p_1"), first)}
 	model := &scriptedModel{}
-	r, _ := newCompatRunner(t, model, inbox, sink, compatSteps("BACKWARD"), compatEnv{})
-	clk := &fakeClock{}
-	r.clk = clk
+	r, clk, _ := waitRunner(t, model, inbox)
+	inbox.steps = []func(context.Context) error{timeoutStep(clk)}
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	text := requestText(model.calls[0])
+	if !strings.Contains(text, "proposal p_1 step 0:") {
+		t.Fatalf("the step 0 result must reach the model, got:\n%s", text)
+	}
+	note := noteLine(text)
+	if !strings.Contains(note, "proposal p_1 (missing: step 1)") {
+		t.Fatalf("the note must name step 1 as missing, got %q", note)
+	}
+	if strings.Contains(note, "step 0") || strings.Contains(note, "steps 0") {
+		t.Fatalf("the note must not mention the step that arrived, got %q", note)
+	}
+	if strings.Contains(note, "Do not say that any step ran") {
+		t.Fatalf("the note must not deny steps that the message shows ran, got %q", note)
+	}
+}
+
+// Two proposals are fully approved in one batch. One settles while waiting, the
+// other times out: the note names only the late one.
+func TestApprovalTwoProposalsOneSettlesOneTimesOut(t *testing.T) {
+	inbox := &pushInbox{pending: append(bothApprove("p_1"), bothApprove("p_2")...)}
+	model := &scriptedModel{}
+	r, clk, _ := waitRunner(t, model, inbox)
+	r.proposals.record("p_2", compatSteps("BACKWARD"))
+	inbox.steps = []func(context.Context) error{inbox.deliver(bothResults("p_1")...), timeoutStep(clk)}
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	text := requestText(model.calls[0])
+	note := noteLine(text)
+	if !strings.Contains(note, "proposal p_2 (missing: steps 0, 1)") {
+		t.Fatalf("the note must name p_2, got %q", note)
+	}
+	if strings.Contains(note, "p_1") {
+		t.Fatalf("p_1 settled and must not be named, got %q", note)
+	}
+	if !strings.Contains(text, "proposal p_1 step 1:") {
+		t.Fatalf("p_1's results must reach the model, got:\n%s", text)
+	}
+	if clk.timers() != 1 {
+		t.Fatalf("both proposals share one timer, got %d", clk.timers())
+	}
+}
+
+// The outer context ends during the wait: the run stops cleanly with no model
+// turn, and the timer goroutine ends.
+func TestApprovalWaitStopsWhenContextEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inbox := &pushInbox{pending: bothApprove("p_1")}
+	inbox.steps = []func(context.Context) error{func(wctx context.Context) error {
+		cancel()
+		<-wctx.Done()
+		return wctx.Err()
+	}}
+	model := &scriptedModel{}
+	r, _, _ := waitRunner(t, model, inbox)
+
+	if err := r.run(ctx); err != nil {
+		t.Fatalf("a cancelled wait is a clean stop, got %v", err)
+	}
+	if len(model.calls) != 0 {
+		t.Fatalf("no model turn after the context ended, got %d", len(model.calls))
+	}
+}
+
+// The inbox closing during the wait ends it, and the note says so instead of
+// blaming the time limit.
+func TestApprovalWaitEndsWhenInboxCloses(t *testing.T) {
+	inbox := &pushInbox{pending: bothApprove("p_1")}
+	inbox.steps = []func(context.Context) error{func(context.Context) error { return ErrInboxClosed }}
+	model := &scriptedModel{}
+	r, _, _ := waitRunner(t, model, inbox)
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	note := noteLine(requestText(model.calls[0]))
+	if !strings.Contains(note, "the inbox closed while waiting") || strings.Contains(note, "wait limit") {
+		t.Fatalf("the note must give the real cause, got %q", note)
+	}
+}
+
+// A step result seen before the last approval settles the proposal: when the
+// approvals complete there is nothing left to wait for.
+func TestApprovalResultSeenBeforeFinalApprovalDoesNotWait(t *testing.T) {
+	last := actionInput("proposal p_1 step 1: restarted task 0 (RUNNING)", okPtr(true))
+	inbox := &pushInbox{pending: []HumanInput{approvalInput("schema-registry", "p_1"), last, approvalInput("kafka-connect", "p_1")}}
+	model := &scriptedModel{}
+	r, clk, _ := waitRunner(t, model, inbox)
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if clk.timers() != 0 {
+		t.Fatalf("a settled proposal must not wait, %d timers started", clk.timers())
+	}
+	if noteLine(requestText(model.calls[0])) != "" {
+		t.Fatal("no pending note is expected")
+	}
+}
+
+// Steers that arrive during the wait wake it but do not restart the timer: one
+// timer for the whole wait.
+func TestApprovalSteerDuringWaitDoesNotRestartTimer(t *testing.T) {
+	inbox := &pushInbox{pending: bothApprove("p_1")}
+	model := &scriptedModel{}
+	r, clk, _ := waitRunner(t, model, inbox)
+	inbox.steps = []func(context.Context) error{
+		inbox.deliver(HumanInput{Kind: "steer", Text: "first steer"}),
+		inbox.deliver(HumanInput{Kind: "steer", Text: "second steer"}),
+		timeoutStep(clk),
+	}
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if clk.timers() != 1 {
+		t.Fatalf("want exactly one step-result timer, got %d", clk.timers())
+	}
+	text := requestText(model.calls[0])
+	for _, want := range []string{"first steer", "second steer"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("the steer %q must reach the model, got:\n%s", want, text)
+		}
+	}
+	if noteLine(text) == "" {
+		t.Fatal("the wait timed out, so the note is expected")
+	}
+}
+
+// Input that keeps coming cannot extend the wait: once the timer has fired, the
+// loop stops waiting even though every Wait would return input at once.
+func TestApprovalInputFloodCannotExtendWait(t *testing.T) {
+	inbox := &pushInbox{pending: bothApprove("p_1")}
+	model := &scriptedModel{}
+	turned := false // set once the model's turn starts, i.e. after the wait
+	r, clk, _ := waitRunner(t, &hookModel{scriptedModel: model, onTurn: func(int) { turned = true }}, inbox)
+	var more int
+	inbox.steps = []func(context.Context) error{func(ctx context.Context) error {
+		inbox.push(HumanInput{Kind: "steer", Text: "steer 0"})
+		clk.release()
+		<-ctx.Done() // the timer has fired by the time this Wait returns input
+		return nil
+	}}
+	inbox.rest = func(context.Context) error {
+		if turned || more > 100 {
+			return context.Canceled // after the wait: end the run
+		}
+		more++
+		inbox.push(HumanInput{Kind: "steer", Text: "more steer"})
+		return nil
+	}
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if more > 0 {
+		t.Fatalf("the wait kept waiting after the timer fired: %d more Waits", more)
+	}
+	text := requestText(model.calls[0])
+	if !strings.Contains(text, "steer 0") || noteLine(text) == "" {
+		t.Fatalf("the steer and the pending note must reach the model, got:\n%s", text)
+	}
+}
+
+// Results that land as the timer fires still count: the final drain after the
+// timeout picks them up and no note is added.
+func TestApprovalResultsLandingAsTimerFiresCount(t *testing.T) {
+	inbox := &pushInbox{pending: bothApprove("p_1")}
+	model := &scriptedModel{}
+	r, clk, _ := waitRunner(t, model, inbox)
+	inbox.steps = []func(context.Context) error{func(ctx context.Context) error {
+		inbox.push(bothResults("p_1")...)
+		clk.release()
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	text := requestText(model.calls[0])
+	if !strings.Contains(text, "proposal p_1 step 1:") {
+		t.Fatalf("the late results must reach the model, got:\n%s", text)
+	}
+	if noteLine(text) != "" {
+		t.Fatalf("the results arrived, so no pending note is expected, got:\n%s", text)
+	}
+}
+
+// A failed step settles the proposal at once: the executor stops at the first
+// failure and reports nothing more. A steer that arrives first only wakes the
+// wait.
+func TestApprovalFullWaitEndsOnFailedStep(t *testing.T) {
+	inbox := &pushInbox{pending: bothApprove("p_1")}
+	model := &scriptedModel{}
+	r, _, _ := waitRunner(t, model, inbox)
+	inbox.steps = []func(context.Context) error{
+		inbox.deliver(HumanInput{Kind: "steer", Text: "check the connector too"}),
+		inbox.deliver(actionInput("proposal p_1 step 0: boom", okPtr(false))),
+	}
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
@@ -163,7 +485,7 @@ func TestApprovalFullWaitEndsOnFailedStep(t *testing.T) {
 			t.Fatalf("the first turn must carry %q, got:\n%s", want, text)
 		}
 	}
-	if strings.Contains(text, "have not arrived") {
+	if noteLine(text) != "" {
 		t.Fatalf("a failed step is a result: no pending note, got:\n%s", text)
 	}
 }
@@ -296,7 +618,7 @@ func TestApprovalFlowStates(t *testing.T) {
 		tr := newTracker()
 		tr.observe(approvalInput("schema-registry", "p_1"))
 		tr.observe(approvalInput("kafka-connect", "p_1"))
-		if ids := tr.giveUpWaiting(); len(ids) != 1 || ids[0] != "p_1" {
+		if ids := tr.giveUpWaiting(); len(ids) != 1 || ids[0].id != "p_1" || len(ids[0].missing) != 2 {
 			t.Fatalf("giveUpWaiting = %v", ids)
 		}
 		tr.observe(approvalInput("kafka-connect", "p_1")) // a repeated input
