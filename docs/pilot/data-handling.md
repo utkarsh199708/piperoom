@@ -45,8 +45,8 @@ your systems ──read-only tools──► Summary (text) ──► model provi
   work, not dollars (`internal/agent/budget.go:13-15,65-67`). Once a room reaches the limit, its calls
 are refused until the server restarts, and a restart is also needed to change the limit
 (`internal/agent/budget.go:88-98`). Hand-offs are counted but never refused.
-`Endpoint.Forget` is not wired. The counts of closed rooms stay in memory until restart
-(`internal/agent/endpoint.go:236-250`).
+Closing a room drops its count: the server calls `Endpoint.Forget` from the room-closed hook
+(`cmd/server/watch.go`; `internal/agent/endpoint.go:236-250`), so the counts of closed rooms do not stay in memory.
 - **Room event log (`room_events`, `migrations/00001_init.sql:16`).** Every tool call, result `Data`,
   comment, steer, proposal and approval is stored **permanently** in the Piperoom database and shown
   to everyone who can open the room. There is no per-event redaction after the fact. Redaction

@@ -106,19 +106,47 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 | `ALERTMANAGER_TOKEN`, `GRAFANA_ALERT_SECRET`, `PAGERDUTY_ALERT_SECRET`, `DATADOG_ALERT_TOKEN`, `GENERIC_ALERT_SECRET` | Secrets for the signed alert routes `POST /api/alerts/{source}` (section 6). A source is enabled only when its secret is set (`internal/alertin/verify.go:90-102`); unset, its route answers 401 (`internal/httpapi/alerts.go:31-41`). Read in `cmd/server/alerts.go:17-40` (`config.go:148-153`) |
 | `PAGERDUTY_SERVICES`, `DEFAULT_ALERT_PIPELINE` | Used by the signed routes. `PAGERDUTY_SERVICES` maps service ids to pipelines, and a bad entry stops the start. `DEFAULT_ALERT_PIPELINE` is used when an alert names no pipeline, and a bad value stops the start (`cmd/server/alerts.go:17-40`; `config.go:151,154`) |
 
-**Built-in watcher (not live yet)**
+**Built-in watcher**
 
-The watcher's design is in [docs/design/watcher.md](../design/watcher.md). The settings below are read
-into config on `main`, and `ParseWatch` validates them (`internal/config/config.go:213`). Nothing on
-`main` calls `ParseWatch`, and no code starts the watcher. So these variables have no effect yet, and
-an invalid value is not rejected yet. The watcher's core and wiring are still in review.
+The watcher polls Kafka Connect and the source database and tells you when a pipeline is in trouble.
+The design is in [docs/design/watcher.md](../design/watcher.md).
+The server reads these variables at start (`config.ParseWatch`), and a bad value stops the start with
+an error that names the variable.
 
 | Variable | Meaning |
 |---|---|
-| `PIPEROOM_WATCH_MODE` | `off`, `log` or `rooms`. Default `log`, which is shadow mode: it only writes log lines. `ParseWatch` rejects other values, but nothing calls it yet (`config.go:78`) |
-| `PIPEROOM_WATCH_INTERVAL` | how often the watcher checks. Go duration, default `60s`, minimum `15s` (`config.go:79`) |
-| `PIPEROOM_WATCH_CHECK_TIMEOUT` | deadline for one check, default `10s`, at most `10s` (the source role's statement timeout) (`config.go:80`) |
-| `PIPEROOM_WATCH_COOLDOWN` | quiet time after a watcher room is closed, default `60m` (`config.go:81`) |
+| `PIPEROOM_WATCH_MODE` | `off`, `log` or `rooms`. Default `log` (see the modes below) |
+| `PIPEROOM_WATCH_INTERVAL` | how often the watcher checks. Go duration, default `60s`, minimum `15s` |
+| `PIPEROOM_WATCH_CHECK_TIMEOUT` | deadline for one check, default `10s`, at most `10s` (the source role's statement timeout) |
+| `PIPEROOM_WATCH_COOLDOWN` | quiet time after a watcher room is closed, default `60m` |
+
+Modes:
+
+- `off`: no watcher is started. `--demo` always runs with the watcher off, whatever this says.
+- `log` (default, shadow mode): the watcher runs and writes one log line for each change of state
+  (`watch: ...` with `pipeline`, `signal`, `value`, `since`). It opens no room and posts nothing. Use
+  it first: read the logs for a week and check that they match what really happened.
+- `rooms`: the same checks, and a firing signal opens a room (or joins the room that is already open
+  for the pipeline). The agent investigates from the evidence. When the signal clears, the room gets a
+  "resolved" note and stays open until the driver closes it. A room the driver closed is not opened
+  again while the same signal still fires. One exception: if the signal rises to sev1, the watcher
+  opens a room once more, and that one skips the cooldown.
+
+To switch from `log` to `rooms`: set `PIPEROOM_WATCH_MODE=rooms` and restart the server. At start it
+logs one line, `server: watcher starting`, with the mode, the interval and the number of pipelines
+watched. Rooms the watcher opens count against `PIPEROOM_MAX_AGENTS`, and each room is an agent run
+with the usual token budget.
+
+What the source database needs:
+
+- `SOURCE_DB_URL` must point at the **primary**. A replica cannot answer `pg_current_wal_lsn()`, so
+  the replication-slot check fails there.
+- PostgreSQL 13 or newer. From 13, `pg_replication_slots` has `safe_wal_size`, which the watcher uses
+  for "slot invalidated in N hours". On older versions that estimate is missing. It is also missing
+  when `max_slot_wal_keep_size` is `-1`, which is the default (and the RDS default). Then the watcher
+  shows the growth rate, and an estimate only if you set `watch.wal_headroom_bytes` for the pipeline.
+- No new grants: the watcher reads `pg_replication_slots` and calls the Connect status and config
+  endpoints, the same reads the agent's tools already make ([permissions.md](permissions.md)).
 
 **Slack, Kafka, Connect and Registry**
 
@@ -171,9 +199,9 @@ life of the process (`internal/agent/endpoint.go:236-245`). Once the count reach
 investigation call is refused at once (`budget.go:88-98`), so a new run for that room is refused
 too. Only a server restart resets the count, and changing `PIPEROOM_ROOM_TOKEN_BUDGET` also needs a
 restart. Hand-offs are counted but never refused, so a person taking over a stopped room still gets a
-summary (`budget.go:160-167`; `internal/agent/endpoint.go:273-281`). Separately, `Endpoint.Forget`
-(`internal/agent/endpoint.go:250`) is not wired: nothing calls it when a room closes. The counts of
-closed rooms stay in memory until restart. Set `0` only if you accept an uncapped cost per room.
+summary (`budget.go:160-167`; `internal/agent/endpoint.go:273-281`). Closing a room drops
+its count: the server calls `Endpoint.Forget` (`internal/agent/endpoint.go:250`) from the room-closed
+hook (`cmd/server/watch.go`), so the counts of closed rooms do not pile up in memory. Set `0` only if you accept an uncapped cost per room.
 
 ## 2. Describe your pipeline: `owners.yaml` and `users.yaml`
 
@@ -220,10 +248,11 @@ Rules of thumb:
   grants identical to these lists
   ([data-handling.md](data-handling.md#3-prompt-injection-and-untrusted-text), F4, F11).
 - Put the real people in `users.yaml`; remove the dev users.
-- A pipeline may also have an optional `watch:` block. On `main` it is parsed (`internal/owners/watch.go`),
-  and it sets the slot-WAL warning threshold for the pipeline map (`watch.slot_wal.fire`,
-  `internal/topology/builder.go:55`). Its other settings (enabled, replication slot, WAL headroom, and
-  per-signal action, `for`, `fire`, `clear`) belong to the watcher, which is not live yet. See
+- A pipeline may also have an optional `watch:` block (`internal/owners/watch.go`). It turns the
+  watcher on or off for the pipeline and sets, per signal, `enabled`, `action` (`log` or `room`) and
+  `for`; for `slot_wal` also `fire`, `clear` and `eta_sev1`; and the pipeline's `slot` name and
+  `wal_headroom_bytes`. `watch.slot_wal.fire` also sets the slot-WAL warning threshold of the pipeline
+  map (`internal/topology/builder.go:55`). Without the block, the defaults apply. See
   [docs/design/watcher.md](../design/watcher.md).
 
 ## 3. Prepare the source database

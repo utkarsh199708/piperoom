@@ -35,6 +35,7 @@ import (
 	"piperoom/internal/store/memstore"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
+	"piperoom/internal/watch"
 	"piperoom/internal/wiring"
 	"piperoom/migrations"
 )
@@ -74,6 +75,13 @@ func run() error {
 	retentionDays, err := store.ParseRetentionDays(cfg.RetentionDays)
 	if err != nil {
 		return fmt.Errorf("server: PIPEROOM_RETENTION_DAYS: %w", err)
+	}
+
+	// A bad PIPEROOM_WATCH_* value stops the server too; the error names the
+	// variable. --demo forces the watcher off.
+	watchCfg, err := watchConfig(cfg, *demoMode, log)
+	if err != nil {
+		return err
 	}
 
 	// Refuse a reachable-from-outside listen address before anything else
@@ -173,6 +181,10 @@ func run() error {
 		topo     topology.Builder
 		run      = agent.Run
 		write    = agent.WriteHandoff
+		wired    *wiring.Wired // nil in demo mode
+		// closedHook is room.Deps.OnRoomClosed: it forgets the room's token
+		// count and tells the watcher, which is set once it exists.
+		closedHook = &roomClosedHook{}
 	)
 	if *demoMode {
 		// The real actions over the demo's in-memory clients (LEAD-ARCH round
@@ -194,12 +206,14 @@ func run() error {
 		}
 		run = ep.Run
 		write = ep.WriteHandoff
+		closedHook.setForget(ep)
 
 		w, err := wiring.Open(ctx, cfg)
 		if err != nil {
 			return fmt.Errorf("server: open the data stack: %w", err)
 		}
 		defer w.Close()
+		wired = w
 		acts = actions.NewRegistry()
 		if err := wiring.RegisterTools(toolsReg, acts, w); err != nil {
 			return fmt.Errorf("server: register tools and actions: %w", err)
@@ -224,6 +238,7 @@ func run() error {
 		Logger:       log,
 		MaxAgents:    maxAgents,
 		OnRoomOpened: slack.onRoomOpened(),
+		OnRoomClosed: closedHook.onClosed,
 	})
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
@@ -267,6 +282,27 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	// The watcher starts after Load (so it never sees a half-built room cache)
+	// and after every check that can still refuse the start (web dir, handler),
+	// just before the server listens, so a start that is about to fail never
+	// runs a tick. Shutdown stops it before the room service closes (the done
+	// goroutine below); the defer covers the early returns after this point.
+	watchDeps := watch.Deps{
+		Owners:       own,
+		Rooms:        watchRooms{svc: svc},
+		Config:       watchCfg,
+		MaxOpenRooms: maxAgents,
+	}
+	if wired != nil {
+		watchDeps.Source, watchDeps.Connect = wired.Source, wired.Connect
+	}
+	stopWatch, err := startWatcher(ctx, watchDeps, closedHook, log)
+	if err != nil {
+		handler.Close()
+		return err
+	}
+	defer stopWatch()
+
 	// done closes only after Shutdown AND handler.Close (WS connections, the
 	// room service and every goroutine it owns) have returned, so main can
 	// wait for them before its defers close the store and the stack.
@@ -274,12 +310,7 @@ func run() error {
 	go func() {
 		defer close(done)
 		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		// Shutdown waits for non-hijacked requests; WS connections are
-		// hijacked, so close them (and the room service) explicitly.
-		_ = server.Shutdown(shutdownCtx)
-		handler.Close()
+		shutdownServer(stopWatch, server, handler)
 	}()
 
 	mode := "real"

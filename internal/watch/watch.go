@@ -7,10 +7,10 @@
 // an ETA). Every check is a read; the watcher never fixes anything and never
 // calls a model. Object names come only from owners.Pipeline.
 //
-// Wiring (a later PR) must: call Run in a goroutine after the room service has
-// loaded; call OnRoomClosed from the service's room-closed hook; and give Deps a
-// RoomSink that adapts room.Service (mapping its "room closed" and "resolved
-// alert, no room" errors to ErrRoomClosed and ErrNoRoom).
+// Wiring: see cmd/server/watch.go. It calls Run in a goroutine after the room
+// service has loaded, calls OnRoomClosed from the service's room-closed hook, and
+// gives Deps a RoomSink that adapts room.Service (mapping its "room closed" and
+// "resolved alert, no room" errors to ErrRoomClosed and ErrNoRoom).
 //
 // connector_down also covers a connector that Kafka Connect does not know
 // (HTTP 404): it fires as "missing" at sev2.

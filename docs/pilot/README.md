@@ -60,7 +60,7 @@ below is from the code.
   every 6 hours; an empty value or `0` keeps everything. Export a room first with
   `GET /api/rooms/{id}/export`. Also on `main`: the Docker image and the served web UI, the signed alert routes,
   the agent cap, the model providers, the triage model and the per-room token budget. The built-in
-  watcher (`PIPEROOM_WATCH_*`, design in `docs/design/watcher.md`) is in review and not live yet. See
+  watcher (`PIPEROOM_WATCH_*`, design in `docs/design/watcher.md`) is live; the default mode `log` only writes log lines. See
   [setup.md](setup.md#1-configure-the-environment).
 - **A restart does not resume the agent.** Open rooms come back with the agent idle. A driver's
   steer, an `@agent` mention or a sent suggestion starts it again. A fix that was approved but not
