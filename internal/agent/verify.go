@@ -624,20 +624,22 @@ func connectRecovered(res tools.Result) bool {
 }
 
 // pgSlotsRecovered reports whether pg_replication_slots shows at least one
-// active logical replication slot.
+// active logical replication slot. A payload that cannot be decoded is never a
+// recovery: the summary text carries slot names from the database, so it can
+// hold "active=true" without any slot being active, and it is not judged.
 func pgSlotsRecovered(res tools.Result) bool {
 	var slots []struct {
 		Active bool `json:"active"`
 	}
-	if err := decodeData(res.Data, &slots); err == nil {
-		for _, s := range slots {
-			if s.Active {
-				return true
-			}
-		}
+	if err := decodeData(res.Data, &slots); err != nil {
 		return false
 	}
-	return strings.Contains(res.Summary, "active=true")
+	for _, s := range slots {
+		if s.Active {
+			return true
+		}
+	}
+	return false
 }
 
 // runVerifyCheck runs one layer check. A settling check must also pass a second

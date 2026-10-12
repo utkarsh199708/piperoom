@@ -121,20 +121,31 @@ var verificationTag = regexp.MustCompile(`(?i)\[verification\]`)
 // markInvisible makes the characters a reader cannot see visible, so the model
 // reads them as data. Zero-width characters are common root causes in CDC data
 // (a key that differs only by one), so they are never dropped: each becomes a
-// visible {U+XXXX} marker. The fullwidth brackets become {U+FF3B} and {U+FF3D},
-// so they cannot pass for the ASCII brackets of a tag. Every other character,
-// the fullwidth letters included, is unchanged.
+// visible {U+XXXX} marker. The fullwidth brackets and angle brackets become
+// {U+FF3B}, {U+FF3D}, {U+FF1C} and {U+FF1E}, so they cannot pass for the ASCII
+// brackets of a tag or for a closing </untrusted> that escapeToolText leaves
+// alone. Every other character, the fullwidth letters included, is unchanged.
 func markInvisible(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		if r == 0xFF3B || r == 0xFF3D || invisibleRune(r) {
+		if lookalikeBracket(r) || invisibleRune(r) {
 			fmt.Fprintf(&b, "{U+%04X}", r)
 			continue
 		}
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// lookalikeBracket reports the fullwidth square and angle brackets, which render
+// like the ASCII ones that open a tag or close a wrapper but are not escaped.
+func lookalikeBracket(r rune) bool {
+	switch r {
+	case 0xFF3B, 0xFF3D, 0xFF1C, 0xFF1E: // ［ ］ ＜ ＞
+		return true
+	}
+	return false
 }
 
 // invisibleRune reports the characters that show nothing or reorder the text
