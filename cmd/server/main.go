@@ -92,7 +92,11 @@ func run() error {
 		if err := migrateRoomDB(ctx, cfg.RoomDBURL, log); err != nil {
 			return err
 		}
-		pg, err := store.New(ctx, cfg.RoomDBURL, log)
+		// store.New pings the pool; bound it so a hung database cannot block
+		// start-up forever (nit 10: store.New had no deadline).
+		pgCtx, cancelPG := context.WithTimeout(ctx, 30*time.Second)
+		pg, err := store.New(pgCtx, cfg.RoomDBURL, log)
+		cancelPG()
 		if err != nil {
 			return fmt.Errorf("server: connect room store: %w", err)
 		}
@@ -149,10 +153,19 @@ func run() error {
 	})
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
-	if err := svc.Load(loadCtx); err != nil {
-		log.Warn("server: cache load failed", "err", err)
-	}
+	loadErr := svc.Load(loadCtx)
 	cancelLoad()
+	if loadErr != nil {
+		if *demoMode {
+			// Demo uses an in-memory store; a failed load is unexpected but not
+			// worth refusing to start.
+			log.Warn("server: cache load failed", "err", loadErr)
+		} else {
+			// Real mode must fail: a broken cache means rooms reached later are
+			// rebuilt lazily without their agent (review nit 9).
+			return fmt.Errorf("server: load room cache: %w", loadErr)
+		}
+	}
 
 	handler := httpapi.New(svc, st, log)
 	server := &http.Server{

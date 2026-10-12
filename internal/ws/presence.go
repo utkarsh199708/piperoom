@@ -131,9 +131,26 @@ func (g *Gateway) broadcastLocked(roomID string) {
 	}
 	for c := range hub.conns {
 		if !c.trySend(b) {
-			go c.shutdown(websocket.StatusPolicyViolation, "send buffer full")
+			g.spawnShutdown(c)
 		}
 	}
+}
+
+// spawnShutdown shuts a slow client down on its own goroutine so the close
+// frame and the onClose cleanup never block the presence broadcast. Caller
+// holds g.mu. The goroutine is tracked by g.wg; it is never started after
+// Close has begun (g.closed), so g.wg.Add never races with g.wg.Wait.
+func (g *Gateway) spawnShutdown(c *client) {
+	if g.closed {
+		// Close is already shutting every client down; do not add work after
+		// the WaitGroup may have started waiting.
+		return
+	}
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		c.shutdown(websocket.StatusPolicyViolation, "send buffer full")
+	}()
 }
 
 // awayAfter is how long a connection may go without any client message
