@@ -47,6 +47,12 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 	if !s.roomOpen(st) {
 		return "", roomClosed("room is closed")
 	}
+	// A room opened from a webhook with an unknown pipeline has proposals
+	// disabled (docs/api.md:103): the agent must not propose a fix against a
+	// pipeline nothing can be scoped to.
+	if s.proposalsDisabled(st) {
+		return "", validation(fmt.Sprintf("pipeline %q is unknown; proposals are disabled for this room", st.snap.PipelineID))
+	}
 
 	// Scope check against the room's pipeline (docs/api.md): a step must
 	// implement actions.Scoped and must stay inside that pipeline. A scope

@@ -77,11 +77,14 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 
 // CreateRoomFromAlert handles the generic alert webhook: it maps title/
 // severity/pipeline_id when present and stores the raw body verbatim in
-// room.created.alert. The pipeline_id takes the same shape check and, when an
-// owners config is loaded, the same known-pipeline check as POST /api/rooms
-// (review item 8; docs/api.md:103 still describes the older behaviour — see
-// the contract note in the PR). With no owners config (--demo, unit tests)
-// there is nothing to validate against. No driver until someone takes control.
+// room.created.alert. The pipeline_id takes the same shape check as POST
+// /api/rooms, but a missing or unknown pipeline NEVER drops the alert
+// (docs/api.md:103, LEAD-ARCH round 1 #10): the room opens anyway with a
+// system message and proposals disabled, so the agent cannot propose a fix
+// against a pipeline it knows nothing about. The 400 for an unknown pipeline
+// stays only on POST /api/rooms (CreateRoom). With no owners config (unit
+// tests) there is nothing to validate against, so every pipeline is treated as
+// known. No driver until someone takes control.
 func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipelineID string, raw json.RawMessage) (RoomSnapshot, error) {
 	if title == "" {
 		title = "New alert"
@@ -95,11 +98,7 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 	if !pipelineIDRe.MatchString(pipelineID) {
 		return RoomSnapshot{}, validation(fmt.Sprintf("pipeline_id %q must match ^[a-zA-Z0-9_.-]+$", pipelineID))
 	}
-	if s.owners != nil {
-		if _, ok := s.owners.Pipeline(pipelineID); !ok {
-			return RoomSnapshot{}, validation(fmt.Sprintf("unknown pipeline %q", pipelineID))
-		}
-	}
+	pipelineKnown := s.owners == nil || s.knownPipeline(pipelineID)
 	roomID := NewID("r_")
 	now := s.now().UTC()
 
@@ -119,6 +118,18 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 	}); err != nil {
 		s.mu.Unlock()
 		return RoomSnapshot{}, err
+	}
+	// A missing/unknown pipeline opens with a system message so the room shows
+	// why no fix is proposed. events.go has no dedicated system-message type,
+	// so the message is an agent.message carried by the system actor (the room
+	// renders it with the actor name "System").
+	if !pipelineKnown {
+		if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
+			Text: fmt.Sprintf("pipeline %q is unknown; proposals are disabled for this room", pipelineID),
+		}); err != nil {
+			s.mu.Unlock()
+			return RoomSnapshot{}, err
+		}
 	}
 	snap := st.snap.Clone()
 	s.startAgentLocked(roomID, title, pipelineID, raw, st)
@@ -209,9 +220,13 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 		s.log.Warn("room: persist close failed", "room", roomID, "err", err)
 	}
 	cancel := st.agentCancel
+	execCancel := st.execCancel
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if execCancel != nil {
+		execCancel()
 	}
 	return e, nil
 }
