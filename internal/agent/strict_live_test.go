@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
-
-	"piperoom/internal/actions"
 )
 
 // strictCapCandidates are the caps the live bisect probes: the shipped cap plus
@@ -35,10 +33,10 @@ func TestLiveStrictToolCap(t *testing.T) {
 		t.Skip("ANTHROPIC_API_KEY not set; set it to run the live strict-tool-cap bisect")
 	}
 
-	// The exact production registry (real read tools, real schemas) and room
-	// tools, so the compiled grammar the API sees is the one that ships.
-	reg := fullRegistry(t)
-	room := newRoomTools(Deps{Actions: actions.NewRegistry()})
+	// The exact production tool set (real read tools including the runbook tool,
+	// and room tools with the real actions registry), so the compiled grammar
+	// the API sees, including propose_fix's nested params, is the one that ships.
+	reg, room := productionToolSet(t)
 
 	// The production client: the SDK reads ANTHROPIC_API_KEY itself, and
 	// newModel adds the anthropic-workspace-id header when ANTHROPIC_WORKSPACE_ID

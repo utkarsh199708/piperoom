@@ -23,7 +23,7 @@ func productionToolSet(t *testing.T) (*tools.Registry, []tools.Tool) {
 	if err := actions.Register(areg, actions.Deps{}); err != nil {
 		t.Fatal(err)
 	}
-	return reg, newRoomTools(Deps{Actions: areg})
+	return reg, newRoomTools(Deps{Actions: areg}, newProposalTracker())
 }
 
 // strictSchemaBytes sums the marshalled input_schema size of every tool the

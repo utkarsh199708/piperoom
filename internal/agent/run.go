@@ -77,6 +77,16 @@ type runner struct {
 	toolList toolList
 	system   string
 
+	// proposals remembers the proposals the agent created this run, so a later
+	// action_result can be matched to its last step and verified.
+	proposals *proposalTracker
+
+	// recoveredIdle is true while the pipeline is verified recovered and nothing
+	// since has broken that (a failed or unknown step, or a NOT recovered
+	// verdict). An episode that ends while it is set stays "done" and waits for
+	// a human, instead of reporting idle.
+	recoveredIdle bool
+
 	emitMu sync.Mutex
 }
 
@@ -109,28 +119,33 @@ func newRunner(alert Alert, deps Deps, opts Options) (*runner, error) {
 		deps.Logger = slog.Default()
 	}
 	return &runner{
-		alert: alert,
-		deps:  deps,
-		opts:  opts,
-		log:   deps.Logger,
-		model: newModel(opts, deps.Logger),
-		clk:   realClock{},
+		alert:     alert,
+		deps:      deps,
+		opts:      opts,
+		log:       deps.Logger,
+		model:     newModel(opts, deps.Logger),
+		clk:       realClock{},
+		proposals: newProposalTracker(),
 	}, nil
 }
 
 func (r *runner) run(ctx context.Context) error {
-	r.toolList = buildToolList(r.deps.Tools, newRoomTools(r.deps))
+	r.toolList = buildToolList(r.deps.Tools, newRoomTools(r.deps, r.proposals))
 	r.system = systemPrompt()
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 
-	// Drain anything already waiting before the first turn so an early steer is
-	// part of the opening prompt.
-	messages := []anthropic.BetaMessageParam{r.initialMessage(r.drain(ctx))}
-
 	// turns counts model turns since the last human input. It is a per-episode
 	// runaway guard, not a lifetime cap: fresh human input resets it.
 	turns := 0
+
+	// Drain anything already waiting before the first turn so an early steer is
+	// part of the opening prompt.
+	initialInputs := r.drain(ctx)
+	// The model reads the verdict of an early recovery in its first turn. Only
+	// an episode that ends after a recovery parks, in pauseForHumanInput.
+	outcome := r.handleActionResults(ctx, initialInputs)
+	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs, outcome.notes)}
 	for {
 		if err := ctx.Err(); err != nil {
 			return stopErr(err)
@@ -139,10 +154,15 @@ func (r *runner) run(ctx context.Context) error {
 		if turns >= r.opts.MaxTurns {
 			// Runaway guard: pause and wait for a human instead of abandoning the
 			// room. The room stays usable while someone is still steering it.
-			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
-				State:  "idle",
-				Detail: "max turns reached; waiting for human input",
-			})
+			recovered := r.recoveredIdle
+			if recovered {
+				r.emitWaiting(ctx)
+			} else {
+				r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
+					State:  "idle",
+					Detail: "max turns reached; waiting for human input",
+				})
+			}
 			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{
 				Text: "I have reached the turn limit for this episode and am pausing. Please steer me or confirm before I continue.",
 			})
@@ -153,8 +173,19 @@ func (r *runner) run(ctx context.Context) error {
 			if len(inputs) == 0 {
 				return nil
 			}
-			messages = append(messages, r.humanMessage(inputs))
+			outcome := r.handleActionResults(ctx, inputs)
+			messages = appendUser(messages, r.inputBlocks(inputs, outcome.notes)...)
 			turns = 0
+			if r.parked(outcome) {
+				if !recovered {
+					r.emitWaiting(ctx)
+				}
+				if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
+					return err
+				}
+			} else if recovered {
+				r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
+			}
 			continue
 		}
 
@@ -236,15 +267,18 @@ func (r *runner) run(ctx context.Context) error {
 			// message carries the tool results plus any human input that arrived
 			// while we were running.
 			inputs := r.drain(ctx)
+			outcome := r.handleActionResults(ctx, inputs)
 			blocks := append([]anthropic.BetaContentBlockParamUnion(nil), resultBlocks...)
-			blocks = append(blocks, r.humanBlocks(inputs)...)
+			blocks = append(blocks, r.inputBlocks(inputs, outcome.notes)...)
 			if len(blocks) == 0 {
 				blocks = append(blocks, anthropic.NewBetaTextBlock("Continue."))
 			}
-			messages = append(messages, anthropic.NewBetaUserMessage(blocks...))
+			messages = appendUser(messages, blocks...)
 			if len(inputs) > 0 {
 				turns = 0
 			}
+			// No park here: a recovered episode keeps running until the model
+			// reaches end_turn, so it can read the verification note and reply.
 		}
 	}
 }
@@ -292,14 +326,27 @@ func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMe
 	}
 }
 
-func (r *runner) initialMessage(inputs []HumanInput) anthropic.BetaMessageParam {
+func (r *runner) initialMessage(inputs []HumanInput, notes []string) anthropic.BetaMessageParam {
 	blocks := []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(firstUserMessage(r.alert))}
-	blocks = append(blocks, r.humanBlocks(inputs)...)
+	blocks = append(blocks, r.inputBlocks(inputs, notes)...)
 	return anthropic.NewBetaUserMessage(blocks...)
 }
 
-func (r *runner) humanMessage(inputs []HumanInput) anthropic.BetaMessageParam {
-	return anthropic.NewBetaUserMessage(r.humanBlocks(inputs)...)
+// inputBlocks renders one batch of human input and its verification notes, in
+// the order the model reads them: the inputs, then what verification found.
+func (r *runner) inputBlocks(inputs []HumanInput, notes []string) []anthropic.BetaContentBlockParamUnion {
+	return append(r.humanBlocks(inputs), verifyBlocks(notes)...)
+}
+
+// appendUser adds blocks to the history as a user turn. When the last message
+// is already a user turn, the blocks join it, so the request never carries two
+// consecutive user messages.
+func appendUser(messages []anthropic.BetaMessageParam, blocks ...anthropic.BetaContentBlockParamUnion) []anthropic.BetaMessageParam {
+	if n := len(messages); n > 0 && messages[n-1].Role == anthropic.BetaMessageParamRoleUser {
+		messages[n-1].Content = append(messages[n-1].Content, blocks...)
+		return messages
+	}
+	return append(messages, anthropic.NewBetaUserMessage(blocks...))
 }
 
 func (r *runner) humanBlocks(inputs []HumanInput) []anthropic.BetaContentBlockParamUnion {
@@ -367,7 +414,13 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 // dropped along with everything else: Run is about to return, so no further
 // request will ever need it.
 func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int, pending []anthropic.BetaContentBlockParamUnion) (bool, error) {
-	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
+	// A recovered episode ends "done" with the reason, not "idle".
+	recovered := r.recoveredIdle
+	if recovered {
+		r.emitWaiting(ctx)
+	} else {
+		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
+	}
 	inputs, err := r.waitForInput(ctx)
 	if err != nil {
 		return true, stopErr(err)
@@ -375,10 +428,54 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 	if len(inputs) == 0 {
 		return true, nil
 	}
-	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.humanBlocks(inputs)...)
-	*messages = append(*messages, anthropic.NewBetaUserMessage(blocks...))
+	outcome := r.handleActionResults(ctx, inputs)
+	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.inputBlocks(inputs, outcome.notes)...)
+	*messages = appendUser(*messages, blocks...)
 	*turns = 0
+	if r.parked(outcome) {
+		if !recovered {
+			r.emitWaiting(ctx)
+		}
+		return r.holdAfterRecovery(ctx, messages, turns)
+	}
+	if recovered {
+		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
+	}
 	return false, nil
+}
+
+// holdAfterRecovery keeps a recovered episode alive. The pipeline is fixed, so
+// the model is not called until something needs an answer, but the run must
+// stay alive: a later steer or comment still gets a reply. It waits on the
+// Inbox exactly like the idle path and keeps the done status. It returns
+// stop=false when the model should run again (a human spoke, or a step failed
+// or is unknown) and stop=true when the room closed, with the error Run should
+// return.
+func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int) (bool, error) {
+	for {
+		inputs, err := r.waitForInput(ctx)
+		if err != nil {
+			return true, stopErr(err)
+		}
+		outcome := r.handleActionResults(ctx, inputs)
+		*messages = appendUser(*messages, r.inputBlocks(inputs, outcome.notes)...)
+		*turns = 0
+		if !r.parked(outcome) {
+			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
+			return false, nil
+		}
+	}
+}
+
+// hasHumanInput reports whether inputs contain anything a person said, as
+// opposed to executor results. A person's words always get a model turn.
+func hasHumanInput(inputs []HumanInput) bool {
+	for _, in := range inputs {
+		if in.Kind != "action_result" {
+			return true
+		}
+	}
+	return false
 }
 
 // emit writes one event to the sink, serialized so parallel tool steps cannot
@@ -634,6 +731,11 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 			content:   wrapToolOutput(u.name, "", "error: "+err.Error()),
 			isError:   true,
 		}
+	}
+	// A new proposal gets its creation baseline now, before anyone approves it,
+	// so rows that arrive during approval and execution count as the fix's.
+	if pr, ok := res.Data.(proposeFixResult); ok {
+		r.snapshotBaseline(ctx, pr.ProposalID)
 	}
 	return toolResult{
 		toolUseID: u.id,

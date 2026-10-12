@@ -59,7 +59,7 @@ func strictNames(t *testing.T, tl toolList) (order []string, strict map[string]b
 // most-used read tools.
 func TestFullRegistryStaysWithinStrictToolCap(t *testing.T) {
 	reg := fullRegistry(t)
-	room := newRoomTools(Deps{Actions: actions.NewRegistry()})
+	room := newRoomTools(Deps{Actions: actions.NewRegistry()}, nil)
 	order, strict := strictNames(t, buildToolList(reg, room))
 
 	if len(order) <= maxStrictTools {
@@ -117,7 +117,7 @@ func TestStrictToolCapWithManyReadTools(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	room := newRoomTools(Deps{Actions: actions.NewRegistry()})
+	room := newRoomTools(Deps{Actions: actions.NewRegistry()}, nil)
 	order, strict := strictNames(t, buildToolList(reg, room))
 	if len(order) != n+len(room) {
 		t.Fatalf("sent %d tools, want %d: no tool may be dropped to meet the cap", len(order), n+len(room))
@@ -150,7 +150,7 @@ func TestStrictReadToolsBeatRegistrationOrder(t *testing.T) {
 	if err := reg.Register(&recordingTool{name: last, schema: map[string]any{"type": "object"}}); err != nil {
 		t.Fatal(err)
 	}
-	_, strict := strictNames(t, buildToolList(reg, newRoomTools(Deps{Actions: actions.NewRegistry()})))
+	_, strict := strictNames(t, buildToolList(reg, newRoomTools(Deps{Actions: actions.NewRegistry()}, nil)))
 	if !strict[last] {
 		t.Errorf("%s is in strictReadTools but lost its slot to registration order", last)
 	}
@@ -159,7 +159,7 @@ func TestStrictReadToolsBeatRegistrationOrder(t *testing.T) {
 // Room tools alone (no registry) are all strict: the cap never removes strict
 // where there is room for it.
 func TestStrictToolCapRoomOnly(t *testing.T) {
-	room := newRoomTools(Deps{Actions: actions.NewRegistry()})
+	room := newRoomTools(Deps{Actions: actions.NewRegistry()}, nil)
 	order, strict := strictNames(t, buildToolList(nil, room))
 	if len(order) != len(room) || len(strict) != len(room) {
 		t.Fatalf("sent %d tools, %d strict; want %d and %d", len(order), len(strict), len(room), len(room))

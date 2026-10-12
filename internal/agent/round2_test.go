@@ -174,7 +174,7 @@ func TestEveryToolSchemaObjectHasAdditionalPropertiesFalse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tl := buildToolList(reg, newRoomTools(Deps{Actions: areg}))
+	tl := buildToolList(reg, newRoomTools(Deps{Actions: areg}, nil))
 	if len(tl.params) == 0 {
 		t.Fatal("no tools built")
 	}
@@ -514,7 +514,7 @@ func TestProposeFixNilProposals(t *testing.T) {
 		t.Fatal(err)
 	}
 	tool := &proposeFixTool{actions: reg, proposals: nil, sink: &fakeSink{}}
-	_, err := tool.Run(context.Background(), json.RawMessage(`{"title":"restart","steps":[{"action":"connect_restart_task","params":{},"description":"d"}],"risk":"","rollback":""}`))
+	_, err := tool.Run(context.Background(), json.RawMessage(`{"title":"restart","steps":[{"action":"connect_restart_task","params":{},"description":"d"}],"risk":"low","rollback":"restore the old task"}`))
 	if err == nil {
 		t.Fatal("expected an error when Proposals is nil")
 	}
