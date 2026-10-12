@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -306,5 +307,155 @@ func TestSetCompatibilityBeforeReadFailsStillSets(t *testing.T) {
 	}
 	if fr.compatLevel != "NONE" {
 		t.Fatalf("registry level = %q, want the set to have happened (NONE)", fr.compatLevel)
+	}
+}
+
+// compatReReadFails fails only the second Compatibility call, the read after
+// the write. The read before the write succeeds.
+type compatReReadFails struct {
+	*fakeRegistry
+	reads int
+}
+
+func (f *compatReReadFails) Compatibility(ctx context.Context, subject string) (string, bool, error) {
+	f.reads++
+	if f.reads == 2 {
+		return "", false, errors.New("registry 503")
+	}
+	return f.fakeRegistry.Compatibility(ctx, subject)
+}
+
+// The re-read-failed result still reports the old level, which the agent needs
+// to restore the subject.
+func TestSetCompatibilityReReadFailsKeepsOldLevel(t *testing.T) {
+	fr := &fakeRegistry{compatLevel: "BACKWARD"}
+	d := testDeps()
+	d.Registry = &compatReReadFails{fakeRegistry: fr}
+	reg := NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := reg.Get("schema_set_compatibility")
+	out, err := a.Execute(context.Background(), json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`))
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	want := "pg.public.orders-value compatibility BACKWARD → NONE (set; re-read failed: registry 503)"
+	if out != want {
+		t.Fatalf("out %q, want %q", out, want)
+	}
+	if fr.compatLevel != "NONE" {
+		t.Fatalf("registry level = %q, want the set to have happened (NONE)", fr.compatLevel)
+	}
+}
+
+// inheritedUntilSet reports the level as inherited from the global default
+// (subjectLevel false) until SetCompatibility has run, then as the subject's
+// own level.
+type inheritedUntilSet struct {
+	*fakeRegistry
+	set bool
+}
+
+func (f *inheritedUntilSet) SetCompatibility(ctx context.Context, subject, level string) error {
+	f.set = true
+	return f.fakeRegistry.SetCompatibility(ctx, subject, level)
+}
+
+func (f *inheritedUntilSet) Compatibility(ctx context.Context, subject string) (string, bool, error) {
+	level, _, err := f.fakeRegistry.Compatibility(ctx, subject)
+	return level, f.set, err
+}
+
+// A subject that only inherits the global level is marked "(global)" so the
+// agent knows the subject had no level of its own.
+func TestSetCompatibilityMarksInheritedOldLevel(t *testing.T) {
+	fr := &fakeRegistry{compatLevel: "BACKWARD"}
+	d := testDeps()
+	d.Registry = &inheritedUntilSet{fakeRegistry: fr}
+	reg := NewRegistry()
+	if err := Register(reg, d); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := reg.Get("schema_set_compatibility")
+	out, err := a.Execute(context.Background(), json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`))
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if out != "pg.public.orders-value compatibility BACKWARD (global) → NONE" {
+		t.Fatalf("out %q", out)
+	}
+}
+
+// The connector itself is not RUNNING while its task is: success is refused and
+// the timeout result names the connector.
+func TestRestartConnectorConnectorNotRunningTimesOut(t *testing.T) {
+	sc := &scriptedConnect{script: []clients.ConnectorStatus{connectorWithTasks("FAILED", "RUNNING")}}
+	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	out, err := a.Execute(pollCtx(t, 30*time.Millisecond), json.RawMessage(restartConnectorIn))
+	if err != nil {
+		t.Fatalf("Execute after an accepted restart returned error: %v", err)
+	}
+	want := "restart accepted for pg-orders-connector; connector FAILED (Connect applies restarts asynchronously)"
+	if out != want {
+		t.Fatalf("out %q, want %q", out, want)
+	}
+}
+
+// A read error after the context has ended is a timeout with the last state
+// seen, not an error.
+func TestAwaitRunningReadErrorAfterCtxEndedIsTimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	state, running, err := awaitRunning(ctx, time.Millisecond, func(context.Context) (string, error) {
+		calls++
+		if calls == 1 {
+			return "RESTARTING", nil
+		}
+		cancel()
+		return "", errors.New("connect gone")
+	})
+	if err != nil || running || state != "RESTARTING" {
+		t.Fatalf("state %q running %v err %v, want RESTARTING, not running, nil error", state, running, err)
+	}
+}
+
+// Write failures are wrapped with the action context (AGENTS.md rule 3).
+func TestWriteErrorsCarryActionContext(t *testing.T) {
+	boom := errors.New("connect 500")
+	sc := &scriptedConnect{restartErr: boom}
+	task := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}}
+	if _, err := task.Execute(context.Background(), json.RawMessage(restartTaskIn)); err == nil || !strings.Contains(err.Error(), "actions: restart pg-orders-connector task 0") {
+		t.Fatalf("restart task error %v", err)
+	}
+	conn := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}}
+	if _, err := conn.Execute(context.Background(), json.RawMessage(restartConnectorIn)); err == nil || !strings.Contains(err.Error(), "actions: restart pg-orders-connector") {
+		t.Fatalf("restart connector error %v", err)
+	}
+	comp := &setCompatibility{d: Deps{Connect: sc, Registry: &compatSetFails{fakeRegistry: &fakeRegistry{}, err: boom}}}
+	if _, err := comp.Execute(context.Background(), json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`)); err == nil || !strings.Contains(err.Error(), "actions: set compatibility pg.public.orders-value") || !errors.Is(err, boom) {
+		t.Fatalf("set compatibility error %v", err)
+	}
+}
+
+// compatSetFails fails SetCompatibility with err.
+type compatSetFails struct {
+	*fakeRegistry
+	err error
+}
+
+func (f *compatSetFails) SetCompatibility(context.Context, string, string) error {
+	return f.err
+}
+
+// A read error while the context is still live is returned as an error.
+func TestAwaitRunningReadErrorWithLiveCtxIsError(t *testing.T) {
+	boom := errors.New("connect 503")
+	state, running, err := awaitRunning(context.Background(), time.Millisecond, func(context.Context) (string, error) {
+		return "", boom
+	})
+	if !errors.Is(err, boom) || running || state != "" {
+		t.Fatalf("state %q running %v err %v, want the read error", state, running, err)
 	}
 }

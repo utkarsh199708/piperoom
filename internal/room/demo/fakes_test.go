@@ -39,12 +39,12 @@ func TestRealActionsOverFakesPreventDemoDrift(t *testing.T) {
 		{
 			action: ActionSchemaSetCompatibility,
 			params: `{"subject":"pg.public.orders-value","level":"NONE"}`,
-			want:   "pg.public.orders-value compatibility now NONE",
+			want:   "pg.public.orders-value compatibility BACKWARD → NONE",
 		},
 		{
 			action: ActionConnectRestartTask,
 			params: `{"connector":"pg-orders-connector","task":0}`,
-			want:   "restarted pg-orders-connector task 0 (state now RUNNING)",
+			want:   "restarted pg-orders-connector task 0 (RUNNING)",
 		},
 	}
 	for _, st := range steps {

@@ -240,7 +240,7 @@ func (a *restartTask) Execute(ctx context.Context, raw json.RawMessage) (string,
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := a.d.Connect.RestartTask(ctx, p.Connector, p.Task); err != nil {
-		return "", err
+		return "", fmt.Errorf("actions: restart %s task %d: %w", p.Connector, p.Task, err)
 	}
 	// Connect applies a restart asynchronously. Once the restart call has
 	// succeeded, every later problem is a non-error result: an error would tell
@@ -308,7 +308,7 @@ func (a *restartConnector) Execute(ctx context.Context, raw json.RawMessage) (st
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := a.d.Connect.RestartConnector(ctx, p.Connector); err != nil {
-		return "", err
+		return "", fmt.Errorf("actions: restart %s: %w", p.Connector, err)
 	}
 	// The call uses onlyFailed=true, so it restarts the connector and its
 	// failed tasks. Success needs the connector and every listed task RUNNING:
@@ -511,17 +511,27 @@ func (a *setCompatibility) Execute(ctx context.Context, raw json.RawMessage) (st
 	// to NONE, the agent must know which level to restore. A failed read does
 	// not block the write; the old level is then reported as unknown.
 	old := "unknown"
-	if before, _, err := a.d.Registry.Compatibility(ctx, p.Subject); err == nil && before != "" {
-		old = before
+	if before, subjectLevel, err := a.d.Registry.Compatibility(ctx, p.Subject); err == nil && before != "" {
+		old = levelText(before, subjectLevel)
 	}
 	if err := a.d.Registry.SetCompatibility(ctx, p.Subject, p.Level); err != nil {
-		return "", err
+		return "", fmt.Errorf("actions: set compatibility %s: %w", p.Subject, err)
 	}
-	level, _, err := a.d.Registry.Compatibility(ctx, p.Subject)
+	level, subjectLevel, err := a.d.Registry.Compatibility(ctx, p.Subject)
 	if err != nil {
-		return fmt.Sprintf("%s compatibility now %s (set; re-read failed: %v)", p.Subject, p.Level, err), nil
+		return fmt.Sprintf("%s compatibility %s → %s (set; re-read failed: %v)", p.Subject, old, p.Level, err), nil
 	}
-	return fmt.Sprintf("%s compatibility %s → %s", p.Subject, old, level), nil
+	return fmt.Sprintf("%s compatibility %s → %s", p.Subject, old, levelText(level, subjectLevel)), nil
+}
+
+// levelText renders a compatibility level for the result. A level inherited
+// from the global default is marked "(global)", so the agent can tell that the
+// subject itself had no level of its own.
+func levelText(level string, subjectLevel bool) string {
+	if subjectLevel {
+		return level
+	}
+	return level + " (global)"
 }
 
 // ---- schema_register ----
