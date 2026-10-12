@@ -39,6 +39,7 @@ func demoCmd(ctx context.Context, s *stack, args []string) error {
 		if err := sc.fix(ctx, s); err != nil {
 			return err
 		}
+		printHealth(ctx, s, "health after the fix:")
 		if err := releaseLock(*owner); err != nil {
 			return err
 		}
@@ -71,6 +72,7 @@ func demoCmd(ctx context.Context, s *stack, args []string) error {
 	if err != nil {
 		return err
 	}
+	printHealth(ctx, s, "health before the break:")
 	s.log.Info("demo: breaking", "scenario", rest[0])
 	if err := sc.breakIt(ctx, s); err != nil {
 		return err
