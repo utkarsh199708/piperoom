@@ -205,6 +205,7 @@ func (s *PG) GetRoom(ctx context.Context, id string) (Room, error) {
 	if driverName != nil {
 		r.DriverName = *driverName
 	}
+	utcTimes(&r)
 	return r, nil
 }
 
@@ -235,6 +236,7 @@ func (s *PG) ListRooms(ctx context.Context) ([]Room, error) {
 		if driverName != nil {
 			r.DriverName = *driverName
 		}
+		utcTimes(&r)
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -649,4 +651,19 @@ func nullString(s string) any {
 		return nil
 	}
 	return s
+}
+
+// utcTimes normalises the timestamps pgx scans in the session's local zone to
+// UTC, so rooms read back after a restart keep the RFC 3339 UTC guarantee of
+// docs/api.md:7 regardless of the host timezone.
+func utcTimes(r *Room) {
+	r.OpenedAt = r.OpenedAt.UTC()
+	if r.ClosedAt != nil {
+		c := r.ClosedAt.UTC()
+		r.ClosedAt = &c
+	}
+	if r.DriverLeaseUntil != nil {
+		l := r.DriverLeaseUntil.UTC()
+		r.DriverLeaseUntil = &l
+	}
 }

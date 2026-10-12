@@ -73,7 +73,12 @@ func (h *hub) run(ctx context.Context) {
 			}
 			continue
 		}
-		if _, err := conn.Exec(ctx, "LISTEN room_events"); err != nil {
+		// The LISTEN statement is a network round-trip on a fresh connection;
+		// bound it so a hung backend cannot stall the reconnect loop forever.
+		lctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		_, err = conn.Exec(lctx, "LISTEN room_events")
+		cancel()
+		if err != nil {
 			h.log.Warn("store: LISTEN failed", "err", err)
 			closeConn(conn)
 			h.signalAll()
