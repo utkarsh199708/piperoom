@@ -2,6 +2,7 @@ package room
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"time"
@@ -61,6 +62,11 @@ func (s *Service) Trace(ctx context.Context, user User, roomID, table, key strin
 	stages, err := s.topo.Trace(tctx, pipelineID, table, key)
 	cancel()
 	if err != nil {
+		// A well-formed table that is not in the pipeline is bad input, not an
+		// internal error (docs/api.md:117): map topology.ErrBadInput to 400.
+		if errors.Is(err, topology.ErrBadInput) {
+			return events.Event{}, validation(err.Error())
+		}
 		return events.Event{}, fmt.Errorf("room: trace: %w", err)
 	}
 

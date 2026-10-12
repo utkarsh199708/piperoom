@@ -95,8 +95,13 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 	if err != nil {
 		return events.Event{}, mapStoreErr(err)
 	}
-	if sugg.RoomID != roomID || sugg.Status != "pending" {
+	if sugg.RoomID != roomID {
 		return events.Event{}, notFound("suggestion not found")
+	}
+	// A second send of an already-sent suggestion is a conflict, not a missing
+	// row (docs/api.md:51).
+	if sugg.Status != "pending" {
+		return events.Event{}, alreadyDecided("suggestion already sent")
 	}
 	if err := s.store.SetSuggestionStatus(ctx, suggestionID, "sent"); err != nil {
 		return events.Event{}, err

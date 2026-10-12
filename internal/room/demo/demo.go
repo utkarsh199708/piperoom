@@ -12,6 +12,7 @@ package demo
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"piperoom/internal/agent"
@@ -193,8 +194,17 @@ func (Builder) Render(g topology.Graph) string {
 	return out
 }
 
-// Trace returns a deterministic stage list matching the fixture.
+// Trace returns a deterministic stage list matching the fixture. Like the real
+// builder, a pipeline or table outside the orders pipeline is topology.ErrBadInput
+// (the room service maps it to 400 validation), so the demo and real modes agree
+// on the error taxonomy (review item 7).
 func (Builder) Trace(ctx context.Context, pipelineID, table, key string) ([]events.TraceStage, error) {
+	if pipelineID != "orders" {
+		return nil, fmt.Errorf("%w: pipeline %q not found", topology.ErrBadInput, pipelineID)
+	}
+	if table != "public.orders" {
+		return nil, fmt.Errorf("%w: no connector streams table %q in pipeline %q", topology.ErrBadInput, table, pipelineID)
+	}
 	return []events.TraceStage{
 		{Layer: "postgres", Name: "public.orders", Status: "seen", Facts: map[string]string{"row": "id=10042"}},
 		{Layer: "kafka-connect", Name: "pg-orders-connector", Status: "seen", Facts: map[string]string{"task": "0"}},

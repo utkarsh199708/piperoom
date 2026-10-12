@@ -57,15 +57,17 @@ func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
 	}
 	if st.exec == nil {
 		st.exec = newExecQueue()
+		execCtx, cancel := context.WithCancel(s.ctx)
+		st.execCancel = cancel
 		s.wg.Add(1)
-		go s.runExecutor(p.RoomID, st.exec)
+		go s.runExecutor(execCtx, p.RoomID, st.exec)
 	}
 	st.exec.push(p)
 }
 
-// runExecutor drains the room's queue one proposal at a time until the
-// service lifetime context ends.
-func (s *Service) runExecutor(roomID string, q *execQueue) {
+// runExecutor drains the room's queue one proposal at a time until its room
+// context ends (the room closes) or the service lifetime ends.
+func (s *Service) runExecutor(ctx context.Context, roomID string, q *execQueue) {
 	defer s.wg.Done()
 	for {
 		for {
@@ -78,7 +80,7 @@ func (s *Service) runExecutor(roomID string, q *execQueue) {
 			}
 		}
 		select {
-		case <-s.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-q.wake:
 		}
@@ -182,12 +184,17 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 		// Persist the claim before any side effect. ErrStepOrder here means the
 		// step was already claimed by an earlier executor (crash + restart):
 		// never run it again. Finish the stale claim and record the outcome so
-		// the proposal does not stay open.
+		// the proposal does not stay open. Any other error (shutdown, store
+		// failure) leaves the claim state unknown, so no outcome is recorded:
+		// the proposal stays open and is re-evaluated after the next restart.
 		if err := s.store.StartProposalStep(ctx, p.ProposalID, i); err != nil {
-			output := fmt.Sprintf("step %d was already claimed by an earlier run: %v", i, err)
-			s.finishClaimedStep(p.ProposalID, i, output)
-			s.failProposal(p.RoomID, p.ProposalID, i, output)
-			return fmt.Errorf("room: proposal %s: claim step %d: %w", p.ProposalID, i, err)
+			if errors.Is(err, ErrStepOrder) {
+				output := fmt.Sprintf("step %d was already claimed by an earlier run: %v", i, err)
+				s.finishClaimedStep(p.ProposalID, i, output)
+				s.failProposal(p.RoomID, p.ProposalID, i, output)
+				return fmt.Errorf("room: proposal %s: claim step %d: %w", p.ProposalID, i, err)
+			}
+			return fmt.Errorf("room: proposal %s: start step %d: %w", p.ProposalID, i, err)
 		}
 
 		action, ok := s.actions.Get(step.Action)
@@ -231,11 +238,14 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 }
 
 // stopOnStep finishes a claimed step as failed (which emits its
-// action.executed event) and marks the proposal failed.
+// action.executed event) and marks the proposal failed. If the store finish
+// fails the outcome event is still emitted best-effort (review item 4), so the
+// room UI never learns the step stopped but not why.
 func (s *Service) stopOnStep(t *stepTracker, p store.ProposalRow, i int, output string) {
 	if err := s.finishStep(p.RoomID, p.ProposalID, t, i, false, output); err != nil {
 		s.log.Warn("room: record step stop failed", "proposal", p.ProposalID, "step", i, "err", err)
 		s.finishClaimedStep(p.ProposalID, i, output)
+		s.failStep(p.RoomID, p.ProposalID, i, output)
 	}
 	s.setProposalStatus(p.ProposalID, "failed")
 }
