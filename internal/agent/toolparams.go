@@ -27,14 +27,23 @@ type toolList struct {
 	byName map[string]toolEntry
 }
 
-// maxStrictTools is the API's per-request cap on tools with strict: true; the
-// 21st is rejected with "Too many strict tools (21). The maximum number of
-// strict tools supported is 20." Room tools take the strict slots first:
-// propose_fix carries the nested action params, where a malformed input costs
-// the most. Read tools fill the remaining slots in registration order. The rest
-// are sent without strict; validateInput still checks every read-tool input in
-// code before Tool.Run, so nothing goes unvalidated.
-const maxStrictTools = 20
+// maxStrictTools caps the tools sent with strict: true. The API enforces two
+// limits on them: at most 20 per request ("Too many strict tools (21)"), and a
+// size limit on the grammar compiled from their schemas, which 20 strict tools
+// exceeded in the live run ("The compiled grammar is too large … Simplify your
+// tool schemas or reduce the number of strict tools."). Eight keeps the grammar
+// small. Room tools take the slots first: propose_fix carries the nested action
+// params, where a malformed input costs the most. strictReadTools fill the
+// rest. Tools sent without strict are still checked in code: validateInput runs
+// on every read-tool input before Tool.Run, so nothing goes unvalidated.
+const maxStrictTools = 8
+
+// strictReadTools take the strict slots left after the room tools, in this
+// order: the read tools the eval scenarios (evals/scenarios/*.yaml) call most.
+// Slots left over go to the other read tools in registration order.
+var strictReadTools = []string{
+	"schema_registry_diff", "pipeline_map", "trace_record", "schema_registry_versions", "connect_status",
+}
 
 // buildToolList assembles the model-facing tool definitions. Registry (read)
 // tools keep their registration order; room tools follow in a fixed order. The
@@ -47,10 +56,10 @@ func buildToolList(reg *tools.Registry, room []tools.Tool) toolList {
 		reads = reg.All()
 	}
 	// Room tools claim strict slots first; read tools get what is left.
-	readStrict := max(maxStrictTools-len(room), 0)
-	for i, t := range reads {
+	strictReads := strictReadSet(reads, max(maxStrictTools-len(room), 0))
+	for _, t := range reads {
 		tl.byName[t.Name()] = toolEntry{tool: t, schema: t.InputSchema(), wrapWhy: true}
-		tl.params = append(tl.params, toolParam(t, true, i < readStrict))
+		tl.params = append(tl.params, toolParam(t, true, strictReads[t.Name()]))
 	}
 	for i, t := range room {
 		tl.byName[t.Name()] = toolEntry{tool: t, schema: t.InputSchema(), isRoom: true}
@@ -64,6 +73,33 @@ func buildToolList(reg *tools.Registry, room []tools.Tool) toolList {
 		}
 	}
 	return tl
+}
+
+// strictReadSet picks the read tools that get the n strict slots: the
+// registered strictReadTools in list order, then the others in registration
+// order. The choice depends only on the registry, so the tool list stays
+// byte-identical across requests.
+func strictReadSet(reads []tools.Tool, n int) map[string]bool {
+	registered := make(map[string]bool, len(reads))
+	for _, t := range reads {
+		registered[t.Name()] = true
+	}
+	set := make(map[string]bool, n)
+	for _, name := range strictReadTools {
+		if len(set) >= n {
+			break
+		}
+		if registered[name] {
+			set[name] = true
+		}
+	}
+	for _, t := range reads {
+		if len(set) >= n {
+			break
+		}
+		set[t.Name()] = true
+	}
+	return set
 }
 
 // toolParam converts one Piperoom tool into an SDK tool definition. When

@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 
 	"piperoom/internal/actions"
@@ -11,6 +12,20 @@ import (
 	"piperoom/internal/tools/dbtools"
 	"piperoom/internal/tools/kafkatools"
 )
+
+// fullRegistry registers every real read tool. Registration needs no live
+// clients, only a non-nil Owners.
+func fullRegistry(t *testing.T) *tools.Registry {
+	t.Helper()
+	reg := tools.NewRegistry()
+	if err := dbtools.Register(reg, dbtools.Deps{Owners: &owners.Owners{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := kafkatools.Register(reg, kafkatools.Deps{}); err != nil {
+		t.Fatal(err)
+	}
+	return reg
+}
 
 // strictNames reads the tool definitions back from the JSON the request sends
 // and returns the names in send order plus the set carrying strict: true.
@@ -37,21 +52,16 @@ func strictNames(t *testing.T, tl toolList) (order []string, strict map[string]b
 	return order, strict
 }
 
-// The live run sends every registered read tool plus the room tools, and the
-// API rejects a request with more than maxStrictTools strict tools. Build the
-// real full registry (registration needs no live clients) and check the cap.
+// The live run sends every registered read tool plus the room tools. The API
+// rejects a request with more than maxStrictTools strict tools, and one whose
+// strict schemas compile to a grammar that is too large, so the full registry
+// must stay within the cap and spend the slots on the room tools and the
+// most-used read tools.
 func TestFullRegistryStaysWithinStrictToolCap(t *testing.T) {
-	reg := tools.NewRegistry()
-	if err := dbtools.Register(reg, dbtools.Deps{Owners: &owners.Owners{}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := kafkatools.Register(reg, kafkatools.Deps{}); err != nil {
-		t.Fatal(err)
-	}
+	reg := fullRegistry(t)
 	room := newRoomTools(Deps{Actions: actions.NewRegistry()})
-	tl := buildToolList(reg, room)
+	order, strict := strictNames(t, buildToolList(reg, room))
 
-	order, strict := strictNames(t, tl)
 	if len(order) <= maxStrictTools {
 		t.Fatalf("full registry sends %d tools; the cap only bites above %d, so this test no longer proves anything", len(order), maxStrictTools)
 	}
@@ -66,17 +76,36 @@ func TestFullRegistryStaysWithinStrictToolCap(t *testing.T) {
 			t.Errorf("room tool %s must stay strict", rt.Name())
 		}
 	}
-	// Strict read tools are a prefix of the registration order.
-	for i, rt := range reg.All() {
-		if want := i < maxStrictTools-len(room); strict[rt.Name()] != want {
-			t.Errorf("read tool #%d %s strict = %v, want %v", i, rt.Name(), strict[rt.Name()], want)
+	slots := maxStrictTools - len(room)
+	for _, name := range strictReadTools[:min(slots, len(strictReadTools))] {
+		if !strict[name] {
+			t.Errorf("most-used read tool %s must be strict", name)
 		}
 	}
 }
 
-// Far more read tools than slots: the cap still holds and the rule stays
-// deterministic (room tools first, then read tools in registration order), so
-// the tool list is byte-identical across requests.
+// strictReadTools must name real registered tools, or a typo would silently
+// hand its slot to whatever read tool was registered first.
+func TestStrictReadToolsAreRegistered(t *testing.T) {
+	reg := fullRegistry(t)
+	seen := map[string]bool{}
+	for _, name := range strictReadTools {
+		if _, ok := reg.Get(name); !ok {
+			t.Errorf("strictReadTools names %q, which no read tool registers", name)
+		}
+		if seen[name] {
+			t.Errorf("strictReadTools lists %q twice", name)
+		}
+		seen[name] = true
+		if slices.Contains(roomToolNames, name) {
+			t.Errorf("%q is a room tool; room tools are strict already", name)
+		}
+	}
+}
+
+// Far more read tools than slots, none of them in strictReadTools: the cap
+// still holds and the leftover slots fall back to registration order, so the
+// tool list is byte-identical across requests and no tool is dropped.
 func TestStrictToolCapWithManyReadTools(t *testing.T) {
 	const n = 30
 	reg := tools.NewRegistry()
@@ -106,6 +135,24 @@ func TestStrictToolCapWithManyReadTools(t *testing.T) {
 		if want := i < maxStrictTools-len(room); strict[name] != want {
 			t.Errorf("%s strict = %v, want %v", name, strict[name], want)
 		}
+	}
+}
+
+// A most-used tool registered last still beats the registration order.
+func TestStrictReadToolsBeatRegistrationOrder(t *testing.T) {
+	reg := tools.NewRegistry()
+	for i := 0; i < 10; i++ {
+		if err := reg.Register(&recordingTool{name: fmt.Sprintf("read_%02d", i), schema: map[string]any{"type": "object"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	last := strictReadTools[len(strictReadTools)-1]
+	if err := reg.Register(&recordingTool{name: last, schema: map[string]any{"type": "object"}}); err != nil {
+		t.Fatal(err)
+	}
+	_, strict := strictNames(t, buildToolList(reg, newRoomTools(Deps{Actions: actions.NewRegistry()})))
+	if !strict[last] {
+		t.Errorf("%s is in strictReadTools but lost its slot to registration order", last)
 	}
 }
 
