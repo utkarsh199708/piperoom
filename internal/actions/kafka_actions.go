@@ -273,6 +273,10 @@ type resumeConnectorParams struct {
 	Connector string `json:"connector"`
 }
 
+// resumePollInterval is how often Execute re-reads the connector state while
+// it waits for Connect to apply the resume.
+const resumePollInterval = 250 * time.Millisecond
+
 func (a *resumeConnector) Validate(raw json.RawMessage) error {
 	var p resumeConnectorParams
 	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" {
@@ -280,7 +284,20 @@ func (a *resumeConnector) Validate(raw json.RawMessage) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return a.d.connectorExists(ctx, p.Connector)
+	if err := a.d.connectorExists(ctx, p.Connector); err != nil {
+		return err
+	}
+	// Resume only moves PAUSED or STOPPED connectors. Refusing the rest here
+	// keeps the agent from "resuming" a RUNNING connector or a FAILED one,
+	// which a resume does not fix (restart is the action for FAILED tasks).
+	st, err := a.d.Connect.Status(ctx, p.Connector)
+	if err != nil {
+		return fmt.Errorf("actions: resume %s: read status: %w", p.Connector, err)
+	}
+	if st.State != "PAUSED" && st.State != "STOPPED" {
+		return fmt.Errorf("actions: connector %q is %s; resume only applies to PAUSED or STOPPED", p.Connector, st.State)
+	}
+	return nil
 }
 
 func (a *resumeConnector) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
@@ -294,7 +311,7 @@ func (a *resumeConnector) CheckScope(p owners.Pipeline, raw json.RawMessage) err
 func (a *resumeConnector) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
 	var p resumeConnectorParams
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return "", err
+		return "", fmt.Errorf("actions: bad params: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -303,13 +320,27 @@ func (a *resumeConnector) Execute(ctx context.Context, raw json.RawMessage) (str
 		return "", fmt.Errorf("actions: connect client does not support Resume")
 	}
 	if err := rc.Resume(ctx, p.Connector); err != nil {
-		return "", err
+		return "", fmt.Errorf("actions: resume %s: %w", p.Connector, err)
 	}
-	st, err := a.d.Connect.Status(ctx, p.Connector)
-	if err != nil {
-		return "", err
+	// Connect applies a resume asynchronously. Once Resume has succeeded the
+	// write is done, so every later failure is reported as a non-error result:
+	// an error here would tell the agent the resume failed and invite a retry.
+	state := ""
+	for {
+		st, err := a.d.Connect.Status(ctx, p.Connector)
+		if err != nil {
+			return fmt.Sprintf("resume accepted for %s; status read failed: %v", p.Connector, err), nil
+		}
+		state = st.State
+		if state == "RUNNING" {
+			return fmt.Sprintf("resumed %s (RUNNING)", p.Connector), nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Sprintf("resume accepted for %s; state now %s (Connect applies resume asynchronously)", p.Connector, state), nil
+		case <-time.After(resumePollInterval):
+		}
 	}
-	return fmt.Sprintf("resumed %s (connector state %s)", p.Connector, st.State), nil
 }
 
 // ---- schema_set_compatibility ----
