@@ -265,6 +265,10 @@ func TestLongTransactionsIntegration(t *testing.T) {
 	}
 	for _, tx := range txns {
 		if tx.Username == "piperoom" && strings.Contains(tx.State, "transaction") {
+			// The client returns the statement verb only, never the text.
+			if tx.Query != "SELECT" {
+				t.Fatalf("Query = %q, want only the statement verb SELECT", tx.Query)
+			}
 			return
 		}
 	}

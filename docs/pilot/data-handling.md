@@ -95,17 +95,17 @@ Two more things follow from this list:
 |---|---|---|
 | `pg_replication_slots` | slot name, plugin, active flag, WAL retained | data |
 | `pg_recent_ddl` | DDL command, object, **full statement text**, user, time | row data |
-| `pg_long_transactions` | in the **Summary** sent to the model: pid, user, state, age, and the first 200 characters of the query, only if the role may see query text. In the **Data** stored in the room log: the query text up to 500 characters (`internal/clients/postgres/postgres.go:166`; Summary cut at `internal/tools/dbtools/pg.go:130`) | query text beyond 500 characters |
+| `pg_long_transactions` | pid, user, application name (client-set free text, shown as-is), state, transaction age, wait event, and at most the statement verb (first keyword, e.g. `UPDATE`). Database-wide: it lists sessions of every pipeline, because any long transaction holds the WAL horizon | query text (never selected, never returned) |
 | `pg_row` | row **column names**; values only for the key and timestamp columns, others `null` (`pg.go:191,199`). Key and timestamp columns are chosen **by name**: the key is the column you pass in, and timestamp columns are `at` or names ending in `_at` (`dbtools.go:220-222`) | other column values |
-| `pg_publication_tables` | for a pipeline: the Debezium publication name, the connector's database role name (from its config), and for each source table whether it is in the publication and whether that role can SELECT it. `Data` lists the publication's member tables (`pg_publication.go:151-190`) | row data |
+| `pg_publication_tables` | the publication name, the connector role, and only the pipeline's own source tables | other tables of a `FOR ALL TABLES` publication |
 | `warehouse_freshness` | max timestamp of the sink table, lag | row data |
 | `warehouse_row` | **timestamp-named columns only** (`at` or `*_at`), by name, not by type. The key and every other column are dropped, from both Summary and Data (`wh.go:111,119-127`; `dbtools.go:220-222`). The same on Snowflake, where column names come back lower-cased (`internal/clients/snowflake/snowflake.go:148`) | key value, all other columns |
 | `pipeline_map` | the pipeline's tables, connectors, topics, consumer groups and sink tables, with owners and health (`map.go:17-26`) | row data |
-| `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag` | topic/group names, offsets, lag | record payloads |
+| `kafka_topic_offsets`, `kafka_list_groups`, `kafka_consumer_lag` | topic/group names, offsets, lag, only for the room pipeline's own topics and consumer groups (`kafka_consumer_lag` shows only partitions of the pipeline's topics) | record payloads |
 | `kafka_topic_config` | for a pipeline's own topic: retention, cleanup policy, min in-sync replicas, partition count and replication factor (`kafka_tools.go:236-270`) | record payloads |
 | `kafka_find_by_key` | topic, partition, offset, timestamp and **key** of matching records | record **values** |
 | `trace_record` | per-stage status and facts for one `(table, key)` (`map.go:46`) | row values |
-| `connect_*` | connector state and task errors (**stack traces can contain data**). Config: a fixed list of key names (`connect_tools.go:155-166`), every `transforms*` key **in full**, and secret-looking keys (`password`, `secret`, `token`, `.key`) as `***`. A secret key's presence is shown, not its value (`connect_tools.go:163-170`) | secret values |
+| `connect_*` | connector state and task errors (**stack traces can contain data**). Config: a fixed list of key names (`connect_tools.go:155-166`), the `transforms` name list and each transform's `type`, `field`, `fields` and `field.name` (every other `transforms*` value is `***`), and secret-looking keys (`password`, `secret`, `token`, `.key`) as `***`. A secret key's presence is shown, not its value (`connect_tools.go:163-170`) | secret values |
 | `schema_registry_*` | subjects, versions, schema definitions and diffs | data |
 | `runbook_lookup` | sections of the runbook library embedded in the binary (`internal/tools/runbooks/runbooks.go:42-43`) | pipeline data, network |
 
@@ -116,8 +116,11 @@ Things to know:
 - **Statement text and error traces are free text.** DDL statements and Connect task errors
   can contain literal values. Check yours (for example, `CREATE ROLE ... PASSWORD` in the
   DDL audit log, or a deserialization error that echoes a record).
-- **Config `transforms*` values are shown in full.** Put secrets in config providers, not in
-  transform settings.
+- **Only some `transforms*` settings are shown.** The `transforms` name list and each
+  transform's `type`, `field`, `fields` and `field.name` appear; every other transform setting
+  is shown as `***`. Still put secrets in config providers, not in transform settings.
+- **`application_name` is free text.** The client sets it (any session can put anything in it),
+  and `pg_long_transactions` shows it as-is.
 
 ## 3. Prompt injection and untrusted text
 
@@ -134,14 +137,17 @@ guarantee. The controls that do not depend on the model are:
    layer owner approves. Read the exact `params` of a proposal, not just its description (F2).
    Every write action is also checked against the room's pipeline before it runs (F10,
    `internal/room/service_executor.go:211`).
-3. **Read scoping is weak.** Only `pg_row` and `warehouse_row` check that a table is listed for a
-   pipeline (`pg.go:177`, `wh.go:97`), and they check the pipeline the agent names, not the
-   room's. `trace_record`, `pipeline_map`, `pg_publication_tables` and `kafka_topic_config` take an
-   agent-chosen `pipeline_id` that nothing checks against the room. The `kafka_*`,
-   `connect_status`, `connect_config` and `schema_registry_*` tools take free topic, group,
-   connector and subject names with no scoping in code. **Only your database grants, Kafka ACLs,
-   Connect proxy rules and Registry ACLs limit these reads** (F4, still partly open). Keep those
-   grants and ACLs to the pipeline's own objects (see [permissions.md](permissions.md)).
+3. **Read scoping (F11).** Every read tool is scoped to the room's pipeline, and the pipeline
+   comes from the alert, never from the model. A tool refuses a `pipeline_id`, connector, topic,
+   consumer group, subject or table that is not the room pipeline's own, before it calls any
+   client. List tools return only the pipeline's own items. By default a read is refused: a room
+   with no pipeline gets no reads (only `runbook_lookup` works), and only a CLI or dev caller can
+   opt out in code. Two tools stay database-wide because the pipeline cannot be told from
+   `owners.yaml`: `pg_replication_slots` (slot metadata for every slot, no row data) and
+   `pg_long_transactions` (long sessions of every pipeline, no query text, since any long
+   transaction holds the WAL horizon). Database grants, Kafka ACLs, Connect proxy rules and
+   Registry ACLs remain the real boundary; keep them to the pipeline's own objects (see
+   [permissions.md](permissions.md)).
 
 ## 4. Retention and deletion
 
@@ -158,7 +164,8 @@ guarantee. The controls that do not depend on the model are:
 - Run on staging or replicas first; use pipelines without regulated data (card numbers,
   health data, government ids) for the pilot unless your security team signs off.
 - Keep `source_tables` / `sink_tables` as small as possible and grant `SELECT` only on them.
-- Keep `owners.yaml` to the pipelines the room may see, since the row tools accept any pipeline in it.
+- Keep `owners.yaml` to the pipelines your Piperoom may serve. A room can only read its own
+  pipeline (F11), but one process holds the credentials for all of them (F7).
 - Pilot with a small, named group in `users.yaml`: everyone in a room sees everything in it.
 - Turn Slack on only with a **private** channel whose members may see every room mirrored into it.
   Leave `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` unset if they may not.

@@ -593,8 +593,8 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 // scoped to the pipeline of the alert that opened the room and cannot be
 // pointed at another pipeline by its input (security finding F11). The
 // pipeline id comes from the alert, never from the model. An alert with no
-// pipeline adds nothing: its tools are refused unless the caller of Run opted
-// out with tools.WithUnscoped.
+// pipeline clears any pipeline the context inherited: its tools are refused
+// unless the caller of Run opted out with tools.WithUnscoped.
 func (r *runner) toolScope(ctx context.Context) context.Context {
 	return tools.WithPipelineID(ctx, r.alert.PipelineID)
 }

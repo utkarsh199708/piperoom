@@ -319,9 +319,32 @@ hardening, or dev-only exposure).
     `fields` and `field.name` (and the `transforms` name list); every other transforms value is
     `***`. The existing secret masking stays.
   - `connect_status` no longer diffs a subject named in a failure trace unless it is in scope.
-- **Not covered:** `pg_replication_slots` and `pg_long_transactions` are database-wide and
-  `owners.yaml` names no slot or session, so they need a room scope but are not filtered. A
-  per-pipeline slot list in `owners.yaml` would close this.
+  - `pg_long_transactions` no longer returns query text. `pg_stat_activity.query` often holds
+    literal row values from other pipelines' sessions. The postgres client selects only the
+    statement verb, and the tool keeps pid, user, application name, state, transaction age,
+    wait event and at most the verb (`clients.Transaction` got `ApplicationName` and
+    `WaitEvent`; that contract change is its own commit). The data-handling notes
+    (`docs/pilot/data-handling.md`, `docs/pilot/permissions.md`) say the same.
+  - `pg_publication_tables` lists only the publication members that are the pipeline's source
+    tables (a `FOR ALL TABLES` publication has every table as a member).
+  - `kafka_consumer_lag` shows only partitions of the pipeline's topics, and recomputes the
+    total lag from them.
+  - `warehouse_row` runs the table and column format checks before the scope check, like
+    `warehouse_freshness`, so bad input stays `ErrBadInput`.
+  - A caller with no pipeline cannot inherit another room's scope: `WithPipelineID(ctx, "")`
+    clears it, and a guard test (`cmd/investigate/scope_guard_test.go`) checks that after
+    `wiring.RegisterTools` every read tool except `runbook_lookup` refuses `context.Background()`.
+- **Still database-wide (by design):**
+  - `pg_replication_slots` returns slot metadata (name, plugin, active flag, retained WAL,
+    `wal_status`) for every slot in the source database, not only the pipeline's. `owners.yaml`
+    names no slot. It holds no row data. A per-pipeline slot list in `owners.yaml` would let
+    it be filtered.
+  - `pg_long_transactions` lists long sessions of every pipeline (pid, user, application, state,
+    age, wait event, statement verb). It stays database-wide because any long transaction
+    holds the WAL horizon and can stall the slot. It returns no query text.
+- **Rooms with no pipeline:** an alert with no `pipeline_id` gets no scope, so all read tools
+  except `runbook_lookup` are refused (`ErrNoScope`). Only the caller of `agent.Run` can opt
+  out, with `tools.WithUnscoped(ctx)`, for CLI and dev use. The model cannot.
 - **Owner:** A3 (`internal/tools/dbtools`), A2 (`internal/tools/kafkatools`), A4
   (`internal/agent`). One PR by A3.
 

@@ -53,10 +53,17 @@ func WithPipeline(ctx context.Context, p owners.Pipeline) context.Context {
 // WithPipelineID returns a context scoped to the pipeline with this id. The
 // tool resolves the id against its own owners config (ScopeFor), so a caller
 // that only knows the id (the agent runner: Alert.PipelineID) can scope tools.
-// An empty id leaves the context unchanged.
+// An empty id clears any pipeline the context already carries (the explicit
+// WithUnscoped opt-out is kept), so a caller with no pipeline cannot inherit
+// another room's scope.
 func WithPipelineID(ctx context.Context, id string) context.Context {
 	if id == "" {
-		return ctx
+		v := scopeOf(ctx)
+		if !v.hasPipeline && v.pipelineID == "" {
+			return ctx
+		}
+		v.pipeline, v.hasPipeline, v.pipelineID = owners.Pipeline{}, false, ""
+		return context.WithValue(ctx, scopeKey{}, v)
 	}
 	v := scopeOf(ctx)
 	v.pipeline, v.hasPipeline, v.pipelineID = owners.Pipeline{}, false, id
@@ -244,6 +251,12 @@ func (s Scope) CheckSinkTable(table string) error {
 		return nil
 	}
 	return refuse("table", table, s, "allowed sink tables: "+strings.Join(s.p.SinkTables, ", "))
+}
+
+// TopicInScope reports whether topic is one of the pipeline's topics (always
+// true when unscoped).
+func (s Scope) TopicInScope(topic string) bool {
+	return s.unscoped || contains(s.Topics(), topic)
 }
 
 // SourceTableInScope reports whether table is one of the pipeline's source tables.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"piperoom/internal/clients"
@@ -171,14 +172,17 @@ func publicationSummary(pub, role string, sourceTables []string, tables []postgr
 
 // publicationData is the structured Data payload: the publication name and its
 // source, the connector name, the connector user and where it came from, the
-// publication's member tables, and the per-source-table membership + SELECT
-// view.
+// publication's member tables that are pipeline source tables, and the
+// per-source-table membership + SELECT view.
 func publicationData(c connectorConfig, sourceTables []string, tables []postgres.PublicationTable) map[string]any {
 	byName := map[string]postgres.PublicationTable{}
 	var members []postgres.PublicationTable
 	for _, t := range tables {
-		byName[t.Schema+"."+t.Table] = t
-		if t.InPublication {
+		name := t.Schema + "." + t.Table
+		byName[name] = t
+		// Only the pipeline's own tables: a FOR ALL TABLES publication has
+		// every table of the database as a member.
+		if t.InPublication && slices.Contains(sourceTables, name) {
 			members = append(members, t)
 		}
 	}

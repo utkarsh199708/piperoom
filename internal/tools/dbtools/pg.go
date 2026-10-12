@@ -112,7 +112,7 @@ func pgRecentDDLTool(d Deps) tools.Tool {
 func pgLongTransactionsTool(d Deps) tools.Tool {
 	return &tool{
 		name: "pg_long_transactions",
-		desc: "List transactions on the source Postgres that have been open longer than a threshold.",
+		desc: "List transactions on the source Postgres that have been open longer than a threshold (pid, user, application, state, age, wait event, statement verb; no query text).",
 		schema: objSchema(map[string]any{
 			"older_than_minutes": intProp("Minimum transaction age in minutes. Default 5."),
 		}),
@@ -129,9 +129,10 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 			if input.OlderThanMinutes < 0 {
 				return tools.Result{}, fmt.Errorf("%w: older_than_minutes must be >= 0", tools.ErrBadInput)
 			}
-			// Open transactions are database-wide and cannot be tied to a
-			// pipeline, so this tool is not filtered; it still needs a room
-			// scope (or the opt-out).
+			// Open transactions are database-wide (any long transaction holds the
+			// WAL horizon) and cannot be tied to a pipeline, so the tool is not
+			// filtered; it needs a room scope (or the opt-out) and returns no
+			// query text.
 			if _, err := d.scope(ctx); err != nil {
 				return tools.Result{}, err
 			}
@@ -143,18 +144,60 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_long_transactions: %w", err)
 			}
 
+			// Query text is never returned: it often holds literal row values and
+			// the sessions belong to any pipeline. Keep the diagnostics and at
+			// most the statement verb.
+			rows := make([]longTxn, 0, len(txns))
 			var sb strings.Builder
 			for _, t := range txns {
-				fmt.Fprintf(&sb, "pid=%d user=%s state=%s age=%s query=%s\n",
-					t.PID, t.Username, t.State, topology.HumanAge(t.Age), cutShort(t.Query, 200))
+				r := longTxn{
+					PID: t.PID, User: t.Username, ApplicationName: t.ApplicationName, State: t.State,
+					Age: topology.HumanAge(t.Age), AgeSeconds: int64(t.Age / time.Second),
+					WaitEvent: t.WaitEvent, Verb: statementVerb(t.Query),
+				}
+				rows = append(rows, r)
+				fmt.Fprintf(&sb, "pid=%d user=%s app=%s state=%s age=%s wait=%s verb=%s\n",
+					r.PID, r.User, r.ApplicationName, r.State, r.Age, orDash(r.WaitEvent), orDash(r.Verb))
 			}
 			if len(txns) == 0 {
 				sb.WriteString("(no long transactions)\n")
 			}
 			summary, truncated := tools.Truncate(sb.String())
-			return tools.Result{Summary: summary, Data: txns, Truncated: truncated}, nil
+			return tools.Result{Summary: summary, Data: rows, Truncated: truncated}, nil
 		},
 	}
+}
+
+// longTxn is one open transaction as the tool reports it: no query text.
+type longTxn struct {
+	PID             int    `json:"pid"`
+	User            string `json:"user"`
+	ApplicationName string `json:"application_name"`
+	State           string `json:"state"`
+	Age             string `json:"age"`
+	AgeSeconds      int64  `json:"age_seconds"`
+	WaitEvent       string `json:"wait_event"`
+	Verb            string `json:"verb"`
+}
+
+// statementVerb returns the first keyword of a statement in upper case (at most
+// 16 letters), or "" when it does not start with letters. It is applied even
+// when the client already sends only a verb, so a client that returns the full
+// statement text still cannot leak it.
+func statementVerb(q string) string {
+	q = strings.TrimSpace(q)
+	end := 0
+	for end < len(q) && end < 16 && (q[end] >= 'a' && q[end] <= 'z' || q[end] >= 'A' && q[end] <= 'Z') {
+		end++
+	}
+	return strings.ToUpper(q[:end])
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
 }
 
 func pgRowTool(d Deps) tools.Tool {

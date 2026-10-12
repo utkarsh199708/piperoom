@@ -181,7 +181,19 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 	if err != nil {
 		return tools.Result{}, err
 	}
+	// Only the pipeline's topics: a group can read topics of other pipelines.
 	parts := lag.Partitions
+	if !sc.Unscoped() {
+		parts = nil
+		var total int64
+		for _, pl := range lag.Partitions {
+			if sc.TopicInScope(pl.Topic) {
+				parts = append(parts, pl)
+				total += pl.Lag
+			}
+		}
+		lag.TotalLag = total
+	}
 	sort.Slice(parts, func(i, j int) bool { return parts[i].Lag > parts[j].Lag })
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s: %s, %d members, total lag %d", lag.Group, lag.State, lag.Members, lag.TotalLag)
