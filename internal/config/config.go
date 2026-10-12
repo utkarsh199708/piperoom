@@ -44,6 +44,11 @@ type Config struct {
 	ConnectTLSCAFile   string // CONNECT_TLS_CA_FILE
 	ConnectTLSCertFile string // CONNECT_TLS_CERT_FILE
 	ConnectTLSKeyFile  string // CONNECT_TLS_KEY_FILE
+
+	// Slack mirror of rooms. Off unless both token and channel are set.
+	SlackBotToken  string // SLACK_BOT_TOKEN (secret)
+	SlackChannelID string // SLACK_CHANNEL_ID
+	PublicURL      string // PIPEROOM_PUBLIC_URL: base URL for room links in Slack; empty = no links
 }
 
 // Load reads the environment and applies dev defaults.
@@ -81,6 +86,10 @@ func Load() Config {
 		ConnectTLSCAFile:   get("CONNECT_TLS_CA_FILE", ""),
 		ConnectTLSCertFile: get("CONNECT_TLS_CERT_FILE", ""),
 		ConnectTLSKeyFile:  get("CONNECT_TLS_KEY_FILE", ""),
+
+		SlackBotToken:  get("SLACK_BOT_TOKEN", ""),
+		SlackChannelID: get("SLACK_CHANNEL_ID", ""),
+		PublicURL:      get("PIPEROOM_PUBLIC_URL", ""),
 	}
 }
 
