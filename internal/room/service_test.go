@@ -1609,3 +1609,83 @@ func TestRebuildDriverLeaseUTC(t *testing.T) {
 		t.Fatalf("lease: got %s want %s", snap.Driver.LeaseUntil, later.UTC())
 	}
 }
+
+// TestActionResultCarriesStepOutcome pins the action_result agent input: its OK
+// field mirrors ActionExecutedPayload.OK, so the agent can tell a failed step
+// from a successful one. Approval results carry no outcome (OK stays nil).
+func TestActionResultCarriesStepOutcome(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	good := &fakeAction{name: "good_act", layer: "postgres"}
+	bad := &fakeAction{name: "bad_act", layer: "postgres", fail: true}
+	reg := actions.NewRegistry()
+	for _, a := range []actions.Action{good, bad} {
+		if err := reg.Register(a); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+	inboxCh := make(chan agent.Inbox, 1)
+	svc := room.New(room.Deps{
+		Store: st, Actions: reg, Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
+		Run: func(ctx context.Context, _ agent.Alert, deps agent.Deps, _ agent.Options) error {
+			inboxCh <- deps.Inbox
+			<-ctx.Done()
+			return nil
+		},
+	})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "arjun").ID
+	inbox := <-inboxCh
+
+	propose := func(action string) string {
+		t.Helper()
+		pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+			Title: action,
+			Steps: []events.ProposalStep{{Action: action, Layer: "postgres", Params: json.RawMessage("{}")}},
+		}, events.AgentActor)
+		if err != nil {
+			t.Fatalf("create proposal %s: %v", action, err)
+		}
+		if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+			t.Fatalf("approve %s: %v", action, err)
+		}
+		return pid
+	}
+	okPID := propose("good_act")
+	failPID := propose("bad_act")
+
+	waitFor(t, 5*time.Second, func() bool {
+		a, errA := st.GetProposal(context.Background(), okPID)
+		b, errB := st.GetProposal(context.Background(), failPID)
+		return errA == nil && errB == nil && a.Status == "executed" && b.Status == "failed"
+	})
+
+	inputs, err := inbox.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	got := map[string]*bool{}
+	for _, in := range inputs {
+		switch in.Kind {
+		case "action_result":
+			pid := okPID
+			if strings.Contains(in.Text, failPID) {
+				pid = failPID
+			}
+			got[pid] = in.OK
+		case "approval_result":
+			if in.OK != nil {
+				t.Fatalf("approval_result must not carry OK: %+v", in)
+			}
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("want two action_result inputs, got %+v", inputs)
+	}
+	if v := got[okPID]; v == nil || !*v {
+		t.Fatalf("successful step: OK = %v, want true", v)
+	}
+	if v := got[failPID]; v == nil || *v {
+		t.Fatalf("failed step: OK = %v, want false", v)
+	}
+}

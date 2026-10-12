@@ -560,7 +560,10 @@ func (s *Service) feedInbox(st *roomState, e events.Event) {
 		if !ok {
 			return
 		}
-		input = &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "action_result", Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, p.StepIndex, p.Output)}
+		// OK tells the agent whether the step succeeded; it must not claim the
+		// pipeline recovered from a failed step (agent.HumanInput.OK).
+		stepOK := p.OK
+		input = &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "action_result", Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, p.StepIndex, p.Output), OK: &stepOK}
 	default:
 		return
 	}
