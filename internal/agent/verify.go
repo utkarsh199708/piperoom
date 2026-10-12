@@ -18,10 +18,11 @@ import (
 
 // verify-after-fix: once the last step of a proposal has succeeded, the agent
 // re-checks the pipeline before it claims recovery. The room delivers each
-// executed step as a HumanInput{Kind:"action_result"} whose Text is "proposal
-// <id> step <n>: <output>" and whose OK says whether the step succeeded (see
-// internal/room). Because the agent created the proposal itself, it can match
-// that text back to the proposal and know whether n is the last step.
+// executed step as a HumanInput{Kind:"action_result"} whose ProposalID and
+// StepIndex name the step and whose OK says whether it succeeded (see
+// internal/room); Text is only for display. Because the agent created the
+// proposal itself, it can match those fields back to the proposal and know
+// whether the step is the last one.
 //
 // Recovery needs two things. The layer checks of the touched layers must pass,
 // and the data must flow: every sink table of the alert's pipeline must receive
@@ -75,10 +76,12 @@ type proposalRecord struct {
 type proposalTracker struct {
 	mu   sync.Mutex
 	byID map[string]proposalRecord
+	// flows follows each proposal from approval to executed steps (approvals.go).
+	flows map[string]*execFlow
 }
 
 func newProposalTracker() *proposalTracker {
-	return &proposalTracker{byID: map[string]proposalRecord{}}
+	return &proposalTracker{byID: map[string]proposalRecord{}, flows: map[string]*execFlow{}}
 }
 
 func (t *proposalTracker) record(id string, steps []events.ProposalStep) {
@@ -88,6 +91,7 @@ func (t *proposalTracker) record(id string, steps []events.ProposalStep) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.byID[id] = proposalRecord{id: id, steps: steps}
+	t.flows[id] = newExecFlow(steps)
 }
 
 func (t *proposalTracker) get(id string) (proposalRecord, bool) {
@@ -131,25 +135,14 @@ func (t *proposalTracker) setBaseline(id string, baseline map[string]time.Time) 
 	t.byID[id] = rec
 }
 
-// parseActionResult splits the room's action_result text back into its parts.
-func parseActionResult(text string) (id string, step int, ok bool) {
-	rest, found := strings.CutPrefix(text, "proposal ")
-	if !found {
+// actionResultFields reads which proposal step an action_result is about from
+// the input's fields. ok is false when a field is missing (for example an event
+// replayed from before the fields existed); the text is only for display.
+func actionResultFields(in HumanInput) (id string, step int, ok bool) {
+	if in.ProposalID == "" || in.StepIndex == nil {
 		return "", 0, false
 	}
-	id, rest, found = strings.Cut(rest, " step ")
-	if !found {
-		return "", 0, false
-	}
-	stepStr, _, found := strings.Cut(rest, ": ")
-	if !found {
-		return "", 0, false
-	}
-	n, err := strconv.Atoi(stepStr)
-	if err != nil || id == "" {
-		return "", 0, false
-	}
-	return id, n, true
+	return in.ProposalID, *in.StepIndex, true
 }
 
 // actionOutcome is what a batch of inputs means for the loop.
@@ -205,7 +198,7 @@ func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) a
 // reported and the model runs; an unknown outcome is never turned into a
 // recovery claim.
 func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOutcome {
-	id, step, parsed := parseActionResult(in.Text)
+	id, step, parsed := actionResultFields(in)
 	switch {
 	case in.OK == nil:
 		return actionOutcome{broken: true, needsModel: true, notes: []string{verifyTag + unknownOutcomeText(id, step, parsed)}}
@@ -242,6 +235,9 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	}
 	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: head + evidence + followUp})
 	r.proposals.markVerified(id, recovered)
+	if recovered {
+		r.trackNoneSubjects(rec.steps)
+	}
 	out := actionOutcome{
 		recovered: recovered,
 		broken:    !recovered,
@@ -386,12 +382,14 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) (bool, 
 		return false, strings.Join(lines, "\n"), "NOT recovered: a layer check did not pass.\n"
 	}
 
-	if r.recoveredIdle && schemaConfigOnly(rec.steps) {
+	if r.recoveredIdle && schemaConfigOnly(rec.steps) && r.restoresTrackedSubjects(rec.steps) {
 		// The episode was already verified recovered, and this proposal only
-		// tightens schema configuration (the restore after a fix). The layer
-		// checks decide. Data flow is read once for the evidence and is not waited
-		// for: a compatibility change adds no rows by itself. From a broken state
-		// nothing has been verified yet, so the data-flow rule applies.
+		// restores subjects that a verified fix left at NONE (the restore after a
+		// fix). The layer checks decide. Data flow is read once for the evidence
+		// and is not waited for: a compatibility change adds no rows by itself.
+		// From a broken state nothing has been verified yet, and a compatibility
+		// change of any other subject (for example FULL to BACKWARD after a
+		// re-break) is not that restore, so the data-flow rule applies.
 		flow := r.verifyDataFlow(ctx, rec, false)
 		lines = append(lines, "data flow (information only, not part of this verdict):")
 		lines = append(lines, flow.lines...)
@@ -510,6 +508,42 @@ func schemaConfigOnly(steps []events.ProposalStep) bool {
 	_, final := compatFinalLevels(steps)
 	for _, level := range final {
 		if level == "NONE" {
+			return false
+		}
+	}
+	return true
+}
+
+// trackNoneSubjects records the effect of a proposal whose verdict is
+// "recovered": every subject it leaves at NONE becomes tracked, and every subject
+// it moves to another level stops being tracked. The restore of a tracked
+// subject is the one change that may be judged without data flow.
+func (r *runner) trackNoneSubjects(steps []events.ProposalStep) {
+	if r.noneSubjects == nil {
+		r.noneSubjects = map[string]bool{}
+	}
+	order, final := compatFinalLevels(steps)
+	for _, subject := range order {
+		if final[subject] == "NONE" {
+			r.noneSubjects[subject] = true
+		} else {
+			delete(r.noneSubjects, subject)
+		}
+	}
+}
+
+// restoresTrackedSubjects reports whether every subject the steps set is one a
+// verified proposal left at NONE. Together with schemaConfigOnly (which makes the
+// steps compatibility steps that end away from NONE) it means the proposal moves
+// only tracked subjects away from NONE. A proposal that also touches an untracked
+// subject is not the restore and keeps the data-flow rule.
+func (r *runner) restoresTrackedSubjects(steps []events.ProposalStep) bool {
+	order, _ := compatFinalLevels(steps)
+	if len(order) == 0 {
+		return false
+	}
+	for _, subject := range order {
+		if !r.noneSubjects[subject] {
 			return false
 		}
 	}

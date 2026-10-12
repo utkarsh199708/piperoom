@@ -1669,6 +1669,16 @@ func TestActionResultCarriesStepOutcome(t *testing.T) {
 	}
 	okPID := propose("good_act")
 	failPID := propose("bad_act")
+	rejectedPID, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change", Title: "rejected",
+		Steps: []events.ProposalStep{{Action: "good_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor)
+	if err != nil {
+		t.Fatalf("create proposal to reject: %v", err)
+	}
+	if _, err := svc.RejectProposal(context.Background(), mustUser(t, svc, "priya"), rejectedPID, "postgres", "not now"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
 
 	waitFor(t, 5*time.Second, func() bool {
 		a, errA := st.GetProposal(context.Background(), okPID)
@@ -1681,18 +1691,35 @@ func TestActionResultCarriesStepOutcome(t *testing.T) {
 		t.Fatalf("drain: %v", err)
 	}
 	got := map[string]*bool{}
+	approvals := map[string]bool{}
 	for _, in := range inputs {
 		switch in.Kind {
 		case "action_result":
-			pid := okPID
-			if strings.Contains(in.Text, failPID) {
-				pid = failPID
+			// The proposal and step come in fields; the text is only for display.
+			if in.StepIndex == nil || *in.StepIndex != 0 || in.Layer != "" || in.Approved != nil {
+				t.Fatalf("action_result fields: want StepIndex 0 and no Layer/Approved, got %+v", in)
 			}
-			got[pid] = in.OK
+			if !strings.Contains(in.Text, in.ProposalID) {
+				t.Fatalf("action_result text must keep naming the proposal: %+v", in)
+			}
+			got[in.ProposalID] = in.OK
 		case "approval_result":
 			if in.OK != nil {
 				t.Fatalf("approval_result must not carry OK: %+v", in)
 			}
+			if in.Layer != "postgres" || in.Approved == nil || in.StepIndex != nil {
+				t.Fatalf("approval_result fields: want Layer postgres and Approved set, got %+v", in)
+			}
+			approvals[in.ProposalID] = *in.Approved
+		}
+	}
+	wantApprovals := map[string]bool{okPID: true, failPID: true, rejectedPID: false}
+	if len(approvals) != len(wantApprovals) {
+		t.Fatalf("approval_result inputs: got %v, want %v", approvals, wantApprovals)
+	}
+	for pid, want := range wantApprovals {
+		if v, ok := approvals[pid]; !ok || v != want {
+			t.Fatalf("approval_result inputs: got %v, want %v", approvals, wantApprovals)
 		}
 	}
 	if len(got) != 2 {

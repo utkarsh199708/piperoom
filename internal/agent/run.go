@@ -75,6 +75,13 @@ type runner struct {
 	// a human, instead of reporting idle.
 	recoveredIdle bool
 
+	// noneSubjects are the schema subjects a verified-recovered proposal left at
+	// compatibility NONE and no verified proposal has moved away from NONE since.
+	// Only a restore of such a subject is judged by its layer checks alone (see
+	// verifyProposal). It is lost on restart, which only makes the verdict
+	// stricter: the data-flow rule then applies.
+	noneSubjects map[string]bool
+
 	emitMu sync.Mutex
 }
 
@@ -115,6 +122,8 @@ func newRunner(alert Alert, deps Deps, opts Options) (*runner, error) {
 		clk:       realClock{},
 		timing:    defaultTiming(),
 		proposals: newProposalTracker(),
+
+		noneSubjects: map[string]bool{},
 	}, nil
 }
 
@@ -133,7 +142,7 @@ func (r *runner) run(ctx context.Context) error {
 	initialInputs := r.drain(ctx)
 	// The model reads the verdict of an early recovery in its first turn. Only
 	// an episode that ends after a recovery parks, in pauseForHumanInput.
-	outcome := r.handleActionResults(ctx, initialInputs)
+	initialInputs, outcome := r.handleInputs(ctx, initialInputs)
 	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs, outcome.notes)}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -162,7 +171,7 @@ func (r *runner) run(ctx context.Context) error {
 			if len(inputs) == 0 {
 				return nil
 			}
-			outcome := r.handleActionResults(ctx, inputs)
+			inputs, outcome := r.handleInputs(ctx, inputs)
 			messages = appendUser(messages, r.inputBlocks(inputs, outcome.notes)...)
 			turns = 0
 			if r.parked(outcome) {
@@ -256,7 +265,7 @@ func (r *runner) run(ctx context.Context) error {
 			// message carries the tool results plus any human input that arrived
 			// while we were running.
 			inputs := r.drain(ctx)
-			outcome := r.handleActionResults(ctx, inputs)
+			inputs, outcome := r.handleInputs(ctx, inputs)
 			blocks := append([]anthropic.BetaContentBlockParamUnion(nil), resultBlocks...)
 			blocks = append(blocks, r.inputBlocks(inputs, outcome.notes)...)
 			if len(blocks) == 0 {
@@ -417,7 +426,7 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 	if len(inputs) == 0 {
 		return true, nil
 	}
-	outcome := r.handleActionResults(ctx, inputs)
+	inputs, outcome := r.handleInputs(ctx, inputs)
 	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.inputBlocks(inputs, outcome.notes)...)
 	*messages = appendUser(*messages, blocks...)
 	*turns = 0
@@ -446,7 +455,7 @@ func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.Be
 		if err != nil {
 			return true, stopErr(err)
 		}
-		outcome := r.handleActionResults(ctx, inputs)
+		inputs, outcome := r.handleInputs(ctx, inputs)
 		*messages = appendUser(*messages, r.inputBlocks(inputs, outcome.notes)...)
 		*turns = 0
 		if !r.parked(outcome) {
