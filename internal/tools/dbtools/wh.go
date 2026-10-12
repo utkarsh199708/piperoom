@@ -16,7 +16,7 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 		name: "warehouse_freshness",
 		desc: "Report the newest timestamp column of a warehouse table and how stale it is.",
 		schema: objSchema(map[string]any{
-			"table":     strProp("\"schema.table\" to inspect."),
+			"table":     strProp("\"schema.table\" (or \"db.schema.table\" on Snowflake) to inspect."),
 			"ts_column": strProp("Timestamp column whose max indicates freshness."),
 		}, "table", "ts_column"),
 		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
@@ -27,10 +27,10 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 			if err := decode(in, &input); err != nil {
 				return tools.Result{}, err
 			}
-			if !validTable(input.Table) {
-				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\"", tools.ErrBadInput)
+			if !d.validWarehouseTable(input.Table) {
+				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\" (or \"db.schema.table\" on Snowflake)", tools.ErrBadInput)
 			}
-			if !validColumn(input.TSColumn) {
+			if !d.validWarehouseColumn(input.TSColumn) {
 				return tools.Result{}, fmt.Errorf("%w: invalid ts_column", tools.ErrBadInput)
 			}
 
@@ -64,7 +64,7 @@ func warehouseRowTool(d Deps) tools.Tool {
 		desc: "Read one row by primary key from the warehouse. Pipeline-scoped: pipeline_id is required and table must be one of the pipeline's sink tables. Returns only timestamp column values.",
 		schema: objSchema(map[string]any{
 			"pipeline_id": strProp("Pipeline id from owners.yaml."),
-			"table":       strProp("\"schema.table\" to read."),
+			"table":       strProp("\"schema.table\" (or \"db.schema.table\" on Snowflake) to read."),
 			"pk_column":   strProp("Primary key column name."),
 			"key":         strProp("Primary key value."),
 		}, "pipeline_id", "table", "pk_column", "key"),
@@ -85,10 +85,10 @@ func warehouseRowTool(d Deps) tools.Tool {
 			if err != nil {
 				return tools.Result{}, err
 			}
-			if !validTable(input.Table) {
-				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\"", tools.ErrBadInput)
+			if !d.validWarehouseTable(input.Table) {
+				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\" (or \"db.schema.table\" on Snowflake)", tools.ErrBadInput)
 			}
-			if !validColumn(input.PKColumn) {
+			if !d.validWarehouseColumn(input.PKColumn) {
 				return tools.Result{}, fmt.Errorf("%w: invalid pk_column", tools.ErrBadInput)
 			}
 			if input.Key == "" {

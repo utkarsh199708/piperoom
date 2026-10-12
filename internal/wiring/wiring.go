@@ -19,7 +19,6 @@ import (
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/clients/postgres"
 	"piperoom/internal/clients/schemareg"
-	"piperoom/internal/clients/warehouse"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -42,9 +41,12 @@ const (
 type Wired struct {
 	Source    clients.SourceDB
 	Warehouse clients.Warehouse
-	Connect   clients.ConnectClient
-	Kafka     clients.KafkaAdmin
-	Registry  clients.SchemaRegistryClient
+	// WarehouseKind is the normalised WAREHOUSE_KIND ("postgres" or
+	// "snowflake"). Empty means postgres.
+	WarehouseKind string
+	Connect       clients.ConnectClient
+	Kafka         clients.KafkaAdmin
+	Registry      clients.SchemaRegistryClient
 
 	// Builder derives pipeline graphs with live health from the clients above.
 	Builder topology.Builder
@@ -139,6 +141,12 @@ func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
 		return nil, fmt.Errorf("wiring: load owners: %w", err)
 	}
 
+	// A bad WAREHOUSE_KIND is a config mistake: fail before any client is built.
+	whKind, err := warehouseKind(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	// Build the A2 clients before any database ping so a bad security
 	// configuration fails Open even when no stack is reachable at all.
 	a2, err := buildA2Clients(cfg)
@@ -163,23 +171,24 @@ func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
 	}
 	opened = append(opened, src.Close)
 
-	wh, err := warehouse.New(ctx, cfg.WarehouseDBURL)
+	wh, closeWh, err := openWarehouse(ctx, cfg, defaultWarehouseOpeners)
 	if err != nil {
 		closeOpened()
-		return nil, fmt.Errorf("wiring: warehouse: %w", err)
+		return nil, err
 	}
-	opened = append(opened, wh.Close)
+	opened = append(opened, closeWh)
 
 	var once sync.Once
 	return &Wired{
-		Source:    src,
-		Warehouse: wh,
-		Connect:   a2.Connect,
-		Kafka:     a2.Kafka,
-		Registry:  a2.Registry,
-		Builder:   topology.NewBuilder(o, a2.Connect, a2.Kafka, src, wh),
-		Owners:    o,
-		close:     func() { once.Do(closeOpened) },
+		Source:        src,
+		Warehouse:     wh,
+		WarehouseKind: whKind,
+		Connect:       a2.Connect,
+		Kafka:         a2.Kafka,
+		Registry:      a2.Registry,
+		Builder:       topology.NewBuilder(o, a2.Connect, a2.Kafka, src, wh),
+		Owners:        o,
+		close:         func() { once.Do(closeOpened) },
 	}, nil
 }
 
@@ -193,7 +202,7 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 		b = topology.NewBuilder(w.Owners, w.Connect, w.Kafka, w.Source, w.Warehouse)
 		w.Builder = b
 	}
-	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, Builder: b, Owners: w.Owners, Connect: w.Connect}); err != nil {
+	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: w.Connect}); err != nil {
 		return fmt.Errorf("wiring: register db tools: %w", err)
 	}
 	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: w.Connect, Registry: w.Registry, Kafka: w.Kafka, Owners: w.Owners}); err != nil {
