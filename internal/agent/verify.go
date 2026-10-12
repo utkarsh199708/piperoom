@@ -75,10 +75,12 @@ type proposalRecord struct {
 type proposalTracker struct {
 	mu   sync.Mutex
 	byID map[string]proposalRecord
+	// flows follows each proposal from approval to executed steps (approvals.go).
+	flows map[string]*execFlow
 }
 
 func newProposalTracker() *proposalTracker {
-	return &proposalTracker{byID: map[string]proposalRecord{}}
+	return &proposalTracker{byID: map[string]proposalRecord{}, flows: map[string]*execFlow{}}
 }
 
 func (t *proposalTracker) record(id string, steps []events.ProposalStep) {
@@ -88,6 +90,7 @@ func (t *proposalTracker) record(id string, steps []events.ProposalStep) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.byID[id] = proposalRecord{id: id, steps: steps}
+	t.flows[id] = newExecFlow(steps)
 }
 
 func (t *proposalTracker) get(id string) (proposalRecord, bool) {
@@ -242,6 +245,9 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	}
 	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: head + evidence + followUp})
 	r.proposals.markVerified(id, recovered)
+	if recovered {
+		r.trackNoneSubjects(rec.steps)
+	}
 	out := actionOutcome{
 		recovered: recovered,
 		broken:    !recovered,
@@ -386,12 +392,14 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) (bool, 
 		return false, strings.Join(lines, "\n"), "NOT recovered: a layer check did not pass.\n"
 	}
 
-	if r.recoveredIdle && schemaConfigOnly(rec.steps) {
+	if r.recoveredIdle && schemaConfigOnly(rec.steps) && r.restoresTrackedSubjects(rec.steps) {
 		// The episode was already verified recovered, and this proposal only
-		// tightens schema configuration (the restore after a fix). The layer
-		// checks decide. Data flow is read once for the evidence and is not waited
-		// for: a compatibility change adds no rows by itself. From a broken state
-		// nothing has been verified yet, so the data-flow rule applies.
+		// restores subjects that a verified fix left at NONE (the restore after a
+		// fix). The layer checks decide. Data flow is read once for the evidence
+		// and is not waited for: a compatibility change adds no rows by itself.
+		// From a broken state nothing has been verified yet, and a compatibility
+		// change of any other subject (for example FULL to BACKWARD after a
+		// re-break) is not that restore, so the data-flow rule applies.
 		flow := r.verifyDataFlow(ctx, rec, false)
 		lines = append(lines, "data flow (information only, not part of this verdict):")
 		lines = append(lines, flow.lines...)
@@ -510,6 +518,42 @@ func schemaConfigOnly(steps []events.ProposalStep) bool {
 	_, final := compatFinalLevels(steps)
 	for _, level := range final {
 		if level == "NONE" {
+			return false
+		}
+	}
+	return true
+}
+
+// trackNoneSubjects records the effect of a proposal whose verdict is
+// "recovered": every subject it leaves at NONE becomes tracked, and every subject
+// it moves to another level stops being tracked. The restore of a tracked
+// subject is the one change that may be judged without data flow.
+func (r *runner) trackNoneSubjects(steps []events.ProposalStep) {
+	if r.noneSubjects == nil {
+		r.noneSubjects = map[string]bool{}
+	}
+	order, final := compatFinalLevels(steps)
+	for _, subject := range order {
+		if final[subject] == "NONE" {
+			r.noneSubjects[subject] = true
+		} else {
+			delete(r.noneSubjects, subject)
+		}
+	}
+}
+
+// restoresTrackedSubjects reports whether every subject the steps set is one a
+// verified proposal left at NONE. Together with schemaConfigOnly (which makes the
+// steps compatibility steps that end away from NONE) it means the proposal moves
+// only tracked subjects away from NONE. A proposal that also touches an untracked
+// subject is not the restore and keeps the data-flow rule.
+func (r *runner) restoresTrackedSubjects(steps []events.ProposalStep) bool {
+	order, _ := compatFinalLevels(steps)
+	if len(order) == 0 {
+		return false
+	}
+	for _, subject := range order {
+		if !r.noneSubjects[subject] {
 			return false
 		}
 	}

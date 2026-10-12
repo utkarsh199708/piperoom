@@ -546,7 +546,8 @@ func TestRestoreProposalOnStaleWarehouseIsRecovered(t *testing.T) {
 	}
 	model := &scriptedModel{}
 	r, _ := newCompatRunner(t, model, inbox, sink, restoreSteps(), compatEnv{warehouse: staleWarehouseTool()})
-	r.recoveredIdle = true // an earlier proposal of this episode was verified recovered
+	r.recoveredIdle = true               // an earlier proposal of this episode was verified recovered
+	r.noneSubjects[compatSubject] = true // ... and left the subject at NONE
 	clk := &fakeClock{}
 	r.clk = clk
 

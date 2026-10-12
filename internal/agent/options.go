@@ -60,6 +60,10 @@ const (
 	// defaultBaselineTimeout bounds the whole creation-baseline snapshot taken
 	// when a proposal is made.
 	defaultBaselineTimeout = 20 * time.Second
+	// defaultStepResultWait bounds how long a model turn waits for the step
+	// results of a proposal that was just approved in full. The executor's
+	// per-step timeout is 30 s, so this leaves room for one slow step.
+	defaultStepResultWait = 45 * time.Second
 	// proposalTimeout bounds the Proposals.Create call so a stalled proposal
 	// store cannot hang the investigation.
 	proposalTimeout = 10 * time.Second
@@ -76,6 +80,9 @@ type timing struct {
 	freshnessWait   time.Duration
 	settleWait      time.Duration
 	baselineTimeout time.Duration
+	// stepResultWait is how long a turn waits for the step results of a
+	// proposal approved in full before it starts without them.
+	stepResultWait time.Duration
 }
 
 // defaultTiming returns the production waits and deadlines.
@@ -88,5 +95,6 @@ func defaultTiming() timing {
 		freshnessWait:   defaultFreshnessWait,
 		settleWait:      defaultSettleWait,
 		baselineTimeout: defaultBaselineTimeout,
+		stepResultWait:  defaultStepResultWait,
 	}
 }
