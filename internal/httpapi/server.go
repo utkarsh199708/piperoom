@@ -37,16 +37,30 @@ type Server struct {
 	gw      *ws.Gateway
 	log     *slog.Logger
 	handler http.Handler
+
+	ready        Pinger
+	probeTimeout time.Duration
+	readyWarn    readyWarner
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
 // gateway for replay + live events. The returned Server must be closed with
 // Close so WebSocket connections and the room service shut down cleanly.
-func New(svc *room.Service, st store.Store, log *slog.Logger) *Server {
+// opts add optional behaviour such as the /readyz store check (WithReady).
+func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{svc: svc, gw: ws.NewGateway(svc, st, log), log: log}
+	s := &Server{
+		svc:          svc,
+		gw:           ws.NewGateway(svc, st, log),
+		log:          log,
+		probeTimeout: DefaultProbeTimeout,
+		readyWarn:    readyWarner{every: readyWarnEvery, now: time.Now},
+	}
+	for _, o := range opts {
+		o(s)
+	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -59,6 +73,11 @@ func New(svc *room.Service, st store.Store, log *slog.Logger) *Server {
 	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	})
+
+	// Liveness/readiness probes: outside /api, so no X-User and no 60 s
+	// request budget; /readyz bounds its store check with probeTimeout.
+	r.Get(pathHealthz, s.handleHealthz)
+	r.Get(pathReadyz, s.handleReadyz)
 
 	r.Route("/api", func(api chi.Router) {
 		// WebSocket authenticates via ?user= (browsers cannot set headers) and
@@ -166,7 +185,12 @@ func requestLog(log *slog.Logger) func(http.Handler) http.Handler {
 			start := time.Now()
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 			next.ServeHTTP(ww, r)
-			log.Info("http request", "method", r.Method, "path", r.URL.Path, "status", ww.Status(), "dur", time.Since(start).Round(time.Millisecond).String())
+			// Probes hit every few seconds; keep them out of the Info log.
+			level := slog.LevelInfo
+			if isProbePath(r.URL.Path) {
+				level = slog.LevelDebug
+			}
+			log.Log(r.Context(), level, "http request", "method", r.Method, "path", r.URL.Path, "status", ww.Status(), "dur", time.Since(start).Round(time.Millisecond).String())
 		})
 	}
 }
