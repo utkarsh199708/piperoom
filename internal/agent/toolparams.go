@@ -28,15 +28,27 @@ type toolList struct {
 }
 
 // maxStrictTools caps the tools sent with strict: true. The API enforces two
-// limits on them: at most 20 per request ("Too many strict tools (21)"), and a
-// size limit on the grammar compiled from their schemas, which 20 strict tools
-// exceeded in the live run ("The compiled grammar is too large … Simplify your
-// tool schemas or reduce the number of strict tools."). Eight keeps the grammar
-// small. Room tools take the slots first: propose_fix carries the nested action
-// params, where a malformed input costs the most. strictReadTools fill the
-// rest. Tools sent without strict are still checked in code: validateInput runs
-// on every read-tool input before Tool.Run, so nothing goes unvalidated.
+// limits on them: a count limit and a size limit on the grammar compiled from
+// their schemas. LEAD-ARCH's live bisect (TestLiveStrictToolCap, 2026-10-12,
+// fullRegistry + room tools) accepted 0–16 strict tools, rejected 20 with
+// "The compiled grammar is too large" and 21 with "Too many strict tools".
+// Eight sits well inside the accepted range; maxStrictSchemaBytes guards the
+// grammar size as schemas grow. Room tools take the slots first: propose_fix
+// carries the nested action params, where a malformed input costs the most.
+// strictReadTools fill the rest. Tools sent without strict are still checked in
+// code: validateInput runs on every read-tool input before Tool.Run, so nothing
+// goes unvalidated.
 const maxStrictTools = 8
+
+// maxStrictSchemaBytes caps the summed size of the marshalled input_schema of
+// every strict tool. Bytes are only a proxy for the compiled grammar size the
+// API limits, but they grow with it. Measured 2026-10-12 with the production
+// registry (db + kafka + runbook read tools, room tools with the real actions
+// registry): the cap-16 strict set (the largest count accepted live) is 7039
+// bytes; the budget is ~80% of that. The shipped cap-8 set is 4491 bytes.
+// Caveat: the live bisect sent propose_fix without registered actions (625
+// bytes instead of 2180), so the accepted live sum at cap 16 was 5484 bytes.
+const maxStrictSchemaBytes = 5600
 
 // strictReadTools take the strict slots left after the room tools, in this
 // order: the read tools the eval scenarios (evals/scenarios/*.yaml) call most.
