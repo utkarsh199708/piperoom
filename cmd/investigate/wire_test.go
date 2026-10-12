@@ -260,12 +260,13 @@ func TestPgRowScopedToPipeline(t *testing.T) {
 	}
 }
 
-// TestSystemPromptNamesOnlyRealTools covers C13 P11: every tool name the
-// agent's system prompt mentions must be a tool the model can really call with
-// this wiring — a read tool registered here, or one of the agent's room tools.
-// A prompt edit that names a nonexistent tool fails this test.
+// TestSystemPromptNamesOnlyRealTools covers C13 P11: every tool or action name
+// the agent's system prompt mentions must be something the model can really
+// reach with this wiring — a read tool registered here, one of the agent's
+// room tools, or a write action it may name inside propose_fix. A prompt edit
+// that names a nonexistent callable fails this test.
 func TestSystemPromptNamesOnlyRealTools(t *testing.T) {
-	reg, _, _ := wireFakes(t)
+	reg, areg, _ := wireFakes(t)
 
 	available := map[string]bool{}
 	for _, tl := range reg.All() {
@@ -274,6 +275,11 @@ func TestSystemPromptNamesOnlyRealTools(t *testing.T) {
 	// The agent builds these on top of the registry it is given.
 	for _, name := range agent.RoomToolNames() {
 		available[name] = true
+	}
+	// The write actions the model may name in propose_fix steps (the
+	// proposal tool refuses anything else).
+	for _, a := range areg.All() {
+		available[a.Name()] = true
 	}
 
 	names := agent.PromptToolNames()
