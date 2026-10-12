@@ -72,7 +72,7 @@ trace or activity feed** — to render a room, the client replays the full event
   "pipeline_id": "orders", "status": "open", "opened_at": "...", "closed_at": null, "resolution": "",
   "last_seq": 42,
   "driver": { "id": "arjun", "name": "Arjun", "lease_until": "..." },
-  "agent_status": { "state": "working", "detail": "step 6" },     // "idle" for a new room
+  "agent_status": { "state": "working", "detail": "step 6" },     // "idle" for a new room; states: working | idle | done | waiting_approval | queued ("waiting for an agent slot (N ahead)" when PIPEROOM_MAX_AGENTS runs are busy)
   "hypothesis": { "text": "...", "based_on_steps": ["s_3","s_4"], "confidence": "high", "confirmed": false },
   "open_proposals": [ { "proposal_id": "p_01J...", "title": "...", "steps": [], "risk": "...", "rollback": "...",
                         "required_layers": ["schema-registry","kafka-connect"],
