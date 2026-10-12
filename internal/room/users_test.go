@@ -54,6 +54,21 @@ func TestValidateUsers(t *testing.T) {
 			owners:  devOwners,
 			wantErr: `"priya" owns layer "schema-registry" in the owners file but lists layers [postgres warehouse]`,
 		},
+		{
+			// The users→owners direction: users.yaml grants priya "warehouse"
+			// while owners.yaml assigns warehouse to meera. The owners→users
+			// check passes (meera owns warehouse and lists it), so only the
+			// users→owners check can catch this drift.
+			name: "users layer not owned by that user refused",
+			users: mustUsers([]User{
+				{ID: "priya", Name: "Priya", Layers: []string{"postgres", "schema-registry", "warehouse"}},
+				{ID: "arjun", Name: "Arjun", Layers: []string{"kafka-connect", "kafka"}},
+				{ID: "meera", Name: "Meera", Layers: []string{"warehouse"}},
+				{ID: "kabir", Name: "Kabir", Layers: []string{"consumer"}},
+			}),
+			owners:  devOwners,
+			wantErr: `grants "priya" layer "warehouse" but the owners file assigns it to "meera"`,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
