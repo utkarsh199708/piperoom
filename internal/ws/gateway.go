@@ -55,6 +55,13 @@ type Gateway struct {
 	// Set it before the gateway serves traffic.
 	ReplayTimeout time.Duration
 
+	// OriginPatterns, when non-nil, replaces the default allowed WebSocket
+	// origin hosts (the Vite dev UI on localhost:5173). The request's own host
+	// is always accepted. Entries are matched with path.Match, so they must be
+	// exact hosts: never build one from unvalidated input. An empty non-nil
+	// slice means same-origin only. Set before serving.
+	OriginPatterns []string
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -176,8 +183,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	origins := g.OriginPatterns
+	if origins == nil {
+		origins = []string{"localhost:5173", "127.0.0.1:5173"}
+	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"localhost:5173", "127.0.0.1:5173"},
+		OriginPatterns: origins,
 	})
 	if err != nil {
 		// Accept already wrote the response.

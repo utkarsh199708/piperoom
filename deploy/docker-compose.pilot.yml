@@ -1,0 +1,113 @@
+# Piperoom pilot stack: the server (with the web UI built in) and its own
+# Postgres for room state. It does NOT include the dev CDC stack: Piperoom
+# connects to YOUR source database, Kafka, Connect, Schema Registry and warehouse.
+#
+#   cp deploy/pilot.env.example deploy/.env      # then fill it in
+#   mkdir -p deploy/config && cp deploy/config/owners.example.yaml deploy/config/owners.yaml  # same for users
+#   docker compose -f deploy/docker-compose.pilot.yml up -d
+#
+# See deploy/README.md. Compose reads deploy/.env (next to this file) for the
+# ${...} values below; the server gets only the settings listed under
+# "environment" (not the Postgres password).
+
+name: piperoom
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: piperoom
+      POSTGRES_DB: piperoom
+      POSTGRES_PASSWORD: ${PIPEROOM_POSTGRES_PASSWORD:?set PIPEROOM_POSTGRES_PASSWORD in deploy/.env}
+    volumes:
+      - piperoom-pgdata:/var/lib/postgresql/data
+    # No "ports": only the server, on this compose network, can reach the database.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U piperoom -d piperoom"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  piperoom:
+    # Built from the Dockerfile at the repo root. To use a prebuilt image, replace
+    # "build" with the image name.
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: piperoom:pilot
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Every variable is listed on purpose, instead of passing all of deploy/.env
+    # with env_file: that would also hand the server container the Postgres
+    # password and the compose-only settings (PIPEROOM_BIND, PIPEROOM_PORT).
+    # An empty value means "use the server default" (or "off"). Add a variable
+    # here if you add a setting to deploy/.env.
+    environment:
+      # The bundled database, unless PIPEROOM_DB_URL is set in deploy/.env.
+      # The password is used only to build this URL.
+      PIPEROOM_DB_URL: ${PIPEROOM_DB_URL:-postgres://piperoom:${PIPEROOM_POSTGRES_PASSWORD}@postgres:5432/piperoom?sslmode=disable}
+      # Fixed by the image and the mounts below.
+      PIPEROOM_HTTP_ADDR: 0.0.0.0:8090
+      PIPEROOM_WEB_DIR: /web
+      OWNERS_FILE: /config/owners.yaml
+      USERS_FILE: /config/users.yaml
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_WORKSPACE_ID: ${ANTHROPIC_WORKSPACE_ID:-}
+      SOURCE_DB_URL: ${SOURCE_DB_URL:-}
+      WAREHOUSE_DB_URL: ${WAREHOUSE_DB_URL:-}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-}
+      CONNECT_URL: ${CONNECT_URL:-}
+      SCHEMA_REGISTRY_URL: ${SCHEMA_REGISTRY_URL:-}
+      PIPEROOM_MODEL: ${PIPEROOM_MODEL:-}
+      PIPEROOM_EFFORT: ${PIPEROOM_EFFORT:-}
+      PIPEROOM_MAX_AGENTS: ${PIPEROOM_MAX_AGENTS:-}
+      PIPEROOM_PUBLIC_URL: ${PIPEROOM_PUBLIC_URL:-}
+      KAFKA_SECURITY_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL:-}
+      KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-}
+      KAFKA_SASL_USERNAME: ${KAFKA_SASL_USERNAME:-}
+      KAFKA_SASL_PASSWORD: ${KAFKA_SASL_PASSWORD:-}
+      KAFKA_TLS_CA_FILE: ${KAFKA_TLS_CA_FILE:-}
+      KAFKA_TLS_CERT_FILE: ${KAFKA_TLS_CERT_FILE:-}
+      KAFKA_TLS_KEY_FILE: ${KAFKA_TLS_KEY_FILE:-}
+      KAFKA_TLS_SERVER_NAME: ${KAFKA_TLS_SERVER_NAME:-}
+      SCHEMA_REGISTRY_USERNAME: ${SCHEMA_REGISTRY_USERNAME:-}
+      SCHEMA_REGISTRY_PASSWORD: ${SCHEMA_REGISTRY_PASSWORD:-}
+      SCHEMA_REGISTRY_TLS_CA_FILE: ${SCHEMA_REGISTRY_TLS_CA_FILE:-}
+      SCHEMA_REGISTRY_TLS_CERT_FILE: ${SCHEMA_REGISTRY_TLS_CERT_FILE:-}
+      SCHEMA_REGISTRY_TLS_KEY_FILE: ${SCHEMA_REGISTRY_TLS_KEY_FILE:-}
+      CONNECT_USERNAME: ${CONNECT_USERNAME:-}
+      CONNECT_PASSWORD: ${CONNECT_PASSWORD:-}
+      CONNECT_TLS_CA_FILE: ${CONNECT_TLS_CA_FILE:-}
+      CONNECT_TLS_CERT_FILE: ${CONNECT_TLS_CERT_FILE:-}
+      CONNECT_TLS_KEY_FILE: ${CONNECT_TLS_KEY_FILE:-}
+      WAREHOUSE_KIND: ${WAREHOUSE_KIND:-}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}
+      ALERTMANAGER_TOKEN: ${ALERTMANAGER_TOKEN:-}
+      GRAFANA_ALERT_SECRET: ${GRAFANA_ALERT_SECRET:-}
+      PAGERDUTY_ALERT_SECRET: ${PAGERDUTY_ALERT_SECRET:-}
+      PAGERDUTY_SERVICES: ${PAGERDUTY_SERVICES:-}
+      DATADOG_ALERT_TOKEN: ${DATADOG_ALERT_TOKEN:-}
+      GENERIC_ALERT_SECRET: ${GENERIC_ALERT_SECRET:-}
+      DEFAULT_ALERT_PIPELINE: ${DEFAULT_ALERT_PIPELINE:-}
+    ports:
+      # Loopback by default: there is no real login yet (see deploy/README.md).
+      - "${PIPEROOM_BIND:-127.0.0.1}:${PIPEROOM_PORT:-8090}:8090"
+    volumes:
+      # owners.yaml and users.yaml: who owns which layer, and who may approve.
+      - ./config:/config:ro
+      # Optional TLS files for Kafka / Registry / Connect (KAFKA_TLS_CA_FILE=/certs/ca.pem ...).
+      - ./certs:/certs:ro
+    # The image has a HEALTHCHECK (GET /healthz). Logs: docker compose logs -f piperoom
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  piperoom-pgdata:

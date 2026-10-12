@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -44,6 +45,11 @@ type Server struct {
 	probeTimeout time.Duration
 	readyWarn    readyWarner
 	refuseWarn   refuseWarner
+
+	// Optional web UI serving (WithWebDir, WithPublicOrigin).
+	webDir  string
+	webRoot *os.Root
+	public  PublicOrigin
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -68,12 +74,31 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
-	r.Use(cors)
+	if s.webDir != "" {
+		r.Use(s.securityHeaders)
+	} else {
+		// The dev UI is a separate origin and needs CORS. When the server
+		// serves the UI itself, everything is same-origin and CORS stays off.
+		r.Use(cors)
+	}
 	r.Use(requestLog(log))
 	// Router-level misses use the same JSON envelope as every other error.
-	r.NotFound(func(w http.ResponseWriter, _ *http.Request) {
+	notFound := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "not found")
-	})
+	}))
+	if s.webDir != "" {
+		// Everything no API or probe route matched is the web UI (static.go);
+		// unknown /api paths still get the JSON 404 there.
+		root, err := os.OpenRoot(s.webDir)
+		if err != nil {
+			// cmd/server checks the directory before it gets here.
+			log.Error("httpapi: open web dir", "dir", s.webDir, "err", err)
+		} else {
+			s.webRoot = root
+			notFound = newStaticHandler(root)
+		}
+	}
+	r.NotFound(notFound.ServeHTTP)
 	r.MethodNotAllowed(func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	})
@@ -122,6 +147,15 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 			})
 		})
 	})
+	if s.webDir != "" {
+		// Same-origin only (the library always accepts the request's own
+		// host), plus the validated public host. The dev origins are for the
+		// Vite dev server, which this mode does not use.
+		s.gw.OriginPatterns = []string{}
+		if s.public.Host != "" {
+			s.gw.OriginPatterns = append(s.gw.OriginPatterns, s.public.Host)
+		}
+	}
 	s.handler = r
 	return s
 }
@@ -139,6 +173,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Close shuts the WebSocket gateway down (closing every live connection) and
 // stops the room service.
 func (s *Server) Close() {
+	if s.webRoot != nil {
+		_ = s.webRoot.Close()
+	}
 	s.gw.Close()
 	s.svc.Close()
 }

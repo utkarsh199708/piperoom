@@ -1,8 +1,34 @@
+# Keep the build context small and free of secrets. Shared by every Dockerfile
+# built from the repo root (the pilot Dockerfile, cmd/devconsumer/Dockerfile).
+#
+# Do NOT ignore every *.md: internal/tools/runbooks/library/*.md is go:embed'ed.
+# Only the root-level markdown is dropped.
 .git
-web
+.github
+.claude
+.gitignore
+.gitattributes
+
+# Environment files can hold secrets.
+.env
+.env.*
+**/*.env
+**/*.env.*
+
+# Not needed to build the server or the web UI.
 bin
 dev
 reviews
 tasks
 docs
-*.md
+evals
+deploy
+/*.md
+Dockerfile
+.dockerignore
+
+# Rebuilt inside the image.
+web/node_modules
+web/dist
+**/*.exe
+**/*.test

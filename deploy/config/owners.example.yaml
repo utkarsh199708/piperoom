@@ -1,0 +1,24 @@
+# owners.yaml: your pipelines and the default owner of each layer.
+# Copy to deploy/config/owners.yaml and edit. Full guide: docs/pilot/setup.md (step 2).
+#
+# The server refuses to start if this file and users.yaml disagree: every layer
+# below must name a user who exists in users.yaml and lists that layer there.
+pipelines:
+  - id: orders                       # the pipeline_id used in rooms and alerts
+    title: Orders CDC
+    topic_prefix: pg                 # Debezium topic.prefix of your connector
+    # The ONLY tables the agent may read at the source. Keep the SELECT grants
+    # of the read-only role identical to this list.
+    source_tables: [public.orders]
+    connectors: [pg-orders-connector]
+    consumer_groups: [order-sync]
+    # The ONLY tables the agent may read in the warehouse.
+    sink_tables: [analytics.orders]
+    sink_ts_column: updated_at       # used to measure freshness
+layers:                              # the default owner (a users.yaml id) of each layer
+  postgres: alice
+  kafka-connect: bob
+  schema-registry: alice
+  kafka: bob
+  consumer: carol
+  warehouse: dave
