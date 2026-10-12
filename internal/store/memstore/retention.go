@@ -14,7 +14,7 @@ var _ store.Purger = (*Store)(nil)
 // PurgeClosedBefore implements store.Purger with the same rules as the
 // Postgres store: only closed rooms with closed_at before cutoff, oldest
 // first, at most maxRooms, and every row keyed by the room goes with it.
-func (s *Store) PurgeClosedBefore(ctx context.Context, cutoff time.Time, maxRooms int) (store.PurgeResult, error) {
+func (s *Store) PurgeClosedBefore(ctx context.Context, cutoff time.Time, maxRooms int, exclude []string) (store.PurgeResult, error) {
 	var res store.PurgeResult
 	if err := ctx.Err(); err != nil {
 		return res, err
@@ -30,7 +30,14 @@ func (s *Store) PurgeClosedBefore(ctx context.Context, cutoff time.Time, maxRoom
 		at time.Time
 	}
 	var cands []cand
+	skip := make(map[string]bool, len(exclude))
+	for _, id := range exclude {
+		skip[id] = true
+	}
 	for id, log := range s.rooms {
+		if skip[id] {
+			continue
+		}
 		m := log.meta
 		if m.Status == "closed" && m.ClosedAt != nil && m.ClosedAt.Before(cutoff) {
 			cands = append(cands, cand{id, *m.ClosedAt})
@@ -45,6 +52,7 @@ func (s *Store) PurgeClosedBefore(ctx context.Context, cutoff time.Time, maxRoom
 	if len(cands) > maxRooms {
 		cands = cands[:maxRooms]
 	}
+	res.Examined = len(cands)
 
 	for _, c := range cands {
 		log := s.rooms[c.id]

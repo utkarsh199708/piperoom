@@ -34,6 +34,14 @@ import (
 // pinned to it. The schema is dropped on cleanup.
 func requireStore(t *testing.T) (*store.PG, string) {
 	t.Helper()
+	s, url, _ := requireStoreSchema(t)
+	return s, url
+}
+
+// requireStoreSchema is requireStore that also returns the test schema's name,
+// for tests that need their own connection to it (for example to add a trigger).
+func requireStoreSchema(t *testing.T) (*store.PG, string, string) {
+	t.Helper()
 	cfg := config.Load()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -87,7 +95,7 @@ func requireStore(t *testing.T) (*store.PG, string) {
 	}
 	s := store.NewPool(pool, cfg.RoomDBURL, slog.Default())
 	t.Cleanup(s.Close)
-	return s, cfg.RoomDBURL
+	return s, cfg.RoomDBURL, schema
 }
 
 // dropSchema removes a test schema; failures are not fatal (best effort).

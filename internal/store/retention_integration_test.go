@@ -6,9 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"piperoom/internal/events"
 	"piperoom/internal/slackbridge"
@@ -73,7 +74,7 @@ func TestPurgeClosedBeforeDeletesOnlyOldClosedRooms(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := s.PurgeClosedBefore(ctx, now.Add(-30*24*time.Hour), 100)
+	res, err := s.PurgeClosedBefore(ctx, now.Add(-30*24*time.Hour), 100, nil)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestPurgeClosedBeforeDeletesOnlyOldClosedRooms(t *testing.T) {
 	}
 
 	// Idempotent.
-	res, err = s.PurgeClosedBefore(ctx, now.Add(-30*24*time.Hour), 100)
+	res, err = s.PurgeClosedBefore(ctx, now.Add(-30*24*time.Hour), 100, nil)
 	if err != nil || len(res.RoomIDs) != 0 {
 		t.Fatalf("second purge: %+v %v", res, err)
 	}
@@ -131,7 +132,7 @@ func TestPurgeClosedBeforeRespectsMaxRoomsOldestFirst(t *testing.T) {
 	r2, _ := seedRoomWithChildren(ctx, t, s, &t2)
 	r3, _ := seedRoomWithChildren(ctx, t, s, &t3)
 
-	res, err := s.PurgeClosedBefore(ctx, now.Add(-30*24*time.Hour), 2)
+	res, err := s.PurgeClosedBefore(ctx, now.Add(-30*24*time.Hour), 2, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,44 +142,51 @@ func TestPurgeClosedBeforeRespectsMaxRoomsOldestFirst(t *testing.T) {
 	if _, err := s.GetRoom(ctx, r3); err != nil {
 		t.Fatalf("third room must wait for the next batch: %v", err)
 	}
-	if res, _ := s.PurgeClosedBefore(ctx, now.Add(-30*24*time.Hour), 2); len(res.RoomIDs) != 1 {
+	if res, _ := s.PurgeClosedBefore(ctx, now.Add(-30*24*time.Hour), 2, nil); len(res.RoomIDs) != 1 {
 		t.Fatalf("next batch should take the last room, got %v", res.RoomIDs)
 	}
 }
 
-// TestPurgeLargeRoomDeletesInBatches crosses the 5000-row statement batch.
+// schemaConn opens a connection pinned to the test schema, for statements the
+// store API has no method for (bulk seeding, a failure-injecting trigger).
+func schemaConn(ctx context.Context, t *testing.T, url, schema string) *pgx.Conn {
+	t.Helper()
+	cfg, err := pgx.ParseConfig(url)
+	if err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	cfg.RuntimeParams["search_path"] = schema
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+	return conn
+}
+
+// TestPurgeLargeRoomDeletesInBatches crosses the 5000-row statement batch. The
+// room is seeded with one INSERT ... generate_series, not 5100 appends.
 func TestPurgeLargeRoomDeletesInBatches(t *testing.T) {
-	s, _ := requireStore(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	s, url, schema := requireStoreSchema(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	roomID := createTestRoom(t, s)
 	const n = 5100
-	var wg sync.WaitGroup
-	jobs := make(chan int)
-	for w := 0; w < 8; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range jobs {
-				if _, err := s.Append(ctx, roomID, events.CommentAdded, commentActor(), events.CommentAddedPayload{CommentID: testenv.Name("c"), Text: "x"}); err != nil {
-					t.Errorf("append %d: %v", i, err)
-				}
-			}
-		}()
+	conn := schemaConn(ctx, t, url, schema)
+	if _, err := conn.Exec(ctx,
+		`INSERT INTO room_events (room_id, seq, type, actor, payload, at)
+		 SELECT $1, g, 'comment.added', '{"kind":"human","id":"arjun","name":"Arjun"}'::jsonb, '{"text":"x"}'::jsonb, now()
+		 FROM generate_series(1, $2::int) AS g`, roomID, n); err != nil {
+		t.Fatalf("seed events: %v", err)
 	}
-	for i := 0; i < n; i++ {
-		jobs <- i
-	}
-	close(jobs)
-	wg.Wait()
-	if t.Failed() {
-		return
+	if _, err := conn.Exec(ctx, `UPDATE rooms SET last_seq = $2 WHERE id = $1`, roomID, n); err != nil {
+		t.Fatalf("seed last_seq: %v", err)
 	}
 	closed := time.Now().UTC().Add(-48 * time.Hour)
 	if err := s.CloseRoom(ctx, roomID, closed); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.PurgeClosedBefore(ctx, time.Now().UTC().Add(-24*time.Hour), 10)
+	res, err := s.PurgeClosedBefore(ctx, time.Now().UTC().Add(-24*time.Hour), 10, nil)
 	if err != nil {
 		t.Fatalf("purge: %v", err)
 	}
@@ -197,11 +205,65 @@ func TestAppendToPurgedRoomIsNotFound(t *testing.T) {
 	defer cancel()
 	closed := time.Now().UTC().Add(-48 * time.Hour)
 	roomID, _ := seedRoomWithChildren(ctx, t, s, &closed)
-	if _, err := s.PurgeClosedBefore(ctx, time.Now().UTC().Add(-24*time.Hour), 10); err != nil {
+	if _, err := s.PurgeClosedBefore(ctx, time.Now().UTC().Add(-24*time.Hour), 10, nil); err != nil {
 		t.Fatal(err)
 	}
 	_, err := s.Append(ctx, roomID, events.CommentAdded, commentActor(), events.CommentAddedPayload{CommentID: "c_late", Text: "x"})
 	if !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+// TestPurgeFailingRoomDoesNotBlockTheOthers makes the delete of one room fail
+// (a trigger raises) and checks that the rooms around it are still purged, the
+// failing room is intact and reported, and passing it in exclude skips it.
+func TestPurgeFailingRoomDoesNotBlockTheOthers(t *testing.T) {
+	s, url, schema := requireStoreSchema(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	now := time.Now().UTC()
+	t1, t2, t3 := now.Add(-90*24*time.Hour), now.Add(-80*24*time.Hour), now.Add(-70*24*time.Hour)
+	seedRoomWithChildren(ctx, t, s, &t1) // oldest: handled first
+	bad, badPid := seedRoomWithChildren(ctx, t, s, &t2)
+	last, _ := seedRoomWithChildren(ctx, t, s, &t3)
+
+	conn := schemaConn(ctx, t, url, schema)
+	if _, err := conn.Exec(ctx, `
+CREATE FUNCTION fail_one_room() RETURNS trigger AS $$
+BEGIN
+  IF OLD.id = '`+bad+`' THEN RAISE EXCEPTION 'injected failure'; END IF;
+  RETURN OLD;
+END $$ LANGUAGE plpgsql;
+CREATE TRIGGER fail_one_room BEFORE DELETE ON rooms FOR EACH ROW EXECUTE FUNCTION fail_one_room();`); err != nil {
+		t.Fatalf("install trigger: %v", err)
+	}
+
+	cutoff := now.Add(-30 * 24 * time.Hour)
+	res, err := s.PurgeClosedBefore(ctx, cutoff, 10, nil)
+	if err != nil {
+		t.Fatalf("a failing room must not fail the call: %v", err)
+	}
+	if res.Examined != 3 || len(res.RoomIDs) != 2 || len(res.Failed) != 1 || res.Failed[0].RoomID != bad {
+		t.Fatalf("want 3 examined, 2 purged, %s failed; got %+v", bad, res)
+	}
+	if _, err := s.GetRoom(ctx, last); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("the room behind the failing one must be purged: %v", err)
+	}
+	// The failing room's transaction rolled back: nothing of it is gone.
+	if evs, err := s.Since(ctx, bad, 0, 100); err != nil || len(evs) != 3 {
+		t.Fatalf("failing room lost events: %d %v", len(evs), err)
+	}
+	if _, err := s.GetProposal(ctx, badPid); err != nil {
+		t.Fatalf("failing room lost its proposal: %v", err)
+	}
+
+	// Without exclude it is tried (and fails) again; with it, it is skipped.
+	res, err = s.PurgeClosedBefore(ctx, cutoff, 10, nil)
+	if err != nil || res.Examined != 1 || len(res.Failed) != 1 {
+		t.Fatalf("second run without exclude: %+v %v", res, err)
+	}
+	res, err = s.PurgeClosedBefore(ctx, cutoff, 10, []string{bad})
+	if err != nil || res.Examined != 0 || len(res.Failed) != 0 {
+		t.Fatalf("exclude must skip the failed room: %+v %v", res, err)
 	}
 }

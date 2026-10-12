@@ -11,6 +11,12 @@ import (
 
 // exportTimeout bounds one audit export. It replaces the 60 s default because a
 // room with a long log is read three times (derived sections, hash, stream).
+//
+// Known wart: chi's Timeout middleware writes a 504 header after the handler
+// returns when the deadline passed. Once the export has started streaming the
+// status is already sent, so that write only logs net/http's "superfluous
+// WriteHeader" line; the client still sees the aborted connection (see
+// handleExportRoom), which is what matters.
 const exportTimeout = 5 * time.Minute
 
 // exportHashHeader carries the SHA-256 of the export, also stored in the

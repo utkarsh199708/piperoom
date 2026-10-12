@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"piperoom/internal/room"
+	"github.com/gowebpki/jcs"
 )
 
 const exportHeader = "X-Piperoom-Export-SHA256"
@@ -83,14 +83,25 @@ func TestExportShapeHeadersAndHash(t *testing.T) {
 	}
 
 	// Recompute the hash the way the contract says.
-	delete(doc, "integrity")
-	canon, err := room.CanonicalJSON(doc)
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(body, &members); err != nil {
+		t.Fatal(err)
+	}
+	delete(members, "integrity")
+	rest, err := json.Marshal(members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canon, err := jcs.Transform(rest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := sha256.Sum256(canon)
 	if hex.EncodeToString(h[:]) != sum {
-		t.Fatalf("hash of canonical document != header")
+		t.Fatalf("hash of the JCS form of the document != header")
+	}
+	if doc["integrity"] == nil || !strings.Contains(string(body), `"canonicalization":"RFC 8785 (JCS)"`) {
+		t.Fatalf("document must name its canonicalization")
 	}
 }
 

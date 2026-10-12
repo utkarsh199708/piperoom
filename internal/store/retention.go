@@ -41,25 +41,37 @@ func ParseRetentionDays(s string) (int, error) {
 	return n, nil
 }
 
+// PurgeRoomTimeout bounds the transaction that purges one room.
+const PurgeRoomTimeout = 2 * time.Minute
+
 var _ Purger = (*PG)(nil)
 
 // PurgeClosedBefore implements Purger.
-func (s *PG) PurgeClosedBefore(ctx context.Context, cutoff time.Time, maxRooms int) (PurgeResult, error) {
+func (s *PG) PurgeClosedBefore(ctx context.Context, cutoff time.Time, maxRooms int, exclude []string) (PurgeResult, error) {
 	var res PurgeResult
 	if maxRooms <= 0 {
 		return res, nil
 	}
-	ids, err := s.expiredRoomIDs(ctx, cutoff, maxRooms)
+	ids, err := s.expiredRoomIDs(ctx, cutoff, maxRooms, exclude)
 	if err != nil {
 		return res, err
 	}
+	res.Examined = len(ids)
 	for _, id := range ids {
+		// Only the whole call being cancelled stops the loop. A failure of one
+		// room (including its own timeout) is recorded and the next room goes on:
+		// otherwise one bad room at the front of the queue would block retention
+		// for every room behind it, on every run.
 		if err := ctx.Err(); err != nil {
 			return res, fmt.Errorf("store: purge: %w", err)
 		}
 		one, ok, err := s.purgeRoom(ctx, id, cutoff)
 		if err != nil {
-			return res, err
+			if ctx.Err() != nil {
+				return res, fmt.Errorf("store: purge: %w", ctx.Err())
+			}
+			res.Failed = append(res.Failed, PurgeFailure{RoomID: id, Err: err})
+			continue
 		}
 		if ok {
 			res.Add(one)
@@ -68,12 +80,18 @@ func (s *PG) PurgeClosedBefore(ctx context.Context, cutoff time.Time, maxRooms i
 	return res, nil
 }
 
-func (s *PG) expiredRoomIDs(ctx context.Context, cutoff time.Time, limit int) ([]string, error) {
+func (s *PG) expiredRoomIDs(ctx context.Context, cutoff time.Time, limit int, exclude []string) ([]string, error) {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
+	if exclude == nil {
+		// A nil slice reaches Postgres as NULL, and id <> ALL(NULL) is NULL,
+		// which would match no row at all.
+		exclude = []string{}
+	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT id FROM rooms WHERE status = 'closed' AND closed_at IS NOT NULL AND closed_at < $1
-		 ORDER BY closed_at ASC, id ASC LIMIT $2`, cutoff, limit)
+		 AND id <> ALL($3::text[])
+		 ORDER BY closed_at ASC, id ASC LIMIT $2`, cutoff, limit, exclude)
 	if err != nil {
 		return nil, fmt.Errorf("store: purge: list expired rooms: %w", err)
 	}
@@ -97,13 +115,10 @@ func (s *PG) expiredRoomIDs(ctx context.Context, cutoff time.Time, limit int) ([
 // before cutoff), which is not an error.
 func (s *PG) purgeRoom(ctx context.Context, id string, cutoff time.Time) (PurgeResult, bool, error) {
 	var res PurgeResult
-	// A big room can take a while; bound the transaction when the caller set
-	// no deadline of its own.
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
-		defer cancel()
-	}
+	// Each room gets its own budget under the run's deadline, so one huge or
+	// stuck room cannot use up the whole run.
+	ctx, cancel := context.WithTimeout(ctx, PurgeRoomTimeout)
+	defer cancel()
 	found := false
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		// Lock the row and re-check: it also makes a late Append wait, then

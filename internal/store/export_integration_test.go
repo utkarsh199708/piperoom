@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gowebpki/jcs"
+
 	"piperoom/internal/agent"
 	"piperoom/internal/room"
 )
@@ -56,14 +58,16 @@ func TestExportFromPostgresIsStableAndVerifies(t *testing.T) {
 		t.Fatalf("export of an unchanged room must be byte-identical")
 	}
 
-	dec := json.NewDecoder(bytes.NewReader(body1))
-	dec.UseNumber()
-	var doc map[string]any
-	if err := dec.Decode(&doc); err != nil {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(body1, &members); err != nil {
 		t.Fatal(err)
 	}
-	delete(doc, "integrity")
-	canon, err := room.CanonicalJSON(doc)
+	delete(members, "integrity")
+	rest, err := json.Marshal(members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canon, err := jcs.Transform(rest)
 	if err != nil {
 		t.Fatal(err)
 	}

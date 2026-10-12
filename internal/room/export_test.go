@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gowebpki/jcs"
+
 	"piperoom/internal/events"
 	"piperoom/internal/room"
 	"piperoom/internal/store"
@@ -49,17 +51,58 @@ func verifyExport(t *testing.T, headerSum string, body []byte) map[string]any {
 	if integ["algorithm"] != "sha256" || integ["sha256"] != headerSum {
 		t.Fatalf("integrity does not match the header hash: %v vs %s", integ, headerSum)
 	}
-	delete(doc, "integrity")
-	canon, err := room.CanonicalJSON(doc)
-	if err != nil {
-		t.Fatalf("canonicalise: %v", err)
-	}
-	sum := sha256.Sum256(canon)
-	if got := hex.EncodeToString(sum[:]); got != headerSum {
+	if got := jcsHashWithoutIntegrity(t, body); got != headerSum {
 		t.Fatalf("recomputed hash %s != %s", got, headerSum)
 	}
-	doc["integrity"] = integ
 	return doc
+}
+
+// jcsHashWithoutIntegrity is an independent re-hash: it does not use the
+// service's canonicalizer, only jcs.Transform on the document minus "integrity".
+func jcsHashWithoutIntegrity(t *testing.T, body []byte) string {
+	t.Helper()
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(body, &members); err != nil {
+		t.Fatalf("export is not a JSON object: %v", err)
+	}
+	delete(members, "integrity")
+	rest, err := json.Marshal(members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canon, err := jcs.Transform(rest)
+	if err != nil {
+		t.Fatalf("jcs: %v", err)
+	}
+	sum := sha256.Sum256(canon)
+	return hex.EncodeToString(sum[:])
+}
+
+// TestExportAlertWithDuplicateKeys: the alert body is stored verbatim and may
+// repeat a key; the export must still work and verify (JCS alone rejects it).
+func TestExportAlertWithDuplicateKeys(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	raw := json.RawMessage(`{"title":"x","dup":1,"dup":2,"big":9007199254740993}`)
+	snap, _, err := svc.CreateRoomFromAlert(context.Background(), "x", "sev2", "orders", raw)
+	if err != nil {
+		t.Fatalf("alert: %v", err)
+	}
+	sum, body := exportRoomFor(t, svc, snap.ID)
+	verifyExport(t, sum, body)
+	if !bytes.Contains(body, []byte("9007199254740993")) {
+		t.Fatalf("the document must show the number as stored")
+	}
+}
+
+// TestExportCanonicalizationIsJCS pins the name stored in the document and the
+// documented number limit: integers above 2^53 are hashed as IEEE doubles.
+func TestExportCanonicalizationIsJCS(t *testing.T) {
+	svc, _, _, roomID := richRoom(t)
+	sum, body := exportRoomFor(t, svc, roomID)
+	doc := verifyExport(t, sum, body)
+	if got := doc["integrity"].(map[string]any)["canonicalization"]; got != "RFC 8785 (JCS)" {
+		t.Fatalf("canonicalization = %v", got)
+	}
 }
 
 // richRoom builds a room with a proposal (two steps, two layers, both approved,

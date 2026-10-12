@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gowebpki/jcs"
+
 	"piperoom/internal/events"
 	"piperoom/internal/store"
 )
@@ -31,9 +33,9 @@ const DefaultExportMaxEvents int64 = 500_000
 const exportPage = 1000
 
 // exportCanonicalization is stored in the document so a verifier needs no
-// other source to recompute the hash.
-const exportCanonicalization = "JSON, UTF-8; object keys sorted by byte order at every level; " +
-	"no whitespace outside strings; numbers exactly as stored; the characters < > & are not escaped"
+// other source to recompute the hash. JCS is the product's one canonicalizer
+// (the auth design uses it for params_hash too).
+const exportCanonicalization = "RFC 8785 (JCS)"
 
 // ErrExportChanged is returned by Export.Write when the log no longer matches
 // what PrepareExport hashed (for example retention deleted the room in
@@ -185,7 +187,7 @@ func (s *Service) PrepareExport(ctx context.Context, roomID string) (*Export, er
 // hashed on the way differ from the hash PrepareExport computed. The caller
 // should abort the connection in that case.
 func (e *Export) Write(ctx context.Context, w io.Writer) error {
-	integrity, err := canonicalJSON(map[string]string{
+	integrity, _, err := canonicalJSON(map[string]string{
 		"algorithm":        "sha256",
 		"canonicalization": exportCanonicalization,
 		"covers":           `the document without its top-level "integrity" member`,
@@ -392,53 +394,59 @@ func nonNilSteps(s []events.ProposalStep) []events.ProposalStep {
 	return s
 }
 
-// writeDocument writes the canonical document. Top-level keys appear in sorted
-// order, so the bytes are already canonical and need no second pass. Everything
-// except the "integrity" member goes to both out and h; integrity (when given)
-// goes to out only, which is why the hash covers "the document without
-// integrity". A hash-only pass uses io.Discard for out and a nil integrity.
+// writeDocument writes the document with top-level keys in sorted order. out
+// gets every value exactly as stored (numbers keep their digits); h gets the
+// same document in RFC 8785 form, which is what the hash covers. The structural
+// bytes are identical in both. The "integrity" member (when given) goes to out
+// only, which is why the hash covers "the document without integrity". A
+// hash-only pass uses io.Discard for out and a nil integrity.
 func (e *Export) writeDocument(ctx context.Context, out io.Writer, h hash.Hash, integrity []byte) error {
-	both := io.MultiWriter(out, h)
 	var werr error
-	put := func(w io.Writer, parts ...[]byte) {
-		for _, p := range parts {
-			if werr != nil {
-				return
-			}
-			if _, err := w.Write(p); err != nil {
-				werr = err
-			}
+	put := func(w io.Writer, p []byte) {
+		if werr != nil {
+			return
+		}
+		if _, err := w.Write(p); err != nil {
+			werr = err
 		}
 	}
-	section := func(key string, v any) {
-		b, err := canonicalJSON(v)
+	both := func(s string) {
+		put(out, []byte(s))
+		put(h, []byte(s))
+	}
+	value := func(v any) {
+		if werr != nil {
+			return
+		}
+		exact, canon, err := canonicalJSON(v)
 		if err != nil {
 			werr = err
 			return
 		}
-		put(both, []byte(strconv.Quote(key)+":"), b)
+		put(out, exact)
+		put(h, canon)
+	}
+	section := func(key string, v any) {
+		both(strconv.Quote(key) + ":")
+		value(v)
 	}
 
-	put(both, []byte("{"))
+	both("{")
 	section("action_results", nonNilResults(e.results))
-	put(both, []byte(","))
+	both(",")
 	section("approvals", nonNilApprovals(e.approvals))
-	put(both, []byte(`,"event_count":`+strconv.FormatInt(e.eventCount, 10)+`,"events":[`))
+	both(`,"event_count":` + strconv.FormatInt(e.eventCount, 10) + `,"events":[`)
 	if werr != nil {
 		return fmt.Errorf("room: export: %w", werr)
 	}
 
 	first := true
 	n, err := e.walk(ctx, func(ev events.Event) error {
-		b, err := canonicalJSON(ev)
-		if err != nil {
-			return err
-		}
 		if !first {
-			put(both, []byte(","))
+			both(",")
 		}
 		first = false
-		put(both, b)
+		value(ev)
 		return werr
 	})
 	if err != nil {
@@ -448,16 +456,18 @@ func (e *Export) writeDocument(ctx context.Context, out io.Writer, h hash.Hash, 
 		return ErrExportChanged
 	}
 
-	put(both, []byte("],"))
+	both("],")
 	section("handoffs", nonNilHandoffs(e.handoffs))
-	put(both, []byte(","))
+	both(",")
 	if integrity != nil {
-		put(out, []byte(`"integrity":`), integrity, []byte(","))
+		put(out, []byte(`"integrity":`))
+		put(out, integrity)
+		put(out, []byte(","))
 	}
 	section("proposals", nonNilProposals(e.proposals))
-	put(both, []byte(","))
+	both(",")
 	section("room", e.room)
-	put(both, []byte(`,"schema":`+strconv.Quote(ExportSchema)+"}"))
+	both(`,"schema":` + strconv.Quote(ExportSchema) + "}")
 	if werr != nil {
 		return fmt.Errorf("room: export: %w", werr)
 	}
@@ -492,30 +502,39 @@ func nonNilProposals(s []*exportProposal) []*exportProposal {
 	return s
 }
 
-// canonicalJSON encodes v as the canonical form named in exportCanonicalization:
-// it round-trips through generic values (numbers kept verbatim) because
-// encoding/json writes map keys sorted, and it does not escape < > &.
-func canonicalJSON(v any) ([]byte, error) {
+// canonicalJSON returns v twice: exact is compact JSON with sorted keys and
+// numbers kept verbatim (what the export shows), canon is its RFC 8785 (JCS)
+// form (what the hash covers). A generic round trip comes first: it makes
+// duplicate object keys in a verbatim payload (an alert body may have them;
+// Postgres jsonb keeps the last) resolve the same way on every store, which
+// jcs.Transform alone rejects.
+//
+// Numbers: JCS serialises every number as an IEEE 754 double, so an integer
+// above 2^53 (12345678901234567890 becomes 12345678901234567000) or a decimal
+// finer than a double is hashed in its double form. The document still shows
+// the digits as stored; only the hash is blind to changes below double
+// precision.
+func canonicalJSON(v any) (exact, canon []byte, err error) {
 	raw, err := encodeJSON(v)
 	if err != nil {
-		return nil, fmt.Errorf("room: canonical json: %w", err)
+		return nil, nil, fmt.Errorf("room: canonical json: %w", err)
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var generic any
 	if err := dec.Decode(&generic); err != nil {
-		return nil, fmt.Errorf("room: canonical json: %w", err)
+		return nil, nil, fmt.Errorf("room: canonical json: %w", err)
 	}
-	out, err := encodeJSON(generic)
+	exact, err = encodeJSON(generic)
 	if err != nil {
-		return nil, fmt.Errorf("room: canonical json: %w", err)
+		return nil, nil, fmt.Errorf("room: canonical json: %w", err)
 	}
-	return out, nil
+	canon, err = jcs.Transform(exact)
+	if err != nil {
+		return nil, nil, fmt.Errorf("room: canonical json: %w", err)
+	}
+	return exact, canon, nil
 }
-
-// CanonicalJSON is canonicalJSON for callers that verify an export: decode the
-// document, delete "integrity", pass the rest here and hash the result.
-func CanonicalJSON(v any) ([]byte, error) { return canonicalJSON(v) }
 
 func encodeJSON(v any) ([]byte, error) {
 	var buf bytes.Buffer

@@ -22,26 +22,47 @@ const purgeBatchRooms = 50
 // cache so lists and lookups stop showing them. Open rooms are never touched.
 // It returns the totals (counts and room ids only) even when it stops early on
 // an error or a done context, so the caller can log how far it got.
+//
+// One failing room does not stop the run: its id and error are logged, it is
+// left out for the rest of the run (it would fail the same way again and block
+// every room behind it), and the others carry on. The returned error joins
+// every room's error; the next run tries the failed rooms again.
 func (s *Service) PurgeExpired(ctx context.Context, cutoff time.Time) (store.PurgeResult, error) {
 	var total store.PurgeResult
 	p, ok := s.store.(store.Purger)
 	if !ok {
 		return total, ErrRetentionUnsupported
 	}
+	var (
+		errs    []error
+		exclude = []string{}
+	)
 	for {
-		res, err := p.PurgeClosedBefore(ctx, cutoff, purgeBatchRooms)
+		res, err := p.PurgeClosedBefore(ctx, cutoff, purgeBatchRooms, exclude)
 		s.evictRooms(res.RoomIDs)
 		total.Add(res)
-		if err != nil {
-			return total, fmt.Errorf("room: purge expired: %w", err)
+		for _, f := range res.Failed {
+			// The room id is an opaque identifier, not content.
+			s.log.Error("room: retention could not purge a room", "room", f.RoomID, "err", f.Err)
+			exclude = append(exclude, f.RoomID)
+			errs = append(errs, fmt.Errorf("room %s: %w", f.RoomID, f.Err))
 		}
-		if len(res.RoomIDs) < purgeBatchRooms {
-			return total, nil
+		if err != nil {
+			errs = append(errs, err)
+			break
+		}
+		if res.Examined < purgeBatchRooms {
+			break
 		}
 		if err := ctx.Err(); err != nil {
-			return total, fmt.Errorf("room: purge expired: %w", err)
+			errs = append(errs, err)
+			break
 		}
 	}
+	if len(errs) > 0 {
+		return total, fmt.Errorf("room: purge expired: %w", errors.Join(errs...))
+	}
+	return total, nil
 }
 
 // evictRooms forgets purged rooms. They are closed, so no agent or executor
