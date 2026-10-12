@@ -127,12 +127,12 @@ Proposals: a step's action must implement `actions.Scoped`; the server calls `Va
 `CheckScope(room's pipeline, params)` when the proposal is created and again right before `Execute`. Params are
 frozen at creation; approvals bind to those exact steps.
 
-### Watcher alerts (`alert_source: "watcher"`) — server wiring in a later PR
+### Watcher alerts (`alert_source: "watcher"`)
 
-The built-in watcher (`internal/watch`, design in `docs/design/watcher.md`) opens rooms **inside the
-process**. It has no HTTP route and no secret: `POST /api/alerts/watcher` is `404 not_found`, like any
-unknown `{source}`. The contract below is fixed now; the server calls and the `room.Service` methods land
-in a later PR (W3).
+The built-in watcher (`internal/watch`, wired in `cmd/server/watch.go`, design in `docs/design/watcher.md`)
+opens rooms **inside the process**. It has no HTTP route and no secret: `POST /api/alerts/watcher` is
+`404 not_found`, like any unknown `{source}`. It starts after the room service loads and stops before it
+closes; `--demo` forces it off.
 
 - `room.created.alert_source` is `"watcher"`. `dedup_key` is `watcher:<pipeline>`, for example
   `watcher:orders`. There is **one open watcher room per pipeline**; every signal (connector down, slot
