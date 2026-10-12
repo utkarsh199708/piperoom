@@ -2,7 +2,7 @@
 
 For the platform/data engineer at a pilot team who will connect Piperoom to a real pipeline.
 
-These docs describe the code on `main` at `d372943`. Each claim names the file it comes from.
+These docs describe the code on `main` at `a91d2bd`. Each claim names the file it comes from.
 If a file changes, update the claim and its citation in the same PR.
 
 | Doc | Read it to |
@@ -23,15 +23,15 @@ below is from the code.
 
 | ID | Status | What the code does now | Where |
 |---|---|---|---|
-| F1 | **open** | Identity is the `X-User` header on HTTP, checked only against `users.yaml`. The WebSocket takes the same thing as `?user=` with no other check, so the same weakness applies there. Any client that can reach the API can act as any user, including a layer owner. The web app still renders a user switcher. The CORS and WebSocket origin checks stop browsers only; a non-browser client is not blocked by them. | `internal/httpapi/server.go:145-160,171`; `internal/ws/gateway.go:156-160,180`; `web/src/components/RoomList.tsx:70`, `RoomScreen.tsx:89,136` |
-| F2 | **fixed in the UI** | The approval view shows each step's `params` as key/value rows, one row per field. Raw JSON is shown only when `params` is not an object. Read the params before you approve. | `web/src/components/ProposalsPanel.tsx:22-60,146`; proposal step updates in `internal/store/store.go:517,534` change only status and output |
-| F3 | **fixed** for `pg_row` and `warehouse_row` | `pg_row` keeps key and timestamp values; other columns are names with `null` values. `warehouse_row` keeps only timestamp-named columns and drops the rest, **including the key**. A column counts as a timestamp by name only: `at` or any name ending in `_at`, not by type. Only these two tools were checked. | `internal/tools/dbtools/pg.go:191,199`; `wh.go:111,119-127`; `dbtools.go:220-222`; the same column rule applies on Snowflake, where names come back lower-cased (`internal/clients/snowflake/snowflake.go:148`) |
+| F1 | **open** | Identity is the `X-User` header on HTTP, checked only against `users.yaml`. The WebSocket takes the same thing as `?user=` with no other check, so the same weakness applies there. Any client that can reach the API can act as any user, including a layer owner. The web app still renders a user switcher. The CORS and WebSocket origin checks stop browsers only; a non-browser client is not blocked by them. | `internal/httpapi/server.go:190-206,216`; `internal/ws/gateway.go:163,188`; `web/src/components/RoomList.tsx:70`, `RoomScreen.tsx:89,136` |
+| F2 | **fixed in the UI** | The approval view shows each step's `params` as key/value rows, one row per field. Raw JSON is shown only when `params` is not an object. Read the params before you approve. | `web/src/components/ProposalsPanel.tsx:22-54,146`; proposal step updates in `internal/store/store.go:544,561` change only status and output |
+| F3 | **fixed** for `pg_row` and `warehouse_row` | `pg_row` keeps key and timestamp values; other columns are names with `null` values. `warehouse_row` keeps only timestamp-named columns and drops the rest, **including the key**. A column counts as a timestamp by name only: `at` or any name ending in `_at`, not by type. Only these two tools were checked. | `internal/tools/dbtools/pg.go:264,272-282`; `wh.go:124,132-140`; `dbtools.go:242-244`; the same column rule applies on Snowflake, where names come back lower-cased (`internal/clients/snowflake/snowflake.go:148`) |
 | F4 | **fixed** (with F11) | Row tools accept only tables listed in the `source_tables` / `sink_tables` of the room's pipeline. The `pipeline_id` in a tool input must be the room's own pipeline, or the tool refuses. | `internal/tools/dbtools/pg.go`, `wh.go`, `dbtools.go` (`resolve`, `scopedTable`); `internal/tools/scope.go` |
 | F5 | **fixed** | Integration tests print only host and port, not the DSN. Test code only. | `internal/clients/postgres/integration_test.go:21-24,34,46`; `internal/clients/warehouse/integration_test.go:20,33,45` |
-| F6 | **open** | No retention, no event cap, no archive. No code path deletes `room_events` or `rooms`. | `internal/store/store.go` (the only DELETEs are on proposals, approvals, suggestions and handoffs: lines 431, 485, 560, 615) |
-| F7 | **open** | One set of connection settings (databases, Kafka, Connect, Registry) per process, shared by every pipeline in `owners.yaml`. | `internal/config/config.go:9-73`; `internal/wiring/wiring.go:135-193` |
+| F6 | **open** | No retention, no event cap, no archive. Nothing deletes `room_events`, and nothing deletes closed rooms. The only room delete removes a room row with no events (an orphan left by a failed create). `PIPEROOM_RETENTION_DAYS` is read into config and not used. | `internal/store/store.go:299` (orphan rooms); the other DELETEs are on proposals, approvals, suggestions and handoffs at lines 458, 512, 587, 642 |
+| F7 | **open** | One set of connection settings (databases, Kafka, Connect, Registry) per process, shared by every pipeline in `owners.yaml`. | `internal/config/config.go:14-104`; `internal/wiring/wiring.go:135-193` |
 | F8 | **fixed** | The dev terminal sink removes control characters (including DEL and C1) and caps printed size. Dev CLI only, not the room service. | `cmd/investigate/sink.go:69-98` |
-| F9 | **open** | The alert webhook has no sender check: no signature, no token. Anyone who sends the `X-User` of a user in `users.yaml` can open rooms. `alertin.Verify` is never called. | `internal/httpapi/handlers.go:50-92`; `internal/alertin/verify.go:109-115` |
+| F9 | **partly fixed** | The signed routes `POST /api/alerts/{source}` check the sender with a token or HMAC, and a source with no secret answers 401. The unsigned dev route `POST /api/alerts/webhook` still has no sender check: anyone who sends the `X-User` of a user in `users.yaml` can open rooms through it. | `internal/httpapi/alerts.go:31-41`; `internal/alertin/verify.go:90-102,109-115`; `internal/httpapi/handlers.go:48-68`; `internal/httpapi/server.go:133` |
 | F10 | **fixed** for write actions | Every write action is scope-checked against the room's pipeline when the proposal is created and again right before it runs. | `internal/room/service_proposals.go:94`; `service_executor.go:211,315-330`; `internal/actions/scope_test.go` |
 | F11 | **fixed** | Every read tool is scoped to the room's pipeline. The runner takes the pipeline from the alert, never from the model, and a tool refuses a `pipeline_id`, connector, topic, consumer group, subject or table outside it before any client call. List tools return only the pipeline's own items. A room with no pipeline gets no reads (only `runbook_lookup` works). `connect_config` shows only `type`/`field` settings of transforms; `pg_long_transactions` returns no query text. `pg_replication_slots` (slot metadata) and `pg_long_transactions` stay database-wide. | `internal/tools/scope.go`; `internal/agent/run.go` (`toolScope`); `internal/tools/kafkatools/*`; `internal/tools/dbtools/*`; `cmd/investigate/scope_guard_test.go` |
 
@@ -56,10 +56,12 @@ below is from the code.
   gosnowflake DSN with a URL-encoded password. Startup errors are redacted (`warehouse.go:74`).
   Read-only access comes only from the DSN role (`internal/clients/snowflake/snowflake.go:6-10`).
   See [permissions.md](permissions.md#warehouse).
-- **Not on `main` yet.** Signed alert senders, a cap on the number of agents, room retention and
-  export, and a web UI served by the room service are still in review. Until they merge, F9 stays
-  open, and the alert and web variables in [setup.md](setup.md#1-configure-the-environment) are
-  read into config only (`internal/config/config.go:59-72`). Nothing on `main` uses them.
+- **Not on `main` yet.** Room retention and export (in review). `PIPEROOM_RETENTION_DAYS` is read
+  into config only (`internal/config/config.go:103`); nothing deletes closed rooms by age. Everything
+  else mentioned here is on `main`: the Docker image and the served web UI, the signed alert routes,
+  the agent cap, the model providers, the triage model and the per-room token budget. The built-in
+  watcher (`PIPEROOM_WATCH_*`, design in `docs/design/watcher.md`) is in review and not live yet. See
+  [setup.md](setup.md#1-configure-the-environment).
 - **A restart does not resume the agent.** Open rooms come back with the agent idle. A driver's
   steer, an `@agent` mention or a sent suggestion starts it again. A fix that was approved but not
   finished is marked failed, not re-run. See [setup.md](setup.md#what-happens-on-a-restart).
@@ -68,7 +70,7 @@ below is from the code.
   any letter case. See [setup.md](setup.md#network-exposure).
 - **Redaction is partial.** `pg_row` keeps key and timestamp values; `warehouse_row` keeps only
   timestamp values and drops the key (F3). A timestamp column is one named `at` or ending in `_at`,
-  whatever its type (`dbtools.go:220-222`). Other tools return their values as described in
+  whatever its type (`dbtools.go:242-244`). Other tools return their values as described in
   [data-handling.md](data-handling.md#2-what-each-tool-exposes). Table, topic and column names,
   and timestamps, still appear in the room.
 - **One credential set per process (F7).** Run one Piperoom process per team or pipeline group.
