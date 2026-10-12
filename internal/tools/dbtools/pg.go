@@ -129,7 +129,7 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 			if input.OlderThanMinutes < 0 {
 				return tools.Result{}, fmt.Errorf("%w: older_than_minutes must be >= 0", tools.ErrBadInput)
 			}
-			// Open transactions are database-wide (any long transaction holds the
+			// Open transactions are database-wide (only writers, has_xid, hold the
 			// WAL horizon) and cannot be tied to a pipeline, so the tool is not
 			// filtered; it needs a room scope (or the opt-out) and returns no
 			// query text.
@@ -153,11 +153,15 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 				r := longTxn{
 					PID: t.PID, User: t.Username, ApplicationName: t.ApplicationName, State: t.State,
 					Age: topology.HumanAge(t.Age), AgeSeconds: int64(t.Age / time.Second),
-					WaitEvent: t.WaitEvent, Verb: statementVerb(t.Query),
+					WaitEvent: t.WaitEvent, Verb: statementVerb(t.Query), HasXID: t.HasXID,
 				}
 				rows = append(rows, r)
-				fmt.Fprintf(&sb, "pid=%d user=%s app=%s state=%s age=%s wait=%s verb=%s\n",
-					r.PID, r.User, r.ApplicationName, r.State, r.Age, orDash(r.WaitEvent), orDash(r.Verb))
+				writer := "no"
+				if r.HasXID {
+					writer = "yes"
+				}
+				fmt.Fprintf(&sb, "pid=%d user=%s app=%s state=%s age=%s wait=%s verb=%s writer=%s\n",
+					r.PID, r.User, r.ApplicationName, r.State, r.Age, orDash(r.WaitEvent), orDash(r.Verb), writer)
 			}
 			if len(txns) == 0 {
 				sb.WriteString("(no long transactions)\n")
@@ -178,6 +182,9 @@ type longTxn struct {
 	AgeSeconds      int64  `json:"age_seconds"`
 	WaitEvent       string `json:"wait_event"`
 	Verb            string `json:"verb"`
+	// HasXID marks a writer: only a transaction with an xid holds the WAL
+	// horizon for a replication slot.
+	HasXID bool `json:"has_xid"`
 }
 
 // statementVerb returns the first keyword of a statement in upper case (at most

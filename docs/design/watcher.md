@@ -71,7 +71,7 @@ pipelines:
         unreachable:    {for: 5m, action: log}
 ```
 
-Each signal accepts `enabled: false` and `action: log|room` (defaults: `room` for the v1 three, `log` for the rest). `slot_wal` numbers are exposed through one `owners → topology.Thresholds` mapping so `pipeline_map` and the watcher cannot drift (`internal/topology/builder.go:38-46`). `dev/owners.yaml` sets `fire: 1MiB`, `for: 30s`; with the 15 s minimum interval that is up to 3 intervals after the first observation (I4).
+Each signal accepts `enabled: false` and `action: log|room` (defaults: `room` for the v1 three, `log` for the rest). `slot_wal` numbers are exposed through one `owners → topology.Thresholds` mapping so `pipeline_map` and the watcher cannot drift (`internal/topology/builder.go:38-46`). `dev/owners.yaml` sets `connector_down` and `slot_inactive` to `for: 30s` and leaves `slot_wal` at its defaults (fire 1GiB): a healthy dev slot retains 0.8-1.1 MB under load (`dev/scenarios.md`), so a small `fire` would warn forever. With the 15 s minimum interval, `for: 30s` is up to 3 intervals after the first observation (I4).
 
 Env (`internal/config/config.go`): `PIPEROOM_WATCH_MODE` = `off|log|rooms`, **default `log`**; `rooms` is an explicit step in `docs/pilot/setup.md`. `PIPEROOM_WATCH_INTERVAL` (60 s, min 15 s). `PIPEROOM_WATCH_CHECK_TIMEOUT` (10 s, max = `statement_timeout`). `PIPEROOM_WATCH_COOLDOWN` (60 m). `--demo` forces `off`.
 
