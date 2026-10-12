@@ -79,6 +79,53 @@ func TestRealActionsOverFakesPreventDemoDrift(t *testing.T) {
 	}
 }
 
+// TestRealResumeConnectorOverFakes runs the real connect_resume_connector action
+// over the fake Connect. The demo connector starts RUNNING, which the real
+// Validate refuses, so the test starts from PAUSED and checks the state the
+// fake reports after the resume.
+func TestRealResumeConnectorOverFakes(t *testing.T) {
+	connect := NewFakeConnect()
+	connect.connState = "PAUSED"
+	reg := actions.NewRegistry()
+	if err := actions.Register(reg, actions.Deps{Connect: connect, Registry: NewFakeRegistry()}); err != nil {
+		t.Fatalf("register real actions: %v", err)
+	}
+	pipeline := owners.Pipeline{
+		ID:           "orders",
+		Title:        "Orders CDC",
+		TopicPrefix:  "pg",
+		SourceTables: []string{"public.orders"},
+		Connectors:   []string{"pg-orders-connector"},
+		SinkTables:   []string{"analytics.orders"},
+		SinkTSColumn: "updated_at",
+	}
+	a, ok := reg.Get("connect_resume_connector")
+	if !ok {
+		t.Fatal("connect_resume_connector not registered")
+	}
+	params := json.RawMessage(`{"connector":"pg-orders-connector"}`)
+	if err := a.Validate(params); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if err := a.(actions.Scoped).CheckScope(pipeline, params); err != nil {
+		t.Fatalf("scope: %v", err)
+	}
+	got, err := a.Execute(context.Background(), params)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if want := "resumed pg-orders-connector (RUNNING)"; got != want {
+		t.Fatalf("execute: got %q, want %q", got, want)
+	}
+	st, err := connect.Status(context.Background(), "pg-orders-connector")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if st.State != "RUNNING" || len(st.Tasks) != 1 || st.Tasks[0].State != "RUNNING" {
+		t.Fatalf("after resume: connector %s, tasks %+v; want RUNNING and task 0 RUNNING", st.State, st.Tasks)
+	}
+}
+
 // TestBuilderTraceRejectsOutOfPipelineTable pins review item 7 for the demo
 // mode: the demo builder rejects a table outside the orders pipeline with
 // topology.ErrBadInput so the room service maps it to 400, exactly like the

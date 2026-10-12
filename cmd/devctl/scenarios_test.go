@@ -365,3 +365,19 @@ func TestAmountIsDecimal(t *testing.T) {
 		})
 	}
 }
+
+// TestAmountIsDecimalNoStaleNamedType checks that a record name defined by an
+// earlier call does not satisfy a later schema. The first call defines
+// pg.public.orders.Value; the second refers to Value without defining it and
+// must fail rather than reuse the earlier definition.
+func TestAmountIsDecimalNoStaleNamedType(t *testing.T) {
+	decSchema := capturedSchema(t, decimalSchemaFile)
+	if got, err := amountIsDecimal(decSchema); err != nil || !got {
+		t.Fatalf("setup: amountIsDecimal(captured decimal) = %v, %v; want true, nil", got, err)
+	}
+	const dangling = `{"type":"record","name":"Envelope","namespace":"pg.public.orders","fields":[{"name":"after","type":["null","Value"]}]}`
+	got, err := amountIsDecimal(dangling)
+	if err == nil {
+		t.Fatalf("amountIsDecimal(dangling Value) = %v, nil; want an error for an undefined name", got)
+	}
+}

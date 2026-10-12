@@ -333,7 +333,7 @@
       "seq": 28,
       "type": "action.executed",
       "actor": { "kind": "system", "id": "executor", "name": "Executor" },
-      "payload": { "proposal_id": "p_1", "step_index": 0, "ok": true, "output": "pg.public.orders-value compatibility now NONE" },
+      "payload": { "proposal_id": "p_1", "step_index": 0, "ok": true, "output": "pg.public.orders-value compatibility BACKWARD → NONE" },
       "at": "2026-10-11T10:01:34Z"
     },
     {
@@ -341,7 +341,7 @@
       "seq": 29,
       "type": "action.executed",
       "actor": { "kind": "system", "id": "executor", "name": "Executor" },
-      "payload": { "proposal_id": "p_1", "step_index": 1, "ok": true, "output": "restarted pg-orders-connector task 0 (state now RUNNING)" },
+      "payload": { "proposal_id": "p_1", "step_index": 1, "ok": true, "output": "restarted pg-orders-connector task 0 (RUNNING)" },
       "at": "2026-10-11T10:01:36Z"
     },
     {

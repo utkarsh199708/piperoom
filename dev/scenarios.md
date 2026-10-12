@@ -135,6 +135,8 @@ ALTER TABLE | public.orders | ALTER TABLE orders ALTER COLUMN amount TYPE numeri
 
 **Fix (`devctl fix schema-change`):** set subject compatibility to `NONE`, restart task 0, wait for the
 new schema version to register (version 2 of the subject), set compatibility back to `BACKWARD`.
+It is idempotent: when the new schema is already registered and task 0 is RUNNING (the agent fixed it
+first), it skips the wait and the restart, and it still ends at `BACKWARD`.
 The consumer reads both versions (int and decimal); missed rows reach the warehouse. No data loss.
 
 ---
@@ -150,7 +152,8 @@ slot        debezium_orders active=true retained=330 kB     ← slot stays ACTIV
 consumer    order-sync: state Stable, members 1, total lag 0
 warehouse   stale
 ```
-Retained WAL grows with load. **Fix:** `PUT …/resume`. Missed changes flow; no data loss.
+Retained WAL grows with load. **Fix:** the agent proposes `connect_resume_connector`, which runs only
+after the kafka-connect owner approves. (Manual equivalent: `PUT …/resume`.) Missed changes flow; no data loss.
 
 ---
 
@@ -212,7 +215,8 @@ warehouse   analytics.orders: 648 rows, newest updated_at …, stale 59 s
 `pg_stat_replication` is empty: nothing confirms WAL, `restart_lsn` stops moving, and retained
 (`pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)`) grows with the load.
 
-**Fix (`devctl fix slot-inactive`):** `PUT …/resume`. Debezium keeps the slot and its offsets
+**Fix:** the agent proposes `connect_resume_connector`, which runs only after the kafka-connect owner
+approves (manual equivalent: `devctl fix slot-inactive`, i.e. `PUT …/resume`). Debezium keeps the slot and its offsets
 (no re-snapshot) and replays the retained WAL: slot back `active=true`, retained fell 1332 kB → 804 kB
 right after resume and order-sync lag drained to 0; the warehouse caught up (648 → 1725 rows, stale 1 s).
 No data loss.
