@@ -54,7 +54,9 @@ func demoCmd(ctx context.Context, s *stack, args []string) error {
 	keep := false
 	defer func() {
 		if !keep {
-			_ = releaseLock(*owner)
+			if err := releaseLock(*owner); err != nil {
+				s.log.Warn("demo: release lock failed", "owner", *owner, "err", err)
+			}
 		}
 	}()
 

@@ -198,6 +198,24 @@ func TestDefaultPathDerivation(t *testing.T) {
 	}
 }
 
+func TestLockFailsClosedWithoutPath(t *testing.T) {
+	// A lock with no resolved path (git unavailable and $PIPEROOM_STACK_LOCK
+	// unset) must refuse every operation instead of writing a per-cwd file.
+	l := &Lock{path: ""}
+	if _, err := l.Acquire("alice"); err == nil || !strings.Contains(err.Error(), "no lock path") {
+		t.Fatalf("Acquire with empty path = %v, want 'no lock path'", err)
+	}
+	if _, err := l.Status(); err == nil || !strings.Contains(err.Error(), "no lock path") {
+		t.Fatalf("Status with empty path = %v, want 'no lock path'", err)
+	}
+	if err := l.Release("alice"); err == nil || !strings.Contains(err.Error(), "no lock path") {
+		t.Fatalf("Release with empty path = %v, want 'no lock path'", err)
+	}
+	if _, err := l.Steal(time.Minute); err == nil || !strings.Contains(err.Error(), "no lock path") {
+		t.Fatalf("Steal with empty path = %v, want 'no lock path'", err)
+	}
+}
+
 func TestStatusEmptyFile(t *testing.T) {
 	l := tmpLock(t)
 	if err := os.WriteFile(l.path, nil, 0o644); err != nil {
