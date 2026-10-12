@@ -551,11 +551,27 @@ func newInbox() *inbox {
 	return &inbox{wake: make(chan struct{}, 1)}
 }
 
-// hasPending reports whether input is waiting to be drained.
-func (in *inbox) hasPending() bool {
+// pushFront returns drained input to the head of the queue, ahead of anything
+// that arrived since, and wakes a waiter. Used when a Drain could not get a
+// slot for the input it took.
+func (in *inbox) pushFront(items []agent.HumanInput) {
+	if len(items) == 0 {
+		return
+	}
+	in.mu.Lock()
+	in.items = append(append([]agent.HumanInput(nil), items...), in.items...)
+	in.mu.Unlock()
+	select {
+	case in.wake <- struct{}{}:
+	default:
+	}
+}
+
+// pending returns how many inputs are waiting to be drained.
+func (in *inbox) pending() int {
 	in.mu.Lock()
 	defer in.mu.Unlock()
-	return len(in.items) > 0
+	return len(in.items)
 }
 
 func (in *inbox) push(inp agent.HumanInput) {
@@ -657,30 +673,10 @@ func (s *Service) feedInbox(st *roomState, e events.Event) {
 type roomSink struct {
 	s      *Service
 	roomID string
-	gate   *agentGate
 }
 
 func (r roomSink) Emit(ctx context.Context, typ events.Type, payload any) error {
-	err := r.s.agentEmit(ctx, r.roomID, typ, payload)
-	// An agent that reports idle, done or waiting_approval is parked on a
-	// human and costs no model calls: give its slot to a queued room. It takes
-	// a slot again in gatedInbox.Drain before the next input reaches it.
-	if err == nil && typ == events.AgentStatus && r.gate != nil {
-		if p, ok := payload.(events.AgentStatusPayload); ok && parkedState(p.State) {
-			r.gate.release()
-		}
-	}
-	return err
-}
-
-// parkedState reports whether an agent.status state means the agent is waiting
-// for a human rather than working.
-func parkedState(state string) bool {
-	switch state {
-	case "idle", "done", "waiting_approval":
-		return true
-	}
-	return false
+	return r.s.agentEmit(ctx, r.roomID, typ, payload)
 }
 
 // proposalCreator implements agent.Proposals.
@@ -724,8 +720,8 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 		deps := agent.Deps{
 			Tools:     s.tools,
 			Actions:   s.actions,
-			Inbox:     gatedInbox{in: st.inbox, g: gate},
-			Sink:      roomSink{s: s, roomID: roomID, gate: gate},
+			Inbox:     gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
+			Sink:      roomSink{s: s, roomID: roomID},
 			Proposals: proposalCreator{s: s, roomID: roomID},
 			Logger:    s.log,
 		}

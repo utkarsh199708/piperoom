@@ -109,9 +109,9 @@ func (a *agentSlots) stats() (inUse, queued int) {
 }
 
 // agentGate is one room's handle on the global slots. The room holds a slot
-// while its agent works and gives it back when the agent goes idle, so rooms
-// parked on a human do not starve rooms that need to run. The agent's inbox
-// (gatedInbox) takes a slot again before new input reaches a parked agent.
+// while its agent can call the model and gives it back while the agent waits
+// for input, so rooms parked on a human do not starve rooms that need to run.
+// gatedInbox drives it.
 type agentGate struct {
 	s      *Service
 	st     *roomState
@@ -229,26 +229,52 @@ func (s *Service) emitSlotAcquired(ctx context.Context, g *agentGate) {
 	}
 }
 
-// gatedInbox is the agent's Inbox. Draining pending input while the room holds
-// no slot first waits for one, so a parked agent cannot start a model turn
-// outside the cap. With nothing pending it returns at once.
+// gatedInbox is the agent's Inbox and the only place a slot is given back or
+// taken again after the run has started. The runner calls Wait only when it has
+// nothing to do, and a model turn only after a Drain that returned input (or
+// after a Wait that ended with an error, see Wait). So the room holds a slot
+// exactly while the runner can call the model. Nothing here reads the status
+// strings the agent emits: those can say "done" while the agent still works.
 type gatedInbox struct {
 	in *inbox
 	g  *agentGate
+	// runCtx is the supervisor context: it outlives the per-call contexts the
+	// runner passes in (for example the step-result wait deadline).
+	runCtx context.Context
 }
 
-// Drain implements agent.Inbox.
+// Drain implements agent.Inbox. It takes the input first, then makes sure the
+// room holds a slot before the runner sees it, so there is no window in which
+// input reaches a turn without a slot. If no slot can be had (ctx ended while
+// queued) the input goes back to the front of the inbox, which outlives the
+// run, and the error is returned.
 func (gi gatedInbox) Drain(ctx context.Context) ([]agent.HumanInput, error) {
-	if err := ctx.Err(); err != nil {
+	items, err := gi.in.Drain(ctx)
+	if err != nil || len(items) == 0 {
+		return items, err
+	}
+	if gi.g.isHeld() {
+		return items, nil
+	}
+	if err := gi.g.acquire(ctx); err != nil {
+		gi.in.pushFront(items)
 		return nil, err
 	}
-	if !gi.g.isHeld() && gi.in.hasPending() {
-		if err := gi.g.acquire(ctx); err != nil {
-			return nil, err
-		}
-	}
-	return gi.in.Drain(ctx)
+	return items, nil
 }
 
-// Wait implements agent.Inbox.
-func (gi gatedInbox) Wait(ctx context.Context) error { return gi.in.Wait(ctx) }
+// Wait implements agent.Inbox. The runner is idle here, so the slot goes back
+// to the pool before blocking. If the wait ends with an error while the run is
+// still alive, the runner is about to carry on without new input (the
+// step-result wait ran out); it takes a slot again first. Input that wakes the
+// wait is slotted by the Drain that follows.
+func (gi gatedInbox) Wait(ctx context.Context) error {
+	gi.g.release()
+	err := gi.in.Wait(ctx)
+	if err != nil && gi.runCtx.Err() == nil {
+		if aerr := gi.g.acquire(gi.runCtx); aerr != nil {
+			return aerr
+		}
+	}
+	return err
+}
