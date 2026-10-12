@@ -39,7 +39,7 @@ func demoCmd(ctx context.Context, s *stack, args []string) error {
 		if err := sc.fix(ctx, s); err != nil {
 			return err
 		}
-		printHealth(ctx, s, "health after the fix:")
+		printHealthAfterFix(ctx, s)
 		if err := releaseLock(*owner); err != nil {
 			return err
 		}
@@ -83,6 +83,7 @@ func demoCmd(ctx context.Context, s *stack, args []string) error {
 Demo ready — %[1]s is broken. Watch it with:
 
   devctl status                      one-screen pipeline health
+  devctl health                      read-only layer check; exit 1 if a layer is unhealthy
   devctl load --rate 20              add traffic and watch the symptoms deepen
 
 To repair and release the lock:

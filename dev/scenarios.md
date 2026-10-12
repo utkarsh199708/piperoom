@@ -41,8 +41,11 @@ times out is reported as FAIL and the other layers still run.
 go run ./cmd/devctl health
 ```
 
-Exit code **0** when every layer is OK, **1** when any layer FAILs (the report names the layer and its
-owner from `dev/owners.yaml`). `devctl demo` prints the health report before the break and after `--fix`.
+Exit codes: **0** when every layer is OK; **1** when any layer FAILs (the report names the layer and its
+owner from `dev/owners.yaml`); **2** when the check could not run at all (not inside the repo,
+`dev/owners.yaml` unreadable or missing the `orders` pipeline, bad arguments). `devctl demo` prints the
+health report before the break. After `--fix` it re-runs the check every 5 s for up to 90 s, because the
+backlog drains after the fix returns, and then prints the settled report.
 
 Each layer:
 
@@ -60,6 +63,9 @@ Notes on the thresholds:
   the newest row. So an idle stack is OK, and a burst that never gets through still FAILs after 60 s.
   The age is computed on the source database clock; the topic line also prints the age of its newest
   record (wall clock, for humans only).
+- Precision: the warehouse comparison uses exact microseconds (a row is pending only if it is strictly
+  newer than the newest loaded row). Kafka record timestamps are milliseconds, so for the topic a row in
+  the same millisecond as the newest record counts as delivered.
 - Kafka's newest record is read at each partition's last offset. A topic whose last offset is a
   transaction marker never answers and shows as `no answer within 15s`.
 - The retained-WAL limit is 100 MB; the observed demo values (26 kB healthy, about 1–2 MB broken) are far
