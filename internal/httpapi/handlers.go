@@ -62,12 +62,18 @@ func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
 		PipelineID string `json:"pipeline_id"`
 	}
 	_ = json.Unmarshal(raw, &probe)
-	snap, err := s.svc.CreateRoomFromAlert(r.Context(), probe.Title, probe.Severity, probe.PipelineID, json.RawMessage(raw))
+	snap, created, err := s.svc.CreateRoomFromAlert(r.Context(), probe.Title, probe.Severity, probe.PipelineID, json.RawMessage(raw))
 	if err != nil {
 		s.writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, snap)
+	// 201 when a room was opened; 200 with the already-open room when the alert
+	// joined it (see room.CreateRoomFromAlert).
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, snap)
 }
 
 func (s *Server) handleGetRoom(w http.ResponseWriter, r *http.Request) {

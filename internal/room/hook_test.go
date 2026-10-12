@@ -42,12 +42,12 @@ func TestOnRoomOpenedOncePerRoom(t *testing.T) {
 	t.Cleanup(svc.Close)
 
 	api := createRoom(t, svc, "arjun")
-	alert, err := svc.CreateRoomFromAlert(context.Background(), "lag", "sev2", "orders", json.RawMessage(`{"x":1}`))
+	alert, _, err := svc.CreateRoomFromAlert(context.Background(), "lag", "sev2", "orders", json.RawMessage(`{"x":1}`))
 	if err != nil {
 		t.Fatalf("create from alert: %v", err)
 	}
 	// An unknown pipeline still opens a room on the webhook path.
-	unknown, err := svc.CreateRoomFromAlert(context.Background(), "lag", "sev2", "nope", json.RawMessage(`{}`))
+	unknown, _, err := svc.CreateRoomFromAlert(context.Background(), "lag", "sev2", "nope", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("create from alert (unknown pipeline): %v", err)
 	}
@@ -77,7 +77,7 @@ func TestOnRoomOpenedOncePerRoom(t *testing.T) {
 func TestOnRoomOpenedNilHook(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	createRoom(t, svc, "arjun")
-	if _, err := svc.CreateRoomFromAlert(context.Background(), "lag", "sev2", "orders", nil); err != nil {
+	if _, _, err := svc.CreateRoomFromAlert(context.Background(), "lag", "sev2", "orders", nil); err != nil {
 		t.Fatalf("create from alert: %v", err)
 	}
 }

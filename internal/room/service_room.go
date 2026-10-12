@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 
+	"piperoom/internal/alertin"
 	"piperoom/internal/events"
 	"piperoom/internal/store"
 )
@@ -85,8 +86,9 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 // against a pipeline it knows nothing about. The 400 for an unknown pipeline
 // stays only on POST /api/rooms (CreateRoom). With no owners config (unit
 // tests) there is nothing to validate against, so every pipeline is treated as
-// known. No driver until someone takes control.
-func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipelineID string, raw json.RawMessage) (RoomSnapshot, error) {
+// known. No driver until someone takes control. created is false when the alert
+// joined the open room for it (see alertIndexKey) instead of opening one.
+func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipelineID string, raw json.RawMessage) (RoomSnapshot, bool, error) {
 	if title == "" {
 		title = "New alert"
 	}
@@ -97,18 +99,29 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 		pipelineID = "unknown"
 	}
 	if !pipelineIDRe.MatchString(pipelineID) {
-		return RoomSnapshot{}, validation(fmt.Sprintf("pipeline_id %q must match ^[a-zA-Z0-9_.-]+$", pipelineID))
+		return RoomSnapshot{}, false, validation(fmt.Sprintf("pipeline_id %q must match ^[a-zA-Z0-9_.-]+$", pipelineID))
 	}
 	pipelineKnown := s.owners == nil || s.knownPipeline(pipelineID)
+	dedupKey, resolved := alertDedup(raw)
+	indexKey := alertIndexKey(pipelineID, dedupKey)
 	roomID := NewID("r_")
 	now := s.now().UTC()
 
 	s.mu.Lock()
+	// The same alert while its room is still open joins that room: no second
+	// room, no second agent, and the hook is not called again (the room was
+	// opened before).
+	if existing, ok := s.openAlertRoomLocked(indexKey); ok {
+		st := s.rooms[existing]
+		snap, err := s.joinAlertRoomLocked(ctx, existing, st, title, resolved)
+		s.mu.Unlock()
+		return snap, false, err
+	}
 	if err := s.store.CreateRoom(ctx, store.Room{
 		ID: roomID, Title: title, Severity: severity, PipelineID: pipelineID, Status: "open", OpenedAt: now,
 	}); err != nil {
 		s.mu.Unlock()
-		return RoomSnapshot{}, fmt.Errorf("room: create from alert: %w", err)
+		return RoomSnapshot{}, false, fmt.Errorf("room: create from alert: %w", err)
 	}
 	st := &roomState{snap: NewSnapshot(), inbox: newInbox()}
 	st.snap.ID = roomID
@@ -118,7 +131,11 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 		Title: title, Severity: severity, PipelineID: pipelineID, Alert: raw,
 	}); err != nil {
 		s.mu.Unlock()
-		return RoomSnapshot{}, err
+		return RoomSnapshot{}, false, err
+	}
+	if indexKey != "" {
+		st.dedupKey = indexKey
+		s.alertRooms[indexKey] = roomID
 	}
 	// A missing/unknown pipeline opens with a system message so the room shows
 	// why no fix is proposed. events.go has no dedicated system-message type,
@@ -129,14 +146,90 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 			Text: fmt.Sprintf("pipeline %q is unknown; proposals are disabled for this room", pipelineID),
 		}); err != nil {
 			s.mu.Unlock()
-			return RoomSnapshot{}, err
+			return RoomSnapshot{}, false, err
 		}
 	}
 	snap := st.snap.Clone()
 	s.startAgentLocked(roomID, title, pipelineID, raw, st)
 	s.notifyRoomOpenedLocked(roomID)
 	s.mu.Unlock()
-	return snap, nil
+	return snap, true, nil
+}
+
+// alertDedup reads a webhook body the way alertin does and returns the dedup
+// key that makes a repeat of the same alert join the room already open for it
+// (alertin.Alert.DedupKey), and whether the source reports the alert resolved.
+// The key is derived from the raw body alone, so a restart rebuilds it. Without
+// a dedup_key in the body the key is a hash of the body: only byte-identical
+// bodies are deduplicated. A body alertin cannot parse, or no body, gets no key
+// and always opens a room.
+func alertDedup(raw json.RawMessage) (key string, resolved bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	a, err := alertin.Config{}.Parse(alertin.Generic, raw)
+	if err != nil {
+		return "", false
+	}
+	return a.DedupKey, a.Status == alertin.StatusResolved
+}
+
+// alertIndexKey scopes an alert dedup key to its pipeline: the same key sent for
+// two pipelines is two incidents. An empty dedup key stays empty (no dedup).
+func alertIndexKey(pipelineID, dedupKey string) string {
+	if dedupKey == "" {
+		return ""
+	}
+	return pipelineID + "\x00" + dedupKey
+}
+
+// openAlertRoomLocked returns the open room that already holds indexKey (see
+// alertIndexKey), if any. A key whose room is closed is not a match. Caller must
+// hold s.mu.
+func (s *Service) openAlertRoomLocked(indexKey string) (string, bool) {
+	if indexKey == "" {
+		return "", false
+	}
+	roomID, ok := s.alertRooms[indexKey]
+	if !ok {
+		return "", false
+	}
+	st, ok := s.rooms[roomID]
+	if !ok || !s.roomOpen(st) {
+		return "", false
+	}
+	return roomID, true
+}
+
+// joinAlertRoomLocked records a repeat of an alert in the room that is already
+// open for it, as a system message, and returns that room. A repeat that the
+// source reports resolved does not close the room: only the driver does that.
+// Caller must hold s.mu.
+func (s *Service) joinAlertRoomLocked(ctx context.Context, roomID string, st *roomState, title string, resolved bool) (RoomSnapshot, error) {
+	text := fmt.Sprintf("alert %q fired again; joined this room instead of opening a new one", title)
+	if resolved {
+		text = fmt.Sprintf("alert %q reported resolved at its source; the room stays open until the driver closes it", title)
+	}
+	if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: text}); err != nil {
+		return RoomSnapshot{}, err
+	}
+	return st.snap.Clone(), nil
+}
+
+// indexAlertRoomLocked puts an open webhook room under its alert index key
+// (pipeline and dedup key), so a repeat of the alert joins it after a restart
+// too. A key shared by several open rooms (rooms opened before dedup existed)
+// keeps the first one. Caller must hold s.mu.
+func (s *Service) indexAlertRoomLocked(ctx context.Context, roomID string, st *roomState) {
+	dedupKey, _ := alertDedup(s.rawAlert(ctx, roomID))
+	key := alertIndexKey(st.snap.PipelineID, dedupKey)
+	if key == "" {
+		return
+	}
+	st.dedupKey = key
+	if _, taken := s.alertRooms[key]; !taken {
+		s.alertRooms[key] = roomID
+	}
 }
 
 // notifyRoomOpenedLocked runs the OnRoomOpened hook off the request path, so
@@ -168,7 +261,7 @@ func (s *Service) GetRoom(ctx context.Context, roomID string) (RoomSnapshot, err
 func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.ensureAllLoadedLocked(ctx); err != nil {
+	if err := s.ensureAllLoadedLocked(ctx, false); err != nil {
 		return nil, err
 	}
 	out := make([]RoomSnapshot, 0, len(s.rooms))
@@ -231,6 +324,11 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 	if err != nil {
 		s.mu.Unlock()
 		return events.Event{}, err
+	}
+	// A closed room no longer takes repeats of its alert: the next one opens a
+	// new room.
+	if st.dedupKey != "" && s.alertRooms[st.dedupKey] == roomID {
+		delete(s.alertRooms, st.dedupKey)
 	}
 	if err := s.store.CloseRoom(ctx, roomID, s.now().UTC()); err != nil {
 		s.log.Warn("room: persist close failed", "room", roomID, "err", err)

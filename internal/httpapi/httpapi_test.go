@@ -366,6 +366,27 @@ func TestWebhookPassesRawBody(t *testing.T) {
 	}
 }
 
+// TestWebhookRepeatReturnsOpenRoom: the same alert twice opens one room; the
+// first answer is 201 Created and the repeat is 200 OK with that same room.
+func TestWebhookRepeatReturnsOpenRoom(t *testing.T) {
+	srv, _ := newServer(t)
+	raw := `{"title":"Repeat me","pipeline_id":"orders","dedup_key":"repeat-me"}`
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/alerts/webhook", "arjun", raw)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("first alert: want 201, got %d", resp.StatusCode)
+	}
+	first := decode[map[string]any](t, resp)
+
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/alerts/webhook", "arjun", raw)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("repeat alert: want 200, got %d", resp.StatusCode)
+	}
+	second := decode[map[string]any](t, resp)
+	if second["id"] != first["id"] {
+		t.Fatalf("repeat opened room %v, want %v", second["id"], first["id"])
+	}
+}
+
 // TestRouterErrorEnvelopes: router-level 404/405 use the same JSON envelope.
 func TestRouterErrorEnvelopes(t *testing.T) {
 	srv, _ := newServer(t)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"piperoom/internal/events"
@@ -14,12 +15,43 @@ import (
 // stepTimeout bounds each action execution (rule 4).
 const stepTimeout = 30 * time.Second
 
+// placeholderTexts are values a model or a form writes when it has nothing to
+// say. They look filled in but say nothing about the risk or the undo plan, so
+// a proposal may not carry one. Compared lowercased and trimmed.
+var placeholderTexts = map[string]bool{
+	"<no value>": true,
+	"n/a":        true,
+	"none":       true,
+	"-":          true,
+	"tbd":        true,
+}
+
+// checkPlanText rejects a risk or rollback that is empty, whitespace-only or a
+// placeholder. Approvers decide on these texts, so a blank one is a validation
+// error before anything is stored or logged.
+func checkPlanText(field, text string) error {
+	norm := strings.ToLower(strings.TrimSpace(text))
+	if norm == "" {
+		return validation(field + " is required")
+	}
+	if placeholderTexts[norm] {
+		return validation(fmt.Sprintf("%s must describe the real %s, not the placeholder %q", field, field, text))
+	}
+	return nil
+}
+
 // CreateProposal validates every step against the actions registry and its
 // scope, derives the required approval layers from the step layers, and stores
 // the proposal (and its proposal.created event). It never executes anything.
 func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor) (string, error) {
 	if len(p.Steps) == 0 {
 		return "", validation("proposal requires at least one step")
+	}
+	if err := checkPlanText("risk", p.Risk); err != nil {
+		return "", err
+	}
+	if err := checkPlanText("rollback", p.Rollback); err != nil {
+		return "", err
 	}
 	// Structural checks first: they do not need the room.
 	for i, step := range p.Steps {

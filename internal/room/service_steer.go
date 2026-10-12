@@ -2,11 +2,22 @@ package room
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"piperoom/internal/events"
 	"piperoom/internal/store"
 )
+
+// agentMention matches "@agent" as a whole word, case-insensitively: it must
+// start the text or follow a non-word character, and must not run on into more
+// letters, so "@agentless" or "text@agent" do not wake the agent.
+var agentMention = regexp.MustCompile(`(?i)(^|\W)@agent\b`)
+
+// mentionsAgent reports whether a comment addresses the agent.
+func mentionsAgent(text string) bool {
+	return agentMention.MatchString(text)
+}
 
 // AddComment posts a comment; "@agent" in the text sets mentions_agent.
 func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, text string) (events.Event, error) {
@@ -26,9 +37,13 @@ func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, tex
 		CommentID:     NewID("c_"),
 		StepID:        stepID,
 		Text:          text,
-		MentionsAgent: strings.Contains(text, "@agent"),
+		MentionsAgent: mentionsAgent(text),
 	}
-	return s.emitLocked(ctx, st, roomID, events.CommentAdded, humanActor(user), payload)
+	e, err := s.emitLocked(ctx, st, roomID, events.CommentAdded, humanActor(user), payload)
+	if err == nil && payload.MentionsAgent {
+		s.ensureAgentLocked(ctx, roomID, st)
+	}
+	return e, err
 }
 
 // Steer sends an instruction. The driver's steer goes straight to the agent
@@ -50,6 +65,7 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 		e, err := s.emitLocked(ctx, st, roomID, events.SteerSent, humanActor(user), events.SteerSentPayload{Text: text})
 		if err == nil {
 			s.touchDriverLease(ctx, st, roomID)
+			s.ensureAgentLocked(ctx, roomID, st)
 		}
 		return e, err
 	}
@@ -118,6 +134,7 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 		return events.Event{}, err
 	}
 	s.touchDriverLease(ctx, st, roomID)
+	s.ensureAgentLocked(ctx, roomID, st)
 	return e, nil
 }
 

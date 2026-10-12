@@ -335,6 +335,7 @@ func TestDoubleApprovalConflict(t *testing.T) {
 	svc, _, _ := newTestService(t, &fakeAction{name: "postgres_action", layer: "postgres"})
 	roomID := createRoom(t, svc, "arjun").ID
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title:          "fix",
 		Steps:          []events.ProposalStep{{Action: "postgres_action", Layer: "postgres", Params: json.RawMessage("{}")}},
 		RequiredLayers: []string{"postgres"},
@@ -453,6 +454,7 @@ func TestExecutorStopsAtFirstFailure(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{
 			{Action: "ok_action", Layer: "postgres", Params: json.RawMessage("{}")},
@@ -569,6 +571,7 @@ func TestRequiredLayersDerivedFromSteps(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{
 			{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")},
@@ -620,6 +623,7 @@ func TestExecutorFailureMarksFailed(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{
 			{Action: "fail_act", Layer: "postgres", Params: json.RawMessage("{}")},
@@ -754,6 +758,7 @@ func TestCreateProposalRejectsUnscopedAction(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	_, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "unscoped", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -775,6 +780,7 @@ func TestCreateProposalScopeViolation(t *testing.T) {
 
 	roomID := createRoom(t, svc, "arjun").ID
 	_, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -787,11 +793,11 @@ func TestCreateProposalScopeViolation(t *testing.T) {
 	// The alert webhook never drops an alert: an unknown (but well-formed)
 	// pipeline opens a room with proposals disabled (docs/api.md:103); only
 	// POST /api/rooms keeps the 400.
-	if _, err := svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "not-configured", json.RawMessage(`{"title":"t2"}`)); err != nil {
+	if _, _, err := svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "not-configured", json.RawMessage(`{"title":"t2"}`)); err != nil {
 		t.Fatalf("webhook with unknown pipeline must open a room: %v", err)
 	}
 	// A malformed pipeline_id is rejected by shape on both paths.
-	_, err = svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "bad id!", json.RawMessage(`{"title":"t2"}`))
+	_, _, err = svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "bad id!", json.RawMessage(`{"title":"t2"}`))
 	wantCode(t, err, "validation")
 }
 
@@ -799,7 +805,7 @@ func TestCreateRoomFromAlertStoresRawBody(t *testing.T) {
 	svc, st, _ := newTestService(t)
 	raw := json.RawMessage(`{"title":"DB down","severity":"sev1","pipeline_id":"orders","extra":[1,2]}`)
 
-	snap, err := svc.CreateRoomFromAlert(context.Background(), "DB down", "sev1", "orders", raw)
+	snap, _, err := svc.CreateRoomFromAlert(context.Background(), "DB down", "sev1", "orders", raw)
 	if err != nil {
 		t.Fatalf("create from alert: %v", err)
 	}
@@ -817,7 +823,7 @@ func TestCreateRoomFromAlertStoresRawBody(t *testing.T) {
 	// With the owners config loaded, a garbage (non-mapped) body uses the
 	// default pipeline "unknown": the room still opens (docs/api.md:103) with a
 	// system message explaining the pipeline is unknown.
-	snapUnknown, err := svc.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
+	snapUnknown, _, err := svc.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
 	if err != nil {
 		t.Fatalf("unknown-pipeline webhook must open a room: %v", err)
 	}
@@ -838,7 +844,7 @@ func TestCreateRoomFromAlertStoresRawBody(t *testing.T) {
 	// the defaults.
 	bare := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})
 	t.Cleanup(bare.Close)
-	snap2, err := bare.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
+	snap2, _, err := bare.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
 	if err != nil {
 		t.Fatalf("create from array alert: %v", err)
 	}
@@ -853,6 +859,7 @@ func TestCloseStopsGoroutinesIdempotent(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -917,6 +924,7 @@ func TestCloseDuringExecutionFinishesStep(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "blocking_action", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -972,6 +980,7 @@ func TestExecutorNeverRunsAPreClaimedStep(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -1028,6 +1037,7 @@ func TestLoadInterruptsStaleProposals(t *testing.T) {
 	mk := func(title string, steps ...events.ProposalStep) string {
 		t.Helper()
 		pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+			Risk: "low", Rollback: "revert the change",
 			Title: title, Steps: steps,
 		}, events.AgentActor)
 		if err != nil {
@@ -1300,6 +1310,7 @@ func TestExecutorRoomClosedPathRecordsOutcome(t *testing.T) {
 	cr.user = mustUser(t, svc, "arjun")
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{
 			{Action: "close_room", Layer: "postgres", Params: json.RawMessage("{}")},
@@ -1357,6 +1368,7 @@ func TestScopeCheckFailsClosedWithoutOwners(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	_, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -1477,7 +1489,7 @@ func TestWebhookUnknownPipelineDisablesProposals(t *testing.T) {
 	act := &fakeAction{name: "pg_act", layer: "postgres"}
 	svc, _, _ := newTestService(t, act)
 
-	snap, err := svc.CreateRoomFromAlert(context.Background(), "", "", "orders-2", json.RawMessage(`{"pipeline_id":"orders-2"}`))
+	snap, _, err := svc.CreateRoomFromAlert(context.Background(), "", "", "orders-2", json.RawMessage(`{"pipeline_id":"orders-2"}`))
 	if err != nil {
 		t.Fatalf("webhook with unknown pipeline must open a room: %v", err)
 	}
@@ -1485,6 +1497,7 @@ func TestWebhookUnknownPipelineDisablesProposals(t *testing.T) {
 		t.Fatalf("bad pipeline: %+v", snap)
 	}
 	_, err = svc.CreateProposal(context.Background(), snap.ID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -1496,6 +1509,7 @@ func TestWebhookUnknownPipelineDisablesProposals(t *testing.T) {
 	// A known pipeline keeps proposals enabled.
 	snap2 := createRoom(t, svc, "arjun")
 	if _, err := svc.CreateProposal(context.Background(), snap2.ID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor); err != nil {
@@ -1537,6 +1551,7 @@ func TestLoadSkipsAlreadyExecutedProposals(t *testing.T) {
 	roomID := createRoom(t, svc, "arjun").ID
 
 	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+		Risk: "low", Rollback: "revert the change",
 		Title: "fix",
 		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
 	}, events.AgentActor)
@@ -1607,5 +1622,529 @@ func TestRebuildDriverLeaseUTC(t *testing.T) {
 	}
 	if !snap.Driver.LeaseUntil.Equal(later.UTC()) {
 		t.Fatalf("lease: got %s want %s", snap.Driver.LeaseUntil, later.UTC())
+	}
+}
+
+// TestActionResultCarriesStepOutcome pins the action_result agent input: its OK
+// field mirrors ActionExecutedPayload.OK, so the agent can tell a failed step
+// from a successful one. Approval results carry no outcome (OK stays nil).
+func TestActionResultCarriesStepOutcome(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	good := &fakeAction{name: "good_act", layer: "postgres"}
+	bad := &fakeAction{name: "bad_act", layer: "postgres", fail: true}
+	reg := actions.NewRegistry()
+	for _, a := range []actions.Action{good, bad} {
+		if err := reg.Register(a); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+	inboxCh := make(chan agent.Inbox, 1)
+	svc := room.New(room.Deps{
+		Store: st, Actions: reg, Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
+		Run: func(ctx context.Context, _ agent.Alert, deps agent.Deps, _ agent.Options) error {
+			inboxCh <- deps.Inbox
+			<-ctx.Done()
+			return nil
+		},
+	})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "arjun").ID
+	inbox := <-inboxCh
+
+	propose := func(action string) string {
+		t.Helper()
+		pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+			Risk: "low", Rollback: "revert the change",
+			Title: action,
+			Steps: []events.ProposalStep{{Action: action, Layer: "postgres", Params: json.RawMessage("{}")}},
+		}, events.AgentActor)
+		if err != nil {
+			t.Fatalf("create proposal %s: %v", action, err)
+		}
+		if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+			t.Fatalf("approve %s: %v", action, err)
+		}
+		return pid
+	}
+	okPID := propose("good_act")
+	failPID := propose("bad_act")
+
+	waitFor(t, 5*time.Second, func() bool {
+		a, errA := st.GetProposal(context.Background(), okPID)
+		b, errB := st.GetProposal(context.Background(), failPID)
+		return errA == nil && errB == nil && a.Status == "executed" && b.Status == "failed"
+	})
+
+	inputs, err := inbox.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	got := map[string]*bool{}
+	for _, in := range inputs {
+		switch in.Kind {
+		case "action_result":
+			pid := okPID
+			if strings.Contains(in.Text, failPID) {
+				pid = failPID
+			}
+			got[pid] = in.OK
+		case "approval_result":
+			if in.OK != nil {
+				t.Fatalf("approval_result must not carry OK: %+v", in)
+			}
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("want two action_result inputs, got %+v", inputs)
+	}
+	if v := got[okPID]; v == nil || !*v {
+		t.Fatalf("successful step: OK = %v, want true", v)
+	}
+	if v := got[failPID]; v == nil || *v {
+		t.Fatalf("failed step: OK = %v, want false", v)
+	}
+}
+
+// TestProposalRejectsEmptyOrPlaceholderPlan pins that a proposal's risk and
+// rollback must be real text: empty, whitespace-only and placeholder values
+// (case-insensitive) are validation errors, and a refused proposal stores
+// nothing and logs no event.
+func TestProposalRejectsEmptyOrPlaceholderPlan(t *testing.T) {
+	pg := &fakeAction{name: "pg_act", layer: "postgres"}
+	svc, st, _ := newTestService(t, pg)
+	roomID := createRoom(t, svc, "arjun").ID
+	ctx := context.Background()
+	steps := []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}}
+	bad := []string{"", "   ", "\t\n", "<no value>", "N/A", "none", "NONE", " - ", "tbd", "Tbd"}
+
+	before := len(allEvents(t, st, roomID))
+	for _, v := range bad {
+		for _, field := range []string{"risk", "rollback"} {
+			p := events.ProposalCreatedPayload{Title: "fix", Steps: steps, Risk: "low", Rollback: "revert the change"}
+			if field == "risk" {
+				p.Risk = v
+			} else {
+				p.Rollback = v
+			}
+			_, err := svc.CreateProposal(ctx, roomID, p, events.AgentActor)
+			if err == nil {
+				t.Fatalf("%s=%q: proposal accepted", field, v)
+			}
+			wantCode(t, err, "validation")
+		}
+	}
+	if got := len(allEvents(t, st, roomID)); got != before {
+		t.Fatalf("refused proposals appended %d events", got-before)
+	}
+	snap, err := svc.GetRoom(ctx, roomID)
+	if err != nil {
+		t.Fatalf("get room: %v", err)
+	}
+	if len(snap.OpenProposals) != 0 {
+		t.Fatalf("refused proposal was stored: %+v", snap.OpenProposals)
+	}
+
+	ok := events.ProposalCreatedPayload{Title: "fix", Steps: steps, Risk: "low", Rollback: "revert the change"}
+	if _, err := svc.CreateProposal(ctx, roomID, ok, events.AgentActor); err != nil {
+		t.Fatalf("valid proposal refused: %v", err)
+	}
+}
+
+// TestRestartWaitsForSteer pins the restart rule: Load starts no agent run, each
+// open room gets an idle marker and a system message, and a room's agent starts
+// only on its next steer (or an @agent comment). Other rooms stay idle.
+func TestRestartWaitsForSteer(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	svc1 := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, Now: c.Now})
+	roomA := createRoom(t, svc1, "arjun").ID
+	roomB := createRoom(t, svc1, "arjun").ID
+	svc1.Close() // the old process dies here
+
+	var mu sync.Mutex
+	runs := map[string]int{}
+	countRun := func(ctx context.Context, alert agent.Alert, _ agent.Deps, _ agent.Options) error {
+		mu.Lock()
+		runs[alert.RoomID]++
+		mu.Unlock()
+		<-ctx.Done()
+		return nil
+	}
+	runsOf := func(id string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return runs[id]
+	}
+
+	svc2 := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Owners: testOwners(), Run: countRun, Now: c.Now})
+	t.Cleanup(svc2.Close)
+	if err := svc2.Load(context.Background()); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond) // give any wrongly started run time to start
+	if n := runsOf(roomA) + runsOf(roomB); n != 0 {
+		t.Fatalf("Load started %d agent run(s), want 0", n)
+	}
+
+	for _, id := range []string{roomA, roomB} {
+		var idle, notice bool
+		for _, e := range allEvents(t, st, id) {
+			switch e.Type {
+			case events.AgentStatus:
+				if p, err := events.Decode[events.AgentStatusPayload](e); err == nil && p.State == "idle" {
+					idle = true
+				}
+			case events.AgentMessage:
+				if p, err := events.Decode[events.AgentMessagePayload](e); err == nil && strings.Contains(p.Text, "the agent is paused") {
+					notice = true
+				}
+			}
+		}
+		if !idle || !notice {
+			t.Fatalf("room %s after restart: idle=%v notice=%v", id, idle, notice)
+		}
+	}
+
+	// The driver's steer resumes room A: one run, and only for room A.
+	if _, err := svc2.Steer(context.Background(), mustUser(t, svc2, "arjun"), roomA, "check the topic"); err != nil {
+		t.Fatalf("steer: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return runsOf(roomA) == 1 })
+	// A second steer must not start a second run for the same room.
+	if _, err := svc2.Steer(context.Background(), mustUser(t, svc2, "arjun"), roomA, "and again"); err != nil {
+		t.Fatalf("second steer: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if runsOf(roomA) != 1 || runsOf(roomB) != 0 {
+		t.Fatalf("after steer: runs A=%d B=%d, want 1 and 0", runsOf(roomA), runsOf(roomB))
+	}
+
+	// An @agent comment is the other way to resume room B.
+	if _, err := svc2.AddComment(context.Background(), mustUser(t, svc2, "priya"), roomB, "", "@agent is this the connector?"); err != nil {
+		t.Fatalf("comment: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return runsOf(roomB) == 1 })
+
+	// A further restart does not pile up notices: each room keeps one restart
+	// message and one idle marker, since its status already shows the restart.
+	svc2.Close()
+	svc3 := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Owners: testOwners(), Run: countRun, Now: c.Now})
+	t.Cleanup(svc3.Close)
+	if err := svc3.Load(context.Background()); err != nil {
+		t.Fatalf("second restart load: %v", err)
+	}
+	for _, id := range []string{roomA, roomB} {
+		restartMsgs := 0
+		for _, e := range allEvents(t, st, id) {
+			if e.Type != events.AgentMessage {
+				continue
+			}
+			if p, err := events.Decode[events.AgentMessagePayload](e); err == nil && strings.Contains(p.Text, "the agent is paused") {
+				restartMsgs++
+			}
+		}
+		if restartMsgs != 1 {
+			t.Fatalf("room %s: %d restart messages after two restarts, want 1", id, restartMsgs)
+		}
+	}
+}
+
+// TestRepeatedAlertJoinsOpenRoom pins webhook dedup: an identical alert while
+// its room is open joins that room (no second room, a system message, the
+// hook not called again). Once that room is closed the same alert opens a new
+// room, and the key survives a restart.
+func TestRepeatedAlertJoinsOpenRoom(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	var mu sync.Mutex
+	hooked := 0
+	hookCount := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return hooked
+	}
+	deps := func() room.Deps {
+		return room.Deps{
+			Store: st, Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, Now: c.Now,
+			OnRoomOpened: func(context.Context, string) {
+				mu.Lock()
+				hooked++
+				mu.Unlock()
+			},
+		}
+	}
+	svc := room.New(deps())
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+	arjun := mustUser(t, svc, "arjun")
+	raw := json.RawMessage(`{"title":"consumer lag","pipeline_id":"orders","dedup_key":"lag"}`)
+	resolvedRaw := json.RawMessage(`{"title":"consumer lag","pipeline_id":"orders","dedup_key":"lag","status":"resolved"}`)
+
+	first, _, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
+	if err != nil {
+		t.Fatalf("first alert: %v", err)
+	}
+	second, _, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
+	if err != nil {
+		t.Fatalf("repeat alert: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("repeat opened room %s, want the open room %s", second.ID, first.ID)
+	}
+	if rooms, _ := svc.ListRooms(ctx); len(rooms) != 1 {
+		t.Fatalf("want one room after a repeat, got %d", len(rooms))
+	}
+	joined := false
+	for _, e := range allEvents(t, st, first.ID) {
+		if e.Type != events.AgentMessage {
+			continue
+		}
+		if p, err := events.Decode[events.AgentMessagePayload](e); err == nil && strings.Contains(p.Text, "fired again") {
+			joined = true
+		}
+	}
+	if !joined {
+		t.Fatal("repeat was not recorded as a system message in the open room")
+	}
+	waitFor(t, 5*time.Second, func() bool { return hookCount() == 1 })
+
+	// The source reporting the alert resolved joins the same room, says so, and
+	// leaves the room open: only the driver closes it.
+	resolvedSnap, _, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", resolvedRaw)
+	if err != nil {
+		t.Fatalf("resolved repeat: %v", err)
+	}
+	if resolvedSnap.ID != first.ID || resolvedSnap.Status != "open" {
+		t.Fatalf("resolved repeat: room %s status %s, want open room %s", resolvedSnap.ID, resolvedSnap.Status, first.ID)
+	}
+	sawResolved := false
+	for _, e := range allEvents(t, st, first.ID) {
+		if e.Type != events.AgentMessage {
+			continue
+		}
+		if p, err := events.Decode[events.AgentMessagePayload](e); err == nil && strings.Contains(p.Text, "reported resolved at its source") {
+			sawResolved = true
+		}
+	}
+	if !sawResolved {
+		t.Fatal("resolved repeat was not recorded as resolved")
+	}
+
+	// Close the room; the same alert then opens a new one.
+	if _, err := svc.GrantControl(ctx, arjun, first.ID, "arjun"); err != nil {
+		t.Fatalf("take control: %v", err)
+	}
+	if _, err := svc.CloseRoom(ctx, arjun, first.ID, "fixed"); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	third, _, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
+	if err != nil {
+		t.Fatalf("alert after close: %v", err)
+	}
+	if third.ID == first.ID {
+		t.Fatal("alert for a closed room joined that room")
+	}
+	waitFor(t, 5*time.Second, func() bool { return hookCount() == 2 })
+
+	// A different body is a different alert and opens its own room.
+	other, _, err := svc.CreateRoomFromAlert(ctx, "disk full", "sev2", "orders", json.RawMessage(`{"title":"disk full","pipeline_id":"orders"}`))
+	if err != nil {
+		t.Fatalf("other alert: %v", err)
+	}
+	if other.ID == third.ID {
+		t.Fatal("a different alert joined an unrelated room")
+	}
+
+	// After a restart the open room is still found by its key.
+	svc.Close()
+	svc2 := room.New(deps())
+	t.Cleanup(svc2.Close)
+	if err := svc2.Load(ctx); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	again, _, err := svc2.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
+	if err != nil {
+		t.Fatalf("alert after restart: %v", err)
+	}
+	if again.ID != third.ID {
+		t.Fatalf("after restart opened room %s, want the open room %s", again.ID, third.ID)
+	}
+	if rooms, _ := svc2.ListRooms(ctx); len(rooms) != 3 {
+		t.Fatalf("want three rooms in total, got %d", len(rooms))
+	}
+}
+
+// TestSameAlertKeyOtherPipelineOpensRoom pins that the dedup key is scoped to
+// the pipeline: the same key for two pipelines is two incidents, while the same
+// key for the same pipeline joins the open room.
+func TestSameAlertKeyOtherPipelineOpensRoom(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	svc := room.New(room.Deps{Store: memstore.NewWithClock(c.Now), Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, Now: c.Now})
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+	orders := json.RawMessage(`{"title":"lag","pipeline_id":"orders","dedup_key":"k"}`)
+	billing := json.RawMessage(`{"title":"lag","pipeline_id":"billing","dedup_key":"k"}`)
+
+	a, _, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", orders)
+	if err != nil {
+		t.Fatalf("orders alert: %v", err)
+	}
+	b, _, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "billing", billing)
+	if err != nil {
+		t.Fatalf("billing alert: %v", err)
+	}
+	if b.ID == a.ID {
+		t.Fatal("same dedup key on another pipeline joined the orders room")
+	}
+	again, _, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", orders)
+	if err != nil {
+		t.Fatalf("orders repeat: %v", err)
+	}
+	if again.ID != a.ID {
+		t.Fatalf("orders repeat opened room %s, want %s", again.ID, a.ID)
+	}
+}
+
+// TestConcurrentIdenticalAlertsOpenOneRoom pins that the check for an open room
+// and the room's creation are one step under s.mu: a burst of identical alerts
+// opens exactly one room.
+func TestConcurrentIdenticalAlertsOpenOneRoom(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	svc := room.New(room.Deps{Store: memstore.NewWithClock(c.Now), Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, Now: c.Now})
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+	raw := json.RawMessage(`{"title":"burst","pipeline_id":"orders","dedup_key":"burst"}`)
+
+	const n = 30
+	ids := make([]string, n)
+	errs := make([]error, n)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			snap, _, err := svc.CreateRoomFromAlert(ctx, "burst", "sev2", "orders", raw)
+			ids[i], errs[i] = snap.ID, err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := range ids {
+		if errs[i] != nil {
+			t.Fatalf("alert %d: %v", i, errs[i])
+		}
+		if ids[i] != ids[0] {
+			t.Fatalf("alert %d opened room %s, alert 0 opened %s", i, ids[i], ids[0])
+		}
+	}
+	if rooms, _ := svc.ListRooms(ctx); len(rooms) != 1 {
+		t.Fatalf("want one room for %d identical alerts, got %d", n, len(rooms))
+	}
+}
+
+// giveUpSetup opens a room whose agent fails on every run, waits until its
+// supervisor has given up (three runs), and returns the service, the room and a
+// run counter. The give-up is followed by the slot release, which the tests
+// below wait for through a steer.
+func giveUpSetup(t *testing.T) (*room.Service, string, func() int) {
+	t.Helper()
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	var mu sync.Mutex
+	runs := 0
+	svc := room.New(room.Deps{
+		Store: st, Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
+		Run: func(context.Context, agent.Alert, agent.Deps, agent.Options) error {
+			mu.Lock()
+			runs++
+			mu.Unlock()
+			return errors.New("provider down")
+		},
+	})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "arjun").ID
+	runsOf := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return runs
+	}
+	waitFor(t, 15*time.Second, func() bool { return runsOf() >= 3 })
+	return svc, roomID, runsOf
+}
+
+// TestGaveUpAgentResumesOnSteer pins that an agent whose supervisor gave up is
+// not stuck: the next driver steer starts a new run (the fourth run overall).
+func TestGaveUpAgentResumesOnSteer(t *testing.T) {
+	svc, roomID, runsOf := giveUpSetup(t)
+	arjun := mustUser(t, svc, "arjun")
+	waitFor(t, 15*time.Second, func() bool {
+		if _, err := svc.Steer(context.Background(), arjun, roomID, "try again"); err != nil {
+			t.Fatalf("steer: %v", err)
+		}
+		return runsOf() >= 4
+	})
+	// The new run's retry backoff is one second, so the count is stable here.
+	time.Sleep(300 * time.Millisecond)
+	if n := runsOf(); n != 4 {
+		t.Fatalf("runs after resume: %d, want 4", n)
+	}
+}
+
+// TestConcurrentSteersStartOneRun pins that two steers racing on a gave-up
+// agent start at most one new run.
+func TestConcurrentSteersStartOneRun(t *testing.T) {
+	svc, roomID, runsOf := giveUpSetup(t)
+	arjun := mustUser(t, svc, "arjun")
+	waitFor(t, 15*time.Second, func() bool {
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _ = svc.Steer(context.Background(), arjun, roomID, "retry")
+			}()
+		}
+		wg.Wait()
+		return runsOf() >= 4
+	})
+	time.Sleep(300 * time.Millisecond)
+	if n := runsOf(); n != 4 {
+		t.Fatalf("runs after two concurrent steers: %d, want 4", n)
+	}
+}
+
+// TestAgentMentionWordBoundary pins @agent detection: a whole-word mention,
+// any case, sets mentions_agent; a longer word or a glued-on name does not.
+func TestAgentMentionWordBoundary(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	roomID := createRoom(t, svc, "arjun").ID
+	priya := mustUser(t, svc, "priya")
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"@agent is this the connector?", true},
+		{"ping @Agent.", true},
+		{"(@agent)", true},
+		{"@agentless is not the agent", false},
+		{"@agents are plural", false},
+		{"text@agent glued to a word", false},
+	}
+	for _, tc := range cases {
+		e, err := svc.AddComment(context.Background(), priya, roomID, "", tc.text)
+		if err != nil {
+			t.Fatalf("comment %q: %v", tc.text, err)
+		}
+		p, err := events.Decode[events.CommentAddedPayload](e)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if p.MentionsAgent != tc.want {
+			t.Fatalf("comment %q: mentions_agent=%v, want %v", tc.text, p.MentionsAgent, tc.want)
+		}
 	}
 }

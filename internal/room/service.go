@@ -61,8 +61,10 @@ type roomState struct {
 	snap        RoomSnapshot
 	inbox       *inbox
 	agentCancel context.CancelFunc
+	agentRun    uint64             // generation of the latest agent start; see releaseAgent
 	execCancel  context.CancelFunc // cancels the room's executor on close
 	exec        *execQueue         // nil until the first proposal is approved
+	dedupKey    string             // alert dedup key of a webhook room; "" otherwise
 }
 
 // Service is the room domain logic. All state derives from the event log; the
@@ -91,6 +93,9 @@ type Service struct {
 	mu     sync.Mutex
 	closed bool
 	rooms  map[string]*roomState
+	// alertRooms maps the dedup key of each open webhook room to that room, so
+	// a repeat of the same alert joins the room instead of opening another.
+	alertRooms map[string]string
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -144,6 +149,7 @@ func New(d Deps) *Service {
 		ctx:          ctx,
 		cancel:       cancel,
 		rooms:        map[string]*roomState{},
+		alertRooms:   map[string]string{},
 	}
 	return s
 }
@@ -169,15 +175,21 @@ func (s *Service) LookupUser(id string) (User, bool) { return s.users.Get(id) }
 // AllUsers returns the full directory.
 func (s *Service) AllUsers() []User { return s.users.All() }
 
-// Load rebuilds the snapshot cache from the event log and restarts the agent
-// for rooms that are still open. Called once at startup.
+// Load rebuilds the snapshot cache from the event log. Called once at startup.
+// It does not start any agent run: each open room gets an idle marker and a
+// system message, and its agent starts on the next steer or on a comment that
+// mentions the agent (ensureAgentLocked). A restart must not spend model calls
+// on rooms nobody is watching.
 func (s *Service) Load(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.ensureAllLoadedLocked(ctx)
+	return s.ensureAllLoadedLocked(ctx, true)
 }
 
-func (s *Service) ensureAllLoadedLocked(ctx context.Context) error {
+// ensureAllLoadedLocked rebuilds every room not yet cached. restarted is true
+// only for the start-up Load: those open rooms are marked as idle after a
+// server restart. Caller must hold s.mu.
+func (s *Service) ensureAllLoadedLocked(ctx context.Context, restarted bool) error {
 	rooms, err := s.store.ListRooms(ctx)
 	if err != nil {
 		return fmt.Errorf("room: load: %w", err)
@@ -194,11 +206,49 @@ func (s *Service) ensureAllLoadedLocked(ctx context.Context) error {
 		st := &roomState{snap: snap, inbox: newInbox()}
 		s.rooms[r.ID] = st
 		if snap.Status == "open" {
+			s.indexAlertRoomLocked(ctx, r.ID, st)
 			s.interruptStaleProposalsLocked(ctx, r.ID, st)
-			s.startAgentLocked(r.ID, snap.Title, snap.PipelineID, s.rawAlert(ctx, r.ID), st)
+			if restarted {
+				if err := s.noteRestartLocked(ctx, r.ID, st); err != nil {
+					s.log.Warn("room: restart notice failed", "room", r.ID, "err", err)
+				}
+			}
 		}
 	}
 	return nil
+}
+
+// restartDetail is the agent status detail a restart writes. A room already
+// showing it is not marked again, so repeated restarts do not pile up notices.
+const restartDetail = "server restarted"
+
+// noteRestartLocked tells the room that the server restarted: the agent is idle
+// and paused until someone steers or mentions it. It writes agent.status idle and
+// a system message to the log, unless the room already shows that state. Caller
+// must hold s.mu.
+func (s *Service) noteRestartLocked(ctx context.Context, roomID string, st *roomState) error {
+	if st.snap.AgentStatus.State == "idle" && st.snap.AgentStatus.Detail == restartDetail {
+		return nil
+	}
+	if _, err := s.emitLocked(ctx, st, roomID, events.AgentStatus, events.AgentActor, events.AgentStatusPayload{
+		State: "idle", Detail: restartDetail,
+	}); err != nil {
+		return err
+	}
+	_, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
+		Text: "server restarted — the agent is paused; the driver can steer, or anyone can mention @agent, to resume",
+	})
+	return err
+}
+
+// ensureAgentLocked starts the room's agent run if the room has none yet. A
+// room restored by Load has none until someone steers it or mentions the agent;
+// a room whose agent was already started is left alone. Caller must hold s.mu.
+func (s *Service) ensureAgentLocked(ctx context.Context, roomID string, st *roomState) {
+	if st.agentCancel != nil || !s.roomOpen(st) {
+		return
+	}
+	s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, s.rawAlert(ctx, roomID), st)
 }
 
 // interruptStaleProposalsLocked records the outcome of proposals that were
@@ -297,6 +347,9 @@ func (s *Service) getStateLocked(ctx context.Context, roomID string) (*roomState
 	}
 	st := &roomState{snap: snap, inbox: newInbox()}
 	s.rooms[roomID] = st
+	if snap.Status == "open" {
+		s.indexAlertRoomLocked(ctx, roomID, st)
+	}
 	return st, nil
 }
 
@@ -560,7 +613,10 @@ func (s *Service) feedInbox(st *roomState, e events.Event) {
 		if !ok {
 			return
 		}
-		input = &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "action_result", Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, p.StepIndex, p.Output)}
+		// OK tells the agent whether the step succeeded; it must not claim the
+		// pipeline recovered from a failed step (agent.HumanInput.OK).
+		stepOK := p.OK
+		input = &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "action_result", Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, p.StepIndex, p.Output), OK: &stepOK}
 	default:
 		return
 	}
@@ -605,6 +661,8 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
 	st.agentCancel = cancel
+	st.agentRun++
+	run := st.agentRun
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -636,6 +694,7 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			ecancel()
 			if attempt >= maxAgentAttempts {
 				s.log.Error("room: agent gave up after repeated failures", "room", roomID, "attempts", attempt)
+				s.releaseAgent(st, run, cancel)
 				return
 			}
 			select {
@@ -646,6 +705,19 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			backoff *= 2
 		}
 	}()
+}
+
+// releaseAgent frees the room's agent slot when its supervisor gives up, so the
+// next steer or @agent comment can start a new run. A supervisor whose slot has
+// already been taken by a newer run (run is stale) releases nothing. cancel is
+// the supervisor's own context, called to free it either way.
+func (s *Service) releaseAgent(st *roomState, run uint64, cancel context.CancelFunc) {
+	s.mu.Lock()
+	if st.agentRun == run {
+		st.agentCancel = nil
+	}
+	s.mu.Unlock()
+	cancel()
 }
 
 func truncateDetail(s string) string {

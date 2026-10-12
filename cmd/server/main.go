@@ -49,11 +49,22 @@ func main() {
 // including the listen-error path.
 func run() error {
 	demoMode := flag.Bool("demo", false, "run a scripted fake agent (no real tools/agent)")
+	allowRemote := flag.Bool("allow-remote", false, "allow PIPEROOM_HTTP_ADDR to be non-loopback (auth is the dev X-User stub)")
 	flag.Parse()
 
 	cfg := config.Load()
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
+
+	// Refuse a reachable-from-outside listen address before anything else
+	// starts: the only auth is the X-User stub (security F1).
+	remote, err := checkListenAddr(cfg.HTTPAddr, *allowRemote)
+	if err != nil {
+		return err
+	}
+	if remote {
+		log.Warn("server: listening on a non-loopback address; auth is the dev X-User stub, so any client that can reach it can act as any user", "addr", cfg.HTTPAddr)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
