@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"piperoom/internal/alertin"
@@ -15,6 +16,9 @@ import (
 // DEFAULT_ALERT_PIPELINE entry refuses start rather than silently routing
 // alerts to the wrong pipeline.
 func alertConfig(cfg config.Config, own *owners.Owners) (alertin.Config, error) {
+	if err := checkOwnersIDs(own); err != nil {
+		return alertin.Config{}, err
+	}
 	services, err := parsePagerDutyServices(cfg.PagerDutyServices, own)
 	if err != nil {
 		return alertin.Config{}, err
@@ -60,6 +64,25 @@ func parsePagerDutyServices(s string, own *owners.Owners) (map[string]string, er
 		out[svc] = pipeline
 	}
 	return out, nil
+}
+
+// alertPipelineIDRe is alertin's own pipeline id shape (alertin.validPipelineID,
+// unexported). alertin ignores any other id from an alert or from
+// PagerDutyServices, so an owners pipeline outside it could never be picked.
+var alertPipelineIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+
+// checkOwnersIDs refuses start when an owners.yaml pipeline id is one alertin
+// would silently ignore, so alerts for it would not be routed there.
+func checkOwnersIDs(own *owners.Owners) error {
+	if own == nil {
+		return nil
+	}
+	for _, p := range own.Pipelines {
+		if !alertPipelineIDRe.MatchString(p.ID) {
+			return fmt.Errorf("server: owners pipeline id %q does not match %s, so signed alerts could not be routed to it", p.ID, alertPipelineIDRe)
+		}
+	}
+	return nil
 }
 
 // checkPipeline fails when own does not define the pipeline.

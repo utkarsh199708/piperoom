@@ -3,8 +3,11 @@ package httpapi
 import (
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"slices"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -30,6 +33,12 @@ func (s *Server) handleSignedAlert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "unknown alert source")
 		return
 	}
+	// A source with no secret is refused before the body is read.
+	if !s.alerts.Enabled(src) {
+		s.refuseWarn.refused(s.log, src, r, "source is not configured")
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "alert authentication failed")
+		return
+	}
 	// One byte over the limit, so a body that is too large is seen by Ingest
 	// (ErrTooLarge) rather than silently cut. A longer body fails the read.
 	r.Body = http.MaxBytesReader(w, r.Body, alertin.MaxBodyBytes+1)
@@ -52,7 +61,7 @@ func (s *Server) handleSignedAlert(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, alertin.ErrUnauthenticated), errors.Is(err, alertin.ErrStale):
 		// The cause is logged for the operator; the client only learns that the
 		// request was refused (alertin errors never carry secrets).
-		s.log.Warn("alerts: refused", "source", src, "remote", r.RemoteAddr, "reason", err.Error())
+		s.refuseWarn.refused(s.log, src, r, err.Error())
 		msg := "alert authentication failed"
 		if errors.Is(err, alertin.ErrStale) {
 			msg = "alert event too old"
@@ -93,4 +102,32 @@ func (s *Server) writeAlertRoom(w http.ResponseWriter, snap room.RoomSnapshot, c
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, snap)
+}
+
+// refuseWarnEvery limits refused-alert logs per source: anyone who can reach
+// the port can make them, so they must not flood the log.
+const refuseWarnEvery = time.Minute
+
+// refuseWarner logs refused signed-alert requests at Warn, at most once per
+// source per interval; the rest go to Debug.
+type refuseWarner struct {
+	every time.Duration
+	now   func() time.Time
+
+	mu   sync.Mutex
+	last map[alertin.Source]time.Time
+}
+
+func (l *refuseWarner) refused(log *slog.Logger, src alertin.Source, r *http.Request, reason string) {
+	level := slog.LevelDebug
+	l.mu.Lock()
+	if l.last == nil {
+		l.last = map[alertin.Source]time.Time{}
+	}
+	if t := l.now(); t.Sub(l.last[src]) >= l.every {
+		l.last[src] = t
+		level = slog.LevelWarn
+	}
+	l.mu.Unlock()
+	log.Log(r.Context(), level, "alerts: refused", "source", src, "remote", r.RemoteAddr, "reason", reason)
 }

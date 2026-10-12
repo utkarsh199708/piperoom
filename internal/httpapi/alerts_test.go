@@ -7,12 +7,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -454,6 +456,80 @@ func TestAlertAuthSplit(t *testing.T) {
 	resp = doJSON(t, http.MethodPost, srv.URL+"/api/alerts/webhook", "arjun", `{"title":"x"}`)
 	wantStatus(t, resp, http.StatusCreated)
 	resp.Body.Close()
+}
+
+// A source with no secret is refused before the body is read: even a body over
+// the limit gets 401, not 413.
+func TestSignedAlertDisabledSourceRefusedBeforeBody(t *testing.T) {
+	cfg := alertCfg(time.Now())
+	cfg.GenericSecret = ""
+	srv, _ := newAlertServer(t, cfg)
+	body := []byte(`"` + strings.Repeat("x", 2*alertin.MaxBodyBytes) + `"`)
+	resp := postAlert(t, srv, alertin.Generic, http.Header{}, body)
+	wantStatus(t, resp, http.StatusUnauthorized)
+	resp.Body.Close()
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// Refused signed requests are logged at Warn at most once per source per
+// minute; the rest are Debug, so a caller cannot flood the log.
+func TestSignedAlertRefusalsAreLoggedOncePerMinute(t *testing.T) {
+	var clockMu sync.Mutex
+	now := time.Date(2026, 10, 11, 11, 0, 0, 0, time.UTC)
+	clock := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	var mu sync.Mutex
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(lockedWriter{&mu, &logs}, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	st := memstore.New()
+	svc := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})
+	api := httpapi.New(svc, st, log, httpapi.WithAlertIngest(alertCfg(now)), httpapi.WithClock(clock))
+	srv := httptest.NewServer(api)
+	t.Cleanup(func() {
+		srv.Close()
+		api.Close()
+	})
+
+	refuse := func(src alertin.Source) {
+		resp := postAlert(t, srv, src, http.Header{}, []byte(`{}`))
+		wantStatus(t, resp, http.StatusUnauthorized)
+		resp.Body.Close()
+	}
+	warns := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Count(logs.String(), "alerts: refused")
+	}
+	for i := 0; i < 5; i++ {
+		refuse(alertin.Generic)
+	}
+	if n := warns(); n != 1 {
+		t.Fatalf("5 refusals of one source logged %d warnings, want 1", n)
+	}
+	refuse(alertin.Grafana)
+	if n := warns(); n != 2 {
+		t.Fatalf("a second source logged %d warnings in total, want 2", n)
+	}
+	clockMu.Lock()
+	now = now.Add(2 * time.Minute)
+	clockMu.Unlock()
+	refuse(alertin.Generic)
+	if n := warns(); n != 3 {
+		t.Fatalf("after a minute logged %d warnings in total, want 3", n)
+	}
 }
 
 // With no WithAlertIngest option every signed source is disabled.

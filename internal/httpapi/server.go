@@ -43,6 +43,7 @@ type Server struct {
 	ready        Pinger
 	probeTimeout time.Duration
 	readyWarn    readyWarner
+	refuseWarn   refuseWarner
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -59,6 +60,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 		log:          log,
 		probeTimeout: DefaultProbeTimeout,
 		readyWarn:    readyWarner{every: readyWarnEvery, now: time.Now},
+		refuseWarn:   refuseWarner{every: refuseWarnEvery, now: time.Now},
 	}
 	for _, o := range opts {
 		o(s)

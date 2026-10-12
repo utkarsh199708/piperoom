@@ -60,6 +60,7 @@ func WithClock(now func() time.Time) Option {
 	return func(s *Server) {
 		if now != nil {
 			s.readyWarn.now = now
+			s.refuseWarn.now = now
 		}
 	}
 }

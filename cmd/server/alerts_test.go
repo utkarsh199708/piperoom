@@ -56,6 +56,19 @@ func TestParsePagerDutyServices(t *testing.T) {
 	}
 }
 
+func TestAlertConfigRejectsOwnersIDAlertinWouldIgnore(t *testing.T) {
+	for _, id := range []string{"has space", "-lead", strings.Repeat("a", 65), "orders/eu"} {
+		own := &owners.Owners{Pipelines: []owners.Pipeline{{ID: id}}}
+		if _, err := alertConfig(config.Config{}, own); err == nil {
+			t.Fatalf("owners id %q must be refused", id)
+		}
+	}
+	own := &owners.Owners{Pipelines: []owners.Pipeline{{ID: "orders-eu.v2_1"}}}
+	if _, err := alertConfig(config.Config{}, own); err != nil {
+		t.Fatalf("valid owners id refused: %v", err)
+	}
+}
+
 func TestAlertConfig(t *testing.T) {
 	cfg := config.Config{
 		AlertmanagerToken:    "s3cret-am",
