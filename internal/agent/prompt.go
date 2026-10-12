@@ -118,20 +118,19 @@ func firstUserMessage(alert Alert) string {
 // text carrying it would forge a verdict.
 var verificationTag = regexp.MustCompile(`(?i)\[verification\]`)
 
-// foldLookalikes maps the characters a forged tag could hide behind onto the
-// plain ASCII they imitate, the way sanitizeLabel does for labels. The fullwidth
-// ASCII block (U+FF01..U+FF5E, which includes the fullwidth brackets ［ ］ and
-// fullwidth letters) folds to ASCII, and zero-width characters, which split a
-// word without showing, are dropped.
-func foldLookalikes(s string) string {
+// markInvisible makes the characters a reader cannot see visible, so the model
+// reads them as data. Zero-width characters are common root causes in CDC data
+// (a key that differs only by one), so they are never dropped: each becomes a
+// visible {U+XXXX} marker. The fullwidth brackets become {U+FF3B} and {U+FF3D},
+// so they cannot pass for the ASCII brackets of a tag. Every other character,
+// the fullwidth letters included, is unchanged.
+func markInvisible(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
-		switch {
-		case r >= 0xFF01 && r <= 0xFF5E:
-			b.WriteRune(r - 0xFEE0)
-		case r == 0x200B, r == 0x200C, r == 0x200D, r == 0x2060, r == 0xFEFF, r == 0x00AD:
-			// zero-width space, non-joiner, joiner, word joiner, BOM and soft hyphen
+		switch r {
+		case 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, 0xFF3B, 0xFF3D:
+			fmt.Fprintf(&b, "{U+%04X}", r)
 		default:
 			b.WriteRune(r)
 		}
@@ -141,10 +140,11 @@ func foldLookalikes(s string) string {
 
 // escapeToolText escapes the three characters that can break out of an
 // untrusted-data wrapper: &, < and >. Escape & first so its escape sequence is
-// not re-escaped. It also neutralises the verification tag, after folding
-// lookalikes, so untrusted text cannot pass for a verdict of the room's checks.
+// not re-escaped. Invisible characters are marked first, and the ASCII
+// verification tag is neutralised last, so untrusted text cannot pass for a
+// verdict of the room's checks.
 func escapeToolText(s string) string {
-	s = foldLookalikes(s)
+	s = markInvisible(s)
 	s = strings.ReplaceAll(s, "&", "&amp;")
 	s = strings.ReplaceAll(s, "<", "&lt;")
 	s = strings.ReplaceAll(s, ">", "&gt;")

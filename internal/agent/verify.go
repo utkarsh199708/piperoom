@@ -42,7 +42,9 @@ const (
 	// can tell a verdict from ordinary input.
 	verifyTag = "[verification] "
 	// recoveredHead opens the verdict of a proposal whose checks all passed.
-	recoveredHead = "recovered: every layer check passed and data flow is verified.\n"
+	// The wording says data is flowing again, not that the sink has caught up:
+	// the check sees new rows after the fix, not the whole backlog.
+	recoveredHead = "recovered: every layer check passed and data is flowing again (new rows arrived after the fix). This does not show that the sink has caught up.\n"
 	// waitingDetail is the status detail of a recovered episode parked for input.
 	waitingDetail = "pipeline recovered; waiting for input"
 )
@@ -55,6 +57,9 @@ var (
 	// needs, so a connector that only just came back is not counted as healthy.
 	// A var so tests can shrink it.
 	settleWait = 5 * time.Second
+	// baselineTimeout bounds the whole creation-baseline snapshot taken when a
+	// proposal is made. A var so tests can shrink it.
+	baselineTimeout = 20 * time.Second
 )
 
 // proposalRecord is what the agent remembers about a proposal it created, so a
@@ -386,12 +391,12 @@ type sinkTable struct {
 
 // pipelineSinks returns the sink tables the data-flow check can judge. When it
 // cannot, the reason is returned instead, and the data flow is not verified.
-func (r *runner) pipelineSinks(ctx context.Context) ([]sinkTable, string) {
+func (r *runner) pipelineSinks(ctx context.Context, verb string) ([]sinkTable, string) {
 	pipeline := r.alert.PipelineID
 	if pipeline == "" {
 		return nil, "the alert names no pipeline"
 	}
-	sinks, err := r.sinkTables(ctx, pipeline)
+	sinks, err := r.sinkTables(ctx, verb, pipeline)
 	if err != nil {
 		return nil, err.Error()
 	}
@@ -441,7 +446,7 @@ func (st sinkState) readings() string {
 // sleeps once and re-reads only the sinks still pending, so the whole check
 // sleeps at most freshnessAttempts × freshnessWait.
 func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord) flowResult {
-	sinks, why := r.pipelineSinks(ctx)
+	sinks, why := r.pipelineSinks(ctx, "verify")
 	if why != "" {
 		return flowResult{lines: []string{"data flow not verified: " + why}}
 	}
@@ -450,7 +455,7 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord) flowRes
 	for i, s := range sinks {
 		st := sinkState{table: s, input: jsonObject("table", s.name, "ts_column", s.tsColumn)}
 		st.proposalAt, st.hasProposal = rec.baseline[s.name]
-		newest, summary, err := r.readNewest(ctx, st.input)
+		newest, summary, err := r.readNewest(ctx, "verify", st.input)
 		if err != nil {
 			return flowResult{lines: []string{"data flow not verified: reading " + s.name + ": " + err.Error()}}
 		}
@@ -472,7 +477,7 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord) flowRes
 			if st.passed {
 				continue
 			}
-			newest, summary, err := r.readNewest(ctx, st.input)
+			newest, summary, err := r.readNewest(ctx, "verify", st.input)
 			if err != nil {
 				return flowResult{lines: []string{"data flow not verified: reading " + st.table.name + ": " + err.Error()}}
 			}
@@ -510,15 +515,22 @@ func anyPending(states []sinkState) bool {
 // made, so the later check can count rows that arrived since the proposal. It is
 // best effort: when a sink cannot be read or judged, no baseline is kept and the
 // check falls back to its window alone.
+//
+// The whole snapshot shares one baselineTimeout deadline, on top of the per-tool
+// timeouts, so a slow warehouse cannot hold up the proposal. A failure anywhere
+// stores nothing: a partial baseline would judge some sinks against a time the
+// others never had.
 func (r *runner) snapshotBaseline(ctx context.Context, proposalID string) {
-	sinks, why := r.pipelineSinks(ctx)
+	ctx, cancel := context.WithTimeout(ctx, baselineTimeout)
+	defer cancel()
+	sinks, why := r.pipelineSinks(ctx, "baseline")
 	if why != "" {
 		r.log.Info("agent: no creation baseline for proposal", "proposal", proposalID, "reason", why)
 		return
 	}
 	base := make(map[string]time.Time, len(sinks))
 	for _, s := range sinks {
-		newest, _, err := r.readNewest(ctx, jsonObject("table", s.name, "ts_column", s.tsColumn))
+		newest, _, err := r.readNewest(ctx, "baseline", jsonObject("table", s.name, "ts_column", s.tsColumn))
 		if err != nil {
 			r.log.Info("agent: no creation baseline for proposal", "proposal", proposalID, "table", s.name, "err", err)
 			return
@@ -539,8 +551,8 @@ func formatBaseline(t time.Time) string {
 
 // readNewest reads warehouse_freshness once and returns the newest row time,
 // which is the zero time for an empty table, plus the tool summary.
-func (r *runner) readNewest(ctx context.Context, input json.RawMessage) (time.Time, string, error) {
-	res, err := r.runVerifyTool(ctx, "warehouse_freshness", input)
+func (r *runner) readNewest(ctx context.Context, verb string, input json.RawMessage) (time.Time, string, error) {
+	res, err := r.runStep(ctx, verb, "warehouse_freshness", input)
 	if err != nil {
 		return time.Time{}, "", err
 	}
@@ -563,8 +575,8 @@ func (r *runner) readNewest(ctx context.Context, input json.RawMessage) (time.Ti
 // sinkTables reads the sink tables of one pipeline from pipeline_map, with the
 // timestamp column each one carries in its facts. It is a read tool like any
 // other, so the call is traced in the room.
-func (r *runner) sinkTables(ctx context.Context, pipelineID string) ([]sinkTable, error) {
-	res, err := r.runVerifyTool(ctx, "pipeline_map", jsonObject("pipeline_id", pipelineID))
+func (r *runner) sinkTables(ctx context.Context, verb, pipelineID string) ([]sinkTable, error) {
+	res, err := r.runStep(ctx, verb, "pipeline_map", jsonObject("pipeline_id", pipelineID))
 	if err != nil {
 		return nil, err
 	}
@@ -670,6 +682,13 @@ func (r *runner) readCheck(ctx context.Context, c verifyCheck) (bool, string) {
 // step/tool events a normal read-tool call produces, and returns the raw
 // result so the caller can judge it.
 func (r *runner) runVerifyTool(ctx context.Context, name string, input json.RawMessage) (tools.Result, error) {
+	return r.runStep(ctx, "verify", name, input)
+}
+
+// runStep is runVerifyTool with the room step titled verb + " " + name, so the
+// room tells a creation baseline read ("baseline ...") from a check read
+// ("verify ...").
+func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawMessage) (tools.Result, error) {
 	entry, ok := r.toolList.byName[name]
 	if !ok {
 		return tools.Result{}, fmt.Errorf("agent: verify: unknown tool %q", name)
@@ -683,7 +702,7 @@ func (r *runner) runVerifyTool(ctx context.Context, name string, input json.RawM
 
 	stepID := newStepID()
 	toolUseID := "tu_" + newULID()
-	r.emit(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: "verify " + name})
+	r.emit(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: verb + " " + name})
 	r.emit(ctx, events.AgentToolCall, events.AgentToolCallPayload{
 		StepID:    stepID,
 		ToolUseID: toolUseID,
