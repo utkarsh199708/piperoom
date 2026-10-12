@@ -53,6 +53,9 @@ type Deps struct {
 	// MaxAgents caps agent runs working at the same time across all rooms; a
 	// room over the cap waits in a FIFO queue. 0 or less means DefaultMaxAgents.
 	MaxAgents int
+	// ExportMaxEvents caps the events one audit export may contain; a larger
+	// room answers 413 export_too_large. Zero means DefaultExportMaxEvents.
+	ExportMaxEvents int64
 
 	// OnRoomOpened, when set, is called once per room opened by CreateRoom or
 	// CreateRoomFromAlert, after room.created is appended. Each call runs in
@@ -87,6 +90,7 @@ type Service struct {
 	now          func() time.Time
 	onRoomOpened func(ctx context.Context, roomID string)
 	slots        *agentSlots // global cap on concurrent agent runs
+	exportMax    int64
 
 	// ctx is the service lifetime: every goroutine the service starts (agent
 	// supervisors, executor queues) derives from it. Close cancels it and
@@ -152,6 +156,7 @@ func New(d Deps) *Service {
 		now:          now,
 		onRoomOpened: d.OnRoomOpened,
 		slots:        newAgentSlots(d.MaxAgents),
+		exportMax:    d.ExportMaxEvents,
 		ctx:          ctx,
 		cancel:       cancel,
 		rooms:        map[string]*roomState{},
