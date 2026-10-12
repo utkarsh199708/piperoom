@@ -55,7 +55,8 @@ type roomState struct {
 	snap        RoomSnapshot
 	inbox       *inbox
 	agentCancel context.CancelFunc
-	exec        *execQueue // nil until the first proposal is approved
+	execCancel  context.CancelFunc // cancels the room's executor on close
+	exec        *execQueue         // nil until the first proposal is approved
 }
 
 // Service is the room domain logic. All state derives from the event log; the
@@ -203,6 +204,14 @@ func (s *Service) interruptStaleProposalsLocked(ctx context.Context, roomID stri
 		if !fullyApproved(p) {
 			continue
 		}
+		// The snapshot is not the whole truth: if the last action.executed
+		// append failed but the store status write succeeded, the DB already
+		// says executed/failed/rejected while the snapshot still shows the
+		// proposal open. Skip those — do not re-mark a finished proposal failed
+		// (review item 6).
+		if row, err := s.store.GetProposal(ctx, p.ProposalID); err == nil && row.Status != "open" {
+			continue
+		}
 		next := s.interruptedStep(ctx, roomID, p)
 		for i := range p.Steps {
 			s.finishClaimedStep(p.ProposalID, i, "interrupted by a service restart")
@@ -309,7 +318,9 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, err
 	}
 	if row, err := s.store.GetRoom(ctx, roomID); err == nil {
 		if row.DriverID != "" && snap.Driver != nil && snap.Driver.ID == row.DriverID && row.DriverLeaseUntil != nil && row.DriverLeaseUntil.After(snap.Driver.LeaseUntil) {
-			snap.Driver.LeaseUntil = *row.DriverLeaseUntil
+			// docs/api.md: times are RFC 3339 UTC; a persisted lease read back
+			// from Postgres may carry the session's local zone.
+			snap.Driver.LeaseUntil = row.DriverLeaseUntil.UTC()
 		}
 	}
 	return snap, nil
@@ -422,6 +433,26 @@ func (s *Service) touchDriverLease(ctx context.Context, st *roomState, roomID st
 
 func (s *Service) roomOpen(st *roomState) bool {
 	return st.snap.Status == "open"
+}
+
+// knownPipeline reports whether the owners config knows pipelineID. With no
+// owners config loaded there is nothing to validate against, so every id is
+// treated as known (unit tests).
+func (s *Service) knownPipeline(pipelineID string) bool {
+	if s.owners == nil {
+		return true
+	}
+	_, ok := s.owners.Pipeline(pipelineID)
+	return ok
+}
+
+// proposalsDisabled reports whether the room must not accept proposals: the
+// pipeline is unknown to the owners config, so there is nothing to scope a
+// fix against (docs/api.md:103). It derives from the snapshot's pipeline id,
+// so it survives a restart: a webhook room opened for an unknown pipeline
+// keeps proposals disabled after the service rebuilds from the log.
+func (s *Service) proposalsDisabled(st *roomState) bool {
+	return s.owners != nil && st.snap.PipelineID != "" && !s.knownPipeline(st.snap.PipelineID)
 }
 
 func humanActor(u User) events.Actor {
