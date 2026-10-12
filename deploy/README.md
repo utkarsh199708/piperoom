@@ -209,10 +209,14 @@ The export carries a SHA-256 over the JCS (RFC 8785) form of the room with the t
 `sha256sum` of the file will not match it. Use it to check later that the file was not changed.
 Any user in `users.yaml` may export.
 
-## Watcher (not active yet)
+## Watcher
 
-The four `PIPEROOM_WATCH_*` settings are also passed through but **not active yet** (watcher in
-review). Leave them empty until it lands.
+The built-in watcher is live. The four `PIPEROOM_WATCH_*` settings are passed through to the server.
+Empty means the default, which is mode `log` (shadow mode: it only writes log lines and opens no
+room). Set `PIPEROOM_WATCH_MODE=rooms` to let it open rooms. A bad value stops the server at start
+with an error that names the variable. `--demo` always runs with the watcher off. The source database
+URL must point at the primary, PostgreSQL 13 or newer. See
+[setup.md](../docs/pilot/setup.md#1-configure-the-environment).
 
 ## Try the UI with no stack (demo mode)
 
