@@ -101,7 +101,8 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 		return RoomSnapshot{}, validation(fmt.Sprintf("pipeline_id %q must match ^[a-zA-Z0-9_.-]+$", pipelineID))
 	}
 	pipelineKnown := s.owners == nil || s.knownPipeline(pipelineID)
-	dedupKey := alertDedupKey(raw)
+	dedupKey, resolved := alertDedup(raw)
+	indexKey := alertIndexKey(pipelineID, dedupKey)
 	roomID := NewID("r_")
 	now := s.now().UTC()
 
@@ -109,9 +110,9 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 	// The same alert while its room is still open joins that room: no second
 	// room, no second agent, and the hook is not called again (the room was
 	// opened before).
-	if existing, ok := s.openAlertRoomLocked(dedupKey); ok {
+	if existing, ok := s.openAlertRoomLocked(indexKey); ok {
 		st := s.rooms[existing]
-		snap, err := s.joinAlertRoomLocked(ctx, existing, st, title)
+		snap, err := s.joinAlertRoomLocked(ctx, existing, st, title, resolved)
 		s.mu.Unlock()
 		return snap, err
 	}
@@ -131,9 +132,9 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 		s.mu.Unlock()
 		return RoomSnapshot{}, err
 	}
-	if dedupKey != "" {
-		st.dedupKey = dedupKey
-		s.alertRooms[dedupKey] = roomID
+	if indexKey != "" {
+		st.dedupKey = indexKey
+		s.alertRooms[indexKey] = roomID
 	}
 	// A missing/unknown pipeline opens with a system message so the room shows
 	// why no fix is proposed. events.go has no dedicated system-message type,
@@ -154,28 +155,41 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 	return snap, nil
 }
 
-// alertDedupKey is the key that makes a repeat of the same alert join the room
-// already open for it (alertin.Alert.DedupKey). It is derived from the raw body
-// alone, so a restart rebuilds the same keys. A body alertin cannot parse, or
-// no body, gets no key and always opens a room.
-func alertDedupKey(raw json.RawMessage) string {
+// alertDedup reads a webhook body the way alertin does and returns the dedup
+// key that makes a repeat of the same alert join the room already open for it
+// (alertin.Alert.DedupKey), and whether the source reports the alert resolved.
+// The key is derived from the raw body alone, so a restart rebuilds it. Without
+// a dedup_key in the body the key is a hash of the body: only byte-identical
+// bodies are deduplicated. A body alertin cannot parse, or no body, gets no key
+// and always opens a room.
+func alertDedup(raw json.RawMessage) (key string, resolved bool) {
 	if len(raw) == 0 {
-		return ""
+		return "", false
 	}
 	a, err := alertin.Config{}.Parse(alertin.Generic, raw)
 	if err != nil {
-		return ""
-	}
-	return a.DedupKey
-}
-
-// openAlertRoomLocked returns the open room that already holds dedupKey, if
-// any. A key whose room is closed is not a match. Caller must hold s.mu.
-func (s *Service) openAlertRoomLocked(dedupKey string) (string, bool) {
-	if dedupKey == "" {
 		return "", false
 	}
-	roomID, ok := s.alertRooms[dedupKey]
+	return a.DedupKey, a.Status == alertin.StatusResolved
+}
+
+// alertIndexKey scopes an alert dedup key to its pipeline: the same key sent for
+// two pipelines is two incidents. An empty dedup key stays empty (no dedup).
+func alertIndexKey(pipelineID, dedupKey string) string {
+	if dedupKey == "" {
+		return ""
+	}
+	return pipelineID + "\x00" + dedupKey
+}
+
+// openAlertRoomLocked returns the open room that already holds indexKey (see
+// alertIndexKey), if any. A key whose room is closed is not a match. Caller must
+// hold s.mu.
+func (s *Service) openAlertRoomLocked(indexKey string) (string, bool) {
+	if indexKey == "" {
+		return "", false
+	}
+	roomID, ok := s.alertRooms[indexKey]
 	if !ok {
 		return "", false
 	}
@@ -187,22 +201,27 @@ func (s *Service) openAlertRoomLocked(dedupKey string) (string, bool) {
 }
 
 // joinAlertRoomLocked records a repeat of an alert in the room that is already
-// open for it, as a system message, and returns that room. Caller must hold s.mu.
-func (s *Service) joinAlertRoomLocked(ctx context.Context, roomID string, st *roomState, title string) (RoomSnapshot, error) {
-	if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
-		Text: fmt.Sprintf("alert %q fired again; joined this room instead of opening a new one", title),
-	}); err != nil {
+// open for it, as a system message, and returns that room. A repeat that the
+// source reports resolved does not close the room: only the driver does that.
+// Caller must hold s.mu.
+func (s *Service) joinAlertRoomLocked(ctx context.Context, roomID string, st *roomState, title string, resolved bool) (RoomSnapshot, error) {
+	text := fmt.Sprintf("alert %q fired again; joined this room instead of opening a new one", title)
+	if resolved {
+		text = fmt.Sprintf("alert %q reported resolved at its source; the room stays open until the driver closes it", title)
+	}
+	if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: text}); err != nil {
 		return RoomSnapshot{}, err
 	}
 	return st.snap.Clone(), nil
 }
 
-// indexAlertRoomLocked puts an open webhook room under its alert dedup key, so
-// a repeat of the alert joins it after a restart too. A key shared by several
-// open rooms (rooms opened before dedup existed) keeps the first one. Caller
-// must hold s.mu.
+// indexAlertRoomLocked puts an open webhook room under its alert index key
+// (pipeline and dedup key), so a repeat of the alert joins it after a restart
+// too. A key shared by several open rooms (rooms opened before dedup existed)
+// keeps the first one. Caller must hold s.mu.
 func (s *Service) indexAlertRoomLocked(ctx context.Context, roomID string, st *roomState) {
-	key := alertDedupKey(s.rawAlert(ctx, roomID))
+	dedupKey, _ := alertDedup(s.rawAlert(ctx, roomID))
+	key := alertIndexKey(st.snap.PipelineID, dedupKey)
 	if key == "" {
 		return
 	}

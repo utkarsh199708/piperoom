@@ -1855,7 +1855,8 @@ func TestRepeatedAlertJoinsOpenRoom(t *testing.T) {
 	t.Cleanup(svc.Close)
 	ctx := context.Background()
 	arjun := mustUser(t, svc, "arjun")
-	raw := json.RawMessage(`{"title":"consumer lag","pipeline_id":"orders"}`)
+	raw := json.RawMessage(`{"title":"consumer lag","pipeline_id":"orders","dedup_key":"lag"}`)
+	resolvedRaw := json.RawMessage(`{"title":"consumer lag","pipeline_id":"orders","dedup_key":"lag","status":"resolved"}`)
 
 	first, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
 	if err != nil {
@@ -1884,6 +1885,28 @@ func TestRepeatedAlertJoinsOpenRoom(t *testing.T) {
 		t.Fatal("repeat was not recorded as a system message in the open room")
 	}
 	waitFor(t, 5*time.Second, func() bool { return hookCount() == 1 })
+
+	// The source reporting the alert resolved joins the same room, says so, and
+	// leaves the room open: only the driver closes it.
+	resolvedSnap, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", resolvedRaw)
+	if err != nil {
+		t.Fatalf("resolved repeat: %v", err)
+	}
+	if resolvedSnap.ID != first.ID || resolvedSnap.Status != "open" {
+		t.Fatalf("resolved repeat: room %s status %s, want open room %s", resolvedSnap.ID, resolvedSnap.Status, first.ID)
+	}
+	sawResolved := false
+	for _, e := range allEvents(t, st, first.ID) {
+		if e.Type != events.AgentMessage {
+			continue
+		}
+		if p, err := events.Decode[events.AgentMessagePayload](e); err == nil && strings.Contains(p.Text, "reported resolved at its source") {
+			sawResolved = true
+		}
+	}
+	if !sawResolved {
+		t.Fatal("resolved repeat was not recorded as resolved")
+	}
 
 	// Close the room; the same alert then opens a new one.
 	if _, err := svc.GrantControl(ctx, arjun, first.ID, "arjun"); err != nil {
@@ -1926,5 +1949,36 @@ func TestRepeatedAlertJoinsOpenRoom(t *testing.T) {
 	}
 	if rooms, _ := svc2.ListRooms(ctx); len(rooms) != 3 {
 		t.Fatalf("want three rooms in total, got %d", len(rooms))
+	}
+}
+
+// TestSameAlertKeyOtherPipelineOpensRoom pins that the dedup key is scoped to
+// the pipeline: the same key for two pipelines is two incidents, while the same
+// key for the same pipeline joins the open room.
+func TestSameAlertKeyOtherPipelineOpensRoom(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	svc := room.New(room.Deps{Store: memstore.NewWithClock(c.Now), Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, Now: c.Now})
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+	orders := json.RawMessage(`{"title":"lag","pipeline_id":"orders","dedup_key":"k"}`)
+	billing := json.RawMessage(`{"title":"lag","pipeline_id":"billing","dedup_key":"k"}`)
+
+	a, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", orders)
+	if err != nil {
+		t.Fatalf("orders alert: %v", err)
+	}
+	b, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "billing", billing)
+	if err != nil {
+		t.Fatalf("billing alert: %v", err)
+	}
+	if b.ID == a.ID {
+		t.Fatal("same dedup key on another pipeline joined the orders room")
+	}
+	again, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", orders)
+	if err != nil {
+		t.Fatalf("orders repeat: %v", err)
+	}
+	if again.ID != a.ID {
+		t.Fatalf("orders repeat opened room %s, want %s", again.ID, a.ID)
 	}
 }
