@@ -1021,6 +1021,11 @@ textarea:focus {
   color: var(--red);
 }
 
+.banner--resolved {
+  background: rgba(76, 195, 138, 0.12);
+  color: var(--green);
+}
+
 /* ---- dialogs / overlays ---- */
 .overlay {
   position: fixed;

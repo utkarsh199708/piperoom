@@ -6,7 +6,7 @@ import { useCurrentUser } from '../context/user'
 import { canHandoff } from '../state/permissions'
 import { ageLabel } from '../lib/time'
 import { Avatar, Chip } from './ui'
-import { severityTone } from '../lib/tones'
+import { agentStatusChip, severityTone } from '../lib/tones'
 import { UserSwitcher } from './UserSwitcher'
 import { PipelineMap } from './PipelineMap'
 import { Timeline } from './Timeline'
@@ -22,10 +22,21 @@ export function RoomScreen() {
   const { roomId = '' } = useParams()
   const { user } = useCurrentUser()
   const { state, presence, conn, error, actions } = useRoom(roomId)
-  const { topology } = useTopology(state?.pipeline_id ?? '')
+  // One topology refetch per executed action, plus the hook's 30 s refresh
+  // while the room is open (stops once closed).
+  const executedCount = useMemo(
+    () => (state ? state.proposals.reduce((n, p) => n + p.executed.length, 0) : 0),
+    [state],
+  )
+  const { topology, updatedAt } = useTopology(state?.pipeline_id ?? '', {
+    refreshKey: executedCount,
+    active: state?.status === 'open',
+  })
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [copied, setCopied] = useState(false)
+
+  const agentChip = state ? agentStatusChip(state.agent_status.state, state.agent_status.detail) : null
 
   const hasPendingApproval = useMemo(() => {
     if (!state) return false
@@ -127,12 +138,18 @@ export function RoomScreen() {
       </header>
 
       {error && <div className="banner banner--error">{error}</div>}
+      {state.status === 'closed' && state.resolution && (
+        <div className="banner banner--resolved" role="status">
+          <span>Resolved</span>
+          <span className="muted">{state.resolution}</span>
+        </div>
+      )}
       <NoDriverBanner state={state} user={user} actions={actions} />
       <HandoffAcceptBanner state={state} user={user} actions={actions} />
 
       <main className={`room-grid ${hasPendingApproval ? 'room-grid--approve-first' : ''}`}>
         <div className="room-col room-col--left">
-          <PipelineMap topology={topology} onTrace={() => setTraceOpen(true)} />
+          <PipelineMap topology={topology} updatedAt={updatedAt} onTrace={() => setTraceOpen(true)} />
         </div>
 
         <div className="room-col room-col--mid">
@@ -158,7 +175,7 @@ export function RoomScreen() {
           <section className="panel timeline-panel">
             <header className="panel__head">
               <h2 className="panel__title">Timeline</h2>
-              <Chip tone="info">{state.agent_status.state}</Chip>
+              {agentChip && <Chip tone={agentChip.tone}>{agentChip.label}</Chip>}
             </header>
             <div className="panel__body">
               <Timeline
