@@ -169,15 +169,21 @@ func (s *Service) LookupUser(id string) (User, bool) { return s.users.Get(id) }
 // AllUsers returns the full directory.
 func (s *Service) AllUsers() []User { return s.users.All() }
 
-// Load rebuilds the snapshot cache from the event log and restarts the agent
-// for rooms that are still open. Called once at startup.
+// Load rebuilds the snapshot cache from the event log. Called once at startup.
+// It does not start any agent run: each open room gets an idle marker and a
+// system message, and its agent starts on the next steer or on a comment that
+// mentions the agent (ensureAgentLocked). A restart must not spend model calls
+// on rooms nobody is watching.
 func (s *Service) Load(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.ensureAllLoadedLocked(ctx)
+	return s.ensureAllLoadedLocked(ctx, true)
 }
 
-func (s *Service) ensureAllLoadedLocked(ctx context.Context) error {
+// ensureAllLoadedLocked rebuilds every room not yet cached. restarted is true
+// only for the start-up Load: those open rooms are marked as idle after a
+// server restart. Caller must hold s.mu.
+func (s *Service) ensureAllLoadedLocked(ctx context.Context, restarted bool) error {
 	rooms, err := s.store.ListRooms(ctx)
 	if err != nil {
 		return fmt.Errorf("room: load: %w", err)
@@ -195,10 +201,39 @@ func (s *Service) ensureAllLoadedLocked(ctx context.Context) error {
 		s.rooms[r.ID] = st
 		if snap.Status == "open" {
 			s.interruptStaleProposalsLocked(ctx, r.ID, st)
-			s.startAgentLocked(r.ID, snap.Title, snap.PipelineID, s.rawAlert(ctx, r.ID), st)
+			if restarted {
+				if err := s.noteRestartLocked(ctx, r.ID, st); err != nil {
+					s.log.Warn("room: restart notice failed", "room", r.ID, "err", err)
+				}
+			}
 		}
 	}
 	return nil
+}
+
+// noteRestartLocked tells the room that the server restarted: the agent is idle
+// and waits for a steer. It writes agent.status idle and a system message to the
+// log. Caller must hold s.mu.
+func (s *Service) noteRestartLocked(ctx context.Context, roomID string, st *roomState) error {
+	if _, err := s.emitLocked(ctx, st, roomID, events.AgentStatus, events.AgentActor, events.AgentStatusPayload{
+		State: "idle", Detail: "server restarted",
+	}); err != nil {
+		return err
+	}
+	_, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
+		Text: "server restarted — send a steer to resume",
+	})
+	return err
+}
+
+// ensureAgentLocked starts the room's agent run if the room has none yet. A
+// room restored by Load has none until someone steers it or mentions the agent;
+// a room whose agent was already started is left alone. Caller must hold s.mu.
+func (s *Service) ensureAgentLocked(ctx context.Context, roomID string, st *roomState) {
+	if st.agentCancel != nil || !s.roomOpen(st) {
+		return
+	}
+	s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, s.rawAlert(ctx, roomID), st)
 }
 
 // interruptStaleProposalsLocked records the outcome of proposals that were

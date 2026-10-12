@@ -168,7 +168,7 @@ func (s *Service) GetRoom(ctx context.Context, roomID string) (RoomSnapshot, err
 func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.ensureAllLoadedLocked(ctx); err != nil {
+	if err := s.ensureAllLoadedLocked(ctx, false); err != nil {
 		return nil, err
 	}
 	out := make([]RoomSnapshot, 0, len(s.rooms))

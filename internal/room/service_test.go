@@ -1750,3 +1750,79 @@ func TestProposalRejectsEmptyOrPlaceholderPlan(t *testing.T) {
 		t.Fatalf("valid proposal refused: %v", err)
 	}
 }
+
+// TestRestartWaitsForSteer pins the restart rule: Load starts no agent run, each
+// open room gets an idle marker and a system message, and a room's agent starts
+// only on its next steer (or an @agent comment). Other rooms stay idle.
+func TestRestartWaitsForSteer(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	svc1 := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, Now: c.Now})
+	roomA := createRoom(t, svc1, "arjun").ID
+	roomB := createRoom(t, svc1, "arjun").ID
+	svc1.Close() // the old process dies here
+
+	var mu sync.Mutex
+	runs := map[string]int{}
+	countRun := func(ctx context.Context, alert agent.Alert, _ agent.Deps, _ agent.Options) error {
+		mu.Lock()
+		runs[alert.RoomID]++
+		mu.Unlock()
+		<-ctx.Done()
+		return nil
+	}
+	runsOf := func(id string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return runs[id]
+	}
+
+	svc2 := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Owners: testOwners(), Run: countRun, Now: c.Now})
+	t.Cleanup(svc2.Close)
+	if err := svc2.Load(context.Background()); err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond) // give any wrongly started run time to start
+	if n := runsOf(roomA) + runsOf(roomB); n != 0 {
+		t.Fatalf("Load started %d agent run(s), want 0", n)
+	}
+
+	for _, id := range []string{roomA, roomB} {
+		var idle, notice bool
+		for _, e := range allEvents(t, st, id) {
+			switch e.Type {
+			case events.AgentStatus:
+				if p, err := events.Decode[events.AgentStatusPayload](e); err == nil && p.State == "idle" {
+					idle = true
+				}
+			case events.AgentMessage:
+				if p, err := events.Decode[events.AgentMessagePayload](e); err == nil && strings.Contains(p.Text, "send a steer to resume") {
+					notice = true
+				}
+			}
+		}
+		if !idle || !notice {
+			t.Fatalf("room %s after restart: idle=%v notice=%v", id, idle, notice)
+		}
+	}
+
+	// The driver's steer resumes room A: one run, and only for room A.
+	if _, err := svc2.Steer(context.Background(), mustUser(t, svc2, "arjun"), roomA, "check the topic"); err != nil {
+		t.Fatalf("steer: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return runsOf(roomA) == 1 })
+	// A second steer must not start a second run for the same room.
+	if _, err := svc2.Steer(context.Background(), mustUser(t, svc2, "arjun"), roomA, "and again"); err != nil {
+		t.Fatalf("second steer: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if runsOf(roomA) != 1 || runsOf(roomB) != 0 {
+		t.Fatalf("after steer: runs A=%d B=%d, want 1 and 0", runsOf(roomA), runsOf(roomB))
+	}
+
+	// An @agent comment is the other way to resume room B.
+	if _, err := svc2.AddComment(context.Background(), mustUser(t, svc2, "priya"), roomB, "", "@agent is this the connector?"); err != nil {
+		t.Fatalf("comment: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return runsOf(roomB) == 1 })
+}

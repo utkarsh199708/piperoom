@@ -28,7 +28,11 @@ func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, tex
 		Text:          text,
 		MentionsAgent: strings.Contains(text, "@agent"),
 	}
-	return s.emitLocked(ctx, st, roomID, events.CommentAdded, humanActor(user), payload)
+	e, err := s.emitLocked(ctx, st, roomID, events.CommentAdded, humanActor(user), payload)
+	if err == nil && payload.MentionsAgent {
+		s.ensureAgentLocked(ctx, roomID, st)
+	}
+	return e, err
 }
 
 // Steer sends an instruction. The driver's steer goes straight to the agent
@@ -50,6 +54,7 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 		e, err := s.emitLocked(ctx, st, roomID, events.SteerSent, humanActor(user), events.SteerSentPayload{Text: text})
 		if err == nil {
 			s.touchDriverLease(ctx, st, roomID)
+			s.ensureAgentLocked(ctx, roomID, st)
 		}
 		return e, err
 	}
@@ -118,6 +123,7 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 		return events.Event{}, err
 	}
 	s.touchDriverLease(ctx, st, roomID)
+	s.ensureAgentLocked(ctx, roomID, st)
 	return e, nil
 }
 
