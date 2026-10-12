@@ -33,15 +33,16 @@ const (
 )
 
 // FakeConnect is an in-memory Kafka Connect: one source connector whose task 0
-// starts FAILED (the demo story) and turns RUNNING when restarted.
+// starts FAILED (the demo story) and turns RUNNING when restarted or resumed.
 type FakeConnect struct {
-	mu    sync.Mutex
-	task0 string
+	mu        sync.Mutex
+	connState string
+	task0     string
 }
 
 // NewFakeConnect returns the Connect state the demo story starts from.
 func NewFakeConnect() *FakeConnect {
-	return &FakeConnect{task0: "FAILED"}
+	return &FakeConnect{connState: "RUNNING", task0: "FAILED"}
 }
 
 func (f *FakeConnect) ListConnectors(context.Context) ([]string, error) {
@@ -55,7 +56,7 @@ func (f *FakeConnect) Status(_ context.Context, name string) (clients.ConnectorS
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return clients.ConnectorStatus{
-		Name: name, Type: "source", State: "RUNNING", WorkerID: "172.19.0.5:8083",
+		Name: name, Type: "source", State: f.connState, WorkerID: "172.19.0.5:8083",
 		Tasks: []clients.TaskStatus{{ID: 0, State: f.task0, WorkerID: "172.19.0.5:8083"}},
 	}, nil
 }
@@ -79,6 +80,18 @@ func (f *FakeConnect) RestartTask(_ context.Context, name string, task int) erro
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.task0 = "RUNNING"
+	return nil
+}
+
+// Resume sets the connector and its tasks to RUNNING, as RestartTask sets task 0.
+func (f *FakeConnect) Resume(_ context.Context, name string) error {
+	if name != connectorName {
+		return fmt.Errorf("demo: connector %q: %w", name, clients.ErrNotFound)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.connState = "RUNNING"
 	f.task0 = "RUNNING"
 	return nil
 }
