@@ -2,8 +2,10 @@
 package connect
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -113,13 +115,63 @@ func (c *Client) Resume(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodPut, path, nil)
 }
 
-// do performs a request and decodes the JSON body into out; nil out skips decoding.
+// UpdateConfig sets one key in a connector's config with
+// PATCH /connectors/{name}/config (KIP-477, Kafka Connect 3.5+). PATCH merges
+// the one key on the server, so no other key (the config can hold passwords in
+// plaintext) passes through this process, there is no read-modify-write window,
+// and a deleted connector answers 404 instead of being re-created by a PUT.
+// There is deliberately no PUT fallback: an older Connect answers 405, which
+// is reported as an error. Connect restarts the connector's tasks on a config
+// change. It is not on clients.ConnectClient yet (contract change request); the
+// connect_update_connector_config action asserts for it.
+func (c *Client) UpdateConfig(ctx context.Context, name string, key, value string) error {
+	if key == "" {
+		return fmt.Errorf("connect: update config %s: empty key", name)
+	}
+	path := "/connectors/" + url.PathEscape(name) + "/config"
+	err := c.doBody(ctx, http.MethodPatch, path, map[string]string{key: value}, nil)
+	var se *statusError
+	if errors.As(err, &se) && se.Code == http.StatusMethodNotAllowed {
+		return fmt.Errorf("connect: update config %s: Connect does not support PATCH config; needs Kafka Connect 3.5+: %w", name, err)
+	}
+	return err
+}
+
+// statusError is a non-2xx, non-404 answer from Connect.
+type statusError struct {
+	Method, Path string
+	Code         int
+	Body         string
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("connect: %s %s: status %d: %s", e.Method, e.Path, e.Code, e.Body)
+}
+
+// do performs a request without a body and decodes the JSON response into out;
+// nil out skips decoding.
 func (c *Client) do(ctx context.Context, method, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)
+	return c.doBody(ctx, method, path, nil, out)
+}
+
+// doBody is do with an optional JSON request body (nil sends none).
+func (c *Client) doBody(ctx context.Context, method, path string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return fmt.Errorf("connect: %s %s: encode body: %w", method, path, err)
+		}
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return fmt.Errorf("connect: %s %s: %w", method, path, err)
 	}
 	req.Header.Set("Accept", "application/json")
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		return fmt.Errorf("connect: %s %s: %w", method, path, err)
@@ -131,7 +183,7 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("connect: %s %s: status %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(b)))
+		return &statusError{Method: method, Path: path, Code: resp.StatusCode, Body: strings.TrimSpace(string(b))}
 	}
 	if out == nil {
 		return nil

@@ -40,6 +40,7 @@ func Register(reg *Registry, d Deps) error {
 		&restartTask{d: d},
 		&restartConnector{d: d},
 		&resumeConnector{d: d},
+		&updateConnectorConfig{d: d},
 		&setCompatibility{d: d},
 		&registerSchema{d: d},
 	} {
