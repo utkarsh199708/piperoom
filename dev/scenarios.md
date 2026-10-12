@@ -43,9 +43,11 @@ go run ./cmd/devctl health
 
 Exit codes: **0** when every layer is OK; **1** when any layer FAILs (the report names the layer and its
 owner from `dev/owners.yaml`); **2** when the check could not run at all (not inside the repo,
-`dev/owners.yaml` unreadable or missing the `orders` pipeline, bad arguments). `devctl demo` prints the
-health report before the break. After `--fix` it re-runs the check every 5 s for up to 90 s, because the
-backlog drains after the fix returns, and then prints the settled report.
+`dev/owners.yaml` unreadable or missing the `orders` pipeline, bad arguments) or when Ctrl+C cuts the
+check short (a cancel is not an unhealthy pipeline). `devctl demo` prints the health report before the
+break. After `--fix` it re-runs the check every 5 s for about 90 s, because the backlog drains after the
+fix returns, and then prints the settled report. The window is checked between runs, so the last run can
+finish a few seconds past 90 s.
 
 Each layer:
 
@@ -79,7 +81,7 @@ OK   postgres      slot debezium_orders: active=true, retained 26 kB (limit 100.
 OK   kafka-connect pg-orders-connector: RUNNING, tasks 0=RUNNING
 OK   kafka         topic pg.public.orders: newest record 4 s old, oldest unsent change 0 s (limit 60 s)
 FAIL consumer      order-sync: state Empty, members 0, total lag 1471 (limit 100)
-OK   warehouse     analytics.orders: newest updated_at 10:04:12, oldest unloaded change 0 s (limit 60 s)
+OK   warehouse     analytics.orders: newest updated_at 08:04:12 UTC, oldest unloaded change 0 s (limit 60 s)
 pipeline UNHEALTHY: consumer (kabir)
 ```
 
