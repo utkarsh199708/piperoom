@@ -217,17 +217,25 @@ func (s *Service) ensureAllLoadedLocked(ctx context.Context, restarted bool) err
 	return nil
 }
 
+// restartDetail is the agent status detail a restart writes. A room already
+// showing it is not marked again, so repeated restarts do not pile up notices.
+const restartDetail = "server restarted"
+
 // noteRestartLocked tells the room that the server restarted: the agent is idle
-// and waits for a steer. It writes agent.status idle and a system message to the
-// log. Caller must hold s.mu.
+// and paused until someone steers or mentions it. It writes agent.status idle and
+// a system message to the log, unless the room already shows that state. Caller
+// must hold s.mu.
 func (s *Service) noteRestartLocked(ctx context.Context, roomID string, st *roomState) error {
+	if st.snap.AgentStatus.State == "idle" && st.snap.AgentStatus.Detail == restartDetail {
+		return nil
+	}
 	if _, err := s.emitLocked(ctx, st, roomID, events.AgentStatus, events.AgentActor, events.AgentStatusPayload{
-		State: "idle", Detail: "server restarted",
+		State: "idle", Detail: restartDetail,
 	}); err != nil {
 		return err
 	}
 	_, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
-		Text: "server restarted — send a steer to resume",
+		Text: "server restarted — the agent is paused; the driver can steer, or anyone can mention @agent, to resume",
 	})
 	return err
 }

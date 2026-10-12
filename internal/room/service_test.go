@@ -1796,7 +1796,7 @@ func TestRestartWaitsForSteer(t *testing.T) {
 					idle = true
 				}
 			case events.AgentMessage:
-				if p, err := events.Decode[events.AgentMessagePayload](e); err == nil && strings.Contains(p.Text, "send a steer to resume") {
+				if p, err := events.Decode[events.AgentMessagePayload](e); err == nil && strings.Contains(p.Text, "the agent is paused") {
 					notice = true
 				}
 			}
@@ -1825,6 +1825,29 @@ func TestRestartWaitsForSteer(t *testing.T) {
 		t.Fatalf("comment: %v", err)
 	}
 	waitFor(t, 5*time.Second, func() bool { return runsOf(roomB) == 1 })
+
+	// A further restart does not pile up notices: each room keeps one restart
+	// message and one idle marker, since its status already shows the restart.
+	svc2.Close()
+	svc3 := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Owners: testOwners(), Run: countRun, Now: c.Now})
+	t.Cleanup(svc3.Close)
+	if err := svc3.Load(context.Background()); err != nil {
+		t.Fatalf("second restart load: %v", err)
+	}
+	for _, id := range []string{roomA, roomB} {
+		restartMsgs := 0
+		for _, e := range allEvents(t, st, id) {
+			if e.Type != events.AgentMessage {
+				continue
+			}
+			if p, err := events.Decode[events.AgentMessagePayload](e); err == nil && strings.Contains(p.Text, "the agent is paused") {
+				restartMsgs++
+			}
+		}
+		if restartMsgs != 1 {
+			t.Fatalf("room %s: %d restart messages after two restarts, want 1", id, restartMsgs)
+		}
+	}
 }
 
 // TestRepeatedAlertJoinsOpenRoom pins webhook dedup: an identical alert while
