@@ -173,10 +173,10 @@ guarantee. The controls that do not depend on the model are:
 
 ## 4. Retention and deletion
 
-- The event log has **no retention policy or size cap** (F6). Nothing deletes `room_events`, and
-  nothing deletes closed rooms. The only room delete removes a room row with no events
-  (`internal/store/store.go:299`). Decide how long you keep closed rooms and delete them at the
-  database level; there is no UI for deletion.
+- Retention is live (F6, partly closed). `PIPEROOM_RETENTION_DAYS` deletes closed rooms older than N
+  days, checked every 6 hours; an empty value or `0` keeps everything. Open rooms are never deleted.
+  Export a room first with `GET /api/rooms/{id}/export` if you must keep it. The event log still has
+  no size cap, and there is no UI for deletion.
 - Deleting the Piperoom database deletes the room history, the Slack thread state and everything
   else in it. Data sent to the model provider (Anthropic, Bedrock or Vertex), and messages already posted to Slack, are governed by
   your agreements with those providers, not by Piperoom.

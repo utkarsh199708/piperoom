@@ -28,7 +28,7 @@ below is from the code.
 | F3 | **fixed** for `pg_row` and `warehouse_row` | `pg_row` keeps key and timestamp values; other columns are names with `null` values. `warehouse_row` keeps only timestamp-named columns and drops the rest, **including the key**. A column counts as a timestamp by name only: `at` or any name ending in `_at`, not by type. Only these two tools were checked. | `internal/tools/dbtools/pg.go:264,272-282`; `wh.go:124,132-140`; `dbtools.go:242-244`; the same column rule applies on Snowflake, where names come back lower-cased (`internal/clients/snowflake/snowflake.go:148`) |
 | F4 | **fixed** (with F11) | Row tools accept only tables listed in the `source_tables` / `sink_tables` of the room's pipeline. The `pipeline_id` in a tool input must be the room's own pipeline, or the tool refuses. | `internal/tools/dbtools/pg.go`, `wh.go`, `dbtools.go` (`resolve`, `scopedTable`); `internal/tools/scope.go` |
 | F5 | **fixed** | Integration tests print only host and port, not the DSN. Test code only. | `internal/clients/postgres/integration_test.go:21-24,34,46`; `internal/clients/warehouse/integration_test.go:20,33,45` |
-| F6 | **open** | No retention, no event cap, no archive. Nothing deletes `room_events`, and nothing deletes closed rooms. The only room delete removes a room row with no events (an orphan left by a failed create). `PIPEROOM_RETENTION_DAYS` is read into config and not used. | `internal/store/store.go:299` (orphan rooms); the other DELETEs are on proposals, approvals, suggestions and handoffs at lines 458, 512, 587, 642 |
+| F6 | **partly closed** | Retention and export are live: `PIPEROOM_RETENTION_DAYS` deletes whole closed rooms older than N days, checked every 6 hours; an empty value or `0` keeps everything; `GET /api/rooms/{id}/export` saves a room first. Still open: there is no event cap or size cap on a room's event log, and nothing archives a room except that export. | `cmd/server/retention.go`; `internal/store/retention.go`; `internal/room/service_export.go`; the orphan-room delete is `internal/store/store.go:335` |
 | F7 | **open** | One set of connection settings (databases, Kafka, Connect, Registry) per process, shared by every pipeline in `owners.yaml`. | `internal/config/config.go:14-104`; `internal/wiring/wiring.go:135-193` |
 | F8 | **fixed** | The dev terminal sink removes control characters (including DEL and C1) and caps printed size. Dev CLI only, not the room service. | `cmd/investigate/sink.go:69-98` |
 | F9 | **partly fixed** | The signed routes `POST /api/alerts/{source}` check the sender with a token or HMAC, and a source with no secret answers 401. The unsigned dev route `POST /api/alerts/webhook` still has no sender check: anyone who sends the `X-User` of a user in `users.yaml` can open rooms through it. | `internal/httpapi/alerts.go:31-41`; `internal/alertin/verify.go:90-102,109-115`; `internal/httpapi/handlers.go:48-68`; `internal/httpapi/server.go:133` |
@@ -56,9 +56,9 @@ below is from the code.
   gosnowflake DSN with a URL-encoded password. Startup errors are redacted (`warehouse.go:74`).
   Read-only access comes only from the DSN role (`internal/clients/snowflake/snowflake.go:6-10`).
   See [permissions.md](permissions.md#warehouse).
-- **Not on `main` yet.** Room retention and export (in review). `PIPEROOM_RETENTION_DAYS` is read
-  into config only (`internal/config/config.go:103`); nothing deletes closed rooms by age. Everything
-  else mentioned here is on `main`: the Docker image and the served web UI, the signed alert routes,
+- **Retention is live.** `PIPEROOM_RETENTION_DAYS` deletes closed rooms older than N days, checked
+  every 6 hours; an empty value or `0` keeps everything. Export a room first with
+  `GET /api/rooms/{id}/export`. Also on `main`: the Docker image and the served web UI, the signed alert routes,
   the agent cap, the model providers, the triage model and the per-room token budget. The built-in
   watcher (`PIPEROOM_WATCH_*`, design in `docs/design/watcher.md`) is in review and not live yet. See
   [setup.md](setup.md#1-configure-the-environment).
