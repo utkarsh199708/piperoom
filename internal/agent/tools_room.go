@@ -27,11 +27,13 @@ var roomToolNames = []string{"update_hypothesis", "propose_fix", "post_message"}
 
 // newRoomTools builds the three room tools the agent itself owns. These are
 // tools.KindRoom: they only write to the room log or create proposals, never
-// to customer systems.
-func newRoomTools(d Deps) []tools.Tool {
+// to customer systems. track records each created proposal so the agent can
+// verify recovery when its last step's action_result arrives; it may be nil
+// (the tool then just skips recording).
+func newRoomTools(d Deps, track *proposalTracker) []tools.Tool {
 	return []tools.Tool{
 		&updateHypothesisTool{sink: d.Sink},
-		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink},
+		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track},
 		&postMessageTool{sink: d.Sink},
 	}
 }
@@ -169,6 +171,7 @@ type proposeFixTool struct {
 	actions   *actions.Registry
 	proposals Proposals
 	sink      Sink
+	track     *proposalTracker
 }
 
 func (t *proposeFixTool) Name() string { return "propose_fix" }
@@ -305,6 +308,9 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	})
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("agent: create proposal: %w", err)
+	}
+	if t.track != nil {
+		t.track.record(id, steps)
 	}
 	return tools.Result{Summary: fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(layers, ", "))}, nil
 }

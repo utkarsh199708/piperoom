@@ -77,6 +77,10 @@ type runner struct {
 	toolList toolList
 	system   string
 
+	// proposals remembers the proposals the agent created this run, so a later
+	// action_result can be matched to its last step and verified.
+	proposals *proposalTracker
+
 	emitMu sync.Mutex
 }
 
@@ -109,24 +113,29 @@ func newRunner(alert Alert, deps Deps, opts Options) (*runner, error) {
 		deps.Logger = slog.Default()
 	}
 	return &runner{
-		alert: alert,
-		deps:  deps,
-		opts:  opts,
-		log:   deps.Logger,
-		model: newModel(opts, deps.Logger),
-		clk:   realClock{},
+		alert:     alert,
+		deps:      deps,
+		opts:      opts,
+		log:       deps.Logger,
+		model:     newModel(opts, deps.Logger),
+		clk:       realClock{},
+		proposals: newProposalTracker(),
 	}, nil
 }
 
 func (r *runner) run(ctx context.Context) error {
-	r.toolList = buildToolList(r.deps.Tools, newRoomTools(r.deps))
+	r.toolList = buildToolList(r.deps.Tools, newRoomTools(r.deps, r.proposals))
 	r.system = systemPrompt()
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 
 	// Drain anything already waiting before the first turn so an early steer is
 	// part of the opening prompt.
-	messages := []anthropic.BetaMessageParam{r.initialMessage(r.drain(ctx))}
+	initialInputs := r.drain(ctx)
+	if r.handleActionResults(ctx, initialInputs) {
+		return nil
+	}
+	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs)}
 
 	// turns counts model turns since the last human input. It is a per-episode
 	// runaway guard, not a lifetime cap: fresh human input resets it.
@@ -151,6 +160,9 @@ func (r *runner) run(ctx context.Context) error {
 				return stopErr(err)
 			}
 			if len(inputs) == 0 {
+				return nil
+			}
+			if r.handleActionResults(ctx, inputs) {
 				return nil
 			}
 			messages = append(messages, r.humanMessage(inputs))
@@ -236,6 +248,9 @@ func (r *runner) run(ctx context.Context) error {
 			// message carries the tool results plus any human input that arrived
 			// while we were running.
 			inputs := r.drain(ctx)
+			if r.handleActionResults(ctx, inputs) {
+				return nil
+			}
 			blocks := append([]anthropic.BetaContentBlockParamUnion(nil), resultBlocks...)
 			blocks = append(blocks, r.humanBlocks(inputs)...)
 			if len(blocks) == 0 {
@@ -373,6 +388,9 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 		return true, stopErr(err)
 	}
 	if len(inputs) == 0 {
+		return true, nil
+	}
+	if r.handleActionResults(ctx, inputs) {
 		return true, nil
 	}
 	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.humanBlocks(inputs)...)

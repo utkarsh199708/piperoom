@@ -147,7 +147,7 @@ func TestProposeFixUnknownAction(t *testing.T) {
 // tools newRoomTools really builds. Add, rename or drop a room tool without
 // touching the list and this fails.
 func TestRoomToolNamesMatchRoomTools(t *testing.T) {
-	built := newRoomTools(Deps{})
+	built := newRoomTools(Deps{}, nil)
 	names := make([]string, 0, len(built))
 	for _, tl := range built {
 		names = append(names, tl.Name())

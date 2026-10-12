@@ -174,7 +174,7 @@ func TestEveryToolSchemaObjectHasAdditionalPropertiesFalse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tl := buildToolList(reg, newRoomTools(Deps{Actions: areg}))
+	tl := buildToolList(reg, newRoomTools(Deps{Actions: areg}, nil))
 	if len(tl.params) == 0 {
 		t.Fatal("no tools built")
 	}
