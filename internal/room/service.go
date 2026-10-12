@@ -61,6 +61,7 @@ type roomState struct {
 	snap        RoomSnapshot
 	inbox       *inbox
 	agentCancel context.CancelFunc
+	agentRun    uint64             // generation of the latest agent start; see releaseAgent
 	execCancel  context.CancelFunc // cancels the room's executor on close
 	exec        *execQueue         // nil until the first proposal is approved
 	dedupKey    string             // alert dedup key of a webhook room; "" otherwise
@@ -660,6 +661,8 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
 	st.agentCancel = cancel
+	st.agentRun++
+	run := st.agentRun
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -691,6 +694,7 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			ecancel()
 			if attempt >= maxAgentAttempts {
 				s.log.Error("room: agent gave up after repeated failures", "room", roomID, "attempts", attempt)
+				s.releaseAgent(st, run, cancel)
 				return
 			}
 			select {
@@ -701,6 +705,19 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			backoff *= 2
 		}
 	}()
+}
+
+// releaseAgent frees the room's agent slot when its supervisor gives up, so the
+// next steer or @agent comment can start a new run. A supervisor whose slot has
+// already been taken by a newer run (run is stale) releases nothing. cancel is
+// the supervisor's own context, called to free it either way.
+func (s *Service) releaseAgent(st *roomState, run uint64, cancel context.CancelFunc) {
+	s.mu.Lock()
+	if st.agentRun == run {
+		st.agentCancel = nil
+	}
+	s.mu.Unlock()
+	cancel()
 }
 
 func truncateDetail(s string) string {

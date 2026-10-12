@@ -2045,3 +2045,74 @@ func TestConcurrentIdenticalAlertsOpenOneRoom(t *testing.T) {
 		t.Fatalf("want one room for %d identical alerts, got %d", n, len(rooms))
 	}
 }
+
+// giveUpSetup opens a room whose agent fails on every run, waits until its
+// supervisor has given up (three runs), and returns the service, the room and a
+// run counter. The give-up is followed by the slot release, which the tests
+// below wait for through a steer.
+func giveUpSetup(t *testing.T) (*room.Service, string, func() int) {
+	t.Helper()
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	var mu sync.Mutex
+	runs := 0
+	svc := room.New(room.Deps{
+		Store: st, Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
+		Run: func(context.Context, agent.Alert, agent.Deps, agent.Options) error {
+			mu.Lock()
+			runs++
+			mu.Unlock()
+			return errors.New("provider down")
+		},
+	})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "arjun").ID
+	runsOf := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return runs
+	}
+	waitFor(t, 15*time.Second, func() bool { return runsOf() >= 3 })
+	return svc, roomID, runsOf
+}
+
+// TestGaveUpAgentResumesOnSteer pins that an agent whose supervisor gave up is
+// not stuck: the next driver steer starts a new run (the fourth run overall).
+func TestGaveUpAgentResumesOnSteer(t *testing.T) {
+	svc, roomID, runsOf := giveUpSetup(t)
+	arjun := mustUser(t, svc, "arjun")
+	waitFor(t, 15*time.Second, func() bool {
+		if _, err := svc.Steer(context.Background(), arjun, roomID, "try again"); err != nil {
+			t.Fatalf("steer: %v", err)
+		}
+		return runsOf() >= 4
+	})
+	// The new run's retry backoff is one second, so the count is stable here.
+	time.Sleep(300 * time.Millisecond)
+	if n := runsOf(); n != 4 {
+		t.Fatalf("runs after resume: %d, want 4", n)
+	}
+}
+
+// TestConcurrentSteersStartOneRun pins that two steers racing on a gave-up
+// agent start at most one new run.
+func TestConcurrentSteersStartOneRun(t *testing.T) {
+	svc, roomID, runsOf := giveUpSetup(t)
+	arjun := mustUser(t, svc, "arjun")
+	waitFor(t, 15*time.Second, func() bool {
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _ = svc.Steer(context.Background(), arjun, roomID, "retry")
+			}()
+		}
+		wg.Wait()
+		return runsOf() >= 4
+	})
+	time.Sleep(300 * time.Millisecond)
+	if n := runsOf(); n != 4 {
+		t.Fatalf("runs after two concurrent steers: %d, want 4", n)
+	}
+}
