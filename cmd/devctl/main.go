@@ -30,7 +30,7 @@ const usage = `devctl — local pipeline control
   devctl down               stop the stack
   devctl reset              remove all data and start clean
   devctl status             one-screen pipeline health (for humans)
-  devctl health             read-only check per layer; exit 1 if any layer is unhealthy
+  devctl health             read-only check per layer; exit 1 unhealthy, 2 setup error
   devctl load [--rate N]    insert/update orders N per second until Ctrl+C
   devctl break <scenario>   cause a failure
   devctl fix <scenario>     apply the correct manual fix
@@ -58,7 +58,7 @@ func main() {
 	st, err := newStack(log)
 	if err != nil {
 		log.Error("devctl", "err", err)
-		os.Exit(1)
+		os.Exit(exitCode(os.Args[1]))
 	}
 	if err := runCommand(ctx, st, os.Args[1], os.Args[2:]); err != nil {
 		if errors.Is(err, errUnhealthy) {
@@ -66,8 +66,18 @@ func main() {
 			os.Exit(1)
 		}
 		log.Error("devctl "+os.Args[1]+" failed", "err", err)
-		os.Exit(1)
+		os.Exit(exitCode(os.Args[1]))
 	}
+}
+
+// exitCode is 2 for a failed `health` run (setup: not in the repo, owners.yaml
+// unreadable, bad arguments) so it is never confused with "unhealthy" (1). Other
+// commands keep 1.
+func exitCode(cmd string) int {
+	if cmd == "health" {
+		return 2
+	}
+	return 1
 }
 
 func runCommand(ctx context.Context, st *stack, cmd string, args []string) error {

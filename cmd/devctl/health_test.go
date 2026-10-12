@@ -6,9 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // fakeSource answers every health read from fields. rows is the updated_at of
@@ -92,21 +97,24 @@ func (f *fakeSource) warehouseNewest(ctx context.Context) (time.Time, error) {
 	return f.warehouse, f.errs["warehouseNewest"]
 }
 
-// unsynced mirrors the real query: the age of the oldest row newer than after.
-func (f *fakeSource) unsynced(ctx context.Context, after time.Time) (time.Duration, error) {
+// unsynced mirrors the real query: the age of the oldest row with updated_at >= from.
+func (f *fakeSource) unsynced(ctx context.Context, from time.Time) (time.Duration, error) {
 	if err := f.block(ctx, "unsynced"); err != nil {
+		return 0, err
+	}
+	if err := f.errs["unsynced"]; err != nil {
 		return 0, err
 	}
 	var oldest time.Time
 	for _, r := range f.rows {
-		if r.After(after) && (oldest.IsZero() || r.Before(oldest)) {
+		if (from.IsZero() || !r.Before(from)) && (oldest.IsZero() || r.Before(oldest)) {
 			oldest = r
 		}
 	}
 	if oldest.IsZero() {
-		return 0, f.errs["unsynced"]
+		return 0, nil
 	}
-	return testBase.Sub(oldest), f.errs["unsynced"]
+	return testBase.Sub(oldest), nil
 }
 
 func (f *fakeSource) group(ctx context.Context, _ string) (groupHealth, error) {
@@ -331,10 +339,20 @@ func TestHealthOneErrorDoesNotStopOthers(t *testing.T) {
 }
 
 func TestHealthTimeoutDoesNotStopOthers(t *testing.T) {
-	for _, hang := range []string{"connector", "group"} {
-		t.Run(hang, func(t *testing.T) {
+	allLayers := []string{"postgres", "kafka-connect", "kafka", "consumer", "warehouse"}
+	tests := []struct {
+		hang  string // fake method that never answers
+		layer string // layer that must time out
+	}{
+		{"connector", "kafka-connect"},
+		{"group", "consumer"},
+		{"topicNewest", "kafka"},
+		{"warehouseNewest", "warehouse"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.hang, func(t *testing.T) {
 			f := healthyFake(t)
-			f.hang = hang
+			f.hang = tt.hang
 			plan := testPlan
 			plan.Timeout = 50 * time.Millisecond
 
@@ -346,16 +364,11 @@ func TestHealthTimeoutDoesNotStopOthers(t *testing.T) {
 			if !errors.Is(err, errUnhealthy) {
 				t.Fatalf("runHealth err = %v, want errUnhealthy", err)
 			}
-			layer := "kafka-connect"
-			if hang == "group" {
-				layer = "consumer"
+			if l := lineFor(t, out, tt.layer); !strings.HasPrefix(l, "FAIL") || !strings.Contains(l, "no answer within 50ms") {
+				t.Errorf("layer %s line = %q, want FAIL with timeout", tt.layer, l)
 			}
-			if l := lineFor(t, out, layer); !strings.HasPrefix(l, "FAIL") || !strings.Contains(l, "no answer within 50ms") {
-				t.Errorf("layer %s line = %q, want FAIL with timeout", layer, l)
-			}
-			others := []string{"postgres", "kafka", "warehouse", "consumer", "kafka-connect"}
-			for _, o := range others {
-				if o == layer {
+			for _, o := range allLayers {
+				if o == tt.layer {
 					continue
 				}
 				if l := lineFor(t, out, o); !strings.HasPrefix(l, "OK") {
@@ -364,6 +377,177 @@ func TestHealthTimeoutDoesNotStopOthers(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHealthErrorIsolation(t *testing.T) {
+	allLayers := []string{"postgres", "kafka-connect", "kafka", "consumer", "warehouse"}
+	tests := []struct {
+		name   string
+		errKey string   // fake method that returns an error
+		layers []string // layers that must FAIL with the error
+	}{
+		// unsynced feeds both the kafka and the warehouse layer.
+		{"unsynced", "unsynced", []string{"kafka", "warehouse"}},
+		{"topicNewest", "topicNewest", []string{"kafka"}},
+		{"warehouseNewest", "warehouseNewest", []string{"warehouse"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := healthyFake(t)
+			f.errs = map[string]error{tt.errKey: errors.New("boom " + tt.errKey)}
+			out, err := runFake(t, f, testPlan)
+			if !errors.Is(err, errUnhealthy) {
+				t.Fatalf("runHealth err = %v, want errUnhealthy", err)
+			}
+			failing := map[string]bool{}
+			for _, l := range tt.layers {
+				failing[l] = true
+				if line := lineFor(t, out, l); !strings.HasPrefix(line, "FAIL") || !strings.Contains(line, "error: boom "+tt.errKey) {
+					t.Errorf("layer %s line = %q, want FAIL with the error", l, line)
+				}
+			}
+			for _, l := range allLayers {
+				if failing[l] {
+					continue
+				}
+				if line := lineFor(t, out, l); !strings.HasPrefix(line, "OK") {
+					t.Errorf("layer %s should still report OK: %q", l, line)
+				}
+			}
+		})
+	}
+}
+
+// TestRunCheckCancelledParent: a parent cancelled by Ctrl+C must not be reported
+// as a slow layer.
+func TestRunCheckCancelledParent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c := healthCheck{layer: "consumer", run: func(ctx context.Context) (bool, string, error) {
+		<-ctx.Done()
+		return false, "", ctx.Err()
+	}}
+	got := runCheck(ctx, c, time.Second)
+	if got.OK || got.Line != "cancelled" {
+		t.Fatalf("runCheck with cancelled parent = %+v, want FAIL cancelled", got)
+	}
+}
+
+// TestPendingFrom covers the boundary math that decides whether a row is still
+// pending. Exact-microsecond rows must not look pending once they are loaded.
+func TestPendingFrom(t *testing.T) {
+	// 08:30:26.045449 is the value from the live false alarm: loaded, not pending.
+	loaded := time.Date(2026, 10, 12, 8, 30, 26, 45449000, time.UTC)
+	if got := warehousePendingFrom(loaded); got.Sub(loaded) != time.Microsecond {
+		t.Fatalf("warehousePendingFrom(%v) = %v, want loaded+1us", loaded, got)
+	}
+	if got := warehousePendingFrom(time.Time{}); !got.IsZero() {
+		t.Fatalf("warehousePendingFrom(zero) = %v, want zero (all rows)", got)
+	}
+
+	// Kafka timestamps are milliseconds: a row 400us after the newest record is in
+	// the same millisecond, so it counts as delivered.
+	topic := time.Date(2026, 10, 12, 8, 30, 26, 45000000, time.UTC)
+	if got := topicPendingFrom(topic.Add(400 * time.Microsecond)); !got.Equal(topic.Add(time.Millisecond)) {
+		t.Fatalf("topicPendingFrom(ms+400us) = %v, want the next millisecond", got)
+	}
+	if got := topicPendingFrom(time.Time{}); !got.IsZero() {
+		t.Fatalf("topicPendingFrom(zero) = %v, want zero (all rows)", got)
+	}
+}
+
+func TestPendingWhere(t *testing.T) {
+	tests := []struct {
+		name string
+		from time.Time
+		want string
+	}{
+		{"zero counts every row", time.Time{}, "TRUE"},
+		{"microseconds kept", time.Date(2026, 10, 12, 8, 30, 26, 45450000, time.UTC),
+			"updated_at >= '2026-10-12 08:30:26.045450+00'::timestamptz"},
+		{"local zone converted to UTC", time.Date(2026, 10, 12, 14, 0, 26, 0, time.FixedZone("IST", 5*3600+1800)),
+			"updated_at >= '2026-10-12 08:30:26.000000+00'::timestamptz"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pendingWhere(tt.from); got != tt.want {
+				t.Fatalf("pendingWhere = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLastRecordOffsets(t *testing.T) {
+	ends := kadm.ListedOffsets{"pg.public.orders": {
+		0: {Topic: "pg.public.orders", Partition: 0, Offset: 0},  // empty partition: excluded
+		1: {Topic: "pg.public.orders", Partition: 1, Offset: 1},  // one record: last is offset 0
+		2: {Topic: "pg.public.orders", Partition: 2, Offset: 42}, // last record is 41
+	}}
+	got, err := lastRecordOffsets(ends)
+	if err != nil {
+		t.Fatalf("lastRecordOffsets: %v", err)
+	}
+	want := map[int32]kgo.Offset{1: kgo.NewOffset().At(0), 2: kgo.NewOffset().At(41)}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("lastRecordOffsets = %v, want %v", got, want)
+	}
+
+	// A partition that could not be listed (the -1 entry for an unknown topic) is an error.
+	bad := kadm.ListedOffsets{"nope": {-1: {Topic: "nope", Partition: -1, Offset: -1, Err: errors.New("unknown topic")}}}
+	if _, err := lastRecordOffsets(bad); err == nil {
+		t.Fatal("lastRecordOffsets with a listing error = nil, want error")
+	}
+
+	none, err := lastRecordOffsets(kadm.ListedOffsets{"t": {0: {Topic: "t", Offset: 0}}})
+	if err != nil || len(none) != 0 {
+		t.Fatalf("empty topic: got %v, %v; want no offsets and no error", none, err)
+	}
+}
+
+func TestSettleHealth(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("settles to healthy and prints the last report", func(t *testing.T) {
+		calls := 0
+		run := func(w io.Writer) error {
+			calls++
+			fmt.Fprintf(w, "run %d\n", calls)
+			if calls < 3 {
+				return errUnhealthy
+			}
+			return nil
+		}
+		var out bytes.Buffer
+		if err := settleHealth(ctx, run, time.Millisecond, time.Second, &out); err != nil {
+			t.Fatalf("settleHealth err = %v, want nil", err)
+		}
+		if calls != 3 {
+			t.Fatalf("calls = %d, want 3", calls)
+		}
+		if got := out.String(); got != "run 3\n" {
+			t.Fatalf("printed %q, want only the last report", got)
+		}
+	})
+
+	t.Run("gives up at the limit and reports unhealthy", func(t *testing.T) {
+		var out bytes.Buffer
+		err := settleHealth(ctx, func(w io.Writer) error { fmt.Fprint(w, "still bad\n"); return errUnhealthy }, time.Millisecond, 20*time.Millisecond, &out)
+		if !errors.Is(err, errUnhealthy) {
+			t.Fatalf("settleHealth err = %v, want errUnhealthy", err)
+		}
+		if out.String() != "still bad\n" {
+			t.Fatalf("printed %q, want the last report", out.String())
+		}
+	})
+
+	t.Run("stops at once on a run that could not happen", func(t *testing.T) {
+		calls := 0
+		boom := errors.New("cannot read owners")
+		err := settleHealth(ctx, func(io.Writer) error { calls++; return boom }, time.Millisecond, time.Second, io.Discard)
+		if !errors.Is(err, boom) || calls != 1 {
+			t.Fatalf("err = %v calls = %d, want boom after 1 call", err, calls)
+		}
+	})
 }
 
 func TestParseSlotRow(t *testing.T) {
@@ -393,19 +577,35 @@ func TestParseSlotRow(t *testing.T) {
 	}
 }
 
-func TestParseMillis(t *testing.T) {
-	zero, err := parseMillis("0")
+func TestParseEpochMicros(t *testing.T) {
+	zero, err := parseEpochMicros("0")
 	if err != nil || !zero.IsZero() {
-		t.Fatalf("parseMillis(0) = %v, %v; want zero time", zero, err)
+		t.Fatalf("parseEpochMicros(0) = %v, %v; want zero time", zero, err)
 	}
-	got, err := parseMillis("1760263200123\n")
+	// 2026-10-12 08:30:26.045449 UTC, the live false-alarm value, exact to the microsecond.
+	want := time.Date(2026, 10, 12, 8, 30, 26, 45449000, time.UTC)
+	got, err := parseEpochMicros(fmt.Sprintf("%d\n", want.UnixMicro()))
 	if err != nil {
-		t.Fatalf("parseMillis: %v", err)
+		t.Fatalf("parseEpochMicros: %v", err)
 	}
-	if want := time.UnixMilli(1760263200123); !got.Equal(want) {
-		t.Fatalf("parseMillis = %v, want %v", got, want)
+	if !got.Equal(want) {
+		t.Fatalf("parseEpochMicros = %v, want %v", got, want)
 	}
-	if _, err := parseMillis("not-a-number"); err == nil {
-		t.Fatal("parseMillis(garbage) err = nil, want error")
+	if _, err := parseEpochMicros("not-a-number"); err == nil {
+		t.Fatal("parseEpochMicros(garbage) err = nil, want error")
+	}
+}
+
+// TestHealthLoadedMicrosecondRowsNotPending is the live false alarm: the source and
+// the warehouse hold the same exact-microsecond newest row, so nothing is pending.
+func TestHealthLoadedMicrosecondRowsNotPending(t *testing.T) {
+	f := healthyFake(t)
+	newest := time.Date(2026, 10, 12, 8, 30, 26, 45449000, time.UTC)
+	f.rows = []time.Time{newest}
+	f.warehouse = newest
+	f.topic = newest.Truncate(time.Millisecond)
+	out, err := runFake(t, f, testPlan)
+	if err != nil {
+		t.Fatalf("loaded rows must not be pending, err = %v\n%s", err, out)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -66,10 +67,10 @@ type healthSource interface {
 	topicNewest(ctx context.Context, topic string) (time.Time, error)
 	// warehouseNewest is the newest updated_at in analytics.orders; zero when empty.
 	warehouseNewest(ctx context.Context) (time.Time, error)
-	// unsynced is how long the oldest source row changed after `after` has been
-	// waiting, measured on the source clock. Zero when no row is newer than
-	// `after`; a zero `after` counts every row.
-	unsynced(ctx context.Context, after time.Time) (time.Duration, error)
+	// unsynced is how long the oldest source row with updated_at >= from has been
+	// waiting, measured on the source clock. Zero when there is no such row; a zero
+	// from counts every row. Callers pass from from the pendingFrom helpers.
+	unsynced(ctx context.Context, from time.Time) (time.Duration, error)
 	group(ctx context.Context, name string) (groupHealth, error)
 }
 
@@ -127,7 +128,7 @@ func healthChecks(src healthSource, plan healthPlan) []healthCheck {
 			if err != nil {
 				return false, "", err
 			}
-			pending, err := src.unsynced(ctx, newest)
+			pending, err := src.unsynced(ctx, topicPendingFrom(newest))
 			if err != nil {
 				return false, "", err
 			}
@@ -152,7 +153,7 @@ func healthChecks(src healthSource, plan healthPlan) []healthCheck {
 			if err != nil {
 				return false, "", err
 			}
-			pending, err := src.unsynced(ctx, newest)
+			pending, err := src.unsynced(ctx, warehousePendingFrom(newest))
 			if err != nil {
 				return false, "", err
 			}
@@ -240,8 +241,106 @@ func runCheck(ctx context.Context, c healthCheck, timeout time.Duration) layerHe
 		}
 		return layerHealth{Layer: c.layer, OK: o.ok, Line: o.line}
 	case <-cctx.Done():
+		// The parent context ending (Ctrl+C) is not the layer being slow.
+		if ctx.Err() != nil {
+			return layerHealth{Layer: c.layer, OK: false, Line: "cancelled"}
+		}
 		return layerHealth{Layer: c.layer, OK: false, Line: fmt.Sprintf("no answer within %s", timeout)}
 	}
+}
+
+// warehousePendingFrom is the first updated_at not yet in the warehouse. The
+// warehouse holds exact microseconds, so its newest row is delivered and only
+// rows strictly after it are pending. A zero newest means nothing is loaded.
+func warehousePendingFrom(newest time.Time) time.Time {
+	if newest.IsZero() {
+		return time.Time{}
+	}
+	return newest.Add(time.Microsecond)
+}
+
+// topicPendingFrom is the first updated_at not yet in the topic. Kafka record
+// timestamps have millisecond precision, so rows in the same millisecond as the
+// newest record count as delivered. A zero newest means the topic is empty.
+func topicPendingFrom(newest time.Time) time.Time {
+	if newest.IsZero() {
+		return time.Time{}
+	}
+	return newest.Truncate(time.Millisecond).Add(time.Millisecond)
+}
+
+// pendingWhere is the SQL filter for source rows with updated_at >= from. The
+// timestamp is written with microseconds so nothing is rounded. Only this
+// formatted time is interpolated; no user input reaches the SQL.
+func pendingWhere(from time.Time) string {
+	if from.IsZero() {
+		return "TRUE"
+	}
+	return "updated_at >= '" + from.UTC().Format("2006-01-02 15:04:05.000000") + "+00'::timestamptz"
+}
+
+// parseEpochMicros decodes epoch microseconds; 0 means "no rows" and yields the zero time.
+func parseEpochMicros(out string) (time.Time, error) {
+	us, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("devctl: health: parse timestamp %q: %w", out, err)
+	}
+	if us == 0 {
+		return time.Time{}, nil
+	}
+	return time.UnixMicro(us), nil
+}
+
+// lastRecordOffsets maps each partition that has records to its last offset
+// (end offset - 1). Empty partitions are left out; a partition that could not be
+// listed is an error.
+func lastRecordOffsets(ends kadm.ListedOffsets) (map[int32]kgo.Offset, error) {
+	last := map[int32]kgo.Offset{}
+	for _, parts := range ends {
+		for p, o := range parts {
+			if o.Err != nil {
+				return nil, fmt.Errorf("devctl: end offset of partition %d: %w", p, o.Err)
+			}
+			if o.Offset > 0 {
+				last[p] = kgo.NewOffset().At(o.Offset - 1)
+			}
+		}
+	}
+	return last, nil
+}
+
+// settleHealth runs the health check until it reports healthy or limit has passed,
+// waiting every between runs. Reports from the earlier runs are discarded; the last
+// one is written to w. A run that fails with anything other than errUnhealthy stops
+// the loop at once.
+func settleHealth(ctx context.Context, run func(io.Writer) error, every, limit time.Duration, w io.Writer) error {
+	deadline := time.Now().Add(limit)
+	for {
+		var buf bytes.Buffer
+		err := run(&buf)
+		if err == nil || !errors.Is(err, errUnhealthy) || !time.Now().Before(deadline) {
+			_, _ = io.Copy(w, &buf)
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			_, _ = io.Copy(w, &buf)
+			return ctx.Err()
+		case <-time.After(every):
+		}
+	}
+}
+
+// printHealthAfterFix is used by demo after --fix. The fix returns before the
+// backlog has drained, so the check is re-run for up to 90 s and the settled
+// report is printed. A still-unhealthy report is printed too.
+func printHealthAfterFix(ctx context.Context, s *stack) {
+	fmt.Fprintln(os.Stdout, "health after the fix:")
+	err := settleHealth(ctx, func(w io.Writer) error { return s.health(ctx, w) }, 5*time.Second, 90*time.Second, os.Stdout)
+	if err != nil && !errors.Is(err, errUnhealthy) {
+		s.log.Warn("health could not run", "err", err)
+	}
+	fmt.Fprintln(os.Stdout)
 }
 
 // health implements `devctl health`. It is read-only, so it takes no stack lock.
@@ -277,6 +376,7 @@ func (s *stack) loadHealthPlan() (healthPlan, error) {
 	}, nil
 }
 
+// slot reads the replication slot. Only the slotName constant is concatenated into the SQL.
 func (s *stack) slot(ctx context.Context) (slotHealth, error) {
 	out, err := s.psql(ctx, "orders", "SELECT CASE WHEN active THEN 'active' ELSE 'inactive' END || ' ' || coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint::text, '-1') FROM pg_replication_slots WHERE slot_name = '"+slotName+"'")
 	if err != nil {
@@ -305,42 +405,30 @@ func (s *stack) connector(ctx context.Context) (connectorStatus, error) {
 	return s.connectorStatus(ctx)
 }
 
+// warehouseNewest is read in microseconds. round() (not floor or a millisecond
+// cast) keeps the exact value: a rounded or truncated timestamp makes already
+// loaded rows look pending.
 func (s *stack) warehouseNewest(ctx context.Context) (time.Time, error) {
-	out, err := s.psql(ctx, "warehouse", "SELECT coalesce((extract(epoch FROM max(updated_at)) * 1000)::bigint, 0) FROM analytics.orders")
+	out, err := s.psql(ctx, "warehouse", "SELECT coalesce(round(extract(epoch FROM max(updated_at)) * 1000000)::bigint, 0) FROM analytics.orders")
 	if err != nil {
 		return time.Time{}, err
 	}
-	return parseMillis(out)
+	return parseEpochMicros(out)
 }
 
 // unsynced is computed inside the source database so both ends of the subtraction
 // use the same clock. The age is capped at zero for rows timestamped in the future.
-func (s *stack) unsynced(ctx context.Context, after time.Time) (time.Duration, error) {
-	where := "TRUE"
-	if !after.IsZero() {
-		where = fmt.Sprintf("updated_at > to_timestamp(%d / 1000.0)", after.UnixMilli())
-	}
-	out, err := s.psql(ctx, "orders", "SELECT coalesce((extract(epoch FROM now() - min(updated_at)) * 1000)::bigint, 0) FROM orders WHERE "+where)
+// The only SQL interpolated here is pendingWhere's formatted timestamp.
+func (s *stack) unsynced(ctx context.Context, from time.Time) (time.Duration, error) {
+	out, err := s.psql(ctx, "orders", "SELECT coalesce(round(extract(epoch FROM now() - min(updated_at)) * 1000000)::bigint, 0) FROM orders WHERE "+pendingWhere(from))
 	if err != nil {
 		return 0, err
 	}
-	ms, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	us, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("devctl: health: parse pending age %q: %w", out, err)
 	}
-	return max(time.Duration(ms)*time.Millisecond, 0), nil
-}
-
-// parseMillis decodes epoch milliseconds; 0 means "no rows" and yields the zero time.
-func parseMillis(out string) (time.Time, error) {
-	ms, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("devctl: health: parse timestamp %q: %w", out, err)
-	}
-	if ms == 0 {
-		return time.Time{}, nil
-	}
-	return time.UnixMilli(ms), nil
+	return max(time.Duration(us)*time.Microsecond, 0), nil
 }
 
 func (s *stack) group(ctx context.Context, name string) (groupHealth, error) {
@@ -366,15 +454,10 @@ func (s *stack) topicNewest(ctx context.Context, topic string) (time.Time, error
 	if err != nil {
 		return time.Time{}, fmt.Errorf("devctl: end offsets of %s: %w", topic, err)
 	}
-	if err := ends.Error(); err != nil {
-		return time.Time{}, fmt.Errorf("devctl: end offsets of %s: %w", topic, err)
+	last, err := lastRecordOffsets(ends)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("devctl: %s: %w", topic, err)
 	}
-	last := map[int32]kgo.Offset{}
-	ends.Each(func(o kadm.ListedOffset) {
-		if o.Offset > 0 {
-			last[o.Partition] = kgo.NewOffset().At(o.Offset - 1)
-		}
-	})
 	if len(last) == 0 {
 		return time.Time{}, nil
 	}
