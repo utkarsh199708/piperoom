@@ -464,12 +464,19 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 	}
 	cancel := st.agentCancel
 	execCancel := st.execCancel
+	pipelineID := st.snap.PipelineID
+	hookKey := hookDedupKey(pipelineID, st.dedupKey)
+	runHook := s.onRoomClosed != nil && !s.closed
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
 	if execCancel != nil {
 		execCancel()
+	}
+	// Outside s.mu, so the hook may call OpenRoomForPipeline and the like.
+	if runHook {
+		s.onRoomClosed(s.ctx, roomID, pipelineID, hookKey)
 	}
 	return e, nil
 }

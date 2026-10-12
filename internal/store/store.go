@@ -263,6 +263,42 @@ func (s *PG) ListRooms(ctx context.Context) ([]Room, error) {
 	return out, nil
 }
 
+// LastRoomByDedupKey returns the newest room whose room.created payload holds
+// dedupKey (see Store.LastRoomByDedupKey). It uses the partial index on
+// payload->>'dedup_key' (migration 00005).
+func (s *PG) LastRoomByDedupKey(ctx context.Context, dedupKey string) (Room, error) {
+	if dedupKey == "" {
+		return Room{}, fmt.Errorf("store: last room by dedup key: empty key: %w", ErrNotFound)
+	}
+	ctx, cancel := dbCtx(ctx)
+	defer cancel()
+	var r Room
+	var closedAt *time.Time
+	var driverID, driverName *string
+	err := s.pool.QueryRow(ctx,
+		`SELECT r.id, r.title, r.severity, r.pipeline_id, r.status, r.opened_at, r.closed_at, r.last_seq, r.driver_id, r.driver_name, r.driver_lease_until
+		 FROM room_events e JOIN rooms r ON r.id = e.room_id
+		 WHERE e.type = 'room.created' AND e.payload->>'dedup_key' = $1
+		 ORDER BY r.opened_at DESC, r.id ASC
+		 LIMIT 1`, dedupKey).
+		Scan(&r.ID, &r.Title, &r.Severity, &r.PipelineID, &r.Status, &r.OpenedAt, &closedAt, &r.LastSeq, &driverID, &driverName, &r.DriverLeaseUntil)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Room{}, fmt.Errorf("store: last room by dedup key: %w", ErrNotFound)
+	}
+	if err != nil {
+		return Room{}, fmt.Errorf("store: last room by dedup key: %w", err)
+	}
+	r.ClosedAt = closedAt
+	if driverID != nil {
+		r.DriverID = *driverID
+	}
+	if driverName != nil {
+		r.DriverName = *driverName
+	}
+	utcTimes(&r)
+	return r, nil
+}
+
 // UpdateDriver records the current driver and lease on the rooms row (kept in
 // sync with the event log; the log remains the source of truth).
 func (s *PG) UpdateDriver(ctx context.Context, id, driverID, driverName string, leaseUntil time.Time) error {

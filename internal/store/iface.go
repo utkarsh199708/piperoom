@@ -23,6 +23,13 @@ type Store interface {
 	// not an error; a room that has events is ErrRoomNotEmpty and is kept.
 	DeleteEmptyRoom(ctx context.Context, id string) error
 
+	// LastRoomByDedupKey returns the newest room (by opened_at, ties by id)
+	// whose room.created event carries dedupKey, open or closed, or an error
+	// wrapping ErrNotFound. dedupKey is the full alert index key
+	// ("<pipeline>|<key>") exactly as room.created stores it. An empty key
+	// never matches.
+	LastRoomByDedupKey(ctx context.Context, dedupKey string) (Room, error)
+
 	CreateProposal(ctx context.Context, p ProposalRow) error
 	DeleteProposal(ctx context.Context, proposalID string) error
 	GetProposal(ctx context.Context, proposalID string) (ProposalRow, error)

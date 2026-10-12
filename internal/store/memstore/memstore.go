@@ -265,6 +265,46 @@ func (s *Store) DeleteEmptyRoom(ctx context.Context, id string) error {
 	return nil
 }
 
+// LastRoomByDedupKey returns the newest room whose room.created event carries
+// dedupKey, with the same order as the Postgres store (opened_at, then id).
+func (s *Store) LastRoomByDedupKey(ctx context.Context, dedupKey string) (store.Room, error) {
+	if err := ctx.Err(); err != nil {
+		return store.Room{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var best *store.Room
+	if dedupKey != "" {
+		for _, log := range s.rooms {
+			if !createdWithKey(log.events, dedupKey) {
+				continue
+			}
+			m := log.meta
+			if best == nil || m.OpenedAt.After(best.OpenedAt) || (m.OpenedAt.Equal(best.OpenedAt) && m.ID < best.ID) {
+				best = &m
+			}
+		}
+	}
+	if best == nil {
+		return store.Room{}, fmt.Errorf("memstore: no room with dedup key %q: %w", dedupKey, store.ErrNotFound)
+	}
+	return *best, nil
+}
+
+// createdWithKey reports whether the room.created event in evs holds dedupKey.
+func createdWithKey(evs []events.Event, dedupKey string) bool {
+	for _, e := range evs {
+		if e.Type != events.RoomCreated {
+			continue
+		}
+		var p events.RoomCreatedPayload
+		if err := json.Unmarshal(e.Payload, &p); err == nil && p.DedupKey == dedupKey {
+			return true
+		}
+	}
+	return false
+}
+
 // UpdateDriver records the current driver on the room row.
 func (s *Store) UpdateDriver(ctx context.Context, id, driverID, driverName string, leaseUntil time.Time) error {
 	s.mu.Lock()
