@@ -69,6 +69,13 @@ func run() error {
 	}
 	log.Info("server: agent cap", "max_agents", maxAgents)
 
+	// A bad retention value stops the server: a typo must never silently keep
+	// (or delete) incident data.
+	retentionDays, err := store.ParseRetentionDays(cfg.RetentionDays)
+	if err != nil {
+		return fmt.Errorf("server: PIPEROOM_RETENTION_DAYS: %w", err)
+	}
+
 	// Refuse a reachable-from-outside listen address before anything else
 	// starts: the only auth is the X-User stub (security F1).
 	remote, err := checkListenAddr(cfg.HTTPAddr, *allowRemote)
@@ -237,6 +244,11 @@ func run() error {
 	if err := slack.startOpen(ctx, svc); err != nil {
 		return err
 	}
+
+	// Retention starts after Load so the cache is built before any room can
+	// disappear. The deferred stop runs before the store closes (LIFO).
+	stopRetention := startRetention(ctx, svc, retentionDays, retentionInterval, retentionRunTimeout, time.Now, log)
+	defer stopRetention()
 
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin)}
 	if cfg.WebDir != "" {

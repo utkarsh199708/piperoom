@@ -123,6 +123,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 
 			// The hand-off route is exempt from the default budget.
 			protected.Post("/rooms/{id}/handoffs", withTimeout(handoffTimeout, s.handleCreateHandoff))
+			// The audit export reads the whole log, so it has its own budget.
+			protected.Get("/rooms/{id}/export", withTimeout(exportTimeout, s.handleExportRoom))
 
 			protected.Group(func(short chi.Router) {
 				short.Use(middleware.Timeout(requestTimeout))

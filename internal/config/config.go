@@ -98,8 +98,9 @@ type Config struct {
 	// the agent stops and says so. Empty = default 2000000; "0" = no cap.
 	RoomTokenBudget string // PIPEROOM_ROOM_TOKEN_BUDGET
 
-	// RetentionDays deletes closed rooms' events older than this many days.
-	// Empty or "0" = keep forever.
+	// RetentionDays deletes whole closed rooms (events, proposals, approvals,
+	// hand-offs) whose closed_at is older than this many days. Open rooms are
+	// never deleted. Empty or "0" = keep forever.
 	RetentionDays string // PIPEROOM_RETENTION_DAYS
 }
 

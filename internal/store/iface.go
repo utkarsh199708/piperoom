@@ -43,3 +43,54 @@ type Store interface {
 	SetHandoffStatus(ctx context.Context, handoffID, status string) error
 	VoidHandoffs(ctx context.Context, roomID, exceptHandoffID string) error
 }
+
+// PurgeResult counts what one PurgeClosedBefore call deleted. It carries
+// counts and room ids only, never content, so it is safe to log.
+type PurgeResult struct {
+	RoomIDs      []string // rooms removed, so the caller can drop cached state
+	Examined     int      // rooms the call looked at (removed, gone meanwhile, or failed)
+	Failed       []PurgeFailure
+	Events       int64
+	Proposals    int64
+	Approvals    int64
+	Steps        int64
+	Suggestions  int64
+	Handoffs     int64
+	SlackThreads int64
+}
+
+// PurgeFailure is one room that could not be purged. Its transaction rolled
+// back, so the room is intact.
+type PurgeFailure struct {
+	RoomID string
+	Err    error
+}
+
+// Add folds o into r.
+func (r *PurgeResult) Add(o PurgeResult) {
+	r.RoomIDs = append(r.RoomIDs, o.RoomIDs...)
+	r.Examined += o.Examined
+	r.Failed = append(r.Failed, o.Failed...)
+	r.Events += o.Events
+	r.Proposals += o.Proposals
+	r.Approvals += o.Approvals
+	r.Steps += o.Steps
+	r.Suggestions += o.Suggestions
+	r.Handoffs += o.Handoffs
+	r.SlackThreads += o.SlackThreads
+}
+
+// Purger is the retention surface. It is separate from Store so a store (or a
+// test fake) that cannot delete simply does not implement it. Both *PG and
+// memstore.Store do.
+type Purger interface {
+	// PurgeClosedBefore deletes up to maxRooms closed rooms whose closed_at is
+	// before cutoff, with every event and child row. Open rooms are never
+	// touched. Each room goes in its own transaction with its own timeout.
+	// Rooms in exclude are skipped (the caller passes rooms that already
+	// failed in this run). One room failing does not stop the others: it is
+	// reported in Failed and the call carries on. The returned error is only
+	// for the call itself (listing failed, ctx done). Examined < maxRooms
+	// means no qualifying room is left.
+	PurgeClosedBefore(ctx context.Context, cutoff time.Time, maxRooms int, exclude []string) (PurgeResult, error)
+}
