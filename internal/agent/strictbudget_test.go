@@ -11,8 +11,9 @@ import (
 
 // productionToolSet mirrors what internal/wiring sends: every real read tool
 // (db, kafka, runbook) plus the room tools with the real actions registry, so
-// propose_fix carries the nested params of every registered action.
-// Registering actions needs no live clients.
+// propose_fix lists every registered action (an enum of names in the strict
+// schema, their params in the description). Registering actions needs no live
+// clients.
 func productionToolSet(t *testing.T) (*tools.Registry, []tools.Tool) {
 	t.Helper()
 	reg := fullRegistry(t)

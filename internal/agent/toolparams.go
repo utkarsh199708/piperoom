@@ -34,7 +34,10 @@ type toolList struct {
 // "The compiled grammar is too large" and 21 with "Too many strict tools".
 // Eight sits well inside the accepted range; maxStrictSchemaBytes guards the
 // grammar size as schemas grow. Room tools take the slots first: propose_fix
-// carries the nested action params, where a malformed input costs the most.
+// guards the write path, where a malformed input costs the most. Its strict
+// schema holds only an enum of action names and the params as JSON text; each
+// action's own params are checked in code (see proposeFixTool.checkStep), so
+// the schema does not grow with every action.
 // strictReadTools fill the rest. Tools sent without strict are still checked in
 // code: validateInput runs on every read-tool input before Tool.Run, so nothing
 // goes unvalidated.
@@ -44,9 +47,15 @@ const maxStrictTools = 8
 // every strict tool. Bytes are only a proxy for the compiled grammar size the
 // API limits, but they grow with it. The budget sits just under the largest
 // sum the API is known to accept (liveAcceptedSchemaBytes); configurations
-// that were never sent live do not count. Measured 2026-10-12: the shipped
-// cap-8 set (production registry, propose_fix with the real actions) is 4491
-// bytes and ran live in LEAD-ARCH's M2 check.
+// that were never sent live do not count.
+//
+// History of the shipped cap-8 set (production registry, the real actions):
+// 4491 bytes on 2026-10-12, which ran live in LEAD-ARCH's M2 check; 5319 bytes
+// once more actions were registered and propose_fix nested each one's params;
+// 3088 bytes now that propose_fix holds only an enum of action names and the
+// params as JSON text. A new action adds about its name length to that enum
+// (TestProposeFixStrictBytesDoNotGrowWithActions holds the line). The current
+// shape has not been sent live yet: re-run TestLiveStrictToolCap once.
 const maxStrictSchemaBytes = 5400
 
 // liveAcceptedSchemaBytes is the largest strict schema sum the API accepted in
@@ -91,7 +100,11 @@ func buildToolListWithCap(reg *tools.Registry, room []tools.Tool, cap int) toolL
 		tl.params = append(tl.params, toolParam(t, true, strictReads[t.Name()]))
 	}
 	for i, t := range room {
-		tl.byName[t.Name()] = toolEntry{tool: t, schema: t.InputSchema(), isRoom: true}
+		schema := t.InputSchema()
+		if v, ok := t.(interface{ validationSchema() map[string]any }); ok {
+			schema = v.validationSchema() // a tool whose Run checks some fields itself
+		}
+		tl.byName[t.Name()] = toolEntry{tool: t, schema: schema, isRoom: true}
 		tl.params = append(tl.params, toolParam(t, false, i < cap))
 	}
 	// Put a cache breakpoint after the tool list (the last tool).

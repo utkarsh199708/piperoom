@@ -22,6 +22,10 @@ type step struct {
 	cite       []string       // explicit based_on_steps instead of "every step so far"
 	proposal   *events.ProposalCreatedPayload
 	idle       bool // or go idle and wait for input; ends the run when the inbox closes
+	// proposeFix is a raw propose_fix tool input, run through the agent's real
+	// propose_fix tool (schema check, Validate, Create) instead of the
+	// Validate-only shortcut of proposal. A refusal is not a run error.
+	proposeFix string
 }
 
 // scriptedRunner is an agent.Runner that replays a fixed script through the
@@ -77,6 +81,8 @@ func scriptedRunner(script []step) agent.Runner {
 				if _, err := d.Proposals.Create(ctx, *s.proposal); err != nil {
 					return err
 				}
+			case s.proposeFix != "":
+				_, _ = agent.NewProposeFixTool(d.Actions, d.Proposals).Run(ctx, json.RawMessage(s.proposeFix))
 			case s.idle:
 				_ = d.Sink.Emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
 				for {

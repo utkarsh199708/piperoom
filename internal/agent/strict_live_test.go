@@ -35,7 +35,8 @@ func TestLiveStrictToolCap(t *testing.T) {
 
 	// The exact production tool set (real read tools including the runbook tool,
 	// and room tools with the real actions registry), so the compiled grammar
-	// the API sees, including propose_fix's nested params, is the one that ships.
+	// the API sees, including propose_fix's action-name enum and JSON-text
+	// params, is the one that ships.
 	reg, room := productionToolSet(t)
 
 	// The production client: the SDK reads ANTHROPIC_API_KEY itself, and
