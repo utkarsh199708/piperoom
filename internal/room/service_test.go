@@ -793,11 +793,11 @@ func TestCreateProposalScopeViolation(t *testing.T) {
 	// The alert webhook never drops an alert: an unknown (but well-formed)
 	// pipeline opens a room with proposals disabled (docs/api.md:103); only
 	// POST /api/rooms keeps the 400.
-	if _, err := svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "not-configured", json.RawMessage(`{"title":"t2"}`)); err != nil {
+	if _, _, err := svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "not-configured", json.RawMessage(`{"title":"t2"}`)); err != nil {
 		t.Fatalf("webhook with unknown pipeline must open a room: %v", err)
 	}
 	// A malformed pipeline_id is rejected by shape on both paths.
-	_, err = svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "bad id!", json.RawMessage(`{"title":"t2"}`))
+	_, _, err = svc.CreateRoomFromAlert(context.Background(), "t2", "sev2", "bad id!", json.RawMessage(`{"title":"t2"}`))
 	wantCode(t, err, "validation")
 }
 
@@ -805,7 +805,7 @@ func TestCreateRoomFromAlertStoresRawBody(t *testing.T) {
 	svc, st, _ := newTestService(t)
 	raw := json.RawMessage(`{"title":"DB down","severity":"sev1","pipeline_id":"orders","extra":[1,2]}`)
 
-	snap, err := svc.CreateRoomFromAlert(context.Background(), "DB down", "sev1", "orders", raw)
+	snap, _, err := svc.CreateRoomFromAlert(context.Background(), "DB down", "sev1", "orders", raw)
 	if err != nil {
 		t.Fatalf("create from alert: %v", err)
 	}
@@ -823,7 +823,7 @@ func TestCreateRoomFromAlertStoresRawBody(t *testing.T) {
 	// With the owners config loaded, a garbage (non-mapped) body uses the
 	// default pipeline "unknown": the room still opens (docs/api.md:103) with a
 	// system message explaining the pipeline is unknown.
-	snapUnknown, err := svc.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
+	snapUnknown, _, err := svc.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
 	if err != nil {
 		t.Fatalf("unknown-pipeline webhook must open a room: %v", err)
 	}
@@ -844,7 +844,7 @@ func TestCreateRoomFromAlertStoresRawBody(t *testing.T) {
 	// the defaults.
 	bare := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})
 	t.Cleanup(bare.Close)
-	snap2, err := bare.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
+	snap2, _, err := bare.CreateRoomFromAlert(context.Background(), "", "", "", json.RawMessage(`[1,2,3]`))
 	if err != nil {
 		t.Fatalf("create from array alert: %v", err)
 	}
@@ -1489,7 +1489,7 @@ func TestWebhookUnknownPipelineDisablesProposals(t *testing.T) {
 	act := &fakeAction{name: "pg_act", layer: "postgres"}
 	svc, _, _ := newTestService(t, act)
 
-	snap, err := svc.CreateRoomFromAlert(context.Background(), "", "", "orders-2", json.RawMessage(`{"pipeline_id":"orders-2"}`))
+	snap, _, err := svc.CreateRoomFromAlert(context.Background(), "", "", "orders-2", json.RawMessage(`{"pipeline_id":"orders-2"}`))
 	if err != nil {
 		t.Fatalf("webhook with unknown pipeline must open a room: %v", err)
 	}
@@ -1858,11 +1858,11 @@ func TestRepeatedAlertJoinsOpenRoom(t *testing.T) {
 	raw := json.RawMessage(`{"title":"consumer lag","pipeline_id":"orders","dedup_key":"lag"}`)
 	resolvedRaw := json.RawMessage(`{"title":"consumer lag","pipeline_id":"orders","dedup_key":"lag","status":"resolved"}`)
 
-	first, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
+	first, _, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
 	if err != nil {
 		t.Fatalf("first alert: %v", err)
 	}
-	second, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
+	second, _, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
 	if err != nil {
 		t.Fatalf("repeat alert: %v", err)
 	}
@@ -1888,7 +1888,7 @@ func TestRepeatedAlertJoinsOpenRoom(t *testing.T) {
 
 	// The source reporting the alert resolved joins the same room, says so, and
 	// leaves the room open: only the driver closes it.
-	resolvedSnap, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", resolvedRaw)
+	resolvedSnap, _, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", resolvedRaw)
 	if err != nil {
 		t.Fatalf("resolved repeat: %v", err)
 	}
@@ -1915,7 +1915,7 @@ func TestRepeatedAlertJoinsOpenRoom(t *testing.T) {
 	if _, err := svc.CloseRoom(ctx, arjun, first.ID, "fixed"); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	third, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
+	third, _, err := svc.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
 	if err != nil {
 		t.Fatalf("alert after close: %v", err)
 	}
@@ -1925,7 +1925,7 @@ func TestRepeatedAlertJoinsOpenRoom(t *testing.T) {
 	waitFor(t, 5*time.Second, func() bool { return hookCount() == 2 })
 
 	// A different body is a different alert and opens its own room.
-	other, err := svc.CreateRoomFromAlert(ctx, "disk full", "sev2", "orders", json.RawMessage(`{"title":"disk full","pipeline_id":"orders"}`))
+	other, _, err := svc.CreateRoomFromAlert(ctx, "disk full", "sev2", "orders", json.RawMessage(`{"title":"disk full","pipeline_id":"orders"}`))
 	if err != nil {
 		t.Fatalf("other alert: %v", err)
 	}
@@ -1940,7 +1940,7 @@ func TestRepeatedAlertJoinsOpenRoom(t *testing.T) {
 	if err := svc2.Load(ctx); err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	again, err := svc2.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
+	again, _, err := svc2.CreateRoomFromAlert(ctx, "consumer lag", "sev2", "orders", raw)
 	if err != nil {
 		t.Fatalf("alert after restart: %v", err)
 	}
@@ -1963,18 +1963,18 @@ func TestSameAlertKeyOtherPipelineOpensRoom(t *testing.T) {
 	orders := json.RawMessage(`{"title":"lag","pipeline_id":"orders","dedup_key":"k"}`)
 	billing := json.RawMessage(`{"title":"lag","pipeline_id":"billing","dedup_key":"k"}`)
 
-	a, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", orders)
+	a, _, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", orders)
 	if err != nil {
 		t.Fatalf("orders alert: %v", err)
 	}
-	b, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "billing", billing)
+	b, _, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "billing", billing)
 	if err != nil {
 		t.Fatalf("billing alert: %v", err)
 	}
 	if b.ID == a.ID {
 		t.Fatal("same dedup key on another pipeline joined the orders room")
 	}
-	again, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", orders)
+	again, _, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", orders)
 	if err != nil {
 		t.Fatalf("orders repeat: %v", err)
 	}
@@ -2003,7 +2003,7 @@ func TestConcurrentIdenticalAlertsOpenOneRoom(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			snap, err := svc.CreateRoomFromAlert(ctx, "burst", "sev2", "orders", raw)
+			snap, _, err := svc.CreateRoomFromAlert(ctx, "burst", "sev2", "orders", raw)
 			ids[i], errs[i] = snap.ID, err
 		}(i)
 	}

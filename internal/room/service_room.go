@@ -86,8 +86,9 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 // against a pipeline it knows nothing about. The 400 for an unknown pipeline
 // stays only on POST /api/rooms (CreateRoom). With no owners config (unit
 // tests) there is nothing to validate against, so every pipeline is treated as
-// known. No driver until someone takes control.
-func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipelineID string, raw json.RawMessage) (RoomSnapshot, error) {
+// known. No driver until someone takes control. created is false when the alert
+// joined the open room for it (see alertIndexKey) instead of opening one.
+func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipelineID string, raw json.RawMessage) (RoomSnapshot, bool, error) {
 	if title == "" {
 		title = "New alert"
 	}
@@ -98,7 +99,7 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 		pipelineID = "unknown"
 	}
 	if !pipelineIDRe.MatchString(pipelineID) {
-		return RoomSnapshot{}, validation(fmt.Sprintf("pipeline_id %q must match ^[a-zA-Z0-9_.-]+$", pipelineID))
+		return RoomSnapshot{}, false, validation(fmt.Sprintf("pipeline_id %q must match ^[a-zA-Z0-9_.-]+$", pipelineID))
 	}
 	pipelineKnown := s.owners == nil || s.knownPipeline(pipelineID)
 	dedupKey, resolved := alertDedup(raw)
@@ -114,13 +115,13 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 		st := s.rooms[existing]
 		snap, err := s.joinAlertRoomLocked(ctx, existing, st, title, resolved)
 		s.mu.Unlock()
-		return snap, err
+		return snap, false, err
 	}
 	if err := s.store.CreateRoom(ctx, store.Room{
 		ID: roomID, Title: title, Severity: severity, PipelineID: pipelineID, Status: "open", OpenedAt: now,
 	}); err != nil {
 		s.mu.Unlock()
-		return RoomSnapshot{}, fmt.Errorf("room: create from alert: %w", err)
+		return RoomSnapshot{}, false, fmt.Errorf("room: create from alert: %w", err)
 	}
 	st := &roomState{snap: NewSnapshot(), inbox: newInbox()}
 	st.snap.ID = roomID
@@ -130,7 +131,7 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 		Title: title, Severity: severity, PipelineID: pipelineID, Alert: raw,
 	}); err != nil {
 		s.mu.Unlock()
-		return RoomSnapshot{}, err
+		return RoomSnapshot{}, false, err
 	}
 	if indexKey != "" {
 		st.dedupKey = indexKey
@@ -145,14 +146,14 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 			Text: fmt.Sprintf("pipeline %q is unknown; proposals are disabled for this room", pipelineID),
 		}); err != nil {
 			s.mu.Unlock()
-			return RoomSnapshot{}, err
+			return RoomSnapshot{}, false, err
 		}
 	}
 	snap := st.snap.Clone()
 	s.startAgentLocked(roomID, title, pipelineID, raw, st)
 	s.notifyRoomOpenedLocked(roomID)
 	s.mu.Unlock()
-	return snap, nil
+	return snap, true, nil
 }
 
 // alertDedup reads a webhook body the way alertin does and returns the dedup
