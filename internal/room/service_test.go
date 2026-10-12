@@ -1982,3 +1982,43 @@ func TestSameAlertKeyOtherPipelineOpensRoom(t *testing.T) {
 		t.Fatalf("orders repeat opened room %s, want %s", again.ID, a.ID)
 	}
 }
+
+// TestConcurrentIdenticalAlertsOpenOneRoom pins that the check for an open room
+// and the room's creation are one step under s.mu: a burst of identical alerts
+// opens exactly one room.
+func TestConcurrentIdenticalAlertsOpenOneRoom(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	svc := room.New(room.Deps{Store: memstore.NewWithClock(c.Now), Users: room.DefaultUsers(), Owners: testOwners(), Run: fakeRun, Now: c.Now})
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+	raw := json.RawMessage(`{"title":"burst","pipeline_id":"orders","dedup_key":"burst"}`)
+
+	const n = 30
+	ids := make([]string, n)
+	errs := make([]error, n)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			snap, err := svc.CreateRoomFromAlert(ctx, "burst", "sev2", "orders", raw)
+			ids[i], errs[i] = snap.ID, err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := range ids {
+		if errs[i] != nil {
+			t.Fatalf("alert %d: %v", i, errs[i])
+		}
+		if ids[i] != ids[0] {
+			t.Fatalf("alert %d opened room %s, alert 0 opened %s", i, ids[i], ids[0])
+		}
+	}
+	if rooms, _ := svc.ListRooms(ctx); len(rooms) != 1 {
+		t.Fatalf("want one room for %d identical alerts, got %d", n, len(rooms))
+	}
+}
