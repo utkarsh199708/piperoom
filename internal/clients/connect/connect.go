@@ -107,6 +107,12 @@ func (c *Client) RestartConnector(ctx context.Context, name string) error {
 	return c.do(ctx, http.MethodPost, path, nil)
 }
 
+// Resume resumes a paused or stopped connector (PUT /connectors/{name}/resume).
+func (c *Client) Resume(ctx context.Context, name string) error {
+	path := "/connectors/" + url.PathEscape(name) + "/resume"
+	return c.do(ctx, http.MethodPut, path, nil)
+}
+
 // do performs a request and decodes the JSON body into out; nil out skips decoding.
 func (c *Client) do(ctx context.Context, method, path string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)

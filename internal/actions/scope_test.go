@@ -34,6 +34,8 @@ func TestCheckScope(t *testing.T) {
 		{name: "restart task other connector", action: "connect_restart_task", pipeline: p, params: `{"connector":"pg-inventory-connector","task":0}`, wantErr: true},
 		{name: "restart connector in scope", action: "connect_restart_connector", pipeline: p, params: `{"connector":"pg-orders-connector"}`},
 		{name: "restart connector other pipeline", action: "connect_restart_connector", pipeline: p, params: `{"connector":"pg-inventory-connector"}`, wantErr: true},
+		{name: "resume connector in scope", action: "connect_resume_connector", pipeline: p, params: `{"connector":"pg-orders-connector"}`},
+		{name: "resume connector other pipeline", action: "connect_resume_connector", pipeline: p, params: `{"connector":"pg-inventory-connector"}`, wantErr: true},
 		{name: "set compatibility value subject in scope", action: "schema_set_compatibility", pipeline: p, params: `{"subject":"pg.public.orders-value","level":"FULL"}`},
 		{name: "set compatibility key subject in scope", action: "schema_set_compatibility", pipeline: p, params: `{"subject":"pg.public.orders-key","level":"NONE"}`},
 		{name: "set compatibility other subject", action: "schema_set_compatibility", pipeline: p, params: `{"subject":"pg.public.customers-value","level":"NONE"}`, wantErr: true},

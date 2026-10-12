@@ -129,6 +129,20 @@ func TestRestartConnectorQuery(t *testing.T) {
 	}
 }
 
+func TestResumePutsRightPath(t *testing.T) {
+	var gotMethod, gotPath string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusAccepted)
+	})
+	if err := c.Resume(context.Background(), "pg-orders-connector"); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if gotMethod != http.MethodPut || gotPath != "/connectors/pg-orders-connector/resume" {
+		t.Fatalf("method/path %s %s", gotMethod, gotPath)
+	}
+}
+
 func TestNotFoundWrapsErrNotFound(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)

@@ -39,6 +39,7 @@ func Register(reg *Registry, d Deps) error {
 	for _, a := range []Action{
 		&restartTask{d: d},
 		&restartConnector{d: d},
+		&resumeConnector{d: d},
 		&setCompatibility{d: d},
 		&registerSchema{d: d},
 	} {
@@ -53,6 +54,7 @@ func Register(reg *Registry, d Deps) error {
 var (
 	_ Scoped = (*restartTask)(nil)
 	_ Scoped = (*restartConnector)(nil)
+	_ Scoped = (*resumeConnector)(nil)
 	_ Scoped = (*setCompatibility)(nil)
 	_ Scoped = (*registerSchema)(nil)
 )
@@ -243,6 +245,71 @@ func (a *restartConnector) Execute(ctx context.Context, raw json.RawMessage) (st
 		return "", err
 	}
 	return fmt.Sprintf("restarted failed tasks of %s (connector state %s)", p.Connector, st.State), nil
+}
+
+// ---- connect_resume_connector ----
+
+// connectorResumer is the local adapter for ConnectClient.Resume until the
+// method lands on clients.ConnectClient (contract change request in the PR):
+// the concrete connect client (internal/clients/connect) and the test fakes
+// implement it, and the action reports a clear error when the injected client
+// does not.
+type connectorResumer interface {
+	Resume(ctx context.Context, name string) error
+}
+
+type resumeConnector struct{ d Deps }
+
+func (a *resumeConnector) Name() string  { return "connect_resume_connector" }
+func (a *resumeConnector) Layer() string { return "kafka-connect" }
+func (a *resumeConnector) Describe() string {
+	return "Resumes a paused or stopped Kafka Connect connector."
+}
+func (a *resumeConnector) ParamsSchema() map[string]any {
+	return objectSchema(map[string]any{"connector": strProp("connector name")}, "connector")
+}
+
+type resumeConnectorParams struct {
+	Connector string `json:"connector"`
+}
+
+func (a *resumeConnector) Validate(raw json.RawMessage) error {
+	var p resumeConnectorParams
+	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" {
+		return fmt.Errorf("actions: connector is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return a.d.connectorExists(ctx, p.Connector)
+}
+
+func (a *resumeConnector) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
+	var params resumeConnectorParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return fmt.Errorf("actions: bad params: %w", err)
+	}
+	return inScopeConnector(p, params.Connector)
+}
+
+func (a *resumeConnector) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
+	var p resumeConnectorParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	rc, ok := a.d.Connect.(connectorResumer)
+	if !ok {
+		return "", fmt.Errorf("actions: connect client does not support Resume")
+	}
+	if err := rc.Resume(ctx, p.Connector); err != nil {
+		return "", err
+	}
+	st, err := a.d.Connect.Status(ctx, p.Connector)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("resumed %s (connector state %s)", p.Connector, st.State), nil
 }
 
 // ---- schema_set_compatibility ----
