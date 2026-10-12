@@ -217,6 +217,7 @@ func TestRecoveredVerdictAfterNoneProposesRestore(t *testing.T) {
 	for name, setResult := range map[string]string{
 		"level inherited from the global level": resultSetNoneFromGlobal,
 		"level set on the subject":              resultSetNoneFromSubject,
+		"earlier level unknown":                 compatSubject + " compatibility unknown → NONE",
 	} {
 		t.Run(name, func(t *testing.T) {
 			sink := &fakeSink{}
