@@ -62,7 +62,7 @@ func TestPgPublicationTablesIntegration(t *testing.T) {
 		t.Fatal("pg_publication_tables not registered")
 	}
 
-	res, err := tt.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders"}`))
+	res, err := tt.Run(tools.WithUnscoped(context.Background()), json.RawMessage(`{"pipeline_id":"orders"}`))
 	if err != nil {
 		t.Fatalf("pg_publication_tables: %v", err)
 	}

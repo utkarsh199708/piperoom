@@ -190,7 +190,7 @@ func TestPipelineMapUsesRealClients(t *testing.T) {
 	if !ok {
 		t.Fatal("pipeline_map not registered")
 	}
-	res, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders"}`))
+	res, err := tool.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"pipeline_id":"orders"}`))
 	if err != nil {
 		t.Fatalf("pipeline_map run: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestTraceRecordUsesRealClients(t *testing.T) {
 	if !ok {
 		t.Fatal("trace_record not registered")
 	}
-	res, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"public.orders","key":"1"}`))
+	res, err := tool.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"pipeline_id":"orders","table":"public.orders","key":"1"}`))
 	if err != nil {
 		t.Fatalf("trace_record run: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestPgRowScopedToPipeline(t *testing.T) {
 		t.Fatal("pg_row not registered")
 	}
 
-	res, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"public.orders","pk_column":"id","key":"1"}`))
+	res, err := tool.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"pipeline_id":"orders","table":"public.orders","pk_column":"id","key":"1"}`))
 	if err != nil {
 		t.Fatalf("pg_row in-scope: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestPgRowScopedToPipeline(t *testing.T) {
 		t.Fatalf("pg_row data type %T, want map[string]any", res.Data)
 	}
 
-	if _, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"public.payments","pk_column":"id","key":"1"}`)); !errors.Is(err, tools.ErrBadInput) {
+	if _, err := tool.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"pipeline_id":"orders","table":"public.payments","pk_column":"id","key":"1"}`)); !errors.Is(err, tools.ErrBadInput) {
 		t.Fatalf("pg_row other-table: err = %v, want ErrBadInput", err)
 	}
 }

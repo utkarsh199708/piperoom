@@ -278,6 +278,78 @@ hardening, or dev-only exposure).
 
 ---
 
+## F11 — Read tools are not scoped to the room's pipeline
+
+- **Status:** fixed in the `[A3] read tools scoped to the room's pipeline (F11)` PR (branch
+  `a3/read-scope`).
+- **Severity:** high
+- **Where (before the fix):** `internal/tools/kafkatools/*` and `internal/tools/dbtools/*`.
+  `trace_record`, `pipeline_map`, `pg_publication_tables` and `kafka_topic_config` took a
+  `pipeline_id` from the tool input and never compared it with the room's pipeline.
+  `kafka_topic_offsets`, `kafka_find_by_key`, `kafka_consumer_lag`, `kafka_list_groups`,
+  `connect_list_connectors`, `connect_status`, `connect_config`, `schema_registry_*`,
+  `warehouse_freshness` and `pg_recent_ddl` took free names (connector, topic, group, subject,
+  table) and passed them straight to the client. `internal/agent/run.go` never told a tool which
+  pipeline the room was about, so no tool could have checked.
+- **Scenario:** F4 and F10 closed the table reads and the write actions. The read side of
+  Kafka, Connect and the Schema Registry stayed open. A room (or a prompt-injected agent, or an
+  over-broad steer) could read any connector's config, any topic's offsets or keys, any group's
+  lag, any subject's schemas, and the full connector and group lists. Only the credentials and
+  ACLs of the process limited this, and they are shared by every pipeline (F7). The connector
+  config also showed `transforms.*` values, which can hold literals (static fields, regexes,
+  replacements) that the key-name secret masking does not catch.
+- **Fix:**
+  - New `internal/tools/scope.go` (not a contract file): `tools.WithPipelineID` /
+    `WithPipeline` put the room's pipeline into the tool context, `tools.ScopeFor(ctx, owners)`
+    resolves it, and `Scope` has the checks and list filters (connector, consumer group, topic,
+    subject, source/sink table, `pipeline_id`). The topic and subject rules are the same as the
+    write actions' `CheckScope` (F10): topic = `<topic_prefix>.<source_table>`, subject =
+    that topic plus `-key` or `-value`, exact match.
+  - The agent runner (`internal/agent/run.go`, `verify.go`) sets the pipeline from
+    `Alert.PipelineID` on every read tool call, including the verification and baseline reads.
+    The model cannot set it. A tool never trusts a `pipeline_id` from its input: a different one
+    is refused and the room's id is used for the data call.
+  - Every tool calls `ScopeFor` first and checks its names before any client call. An
+    out-of-scope name returns an error that names the rule and the allowed names, with no data.
+    List tools return only in-scope items and do not call the client for the others.
+  - The default is refuse. A call with no room pipeline gets `ErrNoScope`. CLI and dev callers
+    opt out explicitly with `tools.WithUnscoped(ctx)`; a room pipeline always wins over the
+    opt-out.
+  - `connect_config` shows a `transforms.<name>.<setting>` value only for `type`, `field`,
+    `fields` and `field.name` (and the `transforms` name list); every other transforms value is
+    `***`. The existing secret masking stays.
+  - `connect_status` no longer diffs a subject named in a failure trace unless it is in scope.
+  - `pg_long_transactions` no longer returns query text. `pg_stat_activity.query` often holds
+    literal row values from other pipelines' sessions. The postgres client selects only the
+    statement verb, and the tool keeps pid, user, application name, state, transaction age,
+    wait event and at most the verb (`clients.Transaction` got `ApplicationName` and
+    `WaitEvent`; that contract change is its own commit). The data-handling notes
+    (`docs/pilot/data-handling.md`, `docs/pilot/permissions.md`) say the same.
+  - `pg_publication_tables` lists only the publication members that are the pipeline's source
+    tables (a `FOR ALL TABLES` publication has every table as a member).
+  - `kafka_consumer_lag` shows only partitions of the pipeline's topics, and recomputes the
+    total lag from them.
+  - `warehouse_row` runs the table and column format checks before the scope check, like
+    `warehouse_freshness`, so bad input stays `ErrBadInput`.
+  - A caller with no pipeline cannot inherit another room's scope: `WithPipelineID(ctx, "")`
+    clears it, and a guard test (`cmd/investigate/scope_guard_test.go`) checks that after
+    `wiring.RegisterTools` every read tool except `runbook_lookup` refuses `context.Background()`.
+- **Still database-wide (by design):**
+  - `pg_replication_slots` returns slot metadata (name, plugin, active flag, retained WAL,
+    `wal_status`) for every slot in the source database, not only the pipeline's. `owners.yaml`
+    names no slot. It holds no row data. A per-pipeline slot list in `owners.yaml` would let
+    it be filtered.
+  - `pg_long_transactions` lists long sessions of every pipeline (pid, user, application, state,
+    age, wait event, statement verb). It stays database-wide because any long transaction
+    holds the WAL horizon and can stall the slot. It returns no query text.
+- **Rooms with no pipeline:** an alert with no `pipeline_id` gets no scope, so all read tools
+  except `runbook_lookup` are refused (`ErrNoScope`). Only the caller of `agent.Run` can opt
+  out, with `tools.WithUnscoped(ctx)`, for CLI and dev use. The model cannot.
+- **Owner:** A3 (`internal/tools/dbtools`), A2 (`internal/tools/kafkatools`), A4
+  (`internal/agent`). One PR by A3.
+
+---
+
 ## Summary of critical/high findings
 
 | ID | Severity | One-line |
@@ -287,3 +359,4 @@ hardening, or dev-only exposure).
 | F3 | high | Full row values (not the redacted summary) are broadcast to every room watcher and stored forever |
 | F4 | high | `pg_row`/`warehouse_row` can read any syntactically-valid table, not just the pipeline's own tables |
 | F10 | high | Write actions (`connect_restart_*`, `schema_set_compatibility`, `schema_register`) can target any connector/subject that exists, not just the pipeline's own |
+| F11 | high | Read tools take any connector, topic, group, subject or `pipeline_id`, not just the room's own pipeline's (fixed) |

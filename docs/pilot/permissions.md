@@ -60,10 +60,10 @@ Notes:
   (`internal/tools/dbtools/pg.go:177`), but the credential is the real boundary: a bug or a
   changed `owners.yaml` must not widen what the role can read.
 - `pg_replication_slots` is readable by any role. No `REPLICATION` attribute is needed or wanted.
-- `pg_long_transactions` reads `pg_stat_activity`. Without `pg_read_all_stats` the role sees
-  other sessions' rows but not their `query` text. That is the **preferred** least-privilege
-  state. Do not grant `pg_read_all_stats` or `pg_monitor` unless you accept the agent
-  seeing live query text (which can contain literal values).
+- `pg_long_transactions` reads `pg_stat_activity`. The tool never returns query text: the
+  client selects only the statement verb (first keyword). Without `pg_read_all_stats` the role
+  also does not see other sessions' `query` at all, which is still the **preferred**
+  least-privilege state. Do not grant `pg_read_all_stats` or `pg_monitor` without need.
 - Primary-key discovery uses `information_schema`, which only lists tables the role can
   access, so the grants above are enough.
 - `pg_publication_tables` reads catalog views only (`pg_publication_tables`, `pg_class`,
@@ -71,7 +71,8 @@ Notes:
   It adds no table grant. It reports the publication name and the connector's database role
   name, taken from the Connect config (`internal/tools/dbtools/pg_publication.go:30-35`). It also
   reports, per source table, whether that table is in the publication and whether the role can
-  SELECT it. Its `Data` lists the publication's member tables. It exposes no row data.
+  SELECT it. Its `Data` lists only the publication members that are the pipeline's source tables
+  (a `FOR ALL TABLES` publication has every table as a member). It exposes no row data.
 - Never use the Debezium replication user or the application user here.
 
 ### DDL audit (optional, recommended)
@@ -217,11 +218,13 @@ Piperoom already checks every write action against the room's pipeline (the `Sco
 `internal/actions/kafka_actions.go:55-61`, run at proposal time and before execution); this is
 defence in depth.
 
-Connector config is also read by the agent. `connect_config` shows a fixed list of key names, every
-`transforms*` key **in full**, and secret-looking keys as `***`, so the presence of a secret key is
-shown, never its value (`internal/tools/kafkatools/connect_tools.go:155-170`). Put secrets in
-connector config providers (`${file:...}` / `${vault:...}`), not in `transforms*` settings, so no
-secret is in the REST output at all.
+Connector config is also read by the agent, and only for the room pipeline's own connectors.
+`connect_config` shows a fixed list of key names, the `transforms` name list and each transform's
+`type`, `field`, `fields` and `field.name`, and shows secret-looking keys and every other
+`transforms*` setting as `***`, so the presence of a secret key is shown, never its value
+(`internal/tools/kafkatools/connect_tools.go`). Still put secrets in connector config providers
+(`${file:...}` / `${vault:...}`), not in `transforms*` settings, so no secret is in the REST output
+at all.
 
 ## Schema Registry
 

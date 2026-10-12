@@ -171,7 +171,7 @@ func TestRegisterRequiresOwners(t *testing.T) {
 
 func runTool(t *testing.T, tt tools.Tool, input string) (tools.Result, error) {
 	t.Helper()
-	return tt.Run(context.Background(), json.RawMessage(input))
+	return tt.Run(tools.WithUnscoped(context.Background()), json.RawMessage(input))
 }
 
 func TestValidationErrors(t *testing.T) {
@@ -351,7 +351,7 @@ func TestPipelineMapTargetError(t *testing.T) {
 		t.Fatal(err)
 	}
 	tt, _ := reg.Get("pipeline_map")
-	_, err := tt.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders"}`))
+	_, err := tt.Run(tools.WithUnscoped(context.Background()), json.RawMessage(`{"pipeline_id":"orders"}`))
 	if err == nil {
 		t.Fatal("expected target error")
 	}
@@ -368,7 +368,7 @@ func TestTraceRecordTargetError(t *testing.T) {
 		t.Fatal(err)
 	}
 	tt, _ := reg.Get("trace_record")
-	_, err := tt.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"public.orders","key":"7"}`))
+	_, err := tt.Run(tools.WithUnscoped(context.Background()), json.RawMessage(`{"pipeline_id":"orders","table":"public.orders","key":"7"}`))
 	if err == nil {
 		t.Fatal("expected target error")
 	}
@@ -385,7 +385,7 @@ func TestPipelineMapUnknownPipelineBadInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	tt, _ := reg.Get("pipeline_map")
-	_, err := tt.Run(context.Background(), json.RawMessage(`{"pipeline_id":"nope"}`))
+	_, err := tt.Run(tools.WithUnscoped(context.Background()), json.RawMessage(`{"pipeline_id":"nope"}`))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -402,7 +402,7 @@ func (b *ctxErrBuilder) Build(ctx context.Context, _ string) (topology.Graph, er
 
 func TestPipelineMapCancelledCtx(t *testing.T) {
 	d := testDeps()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(tools.WithUnscoped(context.Background()))
 	cancel()
 	d.Builder = &ctxErrBuilder{}
 	reg := tools.NewRegistry()

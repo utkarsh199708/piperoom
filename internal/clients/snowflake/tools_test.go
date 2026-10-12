@@ -63,7 +63,7 @@ func TestWarehouseFreshnessToolOnSnowflake(t *testing.T) {
 	fq := &fakeQuerier{rows: &fakeRows{cols: []string{"MAX"}, data: [][]any{{&ts}}}}
 	tt := snowflakeTool(t, fq, "warehouse_freshness")
 
-	res, err := tt.Run(context.Background(), json.RawMessage(`{"table":"analytics.orders","ts_column":"updated_at"}`))
+	res, err := tt.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"table":"analytics.orders","ts_column":"updated_at"}`))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestWarehouseFreshnessToolThreePartTable(t *testing.T) {
 	fq := &fakeQuerier{rows: &fakeRows{cols: []string{"MAX"}, data: [][]any{{&ts}}}}
 	tt := snowflakeTool(t, fq, "warehouse_freshness")
 
-	if _, err := tt.Run(context.Background(), json.RawMessage(`{"table":"dwh.analytics.orders_daily","ts_column":"updated_at"}`)); err != nil {
+	if _, err := tt.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"table":"dwh.analytics.orders_daily","ts_column":"updated_at"}`)); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if want := `SELECT MAX("UPDATED_AT") FROM "DWH"."ANALYTICS"."ORDERS_DAILY"`; fq.lastQuery != want {
@@ -100,13 +100,13 @@ func TestWarehouseFreshnessToolThreePartTable(t *testing.T) {
 func TestWarehouseFreshnessToolEmptyAndMissing(t *testing.T) {
 	var nilTS *time.Time
 	fq := &fakeQuerier{rows: &fakeRows{cols: []string{"MAX"}, data: [][]any{{nilTS}}}}
-	res, err := snowflakeTool(t, fq, "warehouse_freshness").Run(context.Background(), json.RawMessage(`{"table":"analytics.orders","ts_column":"updated_at"}`))
+	res, err := snowflakeTool(t, fq, "warehouse_freshness").Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"table":"analytics.orders","ts_column":"updated_at"}`))
 	if err != nil || res.Summary != "no rows (empty table)" {
 		t.Fatalf("empty table: summary=%q err=%v", res.Summary, err)
 	}
 
 	fq = &fakeQuerier{err: &gosnowflake.SnowflakeError{Number: errObjectDoesNotExist, SQLState: "42S02"}}
-	_, err = snowflakeTool(t, fq, "warehouse_freshness").Run(context.Background(), json.RawMessage(`{"table":"analytics.gone","ts_column":"updated_at"}`))
+	_, err = snowflakeTool(t, fq, "warehouse_freshness").Run(tools.WithUnscoped(context.Background()), json.RawMessage(`{"table":"analytics.gone","ts_column":"updated_at"}`))
 	if !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("missing table: err = %v, want wrapping clients.ErrNotFound", err)
 	}
@@ -121,7 +121,7 @@ func TestWarehouseToolsRefuseInjectionBeforeDriver(t *testing.T) {
 		`{"table":"a.b.c.d","ts_column":"updated_at"}`,
 		`{"table":"analytics.\"orders\"","ts_column":"updated_at"}`,
 	} {
-		if _, err := tt.Run(context.Background(), json.RawMessage(in)); !errors.Is(err, tools.ErrBadInput) {
+		if _, err := tt.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(in)); !errors.Is(err, tools.ErrBadInput) {
 			t.Errorf("input %s: err = %v, want ErrBadInput", in, err)
 		}
 	}
@@ -138,7 +138,7 @@ func TestWarehouseRowToolOnSnowflake(t *testing.T) {
 		data: [][]any{{"7", "19.99", time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}},
 	}}
 	tt := snowflakeTool(t, fq, "warehouse_row")
-	res, err := tt.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"analytics.orders","pk_column":"id","key":"7"}`))
+	res, err := tt.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"pipeline_id":"orders","table":"analytics.orders","pk_column":"id","key":"7"}`))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

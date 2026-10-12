@@ -123,10 +123,10 @@ Rules of thumb:
   A fix needs **all** of its required layers' owners to approve. The six layers are
   `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer` and `warehouse`
   (`internal/events/events.go:268`).
-- `source_tables` and `sink_tables` bound the row tools, but only for the pipeline the agent names.
-  The room's pipeline is not checked, so any pipeline in this file can be read. Keep the file to
-  the pipelines the room may see, and keep `SELECT` grants identical to these lists
-  ([data-handling.md](data-handling.md#3-prompt-injection-and-untrusted-text), F4).
+- `source_tables` and `sink_tables` bound the row tools, and the read tools are scoped to the
+  room's pipeline (its connectors, topics, consumer groups, subjects and tables). Keep `SELECT`
+  grants identical to these lists
+  ([data-handling.md](data-handling.md#3-prompt-injection-and-untrusted-text), F4, F11).
 - Put the real people in `users.yaml`; remove the dev users.
 
 ## 3. Prepare the source database

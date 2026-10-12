@@ -153,7 +153,8 @@ func (d *DB) recentDDL(ctx context.Context, since time.Time, table string, limit
 }
 
 // LongTransactions lists transactions open longer than olderThan, excluding
-// this backend.
+// this backend. It never returns query text: pg_stat_activity.query often holds
+// literal row values, so only the statement verb (first keyword) is selected.
 func (d *DB) LongTransactions(ctx context.Context, olderThan time.Duration) ([]clients.Transaction, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
@@ -161,9 +162,11 @@ func (d *DB) LongTransactions(ctx context.Context, olderThan time.Duration) ([]c
 	rows, err := d.pool.Query(ctx, `
 		SELECT pid,
 		       COALESCE(usename, ''),
+		       COALESCE(application_name, ''),
 		       COALESCE(state, ''),
 		       EXTRACT(EPOCH FROM (now() - xact_start))::bigint,
-		       COALESCE(left(query, 500), '')
+		       COALESCE(wait_event_type || ':' || wait_event, ''),
+		       COALESCE(upper(substring(ltrim(query, E' \t\r\n') from '^[A-Za-z]+')), '')
 		FROM pg_stat_activity
 		WHERE xact_start IS NOT NULL
 		  AND xact_start < now() - make_interval(secs => $1)
@@ -178,7 +181,7 @@ func (d *DB) LongTransactions(ctx context.Context, olderThan time.Duration) ([]c
 	for rows.Next() {
 		var t clients.Transaction
 		var ageSec int64
-		if err := rows.Scan(&t.PID, &t.Username, &t.State, &ageSec, &t.Query); err != nil {
+		if err := rows.Scan(&t.PID, &t.Username, &t.ApplicationName, &t.State, &ageSec, &t.WaitEvent, &t.Query); err != nil {
 			return nil, fmt.Errorf("postgres: scan transaction: %w", err)
 		}
 		t.Age = time.Duration(ageSec) * time.Second

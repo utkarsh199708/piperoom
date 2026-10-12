@@ -589,6 +589,16 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 	return blocks
 }
 
+// toolScope returns ctx carrying the room's pipeline, so every read tool is
+// scoped to the pipeline of the alert that opened the room and cannot be
+// pointed at another pipeline by its input (security finding F11). The
+// pipeline id comes from the alert, never from the model. An alert with no
+// pipeline clears any pipeline the context inherited: its tools are refused
+// unless the caller of Run opted out with tools.WithUnscoped.
+func (r *runner) toolScope(ctx context.Context) context.Context {
+	return tools.WithPipelineID(ctx, r.alert.PipelineID)
+}
+
 // runReadTool executes one registry tool within a step, emitting step.started,
 // tool_call and tool_result events.
 func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
@@ -619,7 +629,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		Input:     u.input,
 	})
 
-	tctx, cancel := context.WithTimeout(ctx, r.timing.toolTimeout)
+	tctx, cancel := context.WithTimeout(r.toolScope(ctx), r.timing.toolTimeout)
 	defer cancel()
 	start := time.Now()
 	res, err := entry.tool.Run(tctx, cleaned)

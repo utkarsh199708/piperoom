@@ -33,6 +33,13 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 			if !d.validWarehouseColumn(input.TSColumn) {
 				return tools.Result{}, fmt.Errorf("%w: invalid ts_column", tools.ErrBadInput)
 			}
+			sc, err := d.scope(ctx)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			if err := sc.CheckSinkTable(input.Table); err != nil {
+				return tools.Result{}, err
+			}
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
@@ -81,10 +88,8 @@ func warehouseRowTool(d Deps) tools.Tool {
 			if input.PipelineID == "" {
 				return tools.Result{}, fmt.Errorf("%w: pipeline_id is required", tools.ErrBadInput)
 			}
-			p, err := d.pipeline(input.PipelineID)
-			if err != nil {
-				return tools.Result{}, err
-			}
+			// Format checks come first, so bad input stays ErrBadInput whatever
+			// the scope is (same order as warehouse_freshness).
 			if !d.validWarehouseTable(input.Table) {
 				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\" (or \"db.schema.table\" on Snowflake)", tools.ErrBadInput)
 			}
@@ -93,6 +98,14 @@ func warehouseRowTool(d Deps) tools.Tool {
 			}
 			if input.Key == "" {
 				return tools.Result{}, fmt.Errorf("%w: key is required", tools.ErrBadInput)
+			}
+			sc, err := d.scope(ctx)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			p, err := d.resolve(sc, input.PipelineID)
+			if err != nil {
+				return tools.Result{}, err
 			}
 			if err := scopedTable(input.PipelineID, input.Table, p.SinkTables); err != nil {
 				return tools.Result{}, err
