@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"piperoom/internal/agent"
 	"piperoom/internal/alertin"
@@ -38,6 +42,11 @@ func guardSetup(t *testing.T, st store.Store) (*room.Service, *atomic.Int32, *at
 	return svc, runs, hooks
 }
 
+// esc builds a JSON \uXXXX escape. Test bodies spell escapes through it so an
+// editor or tool that decodes "A" in source text cannot turn an escape
+// under test into a literal character.
+func esc(hex string) string { return "\\u" + hex }
+
 func wantValidation400(t *testing.T, err error) {
 	t.Helper()
 	var re *room.Error
@@ -52,13 +61,14 @@ func wantValidation400(t *testing.T, err error) {
 func TestAlertBodyGuard(t *testing.T) {
 	bad := map[string]string{
 		"nul escape":                  `{"title":"x\u0000y","pipeline_id":"orders"}`,
-		"nul escape uppercase hex":    `{"title":"\u0000"}`,
+		"bare nul escape":             `{"title":"\u0000"}`,
+		"uppercase high then nul":     `{"title":"` + esc("D83D") + `\u0000"}`,
 		"invalid utf-8":               "{\"title\":\"x\xffy\"}",
 		"raw nul byte":                "{\"title\":\"x\x00y\"}",
 		"lone high surrogate":         `{"title":"\ud83d"}`,
 		"lone low surrogate":          `{"title":"\ude00"}`,
 		"high then plain char":        `{"title":"\ud83dA"}`,
-		"high then non-low escape":    `{"title":"\ud83dA"}`,
+		"high then non-low escape":    `{"title":"` + esc("d83d") + esc("0041") + `"}`,
 		"high then high":              `{"title":"\ud83d\ud83d"}`,
 		"low then high":               `{"title":"\ude00\ud83d"}`,
 		"high at end of string":       `{"title":"x\uD83D"}`,
@@ -85,11 +95,11 @@ func TestAlertBodyGuard(t *testing.T) {
 	}
 
 	good := map[string]string{
-		"valid surrogate pair":     `{"title":"😀"}`,
-		"escaped backslash then u": `{"title":"\\u0000"}`,
-		"plain unicode":            `{"title":"café 中"}`,
-		"escaped quote before u":   `{"title":"\"A"}`,
-		"literal utf-8":            "{\"title\":\"café 中\"}",
+		"valid surrogate pair escapes": `{"title":"` + esc("d83d") + esc("de00") + `"}`,
+		"escaped backslash then u0000": `{"title":"\\u0000"}`,
+		"escaped bmp characters":       `{"title":"` + esc("00e9") + esc("4e2d") + `"}`,
+		"escaped quote before escape":  `{"title":"\"` + esc("0041") + `"}`,
+		"literal utf-8":                "{\"title\":\"café 中\"}",
 	}
 	for name, body := range good {
 		t.Run(name, func(t *testing.T) {
@@ -147,15 +157,55 @@ func TestCreateRoomTitleGuard(t *testing.T) {
 	}
 }
 
+// A store error that carries one of the "value cannot be stored" SQLSTATEs
+// (what Postgres returns for numbers jsonb cannot hold, e.g. 1e131072) is a 400
+// validation error, nothing is left behind, and the Postgres text is not echoed.
+// Any other store error stays a plain error.
+func TestUnstorableAppendErrorIs400(t *testing.T) {
+	ctx := context.Background()
+	body := json.RawMessage(`{"n":1e131072}`)
+	for _, code := range []string{"22003", "22P02", "22P05", "22021"} {
+		t.Run(code, func(t *testing.T) {
+			mem := memstore.New()
+			pgErr := &pgconn.PgError{Code: code, Message: "value overflows numeric format: 1e131072"}
+			svc, runs, hooks := guardSetup(t, failAppendStore{Store: mem, err: fmt.Errorf("store: insert event: %w", pgErr)})
+
+			_, created, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", body)
+			wantValidation400(t, err)
+			if strings.Contains(err.Error(), "1e131072") {
+				t.Fatalf("error echoes the Postgres message: %v", err)
+			}
+			assertNothingCreated(t, svc, runs, hooks, created)
+			if rows, _ := mem.ListRooms(ctx); len(rows) != 0 {
+				t.Fatalf("store keeps %d orphan rows, want 0", len(rows))
+			}
+			_, created, err = svc.OpenAlertRoom(ctx, alertin.Alert{Source: alertin.Generic, Status: alertin.StatusFiring, Title: "lag", Severity: "sev2", PipelineID: "orders", DedupKey: "generic:n", Raw: body})
+			wantValidation400(t, err)
+			assertNothingCreated(t, svc, runs, hooks, created)
+		})
+	}
+
+	t.Run("other error stays a plain error", func(t *testing.T) {
+		boom := fmt.Errorf("store: insert event: %w", &pgconn.PgError{Code: "08006", Message: "connection failure"})
+		svc, _, _ := guardSetup(t, failAppendStore{Store: memstore.New(), err: boom})
+		_, _, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", body)
+		var re *room.Error
+		if err == nil || errors.As(err, &re) {
+			t.Fatalf("err = %v, want the plain store error", err)
+		}
+	})
+}
+
 // failAppendStore refuses to append room.created, as a real store would for a
 // payload it cannot persist (or a database that just went away).
 type failAppendStore struct {
 	*memstore.Store
+	err error // returned for room.created
 }
 
 func (f failAppendStore) Append(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	if typ == events.RoomCreated {
-		return events.Event{}, errors.New("simulated append failure")
+		return events.Event{}, f.err
 	}
 	return f.Store.Append(ctx, roomID, typ, actor, payload)
 }
@@ -181,7 +231,7 @@ func TestFailedRoomCreatedLeavesNoOrphanRow(t *testing.T) {
 	for name, create := range tests {
 		t.Run(name, func(t *testing.T) {
 			mem := memstore.New()
-			svc, runs, hooks := guardSetup(t, failAppendStore{mem})
+			svc, runs, hooks := guardSetup(t, failAppendStore{Store: mem, err: errors.New("simulated append failure")})
 			if err := create(svc); err == nil {
 				t.Fatal("want the append failure returned")
 			}

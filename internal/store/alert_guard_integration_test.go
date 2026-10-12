@@ -18,6 +18,10 @@ import (
 	"piperoom/internal/testenv"
 )
 
+// jsonEscape builds a JSON \uXXXX escape without writing it as one in source
+// text, where a tool or editor could decode it into a literal character.
+func jsonEscape(hex string) string { return "\\u" + hex }
+
 // Real Postgres: an alert body that jsonb cannot hold is refused with a 400
 // before any write, so no rooms row and no event exist afterwards, while a body
 // that only looks similar is stored. Run against a throwaway Postgres.
@@ -55,6 +59,11 @@ func TestAlertBodyGuardLeavesNoRowsOnPostgres(t *testing.T) {
 		"nul escape":         `{"title":"x\u0000y","pipeline_id":"orders"}`,
 		"unpaired surrogate": `{"title":"\ud83d","pipeline_id":"orders"}`,
 		"invalid utf-8":      "{\"title\":\"x\xffy\",\"pipeline_id\":\"orders\"}",
+		// Numbers jsonb cannot hold (SQLSTATE 22003) pass the scanner; the
+		// store error is mapped to the same 400 and the room row is removed.
+		"numeric overflow":       `{"n":1e131072,"pipeline_id":"orders"}`,
+		"numeric underflow":      `{"n":1e-16384,"pipeline_id":"orders"}`,
+		"numeric underflow, 1.5": `{"n":1.5e-16383,"pipeline_id":"orders"}`,
 	}
 	for name, body := range bad {
 		_, _, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", json.RawMessage(body))
@@ -73,7 +82,7 @@ func TestAlertBodyGuardLeavesNoRowsOnPostgres(t *testing.T) {
 
 	// A valid surrogate pair and an escaped backslash are storable.
 	_, created, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders",
-		json.RawMessage(`{"title":"😀 \\u0000","pipeline_id":"orders"}`))
+		json.RawMessage(`{"title":"`+jsonEscape("d83d")+jsonEscape("de00")+` \\u0000","pipeline_id":"orders"}`))
 	if err != nil || !created {
 		t.Fatalf("storable body: created=%v err=%v", created, err)
 	}

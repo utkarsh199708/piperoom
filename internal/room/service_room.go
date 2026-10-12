@@ -65,7 +65,7 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	}); err != nil {
 		s.discardNewRoomLocked(ctx, roomID)
 		s.mu.Unlock()
-		return RoomSnapshot{}, err
+		return RoomSnapshot{}, mapUnstorable(err)
 	}
 	if _, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, humanActor(user), events.ControlGrantedPayload{
 		To: humanActor(user), LeaseUntil: lease,
@@ -88,7 +88,15 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 // a row with no events), so no orphan row is left behind that would load as a
 // room with an empty log. The delete uses a fresh deadline because ctx may be
 // the reason the append failed. If the delete fails too, Load still skips the
-// empty row (ensureAllLoadedLocked). Caller must hold s.mu.
+// empty row (ensureAllLoadedLocked).
+//
+// An append error does not prove the event was not stored: a connection that
+// drops after the commit reports an error for a committed event. Then
+// DeleteEmptyRoom finds last_seq > 0 and keeps the room (ErrRoomNotEmpty is
+// only logged), and the next Load, ListRooms or GetRoom rebuilds it from its
+// log (those load any room that is not cached). The caller got an
+// error for a room that exists; a retry of an alert joins it by its dedup key.
+// Caller must hold s.mu.
 func (s *Service) discardNewRoomLocked(ctx context.Context, roomID string) {
 	delete(s.rooms, roomID)
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -219,7 +227,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	}); err != nil {
 		s.discardNewRoomLocked(ctx, roomID)
 		s.mu.Unlock()
-		return RoomSnapshot{}, false, err
+		return RoomSnapshot{}, false, mapUnstorable(err)
 	}
 	if indexKey != "" {
 		st.dedupKey = indexKey

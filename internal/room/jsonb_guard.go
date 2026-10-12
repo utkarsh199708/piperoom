@@ -2,10 +2,13 @@ package room
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Postgres stores room.created in a jsonb column and the room title in a text
@@ -14,6 +17,30 @@ import (
 // NUL byte or invalid UTF-8. A body like that must be refused with a 400 before
 // any write, otherwise the room row is inserted and the event append then
 // fails on real Postgres (memstore accepts everything and hides this).
+//
+// Two layers cover this. The scanner below is the fast path for the string and
+// encoding classes (NUL, UTF-8, surrogates): it refuses before any write. It
+// does not try to model jsonb's numeric limits (a number like 1e131072 is
+// "value overflows numeric format"); those and anything else Postgres rejects
+// as bad input are caught when room.created is appended, and mapUnstorable
+// turns that error into the same 400. The room row written just before is
+// removed by discardNewRoomLocked.
+
+// unstorableCodes are the Postgres SQLSTATEs for "this value cannot be stored":
+// invalid text representation, unsupported Unicode escape, invalid byte
+// sequence, numeric value out of range.
+var unstorableCodes = map[string]bool{"22P02": true, "22P05": true, "22021": true, "22003": true}
+
+// mapUnstorable turns a store error caused by an unstorable value into a 400
+// validation error; any other error is returned unchanged. The Postgres message
+// is not echoed: it can quote the value.
+func mapUnstorable(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && unstorableCodes[pgErr.Code] {
+		return validation("alert body cannot be stored (value out of range or not valid text)")
+	}
+	return err
+}
 
 // checkJSONBStorable reports why raw cannot be stored in a jsonb column, or nil.
 // raw is JSON text (the alert body as received).
