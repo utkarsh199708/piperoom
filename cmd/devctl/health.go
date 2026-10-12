@@ -159,7 +159,7 @@ func healthChecks(src healthSource, plan healthPlan) []healthCheck {
 			}
 			last := "empty"
 			if !newest.IsZero() {
-				last = "newest updated_at " + newest.Format("15:04:05")
+				last = "newest updated_at " + newest.UTC().Format("15:04:05") + " UTC"
 			}
 			line := fmt.Sprintf("analytics.orders: %s, oldest unloaded change %s (limit %s)",
 				last, formatDuration(pending), formatDuration(maxSyncLag))
@@ -236,17 +236,27 @@ func runCheck(ctx context.Context, c healthCheck, timeout time.Duration) layerHe
 	}()
 	select {
 	case o := <-done:
+		// A check that returns ctx.Err() races with cctx.Done(); when the deadline
+		// has passed, report it the same way as the Done branch below.
+		if o.err != nil && cctx.Err() != nil {
+			return layerHealth{Layer: c.layer, OK: false, Line: ctxLine(ctx, timeout)}
+		}
 		if o.err != nil {
 			return layerHealth{Layer: c.layer, OK: false, Line: "error: " + o.err.Error()}
 		}
 		return layerHealth{Layer: c.layer, OK: o.ok, Line: o.line}
 	case <-cctx.Done():
-		// The parent context ending (Ctrl+C) is not the layer being slow.
-		if ctx.Err() != nil {
-			return layerHealth{Layer: c.layer, OK: false, Line: "cancelled"}
-		}
-		return layerHealth{Layer: c.layer, OK: false, Line: fmt.Sprintf("no answer within %s", timeout)}
+		return layerHealth{Layer: c.layer, OK: false, Line: ctxLine(ctx, timeout)}
 	}
+}
+
+// ctxLine says why a check did not finish. The parent context ending (Ctrl+C) is
+// a cancel, not a slow layer.
+func ctxLine(parent context.Context, timeout time.Duration) string {
+	if parent.Err() != nil {
+		return "cancelled"
+	}
+	return fmt.Sprintf("no answer within %s", timeout)
 }
 
 // warehousePendingFrom is the first updated_at not yet in the warehouse. The
@@ -337,19 +347,25 @@ func settleHealth(ctx context.Context, run func(io.Writer) error, every, limit t
 func printHealthAfterFix(ctx context.Context, s *stack) {
 	fmt.Fprintln(os.Stdout, "health after the fix:")
 	err := settleHealth(ctx, func(w io.Writer) error { return s.health(ctx, w) }, 5*time.Second, 90*time.Second, os.Stdout)
-	if err != nil && !errors.Is(err, errUnhealthy) {
+	if err != nil && !errors.Is(err, errUnhealthy) && !errors.Is(err, context.Canceled) {
 		s.log.Warn("health could not run", "err", err)
 	}
 	fmt.Fprintln(os.Stdout)
 }
 
 // health implements `devctl health`. It is read-only, so it takes no stack lock.
+// A run cut short by Ctrl+C is not an unhealthy pipeline: it returns the context
+// error (exit 2), which also stops settleHealth at once.
 func (s *stack) health(ctx context.Context, w io.Writer) error {
 	plan, err := s.loadHealthPlan()
 	if err != nil {
 		return err
 	}
-	return runHealth(ctx, healthChecks(s, plan), plan, w)
+	err = runHealth(ctx, healthChecks(s, plan), plan, w)
+	if errors.Is(err, errUnhealthy) && ctx.Err() != nil {
+		return fmt.Errorf("devctl: health: %w", ctx.Err())
+	}
+	return err
 }
 
 // loadHealthPlan reads the topic, consumer group and layer owners from dev/owners.yaml.

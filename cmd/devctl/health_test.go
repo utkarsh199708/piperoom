@@ -609,3 +609,53 @@ func TestHealthLoadedMicrosecondRowsNotPending(t *testing.T) {
 		t.Fatalf("loaded rows must not be pending, err = %v\n%s", err, out)
 	}
 }
+
+// TestHealthOneMicrosecondAfterWarehouseIsPending: a row 1 µs newer than the newest
+// loaded row is pending, so the warehouse layer ages it; the row at exactly the
+// newest loaded time is not.
+func TestHealthOneMicrosecondAfterWarehouseIsPending(t *testing.T) {
+	loaded := testBase.Add(-200 * time.Second)
+	tests := []struct {
+		name     string
+		rows     []time.Time
+		wantOK   bool
+		wantText string
+	}{
+		{"row at the newest loaded time", []time.Time{loaded}, true, ""},
+		{"row 1 us after the newest loaded time", []time.Time{loaded, loaded.Add(time.Microsecond)}, false, "oldest unloaded change 200 s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := healthyFake(t)
+			f.warehouse = loaded
+			f.topic = loaded
+			f.rows = tt.rows
+			out, _ := runFake(t, f, testPlan)
+			line := lineFor(t, out, "warehouse")
+			if ok := strings.HasPrefix(line, "OK"); ok != tt.wantOK {
+				t.Fatalf("warehouse OK = %v, want %v: %q", ok, tt.wantOK, line)
+			}
+			if tt.wantText != "" && !strings.Contains(line, tt.wantText) {
+				t.Fatalf("warehouse line %q does not contain %q", line, tt.wantText)
+			}
+		})
+	}
+}
+
+func TestExitCode(t *testing.T) {
+	tests := []struct {
+		cmd  string
+		want int
+	}{
+		{"health", 2}, // setup errors and cancelled runs
+		{"status", 1},
+		{"demo", 1},
+		{"break", 1},
+		{"", 1},
+	}
+	for _, tt := range tests {
+		if got := exitCode(tt.cmd); got != tt.want {
+			t.Errorf("exitCode(%q) = %d, want %d", tt.cmd, got, tt.want)
+		}
+	}
+}
