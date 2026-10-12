@@ -136,9 +136,9 @@ func (r *runner) run(ctx context.Context) error {
 	// Drain anything already waiting before the first turn so an early steer is
 	// part of the opening prompt.
 	initialInputs := r.drain(ctx)
-	recovered := r.handleActionResults(ctx, initialInputs)
-	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs)}
-	if recovered {
+	outcome := r.handleActionResults(ctx, initialInputs)
+	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs, outcome.notes)}
+	if outcome.holds() {
 		if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
 			return err
 		}
@@ -165,10 +165,10 @@ func (r *runner) run(ctx context.Context) error {
 			if len(inputs) == 0 {
 				return nil
 			}
-			recovered := r.handleActionResults(ctx, inputs)
-			messages = append(messages, r.humanMessage(inputs))
+			outcome := r.handleActionResults(ctx, inputs)
+			messages = appendUser(messages, r.inputBlocks(inputs, outcome.notes)...)
 			turns = 0
-			if recovered {
+			if outcome.holds() {
 				if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
 					return err
 				}
@@ -254,17 +254,17 @@ func (r *runner) run(ctx context.Context) error {
 			// message carries the tool results plus any human input that arrived
 			// while we were running.
 			inputs := r.drain(ctx)
-			recovered := r.handleActionResults(ctx, inputs)
+			outcome := r.handleActionResults(ctx, inputs)
 			blocks := append([]anthropic.BetaContentBlockParamUnion(nil), resultBlocks...)
-			blocks = append(blocks, r.humanBlocks(inputs)...)
+			blocks = append(blocks, r.inputBlocks(inputs, outcome.notes)...)
 			if len(blocks) == 0 {
 				blocks = append(blocks, anthropic.NewBetaTextBlock("Continue."))
 			}
-			messages = append(messages, anthropic.NewBetaUserMessage(blocks...))
+			messages = appendUser(messages, blocks...)
 			if len(inputs) > 0 {
 				turns = 0
 			}
-			if recovered {
+			if outcome.holds() {
 				if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
 					return err
 				}
@@ -316,14 +316,27 @@ func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMe
 	}
 }
 
-func (r *runner) initialMessage(inputs []HumanInput) anthropic.BetaMessageParam {
+func (r *runner) initialMessage(inputs []HumanInput, notes []string) anthropic.BetaMessageParam {
 	blocks := []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(firstUserMessage(r.alert))}
-	blocks = append(blocks, r.humanBlocks(inputs)...)
+	blocks = append(blocks, r.inputBlocks(inputs, notes)...)
 	return anthropic.NewBetaUserMessage(blocks...)
 }
 
-func (r *runner) humanMessage(inputs []HumanInput) anthropic.BetaMessageParam {
-	return anthropic.NewBetaUserMessage(r.humanBlocks(inputs)...)
+// inputBlocks renders one batch of human input and its verification notes, in
+// the order the model reads them: the inputs, then what verification found.
+func (r *runner) inputBlocks(inputs []HumanInput, notes []string) []anthropic.BetaContentBlockParamUnion {
+	return append(r.humanBlocks(inputs), verifyBlocks(notes)...)
+}
+
+// appendUser adds blocks to the history as a user turn. When the last message
+// is already a user turn, the blocks join it, so the request never carries two
+// consecutive user messages.
+func appendUser(messages []anthropic.BetaMessageParam, blocks ...anthropic.BetaContentBlockParamUnion) []anthropic.BetaMessageParam {
+	if n := len(messages); n > 0 && messages[n-1].Role == anthropic.BetaMessageParamRoleUser {
+		messages[n-1].Content = append(messages[n-1].Content, blocks...)
+		return messages
+	}
+	return append(messages, anthropic.NewBetaUserMessage(blocks...))
 }
 
 func (r *runner) humanBlocks(inputs []HumanInput) []anthropic.BetaContentBlockParamUnion {
@@ -399,11 +412,11 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 	if len(inputs) == 0 {
 		return true, nil
 	}
-	recovered := r.handleActionResults(ctx, inputs)
-	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.humanBlocks(inputs)...)
-	*messages = append(*messages, anthropic.NewBetaUserMessage(blocks...))
+	outcome := r.handleActionResults(ctx, inputs)
+	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.inputBlocks(inputs, outcome.notes)...)
+	*messages = appendUser(*messages, blocks...)
 	*turns = 0
-	if recovered {
+	if outcome.holds() {
 		return r.holdAfterRecovery(ctx, messages, turns)
 	}
 	return false, nil
@@ -413,20 +426,18 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 // model is not called again until something needs an answer, but the run must
 // stay alive: a later steer or comment still gets a reply. It waits on the
 // Inbox exactly like the idle path. It returns stop=false when the model should
-// run again (a human spoke, or a failed or unknown step needs investigating)
-// and stop=true when the room closed, with the error Run should return.
+// run again (a human spoke, or a step failed or is unknown) and stop=true when
+// the room closed, with the error Run should return.
 func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int) (bool, error) {
 	for {
 		inputs, err := r.waitForInput(ctx)
 		if err != nil {
 			return true, stopErr(err)
 		}
-		recovered := r.handleActionResults(ctx, inputs)
-		*messages = append(*messages, r.humanMessage(inputs))
+		outcome := r.handleActionResults(ctx, inputs)
+		*messages = appendUser(*messages, r.inputBlocks(inputs, outcome.notes)...)
 		*turns = 0
-		// Another recovery from an executor result alone keeps the hold. Any
-		// human input, or a step that did not confirm recovery, runs the model.
-		if !recovered || hasHumanInput(inputs) {
+		if !outcome.holds() {
 			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 			return false, nil
 		}

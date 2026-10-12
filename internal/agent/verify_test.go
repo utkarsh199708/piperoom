@@ -105,10 +105,59 @@ func newVerifyRunner(t *testing.T, model model, inbox Inbox, sink Sink, regTools
 		t.Fatalf("newRunner: %v", err)
 	}
 	r.model = model
+	r.clk = &fakeClock{} // settle and freshness waits are instant
 	if steps != nil {
 		r.proposals.record("p_1", steps)
 	}
 	return r
+}
+
+// recoveredSteps is a two-step proposal: restart the connector task, then
+// backfill the warehouse table. The last step is index 1.
+func recoveredSteps() []events.ProposalStep {
+	return []events.ProposalStep{
+		{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"connector":"pg-orders-connector","task":0}`), Description: "restart task 0"},
+		{Action: "wh_backfill", Layer: "warehouse", Params: json.RawMessage(`{"table":"analytics.orders","ts_column":"updated_at"}`)},
+	}
+}
+
+// pipelineMapTool answers pipeline_map the way the real tool does: a topology
+// graph whose sink_table nodes name the sink tables of the pipeline.
+func pipelineMapTool(sinks ...string) *fakeVerifyTool {
+	nodes := []map[string]any{{"kind": "source_table", "name": "public.orders", "layer": "postgres"}}
+	for _, s := range sinks {
+		nodes = append(nodes, map[string]any{"kind": "sink_table", "name": s, "layer": "warehouse"})
+	}
+	return &fakeVerifyTool{
+		name: "pipeline_map",
+		schema: map[string]any{
+			"type":                 "object",
+			"properties":           map[string]any{"pipeline_id": map[string]any{"type": "string"}},
+			"additionalProperties": false,
+			"required":             []string{"pipeline_id"},
+		},
+		result: tools.Result{Summary: "pipeline orders", Data: map[string]any{"pipeline_id": "orders", "nodes": nodes}},
+	}
+}
+
+// freshWarehouseTool reports rows updated just now, so the freshness check passes.
+func freshWarehouseTool() *fakeVerifyTool {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return &fakeVerifyTool{name: "warehouse_freshness", schema: whSchema(), result: tools.Result{
+		Summary: "newest=" + now + " (stale for 0s)",
+		Data:    map[string]any{"newest": now},
+	}}
+}
+
+// assertNoConsecutiveUsers fails when two user messages are next to each other
+// in a request, which the API would merge but which the loop must not send.
+func assertNoConsecutiveUsers(t *testing.T, msgs []anthropic.BetaMessageParam) {
+	t.Helper()
+	for i := 1; i < len(msgs); i++ {
+		if msgs[i-1].Role == anthropic.BetaMessageParamRoleUser && msgs[i].Role == anthropic.BetaMessageParamRoleUser {
+			t.Fatalf("two consecutive user messages at %d and %d", i-1, i)
+		}
+	}
 }
 
 func messageTexts(s *fakeSink) []string {
@@ -212,52 +261,64 @@ func TestVerifyChecksMapLayers(t *testing.T) {
 		{Action: "schema_set_compatibility", Layer: "schema-registry", Params: json.RawMessage(`{"subject":"x-value","level":"NONE"}`)},
 		{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"connector":"pg-orders-connector","task":0}`)},
 		{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"connector":"other-connector","task":0}`)},
+		{Action: "pg_something", Layer: "postgres", Params: json.RawMessage(`{}`)},
+		{Action: "wh_something", Layer: "warehouse", Params: json.RawMessage(`{"table":"analytics.orders","ts_column":"updated_at"}`)},
 	}
 	checks := verifyChecks(steps)
-	if len(checks) != 1 {
-		t.Fatalf("checks = %d, want 1 (schema-registry has no check, kafka-connect deduped)", len(checks))
+	// schema-registry has no check, kafka-connect is de-duplicated, and the
+	// warehouse is checked by the data-flow stage, not as a layer check.
+	if len(checks) != 2 {
+		t.Fatalf("checks = %d, want 2 (connect_status, pg_replication_slots)", len(checks))
 	}
-	if checks[0].name != "connect_status" {
-		t.Fatalf("check = %q, want connect_status", checks[0].name)
+	if checks[0].name != "connect_status" || checks[1].name != "pg_replication_slots" {
+		t.Fatalf("checks = %q, %q", checks[0].name, checks[1].name)
 	}
 	if got := string(checks[0].input); !strings.Contains(got, "pg-orders-connector") {
 		t.Fatalf("connect_status input should reuse the connector param, got %s", got)
 	}
-
-	// warehouse + postgres each add a check, but only up to the cap.
-	steps2 := []events.ProposalStep{
-		{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"connector":"c"}`)},
-		{Action: "pg_something", Layer: "postgres", Params: json.RawMessage(`{}`)},
-		{Action: "wh_something", Layer: "warehouse", Params: json.RawMessage(`{"table":"analytics.orders","ts_column":"updated_at"}`)},
+	if !checks[0].settle {
+		t.Fatal("connect_status must settle: it has to pass twice")
 	}
-	checks2 := verifyChecks(steps2)
-	if len(checks2) != maxVerifyChecks {
-		t.Fatalf("checks2 = %d, want %d", len(checks2), maxVerifyChecks)
-	}
-	for i, want := range []string{"connect_status", "pg_replication_slots", "warehouse_freshness"} {
-		if checks2[i].name != want {
-			t.Fatalf("checks2[%d] = %q, want %q", i, checks2[i].name, want)
-		}
-	}
-	if !checks2[2].retry {
-		t.Fatal("warehouse_freshness check must retry")
+	if checks[1].settle {
+		t.Fatal("pg_replication_slots must not settle")
 	}
 }
 
-func TestFollowupStep(t *testing.T) {
-	marker := events.ProposalStep{Description: "run only after check: restore BACKWARD"}
-	plain := events.ProposalStep{Description: "restart the task"}
-	if !isFollowupStep(marker) {
-		t.Fatal("step marked run-only-after-check must be detected as a follow-up")
+// A layer is marked seen only once a check was built for it, so a step with
+// unusable params does not hide a later usable step on the same layer.
+func TestVerifyChecksDedupeAfterSuccess(t *testing.T) {
+	steps := []events.ProposalStep{
+		{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"task":0}`)},
+		{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"connector":"pg-orders-connector","task":0}`)},
 	}
-	if isFollowupStep(plain) {
-		t.Fatal("ordinary step must not be a follow-up")
+	checks := verifyChecks(steps)
+	if len(checks) != 1 {
+		t.Fatalf("checks = %d, want 1: the second connect step has the connector", len(checks))
 	}
-	if !strings.Contains(followupLine(marker, true), "now safe") {
-		t.Fatalf("safe follow-up line = %q", followupLine(marker, true))
+	if got := string(checks[0].input); !strings.Contains(got, "pg-orders-connector") {
+		t.Fatalf("connect_status should use the connector from the usable step, got %s", got)
 	}
-	if !strings.Contains(followupLine(marker, false), "not safe") {
-		t.Fatalf("unsafe follow-up line = %q", followupLine(marker, false))
+}
+
+func TestConnectRecoveredRequiresEveryTaskRunning(t *testing.T) {
+	cases := []struct {
+		name string
+		res  tools.Result
+		want bool
+	}{
+		{"running with tasks", connectRecoveredResult(), true},
+		{"no tasks", tools.Result{Data: map[string]any{"state": "RUNNING", "tasks": []map[string]any{}}}, false},
+		{"one task failed", connectBrokenResult(), false},
+		{"one task paused", tools.Result{Data: map[string]any{"state": "RUNNING", "tasks": []map[string]any{{"state": "RUNNING"}, {"state": "PAUSED"}}}}, false},
+		{"connector paused", tools.Result{Data: map[string]any{"state": "PAUSED", "tasks": []map[string]any{{"state": "RUNNING"}}}}, false},
+		{"undecodable payload is never recovered", tools.Result{Summary: "pg-orders-connector: RUNNING"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := connectRecovered(c.res); got != c.want {
+				t.Fatalf("connectRecovered = %v, want %v", got, c.want)
+			}
+		})
 	}
 }
 
@@ -291,14 +352,11 @@ func TestVerifyAfterFixRecoveredEmitsDone(t *testing.T) {
 	inbox := &fakeInbox{
 		drains: [][]HumanInput{
 			nil,
-			lastActionResult("proposal p_1 step 0: restarted pg-orders-connector task 0 (state now RUNNING)"),
+			lastActionResult("proposal p_1 step 1: backfilled analytics.orders (newest row fresh)"),
 		},
 		waitErr: context.Canceled,
 	}
-	steps := []events.ProposalStep{
-		{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"connector":"pg-orders-connector","task":0}`), Description: "restart task 0"},
-	}
-	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect}, steps)
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
@@ -307,8 +365,9 @@ func TestVerifyAfterFixRecoveredEmitsDone(t *testing.T) {
 		t.Fatalf("expected agent.status done, got %v", sink.ofType(events.AgentStatus))
 	}
 	assertVerdict(t, messageTexts(sink), true)
-	if connect.calls != 1 {
-		t.Fatalf("expected 1 connect_status verification call, got %d", connect.calls)
+	// connect_status is read twice: a recovery must hold for settleWait.
+	if connect.calls != 2 {
+		t.Fatalf("expected 2 connect_status reads (settled), got %d", connect.calls)
 	}
 	// After recovery the model is not called again until a human speaks.
 	if len(model.calls) != 1 {
@@ -443,15 +502,12 @@ func TestVerifyAfterFixRecoveredThenSteerGetsReply(t *testing.T) {
 	inbox := &fakeInbox{
 		drains: [][]HumanInput{
 			nil,
-			lastActionResult("proposal p_1 step 0: restarted pg-orders-connector task 0 (state now RUNNING)"),
+			lastActionResult("proposal p_1 step 1: backfilled analytics.orders (newest row fresh)"),
 			{steer},
 		},
 		waitErr: context.Canceled,
 	}
-	steps := []events.ProposalStep{
-		{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"connector":"pg-orders-connector","task":0}`), Description: "restart task 0"},
-	}
-	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect}, steps)
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
@@ -466,6 +522,7 @@ func TestVerifyAfterFixRecoveredThenSteerGetsReply(t *testing.T) {
 	if !strings.Contains(messagesJSON(model.calls[1]), "is the lag back to normal?") {
 		t.Fatalf("the steer must reach the model after recovery: %s", messagesJSON(model.calls[1]))
 	}
+	assertNoConsecutiveUsers(t, model.calls[1])
 	var replied bool
 	for _, m := range messageTexts(sink) {
 		if m == "Lag is back to normal." {
@@ -474,40 +531,6 @@ func TestVerifyAfterFixRecoveredThenSteerGetsReply(t *testing.T) {
 	}
 	if !replied {
 		t.Fatalf("expected the reply to the steer after recovery, got %q", messageTexts(sink))
-	}
-}
-
-func TestVerifyAfterFixFollowupSafety(t *testing.T) {
-	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
-	model := &scriptedModel{}
-	sink := &fakeSink{}
-	inbox := &fakeInbox{
-		drains: [][]HumanInput{
-			nil,
-			lastActionResult("proposal p_1 step 1: done"),
-		},
-		waitErr: context.Canceled,
-	}
-	steps := []events.ProposalStep{
-		{Action: "connect_restart_task", Layer: "kafka-connect", Params: json.RawMessage(`{"connector":"pg-orders-connector","task":0}`), Description: "restart task 0"},
-		{Action: "schema_set_compatibility", Layer: "schema-registry", Params: json.RawMessage(`{"subject":"pg.public.orders-value","level":"BACKWARD"}`), Description: "run only after check: restore BACKWARD"},
-	}
-	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect}, steps)
-
-	if err := r.run(context.Background()); err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	if !hasStatus(sink, "done") {
-		t.Fatalf("expected agent.status done, got %v", sink.ofType(events.AgentStatus))
-	}
-	var sawSafe bool
-	for _, m := range messageTexts(sink) {
-		if strings.Contains(m, "run only after check: restore BACKWARD") && strings.Contains(m, "now safe") {
-			sawSafe = true
-		}
-	}
-	if !sawSafe {
-		t.Fatalf("expected the verdict to say the follow-up is now safe, got %q", messageTexts(sink))
 	}
 }
 
@@ -592,8 +615,9 @@ func TestVerifyAfterFixWarehouseFreshnessRetries(t *testing.T) {
 	steps := []events.ProposalStep{
 		{Action: "wh_backfill", Layer: "warehouse", Params: json.RawMessage(`{"table":"analytics.orders","ts_column":"updated_at"}`)},
 	}
-	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{wh}, steps)
-	r.clk = &fakeClock{} // instant retry waits
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{wh, pipelineMapTool("analytics.orders")}, steps)
+	clk := &fakeClock{} // instant retry waits
+	r.clk = clk
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)
@@ -604,4 +628,371 @@ func TestVerifyAfterFixWarehouseFreshnessRetries(t *testing.T) {
 	if wh.calls != freshnessRetries {
 		t.Fatalf("expected %d warehouse_freshness attempts, got %d", freshnessRetries, wh.calls)
 	}
+}
+
+// ---- round 2: same-batch inputs, verdicts for the model, data flow, settle ----
+
+// A batch that holds a recovered last step and a steer must run the model, so
+// the steer gets an answer, and the model is told the verdict and the outcome.
+func TestSameBatchRecoveryAndSteerRunsModel(t *testing.T) {
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
+		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"Waiting on the fix."}]}`),
+		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"Lag is back to normal."}]}`),
+	}}
+	sink := &fakeSink{}
+	steer := HumanInput{Kind: "steer", Actor: events.Actor{Name: "driver"}, Text: "is the lag back to normal?"}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil,
+			{
+				{Kind: "action_result", Text: "proposal p_1 step 1: backfilled analytics.orders", OK: okPtr(true)},
+				steer,
+			},
+		},
+		waitErr: context.Canceled,
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	assertVerdict(t, messageTexts(sink), true)
+	if len(model.calls) != 2 {
+		t.Fatalf("a steer in the same batch must run the model: got %d model calls, want 2", len(model.calls))
+	}
+	second := messagesJSON(model.calls[1])
+	if !strings.Contains(second, "is the lag back to normal?") {
+		t.Fatalf("the steer must reach the model: %s", second)
+	}
+	if !strings.Contains(second, "[verification] recovered") || !strings.Contains(second, "ok=true") {
+		t.Fatalf("the model must see the verdict and ok=true: %s", second)
+	}
+	var replied bool
+	for _, m := range messageTexts(sink) {
+		if m == "Lag is back to normal." {
+			replied = true
+		}
+	}
+	if !replied {
+		t.Fatalf("the steer must be answered, got %q", messageTexts(sink))
+	}
+	assertNoConsecutiveUsers(t, model.calls[1])
+}
+
+// A batch with a recovered last step of p_1 and a failed step of p_2 must run
+// the model: the failed step is news the model has to read.
+func TestSameBatchRecoveryAndFailedStepRunsModel(t *testing.T) {
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	model := &scriptedModel{}
+	sink := &fakeSink{}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil,
+			{
+				{Kind: "action_result", Text: "proposal p_1 step 1: backfilled analytics.orders", OK: okPtr(true)},
+				{Kind: "action_result", Text: "proposal p_2 step 0: connector rejected the change", OK: okPtr(false)},
+			},
+		},
+		waitErr: context.Canceled,
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
+	r.proposals.record("p_2", recoveredSteps())
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(model.calls) < 2 {
+		t.Fatalf("a failed step in the same batch must run the model: got %d model calls", len(model.calls))
+	}
+	if !strings.Contains(messagesJSON(model.calls[1]), "Fix step failed") {
+		t.Fatalf("the model must read the failed step: %s", messagesJSON(model.calls[1]))
+	}
+}
+
+// Inside the hold, a repeated recovered result neither runs the checks again,
+// nor emits done again, nor wakes the model.
+func TestHoldRepeatedRecoveredResultDoesNotRunModel(t *testing.T) {
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	model := &scriptedModel{}
+	sink := &fakeSink{}
+	last := "proposal p_1 step 1: backfilled analytics.orders"
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil,
+			lastActionResult(last),
+			lastActionResult(last),
+		},
+		waitErr: context.Canceled,
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(model.calls) != 1 {
+		t.Fatalf("a repeated recovered result must not run the model, got %d calls", len(model.calls))
+	}
+	if connect.calls != 2 {
+		t.Fatalf("the checks must run once (settled: 2 reads), got %d connect reads", connect.calls)
+	}
+	var done int
+	for _, e := range sink.ofType(events.AgentStatus) {
+		var p events.AgentStatusPayload
+		if json.Unmarshal(e.payload, &p) == nil && p.State == "done" {
+			done++
+		}
+	}
+	if done != 1 {
+		t.Fatalf("done must be emitted once, got %d", done)
+	}
+}
+
+// Inside the hold, a failed or unknown outcome must run the model.
+func TestHoldFailedOrUnknownResultRunsModel(t *testing.T) {
+	cases := []struct {
+		name string
+		ok   *bool
+	}{
+		{"failed", okPtr(false)},
+		{"unknown", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+			model := &scriptedModel{}
+			sink := &fakeSink{}
+			inbox := &fakeInbox{
+				drains: [][]HumanInput{
+					nil,
+					lastActionResult("proposal p_1 step 1: backfilled analytics.orders"),
+					actionResult("proposal p_1 step 0: restart task", c.ok),
+				},
+				waitErr: context.Canceled,
+			}
+			r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
+
+			if err := r.run(context.Background()); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if len(model.calls) < 2 {
+				t.Fatalf("a %s result in the hold must run the model, got %d calls", c.name, len(model.calls))
+			}
+		})
+	}
+}
+
+// An unknown outcome reaches the model as ok=unknown, with a verdict that says
+// recovery is not claimed.
+func TestModelSeesUnknownOutcome(t *testing.T) {
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	model := &scriptedModel{}
+	sink := &fakeSink{}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil,
+			actionResult("proposal p_1 step 1: backfilled analytics.orders", nil),
+		},
+		waitErr: context.Canceled,
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps())
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(model.calls) < 2 {
+		t.Fatalf("expected the model to read the unknown outcome, got %d calls", len(model.calls))
+	}
+	second := messagesJSON(model.calls[1])
+	if !strings.Contains(second, "ok=unknown") {
+		t.Fatalf("the model must see ok=unknown: %s", second)
+	}
+	if !strings.Contains(second, "[verification] not verified") {
+		t.Fatalf("the model must see the verdict for an unknown outcome: %s", second)
+	}
+	if connect.calls != 0 {
+		t.Fatalf("no checks may run for an unknown outcome, got %d", connect.calls)
+	}
+}
+
+// The connector must still be RUNNING after settleWait: a recovery needs two
+// reads, and a second read that fails is not a recovery.
+func TestConnectSettlesBeforeRecovery(t *testing.T) {
+	var reads int
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), runFn: func() (tools.Result, error) {
+		reads++
+		if reads == 1 {
+			return connectRecoveredResult(), nil
+		}
+		return connectBrokenResult(), nil
+	}}
+	wh := freshWarehouseTool()
+	model := &scriptedModel{}
+	sink := &fakeSink{}
+	inbox := &fakeInbox{
+		drains: [][]HumanInput{
+			nil,
+			lastActionResult("proposal p_1 step 1: backfilled analytics.orders"),
+		},
+		waitErr: context.Canceled,
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect, pipelineMapTool("analytics.orders"), wh}, recoveredSteps())
+	clk := &fakeClock{}
+	r.clk = clk
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	assertVerdict(t, messageTexts(sink), false)
+	if hasStatus(sink, "done") {
+		t.Fatal("a connector that fails on the second read must not be recovered")
+	}
+	if reads != 2 {
+		t.Fatalf("connect_status must be read twice, got %d", reads)
+	}
+	var slept bool
+	for _, d := range clk.durations() {
+		if d == settleWait {
+			slept = true
+		}
+	}
+	if !slept {
+		t.Fatalf("the settle pause %s was not taken; slept %v", settleWait, clk.durations())
+	}
+	if wh.calls != 0 {
+		t.Fatalf("the data-flow check must not run after a layer check fails, got %d reads", wh.calls)
+	}
+}
+
+// Recovery needs the data to flow: every sink table of the pipeline must be
+// known and fresh. Otherwise the verdict says so and never claims recovery.
+func TestDataFlowMustBeVerifiedForRecovery(t *testing.T) {
+	staleNewest := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339Nano)
+	stale := &fakeVerifyTool{name: "warehouse_freshness", schema: whSchema(), result: tools.Result{
+		Summary: "newest=" + staleNewest,
+		Data:    map[string]any{"newest": staleNewest},
+	}}
+	connect := func() *fakeVerifyTool {
+		return &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	}
+	cases := []struct {
+		name    string
+		tools   []tools.Tool
+		wantMsg string
+	}{
+		{"no sink tables", []tools.Tool{connect(), pipelineMapTool(), freshWarehouseTool()}, "has no sink tables"},
+		{"pipeline_map unavailable", []tools.Tool{connect(), freshWarehouseTool()}, "data flow not verified"},
+		{"sink table without a timestamp column", []tools.Tool{connect(), pipelineMapTool("analytics.customers"), freshWarehouseTool()}, "no timestamp column known for sink table analytics.customers"},
+		{"sink table stale", []tools.Tool{connect(), pipelineMapTool("analytics.orders"), stale}, "a sink table is stale"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			model := &scriptedModel{}
+			sink := &fakeSink{}
+			inbox := &fakeInbox{
+				drains: [][]HumanInput{
+					nil,
+					lastActionResult("proposal p_1 step 1: backfilled analytics.orders"),
+				},
+				waitErr: context.Canceled,
+			}
+			r := newVerifyRunner(t, model, inbox, sink, c.tools, recoveredSteps())
+
+			if err := r.run(context.Background()); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if hasStatus(sink, "done") {
+				t.Fatal("must not reach done when the data flow is not verified")
+			}
+			msgs := messageTexts(sink)
+			assertVerdict(t, msgs, false)
+			var found bool
+			for _, m := range msgs {
+				if strings.Contains(m, c.wantMsg) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("expected %q in the verdict, got %q", c.wantMsg, msgs)
+			}
+		})
+	}
+}
+
+// propose_fix with a placeholder risk, through the runner, is an is_error tool
+// result, and no proposal is stored.
+func TestRoomToolPlaceholderIsIsErrorResult(t *testing.T) {
+	reg := actions.NewRegistry()
+	if err := reg.Register(&fakeAction{name: "connect_restart_task", layer: "kafka-connect"}); err != nil {
+		t.Fatal(err)
+	}
+	proposals := &fakeProposals{id: "p_1"}
+	r, err := newRunner(Alert{}, Deps{
+		Tools:     tools.NewRegistry(),
+		Actions:   reg,
+		Inbox:     &fakeInbox{},
+		Sink:      &fakeSink{},
+		Proposals: proposals,
+		Logger:    discardLogger(),
+	}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.toolList = buildToolList(r.deps.Tools, newRoomTools(r.deps, r.proposals))
+	raw := json.RawMessage(`{"title":"restart","steps":[{"action":"connect_restart_task","params":{},"description":"restart"}],"risk":"<no value>","rollback":"restore"}`)
+	res := r.runRoomTool(context.Background(), toolUse{id: "tu_9", name: "propose_fix", input: raw})
+	if !res.isError {
+		t.Fatalf("expected is_error, got %q", res.content)
+	}
+	if proposals.created.Title != "" {
+		t.Fatal("no proposal may be stored")
+	}
+}
+
+// appendUser extends a trailing user turn and otherwise starts a new one, so a
+// request never carries two user messages in a row.
+func TestAppendUserExtendsTrailingUserTurn(t *testing.T) {
+	msgs := []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock("a"))}
+	msgs = appendUser(msgs, anthropic.NewBetaTextBlock("b"))
+	if len(msgs) != 1 || len(msgs[0].Content) != 2 {
+		t.Fatalf("trailing user turn must be extended, got %d messages", len(msgs))
+	}
+	msgs = append(msgs, anthropic.BetaMessageParam{
+		Role:    anthropic.BetaMessageParamRoleAssistant,
+		Content: []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock("c")},
+	})
+	msgs = appendUser(msgs, anthropic.NewBetaTextBlock("d"))
+	if len(msgs) != 3 {
+		t.Fatalf("after an assistant turn a new user turn is added, got %d messages", len(msgs))
+	}
+	assertNoConsecutiveUsers(t, msgs)
+}
+
+// The max-turns pause appends the steer to the trailing tool-result turn, so the
+// next request has no two user messages in a row.
+func TestMaxTurnsPathKeepsUserTurnsAlternating(t *testing.T) {
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	model := &scriptedModel{turns: []anthropic.BetaMessage{
+		mustMessage(t, `{"stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu1","name":"connect_status","input":{"why":"check connect","connector":"pg-orders-connector"}}]}`),
+		mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"Still checking."}]}`),
+	}}
+	sink := &fakeSink{}
+	steer := HumanInput{Kind: "steer", Actor: events.Actor{Name: "driver"}, Text: "keep going"}
+	inbox := &fakeInbox{
+		drains:  [][]HumanInput{nil, nil, {steer}},
+		waitErr: context.Canceled,
+	}
+	r := newVerifyRunner(t, model, inbox, sink, []tools.Tool{connect}, nil)
+	r.opts.MaxTurns = 1
+
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(model.calls) != 2 {
+		t.Fatalf("expected 2 model calls around the max-turns pause, got %d", len(model.calls))
+	}
+	if !strings.Contains(messagesJSON(model.calls[1]), "keep going") {
+		t.Fatalf("the steer must reach the model after the pause: %s", messagesJSON(model.calls[1]))
+	}
+	assertNoConsecutiveUsers(t, model.calls[1])
 }

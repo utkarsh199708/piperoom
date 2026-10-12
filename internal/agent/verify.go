@@ -10,27 +10,36 @@ import (
 	"sync"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go"
+
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
 
-// verify-after-fix: once the last step of a proposal has run, the agent
-// re-checks the layers the proposal touched with read tools before declaring
-// recovery. The room delivers each executed step as a
-// HumanInput{Kind:"action_result"} whose Text is "proposal <id> step <n>:
-// <output>" (see internal/room on the A5 branch). Because the agent created the
-// proposal itself, it can match that text back to the proposal it proposed and
-// know whether n is the last step.
+// verify-after-fix: once the last step of a proposal has succeeded, the agent
+// re-checks the pipeline before it claims recovery. The room delivers each
+// executed step as a HumanInput{Kind:"action_result"} whose Text is "proposal
+// <id> step <n>: <output>" and whose OK says whether the step succeeded (see
+// internal/room). Because the agent created the proposal itself, it can match
+// that text back to the proposal and know whether n is the last step.
+//
+// Recovery needs two things. The layer checks of the touched layers must pass,
+// and the data must flow end to end: every sink table of the alert's pipeline
+// must be fresh. A pipeline with no known sink table, or a sink table whose
+// timestamp column is not known, is "data flow not verified" and never counts
+// as recovered.
 
 const (
-	// maxVerifyChecks bounds the verification pass so one fix never triggers an
-	// unbounded run of read tools.
-	maxVerifyChecks = 3
 	// freshnessRetries is the total number of warehouse_freshness attempts
 	// (including the first) before giving up on newer rows arriving.
 	freshnessRetries = 3
 	// verifyEvidenceBytes caps one tool summary quoted in the verdict message.
 	verifyEvidenceBytes = 500
+	// verifyTag opens every verification line given to the model, so the model
+	// can tell a verdict from ordinary input.
+	verifyTag = "[verification] "
+	// recoveredHead opens the verdict of a proposal whose checks all passed.
+	recoveredHead = "recovered: every layer check passed and data flow is verified.\n"
 )
 
 var (
@@ -40,22 +49,27 @@ var (
 	// warehouseFreshLimit is the maximum age a warehouse row may have for the
 	// warehouse check to count as recovered. A var so tests can widen it.
 	warehouseFreshLimit = 15 * time.Minute
+	// settleWait is the pause between the two connector reads that a recovery
+	// needs, so a connector that only just came back is not counted as healthy.
+	// A var so tests can shrink it.
+	settleWait = 5 * time.Second
 )
-
-// followupMarker marks a proposal step as a follow-up that must run only after
-// the pipeline is confirmed recovered (for example restoring BACKWARD
-// compatibility). The model writes it into the step description.
-const followupMarker = "run only after check"
 
 // proposalRecord is what the agent remembers about a proposal it created, so a
 // later action_result can be matched to its steps and layers.
 type proposalRecord struct {
 	id    string
 	steps []events.ProposalStep
+	// verified is set once the verdict for the last step is decided, and
+	// recovered holds that verdict. A repeated last-step result reuses it.
+	verified  bool
+	recovered bool
 }
 
-// proposalTracker remembers the proposals the agent created this run. It is
-// per-runner state, never global.
+// proposalTracker remembers the proposals the agent created during this run. It
+// is per-runner state, never global. It does not survive a restart: after a
+// restart the agent has no record of earlier proposals, so their action results
+// are not verified (the room waits for a steer after a restart).
 type proposalTracker struct {
 	mu   sync.Mutex
 	byID map[string]proposalRecord
@@ -84,6 +98,22 @@ func (t *proposalTracker) get(id string) (proposalRecord, bool) {
 	return rec, ok
 }
 
+// markVerified stores the verdict for a proposal's last step.
+func (t *proposalTracker) markVerified(id string, recovered bool) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rec, ok := t.byID[id]
+	if !ok {
+		return
+	}
+	rec.verified = true
+	rec.recovered = recovered
+	t.byID[id] = rec
+}
+
 // parseActionResult splits the room's action_result text back into its parts.
 func parseActionResult(text string) (id string, step int, ok bool) {
 	rest, found := strings.CutPrefix(text, "proposal ")
@@ -105,71 +135,97 @@ func parseActionResult(text string) (id string, step int, ok bool) {
 	return id, n, true
 }
 
-// handleActionResults runs verify-after-fix for every action_result in inputs.
-// It reports whether any of them confirmed recovery (the done status has then
-// already been emitted). It never ends the run: a caller that gets true holds
-// for the next human input (see holdAfterRecovery).
-func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) bool {
-	recovered := false
+// actionOutcome is what a batch of inputs means for the loop.
+type actionOutcome struct {
+	// recovered is true when a last step is verified as recovered in this batch,
+	// or was verified as recovered before (a repeat).
+	recovered bool
+	// needsModel is true when the model must read this batch: a person spoke,
+	// or a step's outcome is failed or unknown.
+	needsModel bool
+	// notes are the [verification] lines for the model, to be sent in the same
+	// user message as the inputs they judge.
+	notes []string
+}
+
+// holds reports whether the run should wait for human input instead of calling
+// the model: the pipeline is recovered and nothing in the batch needs a turn.
+func (o actionOutcome) holds() bool {
+	return o.recovered && !o.needsModel
+}
+
+// handleActionResults runs verify-after-fix for every input in the batch. The
+// done status is emitted by verifyActionResult when a recovery is first
+// confirmed. It never ends the run: callers use holds() to decide whether to
+// wait for human input.
+func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) actionOutcome {
+	var out actionOutcome
+	out.needsModel = hasHumanInput(inputs)
 	for _, in := range inputs {
 		if in.Kind != "action_result" {
 			continue
 		}
-		if r.verifyActionResult(ctx, in) {
-			recovered = true
-		}
+		one := r.verifyActionResult(ctx, in)
+		out.recovered = out.recovered || one.recovered
+		out.needsModel = out.needsModel || one.needsModel
+		out.notes = append(out.notes, one.notes...)
 	}
-	return recovered
+	return out
 }
 
-// verifyActionResult handles one action_result input. It returns true only when
-// the input was a successful last step of a tracked proposal and the pipeline
-// was confirmed recovered, in which case the done status has already been
-// emitted. Recovery is verified only from OK == true: a failed step is reported
-// and a nil OK (unknown outcome) is never turned into a recovery claim.
-func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) bool {
+// verifyActionResult handles one action_result input. Recovery is verified only
+// from OK == true on the last step of a tracked proposal. A failed step is
+// reported and the model runs; an unknown outcome is never turned into a
+// recovery claim.
+func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOutcome {
 	id, step, parsed := parseActionResult(in.Text)
-	if in.OK == nil {
-		return false
-	}
-	if !*in.OK {
+	switch {
+	case in.OK == nil:
+		return actionOutcome{needsModel: true, notes: []string{verifyTag + unknownOutcomeText(id, step, parsed)}}
+	case !*in.OK:
 		r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: failedStepText(id, step, parsed)})
-		return false
+		return actionOutcome{needsModel: true, notes: []string{verifyTag + failedStepText(id, step, parsed)}}
 	}
 	if !parsed {
-		return false
+		return actionOutcome{}
 	}
 	rec, ok := r.proposals.get(id)
 	if !ok {
 		r.log.Warn("agent: action_result for a proposal the agent did not create", "proposal", id)
-		return false
+		return actionOutcome{}
 	}
 	if step != len(rec.steps)-1 {
 		// Not the last step yet: no verification, the normal loop continues.
-		return false
+		return actionOutcome{}
 	}
-	recovered, evidence := r.verifyProposal(ctx, rec)
-
-	var b strings.Builder
-	if recovered {
-		b.WriteString("recovered: ")
-	} else {
-		b.WriteString("NOT recovered: ")
-	}
-	b.WriteString(evidence)
-	for _, s := range rec.steps {
-		if isFollowupStep(s) {
-			b.WriteString("\n")
-			b.WriteString(followupLine(s, recovered))
+	if rec.verified {
+		// A repeated last-step result never runs the checks again and never
+		// emits done again; it reports the verdict already reached.
+		return actionOutcome{
+			recovered: rec.recovered,
+			notes:     []string{verifyTag + "already verified: " + verdictWord(rec.recovered) + "; no checks were run again"},
 		}
 	}
-	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: b.String()})
 
-	if !recovered {
-		return false
+	recovered, evidence, head := r.verifyProposal(ctx, rec)
+	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: head + evidence})
+	r.proposals.markVerified(id, recovered)
+	out := actionOutcome{
+		recovered: recovered,
+		notes:     []string{verifyTag + head + wrapToolOutput("verify", "", evidence)},
 	}
-	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "done", Detail: "pipeline recovered"})
-	return true
+	if recovered {
+		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "done", Detail: "pipeline recovered"})
+	}
+	return out
+}
+
+// verdictWord names a stored verdict for the model.
+func verdictWord(recovered bool) string {
+	if recovered {
+		return "recovered"
+	}
+	return "NOT recovered"
 }
 
 // failedStepText tells the room a fix step did not succeed. Recovery is not
@@ -181,23 +237,42 @@ func failedStepText(id string, step int, parsed bool) string {
 	return fmt.Sprintf("Fix step failed: proposal %q step %d did not succeed. I have not verified recovery and will keep investigating.", id, step)
 }
 
-// verifyProposal runs the layer checks for a proposal and returns whether every
-// check passed, plus one evidence line per check joined by newlines.
-func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) (bool, string) {
-	checks := verifyChecks(rec.steps)
-	if len(checks) == 0 {
-		return false, "no verification checks available for the touched layers"
+// unknownOutcomeText tells the model a step's outcome is unknown, so it does not
+// assume the step worked.
+func unknownOutcomeText(id string, step int, parsed bool) string {
+	if !parsed {
+		return "not verified: a step outcome is unknown; recovery is not claimed."
 	}
-	lines := make([]string, 0, len(checks))
-	all := true
-	for _, c := range checks {
+	return fmt.Sprintf("not verified: the outcome of proposal %q step %d is unknown; recovery is not claimed.", id, step)
+}
+
+// verifyProposal runs the layer checks and then the data-flow check. It returns
+// whether recovery is confirmed, one evidence line per check, and the verdict
+// head that opens the room message and the model note. The data-flow check runs
+// only after the layer checks pass.
+func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) (bool, string, string) {
+	var lines []string
+	layersOK := true
+	for _, c := range verifyChecks(rec.steps) {
 		ok, line := r.runVerifyCheck(ctx, c)
-		if !ok {
-			all = false
-		}
+		layersOK = layersOK && ok
 		lines = append(lines, c.name+": "+line)
 	}
-	return all, strings.Join(lines, "\n")
+	if !layersOK {
+		lines = append(lines, "data flow: not checked because a layer check did not pass")
+		return false, strings.Join(lines, "\n"), "NOT recovered: a layer check did not pass.\n"
+	}
+
+	flow := r.verifyDataFlow(ctx, rec)
+	lines = append(lines, flow.lines...)
+	evidence := strings.Join(lines, "\n")
+	switch {
+	case !flow.verified:
+		return false, evidence, "NOT recovered: data flow not verified.\n"
+	case !flow.fresh:
+		return false, evidence, "NOT recovered: data flow did not pass; a sink table is stale.\n"
+	}
+	return true, evidence, recoveredHead
 }
 
 // verifyCheck is one read-tool check in the verification pass.
@@ -205,12 +280,17 @@ type verifyCheck struct {
 	name  string
 	input json.RawMessage
 	judge func(tools.Result) bool
+	// retry repeats the read a bounded number of times before failing.
 	retry bool
+	// settle makes a passing check count only if it still passes after
+	// settleWait, so a transient healthy state does not count as recovery.
+	settle bool
 }
 
 // verifyChecks maps the layers a proposal touched to read-tool checks, in step
-// order and de-duplicated by layer, capped at maxVerifyChecks. Layers without a
-// known recovery check contribute none.
+// order and de-duplicated by layer. A layer is marked seen only once a check was
+// built for it, so a later step on the same layer with usable parameters still
+// gets its check. Layers without a known check contribute none.
 func verifyChecks(steps []events.ProposalStep) []verifyCheck {
 	seen := map[string]bool{}
 	var checks []verifyCheck
@@ -218,21 +298,19 @@ func verifyChecks(steps []events.ProposalStep) []verifyCheck {
 		if seen[s.Layer] {
 			continue
 		}
-		seen[s.Layer] = true
 		c, ok := checkForStep(s)
 		if !ok {
 			continue
 		}
+		seen[s.Layer] = true
 		checks = append(checks, c)
-		if len(checks) >= maxVerifyChecks {
-			break
-		}
 	}
 	return checks
 }
 
 // checkForStep returns the recovery check for one proposal step's layer, or ok
 // false when the layer has no check or the step carries no usable parameters.
+// The warehouse layer is not here: its freshness is part of the data-flow check.
 func checkForStep(s events.ProposalStep) (verifyCheck, bool) {
 	switch s.Layer {
 	case "kafka-connect":
@@ -240,19 +318,106 @@ func checkForStep(s events.ProposalStep) (verifyCheck, bool) {
 		if !ok {
 			return verifyCheck{}, false
 		}
-		return verifyCheck{name: "connect_status", input: jsonObject("connector", conn), judge: connectRecovered}, true
+		return verifyCheck{name: "connect_status", input: jsonObject("connector", conn), judge: connectRecovered, settle: true}, true
 	case "postgres":
 		return verifyCheck{name: "pg_replication_slots", input: json.RawMessage(`{}`), judge: pgSlotsRecovered}, true
-	case "warehouse":
-		table, ok1 := stringParam(s.Params, "table")
-		ts, ok2 := stringParam(s.Params, "ts_column")
-		if !ok1 || !ok2 {
-			return verifyCheck{}, false
-		}
-		return verifyCheck{name: "warehouse_freshness", input: jsonObject("table", table, "ts_column", ts), judge: warehouseRecovered, retry: true}, true
 	default:
 		return verifyCheck{}, false
 	}
+}
+
+// flowResult is the outcome of the data-flow check.
+type flowResult struct {
+	// verified is true when every sink table of the pipeline could be checked:
+	// the pipeline's sink tables are known and each has a timestamp column.
+	verified bool
+	// fresh is true when every sink table passed its freshness check.
+	fresh bool
+	// lines is the evidence, one line per sink table or per reason it was not
+	// verified.
+	lines []string
+}
+
+// verifyDataFlow checks that every sink table of the alert's pipeline is fresh,
+// with the bounded freshness retry. It needs the sink tables from pipeline_map
+// and each table's timestamp column from the proposal's warehouse step for that
+// table. Without either it reports the data flow as not verified.
+func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord) flowResult {
+	pipeline := r.alert.PipelineID
+	if pipeline == "" {
+		return flowResult{lines: []string{"data flow not verified: the alert names no pipeline"}}
+	}
+	sinks, err := r.sinkTables(ctx, pipeline)
+	if err != nil {
+		return flowResult{lines: []string{"data flow not verified: " + err.Error()}}
+	}
+	if len(sinks) == 0 {
+		return flowResult{lines: []string{"data flow not verified: pipeline " + pipeline + " has no sink tables"}}
+	}
+
+	res := flowResult{verified: true, fresh: true}
+	for _, table := range sinks {
+		ts, ok := sinkTSColumn(rec.steps, table)
+		if !ok {
+			res.verified = false
+			res.fresh = false
+			res.lines = append(res.lines, "data flow not verified: no timestamp column known for sink table "+table)
+			return res
+		}
+		c := verifyCheck{
+			name:  "warehouse_freshness",
+			input: jsonObject("table", table, "ts_column", ts),
+			judge: warehouseRecovered,
+			retry: true,
+		}
+		ok, line := r.runVerifyCheck(ctx, c)
+		res.fresh = res.fresh && ok
+		res.lines = append(res.lines, "data flow "+table+": "+line)
+	}
+	return res
+}
+
+// sinkTables reads the sink tables of one pipeline from pipeline_map. It is a
+// read tool like any other, so the call is traced in the room.
+func (r *runner) sinkTables(ctx context.Context, pipelineID string) ([]string, error) {
+	res, err := r.runVerifyTool(ctx, "pipeline_map", jsonObject("pipeline_id", pipelineID))
+	if err != nil {
+		return nil, err
+	}
+	var g struct {
+		Nodes []struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		} `json:"nodes"`
+	}
+	if err := decodeData(res.Data, &g); err != nil {
+		return nil, fmt.Errorf("pipeline_map gave no readable topology: %w", err)
+	}
+	var out []string
+	for _, n := range g.Nodes {
+		if n.Kind == "sink_table" && n.Name != "" {
+			out = append(out, n.Name)
+		}
+	}
+	return out, nil
+}
+
+// sinkTSColumn returns the timestamp column the proposal names for one warehouse
+// table, if any step names that table.
+func sinkTSColumn(steps []events.ProposalStep, table string) (string, bool) {
+	for _, s := range steps {
+		if s.Layer != "warehouse" {
+			continue
+		}
+		t, ok := stringParam(s.Params, "table")
+		if !ok || t != table {
+			continue
+		}
+		if ts, ok := stringParam(s.Params, "ts_column"); ok {
+			return ts, true
+		}
+	}
+	return "", false
 }
 
 // decodeData round-trips a tool's Data through JSON so judges can read it
@@ -268,8 +433,9 @@ func decodeData(data any, v any) error {
 	return json.Unmarshal(b, v)
 }
 
-// connectRecovered reports whether a connect_status result shows a running
-// connector with no failed tasks.
+// connectRecovered reports whether a connect_status result shows a connector
+// that is RUNNING with at least one task, and every task RUNNING. A payload that
+// cannot be decoded is never a recovery: the summary text is not judged.
 func connectRecovered(res tools.Result) bool {
 	var d struct {
 		State string `json:"state"`
@@ -277,18 +443,18 @@ func connectRecovered(res tools.Result) bool {
 			State string `json:"state"`
 		} `json:"tasks"`
 	}
-	if err := decodeData(res.Data, &d); err == nil && d.State != "" {
-		if d.State != "RUNNING" {
+	if err := decodeData(res.Data, &d); err != nil {
+		return false
+	}
+	if d.State != "RUNNING" || len(d.Tasks) == 0 {
+		return false
+	}
+	for _, t := range d.Tasks {
+		if t.State != "RUNNING" {
 			return false
 		}
-		for _, t := range d.Tasks {
-			if t.State == "FAILED" {
-				return false
-			}
-		}
-		return true
 	}
-	return strings.Contains(res.Summary, "RUNNING") && !strings.Contains(res.Summary, "FAILED")
+	return true
 }
 
 // pgSlotsRecovered reports whether pg_replication_slots shows at least one
@@ -324,10 +490,24 @@ func warehouseRecovered(res tools.Result) bool {
 	return time.Since(ts) <= warehouseFreshLimit
 }
 
-// runVerifyCheck runs one check, retrying warehouse freshness a bounded number
-// of times. It returns whether the check passed and the evidence line (a tool
-// summary, or an error message).
+// runVerifyCheck runs one check. A settling check must also pass a second read
+// after settleWait. It returns whether the check passed and an evidence line.
 func (r *runner) runVerifyCheck(ctx context.Context, c verifyCheck) (bool, string) {
+	ok, line := r.attemptCheck(ctx, c)
+	if !ok || !c.settle {
+		return ok, line
+	}
+	if err := r.clk.Sleep(ctx, settleWait); err != nil {
+		return false, "settling: " + err.Error()
+	}
+	ok, again := r.attemptCheck(ctx, c)
+	return ok, line + "; read again after " + settleWait.String() + ": " + again
+}
+
+// attemptCheck reads one check, retrying a bounded number of times when the
+// check asks for it. It returns whether the check passed and the evidence line
+// (a tool summary, or an error message).
+func (r *runner) attemptCheck(ctx context.Context, c verifyCheck) (bool, string) {
 	attempts := 1
 	if c.retry {
 		attempts = freshnessRetries
@@ -434,18 +614,14 @@ func jsonObject(kv ...string) json.RawMessage {
 	return b
 }
 
-// isFollowupStep reports whether a proposal step is marked to run only after
-// the pipeline is confirmed recovered.
-func isFollowupStep(s events.ProposalStep) bool {
-	return strings.Contains(strings.ToLower(s.Description), followupMarker)
-}
-
-// followupLine states whether a follow-up step is now safe.
-func followupLine(s events.ProposalStep, safe bool) string {
-	if safe {
-		return fmt.Sprintf("follow-up %q: now safe", s.Description)
+// verifyBlocks renders the verification notes of one batch as text blocks, for
+// the same user message as the inputs they judge.
+func verifyBlocks(notes []string) []anthropic.BetaContentBlockParamUnion {
+	blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(notes))
+	for _, n := range notes {
+		blocks = append(blocks, anthropic.NewBetaTextBlock(n))
 	}
-	return fmt.Sprintf("follow-up %q: not safe", s.Description)
+	return blocks
 }
 
 // clipLine caps a tool summary quoted in the verdict message at
