@@ -171,3 +171,52 @@ lag 1471 → 0, warehouse catches up (3495 → 5295 rows, stale 0 s).
 Do **not** use `docker compose up -d devconsumer` here: `up` recreates any container that does not
 match the compose file (we hit this once — it recreated Postgres and killed the running `devctl load`).
 `compose start` only starts the stopped container.
+
+---
+
+## 7. `connector-auth` — permission denied on the publication (matches C7 `publication-permission-denied`)
+
+A real Postgres permission break, aligned with the C7 eval scenario
+`evals/scenarios/publication-permission-denied.yaml` (same symptom wording).
+
+**Break (`devctl break connector-auth`):** a DBA moves `public.orders` ownership to a dedicated
+role (`orders_owner`), and the connector is pointed at the least-privilege role `debezium`
+(non-superuser). Concretely, `break` runs:
+
+```
+CREATE ROLE debezium LOGIN REPLICATION PASSWORD 'piperoom-dev'   (if absent)
+CREATE ROLE orders_owner LOGIN                                   (if absent)
+GRANT CONNECT ON DATABASE orders TO debezium
+GRANT USAGE ON SCHEMA public TO debezium
+GRANT SELECT ON public.orders TO debezium
+ALTER PUBLICATION dbz_publication OWNER TO debezium
+ALTER TABLE public.orders OWNER TO orders_owner
+```
+then re-registers the connector with `database.user=debezium` and restarts task 0.
+
+**Root cause:** with `publication.autocreate.mode=filtered`, Debezium 3.2 runs
+`ALTER PUBLICATION dbz_publication SET TABLE "public"."orders"` on every task start, which requires
+owning the table. `debezium` owns the publication but not the table, so the task fails with
+`must be owner of table orders`. The superuser `piperoom` would bypass that check, which is why the
+connector must be switched to the non-superuser `debezium` for the break to bite.
+
+**Real error text** (observed in `docker logs piperoom-dev-connect-1`, repeated on every retry):
+```
+org.apache.kafka.connect.errors.ConnectException: Unable to update filtered publication dbz_publication for "public"."orders"
+Caused by: org.postgresql.util.PSQLException: ERROR: must be owner of table orders
+```
+This is exactly the trace C7's `connect_status` recording shows.
+
+**Symptoms** (observed 2026-10-12). Note Debezium treats the failure as *retriable*, so Kafka
+Connect still reports `tasks 0=RUNNING` — but the task crash-loops and streaming never starts:
+```
+connector   pg-orders-connector: RUNNING, tasks 0=RUNNING   ← crash-looping; the error is in the connect log
+slot        debezium_orders active=false retained=6906 kB   ← slot INACTIVE (never starts streaming)
+consumer    order-sync: state Stable, members 1, total lag 0
+warehouse   analytics.orders: stale                          ← no new records flow
+```
+
+**Fix (`devctl fix connector-auth`):** give ownership back and restart the task:
+`ALTER TABLE public.orders OWNER TO piperoom`, `ALTER PUBLICATION dbz_publication OWNER TO piperoom`,
+re-register the connector with `database.user=piperoom`, restart task 0. The slot goes back
+`active=true` and the next insert reaches the warehouse (verified: 103 → 104 rows, stale 9 s).

@@ -136,6 +136,27 @@ func (s *stack) registerConnector(ctx context.Context) error {
 	return err
 }
 
+// registerConnectorUser re-registers the connector with database.user/password
+// overridden, so a scenario can point the connector at a different role.
+func (s *stack) registerConnectorUser(ctx context.Context, user, pass string) error {
+	body, err := os.ReadFile(filepath.Join(s.root, "dev", "connectors", connectorName+".json"))
+	if err != nil {
+		return fmt.Errorf("devctl: read connector config: %w", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(body, &cfg); err != nil {
+		return fmt.Errorf("devctl: decode connector config: %w", err)
+	}
+	cfg["database.user"] = user
+	cfg["database.password"] = pass
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("devctl: encode connector config: %w", err)
+	}
+	_, err = s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/config", b, http.StatusOK, http.StatusCreated)
+	return err
+}
+
 type connectorStatus struct {
 	Connector struct {
 		State string `json:"state"`

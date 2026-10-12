@@ -40,6 +40,28 @@ func splitOwner(args []string) (owner string, rest []string, err error) {
 	return owner, args, nil
 }
 
+// acquireLock takes the shared stack lock for owner (re-entrant if already
+// held by the same owner).
+func acquireLock(owner string) error {
+	lk := stacklock.New(stacklock.Path())
+	rec, err := lk.Acquire(owner)
+	if err != nil {
+		return fmt.Errorf("devctl: lock: %w", err)
+	}
+	fmt.Printf("stack locked by %q (since %s)\n", rec.Owner, rec.At.Format(time.RFC3339))
+	return nil
+}
+
+// releaseLock releases the shared stack lock for owner.
+func releaseLock(owner string) error {
+	lk := stacklock.New(stacklock.Path())
+	if err := lk.Release(owner); err != nil {
+		return fmt.Errorf("devctl: unlock: %w", err)
+	}
+	fmt.Printf("stack lock released by %q\n", owner)
+	return nil
+}
+
 // requireLock refuses to run a mutating command unless owner currently holds
 // the shared stack lock. The returned error always names the current holder.
 func requireLock(owner string) error {

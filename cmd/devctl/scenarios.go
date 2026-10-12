@@ -21,6 +21,7 @@ var scenarios = map[string]scenario{
 	"long-transaction": {breakLongTransaction, fixLongTransaction},
 	"slot-inactive":    {breakSlotInactive, fixSlotInactive},
 	"consumer-lag":     {breakConsumerLag, fixConsumerLag},
+	"connector-auth":   {breakConnectorAuth, fixConnectorAuth},
 }
 
 // schema-change: a migration changes orders.amount from integer to
@@ -307,6 +308,75 @@ func fixConsumerLag(ctx context.Context, s *stack) error {
 		return err
 	}
 	s.log.Info("fixed: devconsumer running, order-sync lag 0, warehouse catching up")
+	return nil
+}
+
+// connector-auth: a DBA moved ownership of public.orders to orders_owner and
+// the connector now authenticates as the least-privilege role `debezium`
+// (non-superuser). With publication.autocreate.mode=filtered Debezium runs
+// `ALTER PUBLICATION dbz_publication SET TABLE "public"."orders"` on every task
+// start, which requires owning the table. debezium owns the publication but not
+// the table, so task 0 fails with "must be owner of table orders"; streaming
+// never starts, so the slot goes inactive and the warehouse goes stale.
+func breakConnectorAuth(ctx context.Context, s *stack) error {
+	if _, err := s.psql(ctx, "orders",
+		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'debezium') THEN EXECUTE 'CREATE ROLE debezium LOGIN REPLICATION PASSWORD ''piperoom-dev'''; END IF; END $$",
+		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'orders_owner') THEN EXECUTE 'CREATE ROLE orders_owner LOGIN'; END IF; END $$",
+		"GRANT CONNECT ON DATABASE orders TO debezium",
+		"GRANT USAGE ON SCHEMA public TO debezium",
+		"GRANT SELECT ON public.orders TO debezium",
+		"ALTER PUBLICATION dbz_publication OWNER TO debezium",
+		"ALTER TABLE public.orders OWNER TO orders_owner"); err != nil {
+		return err
+	}
+	if err := s.registerConnectorUser(ctx, "debezium", "piperoom-dev"); err != nil {
+		return err
+	}
+	if err := s.restartTask(ctx, 0); err != nil {
+		return err
+	}
+	// The task reports RUNNING but crash-loops on the publication update; the
+	// observable symptom is the slot going inactive (streaming never starts).
+	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
+		active, err := s.slotActive(ctx)
+		if err != nil {
+			return false, nil
+		}
+		return !active, nil
+	}); err != nil {
+		return fmt.Errorf("devctl: slot %s did not go inactive after the permission break: %w", slotName, err)
+	}
+	s.log.Info("broken: connector user debezium cannot update dbz_publication — task 0 fails with \"must be owner of table orders\", slot inactive")
+	return nil
+}
+
+// The fix: give ownership back (orders and the publication return to piperoom),
+// point the connector back at piperoom, and restart the task.
+func fixConnectorAuth(ctx context.Context, s *stack) error {
+	if _, err := s.psql(ctx, "orders",
+		"ALTER TABLE public.orders OWNER TO piperoom",
+		"ALTER PUBLICATION dbz_publication OWNER TO piperoom"); err != nil {
+		return err
+	}
+	if err := s.registerConnector(ctx); err != nil {
+		return err
+	}
+	if err := s.restartTask(ctx, 0); err != nil {
+		return err
+	}
+	if err := s.waitConnector(ctx, "RUNNING", 60*time.Second); err != nil {
+		return err
+	}
+	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
+		active, err := s.slotActive(ctx)
+		if err != nil {
+			return false, nil
+		}
+		return active, nil
+	}); err != nil {
+		return fmt.Errorf("devctl: slot %s did not become active after the fix: %w", slotName, err)
+	}
+	s.log.Info("fixed: orders and dbz_publication owner restored to piperoom, connector re-registered, task 0 RUNNING, slot active")
 	return nil
 }
 

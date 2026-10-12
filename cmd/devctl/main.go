@@ -4,9 +4,10 @@
 //	devctl up | down | reset | status
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
+//	devctl demo [--fix] <scenario>
 //
 // Scenarios: schema-change, connector-down, consumer-stuck, long-transaction,
-// slot-inactive, consumer-lag.
+// slot-inactive, consumer-lag, connector-auth.
 // See dev/scenarios.md for what each one does and what it looks like.
 package main
 
@@ -30,6 +31,7 @@ const usage = `devctl — local pipeline control
   devctl load [--rate N]    insert/update orders N per second until Ctrl+C
   devctl break <scenario>   cause a failure
   devctl fix <scenario>     apply the correct manual fix
+  devctl demo [--fix] <scenario>   one-command live demo (locks, resets, breaks)
   devctl lock --owner <tag> take the shared stack lock
   devctl unlock --owner <tag>  release the shared stack lock
   devctl lock status        show who holds the lock
@@ -142,6 +144,8 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 			return sc.breakIt(ctx, st)
 		}
 		return sc.fix(ctx, st)
+	case "demo":
+		return demoCmd(ctx, st, args)
 	}
 	return fmt.Errorf("unknown command %q", cmd)
 }
