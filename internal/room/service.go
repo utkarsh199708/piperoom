@@ -59,6 +59,18 @@ type Deps struct {
 	// its own goroutine with the service lifetime ctx, so calls may overlap;
 	// the hook must return promptly once ctx ends because Close waits for it.
 	OnRoomOpened func(ctx context.Context, roomID string)
+
+	// OnRoomClosed, when set, is called once per room closed by CloseRoom, after
+	// room.closed is appended, the alert key released and the close persisted,
+	// and after s.mu is released. It runs on the closing request, before
+	// CloseRoom returns, with the service lifetime ctx, so a caller that closes
+	// a room and then asks the hook's owner about it sees the hook already ran.
+	// The hook must be fast and must not call back into a method that waits for
+	// the room to settle. dedupKey is the key the room was opened under, as the
+	// alert source gave it (alertin.Alert.DedupKey, for example "watcher:orders"),
+	// without the pipeline prefix; it is "" for a room opened by hand or by an
+	// alert with no key. Nil means no-op.
+	OnRoomClosed func(ctx context.Context, roomID, pipelineID, dedupKey string)
 }
 
 type roomState struct {
@@ -86,6 +98,7 @@ type Service struct {
 	log          *slog.Logger
 	now          func() time.Time
 	onRoomOpened func(ctx context.Context, roomID string)
+	onRoomClosed func(ctx context.Context, roomID, pipelineID, dedupKey string)
 	slots        *agentSlots // global cap on concurrent agent runs
 
 	// ctx is the service lifetime: every goroutine the service starts (agent
@@ -151,6 +164,7 @@ func New(d Deps) *Service {
 		log:          log,
 		now:          now,
 		onRoomOpened: d.OnRoomOpened,
+		onRoomClosed: d.OnRoomClosed,
 		slots:        newAgentSlots(d.MaxAgents),
 		ctx:          ctx,
 		cancel:       cancel,
