@@ -128,6 +128,13 @@ func TestKafkaTopicConfigErrors(t *testing.T) {
 			wantText: `pipeline "nope" not found`,
 		},
 		{
+			name:     "pipeline without topic_prefix",
+			deps:     Deps{Kafka: echoTopicConfig(), Owners: &owners.Owners{Pipelines: []owners.Pipeline{{ID: "noprefix", SourceTables: []string{"public.orders"}}}}},
+			input:    `{"pipeline_id":"noprefix"}`,
+			wantKind: tools.ErrBadInput,
+			wantText: "no topic_prefix",
+		},
+		{
 			name:     "table outside the pipeline",
 			deps:     Deps{Kafka: echoTopicConfig(), Owners: topicConfigOwners()},
 			input:    `{"pipeline_id":"orders","table":"public.payments"}`,
