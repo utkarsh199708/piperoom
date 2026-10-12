@@ -15,7 +15,16 @@ import (
 // maxTraceChars caps a task trace line in the evidence (design §5, I6).
 const maxTraceChars = 300
 
-var slotNameRE = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+// slotNameRE is the owners rule for a slot name (the same check as watch.slot).
+var slotNameRE = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
+
+// Evidence stays under 4 KiB: at most this many connectors and tasks are listed,
+// and only the first few failed tasks carry a trace line.
+const (
+	maxEvidenceConnectors = 3
+	maxEvidenceTasks      = 5
+	maxEvidenceTraces     = 3
+)
 
 // evaluate turns one observation into signal readings and steps every state
 // machine. Caller holds w.mu. It returns, per signal, the pipelines that fired
@@ -199,15 +208,24 @@ func classifyOne(name string, st clients.ConnectorStatus) (sev, desc string, ev 
 		bad = append(bad, st.State)
 		what = append(what, clean(st.State, 24))
 	}
-	tasks := make([]map[string]any, 0, len(st.Tasks))
+	tasks := make([]map[string]any, 0, min(len(st.Tasks), maxEvidenceTasks))
+	traces, failedTasks := 0, 0
 	for _, tk := range st.Tasks {
-		te := map[string]any{"id": tk.ID, "state": clean(tk.State, 24)}
-		if tk.State != "RUNNING" {
-			bad = append(bad, tk.State)
+		if tk.State == "RUNNING" {
+			continue // only the tasks that are not running go in the evidence
+		}
+		bad = append(bad, tk.State)
+		failedTasks++
+		if failedTasks <= 3 { // the title names a few tasks, not hundreds
 			what = append(what, fmt.Sprintf("task %d %s", tk.ID, clean(tk.State, 24)))
-			if line := firstLine(tk.Trace, maxTraceChars); line != "" {
-				te["trace"] = line
-			}
+		}
+		if failedTasks > maxEvidenceTasks {
+			continue
+		}
+		te := map[string]any{"id": tk.ID, "state": clean(tk.State, 24)}
+		if line := firstLine(tk.Trace, maxTraceChars); line != "" && traces < maxEvidenceTraces {
+			te["trace"] = line
+			traces++
 		}
 		tasks = append(tasks, te)
 	}
@@ -224,22 +242,34 @@ func classifyOne(name string, st clients.ConnectorStatus) (sev, desc string, ev 
 			sev = "sev2"
 		}
 	}
-	return sev, name + " " + strings.Join(what, ", "), map[string]any{
-		"name": name, "state": clean(st.State, 24), "tasks": tasks,
+	ev = map[string]any{"name": name, "state": clean(st.State, 24), "tasks": tasks}
+	if failedTasks > len(tasks) {
+		ev["tasks_omitted"] = failedTasks - len(tasks)
 	}
+	return sev, name + " " + strings.Join(what, ", "), ev
 }
 
 func (c connResult) reading() reading {
 	switch {
 	case c.anyBad:
-		label := "connector " + strings.Join(c.parts, ", ")
+		shown := c.parts[:min(len(c.parts), maxEvidenceConnectors)]
+		label := "connector " + strings.Join(shown, ", ")
 		if len(c.parts) > 1 {
-			label = "connectors " + strings.Join(c.parts, ", ")
+			label = "connectors " + strings.Join(shown, ", ")
+		}
+		if more := len(c.parts) - len(shown); more > 0 {
+			label += fmt.Sprintf(" (+%d more)", more)
+		}
+		ev := map[string]any{
+			"signal": owners.SignalConnectorDown, "severity": c.sev,
+			"connectors": c.ev[:min(len(c.ev), maxEvidenceConnectors)],
+		}
+		if more := len(c.ev) - maxEvidenceConnectors; more > 0 {
+			ev["connectors_omitted"] = more
 		}
 		return reading{
 			v: vBreach, sev: c.sev, label: label, withDur: true,
-			value: strings.Join(c.parts, ", "), threshold: "RUNNING",
-			ev: map[string]any{"signal": owners.SignalConnectorDown, "severity": c.sev, "connectors": c.ev},
+			value: strings.Join(c.parts, ", "), threshold: "RUNNING", ev: ev,
 		}
 	case c.anyUnknown:
 		return reading{v: vUnknown, err: c.firstErr}
@@ -258,7 +288,11 @@ func slotRow(t target, ps *pipeState, obs *observation) (clients.ReplicationSlot
 	}
 	name := t.cfg.Slot
 	if name == "" {
-		name = slotFromConfigs(t, obs)
+		var err error
+		if name, err = slotFromConfigs(t, obs); err != nil {
+			// A present but invalid name is never replaced by another slot.
+			return clients.ReplicationSlot{}, err
+		}
 	}
 	if name != "" {
 		ps.slot = name
@@ -276,20 +310,27 @@ func slotRow(t target, ps *pipeState, obs *observation) (clients.ReplicationSlot
 	return clients.ReplicationSlot{}, fmt.Errorf("watch: pipeline %s: slot %q not found in pg_replication_slots", t.p.ID, name)
 }
 
-func slotFromConfigs(t target, obs *observation) string {
+// slotFromConfigs reads slot.name from the pipeline's connector configs. Only
+// when the key is absent does a Debezium Postgres connector mean "debezium" (its
+// default). A name that is present but not a valid slot name is an error: it
+// must not turn into the default slot, which could belong to another pipeline.
+func slotFromConfigs(t target, obs *observation) (string, error) {
 	for _, c := range t.connectors {
 		co := obs.conns[c]
 		if co == nil || co.cfg == nil {
 			continue
 		}
-		if n := co.cfg["slot.name"]; slotNameRE.MatchString(n) {
-			return n
+		if n, present := co.cfg["slot.name"]; present && strings.TrimSpace(n) != "" {
+			if !slotNameRE.MatchString(n) {
+				return "", fmt.Errorf("watch: pipeline %s: connector %s has an invalid slot.name %q", t.p.ID, c, clean(n, 40))
+			}
+			return n, nil
 		}
 		if strings.Contains(co.cfg["connector.class"], "PostgresConnector") {
-			return "debezium"
+			return "debezium", nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // heartbeat says whether the pipeline's Debezium source has heartbeats. known is
@@ -364,15 +405,18 @@ func (w *Watcher) slotWALReading(now time.Time, t target, ps *pipeState, ss *sig
 		ss.etaSince = time.Time{}
 	}
 
-	sev := "sev2"
-	if !ss.etaSince.IsZero() && now.Sub(ss.etaSince) >= 2*sw.For {
-		sev = "sev1"
-	}
 	// Slot active, connector running, no heartbeat: growth is most likely an idle
-	// database or traffic on other tables (B3). Say so and cap at sev3.
+	// database or traffic on other tables (B3). Say so and cap the base sev2 at
+	// sev3. The cap does not hide an ETA-based sev1: if the numbers say the slot
+	// will be lost, it really will be.
 	capped := row.Active && cr.allRunning() && hb.known && !hb.configured
-	if capped && sevRank(sev) < 3 {
+	sev := "sev2"
+	if capped {
 		sev = "sev3"
+	}
+	etaHeld := !ss.etaSince.IsZero() && now.Sub(ss.etaSince) >= 2*sw.For
+	if etaHeld {
+		sev = "sev1"
 	}
 	// safe_wal_size <= 0 means the slot is already past max_slot_wal_keep_size
 	// (it can be negative before the slot is lost): the same as "unreserved".
@@ -425,7 +469,7 @@ func (w *Watcher) slotWALReading(now time.Time, t target, ps *pipeState, ss *sig
 		ev["eta_note"] = e.Reason
 	}
 	if capped {
-		ev["note"] = "no heartbeat configured: idle-database WAL growth is likely (severity capped at sev3)"
+		ev["note"] = "no heartbeat configured: idle-database WAL growth is likely (base severity capped at sev3)"
 	}
 	r.ev = ev
 	return r

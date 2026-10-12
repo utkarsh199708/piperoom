@@ -9,7 +9,15 @@
 //
 // Wiring (a later PR) must: call Run in a goroutine after the room service has
 // loaded; call OnRoomClosed from the service's room-closed hook; and give Deps a
-// RoomSink that adapts room.Service.
+// RoomSink that adapts room.Service (mapping its "room closed" and "resolved
+// alert, no room" errors to ErrRoomClosed and ErrNoRoom).
+//
+// connector_down also covers a connector that Kafka Connect does not know
+// (HTTP 404): it fires as "missing" at sev2.
+//
+// Known gap (v2): a connector that crash-loops faster than `for` (FAILED for a
+// few seconds, then RUNNING again, repeatedly) is seen as RUNNING most ticks and
+// never fires. v2 needs a restart counter or a flap rule.
 package watch
 
 import (
@@ -39,13 +47,24 @@ type ConnectClient interface {
 	Config(ctx context.Context, name string) (map[string]string, error)
 }
 
+// Errors a RoomSink returns (wrapped is fine; the watcher uses errors.Is). Any
+// other error is treated as transient and retried on the next tick.
+var (
+	// ErrRoomClosed: the room exists but is closed (or is gone). The watcher
+	// then acks the pipeline, as OnRoomClosed would, so a missed close event
+	// cannot leave it posting to a closed room.
+	ErrRoomClosed = errors.New("watch: room is closed")
+	// ErrNoRoom: a resolved alert matched no open room (room.ErrResolvedAlertNoRoom).
+	// Nothing is left to resolve; the watcher stops retrying.
+	ErrNoRoom = errors.New("watch: no open room for the resolved alert")
+)
+
 // RoomSink is how the watcher reaches the room service. A small adapter around
 // room.Service implements it.
 type RoomSink interface {
 	// OpenAlertRoom opens a room for a, or joins the open room that holds
 	// a.DedupKey for the same pipeline (room.Service.OpenAlertRoom). created is
-	// false when it joined. A resolved alert with no open room returns an
-	// error, which the watcher logs and drops.
+	// false when it joined. A resolved alert with no open room returns ErrNoRoom.
 	OpenAlertRoom(ctx context.Context, a alertin.Alert) (roomID string, created bool, err error)
 	// OpenRoomForPipeline reports an open room for the pipeline, whoever
 	// opened it (Alertmanager, a person). The watcher then joins it instead of
@@ -57,6 +76,7 @@ type RoomSink interface {
 	// PostEvidence adds a system message to an open room. It is the join: the
 	// watcher uses it for later signals, "still firing" and for a room it did
 	// not open. The text is built from our own numbers, no usernames, no queries.
+	// It returns ErrRoomClosed when the room is closed.
 	PostEvidence(ctx context.Context, roomID, text string) error
 }
 
@@ -113,8 +133,15 @@ type pipeState struct {
 	// someone else opened.
 	roomID string
 	owned  bool
+	// follower: the pipeline took part in a storm and posts into the leader's
+	// room. Its updates and its clear land there; it does not repeat "still
+	// firing" (the leader does).
+	follower bool
 	// episode: a signal fired and the pipeline has not cleared yet.
 	episode bool
+	// reopened: a rise to sev1 re-opened an acked incident once in this
+	// episode; bypassCooldown lets that one open skip the cooldown.
+	reopened, bypassCooldown bool
 	// lastPost is when the watcher last wrote to the room; postedSev the
 	// severity at that time.
 	lastPost  time.Time
@@ -122,7 +149,7 @@ type pipeState struct {
 	// lastStill is the last "still firing" log line.
 	lastStill time.Time
 	// warned* keep "skipped" lines to one per episode.
-	warnedCooldown, warnedMax bool
+	warnedCooldown, warnedMax, warnedOpen bool
 }
 
 func (ps *pipeState) sig(id string) *sigState {
@@ -148,9 +175,29 @@ type Watcher struct {
 
 	mu    sync.Mutex
 	pipes map[string]*pipeState
-	// closedEarly holds room ids reported closed before the watcher recorded
-	// them (the room closed while OpenAlertRoom was still returning).
-	closedEarly map[string]bool
+	// closed remembers the rooms OnRoomClosed reported (newest last, capped).
+	// recordPost checks it, so a room that closed while a post or an open was
+	// still in flight is not set as the pipeline's room again.
+	closed      map[string]bool
+	closedOrder []string
+	// storms carries a storm over to the next tick when its leader could not
+	// get a room: signal id -> member pipelines still waiting.
+	storms map[string][]string
+}
+
+const maxClosedRemembered = 256
+
+// markClosedLocked remembers that roomID was closed.
+func (w *Watcher) markClosedLocked(roomID string) {
+	if roomID == "" || w.closed[roomID] {
+		return
+	}
+	w.closed[roomID] = true
+	w.closedOrder = append(w.closedOrder, roomID)
+	if len(w.closedOrder) > maxClosedRemembered {
+		delete(w.closed, w.closedOrder[0])
+		w.closedOrder = w.closedOrder[1:]
+	}
 }
 
 // New checks deps and returns a watcher. It starts nothing; call Run.
@@ -177,7 +224,7 @@ func New(d Deps) (*Watcher, error) {
 	w := &Watcher{
 		src: d.Source, conn: d.Connect, own: d.Owners, rooms: d.Rooms,
 		cfg: cfg, maxRooms: d.MaxOpenRooms, clock: d.Clock, log: d.Log, jitter: d.Jitter,
-		pipes: map[string]*pipeState{}, closedEarly: map[string]bool{},
+		pipes: map[string]*pipeState{}, closed: map[string]bool{}, storms: map[string][]string{},
 	}
 	if w.maxRooms <= 0 {
 		w.maxRooms = defaultMaxOpenRooms
@@ -285,17 +332,18 @@ func (w *Watcher) tick(ctx context.Context) {
 func (w *Watcher) OnRoomClosed(roomID, pipelineID, dedupKey string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	keyed := dedupKey == DedupKey(pipelineID) || dedupKey == pipelineID+"|"+DedupKey(pipelineID)
-	ps := w.pipes[pipelineID]
-	switch {
-	case ps != nil && roomID != "" && ps.roomID == roomID:
-		w.ackLocked(pipelineID, ps, roomID)
-	case keyed:
-		// Our room may still be on its way back from OpenAlertRoom; remember it.
-		if len(w.closedEarly) > 64 {
-			clear(w.closedEarly)
+	if roomID == "" {
+		return
+	}
+	// Remember every close, whatever the key: a post or an open may still be on
+	// its way back, and recordPost must not take a closed room as its own.
+	w.markClosedLocked(roomID)
+	// Every pipeline that posts into this room is acked: the owner, and the
+	// followers of a storm room.
+	for id, ps := range w.pipes {
+		if ps.roomID == roomID {
+			w.ackLocked(id, ps, roomID)
 		}
-		w.closedEarly[roomID] = true
 	}
 }
 
@@ -304,12 +352,13 @@ func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string) {
 	for id, ss := range ps.sigs {
 		if ss.phase == phaseFiring {
 			ss.phase = phaseAcked
+			ss.ackSev = ss.last.sev
 			w.log.Info("watch: signal acked, room closed while it still fires",
 				"mode", string(w.cfg.Mode), "pipeline", pipelineID, "signal", id, "room", roomID)
 		}
 	}
-	ps.roomID, ps.owned = "", false
-	ps.warnedCooldown, ps.warnedMax = false, false
+	ps.roomID, ps.owned, ps.follower = "", false, false
+	ps.warnedCooldown, ps.warnedMax, ps.warnedOpen = false, false, false
 }
 
 // openOwned counts the rooms this watcher opened and believes are open.

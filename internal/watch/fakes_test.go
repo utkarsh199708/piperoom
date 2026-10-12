@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -246,29 +245,48 @@ type fakeRooms struct {
 	byKey   map[string]string // pipeline|dedup -> open room
 	n       int
 	calls   int // every call of any method
+	closed  map[string]bool
+
+	// Fault injection. The hooks run without the fake's lock.
+	openErr  func(a alertin.Alert) error // non-nil result fails OpenAlertRoom
+	postErr  func(roomID string) error   // non-nil result fails PostEvidence
+	onOpened func(roomID string)         // after a room was created
+	onPosted func(roomID string)         // after a post was stored
 }
 
 func newFakeRooms() *fakeRooms {
-	return &fakeRooms{foreign: map[string]string{}, last: map[string]lastRoom{}, byKey: map[string]string{}}
+	return &fakeRooms{foreign: map[string]string{}, last: map[string]lastRoom{}, byKey: map[string]string{}, closed: map[string]bool{}}
 }
 
 func (r *fakeRooms) OpenAlertRoom(ctx context.Context, a alertin.Alert) (string, bool, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.calls++
+	if r.openErr != nil {
+		if err := r.openErr(a); err != nil {
+			r.mu.Unlock()
+			return "", false, err
+		}
+	}
 	idx := a.PipelineID + "|" + a.DedupKey
 	if id, ok := r.byKey[idx]; ok {
 		r.opens = append(r.opens, openRec{a, id, false})
+		r.mu.Unlock()
 		return id, false, nil
 	}
 	if a.Status == alertin.StatusResolved {
-		return "", false, errors.New("resolved alert matches no open room")
+		r.mu.Unlock()
+		return "", false, fmt.Errorf("fake: %w", ErrNoRoom)
 	}
 	r.n++
 	id := fmt.Sprintf("r%d", r.n)
 	r.byKey[idx] = id
 	r.last[idx] = lastRoom{roomID: id}
 	r.opens = append(r.opens, openRec{a, id, true})
+	hook := r.onOpened
+	r.mu.Unlock()
+	if hook != nil {
+		hook(id)
+	}
 	return id, true, nil
 }
 
@@ -297,9 +315,23 @@ func (r *fakeRooms) LastRoomForKey(p, key string) (string, *time.Time, bool) {
 
 func (r *fakeRooms) PostEvidence(ctx context.Context, roomID, text string) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	r.calls++
+	if r.postErr != nil {
+		if err := r.postErr(roomID); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+	}
+	if r.closed[roomID] {
+		r.mu.Unlock()
+		return fmt.Errorf("fake: room %s: %w", roomID, ErrRoomClosed)
+	}
 	r.posts = append(r.posts, postRec{roomID, text})
+	hook := r.onPosted
+	r.mu.Unlock()
+	if hook != nil {
+		hook(roomID)
+	}
 	return nil
 }
 
@@ -307,6 +339,7 @@ func (r *fakeRooms) PostEvidence(ctx context.Context, roomID, text string) error
 func (r *fakeRooms) closeRoom(roomID string, at time.Time) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.closed[roomID] = true
 	for idx, id := range r.byKey {
 		if id == roomID {
 			delete(r.byKey, idx)

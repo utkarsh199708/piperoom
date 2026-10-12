@@ -86,8 +86,9 @@ type sigState struct {
 	etaSince time.Time
 	// notified: a room or join already carries this signal.
 	notified bool
-	// suppressed: left to the storm room of another pipeline.
-	suppressed bool
+	// ackSev is the severity when the driver closed the room; a rise to sev1
+	// after that re-opens the incident once.
+	ackSev string
 	// last is the latest known (non-error) reading.
 	last reading
 	// errText is the latest error, "" after a good tick.
@@ -132,7 +133,7 @@ func (s *sigState) step(now time.Time, r reading, forD time.Duration) transition
 		if now.Sub(s.clearingSince) >= forD {
 			s.phase = phaseOK
 			s.breachingSince, s.clearingSince = time.Time{}, time.Time{}
-			s.notified, s.suppressed = false, false
+			s.notified, s.ackSev = false, ""
 			return tResolved
 		}
 	}
