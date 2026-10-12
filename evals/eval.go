@@ -149,7 +149,7 @@ feeding:
 // the production action names.
 func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 	toolInputs := ToolInputs(defs)
-	areg, err := LiveActions(Resources{})
+	areg, err := LiveActions(Resources{}, nil)
 	if err != nil {
 		return err
 	}
@@ -160,6 +160,10 @@ func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 	var errs []error
 	for _, sc := range scenarios {
 		errs = append(errs, sc.Validate(toolInputs, actionNames))
+		// Malformed connect_status data would only surface mid-run otherwise.
+		if _, err := connectStatuses(sc.Recordings); err != nil {
+			errs = append(errs, fmt.Errorf("evals: scenario %q: %w", sc.Name, err))
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -189,7 +193,7 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
-	live, err := LiveActions(sc.Resources)
+	live, err := LiveActions(sc.Resources, sc.Recordings)
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}

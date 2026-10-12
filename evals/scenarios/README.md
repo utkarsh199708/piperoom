@@ -7,7 +7,7 @@ schema-change-shaped answer falls into.
 
 | Scenario | Alert | Root cause | First failing layer | Safe automated fix |
 |---|---|---|---|---|
-| `slot-inactive-wal-growth` | pg_wal 48.6 GiB, disk 81% | connector left in Connect's `STOPPED` state, so no tasks run; slot `debezium_orders` inactive; Postgres retains WAL | kafka-connect | none: resume is not an action |
+| `slot-inactive-wal-growth` | pg_wal 48.6 GiB, disk 81% | connector left in Connect's `STOPPED` state, so no tasks run; slot `debezium_orders` inactive; Postgres retains WAL | kafka-connect | `connect_resume_connector` for `pg-orders-connector`, approved by the kafka-connect owner |
 | `publication-permission-denied` | task 0 FAILED | table owner changed; on task start Debezium runs `ALTER PUBLICATION … SET TABLE`, which needs ownership: `must be owner of table orders` | kafka-connect (cause: postgres permissions) | none now; restart task 0 only after a DBA fixes ownership |
 | `consumer-poison-pill` | lag on partition 1, pod restarting | one non-Avro record at `pg.public.orders/1@25377154` crash-loops order-sync | consumer | none: offset skip or dead-letter queue is manual |
 | `source-column-dropped` | analytics.orders stale 34 min | contract step `DROP COLUMN amount`, so value schema v3 is accepted (BACKWARD allows removing fields) and order-sync can't build rows | consumer (trigger: postgres DDL) | none: consumer change or re-add the column |

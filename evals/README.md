@@ -82,6 +82,11 @@ against the live tool and action names.
 | `truncated` | bool | `Result.Truncated` |
 | `error` | string | if set, the call fails with this text, as if the target failed (e.g. `"connect: connector not found (404)"`) |
 
+A `connect_status` recording with `data` also sets the connector state that `connect_resume_connector`
+validates against (`state`, `tasks[].state`, as the real tool's Data has them). A scenario that proposes a
+resume must record it. Without it, that `Validate` fails with `not available in replay`. The restart
+actions only check that the connector exists, so they do not need it.
+
 Each recording needs `summary` or `error`. If several recordings match, the one with the most
 `input` fields wins; on a tie, the earlier one in the file wins. Write `error` text in the real
 client's format too (e.g. `schemareg: GET /subjects/x/versions/2: not found: …`); when the real message

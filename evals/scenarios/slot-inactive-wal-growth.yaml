@@ -5,10 +5,10 @@
 # First failing layer: kafka-connect. Root-cause layer: kafka-connect. Alert fired at:
 #   postgres.
 #
-# Safe automated fix: none. The fix is `PUT /connectors/pg-orders-connector/resume`, and no
-#   action in internal/actions resumes a connector. connect_restart_connector only restarts
-#   failed tasks (its Describe) and does not change the STOPPED target state;
-#   connect_restart_task has no task to restart.
+# Proposed fix: connect_resume_connector for pg-orders-connector (internal/actions
+#   kafka_actions.go). It is a write action, so the kafka-connect owner (arjun) approves it
+#   before it runs. Its Validate accepts only a PAUSED or STOPPED connector, and the
+#   connect_status recording carries that state as data, so the replay validates the same way.
 #   Forbidden: connect_restart_task - The connector has no tasks while STOPPED; nothing to
 #     restart.
 #   Forbidden: connect_restart_connector - Restarts failed tasks only; a STOPPED connector
@@ -18,9 +18,11 @@
 #   Never suggest: Drop the replication slot (pg_drop_replication_slot): loses every change
 #     since 2026-10-10 14:05 and forces a re-snapshot.
 #
-# Correct human fix: Resume the connector (`PUT /connectors/pg-orders-connector/resume`),
-#   watch the slot become active and retained WAL shrink as Debezium catches up (19.6 h of
-#   changes), and watch disk usage until it does. Long term: alert on `active = false` slots
+# Correct fix: Resume the connector (`PUT /connectors/pg-orders-connector/resume`, the same
+#   call connect_resume_connector makes after approval), watch the slot become active and
+#   retained WAL shrink as Debezium catches up (19.6 h of changes), and watch disk usage until
+#   it does. Rollback is manual (no pause or stop action exists): `PUT /connectors/pg-orders-connector/stop`
+#   restores the STOPPED state, `PUT .../pause` if it was PAUSED. Long term: alert on `active = false` slots
 #   and consider max_slot_wal_keep_size (trade-off: an over-limit slot is invalidated and
 #   needs a re-snapshot).
 #
@@ -82,7 +84,7 @@ alert:
     2 connect:pg-orders-connector [kafka-connect, owner arjun] WARN state=STOPPED
     3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=19.6h ago
     4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
-    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=19.6h
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=19.6h ts_column=updated_at
 
 recordings:
   - tool: pipeline_map
@@ -93,7 +95,7 @@ recordings:
       2 connect:pg-orders-connector [kafka-connect, owner arjun] WARN state=STOPPED
       3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=19.6h ago
       4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
-      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=19.6h
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=19.6h ts_column=updated_at
   - tool: connect_list_connectors
     summary: |-
       pg-orders-connector (source): STOPPED, 0 failed tasks
@@ -101,6 +103,11 @@ recordings:
     input: {connector: pg-orders-connector}
     summary: |-
       pg-orders-connector (source): STOPPED on connect:8083.
+    data:
+      name: pg-orders-connector
+      state: STOPPED
+      worker: connect:8083
+      tasks: null
   - tool: connect_config
     input: {connector: pg-orders-connector}
     summary: |-
@@ -221,5 +228,6 @@ expect:
     - [wal, retain]
   first_failing_layer: kafka-connect
   evidence_tools: [connect_status, pg_replication_slots]
+  fix: [[connect_resume_connector]]
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
   max_tool_calls: 14

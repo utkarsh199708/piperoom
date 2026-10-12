@@ -115,7 +115,7 @@ func TestReplayRejectsUnmarshalableData(t *testing.T) {
 }
 
 func TestLiveActionsValidateButNeverWrite(t *testing.T) {
-	reg, err := LiveActions(Resources{Connectors: []string{"pg-orders-connector"}, Subjects: []string{"pg.public.orders-value"}})
+	reg, err := LiveActions(Resources{Connectors: []string{"pg-orders-connector"}, Subjects: []string{"pg.public.orders-value"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestLiveActionsValidateButNeverWrite(t *testing.T) {
 }
 
 func TestRecordingActionKeepsScope(t *testing.T) {
-	live, err := LiveActions(Resources{Connectors: []string{"pg-orders-connector"}})
+	live, err := LiveActions(Resources{Connectors: []string{"pg-orders-connector"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
