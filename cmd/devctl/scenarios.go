@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -49,17 +52,42 @@ func breakSchemaChange(ctx context.Context, s *stack) error {
 
 // The fix: allow the new schema version, restart the task, then restore the
 // compatibility rule so the next breaking change is caught again.
+//
+// The fix is idempotent. The break may still be active, half-fixed (compatibility
+// NONE, schema not registered yet) or fully fixed by someone else. Every case
+// ends with task 0 RUNNING and compatibility BACKWARD.
 func fixSchemaChange(ctx context.Context, s *stack) error {
-	if err := s.setCompatibility(ctx, valueSubject, "NONE"); err != nil {
-		return err
-	}
-	// Count the registered versions before restarting, so we can tell when the
-	// task has registered the new one.
-	before, err := s.schemaVersions(ctx, valueSubject)
+	// "New schema already registered" is decided from the latest value version,
+	// not from a version count. A count taken before a restart cannot tell a new
+	// version from an old one, and on an already fixed stack no new version comes,
+	// so waiting for one would time out. The schema from before the migration has
+	// amount as Avro int, so amount as bytes/decimal in the latest version means
+	// the new schema is in the registry.
+	registered, err := s.latestAmountIsDecimal(ctx, valueSubject)
 	if err != nil {
 		return err
 	}
-	if err := s.restartTask(ctx, 0); err != nil {
+	var before []int
+	if registered {
+		s.log.Info("skipped: new schema version already registered, no wait for a new version")
+	} else {
+		if err := s.setCompatibility(ctx, valueSubject, "NONE"); err != nil {
+			return err
+		}
+		// Count the registered versions before restarting, so we can tell when the
+		// task has registered the new one.
+		if before, err = s.schemaVersions(ctx, valueSubject); err != nil {
+			return err
+		}
+	}
+	st, err := s.connectorStatus(ctx)
+	if err != nil {
+		return err
+	}
+	// A RUNNING task is left alone: restarting it would only replay the same work.
+	if len(st.Tasks) > 0 && st.Tasks[0].State == "RUNNING" {
+		s.log.Info("skipped: task 0 already RUNNING, no restart")
+	} else if err := s.restartTask(ctx, 0); err != nil {
 		return err
 	}
 	if err := s.waitConnector(ctx, "RUNNING", 60*time.Second); err != nil {
@@ -67,20 +95,121 @@ func fixSchemaChange(ctx context.Context, s *stack) error {
 	}
 	// Wait until the new schema version is registered before restoring BACKWARD;
 	// otherwise the task fails again on the next record.
-	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
-		vs, err := s.schemaVersions(ctx, valueSubject)
-		if err != nil {
-			return false, nil
+	if !registered {
+		if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
+			vs, err := s.schemaVersions(ctx, valueSubject)
+			if err != nil {
+				return false, nil
+			}
+			return len(vs) > len(before), nil
+		}); err != nil {
+			return fmt.Errorf("devctl: new schema version was not registered: %w", err)
 		}
-		return len(vs) > len(before), nil
-	}); err != nil {
-		return fmt.Errorf("devctl: new schema version was not registered: %w", err)
 	}
 	if err := s.setCompatibility(ctx, valueSubject, "BACKWARD"); err != nil {
 		return err
 	}
 	s.log.Info("fixed: new schema registered, task 0 RUNNING, compatibility back to BACKWARD")
 	return nil
+}
+
+// latestAmountIsDecimal reports whether the latest value schema of subject has
+// orders.amount as Avro bytes with logicalType decimal, the shape Debezium
+// registers after the numeric(12,2) migration.
+func (s *stack) latestAmountIsDecimal(ctx context.Context, subject string) (bool, error) {
+	b, err := s.do(ctx, http.MethodGet, s.cfg.SchemaRegistryURL+"/subjects/"+url.PathEscape(subject)+"/versions/latest", nil, http.StatusOK)
+	if err != nil {
+		return false, err
+	}
+	var v struct {
+		Version int    `json:"version"`
+		Schema  string `json:"schema"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return false, fmt.Errorf("devctl: decode latest schema of %s: %w", subject, err)
+	}
+	ok, err := amountIsDecimal(v.Schema)
+	if err != nil {
+		return false, fmt.Errorf("devctl: latest schema of %s (version %d): %w", subject, v.Version, err)
+	}
+	return ok, nil
+}
+
+// avroField and avroRecord decode only what is needed to find a field by name in
+// an Avro record schema.
+type avroField struct {
+	Name string          `json:"name"`
+	Type json.RawMessage `json:"type"`
+}
+
+type avroRecord struct {
+	Type   string      `json:"type"`
+	Fields []avroField `json:"fields"`
+}
+
+// amountIsDecimal walks a Debezium value schema (an envelope record with before
+// and after fields) down to after.amount and reports whether it is bytes with
+// logicalType decimal. Unions are searched branch by branch, so the "null"
+// branches are skipped.
+func amountIsDecimal(schema string) (bool, error) {
+	var root avroRecord
+	if err := json.Unmarshal([]byte(schema), &root); err != nil {
+		return false, fmt.Errorf("decode value schema: %w", err)
+	}
+	after, ok := fieldType(root.Fields, "after")
+	if !ok {
+		return false, errors.New("value schema has no after field")
+	}
+	for _, branch := range unionBranches(after) {
+		var rec avroRecord
+		if json.Unmarshal(branch, &rec) != nil || rec.Type != "record" {
+			continue
+		}
+		amount, ok := fieldType(rec.Fields, "amount")
+		if !ok {
+			return false, errors.New("after record has no amount field")
+		}
+		for _, t := range unionBranches(amount) {
+			if isDecimalBytes(t) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	return false, errors.New("after field is not a record")
+}
+
+// isDecimalBytes reports whether one Avro type is bytes with logicalType decimal.
+// A bare name such as "int" is a JSON string and does not decode into the struct.
+func isDecimalBytes(raw json.RawMessage) bool {
+	var t struct {
+		Type        string `json:"type"`
+		LogicalType string `json:"logicalType"`
+	}
+	if json.Unmarshal(raw, &t) != nil {
+		return false
+	}
+	return t.Type == "bytes" && t.LogicalType == "decimal"
+}
+
+// fieldType returns the declared type of the named field.
+func fieldType(fields []avroField, name string) (json.RawMessage, bool) {
+	for _, f := range fields {
+		if f.Name == name {
+			return f.Type, true
+		}
+	}
+	return nil, false
+}
+
+// unionBranches returns the branches of an Avro union, or the type itself when it
+// is not a union.
+func unionBranches(t json.RawMessage) []json.RawMessage {
+	var branches []json.RawMessage
+	if json.Unmarshal(t, &branches) == nil {
+		return branches
+	}
+	return []json.RawMessage{t}
 }
 
 // connector-down: the connector is paused, so the replication slot goes
