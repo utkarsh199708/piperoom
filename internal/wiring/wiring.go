@@ -19,7 +19,6 @@ import (
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/clients/postgres"
 	"piperoom/internal/clients/schemareg"
-	"piperoom/internal/clients/warehouse"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -139,6 +138,11 @@ func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
 		return nil, fmt.Errorf("wiring: load owners: %w", err)
 	}
 
+	// A bad WAREHOUSE_KIND is a config mistake: fail before any client is built.
+	if _, err := warehouseKind(cfg); err != nil {
+		return nil, err
+	}
+
 	// Build the A2 clients before any database ping so a bad security
 	// configuration fails Open even when no stack is reachable at all.
 	a2, err := buildA2Clients(cfg)
@@ -163,12 +167,12 @@ func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
 	}
 	opened = append(opened, src.Close)
 
-	wh, err := warehouse.New(ctx, cfg.WarehouseDBURL)
+	wh, closeWh, err := openWarehouse(ctx, cfg, defaultWarehouseOpeners)
 	if err != nil {
 		closeOpened()
-		return nil, fmt.Errorf("wiring: warehouse: %w", err)
+		return nil, err
 	}
-	opened = append(opened, wh.Close)
+	opened = append(opened, closeWh)
 
 	var once sync.Once
 	return &Wired{

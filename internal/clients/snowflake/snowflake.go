@@ -1,7 +1,7 @@
 // Package snowflake implements clients.Warehouse against Snowflake, for
 // production use. internal/clients/warehouse implements the same interface
-// against the dev Postgres warehouse; cmd/server picks whichever one its
-// config asks for.
+// against the dev Postgres warehouse; internal/wiring picks whichever one
+// WAREHOUSE_KIND asks for. See README.md in this folder for the DSN and grants.
 //
 // Read-only access is enforced by the role in the DSN, not by this package:
 // grant the connecting role only USAGE on the warehouse, database and
@@ -34,15 +34,17 @@ type DB struct {
 // typically "user:password@account/db/schema?warehouse=...&role=...") and
 // verifies it with a ping.
 func New(ctx context.Context, dsn string) (*DB, error) {
+	// The DSN carries the password and driver errors can echo parts of it,
+	// so every error leaving New goes through Redact.
 	db, err := sql.Open("snowflake", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("snowflake: open: %w", err)
+		return nil, Redact(fmt.Errorf("snowflake: open: %w", err), dsn)
 	}
 	pctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 	if err := db.PingContext(pctx); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("snowflake: ping: %w", err)
+		return nil, Redact(fmt.Errorf("snowflake: ping: %w", err), dsn)
 	}
 	return &DB{db: db, q: dbQuerier{db: db}}, nil
 }
@@ -61,16 +63,10 @@ func (d *DB) Freshness(ctx context.Context, table, tsColumn string) (time.Time, 
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
-	qualified, err := validateTable(table)
+	q, err := freshnessSQL(table, tsColumn)
 	if err != nil {
 		return time.Time{}, err
 	}
-	col, err := validateIdent(tsColumn)
-	if err != nil {
-		return time.Time{}, err
-	}
-
-	q := fmt.Sprintf("SELECT MAX(%s) FROM %s", col, qualified)
 	rows, err := d.q.QueryContext(gosnowflake.WithHigherPrecision(ctx), q)
 	if err != nil {
 		return time.Time{}, wrapQueryErr("freshness of", table, err)
@@ -90,7 +86,10 @@ func (d *DB) Freshness(ctx context.Context, table, tsColumn string) (time.Time, 
 	if ts == nil {
 		return time.Time{}, nil
 	}
-	return *ts, nil
+	// Compare in UTC: the driver returns TIMESTAMP_NTZ as UTC wall time and
+	// TIMESTAMP_LTZ in the session zone, so normalise before the caller does
+	// any age arithmetic or formatting.
+	return ts.UTC(), nil
 }
 
 // Row reads one row by primary key. table is "schema.table" or
@@ -109,16 +108,10 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 	ctx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()
 
-	qualified, err := validateTable(table)
+	q, err := rowSQL(table, pkColumn)
 	if err != nil {
 		return nil, false, err
 	}
-	col, err := validateIdent(pkColumn)
-	if err != nil {
-		return nil, false, err
-	}
-
-	q := fmt.Sprintf("SELECT * FROM %s WHERE %s = ? LIMIT 1", qualified, col)
 	rows, err := d.q.QueryContext(gosnowflake.WithHigherPrecision(ctx), q, pk)
 	if err != nil {
 		return nil, false, wrapQueryErr("query row from", table, err)

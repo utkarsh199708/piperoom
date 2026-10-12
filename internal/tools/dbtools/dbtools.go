@@ -150,6 +150,25 @@ func validTable(name string) bool {
 	return len(parts) == 2 && identRe.MatchString(parts[0]) && identRe.MatchString(parts[1])
 }
 
+// validWarehouseTable reports whether name is "schema.table" or
+// "db.schema.table". A Snowflake sink table can live in another database than
+// the DSN's default one, so the warehouse tools accept three parts; the
+// Postgres warehouse client still rejects a three-part name itself. Each part
+// still has to match identRe (AGENTS.md section 4, rule 6), and the client
+// quotes it again.
+func validWarehouseTable(name string) bool {
+	parts := strings.Split(name, ".")
+	if len(parts) != 2 && len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if !identRe.MatchString(p) {
+			return false
+		}
+	}
+	return true
+}
+
 func validColumn(name string) bool { return identRe.MatchString(name) }
 
 func parseRFC3339(s string) (time.Time, error) {

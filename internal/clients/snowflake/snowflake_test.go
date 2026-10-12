@@ -62,9 +62,13 @@ type fakeQuerier struct {
 	err       error
 	lastQuery string
 	lastArgs  []any
+	onQuery   func(ctx context.Context)
 }
 
 func (q *fakeQuerier) QueryContext(ctx context.Context, query string, args ...any) (sqlRows, error) {
+	if q.onQuery != nil {
+		q.onQuery(ctx)
+	}
 	q.lastQuery = query
 	q.lastArgs = args
 	if q.err != nil {
@@ -85,11 +89,39 @@ func TestFreshnessHappyPath(t *testing.T) {
 	if !got.Equal(ts) {
 		t.Fatalf("Freshness = %v, want %v", got, ts)
 	}
-	if !strings.Contains(fq.lastQuery, "PUBLIC.ORDERS") || !strings.Contains(fq.lastQuery, "UPDATED_AT") {
-		t.Fatalf("query %q did not reference the upper-cased table/column", fq.lastQuery)
+	want := `SELECT MAX("UPDATED_AT") FROM "PUBLIC"."ORDERS"`
+	if fq.lastQuery != want {
+		t.Fatalf("query = %q, want %q", fq.lastQuery, want)
 	}
-	if strings.Contains(fq.lastQuery, `"`) {
-		t.Fatalf("query %q quotes the identifier, which would make it case-sensitive", fq.lastQuery)
+}
+
+func TestFreshnessReturnsUTC(t *testing.T) {
+	ist := time.FixedZone("IST", 5*3600+1800)
+	ts := time.Date(2026, 1, 2, 8, 34, 5, 0, ist) // 03:04:05 UTC
+	fq := &fakeQuerier{rows: &fakeRows{cols: []string{"max"}, data: [][]any{{&ts}}}}
+	db := &DB{q: fq}
+
+	got, err := db.Freshness(context.Background(), "public.orders", "updated_at")
+	if err != nil {
+		t.Fatalf("Freshness: %v", err)
+	}
+	if got.Location() != time.UTC || got.Hour() != 3 {
+		t.Fatalf("Freshness = %v, want 03:04:05 UTC", got)
+	}
+}
+
+func TestFreshnessAppliesDeadline(t *testing.T) {
+	var deadline time.Time
+	var ok bool
+	fq := &fakeQuerier{rows: &fakeRows{cols: []string{"max"}, data: nil}, onQuery: func(ctx context.Context) {
+		deadline, ok = ctx.Deadline()
+	}}
+	db := &DB{q: fq}
+	if _, err := db.Freshness(context.Background(), "public.orders", "updated_at"); err != nil {
+		t.Fatalf("Freshness: %v", err)
+	}
+	if !ok || time.Until(deadline) > defaultTimeout {
+		t.Fatalf("query ctx deadline = %v (set=%v), want within %s", deadline, ok, defaultTimeout)
 	}
 }
 
