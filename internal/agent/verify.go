@@ -228,17 +228,91 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	}
 
 	recovered, evidence, head := r.verifyProposal(ctx, rec)
-	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: head + evidence})
+	var followUp string
+	if recovered {
+		followUp = compatFollowUp(rec.steps)
+	}
+	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: head + evidence + followUp})
 	r.proposals.markVerified(id, recovered)
 	out := actionOutcome{
 		recovered: recovered,
 		broken:    !recovered,
-		notes:     []string{verifyTag + head + wrapToolOutput("verify", "", evidence)},
+		notes:     []string{verifyTag + head + wrapToolOutput("verify", "", evidence) + followUp},
 	}
-	if recovered {
+	switch {
+	case recovered && followUp != "":
+		// The model must read the follow-up and get one turn before the episode
+		// can park as done, so it can propose the restore. If it does not, the
+		// episode parks as done at the end of that turn, like any recovery.
+		out.needsModel = true
+		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working", Detail: "pipeline recovered; compatibility restore pending"})
+	case recovered:
 		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "done", Detail: "pipeline recovered"})
 	}
 	return out
+}
+
+// compatFollowUp tells the model that a recovered fix left a schema subject at
+// compatibility NONE, which lets data through that the old contract cannot read.
+// It returns one line per such subject, each starting on a new line, or "" when
+// the proposal left none. A later step of the same proposal that sets the subject
+// to another level counts as the restore already done. The earlier level is
+// never parsed here: the model reads it from the action result or the schema
+// tools.
+func compatFollowUp(steps []events.ProposalStep) string {
+	final := map[string]string{}
+	var order []string
+	for _, s := range steps {
+		if s.Action != "schema_set_compatibility" {
+			continue
+		}
+		subject, ok := stringParam(s.Params, "subject")
+		if !ok {
+			continue
+		}
+		level, _ := stringParam(s.Params, "level")
+		if _, seen := final[subject]; !seen {
+			order = append(order, subject)
+		}
+		final[subject] = strings.ToUpper(level)
+	}
+	var b strings.Builder
+	for _, subject := range order {
+		if final[subject] != "NONE" {
+			continue
+		}
+		name := followUpSubject(subject)
+		fmt.Fprintf(&b, "\nfollow-up: %s compatibility is still NONE. Propose a separate fix that restores its earlier level (see the action result \"%s compatibility <OLD> → NONE\", or read it with the schema tools).", name, name)
+	}
+	return b.String()
+}
+
+// followUpSubject renders a subject name for the follow-up line, which sits in a
+// verification block outside any untrusted wrapper. The name comes from a step
+// the model proposed, so a name that is not a plain token is marked, stripped of
+// any verification tag and quoted, and cannot add lines or forge a verdict.
+func followUpSubject(s string) string {
+	if isPlainSubject(s) {
+		return s
+	}
+	return strconv.Quote(verificationTag.ReplaceAllString(markInvisible(s), "(verification)"))
+}
+
+// isPlainSubject reports whether s uses only the characters real subjects use,
+// such as pg.public.orders-value.
+func isPlainSubject(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("._:/-", r):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // parked reports whether the run waits for human input instead of calling the
