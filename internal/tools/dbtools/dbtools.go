@@ -22,9 +22,12 @@ import (
 
 // Deps are the collaborators the tools read from.
 type Deps struct {
-	Src     clients.SourceDB
-	Wh      clients.Warehouse
-	Builder topology.Builder
+	Src clients.SourceDB
+	Wh  clients.Warehouse
+	// WarehouseKind is "postgres" (or empty) or "snowflake". It only decides
+	// which table and column names the warehouse tools accept as input.
+	WarehouseKind string
+	Builder       topology.Builder
 	// Connect reads live Kafka Connect connector configs. Only
 	// pg_publication_tables uses it, so it is nil-able; the tool reports a
 	// clear error when it needs Connect and the field is nil.
@@ -150,24 +153,45 @@ func validTable(name string) bool {
 	return len(parts) == 2 && identRe.MatchString(parts[0]) && identRe.MatchString(parts[1])
 }
 
-// validWarehouseTable reports whether name is "schema.table" or
-// "db.schema.table". A Snowflake sink table can live in another database than
-// the DSN's default one, so the warehouse tools accept three parts; the
-// Postgres warehouse client still rejects a three-part name itself. Each part
-// still has to match identRe (AGENTS.md section 4, rule 6), and the client
-// quotes it again.
-func validWarehouseTable(name string) bool {
+// snowflakeIdentRe is identRe plus '$', which Snowflake allows in unquoted
+// names and internal/clients/snowflake accepts, so both layers agree.
+var snowflakeIdentRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_$]*$`)
+
+// isSnowflake reports whether the warehouse is Snowflake. Empty means the
+// default, Postgres.
+func (d Deps) isSnowflake() bool {
+	return strings.EqualFold(strings.TrimSpace(d.WarehouseKind), "snowflake")
+}
+
+// whIdentRe is the identifier regex for the configured warehouse kind.
+func (d Deps) whIdentRe() *regexp.Regexp {
+	if d.isSnowflake() {
+		return snowflakeIdentRe
+	}
+	return identRe
+}
+
+// validWarehouseTable reports whether name is a valid warehouse table. Postgres
+// takes "schema.table". A Snowflake sink table can live in another database
+// than the DSN's default one, so Snowflake also takes "db.schema.table". Each
+// part has to match the kind's identifier regex (AGENTS.md section 4, rule 6);
+// the client quotes it again.
+func (d Deps) validWarehouseTable(name string) bool {
 	parts := strings.Split(name, ".")
-	if len(parts) != 2 && len(parts) != 3 {
+	if len(parts) != 2 && !(len(parts) == 3 && d.isSnowflake()) {
 		return false
 	}
+	re := d.whIdentRe()
 	for _, p := range parts {
-		if !identRe.MatchString(p) {
+		if !re.MatchString(p) {
 			return false
 		}
 	}
 	return true
 }
+
+// validWarehouseColumn is validColumn for the configured warehouse kind.
+func (d Deps) validWarehouseColumn(name string) bool { return d.whIdentRe().MatchString(name) }
 
 func validColumn(name string) bool { return identRe.MatchString(name) }
 

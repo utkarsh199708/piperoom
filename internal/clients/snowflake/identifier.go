@@ -47,16 +47,6 @@ func quote(part string) string {
 	return `"` + strings.ReplaceAll(part, `"`, `""`) + `"`
 }
 
-// validateTable validates a "schema.table" or "db.schema.table" name and
-// returns it as an unquoted, upper-cased, dot-joined name.
-func validateTable(table string) (string, error) {
-	parts, err := tableParts(table)
-	if err != nil {
-		return "", err
-	}
-	return strings.Join(parts, "."), nil
-}
-
 // quoteTable validates a "schema.table" or "db.schema.table" name and returns
 // it as a dot-joined, quoted, upper-cased qualified name, for example
 // "ANALYTICS"."ORDERS".

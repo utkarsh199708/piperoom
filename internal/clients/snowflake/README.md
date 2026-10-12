@@ -17,7 +17,9 @@ defaults to `postgres`. Any value other than `postgres` or `snowflake` stops the
 server at startup. The DSN holds the password: it is never logged, and startup errors
 are scrubbed of it (`snowflake.Redact`).
 
-If the password has `@`, `/` or `:` in it, URL-encode it.
+Always URL-encode the password (for example with `url.QueryEscape`). The driver
+unescapes it, so a raw `%` breaks it, a raw `+` turns into a space, and a raw `?`,
+`@`, `/` or `:` can end the password early.
 
 ## Grants
 
@@ -30,7 +32,9 @@ exact SQL is in [docs/pilot/permissions.md](../../../docs/pilot/permissions.md)
 
 - `sink_tables` and `sink_ts_column` in `owners.yaml` are the only inputs. Use
   `schema.table`, or `db.schema.table` for a table outside the DSN's database.
-- Every part must match `^[A-Za-z_][A-Za-z0-9_$]*$` (AGENTS.md section 4, rule 6). Anything else is
+- Every part must match `^[A-Za-z_][A-Za-z0-9_$]*$` (AGENTS.md section 4, rule 6; the
+  `warehouse_*` tools use the same pattern when `WAREHOUSE_KIND=snowflake`, and the
+  Postgres pattern without `$` otherwise). Anything else is
   refused before a query runs.
 - Snowflake stores unquoted names in upper case. The client folds each part to upper
   case and then double-quotes it, so `analytics.orders` runs as

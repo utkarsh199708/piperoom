@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFreshnessSQL(t *testing.T) {
@@ -74,6 +75,31 @@ func TestRefusedIdentifierNeverReachesDriver(t *testing.T) {
 	}
 	if fq.lastQuery != "" {
 		t.Fatalf("a query reached the driver: %q", fq.lastQuery)
+	}
+}
+
+func TestRowAppliesDeadline(t *testing.T) {
+	var deadline time.Time
+	var ok bool
+	fq := &fakeQuerier{rows: &fakeRows{cols: []string{"ID"}, data: nil}, onQuery: func(ctx context.Context) {
+		deadline, ok = ctx.Deadline()
+	}}
+	db := &DB{q: fq}
+	if _, _, err := db.Row(context.Background(), "analytics.orders", "id", "1"); err != nil {
+		t.Fatalf("Row: %v", err)
+	}
+	if !ok || time.Until(deadline) > defaultTimeout {
+		t.Fatalf("query ctx deadline = %v (set=%v), want within %s", deadline, ok, defaultTimeout)
+	}
+
+	// A parent deadline shorter than the default is kept.
+	parent, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, _, err := db.Row(parent, "analytics.orders", "id", "1"); err != nil {
+		t.Fatalf("Row: %v", err)
+	}
+	if !ok || time.Until(deadline) > time.Second {
+		t.Fatalf("deadline %v is later than the parent's 1s", deadline)
 	}
 }
 

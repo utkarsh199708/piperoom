@@ -1,43 +1,6 @@
 package snowflake
 
-import (
-	"strings"
-	"testing"
-)
-
-func TestValidateTable(t *testing.T) {
-	cases := []struct {
-		table   string
-		want    string
-		wantErr bool
-	}{
-		{table: "public.orders", want: "PUBLIC.ORDERS"},
-		{table: "analytics.orders", want: "ANALYTICS.ORDERS"},
-		{table: "analytics_db.public.orders", want: "ANALYTICS_DB.PUBLIC.ORDERS"},
-		{table: "orders", wantErr: true},
-		{table: "a.b.c.d", wantErr: true},
-		{table: "public.orders; DROP TABLE x", wantErr: true},
-		{table: "public.\"orders\"", wantErr: true},
-		{table: "public.", wantErr: true},
-		{table: "", wantErr: true},
-	}
-	for _, tc := range cases {
-		got, err := validateTable(tc.table)
-		if tc.wantErr {
-			if err == nil {
-				t.Errorf("validateTable(%q): expected error, got %q", tc.table, got)
-			}
-			continue
-		}
-		if err != nil {
-			t.Errorf("validateTable(%q): unexpected error: %v", tc.table, err)
-			continue
-		}
-		if got != tc.want {
-			t.Errorf("validateTable(%q) = %q, want %q", tc.table, got, tc.want)
-		}
-	}
-}
+import "testing"
 
 // TestQuoteTableCaseFoldsLikeSnowflakeUnquoted pins down the fix for
 // LEAD-ARCH #1 on PR #4: dev/owners.yaml names tables in lower case (e.g.
@@ -110,13 +73,6 @@ func TestQuoteIdent(t *testing.T) {
 		if err != nil || got != tc.want {
 			t.Errorf("quoteIdent(%q) = %q, %v; want %q", tc.name, got, err, tc.want)
 		}
-	}
-}
-
-func TestValidateTableUnquoted(t *testing.T) {
-	got, err := validateTable("analytics.orders")
-	if err != nil || got != "ANALYTICS.ORDERS" || strings.Contains(got, `"`) {
-		t.Fatalf("validateTable = %q, %v", got, err)
 	}
 }
 

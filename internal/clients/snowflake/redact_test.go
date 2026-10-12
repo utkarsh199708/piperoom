@@ -38,6 +38,42 @@ func TestRedact(t *testing.T) {
 			leak: []string{"p@ss"},
 		},
 		{
+			name: "unencoded question mark in password",
+			dsn:  "svc:p?ss@acme/DB/SCH",
+			msg:  "auth failed for p?ss",
+			leak: []string{"p?ss"},
+		},
+		{
+			name: "question mark in password with params",
+			dsn:  "svc:pa?ssword@acme/DB/SCH?warehouse=WH&role=R",
+			msg:  "auth failed for pa?ssword",
+			leak: []string{"pa?ssword"},
+		},
+		{
+			name: "plus in password",
+			dsn:  "svc:pa+ss9@acme/DB/SCH",
+			msg:  "auth failed for pa ss9 and pa+ss9",
+			leak: []string{"pa ss9", "pa+ss9"},
+		},
+		{
+			name: "proxyPassword param",
+			dsn:  "svc:pw1234@acme/DB/SCH?proxyHost=h&proxyUser=u&proxyPassword=Pr0xySecret",
+			msg:  "proxy auth failed with Pr0xySecret",
+			leak: []string{"Pr0xySecret"},
+		},
+		{
+			name: "privateKey param",
+			dsn:  "svc@acme/DB/SCH?authenticator=snowflake_jwt&privateKey=MIIEvQIBADANBgkqhkiG9w0BAQEFAASC",
+			msg:  "bad key MIIEvQIBADANBgkqhkiG9w0BAQEFAASC",
+			leak: []string{"MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"},
+		},
+		{
+			name: "passcode param",
+			dsn:  "svc:pw1234@acme/DB/SCH?passcode=483920",
+			msg:  "mfa rejected 483920",
+			leak: []string{"483920"},
+		},
+		{
 			name: "token param",
 			dsn:  "svc@acme/DB/SCH?authenticator=oauth&token=abc123tok",
 			msg:  "rejected abc123tok",
@@ -64,6 +100,15 @@ func TestRedactKeepsHarmlessText(t *testing.T) {
 	err := Redact(errors.New("snowflake: ping: context deadline exceeded"), "svc:pw@acme/DB/SCH")
 	if err.Error() != "snowflake: ping: context deadline exceeded" {
 		t.Fatalf("Redact changed a message with no secret: %q", err)
+	}
+	// A short password must not blank unrelated text such as the warehouse name.
+	short := Redact(errors.New("warehouse WH is suspended for svc:WH@acme/DB/SCH?warehouse=WH"), "svc:WH@acme/DB/SCH?warehouse=WH")
+	if !strings.Contains(short.Error(), "warehouse WH is suspended") {
+		t.Fatalf("short password blanked unrelated text: %q", short)
+	}
+	shortCtx := Redact(errors.New("login as svc:WH@acme failed"), "svc:WH@acme/DB/SCH")
+	if strings.Contains(shortCtx.Error(), ":WH@") {
+		t.Fatalf("short password left in its user:pw@ context: %q", shortCtx)
 	}
 	if Redact(nil, "x") != nil {
 		t.Fatal("Redact(nil) must be nil")

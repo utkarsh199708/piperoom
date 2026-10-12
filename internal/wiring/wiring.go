@@ -41,9 +41,12 @@ const (
 type Wired struct {
 	Source    clients.SourceDB
 	Warehouse clients.Warehouse
-	Connect   clients.ConnectClient
-	Kafka     clients.KafkaAdmin
-	Registry  clients.SchemaRegistryClient
+	// WarehouseKind is the normalised WAREHOUSE_KIND ("postgres" or
+	// "snowflake"). Empty means postgres.
+	WarehouseKind string
+	Connect       clients.ConnectClient
+	Kafka         clients.KafkaAdmin
+	Registry      clients.SchemaRegistryClient
 
 	// Builder derives pipeline graphs with live health from the clients above.
 	Builder topology.Builder
@@ -139,7 +142,8 @@ func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
 	}
 
 	// A bad WAREHOUSE_KIND is a config mistake: fail before any client is built.
-	if _, err := warehouseKind(cfg); err != nil {
+	whKind, err := warehouseKind(cfg)
+	if err != nil {
 		return nil, err
 	}
 
@@ -176,14 +180,15 @@ func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
 
 	var once sync.Once
 	return &Wired{
-		Source:    src,
-		Warehouse: wh,
-		Connect:   a2.Connect,
-		Kafka:     a2.Kafka,
-		Registry:  a2.Registry,
-		Builder:   topology.NewBuilder(o, a2.Connect, a2.Kafka, src, wh),
-		Owners:    o,
-		close:     func() { once.Do(closeOpened) },
+		Source:        src,
+		Warehouse:     wh,
+		WarehouseKind: whKind,
+		Connect:       a2.Connect,
+		Kafka:         a2.Kafka,
+		Registry:      a2.Registry,
+		Builder:       topology.NewBuilder(o, a2.Connect, a2.Kafka, src, wh),
+		Owners:        o,
+		close:         func() { once.Do(closeOpened) },
 	}, nil
 }
 
@@ -197,7 +202,7 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 		b = topology.NewBuilder(w.Owners, w.Connect, w.Kafka, w.Source, w.Warehouse)
 		w.Builder = b
 	}
-	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, Builder: b, Owners: w.Owners, Connect: w.Connect}); err != nil {
+	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: w.Connect}); err != nil {
 		return fmt.Errorf("wiring: register db tools: %w", err)
 	}
 	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: w.Connect, Registry: w.Registry, Kafka: w.Kafka, Owners: w.Owners}); err != nil {

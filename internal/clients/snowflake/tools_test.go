@@ -47,7 +47,7 @@ func snowflakeTool(t *testing.T, fq *fakeQuerier, name string) tools.Tool {
 	}
 	var wh clients.Warehouse = &DB{q: fq}
 	reg := tools.NewRegistry()
-	if err := dbtools.Register(reg, dbtools.Deps{Wh: wh, Owners: o}); err != nil {
+	if err := dbtools.Register(reg, dbtools.Deps{Wh: wh, WarehouseKind: "snowflake", Owners: o}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	tt, ok := reg.Get(name)

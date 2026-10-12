@@ -5,8 +5,8 @@
 //
 // Read-only access is enforced by the role in the DSN, not by this package:
 // grant the connecting role only USAGE on the warehouse, database and
-// schema, and SELECT on the tables it reads (see the PR description for the
-// exact grants). The driver has no session-level read-only switch, so a
+// schema, and SELECT on the tables it reads (see README.md in this folder and
+// docs/pilot/permissions.md for the exact grants). The driver has no session-level read-only switch, so a
 // role with write grants could still write; keep this role SELECT-only.
 package snowflake
 
@@ -46,6 +46,11 @@ func New(ctx context.Context, dsn string) (*DB, error) {
 		db.Close()
 		return nil, Redact(fmt.Errorf("snowflake: ping: %w", err), dsn)
 	}
+	// A Snowflake session token expires after about 4 hours. Retire idle and
+	// old pooled connections well before that, so a quiet server does not
+	// hand the next query a dead session.
+	db.SetConnMaxIdleTime(30 * time.Minute)
+	db.SetConnMaxLifetime(time.Hour)
 	return &DB{db: db, q: dbQuerier{db: db}}, nil
 }
 
