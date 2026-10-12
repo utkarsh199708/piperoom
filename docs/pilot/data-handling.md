@@ -1,7 +1,7 @@
 # Data handling
 
 What Piperoom reads from your systems, what reaches the model, where it goes, who can see it, and
-how to limit it. Based on the code on `main` at `bf71605`. Under `cmd/investigate` events are
+how to limit it. Based on the code on `main` at `d6b83aa`. Under `cmd/investigate` events are
 printed to the terminal. Under `cmd/server` they go to the room event log and, if Slack is
 configured, to a Slack thread.
 
@@ -16,16 +16,29 @@ your systems ──read-only tools──► Summary (text) ──► Claude API 
                     └───────────► selected room events ──► Slack thread   (only if configured)
 ```
 
-- **Claude API (Anthropic).** Everything in the next section goes to the Anthropic API. Review
-  Anthropic's current commercial terms and data-retention settings for your organisation before
-  the pilot. Piperoom does not change them.
-  - **Where the requests go.** The Anthropic SDK reads `ANTHROPIC_BASE_URL` from the environment
-    and sends every request there (`anthropic-sdk-go@v1.80.0/client.go:52-58`). It reads
+- **The model provider.** Everything in the next section goes to the model provider you choose
+  with `PIPEROOM_MODEL_PROVIDER` (`internal/agent/endpoint.go:86-137`): `anthropic` (the default),
+  `bedrock` or `vertex`. Review that provider's current commercial terms and data-retention
+  settings for your organisation before the pilot. Piperoom does not change them.
+  - **`bedrock` and `vertex` run in your cloud account.** The requests carry your AWS or Google
+    credentials and go to the regional endpoint: the Bedrock runtime in `AWS_REGION`
+    (`bedrock-runtime.<region>.amazonaws.com`, `anthropic-sdk-go@v1.80.0/bedrock/bedrock.go:257`),
+    or the Vertex AI endpoint in `VERTEX_REGION` for `VERTEX_PROJECT_ID`
+    (`anthropic-sdk-go@v1.80.0/vertex/vertex.go:96-106`). Usage is billed to that account.
+  - **`anthropic`: where the requests go.** The Anthropic SDK reads `ANTHROPIC_BASE_URL` from the
+    environment and sends every request there (`anthropic-sdk-go@v1.80.0/client.go:52-58`). It reads
     `ANTHROPIC_API_KEY` first, then `ANTHROPIC_AUTH_TOKEN`, then `ANTHROPIC_PROFILE` and other
     sources (`anthropic-sdk-go@v1.80.0/client.go:30-82`). Piperoom reads none of these itself. **Leave `ANTHROPIC_BASE_URL`
     unset, or pin it to the Anthropic host you approved. Unset `ANTHROPIC_AUTH_TOKEN` and
     `ANTHROPIC_PROFILE` on the host.** Otherwise the prompts and the key go wherever those
     variables point.
+  - **The bedrock and vertex clients turn off the SDK's environment defaults**
+    (`anthropic-sdk-go@v1.80.0/bedrock/bedrock.go:252`, `anthropic-sdk-go@v1.80.0/vertex/vertex.go:108`). `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY`
+    therefore do not reach them.
+- **Per-room token cap.** A room stops when it has used `PIPEROOM_ROOM_TOKEN_BUDGET` model tokens
+  (default `2000000`). The count is in memory and starts again at zero after a restart. It counts
+  input, cache creation, cache reads, output and compaction at face value, so the cap limits model
+  work, not dollars (`internal/agent/budget.go:13-15,65-67`).
 - **Room event log (`room_events`, `migrations/00001_init.sql:16`).** Every tool call, result `Data`,
   comment, steer, proposal and approval is stored **permanently** in the Piperoom database and shown
   to everyone who can open the room. There is no per-event redaction after the fact. Redaction
@@ -37,10 +50,10 @@ your systems ──read-only tools──► Summary (text) ──► Claude API 
   Warehouse queries run with the role in that DSN, so the account's network path is part of
   your egress review (section 5).
 - **Slack (optional, outbound only).** Off unless **both** `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID`
-  are set. A half setting stops the server at start (`cmd/server/main.go:145-149`;
+  are set. A half setting stops the server at start (`cmd/server/main.go:157-161`;
   `internal/slackbridge/bridge.go:63-69`). It posts into one thread per room in one channel
   (`internal/slackbridge/bridge.go:1-8`). Nothing typed in Slack reaches a room. The mirror runs in
-  `--demo` mode too, if the variables are set (`cmd/server/main.go:145-149` runs before the demo branch).
+  `--demo` mode too, if the variables are set (`cmd/server/main.go:157-161` runs before the demo branch).
   - **Posted:** the room title, severity, pipeline id and room id, plus a room link if
     `PIPEROOM_PUBLIC_URL` is set (`internal/slackbridge/render.go:78-92`). Hypotheses (text up to
     1500 bytes). Each proposal's title, risk and rollback, and up to 10 steps with action name,
@@ -67,9 +80,9 @@ These are the sources of text the model reads. Everything here goes to the Anthr
 | Source | What the model gets | Code |
 |---|---|---|
 | First message | the alert **title**, the **pipeline id**, the **room id** and the **pipeline map** (text). Severity is not in this message | `internal/agent/prompt.go:91-113` |
-| Human input, live | a driver's steer, including a sent suggestion, in full, with the author's name and **without** the untrusted wrapper. A comment reaches the agent live only when it mentions `@agent`; comments are wrapped. | `internal/room/service.go:624-629`; `internal/agent/prompt.go:238-239` (steer), `:251-253` (comment) |
-| Approvals and rejections | the layer and proposal id; on rejection, the reason | `internal/room/service.go:630-651` |
-| Action results | the output of each step, in full, with the ok flag | `internal/room/service.go:652-665` (no cap on this path) |
+| Human input, live | a driver's steer, including a sent suggestion, in full, with the author's name and **without** the untrusted wrapper. A comment reaches the agent live only when it mentions `@agent`; comments are wrapped. | `internal/room/service.go:633-638`; `internal/agent/prompt.go:238-239` (steer), `:251-253` (comment) |
+| Approvals and rejections | the layer and proposal id; on rejection, the reason | `internal/room/service.go:639-660` |
+| Action results | the output of each step, in full, with the ok flag | `internal/room/service.go:661-674` (no cap on this path) |
 | Tool results | each tool's `Summary` text (never `Data`) | the tool's `Summary`, capped by `tools.MaxSummaryBytes` |
 | Hand-off | a digest of the room log (see below) | `internal/agent/handoff.go:19-25`; `prompt.go:298-392` |
 
@@ -151,8 +164,9 @@ guarantee. The controls that do not depend on the model are:
 
 ## 4. Retention and deletion
 
-- The event log has **no retention policy or size cap** (F6). No code deletes `room_events` or
-  `rooms` (`internal/store/store.go`). Decide how long you keep closed rooms and delete them at the
+- The event log has **no retention policy or size cap** (F6). Nothing deletes `room_events`, and
+  nothing deletes closed rooms. The only room delete removes a room row with no events
+  (`internal/store/store.go:299`). Decide how long you keep closed rooms and delete them at the
   database level; there is no UI for deletion.
 - Deleting the Piperoom database deletes the room history, the Slack thread state and everything
   else in it. Data sent to the Anthropic API, and messages already posted to Slack, are governed by

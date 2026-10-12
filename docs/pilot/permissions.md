@@ -20,7 +20,7 @@ The names below match the code: tools in `internal/tools/{dbtools,kafkatools}`, 
 | Kafka Connect | `connect_list_connectors`, `connect_status`, `connect_config` | REST `GET` | 4 actions: `connect_restart_task`, `connect_restart_connector`, `connect_resume_connector`, `connect_update_connector_config` |
 | Schema Registry | `schema_registry_subjects`, `_versions`, `_diff` | REST `GET` | 2 actions: `schema_set_compatibility`, `schema_register` |
 | Room database | room service | n/a | full access to its **own** database only (it creates its tables itself) |
-| Anthropic API | agent | API key (env var) | n/a |
+| Model provider | agent | `anthropic`: API key (env var). `bedrock`: AWS identity with invoke rights in `AWS_REGION`. `vertex`: Google identity with Vertex AI access in `VERTEX_PROJECT_ID` | n/a |
 
 Every write action is registered in `internal/actions/kafka_actions.go:38-52`. The room service
 runs them only after approval, and checks each one against the room's pipeline (see
@@ -247,7 +247,7 @@ the approval process in your team.
 ## Room database
 
 The room service uses a separate Postgres database (`PIPEROOM_DB_URL`) that Piperoom owns.
-At start-up `cmd/server` applies the embedded goose migrations itself (`cmd/server/main.go:125`,
+At start-up `cmd/server` applies the embedded goose migrations itself (`cmd/server/main.go:137`,
 `migrations/migrate.go:20`), so the role in `PIPEROOM_DB_URL` needs rights to
 create tables and indexes in that database. The migrations create `rooms`, `room_events`,
 `proposals`, `approvals`, `suggestions`, `handoffs` (`00001_init.sql`), `proposal_steps`
@@ -272,13 +272,29 @@ hand-off digest (see [data-handling.md](data-handling.md#what-reaches-the-model)
 `ANTHROPIC_BASE_URL` unset, or pin it to the Anthropic host you approved. Leave
 `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_PROFILE` unset on the Piperoom host.
 
+## Model provider credentials (`PIPEROOM_MODEL_PROVIDER`)
+
+Pick one provider. The default is `anthropic` (the section above).
+
+- **`bedrock`**: set `AWS_REGION`. Give the process an AWS identity that may invoke the model in
+  that region (Bedrock invoke permissions on the model or inference profile). Piperoom uses the
+  standard AWS chain: environment variables, shared config, or an instance or task role. An
+  `AWS_BEARER_TOKEN_BEDROCK` key may be used instead. Credentials are checked once at start-up
+  (`internal/agent/endpoint.go:138-165`). Requests go to `bedrock-runtime.<AWS_REGION>.amazonaws.com`.
+- **`vertex`**: set `VERTEX_PROJECT_ID` and `VERTEX_REGION`. Give the process a Google identity
+  (application default credentials, for example a service account) with access to Vertex AI in that
+  project. Requests go to the Vertex AI endpoint for `VERTEX_REGION` (`anthropic-sdk-go@v1.80.0/vertex/vertex.go:96-106`).
+- **Either way**, the provider's key or identity is the credential to protect. The Anthropic key
+  section above does not apply, and `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` do not reach these
+  clients (`anthropic-sdk-go@v1.80.0/bedrock/bedrock.go:252`, `anthropic-sdk-go@v1.80.0/vertex/vertex.go:108`).
+
 ## Review checklist
 
 - [ ] Every credential is dedicated to Piperoom and stored in a secret manager, not in the repo or in `owners.yaml`.
 - [ ] Postgres and warehouse roles cannot write (`INSERT` as that role fails), and see only pipeline tables.
 - [ ] Kafka principal has no write/group-read/alter ACLs, only pipeline-prefixed topics.
 - [ ] Connect and Registry are in read-only mode unless you deliberately enabled write mode. In write mode the proxy allows only the four Connect calls and two Registry calls listed above.
-- [ ] Network: Piperoom can reach only the five systems above, the Snowflake account host (only if `WAREHOUSE_KIND=snowflake`), the Anthropic API host (or the pinned `ANTHROPIC_BASE_URL` host), its own DB, and, only if Slack is configured, `https://slack.com/api` (`internal/slackbridge/bridge.go:36`).
+- [ ] Network: Piperoom can reach only the five systems above, the Snowflake account host (only if `WAREHOUSE_KIND=snowflake`), the model provider's endpoint (the Anthropic API host or the pinned `ANTHROPIC_BASE_URL` host for `anthropic`; the Bedrock runtime in `AWS_REGION` for `bedrock`; the Vertex AI endpoint in `VERTEX_REGION` for `vertex`), its own DB, and, only if Slack is configured, `https://slack.com/api` (`internal/slackbridge/bridge.go:36`).
 - [ ] If `WAREHOUSE_KIND=snowflake`: the DSN password is URL-encoded, the role in the DSN has only `USAGE` and `SELECT` as listed above, and the resource monitor is set.
 - [ ] `ANTHROPIC_BASE_URL` is unset or pinned, and `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_PROFILE` are unset on the host (`anthropic-sdk-go@v1.80.0/client.go:52-82`).
 - [ ] The room service's HTTP port (`PIPEROOM_HTTP_ADDR`) is not reachable from outside the pilot team's network.
