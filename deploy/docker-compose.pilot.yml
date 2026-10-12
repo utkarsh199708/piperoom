@@ -68,6 +68,37 @@ services:
       PIPEROOM_WATCH_INTERVAL: ${PIPEROOM_WATCH_INTERVAL:-}
       PIPEROOM_WATCH_CHECK_TIMEOUT: ${PIPEROOM_WATCH_CHECK_TIMEOUT:-}
       PIPEROOM_WATCH_COOLDOWN: ${PIPEROOM_WATCH_COOLDOWN:-}
+      PIPEROOM_TRIAGE_MODEL: ${PIPEROOM_TRIAGE_MODEL:-}
+      PIPEROOM_ROOM_TOKEN_BUDGET: ${PIPEROOM_ROOM_TOKEN_BUDGET:-}
+      # Model provider: anthropic (default) | bedrock | vertex. See deploy/README.md.
+      PIPEROOM_MODEL_PROVIDER: ${PIPEROOM_MODEL_PROVIDER:-}
+      # Bedrock. Credentials come from, in this order of ease: a Bedrock API key,
+      # static AWS keys, an AWS_PROFILE (needs the commented ~/.aws mount below),
+      # or an instance/task role (nothing to set here).
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_PROFILE: ${AWS_PROFILE:-}
+      # Vertex AI. GOOGLE_APPLICATION_CREDENTIALS is a path INSIDE the container,
+      # for example /config/gcp-sa.json (see the optional mount below).
+      VERTEX_PROJECT_ID: ${VERTEX_PROJECT_ID:-}
+      VERTEX_REGION: ${VERTEX_REGION:-}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+      # ANTHROPIC_BASE_URL is deliberately NOT passed. The Anthropic SDK reads it
+      # from the process environment, so passing it would let a value from the
+      # host (the shell of whoever runs compose, or a stray line in .env) send the
+      # API key and every prompt to another server. Only the variables listed in
+      # this block reach the container, so a host value cannot redirect model
+      # traffic. Do not add it here without a security review.
+      PIPEROOM_RETENTION_DAYS: ${PIPEROOM_RETENTION_DAYS:-}
+      # Outbound proxy for the Anthropic/Bedrock/Vertex APIs, Slack, and HTTP(S)
+      # Connect / Schema Registry / Snowflake. Kafka and Postgres use plain TCP and
+      # do not go through it. Loopback is never proxied.
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
       PIPEROOM_PUBLIC_URL: ${PIPEROOM_PUBLIC_URL:-}
       KAFKA_SECURITY_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL:-}
       KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-}
@@ -105,6 +136,20 @@ services:
       - ./config:/config:ro
       # Optional TLS files for Kafka / Registry / Connect (KAFKA_TLS_CA_FILE=/certs/ca.pem ...).
       - ./certs:/certs:ro
+      # Optional, Vertex AI with a service-account key file. deploy/config is
+      # already mounted at /config above, so a key saved as deploy/config/gcp-sa.json
+      # is visible at /config/gcp-sa.json with no extra line; just set
+      # GOOGLE_APPLICATION_CREDENTIALS=/config/gcp-sa.json in deploy/.env. To keep
+      # the key outside deploy/config, uncomment this and point the variable at
+      # the container path:
+      # - ./secrets/gcp-sa.json:/config/gcp-sa.json:ro
+      #
+      # Optional, Bedrock with a named AWS profile (AWS_PROFILE). Off by default so
+      # the container never sees a developer's whole ~/.aws. Prefer a Bedrock API
+      # key, static keys in deploy/.env, or an instance role. Mount only a file
+      # that holds the one profile:
+      # - ./secrets/aws-config:/home/nonroot/.aws/config:ro
+      # - ./secrets/aws-credentials:/home/nonroot/.aws/credentials:ro
     # The image has a HEALTHCHECK (GET /healthz). Logs: docker compose logs -f piperoom
     read_only: true
     tmpfs:

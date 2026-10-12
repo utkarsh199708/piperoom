@@ -4,3 +4,6 @@ config/owners.yaml
 config/users.yaml
 certs/*
 !certs/.gitkeep
+# Optional Vertex AI service-account key and other secret files (see pilot.env.example)
+config/*.json
+secrets/
