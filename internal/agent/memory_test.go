@@ -102,7 +102,7 @@ func TestWaitForInputBacksOffOnDrainError(t *testing.T) {
 	if len(slept) != 3 {
 		t.Fatalf("expected one backoff sleep per failed drain (3), got %d: %v", len(slept), slept)
 	}
-	want := []time.Duration{drainBackoffMin, drainBackoffMin * 2, drainBackoffMin * 4}
+	want := []time.Duration{defaultDrainBackoffMin, defaultDrainBackoffMin * 2, defaultDrainBackoffMin * 4}
 	for i, d := range want {
 		if slept[i] != d {
 			t.Fatalf("sleep %d = %v, want %v (all: %v)", i, slept[i], d, slept)
@@ -111,7 +111,7 @@ func TestWaitForInputBacksOffOnDrainError(t *testing.T) {
 }
 
 // TestWaitForInputBackoffCapsAtMax checks the backoff never exceeds
-// drainBackoffMax even after many consecutive drain failures.
+// defaultDrainBackoffMax even after many consecutive drain failures.
 func TestWaitForInputBackoffCapsAtMax(t *testing.T) {
 	inbox := &fakeInbox{
 		drainErr:      errors.New("inbox store unavailable"),
@@ -136,11 +136,11 @@ func TestWaitForInputBackoffCapsAtMax(t *testing.T) {
 		t.Fatalf("expected 8 backoff sleeps, got %d: %v", len(slept), slept)
 	}
 	for _, d := range slept {
-		if d > drainBackoffMax {
-			t.Fatalf("backoff exceeded the max: %v > %v (all: %v)", d, drainBackoffMax, slept)
+		if d > defaultDrainBackoffMax {
+			t.Fatalf("backoff exceeded the max: %v > %v (all: %v)", d, defaultDrainBackoffMax, slept)
 		}
 	}
-	if slept[len(slept)-1] != drainBackoffMax {
+	if slept[len(slept)-1] != defaultDrainBackoffMax {
 		t.Fatalf("backoff should have reached the max by the last failure, got %v", slept)
 	}
 }

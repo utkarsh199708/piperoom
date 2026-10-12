@@ -77,7 +77,7 @@ func TestFullRegistryStaysWithinStrictToolCap(t *testing.T) {
 		}
 	}
 	slots := maxStrictTools - len(room)
-	for _, name := range strictReadTools[:min(slots, len(strictReadTools))] {
+	for _, name := range strictReadTools()[:min(slots, len(strictReadTools()))] {
 		if !strict[name] {
 			t.Errorf("most-used read tool %s must be strict", name)
 		}
@@ -89,7 +89,7 @@ func TestFullRegistryStaysWithinStrictToolCap(t *testing.T) {
 func TestStrictReadToolsAreRegistered(t *testing.T) {
 	reg := fullRegistry(t)
 	seen := map[string]bool{}
-	for _, name := range strictReadTools {
+	for _, name := range strictReadTools() {
 		if _, ok := reg.Get(name); !ok {
 			t.Errorf("strictReadTools names %q, which no read tool registers", name)
 		}
@@ -97,7 +97,7 @@ func TestStrictReadToolsAreRegistered(t *testing.T) {
 			t.Errorf("strictReadTools lists %q twice", name)
 		}
 		seen[name] = true
-		if slices.Contains(roomToolNames, name) {
+		if slices.Contains(roomToolNames(), name) {
 			t.Errorf("%q is a room tool; room tools are strict already", name)
 		}
 	}
@@ -146,7 +146,7 @@ func TestStrictReadToolsBeatRegistrationOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	last := strictReadTools[len(strictReadTools)-1]
+	last := strictReadTools()[len(strictReadTools())-1]
 	if err := reg.Register(&recordingTool{name: last, schema: map[string]any{"type": "object"}}); err != nil {
 		t.Fatal(err)
 	}

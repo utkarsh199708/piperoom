@@ -4,18 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
 	"strings"
-	"time"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
-
-// proposalTimeout bounds the Proposals.Create call so a stalled proposal store
-// cannot hang the investigation.
-var proposalTimeout = 10 * time.Second
 
 // roomToolNames are the names of the room tools newRoomTools builds, kept
 // beside it so both are edited together. RoomToolNames serves callers that
@@ -23,7 +17,9 @@ var proposalTimeout = 10 * time.Second
 // tool constructor may one day dereference its deps, and a name lookup must
 // not panic on a zero Deps. TestRoomToolNamesMatchRoomTools keeps the list in
 // sync with what the constructor really builds.
-var roomToolNames = []string{"update_hypothesis", "propose_fix", "post_message"}
+func roomToolNames() []string {
+	return []string{"update_hypothesis", "propose_fix", "post_message"}
+}
 
 // newRoomTools builds the three room tools the agent itself owns. These are
 // tools.KindRoom: they only write to the room log or create proposals, never
@@ -44,7 +40,7 @@ func newRoomTools(d Deps, track *proposalTracker) []tools.Tool {
 // names tools the model can really call. The returned slice is a copy callers
 // may keep or modify.
 func RoomToolNames() []string {
-	return slices.Clone(roomToolNames)
+	return roomToolNames()
 }
 
 func roomObjectSchema(props map[string]any, required ...string) map[string]any {
@@ -330,15 +326,16 @@ type proposeFixResult struct {
 	ProposalID string `json:"proposal_id"`
 }
 
-// placeholderTexts are the values a model sends when it has nothing real to put
-// in risk or rollback. A live run stored them as "<no value>" for the approvers
-// to read, so they are refused the same as an empty string.
-var placeholderTexts = map[string]bool{
-	"<no value>": true,
-	"n/a":        true,
-	"none":       true,
-	"-":          true,
-	"tbd":        true,
+// isPlaceholderText reports the values a model sends when it has nothing real
+// to put in risk or rollback. A live run stored them as "<no value>" for the
+// approvers to read, so they are refused the same as an empty string. v is
+// already trimmed and lower-cased.
+func isPlaceholderText(v string) bool {
+	switch v {
+	case "<no value>", "n/a", "none", "-", "tbd":
+		return true
+	}
+	return false
 }
 
 // checkProposalText refuses a risk or rollback that is empty, whitespace-only or
@@ -346,7 +343,7 @@ var placeholderTexts = map[string]bool{
 // so the model sees it as a failed tool call and retries with a real answer.
 func checkProposalText(field, value string) error {
 	v := strings.ToLower(strings.TrimSpace(value))
-	if v == "" || placeholderTexts[v] {
+	if v == "" || isPlaceholderText(v) {
 		return fmt.Errorf("%w: %s must describe the actual %s in words; empty or placeholder values such as n/a are refused", tools.ErrBadInput, field, field)
 	}
 	return nil

@@ -45,21 +45,11 @@ const (
 	// The wording says data is flowing again, not that the sink has caught up:
 	// the check sees new rows after the fix, not the whole backlog.
 	recoveredHead = "recovered: every layer check passed and data is flowing again (new rows arrived after the fix). This does not show that the sink has caught up.\n"
+	// recoveredConfigHead opens the verdict of a proposal that only changed
+	// schema configuration. No data path was touched, so it claims no flow.
+	recoveredConfigHead = "recovered: every layer check passed. The proposal only changed schema configuration, so data flow was not part of this verdict.\n"
 	// waitingDetail is the status detail of a recovered episode parked for input.
 	waitingDetail = "pipeline recovered; waiting for input"
-)
-
-var (
-	// freshnessWait is the pause between warehouse_freshness read rounds. One
-	// round sleeps once for all sinks still pending. A var so tests can shrink it.
-	freshnessWait = 10 * time.Second
-	// settleWait is the pause between the two connector reads that a recovery
-	// needs, so a connector that only just came back is not counted as healthy.
-	// A var so tests can shrink it.
-	settleWait = 5 * time.Second
-	// baselineTimeout bounds the whole creation-baseline snapshot taken when a
-	// proposal is made. A var so tests can shrink it.
-	baselineTimeout = 20 * time.Second
 )
 
 // proposalRecord is what the agent remembers about a proposal it created, so a
@@ -174,6 +164,10 @@ type actionOutcome struct {
 	// needsModel is true when the model must read this batch: a person spoke,
 	// or a step's outcome is failed or unknown.
 	needsModel bool
+	// statusSet is true when this batch already emitted a working status with a
+	// detail (a compatibility restore is pending), which a plain working status
+	// must not overwrite at once.
+	statusSet bool
 	// notes are the [verification] lines for the model, to be sent in the same
 	// user message as the inputs they judge.
 	notes []string
@@ -194,6 +188,7 @@ func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) a
 		out.recovered = out.recovered || one.recovered
 		out.broken = out.broken || one.broken
 		out.needsModel = out.needsModel || one.needsModel
+		out.statusSet = out.statusSet || one.statusSet
 		out.notes = append(out.notes, one.notes...)
 	}
 	switch {
@@ -241,17 +236,99 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	}
 
 	recovered, evidence, head := r.verifyProposal(ctx, rec)
-	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: head + evidence})
+	var followUp string
+	if recovered {
+		followUp = compatFollowUp(rec.steps)
+	}
+	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: head + evidence + followUp})
 	r.proposals.markVerified(id, recovered)
 	out := actionOutcome{
 		recovered: recovered,
 		broken:    !recovered,
-		notes:     []string{verifyTag + head + wrapToolOutput("verify", "", evidence)},
+		notes:     []string{verifyTag + head + wrapToolOutput("verify", "", evidence) + followUp},
 	}
-	if recovered {
+	switch {
+	case recovered && followUp != "":
+		// The model must read the follow-up and get one turn before the episode
+		// can park as done, so it can propose the restore. If it does not, the
+		// episode parks as done at the end of that turn, like any recovery.
+		out.needsModel = true
+		out.statusSet = true
+		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working", Detail: "pipeline recovered; compatibility restore pending"})
+	case recovered:
 		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "done", Detail: "pipeline recovered"})
 	}
 	return out
+}
+
+// compatFollowUp tells the model that a recovered fix left a schema subject at
+// compatibility NONE, which lets data through that the old contract cannot read.
+// It returns one line per such subject, each starting on a new line, or "" when
+// the proposal left none. A later step of the same proposal that sets the subject
+// to another level counts as the restore already done. The earlier level is
+// never parsed here: the model reads it from the action result or the schema
+// tools.
+func compatFollowUp(steps []events.ProposalStep) string {
+	order, final := compatFinalLevels(steps)
+	var b strings.Builder
+	for _, subject := range order {
+		if final[subject] != "NONE" {
+			continue
+		}
+		fmt.Fprintf(&b, "\nfollow-up: %s compatibility is still NONE. Propose a separate fix that restores the level shown before \"→\" in the schema_set_compatibility step result (or read it with the schema tools).", followUpSubject(subject))
+	}
+	return b.String()
+}
+
+// compatFinalLevels returns the subjects that schema_set_compatibility steps set,
+// in first-seen order, with the upper-cased level each ends at: a later step on
+// the same subject overrides an earlier one. Steps without a subject are skipped.
+func compatFinalLevels(steps []events.ProposalStep) ([]string, map[string]string) {
+	final := map[string]string{}
+	var order []string
+	for _, s := range steps {
+		if s.Action != "schema_set_compatibility" {
+			continue
+		}
+		subject, ok := stringParam(s.Params, "subject")
+		if !ok {
+			continue
+		}
+		level, _ := stringParam(s.Params, "level")
+		if _, seen := final[subject]; !seen {
+			order = append(order, subject)
+		}
+		final[subject] = strings.ToUpper(level)
+	}
+	return order, final
+}
+
+// followUpSubject renders a subject name for the follow-up line, which sits in a
+// verification block outside any untrusted wrapper. The name comes from a step
+// the model proposed, so a name that is not a plain token is marked, stripped of
+// any verification tag and quoted, and cannot add lines or forge a verdict.
+func followUpSubject(s string) string {
+	if isPlainSubject(s) {
+		return s
+	}
+	return strconv.Quote(verificationTag.ReplaceAllString(markInvisible(s), "(verification)"))
+}
+
+// isPlainSubject reports whether s uses only the characters real subjects use,
+// such as pg.public.orders-value.
+func isPlainSubject(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("._:/-", r):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // parked reports whether the run waits for human input instead of calling the
@@ -309,7 +386,19 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) (bool, 
 		return false, strings.Join(lines, "\n"), "NOT recovered: a layer check did not pass.\n"
 	}
 
-	flow := r.verifyDataFlow(ctx, rec)
+	if r.recoveredIdle && schemaConfigOnly(rec.steps) {
+		// The episode was already verified recovered, and this proposal only
+		// tightens schema configuration (the restore after a fix). The layer
+		// checks decide. Data flow is read once for the evidence and is not waited
+		// for: a compatibility change adds no rows by itself. From a broken state
+		// nothing has been verified yet, so the data-flow rule applies.
+		flow := r.verifyDataFlow(ctx, rec, false)
+		lines = append(lines, "data flow (information only, not part of this verdict):")
+		lines = append(lines, flow.lines...)
+		return true, strings.Join(lines, "\n"), recoveredConfigHead
+	}
+
+	flow := r.verifyDataFlow(ctx, rec, true)
 	lines = append(lines, flow.lines...)
 	evidence := strings.Join(lines, "\n")
 	switch {
@@ -336,10 +425,22 @@ type verifyCheck struct {
 // built for it, so a later step on the same layer with usable parameters still
 // gets its check. Layers without a known check contribute none. The warehouse
 // layer is not here: its freshness is judged by the data-flow check.
+//
+// A schema_set_compatibility step is the exception: it is checked per subject,
+// against the level the proposal leaves the subject at, because two such steps
+// on different subjects are two different facts.
 func verifyChecks(steps []events.ProposalStep) []verifyCheck {
 	seen := map[string]bool{}
+	seenSubject := map[string]bool{}
 	var checks []verifyCheck
 	for _, s := range steps {
+		if s.Action == "schema_set_compatibility" {
+			if c, subject, ok := compatCheck(s, steps); ok && !seenSubject[subject] {
+				seenSubject[subject] = true
+				checks = append(checks, c)
+			}
+			continue
+		}
 		if seen[s.Layer] {
 			continue
 		}
@@ -351,6 +452,68 @@ func verifyChecks(steps []events.ProposalStep) []verifyCheck {
 		checks = append(checks, c)
 	}
 	return checks
+}
+
+// compatCheck builds the check of one schema_set_compatibility step: the
+// subject's compatibility, read with schema_registry_versions, must equal the
+// level the proposal leaves the subject at. It returns the subject too. ok is
+// false when the step carries no usable subject or level.
+func compatCheck(s events.ProposalStep, steps []events.ProposalStep) (verifyCheck, string, bool) {
+	subject, ok := stringParam(s.Params, "subject")
+	if !ok {
+		return verifyCheck{}, "", false
+	}
+	_, final := compatFinalLevels(steps)
+	want := final[subject]
+	if want == "" {
+		return verifyCheck{}, "", false
+	}
+	return verifyCheck{name: "schema_registry_versions", input: jsonObject("subject", subject), judge: compatibilityIs(want)}, subject, true
+}
+
+// compatibilityIs judges a schema_registry_versions result: the subject's
+// compatibility must be the wanted level. A payload that cannot be decoded, or
+// that names no level (the tool reports UNKNOWN when it cannot read it), is not
+// a pass; the summary text is not judged.
+func compatibilityIs(want string) func(tools.Result) bool {
+	return func(res tools.Result) bool {
+		var d struct {
+			Compatibility string `json:"compatibility"`
+		}
+		if err := decodeData(res.Data, &d); err != nil {
+			return false
+		}
+		return d.Compatibility != "" && strings.EqualFold(d.Compatibility, want)
+	}
+}
+
+// schemaConfigOnly reports whether a proposal is a pure tightening of schema
+// configuration: every step is a schema_set_compatibility step with a check, and
+// no subject ends at NONE. Such a proposal changes no data path, so once the
+// episode is already recovered its layer checks decide and data flow is only
+// information: a quiet pipeline gets no new rows from a compatibility change.
+// Any other step, even a schema_register, keeps the data-flow rule, and so does
+// a proposal that loosens a subject to NONE: that one is a fix attempt, and only
+// data flow shows whether it worked.
+func schemaConfigOnly(steps []events.ProposalStep) bool {
+	if len(steps) == 0 {
+		return false
+	}
+	for _, s := range steps {
+		if s.Action != "schema_set_compatibility" {
+			return false
+		}
+		if _, _, ok := compatCheck(s, steps); !ok {
+			return false
+		}
+	}
+	_, final := compatFinalLevels(steps)
+	for _, level := range final {
+		if level == "NONE" {
+			return false
+		}
+	}
+	return true
 }
 
 // checkForStep returns the recovery check for one proposal step's layer, or ok
@@ -444,8 +607,10 @@ func (st sinkState) readings() string {
 //
 // The check baselines are read for every sink first. Each window round then
 // sleeps once and re-reads only the sinks still pending, so the whole check
-// sleeps at most freshnessAttempts × freshnessWait.
-func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord) flowResult {
+// sleeps at most freshnessAttempts × freshnessWait. With wait false the window
+// is skipped and only the creation baseline can pass a sink: the caller wants a
+// reading for the evidence, not a wait.
+func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bool) flowResult {
 	sinks, why := r.pipelineSinks(ctx, "verify")
 	if why != "" {
 		return flowResult{lines: []string{"data flow not verified: " + why}}
@@ -468,8 +633,8 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord) flowRes
 		states[i] = st
 	}
 
-	for attempt := 0; attempt < freshnessAttempts && anyPending(states); attempt++ {
-		if err := r.clk.Sleep(ctx, freshnessWait); err != nil {
+	for attempt := 0; wait && attempt < freshnessAttempts && anyPending(states); attempt++ {
+		if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
 			return flowResult{lines: []string{"data flow not verified: waiting for new rows: " + err.Error()}}
 		}
 		for i := range states {
@@ -521,7 +686,7 @@ func anyPending(states []sinkState) bool {
 // stores nothing: a partial baseline would judge some sinks against a time the
 // others never had.
 func (r *runner) snapshotBaseline(ctx context.Context, proposalID string) {
-	ctx, cancel := context.WithTimeout(ctx, baselineTimeout)
+	ctx, cancel := context.WithTimeout(ctx, r.timing.baselineTimeout)
 	defer cancel()
 	sinks, why := r.pipelineSinks(ctx, "baseline")
 	if why != "" {
@@ -637,20 +802,22 @@ func connectRecovered(res tools.Result) bool {
 }
 
 // pgSlotsRecovered reports whether pg_replication_slots shows at least one
-// active logical replication slot.
+// active logical replication slot. A payload that cannot be decoded is never a
+// recovery: the summary text carries slot names from the database, so it can
+// hold "active=true" without any slot being active, and it is not judged.
 func pgSlotsRecovered(res tools.Result) bool {
 	var slots []struct {
 		Active bool `json:"active"`
 	}
-	if err := decodeData(res.Data, &slots); err == nil {
-		for _, s := range slots {
-			if s.Active {
-				return true
-			}
-		}
+	if err := decodeData(res.Data, &slots); err != nil {
 		return false
 	}
-	return strings.Contains(res.Summary, "active=true")
+	for _, s := range slots {
+		if s.Active {
+			return true
+		}
+	}
+	return false
 }
 
 // runVerifyCheck runs one layer check. A settling check must also pass a second
@@ -661,11 +828,11 @@ func (r *runner) runVerifyCheck(ctx context.Context, c verifyCheck) (bool, strin
 	if !ok || !c.settle {
 		return ok, line
 	}
-	if err := r.clk.Sleep(ctx, settleWait); err != nil {
+	if err := r.clk.Sleep(ctx, r.timing.settleWait); err != nil {
 		return false, "settling: " + err.Error()
 	}
 	ok, again := r.readCheck(ctx, c)
-	return ok, line + "; read again after " + settleWait.String() + ": " + again
+	return ok, line + "; read again after " + r.timing.settleWait.String() + ": " + again
 }
 
 // readCheck reads one layer check once and judges it. It returns whether the
@@ -715,7 +882,7 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 		Input:     input,
 	})
 
-	tctx, cancel := context.WithTimeout(ctx, toolTimeout)
+	tctx, cancel := context.WithTimeout(ctx, r.timing.toolTimeout)
 	defer cancel()
 	start := time.Now()
 	res, err := entry.tool.Run(tctx, input)
