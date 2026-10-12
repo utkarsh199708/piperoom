@@ -88,6 +88,8 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 // tests) there is nothing to validate against, so every pipeline is treated as
 // known. No driver until someone takes control. created is false when the alert
 // joined the open room for it (see alertIndexKey) instead of opening one.
+// A resolved alert that matches no open room returns ErrResolvedAlertNoRoom and
+// changes nothing: it never opens a room.
 func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipelineID string, raw json.RawMessage) (RoomSnapshot, bool, error) {
 	if title == "" {
 		title = "New alert"
@@ -116,6 +118,10 @@ func (s *Service) CreateRoomFromAlert(ctx context.Context, title, severity, pipe
 		snap, err := s.joinAlertRoomLocked(ctx, existing, st, title, resolved)
 		s.mu.Unlock()
 		return snap, false, err
+	}
+	if resolved {
+		s.mu.Unlock()
+		return RoomSnapshot{}, false, ErrResolvedAlertNoRoom
 	}
 	if err := s.store.CreateRoom(ctx, store.Room{
 		ID: roomID, Title: title, Severity: severity, PipelineID: pipelineID, Status: "open", OpenedAt: now,
