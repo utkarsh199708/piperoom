@@ -36,7 +36,7 @@ type view struct {
 	roomID   string
 	owned    bool
 	follower bool
-	// leaderGone: a follower whose storm room has no owner any more (the
+	// leaderGone: a follower whose storm room has no leader any more (the
 	// leader resolved). The follower then repeats "still firing" itself.
 	leaderGone bool
 	active     []sigSnap // firing and not acked, action room
@@ -77,7 +77,7 @@ func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 func (w *Watcher) viewOf(t target, ps *pipeState) view {
 	v := view{roomID: ps.roomID, owned: ps.owned, follower: ps.follower, episode: ps.episode,
 		postedSev: ps.postedSev, lastPost: ps.lastPost, bypass: ps.bypassCooldown, sev: "sev9"}
-	v.leaderGone = ps.follower && ps.roomID != "" && !w.roomOwnedLocked(ps.roomID)
+	v.leaderGone = ps.follower && ps.roomID != "" && !w.roomLedLocked(ps.roomID)
 	for _, id := range signalIDs {
 		ss := ps.sigs[id]
 		sc := signalCfg(t.cfg, id)
@@ -99,11 +99,12 @@ func (w *Watcher) viewOf(t target, ps *pipeState) view {
 	return v
 }
 
-// roomOwnedLocked: some pipeline opened roomID (or re-attached to it) and still
-// posts into it. Caller holds w.mu.
-func (w *Watcher) roomOwnedLocked(roomID string) bool {
+// roomLedLocked: some pipeline that is not a storm follower (the leader, whether
+// it opened the room or joined one that was already open) still posts into roomID.
+// Caller holds w.mu.
+func (w *Watcher) roomLedLocked(roomID string) bool {
 	for _, ps := range w.pipes {
-		if ps.owned && ps.roomID == roomID {
+		if !ps.follower && ps.roomID == roomID {
 			return true
 		}
 	}
@@ -438,6 +439,7 @@ func (w *Watcher) assignFollowers(now time.Time, leader, roomID string, storm ma
 			ss.notified = true
 			if w.closed[roomID] {
 				ss.phase, ss.ackSev = phaseAcked, ss.last.sev
+				ps.lastClosed = w.clock.Now()
 				continue
 			}
 			sev := "sev9"
@@ -504,6 +506,7 @@ func (w *Watcher) recordPost(now time.Time, pipelineID string, v view, roomID st
 	}
 	if w.closed[roomID] {
 		ps.roomID, ps.owned, ps.follower = "", false, false
+		ps.lastClosed = w.clock.Now()
 		w.log.Info("watch: room closed while it was being written to, signals acked",
 			"mode", string(w.cfg.Mode), "pipeline", pipelineID, "room", roomID)
 		return false

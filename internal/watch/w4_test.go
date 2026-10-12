@@ -123,7 +123,11 @@ func TestStripTracesDoesNotChangeTheStoredReading(t *testing.T) {
 	h.conn.setStatus("pg-orders", clients.ConnectorStatus{Name: "pg-orders", State: "FAILED", Tasks: []clients.TaskStatus{
 		{ID: 0, State: "FAILED", Trace: trace}, {ID: 1, State: "FAILED", Trace: trace}, {ID: 2, State: "FAILED", Trace: trace},
 	}})
-	h.steps(5, time.Minute)
+	// Stop on the tick that opens the room: the next tick builds fresh readings
+	// and would hide a change made to the old ones.
+	for i := 0; i < 10 && len(h.rooms.created()) == 0; i++ {
+		h.step(time.Minute)
+	}
 	rooms := h.rooms.created()
 	if len(rooms) != 1 {
 		t.Fatalf("rooms = %d, want 1", len(rooms))
@@ -186,6 +190,73 @@ func TestResolvedAlertFailureWarnsOncePerEpisode(t *testing.T) {
 	h.steps(12, time.Minute)
 	if n := h.logs.count(warn); n != 2 {
 		t.Fatalf("resolved-failed warnings after a second episode = %d, want 2", n)
+	}
+}
+
+func TestComposeKeepsTheSourceTraces(t *testing.T) {
+	trace := strings.Repeat("<", 400)
+	mk := func(id int) map[string]any { return map[string]any{"id": id, "state": "FAILED", "trace": trace} }
+	tasks := []map[string]any{mk(0), mk(1), mk(2)}
+	src := map[string]any{
+		"signal":     owners.SignalConnectorDown,
+		"connectors": []map[string]any{{"name": "pg-x", "state": "FAILED", "tasks": tasks}},
+	}
+	v := view{sev: "sev2", active: []sigSnap{{id: owners.SignalConnectorDown, sev: "sev2", label: "connector pg-x FAILED", ev: src}}}
+	_, raw := compose("x", t0, v, "opened", nil)
+	if strings.Contains(string(raw), `"trace"`) {
+		t.Fatalf("the evidence still has traces (%d bytes)", len(raw))
+	}
+	for _, tk := range tasks {
+		if tk["trace"] != trace {
+			t.Fatalf("compose changed the source task: %v", tk)
+		}
+	}
+}
+
+func TestStormFollowersWaitForALeaderThatJoinedAnotherRoom(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{{id: "a"}, {id: "b"}, {id: "c"}}})
+	h.rooms.foreign["a"] = "r_am" // an Alertmanager room for the leader
+	h.step(0)
+	for _, p := range []string{"a", "b", "c"} {
+		h.breakConnector(p, "worker died")
+	}
+	h.steps(4, time.Minute)
+	if got := len(h.rooms.created()); got != 0 {
+		t.Fatalf("rooms created = %d, want 0 (the leader joins r_am)", got)
+	}
+	for _, p := range []string{"a", "b", "c"} {
+		if got := h.roomOf(p); got != "r_am" {
+			t.Fatalf("pipeline %s room = %q, want r_am", p, got)
+		}
+	}
+	countStill := func(p string) int {
+		n := 0
+		for _, post := range h.rooms.postsContaining("(still firing)") {
+			if strings.HasPrefix(post.text, "watcher: "+p+":") {
+				n++
+			}
+		}
+		return n
+	}
+
+	// While the leader is in the room, only the leader repeats still-firing.
+	h.steps(40, time.Minute)
+	if countStill("a") == 0 {
+		t.Fatal("the leader did not post still-firing")
+	}
+	if countStill("b") != 0 || countStill("c") != 0 {
+		t.Fatalf("followers posted still-firing next to the leader: b=%d c=%d", countStill("b"), countStill("c"))
+	}
+
+	// The leader clears: now the followers remind.
+	h.fixConnector("a")
+	h.steps(20, time.Minute)
+	if h.roomOf("a") != "" {
+		t.Fatal("the leader is still in the room after it cleared")
+	}
+	h.steps(20, time.Minute)
+	if countStill("b") == 0 || countStill("c") == 0 {
+		t.Fatalf("followers did not remind after the leader cleared: b=%d c=%d", countStill("b"), countStill("c"))
 	}
 }
 
