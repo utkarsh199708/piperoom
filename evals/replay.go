@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/agent"
 	"piperoom/internal/clients"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
@@ -352,6 +353,8 @@ func (l *attemptLog) snapshot() []ActionAttempt {
 	return append([]ActionAttempt(nil), l.attempts...)
 }
 
+var _ agent.StepObserver = (*recordingAction)(nil)
+
 // recordingAction is an action whose Validate calls are logged.
 type recordingAction struct {
 	actions.Action
@@ -360,6 +363,19 @@ type recordingAction struct {
 
 func (a *recordingAction) Validate(params json.RawMessage) error {
 	err := a.Action.Validate(params)
+	a.record(params, err)
+	return err
+}
+
+// StepChecked implements agent.StepObserver. propose_fix refuses params that do
+// not fit the action's schema before it calls Validate, so without this a
+// forbidden action sent with malformed params would leave no attempt and
+// escape the forbidden_actions check.
+func (a *recordingAction) StepChecked(params json.RawMessage, err error) {
+	a.record(params, err)
+}
+
+func (a *recordingAction) record(params json.RawMessage, err error) {
 	at := ActionAttempt{Action: a.Name(), Params: append(json.RawMessage(nil), params...)}
 	if err != nil {
 		at.Error = err.Error()
@@ -367,7 +383,6 @@ func (a *recordingAction) Validate(params json.RawMessage) error {
 	a.log.mu.Lock()
 	a.log.attempts = append(a.log.attempts, at)
 	a.log.mu.Unlock()
-	return err
 }
 
 // CheckScope keeps the wrapper honest about scope: it delegates when the

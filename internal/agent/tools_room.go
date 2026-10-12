@@ -195,6 +195,7 @@ func (t *proposeFixTool) Description() string {
 	}
 	b.WriteString("steps is an array; each step has action, params and a short description. ")
 	b.WriteString(`params is the action's parameters as JSON object text in a string, for example "{\"connector\":\"c1\"}". `)
+	b.WriteString(`A param that is itself JSON, such as the Avro schema of schema_register, is escaped once more: "{\"subject\":\"orders-value\",\"schema\":\"{\\\"type\\\":\\\"string\\\"}\"}". `)
 	b.WriteString("A step with a wrong or missing param is refused and nothing is stored. ")
 	b.WriteString("risk and rollback are required short text: never empty and never a placeholder such as n/a.")
 	return b.String()
@@ -296,7 +297,82 @@ func decodeStepParams(raw json.RawMessage) (json.RawMessage, error) {
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return nil, fmt.Errorf("params must be a JSON object, not another JSON value")
 	}
+	// Go keeps the last of two equal keys, but the stored text keeps both and
+	// an approver or another parser may read the first. Refuse the ambiguity.
+	if key, dup := duplicateKey(trimmed); dup {
+		return nil, fmt.Errorf("params has the field %q more than once", key)
+	}
 	return json.RawMessage(trimmed), nil
+}
+
+// duplicateKey reports the first object key that appears twice in the same
+// object anywhere in valid JSON text.
+func duplicateKey(raw []byte) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	type frame struct {
+		isObj  bool
+		seen   map[string]bool
+		expect bool // in an object: the next string token is a key
+	}
+	var stack []*frame
+	// valueDone marks the end of a value so the enclosing object expects a key.
+	valueDone := func() {
+		if n := len(stack); n > 0 && stack[n-1].isObj {
+			stack[n-1].expect = true
+		}
+	}
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{':
+				stack = append(stack, &frame{isObj: true, seen: map[string]bool{}, expect: true})
+			case '[':
+				stack = append(stack, &frame{})
+			default:
+				stack = stack[:len(stack)-1]
+				valueDone()
+			}
+			continue
+		}
+		if n := len(stack); n > 0 && stack[n-1].isObj && stack[n-1].expect {
+			key, _ := tok.(string)
+			if stack[n-1].seen[key] {
+				return key, true
+			}
+			stack[n-1].seen[key] = true
+			stack[n-1].expect = false
+			continue
+		}
+		valueDone()
+	}
+}
+
+// StepObserver is implemented by an action wrapper that wants to see every
+// step check, including the ones that end before Validate. propose_fix calls
+// StepChecked when it refuses a step's params for a bad shape (not JSON, not
+// an object, a repeated field, or a mismatch with the action's ParamsSchema),
+// so a harness that records Validate calls (the evals attempt log) still sees
+// an attempt it would otherwise lose. err is the reason the step was refused.
+type StepObserver interface {
+	StepChecked(params json.RawMessage, err error)
+}
+
+// observeStep tells a if it is a StepObserver.
+func observeStep(a actions.Action, params json.RawMessage, err error) {
+	if o, ok := a.(StepObserver); ok {
+		o.StepChecked(params, err)
+	}
+}
+
+// NewProposeFixTool returns the propose_fix room tool over reg and proposals,
+// for harnesses (the evals) that drive it without a model. Proposals created
+// through it go through the same checks as the agent's own tool.
+func NewProposeFixTool(reg *actions.Registry, proposals Proposals) tools.Tool {
+	return &proposeFixTool{actions: reg, proposals: proposals}
 }
 
 // checkStep resolves a step to its action and decoded params, or returns the
@@ -315,10 +391,12 @@ func (t *proposeFixTool) checkStep(i int, action string, rawParams json.RawMessa
 	}
 	params, err := decodeStepParams(rawParams)
 	if err != nil {
+		observeStep(a, rawParams, err)
 		return nil, nil, fmt.Errorf("%w: step %d (%s): %v", tools.ErrBadInput, i+1, action, err)
 	}
 	if schema := a.ParamsSchema(); schema != nil {
 		if err := validateInput(schema, params); err != nil {
+			observeStep(a, params, err)
 			return nil, nil, fmt.Errorf("%w: step %d (%s): params: %v", tools.ErrBadInput, i+1, action, err)
 		}
 	}

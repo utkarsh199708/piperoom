@@ -47,13 +47,15 @@ const maxStrictTools = 8
 // every strict tool. Bytes are only a proxy for the compiled grammar size the
 // API limits, but they grow with it. The budget sits just under the largest
 // sum the API is known to accept (liveAcceptedSchemaBytes); configurations
-// that were never sent live do not count. Measured 2026-10-12: the shipped
-// cap-8 set (production registry, propose_fix with the real actions) is 4491
-// bytes and ran live in LEAD-ARCH's M2 check. The set was 5319 bytes before
-// propose_fix stopped nesting each action's params, and is 3088 after; the
-// enum entry of a new action adds about its name length
-// (TestProposeFixStrictBytesDoNotGrowWithActions holds that line). The new
-// propose_fix shape was never sent live: re-run TestLiveStrictToolCap once.
+// that were never sent live do not count.
+//
+// History of the shipped cap-8 set (production registry, the real actions):
+// 4491 bytes on 2026-10-12, which ran live in LEAD-ARCH's M2 check; 5319 bytes
+// once more actions were registered and propose_fix nested each one's params;
+// 3088 bytes now that propose_fix holds only an enum of action names and the
+// params as JSON text. A new action adds about its name length to that enum
+// (TestProposeFixStrictBytesDoNotGrowWithActions holds the line). The current
+// shape has not been sent live yet: re-run TestLiveStrictToolCap once.
 const maxStrictSchemaBytes = 5400
 
 // liveAcceptedSchemaBytes is the largest strict schema sum the API accepted in

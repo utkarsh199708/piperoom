@@ -245,7 +245,7 @@ func TestProposeFixDescriptionListsParams(t *testing.T) {
 	d := tool.Description()
 	for _, want := range []string{
 		"connect_restart_task(connector:string [connector name], task:integer [task id]) [kafka-connect]",
-		"connect_update_connector_config(connector:string, key:string, value:string)",
+		"connect_update_connector_config(connector:string, key:decimal.handling.mode|time.precision.mode|tombstones.on.delete, value:string)",
 		"schema_set_compatibility(subject:string [subject name], level:string [BACKWARD",
 		"schema_register(subject:string [subject name], schema:string [Avro schema JSON string]) [schema-registry]",
 	} {

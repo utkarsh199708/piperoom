@@ -93,12 +93,15 @@ func (a *updateConnectorConfig) Describe() string {
 	return "Changes one setting that sets the connector's output schema or precision: decimal.handling.mode precise|double|string; time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false. Takes effect for new events only; events already emitted keep the old form. Connect restarts the tasks. To undo the setting, set the old value."
 }
 func (a *updateConnectorConfig) ParamsSchema() map[string]any {
-	// No enum and no property descriptions: propose_fix nests every action's
-	// schema, and the strict-schema byte budget in internal/agent is tight.
-	// Describe names the keys; Validate enforces the allow-list.
+	// propose_fix no longer inlines this schema into the strict request (the
+	// agent checks params against it in code and lists it in the tool
+	// description), so an enum costs no strict-schema bytes. key is an enum of
+	// the allow-list so a wrong key is refused with the allowed names; the
+	// allowed values depend on the key, so value stays a string and Validate
+	// enforces the pair.
 	return objectSchema(map[string]any{
 		"connector": map[string]any{"type": "string"},
-		"key":       map[string]any{"type": "string"},
+		"key":       map[string]any{"type": "string", "enum": sortedKeys(a.allowList())},
 		"value":     map[string]any{"type": "string"},
 	}, "connector", "key", "value")
 }
