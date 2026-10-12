@@ -2116,3 +2116,35 @@ func TestConcurrentSteersStartOneRun(t *testing.T) {
 		t.Fatalf("runs after two concurrent steers: %d, want 4", n)
 	}
 }
+
+// TestAgentMentionWordBoundary pins @agent detection: a whole-word mention,
+// any case, sets mentions_agent; a longer word or a glued-on name does not.
+func TestAgentMentionWordBoundary(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	roomID := createRoom(t, svc, "arjun").ID
+	priya := mustUser(t, svc, "priya")
+	cases := []struct {
+		text string
+		want bool
+	}{
+		{"@agent is this the connector?", true},
+		{"ping @Agent.", true},
+		{"(@agent)", true},
+		{"@agentless is not the agent", false},
+		{"@agents are plural", false},
+		{"text@agent glued to a word", false},
+	}
+	for _, tc := range cases {
+		e, err := svc.AddComment(context.Background(), priya, roomID, "", tc.text)
+		if err != nil {
+			t.Fatalf("comment %q: %v", tc.text, err)
+		}
+		p, err := events.Decode[events.CommentAddedPayload](e)
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if p.MentionsAgent != tc.want {
+			t.Fatalf("comment %q: mentions_agent=%v, want %v", tc.text, p.MentionsAgent, tc.want)
+		}
+	}
+}
