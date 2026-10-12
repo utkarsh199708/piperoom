@@ -23,16 +23,22 @@ func (t *connectList) InputSchema() map[string]any {
 	return objectSchema(map[string]any{})
 }
 func (t *connectList) Description() string {
-	return "Lists all Kafka Connect connectors with their type, state and failed task count."
+	return "Lists the pipeline's Kafka Connect connectors with their type, state and failed task count."
 }
 
 func (t *connectList) Run(ctx context.Context, _ json.RawMessage) (tools.Result, error) {
+	sc, err := t.d.scope(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	names, err := t.d.Connect.ListConnectors(cctx)
 	if err != nil {
 		return tools.Result{}, err
 	}
+	// Only this room's connectors; the others get no Status call either.
+	names = sc.FilterConnectors(names)
 	type row struct {
 		Name        string `json:"name"`
 		Type        string `json:"type"`
@@ -84,6 +90,13 @@ func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.R
 	if err := json.Unmarshal(input, &p); err != nil || p.Connector == "" {
 		return tools.Result{}, fmt.Errorf("%w: connector is required", tools.ErrBadInput)
 	}
+	sc, err := t.d.scope(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if err := sc.CheckConnector(p.Connector); err != nil {
+		return tools.Result{}, err
+	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	st, err := t.d.Connect.Status(cctx, p.Connector)
@@ -108,7 +121,7 @@ func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.R
 		if ts.State == "FAILED" && ts.Trace != "" {
 			cond := condenseTrace(ts.Trace)
 			if t.d.Registry != nil {
-				if line := rejectedSchemaLine(cctx, t.d.Registry, ts.Trace); line != "" {
+				if line := rejectedSchemaLine(cctx, t.d.Registry, sc, ts.Trace); line != "" {
 					cond += "\n" + line
 				}
 			}
@@ -135,7 +148,7 @@ func (t *connectConfig) InputSchema() map[string]any {
 	return objectSchema(map[string]any{"connector": strProp("connector name")}, "connector")
 }
 func (t *connectConfig) Description() string {
-	return "Returns the key settings of a connector config, redacting any credential value (keys containing password, secret, token or .key)."
+	return "Returns the key settings of a connector config, redacting any credential value (keys containing password, secret, token or .key) and every transforms.* value except each transform's type and field names."
 }
 
 func (t *connectConfig) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -144,6 +157,13 @@ func (t *connectConfig) Run(ctx context.Context, input json.RawMessage) (tools.R
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Connector == "" {
 		return tools.Result{}, fmt.Errorf("%w: connector is required", tools.ErrBadInput)
+	}
+	sc, err := t.d.scope(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if err := sc.CheckConnector(p.Connector); err != nil {
+		return tools.Result{}, err
 	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
@@ -164,7 +184,17 @@ func (t *connectConfig) Run(ctx context.Context, input json.RawMessage) (tools.R
 			shown[k] = "***" // presence shown, value redacted
 			continue
 		}
-		if important[k] || strings.HasPrefix(k, "transforms") {
+		if strings.HasPrefix(k, "transforms") {
+			// Transform settings can carry literal values (static fields,
+			// regexes, replacements): show only the allow-listed keys.
+			if transformKeyAllowed(k) {
+				shown[k] = v
+			} else {
+				shown[k] = "***"
+			}
+			continue
+		}
+		if important[k] {
 			shown[k] = v
 		}
 	}
@@ -177,6 +207,28 @@ func (t *connectConfig) Run(ctx context.Context, input json.RawMessage) (tools.R
 		fmt.Fprintf(&sb, "%s: %s", k, shown[k])
 	}
 	return res(sb.String(), shown), nil
+}
+
+// transformAllowed are the transforms.<name>.<setting> settings whose values are
+// shown: the transform class and the names of the fields it works on. Every
+// other transforms.* value is redacted.
+var transformAllowed = map[string]bool{
+	"type": true, "field": true, "fields": true, "field.name": true,
+}
+
+// transformKeyAllowed reports whether a transforms* key may show its value:
+// "transforms" itself (the list of transform names) and the allow-listed
+// settings of each transform.
+func transformKeyAllowed(k string) bool {
+	if k == "transforms" {
+		return true
+	}
+	rest, ok := strings.CutPrefix(k, "transforms.")
+	if !ok {
+		return false
+	}
+	_, setting, ok := strings.Cut(rest, ".")
+	return ok && transformAllowed[setting]
 }
 
 func sortedKeys(m map[string]string) []string {
@@ -361,13 +413,18 @@ func extractSubject(trace string) (string, bool) {
 }
 
 // rejectedSchemaLine diffs a rejected schema (from a trace) against the subject's latest version.
-func rejectedSchemaLine(ctx context.Context, reg clients.SchemaRegistryClient, trace string) string {
+func rejectedSchemaLine(ctx context.Context, reg clients.SchemaRegistryClient, sc tools.Scope, trace string) string {
 	schema, ok := extractRejectedSchema(trace)
 	if !ok {
 		return ""
 	}
 	subject, ok := extractSubject(trace)
 	if !ok {
+		return ""
+	}
+	// The subject comes from trace text, not from the pipeline's config: read
+	// it only when it belongs to this room's pipeline.
+	if !sc.SubjectInScope(subject) {
 		return ""
 	}
 	latest, err := reg.Schema(ctx, subject, -1)

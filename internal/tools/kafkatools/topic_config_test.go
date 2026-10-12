@@ -175,7 +175,7 @@ func TestKafkaTopicConfigErrors(t *testing.T) {
 				t.Fatal(err)
 			}
 			tool, _ := reg.Get("kafka_topic_config")
-			_, err := tool.Run(context.Background(), json.RawMessage(tt.input))
+			_, err := tool.Run(tools.WithUnscoped(context.Background()), json.RawMessage(tt.input))
 			if err == nil {
 				t.Fatal("want error, got nil")
 			}
@@ -200,7 +200,7 @@ func TestKafkaTopicConfigBadJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	tool, _ := reg.Get("kafka_topic_config")
-	_, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":`))
+	_, err := tool.Run(tools.WithUnscoped(context.Background()), json.RawMessage(`{"pipeline_id":`))
 	if !errors.Is(err, tools.ErrBadInput) {
 		t.Fatalf("err = %v, want ErrBadInput", err)
 	}

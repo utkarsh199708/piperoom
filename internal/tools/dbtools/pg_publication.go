@@ -55,7 +55,11 @@ func pgPublicationTablesTool(d Deps) tools.Tool {
 			if input.PipelineID == "" {
 				return tools.Result{}, fmt.Errorf("%w: pipeline_id is required", tools.ErrBadInput)
 			}
-			p, err := d.pipeline(input.PipelineID)
+			sc, err := d.scope(ctx)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			p, err := d.resolve(sc, input.PipelineID)
 			if err != nil {
 				return tools.Result{}, err
 			}

@@ -19,13 +19,22 @@ type Deps struct {
 	Connect  clients.ConnectClient
 	Registry clients.SchemaRegistryClient
 	Kafka    clients.KafkaAdmin
-	// Owners resolves pipeline_id + source table to the pipeline's topic
-	// ("<topic_prefix>.<source_table>") for kafka_topic_config. The wiring
-	// must pass it; the tool reports a clear error when it is missing.
+	// Owners resolves the room's pipeline id (tools.WithPipelineID) to its
+	// connectors, topics, groups and tables, and pipeline_id + source table to
+	// the pipeline's topic ("<topic_prefix>.<source_table>") for
+	// kafka_topic_config. The wiring must pass it; every tool reports a clear
+	// error when it is missing and the context carries only a pipeline id.
 	Owners *owners.Owners
 }
 
 const timeout = 10 * time.Second
+
+// scope resolves the room's pipeline scope for one tool call (finding F11).
+// A tool calls it first, and checks every name it got against the result
+// before it uses a client.
+func (d Deps) scope(ctx context.Context) (tools.Scope, error) {
+	return tools.ScopeFor(ctx, d.Owners)
+}
 
 // Register adds every kafkatools tool to reg.
 func Register(reg *tools.Registry, d Deps) error {

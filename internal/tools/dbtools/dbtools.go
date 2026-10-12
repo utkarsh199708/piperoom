@@ -52,6 +52,28 @@ func (d Deps) pipeline(id string) (owners.Pipeline, error) {
 	return p, nil
 }
 
+// scope resolves the room's pipeline scope for one tool call (finding F11).
+// A tool calls it first and checks every name it got against the result before
+// it uses a client; a call with no room pipeline and no explicit opt-out is
+// refused.
+func (d Deps) scope(ctx context.Context) (tools.Scope, error) {
+	return tools.ScopeFor(ctx, d.Owners)
+}
+
+// resolve returns the pipeline a tool works on. Scoped, it is the room's
+// pipeline, and a pipeline_id in the input that differs from it is refused
+// (the input is never trusted). Unscoped (explicit opt-out), it is the
+// pipeline the input names.
+func (d Deps) resolve(sc tools.Scope, inputID string) (owners.Pipeline, error) {
+	if sc.Unscoped() {
+		return d.pipeline(inputID)
+	}
+	if err := sc.CheckPipelineID(inputID); err != nil {
+		return owners.Pipeline{}, err
+	}
+	return sc.Pipeline(), nil
+}
+
 // scopedTable returns an ErrBadInput error when table is not one of the
 // pipeline's own tables (finding F4). tables is SourceTables for the source
 // row tool and SinkTables for the warehouse row tool.

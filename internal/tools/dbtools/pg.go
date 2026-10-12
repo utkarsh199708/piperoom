@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,6 +20,11 @@ func pgReplicationSlotsTool(d Deps) tools.Tool {
 		desc:   "List logical replication slots on the source Postgres: active state, retained WAL size and wal_status.",
 		schema: objSchema(map[string]any{}),
 		run: func(ctx context.Context, _ json.RawMessage) (tools.Result, error) {
+			// Slots are database-wide and owners.yaml names none, so this tool
+			// is not filtered; it still needs a room scope (or the opt-out).
+			if _, err := d.scope(ctx); err != nil {
+				return tools.Result{}, err
+			}
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
 			slots, err := d.Src.ReplicationSlots(ctx)
@@ -61,22 +68,28 @@ func pgRecentDDLTool(d Deps) tools.Tool {
 			if input.Table != "" && !validTable(input.Table) {
 				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\"", tools.ErrBadInput)
 			}
+			sc, err := d.scope(ctx)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			if input.Table != "" {
+				if err := sc.CheckSourceTable(input.Table); err != nil {
+					return tools.Result{}, err
+				}
+			}
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
 
 			var changes []clients.DDLChange
-			if input.Table != "" {
-				if f, ok := d.Src.(tableDDLFilterer); ok {
-					changes, err = f.RecentDDLTable(ctx, since, input.Table, 100)
-				} else {
-					changes, err = d.Src.RecentDDL(ctx, since, 100)
-					if err == nil {
-						changes = filterDDL(changes, input.Table)
-					}
-				}
-			} else {
+			switch {
+			case input.Table != "":
+				changes, err = d.recentDDLTable(ctx, since, input.Table)
+			case sc.Unscoped():
 				changes, err = d.Src.RecentDDL(ctx, since, 100)
+			default:
+				// No table given: only DDL on the pipeline's own source tables.
+				changes, err = d.recentDDLTables(ctx, since, sc.Pipeline().SourceTables)
 			}
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_recent_ddl: %w", err)
@@ -115,6 +128,12 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 			}
 			if input.OlderThanMinutes < 0 {
 				return tools.Result{}, fmt.Errorf("%w: older_than_minutes must be >= 0", tools.ErrBadInput)
+			}
+			// Open transactions are database-wide and cannot be tied to a
+			// pipeline, so this tool is not filtered; it still needs a room
+			// scope (or the opt-out).
+			if _, err := d.scope(ctx); err != nil {
+				return tools.Result{}, err
 			}
 
 			ctx, cancel := toolCtx(ctx)
@@ -161,7 +180,11 @@ func pgRowTool(d Deps) tools.Tool {
 			if input.PipelineID == "" {
 				return tools.Result{}, fmt.Errorf("%w: pipeline_id is required", tools.ErrBadInput)
 			}
-			p, err := d.pipeline(input.PipelineID)
+			sc, err := d.scope(ctx)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			p, err := d.resolve(sc, input.PipelineID)
 			if err != nil {
 				return tools.Result{}, err
 			}
@@ -238,6 +261,50 @@ func tsValue(row map[string]any, name string) string {
 		return fmt.Sprintf("%v", v)
 	}
 	return s
+}
+
+// recentDDLTable returns the recent DDL of one table.
+func (d Deps) recentDDLTable(ctx context.Context, since time.Time, table string) ([]clients.DDLChange, error) {
+	if f, ok := d.Src.(tableDDLFilterer); ok {
+		return f.RecentDDLTable(ctx, since, table, 100)
+	}
+	changes, err := d.Src.RecentDDL(ctx, since, 100)
+	if err != nil {
+		return nil, err
+	}
+	return filterDDL(changes, table), nil
+}
+
+// recentDDLTables returns the recent DDL of the given tables only, newest first
+// and at most 100 changes. With a SQL table filter each table is read on its
+// own (so one busy table cannot push the others past the limit); without one
+// the unfiltered read is filtered in memory.
+func (d Deps) recentDDLTables(ctx context.Context, since time.Time, tables []string) ([]clients.DDLChange, error) {
+	var out []clients.DDLChange
+	if f, ok := d.Src.(tableDDLFilterer); ok {
+		for _, t := range tables {
+			part, err := f.RecentDDLTable(ctx, since, t, 100)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, part...)
+		}
+	} else {
+		all, err := d.Src.RecentDDL(ctx, since, 100)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range all {
+			if slices.Contains(tables, c.ObjectIdentity) {
+				out = append(out, c)
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].At.After(out[j].At) })
+	if len(out) > 100 {
+		out = out[:100]
+	}
+	return out, nil
 }
 
 // tableDDLFilterer is implemented by SourceDB implementations that can filter

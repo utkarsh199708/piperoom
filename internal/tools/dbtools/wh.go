@@ -33,6 +33,13 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 			if !d.validWarehouseColumn(input.TSColumn) {
 				return tools.Result{}, fmt.Errorf("%w: invalid ts_column", tools.ErrBadInput)
 			}
+			sc, err := d.scope(ctx)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			if err := sc.CheckSinkTable(input.Table); err != nil {
+				return tools.Result{}, err
+			}
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
@@ -81,7 +88,11 @@ func warehouseRowTool(d Deps) tools.Tool {
 			if input.PipelineID == "" {
 				return tools.Result{}, fmt.Errorf("%w: pipeline_id is required", tools.ErrBadInput)
 			}
-			p, err := d.pipeline(input.PipelineID)
+			sc, err := d.scope(ctx)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			p, err := d.resolve(sc, input.PipelineID)
 			if err != nil {
 				return tools.Result{}, err
 			}

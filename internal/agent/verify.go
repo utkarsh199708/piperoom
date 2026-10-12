@@ -916,7 +916,7 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 		Input:     input,
 	})
 
-	tctx, cancel := context.WithTimeout(ctx, r.timing.toolTimeout)
+	tctx, cancel := context.WithTimeout(r.toolScope(ctx), r.timing.toolTimeout)
 	defer cancel()
 	start := time.Now()
 	res, err := entry.tool.Run(tctx, input)

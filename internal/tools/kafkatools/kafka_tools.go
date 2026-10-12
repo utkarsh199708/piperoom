@@ -35,6 +35,13 @@ func (t *topicOffsets) Run(ctx context.Context, input json.RawMessage) (tools.Re
 	if err := json.Unmarshal(input, &p); err != nil || p.Topic == "" {
 		return tools.Result{}, fmt.Errorf("%w: topic is required", tools.ErrBadInput)
 	}
+	sc, err := t.d.scope(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if err := sc.CheckTopic(p.Topic); err != nil {
+		return tools.Result{}, err
+	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	offs, err := t.d.Kafka.TopicOffsets(cctx, p.Topic)
@@ -79,7 +86,7 @@ func (t *listGroups) InputSchema() map[string]any {
 	return objectSchema(map[string]any{"topic": strProp("optional topic: only groups reading this topic")})
 }
 func (t *listGroups) Description() string {
-	return "Lists consumer groups with their state; optionally only those reading a given topic."
+	return "Lists the pipeline's consumer groups with their state; optionally only those reading a given topic."
 }
 
 func (t *listGroups) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -89,12 +96,23 @@ func (t *listGroups) Run(ctx context.Context, input json.RawMessage) (tools.Resu
 	if err := json.Unmarshal(input, &p); err != nil {
 		return tools.Result{}, fmt.Errorf("%w: %v", tools.ErrBadInput, err)
 	}
+	sc, err := t.d.scope(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if p.Topic != "" {
+		if err := sc.CheckTopic(p.Topic); err != nil {
+			return tools.Result{}, err
+		}
+	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	groups, err := t.d.Kafka.ConsumerGroups(cctx)
 	if err != nil {
 		return tools.Result{}, err
 	}
+	// Only this room's groups; the others get no GroupLag call either.
+	groups = sc.FilterGroups(groups)
 	type row struct {
 		Group string `json:"group"`
 		State string `json:"state"`
@@ -149,6 +167,13 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Group == "" {
 		return tools.Result{}, fmt.Errorf("%w: group is required", tools.ErrBadInput)
+	}
+	sc, err := t.d.scope(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if err := sc.CheckGroup(p.Group); err != nil {
+		return tools.Result{}, err
 	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
@@ -205,6 +230,13 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("%w: since must be RFC 3339: %v", tools.ErrBadInput, err)
 	}
+	sc, err := t.d.scope(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if err := sc.CheckTopic(p.Topic); err != nil {
+		return tools.Result{}, err
+	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	refs, err := t.d.Kafka.FindByKey(cctx, p.Topic, p.Key, since, p.MaxScan)
@@ -258,7 +290,14 @@ func (t *topicConfig) Run(ctx context.Context, input json.RawMessage) (tools.Res
 	if err := json.Unmarshal(input, &p); err != nil || p.PipelineID == "" {
 		return tools.Result{}, fmt.Errorf("%w: pipeline_id is required", tools.ErrBadInput)
 	}
-	topic, err := pipelineTopic(t.d.Owners, p.PipelineID, p.Table)
+	sc, err := t.d.scope(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if err := sc.CheckPipelineID(p.PipelineID); err != nil {
+		return tools.Result{}, err
+	}
+	topic, err := pipelineTopic(t.d.Owners, sc.PipelineID(p.PipelineID), p.Table)
 	if err != nil {
 		return tools.Result{}, err
 	}
