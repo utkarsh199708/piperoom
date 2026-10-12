@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"piperoom/internal/config"
 	"piperoom/internal/room"
 	"piperoom/internal/slackbridge"
 	"piperoom/internal/store/memstore"
@@ -76,7 +77,7 @@ func newSlackService(t *testing.T, s slackSettings) (*room.Service, *mirrors) {
 func TestSlackMirrorsRoomIntoOneThread(t *testing.T) {
 	slack := newFakeSlack(t)
 	setSlackEnv(t, fakeToken, "C1")
-	s := slackEnv()
+	s := slackFromConfig(config.Load())
 	s.apiBase = slack.srv.URL
 	svc, m := newSlackService(t, s)
 	if m == nil {
@@ -125,7 +126,7 @@ func TestSlackMirrorsRoomIntoOneThread(t *testing.T) {
 func TestSlackDisabledMakesNoCalls(t *testing.T) {
 	slack := newFakeSlack(t)
 	setSlackEnv(t, "", "")
-	s := slackEnv()
+	s := slackFromConfig(config.Load())
 	s.apiBase = slack.srv.URL
 
 	var logs bytes.Buffer
@@ -162,7 +163,7 @@ func TestSlackBadConfigFailsWithoutToken(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			setSlackEnv(t, tc.token, tc.channel)
 			var logs bytes.Buffer
-			m, err := newMirrors(context.Background(), memstore.New(), slackbridge.NewMemThreads(), slackEnv(), slog.New(slog.NewTextHandler(&logs, nil)))
+			m, err := newMirrors(context.Background(), memstore.New(), slackbridge.NewMemThreads(), slackFromConfig(config.Load()), slog.New(slog.NewTextHandler(&logs, nil)))
 			if err == nil {
 				m.stop(time.Second)
 				t.Fatal("want a start-up error")
@@ -179,7 +180,7 @@ func TestSlackBadConfigFailsWithoutToken(t *testing.T) {
 func TestSlackStartOpenMirrorsExistingRooms(t *testing.T) {
 	slack := newFakeSlack(t)
 	setSlackEnv(t, fakeToken, "C1")
-	s := slackEnv()
+	s := slackFromConfig(config.Load())
 	s.apiBase = slack.srv.URL
 	st := memstore.New()
 	pre := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})

@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
+
 	"strings"
 	"sync"
 	"time"
 
 	"piperoom/internal/clients/netsec"
+	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
 	"piperoom/internal/slackbridge"
@@ -19,7 +20,7 @@ import (
 // mirrorStopTimeout bounds how long shutdown waits for the Slack mirrors.
 const mirrorStopTimeout = 5 * time.Second
 
-// slackSettings are the bridge settings read from the environment.
+// slackSettings are the bridge settings taken from config.
 type slackSettings struct {
 	Token     netsec.Secret
 	ChannelID string
@@ -27,15 +28,14 @@ type slackSettings struct {
 	apiBase   string // tests only: the fake Slack API
 }
 
-// slackEnv reads the Slack settings. They are not in internal/config yet
-// (contract change request in the PR). The token is a netsec.Secret from the
-// moment it is read, so it prints as [redacted] anywhere it ends up.
-func slackEnv() slackSettings {
-	env := func(k string) string { return strings.TrimSpace(os.Getenv(k)) }
+// slackFromConfig builds the bridge settings from config.Load(). config
+// keeps the token a plain string; it becomes a netsec.Secret here, at wiring
+// time, so it prints as [redacted] anywhere it ends up from now on.
+func slackFromConfig(cfg config.Config) slackSettings {
 	return slackSettings{
-		Token:     netsec.Secret(env("SLACK_BOT_TOKEN")),
-		ChannelID: env("SLACK_CHANNEL_ID"),
-		PublicURL: env("PIPEROOM_PUBLIC_URL"),
+		Token:     netsec.Secret(strings.TrimSpace(cfg.SlackBotToken)),
+		ChannelID: strings.TrimSpace(cfg.SlackChannelID),
+		PublicURL: strings.TrimSpace(cfg.PublicURL),
 	}
 }
 

@@ -114,7 +114,7 @@ func run() error {
 	// Slack mirroring is on only when SLACK_BOT_TOKEN/SLACK_CHANNEL_ID are set,
 	// in both modes; a wrong setting refuses start. The deferred stop runs
 	// before the store's Close (defers are LIFO), so no mirror outlives it.
-	slack, err := newMirrors(ctx, st, threads, slackEnv(), log)
+	slack, err := newMirrors(ctx, st, threads, slackFromConfig(cfg), log)
 	if err != nil {
 		return err
 	}
