@@ -31,6 +31,74 @@ warehouse   analytics.orders: 100 rows, newest updated_at …, stale <60 s
 
 ---
 
+## Health check: `devctl health`
+
+One read-only command that says whether the pipeline is healthy. It takes no lock, changes nothing,
+and checks five layers concurrently. Each layer has its own 15 s timeout; a layer that errors or
+times out is reported as FAIL and the other layers still run.
+
+```
+go run ./cmd/devctl health
+```
+
+Exit codes: **0** when every layer is OK; **1** when any layer FAILs (the report names the layer and its
+owner from `dev/owners.yaml`); **2** when the check could not run at all (not inside the repo,
+`dev/owners.yaml` unreadable or missing the `orders` pipeline, bad arguments) or when Ctrl+C cuts the
+check short (a cancel is not an unhealthy pipeline). `devctl demo` prints the health report before the
+break. After `--fix` it re-runs the check every 5 s for about 90 s, because the backlog drains after the
+fix returns, and then prints the settled report. The window is checked between runs, so the last run can
+finish a few seconds past 90 s.
+
+Each layer:
+
+| Layer (owner) | Check | FAIL when |
+|---|---|---|
+| `postgres` (priya) | slot `debezium_orders` | missing, `active=false`, or retained WAL > **100 MB** |
+| `kafka-connect` (arjun) | connector `pg-orders-connector` and its tasks (Connect REST) | connector not `RUNNING`, no tasks, or any task not `RUNNING` |
+| `kafka` (arjun) | topic `pg.public.orders` | the oldest source change not yet in the topic has waited **> 60 s** |
+| `consumer` (kabir) | group `order-sync` (from `dev/owners.yaml`) | state not `Stable`, no members, or total lag **> 100** |
+| `warehouse` (meera) | `analytics.orders` | the oldest source change not yet loaded has waited **> 60 s** |
+
+Notes on the thresholds:
+- The topic and warehouse layers measure the **age of the oldest change that has not arrived yet**
+  (`updated_at` of the source rows newer than the newest topic record / warehouse row), not the age of
+  the newest row. So an idle stack is OK, and a burst that never gets through still FAILs after 60 s.
+  The age is computed on the source database clock; the topic line also prints the age of its newest
+  record (wall clock, for humans only).
+- Precision: the warehouse comparison uses exact microseconds (a row is pending only if it is strictly
+  newer than the newest loaded row). Kafka record timestamps are milliseconds, so for the topic a row in
+  the same millisecond as the newest record counts as delivered.
+- Kafka's newest record is read at each partition's last offset. A topic whose last offset is a
+  transaction marker never answers and shows as `no answer within 15s`.
+- The retained-WAL limit is 100 MB; the observed demo values (26 kB healthy, about 1–2 MB broken) are far
+  below it, so a slot that is active but not moving (`long-transaction`) is **not** flagged. Watch
+  `restart_lsn` with `devctl status` for that case.
+
+Output format (from the unit-test fakes; not yet checked against the live stack):
+
+```
+OK   postgres      slot debezium_orders: active=true, retained 26 kB (limit 100.0 MB)
+OK   kafka-connect pg-orders-connector: RUNNING, tasks 0=RUNNING
+OK   kafka         topic pg.public.orders: newest record 4 s old, oldest unsent change 0 s (limit 60 s)
+FAIL consumer      order-sync: state Empty, members 0, total lag 1471 (limit 100)
+OK   warehouse     analytics.orders: newest updated_at 08:04:12 UTC, oldest unloaded change 0 s (limit 60 s)
+pipeline UNHEALTHY: consumer (kabir)
+```
+
+Expected health per scenario, derived from the symptoms above (**not yet verified with `devctl health`**):
+
+| Scenario | Layers that should FAIL | Layers that stay OK |
+|---|---|---|
+| `schema-change` | kafka-connect (task 0 FAILED), postgres (slot inactive); kafka and warehouse once 60 s pass | consumer |
+| `connector-down` (PAUSED) | kafka-connect; kafka and warehouse after 60 s | postgres (slot still active), consumer |
+| `consumer-stuck` | consumer; warehouse after 60 s | kafka-connect, postgres, kafka |
+| `consumer-lag` | consumer (no members, lag); warehouse after 60 s | kafka-connect, postgres, kafka |
+| `slot-inactive` | kafka-connect (STOPPED); postgres; kafka and warehouse after 60 s | consumer |
+| `connector-auth` | postgres (slot inactive); kafka and warehouse after 60 s | kafka-connect (task stays RUNNING, see §7), consumer |
+| `long-transaction` | nothing until retained WAL passes 100 MB | all |
+
+---
+
 ## 1. `schema-change` — the demo scenario
 
 **Break:** `ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2)`, then insert 2 rows.

@@ -2,6 +2,7 @@
 // develop and test Piperoom. Run it from anywhere inside the repo.
 //
 //	devctl up | down | reset | status
+//	devctl health                     read-only; exit 1 if a layer is unhealthy
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
 //	devctl demo [--fix] <scenario>
@@ -13,6 +14,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -27,7 +29,8 @@ const usage = `devctl — local pipeline control
   devctl up                 start the stack, register the connector, start devconsumer
   devctl down               stop the stack
   devctl reset              remove all data and start clean
-  devctl status             one-screen pipeline health
+  devctl status             one-screen pipeline health (for humans)
+  devctl health             read-only check per layer; exit 1 unhealthy, 2 setup error
   devctl load [--rate N]    insert/update orders N per second until Ctrl+C
   devctl break <scenario>   cause a failure
   devctl fix <scenario>     apply the correct manual fix
@@ -55,12 +58,26 @@ func main() {
 	st, err := newStack(log)
 	if err != nil {
 		log.Error("devctl", "err", err)
-		os.Exit(1)
+		os.Exit(exitCode(os.Args[1]))
 	}
 	if err := runCommand(ctx, st, os.Args[1], os.Args[2:]); err != nil {
+		if errors.Is(err, errUnhealthy) {
+			// The report already names the layers; exit code is the answer.
+			os.Exit(1)
+		}
 		log.Error("devctl "+os.Args[1]+" failed", "err", err)
-		os.Exit(1)
+		os.Exit(exitCode(os.Args[1]))
 	}
+}
+
+// exitCode is 2 for a failed `health` run (setup: not in the repo, owners.yaml
+// unreadable, bad arguments) so it is never confused with "unhealthy" (1). Other
+// commands keep 1.
+func exitCode(cmd string) int {
+	if cmd == "health" {
+		return 2
+	}
+	return 1
 }
 
 func runCommand(ctx context.Context, st *stack, cmd string, args []string) error {
@@ -103,6 +120,11 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		return st.reset(ctx)
 	case "status":
 		return st.status(ctx, os.Stdout)
+	case "health":
+		if len(args) != 0 {
+			return fmt.Errorf("usage: devctl health")
+		}
+		return st.health(ctx, os.Stdout)
 	case "load":
 		owner, rest, err := splitOwner(args)
 		if err != nil {
