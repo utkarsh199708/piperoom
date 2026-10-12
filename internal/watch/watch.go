@@ -148,8 +148,12 @@ type pipeState struct {
 	postedSev string
 	// lastStill is the last "still firing" log line.
 	lastStill time.Time
+	// lastClosed is when a room this pipeline posted into was closed (set by
+	// ackLocked, in memory). A storm follower never had a room under its own
+	// dedup key, so the room service cannot tell its cooldown; this can.
+	lastClosed time.Time
 	// warned* keep "skipped" lines to one per episode.
-	warnedCooldown, warnedMax, warnedOpen bool
+	warnedCooldown, warnedMax, warnedOpen, warnedResolve bool
 }
 
 func (ps *pipeState) sig(id string) *sigState {
@@ -327,8 +331,9 @@ func (w *Watcher) tick(ctx context.Context) {
 // OnRoomClosed tells the watcher that the driver closed a room. Wire it to the
 // room service's room-closed hook. Signals that still fire in the pipeline
 // become acked: the same incident does not open another room, and the watcher
-// stays quiet until the signal clears. dedupKey is accepted in either shape,
-// "watcher:<pipeline>" or the service's "<pipeline>|watcher:<pipeline>".
+// stays quiet until the signal clears. pipelineID and dedupKey are unused: the
+// room is found by roomID, so a storm room acks every pipeline that posts into
+// it, whatever key it was opened under.
 func (w *Watcher) OnRoomClosed(roomID, pipelineID, dedupKey string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -358,7 +363,14 @@ func (w *Watcher) ackLocked(pipelineID string, ps *pipeState, roomID string) {
 		}
 	}
 	ps.roomID, ps.owned, ps.follower = "", false, false
-	ps.warnedCooldown, ps.warnedMax, ps.warnedOpen = false, false, false
+	ps.lastClosed = w.clock.Now()
+	ps.warnedCooldown, ps.warnedMax, ps.warnedOpen, ps.warnedResolve = false, false, false, false
+}
+
+// Targets returns how many pipelines the watcher looks at: enabled, with at
+// least one v1 signal on, and in scope. It is the same list a tick works on.
+func (w *Watcher) Targets() int {
+	return len(w.targets(context.Background()))
 }
 
 // openOwned counts the rooms this watcher opened and believes are open.

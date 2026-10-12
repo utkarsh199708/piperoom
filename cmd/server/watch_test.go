@@ -415,11 +415,15 @@ func TestStartWatcherInstallsTheWatcherInTheHook(t *testing.T) {
 	}
 }
 
-func TestWatchedPipelines(t *testing.T) {
-	if watchedPipelines(nil) != 0 {
-		t.Fatal("nil owners")
+func TestWatcherTargetsCountsTheWatchedPipelines(t *testing.T) {
+	w, err := watch.New(watch.Deps{
+		Owners: loadTestOwners(t), Config: config.Watch{Mode: config.WatchLog, Interval: time.Minute},
+		Clock: newFakeClock(), Jitter: func(time.Duration) time.Duration { return 0 },
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if n := watchedPipelines(loadTestOwners(t)); n != 1 {
-		t.Fatalf("watched = %d, want 1", n)
+	if n := w.Targets(); n != 1 {
+		t.Fatalf("targets = %d, want 1", n)
 	}
 }
