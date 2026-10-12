@@ -195,8 +195,8 @@ container will get (it shows secrets, so do not paste the output).
 
 `PIPEROOM_RETENTION_DAYS` is **live**. It deletes whole closed rooms (events, proposals,
 approvals and hand-offs) that were closed more than that many days ago. The check runs every
-6 hours. Open rooms are never deleted. Empty or `0` keeps everything. A value that is not a whole
-number stops the server at start-up.
+6 hours. Open rooms are never deleted. Empty or `0` keeps everything. A value must be a whole number
+from 0 to 36500; anything else stops the server at start-up.
 
 Deletion cannot be undone. If you must keep a room, export it before it ages out:
 
@@ -204,8 +204,9 @@ Deletion cannot be undone. If you must keep a room, export it before it ages out
 curl -H 'X-User: alice' http://localhost:8090/api/rooms/<room id>/export > room.json
 ```
 
-The export carries a SHA-256 over the JCS (RFC 8785) form of the room (also sent in the
-`X-Piperoom-Export-SHA256` header), so you can check later that the file was not changed.
+The export carries a SHA-256 over the JCS (RFC 8785) form of the room with the top-level
+`integrity` member removed (also sent in the `X-Piperoom-Export-SHA256` header), so a plain
+`sha256sum` of the file will not match it. Use it to check later that the file was not changed.
 Any user in `users.yaml` may export.
 
 ## Watcher (not active yet)
