@@ -207,42 +207,57 @@ func TestGatedInboxDrainQueuedThenRoomClosed(t *testing.T) {
 	}
 }
 
-// A Wait that ends by deadline (the agent's step-result wait) is followed by a
-// model call with no new input, so Wait must hand back a slot before returning.
-func TestGatedInboxWaitDeadlineTakesSlotBack(t *testing.T) {
+// The bounded step-result wait (a child context of the run) keeps the slot,
+// even when a stale wake token makes it return at once or its deadline ends it:
+// the runner then calls the model with nothing left to Drain. Only the
+// run-level wait, on the supervisor context itself, gives the slot back.
+func TestGatedInboxBoundedWaitKeepsSlotRunLevelWaitReleases(t *testing.T) {
 	svc, handles := newGateService(t, 1)
+	roomID := mustCreate(t, svc)
+	h := nextHandle(t, handles)
+	gi := h.inbox
 	arjun, _ := svc.LookupUser("arjun")
 
-	_ = mustCreate(t, svc) // B holds the only slot
-	hb := nextHandle(t, handles)
-	a := mustCreate(t, svc) // A queues
-	hb.inbox.g.release()    // B waits: A gets the slot
-	nextHandle(t, handles)
+	if !gi.g.isHeld() {
+		t.Fatal("the room should hold its slot while the run starts")
+	}
+	// A push leaves a wake token that Drain does not consume.
+	if _, err := svc.Steer(context.Background(), arjun, roomID, "go"); err != nil {
+		t.Fatalf("steer: %v", err)
+	}
+	if items, err := gi.Drain(h.ctx); err != nil || len(items) != 1 {
+		t.Fatalf("drain = %v, %v; want 1 input", items, err)
+	}
 
-	wctx, cancel := context.WithTimeout(hb.ctx, 50*time.Millisecond)
-	defer cancel()
+	wctx, cancel := context.WithCancel(h.ctx)
+	if err := gi.Wait(wctx); err != nil { // returns at once on the stale token
+		t.Fatalf("Wait on a stale token: %v", err)
+	}
+	if !gi.g.isHeld() {
+		t.Fatal("a bounded wait released the slot")
+	}
+	cancel() // the step-result deadline fires
+	if err := gi.Wait(wctx); err == nil {
+		t.Fatal("Wait on a cancelled context should fail")
+	}
+	if !gi.g.isHeld() {
+		t.Fatal("slot lost when the bounded wait ended: the next model call would have none")
+	}
+
+	// The run-level wait gives the slot back, and input takes it again.
 	done := make(chan error, 1)
-	go func() { done <- hb.inbox.Wait(wctx) }()
-
-	// The deadline passes, but Wait must not return before B has a slot again.
-	pollUntil(t, func() bool { _, q := svc.slots.stats(); return q == 1 })
-	select {
-	case err := <-done:
-		t.Fatalf("Wait returned (%v) before it had a slot", err)
-	case <-time.After(150 * time.Millisecond):
+	go func() { done <- gi.Wait(h.ctx) }()
+	pollUntil(t, func() bool { return !gi.g.isHeld() })
+	if inUse, _ := svc.slots.stats(); inUse != 0 {
+		t.Fatalf("slots in use = %d while the run waits, want 0", inUse)
 	}
-	if _, err := svc.CloseRoom(context.Background(), arjun, a, "free the slot"); err != nil {
-		t.Fatalf("close: %v", err)
+	if _, err := svc.Steer(context.Background(), arjun, roomID, "again"); err != nil {
+		t.Fatalf("steer: %v", err)
 	}
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("Wait should report the deadline")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Wait did not return once a slot was free")
+	if err := <-done; err != nil {
+		t.Fatalf("run-level Wait: %v", err)
 	}
-	if !hb.inbox.g.isHeld() {
-		t.Fatal("room must hold a slot after its wait deadline")
+	if items, err := gi.Drain(h.ctx); err != nil || len(items) != 1 || !gi.g.isHeld() {
+		t.Fatalf("drain after wake = %v, %v, held=%v; want 1 input with a slot", items, err, gi.g.isHeld())
 	}
 }

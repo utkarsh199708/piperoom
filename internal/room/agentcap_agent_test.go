@@ -198,9 +198,10 @@ func (a *gatedAction) Execute(ctx context.Context, _ json.RawMessage) (string, e
 }
 
 // T6b: the real agent.Run through proposal, full approval and the wait for
-// step results, at cap 1 with a second room. While the agent waits for the
-// executor it holds no slot (the other room runs); when the result arrives it
-// queues for a slot before its next model call.
+// step results, at cap 1 with a second room. The bounded step-result wait keeps
+// the agent's slot, so the second room stays queued through it; the agent makes
+// its next model call with the slot it holds, and the second room runs once the
+// agent goes idle.
 func TestAgentCapRealAgentApprovalWait(t *testing.T) {
 	f := newFakeAnthropic(t, func(n int) fakeTurn {
 		if n == 1 {
@@ -253,24 +254,25 @@ func TestAgentCapRealAgentApprovalWait(t *testing.T) {
 		return s.State == "working" && s.Detail == "waiting for step results"
 	})
 	b := createRoom(t, svc, "arjun").ID
-	cr.waitStarted(t, 1) // room B runs although A's agent is mid-wait
-	if got := cr.startedIDs(); got[0] != b {
-		t.Fatalf("started %v, want room B", got)
+	waitQueued(t, svc, b) // A keeps its slot through the bounded wait
+	settle()
+	if n := cr.starts(b); n != 0 {
+		t.Fatal("room B ran while A was still working through its step-result wait")
 	}
 	if n, _ := f.counts(); n != 2 {
 		t.Fatalf("model requests = %d before the step result, want 2", n)
 	}
 
-	// The executor reports. A must queue behind B for its next model call.
+	// The executor reports. A makes its next model call with the slot it held,
+	// then goes idle; only then does B run.
 	close(act.release)
-	waitQueued(t, svc, a)
-	settle()
-	if n, _ := f.counts(); n != 2 {
-		t.Fatalf("A called the model without a slot: requests=%d, want 2", n)
-	}
-	cr.finish(b)
 	waitFor(t, 10*time.Second, func() bool { n, _ := f.counts(); return n == 3 })
+	cr.waitStarted(t, 1)
+	if got := cr.startedIDs(); got[0] != b {
+		t.Fatalf("started %v, want room B", got)
+	}
 	waitFor(t, 10*time.Second, func() bool { return agentState(t, svc, a).State == "idle" })
+	cr.finish(b)
 	if _, m := f.counts(); m != 1 {
 		t.Fatalf("max model calls in flight = %d, want 1", m)
 	}

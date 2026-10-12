@@ -230,10 +230,10 @@ func (s *Service) emitSlotAcquired(ctx context.Context, g *agentGate) {
 }
 
 // gatedInbox is the agent's Inbox and the only place a slot is given back or
-// taken again after the run has started. The runner calls Wait only when it has
-// nothing to do, and a model turn only after a Drain that returned input (or
-// after a Wait that ended with an error, see Wait). So the room holds a slot
-// exactly while the runner can call the model. Nothing here reads the status
+// taken again after the run has started. The runner calls the run-level Wait
+// only when it has nothing to do, and starts a model turn from input only after
+// a Drain that returned it. So the room holds a slot while the runner can call
+// the model (the bounded step-result wait counts as working, see Wait). Nothing here reads the status
 // strings the agent emits: those can say "done" while the agent still works.
 type gatedInbox struct {
 	in *inbox
@@ -263,18 +263,18 @@ func (gi gatedInbox) Drain(ctx context.Context) ([]agent.HumanInput, error) {
 	return items, nil
 }
 
-// Wait implements agent.Inbox. The runner is idle here, so the slot goes back
-// to the pool before blocking. If the wait ends with an error while the run is
-// still alive, the runner is about to carry on without new input (the
-// step-result wait ran out); it takes a slot again first. Input that wakes the
-// wait is slotted by the Drain that follows.
+// Wait implements agent.Inbox. Only the open-ended, run-level wait gives the
+// slot back: agent.Run passes the supervisor context unchanged to it, and it
+// ends only when input arrives (the Drain after it takes a slot again) or the
+// run ends. Any other wait uses a context derived from it, such as the
+// bounded step-result wait (at most 45 s, agent status "working"), and keeps
+// the slot. That wait can end by deadline, or return at once on a stale wake
+// token that Drain never consumes, and the runner then calls the model with
+// nothing more to Drain. Giving the slot up there would leave that call
+// without one; it costs a slot for at most the bound.
 func (gi gatedInbox) Wait(ctx context.Context) error {
-	gi.g.release()
-	err := gi.in.Wait(ctx)
-	if err != nil && gi.runCtx.Err() == nil {
-		if aerr := gi.g.acquire(gi.runCtx); aerr != nil {
-			return aerr
-		}
+	if ctx.Done() == gi.runCtx.Done() {
+		gi.g.release()
 	}
-	return err
+	return gi.in.Wait(ctx)
 }
