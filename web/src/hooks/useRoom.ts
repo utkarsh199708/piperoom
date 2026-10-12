@@ -5,6 +5,7 @@ import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } fro
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../dev/users'
 import { errorText, friendlyError } from '../lib/errors'
+import { mentionsAgent } from '../lib/mentions'
 import { applyEvent } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
 import type { RoomState } from '../state/types'
@@ -290,7 +291,7 @@ export function useRoom(roomId: string) {
           comment_id: nextLocalId(),
           step_id: stepId,
           text,
-          mentions_agent: text.includes('@agent'),
+          mentions_agent: mentionsAgent(text),
         })
         return
       }
