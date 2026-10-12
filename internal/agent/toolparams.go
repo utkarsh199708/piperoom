@@ -42,13 +42,19 @@ const maxStrictTools = 8
 
 // maxStrictSchemaBytes caps the summed size of the marshalled input_schema of
 // every strict tool. Bytes are only a proxy for the compiled grammar size the
-// API limits, but they grow with it. Measured 2026-10-12 with the production
-// registry (db + kafka + runbook read tools, room tools with the real actions
-// registry): the cap-16 strict set (the largest count accepted live) is 7039
-// bytes; the budget is ~80% of that. The shipped cap-8 set is 4491 bytes.
-// Caveat: the live bisect sent propose_fix without registered actions (625
-// bytes instead of 2180), so the accepted live sum at cap 16 was 5484 bytes.
-const maxStrictSchemaBytes = 5600
+// API limits, but they grow with it. The budget sits just under the largest
+// sum the API is known to accept (liveAcceptedSchemaBytes); configurations
+// that were never sent live do not count. Measured 2026-10-12: the shipped
+// cap-8 set (production registry, propose_fix with the real actions) is 4491
+// bytes and ran live in LEAD-ARCH's M2 check.
+const maxStrictSchemaBytes = 5400
+
+// liveAcceptedSchemaBytes is the largest strict schema sum the API accepted in
+// the live bisect of 2026-10-12 (TestLiveStrictToolCap, cap 16; that run used
+// an empty actions registry, so propose_fix was 625 bytes, not 2180). The
+// next measured point, 6461 bytes at cap 20, was rejected as too large.
+// Re-run the bisect with the production registry before raising the budget.
+const liveAcceptedSchemaBytes = 5484
 
 // strictReadTools take the strict slots left after the room tools, in this
 // order: the read tools the eval scenarios (evals/scenarios/*.yaml) call most.

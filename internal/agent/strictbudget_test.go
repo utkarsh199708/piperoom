@@ -67,13 +67,9 @@ func TestStrictSchemaBytesWithinBudget(t *testing.T) {
 		t.Errorf("strict tool schemas total %d bytes, budget is %d: shrink a strict schema or lower maxStrictTools, and re-run TestLiveStrictToolCap (-tags claude)", got, maxStrictSchemaBytes)
 	}
 
-	// The budget must stay below the largest strict set accepted live, or it
-	// guards nothing.
-	ref, refN := strictSchemaBytes(t, buildToolListWithCap(reg, room, 16))
-	if refN != 16 {
-		t.Fatalf("cap 16 produced %d strict tools", refN)
-	}
-	if maxStrictSchemaBytes >= ref {
-		t.Errorf("budget %d bytes is not below the cap-16 strict set (%d bytes)", maxStrictSchemaBytes, ref)
+	// The budget must stay below the largest sum proven accepted live, or a
+	// set inside the budget could still be rejected.
+	if maxStrictSchemaBytes >= liveAcceptedSchemaBytes {
+		t.Errorf("budget %d bytes is not below the largest live-accepted sum (%d bytes)", maxStrictSchemaBytes, liveAcceptedSchemaBytes)
 	}
 }
