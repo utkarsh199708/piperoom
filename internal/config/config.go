@@ -49,6 +49,27 @@ type Config struct {
 	SlackBotToken  string // SLACK_BOT_TOKEN (secret)
 	SlackChannelID string // SLACK_CHANNEL_ID
 	PublicURL      string // PIPEROOM_PUBLIC_URL: base URL for room links in Slack; empty = no links
+
+	// Warehouse kind. "postgres" (default) uses WAREHOUSE_DB_URL as a Postgres URL;
+	// "snowflake" uses it as a gosnowflake DSN.
+	WarehouseKind string // WAREHOUSE_KIND: postgres | snowflake
+
+	// Signed alert sources (internal/alertin). A source with an empty secret is
+	// disabled: its route answers 401. All secrets; never log them.
+	AlertmanagerToken    string // ALERTMANAGER_TOKEN
+	GrafanaAlertSecret   string // GRAFANA_ALERT_SECRET
+	PagerDutyAlertSecret string // PAGERDUTY_ALERT_SECRET
+	PagerDutyServices    string // PAGERDUTY_SERVICES: "SVCID=pipeline,SVCID2=pipeline2"
+	DatadogAlertToken    string // DATADOG_ALERT_TOKEN
+	GenericAlertSecret   string // GENERIC_ALERT_SECRET (HMAC for /api/alerts/generic)
+	DefaultAlertPipeline string // DEFAULT_ALERT_PIPELINE: used when an alert names no pipeline
+
+	// Agent cost guard: at most this many agent runs at once across all rooms;
+	// further rooms wait in a queue. 0 or empty = default 3.
+	MaxAgents string // PIPEROOM_MAX_AGENTS
+
+	// WebDir, when set, makes the server serve the built web UI (web/dist) at /.
+	WebDir string // PIPEROOM_WEB_DIR
 }
 
 // Load reads the environment and applies dev defaults.
@@ -90,6 +111,20 @@ func Load() Config {
 		SlackBotToken:  get("SLACK_BOT_TOKEN", ""),
 		SlackChannelID: get("SLACK_CHANNEL_ID", ""),
 		PublicURL:      get("PIPEROOM_PUBLIC_URL", ""),
+
+		WarehouseKind: get("WAREHOUSE_KIND", "postgres"),
+
+		AlertmanagerToken:    get("ALERTMANAGER_TOKEN", ""),
+		GrafanaAlertSecret:   get("GRAFANA_ALERT_SECRET", ""),
+		PagerDutyAlertSecret: get("PAGERDUTY_ALERT_SECRET", ""),
+		PagerDutyServices:    get("PAGERDUTY_SERVICES", ""),
+		DatadogAlertToken:    get("DATADOG_ALERT_TOKEN", ""),
+		GenericAlertSecret:   get("GENERIC_ALERT_SECRET", ""),
+		DefaultAlertPipeline: get("DEFAULT_ALERT_PIPELINE", ""),
+
+		MaxAgents: get("PIPEROOM_MAX_AGENTS", ""),
+
+		WebDir: get("PIPEROOM_WEB_DIR", ""),
 	}
 }
 
