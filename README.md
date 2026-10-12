@@ -28,7 +28,7 @@ internal/
   agent/         the Claude investigation loop and its contract
   clients/       Postgres, warehouse, Connect, Schema Registry, and Kafka clients
   owners/        who owns which pipeline layer, for approvals
-  slackbridge/   mirrors a room into one Slack thread (library; not wired into the server yet)
+  slackbridge/   mirrors a room into one Slack thread (wired in cmd/server)
   stacklock/      the shared dev-stack lock devctl uses
   testenv/       integration-test helpers (skip when the stack is unreachable or locked)
   tools/         read-only tools the agent calls, grouped by area

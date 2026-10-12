@@ -14,7 +14,6 @@ import (
 
 	"piperoom/internal/alertin"
 	"piperoom/internal/config"
-	"piperoom/internal/owners"
 	"piperoom/internal/room"
 	"piperoom/internal/watch"
 )
@@ -154,22 +153,6 @@ func (h *roomClosedHook) onClosed(_ context.Context, roomID, pipelineID, dedupKe
 	}
 }
 
-// watchedPipelines counts the pipelines the watcher looks at: enabled, with at
-// least one v1 signal on (the same rule as watch.Watcher.targets).
-func watchedPipelines(o *owners.Owners) int {
-	if o == nil {
-		return 0
-	}
-	n := 0
-	for _, p := range o.Pipelines {
-		c := p.Watch()
-		if c.Enabled && (c.ConnectorDown.Enabled || c.SlotInactive.Enabled || c.SlotWAL.Enabled) {
-			n++
-		}
-	}
-	return n
-}
-
 // watchRunner is the part of *watch.Watcher the server starts.
 type watchRunner interface {
 	Run(ctx context.Context) error
@@ -218,7 +201,7 @@ func startWatcher(ctx context.Context, d watch.Deps, hook *roomClosedHook, log *
 	log.Info("server: watcher starting",
 		"mode", string(d.Config.Mode),
 		"interval", d.Config.Interval.String(),
-		"pipelines", watchedPipelines(d.Owners))
+		"pipelines", w.Targets())
 	return startWatch(ctx, w, watchStopTimeout, log), nil
 }
 
