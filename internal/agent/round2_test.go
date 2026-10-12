@@ -311,10 +311,6 @@ func TestRunToolErrorIsError(t *testing.T) {
 // ---- tool timeout ----
 
 func TestRunToolTimeoutIsError(t *testing.T) {
-	old := toolTimeout
-	toolTimeout = 50 * time.Millisecond
-	defer func() { toolTimeout = old }()
-
 	bt := &blockingTool{name: "blocking", schema: testSchema("connector")}
 	model := &scriptedModel{turns: []anthropic.BetaMessage{
 		mustMessage(t, `{"stop_reason":"tool_use","content":[
@@ -324,6 +320,7 @@ func TestRunToolTimeoutIsError(t *testing.T) {
 	sink := &fakeSink{}
 	inbox := &fakeInbox{waitErr: context.Canceled}
 	r := newTestRunner(t, model, inbox, sink, bt, Options{MaxTurns: 3})
+	r.timing.toolTimeout = 50 * time.Millisecond
 
 	if err := r.run(context.Background()); err != nil {
 		t.Fatalf("run: %v", err)

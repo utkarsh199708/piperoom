@@ -522,11 +522,10 @@ func actorName(a events.Actor) string {
 // first-word rule keeps step id examples like s_3 out of the matches.
 var promptTokenRe = regexp.MustCompile(`\b[a-z][a-z0-9]+(?:_[a-z0-9]+)+\b`)
 
-// promptNonToolTokens are snake_case tokens in the prompt that are not
+// isPromptNonToolToken reports the snake_case tokens in the prompt that are not
 // callable names: the tool-output wrapper tag and the reply_to tool parameter.
-var promptNonToolTokens = map[string]bool{
-	"tool_output": true,
-	"reply_to":    true,
+func isPromptNonToolToken(tok string) bool {
+	return tok == "tool_output" || tok == "reply_to"
 }
 
 // PromptToolNames returns every callable name (tool or write action) the
@@ -540,7 +539,7 @@ func PromptToolNames() []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, tok := range promptTokenRe.FindAllString(systemPrompt(), -1) {
-		if promptNonToolTokens[tok] || seen[tok] {
+		if isPromptNonToolToken(tok) || seen[tok] {
 			continue
 		}
 		seen[tok] = true

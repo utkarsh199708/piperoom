@@ -59,8 +59,10 @@ const liveAcceptedSchemaBytes = 5484
 // strictReadTools take the strict slots left after the room tools, in this
 // order: the read tools the eval scenarios (evals/scenarios/*.yaml) call most.
 // Slots left over go to the other read tools in registration order.
-var strictReadTools = []string{
-	"schema_registry_diff", "pipeline_map", "trace_record", "schema_registry_versions", "connect_status",
+func strictReadTools() []string {
+	return []string{
+		"schema_registry_diff", "pipeline_map", "trace_record", "schema_registry_versions", "connect_status",
+	}
 }
 
 // buildToolList assembles the model-facing tool definitions. Registry (read)
@@ -112,7 +114,7 @@ func strictReadSet(reads []tools.Tool, n int) map[string]bool {
 		registered[t.Name()] = true
 	}
 	set := make(map[string]bool, n)
-	for _, name := range strictReadTools {
+	for _, name := range strictReadTools() {
 		if len(set) >= n {
 			break
 		}

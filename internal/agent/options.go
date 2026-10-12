@@ -1,5 +1,7 @@
 package agent
 
+import "time"
+
 // defaultModel is the Claude model the agent uses unless Options says otherwise.
 const defaultModel = "claude-opus-5-5"
 
@@ -32,5 +34,59 @@ func (o Options) effort() string {
 		return o.Effort
 	default:
 		return defaultEffort
+	}
+}
+
+const (
+	// defaultToolTimeout bounds a single read tool call. The turn continues with
+	// the other results if one tool times out.
+	defaultToolTimeout = 10 * time.Second
+	// defaultRoomToolTimeout bounds one room tool call (hypothesis, proposal,
+	// message).
+	defaultRoomToolTimeout = 10 * time.Second
+	// defaultDrainBackoffMin and defaultDrainBackoffMax bound the backoff
+	// waitForInput applies when Inbox.Drain keeps failing while Wait keeps
+	// returning at once: without a backoff that combination spins the loop at
+	// full speed.
+	defaultDrainBackoffMin = 250 * time.Millisecond
+	defaultDrainBackoffMax = 5 * time.Second
+	// defaultFreshnessWait is the pause between warehouse_freshness read rounds.
+	// One round sleeps once for all sinks still pending.
+	defaultFreshnessWait = 10 * time.Second
+	// defaultSettleWait is the pause between the two connector reads that a
+	// recovery needs, so a connector that only just came back is not counted as
+	// healthy.
+	defaultSettleWait = 5 * time.Second
+	// defaultBaselineTimeout bounds the whole creation-baseline snapshot taken
+	// when a proposal is made.
+	defaultBaselineTimeout = 20 * time.Second
+	// proposalTimeout bounds the Proposals.Create call so a stalled proposal
+	// store cannot hang the investigation.
+	proposalTimeout = 10 * time.Second
+)
+
+// timing holds the waits and deadlines one runner uses. Each runner gets its own
+// copy from defaultTiming, so tests shrink them on the runner and no package
+// level state is shared between runs.
+type timing struct {
+	toolTimeout     time.Duration
+	roomToolTimeout time.Duration
+	drainBackoffMin time.Duration
+	drainBackoffMax time.Duration
+	freshnessWait   time.Duration
+	settleWait      time.Duration
+	baselineTimeout time.Duration
+}
+
+// defaultTiming returns the production waits and deadlines.
+func defaultTiming() timing {
+	return timing{
+		toolTimeout:     defaultToolTimeout,
+		roomToolTimeout: defaultRoomToolTimeout,
+		drainBackoffMin: defaultDrainBackoffMin,
+		drainBackoffMax: defaultDrainBackoffMax,
+		freshnessWait:   defaultFreshnessWait,
+		settleWait:      defaultSettleWait,
+		baselineTimeout: defaultBaselineTimeout,
 	}
 }

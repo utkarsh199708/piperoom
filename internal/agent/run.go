@@ -24,20 +24,6 @@ const (
 	maxTokens = 16000
 )
 
-var (
-	// toolTimeout bounds a single read tool call. The turn continues with the
-	// other results if one tool times out. A var so tests can shorten it.
-	toolTimeout = 10 * time.Second
-	// roomToolTimeout bounds one room tool call (hypothesis, proposal, message).
-	roomToolTimeout = 10 * time.Second
-	// drainBackoffMin/Max bound the backoff waitForInput applies when
-	// Inbox.Drain keeps failing while Wait keeps returning at once: without a
-	// backoff that combination spins the loop at full speed. Vars so tests can
-	// shrink them.
-	drainBackoffMin = 250 * time.Millisecond
-	drainBackoffMax = 5 * time.Second
-)
-
 // clock abstracts time so tests can verify backoff behavior without waiting
 // on a real timer.
 type clock interface {
@@ -73,6 +59,8 @@ type runner struct {
 	log   *slog.Logger
 	model model
 	clk   clock
+	// timing holds this runner's waits and deadlines.
+	timing timing
 
 	toolList toolList
 	system   string
@@ -125,6 +113,7 @@ func newRunner(alert Alert, deps Deps, opts Options) (*runner, error) {
 		log:       deps.Logger,
 		model:     newModel(opts, deps.Logger),
 		clk:       realClock{},
+		timing:    defaultTiming(),
 		proposals: newProposalTracker(),
 	}, nil
 }
@@ -376,7 +365,7 @@ func (r *runner) drain(ctx context.Context) []HumanInput {
 // returning at once, draining again immediately would spin the loop at full
 // speed; an increasing backoff between failed drains bounds that.
 func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
-	backoff := drainBackoffMin
+	backoff := r.timing.drainBackoffMin
 	for {
 		inputs, err := r.deps.Inbox.Drain(ctx)
 		if err != nil {
@@ -384,15 +373,15 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 			if serr := r.clk.Sleep(ctx, backoff); serr != nil {
 				return nil, serr
 			}
-			if backoff *= 2; backoff > drainBackoffMax {
-				backoff = drainBackoffMax
+			if backoff *= 2; backoff > r.timing.drainBackoffMax {
+				backoff = r.timing.drainBackoffMax
 			}
 			continue
 		}
 		if len(inputs) > 0 {
 			return inputs, nil
 		}
-		backoff = drainBackoffMin
+		backoff = r.timing.drainBackoffMin
 		if err := r.deps.Inbox.Wait(ctx); err != nil {
 			return nil, err
 		}
@@ -619,7 +608,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		Input:     u.input,
 	})
 
-	tctx, cancel := context.WithTimeout(ctx, toolTimeout)
+	tctx, cancel := context.WithTimeout(ctx, r.timing.toolTimeout)
 	defer cancel()
 	start := time.Now()
 	res, err := entry.tool.Run(tctx, cleaned)
@@ -722,7 +711,7 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 			isError:   true,
 		}
 	}
-	tctx, cancel := context.WithTimeout(ctx, roomToolTimeout)
+	tctx, cancel := context.WithTimeout(ctx, r.timing.roomToolTimeout)
 	defer cancel()
 	res, err := entry.tool.Run(tctx, u.input)
 	if err != nil {

@@ -49,19 +49,6 @@ const (
 	waitingDetail = "pipeline recovered; waiting for input"
 )
 
-var (
-	// freshnessWait is the pause between warehouse_freshness read rounds. One
-	// round sleeps once for all sinks still pending. A var so tests can shrink it.
-	freshnessWait = 10 * time.Second
-	// settleWait is the pause between the two connector reads that a recovery
-	// needs, so a connector that only just came back is not counted as healthy.
-	// A var so tests can shrink it.
-	settleWait = 5 * time.Second
-	// baselineTimeout bounds the whole creation-baseline snapshot taken when a
-	// proposal is made. A var so tests can shrink it.
-	baselineTimeout = 20 * time.Second
-)
-
 // proposalRecord is what the agent remembers about a proposal it created, so a
 // later action_result can be matched to its steps and layers.
 type proposalRecord struct {
@@ -469,7 +456,7 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord) flowRes
 	}
 
 	for attempt := 0; attempt < freshnessAttempts && anyPending(states); attempt++ {
-		if err := r.clk.Sleep(ctx, freshnessWait); err != nil {
+		if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
 			return flowResult{lines: []string{"data flow not verified: waiting for new rows: " + err.Error()}}
 		}
 		for i := range states {
@@ -521,7 +508,7 @@ func anyPending(states []sinkState) bool {
 // stores nothing: a partial baseline would judge some sinks against a time the
 // others never had.
 func (r *runner) snapshotBaseline(ctx context.Context, proposalID string) {
-	ctx, cancel := context.WithTimeout(ctx, baselineTimeout)
+	ctx, cancel := context.WithTimeout(ctx, r.timing.baselineTimeout)
 	defer cancel()
 	sinks, why := r.pipelineSinks(ctx, "baseline")
 	if why != "" {
@@ -661,11 +648,11 @@ func (r *runner) runVerifyCheck(ctx context.Context, c verifyCheck) (bool, strin
 	if !ok || !c.settle {
 		return ok, line
 	}
-	if err := r.clk.Sleep(ctx, settleWait); err != nil {
+	if err := r.clk.Sleep(ctx, r.timing.settleWait); err != nil {
 		return false, "settling: " + err.Error()
 	}
 	ok, again := r.readCheck(ctx, c)
-	return ok, line + "; read again after " + settleWait.String() + ": " + again
+	return ok, line + "; read again after " + r.timing.settleWait.String() + ": " + again
 }
 
 // readCheck reads one layer check once and judges it. It returns whether the
@@ -715,7 +702,7 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 		Input:     input,
 	})
 
-	tctx, cancel := context.WithTimeout(ctx, toolTimeout)
+	tctx, cancel := context.WithTimeout(ctx, r.timing.toolTimeout)
 	defer cancel()
 	start := time.Now()
 	res, err := entry.tool.Run(tctx, input)
