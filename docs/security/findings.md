@@ -278,6 +278,55 @@ hardening, or dev-only exposure).
 
 ---
 
+## F11 — Read tools are not scoped to the room's pipeline
+
+- **Status:** fixed in the `[A3] read tools scoped to the room's pipeline (F11)` PR (branch
+  `a3/read-scope`).
+- **Severity:** high
+- **Where (before the fix):** `internal/tools/kafkatools/*` and `internal/tools/dbtools/*`.
+  `trace_record`, `pipeline_map`, `pg_publication_tables` and `kafka_topic_config` took a
+  `pipeline_id` from the tool input and never compared it with the room's pipeline.
+  `kafka_topic_offsets`, `kafka_find_by_key`, `kafka_consumer_lag`, `kafka_list_groups`,
+  `connect_list_connectors`, `connect_status`, `connect_config`, `schema_registry_*`,
+  `warehouse_freshness` and `pg_recent_ddl` took free names (connector, topic, group, subject,
+  table) and passed them straight to the client. `internal/agent/run.go` never told a tool which
+  pipeline the room was about, so no tool could have checked.
+- **Scenario:** F4 and F10 closed the table reads and the write actions. The read side of
+  Kafka, Connect and the Schema Registry stayed open. A room (or a prompt-injected agent, or an
+  over-broad steer) could read any connector's config, any topic's offsets or keys, any group's
+  lag, any subject's schemas, and the full connector and group lists. Only the credentials and
+  ACLs of the process limited this, and they are shared by every pipeline (F7). The connector
+  config also showed `transforms.*` values, which can hold literals (static fields, regexes,
+  replacements) that the key-name secret masking does not catch.
+- **Fix:**
+  - New `internal/tools/scope.go` (not a contract file): `tools.WithPipelineID` /
+    `WithPipeline` put the room's pipeline into the tool context, `tools.ScopeFor(ctx, owners)`
+    resolves it, and `Scope` has the checks and list filters (connector, consumer group, topic,
+    subject, source/sink table, `pipeline_id`). The topic and subject rules are the same as the
+    write actions' `CheckScope` (F10): topic = `<topic_prefix>.<source_table>`, subject =
+    that topic plus `-key` or `-value`, exact match.
+  - The agent runner (`internal/agent/run.go`, `verify.go`) sets the pipeline from
+    `Alert.PipelineID` on every read tool call, including the verification and baseline reads.
+    The model cannot set it. A tool never trusts a `pipeline_id` from its input: a different one
+    is refused and the room's id is used for the data call.
+  - Every tool calls `ScopeFor` first and checks its names before any client call. An
+    out-of-scope name returns an error that names the rule and the allowed names, with no data.
+    List tools return only in-scope items and do not call the client for the others.
+  - The default is refuse. A call with no room pipeline gets `ErrNoScope`. CLI and dev callers
+    opt out explicitly with `tools.WithUnscoped(ctx)`; a room pipeline always wins over the
+    opt-out.
+  - `connect_config` shows a `transforms.<name>.<setting>` value only for `type`, `field`,
+    `fields` and `field.name` (and the `transforms` name list); every other transforms value is
+    `***`. The existing secret masking stays.
+  - `connect_status` no longer diffs a subject named in a failure trace unless it is in scope.
+- **Not covered:** `pg_replication_slots` and `pg_long_transactions` are database-wide and
+  `owners.yaml` names no slot or session, so they need a room scope but are not filtered. A
+  per-pipeline slot list in `owners.yaml` would close this.
+- **Owner:** A3 (`internal/tools/dbtools`), A2 (`internal/tools/kafkatools`), A4
+  (`internal/agent`). One PR by A3.
+
+---
+
 ## Summary of critical/high findings
 
 | ID | Severity | One-line |
@@ -287,3 +336,4 @@ hardening, or dev-only exposure).
 | F3 | high | Full row values (not the redacted summary) are broadcast to every room watcher and stored forever |
 | F4 | high | `pg_row`/`warehouse_row` can read any syntactically-valid table, not just the pipeline's own tables |
 | F10 | high | Write actions (`connect_restart_*`, `schema_set_compatibility`, `schema_register`) can target any connector/subject that exists, not just the pipeline's own |
+| F11 | high | Read tools take any connector, topic, group, subject or `pipeline_id`, not just the room's own pipeline's (fixed) |
