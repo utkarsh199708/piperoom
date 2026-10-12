@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"piperoom/internal/alertin"
@@ -66,20 +65,16 @@ func parsePagerDutyServices(s string, own *owners.Owners) (map[string]string, er
 	return out, nil
 }
 
-// alertPipelineIDRe is alertin's own pipeline id shape (alertin.validPipelineID,
-// unexported). alertin ignores any other id from an alert or from
-// PagerDutyServices, so an owners pipeline outside it could never be picked.
-var alertPipelineIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
-
 // checkOwnersIDs refuses start when an owners.yaml pipeline id is one alertin
-// would silently ignore, so alerts for it would not be routed there.
+// would silently ignore (alertin.ValidPipelineID), so alerts for it would not
+// be routed there.
 func checkOwnersIDs(own *owners.Owners) error {
 	if own == nil {
 		return nil
 	}
 	for _, p := range own.Pipelines {
-		if !alertPipelineIDRe.MatchString(p.ID) {
-			return fmt.Errorf("server: owners pipeline id %q does not match %s, so signed alerts could not be routed to it", p.ID, alertPipelineIDRe)
+		if !alertin.ValidPipelineID(p.ID) {
+			return fmt.Errorf("server: owners pipeline id %q is not a valid alert pipeline id (letters, digits, _ . -; at most 64), so signed alerts could not be routed to it", p.ID)
 		}
 	}
 	return nil

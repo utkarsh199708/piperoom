@@ -1,7 +1,10 @@
 package room_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +80,44 @@ func TestDevWebhookCannotTakeSignedAlertKey(t *testing.T) {
 	check("after restart", svc2)
 	if rooms, _ := svc2.ListRooms(ctx); len(rooms) != 2 {
 		t.Fatalf("want 2 rooms, got %d", len(rooms))
+	}
+}
+
+// room.created is stored in a Postgres jsonb column, which rejects \u0000, so
+// the stored dedup key (and the rest of the payload) must be free of NUL for
+// both routes.
+func TestRoomCreatedPayloadHasNoNUL(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	st := memstore.NewWithClock(c.Now)
+	svc := room.New(alertDeps(st, c)())
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+
+	signed, err := alertin.Config{}.Parse(alertin.Alertmanager, alertBody)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	a, _, err := svc.OpenAlertRoom(ctx, signed)
+	if err != nil {
+		t.Fatalf("signed: %v", err)
+	}
+	b, _, err := svc.CreateRoomFromAlert(ctx, "Lag", "sev1", "orders", alertBody)
+	if err != nil {
+		t.Fatalf("dev: %v", err)
+	}
+	for _, id := range []string{a.ID, b.ID} {
+		e := allEvents(t, st, id)[0]
+		enc, err := json.Marshal(e)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if bytes.Contains(enc, []byte(`\u0000`)) || bytes.IndexByte(e.Payload, 0) >= 0 {
+			t.Fatalf("room %s: room.created contains NUL: %s", id, e.Payload)
+		}
+		p, err := events.Decode[events.RoomCreatedPayload](e)
+		if err != nil || !strings.HasPrefix(p.DedupKey, "orders|") {
+			t.Fatalf("room %s: dedup_key %q (err %v), want orders|...", id, p.DedupKey, err)
+		}
 	}
 }
 

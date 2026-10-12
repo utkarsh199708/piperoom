@@ -233,11 +233,14 @@ func alertDedup(raw json.RawMessage) (key string, resolved bool) {
 
 // alertIndexKey scopes an alert dedup key to its pipeline: the same key sent for
 // two pipelines is two incidents. An empty dedup key stays empty (no dedup).
+// The key is stored in room.created (Postgres jsonb), so the separator must be
+// printable: jsonb rejects \u0000. "|" cannot occur in a pipeline id
+// ([a-zA-Z0-9_.-]), so pipeline and key never run together.
 func alertIndexKey(pipelineID, dedupKey string) string {
 	if dedupKey == "" {
 		return ""
 	}
-	return pipelineID + "\x00" + dedupKey
+	return pipelineID + "|" + dedupKey
 }
 
 // openAlertRoomLocked returns the open room that already holds indexKey (see

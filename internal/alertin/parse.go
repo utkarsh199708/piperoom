@@ -54,16 +54,16 @@ func (c Config) Parse(src Source, body []byte) (Alert, error) {
 // resolvePipeline picks the pipeline in this order: the alert's own label,
 // the PagerDuty service map, a unique owners.yaml match, the default.
 func (c Config) resolvePipeline(p parsed) (string, string) {
-	if validPipelineID(p.explicit) {
+	if ValidPipelineID(p.explicit) {
 		return p.explicit, ViaLabel
 	}
-	if id := c.PagerDutyServices[p.service]; p.service != "" && validPipelineID(id) {
+	if id := c.PagerDutyServices[p.service]; p.service != "" && ValidPipelineID(id) {
 		return id, ViaService
 	}
 	if id := matchOwners(c.Owners, p.values, p.text); id != "" {
 		return id, ViaOwners
 	}
-	if validPipelineID(c.DefaultPipeline) {
+	if ValidPipelineID(c.DefaultPipeline) {
 		return c.DefaultPipeline, ViaDefault
 	}
 	return "", ""
