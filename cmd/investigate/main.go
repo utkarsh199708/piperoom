@@ -43,6 +43,13 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The model endpoint (provider, triage model, token budget) comes from the
+	// same settings as the server; a bad value stops the run before any tool opens.
+	ep, err := wiring.NewAgentEndpoint(ctx, cfg, nil)
+	if err != nil {
+		return fmt.Errorf("investigate: %w", err)
+	}
+
 	reg := tools.NewRegistry()
 	areg := actions.NewRegistry()
 	if fakeTools {
@@ -79,7 +86,7 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 postgres: public.orders  ->  connect: pg-orders-connector  ->  topic: pg.public.orders  ->  consumer: order-sync  ->  warehouse: analytics.orders`, pipeline),
 	}
 
-	err := agent.Run(ctx, alert, agent.Deps{
+	err = ep.Run(ctx, alert, agent.Deps{
 		Tools:     reg,
 		Actions:   areg,
 		Inbox:     inbox,

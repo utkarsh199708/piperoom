@@ -190,6 +190,11 @@ func (r *runner) handleActionResults(ctx context.Context, inputs []HumanInput) a
 	case out.recovered:
 		r.recoveredIdle = true
 	}
+	// A verdict is going to the model: from here on the main model reads the
+	// evidence (see pickModel).
+	if len(out.notes) > 0 {
+		r.verified = true
+	}
 	return out
 }
 
