@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"time"
 
 	"piperoom/internal/alertin"
 	"piperoom/internal/events"
@@ -23,6 +24,10 @@ var pipelineIDRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pipelineID string) (RoomSnapshot, error) {
 	if title == "" || pipelineID == "" {
 		return RoomSnapshot{}, validation("title and pipeline_id are required")
+	}
+	// The title is client text stored in a Postgres text column and in jsonb.
+	if err := checkTextStorable("title", title); err != nil {
+		return RoomSnapshot{}, err
 	}
 	// The shape check applies even without an owners config (demo, unit
 	// tests): it does not depend on anything being loaded.
@@ -58,6 +63,7 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	if _, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, humanActor(user), events.RoomCreatedPayload{
 		Title: title, Severity: severity, PipelineID: pipelineID,
 	}); err != nil {
+		s.discardNewRoomLocked(ctx, roomID)
 		s.mu.Unlock()
 		return RoomSnapshot{}, err
 	}
@@ -75,6 +81,21 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	s.notifyRoomOpenedLocked(roomID)
 	s.mu.Unlock()
 	return snap, nil
+}
+
+// discardNewRoomLocked undoes a room whose room.created append failed: the
+// cache entry goes and the rooms row is deleted (DeleteEmptyRoom only deletes
+// a row with no events), so no orphan row is left behind that would load as a
+// room with an empty log. The delete uses a fresh deadline because ctx may be
+// the reason the append failed. If the delete fails too, Load still skips the
+// empty row (ensureAllLoadedLocked). Caller must hold s.mu.
+func (s *Service) discardNewRoomLocked(ctx context.Context, roomID string) {
+	delete(s.rooms, roomID)
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.store.DeleteEmptyRoom(dctx, roomID); err != nil {
+		s.log.Warn("room: remove room row after failed room.created", "room", roomID, "err", err)
+	}
 }
 
 // CreateRoomFromAlert handles the generic alert webhook (POST
@@ -141,6 +162,15 @@ func (s *Service) OpenAlertRoom(ctx context.Context, a alertin.Alert) (RoomSnaps
 // openAlertRoom is OpenAlertRoom with the route recorded in room.created.
 func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSource string) (RoomSnapshot, bool, error) {
 	title, severity, pipelineID, raw := a.Title, a.Severity, a.PipelineID, a.Raw
+	// Before ANY write (a repeat joining an open room writes too): refuse
+	// what Postgres jsonb/text cannot store, with a 400 instead of a failed
+	// append on real Postgres.
+	if err := checkJSONBStorable(raw); err != nil {
+		return RoomSnapshot{}, false, err
+	}
+	if err := checkTextStorable("title", title); err != nil {
+		return RoomSnapshot{}, false, err
+	}
 	if title == "" {
 		title = "New alert"
 	}
@@ -187,6 +217,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 		Title: title, Severity: severity, PipelineID: pipelineID, Alert: raw,
 		AlertSource: alertSource, DedupKey: indexKey,
 	}); err != nil {
+		s.discardNewRoomLocked(ctx, roomID)
 		s.mu.Unlock()
 		return RoomSnapshot{}, false, err
 	}

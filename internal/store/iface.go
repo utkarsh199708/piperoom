@@ -18,6 +18,10 @@ type Store interface {
 	ListRooms(ctx context.Context) ([]Room, error)
 	UpdateDriver(ctx context.Context, id, driverID, driverName string, leaseUntil time.Time) error
 	CloseRoom(ctx context.Context, id string, closedAt time.Time) error
+	// DeleteEmptyRoom removes a room row that has no events yet, for the
+	// window between CreateRoom and the room.created append. A missing room is
+	// not an error; a room that has events is ErrRoomNotEmpty and is kept.
+	DeleteEmptyRoom(ctx context.Context, id string) error
 
 	CreateProposal(ctx context.Context, p ProposalRow) error
 	DeleteProposal(ctx context.Context, proposalID string) error
