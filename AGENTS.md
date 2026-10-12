@@ -53,6 +53,7 @@ Each agent owns folders. **Never edit a file you do not own.**
 | A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`), `cmd/investigate/**`, `internal/wiring/**` (shared client/tool wiring) |
 | A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**` |
 | A6 | `tasks/A6-web.md` | `web/**` |
+| A7 | `docs/design/watcher.md` (watcher) | `internal/watch/**` |
 | C1 (cloud) | `tasks/C1-ci-repo.md` | `.github/**`, `README.md`, `docs/runbook.md`, `Makefile` |
 | C2 (cloud) | `tasks/C2-agent-memory.md` | done — merged `9519d23`; `internal/agent/**` belongs to A4 again |
 | C3 (cloud) | `tasks/C3-snowflake.md` | `internal/clients/snowflake/**` |

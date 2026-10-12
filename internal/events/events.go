@@ -104,8 +104,9 @@ type RoomCreatedPayload struct {
 	PipelineID string          `json:"pipeline_id"`
 	Alert      json.RawMessage `json:"alert,omitempty"` // raw alert from the webhook
 	// AlertSource is the route that opened the room: "webhook" (dev X-User
-	// route) or a signed source ("alertmanager", "grafana", "pagerduty",
-	// "datadog", "generic"). Empty for rooms not opened by an alert.
+	// route), a signed source ("alertmanager", "grafana", "pagerduty",
+	// "datadog", "generic") or the built-in watcher ("watcher"; dedup key
+	// "watcher:<pipeline>", no HTTP route). Empty for rooms not opened by an alert.
 	AlertSource string `json:"alert_source,omitempty"`
 	// DedupKey is the exact index key the room was opened under, so a restart
 	// rebuilds the same alert index instead of re-deriving it from Alert.

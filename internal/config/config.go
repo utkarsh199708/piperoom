@@ -3,7 +3,12 @@
 // CONTRACT FILE — owned by the reviewer. Do not edit; request changes in your PR.
 package config
 
-import "os"
+import (
+	"fmt"
+	"os"
+	"strings"
+	"time"
+)
 
 // Config holds every setting. Defaults match dev/docker-compose.yml.
 type Config struct {
@@ -67,6 +72,13 @@ type Config struct {
 	// Agent cost guard: at most this many agent runs at once across all rooms;
 	// further rooms wait in a queue. 0 or empty = default 3.
 	MaxAgents string // PIPEROOM_MAX_AGENTS
+
+	// Built-in watcher (internal/watch). Kept as strings like the other fields;
+	// ParseWatch turns them into typed values and names the env var on error.
+	WatchMode         string // PIPEROOM_WATCH_MODE: off | log | rooms (default log = shadow mode)
+	WatchInterval     string // PIPEROOM_WATCH_INTERVAL: Go duration, default 60s, minimum 15s
+	WatchCheckTimeout string // PIPEROOM_WATCH_CHECK_TIMEOUT: per-check deadline, default 10s (max 10s = the pilot role's statement_timeout)
+	WatchCooldown     string // PIPEROOM_WATCH_COOLDOWN: quiet time after a watcher room is closed, default 60m
 
 	// WebDir, when set, makes the server serve the built web UI (web/dist) at /.
 	WebDir string // PIPEROOM_WEB_DIR
@@ -143,6 +155,11 @@ func Load() Config {
 
 		MaxAgents: get("PIPEROOM_MAX_AGENTS", ""),
 
+		WatchMode:         get("PIPEROOM_WATCH_MODE", DefaultWatchMode),
+		WatchInterval:     get("PIPEROOM_WATCH_INTERVAL", DefaultWatchInterval),
+		WatchCheckTimeout: get("PIPEROOM_WATCH_CHECK_TIMEOUT", DefaultWatchCheckTimeout),
+		WatchCooldown:     get("PIPEROOM_WATCH_COOLDOWN", DefaultWatchCooldown),
+
 		WebDir: get("PIPEROOM_WEB_DIR", ""),
 
 		ModelProvider:   get("PIPEROOM_MODEL_PROVIDER", "anthropic"),
@@ -154,6 +171,92 @@ func Load() Config {
 
 		RetentionDays: get("PIPEROOM_RETENTION_DAYS", ""),
 	}
+}
+
+// Watcher defaults and limits.
+const (
+	DefaultWatchMode         = "log"
+	DefaultWatchInterval     = "60s"
+	DefaultWatchCheckTimeout = "10s"
+	DefaultWatchCooldown     = "60m"
+
+	// MinWatchInterval keeps the watcher from hammering the source database.
+	MinWatchInterval = 15 * time.Second
+	// MaxWatchCheckTimeout must not exceed the pilot role's statement_timeout
+	// (docs/pilot/permissions.md), or a hung check would outlive the server's cap.
+	MaxWatchCheckTimeout = 10 * time.Second
+)
+
+// WatchMode says what the watcher does when a signal fires.
+type WatchMode string
+
+// Watcher modes.
+const (
+	// WatchOff does not start the watcher.
+	WatchOff WatchMode = "off"
+	// WatchLog checks and logs transitions but opens no rooms (shadow mode).
+	WatchLog WatchMode = "log"
+	// WatchRooms checks, logs, and opens or joins rooms.
+	WatchRooms WatchMode = "rooms"
+)
+
+// Watch holds the typed watcher settings.
+type Watch struct {
+	Mode         WatchMode
+	Interval     time.Duration
+	CheckTimeout time.Duration
+	Cooldown     time.Duration
+}
+
+// ParseWatch validates the PIPEROOM_WATCH_* fields. The error names the env var
+// so the operator knows what to fix. Empty fields mean the default.
+func ParseWatch(c Config) (Watch, error) {
+	var w Watch
+
+	mode := strings.ToLower(strings.TrimSpace(c.WatchMode))
+	if mode == "" {
+		mode = DefaultWatchMode
+	}
+	switch WatchMode(mode) {
+	case WatchOff, WatchLog, WatchRooms:
+		w.Mode = WatchMode(mode)
+	default:
+		return Watch{}, fmt.Errorf("config: PIPEROOM_WATCH_MODE=%q: want off, log or rooms", c.WatchMode)
+	}
+
+	var err error
+	if w.Interval, err = parseWatchDuration("PIPEROOM_WATCH_INTERVAL", c.WatchInterval, DefaultWatchInterval); err != nil {
+		return Watch{}, err
+	}
+	if w.Interval < MinWatchInterval {
+		return Watch{}, fmt.Errorf("config: PIPEROOM_WATCH_INTERVAL=%q: must be at least %s", c.WatchInterval, MinWatchInterval)
+	}
+	if w.CheckTimeout, err = parseWatchDuration("PIPEROOM_WATCH_CHECK_TIMEOUT", c.WatchCheckTimeout, DefaultWatchCheckTimeout); err != nil {
+		return Watch{}, err
+	}
+	if w.CheckTimeout > MaxWatchCheckTimeout {
+		return Watch{}, fmt.Errorf("config: PIPEROOM_WATCH_CHECK_TIMEOUT=%q: must be at most %s (the source role's statement_timeout)", c.WatchCheckTimeout, MaxWatchCheckTimeout)
+	}
+	if w.Cooldown, err = parseWatchDuration("PIPEROOM_WATCH_COOLDOWN", c.WatchCooldown, DefaultWatchCooldown); err != nil {
+		return Watch{}, err
+	}
+	return w, nil
+}
+
+// parseWatchDuration parses a positive Go duration; empty uses def.
+func parseWatchDuration(name, v, def string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		v = def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s=%q: not a duration like 30s or 5m: %w", name, v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("config: %s=%q: must be greater than zero", name, v)
+	}
+	return d, nil
 }
 
 func get(key, def string) string {

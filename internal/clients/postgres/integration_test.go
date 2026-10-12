@@ -254,11 +254,13 @@ func TestLongTransactionsIntegration(t *testing.T) {
 		t.Fatalf("BEGIN: %v", err)
 	}
 	defer func() { _, _ = conn.Exec(context.Background(), "ROLLBACK") }()
-	if _, err := conn.Exec(ctx, "SELECT 1"); err != nil {
-		t.Fatalf("SELECT: %v", err)
+	// txid_current() assigns a transaction id, so this backend now holds a
+	// backend_xid like any writer; a bare SELECT would not.
+	if _, err := conn.Exec(ctx, "SELECT txid_current()"); err != nil {
+		t.Fatalf("SELECT txid_current: %v", err)
 	}
 
-	// olderThan=0 selects every open transaction.
+	// olderThan=0 selects every open transaction that holds an xid.
 	txns, err := db.LongTransactions(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("LongTransactions: %v", err)
@@ -269,8 +271,116 @@ func TestLongTransactionsIntegration(t *testing.T) {
 			if tx.Query != "SELECT" {
 				t.Fatalf("Query = %q, want only the statement verb SELECT", tx.Query)
 			}
+			if !tx.HasXID {
+				t.Fatalf("returned transaction has HasXID=false: %+v", tx)
+			}
 			return
 		}
 	}
 	t.Fatalf("did not find the open transaction in %+v", txns)
+}
+
+// A read-only transaction is listed with HasXID=false (it blocks DDL and
+// VACUUM); a writer is listed with HasXID=true (it holds the WAL horizon).
+func TestLongTransactionsHasXIDIntegration(t *testing.T) {
+	db := sourceDB(t)
+	readConn := writeConn(t, testenv.Require(t).SourceDBURL)
+	writeC := writeConn(t, testenv.Require(t).SourceDBURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pid := func(c *pgx.Conn) int {
+		var p int
+		if err := c.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&p); err != nil {
+			t.Fatalf("pg_backend_pid: %v", err)
+		}
+		return p
+	}
+	for _, c := range []*pgx.Conn{readConn, writeC} {
+		if _, err := c.Exec(ctx, "BEGIN"); err != nil {
+			t.Fatalf("BEGIN: %v", err)
+		}
+		defer func(c *pgx.Conn) { _, _ = c.Exec(context.Background(), "ROLLBACK") }(c)
+	}
+	if _, err := readConn.Exec(ctx, "SELECT 1"); err != nil {
+		t.Fatalf("SELECT 1: %v", err)
+	}
+	if _, err := writeC.Exec(ctx, "SELECT txid_current()"); err != nil {
+		t.Fatalf("SELECT txid_current: %v", err)
+	}
+	readPID, writePID := pid(readConn), pid(writeC)
+
+	txns, err := db.LongTransactions(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("LongTransactions: %v", err)
+	}
+	foundReader, foundWriter := false, false
+	for _, tx := range txns {
+		switch tx.PID {
+		case readPID:
+			foundReader = true
+			if tx.HasXID {
+				t.Fatalf("read-only transaction has HasXID=true: %+v", tx)
+			}
+		case writePID:
+			foundWriter = true
+			if !tx.HasXID {
+				t.Fatalf("writer has HasXID=false: %+v", tx)
+			}
+		}
+	}
+	if !foundReader {
+		t.Fatalf("read-only transaction (pid %d) not listed in %+v", readPID, txns)
+	}
+	if !foundWriter {
+		t.Fatalf("writer transaction (pid %d) not listed in %+v", writePID, txns)
+	}
+}
+
+// SafeWALBytes mirrors pg_replication_slots.safe_wal_size: nil when Postgres
+// reports NULL (max_slot_wal_keep_size = -1), a number otherwise (it goes
+// negative only after the slot is past its limit; a fresh slot is not).
+func TestReplicationSlotsSafeWALIntegration(t *testing.T) {
+	db := sourceDB(t)
+	conn := writeConn(t, testenv.Require(t).SourceDBURL)
+
+	slot := testenv.Name("slot")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := conn.Exec(ctx, "SELECT pg_create_logical_replication_slot($1, 'pgoutput')", slot); err != nil {
+		t.Fatalf("create slot (needs wal_level=logical): %v", err)
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(c, "SELECT pg_drop_replication_slot($1)", slot)
+	})
+
+	var wantNull bool
+	if err := conn.QueryRow(ctx, "SELECT safe_wal_size IS NULL FROM pg_replication_slots WHERE slot_name = $1", slot).Scan(&wantNull); err != nil {
+		t.Fatalf("read safe_wal_size: %v", err)
+	}
+
+	slots, err := db.ReplicationSlots(context.Background())
+	if err != nil {
+		t.Fatalf("ReplicationSlots: %v", err)
+	}
+	for _, s := range slots {
+		if s.Name != slot {
+			continue
+		}
+		if wantNull != (s.SafeWALBytes == nil) {
+			t.Fatalf("SafeWALBytes nil = %v, but safe_wal_size IS NULL = %v", s.SafeWALBytes == nil, wantNull)
+		}
+		if s.SafeWALBytes != nil && *s.SafeWALBytes < 0 {
+			t.Fatalf("SafeWALBytes = %d, want >= 0", *s.SafeWALBytes)
+		}
+		if s.SafeWALBytes == nil {
+			t.Logf("slot %s: wal_status=%s safe_wal_bytes=NULL", slot, s.WALStatus)
+		} else {
+			t.Logf("slot %s: wal_status=%s safe_wal_bytes=%d", slot, s.WALStatus, *s.SafeWALBytes)
+		}
+		return
+	}
+	t.Fatalf("slot %s not in %+v", slot, slots)
 }

@@ -56,6 +56,32 @@ func TestLongTransactionsReturnNoQueryText(t *testing.T) {
 	}
 }
 
+// has_xid marks writers: it reaches both the Summary (writer=yes|no) and Data.
+func TestLongTransactionsMarkWriters(t *testing.T) {
+	d := testDeps()
+	d.Src = &txnSource{fakeSource: d.Src.(*fakeSource), txns: []clients.Transaction{
+		{PID: 51, Username: "etl", State: "active", Age: 9 * time.Minute, Query: "UPDATE", HasXID: true},
+		{PID: 52, Username: "bi", State: "idle in transaction", Age: 8 * time.Minute, Query: "SELECT", HasXID: false},
+	}}
+	r, err := scopedTool(t, d, "pg_long_transactions").Run(roomCtx(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := r.Data.([]longTxn)
+	if len(rows) != 2 || !rows[0].HasXID || rows[1].HasXID {
+		t.Fatalf("HasXID = %+v, want [true false]", rows)
+	}
+	data, _ := json.Marshal(r.Data)
+	if !strings.Contains(string(data), `"has_xid":true`) || !strings.Contains(string(data), `"has_xid":false`) {
+		t.Errorf("data lacks has_xid: %s", data)
+	}
+	lines := strings.Split(strings.TrimSpace(r.Summary), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "pid=51") || !strings.HasSuffix(lines[0], "writer=yes") ||
+		!strings.Contains(lines[1], "pid=52") || !strings.HasSuffix(lines[1], "writer=no") {
+		t.Errorf("summary writer flags wrong:\n%s", r.Summary)
+	}
+}
+
 func TestStatementVerb(t *testing.T) {
 	for in, want := range map[string]string{
 		"select 1":               "SELECT",

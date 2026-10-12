@@ -25,6 +25,12 @@ type Pipeline struct {
 	ConsumerGroups []string `yaml:"consumer_groups"`
 	SinkTables     []string `yaml:"sink_tables"`
 	SinkTSColumn   string   `yaml:"sink_ts_column"`
+	// WatchSpec is the optional `watch:` block (see watch.go). Read the
+	// validated values with Watch().
+	WatchSpec *WatchSpec `yaml:"watch"`
+
+	// watch is WatchSpec after validation, with defaults applied. Set by Load.
+	watch *WatchConfig
 }
 
 // Owners is the full ownership config.
@@ -72,7 +78,8 @@ func (o *Owners) validate() error {
 		}
 	}
 	seen := map[string]bool{}
-	for _, p := range o.Pipelines {
+	for i := range o.Pipelines {
+		p := o.Pipelines[i]
 		if p.ID == "" {
 			return fmt.Errorf("pipeline with empty id")
 		}
@@ -92,6 +99,11 @@ func (o *Owners) validate() error {
 		if len(p.SinkTables) > 0 && p.SinkTSColumn == "" {
 			return fmt.Errorf("pipeline %q: sink_ts_column is required when sink_tables is set", p.ID)
 		}
+		w, err := resolveWatch(p.WatchSpec)
+		if err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
+		o.Pipelines[i].watch = &w
 	}
 	return nil
 }

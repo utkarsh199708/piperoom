@@ -95,7 +95,7 @@ Two more things follow from this list:
 |---|---|---|
 | `pg_replication_slots` | slot name, plugin, active flag, WAL retained | data |
 | `pg_recent_ddl` | DDL command, object, **full statement text**, user, time | row data |
-| `pg_long_transactions` | pid, user, application name (client-set free text, shown as-is), state, transaction age, wait event, and at most the statement verb (first keyword, e.g. `UPDATE`). Database-wide: it lists sessions of every pipeline, because any long transaction holds the WAL horizon | query text (never selected, never returned) |
+| `pg_long_transactions` | pid, user, application name (client-set free text, shown as-is), state, transaction age, wait event, and at most the statement verb (first keyword, e.g. `UPDATE`). Database-wide: it lists sessions of every pipeline, because it cannot be tied to one pipeline. Each row has `has_xid` (summary `writer=yes\|no`): only writers hold the WAL horizon, but long read-only sessions are listed too since they block DDL and VACUUM | query text (never selected, never returned) |
 | `pg_row` | row **column names**; values only for the key and timestamp columns, others `null` (`pg.go:191,199`). Key and timestamp columns are chosen **by name**: the key is the column you pass in, and timestamp columns are `at` or names ending in `_at` (`dbtools.go:220-222`) | other column values |
 | `pg_publication_tables` | the publication name, the connector role, and only the pipeline's own source tables | other tables of a `FOR ALL TABLES` publication |
 | `warehouse_freshness` | max timestamp of the sink table, lag | row data |
