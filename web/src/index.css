@@ -1012,6 +1012,10 @@ textarea:focus {
   background: rgba(76, 195, 138, 0.12);
 }
 
+.banner--nodriver {
+  background: rgba(255, 169, 77, 0.12);
+}
+
 .banner--error {
   background: rgba(255, 107, 107, 0.12);
   color: var(--red);

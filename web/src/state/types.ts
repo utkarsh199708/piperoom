@@ -108,6 +108,12 @@ export interface HandoffState {
   status: 'pending' | 'accepted'
 }
 
+/** The alert that opened the room, from room.created's `alert` webhook body. */
+export interface AlertInfo {
+  /** Best-effort source inferred from the raw body shape; null when unknown. */
+  source: string | null
+}
+
 export interface ActivityEntry {
   seq: number
   at: string
@@ -126,6 +132,8 @@ export interface RoomState {
   resolution?: string
   last_seq: number
   driver: DriverInfo | null
+  /** Set when room.created carried an alert webhook body (alert-opened room). */
+  alert: AlertInfo | null
   agent_status: AgentStatusState
   hypothesis: HypothesisState | null
   steps: StepState[]
@@ -150,6 +158,7 @@ export function emptyRoomState(id: string): RoomState {
     opened_at: '',
     last_seq: 0,
     driver: null,
+    alert: null,
     agent_status: { state: 'idle' },
     hypothesis: null,
     steps: [],

@@ -23,11 +23,12 @@ vi.mock('../api/client', async (importOriginal) => {
       ...actual.api,
       room: vi.fn(),
       events: vi.fn(),
+      grantControl: vi.fn(),
     },
   }
 })
 
-import { api, openRoomWs } from '../api/client'
+import { ApiClientError, api, openRoomWs } from '../api/client'
 import { useRoom } from './useRoom'
 
 class FakeWebSocket {
@@ -193,5 +194,26 @@ describe('useRoom transport', () => {
     })
 
     expect(result.current.error).toBe('someone else holds control')
+  })
+
+  it('maps a lease_held rejection from control/grant (self-grant race) to the friendly text', async () => {
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    vi.mocked(api.grantControl).mockRejectedValue(
+      new ApiClientError(409, 'lease_held', 'control/grant: kabir holds the lease until 10:35'),
+    )
+
+    const { result } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 'arjun', 0))
+    socket.onopen?.()
+
+    // The no-driver banner grants control to the current user.
+    await act(async () => {
+      result.current.actions.grantControl('arjun')
+    })
+
+    await waitFor(() => expect(result.current.error).toBe('someone else holds control'))
+    expect(api.grantControl).toHaveBeenCalledWith('arjun', 'r1', 'arjun')
   })
 })
