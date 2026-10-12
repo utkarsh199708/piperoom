@@ -151,7 +151,9 @@ func (s *stack) latestAmountIsDecimal(ctx context.Context, subject string) (bool
 // inside before, and refers to it by name from after, so the schema is parsed
 // with hamba/avro (which resolves those references) before the fields are read.
 func amountIsDecimal(schema string) (bool, error) {
-	root, err := avro.Parse(schema)
+	// A fresh cache per call: hamba/avro's default cache is package-global, so a
+	// name defined by an earlier schema would resolve here without being defined.
+	root, err := avro.ParseWithCache(schema, "", &avro.SchemaCache{})
 	if err != nil {
 		return false, fmt.Errorf("parse value schema: %w", err)
 	}
