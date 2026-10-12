@@ -317,9 +317,15 @@ func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {
 	snap := info.freshness[s]
 	if snap.err != nil {
 		n.Facts = map[string]string{"error": "unreachable"}
-		return n
+	} else {
+		n.Health, n.Facts = sinkHealth(snap.ts, info.now, b.t)
 	}
-	n.Health, n.Facts = sinkHealth(snap.ts, info.now, b.t)
+	// The timestamp column is set on every sink node, including unreachable
+	// ones, so the agent knows which column its recovery check must read.
+	if n.Facts == nil {
+		n.Facts = map[string]string{}
+	}
+	n.Facts["ts_column"] = p.SinkTSColumn
 	return n
 }
 

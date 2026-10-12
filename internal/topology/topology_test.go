@@ -2,6 +2,7 @@ package topology
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -930,6 +931,95 @@ func TestBuildConnectorMissing(t *testing.T) {
 				t.Fatalf("deleted connector facts = %v, want missing=true", n.Facts)
 			}
 		}
+	}
+}
+
+// TestSinkNodeCarriesTSColumn proves every sink node carries the pipeline's
+// ts_column fact in each branch (fresh, stale, unreachable), next to the facts
+// that branch already sets. The recovery check reads the column from here.
+func TestSinkNodeCarriesTSColumn(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name       string
+		fresh      time.Time
+		freshErr   error
+		wantHealth Health
+		wantKey    string
+		wantVal    string // empty: only require the key to be present
+	}{
+		{"healthy", now.Add(-time.Minute), nil, HealthOK, "stale_for", ""},
+		{"stale", now.Add(-31 * time.Minute), nil, HealthFail, "stale_for", ""},
+		{"unreachable", time.Time{}, errors.New("warehouse down"), HealthUnknown, "error", "unreachable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wh := &fakeWarehouse{fresh: map[string]time.Time{"analytics.orders": tc.fresh}}
+			if tc.freshErr != nil {
+				wh.freshErr = map[string]error{"analytics.orders": tc.freshErr}
+			}
+			b := NewBuilder(
+				testOwners(),
+				&fakeConnect{
+					config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders", "slot.name": "pg-orders-connector"}},
+					status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
+				},
+				&fakeKafka{
+					lags:    map[string]clients.GroupLag{"order-sync": {State: "Stable", TotalLag: 0}},
+					offsets: map[string][]clients.PartitionOffsets{"pg.public.orders": {{Partition: 0, LastTimestamp: now.Add(-time.Minute)}}},
+				},
+				&fakeSource{slots: []clients.ReplicationSlot{{Name: "pg-orders-connector", Active: true, RetainedWALBytes: 10}}},
+				wh,
+			)
+			g, err := b.Build(context.Background(), "orders")
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+
+			var sink *Node
+			for i := range g.Nodes {
+				if g.Nodes[i].Kind == KindSinkTable {
+					sink = &g.Nodes[i]
+				}
+			}
+			if sink == nil {
+				t.Fatalf("sink node missing: %+v", g.Nodes)
+			}
+			if sink.Health != tc.wantHealth {
+				t.Fatalf("sink health = %s, want %s", sink.Health, tc.wantHealth)
+			}
+			if sink.Facts["ts_column"] != "updated_at" {
+				t.Fatalf("ts_column = %q, want updated_at (facts %v)", sink.Facts["ts_column"], sink.Facts)
+			}
+			if v := sink.Facts[tc.wantKey]; v == "" || (tc.wantVal != "" && v != tc.wantVal) {
+				t.Fatalf("fact %s = %q, want set (%q); facts %v", tc.wantKey, v, tc.wantVal, sink.Facts)
+			}
+
+			// The Data the pipeline_map tool returns is the Graph itself; check
+			// the JSON key path the agent and the UI see.
+			raw, err := json.Marshal(g)
+			if err != nil {
+				t.Fatalf("marshal graph: %v", err)
+			}
+			var shape struct {
+				Nodes []struct {
+					Kind  NodeKind          `json:"kind"`
+					Facts map[string]string `json:"facts"`
+				} `json:"nodes"`
+			}
+			if err := json.Unmarshal(raw, &shape); err != nil {
+				t.Fatalf("unmarshal graph: %v", err)
+			}
+			for _, n := range shape.Nodes {
+				if n.Kind == KindSinkTable && n.Facts["ts_column"] != "updated_at" {
+					t.Fatalf("JSON nodes[kind=sink_table].facts.ts_column = %q, want updated_at", n.Facts["ts_column"])
+				}
+			}
+
+			if !strings.Contains(b.Render(g), "wh:analytics.orders [warehouse, owner meera]") ||
+				!strings.Contains(b.Render(g), "ts_column=updated_at") {
+				t.Fatalf("Render does not show ts_column for the sink node:\n%s", b.Render(g))
+			}
+		})
 	}
 }
 
