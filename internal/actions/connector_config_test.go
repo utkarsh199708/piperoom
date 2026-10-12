@@ -309,10 +309,11 @@ func TestUpdateConnectorConfigSchemaAndRegistry(t *testing.T) {
 		t.Errorf("Describe %q should say how to undo", a.Describe())
 	}
 	props := a.ParamsSchema()["properties"].(map[string]any)
-	keyProp := props["key"].(map[string]any)
-	enum, _ := keyProp["enum"].([]string)
-	if len(enum) != len(connectorConfigAllowList) {
-		t.Errorf("key enum %v", enum)
+	// Describe names every allowed key, since the schema carries no enum.
+	for _, k := range connectorConfigKeys() {
+		if !strings.Contains(a.Describe(), k) {
+			t.Errorf("Describe does not name %q", k)
+		}
 	}
 	for _, name := range []string{"connector", "key", "value"} {
 		if _, ok := props[name]; !ok {

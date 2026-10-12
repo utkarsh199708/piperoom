@@ -83,10 +83,11 @@ func (a *updateConnectorConfig) Describe() string {
 func (a *updateConnectorConfig) ParamsSchema() map[string]any {
 	// No property descriptions: propose_fix nests every action's schema, and
 	// the strict-schema byte budget in internal/agent is tight. The allowed
-	// values per key are in Describe and in Validate's error message.
+	// keys and values are in Describe; Validate enforces the allow-list, so the
+	// schema needs no enum.
 	return objectSchema(map[string]any{
 		"connector": map[string]any{"type": "string"},
-		"key":       map[string]any{"type": "string", "enum": connectorConfigKeys()},
+		"key":       map[string]any{"type": "string"},
 		"value":     map[string]any{"type": "string"},
 	}, "connector", "key", "value")
 }
