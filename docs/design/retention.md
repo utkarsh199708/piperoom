@@ -82,7 +82,9 @@ exist, the second pass never needs to skip a pipeline.
   in the same transaction.
 - Memstore: the same check under its mutex.
 - Limits are set on the store once at start (`SetLimits`); zero limits mean no cap (unit tests, tools).
-- The store returns the usage after each insert (`AppendWithUsage`), so the room service needs no extra query.
+- The room service follows the usage without a query per append: the event count is the last seq (the log has
+  no gaps) and the bytes the store counts for an event are `len(Event.Payload)` as `Append` returns it. It reads
+  the store's counters once (`RoomUsage`) when a room enters its cache.
 
 ### 5.3 Room service
 
@@ -90,10 +92,14 @@ exist, the second pass never needs to skip a pipeline.
   `room.log_cap_warning` (system). Usage at 100% of either cap and the snapshot is not `log_full` -> cancel the
   room's agent and append `agent.status {state: "log_full"}` (system). Both are folded into the snapshot
   (`log_cap`), so a restart neither repeats them nor restarts the agent.
-- An agent event refused with `ErrLogFull` triggers the same stop.
+- Any event refused with `ErrLogFull` triggers the same stop (a byte cap can be passed by one large event while
+  the count is still low).
 - `ensureAgentLocked` never starts an agent in a `log_full` room.
 - A human route refused with `ErrLogFull` answers `409 log_full`. A repeat alert joining a full room still
-  answers with the room (the note is dropped, logged).
+  answers with the room, and a watcher note into a full room is dropped (both logged), so a sender does not
+  retry forever.
+- A shadow room's agent writes to the shadow log, which these caps do not cover (its run is bounded by
+  `PIPEROOM_SHADOW_MAX_TURNS` and `PIPEROOM_SHADOW_TOKEN_BUDGET`); a full shadow room does not cancel its run.
 
 ### 5.4 Data size
 

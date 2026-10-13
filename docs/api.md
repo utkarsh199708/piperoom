@@ -286,3 +286,4 @@ Rules: the server first replays every event with `seq > after`, then streams liv
 Room deleted: when an admin deletes the room, each open connection gets one last frame
 `{ "type": "event", "event": { "room_id": "r_…", "seq": <last_seq + 1>, "type": "room.deleted", "actor": <the admin>, "payload": { "reason": "…" }, "at": "…" } }`
 and is then closed with status 1000 and close reason `room deleted`. That event is never stored; a reconnect gets `404`.
+A connection that was still replaying when the room was deleted gets only the close (same status and reason).
