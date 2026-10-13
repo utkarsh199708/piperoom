@@ -86,8 +86,6 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 	st.agentCancel = cancel
 	st.agentRun++
 	st.shadowActive = true
-	st.shadowClosed = make(chan struct{})
-	closed := st.shadowClosed
 	gate := &agentGate{s: s, st: st, roomID: roomID}
 	s.wg.Add(1)
 	go func() {
@@ -95,7 +93,7 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 		defer cancel()
 		defer gate.release()
 		var tokens atomic.Int64
-		status := s.superviseShadow(ctx, roomID, title, pipelineID, raw, st, gate, &tokens, closed)
+		status := s.superviseShadow(ctx, roomID, title, pipelineID, raw, st, gate, &tokens)
 		gate.release()
 		s.finishShadow(roomID, st, status, tokens.Load())
 	}()
@@ -105,7 +103,7 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 // "" when the run row could not be created (then nothing ran and nothing is
 // written). A nil return maps to ShadowHypothesised here; finishShadow lowers
 // it to no_hypothesis when the run emitted none.
-func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID string, raw json.RawMessage, st *roomState, gate *agentGate, tokens *atomic.Int64, closed <-chan struct{}) string {
+func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID string, raw json.RawMessage, st *roomState, gate *agentGate, tokens *atomic.Int64) string {
 	// Second try (the first was at open): no row means nothing could store
 	// the run's output, so no tokens are spent on it.
 	cctx, ccancel := context.WithTimeout(ctx, shadowWriteTimeout)
@@ -127,21 +125,26 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 	backoff := agentRetryBackoff
 	started := false
 	for attempt := 1; ; attempt++ {
-		// No attempt after the first may start on a closed room: the
-		// room-closed hook has dropped its token count, so a retry would
-		// spend a fresh budget (design 3.3, M4). With grace > 0 the close
-		// does not cancel ctx, so this is checked here, not only after a run.
-		if attempt > 1 && s.shadowRoomClosed(st) {
+		// A close while queued or backing off cancels ctx (closeShadowLocked
+		// gives grace only to a running attempt), so acquire and the backoff
+		// below end at once.
+		if err := gate.acquire(ctx); err != nil {
 			return store.ShadowInterrupted
 		}
-		if err := gate.acquire(ctx); err != nil {
-			return store.ShadowInterrupted // closed or shut down while queued
+		// Re-check under s.mu with the slot in hand, and mark the attempt
+		// running in the same critical section: a close either sees the
+		// attempt running (grace) or is seen here. No attempt starts on a
+		// closed room, because the room-closed hook has dropped its token
+		// count and a retry would spend a fresh budget (design 3.3, M4).
+		if !s.beginShadowAttempt(st) {
+			return store.ShadowInterrupted // the caller releases the slot
 		}
 		if !started {
 			started = true
-			alert.PipelineMap = s.markShadowStarted(ctx, roomID, pipelineID, st)
+			alert.PipelineMap = s.markShadowStarted(ctx, roomID, pipelineID)
 		}
 		err := s.runGuarded(ctx, roomID, alert, deps, s.shadowOpts)
+		s.endShadowAttempt(st)
 		gate.release()
 		switch {
 		case ctx.Err() != nil:
@@ -168,8 +171,6 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 		select {
 		case <-ctx.Done():
 			return store.ShadowInterrupted
-		case <-closed:
-			return store.ShadowInterrupted
 		case <-time.After(backoff):
 		}
 		backoff *= 2
@@ -179,10 +180,7 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 // markShadowStarted records that the run holds its first slot (running,
 // started_at), renders the topology and stores the model and the map. It
 // returns the rendered map for the alert.
-func (s *Service) markShadowStarted(ctx context.Context, roomID, pipelineID string, st *roomState) string {
-	s.mu.Lock()
-	st.shadowStarted = true
-	s.mu.Unlock()
+func (s *Service) markShadowStarted(ctx context.Context, roomID, pipelineID string) string {
 	wctx, wcancel := context.WithTimeout(context.WithoutCancel(ctx), shadowWriteTimeout)
 	defer wcancel()
 	now := s.now().UTC()
@@ -207,6 +205,24 @@ func (s *Service) markShadowStarted(ctx context.Context, roomID, pipelineID stri
 		s.log.Warn("room: record shadow run model failed", "room", roomID, "err", err)
 	}
 	return pipelineMap
+}
+
+// beginShadowAttempt marks an attempt as running, or reports false when the
+// room is closed and no attempt may start.
+func (s *Service) beginShadowAttempt(st *roomState) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.roomOpen(st) {
+		return false
+	}
+	st.shadowInAttempt = true
+	return true
+}
+
+func (s *Service) endShadowAttempt(st *roomState) {
+	s.mu.Lock()
+	st.shadowInAttempt = false
+	s.mu.Unlock()
 }
 
 func (s *Service) shadowRoomClosed(st *roomState) bool {
@@ -260,17 +276,17 @@ func (s *Service) finishShadow(roomID string, st *roomState, status string, toke
 }
 
 // closeShadowLocked applies the close rules of a shadow room (design 3.4) and
-// returns the cancel func CloseRoom should call now, or nil. A run that is going
-// with a grace period keeps running and is cancelled by a timer; a run that has
-// not started yet is cancelled at once. A room whose run has ended is revealed
-// here. Caller holds s.mu, after room.closed was appended.
+// returns the cancel func CloseRoom should call now, or nil. With a grace
+// period, an attempt that is running keeps going and a timer cancels it; a run
+// that is queued for a slot or waiting to retry is cancelled at once. A room
+// whose run has ended is revealed here. Caller holds s.mu, after room.closed
+// was appended.
 func (s *Service) closeShadowLocked(ctx context.Context, roomID string, st *roomState, cancel context.CancelFunc) context.CancelFunc {
-	if st.shadowClosed != nil {
-		close(st.shadowClosed) // CloseRoom runs once per room
-		st.shadowClosed = nil
-	}
 	if st.shadowActive {
-		if s.shadowGrace > 0 && st.shadowStarted && cancel != nil {
+		// Grace only for an attempt that is running now. A run that is
+		// queued for a slot or backing off before a retry is cancelled at
+		// once: it must not start an attempt on a closed room.
+		if s.shadowGrace > 0 && st.shadowInAttempt && cancel != nil {
 			st.graceTimer = time.AfterFunc(s.shadowGrace, cancel)
 			return nil
 		}

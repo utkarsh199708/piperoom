@@ -107,15 +107,14 @@ type roomState struct {
 	dedupKey    string             // alert index key of an alert room; "" otherwise
 
 	// Shadow run state (shadow.go). shadowActive is true from the start of
-	// the shadow supervisor until it has written the run's final status;
-	// shadowStarted once it held a slot; graceTimer cancels a run that is
-	// still going PIPEROOM_SHADOW_GRACE after the close.
-	shadowActive  bool
-	shadowStarted bool
-	graceTimer    *time.Timer
-	// shadowClosed is closed when the room closes, so a supervisor in its
-	// retry backoff wakes and stops instead of retrying on a closed room.
-	shadowClosed chan struct{}
+	// the shadow supervisor until it has written the run's final status.
+	// shadowInAttempt is true only while an attempt runs (runGuarded), so a
+	// close gives grace to a run that is mid-investigation and cancels a run
+	// that is queued or backing off. graceTimer cancels a run that is still
+	// going PIPEROOM_SHADOW_GRACE after the close.
+	shadowActive    bool
+	shadowInAttempt bool
+	graceTimer      *time.Timer
 }
 
 // Service is the room domain logic. All state derives from the event log; the

@@ -23,6 +23,13 @@ func TestPGAppendShadowPreCheck(t *testing.T) {
 		"lone surrogate": json.RawMessage(`{"text":"\ud800"}`),
 	} {
 		t.Run(name, func(t *testing.T) {
+			// Past the pre-check a zero *PG panics (no clock, no pool); say
+			// what that means instead of showing a nil-pointer trace.
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("pre-check missing: AppendShadow went past CheckAppend to the database (%v)", r)
+				}
+			}()
 			_, err := s.AppendShadow(context.Background(), "r1", events.AgentMessage, agent, payload)
 			if !errors.Is(err, store.ErrUnstorable) {
 				t.Fatalf("err = %v, want ErrUnstorable from the pre-check", err)

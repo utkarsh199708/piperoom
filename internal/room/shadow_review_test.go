@@ -100,6 +100,66 @@ func TestShadowRevealedAtIsWriteOnceMarker(t *testing.T) {
 	}
 }
 
+// queuedRetry sets up review round 2's path: attempt 1 fails while the room is
+// open, a live room takes the only slot, and the retry ends up queued in
+// gate.acquire when the shadow room closes with grace > 0.
+func queuedRetry(t *testing.T) (env *shadowEnv, shadowID, liveID string) {
+	t.Helper()
+	failed := make(chan struct{}, 8)
+	env = newShadowEnv(t, shadowCfg{maxAgents: 1, grace: 10 * time.Second, fn: func(ctx context.Context, _ int, d agent.Deps) error {
+		failed <- struct{}{}
+		return errors.New("test: model down")
+	}})
+	snap := env.open(t, "queued-retry")
+	<-failed
+	arjun := env.user(t, "arjun")
+	live, err := env.svc.CreateRoom(context.Background(), arjun, "live", "sev2", "live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return env.run.live.Load() == 1 })
+	time.Sleep(1300 * time.Millisecond) // the 1s backoff is over: the retry is queued
+	return env, snap.ID, live.ID
+}
+
+// A retry queued for a slot when the room closes (grace > 0) never runs, even
+// once the slot frees: no second attempt on a closed room (design 3.3, M4).
+func TestShadowQueuedRetryNotRunAfterClose(t *testing.T) {
+	env, shadowID, liveID := queuedRetry(t)
+	env.close(t, shadowID, "fixed by hand")
+	if _, err := env.svc.CloseRoom(context.Background(), env.user(t, "arjun"), liveID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	r := env.waitFinished(t, shadowID)
+	time.Sleep(300 * time.Millisecond)
+	if r.Status != store.ShadowInterrupted || env.run.Calls() != 1 {
+		t.Fatalf("status %q after %d calls, want interrupted after 1", r.Status, env.run.Calls())
+	}
+	if n := countReveals(env.roomLog(t, shadowID)); n != 1 {
+		t.Fatalf("reveals = %d", n)
+	}
+}
+
+// The same queued retry ends at the close itself: with no attempt running the
+// close cancels the run instead of arming the grace timer, so it does not sit
+// in the slot queue until a slot or the grace frees it.
+func TestShadowQueuedRetryEndsAtClose(t *testing.T) {
+	env, shadowID, _ := queuedRetry(t)
+	env.close(t, shadowID, "fixed by hand") // the live room keeps the slot
+	var r store.ShadowRun
+	waitFor(t, 2*time.Second, func() bool {
+		got, err := env.st.GetShadowRun(context.Background(), shadowID)
+		r = got
+		return err == nil && got.Finished()
+	})
+	if r.Status != store.ShadowInterrupted || env.run.Calls() != 1 {
+		t.Fatalf("status %q after %d calls", r.Status, env.run.Calls())
+	}
+	if n := countReveals(env.roomLog(t, shadowID)); n != 1 {
+		t.Fatalf("reveals = %d", n)
+	}
+}
+
 // Grace 10s, a failure while open, and the close during the retry backoff: the
 // retry never runs (the room-closed hook dropped the budget, design 3.3 M4),
 // and the backoff wakes on the close, so the run ends at once.
