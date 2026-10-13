@@ -8,6 +8,7 @@ package room
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -285,15 +286,26 @@ func TestReplicasOneAgentPerRoom(t *testing.T) {
 	room := snap.ID
 	eventually(t, 5*time.Second, "agent started on r0", func() bool { return len(log.runsOf(room)) == 1 })
 
+	// Driver steers from two replicas race on the conditional append; after
+	// three tries the spec answers 409 conflict (the caller retries), so a
+	// steer that got 409 sent no input and is not expected in the inbox.
 	var wg sync.WaitGroup
+	var sent atomic.Int64
 	for i := 0; i < 10; i++ {
 		for _, s := range []*Service{b, c} {
 			wg.Add(1)
 			go func(s *Service, i int) {
 				defer wg.Done()
-				if _, err := s.Steer(ctx, arjun, room, fmt.Sprintf("steer %s %d", s.replica, i)); err != nil {
+				_, err := s.Steer(ctx, arjun, room, fmt.Sprintf("steer %s %d", s.replica, i))
+				var re *Error
+				switch {
+				case err == nil:
+					sent.Add(1)
+				case errors.As(err, &re) && re.Code == "conflict":
+				default:
 					t.Errorf("steer on %s: %v", s.replica, err)
 				}
+				sent.Add(1) // the comment below
 				if _, err := s.AddComment(ctx, user(t, s, "priya"), room, "", fmt.Sprintf("@agent look %s %d", s.replica, i)); err != nil {
 					t.Errorf("comment on %s: %v", s.replica, err)
 				}
@@ -301,7 +313,11 @@ func TestReplicasOneAgentPerRoom(t *testing.T) {
 		}
 	}
 	wg.Wait()
-	eventually(t, 10*time.Second, "the owner's inbox gets all 40 inputs", func() bool { return len(log.inputsOf("r0", room)) == 40 })
+	accepted := int(sent.Load())
+	if accepted <= 20 {
+		t.Fatalf("only %d of 40 inputs were accepted: no driver steer got through", accepted)
+	}
+	eventually(t, 10*time.Second, fmt.Sprintf("the owner's inbox gets all %d accepted inputs", accepted), func() bool { return len(log.inputsOf("r0", room)) == accepted })
 	time.Sleep(500 * time.Millisecond)
 	if runs := log.runsOf(room); len(runs) != 1 || runs[0].replica != "r0" {
 		t.Fatalf("runs = %+v, want exactly one on r0", runs)
