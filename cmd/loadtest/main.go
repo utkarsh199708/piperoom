@@ -90,6 +90,8 @@ func run(args []string) error {
 	dbURL := fs.String("db-url", "", "existing Postgres admin URL; default starts a throwaway postgres:16 container")
 	prefix := fs.String("prefix", "s2lt", "docker container name prefix")
 	mutex := fs.Int("mutex-profile", 0, "mutex profile fraction for the servers (0 = off); read /debug/pprof/mutex on a server URL")
+	dbParams := fs.String("server-db-params", "", "extra k=v&k=v parameters for the servers' database URL, e.g. pool_max_conns=20")
+	poolMax := fs.Int("pool-max-conns", 0, "experiment: set the servers' pgxpool size directly (0 = the default cmd/server gets)")
 	var params multi
 	fs.Var(&params, "p", "parameter override key=value or profile.key=value (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -121,8 +123,8 @@ func run(args []string) error {
 	defer stop()
 	env, err := loadtest.NewEnv(ctx, loadtest.EnvConfig{
 		DBURL: *dbURL, Prefix: *prefix, Replicas: *replicas, Short: *short, LogDir: filepath.Join(*out, "logs"), Log: log,
-		MutexProfile: *mutex,
-		Command:      func() (string, []string, []string) { return self, []string{"serve"}, nil },
+		MutexProfile: *mutex, ServerDBParams: *dbParams, PoolMaxConns: *poolMax,
+		Command: func() (string, []string, []string) { return self, []string{"serve"}, nil },
 	})
 	if err != nil {
 		return err

@@ -58,6 +58,9 @@ type ServerConfig struct {
 	// MutexProfileFraction > 0 turns on mutex profiling at that rate, read
 	// at /debug/pprof/mutex.
 	MutexProfileFraction int `json:"mutex_profile_fraction"`
+	// PoolMaxConns > 0 sets the pool size directly (an experiment; 0 keeps
+	// the pgxpool default that cmd/server gets: max(4, NumCPU)).
+	PoolMaxConns int `json:"pool_max_conns"`
 }
 
 // Server is the room service, HTTP API and WebSocket gateway exactly as
@@ -157,9 +160,19 @@ func StartServer(ctx context.Context, cfg ServerConfig, log *slog.Logger) (*Serv
 
 	// The pool is built the way store.New builds it (pgxpool.New on the same
 	// URL, so the same default size), but kept here so its Stat can be read.
+	// PoolMaxConns is an experiment cmd/server cannot do today: a pool_max_conns
+	// in PIPEROOM_DB_URL breaks its migrations and LISTEN connections
+	// (reviews/capacity-2026-10.md).
 	pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(pctx, cfg.DBURL)
+	pcfg, err := pgxpool.ParseConfig(cfg.DBURL)
+	if err != nil {
+		return nil, fmt.Errorf("loadtest: server: pool config: %w", err)
+	}
+	if cfg.PoolMaxConns > 0 {
+		pcfg.MaxConns = int32(cfg.PoolMaxConns)
+	}
+	pool, err := pgxpool.NewWithConfig(pctx, pcfg)
 	if err != nil {
 		return nil, fmt.Errorf("loadtest: server: pool: %w", err)
 	}

@@ -17,6 +17,7 @@ func throughputProfile() Profile {
 			{Name: "turns", Kind: KindInt, Full: "5", Short: "2", Min: 1, Help: "model turns per agent run (turns-1 tool calls, then end_turn)"},
 			{Name: "max_agents", Kind: KindIntList, Full: "3,10,30", Short: "2", Min: 1, Help: "PIPEROOM_MAX_AGENTS values, one run each"},
 			{Name: "subs_per_room", Kind: KindInt, Full: "2", Short: "1", Min: 0, Help: "WebSocket viewers per room during the run"},
+			{Name: "propose", Kind: KindBool, Full: "false", Short: "true", Help: "each run proposes a no-op fix; the driver approves it and counts executions"},
 			{Name: "timeout", Kind: KindDuration, Full: "15m", Short: "60s", Min: float64(time.Second)},
 		}, modelSpecs("500ms", "20ms")...),
 		Run: runThroughput,
@@ -43,6 +44,7 @@ type ThroughputRun struct {
 	Model          ModelStatsLite `json:"model"`
 	Subs           SubTotals      `json:"subs"`
 	CPU            CPUUse         `json:"cpu"`
+	Exec           *ExecStats     `json:"exec,omitempty"` // with propose=true
 	Server         []ServerStats  `json:"server"`
 }
 
@@ -119,9 +121,13 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 	}
 	cpu0 := env.cpuMark(ctx, st)
 	n := p.Int("rooms")
+	propose := p.Bool("propose")
 	titles, pp := make([]string, n), make([]string, n)
 	for i := range titles {
 		titles[i], pp[i] = fmt.Sprintf("throughput %d", i), "pa"
+		if propose {
+			titles[i] += " " + ModePropose
+		}
 	}
 	ids, _, err := st.openRooms(ctx, titles, pp, 8)
 	if err != nil {
@@ -135,6 +141,7 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 		for j := 0; j < p.Int("subs_per_room"); j++ {
 			s := NewSub(id, loadUsers[(j+1)%len(loadUsers)], 0, nil)
 			s.Reconnect = true
+			s.Replica = (i + j) % len(st.cluster.Procs)
 			subs = append(subs, s)
 			wg.Add(1)
 			go func(k int) {
@@ -145,7 +152,15 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 	}
 	waitErr := env.waitRuns(ctx, ids, p.Dur("timeout"))
 	cpu1 := env.cpuMark(ctx, st)
+	mst := env.Model.Stats()
 	srv, sErr := st.serverStats(ctx)
+	var exec *ExecStats
+	if propose && waitErr == nil && sErr == nil {
+		// After the throughput numbers: approve every proposal (viewers still
+		// connected) and count what the executors ran.
+		es := approveAll(ctx, st, ids, time.Minute)
+		exec = &es
+	}
 	stopSubs()
 	wg.Wait()
 	if waitErr != nil {
@@ -158,8 +173,14 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 	if err != nil {
 		return ThroughputRun{}, err
 	}
-	mst := env.Model.Stats()
 	run := ThroughputRun{MaxAgents: maxAgents, Rooms: n, Server: srv, Model: liteModel(mst, ids), Subs: Totals(subs, nil), CPU: cpu0.until(cpu1)}
+	if exec != nil {
+		exec.countExecuted(tls)
+		run.Exec = exec
+		// Approval results wake the agents for more turns; the duplicate-run
+		// check covers that phase too.
+		run.Model = liteModel(env.Model.Stats(), ids)
+	}
 	var first, last time.Time
 	for _, t := range tls {
 		if first.IsZero() || t.Created.Before(first) {
@@ -186,7 +207,7 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 	run.RunHold = Summarize(durations(tls, timeline.Hold))
 	if run.RunHold.P50MS > 0 {
 		slots := min(maxAgents*env.Replicas, n)
-		run.IdealPerSec = round3(float64(slots) * float64(turns) / (run.RunHold.P50MS / 1000))
+		run.IdealPerSec = round3(float64(slots) * float64(run.Turns) / float64(n) / (run.RunHold.P50MS / 1000))
 	}
 	for _, s := range srv {
 		run.Pool = append(run.Pool, s.Pool)
@@ -198,7 +219,17 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 	res.check(label+"agent cap respected", mst.MaxInFlight <= maxAgents*env.Replicas, "max in-flight %d, cap %d x %d replicas", mst.MaxInFlight, maxAgents, env.Replicas)
 	res.check(label+"no duplicate agent runs", run.Model.DuplicateRuns == 0 && run.Model.ConcurrentDup == 0,
 		"rooms with >1 run start %d, with concurrent model calls %d", run.Model.DuplicateRuns, run.Model.ConcurrentDup)
-	res.check(label+"every run made all its turns", run.Turns == int64(n*turns), "model turns %d, want %d", run.Turns, n*turns)
+	want := n * turns
+	if propose {
+		want += n // the propose_fix turn
+	}
+	res.check(label+"every run made all its turns", run.Turns == int64(want), "model turns %d, want %d", run.Turns, want)
+	if e := run.Exec; e != nil {
+		res.check(label+"every approved fix executed exactly once", e.Approved == n && e.ApproveErr == 0 && e.DuplicateExecutions == 0 &&
+			e.MissingExecutions == 0 && e.DuplicateExecEvents == 0 && e.ExecutedEvents == e.Approved,
+			"proposals %d approved %d approve errors %d; executions %d (duplicate %d, missing %d); action.executed events %d (duplicate %d)",
+			e.Proposals, e.Approved, e.ApproveErr, e.Executions, e.DuplicateExecutions, e.MissingExecutions, e.ExecutedEvents, e.DuplicateExecEvents)
+	}
 	res.check(label+"viewers saw gap-free logs", run.Subs.Gaps == 0 && run.Subs.Dups == 0 && run.Subs.Mismatches == 0,
 		"gaps %d dups %d parse mismatches %d", run.Subs.Gaps, run.Subs.Dups, run.Subs.Mismatches)
 	res.check(label+"no append errors", sumAppendErrors(srv) == 0, "append errors %d", sumAppendErrors(srv))

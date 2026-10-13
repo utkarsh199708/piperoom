@@ -25,7 +25,9 @@ var loadUsers = []string{"arjun", "priya", "meera", "kabir"}
 // API is a small client for the room HTTP API.
 type API struct {
 	Base string
-	HTTP *http.Client
+	// Replica is the index of this server in its cluster.
+	Replica int
+	HTTP    *http.Client
 }
 
 // newHTTPClient returns the driver's shared HTTP client.
@@ -104,7 +106,7 @@ func (a *API) CreateRoom(ctx context.Context, user, title, pipeline string) (str
 // Comment posts a comment whose text carries the send time, for end-to-end
 // latency, padded to pad bytes.
 func (a *API) Comment(ctx context.Context, user, roomID string, pad int) error {
-	text := commentMark + strconv.FormatInt(time.Now().UnixNano(), 10) + " " + fillerText(pad)
+	text := commentMark + strconv.FormatInt(time.Now().UnixNano(), 10) + ":" + strconv.Itoa(a.Replica) + " " + fillerText(pad)
 	return a.do(ctx, http.MethodPost, "/api/rooms/"+roomID+"/comments", user, map[string]string{"text": text}, nil)
 }
 
@@ -138,6 +140,31 @@ func (a *API) Events(ctx context.Context, user, roomID string) ([]events.Event, 
 	}
 }
 
+// OpenProposal is a proposal waiting for approval, as the room snapshot
+// shows it.
+type OpenProposal struct {
+	ProposalID string `json:"proposal_id"`
+	ParamsHash string `json:"params_hash"`
+}
+
+// OpenProposals reads a room's open proposals from its snapshot.
+func (a *API) OpenProposals(ctx context.Context, user, roomID string) ([]OpenProposal, error) {
+	var snap struct {
+		OpenProposals []OpenProposal `json:"open_proposals"`
+	}
+	if err := a.do(ctx, http.MethodGet, "/api/rooms/"+roomID, user, nil, &snap); err != nil {
+		return nil, err
+	}
+	return snap.OpenProposals, nil
+}
+
+// Approve approves one layer of a proposal with the params_hash the
+// approver saw, as the web UI does.
+func (a *API) Approve(ctx context.Context, user, proposalID, layer, paramsHash string) error {
+	return a.do(ctx, http.MethodPost, "/api/proposals/"+proposalID+"/approve", user,
+		map[string]string{"layer": layer, "params_hash": paramsHash}, nil)
+}
+
 // LastSeq returns a room's last seq.
 func (a *API) LastSeq(ctx context.Context, user, roomID string) (int64, error) {
 	var page struct {
@@ -152,6 +179,9 @@ func (a *API) LastSeq(ctx context.Context, user, roomID string) (int64, error) {
 type LatencySink struct {
 	Delivery *Recorder // receive time minus the event's server "at"
 	EndToEnd *Recorder // receive time minus a driver comment's send time
+	// Same and Cross split the delivery latency of driver comments by whether
+	// the comment was posted to the subscriber's own server or another one.
+	Same, Cross *Recorder
 	// From drops events whose "at" is before it (warm-up, replay).
 	From atomic.Int64 // unix ns
 	// Off stops recording when set.
@@ -165,6 +195,8 @@ type Sub struct {
 	User   string
 	Sink   *LatencySink
 	Target int64 // close Done once LastSeq reaches it (0 = never)
+	// Replica is the index of the server this subscriber is connected to.
+	Replica int
 	// Reconnect makes the subscriber reconnect with after=LastSeq when the
 	// server closes it, as the web UI does.
 	Reconnect bool
@@ -313,6 +345,12 @@ func (s *Sub) read(ctx context.Context, conn *websocket.Conn) error {
 		if sk := s.Sink; sk != nil && !sk.Off.Load() && f.At.UnixNano() >= sk.From.Load() {
 			if sk.Delivery != nil {
 				sk.Delivery.Add(now.Sub(f.At))
+			}
+			if sk.Same != nil && f.MarkReplica >= 0 && f.MarkReplica == s.Replica {
+				sk.Same.Add(now.Sub(f.At))
+			}
+			if sk.Cross != nil && f.MarkReplica >= 0 && f.MarkReplica != s.Replica {
+				sk.Cross.Add(now.Sub(f.At))
 			}
 			if sk.EndToEnd != nil && f.MarkNS > 0 {
 				sk.EndToEnd.Add(now.Sub(time.Unix(0, f.MarkNS)))

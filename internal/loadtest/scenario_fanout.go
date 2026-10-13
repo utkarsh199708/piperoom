@@ -38,6 +38,8 @@ type FanoutRun struct {
 	Post             Dist          `json:"comment_post_latency"`
 	Delivery         Dist          `json:"event_to_delivery"`
 	EndToEnd         Dist          `json:"post_to_delivery"`
+	SameReplica      Dist          `json:"same_replica_delivery"`
+	CrossReplica     Dist          `json:"cross_replica_delivery"`
 	DeliveredPerSec  float64       `json:"deliveries_per_sec"`
 	Appends          Dist          `json:"event_insert_latency"`
 	Totals           SubTotals     `json:"subs_totals"`
@@ -64,12 +66,12 @@ func (d FanoutData) markdown() string {
 		rows = append(rows, []string{fmt.Sprint(r.Subs), fmt.Sprint(r.Rooms), fmt.Sprintf("%.1f / %.1f", r.AchievedPerSec, r.OfferedPerSec),
 			fmt.Sprintf("%.0f", r.DeliveredPerSec),
 			fms(r.Delivery.P50MS), fms(r.Delivery.P95MS), fms(r.Delivery.P99MS), fms(r.Delivery.MaxMS),
-			fms(r.EndToEnd.P50MS), fms(r.EndToEnd.P99MS), fms(r.Post.P50MS), fms(r.Post.P99MS), fms(r.Appends.P50MS),
+			fms(r.EndToEnd.P50MS), fms(r.EndToEnd.P99MS), distOrDash(r.CrossReplica.P50MS, r.CrossReplica.N), distOrDash(r.CrossReplica.P99MS, r.CrossReplica.N), fms(r.Post.P50MS), fms(r.Post.P99MS), fms(r.Appends.P50MS),
 			fmt.Sprint(r.Totals.SlowClosed), fmt.Sprint(r.Totals.Reconnects), fmt.Sprintf("%d/%d/%d", r.GoroutinesBefore, r.GoroutinesPeak, r.GoroutinesAfter),
 			fmt.Sprintf("%d/%d %.0f%%, %.0f q/s, %d waits", r.Pool.MaxAcquired, r.Pool.MaxConns, 100*r.Pool.SaturatedRatio, r.QueriesPerSec, r.Pool.EmptyAcquires),
 			fmtMiB(r.PeakHeap), r.CPU.String()})
 	}
-	b.WriteString(mdTable([]string{"subs", "rooms", "comments/s accepted / offered", "deliveries/s", "event->delivery p50 ms", "p95", "p99", "max", "post->delivery p50", "p99",
+	b.WriteString(mdTable([]string{"subs", "rooms", "comments/s accepted / offered", "deliveries/s", "event->delivery p50 ms", "p95", "p99", "max", "post->delivery p50", "p99", "cross-replica delivery p50", "p99",
 		"POST p50", "POST p99", "insert p50", "send-buffer-full closes", "reconnects", "server goroutines before/peak/after", "pool", "peak heap", "CPU (avg cores)"}, rows))
 	return b.String()
 }
@@ -101,6 +103,7 @@ func (r *rig) connect(rooms []string, n int, sink *LatencySink, timeout time.Dur
 		r.subs = append(r.subs, s)
 		r.subWG.Add(1)
 		k := len(r.subs)
+		s.Replica = k % len(r.st.cluster.Procs)
 		go func() {
 			defer r.subWG.Done()
 			s.Run(r.subCtx, r.st.cluster.URL(k), r.env.HTTP)
@@ -257,7 +260,7 @@ func fanoutOnce(ctx context.Context, env *Env, p Params, n int, res *Result) (Fa
 		run.GoroutinesBefore += s.Goroutines
 	}
 
-	sink := &LatencySink{Delivery: NewRecorder(0), EndToEnd: NewRecorder(0)}
+	sink := &LatencySink{Delivery: NewRecorder(0), EndToEnd: NewRecorder(0), Same: NewRecorder(0), Cross: NewRecorder(0)}
 	sink.Off.Store(true)
 	rg := newRig(ctx, env, st)
 	t0 := time.Now()
@@ -318,6 +321,7 @@ func fanoutOnce(ctx context.Context, env *Env, p Params, n int, res *Result) (Fa
 	run.Post = post.Dist()
 	run.Delivery = sink.Delivery.Dist()
 	run.EndToEnd = sink.EndToEnd.Dist()
+	run.SameReplica, run.CrossReplica = sink.Same.Dist(), sink.Cross.Dist()
 	if wDur > 0 {
 		run.DeliveredPerSec = round3(float64(run.Delivery.N) / wDur.Seconds())
 	}

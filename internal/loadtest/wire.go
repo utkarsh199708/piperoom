@@ -13,9 +13,37 @@ type frame struct {
 	Seq  int64
 	Type string    // event type
 	At   time.Time // event time (server clock)
-	// MarkNS is the send time a driver comment carries ("lt:<unix ns> ..."),
+	// MarkNS is the send time a driver comment carries ("lt:<unix ns>:<replica> ..."),
 	// 0 when the event is not such a comment.
 	MarkNS int64
+	// MarkReplica is the index of the server the comment was posted to, -1
+	// when the event is not a driver comment.
+	MarkReplica int
+}
+
+// parseMark reads "<digits>[:<digits>]" at the start of d: the send time and
+// the replica index (-1 when absent).
+func parseMark(d []byte) (ns int64, replica int, ok bool) {
+	n := 0
+	for n < len(d) && d[n] >= '0' && d[n] <= '9' {
+		n++
+	}
+	v, err := strconv.ParseInt(string(d[:n]), 10, 64)
+	if err != nil {
+		return 0, -1, false
+	}
+	replica = -1
+	if n < len(d) && d[n] == ':' {
+		r := d[n+1:]
+		m := 0
+		for m < len(r) && r[m] >= '0' && r[m] <= '9' {
+			m++
+		}
+		if x, err := strconv.Atoi(string(r[:m])); err == nil {
+			replica = x
+		}
+	}
+	return v, replica, true
 }
 
 var (
@@ -89,15 +117,11 @@ func parseFrame(b []byte) (f frame, ok bool) {
 		return f, false
 	}
 	f.At = t
+	f.MarkReplica = -1
 	if f.Type == "comment.added" {
 		if m := bytes.Index(rest[:a], keyMark); m >= 0 {
-			d := rest[m+len(keyMark):]
-			n := 0
-			for n < len(d) && d[n] >= '0' && d[n] <= '9' {
-				n++
-			}
-			if v, err := strconv.ParseInt(string(d[:n]), 10, 64); err == nil {
-				f.MarkNS = v
+			if ns, r, ok := parseMark(rest[m+len(keyMark):]); ok {
+				f.MarkNS, f.MarkReplica = ns, r
 			}
 		}
 	}
@@ -118,7 +142,7 @@ func decodeFrame(b []byte) (frame, error) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		return frame{}, err
 	}
-	f := frame{Kind: m.Type}
+	f := frame{Kind: m.Type, MarkReplica: -1}
 	if m.Event == nil {
 		return f, nil
 	}
@@ -128,13 +152,8 @@ func decodeFrame(b []byte) (frame, error) {
 			Text string `json:"text"`
 		}
 		if json.Unmarshal(m.Event.Payload, &p) == nil && len(p.Text) > len(commentMark) && p.Text[:len(commentMark)] == commentMark {
-			d := p.Text[len(commentMark):]
-			n := 0
-			for n < len(d) && d[n] >= '0' && d[n] <= '9' {
-				n++
-			}
-			if v, err := strconv.ParseInt(d[:n], 10, 64); err == nil {
-				f.MarkNS = v
+			if ns, r, ok := parseMark([]byte(p.Text[len(commentMark):])); ok {
+				f.MarkNS, f.MarkReplica = ns, r
 			}
 		}
 	}

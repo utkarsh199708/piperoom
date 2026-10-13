@@ -23,15 +23,18 @@ func TestParseFrameMatchesJSON(t *testing.T) {
 		typ     events.Type
 		payload any
 		mark    int64
+		replica int
 	}{
-		{"comment with mark", events.CommentAdded, events.CommentAddedPayload{CommentID: "c_1", Text: "lt:1760349600123456789 padding"}, 1760349600123456789},
-		{"comment without mark", events.CommentAdded, events.CommentAddedPayload{CommentID: "c_2", Text: "hello \"seq\":5 at"}, 0},
+		{"comment with mark and replica", events.CommentAdded, events.CommentAddedPayload{CommentID: "c_1", Text: "lt:1760349600123456789:2 padding"}, 1760349600123456789, 2},
+		{"comment with mark, no replica", events.CommentAdded, events.CommentAddedPayload{CommentID: "c_3", Text: "lt:77 padding"}, 77, -1},
+		{"comment with mark, empty replica", events.CommentAdded, events.CommentAddedPayload{CommentID: "c_4", Text: "lt:78: padding"}, 78, -1},
+		{"comment without mark", events.CommentAdded, events.CommentAddedPayload{CommentID: "c_2", Text: "hello \"seq\":5 at"}, 0, -1},
 		{"tool result with nested keys", events.AgentToolResult, map[string]any{
 			"step_id": "s_1", "summary": `{"seq":99,"type":"x","at":"2020-01-01T00:00:00Z"}`,
 			"data": map[string]any{"seq": 77, "type": "nested", "at": "2021-01-01T00:00:00Z"},
-		}, 0},
-		{"status", events.AgentStatus, events.AgentStatusPayload{State: "working"}, 0},
-		{"mark text on a non-comment is ignored", events.AgentMessage, map[string]string{"text": "lt:42 x"}, 0},
+		}, 0, -1},
+		{"status", events.AgentStatus, events.AgentStatusPayload{State: "working"}, 0, -1},
+		{"mark text on a non-comment is ignored", events.AgentMessage, map[string]string{"text": "lt:42:1 x"}, 0, -1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,10 +56,10 @@ func TestParseFrameMatchesJSON(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if fast.Kind != "event" || fast.Seq != 4321 || fast.Type != string(tc.typ) || !fast.At.Equal(at) || fast.MarkNS != tc.mark {
+			if fast.Kind != "event" || fast.Seq != 4321 || fast.Type != string(tc.typ) || !fast.At.Equal(at) || fast.MarkNS != tc.mark || fast.MarkReplica != tc.replica {
 				t.Fatalf("fast = %+v", fast)
 			}
-			if fast.Kind != slow.Kind || fast.Seq != slow.Seq || fast.Type != slow.Type || !fast.At.Equal(slow.At) || fast.MarkNS != slow.MarkNS {
+			if fast.Kind != slow.Kind || fast.Seq != slow.Seq || fast.Type != slow.Type || !fast.At.Equal(slow.At) || fast.MarkNS != slow.MarkNS || fast.MarkReplica != slow.MarkReplica {
 				t.Fatalf("fast %+v != slow %+v", fast, slow)
 			}
 		})

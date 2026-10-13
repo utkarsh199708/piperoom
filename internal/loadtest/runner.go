@@ -113,6 +113,10 @@ type Env struct {
 	Log      *slog.Logger
 	// MutexProfile is passed to every server (ServerConfig.MutexProfileFraction).
 	MutexProfile int
+	// ServerDBParams are appended to each server's database URL.
+	ServerDBParams string
+	// PoolMaxConns is ServerConfig.PoolMaxConns for every server.
+	PoolMaxConns int
 	HTTP         *http.Client
 
 	modelSrv *http.Server
@@ -134,6 +138,10 @@ type EnvConfig struct {
 	Log       *slog.Logger
 	// MutexProfile is ServerConfig.MutexProfileFraction for every server.
 	MutexProfile int
+	// ServerDBParams are appended to the servers' database URL (k=v&k=v).
+	ServerDBParams string
+	// PoolMaxConns sets every server's pool size (experiment; 0 = default).
+	PoolMaxConns int
 }
 
 // NewEnv starts the database (or connects to one) and the fake model.
@@ -147,7 +155,7 @@ func NewEnv(ctx context.Context, c EnvConfig) (*Env, error) {
 	if err := os.MkdirAll(c.LogDir, 0o755); err != nil {
 		return nil, fmt.Errorf("loadtest: log dir: %w", err)
 	}
-	e := &Env{Model: NewFakeModel(ModelConfig{}), Replicas: max(1, c.Replicas), Short: c.Short, MutexProfile: c.MutexProfile, Log: c.Log, HTTP: newHTTPClient()}
+	e := &Env{Model: NewFakeModel(ModelConfig{}), Replicas: max(1, c.Replicas), Short: c.Short, MutexProfile: c.MutexProfile, ServerDBParams: c.ServerDBParams, PoolMaxConns: c.PoolMaxConns, Log: c.Log, HTTP: newHTTPClient()}
 	var err error
 	if c.DBURL != "" {
 		e.PG, err = ExistingPostgres(ctx, c.DBURL)
@@ -198,6 +206,14 @@ func (e *Env) newStack(ctx context.Context, name string, sc ServerConfig, seed f
 		}
 	}
 	sc.DBURL = db.URL
+	if e.ServerDBParams != "" {
+		// Extra connection-string parameters for the servers only, such as
+		// pool_max_conns=20 (what an operator would put in PIPEROOM_DB_URL).
+		sc.DBURL += "&" + e.ServerDBParams
+	}
+	if sc.PoolMaxConns == 0 {
+		sc.PoolMaxConns = e.PoolMaxConns
+	}
 	if sc.MutexProfileFraction == 0 {
 		sc.MutexProfileFraction = e.MutexProfile
 	}
@@ -208,8 +224,8 @@ func (e *Env) newStack(ctx context.Context, name string, sc ServerConfig, seed f
 	}
 	s := &stack{db: db, cluster: c}
 	e.Log.Info("loadtest: servers up", "run", name, "urls", c.urls(), "db", db.Name)
-	for _, p := range c.Procs {
-		s.apis = append(s.apis, &API{Base: p.URL, HTTP: e.HTTP})
+	for i, p := range c.Procs {
+		s.apis = append(s.apis, &API{Base: p.URL, HTTP: e.HTTP, Replica: i})
 	}
 	return s, nil
 }
