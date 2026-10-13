@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -134,6 +135,27 @@ func TestBuilderTrace(t *testing.T) {
 				t.Fatalf("last stage = %+v, want warehouse stopped_here (the demo story ends there)", last)
 			}
 		})
+	}
+}
+
+func TestBuilderTraceFixtureExact(t *testing.T) {
+	// Every fact is pinned: a changed offset or row id in the fixture is a
+	// change to the demo story and must be a deliberate edit of this test.
+	var b Builder
+	got, err := b.Trace(context.Background(), "orders", "public.orders", "10042")
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+	want := []events.TraceStage{
+		{Layer: "postgres", Name: "public.orders", Status: "seen", Facts: map[string]string{"row": "id=10042"}},
+		{Layer: "kafka-connect", Name: "pg-orders-connector", Status: "seen", Facts: map[string]string{"task": "0"}},
+		{Layer: "schema-registry", Name: "pg.public.orders-value", Status: "seen"},
+		{Layer: "kafka", Name: "pg.public.orders", Status: "seen", Facts: map[string]string{"partition": "0", "offset": "48213"}},
+		{Layer: "consumer", Name: "order-sync", Status: "not_seen"},
+		{Layer: "warehouse", Name: "analytics.orders", Status: "stopped_here", Facts: map[string]string{"reason": "no row for id=10042"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Trace fixture changed:\n got %+v\nwant %+v", got, want)
 	}
 }
 
