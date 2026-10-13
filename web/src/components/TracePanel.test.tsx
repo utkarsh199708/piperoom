@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { TracePanel } from './TracePanel'
 import type { RoomActions } from '../hooks/useRoom'
 import type { TraceState } from '../state/types'
@@ -32,9 +32,36 @@ const trace: TraceState = {
 
 describe('TracePanel', () => {
   it('renders stages and highlights exactly one stopped_here', () => {
-    const { container } = render(<TracePanel trace={trace} actions={actions} onClose={vi.fn()} />)
+    render(<TracePanel trace={trace} actions={actions} onClose={vi.fn()} />)
+    // The dialog is a Radix portal: it renders in document.body, not in the render container.
+    const container = document.body
     const stopped = container.querySelectorAll('.trace-stage--stopped_here')
     expect(stopped).toHaveLength(1)
     expect(stopped[0].textContent).toContain('analytics.orders')
+  })
+})
+
+describe('TracePanel as a dialog', () => {
+  it('is a named modal dialog with the stopped stage marked', () => {
+    render(<TracePanel trace={trace} actions={actions} onClose={vi.fn()} />)
+    const dialog = screen.getByRole('dialog', { name: 'Trace a record' })
+    expect(within(dialog).getByText('stopped here')).toBeInTheDocument()
+    expect(within(dialog).getByLabelText('Table')).toHaveValue('public.orders')
+  })
+
+  it('Esc and the X both ask to close', () => {
+    const onClose = vi.fn()
+    render(<TracePanel trace={null} actions={actions} onClose={onClose} />)
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Close trace panel' }))
+    expect(onClose).toHaveBeenCalledTimes(2)
+  })
+
+  it('submitting traces the table and key', () => {
+    render(<TracePanel trace={null} actions={actions} onClose={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText('Key'), { target: { value: '7' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Trace' }))
+    expect(actions.trace).toHaveBeenCalledWith('public.orders', '7')
   })
 })

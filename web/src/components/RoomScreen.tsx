@@ -1,13 +1,11 @@
 import { useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useParams, useSearchParams } from 'react-router-dom'
+import { isFixtures } from '../api/client'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
 import { useCurrentUser } from '../context/user'
 import { canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
 import { ageLabel } from '../lib/time'
-import { Avatar, Chip } from './ui'
-import { agentStatusChip, severityTone } from '../lib/tones'
-import { UserSwitcher } from './UserSwitcher'
 import { PipelineMap } from './PipelineMap'
 import { Timeline } from './Timeline'
 import { SteerBox } from './SteerBox'
@@ -19,9 +17,21 @@ import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import { NoDriverBanner } from './NoDriverBanner'
 import { StaleBanner } from './StaleBanner'
 import { useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
+import { HypothesisCard } from './room/HypothesisCard'
+import { PROPOSAL_ANCHOR, ProposalsSummary } from './room/ProposalsSummary'
+import { RoomError } from './room/RoomError'
+import { RoomHeader } from './room/RoomHeader'
+import { RoomSkeleton } from './room/RoomSkeleton'
+import { useRoomShortcuts } from './room/useRoomShortcuts'
 
+// The room screen (docs/design/ui-v2: Room-Investigating, -NoDriver, -Viewer, -Loading).
+// One column for the investigation (header, pipeline lane, hypothesis, fix, step stream,
+// composer) and a 300px rail from 1280px up (proposals summary, who is here, activity);
+// below that the rail stacks under the column. All state and rules live in useRoom and
+// state/permissions; this file only places things.
 export function RoomScreen() {
   const { roomId = '' } = useParams()
+  const [searchParams] = useSearchParams()
   const { user } = useCurrentUser()
   const { state, presence, conn, error, actions, stale, dismissStale, reload } = useRoom(roomId)
   // One topology refetch per executed action, plus the hook's 30 s refresh
@@ -37,17 +47,6 @@ export function RoomScreen() {
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [copied, setCopied] = useState(false)
-
-  const agentChip = state ? agentStatusChip(state.agent_status.state, state.agent_status.detail) : null
-
-  const hasPendingApproval = useMemo(() => {
-    if (!state) return false
-    return state.proposals.some((p) =>
-      (p.required_layers ?? []).some(
-        (l) => p.approvals[l] === 'pending' && user.layers.includes(l),
-      ),
-    )
-  }, [state, user.layers])
 
   const headerMembers = useMemo(() => {
     const ids = new Set<string>()
@@ -66,8 +65,10 @@ export function RoomScreen() {
         }
       }
     }
+    // You are here too, even before the server has reported you.
+    if (!ids.has(user.id)) rows.push({ id: user.id, name: user.name })
     return rows
-  }, [presence, state])
+  }, [presence, state, user.id, user.name])
 
   const invite = () => {
     const url = window.location.href
@@ -83,144 +84,149 @@ export function RoomScreen() {
 
   useBreadcrumbTail(state?.pipeline_id) // shell breadcrumb: "Rooms › <pipeline>"
 
+  const takeControl = state && canTakeControl(state, user) ? () => actions.grantControl(user.id) : undefined
+  const requestControl =
+    state && !takeControl && canRequestControl(state, user) ? actions.requestControl : undefined
+  const openHandoff = state && canHandoff(state, user) ? () => setHandoffOpen(true) : undefined
+  const openTrace = state && !isViewer(user) ? () => setTraceOpen(true) : undefined
+
   // The command menu (⌘K) offers what this room offers right now. Same permission
   // checks and callbacks as the buttons below; a viewer gets none of the writes.
   useRegisterRoomCommands(
     state
       ? {
           title: state.title,
-          takeControl: canTakeControl(state, user) ? () => actions.grantControl(user.id) : undefined,
-          requestControl:
-            !canTakeControl(state, user) && canRequestControl(state, user) ? actions.requestControl : undefined,
-          handoff: canHandoff(state, user) ? () => setHandoffOpen(true) : undefined,
-          trace: isViewer(user) ? undefined : () => setTraceOpen(true),
+          takeControl,
+          requestControl,
+          handoff: openHandoff,
+          trace: openTrace,
           invite,
         }
       : null,
   )
+  // The keys printed on the buttons (H, T, Shift+T).
+  useRoomShortcuts({ handoff: openHandoff, trace: openTrace, control: takeControl ?? requestControl })
 
-  if (!state) {
+  // `?loading=1` previews the skeleton in fixture mode, where the room loads at once.
+  const previewLoading = isFixtures() && searchParams.get('loading') === '1'
+  if (!state || previewLoading) {
+    const failed = !previewLoading && (conn === 'error' || conn === 'not_found')
     return (
-      <div className="shell">
-        <header className="topbar">
-          <Link to="/" className="topbar__back">
-            ← Rooms
-          </Link>
-          <UserSwitcher />
-        </header>
+      <>
         {stale && <StaleBanner onReload={reload} onDismiss={dismissStale} />}
-        <main className="room">
-          <p className="empty">
-            {conn === 'error' ? `Could not load room: ${error ?? 'unknown error'}` : 'Loading room…'}
-          </p>
-        </main>
-      </div>
+        {failed ? (
+          <RoomError
+            message={error ?? (conn === 'not_found' ? 'this room does not exist' : 'unknown error')}
+            onRetry={reload}
+          />
+        ) : (
+          <RoomSkeleton pipelineId={state?.pipeline_id} />
+        )}
+      </>
     )
   }
 
-  return (
-    <div className="shell">
-      <header className="topbar">
-        <Link to="/" className="topbar__back" aria-label="Back to rooms">
-          ← Rooms
-        </Link>
-        <div className="topbar__room">
-          <h1 className="topbar__title">{state.title}</h1>
-          <Chip tone={severityTone(state.severity)}>{state.severity}</Chip>
-          {state.alert && (
-            <Chip tone="info" title="This room was opened by an alert webhook">
-              {state.alert.source ? `alert · ${state.alert.source}` : 'alert'}
-            </Chip>
-          )}
-          <span className="muted topbar__id mono">#{state.id}</span>
-          <span className="muted topbar__age">open {ageLabel(state.opened_at)}</span>
-        </div>
-        <div className="topbar__right">
-          {conn === 'reconnecting' && <Chip tone="warn">reconnecting…</Chip>}
-          {conn === 'connecting' && <Chip tone="info">connecting…</Chip>}
-          <div className="presence-avatars" aria-label="People in the room">
-            {headerMembers.slice(0, 5).map((m) => (
-              <Avatar key={m.id} actor={{ kind: 'human', id: m.id, name: m.name }} size="sm" />
-            ))}
-            {headerMembers.length > 5 && (
-              <span className="muted">+{headerMembers.length - 5}</span>
-            )}
-          </div>
-          {canHandoff(state, user) && (
-            <button type="button" className="btn btn--ghost" onClick={() => setHandoffOpen(true)}>
-              Hand off
-            </button>
-          )}
-          <button type="button" className="btn btn--ghost" onClick={invite} aria-label="Invite (copy link)">
-            {copied ? 'Copied' : 'Invite'}
-          </button>
-          <UserSwitcher />
-        </div>
-      </header>
+  const viewer = isViewer(user)
+  const stalledFor = state.status === 'open' && state.opened_at ? ageLabel(state.opened_at) : undefined
+  const showProposals = state.proposals.length > 0 || user.solo === true
 
+  return (
+    <div className="flex min-h-[calc(100dvh-3rem)] flex-col text-sm">
       {stale && <StaleBanner onReload={reload} onDismiss={dismissStale} />}
-      {error && <div className="banner banner--error">{error}</div>}
+      {error && (
+        <div
+          role="alert"
+          className="border-b border-border bg-destructive-subtle px-4 py-2 font-medium text-destructive-fg sm:px-6"
+        >
+          {error}
+        </div>
+      )}
       {state.status === 'closed' && state.resolution && (
-        <div className="banner banner--resolved" role="status">
+        <div
+          role="status"
+          className="flex min-h-10 flex-wrap items-center gap-x-2.5 border-b border-border bg-success-subtle px-4 py-1.5 font-medium text-success-foreground sm:px-6"
+        >
           <span>Resolved</span>
-          <span className="muted">{state.resolution}</span>
+          <span className="font-normal text-muted-foreground">{state.resolution}</span>
         </div>
       )}
       <NoDriverBanner state={state} user={user} actions={actions} />
       <HandoffAcceptBanner state={state} user={user} actions={actions} />
 
-      <main className={`room-grid ${hasPendingApproval ? 'room-grid--approve-first' : ''}`}>
-        <div className="room-col room-col--left">
-          <PipelineMap topology={topology} updatedAt={updatedAt} onTrace={isViewer(user) ? undefined : () => setTraceOpen(true)} />
-        </div>
+      <div className="flex min-w-0 flex-1 flex-col xl:flex-row">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <RoomHeader
+            state={state}
+            user={user}
+            members={headerMembers}
+            conn={conn}
+            copied={copied}
+            onHandoff={() => setHandoffOpen(true)}
+            onInvite={invite}
+          />
 
-        <div className="room-col room-col--mid">
-          {state.hypothesis && (
-            <section className="panel hypothesis">
-              <header className="panel__head">
-                <h2 className="panel__title">Current best guess</h2>
-                <Chip tone={state.hypothesis.confirmed ? 'ok' : 'info'}>
-                  {state.hypothesis.confidence}
-                </Chip>
-              </header>
-              <div className="panel__body">
-                <p className="hypothesis__text">{state.hypothesis.text}</p>
-                {(state.hypothesis.based_on_steps ?? []).length > 0 && (
-                  <p className="muted hypothesis__based">
-                    based on {state.hypothesis.based_on_steps.join(', ')}
-                  </p>
+          <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
+            <PipelineMap
+              topology={topology}
+              updatedAt={updatedAt}
+              pipelineId={state.pipeline_id}
+              stalledFor={stalledFor}
+              onTrace={viewer ? undefined : () => setTraceOpen(true)}
+            />
+
+            {state.hypothesis && <HypothesisCard hypothesis={state.hypothesis} steps={state.steps} />}
+
+            {showProposals && (
+              <div id={PROPOSAL_ANCHOR} tabIndex={-1} className="scroll-mt-4 focus:outline-none">
+                <ProposalsPanel state={state} user={user} actions={actions} />
+              </div>
+            )}
+
+            <section aria-labelledby="investigation-heading" className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 pt-1">
+                <h2 id="investigation-heading" className="m-0 text-sm font-medium">
+                  Investigation
+                </h2>
+                {state.steps.length > 0 && (
+                  <span className="text-xs tabular-nums text-subtle-foreground">
+                    {state.steps.length} {state.steps.length === 1 ? 'step' : 'steps'}
+                  </span>
                 )}
               </div>
-            </section>
-          )}
-
-          <section className="panel timeline-panel">
-            <header className="panel__head">
-              <h2 className="panel__title">Timeline</h2>
-              {agentChip && <Chip tone={agentChip.tone}>{agentChip.label}</Chip>}
-            </header>
-            <div className="panel__body">
               <Timeline
                 steps={state.steps}
                 messages={state.messages}
                 comments={state.comments}
                 onComment={actions.comment}
-                readOnly={isViewer(user)}
+                readOnly={viewer}
+                working={state.agent_status.state === 'working'}
+                onTakeControl={takeControl}
               />
-            </div>
-          </section>
+            </section>
+          </div>
 
           <SteerBox state={state} user={user} actions={actions} />
         </div>
 
-        <div className="room-col room-col--right">
-          <ProposalsPanel state={state} user={user} actions={actions} />
-          <PresencePanel members={state.members} presence={presence} />
+        <aside
+          aria-label="Room details"
+          className="flex w-full shrink-0 flex-col border-t border-border xl:w-[300px] xl:border-l xl:border-t-0"
+        >
+          <ProposalsSummary proposals={state.proposals} />
+          <div className="h-px shrink-0 bg-border" />
+          <PresencePanel
+            members={state.members}
+            presence={presence}
+            selfId={user.id}
+            selfName={user.name}
+            selfIsViewer={viewer}
+          />
+          <div className="h-px shrink-0 bg-border" />
           <ActivityFeed activity={state.activity} />
-        </div>
-      </main>
+        </aside>
+      </div>
 
-      {traceOpen && !isViewer(user) && <TracePanel trace={state.trace} actions={actions} onClose={() => setTraceOpen(false)} />}
+      {traceOpen && !viewer && <TracePanel trace={state.trace} actions={actions} onClose={() => setTraceOpen(false)} />}
       {handoffOpen && (
         <HandoffDialog state={state} user={user} actions={actions} onClose={() => setHandoffOpen(false)} />
       )}
