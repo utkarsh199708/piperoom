@@ -71,8 +71,10 @@ type Actor struct {
 	// viewer group. That person's Name comes from the IdP name claim, which
 	// they can set, so clients must mark it (docs/design/auth.md §2.1). It is
 	// decided when the event is written, from the users.yaml loaded then.
-	// Events written before this field read as false.
-	Verified bool `json:"verified"`
+	// omitempty: false is written as no key, so an event from before this
+	// field serialises exactly as before and an export of an old room keeps
+	// its hash; a missing key reads as false.
+	Verified bool `json:"verified,omitempty"`
 }
 
 // AgentActor is the actor used for every event the agent emits.

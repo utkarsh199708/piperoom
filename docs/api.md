@@ -69,11 +69,17 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 - **Verified people (design §2.1).** Every person the API returns carries `verified`: `true` for a `users.yaml`
   person, `false` for someone known only to the IdP (a derived `u_` id). This covers event `actor`s (agent and system
   actors are `true`), `control.granted.to` and `handoff.created.to`, the snapshot's `driver`,
-  `pending_suggestions[].from` and `members[]`, `/api/me`, `/api/people` and WebSocket presence `members`. Clients
-  show an unverified person with a badge and their id or email next to the name; `verified` missing (events written
-  before this field) counts as `false`. An IdP name that looks like a `users.yaml` person (same id, name or email
-  after Unicode case folding and confusable mapping: Cyrillic/Greek look-alikes, fullwidth, mixed case) is shown as
-  `"<name> (<email>)"`, or `"<name> (<id>)"` without a verified email; the login is logged, not refused.
+  `pending_suggestions[].from` and `members[]`, `/api/me`, `/api/people` and WebSocket presence `members`. In events
+  (`events.Actor`, also inside the export) the key is **omitted when false** (`omitempty`), so events written before
+  the field, and exports of old rooms, are unchanged; a missing `verified` counts as `false` everywhere. The other
+  objects always carry `true` or `false`. Clients show an unverified person with a badge and their id or email next
+  to the name. **The web badge is pending (A6 follow-up)**, so security audit A-ID-2 stays open until it ships. An
+  IdP name that looks like a `users.yaml` person is shown as `"<name> (<email>)"`, or `"<name> (<id>)"` without a
+  verified email, and the login is logged, not refused. "Looks like": the whole name, or the name with its bracketed
+  parts removed, equals a `users.yaml` id, name or email after the design §2.1 skeleton (default-ignorable code points
+  dropped, compatibility forms, Unicode case folding, Cyrillic/Greek/Armenian/Cherokee/Lisu look-alikes); also any
+  name that mixes Latin with another script, and any name that ends in the server's own suffix shape (`(…@…)` or
+  `(u_…)`). A name with extra words (`Priya S.`) is not suffixed and relies on the badge.
 
 ## Errors
 
@@ -169,7 +175,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/rooms/{id}/control/request` | – | `Event` | |
 | POST | `/api/rooms/{id}/control/grant` | `{to}` | `Event` | driver only, or anyone if no driver / lease expired |
 | POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only; a shadow room refuses an empty resolution with `400 validation` |
-| POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step. After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode); `identity.email` is the session's verified IdP email, else the `users.yaml` `email:` (omitted when neither exists), so a decision is tied to the actor id and a mailbox, never to the name alone. `approval.rejected` likewise |
+| POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step. After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode); `identity.email` is the session's verified IdP email, else the `users.yaml` `email:` (omitted when neither exists), so a decision is tied to the actor id and a mailbox, never to the name alone. `approval.rejected`, `shadow.labelled` and `shadow.graded` carry the same `identity.email` |
 | POST | `/api/proposals/{pid}/reject` | `{layer, reason}`; after auth PR 4 `{layer, reason, params_hash}` | `Event` | same hash rule as approve |
 | GET | `/api/rooms/{id}/export` | – | the room as one JSON document | header `X-Piperoom-Export-SHA256` = SHA-256 of the RFC 8785 (JCS) form without the top-level `integrity` member. Today any user may export. After auth PR 4: only an approver or backup for any layer of the room's pipeline (in dev mode: `users.yaml` `layers`) or an `auditors:` principal; the driver is not on the list; others → `403 not_allowed`. Proposals, approvals and action results then carry `params_hash`, and approvals also `identity`. `?include=shadow` (closed rooms only, else `409 room_open`; `409 not_labelled` before the blind label) adds a top-level `"shadow": {run, events}` member (with `data`) after `"schema"`; it is inside the hashed document, so the hash differs from the plain export. Same access rule |
 | POST | `/api/rooms/{id}/handoffs` | `{to, stay_as_watcher}` | `Event` | driver only; server asks the agent for the summary (can take up to 3 min; this route is exempt from the 60 s request timeout) |
