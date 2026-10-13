@@ -98,7 +98,7 @@ func (a *updateConnectorConfig) allowList() map[string]map[string]bool {
 func (a *updateConnectorConfig) Name() string  { return "connect_update_connector_config" }
 func (a *updateConnectorConfig) Layer() string { return "kafka-connect" }
 func (a *updateConnectorConfig) Describe() string {
-	return "Changes one setting that sets the connector's output schema or precision: decimal.handling.mode precise|double|string; time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, errors.log.enable true (refused while errors.log.include.messages is true) and, on a sink connector only, errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks. To undo an output setting, set the old value."
+	return "Changes one setting that sets the connector's output schema or precision: decimal.handling.mode precise|double|string; time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, errors.log.enable true (refused unless errors.log.include.messages is unset or false) and, on a sink connector only, errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks. To undo an output setting, set the old value."
 }
 func (a *updateConnectorConfig) ParamsSchema() map[string]any {
 	// propose_fix no longer inlines this schema into the strict request (the
@@ -163,18 +163,20 @@ func (a *updateConnectorConfig) Validate(raw json.RawMessage) error {
 }
 
 // checkVisibilityGuard refuses the two errors.* switches where they would not
-// be "visibility only": errors.log.enable=true on a connector that already has
-// errors.log.include.messages=true starts writing record keys and values into
+// be "visibility only": errors.log.enable=true on a connector whose
+// errors.log.include.messages is not false starts writing record keys and values into
 // the worker log, and the DLQ context headers exist only on sink connectors.
 func checkVisibilityGuard(p updateConnectorConfigParams, cfg map[string]string) error {
-	ec := dlq.Parse(cfg)
 	switch p.Key {
 	case dlq.KeyLogEnable:
-		if ec.LogMessages {
-			return fmt.Errorf("actions: %s=true is refused on %s: errors.log.include.messages is true, so enabling the error log would write failed record values into the worker log; turn errors.log.include.messages off first", p.Key, p.Connector)
+		// Fail closed: only an unset or literal "false" passes. A config-provider
+		// reference such as ${file:/x:incl} comes back unresolved from Connect
+		// and may resolve to true.
+		if v, set := cfg[dlq.KeyLogMessages]; set && !strings.EqualFold(strings.TrimSpace(v), "false") {
+			return fmt.Errorf("actions: %s=true is refused on %s: errors.log.include.messages is not false (it is true or cannot be read as false), so enabling the error log would write failed record values into the worker log; turn errors.log.include.messages off first", p.Key, p.Connector)
 		}
 	case dlq.KeyContextHeaders:
-		if !ec.IsSink {
+		if !dlq.Parse(cfg).IsSink {
 			return fmt.Errorf("actions: %s only applies to a sink connector; %s is not one", p.Key, p.Connector)
 		}
 	}

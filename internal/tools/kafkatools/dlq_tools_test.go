@@ -243,7 +243,7 @@ func TestDLQPeekLimitCapAndDefault(t *testing.T) {
 	}
 	// The reader may return more than asked for; the tool still shows <= limit.
 	for i := 0; i < 30; i++ {
-		k.recs = append(k.recs, clients.DLQRecord{Topic: "orders-dlq", Offset: int64(i), Timestamp: ts(i), Headers: hdr("DataException", "m")})
+		k.recs = append(k.recs, clients.DLQRecord{Topic: "orders-dlq", Offset: int64(i), Timestamp: ts(i), Headers: hdr("org.apache.kafka.connect.errors.DataException", "m")})
 	}
 	r, err := tl.Run(scoped(), json.RawMessage(`{"connector":"pg-orders-sink","limit":3}`))
 	if err != nil {
@@ -316,7 +316,7 @@ func TestDLQPeekConnectorWithoutDLQ(t *testing.T) {
 
 func TestDLQPeekConnectorResolvesTopic(t *testing.T) {
 	k := &fakeDLQ{fakeKafka: &fakeKafka{}, offsets: okOffsets(),
-		recs: []clients.DLQRecord{{Topic: "orders-dlq", Partition: 1, Offset: 412, Timestamp: ts(58), Headers: hdr("DataException", "bad")}}}
+		recs: []clients.DLQRecord{{Topic: "orders-dlq", Partition: 1, Offset: 412, Timestamp: ts(58), Headers: hdr("org.apache.kafka.connect.errors.DataException", "bad")}}}
 	tl := peekTool(t, dlqDeps(t, "", k, defaultCfgs()))
 	r, err := tl.Run(scoped(), json.RawMessage(`{"connector":"pg-orders-sink"}`))
 	if err != nil {
@@ -335,7 +335,7 @@ func TestDLQPeekConnectorResolvesTopic(t *testing.T) {
 	if !k.deadline {
 		t.Fatal("Kafka call had no deadline")
 	}
-	for _, want := range []string{"orders-dlq (DLQ of pg-orders-sink): 55 records in 2 partitions", "last hour: unknown (no watcher in this process)", "DataException x1", "p1@412 2026-10-13T09:58:00Z DataException stage=VALUE_CONVERTER"} {
+	for _, want := range []string{"orders-dlq (DLQ of pg-orders-sink): 55 records in 2 partitions", "last hour: unknown (no watcher in this process)", "DataException x1", "p1@412 2026-10-13T09:58:00Z org.apache.kafka.connect.errors.DataException stage=VALUE_CONVERTER"} {
 		if !strings.Contains(r.Summary, want) {
 			t.Errorf("summary lacks %q:\n%s", want, r.Summary)
 		}
@@ -422,9 +422,9 @@ func TestDLQPeekHonoursCancelledContext(t *testing.T) {
 
 func modeRecs() []clients.DLQRecord {
 	return []clients.DLQRecord{
-		{Topic: "orders-dlq", Partition: 1, Offset: 412, Timestamp: ts(58), Headers: hdr("DataException", "Unexpected character ('x')")},
-		{Topic: "orders-dlq", Partition: 0, Offset: 389, Timestamp: ts(57), Headers: hdr("DataException", "m2")},
-		{Topic: "orders-dlq", Partition: 0, Offset: 388, Timestamp: ts(56), Headers: hdr("SerializationException", "m3")},
+		{Topic: "orders-dlq", Partition: 1, Offset: 412, Timestamp: ts(58), Headers: hdr("org.apache.kafka.connect.errors.DataException", "Unexpected character ('x')")},
+		{Topic: "orders-dlq", Partition: 0, Offset: 389, Timestamp: ts(57), Headers: hdr("org.apache.kafka.connect.errors.DataException", "m2")},
+		{Topic: "orders-dlq", Partition: 0, Offset: 388, Timestamp: ts(56), Headers: hdr("org.apache.kafka.connect.errors.SerializationException", "m3")},
 	}
 }
 
@@ -436,7 +436,7 @@ func TestDLQPeekHeaderModes(t *testing.T) {
 	}{
 		{"counts_only", []string{"headers: counts_only", "p1@412 2026-10-13T09:58:00Z", "DataException x2"},
 			[]string{"stage=", "VALUE_CONVERTER", "JsonConverter", "pg.public.orders", "Unexpected character", "task="}},
-		{"classes", []string{"headers: classes", "p1@412 2026-10-13T09:58:00Z DataException stage=VALUE_CONVERTER class=org.apache.kafka.connect.json.JsonConverter connector=pg-orders-sink task=0 from pg.public.orders/1@25377154", "SerializationException x1"},
+		{"classes", []string{"headers: classes", "p1@412 2026-10-13T09:58:00Z org.apache.kafka.connect.errors.DataException stage=VALUE_CONVERTER class=org.apache.kafka.connect.json.JsonConverter connector=pg-orders-sink task=0 from pg.public.orders/1@25377154", "SerializationException x1"},
 			[]string{"Unexpected character", "msg=", "trace="}},
 		{"messages", []string{"headers: messages", "stage=VALUE_CONVERTER", `msg="Unexpected character ('x')"`, `trace="org.apache.kafka.connect.errors.DataException: Unexpected character ('x')"`},
 			nil},
@@ -462,7 +462,7 @@ func TestDLQPeekHeaderModes(t *testing.T) {
 			}
 			// Data is the same in every mode: counts, positions, timestamps.
 			d := r.Data.(dlqData)
-			if d.ExceptionClassCount["DataException"] != 2 || d.ExceptionClassCount["SerializationException"] != 1 {
+			if d.ExceptionClassCount["org.apache.kafka.connect.errors.DataException"] != 2 || d.ExceptionClassCount["org.apache.kafka.connect.errors.SerializationException"] != 1 {
 				t.Fatalf("class counts = %v", d.ExceptionClassCount)
 			}
 			wantMode := tc.mode
@@ -512,7 +512,7 @@ func TestDLQPeekDataShape(t *testing.T) {
 func TestDLQPeekCrossPipelineFilter(t *testing.T) {
 	recs := modeRecs()
 	recs = append(recs, clients.DLQRecord{Topic: "orders-dlq", Offset: 1, Timestamp: ts(59),
-		Headers: hdr("OtherException", "x", "__connect.errors.connector.name", "bill-sink")})
+		Headers: hdr("org.acme.OtherException", "x", "__connect.errors.connector.name", "bill-sink")})
 	k := &fakeDLQ{fakeKafka: &fakeKafka{}, offsets: okOffsets(), recs: recs}
 	tl := peekTool(t, dlqDeps(t, "", k, defaultCfgs()))
 	r, err := tl.Run(scoped(), json.RawMessage(`{"connector":"pg-orders-sink"}`))
@@ -520,10 +520,10 @@ func TestDLQPeekCrossPipelineFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := r.Data.(dlqData)
-	if d.OtherWriters != 1 || d.Sampled != 3 || d.ExceptionClassCount["OtherException"] != 0 {
+	if d.OtherWriters != 1 || d.Sampled != 3 || d.ExceptionClassCount["org.acme.OtherException"] != 0 {
 		t.Fatalf("data = %+v", d)
 	}
-	if strings.Contains(r.Summary, "OtherException") || strings.Contains(r.Summary, "bill-sink") ||
+	if strings.Contains(r.Summary, "org.acme.OtherException") || strings.Contains(r.Summary, "bill-sink") ||
 		!strings.Contains(r.Summary, "1 sampled records written by other connectors were left out") {
 		t.Fatalf("summary:\n%s", r.Summary)
 	}
@@ -561,7 +561,7 @@ func TestDLQPeekSummaryIsCapped(t *testing.T) {
 	var recs []clients.DLQRecord
 	for i := 0; i < 20; i++ {
 		recs = append(recs, clients.DLQRecord{Topic: "orders-dlq", Offset: int64(i), Timestamp: ts(i),
-			Headers: hdr("DataException", long)})
+			Headers: hdr("org.apache.kafka.connect.errors.DataException", long)})
 	}
 	k := &fakeDLQ{fakeKafka: &fakeKafka{}, offsets: okOffsets(), recs: recs}
 	tl := peekTool(t, dlqDeps(t, "messages", k, defaultCfgs()))
@@ -592,7 +592,7 @@ func TestDLQPeekLeakMarkers(t *testing.T) {
 	jackson := `Unexpected character ('x' (code 120)): was expecting double-quote at [Source: (byte[])"{"email":"` + msgMarker + `@b.com"}"; line: 1, column: 2]`
 	jdbc := `Batch entry failed. Detail: Key (id)=(` + sqlMarker + `) already exists.`
 	recs := []clients.DLQRecord{
-		{Topic: "orders-dlq", Partition: 0, Offset: 3, Timestamp: ts(3), Headers: hdr("DataException", jackson,
+		{Topic: "orders-dlq", Partition: 0, Offset: 3, Timestamp: ts(3), Headers: hdr("org.apache.kafka.connect.errors.DataException", jackson,
 			"x-trace-id", keyMarker, "key", keyMarker, "value", keyMarker, "__connect.other."+keyMarker, keyMarker,
 			"__connect.errors.stage", "bad stage "+valMarker,
 			"__connect.errors.task.id", valMarker,

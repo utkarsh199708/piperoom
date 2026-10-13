@@ -23,6 +23,8 @@ func TestDLQPeekClassAndStageForms(t *testing.T) {
 		hex.EncodeToString([]byte(m)),
 		base64.RawURLEncoding.EncodeToString([]byte(m)),
 		base64.StdEncoding.EncodeToString([]byte(m)),
+		m + "Error", // no package
+		"x" + base64.RawURLEncoding.EncodeToString([]byte(m)) + "Exception", // no package
 		"com.acme." + m, // a valid class name, but not a throwable's
 		strings.Repeat("a", 250) + ".XException",
 	}
@@ -61,7 +63,7 @@ func TestDLQPeekClassAndStageForms(t *testing.T) {
 }
 
 func TestDLQPeekValidNames(t *testing.T) {
-	for _, v := range []string{"DataException", "org.apache.kafka.connect.errors.DataException", "java.lang.StackOverflowError", "a.b.$Inner$Throwable", "SerializationException"} {
+	for _, v := range []string{"org.apache.kafka.connect.errors.DataException", "org.apache.kafka.connect.errors.DataException", "java.lang.StackOverflowError", "a.b.$Inner$Throwable", "org.apache.kafka.connect.errors.SerializationException"} {
 		if excClassName(v) != v {
 			t.Errorf("excClassName(%q) = %q", v, excClassName(v))
 		}
@@ -83,7 +85,7 @@ func TestDLQPeekValidNames(t *testing.T) {
 
 func TestDLQPeekTraceCutsAtAnyLineBreak(t *testing.T) {
 	for _, sep := range []string{"\n", "\r", "\u2028", "\u2029", "\u0085", "\v", "\f"} {
-		h := hdr("DataException", "m", "__connect.errors.exception.stacktrace", "first line"+sep+"SECONDLINEMARK")
+		h := hdr("org.apache.kafka.connect.errors.DataException", "m", "__connect.errors.exception.stacktrace", "first line"+sep+"SECONDLINEMARK")
 		line := recordLine(clients.DLQRecord{Timestamp: ts(1), Headers: h}, "messages", tools.Scope{})
 		if strings.Contains(line, "SECONDLINEMARK") || !strings.Contains(line, "first line") {
 			t.Errorf("sep %q: %s", sep, line)
@@ -93,8 +95,8 @@ func TestDLQPeekTraceCutsAtAnyLineBreak(t *testing.T) {
 
 func TestDLQPeekOriginTopicMustBeInScope(t *testing.T) {
 	k := &fakeDLQ{fakeKafka: &fakeKafka{}, offsets: okOffsets(), recs: []clients.DLQRecord{
-		{Topic: "orders-dlq", Offset: 2, Timestamp: ts(2), Headers: hdr("DataException", "x")},
-		{Topic: "orders-dlq", Offset: 1, Timestamp: ts(1), Headers: hdr("DataException", "x", "__connect.errors.topic", "bill.public.invoices")},
+		{Topic: "orders-dlq", Offset: 2, Timestamp: ts(2), Headers: hdr("org.apache.kafka.connect.errors.DataException", "x")},
+		{Topic: "orders-dlq", Offset: 1, Timestamp: ts(1), Headers: hdr("org.apache.kafka.connect.errors.DataException", "x", "__connect.errors.topic", "bill.public.invoices")},
 	}}
 	r, err := peekTool(t, dlqDeps(t, "", k, defaultCfgs())).Run(scoped(), json.RawMessage(`{"connector":"pg-orders-sink"}`))
 	if err != nil {
@@ -106,11 +108,11 @@ func TestDLQPeekOriginTopicMustBeInScope(t *testing.T) {
 }
 
 func TestDLQPeekSharedTopicWordingAndMissingConnectorName(t *testing.T) {
-	noName := hdr("DataException", "x")
+	noName := hdr("org.apache.kafka.connect.errors.DataException", "x")
 	delete(noName, "__connect.errors.connector.name")
 	k := &fakeDLQ{fakeKafka: &fakeKafka{}, offsets: okOffsets(), recs: []clients.DLQRecord{
 		{Topic: "orders-dlq", Offset: 3, Timestamp: ts(3), Headers: noName},
-		{Topic: "orders-dlq", Offset: 2, Timestamp: ts(2), Headers: hdr("DataException", "x", "__connect.errors.connector.name", "bill-sink")},
+		{Topic: "orders-dlq", Offset: 2, Timestamp: ts(2), Headers: hdr("org.apache.kafka.connect.errors.DataException", "x", "__connect.errors.connector.name", "bill-sink")},
 	}}
 	r, err := peekTool(t, dlqDeps(t, "", k, defaultCfgs())).Run(scoped(), json.RawMessage(`{"connector":"pg-orders-sink"}`))
 	if err != nil {

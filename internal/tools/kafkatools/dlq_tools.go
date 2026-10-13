@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -58,7 +59,10 @@ var (
 	identRE = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$.\-]{0,119}$`)
 )
 
-const maxClassNameLen = 200
+const (
+	maxClassNameLen = 200
+	maxExcClassLen  = 120
+)
 
 // connectStages are the values of __connect.errors.stage
 // (org.apache.kafka.connect.runtime.errors.Stage).
@@ -97,7 +101,9 @@ func operatorClassName(v string) string {
 // excClassName is className plus the rule that a throwable's simple name ends
 // in Exception, Error or Throwable.
 func excClassName(v string) string {
-	if className(v) == "?" {
+	// Connect writes getClass().getName(), so a real value always has a
+	// package; a bare word is not one. 120 is generous for a real name.
+	if len(v) > maxExcClassLen || !strings.Contains(v, ".") || className(v) == "?" {
 		return "?"
 	}
 	last := v[strings.LastIndexByte(v, '.')+1:]
@@ -415,7 +421,7 @@ func windowText(w time.Duration) string {
 func firstLine(s string) string {
 	if i := strings.IndexFunc(s, func(r rune) bool {
 		switch r {
-		case '\r', '\n', '\v', '\f', '\u0085', ' ', ' ':
+		case '\r', '\n', '\v', '\f', '\u0085', '\u2028', '\u2029':
 			return true
 		}
 		return false
@@ -540,7 +546,7 @@ func recordLine(r clients.DLQRecord, mode string, sc tools.Scope) string {
 		line += " connector=" + connectorName(v, sc)
 	}
 	if v, ok := h[hTask]; ok {
-		line += " task=" + numOrQ(v)
+		line += " task=" + numOrQ(v, maxTaskID)
 	}
 	if orig := origin(h, sc); orig != "" {
 		line += " from " + orig
@@ -572,18 +578,28 @@ func origin(h map[string]string, sc tools.Scope) string {
 		out = tp
 	}
 	if p, ok := h[hPartition]; ok {
-		out += "/" + numOrQ(p)
+		out += "/" + numOrQ(p, maxPartition)
 	}
 	if o, ok := h[hOffset]; ok {
-		out += "@" + numOrQ(o)
+		out += "@" + numOrQ(o, maxOffset)
 	}
 	return out
 }
 
-// numOrQ returns v when it is a non-negative integer and "?" otherwise.
-func numOrQ(v string) string {
-	if n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 63); err == nil {
+// numOrQ returns v when it is a non-negative integer no larger than max and
+// "?" otherwise. The bound keeps a long digit string (a card number written
+// into task.id or partition) out of the summary.
+func numOrQ(v string, max uint64) string {
+	if n, err := strconv.ParseUint(strings.TrimSpace(v), 10, 63); err == nil && n <= max {
 		return strconv.FormatUint(n, 10)
 	}
 	return "?"
 }
+
+// Bounds for the numeric headers. Offsets are not bounded below int64: a real
+// offset can be any int64.
+const (
+	maxTaskID    = 9999
+	maxPartition = math.MaxInt32
+	maxOffset    = math.MaxInt64
+)
