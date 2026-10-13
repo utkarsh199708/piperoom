@@ -127,8 +127,9 @@ func (s *Store) Since(ctx context.Context, roomID string, afterSeq int64, limit 
 	}
 	// The log is in seq order (Append assigns seqs under s.mu), so a binary
 	// search finds the first event after afterSeq. Every live subscriber calls
-	// Since on every append while holding the store-wide lock, so a linear scan
-	// of the whole room log made fan-out O(subscribers x room length).
+	// Since on every append, and each call takes the store-wide lock that all
+	// rooms and Append share, so a linear scan of the whole room log under it
+	// made fan-out O(subscribers x room length).
 	evs := log.events
 	i := sort.Search(len(evs), func(i int) bool { return evs[i].Seq > afterSeq })
 	n := min(len(evs)-i, limit)

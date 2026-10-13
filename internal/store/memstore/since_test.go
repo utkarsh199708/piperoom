@@ -98,7 +98,8 @@ func TestSubscribeSlowReaderGetsEverything(t *testing.T) {
 	roomID := newTestRoom(t, s)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	const before, live = 3, 10 * store.SubscribeBuffer
+	const before = 3
+	live := max(10*store.SubscribeBuffer, 100)
 	for i := 0; i < before; i++ {
 		if _, err := s.Append(ctx, roomID, events.CommentAdded, testActor(), events.CommentAddedPayload{CommentID: "c", Text: "x"}); err != nil {
 			t.Fatalf("append: %v", err)
@@ -115,7 +116,7 @@ func TestSubscribeSlowReaderGetsEverything(t *testing.T) {
 	}
 	want := int64(2)
 	timeout := time.After(5 * time.Second)
-	for want <= before+live {
+	for want <= int64(before+live) {
 		select {
 		case e, ok := <-ch:
 			if !ok {

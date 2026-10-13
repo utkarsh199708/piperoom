@@ -46,6 +46,7 @@ type loadConfig struct {
 	padBytes      int           // LOAD_PAD_BYTES, filler in each agent message
 	burst         bool          // LOAD_BURST=1: every agent ticks at the same instant (worst case)
 	heapProfile   string        // LOAD_HEAP_PROFILE: write a heap profile here at the end of the window
+	maxReconnects int64         // LOAD_MAX_RECONNECTS: reconnects tolerated across all clients (default 0)
 }
 
 func envInt(t *testing.T, key string, def int) int {
@@ -57,6 +58,19 @@ func envInt(t *testing.T, key string, def int) int {
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
 		t.Fatalf("%s: want a positive integer, got %q", key, v)
+	}
+	return n
+}
+
+func envNonNegInt(t *testing.T, key string, def int) int {
+	t.Helper()
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		t.Fatalf("%s: want a non-negative integer, got %q", key, v)
 	}
 	return n
 }
@@ -94,6 +108,7 @@ func readConfig(t *testing.T) loadConfig {
 		padBytes:      envInt(t, "LOAD_PAD_BYTES", 300),
 		burst:         os.Getenv("LOAD_BURST") == "1",
 		heapProfile:   os.Getenv("LOAD_HEAP_PROFILE"),
+		maxReconnects: int64(envNonNegInt(t, "LOAD_MAX_RECONNECTS", 0)),
 	}
 }
 
@@ -684,6 +699,25 @@ func TestWSFanoutLoad(t *testing.T) {
 	}
 	if tail != 0 {
 		t.Errorf("%d events never reached their clients", tail)
+	}
+	// A slow consumer is closed with "send buffer full" and the client's
+	// reconnect + replay would hide it from the seq check, so reconnects fail
+	// the run unless explicitly allowed.
+	if reconnects > cfg.maxReconnects {
+		t.Errorf("reconnects=%d exceed LOAD_MAX_RECONNECTS=%d (server dropped clients, e.g. send buffer full)", reconnects, cfg.maxReconnects)
+	}
+	for name, n := range map[string]int64{
+		"emitErrs":    h.emitErrs.Load(),
+		"propErrs":    h.propErrs.Load(),
+		"commentErrs": h.commentErrs.Load(),
+		"approveErrs": h.approveErrs.Load(),
+	} {
+		if n != 0 {
+			t.Errorf("%s=%d, want 0", name, n)
+		}
+	}
+	if p := h.propCreated.Load(); p > 0 && h.approvals.Load() != p {
+		t.Errorf("approvals=%d, want one per proposal (%d)", h.approvals.Load(), p)
 	}
 	if h.emitted.Load() == 0 || len(all) == 0 {
 		t.Errorf("no events measured")
