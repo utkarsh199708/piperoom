@@ -378,6 +378,110 @@ statement should be made about it until S1's round-robin queue lands.
 
 Use the same commands (section 3) with `-db-url` pointing at the managed database.
 
-## 9. Multi-replica runs
+## 9. Multi-replica runs (phase 2, `s1/replicas` @ 75a1968)
 
-Pending: second PR "[S2] loadtest: multi-replica runs" on `s2/load-test-replicas`, stacked on `s1/replicas`.
+Second PR "[S2] loadtest: multi-replica runs", branch `s2/load-test-replicas` = `s1/replicas` + this harness.
+**Merge after S1.** The harness server now passes a per-process `ReplicaID` (`lt-r<N>-<hex>`) and
+`MaxAgentsGlobal` to `room.New`, as `cmd/server/replicas.go` does; the leader-only loops (watcher, retention,
+Slack) are not part of the harness. Everything else is unchanged, so N = 1 below is S1's code on one server
+and is directly comparable with sections 4.1, 4.2 and 4.4 (`main`).
+
+Commands (18:43–18:57Z, load average 23–45):
+
+```sh
+for n in 1 2 3; do
+  ./loadtest run -replicas $n -profile fairness,throughput,fanout -p throughput.propose=true -out rep-n$n
+done
+./loadtest run -replicas 3 -profile fairness -p max_agents_global=3 -out rep-n3-global
+./loadtest run -replicas 1 -profile throughput -p model_latency=0s -p tool_latency=0s -p turns=10 -p max_agents=10 -out rep-n1-zero
+./loadtest run -replicas 3 -profile throughput -p model_latency=0s -p tool_latency=0s -p turns=10 -p max_agents=10 -out rep-n3-zero
+# CI: two replicas, fairness + throughput with approvals + fan-out, all checks required
+go test -tags integration -run TestSmokeReplicas ./internal/loadtest/
+```
+
+Rooms and comments go round-robin to the replicas' APIs, viewers connect round-robin, and every approval is
+sent to a different replica than the one the room was read on. Comments carry the replica they were posted
+to, so each delivery is classed as same-replica or cross-replica.
+
+**The required zeros held in every run:** 0 rooms with more than one agent run start and 0 with concurrent model
+calls (all 15 agent runs: 3 fairness, 9 throughput with approvals, 1 global-cap fairness, 2 zero-latency throughput); **540 approved fixes, 540 executions,
+0 duplicate executions, 0 duplicate `action.executed` events, 0 missing** (60 per throughput run × 9); 0 gaps,
+0 duplicates and 0 missing events for every viewer; 0 append errors; server goroutines back to baseline after
+every fan-out run. The fake model never saw more concurrent runs than `max_agents × N`, or than the global cap
+when set (`max_agents_global=3` on 3 replicas: max in-flight 3).
+
+### 9.1 Queue fairness (scenario 1) — round-robin across pipelines
+
+| replicas | A TTFT p50 / p95 / max ms | B max queue wait ms | C max queue wait ms | max overtaken B / C |
+|---|---|---|---|---|
+| `main` (FIFO), 4.1 | 8,996–9,065 / 18,140–19,427 / 19,265–19,918 | 17,781–18,483 | 17,827–18,554 | 46 / 47 |
+| 1 | 11,272 / 18,891 / 19,796 | 3,194 | 3,196 | 5 / 6 |
+| 2 | 5,668 / 9,470 / 10,390 | 2,472 | 2,316 | 8 / 6 |
+| 3 | 3,367 / 5,499 / 6,361 | 726 | 689 | 6 / 4 |
+| 3, global cap 3 | 11,896 / 22,070 / 23,039 | 3,277 | 3,411 | 5 / 6 |
+
+Round-robin fixes the starvation: B and C now wait about one round of the queue (their 3 rooms each take
+a turn after 2 other pipelines, ~3 run holds on one replica) instead of the whole of A's burst. More replicas
+add slots, so everyone waits less. With a global cap the order across replicas is first-come at the 1 s
+retry, not round-robin (design §4.4); B/C still waited only ~3.3 s.
+
+### 9.2 Agent throughput with approvals (scenario 2)
+
+60 rooms, 4 tool calls + `propose_fix` + end per run (6 model turns), 500 ms model; then every proposal approved.
+
+| replicas | turns/s at max_agents 3 / 10 / 30 (per replica) | queue wait p95 ms at 3 / 10 / 30 | insert p99 ms at 3 / 10 / 30 | pool waits per replica (3 / 10 / 30) |
+|---|---|---|---|---|
+| 1 | 5.12 / 15.70 / 36.58 | 62,312 / 17,401 / 4,290 | 77.8 / 55.8 / 33.0 | 384 / 407 / 388 |
+| 2 | 9.57 / 28.66 / 59.29 | 31,890 / 7,554 / 455 | 136.0 / 76.0 / 92.3 | ~160 / ~200–380 / ~200–280 |
+| 3 | 14.84 / 47.44 / 54.81 | 20,315 / 3,523 / 980 | 55.3 / 54.7 / 124.0 | ~100–155 / ~165–245 / ~120–170 |
+
+`main` (4.2) had 1,173–6,415 pool waits per run on one replica; S1's per-room feed removed most of them.
+Throughput scales with total slots until the write path is reached (N=3 at max_agents 30: 54.8 turns/s).
+
+Zero model and tool latency, 10 turns, max_agents 10: **N=1: 151 events/s (44.9 turns/s); N=3: 179 events/s
+(54.2 turns/s) in total.** Each replica's serialized append section was still 87–89% busy, but each append took
+2.5x longer with three writers (mean 14.7–15.0 ms vs 5.8 ms). On this box the database's commit rate
+(fsync on a shared VM disk) and not the per-process lock set the total write ceiling: **replicas did not add
+write capacity here.** This must be re-measured against a production database (section 8, item 2).
+
+### 9.3 WebSocket fan-out (scenario 4) and cross-replica delivery
+
+| replicas | viewers | accepted / offered comments/s | event→delivery p50 / p95 / p99 ms (same replica) | cross-replica p50 / p95 / p99 ms | POST p50 / p95 / p99 ms | queries/s (all replicas) | peak heap per replica |
+|---|---|---|---|---|---|---|---|
+| `main`, 4.4 | 2,000 | 29.6–31.3 / 50 | 49.0–51.0 / 242–295 / 350–455 | — | 1,493–1,641 / 2,203–2,271 / 2,615–2,701 | 5,594–5,792 | 112.3–112.8 MiB |
+| 1 | 500 | 48.4 / 50 | 5.3 / 38.8 / 107.6 | — | 7.0 / 152.8 / 243.2 | 148 | 30.5 MiB |
+| | 1,000 | 48.4 / 50 | 6.9 / 48.5 / 119.9 | — | 12.6 / 211.7 / 402.3 | 149 | 55.2 MiB |
+| | 2,000 | 48.4 / 50 | 8.0 / 58.2 / 141.3 | — | 18.4 / 525.8 / 1,353 | 149 | 98.4 MiB |
+| 2 | 500 | 48.4 / 50 | 4.7 / 32.6 / 111.1 | 5.1 / 33.5 / 98.2 | 5.1 / 72.1 / 178.4 | 197 | 18.4 MiB |
+| | 1,000 | 48.4 / 50 | 4.6 / 25.3 / 82.4 | 6.1 / 30.5 / 81.9 | 4.8 / 47.9 / 145.2 | 197 | 29.8 MiB |
+| | 2,000 | 48.4 / 50 | 7.7 / 45.7 / 80.0 | 7.6 / 54.9 / 136.5 | 7.1 / 103.4 / 246.3 | 197 | 54.4 MiB |
+| 3 | 500 | 48.4 / 50 | 5.9 / 35.3 / 98.4 | 6.1 / 36.0 / 93.4 | 5.6 / 52.0 / 117.5 | 342 | 14.3 MiB |
+| | 1,000 | 48.4 / 50 | 6.8 / 41.8 / 92.4 | 6.9 / 44.4 / 92.4 | 6.1 / 63.9 / 138.7 | 342 | 22.6 MiB |
+| | 2,000 | 48.4 / 50 | 10.2 / 66.7 / 133.4 | 10.5 / 67.2 / 129.6 | 11.7 / 189.4 / 387.7 | 342 | 38.6 MiB |
+
+S1's one-feed-per-room cut database queries at 2,000 viewers from ~5,700/s to **149/s** (one replica) and
+removed the fan-out bottleneck of section 4.4: every offered comment was accepted at every size. Delivery to a
+viewer on another replica costs about the same as on the writer's replica (p50 within 1.5 ms, p99 within
+±60 ms, inside run-to-run noise): NOTIFY plus one feed read per room per replica. Queries grow with replicas
+(one feed per room per replica), 149 → 197 → 342/s. On one replica the comment POST p99 still reached 1.35 s at
+2,000 viewers: writes still serialize on `Service.mu` (6.1), and spreading viewers over replicas spreads that
+too.
+
+### 9.4 What phase 2 changes in the proposal
+
+With S1 merged (one replica): the fan-out limit of section 4.4 moves well past 2,000 viewers on this box
+(not found in this run); queue fairness is fixed. With 2–3 replicas: no duplicate agent runs, no duplicate
+action executions and no lost or reordered events were seen, and cross-replica delivery costs about the same
+as local delivery. Replicas spread viewers, CPU and the per-process lock; they did not raise the total event
+write rate on this box. A proposed statement for after S1, again a floor:
+
+> Up to 3 replicas on one Postgres; per replica the single-replica limits of section 7, except up to
+> **1,000 connected viewers per replica**; the event write rate across all replicas stays at the single-replica
+> figure until it is measured against a production database.
+
+Open for S1/A5: section 6.3 (`pool_max_conns` in the URL) still applies on `s1/replicas` —
+`internal/store/hub.go` and `cmd/server` `migrateRoomDB` still call `pgx.ParseConfig` on the pool URL; S1's
+leader elector already uses `pool.Config().ConnConfig`, which is the fix pattern.
+
+Not measured in phase 2: leader takeover and lease takeover under load (S1's integration tests cover them
+functionally), replay (scenario 3) and isolation (scenario 5) with replicas, and a replica killed mid-run.
