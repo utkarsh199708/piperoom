@@ -300,6 +300,10 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
             rollback: p.rollback,
             required_layers: p.required_layers ?? [],
             approvals,
+            decisions: {},
+            // The event's hash, else the snapshot's (an event written before the
+            // hash existed has none; the server computed one for the snapshot).
+            params_hash: p.params_hash || state.snapshot_hashes[p.proposal_id] || '',
             status: 'open',
             executed: [],
           },
@@ -318,7 +322,20 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
           const allApproved = (prop.required_layers ?? []).every(
             (l) => approvals[l] === 'approved',
           )
-          return { ...prop, approvals, status: allApproved ? 'approved' : 'open' }
+          return {
+            ...prop,
+            approvals,
+            decisions: {
+              ...prop.decisions,
+              [p.layer]: {
+                outcome: 'approved' as const,
+                by: event.actor,
+                identity: p.identity,
+                params_hash: p.params_hash,
+              },
+            },
+            status: allApproved ? 'approved' : 'open',
+          }
         }),
       }
       break
@@ -333,6 +350,16 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
             ? {
                 ...prop,
                 approvals: { ...prop.approvals, [p.layer]: 'rejected' as const },
+                decisions: {
+                  ...prop.decisions,
+                  [p.layer]: {
+                    outcome: 'rejected' as const,
+                    by: event.actor,
+                    identity: p.identity,
+                    params_hash: p.params_hash,
+                    reason: p.reason,
+                  },
+                },
                 status: 'rejected',
               }
             : prop,

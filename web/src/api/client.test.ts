@@ -53,8 +53,8 @@ describe('request shape', () => {
     await api.requestControl('r_1')
     await api.grantControl('r_1', 'priya')
     await api.closeRoom('r_1', 'done')
-    await api.approve('p_1', 'kafka')
-    await api.reject('p_1', 'kafka', 'no')
+    await api.approve('p_1', 'kafka', { params_hash: 'h1' })
+    await api.reject('p_1', 'kafka', 'no', 'h1')
     await api.handoff('r_1', 'priya', true)
     await api.acceptHandoff('h_1')
     await api.trace('r_1', 'orders', 'k')
@@ -232,13 +232,28 @@ describe('people and approve (auth PR 3)', () => {
     expect(seen.map((p) => p.kind)).toEqual(['viewer'])
   })
 
-  it('approve sends only {layer} by default and adds confirm for solo mode', async () => {
+  it('approve sends {layer, params_hash} and adds confirm for solo mode', async () => {
     fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, {})))
-    await api.approve('p_1', 'kafka')
-    expect(lastCall().init.body).toBe(JSON.stringify({ layer: 'kafka' }))
-    await api.approve('p_1', 'kafka', { confirm: 'orders/kafka' })
+    await api.approve('p_1', 'kafka', { params_hash: 'h1' })
+    expect(lastCall().init.body).toBe(JSON.stringify({ layer: 'kafka', params_hash: 'h1' }))
+    await api.approve('p_1', 'kafka', { params_hash: 'h1', confirm: 'orders/kafka' })
     expect(lastCall().url).toBe('/api/proposals/p_1/approve')
-    expect(JSON.parse(lastCall().init.body as string)).toEqual({ layer: 'kafka', confirm: 'orders/kafka' })
+    expect(JSON.parse(lastCall().init.body as string)).toEqual({
+      layer: 'kafka',
+      params_hash: 'h1',
+      confirm: 'orders/kafka',
+    })
+  })
+
+  it('reject sends {layer, reason, params_hash}', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, {})))
+    await api.reject('p_1', 'kafka', 'wrong subject', 'h1')
+    expect(lastCall().url).toBe('/api/proposals/p_1/reject')
+    expect(JSON.parse(lastCall().init.body as string)).toEqual({
+      layer: 'kafka',
+      reason: 'wrong subject',
+      params_hash: 'h1',
+    })
   })
 
   it.each([

@@ -44,6 +44,7 @@ const actions: RoomActions = {
   acceptHandoff: vi.fn(),
   trace: vi.fn(),
 }
+const staleOff = { stale: false, dismissStale: vi.fn(), reload: vi.fn() }
 
 const member: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'], role: 'member' }
 const viewer: CurrentUser = { id: 'vera', name: 'Vera', layers: ['kafka-connect'], role: 'viewer' }
@@ -66,6 +67,8 @@ function busyRoom(): RoomState {
         rollback: 'none',
         required_layers: ['kafka-connect'],
         approvals: { 'kafka-connect': 'pending' },
+        decisions: {},
+        params_hash: 'abc123abc123',
         status: 'open',
         executed: [],
       },
@@ -74,7 +77,7 @@ function busyRoom(): RoomState {
 }
 
 function showRoom(state: RoomState) {
-  vi.mocked(useRoom).mockReturnValue({ state, presence: [], conn: 'live', error: null, actions })
+  vi.mocked(useRoom).mockReturnValue({ state, presence: [], conn: 'live', error: null, actions, ...staleOff })
   vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null })
   return render(
     <MemoryRouter initialEntries={['/rooms/r1']}>

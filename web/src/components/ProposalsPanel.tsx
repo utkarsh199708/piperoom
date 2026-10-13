@@ -3,6 +3,7 @@ import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canDecideLayer } from '../state/permissions'
 import { soloConfirmText } from '../lib/solo'
+import { describeIdentity, identityDetails, shortHash } from '../lib/hash'
 import type { RoomActions } from '../hooks/useRoom'
 import { Chip, Empty, Panel } from './ui'
 
@@ -138,13 +139,24 @@ function LayerDecision({
   // Not solo (as far as we know): the first approve goes without `confirm`, and a
   // 400 "solo mode:" answer opens the box. Solo (`/api/me.solo`): the box opens
   // up front and no call is made until the text is typed.
-  const approve = async (extra?: { confirm: string }) => {
+  //
+  // `proposal.params_hash` is the hash this card shows. It is sent as it is, not
+  // fetched again at click time: if the fix changed under the screen, the server
+  // answers 409 params_mismatch and the stale banner tells the person (auth PR 4).
+  const approve = async (confirm?: string) => {
     setBusy(true)
     try {
-      const res = await actions.approve(proposal.proposal_id, layer, extra)
-      if (res?.needsConfirm) {
+      const res = await actions.approve(proposal.proposal_id, layer, {
+        params_hash: proposal.params_hash,
+        ...(confirm !== undefined ? { confirm } : {}),
+      })
+      if (res?.mismatch) {
+        // Stale screen: close the box. No retry; the room is reloading.
+        setConfirming(false)
+        setRefused(false)
+      } else if (res?.needsConfirm) {
         onSolo()
-        setRefused(extra !== undefined)
+        setRefused(confirm !== undefined)
         setConfirming(true)
       } else {
         setConfirming(false)
@@ -155,18 +167,33 @@ function LayerDecision({
     }
   }
   const state = proposal.approvals[layer] ?? 'pending'
+  const decision = proposal.decisions?.[layer]
+  // No params_hash (the server could not fingerprint the fix): nothing can be
+  // sent that the server would accept, so Approve and Reject stay off.
+  const hashed = proposal.params_hash !== ''
   const canDecide = canDecideLayer(proposal, user, layer)
 
   return (
     <div className={`approval approval--${state}`}>
       <span className="approval__layer">{layer}</span>
       <Chip tone={state === 'approved' ? 'ok' : state === 'rejected' ? 'fail' : 'warn'}>{state}</Chip>
+      {decision && (
+        <span
+          className="approval__who"
+          data-testid={`decision-${layer}`}
+          title={identityDetails(decision.identity) || undefined}
+        >
+          {decision.outcome} by {decision.by.name || decision.by.id}
+          {decision.identity && ` (${describeIdentity(decision.identity)})`}
+          {decision.outcome === 'rejected' && decision.reason ? `: ${decision.reason}` : ''}
+        </span>
+      )}
       {canDecide && confirming && (
         <SoloConfirm
           want={soloConfirmText(pipelineId, layer)}
           busy={busy}
           rejected={refused}
-          onConfirm={(typed) => void approve({ confirm: typed })}
+          onConfirm={(typed) => void approve(typed)}
           onCancel={() => {
             setConfirming(false)
             setRefused(false)
@@ -178,7 +205,7 @@ function LayerDecision({
           <button
             type="button"
             className="btn btn--small btn--approve"
-            disabled={busy}
+            disabled={busy || !hashed}
             onClick={() => (user.solo ? setConfirming(true) : void approve())}
           >
             Approve
@@ -186,6 +213,7 @@ function LayerDecision({
           <button
             type="button"
             className="btn btn--small btn--reject"
+            disabled={!hashed}
             onClick={() => setRejecting(true)}
           >
             Reject
@@ -206,7 +234,7 @@ function LayerDecision({
             className="btn btn--small btn--reject"
             disabled={!reason.trim()}
             onClick={() => {
-              actions.reject(proposal.proposal_id, layer, reason.trim())
+              actions.reject(proposal.proposal_id, layer, reason.trim(), proposal.params_hash)
               setRejecting(false)
               setReason('')
             }}
@@ -215,6 +243,49 @@ function LayerDecision({
           </button>
         </span>
       )}
+    </div>
+  )
+}
+
+// The proposal's params_hash (auth PR 4): the short form to glance at, the full
+// value in a read-only monospace field to compare, and a copy button. This is the
+// value approve and reject send back.
+function ParamsHash({ hash }: { hash: string }) {
+  const [copied, setCopied] = useState(false)
+  if (!hash) {
+    return (
+      <p className="proposal__hash error-text" data-testid="params-hash-missing" role="note">
+        This fix can't be approved or rejected here: its parameters could not be fingerprinted (see the server
+        log).
+      </p>
+    )
+  }
+  const copy = () => {
+    if (!navigator.clipboard) return
+    void navigator.clipboard.writeText(hash).then(
+      () => {
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1500)
+      },
+      () => undefined,
+    )
+  }
+  return (
+    <div className="proposal__hash">
+      <span className="muted">params hash</span>
+      <code className="mono proposal__hash-short" data-testid="params-hash-short">
+        {shortHash(hash)}
+      </code>
+      <input
+        className="mono proposal__hash-full"
+        readOnly
+        value={hash}
+        onFocus={(e) => e.currentTarget.select()}
+        aria-label="Full params hash"
+      />
+      <button type="button" className="btn btn--small btn--ghost" onClick={copy}>
+        {copied ? 'Copied' : 'Copy hash'}
+      </button>
     </div>
   )
 }
@@ -250,6 +321,7 @@ function Proposal({ proposal, user, actions, pipelineId, onSolo }: {
           </li>
         ))}
       </ul>
+      <ParamsHash hash={proposal.params_hash} />
       <div className="proposal__approvals">
         {proposal.required_layers.map((layer) => (
           <LayerDecision
@@ -265,12 +337,32 @@ function Proposal({ proposal, user, actions, pipelineId, onSolo }: {
       </div>
       {proposal.executed.length > 0 && (
         <ul className="proposal__executed">
-          {proposal.executed.map((ex) => (
-            <li key={ex.step_index} className={ex.ok ? 'exec-ok' : 'exec-fail'}>
-              <span className="mono">step {ex.step_index + 1}</span>
-              <span>{ex.output}</span>
-            </li>
-          ))}
+          {proposal.executed.map((ex) => {
+            // The executor checked this hash before it ran the step. A different
+            // one than the card shows is flagged; an event without one is not.
+            const differs =
+              !!ex.params_hash && !!proposal.params_hash && ex.params_hash !== proposal.params_hash
+            return (
+              <li key={ex.step_index} className={ex.ok ? 'exec-ok' : 'exec-fail'}>
+                <span className="mono">step {ex.step_index + 1}</span>
+                <span>{ex.output}</span>
+                {ex.params_hash && (
+                  <code
+                    className="mono exec__hash"
+                    data-testid={`exec-hash-${ex.step_index}`}
+                    title={ex.params_hash}
+                  >
+                    {shortHash(ex.params_hash)}
+                  </code>
+                )}
+                {differs && (
+                  <Chip tone="fail" title="The step ran with a different params_hash than this proposal shows">
+                    hash differs from proposal
+                  </Chip>
+                )}
+              </li>
+            )
+          })}
         </ul>
       )}
     </article>

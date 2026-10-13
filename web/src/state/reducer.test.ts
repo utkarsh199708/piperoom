@@ -438,6 +438,105 @@ describe('applyEvent — membership and hand-off lease', () => {
   })
 })
 
+describe('params_hash and approver identity (auth PR 4)', () => {
+  const HASH = '9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b'
+  const created = {
+    proposal_id: 'p1',
+    title: 'fix',
+    steps: [],
+    risk: 'low',
+    rollback: 'undo',
+    required_layers: ['schema-registry', 'kafka-connect'],
+  }
+  const identity = { iss: 'https://idp', sub: 'u-1', session_id: 's-1', method: 'oidc', grant: 'user:priya' }
+
+  it('keeps params_hash from proposal.created', () => {
+    const s = applyEvent(base(), ev(1, 'proposal.created', { ...created, params_hash: HASH }))
+    expect(s.proposals[0].params_hash).toBe(HASH)
+  })
+
+  it('falls back to the snapshot hash for a proposal.created written before the hash existed', () => {
+    const snap: RoomSnapshot = {
+      id: 'r1',
+      title: 'T',
+      severity: 'sev2',
+      pipeline_id: 'orders',
+      status: 'open',
+      opened_at: '2026-10-11T10:00:00Z',
+      last_seq: 5,
+      driver: null,
+      agent_status: { state: 'idle' },
+      hypothesis: null,
+      open_proposals: [
+        { ...created, approvals: { 'schema-registry': 'pending', 'kafka-connect': 'pending' }, params_hash: HASH },
+      ],
+      pending_suggestions: [],
+      members: [],
+    }
+    const seeded = fromSnapshot(snap)
+    expect(seeded.snapshot_hashes).toEqual({ p1: HASH })
+    expect(applyEvent(seeded, ev(1, 'proposal.created', created)).proposals[0].params_hash).toBe(HASH)
+    // The event's own hash wins when both are there.
+    const other = 'ab'.repeat(32)
+    expect(
+      applyEvent(seeded, ev(1, 'proposal.created', { ...created, params_hash: other })).proposals[0].params_hash,
+    ).toBe(other)
+  })
+
+  it('is empty, not undefined, when neither the event nor the snapshot has a hash', () => {
+    const s = applyEvent(base(), ev(1, 'proposal.created', created))
+    expect(s.proposals[0].params_hash).toBe('')
+  })
+
+  it('keeps the identity and hash of an approval, per layer', () => {
+    let s = applyEvent(base(), ev(1, 'proposal.created', { ...created, params_hash: HASH }))
+    s = applyEvent(
+      s,
+      ev(2, 'approval.given', { proposal_id: 'p1', layer: 'schema-registry', params_hash: HASH, identity }, human),
+    )
+    expect(s.proposals[0].decisions['schema-registry']).toEqual({
+      outcome: 'approved',
+      by: human,
+      identity,
+      params_hash: HASH,
+    })
+    expect(s.proposals[0].decisions['kafka-connect']).toBeUndefined()
+    // An approval without identity (an old event) is still recorded.
+    s = applyEvent(s, ev(3, 'approval.given', { proposal_id: 'p1', layer: 'kafka-connect' }, human))
+    expect(s.proposals[0].decisions['kafka-connect']?.identity).toBeUndefined()
+    expect(s.proposals[0].status).toBe('approved')
+  })
+
+  it('keeps the identity, hash and reason of a rejection', () => {
+    let s = applyEvent(base(), ev(1, 'proposal.created', { ...created, params_hash: HASH }))
+    s = applyEvent(
+      s,
+      ev(
+        2,
+        'approval.rejected',
+        { proposal_id: 'p1', layer: 'kafka-connect', reason: 'nope', params_hash: HASH, identity },
+        human,
+      ),
+    )
+    expect(s.proposals[0].decisions['kafka-connect']).toEqual({
+      outcome: 'rejected',
+      by: human,
+      identity,
+      params_hash: HASH,
+      reason: 'nope',
+    })
+  })
+
+  it('keeps params_hash on the action result', () => {
+    let s = applyEvent(base(), ev(1, 'proposal.created', { ...created, params_hash: HASH }))
+    s = applyEvent(
+      s,
+      ev(2, 'action.executed', { proposal_id: 'p1', step_index: 0, ok: true, output: 'x', params_hash: HASH }),
+    )
+    expect(s.proposals[0].executed[0].params_hash).toBe(HASH)
+  })
+})
+
 describe('fromSnapshot', () => {
   it('defaults null slices and starts last_seq at 0 for the full event replay', () => {
     const snap: RoomSnapshot = {

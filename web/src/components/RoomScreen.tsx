@@ -17,11 +17,12 @@ import { ActivityFeed } from './ActivityFeed'
 import { TracePanel } from './TracePanel'
 import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import { NoDriverBanner } from './NoDriverBanner'
+import { StaleBanner } from './StaleBanner'
 
 export function RoomScreen() {
   const { roomId = '' } = useParams()
   const { user } = useCurrentUser()
-  const { state, presence, conn, error, actions } = useRoom(roomId)
+  const { state, presence, conn, error, actions, stale, dismissStale, reload } = useRoom(roomId)
   // One topology refetch per executed action, plus the hook's 30 s refresh
   // while the room is open (stops once closed).
   const executedCount = useMemo(
@@ -88,6 +89,7 @@ export function RoomScreen() {
           </Link>
           <UserSwitcher />
         </header>
+        {stale && <StaleBanner onReload={reload} onDismiss={dismissStale} />}
         <main className="room">
           <p className="empty">
             {conn === 'error' ? `Could not load room: ${error ?? 'unknown error'}` : 'Loading room…'}
@@ -137,6 +139,7 @@ export function RoomScreen() {
         </div>
       </header>
 
+      {stale && <StaleBanner onReload={reload} onDismiss={dismissStale} />}
       {error && <div className="banner banner--error">{error}</div>}
       {state.status === 'closed' && state.resolution && (
         <div className="banner banner--resolved" role="status">

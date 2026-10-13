@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { Event, PresenceMember, RoomSnapshot, WsServerMessage } from '../api/types'
-import { api, isFixtures, openRoomWs } from '../api/client'
+import { ApiClientError, api, isFixtures, openRoomWs } from '../api/client'
 import type { ApproveExtras } from '../api/client'
 import { isSoloConfirmError } from '../lib/solo'
 import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
@@ -25,6 +25,16 @@ export interface ApproveResult {
   ok: boolean
   /** Solo mode: the server wants `confirm: "<pipeline_id>/<layer>"`. */
   needsConfirm?: boolean
+  /**
+   * 409 params_mismatch: the fix changed since the UI loaded it. The hook shows the
+   * stale banner and reloads the room; the caller must not retry.
+   */
+  mismatch?: boolean
+}
+
+/** True for the 409 the server sends when the params_hash sent is not the proposal's. */
+export function isParamsMismatch(e: unknown): boolean {
+  return e instanceof ApiClientError && e.status === 409 && e.code === 'params_mismatch'
 }
 
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
@@ -39,10 +49,13 @@ export interface RoomActions {
   /**
    * Resolves when the call is done. `needsConfirm` means the server wants the
    * solo-mode string (docs/design/auth.md 5.3): the caller asks for it and calls
-   * again with `extra.confirm`. Any other error is already in the room error banner.
+   * again with `extra.confirm`. `mismatch` means the stale banner is up and the room
+   * is reloading; nothing is retried. Any other error is already in the room error banner.
+   * `extra.params_hash` is the hash the UI rendered with the proposal, sent as is.
    */
-  approve: (proposalId: string, layer: string, extra?: ApproveExtras) => Promise<ApproveResult>
-  reject: (proposalId: string, layer: string, reason: string) => void
+  approve: (proposalId: string, layer: string, extra: ApproveExtras) => Promise<ApproveResult>
+  /** `paramsHash` is the hash the UI rendered with the proposal, sent as is. */
+  reject: (proposalId: string, layer: string, reason: string, paramsHash: string) => void
   handoff: (to: string, stayAsWatcher: boolean) => void
   acceptHandoff: (handoffId: string) => void
   trace: (table: string, key: string) => void
@@ -70,6 +83,10 @@ export function useRoom(roomId: string) {
   const [presence, setPresence] = useState<PresenceMember[]>([])
   const [conn, setConn] = useState<ConnState>('loading')
   const [error, setError] = useState<string | null>(null)
+  // 409 params_mismatch: the stale-UI banner. Kept apart from `error` because the
+  // reload it triggers clears `error`, and the banner must outlive the reload.
+  const [stale, setStale] = useState(false)
+  const [reloadKey, setReloadKey] = useState(0)
 
   const lastSeqRef = useRef(0)
   const stateRef = useRef<RoomState | null>(null)
@@ -303,7 +320,18 @@ export function useRoom(roomId: string) {
       ws?.close()
       ws = null
     }
-  }, [roomId, user.id, user.name, sessionEpoch])
+  }, [roomId, user.id, user.name, sessionEpoch, reloadKey])
+
+  // Fetch the snapshot and replay the log again (a fresh socket, after=0).
+  const reload = useCallback(() => setReloadKey((k) => k + 1), [])
+  const dismissStale = useCallback(() => setStale(false), [])
+
+  // A decision call failed with 409 params_mismatch: say so and reload the room.
+  // Never retry; the person reviews the reloaded fix and decides again.
+  const onMismatch = useCallback(() => {
+    setStale(true)
+    setReloadKey((k) => k + 1)
+  }, [])
 
   const runAction = useCallback((p: Promise<unknown>) => {
     p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))
@@ -397,14 +425,25 @@ export function useRoom(roomId: string) {
     },
     approve: async (proposalId, layer, extra) => {
       if (isFixtures()) {
-        synthesize('approval.given', { proposal_id: proposalId, layer })
+        synthesize('approval.given', {
+          proposal_id: proposalId,
+          layer,
+          params_hash: extra.params_hash,
+          identity: { method: 'dev', grant: `user:${user.id}` },
+        })
         return { ok: true }
       }
       try {
         await api.approve(proposalId, layer, extra)
         setError(null)
+        setStale(false)
         return { ok: true }
       } catch (e) {
+        if (isParamsMismatch(e)) {
+          setError(null)
+          onMismatch()
+          return { ok: false, mismatch: true }
+        }
         // Solo mode asks for the typed string; the confirm box handles it, so it
         // is not an error banner.
         if (isSoloConfirmError(e)) {
@@ -415,12 +454,31 @@ export function useRoom(roomId: string) {
         return { ok: false }
       }
     },
-    reject: (proposalId, layer, reason) => {
+    reject: (proposalId, layer, reason, paramsHash) => {
       if (isFixtures()) {
-        synthesize('approval.rejected', { proposal_id: proposalId, layer, reason })
+        synthesize('approval.rejected', {
+          proposal_id: proposalId,
+          layer,
+          reason,
+          params_hash: paramsHash,
+          identity: { method: 'dev', grant: `user:${user.id}` },
+        })
         return
       }
-      void runAction(api.reject(proposalId, layer, reason))
+      api
+        .reject(proposalId, layer, reason, paramsHash)
+        .then(() => {
+          setError(null)
+          setStale(false)
+        })
+        .catch((e: unknown) => {
+          if (isParamsMismatch(e)) {
+            setError(null)
+            onMismatch()
+          } else {
+            setError(errorText(e))
+          }
+        })
     },
     handoff: (to, stayAsWatcher) => {
       if (isFixtures()) {
@@ -468,5 +526,5 @@ export function useRoom(roomId: string) {
     },
   }
 
-  return { state, presence, conn, error, actions }
+  return { state, presence, conn, error, actions, stale, dismissStale, reload }
 }

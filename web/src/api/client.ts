@@ -85,10 +85,13 @@ export async function probeSession(): Promise<SessionProbe> {
 
 /**
  * Extra fields of POST /api/proposals/{pid}/approve beyond `layer`.
+ * `params_hash` is the hash the approver SAW on screen (auth PR 4): the server
+ * answers 400 without it and 409 params_mismatch when it is not the proposal's.
  * `confirm` is the solo-mode string "<pipeline_id>/<layer>" typed by hand
- * (docs/design/auth.md 5.3). Auth PR 4 adds `params_hash` here.
+ * (docs/design/auth.md 5.3).
  */
 export interface ApproveExtras {
+  params_hash: string
   confirm?: string
 }
 
@@ -130,15 +133,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ resolution }),
     }),
-  approve: (proposalId: string, layer: string, extra: ApproveExtras = {}) =>
+  approve: (proposalId: string, layer: string, extra: ApproveExtras) =>
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/approve`, {
       method: 'POST',
       body: JSON.stringify({ layer, ...extra }),
     }),
-  reject: (proposalId: string, layer: string, reason: string) =>
+  // paramsHash: the hash shown with the proposal, same rule as approve.
+  reject: (proposalId: string, layer: string, reason: string, paramsHash: string) =>
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/reject`, {
       method: 'POST',
-      body: JSON.stringify({ layer, reason }),
+      body: JSON.stringify({ layer, reason, params_hash: paramsHash }),
     }),
   handoff: (roomId: string, to: string, stayAsWatcher: boolean) =>
     request<Event>(`${room(roomId)}/handoffs`, {
