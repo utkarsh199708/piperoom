@@ -221,6 +221,87 @@ func failed(name, trace string) clients.ConnectorStatus {
 	return clients.ConnectorStatus{Name: name, State: "FAILED", Tasks: []clients.TaskStatus{{ID: 0, State: "FAILED", Trace: trace}}}
 }
 
+// ---- fake kafka (clients.DLQReader) ----
+
+type fakeKafka struct {
+	mu     sync.Mutex
+	topics map[string][]clients.PartitionOffsets
+	err    error
+	calls  [][]string // the topic list of every DLQOffsets call
+	// hook runs inside DLQOffsets before it answers; it may block.
+	hook func(ctx context.Context)
+}
+
+func newFakeKafka() *fakeKafka { return &fakeKafka{topics: map[string][]clients.PartitionOffsets{}} }
+
+func (k *fakeKafka) DLQOffsets(ctx context.Context, topics ...string) (map[string][]clients.PartitionOffsets, error) {
+	k.mu.Lock()
+	k.calls = append(k.calls, slices.Clone(topics))
+	hook, err := k.hook, k.err
+	out := map[string][]clients.PartitionOffsets{}
+	for _, tp := range topics {
+		if ps, ok := k.topics[tp]; ok {
+			out[tp] = slices.Clone(ps)
+		}
+	}
+	k.mu.Unlock()
+	if hook != nil {
+		hook(ctx)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (k *fakeKafka) PeekDLQ(ctx context.Context, topic string, limit int) ([]clients.DLQRecord, error) {
+	return nil, fmt.Errorf("fake: PeekDLQ must not be called by the watcher")
+}
+
+// set makes the topic exist with one partition from start to end.
+func (k *fakeKafka) set(topic string, start, end int64) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.topics[topic] = []clients.PartitionOffsets{{Partition: 0, Start: start, End: end}}
+}
+
+// add appends n records to partition 0 (the topic is created when missing).
+func (k *fakeKafka) add(topic string, n int64) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	ps := k.topics[topic]
+	if len(ps) == 0 {
+		ps = []clients.PartitionOffsets{{Partition: 0}}
+	}
+	ps[0].End += n
+	k.topics[topic] = ps
+}
+
+// setStart moves the start offset (retention).
+func (k *fakeKafka) setStart(topic string, start int64) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.topics[topic][0].Start = start
+}
+
+func (k *fakeKafka) remove(topic string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	delete(k.topics, topic)
+}
+
+func (k *fakeKafka) setErr(err error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.err = err
+}
+
+func (k *fakeKafka) callLists() [][]string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return slices.Clone(k.calls)
+}
+
 // ---- fake rooms ----
 
 type openRec struct {
@@ -454,6 +535,7 @@ type opts struct {
 	cooldown     time.Duration
 	checkTimeout time.Duration
 	noHeartbeat  bool
+	noKafka      bool // Deps.Kafka stays nil: the client cannot read DLQ offsets
 }
 
 type harness struct {
@@ -463,7 +545,9 @@ type harness struct {
 	src   *fakeSource
 	conn  *fakeConnect
 	rooms *fakeRooms
+	kafka *fakeKafka
 	logs  *logBuf
+	deps  Deps
 }
 
 func newHarness(t *testing.T, o opts) *harness {
@@ -480,7 +564,7 @@ func newHarness(t *testing.T, o opts) *harness {
 	if o.checkTimeout == 0 {
 		o.checkTimeout = 200 * time.Millisecond
 	}
-	h := &harness{t: t, clk: newFakeClock(), src: &fakeSource{}, conn: newFakeConnect(), rooms: newFakeRooms(), logs: &logBuf{}}
+	h := &harness{t: t, clk: newFakeClock(), src: &fakeSource{}, conn: newFakeConnect(), rooms: newFakeRooms(), kafka: newFakeKafka(), logs: &logBuf{}}
 	for _, p := range o.pipes {
 		cfg := map[string]string{
 			"connector.class": "io.debezium.connector.postgresql.PostgresConnector",
@@ -495,13 +579,18 @@ func newHarness(t *testing.T, o opts) *harness {
 			r.Active, r.WALStatus, r.RetainedWALBytes = true, "reserved", 1<<20
 		})
 	}
-	w, err := New(Deps{
+	d := Deps{
 		Source: h.src, Connect: h.conn, Owners: loadOwners(t, o.pipes...), Rooms: h.rooms,
 		Config:       config.Watch{Mode: o.mode, Interval: time.Minute, CheckTimeout: o.checkTimeout, Cooldown: o.cooldown},
 		MaxOpenRooms: o.maxRooms, Clock: h.clk,
 		Log:    slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Jitter: func(time.Duration) time.Duration { return 0 },
-	})
+	}
+	if !o.noKafka {
+		d.Kafka = h.kafka
+	}
+	h.deps = d
+	w, err := New(d)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
