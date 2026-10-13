@@ -156,6 +156,16 @@ type Export struct {
 	inexact     int // numbers in the document the hash covers only approximately; see integrity.inexact_numbers
 	proposalIdx map[string]*exportProposal
 	handoffIdx  map[string]*exportHandoff
+	shadow      *exportShadow // set only for ?include=shadow
+}
+
+// exportShadow is the top-level "shadow" member of an export with
+// ?include=shadow (docs/api.md): the run row and the whole shadow log with
+// tool_result.data. It is read once in PrepareExportShadow, so the hash and
+// the streamed bytes always cover the same shadow content.
+type exportShadow struct {
+	Run    store.ShadowRun `json:"run"`
+	Events []ShadowEvent   `json:"events"`
 }
 
 // SHA256 is the hex SHA-256 of the canonical document without its "integrity"
@@ -175,6 +185,32 @@ func (e *Export) EventCount() int64 { return e.eventCount }
 // held in memory except those sections: the events are streamed. It returns a
 // 404 room error for an unknown room and 413 when the log exceeds the cap.
 func (s *Service) PrepareExport(ctx context.Context, roomID string) (*Export, error) {
+	return s.prepareExport(ctx, roomID, nil)
+}
+
+// PrepareExportShadow is PrepareExport with the shadow run added as the
+// top-level "shadow" member (GET /api/rooms/{id}/export?include=shadow). Only a
+// closed shadow room that has its blind label may be exported this way: 404
+// for a live room, 409 room_open while open, 409 not_labelled before the label.
+// The member is inside the hashed document. The caller checks export access.
+func (s *Service) PrepareExportShadow(ctx context.Context, roomID string) (*Export, error) {
+	s.mu.Lock()
+	st, err := s.closedShadowLocked(ctx, roomID)
+	if err == nil && !st.snap.shadowLabelled {
+		err = errNotLabelled()
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	run, evs, err := s.readShadow(ctx, roomID, true)
+	if err != nil {
+		return nil, err
+	}
+	return s.prepareExport(ctx, roomID, &exportShadow{Run: run, Events: evs})
+}
+
+func (s *Service) prepareExport(ctx context.Context, roomID string, shadow *exportShadow) (*Export, error) {
 	row, err := s.store.GetRoom(ctx, roomID)
 	if err != nil {
 		return nil, mapStoreErr(err)
@@ -193,6 +229,7 @@ func (s *Service) PrepareExport(ctx context.Context, roomID string) (*Export, er
 		svc: s, row: row, upTo: row.LastSeq,
 		proposalIdx: map[string]*exportProposal{},
 		handoffIdx:  map[string]*exportHandoff{},
+		shadow:      shadow,
 	}
 	e.eventCount, err = e.walk(ctx, e.fold)
 	if err != nil {
@@ -505,7 +542,14 @@ func (e *Export) writeDocument(ctx context.Context, out io.Writer, h hash.Hash, 
 	section("proposals", nonNilProposals(e.proposals))
 	both(",")
 	section("room", e.room)
-	both(`,"schema":` + strconv.Quote(ExportSchema) + "}")
+	both(`,"schema":` + strconv.Quote(ExportSchema))
+	// "shadow" sorts after "schema"; without the flag the document is byte for
+	// byte what it was before shadow mode.
+	if e.shadow != nil {
+		both(",")
+		section("shadow", e.shadow)
+	}
+	both("}")
 	if werr != nil {
 		return 0, fmt.Errorf("room: export: %w", werr)
 	}

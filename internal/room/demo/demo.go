@@ -96,6 +96,14 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 		Confidence:   "high",
 		Confirmed:    false,
 	})
+	// A shadow room has no proposal creator (docs/design/shadow.md 3.7): the
+	// run stops at the hypothesis and ends on the closed inbox.
+	if deps.Proposals == nil {
+		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value."})
+		_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "idle", Detail: "no proposals in this room"})
+		return waitForInput(ctx, deps, emit)
+	}
+
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value. I've written a fix proposal."})
 
 	proposalID, err := deps.Proposals.Create(ctx, events.ProposalCreatedPayload{
@@ -123,7 +131,12 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 	}
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Proposal " + proposalID + " is waiting for schema-registry and kafka-connect owners."})
 	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: "proposal " + proposalID})
+	return waitForInput(ctx, deps, emit)
+}
 
+// waitForInput answers steers, comments and approval results until the room
+// closes. An inbox that is closed (a shadow room) ends it at once with nil.
+func waitForInput(ctx context.Context, deps agent.Deps, emit func(events.Type, any) error) error {
 	for ctx.Err() == nil {
 		if err := deps.Inbox.Wait(ctx); err != nil {
 			return nil // room closed or ctx cancelled

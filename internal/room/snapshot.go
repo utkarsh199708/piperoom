@@ -64,14 +64,18 @@ type Suggestion struct {
 
 // RoomSnapshot is the derived room state (docs/api.md), folded from events.
 type RoomSnapshot struct {
-	ID                 string       `json:"id"`
-	Title              string       `json:"title"`
-	Severity           string       `json:"severity"`
-	PipelineID         string       `json:"pipeline_id"`
-	Status             string       `json:"status"`
-	OpenedAt           time.Time    `json:"opened_at"`
-	ClosedAt           *time.Time   `json:"closed_at"`
-	Resolution         string       `json:"resolution"`
+	ID         string     `json:"id"`
+	Title      string     `json:"title"`
+	Severity   string     `json:"severity"`
+	PipelineID string     `json:"pipeline_id"`
+	Status     string     `json:"status"`
+	OpenedAt   time.Time  `json:"opened_at"`
+	ClosedAt   *time.Time `json:"closed_at"`
+	Resolution string     `json:"resolution"`
+	// Shadow is room.created.shadow: the room's pipeline had shadow mode on at
+	// open, so the agent ran silently and proposes nothing
+	// (docs/design/shadow.md).
+	Shadow             bool         `json:"shadow"`
 	LastSeq            int64        `json:"last_seq"`
 	Driver             *Driver      `json:"driver"`
 	AgentStatus        AgentStatus  `json:"agent_status"`
@@ -79,6 +83,12 @@ type RoomSnapshot struct {
 	OpenProposals      []Proposal   `json:"open_proposals"`
 	PendingSuggestions []Suggestion `json:"pending_suggestions"`
 	Members            []Member     `json:"members"`
+
+	// Shadow facts folded from the log after room.closed. Unexported: they are
+	// not part of the snapshot JSON (docs/api.md), only the service reads them.
+	shadowRevealed bool
+	shadowLabelled bool
+	shadowGrade    *events.ShadowGradedPayload // the last grade; nil before any
 }
 
 // NewSnapshot returns a zero snapshot with non-nil slices and the agent state
@@ -106,6 +116,10 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 			h.BasedOnSteps = append([]string{}, s.Hypothesis.BasedOnSteps...)
 		}
 		c.Hypothesis = &h
+	}
+	if s.shadowGrade != nil {
+		g := *s.shadowGrade
+		c.shadowGrade = &g
 	}
 	c.OpenProposals = cloneProposals(s.OpenProposals)
 	c.PendingSuggestions = append([]Suggestion{}, s.PendingSuggestions...)
@@ -155,8 +169,20 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Title = p.Title
 		snap.Severity = p.Severity
 		snap.PipelineID = p.PipelineID
+		snap.Shadow = p.Shadow
 		snap.Status = "open"
 		snap.OpenedAt = e.At
+
+	case events.ShadowRevealed:
+		snap.shadowRevealed = true
+
+	case events.ShadowLabelled:
+		snap.shadowLabelled = true
+
+	case events.ShadowGraded:
+		if p, ok := decode[events.ShadowGradedPayload](e); ok {
+			snap.shadowGrade = &p
+		}
 
 	case events.RoomClosed:
 		p, ok := decode[events.RoomClosedPayload](e)

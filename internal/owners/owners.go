@@ -25,6 +25,9 @@ type Pipeline struct {
 	// WatchSpec is the optional `watch:` block (see watch.go). Read the
 	// validated values with Watch().
 	WatchSpec *WatchSpec `yaml:"watch"`
+	// ShadowSpec is the optional `shadow:` block (see shadow.go). Read it with
+	// Shadow().
+	ShadowSpec *ShadowSpec `yaml:"shadow"`
 	// Owners is the optional per-pipeline `owners:` block. A layer listed here
 	// replaces the top-level `layers:` entry for this pipeline.
 	Owners map[string]LayerRights `yaml:"owners"`
