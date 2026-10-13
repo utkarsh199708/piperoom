@@ -74,7 +74,7 @@ Run these from the repository root.
    | `ANTHROPIC_API_KEY` | the agent's API key (`ANTHROPIC_WORKSPACE_ID` too, for a user key). Only for the default `anthropic` provider; for AWS Bedrock or Google Vertex AI see [Model provider](#model-provider) |
    | `PIPEROOM_POSTGRES_PASSWORD` | the bundled Postgres password. Generate it with `openssl rand -hex 32`. It goes into a URL unescaped, so it must not contain `/ @ : # ? % $` |
    | `SOURCE_DB_URL`, `WAREHOUSE_DB_URL` | the read-only connection URLs |
-   | `KAFKA_BROKERS`, `CONNECT_URL`, `SCHEMA_REGISTRY_URL` | your hosts. `localhost` inside the container is the container itself, so use real host names |
+   | `KAFKA_BROKERS`, `CONNECT_URL`, `SCHEMA_REGISTRY_URL` | your hosts (`SCHEMA_REGISTRY_URL`: `off` when the pipelines use no registry; compose requires a value). `localhost` inside the container is the container itself, so use real host names |
 
    Add Kafka/Registry/Connect logins and TLS in sections 5 to 7 of the file if your clusters
    need them. Put certificate files in `deploy/certs/` and refer to them as `/certs/<file>`.

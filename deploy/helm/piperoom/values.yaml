@@ -90,6 +90,9 @@ env:
   # --- the pipeline (non-secret parts; the DB URLs with passwords are secrets) ---
   KAFKA_BROKERS: ""
   CONNECT_URL: ""
+  # Your registry URL, or `off` when the pipelines use none. The chart skips empty
+  # values, so "" is unset and the server falls back to the dev default
+  # http://localhost:8081 (unreachable in a pod: the map shows the registry as unknown).
   SCHEMA_REGISTRY_URL: ""
   WAREHOUSE_KIND: postgres            # postgres | snowflake
 
