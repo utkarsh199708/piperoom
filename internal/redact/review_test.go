@@ -133,13 +133,57 @@ func TestSlackWebhook(t *testing.T) {
 func TestAWSShapeAfterKeyWord(t *testing.T) {
 	// A 40-character record key is evidence, not an AWS secret.
 	k := "Ab12Cd34Ef56Gh78Ij90Kl12Mn34Op56Qr78St90"
-	for _, in := range []string{"record key " + k + " not found", "message_id=" + k} {
+	for _, in := range []string{
+		"record key " + k + " not found",
+		"message_id=" + k,
+		"kafka key: " + k,
+		"partition key " + k,
+		"idempotency_key=" + k,
+		"request id " + k,
+	} {
 		if out, _ := Text(in); out != in {
-			t.Errorf("Text(%q) = %q", in, out)
+			t.Errorf("record key masked: Text(%q) = %q", in, out)
 		}
 	}
-	if out, _ := Text("creds AKIAZ7QW3RTY5UIOPLKJ " + k); strings.Contains(out, k) {
-		t.Errorf("bare AWS secret kept: %q", out)
+	// Credential labels before key/id: the token is a secret (round 2).
+	for _, in := range []string{
+		"creds AKIAZ7QW3RTY5UIOPLKJ " + k,
+		"AWS Secret Access Key: " + k,
+		"AWS secret key: " + k,
+		"secret key: " + k,
+		"secret access key " + k,
+		"access key: " + k,
+		"private key: " + k,
+		"api key " + k,
+		"key=" + k,
+		"key " + k,
+		"client id " + k,
+	} {
+		if out, _ := Text(in); strings.Contains(out, k) {
+			t.Errorf("AWS-shaped secret kept: Text(%q) = %q", in, out)
+		}
+	}
+}
+
+func TestScanCapNoSplitSecret(t *testing.T) {
+	ghp := "ghp_" + strings.Repeat("Ab3x", 9) + "Q9Zz"
+	// leak is the part of the secret that falls before the limit.
+	cases := []struct{ leak, tail string }{
+		{"u:Hunter", "postgres://u:Hunter2pass@db:5432/orders"},
+		{ghp[4:20], ghp},
+	}
+	for _, c := range cases {
+		// A single long line with no line break in the last 4 KiB, the
+		// secret straddling the limit.
+		head := strings.Repeat("x", MaxScan-len(c.tail)/2-1) + " "
+		in := head + c.tail + strings.Repeat(" more", 20)
+		out, _ := Text(in)
+		if strings.Contains(out, c.leak) {
+			t.Errorf("%q leaked around the cut: ...%s", c.leak, out[len(out)-120:])
+		}
+		if again, _ := Text(out); again != out {
+			t.Error("not idempotent")
+		}
 	}
 }
 

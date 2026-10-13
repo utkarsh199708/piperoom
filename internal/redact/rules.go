@@ -469,7 +469,7 @@ func maskAWSSecrets(s string) (string, int) {
 	var b strings.Builder
 	last, n := 0, 0
 	isTok := func(c byte) bool {
-		return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '/' || c == '+' || c == '='
+		return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '/' || c == '+'
 	}
 	for i := 0; i < len(s); {
 		if !isTok(s[i]) {
@@ -571,28 +571,67 @@ func hasAWSPrefix(s, _ string) bool {
 	}
 }
 
-// afterIDWord reports whether the token at i follows a word like "key" or
-// "id" that names a record or object, not a credential ("record key ...",
-// "message_id=..."). A 40-character Kafka key is evidence.
+// recordWords name things whose key or id is data, not a credential.
+var recordWords = map[string]bool{
+	"record": true, "message": true, "msg": true, "partition": true, "row": true,
+	"kafka": true, "idempotency": true, "dedup": true, "request": true, "event": true,
+	"object": true, "correlation": true, "trace": true, "span": true, "document": true,
+}
+
+// afterIDWord reports whether the token at i follows a name for a record's
+// key or id ("record key ...", "message_id=...", "partition key: ..."). A
+// 40-character Kafka key is evidence. Any credential word before the key or
+// id ("AWS Secret Access Key:", "api key", "private key") means the token is
+// a secret; so does a bare "key=" with nothing naming a record before it.
 func afterIDWord(s string, i int) bool {
 	j := i
 	for n := 0; j > 0 && n < 4 && strings.IndexByte(" \t:=\"',", s[j-1]) >= 0; n++ {
 		j--
 	}
-	w := j
-	for w > 0 && isKeyChar(s[w-1]) {
-		w--
+	// Up to three tokens before the value, nearest last.
+	var words []string
+	first := true
+	compound := false
+	for range 3 {
+		w := j
+		for w > 0 && isKeyChar(s[w-1]) {
+			w--
+		}
+		if w == j {
+			break
+		}
+		ws := keyWords(s[w:j])
+		if first {
+			compound = len(ws) > 1
+			first = false
+		}
+		words = append(ws, words...)
+		j = w
+		sp := 0
+		for j > 0 && sp < 2 && (s[j-1] == ' ' || s[j-1] == '\t') {
+			j--
+			sp++
+		}
+		if sp == 0 {
+			break
+		}
 	}
-	if w == j {
-		return false
-	}
-	words := keyWords(s[w:j])
 	if len(words) == 0 {
-		// Only separators ("." or "-"): no word.
 		return false
 	}
 	last := words[len(words)-1]
-	return (last == "key" || last == "id") && secretKey(s[w:j]) == keyNone
+	if last != "key" && last != "id" {
+		return false
+	}
+	for _, w := range words[:len(words)-1] {
+		if keyQualifiers[w] || strongWords[w] || weakWords[w] {
+			return false
+		}
+	}
+	if compound {
+		return true
+	}
+	return len(words) > 1 && recordWords[words[len(words)-2]]
 }
 
 // pemFind finds PEM private key blocks in linear time. A block runs from its

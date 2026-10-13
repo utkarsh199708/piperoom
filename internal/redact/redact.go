@@ -12,6 +12,12 @@
 //	postgres://app:[redacted 16]@db:5432/orders
 //
 // Passwords and short values keep no characters at all.
+//
+// Known gaps: a URL password holding a raw '@' or '/' (postgres://app:p@ss@db)
+// is not found, since the URL no longer parses one way; a bare key=value
+// password containing spaces is masked only up to its first space; JAAS
+// configs escaped twice (\\\"...\\\", JSON inside JSON inside JSON) are not
+// matched by the key=value rule.
 package redact
 
 import (
@@ -153,14 +159,21 @@ func (r *Redactor) Text(s string) (string, Stats) {
 	return r.scan(s)
 }
 
-// scanCut picks where to stop scanning a string longer than MaxScan: at the
-// last line break in the final 4 KiB before the limit, so a secret on that
-// line is not cut in half, else at a rune boundary.
+// scanCut picks where to stop scanning a string longer than MaxScan. The cut
+// must not split a secret, or its first half would pass through in the head:
+// it goes after the last line break in the final 4 KiB before the limit, else
+// after the last whitespace or delimiter there, so the partial token at the
+// limit lands in the overflow mask. Only a single token longer than 4 KiB is
+// cut inside, at a rune boundary.
 func scanCut(s string) int {
-	if i := strings.LastIndexByte(s[MaxScan-4096:MaxScan], '\n'); i >= 0 {
+	win := s[MaxScan-4096 : MaxScan]
+	if i := strings.LastIndexByte(win, '\n'); i >= 0 {
 		return MaxScan - 4096 + i + 1
 	}
-	cut := MaxScan
+	if i := strings.LastIndexAny(win, " \t\r,;\"'<>()[]{}|"); i >= 0 {
+		return MaxScan - 4096 + i + 1
+	}
+	cut := MaxScan - 4096
 	for cut > 0 && s[cut]&0xC0 == 0x80 {
 		cut--
 	}
