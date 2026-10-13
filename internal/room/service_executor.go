@@ -175,6 +175,14 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 		s.failProposal(p.RoomID, p.ProposalID, 0, p.ParamsHash, "cannot decode steps: "+err.Error())
 		return fmt.Errorf("room: decode proposal %s steps: %w", p.ProposalID, err)
 	}
+	// CreateProposal refuses a proposal with no steps, so a row that decodes to
+	// none (steps edited to null or []) was changed after creation. Without
+	// this the loop below would not run, no step would be re-checked, and the
+	// proposal would be marked "executed" (security audit 2026-10, A-PH-3).
+	if len(steps) == 0 {
+		s.failProposal(p.RoomID, p.ProposalID, 0, p.ParamsHash, paramsHashMismatchOutput)
+		return nil
+	}
 	tracker := newStepTracker(len(steps))
 
 	for i := range steps {
@@ -290,6 +298,20 @@ func (s *Service) recheckStep(ctx context.Context, proposalID, approved string, 
 	}
 	if approved == "" || cur.ParamsHash == "" || got != cur.ParamsHash || got != approved || i >= len(steps) {
 		return events.ProposalStep{}, paramsHashMismatchOutput
+	}
+	// Every approval must be for the hash that runs. The last approver's echo
+	// is checked against the row, but an earlier approver approved the row as
+	// it was then: steps and stored hash edited together between two
+	// approvals would otherwise run on the first approver's name (security
+	// audit 2026-10, A-PH-1).
+	apps, err := s.store.ListApprovals(ctx, proposalID)
+	if err != nil {
+		return events.ProposalStep{}, "cannot read the approvals before running the step: " + err.Error()
+	}
+	for _, a := range apps {
+		if a.Decision == "approved" && a.ParamsHash != approved {
+			return events.ProposalStep{}, paramsHashMismatchOutput
+		}
 	}
 	return steps[i], ""
 }
