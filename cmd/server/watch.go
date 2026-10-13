@@ -133,6 +133,16 @@ func (h *roomClosedHook) setWatcher(w roomClosedWatcher) {
 	h.mu.Unlock()
 }
 
+// clearWatcher removes w when it is still the installed watcher (its
+// leadership term ended).
+func (h *roomClosedHook) clearWatcher(w roomClosedWatcher) {
+	h.mu.Lock()
+	if h.watcher == w {
+		h.watcher = nil
+	}
+	h.mu.Unlock()
+}
+
 // setForget installs the token-budget forgetter. Demo mode has none.
 func (h *roomClosedHook) setForget(f roomForgetter) {
 	h.mu.Lock()

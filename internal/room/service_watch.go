@@ -35,14 +35,25 @@ func hookDedupKey(pipelineID, indexKey string) string {
 // for the pipeline, it returns the newest one (latest opened_at; the smaller
 // id on a tie, the same order as the stores), so evidence lands in the room
 // people are most likely watching. It reads the room cache, which Load fills at
-// start-up; it does no store I/O. A pipelineID that is not a valid pipeline id
-// (pipelineIDRe) matches nothing.
+// start-up; with a single-process store it does no store I/O, with a shared
+// one it refreshes the cache first (one ListRooms read). A pipelineID that is
+// not a valid pipeline id (pipelineIDRe) matches nothing.
 func (s *Service) OpenRoomForPipeline(pipelineID string) (roomID string, ok bool) {
 	if !pipelineIDRe.MatchString(pipelineID) {
 		return "", false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.coord != nil {
+		// Shared store: rooms other replicas opened or closed since the last
+		// fold count too. One ListRooms read; a failure falls back to the
+		// cache (the follower keeps it close).
+		ctx, cancel := context.WithTimeout(s.ctx, lastRoomLookupTimeout)
+		if err := s.refreshAllLocked(ctx); err != nil && s.ctx.Err() == nil {
+			s.log.Warn("room: open room for pipeline: refresh failed; using the cache", "pipeline", pipelineID, "err", err)
+		}
+		cancel()
+	}
 	var newest *roomState
 	for id, st := range s.rooms {
 		if st.snap.PipelineID != pipelineID || !s.roomOpen(st) {

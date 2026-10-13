@@ -69,7 +69,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	log.Info("server: agent cap", "max_agents", maxAgents)
+	maxAgentsGlobal, err := parseMaxAgentsGlobal(cfg.MaxAgentsGlobal)
+	if err != nil {
+		return err
+	}
+	// The name of this process in room leases, executor claims and leader
+	// logs (docs/design/replicas.md section 2).
+	replica := replicaID(cfg.ReplicaID)
+	log.Info("server: agent cap", "max_agents_per_replica", maxAgents, "max_agents_global", maxAgentsGlobal, "replica", replica)
 
 	// A bad retention value stops the server: a typo must never silently keep
 	// (or delete) incident data.
@@ -174,6 +181,9 @@ func run() error {
 		st      store.Store
 		ready   httpapi.Pinger      // nil in demo mode: the in-memory store is always ready
 		threads slackbridge.Threads = slackbridge.NewMemThreads()
+		// elector runs the leader-only loops; the in-memory store is one
+		// process, so in demo mode it is always the leader.
+		elector store.Elector = store.SoloElector{}
 		// Login sessions: in memory in demo mode, the sessions table otherwise.
 		sessions auth.Store = auth.NewMemStore()
 		// The pre-login rows and the iss+sub bindings of OIDC login.
@@ -196,6 +206,7 @@ func run() error {
 		}
 		st = pg
 		ready = pg
+		elector = pg.Elector(replica)
 		threads = pg.SlackThreads()
 		sessions = pg.Sessions()
 		loginStates = pg.LoginStates()
@@ -277,16 +288,18 @@ func run() error {
 			Effort:   cfg.Effort,
 			MaxTurns: 40,
 		},
-		ShadowOptions: shadowAgentOptions(cfg, shadowCfg),
-		ShadowGrace:   shadowCfg.Grace,
-		Logger:        log,
-		MaxAgents:     maxAgents,
-		Sessions:      sessions,
-		SessionIdle:   authSettings.Idle,
-		ViewerGroups:  authSettings.ViewerGroups,
-		SoloUser:      soloUser,
-		OnRoomOpened:  slack.onRoomOpened(),
-		OnRoomClosed:  closedHook.onClosed,
+		ShadowOptions:   shadowAgentOptions(cfg, shadowCfg),
+		ShadowGrace:     shadowCfg.Grace,
+		Logger:          log,
+		MaxAgents:       maxAgents,
+		ReplicaID:       replica,
+		MaxAgentsGlobal: maxAgentsGlobal,
+		Sessions:        sessions,
+		SessionIdle:     authSettings.Idle,
+		ViewerGroups:    authSettings.ViewerGroups,
+		SoloUser:        soloUser,
+		OnRoomOpened:    slack.onRoomOpened(),
+		OnRoomClosed:    closedHook.onClosed,
 	})
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
@@ -304,18 +317,19 @@ func run() error {
 		}
 	}
 
-	if err := slack.startOpen(ctx, svc); err != nil {
-		return err
-	}
+	// The Slack mirror, retention, auth prune and watcher run on one replica
+	// only: the leader of each loop (docs/design/replicas.md section 3).
+	stopSlack := slack.elect(ctx, elector, svc)
+	defer stopSlack()
 
 	// Retention starts after Load so the cache is built before any room can
 	// disappear. The deferred stop runs before the store closes (LIFO).
-	stopRetention := startRetention(ctx, svc, retentionDays, retentionInterval, retentionRunTimeout, time.Now, log)
+	stopRetention := startElectedRetention(ctx, elector, svc, retentionDays, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopRetention()
 	// Dead sessions and login states are pruned whatever PIPEROOM_RETENTION_DAYS
 	// says: the job above is off by default, this one is always on.
 	sessionPruner, loginStatePruner := authPruners(sessions, loginStates)
-	stopAuthPrune := startAuthPrune(ctx, sessionPruner, loginStatePruner, retentionInterval, retentionRunTimeout, time.Now, log)
+	stopAuthPrune := startElectedAuthPrune(ctx, elector, sessionPruner, loginStatePruner, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopAuthPrune()
 
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions),
@@ -353,7 +367,7 @@ func run() error {
 	if wired != nil {
 		watchDeps.Source, watchDeps.Connect = wired.Source, wired.Connect
 	}
-	stopWatch, err := startWatcher(ctx, watchDeps, closedHook, log)
+	stopWatch, err := startElectedWatcher(ctx, elector, watchDeps, closedHook, log)
 	if err != nil {
 		handler.Close()
 		return err
@@ -411,8 +425,14 @@ func migrateRoomDB(ctx context.Context, dbURL string, log *slog.Logger) error {
 	if err := db.PingContext(mctx); err != nil {
 		return fmt.Errorf("server: ping for migrations: %w", err)
 	}
-	n, err := migrations.Up(mctx, db)
-	if err != nil {
+	// Replicas that start together take turns (docs/design/replicas.md
+	// section 7): the first applies the migrations, the rest find none.
+	var n int
+	if err := withMigrationLock(mctx, db, func() error {
+		var err error
+		n, err = migrations.Up(mctx, db)
+		return err
+	}); err != nil {
 		return err
 	}
 	log.Info("server: migrations applied", "count", n)

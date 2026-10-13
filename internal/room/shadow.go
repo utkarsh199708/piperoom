@@ -86,7 +86,7 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 	st.agentCancel = cancel
 	st.agentRun++
 	st.shadowActive = true
-	gate := &agentGate{s: s, st: st, roomID: roomID}
+	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -252,6 +252,9 @@ func (s *Service) finishShadow(roomID string, st *roomState, status string, toke
 		st.graceTimer.Stop()
 		st.graceTimer = nil
 	}
+	// A shadow run is one-shot: once it has ended, the room needs no agent
+	// owner (a shadow room keeps its lease through the grace after close).
+	s.dropLeaseLocked(roomID, st)
 	if status != "" {
 		now := s.now().UTC()
 		closedAt := st.snap.ClosedAt
@@ -374,9 +377,23 @@ func (s *Service) sweepShadowLocked(ctx context.Context) {
 	if s.shadow == nil {
 		return
 	}
+	// With a shared store, a room with an agent lease has its run on another
+	// replica (live) or is taken over by the coordination loop (expired): not
+	// this sweep's.
+	var leases map[string]store.RoomLease
+	if s.coord != nil {
+		var err error
+		if leases, err = s.coord.RoomLeases(ctx); err != nil {
+			s.log.Warn("room: shadow sweep: list agent leases failed; sweep skipped", "err", err)
+			return
+		}
+	}
 	now := s.now().UTC()
 	for id, st := range s.rooms {
 		if !st.snap.Shadow {
+			continue
+		}
+		if _, held := leases[id]; held {
 			continue
 		}
 		run, err := s.shadow.GetShadowRun(ctx, id)

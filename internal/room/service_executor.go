@@ -166,6 +166,20 @@ func (s *Service) resultCtx() (context.Context, context.CancelFunc) {
 func (s *Service) executeProposal(p store.ProposalRow) error {
 	ctx := s.ctx
 
+	// One executor per approved proposal across replicas
+	// (docs/design/replicas.md section 5): the claim comes before anything
+	// that writes, so a losing executor leaves no trace. With an error the
+	// claim may or may not have landed; nothing runs, and if it landed the
+	// stale-claim sweep records the outcome later.
+	claimed, err := s.claimExecution(ctx, p.ProposalID)
+	if err != nil {
+		return fmt.Errorf("room: proposal %s: claim: %w", p.ProposalID, err)
+	}
+	if !claimed {
+		s.log.Info("room: proposal already claimed by another executor; not run here", "proposal", p.ProposalID)
+		return nil
+	}
+
 	// approved is the hash the approvers approved (the queued row, filled at
 	// approval time). It is never replaced by anything read later, and every
 	// event below carries it (p.ParamsHash is not reassigned).
@@ -188,6 +202,14 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 	for i := range steps {
 		if !s.isRoomOpen(ctx, p.RoomID) {
 			s.failProposal(p.RoomID, p.ProposalID, i, p.ParamsHash, "room closed before this step ran")
+			return nil
+		}
+		// Refresh the executor claim: a claim the stale sweep declared dead
+		// (and recorded as failed) must not run another step.
+		if ok, err := s.touchExecution(ctx, p.ProposalID); err != nil {
+			return fmt.Errorf("room: proposal %s: refresh claim before step %d: %w", p.ProposalID, i, err)
+		} else if !ok {
+			s.log.Warn("room: executor claim was declared dead; step not run", "proposal", p.ProposalID, "step", i)
 			return nil
 		}
 		if err := tracker.claim(i); err != nil {

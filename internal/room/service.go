@@ -58,9 +58,23 @@ type Deps struct {
 	Logger      *slog.Logger
 	Now         func() time.Time
 
-	// MaxAgents caps agent runs working at the same time across all rooms; a
-	// room over the cap waits in a FIFO queue. 0 or less means DefaultMaxAgents.
+	// MaxAgents caps agent runs working at the same time on this replica,
+	// across all its rooms; a room over the cap waits in a queue that is
+	// round-robin across pipelines and FIFO within one. 0 or less means
+	// DefaultMaxAgents.
 	MaxAgents int
+	// ReplicaID names this process in room leases and executor claims when
+	// the store is shared (a store.Coordinator; docs/design/replicas.md).
+	// cmd/server passes PIPEROOM_REPLICA_ID plus a per-process suffix; empty
+	// gets a random id. Unused with a single-process store.
+	ReplicaID string
+	// MaxAgentsGlobal caps working agent runs across every replica that
+	// shares the store (PIPEROOM_MAX_AGENTS_GLOBAL), counted from the room
+	// leases. 0 = off. Unused with a single-process store.
+	MaxAgentsGlobal int
+	// ReplicaTimings shortens the lease and sweep periods (tests); the zero
+	// value is the production timing.
+	ReplicaTimings ReplicaTimings
 	// ExportMaxEvents caps the events one audit export may contain; a larger
 	// room answers 413 export_too_large. Zero means DefaultExportMaxEvents.
 	ExportMaxEvents int64
@@ -115,6 +129,15 @@ type roomState struct {
 	shadowActive    bool
 	shadowInAttempt bool
 	graceTimer      *time.Timer
+
+	// Multi-replica state (replicas.go). leased: this replica owns the room's
+	// agent lease, so it runs the agent and feeds its inbox; leaseValid is the
+	// local deadline after which the agent stops unless a renew confirmed the
+	// lease. pending is the human input logged after the agent's last own
+	// event, which primes the inbox of a replica that becomes the owner.
+	leased     bool
+	leaseValid time.Time
+	pending    []agent.HumanInput
 }
 
 // Service is the room domain logic. All state derives from the event log; the
@@ -142,6 +165,15 @@ type Service struct {
 	sessionIdle  time.Duration
 	viewerGroups map[string]struct{}
 	soloUser     string
+
+	// Multi-replica coordination (replicas.go). coord is nil with a store that
+	// belongs to one process (memstore); then nothing below runs.
+	coord     store.Coordinator
+	replica   string
+	global    globalSlots // nil: no cap across replicas
+	timing    ReplicaTimings
+	follow    *follower
+	coordOnce sync.Once
 
 	// ctx is the service lifetime: every goroutine the service starts (agent
 	// supervisors, executor queues) derives from it. Close cancels it and
@@ -222,6 +254,18 @@ func New(d Deps) *Service {
 		rooms:        map[string]*roomState{},
 		alertRooms:   map[string]string{},
 	}
+	if coord, ok := d.Store.(store.Coordinator); ok {
+		s.coord = coord
+		s.replica = d.ReplicaID
+		if s.replica == "" {
+			s.replica = NewID("replica_")
+		}
+		s.timing = d.ReplicaTimings.withDefaults()
+		s.follow = newFollower()
+		if d.MaxAgentsGlobal > 0 {
+			s.global = coordSlots{s: s, max: d.MaxAgentsGlobal}
+		}
+	}
 	return s
 }
 
@@ -238,6 +282,15 @@ func (s *Service) Close() {
 	s.mu.Unlock()
 	s.cancel()
 	s.wg.Wait()
+	if s.coord != nil {
+		// Every agent here has stopped: hand the rooms over now instead of
+		// letting their leases run out (docs/design/replicas.md section 4.1).
+		ctx, cancel := s.coordCtx()
+		defer cancel()
+		if err := s.coord.ExpireRoomLeases(ctx, s.replica); err != nil {
+			s.log.Warn("room: hand over agent leases at shutdown failed; they expire on their own", "err", err)
+		}
+	}
 }
 
 // LookupUser returns a user by id (for auth and the /api/me endpoint).
@@ -251,16 +304,27 @@ func (s *Service) AllUsers() []User { return s.users.All() }
 // system message, and its agent starts on the next steer or on a comment that
 // mentions the agent (ensureAgentLocked). A restart must not spend model calls
 // on rooms nobody is watching.
+//
+// With a shared store (docs/design/replicas.md section 4.3) the agent leases
+// decide instead: a room whose lease another replica holds is left alone, and
+// a room whose lease expired is taken over by the coordination loop Load
+// starts at the end (an agent that was working resumes, an idle one gets the
+// pause notice). Only an open room that shows a working agent but has no
+// lease at all gets the restart notice here.
 func (s *Service) Load(ctx context.Context) error {
 	if s.shadow == nil && s.owners.AnyShadow() {
 		return fmt.Errorf("room: load: owners.yaml turns shadow mode on, but the store cannot hold shadow runs")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.ensureAllLoadedLocked(ctx, true); err != nil {
+	err := s.ensureAllLoadedLocked(ctx, true)
+	if err == nil {
+		s.sweepShadowLocked(ctx)
+	}
+	s.mu.Unlock()
+	if err != nil {
 		return err
 	}
-	s.sweepShadowLocked(ctx)
+	s.startCoordination()
 	return nil
 }
 
@@ -272,33 +336,51 @@ func (s *Service) ensureAllLoadedLocked(ctx context.Context, restarted bool) err
 	if err != nil {
 		return fmt.Errorf("room: load: %w", err)
 	}
+	return s.loadRowsLocked(ctx, rooms, restarted)
+}
+
+// loadRowsLocked rebuilds the rooms among rows that are not cached yet (see
+// ensureAllLoadedLocked). Caller must hold s.mu.
+func (s *Service) loadRowsLocked(ctx context.Context, rooms []store.Room, restarted bool) error {
+	var leases map[string]store.RoomLease
+	if s.coord != nil && restarted {
+		var err error
+		if leases, err = s.coord.RoomLeases(ctx); err != nil {
+			return fmt.Errorf("room: load: %w", err)
+		}
+	}
 	for _, r := range rooms {
 		if _, ok := s.rooms[r.ID]; ok {
 			continue
 		}
 		if r.LastSeq == 0 {
 			// A row with no events is a leftover of a room.created append that
-			// failed (or a crash before it); creation holds s.mu, so a live
-			// room is never seen here without events. It is not a room.
+			// failed (or a crash before it), or a room another replica is
+			// opening right now (the follower loads it at its first event).
+			// It is not a room yet.
 			if restarted {
 				s.log.Warn("room: skipping room row with no events", "room", r.ID)
 			}
 			continue
 		}
-		snap, err := s.rebuild(ctx, r.ID)
+		snap, pending, err := s.rebuild(ctx, r.ID)
 		if err != nil {
 			s.log.Warn("room: rebuild failed", "room", r.ID, "err", err)
 			continue
 		}
-		st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow)}
+		st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
 		s.rooms[r.ID] = st
 		if snap.Status == "open" {
 			s.indexAlertRoomLocked(ctx, r.ID, st)
-			s.interruptStaleProposalsLocked(ctx, r.ID, st)
+			// With a shared store a proposal may be running on another
+			// replica right now; the stale-claim sweep decides instead.
+			if s.coord == nil {
+				s.interruptStaleProposalsLocked(ctx, r.ID, st)
+			}
 			// A shadow room never resumes its agent, so the "steer to
 			// resume" notice would be wrong there (the sweep in Load marks
 			// its run interrupted instead).
-			if restarted && !snap.Shadow {
+			if restarted && !snap.Shadow && s.restartNoticeDue(r.ID, st, leases) {
 				if err := s.noteRestartLocked(ctx, r.ID, st); err != nil {
 					s.log.Warn("room: restart notice failed", "room", r.ID, "err", err)
 				}
@@ -306,6 +388,20 @@ func (s *Service) ensureAllLoadedLocked(ctx context.Context, restarted bool) err
 		}
 	}
 	return nil
+}
+
+// restartNoticeDue reports whether Load writes the restart notice into an
+// open room: always with a single-process store; with a shared one only when
+// the room shows a working agent that holds no lease anywhere (an agent with a
+// lease is running elsewhere or is taken over by the coordination loop).
+func (s *Service) restartNoticeDue(roomID string, st *roomState, leases map[string]store.RoomLease) bool {
+	if s.coord == nil {
+		return true
+	}
+	if _, held := leases[roomID]; held {
+		return false
+	}
+	return agentWasWorking(st)
 }
 
 // restartDetail is the agent status detail a restart writes. A room already
@@ -428,19 +524,24 @@ func (s *Service) roomCreated(ctx context.Context, roomID string) (events.RoomCr
 }
 
 // getStateLocked returns the cached room state, rebuilding it from the log if
-// the room is not cached. Caller must hold s.mu.
+// the room is not cached. With a shared store a cached room is first brought
+// up to the log (syncLocked), so every check runs against what every replica
+// wrote. Caller must hold s.mu.
 func (s *Service) getStateLocked(ctx context.Context, roomID string) (*roomState, error) {
 	if st, ok := s.rooms[roomID]; ok {
+		if err := s.syncLocked(ctx, roomID, st); err != nil {
+			return nil, err
+		}
 		return st, nil
 	}
 	if _, err := s.store.GetRoom(ctx, roomID); err != nil {
 		return nil, mapStoreErr(err)
 	}
-	snap, err := s.rebuild(ctx, roomID)
+	snap, pending, err := s.rebuild(ctx, roomID)
 	if err != nil {
 		return nil, fmt.Errorf("room: rebuild %s: %w", roomID, err)
 	}
-	st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow)}
+	st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
 	s.rooms[roomID] = st
 	if snap.Status == "open" {
 		s.indexAlertRoomLocked(ctx, roomID, st)
@@ -449,26 +550,29 @@ func (s *Service) getStateLocked(ctx context.Context, roomID string) (*roomState
 }
 
 // rebuild folds the whole log into a snapshot, then refreshes the driver lease
-// from the rooms row (renewals are persisted there, not in the log).
-func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, error) {
-	snap := NewSnapshot()
+// from the rooms row (renewals are persisted there, not in the log). pending is
+// the human input logged after the agent's last own event (trackPending).
+func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, []agent.HumanInput, error) {
+	st := &roomState{snap: NewSnapshot()}
 	after := int64(0)
 	for {
 		evs, err := s.store.Since(ctx, roomID, after, 1000)
 		if err != nil {
-			return snap, err
+			return st.snap, nil, err
 		}
 		if len(evs) == 0 {
 			break
 		}
 		for _, e := range evs {
-			snap = Apply(snap, e)
+			st.snap = Apply(st.snap, e)
+			trackPending(st, e)
 			after = e.Seq
 		}
 		if len(evs) < 1000 {
 			break
 		}
 	}
+	snap := st.snap
 	if snap.ID == "" {
 		snap.ID = roomID
 	}
@@ -479,7 +583,7 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, err
 			snap.Driver.LeaseUntil = row.DriverLeaseUntil.UTC()
 		}
 	}
-	return snap, nil
+	return snap, st.pending, nil
 }
 
 // emitLocked appends one event, folds it into the cached snapshot and feeds
@@ -487,7 +591,9 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, err
 // shadow log instead (docs/design/shadow.md 3.2): it is not folded and not fed,
 // so no agent text, status or error reaches the room log, the WebSocket, the
 // Slack mirror or the export before the reveal. This is the one place that
-// decides it. Caller must hold s.mu.
+// decides it. With a shared store, events other replicas appended since the
+// last fold are folded first, so the snapshot never skips a seq. Caller must
+// hold s.mu.
 func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	if st.snap.Shadow && actor == events.AgentActor {
 		return s.appendShadowLocked(ctx, roomID, typ, payload)
@@ -496,9 +602,29 @@ func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, 
 	if err != nil {
 		return events.Event{}, fmt.Errorf("room: append %s: %w", typ, err)
 	}
-	st.snap = Apply(st.snap, e)
-	s.feedInbox(st, e)
+	if s.coord != nil && e.Seq > st.snap.LastSeq+1 {
+		s.fillGapLocked(ctx, roomID, st, e.Seq)
+	}
+	s.foldLocked(ctx, roomID, st, e, false)
 	return e, nil
+}
+
+// fillGapLocked folds the events between the snapshot and seq (exclusive)
+// that another replica appended. Caller must hold s.mu.
+func (s *Service) fillGapLocked(ctx context.Context, roomID string, st *roomState, seq int64) {
+	for st.snap.LastSeq+1 < seq {
+		evs, err := s.store.Since(ctx, roomID, st.snap.LastSeq, int(min(seq-1-st.snap.LastSeq, 1000)))
+		if err != nil || len(evs) == 0 {
+			s.log.Warn("room: fold events from other replicas failed", "room", roomID, "have", st.snap.LastSeq, "want", seq-1, "err", err)
+			return
+		}
+		for _, ev := range evs {
+			if ev.Seq != st.snap.LastSeq+1 || ev.Seq >= seq {
+				return
+			}
+			s.foldLocked(ctx, roomID, st, ev, true)
+		}
+	}
 }
 
 // agentEventTypes is the set of event types the investigation agent may append
@@ -533,6 +659,11 @@ func (s *Service) agentEmit(ctx context.Context, roomID string, typ events.Type,
 	st, ok := s.rooms[roomID]
 	if !ok {
 		return fmt.Errorf("room: agent emit on unknown room %q", roomID)
+	}
+	// Only the lease owner's agent may write: a run that lost its lease is
+	// being stopped, and another replica may already run the room's agent.
+	if s.coord != nil && !st.leased {
+		return fmt.Errorf("room: agent emit on %s: %w", roomID, store.ErrLeaseLost)
 	}
 	_, err = s.emitLocked(ctx, st, roomID, typ, events.AgentActor, payload)
 	return err
@@ -732,32 +863,62 @@ func (in *inbox) Wait(ctx context.Context) error {
 	}
 }
 
-// feedInbox converts relevant events into agent.HumanInput. Caller holds s.mu.
+// reset replaces the queued input with items (the input a new lease owner
+// primes the inbox with, docs/design/replicas.md section 4.2) and wakes a
+// waiter when there is any.
+func (in *inbox) reset(items []agent.HumanInput) {
+	if in.closed {
+		return
+	}
+	in.mu.Lock()
+	in.items = append([]agent.HumanInput(nil), items...)
+	in.mu.Unlock()
+	if len(items) > 0 {
+		select {
+		case in.wake <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// feedInbox pushes the agent input an event carries into the room's inbox.
+// With a shared store only the replica that owns the room's agent lease feeds
+// it: another replica's inbox would only collect input no run here reads.
+// Caller holds s.mu.
 func (s *Service) feedInbox(st *roomState, e events.Event) {
 	if st.inbox == nil || st.snap.Shadow {
 		return
 	}
-	var input *agent.HumanInput
+	if s.coord != nil && !st.leased {
+		return
+	}
+	if input := inputFor(e); input != nil {
+		st.inbox.push(*input)
+	}
+}
+
+// inputFor converts an event into the agent.HumanInput it carries, or nil.
+func inputFor(e events.Event) *agent.HumanInput {
 	switch e.Type {
 	case events.SteerSent:
 		p, ok := decode[events.SteerSentPayload](e)
 		if !ok {
-			return
+			return nil
 		}
-		input = &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "steer", Text: p.Text}
+		return &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "steer", Text: p.Text}
 	case events.CommentAdded:
 		p, ok := decode[events.CommentAddedPayload](e)
 		if !ok || !p.MentionsAgent {
-			return
+			return nil
 		}
-		input = &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "comment", StepID: p.StepID, CommentID: p.CommentID, Text: p.Text}
+		return &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "comment", StepID: p.StepID, CommentID: p.CommentID, Text: p.Text}
 	case events.ApprovalGiven:
 		p, ok := decode[events.ApprovalGivenPayload](e)
 		if !ok {
-			return
+			return nil
 		}
 		approved := true
-		input = &agent.HumanInput{
+		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
 			Text:       fmt.Sprintf("layer %q approved proposal %s", p.Layer, p.ProposalID),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
@@ -765,10 +926,10 @@ func (s *Service) feedInbox(st *roomState, e events.Event) {
 	case events.ApprovalRejected:
 		p, ok := decode[events.ApprovalRejectedPayload](e)
 		if !ok {
-			return
+			return nil
 		}
 		approved := false
-		input = &agent.HumanInput{
+		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
 			Text:       fmt.Sprintf("layer %q rejected proposal %s: %s", p.Layer, p.ProposalID, p.Reason),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
@@ -776,21 +937,19 @@ func (s *Service) feedInbox(st *roomState, e events.Event) {
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)
 		if !ok {
-			return
+			return nil
 		}
 		// OK tells the agent whether the step succeeded; it must not claim the
 		// pipeline recovered from a failed step (agent.HumanInput.OK).
 		stepOK := p.OK
 		stepIndex := p.StepIndex
-		input = &agent.HumanInput{
+		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "action_result",
 			Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, p.StepIndex, p.Output),
 			OK:   &stepOK, ProposalID: p.ProposalID, StepIndex: &stepIndex,
 		}
-	default:
-		return
 	}
-	st.inbox.push(*input)
+	return nil
 }
 
 // ---- agent supervisor ----
@@ -832,6 +991,12 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	if s.closed {
 		return
 	}
+	// With a shared store only the lease owner runs the room's agent; when
+	// another replica owns it, that replica reads this room's input from the
+	// log (docs/design/replicas.md section 4).
+	if !s.claimLeaseLocked(roomID, st) {
+		return
+	}
 	if st.snap.Shadow {
 		s.startShadowLocked(roomID, title, pipelineID, raw, st)
 		return
@@ -840,7 +1005,7 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	st.agentCancel = cancel
 	st.agentRun++
 	run := st.agentRun
-	gate := &agentGate{s: s, st: st, roomID: roomID}
+	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -927,6 +1092,8 @@ func (s *Service) releaseAgent(st *roomState, run uint64, cancel context.CancelF
 	s.mu.Lock()
 	if st.agentRun == run {
 		st.agentCancel = nil
+		// The room has no agent now: any replica may start the next one.
+		s.dropLeaseLocked(st.snap.ID, st)
 	}
 	s.mu.Unlock()
 	cancel()
