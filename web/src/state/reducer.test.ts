@@ -499,6 +499,7 @@ describe('params_hash and approver identity (auth PR 4)', () => {
       by: human,
       identity,
       params_hash: HASH,
+      at: '2026-10-11T10:00:02Z',
     })
     expect(s.proposals[0].decisions['kafka-connect']).toBeUndefined()
     // An approval without identity (an old event) is still recorded.
@@ -524,6 +525,7 @@ describe('params_hash and approver identity (auth PR 4)', () => {
       identity,
       params_hash: HASH,
       reason: 'nope',
+      at: '2026-10-11T10:00:02Z',
     })
   })
 

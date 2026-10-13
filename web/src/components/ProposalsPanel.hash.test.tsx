@@ -50,10 +50,14 @@ beforeEach(() => {
 })
 
 describe('params hash in the proposal card', () => {
-  it('shows the short form, the full hash in a read-only field and a copy button', () => {
+  it('shows the fingerprint (first 8, last 4), the full hash in a read-only field and a copy button', () => {
     render(<ProposalsPanel state={roomWith(proposal)} user={arjun} actions={actions} />)
-    expect(screen.getByTestId('params-hash-short')).toHaveTextContent(H1.slice(0, 12))
-    expect(screen.getByTestId('params-hash-short').textContent).toHaveLength(12)
+    // "9f2c 1e7a … 0a1b": the first eight and the last four characters, in groups of four.
+    expect(screen.getByTestId('params-hash-short')).toHaveTextContent('9f2c 1e7a … 0a1b')
+    expect(screen.getByTestId('params-hash-short').textContent).toBe('9f2c 1e7a … 0a1b')
+    expect(screen.getByText('Approving exactly this')).toBeInTheDocument()
+    // The full value sits in a closed <details> until the person opens it.
+    expect(screen.getByLabelText('Full params hash').closest('details')).not.toHaveAttribute('open')
     const full = screen.getByLabelText('Full params hash')
     expect(full).toHaveValue(H1)
     expect(full).toHaveAttribute('readonly')
@@ -70,18 +74,42 @@ describe('params hash in the proposal card', () => {
     expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument()
   })
 
-  it('with no hash: says so and disables Approve and Reject', () => {
+  it('with no hash: says so, disables Approve (with the reason) and still allows Reject', () => {
     render(<ProposalsPanel state={roomWith({ ...proposal, params_hash: '' })} user={arjun} actions={actions} />)
-    expect(screen.getByTestId('params-hash-missing')).toHaveTextContent(
-      "This fix can't be approved or rejected here: its parameters could not be fingerprinted (see the server log).",
+    const note = screen.getByTestId('params-hash-missing')
+    expect(note).toHaveTextContent(
+      "This fix can't be approved here: its parameters could not be fingerprinted (see the server log). It can still be rejected.",
     )
     expect(screen.queryByTestId('params-hash-short')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Reject' })).toBeDisabled()
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Reject' }))
+    const approveButton = screen.getByRole('button', { name: 'Approve' })
+    expect(approveButton).toBeDisabled()
+    expect(approveButton).toHaveAccessibleDescription(/could not be fingerprinted/)
+    fireEvent.click(approveButton)
     expect(approve).not.toHaveBeenCalled()
-    expect(screen.queryByLabelText('Rejection reason for kafka-connect')).not.toBeInTheDocument()
+    // The server takes a rejection with an empty params_hash for exactly this open proposal (params_hash.go).
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled()
+  })
+
+  it('with no hash, Reject sends the empty hash that is on screen', () => {
+    render(<ProposalsPanel state={roomWith({ ...proposal, params_hash: '' })} user={arjun} actions={actions} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Reject' }))
+    fireEvent.change(screen.getByLabelText('Rejection reason for kafka-connect'), { target: { value: 'cannot hash it' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    expect(reject).toHaveBeenCalledWith('p1', 'kafka-connect', 'cannot hash it', '')
+    expect(approve).not.toHaveBeenCalled()
+  })
+
+  it('a settled proposal with no hash says "no params hash recorded" and has no buttons', () => {
+    render(
+      <ProposalsPanel
+        state={roomWith({ ...proposal, params_hash: '', status: 'approved', approvals: { 'kafka-connect': 'approved' } })}
+        user={arjun}
+        actions={actions}
+      />,
+    )
+    expect(screen.getByTestId('params-hash-none')).toHaveTextContent('no params hash recorded')
+    expect(screen.queryByTestId('params-hash-missing')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
   })
 
   it('with no hash, a solo user cannot open the confirm box', () => {
