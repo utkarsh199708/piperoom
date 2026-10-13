@@ -114,6 +114,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
         layers: me.layers,
         role: me.role === 'viewer' ? 'viewer' : 'member',
         groupsMissing: me.groups_missing === true,
+        solo: me.solo === true,
       })
       setPhase('ready')
       setFailure(null)
@@ -192,6 +193,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     transition.current = true
+    setBusy(true)
     void (async () => {
       try {
         try {
@@ -208,6 +210,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
         bumpEpoch()
       } finally {
         transition.current = false
+        setBusy(false)
       }
     })()
   }, [bumpEpoch, setPhase])

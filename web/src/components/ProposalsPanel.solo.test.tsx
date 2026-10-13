@@ -22,6 +22,8 @@ const actions: RoomActions = {
 }
 
 const solo: CurrentUser = { id: 'sam', name: 'Sam', layers: ['kafka-connect'] }
+const soloKnown: CurrentUser = { ...solo, solo: true }
+const BOX = /Solo mode: type orders\/kafka-connect to approve/
 
 const proposal: ProposalState = {
   proposal_id: 'p1',
@@ -56,7 +58,7 @@ describe('solo-mode confirm', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
 
-    const box = await screen.findByLabelText('Type the pipeline and layer to confirm')
+    const box = await screen.findByLabelText(BOX)
     // The solo banner appears once the server has asked.
     expect(screen.getByRole('status')).toHaveTextContent(/Solo mode/)
     // The text to type is shown, with no copy button.
@@ -78,7 +80,7 @@ describe('solo-mode confirm', () => {
     expect(approve).toHaveBeenCalledTimes(2)
     // The box closes after a good answer.
     await waitFor(() =>
-      expect(screen.queryByLabelText('Type the pipeline and layer to confirm')).not.toBeInTheDocument(),
+      expect(screen.queryByLabelText(BOX)).not.toBeInTheDocument(),
     )
   })
 
@@ -86,7 +88,10 @@ describe('solo-mode confirm', () => {
     approve.mockResolvedValue({ ok: false, needsConfirm: true })
     render(<ProposalsPanel state={state} user={solo} actions={actions} />)
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
-    const box = await screen.findByLabelText('Type the pipeline and layer to confirm')
+    const box = await screen.findByLabelText(BOX)
+    // A visible hint says paste is off, and the input points at it.
+    expect(screen.getByText('Type it by hand. Paste is off.')).toBeInTheDocument()
+    expect(box).toHaveAccessibleDescription('Type it by hand. Paste is off.')
     const notCancelled = fireEvent.paste(box, { clipboardData: { getData: () => 'orders/kafka-connect' } })
     expect(notCancelled).toBe(false) // preventDefault was called
   })
@@ -95,20 +100,50 @@ describe('solo-mode confirm', () => {
     approve.mockResolvedValue({ ok: false, needsConfirm: true })
     render(<ProposalsPanel state={state} user={solo} actions={actions} />)
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
-    const box = await screen.findByLabelText('Type the pipeline and layer to confirm')
+    const box = await screen.findByLabelText(BOX)
     fireEvent.change(box, { target: { value: 'orders/kafka-connect' } })
     fireEvent.click(screen.getAllByRole('button', { name: 'Approve' }).at(-1) as HTMLElement)
-    expect(await screen.findByText('The server did not accept that text.')).toBeInTheDocument()
-    expect(screen.getByLabelText('Type the pipeline and layer to confirm')).toBeInTheDocument()
+    expect(await screen.findByRole('alert')).toHaveTextContent('The server did not accept that text.')
+    expect(screen.getByLabelText(BOX)).toBeInTheDocument()
   })
 
   it('Cancel closes the box without a second call', async () => {
     approve.mockResolvedValue({ ok: false, needsConfirm: true })
     render(<ProposalsPanel state={state} user={solo} actions={actions} />)
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
-    await screen.findByLabelText('Type the pipeline and layer to confirm')
+    await screen.findByLabelText(BOX)
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
-    expect(screen.queryByLabelText('Type the pipeline and layer to confirm')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText(BOX)).not.toBeInTheDocument()
     expect(approve).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('solo mode known from /api/me.solo', () => {
+  it('shows the solo banner up front, before any approve call', () => {
+    render(<ProposalsPanel state={state} user={soloKnown} actions={actions} />)
+    expect(screen.getByRole('status')).toHaveTextContent(/Solo mode/)
+    expect(approve).not.toHaveBeenCalled()
+  })
+
+  it('Approve opens the confirm box without a call, then sends confirm once', async () => {
+    approve.mockResolvedValue({ ok: true })
+    render(<ProposalsPanel state={state} user={soloKnown} actions={actions} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    expect(approve).not.toHaveBeenCalled()
+
+    const box = screen.getByLabelText(BOX)
+    fireEvent.change(box, { target: { value: 'orders/kafka-connect' } })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Approve' }).at(-1) as HTMLElement)
+    await waitFor(() =>
+      expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', { confirm: 'orders/kafka-connect' }),
+    )
+    expect(approve).toHaveBeenCalledTimes(1)
+  })
+
+  it('a non-solo user still sends a plain approve (the error-triggered path is the fallback)', async () => {
+    approve.mockResolvedValue({ ok: true })
+    render(<ProposalsPanel state={state} user={solo} actions={actions} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    await waitFor(() => expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', undefined))
   })
 })

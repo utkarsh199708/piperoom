@@ -29,6 +29,7 @@ vi.mock('../api/client', async (importOriginal) => {
       room: vi.fn(),
       events: vi.fn(),
       grantControl: vi.fn(),
+      approve: vi.fn(),
     },
   }
 })
@@ -223,6 +224,55 @@ describe('useRoom transport', () => {
 
     await waitFor(() => expect(result.current.error).toBe('someone else holds control'))
     expect(api.grantControl).toHaveBeenCalledWith('r1', 'arjun')
+  })
+})
+
+describe('useRoom approve', () => {
+  async function setup() {
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    const hook = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
+    socket.onopen?.()
+    return hook
+  }
+
+  it('the real solo-mode server error becomes needsConfirm, not an error banner', async () => {
+    vi.mocked(api.approve).mockRejectedValue(
+      new ApiClientError(400, 'validation', 'solo mode: type confirm "orders/kafka" to approve'),
+    )
+    const { result } = await setup()
+    let res: unknown
+    await act(async () => {
+      res = await result.current.actions.approve('p1', 'kafka')
+    })
+    expect(res).toEqual({ ok: false, needsConfirm: true })
+    expect(result.current.error).toBeNull()
+  })
+
+  it('passes confirm through and resolves ok', async () => {
+    vi.mocked(api.approve).mockResolvedValue(ev(1))
+    const { result } = await setup()
+    let res: unknown
+    await act(async () => {
+      res = await result.current.actions.approve('p1', 'kafka', { confirm: 'orders/kafka' })
+    })
+    expect(res).toEqual({ ok: true })
+    expect(api.approve).toHaveBeenCalledWith('p1', 'kafka', { confirm: 'orders/kafka' })
+  })
+
+  it('any other error is shown in the banner and is not needsConfirm', async () => {
+    vi.mocked(api.approve).mockRejectedValue(
+      new ApiClientError(403, 'not_layer_owner', 'user arjun does not own layer "kafka"'),
+    )
+    const { result } = await setup()
+    let res: unknown
+    await act(async () => {
+      res = await result.current.actions.approve('p1', 'kafka')
+    })
+    expect(res).toEqual({ ok: false })
+    expect(result.current.error).toBe('user arjun does not own layer "kafka"')
   })
 })
 

@@ -14,6 +14,8 @@ export interface CurrentUser {
   role?: Role
   /** The IdP sent no groups claim, so group-based rights are not available. */
   groupsMissing?: boolean
+  /** `/api/me.solo`: show the solo banner and ask for the typed confirm up front. */
+  solo?: boolean
 }
 
 /** A viewer sees everything and changes nothing; the server enforces it, the UI hides the controls. */

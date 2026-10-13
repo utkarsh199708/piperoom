@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canDecideLayer } from '../state/permissions'
@@ -71,6 +71,8 @@ function SoloConfirm({
   onCancel: () => void
 }) {
   const [typed, setTyped] = useState('')
+  const inputId = useId()
+  const hintId = `${inputId}-hint`
   return (
     <form
       className="solo-confirm"
@@ -79,19 +81,28 @@ function SoloConfirm({
         if (typed === want && !busy) onConfirm(typed)
       }}
     >
-      <label className="solo-confirm__label">
+      {/* The label text holds the exact string, so a screen reader announces it. */}
+      <label className="solo-confirm__label" htmlFor={inputId}>
         Solo mode: type <code className="mono">{want}</code> to approve
-        <input
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-          onPaste={(e) => e.preventDefault()}
-          onDrop={(e) => e.preventDefault()}
-          aria-label="Type the pipeline and layer to confirm"
-          autoComplete="off"
-          autoFocus
-        />
       </label>
-      {rejected && <span className="error-text">The server did not accept that text.</span>}
+      <input
+        id={inputId}
+        value={typed}
+        onChange={(e) => setTyped(e.target.value)}
+        onPaste={(e) => e.preventDefault()}
+        onDrop={(e) => e.preventDefault()}
+        aria-describedby={hintId}
+        autoComplete="off"
+        autoFocus
+      />
+      <span id={hintId} className="muted solo-confirm__hint">
+        Type it by hand. Paste is off.
+      </span>
+      {rejected && (
+        <span className="error-text" role="alert">
+          The server did not accept that text.
+        </span>
+      )}
       <button type="submit" className="btn btn--small btn--approve" disabled={busy || typed !== want}>
         Approve
       </button>
@@ -124,7 +135,9 @@ function LayerDecision({
   const [busy, setBusy] = useState(false)
   const [refused, setRefused] = useState(false)
 
-  // The first approve goes without `confirm`; only a 400 solo error opens the box.
+  // Not solo (as far as we know): the first approve goes without `confirm`, and a
+  // 400 "solo mode:" answer opens the box. Solo (`/api/me.solo`): the box opens
+  // up front and no call is made until the text is typed.
   const approve = async (extra?: { confirm: string }) => {
     setBusy(true)
     try {
@@ -166,7 +179,7 @@ function LayerDecision({
             type="button"
             className="btn btn--small btn--approve"
             disabled={busy}
-            onClick={() => void approve()}
+            onClick={() => (user.solo ? setConfirming(true) : void approve())}
           >
             Approve
           </button>
@@ -274,8 +287,10 @@ export function ProposalsPanel({
   actions: RoomActions
 }) {
   const proposals = state.proposals
-  // No API field says "solo"; the first approve that asks for a confirm tells us.
-  const [solo, setSolo] = useState(false)
+  // `/api/me.solo` says so up front; on an older server the first approve that
+  // asks for a confirm tells us.
+  const [soloSeen, setSoloSeen] = useState(false)
+  const solo = user.solo === true || soloSeen
   return (
     <Panel
       className="proposals"
@@ -299,7 +314,7 @@ export function ProposalsPanel({
               user={user}
               actions={actions}
               pipelineId={state.pipeline_id}
-              onSolo={() => setSolo(true)}
+              onSolo={() => setSoloSeen(true)}
             />
           ))}
         </div>

@@ -278,6 +278,33 @@ describe('UserProvider: roles, groups notice, switcher, login errors', () => {
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument()
   })
 
+  it('disables Log out while a logout is in flight', async () => {
+    vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
+    let finish!: () => void
+    vi.mocked(api.logout).mockReturnValue(new Promise<void>((r) => (finish = r)))
+    vi.mocked(probeSession).mockResolvedValue({ valid: false, mode: 'dev' })
+    renderWith(<UserSwitcher />)
+    const out = await screen.findByRole('button', { name: 'Log out' })
+    fireEvent.click(out)
+    await waitFor(() => expect(out).toBeDisabled())
+    finish()
+    expect(await screen.findByText('Sign in')).toBeInTheDocument()
+  })
+
+  it('maps /api/me.solo to the user (omitted means false)', async () => {
+    function Solo() {
+      const { user } = useCurrentUser()
+      return <span data-testid="solo">{String(user.solo)}</span>
+    }
+    vi.mocked(api.me).mockResolvedValue({ ...meOf('sam'), solo: true })
+    const first = renderWith(<Solo />)
+    expect(await screen.findByTestId('solo')).toHaveTextContent('true')
+    first.unmount()
+    vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
+    renderWith(<Solo />)
+    expect(await screen.findByTestId('solo')).toHaveTextContent('false')
+  })
+
   it('disables the dev switcher while a dev-login is in flight, then enables it', async () => {
     vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
     let finish!: () => void
@@ -316,6 +343,16 @@ describe('UserProvider: roles, groups notice, switcher, login errors', () => {
       expect(api.me).not.toHaveBeenCalled()
       expect(redirectToLogin).not.toHaveBeenCalled()
     })
+
+    it.each(['__proto__', 'toString', 'constructor', 'hasOwnProperty'])(
+      'treats the inherited name %s as an unknown code (generic page)',
+      (code) => {
+        window.history.replaceState({}, '', `/?login_error=${code}`)
+        renderWith(<Role />)
+        expect(screen.getByRole('heading', { name: 'Sign-in failed' })).toBeInTheDocument()
+        expect(screen.getByRole('link', { name: 'Sign in again' })).toBeInTheDocument()
+      },
+    )
 
     it('reads the code from a hash route too', () => {
       window.history.replaceState({}, '', '/#/?login_error=rate_limited')

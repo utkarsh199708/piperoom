@@ -36,7 +36,7 @@ export function UserSwitcher() {
         </span>
       )}
       {!isFixtures() && (
-        <button type="button" className="btn btn--ghost btn--small" onClick={logout}>
+        <button type="button" className="btn btn--ghost btn--small" onClick={logout} disabled={busy}>
           Log out
         </button>
       )}
