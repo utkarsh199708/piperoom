@@ -131,10 +131,10 @@ logging the victim in as the attacker.
 1. Read the login cookie. No cookie → `400 login_expired`.
 2. `DELETE FROM login_states WHERE id = $1 AND expires_at > now() RETURNING …`. No row → `400 login_expired`.
    The delete makes the row single use: a replayed callback finds nothing.
-3. Compare the `state` query value with the row's `state` using `subtle.ConstantTimeCompare`. Mismatch → `400`.
+3. Compare the `state` query value with the row's `state` using `subtle.ConstantTimeCompare`. Mismatch → `401 unauthenticated` (lead, 2026-10-13: matches the code and the §8 tests; a bad nonce, a bad token and an `azp` other than our client id also give `401`).
 4. `Config.Exchange` with `VerifierOption(row.pkce_verifier)`.
 5. `IDTokenVerifier.Verify` (signature, `iss`, `aud`, `exp`). Then **compare `IDToken.Nonce` with the row's nonce
-   ourselves** with `subtle.ConstantTimeCompare`; `Verify` does not check the nonce.
+   ourselves** with `subtle.ConstantTimeCompare`; `Verify` does not check the nonce. If the token has an `azp` claim it must equal our client id (OIDC Core 3.1.3.7).
 6. Map the identity (§2). Create the session (§1.3). Clear the login cookie. Discard every IdP token; we keep none.
 7. Redirect to `return_path`.
 
