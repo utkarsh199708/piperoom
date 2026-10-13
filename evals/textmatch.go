@@ -139,7 +139,9 @@ var (
 )
 
 // denied marks, per token of c, whether a denial covers it. With layers set,
-// exonerators clear what precedes them too.
+// exonerators clear what precedes them in their own sub: "Connect is healthy"
+// clears Connect, but "order-sync is stuck on partition 1, partitions 0 and 2
+// are fine" still names the consumer and partition 1.
 func denied(c clauseToks, layers bool) []bool {
 	n := len(c.toks)
 	neg := make([]bool, n)
@@ -168,7 +170,9 @@ func denied(c clauseToks, layers bool) []bool {
 			back(j)
 		}
 		if layers && phraseAt(c.toks, j, exonerators) > 0 && !negatorBefore(c.toks, j, 2) {
-			back(j)
+			for i := j - 1; i >= 0 && c.sub[i] == c.sub[j]; i-- {
+				neg[i] = true
+			}
 		}
 	}
 	return neg
@@ -259,13 +263,20 @@ var layerTerms = map[string][]string{
 }
 
 // layerTermsFor adds the pipeline's own names to a layer's words: its
-// consumer groups name the consumer ("order-sync is stuck"), its connectors
+// consumer groups name the consumer ("order-sync is stuck"), its topics
+// (topic_prefix.source_table, "pg.public.orders/1") Kafka, its connectors
 // Connect and its sink tables the warehouse.
 func layerTermsFor(p owners.Pipeline, layer string) []string {
 	terms := append([]string(nil), layerTerms[layer]...)
 	switch layer {
 	case "consumer":
 		terms = append(terms, p.ConsumerGroups...)
+	case "kafka":
+		for _, t := range p.SourceTables {
+			if p.TopicPrefix != "" {
+				terms = append(terms, p.TopicPrefix+"."+t)
+			}
+		}
 	case "kafka-connect":
 		terms = append(terms, p.Connectors...)
 	case "warehouse":
@@ -286,7 +297,14 @@ var healthyTerms = []string{"healthy", "recovered", "resolved", "back to normal"
 	"no fix needed", "no fix is needed", "no fix required", "no fix is required",
 	"no action needed", "no action is needed", "no action required", "no action is required",
 	"no action necessary", "no action is necessary", "no issues", "no problems",
-	"stale alert", "stale re notification"}
+	"stale alert", "stale re notification", "fine", "all good", "nothing is wrong", "operating normally",
+	"running normally", "caught up", "nothing to do"}
+
+// healthyCaveats in a healthy phrase's clause, or "until" after it, make it a
+// conditional or partial verdict: "healthy except task 0", "healthy apart from
+// partition 1", "no action needed until the DBA restores ownership", "it would
+// be healthy if order-sync were restarted".
+var healthyCaveats = []string{"except", "apart from", "other than", "otherwise", "would", "if"}
 
 // healthyNegators cancel a healthy phrase anywhere else in its sub: "there is
 // no sign it is healthy", "can't confirm it is healthy", "has not recovered".
@@ -296,7 +314,15 @@ var healthyNegators = []string{"not", "t", "no", "never", "nobody", "without"}
 // question cancels a healthy verdict in the same text: "Connect is healthy but
 // order-sync is still stuck".
 var faultTerms = []string{"stuck", "fail*", "error*", "crash*", "broken", "break*", "is down", "are down",
-	"went down", "stopped", "paused", "lagging", "falling behind", "still behind", "degraded", "unhealthy"}
+	"went down", "stopped", "paused", "lagging", "behind", "degraded", "unhealthy", "stale", "wedged"}
+
+// alertWords in a fault's sub make it about the alert, not the pipeline: "this
+// alert is stale".
+var alertWords = []string{"alert*", "notification*", "re notification*", "page"}
+
+// shortDurations before "behind" are normal replication delay, not a fault:
+// "warehouse 1 minute behind".
+var shortDurations = []string{"1 minute", "1 min", "2 minutes", "2 min", "1m", "2m", "seconds", "a few seconds"}
 
 // faultNegators make a fault term a non-fault when they sit in the three words
 // before it: "no errors", "not stuck any more", "no longer lagging",
@@ -320,6 +346,15 @@ func saysHealthy(text string) bool {
 				continue
 			}
 			if j+l < len(c.toks) && c.toks[j+l] == "yet" {
+				continue
+			}
+			caveat := false
+			for i := range c.toks {
+				if phraseAt(c.toks, i, healthyCaveats) > 0 || (i >= j+l && c.toks[i] == "until") {
+					caveat = true
+				}
+			}
+			if caveat {
 				continue
 			}
 			ok := true
@@ -369,13 +404,23 @@ func hasFault(text string) bool {
 					negated = true
 				}
 			}
-			past := false
+			past, alert := false, false
 			for i := range c.toks {
 				if c.sub[i] == c.sub[j] && phraseAt(c.toks, i, pastMarkers) > 0 {
 					past = true
 				}
+				if c.sub[i] == c.sub[j] && phraseAt(c.toks, i, alertWords) > 0 {
+					alert = true
+				}
 			}
-			if !negated && !past {
+			if c.toks[j] == "behind" {
+				for i := max(0, j-3); i < j; i++ {
+					if l := phraseAt(c.toks, i, shortDurations); l > 0 && i+l == j {
+						negated = true
+					}
+				}
+			}
+			if !negated && !past && !alert {
 				return true
 			}
 		}
@@ -390,8 +435,9 @@ func healthyVerdict(text string) bool {
 }
 
 // questionEnd matches a "?" that ends a sentence: before a space, the end, or
-// closing punctuation. A "?" inside a URL query is not a question.
-var questionEnd = regexp.MustCompile(`\?["')\]]*(\s|$)`)
+// closing punctuation or markdown (" ' ) ] * _ ” ’). A "?" inside a URL query
+// is not a question.
+var questionEnd = regexp.MustCompile(`\?["')\]*_”’]*(\s|$)`)
 
 // asksQuestion reports whether text asks a question.
 func asksQuestion(text string) bool {

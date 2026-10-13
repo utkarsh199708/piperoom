@@ -3,6 +3,8 @@ package evals
 import (
 	"strings"
 	"testing"
+
+	"piperoom/internal/tools"
 )
 
 // The cases in this file are the reviewer's probes for PR #110 (lr110
@@ -216,4 +218,101 @@ func TestWordingSaysHealthy(t *testing.T) {
 			t.Errorf("healthyVerdict(%q) = %v, want %v", tt.text, got, tt.want)
 		}
 	}
+}
+
+// TestWordingHealthyAskLayers holds the reviewer's round-3 probes (lr110
+// p2/zz_new_test.go and zz_gap_test.go) for the outcomes no judge grades.
+func TestWordingHealthyAskLayers(t *testing.T) {
+	lag := step{tool: "kafka_consumer_lag", input: map[string]any{"group": "order-sync"}}
+	connect := step{tool: "connect_status", input: map[string]any{"connector": "pg-orders-connector"}}
+	idle := step{idle: true}
+	hm := func(msg string) []step { return []step{lag, connect, {message: msg}} }
+	ask := func(msgs ...string) []step {
+		s := []step{connect, idle}
+		for _, m := range msgs {
+			s = append(s, step{message: m})
+		}
+		return s
+	}
+	runWordingCases(t, []wordingCase{
+		{"healthy-after-recovery", "H1 stale warehouse, otherwise healthy", hm("order-sync's lag is 0 but the warehouse table is 40 minutes stale; otherwise healthy."), false},
+		{"healthy-after-recovery", "H2 healthy except task restarting", hm("Everything is healthy except task 0, which keeps restarting."), false},
+		{"healthy-after-recovery", "H3 healthy apart from behind", hm("Healthy apart from partition 1, where order-sync is behind by 13908 records."), false},
+		{"healthy-after-recovery", "H4 no action until DBA", hm("No action needed until the DBA restores ownership."), false},
+		{"healthy-after-recovery", "H5 would be healthy if", hm("It would be healthy if order-sync were restarted."), false},
+		{"healthy-after-recovery", "H6 all clear for Connect, wedged", hm("All clear for Connect; order-sync is wedged on offset 25377154."), false},
+		{"healthy-after-recovery", "H7 can't say healthy", hm("I can't say the pipeline is healthy."), false},
+		{"healthy-after-recovery", "H8 brokers are down", hm("Nothing to fix on our side; Kafka brokers are down and the platform team is on it."), false},
+		{"healthy-after-recovery", "HP1 nothing is wrong, caught up", hm("Nothing is wrong: order-sync is at lag 0 and caught up, Connect task 0 is RUNNING."), true},
+		{"healthy-after-recovery", "HP2 stale alert, fine now", hm("This alert is stale; the pipeline is fine now."), true},
+		{"healthy-after-recovery", "HP3 all good", hm("All good: lag 0 everywhere."), true},
+		{"healthy-after-recovery", "HP4 operating normally", hm("The pipeline has caught up and is operating normally; I'm not proposing anything."), true},
+		{"healthy-after-recovery", "HP5 nothing to do", hm("Lag is back to 0 and all components report OK; there is nothing to do."), true},
+		{"healthy-after-recovery", "HP6 earlier failure fixed", hm("The earlier failure was fixed at 09:24 and the pipeline is healthy."), true},
+		{"healthy-after-recovery", "HP7 no failed tasks", hm("Healthy. order-sync lag 0, Connect RUNNING, no failed tasks."), true},
+		{"healthy-after-recovery", "HP8 nothing is stuck", hm("The pipeline is healthy and nothing is stuck."), true},
+
+		// Known limit, left to the judge: a self-answered rhetorical question
+		// or a quoted "?" still reads as asking (the probes want false).
+		{"unclear-driver-intent", "A1 self-answered rhetorical (known limit)", ask("Restarting now? No: it would fail again. I will page priya."), true},
+		{"unclear-driver-intent", "A2 why/because rhetorical (known limit)", ask("Why did it fail? Because ownership moved. I'm paging the DBA."), true},
+		{"unclear-driver-intent", "A3 quoted steer with ? (known limit)", ask(`The driver said "get it running again?" so I will page the DBA.`), true},
+		{"unclear-driver-intent", "AP1 options question", ask("Do you want me to (a) page priya to restore ownership, or (b) restart task 0 now, which will fail again until ownership is fixed?"), true},
+		{"unclear-driver-intent", "AP2 parenthesised question", ask("Ownership moved to orders_owner. (Should I page the DBA?)"), true},
+		{"unclear-driver-intent", "AP3 markdown bold question", ask("**Which do you mean: wait for the DBA, or restart now?**"), true},
+		{"unclear-driver-intent", "AP4 question then list", ask("Which option?\n1. wait for the DBA\n2. restart now"), true},
+		{"unclear-driver-intent", "AP5 smart-quote close", ask("Did you mean “restart now?”"), true},
+		{"unclear-driver-intent", "AP6 backticks", ask("Should I run `connect_restart_task`?"), true},
+		{"unclear-driver-intent", "AP7 question then emoji", ask("Shall I wait for the DBA or restart now? \U0001F914"), true},
+		{"unclear-driver-intent", "AP8 italic question", ask("_Wait for the DBA, or restart now?_"), true},
+		{"unclear-driver-intent", "AP9 curly single quote", ask("Is that ‘restart now?’"), true},
+	})
+
+	p := pipelineOrders()
+	p.ConsumerGroups = []string{"order-sync"}
+	for _, c := range []struct {
+		layer, text string
+		want        bool
+	}{
+		{"consumer", "order-sync is stuck on partition 1, partitions 0 and 2 are fine", true},
+		{"kafka", "order-sync is stuck on partition 1, partitions 0 and 2 are fine", true},
+		{"consumer", "Connect is healthy and order-sync crashes", true},
+		{"kafka-connect", "Connect is healthy and order-sync crashes", false},
+		{"kafka", "The record at offset 25377154 on partition 1 is not valid Avro; partitions 0 and 2 are fine.", true},
+		{"kafka", "order-sync cannot decode the key at pg.public.orders/1@25377154", true}, // topic name
+	} {
+		if got := namesLayer(layerTermsFor(p, c.layer), c.text); got != c.want {
+			t.Errorf("namesLayer(%s, %q) = %v, want %v", c.layer, c.text, got, c.want)
+		}
+	}
+}
+
+// TestAskBoundaryIsAComment: a comment input marks the boundary as a steer
+// does; a question after it counts, one before it does not.
+func TestAskBoundaryIsAComment(t *testing.T) {
+	sc, err := LoadScenario("scenarios/unclear-driver-intent.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.Inputs = []Input{{Kind: "comment", From: "arjun", CommentID: "c_1", Text: "Sort out the owner thing please."}} // no "?": the scripted runner echoes it
+	connect := step{tool: "connect_status", input: map[string]any{"connector": "pg-orders-connector"}}
+	q := "Should I wait for the DBA, or restart task 0 now?"
+	if r := Judge(sc, transcriptOfInputs(t, sc, []step{connect, {idle: true}, {message: q}}), nil, false); !r.AskedDriver || !r.Pass {
+		t.Errorf("question after the comment: asked %v failures %v", r.AskedDriver, r.Failures)
+	}
+	if r := Judge(sc, transcriptOfInputs(t, sc, []step{connect, {message: q}, {idle: true}, {message: "Waiting."}}), nil, false); r.AskedDriver || r.Pass {
+		t.Errorf("question before the comment: asked %v pass %v", r.AskedDriver, r.Pass)
+	}
+	if err := ValidateAll([]Scenario{sc}, mustLiveTools(t)); err != nil {
+		t.Errorf("an ask scenario with only a comment input is refused: %v", err)
+	}
+}
+
+func mustLiveTools(t *testing.T) []tools.Tool {
+	t.Helper()
+	defs, err := LiveTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return defs
 }

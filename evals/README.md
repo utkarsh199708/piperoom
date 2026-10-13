@@ -143,18 +143,27 @@ before a space), fragments (at `: ( ) [ ]` and before `but`, `while`, `whereas`,
 
 `no longer`, `without` and `nothing` are not denials ("records no longer include amount", "records
 without amount", "nothing reads the slot" all state the cause). A term that starts with a negator
-(`no longer`, `not avro`, `never reached`, `not the owner`) is its own phrase. For layers, a part of
-the fragment that ends in `healthy`, `fine`, `unrelated`, `unaffected` or `working normally` (and not
-`not healthy`) clears what it names: "Connect is healthy" does not name Connect. Known limits, left to
-the judge: "piperoom is not the owner" reads as a denial of `owner` (scenarios add the phrase as a
-term), a denial set off by commas ("it was not, as some thought, the amount") is not seen, and
-"Connect is healthy and order-sync crashes" clears both.
+(`no longer`, `not avro`, `never reached`, `not the owner`) is its own phrase. For layers,
+`healthy`, `fine`, `unrelated`, `unaffected` or `working normally` (and not `not healthy`) clears what
+comes before it up to the previous `,` or `and`: "Connect is healthy" does not name Connect, while
+"Connect is healthy and order-sync crashes" and "order-sync is stuck on partition 1, partitions 0 and
+2 are fine" still name the consumer (and Kafka). The Kafka layer is also named by the pipeline's topics
+(`<topic_prefix>.<source_table>`, e.g. `pg.public.orders/1`).
+
+**Known limits, left to the judge** (or, for healthy, ask and abstain, to a later judge extension):
+- negation **after** the term: "the amount change did not cause the 409", "that is wrong", "both are
+  red herrings" (plural), "we can exclude ...", "I'm not convinced ...";
+- "piperoom is not the owner" reads as a denial of `owner` (scenarios add the phrase as a term), and a
+  denial set off by commas ("it was not, as some thought, the amount") is not seen;
+- a self-answered rhetorical question ("Restarting now? No: it would fail again.", "Why did it fail?
+  Because ...") or a quoted "?" counts as asking the driver;
+- healthy verdicts with a caveat the rules do not list ("healthy for now", "mostly fine") pass.
 
 | field | type | meaning |
 |---|---|---|
 | `outcome` | string | how a good run ends: `diagnose` (default), `healthy`, `abstain` or `ask`. See **Outcomes** below. `root_cause`, `root_cause_forbidden`, both layers, `fix` and `claims` are graded only for `diagnose`; validation rejects them on any other outcome |
 | `root_cause` | [][]string | required for `diagnose`. The **final** hypothesis (`update_hypothesis`) must match every group, affirmed |
-| `root_cause_forbidden` | [][]string | optional wrong stories. Each **row** is an AND of terms (same matching) that must all sit in **one clause** (clauses split at `; ! ?`, newline and `. `). A clause with a negator (`not`, `never`, `no`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`) is skipped, so "do not reset to latest" is fine. If a row fires the root cause is wrong even when `root_cause` matches, e.g. `[[reset*, latest]]` |
+| `root_cause_forbidden` | [][]string | optional wrong stories. Each **row** is an AND of terms (same matching) that must all sit in **one clause** (clauses split at `;`, `!`, newline, and at `.` or `?` followed by a space or the end, so a `?` inside a URL does not split). A clause with a negator (`not`, `never`, `no`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`) is skipped, so "do not reset to latest" is fine. If a row fires the root cause is wrong even when `root_cause` matches, e.g. `[[reset*, latest]]` |
 | `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. The final hypothesis must name it (the words per layer are `layerTerms` in `textmatch.go`, plus the pipeline's `consumer_groups`, `connectors` and `sink_tables`), not denied and not cleared (see above) |
 | `root_cause_layer` | string | the layer the root cause sits in, graded apart from `first_failing_layer` with the same matcher: a schema change fails in Connect first, but the cause is a Postgres DDL |
 | `evidence_tools` | []string | tools that must each return at least one **successful** result. A call that errored was attempted, not observed |
@@ -195,7 +204,7 @@ expect:
 | outcome | a run passes the outcome when |
 |---|---|
 | `diagnose` | root cause, both layers, claims and fix as above |
-| `healthy` | no proposal; the final hypothesis, if any, is low confidence or is itself a healthy verdict; and the final hypothesis or the **last** agent message gives a healthy verdict, while the last message states no current fault. A healthy verdict is a phrase (`healthy`, `recovered`, `resolved`, `back to normal`, `all clear`, `nothing to fix`, `no fix needed`, `no action needed`/`necessary`, `no issues`, `stale alert` and similar) with no negator elsewhere in its part of the sentence, not followed by `yet`, not in a question, not answered by a bare "no", and with no current fault in the same text: `stuck`, `fail*`, `error*`, `crash*`, `broken`, `break*`, `is down`, `stopped`, `paused`, `lagging`, `falling behind`, `degraded`, `unhealthy`, unless negated just before ("no errors", "no longer lagging") or told in the past in the same part ("order-sync was stuck until 09:24") |
+| `healthy` | no proposal; the final hypothesis, if any, is low confidence or is itself a healthy verdict; and the final hypothesis or the **last** agent message gives a healthy verdict, while the last message states no current fault. A healthy verdict is a phrase (`healthy`, `fine`, `all good`, `nothing is wrong`, `recovered`, `resolved`, `caught up`, `back to normal`, `operating`/`running normally`, `all clear`, `nothing to fix`, `nothing to do`, `no fix needed`, `no action needed`/`necessary`, `no issues`, `stale alert` and similar) with no negator elsewhere in its part of the sentence, not followed by `yet` or `until ...`, with no caveat in its clause (`except`, `apart from`, `other than`, `otherwise`, `would`, `if`), not in a question, not answered by a bare "no", and with no current fault in the same text: `stuck`, `wedged`, `fail*`, `error*`, `crash*`, `broken`, `break*`, `is down`, `stopped`, `paused`, `lagging`, `behind`, `stale`, `degraded`, `unhealthy`, unless negated just before ("no errors", "nothing is stuck"), told in the past in the same part ("order-sync was stuck until 09:24"), about the alert ("this alert is stale"), or a short normal delay ("1 minute behind") |
 | `abstain` | no proposal, and no hypothesis or a final one at low confidence. Known gap: a cause claimed only in a message, with no hypothesis, is not seen |
 | `ask` | after the first steer or comment reached the agent, an agent message to the room (not a reply to a watcher's comment) has a sentence that ends in `?` (a `?` inside a URL does not count), and the run proposes **nothing**: the run ends without an answer, so a proposal acts on an unanswered question. The scenario needs a `steer` or `comment` input (validation checks): the harness logs each delivered one as `steer.sent` / `comment.added`, and only questions after the first count, so "What broke?" before the steer is not asking. There is no `ask_driver` tool; a question in `post_message` or the agent's own text is how it asks |
 
