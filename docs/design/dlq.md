@@ -565,7 +565,7 @@ provable:
 
 ```
 pipeline orders
-legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or an earlier reading; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
 1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.1 MiB
 2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
   from: pg:public.orders

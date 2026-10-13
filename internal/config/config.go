@@ -18,7 +18,7 @@ type Config struct {
 	WarehouseDBURL    string // WAREHOUSE_DB_URL (dev warehouse; Postgres)
 	KafkaBrokers      string // KAFKA_BROKERS (comma separated)
 	ConnectURL        string // CONNECT_URL
-	SchemaRegistryURL string // SCHEMA_REGISTRY_URL
+	SchemaRegistryURL string // SCHEMA_REGISTRY_URL; set to "" or "off" (any case) = no Schema Registry, and Load stores ""
 	OwnersFile        string // OWNERS_FILE
 	UsersFile         string // USERS_FILE
 	Model             string // PIPEROOM_MODEL
@@ -138,7 +138,7 @@ func Load() Config {
 		WarehouseDBURL:    get("WAREHOUSE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/warehouse?sslmode=disable"),
 		KafkaBrokers:      get("KAFKA_BROKERS", "localhost:29092"),
 		ConnectURL:        get("CONNECT_URL", "http://localhost:8083"),
-		SchemaRegistryURL: get("SCHEMA_REGISTRY_URL", "http://localhost:8081"),
+		SchemaRegistryURL: registryURL(getSet("SCHEMA_REGISTRY_URL", "http://localhost:8081")),
 		OwnersFile:        get("OWNERS_FILE", "dev/owners.yaml"),
 		UsersFile:         get("USERS_FILE", "dev/users.yaml"),
 		Model:             get("PIPEROOM_MODEL", "claude-opus-5-5"),
@@ -395,6 +395,16 @@ func getSet(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// registryURL maps "off" to "": a pipeline without a Schema Registry says so
+// explicitly, instead of every client and map chasing an unreachable default.
+func registryURL(v string) string {
+	v = strings.TrimSpace(v)
+	if strings.EqualFold(v, "off") {
+		return ""
+	}
+	return v
 }
 
 func get(key, def string) string {
