@@ -54,6 +54,9 @@ users:
     email: kabir@example.com
     sub: sub-kabir
     layers: [consumer]
+  - id: ksenia
+    name: Ksenia
+    email: ksenia@example.com
 `
 
 // kafka-connect of the orders pipeline is replaced by a group and a backup, so
@@ -875,6 +878,7 @@ func TestOIDCLookupPerson(t *testing.T) {
 	})
 	t.Run("everyone else is 400 validation", func(t *testing.T) {
 		snap := e.newRoom(t, "priya")
+		first := ""
 		for name, id := range map[string]string{
 			"a viewer":                     viewerID,
 			"an auditor-only principal":    auditorID,
@@ -889,8 +893,16 @@ func TestOIDCLookupPerson(t *testing.T) {
 					t.Errorf("%s to %s = %d, want 400; body %s", kind, name, resp.StatusCode, b)
 					continue
 				}
-				if c, _ := errCode(t, resp); c != "validation" {
+				c, msg := errCode(t, resp)
+				if c != "validation" {
 					t.Errorf("%s to %s: code %q", kind, name, c)
+				}
+				// One message for every refusal, so a reply does not reveal which
+				// ids exist or what role someone has.
+				if first == "" {
+					first = msg
+				} else if msg != first {
+					t.Errorf("%s to %s: message %q differs from %q", kind, name, msg, first)
 				}
 			}
 		}

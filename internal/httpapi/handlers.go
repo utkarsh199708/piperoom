@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"piperoom/internal/events"
+	"piperoom/internal/room"
 )
 
 // meResponse is GET /api/me. layers is what this session may approve, computed
@@ -27,6 +28,22 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, meResponse{
 		ID: u.ID, Name: u.Name, Layers: s.svc.LayersFor(u), Role: roleFrom(r.Context()), GroupsMissing: u.GroupsMissing,
 	})
+}
+
+// handlePeople is GET /api/people: who a driver may give control or a hand-off
+// to (docs/api.md). Members only: the list holds emails, and a viewer can
+// neither grant nor hand off.
+func (s *Server) handlePeople(w http.ResponseWriter, r *http.Request) {
+	if roleFrom(r.Context()) != room.RoleMember {
+		writeError(w, http.StatusForbidden, "viewer", "viewers cannot see the list of people")
+		return
+	}
+	people, err := s.svc.People(r.Context())
+	if err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, people)
 }
 
 func (s *Server) handleListRooms(w http.ResponseWriter, r *http.Request) {

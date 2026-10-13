@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
@@ -80,6 +81,34 @@ func (m *MemStore) LiveByUserID(_ context.Context, userID string, now time.Time,
 		return Session{}, ErrNotFound
 	}
 	return clone(*best), nil
+}
+
+// LiveSessions implements Store.
+func (m *MemStore) LiveSessions(_ context.Context, now time.Time, idle time.Duration, limit int) ([]Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	newest := map[string]*Session{}
+	for _, s := range m.byID {
+		if s.Check(now, idle) != nil {
+			continue
+		}
+		if cur := newest[s.UserID]; cur == nil || s.CreatedAt.After(cur.CreatedAt) {
+			newest[s.UserID] = s
+		}
+	}
+	ids := make([]string, 0, len(newest))
+	for id := range newest {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if limit > 0 && len(ids) > limit {
+		ids = ids[:limit]
+	}
+	out := make([]Session, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, clone(*newest[id]))
+	}
+	return out, nil
 }
 
 // Touch implements Store.

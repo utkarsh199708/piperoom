@@ -163,6 +163,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Use(middleware.Timeout(requestTimeout))
 
 				short.Get("/me", s.handleMe)
+				short.Get("/people", s.handlePeople)
 				short.Get("/rooms", s.handleListRooms)
 				short.Post("/rooms", s.handleCreateRoom)
 				if !s.authSettings.IsOIDC() {

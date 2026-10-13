@@ -27,21 +27,21 @@ func NewSessions(pool *pgxpool.Pool) *Sessions { return &Sessions{pool: pool} }
 // Sessions returns the sessions table on this store's pool.
 func (s *PG) Sessions() *Sessions { return NewSessions(s.pool) }
 
-const sessionCols = `id, token_hash, user_id, name, iss, sub, groups, groups_missing, auth_time,
+const sessionCols = `id, token_hash, user_id, name, email, iss, sub, groups, groups_missing, auth_time,
  amr, acr, method, created_at, last_seen_at, expires_at, revoked_at`
 
 // Create implements auth.Store.
 func (t *Sessions) Create(ctx context.Context, s auth.Session) error {
-	if err := CheckText(s.ID, s.UserID, s.Name, s.Iss, s.Sub, s.ACR, s.Method); err != nil {
+	if err := CheckText(s.ID, s.UserID, s.Name, s.Email, s.Iss, s.Sub, s.ACR, s.Method); err != nil {
 		return fmt.Errorf("store: session create: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, sessionTimeout)
 	defer cancel()
 	_, err := t.pool.Exec(ctx, `
-INSERT INTO sessions (id, token_hash, user_id, name, iss, sub, groups, groups_missing, auth_time,
+INSERT INTO sessions (id, token_hash, user_id, name, email, iss, sub, groups, groups_missing, auth_time,
                       amr, acr, method, created_at, last_seen_at, expires_at, revoked_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
-		s.ID, s.TokenHash, s.UserID, s.Name, s.Iss, s.Sub, nonNil(s.Groups), s.GroupsMissing, nullTime(s.AuthTime),
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+		s.ID, s.TokenHash, s.UserID, s.Name, s.Email, s.Iss, s.Sub, nonNil(s.Groups), s.GroupsMissing, nullTime(s.AuthTime),
 		nonNil(s.AMR), s.ACR, s.Method, s.CreatedAt.UTC(), s.LastSeenAt.UTC(), s.ExpiresAt.UTC(), nullTime(s.RevokedAt))
 	if err != nil {
 		return fmt.Errorf("store: session create: %w", err)
@@ -67,23 +67,62 @@ func (t *Sessions) LiveByUserID(ctx context.Context, userID string, now time.Tim
  ORDER BY created_at DESC LIMIT 1`, userID, now.UTC(), idle.Seconds())
 }
 
+// LiveSessions implements auth.Store: the newest live session of each user,
+// ordered by user id, with the same liveness rule as LiveByUserID.
+func (t *Sessions) LiveSessions(ctx context.Context, now time.Time, idle time.Duration, limit int) ([]auth.Session, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	ctx, cancel := context.WithTimeout(ctx, sessionTimeout)
+	defer cancel()
+	rows, err := t.pool.Query(ctx, `SELECT DISTINCT ON (user_id) `+sessionCols+` FROM sessions
+ WHERE revoked_at IS NULL AND expires_at > $1
+ AND ($2::float8 <= 0 OR last_seen_at + make_interval(secs => $2::float8) > $1)
+ ORDER BY user_id, created_at DESC LIMIT $3`, now.UTC(), idle.Seconds(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: live sessions: %w", err)
+	}
+	defer rows.Close()
+	var out []auth.Session
+	for rows.Next() {
+		s, err := scanSession(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: live sessions: %w", err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: live sessions: %w", err)
+	}
+	return out, nil
+}
+
 // one reads the single session matching where (a fixed string, never client
 // text) with bound arguments.
 func (t *Sessions) one(ctx context.Context, where string, args ...any) (auth.Session, error) {
 	ctx, cancel := context.WithTimeout(ctx, sessionTimeout)
 	defer cancel()
-	var (
-		s                   auth.Session
-		authTime, revokedAt *time.Time
-	)
-	err := t.pool.QueryRow(ctx, `SELECT `+sessionCols+` FROM sessions WHERE `+where, args...).Scan(
-		&s.ID, &s.TokenHash, &s.UserID, &s.Name, &s.Iss, &s.Sub, &s.Groups, &s.GroupsMissing, &authTime,
-		&s.AMR, &s.ACR, &s.Method, &s.CreatedAt, &s.LastSeenAt, &s.ExpiresAt, &revokedAt)
+	s, err := scanSession(t.pool.QueryRow(ctx, `SELECT `+sessionCols+` FROM sessions WHERE `+where, args...))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.Session{}, auth.ErrNotFound
 	}
 	if err != nil {
 		return auth.Session{}, fmt.Errorf("store: session get: %w", err)
+	}
+	return s, nil
+}
+
+// scanSession reads one row of sessionCols.
+func scanSession(row pgx.Row) (auth.Session, error) {
+	var (
+		s                   auth.Session
+		authTime, revokedAt *time.Time
+	)
+	err := row.Scan(
+		&s.ID, &s.TokenHash, &s.UserID, &s.Name, &s.Email, &s.Iss, &s.Sub, &s.Groups, &s.GroupsMissing, &authTime,
+		&s.AMR, &s.ACR, &s.Method, &s.CreatedAt, &s.LastSeenAt, &s.ExpiresAt, &revokedAt)
+	if err != nil {
+		return auth.Session{}, err
 	}
 	s.CreatedAt, s.LastSeenAt, s.ExpiresAt = s.CreatedAt.UTC(), s.LastSeenAt.UTC(), s.ExpiresAt.UTC()
 	if authTime != nil {

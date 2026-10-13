@@ -61,11 +61,16 @@ func ParseUsers(data []byte) (*Users, error) {
 		if strings.ContainsFunc(user.ID, func(r rune) bool { return r == ':' || unicode.IsSpace(r) }) {
 			return nil, fmt.Errorf("room: user id %q: a colon or whitespace is not allowed", user.ID)
 		}
+		// u_ + 12 hex is the id of an IdP user with no users.yaml entry, so a
+		// file id in that space would collide with such a person.
+		if strings.HasPrefix(user.ID, DerivedIDPrefix) {
+			return nil, fmt.Errorf("room: user id %q: the prefix %q is reserved for IdP users without an entry", user.ID, DerivedIDPrefix)
+		}
 		if user.Email != "" {
-			if !strings.Contains(user.Email, "@") || strings.ContainsAny(user.Email, " \t\r\n") {
-				return nil, fmt.Errorf("room: user %q: bad email %q", user.ID, user.Email)
+			if !strings.Contains(user.Email, "@") || strings.ContainsAny(user.Email, " \t\r\n") || !isASCII(user.Email) {
+				return nil, fmt.Errorf("room: user %q: bad email %q (ASCII only, no spaces)", user.ID, user.Email)
 			}
-			key := strings.ToLower(user.Email)
+			key := asciiLower(user.Email)
 			if other, dup := emails[key]; dup {
 				return nil, fmt.Errorf("room: users %q and %q have the same email %q", other, user.ID, user.Email)
 			}
@@ -241,18 +246,44 @@ func (u *Users) BySub(sub string) (User, bool) {
 	return User{}, false
 }
 
-// ByEmail returns the user whose users.yaml email: equals email, ignoring case.
-// An empty email matches nobody.
+// ByEmail returns the user whose users.yaml email: equals email, ignoring ASCII
+// case. An empty or non-ASCII email matches nobody: Unicode folding would let a
+// Kelvin sign or a long s pass for k or s.
 func (u *Users) ByEmail(email string) (User, bool) {
-	if email == "" {
+	if email == "" || !isASCII(email) {
 		return User{}, false
 	}
+	want := asciiLower(email)
 	for _, user := range u.order {
-		if user.Email != "" && strings.EqualFold(user.Email, email) {
+		if user.Email != "" && asciiLower(user.Email) == want {
 			return user, true
 		}
 	}
 	return User{}, false
+}
+
+// DerivedIDPrefix starts the id of an IdP user with no users.yaml entry
+// ("u_" + 12 hex of SHA-256(iss|sub)); users.yaml may not use it.
+const DerivedIDPrefix = "u_"
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// asciiLower lower-cases A-Z only.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 32
+		}
+	}
+	return string(b)
 }
 
 // All returns every user in file order.

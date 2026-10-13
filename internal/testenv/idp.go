@@ -53,6 +53,8 @@ type FakeIdP struct {
 	// code_challenge (invalid_grant). NewFakeIdP sets it to true; set false to
 	// test a client that does not use PKCE.
 	RequirePKCE bool
+	// AZP, when set, is put in every ID token as the azp (authorized party) claim.
+	AZP string
 	// OmitNonce stops the IdP echoing the nonce (a non-compliant IdP).
 	OmitNonce bool
 	// Now is the clock. Default time.Now.
@@ -287,6 +289,9 @@ func (f *FakeIdP) IssueIDToken(u IDPUser, nonce string, fault IDPFault) string {
 	}
 	if nonce != "" && !f.OmitNonce {
 		claims["nonce"] = nonce
+	}
+	if f.AZP != "" {
+		claims["azp"] = f.AZP
 	}
 	if u.Email != "" {
 		claims["email"] = u.Email

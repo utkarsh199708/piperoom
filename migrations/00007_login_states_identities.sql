@@ -29,6 +29,11 @@ CREATE TABLE identities (
     PRIMARY KEY (iss, sub)
 );
 
+-- sessions.email: the IdP email, kept only when the token said email_verified.
+-- GET /api/people shows it next to the name in the control and hand-off pickers.
+ALTER TABLE sessions ADD COLUMN email text NOT NULL DEFAULT '';
+
 -- +goose Down
+ALTER TABLE sessions DROP COLUMN IF EXISTS email;
 DROP TABLE IF EXISTS identities;
 DROP TABLE IF EXISTS login_states;

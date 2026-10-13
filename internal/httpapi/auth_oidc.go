@@ -48,7 +48,7 @@ const loginRateLimit = 300
 // browser to the IdP.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
-	if !s.loginLimit.allow(s.clientIP(r), now) {
+	if !s.loginLimit.allow(limitKey(s.clientIP(r)), now) {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts from this address; try again in a minute")
 		return
@@ -182,6 +182,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		TokenHash:     hash,
 		UserID:        userID,
 		Name:          name,
+		Email:         verifiedEmail(claims),
 		Iss:           claims.Issuer,
 		Sub:           claims.Subject,
 		Groups:        claims.Groups,
@@ -228,12 +229,21 @@ func (s *Server) mapIdentity(ctx context.Context, c auth.Claims) (id, name strin
 	bound, err := s.identities.UserFor(ctx, c.Issuer, c.Subject)
 	switch {
 	case err == nil:
+		// A users.yaml sub: pin added after the binding wins over an old row:
+		// otherwise a stale (iss, sub) -> user row would let that account in
+		// although the file now names another sub for the user.
+		if u, ok := s.svc.LookupUser(bound); ok && u.Sub != "" && u.Sub != c.Subject {
+			s.log.Warn("auth: login refused: an old identity row points at a user now pinned to another sub", "user", bound, "iss", c.Issuer)
+			return "", "", &authError{http.StatusForbidden, "not_provisioned", "this account is not the one pinned for " + bound}
+		}
 		return bound, s.displayName(bound, c), nil
 	case !errors.Is(err, auth.ErrIdentityNotFound):
 		s.log.Error("auth: look up identity", "err", err)
 		return "", "", &authError{http.StatusInternalServerError, "internal_error", "internal error"}
 	}
-	if c.EmailVerified && c.Email != "" {
+	// Emails bind as ASCII only: Unicode case folding would let a Kelvin sign
+	// or a long s pass for k or s (room.Users.ByEmail enforces the same).
+	if c.EmailVerified && c.Email != "" && isASCII(c.Email) {
 		if u, ok := s.svc.UserByEmail(c.Email); ok {
 			refuse := &authError{http.StatusForbidden, "not_provisioned", "this email is already linked to a different account; ask an admin to unbind it"}
 			if u.Sub != "" {
@@ -255,6 +265,24 @@ func (s *Server) mapIdentity(ctx context.Context, c auth.Claims) (id, name strin
 	}
 	derived := DerivedUserID(c.Issuer, c.Subject)
 	return derived, s.displayName(derived, c), nil
+}
+
+// verifiedEmail is the email to keep on the session: only one the IdP said was
+// verified, because GET /api/people shows it to other members.
+func verifiedEmail(c auth.Claims) string {
+	if c.EmailVerified {
+		return c.Email
+	}
+	return ""
+}
+
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // displayName is the users.yaml name when the id is in users.yaml, else the
@@ -384,6 +412,7 @@ func inPrefixes(ps []netip.Prefix, a netip.Addr) bool {
 type rateLimiter struct {
 	limit  int
 	window time.Duration
+	max    int // hard cap on tracked keys
 
 	mu      sync.Mutex
 	buckets map[string]*bucket
@@ -396,23 +425,56 @@ type bucket struct {
 }
 
 func newRateLimiter(limit int, window time.Duration) *rateLimiter {
-	return &rateLimiter{limit: limit, window: window, buckets: map[string]*bucket{}}
+	return &rateLimiter{limit: limit, window: window, max: maxLoginBuckets, buckets: map[string]*bucket{}}
 }
 
-// allow counts one call for key at now and reports whether it is within the limit.
+// maxLoginBuckets is the hard cap on tracked client keys. When the table is
+// full of live buckets, a new key is answered 429 rate_limited: the cap trades a
+// possible refusal of new clients during a flood for a bounded amount of memory.
+const maxLoginBuckets = 10000
+
+// limitKey is the rate-limit key for a client address: an IPv6 address counts
+// as its /64 (one subscriber owns a whole /64, so per-address keys would let one
+// client mint a fresh budget for every address and fill the table), an IPv4
+// address as itself.
+func limitKey(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	a = a.Unmap()
+	if a.Is6() {
+		return netip.PrefixFrom(a, 64).Masked().String()
+	}
+	return a.String()
+}
+
+// prune drops every bucket whose window is over. Caller holds l.mu.
+func (l *rateLimiter) prune(now time.Time) {
+	for k, b := range l.buckets {
+		if now.Sub(b.start) >= l.window {
+			delete(l.buckets, k)
+		}
+	}
+	l.pruneAt = now.Add(l.window)
+}
+
+// allow counts one call for key at now and reports whether it is within the
+// limit. A key that is not tracked yet is refused while the table is full.
 func (l *rateLimiter) allow(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if now.After(l.pruneAt) {
-		for k, b := range l.buckets {
-			if now.Sub(b.start) >= l.window {
-				delete(l.buckets, k)
-			}
-		}
-		l.pruneAt = now.Add(l.window)
+		l.prune(now)
 	}
 	b := l.buckets[key]
 	if b == nil || now.Sub(b.start) >= l.window {
+		if b == nil && len(l.buckets) >= l.max {
+			l.prune(now) // expired buckets may be what fills the table
+			if len(l.buckets) >= l.max {
+				return false
+			}
+		}
 		b = &bucket{start: now}
 		l.buckets[key] = b
 	}

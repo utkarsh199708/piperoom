@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 
 	"piperoom/internal/auth"
@@ -97,23 +98,84 @@ func (s *Service) LookupPerson(ctx context.Context, id string) (User, error) {
 		return u, nil
 	}
 	if s.sessions == nil || id == "" {
-		return User{}, validation("unknown user")
+		return User{}, errNotAPerson()
 	}
 	sess, err := s.sessions.LiveByUserID(ctx, id, s.now(), s.sessionIdle)
 	if errors.Is(err, auth.ErrNotFound) {
-		return User{}, validation("unknown user, or not signed in right now")
+		return User{}, errNotAPerson()
 	}
 	if err != nil {
 		return User{}, fmt.Errorf("room: look up person %q: %w", id, err)
 	}
 	if role, ok := s.RoleFor(sess.UserID, sess.Groups); !ok || role != RoleMember {
-		return User{}, validation("this user is a viewer and cannot take control or receive a hand-off")
+		return User{}, errNotAPerson()
 	}
 	name := sess.Name
 	if name == "" {
 		name = sess.UserID
 	}
 	return User{ID: sess.UserID, Name: name, Groups: sess.Groups, GroupsMissing: sess.GroupsMissing}, nil
+}
+
+// PersonEntry is one entry of GET /api/people: someone a driver may give control or a
+// hand-off to. Email is set only for an IdP user whose token said
+// email_verified; users.yaml users have none.
+type PersonEntry struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Email string `json:"email,omitempty"`
+}
+
+// maxPeople bounds the list.
+const maxPeople = 1000
+
+// People lists the people LookupPerson would accept: every users.yaml user, then
+// each member with a live session (newest session per user, role member for its
+// groups). users.yaml users come first in file order, IdP members after them
+// ordered by name then id. A viewer or an auditor-only principal is not
+// listed.
+func (s *Service) People(ctx context.Context) ([]PersonEntry, error) {
+	out := make([]PersonEntry, 0, len(s.users.All()))
+	listed := map[string]bool{}
+	for _, u := range s.users.All() {
+		out = append(out, PersonEntry{ID: u.ID, Name: u.Name})
+		listed[u.ID] = true
+	}
+	if s.sessions == nil {
+		return out, nil
+	}
+	live, err := s.sessions.LiveSessions(ctx, s.now(), s.sessionIdle, maxPeople)
+	if err != nil {
+		return nil, fmt.Errorf("room: list people: %w", err)
+	}
+	var idp []PersonEntry
+	for _, sess := range live {
+		if listed[sess.UserID] {
+			continue
+		}
+		if role, ok := s.RoleFor(sess.UserID, sess.Groups); !ok || role != RoleMember {
+			continue
+		}
+		name := sess.Name
+		if name == "" {
+			name = sess.UserID
+		}
+		idp = append(idp, PersonEntry{ID: sess.UserID, Name: name, Email: sess.Email})
+	}
+	sort.Slice(idp, func(i, j int) bool {
+		if idp[i].Name != idp[j].Name {
+			return idp[i].Name < idp[j].Name
+		}
+		return idp[i].ID < idp[j].ID
+	})
+	return append(out, idp...), nil
+}
+
+// errNotAPerson is the one answer LookupPerson gives for every refusal (unknown
+// id, no live session, viewer, auditor-only), so the reply does not tell a
+// caller which ids exist or what role someone has.
+func errNotAPerson() error {
+	return validation("that person cannot be given control or a hand-off: unknown, not signed in, or not a member")
 }
 
 // authorizeLayer decides whether user may approve or reject the layer of a
@@ -140,7 +202,7 @@ func (s *Service) authorizeLayer(pipelineID string, user User, layer, confirm st
 			return g, nil
 		}
 	}
-	if user.OwnsLayer(layer) && !s.layerOverridden(pipelineID, layer) {
+	if user.OwnsLayer(layer) && !s.userLayersBlocked(pipelineID, layer) {
 		return owners.GrantUserPrefix + user.ID, nil
 	}
 	if user.GroupsMissing && s.layerListsGroup(pipelineID, layer) {
@@ -149,15 +211,17 @@ func (s *Service) authorizeLayer(pipelineID string, user User, layer, confirm st
 	return "", notLayerOwner(fmt.Sprintf("user %s does not own layer %q", user.ID, layer))
 }
 
-// layerOverridden reports whether a pipeline owners: block replaces the layer's
-// default owners, in which case the users.yaml layers list does not apply.
-func (s *Service) layerOverridden(pipelineID, layer string) bool {
+// userLayersBlocked reports whether the users.yaml layers list must not grant
+// this layer: a pipeline owners: block replaces the layer's default owners, or
+// the pipeline id is not empty and matches no pipeline (fail closed, like
+// owners.CanApprove).
+func (s *Service) userLayersBlocked(pipelineID, layer string) bool {
 	if s.owners == nil {
 		return false
 	}
 	p, ok := s.owners.Pipeline(pipelineID)
 	if !ok {
-		return false
+		return pipelineID != ""
 	}
 	_, over := p.Owners[layer]
 	return over

@@ -12,7 +12,7 @@ import (
 
 // identitiesCmd runs `devctl identities unbind <user>` (docs/design/auth.md
 // section 2.1). It deletes the user's identities row in the room database
-// (PIPEROOM_ROOM_DB_URL), so the next verified-email login binds the new IdP
+// (PIPEROOM_DB_URL), so the next verified-email login binds the new IdP
 // account. Use it when a person moves to a new IdP account, or after a login was
 // refused because the email is bound to another account.
 func identitiesCmd(ctx context.Context, st *stack, args []string, out io.Writer) error {

@@ -223,10 +223,20 @@ func (o *OIDC) Exchange(ctx context.Context, code, verifier, nonce string) (Clai
 	ctx = oidc.ClientContext(ctx, o.http)
 	tok, err := conf.Exchange(ctx, code, oauth2.VerifierOption(verifier))
 	if err != nil {
+		// A RetrieveError carries the response body, which may hold anything the
+		// IdP wrote. Only the status and a vetted OAuth error code are kept; the
+		// error value itself is never wrapped or logged.
 		var re *oauth2.RetrieveError
-		if errors.As(err, &re) && re.Response != nil && re.Response.StatusCode < 500 {
+		if errors.As(err, &re) {
+			status := 0
+			if re.Response != nil {
+				status = re.Response.StatusCode
+			}
+			if status >= 500 || status == 0 {
+				return Claims{}, fmt.Errorf("%w: token endpoint said %d %s", ErrIDPUnavailable, status, safeOAuthCode(re.ErrorCode))
+			}
 			// The IdP answered and said no: a bad, used or expired code.
-			return Claims{}, fmt.Errorf("%w: token endpoint said %d %s", ErrLoginRefused, re.Response.StatusCode, safeOAuthCode(re.ErrorCode))
+			return Claims{}, fmt.Errorf("%w: token endpoint said %d %s", ErrLoginRefused, status, safeOAuthCode(re.ErrorCode))
 		}
 		return Claims{}, fmt.Errorf("%w: token call: %w", ErrIDPUnavailable, scrubURLErr(err))
 	}
@@ -244,6 +254,14 @@ func (o *OIDC) Exchange(ctx context.Context, code, verifier, nonce string) (Clai
 	var all map[string]json.RawMessage
 	if err := idt.Claims(&all); err != nil {
 		return Claims{}, fmt.Errorf("%w: id token claims: %v", ErrLoginRefused, err)
+	}
+	// OIDC Core 3.1.3.7: if the token names an authorized party, it must be us.
+	// go-oidc checks aud only.
+	if raw, present := all["azp"]; present && string(raw) != "null" {
+		var azp string
+		if json.Unmarshal(raw, &azp) != nil || azp != o.cfg.ClientID {
+			return Claims{}, fmt.Errorf("%w: id token azp is not this client", ErrLoginRefused)
+		}
 	}
 	c := o.claimsFrom(idt, all)
 	if c.Subject == "" || len(c.Subject) > maxClaimBytes || len(c.Issuer) > maxClaimBytes {
