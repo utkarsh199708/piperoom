@@ -65,6 +65,10 @@ type Cause struct {
 	Message string `json:"message,omitempty"`
 	// Frames are the top stack frames, "pkg.Class.method", without file:line.
 	Frames []string `json:"frames,omitempty"`
+	// Log is true when the line carried a log prefix (timestamp/level) or a
+	// logfmt level= key. Such a line after the root is log noise and is not
+	// hashed; ERROR:/Detail:/Hint: lines are not log lines and always are.
+	Log bool `json:"log,omitempty"`
 }
 
 // Template is a normalised error text: the chain of causes, outermost first.
@@ -217,7 +221,14 @@ func parseCause(line string) Cause {
 	if line == "" {
 		return Cause{}
 	}
-	line = reLogPrefix.ReplaceAllString(line, "")
+	logged := false
+	if loc := reLogPrefix.FindStringIndex(line); loc != nil && loc[1] > 0 {
+		logged = true
+		line = line[loc[1]:]
+	}
+	if strings.Contains(line, "level=") {
+		logged = true
+	}
 	line = strings.TrimPrefix(line, "Caused by:")
 	line = strings.TrimPrefix(line, "Suppressed:")
 	line = strings.TrimLeft(line, " \t")
@@ -225,9 +236,17 @@ func parseCause(line string) Cause {
 		line = reLogfmt.ReplaceAllString(line, "$1")
 	}
 	if m := reClass.FindStringSubmatch(line); m != nil && looksLikeClass(m[1]) {
-		return Cause{Class: m[1], Message: maskMessage(m[2])}
+		// After a log prefix "pkg.Logger: text" is a logger name, not a
+		// thrown exception; only exception-shaped names count as classes.
+		if !logged || looksLikeException(m[1]) {
+			return Cause{Class: m[1], Message: maskMessage(m[2]), Log: logged}
+		}
 	}
-	return Cause{Message: maskMessage(line)}
+	return Cause{Message: maskMessage(line), Log: logged}
+}
+
+func looksLikeException(class string) bool {
+	return strings.HasSuffix(class, "Exception") || strings.HasSuffix(class, "Error") || strings.HasSuffix(class, "Throwable")
 }
 
 // looksLikeClass accepts a dotted name whose last segment starts upper-case
@@ -564,9 +583,10 @@ func (t Template) canonical(forHash bool) string {
 		}
 	}
 	for i, c := range t.Causes {
-		// Plain log lines after the root are left out of the hash: a trace and
-		// the same trace with a trailing log line are one failure.
-		if forHash && i > root && c.Class == "" {
+		// Log lines after the root are left out of the hash: a trace and the
+		// same trace with a trailing log line are one failure. Bare message
+		// lines (ERROR:, Detail:, Hint:) are not log lines and stay.
+		if forHash && i > root && c.Log {
 			continue
 		}
 		if i > 0 {

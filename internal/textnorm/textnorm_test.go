@@ -156,8 +156,15 @@ func TestTruncatedTraceMatches(t *testing.T) {
 	if Fingerprint(full) != Fingerprint(cut) {
 		t.Errorf("tools.Truncate output does not match:\n%s\n---\n%s", Normalize(full), Normalize(cut))
 	}
-	// Sweep every cut after the root cause's first frame line has ended: the
-	// partial line before the marker must never become a bogus cause.
+	sweepCuts(t, full)
+	// The same sweep with a log line after the root: it never changes the hash.
+	sweepCuts(t, full+"[2026-10-13 09:00:01,123] INFO Worker stopped\n")
+}
+
+// sweepCuts checks every cut after the root cause's first frame line has
+// ended: the partial line before the marker must never become a bogus cause.
+func sweepCuts(t *testing.T, full string) {
+	t.Helper()
 	marker := "sendHttpRequest(RestService.java:297)\n"
 	start := strings.Index(full, marker) + len(marker)
 	want := Fingerprint(full)
@@ -564,11 +571,49 @@ func TestEvidenceShapes(t *testing.T) {
 
 func TestTrailingLogLineNotHashed(t *testing.T) {
 	base := "a.b.OuterException: x\nCaused by: a.b.RootException: y\n\tat r.One.m(One.java:1)"
-	if Fingerprint(base) != Fingerprint(base+"\nWorker stopped after 3 retries") {
-		t.Error("trailing class-less log line changed the fingerprint")
+	for _, log := range []string{
+		"[2026-10-13 09:00:01,123] INFO Worker stopped after 3 retries",
+		`time=2026-10-13T09:00:01Z level=INFO msg="worker stopped"`,
+	} {
+		if Fingerprint(base) != Fingerprint(base+"\n"+log) {
+			t.Errorf("trailing log line %q changed the fingerprint", log)
+		}
 	}
-	// A class-less line before the root still counts.
+	// A bare class-less line before the root still counts.
 	if Fingerprint("Task 0: FAILED:\n"+base) == Fingerprint(base) {
 		t.Error("leading plain line ignored")
+	}
+}
+
+// Bare message lines after the root name the real error and must be hashed.
+func TestBareLinesAfterRootCount(t *testing.T) {
+	logger := "[2026-10-13 09:00:01,123] ERROR org.apache.kafka.connect.runtime.WorkerTask: Task threw an uncaught exception\n"
+	pairs := [][2]string{
+		{logger + `ERROR: relation "orders" does not exist`, logger + "ERROR: permission denied for table orders"},
+		{"java.net.ConnectException: Connection refused\nERROR: disk full", "java.net.ConnectException: Connection refused\nERROR: out of memory"},
+		{"org.postgresql.util.PSQLException: ERROR: update or delete violates foreign key\nDetail: Key (id)=(5) is still referenced from table \"items\".",
+			"org.postgresql.util.PSQLException: ERROR: update or delete violates foreign key\nDetail: Key (id)=(5) already exists."},
+		{"org.postgresql.util.PSQLException: ERROR: x\nHint: Increase max_replication_slots.", "org.postgresql.util.PSQLException: ERROR: x\nHint: Drop the slot."},
+	}
+	for _, p := range pairs {
+		if Fingerprint(p[0]) == Fingerprint(p[1]) {
+			t.Errorf("same fingerprint:\n%s\n---\n%s", p[0], p[1])
+		}
+	}
+}
+
+func TestLoggerNameIsNotAClass(t *testing.T) {
+	line := "[2026-10-13 09:00:01,123] ERROR org.apache.kafka.connect.runtime.WorkerTask: Task threw an uncaught exception"
+	tpl := Normalize(line + "\njava.net.ConnectException: Connection refused\n\tat a.B.c(B.java:1)")
+	if tpl.Causes[0].Class != "" || !tpl.Causes[0].Log {
+		t.Errorf("logger parsed as class: %+v", tpl.Causes[0])
+	}
+	if tpl.Causes[1].Class != "java.net.ConnectException" {
+		t.Errorf("exception lost: %+v", tpl.Causes[1])
+	}
+	// An exception on a logged line is still an exception.
+	got := Normalize("[2026-10-13 09:00:01,123] ERROR java.net.ConnectException: refused").Causes[0]
+	if got.Class != "java.net.ConnectException" {
+		t.Errorf("logged exception lost: %+v", got)
 	}
 }
