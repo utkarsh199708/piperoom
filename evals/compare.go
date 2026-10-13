@@ -3,6 +3,7 @@ package evals
 import (
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"sort"
 	"strings"
@@ -41,6 +42,9 @@ type PairedComparison struct {
 	FailToPass int `json:"fail_to_pass"`
 	BothPass   int `json:"both_pass"`
 	BothFail   int `json:"both_fail"`
+	// McNemarP is the exact two-sided McNemar p-value: the binomial test of
+	// the discordant pairs against an even split. 1 with none.
+	McNemarP float64 `json:"mcnemar_p"`
 	// TooSmall is true below MinPairs pairs.
 	TooSmall bool `json:"too_small"`
 }
@@ -78,6 +82,7 @@ func ComparePaired(base, cand Report) PairedComparison {
 			cp++
 		}
 	}
+	pc.McNemarP = McNemarExactP(pc.PassToFail, pc.FailToPass)
 	n := float64(pc.Pairs)
 	pc.BasePassRate, pc.CandPassRate = float64(bp)/n, float64(cp)/n
 	pc.Diff = pc.CandPassRate - pc.BasePassRate
@@ -144,6 +149,25 @@ func BootstrapDiffCI(base, cand []bool, resamples int, seed uint64) (lo, hi floa
 	return sortedPercentile(means, 2.5), sortedPercentile(means, 97.5)
 }
 
+// McNemarExactP is the exact two-sided McNemar p-value for b and c
+// discordant pairs: 2 × P(X <= min(b, c)) for X ~ Binomial(b+c, 1/2), at
+// most 1. The terms are summed in log space, so large counts stay finite.
+func McNemarExactP(b, c int) float64 {
+	n := b + c
+	if n == 0 {
+		return 1
+	}
+	k := min(b, c)
+	lgN, _ := math.Lgamma(float64(n + 1))
+	var sum float64
+	for i := 0; i <= k; i++ {
+		lgI, _ := math.Lgamma(float64(i + 1))
+		lgR, _ := math.Lgamma(float64(n - i + 1))
+		sum += math.Exp(lgN - lgI - lgR - float64(n)*math.Ln2)
+	}
+	return math.Min(1, 2*sum)
+}
+
 func b2f(b bool) float64 {
 	if b {
 		return 1
@@ -160,8 +184,8 @@ func (pc PairedComparison) WriteMarkdown(w io.Writer) error {
 	} else {
 		fmt.Fprintf(&b, "%d pair(s), %d unmatched run(s). Pass rate %.1f%% → %.1f%% (%+.1f points), 95%% bootstrap CI [%+.1f, %+.1f] points (%d resamples, seed %d).\n\n",
 			pc.Pairs, pc.Unmatched, 100*pc.BasePassRate, 100*pc.CandPassRate, 100*pc.Diff, 100*pc.CILow, 100*pc.CIHigh, pc.Resamples, pc.Seed)
-		fmt.Fprintf(&b, "McNemar discordant pairs: pass→fail %d, fail→pass %d (both pass %d, both fail %d).\n",
-			pc.PassToFail, pc.FailToPass, pc.BothPass, pc.BothFail)
+		fmt.Fprintf(&b, "McNemar discordant pairs: pass→fail %d, fail→pass %d (both pass %d, both fail %d); exact two-sided p = %.3f.\n",
+			pc.PassToFail, pc.FailToPass, pc.BothPass, pc.BothFail, pc.McNemarP)
 	}
 	if pc.TooSmall {
 		fmt.Fprintf(&b, "\nSample too small to call: %d pair(s), need at least %d.\n", pc.Pairs, MinPairs)

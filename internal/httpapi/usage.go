@@ -8,16 +8,29 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"piperoom/internal/room"
 	"piperoom/internal/store"
 )
 
 // maxPipelineIDLen bounds the pipeline query parameter of GET /api/usage.
 const maxPipelineIDLen = 200
 
+// UsageVisibility is what the usage routes check before any role check
+// (tenancy, docs/design/tenancy.md): a room or pipeline the caller cannot see
+// answers 404. *room.Service implements it with an adapter until #112 merges;
+// it then switches to #112's roomVisible / CanSeePipeline.
+type UsageVisibility interface {
+	UsageRoomVisible(user room.User, snap room.RoomSnapshot) bool
+	UsagePipelineVisible(user room.User, pipelineID string) bool
+}
+
 // Spend configures the usage routes (docs/api.md, docs/design/cost.md 4).
 type Spend struct {
-	// Store holds the spend tables; nil leaves both routes unmounted (404).
+	// Store holds the spend tables; nil = both routes answer 404 (they stay
+	// mounted, so route walks see them).
 	Store store.SpendStore
+	// Visibility decides what a caller can see; nil = the room service.
+	Visibility UsageVisibility
 	// The configured caps, shown as "limit"; 0 = off.
 	RoomTokens           int64
 	PipelineDailyTokens  int64
@@ -26,7 +39,7 @@ type Spend struct {
 	Now func() time.Time
 }
 
-// WithSpend mounts GET /api/rooms/{id}/usage and GET /api/usage.
+// WithSpend serves GET /api/rooms/{id}/usage and GET /api/usage.
 func WithSpend(sp Spend) Option {
 	return func(s *Server) {
 		if sp.Now == nil {
@@ -120,13 +133,34 @@ type pipelineUsageResponse struct {
 	usageBody
 }
 
-// handleRoomUsage serves GET /api/rooms/{id}/usage: anyone who may read the
-// room, since its agent.usage events carry the same numbers. A shadow room's
-// spend stays hidden until it closes, like the rest of its run.
+// errNotFound is the body of a missing room (room.mapStoreErr), so a room the
+// caller cannot see is told apart from nothing.
+var errNotFound = &room.Error{Status: http.StatusNotFound, Code: "not_found", Msg: "not found"}
+
+// visibility returns the configured visibility check.
+func (s *Server) visibility() UsageVisibility {
+	if s.spend.Visibility != nil {
+		return s.spend.Visibility
+	}
+	return s.svc
+}
+
+// handleRoomUsage serves GET /api/rooms/{id}/usage: anyone who can see and
+// read the room, since its agent.usage events carry the same numbers. A room
+// the caller cannot see is a 404 like a missing one. A shadow room's spend
+// stays hidden until it closes, like the rest of its run.
 func (s *Server) handleRoomUsage(w http.ResponseWriter, r *http.Request) {
+	if s.spend.Store == nil {
+		s.writeErr(w, errNotFound)
+		return
+	}
 	snap, err := s.svc.GetRoom(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		s.writeErr(w, err)
+		return
+	}
+	if !s.visibility().UsageRoomVisible(userFrom(r.Context()), snap) {
+		s.writeErr(w, errNotFound)
 		return
 	}
 	if snap.Shadow && snap.Status != "closed" {
@@ -143,9 +177,15 @@ func (s *Server) handleRoomUsage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handlePipelineUsage serves GET /api/usage?pipeline=&day=: the pipeline's
-// members by the export rule, the solo user, and auditors.
+// handlePipelineUsage serves GET /api/usage?pipeline=&day=. Visibility comes
+// first: an unknown pipeline, or one outside the caller's tenants, is 404
+// before any role check, so the 403 never confirms that a pipeline exists.
+// Then the pipeline's members by the export rule, the solo user, and auditors.
 func (s *Server) handlePipelineUsage(w http.ResponseWriter, r *http.Request) {
+	if s.spend.Store == nil {
+		s.writeErr(w, errNotFound)
+		return
+	}
 	q := r.URL.Query()
 	pipelineID := q.Get("pipeline")
 	if pipelineID == "" {
@@ -160,10 +200,15 @@ func (s *Server) handlePipelineUsage(w http.ResponseWriter, r *http.Request) {
 	if day == "" {
 		day = s.spend.Now().UTC().Format(time.DateOnly)
 	} else if store.CheckDay(day) != nil {
-		s.writeErr(w, validation("day must be a YYYY-MM-DD date (UTC)"))
+		s.writeErr(w, validation("day must be a YYYY-MM-DD date (UTC) from 2000-01-01 to 2999-12-31"))
 		return
 	}
-	if !s.svc.CanReadPipelineUsage(userFrom(r.Context()), pipelineID) {
+	user := userFrom(r.Context())
+	if !s.visibility().UsagePipelineVisible(user, pipelineID) {
+		writeError(w, http.StatusNotFound, "not_found", "pipeline not found")
+		return
+	}
+	if !s.svc.CanReadPipelineUsage(user, pipelineID) {
 		writeError(w, http.StatusForbidden, "not_allowed", "reading a pipeline's usage needs an approver or backup of one of its layers, or the auditor role")
 		return
 	}

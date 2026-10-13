@@ -129,3 +129,11 @@ func (u *usageRelay) emit(ctx context.Context, roomID string, p events.AgentUsag
 		u.log.Warn("server: could not record the hand-off's model usage", "room", roomID, "err", err)
 	}
 }
+
+// newRoomService builds the room service and points the usage relay at it, so
+// the hand-off's agent.usage events reach the room log.
+func newRoomService(d room.Deps, usage *usageRelay) *room.Service {
+	svc := room.New(d)
+	usage.set(svc)
+	return svc
+}

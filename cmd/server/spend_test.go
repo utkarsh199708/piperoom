@@ -57,19 +57,20 @@ func TestSpendSetup(t *testing.T) {
 		edit func(*config.Config)
 		want string
 	}{
-		"cost with an exponent":  {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "1e3", prices }, "PIPEROOM_PIPELINE_DAILY_COST_USD"},
-		"negative cost":          {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "-1", prices }, "PIPEROOM_PIPELINE_DAILY_COST_USD"},
-		"cost without digits":    {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = ".5", prices }, "PIPEROOM_PIPELINE_DAILY_COST_USD"},
-		"cost with a dangling .": {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "5.", prices }, "PIPEROOM_PIPELINE_DAILY_COST_USD"},
-		"cost too large":         {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "2000000000", prices }, "too large"},
-		"cost without prices":    {func(c *config.Config) { c.PipelineDailyCostUSD = "10" }, "needs PIPEROOM_MODEL_PRICES"},
-		"bad daily tokens":       {func(c *config.Config) { c.PipelineDailyTokenBudget = "lots" }, "PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET"},
-		"negative daily tokens":  {func(c *config.Config) { c.PipelineDailyTokenBudget = "-5" }, "PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET"},
-		"bad room budget":        {func(c *config.Config) { c.RoomTokenBudget = "2M" }, "PIPEROOM_ROOM_TOKEN_BUDGET"},
-		"missing prices file":    {func(c *config.Config) { c.ModelPrices = filepath.Join(t.TempDir(), "none.json") }, "PIPEROOM_MODEL_PRICES"},
-		"broken prices file":     {func(c *config.Config) { c.ModelPrices = writePrices(t, `{"m":{"input":1}}`) }, "PIPEROOM_MODEL_PRICES"},
-		"unpriced main model":    {func(c *config.Config) { c.Model, c.PipelineDailyCostUSD, c.ModelPrices = "other", "10", prices }, `PIPEROOM_MODEL="other"`},
-		"unpriced triage model":  {func(c *config.Config) { c.TriageModel, c.PipelineDailyCostUSD, c.ModelPrices = "tri", "10", prices }, `PIPEROOM_TRIAGE_MODEL="tri"`},
+		"cost with an exponent":       {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "1e3", prices }, "PIPEROOM_PIPELINE_DAILY_COST_USD"},
+		"negative cost":               {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "-1", prices }, "PIPEROOM_PIPELINE_DAILY_COST_USD"},
+		"cost without digits":         {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = ".5", prices }, "PIPEROOM_PIPELINE_DAILY_COST_USD"},
+		"cost with a dangling .":      {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "5.", prices }, "PIPEROOM_PIPELINE_DAILY_COST_USD"},
+		"cost finer than a millionth": {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "1.0000001", prices }, "decimal places"},
+		"cost too large":              {func(c *config.Config) { c.PipelineDailyCostUSD, c.ModelPrices = "2000000000", prices }, "too large"},
+		"cost without prices":         {func(c *config.Config) { c.PipelineDailyCostUSD = "10" }, "needs PIPEROOM_MODEL_PRICES"},
+		"bad daily tokens":            {func(c *config.Config) { c.PipelineDailyTokenBudget = "lots" }, "PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET"},
+		"negative daily tokens":       {func(c *config.Config) { c.PipelineDailyTokenBudget = "-5" }, "PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET"},
+		"bad room budget":             {func(c *config.Config) { c.RoomTokenBudget = "2M" }, "PIPEROOM_ROOM_TOKEN_BUDGET"},
+		"missing prices file":         {func(c *config.Config) { c.ModelPrices = filepath.Join(t.TempDir(), "none.json") }, "PIPEROOM_MODEL_PRICES"},
+		"broken prices file":          {func(c *config.Config) { c.ModelPrices = writePrices(t, `{"m":{"input":1}}`) }, "PIPEROOM_MODEL_PRICES"},
+		"unpriced main model":         {func(c *config.Config) { c.Model, c.PipelineDailyCostUSD, c.ModelPrices = "other", "10", prices }, `PIPEROOM_MODEL="other"`},
+		"unpriced triage model":       {func(c *config.Config) { c.TriageModel, c.PipelineDailyCostUSD, c.ModelPrices = "tri", "10", prices }, `PIPEROOM_TRIAGE_MODEL="tri"`},
 	}
 	for name, b := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -81,6 +82,13 @@ func TestSpendSetup(t *testing.T) {
 			}
 		})
 	}
+	t.Run("six decimals", func(t *testing.T) {
+		c := base
+		c.PipelineDailyCostUSD, c.ModelPrices = "0.000001", prices
+		if s, err := spendSetup(c); err != nil || s.cost.PipelineDailyCostUSD != 0.000001 {
+			t.Fatalf("six decimals: %+v, %v", s.cost, err)
+		}
+	})
 	t.Run("unpriced model without a cost cap", func(t *testing.T) {
 		c := base
 		c.Model, c.ModelPrices = "other", prices
@@ -154,5 +162,24 @@ func TestUsageRelay(t *testing.T) {
 	relay.emit(ctx, "r_unknown", p)
 	if !strings.Contains(logs.String(), "could not record the hand-off's model usage") {
 		t.Fatalf("logs = %q, want a warning for an unknown room", logs.String())
+	}
+}
+
+func TestNewRoomServiceWiresTheUsageRelay(t *testing.T) {
+	ctx := context.Background()
+	relay := &usageRelay{log: slog.New(slog.DiscardHandler)}
+	svc := newRoomService(room.Deps{Store: memstore.New(), Users: room.DefaultUsers(), Run: fakeRun}, relay)
+	t.Cleanup(svc.Close)
+	snap, err := svc.CreateRoom(ctx, room.DefaultUsers().All()[0], "t", "sev2", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay.emit(ctx, snap.ID, events.AgentUsagePayload{Model: "m", Role: events.UsageRoleHandoff})
+	evs, _, err := svc.Events(ctx, snap.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evs[len(evs)-1].Type != events.AgentUsage {
+		t.Fatalf("last event = %s, want the relayed agent.usage: the relay is not wired to the service", evs[len(evs)-1].Type)
 	}
 }

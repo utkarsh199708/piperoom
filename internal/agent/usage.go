@@ -81,6 +81,11 @@ type rawPrice struct {
 // object with exactly input, output, cache_write and cache_read, each a
 // finite number >= 0.
 func ParseModelPrices(b []byte) (Prices, error) {
+	// encoding/json keeps the last of two equal keys; a price given twice is
+	// a typo that must not pick a winner silently.
+	if err := noDuplicateKeys(b); err != nil {
+		return nil, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	var raw map[string]rawPrice
@@ -113,6 +118,47 @@ func ParseModelPrices(b []byte) (Prices, error) {
 		out[model] = ModelPrice{Input: *r.Input, Output: *r.Output, CacheWrite: *r.CacheWrite, CacheRead: *r.CacheRead}
 	}
 	return out, nil
+}
+
+// noDuplicateKeys reports the first object key that appears twice in the same
+// JSON object, at any depth. Malformed JSON is left to the decoder.
+func noDuplicateKeys(b []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	var walk func(path string) error
+	walk = func(path string) error {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil
+		}
+		switch tok {
+		case json.Delim('{'):
+			seen := map[string]bool{}
+			for dec.More() {
+				kt, err := dec.Token()
+				if err != nil {
+					return nil
+				}
+				k, _ := kt.(string)
+				if seen[k] {
+					return fmt.Errorf("key %q appears twice%s", k, path)
+				}
+				seen[k] = true
+				if err := walk(fmt.Sprintf(" in %q", k)); err != nil {
+					return err
+				}
+			}
+			_, _ = dec.Token() // the closing brace
+		case json.Delim('['):
+			for dec.More() {
+				if err := walk(path); err != nil {
+					return err
+				}
+			}
+			_, _ = dec.Token()
+		}
+		return nil
+	}
+	return walk("")
 }
 
 // callTokens is the four token counts of one request, or of its compaction
@@ -205,6 +251,17 @@ func usagePayload(model, role string, c callTokens, latencyMS int64, prices Pric
 	return p
 }
 
+// usageEmitTimeout bounds writing one agent.usage event.
+const usageEmitTimeout = 5 * time.Second
+
+// detached returns a context that outlives ctx, bounded by usageEmitTimeout:
+// a request still in flight when the room closes was billed, so its
+// agent.usage event must still be written, or the log and the spend tables
+// would disagree.
+func detached(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), usageEmitTimeout)
+}
+
 // errNotSent marks an error returned before a request reached the API, so no
 // agent.usage is reported for it. A *BudgetError means the same.
 var errNotSent = errors.New("agent: request not sent")
@@ -231,8 +288,10 @@ func (m *reportingModel) Turn(ctx context.Context, params anthropic.BetaMessageN
 	start := time.Now()
 	msg, err := m.inner.Turn(ctx, params)
 	if wasSent(err) {
+		ectx, cancel := detached(ctx)
+		defer cancel()
 		for _, p := range usagePayloads(params.Model, m.role, msg, time.Since(start), m.prices) {
-			m.report(ctx, p)
+			m.report(ectx, p)
 		}
 	}
 	return msg, err

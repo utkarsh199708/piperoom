@@ -5,8 +5,6 @@ package agent
 import (
 	"context"
 	"log/slog"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,47 +106,12 @@ func TestSpendBudgetPersistsAcrossARestartPostgres(t *testing.T) {
 	}
 }
 
-func TestSpendConcurrentAdmitsOvershootByAtMostOneCallPostgres(t *testing.T) {
-	const (
-		g        = 20
-		perCall  = 100
-		capLimit = 1000
-	)
+func TestSpendConcurrentAdmitsKeepEstimatesWithinTheCapPostgres(t *testing.T) {
 	s := pgSpendSchema(t)()
-	rooms := make([]string, g)
+	rooms := make([]string, 20)
 	for i := range rooms {
 		rooms[i] = testenv.Name("room")
 	}
 	pgRooms(t, s, rooms...)
-	day := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
-	m := &barrierModel{g: g, all: make(chan struct{}), turn: mustMessage(t, `{"stop_reason":"end_turn","content":[],"usage":{"input_tokens":100}}`)}
-	ep := spendEndpoint(t, m, 0, storeLedger{s}, SpendOptions{PipelineDailyTokens: capLimit, Now: func() time.Time { return day }})
-	var wg sync.WaitGroup
-	var refused atomic.Int64
-	for _, id := range rooms {
-		ep.budget(id).record(usageTokens{input: perCall}, true)
-		wg.Add(1)
-		go func(id string) {
-			defer wg.Done()
-			bm := &budgetModel{inner: m, budget: ep.budget(id), loop: true, guard: ep.guard(id, "orders")}
-			if _, err := bm.Turn(context.Background(), anthropic.BetaMessageNewParams{Model: "m"}); err != nil {
-				if _, ok := asBudgetError(err); !ok {
-					t.Errorf("Turn: %v", err)
-				}
-				refused.Add(1)
-			}
-		}(id)
-	}
-	wg.Wait()
-	spent := m.calls.Load() * perCall
-	if spent > capLimit+perCall || refused.Load() == 0 {
-		t.Fatalf("%d concurrent requests spent %d against a cap of %d (refused %d)", g, spent, capLimit, refused.Load())
-	}
-	p, err := s.PipelineSpend(context.Background(), "orders", "2026-10-13")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if p.ChargedTokens != spent || p.Totals().Tokens() != spent {
-		t.Fatalf("pipeline spend = %+v, want exactly the %d spent", p, spent)
-	}
+	concurrentBurst(t, s, rooms, 0, 1000)
 }

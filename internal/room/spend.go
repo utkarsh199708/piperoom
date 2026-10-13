@@ -25,3 +25,22 @@ func (s *Service) CanReadPipelineUsage(user User, pipelineID string) bool {
 	_, ok := s.canGradeShadow(pipelineID, user)
 	return ok
 }
+
+// UsageRoomVisible decides whether user may see a room on the usage route.
+// It is the tenancy adapter until #112 merges: there are no tenants yet, so
+// every room a caller can name is visible. After #112 it becomes the
+// roomVisible check (CheckRoomVisible), so a room of another tenant answers
+// 404 like a missing one.
+func (s *Service) UsageRoomVisible(user User, snap RoomSnapshot) bool { return true }
+
+// UsagePipelineVisible decides whether user may see a pipeline on GET
+// /api/usage, before any role check. The adapter until #112: a pipeline is
+// visible when owners.yaml defines it. After #112 it becomes CanSeePipeline,
+// which also hides other tenants' pipelines, from auditors too.
+func (s *Service) UsagePipelineVisible(user User, pipelineID string) bool {
+	if s.owners == nil {
+		return false
+	}
+	_, ok := s.owners.Pipeline(pipelineID)
+	return ok
+}

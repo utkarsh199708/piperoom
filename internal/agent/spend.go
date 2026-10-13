@@ -18,6 +18,14 @@ import (
 // counts as unavailable.
 const spendStoreTimeout = 5 * time.Second
 
+// spendRetryTimeout bounds the one retry of a failed settle.
+const spendRetryTimeout = 2 * time.Second
+
+// DefaultEstimateFloor is the estimate of a room's first request in this
+// process (a new room, or the first after a restart), when there is no
+// previous request to size it by (docs/design/cost.md 3.3).
+const DefaultEstimateFloor int64 = 20_000
+
 // SpendLedger keeps model spend where it survives a restart (the room
 // database; docs/design/cost.md 3.2). cmd/server adapts store.SpendStore to it.
 type SpendLedger interface {
@@ -78,6 +86,10 @@ type SpendOptions struct {
 	// OnUsage receives the agent.usage events of requests made outside a run
 	// (the hand-off), with the room they belong to. Nil drops them.
 	OnUsage func(ctx context.Context, roomID string, p events.AgentUsagePayload)
+	// EstimateFloor is the estimate of a room's first request in this process;
+	// 0 = DefaultEstimateFloor. Without it first requests reserve nothing, and
+	// many rooms arriving together could all pass a pipeline's daily cap.
+	EstimateFloor int64
 }
 
 // spendSettings is what SetSpend stored. It never changes afterwards.
@@ -88,6 +100,7 @@ type spendSettings struct {
 	prices          Prices
 	now             func() time.Time
 	onUsage         func(ctx context.Context, roomID string, p events.AgentUsagePayload)
+	estimateFloor   int64
 
 	warnMu   sync.Mutex
 	unpriced map[string]bool // models already warned about under a cost cap
@@ -108,6 +121,13 @@ func (e *Endpoint) SetSpend(o SpendOptions) error {
 	if c > 0 && len(o.Prices) == 0 {
 		return errors.New("agent: PIPEROOM_PIPELINE_DAILY_COST_USD needs PIPEROOM_MODEL_PRICES")
 	}
+	if o.EstimateFloor < 0 {
+		return errors.New("agent: the estimate floor must not be negative")
+	}
+	floor := o.EstimateFloor
+	if floor == 0 {
+		floor = DefaultEstimateFloor
+	}
 	s := &spendSettings{
 		ledger:          o.Ledger,
 		dailyTokens:     o.PipelineDailyTokens,
@@ -115,6 +135,7 @@ func (e *Endpoint) SetSpend(o SpendOptions) error {
 		prices:          o.Prices,
 		now:             o.Now,
 		onUsage:         o.OnUsage,
+		estimateFloor:   floor,
 		unpriced:        map[string]bool{},
 	}
 	if s.now == nil {
@@ -217,6 +238,10 @@ type spendCharge struct {
 func (g *spendGuard) admit(ctx context.Context, b *tokenBudget, model string, est int64) (spendCharge, error) {
 	limit, runLimit := b.limits()
 	capped := limit > 0 || g.s.dailyTokens > 0 || g.s.dailyCostMicros > 0
+	if est <= 0 {
+		// No previous request in this process to size it by.
+		est = g.s.estimateFloor
+	}
 	ch := spendCharge{day: g.s.day(), tokens: est, costMicros: g.s.prices.estimateMicros(model, est)}
 
 	sctx, cancel := context.WithTimeout(ctx, spendStoreTimeout)
@@ -258,20 +283,22 @@ func (g *spendGuard) over(t SpendTotals, ch spendCharge, limit int64, runLimit b
 	return nil
 }
 
-// refund takes back the charge of a refused request. If that fails the
-// estimate stays charged, which errs on the side of the cap.
+// refund takes back the charge of a refused request, on the day it was
+// charged and on a context that outlives the run. If that fails, the estimate
+// of a request that was never sent stays charged (an overcount).
 func (g *spendGuard) refund(ctx context.Context, ch spendCharge) {
-	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), spendStoreTimeout)
-	defer cancel()
-	if _, err := g.s.ledger.AddSpend(sctx, g.change(ch.day, -ch.tokens, -ch.costMicros, nil)); err != nil {
+	if err := g.addDetached(ctx, g.change(ch.day, -ch.tokens, -ch.costMicros, nil), spendStoreTimeout); err != nil {
 		g.log.Warn("agent: could not take back the estimate of a refused request; it stays charged", "room", g.roomID, "tokens", ch.tokens, "err", err)
 	}
 }
 
 // settle replaces the charged estimate with what the request used and adds it
 // to the per-model breakdowns, on the day it was charged. It runs even when
-// the run's context has ended: the request was billed. A failure is logged
-// (counts only) and the estimate stays charged.
+// the run's context has ended: the request was billed. A failure is retried
+// once on a fresh short context. (If the first attempt did commit and only its
+// reply was lost, the retry counts the request twice: an overcount, which
+// errs on the side of the cap.) If the retry fails too, the estimate stays
+// charged, usually an undercount, and an Error is logged with counts only.
 func (g *spendGuard) settle(ctx context.Context, ch spendCharge, model string, msg anthropic.BetaMessage) {
 	own, comp, _ := splitUsage(msg)
 	used := own.plus(comp)
@@ -292,12 +319,25 @@ func (g *spendGuard) settle(ctx context.Context, ch spendCharge, model string, m
 		CostMicros:               cost,
 		Priced:                   priced,
 	}
-	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), spendStoreTimeout)
-	defer cancel()
-	if _, err := g.s.ledger.AddSpend(sctx, g.change(day, used.total()-ch.tokens, cost-ch.costMicros, call)); err != nil {
-		g.log.Warn("agent: could not record a model request's spend; its estimate stays charged",
-			"room", g.roomID, "pipeline", g.pipelineID, "model", model, "tokens", used.total(), "estimate", ch.tokens, "err", err)
+	change := g.change(day, used.total()-ch.tokens, cost-ch.costMicros, call)
+	err := g.addDetached(ctx, change, spendStoreTimeout)
+	if err == nil {
+		return
 	}
+	g.log.Warn("agent: could not record a model request's spend; retrying once", "room", g.roomID, "pipeline", g.pipelineID, "err", err)
+	if err = g.addDetached(ctx, change, spendRetryTimeout); err != nil {
+		g.log.Error("agent: could not record a model request's spend; its estimate stays charged",
+			"room", g.roomID, "pipeline", g.pipelineID, "model", model, "estimate", ch.tokens, "actual", used.total(), "err", err)
+	}
+}
+
+// addDetached applies a change on a context that outlives the run, bounded by
+// timeout.
+func (g *spendGuard) addDetached(ctx context.Context, c SpendChange, timeout time.Duration) error {
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	_, err := g.s.ledger.AddSpend(sctx, c)
+	return err
 }
 
 func (g *spendGuard) change(day string, tokens, costMicros int64, call *SpendCall) SpendChange {

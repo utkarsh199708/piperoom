@@ -1,6 +1,8 @@
 package evals
 
 import (
+	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -36,6 +38,10 @@ func TestComparePairedOnFixedInputs(t *testing.T) {
 	if pc.PassToFail != 3 || pc.FailToPass != 10 || pc.BothPass != 12 || pc.BothFail != 5 {
 		t.Fatalf("McNemar counts = %+v", pc)
 	}
+	// Exact McNemar on 3 vs 10 discordant pairs: 2 × (1+13+78+286)/2^13.
+	if !near(pc.McNemarP, 756.0/8192) || fmt.Sprintf("%.3f", pc.McNemarP) != "0.092" {
+		t.Fatalf("McNemar p = %v, want 0.092", pc.McNemarP)
+	}
 	if !near(pc.BasePassRate, 0.5) || !near(pc.CandPassRate, 22.0/30) || !near(pc.Diff, 7.0/30) {
 		t.Fatalf("rates = %+v", pc)
 	}
@@ -68,6 +74,23 @@ const (
 	wantCILow  = 0.0
 	wantCIHigh = 14.0 / 30
 )
+
+func TestMcNemarExactP(t *testing.T) {
+	for _, c := range []struct {
+		b, c int
+		want float64
+	}{
+		{0, 0, 1}, {1, 1, 1}, {0, 1, 1}, {0, 5, 0.0625}, {5, 0, 0.0625}, {3, 10, 756.0 / 8192}, {10, 3, 756.0 / 8192},
+		{0, 10, 2.0 / 1024},
+	} {
+		if got := McNemarExactP(c.b, c.c); !near(got, c.want) {
+			t.Errorf("p(%d, %d) = %v, want %v", c.b, c.c, got, c.want)
+		}
+	}
+	if p := McNemarExactP(400, 600); p <= 0 || p >= 1e-9 || math.IsNaN(p) {
+		t.Errorf("p(400, 600) = %v, want a tiny finite value", p)
+	}
+}
 
 func TestBootstrapDiffCI(t *testing.T) {
 	same := []bool{true, false, true, true, false}
@@ -127,7 +150,7 @@ func TestComparePairedMatchesOnScenarioAndRun(t *testing.T) {
 	if err := pc.WriteMarkdown(&md); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"3 pair(s), 2 unmatched", "pass→fail 1, fail→pass 1", "Sample too small to call: 3 pair(s), need at least 20"} {
+	for _, want := range []string{"3 pair(s), 2 unmatched", "pass→fail 1, fail→pass 1", "exact two-sided p = 1.000", "Sample too small to call: 3 pair(s), need at least 20"} {
 		if !strings.Contains(md.String(), want) {
 			t.Fatalf("markdown lacks %q:\n%s", want, md.String())
 		}

@@ -284,7 +284,7 @@ func run() error {
 		topo = w.Builder
 	}
 
-	svc := room.New(room.Deps{
+	svc := newRoomService(room.Deps{
 		Store:        st,
 		Actions:      acts,
 		Tools:        toolsReg,
@@ -308,8 +308,7 @@ func run() error {
 		SoloUser:      soloUser,
 		OnRoomOpened:  slack.onRoomOpened(),
 		OnRoomClosed:  closedHook.onClosed,
-	})
-	usage.set(svc)
+	}, usage)
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
 	loadErr := svc.Load(loadCtx)

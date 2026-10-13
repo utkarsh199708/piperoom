@@ -82,6 +82,9 @@ func TestAddSpendRefusesBadChanges(t *testing.T) {
 	for name, c := range map[string]store.SpendChange{
 		"no room":         {Day: "2026-10-13"},
 		"bad day":         {RoomID: "r1", Day: "13/10/2026"},
+		"year 0":          {RoomID: "r1", Day: "0000-01-01"},
+		"before 2000":     {RoomID: "r1", Day: "1999-12-31"},
+		"after 2999":      {RoomID: "r1", Day: "3000-01-01"},
 		"day with a time": {RoomID: "r1", Day: "2026-10-13T00:00:00Z"},
 		"no model":        {RoomID: "r1", Day: "2026-10-13", Call: &store.SpendCall{}},
 		"NUL in model":    {RoomID: "r1", Day: "2026-10-13", Call: &store.SpendCall{Model: "a\x00b"}},
@@ -92,6 +95,11 @@ func TestAddSpendRefusesBadChanges(t *testing.T) {
 	}
 	if _, err := s.PipelineSpend(ctx, "orders", "yesterday"); err == nil {
 		t.Error("PipelineSpend accepted a bad day")
+	}
+	for _, ok := range []string{"2000-01-01", "2999-12-31"} {
+		if _, err := s.AddSpend(ctx, store.SpendChange{RoomID: "r1", Day: ok}); err != nil {
+			t.Errorf("day %s refused: %v", ok, err)
+		}
 	}
 	if rep, _ := s.RoomSpend(ctx, "r1"); rep.ChargedTokens != 0 {
 		t.Fatalf("a refused change was stored: %+v", rep)

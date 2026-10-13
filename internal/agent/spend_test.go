@@ -53,6 +53,11 @@ func spendEndpoint(t *testing.T, m model, limit int64, l SpendLedger, o SpendOpt
 	t.Helper()
 	ep := testEndpoint(m, limit)
 	o.Ledger = l
+	if o.EstimateFloor == 0 {
+		// A floor of 1 keeps the arithmetic of these tests; the default
+		// floor has its own test.
+		o.EstimateFloor = 1
+	}
 	if err := ep.SetSpend(o); err != nil {
 		t.Fatalf("SetSpend: %v", err)
 	}
@@ -139,69 +144,76 @@ func (m *barrierModel) Turn(ctx context.Context, _ anthropic.BetaMessageNewParam
 	return m.turn, nil
 }
 
-func TestSpendConcurrentAdmitsOvershootByAtMostOneCall(t *testing.T) {
-	const (
-		g        = 20
-		perCall  = 100 // each call uses exactly its estimate
-		capLimit = 1000
-	)
+// concurrentBurst sends g requests at once, each estimated at est and using
+// actual (more than est), against a cap of capLimit, and checks the soft-cap
+// bound of docs/design/cost.md 3.3: (a) the estimates of the admitted
+// requests stay within the cap, and (b) the overshoot is at most
+// admitted × (actual − est). The stored totals must equal what was spent.
+func concurrentBurst(t *testing.T, st store.SpendStore, rooms []string, roomCap, dailyCap int64) {
+	t.Helper()
+	const est, actual = 100, 150
+	g := len(rooms)
+	capLimit := roomCap + dailyCap
 	day := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
-	for _, scope := range []string{"one room", "one pipeline"} {
-		t.Run(scope, func(t *testing.T) {
-			rooms := make([]string, g)
-			for i := range rooms {
-				rooms[i] = "room-0"
-				if scope == "one pipeline" {
-					rooms[i] = "room-" + string(rune('a'+i))
-				}
-			}
-			st := spendRooms(t, uniq(rooms)...)
-			m := &barrierModel{g: g, all: make(chan struct{}), turn: mustMessage(t, `{"stop_reason":"end_turn","content":[],"usage":{"input_tokens":100}}`)}
-			roomCap, o := int64(0), SpendOptions{Now: func() time.Time { return day }}
-			if scope == "one room" {
-				roomCap = capLimit
-			} else {
-				o.PipelineDailyTokens = capLimit
-			}
-			ep := spendEndpoint(t, m, roomCap, storeLedger{st}, o)
-			for _, id := range uniq(rooms) {
-				ep.budget(id).record(usageTokens{input: perCall}, true) // the next estimate
-			}
-
-			var wg sync.WaitGroup
-			var refused atomic.Int64
-			for _, id := range rooms {
-				wg.Add(1)
-				go func(id string) {
-					defer wg.Done()
-					bm := &budgetModel{inner: m, budget: ep.budget(id), loop: true, guard: ep.guard(id, "orders")}
-					if _, err := bm.Turn(context.Background(), anthropic.BetaMessageNewParams{Model: "m"}); err != nil {
-						if _, ok := asBudgetError(err); !ok {
-							t.Errorf("Turn: %v", err)
-						}
-						refused.Add(1)
-					}
-				}(id)
-			}
-			wg.Wait()
-
-			spent := m.calls.Load() * perCall
-			if spent > capLimit+perCall {
-				t.Fatalf("%d concurrent requests spent %d tokens against a cap of %d: more than one call (%d) over", g, spent, capLimit, perCall)
-			}
-			if m.calls.Load()+refused.Load() != g || refused.Load() == 0 {
-				t.Fatalf("calls %d + refused %d, want %d with some refused", m.calls.Load(), refused.Load(), g)
-			}
-			// Settled and refunded, the stored totals are exactly what was spent.
-			p, err := st.PipelineSpend(context.Background(), "orders", "2026-10-13")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if p.ChargedTokens != spent || p.Totals().Tokens() != spent {
-				t.Fatalf("pipeline spend = %+v, want %d charged and finished", p, spent)
-			}
-		})
+	m := &barrierModel{g: g, all: make(chan struct{}), turn: mustMessage(t, `{"stop_reason":"end_turn","content":[],"usage":{"input_tokens":150}}`)}
+	ep := spendEndpoint(t, m, roomCap, storeLedger{st}, SpendOptions{PipelineDailyTokens: dailyCap, Now: func() time.Time { return day }})
+	for _, id := range uniq(rooms) {
+		ep.budget(id).record(usageTokens{input: est}, true) // the next estimate
 	}
+	var wg sync.WaitGroup
+	var refused atomic.Int64
+	for _, id := range rooms {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			bm := &budgetModel{inner: m, budget: ep.budget(id), loop: true, guard: ep.guard(id, "orders")}
+			if _, err := bm.Turn(context.Background(), anthropic.BetaMessageNewParams{Model: "m"}); err != nil {
+				if _, ok := asBudgetError(err); !ok {
+					t.Errorf("Turn: %v", err)
+				}
+				refused.Add(1)
+			}
+		}(id)
+	}
+	wg.Wait()
+
+	admitted := m.calls.Load()
+	if admitted+refused.Load() != int64(g) || refused.Load() == 0 {
+		t.Fatalf("admitted %d + refused %d, want %d with some refused", admitted, refused.Load(), g)
+	}
+	if admitted*est > capLimit {
+		t.Fatalf("(a) %d admitted requests reserved %d tokens against a cap of %d", admitted, admitted*est, capLimit)
+	}
+	spent := admitted * actual
+	if over := spent - capLimit; over > admitted*(actual-est) {
+		t.Fatalf("(b) overshoot %d > admitted %d × (usage − estimate) %d", over, admitted, actual-est)
+	}
+	// Settled and refunded, the stored totals are exactly what was spent.
+	p, err := st.PipelineSpend(context.Background(), "orders", "2026-10-13")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ChargedTokens != spent || p.Totals().Tokens() != spent {
+		t.Fatalf("pipeline spend = %+v, want %d charged and finished", p, spent)
+	}
+}
+
+func TestSpendConcurrentAdmitsKeepEstimatesWithinTheCap(t *testing.T) {
+	const g, capLimit = 20, 1000
+	t.Run("one room", func(t *testing.T) {
+		rooms := make([]string, g)
+		for i := range rooms {
+			rooms[i] = "room-0"
+		}
+		concurrentBurst(t, spendRooms(t, "room-0"), rooms, capLimit, 0)
+	})
+	t.Run("one pipeline", func(t *testing.T) {
+		rooms := make([]string, g)
+		for i := range rooms {
+			rooms[i] = "room-" + string(rune('a'+i))
+		}
+		concurrentBurst(t, spendRooms(t, rooms...), rooms, 0, capLimit)
+	})
 }
 
 func uniq(ss []string) []string {
@@ -297,11 +309,11 @@ func TestSpendStoreErrorFailsClosedWithACapAndOpenWithout(t *testing.T) {
 		if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "spend store unavailable") {
 			t.Fatalf("logs = %q, want a warning", logs.String())
 		}
-		if strings.Contains(logs.String(), "level=ERROR") {
-			t.Fatalf("logs = %q, want no error with no cap", logs.String())
+		if strings.Contains(logs.String(), "the run stops") {
+			t.Fatalf("logs = %q, want no stop with no cap", logs.String())
 		}
-		if l.calls.Load() != 2 {
-			t.Fatalf("store calls = %d, want the charge and the settle to be tried", l.calls.Load())
+		if l.calls.Load() != 3 {
+			t.Fatalf("store calls = %d, want the charge, the settle and its one retry", l.calls.Load())
 		}
 	})
 
@@ -464,17 +476,19 @@ func TestSpendHandoffCountsOnTheRoomsPipeline(t *testing.T) {
 }
 
 func TestSpendCapsRefuseAtExactlyTheLimit(t *testing.T) {
-	// One run spends 110 tokens (1100 millionths at 10 USD per million); a
-	// restarted endpoint has no estimate, so only "total >= cap" refuses.
+	// One run spends 110 tokens (1100 millionths at 10 USD per million); only
+	// "total >= cap" refuses the restarted endpoint's first request.
 	prices := Prices{"claude-opus-5-5": {Input: 10, Output: 10, CacheWrite: 10, CacheRead: 10}}
 	day := func() time.Time { return time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC) }
 	for name, c := range map[string]struct {
 		roomCap int64
 		o       SpendOptions
 	}{
-		"room":            {roomCap: 110, o: SpendOptions{Now: day}},
-		"pipeline tokens": {o: SpendOptions{Now: day, PipelineDailyTokens: 110}},
-		"pipeline cost":   {o: SpendOptions{Now: day, PipelineDailyCostUSD: 0.0011, Prices: prices}},
+		// The restarted endpoint's first request is estimated at the floor
+		// (1 token, 10 millionths), so the totals land exactly on these caps.
+		"room":            {roomCap: 111, o: SpendOptions{Now: day}},
+		"pipeline tokens": {o: SpendOptions{Now: day, PipelineDailyTokens: 111}},
+		"pipeline cost":   {o: SpendOptions{Now: day, PipelineDailyCostUSD: 0.00111, Prices: prices}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			st := spendRooms(t, "room-a")

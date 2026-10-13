@@ -151,11 +151,18 @@ func (c SpendChange) Check() error {
 	return nil
 }
 
-// CheckDay accepts exactly a "2006-01-02" date.
+// Days the spend tables take (docs/api.md): Postgres refuses year 0, and
+// nothing outside this range is a real UTC day of spend.
+const (
+	MinSpendYear = 2000
+	MaxSpendYear = 2999
+)
+
+// CheckDay accepts exactly a "2006-01-02" date from 2000-01-01 to 2999-12-31.
 func CheckDay(day string) error {
 	t, err := time.Parse(time.DateOnly, day)
-	if err != nil || t.Format(time.DateOnly) != day {
-		return fmt.Errorf("store: spend: day %q is not a YYYY-MM-DD date", day)
+	if err != nil || t.Format(time.DateOnly) != day || t.Year() < MinSpendYear || t.Year() > MaxSpendYear {
+		return fmt.Errorf("store: spend: day %q is not a YYYY-MM-DD date from 2000-01-01 to 2999-12-31", day)
 	}
 	return nil
 }

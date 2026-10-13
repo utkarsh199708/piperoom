@@ -324,8 +324,10 @@ func (r *runner) callModel(ctx context.Context, req anthropic.BetaMessageNewPara
 	start := time.Now()
 	resp, err := r.model.Turn(ctx, req)
 	if wasSent(err) {
+		ectx, cancel := detached(ctx)
+		defer cancel()
 		for _, p := range usagePayloads(req.Model, role, resp, time.Since(start), r.prices) {
-			r.emit(ctx, events.AgentUsage, p)
+			r.emit(ectx, events.AgentUsage, p)
 		}
 	}
 	return resp, err

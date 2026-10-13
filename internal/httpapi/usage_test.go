@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,6 +52,11 @@ const usageUsers = `users:
 // newUsageServer serves the usage routes over a memstore, on a fixed clock.
 func newUsageServer(t *testing.T, withSpend bool) (*httptest.Server, *memstore.Store) {
 	t.Helper()
+	return newUsageServerWith(t, withSpend, nil)
+}
+
+func newUsageServerWith(t *testing.T, withSpend bool, vis httpapi.UsageVisibility) (*httptest.Server, *memstore.Store) {
+	t.Helper()
 	users, err := room.ParseUsers([]byte(usageUsers))
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +79,7 @@ func newUsageServer(t *testing.T, withSpend bool) (*httptest.Server, *memstore.S
 	var opts []httpapi.Option
 	if withSpend {
 		opts = append(opts, httpapi.WithSpend(httpapi.Spend{
-			Store: st, RoomTokens: 2_000_000, PipelineDailyTokens: 5_000_000, PipelineDailyCostUSD: 50,
+			Store: st, Visibility: vis, RoomTokens: 2_000_000, PipelineDailyTokens: 5_000_000, PipelineDailyCostUSD: 50,
 			Now: func() time.Time { return time.Date(2026, 10, 13, 23, 0, 0, 0, time.UTC) },
 		}))
 	}
@@ -212,11 +218,77 @@ func TestPipelineUsage(t *testing.T) {
 	for _, bad := range []string{"13-10-2026", "2026-10-13T00:00:00Z", "2026-02-30", "today"} {
 		wantErr(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=orders&day="+bad, "arjun", ""), http.StatusBadRequest, "validation")
 	}
+	for _, bad := range []string{"0000-01-01", "1999-12-31", "3000-01-01"} {
+		wantErr(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=orders&day="+bad, "arjun", ""), http.StatusBadRequest, "validation")
+	}
+	for _, edge := range []string{"2000-01-01", "2999-12-31"} {
+		wantStatus(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=orders&day="+edge, "arjun", ""), http.StatusOK)
+	}
 	wantErr(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=%FF", "arjun", ""), http.StatusBadRequest, "validation")
-	// No layer anywhere, or layers only on pipelines that are not this one.
+	wantErr(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=or%00ders", "arjun", ""), http.StatusBadRequest, "validation")
+	wantErr(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline="+strings.Repeat("p", 201), "arjun", ""), http.StatusBadRequest, "validation")
+	// 200 bytes is a valid id; it names no pipeline.
+	wantErr(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline="+strings.Repeat("p", 200), "arjun", ""), http.StatusNotFound, "not_found")
+	// No layer of this pipeline: 403.
 	wantErr(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=orders", "nolayers", ""), http.StatusForbidden, "not_allowed")
-	wantErr(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=unknown", "arjun", ""), http.StatusForbidden, "not_allowed")
-	// The auditor reads any pipeline.
-	wantStatus(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=unknown", "audrey", ""), http.StatusOK)
+	// An unknown pipeline is 404 before the role check, for everyone.
+	for _, user := range []string{"nolayers", "arjun", "audrey"} {
+		resp := doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=unknown", user, "")
+		wantStatus(t, resp, http.StatusNotFound)
+		if body := decode[map[string]map[string]string](t, resp); body["error"]["message"] != "pipeline not found" {
+			t.Fatalf("%s: body %v", user, body)
+		}
+	}
 	wantErr(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=orders", "", ""), http.StatusUnauthorized, "session_expired")
+}
+
+// tenantVisibility stands in for #112's tenancy: hidden maps a user to the
+// rooms and pipelines of other tenants.
+type tenantVisibility struct {
+	hiddenRooms     map[string]map[string]bool
+	hiddenPipelines map[string]map[string]bool
+}
+
+func (v tenantVisibility) UsageRoomVisible(u room.User, snap room.RoomSnapshot) bool {
+	return !v.hiddenRooms[u.ID][snap.ID]
+}
+
+func (v tenantVisibility) UsagePipelineVisible(u room.User, pipelineID string) bool {
+	return !v.hiddenPipelines[u.ID][pipelineID]
+}
+
+func TestUsageTenancyComesBeforeTheRoleCheck(t *testing.T) {
+	vis := tenantVisibility{hiddenRooms: map[string]map[string]bool{}, hiddenPipelines: map[string]map[string]bool{
+		"kabir":  {"orders": true}, // owns a layer of orders, but in another tenant
+		"audrey": {"orders": true}, // an auditor outside the tenant
+	}}
+	srv, st := newUsageServerWith(t, true, vis)
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/rooms", "arjun", `{"title":"t","severity":"sev2","pipeline_id":"orders"}`)
+	wantStatus(t, resp, http.StatusCreated)
+	roomID := decode[room.RoomSnapshot](t, resp).ID
+	vis.hiddenRooms["kabir"] = map[string]bool{roomID: true}
+	addSpend(t, st, store.SpendChange{RoomID: roomID, PipelineID: "orders", Day: "2026-10-13", Tokens: 9})
+
+	missing := doJSON(t, http.MethodGet, srv.URL+"/api/rooms/r_nope/usage", "kabir", "")
+	hidden := doJSON(t, http.MethodGet, srv.URL+"/api/rooms/"+roomID+"/usage", "kabir", "")
+	wantStatus(t, hidden, http.StatusNotFound)
+	if a, b := decode[json.RawMessage](t, missing), decode[json.RawMessage](t, hidden); string(a) != string(b) {
+		t.Fatalf("a hidden room's body %s differs from a missing room's %s", b, a)
+	}
+	wantStatus(t, doJSON(t, http.MethodGet, srv.URL+"/api/rooms/"+roomID+"/usage", "arjun", ""), http.StatusOK)
+
+	for _, user := range []string{"kabir", "audrey"} {
+		wantErr(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=orders", user, ""), http.StatusNotFound, "not_found")
+	}
+	wantStatus(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=orders", "arjun", ""), http.StatusOK)
+}
+
+func TestUsageRoutesStayMountedWithoutAStore(t *testing.T) {
+	srv, _ := newUsageServer(t, false)
+	// A mounted GET route answers 405 to POST; an unmounted path answers 404.
+	for _, path := range []string{"/api/usage", "/api/rooms/r1/usage"} {
+		resp := doJSON(t, http.MethodPost, srv.URL+path, "arjun", "{}")
+		wantStatus(t, resp, http.StatusMethodNotAllowed)
+		resp.Body.Close()
+	}
 }
