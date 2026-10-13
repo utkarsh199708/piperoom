@@ -1,0 +1,9 @@
+# users.yaml for the OIDC e2e stack. Only dave is listed, and he never logs in.
+# alice, bob and carol are Keycloak users with no entry here on purpose:
+#   alice gets in through owners.yaml group:dataeng-oncall (member, id u_...),
+#   bob has no group and is refused (not_provisioned),
+#   carol gets in through PIPEROOM_AUTH_VIEWER_GROUPS=piperoom-viewers (viewer).
+users:
+  - id: dave
+    name: Dave
+    layers: [postgres, schema-registry, consumer, warehouse]

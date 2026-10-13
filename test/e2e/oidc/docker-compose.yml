@@ -1,0 +1,106 @@
+# OIDC end-to-end stack: Keycloak (real IdP) + Postgres + the piperoom image in
+# oidc mode, behind Caddy for TLS. Run it with ./run.sh (see README.md); the
+# certificates in .certs/ come from ./certgen and must exist before "up".
+#
+# Every password and secret below is a test-only value for this throwaway stack.
+#
+# Issuer consistency (README.md, "One issuer for everyone"): Keycloak's issuer is
+# https://localhost:8444/realms/piperoom. The test on the host reaches it through
+# the published port; the piperoom server reaches the SAME URL because it runs in
+# Caddy's network namespace (network_mode: service:caddy), where localhost:8444
+# is Caddy itself. KC_HOSTNAME pins the issuer, so Keycloak never derives it from
+# the request.
+
+name: piperoom-o7-e2e
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: piperoom
+      POSTGRES_DB: piperoom
+      POSTGRES_PASSWORD: piperoom-e2e
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U piperoom -d piperoom"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  keycloak:
+    # Docker Hub mirror of quay.io/keycloak/keycloak (same image, same tags).
+    image: docker.io/keycloak/keycloak:26.3.4
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin-e2e-only
+      # The public URL, scheme and port included: the issuer and every endpoint
+      # in the discovery document use it, for browser and back-channel alike.
+      KC_HOSTNAME: https://localhost:8444
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    healthcheck:
+      # No curl in the image; bash's /dev/tcp talks to the management port.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 3s
+      timeout: 5s
+      retries: 100
+      start_period: 10s
+
+  caddy:
+    image: caddy:2.10.2-alpine
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./.certs:/certs:ro
+    ports:
+      # The host ports must equal the ports in the URLs (8443 for
+      # PIPEROOM_PUBLIC_URL, 8444 for the issuer): both are part of the origin.
+      - "127.0.0.1:8443:8443"
+      - "127.0.0.1:8444:8444"
+
+  piperoom:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+    image: ${PIPEROOM_E2E_IMAGE:-piperoom:e2e}
+    # Shares Caddy's network namespace: localhost:8444 here is Caddy, which
+    # forwards to Keycloak; Caddy reaches this server at 127.0.0.1:8090.
+    network_mode: service:caddy
+    depends_on:
+      postgres:
+        condition: service_healthy
+      caddy:
+        condition: service_started
+    environment:
+      PIPEROOM_DB_URL: postgres://piperoom:piperoom-e2e@postgres:5432/piperoom?sslmode=disable
+      # The server opens its data-stack clients at start-up; there is no CDC
+      # stack here, so the source and warehouse point at the room database.
+      SOURCE_DB_URL: postgres://piperoom:piperoom-e2e@postgres:5432/piperoom?sslmode=disable
+      WAREHOUSE_DB_URL: postgres://piperoom:piperoom-e2e@postgres:5432/piperoom?sslmode=disable
+      PIPEROOM_HTTP_ADDR: 0.0.0.0:8090
+      PIPEROOM_AUTH_MODE: oidc
+      PIPEROOM_PUBLIC_URL: https://localhost:8443
+      PIPEROOM_OIDC_ISSUER: https://localhost:8444/realms/piperoom
+      PIPEROOM_OIDC_CLIENT_ID: piperoom
+      PIPEROOM_OIDC_CLIENT_SECRET: piperoom-e2e-test-only-secret
+      PIPEROOM_OIDC_GROUPS_CLAIM: groups
+      PIPEROOM_AUTH_VIEWER_GROUPS: piperoom-viewers
+      # Caddy is the peer (same namespace, so 127.0.0.1).
+      PIPEROOM_TRUSTED_PROXIES: 127.0.0.1/32
+      # Go reads this on Linux: the server trusts only the test CA, which is all
+      # it needs (Keycloak through Caddy). No model calls happen in this test.
+      SSL_CERT_FILE: /e2e-certs/ca.crt
+      OWNERS_FILE: /config/owners.yaml
+      USERS_FILE: /config/users.yaml
+      PIPEROOM_WATCH_MODE: "off"
+    volumes:
+      - ./config:/config:ro
+      - ./.certs/ca.crt:/e2e-certs/ca.crt:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
