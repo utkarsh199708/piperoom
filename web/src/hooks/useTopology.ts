@@ -18,7 +18,7 @@ export interface TopologyOptions {
 // (docs/api.md) and again whenever `refreshKey` changes. Fetch calls never
 // overlap: an interval tick while a fetch is in flight is skipped.
 export function useTopology(pipelineId: string, options: TopologyOptions = {}) {
-  const { user } = useCurrentUser()
+  const { user, sessionEpoch } = useCurrentUser()
   const [topology, setTopology] = useState<Topology | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<number | null>(null)
@@ -41,7 +41,7 @@ export function useTopology(pipelineId: string, options: TopologyOptions = {}) {
           }
           return
         }
-        const t = await api.topology(user.id, pipelineId)
+        const t = await api.topology(pipelineId)
         if (!cancelled) {
           setTopology(t)
           setUpdatedAt(Date.now())
@@ -69,7 +69,7 @@ export function useTopology(pipelineId: string, options: TopologyOptions = {}) {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [pipelineId, user.id, refreshKey, active])
+  }, [pipelineId, user.id, sessionEpoch, refreshKey, active])
 
   return { topology, error, updatedAt }
 }

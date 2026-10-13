@@ -474,6 +474,13 @@ textarea:focus {
   color: var(--muted);
 }
 
+.login-users {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 /* ---- pipeline map ---- */
 .pipeline__nodes {
   display: flex;

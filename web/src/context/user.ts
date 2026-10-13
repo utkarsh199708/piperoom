@@ -3,7 +3,12 @@ import type { CurrentUser } from '../state/permissions'
 
 export interface UserContextValue {
   user: CurrentUser
+  /** Dev mode: sign in as this users.yaml user (POST /auth/dev-login), then reload /api/me. */
   setUserId: (id: string) => void
+  /** POST /auth/logout, then show the sign-in choice for the server mode (never an automatic redirect). */
+  logout: () => void
+  /** Bumps on every login or logout, so data hooks reload and the WebSocket reconnects. */
+  sessionEpoch: number
 }
 
 export const UserContext = createContext<UserContextValue | null>(null)

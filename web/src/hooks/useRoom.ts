@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { Event, PresenceMember, RoomSnapshot, WsServerMessage } from '../api/types'
 import { api, isFixtures, openRoomWs } from '../api/client'
+import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../dev/users'
@@ -9,6 +10,14 @@ import { mentionsAgent } from '../lib/mentions'
 import { applyEvent } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
 import type { RoomState } from '../state/types'
+
+// HTTP status an error frame code stands for (docs/api.md, Errors).
+const WS_FRAME_STATUS: Record<string, number> = {
+  session_expired: 401,
+  viewer: 403,
+  proxy_identity: 403,
+  bad_host: 421,
+}
 
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
 
@@ -43,7 +52,7 @@ function roomReducer(state: RoomState | null, action: RoomAction): RoomState | n
 }
 
 export function useRoom(roomId: string) {
-  const { user } = useCurrentUser()
+  const { user, sessionEpoch } = useCurrentUser()
   const [state, dispatch] = useReducer(roomReducer, null)
   const [presence, setPresence] = useState<PresenceMember[]>([])
   const [conn, setConn] = useState<ConnState>('loading')
@@ -125,6 +134,7 @@ export function useRoom(roomId: string) {
     setConn('loading')
 
     let backoff = 1000
+    let probed = false
     let firstConnect = true
     let queue: Promise<void> = Promise.resolve()
 
@@ -147,7 +157,7 @@ export function useRoom(roomId: string) {
         if (cancelled) return false
         let page
         try {
-          page = await api.events(user.id, roomId, lastSeqRef.current)
+          page = await api.events(roomId, lastSeqRef.current)
         } catch {
           ws?.close()
           return false
@@ -188,16 +198,20 @@ export function useRoom(roomId: string) {
     const connect = () => {
       if (cancelled) return
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
-      ws = openRoomWs(roomId, user.id, firstConnect ? 0 : lastSeqRef.current)
+      ws = openRoomWs(roomId, firstConnect ? 0 : lastSeqRef.current)
       firstConnect = false
+      let opened = false
       ws.onopen = () => {
         if (cancelled) return
+        opened = true
+        probed = false
         backoff = 1000
         setConn('live')
         setError(null)
         sendPresence('viewing')
       }
       ws.onmessage = (m) => {
+        if (cancelled) return // a socket from an older session epoch
         let msg: WsServerMessage
         try {
           msg = JSON.parse(m.data as string) as WsServerMessage
@@ -209,11 +223,34 @@ export function useRoom(roomId: string) {
         } else if (msg.type === 'presence') {
           setPresence(msg.members)
         } else if (msg.type === 'error') {
+          // An error frame can say the session ended (auth.md 1.6) or that the
+          // user may not act (viewer, proxy_identity): same banners as HTTP.
+          const problem = classifyAuthProblem(
+            WS_FRAME_STATUS[msg.error.code] ?? 0,
+            msg.error.code,
+            msg.error.message,
+          )
+          if (problem) reportAuthProblem({ ...problem, epoch: sessionEpoch })
           setError(friendlyError(msg.error.code, msg.error.message))
         }
       }
-      ws.onclose = () => {
+      ws.onclose = (ev: CloseEvent) => {
         if (cancelled) return
+        if (ev?.reason === 'session_expired') {
+          // The server closed the socket because the session ended (auth.md 1.6).
+          // Stop retrying; the login screen (or redirect) takes over.
+          reportAuthProblem({ kind: 'session_expired', message: 'session_expired', epoch: sessionEpoch })
+          setConn('error')
+          return
+        }
+        if (!opened && !probed) {
+          // A refused upgrade (401/403/421) shows up as a bare close. Ask the API
+          // why, once until a connection succeeds: api.me() reports an auth
+          // problem through the same path. Not on every retry, or a dismissed
+          // 403/421 banner would come back every few seconds.
+          probed = true
+          void api.me().catch(() => undefined)
+        }
         setConn('reconnecting')
         reconnectTimer = window.setTimeout(connect, backoff)
         backoff = Math.min(backoff * 2, 10000)
@@ -225,7 +262,7 @@ export function useRoom(roomId: string) {
 
     void (async () => {
       try {
-        const snapshot = await api.room(user.id, roomId)
+        const snapshot = await api.room(roomId)
         if (cancelled) return
         dispatch({ type: 'init', snapshot })
         // lastSeqRef stays 0: open with after=0 so the full log replays and the
@@ -253,7 +290,7 @@ export function useRoom(roomId: string) {
       ws?.close()
       ws = null
     }
-  }, [roomId, user.id, user.name])
+  }, [roomId, user.id, user.name, sessionEpoch])
 
   const runAction = useCallback((p: Promise<unknown>) => {
     p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))
@@ -295,7 +332,7 @@ export function useRoom(roomId: string) {
         })
         return
       }
-      void runAction(api.comment(user.id, roomId, { step_id: stepId, text }))
+      void runAction(api.comment(roomId, { step_id: stepId, text }))
     },
     steer: (text) => {
       if (isFixtures()) {
@@ -307,7 +344,7 @@ export function useRoom(roomId: string) {
         )
         return
       }
-      void runAction(api.steer(user.id, roomId, text))
+      void runAction(api.steer(roomId, text))
     },
     sendSuggestion: (suggestionId) => {
       if (isFixtures()) {
@@ -318,14 +355,14 @@ export function useRoom(roomId: string) {
         })
         return
       }
-      void runAction(api.sendSuggestion(user.id, roomId, suggestionId))
+      void runAction(api.sendSuggestion(roomId, suggestionId))
     },
     requestControl: () => {
       if (isFixtures()) {
         synthesize('control.requested', {})
         return
       }
-      void runAction(api.requestControl(user.id, roomId))
+      void runAction(api.requestControl(roomId))
     },
     grantControl: (to) => {
       if (isFixtures()) {
@@ -336,28 +373,28 @@ export function useRoom(roomId: string) {
         })
         return
       }
-      void runAction(api.grantControl(user.id, roomId, to))
+      void runAction(api.grantControl(roomId, to))
     },
     close: (resolution) => {
       if (isFixtures()) {
         synthesize('room.closed', { resolution })
         return
       }
-      void runAction(api.closeRoom(user.id, roomId, resolution))
+      void runAction(api.closeRoom(roomId, resolution))
     },
     approve: (proposalId, layer) => {
       if (isFixtures()) {
         synthesize('approval.given', { proposal_id: proposalId, layer })
         return
       }
-      void runAction(api.approve(user.id, proposalId, layer))
+      void runAction(api.approve(proposalId, layer))
     },
     reject: (proposalId, layer, reason) => {
       if (isFixtures()) {
         synthesize('approval.rejected', { proposal_id: proposalId, layer, reason })
         return
       }
-      void runAction(api.reject(user.id, proposalId, layer, reason))
+      void runAction(api.reject(proposalId, layer, reason))
     },
     handoff: (to, stayAsWatcher) => {
       if (isFixtures()) {
@@ -377,14 +414,14 @@ export function useRoom(roomId: string) {
         })
         return
       }
-      void runAction(api.handoff(user.id, roomId, to, stayAsWatcher))
+      void runAction(api.handoff(roomId, to, stayAsWatcher))
     },
     acceptHandoff: (handoffId) => {
       if (isFixtures()) {
         synthesize('handoff.accepted', { handoff_id: handoffId })
         return
       }
-      void runAction(api.acceptHandoff(user.id, handoffId))
+      void runAction(api.acceptHandoff(handoffId))
     },
     trace: (table, key) => {
       if (isFixtures()) {
@@ -401,7 +438,7 @@ export function useRoom(roomId: string) {
         })
         return
       }
-      void runAction(api.trace(user.id, roomId, table, key))
+      void runAction(api.trace(roomId, table, key))
     },
   }
 

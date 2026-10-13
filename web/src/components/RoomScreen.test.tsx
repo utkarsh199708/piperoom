@@ -9,6 +9,8 @@ vi.mock('../context/user', () => ({
   useCurrentUser: () => ({
     user: { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] },
     setUserId: vi.fn(),
+    logout: vi.fn(),
+    sessionEpoch: 0,
   }),
 }))
 vi.mock('../hooks/useRoom', () => ({ useRoom: vi.fn() }))
