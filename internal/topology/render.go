@@ -4,14 +4,19 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"unicode"
 )
 
 // renderLegend tells the model how to read the listing. It is fixed text, so
 // the rendering stays deterministic.
 const renderLegend = `legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. ` +
-	`(unconfirmed) = not proven; implied by owners.yaml or an earlier reading; verify it with tools. ` +
+	`(unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. ` +
 	`First failing component and root cause can differ; check upstream dependencies of the first failing component.`
+
+// maxRenderBytes caps the map so no graph source can flood the prompt.
+const maxRenderBytes = 16 << 10
+
+// renderTruncated ends a map that hit maxRenderBytes.
+const renderTruncated = "(map truncated)\n"
 
 // Render returns the canonical dependency listing of g for the model's first
 // prompt: one line per node in data-flow order (upstream first), each
@@ -42,18 +47,25 @@ func (b *builder) Render(g Graph) string {
 	sb.WriteByte('\n')
 	for i, idx := range order {
 		n := g.Nodes[idx]
-		sb.WriteString(renderNode(i+1, n))
-		sb.WriteByte('\n')
+		var blk strings.Builder
+		blk.WriteString(renderNode(i+1, n))
+		blk.WriteByte('\n')
 		if in := inputs[n.ID]; len(in) > 0 {
-			sb.WriteString("  from: ")
-			sb.WriteString(renderLinks(in, func(e Edge) string { return e.From }, pos))
-			sb.WriteByte('\n')
+			blk.WriteString("  from: ")
+			blk.WriteString(renderLinks(in, func(e Edge) string { return e.From }, pos))
+			blk.WriteByte('\n')
 		}
 		if dep := needs[n.ID]; len(dep) > 0 {
-			sb.WriteString("  depends on: ")
-			sb.WriteString(renderLinks(dep, func(e Edge) string { return e.To }, pos))
-			sb.WriteByte('\n')
+			blk.WriteString("  depends on: ")
+			blk.WriteString(renderLinks(dep, func(e Edge) string { return e.To }, pos))
+			blk.WriteByte('\n')
 		}
+		// Whole node blocks only, so a node never loses its from/depends lines.
+		if sb.Len()+blk.Len()+len(renderTruncated) > maxRenderBytes {
+			sb.WriteString(renderTruncated)
+			break
+		}
+		sb.WriteString(blk.String())
 	}
 	return sb.String()
 }
@@ -186,7 +198,7 @@ func renderNode(i int, n Node) string {
 	return sb.String()
 }
 
-// printable shows control, format and line/paragraph-separator characters as
+// printable shows every rune outside printable ASCII as
 // {U+XXXX}. Every text in the map comes from config or a live system, and the
 // map is one line per node, so a newline in a name or fact must not start a
 // forged line (a fake "depends on:" or node) in the model's prompt.
@@ -205,6 +217,6 @@ func printable(s string) string {
 	return b.String()
 }
 
-func unprintable(r rune) bool {
-	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == ' ' || r == ' '
-}
+// unprintable is everything but printable ASCII: control and format
+// characters, separators and lookalikes (U+00A0, U+3164, ...) alike.
+func unprintable(r rune) bool { return r < 0x20 || r > 0x7e }

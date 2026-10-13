@@ -7,6 +7,7 @@ package wiring
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -87,18 +88,23 @@ type a2Clients struct {
 // user for it). The caller owns the Kafka client and must close it.
 func buildA2Clients(cfg config.Config, awsCfg *aws.Config) (*a2Clients, error) {
 	// The Schema Registry client comes first: the Kafka client uses it to
-	// decode Avro keys.
-	registry, err := schemareg.NewSecure(cfg.SchemaRegistryURL, netsec.HTTP{
-		Username: cfg.SchemaRegistryUsername,
-		Password: netsec.Secret(cfg.SchemaRegistryPassword),
-		TLS: netsec.TLS{
-			CAFile:   cfg.SchemaRegistryTLSCAFile,
-			CertFile: cfg.SchemaRegistryTLSCertFile,
-			KeyFile:  cfg.SchemaRegistryTLSKeyFile,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("wiring: schema registry client: %w", err)
+	// decode Avro keys. SCHEMA_REGISTRY_URL "" or "off" (config stores "")
+	// means none: registry stays nil.
+	var registry *schemareg.Client
+	if cfg.SchemaRegistryURL != "" {
+		r, err := schemareg.NewSecure(cfg.SchemaRegistryURL, netsec.HTTP{
+			Username: cfg.SchemaRegistryUsername,
+			Password: netsec.Secret(cfg.SchemaRegistryPassword),
+			TLS: netsec.TLS{
+				CAFile:   cfg.SchemaRegistryTLSCAFile,
+				CertFile: cfg.SchemaRegistryTLSCertFile,
+				KeyFile:  cfg.SchemaRegistryTLSKeyFile,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("wiring: schema registry client: %w", err)
+		}
+		registry = r
 	}
 
 	connectClient, err := connect.NewSecure(cfg.ConnectURL, netsec.HTTP{
@@ -202,6 +208,13 @@ func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, e
 	}
 	opened = append(opened, closeWh)
 
+	return assemble(o, whKind, a2, src, wh, closeOpened), nil
+}
+
+// assemble builds the Wired that Open returns from the clients it opened,
+// the topology builder included. It is apart from Open so a test can check
+// the assembly without a database.
+func assemble(o *owners.Owners, whKind string, a2 *a2Clients, src clients.SourceDB, wh clients.Warehouse, closeAll func()) *Wired {
 	var once sync.Once
 	w := &Wired{
 		Source:        src,
@@ -209,18 +222,48 @@ func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, e
 		WarehouseKind: whKind,
 		Connect:       a2.Connect,
 		Kafka:         a2.Kafka,
-		Registry:      a2.Registry,
 		Owners:        o,
-		close:         func() { once.Do(closeOpened) },
+		close:         func() { once.Do(closeAll) },
+	}
+	// A nil *schemareg.Client in the interface would read as configured.
+	if a2.Registry != nil {
+		w.Registry = a2.Registry
 	}
 	w.Builder = newTopologyBuilder(w)
-	return w, nil
+	return w
 }
 
 // newTopologyBuilder is the one place a Builder is made from w's clients, the
 // Schema Registry included, for Open and RegisterTools alike.
 func newTopologyBuilder(w *Wired) topology.Builder {
 	return topology.NewBuilder(w.Owners, w.Connect, w.Kafka, w.Source, w.Warehouse, topology.WithSchemaRegistry(w.Registry))
+}
+
+// errNoRegistry is what the write actions get from the registry when none is
+// configured, so proposing a schema action fails validation cleanly.
+var errNoRegistry = errors.New("wiring: Schema Registry not configured (SCHEMA_REGISTRY_URL is empty or off)")
+
+// noRegistry stands in for the registry in the write actions only; the read
+// tools and the builder take nil and say "not configured" themselves.
+type noRegistry struct{}
+
+func (noRegistry) Subjects(context.Context) ([]string, error)             { return nil, errNoRegistry }
+func (noRegistry) Versions(context.Context, string) ([]int, error)        { return nil, errNoRegistry }
+func (noRegistry) SetCompatibility(context.Context, string, string) error { return errNoRegistry }
+func (noRegistry) Register(context.Context, string, string) (int, error)  { return 0, errNoRegistry }
+func (noRegistry) Schema(context.Context, string, int) (clients.SchemaVersion, error) {
+	return clients.SchemaVersion{}, errNoRegistry
+}
+func (noRegistry) Compatibility(context.Context, string) (string, bool, error) {
+	return "", false, errNoRegistry
+}
+
+// actionRegistry is w's registry for the write actions, never nil.
+func actionRegistry(w *Wired) clients.SchemaRegistryClient {
+	if w.Registry == nil {
+		return noRegistry{}
+	}
+	return w.Registry
 }
 
 // RegisterTools registers the A3 db tools, A2's read-only Kafka/Connect/
@@ -243,7 +286,7 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 	if err := runbooks.Register(reg); err != nil {
 		return fmt.Errorf("wiring: register runbooks: %w", err)
 	}
-	if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: w.Registry}); err != nil {
+	if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w)}); err != nil {
 		return fmt.Errorf("wiring: register actions: %w", err)
 	}
 	return nil

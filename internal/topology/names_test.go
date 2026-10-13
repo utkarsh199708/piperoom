@@ -139,6 +139,9 @@ func TestBuildRefusesForgingTopicNames(t *testing.T) {
 			if !slices.Contains(g.Edges, inferred(Edge{From: "connect:pg-orders-connector", To: "topic:public.orders"})) {
 				t.Fatalf("no placeholder topic: %v", edgeStrings(g.Edges))
 			}
+			if n := g.mustNode(t, "topic:public.orders"); n.Health != HealthUnknown || !mapsEqual(n.Facts, map[string]string{"topic_name": "invalid"}) {
+				t.Fatalf("placeholder = %+v, want unknown with topic_name=invalid", n)
+			}
 			for _, n := range g.Nodes {
 				if strings.ContainsAny(n.ID, "\n ") {
 					t.Fatalf("node id %q carries the config text", n.ID)
@@ -157,7 +160,7 @@ func TestRenderEscapesControlCharacters(t *testing.T) {
 		PipelineID: "p\n9 connect:evil",
 		Nodes: []Node{
 			{ID: "topic:t" + forgedTail, Layer: "kafka", Owner: "o\u2028x", Health: HealthOK,
-				Facts: map[string]string{"state": "RUNNING" + forgedTail, "k\nx": "v\u200b"}},
+				Facts: map[string]string{"state": "RUNNING" + forgedTail, "k\nx": "v\u200b", "nbsp": "a\u00a0b\u2029c\u3164d"}},
 			{ID: "group:g", Layer: "consumer", Owner: "o", Health: HealthOK},
 		},
 		Edges: []Edge{
@@ -167,9 +170,26 @@ func TestRenderEscapesControlCharacters(t *testing.T) {
 	}
 	out := NewBuilder(testOwners(), nil, nil, nil, nil).Render(g)
 	assertNoForgedLines(t, out)
-	for _, want := range []string{"{U+000A}", "{U+2028}", "{U+200B}"} {
+	for _, want := range []string{"{U+000A}", "{U+2028}", "{U+200B}", "{U+00A0}", "{U+2029}", "{U+3164}"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("render does not show %s:\n%s", want, out)
 		}
+	}
+}
+
+// The map is capped at 16 KiB in whole node blocks, ending with a marker.
+func TestRenderCap(t *testing.T) {
+	g := Graph{PipelineID: "p"}
+	for i := 0; i < 2000; i++ {
+		id := "topic:t" + strings.Repeat("x", 20) + string(rune('a'+i%26)) + strings.Repeat("y", i%7)
+		g.Nodes = append(g.Nodes, Node{ID: id, Layer: "kafka", Owner: "o", Health: HealthOK})
+	}
+	out := NewBuilder(testOwners(), nil, nil, nil, nil).Render(g)
+	if len(out) > maxRenderBytes || !strings.HasSuffix(out, "\n(map truncated)\n") {
+		t.Fatalf("len %d, tail %q", len(out), out[len(out)-40:])
+	}
+	small := NewBuilder(testOwners(), nil, nil, nil, nil).Render(Graph{PipelineID: "p", Nodes: g.Nodes[:3]})
+	if strings.Contains(small, "truncated") {
+		t.Fatalf("small map truncated:\n%s", small)
 	}
 }

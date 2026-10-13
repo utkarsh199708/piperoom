@@ -55,6 +55,7 @@ func compileConfigRegex(flags, expr string) (whole, bare *regexp.Regexp, ok bool
 type flowPlan struct {
 	topics      []string        // CDC topics in discovery order (placeholders included)
 	placeholder map[string]bool // topic names that stand in for unknown real names
+	invalidName map[string]bool // placeholders for a configured name that is not a legal topic name
 	edges       []Edge          // data edges, in flow order
 }
 
@@ -122,7 +123,7 @@ func sourceTopics(cfg map[string]string, streamed []string) (topics []string, pr
 
 // planFlow derives the topics and data edges of p from what collect read.
 func (b *builder) planFlow(p owners.Pipeline, info *collected) flowPlan {
-	fp := flowPlan{placeholder: map[string]bool{}}
+	fp := flowPlan{placeholder: map[string]bool{}, invalidName: map[string]bool{}}
 	addTopic := func(t string, placeholder bool) {
 		if !slices.Contains(fp.topics, t) {
 			fp.topics = append(fp.topics, t)
@@ -174,6 +175,9 @@ func (b *builder) planFlow(p owners.Pipeline, info *collected) flowPlan {
 		proven = proven && exact && defaultTopicNaming(snap.config)
 		for _, t := range ts {
 			addTopic(t, placeholder)
+			if placeholder {
+				fp.invalidName[t] = true
+			}
 			e := Edge{From: cid, To: "topic:" + t}
 			if !proven {
 				e = inferred(e)

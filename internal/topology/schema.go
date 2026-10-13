@@ -48,29 +48,30 @@ var compatLevelRE = regexp.MustCompile(`^[A-Z_]{1,32}$`)
 type topicUser struct {
 	id     string
 	mapped bool // the data edge to or from the topic is proven
+	writer bool // a connector that writes the topic
 }
 
 // topicUsers lists the writers (connectors) then the readers (connectors and
 // groups) of a topic node, from the data edges.
 func topicUsers(edges []Edge, topicID string) []topicUser {
 	var out []topicUser
-	add := func(id string, mapped bool) {
+	add := func(id string, mapped, writer bool) {
 		for i := range out {
 			if out[i].id == id {
 				out[i].mapped = out[i].mapped || mapped
 				return
 			}
 		}
-		out = append(out, topicUser{id: id, mapped: mapped})
+		out = append(out, topicUser{id: id, mapped: mapped, writer: writer})
 	}
 	for _, e := range edges {
 		if !e.IsDependency() && e.To == topicID && strings.HasPrefix(e.From, "connect:") {
-			add(e.From, !e.IsInferred())
+			add(e.From, !e.IsInferred(), true)
 		}
 	}
 	for _, e := range edges {
 		if !e.IsDependency() && e.From == topicID && (strings.HasPrefix(e.To, "connect:") || strings.HasPrefix(e.To, "group:")) {
-			add(e.To, !e.IsInferred())
+			add(e.To, !e.IsInferred(), false)
 		}
 	}
 	return out
@@ -90,7 +91,9 @@ const (
 // it, when a user's own converter config proves it, or whenever the registry
 // is unreachable: an outage must show the registry in the map as unknown,
 // not hide it, so every real topic then gets both subjects. A user whose own
-// config rules the subject out gets no edge. An edge is mapped only when the
+// config rules the subject out gets no edge, and when every writer of the
+// topic rules it out nobody gets one: records written without the registry
+// carry no schema id for a reader to look up. An edge is mapped only when the
 // user's data edge is proven and the listing or the user's config proves the
 // subject; otherwise it is inferred.
 func (b *builder) planSubjects(info *collected, fp flowPlan) ([]string, []Edge) {
@@ -107,10 +110,24 @@ func (b *builder) planSubjects(info *collected, fp flowPlan) ([]string, []Edge) 
 		for _, part := range []string{"key", "value"} {
 			subject := t + "-" + part
 			listed := info.srErr == nil && info.srListed[subject]
+			proofs := make([]regProof, len(users))
+			writers, writersRuledOut := 0, 0
+			for i, u := range users {
+				proofs[i] = registryProof(info, u.id, part)
+				if u.writer {
+					writers++
+					if proofs[i] == regNo {
+						writersRuledOut++
+					}
+				}
+			}
+			if writers > 0 && writersRuledOut == writers {
+				continue
+			}
 			var edges []Edge
 			anyProof := false
-			for _, u := range users {
-				proof := registryProof(info, u.id, part)
+			for i, u := range users {
+				proof := proofs[i]
 				if proof == regNo {
 					continue
 				}

@@ -423,7 +423,9 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 // decodeKey decodes a Confluent Avro key into a comparable string. Raw
 // (non-Confluent) keys are returned as-is. Parsed schemas are cached by id.
 func (c *Client) decodeKey(ctx context.Context, key []byte) (string, error) {
-	if len(key) < 5 || key[0] != 0x00 {
+	// Without a Schema Registry (SCHEMA_REGISTRY_URL empty or off) no key is
+	// Avro-decoded: a key that merely starts with 0x00 is compared raw.
+	if c.sr == nil || len(key) < 5 || key[0] != 0x00 {
 		return string(key), nil
 	}
 	id := int(binary.BigEndian.Uint32(key[1:5]))

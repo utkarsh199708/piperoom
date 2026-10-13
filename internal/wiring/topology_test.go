@@ -3,6 +3,9 @@ package wiring
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -58,5 +61,86 @@ func TestNewTopologyBuilderUsesRegistry(t *testing.T) {
 	}
 	if reg.subjects.Load() == 0 {
 		t.Fatal("the builder never asked the Schema Registry: newTopologyBuilder did not pass it")
+	}
+}
+
+// testPipeline has no groups or sinks, so a Build touches only the source,
+// Connect and the registry.
+func testPipeline() *owners.Owners {
+	return &owners.Owners{Pipelines: []owners.Pipeline{{
+		ID: "p", TopicPrefix: "pg", SourceTables: []string{"public.t"}, Connectors: []string{"c"},
+	}}}
+}
+
+// Open's path: assemble (what Open returns) builds the topology builder with
+// the registry built from SCHEMA_REGISTRY_URL.
+func TestAssembleBuilderUsesRegistry(t *testing.T) {
+	var subjects atomic.Int32
+	sr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/subjects" {
+			subjects.Add(1)
+		}
+		w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(sr.Close)
+	connectSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(connectSrv.Close)
+
+	cfg := devA2Config()
+	cfg.SchemaRegistryURL = sr.URL
+	cfg.ConnectURL = connectSrv.URL
+	a2, err := buildA2Clients(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a2.Kafka.Close)
+
+	w := assemble(testPipeline(), "", a2, downSource{}, nil, func() {})
+	if w.Registry == nil || w.Builder == nil {
+		t.Fatalf("assemble: registry %v, builder %v", w.Registry, w.Builder)
+	}
+	if _, err := w.Builder.Build(context.Background(), "p"); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if subjects.Load() == 0 {
+		t.Fatal("Open's builder never asked the Schema Registry")
+	}
+}
+
+// SCHEMA_REGISTRY_URL "" (or "off", which config stores as ""): no registry
+// client at all, a nil interface on Wired (not a nil pointer in it), and a
+// write-action registry that refuses cleanly.
+func TestAssembleWithoutRegistry(t *testing.T) {
+	connectSrv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(connectSrv.Close)
+	cfg := devA2Config()
+	cfg.SchemaRegistryURL = ""
+	cfg.ConnectURL = connectSrv.URL
+	a2, err := buildA2Clients(cfg, nil)
+	if err != nil {
+		t.Fatalf("buildA2Clients without a registry: %v", err)
+	}
+	t.Cleanup(a2.Kafka.Close)
+	if a2.Registry != nil {
+		t.Fatal("a registry client was built for an empty SCHEMA_REGISTRY_URL")
+	}
+	w := assemble(testPipeline(), "", a2, downSource{}, nil, func() {})
+	if w.Registry != nil {
+		t.Fatalf("Wired.Registry = %#v, want a nil interface", w.Registry)
+	}
+	g, err := w.Builder.Build(context.Background(), "p")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, n := range g.Nodes {
+		if strings.HasPrefix(n.ID, "sr:") {
+			t.Fatalf("subject node %s without a registry", n.ID)
+		}
+	}
+	if _, err := actionRegistry(w).Subjects(context.Background()); !errors.Is(err, errNoRegistry) {
+		t.Fatalf("action registry Subjects error = %v, want errNoRegistry", err)
+	}
+	if actionRegistry(&Wired{Registry: &countingRegistry{}}) == (noRegistry{}) {
+		t.Fatal("a configured registry was replaced by the stub")
 	}
 }

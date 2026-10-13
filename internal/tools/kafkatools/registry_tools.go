@@ -30,6 +30,9 @@ func (t *registrySubjects) Run(ctx context.Context, input json.RawMessage) (tool
 	if err := json.Unmarshal(input, &p); err != nil {
 		return tools.Result{}, fmt.Errorf("%w: %v", tools.ErrBadInput, err)
 	}
+	if t.d.Registry == nil {
+		return notConfigured(), nil
+	}
 	sc, err := t.d.scope(ctx)
 	if err != nil {
 		return tools.Result{}, err
@@ -70,6 +73,9 @@ func (t *registryVersions) Run(ctx context.Context, input json.RawMessage) (tool
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Subject == "" {
 		return tools.Result{}, fmt.Errorf("%w: subject is required", tools.ErrBadInput)
+	}
+	if t.d.Registry == nil {
+		return notConfigured(), nil
 	}
 	sc, err := t.d.scope(ctx)
 	if err != nil {
@@ -131,6 +137,9 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Subject == "" {
 		return tools.Result{}, fmt.Errorf("%w: subject is required", tools.ErrBadInput)
+	}
+	if t.d.Registry == nil {
+		return notConfigured(), nil
 	}
 	sc, err := t.d.scope(ctx)
 	if err != nil {
@@ -317,4 +326,11 @@ func canonType(t any) string {
 		return "[" + strings.Join(parts, ", ") + "]"
 	}
 	return fmt.Sprint(t)
+}
+
+// notConfigured is a schema tool's answer when the deployment has no Schema
+// Registry (SCHEMA_REGISTRY_URL empty or off): a finding for the agent, not
+// an error to retry.
+func notConfigured() tools.Result {
+	return res("Schema Registry not configured (SCHEMA_REGISTRY_URL is empty or off)", map[string]any{"configured": false})
 }

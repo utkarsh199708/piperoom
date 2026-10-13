@@ -155,10 +155,10 @@ func TestSchemaDependsOnInheritsInferredDataEdge(t *testing.T) {
 	}
 }
 
-// Schema Registry unreachable: every real topic gets both subjects as unknown
+// Schema Registry unreachable: every real topic gets its subjects as unknown
 // nodes, so the outage shows in the map. A dependency the connector's own
-// config proves stays mapped; one its config rules out is not drawn; the rest
-// are unconfirmed.
+// config proves stays mapped; the rest are unconfirmed. The key side, which
+// the only writer serializes without the registry, has no subject at all.
 func TestSchemaSubjectRegistryUnreachable(t *testing.T) {
 	cfg := map[string]string{
 		"topic.prefix": "pg", "table.include.list": "public.orders",
@@ -167,15 +167,15 @@ func TestSchemaSubjectRegistryUnreachable(t *testing.T) {
 		"key.converter":                       "org.apache.kafka.connect.storage.StringConverter",
 	}
 	g := mustBuild(t, srBuilder(cfg, &fakeSR{subjectsErr: errors.New("dial tcp: connection refused")}))
-	for _, id := range []string{"sr:pg.public.orders-key", "sr:pg.public.orders-value"} {
-		n := g.mustNode(t, id)
-		if n.Health != HealthUnknown || n.Facts["error"] != "unreachable" || len(n.Facts) != 1 {
-			t.Fatalf("node = %+v, want unknown with error=unreachable", n)
-		}
+	n := g.mustNode(t, "sr:pg.public.orders-value")
+	if n.Health != HealthUnknown || n.Facts["error"] != "unreachable" || len(n.Facts) != 1 {
+		t.Fatalf("node = %+v, want unknown with error=unreachable", n)
+	}
+	if _, ok := g.node("sr:pg.public.orders-key"); ok {
+		t.Fatal("key subject drawn although the only writer's key converter is not a registry converter")
 	}
 	wantDeps := []string{
 		"connect:pg-orders-connector>sr:pg.public.orders-value dep",
-		"group:order-sync>sr:pg.public.orders-key dep ~",
 		"group:order-sync>sr:pg.public.orders-value dep ~",
 	}
 	if got := depEdges(g); !slices.Equal(got, wantDeps) {
@@ -236,23 +236,40 @@ func TestSchemaSubjectRuledOutByConverter(t *testing.T) {
 		subjects: []string{"pg.public.orders-key", "pg.public.orders-value"},
 		versions: map[string][]int{"pg.public.orders-key": {1}, "pg.public.orders-value": {1}},
 	}
-	cfg := map[string]string{
-		"topic.prefix":    "pg",
-		"value.converter": "org.apache.kafka.connect.json.JsonConverter",
-		"key.converter":   "org.apache.kafka.connect.storage.StringConverter",
+	cases := []struct {
+		name  string
+		cfg   map[string]string
+		srErr error
+		want  []string
+	}{
+		{
+			// The only writer writes without the registry on both sides: no
+			// record carries a schema id, so the group depends on nothing
+			// there, even though the registry lists the subjects.
+			name: "every writer rules both sides out",
+			cfg:  map[string]string{"topic.prefix": "pg", "value.converter": "org.apache.kafka.connect.json.JsonConverter", "key.converter": "org.apache.kafka.connect.storage.StringConverter"},
+		},
+		{
+			name:  "ruled out during an outage too",
+			cfg:   map[string]string{"topic.prefix": "pg", "value.converter": "org.apache.kafka.connect.json.JsonConverter", "key.converter": "org.apache.kafka.connect.storage.StringConverter"},
+			srErr: errors.New("timeout"),
+		},
+		{
+			name: "only the key side is ruled out",
+			cfg:  map[string]string{"topic.prefix": "pg", "value.converter": "io.confluent.connect.avro.AvroConverter", "key.converter": "org.apache.kafka.connect.storage.StringConverter"},
+			want: []string{
+				"connect:pg-orders-connector>sr:pg.public.orders-value dep",
+				"group:order-sync>sr:pg.public.orders-value dep",
+			},
+		},
 	}
-	want := []string{
-		"group:order-sync>sr:pg.public.orders-key dep",
-		"group:order-sync>sr:pg.public.orders-value dep",
-	}
-	if got := depEdges(mustBuild(t, srBuilder(cfg, sr))); !slices.Equal(got, want) {
-		t.Fatalf("depends_on edges:\n got %v\nwant %v", got, want)
-	}
-	// Only the connector uses the topic: no subject at all.
-	b := srBuilder(cfg, sr)
-	b.o.Pipelines[0].ConsumerGroups = nil
-	if g := mustBuild(t, b); len(depEdges(g)) != 0 {
-		t.Fatalf("subjects drawn for a JSON-only pipeline: %v", depEdges(g))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeSR{subjects: sr.subjects, versions: sr.versions, subjectsErr: tc.srErr}
+			if got := depEdges(mustBuild(t, srBuilder(tc.cfg, f))); !slices.Equal(got, tc.want) {
+				t.Fatalf("depends_on edges:\n got %v\nwant %v", got, tc.want)
+			}
+		})
 	}
 }
 

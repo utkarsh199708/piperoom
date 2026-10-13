@@ -193,7 +193,7 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	}
 	for _, t := range fp.topics {
 		if fp.placeholder[t] {
-			g.Nodes = append(g.Nodes, b.placeholderTopicNode(p, t))
+			g.Nodes = append(g.Nodes, b.placeholderTopicNode(p, t, fp.invalidName[t]))
 		} else {
 			g.Nodes = append(g.Nodes, b.topicNode(p, t, info))
 		}
@@ -321,9 +321,11 @@ func (b *builder) topicNode(p owners.Pipeline, topic string, info *collected) No
 	return n
 }
 
-// placeholderTopicNode is used when connector config is unavailable: the topic
+// placeholderTopicNode is used when connector config is unavailable, or when
+// it names an illegal topic (invalid): the config itself is then a likely root
+// cause, so the fact says so instead of "unreachable". The topic
 // node exists to keep the graph shape but its real name and health are unknown.
-func (b *builder) placeholderTopicNode(p owners.Pipeline, topic string) Node {
+func (b *builder) placeholderTopicNode(p owners.Pipeline, topic string, invalid bool) Node {
 	n := Node{
 		ID:     "topic:" + topic,
 		Kind:   KindTopic,
@@ -332,6 +334,9 @@ func (b *builder) placeholderTopicNode(p owners.Pipeline, topic string) Node {
 		Owner:  b.layerOwner("kafka"),
 		Health: HealthUnknown,
 		Facts:  map[string]string{"error": "unreachable"},
+	}
+	if invalid {
+		n.Facts = map[string]string{"topic_name": "invalid"}
 	}
 	return n
 }
