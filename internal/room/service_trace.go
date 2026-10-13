@@ -82,7 +82,13 @@ func (s *Service) Trace(ctx context.Context, user User, roomID, table, key strin
 	if !s.roomOpen(st2) {
 		return events.Event{}, roomClosed("room is closed")
 	}
-	return s.emitLocked(ctx, st2, roomID, events.TracePinned, humanActor(user), events.TracePinnedPayload{
-		Table: table, Key: key, Stages: stages,
-	})
+	// Table and key are person text, refused above if unstorable. The stage
+	// names, statuses and facts come from outside systems (Connect, Kafka, the
+	// warehouse); a NUL or bad byte there is not the person's fault, so it
+	// becomes U+FFFD (the agent-text policy) and not a misleading 400.
+	payload, err := sanitizeAgentPayload(events.TracePinnedPayload{Table: table, Key: key, Stages: stages})
+	if err != nil {
+		return events.Event{}, err
+	}
+	return s.emitLocked(ctx, st2, roomID, events.TracePinned, humanActor(user), payload)
 }

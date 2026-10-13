@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"piperoom/internal/events"
 	"piperoom/internal/httpapi"
 	"piperoom/internal/room"
@@ -84,6 +86,38 @@ func (f *unstorableStore) Append(ctx context.Context, roomID string, typ events.
 		return events.Event{}, fmt.Errorf("store: append to %s: %w", roomID, store.ErrUnstorable)
 	}
 	return f.Store.Append(ctx, roomID, typ, actor, payload)
+}
+
+// pgFailStore fails event appends with a raw Postgres error once armed.
+type pgFailStore struct {
+	*memstore.Store
+	code  string
+	armed atomic.Bool
+}
+
+func (f *pgFailStore) Append(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
+	if f.armed.Load() {
+		return events.Event{}, fmt.Errorf("store: insert event: %w", &pgconn.PgError{Code: f.code, Message: "invalid input syntax"})
+	}
+	return f.Store.Append(ctx, roomID, typ, actor, payload)
+}
+
+// SQLSTATE 22P02 (invalid text representation) after the pre-checks means our
+// own bug, not bad client text: it stays a logged 500 internal_error and is not
+// turned into a silent 400.
+func TestPostgres22P02StaysA500(t *testing.T) {
+	st := &pgFailStore{Store: memstore.New(), code: "22P02"}
+	svc := room.New(room.Deps{Store: st, Users: room.DefaultUsers(), Run: fakeRun})
+	t.Cleanup(svc.Close)
+	srv := httptest.NewServer(httpapi.New(svc, st, nil))
+	t.Cleanup(srv.Close)
+
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/rooms", "arjun", `{"title":"t","severity":"sev2","pipeline_id":"orders"}`)
+	roomID := decode[map[string]any](t, resp)["id"].(string)
+
+	st.armed.Store(true)
+	resp = doJSON(t, http.MethodPost, srv.URL+"/api/rooms/"+roomID+"/comments", "arjun", `{"text":"fine"}`)
+	wantErrorBody(t, resp, http.StatusInternalServerError, "internal_error")
 }
 
 // An ErrUnstorable that comes back from the store is a 400, never a 500, and
