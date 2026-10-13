@@ -1,6 +1,8 @@
 /*
- * Piperoom styles: one file per concern, tokens first.
- * Other UI packages add their own file with one @import line at the bottom.
+ * Piperoom styles: the ordered @import list (all @imports must stay at the top).
+ * Tokens come first, so every later file can rely on them. Other packages do not
+ * add lines here: they import their own CSS from their components, which loads
+ * after this file.
  */
 @import './styles/tokens.css';
 @import './styles/base.css';
