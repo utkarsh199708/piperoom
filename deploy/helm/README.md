@@ -62,6 +62,20 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
   `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`; in oidc mode the server ignores it and logs a warning at
   every start (expected). oidc needs an https `PIPEROOM_PUBLIC_URL`; the chart derives it from
   `ingress.host` when `ingress.tlsSecretName` is set.
+- **Dev mode is blocked.** The chart always renders `PIPEROOM_AUTH_MODE` (an empty value means
+  oidc) and `PIPEROOM_DEV_ALLOW_NONLOOPBACK` (empty in oidc mode, overriding the image). Any
+  other mode fails the render unless `allowDevMode=true`, and dev mode with an Ingress always
+  fails. To try dev mode, install with `--set env.PIPEROOM_AUTH_MODE=dev --set allowDevMode=true`
+  and no Ingress, then `kubectl port-forward svc/<release>-piperoom 8090:8090`.
+- **Guard rails.** The render also fails when `env` holds a secret-looking name (PASSWORD, SECRET,
+  TOKEN, `_KEY`, `_DB_URL`...), a variable that is also listed under `secrets`, a chart-managed
+  variable (`PIPEROOM_HTTP_ADDR`, `OWNERS_FILE`, `USERS_FILE`), or when `PIPEROOM_PUBLIC_URL`
+  has a different host than `ingress.host` and `ingress.host` is not in `PIPEROOM_ALLOWED_HOSTS`.
+  `values.schema.json` rejects wrong types (for example `networkPolicy.egress.kafka.ports=9092`
+  must be a list).
+- **With an Ingress** set `env.PIPEROOM_TRUSTED_PROXIES` to the ingress controller pod CIDR.
+  Without it the server sees the controller's address for every user, so all users share one
+  login rate-limit bucket.
 - **Probes** call `/healthz` (liveness) and `/readyz` (readiness, also pings the room database)
   with `Host: localhost`. The server checks the Host header on every route including probes, and
   kubelet would otherwise send the pod IP and get 421.
@@ -80,7 +94,11 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
   ports for Postgres 5432, Kafka 9092/9093, Connect 8083, Schema Registry 8081 and HTTPS 443
   (IdP, model API, Slack). Those groups have an empty `to`, meaning any address on that port; set
   `to` to your CIDRs or selectors, and change `ports` if your services listen elsewhere. Add
-  other rules with `extraEgress`.
+  other rules with `extraEgress`. Caveats: in-cluster alert senders (Alertmanager, Grafana)
+  need their namespace in `ingressFrom`; DNS egress assumes `k8s-app: kube-dns` (NodeLocal
+  DNSCache needs an `extraEgress` rule); 443 to any address is a data-exfiltration path, so
+  narrow `egress.https.to` to your IdP and model endpoints; an `HTTPS_PROXY` on another port
+  needs an `extraEgress` rule.
 - Setting `owners`/`users` in values stores them in a ConfigMap, so keep real user data in a
   ConfigMap you manage (`files.existingConfigMap`) if you do not want it in the release.
 

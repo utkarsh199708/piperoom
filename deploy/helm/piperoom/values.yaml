@@ -9,6 +9,11 @@
 # but the background workers do not. See deploy/helm/README.md.
 replicaCount: 1
 
+# The chart refuses env.PIPEROOM_AUTH_MODE=dev (passwordless login) unless this
+# is true, and never together with an Ingress. For a throwaway try-out only;
+# reach the pod with kubectl port-forward.
+allowDevMode: false
+
 image:
   repository: piperoom      # build from the repo Dockerfile and push it to your registry
   tag: pilot                # prefer an immutable tag; the digest below wins
@@ -74,8 +79,13 @@ env:
   PIPEROOM_SESSION_IDLE: ""           # default 8h
   PIPEROOM_SESSION_MAX: ""            # default 12h
   PIPEROOM_SOLO_USER: ""
-  PIPEROOM_ALLOWED_HOSTS: ""          # extra Host values (the public URL host is allowed already)
-  PIPEROOM_TRUSTED_PROXIES: ""        # CIDRs of the ingress controller pods (X-Forwarded-For)
+  # Extra Host values. The public URL host is allowed already; if it differs from
+  # ingress.host, list ingress.host here (the chart fails otherwise).
+  PIPEROOM_ALLOWED_HOSTS: ""
+  # With an Ingress, set this to the ingress controller pod CIDR. Otherwise the
+  # server sees the controller's address for everyone and all users share one
+  # login rate-limit bucket (300 a minute).
+  PIPEROOM_TRUSTED_PROXIES: ""
 
   # --- the pipeline (non-secret parts; the DB URLs with passwords are secrets) ---
   KAFKA_BROKERS: ""
@@ -92,6 +102,9 @@ env:
   PIPEROOM_ROOM_TOKEN_BUDGET: ""      # default 2000000, 0 = no cap
   ANTHROPIC_WORKSPACE_ID: ""          # only for user keys (sk-ant-usr-...)
   AWS_REGION: ""                      # bedrock
+  # A named profile only works with a mounted config file (extraVolumes). On EKS
+  # prefer IRSA (serviceAccount.annotations) and leave this empty.
+  AWS_PROFILE: ""
   VERTEX_PROJECT_ID: ""               # vertex
   VERTEX_REGION: ""
   GOOGLE_APPLICATION_CREDENTIALS: ""  # path in the container, e.g. a mounted key file
@@ -239,6 +252,12 @@ networkPolicy:
         podSelector:
           matchLabels:
             k8s-app: kube-dns
+  # Notes: in-cluster alert senders (Alertmanager, Grafana) call the Service, so
+  # add their namespace to ingressFrom. DNS assumes k8s-app=kube-dns; with
+  # NodeLocal DNSCache add the node-local address through extraEgress. The https
+  # group allows 443 to ANYWHERE, which is a data-exfiltration path: narrow "to"
+  # to your IdP and model endpoints. An HTTPS_PROXY on another port needs an
+  # extraEgress rule for the proxy.
   # Egress groups. "to" uses NetworkPolicy peer syntax (ipBlock, namespaceSelector,
   # podSelector). An EMPTY "to" opens the ports to any destination, because the
   # chart cannot know your addresses: narrow it to your CIDRs for production.

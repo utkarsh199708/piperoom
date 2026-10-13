@@ -1,3 +1,4 @@
+{{- include "piperoom.validate" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -59,10 +60,16 @@ spec:
             - name: PIPEROOM_PUBLIC_URL
               value: {{ $url | quote }}
             {{- end }}
+            # Always set explicitly: the image defaults to dev mode with
+            # PIPEROOM_DEV_ALLOW_NONLOOPBACK=1.
+            - name: PIPEROOM_AUTH_MODE
+              value: {{ include "piperoom.authMode" . | quote }}
+            - name: PIPEROOM_DEV_ALLOW_NONLOOPBACK
+              value: {{ ternary "" "1" (eq (include "piperoom.authMode" .) "oidc") | quote }}
             {{- range $k, $v := .Values.env }}
-            {{- if and (ne $k "PIPEROOM_PUBLIC_URL") (or (ne (toString $v) "") (eq $k "PIPEROOM_OIDC_GROUPS_CLAIM")) (not (kindIs "invalid" $v)) }}
+            {{- if and (not (kindIs "invalid" $v)) (ne $k "PIPEROOM_PUBLIC_URL") (ne $k "PIPEROOM_AUTH_MODE") (or (ne (toString $v) "") (eq $k "PIPEROOM_OIDC_GROUPS_CLAIM")) }}
             - name: {{ $k }}
-              value: {{ toString $v | quote }}
+              value: {{ include "piperoom.envValue" $v | quote }}
             {{- end }}
             {{- end }}
             {{- $s := .Values.secrets }}
