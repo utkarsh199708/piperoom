@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -501,7 +503,13 @@ func TestAttack_UnbindLeavesSessionsAlive(t *testing.T) {
 
 // A-EX-1. Who may export, and what the file holds: a plain member who drives
 // the room cannot export, a viewer cannot, an auditor can; the file holds no
-// session token, token hash, email or IdP group.
+// session token, token hash or IdP group.
+//
+// Emails (A-ID-2, accepted by LEAD-ARCH): the file, and the events a viewer
+// reads, hold exactly two kinds of email, each a person's own: (a) an
+// approver's, in identity.email of their own decision, and (b) a member's,
+// in their own actor name when the server suffixed a look-alike name. Never
+// a third party's (the auditor's, the driver's, anyone who only logged in).
 func TestAttack_ExportAccessAndContent(t *testing.T) {
 	e := newOIDCEnv(t, oidcOpts{})
 	snap := e.newRoom(t, "priya")
@@ -509,6 +517,9 @@ func TestAttack_ExportAccessAndContent(t *testing.T) {
 	pid := e.proposal(t, snap.ID, "postgres")
 	wantStatus(t, e.approve(t, priya, pid, "postgres"), http.StatusOK)
 	waitFor(t, func() bool { return e.acts["postgres"].count() == 1 }, "the step to run")
+	// A group member whose IdP name is "Priya" comments: shown with their own email.
+	lookalike := e.mustLogin(t, testenv.IDPUser{Sub: "idp-lookalike", Email: "lookalike@example.com", EmailVerified: true, Name: "Priya", Groups: []string{"dataeng-oncall"}})
+	wantStatus(t, e.do(t, http.MethodPost, "/api/rooms/"+snap.ID+"/comments", `{"text":"hi"}`, ck(lookalike)), http.StatusOK)
 
 	// ksenia is in users.yaml with no layer: a plain member. Make her the driver.
 	ksenia := e.mustLogin(t, testenv.IDPUser{Sub: "idp-ksenia", Email: "ksenia@example.com", EmailVerified: true})
@@ -541,15 +552,40 @@ func TestAttack_ExportAccessAndContent(t *testing.T) {
 			t.Errorf("the export contains %q", leak)
 		}
 	}
-	// The one email in the file is the approver's own, recorded with their
-	// decision (design section 2.1, A-ID-2): once in the approval.given event
-	// and once in approvals[].identity.
+	// (a) the approver's own email, with their decision: once in the
+	// approval.given event and once in approvals[].identity.
 	if n := strings.Count(doc, `"email":"priya@example.com"`); n != 2 {
 		t.Errorf("the approver's email appears %d times, want 2 (the event and approvals[].identity)", n)
+	}
+	// (b) the suffixed member's own email, in their own actor name only.
+	if n, m := strings.Count(doc, "lookalike@example.com"), strings.Count(doc, `"name":"Priya (lookalike@example.com)"`); n != 1 || m != 1 {
+		t.Errorf("the suffixed member's email appears %d times (%d as their name), want once, as their name", n, m)
+	}
+	// Nothing else: the same holds for what a viewer reads.
+	want := map[string]bool{"priya@example.com": true, "lookalike@example.com": true}
+	if got := emailsIn(doc); !maps.Equal(got, want) {
+		t.Errorf("emails in the export = %v, want only %v", got, want)
+	}
+	vresp := e.do(t, http.MethodGet, "/api/rooms/"+snap.ID+"/events?after=0", "", ck(viewer))
+	wantStatus(t, vresp, http.StatusOK)
+	vbody, _ := io.ReadAll(vresp.Body)
+	if got := emailsIn(string(vbody)); !maps.Equal(got, want) {
+		t.Errorf("emails a viewer reads = %v, want only %v", got, want)
 	}
 	if !strings.Contains(doc, `"params_hash"`) {
 		t.Error("the export has no params_hash")
 	}
+}
+
+var emailRE = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]+`)
+
+// emailsIn is the set of email addresses in s.
+func emailsIn(s string) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range emailRE.FindAllString(s, -1) {
+		out[m] = true
+	}
+	return out
 }
 
 // A-EX-2 (design, documented). The export is limited to approvers and

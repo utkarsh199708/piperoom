@@ -125,14 +125,28 @@ func (s *Service) LookupPerson(ctx context.Context, id string) (User, error) {
 // may not pass for them either.
 var serverActorNames = []string{events.AgentActor.Name, systemActor.Name, executorActor.Name}
 
+// Reasons ShownName gives in resembles when no users.yaml person or server
+// actor is matched.
+const (
+	resemblesSuffixShape = "suffix-shape"
+	resemblesMixedScript = "mixed-script"
+)
+
 // ShownName is the name the room shows for a person (design section 2.1,
 // security audit A-ID-2). A users.yaml person is shown with their users.yaml
-// name. Anyone else chose their own name in the IdP, so when that name renders
-// like a users.yaml id, name or email, or like a server actor (auth.Skeleton),
-// it is shown as "<name> (<email>)", or "<name> (<id>)" without a verified
-// email. resembles is the users.yaml id (or server actor name) it looks like,
-// "" when none. An empty name becomes the email, else the id. The result is
-// stable: a name that already carries the suffix no longer looks like anyone.
+// name. Anyone else chose their own name in the IdP, so it is shown as
+// "<name> (<email>)", or "<name> (<id>)" without a verified email, when
+//
+//   - the whole name, or the name with its bracketed parts removed, renders
+//     like a users.yaml id, name or email, or a server actor (auth.Skeleton);
+//   - it holds a bracketed part shaped like this suffix (an email or a u_ id),
+//     so it cannot forge the server's own marking; or
+//   - it mixes Latin with another script.
+//
+// resembles is the users.yaml id or server actor name it looks like, or
+// "suffix-shape" / "mixed-script"; "" when the name is shown as it is. An empty
+// name becomes the email, else the id. Callers pass the name as the IdP sent
+// it, never a name this function already returned.
 func (s *Service) ShownName(id, name, email string) (shown, resembles string) {
 	if u, ok := s.users.Get(id); ok {
 		return u.Name, ""
@@ -143,16 +157,7 @@ func (s *Service) ShownName(id, name, email string) (shown, resembles string) {
 	if name == "" {
 		return id, ""
 	}
-	if u, ok := s.users.Lookalike(name); ok {
-		resembles = u.ID
-	} else {
-		for _, n := range serverActorNames {
-			if auth.LooksLike(name, n) {
-				resembles = n
-				break
-			}
-		}
-	}
+	resembles = s.resembles(name)
 	if resembles == "" {
 		return name, ""
 	}
@@ -161,6 +166,27 @@ func (s *Service) ShownName(id, name, email string) (shown, resembles string) {
 		tag = id
 	}
 	return name + " (" + tag + ")", resembles
+}
+
+// resembles is ShownName's test; see there.
+func (s *Service) resembles(name string) string {
+	for _, n := range []string{name, auth.WithoutBrackets(name)} {
+		if u, ok := s.users.Lookalike(n); ok {
+			return u.ID
+		}
+		for _, a := range serverActorNames {
+			if auth.LooksLike(n, a) {
+				return a
+			}
+		}
+	}
+	if auth.HasSuffixShape(name) {
+		return resemblesSuffixShape
+	}
+	if auth.MixesLatin(name) {
+		return resemblesMixedScript
+	}
+	return ""
 }
 
 // PersonEntry is one entry of GET /api/people: someone a driver may give control or a

@@ -30,6 +30,16 @@ func TestSkeletonLookalikes(t *testing.T) {
 		{"Pri\u200bya", "a zero-width space"},
 		{"Pri\u200dya", "a zero-width joiner"},
 		{" Priya. ", "spaces and punctuation"},
+		// Hangul fillers are letters (Lo) that render as nothing.
+		{"Priya\u3164", "Hangul filler U+3164"},
+		{"Pri\u115fya", "Hangul choseong filler U+115F"},
+		{"Pri\u1160ya", "Hangul jungseong filler U+1160"},
+		{"Priya\uffa0", "halfwidth Hangul filler U+FFA0"},
+		{"Pri\u034fya", "combining grapheme joiner"},
+		{"Priya\ufe0f", "variation selector"},
+		{"\u13e2\u13a1\u13a5\u13a9\u13aa", "Cherokee capitals TLV E V GI GO"},
+		{"\uabb2\uab71\uab75\uab79\uab7a", "Cherokee small letters (fold to the capitals)"},
+		{"\ua4d1\ua4e3\ua4f2\ua4ec\ua4ee", "Lisu PA ZHA I YA A"},
 		{"Priya \u2713", "a check mark"},
 		{"P r i y a", "spaced letters"},
 	}
@@ -55,6 +65,12 @@ func TestSkeletonLookalikes(t *testing.T) {
 		{"Oscar", "0scar", "zero for O"},
 		{"Nora", "\u0274\u1d0f\u0280\u1d00", "small capitals"},
 		{"priya@example.com", "PRIYA@EXAMPLE.COM", "an email folds too"},
+		{"John", "J\u0585\u0570n", "Armenian small oh and ho"},
+		{"Ugo", "\u054dg\u0585", "Armenian capital seh (folds to small seh) and oh"},
+		{"Qin", "\u0566in", "Armenian small za"},
+		{"Nina", "\u0578ina", "Armenian small vo"},
+		{"Bob", "\u13f4ob", "Cherokee capital YV"},
+		{"Bob", "\u13fcob", "Cherokee small YV (not at +0x97D0)"},
 	}
 	for _, p := range pairs {
 		if !LooksLike(p.a, p.b) {

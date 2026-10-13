@@ -33,37 +33,68 @@ func TestVerified_LookalikeIdPNamesAreSuffixed(t *testing.T) {
 
 	cases := []struct {
 		name, resembles string
+		// stored is the name the session keeps (what login leaves of the IdP
+		// name); "" means the name itself.
+		stored string
 	}{
-		{"Priya", "priya"},
-		{"PRIYA", "priya"},
-		{"pRiYa", "priya"},
-		{"Pri\u0443a", "priya"},                     // Cyrillic small u (looks like y)
-		{"Priy\u0430", "priya"},                     // Cyrillic small a
-		{"Pr\u03b9ya", "priya"},                     // Greek small iota
-		{"\uff30\uff52\uff49\uff59\uff41", "priya"}, // fullwidth
-		{"\u041c\u0435\u0435r\u0430", "meera"},      // Cyrillic capital M, small e, a
-		{"K\u03b1b\u0456r", "kabir"},                // Greek alpha, Cyrillic i
-		{"arjun@example.com", "arjun"},              // a users.yaml email as a name
-		{"\u0391gent", events.AgentActor.Name},      // Greek capital alpha: the agent
-		{"Priya \u2713", "priya"},                   // a check mark to look verified
-		{"Pri\u200bya", "priya"},                    // zero-width space (dropped at login)
+		{"Priya", "priya", ""},
+		{"PRIYA", "priya", ""},
+		{"pRiYa", "priya", ""},
+		{"Pri\u0443a", "priya", ""},                     // Cyrillic small u (looks like y)
+		{"Priy\u0430", "priya", ""},                     // Cyrillic small a
+		{"Pr\u03b9ya", "priya", ""},                     // Greek small iota
+		{"\uff30\uff52\uff49\uff59\uff41", "priya", ""}, // fullwidth
+		{"\u041c\u0435\u0435r\u0430", "meera", ""},      // Cyrillic capital M, small e, a
+		{"K\u03b1b\u0456r", "kabir", ""},                // Greek alpha, Cyrillic i
+		{"arjun@example.com", "arjun", ""},              // a users.yaml email as a name
+		{"\u0391gent", events.AgentActor.Name, ""},      // Greek capital alpha: the agent
+		{"Priya \u2713", "priya", ""},                   // a check mark to look verified
+		{"Pri\u200bya", "priya", "Priya"},               // zero-width space (dropped at login)
+		// Hangul fillers render as nothing; login drops them (A-ID-2 review).
+		{"Priya\u3164", "priya", "Priya"},
+		{"Pri\u115fya", "priya", "Priya"},
+		{"Pri\u1160ya", "priya", "Priya"},
+		{"Priya\uffa0", "priya", "Priya"},
+		// The server's own suffix, forged (A-ID-2 review).
+		{"Priya (priya@example.com)", "priya", ""},
+		{"Priya (arjun@example.com)", "priya", ""},
+		{"Bob (bob@vendor.example)", "suffix-shape", ""},
+		{"Zed (u_0123456789ab)", "suffix-shape", ""},
+		// Other scripts: whole-name look-alikes, and Latin mixed with another
+		// script.
+		{"\ua4d1\ua4e3\ua4f2\ua4ec\ua4ee", "priya", ""}, // Lisu
+		{"\u13e2\u13a1\u13a5\u13a9\u13aa", "priya", ""}, // Cherokee
+		{"Zed\u0430", "mixed-script", ""},               // Latin with one Cyrillic letter
+		{"\u738b Wang", "mixed-script", ""},             // Han and Latin
 	}
 	for i, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			email := fmt.Sprintf("member%d@example.com", i)
 			u := testenv.IDPUser{Sub: fmt.Sprintf("idp-lookalike-%d", i), Email: email, EmailVerified: true, Name: c.name, Groups: []string{"dataeng-oncall"}}
 			cookie := e.mustLogin(t, u)
+			stored := c.stored
+			if stored == "" {
+				stored = c.name
+			}
+			want := stored + " (" + email + ")"
 			me := e.me(t, cookie)
-			name, _ := me["name"].(string)
-			if !strings.HasSuffix(name, " ("+email+")") || me["verified"] != false {
-				t.Fatalf("/api/me = %v, want the name with (%s) appended, unverified", me, email)
+			if me["name"] != want || me["verified"] != false {
+				t.Fatalf("/api/me = %v, want name %q, unverified", me, want)
+			}
+			// The session keeps the name as sent, so the suffix is added once,
+			// on every request, never twice.
+			if sess, err := e.sessions.ByID(context.Background(), sessionID(t, e, cookie)); err != nil || sess.Name != stored {
+				t.Fatalf("stored session name = %q (%v), want %q", sess.Name, err, stored)
+			}
+			if again := e.me(t, cookie); again["name"] != want {
+				t.Fatalf("second /api/me name = %v, want %q", again["name"], want)
 			}
 			ev := comment(t, e, snap.ID, cookie)
-			if ev.Actor.Name != name || ev.Actor.Verified || !strings.HasPrefix(ev.Actor.ID, room.DerivedIDPrefix) {
-				t.Fatalf("comment actor = %+v, want %q, unverified, derived id", ev.Actor, name)
+			if ev.Actor.Name != want || ev.Actor.Verified || !strings.HasPrefix(ev.Actor.ID, room.DerivedIDPrefix) {
+				t.Fatalf("comment actor = %+v, want %q, unverified, derived id", ev.Actor, want)
 			}
-			if !strings.Contains(e.logs.String(), "resembles="+c.resembles) {
-				t.Fatalf("the login was not logged with resembles=%s:\n%s", c.resembles, e.logs.String())
+			if line := "user=" + ev.Actor.ID + " resembles=" + c.resembles; !strings.Contains(e.logs.String(), line) {
+				t.Fatalf("the login was not logged with %q:\n%s", line, e.logs.String())
 			}
 		})
 	}
@@ -158,6 +189,25 @@ func TestVerified_NameRecheckedPerRequest(t *testing.T) {
 	p, err := e.svc.LookupPerson(context.Background(), "u_0123456789ab")
 	if err != nil || p.Name != "M\u0435\u0435ra (old@example.com)" || p.Verified {
 		t.Fatalf("LookupPerson = %+v, %v", p, err)
+	}
+	// And GET /api/people, the picker for control and hand-offs.
+	resp = e.do(t, http.MethodGet, "/api/people", "", cookie)
+	wantStatus(t, resp, http.StatusOK)
+	var people []room.PersonEntry
+	if err := json.NewDecoder(resp.Body).Decode(&people); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, q := range people {
+		if q.ID == "u_0123456789ab" {
+			found = true
+			if q.Name != "M\u0435\u0435ra (old@example.com)" || q.Verified {
+				t.Fatalf("/api/people entry = %+v, want the look-alike name with the email appended, unverified", q)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("/api/people = %+v, want the seeded member", people)
 	}
 }
 

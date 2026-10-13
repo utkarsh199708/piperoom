@@ -170,12 +170,13 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("auth: no groups claim in id token", "user", userID, "iss", claims.Issuer, "claim", s.oidc.GroupsClaim())
 	}
 	// A person who is not in users.yaml chose their own name in the IdP. One
-	// that renders like a users.yaml person is stored with the email (or id)
-	// appended, not refused: they may really share the name (design §2.1,
-	// security audit A-ID-2). Only ids are logged; the name is the IdP's text.
-	name, resembles := s.svc.ShownName(userID, name, verifiedEmail(claims))
-	if resembles != "" {
-		s.log.Warn("auth: IdP display name looks like a users.yaml person; shown with the email or id appended",
+	// that could pass for someone is shown with the email (or id) appended, not
+	// refused: they may really share the name (design §2.1, security audit
+	// A-ID-2). The session keeps the name as sent; person() works out the shown
+	// name on every request, so the suffix is never applied twice. Only ids are
+	// logged; the name is the IdP's text.
+	if _, resembles := s.svc.ShownName(userID, name, verifiedEmail(claims)); resembles != "" {
+		s.log.Warn("auth: IdP display name could pass for someone else; shown with the email or id appended",
 			"user", userID, "resembles", resembles, "iss", claims.Issuer)
 	}
 
