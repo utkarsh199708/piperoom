@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, renderHook, waitFor } from '@testing-library/react'
+import { act, render, renderHook, screen, waitFor, fireEvent } from '@testing-library/react'
+import { toast } from 'sonner'
 import type { Event, EventsPage, RoomSnapshot } from '../api/types'
+
+vi.mock('sonner', () => ({
+  toast: Object.assign(vi.fn(), { warning: vi.fn(), dismiss: vi.fn() }),
+}))
 
 // The hook reads the current user from context; provide a fixed user so it can
 // render without a router/provider.
@@ -39,6 +44,7 @@ import { ApiClientError, api, openRoomWs } from '../api/client'
 import { onAuthProblem } from '../lib/auth'
 import type { AuthProblem } from '../lib/auth'
 import { useRoom } from './useRoom'
+import { ProposalsPanel } from '../components/ProposalsPanel'
 
 class FakeWebSocket {
   static CONNECTING = 0
@@ -287,16 +293,16 @@ describe('useRoom approve', () => {
       res = await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
     })
     expect(res).toEqual({ ok: false, mismatch: true })
-    expect(result.current.stale).toBe(true)
+    expect(result.current.stale).toEqual({ proposalId: 'p1', sentHash: 'h1' })
     // Not the generic error banner, and no second approve call.
     expect(result.current.error).toBeNull()
     // The room state is fetched again (snapshot), which is the reload.
     await waitFor(() => expect(api.room).toHaveBeenCalledTimes(2))
     expect(api.approve).toHaveBeenCalledTimes(1)
     // The flag survives the reload until it is dismissed.
-    expect(result.current.stale).toBe(true)
+    expect(result.current.stale).toEqual({ proposalId: 'p1', sentHash: 'h1' })
     act(() => result.current.dismissStale())
-    expect(result.current.stale).toBe(false)
+    expect(result.current.stale).toBeNull()
   })
 
   it('409 params_mismatch on reject sends the rendered hash, raises the stale flag and does not retry', async () => {
@@ -305,7 +311,7 @@ describe('useRoom approve', () => {
     )
     const { result } = await setup()
     act(() => result.current.actions.reject('p1', 'kafka', 'wrong', 'h1'))
-    await waitFor(() => expect(result.current.stale).toBe(true))
+    await waitFor(() => expect(result.current.stale).toEqual({ proposalId: 'p1', sentHash: 'h1' }))
     expect(api.reject).toHaveBeenCalledWith('p1', 'kafka', 'wrong', 'h1')
     await waitFor(() => expect(api.room).toHaveBeenCalledTimes(2))
     expect(api.reject).toHaveBeenCalledTimes(1)
@@ -320,9 +326,137 @@ describe('useRoom approve', () => {
     await act(async () => {
       await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
     })
-    expect(result.current.stale).toBe(false)
+    expect(result.current.stale).toBeNull()
     expect(result.current.error).toBe('layer "kafka" already decided')
     expect(api.room).toHaveBeenCalledTimes(1)
+    expect(toast.warning).not.toHaveBeenCalled()
+  })
+
+  it('raises the stale toast once, where the 409 happens, and Reload closes it for good', async () => {
+    vi.mocked(api.approve).mockRejectedValue(
+      new ApiClientError(409, 'params_mismatch', 'params_hash does not match the proposal'),
+    )
+    const { result } = await setup()
+    expect(toast.warning).not.toHaveBeenCalled()
+    await act(async () => {
+      await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
+    })
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+    const [title, options] = vi.mocked(toast.warning).mock.calls[0]
+    expect(title).toBe('Proposal changed since you looked')
+    expect(options?.duration).toBe(Infinity)
+    expect(options?.action).toMatchObject({ label: 'Reload' })
+    await waitFor(() => expect(api.room).toHaveBeenCalledTimes(2))
+    vi.mocked(toast.dismiss).mockClear()
+
+    // Reload (the banner button, or the toast's own action) closes it ...
+    act(() => result.current.reload())
+    expect(toast.dismiss).toHaveBeenCalledWith('stale-params-mismatch')
+    await waitFor(() => expect(api.room).toHaveBeenCalledTimes(3))
+    await act(async () => {
+      await sleep(20)
+    })
+    // ... and nothing raises it again, although the stale state (the banner) is still there.
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+    expect(result.current.stale).not.toBeNull()
+
+    // The toast action is the same reload.
+    const action = options?.action as unknown as { onClick: () => void }
+    vi.mocked(toast.dismiss).mockClear()
+    act(() => action.onClick())
+    expect(toast.dismiss).toHaveBeenCalledWith('stale-params-mismatch')
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+  })
+
+  it('dismissing the stale state, or a decision that goes through, takes the toast down', async () => {
+    vi.mocked(api.approve).mockRejectedValueOnce(
+      new ApiClientError(409, 'params_mismatch', 'params_hash does not match the proposal'),
+    )
+    const { result } = await setup()
+    await act(async () => {
+      await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
+    })
+    vi.mocked(toast.dismiss).mockClear()
+    act(() => result.current.dismissStale())
+    expect(toast.dismiss).toHaveBeenCalledWith('stale-params-mismatch')
+
+    vi.mocked(api.approve).mockResolvedValueOnce(ev(1))
+    await act(async () => {
+      await result.current.actions.approve('p1', 'kafka', { params_hash: 'h2' })
+    })
+    expect(result.current.stale).toBeNull()
+  })
+
+  it('leaving the room takes the toast down', async () => {
+    const { unmount } = await setup()
+    vi.mocked(toast.dismiss).mockClear()
+    unmount()
+    expect(toast.dismiss).toHaveBeenCalledWith('stale-params-mismatch')
+  })
+})
+
+describe('the stale note through a real room reload', () => {
+  const H1 = 'a'.repeat(64)
+  const H2 = 'b'.repeat(64)
+  const created = (hash: string) =>
+    ev(1, 'proposal.created', {
+      proposal_id: 'p1',
+      title: 'Restart the task',
+      steps: [],
+      risk: 'low',
+      rollback: 'none',
+      required_layers: ['kafka'],
+      params_hash: hash,
+    })
+  const user = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] }
+
+  // The room as RoomScreen uses it: no state means "Loading room…" and the panel is unmounted.
+  function Harness() {
+    const { state, actions, stale } = useRoom('r1')
+    if (!state) return <p>Loading room…</p>
+    return <ProposalsPanel state={state} user={user} actions={actions} stale={stale} />
+  }
+
+  it('the panel is unmounted by the reload, and the note is back when the new hash arrives', async () => {
+    const s1 = new FakeWebSocket()
+    const s2 = new FakeWebSocket()
+    // The second snapshot is held back, so "Loading room…" can be seen.
+    let releaseSnapshot: (s: RoomSnapshot) => void = () => undefined
+    vi.mocked(api.room)
+      .mockResolvedValueOnce(snapshot('r1'))
+      .mockReturnValueOnce(new Promise<RoomSnapshot>((r) => (releaseSnapshot = r)))
+    vi.mocked(openRoomWs)
+      .mockReturnValueOnce(s1 as unknown as WebSocket)
+      .mockReturnValueOnce(s2 as unknown as WebSocket)
+    vi.mocked(api.approve).mockRejectedValue(
+      new ApiClientError(409, 'params_mismatch', 'params_hash does not match the proposal'),
+    )
+
+    render(<Harness />)
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    act(() => s1.onopen?.())
+    await act(async () => {
+      s1.onmessage?.(wsMessage(created(H1)))
+    })
+    const approveButton = await screen.findByRole('button', { name: 'Approve' })
+    expect(screen.queryByText('You looked at')).not.toBeInTheDocument()
+
+    fireEvent.click(approveButton)
+    // The reload takes the panel away ...
+    await waitFor(() => expect(screen.getByText('Loading room…')).toBeInTheDocument())
+    expect(screen.queryByRole('region', { name: 'Proposals' })).not.toBeInTheDocument()
+    // ... and brings it back with the server's hash, plus what the person looked at.
+    await act(async () => releaseSnapshot(snapshot('r1')))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2))
+    act(() => s2.onopen?.())
+    await act(async () => {
+      s2.onmessage?.(wsMessage(created(H2)))
+    })
+    expect(await screen.findByText('You looked at')).toBeInTheDocument()
+    expect(screen.getByText('aaaa aaaa … aaaa').closest('span[title]')).toHaveClass('line-through')
+    expect(screen.getAllByText('bbbb bbbb … bbbb')).toHaveLength(2)
+    expect(api.approve).toHaveBeenCalledTimes(1)
+    expect(api.approve).toHaveBeenCalledWith('p1', 'kafka', { params_hash: H1 })
   })
 })
 
