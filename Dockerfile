@@ -63,11 +63,13 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
 # this port to the internet. Keep it on the customer's VPN or behind an SSH
 # tunnel.
 #
-# A reverse proxy that does the authenticating needs PIPEROOM_AUTH_MODE=oidc,
-# which arrives in auth PR 3 (docs/design/auth.md sections 5.1 and 5.4). Until
-# then, pilots behind a proxy build from the git tag "pre-auth". The image sets
-# its mode explicitly so a later change of the default cannot lock out this
-# path. See deploy/README.md.
+# A reverse proxy needs PIPEROOM_AUTH_MODE=oidc (real login through the
+# customer's identity provider, set in deploy/.env; docs/design/auth.md sections
+# 5.1 and 5.4). In oidc mode the server ignores PIPEROOM_DEV_ALLOW_NONLOOPBACK
+# and logs a warning about it at every start; that warning is expected. A proxy
+# pilot that cannot use OIDC yet builds from the git tag "pre-auth". The image
+# sets its mode explicitly so a later change of the default cannot lock out this
+# path. See deploy/README.md, "Single sign-on (OIDC)".
 #
 # These are ENV values, not a flag in ENTRYPOINT, so a command override such as
 # "--demo" still starts a server that Docker's port mapping can reach.

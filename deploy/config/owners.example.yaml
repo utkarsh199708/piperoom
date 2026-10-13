@@ -23,10 +23,12 @@ layers:                              # the default owner (a users.yaml id) of ea
   consumer: carol
   warehouse: dave
 
-# Optional (login with OIDC, auth PR 3). A layer value may also be a list of
+# Optional (login with OIDC, oidc mode). A layer value may also be a list of
 # principals, user:<users.yaml id> or group:<IdP group>. A bare id means user:.
 # Use the IdP group ID where your IdP sends ids (Entra object ids), not a name
-# anyone can create.
+# anyone can create. A layer whose principals are all user: must name users.yaml
+# users; a person with no users.yaml entry (id u_...) goes in a group:, a
+# pipeline owners: block or auditors:. See deploy/README.md, "Identity and rights".
 #   kafka: [user:bob, group:dataeng-oncall]
 #
 # Per pipeline, `owners:` replaces the default for that layer. A backup may approve too.

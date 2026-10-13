@@ -10,7 +10,8 @@ export function PipelineMap({
 }: {
   topology: Topology | null
   updatedAt?: number | null
-  onTrace: () => void
+  /** Absent for a viewer: tracing a record is a write (POST .../trace). */
+  onTrace?: () => void
 }) {
   // Re-render once a second so "updated Ns ago" stays fresh between fetches.
   const [now, setNow] = useState(() => Date.now())
@@ -28,9 +29,11 @@ export function PipelineMap({
           {updatedAt != null && (
             <span className="muted pipeline__updated">{updatedAgoLabel(updatedAt, now)}</span>
           )}
-          <button type="button" className="btn btn--ghost" onClick={onTrace}>
-            Trace one record
-          </button>
+          {onTrace && (
+            <button type="button" className="btn btn--ghost" onClick={onTrace}>
+              Trace one record
+            </button>
+          )}
         </>
       }
     >

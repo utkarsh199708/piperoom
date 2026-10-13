@@ -2,8 +2,42 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import type { RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
-import { canRequestControl, canSteer, canTakeControl } from '../state/permissions'
+import { canRequestControl, canSteer, canTakeControl, isViewer } from '../state/permissions'
 import type { RoomActions } from '../hooks/useRoom'
+import { PersonSelect } from './PersonSelect'
+
+// Driver only: give control to anyone GET /api/people lists. Loads the list on open.
+function GrantPicker({ user, onGrant }: { user: CurrentUser; onGrant: (to: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const [to, setTo] = useState('')
+  if (!open) {
+    return (
+      <button type="button" className="btn btn--ghost" onClick={() => setOpen(true)}>
+        Give control to…
+      </button>
+    )
+  }
+  return (
+    <div className="grant-picker">
+      <label htmlFor="grant-to">Give control to</label>
+      <PersonSelect id="grant-to" selfId={user.id} value={to} onChange={setTo} />
+      <button
+        type="button"
+        className="btn btn--small btn--primary"
+        disabled={!to}
+        onClick={() => {
+          onGrant(to)
+          setOpen(false)
+        }}
+      >
+        Give control
+      </button>
+      <button type="button" className="btn btn--small btn--ghost" onClick={() => setOpen(false)}>
+        Cancel
+      </button>
+    </div>
+  )
+}
 
 export function SteerBox({
   state,
@@ -16,6 +50,19 @@ export function SteerBox({
 }) {
   const [text, setText] = useState('')
   const isDriver = canSteer(state, user)
+
+  if (isViewer(user)) {
+    return (
+      <section className="panel steer">
+        <div className="panel__head">
+          <h2 className="panel__title">Steer</h2>
+        </div>
+        <div className="panel__body">
+          <p className="muted">View only: you can read this room but not steer it.</p>
+        </div>
+      </section>
+    )
+  }
 
   const submit = (e: FormEvent) => {
     e.preventDefault()
@@ -81,6 +128,8 @@ export function SteerBox({
             </button>
           </div>
         </form>
+
+        {isDriver && <GrantPicker user={user} onGrant={actions.grantControl} />}
 
         {isDriver && state.control_requests.length > 0 && (
           <ul className="suggestions">

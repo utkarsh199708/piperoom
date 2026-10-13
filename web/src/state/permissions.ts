@@ -3,10 +3,24 @@
 import type { ApprovalValue } from '../api/types'
 import type { HandoffState, ProposalState, RoomState, SuggestionState } from './types'
 
+/** `/api/me.role`: a viewer can read rooms but every write answers 403 viewer. */
+export type Role = 'member' | 'viewer'
+
 export interface CurrentUser {
   id: string
   name: string
   layers: string[]
+  /** Absent in fixture mode and old servers: treated as a member. */
+  role?: Role
+  /** The IdP sent no groups claim, so group-based rights are not available. */
+  groupsMissing?: boolean
+  /** `/api/me.solo`: show the solo banner and ask for the typed confirm up front. */
+  solo?: boolean
+}
+
+/** A viewer sees everything and changes nothing; the server enforces it, the UI hides the controls. */
+export function isViewer(user: CurrentUser): boolean {
+  return user.role === 'viewer'
 }
 
 export function isDriver(state: RoomState, user: CurrentUser): boolean {
@@ -26,15 +40,16 @@ export function isLeaseExpired(state: RoomState): boolean {
 }
 
 export function canSteer(state: RoomState, user: CurrentUser): boolean {
-  return isOpen(state) && isDriver(state, user)
+  return !isViewer(user) && isOpen(state) && isDriver(state, user)
 }
 
 export function canSuggest(state: RoomState, user: CurrentUser): boolean {
-  return isOpen(state) && !isDriver(state, user) && state.driver != null
+  return !isViewer(user) && isOpen(state) && !isDriver(state, user) && state.driver != null
 }
 
 export function canRequestControl(state: RoomState, user: CurrentUser): boolean {
   return (
+    !isViewer(user) &&
     isOpen(state) &&
     !isDriver(state, user) &&
     state.driver != null &&
@@ -45,6 +60,7 @@ export function canRequestControl(state: RoomState, user: CurrentUser): boolean 
 
 export function canTakeControl(state: RoomState, user: CurrentUser): boolean {
   return (
+    !isViewer(user) &&
     isOpen(state) &&
     !isDriver(state, user) &&
     (state.driver == null || isLeaseExpired(state))
@@ -52,15 +68,15 @@ export function canTakeControl(state: RoomState, user: CurrentUser): boolean {
 }
 
 export function canGrantControl(state: RoomState, user: CurrentUser): boolean {
-  return isOpen(state) && isDriver(state, user)
+  return !isViewer(user) && isOpen(state) && isDriver(state, user)
 }
 
 export function canHandoff(state: RoomState, user: CurrentUser): boolean {
-  return isOpen(state) && isDriver(state, user)
+  return !isViewer(user) && isOpen(state) && isDriver(state, user)
 }
 
 export function canClose(state: RoomState, user: CurrentUser): boolean {
-  return isOpen(state) && isDriver(state, user)
+  return !isViewer(user) && isOpen(state) && isDriver(state, user)
 }
 
 export function canSendSuggestionToAgent(
@@ -68,7 +84,7 @@ export function canSendSuggestionToAgent(
   user: CurrentUser,
   suggestion: SuggestionState,
 ): boolean {
-  return isOpen(state) && isDriver(state, user) && suggestion.suggestion_id != null
+  return !isViewer(user) && isOpen(state) && isDriver(state, user) && suggestion.suggestion_id != null
 }
 
 export function pendingLayersFor(
@@ -86,6 +102,7 @@ export function canDecideLayer(
   layer: string,
 ): boolean {
   return (
+    !isViewer(user) &&
     proposal.status === 'open' &&
     proposal.approvals[layer] === 'pending' &&
     user.layers.includes(layer)
@@ -109,7 +126,7 @@ export function canReject(
 }
 
 export function canAcceptHandoff(user: CurrentUser, handoff: HandoffState): boolean {
-  return handoff.status === 'pending' && handoff.to.id === user.id
+  return !isViewer(user) && handoff.status === 'pending' && handoff.to.id === user.id
 }
 
 export function proposalAllApproved(proposal: ProposalState): boolean {

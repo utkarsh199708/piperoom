@@ -16,12 +16,20 @@ import type { AuthMode, AuthProblem } from '../lib/auth'
 import { errorText } from '../lib/errors'
 import { AuthBanner } from '../components/AuthBanner'
 import { LoginScreen } from '../components/LoginScreen'
+import { LoginErrorScreen } from '../components/LoginErrorScreen'
+import { GroupsMissingNotice } from '../components/GroupsMissingNotice'
+import { loginErrorFromLocation } from '../lib/loginError'
 import { UserContext } from './user'
 
 type Phase = 'loading' | 'ready' | 'login' | 'failed'
 
 export function UserProvider({ children }: { children: ReactNode }) {
-  return isFixtures() ? <FixtureUserProvider>{children}</FixtureUserProvider> : <LiveUserProvider>{children}</LiveUserProvider>
+  if (isFixtures()) return <FixtureUserProvider>{children}</FixtureUserProvider>
+  // The OIDC callback sent the person back with an error (`?login_error=<code>`):
+  // show it and stop. No /api/me call and no redirect, so this cannot loop.
+  const loginError = loginErrorFromLocation()
+  if (loginError) return <LoginErrorScreen info={loginError} />
+  return <LiveUserProvider>{children}</LiveUserProvider>
 }
 
 // Fixture mode has no server and no session; the client copy of dev/users.yaml
@@ -49,9 +57,11 @@ function FixtureUserProvider({ children }: { children: ReactNode }) {
       </div>
     )
   }
-  const user: CurrentUser = { id: dev.id, name: dev.name, layers: dev.layers }
+  // `?role=viewer` previews the read-only UI without a server.
+  const role = searchParams.get('role') === 'viewer' ? 'viewer' : 'member'
+  const user: CurrentUser = { id: dev.id, name: dev.name, layers: dev.layers, role }
   return (
-    <UserContext.Provider value={{ user, setUserId, logout: () => undefined, sessionEpoch: 0 }}>
+    <UserContext.Provider value={{ user, setUserId, logout: () => undefined, sessionEpoch: 0, busy: false }}>
       {children}
     </UserContext.Provider>
   )
@@ -98,7 +108,14 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
   const loadMe = useCallback(async (): Promise<boolean> => {
     try {
       const me = await api.me()
-      setUser({ id: me.id, name: me.name, layers: me.layers })
+      setUser({
+        id: me.id,
+        name: me.name,
+        layers: me.layers,
+        role: me.role === 'viewer' ? 'viewer' : 'member',
+        groupsMissing: me.groups_missing === true,
+        solo: me.solo === true,
+      })
       setPhase('ready')
       setFailure(null)
       return true
@@ -176,6 +193,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(() => {
     transition.current = true
+    setBusy(true)
     void (async () => {
       try {
         try {
@@ -192,6 +210,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
         bumpEpoch()
       } finally {
         transition.current = false
+        setBusy(false)
       }
     })()
   }, [bumpEpoch, setPhase])
@@ -200,6 +219,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
     <>
       {problem && <AuthBanner problem={problem} onDismiss={() => setProblem(null)} />}
       {failure && <div className="banner banner--error" role="alert">{failure}</div>}
+      {user?.groupsMissing && <GroupsMissingNotice />}
     </>
   )
 
@@ -244,7 +264,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <UserContext.Provider value={{ user, setUserId, logout, sessionEpoch: epoch }}>
+    <UserContext.Provider value={{ user, setUserId, logout, sessionEpoch: epoch, busy }}>
       {banners}
       {children}
     </UserContext.Provider>
