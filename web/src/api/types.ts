@@ -291,6 +291,20 @@ export interface Me {
   id: string
   name: string
   layers: string[]
+  /** After auth PR 3; absent on an older server (treated as member). */
+  role?: 'member' | 'viewer'
+  /** The IdP sent no groups claim (docs/design/auth.md 2.2). */
+  groups_missing?: boolean
+  /** This user is PIPEROOM_SOLO_USER (omitted otherwise): approvals need a typed confirm. */
+  solo?: boolean
+}
+
+/** One row of GET /api/people: a person a driver may grant control or hand off to. */
+export interface Person {
+  id: string
+  name: string
+  /** Only for IdP users with a verified email. */
+  email?: string
 }
 
 export interface PresenceMember {

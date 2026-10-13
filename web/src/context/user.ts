@@ -7,6 +7,8 @@ export interface UserContextValue {
   setUserId: (id: string) => void
   /** POST /auth/logout, then show the sign-in choice for the server mode (never an automatic redirect). */
   logout: () => void
+  /** A dev-login or logout is in flight: the user switcher and Log out button are disabled meanwhile. */
+  busy?: boolean
   /** Bumps on every login or logout, so data hooks reload and the WebSocket reconnects. */
   sessionEpoch: number
 }

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { Event, PresenceMember, RoomSnapshot, WsServerMessage } from '../api/types'
 import { api, isFixtures, openRoomWs } from '../api/client'
+import type { ApproveExtras } from '../api/client'
+import { isSoloConfirmError } from '../lib/solo'
 import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
@@ -19,6 +21,12 @@ const WS_FRAME_STATUS: Record<string, number> = {
   bad_host: 421,
 }
 
+export interface ApproveResult {
+  ok: boolean
+  /** Solo mode: the server wants `confirm: "<pipeline_id>/<layer>"`. */
+  needsConfirm?: boolean
+}
+
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
 
 export interface RoomActions {
@@ -28,7 +36,12 @@ export interface RoomActions {
   requestControl: () => void
   grantControl: (to: string) => void
   close: (resolution: string) => void
-  approve: (proposalId: string, layer: string) => void
+  /**
+   * Resolves when the call is done. `needsConfirm` means the server wants the
+   * solo-mode string (docs/design/auth.md 5.3): the caller asks for it and calls
+   * again with `extra.confirm`. Any other error is already in the room error banner.
+   */
+  approve: (proposalId: string, layer: string, extra?: ApproveExtras) => Promise<ApproveResult>
   reject: (proposalId: string, layer: string, reason: string) => void
   handoff: (to: string, stayAsWatcher: boolean) => void
   acceptHandoff: (handoffId: string) => void
@@ -382,12 +395,25 @@ export function useRoom(roomId: string) {
       }
       void runAction(api.closeRoom(roomId, resolution))
     },
-    approve: (proposalId, layer) => {
+    approve: async (proposalId, layer, extra) => {
       if (isFixtures()) {
         synthesize('approval.given', { proposal_id: proposalId, layer })
-        return
+        return { ok: true }
       }
-      void runAction(api.approve(proposalId, layer))
+      try {
+        await api.approve(proposalId, layer, extra)
+        setError(null)
+        return { ok: true }
+      } catch (e) {
+        // Solo mode asks for the typed string; the confirm box handles it, so it
+        // is not an error banner.
+        if (isSoloConfirmError(e)) {
+          setError(null)
+          return { ok: false, needsConfirm: true }
+        }
+        setError(errorText(e))
+        return { ok: false }
+      }
     },
     reject: (proposalId, layer, reason) => {
       if (isFixtures()) {

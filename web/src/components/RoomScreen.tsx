@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
 import { useCurrentUser } from '../context/user'
-import { canHandoff } from '../state/permissions'
+import { canHandoff, isViewer } from '../state/permissions'
 import { ageLabel } from '../lib/time'
 import { Avatar, Chip } from './ui'
 import { agentStatusChip, severityTone } from '../lib/tones'
@@ -149,7 +149,7 @@ export function RoomScreen() {
 
       <main className={`room-grid ${hasPendingApproval ? 'room-grid--approve-first' : ''}`}>
         <div className="room-col room-col--left">
-          <PipelineMap topology={topology} updatedAt={updatedAt} onTrace={() => setTraceOpen(true)} />
+          <PipelineMap topology={topology} updatedAt={updatedAt} onTrace={isViewer(user) ? undefined : () => setTraceOpen(true)} />
         </div>
 
         <div className="room-col room-col--mid">
@@ -183,6 +183,7 @@ export function RoomScreen() {
                 messages={state.messages}
                 comments={state.comments}
                 onComment={actions.comment}
+                readOnly={isViewer(user)}
               />
             </div>
           </section>
@@ -197,7 +198,7 @@ export function RoomScreen() {
         </div>
       </main>
 
-      {traceOpen && <TracePanel trace={state.trace} actions={actions} onClose={() => setTraceOpen(false)} />}
+      {traceOpen && !isViewer(user) && <TracePanel trace={state.trace} actions={actions} onClose={() => setTraceOpen(false)} />}
       {handoffOpen && (
         <HandoffDialog state={state} user={user} actions={actions} onClose={() => setHandoffOpen(false)} />
       )}

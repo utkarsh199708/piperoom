@@ -4,7 +4,17 @@
 export type AuthMode = 'dev' | 'oidc'
 
 /** The auth failures the UI shows to the person (docs/api.md, Errors). */
-export type AuthProblemKind = 'session_expired' | 'proxy_identity' | 'bad_host' | 'viewer'
+export type AuthProblemKind =
+  | 'session_expired'
+  | 'proxy_identity'
+  | 'bad_host'
+  | 'viewer'
+  // /auth/* answers (docs/api.md, Errors). A top-level callback navigation shows
+  // them through the login-error page (lib/loginError.ts); a fetch gets a banner.
+  | 'login_expired'
+  | 'not_provisioned'
+  | 'rate_limited'
+  | 'idp_unavailable'
 
 export interface AuthProblem {
   kind: AuthProblemKind
@@ -43,6 +53,10 @@ export function classifyAuthProblem(
   if (status === 403 && code === 'proxy_identity') return { kind: 'proxy_identity', message }
   if (status === 403 && code === 'viewer') return { kind: 'viewer', message }
   if (status === 421 || code === 'bad_host') return { kind: 'bad_host', message }
+  if (status === 400 && code === 'login_expired') return { kind: 'login_expired', message }
+  if (status === 403 && code === 'not_provisioned') return { kind: 'not_provisioned', message }
+  if (status === 429 && code === 'rate_limited') return { kind: 'rate_limited', message }
+  if (status === 503 && code === 'idp_unavailable') return { kind: 'idp_unavailable', message }
   return null
 }
 
@@ -54,6 +68,11 @@ const BANNER_TEXT: Record<Exclude<AuthProblemKind, 'session_expired'>, string> =
     'The server does not accept this address. Open Piperoom on localhost, or ask the ' +
     'person who runs it to add this host to PIPEROOM_ALLOWED_HOSTS.',
   viewer: 'You have read-only access. You can read rooms but you cannot change anything.',
+  login_expired: 'The sign-in took too long or was already used. Please sign in again.',
+  not_provisioned:
+    'Your account is not set up for Piperoom. Ask the person who runs Piperoom to add you.',
+  rate_limited: 'Too many sign-in attempts. Wait a minute, then try again.',
+  idp_unavailable: 'The sign-in service is not available right now. Try again in a few minutes.',
 }
 
 /** Text for the banner. The server message is added when it says more. */

@@ -9,7 +9,7 @@ vi.mock('../lib/env', () => ({
   },
 }))
 
-const ctx = vi.hoisted(() => ({ setUserId: vi.fn(), logout: vi.fn() }))
+const ctx = vi.hoisted(() => ({ setUserId: vi.fn(), logout: vi.fn(), busy: false }))
 
 vi.mock('../context/user', () => ({
   useCurrentUser: () => ({
@@ -17,6 +17,7 @@ vi.mock('../context/user', () => ({
     setUserId: ctx.setUserId,
     logout: ctx.logout,
     sessionEpoch: 0,
+    busy: ctx.busy,
   }),
 }))
 
@@ -51,5 +52,18 @@ describe('UserSwitcher dev gating', () => {
       expect(ctx.logout).toHaveBeenCalledTimes(1)
       unmount()
     }
+  })
+})
+
+describe('UserSwitcher busy state', () => {
+  it('disables the select while a dev-login is in flight', () => {
+    flags.dev = true
+    ctx.busy = true
+    const { unmount } = render(<UserSwitcher />)
+    expect(screen.getByLabelText('Switch user')).toBeDisabled()
+    unmount()
+    ctx.busy = false
+    render(<UserSwitcher />)
+    expect(screen.getByLabelText('Switch user')).toBeEnabled()
   })
 })

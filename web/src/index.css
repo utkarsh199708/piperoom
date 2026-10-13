@@ -1216,3 +1216,53 @@ textarea:focus {
     min-height: var(--touch);
   }
 }
+
+/* ---- roles, solo mode, login errors (auth PR 3) ---- */
+.view-only {
+  white-space: nowrap;
+}
+
+.notice {
+  margin: 0;
+  padding: 6px 20px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.solo-banner {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  border: 1px solid var(--orange);
+  border-radius: var(--radius);
+  background: rgba(255, 169, 77, 0.12);
+}
+
+.solo-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.solo-confirm__label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.grant-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.login-error .btn {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}

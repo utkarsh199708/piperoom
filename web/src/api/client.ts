@@ -11,6 +11,7 @@ import type {
   Event,
   EventsPage,
   Me,
+  Person,
   RoomSnapshot,
   Topology,
 } from './types'
@@ -82,10 +83,21 @@ export async function probeSession(): Promise<SessionProbe> {
   }
 }
 
+/**
+ * Extra fields of POST /api/proposals/{pid}/approve beyond `layer`.
+ * `confirm` is the solo-mode string "<pipeline_id>/<layer>" typed by hand
+ * (docs/design/auth.md 5.3). Auth PR 4 adds `params_hash` here.
+ */
+export interface ApproveExtras {
+  confirm?: string
+}
+
 const room = (roomId: string) => `/api/rooms/${encodeURIComponent(roomId)}`
 
 export const api = {
   me: () => request<Me>('/api/me'),
+  // Members only (a viewer gets 403 viewer): who a driver may grant control or hand off to.
+  people: () => request<Person[]>('/api/people'),
   // Dev mode only: issues the piperoom_session cookie for a users.yaml user.
   devLogin: (user: string) =>
     request<void>('/auth/dev-login', { method: 'POST', body: JSON.stringify({ user }) }),
@@ -118,10 +130,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ resolution }),
     }),
-  approve: (proposalId: string, layer: string) =>
+  approve: (proposalId: string, layer: string, extra: ApproveExtras = {}) =>
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/approve`, {
       method: 'POST',
-      body: JSON.stringify({ layer }),
+      body: JSON.stringify({ layer, ...extra }),
     }),
   reject: (proposalId: string, layer: string, reason: string) =>
     request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/reject`, {
