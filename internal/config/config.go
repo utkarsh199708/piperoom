@@ -112,7 +112,7 @@ type Config struct {
 	RoomMaxEvents     string // PIPEROOM_ROOM_MAX_EVENTS: events in one room log; default 20000
 	RoomMaxBytes      string // PIPEROOM_ROOM_MAX_BYTES: stored payload bytes of one room log; default 256MiB
 	EventMaxDataBytes string // PIPEROOM_EVENT_MAX_DATA_BYTES: tool_result.data (and action.executed.output) bytes of one event; default 64KiB
-	ArchiveDir        string // PIPEROOM_ARCHIVE_DIR: absolute directory; when set, retention and deletion write the room's export there first; empty = off
+	ArchiveDir        string // PIPEROOM_ARCHIVE_DIR: absolute directory; when set, retention writes the room's export there before a purge, and an admin delete does when asked (?archive=true); empty = off
 
 	// Login (docs/design/auth.md §6). Raw strings; the auth package parses and
 	// checks them at start-up. Not wired until auth PR 2.
@@ -352,8 +352,9 @@ type Limits struct {
 	// EventMaxDataBytes caps tool_result.data and action.executed.output of
 	// one event; larger values are stored truncated.
 	EventMaxDataBytes int64
-	// ArchiveDir is where retention and deletion write a room's export before
-	// they delete it; "" = no archive. Always an absolute, cleaned path.
+	// ArchiveDir is where retention writes a room's export before it purges
+	// it, and where an admin delete writes one when asked (?archive=true);
+	// "" = no archive. Always an absolute, cleaned path.
 	ArchiveDir string
 }
 

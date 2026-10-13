@@ -188,17 +188,20 @@ Design: `docs/design/retention.md`. Every value below is read at start; a bad va
   100% the agent stops and its events are refused. People can still comment, approve, hand off and close,
   within a 2% reserve. A tool result's `Data` over `PIPEROOM_EVENT_MAX_DATA_BYTES` (default 64 KiB) is
   stored truncated (a preview and the original size), and so is a long action output.
-- **Deleting one room.** A users.yaml user with `admin: true` can delete a room, open or closed, with
+- **Deleting one room.** A users.yaml user with `admin: true` can erase a room, open or closed, with
   `DELETE /api/rooms/{id}?reason=...` or `devctl rooms delete <id> --reason "..." --as <admin>`. It
   removes the room's events, proposals, approvals, suggestions, hand-offs, Slack thread state and shadow
-  data from the Piperoom database, and closes open WebSockets of the room. A row in `room_deletions`
-  keeps the room id, pipeline, who, when, the reason and the event count, and nothing else. It does not
+  data from the Piperoom database, keeps no copy, and closes open WebSockets of the room. It does not
   remove messages already posted to Slack or data already sent to the model provider.
-- **Archive (optional).** With `PIPEROOM_ARCHIVE_DIR` set, retention and deletion first write the room's
-  export (the same document as `GET /api/rooms/{id}/export`) to `<dir>/<pipeline>/<room>.json`, readable
-  only by the server's user (mode `0600`). If the write fails, the room is not deleted. **The archive
-  keeps the room's content**: with an archive set, a deletion removes the room from Piperoom but not from
-  that directory. Protect, back up and expire the directory under your own policy.
+- **Audit of deletions.** Every deleted room, by an admin or by retention, leaves one row in
+  `room_deletions`: the room id, pipeline, who (`system` for retention), when, the reason
+  (`retention: closed N days` for retention) and the event count, and nothing else.
+- **Archive (optional).** With `PIPEROOM_ARCHIVE_DIR` set, retention always, and an admin delete only when
+  asked (`archive=true`, or `devctl rooms delete ... --archive`), first write the room's export (the same
+  document as `GET /api/rooms/{id}/export`) to `<dir>/<pipeline>/<room>.json`, readable only by the
+  server's user (mode `0600`). If the write fails, the room is not deleted. **The archive keeps the
+  room's content**: such a purge or delete removes the room from Piperoom but not from that directory.
+  Protect, back up and expire the directory under your own policy.
 - Without an archive, export a room first with `GET /api/rooms/{id}/export` if you must keep it.
 - Deleting the Piperoom database deletes the room history, the Slack thread state and everything
   else in it. Data sent to the model provider (Anthropic, Bedrock or Vertex), and messages already posted to Slack, are governed by

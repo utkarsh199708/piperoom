@@ -20,8 +20,8 @@ Before this change:
 | 1 | Open-room limit `PIPEROOM_MAX_OPEN_DAYS`, default 14, `0` = off. Warning 24 h before, then auto-close with resolution `retention: open longer than N days`. The driver may extend **once** by N days (`POST /api/rooms/{id}/extend`, event `room.extended`). |
 | 2 | Per-pipeline retention: `owners.yaml` pipeline `retention_days:`. The shorter of it and `PIPEROOM_RETENTION_DAYS` wins when both are set. Validated at start-up. |
 | 3 | Per-room caps: `PIPEROOM_ROOM_MAX_EVENTS` (20000), `PIPEROOM_ROOM_MAX_BYTES` (256 MiB, stored payload size), `PIPEROOM_EVENT_MAX_DATA_BYTES` (64 KiB). Warning at 90%; at 100% the agent stops (`log_full`) and agent events are refused; humans keep a 2% reserve. Enforced in the store, in the same transaction as the insert. |
-| 4 | Admin-only `DELETE /api/rooms/{id}?reason=`; audit row in `room_deletions`; `devctl rooms delete`; open WebSockets closed with `room deleted`; idempotent; 404 for an unknown id, 403 for a non-admin. |
-| 5 | Optional `PIPEROOM_ARCHIVE_DIR`: retention and deletion write the room's export there first (`<dir>/<pipeline>/<room>.json`, `0600`); a failed write skips the delete. |
+| 4 | Admin-only `DELETE /api/rooms/{id}?reason=`; audit row in `room_deletions`; `devctl rooms delete`; open WebSockets closed with `room deleted`; idempotent; 404 for an unknown id, 403 for a non-admin. A delete is an erase: no copy unless `?archive=true` (`devctl … --archive`). Retention purges write an audit row too (`deleted_by` `system`, `reason` `retention: closed N days`). |
+| 5 | Optional `PIPEROOM_ARCHIVE_DIR`: retention writes the room's export there before each purge, an admin delete only with `?archive=true` (`<dir>/<pipeline>/<room>.json`, `0600`); a failed write skips the delete. |
 | 6 | No `web/**` change in this work (UI v2 track); the PR lists the UI follow-up (section 9). |
 
 ## 3. Closed-room retention per pipeline
@@ -75,9 +75,12 @@ exist, the second pass never needs to skip a pipeline.
 
 ### 5.2 Store enforcement
 
-- Postgres: migration `00012` adds `rooms.event_count bigint` and `rooms.byte_size bigint` (backfilled from
-  `last_seq` and `octet_length(payload::text)`; the backfill over-counts a little because jsonb text adds
-  spaces). `Append` does
+- Postgres: migration `00012` adds `rooms.event_count bigint` and `rooms.byte_size bigint`, backfilled from
+  `last_seq` and `octet_length(payload::text)`. The backfill is an estimate of what was written: jsonb text has
+  one space more after each `:` and `,`, and one byte instead of Go's six-byte escape for each `<`, `>` and
+  `&`, so `written - 5 x (escaped <>&) <= byte_size <= written + (':' and ',')` (numbers in exponent form and
+  repeated keys in a raw alert body can differ further). A test seeds rooms at `00009` and pins this bound.
+  `Append` does
   `UPDATE rooms SET last_seq = last_seq+1, event_count = event_count+1, byte_size = byte_size+$size WHERE id = $1 AND <class limit> RETURNING ...`
   in the insert's transaction. The row lock serialises concurrent appends of one room, so no interleaving can
   pass a limit: the agent class never exceeds the cap, the reserve class never exceeds cap + 2%.
@@ -101,8 +104,10 @@ exist, the second pass never needs to skip a pipeline.
 - A human route refused with `ErrLogFull` answers `409 log_full`. A repeat alert joining a full room still
   answers with the room, and a watcher note into a full room is dropped (both logged), so a sender does not
   retry forever.
-- A shadow room's agent writes to the shadow log, which these caps do not cover (its run is bounded by
-  `PIPEROOM_SHADOW_MAX_TURNS` and `PIPEROOM_SHADOW_TOKEN_BUDGET`); a full shadow room does not cancel its run.
+- A shadow room's own log has the same caps on its own counts (`shadow_runs.last_seq` and
+  `shadow_runs.byte_size`, same classes, checked in `AppendShadow`'s transaction). When the shadow agent's
+  event is refused, the service cancels the shadow run, which ends with status `budget` (like a run that spent
+  its tokens). Nothing is written to the room log for it, and there is no 90% warning in a shadow log.
 
 ### 5.4 Data size
 
@@ -123,13 +128,15 @@ the start and names the variable (`config.ParseLimits`).
 
 - Role: there is no admin role in `docs/design/auth.md`, so per decision 4 it is users.yaml `admin: true`. It
   grants deletion only. `GET /api/me` shows `admin: true` so the UI can show the button.
-- `DELETE /api/rooms/{id}?reason=` (reason 1–500 characters, storable text):
+- `DELETE /api/rooms/{id}?reason=&archive=` (reason 1–500 characters, storable text). A delete is an erase:
+  nothing is kept unless `archive=true`; `archive=true` without `PIPEROOM_ARCHIVE_DIR` is `400 validation`.
   1. not an admin -> `403 not_allowed` (viewers already get `403 viewer`), before any lookup, so a non-admin
      learns nothing about which ids exist;
-  2. room missing: an audit row for it -> `200` with that row (idempotent); none -> `404 not_found`;
+  2. room missing: an audit row for it (an admin delete or a retention purge) -> `200` with that row
+     (idempotent); none -> `404 not_found`;
   3. under the service lock: mark the room deleting (later appends through the service are refused), stop its
      agent and executor, release its alert key;
-  4. with `PIPEROOM_ARCHIVE_DIR`: write the export (section 7); failure -> `500 archive_failed`, the room is
+  4. with `archive=true`: write the export (section 7); failure -> `500 archive_failed`, the room is
      un-marked and kept;
   5. one store transaction: lock the room row, check `last_seq` still equals what was archived, delete events
      (batches of 5000), approvals, steps, proposals, suggestions, hand-offs, Slack thread row, shadow events and
@@ -138,11 +145,12 @@ the start and names the variable (`config.ParseLimits`).
   6. drop the room from the service cache, run the room-closed hook if the room was open (token count and
      watcher cooldown), and close the room's WebSockets: one last `room.deleted` frame (seq = last seq + 1,
      never stored) and close status 1000 with reason `room deleted`.
-- `devctl rooms delete <id> --reason <text> --as <admin>` calls the route on `PIPEROOM_HTTP_ADDR` (or
+- `devctl rooms delete <id> --reason <text> --as <admin> [--archive]` calls the route on `PIPEROOM_HTTP_ADDR` (or
   `--server`), so the running server's cache and sockets are updated too. `--as` sends `X-User` (dev mode); in
   oidc mode pass the session cookie in `PIPEROOM_COOKIE`.
-- Retention purges do not write `room_deletions` rows: the policy itself is the record, and the purge logs
-  counts per run.
+- Retention purges write a `room_deletions` row too, in each room's purge transaction: `deleted_by`
+  `system`, `reason` `retention: closed N days` (N = the days that applied to the room's pipeline), the
+  room's event count.
 
 ## 7. Archive
 
@@ -155,8 +163,8 @@ the start and names the variable (`config.ParseLimits`).
 - The purge transaction deletes only when `last_seq` is still the archived seq (a shadow room can get a label
   or grade after close); otherwise the room is left for the next run.
 - At start the server refuses a `PIPEROOM_ARCHIVE_DIR` that is not an existing, writable directory.
-- The archive holds the room's content: deletion with an archive configured does **not** erase the data. Its
-  retention and access are the operator's job.
+- The archive holds the room's content: a purge with an archive configured, or a delete with `archive=true`,
+  does **not** erase the data. Its retention and access are the operator's job.
 
 ## 8. Tests that must fail without each guard
 
@@ -166,9 +174,11 @@ Postgres (throwaway `postgres:16`): 90% warning once; 100% agent refused, `log_f
 and not restarted by a steer; human events up to the reserve then `ErrLogFull`; `room.closed` always accepted;
 concurrent agent and human appends never pass cap / cap + reserve. Data truncation of tool data and action
 output. Delete: admin `200`, member `403`, viewer `403`, unknown `404`, repeat `200` with the same row, audit row
-written, events gone, WebSocket gets `room.deleted` and closes. Archive written before purge (mode `0600`,
-content verifies), archive failure skips the purge (room kept, retried next run). Bad env and owners values stop
-the start.
+written, events gone, WebSocket gets `room.deleted` and closes; no archive file without `archive=true`, `400`
+for `archive=true` without a directory. Archive written before purge (mode `0600`, content verifies), archive
+failure skips the purge (room kept, retried next run); each purge writes its audit row. Shadow log caps on
+memstore and Postgres; a shadow run stopped by them ends as `budget`. Backfill within the stated bound. Bad env
+and owners values stop the start.
 
 ## 9. UI follow-up (not in this work)
 
@@ -178,7 +188,7 @@ the start.
 - Log cap banner: `log_cap: "warning"` -> amber "This room's log is at 90% of its limit"; `"full"` -> red "The
   room log is full: the agent has stopped. Comments, approvals, hand-off and close still work." Render
   `agent.status log_full` as "Agent stopped · log full" instead of the generic pill.
-- Admin only (`/api/me.admin`): a **Delete room** item in the room menu with a required reason field and a
+- Admin only (`/api/me.admin`): a **Delete room** item in the room menu with a required reason field, a "keep a copy in the archive" checkbox (sends `archive=true`; off by default, a delete is an erase) and a
   typed confirm of the room title; on success navigate to the room list. Handle the WebSocket `room.deleted`
   frame / close reason `room deleted` by showing "This room was deleted by <name>: <reason>" and not
   reconnecting.
