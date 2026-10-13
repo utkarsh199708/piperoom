@@ -513,6 +513,7 @@ var agentEventTypes = map[events.Type]bool{
 	events.AgentToolResult: true,
 	events.AgentMessage:    true,
 	events.AgentHypothesis: true,
+	events.AgentUsage:      true,
 }
 
 // agentEmit is the agent Sink: the agent's events enter the same log and cache.

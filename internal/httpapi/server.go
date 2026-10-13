@@ -62,6 +62,9 @@ type Server struct {
 	loginStates auth.LoginStateStore
 	identities  auth.IdentityStore
 	loginLimit  *rateLimiter
+
+	// Model spend routes (WithSpend): usage.go.
+	spend Spend
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -185,6 +188,10 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/rooms/{id}/shadow", s.handleShadow)
 				short.Post("/rooms/{id}/shadow/grade", s.handleShadowGrade)
 				short.Get("/shadow/metrics", s.handleShadowMetrics)
+				if s.spend.Store != nil {
+					short.Get("/rooms/{id}/usage", s.handleRoomUsage)
+					short.Get("/usage", s.handlePipelineUsage)
+				}
 				short.Post("/proposals/{pid}/approve", s.handleApproveProposal)
 				short.Post("/proposals/{pid}/reject", s.handleRejectProposal)
 				short.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)

@@ -428,6 +428,10 @@ func truncatePromptLine(s string) string {
 // hand-off.
 func renderRoomEvent(e events.Event) string {
 	switch e.Type {
+	case events.AgentUsage:
+		// Cost telemetry, one per model request: it says nothing about the
+		// incident and would crowd the hand-off's tail window.
+		return ""
 	case events.RoomCreated:
 		p, err := events.Decode[events.RoomCreatedPayload](e)
 		if err != nil {
