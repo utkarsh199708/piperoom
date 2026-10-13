@@ -53,7 +53,7 @@ type Config struct {
 	// Slack mirror of rooms. Off unless both token and channel are set.
 	SlackBotToken  string // SLACK_BOT_TOKEN (secret)
 	SlackChannelID string // SLACK_CHANNEL_ID
-	PublicURL      string // PIPEROOM_PUBLIC_URL: base URL for room links in Slack; empty = no links
+	PublicURL      string // PIPEROOM_PUBLIC_URL: base URL for Slack room links, the WS origin, and (auth) the OIDC redirect URI and Host allow-list
 
 	// Warehouse kind. "postgres" (default) uses WAREHOUSE_DB_URL as a Postgres URL;
 	// "snowflake" uses it as a gosnowflake DSN.
@@ -102,6 +102,23 @@ type Config struct {
 	// hand-offs) whose closed_at is older than this many days. Open rooms are
 	// never deleted. Empty or "0" = keep forever.
 	RetentionDays string // PIPEROOM_RETENTION_DAYS
+
+	// Login (docs/design/auth.md §6). Raw strings; the auth package parses and
+	// checks them at start-up. Not wired until auth PR 2.
+	AuthMode            string // PIPEROOM_AUTH_MODE: dev (default) | oidc
+	DevAllowNonLoopback string // PIPEROOM_DEV_ALLOW_NONLOOPBACK: "1" lets dev mode listen off loopback (replaces --allow-remote)
+	AllowedHosts        string // PIPEROOM_ALLOWED_HOSTS: comma list of extra Host values for a proxy that rewrites Host
+	TrustedProxies      string // PIPEROOM_TRUSTED_PROXIES: comma list of CIDRs; X-Forwarded-For read only from these (oidc mode only)
+	OIDCIssuer          string // PIPEROOM_OIDC_ISSUER
+	OIDCClientID        string // PIPEROOM_OIDC_CLIENT_ID
+	OIDCClientSecret    string // PIPEROOM_OIDC_CLIENT_SECRET (secret, never logged)
+	OIDCPublicClient    string // PIPEROOM_OIDC_PUBLIC_CLIENT: "1" allows an empty secret (PKCE only)
+	OIDCScopes          string // PIPEROOM_OIDC_SCOPES (space separated)
+	OIDCGroupsClaim     string // PIPEROOM_OIDC_GROUPS_CLAIM: "" = no group rights
+	AuthViewerGroups    string // PIPEROOM_AUTH_VIEWER_GROUPS: comma list; viewer role
+	SessionIdle         string // PIPEROOM_SESSION_IDLE: Go duration
+	SessionMax          string // PIPEROOM_SESSION_MAX: Go duration
+	SoloUser            string // PIPEROOM_SOLO_USER: "" = off
 }
 
 // Load reads the environment and applies dev defaults.
@@ -171,8 +188,32 @@ func Load() Config {
 		RoomTokenBudget: get("PIPEROOM_ROOM_TOKEN_BUDGET", ""),
 
 		RetentionDays: get("PIPEROOM_RETENTION_DAYS", ""),
+
+		AuthMode:            get("PIPEROOM_AUTH_MODE", DefaultAuthMode),
+		DevAllowNonLoopback: get("PIPEROOM_DEV_ALLOW_NONLOOPBACK", ""),
+		AllowedHosts:        get("PIPEROOM_ALLOWED_HOSTS", ""),
+		TrustedProxies:      get("PIPEROOM_TRUSTED_PROXIES", ""),
+		OIDCIssuer:          get("PIPEROOM_OIDC_ISSUER", ""),
+		OIDCClientID:        get("PIPEROOM_OIDC_CLIENT_ID", ""),
+		OIDCClientSecret:    get("PIPEROOM_OIDC_CLIENT_SECRET", ""),
+		OIDCPublicClient:    get("PIPEROOM_OIDC_PUBLIC_CLIENT", ""),
+		OIDCScopes:          get("PIPEROOM_OIDC_SCOPES", DefaultOIDCScopes),
+		OIDCGroupsClaim:     getSet("PIPEROOM_OIDC_GROUPS_CLAIM", DefaultOIDCGroupsClaim),
+		AuthViewerGroups:    get("PIPEROOM_AUTH_VIEWER_GROUPS", ""),
+		SessionIdle:         get("PIPEROOM_SESSION_IDLE", DefaultSessionIdle),
+		SessionMax:          get("PIPEROOM_SESSION_MAX", DefaultSessionMax),
+		SoloUser:            get("PIPEROOM_SOLO_USER", ""),
 	}
 }
+
+// Login defaults (docs/design/auth.md §6).
+const (
+	DefaultAuthMode        = "dev"
+	DefaultOIDCScopes      = "openid email profile"
+	DefaultOIDCGroupsClaim = "groups"
+	DefaultSessionIdle     = "8h"
+	DefaultSessionMax      = "12h"
+)
 
 // Watcher defaults and limits.
 const (
@@ -258,6 +299,17 @@ func parseWatchDuration(name, v, def string) (time.Duration, error) {
 		return 0, fmt.Errorf("config: %s=%q: must be greater than zero", name, v)
 	}
 	return d, nil
+}
+
+// getSet is get, except that a variable set to "" keeps "" (for settings
+// where empty means off, like PIPEROOM_OIDC_GROUPS_CLAIM). Compose files must
+// not pass such a variable as ${VAR:-} (that sets ""); use ${VAR-default} or
+// leave it out.
+func getSet(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return def
 }
 
 func get(key, def string) string {

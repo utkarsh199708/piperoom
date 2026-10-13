@@ -211,19 +211,37 @@ type ProposalCreatedPayload struct {
 	Risk           string         `json:"risk"`
 	Rollback       string         `json:"rollback"`
 	RequiredLayers []string       `json:"required_layers"`
+	// ParamsHash is hex SHA-256 of the RFC 8785 (JCS) form of the frozen
+	// proposal (docs/design/auth.md §3.1). Empty on events written before auth PR 4.
+	ParamsHash string `json:"params_hash,omitempty"`
+}
+
+// Identity says who made a decision and how they logged in
+// (docs/design/auth.md §3.2). SessionID is the public session id, never the token.
+type Identity struct {
+	Iss       string    `json:"iss,omitempty"`
+	Sub       string    `json:"sub,omitempty"`
+	SessionID string    `json:"session_id,omitempty"`
+	Method    string    `json:"method"`          // "oidc" | "dev"
+	Grant     string    `json:"grant,omitempty"` // "user:…" | "group:…" | "backup:…" | "solo"
+	AuthTime  time.Time `json:"auth_time,omitzero"`
 }
 
 // ApprovalGivenPayload is one layer owner's approval.
 type ApprovalGivenPayload struct {
-	ProposalID string `json:"proposal_id"`
-	Layer      string `json:"layer"`
+	ProposalID string    `json:"proposal_id"`
+	Layer      string    `json:"layer"`
+	ParamsHash string    `json:"params_hash,omitempty"`
+	Identity   *Identity `json:"identity,omitempty"`
 }
 
 // ApprovalRejectedPayload is one layer owner's rejection.
 type ApprovalRejectedPayload struct {
-	ProposalID string `json:"proposal_id"`
-	Layer      string `json:"layer"`
-	Reason     string `json:"reason"`
+	ProposalID string    `json:"proposal_id"`
+	Layer      string    `json:"layer"`
+	Reason     string    `json:"reason"`
+	ParamsHash string    `json:"params_hash,omitempty"`
+	Identity   *Identity `json:"identity,omitempty"`
 }
 
 // ActionExecutedPayload is the result of running one approved step.
@@ -232,6 +250,8 @@ type ActionExecutedPayload struct {
 	StepIndex  int    `json:"step_index"`
 	OK         bool   `json:"ok"`
 	Output     string `json:"output"`
+	// ParamsHash is the proposal's params_hash the executor checked before Execute.
+	ParamsHash string `json:"params_hash,omitempty"`
 }
 
 // HandoffSummary is the agent-written shift hand-off.
