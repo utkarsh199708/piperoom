@@ -385,10 +385,14 @@ func (s *stack) loadHealthPlan() (healthPlan, error) {
 	if len(p.SourceTables) == 0 || len(p.ConsumerGroups) == 0 {
 		return healthPlan{}, fmt.Errorf("devctl: health: pipeline %q needs a source table and a consumer group", pipelineID)
 	}
+	layerOwners := make(map[string]string, len(o.Layers))
+	for layer := range o.Layers {
+		layerOwners[layer], _ = o.LayerOwner(layer) // display label, for the report only
+	}
 	return healthPlan{
 		Topic:  p.TopicPrefix + "." + p.SourceTables[0],
 		Group:  p.ConsumerGroups[0],
-		Owners: o.Layers,
+		Owners: layerOwners,
 	}, nil
 }
 

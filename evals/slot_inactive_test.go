@@ -168,7 +168,7 @@ func TestScenarioFixturesCarryTSColumnAndOwners(t *testing.T) {
 					t.Errorf("%s: %s sink line lacks ts_column=%s: %q", sc.Name, where, col, line)
 				}
 				for _, m := range ownerRe.FindAllStringSubmatch(line, -1) {
-					if want, ok := o.Layers[m[1]]; !ok || want != m[2] {
+					if want, ok := o.LayerOwner(m[1]); !ok || want != m[2] {
 						t.Errorf("%s: %s line %q: owner of %s is %q in dev/owners.yaml", sc.Name, where, line, m[1], want)
 					}
 				}

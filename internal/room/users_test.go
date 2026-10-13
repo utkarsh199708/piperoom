@@ -10,11 +10,11 @@ import (
 func TestValidateUsers(t *testing.T) {
 	devOwners := &owners.Owners{
 		Pipelines: []owners.Pipeline{{ID: "orders"}},
-		Layers: map[string]string{
+		Layers: owners.UserLayers(map[string]string{
 			"postgres": "priya", "kafka-connect": "arjun",
 			"schema-registry": "priya", "kafka": "arjun",
 			"consumer": "kabir", "warehouse": "meera",
-		},
+		}),
 	}
 	tests := []struct {
 		name    string
