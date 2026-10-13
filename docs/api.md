@@ -45,11 +45,11 @@ The X-User stub above stays until auth PR 2. After it:
   `piperoom_session` (no `Secure`) in `dev` mode over plain http. The cookie wins over `X-User` when both name the
   same user.
 - **Routes.** `GET /auth/login?return=/path` → IdP redirect; `GET /auth/callback` (finds the login row by the
-  login cookie, then checks `state` and nonce; single use); `POST /auth/logout` (also closes the user's WebSockets);
+  login cookie, then checks `state` and nonce; single use); `POST /auth/logout` (`204`; revokes this session and closes this session's WebSockets);
   `POST /auth/dev-login {user}` (dev mode only).
 - **Host allow-list.** `Host` must be a loopback name (any port), a value in `PIPEROOM_ALLOWED_HOSTS`, or the host
   of `PIPEROOM_PUBLIC_URL` (exact) — in `oidc` mode always, in `dev` mode only with
-  `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`; otherwise `421 bad_host`. Cross-origin browser POSTs get Go's
+  `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`; otherwise `421 bad_host`. The signed `POST /api/alerts/{source}` routes are exempt (their signature is the auth); the unsigned dev webhook is not. Unknown paths under `/auth/` answer a JSON `404 not_found`. A request carrying more than one `X-User` value in dev mode → `403 proxy_identity`. Cross-origin browser POSTs get Go's
   `CrossOriginProtection` `403` (plain text, not the JSON error shape).
 - **Login gate.** Login works only for a `users.yaml` user, a principal named in `owners.yaml` (`layers:`, a pipeline
   `owners:` block, or `auditors:`), or a member of `PIPEROOM_AUTH_VIEWER_GROUPS`; else `403 not_provisioned`.
