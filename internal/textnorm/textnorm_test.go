@@ -494,7 +494,7 @@ func TestLineCapAndBudget(t *testing.T) {
 	}
 	b.WriteString("a.b.RootException: the end\n")
 	tpl := Normalize(b.String())
-	if max := budgetBytes/300 + 2; len(tpl.Causes) > max {
+	if max := 29; len(tpl.Causes) > max {
 		t.Errorf("causes = %d, want <= %d", len(tpl.Causes), max)
 	}
 	if len(tpl.Causes) < 20 {
@@ -516,5 +516,59 @@ func TestRootIsLastClassCause(t *testing.T) {
 	c := strings.Replace(a, "r.One.m", "r.Other.m", 1)
 	if Fingerprint(a) == Fingerprint(c) {
 		t.Error("first root frame ignored with a trailing log line")
+	}
+}
+
+func TestStatusCodePhrasings(t *testing.T) {
+	kept := []string{
+		"Unexpected status code 409",
+		"statusCode: 503",
+		"status_code=503",
+		"HTTP status code 503",
+		"Server returned HTTP response code: 401 for URL",
+	}
+	for _, in := range kept {
+		if got := maskMessage(in); got != in {
+			t.Errorf("maskMessage(%q) = %q, want it kept", in, got)
+		}
+	}
+	if Fingerprint("Server returned HTTP response code: 401") == Fingerprint("Server returned HTTP response code: 503") {
+		t.Error("401 and 503 share a fingerprint")
+	}
+	if got := maskMessage("status code 77"); got != "status code <n>" {
+		t.Errorf("status code 77 = %q", got)
+	}
+}
+
+func TestEvidenceShapes(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"SQLSTATE 1234", "SQLSTATE <n>"},
+		{"SQLSTATE 123456", "SQLSTATE <n>"},
+		{"SQLSTATE 23505", "SQLSTATE 23505"},
+		{"error code: 12", "error code: <n>"},
+		{"error code: 123456", "error code: <n>"},
+		{"error code: 409", "error code: 409"},
+		{"HTTP 600", "HTTP <n>"},
+		{"HTTP 099", "HTTP <n>"},
+		{"HTTP 599", "HTTP 599"},
+	}
+	for _, tc := range tests {
+		if got := maskMessage(tc.in); got != tc.want {
+			t.Errorf("maskMessage(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if Fingerprint("ERROR: relation x (SQLSTATE 42P01)") == Fingerprint("ERROR: relation x (SQLSTATE 22P02)") {
+		t.Error("alphanumeric SQLSTATEs share a fingerprint")
+	}
+}
+
+func TestTrailingLogLineNotHashed(t *testing.T) {
+	base := "a.b.OuterException: x\nCaused by: a.b.RootException: y\n\tat r.One.m(One.java:1)"
+	if Fingerprint(base) != Fingerprint(base+"\nWorker stopped after 3 retries") {
+		t.Error("trailing class-less log line changed the fingerprint")
+	}
+	// A class-less line before the root still counts.
+	if Fingerprint("Task 0: FAILED:\n"+base) == Fingerprint(base) {
+		t.Error("leading plain line ignored")
 	}
 }

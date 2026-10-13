@@ -504,9 +504,12 @@ func maskNumbers(s string) string {
 // what failed and must tell incidents apart. It is decided by position and
 // shape, so a volatile number after the same word is still masked:
 //
-//	SQLSTATE            exactly 5 digits (23505, 40001)
+//	SQLSTATE            exactly 5 digits (23505, 40001); SQLSTATEs with a
+//	                    letter (42P01, 22P02) are not standalone numbers, so
+//	                    they are never masked and need no rule
 //	error code, errorCode   3 to 5 digits (409, 40401)
-//	HTTP, status        3 digits, 100 to 599 (503)
+//	HTTP, status, status code, response code (any spelling)
+//	                    3 digits, 100 to 599 (503)
 //	error               5 digits starting 4 or 5 (registry "error 40401")
 func keepNumber(before, digits string) bool {
 	if len(before) > 24 {
@@ -519,10 +522,21 @@ func keepNumber(before, digits string) bool {
 		return n == 5
 	case strings.HasSuffix(look, "error code"), strings.HasSuffix(look, "error_code"), strings.HasSuffix(look, "errorcode"):
 		return n >= 3 && n <= 5
-	case strings.HasSuffix(look, "status"), strings.HasSuffix(look, "http"), httpVersionEnd(look):
+	case hasAnySuffix(look, statusKeys), httpVersionEnd(look):
 		return n == 3 && digits[0] >= '1' && digits[0] <= '5'
 	case strings.HasSuffix(look, "error"):
 		return n == 5 && (digits[0] == '4' || digits[0] == '5')
+	}
+	return false
+}
+
+var statusKeys = []string{"status", "http", "status code", "statuscode", "status_code", "response code", "responsecode", "response_code"}
+
+func hasAnySuffix(s string, suffixes []string) bool {
+	for _, x := range suffixes {
+		if strings.HasSuffix(s, x) {
+			return true
+		}
 	}
 	return false
 }
@@ -550,6 +564,11 @@ func (t Template) canonical(forHash bool) string {
 		}
 	}
 	for i, c := range t.Causes {
+		// Plain log lines after the root are left out of the hash: a trace and
+		// the same trace with a trailing log line are one failure.
+		if forHash && i > root && c.Class == "" {
+			continue
+		}
 		if i > 0 {
 			b.WriteString("\nCaused by: ")
 		}
