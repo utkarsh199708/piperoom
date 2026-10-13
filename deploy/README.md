@@ -389,7 +389,7 @@ tell the two apart.
 | Role | Who | May |
 |---|---|---|
 | **member** | in `users.yaml`, or an approver or backup (`user:` or `group:`) in `layers:` or a pipeline `owners:` block | everything a room allows: create rooms, comment, steer, suggest, request and take control, hand off, close, trace. Approve only the layers they own |
-| **viewer** | passes the gate **only** through `PIPEROOM_AUTH_VIEWER_GROUPS` or `auditors:` | read and watch: every `GET` except export, and the live WebSocket. **Every non-GET under `/api` answers `403 viewer`**, including accepting a hand-off. A viewer can still log out |
+| **viewer** | passes the gate **only** through `PIPEROOM_AUTH_VIEWER_GROUPS` or `auditors:` | read and watch: every `GET` except export and `GET /api/people` (`403 viewer`), and the live WebSocket. **Every non-GET under `/api` answers `403 viewer`**, including accepting a hand-off. A viewer can still log out |
 | **auditor** | named in `auditors:`, any role | export a room. `auditors:` **never makes a member**: a person who is only in `auditors:` is a viewer who can also export |
 
 Today a **member can still export** too. From auth PR 4 a member who is not an approver, a backup
@@ -423,8 +423,8 @@ For one data engineer who owns every layer. Set `PIPEROOM_SOLO_USER=<users.yaml 
 
 - that user may approve **every** layer;
 - each approval must also send `confirm: "<pipeline_id>/<layer>"`, typed by hand, for example
-  `"orders/kafka"`. Without it the answer is `400 validation`. The web app has no box for this
-  yet (it comes with auth PR 4), so today a solo approval is sent through the API;
+  `"orders/kafka"`. Without it the answer is `400 validation`. The web app asks for it when the
+  server says a solo confirm is needed; through the API, send `confirm` in the approve body;
 - the server log records the grant as `solo` (storing it on the approval event comes with auth PR 4).
 
 The typed text is a speed bump, not a control. So **the server refuses to start** when the solo
@@ -669,14 +669,14 @@ room. A fix that was approved but not finished is marked failed, not re-run
 | No agent answer | the model provider's credentials are missing, or egress to its API is blocked (behind a proxy, set `HTTPS_PROXY` and `NO_PROXY`) |
 | Exits at start with an error about the model provider, region, project or credentials | see [Model provider](#model-provider); the error names the setting |
 | A password with `$` is cut short | write `$` as `$$` in `deploy/.env` |
-| `400 login_expired` at `/auth/callback` | the login cookie or its row is gone. A login lasts **10 minutes**; the person took longer, or opened `/auth/login` a second time (a second tab) so the first tab's login was replaced, or pressed back and sent the same callback twice (each login works once), or opened the callback in another browser. Also check that people open the exact `PIPEROOM_PUBLIC_URL` address (the cookie belongs to that host). Fix: start again from the site address, in one tab |
-| `401 unauthenticated` at `/auth/callback` | `state` did not match, the IdP refused the login (`access_denied`), or the ID token failed a check: signature, issuer, audience, expiry, nonce, or `azp` not equal to our client id. The server log says which (`auth: login refused ...` or `auth: callback state mismatch`). Check `PIPEROOM_OIDC_ISSUER` and `PIPEROOM_OIDC_CLIENT_ID`, and the server clock (use NTP) |
-| `403 not_provisioned` at login | the IdP login was fine but the gate says no: the person is not in `users.yaml`, not named in `owners.yaml` (`layers:`, a pipeline `owners:` block, `auditors:`), and not in `PIPEROOM_AUTH_VIEWER_GROUPS`. Find their id in the log (`auth: login refused by the gate`, `user=...`), add them, restart. Two other texts mean a **recycled or moved account**: "this email is already linked to a different account; ask an admin to unbind it" (run `devctl identities unbind <user>`, see [Moving a person](#moving-a-person-to-a-new-idp-account)) and "this account is not the one pinned for <user>" (the user has a `sub:` in `users.yaml` that is not this account: fix the `sub:`) |
-| `401 session_expired` after a good login | the idle (`PIPEROOM_SESSION_IDLE`) or maximum (`PIPEROOM_SESSION_MAX`) time ran out, or the person was removed from `users.yaml`, `owners.yaml` or the viewer groups ("this user is no longer allowed to sign in") |
-| `429 rate_limited` on `/auth/login` | more than 300 logins a minute from one client address. Behind a proxy this usually means everyone shares the proxy's address: set `PIPEROOM_TRUSTED_PROXIES`, and make the proxy send plain addresses (no port) in `X-Forwarded-For`. Wait a minute (`Retry-After: 60`) |
-| `503 idp_unavailable` | the server has not reached the IdP (discovery is retried in the background, 1 s up to 30 s apart, and is not fatal), or the IdP's token endpoint was down during the login. Check `PIPEROOM_OIDC_ISSUER`, DNS, firewall and `HTTPS_PROXY`/`NO_PROXY` (see [Outbound proxy](#outbound-proxy)); watch for `auth: oidc discovery succeeded`. People already signed in are not affected |
-| `403 viewer` | the person is a viewer: in `PIPEROOM_AUTH_VIEWER_GROUPS`, or only in `auditors:`. Viewers can read and watch, not change anything. To make them members, add them to `users.yaml` or as an approver or backup in `owners.yaml`, then restart |
-| `403 not_allowed` on export | a viewer who is not in `auditors:` (see [Roles](#roles)) |
+| `login_expired` (`400` at `/auth/callback`; today the browser shows this JSON, after auth PR 4 the "sign-in expired" page) | the login cookie or its row is gone. A login lasts **10 minutes**; the person took longer, or opened `/auth/login` a second time (a second tab) so the first tab's login was replaced, or pressed back and sent the same callback twice (each login works once), or opened the callback in another browser. Also check that people open the exact `PIPEROOM_PUBLIC_URL` address (the cookie belongs to that host). Fix: start again from the site address, in one tab |
+| `unauthenticated` (`401` at `/auth/callback`; today JSON in the browser, after auth PR 4 a sign-in failed page) | `state` did not match (log `auth: callback state mismatch`); the IdP refused the login, for example `access_denied` (log `auth: the identity provider refused the login`); the token endpoint said no, for example `invalid_grant`, which a redirect URI that does not match the one registered at the IdP also gives (log `auth: login refused: token endpoint said 400 invalid_grant`); or the ID token failed a check: signature, issuer, audience, expiry, nonce, or `azp` not equal to our client id (log `auth: login refused ...`). A token endpoint that answers 5xx gives `503 idp_unavailable` instead. Check `PIPEROOM_OIDC_ISSUER` and `PIPEROOM_OIDC_CLIENT_ID`, and the server clock (use NTP) |
+| `not_provisioned` (`403` at login; today JSON in the browser, after auth PR 4 a "not set up" page) | the IdP login was fine but the gate says no: the person is not in `users.yaml`, not named in `owners.yaml` (`layers:`, a pipeline `owners:` block, `auditors:`), and not in `PIPEROOM_AUTH_VIEWER_GROUPS`. Find their id in the log (`auth: login refused by the gate`, `user=...`), add them, restart. Two other texts mean a **recycled or moved account**. "this email is already linked to a different account; ask an admin to unbind it" has two causes: the user is already bound to another IdP account (run `devctl identities unbind <user>`, see [Moving a person](#moving-a-person-to-a-new-idp-account)), or the email belongs to a `users.yaml` user who has a `sub:` pin and this account is not that `sub` (unbind does not help: fix the `sub:` in `users.yaml`, or the login is right to be refused). "this account is not the one pinned for <user>" is the same pin problem: fix the `sub:` |
+| `session_expired` (`401`) after a good login | the idle (`PIPEROOM_SESSION_IDLE`) or maximum (`PIPEROOM_SESSION_MAX`) time ran out, or the person was removed from `users.yaml`, `owners.yaml` or the viewer groups ("this user is no longer allowed to sign in") |
+| `rate_limited` (`429` on `/auth/login`) | more than 300 logins a minute from one client address. Behind a proxy this usually means everyone shares the proxy's address: set `PIPEROOM_TRUSTED_PROXIES`, and make the proxy send plain addresses (no port) in `X-Forwarded-For`. Wait a minute (`Retry-After: 60`) |
+| `idp_unavailable` (`503`) | the server has not reached the IdP (discovery is retried in the background, 1 s up to 30 s apart, and is not fatal), or the IdP's token endpoint was down during the login. Check `PIPEROOM_OIDC_ISSUER`, DNS, firewall and `HTTPS_PROXY`/`NO_PROXY` (see [Outbound proxy](#outbound-proxy)); watch for `auth: oidc discovery succeeded`. People already signed in are not affected |
+| `viewer` (`403`) | the person is a viewer: in `PIPEROOM_AUTH_VIEWER_GROUPS`, or only in `auditors:`. Viewers can read and watch, not change anything. To make them members, add them to `users.yaml` or as an approver or backup in `owners.yaml`, then restart |
+| `not_allowed` (`403`) on export | a viewer who is not in `auditors:` (see [Roles](#roles)) |
 | `403 not_layer_owner` "no groups claim in token (IdP overage?)" (`groups_missing`) | the ID token had no groups claim, so a group right could not apply. `GET /api/me` shows `groups_missing: true`; the log has `auth: no groups claim in id token`. Check the claim is in the **ID token** and its name equals `PIPEROOM_OIDC_GROUPS_CLAIM`; with Entra check for overage. Or name the person with `user:`. They must sign in again |
 | `404` on `POST /api/alerts/webhook` | normal in `oidc` mode: that route is not mounted. Use the signed `/api/alerts/generic` |
 | An alert sender gets 401 | its secret in `deploy/.env` is empty or wrong, or the proxy is asking it to log in (see [Alerts](#alerts)) |
@@ -686,8 +686,9 @@ room. A fix that was approved but not finished is marked failed, not re-run
 Moving to the version with OIDC login (auth PR 3):
 
 - **`users.yaml` is checked harder at start-up.** The server now refuses to start if a user `id`
-  starts with `u_` (that prefix is for IdP users with no entry), or if an `email:` contains a
-  non-ASCII character or a space. Rename the id or fix the email before you upgrade. The example
+  starts with `u_` (that prefix is for IdP users with no entry), or contains a `:` or any
+  whitespace, or if an `email:` has no `@`, contains a space, or has a non-ASCII character.
+  Rename the id or fix the email before you upgrade. The example
   files in `deploy/config/` and `dev/` use neither.
 - **Migration `00007`** runs on the first start. It adds two tables, `login_states` and
   `identities`, and an `email` column on `sessions`. A pilot that stays in dev mode does not use
