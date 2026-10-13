@@ -9,6 +9,40 @@
 > current secret first, "" = webhook source off). `webhook-auth.md` is the single `docs/api.md` proposal.
 
 
+> **Status (C9, 2026-10-13):** `docs/design/auth.md` rewritten against `main` @ 2a7bc34 on branch `c9/auth-design`
+> (OIDC + PKCE, server-side session, owners.yaml principals/groups/backup, solo mode, `params_hash` on approvals,
+> 4-PR split). It replaces PR #10's `auth.md`; `webhook-auth.md` and `event-retention.md` stay in PR #10.
+>
+> **Revision 2 (C9, 2026-10-13, PR #44):** rebased on `main` @ 9a97cb2 and revised for every item of
+> `reviews/auth-design-critique.md`: dev non-loopback opt-in `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (keeps the Docker
+> image working), Host allow-list against DNS rebinding, login CSRF (row by cookie, then `state`), mode-specific
+> cookie names, `params_hash` on `action.executed` with title/risk/rollback hashed and a JCS number rule, export
+> limited to owners/driver/auditors, solo start check, `ValidateUsers` group rule, `return` parsing, client secret
+> rule, groups-overage message. The "Changes in revision 2" table at the top of `auth.md` maps item → section.
+> `jcs` is already a direct dependency on `main`; only `go-oidc` is new.
+>
+> **Revision 3 (C9, 2026-10-13, PR #44):** answers the two critic reviews of revision 2 (security; fit with `main`).
+> Viewer role (`403 viewer` on every room and proposal POST, so a viewer can never take the driver role), driver
+> dropped from the export list, `/auth/login` limit raised to 300/min with `PIPEROOM_TRUSTED_PROXIES`, loopback
+> hosts on any port plus `PIPEROOM_ALLOWED_HOSTS`, the dev-mode `X-Forwarded-For` 403 deleted, a reverse proxy
+> needs `oidc` (proxy pilots build from git tag `pre-auth` until PR 3), `--allow-remote` kept one release as an alias,
+> `/api/me.layers` stays, Vite proxy is a PR 2 prerequisite before `cors` goes, line refs fixed. The "Changes in
+> revision 3" table at the top of `auth.md` maps item → section; §10 lists what was narrowed or rejected and why.
+>
+> **Revision 4 (C9, 2026-10-13, PR #44):** answers the review of revision 3 at be6f3c2, rebased on `main` @ 0172826.
+> Dev mode answers `403 proxy_identity` when `/auth/dev-login` carries `X-User`, or when a session cookie and an
+> `X-User` for a different user arrive together (a proxy pilot that upgrades could otherwise be impersonated). The
+> viewer rule is default-deny: every non-GET under `/api` is `403 viewer`, which also covers
+> `POST /api/handoffs/{hid}/accept`. PR 3 adds `Service.LookupPerson`, backed by sessions, so a member who is only in an
+> `owners.yaml` group can be granted control or receive a hand-off. `auditors:` gives export only; an auditor-only
+> principal is a viewer plus export. The `PIPEROOM_PUBLIC_URL` row states the dev-mode non-loopback rule. Line refs
+> refreshed. The "Changes in revision 4" table at the top of `auth.md` maps item to section.
+>
+> **Lead decisions (2026-10-13):** written into `auth.md` §9 rows 7–9 and the sections they touch; the open questions are gone.
+> (7) `PIPEROOM_TRUSTED_PROXIES` is kept, oidc mode only, added by the lead in the PR 1 contract commit. (8) No image
+> pipeline: pilots build from source with `deploy/docker-compose.pilot.yml`; the image tag `piperoom:pre-auth` became a
+> git tag `pre-auth`. (9) Members who are not owners or auditors cannot export; they go in `auditors:`.
+
 Read these first: `AGENTS.md`, `docs/collab.md`, `docs/security/findings.md` (F1–F10), `docs/security/threat-model.md`, `docs/api.md`,
 `internal/events/events.go`, `internal/config/config.go`, `internal/owners/owners.go`, `dev/users.yaml`, `dev/owners.yaml`,
 `web/src/api/client.ts` and C5's task file (`tasks/C5-*.md`). You own a **new** folder, `docs/design/**`. Branch: `c9/security-design`.
