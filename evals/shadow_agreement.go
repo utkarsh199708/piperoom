@@ -250,8 +250,12 @@ func ReadShadowDoc(file string) (ShadowDoc, error) {
 	}
 	defer fh.Close()
 	var d ShadowDoc
-	if err := json.NewDecoder(io.LimitReader(fh, maxShadowFile)).Decode(&d); err != nil {
+	dec := json.NewDecoder(io.LimitReader(fh, maxShadowFile))
+	if err := dec.Decode(&d); err != nil {
 		return ShadowDoc{}, fmt.Errorf("evals: reading %s: %w", file, err)
+	}
+	if dec.More() {
+		return ShadowDoc{}, fmt.Errorf("evals: reading %s: trailing data after the JSON document", file)
 	}
 	return d, nil
 }

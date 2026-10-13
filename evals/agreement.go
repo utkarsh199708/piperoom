@@ -83,6 +83,9 @@ func (l Label) Validate() error {
 		return fmt.Errorf("evals: label has %d root_cause_terms, want 1-20", n)
 	}
 	for _, t := range l.RootCauseTerms {
+		if len(t) > 200 {
+			return fmt.Errorf("evals: label term is %d characters, want 1-200", len(t))
+		}
 		if _, _, ok := termTokens(t); !ok {
 			return fmt.Errorf("evals: label term %q has no words", t)
 		}
@@ -115,7 +118,10 @@ func Agreement(hypothesis string, label Label, opts ...AgreementOption) (Agreeme
 		res.Reason = "no hypothesis text"
 		return res, nil
 	}
-	layer, why := agentLayer(hypothesis, cfg.names)
+	layer, why, also := agentLayer(hypothesis, cfg.names)
+	if len(also) > 0 {
+		why += "; also names " + strings.Join(also, ", ")
+	}
 	res.AgentLayer = layer
 	res.LayerAgree = layer == label.Layer
 	var parts []string
@@ -181,119 +187,7 @@ func AgreementJudged(ctx context.Context, j HypothesisJudge, hypothesis string, 
 	}, nil
 }
 
-// --- deterministic internals ---
-
-// clauseSplitFine adds commas and dashes to score.go's clause split, so a
-// denial stays in its own clause: "not the importer, it is the poll timeout".
-var clauseSplitFine = regexp.MustCompile(`[,—–]`)
-
-// clauseTokens tokenises text clause by clause.
-func clauseTokens(text string) [][]string {
-	var out [][]string
-	for _, c := range clauseSplit.Split(text, -1) {
-		for _, f := range clauseSplitFine.Split(c, -1) {
-			if t := tokenize(f); len(t) > 0 {
-				out = append(out, t)
-			}
-		}
-	}
-	return out
-}
-
-var (
-	// contrastWords end a negation's reach: "not X but Y" leaves Y positive.
-	contrastWords = map[string]bool{"but": true, "however": true, "actually": true, "although": true, "though": true, "whereas": true, "yet": true}
-	// clearedWords after a term clear it: "Connect is healthy".
-	clearedWords = map[string]bool{"healthy": true, "fine": true, "ok": true, "okay": true, "normal": true, "unaffected": true,
-		"unrelated": true, "irrelevant": true, "excluded": true, "ruled": true, "innocent": true, "stable": true}
-)
-
-const negWindow = 5
-
-// negatorAt reports whether toks[i] is a negator in its context.
-func negatorAt(toks []string, i int) bool {
-	next := ""
-	if i+1 < len(toks) {
-		next = toks[i+1]
-	}
-	switch t := toks[i]; {
-	case t == "no":
-		return next != "longer" // "no longer carry amount" states a fact
-	case t == "not", t == "never", t == "t", t == "without", t == "against", t == "neither", t == "nor", strings.HasPrefix(t, "avoid"):
-		return true
-	case t == "instead":
-		return next == "of"
-	case t == "rather":
-		return next == "than"
-	}
-	return false
-}
-
-// occurrence is one place a term occurs and whether a negation reaches it.
-type occurrence struct {
-	start, end int
-	negated    bool
-}
-
-// findTerm lists the occurrences of term in one clause. A term is negated
-// by a negator in the negWindow words before it (not past a contrast word)
-// or a clearing word in the negWindow words after it.
-func findTerm(toks []string, term string) []occurrence {
-	want, prefix, ok := termTokens(term)
-	if !ok {
-		return nil
-	}
-	var out []occurrence
-	for i := 0; i+len(want) <= len(toks); i++ {
-		hit := true
-		for j, w := range want {
-			if j == len(want)-1 && prefix {
-				hit = strings.HasPrefix(toks[i+j], w)
-			} else {
-				hit = toks[i+j] == w
-			}
-			if !hit {
-				break
-			}
-		}
-		if !hit {
-			continue
-		}
-		o := occurrence{start: i, end: i + len(want)}
-		for k := i - 1; k >= 0 && k >= i-negWindow; k-- {
-			if contrastWords[toks[k]] {
-				break
-			}
-			if negatorAt(toks, k) {
-				o.negated = true
-				break
-			}
-		}
-		for k := o.end; !o.negated && k < len(toks) && k < o.end+negWindow; k++ {
-			if contrastWords[toks[k]] {
-				break
-			}
-			o.negated = clearedWords[toks[k]]
-		}
-		out = append(out, o)
-	}
-	return out
-}
-
-// termHits reports whether term occurs un-negated in any clause (hit) and
-// whether it occurs at all only negated (neg).
-func termHits(clauses [][]string, term string) (hit, neg bool) {
-	for _, c := range clauses {
-		for _, o := range findTerm(c, term) {
-			if o.negated {
-				neg = true
-			} else {
-				return true, false
-			}
-		}
-	}
-	return false, neg
-}
+// --- layer detection ---
 
 // failureMarkers say a clause reports something broken.
 var failureMarkers = []string{"fail*", "stuck", "cannot", "reject*", "denied", "stopp*", "drop*", "delet*", "lost", "loss",
@@ -334,8 +228,10 @@ func causeStart(toks []string) int {
 	return 0
 }
 
-// agentLayer finds the layer the hypothesis blames and says why.
-func agentLayer(text string, names map[string]string) (layer, why string) {
+// agentLayer finds the layer the hypothesis blames and says why. also lists
+// the other layers the same clause names, so a reader sees what was
+// ambiguous.
+func agentLayer(text string, names map[string]string) (layer, why string, also []string) {
 	terms := agreementLayerTerms()
 	for name, l := range names {
 		terms[l] = append(terms[l], name)
@@ -345,12 +241,13 @@ func agentLayer(text string, names map[string]string) (layer, why string) {
 		layer, word string
 	}
 	clauses := clauseTokens(text)
-	best := func(wantFailure bool) (hit, bool) {
-		for _, toks := range clauses {
+	best := func(wantFailure bool) (hit, []string, bool) {
+		for _, c := range clauses {
+			toks := c.toks
 			if wantFailure {
 				live := false
 				for _, m := range failureMarkers {
-					for _, o := range findTerm(toks, m) {
+					for _, o := range findTerm(c, m) {
 						live = live || !o.negated
 					}
 				}
@@ -361,7 +258,7 @@ func agentLayer(text string, names map[string]string) (layer, why string) {
 			var hits []hit
 			for l, ts := range terms {
 				for _, t := range ts {
-					for _, o := range findTerm(toks, t) {
+					for _, o := range findTerm(c, t) {
 						if !o.negated {
 							hits = append(hits, hit{o.start, l, t})
 						}
@@ -392,15 +289,23 @@ func agentLayer(text string, names map[string]string) (layer, why string) {
 				}
 				return hits[a].layer < hits[b].layer
 			})
-			return hits[0], true
+			var others []string
+			seen := map[string]bool{hits[0].layer: true}
+			for _, h := range hits[1:] {
+				if !seen[h.layer] {
+					seen[h.layer] = true
+					others = append(others, h.layer)
+				}
+			}
+			return hits[0], others, true
 		}
-		return hit{}, false
+		return hit{}, nil, false
 	}
-	if h, ok := best(true); ok {
-		return h.layer, fmt.Sprintf("failure clause names %q", h.word)
+	if h, o, ok := best(true); ok {
+		return h.layer, fmt.Sprintf("failure clause names %q", h.word), o
 	}
-	if h, ok := best(false); ok {
-		return h.layer, fmt.Sprintf("first layer named is %q", h.word)
+	if h, o, ok := best(false); ok {
+		return h.layer, fmt.Sprintf("first layer named is %q", h.word), o
 	}
-	return "", ""
+	return "", "", nil
 }

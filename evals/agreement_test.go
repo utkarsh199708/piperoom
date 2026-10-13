@@ -34,6 +34,22 @@ func TestAgreementTable(t *testing.T) {
 			Label{"kafka-connect", []string{"poll timeout"}}, "", false, true},
 		{"cleared by healthy", "The Schema Registry is healthy; the connector task failed.", connect, "kafka-connect", true, false},
 		{"no longer is a fact", "The records no longer carry amount.", Label{"consumer", []string{"amount"}}, "", false, true},
+		{"later denial clause", "The bulk import, which many people suspected early on in the investigation, is not the problem; the poll timeout is.",
+			Label{"kafka-connect", []string{"bulk import"}}, "", false, false},
+		{"later denial keeps own subject", "The poll timeout is the cause, and the bulk import is not the problem.",
+			Label{"kafka-connect", []string{"poll timeout"}}, "", false, true},
+		{"negator ends an earlier clause", "It is not, as the on-call first assumed after looking at the dashboards for a while, the compat mode.",
+			Label{"schema-registry", []string{"compat mode"}}, "", false, false},
+		{"clearing follows but it", "I checked whether the connector task failed but it was fine.",
+			Label{"kafka-connect", []string{"task failed"}}, "kafka-connect", true, false},
+		{"clearing stops at but another", "The connector task failed but the consumer is fine.",
+			Label{"kafka-connect", []string{"task failed"}}, "kafka-connect", true, true},
+		{"negator at window edge", "It is not clear to us that poll timeout.",
+			Label{"kafka-connect", []string{"poll timeout"}}, "", false, false},
+		{"negator beyond window", "It is not clear to all of us that poll timeout.",
+			Label{"kafka-connect", []string{"poll timeout"}}, "", false, true},
+		{"failure clause beats earlier mention", "The warehouse looks a bit slow today. Connector task 0 failed on a schema error.",
+			connect, "kafka-connect", true, false},
 		{"contraction", "It isn't the poll timeout.", Label{"kafka-connect", []string{"poll timeout"}}, "", false, false},
 		{"because names the cause", "The warehouse is stale because the connector task stopped.", connect, "kafka-connect", true, false},
 		{"empty", "  ", connect, "", false, false},
@@ -248,6 +264,11 @@ func TestShadowFileErrors(t *testing.T) {
 	_ = os.WriteFile(bad, []byte("{not json"), 0o600)
 	if _, err := ScoreShadowFiles(context.Background(), bad, TermsAgreement); err == nil {
 		t.Error("bad json accepted")
+	}
+	trail := filepath.Join(dir, "trail.json")
+	_ = os.WriteFile(trail, []byte(`{"run":{"room_id":"r","status":"error"},"room":{}} {"x":1}`), 0o600)
+	if _, err := ScoreShadowFiles(context.Background(), trail, TermsAgreement); err == nil || !strings.Contains(err.Error(), "trailing") {
+		t.Errorf("trailing data accepted: %v", err)
 	}
 	// A bad grade value is an error, not silently ignored.
 	p := filepath.Join(dir, "g.json")

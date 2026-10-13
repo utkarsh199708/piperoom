@@ -87,11 +87,31 @@ go run -tags claude ./evals/cmd/evalrun -agreement saved/ -judge claude         
   names from the run's `pipeline_map` count as keywords. Clauses that clear a layer ("Connect is
   healthy") or deny it ("not the importer") are skipped.
 - **cause_agree**: any one label term (the terms are **one OR group**, as `evalrun -from-shadow`
-  builds them) is stated outside a negation. A negator in the five words before a term, or a clearing
-  word ("healthy", "fine", "ruled out") in the five after it, negates it, up to a contrast word
-  ("but", "however"): "it is not the bulk import; it's the poll timeout" agrees with `poll timeout`
-  and not with `bulk import`. Matching is `score.go`'s whole-word matcher. Labellers must pick
-  distinctive terms: a term the whole pipeline mentions makes every run agree.
+  builds them) is stated outside a negation. A term is negated by: a negator (`not`, `never`, `no`
+  except "no longer", `n't`, `without`, `avoid*`, `nor`, `neither`, `instead of`, `rather than`) in the
+  five words before it; a clearing word (`healthy`, `fine`, `ok`, `normal`, `ruled out`, ...) in the
+  five words after it; a negator that ends an earlier comma clause of the same sentence ("It is not,
+  as the on-call assumed, the compat mode"); or a later subject-less denial clause ("The bulk import,
+  which many suspected, is not the problem"). A contrast word (`but`, `however`, `actually`,
+  `although` ...) ends the reach, except that clearing follows "but it/this/that/they"
+  ("the task failed but it was fine"). So "it is not the bulk import; it's the poll timeout" agrees
+  with `poll timeout` and not with `bulk import`. Matching is `score.go`'s whole-word matcher.
+  Labellers must pick distinctive terms: a term the whole pipeline mentions makes every run agree.
+  The `Reason` says which term matched, or that terms occur only negated.
+
+**Known limits** (the deterministic mode is a screen, not a grade; use `-judge claude` or the human
+grade where it matters):
+- A paraphrase that uses none of the label terms scores `cause_agree = no`, however right it is.
+- Negation reaches a fixed distance (5 words) and only the cross-comma patterns above; a denial far
+  from its term, in another sentence ("Many suspected X. That was wrong.") is not seen.
+- A clearing word can clear the wrong term ("the connector failed, the consumer is fine" keeps the
+  connector; "the connector task, whose consumer is fine, failed" may not).
+- "but another subject" ends a clearing scan, so "failed but the consumer is fine" is read correctly,
+  while "failed but this was expected" is read as cleared.
+- Layer detection is keyword based: a cause described in another layer's words (a Postgres migration
+  that breaks the consumer) is attributed to the layer whose word comes first in the failure clause.
+  `Reason` lists "also names ..." layers from that clause so the ambiguity is visible.
+- Hypotheses are read as text only; step citations, tools called and proposals are ignored.
 - A run with no hypothesis (`no_hypothesis`, `error`, `budget` before one, `interrupted`) scores
   `no`/`no` and still counts in the totals, like the metrics denominator ("every closed room").
   A response without `room.labelled` (saved without `?include=room`, or not yet labelled) is listed
