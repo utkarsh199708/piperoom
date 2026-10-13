@@ -8,6 +8,7 @@ import type { RoomActions } from '../hooks/useRoom'
 import { Chip, Panel } from './ui'
 // TEMP until P1 merges: Icon, LayerTag and Empty come from './ui' then (see the stand-in file's header).
 import { Empty, Icon, LayerTag } from './proposals-temp-ui'
+import '../styles/proposals.css'
 
 // Fields that identify what an action actually targets. Approvers must see these
 // highlighted (F2): the layer owner should never rubber-stamp a description
