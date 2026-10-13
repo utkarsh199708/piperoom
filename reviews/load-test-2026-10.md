@@ -21,7 +21,13 @@ Author: [O5]. Test: `internal/loadtest/ws_load_test.go` (build tag `load`, not p
   gateway marshal/queue/write + loopback + client frame read.
 - **Seq check:** every client checks every event frame: seq must be exactly `last+1` (gaps and
   duplicates counted), and after the window each client's last seq must equal the room's final seq.
-  The test fails on any gap, duplicate, missing tail event, or goroutine leak after shutdown.
+  The test fails on any gap, duplicate, missing tail event, or goroutine leak after shutdown. It
+  also fails when clients reconnect more than `LOAD_MAX_RECONNECTS` times (default 0), because a
+  server-side drop such as "send buffer full" is otherwise hidden by reconnect + replay. It fails when
+  any agent emit, proposal, comment or approval request errors, and when not every created proposal
+  was approved. Both checks were verified by injecting faults: an approve with a wrong layer gave
+  `approveErrs=5` and `approvals=0, want 5` → FAIL; dropping each client's first connection gave
+  `gaps=0 ... reconnects=20` → FAIL. Both faults were reverted.
 - **Agent phase:** by default the 50 agents are spread evenly over one 200 ms period (real rooms are
   not phase-locked). `LOAD_BURST=1` makes all 50 tick at the same instant (worst-case herd:
   1,000 frames at once).
@@ -42,7 +48,7 @@ LOAD_HEAP_PROFILE=/tmp/heap-peak.out go test -tags load ./internal/loadtest -run
 
 Knobs (env): `LOAD_ROOMS` (50), `LOAD_CLIENTS` (20), `LOAD_RATE` (5), `LOAD_DURATION` (60s),
 `LOAD_COMMENT_EVERY` (2s), `LOAD_PROPOSAL_EVERY` (50), `LOAD_PAD_BYTES` (300), `LOAD_BURST`,
-`LOAD_HEAP_PROFILE`. Smoke run: `LOAD_ROOMS=5 LOAD_CLIENTS=4 LOAD_DURATION=10s`.
+`LOAD_HEAP_PROFILE`, `LOAD_MAX_RECONNECTS` (0). Smoke run: `LOAD_ROOMS=5 LOAD_CLIENTS=4 LOAD_DURATION=10s`.
 
 ## Results
 
@@ -114,10 +120,13 @@ everything returns to baseline after `Server.Close`.
    `TestSinceMatchesLinearScan` (every `afterSeq`/`limit` edge compared with the original linear filter,
    including negative and past-the-end `afterSeq`), `TestSinceReturnsCopy` and `TestSinceErrors`.
 2. `internal/store/store.go` + memstore — new `store.SubscribeBuffer = 16` used by both stores instead of
-   256. A full channel only makes the subscriber goroutine wait (it re-reads from its own `lastSeq`), so
-   nothing is lost or reordered; pinned by `TestSubscribeSlowReaderGetsEverything` (appends 10× the buffer
-   before reading, checks every seq once and in order). This cut peak heap by ~40 % in the load test and
-   applies to the Postgres store too (~35 KB → ~2 KB per open socket).
+   256. On a full channel the subscriber goroutine blocks in its send (until the reader takes the event
+   or ctx ends), and `lastSeq` only advances after a successful send. So nothing is lost or reordered.
+   This is pinned by `TestSubscribeSlowReaderGetsEverything`, which appends max(10× the buffer, 100)
+   events before reading and checks every seq arrives once and in order. This cut peak heap by ~40 % in
+   the load test. The constant also applies to the Postgres store (~35 KB → ~2 KB per open socket),
+   **but 256 → 16 was only measured on memstore.** Follow-up: a Postgres integration twin of
+   `TestSubscribeSlowReaderGetsEverything` (build tag `integration`, dev stack).
 
 No change to `internal/ws`, `internal/room` or `internal/httpapi`.
 
@@ -128,8 +137,13 @@ burst p50 14 → 10.5 ms. Correctness unchanged (0 gaps / 0 dups in every run; a
 
 1. **One store subscription per WebSocket (production impact, Postgres).** `ws.Gateway` calls
    `store.Subscribe` per connection; on `*PG` every subscriber runs its own
-   `SELECT ... WHERE room_id=$1 AND seq>$2` on each NOTIFY. With 20 viewers per room that is 20
-   identical queries per event: at this test's load ~4,900 queries/s against Postgres for 245 events/s.
+   `SELECT ... WHERE room_id=$1 AND seq>$2` on each NOTIFY. `PG.drain` (`internal/store/hub.go`) also
+   has no `len(events) < limit` early return. So one wake costs about 3 queries per subscriber: the
+   page with the event, an empty read that ends `drain`, and an empty read on the immediate re-drain in
+   `runSub`. With 20 viewers per room that is about 60 queries per event. At this test's load (~285
+   appends/s including comments and approvals) that is roughly 15,000–17,000 queries/s against Postgres,
+   not the ~4,900/s an earlier draft of this report said. Adding the early return to `PG.drain`, as
+   memstore has, would cut this about 3×. It was not changed here.
    Fix: one subscription per room in the gateway (or in the store hub) that fans the same event out to
    every client of that room, each client keeping its own `lastSeq` for gap-free resume. Not small; touches
    the gateway's lifecycle. **Highest-value next step.** This test cannot show it because it uses memstore;
@@ -151,3 +165,10 @@ burst p50 14 → 10.5 ms. Correctness unchanged (0 gaps / 0 dups in every run; a
 - `go test -count=1 ./...` → all packages ok (the load test is not compiled without the tag)
 - `go test -count=1 -race ./internal/store/memstore/` → ok
 - `go test -tags load ./internal/loadtest -run TestWSFanoutLoad -v` → PASS (numbers above)
+
+### Re-check after review round 1 (stricter assertions)
+
+`LOAD_DURATION=30s go test -tags load ./internal/loadtest -run TestWSFanoutLoad -v -count=1` → PASS:
+7,350 agent events, 101 proposals / 101 approvals, 750 comments, every error counter 0, 170,060 frames
+(5,668/s). Latency p50 0.40 ms, p90 0.79 ms, p99 4.1 ms, p99.9 15.7 ms, max 29.7 ms. gaps=0 dups=0
+reconnects=0 missing=0. Peak heap 87 MiB, peak RSS 163 MiB, goroutines 6,321 at peak and 2 after shutdown.
