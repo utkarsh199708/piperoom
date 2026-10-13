@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
-	"sync"
 	"time"
 
 	"piperoom/internal/auth"
@@ -405,79 +404,4 @@ func inPrefixes(ps []netip.Prefix, a netip.Addr) bool {
 		}
 	}
 	return false
-}
-
-// rateLimiter is a fixed one-minute window counter per key, in memory and per
-// process (design §1.1).
-type rateLimiter struct {
-	limit  int
-	window time.Duration
-	max    int // hard cap on tracked keys
-
-	mu      sync.Mutex
-	buckets map[string]*bucket
-	pruneAt time.Time
-}
-
-type bucket struct {
-	start time.Time
-	n     int
-}
-
-func newRateLimiter(limit int, window time.Duration) *rateLimiter {
-	return &rateLimiter{limit: limit, window: window, max: maxLoginBuckets, buckets: map[string]*bucket{}}
-}
-
-// maxLoginBuckets is the hard cap on tracked client keys. When the table is
-// full of live buckets, a new key is answered 429 rate_limited: the cap trades a
-// possible refusal of new clients during a flood for a bounded amount of memory.
-const maxLoginBuckets = 10000
-
-// limitKey is the rate-limit key for a client address: an IPv6 address counts
-// as its /64 (one subscriber owns a whole /64, so per-address keys would let one
-// client mint a fresh budget for every address and fill the table), an IPv4
-// address as itself.
-func limitKey(ip string) string {
-	a, err := netip.ParseAddr(ip)
-	if err != nil {
-		return ip
-	}
-	a = a.Unmap()
-	if a.Is6() {
-		return netip.PrefixFrom(a, 64).Masked().String()
-	}
-	return a.String()
-}
-
-// prune drops every bucket whose window is over. Caller holds l.mu.
-func (l *rateLimiter) prune(now time.Time) {
-	for k, b := range l.buckets {
-		if now.Sub(b.start) >= l.window {
-			delete(l.buckets, k)
-		}
-	}
-	l.pruneAt = now.Add(l.window)
-}
-
-// allow counts one call for key at now and reports whether it is within the
-// limit. A key that is not tracked yet is refused while the table is full.
-func (l *rateLimiter) allow(key string, now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if now.After(l.pruneAt) {
-		l.prune(now)
-	}
-	b := l.buckets[key]
-	if b == nil || now.Sub(b.start) >= l.window {
-		if b == nil && len(l.buckets) >= l.max {
-			l.prune(now) // expired buckets may be what fills the table
-			if len(l.buckets) >= l.max {
-				return false
-			}
-		}
-		b = &bucket{start: now}
-		l.buckets[key] = b
-	}
-	b.n++
-	return b.n <= l.limit
 }

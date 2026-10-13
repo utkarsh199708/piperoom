@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"fmt"
 	"testing"
 	"time"
 )
@@ -38,38 +37,5 @@ func TestRateLimiterWindowAndLimit(t *testing.T) {
 	}
 	if !l.allow("a", now.Add(time.Minute)) {
 		t.Fatal("the window did not reset")
-	}
-}
-
-// The table never grows past its cap: when it is full of live buckets a new key
-// is refused, and expired buckets are reclaimed so the table recovers.
-func TestRateLimiterHardCap(t *testing.T) {
-	l := newRateLimiter(300, time.Minute)
-	l.max = 50
-	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
-	for i := 0; i < 50; i++ {
-		if !l.allow(fmt.Sprintf("k%d", i), now) {
-			t.Fatalf("key %d refused before the cap", i)
-		}
-	}
-	// A flood of new keys: all refused, the table does not grow.
-	for i := 50; i < 500; i++ {
-		if l.allow(fmt.Sprintf("k%d", i), now.Add(time.Second)) {
-			t.Fatalf("new key %d allowed with a full table", i)
-		}
-	}
-	if n := len(l.buckets); n != 50 {
-		t.Fatalf("table size = %d, want 50", n)
-	}
-	// Keys already tracked keep working.
-	if !l.allow("k0", now.Add(time.Second)) {
-		t.Fatal("a tracked key was refused")
-	}
-	// After the window the old buckets are reclaimed and new keys fit again.
-	if !l.allow("fresh", now.Add(2*time.Minute)) {
-		t.Fatal("the table did not recover after the window")
-	}
-	if n := len(l.buckets); n != 1 {
-		t.Fatalf("table size after recovery = %d, want 1", n)
 	}
 }

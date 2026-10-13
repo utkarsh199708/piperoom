@@ -69,6 +69,14 @@ func (t *Sessions) LiveByUserID(ctx context.Context, userID string, now time.Tim
 
 // LiveSessions implements auth.Store: the newest live session of each user,
 // ordered by user id, with the same liveness rule as LiveByUserID.
+//
+// The LIMIT applies here, before the role filter in room.Service.People. The
+// role depends on the session's groups and on owners.yaml, which SQL cannot
+// evaluate, so with more than limit live users, members past the limit (in user
+// id order) would be missing from the list. GET /api/people is a picker, and a
+// pilot has far fewer than 1000 people signed in at once; if that stops being
+// true the filter has to move into the query (for example by storing the role
+// on the session at login).
 func (t *Sessions) LiveSessions(ctx context.Context, now time.Time, idle time.Duration, limit int) ([]auth.Session, error) {
 	if limit <= 0 {
 		limit = 1000
