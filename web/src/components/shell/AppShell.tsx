@@ -8,7 +8,7 @@ import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useTheme } from '@/context/theme'
 import { useRoomList } from '@/hooks/useRoomList'
-import { BreadcrumbTailContext, InShellContext, RoomCommandsContext, TopBarSlotContext } from './context'
+import { BreadcrumbTailContext, InShellContext, RoomCommandsContext, RoomListContext, TopBarSlotContext } from './context'
 import type { RoomCommandRegistry, RoomCommands } from './context'
 import { isEditableTarget } from './keys'
 import { pipelineSummaries } from './pipelines'
@@ -41,7 +41,12 @@ function useIsDesktop(): boolean {
 export function AppShell() {
   const { toggleTheme } = useTheme()
   const location = useLocation()
-  const { rooms, reload } = useRoomList()
+  // The one room list: the sidebar reads it here and the room list screen through RoomListContext.
+  const { rooms, loading: roomsLoading, error: roomsError, reload } = useRoomList()
+  const roomList = useMemo(
+    () => ({ rooms, loading: roomsLoading, error: roomsError, reload }),
+    [rooms, roomsLoading, roomsError, reload],
+  )
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(false)
   const [slotEl, setSlotEl] = useState<HTMLElement | null>(null)
@@ -122,6 +127,7 @@ export function AppShell() {
 
   return (
     <InShellContext.Provider value>
+     <RoomListContext.Provider value={roomList}>
       <RoomCommandsContext.Provider value={registry}>
         <TopBarSlotContext.Provider value={slotEl}>
          <BreadcrumbTailContext.Provider value={setCrumbPipeline}>
@@ -201,6 +207,7 @@ export function AppShell() {
          </BreadcrumbTailContext.Provider>
         </TopBarSlotContext.Provider>
       </RoomCommandsContext.Provider>
+     </RoomListContext.Provider>
     </InShellContext.Provider>
   )
 }

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { ChevronRight, LogIn } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge, layerVariant } from '@/components/ui/badge'
@@ -29,6 +30,8 @@ export function LoginScreen({
   ssoHref?: string
 }) {
   const env = envLabel()
+  // Another row is hovered or focused: the first row gives up its "on" highlight, so only one row is lit.
+  const [other, setOther] = useState(false)
   return (
     <main className="flex flex-1 flex-col items-center justify-center gap-6 bg-background px-4 py-12 text-sm text-foreground">
       <div className="flex items-center gap-2">
@@ -81,11 +84,15 @@ export function LoginScreen({
                   // Name is the person's name alone; the layers are in the description.
                   aria-label={u.name}
                   aria-describedby={`dev-user-${u.id}-layers`}
-                  data-on={first || undefined}
+                  data-on={first && !other ? true : undefined}
+                  onMouseEnter={first ? undefined : () => setOther(true)}
+                  onMouseLeave={first ? undefined : () => setOther(false)}
+                  onFocus={first ? undefined : () => setOther(true)}
+                  onBlur={first ? undefined : () => setOther(false)}
                   autoFocus={first}
                   className={cn(
                     'flex min-h-11 w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50',
-                    first && 'bg-accent',
+                    first && !other && 'bg-accent',
                   )}
                 >
                   <Avatar className="size-7">

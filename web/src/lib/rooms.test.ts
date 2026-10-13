@@ -3,6 +3,7 @@ import type { RoomSnapshot } from '../api/types'
 import {
   agentCell,
   canTakeControlOf,
+  hasLiveDriver,
   isMine,
   layersNeedingYou,
   needsApproval,
@@ -167,6 +168,16 @@ describe('roomStats', () => {
     expect(s.agentCaption).toBe('customers · step 2')
     expect(s.resolvedToday).toBe(2)
     expect(s.medianMinutes).toBe(40) // (20 + 60) / 2
+  })
+
+  it('does not count a driver whose lease has expired as "with a driver"', () => {
+    const rooms: RoomSnapshot[] = [
+      { ...room('live', 'open', '2026-10-11T10:00:00'), driver: { id: 'k', name: 'K', lease_until: '2026-10-11T19:00:00' } },
+      { ...room('old', 'open', '2026-10-11T10:00:00'), driver: { id: 'k', name: 'K', lease_until: '2026-10-11T17:00:00' } },
+      { ...room('none', 'open', '2026-10-11T10:00:00'), driver: { id: 'k', name: 'K' } },
+    ]
+    expect(roomStats(rooms, arjun, now).openWithDriver).toBe(2)
+    expect(hasLiveDriver(rooms[1], now)).toBe(false)
   })
 
   it('has quiet defaults with no rooms', () => {

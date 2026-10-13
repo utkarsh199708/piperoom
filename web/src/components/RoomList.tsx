@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertTriangle, ChevronDown, Plus, X } from 'lucide-react'
@@ -52,7 +52,7 @@ import { Kbd } from './ui/kbd'
 import { Skeleton } from './ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { TopBarSlot } from './shell/TopBarSlot'
-import { useInShell } from './shell/context'
+import { RoomListContext, useInShell } from './shell/context'
 import { isEditableTarget } from './shell/keys'
 
 const SEVERITIES = ['sev1', 'sev2', 'sev3', 'sev4']
@@ -89,11 +89,15 @@ export function RoomList() {
   const inShell = useInShell()
   const { user } = useCurrentUser()
   const viewer = isViewer(user) // a viewer cannot create rooms or take control (the server answers 403 viewer)
-  const { rooms, loading, error, reload } = useRoomList()
+  // In the shell the list is the shell's copy (the sidebar shows it too); on its own it loads its own.
+  const shared = useContext(RoomListContext)
+  const own = useRoomList({ enabled: shared === null })
+  const { rooms, loading, error, reload } = shared ?? own
   const [searchParams, setSearchParams] = useSearchParams()
   const pipeline = searchParams.get('pipeline') || null
   const [tab, setTab] = useState<RoomTab>('open')
-  const [active, setActive] = useState(-1) // keyboard row, an index into `visible`
+  // The keyboard row is a room id, not a position: a refresh can insert or reorder rows.
+  const [activeId, setActiveId] = useState<string | null>(null)
   const [newOpen, setNewOpen] = useState(false)
   const [taking, setTaking] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -112,12 +116,25 @@ export function RoomList() {
     const t = window.setInterval(() => {
       if (!document.hidden) void reload()
     }, POLL_MS)
-    return () => window.clearInterval(t)
+    // Back to the tab after a while: do not wait for the next tick.
+    const onVisible = () => {
+      if (!document.hidden) void reload()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearInterval(t)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [reload])
 
   const sorted = useMemo(() => sortRoomsForList(rooms), [rooms])
   const scoped = useMemo(() => roomsForPipeline(sorted, pipeline), [sorted, pipeline])
   const visible = useMemo(() => roomsForTab(scoped, tab, user), [scoped, tab, user])
+  const active = activeId === null ? -1 : visible.findIndex((r) => r.id === activeId)
+  // The row left the list (a refresh, a filter): nothing is selected any more.
+  useEffect(() => {
+    if (activeId !== null && active === -1) setActiveId(null)
+  }, [activeId, active])
   const counts = useMemo(
     () => ({
       open: roomsForTab(scoped, 'open', user).length,
@@ -140,7 +157,7 @@ export function RoomList() {
         },
         { replace: true },
       )
-      setActive(-1)
+      setActiveId(null)
     },
     [setSearchParams],
   )
@@ -168,9 +185,10 @@ export function RoomList() {
   )
 
   const focusRow = (index: number) => {
-    setActive(index)
     const room = visible[index]
-    if (room) rowLinks.current.get(room.id)?.focus()
+    if (!room) return
+    setActiveId(room.id)
+    rowLinks.current.get(room.id)?.focus()
   }
 
   // J/K move, Enter opens, T takes control, C opens the new-room dialog. Never while typing, never
@@ -194,7 +212,8 @@ export function RoomList() {
         return
       } else if (key === 't') {
         const room = visible[active]
-        if (room && canTakeControlOf(room, user)) void takeControl(room)
+        // One take at a time: a second T while the first is in flight does nothing.
+        if (room && taking === null && canTakeControlOf(room, user)) void takeControl(room)
       } else if (key === 'c' && !viewer) {
         e.preventDefault()
         setNewOpen(true)
@@ -206,7 +225,7 @@ export function RoomList() {
 
   const changeTab = (next: string) => {
     setTab(next as RoomTab)
-    setActive(-1)
+    setActiveId(null)
   }
 
   const controls = (
@@ -314,7 +333,7 @@ export function RoomList() {
                     active={active}
                     taking={taking}
                     linkRefs={rowLinks.current}
-                    onActive={setActive}
+                    onActive={setActiveId}
                     onOpen={(id) => navigate(`/rooms/${id}`)}
                     onTake={(r) => void takeControl(r)}
                   />
@@ -492,7 +511,7 @@ function RoomTable({
   active: number
   taking: string | null
   linkRefs: Map<string, HTMLAnchorElement>
-  onActive: (i: number) => void
+  onActive: (id: string) => void
   onOpen: (id: string) => void
   onTake: (room: RoomSnapshot) => void
 }) {
@@ -536,7 +555,7 @@ function RoomTable({
                 if (el) linkRefs.set(room.id, el)
                 else linkRefs.delete(room.id)
               }}
-              onActivate={() => onActive(i)}
+              onActivate={() => onActive(room.id)}
               onOpen={() => onOpen(room.id)}
               onTake={() => onTake(room)}
             />
@@ -803,6 +822,9 @@ function ErrorCard({ message, onRetry }: { message: string | null; onRetry: () =
 
 const FIELD_LABEL = 'text-xs font-medium text-muted-foreground'
 
+// The form lives inside the dialog content, which Radix unmounts on close: every open starts
+// fresh (empty title, no old error) and the pipeline defaults to the filter on screen right
+// now, else the first pipeline.
 function NewRoomDialog({
   open,
   onOpenChange,
@@ -814,24 +836,30 @@ function NewRoomDialog({
   pipelines: string[]
   defaultPipeline: string | null
 }) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <NewRoomForm onClose={() => onOpenChange(false)} pipelines={pipelines} defaultPipeline={defaultPipeline} />
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function NewRoomForm({
+  onClose,
+  pipelines,
+  defaultPipeline,
+}: {
+  onClose: () => void
+  pipelines: string[]
+  defaultPipeline: string | null
+}) {
   const navigate = useNavigate()
   const [title, setTitle] = useState('')
   const [severity, setSeverity] = useState('sev2')
-  const [pipelineId, setPipelineId] = useState('')
+  const [pipelineId, setPipelineId] = useState(defaultPipeline ?? pipelines[0] ?? 'orders')
   const [busy, setBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
-
-  const change = (next: boolean) => {
-    if (!next) {
-      setTitle('')
-      setCreateError(null)
-    }
-    onOpenChange(next)
-  }
-  // However it was opened (button, C key, empty state): the pipeline defaults to the filter, else the first one.
-  useEffect(() => {
-    if (open) setPipelineId((p) => p || (defaultPipeline ?? pipelines[0] ?? 'orders'))
-  }, [open, defaultPipeline, pipelines])
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -848,7 +876,7 @@ function NewRoomDialog({
       } else {
         id = (await api.createRoom({ title: title.trim(), severity, pipeline_id: pipeline })).id
       }
-      change(false)
+      onClose()
       navigate(`/rooms/${id}`)
     } catch (err) {
       setCreateError(errorText(err))
@@ -858,8 +886,6 @@ function NewRoomDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={change}>
-      <DialogContent>
         <form className="grid gap-4" onSubmit={onSubmit}>
           <DialogHeader>
             <DialogTitle>New room</DialogTitle>
@@ -921,7 +947,7 @@ function NewRoomDialog({
             </p>
           )}
           <DialogFooter>
-            <Button type="button" variant="ghost" onClick={() => change(false)}>
+            <Button type="button" variant="ghost" onClick={onClose}>
               Cancel
             </Button>
             <Button type="submit" disabled={busy || !title.trim()}>
@@ -929,7 +955,5 @@ function NewRoomDialog({
             </Button>
           </DialogFooter>
         </form>
-      </DialogContent>
-    </Dialog>
   )
 }

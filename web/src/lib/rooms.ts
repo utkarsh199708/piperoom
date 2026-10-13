@@ -2,7 +2,7 @@
 // already sorts open-first (docs/api.md), but fixture mode and any client-side
 // refresh can return arbitrary order, so the sorting rule lives here too.
 import type { RoomSnapshot } from '../api/types'
-import { isViewer } from '../state/permissions'
+import { canDecideLayer, isViewer } from '../state/permissions'
 import type { CurrentUser } from '../state/permissions'
 
 function openedAtMs(room: RoomSnapshot): number {
@@ -52,8 +52,16 @@ export function needsApproval(room: RoomSnapshot): boolean {
  * owned by someone else never tints a row. A viewer owns nothing and can decide nothing.
  */
 export function layersNeedingYou(room: RoomSnapshot, user: CurrentUser): string[] {
-  if (isViewer(user)) return []
-  return pendingLayers(room).filter((l) => user.layers.includes(l))
+  if (room.status !== 'open') return []
+  const out: string[] = []
+  for (const p of room.open_proposals ?? []) {
+    // The same rule the proposals panel uses to show Approve/Reject (state/permissions.ts).
+    const proposal = { required_layers: p.required_layers, approvals: p.approvals, status: 'open' as const }
+    for (const layer of p.required_layers) {
+      if (canDecideLayer(proposal, user, layer) && !out.includes(layer)) out.push(layer)
+    }
+  }
+  return out
 }
 
 export function needsYou(room: RoomSnapshot, user: CurrentUser): boolean {
@@ -67,9 +75,14 @@ export function needsYou(room: RoomSnapshot, user: CurrentUser): boolean {
 export function canTakeControlOf(room: RoomSnapshot, user: CurrentUser): boolean {
   if (isViewer(user) || room.status !== 'open') return false
   if (room.driver?.id === user.id) return false
-  if (room.driver == null) return true
+  return !hasLiveDriver(room)
+}
+
+/** A driver whose lease has not run out. No lease time means a live driver; an expired lease means none. */
+export function hasLiveDriver(room: RoomSnapshot, now = Date.now()): boolean {
+  if (room.driver == null) return false
   const until = room.driver.lease_until
-  return until != null && Date.parse(until) <= Date.now()
+  return until == null || !(Date.parse(until) <= now)
 }
 
 /** Rooms that need me: I drive an open room, or one of my layers has to decide. */
@@ -141,7 +154,7 @@ export function roomStats(rooms: RoomSnapshot[], user: CurrentUser, now = Date.n
   const first = working[0]
   return {
     open: open.length,
-    openWithDriver: open.filter((r) => r.driver != null).length,
+    openWithDriver: open.filter((r) => hasLiveDriver(r, now)).length,
     needsYou: mine,
     needsYouLayers: layers,
     agentWorking: working.length,

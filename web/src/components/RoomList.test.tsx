@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
+import { Link, MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { useState } from 'react'
 import type { RoomSnapshot } from '../api/types'
 
@@ -40,7 +40,7 @@ vi.mock('../api/client', () => {
 import { toast } from 'sonner'
 import { useRoomList } from '../hooks/useRoomList'
 import { api } from '../api/client'
-import { InShellContext, TopBarSlotContext } from './shell/context'
+import { InShellContext, RoomListContext, TopBarSlotContext } from './shell/context'
 import { RoomList } from './RoomList'
 
 function room(over: Partial<RoomSnapshot> & { id: string }): RoomSnapshot {
@@ -104,6 +104,8 @@ const titlesInOrder = () =>
 beforeEach(() => {
   ctx.user = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'] }
   vi.clearAllMocks()
+  vi.mocked(api.grantControl).mockReset()
+  vi.mocked(api.createRoom).mockReset()
   mockList([])
 })
 
@@ -322,6 +324,29 @@ describe('New room', () => {
     expect(api.createRoom).toHaveBeenCalledWith({ title: 'Lag on payments', severity: 'sev1', pipeline_id: 'payments' })
   })
 
+  it('reopening starts fresh and takes the pipeline filter that is on screen now', () => {
+    mockList([room({ id: 'o1', pipeline_id: 'orders' }), room({ id: 'p1', pipeline_id: 'payments' })])
+    render(
+      <MemoryRouter initialEntries={['/?pipeline=orders']}>
+        <Link to="/?pipeline=payments">sidebar link</Link>
+        <Routes>
+          <Route path="/" element={<RoomList />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'New room' }))
+    expect(screen.getByLabelText('Pipeline')).toHaveValue('orders')
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'half typed' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    // The same screen under another filter (the sidebar link): the new dialog uses it.
+    fireEvent.click(screen.getByRole('link', { name: 'sidebar link' }))
+    fireEvent.click(screen.getByRole('button', { name: 'New room' }))
+    expect(screen.getByLabelText('Pipeline')).toHaveValue('payments')
+    expect(screen.getByLabelText('Title')).toHaveValue('')
+  })
+
   it('does not submit an empty title', () => {
     renderList()
     fireEvent.click(screen.getAllByRole('button', { name: 'New room' })[0])
@@ -416,6 +441,62 @@ describe('keyboard', () => {
     await waitFor(() => expect(api.grantControl).toHaveBeenCalledWith('b', 'arjun'))
   })
 
+  it('the picked row is a room, not a position: a refresh that inserts a row above does not move T', async () => {
+    vi.mocked(api.grantControl).mockResolvedValue({} as never)
+    mockList(rooms)
+    const view = renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 'j' }) // Bravo
+    expect(activeId()).toBe('b')
+
+    // The poll brings a newer room, which sorts to the top. Bravo stays the picked row.
+    mockList([room({ id: 'z', title: 'Zulu', opened_at: '2026-10-11T13:00:00Z' }), ...rooms])
+    view.rerender(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/" element={<RoomList />} />
+        </Routes>
+        <Where />
+      </MemoryRouter>,
+    )
+    expect(titlesInOrder()[0]).toBe('Zulu')
+    expect(activeId()).toBe('b')
+    fireEvent.keyDown(document.body, { key: 't' })
+    await waitFor(() => expect(api.grantControl).toHaveBeenCalledWith('b', 'arjun'))
+    expect(api.grantControl).not.toHaveBeenCalledWith('z', 'arjun')
+  })
+
+  it('when the picked room leaves the list nothing is picked, and T does nothing', () => {
+    mockList(rooms)
+    const view = renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 'j' })
+    mockList(rooms.filter((r) => r.id !== 'b'))
+    view.rerender(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/" element={<RoomList />} />
+        </Routes>
+        <Where />
+      </MemoryRouter>,
+    )
+    expect(activeId()).toBeUndefined()
+    fireEvent.keyDown(document.body, { key: 't' })
+    expect(api.grantControl).not.toHaveBeenCalled()
+  })
+
+  it('ignores T while a take is in flight', async () => {
+    vi.mocked(api.grantControl).mockReturnValue(new Promise(() => {}))
+    mockList([room({ id: 'x', title: 'X' }), room({ id: 'y', title: 'Y', opened_at: '2026-10-11T09:00:00Z' })])
+    renderList()
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    await waitFor(() => expect(api.grantControl).toHaveBeenCalledTimes(1))
+    fireEvent.keyDown(document.body, { key: 'j' })
+    fireEvent.keyDown(document.body, { key: 't' })
+    expect(api.grantControl).toHaveBeenCalledTimes(1)
+  })
+
   it('C opens the new-room dialog', () => {
     renderList()
     fireEvent.keyDown(document.body, { key: 'c' })
@@ -442,6 +523,35 @@ describe('keyboard', () => {
     const dialog = screen.getByRole('dialog', { name: 'New room' })
     fireEvent.keyDown(dialog, { key: 'j' })
     expect(activeId()).toBeUndefined()
+  })
+})
+
+describe('refresh', () => {
+  it('reloads once when the tab becomes visible again', () => {
+    renderList()
+    expect(reload).not.toHaveBeenCalled()
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(reload).toHaveBeenCalledTimes(1)
+  })
+
+  it('in the shell it reads the shell list and does not load its own', () => {
+    const shellReload = vi.fn()
+    mockList([room({ id: 'own', title: 'From the hook' })])
+    render(
+      <MemoryRouter>
+        <RoomListContext.Provider
+          value={{ rooms: [room({ id: 'sh', title: 'From the shell' })], loading: false, error: null, reload: shellReload }}
+        >
+          <RoomList />
+        </RoomListContext.Provider>
+      </MemoryRouter>,
+    )
+    expect(titlesInOrder()).toEqual(['From the shell'])
+    expect(vi.mocked(useRoomList)).toHaveBeenCalledWith({ enabled: false })
+    // Take control and the refresh go through the shell's reload, so the sidebar updates too.
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(shellReload).toHaveBeenCalledTimes(1)
+    expect(reload).not.toHaveBeenCalled()
   })
 })
 
