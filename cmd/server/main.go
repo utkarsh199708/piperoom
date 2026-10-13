@@ -272,21 +272,16 @@ func run() error {
 			Effort:   cfg.Effort,
 			MaxTurns: 40,
 		},
-		ShadowOptions: agent.Options{
-			Model:       cfg.Model,
-			Effort:      cfg.Effort,
-			MaxTurns:    shadowCfg.MaxTurns,
-			TokenBudget: shadowCfg.TokenBudget,
-		},
-		ShadowGrace:  shadowCfg.Grace,
-		Logger:       log,
-		MaxAgents:    maxAgents,
-		Sessions:     sessions,
-		SessionIdle:  authSettings.Idle,
-		ViewerGroups: authSettings.ViewerGroups,
-		SoloUser:     soloUser,
-		OnRoomOpened: slack.onRoomOpened(),
-		OnRoomClosed: closedHook.onClosed,
+		ShadowOptions: shadowAgentOptions(cfg, shadowCfg),
+		ShadowGrace:   shadowCfg.Grace,
+		Logger:        log,
+		MaxAgents:     maxAgents,
+		Sessions:      sessions,
+		SessionIdle:   authSettings.Idle,
+		ViewerGroups:  authSettings.ViewerGroups,
+		SoloUser:      soloUser,
+		OnRoomOpened:  slack.onRoomOpened(),
+		OnRoomClosed:  closedHook.onClosed,
 	})
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
@@ -412,15 +407,4 @@ func migrateRoomDB(ctx context.Context, dbURL string, log *slog.Logger) error {
 	}
 	log.Info("server: migrations applied", "count", n)
 	return nil
-}
-
-// shadowPipelines lists the ids of the pipelines with shadow mode on.
-func shadowPipelines(own *owners.Owners) []string {
-	var ids []string
-	for _, p := range own.Pipelines {
-		if p.Shadow() {
-			ids = append(ids, p.ID)
-		}
-	}
-	return ids
 }
