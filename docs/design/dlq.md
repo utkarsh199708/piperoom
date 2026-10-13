@@ -565,13 +565,13 @@ provable:
 
 ```
 pipeline orders
-legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = assumed, not proven by config or metadata; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or an earlier reading; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
 1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.1 MiB
 2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
   from: pg:public.orders
 3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=12s ago
   from: connect:pg-orders-connector
-4 connect:pg-orders-sink [kafka-connect, owner arjun] WARN config_risk=dlq_no_log dlq=orders-dlq errors_tolerance=all
+4 connect:pg-orders-sink [kafka-connect, owner arjun] OK config_risk=dlq_no_log dlq=orders-dlq errors_tolerance=all
   from: topic:pg.public.orders
 5 dlq:orders-dlq [kafka-connect, owner arjun] WARN newest_record=3m ago recent=true records=1204 writer=pg-orders-sink
   from: connect:pg-orders-sink

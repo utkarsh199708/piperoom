@@ -30,7 +30,11 @@ const (
 	// "schema-registry") that the pipeline's connectors serialize with or its
 	// consumers deserialize with. It is not a data stage: only depends_on
 	// edges point at it. Facts: compatibility, latest_version and
-	// registered_recently (true | false | unknown).
+	// registered_recently (true | false | unknown); new_version_seen (age,
+	// health warn) when registered_recently is true; version_deleted_seen
+	// (age, health warn) when the latest version went down, which is not a
+	// registration; exists=false (health warn) when a converter config names
+	// it but nothing is registered; error=unreachable (health unknown).
 	KindSchemaSubject NodeKind = "schema_subject"
 )
 
@@ -80,8 +84,8 @@ const (
 	// committed group offsets, Schema Registry subjects) or declared
 	// explicitly in owners.yaml.
 	MappingMapped EdgeMapping = "mapped"
-	// MappingInferred is assumed only because owners.yaml lists both ends in
-	// the same pipeline and nothing better is known. Render marks it
+	// MappingInferred is not proven; it is implied by owners.yaml (both ends
+	// in the same pipeline) or by an earlier reading. Render marks it
 	// "(unconfirmed)"; the agent treats it as a hypothesis to check.
 	MappingInferred EdgeMapping = "inferred"
 )
