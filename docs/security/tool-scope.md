@@ -36,16 +36,16 @@ returned, or read into the process, that is not the pipeline's.
 | Tool | Returns (scoped call, after T2) | Outside the scope before T2 | T2 change | Where it filters |
 |---|---|---|---|---|
 | `pg_replication_slots` | the pipeline's slots: name, plugin, active, LSNs, `wal_status`, retained WAL, `safe_wal_size`; a missing slot is reported as `not found`; count of other slots | **every slot on the server**: other pipelines' slots, physical slots, slots of other databases | scoped; slot names from `watch.slot`, else the connector configs (`Scope.Slots`); unreadable config fails closed | SQL `slot_name = ANY($1)`, other slots `count(*)` (`postgres.ReplicationSlotsNamed`); in-memory fallback for other clients |
-| `pg_long_transactions` | sessions of the source database that hold or wait for a relation lock on a pipeline source table: pid, user, application, state, age, wait event, statement verb, `has_xid`; count of other long transactions and how many of them are writers | **every long transaction in every database of the server**: other pipelines', other users', other databases' sessions | scoped by `pg_locks`; a client without the filter fails closed | SQL CTE over `pg_stat_activity` + `pg_locks` + the pipeline's table oids; others only `count(*)` (`postgres.LongTransactionsOnTables`) |
+| `pg_long_transactions` | sessions of the source database that hold or wait for a relation lock on a pipeline source table: pid, user, application, state, age, wait event, statement verb, `has_xid`; count of other long transactions and of the writers among them; the oldest 5 other **writers** anonymised: pid, `same_database` (a bool), state, age, `age(backend_xid)`, wait event type, nothing else | **every long transaction in every database of the server**: other pipelines', other users', other databases' sessions | scoped by `pg_locks`; other writers anonymised (they hold back every logical slot's `restart_lsn`); readers only counted; a client without the filter fails closed | SQL CTE over `pg_stat_activity` + `pg_locks` + the pipeline's table oids; others `count(*)`, the oldest other writers by an allow-listed `SELECT` (`postgres.LongTransactionsOnTables`); state and wait type checked against Postgres's vocabularies in the tool |
 | `pg_publication_tables` | the pipeline's publication (from its connector config), the connector role, membership and SELECT for each pipeline source table; count of the publication's other member tables | Summary and Data were already limited to source tables, but the client read **every member table name** of the publication into the process (all tables for `FOR ALL TABLES`) | the client reads only the pipeline's tables; other members are counted in SQL | SQL `unnest($2,$3)` join, `count(*)` (`postgres.PublicationSourceTables`); in-memory fallback for other clients |
-| `pg_recent_ddl` | DDL rows whose `object_identity` is a pipeline source table | none (F11 filters by table) | none | SQL `object_identity = $2` per table (`RecentDDLTable`); in-memory fallback |
+| `pg_recent_ddl` | DDL rows whose `object_identity` is a pipeline source table | rows are scoped (F11), but a row's `query` is the audit trigger's `current_query()`: a multi-statement DDL that also touched another table shows that table's DDL and literals, up to 300 characters (residual 9) | none | SQL `object_identity = $2` per table (`RecentDDLTable`); in-memory fallback |
 | `pg_row` | key and timestamp values of one pipeline source-table row | none (F4) | none | `CheckSourceTable` before the query |
 | `warehouse_freshness` | max timestamp of one pipeline sink table | none (F11) | none | `CheckSinkTable` before the query |
 | `warehouse_row` | timestamp values of one pipeline sink-table row | none (F4) | none | `CheckSinkTable` before the query |
-| `pipeline_map` | the pipeline's nodes and edges with health | the consumer group node's `lag` fact (and its health) was the **group's total lag over every topic it reads**, other pipelines' topics included | the group lag counts only the pipeline's topics (from the connector config, plus `owners.yaml` while Connect is down) | Go, `topology.pipelineLag`; slots are read in full inside the builder but only the pipeline's slot reaches the graph |
+| `pipeline_map` | the pipeline's nodes and edges with health | the consumer group node's `lag` fact (and its health) was the **group's total lag over every topic it reads**, other pipelines' topics included | the group lag counts only the pipeline's topics (from the connector config, plus `owners.yaml` while Connect is down); a group with partitions but none of the pipeline's topics shows `lag: unknown (no partition of this pipeline's topics)` and health unknown, never 0 | Go, `topology.pipelineLag`; slots are read in full inside the builder but only the pipeline's slot reaches the graph |
 | `trace_record` | one record's path through the pipeline's own stages | none (connector must stream the table; the group lag read uses only the record's partition) | none | `CheckSourceTable`, `connectorForTable` |
 | `connect_list_connectors` | the pipeline's connectors: type, state, failed task count; count of other connectors | none in output (F11 filters); every connector name is read from Connect | count line | Go after `ListConnectors` (Connect has no filter); `Status` only for the pipeline's |
-| `connect_status` | one pipeline connector's state, tasks, condensed failure trace | none (F11); a trace subject is diffed only when in scope | none | `CheckConnector` before the call |
+| `connect_status` | one pipeline connector's state, tasks, condensed failure trace | the connector is scoped (F11), but the trace text is the worker's: its exception and `Caused by:` lines can name other subjects and topics (residual 10); a trace subject is diffed only when in scope | none | `CheckConnector` before the call |
 | `connect_config` | key settings of one pipeline connector, secrets and transform literals masked | none (F11); see residual 3 | none | `CheckConnector` before the call |
 | `dlq_peek` | the pipeline sink's DLQ or a declared DLQ: counts, positions, error-header classes | records written by other connectors are dropped and counted (D4) | none | `CheckConnector` / `CheckDLQTopic`; record filter in Go |
 | `schema_registry_subjects` | the pipeline's subjects (`<topic>-key`/`-value`), optional prefix; count of other subjects | none in output (F11 filters); every subject name is read from the registry | count line, counted before the prefix filter so a prefix cannot probe names | Go after `Subjects` (no filter in the client contract) |
@@ -62,8 +62,6 @@ returned, or read into the process, that is not the pipeline's.
 
 1. **Counts.** A scoped list tool says how many other slots, sessions, connectors, groups,
    subjects, partitions or publication members exist. It never names them.
-   `pg_long_transactions` also says how many of the other sessions are writers: a long writer
-   anywhere holds back the WAL a slot keeps, so the agent must know one exists. The DBA finds it.
 2. **Kafka, Connect and the Schema Registry list everything to the process.** Their APIs have no
    name filter, so `ListConnectors`, `ConsumerGroups` and `Subjects` return every name to
    Piperoom; the names are dropped before any result is built and never reach the model, the room
@@ -76,20 +74,37 @@ returned, or read into the process, that is not the pipeline's.
    none: a registry-wide setting, but it is the level in force for this subject.
 5. **Subjects named only in a connector config** (for example a record-name subject strategy) are
    not added to the scope: the scope stays `<topic>-key`/`-value`, which is narrower, not wider.
-6. **`pg_long_transactions` ties a session to the pipeline through its locks.** A session that
-   holds no lock on a pipeline table (for example one that only took a transaction id) is counted,
-   not listed, even when it is what holds the slot back.
+6. **`pg_long_transactions` shows other writers, anonymised.** A writer on another table or in
+   another database of the server holds back every logical slot's `restart_lsn` (seen on real
+   Postgres: `restart_lsn` stuck, retained WAL growing). So the oldest 5 writers outside the
+   pipeline's tables are listed with pid, `same_database`, state, age, `age(backend_xid)` and
+   wait event type: enough for the agent to name the cause and for a DBA to act on the pid. Their
+   user, application, client address, database name and query (even the verb) are never selected.
+   Readers (no xid) cannot pin a slot and stay a count. A session is the pipeline's when it holds
+   or waits for a lock on a pipeline table in the source database; a clone of the database
+   (`CREATE DATABASE … TEMPLATE`) has the same table oids, so the `datname` check keeps it out.
 7. **`dlq_peek` counts are for the whole DLQ topic**, which other connectors may share (D4 says so
    in the summary).
 8. **Scope comes from `owners.yaml` and the connector configs.** A wrong `owners.yaml` or a
    connector config that names another pipeline's slot widens the scope to that object.
+9. **`pg_recent_ddl` shows the audit trigger's `current_query()`** (`dev/postgres-init/02-ddl-audit.sql`).
+   A row is the pipeline's table, but its query text is the whole statement string the client
+   sent: a multi-statement DDL that also changed another table shows that table's DDL and any
+   literals in it (cut to 300 characters in Summary). Pre-existing; a fix is to store only the
+   command tag and object, or to cut the text at the first statement.
+10. **`connect_status` shows the pipeline connector's failure trace.** The exception and
+    `Caused by:` lines are the worker's text and can name other subjects and topics (for example
+    a registry error about another subject). Only an in-scope subject is ever read from the
+    registry. Pre-existing.
 
 ## Tests
 
 - `internal/tools/dbtools/scope_meta_test.go`: fakes with two pipelines' slots, sessions and
   publication members (`FOREIGNMARK` in every foreign name); a scoped call shows only its own, in
-  Summary and marshalled Data; the count line names nothing; config unreadable, connector
-  missing, no Connect client and an invalid `slot.name` fail closed with no source read.
+  Summary and marshalled Data; the count line names nothing; other writers are listed oldest
+  first, capped at 5, with exactly the allow-listed fields (`TestOtherWriterAllowList`); config
+  unreadable, connector missing, no Connect client and an invalid `slot.name` fail closed with
+  no source read.
 - `internal/tools/kafkatools/scope_count_test.go`: the same for the cluster-wide lists.
 - `internal/tools/scope_slots_test.go`: `Scope.Slots` (declared slot, config slot, default, fail
   closed) and `NotShown`.
@@ -97,6 +112,10 @@ returned, or read into the process, that is not the pipeline's.
   topic.
 - `-tags integration`, on a throwaway `postgres:16 -c wal_level=logical`
   (`PIPEROOM_SCOPE_PG_URL`, else `SOURCE_DB_URL`):
-  `internal/clients/postgres/scoped_integration_test.go` (the three SQL filters) and
+  `internal/clients/postgres/scoped_integration_test.go` (the three SQL filters; exact
+  other/writer counts with a REPEATABLE READ reader; a cloned database whose writer on the
+  clone's copy of the pipeline table is not listed and leaks no login or application name) and
   `internal/tools/dbtools/scope_integration_test.go` (two publications and two slots; the scoped
-  slot and publication tools show only their own; unreadable config fails closed).
+  slot and publication tools show only their own; unreadable config fails closed; an
+  idle-in-transaction writer in another database is listed anonymised, its marker login,
+  application name and database nowhere in Summary or Data).
