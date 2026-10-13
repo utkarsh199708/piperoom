@@ -87,6 +87,13 @@ type Config struct {
 	// process's leases or claims for its own.
 	ReplicaID string // PIPEROOM_REPLICA_ID
 
+	// ResumeOnTakeover: when a replica takes over the agent lease of a
+	// replica that stopped, "1" resumes an agent that was working (a fresh
+	// run, at most 3 resumes per room per hour); empty or "0" (default) pauses
+	// it as a restart does, until someone steers or mentions @agent
+	// (docs/design/replicas.md section 4.3).
+	ResumeOnTakeover string // PIPEROOM_RESUME_ON_TAKEOVER
+
 	// Built-in watcher (internal/watch). Kept as strings like the other fields;
 	// ParseWatch turns them into typed values and names the env var on error.
 	WatchMode         string // PIPEROOM_WATCH_MODE: off | log | rooms (default log = shadow mode)
@@ -193,9 +200,10 @@ func Load() Config {
 		GenericAlertSecret:   get("GENERIC_ALERT_SECRET", ""),
 		DefaultAlertPipeline: get("DEFAULT_ALERT_PIPELINE", ""),
 
-		MaxAgents:       get("PIPEROOM_MAX_AGENTS", ""),
-		MaxAgentsGlobal: get("PIPEROOM_MAX_AGENTS_GLOBAL", ""),
-		ReplicaID:       get("PIPEROOM_REPLICA_ID", ""),
+		MaxAgents:        get("PIPEROOM_MAX_AGENTS", ""),
+		MaxAgentsGlobal:  get("PIPEROOM_MAX_AGENTS_GLOBAL", ""),
+		ReplicaID:        get("PIPEROOM_REPLICA_ID", ""),
+		ResumeOnTakeover: get("PIPEROOM_RESUME_ON_TAKEOVER", ""),
 
 		WatchMode:         get("PIPEROOM_WATCH_MODE", DefaultWatchMode),
 		WatchInterval:     get("PIPEROOM_WATCH_INTERVAL", DefaultWatchInterval),
