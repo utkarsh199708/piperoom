@@ -76,6 +76,12 @@ func TestMasking(t *testing.T) {
 		{"pg failing row", "Failing row contains (5, bob, 2026-01-01).", "Failing row contains (<row>)."},
 		{"debezium struct", "bad Struct{id=5,name=bob,amount=12.50}", "bad Struct{<fields>}"},
 		{"brace kv", "WorkerSourceTask{id=pg-orders-0} stopped", "WorkerSourceTask{<fields>} stopped"},
+		{"error code host", "error code:40401 now", "error code:40401 now"},
+		{"volatile after error", "Error 25377154 records skipped", "Error <n> records skipped"},
+		{"volatile after status", "status 1760175420 reached", "status <n> reached"},
+		{"volatile after code", "code 77 retry", "code <n> retry"},
+		{"value enum", `Could not find value "Bob" in enum`, `Could not find value "<str>" in enum`},
+		{"partition suffix", "table orders_2026_10_13 gone", "table orders_<n>_<n>_<n> gone"},
 		{"fqdn tld", "no route to broker.example.io", "no route to <host>"},
 		{"class not host", "failed javax.net.ssl.SSLHandshakeException here", "failed javax.net.ssl.SSLHandshakeException here"},
 		{"setting not host", "request.timeout:30000 exceeded", "request.timeout:<n> exceeded"},
@@ -150,8 +156,15 @@ func TestTruncatedTraceMatches(t *testing.T) {
 	if Fingerprint(full) != Fingerprint(cut) {
 		t.Errorf("tools.Truncate output does not match:\n%s\n---\n%s", Normalize(full), Normalize(cut))
 	}
-	// Sweep every cut after the root cause's first frame line has ended: the
-	// partial line before the marker must never become a bogus cause.
+	sweepCuts(t, full)
+	// The same sweep with a log line after the root: it never changes the hash.
+	sweepCuts(t, full+"[2026-10-13 09:00:01,123] INFO Worker stopped\n")
+}
+
+// sweepCuts checks every cut after the root cause's first frame line has
+// ended: the partial line before the marker must never become a bogus cause.
+func sweepCuts(t *testing.T, full string) {
+	t.Helper()
 	marker := "sendHttpRequest(RestService.java:297)\n"
 	start := strings.Index(full, marker) + len(marker)
 	want := Fingerprint(full)
@@ -327,6 +340,10 @@ func scenarioTexts(t *testing.T) []string {
 
 var digitRun = regexp.MustCompile(`\b\d+\b`)
 
+// evidencePosition lists, independently of the package code, where the
+// scenarios carry evidence codes that must not be bumped.
+var evidencePosition = regexp.MustCompile(`(?i)(sqlstate|error[ _]?code|status|http\S*|error)[\s:="'\[(]*$`)
+
 // bumpNumbers changes every standalone number to another of the same shape
 // (timestamps stay timestamps), except evidence codes, which are kept on purpose.
 func bumpNumbers(s string) string {
@@ -336,7 +353,7 @@ func bumpNumbers(s string) string {
 	for _, m := range idx {
 		b.WriteString(s[last:m[0]])
 		d := s[m[0]:m[1]]
-		if keepNumber(s[:m[0]], len(d)) {
+		if evidencePosition.MatchString(s[:m[0]]) {
 			b.WriteString(d)
 		} else {
 			bs := []byte(d)
@@ -429,4 +446,174 @@ func scenarioSeeds() []string {
 		out = out[:40]
 	}
 	return out
+}
+
+func TestNestedBodiesMasked(t *testing.T) {
+	tests := []struct{ name, in string }{
+		{"nested struct", "bad Struct{id=5,name=bob,addr=Struct{city=Paris}} here"},
+		{"nested braces", "bad {id=5, name=bob, addr={city=Paris}} here"},
+		{"envelope", "Struct{before=Struct{id=5,name=bob},after=Struct{id=5,name=bobby},op=u}"},
+		{"inner parens", "Key (name)=(bob (jr)) already exists."},
+		{"failing row", "Failing row contains (5, bob (jr), 2026-01-01)."},
+	}
+	for _, tc := range tests {
+		got := Normalize(tc.in).String()
+		for _, leak := range []string{"bob", "Paris", "jr"} {
+			if strings.Contains(got, leak) {
+				t.Errorf("%s: %q leaked into %q", tc.name, leak, got)
+			}
+		}
+	}
+	if got := maskMessage("Key (name)=(bob (jr)) already exists."); got != "Key (name)=(<val>) already exists." {
+		t.Errorf("inner parens: %q", got)
+	}
+}
+
+// A body that is cut by the line cap has no closer; everything after the
+// opener is a value and must be masked to the end of the line.
+func TestCutBodiesMasked(t *testing.T) {
+	pad := strings.Repeat("x", 300)
+	openers := []string{"Struct{name=bob,", "{id=5,name=bob,", "Failing row contains (5, bob, ", "Key (email)=(bob"}
+	for _, o := range openers {
+		in := pad + " " + o + strings.Repeat("secretvalue ", 100) + "}) tail"
+		got := Normalize(in).String()
+		if strings.Contains(got, "bob") || strings.Contains(got, "secret") {
+			t.Errorf("opener %q leaked: %q", o, got)
+		}
+	}
+	// Opener early in the line, closer beyond the line cap: no closer is seen.
+	in := "msg Struct{name=bob," + strings.Repeat("a", 500) + "} tail"
+	if got := Normalize(in).String(); strings.Contains(got, "bob") || strings.Contains(got, "tail") {
+		t.Errorf("line cap not applied before masking: %q", got)
+	}
+}
+
+func TestLineCapAndBudget(t *testing.T) {
+	// maxLineBytes: a line is cut before parsing, so text past it is gone.
+	long := "a.b.CException: " + strings.Repeat("a", maxLineBytes) + " Struct{name=bob}"
+	if got := Normalize(long).String(); strings.Contains(got, "Struct") {
+		t.Errorf("text past maxLineBytes survived: %q", got)
+	}
+	// budgetBytes: head causes stop once the budget is spent; the final cause stays.
+	var b strings.Builder
+	for i := 0; i < 100; i++ {
+		b.WriteString("a.b.CException: " + strings.Repeat("w", 300) + "\n")
+	}
+	b.WriteString("a.b.RootException: the end\n")
+	tpl := Normalize(b.String())
+	if max := 29; len(tpl.Causes) > max {
+		t.Errorf("causes = %d, want <= %d", len(tpl.Causes), max)
+	}
+	if len(tpl.Causes) < 20 {
+		t.Errorf("budget too small: %d causes", len(tpl.Causes))
+	}
+	if last := tpl.Causes[len(tpl.Causes)-1]; last.Class != "a.b.RootException" {
+		t.Errorf("root lost: %q", last.Class)
+	}
+}
+
+func TestRootIsLastClassCause(t *testing.T) {
+	// A trailing log line must not become the root: frames of the real root
+	// (the last class-bearing cause) still count only up to RootFrames.
+	a := "a.b.OuterException: x\nCaused by: a.b.RootException: y\n\tat r.One.m(One.java:1)\n\tat r.Two.m(Two.java:1)\nWorker stopped"
+	b := strings.Replace(a, "r.Two.m", "r.Other.m", 1)
+	if Fingerprint(a) != Fingerprint(b) {
+		t.Error("second root frame changed the fingerprint with a trailing log line")
+	}
+	c := strings.Replace(a, "r.One.m", "r.Other.m", 1)
+	if Fingerprint(a) == Fingerprint(c) {
+		t.Error("first root frame ignored with a trailing log line")
+	}
+}
+
+func TestStatusCodePhrasings(t *testing.T) {
+	kept := []string{
+		"Unexpected status code 409",
+		"statusCode: 503",
+		"status_code=503",
+		"HTTP status code 503",
+		"Server returned HTTP response code: 401 for URL",
+	}
+	for _, in := range kept {
+		if got := maskMessage(in); got != in {
+			t.Errorf("maskMessage(%q) = %q, want it kept", in, got)
+		}
+	}
+	if Fingerprint("Server returned HTTP response code: 401") == Fingerprint("Server returned HTTP response code: 503") {
+		t.Error("401 and 503 share a fingerprint")
+	}
+	if got := maskMessage("status code 77"); got != "status code <n>" {
+		t.Errorf("status code 77 = %q", got)
+	}
+}
+
+func TestEvidenceShapes(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"SQLSTATE 1234", "SQLSTATE <n>"},
+		{"SQLSTATE 123456", "SQLSTATE <n>"},
+		{"SQLSTATE 23505", "SQLSTATE 23505"},
+		{"error code: 12", "error code: <n>"},
+		{"error code: 123456", "error code: <n>"},
+		{"error code: 409", "error code: 409"},
+		{"HTTP 600", "HTTP <n>"},
+		{"HTTP 099", "HTTP <n>"},
+		{"HTTP 599", "HTTP 599"},
+	}
+	for _, tc := range tests {
+		if got := maskMessage(tc.in); got != tc.want {
+			t.Errorf("maskMessage(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if Fingerprint("ERROR: relation x (SQLSTATE 42P01)") == Fingerprint("ERROR: relation x (SQLSTATE 22P02)") {
+		t.Error("alphanumeric SQLSTATEs share a fingerprint")
+	}
+}
+
+func TestTrailingLogLineNotHashed(t *testing.T) {
+	base := "a.b.OuterException: x\nCaused by: a.b.RootException: y\n\tat r.One.m(One.java:1)"
+	for _, log := range []string{
+		"[2026-10-13 09:00:01,123] INFO Worker stopped after 3 retries",
+		`time=2026-10-13T09:00:01Z level=INFO msg="worker stopped"`,
+	} {
+		if Fingerprint(base) != Fingerprint(base+"\n"+log) {
+			t.Errorf("trailing log line %q changed the fingerprint", log)
+		}
+	}
+	// A bare class-less line before the root still counts.
+	if Fingerprint("Task 0: FAILED:\n"+base) == Fingerprint(base) {
+		t.Error("leading plain line ignored")
+	}
+}
+
+// Bare message lines after the root name the real error and must be hashed.
+func TestBareLinesAfterRootCount(t *testing.T) {
+	logger := "[2026-10-13 09:00:01,123] ERROR org.apache.kafka.connect.runtime.WorkerTask: Task threw an uncaught exception\n"
+	pairs := [][2]string{
+		{logger + `ERROR: relation "orders" does not exist`, logger + "ERROR: permission denied for table orders"},
+		{"java.net.ConnectException: Connection refused\nERROR: disk full", "java.net.ConnectException: Connection refused\nERROR: out of memory"},
+		{"org.postgresql.util.PSQLException: ERROR: update or delete violates foreign key\nDetail: Key (id)=(5) is still referenced from table \"items\".",
+			"org.postgresql.util.PSQLException: ERROR: update or delete violates foreign key\nDetail: Key (id)=(5) already exists."},
+		{"org.postgresql.util.PSQLException: ERROR: x\nHint: Increase max_replication_slots.", "org.postgresql.util.PSQLException: ERROR: x\nHint: Drop the slot."},
+	}
+	for _, p := range pairs {
+		if Fingerprint(p[0]) == Fingerprint(p[1]) {
+			t.Errorf("same fingerprint:\n%s\n---\n%s", p[0], p[1])
+		}
+	}
+}
+
+func TestLoggerNameIsNotAClass(t *testing.T) {
+	line := "[2026-10-13 09:00:01,123] ERROR org.apache.kafka.connect.runtime.WorkerTask: Task threw an uncaught exception"
+	tpl := Normalize(line + "\njava.net.ConnectException: Connection refused\n\tat a.B.c(B.java:1)")
+	if tpl.Causes[0].Class != "" || !tpl.Causes[0].Log {
+		t.Errorf("logger parsed as class: %+v", tpl.Causes[0])
+	}
+	if tpl.Causes[1].Class != "java.net.ConnectException" {
+		t.Errorf("exception lost: %+v", tpl.Causes[1])
+	}
+	// An exception on a logged line is still an exception.
+	got := Normalize("[2026-10-13 09:00:01,123] ERROR java.net.ConnectException: refused").Causes[0]
+	if got.Class != "java.net.ConnectException" {
+		t.Errorf("logged exception lost: %+v", got)
+	}
 }

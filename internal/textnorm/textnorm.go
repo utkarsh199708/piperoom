@@ -65,6 +65,10 @@ type Cause struct {
 	Message string `json:"message,omitempty"`
 	// Frames are the top stack frames, "pkg.Class.method", without file:line.
 	Frames []string `json:"frames,omitempty"`
+	// Log is true when the line carried a log prefix (timestamp/level) or a
+	// logfmt level= key. Such a line after the root is log noise and is not
+	// hashed; ERROR:/Detail:/Hint: lines are not log lines and always are.
+	Log bool `json:"log,omitempty"`
 }
 
 // Template is a normalised error text: the chain of causes, outermost first.
@@ -83,23 +87,18 @@ var (
 	// message. Other keys, including level=, stay in the text as they are.
 	reLogfmt = regexp.MustCompile(`\b(?:msg|err|error)="((?:[^"\\]|\\.)*)"`)
 
-	reKeyVal   = regexp.MustCompile(`\(([^()\n]*)\)=\([^()\n]*\)`)
-	reRow      = regexp.MustCompile(`(Failing row contains) \([^\n]*\)`)
-	reStruct   = regexp.MustCompile(`\bStruct\{[^{}\n]*\}`)
-	reBraceKV  = regexp.MustCompile(`\{[^{}\n]*=[^{}\n]*\}`)
-	reEmail    = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
-	reTS       = regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?|\b\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b`)
-	reUUID     = regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
-	reMember   = regexp.MustCompile(`\b((?:consumer|producer|connector-consumer|connector-producer|adminclient|rdkafka)[A-Za-z0-9._-]*?)(?:-\d+)?-<uuid>`)
-	reLSNWrap  = regexp.MustCompile(`LSN\{[^}\n]*\}`)
-	reLSN      = regexp.MustCompile(`\b[0-9A-F]{1,8}/[0-9A-F]{1,8}\b`)
-	reIP       = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b`)
-	reHost     = regexp.MustCompile(`\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:local|internal|svc|com|net|io|org)\b(?::\d{1,5})?|\blocalhost(?::\d{1,5})?\b|\b[A-Za-z][A-Za-z0-9.-]*:\d{4,5}\b`)
+	reEmail   = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
+	reTS      = regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?|\b\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b`)
+	reUUID    = regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
+	reMember  = regexp.MustCompile(`\b((?:consumer|producer|connector-consumer|connector-producer|adminclient|rdkafka)[A-Za-z0-9._-]*?)(?:-\d+)?-<uuid>`)
+	reLSNWrap = regexp.MustCompile(`LSN\{[^}\n]*\}`)
+	reLSN     = regexp.MustCompile(`\b[0-9A-F]{1,8}/[0-9A-F]{1,8}\b`)
+	reIP      = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b`)
+	reHost    = regexp.MustCompile(`\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:local|internal|svc|com|net|io|org)\b(?::\d{1,5})?|\blocalhost(?::\d{1,5})?\b|\b[A-Za-z][A-Za-z0-9.-]*:\d{4,5}\b`)
+	// A digit run of 16 or more is <hex> (it also matches this pattern), a
+	// shorter one is <n>; both are volatile, the split only follows the pattern.
 	reHex      = regexp.MustCompile(`\b0[xX][0-9a-fA-F]+\b|\b[0-9a-fA-F]{16,}\b`)
-	hostNotKey = []string{"timeout", "offset", "interval", "size", "lag", "limit", "count", "bytes", "delay", "retries", "version", "port", ".ms", "_ms"}
-	// Numbers after these words are evidence (SQLSTATE 23505, "error code:
-	// 409", HTTP 503), not volatile, and are kept.
-	codeKeys = []string{"sqlstate", "error code", "error_code", "errorcode", "code", "status", "http", "error"}
+	hostNotKey = []string{"timeout", "offset", "interval", "size", "lag", "limit", "count", "bytes", "delay", "retries", "version", "port", "code", ".ms", "_ms"}
 )
 
 // Normalize parses trace and returns its template with DefaultFrames frames per
@@ -222,7 +221,14 @@ func parseCause(line string) Cause {
 	if line == "" {
 		return Cause{}
 	}
-	line = reLogPrefix.ReplaceAllString(line, "")
+	logged := false
+	if loc := reLogPrefix.FindStringIndex(line); loc != nil && loc[1] > 0 {
+		logged = true
+		line = line[loc[1]:]
+	}
+	if strings.Contains(line, "level=") {
+		logged = true
+	}
 	line = strings.TrimPrefix(line, "Caused by:")
 	line = strings.TrimPrefix(line, "Suppressed:")
 	line = strings.TrimLeft(line, " \t")
@@ -230,9 +236,17 @@ func parseCause(line string) Cause {
 		line = reLogfmt.ReplaceAllString(line, "$1")
 	}
 	if m := reClass.FindStringSubmatch(line); m != nil && looksLikeClass(m[1]) {
-		return Cause{Class: m[1], Message: maskMessage(m[2])}
+		// After a log prefix "pkg.Logger: text" is a logger name, not a
+		// thrown exception; only exception-shaped names count as classes.
+		if !logged || looksLikeException(m[1]) {
+			return Cause{Class: m[1], Message: maskMessage(m[2]), Log: logged}
+		}
 	}
-	return Cause{Message: maskMessage(line)}
+	return Cause{Message: maskMessage(line), Log: logged}
+}
+
+func looksLikeException(class string) bool {
+	return strings.HasSuffix(class, "Exception") || strings.HasSuffix(class, "Error") || strings.HasSuffix(class, "Throwable")
 }
 
 // looksLikeClass accepts a dotted name whose last segment starts upper-case
@@ -245,18 +259,7 @@ func looksLikeClass(s string) bool {
 
 func maskMessage(s string) string {
 	s = clip(s, maxLineBytes)
-	if strings.Contains(s, ")=(") {
-		s = reKeyVal.ReplaceAllString(s, "($1)=(<val>)")
-	}
-	if strings.Contains(s, "Failing row") {
-		s = reRow.ReplaceAllString(s, "$1 (<row>)")
-	}
-	if strings.Contains(s, "Struct{") {
-		s = reStruct.ReplaceAllString(s, "Struct{<fields>}")
-	}
-	if strings.Contains(s, "{") {
-		s = reBraceKV.ReplaceAllString(s, "{<fields>}")
-	}
+	s = maskBodies(s)
 	if strings.Contains(s, "@") {
 		s = reEmail.ReplaceAllString(s, "<email>")
 	}
@@ -334,12 +337,81 @@ func isIdent(s string) bool {
 	return true
 }
 
+// afterAssign reports whether the quote at s[i] follows ':' or '=' or the word
+// "value", where the quoted text is a value, not a name.
 func afterAssign(s string, i int) bool {
 	j := i - 1
 	for j >= 0 && s[j] == ' ' {
 		j--
 	}
-	return j >= 0 && (s[j] == ':' || s[j] == '=')
+	if j < 0 {
+		return false
+	}
+	if s[j] == ':' || s[j] == '=' {
+		return true
+	}
+	return j >= 4 && strings.EqualFold(s[j-4:j+1], "value")
+}
+
+// maskBodies masks the bodies that carry record values: Debezium
+// "Struct{...}", "{field=value}" maps, Postgres "Failing row contains (...)" and
+// the value group of "Key (col)=(value)". Each body is masked up to its matching
+// closer, counting nesting, or to the end of the line when it has none (the line
+// was cut); so nested bodies and cut bodies leak nothing.
+func maskBodies(s string) string {
+	if !strings.ContainsAny(s, "{(") {
+		return s
+	}
+	const rowOpen = "Failing row contains "
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		switch {
+		case strings.HasPrefix(s[i:], "Struct{"):
+			i = balancedEnd(s, i+len("Struct"), '{', '}')
+			b.WriteString("Struct{<fields>}")
+		case s[i] == '{' && startsKeyValue(s, i+1):
+			i = balancedEnd(s, i, '{', '}')
+			b.WriteString("{<fields>}")
+		case strings.HasPrefix(s[i:], rowOpen+"("):
+			i = balancedEnd(s, i+len(rowOpen), '(', ')')
+			b.WriteString(rowOpen + "(<row>)")
+		case strings.HasPrefix(s[i:], ")=("):
+			i = balancedEnd(s, i+2, '(', ')')
+			b.WriteString(")=(<val>)")
+		default:
+			b.WriteByte(s[i])
+			i++
+		}
+	}
+	return b.String()
+}
+
+// balancedEnd returns the index after the closer that matches the opener at
+// s[start], or len(s) when there is none.
+func balancedEnd(s string, start int, open, closer byte) int {
+	depth := 0
+	for j := start; j < len(s); j++ {
+		switch s[j] {
+		case open:
+			depth++
+		case closer:
+			depth--
+			if depth == 0 {
+				return j + 1
+			}
+		}
+	}
+	return len(s)
+}
+
+// startsKeyValue reports whether s[i:] starts with "identifier=".
+func startsKeyValue(s string, i int) bool {
+	j := i
+	for j < len(s) && (isWord(s[j]) || s[j] == '.' || s[j] == '-') {
+		j++
+	}
+	return j > i && j < len(s) && s[j] == '='
 }
 
 // maskVolatile replaces timestamps, ids, hosts, LSNs and numbers. Most
@@ -423,7 +495,8 @@ func maskNumbers(s string) string {
 	var b strings.Builder
 	last := 0
 	for i := 0; i < len(s); {
-		if s[i] < '0' || s[i] > '9' || i > 0 && isWord(s[i-1]) {
+		// '_' delimits a number ("orders_2026_10_13"); other word bytes do not.
+		if s[i] < '0' || s[i] > '9' || i > 0 && isWord(s[i-1]) && s[i-1] != '_' {
 			i++
 			continue
 		}
@@ -431,7 +504,7 @@ func maskNumbers(s string) string {
 		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
 			j++
 		}
-		if j < len(s) && isWord(s[j]) || keepNumber(s[:i], j-i) {
+		if j < len(s) && isWord(s[j]) && s[j] != '_' || keepNumber(s[:i], s[i:j]) {
 			i = j
 			continue
 		}
@@ -446,17 +519,51 @@ func maskNumbers(s string) string {
 	return b.String()
 }
 
-func keepNumber(before string, digits int) bool {
+// keepNumber reports whether the digit run is an evidence code, which says
+// what failed and must tell incidents apart. It is decided by position and
+// shape, so a volatile number after the same word is still masked:
+//
+//	SQLSTATE            exactly 5 digits (23505, 40001); SQLSTATEs with a
+//	                    letter (42P01, 22P02) are not standalone numbers, so
+//	                    they are never masked and need no rule
+//	error code, errorCode   3 to 5 digits (409, 40401)
+//	HTTP, status, status code, response code (any spelling)
+//	                    3 digits, 100 to 599 (503)
+//	error               5 digits starting 4 or 5 (registry "error 40401")
+func keepNumber(before, digits string) bool {
 	if len(before) > 24 {
 		before = before[len(before)-24:]
 	}
 	look := strings.ToLower(strings.TrimRight(before, " :=\"'[]("))
-	for _, k := range codeKeys {
-		if strings.HasSuffix(look, k) {
+	n := len(digits)
+	switch {
+	case strings.HasSuffix(look, "sqlstate"):
+		return n == 5
+	case strings.HasSuffix(look, "error code"), strings.HasSuffix(look, "error_code"), strings.HasSuffix(look, "errorcode"):
+		return n >= 3 && n <= 5
+	case hasAnySuffix(look, statusKeys), httpVersionEnd(look):
+		return n == 3 && digits[0] >= '1' && digits[0] <= '5'
+	case strings.HasSuffix(look, "error"):
+		return n == 5 && (digits[0] == '4' || digits[0] == '5')
+	}
+	return false
+}
+
+var statusKeys = []string{"status", "http", "status code", "statuscode", "status_code", "response code", "responsecode", "response_code"}
+
+func hasAnySuffix(s string, suffixes []string) bool {
+	for _, x := range suffixes {
+		if strings.HasSuffix(s, x) {
 			return true
 		}
 	}
-	return digits == 3 && strings.Contains(look, "http")
+	return false
+}
+
+// httpVersionEnd reports whether look ends with "http/1.1", "http/2" and the like.
+func httpVersionEnd(look string) bool {
+	i := strings.LastIndex(look, "http/")
+	return i >= 0 && len(look)-i <= 10
 }
 
 // String is the canonical text of the template, one cause per block.
@@ -466,7 +573,22 @@ func (t Template) String() string { return t.canonical(false) }
 // shows only RootFrames frames.
 func (t Template) canonical(forHash bool) string {
 	var b strings.Builder
+	// The root is the last cause that names an exception class, so a trailing
+	// plain log line does not take its place.
+	root := len(t.Causes) - 1
+	for i := root; i >= 0; i-- {
+		if t.Causes[i].Class != "" {
+			root = i
+			break
+		}
+	}
 	for i, c := range t.Causes {
+		// Log lines after the root are left out of the hash: a trace and the
+		// same trace with a trailing log line are one failure. Bare message
+		// lines (ERROR:, Detail:, Hint:) are not log lines and stay.
+		if forHash && i > root && c.Log {
+			continue
+		}
 		if i > 0 {
 			b.WriteString("\nCaused by: ")
 		}
@@ -476,7 +598,7 @@ func (t Template) canonical(forHash bool) string {
 		}
 		b.WriteString(c.Message)
 		frames := c.Frames
-		if forHash && i == len(t.Causes)-1 && len(frames) > RootFrames {
+		if forHash && i == root && len(frames) > RootFrames {
 			frames = frames[:RootFrames]
 		}
 		for _, f := range frames {
