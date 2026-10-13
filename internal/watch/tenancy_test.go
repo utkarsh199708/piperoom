@@ -146,3 +146,77 @@ func TestNilSetClientsAreUnknown(t *testing.T) {
 		t.Fatalf("pa with no client: phase %+v, want unknown (no fire)", sig)
 	}
 }
+
+// TestPerSetDLQTopics: two clusters each have a DLQ topic called shared-dlq.
+// Each set reads its own cluster once per tick and keeps its own ring, so
+// records arriving on cluster A fire pa only, and cluster B's old backlog
+// never looks new.
+func TestPerSetDLQTopics(t *testing.T) {
+	pipe := func(id, tenant, p string) string {
+		return "  - id: " + id + "\n    tenant: " + tenant + "\n    topic_prefix: " + id + "\n    source_tables: [public.t]\n    connectors: [pg-" + id + "]\n    consumer_groups: [g-" + id + "]\n" +
+			"    connections: {source_db_url: {env: " + p + "_SRC}, warehouse_db_url: {env: " + p + "_WH}, kafka_brokers: {env: " + p + "_K}, connect_url: {env: " + p + "_C}, schema_registry_url: {env: " + p + "_SR}}\n" +
+			"    watch:\n      signals:\n        slot_inactive: {enabled: false}\n        slot_wal: {enabled: false}\n" +
+			"      dlq_topics:\n        - {topic: shared-dlq, written_by: g-" + id + "}\n"
+	}
+	path := filepath.Join(t.TempDir(), "owners.yaml")
+	if err := os.WriteFile(path, []byte("tenants:\n  a: {}\n  b: {}\npipelines:\n"+pipe("pa", "a", "A")+pipe("pb", "b", "B")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	own, err := owners.Load(path)
+	if err != nil {
+		t.Fatalf("owners.Load: %v", err)
+	}
+	connA, connB := newFakeConnect(), newFakeConnect()
+	connA.setStatus("pg-pa", running("pg-pa"))
+	connB.setStatus("pg-pb", running("pg-pb"))
+	kafkaA, kafkaB := newFakeKafka(), newFakeKafka()
+	kafkaA.set("shared-dlq", 0, 0)
+	kafkaB.set("shared-dlq", 0, 100) // an old backlog on cluster B
+	sets := map[string]PipelineClients{
+		"pa": {Set: "pipeline pa", Source: &fakeSource{}, Connect: connA, Kafka: kafkaA},
+		"pb": {Set: "pipeline pb", Source: &fakeSource{}, Connect: connB, Kafka: kafkaB},
+	}
+	shared := newFakeKafka()
+	clk, rooms, logs := newFakeClock(), newFakeRooms(), &logBuf{}
+	w, err := New(Deps{
+		Kafka: shared, Owners: own, Rooms: rooms,
+		ClientsFor: func(id string) PipelineClients { return sets[id] },
+		Config:     config.Watch{Mode: config.WatchRooms, Interval: time.Minute, CheckTimeout: 200 * time.Millisecond, Cooldown: time.Hour},
+		Clock:      clk,
+		Log:        slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Jitter:     func(time.Duration) time.Duration { return 0 },
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tick := func() {
+		clk.Advance(time.Minute)
+		w.tick(context.Background())
+	}
+	tick() // baseline on both clusters
+	kafkaA.add("shared-dlq", 3)
+	for range 7 {
+		tick()
+	}
+	created := rooms.created()
+	if len(created) != 1 || created[0].alert.PipelineID != "pa" {
+		t.Fatalf("rooms = %d (%v), want one for pa only\n%s", len(created), created, logs)
+	}
+	if n := len(kafkaA.callLists()); n != 8 {
+		t.Fatalf("cluster A read %d times, want once per tick (8)", n)
+	}
+	if n := len(kafkaB.callLists()); n != 8 {
+		t.Fatalf("cluster B read %d times, want once per tick (8)", n)
+	}
+	if n := len(shared.callLists()); n != 0 {
+		t.Fatalf("the process-wide Kafka client was read %d times", n)
+	}
+	w.mu.Lock()
+	_, a := w.dlqState[dlqStateKey("pipeline pa", "shared-dlq")]
+	_, b := w.dlqState[dlqStateKey("pipeline pb", "shared-dlq")]
+	_, bare := w.dlqState["shared-dlq"]
+	w.mu.Unlock()
+	if !a || !b || bare {
+		t.Fatalf("rings: pa=%v pb=%v bare=%v, want one ring per set", a, b, bare)
+	}
+}

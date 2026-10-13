@@ -71,32 +71,42 @@ func (s *Service) CheckRoomVisible(ctx context.Context, u User, roomID string) e
 	if !s.TenancyOn() {
 		return nil
 	}
-	snap, err := s.GetRoom(ctx, roomID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.checkVisibleLocked(ctx, u, roomID)
+}
+
+// checkVisibleLocked is CheckRoomVisible for a caller that holds s.mu, for
+// example one that has just loaded a row (proposal, hand-off) of roomID. It
+// must run before any answer that depends on the row (409 already decided,
+// 403 not the recipient), so a person outside the tenant learns nothing from
+// it.
+func (s *Service) checkVisibleLocked(ctx context.Context, u User, roomID string) error {
+	if !s.TenancyOn() {
+		return nil
+	}
+	pipelineID, err := s.roomPipelineLocked(ctx, roomID)
 	if err != nil {
 		return err
 	}
-	if !s.CanSeePipeline(u, snap.PipelineID) {
+	if !s.CanSeePipeline(u, pipelineID) {
 		return errHidden()
 	}
 	return nil
 }
 
-// checkVisibleLocked is CheckRoomVisible for a caller that holds s.mu and
-// has just loaded a row (proposal, hand-off) of roomID. It must run before
-// any answer that depends on the row (409 already decided, 403 not the
-// recipient), so a person outside the tenant learns nothing from it.
-func (s *Service) checkVisibleLocked(ctx context.Context, u User, roomID string) error {
-	if !s.TenancyOn() {
-		return nil
+// roomPipelineLocked returns a room's pipeline id from the cache, else from
+// its rooms row: no snapshot is cloned or rebuilt for a visibility check. A
+// missing room is the 404 of mapStoreErr. Caller must hold s.mu.
+func (s *Service) roomPipelineLocked(ctx context.Context, roomID string) (string, error) {
+	if st, ok := s.rooms[roomID]; ok {
+		return st.snap.PipelineID, nil
 	}
-	st, err := s.getStateLocked(ctx, roomID)
+	row, err := s.store.GetRoom(ctx, roomID)
 	if err != nil {
-		return err
+		return "", mapStoreErr(err)
 	}
-	if !s.CanSeePipeline(u, st.snap.PipelineID) {
-		return errHidden()
-	}
-	return nil
+	return row.PipelineID, nil
 }
 
 // checkTargetVisible refuses to give control or a hand-off to a person who

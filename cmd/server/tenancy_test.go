@@ -59,6 +59,14 @@ type stubSource struct{ clients.SourceDB }
 
 type stubConnect struct{ clients.ConnectClient }
 
+type stubKafka struct{ clients.KafkaAdmin }
+
+// stubDLQKafka is a Kafka client that can also read DLQ offsets.
+type stubDLQKafka struct {
+	clients.KafkaAdmin
+	clients.DLQReader
+}
+
 type fakeFinder map[string]*wiring.Stack
 
 func (f fakeFinder) For(id string) *wiring.Stack {
@@ -74,10 +82,13 @@ func TestStackAdapters(t *testing.T) {
 	// Only identity is compared; no method is called.
 	srcA := &stubSource{}
 	connA := &stubConnect{}
+	kafkaA := &stubDLQKafka{}
 	a := &wiring.Stack{Name: "pipeline pa", Tools: tools.NewRegistry(), Actions: actions.NewRegistry(),
-		Clients: &wiring.Wired{Source: srcA, Connect: connA}}
+		Clients: &wiring.Wired{Source: srcA, Connect: connA, Kafka: kafkaA}}
+	b := &wiring.Stack{Name: "pipeline pb", Tools: tools.NewRegistry(), Actions: actions.NewRegistry(),
+		Clients: &wiring.Wired{Source: &stubSource{}, Connect: &stubConnect{}, Kafka: &stubKafka{}}}
 	none := &wiring.Stack{Name: wiring.NoStack, Tools: tools.NewRegistry(), Actions: actions.NewRegistry()}
-	f := fakeFinder{"pa": a, "": none}
+	f := fakeFinder{"pa": a, "pb": b, "": none}
 
 	rs := roomStacks(f)
 	if got := rs("pa"); got.Tools != a.Tools || got.Actions != a.Actions {
@@ -87,10 +98,13 @@ func TestStackAdapters(t *testing.T) {
 		t.Fatal("room adapter: unknown pipeline must get the fallback set")
 	}
 	wc := watchClients(f)
-	if got := wc("pa"); got.Set != "pipeline pa" || got.Source != srcA || got.Connect != connA {
+	if got := wc("pa"); got.Set != "pipeline pa" || got.Source != srcA || got.Connect != connA || got.Kafka != kafkaA {
 		t.Fatalf("watch adapter pa = %+v", got)
 	}
-	if got := wc("zz"); got.Set != wiring.NoStack || got.Source != nil || got.Connect != nil {
+	if got := wc("pb"); got.Set != "pipeline pb" || got.Kafka != nil {
+		t.Fatalf("watch adapter pb = %+v, want no DLQ reader for a Kafka client without one", got)
+	}
+	if got := wc("zz"); got.Set != wiring.NoStack || got.Source != nil || got.Connect != nil || got.Kafka != nil {
 		t.Fatalf("watch adapter on the empty set = %+v, want no clients", got)
 	}
 }

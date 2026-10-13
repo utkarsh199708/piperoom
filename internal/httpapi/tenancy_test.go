@@ -133,6 +133,7 @@ type fixture struct {
 	proposal    string // an executed proposal of rb
 	open        string // an open proposal of rb
 	handoff     string // a pending hand-off of rb, to ben
+	voided      string // an older hand-off of rb, voided by handoff
 }
 
 func (e *tenancyEnv) build(t *testing.T) fixture {
@@ -156,21 +157,25 @@ func (e *tenancyEnv) build(t *testing.T) fixture {
 		`{"layer":"kafka-connect","params_hash":"`+hashOfOpen(t, e.svc, f.proposal)+`"}`, http.StatusOK)
 	f.open = newProposal()
 
+	// Two hand-offs to ben: the second voids the first.
+	e.mustDo(t, "bob", http.MethodPost, "/api/rooms/"+f.rb+"/handoffs", `{"to":"ben"}`, http.StatusOK)
 	e.mustDo(t, "bob", http.MethodPost, "/api/rooms/"+f.rb+"/handoffs", `{"to":"ben"}`, http.StatusOK)
 	evs, _, err := e.svc.Events(context.Background(), f.rb, 0, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
+	var hids []string
 	for _, ev := range evs {
 		if ev.Type == events.HandoffCreated {
 			var p events.HandoffCreatedPayload
 			_ = json.Unmarshal(ev.Payload, &p)
-			f.handoff = p.HandoffID
+			hids = append(hids, p.HandoffID)
 		}
 	}
-	if f.handoff == "" {
-		t.Fatal("no hand-off")
+	if len(hids) != 2 {
+		t.Fatalf("hand-offs = %v", hids)
 	}
+	f.voided, f.handoff = hids[0], hids[1]
 
 	// A closed shadow room in tenant b (dev webhook as bob).
 	f.rbs = decodeID(t, e.mustDo(t, "bob", http.MethodPost, "/api/alerts/webhook", `{"title":"s","pipeline_id":"pbs"}`, http.StatusCreated))
@@ -191,8 +196,8 @@ func decodeID(t *testing.T, body string) string {
 }
 
 // hiddenRoutes are every route that names a room, proposal, hand-off or
-// pipeline, filled with tenant b's objects. TestTenantRoutesCovered fails when
-// a new route with an id is added without a line here.
+// pipeline, filled with tenant b's objects. TestTenantRoutesClassified fails
+// when a new route with an id is added without a line here.
 func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 	return []struct{ method, pattern, path, body string }{
 		{"GET", "/api/rooms/{id}", "/api/rooms/" + f.rb, ""},
@@ -217,29 +222,53 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 	}
 }
 
-// TestTenantRoutesCovered walks the router: every route that takes a room,
-// proposal, hand-off or pipeline id must be in hiddenRoutes.
-func TestTenantRoutesCovered(t *testing.T) {
+// aggregateRoutes return or act on several pipelines' objects; each filters by
+// tenant and has its own test here (TestRoomListAndMetricsAreFiltered,
+// TestCreateAndAlertRoutingRespectTenants).
+var aggregateRoutes = []string{
+	"GET /api/rooms",
+	"GET /api/shadow/metrics",
+	"POST /api/rooms",
+	"POST /api/alerts/webhook",
+	"POST /api/alerts/{source}",
+}
+
+// publicRoutes hold no tenant's data: probes, login, the caller's own
+// identity, and the people list (global by design: docs/design/tenancy.md
+// section 8).
+var publicRoutes = []string{
+	"GET /healthz",
+	"GET /readyz",
+	"POST /auth/logout",
+	"POST /auth/dev-login",
+	"GET /api/me",
+	"GET /api/people",
+}
+
+// TestTenantRoutesClassified walks the router: every route must be a room-id
+// route (hiddenRoutes), an aggregate that filters by tenant, or public. A new
+// route of any kind fails here until someone decides which it is.
+func TestTenantRoutesClassified(t *testing.T) {
 	e := newTenancyEnv(t, true)
-	covered := map[string]bool{}
+	known := map[string]bool{}
 	for _, r := range hiddenRoutes(fixture{}) {
-		covered[r.method+" "+r.pattern] = true
+		known[r.method+" "+r.pattern] = true
+	}
+	for _, r := range slices.Concat(aggregateRoutes, publicRoutes) {
+		known[r] = true
 	}
 	table := httpapi.RouteTable(e.api)
-	if !slices.Contains(table, "GET /api/rooms/{id}/ws") || !slices.Contains(table, "POST /api/handoffs/{hid}/accept") {
+	if !slices.Contains(table, "GET /api/rooms/{id}/ws") || !slices.Contains(table, "POST /api/handoffs/{hid}/accept") || !slices.Contains(table, "GET /healthz") {
 		t.Fatalf("route table looks wrong: %v", table)
 	}
 	var missing []string
 	for _, r := range table {
-		if !strings.Contains(r, "{") || strings.Contains(r, "{source}") || strings.HasSuffix(r, "/*") {
-			continue
-		}
-		if !covered[r] {
+		if !known[r] {
 			missing = append(missing, r)
 		}
 	}
 	if len(missing) > 0 {
-		t.Fatalf("routes with an id and no tenant case: %v", missing)
+		t.Fatalf("routes not classified as room-id, aggregate or public: %v", missing)
 	}
 }
 
@@ -264,14 +293,30 @@ func TestOtherTenantGets404Everywhere(t *testing.T) {
 		}
 	}
 
-	// The proposal that is already decided is still 404, not 409.
-	status, _ := e.do(t, "alice", http.MethodPost, "/api/proposals/"+f.proposal+"/approve", `{"layer":"kafka-connect","params_hash":"x"}`)
-	if status != http.StatusNotFound {
-		t.Fatalf("decided proposal as alice: %d, want 404", status)
+	// The proposal that is already decided is still 404, not 409, for
+	// approve and reject, with the body of a proposal that does not exist.
+	for _, verb := range []string{"approve", "reject"} {
+		body := `{"layer":"kafka-connect","reason":"no","params_hash":"x"}`
+		_, missing := e.do(t, "alice", http.MethodPost, "/api/proposals/p_nope/"+verb, body)
+		for _, pid := range []string{f.proposal, f.open} {
+			status, got := e.do(t, "alice", http.MethodPost, "/api/proposals/"+pid+"/"+verb, body)
+			if status != http.StatusNotFound || got != missing {
+				t.Fatalf("%s %s as alice: %d %s, want the missing proposal's 404 %s", verb, pid, status, got, missing)
+			}
+		}
 	}
-	_, missingProposal := e.do(t, "alice", http.MethodPost, "/api/proposals/p_nope/approve", `{"layer":"kafka-connect","params_hash":"x"}`)
-	if _, got := e.do(t, "alice", http.MethodPost, "/api/proposals/"+f.open+"/approve", `{"layer":"kafka-connect","params_hash":"x"}`); got != missingProposal {
-		t.Fatalf("hidden proposal body %s, missing proposal body %s", got, missingProposal)
+	// A voided hand-off is 404 too, not 409 stale_handoff.
+	_, missingHandoff := e.do(t, "alice", http.MethodPost, "/api/handoffs/h_nope/accept", "")
+	if status, got := e.do(t, "alice", http.MethodPost, "/api/handoffs/"+f.voided+"/accept", ""); status != http.StatusNotFound || got != missingHandoff {
+		t.Fatalf("voided hand-off as alice: %d %s, want %s", status, got, missingHandoff)
+	}
+	if status, _ := e.do(t, "ben", http.MethodPost, "/api/handoffs/"+f.voided+"/accept", ""); status != http.StatusConflict {
+		t.Fatalf("voided hand-off as ben: %d, want 409 for a member", status)
+	}
+	// The topology of a hidden pipeline answers exactly as an unknown one.
+	_, missingPipeline := e.do(t, "alice", "GET", "/api/pipelines/nope/topology", "")
+	if status, got := e.do(t, "alice", "GET", "/api/pipelines/pb/topology", ""); status != http.StatusNotFound || got != missingPipeline {
+		t.Fatalf("topology of pb as alice: %d %s, want the unknown pipeline's %s", status, got, missingPipeline)
 	}
 
 	// WebSocket: refused before the upgrade for alice, accepted for ben.
@@ -298,6 +343,10 @@ func TestOtherTenantGets404Everywhere(t *testing.T) {
 		t.Fatal("bob must reach the shadow room (409 not_labelled is fine, 404 is not)")
 	}
 	e.mustDo(t, "ben", http.MethodPost, "/api/handoffs/"+f.handoff+"/accept", "", http.StatusOK)
+	// An accepted hand-off is 404 for alice, not 409 already_decided.
+	if status, got := e.do(t, "alice", http.MethodPost, "/api/handoffs/"+f.handoff+"/accept", ""); status != http.StatusNotFound || got != missingHandoff {
+		t.Fatalf("accepted hand-off as alice: %d %s, want %s", status, got, missingHandoff)
+	}
 	// alice's own room is fine.
 	e.mustDo(t, "alice", "GET", "/api/rooms/"+f.ra, "", http.StatusOK)
 }

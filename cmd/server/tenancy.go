@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
@@ -84,6 +85,11 @@ func watchClients(st stackFinder) func(pipelineID string) watch.PipelineClients 
 		pc := watch.PipelineClients{Set: s.Name}
 		if s.Clients != nil {
 			pc.Source, pc.Connect = s.Clients.Source, s.Clients.Connect
+			// dlq_growth needs DLQ offsets; a Kafka client without them leaves
+			// the signal off for this set (watch.Deps.Kafka).
+			if r, ok := s.Clients.Kafka.(clients.DLQReader); ok {
+				pc.Kafka = r
+			}
 		}
 		return pc
 	}
