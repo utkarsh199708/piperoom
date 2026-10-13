@@ -203,6 +203,8 @@ func TestShadowGradeBeforeRevealOverHTTP(t *testing.T) {
 	wantStatus(t, doJSON(t, http.MethodPost, path+"/control/grant", "arjun", `{"to":"arjun"}`), http.StatusOK)
 	wantStatus(t, doJSON(t, http.MethodPost, path+"/close", "arjun", `{"resolution":"schema change"}`), http.StatusOK)
 	wantStatus(t, doJSON(t, http.MethodPost, path+"/shadow/blind", "kabir", `{"actual_layer":"kafka-connect","root_cause_terms":["schema"]}`), http.StatusOK)
+	// Only the grade waits for the reveal: reading the run is allowed once labelled.
+	wantStatus(t, doJSON(t, http.MethodGet, path+"/shadow", "kabir", ""), http.StatusOK)
 	wantErr(t, doJSON(t, http.MethodPost, path+"/shadow/grade", "kabir", `{"layer_correct":true,"root_cause":"yes"}`), http.StatusConflict, "not_revealed")
 
 	close(release)

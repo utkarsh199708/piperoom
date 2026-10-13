@@ -430,7 +430,7 @@ func errNotLabelled() *Error {
 }
 
 func errNotRevealed() *Error {
-	return &Error{Status: 409, Code: "not_revealed", Msg: "the shadow run is not revealed yet"}
+	return &Error{Status: 409, Code: "not_revealed", Msg: "the shadow run is not revealed yet: it is still going in its grace period; grade it after shadow.revealed"}
 }
 
 func errShadowNotAllowed() *Error {
@@ -515,7 +515,10 @@ func (s *Service) ShadowLabel(ctx context.Context, user User, roomID, actualLaye
 }
 
 // ShadowGrade records a grade of the revealed run (POST
-// /api/rooms/{id}/shadow/grade). Re-grading appends another; the last wins.
+// /api/rooms/{id}/shadow/grade): a closed, labelled and revealed shadow room
+// only (409 not_labelled, 409 not_revealed), because a run still going in its
+// grace period can change its hypothesis. Re-grading appends another; the last
+// wins.
 func (s *Service) ShadowGrade(ctx context.Context, user User, roomID string, layerCorrect bool, rootCause, notes string) (events.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
