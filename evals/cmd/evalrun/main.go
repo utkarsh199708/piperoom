@@ -90,7 +90,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.IntVar(&f.maxTurns, "max-turns", 0, "agent max turns per episode (default 40)")
 	fs.StringVar(&f.label, "label", "", "name for this configuration in the report, e.g. main or prompt-v2")
 	fs.StringVar(&f.judge, "judge", "", `how root cause and layer are judged: "terms" (deterministic) or "claude" (LLM judge, needs a -tags claude build); default: each scenario's judge field, else terms`)
-	fs.StringVar(&f.judgeModel, "judge-model", "", "model for -judge claude (default claude-sonnet-5-5)")
+	fs.StringVar(&f.judgeModel, "judge-model", "", "model for -judge claude (default: the configured model, PIPEROOM_MODEL)")
 	fs.StringVar(&f.out, "out", "", "write the JSON report here")
 	fs.StringVar(&f.md, "md", "", "also write the markdown table here")
 	fs.StringVar(&f.transcripts, "transcripts", "", "write each run's full transcript and result as JSON into this directory")

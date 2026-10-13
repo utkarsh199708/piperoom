@@ -161,7 +161,7 @@ recordings:
 
 expect:
   root_cause:
-    - [amount]
+    - [amount*]
     - [numeric, decimal, bytes]
     - [schema registry, registry, avro, compatib*, "409"]
   first_failing_layer: kafka-connect

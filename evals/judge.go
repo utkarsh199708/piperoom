@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"piperoom/internal/events"
@@ -105,33 +106,45 @@ func judgePrompt(sc Scenario, hypothesis string) string {
 	return b.String()
 }
 
+// verificationTag matches the room's verification tag in any letter case.
+var verificationTag = regexp.MustCompile(`(?i)\[verification\]`)
+
 // wrapUntrusted marks text as untrusted data in the same form the agent's own
-// prompts use (internal/agent wrapUntrusted, unexported there): & < > are
-// escaped so the text cannot close the wrapper, and invisible or look-alike
-// characters become visible {U+XXXX} markers.
+// prompts use. It is a copy of internal/agent wrapUntrusted/escapeToolText
+// (prompt.go), which is unexported and owned by A4: invisible and look-alike
+// characters become visible {U+XXXX} markers, & < > are escaped so the text
+// cannot close the wrapper, and a "[verification]" tag is neutralised.
+// Follow-up for A4: export agent.WrapUntrusted and delete this copy.
 func wrapUntrusted(text string) string {
 	var b strings.Builder
 	for _, r := range text {
-		switch {
-		case r == '&':
-			b.WriteString("&amp;")
-		case r == '<':
-			b.WriteString("&lt;")
-		case r == '>':
-			b.WriteString("&gt;")
-		case invisibleOrLookalike(r):
+		if lookalikeBracket(r) || invisibleRune(r) {
 			fmt.Fprintf(&b, "{U+%04X}", r)
-		default:
-			b.WriteRune(r)
+			continue
 		}
+		b.WriteRune(r)
 	}
-	return "<untrusted>" + b.String() + "</untrusted>"
+	s := strings.ReplaceAll(b.String(), "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = verificationTag.ReplaceAllString(s, "(verification)")
+	return "<untrusted>" + s + "</untrusted>"
 }
 
-func invisibleOrLookalike(r rune) bool {
+// lookalikeBracket reports the fullwidth square and angle brackets.
+func lookalikeBracket(r rune) bool {
 	switch r {
-	case 0xFF3B, 0xFF3D, 0xFF1C, 0xFF1E, // fullwidth [ ] < >
-		0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD:
+	case 0xFF3B, 0xFF3D, 0xFF1C, 0xFF1E:
+		return true
+	}
+	return false
+}
+
+// invisibleRune reports characters that show nothing or reorder the text
+// around them (same set as internal/agent).
+func invisibleRune(r rune) bool {
+	switch r {
+	case 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, 0x180E, 0xFE0F:
 		return true
 	}
 	return (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)

@@ -86,6 +86,46 @@ func TestRootCauseForbidden(t *testing.T) {
 	}
 }
 
+// TestForbiddenClausesAndNegation: a row fires only when all its terms are in
+// one clause, and a negated clause is skipped.
+func TestForbiddenClausesAndNegation(t *testing.T) {
+	rows := [][]string{{"reset*", "latest"}}
+	tests := []struct {
+		text string
+		want bool // true = the forbidden story is told
+	}{
+		{"Reset the group to latest.", true},
+		{"The fix: reset order-sync to latest", true},
+		{"Resetting to latest skips the backlog", true},
+		{"RESET TO LATEST", true},
+		{"Do NOT reset the group to latest.", false},
+		{"Do not reset the group to latest: it skips unread changes.", false},
+		{"Never reset to latest.", false},
+		{"Avoid resetting the group to latest.", false},
+		{"Instead of resetting to latest, move partition 1 past the record.", false},
+		{"Rather than reset to latest, skip one offset.", false},
+		{"Don't reset the offsets to latest.", false},
+		{"Resetting to latest is not an option.", false},
+		{"Reset without going to latest.", false},
+		{"A reset to latest is advised against.", false},
+		{"Reset offsets for partition 1 only; the latest schema id 2 is fine.", false},
+		{"Reset offsets for partition 1 only. The latest schema id 2 is fine.", false},
+		{"Reset partition 1\nthe latest schema is fine", false},
+		{"pg.public.orders latest offsets are fine; reset partition 1.", false},
+		{"Do not reset to latest; actually, reset to latest anyway.", true}, // told again in a clause with no negator
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := matchForbidden(rows, tt.text); got != tt.want {
+			t.Errorf("matchForbidden(%q) = %v, want %v", tt.text, got, tt.want)
+		}
+	}
+	// A dotted identifier is not a sentence end.
+	if got := matchForbidden([][]string{{"orders", "latest"}}, "pg.public.orders is at the latest offset"); !got {
+		t.Error("pg.public.orders was split into clauses")
+	}
+}
+
 func TestJudgeFlagsForbiddenStory(t *testing.T) {
 	sc := loadSeed()
 	sc.Expect.RootCauseForbidden = [][]string{{"bulk import"}}
@@ -110,6 +150,8 @@ func TestValidateRootCauseForbiddenAndJudge(t *testing.T) {
 		"blank term":     func(s *Scenario) { s.Expect.RootCauseForbidden = [][]string{{" "}} },
 		"bad star":       func(s *Scenario) { s.Expect.RootCauseForbidden = [][]string{{"a*b"}} },
 		"bad star in rc": func(s *Scenario) { s.Expect.RootCause = [][]string{{"*"}} },
+		"camelCase":      func(s *Scenario) { s.Expect.RootCause = [][]string{{"LeaveGroup"}} },
+		"digit-joined":   func(s *Scenario) { s.Expect.RootCause = [][]string{{"22P02"}} },
 		"bad judge":      func(s *Scenario) { s.Judge = "gpt" },
 	} {
 		sc := loadSeed()
@@ -169,7 +211,7 @@ var legacyTerms = map[string][][]string{
 // alert and pipeline map: what the agent was handed, handed back.
 var hypotheses = map[string]struct{ good, wrong string }{
 	"consumer-poison-pill": {
-		good:  "order-sync is stuck on a poison pill: the record at offset 25377154 on partition 1 of pg.public.orders is not Avro (no magic byte), so deserialization fails on every restart. Connect is healthy.",
+		good:  "order-sync is stuck on a poison pill: the record at offset 25377154 on partition 1 of pg.public.orders is not Avro (no magic byte), so deserialization fails on every restart. Connect is healthy. Do not reset the group to latest: that skips every partition's unread changes.",
 		wrong: "order-sync is stuck on partition 1 after a bad deploy; reset the group to latest to skip the backlog.",
 	},
 	"publication-permission-denied": {
@@ -213,10 +255,13 @@ func TestScoringOldVsNew(t *testing.T) {
 		return "fail"
 	}
 	for _, sc := range scs {
-		old, ok := legacyTerms[sc.Name]
-		h, ok2 := hypotheses[sc.Name]
-		if !ok || !ok2 {
-			t.Errorf("scenario %q has no legacy terms or hypotheses in this table; add them", sc.Name)
+		// legacyTerms exist only for scenarios migrated by N2; a scenario added
+		// later has no old terms and shows "n/a" for the old matcher. Its
+		// good/wrong texts are required: add them to hypotheses.
+		old, hasOld := legacyTerms[sc.Name]
+		h, ok := hypotheses[sc.Name]
+		if !ok {
+			t.Errorf("scenario %q has no good/wrong hypotheses in this test; add an entry to hypotheses", sc.Name)
 			continue
 		}
 		texts := []struct{ kind, text string }{
@@ -226,12 +271,16 @@ func TestScoringOldVsNew(t *testing.T) {
 			{"wrong-cause", h.wrong},
 		}
 		for _, tx := range texts {
-			o := legacyMatch(old, tx.text)
+			o := hasOld && legacyMatch(old, tx.text)
 			n := rootCauseMatches(sc.Expect, tx.text)
-			fmt.Fprintf(&tab, "| %s | %s | %s | %s |\n", sc.Name, tx.kind, mark(o), mark(n))
+			oldMark := "n/a"
+			if hasOld {
+				oldMark = mark(o)
+			}
+			fmt.Fprintf(&tab, "| %s | %s | %s | %s |\n", sc.Name, tx.kind, oldMark, mark(n))
 			switch tx.kind {
 			case "good":
-				if !o {
+				if hasOld && !o {
 					t.Errorf("%s: test fixture: good text fails the OLD matcher", sc.Name)
 				}
 				if !n {

@@ -3,6 +3,7 @@ package evals
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -273,22 +274,51 @@ func matchGroups(groups [][]string, text string) bool {
 	return true
 }
 
-// matchForbidden reports whether text tells one of the forbidden stories: a
-// row matches when every one of its terms occurs. No rows never match.
+// clauseSplit cuts text into clauses at ; ! ? newlines and at a full stop
+// followed by space or the end, so "pg.public.orders" stays whole.
+var clauseSplit = regexp.MustCompile(`[;!?\n]|\.(\s|$)`)
+
+// negators mark a clause as advice against, or a denial of, whatever else it
+// says: "do NOT reset to latest", "never reset", "avoid resetting", "instead of
+// resetting", "rather than", "against". "t" is the tail of a contraction
+// (don't -> don t). They are matched like terms, so "avoid*" is a prefix.
+var negators = []string{"not", "never", "no", "avoid*", "without", "t", "instead of", "rather than", "against"}
+
+// matchForbidden reports whether text tells one of the forbidden stories. A
+// row fires only when all its terms occur in one clause, and a clause with a
+// negator is skipped: a correct agent that writes "Do not reset the group to
+// latest" or "reset partition 1 only; the latest schema id is fine" has not
+// told the story. No rows never match. A story that is negated in a clause and
+// told again in another clause still fires.
 func matchForbidden(rows [][]string, text string) bool {
-	toks := tokenize(text)
-	for _, row := range rows {
-		if len(row) == 0 {
+	for _, clause := range clauseSplit.Split(text, -1) {
+		toks := tokenize(clause)
+		if len(toks) == 0 || negated(toks) {
 			continue
 		}
-		all := true
-		for _, term := range row {
-			if !matchTerm(toks, term) {
-				all = false
-				break
+		for _, row := range rows {
+			if len(row) == 0 {
+				continue
+			}
+			all := true
+			for _, term := range row {
+				if !matchTerm(toks, term) {
+					all = false
+					break
+				}
+			}
+			if all {
+				return true
 			}
 		}
-		if all {
+	}
+	return false
+}
+
+// negated reports whether the clause's tokens contain a negator.
+func negated(toks []string) bool {
+	for _, n := range negators {
+		if matchTerm(toks, n) {
 			return true
 		}
 	}
@@ -301,7 +331,9 @@ func rootCauseMatches(e Expect, text string) bool {
 	return matchGroups(e.RootCause, text) && !matchForbidden(e.RootCauseForbidden, text)
 }
 
-// tokenize lowercases text and splits it into words: on every character that
+// tokenize lowercases text and splits it into words (zero-width and other
+// invisible characters are not letters, so they split a word like any
+// punctuation; "res<ZWSP>et" is two words and matches nothing): on every character that
 // is not a letter or digit, between a lower-case letter or digit and an
 // upper-case letter (PreparingRebalance -> preparing rebalance), and before
 // the last capital of an acronym (HTTPServer -> http server). Digits stay

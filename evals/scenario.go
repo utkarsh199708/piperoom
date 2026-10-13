@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -106,6 +107,13 @@ type Input struct {
 // words "preparing" and "rebalance". A term ending in "*" matches a word prefix
 // ("rebalanc*" matches rebalance, rebalancing, PreparingRebalance); without it
 // "rebalanc" matches nothing. A multi-word term must occur as consecutive words.
+// Write terms lower-case with spaces ("leave group", not "LeaveGroup"; "22p02"
+// is one word, "22P02" is rejected by validation).
+//
+// Forbidden rows are matched clause by clause: all terms of a row must sit in
+// one clause (split at ; ! ? newline and ". "), and a clause with a negator
+// (not, never, no, avoid*, without, n't, instead of, rather than, against) is
+// skipped, so "do not reset to latest" does not fire [reset*, latest].
 type Expect struct {
 	// RootCause term groups must all appear in the agent's final hypothesis.
 	RootCause [][]string `yaml:"root_cause"`
@@ -329,8 +337,14 @@ func checkGroups(field string, groups [][]string, known []string) []error {
 				errs = append(errs, fmt.Errorf("%s[%d]: unknown action %q", field, i, term))
 			} else if known == nil {
 				// Text terms: "*" only as the last character, and at least one word.
-				if _, _, ok := termTokens(term); !ok {
+				toks, _, ok := termTokens(term)
+				if !ok {
 					errs = append(errs, fmt.Errorf("%s[%d]: term %q has no words or a \"*\" that is not the last character", field, i, term))
+				} else if !reflect.DeepEqual(toks, tokenize(strings.ToLower(strings.TrimSuffix(strings.TrimSpace(term), "*")))) {
+					// Text is matched lower-cased then split, so a camelCase or
+					// digit-joined term (22P02, HTTP409, leaveGroup) would
+					// never be seen as the words its tokens claim.
+					errs = append(errs, fmt.Errorf("%s[%d]: term %q splits differently once lower-cased; write it lower-case with spaces", field, i, term))
 				}
 			}
 		}
