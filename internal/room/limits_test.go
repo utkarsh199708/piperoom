@@ -298,6 +298,63 @@ func TestOpenLimitSurvivesRestart(t *testing.T) {
 	wantCode(t, err, "already_extended")
 }
 
+// TestOpenLimitAlwaysWarnsADayAhead: a room already past its deadline when
+// the limit first looks (the limit was just turned on) is warned with a close
+// time 24 h out and closed only then, never at once.
+func TestOpenLimitAlwaysWarnsADayAhead(t *testing.T) {
+	e := newLimitsEnv(t, config.Limits{MaxOpenDays: 14})
+	ctx := context.Background()
+	snap := createRoom(t, e.svc, "arjun")
+	e.clock.Advance(30 * 24 * time.Hour) // long past the 14-day deadline
+	warnedAt := e.clock.Now()
+	if res, _ := e.svc.EnforceOpenLimit(ctx); res.Warned != 1 || res.Closed != 0 {
+		t.Fatalf("first pass past the deadline: %+v, want a warning and no close", res)
+	}
+	w, _ := events.Decode[events.RoomRetentionWarningPayload](typedEvents(t, e.st, snap.ID, events.RoomRetentionWarning)[0])
+	if !w.CloseAt.Equal(warnedAt.Add(24 * time.Hour)) {
+		t.Fatalf("warning close_at = %v, want %v", w.CloseAt, warnedAt.Add(24*time.Hour))
+	}
+	if got, _ := e.svc.GetRoom(ctx, snap.ID); got.AutoCloseAt == nil || !got.AutoCloseAt.Equal(w.CloseAt) {
+		t.Fatalf("auto_close_at = %v, want the warned close %v", got.AutoCloseAt, w.CloseAt)
+	}
+	e.clock.Advance(24*time.Hour - time.Second)
+	if res, _ := e.svc.EnforceOpenLimit(ctx); res != (room.OpenLimitResult{}) {
+		t.Fatalf("before the warned close: %+v", res)
+	}
+	e.clock.Advance(time.Second)
+	if res, _ := e.svc.EnforceOpenLimit(ctx); res.Closed != 1 {
+		t.Fatalf("at the warned close: %+v", res)
+	}
+	if got, _ := e.svc.GetRoom(ctx, snap.ID); got.Resolution != "retention: open longer than 31 days" {
+		t.Fatalf("resolution = %q", got.Resolution)
+	}
+}
+
+// TestExtendAfterLateWarning: the extension counts from the close time the
+// room shows, not from the old nominal deadline.
+func TestExtendAfterLateWarning(t *testing.T) {
+	e := newLimitsEnv(t, config.Limits{MaxOpenDays: 14})
+	ctx := context.Background()
+	snap := createRoom(t, e.svc, "arjun")
+	e.clock.Advance(30 * 24 * time.Hour)
+	if res, _ := e.svc.EnforceOpenLimit(ctx); res.Warned != 1 {
+		t.Fatalf("warning: %+v", res)
+	}
+	shown, _ := e.svc.GetRoom(ctx, snap.ID)
+	ev, err := e.svc.ExtendRoom(ctx, mustUser(t, e.svc, "arjun"), snap.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := events.Decode[events.RoomExtendedPayload](ev)
+	if want := shown.AutoCloseAt.AddDate(0, 0, 14); !p.CloseAt.Equal(want) {
+		t.Fatalf("extended close_at = %v, want %v", p.CloseAt, want)
+	}
+	e.clock.Advance(2 * 24 * time.Hour)
+	if res, _ := e.svc.EnforceOpenLimit(ctx); res.Closed != 0 {
+		t.Fatalf("closed after the extension: %+v", res)
+	}
+}
+
 func TestOpenLimitOff(t *testing.T) {
 	e := newLimitsEnv(t, config.Limits{})
 	ctx := context.Background()

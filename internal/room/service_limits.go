@@ -100,24 +100,45 @@ func (s *Service) logFullLocked(ctx context.Context, st *roomState, roomID strin
 	s.log.Warn("room: log full; agent stopped", "room", roomID, "events", u.Events, "bytes", u.Bytes)
 }
 
-// deadline is when the open-room limit closes the room: opened_at plus
-// PIPEROOM_MAX_OPEN_DAYS, or the room.extended deadline. ok is false when the
-// limit is off or the room is not open.
-func (s *Service) deadline(snap RoomSnapshot) (time.Time, bool) {
+// openDeadline is the open-room limit's view of a room.
+type openDeadline struct {
+	// due is opened_at plus PIPEROOM_MAX_OPEN_DAYS, or the room.extended
+	// deadline.
+	due time.Time
+	// warned is true when a room.retention_warning covers due: its close_at
+	// is due or later.
+	warned bool
+	// closeAt is when the room is closed: the warned close_at, which is never
+	// less than 24 h after the warning, or due while no warning was given.
+	closeAt time.Time
+}
+
+// deadline returns the room's open-room deadline. ok is false when the limit
+// is off or the room is not open. A room is never closed less than 24 h after
+// its warning: a room that is already past due when the limit first sees it
+// (the limit was just turned on, or lowered) is warned now and closed a day
+// later.
+func (s *Service) deadline(snap RoomSnapshot) (openDeadline, bool) {
 	n := s.limits.MaxOpenDays
 	if n <= 0 || snap.Status != "open" || snap.OpenedAt.IsZero() {
-		return time.Time{}, false
+		return openDeadline{}, false
 	}
+	d := openDeadline{due: snap.OpenedAt.UTC().AddDate(0, 0, n)}
 	if snap.extendedUntil != nil {
-		return snap.extendedUntil.UTC(), true
+		d.due = snap.extendedUntil.UTC()
 	}
-	return snap.OpenedAt.UTC().AddDate(0, 0, n), true
+	d.closeAt = d.due
+	if w := snap.warnedFor; w != nil && !w.Before(d.due) {
+		d.warned, d.closeAt = true, w.UTC()
+	}
+	return d, true
 }
 
 // setDeadline fills snapshot.auto_close_at.
 func (s *Service) setDeadline(snap *RoomSnapshot) {
 	if d, ok := s.deadline(*snap); ok {
-		snap.AutoCloseAt = &d
+		at := d.closeAt
+		snap.AutoCloseAt = &at
 		return
 	}
 	snap.AutoCloseAt = nil
@@ -162,15 +183,22 @@ func (s *Service) EnforceOpenLimit(ctx context.Context) (OpenLimitResult, error)
 		if !ok {
 			continue
 		}
-		if !now.Before(d) {
-			expired = append(expired, id)
+		if d.warned {
+			if !now.Before(d.closeAt) {
+				expired = append(expired, id)
+			}
 			continue
 		}
-		if now.Before(d.Add(-retentionWarnLead)) || (st.snap.warnedFor != nil && st.snap.warnedFor.Equal(d)) {
+		if now.Before(d.due.Add(-retentionWarnLead)) {
 			continue
+		}
+		// The warning names the close time, which is at least 24 h away.
+		closeAt := d.due
+		if lead := now.Add(retentionWarnLead); closeAt.Before(lead) {
+			closeAt = lead
 		}
 		if _, err := s.emitLocked(ctx, st, id, events.RoomRetentionWarning, systemActor, events.RoomRetentionWarningPayload{
-			CloseAt: d, OpenDays: openDays(st.snap.OpenedAt, d),
+			CloseAt: closeAt, OpenDays: openDays(st.snap.OpenedAt, closeAt),
 		}); err != nil {
 			s.log.Warn("room: retention warning failed", "room", id, "err", err)
 			res.Failed++
@@ -184,12 +212,15 @@ func (s *Service) EnforceOpenLimit(ctx context.Context) (OpenLimitResult, error)
 		if err := ctx.Err(); err != nil {
 			return res, fmt.Errorf("room: open-room limit: %w", err)
 		}
-		if err := s.autoClose(ctx, id, now); err != nil {
+		closed, err := s.autoClose(ctx, id, now)
+		if err != nil {
 			s.log.Warn("room: open-room limit could not close a room", "room", id, "err", err)
 			res.Failed++
 			continue
 		}
-		res.Closed++
+		if closed {
+			res.Closed++
+		}
 	}
 	return res, nil
 }
@@ -199,26 +230,25 @@ func openDays(opened, deadline time.Time) int {
 	return int((deadline.Sub(opened) + 12*time.Hour) / (24 * time.Hour))
 }
 
-// autoClose closes a room past its deadline as the system actor. The check
-// runs again under the lock: an extension or a close may have happened since
-// the scan.
-func (s *Service) autoClose(ctx context.Context, roomID string, now time.Time) error {
-	var resolution string
-	_, err := s.closeRoom(ctx, roomID, systemActor, func(st *roomState) (string, error) {
+// autoClose closes a room past its warned close time as the system actor.
+// The check runs again under the lock: an extension or a close may have
+// happened since the scan. closed is false when the room was no longer due.
+func (s *Service) autoClose(ctx context.Context, roomID string, now time.Time) (closed bool, err error) {
+	_, err = s.closeRoom(ctx, roomID, systemActor, func(st *roomState) (string, error) {
 		d, ok := s.deadline(st.snap)
-		if !ok || now.Before(d) {
+		if !ok || !d.warned || now.Before(d.closeAt) {
 			return "", errNotDue
 		}
-		resolution = "retention: open longer than " + strconv.Itoa(openDays(st.snap.OpenedAt, d)) + " days"
-		return resolution, nil
+		return "retention: open longer than " + strconv.Itoa(openDays(st.snap.OpenedAt, d.closeAt)) + " days", nil
 	})
 	if errors.Is(err, errNotDue) {
-		return nil
+		return false, nil
 	}
-	if err == nil {
-		s.log.Info("room: closed by the open-room limit", "room", roomID)
+	if err != nil {
+		return false, err
 	}
-	return err
+	s.log.Info("room: closed by the open-room limit", "room", roomID)
+	return true, nil
 }
 
 var errNotDue = errors.New("room: not due")
@@ -249,8 +279,10 @@ func (s *Service) ExtendRoom(ctx context.Context, user User, roomID string) (eve
 	if !ok {
 		return events.Event{}, validation("this room has no open-room deadline")
 	}
+	// From the close time the room shows (auto_close_at), so a late warning's
+	// extra day is not lost.
 	e, err := s.emitLocked(ctx, st, roomID, events.RoomExtended, humanActor(user), events.RoomExtendedPayload{
-		Days: n, CloseAt: d.AddDate(0, 0, n),
+		Days: n, CloseAt: d.closeAt.AddDate(0, 0, n),
 	})
 	if err != nil {
 		return events.Event{}, err
