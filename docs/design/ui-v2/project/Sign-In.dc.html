@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sign in</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+.pr{--background:#0a0a0b;--card:#121214;--muted:#19191d;--hover:#1f1f25;--border:#222228;--border-strong:#2d2d35;--foreground:#ececf0;--muted-foreground:#9d9da8;--subtle-foreground:#6b6b76;--primary:#5b7cfa;--primary-on:#ffffff;--ring:#5b7cfa;--l-postgres:#7cb8ff;--l-kafka-connect:#f0a35c;--l-schema-registry:#5ad3c0;--l-kafka:#f28fb4;--l-consumer:#b9d96b;--l-warehouse:#9fb3ff;--shadow-md:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.4);--sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-family:var(--sans);font-size:13px;line-height:18px;color:var(--foreground);background:var(--background);-webkit-font-smoothing:antialiased;color-scheme:dark}
+.pr[data-theme=light]{--background:#ffffff;--card:#ffffff;--muted:#f4f4f5;--hover:#ececee;--border:#e4e4e7;--border-strong:#d4d4d8;--foreground:#18181b;--muted-foreground:#52525b;--subtle-foreground:#71717a;--primary:#4f6ef2;--l-postgres:#1d6fd8;--l-kafka-connect:#b85c0a;--l-schema-registry:#0f8a78;--l-kafka:#c0366d;--l-consumer:#5a7d0d;--l-warehouse:#4a5fd0;--shadow-md:0 1px 2px rgba(0,0,0,.06),0 8px 24px rgba(0,0,0,.08);color-scheme:light}
+.pr *{box-sizing:border-box}
+.pr a{color:inherit;text-decoration:none}
+.pr :focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.ic{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic-14{width:14px;height:14px}.ic-12{width:12px;height:12px}
+.mono{font-family:var(--mono)}.muted{color:var(--muted-foreground)}.subtle{color:var(--subtle-foreground)}
+.t-xs{font-size:12px;line-height:16px}.t-xl{font-size:20px;line-height:26px;font-weight:600;letter-spacing:-.01em}
+.w500{font-weight:500}.w600{font-weight:600}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:36px;padding:0 12px;border-radius:6px;font:500 13px/18px var(--sans);border:1px solid transparent;background:transparent;color:var(--foreground);cursor:pointer;white-space:nowrap}
+.btn-primary{background:var(--primary);color:var(--primary-on)}
+.kbd{display:inline-flex;align-items:center;justify-content:center;height:18px;min-width:18px;padding:0 4px;border-radius:4px;border:1px solid var(--border-strong);background:var(--muted);color:var(--subtle-foreground);font:500 11px/16px var(--mono)}
+.badge{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 6px;border-radius:6px;font:500 12px/16px var(--sans);background:var(--muted);color:var(--muted-foreground);border:1px solid transparent;white-space:nowrap}
+.badge-outline{background:transparent;border-color:var(--border-strong);color:var(--muted-foreground)}
+.badge-mono{font:500 11.5px/16px var(--mono)}
+.l-postgres{color:var(--l-postgres);background:color-mix(in srgb,var(--l-postgres) 12%,transparent)}.l-kafka-connect{color:var(--l-kafka-connect);background:color-mix(in srgb,var(--l-kafka-connect) 12%,transparent)}.l-schema-registry{color:var(--l-schema-registry);background:color-mix(in srgb,var(--l-schema-registry) 12%,transparent)}.l-kafka{color:var(--l-kafka);background:color-mix(in srgb,var(--l-kafka) 12%,transparent)}.l-warehouse{color:var(--l-warehouse);background:color-mix(in srgb,var(--l-warehouse) 12%,transparent)}
+.av{width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;font:600 11px/1 var(--sans);color:#fff;flex:none}
+.p-kabir{background:#b45309}.p-arjun{background:#1d4ed8}.p-priya{background:#0f766e}.p-meera{background:#be185d}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px}
+.user{display:flex;align-items:center;gap:10px;height:44px;padding:0 10px;border-radius:6px;color:var(--foreground)}
+.user.on{background:var(--hover)}
+.user .ic{margin-left:auto;color:var(--subtle-foreground)}
+</style>
+</helmet>
+<div class="pr" data-theme="{{theme}}" style="width: 100%; min-height: 900px; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px 16px; gap: 24px;">
+  <div style="display: flex; align-items: center; gap: 8px;">
+    <span style="width: 24px; height: 24px; border-radius: 6px; background: var(--primary); display: inline-flex; align-items: center; justify-content: center;"><svg class="ic ic-14" viewBox="0 0 24 24" aria-hidden="true" style="stroke: #fff;"><path d="M4 12h5l2-5 3 10 2-5h4"/></svg></span>
+    <span class="w600" style="font-size: 14px;">Piperoom</span>
+  </div>
+  <div class="card" style="width: min(400px, 100%); padding: 24px; display: flex; flex-direction: column; gap: 16px; box-shadow: var(--shadow-md);">
+    <div style="display: flex; flex-direction: column; gap: 4px;">
+      <h1 class="t-xl" style="margin: 0;">Sign in</h1>
+      <p class="muted" style="margin: 0;">Your identity is attached to every approval you give.</p>
+    </div>
+    <button class="btn btn-primary" type="button" style="width: 100%;"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" x2="3" y1="12" y2="12"/></svg>Continue with SSO</button>
+    <div style="display: flex; align-items: center; gap: 10px; color: var(--subtle-foreground); font-size: 12px;"><span style="flex: 1 1 auto; height: 1px; background: var(--border);"></span>or pick a dev user<span style="flex: 1 1 auto; height: 1px; background: var(--border);"></span></div>
+    <div style="display: flex; flex-direction: column; gap: 2px; margin: 0 -4px;">
+      <a class="user on" href="Main.dc.html"><span class="av p-kabir">KA</span><span class="w500">Kabir</span><span class="badge badge-mono l-postgres">postgres</span><span class="badge badge-mono l-kafka">kafka</span><span class="kbd" style="margin-left: auto;">⏎</span></a>
+      <a class="user" href="Main.dc.html"><span class="av p-arjun">AR</span><span class="w500">Arjun</span><span class="badge badge-mono l-kafka-connect">kafka-connect</span><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></a>
+      <a class="user" href="Main.dc.html"><span class="av p-priya">PR</span><span class="w500">Priya</span><span class="badge badge-mono l-schema-registry">schema-registry</span><span class="badge badge-mono l-warehouse">warehouse</span><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></a>
+      <a class="user" href="Room-Viewer.dc.html"><span class="av p-meera">ME</span><span class="w500">Meera</span><span class="badge badge-outline">viewer</span><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></a>
+    </div>
+  </div>
+  <div class="t-xs subtle mono">staging · idp.example.com · dev users are off in production</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { theme: this.props.theme ?? 'dark' };
+  }
+}
+</script>
+</body>
+</html>
