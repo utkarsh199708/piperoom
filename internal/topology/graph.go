@@ -85,7 +85,7 @@ const (
 	// explicitly in owners.yaml.
 	MappingMapped EdgeMapping = "mapped"
 	// MappingInferred is not proven; it is implied by owners.yaml (both ends
-	// in the same pipeline) or by an earlier reading. Render marks it
+	// in the same pipeline) or by a naming convention. Render marks it
 	// "(unconfirmed)"; the agent treats it as a hypothesis to check.
 	MappingInferred EdgeMapping = "inferred"
 )
