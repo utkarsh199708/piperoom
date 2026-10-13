@@ -48,15 +48,18 @@ exist, the second pass never needs to skip a pipeline.
 - Deadline `D` = `opened_at + N days`, or `room.extended.close_at` after the extension. N is read from the
   environment at each check, so changing it changes the deadline of rooms that were not extended.
 - A background loop (every 10 minutes) looks at every cached open room:
-  - `now >= D - 24h` and no `room.retention_warning` with `close_at = D` yet: append one (system actor).
-  - `now >= D`: close the room as the system actor with `retention: open longer than K days`, K = whole days
-    from `opened_at` to `D`. The close runs the normal close path (alert key released, agent and executor
-    stopped, shadow grace and reveal, the room-closed hook), so nothing differs from a driver's close except the
-    actor. A full room log never refuses `room.closed`.
+  - no `room.retention_warning` with `close_at >= D` yet and `now >= D - 24h`: append one (system actor) with
+    `close_at = max(D, now + 24h)`. So no room is closed less than 24 h after its warning, even one that is
+    already past `D` when the limit is turned on or lowered.
+  - warned and `now >= close_at`: close the room as the system actor with `retention: open longer than K days`,
+    K = whole days from `opened_at` to `close_at`. The close runs the normal close path (alert key released,
+    agent and executor stopped, shadow grace and reveal, the room-closed hook), so nothing differs from a
+    driver's close except the actor. A full room log never refuses `room.closed`.
 - Extend: driver only, open rooms only, once (`409 already_extended`), `400 validation` when N = 0. New deadline
-  = old deadline + N days. It renews the driver lease like other driver actions.
-- The snapshot carries `auto_close_at` (null when off or closed) and `extended`, so a list view can show the
-  deadline without folding the log.
+  = the close time the room shows (`auto_close_at`) + N days. It renews the driver lease like other driver
+  actions.
+- The snapshot carries `auto_close_at` (the warned `close_at`, else `D`; null when off or closed) and
+  `extended`, so a list view can show the deadline without folding the log.
 
 ## 5. Per-room caps
 
@@ -157,7 +160,7 @@ the start and names the variable (`config.ParseLimits`).
 
 ## 8. Tests that must fail without each guard
 
-Fake clock: warning at `D - 24h` and not before; one warning per deadline; auto-close at `D`; extend once
+Fake clock: warning at `D - 24h` and not before; one warning per deadline; auto-close at `D`; a room past `D` when first seen is warned and closed 24 h later; extend once
 (second `409`), driver only, closed room `409`; extension moves the deadline and re-warns. Caps on memstore and
 Postgres (throwaway `postgres:16`): 90% warning once; 100% agent refused, `log_full` written once, agent stopped
 and not restarted by a steer; human events up to the reserve then `ErrLogFull`; `room.closed` always accepted;

@@ -119,7 +119,7 @@ trace or activity feed** — to render a room, the client replays the full event
   "last_seq": 42,
   "driver": { "id": "arjun", "name": "Arjun", "lease_until": "..." },
   "agent_status": { "state": "working", "detail": "step 6" },     // "idle" for a new room; states: working | idle | done | waiting_approval | queued ("waiting for an agent slot (N ahead)" when PIPEROOM_MAX_AGENTS runs are busy) | log_full (the room log hit its cap; the agent stopped for good); in a shadow room the agent writes no status to the room log, so it stays "idle"
-  "auto_close_at": "...",          // open-room limit: when the server closes this open room (opened_at + PIPEROOM_MAX_OPEN_DAYS, or room.extended.close_at); null when the limit is off or the room is closed
+  "auto_close_at": "...",          // open-room limit: when the server closes this open room (opened_at + PIPEROOM_MAX_OPEN_DAYS, or room.extended.close_at, or a later room.retention_warning.close_at); null when the limit is off or the room is closed
   "extended": false,               // the room's one extension was used (room.extended)
   "log_cap": "ok",                 // ok | warning (room.log_cap_warning: 90% of a cap) | full (agent.status log_full)
   "hypothesis": { "text": "...", "based_on_steps": ["s_3","s_4"], "confidence": "high", "confirmed": false },
@@ -239,10 +239,12 @@ never shows shadow output.
 
 - **Open-room limit.** `PIPEROOM_MAX_OPEN_DAYS` (default `14`, `0` = off). 24 h before a room's deadline
   (`snapshot.auto_close_at`) the system actor appends `room.retention_warning {close_at, open_days}`, once per
-  deadline. At the deadline the system actor closes the room with the resolution
+  deadline. At `close_at` the system actor closes the room with the resolution
   `retention: open longer than N days` (a normal `room.closed`; the closed-room retention below applies from then on).
-  The driver may extend once: `POST /api/rooms/{id}/extend` appends `room.extended {days, close_at}` and the
-  deadline moves by `PIPEROOM_MAX_OPEN_DAYS` days (a new warning comes 24 h before the new deadline).
+  No room is closed less than 24 h after its warning: a room already past its deadline when the limit first sees it
+  (the limit was just turned on or lowered) is warned with `close_at` 24 h later.
+  The driver may extend once: `POST /api/rooms/{id}/extend` appends `room.extended {days, close_at}`; the new
+  deadline is the shown `auto_close_at` plus `PIPEROOM_MAX_OPEN_DAYS` days (a new warning comes 24 h before it).
 - **Closed-room retention.** `PIPEROOM_RETENTION_DAYS` (empty or `0` = keep forever) deletes closed rooms whose
   `closed_at` is older. A pipeline's `retention_days:` in `owners.yaml` (1–36500) sets that pipeline's own value;
   when `PIPEROOM_RETENTION_DAYS` is set too, the **shorter** wins. A bad value stops the server.
