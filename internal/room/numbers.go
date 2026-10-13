@@ -52,17 +52,33 @@ func classifyNumber(tok string) numberClass {
 	if digits == "0" {
 		return numberExact // zero stays zero whatever the exponent
 	}
-	if mag := exp10 + len(digits); mag > jsonnum.MaxMag {
+	mag := exp10 + len(digits)
+	if mag > jsonnum.MaxMag {
 		return numberOutOfRange
 	} else if mag < jsonnum.MinMag {
 		return numberInexact
 	}
-	// ParseFloat sees at most the significant digits and an exponent within
-	// about 1200, never the padding of the raw token.
-	norm := digits + "e" + strconv.Itoa(exp10)
+	sign := ""
 	if tok[0] == '-' {
-		norm = "-" + norm
+		sign = "-"
 	}
+	if len(digits) > maxExactSigDigits {
+		// Never equal to a double, so inexact, unless it lies beyond the
+		// largest double: jsonb accepts that, JCS cannot write it, and the
+		// ingest guard refuses it. The largest double is an integer of 309
+		// digits, so it lies on the 800-digit grid, and the value is at least
+		// it exactly when its first 800 digits are. ParseFloat is given only
+		// those digits, with the exponent that keeps the magnitude; the full
+		// string would have its exponent misread (see above).
+		top := sign + digits[:maxExactSigDigits] + "e" + strconv.Itoa(mag-maxExactSigDigits)
+		if _, err := strconv.ParseFloat(top, 64); errors.Is(err, strconv.ErrRange) {
+			return numberOutOfRange
+		}
+		return numberInexact
+	}
+	// ParseFloat sees at most maxExactSigDigits digits and an exponent within
+	// about 1200, never the padding of the raw token.
+	norm := sign + digits + "e" + strconv.Itoa(exp10)
 	f, err := strconv.ParseFloat(norm, 64)
 	if err != nil {
 		if errors.Is(err, strconv.ErrRange) {
@@ -78,11 +94,6 @@ func classifyNumber(tok string) numberClass {
 	// (1.<700 zeros>e-320 is 707 characters in and 1022 after the round trip),
 	// and a length cap would class one value two ways. Significant digits are
 	// the same for every spelling of a value.
-	if len(digits) > maxExactSigDigits {
-		// A double's exact decimal expansion has at most 767 significant
-		// digits; with more, the token is never the same value as any double.
-		return numberInexact
-	}
 	// want = digits * 10^exp10, with 5e-324 <= |want| <= 1.8e308 and at most
 	// maxExactSigDigits digits.
 	want, ok := new(big.Rat).SetString(norm)

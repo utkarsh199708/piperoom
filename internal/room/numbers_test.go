@@ -38,6 +38,18 @@ func TestClassifyNumber(t *testing.T) {
 		{"1e99999999999", numberOutOfRange},
 		{"-", numberIgnore},
 		{"1e", numberIgnore},
+		// Exponents at the int64 edge: the sign of the clamp must survive.
+		{"10e9223372036854775807", numberOutOfRange},
+		{"0.1e-9223372036854775808", numberInexact}, // underflows: inexact, not out of range
+		{"10e92233720368547758070", numberOutOfRange},
+		{"0.1e-92233720368547758080", numberInexact},
+		{"0e9223372036854775807", numberExact},
+		{"0.0e-9223372036854775808", numberExact},
+		// Long mantissas: padding is not significant, digits are.
+		{"1" + strings.Repeat("0", 900000) + "e-899990", numberExact},                  // value 1e10
+		{strings.Repeat("7", 900000) + "e-899990", numberInexact},                      // about 7.7e9, 900000 significant digits
+		{"1797693134862315808" + strings.Repeat("1", 800) + "e-510", numberOutOfRange}, // above max double
+		{"1797693134862315807" + strings.Repeat("1", 800) + "e-510", numberInexact},    // below max double
 	} {
 		if got := classifyNumber(tc.tok); got != tc.want {
 			t.Errorf("classifyNumber(%q) = %d, want %d", tc.tok, got, tc.want)
