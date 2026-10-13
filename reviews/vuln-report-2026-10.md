@@ -1,13 +1,15 @@
 # Vulnerability report 2026-10: govulncheck and npm audit
 
 Agent C3 (cloud), 2026-10-13. Branch `c3/vuln-report`. Scanned at `1b31e7a` (base `2fb0055`). Current `main`
-is `8c0339e`; the reviewer's rescan of current `main` gave identical govulncheck results.
+is `85fa78d`; the reviewer's rescan of current `main` at `85fa78d` gave identical govulncheck results.
 
 ## Summary
 
 - **Go, called findings: 18 before, 4 after on Go 1.27.2 (17 after on Go 1.27.0).** Module-level (not called): 1, unchanged.
 - **Fixed in this PR:** GO-2026-5764 (aws-sdk-go-v2 `service/s3` and `eventstream`), by upgrading s3 to v1.97.3.
-- **Cleared by the Go 1.27.2 toolchain:** 13 standard library findings. This is a toolchain upgrade, not a `go.mod` change.
+- **Cleared by the Go 1.27.2 toolchain:** 13 standard library findings. The fix is binding only once `go 1.27.2` is in
+  `go.mod` (setup-go reads only that line) and `FROM golang:1.27.2-alpine` is at Dockerfile:21. Both are recommended
+  here and not applied in this PR (see "Go toolchain").
 - **Still open, no fix in the current majors:**
   - GO-2026-6665 (gosnowflake v1, called). The fix is in gosnowflake **v2.2.0**, a major version. Mitigation in the
     section below.
@@ -81,9 +83,9 @@ Reachable = govulncheck found a call path from our code to the vulnerable symbol
 |---|---|---|---|---|---|---|
 | GO-2026-6665 | github.com/snowflakedb/gosnowflake | v1.19.1 (latest v1) | **v2.2.0** (major; none in v1) | **yes** via `internal/clients/snowflake/snowflake.go:39:21` `snowflake.New` -> `sql.Open` -> `Connector.Connect` | see "gosnowflake" below | Migrate to gosnowflake/v2 (track separately). Until then apply the mitigation below. |
 | GO-2026-5046 | github.com/hamba/avro/v2 | v2.31.0 (latest hamba release) | none in hamba; fork `github.com/iskorotkov/avro/v2` **v2.33.0** | **yes, production**: `internal/clients/kafka/kafka.go:436:22` `Client.decodeKey` calls `avro.Decoder.Decode` | `decodeKey` is reached from `FindByKey` (kafka.go:347), which is called by the read-only tool `internal/tools/kafkatools/kafka_tools.go:254` and by `internal/topology/trace.go:126`. Both link into `cmd/server` and `cmd/investigate`. | Switch to the fork and decode with a bounded config (see "avro"). |
-| GO-2026-5047 | github.com/hamba/avro/v2 | v2.31.0 | fork v2.33.0 | **yes, production**: `kafka.go:434:33` `decodeKey` calls `avro.NewDecoderForSchema`; `internal/actions/kafka_actions.go:564:25` `registerSchema.Validate` calls `avro.Parse` | same as above | same as GO-2026-5046 |
+| GO-2026-5047 | github.com/hamba/avro/v2 | v2.31.0 | fork v2.33.0 | **yes, production**: `kafka.go:434:33` `decodeKey` calls `avro.NewDecoderForSchema`; `internal/actions/kafka_actions.go:564:25` `registerSchema.Validate` calls `avro.Parse` (schema parsing only, a package-level call; the advisories are decoder-only, so this path is low risk) | same as above | same as GO-2026-5046 |
 | GO-2026-5048 | github.com/hamba/avro/v2 | v2.31.0 | fork v2.33.0 (needs `Config.MaxMapAllocSize`) | **yes, production** (same `decodeKey` path) | same as above | same as GO-2026-5046, plus set `MaxMapAllocSize` |
-| 13 stdlib IDs (below) | Go standard library | go1.27.0 | **go1.27.2** | yes on go1.27.0, **cleared** on go1.27.2 | e.g. `cmd/server/main.go:364:35` `server.run` -> `http.Server.ListenAndServe` (GO-2026-6617) | Upgrade the toolchain to 1.27.2 (see "Go toolchain"). Not a `go.mod` change. |
+| 13 stdlib IDs (below) | Go standard library | go1.27.0 | **go1.27.2** | yes on go1.27.0, **cleared** on go1.27.2 | e.g. `cmd/server/main.go:364:35` `server.run` -> `http.Server.ListenAndServe` (GO-2026-6617) | Binding only with `go 1.27.2` in `go.mod` and `FROM golang:1.27.2-alpine` at Dockerfile:21 (see "Go toolchain"). Neither is applied in this PR. |
 | GO-2026-5932 | golang.org/x/crypto | v0.58.0 (required) | none | **no** (module-level only) | `openpgp` package not called | No action. |
 
 Standard library IDs (all called on go1.27.0, all cleared by go1.27.2): GO-2026-6617, 6613, 6612, 6611, 6610, 6609,
@@ -111,10 +113,18 @@ Exploitability (reviewer analysis): anyone who can produce to a pipeline topic c
 schema id. Rate production exposure medium to high.
 
 Recommended follow-ups (not in this PR; owners to assign):
-- **A2 (owns `internal/clients/kafka/**`):** import `github.com/iskorotkov/avro/v2` at v2.33.0 or later, and decode
-  with a frozen bounded config, e.g. `avro.Config{MaxByteSliceSize: 64 << 10, MaxSliceAllocSize: 1 << 20,
-  MaxMapAllocSize: 1 << 16}.Freeze()`, then `NewDecoderForSchema` on that API. Refuse keys larger than 64 KiB, refuse
-  key schemas containing array or map types, and add a `defer recover()` in `decodeKey`.
+- **A2 (owns `internal/clients/kafka/**`):** import `github.com/iskorotkov/avro/v2` at v2.33.0 or later and decode
+  with a frozen bounded config:
+
+  ```go
+  api := avro.Config{MaxByteSliceSize: 64 << 10, MaxSliceAllocSize: 1 << 20, MaxMapAllocSize: 1 << 16}.Freeze()
+  dec := api.NewDecoder(schema, bytes.NewReader(key[5:]))
+  ```
+
+  `API` (config.go:124) has `NewDecoder`, not `NewDecoderForSchema`. Do not use the package-level
+  `NewDecoderForSchema` or `Unmarshal` for untrusted input: they use `DefaultConfig` (decoder.go:24-25), which sets no
+  limits, so GO-2026-5048 stays open (`MaxMapAllocSize` 0 means unbounded). Refuse keys larger than 64 KiB, refuse key
+  schemas containing array or map types, and add a `defer recover()` in `decodeKey`.
 - **A4 (owns `internal/agent/**`):** add a `recover()` in the read-tool goroutine (run.go, around line 619) so one
   hostile key cannot crash the server.
 - The fork's config fields (`MaxByteSliceSize`, `MaxSliceAllocSize`, `MaxMapAllocSize`) and `Config.Freeze` were
@@ -189,9 +199,9 @@ bump of all of them is the recommended follow-up.
 
 Verified: build, vet, unit tests and govulncheck all pass with `GOTOOLCHAIN=go1.27.2`.
 
-Per the reviewer, `setup-go` with `go-version-file` reads only the `go` directive and ignores a `toolchain` line
-(not re-checked here). So a `toolchain` line would not make CI install 1.27.2. The enforceable change is the `go`
-directive. These lines are recommended and **not applied in this commit**:
+CI uses `actions/setup-go` v5.6.0 (SHA `40f1582b`). Its `parseGoVersionFile` (`src/installer.ts:491-503`) matches only
+`^go (\d+(\.\d+)*)` in `go.mod` and ignores any `toolchain` line, so the `go` directive is the binding setting for CI.
+These lines are recommended and **not applied in this commit**:
 
 1. `go.mod` line 3: `go 1.27.0` -> `go 1.27.2`. This is a `go.mod` change; CI and local builds then use 1.27.2.
    Re-run build, vet and tests after the change.
@@ -224,8 +234,8 @@ directive. These lines are recommended and **not applied in this commit**:
 
 ## Not done
 
-- The gosnowflake mitigation in the code (steps 1-2 above) is not applied in this PR. It is a recommendation for A2
-  to implement in `internal/clients/snowflake`.
+- The gosnowflake mitigation in the code (steps 1-2 above) is not applied in this PR. `internal/clients/snowflake/**`
+  is owned by C3 (AGENTS.md §2), so it is a follow-up for C3, not A2.
 - The avro switch to the fork, the bounded decode config, and the `recover()` in `decodeKey` and the read-tool
   goroutine are follow-ups for A2 and A4.
 - The `go` directive and Dockerfile pin are recommended, not applied.
