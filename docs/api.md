@@ -47,6 +47,8 @@ map) must agree; the server checks this at start-up and refuses to start on a mi
 | 413 | `too_large` (signed alert body over 1 MB) |
 | 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff` |
 
+Text a person types (titles, comments, steers, resolutions, trace keys, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD).
+
 `lease_held`: `control/grant` called by a non-driver while another user's lease is still live. All other
 driver-only endpoints answer `403 not_driver`. `stale_handoff`: the hand-off's creator is no longer the driver,
 or the hand-off was voided by a newer one. A second `send` of an already-sent suggestion → `409 already_decided`.
