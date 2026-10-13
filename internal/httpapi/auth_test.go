@@ -284,6 +284,37 @@ func TestOIDCModeIgnoresXUser(t *testing.T) {
 	wantStatus(t, e.do(t, http.MethodGet, "/auth/callback", ""), http.StatusNotImplemented)
 }
 
+// With the web UI served, an unmounted or unknown /auth path is a JSON 404, not
+// the SPA shell: index.html for /auth/login would make the web client loop.
+func TestAuthPathsAreNeverTheSPAShell(t *testing.T) {
+	dev := newWebServer(t, httpapi.WithWebDir(webDir(t)))
+	for _, p := range []string{"/auth/login", "/auth/callback", "/auth/nothing", "/auth/", "/auth", "/AUTH/login", "/auth/../auth/login"} {
+		resp, body := fetch(t, http.MethodGet, dev.URL+p)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("GET %s in dev mode: status %d, want 404 (body %.60q)", p, resp.StatusCode, body)
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "application/json" || strings.Contains(body, "<title>Piperoom</title>") || !strings.Contains(body, `"not_found"`) {
+			t.Fatalf("GET %s: want the JSON not_found envelope, got %q %.80q", p, ct, body)
+		}
+	}
+	// The SPA itself still loads.
+	resp, body := fetch(t, http.MethodGet, dev.URL+"/")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "<title>Piperoom</title>") {
+		t.Fatalf("GET /: %d, want the shell", resp.StatusCode)
+	}
+
+	// In oidc mode the two routes exist (501 until PR 3); the rest is still 404.
+	oidc := newWebServer(t, httpapi.WithWebDir(webDir(t)), httpapi.WithAuth(oidcSettings()))
+	resp, _ = fetch(t, http.MethodGet, oidc.URL+"/auth/login")
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Fatalf("GET /auth/login in oidc mode: %d, want 501", resp.StatusCode)
+	}
+	resp, body = fetch(t, http.MethodGet, oidc.URL+"/auth/nothing")
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(body, `"not_found"`) {
+		t.Fatalf("GET /auth/nothing in oidc mode: %d %.80q", resp.StatusCode, body)
+	}
+}
+
 func TestOIDCModeReadsOnlyItsOwnCookie(t *testing.T) {
 	e := newAuthEnv(t, httpapi.WithAuth(oidcSettings()))
 	now := time.Now().UTC()
@@ -372,14 +403,24 @@ func TestHostAllowList(t *testing.T) {
 	}
 }
 
-// The signed alert routes go through the Host check too (design §4).
-func TestHostAllowListCoversSignedAlerts(t *testing.T) {
+// The signed alert routes skip the Host check (their signature is the auth, and
+// in-cluster senders use internal DNS names): an unsigned request reaches the
+// verifier and is 401, not 421. The unsigned dev webhook stays under the check.
+func TestSignedAlertRoutesSkipHostCheck(t *testing.T) {
 	e := newAuthEnv(t)
-	resp := e.do(t, http.MethodPost, "/api/alerts/generic", `{}`, "Host: evil.test")
-	wantStatus(t, resp, http.StatusMisdirectedRequest)
-	// A loopback host reaches the handler (source disabled: 401, not 421).
-	resp = e.do(t, http.MethodPost, "/api/alerts/generic", `{}`)
-	wantStatus(t, resp, http.StatusUnauthorized)
+	for _, src := range []string{"generic", "alertmanager", "grafana", "pagerduty", "datadog"} {
+		resp := e.do(t, http.MethodPost, "/api/alerts/"+src, `{}`, "Host: alertmanager.monitoring.svc")
+		wantStatus(t, resp, http.StatusUnauthorized)
+		if b := readErr(t, resp); b.Error.Code != "unauthenticated" {
+			t.Fatalf("%s: code %q, want unauthenticated from the verifier", src, b.Error.Code)
+		}
+	}
+	// Not exempt: the unsigned webhook, other paths under /api/alerts, other
+	// methods, and every other route.
+	wantStatus(t, e.do(t, http.MethodPost, "/api/alerts/webhook", `{}`, "Host: alertmanager.monitoring.svc", "X-User: arjun"), http.StatusMisdirectedRequest)
+	wantStatus(t, e.do(t, http.MethodPost, "/api/alerts/generic/extra", `{}`, "Host: evil.test"), http.StatusMisdirectedRequest)
+	wantStatus(t, e.do(t, http.MethodGet, "/api/alerts/generic", "", "Host: evil.test"), http.StatusMisdirectedRequest)
+	wantStatus(t, e.do(t, http.MethodPost, "/api/rooms", `{}`, "Host: alertmanager.monitoring.svc", "X-User: arjun"), http.StatusMisdirectedRequest)
 }
 
 func TestCrossOriginPostRefused(t *testing.T) {

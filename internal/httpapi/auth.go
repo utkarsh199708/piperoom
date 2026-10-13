@@ -58,7 +58,7 @@ func (s *Server) normalizeAuth() {
 // hostGuard refuses any Host that is not on the allow-list with 421 bad_host.
 // CrossOriginProtection compares Origin with Host, so a page on a rebound DNS
 // name passes it; this check is what stops that. It runs before every route,
-// probes and signed alert routes included.
+// probes included, except the signed alert routes (isSignedAlertRoute).
 func (s *Server) hostGuard(next http.Handler) http.Handler {
 	allowed := map[string]bool{}
 	for _, h := range s.authSettings.AllowedHosts {
@@ -69,12 +69,26 @@ func (s *Server) hostGuard(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := strings.ToLower(r.Host)
-		if !isLoopbackHostHeader(h) && !allowed[h] {
+		if !isLoopbackHostHeader(h) && !allowed[h] && !isSignedAlertRoute(r) {
 			writeError(w, http.StatusMisdirectedRequest, "bad_host", "this Host is not allowed; see PIPEROOM_PUBLIC_URL and PIPEROOM_ALLOWED_HOSTS")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isSignedAlertRoute reports whether r is POST /api/alerts/{source} for a
+// signed source. Those routes skip the Host check (lead decision on PR #61):
+// the sender's HMAC or token is their auth and DNS rebinding cannot forge it,
+// while in-cluster senders call by internal DNS names that no operator would
+// think to list. The unsigned dev webhook (/api/alerts/webhook) is not one of
+// them and stays under the check.
+func isSignedAlertRoute(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	src, ok := strings.CutPrefix(r.URL.Path, "/api/alerts/")
+	return ok && src != "" && src != "webhook" && !strings.Contains(src, "/")
 }
 
 // publicHostInList is the PIPEROOM_PUBLIC_URL host when it joins the allow-list:

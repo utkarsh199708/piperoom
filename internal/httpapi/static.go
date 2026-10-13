@@ -108,13 +108,21 @@ func newStaticHandler(root *os.Root) *staticHandler {
 	return &staticHandler{fsys: root.FS()}
 }
 
+// isServerPath reports whether the lower-case, cleaned path p is prefix or lies
+// under it. /api and /auth belong to the server, never to the web UI.
+func isServerPath(p, prefix string) bool {
+	return p == prefix || strings.HasPrefix(p, prefix+"/")
+}
+
 func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p := path.Clean("/" + r.URL.Path)
+	// An unknown /auth path is the same: the web app must not get index.html
+	// for /auth/login where the route is not mounted (it would loop).
 	// An unknown API path must stay a JSON 404, never the HTML shell: clients
 	// parse the envelope, and a 200 HTML page would hide a wrong URL.
 	// chi matches routes case-sensitively, so "/API/..." misses them too: keep
 	// that a JSON 404 as well.
-	if lp := strings.ToLower(p); lp == "/api" || strings.HasPrefix(lp, "/api/") {
+	if lp := strings.ToLower(p); isServerPath(lp, "/api") || isServerPath(lp, "/auth") {
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
