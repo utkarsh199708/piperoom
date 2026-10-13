@@ -326,7 +326,7 @@
       "seq": 27,
       "type": "approval.given",
       "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
-      "payload": { "proposal_id": "p_1", "layer": "kafka-connect", "params_hash": "9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b", "identity": { "iss": "https://idp.example.com", "sub": "kabir", "method": "oidc", "grant": "backup:group:sre" } },
+      "payload": { "proposal_id": "p_1", "layer": "kafka-connect", "params_hash": "9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b", "identity": { "iss": "https://idp.example.com", "sub": "arjun", "method": "oidc", "grant": "backup:group:sre" } },
       "at": "2026-10-11T10:01:32Z"
     },
     {
