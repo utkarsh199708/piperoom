@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render, within } from '@testing-library/react'
+import { useState } from 'react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { HandoffDialog } from './HandoffDialog'
 import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
@@ -45,9 +46,9 @@ const pendingHandoff: HandoffState = {
 describe('HandoffDialog plain-text rendering (P5)', () => {
   it('renders html- and markdown-looking summary fields literally, with no links', () => {
     const state = { ...emptyRoomState('r1'), handoffs: [pendingHandoff] }
-    const { container } = render(
-      <HandoffDialog state={state} user={user} actions={actions} onClose={() => {}} />,
-    )
+    render(<HandoffDialog state={state} user={user} actions={actions} onClose={() => {}} />)
+    // The dialog is a Radix portal: it renders in document.body, not in the render container.
+    const container = document.body
 
     // Both payloads appear verbatim in the rendered text content.
     const text = container.textContent ?? ''
@@ -59,5 +60,51 @@ describe('HandoffDialog plain-text rendering (P5)', () => {
     expect(summary).not.toBeNull()
     expect(within(summary as HTMLElement).queryAllByRole('link')).toHaveLength(0)
     expect(summary?.querySelector('a')).toBeNull()
+  })
+})
+
+// U3: a real dialog. Esc closes it, focus stays inside while it is open and goes back to
+// the button that opened it.
+function Harness({ withHandoff = false }: { withHandoff?: boolean }) {
+  const [open, setOpen] = useState(false)
+  const state = { ...emptyRoomState('r1'), handoffs: withHandoff ? [pendingHandoff] : [] }
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)}>
+        open dialog
+      </button>
+      {open && <HandoffDialog state={state} user={user} actions={actions} onClose={() => setOpen(false)} />}
+    </>
+  )
+}
+
+describe('HandoffDialog as a dialog', () => {
+  it('is a named modal dialog', () => {
+    render(<HandoffDialog state={emptyRoomState('r1')} user={user} actions={actions} onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog', { name: 'Hand off the room' })
+    expect(dialog).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Close hand-off dialog' })).toBeInTheDocument()
+  })
+
+  it('Esc closes it and focus returns to the opener', async () => {
+    render(<Harness />)
+    const opener = screen.getByRole('button', { name: 'open dialog' })
+    opener.focus()
+    fireEvent.click(opener)
+    const dialog = await screen.findByRole('dialog')
+    // Focus moved inside.
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true))
+
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(opener).toHaveFocus())
+  })
+
+  it('the pending summary closes with its Close button', async () => {
+    render(<Harness withHandoff />)
+    fireEvent.click(screen.getByRole('button', { name: 'open dialog' }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
 })

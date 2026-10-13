@@ -87,8 +87,14 @@ export function canSendSuggestionToAgent(
   return !isViewer(user) && isOpen(state) && isDriver(state, user) && suggestion.suggestion_id != null
 }
 
+/**
+ * What the layer rules need from a proposal: the full ProposalState, or a room snapshot's
+ * open proposal (the room list) with `status: 'open'`.
+ */
+export type ProposalLike = Pick<ProposalState, 'required_layers' | 'approvals' | 'status'>
+
 export function pendingLayersFor(
-  proposal: ProposalState,
+  proposal: ProposalLike,
   user: CurrentUser,
 ): string[] {
   return proposal.required_layers.filter(
@@ -97,7 +103,7 @@ export function pendingLayersFor(
 }
 
 export function canDecideLayer(
-  proposal: ProposalState,
+  proposal: ProposalLike,
   user: CurrentUser,
   layer: string,
 ): boolean {
