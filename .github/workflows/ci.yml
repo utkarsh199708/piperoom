@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Manual runs only: this is the trigger for the e2e job (OIDC against Keycloak).
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -48,6 +50,158 @@ jobs:
         run: go test ./...
       - name: eval scenarios (validate only; no model calls, no API key, no network)
         run: go run ./evals/cmd/evalrun -validate
+
+  integration:
+    name: Go integration (Postgres only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: piperoom
+          # CI-only throwaway database on the job's own network; not a secret.
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: piperoom
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U piperoom -d piperoom"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PIPEROOM_DB_URL: postgres://piperoom:ci-only@127.0.0.1:5432/piperoom?sslmode=disable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go test -tags integration (room database only)
+        # Only the room Postgres exists here. Tests that need the dev stack
+        # (Kafka, Connect, Schema Registry, source and warehouse Postgres) call
+        # testenv.Require and skip cleanly when Connect at CONNECT_URL is
+        # unreachable, so internal/store and internal/room run for real and the
+        # client/tool packages report SKIP. cmd/discover is excluded: its
+        # TestDiscoverDevStack has no skip guard and fails without the stack.
+        run: |
+          pkgs="$(go list ./... | grep -v '/cmd/discover$')"
+          # shellcheck disable=SC2086
+          go test -count=1 -tags integration $pkgs
+
+  race:
+    name: Go race detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: go test -race
+        run: go test -race -count=1 ./...
+
+  vuln:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install govulncheck (built with the same Go as the other jobs)
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+      - name: govulncheck
+        run: govulncheck ./...
+
+  deploy:
+    name: Deploy manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install helm and kubeconform (pinned, built from source by the Go module proxy)
+        run: |
+          go install helm.sh/helm/v3/cmd/helm@v3.16.3
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.6.7
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: helm lint
+        run: |
+          helm lint deploy/helm/piperoom
+          for f in deploy/helm/piperoom/ci/*.yaml; do
+            helm lint deploy/helm/piperoom -f "$f"
+          done
+      - name: helm template | kubeconform
+        run: |
+          for f in deploy/helm/piperoom/ci/*.yaml; do
+            echo "== $f"
+            helm template piperoom deploy/helm/piperoom -f "$f" | kubeconform -strict -summary
+          done
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff deploy/terraform
+      - name: terraform init and validate (deploy/terraform/gcp)
+        working-directory: deploy/terraform/gcp
+        # -backend=false: no state or credentials. init reads the committed
+        # .terraform.lock.hcl, so the google provider version is fixed.
+        run: |
+          terraform init -backend=false -input=false -lockfile=readonly
+          terraform validate
+
+  e2e-oidc:
+    name: OIDC end-to-end (manual)
+    # Not on pull requests or pushes: it builds the image and starts Keycloak,
+    # Caddy and the app. Run it from the Actions tab (workflow_dispatch).
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run test/e2e/oidc/run.sh
+        run: test/e2e/oidc/run.sh
+      - name: Upload stack logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: oidc-e2e-logs
+          path: test/e2e/oidc/.logs
+          if-no-files-found: ignore
 
   web:
     name: Web
