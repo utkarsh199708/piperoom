@@ -40,15 +40,22 @@ func (t *registrySubjects) Run(ctx context.Context, input json.RawMessage) (tool
 	if err != nil {
 		return tools.Result{}, err
 	}
-	// Only subjects derived from this room's pipeline topics.
+	// Only subjects derived from this room's pipeline topics; the others are
+	// only counted, before the prefix filter, so a prefix cannot probe for
+	// other subjects' names through the count.
+	all := len(subjects)
 	subjects = sc.FilterSubjects(subjects)
+	other := all - len(subjects)
 	var out []string
 	for _, s := range subjects {
 		if p.Prefix == "" || strings.HasPrefix(s, p.Prefix) {
 			out = append(out, s)
 		}
 	}
-	return res(strings.Join(out, "\n"), out), nil
+	var sb strings.Builder
+	sb.WriteString(strings.Join(out, "\n"))
+	appendLine(&sb, tools.NotShown(other, "subjects"))
+	return res(sb.String(), out), nil
 }
 
 // ---- schema_registry_versions ----

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -319,4 +320,76 @@ func (s Scope) filter(names []string, keep func(string) bool) []string {
 		}
 	}
 	return out
+}
+
+// NotShown is the line a scoped list tool adds when it dropped objects that
+// are not the pipeline's: a count and a kind, never a name. It is "" for
+// n <= 0.
+func NotShown(n int, kind string) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d other %s not shown (not part of this room's pipeline)", n, kind)
+}
+
+// ---- source database objects ----
+
+// ConfigReader reads one Kafka Connect connector config. clients.ConnectClient
+// satisfies it.
+type ConfigReader interface {
+	Config(ctx context.Context, name string) (map[string]string, error)
+}
+
+// defaultSlot is the slot a Debezium Postgres connector uses when its config
+// has no slot.name.
+const defaultSlot = "debezium"
+
+// slotNameRE is Postgres's rule for a replication slot name, the same rule as
+// owners.yaml watch.slot.
+var slotNameRE = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
+
+// Slots returns the replication slots that belong to the room's pipeline, by
+// the watcher's rule:
+//   - owners.yaml watch.slot, when set. It is the whole answer and needs no
+//     Connect call, so the slot stays visible while Connect is down.
+//   - otherwise slot.name from each of the pipeline's connector configs, or
+//     Debezium's default "debezium" for a PostgresConnector that sets none.
+//
+// It fails closed. A connector config that cannot be read is an error, never
+// "every slot": the caller then shows no slot. A slot.name that is set but is
+// not a valid slot name is an error too, so it never turns into the default
+// slot, which can belong to another pipeline. An empty list with a nil error
+// means no connector of the pipeline is a Debezium Postgres source.
+//
+// Unscoped callers do not filter, so calling it unscoped is an error.
+func (s Scope) Slots(ctx context.Context, cr ConfigReader) ([]string, error) {
+	if s.unscoped {
+		return nil, errors.New("tools: Slots needs a room pipeline (unscoped callers do not filter)")
+	}
+	if declared := s.p.Watch().Slot; declared != "" {
+		return []string{declared}, nil
+	}
+	if cr == nil {
+		return nil, fmt.Errorf("tools: pipeline %q: no Connect client to read the connector configs, and owners.yaml sets no watch.slot", s.p.ID)
+	}
+	var out []string
+	for _, name := range s.p.Connectors {
+		cfg, err := cr.Config(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("tools: pipeline %q: read connector %q config to find its slot (set watch.slot in owners.yaml to name it without Connect): %w", s.p.ID, name, err)
+		}
+		slot := ""
+		if n, present := cfg["slot.name"]; present && strings.TrimSpace(n) != "" {
+			if !slotNameRE.MatchString(n) {
+				return nil, fmt.Errorf("tools: pipeline %q: connector %q has an invalid slot.name %q", s.p.ID, name, shorten(n))
+			}
+			slot = n
+		} else if strings.Contains(cfg["connector.class"], "PostgresConnector") {
+			slot = defaultSlot
+		}
+		if slot != "" && !contains(out, slot) {
+			out = append(out, slot)
+		}
+	}
+	return out, nil
 }

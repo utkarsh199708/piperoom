@@ -3,6 +3,7 @@ package dbtools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/postgres"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
 )
@@ -17,32 +19,92 @@ import (
 func pgReplicationSlotsTool(d Deps) tools.Tool {
 	return &tool{
 		name:   "pg_replication_slots",
-		desc:   "List logical replication slots on the source Postgres: active state, retained WAL size and wal_status.",
+		desc:   "List the room pipeline's replication slots on the source Postgres (owners.yaml watch.slot, else slot.name from its Debezium connector config): active state, retained WAL size and wal_status. Other slots are only counted.",
 		schema: objSchema(map[string]any{}),
 		run: func(ctx context.Context, _ json.RawMessage) (tools.Result, error) {
-			// Slots are database-wide and owners.yaml names none, so this tool
-			// is not filtered; it still needs a room scope (or the opt-out).
-			if _, err := d.scope(ctx); err != nil {
+			sc, err := d.scope(ctx)
+			if err != nil {
 				return tools.Result{}, err
 			}
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
-			slots, err := d.Src.ReplicationSlots(ctx)
+			if sc.Unscoped() {
+				slots, err := d.Src.ReplicationSlots(ctx)
+				if err != nil {
+					return tools.Result{}, fmt.Errorf("dbtools: pg_replication_slots: %w", err)
+				}
+				return slotsResult(slots, ""), nil
+			}
+
+			// Scoped: only the pipeline's own slots. A slot name that cannot be
+			// resolved fails the call; it never falls back to every slot.
+			// A nil Connect stays a nil reader: Slots then says Connect is missing.
+			names, err := sc.Slots(ctx, d.Connect)
+			if err != nil {
+				return tools.Result{}, fmt.Errorf("dbtools: pg_replication_slots: no slot is shown: %w", err)
+			}
+			slots, other, err := d.namedSlots(ctx, names)
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_replication_slots: %w", err)
 			}
-			var sb strings.Builder
-			for _, s := range slots {
-				fmt.Fprintf(&sb, "slot %s: active=%t retained=%s wal_status=%s\n",
-					s.Name, s.Active, topology.HumanBytes(s.RetainedWALBytes), s.WALStatus)
+			var head strings.Builder
+			if len(names) == 0 {
+				fmt.Fprintf(&head, "(pipeline %s has no Debezium Postgres source connector, so no replication slot)\n", sc.Pipeline().ID)
 			}
-			if len(slots) == 0 {
-				sb.WriteString("(no replication slots)\n")
+			for _, n := range names {
+				if !slices.ContainsFunc(slots, func(s clients.ReplicationSlot) bool { return s.Name == n }) {
+					fmt.Fprintf(&head, "slot %s: not found in pg_replication_slots\n", n)
+				}
 			}
-			summary, truncated := tools.Truncate(sb.String())
-			return tools.Result{Summary: summary, Data: slots, Truncated: truncated}, nil
+			if line := tools.NotShown(other, "replication slots"); line != "" {
+				head.WriteString(line + "\n")
+			}
+			return slotsResult(slots, head.String()), nil
 		},
 	}
+}
+
+// slotsResult renders one line per slot, then extra (lines that are not about
+// a listed slot, already newline-terminated). Data holds exactly the listed
+// slots.
+func slotsResult(slots []clients.ReplicationSlot, extra string) tools.Result {
+	var sb strings.Builder
+	for _, s := range slots {
+		fmt.Fprintf(&sb, "slot %s: active=%t retained=%s wal_status=%s\n",
+			s.Name, s.Active, topology.HumanBytes(s.RetainedWALBytes), s.WALStatus)
+	}
+	if len(slots) == 0 && extra == "" {
+		sb.WriteString("(no replication slots)\n")
+	}
+	sb.WriteString(extra)
+	summary, truncated := tools.Truncate(sb.String())
+	return tools.Result{Summary: summary, Data: slots, Truncated: truncated}
+}
+
+// namedSlotLister is implemented by SourceDB implementations that filter slots
+// by name in SQL and only count the others (internal/clients/postgres).
+type namedSlotLister interface {
+	ReplicationSlotsNamed(ctx context.Context, names []string) ([]clients.ReplicationSlot, int, error)
+}
+
+// namedSlots returns the slots called names and the number of other slots.
+// Without the SQL filter it filters the full list in memory, so the result
+// is the same either way.
+func (d Deps) namedSlots(ctx context.Context, names []string) ([]clients.ReplicationSlot, int, error) {
+	if l, ok := d.Src.(namedSlotLister); ok {
+		return l.ReplicationSlotsNamed(ctx, names)
+	}
+	all, err := d.Src.ReplicationSlots(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	var out []clients.ReplicationSlot
+	for _, s := range all {
+		if slices.Contains(names, s.Name) {
+			out = append(out, s)
+		}
+	}
+	return out, len(all) - len(out), nil
 }
 
 func pgRecentDDLTool(d Deps) tools.Tool {
@@ -112,7 +174,7 @@ func pgRecentDDLTool(d Deps) tools.Tool {
 func pgLongTransactionsTool(d Deps) tools.Tool {
 	return &tool{
 		name: "pg_long_transactions",
-		desc: "List transactions on the source Postgres that have been open longer than a threshold (pid, user, application, state, age, wait event, statement verb; no query text). has_xid marks writers that hold the WAL horizon; long read-only transactions are listed too because they block DDL and VACUUM.",
+		desc: "List transactions on the source Postgres that have been open longer than a threshold (pid, user, application, state, age, wait event, statement verb; no query text). In a room, only transactions that hold or wait for a lock on the pipeline's source tables are listed; the others are only counted, with how many of them are writers. has_xid marks writers that hold the WAL horizon; long read-only transactions are listed too because they block DDL and VACUUM.",
 		schema: objSchema(map[string]any{
 			"older_than_minutes": intProp("Minimum transaction age in minutes. Default 5."),
 		}),
@@ -129,24 +191,37 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 			if input.OlderThanMinutes < 0 {
 				return tools.Result{}, fmt.Errorf("%w: older_than_minutes must be >= 0", tools.ErrBadInput)
 			}
-			// Open transactions are database-wide (only writers, has_xid, hold the
-			// WAL horizon) and cannot be tied to a pipeline, so the tool is not
-			// filtered; it needs a room scope (or the opt-out) and returns no
-			// query text.
-			if _, err := d.scope(ctx); err != nil {
+			sc, err := d.scope(ctx)
+			if err != nil {
 				return tools.Result{}, err
 			}
+			olderThan := time.Duration(input.OlderThanMinutes) * time.Minute
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
-			txns, err := d.Src.LongTransactions(ctx, time.Duration(input.OlderThanMinutes)*time.Minute)
+			var txns []clients.Transaction
+			var other, otherWriters int
+			if sc.Unscoped() {
+				txns, err = d.Src.LongTransactions(ctx, olderThan)
+			} else {
+				// Scoped: only sessions of the source database that lock one of
+				// the pipeline's tables. Other sessions belong to other
+				// pipelines, users or databases and are only counted. A client
+				// that cannot filter is refused, never read in full.
+				l, ok := d.Src.(tableTxnLister)
+				if !ok {
+					return tools.Result{}, errors.New("dbtools: pg_long_transactions: the source client cannot filter transactions by table, so none are shown")
+				}
+				var tt postgres.TableTransactions
+				tt, err = l.LongTransactionsOnTables(ctx, olderThan, sc.Pipeline().SourceTables)
+				txns, other, otherWriters = tt.Transactions, tt.Other, tt.OtherWriters
+			}
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_long_transactions: %w", err)
 			}
 
-			// Query text is never returned: it often holds literal row values and
-			// the sessions belong to any pipeline. Keep the diagnostics and at
-			// most the statement verb.
+			// Query text is never returned: it often holds literal row values.
+			// Keep the diagnostics and at most the statement verb.
 			rows := make([]longTxn, 0, len(txns))
 			var sb strings.Builder
 			for _, t := range txns {
@@ -164,12 +239,27 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 					r.PID, r.User, r.ApplicationName, r.State, r.Age, orDash(r.WaitEvent), orDash(r.Verb), writer)
 			}
 			if len(txns) == 0 {
-				sb.WriteString("(no long transactions)\n")
+				if sc.Unscoped() {
+					sb.WriteString("(no long transactions)\n")
+				} else {
+					sb.WriteString("(no long transactions on this pipeline's tables)\n")
+				}
+			}
+			if line := tools.NotShown(other, "long transactions"); line != "" {
+				// Only counts: a writer anywhere can still hold back this
+				// pipeline's slot, so the agent must know one exists.
+				fmt.Fprintf(&sb, "%s; %d of them are writers (has_xid) and can hold back the WAL a slot keeps\n", line, otherWriters)
 			}
 			summary, truncated := tools.Truncate(sb.String())
 			return tools.Result{Summary: summary, Data: rows, Truncated: truncated}, nil
 		},
 	}
+}
+
+// tableTxnLister is implemented by SourceDB implementations that can tell, in
+// SQL, which long transactions lock a set of tables (internal/clients/postgres).
+type tableTxnLister interface {
+	LongTransactionsOnTables(ctx context.Context, olderThan time.Duration, tables []string) (postgres.TableTransactions, error)
 }
 
 // longTxn is one open transaction as the tool reports it: no query text.

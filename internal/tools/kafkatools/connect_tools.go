@@ -37,8 +37,11 @@ func (t *connectList) Run(ctx context.Context, _ json.RawMessage) (tools.Result,
 	if err != nil {
 		return tools.Result{}, err
 	}
-	// Only this room's connectors; the others get no Status call either.
+	// Only this room's connectors; the others get no Status call either and
+	// are only counted.
+	all := len(names)
 	names = sc.FilterConnectors(names)
+	other := all - len(names)
 	type row struct {
 		Name        string `json:"name"`
 		Type        string `json:"type"`
@@ -67,6 +70,7 @@ func (t *connectList) Run(ctx context.Context, _ json.RawMessage) (tools.Result,
 		}
 		fmt.Fprintf(&sb, "%s (%s): %s, %d failed tasks", r.Name, r.Type, r.State, r.FailedTasks)
 	}
+	appendLine(&sb, tools.NotShown(other, "connectors"))
 	return res(sb.String(), rows), nil
 }
 

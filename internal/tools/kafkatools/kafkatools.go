@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"piperoom/internal/clients"
@@ -77,6 +78,17 @@ func parse[T any](raw json.RawMessage) (T, error) {
 		return v, fmt.Errorf("%w: %v", tools.ErrBadInput, err)
 	}
 	return v, nil
+}
+
+// appendLine adds line to sb on a line of its own; an empty line adds nothing.
+func appendLine(sb *strings.Builder, line string) {
+	if line == "" {
+		return
+	}
+	if sb.Len() > 0 {
+		sb.WriteString("\n")
+	}
+	sb.WriteString(line)
 }
 
 // res builds a Result with the summary truncated.

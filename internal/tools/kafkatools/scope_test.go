@@ -343,15 +343,21 @@ func TestScopeListToolsAreFiltered(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := strings.Split(r.Summary, "\n")
+		const countLine = "4 other subjects not shown (not part of this room's pipeline)"
+		if got[len(got)-1] != countLine {
+			t.Fatalf("last line = %q, want %q", got[len(got)-1], countLine)
+		}
+		got = got[:len(got)-1]
 		slices.Sort(got)
 		want := []string{"pg.public.orders-key", "pg.public.orders-value"}
 		if !slices.Equal(got, want) {
 			t.Fatalf("subjects = %v, want %v", got, want)
 		}
-		// A prefix cannot widen the scope.
+		// A prefix cannot widen the scope, and the count does not depend on it,
+		// so a prefix cannot probe other subjects' names either.
 		r, err = scopeTool(t, d, "schema_registry_subjects").Run(roomCtx(), json.RawMessage(`{"prefix":"bill"}`))
-		if err != nil || r.Summary != "" {
-			t.Fatalf("prefix bill gave %q, %v", r.Summary, err)
+		if err != nil || r.Summary != countLine || len(r.Data.([]string)) != 0 {
+			t.Fatalf("prefix bill gave %q, %v, %v", r.Summary, r.Data, err)
 		}
 	})
 }

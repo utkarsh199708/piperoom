@@ -3,6 +3,7 @@ package dbtools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,10 +18,29 @@ import (
 type txnSource struct {
 	*fakeSource
 	txns []clients.Transaction
+	// locks maps a pid to the tables its transaction locks. With locks set,
+	// LongTransactionsOnTables keeps a transaction only when it locks one of
+	// the tables asked for and counts the rest, like the SQL; nil keeps all.
+	locks map[int][]string
 }
 
 func (s *txnSource) LongTransactions(context.Context, time.Duration) ([]clients.Transaction, error) {
 	return s.txns, nil
+}
+
+func (s *txnSource) LongTransactionsOnTables(_ context.Context, _ time.Duration, tables []string) (postgres.TableTransactions, error) {
+	var out postgres.TableTransactions
+	for _, t := range s.txns {
+		if s.locks == nil || slices.ContainsFunc(s.locks[t.PID], func(x string) bool { return slices.Contains(tables, x) }) {
+			out.Transactions = append(out.Transactions, t)
+			continue
+		}
+		out.Other++
+		if t.HasXID {
+			out.OtherWriters++
+		}
+	}
+	return out, nil
 }
 
 func TestLongTransactionsReturnNoQueryText(t *testing.T) {

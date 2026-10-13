@@ -157,8 +157,20 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 			g.Nodes = append(g.Nodes, b.topicNode(p, t, info))
 		}
 	}
+	// The pipeline's topics, for the group lag: the ones derived from the
+	// connector configs plus "<topic_prefix>.<table>" from owners.yaml, so
+	// the filter still knows them while Connect is down.
+	ownTopics := map[string]bool{}
+	for _, t := range topics {
+		ownTopics[t] = true
+	}
+	if p.TopicPrefix != "" {
+		for _, t := range p.SourceTables {
+			ownTopics[p.TopicPrefix+"."+t] = true
+		}
+	}
 	for _, gr := range p.ConsumerGroups {
-		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info))
+		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info, ownTopics))
 	}
 	for _, s := range p.SinkTables {
 		g.Nodes = append(g.Nodes, b.sinkNode(p, s, info))
@@ -298,7 +310,7 @@ func (b *builder) placeholderTopicNode(p owners.Pipeline, topic string) Node {
 	return n
 }
 
-func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected) Node {
+func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected, ownTopics map[string]bool) Node {
 	n := Node{
 		ID:     "group:" + gr,
 		Kind:   KindConsumerGroup,
@@ -312,8 +324,30 @@ func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected) Node 
 		n.Facts = map[string]string{"error": "unreachable"}
 		return n
 	}
-	n.Health, n.Facts = groupHealth(snap.lag, b.t)
+	n.Health, n.Facts = groupHealth(pipelineLag(snap.lag, ownTopics), b.t)
 	return n
+}
+
+// pipelineLag keeps only the partitions of the pipeline's own topics and sums
+// the lag again from them. A group can also read other pipelines' topics:
+// their lag is not this pipeline's health and must not show on its map (the
+// same rule as kafka_consumer_lag). A lag without partitions is kept as it is:
+// there is nothing to tell apart, and the real client only returns one when
+// the group has no readable partition at all.
+func pipelineLag(l clients.GroupLag, ownTopics map[string]bool) clients.GroupLag {
+	if len(l.Partitions) == 0 {
+		return l
+	}
+	var kept []clients.PartitionLag
+	var total int64
+	for _, pl := range l.Partitions {
+		if ownTopics[pl.Topic] {
+			kept = append(kept, pl)
+			total += pl.Lag
+		}
+	}
+	l.Partitions, l.TotalLag = kept, total
+	return l
 }
 
 func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {

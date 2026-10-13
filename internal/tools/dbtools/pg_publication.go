@@ -27,6 +27,47 @@ type publicationTablesClient interface {
 	PublicationTables(ctx context.Context, publication, role string, tables []string) ([]postgres.PublicationTable, error)
 }
 
+// publicationSourceTablesClient is implemented by source clients that read
+// only the given tables of a publication in SQL and count its other members
+// (internal/clients/postgres).
+type publicationSourceTablesClient interface {
+	PublicationSourceTables(ctx context.Context, publication, role string, tables []string) ([]postgres.PublicationTable, int, error)
+}
+
+// publicationRead returns the entries for tables and the number of the
+// publication's other member tables.
+type publicationRead func(ctx context.Context, publication, role string, tables []string) ([]postgres.PublicationTable, int, error)
+
+// publicationReader picks the source client's publication read: the SQL
+// filtered one when it has it, else the full member list filtered here. Either
+// way the other members' names are dropped before any result is built.
+func (d Deps) publicationReader() (publicationRead, error) {
+	if c, ok := d.Src.(publicationSourceTablesClient); ok {
+		return c.PublicationSourceTables, nil
+	}
+	c, ok := d.Src.(publicationTablesClient)
+	if !ok {
+		return nil, fmt.Errorf("dbtools: pg_publication_tables: source client does not support PublicationTables")
+	}
+	return func(ctx context.Context, publication, role string, tables []string) ([]postgres.PublicationTable, int, error) {
+		all, err := c.PublicationTables(ctx, publication, role, tables)
+		if err != nil {
+			return nil, 0, err
+		}
+		var out []postgres.PublicationTable
+		other := 0
+		for _, t := range all {
+			switch {
+			case slices.Contains(tables, t.Schema+"."+t.Table):
+				out = append(out, t)
+			case t.InPublication:
+				other++
+			}
+		}
+		return out, other, nil
+	}, nil
+}
+
 // connectorConfig is the Debezium source connector configuration resolved from
 // Connect for a pipeline: the connector name, its database.user role, and the
 // publication name it publishes to together with where that name came from.
@@ -65,9 +106,9 @@ func pgPublicationTablesTool(d Deps) tools.Tool {
 				return tools.Result{}, err
 			}
 
-			src, ok := d.Src.(publicationTablesClient)
-			if !ok {
-				return tools.Result{}, fmt.Errorf("dbtools: pg_publication_tables: source client does not support PublicationTables")
+			read, err := d.publicationReader()
+			if err != nil {
+				return tools.Result{}, err
 			}
 
 			ctx, cancel := toolCtx(ctx)
@@ -77,12 +118,18 @@ func pgPublicationTablesTool(d Deps) tools.Tool {
 				return tools.Result{}, err
 			}
 
-			tables, err := src.PublicationTables(ctx, conn.publication, conn.role, p.SourceTables)
+			tables, other, err := read(ctx, conn.publication, conn.role, p.SourceTables)
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_publication_tables: %w", err)
 			}
 
-			summary, truncated := tools.Truncate(publicationSummary(conn.publication, conn.role, p.SourceTables, tables))
+			text := publicationSummary(conn.publication, conn.role, p.SourceTables, tables)
+			if !sc.Unscoped() {
+				if line := tools.NotShown(other, "tables in publication "+conn.publication); line != "" {
+					text += line + "\n"
+				}
+			}
+			summary, truncated := tools.Truncate(text)
 			return tools.Result{
 				Summary:   summary,
 				Data:      publicationData(conn, p.SourceTables, tables),
