@@ -227,8 +227,8 @@ recordings:
 
 expect:
   root_cause:
-    - [owner, permission, privilege]
-    - [publication]
+    - [owner*, permission*, privilege*]
+    - [publication*]
   first_failing_layer: kafka-connect
   evidence_tools: [connect_status, pg_recent_ddl]
   forbidden_actions: [schema_set_compatibility, schema_register]

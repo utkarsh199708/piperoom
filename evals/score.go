@@ -3,7 +3,9 @@ package evals
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
+	"unicode"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
@@ -29,7 +31,10 @@ type RunResult struct {
 	// Failures says, in short phrases, why Pass is false.
 	Failures []string `json:"failures,omitempty"`
 
-	RootCause       bool   `json:"root_cause"` // final hypothesis matches expect.root_cause
+	RootCause bool `json:"root_cause"` // final hypothesis matches expect.root_cause and tells no root_cause_forbidden story
+	// ForbiddenCause: the final hypothesis tells an expect.root_cause_forbidden
+	// story (it forces RootCause false).
+	ForbiddenCause  bool   `json:"forbidden_cause,omitempty"`
 	FinalHypothesis string `json:"final_hypothesis,omitempty"`
 	Confidence      string `json:"confidence,omitempty"`
 	// ToolCallsToRootCause is how many read-tool calls the agent made before
@@ -43,6 +48,10 @@ type RunResult struct {
 	// MessageNamesCause is informational: an agent message matched
 	// expect.root_cause even if the hypothesis did not.
 	MessageNamesCause bool `json:"message_names_cause"`
+
+	// Judged is set when an LLM judge graded the run (ApplyVerdict): RootCause
+	// and LayerNamed then hold the judge's verdicts, Judged the terms ones.
+	Judged *JudgeResult `json:"judged,omitempty"`
 
 	MissingEvidence   []string `json:"missing_evidence,omitempty"`
 	FixExpected       bool     `json:"fix_expected"`
@@ -114,12 +123,12 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 			}
 			res.Hypotheses++
 			last = &p
-			if res.ToolCallsToRootCause < 0 && matchGroups(sc.Expect.RootCause, p.Text) {
+			if res.ToolCallsToRootCause < 0 && rootCauseMatches(sc.Expect, p.Text) {
 				res.ToolCallsToRootCause = res.ToolCalls
 			}
 		case events.AgentMessage:
 			var p events.AgentMessagePayload
-			if json.Unmarshal(ev.Payload, &p) == nil && matchGroups(sc.Expect.RootCause, p.Text) {
+			if json.Unmarshal(ev.Payload, &p) == nil && rootCauseMatches(sc.Expect, p.Text) {
 				res.MessageNamesCause = true
 			}
 		case events.ProposalCreated:
@@ -140,7 +149,8 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		res.LayerNamed = res.LayerNamed || namesLayer(sc.Expect.FirstFailingLayer, last.Text)
 		res.FinalHypothesis = last.Text
 		res.Confidence = last.Confidence
-		res.RootCause = matchGroups(sc.Expect.RootCause, last.Text)
+		res.RootCause = rootCauseMatches(sc.Expect, last.Text)
+		res.ForbiddenCause = matchForbidden(sc.Expect.RootCauseForbidden, last.Text)
 		res.CitesSteps = len(last.BasedOnSteps) > 0
 		for _, id := range last.BasedOnSteps {
 			if !steps[id] {
@@ -214,6 +224,8 @@ func failures(sc Scenario, res RunResult) []string {
 	switch {
 	case res.Hypotheses == 0:
 		f = append(f, "no hypothesis")
+	case res.ForbiddenCause:
+		f = append(f, "wrong root cause: tells a forbidden story")
 	case !res.RootCause:
 		f = append(f, "wrong root cause")
 	}
@@ -239,15 +251,18 @@ func failures(sc Scenario, res RunResult) []string {
 }
 
 // matchGroups reports whether every group has a term that occurs in text.
+// Terms match whole words over a normalised token stream (see tokenize), not
+// as substrings: "rebalanc" does not match "PreparingRebalance", "rebalanc*"
+// does.
 func matchGroups(groups [][]string, text string) bool {
 	if len(groups) == 0 {
 		return false
 	}
-	lower := strings.ToLower(text)
+	toks := tokenize(text)
 	for _, g := range groups {
 		hit := false
 		for _, term := range g {
-			if strings.Contains(lower, strings.ToLower(term)) {
+			if matchTerm(toks, term) {
 				hit = true
 				break
 			}
@@ -257,6 +272,141 @@ func matchGroups(groups [][]string, text string) bool {
 		}
 	}
 	return true
+}
+
+// clauseSplit cuts text into clauses at ; ! ? newlines and at a full stop
+// followed by space or the end, so "pg.public.orders" stays whole.
+var clauseSplit = regexp.MustCompile(`[;!?\n]|\.(\s|$)`)
+
+// negators mark a clause as advice against, or a denial of, whatever else it
+// says: "do NOT reset to latest", "never reset", "avoid resetting", "instead of
+// resetting", "rather than", "against". "t" is the tail of a contraction
+// (don't -> don t). They are matched like terms, so "avoid*" is a prefix.
+var negators = []string{"not", "never", "no", "avoid*", "without", "t", "instead of", "rather than", "against"}
+
+// matchForbidden reports whether text tells one of the forbidden stories. A
+// row fires only when all its terms occur in one clause, and a clause with a
+// negator is skipped: a correct agent that writes "Do not reset the group to
+// latest" or "reset partition 1 only; the latest schema id is fine" has not
+// told the story. No rows never match. A story that is negated in a clause and
+// told again in another clause still fires.
+func matchForbidden(rows [][]string, text string) bool {
+	for _, clause := range clauseSplit.Split(text, -1) {
+		toks := tokenize(clause)
+		if len(toks) == 0 || negated(toks) {
+			continue
+		}
+		for _, row := range rows {
+			if len(row) == 0 {
+				continue
+			}
+			all := true
+			for _, term := range row {
+				if !matchTerm(toks, term) {
+					all = false
+					break
+				}
+			}
+			if all {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// negated reports whether the clause's tokens contain a negator.
+func negated(toks []string) bool {
+	for _, n := range negators {
+		if matchTerm(toks, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// rootCauseMatches is the deterministic root-cause verdict for one text: the
+// expected terms are all there and no forbidden story is told.
+func rootCauseMatches(e Expect, text string) bool {
+	return matchGroups(e.RootCause, text) && !matchForbidden(e.RootCauseForbidden, text)
+}
+
+// tokenize lowercases text and splits it into words (zero-width and other
+// invisible characters are not letters, so they split a word like any
+// punctuation; "res<ZWSP>et" is two words and matches nothing): on every character that
+// is not a letter or digit, between a lower-case letter or digit and an
+// upper-case letter (PreparingRebalance -> preparing rebalance), and before
+// the last capital of an acronym (HTTPServer -> http server). Digits stay
+// attached to the letters they touch (int4, v3), and "25377154" is one token.
+func tokenize(s string) []string {
+	var toks []string
+	var cur []rune
+	flush := func() {
+		if len(cur) > 0 {
+			toks = append(toks, strings.ToLower(string(cur)))
+			cur = cur[:0]
+		}
+	}
+	rs := []rune(s)
+	for i, r := range rs {
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			flush()
+			continue
+		}
+		if unicode.IsUpper(r) && len(cur) > 0 {
+			prev := rs[i-1]
+			nextLower := i+1 < len(rs) && unicode.IsLower(rs[i+1])
+			if unicode.IsLower(prev) || unicode.IsDigit(prev) || (unicode.IsUpper(prev) && nextLower) {
+				flush()
+			}
+		}
+		cur = append(cur, r)
+	}
+	flush()
+	return toks
+}
+
+// termTokens splits a scenario term into its tokens and reports whether it
+// ends in "*", which makes the last token a prefix match. ok is false for a
+// term with no words or a "*" anywhere but the end.
+func termTokens(term string) (toks []string, prefix, ok bool) {
+	term = strings.TrimSpace(term)
+	if strings.HasSuffix(term, "*") {
+		prefix = true
+		term = strings.TrimSuffix(term, "*")
+	}
+	if strings.Contains(term, "*") {
+		return nil, false, false
+	}
+	toks = tokenize(term)
+	return toks, prefix, len(toks) > 0
+}
+
+// matchTerm reports whether the term's tokens occur as consecutive tokens in
+// text (a phrase), the last one as a prefix when the term ends in "*".
+func matchTerm(text []string, term string) bool {
+	want, prefix, ok := termTokens(term)
+	if !ok {
+		return false
+	}
+	for i := 0; i+len(want) <= len(text); i++ {
+		hit := true
+		for j, w := range want {
+			t := text[i+j]
+			if j == len(want)-1 && prefix {
+				hit = strings.HasPrefix(t, w)
+			} else {
+				hit = t == w
+			}
+			if !hit {
+				break
+			}
+		}
+		if hit {
+			return true
+		}
+	}
+	return false
 }
 
 // matchActionGroups reports whether every group has an action in proposed.
@@ -315,12 +465,12 @@ func checkSteps(sc Scenario, steps []events.ProposalStep) []string {
 // hypothesis. Kafka itself is matched by its parts, not the word "kafka",
 // because "Kafka Connect" would otherwise name both layers.
 var layerTerms = map[string][]string{
-	"postgres":        {"postgres", "replication slot", "source table", "source db", "transaction"},
-	"kafka-connect":   {"connect", "debezium"},
-	"schema-registry": {"schema registry", "schema-registry", "registry", "subject"},
-	"kafka":           {"topic", "broker", "partition"},
-	"consumer":        {"consumer"},
-	"warehouse":       {"warehouse", "sink table"},
+	"postgres":        {"postgres*", "replication slot", "source table", "source db", "transaction*"},
+	"kafka-connect":   {"connect", "connector*", "debezium"},
+	"schema-registry": {"schema registry", "registry", "subject*"},
+	"kafka":           {"topic*", "broker*", "partition*"},
+	"consumer":        {"consumer*"},
+	"warehouse":       {"warehouse*", "sink table"},
 }
 
 // namesLayer reports whether text names layer.

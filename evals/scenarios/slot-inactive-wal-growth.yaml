@@ -224,8 +224,8 @@ recordings:
 expect:
   root_cause:
     - [stopped]
-    - [slot]
-    - [wal, retain]
+    - [slot*]
+    - [wal, retain*]
   first_failing_layer: kafka-connect
   evidence_tools: [connect_status, pg_replication_slots]
   fix: [[connect_resume_connector]]

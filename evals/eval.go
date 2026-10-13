@@ -33,6 +33,12 @@ type Config struct {
 	Runner agent.Runner
 	// Logger receives the agent's own logs (default slog.Default()).
 	Logger *slog.Logger
+	// Judge forces the judge mode for every scenario ("terms" or "claude");
+	// empty uses each scenario's own `judge` field (default terms).
+	Judge string
+	// JudgeClient grades hypotheses when a scenario's judge mode is "claude".
+	// Nil is an error then; tests and CI never set it.
+	JudgeClient HypothesisJudge
 	// OnRun, if set, is called after each run, for progress output. Calls are
 	// serialized.
 	OnRun func(RunResult, Transcript)
@@ -69,6 +75,14 @@ func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, er
 	}
 	if err := ValidateAll(scenarios, defs); err != nil {
 		return Report{}, err
+	}
+	if cfg.Judge != "" && cfg.Judge != JudgeTerms && cfg.Judge != JudgeClaude {
+		return Report{}, fmt.Errorf("evals: unknown judge %q (want %q or %q)", cfg.Judge, JudgeTerms, JudgeClaude)
+	}
+	for _, sc := range scenarios {
+		if effectiveJudge(cfg.Judge, sc) == JudgeClaude && cfg.JudgeClient == nil {
+			return Report{}, fmt.Errorf("evals: scenario %q asks for judge %q but no judge client is configured (build with -tags claude and set ANTHROPIC_API_KEY)", sc.Name, JudgeClaude)
+		}
 	}
 
 	type job struct {
@@ -230,6 +244,14 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 
 	tr := Transcript{Events: rec.snapshot(), Misses: rp.Misses(), Attempts: attempts.snapshot(), Idles: inbox.idleCount()}
 	res := Judge(sc, tr, err, timedOut)
+	// Nothing to grade without a hypothesis; the terms verdict already says so.
+	if effectiveJudge(cfg.Judge, sc) == JudgeClaude && res.FinalHypothesis != "" {
+		v, jerr := cfg.JudgeClient.JudgeHypothesis(ctx, sc, res.FinalHypothesis)
+		if jerr != nil {
+			return RunResult{}, Transcript{}, jerr
+		}
+		res = ApplyVerdict(sc, res, v)
+	}
 	res.Run = run
 	res.DurationMS = took.Milliseconds()
 	return res, tr, nil
