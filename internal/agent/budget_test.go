@@ -137,8 +137,13 @@ func TestRunStopsAtBudgetAfterTheToolsFinish(t *testing.T) {
 	sink := &fakeSink{}
 	r, rec := budgetRunner(t, scripted, b, sink, Options{MaxTurns: 10})
 
-	if err := r.run(context.Background()); err != nil {
-		t.Fatalf("a budget stop is a clean stop, got %v", err)
+	err := r.run(context.Background())
+	be, ok := asBudgetError(err)
+	if !ok {
+		t.Fatalf("a budget stop must return an error wrapping *BudgetError, got %v", err)
+	}
+	if be.Used != 140 || be.Limit != 150 {
+		t.Fatalf("BudgetError = %+v, want 140 of 150", be)
 	}
 	// Turn 1: 70 used, estimate 60 -> allowed. Turn 2: 140 used, estimate 60 ->
 	// refused before the third call.
@@ -223,15 +228,13 @@ func testEndpoint(m model, limit int64) *Endpoint {
 	return &Endpoint{provider: ProviderAnthropic, limit: limit, model: m, log: discardLogger(), budgets: map[string]*tokenBudget{}, triageTurns: defaultTriageTurns}
 }
 
-func endpointRun(t *testing.T, ep *Endpoint, roomID string, sink *fakeSink) {
+// endpointRun runs one room on ep and returns Run's error.
+func endpointRun(t *testing.T, ep *Endpoint, roomID string, sink *fakeSink) error {
 	t.Helper()
 	reg := tools.NewRegistry()
-	err := ep.Run(context.Background(), Alert{RoomID: roomID, Title: "orders stale", PipelineID: "orders"}, Deps{
+	return ep.Run(context.Background(), Alert{RoomID: roomID, Title: "orders stale", PipelineID: "orders"}, Deps{
 		Tools: reg, Inbox: &fakeInbox{waitErr: context.Canceled}, Sink: sink, Logger: discardLogger(),
 	}, Options{})
-	if err != nil {
-		t.Fatalf("Run(%s): %v", roomID, err)
-	}
 }
 
 func TestEndpointBudgetSurvivesAnAgentRestart(t *testing.T) {
@@ -240,14 +243,18 @@ func TestEndpointBudgetSurvivesAnAgentRestart(t *testing.T) {
 	ep := testEndpoint(scripted, 100)
 
 	first := &fakeSink{}
-	endpointRun(t, ep, "room-a", first) // 110 used after the first run
+	if err := endpointRun(t, ep, "room-a", first); err != nil { // 110 used after the first run
+		t.Fatalf("first run: %v", err)
+	}
 	if len(scripted.calls) != 1 {
 		t.Fatalf("first run made %d calls, want 1", len(scripted.calls))
 	}
 
 	// The room service starts a new Run for the same room: the count carries over.
 	second := &fakeSink{}
-	endpointRun(t, ep, "room-a", second)
+	if _, ok := asBudgetError(endpointRun(t, ep, "room-a", second)); !ok {
+		t.Fatal("a restarted run on a spent budget must return a *BudgetError")
+	}
 	if len(scripted.calls) != 1 {
 		t.Fatalf("restarted run called the model again (%d calls); the budget did not survive", len(scripted.calls))
 	}
@@ -257,7 +264,9 @@ func TestEndpointBudgetSurvivesAnAgentRestart(t *testing.T) {
 	}
 
 	// Another room has its own budget.
-	endpointRun(t, ep, "room-b", &fakeSink{})
+	if err := endpointRun(t, ep, "room-b", &fakeSink{}); err != nil {
+		t.Fatalf("room-b: %v", err)
+	}
 	if len(scripted.calls) != 2 {
 		t.Fatalf("a different room made %d total calls, want 2", len(scripted.calls))
 	}

@@ -213,9 +213,11 @@ func (r *runner) run(ctx context.Context) error {
 		if err != nil {
 			// The room's token budget is spent: stop here, between turns. Tool
 			// calls of the previous turn have all finished by now.
+			// The error is returned so a supervisor can tell this stop from a
+			// normal end; it must treat it as a stop (no retry, no error status).
 			if be, ok := asBudgetError(err); ok {
 				r.stopForBudget(ctx, be)
-				return nil
+				return fmt.Errorf("agent: stopped: %w", be)
 			}
 			// A cancelled context is a clean shutdown (room closed), not an error.
 			if ctx.Err() != nil {

@@ -74,9 +74,11 @@ func budgetText(used, limit int64) string {
 // limit by its own output, and calls that run at the same time (a hand-off next
 // to the loop) are not serialized.
 type tokenBudget struct {
-	limit int64 // 0 = no cap
-
-	mu    sync.Mutex
+	mu sync.Mutex
+	// limit is 0 for no cap. It sits under mu because a run with
+	// Options.TokenBudget changes it on an entry another call (a hand-off) may
+	// already be using.
+	limit int64
 	used  int64
 	input int64 // input size of the last loop call, the floor for the next one
 }
@@ -86,11 +88,11 @@ func newTokenBudget(limit int64) *tokenBudget { return &tokenBudget{limit: limit
 // admit returns a *BudgetError when a call that needs at least estimate more
 // tokens would reach the limit.
 func (b *tokenBudget) admit(estimate int64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.limit <= 0 {
 		return nil
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.used+estimate >= b.limit {
 		return &BudgetError{Used: b.used, Limit: b.limit}
 	}
@@ -115,6 +117,21 @@ func (b *tokenBudget) record(u usageTokens, isLoop bool) {
 	if isLoop && u.input > 0 {
 		b.input = u.input
 	}
+}
+
+// setLimit replaces the cap and keeps the count, so a run that asks for a
+// smaller budget is still charged for what the room already spent.
+func (b *tokenBudget) setLimit(limit int64) {
+	b.mu.Lock()
+	b.limit = limit
+	b.mu.Unlock()
+}
+
+// Limit reports the current cap; 0 means no cap.
+func (b *tokenBudget) Limit() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.limit
 }
 
 // Used reports the tokens counted so far.
