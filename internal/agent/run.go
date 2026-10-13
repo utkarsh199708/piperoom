@@ -728,7 +728,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		})
 		return toolResult{
 			toolUseID: u.id,
-			content:   r.wrapReadToolOutput(u.name, stepID, msg),
+			content:   r.wrapReadToolOutput(u.name, stepID, summary),
 			isError:   true,
 		}
 	}

@@ -11,16 +11,21 @@ import (
 // mapping:
 //   - format characters (Unicode Cf: zero-width space/joiners, word joiner,
 //     BOM, soft hyphen, bidi embeddings/overrides/isolates) and variation
-//     selectors are dropped;
-//   - fullwidth ASCII (U+FF01..U+FF5E) and the small-form angle brackets map
-//     to ASCII;
+//     selectors are dropped, and so are combining marks (Mn), so "i̇gnore"
+//     reads "ignore";
+//   - fullwidth ASCII (U+FF01..U+FF5E), Mathematical Alphanumeric letters and
+//     digits (U+1D400..U+1D7FF) and the small-form angle brackets map to
+//     ASCII;
 //   - unusual spaces (no-break, ideographic, en/em spaces) become ' ';
-//   - common Cyrillic and Greek lookalikes of Latin letters map to Latin.
+//   - common Cyrillic, Greek and Armenian lookalikes and the Latin small
+//     capitals map to Latin letters.
 //
 // origin[i] is the byte offset in s of the rune that produced byte i of the
 // result; origin[len(result)] is len(s). changed reports whether any rune was
-// mapped or dropped.
-func normalize(s string) (out string, origin []int, changed bool) {
+// mapped or dropped. With cfAsSpace, format characters become ' ' instead of
+// being dropped, for text that uses them as word separators
+// ("IGNORE<U+2060>ALL"); hadCf reports whether there were any.
+func normalize(s string, cfAsSpace bool) (out string, origin []int, changed, hadCf bool) {
 	var b strings.Builder
 	b.Grow(len(s))
 	origin = make([]int, 0, len(s)+1)
@@ -28,7 +33,14 @@ func normalize(s string) (out string, origin []int, changed bool) {
 		m, keep := mapRune(r)
 		if !keep {
 			changed = true
-			continue
+			if !unicode.Is(unicode.Cf, r) {
+				continue
+			}
+			hadCf = true
+			if !cfAsSpace {
+				continue
+			}
+			m = ' '
 		}
 		if m != r {
 			changed = true
@@ -43,7 +55,7 @@ func normalize(s string) (out string, origin []int, changed bool) {
 		}
 	}
 	origin = append(origin, len(s))
-	return b.String(), origin, changed
+	return b.String(), origin, changed, hadCf
 }
 
 // mapRune returns the replacement for r, or keep=false to drop it.
@@ -53,8 +65,17 @@ func mapRune(r rune) (rune, bool) {
 		return r, true
 	case unicode.Is(unicode.Cf, r),
 		r >= 0xFE00 && r <= 0xFE0F, // variation selectors
-		r == 0x180E, r == 0x034F:   // Mongolian vowel separator, combining grapheme joiner
+		r == 0x180E, r == 0x034F,   // Mongolian vowel separator, combining grapheme joiner
+		unicode.Is(unicode.Mn, r):
 		return 0, false
+	case r >= 0x1D400 && r <= 0x1D6A3: // Mathematical Alphanumeric letters: 13 styles of A-Z a-z
+		i := (r - 0x1D400) % 52
+		if i < 26 {
+			return 'A' + i, true
+		}
+		return 'a' + i - 26, true
+	case r >= 0x1D7CE && r <= 0x1D7FF: // Mathematical digits: 5 styles of 0-9
+		return '0' + (r-0x1D7CE)%10, true
 	case r >= 0xFF01 && r <= 0xFF5E: // fullwidth ASCII
 		return r - 0xFEE0, true
 	case r == 0xFE64:
@@ -78,6 +99,12 @@ var lookalikes = map[rune]rune{
 	// Cyrillic upper case
 	'А': 'A', 'В': 'B', 'С': 'C', 'Е': 'E', 'Н': 'H', 'І': 'I', 'Ј': 'J', 'К': 'K', 'М': 'M',
 	'О': 'O', 'Р': 'P', 'Ѕ': 'S', 'Т': 'T', 'Х': 'X', 'У': 'Y',
+	// Armenian
+	'օ': 'o', 'ս': 'u', 'հ': 'h', 'ո': 'n', 'ց': 'g',
+	// Latin small capitals
+	'ᴀ': 'a', 'ʙ': 'b', 'ᴄ': 'c', 'ᴅ': 'd', 'ᴇ': 'e', 'ɢ': 'g', 'ʜ': 'h', 'ɪ': 'i', 'ᴊ': 'j',
+	'ᴋ': 'k', 'ʟ': 'l', 'ᴍ': 'm', 'ɴ': 'n', 'ᴏ': 'o', 'ᴘ': 'p', 'ʀ': 'r', 'ꜱ': 's', 'ᴛ': 't',
+	'ᴜ': 'u', 'ᴠ': 'v', 'ᴡ': 'w', 'ʏ': 'y', 'ᴢ': 'z',
 	// Greek
 	'ο': 'o', 'α': 'a', 'ν': 'v', 'ι': 'i', 'Α': 'A', 'Β': 'B', 'Ε': 'E', 'Η': 'H', 'Ι': 'I',
 	'Κ': 'K', 'Μ': 'M', 'Ν': 'N', 'Ο': 'O', 'Ρ': 'P', 'Τ': 'T', 'Χ': 'X', 'Υ': 'Y', 'Ζ': 'Z',
