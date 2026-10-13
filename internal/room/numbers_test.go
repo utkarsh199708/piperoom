@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"piperoom/internal/jsonnum"
 )
 
 func TestClassifyNumber(t *testing.T) {
@@ -65,11 +67,12 @@ func TestSignificantForm(t *testing.T) {
 		{"1e", "", 0, false},
 		{"1e5x", "", 0, false},
 		{"e5", "", 0, false},
-		{"1e99999999999999999999", "", 0, false},
+		{"1e99999999999999999999", "1", 1 << 40, true}, // clamped, sign kept
+		{"1e-99999999999999999999", "1", -(1 << 40), true},
 	} {
-		d, e, ok := significantForm(tc.tok)
+		d, e, ok := jsonnum.Significant(tc.tok)
 		if ok != tc.ok || (ok && (d != tc.digits || e != tc.exp10)) {
-			t.Errorf("significantForm(%.40q) = %q, %d, %v; want %q, %d, %v", tc.tok, d, e, ok, tc.digits, tc.exp10, tc.ok)
+			t.Errorf("jsonnum.Significant(%.40q) = %q, %d, %v; want %q, %d, %v", tc.tok, d, e, ok, tc.digits, tc.exp10, tc.ok)
 		}
 	}
 }
@@ -114,6 +117,67 @@ func TestClassifyNumberIsStableAcrossSpellings(t *testing.T) {
 	// Over maxExactSigDigits significant digits: inexact, never compared.
 	if got := classifyNumber("1" + strings.Repeat("3", maxExactSigDigits) + "e-" + "1000"); got != numberInexact {
 		t.Errorf("801 significant digits = %d, want inexact", got)
+	}
+}
+
+// strconv.ParseFloat stops adding exponent digits at about 10000, so a token
+// padded with zeros used to parse as a small number while its value is huge
+// (or tiny), and big.Rat then built 10^999899 (about 32 ms a token). The
+// decision is now made on the significant form.
+func TestClassifyNumberPaddedTokensAreCheapAndRight(t *testing.T) {
+	zeros := func(n int) string { return strings.Repeat("0", n) }
+	hugePos := "0." + zeros(10098) + "1e1009998" // value 1e999899, beyond every double
+	hugeNeg := "1" + zeros(10099) + "e-1009998"  // value 1e-999899, rounds to zero
+	for _, tc := range []struct {
+		name string
+		tok  string
+		want numberClass
+	}{
+		{"huge positive value", hugePos, numberOutOfRange},
+		{"negative of the huge positive value", "-" + hugePos, numberOutOfRange},
+		{"tiny value (underflow)", hugeNeg, numberInexact},
+		{"value 1 with a 99999-zero fraction and e100000", "0." + zeros(99999) + "1e100000", numberExact},
+		{"value 0.1 with 99999 integer zeros and e-100000", "1" + zeros(99999) + "e-100000", numberExact},
+		{"value 1 in the plain spelling", "1", numberExact},
+		{"value 0.1 in the plain spelling", "0.1", numberExact},
+	} {
+		start := time.Now()
+		got := classifyNumber(tc.tok)
+		if d := time.Since(start); d > 20*time.Millisecond {
+			t.Errorf("%s: took %v, want a few ms at most", tc.name, d)
+		}
+		if got != tc.want {
+			t.Errorf("%s: classifyNumber = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+	// Neither padded 'one' and 'tenth' is out of range for the guard.
+	for _, body := range []string{`{"n":0.` + zeros(99999) + `1e100000}`, `{"n":1` + zeros(99999) + `e-100000}`} {
+		if hasOutOfRangeNumber([]byte(body)) {
+			t.Errorf("hasOutOfRangeNumber(%.30q...) = true, want false", body)
+		}
+	}
+	// Both spellings of one value agree, which is what survives the jsonb round trip.
+	if classifyNumber("0."+zeros(99999)+"1e100000") != classifyNumber("1") {
+		t.Error("padded and plain spellings of 1 differ")
+	}
+}
+
+// 1 MiB of the slow tokens must go through the guard and the hash form fast.
+func TestPaddedNumberTokensAreCheapInABody(t *testing.T) {
+	for name, tok := range map[string]string{
+		"huge positive": "0." + strings.Repeat("0", 10098) + "1e1009998",
+		"huge negative": "1" + strings.Repeat("0", 10099) + "e-1009998",
+	} {
+		body := []byte("[" + strings.Repeat(tok+",", (1<<20)/(len(tok)+1)) + "0]")
+		start := time.Now()
+		got := hasOutOfRangeNumber(body)
+		_, inexact := hashForm(body)
+		if d := time.Since(start); d > 500*time.Millisecond {
+			t.Fatalf("%s: 1 MiB of tokens took %v, want well under 1 s", name, d)
+		}
+		if got != (name == "huge positive") || inexact == 0 {
+			t.Errorf("%s: out of range = %v, inexact = %d", name, got, inexact)
+		}
 	}
 }
 

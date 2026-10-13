@@ -24,6 +24,11 @@ func TestOutOfRange(t *testing.T) {
 		"-":                               false, // not a number
 		"1e":                              false,
 		"1." + strings.Repeat("0", 20000): true, // scale beyond what jsonb takes
+		// ParseFloat cuts a long exponent off at about 10000 digits and would
+		// read these as 1 and 1; the values are 1e999899 and 1e-999899.
+		"0." + strings.Repeat("0", 10098) + "1e1009998": true,
+		"1" + strings.Repeat("0", 10099) + "e-1009998":  true,
+		"0." + strings.Repeat("0", 5000) + "1e5001":     false, // value 1
 	} {
 		if got := OutOfRange(tok); got != want {
 			t.Errorf("OutOfRange(%.40q) = %v, want %v", tok, got, want)
@@ -49,6 +54,11 @@ func TestQuote(t *testing.T) {
 		if string(out) != tc.out || n != tc.n {
 			t.Errorf("Quote(%s) = %s, %d; want %s, %d", tc.in, out, n, tc.out, tc.n)
 		}
+	}
+	// The 10109-character token whose true value is 1e999899 is quoted.
+	big := "0." + strings.Repeat("0", 10098) + "1e1009998"
+	if out, n := Quote([]byte(`{"n":` + big + `}`)); n != 1 || string(out) != `{"n":"`+big+`"}` {
+		t.Errorf("Quote of the padded huge token: n = %d, out = %.60s", n, out)
 	}
 	// No copy when nothing changes.
 	in := []byte(`{"a":1}`)

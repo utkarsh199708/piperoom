@@ -18,57 +18,6 @@ import (
 // so the count is the same before and after a jsonb round trip.
 const maxExactSigDigits = 800
 
-// significantForm splits a finite number token into its significant digits
-// (no sign, no leading zeros, no trailing zeros) and a decimal exponent, so the
-// value is digits * 10^exp10. ok is false when the token is not a plain JSON
-// number or its exponent does not fit an int. The work is linear in the token
-// length and allocates at most that much; it never builds a big number.
-func significantForm(tok string) (digits string, exp10 int, ok bool) {
-	i := 0
-	if i < len(tok) && (tok[i] == '-' || tok[i] == '+') {
-		i++
-	}
-	start := i
-	for i < len(tok) && tok[i] >= '0' && tok[i] <= '9' {
-		i++
-	}
-	intPart := tok[start:i]
-	fracPart := ""
-	if i < len(tok) && tok[i] == '.' {
-		i++
-		fs := i
-		for i < len(tok) && tok[i] >= '0' && tok[i] <= '9' {
-			i++
-		}
-		fracPart = tok[fs:i]
-	}
-	exp := 0
-	if i < len(tok) && (tok[i] == 'e' || tok[i] == 'E') {
-		n, err := strconv.Atoi(tok[i+1:])
-		if err != nil {
-			return "", 0, false
-		}
-		exp = n
-		i = len(tok)
-	}
-	if i != len(tok) || intPart == "" && fracPart == "" {
-		return "", 0, false
-	}
-	all := intPart + fracPart
-	lead := 0
-	for lead < len(all) && all[lead] == '0' {
-		lead++
-	}
-	end := len(all)
-	for end > lead && all[end-1] == '0' {
-		end--
-	}
-	if lead == end {
-		return "0", 0, true // zero in any spelling
-	}
-	return all[lead:end], exp - len(fracPart) + (len(all) - end), true
-}
-
 // numberClass says how a number token fares as a float64.
 type numberClass int
 
@@ -81,14 +30,40 @@ const (
 
 // classifyNumber classifies one number token.
 //
-// The cost is bounded by the token length. big.Rat is only used once
-// strconv.ParseFloat has shown the value is a finite, non-zero double; for such
-// a token the decimal exponent cannot be larger than about 330 plus the number
-// of digits, so building 10^exponent is cheap. A token such as 1e-999999 parses
-// to 0 (underflow) and is classified without big.Rat: it used to build
-// 10^999999, about 27 ms a token.
+// The decision is made on the significant form of the token (jsonnum.Significant:
+// digits without sign, leading and trailing zeros, and a decimal exponent), never
+// on the raw text. strconv.ParseFloat is not reliable for a token padded with
+// zeros: it stops adding exponent digits at about 10000, so
+// "0.<10098 zeros>1e1009998" parses as 1 while its value is 1e-9 * 10^1009998.
+// Building 10^1009998 with big.Rat takes about 32 ms a token.
+//
+// With mag = exp10 + len(digits) the value lies in [10^(mag-1), 10^mag):
+//
+//   - mag above jsonnum.MaxMag is beyond every double: out of range;
+//   - mag below jsonnum.MinMag rounds to zero: inexact (underflow);
+//   - otherwise exp10 is between about -1125 and 310 (the digits are capped at
+//     maxExactSigDigits), so ParseFloat of the short significant form is cheap,
+//     and so is the big.Rat built from it, whatever the token's length.
 func classifyNumber(tok string) numberClass {
-	f, err := strconv.ParseFloat(tok, 64)
+	digits, exp10, ok := jsonnum.Significant(tok)
+	if !ok {
+		return numberIgnore
+	}
+	if digits == "0" {
+		return numberExact // zero stays zero whatever the exponent
+	}
+	if mag := exp10 + len(digits); mag > jsonnum.MaxMag {
+		return numberOutOfRange
+	} else if mag < jsonnum.MinMag {
+		return numberInexact
+	}
+	// ParseFloat sees at most the significant digits and an exponent within
+	// about 1200, never the padding of the raw token.
+	norm := digits + "e" + strconv.Itoa(exp10)
+	if tok[0] == '-' {
+		norm = "-" + norm
+	}
+	f, err := strconv.ParseFloat(norm, 64)
 	if err != nil {
 		if errors.Is(err, strconv.ErrRange) {
 			return numberOutOfRange
@@ -96,33 +71,23 @@ func classifyNumber(tok string) numberClass {
 		return numberIgnore
 	}
 	if f == 0 {
-		// Zero, or a non-zero value that underflowed to zero.
-		if jsonnum.MantissaIsZero(tok) {
-			return numberExact
-		}
-		return numberInexact
+		return numberInexact // a non-zero value that underflowed to zero
 	}
 	// The cap is on significant digits, not on token length. jsonb keeps the
 	// decimal scale, so the same value comes back with a different length
 	// (1.<700 zeros>e-320 is 707 characters in and 1022 after the round trip),
 	// and a length cap would class one value two ways. Significant digits are
 	// the same for every spelling of a value.
-	digits, exp10, ok := significantForm(tok)
-	if !ok || len(digits) > maxExactSigDigits {
+	if len(digits) > maxExactSigDigits {
 		// A double's exact decimal expansion has at most 767 significant
 		// digits; with more, the token is never the same value as any double.
 		return numberInexact
 	}
-	// want = digits * 10^exp10. The token is a finite non-zero double, so
-	// 5e-324 <= want <= 1.8e308 and digits has at most maxExactSigDigits
-	// digits: exp10 is between about -1125 and 308, so building 10^|exp10| is
-	// cheap whatever the token's length or spelling.
-	want, ok := new(big.Rat).SetString(digits + "e" + strconv.Itoa(exp10))
+	// want = digits * 10^exp10, with 5e-324 <= |want| <= 1.8e308 and at most
+	// maxExactSigDigits digits.
+	want, ok := new(big.Rat).SetString(norm)
 	if !ok {
-		return numberInexact // too large an exponent to model; treat as not exact
-	}
-	if f < 0 {
-		want.Neg(want)
+		return numberInexact
 	}
 	written, err := jcs.NumberToJSON(f)
 	if err != nil {

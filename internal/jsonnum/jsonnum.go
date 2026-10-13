@@ -48,33 +48,112 @@ func Scan(raw []byte, fn func(start, end int)) {
 	}
 }
 
-// MantissaIsZero reports whether the digits before any exponent are all zero.
-func MantissaIsZero(tok string) bool {
-	for i := 0; i < len(tok); i++ {
-		switch c := tok[i]; {
-		case c == 'e' || c == 'E':
-			return true
-		case c >= '1' && c <= '9':
-			return false
-		}
+// MaxMag and MinMag bound the magnitude of a finite, non-zero float64. A value
+// with significant digits d and exponent e (value = d * 10^e) lies in
+// [10^(mag-1), 10^mag) for mag = e + len(d). The largest double is 1.8e308
+// (mag 309) and the smallest denormal is 4.9e-324 (mag -323), so mag above
+// MaxMag is beyond every double and mag below MinMag rounds to zero. Only the
+// narrow band between needs a real parse.
+const (
+	MaxMag = 310
+	MinMag = -325
+)
+
+// maxExpClamp stands in for an exponent too large for an int; it keeps the
+// magnitude arithmetic far from overflow and is far beyond MaxMag/MinMag.
+const maxExpClamp = 1 << 40
+
+// Significant splits a number token into its significant digits (no sign, no
+// leading zeros, no trailing zeros) and a decimal exponent, so the value is
+// digits * 10^exp10; zero in any spelling is "0", 0. ok is false when the token
+// is not a plain JSON number. An exponent that does not fit an int is clamped
+// to +/-2^40 (its sign is kept), which is far outside the double range. The
+// work is linear in the token length; it never builds a big number, and it does
+// not depend on how ParseFloat treats a very long exponent or mantissa (which
+// it cuts off at about 10000 digits).
+func Significant(tok string) (digits string, exp10 int, ok bool) {
+	i := 0
+	if i < len(tok) && (tok[i] == '-' || tok[i] == '+') {
+		i++
 	}
-	return true
+	start := i
+	for i < len(tok) && tok[i] >= '0' && tok[i] <= '9' {
+		i++
+	}
+	intPart := tok[start:i]
+	fracPart := ""
+	if i < len(tok) && tok[i] == '.' {
+		i++
+		fs := i
+		for i < len(tok) && tok[i] >= '0' && tok[i] <= '9' {
+			i++
+		}
+		fracPart = tok[fs:i]
+	}
+	exp := 0
+	if i < len(tok) && (tok[i] == 'e' || tok[i] == 'E') {
+		n, err := strconv.Atoi(tok[i+1:])
+		switch {
+		case err == nil:
+			exp = n
+		case errors.Is(err, strconv.ErrRange):
+			exp = maxExpClamp
+			if tok[i+1] == '-' {
+				exp = -maxExpClamp
+			}
+		default:
+			return "", 0, false
+		}
+		i = len(tok)
+	}
+	if i != len(tok) || intPart == "" && fracPart == "" {
+		return "", 0, false
+	}
+	all := intPart + fracPart
+	lead := 0
+	for lead < len(all) && all[lead] == '0' {
+		lead++
+	}
+	end := len(all)
+	for end > lead && all[end-1] == '0' {
+		end--
+	}
+	if lead == end {
+		return "0", 0, true // zero in any spelling
+	}
+	exp10 = exp - len(fracPart) + (len(all) - end)
+	if exp10 > maxExpClamp {
+		exp10 = maxExpClamp
+	} else if exp10 < -maxExpClamp {
+		exp10 = -maxExpClamp
+	}
+	return all[lead:end], exp10, true
 }
 
 // OutOfRange reports whether the number token tok is outside the double range:
 // not finite as a float64 (1e400, and the 1e131072 that jsonb refuses), not zero
 // but underflowing to zero (1e-400, and the 1e-16384 that jsonb refuses), or so
 // long that jsonb may refuse its scale. A token that does not parse as a number
-// is not out of range (it is not a number).
+// is not out of range (it is not a number). The decision uses the significant
+// form (see Significant), so a token padded with thousands of zeros is judged by
+// its value, not by how strconv cuts off a long exponent.
 func OutOfRange(tok string) bool {
 	if len(tok) > maxStorableTokenLen {
 		return true
 	}
-	f, err := strconv.ParseFloat(tok, 64)
+	digits, exp10, ok := Significant(tok)
+	if !ok || digits == "0" {
+		return false
+	}
+	switch mag := exp10 + len(digits); {
+	case mag > MaxMag, mag < MinMag:
+		return true
+	}
+	f, err := strconv.ParseFloat(digits+"e"+strconv.Itoa(exp10), 64)
 	if err != nil {
 		return errors.Is(err, strconv.ErrRange)
 	}
-	return f == 0 && !MantissaIsZero(tok)
+	return f == 0
 }
 
 // Quote returns raw with every out-of-range number token (see OutOfRange)
