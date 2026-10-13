@@ -4,6 +4,8 @@ export interface DevUser {
   id: string
   name: string
   layers: string[]
+  /** Absent means member. A viewer can read rooms and change nothing. */
+  role?: 'member' | 'viewer'
 }
 
 export const DEV_USERS: DevUser[] = [

@@ -44,8 +44,18 @@ function FixtureUserProvider({ children }: { children: ReactNode }) {
       const p = new URLSearchParams(prev)
       if (next) p.set('user', next)
       else p.delete('user')
+      p.delete('login')
       return p
     })
+  }
+
+  // `?login=1` previews the sign-in screen without a server (fixture mode only).
+  if (searchParams.get('login') === '1') {
+    return (
+      <div className="shell">
+        <LoginScreen onPick={setUserId} busy={false} />
+      </div>
+    )
   }
 
   if (!dev) {

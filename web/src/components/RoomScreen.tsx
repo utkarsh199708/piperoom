@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
 import { useCurrentUser } from '../context/user'
-import { canHandoff, isViewer } from '../state/permissions'
+import { canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
 import { ageLabel } from '../lib/time'
 import { Avatar, Chip } from './ui'
 import { agentStatusChip, severityTone } from '../lib/tones'
@@ -18,6 +18,7 @@ import { TracePanel } from './TracePanel'
 import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import { NoDriverBanner } from './NoDriverBanner'
 import { StaleBanner } from './StaleBanner'
+import { useRegisterRoomCommands } from './shell/context'
 
 export function RoomScreen() {
   const { roomId = '' } = useParams()
@@ -79,6 +80,22 @@ export function RoomScreen() {
       () => undefined,
     )
   }
+
+  // The command menu (⌘K) offers what this room offers right now. Same permission
+  // checks and callbacks as the buttons below; a viewer gets none of the writes.
+  useRegisterRoomCommands(
+    state
+      ? {
+          title: state.title,
+          takeControl: canTakeControl(state, user) ? () => actions.grantControl(user.id) : undefined,
+          requestControl:
+            !canTakeControl(state, user) && canRequestControl(state, user) ? actions.requestControl : undefined,
+          handoff: canHandoff(state, user) ? () => setHandoffOpen(true) : undefined,
+          trace: isViewer(user) ? undefined : () => setTraceOpen(true),
+          invite,
+        }
+      : null,
+  )
 
   if (!state) {
     return (
