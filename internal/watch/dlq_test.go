@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/owners"
 )
 
@@ -917,5 +918,177 @@ func TestDLQIdleTopicStateIsDropped(t *testing.T) {
 	h.w.mu.Unlock()
 	if kept {
 		t.Fatal("a topic nobody asks for stayed in memory")
+	}
+}
+
+// ---- review round 2 ----
+
+func TestDLQDeclaredTopicMissingForLongThenAppears(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.steps(90, time.Minute) // longer than the window and the ring: still missing
+	if len(h.rooms.created()) != 0 {
+		t.Fatalf("fired for a missing topic\n%s", h.logs)
+	}
+	h.kafka.add("orders-dlq", 4)
+	h.steps(7, time.Minute)
+	if len(h.rooms.created()) != 1 {
+		t.Fatalf("a consumer DLQ that appeared after 90 minutes did not fire\n%s", h.logs)
+	}
+	if ev := h.openedEv(t, owners.SignalDLQGrowth); num(t, ev, "new_in_window") != 4 || ev["older_than_watcher"] != false {
+		t.Fatalf("evidence = %v", ev)
+	}
+}
+
+func TestDLQBacklogAbsentForLongBackWithMore(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.kafka.set("orders-dlq", 0, 100)
+	h.steps(5, time.Minute)
+	h.kafka.remove("orders-dlq")
+	h.steps(90, time.Minute)
+	h.kafka.set("orders-dlq", 0, 105)
+	h.steps(7, time.Minute)
+	if len(h.rooms.created()) != 1 {
+		t.Fatalf("5 records written during a long absence did not fire\n%s", h.logs)
+	}
+	if ev := h.openedEv(t, owners.SignalDLQGrowth); num(t, ev, "new_in_window") != 5 || ev["older_than_watcher"] != true {
+		t.Fatalf("evidence = %v", ev)
+	}
+}
+
+func TestDLQRecreatedAfterAnAbsenceLongerThanTheWindow(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.kafka.set("orders-dlq", 0, 100)
+	h.steps(5, time.Minute)
+	h.kafka.remove("orders-dlq")
+	h.steps(90, time.Minute)
+	h.kafka.set("orders-dlq", 0, 3) // created again, smaller than the old sum
+	h.steps(7, time.Minute)
+	if len(h.rooms.created()) != 1 {
+		t.Fatalf("a recreated topic did not fire\n%s", h.logs)
+	}
+	if ev := h.openedEv(t, owners.SignalDLQGrowth); num(t, ev, "new_in_window") != 3 {
+		t.Fatalf("evidence = %v", ev)
+	}
+}
+
+func TestDLQBatchedTrickleHoldsSev3(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.kafka.set("orders-dlq", 0, 0)
+	h.step(time.Minute)
+	sawFiring := false
+	for m := 1; m <= 300; m++ {
+		if m%20 == 0 {
+			h.kafka.add("orders-dlq", 2)
+		}
+		h.step(time.Minute)
+		if h.sigPhase(owners.SignalDLQGrowth) == phaseFiring {
+			sawFiring = true
+			if sev := h.lastSev(owners.SignalDLQGrowth); sev != "sev3" {
+				t.Fatalf("minute %d: 2 records per 20 minutes is %s, want sev3", m, sev)
+			}
+		}
+	}
+	if !sawFiring {
+		t.Fatalf("never fired\n%s", h.logs)
+	}
+	if n := len(h.rooms.postsContaining("severity raised")); n != 0 {
+		t.Fatalf("%d \"severity raised\" posts for a steady trickle", n)
+	}
+}
+
+func TestIsRisingBoundaries(t *testing.T) {
+	for _, c := range []struct {
+		older, newer int64
+		want         bool
+	}{
+		{0, 4, false}, // 2*newer = 8 < 10: too small to be a surge
+		{0, 5, true},  // exactly at the threshold
+		{0, 1, false},
+		{2, 5, false}, // 5 < 2*2+2
+		{2, 6, true},  // at 2*older+2
+		{3, 7, false}, // 7 < 2*3+2 = 8
+		{3, 8, true},  // at 2*older+2
+		{4, 9, false},
+		{4, 10, true},
+		{5, 5, false}, // steady
+	} {
+		if got := isRising(c.older, c.newer); got != c.want {
+			t.Errorf("isRising(older %d, newer %d) = %v, want %v", c.older, c.newer, got, c.want)
+		}
+	}
+}
+
+// ringWith builds a one-hour ring with one sample a minute: older records land
+// at minute -50 (older half), newer ones at minute -10 (newer half).
+func ringWith(now time.Time, older, newer int64) *dlqTopicState {
+	st := &dlqTopicState{}
+	var total int64
+	for m := -60; m <= 0; m++ {
+		switch m {
+		case -50:
+			total += older
+		case -10:
+			total += newer
+		}
+		st.samples = append(st.samples, sample{at: now.Add(time.Duration(m) * time.Minute), retained: total})
+	}
+	return st
+}
+
+func TestWindowedRisingNeedsAFullRing(t *testing.T) {
+	now := t0.Add(3 * time.Hour)
+	_, _, _, _, rising := windowed(ringWith(now, 0, 5), now, time.Hour, 2*time.Minute)
+	if !rising {
+		t.Fatal("5 against 0 over a full ring is a surge")
+	}
+	_, _, _, _, rising = windowed(ringWith(now, 0, 4), now, time.Hour, 2*time.Minute)
+	if rising {
+		t.Fatal("4 against 0 is below the threshold")
+	}
+	// The same counts on a ring that starts 20 minutes ago cannot be called a surge.
+	young := ringWith(now, 0, 5)
+	young.samples = young.samples[40:]
+	_, _, _, _, rising = windowed(young, now, time.Hour, 2*time.Minute)
+	if rising {
+		t.Fatal("a young ring read as a surge")
+	}
+}
+
+func TestConfigRiskInEvidenceDuringAKafkaOutage(t *testing.T) {
+	h := newHarness(t, opts{})
+	h.setSinkConfig("orders", map[string]string{
+		"errors.deadletterqueue.topic.name": "orders-sink-dlq",
+		"errors.log.enable":                 "true", "errors.deadletterqueue.context.headers.enable": "true",
+	})
+	h.steps(4, time.Minute) // the topic is missing: dlq_topic_missing is known
+	h.kafka.setErr(errors.New("broker unreachable"))
+	h.breakConnector("orders", "boom")
+	h.steps(5, time.Minute)
+	cr := h.rooms.created()
+	if len(cr) != 1 {
+		t.Fatalf("want one room\n%s", h.logs)
+	}
+	if !strings.Contains(string(cr[0].alert.Raw), "dlq_topic_missing") {
+		t.Fatalf("the last known topic state was not used during the outage: %s", cr[0].alert.Raw)
+	}
+}
+
+func TestDLQMissingConnectorDoesNotLeaveTheSignalUnknown(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.kafka.set("orders-dlq", 0, 0)
+	h.step(time.Minute)
+	h.kafka.add("orders-dlq", 3)
+	h.steps(7, time.Minute)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseFiring {
+		t.Fatalf("did not fire\n%s", h.logs)
+	}
+	// Kafka Connect no longer knows the connector (404): connector_down says so.
+	h.conn.setStatusErr("pg-orders", fmt.Errorf("connect: %w", clients.ErrNotFound))
+	h.steps(80, time.Minute)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseOK {
+		t.Fatalf("dlq_growth stayed unknown behind a 404 connector\n%s", h.logs)
+	}
+	if strings.Contains(h.logs.String(), "DLQ topics unknown") {
+		t.Fatalf("a 404 connector was reported as an unreadable config\n%s", h.logs)
 	}
 }

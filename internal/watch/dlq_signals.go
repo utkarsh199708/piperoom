@@ -95,6 +95,9 @@ func planDLQ(ts []target, obs *observation) *dlqPlan {
 		}
 		for _, c := range t.connectors {
 			co := obs.conns[c]
+			if connectorGone(co) {
+				continue // connector_down already says "missing"; it writes no DLQ
+			}
 			if co == nil || !co.cfgTried || co.cfgErr != nil {
 				plan.cfgFail[t.p.ID] = true
 				continue
@@ -127,6 +130,13 @@ func planDLQ(ts []target, obs *observation) *dlqPlan {
 	}
 	slices.Sort(plan.want)
 	return plan
+}
+
+// connectorGone: Kafka Connect does not know the connector (404 on Status or
+// Config). It has no config to read and writes no DLQ topic; connector_down
+// reports the missing connector.
+func connectorGone(co *connObs) bool {
+	return co != nil && (errors.Is(co.statusErr, clients.ErrNotFound) || errors.Is(co.cfgErr, clients.ErrNotFound))
 }
 
 // observeDLQ makes the one DLQOffsets call of the tick, for every DLQ topic of
@@ -213,9 +223,16 @@ func (w *Watcher) recordDLQ(now time.Time, ts []target, obs *observation) map[st
 			// Absent. A topic never seen before has zero records, so its first
 			// appearance counts as new. A topic that had records keeps its last
 			// end sum: one missing answer must not turn its backlog into news.
-			if len(st.samples) == 0 {
-				st.samples, st.backlog = []sample{{at: now}}, false
+			// Every absent tick adds a sample that repeats the last sum, so a
+			// long absence (a consumer DLQ is missing until first use) still has
+			// a baseline inside the window when the topic appears.
+			var last int64
+			if n := len(st.samples); n > 0 {
+				last = st.samples[n-1].retained
+			} else {
+				st.backlog = false
 			}
+			st.appendSample(now, last, keep)
 			st.absent, st.known, st.exists = true, true, false
 			snaps[name] = dlqSnap{known: true}
 			continue
@@ -230,27 +247,31 @@ func (w *Watcher) recordDLQ(now time.Time, ts []target, obs *observation) map[st
 			st.backlog = snap.records > 0 // the baseline: never a rise
 		case snap.endSum < st.samples[n-1].retained:
 			// Offsets went back: the topic was deleted and created again. All its
-			// records are new.
-			at := st.samples[n-1].at
-			if st.absent {
-				at = now
-			}
-			st.samples = []sample{{at: at}}
+			// records are new. (A topic recreated and refilled to at least its old
+			// sum during an absence is undercounted: telling it from the old one
+			// needs topic IDs, which DLQOffsets does not return.)
+			st.samples = []sample{{at: st.samples[n-1].at}}
 		}
 		st.absent, st.known, st.exists = false, true, true
-		st.samples = append(st.samples, sample{at: now, retained: snap.endSum})
-		cutoff := now.Add(-keep)
-		i := 0
-		for i < len(st.samples)-1 && st.samples[i].at.Before(cutoff) {
-			i++
-		}
-		if over := len(st.samples) - i - maxDLQSamples; over > 0 {
-			i += over
-		}
-		st.samples = slices.Clone(st.samples[i:])
+		st.appendSample(now, snap.endSum, keep)
 		snaps[name] = snap
 	}
 	return snaps
+}
+
+// appendSample adds a reading and drops what is older than keep (the newest
+// sample always stays) or beyond the size cap.
+func (st *dlqTopicState) appendSample(now time.Time, endSum int64, keep time.Duration) {
+	st.samples = append(st.samples, sample{at: now, retained: endSum})
+	cutoff := now.Add(-keep)
+	i := 0
+	for i < len(st.samples)-1 && st.samples[i].at.Before(cutoff) {
+		i++
+	}
+	if over := len(st.samples) - i - maxDLQSamples; over > 0 {
+		i += over
+	}
+	st.samples = slices.Clone(st.samples[i:])
 }
 
 // dlqTopicReading is one topic's numbers for one pipeline.
@@ -266,14 +287,20 @@ type dlqTopicReading struct {
 	contexts string // "true" | "false" | "" (unknown)
 }
 
+// isRising: the newer half of the window at least doubled the older half plus
+// two, and on its own projects to troubleTrickle or more per window. Records are
+// whole numbers, so a steady batched trickle splits k against k+1 (or 0 against
+// 1) between the halves; a looser test would flip its severity back and forth.
+func isRising(older, newer int64) bool {
+	return newer >= 2*older+2 && 2*newer >= troubleTrickle
+}
+
 // windowed works out new_in_window and the rate for a topic.
 // new_in_window = end_sum(now) - end_sum(oldest sample inside the window); the
 // end offsets only grow, so it is exact. first is the time of the first rising
 // sample inside the window.
 //
-// rising says growth is accelerating: the newer half of the window got at least
-// two records more than the older half. Counts are integers and a slow trickle
-// puts one or two records in a half, so a difference of one is noise.
+// rising says growth is accelerating (see isRising).
 func windowed(st *dlqTopicState, now time.Time, window, slack time.Duration) (newN int64, rate float64, rateOK bool, first time.Time, rising bool) {
 	if st == nil || len(st.samples) == 0 {
 		return 0, 0, false, time.Time{}, false
@@ -302,7 +329,7 @@ func windowed(st *dlqTopicState, now time.Time, window, slack time.Duration) (ne
 	// read every first record as a surge), so the ring must reach back to the
 	// start of the window, give or take a tick.
 	covered := st.samples[base].at.Sub(cutoff) <= slack
-	return newN, rate, rateOK, first, covered && newer-older >= 2
+	return newN, rate, rateOK, first, covered && isRising(older, newer)
 }
 
 // evaluateDLQ steps config_risk and dlq_growth for one pipeline. Caller holds w.mu.
@@ -553,6 +580,8 @@ func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs
 	for _, c := range t.connectors {
 		co := obs.conns[c]
 		switch {
+		case connectorGone(co):
+			continue
 		case co == nil || !co.cfgTried:
 			if firstErr == nil {
 				firstErr = fmt.Errorf("watch: connector %s: config not read", c)
