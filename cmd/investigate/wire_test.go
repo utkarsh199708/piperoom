@@ -116,14 +116,14 @@ func testOwners() *owners.Owners {
 			SinkTables:     []string{"analytics.orders"},
 			SinkTSColumn:   "updated_at",
 		}},
-		Layers: map[string]string{
+		Layers: owners.UserLayers(map[string]string{
 			"postgres":        "priya",
 			"kafka-connect":   "arjun",
 			"schema-registry": "priya",
 			"kafka":           "arjun",
 			"consumer":        "kabir",
 			"warehouse":       "meera",
-		},
+		}),
 	}
 }
 

@@ -2,8 +2,11 @@ package room
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
+	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 
@@ -16,6 +19,11 @@ type User struct {
 	ID     string   `json:"id"`
 	Name   string   `json:"name"`
 	Layers []string `json:"layers"`
+	// Email and Sub tie this user to an IdP account (docs/design/auth.md
+	// section 2.1). Both are optional. They are parsed and checked here but not
+	// used until the OIDC login lands, and they are not sent to clients.
+	Email string `json:"-" yaml:"email"`
+	Sub   string `json:"-" yaml:"sub"`
 }
 
 // Users is the user directory parsed from dev/users.yaml.
@@ -35,9 +43,32 @@ func ParseUsers(data []byte) (*Users, error) {
 		return nil, fmt.Errorf("room: parse users: %w", err)
 	}
 	u := &Users{byID: map[string]User{}}
+	emails := map[string]string{} // lower-cased email -> user id
+	subs := map[string]string{}
 	for _, user := range f.Users {
 		if user.ID == "" {
 			return nil, fmt.Errorf("room: user with empty id")
+		}
+		// A colon or space in an id would let user "group:x" print like the
+		// principal group:x (LayerOwner labels drop the user: prefix).
+		if strings.ContainsFunc(user.ID, func(r rune) bool { return r == ':' || unicode.IsSpace(r) }) {
+			return nil, fmt.Errorf("room: user id %q: a colon or whitespace is not allowed", user.ID)
+		}
+		if user.Email != "" {
+			if !strings.Contains(user.Email, "@") || strings.ContainsAny(user.Email, " \t\r\n") {
+				return nil, fmt.Errorf("room: user %q: bad email %q", user.ID, user.Email)
+			}
+			key := strings.ToLower(user.Email)
+			if other, dup := emails[key]; dup {
+				return nil, fmt.Errorf("room: users %q and %q have the same email %q", other, user.ID, user.Email)
+			}
+			emails[key] = user.ID
+		}
+		if user.Sub != "" {
+			if other, dup := subs[user.Sub]; dup {
+				return nil, fmt.Errorf("room: users %q and %q have the same sub %q", other, user.ID, user.Sub)
+			}
+			subs[user.Sub] = user.ID
 		}
 		u.byID[user.ID] = user
 		u.order = append(u.order, user)
@@ -83,28 +114,81 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 		layers = append(layers, layer)
 	}
 	sort.Strings(layers) // deterministic error for the same config
+	// Group rule (docs/design/auth.md section 2.3): the server does not know
+	// group membership at start-up, so a layer that lists any group: principal
+	// is not checked against users.yaml. Log it once.
+	var skipped []string
 	for _, layer := range layers {
-		ownerID := own.Layers[layer]
-		user, ok := users.Get(ownerID)
-		if !ok {
-			return fmt.Errorf("owners file assigns layer %q to %q, who is not in the users file", layer, ownerID)
+		if !own.Layers[layer].AllUsers() {
+			skipped = append(skipped, layer)
 		}
-		if !user.OwnsLayer(layer) {
-			return fmt.Errorf("users file and owners file disagree: %q owns layer %q in the owners file but lists layers %v", ownerID, layer, user.Layers)
+	}
+	if len(skipped) > 0 {
+		slog.Info("users: layers with group principals are not checked against users.yaml", "layers", skipped)
+	}
+	for _, layer := range layers {
+		ps := own.Layers[layer]
+		if !ps.AllUsers() {
+			continue
+		}
+		for _, ownerID := range ps.Users() {
+			user, ok := users.Get(ownerID)
+			if !ok {
+				return fmt.Errorf("owners file assigns layer %q to %q, who is not in the users file", layer, ownerID)
+			}
+			if !user.OwnsLayer(layer) {
+				return fmt.Errorf("users file and owners file disagree: %q owns layer %q in the owners file but lists layers %v", ownerID, layer, user.Layers)
+			}
 		}
 	}
 	// users → owners: every layer a user lists must be owned by that same user.
 	// Iterate in file order for a deterministic error.
 	for _, user := range users.order {
 		for _, layer := range user.Layers {
-			ownerID, ok := own.Layers[layer]
+			ps, ok := own.Layers[layer]
 			if !ok {
 				return fmt.Errorf("users file grants %q layer %q, which the owners file does not assign to anyone", user.ID, layer)
 			}
-			if ownerID != user.ID {
-				return fmt.Errorf("users file and owners file disagree: users file grants %q layer %q but the owners file assigns it to %q", user.ID, layer, ownerID)
+			if !ps.AllUsers() {
+				continue // group rule: skipped above
+			}
+			if !ps.Contains(owners.Principal{Kind: owners.KindUser, Name: user.ID}) {
+				return fmt.Errorf("users file and owners file disagree: users file grants %q layer %q but the owners file assigns it to %q", user.ID, layer, ps.Display())
 			}
 		}
+	}
+	return nil
+}
+
+// CheckSoloUser is the solo-mode start check (docs/design/auth.md section 5.3).
+// soloUser is the value of PIPEROOM_SOLO_USER; "" means solo mode is off and
+// the check passes. Otherwise it returns an error when
+//   - the solo user is not in users.yaml, or
+//   - owners.yaml names any principal other than user:<soloUser> (in layers:,
+//     any pipeline owners: block, or auditors:). A group counts as another
+//     principal.
+//
+// own may be nil (no owners file), which passes the second rule. The caller
+// refuses to start on an error and logs a warning when it returns nil.
+func CheckSoloUser(soloUser string, users *Users, own *owners.Owners) error {
+	if soloUser == "" {
+		return nil
+	}
+	if users == nil {
+		return fmt.Errorf("solo mode: PIPEROOM_SOLO_USER=%q but there is no users file", soloUser)
+	}
+	if _, ok := users.Get(soloUser); !ok {
+		return fmt.Errorf("solo mode: PIPEROOM_SOLO_USER=%q is not in the users file", soloUser)
+	}
+	me := owners.Principal{Kind: owners.KindUser, Name: soloUser}
+	var others []string
+	for _, p := range own.NamedPrincipals() {
+		if p != me {
+			others = append(others, p.String())
+		}
+	}
+	if len(others) > 0 {
+		return fmt.Errorf("solo mode: the owners file names other principals (%s); solo mode is for a single owner, so remove PIPEROOM_SOLO_USER or the other owners", strings.Join(others, ", "))
 	}
 	return nil
 }

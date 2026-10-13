@@ -6,11 +6,8 @@ package owners
 import (
 	"fmt"
 	"os"
-	"slices"
 
 	"gopkg.in/yaml.v3"
-
-	"piperoom/internal/events"
 )
 
 // Pipeline is one named data pipeline.
@@ -28,15 +25,25 @@ type Pipeline struct {
 	// WatchSpec is the optional `watch:` block (see watch.go). Read the
 	// validated values with Watch().
 	WatchSpec *WatchSpec `yaml:"watch"`
+	// Owners is the optional per-pipeline `owners:` block. A layer listed here
+	// replaces the top-level `layers:` entry for this pipeline.
+	Owners map[string]LayerRights `yaml:"owners"`
 
 	// watch is WatchSpec after validation, with defaults applied. Set by Load.
 	watch *WatchConfig
 }
 
 // Owners is the full ownership config.
+//
+// Layers maps a layer to its default approvers. Each value is a user id (the
+// original form), or a list of `user:<id>` / `group:<name>` principals. A
+// pipeline's own `owners:` block overrides a layer for that pipeline. Auditors
+// may export (docs/design/auth.md sections 2.3 and 3.4). See rights.go for the
+// functions that answer "may this session do X".
 type Owners struct {
-	Pipelines []Pipeline        `yaml:"pipelines"`
-	Layers    map[string]string `yaml:"layers"`
+	Pipelines []Pipeline            `yaml:"pipelines"`
+	Layers    map[string]Principals `yaml:"layers"`
+	Auditors  Principals            `yaml:"auditors"`
 }
 
 // Load reads and validates the owners file at path.
@@ -65,17 +72,9 @@ func (o *Owners) Pipeline(id string) (Pipeline, bool) {
 	return Pipeline{}, false
 }
 
-// LayerOwner returns the user id that owns a layer, e.g. "kafka-connect" -> "arjun".
-func (o *Owners) LayerOwner(layer string) (string, bool) {
-	u, ok := o.Layers[layer]
-	return u, ok
-}
-
 func (o *Owners) validate() error {
-	for layer := range o.Layers {
-		if !slices.Contains(events.Layers, layer) {
-			return fmt.Errorf("unknown layer %q (known: %v)", layer, events.Layers)
-		}
+	if err := o.validateRights(); err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	for i := range o.Pipelines {

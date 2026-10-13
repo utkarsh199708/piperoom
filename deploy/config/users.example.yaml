@@ -17,3 +17,7 @@ users:
   - id: dave
     name: Dave
     layers: [warehouse]
+
+# Optional, for OIDC login (auth PR 3; read but not used yet). Add to a user:
+#   email: alice@example.com   # matched only when the IdP says the email is verified
+#   sub: "00u1abcd"            # the IdP subject; wins over email
