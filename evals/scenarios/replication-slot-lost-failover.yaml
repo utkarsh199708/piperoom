@@ -3,10 +3,15 @@
 # (internal/tools/{kafkatools,dbtools}, internal/topology); clock: 2026-10-13T07:20:00Z.
 # The values (offsets, LSNs, timestamps) were composed by hand and cross-checked, not
 # generated from fake clients, so regenerate them if a tool's output format changes.
+# kafka_find_by_key "not found ... since T" echoes a fixed T, not the agent's argument.
 #
 # First failing layer: postgres (the replication slot is gone). Alert fired at: kafka-connect.
 #   Root-cause layer: postgres. The visible failure is the Debezium task; the cause is that
 #   debezium_orders does not exist on the new primary (orders-db-2, promoted at 06:58:12Z).
+#
+# Modelling note: Debezium normally CREATES a missing slot on task start, so silent loss is the common
+#   real path. This scenario models the FAILED-on-reconnect path (the walsender connection drops and
+#   START_REPLICATION on the vanished slot is refused), which is the one a person gets paged for.
 #
 # Safe automated fix: none. The connector must not simply be restarted: with snapshot.mode=initial and
 #   stored offsets, Debezium recreates a slot at the new primary's CURRENT LSN and carries on, silently
@@ -33,7 +38,6 @@
 #   - A recent index creation is noise.
 #
 # Sources:
-#   - Debezium PostgresStreamingChangeEventSource: "Failed to start replication stream at ...".
 #   - PostgreSQL: ERROR: replication slot "x" does not exist (START_REPLICATION on a missing slot).
 #   - PostgreSQL docs, logical replication failover (17+): logical slots are not copied to standbys by default.
 #   - Debezium snapshot.mode=initial: with offsets present no new snapshot is taken.
@@ -95,7 +99,6 @@ recordings:
       pg-orders-connector (source): RUNNING on connect-1:8083.
       Task 0: FAILED:
       org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.
-      Caused by: io.debezium.DebeziumException: Failed to start replication stream at LSN{0/5A3B2F8}
       Caused by: org.postgresql.util.PSQLException: ERROR: replication slot "debezium_orders" does not exist
   - tool: connect_config
     input: {connector: pg-orders-connector}
@@ -224,7 +227,8 @@ inputs:
 expect:
   root_cause:
     - ['slot', 'replication slot', debezium_orders]
-    - [missing, 'does not exist', gone, lost, failover, promot]
+    - [missing, 'does not exist', gone, lost]
+    - [failover, promot, standby, 'new primary']
   first_failing_layer: postgres
   evidence_tools: [connect_status, pg_replication_slots]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]

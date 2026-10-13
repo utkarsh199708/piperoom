@@ -3,6 +3,7 @@
 # (internal/tools/{kafkatools,dbtools}, internal/topology); clock: 2026-10-13T10:00:00Z.
 # The values (offsets, LSNs, timestamps) were composed by hand and cross-checked, not
 # generated from fake clients, so regenerate them if a tool's output format changes.
+# kafka_find_by_key "not found ... since T" echoes a fixed T, not the agent's argument.
 #
 # First failing layer: kafka. Root-cause layer: kafka (retention shorter than the consumer outage).
 #   Alert fired at: consumer (crash loop) / warehouse.
@@ -40,9 +41,9 @@
 #   - The consumer owner proposes resetting to latest in his comment.
 #
 # Sources:
-#   - org.apache.kafka.clients.consumer.OffsetOutOfRangeException: "Fetch position FetchPosition{offset=...,
-#     offsetEpoch=..., currentLeader=...} is out of range for partition <topic>-<n>"; with
-#     auto.offset.reset=none: "Offsets out of range with no configured reset policy for partitions: {...}".
+#   - org.apache.kafka.clients.consumer.OffsetOutOfRangeException with auto.offset.reset=none:
+#     "Offsets out of range with no configured reset policy for partitions: {...}" (one client
+#     version's text only; the "Fetch position ... is out of range" variant is not mixed in).
 #   - https://kafka.apache.org/documentation/#topicconfigs_retention.ms: segments are deleted by age
 #     whether or not any group has read them.
 
@@ -232,14 +233,13 @@ inputs:
     from: Kabir
     text: |-
       order-sync: a cost-saver CronJob scaled the deployment to 0 on Fri 2026-10-09 18:24Z and nobody scaled it back. I scaled it up at 09:50 today and every pod dies at once with:
-      org.apache.kafka.clients.consumer.OffsetOutOfRangeException: Fetch position FetchPosition{offset=61204118, offsetEpoch=Optional[14], currentLeader=LeaderAndEpoch{leader=Optional[kafka-1:9092 (id: 1 rack: null)], epoch=14}} is out of range for partition pg.public.orders-0
-      Offsets out of range with no configured reset policy for partitions: {pg.public.orders-0=61204118}
+      org.apache.kafka.clients.consumer.OffsetOutOfRangeException: Offsets out of range with no configured reset policy for partitions: {pg.public.orders-0=61204118}
       I will just set the group to start from latest so it gets going again, ok?
 
 expect:
   root_cause:
-    - [retention, 'log start', 'log-start', expired, 'aged out', 'deleted by', 'out of range', 'out-of-range']
-    - [lost, loss, gap, skipped, missing, 'data loss', deleted]
+    - [retention, 'log start', 'log-start', 'aged out', 'deleted by retention']
+    - [lost, loss, deleted, 'data loss', 'aged out']
   first_failing_layer: kafka
   evidence_tools: [kafka_topic_offsets, kafka_consumer_lag, kafka_topic_config]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]

@@ -3,6 +3,7 @@
 # (internal/tools/{kafkatools,dbtools}, internal/topology); clock: 2026-10-13T10:30:00Z.
 # The values (offsets, LSNs, timestamps) were composed by hand and cross-checked, not
 # generated from fake clients, so regenerate them if a tool's output format changes.
+# kafka_find_by_key "not found ... since T" echoes a fixed T, not the agent's argument.
 #
 # First failing layer: consumer. Root-cause layer: consumer. Alert fired at: consumer lag / warehouse.
 #
@@ -127,13 +128,13 @@ recordings:
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
     summary: |-
-      partition 0: 51482118–88214730 (36732612 records), newest just now
-      partition 1: 51470225–88201355 (36731130 records), newest just now
-      partition 2: 51501876–88226041 (36724165 records), newest just now
+      partition 0: 73514730–88214730 (14700000 records), newest just now
+      partition 1: 73501355–88201355 (14700000 records), newest just now
+      partition 2: 73526041–88226041 (14700000 records), newest just now
   - tool: kafka_topic_config
     input: {pipeline_id: orders}
     summary: |-
-      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+      pg.public.orders: retention.ms=86400000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
   - tool: kafka_list_groups
     summary: |-
       order-sync: PreparingRebalance
@@ -227,9 +228,9 @@ inputs:
 
 expect:
   root_cause:
-    - [rebalanc, 'poll timeout', 'max.poll.interval', 'session timeout', 'heartbeat', leavegroup, 'leave group', 'removing member']
+    - ['poll timeout', 'max.poll.interval', 'session timeout', 'heartbeat', leavegroup, 'leave group', 'removing member', 'rebalance storm', generation, throttl, 'cpu limit']
     - [consumer, group, member]
   first_failing_layer: consumer
-  evidence_tools: [kafka_consumer_lag, kafka_list_groups]
+  evidence_tools: [kafka_consumer_lag, pg_long_transactions]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]
   max_tool_calls: 14

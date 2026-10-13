@@ -3,12 +3,16 @@
 # (internal/tools/{kafkatools,dbtools}, internal/topology); clock: 2026-10-13T09:40:00Z.
 # The values (offsets, LSNs, timestamps) were composed by hand and cross-checked, not
 # generated from fake clients, so regenerate them if a tool's output format changes.
+# kafka_find_by_key "not found ... since T" echoes a fixed T, not the agent's argument.
 #
 # First failing layer: schema-registry. Alert fired at: kafka-connect (the sink task).
 #   Root cause: schema registry. A cleanup job permanently deleted version 3 of
 #   pg.public.orders-value (schema id 7) 25 minutes after the producer-side DDL that created it.
 #   Debezium caches its schema id and still writes id 7 into every record. The sink worker restarted,
 #   its AvroConverter cache is cold, and the registry no longer knows id 7.
+#
+# Reading of the brief (deliberate): the producer DDL created v3 / id 7 and was fine; the failure comes
+#   from the LATER hard delete of v3, which only bites once a consumer has a cold cache.
 #
 # Safe automated fix: none. The schema must be put back under the SAME id (registry IMPORT mode
 #   with the original schema, from the Debezium log or a registry backup), then the task is restarted.
@@ -29,7 +33,7 @@
 #   - An idle-in-transaction reporting session and a 212 MiB slot are normal noise.
 #
 # Sources:
-#   - io.confluent.kafka.serializers AbstractKafkaAvroDeserializer: "Error retrieving Avro schema for id N".
+#   - io.confluent.kafka.serializers AbstractKafkaAvroDeserializer: "Error retrieving Avro value schema for id N".
 #   - Confluent Schema Registry error code 40403: "Schema N not found"; 40402: "Version N not found".
 #   - Schema Registry DELETE /subjects/{subject}/versions/{version}?permanent=true hard-deletes a version
 #     and its id; IMPORT mode is the way to re-register a schema under a given id.
@@ -103,7 +107,7 @@ recordings:
       Task 0: FAILED:
       org.apache.kafka.connect.errors.ConnectException: Tolerance exceeded in error handler
       Caused by: org.apache.kafka.connect.errors.DataException: Failed to deserialize data for topic pg.public.orders to Avro:
-      Caused by: org.apache.kafka.common.errors.SerializationException: Error retrieving Avro schema for id 7
+      Caused by: org.apache.kafka.common.errors.SerializationException: Error retrieving Avro value schema for id 7
       Caused by: io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException: Schema 7 not found; error code: 40403
   - tool: connect_config
     input: {connector: pg-orders-connector}
@@ -167,13 +171,13 @@ recordings:
   - tool: kafka_topic_offsets
     input: {topic: pg.public.orders}
     summary: |-
-      partition 0: 36512884–42951330 (6438446 records), newest just now
-      partition 1: 36498120–42940277 (6442157 records), newest just now
-      partition 2: 36530447–42963512 (6433065 records), newest just now
+      partition 0: 36761330–42951330 (6190000 records), newest just now
+      partition 1: 36750277–42940277 (6190000 records), newest just now
+      partition 2: 36773512–42963512 (6190000 records), newest just now
   - tool: kafka_topic_config
     input: {pipeline_id: orders}
     summary: |-
-      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+      pg.public.orders: retention.ms=28800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
   - tool: kafka_list_groups
     summary: |-
       connect-wh-orders-sink: Empty
@@ -263,7 +267,8 @@ inputs:
 
 expect:
   root_cause:
-    - ['schema 7', 'id 7', deleted, removed, 'not found', missing, 'version 3']
+    - ['id 7', 'schema 7', 'version 3']
+    - [deleted, 'hard-delete', permanently, removed, purged, cleanup]
     - [registry, subject]
   first_failing_layer: schema-registry
   evidence_tools: [connect_status, schema_registry_versions]
