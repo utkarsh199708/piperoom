@@ -8,8 +8,12 @@ region     = "us-central1"
 # Host name people will use. You create its DNS A record after the first apply.
 domain = "piperoom.corp.example"
 
-# The image you built from the repository Dockerfile and pushed (README step 2).
-piperoom_image = "us-central1-docker.pkg.dev/my-piperoom-pilot/piperoom/piperoom:pilot"
+# The image you built from the repository Dockerfile and pushed (README step 2),
+# BY DIGEST (docker push prints it). Tags are refused.
+piperoom_image = "us-central1-docker.pkg.dev/my-piperoom-pilot/piperoom/piperoom@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+# A named Debian 12 image (README step 2 shows how to list current ones).
+vm_image = "<debian-12-bookworm-vYYYYMMDD>"
 
 # Single sign-on. Register https://<domain>/auth/callback at the IdP.
 oidc_issuer    = "https://login.corp.example"

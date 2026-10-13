@@ -142,20 +142,81 @@ variable "boot_disk_gb" {
   }
 }
 
-variable "piperoom_image" {
-  description = "Container image the VM runs, for example europe-west4-docker.pkg.dev/<project>/piperoom/piperoom:pilot. The VM does not build from source: build and push the repository Dockerfile first (README step 2)."
+variable "vm_image" {
+  description = "Name of the Debian 12 boot image in project debian-cloud, for example debian-12-bookworm-v20260101 (a NAMED image, not the moving debian-12 family, so a re-apply never swaps the OS under the VM). Look up a current name with: gcloud compute images list --project debian-cloud --no-standard-images --filter=\"family=debian-12\" --sort-by=~creationTimestamp --limit=3 . Changing it recreates the boot disk."
   type        = string
 
   validation {
-    condition     = can(regex("^[a-z0-9][a-zA-Z0-9._/-]*(:[A-Za-z0-9._-]+|@sha256:[0-9a-f]{64})$", var.piperoom_image))
-    error_message = "piperoom_image must be a registry path with a tag or @sha256 digest."
+    condition     = can(regex("^debian-12-bookworm-v[0-9]{8}$", var.vm_image))
+    error_message = "vm_image must be a named Debian 12 image such as debian-12-bookworm-v20260101 (not a family)."
+  }
+}
+
+variable "piperoom_image" {
+  description = "Container image the VM runs, PINNED BY DIGEST, for example europe-west4-docker.pkg.dev/<project>/piperoom/piperoom@sha256:<64 hex>. The VM does not build from source: build and push the repository Dockerfile first and copy the digest from the push output (README step 2). A tag is refused because it can move and the VM would run whatever it points to at the next boot."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-zA-Z0-9._/:-]*@sha256:[0-9a-f]{64}$", var.piperoom_image))
+    error_message = "piperoom_image must be a registry path pinned by digest: <registry>/<path>@sha256:<64 lower-case hex>. Tags are not accepted."
   }
 }
 
 variable "grant_artifact_registry_reader" {
-  description = "Give the VM service account roles/artifactregistry.reader on the project, so it can pull piperoom_image from Artifact Registry. Set false if the image is public or the repository has its own IAM binding."
+  description = "Give the VM service account roles/artifactregistry.reader on the ONE Artifact Registry repository that holds piperoom_image (the repository is taken from the image path, which must be <location>-docker.pkg.dev/<project>/<repo>/...). Set false if the image is public, in gcr.io or elsewhere, or the repository has its own IAM binding."
   type        = bool
   default     = true
+}
+
+# ---- Pinned packages on the VM -------------------------------------------------
+# startup.sh installs these exact apt versions from the Docker repository and holds
+# them. To upgrade, change the value (check: apt-cache madison docker-ce on the VM
+# or https://download.docker.com/linux/debian/dists/bookworm/stable/binary-amd64/Packages)
+# and re-run the start-up script on a new VM. The defaults are the ones tested with
+# docker-compose.pilot.yml; compose must stay at 2.24 or newer for "!reset".
+
+variable "docker_version" {
+  description = "Exact apt version of docker-ce and docker-ce-cli."
+  type        = string
+  default     = "5:29.8.2-1~debian.12~bookworm"
+
+  validation {
+    condition     = can(regex("^[0-9]+:[0-9][0-9A-Za-z.+~-]*$", var.docker_version))
+    error_message = "docker_version must be an exact apt version such as 5:29.8.2-1~debian.12~bookworm."
+  }
+}
+
+variable "containerd_version" {
+  description = "Exact apt version of containerd.io."
+  type        = string
+  default     = "2.3.6-1~debian.12~bookworm"
+
+  validation {
+    condition     = can(regex("^[0-9][0-9A-Za-z.+~-]*$", var.containerd_version))
+    error_message = "containerd_version must be an exact apt version such as 2.3.6-1~debian.12~bookworm."
+  }
+}
+
+variable "docker_compose_plugin_version" {
+  description = "Exact apt version of docker-compose-plugin (must be 2.24 or newer; startup.sh checks)."
+  type        = string
+  default     = "5.5.1-1~debian.12~bookworm"
+
+  validation {
+    condition     = can(regex("^[0-9][0-9A-Za-z.+~-]*$", var.docker_compose_plugin_version))
+    error_message = "docker_compose_plugin_version must be an exact apt version such as 5.5.1-1~debian.12~bookworm."
+  }
+}
+
+variable "ops_agent_repo_suffix" {
+  description = "REPO_SUFFIX for the Ops Agent install script: the major version whose apt repository is used (\"2\" = google-cloud-ops-agent-bookworm-2, which only holds 2.x releases)."
+  type        = string
+  default     = "2"
+
+  validation {
+    condition     = can(regex("^[0-9]+$", var.ops_agent_repo_suffix))
+    error_message = "ops_agent_repo_suffix must be a major version number such as 2."
+  }
 }
 
 variable "install_ops_agent" {

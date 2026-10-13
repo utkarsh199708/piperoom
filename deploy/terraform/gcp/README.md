@@ -76,9 +76,17 @@ docker build -t us-central1-docker.pkg.dev/<project_id>/piperoom/piperoom:pilot 
 docker push  us-central1-docker.pkg.dev/<project_id>/piperoom/piperoom:pilot
 ```
 
-Put that name in `piperoom_image` (a `@sha256:` digest is better than a moving tag). The VM
-service account gets `roles/artifactregistry.reader` by default
-(`grant_artifact_registry_reader`).
+`docker push` prints `digest: sha256:...`. Put the image **by digest** in `piperoom_image`:
+`us-central1-docker.pkg.dev/<project_id>/piperoom/piperoom@sha256:<64 hex>`. A tag is refused
+(Terraform validation and `startup.sh`), because a re-pushed tag would change what the VM runs
+at the next boot. The VM service account gets `roles/artifactregistry.reader` on that one
+repository (taken from the image path; `grant_artifact_registry_reader`). The repository must
+exist before `terraform apply`. For an image outside Artifact Registry set
+`grant_artifact_registry_reader = false`.
+
+Also set `vm_image` to a current named Debian 12 image (no default, so a stale name is never
+used silently):
+`gcloud compute images list --project debian-cloud --no-standard-images --filter="family=debian-12" --sort-by=~creationTimestamp --limit=3`.
 
 ### 3. Apply
 
@@ -200,9 +208,16 @@ Container logs are also in Cloud Logging (resource type "gce_instance", log `gcp
 
 ### Upgrading
 
-Push a new image, change `piperoom_image`, `terraform apply` (this updates the VM's metadata in
-place and does not restart it), then run `sudo google_metadata_script_runner startup` on the VM:
-it pulls the image and recreates the container. The same command picks up a re-pushed tag.
+Push a new image, change `piperoom_image` to its new `@sha256:` digest, `terraform apply` (this
+updates the VM's metadata in place and does not restart it), then run
+`sudo google_metadata_script_runner startup` on the VM: it pulls that digest and recreates the
+container. Re-running the command without changing the digest pulls nothing new.
+
+Docker packages are pinned (`docker_version`, `containerd_version`,
+`docker_compose_plugin_version`) and held with `apt-mark hold`; the Ops Agent is pinned to a
+major version with `ops_agent_repo_suffix`. They are installed once, when the VM first boots.
+To change a version, set the variable and replace the VM
+(`terraform apply -replace=google_compute_instance.piperoom`).
 
 ### Destroy
 
@@ -228,7 +243,8 @@ All variables have descriptions and validation in `variables.tf`.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `project_id`, `domain`, `piperoom_image`, `oidc_issuer`, `oidc_client_id` | required | where, address, image, login |
+| `project_id`, `domain`, `piperoom_image`, `vm_image`, `oidc_issuer`, `oidc_client_id` | required | where, address, image (by digest), boot image (named Debian 12), login |
+| `docker_version`, `containerd_version`, `docker_compose_plugin_version`, `ops_agent_repo_suffix` | pinned defaults | exact apt versions installed on the VM; Ops Agent major version |
 | `region` | `us-central1` | everything except the global load balancer |
 | `model_provider` | `vertex` | `vertex` uses the VM's service account; `anthropic` uses the API-key secret |
 | `model`, `vertex_region` | `null` | `PIPEROOM_MODEL`, `VERTEX_REGION`. **Both required with `vertex`** (plan fails otherwise): a Vertex model id and a region that serves it, from Model Garden |
@@ -251,7 +267,7 @@ single region if data must stay in one place.
 | `roles/logging.logWriter` | project | Docker `gcplogs` driver and the VM write logs | always |
 | `roles/monitoring.metricWriter` | project | Ops Agent host metrics | `install_ops_agent` |
 | `roles/aiplatform.user` | project | call Claude on Vertex AI (prediction only; no model admin, no data access) | `model_provider = vertex` |
-| `roles/artifactregistry.reader` | project | pull the image | `grant_artifact_registry_reader` |
+| `roles/artifactregistry.reader` | the one repository that holds the image | pull the image | `grant_artifact_registry_reader` |
 
 Not granted: `roles/cloudsql.client` (the VM connects to the private IP with password and TLS,
 not through the Cloud SQL connector or proxy; add it if you switch to the proxy), any compute or
@@ -341,8 +357,14 @@ Known limits:
 
 - The boot script installs Docker and the Ops Agent from the internet (Docker apt repository,
   `dl.google.com`) through Cloud NAT, so the first boot needs working egress; a restricted
-  egress policy needs an internal mirror. The Ops Agent install script is downloaded and run as
-  root; set `install_ops_agent = false` to skip it.
+  egress policy needs an internal mirror. The Docker apt key is checked against its published
+  fingerprint (9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88) and the packages are pinned
+  to exact versions. The Ops Agent install script itself is downloaded and run as root without
+  a checksum (only its repository is pinned to a major version); set `install_ops_agent = false`
+  to skip it.
+- The default package versions were taken from the Docker repository listing; they have not
+  been installed on a real VM yet. `docker_compose_plugin_version` must give Compose 2.24 or
+  newer (the script stops otherwise).
 - One VM, one zone: no high availability for the application. A VM restart means about a minute
   of downtime; the room state is in Cloud SQL and survives.
 - Database user, ownership grant and secret values are manual steps by design (they keep

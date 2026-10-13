@@ -8,6 +8,15 @@ locals {
   google_lb_ranges = ["130.211.0.0/22", "35.191.0.0/16"]
   iap_range        = "35.235.240.0/20"
 
+  # <location>-docker.pkg.dev/<project>/<repository>/<image>@sha256:... -> its parts,
+  # or null when the image is not in Artifact Registry.
+  ar_parts = regexall("^([a-z0-9-]+)-docker\\.pkg\\.dev/([^/]+)/([^/]+)/", var.piperoom_image)
+  ar_repo = length(local.ar_parts) == 1 ? {
+    location   = local.ar_parts[0][0]
+    project    = local.ar_parts[0][1]
+    repository = local.ar_parts[0][2]
+  } : null
+
   server_port = 8090
   vm_tag      = "${var.name_prefix}-vm"
 
@@ -229,13 +238,19 @@ resource "google_project_iam_member" "vertex_user" {
   member  = "serviceAccount:${google_service_account.vm.email}"
 }
 
-# Pull the image from Artifact Registry.
-resource "google_project_iam_member" "ar_reader" {
-  count = var.grant_artifact_registry_reader ? 1 : 0
+# Pull the image from Artifact Registry. Granted on the ONE repository that holds
+# the image (read from the image path), not on the project, so the VM cannot read
+# other repositories.
+resource "google_artifact_registry_repository_iam_member" "ar_reader" {
+  count = var.grant_artifact_registry_reader && local.ar_repo != null ? 1 : 0
 
-  project = var.project_id
-  role    = "roles/artifactregistry.reader"
-  member  = "serviceAccount:${google_service_account.vm.email}"
+  project    = local.ar_repo.project
+  location   = local.ar_repo.location
+  repository = local.ar_repo.repository
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${google_service_account.vm.email}"
+
+  depends_on = [google_project_service.apis]
 }
 
 # roles/cloudsql.client is NOT granted: the VM connects to the private IP

@@ -25,18 +25,60 @@ export DEBIAN_FRONTEND=noninteractive
 
 # ---- Packages ---------------------------------------------------------------
 
+# Exact package versions (variables.tf passes them as metadata; these defaults
+# apply when the attribute is absent). apt resolves "name=version" and fails if
+# that version is not in the repository, so nothing newer is installed silently.
+DOCKER_VERSION=$(md piperoom-docker-version)
+DOCKER_VERSION=${DOCKER_VERSION:-5:29.8.2-1~debian.12~bookworm}
+CONTAINERD_VERSION=$(md piperoom-containerd-version)
+CONTAINERD_VERSION=${CONTAINERD_VERSION:-2.3.6-1~debian.12~bookworm}
+COMPOSE_PLUGIN_VERSION=$(md piperoom-compose-version)
+COMPOSE_PLUGIN_VERSION=${COMPOSE_PLUGIN_VERSION:-5.5.1-1~debian.12~bookworm}
+OPS_AGENT_REPO_SUFFIX=$(md piperoom-ops-agent-suffix)
+OPS_AGENT_REPO_SUFFIX=${OPS_AGENT_REPO_SUFFIX:-2}
+# Fingerprint of Docker's apt signing key (https://docs.docker.com/engine/install/debian/).
+DOCKER_GPG_FPR="9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
+MIN_COMPOSE=2.24 # "!reset" in the override file needs this
+
+# check_docker_key <file>: die unless the file holds exactly one key and its
+# primary fingerprint is DOCKER_GPG_FPR (stops a swapped or hijacked key file).
+check_docker_key() {
+  local colons fprs npub
+  colons=$(gpg --show-keys --with-colons "$1" 2>/dev/null) || die "cannot read the Docker apt key"
+  npub=$(printf '%s\n' "$colons" | grep -c '^pub:' || true)
+  [ "$npub" -eq 1 ] || die "the Docker apt key file holds $npub keys, expected 1"
+  # The first fpr line after the pub line is the primary key's fingerprint.
+  fprs=$(printf '%s\n' "$colons" | awk -F: '/^pub:/{p=1; next} p && /^fpr:/{print $10; exit}')
+  [ "$fprs" = "$DOCKER_GPG_FPR" ] ||
+    die "Docker apt key fingerprint is '$fprs', expected '$DOCKER_GPG_FPR' (9DC8 5822 9FC7 DD38 854A E2D8 8D81 803C 0EBF CD88)"
+}
+
 if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
-  log "installing Docker Engine, Compose plugin, jq, psql client"
+  log "installing Docker Engine $DOCKER_VERSION, Compose plugin $COMPOSE_PLUGIN_VERSION, jq, psql client"
   apt-get update -y
   apt-get install -y ca-certificates curl gnupg jq postgresql-client
   install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-  chmod a+r /etc/apt/keyrings/docker.asc
+  KEY_TMP=$(mktemp)
+  curl -fsSL https://download.docker.com/linux/debian/gpg -o "$KEY_TMP"
+  check_docker_key "$KEY_TMP"
+  install -m 0644 "$KEY_TMP" /etc/apt/keyrings/docker.asc
+  rm -f "$KEY_TMP"
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" \
     > /etc/apt/sources.list.d/docker.list
   apt-get update -y
-  apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  apt-get install -y \
+    "docker-ce=$DOCKER_VERSION" "docker-ce-cli=$DOCKER_VERSION" \
+    "containerd.io=$CONTAINERD_VERSION" "docker-compose-plugin=$COMPOSE_PLUGIN_VERSION"
+  # Keep unattended-upgrades and "apt upgrade" from moving the pinned packages.
+  apt-mark hold docker-ce docker-ce-cli containerd.io docker-compose-plugin
 fi
+
+# Compose must be new enough for "!reset" (checked on every boot, installed or not).
+COMPOSE_NOW=$(docker compose version --short 2>/dev/null || true)
+COMPOSE_NOW=${COMPOSE_NOW#v}
+[ -n "$COMPOSE_NOW" ] || die "docker compose is not available"
+[ "$(printf '%s\n%s\n' "$MIN_COMPOSE" "$COMPOSE_NOW" | sort -V | head -n1)" = "$MIN_COMPOSE" ] ||
+  die "docker compose $COMPOSE_NOW is older than $MIN_COMPOSE ('!reset' in the override file needs $MIN_COMPOSE+)"
 
 # Container logs go to Cloud Logging (needs roles/logging.logWriter). Docker 20.10+
 # keeps a local copy, so "docker logs" still works.
@@ -48,9 +90,11 @@ fi
 systemctl enable --now docker
 
 if [ "$(md piperoom-ops-agent)" = "true" ] && ! dpkg -s google-cloud-ops-agent >/dev/null 2>&1; then
-  log "installing the Ops Agent"
+  log "installing the Ops Agent from the major-version-$OPS_AGENT_REPO_SUFFIX repository"
   curl -fsSL -o /tmp/add-google-cloud-ops-agent-repo.sh https://dl.google.com/cloudagents/add-google-cloud-ops-agent-repo.sh
-  bash /tmp/add-google-cloud-ops-agent-repo.sh --also-install
+  # REPO_SUFFIX selects the repository google-cloud-ops-agent-bookworm-<suffix>,
+  # which only holds that major version, so a new major release is not pulled in.
+  REPO_SUFFIX="$OPS_AGENT_REPO_SUFFIX" bash /tmp/add-google-cloud-ops-agent-repo.sh --also-install --version="$OPS_AGENT_REPO_SUFFIX.*.*"
   rm -f /tmp/add-google-cloud-ops-agent-repo.sh
 fi
 
@@ -89,14 +133,20 @@ chmod 0644 "$APP_DIR/docker-compose.pilot.yml"
 
 IMAGE=$(md piperoom-image)
 [ -n "$IMAGE" ] || die "metadata piperoom-image is empty"
+# Only an immutable digest is run: a tag can be re-pushed and would change what
+# the VM runs on the next boot. (variables.tf checks this too.)
+printf '%s' "$IMAGE" | grep -Eq '^[a-z0-9][a-zA-Z0-9._/:-]*@sha256:[0-9a-f]{64}$' ||
+  die "piperoom-image '$IMAGE' is not pinned by digest (<path>@sha256:<64 hex>)"
 # The base file builds from source; a VM has no source tree, so use the image.
-# "!reset" needs Docker Compose 2.24 or newer (the Docker apt repo ships it).
+# "!reset" needs Docker Compose $MIN_COMPOSE or newer (checked above).
+# pull_policy missing: pull only if this exact digest is not on the disk. Never
+# "always": a digest cannot move, so there is nothing newer to fetch.
 cat > "$APP_DIR/docker-compose.override.yml" <<YAML
 services:
   piperoom:
     build: !reset null
     image: $IMAGE
-    pull_policy: always
+    pull_policy: missing
 YAML
 chmod 0644 "$APP_DIR/docker-compose.override.yml"
 
@@ -208,6 +258,6 @@ esac
 
 cd "$APP_DIR"
 # --no-deps: do not start the bundled postgres service.
-docker compose -f docker-compose.pilot.yml -f docker-compose.override.yml up -d --no-deps --pull always piperoom
+docker compose -f docker-compose.pilot.yml -f docker-compose.override.yml up -d --no-deps --pull missing piperoom
 
 log "done. Check: docker compose -f $APP_DIR/docker-compose.pilot.yml -f $APP_DIR/docker-compose.override.yml ps"

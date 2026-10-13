@@ -39,7 +39,9 @@ resource "google_compute_instance" "piperoom" {
 
   boot_disk {
     initialize_params {
-      image  = "projects/debian-cloud/global/images/family/debian-12"
+      # A named image, not the family: the family moves and would change the OS
+      # (and force a new boot disk) on a later plan.
+      image  = "projects/debian-cloud/global/images/${var.vm_image}"
       size   = var.boot_disk_gb
       type   = "pd-balanced"
       labels = local.labels
@@ -79,9 +81,19 @@ resource "google_compute_instance" "piperoom" {
     piperoom-secret-owners  = google_secret_manager_secret.this["owners-yaml"].secret_id
     piperoom-secret-users   = google_secret_manager_secret.this["users-yaml"].secret_id
     piperoom-ops-agent      = tostring(var.install_ops_agent)
+
+    # Pinned package versions (see variables.tf).
+    piperoom-docker-version     = var.docker_version
+    piperoom-containerd-version = var.containerd_version
+    piperoom-compose-version    = var.docker_compose_plugin_version
+    piperoom-ops-agent-suffix   = var.ops_agent_repo_suffix
   }
 
   lifecycle {
+    precondition {
+      condition     = !var.grant_artifact_registry_reader || local.ar_repo != null
+      error_message = "grant_artifact_registry_reader = true needs piperoom_image in Artifact Registry (<location>-docker.pkg.dev/<project>/<repo>/<image>@sha256:...). For gcr.io, Docker Hub or a public image set grant_artifact_registry_reader = false."
+    }
     precondition {
       condition     = !local.vertex || var.model != null
       error_message = "model_provider = \"vertex\" needs model set to a Vertex model id: the server default is an Anthropic API id and does not work on Vertex."
@@ -96,6 +108,7 @@ resource "google_compute_instance" "piperoom" {
     google_compute_router_nat.nat,
     google_secret_manager_secret_iam_member.vm_accessor,
     google_project_iam_member.log_writer,
+    google_artifact_registry_repository_iam_member.ar_reader,
   ]
 }
 
