@@ -85,6 +85,37 @@ func (b *logBuilder) executed(id string, step int, out string) *logBuilder {
 	return b
 }
 
+func (b *logBuilder) failedAction(id string, step int, out string) *logBuilder {
+	b.add(events.ActionExecuted, events.Actor{Kind: events.ActorSystem, ID: "executor", Name: "executor"},
+		events.ActionExecutedPayload{ProposalID: id, StepIndex: step, OK: false, Output: out})
+	return b
+}
+
+func (b *logBuilder) suggest(id, text string) *logBuilder {
+	b.add(events.SteerSuggested, testHuman, events.SteerSuggestedPayload{SuggestionID: id, Text: text})
+	return b
+}
+
+func (b *logBuilder) close(resolution string) *logBuilder {
+	b.add(events.RoomClosed, testHuman, events.RoomClosedPayload{Resolution: resolution})
+	return b
+}
+
+func (b *logBuilder) callOnly(tool string) *logBuilder {
+	id := fmt.Sprintf("s_%d", b.step)
+	b.step++
+	b.add(events.AgentStepStart, events.AgentActor, events.AgentStepStartPayload{StepID: id, Title: tool})
+	b.add(events.AgentToolCall, events.AgentActor, events.AgentToolCallPayload{StepID: id, ToolUseID: "tu_" + id, Tool: tool, Input: json.RawMessage(`{}`)})
+	return b
+}
+
+func (b *logBuilder) stepOnly(title string) *logBuilder {
+	id := fmt.Sprintf("s_%d", b.step)
+	b.step++
+	b.add(events.AgentStepStart, events.AgentActor, events.AgentStepStartPayload{StepID: id, Title: title})
+	return b
+}
+
 func (b *logBuilder) comment(id, text string) *logBuilder {
 	b.add(events.CommentAdded, testHuman, events.CommentAddedPayload{CommentID: id, Text: text})
 	return b
@@ -129,7 +160,7 @@ func handoffCases() []handoffCase {
 			Done:      []string{"Resumed pg-orders-connector (proposal p_7, approved by kafka-connect)"},
 			RuledOut:  []string{"No failed task: the connector was stopped, not failed"},
 			Open:      []string{"Watch retained WAL of debezium_orders shrink; it was 48.6 GiB"},
-			Risks:     []string{"Disk may fill before the slot catches up"},
+			Risks:     []string{"Disk may fill before the slot catches up (about 81% used, stopped since 2026-10-10 14:05, roughly 19 hours, i.e. most of a day)"},
 		}})
 
 	cs = append(cs, handoffCase{"consumer-poison-pill", (&logBuilder{}).room("order-sync flapping").
@@ -154,7 +185,7 @@ func handoffCases() []handoffCase {
 			WhatBroke: "Task 0 of pg-orders-connector is FAILED and the warehouse is 28 minutes stale.",
 			Why:       "public.orders now belongs to orders_owner, so ALTER PUBLICATION dbz_publication fails with must be owner of table orders.",
 			Done:      []string{"Found the OWNER TO change at 08:52 via pg_recent_ddl"},
-			RuledOut:  []string{"The unrelated CREATE INDEX is not the cause"},
+			RuledOut:  []string{"The unrelated CREATE INDEX is not the cause; e.g. read/write load on Kafka/Connect was normal, checked every 15 min for 30 seconds on port 5432"},
 			Open:      []string{"A DBA must restore ownership or grant the connector user rights"},
 			Risks:     []string{"The slot is inactive and retains WAL"},
 		}})
@@ -212,6 +243,49 @@ func handoffCases() []handoffCase {
 			RuledOut:  []string{},
 			Open:      []string{"The investigation was interrupted by an agent error; restart it"},
 			Risks:     []string{"No root cause is known"},
+		}})
+
+	// A proposal whose only step failed is closed, but must be reported.
+	cs = append(cs, handoffCase{"failed-one-step", (&logBuilder{}).room("connector failed").
+		tool("connect_status", "pg-orders-connector FAILED").
+		propose("p_4", "Restart task 0", "kafka-connect").
+		approve("p_4", "kafka-connect").failedAction("p_4", 0, "restart refused: 409").evs,
+		events.HandoffSummary{
+			WhatBroke: "pg-orders-connector FAILED.",
+			Why:       "Not known yet.",
+			Done:      []string{"Proposed p_4 (Restart task 0); the restart failed"},
+			RuledOut:  []string{},
+			Open:      []string{"Proposal p_4 (Restart task 0) failed on its only step and is not applied"},
+			Risks:     []string{},
+		}})
+
+	// Step 0 ran, step 1 failed: half applied.
+	cs = append(cs, handoffCase{"failed-multi-step", (&logBuilder{}).room("schema rejected").
+		tool("connect_status", "pg-orders-connector task 0 FAILED").
+		propose("p_5", "Relax compatibility then restart", "schema-registry", "kafka-connect").
+		approve("p_5", "schema-registry").approve("p_5", "kafka-connect").
+		executed("p_5", 0, "compatibility set").failedAction("p_5", 1, "task restart failed").evs,
+		events.HandoffSummary{
+			WhatBroke: "Task 0 of pg-orders-connector FAILED.",
+			Why:       "The schema was rejected.",
+			Done:      []string{"Compatibility was relaxed by p_5 step 0"},
+			RuledOut:  []string{},
+			Open:      []string{"Task restart (p_5, step 1) failed; compatibility is already relaxed"},
+			Risks:     []string{"Relax compatibility then restart is half applied"},
+		}})
+
+	// Only the kafka layer is pending: kafka-connect in the text is not it.
+	cs = append(cs, handoffCase{"pending-kafka-layer", (&logBuilder{}).room("lag").
+		tool("kafka_consumer_lag", "order-sync lag 5000").
+		propose("p_6", "Reset offsets", "kafka", "kafka-connect").
+		approve("p_6", "kafka-connect").evs,
+		events.HandoffSummary{
+			WhatBroke: "order-sync lags.",
+			Why:       "Not known yet.",
+			Done:      []string{"kafka-connect approved p_6"},
+			RuledOut:  []string{},
+			Open:      []string{"Proposal p_6 (Reset offsets) needs approval from the kafka layer"},
+			Risks:     []string{},
 		}})
 
 	// A fully executed proposal needs no open item.

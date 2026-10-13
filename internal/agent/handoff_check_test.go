@@ -7,9 +7,24 @@ import (
 	"piperoom/internal/events"
 )
 
+// extraCases are logs only the checker tests need.
+func extraCases() []handoffCase {
+	base := events.HandoffSummary{WhatBroke: "Something broke.", Why: "Not known.", Done: []string{}, RuledOut: []string{}, Open: []string{}, Risks: []string{}}
+	return []handoffCase{
+		{"suggestion", (&logBuilder{}).room("x").suggest("g_1", "try a restart").status("done").evs, base},
+		{"dangling-call", (&logBuilder{}).room("x").callOnly("connect_status").evs, base},
+		{"step-only", (&logBuilder{}).room("x").tool("connect_status", "ok").stepOnly("next").evs, base},
+		{"working-after-result", (&logBuilder{}).room("x").status("working").tool("connect_status", "ok").evs, base},
+		{"closed-room", (&logBuilder{}).room("x").callOnly("connect_status").status("error").close("fixed by hand").evs, base},
+		{"duplicate-proposal", (&logBuilder{}).room("x").
+			propose("p_1", "Fix it", "kafka-connect").propose("p_1", "Fix it", "kafka-connect").evs, base},
+		{"thousands", (&logBuilder{}).room("x").tool("kafka_consumer_lag", "lag 12,000 records").evs, base},
+	}
+}
+
 func caseByName(t *testing.T, name string) handoffCase {
 	t.Helper()
-	for _, c := range handoffCases() {
+	for _, c := range append(handoffCases(), extraCases()...) {
 		if c.name == name {
 			return c
 		}
@@ -102,6 +117,65 @@ func TestCheckHandoffViolations(t *testing.T) {
 		{"empty required field", "schema-change",
 			func(s *events.HandoffSummary) { s.Why = " " },
 			[]string{RuleEmptyField}, nil},
+		{"unknown comment id", "consumer-poison-pill",
+			func(s *events.HandoffSummary) { s.Open = []string{"See comment c_99"} },
+			[]string{RuleUnknownRef}, nil},
+		{"known comment id", "consumer-poison-pill",
+			func(s *events.HandoffSummary) { s.Open = []string{"See comment c_1"} },
+			nil, []string{RuleUnknownRef}},
+		{"unknown suggestion id", "suggestion",
+			func(s *events.HandoffSummary) { s.Open = []string{"See suggestion g_404"} },
+			[]string{RuleUnknownRef}, nil},
+		{"known suggestion id", "suggestion",
+			func(s *events.HandoffSummary) { s.Open = []string{"See suggestion g_1"} },
+			nil, []string{RuleUnknownRef}},
+		{"failed proposal missing", "failed-one-step",
+			func(s *events.HandoffSummary) { s.Open = []string{"Find the cause"} },
+			[]string{RuleFailedAction}, []string{RuleOpenProposal}},
+		{"failed proposal named in risks", "failed-one-step",
+			func(s *events.HandoffSummary) { s.Open = []string{"Find the cause"}; s.Risks = []string{"p_4 failed"} },
+			nil, []string{RuleFailedAction}},
+		{"failed proposal named by title", "failed-one-step",
+			func(s *events.HandoffSummary) { s.Open = []string{"Restart task 0 did not work"} },
+			nil, []string{RuleFailedAction}},
+		{"failed multi-step proposal missing", "failed-multi-step",
+			func(s *events.HandoffSummary) { s.Open = nil; s.Risks = nil },
+			[]string{RuleFailedAction}, nil},
+		{"only kafka-connect named for kafka layer", "pending-kafka-layer",
+			func(s *events.HandoffSummary) { s.Open = []string{"Proposal p_6 needs kafka-connect"} },
+			[]string{RulePendingLayer}, nil},
+		{"kafka layer named", "pending-kafka-layer",
+			func(s *events.HandoffSummary) {}, nil, []string{RulePendingLayer}},
+		{"generic failure word is not an interruption note", "interrupted-run",
+			func(s *events.HandoffSummary) {
+				s.Open = []string{"Task 0 failed and the connector stopped"}
+				s.Risks = []string{"An error in the schema"}
+			},
+			[]string{RuleInterruptedRun}, nil},
+		{"agent run note in risks", "interrupted-run",
+			func(s *events.HandoffSummary) { s.Open = nil; s.Risks = []string{"The agent run stopped unfinished"} },
+			nil, []string{RuleInterruptedRun}},
+		{"dangling tool call", "dangling-call",
+			func(s *events.HandoffSummary) { s.Open = []string{"Find the cause"} },
+			[]string{RuleInterruptedRun}, nil},
+		{"dangling tool call noted", "dangling-call",
+			func(s *events.HandoffSummary) { s.Open = []string{"The investigation was interrupted mid tool call"} },
+			nil, []string{RuleInterruptedRun}},
+		{"log ends on a step start", "step-only",
+			func(s *events.HandoffSummary) { s.Open = []string{"Find the cause"} },
+			[]string{RuleInterruptedRun}, nil},
+		{"working after a tool result", "working-after-result",
+			func(s *events.HandoffSummary) { s.Open = []string{"Find the cause"} },
+			[]string{RuleInterruptedRun}, nil},
+		{"closed room needs no interruption note", "closed-room",
+			func(s *events.HandoffSummary) { s.Open = nil; s.Risks = nil },
+			nil, []string{RuleInterruptedRun}},
+		{"duplicate proposal.created keeps state", "duplicate-proposal",
+			func(s *events.HandoffSummary) { s.Open = nil },
+			[]string{RuleOpenProposal}, nil},
+		{"comma-separated number in the log", "thousands",
+			func(s *events.HandoffSummary) { s.Risks = []string{"Lag is 12000 records and 3 partitions"} },
+			nil, []string{RuleUnknownNumber}},
 		{"empty list item", "schema-change",
 			func(s *events.HandoffSummary) { s.Done = append(s.Done, "") },
 			[]string{RuleEmptyField}, nil},
@@ -144,13 +218,80 @@ func TestContainsNumber(t *testing.T) {
 	}{
 		{"lag=2900000", "2900000", true},
 		{"lag=29000001", "2900000", false},
-		{"retained 1,234 rows", "1234", true},
+		{"retained 1,234 rows", "1234", false}, // raw text only; hasNumber also tries the comma-free text
 		{"48.6 gib", "48.6", true},
 		{"148.65", "48.6", false},
 	}
 	for _, tt := range tests {
 		if got := containsNumber(tt.text, tt.n); got != tt.want {
 			t.Errorf("containsNumber(%q,%q)=%v", tt.text, tt.n, got)
+		}
+	}
+}
+
+func TestLogHasNumberIgnoresThousandsCommas(t *testing.T) {
+	idx := indexLog((&logBuilder{}).room("x").tool("t", "lag 12,000 and decimal(12,2)").evs)
+	for _, n := range []string{"12000", "12"} {
+		if !idx.hasNumber(n) {
+			t.Errorf("hasNumber(%q) = false", n)
+		}
+	}
+	if idx.hasNumber("122") {
+		t.Error("12,2 must not be folded into 122")
+	}
+}
+
+// TestCheckHandoffProseIsNotFlagged: ordinary hand-off wording must not trip
+// the name and number checks, on a log that has none of these tokens.
+func TestCheckHandoffProseIsNotFlagged(t *testing.T) {
+	log := (&logBuilder{}).room("orders stale").tool("connect_status", "pg-orders-connector FAILED; decimal(12,2); 1,000 rows").evs
+	prose := []string{
+		"Checked the usual suspects, e.g. the connector, i.e. the Debezium task",
+		"Kafka/Connect and read/write paths were fine",
+		"See https://example.com/docs/page-1/step-2 for the runbook",
+		"The warehouse is up-to-date again, not out-of-sync, with at-least-once delivery",
+		"The alert fired at 09:40 and cleared at 9:41:30",
+		"Started 2026-10-11 and again 2026-10-11T09:40:00Z",
+		"CPU was at 50% and then 99.5%",
+		"Waited 15 min, then 30 seconds, then 2 hours, 45 ms and 3x",
+		"Postgres on port 5432 answered",
+		"Referenced as #12 in the thread",
+		"decimal(12,2) is the new type",
+		"Used a well-known trick, a one-off fix",
+		"Roughly 1,000 rows",
+	}
+	for _, p := range prose {
+		s := events.HandoffSummary{WhatBroke: "pg-orders-connector FAILED.", Why: p, Done: []string{p}, RuledOut: []string{}, Open: []string{}, Risks: []string{}}
+		for _, v := range CheckHandoff(log, s) {
+			if v.Rule == RuleUnknownName || v.Rule == RuleUnknownNumber {
+				t.Errorf("%q flagged: %s", p, v)
+			}
+		}
+	}
+}
+
+// TestCheckHandoffStillFlagsInventions: the relaxed rules keep the point.
+func TestCheckHandoffStillFlagsInventions(t *testing.T) {
+	log := (&logBuilder{}).room("orders stale").tool("connect_status", "pg-orders-connector FAILED").evs
+	tests := []struct{ text, rule string }{
+		{"pg-payments-connector failed", RuleUnknownName},
+		{"topic pg.public.refunds is empty", RuleUnknownName},
+		{"slot debezium_payments inactive", RuleUnknownName},
+		{"the `refund_sink` is down", RuleUnknownName},
+		{"lag is 48213 records", RuleUnknownNumber},
+		{"public/refunds_v2 was scanned", RuleUnknownName},
+		{"WAL is 91.2 GiB", RuleUnknownNumber},
+	}
+	for _, tt := range tests {
+		s := events.HandoffSummary{WhatBroke: "pg-orders-connector FAILED.", Why: tt.text, Done: []string{}, RuledOut: []string{}, Open: []string{}, Risks: []string{}}
+		found := false
+		for _, v := range CheckHandoff(log, s) {
+			if v.Rule == tt.rule {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%q: %s not reported", tt.text, tt.rule)
 		}
 	}
 }

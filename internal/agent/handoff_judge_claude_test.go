@@ -21,15 +21,24 @@ func TestJudgeHandoffParsesVerdict(t *testing.T) {
 		Content: []anthropic.BetaContentBlockUnion{{Type: "text",
 			Text: `{"contradictions":[{"claim":"lag is 0","evidence":"lag=5"}]}`}},
 	}, params: &gotParams}
-	v, err := judgeHandoff(context.Background(), c.events, c.summary, m, judgeModel)
+	v, err := judgeHandoff(context.Background(), c.events, c.summary, Options{}.withDefaults(), m)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if v.OK() || v.Contradictions[0].Claim != "lag is 0" {
 		t.Fatalf("verdict = %+v", v)
 	}
-	if !gotParams.Temperature.Valid() || gotParams.Temperature.Value != 0 {
-		t.Errorf("temperature = %+v, want 0", gotParams.Temperature)
+	if gotParams.Temperature.Valid() {
+		t.Errorf("temperature must be unset (current models reject it), got %+v", gotParams.Temperature)
+	}
+	if want := (Options{}).withDefaults().Model; gotParams.Model != want {
+		t.Errorf("model = %q, want the configured model", gotParams.Model)
+	}
+	if e := string(gotParams.OutputConfig.Effort); e != "medium" && e != "low" {
+		t.Errorf("effort = %q", e)
+	}
+	if gotParams.OutputConfig.Format.Schema == nil {
+		t.Error("strict JSON schema missing")
 	}
 	body := gotParams.Messages[0].Content[0].OfText.Text
 	if !strings.Contains(body, "<untrusted>") {
@@ -39,12 +48,12 @@ func TestJudgeHandoffParsesVerdict(t *testing.T) {
 
 func TestJudgeHandoffRejectsBadVerdict(t *testing.T) {
 	c := caseByName(t, "schema-change")
-	for _, text := range []string{"nope", `{"contradictions":[],"extra":1}`} {
+	for _, text := range []string{"nope", `{"contradictions":[],"extra":1}`, `{"contradictions":[]} {"contradictions":[]}`, `{"contradictions":[]} trailing`} {
 		m := &capturingModel{msg: anthropic.BetaMessage{
 			StopReason: anthropic.BetaStopReasonEndTurn,
 			Content:    []anthropic.BetaContentBlockUnion{{Type: "text", Text: text}},
 		}, params: new(anthropic.BetaMessageNewParams)}
-		if _, err := judgeHandoff(context.Background(), c.events, c.summary, m, judgeModel); err == nil {
+		if _, err := judgeHandoff(context.Background(), c.events, c.summary, Options{}.withDefaults(), m); err == nil {
 			t.Errorf("%q: want error", text)
 		}
 	}
@@ -81,7 +90,7 @@ func TestClaudeHandoffQuality(t *testing.T) {
 			for _, v := range CheckHandoff(c.events, s) {
 				t.Errorf("check: %s", v)
 			}
-			verdict, err := JudgeHandoff(ctx, c.events, s, Options{}, "")
+			verdict, err := JudgeHandoff(ctx, c.events, s, Options{})
 			if err != nil {
 				t.Fatalf("JudgeHandoff: %v", err)
 			}

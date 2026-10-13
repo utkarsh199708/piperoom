@@ -5,7 +5,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -13,13 +15,7 @@ import (
 	"piperoom/internal/events"
 )
 
-// judgeModel is the default judge. Claude Opus 5.5 and Sonnet 5.5 reject
-// non-default sampling parameters, so they cannot run at temperature 0; Sonnet
-// 4.6 accepts it and takes no thinking config, which keeps the verdict as
-// repeatable as the API allows.
-const judgeModel = "claude-sonnet-4-6"
-
-const judgeMaxTokens = 2048
+const judgeMaxTokens = 4096
 
 // HandoffVerdict is the judge's strict-JSON answer.
 type HandoffVerdict struct {
@@ -66,31 +62,50 @@ func judgeSchema() map[string]any {
 	}
 }
 
-// JudgeHandoff asks a model whether any claim in the summary contradicts the
-// log. Both are passed inside the untrusted wrapper. model may be empty for
-// the default judge.
-func JudgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSummary, opts Options, modelName string) (HandoffVerdict, error) {
-	if modelName == "" {
-		modelName = judgeModel
-	}
-	return judgeHandoff(ctx, evs, s, newModel(opts.withDefaults(), nil), modelName)
+// JudgeHandoff asks the configured model (Options.Model, PIPEROOM_MODEL)
+// whether any claim in the summary contradicts the log. Both are passed inside
+// the untrusted wrapper. The verdict is held to a strict JSON schema; no
+// sampling parameter is sent because current models reject non-default ones.
+func JudgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSummary, opts Options) (HandoffVerdict, error) {
+	opts = opts.withDefaults()
+	return judgeHandoff(ctx, evs, s, opts, newModel(opts, nil))
 }
 
-func judgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSummary, m model, modelName string) (HandoffVerdict, error) {
+// JudgeHandoff is JudgeHandoff on the endpoint's model client, so the
+// provider (Bedrock, Vertex) and the room's token accounting apply.
+func (e *Endpoint) JudgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSummary, opts Options) (HandoffVerdict, error) {
+	opts = opts.withDefaults()
+	if len(evs) == 0 {
+		return HandoffVerdict{}, fmt.Errorf("agent: cannot judge a handoff against an empty room")
+	}
+	m := &budgetModel{inner: e.model, budget: e.budget(evs[0].RoomID)}
+	return judgeHandoff(ctx, evs, s, opts, m)
+}
+
+// judgeEffort is the effort for the judge: a verdict over a short log needs
+// little reasoning, so it is capped at medium.
+func judgeEffort(opts Options) string {
+	if opts.effort() == "low" {
+		return "low"
+	}
+	return "medium"
+}
+
+func judgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSummary, opts Options, m model) (HandoffVerdict, error) {
 	sj, err := json.Marshal(s)
 	if err != nil {
 		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: marshal summary: %w", err)
 	}
 	user := "Hand-off summary:\n" + wrapUntrusted(string(sj)) + "\n\n" + renderRoomEvents(evs)
 	params := anthropic.BetaMessageNewParams{
-		Model:       modelName,
-		MaxTokens:   judgeMaxTokens,
-		Temperature: anthropic.Float(0),
-		System:      []anthropic.BetaTextBlockParam{{Text: judgePrompt()}},
+		Model:     opts.Model,
+		MaxTokens: judgeMaxTokens,
+		System:    []anthropic.BetaTextBlockParam{{Text: judgePrompt()}},
 		Messages: []anthropic.BetaMessageParam{
 			anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(user)),
 		},
 		OutputConfig: anthropic.BetaOutputConfigParam{
+			Effort: anthropic.BetaOutputConfigEffort(judgeEffort(opts)),
 			Format: anthropic.BetaJSONOutputFormatParam{Schema: judgeSchema()},
 		},
 	}
@@ -101,12 +116,16 @@ func judgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSumma
 	if msg.StopReason == anthropic.BetaStopReasonRefusal {
 		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: model refused the request")
 	}
-	text := extractText(msg.Content)
-	var v HandoffVerdict
-	dec := json.NewDecoder(strings.NewReader(text))
+	dec := json.NewDecoder(strings.NewReader(extractText(msg.Content)))
 	dec.DisallowUnknownFields()
+	var v HandoffVerdict
 	if err := dec.Decode(&v); err != nil {
 		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: verdict is not valid JSON: %w", err)
+	}
+	// Anything after the verdict is a protocol break, not a verdict.
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return HandoffVerdict{}, fmt.Errorf("agent: judge handoff: trailing data after the verdict")
 	}
 	return v, nil
 }

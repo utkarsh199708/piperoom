@@ -12,8 +12,9 @@ import (
 )
 
 // Hand-off length caps. They mirror what internal/room applies before a
-// summary is stored (handoffListMax and truncateDetail's 500 bytes); a summary
-// over them is cut there, so the model should not produce one. Keep in sync.
+// summary is stored (handoffListMax and truncateDetail's 500 bytes). The
+// duplication is deliberate: internal/room imports this package, so it cannot
+// be shared from here. Keep in sync (room owner: A5).
 const (
 	// HandoffListMax is the most items a hand-off list may carry.
 	HandoffListMax = 10
@@ -31,6 +32,7 @@ const (
 	RuleUnknownNumber  = "unknown_number"
 	RuleOpenProposal   = "open_proposal_missing"
 	RulePendingLayer   = "pending_layer_missing"
+	RuleFailedAction   = "failed_action_missing"
 	RuleInterruptedRun = "interrupted_run_missing"
 )
 
@@ -52,12 +54,20 @@ func (v HandoffViolation) String() string {
 //
 //   - a cited seq (as "seq 12"), step id (s_...), proposal id (p_...), comment
 //     id (c_...) or suggestion id (g_...) must exist in the log;
-//   - an identifier-like name (backticked text, or a token joined by . _ : /
-//     or by two or more hyphens, or hyphenated with a digit) and a number of
-//     two or more digits must appear in the log's text, case-insensitively;
+//   - an identifier-like name and a number of two or more digits must appear
+//     in the log's text, case-insensitively. Names are backticked text, tokens
+//     joined by . _ or :, slash paths with a digit, _ or ., and tokens with
+//     two or more hyphens or a digit (except common English compounds).
+//     Dates, times, percentages, durations, ports, #refs and URLs are prose
+//     and are not checked;
 //   - every open proposal must be named (id or title) in an open item, and
-//     the layers still to approve must be named in those items;
-//   - a run that did not finish must be mentioned in open or risks;
+//     the layers still to approve must be named in those items. A proposal is
+//     open until it is rejected, a step fails, or its last step runs (the
+//     rule internal/room/snapshot.go applies);
+//   - a proposal with a failed step must be named in open or risks;
+//   - a run that did not finish must be said so in open or risks. In progress
+//     counts as unfinished: the log ends inside a step or tool call, after a
+//     tool result with the agent still "working", or on an "error" status;
 //   - the length caps hold.
 //
 // Names and numbers are matched against the whole log, not only the part the
@@ -68,6 +78,7 @@ func CheckHandoff(evs []events.Event, s events.HandoffSummary) []HandoffViolatio
 	idx := indexLog(evs)
 	out = append(out, checkGrounding(idx, s)...)
 	out = append(out, checkOpenProposals(idx, s)...)
+	out = append(out, checkFailedActions(idx, s)...)
 	out = append(out, checkInterrupted(idx, s)...)
 	return out
 }
@@ -106,11 +117,14 @@ type proposalState struct {
 	steps     int
 	approved  map[string]bool
 	rejected  bool
+	failed    bool
 	executed  map[int]bool
 }
 
+// open follows internal/room/snapshot.go: a rejection, a failed step or the
+// last step running decides a proposal.
 func (p *proposalState) open() bool {
-	return !p.rejected && len(p.executed) < p.steps
+	return !p.rejected && !p.failed && !p.executed[p.steps-1]
 }
 
 func (p *proposalState) pendingLayers() []string {
@@ -126,8 +140,9 @@ func (p *proposalState) pendingLayers() []string {
 // logIndex is the facts the checks need, gathered in one pass.
 type logIndex struct {
 	seqs      map[int64]bool
-	ids       map[string]bool // step, tool-use, proposal, comment, suggestion ids
+	ids       map[string]bool // step, proposal, comment, suggestion ids
 	text      string          // every string and number in every payload, lower-cased
+	textNC    string          // text with thousands commas removed, so 1,234 matches 1234
 	proposals []*proposalState
 	// interrupted is set when the run did not end cleanly.
 	interrupted bool
@@ -137,27 +152,29 @@ func indexLog(evs []events.Event) logIndex {
 	idx := logIndex{seqs: map[int64]bool{}, ids: map[string]bool{}}
 	var text strings.Builder
 	byID := map[string]*proposalState{}
-	openCalls := map[string]bool{} // tool_use_id with no result yet
+	openCalls := map[string]bool{} // calls with no result yet
 	lastStatus := ""
-	var lastType events.Type
+	var lastWork events.Type // last step start, tool call or tool result
 	closed := false
 
 	for _, e := range evs {
 		idx.seqs[e.Seq] = true
 		collectStrings(e.Payload, &text)
 		text.WriteByte('\n')
-		lastType = e.Type
 		switch e.Type {
 		case events.AgentStepStart:
+			lastWork = e.Type
 			if p, err := events.Decode[events.AgentStepStartPayload](e); err == nil {
 				idx.ids[strings.ToLower(p.StepID)] = true
 			}
 		case events.AgentToolCall:
+			lastWork = e.Type
 			if p, err := events.Decode[events.AgentToolCallPayload](e); err == nil {
 				idx.ids[strings.ToLower(p.StepID)] = true
 				openCalls[p.ToolUseID+"|"+p.StepID+"|"+p.Tool] = true
 			}
 		case events.AgentToolResult:
+			lastWork = e.Type
 			if p, err := events.Decode[events.AgentToolResultPayload](e); err == nil {
 				delete(openCalls, p.ToolUseID+"|"+p.StepID+"|"+p.Tool)
 			}
@@ -177,8 +194,8 @@ func indexLog(evs []events.Event) logIndex {
 			closed = true
 		case events.ProposalCreated:
 			p, err := events.Decode[events.ProposalCreatedPayload](e)
-			if err != nil {
-				continue
+			if err != nil || byID[p.ProposalID] != nil {
+				continue // a duplicate proposal.created does not reset state
 			}
 			idx.ids[strings.ToLower(p.ProposalID)] = true
 			ps := &proposalState{
@@ -197,18 +214,30 @@ func indexLog(evs []events.Event) logIndex {
 			}
 		case events.ActionExecuted:
 			if p, err := events.Decode[events.ActionExecutedPayload](e); err == nil && byID[p.ProposalID] != nil {
-				byID[p.ProposalID].executed[p.StepIndex] = true
+				ps := byID[p.ProposalID]
+				ps.executed[p.StepIndex] = true
+				if !p.OK {
+					ps.failed = true
+				}
 			}
 		}
 	}
 	idx.text = strings.ToLower(text.String())
-	// A run is unfinished when the agent last reported an error, or the log
-	// ends inside a tool call or step with no result. A closed room is not.
+	idx.textNC = thousandsGroup.ReplaceAllStringFunc(idx.text, func(m string) string { return strings.ReplaceAll(m, ",", "") })
+	// A closed room has nothing left to finish.
 	if !closed {
 		idx.interrupted = lastStatus == "error" ||
-			(len(openCalls) > 0 && (lastType == events.AgentToolCall || lastType == events.AgentStepStart))
+			len(openCalls) > 0 ||
+			lastWork == events.AgentStepStart ||
+			(lastStatus == "working" && lastWork == events.AgentToolResult)
 	}
 	return idx
+}
+
+// hasNumber reports whether n appears in the log as a whole number, with or
+// without thousands separators.
+func (idx logIndex) hasNumber(n string) bool {
+	return containsNumber(idx.text, n) || containsNumber(idx.textNC, n)
 }
 
 // collectStrings appends every string and number in a JSON payload, so text
@@ -252,14 +281,57 @@ var (
 	seqRef   = regexp.MustCompile(`(?i)\bseq(?:uence)?[ =#:]*(\d+)`)
 	idRef    = regexp.MustCompile(`\b[spcg]_[A-Za-z0-9]+\b`)
 	backtick = regexp.MustCompile("`([^`\n]+)`")
-	// A name joined by . _ : / (pg.public.orders, debezium_orders, wh:x).
-	dotName = regexp.MustCompile(`[A-Za-z][A-Za-z0-9]*(?:[._:/][A-Za-z0-9]+)+`)
-	// A hyphenated name (pg-orders-connector, order-sync).
-	hyphName = regexp.MustCompile(`[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+`)
-	number   = regexp.MustCompile(`\d[\d,]*(?:\.\d+)?`)
+	urlRef   = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://\S+`)
+	// A name joined by . _ or : (pg.public.orders, debezium_orders); every
+	// segment has 2+ characters, so "e.g" and "i.e" are not names.
+	dotName = regexp.MustCompile(`[A-Za-z][A-Za-z0-9]+(?:[._:][A-Za-z0-9]{2,})+`)
+	// A path with slashes (public/orders); checked only with a digit, _ or .
+	slashName = regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9._]*(?:/[A-Za-z0-9][A-Za-z0-9._]*)+`)
+	// A hyphenated token whose segments all have 2+ characters.
+	hyphName = regexp.MustCompile(`[A-Za-z][A-Za-z0-9]+(?:-[A-Za-z0-9]{2,})+`)
+
+	isoDate        = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}(?:[T ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?`)
+	clockTime      = regexp.MustCompile(`\b\d{1,2}:\d{2}(?::\d{2})?\b`)
+	thousandsGroup = regexp.MustCompile(`\d{1,3}(?:,\d{3})+`)
+	numToken       = regexp.MustCompile(`#?\d{1,3}(?:,\d{3})+(?:\.\d+)?|#?\d+(?:\.\d+)?`)
+	// A number that is a rate, size-less unit or count of time, not a fact the
+	// log must hold: 50%, 15 min, 30 seconds, 3x.
+	unitAfter  = regexp.MustCompile(`^(?:\s?%|\s?(?:ms|msec|s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?|weeks?)\b|x\b)`)
+	portBefore = regexp.MustCompile(`(?i)\bports?\s*[:=]?\s*$`)
 )
 
+// englishCompounds are hyphenated phrases with 2+ hyphens that are prose, not
+// pipeline names.
+var englishCompounds = map[string]bool{
+	"up-to-date": true, "out-of-sync": true, "out-of-date": true, "at-least-once": true,
+	"at-most-once": true, "end-to-end": true, "state-of-the-art": true,
+	"first-in-first-out": true, "on-call-to-on-call": true, "day-to-day": true,
+	"one-to-one": true, "one-to-many": true, "many-to-many": true, "run-time-error": true,
+	"read-after-write": true, "check-in-check-out": true,
+	"hand-off-to-hand-off": true, "time-to-live": true, "per-partition-per-topic": true,
+	"non-breaking-change": true, "not-yet-approved": true, "to-be-decided": true,
+	"no-op-on-retry": true, "re-run-after-fix": true, "case-by-case": true,
+	"by-the-book": true, "on-the-fly": true, "off-by-one": true, "run-to-completion": true,
+	"fire-and-forget": true, "trial-and-error": true, "back-to-back": true,
+	"exactly-once-delivery": true, "at-least-once-delivery": true, "wait-and-see": true,
+	"stop-the-world": true,
+}
+
 type summaryText struct{ field, text string }
+
+func orderedSummaryTexts(s events.HandoffSummary) []summaryText {
+	out := []summaryText{{"what_broke", s.WhatBroke}, {"why", s.Why}}
+	add := func(name string, items []string) {
+		for i, it := range items {
+			out = append(out, summaryText{fmt.Sprintf("%s[%d]", name, i), it})
+		}
+	}
+	add("done", s.Done)
+	add("ruled_out", s.RuledOut)
+	add("open", s.Open)
+	add("risks", s.Risks)
+	return out
+}
 
 func checkGrounding(idx logIndex, s events.HandoffSummary) []HandoffViolation {
 	var out []HandoffViolation
@@ -290,26 +362,11 @@ func checkGrounding(idx logIndex, s events.HandoffSummary) []HandoffViolation {
 			}
 		}
 		for _, n := range candidateNumbers(st.text) {
-			if !containsNumber(idx.text, n) {
+			if !idx.hasNumber(n) {
 				add(RuleUnknownNumber, st.field, n, fmt.Sprintf("number %s does not appear in the log", n))
 			}
 		}
 	}
-	return out
-}
-
-// orderedSummaryTexts is summaryTexts in a stable order (map iteration is not).
-func orderedSummaryTexts(s events.HandoffSummary) []summaryText {
-	out := []summaryText{{"what_broke", s.WhatBroke}, {"why", s.Why}}
-	add := func(name string, items []string) {
-		for i, it := range items {
-			out = append(out, summaryText{fmt.Sprintf("%s[%d]", name, i), it})
-		}
-	}
-	add("done", s.Done)
-	add("ruled_out", s.RuledOut)
-	add("open", s.Open)
-	add("risks", s.Risks)
 	return out
 }
 
@@ -325,11 +382,21 @@ func candidateNames(text string) []string {
 		}
 	}
 	rest := backtick.ReplaceAllString(text, " ")
+	rest = urlRef.ReplaceAllString(rest, " ")
 	rest = idRef.ReplaceAllString(rest, " ") // ids are checked as references
+	rest = isoDate.ReplaceAllString(rest, " ")
 	for _, t := range dotName.FindAllString(rest, -1) {
-		out = append(out, strings.TrimRight(t, "._:/"))
+		out = append(out, t)
+	}
+	for _, t := range slashName.FindAllString(rest, -1) {
+		if strings.ContainsAny(t, "_.0123456789") {
+			out = append(out, strings.TrimRight(t, "."))
+		}
 	}
 	for _, t := range hyphName.FindAllString(rest, -1) {
+		if englishCompounds[strings.ToLower(t)] {
+			continue
+		}
 		if strings.Count(t, "-") >= 2 || strings.ContainsAny(t, "0123456789") {
 			out = append(out, t)
 		}
@@ -337,18 +404,24 @@ func candidateNames(text string) []string {
 	return out
 }
 
-// candidateNumbers returns numbers of two or more digits, normalised (no
-// thousands commas). Single digits are too common in prose to check.
+// candidateNumbers returns numbers of two or more digits, without thousands
+// commas. Single digits are too common in prose to check. Dates, times,
+// percentages, durations, ports, #refs and names are not facts to ground.
 func candidateNumbers(text string) []string {
 	var out []string
-	// Names are checked separately; strip them so pg-orders-2 is not a number.
 	stripped := backtick.ReplaceAllString(text, " ")
-	stripped = idRef.ReplaceAllString(stripped, " ")
-	stripped = seqRef.ReplaceAllString(stripped, " ")
-	stripped = dotName.ReplaceAllString(stripped, " ")
-	stripped = hyphName.ReplaceAllString(stripped, " ")
-	for _, m := range number.FindAllString(stripped, -1) {
-		n := strings.TrimRight(strings.ReplaceAll(m, ",", ""), ".")
+	for _, re := range []*regexp.Regexp{urlRef, idRef, seqRef, isoDate, clockTime, dotName, slashName, hyphName} {
+		stripped = re.ReplaceAllString(stripped, " ")
+	}
+	for _, loc := range numToken.FindAllStringIndex(stripped, -1) {
+		tok := stripped[loc[0]:loc[1]]
+		if strings.HasPrefix(tok, "#") {
+			continue
+		}
+		if unitAfter.MatchString(stripped[loc[1]:]) || portBefore.MatchString(stripped[:loc[0]]) {
+			continue
+		}
+		n := strings.ReplaceAll(tok, ",", "")
 		if len(strings.ReplaceAll(n, ".", "")) >= 2 {
 			out = append(out, n)
 		}
@@ -357,18 +430,17 @@ func candidateNumbers(text string) []string {
 }
 
 // containsNumber reports whether n appears in text as a whole number (not
-// inside a longer digit run), ignoring thousands commas in the log.
+// inside a longer digit run).
 func containsNumber(text, n string) bool {
-	norm := strings.ReplaceAll(text, ",", "")
 	for from := 0; ; {
-		i := strings.Index(norm[from:], n)
+		i := strings.Index(text[from:], n)
 		if i < 0 {
 			return false
 		}
 		i += from
 		end := i + len(n)
-		before := i == 0 || !isDigit(norm[i-1])
-		after := end == len(norm) || !isDigit(norm[end])
+		before := i == 0 || !isDigit(text[i-1])
+		after := end == len(text) || !isDigit(text[end])
 		if before && after {
 			return true
 		}
@@ -378,6 +450,11 @@ func containsNumber(text, n string) bool {
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
+func mentionsProposal(low string, p *proposalState) bool {
+	return strings.Contains(low, strings.ToLower(p.id)) ||
+		(strings.TrimSpace(p.title) != "" && strings.Contains(low, strings.ToLower(strings.TrimSpace(p.title))))
+}
+
 func checkOpenProposals(idx logIndex, s events.HandoffSummary) []HandoffViolation {
 	var out []HandoffViolation
 	for _, p := range idx.proposals {
@@ -386,9 +463,7 @@ func checkOpenProposals(idx logIndex, s events.HandoffSummary) []HandoffViolatio
 		}
 		var mentioned []string
 		for _, it := range s.Open {
-			low := strings.ToLower(it)
-			if strings.Contains(low, strings.ToLower(p.id)) ||
-				(strings.TrimSpace(p.title) != "" && strings.Contains(low, strings.ToLower(strings.TrimSpace(p.title)))) {
+			if low := strings.ToLower(it); mentionsProposal(low, p) {
 				mentioned = append(mentioned, low)
 			}
 		}
@@ -406,6 +481,29 @@ func checkOpenProposals(idx logIndex, s events.HandoffSummary) []HandoffViolatio
 	return out
 }
 
+// checkFailedActions requires a proposal whose step failed to appear in open
+// or risks: the executor stopped there, so the fix is half-applied or not
+// applied and the next driver must know.
+func checkFailedActions(idx logIndex, s events.HandoffSummary) []HandoffViolation {
+	var out []HandoffViolation
+	for _, p := range idx.proposals {
+		if !p.failed {
+			continue
+		}
+		found := false
+		for _, it := range append(append([]string{}, s.Open...), s.Risks...) {
+			if mentionsProposal(strings.ToLower(it), p) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, HandoffViolation{RuleFailedAction, "open", fmt.Sprintf("proposal %s (%q) had a failed step but is in neither open nor risks", p.id, p.title)})
+		}
+	}
+	return out
+}
+
 // mentionsLayer matches a layer name as a whole word, so "kafka" does not
 // match inside "kafka-connect".
 func mentionsLayer(lowText, layer string) bool {
@@ -413,14 +511,21 @@ func mentionsLayer(lowText, layer string) bool {
 	return re.MatchString(lowText)
 }
 
-var interruptedWords = regexp.MustCompile(`(?i)interrupt|unfinish|incomplete|did not (?:finish|complete)|not (?:finished|complete)|stopped|crash|gave up|error|failed|cut off|aborted`)
+// A generic "failed"/"error" word is in nearly every CDC hand-off, so the
+// item must refer to the agent run itself: the run/agent/investigation next
+// to an interrupt, stop, error or unfinished word, within 60 characters.
+var (
+	runWord  = `(?:agent|investigation|run)`
+	haltWord = `(?:interrupt\w*|stopp\w*|unfinish\w*|incomplete|crash\w*|abort\w*|errored|error|cut off|gave up|did not (?:finish|complete)|not (?:finished|complete\w*)|in progress|still running)`
+	runHalt  = regexp.MustCompile(`(?i)\b` + runWord + `\b.{0,60}\b` + haltWord + `\b|\b` + haltWord + `\b.{0,60}\b` + runWord + `\b`)
+)
 
 func checkInterrupted(idx logIndex, s events.HandoffSummary) []HandoffViolation {
 	if !idx.interrupted {
 		return nil
 	}
 	for _, it := range append(append([]string{}, s.Open...), s.Risks...) {
-		if interruptedWords.MatchString(it) {
+		if runHalt.MatchString(it) {
 			return nil
 		}
 	}
