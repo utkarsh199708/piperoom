@@ -1,8 +1,20 @@
 # Design: OIDC login, identity-bound approvals, params hash
 
-C9, 2026-10-13, **revision 3**, against `main` @ 9a97cb2. Replaces PR #10's `auth.md`. Covers F1, F2 and feedback
+C9, 2026-10-13, **revision 4**, against `main` @ 0172826. Replaces PR #10's `auth.md`. Covers F1, F2 and feedback
 T1, T5, T6. Revision 1 was reviewed in `reviews/auth-design-critique.md` (verdict: approve with changes). Revision 2
-was reviewed by two critics (security, fit with `main`); revision 3 answers them.
+was reviewed by two critics (security, fit with `main`); revision 3 answers them. Revision 4 answers the review of
+revision 3 (PR #44 at be6f3c2).
+
+## Changes in revision 4
+
+| Item | What changed | Section |
+|---|---|---|
+| 1 (blocking) | A proxy pilot that upgrades could be impersonated: the proxy forces `X-User: bob`, the image stays in dev mode, and bob calls `POST /auth/dev-login {user:"priya"}`. Now dev mode answers `403 proxy_identity` when (a) `/auth/dev-login` is called with `X-User`, or (b) a request has a session cookie and an `X-User` for a different user. Keyed on `X-User` only. Both cases are in PR 2's done-when. | §5.2, §5.1, §7, §8 |
+| 2 | Viewer rule is default-deny: every non-GET under `/api` answers `403 viewer`. It now also catches `POST /api/handoffs/{hid}/accept`. Viewer row: every GET except export. | §2.1, §6, §7, §8 |
+| 3 | People who get in only through an `owners.yaml` group are not in `users.yaml`, so `GrantControl` and `CreateHandoff` could not find them. PR 3 adds a person lookup backed by sessions (`LookupPerson`). | §0, §1.3, §2.1, §8 |
+| 4 | `auditors:` no longer makes a member. An auditor-only principal is a viewer plus export. | §2.1, §3.4, §8 |
+| 5 | The `PIPEROOM_PUBLIC_URL` row now states the §1.5 rule: in dev mode on a non-loopback address the host joins the allow-list only with `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`. | §6 |
+| 6 | Line refs and the header refreshed to `main` @ 0172826: `service_proposals.go` 131-146, `OwnsLayer` check :187, `approval.given` :202-204; `service_steer.go` `GrantControl` 161-193; `docs/api.md:103`. Each was checked against `origin/main`. | §0, §3.1, `findings.md` |
 
 ## Changes in revision 3
 
@@ -38,13 +50,13 @@ Each row is one numbered item of the critique and the section that now answers i
 | 12 | `GET /auth/login` row caps; `Access-Control-Expose-Headers` goes with `cors`; `amr`/`acr` stored now. | §1.1, §1.4, §1.3 |
 | Founder table | The critique's recommended defaults are written in as the proposal. | §9 |
 
-## 0. Today (`main` @ 9a97cb2)
+## 0. Today (`main` @ 0172826)
 
 - `authenticate` trusts `X-User` (`internal/httpapi/server.go:191-208`). The WebSocket trusts `?user=`
-  (`internal/ws/gateway.go:163-166`). Rights are `users.yaml` `layers` (`internal/room/service_proposals.go:165`,
-  `users.go:145`). `approval.given` records only `Actor{kind,id,name}` (`service_proposals.go:180-182`).
+  (`internal/ws/gateway.go:163-166`). Rights are `users.yaml` `layers` (`internal/room/service_proposals.go:187`,
+  `users.go:145`). `approval.given` records only `Actor{kind,id,name}` (`service_proposals.go:202-204`).
 - Steps are frozen at creation: `CreateProposal` marshals them into `proposals.steps` (`jsonb`,
-  `service_proposals.go:112-127`, `migrations/00001_init.sql:26-37`). `approvals` has no approver column
+  `service_proposals.go:131-146`, `migrations/00001_init.sql:26-37`). `approvals` has no approver column
   (`00001_init.sql:39-46`). The executor re-validates and re-scopes each step from the row
   (`service_executor.go:200-214`). Nothing proves what an approver saw.
 - The model sends `params` as JSON **text** inside a string (PR #45). `decodeStepParams`
@@ -64,11 +76,13 @@ Each row is one numbered item of the critique and the section that now answers i
   same-origin there; `cors` is used only when no web dir is set (`server.go:77-83`).
 - Dev UI: `web/vite.config.ts` has **no proxy**. Under `npm run dev` the client calls `http://localhost:8090`
   cross-origin with `X-User` (`web/src/api/client.ts:15-16,38`). The UI gates approve buttons on `/api/me.layers`
-  (`web/src/context/UserContext.tsx:40`; `docs/api.md:101`).
+  (`web/src/context/UserContext.tsx:40`; `docs/api.md:103`).
 - The pilot docs tell pilots to run the image behind an authenticating reverse proxy that sets `X-User` and forces
   `?user=` (`deploy/README.md:12-19`, `docs/pilot/setup.md:385-388`, `Dockerfile:57-62`).
 - Driver: `GrantControl` lets **anyone** take the driver role when there is no driver or the 30-minute lease has
-  lapsed (`internal/room/service_steer.go:155-175`).
+  lapsed (`internal/room/service_steer.go:161-193`). `GrantControl` and `CreateHandoff` find the target with
+  `s.users.Get(toID)` (`service_steer.go:165`, `service_handoff.go:46`), and `Service.LookupUser` is the same
+  `users.yaml`-only map (`service.go:198`). A person who is not in `users.yaml` cannot be found by either call (§2.1).
 - Signed alert routes `POST /api/alerts/{source}` are merged (f4ce4b5) and sit outside `X-User`
   (`server.go:119`). The unsigned `POST /api/alerts/webhook` is still inside the `X-User` group (`server.go:135`).
 - `PIPEROOM_PUBLIC_URL` is validated by `httpapi.ParsePublicURL` (`static.go:41-76`) and its host is the only extra
@@ -126,7 +140,7 @@ logging the victim in as the attacker.
 
 ### 1.3 Session
 
-Server-side `sessions` table: `id` (public, `ses_`+ULID), `token_hash` (SHA-256 of 32 random bytes), `user_id`,
+Server-side `sessions` table: `id` (public, `ses_`+ULID), `token_hash` (SHA-256 of 32 random bytes), `user_id`, `name`,
 `iss`, `sub`, `groups`, `groups_missing` (bool, §2.2), `auth_time`, `amr`, `acr`, `method` (`oidc` | `dev`),
 `created_at`, `last_seen_at`, `expires_at`, `revoked_at`. `amr` and `acr` are stored now so a later step-up rule
 needs no migration. A new token at every login. `last_seen_at` is written at most once a minute.
@@ -199,8 +213,10 @@ The session cookie is checked at upgrade; **`?user=` is removed**. `OriginPatter
   `email_verified` is true. The first email match binds `iss`+`sub` in an `identities` table; a later login with the
   same email and a different `sub` is refused (recycled account).
 - A user with no `users.yaml` entry gets id `u_` + first 12 hex of SHA-256(`iss`|`sub`), name from `name`.
-- **Login gate (fail closed):** login works only if the user is in `users.yaml`, in any group named in
-  `owners.yaml`, or in `PIPEROOM_AUTH_VIEWER_GROUPS`. Else `403 not_provisioned`.
+- **Login gate (fail closed):** login works only if the user is in `users.yaml`, or is named in `owners.yaml`
+  (a `user:` or `group:` in `layers:`, in a pipeline `owners:` block as approver or backup, or in `auditors:`), or is
+  in a group of `PIPEROOM_AUTH_VIEWER_GROUPS`. Else `403 not_provisioned`. The gate decides **who gets in**. The role
+  below decides **what they may do**, and the two are not the same list.
 - **Unbind:** an admin who moves a user to a new IdP account deletes that user's `identities` row; the next
   verified-email login binds the new `iss`+`sub`. A `devctl identities unbind <user>` helper is A1 work in PR 3.
 
@@ -208,14 +224,37 @@ The session cookie is checked at upgrade; **`?user=` is removed**. `OriginPatter
 
 | Role | Who | May |
 |---|---|---|
-| viewer | passes the gate **only** through `PIPEROOM_AUTH_VIEWER_GROUPS` | every GET and the WebSocket. **Every POST under `/api/rooms` and `/api/proposals` answers `403 viewer`.** No room create, no comment, no steer, no control request or grant, no export |
-| member | in `users.yaml`, or in a group named in `owners.yaml` | all of today's room actions: create, comment, steer, suggest, request and take control, close, trace. **Not export:** a member who is not an approver and not in `auditors:` gets `403 not_allowed` on export (§3.4) |
+| viewer | passes the gate **only** through `PIPEROOM_AUTH_VIEWER_GROUPS` and/or `auditors:` (an auditor-only principal is a viewer) | every GET **except export**, and the WebSocket. **Every non-GET under `/api` answers `403 viewer`.** No room create, no comment, no steer, no control request or grant, no hand-off create or accept. Export only if also in `auditors:` (§3.4) |
+| member | in `users.yaml`, or a `user:` / `group:` listed in `layers:` or in a pipeline `owners:` block (approver or backup) | all of today's room actions: create, comment, steer, suggest, request and take control, hand off, close, trace. **Not export:** a member who is not an approver and not in `auditors:` gets `403 not_allowed` on export (§3.4) |
 | approver | member whose `user:` or `group:` is listed for a layer (or is its backup) | approve or reject that layer (§2.3) |
-| auditor | in `auditors:` | export (§3.4) |
+| auditor | in `auditors:` (any role) | export (§3.4). **`auditors:` never makes a member.** A principal who is only in `auditors:` has the viewer role plus export: they can read and export, they cannot steer, comment, approve, take control or receive a hand-off |
+
+**The viewer rule is default-deny.** It is a middleware on the HTTP method, not a list of routes: for a request whose
+role is viewer, every method other than GET answers `403 viewer`. A route list missed one already: it named
+`/api/rooms` and `/api/proposals` and left out `POST /api/handoffs/{hid}/accept`. With a method rule, a route added
+later is closed from the first day. Two limits: `POST /auth/logout` is under `/auth`, so a viewer can still log out;
+`POST /api/alerts/{source}` is a machine route outside session auth (§4), so it has no role.
 
 Why the viewer rule is strict: on `main`, `GrantControl` lets anyone take the wheel when the room has no driver or
 the lease has lapsed (§0). Without this rule a viewer waits for a quiet room, grants control to themself, then
 steers the agent. Viewers can watch; they cannot touch.
+
+**Finding a person who is not in `users.yaml`.** A member who gets in only through an `owners.yaml` group has no
+`users.yaml` entry. Their id is `u_` + 12 hex (above). `GrantControl` and `CreateHandoff` call `s.users.Get(toID)`
+(§0), which knows only `users.yaml`, so today they answer `400 validation` for such a member: the group owner cannot be
+given control and cannot receive a hand-off. PR 3 adds `Service.LookupPerson(ctx, id)` and uses it in both calls
+(and wherever a "who can I pick" list is built):
+
+1. `users.yaml` first (always a member, no session needed).
+2. Else the newest **live** `sessions` row with `user_id = id` (not revoked, not past idle or absolute expiry). The
+   person is returned with `name` from that row (§1.3), and is accepted only if the §2.1 gate and role rules give them
+   the **member** role for the stored `groups`.
+3. Else `400 validation` ("unknown user"). A viewer or auditor-only principal is also `400 validation`, because
+   control and hand-offs are member actions.
+
+Limit, on purpose: a group-only member must have logged in and be live. A person who has never logged in, or whose
+session ended, cannot be picked. That is the safe side: nobody gets the driver role without a current identity.
+`LookupUser` stays `users.yaml`-only; the dev-mode `authenticate` path keeps using it.
 
 ### 2.2 Groups
 
@@ -257,7 +296,7 @@ Rights are derived per request from the session's user and groups. `users.yaml` 
 all `user:`**. The server does not know group membership at start-up, so a layer that lists any `group:` is skipped
 with one Info log. The check goes away when `users.yaml` `layers` is removed.
 
-**`/api/me.layers` stays.** `docs/api.md:101` returns `{id,name,layers}` and the UI gates approve buttons on it
+**`/api/me.layers` stays.** `docs/api.md:103` returns `{id,name,layers}` and the UI gates approve buttons on it
 (`web/src/context/UserContext.tsx:40`). `layers` becomes "the layers this session may approve", computed per
 request from `user:`, `group:`, backup and solo. The UI needs no change. `/api/me` also gains `role` (§2.1) and
 `groups_missing` (§2.2).
@@ -277,7 +316,7 @@ naming the backup. Escalation timers are T6 later work.
 ### 3.1 What is hashed
 
 At `CreateProposal`, after `decodeStepParams` and `a.Validate` have run and **after** `p.Steps` is marshalled for the
-row (`service_proposals.go:112`), compute `params_hash` = hex SHA-256 of the **RFC 8785 (JCS)** form of:
+row (`service_proposals.go:131`), compute `params_hash` = hex SHA-256 of the **RFC 8785 (JCS)** form of:
 
 ```json
 {"v":2,"room_id":"…","proposal_id":"…","title":"…","risk":"…","rollback":"…",
@@ -328,7 +367,7 @@ row (`service_proposals.go:112`), compute `params_hash` = hex SHA-256 of the **R
 - Access: `GET /api/rooms/{id}/export` answers `403 not_allowed` unless the user is (a) an approver or backup for
   any layer of the room's pipeline, or (b) an `auditors:` principal. **The driver is not on the list.** Revision 2
   had "the current driver" there; on `main` anyone can become driver of a quiet room (§0), so that clause was a
-  door, not a rule. A driver who needs the file goes in `auditors:`. Viewers (§2.1) cannot export.
+  door, not a rule. A driver who needs the file goes in `auditors:`. A viewer cannot export unless they are also in `auditors:`; an auditor-only principal is a viewer plus export (§2.1).
   **Accepted (lead, 2026-10-13):** a member who is not an owner, not a backup and not an auditor cannot export either.
   Today any `users.yaml` user can; from PR 4 such a member must be added to `auditors:` to export. Pilots are told
   in `deploy/README.md` (PR 2, A1 scope) so nobody finds out when the first export returns `403`. In dev mode (a)
@@ -365,7 +404,8 @@ row (`service_proposals.go:112`), compute `params_hash` = hex SHA-256 of the **R
   from PR 2 the dev login is a cookie from `POST /auth/dev-login {user}` (§5.2), which a proxy cannot force. The
   revision 2 rule "refuse dev requests that carry `X-Forwarded-For`" is **deleted**: the image is dev mode and the
   pilot docs send pilots behind a proxy, so that 403 would have locked out every proxied request while giving no
-  real protection (a proxy may not add the header). The listen check is the guard.
+  real protection (a proxy may not add the header). The listen check is the guard. What replaces it is a rule on
+  `X-User` itself, which a proxy must send to work: `403 proxy_identity` (§5.2).
 - `--demo` forces dev.
 - Docker image (A1): `ENV PIPEROOM_AUTH_MODE=dev PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` replaces the `--allow-remote`
   entrypoint flag. The comment block at `Dockerfile:57-62` is rewritten: "do not publish this port; a reverse proxy
@@ -381,8 +421,25 @@ row (`service_proposals.go:112`), compute `params_hash` = hex SHA-256 of the **R
 ### 5.2 Dev login
 
 `POST /auth/dev-login {user}` issues a **real session** (`method: "dev"`) for a `users.yaml` user. `UserSwitcher`
-calls it, so dev and prod share the cookie path. `X-User` stays for curl only, dev mode only. When a dev request
-carries both a session cookie and `X-User`, **the cookie wins**; `X-User` is read only when there is no cookie.
+calls it, so dev and prod share the cookie path. `X-User` stays for curl only, dev mode only.
+
+**A proxy that forces `X-User` must not be able to use dev login.** The hole in revision 3: a proxy pilot upgrades to
+PR 2. The proxy still forces `X-User: bob`, the image is still dev mode with `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`, and
+bob calls `POST /auth/dev-login {user:"priya"}`. He gets priya's cookie, and a cookie beats `X-User`, so from then on
+he is priya, silently. The fix is two checks in dev mode. Both answer `403 proxy_identity` with the message
+`a reverse proxy needs PIPEROOM_AUTH_MODE=oidc or tag pre-auth`:
+
+- (a) `POST /auth/dev-login` on a request that carries an `X-User` header (any value).
+- (b) **any** request that carries a valid session cookie and an `X-User` that names a **different** user than the
+  session's `user_id`. (A cookie that is not valid gets the normal `401 session_expired`.) The WebSocket upgrade
+  counts as a request.
+
+The key is `X-User` only, **not** `X-Forwarded-For`: a proxy may not add that header, but it has to send `X-User`.
+So `curl` with no cookie keeps working: `X-User` with no cookie is read as today, `POST /auth/dev-login` without
+`X-User` works, and `X-User` equal to the cookie's user passes. With no mismatch the cookie still wins over `X-User`.
+Result for the upgraded proxy pilot: bob cannot get a cookie at all and every cookie he somehow holds fails (b), so he
+stays bob, and the 403 message tells the operator what to do. This is not a defence against a user who can reach the
+port without the proxy; the listen check and the loopback default are for that (§5.1).
 
 ### 5.3 Solo mode
 
@@ -409,7 +466,8 @@ pilots build from source with `deploy/docker-compose.pilot.yml`. The lead puts a
 `main` commit before PR 2 merges (agents do not touch `main`), and A1 says in `deploy/README.md` that proxy pilots
 build from tag `pre-auth` until PR 3 (lead decision, 2026-10-13, §9 row 8). Local, VPN and SSH-tunnel pilots are
 not affected; their users pick themselves in `UserSwitcher` as today. PR 2 does not keep `?user=` as a fallback:
-with dev-login any proxied user could pick any name, so the fallback would only look like protection.
+with dev-login any proxied user could pick any name, so the fallback would only look like protection. For a proxy
+pilot that upgrades anyway, dev mode answers `403 proxy_identity` (§5.2) instead of issuing a cookie.
 
 ## 6. Config fields (contract, `internal/config/config.go`)
 
@@ -417,7 +475,7 @@ with dev-login any proxied user could pick any name, so the fallback would only 
 |---|---|---|
 | `PIPEROOM_AUTH_MODE` | `dev` | `dev` \| `oidc` |
 | `PIPEROOM_DEV_ALLOW_NONLOOPBACK` | `""` | `1` lets dev mode listen on a non-loopback address (loud warnings); replaces `--allow-remote` |
-| `PIPEROOM_PUBLIC_URL` | `""` (exists) | `https` origin in oidc mode; redirect URI = this + `/auth/callback`; its host joins the Host allow-list (exact) |
+| `PIPEROOM_PUBLIC_URL` | `""` (exists) | `https` origin in oidc mode; redirect URI = this + `/auth/callback`; its host joins the Host allow-list (exact). In dev mode the host joins only with `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` on a non-loopback address (§1.5) |
 | `PIPEROOM_ALLOWED_HOSTS` | `""` | comma list of extra `Host` values (`host` or `host:port`, compared as written) for a proxy or tunnel that rewrites `Host` (§1.5) |
 | `PIPEROOM_TRUSTED_PROXIES` | `""` | comma list of CIDRs; `X-Forwarded-For` is read only from these peers, for the `/auth/login` rate limit and the request log (§1.1). **Used only in `oidc` mode**; dev mode keys on `RemoteAddr`. The lead adds the field in the PR 1 contract commit |
 | `PIPEROOM_OIDC_ISSUER` | `""` | issuer URL |
@@ -426,7 +484,7 @@ with dev-login any proxied user could pick any name, so the fallback would only 
 | `PIPEROOM_OIDC_PUBLIC_CLIENT` | `""` | `1` allows an empty secret (PKCE only) |
 | `PIPEROOM_OIDC_SCOPES` | `openid email profile` | space separated |
 | `PIPEROOM_OIDC_GROUPS_CLAIM` | `groups` | `""` = no group rights |
-| `PIPEROOM_AUTH_VIEWER_GROUPS` | `""` | comma separated; viewer role (§2.1): GET and WebSocket only, every POST is `403 viewer` |
+| `PIPEROOM_AUTH_VIEWER_GROUPS` | `""` | comma separated; viewer role (§2.1): GET (not export) and WebSocket only, every non-GET under `/api` is `403 viewer` |
 | `PIPEROOM_SESSION_IDLE` | `8h` | Go duration |
 | `PIPEROOM_SESSION_MAX` | `12h` | Go duration |
 | `PIPEROOM_SOLO_USER` | `""` | off |
@@ -444,7 +502,9 @@ with dev-login any proxied user could pick any name, so the fallback would only 
 | Replayed callback | `login_states` row deleted on first use; state + nonce checked |
 | `login_states` filling | One row per cookie, 10 min expiry, large per-IP limit (§1.1) |
 | Anonymous login lockout (small per-IP limit on `/auth/login`) | 300/min per client IP; client IP from `X-Forwarded-For` only behind `PIPEROOM_TRUSTED_PROXIES` (§1.1) |
-| Viewer becomes driver, then exports or steers | Viewer role: every POST under `/api/rooms` and `/api/proposals` is `403 viewer`; driver dropped from the export list (§2.1, §3.4) |
+| Viewer becomes driver, then exports or steers | Viewer role is default-deny: every non-GET under `/api` is `403 viewer` (this includes `POST /api/handoffs/{hid}/accept`); driver dropped from the export list (§2.1, §3.4) |
+| An `auditors:` entry becomes a member who can steer | `auditors:` gives export only; an auditor-only principal is a viewer (§2.1) |
+| Proxy pilot upgrades; the proxy forces `X-User: bob`; bob calls `POST /auth/dev-login {user:"priya"}` and keeps priya's cookie | Dev mode: `403 proxy_identity` when `dev-login` carries `X-User`, or when a cookie and an `X-User` for a different user arrive together. Keyed on `X-User`, not `X-Forwarded-For`. The real fix is `PIPEROOM_AUTH_MODE=oidc` (§5.2) |
 | Open redirect via `return` | `url.Parse`, empty scheme and host (§1.1) |
 | IdP outage | Live sessions keep working; new logins get `503 idp_unavailable`; discovery retried, not fatal at start |
 | Clock skew | Session expiry uses server time; ID token `exp` checked once at login; NTP required |
@@ -460,8 +520,8 @@ with dev-login any proxied user could pick any name, so the fallback would only 
 | PR | Owner | Scope | Done when |
 |---|---|---|---|
 | 1 | Lead (contract) | `config.go` fields (§6, including `PIPEROOM_ALLOWED_HOSTS` and `PIPEROOM_TRUSTED_PROXIES`; the lead adds `PIPEROOM_TRUSTED_PROXIES` in the lead contract commit, oidc mode only); `events.go` `ParamsHash` on `ProposalCreatedPayload` and `ActionExecutedPayload`, `ParamsHash` + `Identity` on approval payloads; `docs/api.md`: auth, `/auth/*`, approve body, `409 params_mismatch`, `421 bad_host`, `403 viewer`, `/api/me` keeps `layers` and gains `role` + `groups_missing`, a new row for `GET /api/rooms/{id}/export` with the §3.4 access rule (there is none today), WS without `?user=` | `go build ./...` passes; api.md matches this doc |
-| 2 | A5 + A6 + A1 | Sessions, mode-specific cookie names, `/auth/dev-login`, `/auth/logout`, cookie WS, `?user=` removed, Host allow-list (loopback any port, public host exact, `PIPEROOM_ALLOWED_HOSTS`), `CrossOriginProtection`, `PIPEROOM_DEV_ALLOW_NONLOOPBACK` with `--allow-remote` as a deprecated alias, webhook dev-only, cookie wins over `X-User`. **A6 first:** Vite proxy (`/api`, `/auth`, `ws: true`), same-origin client, cookie client, `UserSwitcher` via dev-login, 401 redirect; **then** A5 deletes `cors` and the expose header. A1: Dockerfile env + comment, compose pass-through, `deploy/README.md` and the pilot docs listed in §5.1. The `deploy/README.md` text lists: pilots build from source with `deploy/docker-compose.pilot.yml`; proxy pilots build from git tag `pre-auth` (made by the lead on the last `main` commit before PR 2); from PR 4 members who are not owners or auditors cannot export and must be added to `auditors:` | `X-User` in oidc mode → 401; dev on `0.0.0.0` without the switch refuses start; with the switch or the old flag warns; `Host: evil.test` → 421; `Host: localhost:5173` and `Host: 127.0.0.1:9000` → 200; WS without cookie → 401; cross-origin POST → 403; logout closes WS; `npm run dev` works through the proxy; the pilot image starts; `deploy/README.md` says: "Pilots build from source with `deploy/docker-compose.pilot.yml`. Proxy pilots build from the git tag `pre-auth` until PR 3." It also says that members who are not owners or auditors cannot export and must be added to `auditors:` |
-| 3 | A5 + A3 + A1 | OIDC login (§1.1–1.2 order, nonce in constant time, `return` check on the decoded path, 300/min limit with trusted proxies), `identities` + unbind helper, login gate at login and per request, secret rule, **roles** (§2.1: `403 viewer` on every room and proposal POST), rights from `owners.yaml` principals, `/api/me.layers` computed per request, groups + overage message, backup, solo start check, `ValidateUsers` group rule. A3: `internal/owners` `Principals` type, per-pipeline `owners:`, `auditors:`, `LayerOwner` display string. A1: fake IdP (`httptest`) in `internal/testenv`, `devctl identities unbind` | With the fake IdP: bad nonce/state → 401; callback without the login cookie → 400; replayed callback → 400; unmapped user → 403; viewer `POST …/control/grant` → `403 viewer`; viewer GET and WS → 200; group owner approves; `/api/me.layers` lists the group's layer; missing groups claim → 403 with the overage message; removed `users.yaml` user → 401 on the next request; solo + other owners → no start |
+| 2 | A5 + A6 + A1 | Sessions, mode-specific cookie names, `/auth/dev-login`, `/auth/logout`, cookie WS, `?user=` removed, Host allow-list (loopback any port, public host exact, `PIPEROOM_ALLOWED_HOSTS`), `CrossOriginProtection`, `PIPEROOM_DEV_ALLOW_NONLOOPBACK` with `--allow-remote` as a deprecated alias, webhook dev-only, `403 proxy_identity` (§5.2), cookie wins over `X-User` when both name the same user. **A6 first:** Vite proxy (`/api`, `/auth`, `ws: true`), same-origin client, cookie client, `UserSwitcher` via dev-login, 401 redirect; **then** A5 deletes `cors` and the expose header. A1: Dockerfile env + comment, compose pass-through, `deploy/README.md` and the pilot docs listed in §5.1. The `deploy/README.md` text lists: pilots build from source with `deploy/docker-compose.pilot.yml`; proxy pilots build from git tag `pre-auth` (made by the lead on the last `main` commit before PR 2); from PR 4 members who are not owners or auditors cannot export and must be added to `auditors:` | `X-User` in oidc mode → 401; dev on `0.0.0.0` without the switch refuses start; with the switch or the old flag warns; `Host: evil.test` → 421; `Host: localhost:5173` and `Host: 127.0.0.1:9000` → 200; WS without cookie → 401; cross-origin POST → 403; dev: `POST /auth/dev-login` with `X-User` → `403 proxy_identity`; dev: cookie for priya plus `X-User: bob` → `403 proxy_identity`; cookie for priya plus `X-User: priya` → 200; `curl` with `X-User` and no cookie → 200; `curl` `dev-login` with no `X-User` → 200; `X-Forwarded-For` alone changes nothing; logout closes WS; `npm run dev` works through the proxy; the pilot image starts; `deploy/README.md` says: "Pilots build from source with `deploy/docker-compose.pilot.yml`. Proxy pilots build from the git tag `pre-auth` until PR 3." It also says that members who are not owners or auditors cannot export and must be added to `auditors:` |
+| 3 | A5 + A3 + A1 | OIDC login (§1.1–1.2 order, nonce in constant time, `return` check on the decoded path, 300/min limit with trusted proxies), `identities` + unbind helper, login gate at login and per request, secret rule, **roles** (§2.1: default-deny `403 viewer` on every non-GET under `/api`, including `POST /api/handoffs/{hid}/accept`; `auditors:` gives export only), **`Service.LookupPerson`** backed by `sessions` (§2.1) used by `GrantControl` (`service_steer.go:165`) and `CreateHandoff` (`service_handoff.go:46`), `sessions.name`, rights from `owners.yaml` principals, `/api/me.layers` computed per request, groups + overage message, backup, solo start check, `ValidateUsers` group rule. A3: `internal/owners` `Principals` type, per-pipeline `owners:`, `auditors:`, `LayerOwner` display string. A1: fake IdP (`httptest`) in `internal/testenv`, `devctl identities unbind` | With the fake IdP: bad nonce/state → 401; callback without the login cookie → 400; replayed callback → 400; unmapped user → 403; viewer `POST …/control/grant` → `403 viewer`; viewer `POST /api/handoffs/{hid}/accept` → `403 viewer`; viewer GET and WS → 200; viewer GET export → `403 not_allowed`; auditor-only principal: GET → 200, `POST …/steer` → `403 viewer`, export → 200; a member who got in only through an `owners.yaml` group (not in `users.yaml`, live session) can be granted control and can receive a hand-off; the same call for a viewer, an auditor-only principal, a person with no live session, or an unknown id → `400 validation`; group owner approves; `/api/me.layers` lists the group's layer; missing groups claim → 403 with the overage message; removed `users.yaml` user → 401 on the next request; solo + other owners → no start |
 | 4 | A5 + A6 | `params_hash` compute/store/check (§3.1 object, number rule), executor re-check, `action.executed` hash, approval identity columns, export access (approvers + auditors, no driver) + fields (§3.4). A6: show params + hash, send hash, solo confirm box | Changed params → `409`; DB-edited row → executor refuses; params with `2^53+1` → `400`; viewer export → `403`; member-only driver export → `403`; plain member (not owner, not auditor) export → `403`; auditor export → 200; export row re-hashes to `params_hash` |
 
 ## 9. Decisions

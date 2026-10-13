@@ -29,6 +29,15 @@
 > `/api/me.layers` stays, Vite proxy is a PR 2 prerequisite before `cors` goes, line refs fixed. The "Changes in
 > revision 3" table at the top of `auth.md` maps item → section; §10 lists what was narrowed or rejected and why.
 >
+> **Revision 4 (C9, 2026-10-13, PR #44):** answers the review of revision 3 at be6f3c2, rebased on `main` @ 0172826.
+> Dev mode answers `403 proxy_identity` when `/auth/dev-login` carries `X-User`, or when a session cookie and an
+> `X-User` for a different user arrive together (a proxy pilot that upgrades could otherwise be impersonated). The
+> viewer rule is default-deny: every non-GET under `/api` is `403 viewer`, which also covers
+> `POST /api/handoffs/{hid}/accept`. PR 3 adds `Service.LookupPerson`, backed by sessions, so a member who is only in an
+> `owners.yaml` group can be granted control or receive a hand-off. `auditors:` gives export only; an auditor-only
+> principal is a viewer plus export. The `PIPEROOM_PUBLIC_URL` row states the dev-mode non-loopback rule. Line refs
+> refreshed. The "Changes in revision 4" table at the top of `auth.md` maps item to section.
+>
 > **Lead decisions (2026-10-13):** written into `auth.md` §9 rows 7–9 and the sections they touch; the open questions are gone.
 > (7) `PIPEROOM_TRUSTED_PROXIES` is kept, oidc mode only, added by the lead in the PR 1 contract commit. (8) No image
 > pipeline: pilots build from source with `deploy/docker-compose.pilot.yml`; the image tag `piperoom:pre-auth` became a
