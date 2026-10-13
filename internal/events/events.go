@@ -201,7 +201,10 @@ type AgentToolCallPayload struct {
 
 // AgentToolResultPayload records a tool result inside a step. A Data larger
 // than PIPEROOM_EVENT_MAX_DATA_BYTES is stored as a TruncatedData object
-// instead, and Truncated is then true.
+// instead, and Truncated is then true. Truncated therefore means "something
+// in this result was cut": the Summary (tools.MaxSummaryBytes), the Data, or
+// both. A UI tells cut Data apart by its shape: an object with "truncated":
+// true, "original_bytes" and "preview" (TruncatedData).
 type AgentToolResultPayload struct {
 	StepID    string          `json:"step_id"`
 	ToolUseID string          `json:"tool_use_id"`
@@ -209,7 +212,7 @@ type AgentToolResultPayload struct {
 	Summary   string          `json:"summary"`
 	Data      json.RawMessage `json:"data,omitempty"`
 	IsError   bool            `json:"is_error"`
-	Truncated bool            `json:"truncated,omitempty"`
+	Truncated bool            `json:"truncated,omitempty"` // Summary or Data (or both) was cut; see above
 	TookMS    int64           `json:"took_ms"`
 }
 
