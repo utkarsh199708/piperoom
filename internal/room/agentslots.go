@@ -243,6 +243,14 @@ func (g *agentGate) acquire(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Close sets closed before it cancels the service context, and the
+	// cancel reaches the rooms one at a time: a room granted the slot that a
+	// cancelled room just gave back can still see a live context. It must not
+	// start a run on a closing service.
+	if g.s.isClosed() {
+		g.release()
+		return context.Canceled
+	}
 	if g.s.global != nil {
 		got, err := g.acquireGlobal(ctx, shown)
 		if err != nil {
@@ -255,6 +263,13 @@ func (g *agentGate) acquire(ctx context.Context) error {
 		g.s.emitSlotAcquired(ctx, g)
 	}
 	return nil
+}
+
+// isClosed reports whether Close has begun.
+func (s *Service) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
 }
 
 // acquireLocal is acquire on this replica's slots. shown reports whether a
@@ -284,13 +299,18 @@ func (g *agentGate) acquireLocal(ctx context.Context) (shown bool, err error) {
 	select {
 	case <-w.ready:
 	case <-ctx.Done():
+	}
+	// A grant and a cancel can arrive together (the service closing frees a
+	// slot and cancels every queued room at once): a cancelled room gives the
+	// slot back instead of starting a run on a dead context.
+	if err := ctx.Err(); err != nil {
 		g.mu.Lock()
 		if g.w == w {
 			g.s.slots.cancel(w)
 			g.w = nil
 		}
 		g.mu.Unlock()
-		return shown, ctx.Err()
+		return shown, err
 	}
 	g.mu.Lock()
 	if g.w == w {
