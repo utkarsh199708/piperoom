@@ -204,6 +204,32 @@ func (s Scope) CheckTopic(topic string) error {
 	return refuse("topic", topic, s, "allowed topics: "+strings.Join(s.Topics(), ", "))
 }
 
+// DLQTopics returns the dead-letter topics the pipeline declares in owners.yaml
+// (watch.dlq_topics). Topics a sink connector names in its own config are not
+// listed: dlq_peek reaches those through the connector, never by topic name.
+func (s Scope) DLQTopics() []string {
+	declared := s.p.Watch().DLQTopics
+	out := make([]string, 0, len(declared))
+	for _, d := range declared {
+		out = append(out, d.Topic)
+	}
+	return out
+}
+
+// CheckDLQTopic refuses a topic that is not declared in the pipeline's
+// watch.dlq_topics. A CDC topic is refused too (owners.yaml cannot declare
+// one), so dlq_peek never becomes a way around CheckTopic.
+func (s Scope) CheckDLQTopic(topic string) error {
+	if s.unscoped {
+		return nil
+	}
+	declared := s.DLQTopics()
+	if contains(declared, topic) {
+		return nil
+	}
+	return refuse("DLQ topic", topic, s, "declared DLQ topics: "+strings.Join(declared, ", "))
+}
+
 // subjectTopic strips the "-key"/"-value" suffix from a Schema Registry subject.
 func subjectTopic(subject string) (string, bool) {
 	for _, suf := range []string{"-key", "-value"} {
