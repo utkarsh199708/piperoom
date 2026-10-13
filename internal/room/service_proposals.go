@@ -88,6 +88,11 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 		if err := a.Validate(step.Params); err != nil {
 			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
+		// Exact, case-sensitive keys only: the decoder would fold case and the
+		// approver would not see which value ran (see param_keys.go).
+		if err := checkParamKeys(a.ParamsSchema(), step.Params); err != nil {
+			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
+		}
 	}
 
 	s.mu.Lock()
@@ -189,7 +194,7 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		return events.Event{}, err
 	}
 	if paramsHash == "" {
-		return events.Event{}, validation("params_hash is required: send the params_hash shown with the proposal")
+		return events.Event{}, validation(paramsRequiredMsg)
 	}
 	var prow store.ProposalRow
 	var ev events.Event
@@ -213,7 +218,9 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		if !s.roomOpen(st) {
 			return roomClosed("room is closed")
 		}
-		grant, err := s.authorizeLayer(st.snap.PipelineID, user, layer, confirm, true)
+		// The solo confirm text is checked after the hash (below), so a stale
+		// solo user is told params_mismatch first.
+		grant, err := s.authorizeLayer(st.snap.PipelineID, user, layer, confirm, false)
 		if err != nil {
 			return err
 		}
@@ -225,8 +232,13 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		}
 		// The hash the approver echoed must be the proposal's. A proposal
 		// from before the hash existed gets its hash here, on first use.
-		if err := s.checkParamsHash(ctx, &p, paramsHash); err != nil {
+		if err := s.checkParamsHash(ctx, &p, paramsHash, false); err != nil {
 			return err
+		}
+		if grant == "solo" {
+			if err := checkSoloConfirm(st.snap.PipelineID, layer, confirm); err != nil {
+				return err
+			}
 		}
 		prow = p
 		ident := identityFor(user, grant)
@@ -271,9 +283,8 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	if err := rejectUnstorable(layer, reason, paramsHash); err != nil {
 		return events.Event{}, err
 	}
-	if paramsHash == "" {
-		return events.Event{}, validation("params_hash is required: send the params_hash shown with the proposal")
-	}
+	// An empty params_hash is allowed only for a proposal that cannot be
+	// hashed; checkParamsHash decides once it has the row.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -301,7 +312,7 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	if approvalFor(st.snap, proposalID, layer) != "pending" {
 		return events.Event{}, alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
 	}
-	if err := s.checkParamsHash(ctx, &p, paramsHash); err != nil {
+	if err := s.checkParamsHash(ctx, &p, paramsHash, true); err != nil {
 		return events.Event{}, err
 	}
 	ident := identityFor(user, grant)

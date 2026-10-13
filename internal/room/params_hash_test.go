@@ -259,16 +259,47 @@ func TestApprovalEventsCarryIdentity(t *testing.T) {
 // edit or an old row would.
 type wrapStore struct {
 	*memstore.Store
-	tamper atomic.Bool // GetProposal returns steps with "orders" changed to "customers"
-	legacy atomic.Bool // new proposals are stored with no hash, as before auth PR 4
+	tamper    atomic.Bool // GetProposal returns steps with "orders" changed to "customers"
+	rehash    atomic.Bool // ... and a params_hash recomputed for the edited steps (an editor who also fixes the hash)
+	clearHash atomic.Bool // ... and an empty params_hash
+	bigNumber atomic.Bool // GetProposal returns steps holding a number above 2^53 (an unhashable row)
+	conflict  atomic.Bool // SetProposalParamsHash answers a conflict (another writer set a different hash)
+	legacy    atomic.Bool // new proposals are stored with no hash, as before auth PR 4
 }
 
 func (w *wrapStore) GetProposal(ctx context.Context, id string) (store.ProposalRow, error) {
 	p, err := w.Store.GetProposal(ctx, id)
-	if err == nil && w.tamper.Load() {
+	if err != nil {
+		return p, err
+	}
+	if w.tamper.Load() {
 		p.Steps = bytes.ReplaceAll(p.Steps, []byte("orders"), []byte("customers"))
 	}
-	return p, err
+	if w.bigNumber.Load() {
+		p.Steps = bytes.ReplaceAll(p.Steps, []byte(`"public.orders"`), []byte(`9007199254740993`))
+	}
+	if w.rehash.Load() {
+		var steps []events.ProposalStep
+		if err := json.Unmarshal(p.Steps, &steps); err != nil {
+			return p, err
+		}
+		h, err := room.ComputeParamsHash(p.RoomID, p.ProposalID, p.Title, p.Risk, p.Rollback, p.RequiredLayers, steps)
+		if err != nil {
+			return p, err
+		}
+		p.ParamsHash = h
+	}
+	if w.clearHash.Load() {
+		p.ParamsHash = ""
+	}
+	return p, nil
+}
+
+func (w *wrapStore) SetProposalParamsHash(ctx context.Context, id, hash string) error {
+	if w.conflict.Load() {
+		return store.ErrParamsHashConflict
+	}
+	return w.Store.SetProposalParamsHash(ctx, id, hash)
 }
 
 func (w *wrapStore) CreateProposal(ctx context.Context, p store.ProposalRow) error {

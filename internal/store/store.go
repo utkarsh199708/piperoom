@@ -29,6 +29,10 @@ var ErrRoomNotEmpty = errors.New("store: room has events")
 // (e.g. a second decision on the same proposal layer).
 var ErrAlreadyExists = errors.New("store: already exists")
 
+// ErrParamsHashConflict is returned by SetProposalParamsHash when the row
+// already holds a different, non-empty params_hash.
+var ErrParamsHashConflict = errors.New("store: proposal already has a different params_hash")
+
 // ErrStepOrder is returned when a proposal step is used out of order: started
 // twice, or finished without having been started (or finished twice). The
 // room service re-exports it as room.ErrStepOrder and surfaces it instead of
@@ -633,8 +637,8 @@ func (s *PG) ListApprovals(ctx context.Context, proposalID string) ([]ApprovalRo
 
 // SetProposalParamsHash stores the params_hash of a proposal that has none (a
 // row written before auth PR 4). It never replaces an existing hash: a
-// different value is a mismatch, not an upgrade, and the caller has already
-// compared. A missing proposal is ErrNotFound.
+// different value is ErrParamsHashConflict, the same value is a no-op. A missing
+// proposal is ErrNotFound.
 func (s *PG) SetProposalParamsHash(ctx context.Context, proposalID, hash string) error {
 	if err := CheckText(proposalID, hash); err != nil {
 		return fmt.Errorf("store: set params hash %s: %w", proposalID, err)
@@ -647,13 +651,16 @@ func (s *PG) SetProposalParamsHash(ctx context.Context, proposalID, hash string)
 		return fmt.Errorf("store: set params hash %s: %w", proposalID, err)
 	}
 	if tag.RowsAffected() == 0 {
-		var one int
-		err := s.pool.QueryRow(ctx, `SELECT 1 FROM proposals WHERE proposal_id = $1`, proposalID).Scan(&one)
+		var cur string
+		err := s.pool.QueryRow(ctx, `SELECT params_hash FROM proposals WHERE proposal_id = $1`, proposalID).Scan(&cur)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("store: proposal %s: %w", proposalID, ErrNotFound)
 		}
 		if err != nil {
 			return fmt.Errorf("store: set params hash %s: %w", proposalID, err)
+		}
+		if cur != hash {
+			return fmt.Errorf("store: set params hash %s: %w", proposalID, ErrParamsHashConflict)
 		}
 	}
 	return nil

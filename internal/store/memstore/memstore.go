@@ -432,6 +432,8 @@ func (s *Store) SetProposalParamsHash(ctx context.Context, proposalID, hash stri
 	}
 	if p.ParamsHash == "" {
 		p.ParamsHash = hash
+	} else if p.ParamsHash != hash {
+		return fmt.Errorf("memstore: set params hash %s: %w", proposalID, store.ErrParamsHashConflict)
 	}
 	return nil
 }

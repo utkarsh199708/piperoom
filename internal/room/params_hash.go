@@ -78,27 +78,44 @@ func ComputeParamsHash(roomID, proposalID, title, risk, rollback string, require
 // (SetProposalParamsHash), exactly what creation would have stored; the
 // snapshot shows the same value (eventParamsHash), so the web app has it to
 // send. If such a proposal cannot be hashed (a number above 2^53, a duplicate
-// key) it cannot be decided, and the message says so.
-func (s *Service) checkParamsHash(ctx context.Context, p *store.ProposalRow, given string) error {
+// key) it cannot be approved, and the message says so. It can still be rejected:
+// a rejection (isReject) with an empty params_hash is accepted for exactly that
+// proposal and is recorded with an empty hash. Everywhere else an empty
+// params_hash is 400 validation.
+func (s *Service) checkParamsHash(ctx context.Context, p *store.ProposalRow, given string, isReject bool) error {
 	if p.ParamsHash == "" {
 		h, _, err := rowParamsHash(*p)
 		if err != nil {
-			return validation("this proposal was created before params_hash existed and cannot be hashed (" + err.Error() + "); ask the agent to propose the fix again")
+			if isReject && given == "" {
+				return nil // p.ParamsHash stays empty and so does the recorded hash
+			}
+			return validation("this proposal was created before params_hash existed and cannot be hashed (" + err.Error() + "); it can only be rejected, with an empty params_hash")
+		}
+		if given == "" {
+			return validation(paramsRequiredMsg)
 		}
 		if given != h {
 			return paramsMismatch(paramsMismatchMsg)
 		}
 		if err := s.store.SetProposalParamsHash(ctx, p.ProposalID, h); err != nil {
+			if errors.Is(err, store.ErrParamsHashConflict) {
+				return paramsMismatch(paramsMismatchMsg)
+			}
 			return mapStoreErr(err)
 		}
 		p.ParamsHash = h
 		return nil
+	}
+	if given == "" {
+		return validation(paramsRequiredMsg)
 	}
 	if given != p.ParamsHash {
 		return paramsMismatch(paramsMismatchMsg)
 	}
 	return nil
 }
+
+const paramsRequiredMsg = "params_hash is required: send the params_hash shown with the proposal"
 
 const paramsMismatchMsg = "params_hash does not match this proposal; reload the room and review the proposal again"
 

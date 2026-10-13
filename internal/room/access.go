@@ -195,9 +195,8 @@ func errNotAPerson() error {
 func (s *Service) authorizeLayer(pipelineID string, user User, layer, confirm string, needConfirm bool) (string, error) {
 	if s.soloUser != "" && user.ID == s.soloUser {
 		if needConfirm {
-			want := pipelineID + "/" + layer
-			if subtle.ConstantTimeCompare([]byte(confirm), []byte(want)) != 1 {
-				return "", validation(fmt.Sprintf("solo mode: type confirm %q to approve", want))
+			if err := checkSoloConfirm(pipelineID, layer, confirm); err != nil {
+				return "", err
 			}
 		}
 		return "solo", nil
@@ -214,6 +213,17 @@ func (s *Service) authorizeLayer(pipelineID string, user User, layer, confirm st
 		return "", notLayerOwner(groupsMissingMsg)
 	}
 	return "", notLayerOwner(fmt.Sprintf("user %s does not own layer %q", user.ID, layer))
+}
+
+// checkSoloConfirm is the solo user's typed "<pipeline_id>/<layer>" check. The
+// approve path runs it after the params_hash check, so a stale solo user is
+// told 409 params_mismatch before 400 about the confirm text.
+func checkSoloConfirm(pipelineID, layer, confirm string) error {
+	want := pipelineID + "/" + layer
+	if subtle.ConstantTimeCompare([]byte(confirm), []byte(want)) != 1 {
+		return validation(fmt.Sprintf("solo mode: type confirm %q to approve", want))
+	}
+	return nil
 }
 
 // userLayersBlocked reports whether the users.yaml layers list must not grant

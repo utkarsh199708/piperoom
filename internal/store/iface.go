@@ -39,7 +39,8 @@ type Store interface {
 	// ListApprovals returns a proposal's decisions ordered by layer.
 	ListApprovals(ctx context.Context, proposalID string) ([]ApprovalRow, error)
 	// SetProposalParamsHash fills the hash of a proposal that has none (a row
-	// from before auth PR 4). It never replaces an existing hash.
+	// from before auth PR 4). It never replaces an existing hash: a different
+	// one wraps ErrParamsHashConflict, the same one is a no-op.
 	SetProposalParamsHash(ctx context.Context, proposalID, hash string) error
 	DeleteApproval(ctx context.Context, proposalID, layer string) error
 	StartProposalStep(ctx context.Context, proposalID string, stepIndex int) error

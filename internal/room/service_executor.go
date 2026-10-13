@@ -166,6 +166,10 @@ func (s *Service) resultCtx() (context.Context, context.CancelFunc) {
 func (s *Service) executeProposal(p store.ProposalRow) error {
 	ctx := s.ctx
 
+	// approved is the hash the approvers approved (the queued row, filled at
+	// approval time). It is never replaced by anything read later, and every
+	// event below carries it (p.ParamsHash is not reassigned).
+	approved := p.ParamsHash
 	var steps []events.ProposalStep
 	if err := json.Unmarshal(p.Steps, &steps); err != nil {
 		s.failProposal(p.RoomID, p.ProposalID, 0, p.ParamsHash, "cannot decode steps: "+err.Error())
@@ -200,8 +204,7 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 		// Design section 3.2: re-read the row and recompute the hash right
 		// before the write. The step that runs is the one the fresh row holds
 		// and the hash covers, not the copy queued at approval time.
-		step, hash, why := s.recheckStep(ctx, p, i)
-		p.ParamsHash = hash
+		step, why := s.recheckStep(ctx, p.ProposalID, approved, i)
 		if why != "" {
 			s.stopOnStep(tracker, p, i, why)
 			return nil
@@ -265,38 +268,30 @@ func (s *Service) stopOnStep(t *stepTracker, p store.ProposalRow, i int, output 
 const paramsHashMismatchOutput = "params hash mismatch"
 
 // recheckStep is the executor's integrity check (design section 3.2). It
-// re-reads the proposal row, recomputes the hash from what the row holds now
-// and compares it with the row's stored params_hash. It returns the step to run
-// (taken from that same fresh row), the stored hash for the action.executed
-// event, and, when the step must not run, the failure output.
+// re-reads the proposal row and recomputes the hash from what the row holds
+// now. The step runs only if the recomputed hash equals BOTH the row's stored
+// params_hash AND approved, the hash the approvers approved, which the executor
+// took from the approval itself (the queued row) and keeps in memory. The
+// second comparison is what stops someone who edits the steps and the stored
+// hash together after the last approval. A row with no stored hash is a
+// mismatch: the approve path fills the hash of an old row before it queues the
+// proposal, so the executor never lets a row vouch for itself.
 //
-// A row written before auth PR 4 and approved before the upgrade has no stored
-// hash; it is computed and stored here, once, and the step runs. That is the
-// one case where the row vouches for itself, and it only exists for proposals
-// that were already open at upgrade.
-//
-// This catches an edit of the row between approval and execution. It does not
-// catch someone who edits both steps and params_hash (design section 3.3).
-func (s *Service) recheckStep(ctx context.Context, queued store.ProposalRow, i int) (events.ProposalStep, string, string) {
-	cur, err := s.store.GetProposal(ctx, queued.ProposalID)
+// It returns the step to run (taken from that same fresh row) and, when the
+// step must not run, the failure output.
+func (s *Service) recheckStep(ctx context.Context, proposalID, approved string, i int) (events.ProposalStep, string) {
+	cur, err := s.store.GetProposal(ctx, proposalID)
 	if err != nil {
-		return events.ProposalStep{}, queued.ParamsHash, "cannot re-read the proposal before running the step: " + err.Error()
+		return events.ProposalStep{}, "cannot re-read the proposal before running the step: " + err.Error()
 	}
 	got, steps, err := rowParamsHash(cur)
 	if err != nil {
-		return events.ProposalStep{}, cur.ParamsHash, paramsHashMismatchOutput + " (cannot recompute: " + err.Error() + ")"
+		return events.ProposalStep{}, paramsHashMismatchOutput + " (cannot recompute: " + err.Error() + ")"
 	}
-	if cur.ParamsHash == "" {
-		if err := s.store.SetProposalParamsHash(ctx, cur.ProposalID, got); err != nil {
-			return events.ProposalStep{}, got, "cannot store the hash of a proposal that predates params_hash: " + err.Error()
-		}
-		s.log.Info("room: stored params_hash of a proposal created before it existed", "proposal", cur.ProposalID)
-		cur.ParamsHash = got
+	if approved == "" || cur.ParamsHash == "" || got != cur.ParamsHash || got != approved || i >= len(steps) {
+		return events.ProposalStep{}, paramsHashMismatchOutput
 	}
-	if got != cur.ParamsHash || i >= len(steps) {
-		return events.ProposalStep{}, cur.ParamsHash, paramsHashMismatchOutput
-	}
-	return steps[i], cur.ParamsHash, ""
+	return steps[i], ""
 }
 
 // finishStep checks the local transition, records the step result in the store

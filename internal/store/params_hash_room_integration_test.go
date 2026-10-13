@@ -20,7 +20,10 @@ import (
 )
 
 // pgAction is a postgres-layer action that counts its runs.
-type pgAction struct{ runs atomic.Int32 }
+type pgAction struct {
+	runs atomic.Int32
+	hook func() // called at the start of the first run
+}
 
 func (a *pgAction) Name() string     { return "pg_act" }
 func (a *pgAction) Layer() string    { return "postgres" }
@@ -31,7 +34,9 @@ func (a *pgAction) ParamsSchema() map[string]any {
 func (a *pgAction) Validate(json.RawMessage) error                    { return nil }
 func (a *pgAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
 func (a *pgAction) Execute(context.Context, json.RawMessage) (string, error) {
-	a.runs.Add(1)
+	if a.runs.Add(1) == 1 && a.hook != nil {
+		a.hook()
+	}
 	return "done", nil
 }
 

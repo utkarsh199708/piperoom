@@ -59,7 +59,10 @@ func (a *fakeAction) Name() string     { return a.name }
 func (a *fakeAction) Layer() string    { return a.layer }
 func (a *fakeAction) Describe() string { return a.name }
 func (a *fakeAction) ParamsSchema() map[string]any {
-	return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}
+	// No "properties": the fake accepts any parameter names, so tests can use
+	// whatever params they like (CreateProposal only checks case-folded
+	// duplicate keys for a schema like this; see strictAction for the rest).
+	return map[string]any{"type": "object"}
 }
 func (a *fakeAction) Validate(json.RawMessage) error { return nil }
 

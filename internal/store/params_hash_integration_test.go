@@ -42,8 +42,11 @@ func TestParamsHashAndApprovalIdentityColumns(t *testing.T) {
 	if err := s.SetProposalParamsHash(ctx, oldPid, hash); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetProposalParamsHash(ctx, oldPid, "ffff"); err != nil {
+	if err := s.SetProposalParamsHash(ctx, oldPid, hash); err != nil { // the same value again is a no-op
 		t.Fatal(err)
+	}
+	if err := s.SetProposalParamsHash(ctx, oldPid, "ffff"); !errors.Is(err, store.ErrParamsHashConflict) {
+		t.Fatalf("a different hash: want ErrParamsHashConflict, got %v", err)
 	}
 	if p, _ := s.GetProposal(ctx, oldPid); p.ParamsHash != hash {
 		t.Fatalf("hash = %q, want the first value to stay", p.ParamsHash)
