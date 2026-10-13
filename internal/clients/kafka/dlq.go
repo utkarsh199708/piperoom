@@ -53,6 +53,13 @@ type dlqConsumer interface {
 // LastTimestamp is zero. A topic that does not exist is absent from the
 // result (not an error). With no topics it returns nil, nil and sends
 // nothing: kadm lists the whole cluster for an empty list.
+//
+// kadm caches topic metadata (MetadataMinAge, 5 s), so a topic created a
+// moment ago may still look absent for up to that long. One topic the
+// principal may not describe (TopicAuthorizationFailed) fails the whole call,
+// not just that topic; callers that pass several topics should know that.
+// end-start is an upper bound on the records present: compaction gaps and
+// transaction markers occupy offsets without being records.
 func (c *Client) DLQOffsets(ctx context.Context, topics ...string) (map[string][]clients.PartitionOffsets, error) {
 	topics = uniqueNonEmpty(topics)
 	if len(topics) == 0 {
@@ -99,6 +106,15 @@ func (c *Client) DLQOffsets(ctx context.Context, topics ...string) (map[string][
 
 // PeekDLQ returns the newest records of topic as DLQRecord, newest first, at
 // most limit in total across partitions (limit <= 0 means 5, capped at 20).
+//
+// It reads up to min(limit, available) records from the tail of every
+// non-empty partition, merges them and cuts to limit; the 8 MiB bound and the
+// 10 s deadline bound the cost. Within a partition records are ordered by
+// offset, newest first; across partitions by record timestamp, newest first
+// (ties: lower partition, then higher offset). A Connect DLQ record carries
+// the ORIGINAL record's timestamp (DeadLetterQueueReporter), so "newest"
+// means newest source event, not newest failure.
+//
 // A topic that does not exist is an error wrapping clients.ErrNotFound
 // (DLQOffsets, which the watcher uses, treats absence as normal; a peek of a
 // topic the caller named is worth reporting). A topic with no records returns
@@ -106,9 +122,12 @@ func (c *Client) DLQOffsets(ctx context.Context, topics ...string) (map[string][
 //
 // Only __connect.errors.* headers are returned; neither key nor value ever
 // leaves this function. The fetch does bring record bytes into the process
-// for a moment (Kafka has no headers-only fetch); the read stops at 8 MiB
-// of record bytes and returns what it has. If the deadline cuts the read
-// short the result is an error, never a silently smaller sample.
+// for a moment (Kafka has no headers-only fetch). Known limits: the read
+// stops at 8 MiB of record bytes and returns what it has, with no flag; if
+// the deadline cuts the read short and at least one record arrived, those
+// records are returned (a sample), with none it is an error. Only committed
+// records are read, and transaction markers count toward "partition done"
+// but are never returned.
 func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]clients.DLQRecord, error) {
 	if strings.TrimSpace(topic) == "" {
 		return nil, fmt.Errorf("kafka: peek dlq: empty topic")
@@ -144,20 +163,50 @@ func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]client
 	if err != nil {
 		return nil, fmt.Errorf("kafka: peek dlq %s: %w", topic, err)
 	}
-	sort.SliceStable(recs, func(i, j int) bool {
-		a, b := recs[i], recs[j]
-		if !a.Timestamp.Equal(b.Timestamp) {
-			return a.Timestamp.After(b.Timestamp)
-		}
-		if a.Partition != b.Partition {
-			return a.Partition < b.Partition
-		}
-		return a.Offset > b.Offset
-	})
-	if len(recs) > limit {
-		recs = recs[:limit]
+	return mergeNewest(recs, limit), nil
+}
+
+// mergeNewest orders records per partition by offset descending, then merges
+// the partitions by timestamp descending (ties: lower partition, then higher
+// offset) and cuts to limit.
+func mergeNewest(recs []clients.DLQRecord, limit int) []clients.DLQRecord {
+	byPart := map[int32][]clients.DLQRecord{}
+	for _, r := range recs {
+		byPart[r.Partition] = append(byPart[r.Partition], r)
 	}
-	return recs, nil
+	lists := make([][]clients.DLQRecord, 0, len(byPart))
+	for _, l := range byPart {
+		sort.Slice(l, func(i, j int) bool { return l[i].Offset > l[j].Offset })
+		lists = append(lists, l)
+	}
+	out := make([]clients.DLQRecord, 0, limit)
+	for len(out) < limit {
+		best := -1
+		for i, l := range lists {
+			if len(l) == 0 {
+				continue
+			}
+			if best < 0 || newer(l[0], lists[best][0]) {
+				best = i
+			}
+		}
+		if best < 0 {
+			break
+		}
+		out = append(out, lists[best][0])
+		lists[best] = lists[best][1:]
+	}
+	return out
+}
+
+func newer(a, b clients.DLQRecord) bool {
+	if !a.Timestamp.Equal(b.Timestamp) {
+		return a.Timestamp.After(b.Timestamp)
+	}
+	if a.Partition != b.Partition {
+		return a.Partition < b.Partition
+	}
+	return a.Offset > b.Offset
 }
 
 // peekPart is one partition's share of a peek: read [from, end).
@@ -166,41 +215,33 @@ type peekPart struct {
 	from, end int64
 }
 
-// planPeek spreads limit records over the partitions, highest end offset
-// first (it most likely holds the newest record; timestamps are compared
-// after the fetch). The shares add up to at most limit, so a 64-partition
-// topic with limit 20 reads 20 records, not 20 per partition.
+// planPeek reads min(limit, end-start) records from the tail of every
+// non-empty partition. A partition's end offset says how much was written,
+// not how recently, so no partition is skipped on that basis. end-start is an
+// upper bound: control markers and compaction gaps take offsets too.
 func planPeek(parts []clients.PartitionOffsets, limit int) []peekPart {
-	sorted := append([]clients.PartitionOffsets(nil), parts...)
-	sort.SliceStable(sorted, func(i, j int) bool {
-		if sorted[i].End != sorted[j].End {
-			return sorted[i].End > sorted[j].End
-		}
-		return sorted[i].Partition < sorted[j].Partition
-	})
 	var plan []peekPart
-	left := int64(limit)
-	for _, p := range sorted {
-		if left <= 0 {
-			break
-		}
+	for _, p := range parts {
 		avail := p.End - p.Start
 		if avail <= 0 {
 			continue
 		}
 		n := avail
-		if n > left {
-			n = left
+		if n > int64(limit) {
+			n = int64(limit)
 		}
 		plan = append(plan, peekPart{partition: p.Partition, from: p.End - n, end: p.End})
-		left -= n
 	}
+	sort.Slice(plan, func(i, j int) bool { return plan[i].partition < plan[j].partition })
 	return plan
 }
 
 // collectPeek polls until every planned partition reached its end offset,
-// 8 MiB of record bytes were read, or ctx ends (an error). Only DLQRecords
-// come out: each *kgo.Record is dropped after its iteration.
+// 8 MiB of record bytes were read, or ctx ends. Control records (transaction
+// markers) are delivered because KeepControlRecords is on: they mark a
+// partition done when they sit at its last offset, but are never returned or
+// counted. Only DLQRecords come out: each *kgo.Record is dropped after its
+// iteration.
 func collectPeek(ctx context.Context, cons dlqConsumer, topic string, plan []peekPart) ([]clients.DLQRecord, error) {
 	ends := map[int32]int64{}
 	for _, pl := range plan {
@@ -217,8 +258,15 @@ func collectPeek(ctx context.Context, cons dlqConsumer, topic string, plan []pee
 			return nil, errors.New("consumer closed")
 		}
 		for _, fe := range fetches.Errors() {
+			var loss *kgo.ErrDataLoss
+			if errors.As(fe.Err, &loss) {
+				continue // informational: kgo resets and goes on
+			}
 			if errors.Is(fe.Err, context.Canceled) || errors.Is(fe.Err, context.DeadlineExceeded) {
-				return nil, fmt.Errorf("read incomplete after %d records: %w", len(out), fe.Err)
+				if len(out) > 0 {
+					return out, nil // a sample is better than nothing
+				}
+				return nil, fmt.Errorf("read incomplete after 0 records: %w", fe.Err)
 			}
 			return nil, fmt.Errorf("fetch %s/%d: %w", fe.Topic, fe.Partition, fe.Err)
 		}
@@ -227,17 +275,23 @@ func collectPeek(ctx context.Context, cons dlqConsumer, topic string, plan []pee
 			if !planned || r.Offset >= end {
 				continue
 			}
-			total += recordSize(r)
-			out = append(out, dlqRecordFrom(topic, r))
 			if r.Offset+1 >= end {
 				done[r.Partition] = true
 			}
+			if r.Attrs.IsControl() {
+				continue
+			}
+			total += recordSize(r)
+			out = append(out, dlqRecordFrom(topic, r))
 			if total >= maxPeekBytes {
 				return out, nil
 			}
 		}
 		if err := ctx.Err(); err != nil && len(done) < len(ends) {
-			return nil, fmt.Errorf("read incomplete after %d records: %w", len(out), err)
+			if len(out) > 0 {
+				return out, nil
+			}
+			return nil, fmt.Errorf("read incomplete after 0 records: %w", err)
 		}
 	}
 	return out, nil
@@ -375,5 +429,7 @@ func (c *Client) newDLQConsumer(parts map[string]map[int32]kgo.Offset) (dlqConsu
 		kgo.ConsumePartitions(parts),
 		kgo.FetchMaxBytes(4<<20),
 		kgo.FetchMaxPartitionBytes(1<<20),
+		kgo.KeepControlRecords(),
+		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
 	)
 }

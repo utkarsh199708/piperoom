@@ -1,11 +1,13 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -261,17 +263,17 @@ func TestPeekDLQNoHeaders(t *testing.T) {
 	}
 }
 
-func TestPeekDLQLimitIsTotalAcrossPartitions(t *testing.T) {
+// TestPeekDLQNewestWinsAcrossPartitions: p1 has the highest end offset but
+// old records; p0 has few records, one of them much newer. The newest wins.
+func TestPeekDLQNewestWinsAcrossPartitions(t *testing.T) {
 	now := time.Date(2026, 10, 13, 10, 0, 0, 0, time.UTC)
-	// p2 has the highest end offset (read first), p0 next, p1 smallest.
-	starts := merge(listed("d", map[int32]int64{0: 0, 1: 0, 2: 0}))
-	ends := merge(listed("d", map[int32]int64{0: 4, 1: 3, 2: 9}))
+	starts := merge(listed("d", map[int32]int64{0: 0, 1: 0}))
+	ends := merge(listed("d", map[int32]int64{0: 3, 1: 9}))
 	var recs []*kgo.Record
-	for off := int64(5); off < 9; off++ { // p2: 4 newest of limit 5... plan gives p2 5 records
-		recs = append(recs, rec(2, off, now.Add(time.Duration(off)*time.Second)))
+	for off := int64(4); off < 9; off++ {
+		recs = append(recs, rec(1, off, now.Add(time.Duration(off)*time.Second)))
 	}
-	recs = append(recs, rec(2, 4, now.Add(4*time.Second)))
-	recs = append(recs, rec(0, 3, now.Add(time.Hour))) // not planned: must be ignored
+	recs = append(recs, rec(0, 0, now), rec(0, 1, now), rec(0, 2, now.Add(time.Hour)))
 	cons := &fakeConsumer{polls: []kgo.Fetches{fetchOf("d", recs...)}}
 	var opened map[string]map[int32]kgo.Offset
 	c := peekClient(starts, ends, cons, &opened)
@@ -280,67 +282,144 @@ func TestPeekDLQLimitIsTotalAcrossPartitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(opened["d"]) != 1 {
-		t.Fatalf("consumer opened on %d partitions, want only the newest-end partition (limit 5 fits in it): %v", len(opened["d"]), opened)
+	if len(opened["d"]) != 2 {
+		t.Fatalf("consumer opened on %v, want both partitions", opened)
 	}
-	if _, ok := opened["d"][2]; !ok {
-		t.Fatalf("partition 2 (highest end) not read: %v", opened)
-	}
-	if len(got) != 5 {
-		t.Fatalf("got %d records, want 5", len(got))
+	if len(got) != 5 || got[0].Partition != 0 || got[0].Offset != 2 {
+		t.Fatalf("newest record must win, got %+v", got)
 	}
 	for i := 1; i < len(got); i++ {
 		if got[i].Timestamp.After(got[i-1].Timestamp) {
 			t.Fatalf("not newest first at %d: %+v", i, got)
 		}
 	}
-	if got[0].Offset != 8 {
-		t.Errorf("newest = %d, want 8", got[0].Offset)
+}
+
+func TestMergeNewestOrder(t *testing.T) {
+	t0 := time.Unix(1000, 0)
+	in := []clients.DLQRecord{
+		{Partition: 0, Offset: 1, Timestamp: t0},
+		{Partition: 0, Offset: 2, Timestamp: t0.Add(-time.Hour)}, // non-monotonic source time
+		{Partition: 1, Offset: 7, Timestamp: t0},
+	}
+	got := mergeNewest(in, 10)
+	// p0 stays offset-descending (2 before 1); across partitions by timestamp
+	// of the head: p0@2 is old, p1@7 is newer, so p1 first.
+	want := [][2]int64{{1, 7}, {0, 2}, {0, 1}}
+	for i, w := range want {
+		if int64(got[i].Partition) != w[0] || got[i].Offset != w[1] {
+			t.Fatalf("order = %+v, want %v", got, want)
+		}
+	}
+	if n := len(mergeNewest(in, 2)); n != 2 {
+		t.Fatalf("cut to limit: %d", n)
 	}
 }
 
 func TestPlanPeek(t *testing.T) {
 	parts := []clients.PartitionOffsets{
+		{Partition: 2, Start: 0, End: 100},
 		{Partition: 0, Start: 0, End: 2},
 		{Partition: 1, Start: 5, End: 5}, // empty
-		{Partition: 2, Start: 0, End: 100},
 		{Partition: 3, Start: 0, End: 3},
 	}
-	tests := []struct {
-		limit int
-		want  []peekPart
-	}{
-		{5, []peekPart{{2, 95, 100}}},
-		{20, []peekPart{{2, 80, 100}}},
-		{1, []peekPart{{2, 99, 100}}},
+	got := planPeek(parts, 5)
+	want := []peekPart{{0, 0, 2}, {2, 95, 100}, {3, 0, 3}}
+	if len(got) != len(want) {
+		t.Fatalf("plan = %+v, want %+v", got, want)
 	}
-	for _, tt := range tests {
-		got := planPeek(parts, tt.limit)
-		if len(got) != len(tt.want) || got[0] != tt.want[0] {
-			t.Errorf("limit %d: %+v, want %+v", tt.limit, got, tt.want)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("plan = %+v, want %+v", got, want)
 		}
 	}
-	// Spills over partitions in end-offset order, never more than limit total.
-	small := []clients.PartitionOffsets{{Partition: 0, Start: 0, End: 2}, {Partition: 1, Start: 0, End: 3}, {Partition: 2, Start: 0, End: 1}}
-	got := planPeek(small, 5)
-	var sum int64
-	for _, p := range got {
-		sum += p.end - p.from
+}
+
+// TestPeekDLQControlRecordAtEnd: a transactional DLQ write leaves a commit
+// marker at the last offset; it marks the partition done and is not returned.
+func TestPeekDLQControlRecordAtEnd(t *testing.T) {
+	now := time.Now()
+	marker := rec(0, 3, now)
+	marker.Attrs = kgo.NewRecordAttrs(kgo.RecordAttrsOpts{Control: true, Transactional: true})
+	marker.Key, marker.Value = []byte("MARKERKEY"), []byte("MARKERVAL")
+	cons := &fakeConsumer{polls: []kgo.Fetches{fetchOf("d",
+		rec(0, 0, now), rec(0, 1, now.Add(time.Second)), rec(0, 2, now.Add(2*time.Second)), marker)}}
+	c := peekClient(merge(listed("d", map[int32]int64{0: 0})), merge(listed("d", map[int32]int64{0: 4})), cons, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	got, err := c.PeekDLQ(ctx, "d", 5)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if sum != 5 || len(got) != 2 || got[0].partition != 1 || got[1].partition != 0 {
-		t.Errorf("spill plan = %+v (sum %d)", got, sum)
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("waited for the deadline instead of finishing at the marker")
 	}
-	// 64 partitions, limit 20 -> at most 20 records planned.
-	var wide []clients.PartitionOffsets
-	for i := int32(0); i < 64; i++ {
-		wide = append(wide, clients.PartitionOffsets{Partition: i, Start: 0, End: 100})
+	if len(got) != 3 || got[0].Offset != 2 {
+		t.Fatalf("got %+v, want 3 data records", got)
 	}
-	sum = 0
-	for _, p := range planPeek(wide, 20) {
-		sum += p.end - p.from
+}
+
+// TestPeekDLQDeadlineWithRecordsReturnsSample: records arrived, the last
+// planned offset never does; the sample is returned.
+func TestPeekDLQDeadlineWithRecordsReturnsSample(t *testing.T) {
+	cons := &fakeConsumer{polls: []kgo.Fetches{fetchOf("d", rec(0, 0, time.Now()))}}
+	c := peekClient(merge(listed("d", map[int32]int64{0: 0})), merge(listed("d", map[int32]int64{0: 2})), cons, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	got, err := c.PeekDLQ(ctx, "d", 2)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("got %+v, %v; want the one record read", got, err)
 	}
-	if sum != 20 {
-		t.Errorf("64 partitions planned %d records, want 20", sum)
+}
+
+func TestPeekDLQDataLossIsSkipped(t *testing.T) {
+	loss := kgo.Fetches{{Topics: []kgo.FetchTopic{{Topic: "d", Partitions: []kgo.FetchPartition{
+		{Partition: 0, Err: &kgo.ErrDataLoss{Topic: "d", Partition: 0}},
+	}}}}}
+	cons := &fakeConsumer{polls: []kgo.Fetches{loss, fetchOf("d", rec(0, 0, time.Now()))}}
+	c := peekClient(merge(listed("d", map[int32]int64{0: 0})), merge(listed("d", map[int32]int64{0: 1})), cons, nil)
+	got, err := c.PeekDLQ(context.Background(), "d", 1)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+// TestPeekDLQLeakInMessageErrorsAndLogs puts the junk inside the
+// [Source: ...] tail of the message and the stack trace line, and checks the
+// result, error text and log output for it.
+func TestPeekDLQLeakInMessageErrorsAndLogs(t *testing.T) {
+	const marker = "JUNKMSG-c3d1"
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(old)
+
+	now := time.Now()
+	r := rec(0, 0, now,
+		hdr("__connect.errors.exception.message", `bad at [Source: (byte[])"{"email":"`+marker+`"}"; line: 1]`),
+		hdr("__connect.errors.exception.stacktrace", `x.JsonParseException: Unexpected "`+marker+`" [Source: (byte[])"`+marker+`"]`+"\n\tat y"),
+	)
+	r.Value = []byte(marker)
+	cons := &fakeConsumer{polls: []kgo.Fetches{fetchOf("d", r)}}
+	c := peekClient(merge(listed("d", map[int32]int64{0: 0})), merge(listed("d", map[int32]int64{0: 1})), cons, nil)
+	got, err := c.PeekDLQ(context.Background(), "d", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(got)
+	if strings.Contains(string(b), marker) {
+		t.Fatalf("marker in result: %s", b)
+	}
+
+	// Failing paths: the error text must not carry record content either.
+	bad := &fakeConsumer{polls: []kgo.Fetches{kgo.NewErrFetch(errors.New("boom"))}}
+	c2 := peekClient(merge(listed("d", map[int32]int64{0: 0})), merge(listed("d", map[int32]int64{0: 1})), bad, nil)
+	if _, err := c2.PeekDLQ(context.Background(), "d", 1); err == nil || strings.Contains(err.Error(), marker) {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Contains(logs.String(), marker) {
+		t.Fatalf("marker in logs: %s", logs.String())
 	}
 }
 
