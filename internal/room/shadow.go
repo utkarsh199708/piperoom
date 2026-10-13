@@ -429,6 +429,10 @@ func errNotLabelled() *Error {
 	return &Error{Status: 409, Code: "not_labelled", Msg: "label the room blind (POST /api/rooms/{id}/shadow/blind) before reading its shadow run"}
 }
 
+func errNotRevealed() *Error {
+	return &Error{Status: 409, Code: "not_revealed", Msg: "the shadow run is not revealed yet"}
+}
+
 func errShadowNotAllowed() *Error {
 	return &Error{Status: 403, Code: "not_allowed", Msg: "labelling or grading a shadow room needs a member of its pipeline"}
 }
@@ -536,6 +540,9 @@ func (s *Service) ShadowGrade(ctx context.Context, user User, roomID string, lay
 	}
 	if !st.snap.shadowLabelled {
 		return events.Event{}, errNotLabelled()
+	}
+	if !st.snap.shadowRevealed {
+		return events.Event{}, errNotRevealed()
 	}
 	ident := identityFor(user, grant)
 	e, err := s.emitLocked(ctx, st, roomID, events.ShadowGraded, humanActor(user), events.ShadowGradedPayload{

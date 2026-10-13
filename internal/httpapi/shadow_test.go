@@ -71,6 +71,11 @@ func shadowAgent(ctx context.Context, _ agent.Alert, d agent.Deps, _ agent.Optio
 
 func newShadowServer(t *testing.T) (*httptest.Server, *memstore.Store) {
 	t.Helper()
+	return newShadowServerWith(t, shadowAgent, 0)
+}
+
+func newShadowServerWith(t *testing.T, run agent.Runner, grace time.Duration) (*httptest.Server, *memstore.Store) {
+	t.Helper()
 	users, err := room.ParseUsers([]byte(shadowHTTPUsers))
 	if err != nil {
 		t.Fatal(err)
@@ -85,7 +90,7 @@ func newShadowServer(t *testing.T) (*httptest.Server, *memstore.Store) {
 	}
 	st := memstore.New()
 	svc := room.New(room.Deps{
-		Store: st, Users: users, Owners: own, Run: shadowAgent,
+		Store: st, Users: users, Owners: own, Run: run, ShadowGrace: grace,
 		WriteHandoff: func(context.Context, []events.Event, agent.Options) (events.HandoffSummary, error) {
 			return events.HandoffSummary{WhatBroke: "x"}, nil
 		},
@@ -167,6 +172,52 @@ func noAgentEvents(t *testing.T, where string, evs []events.Event) {
 			t.Fatalf("%s: agent text in event %d %s", where, e.Seq, e.Type)
 		}
 	}
+}
+
+// POST /shadow/grade on a closed, labelled room whose run is still going in the
+// grace period is 409 not_revealed; once revealed it is 200.
+func TestShadowGradeBeforeRevealOverHTTP(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	slow := func(ctx context.Context, _ agent.Alert, d agent.Deps, _ agent.Options) error {
+		_ = d.Sink.Emit(ctx, events.AgentToolCall, events.AgentToolCallPayload{StepID: "s_1", ToolUseID: "tu", Tool: "connect_status", Input: json.RawMessage(`{}`)})
+		once.Do(func() { close(started) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-release:
+		}
+		_ = d.Sink.Emit(ctx, events.AgentHypothesis, events.AgentHypothesisPayload{Text: httpSecretText, Confidence: "high"})
+		return nil
+	}
+	srv, st := newShadowServerWith(t, slow, 30*time.Second)
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/alerts/webhook", "arjun", `{"title":"orders stale","pipeline_id":"orders","dedup_key":"k-early"}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("webhook status %d", resp.StatusCode)
+	}
+	roomID, _ := decode[map[string]any](t, resp)["id"].(string)
+	path := srv.URL + "/api/rooms/" + roomID
+	<-started
+
+	wantStatus(t, doJSON(t, http.MethodPost, path+"/control/grant", "arjun", `{"to":"arjun"}`), http.StatusOK)
+	wantStatus(t, doJSON(t, http.MethodPost, path+"/close", "arjun", `{"resolution":"schema change"}`), http.StatusOK)
+	wantStatus(t, doJSON(t, http.MethodPost, path+"/shadow/blind", "kabir", `{"actual_layer":"kafka-connect","root_cause_terms":["schema"]}`), http.StatusOK)
+	wantErr(t, doJSON(t, http.MethodPost, path+"/shadow/grade", "kabir", `{"layer_correct":true,"root_cause":"yes"}`), http.StatusConflict, "not_revealed")
+
+	close(release)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		got, err := st.GetShadowRun(context.Background(), roomID)
+		if err == nil && got.RevealedAt != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run not revealed: %+v %v", got, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	wantStatus(t, doJSON(t, http.MethodPost, path+"/shadow/grade", "kabir", `{"layer_correct":true,"root_cause":"yes"}`), http.StatusOK)
 }
 
 // The leak test over the wire: a shadow room's WebSocket stream and GET /events

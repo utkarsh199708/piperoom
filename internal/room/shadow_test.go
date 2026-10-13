@@ -657,6 +657,35 @@ func TestShadowCloseWithGraceFinishes(t *testing.T) {
 	assertNoAgentLeak(t, env.roomLog(t, snap.ID))
 }
 
+// A grade before shadow.revealed is 409 not_revealed: closed and labelled, but
+// the run is still going in the grace period. After the reveal it is accepted.
+func TestShadowGradeBeforeRevealRefused(t *testing.T) {
+	m := newMidTool(false)
+	env := newShadowEnv(t, shadowCfg{fn: m.fn, grace: 10 * time.Second})
+	ctx := context.Background()
+	snap := env.open(t, "grade-early")
+	<-m.started
+	env.close(t, snap.ID, "fixed by hand")
+	priya := env.user(t, "priya")
+	if _, err := env.svc.ShadowLabel(ctx, priya, snap.ID, "kafka-connect", []string{"schema"}); err != nil {
+		t.Fatalf("label: %v", err)
+	}
+	if _, err := env.svc.ShadowGrade(ctx, priya, snap.ID, true, "yes", ""); err == nil {
+		t.Fatal("grade before the reveal accepted")
+	} else {
+		wantCode(t, err, "not_revealed")
+	}
+	if n := countReveals(env.roomLog(t, snap.ID)); n != 0 {
+		t.Fatalf("revealed early: %d", n)
+	}
+	close(m.release)
+	env.waitFinished(t, snap.ID)
+	waitFor(t, 5*time.Second, func() bool { return countReveals(env.roomLog(t, snap.ID)) == 1 })
+	if _, err := env.svc.ShadowGrade(ctx, priya, snap.ID, true, "yes", ""); err != nil {
+		t.Fatalf("grade after the reveal: %v", err)
+	}
+}
+
 // Grace 10s and a failure after the close: interrupted, one attempt, one
 // reveal (no fresh budget for a retry).
 func TestShadowFailureAfterCloseNotRetried(t *testing.T) {

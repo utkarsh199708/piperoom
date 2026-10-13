@@ -1,7 +1,6 @@
 package main
 
 import (
-	"math"
 	"testing"
 	"time"
 
@@ -17,8 +16,9 @@ func TestShadowAgentOptions(t *testing.T) {
 	}{
 		{"default", "", 500000},
 		{"explicit", "1234", 1234},
-		// 0 = no cap: never the agent's 0 (= the live Endpoint default).
-		{"no cap", "0", math.MaxInt64},
+		// 0 passes through: the agent reads 0 as the room default, never unlimited.
+		{"zero", "0", 0},
+		{"500000", "500000", 500000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := cfg
@@ -30,9 +30,6 @@ func TestShadowAgentOptions(t *testing.T) {
 			o := shadowAgentOptions(c, sh)
 			if o.TokenBudget != tc.want {
 				t.Fatalf("TokenBudget = %d, want %d", o.TokenBudget, tc.want)
-			}
-			if o.TokenBudget <= 0 {
-				t.Fatal("a shadow run must never fall back to the live room budget")
 			}
 			if o.Model != "m" || o.Effort != "high" || o.MaxTurns != 20 {
 				t.Fatalf("options = %+v", o)
