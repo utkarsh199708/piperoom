@@ -20,9 +20,10 @@ import (
 // scrubToolResult masks secrets in a read tool's summary and data.
 func (r *runner) scrubToolResult(tool string, res tools.Result) tools.Result {
 	summary, st := redact.Text(res.Summary)
-	res.Summary = summary
-	res.Data = redact.JSON(res.Data)
-	r.logRedaction(tool, st)
+	data, dst := redact.JSONStats(res.Data)
+	res.Summary, res.Data = summary, data
+	r.logRedaction(tool, "result", st)
+	r.logRedaction(tool, "data", dst)
 	return res
 }
 
@@ -34,7 +35,7 @@ func (r *runner) scrubToolError(tool string, err error) error {
 	if st.Total == 0 {
 		return err
 	}
-	r.logRedaction(tool, st)
+	r.logRedaction(tool, "error", st)
 	return &scrubbedError{msg: msg, err: err}
 }
 
@@ -47,19 +48,24 @@ type scrubbedError struct {
 func (e *scrubbedError) Error() string { return e.msg }
 func (e *scrubbedError) Unwrap() error { return e.err }
 
-// scrubPanic renders a recovered panic value for the log without secrets.
-func scrubPanic(p any) string {
-	s, _ := redact.Text(fmt.Sprint(p))
+// scrubPanic masks secrets in a recovered panic value. A value with nothing
+// to mask is returned as is, so callers that compare it still can; otherwise
+// the masked text replaces it.
+func scrubPanic(p any) any {
+	s, st := redact.Text(fmt.Sprint(p))
+	if st.Total == 0 {
+		return p
+	}
 	return s
 }
 
 // logRedaction records that masking happened. It logs counts per kind only,
 // never the text.
-func (r *runner) logRedaction(tool string, st redact.Stats) {
+func (r *runner) logRedaction(tool, part string, st redact.Stats) {
 	if st.Total == 0 {
 		return
 	}
-	attrs := []any{"tool", tool, "count", st.Total}
+	attrs := []any{"tool", tool, "part", part, "count", st.Total}
 	for k, n := range st.ByKind {
 		attrs = append(attrs, slog.Int("kind_"+string(k), n))
 	}

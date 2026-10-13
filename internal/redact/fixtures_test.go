@@ -89,6 +89,7 @@ var secretGen = map[string]func(g *gen) string{
 	"basic":   func(g *gen) string { return base64.StdEncoding.EncodeToString([]byte("svc_cdc:" + g.password())) },
 	"cookie":  func(g *gen) string { return g.str(alnum, 32) },
 	"sfmastr": func(g *gen) string { return "ver:1-hint:" + g.str("0123456789", 6) + "-" + g.str(b64, 60) },
+	"hook":    func(g *gen) string { return g.str(alnum, 24) },
 }
 
 // secretTemplates are realistic lines that each carry one or more secrets.
@@ -197,6 +198,14 @@ var secretTemplates = []string{
 	`env: AWS_ACCESS_KEY_ID={awsid} AWS_SECRET_ACCESS_KEY={awssec} ANTHROPIC_API_KEY={skant}`,
 	`level=ERROR msg="snowflake login failed" err="390144 (08004): JWT token is invalid" jwt={jwt}`,
 	`record value: {"id":103,"note":"pls reset pw","password":"{pw}","api_key":"{tok}"}`,
+	// Escaped quotes: JAAS inside JSON, JSON-encoded Connect bodies, Go %q errors.
+	`{"sasl.jaas.config":"org.apache.kafka.common.security.scram.ScramLoginModule required username=\"cdc\" password=\"{pw}\";"}`,
+	`connect: PUT /connectors/pg-orders-connector/config: "database.password=\"{pw}\" rejected"`,
+	`{"error_code":400,"message":"{\"user\":\"debezium\",\"password\":\"{pw}\"}"}`,
+	// Bare bearer tokens, basic auth, Slack webhooks.
+	`retrying with Bearer {tok}`,
+	`Authorization: Basic {basic}`,
+	`alert sink https://hooks.slack.com/services/T0ABC1234/B0DEF5678/{hook} returned 404`,
 }
 
 // evidenceLines carry no secret and must come out byte for byte unchanged.

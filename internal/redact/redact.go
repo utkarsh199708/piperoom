@@ -40,6 +40,9 @@ const (
 	KindKeyValue   Kind = "secret_value"
 	KindEmail      Kind = "email"
 	KindIP         Kind = "ip"
+	KindSlackHook  Kind = "slack_webhook"
+	// KindOverflow counts text past MaxScan, masked whole.
+	KindOverflow Kind = "overflow"
 )
 
 // Stats reports what one call masked.
@@ -56,6 +59,16 @@ func (s *Stats) add(k Kind) {
 	}
 	s.ByKind[k]++
 	s.Total++
+}
+
+func (s *Stats) merge(o Stats) {
+	for k, n := range o.ByKind {
+		if s.ByKind == nil {
+			s.ByKind = map[Kind]int{}
+		}
+		s.ByKind[k] += n
+	}
+	s.Total += o.Total
 }
 
 // Options selects the optional detectors.
@@ -97,6 +110,17 @@ func Text(s string) (string, Stats) { return def.Text(s) }
 // JSON masks secrets in the string values of v with the default options.
 func JSON(v any) any { return def.JSON(v) }
 
+// JSONStats is JSON that also reports what it masked.
+func JSONStats(v any) (any, Stats) { return def.JSONStats(v) }
+
+// MaxScan is the most text Text scans in one string. Tool summaries are far
+// smaller; the cap bounds the cost of uncapped tool data strings and error
+// texts. Anything past it is masked whole, never passed through unscanned.
+const MaxScan = 64 << 10
+
+// overflowSuffix ends the mask that replaces text past MaxScan.
+const overflowSuffix = " bytes past the scan limit]"
+
 // maxPasses bounds the fixed-point loops in Text. One pass is enough for
 // every input seen so far; the loop only guards idempotency against a mask
 // that happens to complete a new match with its neighbours.
@@ -105,6 +129,46 @@ const maxPasses = 3
 // Text masks secrets in s. Masking is idempotent: Text of its own output
 // returns that output unchanged.
 func (r *Redactor) Text(s string) (string, Stats) {
+	var st Stats
+	if s == "" {
+		return s, st
+	}
+	// Text past the scan limit is replaced by one mask. Output that already
+	// ends in that mask is rescanned up to it and the mask kept, so a second
+	// call returns the first call's output. Masks can grow short values up
+	// to about 3x, so such a head is at most 4*MaxScan; anything longer is
+	// treated as fresh input and capped again.
+	if i := strings.LastIndex(s, "…"+marker+" "); i >= 0 && i <= 4*MaxScan && strings.HasSuffix(s, overflowSuffix) &&
+		allDigits(s[i+len("…"+marker+" "):len(s)-len(overflowSuffix)]) {
+		head, hst := r.scan(s[:i])
+		hst.merge(st)
+		return head + s[i:], hst
+	}
+	if len(s) > MaxScan {
+		cut := scanCut(s)
+		head, hst := r.scan(s[:cut])
+		hst.add(KindOverflow)
+		return head + "…" + marker + " " + strconv.Itoa(len(s)-cut) + overflowSuffix, hst
+	}
+	return r.scan(s)
+}
+
+// scanCut picks where to stop scanning a string longer than MaxScan: at the
+// last line break in the final 4 KiB before the limit, so a secret on that
+// line is not cut in half, else at a rune boundary.
+func scanCut(s string) int {
+	if i := strings.LastIndexByte(s[MaxScan-4096:MaxScan], '\n'); i >= 0 {
+		return MaxScan - 4096 + i + 1
+	}
+	cut := MaxScan
+	for cut > 0 && s[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return cut
+}
+
+// scan masks s without the size cap.
+func (r *Redactor) scan(s string) (string, Stats) {
 	var st Stats
 	if s == "" {
 		return s, st
@@ -254,7 +318,9 @@ func (ru *rule) apply(s, lower string) (string, int) {
 			continue
 		}
 		val := s[g0:g1]
-		if isMasked(val) || isPlaceholder(val) {
+		// A one-character "value" is a parse artifact (a stray quote or
+		// backslash), never a credential worth a mask.
+		if len(val) <= 1 || isMasked(val) || isPlaceholder(val) {
 			continue
 		}
 		if ru.ok != nil && !ru.ok(s, m) {

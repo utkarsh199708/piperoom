@@ -113,13 +113,14 @@ func TestJSONStructs(t *testing.T) {
 	if got := JSON(make(chan int)); got == nil {
 		t.Error("unmarshalable value dropped")
 	}
-	ss := JSON([]string{"ok", "token=Zx81Lk29Qp0Wm3Nb7Vc5"}).([]string)
-	if ss[0] != "ok" || strings.Contains(ss[1], "Lk29Qp0Wm3") {
-		t.Errorf("got %q", ss)
-	}
-	ms := JSON(map[string]string{"api_key": "Zx81Lk29Qp0Wm3Nb7Vc5"}).(map[string]string)
-	if strings.Contains(ms["api_key"], "Lk29Qp0Wm3") {
-		t.Errorf("got %q", ms)
+	for _, v := range []any{
+		[]string{"ok", "token=Zx81Lk29Qp0Wm3Nb7Vc5"},
+		map[string]string{"api_key": "Zx81Lk29Qp0Wm3Nb7Vc5"},
+	} {
+		b, _ := json.Marshal(JSON(v))
+		if strings.Contains(string(b), "Lk29Qp0Wm3") {
+			t.Errorf("got %s", b)
+		}
 	}
 }
 

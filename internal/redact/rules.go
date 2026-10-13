@@ -43,10 +43,8 @@ func randomGroup(g, minLen int) func(s string, m []int) bool {
 // escapes) and ones cut off by truncation (no END line). It is the only rule
 // that spans lines; the line rules below run one line at a time.
 var pemRule = rule{
-	kind: KindPrivateKey,
-	re: regexp.MustCompile(`(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----` +
-		`(?:(?:[A-Za-z0-9+/=\s:,.-]|\\[nr])*?-----END [A-Z0-9 ]*PRIVATE KEY-----` +
-		`|(?:(?:\s|\\[nr])*[A-Za-z0-9+/=]{16,})*))`),
+	kind:   KindPrivateKey,
+	find:   pemFind,
 	groups: []int{1},
 	style:  styleWhole,
 	pre:    containsCase("PRIVATE KEY-----"),
@@ -72,10 +70,27 @@ var baseRules = []rule{
 	{
 		kind: KindAuthHeader,
 		re: regexp.MustCompile(`(?i)\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?` +
-			`(?:(?:bearer|basic|digest|token|negotiate|aws4-hmac-sha256|snowflake\s+token\s*=)\s*["']?)?([^\s"',;]+)`),
-		groups: []int{1},
+			`(?:(bearer|basic|digest|token|negotiate|aws4-hmac-sha256|snowflake\s+token\s*=)\s*["']?)?([^\s"',;]+)`),
+		groups: []int{2},
 		style:  styleToken,
 		pre:    containsAny("authorization"),
+		// Basic credentials are base64 of user:password; the last
+		// characters would leak password bytes, so they keep none.
+		styleOf: func(s string, m []int) maskStyle {
+			if m[2] >= 0 && strings.EqualFold(s[m[2]:m[3]], "basic") {
+				return styleSecret
+			}
+			return styleToken
+		},
+	},
+	// Slack incoming webhooks: the last path segment is the secret.
+	{
+		kind: KindSlackHook,
+		re: regexp.MustCompile(`hooks\.slack\.com/(?:services/T[A-Z0-9]+/B[A-Z0-9]+/([A-Za-z0-9]{8,})` +
+			`|(?:workflows|triggers)/([A-Za-z0-9/]{16,}))`),
+		groups: []int{1, 2},
+		style:  styleSecret,
+		pre:    containsCase("hooks.slack.com/"),
 	},
 	{
 		kind:   KindBearer,
@@ -139,7 +154,7 @@ var baseRules = []rule{
 	{
 		kind:    KindKeyValue,
 		find:    kvFind,
-		groups:  []int{2, 3, 4},
+		groups:  []int{2, 3, 4, 5},
 		pre:     containsAny(kvWords...),
 		ok:      kvOK,
 		styleOf: kvStyle,
@@ -147,9 +162,12 @@ var baseRules = []rule{
 }
 
 // kvAnchored matches one key/value pair starting at a candidate key: group 1
-// is the key, groups 2-4 the value (double-quoted, single-quoted, bare).
-var kvAnchored = regexp.MustCompile(`^["']?([A-Za-z][A-Za-z0-9_.-]{1,63})["']?[ \t]*(?:=|:)[ \t]*` +
-	`(?:"((?:[^"\\\n]|\\.)*)"|'([^'\n]*)'|([^\s,;&"'}\])<>]+))`)
+// is the key, groups 2-5 the value: escaped-quoted (\"...\" inside a JSON
+// string or a Go %q error), double-quoted, single-quoted, bare. A bare value
+// ends at whitespace, so a password with spaces is masked only up to its
+// first space (key=value text has no way to say where such a value ends).
+var kvAnchored = regexp.MustCompile(`^(?:\\?["'])?([A-Za-z][A-Za-z0-9_.-]{1,63})(?:\\?["'])?[ \t]*(?:=|:)[ \t]*` +
+	`(?:\\"((?:[^"\\\n]|\\[^"\n])*)\\"|"((?:[^"\\\n]|\\.)*)"|'([^'\n]*)'|([^\s,;&"'}\])<>\\]+))`)
 
 // kvWords are the fragments a secret key name contains; secretKey makes the
 // real decision.
@@ -183,6 +201,9 @@ func kvFind(s, lower string) [][]int {
 			}
 			off = ke
 			j := ke
+			if j+1 < len(s) && s[j] == '\\' && (s[j+1] == '"' || s[j+1] == '\'') {
+				j++
+			}
 			if j < len(s) && (s[j] == '"' || s[j] == '\'') {
 				j++
 			}
@@ -197,6 +218,9 @@ func kvFind(s, lower string) [][]int {
 			}
 			if ks > 0 && (s[ks-1] == '"' || s[ks-1] == '\'') {
 				ks--
+				if ks > 0 && s[ks-1] == '\\' {
+					ks--
+				}
 			}
 			starts = append(starts, ks)
 		}
@@ -219,6 +243,11 @@ func kvFind(s, lower string) [][]int {
 			if m[k] >= 0 {
 				m[k] += ks
 			}
+		}
+		// A pair that is not a secret must not hide the pairs inside its
+		// value: "sasl.jaas.config": "... password=\"x\"".
+		if !kvOK(s, m) {
+			continue
 		}
 		out = append(out, m)
 		last = m[1]
@@ -394,7 +423,7 @@ func secretKey(k string) keyStrength {
 
 func kvGroups(s string, m []int) (key, val string) {
 	key = s[m[2]:m[3]]
-	for _, g := range []int{2, 3, 4} {
+	for _, g := range []int{2, 3, 4, 5} {
 		if m[2*g] >= 0 {
 			return key, s[m[2*g]:m[2*g+1]]
 		}
@@ -452,7 +481,7 @@ func maskAWSSecrets(s string) (string, int) {
 			j++
 		}
 		tok := strings.TrimRight(s[i:j], "=")
-		if len(tok) == 40 && awsSecretLike(tok) {
+		if len(tok) == 40 && awsSecretLike(tok) && !afterIDWord(s, i) {
 			if n == 0 {
 				b.Grow(len(s))
 			}
@@ -539,5 +568,136 @@ func hasAWSPrefix(s, _ string) bool {
 			return true
 		}
 		off += i + 1
+	}
+}
+
+// afterIDWord reports whether the token at i follows a word like "key" or
+// "id" that names a record or object, not a credential ("record key ...",
+// "message_id=..."). A 40-character Kafka key is evidence.
+func afterIDWord(s string, i int) bool {
+	j := i
+	for n := 0; j > 0 && n < 4 && strings.IndexByte(" \t:=\"',", s[j-1]) >= 0; n++ {
+		j--
+	}
+	w := j
+	for w > 0 && isKeyChar(s[w-1]) {
+		w--
+	}
+	if w == j {
+		return false
+	}
+	words := keyWords(s[w:j])
+	if len(words) == 0 {
+		// Only separators ("." or "-"): no word.
+		return false
+	}
+	last := words[len(words)-1]
+	return (last == "key" || last == "id") && secretKey(s[w:j]) == keyNone
+}
+
+// pemFind finds PEM private key blocks in linear time. A block runs from its
+// BEGIN line to the matching END line when only PEM characters lie between;
+// otherwise (truncated output) it runs over the base64 chunks of 16+
+// characters that follow the BEGIN line. Facts about the current run of PEM
+// characters (where it ends, where its next END line is) are kept across
+// BEGIN lines, so repeated BEGIN lines cost no rescans.
+func pemFind(s, _ string) [][]int {
+	const begin, end = "-----BEGIN ", "-----END "
+	var out [][]int
+	runTo := -1   // end of the run of PEM characters being looked at
+	nextEnd := -1 // next END line in that run; -1 unknown, -2 none left
+	for off := 0; off < len(s); {
+		i := strings.Index(s[off:], begin)
+		if i < 0 {
+			break
+		}
+		start := off + i
+		body, ok := pemLabel(s, start+len(begin))
+		if !ok {
+			off = start + len(begin)
+			continue
+		}
+		if body >= runTo {
+			runTo = body
+			for runTo < len(s) && isPEMChar(s[runTo]) {
+				runTo++
+			}
+			nextEnd = -1
+		}
+		stop := -1
+		for nextEnd != -2 {
+			if nextEnd < body {
+				j := strings.Index(s[body:runTo], end)
+				if j < 0 {
+					nextEnd = -2
+					break
+				}
+				nextEnd = body + j
+			}
+			if e, ok := pemLabel(s, nextEnd+len(end)); ok {
+				stop = e
+				break
+			}
+			// An END line of something else (a certificate): look further.
+			j := strings.Index(s[nextEnd+len(end):runTo], end)
+			if j < 0 {
+				nextEnd = -2
+				break
+			}
+			nextEnd = nextEnd + len(end) + j
+		}
+		if stop < 0 {
+			stop = pemChunks(s, body)
+		}
+		out = append(out, []int{start, stop, start, stop})
+		off = stop
+	}
+	return out
+}
+
+// pemLabel checks that s[i:] starts with "[A-Z0-9 ]*PRIVATE KEY-----" and
+// returns the index after it.
+func pemLabel(s string, i int) (int, bool) {
+	k := i
+	for k < len(s) && k-i < 64 && (s[k] >= 'A' && s[k] <= 'Z' || s[k] >= '0' && s[k] <= '9' || s[k] == ' ') {
+		k++
+	}
+	if !strings.HasSuffix(s[i:k], "PRIVATE KEY") || !strings.HasPrefix(s[k:], "-----") {
+		return 0, false
+	}
+	return k + 5, true
+}
+
+// isPEMChar reports characters that may appear between BEGIN and END lines:
+// base64, whitespace, the header punctuation of encrypted keys and the
+// backslash of JSON "\n" escapes.
+func isPEMChar(c byte) bool {
+	return isLetter(c) || c >= '0' && c <= '9' || strings.IndexByte("+/= \t\r\n:,.-\\", c) >= 0
+}
+
+// pemChunks returns where the base64 chunks of 16+ characters after i end.
+func pemChunks(s string, i int) int {
+	pos := i
+	for {
+		q := pos
+		for q < len(s) {
+			switch {
+			case s[q] == ' ' || s[q] == '\t' || s[q] == '\r' || s[q] == '\n':
+				q++
+				continue
+			case s[q] == '\\' && q+1 < len(s) && (s[q+1] == 'n' || s[q+1] == 'r'):
+				q += 2
+				continue
+			}
+			break
+		}
+		r := q
+		for r < len(s) && (isLetter(s[r]) || s[r] >= '0' && s[r] <= '9' || s[r] == '+' || s[r] == '/' || s[r] == '=') {
+			r++
+		}
+		if r-q < 16 {
+			return pos
+		}
+		pos = r
 	}
 }

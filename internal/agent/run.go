@@ -632,7 +632,10 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 			defer wg.Done()
 			defer func() {
 				if p := recover(); p != nil {
-					r.log.Error("agent: read tool panicked", "tool", u.name, "panic", scrubPanic(p), "stack", string(debug.Stack()))
+					// The value goes on to the room supervisor, which logs it and
+					// puts it in the room status, so it is masked here.
+					p = scrubPanic(p)
+					r.log.Error("agent: read tool panicked", "tool", u.name, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
 					panicMu.Lock()
 					if !panicked {
 						panicked, firstPanic = true, p
