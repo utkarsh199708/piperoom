@@ -80,13 +80,28 @@ type RoomSink interface {
 	PostEvidence(ctx context.Context, roomID, text string) error
 }
 
+// PipelineClients are the clients of one pipeline's client set. Either may be
+// nil, like Deps.Source and Deps.Connect.
+type PipelineClients struct {
+	// Set names the client set. Pipelines with the same Set must get the same
+	// clients: they share one replication-slot query and one read per
+	// connector name in a tick.
+	Set     string
+	Source  SourceDB
+	Connect ConnectClient
+}
+
 // Deps are the watcher's dependencies.
 type Deps struct {
 	// Source and Connect may be nil: the signals that need them then stay
 	// "unknown" and a warning names the missing client.
 	Source  SourceDB
 	Connect ConnectClient
-	Owners  *owners.Owners
+	// ClientsFor, when set, gives each pipeline the clients of its own client
+	// set (docs/design/tenancy.md section 5) and Source and Connect are not
+	// used. Pipelines of one set share each read of a tick.
+	ClientsFor func(pipelineID string) PipelineClients
+	Owners     *owners.Owners
 	// Rooms is required in mode "rooms"; modes "log" and "off" never call it.
 	Rooms RoomSink
 	// Config comes from config.ParseWatch.
@@ -167,15 +182,16 @@ func (ps *pipeState) sig(id string) *sigState {
 
 // Watcher is the built-in watcher.
 type Watcher struct {
-	src      SourceDB
-	conn     ConnectClient
-	own      *owners.Owners
-	rooms    RoomSink
-	cfg      config.Watch
-	maxRooms int
-	clock    Clock
-	log      *slog.Logger
-	jitter   func(time.Duration) time.Duration
+	src        SourceDB
+	conn       ConnectClient
+	clientsFor func(pipelineID string) PipelineClients
+	own        *owners.Owners
+	rooms      RoomSink
+	cfg        config.Watch
+	maxRooms   int
+	clock      Clock
+	log        *slog.Logger
+	jitter     func(time.Duration) time.Duration
 
 	mu    sync.Mutex
 	pipes map[string]*pipeState
@@ -226,7 +242,7 @@ func New(d Deps) (*Watcher, error) {
 		cfg.Cooldown = 60 * time.Minute
 	}
 	w := &Watcher{
-		src: d.Source, conn: d.Connect, own: d.Owners, rooms: d.Rooms,
+		src: d.Source, conn: d.Connect, clientsFor: d.ClientsFor, own: d.Owners, rooms: d.Rooms,
 		cfg: cfg, maxRooms: d.MaxOpenRooms, clock: d.Clock, log: d.Log, jitter: d.Jitter,
 		pipes: map[string]*pipeState{}, closed: map[string]bool{}, storms: map[string][]string{},
 	}

@@ -26,12 +26,18 @@ const (
 	maxEvidenceTraces     = 3
 )
 
-// evaluate turns one observation into signal readings and steps every state
-// machine. Caller holds w.mu. It returns, per signal, the pipelines that fired
-// in this tick (the storm cap needs that).
-func (w *Watcher) evaluate(now time.Time, ts []target, obs *observation) map[string][]string {
+// evaluate turns the observations (one per client set) into signal readings and
+// steps every state machine. Caller holds w.mu. It returns, per signal, the
+// pipelines that fired in this tick (the storm cap needs that).
+func (w *Watcher) evaluate(now time.Time, ts []target, bySet map[string]*observation) map[string][]string {
 	fired := map[string][]string{}
 	for _, t := range ts {
+		obs := bySet[t.set]
+		if obs == nil {
+			// observe reads every set it is given; this only guards a caller
+			// that passes targets it did not observe.
+			obs = &observation{slotsErr: errNotObserved, conns: map[string]*connObs{}}
+		}
 		ps := w.pipe(t.p.ID)
 		cr := classifyConnectors(t.connectors, obs)
 		if t.cfg.ConnectorDown.Enabled {
