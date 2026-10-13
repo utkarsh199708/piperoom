@@ -7,15 +7,16 @@ import (
 	"strings"
 )
 
-// errNonLoopback reports a listen address that another host can reach. The
-// server has no real login yet (X-User is a dev stub), so it refuses such an
-// address unless the operator passes --allow-remote.
+// errNonLoopback reports a listen address that another host can reach. In dev
+// auth mode anyone who can reach the port can act as any user, so the server
+// refuses such an address unless the operator sets
+// PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 (or the deprecated --allow-remote flag).
 var errNonLoopback = errors.New("listen address is not loopback")
 
-// checkListenAddr decides whether the server may listen on addr. A loopback
-// address (127.0.0.1, ::1 or localhost) is always allowed. Any other address
-// needs allowRemote; the returned remote flag is then true so the caller can
-// warn that auth is the dev stub.
+// checkListenAddr decides whether the server may listen on addr in dev auth
+// mode. A loopback address (127.0.0.1, ::1 or localhost) is always allowed. Any
+// other address needs allowRemote; the returned remote flag is then true so the
+// caller can warn loudly that dev auth is reachable.
 func checkListenAddr(addr string, allowRemote bool) (remote bool, err error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -25,7 +26,7 @@ func checkListenAddr(addr string, allowRemote bool) (remote bool, err error) {
 		return false, nil
 	}
 	if !allowRemote {
-		return false, fmt.Errorf("server: refusing to listen on %q without --allow-remote (auth is the dev X-User stub): %w", addr, errNonLoopback)
+		return false, fmt.Errorf("server: refusing to listen on %q in dev auth mode (anyone who can reach it can act as any user): set PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 to allow it, or PIPEROOM_AUTH_MODE=oidc: %w", addr, errNonLoopback)
 	}
 	return true, nil
 }

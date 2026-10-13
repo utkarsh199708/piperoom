@@ -8,19 +8,22 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"piperoom/internal/room"
 )
 
 // client is one WebSocket connection.
 type client struct {
-	userID   string
-	userName string
-	state    string
-	lastSeen time.Time
-	send     chan []byte
-	conn     *websocket.Conn
-	cancel   func()
-	onClose  func()
-	once     sync.Once
+	sessionID string // "" for an X-User (dev, no cookie) connection
+	userID    string
+	userName  string
+	state     string
+	lastSeen  time.Time
+	send      chan []byte
+	conn      *websocket.Conn
+	cancel    func()
+	onClose   func()
+	once      sync.Once
 }
 
 // roomHub is the set of connections for one room.
@@ -131,16 +134,16 @@ func (g *Gateway) broadcastLocked(roomID string) {
 	}
 	for c := range hub.conns {
 		if !c.trySend(b) {
-			g.spawnShutdown(c)
+			g.spawnShutdown(c, "send buffer full")
 		}
 	}
 }
 
-// spawnShutdown shuts a slow client down on its own goroutine so the close
-// frame and the onClose cleanup never block the presence broadcast. Caller
-// holds g.mu. The goroutine is tracked by g.wg; it is never started after
-// Close has begun (g.closed), so g.wg.Add never races with g.wg.Wait.
-func (g *Gateway) spawnShutdown(c *client) {
+// spawnShutdown shuts a client down (policy violation, with reason) on its own
+// goroutine so the close frame and the onClose cleanup never block the caller.
+// Caller holds g.mu. The goroutine is tracked by g.wg; it is never started
+// after Close has begun (g.closed), so g.wg.Add never races with g.wg.Wait.
+func (g *Gateway) spawnShutdown(c *client, reason string) {
 	if g.closed {
 		// Close is already shutting every client down; do not add work after
 		// the WaitGroup may have started waiting.
@@ -149,8 +152,77 @@ func (g *Gateway) spawnShutdown(c *client) {
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
-		c.shutdown(websocket.StatusPolicyViolation, "send buffer full")
+		c.shutdown(websocket.StatusPolicyViolation, reason)
 	}()
+}
+
+// sessionExpiredReason is the close reason when a session ends under a live
+// connection (logout, revoke, expiry, user removed). The web app reads it and
+// goes to the login page.
+const sessionExpiredReason = "session_expired"
+
+// spawnSessionEnd tells a client its session ended: an error frame with code
+// session_expired (docs/api.md), then a close with the same reason text. Like
+// spawnShutdown it runs on its own goroutine and the caller holds g.mu.
+func (g *Gateway) spawnSessionEnd(c *client) {
+	if g.closed {
+		return
+	}
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		if b, err := json.Marshal(serverMsg{Type: "error", Error: &serverError{Code: sessionExpiredReason, Message: "your session ended; sign in again"}}); err == nil {
+			// Best effort: a client that cannot take the frame is closed anyway.
+			_ = c.write(g.ctx, b)
+		}
+		c.shutdown(websocket.StatusPolicyViolation, sessionExpiredReason)
+	}()
+}
+
+// CloseSession ends every connection of one cookie session: an error frame
+// {type:"error", error:{code:"session_expired"}}, then a policy-violation close
+// with the reason "session_expired". It returns at once; the frames go out on
+// their own goroutines. An empty id is ignored.
+func (g *Gateway) CloseSession(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, hub := range g.rooms {
+		for c := range hub.conns {
+			if c.sessionID == sessionID {
+				g.spawnSessionEnd(c)
+			}
+		}
+	}
+}
+
+// recheckSessions asks SessionAlive about each cookie session that has a live
+// connection and closes the connections of the ones that are gone. It takes the
+// ids under g.mu but calls SessionAlive (a store read) outside it.
+func (g *Gateway) recheckSessions() {
+	if g.SessionAlive == nil {
+		return
+	}
+	g.mu.Lock()
+	seen := map[string]Identity{}
+	for _, hub := range g.rooms {
+		for c := range hub.conns {
+			if c.sessionID != "" {
+				seen[c.sessionID] = Identity{User: room.User{ID: c.userID, Name: c.userName}, SessionID: c.sessionID}
+			}
+		}
+	}
+	g.mu.Unlock()
+	for id, ident := range seen {
+		if g.ctx.Err() != nil {
+			return
+		}
+		if !g.SessionAlive(g.ctx, ident) {
+			g.CloseSession(id)
+		}
+	}
 }
 
 // awayAfter is how long a connection may go without any client message
@@ -182,6 +254,7 @@ func (g *Gateway) presenceLoop() {
 				}
 			}
 			g.mu.Unlock()
+			g.recheckSessions()
 		}
 	}
 }

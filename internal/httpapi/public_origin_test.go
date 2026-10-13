@@ -76,8 +76,9 @@ func dialOrigin(t *testing.T, srv *httptest.Server, roomID, origin string) bool 
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	url := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/rooms/" + roomID + "/ws?user=arjun&after=0"
+	url := "ws" + strings.TrimPrefix(srv.URL, "http") + "/api/rooms/" + roomID + "/ws?after=0"
 	opts := &websocket.DialOptions{HTTPHeader: http.Header{}}
+	opts.HTTPHeader.Set("X-User", "arjun")
 	if origin != "" {
 		opts.HTTPHeader.Set("Origin", origin)
 	}

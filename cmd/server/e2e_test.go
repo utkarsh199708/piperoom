@@ -62,10 +62,10 @@ type wsReader struct {
 
 func dialWS(t *testing.T, srv *httptest.Server, roomID, user string, after int64) *wsReader {
 	t.Helper()
-	url := strings.Replace(srv.URL, "http", "ws", 1) + "/api/rooms/" + roomID + "/ws?user=" + user + "&after=" + fmt.Sprintf("%d", after)
+	url := strings.Replace(srv.URL, "http", "ws", 1) + "/api/rooms/" + roomID + "/ws?after=" + fmt.Sprintf("%d", after)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, url, nil)
+	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: http.Header{"X-User": {user}}})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

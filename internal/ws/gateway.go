@@ -62,6 +62,18 @@ type Gateway struct {
 	// slice means same-origin only. Set before serving.
 	OriginPatterns []string
 
+	// Identify resolves who is upgrading. httpapi sets it to read the user the
+	// authenticate middleware already put on the request, so the session
+	// cookie (or, in dev mode, the X-User header) is the only credential:
+	// there is no ?user= (docs/design/auth.md §1.6). With Identify nil every
+	// upgrade is refused with 401. Set before serving.
+	Identify func(r *http.Request) (Identity, bool)
+
+	// SessionAlive, when set, is asked about every cookie session that has a
+	// live connection on each presence tick (20 s). A false answer closes that
+	// session's connections with "session_expired". Set before serving.
+	SessionAlive func(ctx context.Context, id Identity) bool
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -157,15 +169,27 @@ type Member struct {
 	State string `json:"state"` // "viewing" | "away"
 }
 
-// ServeHTTP authenticates (?user=), verifies the room, upgrades, replays and
+// Identity is who a connection belongs to. SessionID is the public id of the
+// cookie session, or "" for a request authenticated by the dev X-User header
+// (curl, wscat), which has no session to expire or revoke.
+type Identity struct {
+	User      room.User
+	SessionID string
+}
+
+// ServeHTTP authenticates (Identify), verifies the room, upgrades, replays and
 // then streams live events.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	userID := r.URL.Query().Get("user")
-	user, ok := g.svc.LookupUser(userID)
+	var ident Identity
+	ok := false
+	if g.Identify != nil {
+		ident, ok = g.Identify(r)
+	}
 	if !ok {
-		writeHTTPError(w, http.StatusUnauthorized, "unauthenticated", "unknown user")
+		writeHTTPError(w, http.StatusUnauthorized, "unauthenticated", "not signed in")
 		return
 	}
+	user := ident.User
 	roomID := chi.URLParam(r, "id")
 	if _, err := g.svc.GetRoom(r.Context(), roomID); err != nil {
 		var re *room.Error
@@ -197,13 +221,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(4096)
 
 	c := &client{
-		userID:   user.ID,
-		userName: user.Name,
-		state:    "viewing",
-		lastSeen: g.now(),
-		send:     make(chan []byte, sendBuffer),
-		conn:     conn,
-		once:     sync.Once{},
+		sessionID: ident.SessionID,
+		userID:    user.ID,
+		userName:  user.Name,
+		state:     "viewing",
+		lastSeen:  g.now(),
+		send:      make(chan []byte, sendBuffer),
+		conn:      conn,
+		once:      sync.Once{},
 	}
 	ctx, cancel := context.WithCancel(g.ctx)
 	c.cancel = cancel
