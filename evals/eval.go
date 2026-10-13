@@ -245,7 +245,8 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	tr := Transcript{Events: rec.snapshot(), Misses: rp.Misses(), Attempts: attempts.snapshot(), Idles: inbox.idleCount()}
 	res := Judge(sc, tr, err, timedOut)
 	// Nothing to grade without a hypothesis; the terms verdict already says so.
-	if effectiveJudge(cfg.Judge, sc) == JudgeClaude && res.FinalHypothesis != "" {
+	// Healthy, abstain and ask scenarios have no root cause for a judge.
+	if effectiveJudge(cfg.Judge, sc) == JudgeClaude && res.FinalHypothesis != "" && sc.Expect.outcome() == OutcomeDiagnose {
 		v, jerr := cfg.JudgeClient.JudgeHypothesis(ctx, sc, res.FinalHypothesis)
 		if jerr != nil {
 			return RunResult{}, Transcript{}, jerr

@@ -20,6 +20,9 @@ type step struct {
 	input      map[string]any // ...with this input
 	hypothesis string         // or record this hypothesis (citing every step so far)
 	cite       []string       // explicit based_on_steps instead of "every step so far"
+	confidence string         // the hypothesis's confidence; default high
+	message    string         // or post this agent message...
+	replyTo    string         // ...as a reply to this comment id
 	proposal   *events.ProposalCreatedPayload
 	idle       bool // or go idle and wait for input; ends the run when the inbox closes
 	// proposeFix is a raw propose_fix tool input, run through the agent's real
@@ -60,9 +63,15 @@ func scriptedRunner(script []step) agent.Runner {
 				if cite == nil {
 					cite = append([]string(nil), stepIDs...)
 				}
+				conf := s.confidence
+				if conf == "" {
+					conf = "high"
+				}
 				_ = d.Sink.Emit(ctx, events.AgentHypothesis, events.AgentHypothesisPayload{
-					Text: s.hypothesis, BasedOnSteps: cite, Confidence: "high",
+					Text: s.hypothesis, BasedOnSteps: cite, Confidence: conf,
 				})
+			case s.message != "":
+				_ = d.Sink.Emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: s.message, ReplyTo: s.replyTo})
 			case s.proposal != nil:
 				// Like propose_fix: validate every step through the
 				// registry and drop the whole proposal on the first
@@ -116,7 +125,7 @@ func goodSchemaChangeScript() []step {
 		{tool: "pipeline_map", input: map[string]any{"pipeline_id": "orders"}},
 		{tool: "connect_status", input: map[string]any{"connector": "pg-orders-connector"}},
 		{tool: "pg_recent_ddl", input: map[string]any{"since": "2026-10-11T10:00:00Z"}},
-		{hypothesis: "Kafka Connect task 0 failed: the Schema Registry rejected (409, BACKWARD) the new Avro schema after amount changed int -> numeric(12,2)."},
+		{hypothesis: "Kafka Connect task 0 failed: the Schema Registry rejected (409, BACKWARD) the new Avro schema after an ALTER TABLE in Postgres changed amount int -> numeric(12,2)."},
 		{proposal: &events.ProposalCreatedPayload{
 			Title: "Allow the new schema and restart task 0",
 			Steps: []events.ProposalStep{

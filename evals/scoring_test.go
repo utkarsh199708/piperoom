@@ -219,7 +219,7 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		wrong: "Debezium task 0 failed to publish to Kafka because a broker is unreachable; restart the connector.",
 	},
 	"schema-change": {
-		good:  "Kafka Connect task 0 failed: the Schema Registry rejected (409, BACKWARD) the new Avro schema after amount changed int -> numeric(12,2).",
+		good:  "Kafka Connect task 0 failed: the Schema Registry rejected (409, BACKWARD) the new Avro schema after an ALTER TABLE in Postgres changed amount int -> numeric(12,2).",
 		wrong: "The consumer order-sync is stuck on a poison pill.",
 	},
 	"slot-inactive-wal-growth": {
@@ -255,6 +255,10 @@ func TestScoringOldVsNew(t *testing.T) {
 		return "fail"
 	}
 	for _, sc := range scs {
+		// Healthy, abstain and ask scenarios have no root cause to match.
+		if sc.Expect.outcome() != OutcomeDiagnose {
+			continue
+		}
 		// legacyTerms exist only for scenarios migrated by N2; a scenario added
 		// later has no old terms and shows "n/a" for the old matcher. Its
 		// good/wrong texts are required: add them to hypotheses.
@@ -489,4 +493,34 @@ func TestJudgeAgreement(t *testing.T) {
 		}
 	}
 	t.Logf("judge vs terms agreement on root cause: %d/%d", agree, total)
+}
+
+// TestJudgeSkipsOutcomesWithoutRootCause: a healthy, abstain or ask scenario
+// has no root cause, so the LLM judge is never called for it and a verdict
+// changes nothing, even when -judge claude forces the judge everywhere.
+func TestJudgeSkipsOutcomesWithoutRootCause(t *testing.T) {
+	sc, err := LoadScenario("scenarios/ambiguous-lag-spike.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := []step{
+		{tool: "kafka_consumer_lag", input: map[string]any{"group": "order-sync"}},
+		{tool: "connect_status", input: map[string]any{"connector": "pg-orders-connector"}},
+		{tool: "pg_recent_ddl", input: map[string]any{}},
+		{hypothesis: "Cause unknown from this evidence.", confidence: "low"},
+	}
+	fj := &fakeJudge{v: Verdict{RootCauseCorrect: false, LayerCorrect: false, Reason: "no"}}
+	rep, err := Evaluate(context.Background(), []Scenario{sc}, Config{
+		Runner: scriptedRunner(script), Logger: quietLogger(), Judge: JudgeClaude, JudgeClient: fj,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := rep.Results[0]
+	if fj.calls != 0 || r.Judged != nil || !r.Pass {
+		t.Errorf("judge calls %d judged %+v pass %v failures %v", fj.calls, r.Judged, r.Pass, r.Failures)
+	}
+	if got := ApplyVerdict(sc, r, fj.v); got.Judged != nil || !got.Pass || !got.RootCause {
+		t.Errorf("verdict applied to an abstain run: %+v", got)
+	}
 }

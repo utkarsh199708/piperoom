@@ -120,15 +120,59 @@ split on punctuation and camelCase (`PreparingRebalance` = `preparing rebalance`
 prefix match on its last word: `rebalanc*` matches `rebalancing` and `PreparingRebalance`, plain
 `rebalanc` matches nothing. Write `deserializ*`, `compatib*`, `retain*` where a stem is meant.
 
+In a hypothesis a term counts only where it is **affirmed**: not in a question, and with no negator
+(`not`, `never`, `no`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`) in the three
+words before it, within its fragment (a sentence cut at `, : ( ) [ ]` and before `but`, `while`,
+`whereas`, `although`, `though`). "Not an amount change" does not name amount; "the record on
+partition 1 is not Avro" still names partition 1.
+
 | field | type | meaning |
 |---|---|---|
-| `root_cause` | [][]string | required. The **final** hypothesis (`update_hypothesis`) must match every group |
+| `outcome` | string | how a good run ends: `diagnose` (default), `healthy`, `abstain` or `ask`. See **Outcomes** below. `root_cause`, `root_cause_forbidden`, both layers, `fix` and `claims` are graded only for `diagnose`; validation rejects them on any other outcome |
+| `root_cause` | [][]string | required for `diagnose`. The **final** hypothesis (`update_hypothesis`) must match every group, affirmed |
 | `root_cause_forbidden` | [][]string | optional wrong stories. Each **row** is an AND of terms (same matching) that must all sit in **one clause** (clauses split at `; ! ?`, newline and `. `). A clause with a negator (`not`, `never`, `no`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`) is skipped, so "do not reset to latest" is fine. If a row fires the root cause is wrong even when `root_cause` matches, e.g. `[[reset*, latest]]` |
-| `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`. The final hypothesis must name it (the words per layer are `layerTerms` in `score.go`) |
-| `evidence_tools` | []string | tools that must each be called at least once |
+| `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. The final hypothesis must name it (the words per layer are `layerTerms` in `score.go`, plus the pipeline's `consumer_groups`, `connectors` and `sink_tables`), affirmed and in a fragment that does not clear it (`healthy`, `fine`, `ruled out`, `unrelated`, `unaffected`, `not involved`, `not the cause`, `not at fault`, `red herring`): "Connect is healthy" does not name Connect |
+| `root_cause_layer` | string | the layer the root cause sits in, graded apart from `first_failing_layer` with the same matcher: a schema change fails in Connect first, but the cause is a Postgres DDL |
+| `evidence_tools` | []string | tools that must each return at least one **successful** result. A call that errored was attempted, not observed |
+| `expected_facts` | list | what the diagnosis must rest on, see below |
+| `claims` | list | `[{about: root_cause, facts: [ids]}]`: the final hypothesis's `based_on_steps` must include a step that established at least one of these facts |
 | `fix` | [][]string | action-name groups that must all appear among the proposed steps. Absent = no particular fix expected |
 | `forbidden_actions` | []string | actions that must never be proposed in this scenario. A **rejected attempt** counts too: `propose_fix` drops a proposal whose step fails `Validate` and leaves no event, so the harness records every `Validate` call and fails a run that even tried a forbidden action |
-| `max_tool_calls` | int | read-tool budget; 0 = none |
+| `max_tool_calls` | int | read-tool budget (calls attempted); 0 = none |
+
+**`expected_facts[]`**: `id` (unique), `tool`, `match` ([]string), `required` (bool). A fact is
+established at a step when the step called `tool`, the result was **not an error**, and every `match`
+term occurs in that result's summary (whole words, as above; no negation handling: `active=false` is
+data, not a denial). A required fact the run never established fails it. `-validate` rejects a fact
+that no successful recording of its tool contains in full, so a typo fails before any model call.
+
+```yaml
+expect:
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_task_failed
+      tool: connect_status
+      match: [task 0, failed]
+      required: true
+    - id: f_ddl_amount
+      tool: pg_recent_ddl
+      match: [alter column amount, numeric]
+  claims:
+    - about: root_cause
+      facts: [f_ddl_amount, f_task_failed]
+```
+
+### Outcomes
+
+| outcome | a run passes the outcome when |
+|---|---|
+| `diagnose` | root cause, both layers, claims and fix as above |
+| `healthy` | no proposal; the final hypothesis, if any, is low confidence or itself says the pipeline is healthy; and the **last** agent message says the pipeline is healthy or that there is nothing to fix (`healthy`, `nothing to fix`, `no fix needed`, `no action needed` and similar), with no negator anywhere else in its fragment and not as a question |
+| `abstain` | no proposal, and no hypothesis or a final one at low confidence |
+| `ask` | an agent message to the room (not a reply to a watcher's comment) containing `?` comes before any proposal. There is no `ask_driver` tool; a question in `post_message` or the agent's own text is how it asks |
+
+Every outcome also fails on a run error, a timeout, a missing evidence tool, a missing required fact,
+a forbidden or invalid proposal step, and the tool budget.
 
 ### Example
 
@@ -170,7 +214,16 @@ expect:
     - [paused]
     - [connector, connect]
   first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
   evidence_tools: [connect_status]
+  expected_facts:
+    - id: f_paused
+      tool: connect_status
+      match: [task 0, paused]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_paused]
   forbidden_actions: [schema_set_compatibility, schema_register]
   max_tool_calls: 10
 ```
@@ -181,25 +234,40 @@ The full seed is [`scenarios/schema-change.yaml`](scenarios/schema-change.yaml).
 
 | part | points | rule |
 |---|---|---|
-| root cause | 35 | final hypothesis matches `expect.root_cause` |
-| layer | 10 | final hypothesis names `expect.first_failing_layer` |
-| evidence | 10 | share of `evidence_tools` called |
+| root cause | 35 | final hypothesis matches `expect.root_cause`, affirmed (on other outcomes: the outcome passed, 35 + 10) |
+| layer | 10 | share of `first_failing_layer` and `root_cause_layer` the final hypothesis names |
+| evidence | 10 | share of `evidence_tools` with a successful result and **required** `expected_facts` established; optional facts count only through claims |
 | fix | 20 | `expect.fix` met (or none expected), no forbidden action, and every step passes the action's `Validate` and `CheckScope` |
-| citations | 10 | final hypothesis cites step ids, and all of them are real |
+| citations | 10 | final hypothesis cites steps, all of them exist and succeeded, and every claim is backed by a cited step. At low confidence a cited step may also be an errored one (prompt rule 7: an error is evidence for what is unknown, never proof); it still backs no claim. On other outcomes a run with no hypothesis gets these points |
 | efficiency | 15 | full within `max_tool_calls`, else scaled by budget ÷ calls |
 
-A run **passes** when all of the following hold:
+A `diagnose` run **passes** when all of the following hold:
 - no run error or timeout
-- the root cause matches and the layer is named
-- no evidence tool is missing
+- the root cause matches, and both layers are named
+- every evidence tool returned a successful result, and every required fact was established
+- every claim is backed by a cited step that established one of its facts
 - the expected fix is proposed
 - no forbidden action is proposed or attempted, and no invalid or out-of-scope step is proposed
 - it stays within the tool budget
 
-The report also gives:
+A `healthy`, `abstain` or `ask` run passes on its outcome rule (see **Outcomes**) plus the same run error,
+evidence, fact, action and budget checks.
+
+Per run the result also gives:
+- `tool_calls` (attempted), `tool_calls_ok` and `tool_errors`; `evidence_errored` lists evidence tools
+  whose every call errored
+- `facts_found` / `facts_missing`, `supported_claims` / `unsupported_claims`
+- `layer_named`, `root_cause_layer_named`, `correct` (root cause and root-cause layer on `diagnose`, the
+  outcome otherwise), `claims_cause` (final hypothesis at medium or high confidence), `abstained` (no
+  proposal and no `claims_cause`; on `ask`, asked before proposing), `asked_driver`, `says_healthy`
 - `tool_calls_to_root_cause`: read-tool calls made before the first hypothesis that matched
-- misses
-- action attempts and how many `Validate` rejected (`rejected_attempts`, the "rejected fixes" column)
-- tool errors
-- idles
-- duration
+- misses, action attempts and how many `Validate` rejected (`rejected_attempts`, the "rejected fixes"
+  column), idles, duration
+
+The report adds, over all runs (`calibration.go`; runs that ended in a run error are left out):
+- **Calibration**: confidence is read as a probability (low 0.3, medium 0.6, high 0.9). The Brier score
+  is the mean of (p − right)² over runs with a final hypothesis (0 is perfect); a reliability table
+  gives runs and accuracy per confidence; "overconfident" counts high-confidence runs that were wrong.
+- **Abstention**: how often the agent held back on `healthy`/`abstain`/`ask` scenarios, against how
+  often it held back on `diagnose` scenarios, where that is a false abstention.
+- **Evidence**: tool calls attempted / ok / errored, expected facts found, claims backed.

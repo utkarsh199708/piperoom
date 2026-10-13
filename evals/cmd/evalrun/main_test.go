@@ -32,6 +32,29 @@ func TestRunCheck(t *testing.T) {
 	}
 }
 
+// TestRunCheckRejectsFactTypo: -validate catches an expected fact whose terms
+// no recording of its tool contains, so an author typo fails before any run.
+func TestRunCheckRejectsFactTypo(t *testing.T) {
+	b, err := os.ReadFile("../../scenarios/schema-change.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := `match: [incompatible, "409"]`
+	if !bytes.Contains(b, []byte(good)) {
+		t.Fatalf("seed no longer has %s", good)
+	}
+	dir := t.TempDir()
+	typo := bytes.Replace(b, []byte(good), []byte(`match: [incompatable, "409"]`), 1)
+	if err := os.WriteFile(filepath.Join(dir, "schema-change.yaml"), typo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code, err := run(flags{scenarios: dir, check: true}, &out, &out)
+	if err == nil || code != 1 || !strings.Contains(err.Error(), `(f_schema_incompatible): no successful connect_status recording contains all of ["incompatable" "409"]`) {
+		t.Fatalf("code %d err %v", code, err)
+	}
+}
+
 func TestRunUnknownScenario(t *testing.T) {
 	var out bytes.Buffer
 	if _, err := run(flags{scenarios: "../../scenarios", only: "nope", check: true}, &out, &out); err == nil {

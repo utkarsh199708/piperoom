@@ -52,17 +52,20 @@ func effectiveJudge(flag string, sc Scenario) string {
 	return JudgeTerms
 }
 
-// ApplyVerdict replaces the deterministic root-cause and layer results of res
-// with the judge's, then recomputes the score and failures. The terms results
-// are kept in res.Judged.
+// ApplyVerdict replaces the deterministic root-cause and first-failing-layer
+// results of res with the judge's, then recomputes the outcome, score and
+// failures. The terms results are kept in res.Judged. The root-cause layer
+// stays graded by terms (the verdict has no field for it). Only a diagnose
+// scenario has a root cause to judge; any other res is returned unchanged.
 func ApplyVerdict(sc Scenario, res RunResult, v Verdict) RunResult {
+	if sc.Expect.outcome() != OutcomeDiagnose {
+		return res
+	}
 	res.Judged = &JudgeResult{Verdict: v, TermsRootCause: res.RootCause, TermsLayer: res.LayerNamed}
 	res.RootCause = v.RootCauseCorrect
 	res.ForbiddenCause = false
 	res.LayerNamed = sc.Expect.FirstFailingLayer == "" || v.LayerCorrect
-	res.Score = score(sc, res)
-	res.Failures = failures(sc, res)
-	res.Pass = len(res.Failures) == 0
+	finish(sc, &res)
 	return res
 }
 
