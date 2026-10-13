@@ -1,10 +1,11 @@
-// Package auth holds the login settings and the session store contract
-// (docs/design/auth.md). Dev mode works end to end; OIDC login is auth PR 3,
-// so oidc mode here only validates its configuration and refuses X-User.
+// Package auth holds the login settings, the session store contract and the
+// OIDC relying party (docs/design/auth.md). Dev mode works end to end; the OIDC
+// login is in oidc.go.
 package auth
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -25,6 +26,10 @@ const (
 const (
 	DevSessionCookie  = "piperoom_session"
 	OIDCSessionCookie = "__Host-piperoom_session"
+
+	// The pre-login cookie holds the login_states row id (design §1.1).
+	DevLoginCookie  = "piperoom_login"
+	OIDCLoginCookie = "__Host-piperoom_login"
 )
 
 // Settings is the parsed, validated login configuration.
@@ -40,6 +45,11 @@ type Settings struct {
 	AllowedHosts []string
 	Idle         time.Duration // PIPEROOM_SESSION_IDLE
 	Max          time.Duration // PIPEROOM_SESSION_MAX
+	// ViewerGroups are the PIPEROOM_AUTH_VIEWER_GROUPS entries (design §2.1).
+	ViewerGroups []string
+	// TrustedProxies are the PIPEROOM_TRUSTED_PROXIES prefixes. X-Forwarded-For
+	// is read only from these peers, in oidc mode (design §1.1).
+	TrustedProxies []netip.Prefix
 }
 
 // Default returns dev mode with the default session lengths. httpapi uses it
@@ -57,6 +67,14 @@ func (s Settings) CookieName() string {
 		return OIDCSessionCookie
 	}
 	return DevSessionCookie
+}
+
+// LoginCookieName is the pre-login cookie name for the mode.
+func (s Settings) LoginCookieName() string {
+	if s.IsOIDC() {
+		return OIDCLoginCookie
+	}
+	return DevLoginCookie
 }
 
 // hostRe is deliberately narrow, like httpapi's public host check: PIPEROOM_
@@ -101,12 +119,45 @@ func ParseSettings(c config.Config) (Settings, error) {
 		s.AllowedHosts = append(s.AllowedHosts, strings.ToLower(h))
 	}
 
+	for _, g := range strings.Split(c.AuthViewerGroups, ",") {
+		if g = strings.TrimSpace(g); g != "" {
+			s.ViewerGroups = append(s.ViewerGroups, g)
+		}
+	}
+
 	if s.Mode == ModeOIDC {
 		if err := checkOIDC(c); err != nil {
 			return Settings{}, err
 		}
+		// Used only in oidc mode (design §1.1); dev mode keys on RemoteAddr.
+		if s.TrustedProxies, err = ParseTrustedProxies(c.TrustedProxies); err != nil {
+			return Settings{}, err
+		}
 	}
 	return s, nil
+}
+
+// ParseTrustedProxies parses the PIPEROOM_TRUSTED_PROXIES CIDR list. A bare
+// address counts as a /32 or /128.
+func ParseTrustedProxies(list string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, e := range strings.Split(list, ",") {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(e); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(e)
+		if err != nil {
+			return nil, fmt.Errorf("auth: PIPEROOM_TRUSTED_PROXIES entry %q: want a CIDR like 10.0.0.0/8 or an address", e)
+		}
+		a = a.Unmap()
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
+	}
+	return out, nil
 }
 
 // checkOIDC is the start-up check for oidc mode. The login itself is auth PR 3.

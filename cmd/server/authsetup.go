@@ -17,7 +17,7 @@ const devNonLoopbackWarning = "dev auth on a non-loopback address: anyone who ca
 //
 //   - PIPEROOM_AUTH_MODE must be dev or oidc; oidc needs an https
 //     PIPEROOM_PUBLIC_URL, an issuer, a client id and a secret (unless
-//     PIPEROOM_OIDC_PUBLIC_CLIENT=1). Validation only: the login is PR 3.
+//     PIPEROOM_OIDC_PUBLIC_CLIENT=1). The login itself is built by oidcSetup.
 //   - dev mode refuses a non-loopback PIPEROOM_HTTP_ADDR unless
 //     PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 or the deprecated --allow-remote flag
 //     is given; both start with a loud warning.

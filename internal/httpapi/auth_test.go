@@ -159,13 +159,13 @@ func TestDevLoginSetsCookieAndMe(t *testing.T) {
 	if len(c.Value) != 43 {
 		t.Fatalf("cookie value length = %d, want 43", len(c.Value))
 	}
-	// /api/me keeps {id,name,layers}.
+	// /api/me is {id,name,layers,role,groups_missing}.
 	resp = e.do(t, http.MethodGet, "/api/me", "", cookieHdr(c))
 	wantStatus(t, resp, http.StatusOK)
 	var me map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&me)
-	if me["id"] != "priya" || me["name"] == nil || me["layers"] == nil || len(me) != 3 {
-		t.Fatalf("/api/me = %+v, want exactly id, name, layers for priya", me)
+	if me["id"] != "priya" || me["name"] == nil || me["layers"] == nil || me["role"] != "member" || me["groups_missing"] != false || len(me) != 5 {
+		t.Fatalf("/api/me = %+v, want exactly id, name, layers, role, groups_missing for priya", me)
 	}
 	// Only the hash is stored.
 	hash, _ := auth.HashToken(c.Value)
@@ -352,10 +352,10 @@ func TestOIDCModeIgnoresXUser(t *testing.T) {
 	if b.Error.Code != "session_expired" || b.Error.AuthMode != "oidc" {
 		t.Fatalf("error = %+v, want session_expired with auth_mode oidc", b.Error)
 	}
-	// Dev login is not mounted, the OIDC routes are pending (501).
+	// Dev login is not mounted; the OIDC routes answer 503 while discovery has not run.
 	wantStatus(t, e.do(t, http.MethodPost, "/auth/dev-login", `{"user":"arjun"}`), http.StatusNotFound)
-	wantStatus(t, e.do(t, http.MethodGet, "/auth/login?return=/", ""), http.StatusNotImplemented)
-	wantStatus(t, e.do(t, http.MethodGet, "/auth/callback", ""), http.StatusNotImplemented)
+	wantStatus(t, e.do(t, http.MethodGet, "/auth/login?return=/", ""), http.StatusServiceUnavailable)
+	wantStatus(t, e.do(t, http.MethodGet, "/auth/callback", ""), http.StatusServiceUnavailable)
 }
 
 // With the web UI served, an unmounted or unknown /auth path is a JSON 404, not
@@ -377,11 +377,11 @@ func TestAuthPathsAreNeverTheSPAShell(t *testing.T) {
 		t.Fatalf("GET /: %d, want the shell", resp.StatusCode)
 	}
 
-	// In oidc mode the two routes exist (501 until PR 3); the rest is still 404.
+	// In oidc mode the two routes exist (503 until discovery succeeds); the rest is still 404.
 	oidc := newWebServer(t, httpapi.WithWebDir(webDir(t)), httpapi.WithAuth(oidcSettings()))
 	resp, _ = fetch(t, http.MethodGet, oidc.URL+"/auth/login")
-	if resp.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("GET /auth/login in oidc mode: %d, want 501", resp.StatusCode)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("GET /auth/login in oidc mode: %d, want 503", resp.StatusCode)
 	}
 	resp, body = fetch(t, http.MethodGet, oidc.URL+"/auth/nothing")
 	if resp.StatusCode != http.StatusNotFound || !strings.Contains(body, `"not_found"`) {

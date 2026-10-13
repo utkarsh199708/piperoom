@@ -20,10 +20,17 @@ type User struct {
 	Name   string   `json:"name"`
 	Layers []string `json:"layers"`
 	// Email and Sub tie this user to an IdP account (docs/design/auth.md
-	// section 2.1). Both are optional. They are parsed and checked here but not
-	// used until the OIDC login lands, and they are not sent to clients.
+	// section 2.1). Both are optional. They map an IdP login to this user and
+	// are not sent to clients.
 	Email string `json:"-" yaml:"email"`
 	Sub   string `json:"-" yaml:"sub"`
+
+	// Groups are the IdP groups of the session this value was built for; nil
+	// when the token had no groups claim, and always nil for a users.yaml entry.
+	// GroupsMissing is true when a groups claim is configured but the token had
+	// none (design section 2.2). Neither is part of users.yaml or the JSON.
+	Groups        []string `json:"-" yaml:"-"`
+	GroupsMissing bool     `json:"-" yaml:"-"`
 }
 
 // Users is the user directory parsed from dev/users.yaml.
@@ -218,6 +225,34 @@ func mustUsers(users []User) *Users {
 func (u *Users) Get(id string) (User, bool) {
 	user, ok := u.byID[id]
 	return user, ok
+}
+
+// BySub returns the user whose users.yaml sub: is sub. An empty sub matches
+// nobody.
+func (u *Users) BySub(sub string) (User, bool) {
+	if sub == "" {
+		return User{}, false
+	}
+	for _, user := range u.order {
+		if user.Sub == sub {
+			return user, true
+		}
+	}
+	return User{}, false
+}
+
+// ByEmail returns the user whose users.yaml email: equals email, ignoring case.
+// An empty email matches nobody.
+func (u *Users) ByEmail(email string) (User, bool) {
+	if email == "" {
+		return User{}, false
+	}
+	for _, user := range u.order {
+		if user.Email != "" && strings.EqualFold(user.Email, email) {
+			return user, true
+		}
+	}
+	return User{}, false
 }
 
 // All returns every user in file order.

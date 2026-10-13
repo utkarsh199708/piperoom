@@ -162,9 +162,9 @@ func (s *Service) RequestControl(ctx context.Context, user User, roomID string) 
 // there is no driver or the lease has expired. A non-driver while another
 // user's lease is still live gets 409 lease_held (docs/api.md).
 func (s *Service) GrantControl(ctx context.Context, user User, roomID, toID string) (events.Event, error) {
-	to, ok := s.users.Get(toID)
-	if !ok {
-		return events.Event{}, validation("unknown user to grant control to")
+	to, err := s.LookupPerson(ctx, toID)
+	if err != nil {
+		return events.Event{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

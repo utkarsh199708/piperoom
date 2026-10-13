@@ -80,6 +80,11 @@ type Store interface {
 	// ByID returns the session with this public id, live or not, or
 	// ErrNotFound. The WebSocket presence tick uses it.
 	ByID(ctx context.Context, id string) (Session, error)
+	// LiveByUserID returns the newest session of userID (by created_at) that is
+	// live at now: not revoked, before its absolute expiry and not idle for
+	// idle. ErrNotFound when there is none. Service.LookupPerson uses it to
+	// find a person who is not in users.yaml (design §2.1).
+	LiveByUserID(ctx context.Context, userID string, now time.Time, idle time.Duration) (Session, error)
 	// Touch sets last_seen_at. A missing session is not an error.
 	Touch(ctx context.Context, id string, at time.Time) error
 	// Revoke sets revoked_at if it is not set yet. It is idempotent and a

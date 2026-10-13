@@ -63,6 +63,25 @@ func (m *MemStore) ByID(_ context.Context, id string) (Session, error) {
 	return clone(*s), nil
 }
 
+// LiveByUserID implements Store.
+func (m *MemStore) LiveByUserID(_ context.Context, userID string, now time.Time, idle time.Duration) (Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var best *Session
+	for _, s := range m.byID {
+		if s.UserID != userID || s.Check(now, idle) != nil {
+			continue
+		}
+		if best == nil || s.CreatedAt.After(best.CreatedAt) {
+			best = s
+		}
+	}
+	if best == nil {
+		return Session{}, ErrNotFound
+	}
+	return clone(*best), nil
+}
+
 // Touch implements Store.
 func (m *MemStore) Touch(_ context.Context, id string, at time.Time) error {
 	m.mu.Lock()

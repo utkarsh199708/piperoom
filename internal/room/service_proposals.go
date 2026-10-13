@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/store"
 )
 
@@ -159,6 +160,13 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 // is approved the executor runs the steps in order (asynchronously, on the
 // service lifetime context, not the request context).
 func (s *Service) ApproveProposal(ctx context.Context, user User, proposalID, layer string) (events.Event, error) {
+	return s.ApproveProposalConfirm(ctx, user, proposalID, layer, "")
+}
+
+// ApproveProposalConfirm is ApproveProposal with the solo-mode confirm string
+// (docs/design/auth.md section 5.3): the solo user must send
+// "<pipeline_id>/<layer>". Anyone else's confirm is ignored.
+func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposalID, layer, confirm string) (events.Event, error) {
 	if err := rejectUnstorable(layer); err != nil {
 		return events.Event{}, err
 	}
@@ -184,8 +192,9 @@ func (s *Service) ApproveProposal(ctx context.Context, user User, proposalID, la
 		if !s.roomOpen(st) {
 			return roomClosed("room is closed")
 		}
-		if !user.OwnsLayer(layer) {
-			return notLayerOwner(fmt.Sprintf("user %s does not own layer %q", user.ID, layer))
+		grant, err := s.authorizeLayer(st.snap.PipelineID, user, layer, confirm, true)
+		if err != nil {
+			return err
 		}
 		if !contains(p.RequiredLayers, layer) {
 			return validation(fmt.Sprintf("layer %q is not required for this proposal", layer))
@@ -207,6 +216,14 @@ func (s *Service) ApproveProposal(ctx context.Context, user User, proposalID, la
 				s.log.Warn("room: compensate failed approval", "proposal", proposalID, "layer", layer, "err", delErr)
 			}
 			return err
+		}
+		// The grant string goes into the events in auth PR 4 (identity on
+		// approval.given). Until then it is in the log.
+		s.log.Info("room: approval given", "proposal", proposalID, "layer", layer, "user", user.ID, "grant", grant)
+		if strings.HasPrefix(grant, owners.GrantBackupPrefix) {
+			if _, err := s.emitLocked(ctx, st, p.RoomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: backupNote(user, layer, grant)}); err != nil {
+				s.log.Warn("room: backup approval note failed", "proposal", proposalID, "err", err)
+			}
 		}
 		if allApproved(st.snap, proposalID) {
 			// Approved in full: queue the steps on the room's single executor so
@@ -243,8 +260,9 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
-	if !user.OwnsLayer(layer) {
-		return events.Event{}, notLayerOwner(fmt.Sprintf("user %s does not own layer %q", user.ID, layer))
+	grant, err := s.authorizeLayer(st.snap.PipelineID, user, layer, "", false)
+	if err != nil {
+		return events.Event{}, err
 	}
 	if !contains(p.RequiredLayers, layer) {
 		return events.Event{}, validation(fmt.Sprintf("layer %q is not required for this proposal", layer))
@@ -267,6 +285,7 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 		}
 		return events.Event{}, err
 	}
+	s.log.Info("room: rejection given", "proposal", proposalID, "layer", layer, "user", user.ID, "grant", grant)
 	if err := s.store.SetProposalStatus(ctx, proposalID, "rejected"); err != nil {
 		s.log.Warn("room: set proposal rejected failed", "proposal", proposalID, "err", err)
 	}

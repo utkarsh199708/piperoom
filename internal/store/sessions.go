@@ -59,16 +59,24 @@ func (t *Sessions) ByID(ctx context.Context, id string) (auth.Session, error) {
 	return t.one(ctx, `id = $1`, id)
 }
 
+// LiveByUserID implements auth.Store. idle is added to last_seen_at in SQL with
+// make_interval so the same rule as auth.Session.Check applies.
+func (t *Sessions) LiveByUserID(ctx context.Context, userID string, now time.Time, idle time.Duration) (auth.Session, error) {
+	return t.one(ctx, `user_id = $1 AND revoked_at IS NULL AND expires_at > $2
+ AND ($3::float8 <= 0 OR last_seen_at + make_interval(secs => $3::float8) > $2)
+ ORDER BY created_at DESC LIMIT 1`, userID, now.UTC(), idle.Seconds())
+}
+
 // one reads the single session matching where (a fixed string, never client
-// text) with one bound argument.
-func (t *Sessions) one(ctx context.Context, where string, arg any) (auth.Session, error) {
+// text) with bound arguments.
+func (t *Sessions) one(ctx context.Context, where string, args ...any) (auth.Session, error) {
 	ctx, cancel := context.WithTimeout(ctx, sessionTimeout)
 	defer cancel()
 	var (
 		s                   auth.Session
 		authTime, revokedAt *time.Time
 	)
-	err := t.pool.QueryRow(ctx, `SELECT `+sessionCols+` FROM sessions WHERE `+where, arg).Scan(
+	err := t.pool.QueryRow(ctx, `SELECT `+sessionCols+` FROM sessions WHERE `+where, args...).Scan(
 		&s.ID, &s.TokenHash, &s.UserID, &s.Name, &s.Iss, &s.Sub, &s.Groups, &s.GroupsMissing, &authTime,
 		&s.AMR, &s.ACR, &s.Method, &s.CreatedAt, &s.LastSeenAt, &s.ExpiresAt, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {

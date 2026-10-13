@@ -6,6 +6,7 @@
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
 //	devctl demo [--fix] <scenario>
+//	devctl identities unbind <user>   move a user to a new IdP account
 //
 // Scenarios: schema-change, connector-down, consumer-stuck, long-transaction,
 // slot-inactive, consumer-lag, connector-auth.
@@ -38,6 +39,7 @@ const usage = `devctl — local pipeline control
   devctl lock --owner <tag> take the shared stack lock
   devctl unlock --owner <tag>  release the shared stack lock
   devctl lock status        show who holds the lock
+  devctl identities unbind <user>   delete the user's IdP binding (room database)
   devctl lock --steal       steal a stale (>15m) lock
 
 up/down/reset/load/break/fix mutate the shared stack and require --owner <tag>
@@ -168,6 +170,8 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		return sc.fix(ctx, st)
 	case "demo":
 		return demoCmd(ctx, st, args)
+	case "identities":
+		return identitiesCmd(ctx, st, args, os.Stdout)
 	}
 	return fmt.Errorf("unknown command %q", cmd)
 }

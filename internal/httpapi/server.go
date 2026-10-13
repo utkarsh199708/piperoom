@@ -56,6 +56,12 @@ type Server struct {
 	authSettings auth.Settings
 	sessions     auth.Store
 	now          func() time.Time
+
+	// OIDC login (WithOIDC, WithLoginStates, WithIdentities): auth_oidc.go.
+	oidc        *auth.OIDC
+	loginStates auth.LoginStateStore
+	identities  auth.IdentityStore
+	loginLimit  *rateLimiter
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -86,7 +92,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	if s.webDir != "" {
 		r.Use(s.securityHeaders)
 	}
-	r.Use(requestLog(log))
+	r.Use(requestLog(log, s.clientIP))
 	// Host allow-list first (DNS rebinding, design §1.5), then the cross-origin
 	// check, on every route including probes and signed alerts.
 	r.Use(s.hostGuard)
@@ -117,15 +123,15 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	r.Get(pathHealthz, s.handleHealthz)
 	r.Get(pathReadyz, s.handleReadyz)
 
-	// Login routes (auth.go). Dev login exists only in dev mode; in oidc mode
-	// the two OIDC routes answer 501 until auth PR 3.
+	// Login routes (auth.go, auth_oidc.go). Dev login exists only in dev mode;
+	// the two OIDC routes only in oidc mode.
 	r.Route("/auth", func(a chi.Router) {
 		a.Use(requireJSON)
 		a.Use(middleware.Timeout(requestTimeout))
 		a.Post("/logout", s.handleLogout)
 		if s.authSettings.IsOIDC() {
-			a.Get("/login", s.handleOIDCPending)
-			a.Get("/callback", s.handleOIDCPending)
+			a.Get("/login", s.handleLogin)
+			a.Get("/callback", s.handleCallback)
 		} else {
 			a.Post("/dev-login", s.handleDevLogin)
 		}
@@ -139,6 +145,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 
 		api.Group(func(protected chi.Router) {
 			protected.Use(s.authenticate)
+			protected.Use(viewerGuard)
 			protected.Use(requireJSON)
 
 			// The WebSocket authenticates by the session cookie (or, in dev
@@ -243,7 +250,7 @@ func userFrom(ctx context.Context) room.User {
 	return u
 }
 
-func requestLog(log *slog.Logger) func(http.Handler) http.Handler {
+func requestLog(log *slog.Logger, client func(*http.Request) string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -254,7 +261,7 @@ func requestLog(log *slog.Logger) func(http.Handler) http.Handler {
 			if isProbePath(r.URL.Path) {
 				level = slog.LevelDebug
 			}
-			log.Log(r.Context(), level, "http request", "method", r.Method, "path", r.URL.Path, "status", ww.Status(), "dur", time.Since(start).Round(time.Millisecond).String())
+			log.Log(r.Context(), level, "http request", "method", r.Method, "path", r.URL.Path, "status", ww.Status(), "client", client(r), "dur", time.Since(start).Round(time.Millisecond).String())
 		})
 	}
 }
