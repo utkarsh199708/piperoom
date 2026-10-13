@@ -37,7 +37,7 @@ map) must agree; the server checks this at start-up and refuses to start on a mi
 
 ### Login (auth PRs 2–4, design `docs/design/auth.md`)
 
-PR 2 (dev sessions, Host allow-list, proxy guard) is live; items marked PR 3 or PR 4 are not yet.
+PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, identities, roles, `/api/people`); items marked PR 4 are not yet.
 
 - **Mode.** `PIPEROOM_AUTH_MODE` = `dev` (default) or `oidc`. In `oidc` mode `X-User` is ignored and a request with
   no session answers `401 session_expired`; the unsigned `POST /api/alerts/webhook` is not mounted (`404`), so
