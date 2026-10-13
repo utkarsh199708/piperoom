@@ -16,7 +16,8 @@ import (
 //   - fullwidth ASCII (U+FF01..U+FF5E), Mathematical Alphanumeric letters and
 //     digits (U+1D400..U+1D7FF) and the small-form angle brackets map to
 //     ASCII;
-//   - unusual spaces (no-break, ideographic, en/em spaces) become ' ';
+//   - unusual spaces (no-break, ideographic, en/em spaces) become ' ', and
+//     whitespace runs collapse (keeping at most two newlines);
 //   - common Cyrillic, Greek and Armenian lookalikes and the Latin small
 //     capitals map to Latin letters.
 //
@@ -29,6 +30,7 @@ func normalize(s string, cfAsSpace bool) (out string, origin []int, changed, had
 	var b strings.Builder
 	b.Grow(len(s))
 	origin = make([]int, 0, len(s)+1)
+	inSpace, newlines := false, 0
 	for i, r := range s {
 		m, keep := mapRune(r)
 		if !keep {
@@ -49,6 +51,25 @@ func normalize(s string, cfAsSpace bool) (out string, origin []int, changed, had
 		if n < 0 { // invalid rune: write the replacement character
 			m, n = utf8.RuneError, utf8.RuneLen(utf8.RuneError)
 		}
+		// Whitespace runs collapse to their first character, keeping up to
+		// two newlines (a blank line still separates chat turns), so padding
+		// cannot push the end of a phrase out of a rule's window.
+		if isSpaceRune(m) {
+			if inSpace {
+				if m != '\n' || newlines >= 2 {
+					changed = true
+					continue
+				}
+				newlines++
+			} else {
+				inSpace, newlines = true, 0
+				if m == '\n' {
+					newlines = 1
+				}
+			}
+		} else {
+			inSpace = false
+		}
 		b.WriteRune(m)
 		for range n {
 			origin = append(origin, i)
@@ -56,6 +77,10 @@ func normalize(s string, cfAsSpace bool) (out string, origin []int, changed, had
 	}
 	origin = append(origin, len(s))
 	return b.String(), origin, changed, hadCf
+}
+
+func isSpaceRune(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f'
 }
 
 // mapRune returns the replacement for r, or keep=false to drop it.

@@ -58,6 +58,18 @@ func TestWrapReadToolOutputLeavesCleanDataAlone(t *testing.T) {
 	}
 }
 
+// TestPromptExplainsSuspectedAttr ties the system prompt to the attribute the
+// wrapper writes, so renaming one without the other fails.
+func TestPromptExplainsSuspectedAttr(t *testing.T) {
+	attr := strings.TrimSpace(suspectedAttr)
+	if !strings.Contains(systemPrompt(), "A wrapper with "+attr+" ") {
+		t.Errorf("system prompt does not explain %s", attr)
+	}
+	if !strings.Contains(markSuspected(wrapToolOutput("connect_status", "s_1", "x")), attr+">") {
+		t.Errorf("wrapper does not write %s", attr)
+	}
+}
+
 // TestDataCannotForgeSuspectedAttr: the attribute goes into the opening tag,
 // and a data copy of it stays escaped inside.
 func TestDataCannotForgeSuspectedAttr(t *testing.T) {

@@ -24,11 +24,21 @@ var toolNames = setOf(
 // anyone to run them.
 var roomToolNames = setOf("propose_fix", "update_hypothesis", "post_message")
 
-// addresseeWords name the AI. They make the conditional rules count: "you
+// addresseePattern names the AI. It makes the conditional rules count: "you
 // must restart the connector" is ordinary advice in a Postgres HINT, but not
-// next to "note to the AI agent".
-const addresseeWords = `ai|a\.i\.|assistant|llm|claude|chatbot|chatgpt|gpt|language\s+model|` +
-	`(?:ai|automated|investigating|investigation|incident|autonomous)\s+(?:agent|investigator)`
+// next to "note to the AI agent". Words that are common in ops text on their
+// own ("assistant", "ai") count only in phrases that address someone ("the
+// assistant", "dear assistant", "AI agent", a line starting "assistant:");
+// the rarer names (claude, llm, gpt, chatbot) count bare. Any match that
+// touches - _ . @ / is a hostname, service, topic or e-mail and is dropped
+// (see touchesIdent).
+const addresseePattern = `\b(?:the|an|dear|hey|to|for|attention)\s*:?\s+(?:ai|assistant|chatbot)\b` +
+	`|\b(?:ai|a\.i\.)\s+(?:agent|assistant|model|investigator)s?\b` +
+	`|(?m:^[ \t]*(?:ai|assistant)[ \t]*[:,])` +
+	`|\b(?:claude|llm|chatgpt|gpt|chatbot)\b` +
+	`|\b(?:automated|investigating|investigation|incident|autonomous)\s+(?:agent|investigator)\b` +
+	`|\b(?:as|you\s+are)\s+(?:the|an?)\s+(?:ai|assistant|llm|language\s+model|claude|chatbot)\b` +
+	`|\byou\s+are\s+now\b`
 
 // determiner before a verb makes it a noun ("the same call x makes").
 const determiner = `(\b(?:the|same|a|an|this|that|each|every|one|which|its|first|last)\s+)?`
@@ -59,6 +69,9 @@ type rule struct {
 	// whole runs the rule on the whole text: its pattern is anchored to the
 	// start of the text or of a line, which a window start would fake.
 	whole bool
+	// identGuard drops a match that touches - _ . @ / at either end: part of
+	// an identifier, not words addressed to someone.
+	identGuard bool
 	// distinctRoles keeps the matches only when at least two different role
 	// labels (capture group 1) match: a dialogue, not one "system: ..." log
 	// line.
@@ -84,7 +97,7 @@ var rules = []rule{
 	// ---- addressed ----
 	{kind: KindAddressed, keys: addresseeKeys,
 		re: regexp.MustCompile(`\b(?:as|you\s+are)\s+(?:the|an?)\s+(?:ai|assistant|llm|language\s+model|claude|chatbot)\b` +
-			`|\b(?:to|for|attention|dear|hey)\s*:?\s+(?:the\s+)?(?:` + addresseeWords + `|ai(?:\s+(?:agent|assistant|model))?)\b`)},
+			`|\b(?:to|for|attention|dear|hey)\s*:?\s+(?:the\s+)?(?:ai(?:\s+(?:agent|assistant|model|investigator))?|assistant|llm|claude|chatbot|chatgpt|gpt|(?:automated|investigating|investigation|incident|autonomous)\s+(?:agent|investigator))\b`), identGuard: true},
 
 	// ---- tool requests ----
 	{kind: KindToolRequest, nounGuard: true, names: roomToolNames, keys: []string{"propose_fix", "update_hypothesis", "post_message"},
@@ -111,7 +124,7 @@ var rules = []rule{
 }
 
 // addressee marks where the text names the AI (context for conditional rules).
-var addressee = regexp.MustCompile(`\b(?:` + addresseeWords + `)\b|\byou\s+are\s+now\b`)
+var addressee = regexp.MustCompile(addresseePattern)
 
 // addresseeKeys prefilter the addressee search.
 var addresseeKeys = []string{"ai", "a.i.", "assistant", "llm", "claude", "chatbot", "gpt", "language", "investigat", "you are now"}
@@ -187,9 +200,13 @@ func scanText(text string, origin []int) []Finding {
 	lower := lowerASCII(text)
 	var out []Finding
 	var anchors []int
-	for _, sp := range windows(lower, keyOffsets(lower, addresseeKeys), keyBefore, keyAfter) {
-		for _, loc := range addressee.FindAllStringIndex(lower[sp[0]:sp[1]], MaxFindings) {
-			anchors = append(anchors, sp[0]+loc[0])
+	if hasAny(lower, addresseeKeys) {
+		// Whole text: the pattern has a line-start branch that a window
+		// start would fake.
+		for _, loc := range addressee.FindAllStringIndex(lower, MaxFindings) {
+			if !touchesIdent(lower, loc[0], loc[1]) {
+				anchors = append(anchors, loc[0])
+			}
 		}
 	}
 	for _, r := range rules {
@@ -260,6 +277,9 @@ func runRule(r rule, subject, text string, spans [][2]int) []Finding {
 		if r.nounGuard && len(loc) >= 4 && loc[2] >= 0 {
 			continue
 		}
+		if r.identGuard && touchesIdent(subject, loc[0], loc[1]) {
+			continue
+		}
 		if r.names != nil && (len(loc) < 6 || loc[4] < 0 || !r.names[subject[loc[4]:loc[5]]]) {
 			continue
 		}
@@ -321,20 +341,25 @@ func isWordByte(c byte) bool {
 	return c == '_' || c >= 0x80 || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || ('0' <= c && c <= '9')
 }
 
+// distinctRoleLabels reports a dialogue: at least two different role labels,
+// one of them human or assistant ("user: alice\nsystem: linux" is a config
+// listing, not a chat transcript).
 func distinctRoleLabels(s string, locs [][]int) bool {
-	var first string
+	roles := map[string]bool{}
 	for _, loc := range locs {
-		if len(loc) < 4 || loc[2] < 0 {
-			continue
-		}
-		role := s[loc[2]:loc[3]]
-		if first == "" {
-			first = role
-		} else if role != first {
-			return true
+		if len(loc) >= 4 && loc[2] >= 0 {
+			roles[s[loc[2]:loc[3]]] = true
 		}
 	}
-	return false
+	return len(roles) >= 2 && (roles["human"] || roles["assistant"])
+}
+
+// touchesIdent reports whether s[start:end] has - _ . @ or / right before or
+// after it, which makes it part of a hostname, service, topic or e-mail.
+func touchesIdent(s string, start, end int) bool {
+	const ident = "-_.@/"
+	return (start > 0 && strings.IndexByte(ident, s[start-1]) >= 0) ||
+		(end < len(s) && strings.IndexByte(ident, s[end]) >= 0)
 }
 
 // near reports whether a sorted anchor lies within contextBytes of off.
@@ -359,7 +384,7 @@ func hiddenComments(lower, text string) []Finding {
 		if j := strings.Index(lower[start+4:end], "-->"); j >= 0 {
 			end = start + 4 + j
 		}
-		if addressee.MatchString(lower[start:end]) {
+		if addressee.MatchString(lower[start+4 : max(start+4, end)]) {
 			out = append(out, Finding{Kind: KindHiddenComment, Offset: start, Excerpt: excerpt(text[start:end])})
 		}
 		from = start + 4
