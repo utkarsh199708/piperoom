@@ -177,6 +177,13 @@ func (t *connectConfig) Run(ctx context.Context, input json.RawMessage) (tools.R
 		"key.converter": true, "value.converter": true, "decimal.handling.mode": true,
 		"database.hostname": true, "database.port": true, "database.dbname": true,
 		"database.user": true, "database.server.name": true,
+		// Error handling: switches and a topic name, never credentials. Without
+		// them the agent can see a DLQ but not why it exists (dlq_peek).
+		"errors.tolerance": true, "errors.deadletterqueue.topic.name": true,
+		"errors.log.enable": true, "errors.log.include.messages": true,
+		"errors.deadletterqueue.context.headers.enable": true,
+		"errors.retry.timeout":                          true,
+		"event.processing.failure.handling.mode":        true,
 	}
 	shown := map[string]string{}
 	for k, v := range cfg {

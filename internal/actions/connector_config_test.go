@@ -238,6 +238,13 @@ func TestUpdateConnectorConfigValidate(t *testing.T) {
 		{"ok precise", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"precise"}`, ""},
 		{"ok time precision", `{"connector":"pg-orders-connector","key":"time.precision.mode","value":"connect"}`, ""},
 		{"ok tombstones", `{"connector":"pg-orders-connector","key":"tombstones.on.delete","value":"false"}`, ""},
+		{"ok errors.log.enable", `{"connector":"pg-orders-connector","key":"errors.log.enable","value":"true"}`, ""},
+		{"ok dlq context headers", `{"connector":"pg-orders-connector","key":"errors.deadletterqueue.context.headers.enable","value":"true"}`, ""},
+		{"errors.log.enable false refused", `{"connector":"pg-orders-connector","key":"errors.log.enable","value":"false"}`, "not allowed for"},
+		{"dlq context headers false refused", `{"connector":"pg-orders-connector","key":"errors.deadletterqueue.context.headers.enable","value":"false"}`, "not allowed for"},
+		{"errors.log.enable case variant", `{"connector":"pg-orders-connector","key":"errors.log.enable","value":"True"}`, "not allowed for"},
+		{"errors.log.include.messages refused", `{"connector":"pg-orders-connector","key":"errors.log.include.messages","value":"true"}`, "not allowed"},
+		{"dlq topic name refused", `{"connector":"pg-orders-connector","key":"errors.deadletterqueue.topic.name","value":"x"}`, "not allowed"},
 		{"errors.tolerance removed", `{"connector":"pg-orders-connector","key":"errors.tolerance","value":"none"}`, "not allowed"},
 		{"errors.tolerance all removed", `{"connector":"pg-orders-connector","key":"errors.tolerance","value":"all"}`, "not allowed"},
 		{"key not allowed", `{"connector":"pg-orders-connector","key":"tasks.max","value":"4"}`, "not allowed"},
@@ -334,11 +341,18 @@ func TestDefaultAllowListIsFreshEachCall(t *testing.T) {
 	if _, bad := second["tasks.max"]; bad {
 		t.Fatal("allow-list is shared state")
 	}
-	if len(second) != 3 {
-		t.Fatalf("allow-list %v, want the 3 default keys", sortedKeys(second))
+	if len(second) != 5 {
+		t.Fatalf("allow-list %v, want the 5 default keys", sortedKeys(second))
 	}
-	if _, ok := second["errors.tolerance"]; ok {
-		t.Fatal("errors.tolerance must not be allow-listed")
+	for _, k := range []string{"errors.tolerance", "errors.log.include.messages"} {
+		if _, ok := second[k]; ok {
+			t.Fatalf("%s must not be allow-listed", k)
+		}
+	}
+	for _, k := range []string{"errors.log.enable", "errors.deadletterqueue.context.headers.enable"} {
+		if len(second[k]) != 1 || !second[k]["true"] {
+			t.Fatalf("%s must allow exactly \"true\", got %v", k, second[k])
+		}
 	}
 }
 

@@ -14,9 +14,13 @@ import (
 // action may change, with the exact values each accepts. Each one changes how a
 // connector encodes its output (schema or precision) for NEW events; events
 // already emitted keep their old form, so "reversible" applies to the setting,
-// not to past events. errors.tolerance is deliberately absent: on a source
+// not to past events. Two errors.* switches are listed with the single value
+// "true": they only add visibility (worker log lines, Connect error headers on
+// DLQ records) and change nothing about which records are kept. Turning them
+// off is not offered. errors.tolerance is deliberately absent: on a source
 // connector "all" drops CDC events for good and setting it back does not
-// restore them. Anything not listed is refused: the action must never become a
+// restore them. errors.log.include.messages is absent too: it writes record
+// values into the worker log. Anything not listed is refused: the action must never become a
 // general "edit any connector config" tool. A function, not a package variable,
 // so nothing can mutate the list at run time.
 func defaultConnectorConfigAllowList() map[string]map[string]bool {
@@ -24,6 +28,9 @@ func defaultConnectorConfigAllowList() map[string]map[string]bool {
 		"decimal.handling.mode": {"precise": true, "double": true, "string": true},
 		"time.precision.mode":   {"adaptive": true, "adaptive_time_microseconds": true, "connect": true},
 		"tombstones.on.delete":  {"true": true, "false": true},
+		// Visibility only; "true" is the only value offered (see above).
+		"errors.log.enable":                             {"true": true},
+		"errors.deadletterqueue.context.headers.enable": {"true": true},
 	}
 }
 
@@ -90,7 +97,7 @@ func (a *updateConnectorConfig) allowList() map[string]map[string]bool {
 func (a *updateConnectorConfig) Name() string  { return "connect_update_connector_config" }
 func (a *updateConnectorConfig) Layer() string { return "kafka-connect" }
 func (a *updateConnectorConfig) Describe() string {
-	return "Changes one setting that sets the connector's output schema or precision: decimal.handling.mode precise|double|string; time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false. Takes effect for new events only; events already emitted keep the old form. Connect restarts the tasks. To undo the setting, set the old value."
+	return "Changes one setting that sets the connector's output schema or precision: decimal.handling.mode precise|double|string; time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, on a sink connector, errors.log.enable true and errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks. To undo an output setting, set the old value."
 }
 func (a *updateConnectorConfig) ParamsSchema() map[string]any {
 	// propose_fix no longer inlines this schema into the strict request (the
