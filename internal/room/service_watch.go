@@ -110,6 +110,13 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 	// the snapshot wins.
 	s.mu.Lock()
 	if st, cached := s.rooms[row.ID]; cached {
+		// Shared store: fold a close another replica wrote first. A room
+		// deleted meanwhile is not found and simply loses the snapshot vote.
+		_ = s.syncLocked(ctx, row.ID, st)
+		if s.rooms[row.ID] != st {
+			s.mu.Unlock()
+			return row.ID, closedAt, true
+		}
 		if s.roomOpen(st) {
 			closedAt = nil
 		} else if st.snap.ClosedAt != nil {
