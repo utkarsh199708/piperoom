@@ -147,19 +147,35 @@ func New(ctx context.Context, connString string, log *slog.Logger) (*PG, error) 
 		pool.Close()
 		return nil, fmt.Errorf("store: ping: %w", err)
 	}
-	return newPG(pool, connString, log), nil
+	return newPG(pool, connString, log, Options{}), nil
 }
 
 // NewPool wraps an existing pool. Tests use it to pin search_path to a fresh
 // schema; the returned Store must be closed with Close.
 func NewPool(pool *pgxpool.Pool, connString string, log *slog.Logger) *PG {
+	return NewPoolOptions(pool, connString, log, Options{})
+}
+
+// Options tune a PG store. The zero value is what the server uses.
+type Options struct {
+	// NoListen keeps the hub from opening its LISTEN connection, so every
+	// room feed and append watcher runs on the poll fallback alone. Tests of
+	// that fallback use it; the server never sets it.
+	NoListen bool
+	// PollInterval is the fallback poll period while LISTEN is down; zero
+	// means DefaultPollInterval.
+	PollInterval time.Duration
+}
+
+// NewPoolOptions is NewPool with Options.
+func NewPoolOptions(pool *pgxpool.Pool, connString string, log *slog.Logger, opts Options) *PG {
 	if log == nil {
 		log = slog.Default()
 	}
-	return newPG(pool, connString, log)
+	return newPG(pool, connString, log, opts)
 }
 
-func newPG(pool *pgxpool.Pool, connString string, log *slog.Logger) *PG {
+func newPG(pool *pgxpool.Pool, connString string, log *slog.Logger, opts Options) *PG {
 	hubCtx, cancel := context.WithCancel(context.Background())
 	s := &PG{
 		pool:       pool,
@@ -168,11 +184,11 @@ func newPG(pool *pgxpool.Pool, connString string, log *slog.Logger) *PG {
 		now:        time.Now,
 		cancel:     cancel,
 	}
-	s.hub = newHub(s, connString, listenAppName(), log)
+	s.hub = newHub(hubCtx, s, connString, listenAppName(), log, !opts.NoListen, opts.PollInterval)
 	s.hubWg.Add(1)
 	go func() {
 		defer s.hubWg.Done()
-		s.hub.run(hubCtx)
+		s.hub.run()
 	}()
 	return s
 }
@@ -506,7 +522,7 @@ func scanEvent(roomID string, row scanner) (events.Event, error) {
 const SubscribeBuffer = 16
 
 // Subscribe replays events after afterSeq then streams new ones live from the
-// shared LISTEN hub. The channel closes when ctx ends.
+// room's shared feed (hub.go). The channel closes when ctx ends.
 func (s *PG) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-chan events.Event, error) {
 	if _, err := s.GetRoom(ctx, roomID); err != nil {
 		return nil, err
@@ -517,7 +533,9 @@ func (s *PG) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-ch
 		ch:      make(chan events.Event, SubscribeBuffer),
 		wake:    make(chan struct{}, 1),
 	}
-	s.hub.register(sub)
+	if !s.hub.register(sub) {
+		return nil, fmt.Errorf("store: subscribe %s: store is closed", roomID)
+	}
 	go s.runSub(ctx, sub)
 	return sub.ch, nil
 }
