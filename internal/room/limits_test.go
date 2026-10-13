@@ -136,7 +136,7 @@ func typedEvents(t *testing.T, st *memstore.Store, roomID string, typ events.Typ
 			t.Fatalf("events: %v", err)
 		}
 		for _, e := range evs {
-			if e.Type == typ {
+			if typ == "" || e.Type == typ { // "" = every event
 				out = append(out, e)
 			}
 			after = e.Seq
@@ -323,30 +323,30 @@ func TestOpenLimitOff(t *testing.T) {
 // are refused, a steer does not start the agent again (not even after a
 // restart), people keep the 2% reserve, and the room can still be closed.
 func TestLogCapWarningAndFull(t *testing.T) {
-	l := config.Limits{RoomMaxEvents: 100, RoomMaxBytes: 1 << 30}
+	l := config.Limits{RoomMaxEvents: 1000, RoomMaxBytes: 1 << 30}
 	e := newLimitsEnv(t, l)
 	ctx := context.Background()
 	snap := createRoom(t, e.svc, "arjun") // room.created + control.granted
 	sink := e.runs.sink(t)
 
 	var refused error
-	for i := 0; i < 200 && refused == nil; i++ {
+	for i := 0; i < 2000 && refused == nil; i++ {
 		refused = sink.Emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: "step"})
 	}
 	if !errors.Is(refused, store.ErrLogFull) {
 		t.Fatalf("agent emit at the cap: %v, want ErrLogFull", refused)
 	}
 	warns := typedEvents(t, e.st, snap.ID, events.RoomLogCapWarning)
-	if len(warns) != 1 || warns[0].Seq != 91 || warns[0].Actor.Kind != events.ActorSystem {
-		t.Fatalf("cap warnings = %+v, want one at seq 91 (after the 90th event)", warns)
+	if len(warns) != 1 || warns[0].Seq != 901 || warns[0].Actor.Kind != events.ActorSystem {
+		t.Fatalf("cap warnings = %+v, want one at seq 901 (after the 900th event)", warns)
 	}
 	wp, _ := events.Decode[events.RoomLogCapWarningPayload](warns[0])
-	if wp.Events != 90 || wp.MaxEvents != 100 {
+	if wp.Events != 900 || wp.MaxEvents != 1000 {
 		t.Fatalf("warning payload = %+v", wp)
 	}
 	var full []events.Event
 	agentEvents := 0
-	for _, ev := range allEvents(t, e.st, snap.ID) {
+	for _, ev := range typedEvents(t, e.st, snap.ID, "") {
 		if ev.Actor.Kind == events.ActorAgent {
 			agentEvents++
 		}
@@ -359,7 +359,7 @@ func TestLogCapWarningAndFull(t *testing.T) {
 	if len(full) != 1 || full[0].Actor.Kind != events.ActorSystem {
 		t.Fatalf("log_full statuses = %+v, want one by the system", full)
 	}
-	if agentEvents > 100 {
+	if agentEvents > 1000 {
 		t.Fatalf("agent events = %d, over the cap", agentEvents)
 	}
 	waitFor(t, 5*time.Second, func() bool { _, stops := e.runs.counts(); return stops == 1 })
@@ -388,7 +388,7 @@ func TestLogCapWarningAndFull(t *testing.T) {
 	if g, _ := svc2.GetRoom(ctx, snap.ID); g.LogCap != room.LogCapFull {
 		t.Fatalf("after restart log_cap = %q", g.LogCap)
 	}
-	if _, err := svc2.AddComment(ctx, mustUser(t, svc2, "priya"), snap.ID, "", "@agent are you there"); err != nil && !errors.Is(err, store.ErrLogFull) {
+	if _, err := svc2.AddComment(ctx, mustUser(t, svc2, "priya"), snap.ID, "", "@agent are you there"); err != nil { // inside the reserve, so it is stored and would wake an agent
 		t.Fatalf("comment: %v", err)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -398,14 +398,14 @@ func TestLogCapWarningAndFull(t *testing.T) {
 
 	// People use up the reserve, then are refused with ErrLogFull.
 	var err error
-	for i := 0; i < 20 && err == nil; i++ {
+	for i := 0; i < 40 && err == nil; i++ {
 		_, err = svc2.AddComment(ctx, mustUser(t, svc2, "priya"), snap.ID, "", "comment")
 	}
 	if !errors.Is(err, store.ErrLogFull) {
 		t.Fatalf("comment past the reserve: %v, want ErrLogFull", err)
 	}
-	if n := len(allEvents(t, e.st, snap.ID)); n != 102 {
-		t.Fatalf("events = %d, want cap + reserve = 102", n)
+	if n := len(typedEvents(t, e.st, snap.ID, "")); n != 1020 {
+		t.Fatalf("events = %d, want cap + reserve = 1020", n)
 	}
 	// Close always works.
 	if _, err := svc2.CloseRoom(ctx, mustUser(t, svc2, "arjun"), snap.ID, "done"); err != nil {
