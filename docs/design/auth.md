@@ -239,19 +239,32 @@ member who got in through a group could call themself "Priya". Three rules keep 
 
 - **`verified`.** Every person in events and API responses carries `verified` (`events.Actor.Verified`,
   `docs/api.md`): `true` for a `users.yaml` person, whose name is the `users.yaml` name; `false` for a derived `u_`
-  id. The agent and system actors are `true`. It is decided when the event is written. The UI marks `false` with a
-  badge and shows the id or email next to the name.
-- **Look-alike names.** The name of a person who is not in `users.yaml` is compared with every `users.yaml` id, name
-  and email, at login and again on every request (so a `users.yaml` entry added later, or a session made before this
-  rule, is caught too). The comparison form is a skeleton in the spirit of Unicode TR39: drop format characters,
-  NFKD (fullwidth and other compatibility forms), drop combining marks, map Greek and Cyrillic capitals that look
-  Latin, Unicode case folding, map the lower-case Latin, Greek and Cyrillic look-alikes to Latin (a small built-in
-  table), fold `i`/`l`/`1`/`|` and `0`/`o`, `rn`→`m`, `vv`→`w`, and ignore spaces, punctuation and symbols. On a
-  match the name becomes `"<name> (<email>)"` with the verified email, or `"<name> (<u_ id>)"` without one, and the
-  login is logged at Warn with both ids. It is **not refused**: the person may really be called Priya, and the suffix
-  plus the badge tell the two apart. A false match costs only a suffix, so the mapping errs wide.
-- **Decisions carry a mailbox.** `approval.given` / `approval.rejected` `identity.email` is the session's verified
-  IdP email, else the `users.yaml` `email:` of the user, beside the actor id; an audit never rests on the name.
+  id. The agent and system actors are `true`. It is decided when the event is written. In events the key is omitted
+  when false, so old events and exports of old rooms keep their bytes and hash; missing means false. The UI marks
+  `false` with a badge and shows the id or email next to the name. **The web badge is an A6 follow-up; until it ships,
+  A-ID-2 stays open in the audit.** In a group-only OIDC setup most people are `u_` ids, and the suffix below protects
+  only `users.yaml` names, so there the badge plus id or email is the real control.
+- **Look-alike names.** The IdP name is stored as sent (format and other default-ignorable code points stripped,
+  A-ID-4). For a person who is not in `users.yaml`, the shown name is computed at login (which logs a match) and again
+  on every request, in `/api/people` and in `LookupPerson`, so a `users.yaml` entry added later, or a session made
+  before this rule, is covered too. The name gets a suffix when:
+  - the **whole name**, or the name with its bracketed parts removed, has the same skeleton as a `users.yaml` id, name
+    or email, or as the agent and system actor names. The skeleton is in the spirit of Unicode TR39: NFKD (fullwidth
+    and other compatibility forms; accents split off), drop default-ignorable code points (format characters, Hangul
+    fillers and the rest of `Other_Default_Ignorable_Code_Point`), map Greek and Cyrillic capitals that look Latin,
+    Unicode case folding, map the lower-case Latin, Greek, Cyrillic, Armenian, Cherokee and Lisu look-alikes to Latin
+    (a small built-in table), fold `i`/`l`/`1`/`|` and `0`/`o`, ignore everything that is not a letter or digit
+    (spaces, punctuation, symbols, accents), `rn`→`m`, `vv`→`w`;
+  - the name **mixes Latin with any other script** (`unicode.In` per rune; Common and Inherited do not count);
+  - the name **ends in the server's own suffix shape**, a bracketed `…@…` or `u_…`, so it cannot forge one.
+  The match is on the whole name: added words (`Priya S.`) are not suffixed and rely on the badge. On a match the name
+  is shown as `"<name> (<email>)"` with the verified email, or `"<name> (<u_ id>)"` without one, and the login is
+  logged at Warn with both ids. It is **not refused**: the person may really be called Priya, and the suffix plus the
+  badge tell the two apart. A false match costs only a suffix, so the mapping errs wide.
+- **Decisions carry a mailbox.** `approval.given`, `approval.rejected`, `shadow.labelled` and `shadow.graded`
+  `identity.email` is the session's verified IdP email, else the `users.yaml` `email:` of the user, beside the actor
+  id; an audit never rests on the name.
+- **Rooms open across the upgrade** show earlier actors as unverified (no key) until those people act again.
 
 **Roles**, computed per request from the session's user and groups:
 
