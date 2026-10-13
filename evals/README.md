@@ -157,6 +157,70 @@ expect:
 
 The full seed is [`scenarios/schema-change.yaml`](scenarios/schema-change.yaml).
 
+## Scenarios from shadow runs
+
+A graded shadow room (`docs/design/shadow.md`) is a real incident with a human label. Turn it into a
+scenario:
+
+```sh
+# save the run as the labeller sees it (after the blind label), data included
+curl -s -H "X-User: you" "$SERVER/api/rooms/$ROOM/shadow?include=data,room" > run.json
+go run ./evals/cmd/evalrun -from-shadow run.json -o evals/scenarios/my-incident.yaml   # or stdout
+go run ./evals/cmd/evalrun -check
+```
+
+`-from-shadow` reads one `GET /api/rooms/{id}/shadow?include=data,room` response and writes a scenario
+YAML to `-o`/`-out` (stdout when neither is given, so it pipes; warnings go to stderr). It runs the same
+validation as `-check` before it writes anything, so a file it writes loads. `-owners` picks the
+`owners.yaml` the room's `pipeline_id` is looked up in (default `OWNERS_FILE`, else `dev/owners.yaml`);
+`-name` overrides the scenario name (default `shadow-<room id>`). It never calls a model.
+
+| scenario field | from |
+|---|---|
+| `pipeline`, `resources.connectors` | the room's pipeline in `owners.yaml` (plain fields only) |
+| `resources.subjects` | derived: `<topic_prefix>.<table>-key` and `-value` for each source table |
+| `alert.title` | `room.created.title` |
+| `alert.pipeline_map` | `run.pipeline_map` (capped at 16 KiB) |
+| `recordings[]` | each `agent.tool_call` paired with its `agent.tool_result` by `tool_use_id`: `input` without the model's `why`, `summary` (cut to the tool limit), `data`, `truncated`; a failed call (`is_error`) becomes `error` |
+| `expect.first_failing_layer` | the human label's `actual_layer` (must be one of the six layers) |
+| `expect.root_cause` | the label's `root_cause_terms`, as **one OR group** (any term matches) |
+| `expect.max_tool_calls` | calls the run made + 5 |
+| `description` | run id, status, label layer and the grade (`layer_correct`, `root_cause`). The schema has no grade field, so the grade lives only here; the grader's notes and the agent's own text are left out |
+| `inputs`, `evidence_tools`, `fix`, `forbidden_actions` | not set: the shadow run had no human input and proposed nothing |
+
+Ground truth is the **human** label, never the agent's hypothesis. A run nobody labelled is refused.
+
+Things to know before you commit the file:
+
+- **Recordings cover only the path this run took.** A different investigation will call tools the run
+  never called; those calls miss (`no data available for this request`) and show in the report's
+  misses. Add recordings by hand for the other branches you want to test. Calls repeated with identical
+  input are folded into the first result; `runbook_lookup` is not recorded (it runs for real in an eval).
+- **`data` must be in the response.** Without `include=data` the file is refused, because replayed
+  `data` is what `connect_resume_connector` validates against. `include=room` is required too: it carries
+  the alert and the label.
+- **Everything in the response is untrusted** (agent and tool output). It is only written as YAML string
+  and number values, never executed, never turned into structure; sizes are capped (summary 8000 bytes,
+  data 64 KiB per recording, 200 recordings, 16 MiB input), and data over the cap is dropped with a warning.
+- A tool or input field that no longer exists in this build fails validation, and nothing is written.
+- Read the file once: the root-cause terms were written for a human reading a resolution, so check that
+  they are specific enough to fail a wrong hypothesis.
+
+### Partial runs
+
+A run that did not end with a hypothesis has `status` `interrupted` (cut off at room close, or the
+process restarted), `budget` (token budget spent), `error`, or `no_hypothesis`. The label still says what
+was wrong, so these are written too, with a warning and `PARTIAL RUN` at the start of the description:
+
+- recordings are the calls that **finished**; a call with no result (cut off mid-flight) is skipped and
+  warned about, but still counts toward `max_tool_calls`.
+- the scenario holds only the evidence the agent had when it stopped. It may be unsolvable from those
+  recordings alone. Treat it as a hard case, not a regression baseline: do not use it with
+  `-fail-on-regression` until you have added the recordings a full investigation needs, or a run that
+  fails it tells you about the recordings, not the agent.
+- `max_tool_calls` is a lower bound; raise it when you complete the scenario.
+- `queued` and `running` runs are refused (nothing is final), and so is a run with no finished tool call.
+
 ## Scoring (per run, 0–100)
 
 | part | points | rule |

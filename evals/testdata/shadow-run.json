@@ -1,0 +1,313 @@
+{
+  "run": {
+    "room_id": "room_8f3a1c7e",
+    "status": "hypothesised",
+    "model": "claude-opus-5-5",
+    "pipeline_map": "pipeline orders\n1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=213.0 KiB\n2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1\n3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=14m ago\n4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable\n5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=14m ts_column=updated_at\n",
+    "started_at": "2026-10-11T09:54:58Z",
+    "first_hypothesis_at": "2026-10-11T09:55:30Z",
+    "final_hypothesis_at": "2026-10-11T09:55:30Z",
+    "finished_at": "2026-10-11T09:55:31Z",
+    "finished_after_close": false,
+    "final_hypothesis": "Connector pg-orders-connector task 0 is FAILED: the Avro value schema for pg.public.orders changed amount from int to bytes(decimal 12,2), and Schema Registry rejected it as incompatible (409, BACKWARD). The consumer is healthy; the warehouse is stale because nothing new reaches the topic. Evidence: s1, s2.",
+    "tool_calls": 4,
+    "tokens": 18420,
+    "revealed_at": "2026-10-11T10:20:02Z"
+  },
+  "events": [
+    {
+      "room_id": "room_8f3a1c7e",
+      "seq": 1,
+      "type": "agent.step.started",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "step_id": "s1",
+        "title": "Check the connector"
+      },
+      "at": "2026-10-11T09:54:05Z",
+      "shadow": true
+    },
+    {
+      "room_id": "room_8f3a1c7e",
+      "seq": 2,
+      "type": "agent.tool_call",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "step_id": "s1",
+        "tool_use_id": "toolu_01",
+        "tool": "connect_status",
+        "input": {
+          "connector": "pg-orders-connector",
+          "why": "The alert says the warehouse is stale; the connector is the first hop."
+        }
+      },
+      "at": "2026-10-11T09:54:05Z",
+      "shadow": true
+    },
+    {
+      "room_id": "room_8f3a1c7e",
+      "seq": 3,
+      "type": "agent.tool_result",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "step_id": "s1",
+        "tool_use_id": "toolu_01",
+        "tool": "connect_status",
+        "summary": "pg-orders-connector (source): RUNNING on 172.18.0.6:8083.\nTask 0: FAILED:\norg.apache.kafka.connect.errors.ConnectException: Tolerance exceeded in error handler\nCaused by: org.apache.kafka.connect.errors.DataException: Failed to serialize Avro data from topic pg.public.orders :\nCaused by: org.apache.kafka.common.errors.SerializationException: Error registering Avro schema<schema>\nCaused by: io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException: Schema being registered is incompatible with an earlier schema for subject \"pg.public.orders-value\", details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path '/fields/0/type/1' in the old schema', additionalInfo:'reader union lacking writer type: RECORD'}, {errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type inside a union field at path '/fields/1/type/1' in the old schema', additionalInfo:'reader union lacking writer type: RECORD'}, {oldSchemaVersion: 1}, {oldSchema: <schema>}, {validateFields: 'false', compatibility: 'BACKWARD'}]; error code: 409\nRejected schema vs pg.public.orders-value v1:\nValue.amount: int → bytes(decimal 12,2)",
+        "is_error": false,
+        "took_ms": 120,
+        "data": {
+          "name": "pg-orders-connector",
+          "state": "RUNNING",
+          "worker": "172.18.0.6:8083",
+          "tasks": [
+            {
+              "id": 0,
+              "state": "FAILED"
+            }
+          ]
+        }
+      },
+      "at": "2026-10-11T09:54:07Z",
+      "shadow": true
+    },
+    {
+      "room_id": "room_8f3a1c7e",
+      "seq": 4,
+      "type": "agent.step.started",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "step_id": "s2",
+        "title": "Compare the schema versions"
+      },
+      "at": "2026-10-11T09:54:10Z",
+      "shadow": true
+    },
+    {
+      "room_id": "room_8f3a1c7e",
+      "seq": 5,
+      "type": "agent.tool_call",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "step_id": "s2",
+        "tool_use_id": "toolu_02",
+        "tool": "schema_registry_versions",
+        "input": {
+          "subject": "pg.public.orders-value",
+          "why": "Task 0 failed registering a schema; see what the registry holds."
+        }
+      },
+      "at": "2026-10-11T09:54:10Z",
+      "shadow": true
+    },
+    {
+      "room_id": "room_8f3a1c7e",
+      "seq": 6,
+      "type": "agent.tool_result",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "step_id": "s2",
+        "tool_use_id": "toolu_02",
+        "tool": "schema_registry_versions",
+        "summary": "pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)",
+        "is_error": false,
+        "took_ms": 120,
+        "data": {
+          "subject": "pg.public.orders-value",
+          "versions": [
+            1
+          ]
+        }
+      },
+      "at": "2026-10-11T09:54:12Z",
+      "shadow": true
+    },
+    {
+      "room_id": "room_8f3a1c7e",
+      "seq": 7,
+      "type": "agent.tool_call",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "step_id": "s2",
+        "tool_use_id": "toolu_03",
+        "tool": "pg_replication_slots",
+        "input": {
+          "why": "Check whether the slot is retaining WAL."
+        }
+      },
+      "at": "2026-10-11T09:54:15Z",
+      "shadow": true
+    },
+    {
+      "room_id": "room_8f3a1c7e",
+      "seq": 8,
+      "type": "agent.tool_result",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "step_id": "s2",
+        "tool_use_id": "toolu_03",
+        "tool": "pg_replication_slots",
+        "summary": "slot debezium_orders: active=false retained=213.0 KiB wal_status=reserved\n",
+        "is_error": false,
+        "took_ms": 120,
+        "data": {
+          "slots": [
+            {
+              "name": "debezium_orders",
+              "active": false,
+              "wal_status": "reserved"
+            }
+          ]
+        }
+      },
+      "at": "2026-10-11T09:54:17Z",
+      "shadow": true
+    },
+    {
+      "room_id": "room_8f3a1c7e",
+      "seq": 9,
+      "type": "agent.tool_call",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "step_id": "s2",
+        "tool_use_id": "toolu_04",
+        "tool": "schema_registry_diff",
+        "input": {
+          "subject": "pg.public.orders-value",
+          "to_version": 2,
+          "why": "Diff the rejected schema against v1."
+        }
+      },
+      "at": "2026-10-11T09:54:20Z",
+      "shadow": true
+    },
+    {
+      "room_id": "room_8f3a1c7e",
+      "seq": 10,
+      "type": "agent.tool_result",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "step_id": "s2",
+        "tool_use_id": "toolu_04",
+        "tool": "schema_registry_diff",
+        "summary": "schemareg: GET /subjects/pg.public.orders-value/versions/2: not found: schema registry error 40402: Version 2 not found.",
+        "is_error": true,
+        "took_ms": 120
+      },
+      "at": "2026-10-11T09:54:22Z",
+      "shadow": true
+    },
+    {
+      "room_id": "room_8f3a1c7e",
+      "seq": 11,
+      "type": "agent.hypothesis",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "text": "Connector pg-orders-connector task 0 is FAILED: the Avro value schema for pg.public.orders changed amount from int to bytes(decimal 12,2), and Schema Registry rejected it as incompatible (409, BACKWARD). The consumer is healthy; the warehouse is stale because nothing new reaches the topic. Evidence: s1, s2.",
+        "based_on_steps": [
+          "s1",
+          "s2"
+        ],
+        "confidence": "high",
+        "confirmed": false
+      },
+      "at": "2026-10-11T09:54:25Z",
+      "shadow": true
+    },
+    {
+      "room_id": "room_8f3a1c7e",
+      "seq": 12,
+      "type": "agent.status",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "state": "done"
+      },
+      "at": "2026-10-11T09:54:25Z",
+      "shadow": true
+    }
+  ],
+  "room": {
+    "created": {
+      "title": "orders stale",
+      "severity": "sev2",
+      "pipeline_id": "orders",
+      "alert": {
+        "alertname": "WarehouseStale",
+        "table": "analytics.orders"
+      },
+      "alert_source": "webhook",
+      "dedup_key": "webhook:orders:WarehouseStale",
+      "shadow": true
+    },
+    "labelled": {
+      "actual_layer": "kafka-connect",
+      "root_cause_terms": [
+        "amount",
+        "numeric",
+        "schema registry",
+        "409"
+      ],
+      "identity": {
+        "method": "dev",
+        "grant": "solo"
+      }
+    },
+    "graded": {
+      "layer_correct": true,
+      "root_cause": "yes",
+      "notes": "Same cause the team found; the agent got there in four calls.",
+      "identity": {
+        "method": "dev",
+        "grant": "solo"
+      }
+    }
+  }
+}
