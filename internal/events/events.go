@@ -139,9 +139,11 @@ type RoomClosedPayload struct {
 }
 
 // RoomRetentionWarningPayload says the open-room limit will close the room at
-// CloseAt. Written by the system actor once per deadline, 24 h before it (at
-// once when less is left); an extension moves the deadline and gets its own
-// warning.
+// CloseAt. Written by the system actor once per deadline, 24 h before it. A
+// room that is past its deadline when the limit first sees it (the limit was
+// just turned on or lowered) is warned at once with CloseAt 24 h later: no
+// room is closed less than 24 h after its warning. An extension moves the
+// deadline and gets its own warning.
 type RoomRetentionWarningPayload struct {
 	CloseAt  time.Time `json:"close_at"`
 	OpenDays int       `json:"open_days"` // days from opened_at to CloseAt
@@ -149,7 +151,7 @@ type RoomRetentionWarningPayload struct {
 
 // RoomExtendedPayload records the room's one extension of the open-room limit
 // (POST /api/rooms/{id}/extend, driver only). CloseAt is the new deadline:
-// the old one plus Days.
+// the close time the room showed (snapshot auto_close_at) plus Days.
 type RoomExtendedPayload struct {
 	Days    int       `json:"days"`
 	CloseAt time.Time `json:"close_at"`
