@@ -55,21 +55,18 @@ var lowerLookalikes = map[rune]rune{
 	'0': 'o', '1': 'l', '|': 'l',
 }
 
-// Skeleton returns the comparison form of a display name: format characters
-// dropped, NFKD (fullwidth and other compatibility forms become plain letters),
-// combining marks dropped, Greek and Cyrillic look-alikes mapped to Latin,
-// Unicode case folding, i and l folded together (a capital I and a small l are
-// the same stroke), "rn" read as "m" and "vv" as "w", and every rune that is
-// not a letter or digit (spaces, punctuation, symbols such as a check mark)
-// dropped. Two names with the same non-empty skeleton look alike.
+// Skeleton returns the comparison form of a display name: NFKD (fullwidth and
+// other compatibility forms become plain letters, accents split off), Greek and
+// Cyrillic look-alikes mapped to Latin, Unicode case folding, i and l folded
+// together (a capital I and a small l are the same stroke), every rune that is
+// not a letter or digit dropped (the accents NFKD split off, format characters
+// such as a zero-width space, spaces, punctuation, symbols such as a check
+// mark), then "rn" read as "m" and "vv" as "w". Two names with the same
+// non-empty skeleton look alike.
 func Skeleton(s string) string {
 	s = norm.NFKD.String(s)
 	var b strings.Builder
 	for _, r := range s {
-		switch {
-		case unicode.Is(unicode.Cf, r), unicode.Is(unicode.Mn, r), unicode.Is(unicode.Me, r):
-			continue // invisible, or a mark NFKD split off its letter
-		}
 		if m, ok := upperLookalikes[r]; ok {
 			r = m
 		}

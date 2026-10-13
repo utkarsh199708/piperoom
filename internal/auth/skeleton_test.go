@@ -43,6 +43,12 @@ func TestSkeletonLookalikes(t *testing.T) {
 		{"Kabir", "\u039a\u0391\u0392\u0399r", "Greek capitals K, A, B, I"},
 		{"Hana", "\u041d\u0430n\u0430", "Cyrillic capital H (En) and a"},
 		{"Nina", "\u03b7\u03b9\u03b7\u03b1", "Greek eta for n"},
+		// Capitals whose small letter imitates something else: mapped before
+		// case folding, or capital eta would read as an n.
+		{"Hana", "\u0397ana", "Greek capital eta for H"},
+		{"Nina", "\u039dina", "Greek capital nu for N"},
+		{"Mohan", "\u039cohan", "Greek capital mu for M"},
+		{"Yusuf", "\u03a5usuf", "Greek capital upsilon for Y"},
 		{"Mohan", "rnohan", "rn for m"},
 		{"Wendy", "VVendy", "vv for w"},
 		{"Kelvin", "\u212aelvin", "Kelvin sign"},
