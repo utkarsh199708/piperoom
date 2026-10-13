@@ -191,7 +191,10 @@ func newShadowEnv(t *testing.T, cfg shadowCfg) *shadowEnv {
 	}
 	fn := cfg.fn
 	if fn == nil {
-		fn = func(ctx context.Context, _ int, d agent.Deps) error { investigate(ctx, d, true); return endTurn(ctx, d) }
+		fn = func(ctx context.Context, _ int, d agent.Deps) error {
+			investigate(ctx, d, true)
+			return endTurn(ctx, d)
+		}
 	}
 	r := &scriptRunner{fn: fn}
 	deps := room.Deps{
