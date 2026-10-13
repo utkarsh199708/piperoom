@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"piperoom/internal/alertin"
@@ -192,6 +193,10 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 		return RoomSnapshot{}, false, validation(fmt.Sprintf("pipeline_id %q must match ^[a-zA-Z0-9_.-]+$", pipelineID))
 	}
 	pipelineKnown := s.owners == nil || s.knownPipeline(pipelineID)
+	// Frozen in room.created so a restart keeps it even if owners.yaml
+	// changes (docs/design/shadow.md 3.1). Only a known pipeline can be
+	// shadow.
+	shadow := s.pipelineShadow(pipelineID)
 	resolved := a.Status == alertin.StatusResolved
 	indexKey := alertIndexKey(pipelineID, a.DedupKey)
 	roomID := NewID("r_")
@@ -217,17 +222,22 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 		s.mu.Unlock()
 		return RoomSnapshot{}, false, fmt.Errorf("room: create from alert: %w", err)
 	}
-	st := &roomState{snap: NewSnapshot(), inbox: newInbox()}
+	st := &roomState{snap: NewSnapshot(), inbox: newRoomInbox(shadow)}
 	st.snap.ID = roomID
 	s.rooms[roomID] = st
 
 	if _, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, systemActor, events.RoomCreatedPayload{
 		Title: title, Severity: severity, PipelineID: pipelineID, Alert: raw,
-		AlertSource: alertSource, DedupKey: indexKey,
+		AlertSource: alertSource, DedupKey: indexKey, Shadow: shadow,
 	}); err != nil {
 		s.discardNewRoomLocked(ctx, roomID)
 		s.mu.Unlock()
 		return RoomSnapshot{}, false, mapUnstorable(err)
+	}
+	if shadow {
+		// First try; the supervisor and the Load sweep try again, and a
+		// failure never drops the alert (docs/design/shadow.md 3.7).
+		_ = s.createShadowRun(ctx, roomID)
 	}
 	if indexKey != "" {
 		st.dedupKey = indexKey
@@ -454,6 +464,11 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 		s.mu.Unlock()
 		return events.Event{}, ErrNotDriver()
 	}
+	// The resolution is what the shadow run is graded against.
+	if st.snap.Shadow && strings.TrimSpace(resolution) == "" {
+		s.mu.Unlock()
+		return events.Event{}, validation("a shadow room needs a resolution to grade against")
+	}
 	e, err := s.emitLocked(ctx, st, roomID, events.RoomClosed, humanActor(user), events.RoomClosedPayload{Resolution: resolution})
 	if err != nil {
 		s.mu.Unlock()
@@ -466,6 +481,11 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 		s.log.Warn("room: persist close failed", "room", roomID, "err", err)
 	}
 	cancel := st.agentCancel
+	if st.snap.Shadow {
+		// Grace, the error-row upsert and the reveal (shadow.go). It keeps
+		// cancel only when the run must stop now.
+		cancel = s.closeShadowLocked(ctx, roomID, st, cancel)
+	}
 	execCancel := st.execCancel
 	pipelineID := st.snap.PipelineID
 	hookKey := hookDedupKey(pipelineID, st.dedupKey)

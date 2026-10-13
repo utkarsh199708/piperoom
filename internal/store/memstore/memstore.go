@@ -28,6 +28,9 @@ type Store struct {
 	handoffs    map[string]*store.HandoffRow
 	approvals   map[string]store.ApprovalRow
 	steps       map[string]string // proposalID + "\x00" + stepIndex -> status
+
+	shadowRuns   map[string]*store.ShadowRun
+	shadowEvents map[string][]events.Event
 }
 
 type roomLog struct {
@@ -54,6 +57,9 @@ func New() *Store {
 		handoffs:    map[string]*store.HandoffRow{},
 		approvals:   map[string]store.ApprovalRow{},
 		steps:       map[string]string{},
+
+		shadowRuns:   map[string]*store.ShadowRun{},
+		shadowEvents: map[string][]events.Event{},
 	}
 }
 

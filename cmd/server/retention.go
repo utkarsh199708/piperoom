@@ -73,6 +73,8 @@ func runRetention(ctx context.Context, svc expirer, days int, timeout time.Durat
 		"suggestions", res.Suggestions,
 		"handoffs", res.Handoffs,
 		"slack_threads", res.SlackThreads,
+		"shadow_events", res.ShadowEvents,
+		"shadow_runs", res.ShadowRuns,
 	}
 	if err != nil {
 		switch {

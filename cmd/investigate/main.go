@@ -6,8 +6,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -31,10 +33,24 @@ func main() {
 	)
 	flag.Parse()
 
-	if err := run(*pipeline, *title, *fakeTools, *model, *effort, *maxTurns); err != nil {
-		fmt.Fprintln(os.Stderr, "investigate:", truncatePrinted(sanitizeTerminal(err.Error())))
-		os.Exit(1)
+	os.Exit(exitCode(run(*pipeline, *title, *fakeTools, *model, *effort, *maxTurns), os.Stderr))
+}
+
+// exitCode prints err (if any) as one line to w and returns the process exit
+// code. A spent room token budget is a stop, not a failure: the runner has
+// already written its message through the terminal sink, so this prints one
+// line and returns 0.
+func exitCode(err error, w io.Writer) int {
+	if err == nil {
+		return 0
 	}
+	var be *agent.BudgetError
+	if errors.As(err, &be) {
+		fmt.Fprintln(w, "investigate: stopped:", truncatePrinted(sanitizeTerminal(be.Error())))
+		return 0
+	}
+	fmt.Fprintln(w, "investigate:", truncatePrinted(sanitizeTerminal(err.Error())))
+	return 1
 }
 
 func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns int) error {
