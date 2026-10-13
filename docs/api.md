@@ -255,7 +255,9 @@ never shows shadow output.
   `agent.status {state: "log_full"}`; a steer or `@agent` comment no longer starts it in that room. Every other
   event (human comments, steers, suggestions, control, approvals and rejections, action results,
   hand-offs, traces, system notes) may go up to 2% over the caps; past that the route answers `409 log_full`.
-  `room.closed` is always accepted, so a full room can still be closed.
+  `room.closed` is always accepted, so a full room can still be closed. Rooms created before the upgrade that
+  added the caps get their byte count in the background after the server starts; until a room is counted only
+  its event cap applies (`docs/design/retention.md` section 5.2).
 - **Data size.** `PIPEROOM_EVENT_MAX_DATA_BYTES` (default `64KiB`). A larger `agent.tool_result.data` is stored as
   `{"truncated": true, "original_bytes": N, "preview": "<start of the JSON text>"}` and the payload's `truncated`
   is true; a larger `action.executed.output` is cut and ends with `… [truncated: N bytes]`.

@@ -183,6 +183,9 @@ Design: `docs/design/retention.md`. Every value below is read at start; a bad va
 - **Open rooms.** `PIPEROOM_MAX_OPEN_DAYS` (default 14, `0` = off) closes a room that has been open that
   long. The room gets a warning 24 hours before; the driver can extend it once by the same number of
   days. After the close, the closed-room retention above applies.
+- **Rooms from before the upgrade.** The byte cap of a room created before the upgrade that added the caps
+  applies once the server has counted its stored bytes, which it does in the background after the first start
+  (see `docs/runbook.md`, "Upgrading to room limits"); its event cap applies at once.
 - **Size of one room.** A room's log holds at most `PIPEROOM_ROOM_MAX_EVENTS` events (default 20000)
   and `PIPEROOM_ROOM_MAX_BYTES` of stored payloads (default 256 MiB). At 90% the room gets a warning; at
   100% the agent stops and its events are refused. People can still comment, approve, hand off and close,

@@ -75,22 +75,40 @@ exist, the second pass never needs to skip a pipeline.
 
 ### 5.2 Store enforcement
 
-- Postgres: migration `00012` adds `rooms.event_count bigint` and `rooms.byte_size bigint`, backfilled from
-  `last_seq` and `octet_length(payload::text)`. The backfill is an estimate of what was written: jsonb text has
-  one space more after each `:` and `,`, and one byte instead of Go's six-byte escape for each `<`, `>` and
-  `&`, so `written - 5 x (escaped <>&) <= byte_size <= written + (':' and ',')` (numbers in exponent form and
-  repeated keys in a raw alert body can differ further). A test seeds rooms at `00009` and pins this bound.
-  `Append` does
-  `UPDATE rooms SET last_seq = last_seq+1, event_count = event_count+1, byte_size = byte_size+$size WHERE id = $1 AND <class limit> RETURNING ...`
+- Postgres: the event cap is checked on `rooms.last_seq` (the log has no gaps), so it needs no new column.
+  Migration `00012` only adds `rooms.byte_size bigint` and `shadow_runs.byte_size bigint`, nullable and with no
+  default, so it rewrites no row and holds its lock on `rooms` for an instant whatever the table's size. New rooms
+  and shadow runs start at 0. `Append` does
+  `UPDATE rooms SET last_seq = last_seq+1, byte_size = byte_size+$size WHERE id = $1 AND <event limit on last_seq+1> AND (byte_size IS NULL OR <byte limit>) RETURNING last_seq`
   in the insert's transaction. The row lock serialises concurrent appends of one room, so no interleaving can
   pass a limit: the agent class never exceeds the cap, the reserve class never exceeds cap + 2%.
   No row back: the room is missing (`ErrNotFound`) or over its limit (`ErrLogFull`), told apart by a second read
   in the same transaction.
+- **Rooms from before `00012`** have `byte_size` NULL: their event cap applies at once, their byte cap only once
+  they are counted (`NULL + size` stays NULL, so appends in between do not start a wrong count). The server counts
+  them after it starts, in the background (`store.PG.BackfillByteSize`): `BackfillBatch` (500) rooms per short
+  transaction, `byte_size = sum(octet_length(payload::text))`, then the same for shadow runs, then the room
+  service re-reads its counters (`ReloadUsage`). Why at start-up in Go rather than a goose `NO TRANSACTION`
+  migration: no start waits on a large `room_events` (goose runs migrations before the server listens); a stopped
+  backfill resumes where it left off (it picks `WHERE byte_size IS NULL`); and replicas coordinate through a
+  session advisory lock (`pg_try_advisory_lock`), so a second replica skips instead of repeating the work. Each
+  batch locks only its own rooms' rows, for one batch.
+- **Duration.** Measured on postgres:16 (default settings, a shared host under heavy load) at about 24 MB of
+  stored payload text per second (500000 events, 187 MB of payload text, 298 MB `room_events`, counted in 7.8 s):
+  about 45 s per GB of payloads, 7 to 8 minutes for 10 GB. Appends to the rooms of the batch being counted wait
+  for that batch only.
+- The count is an estimate of what was written: jsonb text has one space more after each `:` and `,`, and one byte
+  instead of Go's six-byte escape for each `<`, `>` and `&`, so
+  `written - 5 x (escaped <>&) <= byte_size <= written + (':' and ',')` (numbers in exponent form and repeated
+  keys in a raw alert body can differ further). An append that commits while its room's batch runs may be left
+  out of that room's count. A test seeds rooms at `00009`, migrates, checks the caps while uncounted, backfills
+  and pins this bound.
 - Memstore: the same check under its mutex.
 - Limits are set on the store once at start (`SetLimits`); zero limits mean no cap (unit tests, tools).
 - The room service follows the usage without a query per append: the event count is the last seq (the log has
   no gaps) and the bytes the store counts for an event are `len(Event.Payload)` as `Append` returns it. It reads
-  the store's counters once (`RoomUsage`) when a room enters its cache.
+  the store's counters once (`RoomUsage`) when a room enters its cache, and again after the backfill. For an
+  uncounted room `RoomUsage` reports `BytesUnknown` and 0 bytes, so its 90% byte warning waits for the backfill.
 
 ### 5.3 Room service
 
