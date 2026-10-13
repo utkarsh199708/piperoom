@@ -133,7 +133,14 @@ IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_
                "owner": "priya", "health": "warn", "facts": { "slot_retained": "12.4 GB" } } ],
   "edges": [ { "from": "pg:public.orders", "to": "connect:pg-orders-connector" } ] }
 ```
-`kind`: `source_table | connector | topic | consumer_group | sink_table`. `health`: `ok | warn | fail | unknown`.
+`kind`: `source_table | connector | topic | dlq_topic | consumer_group | sink_table`. `health`: `ok | warn | fail | unknown`.
+A `dlq_topic` node (`id` `dlq:<topic>`) is a dead-letter topic of the pipeline; its `layer` and `owner` are the
+writer's (`kafka-connect` for a sink connector, `consumer` for a declared consumer group), edges lead into it only,
+and `facts` carry `records` (end minus start offsets, summed), `newest_record`, `writer` and `exists`. A `connector`
+node may carry `errors_tolerance`, `dlq` and `config_risk` facts. The agent's `dlq_peek` tool returns DLQ record
+positions and Kafka Connect error headers only, never a key or value; per-record header text appears in the
+summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.data` holds counts and positions
+(design: `docs/design/dlq.md`).
 
 ## REST endpoints
 
@@ -183,7 +190,7 @@ closes; `--demo` forces it off.
 
 - `room.created.alert_source` is `"watcher"`. `dedup_key` is `watcher:<pipeline>`, for example
   `watcher:orders`. There is **one open watcher room per pipeline**; every signal (connector down, slot
-  inactive, slot WAL) shares that key. `room.created.alert` holds the watcher's evidence JSON.
+  inactive, slot WAL, DLQ growth, config risk) shares that key. `room.created.alert` holds the watcher's evidence JSON.
 - **Join-on-open-room.** Before it opens a room, the watcher asks whether any room for that pipeline is
   already open, including one opened by Alertmanager or a person. If so it posts its evidence into that room
   as a join and opens nothing. A later signal or re-fire on the same pipeline joins the same room the same
@@ -191,6 +198,12 @@ closes; `--demo` forces it off.
 - **Resolved.** When every signal of the pipeline has cleared, the watcher sends the same alert with
   `status: "resolved"`. The service posts a resolved note in the open room and leaves the room **open**; a
   resolved alert with no open room opens nothing and is dropped (same rule as the signed sources above).
+- **DLQ growth** (docs/design/dlq.md). `dlq_growth` fires when a dead-letter topic of the pipeline (from the
+  sink's `errors.deadletterqueue.topic.name`, or `watch.dlq_topics` in `owners.yaml`) gains records; the
+  evidence holds counts, rates and offsets only, never record content. `config_risk` (default `action: log`)
+  reports a connector set to drop records silently (`errors.tolerance=all` with no DLQ and no error log, or on a
+  source connector) or a sink whose configured DLQ topic does not exist. Records that were in the DLQ before
+  the watcher started never fire. A pipeline with no DLQ topics costs the watcher no Kafka call.
 - **After a restart** the watcher joins a room that is still open but does not wake the agent. A room closed
   less than `PIPEROOM_WATCH_COOLDOWN` ago (default 60 min) is not re-opened by the same incident.
 - Modes: `PIPEROOM_WATCH_MODE` = `off`, `log` (default: log transitions, open nothing) or `rooms`.

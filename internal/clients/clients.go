@@ -106,6 +106,52 @@ type RecordRef struct {
 	Key       string    `json:"key"`
 }
 
+// ---- Kafka: dead-letter topics (optional on a KafkaAdmin) ----
+
+// DLQRecord is one record of a dead-letter topic with its key and value
+// removed on purpose: where it is, when it was written, and the Kafka Connect
+// error headers it carries. It is the only shape in which a DLQ record may
+// leave the client (docs/pilot/data-handling.md, dlq_peek row).
+type DLQRecord struct {
+	Topic     string    `json:"topic"`
+	Partition int32     `json:"partition"`
+	Offset    int64     `json:"offset"`
+	Timestamp time.Time `json:"timestamp"`
+	// Headers keeps only headers whose key starts with "__connect.errors."
+	// (Connect's DLQ context headers: topic, partition, offset, connector.name,
+	// task.id, stage, class.name, exception.class.name, exception.message,
+	// exception.stacktrace). Values are text with control characters removed
+	// and at most 300 runes; exception.stacktrace is its first line only;
+	// exception.message and that first line are redacted (dlq.RedactMessage:
+	// "[Source:", "Detail:" and "Where:" tails, braces, brackets and quoted
+	// strings removed) because converters and drivers quote record bytes in
+	// them. Empty when the sink does not set
+	// errors.deadletterqueue.context.headers.enable=true. Every other header
+	// is dropped: an application header is never returned.
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// DLQReader is optional on a KafkaAdmin. The watcher's dlq_growth signal and
+// the dlq_peek tool ask for it with a type assertion at use time; a
+// KafkaAdmin without it leaves the signal "unknown" (one log line) and makes
+// the tool return a clear error, so fakes and replay clients need not
+// implement it.
+type DLQReader interface {
+	// DLQOffsets returns the start and end offset of every partition of each
+	// topic, in two requests for all topics (ListStartOffsets, ListEndOffsets).
+	// LastTimestamp is always zero: it never fetches a record (unlike
+	// TopicOffsets). A topic that does not exist is absent from the result
+	// and is NOT an error. No topics returns nil, nil without any request:
+	// kadm lists the whole cluster for an empty topic list, and that must
+	// never happen on a tick.
+	DLQOffsets(ctx context.Context, topics ...string) (map[string][]PartitionOffsets, error)
+	// PeekDLQ returns the newest records of topic, newest first, at most limit
+	// in TOTAL across partitions (partitions are read newest end offset first
+	// and the read stops at limit or at 8 MiB of record bytes), as DLQRecord:
+	// never a value, never a key. limit <= 0 means 5; it is capped at 20.
+	PeekDLQ(ctx context.Context, topic string, limit int) ([]DLQRecord, error)
+}
+
 // ---- Source Postgres (the CDC source) ----
 
 type SourceDB interface {
