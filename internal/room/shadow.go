@@ -64,6 +64,32 @@ func (s *Service) appendShadowLocked(ctx context.Context, roomID string, typ eve
 	return e, nil
 }
 
+// shadowLogFullLocked stops a shadow run whose log reached the room's cap
+// (docs/design/retention.md section 5.3): every further agent event would be
+// refused, so the run is cancelled and ends with status budget, like a run
+// that spent its tokens. Caller must hold s.mu.
+func (s *Service) shadowLogFullLocked(roomID string, st *roomState) {
+	if st.shadowLogFull {
+		return
+	}
+	st.shadowLogFull = true
+	if st.agentCancel != nil {
+		st.agentCancel()
+	}
+	s.log.Warn("room: shadow log full; shadow run stopped", "room", roomID)
+}
+
+// shadowStopStatus is the status of a shadow run whose context ended: budget
+// when the log cap stopped it, interrupted otherwise (close, shutdown).
+func (s *Service) shadowStopStatus(st *roomState) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if st.shadowLogFull {
+		return store.ShadowBudget
+	}
+	return store.ShadowInterrupted
+}
+
 // updateShadowRun reads the run row, applies fn and writes it back.
 func (s *Service) updateShadowRun(ctx context.Context, roomID string, fn func(*store.ShadowRun)) error {
 	if s.shadow == nil {
@@ -148,7 +174,7 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 		gate.release()
 		switch {
 		case ctx.Err() != nil:
-			return store.ShadowInterrupted
+			return s.shadowStopStatus(st)
 		case isBudgetStop(err):
 			return store.ShadowBudget
 		case err == nil:

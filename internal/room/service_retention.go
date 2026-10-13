@@ -72,7 +72,8 @@ func (s *Service) PurgeByPolicy(ctx context.Context, now time.Time, p RetentionP
 	}
 	sort.Strings(ids)
 	for _, id := range ids {
-		res, err := s.purge(ctx, store.PurgeQuery{Cutoff: now.UTC().AddDate(0, 0, -p.PipelineDays[id]), PipelineID: id})
+		days := p.PipelineDays[id]
+		res, err := s.purge(ctx, store.PurgeQuery{Cutoff: now.UTC().AddDate(0, 0, -days), PipelineID: id, AuditReason: retentionReason(days)})
 		total.Add(res)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("pipeline %s: %w", id, err))
@@ -82,7 +83,7 @@ func (s *Service) PurgeByPolicy(ctx context.Context, now time.Time, p RetentionP
 		}
 	}
 	if p.GlobalDays > 0 {
-		res, err := s.purge(ctx, store.PurgeQuery{Cutoff: now.UTC().AddDate(0, 0, -p.GlobalDays)})
+		res, err := s.purge(ctx, store.PurgeQuery{Cutoff: now.UTC().AddDate(0, 0, -p.GlobalDays), AuditReason: retentionReason(p.GlobalDays)})
 		total.Add(res)
 		if err != nil {
 			errs = append(errs, err)
@@ -104,7 +105,13 @@ func (s *Service) PurgeByPolicy(ctx context.Context, now time.Time, p RetentionP
 // every room behind it), and the others carry on. The returned error joins
 // every room's error; the next run tries the failed rooms again.
 func (s *Service) PurgeExpired(ctx context.Context, cutoff time.Time) (store.PurgeResult, error) {
-	return s.purge(ctx, store.PurgeQuery{Cutoff: cutoff})
+	days := int((s.now().Sub(cutoff) + 12*time.Hour) / (24 * time.Hour))
+	return s.purge(ctx, store.PurgeQuery{Cutoff: cutoff, AuditReason: retentionReason(days)})
+}
+
+// retentionReason is room_deletions.reason of a retention purge.
+func retentionReason(days int) string {
+	return fmt.Sprintf("retention: closed %d days", days)
 }
 
 // purge loops PurgeClosed in batches of purgeBatchRooms; see PurgeExpired.
@@ -117,6 +124,7 @@ func (s *Service) purge(ctx context.Context, q store.PurgeQuery) (store.PurgeRes
 	var errs []error
 	q.MaxRooms = purgeBatchRooms
 	q.Exclude = []string{}
+	q.DeletedAt = s.now().UTC()
 	if s.limits.ArchiveDir != "" {
 		q.Archive = s.archiveRoom
 	}

@@ -166,7 +166,7 @@ func TestPGDeleteRoomService(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := svc.DeleteRoom(ctx, mustUser(t, svc, "ada"), snap.ID, "test")
+	d, err := svc.DeleteRoom(ctx, mustUser(t, svc, "ada"), snap.ID, "test", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestPGDeleteRoomService(t *testing.T) {
 	if _, err := st.GetRoom(ctx, snap.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("room left: %v", err)
 	}
-	again, err := svc.DeleteRoom(ctx, mustUser(t, svc, "ada"), snap.ID, "again")
+	again, err := svc.DeleteRoom(ctx, mustUser(t, svc, "ada"), snap.ID, "again", true)
 	if err != nil || again.RoomDeletion != d.RoomDeletion || !again.Archived {
 		t.Fatalf("repeat = %+v %v", again, err)
 	}

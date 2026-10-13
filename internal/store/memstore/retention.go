@@ -48,7 +48,7 @@ func (s *Store) PurgeClosed(ctx context.Context, q store.PurgeQuery) (store.Purg
 			wantSeq = seq
 		}
 		s.mu.Lock()
-		one, ok, err := s.purgeClosedLocked(id, q.Cutoff, wantSeq)
+		one, ok, err := s.purgeClosedLocked(id, q, wantSeq)
 		s.mu.Unlock()
 		if err != nil {
 			res.Failed = append(res.Failed, store.PurgeFailure{RoomID: id, Err: err})
@@ -104,19 +104,22 @@ func (s *Store) expired(q store.PurgeQuery) []string {
 
 // purgeClosedLocked re-checks that the room still qualifies (and still ends at
 // wantSeq when that is >= 0) and deletes it. Caller holds s.mu.
-func (s *Store) purgeClosedLocked(id string, cutoff time.Time, wantSeq int64) (store.PurgeResult, bool, error) {
+func (s *Store) purgeClosedLocked(id string, q store.PurgeQuery, wantSeq int64) (store.PurgeResult, bool, error) {
 	log, ok := s.rooms[id]
 	if !ok {
 		return store.PurgeResult{}, false, nil
 	}
 	m := log.meta
-	if m.Status != "closed" || m.ClosedAt == nil || !m.ClosedAt.Before(cutoff) {
+	if m.Status != "closed" || m.ClosedAt == nil || !m.ClosedAt.Before(q.Cutoff) {
 		return store.PurgeResult{}, false, nil
 	}
 	if wantSeq >= 0 && log.lastSeq != wantSeq {
 		return store.PurgeResult{}, false, fmt.Errorf("memstore: purge %s: archived %d events, room has %d: %w", id, wantSeq, log.lastSeq, store.ErrRoomChanged)
 	}
 	res := s.deleteLocked(id)
+	// The same content-free audit row a Postgres purge writes in its
+	// transaction; here the lock is the transaction.
+	s.deletions[id] = q.Audit(id, m.PipelineID, res.Events, s.now)
 	res.RoomIDs = []string{id}
 	return res, true, nil
 }
@@ -164,6 +167,7 @@ func (s *Store) deleteLocked(id string) store.PurgeResult {
 		res.ShadowEvents += int64(len(s.shadowEvents[id]))
 		res.ShadowRuns++
 		delete(s.shadowEvents, id)
+		delete(s.shadowBytes, id)
 		delete(s.shadowRuns, id)
 	}
 	return res

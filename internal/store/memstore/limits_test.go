@@ -207,6 +207,76 @@ func TestDeleteRoomWantSeq(t *testing.T) {
 	}
 }
 
+// TestPurgeWritesAuditRow: each purged room gets a content-free
+// room_deletions row by the system, with the query's reason.
+func TestPurgeWritesAuditRow(t *testing.T) {
+	ctx := context.Background()
+	st := memstore.New()
+	closed := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	newRoom(t, st, "r1", "orders")
+	for i := 0; i < 2; i++ {
+		if _, err := st.Append(ctx, "r1", events.CommentAdded, human, map[string]string{"text": "x"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.CloseRoom(ctx, "r1", closed); err != nil {
+		t.Fatal(err)
+	}
+	at := closed.AddDate(0, 0, 40).Add(1500 * time.Nanosecond)
+	res, err := st.PurgeClosed(ctx, store.PurgeQuery{Cutoff: closed.Add(time.Hour), MaxRooms: 10, AuditReason: "retention: closed 30 days", DeletedAt: at})
+	if err != nil || len(res.RoomIDs) != 1 {
+		t.Fatalf("purge: %+v %v", res, err)
+	}
+	got, err := st.GetRoomDeletion(ctx, "r1")
+	want := store.RoomDeletion{RoomID: "r1", PipelineID: "orders", DeletedBy: "system", DeletedAt: at.Truncate(time.Microsecond), Reason: "retention: closed 30 days", EventCount: 2}
+	if err != nil || got != want {
+		t.Fatalf("audit row = %+v %v, want %+v", got, err, want)
+	}
+}
+
+// TestShadowLogCaps: the room caps hold for the shadow log on its own counts:
+// agent events stop at the cap and use no seq.
+func TestShadowLogCaps(t *testing.T) {
+	ctx := context.Background()
+	st := memstore.New()
+	st.SetLimits(store.Limits{MaxEvents: 100, MaxBytes: 1 << 20})
+	newRoom(t, st, "r1", "orders")
+	if err := st.CreateShadowRun(ctx, store.ShadowRun{RoomID: "r1", Status: store.ShadowQueued}); err != nil {
+		t.Fatal(err)
+	}
+	// The room log's own events do not count against the shadow log.
+	for i := 0; i < 50; i++ {
+		if _, err := st.Append(ctx, "r1", events.CommentAdded, human, map[string]int{"i": i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 100; i++ {
+		if _, err := st.AppendShadow(ctx, "r1", events.AgentMessage, events.AgentActor, map[string]int{"i": i}); err != nil {
+			t.Fatalf("shadow event %d: %v", i+1, err)
+		}
+	}
+	if _, err := st.AppendShadow(ctx, "r1", events.AgentMessage, events.AgentActor, map[string]int{"i": 100}); !errors.Is(err, store.ErrLogFull) {
+		t.Fatalf("shadow event 101: %v, want ErrLogFull", err)
+	}
+	if run, _ := st.GetShadowRun(ctx, "r1"); run.LastSeq != 100 {
+		t.Fatalf("shadow last_seq = %d, want 100 (a refused event uses no seq)", run.LastSeq)
+	}
+	// Bytes: a second room whose shadow events are large.
+	newRoom(t, st, "r2", "orders")
+	if err := st.CreateShadowRun(ctx, store.ShadowRun{RoomID: "r2", Status: store.ShadowQueued}); err != nil {
+		t.Fatal(err)
+	}
+	big := strings.Repeat("x", 300<<10)
+	var err error
+	n := 0
+	for ; n < 10 && err == nil; n++ {
+		_, err = st.AppendShadow(ctx, "r2", events.AgentMessage, events.AgentActor, map[string]string{"text": big})
+	}
+	if !errors.Is(err, store.ErrLogFull) || n != 4 {
+		t.Fatalf("byte cap: refused after %d appends (%v), want the 4th of 300 KiB refused under 1 MiB", n, err)
+	}
+}
+
 // TestPurgeClosedPipelineAndArchive: a pipeline filter keeps other pipelines;
 // the archive runs before each delete; an archive error keeps the room; an
 // archive that saw fewer events than the room has keeps it too.

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -582,19 +583,19 @@ func TestDeleteRoomAccess(t *testing.T) {
 	snap := createRoom(t, e.svc, "arjun")
 
 	// Not an admin: 403 whether or not the room exists, so ids do not leak.
-	_, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "arjun"), snap.ID, "cleanup")
+	_, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "arjun"), snap.ID, "cleanup", false)
 	wantCode(t, err, "not_allowed")
-	_, err = e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "arjun"), "r_missing", "cleanup")
+	_, err = e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "arjun"), "r_missing", "cleanup", false)
 	wantCode(t, err, "not_allowed")
 	// A User value claiming admin does not count: only users.yaml does.
-	_, err = e.svc.DeleteRoom(ctx, room.User{ID: "mallory", Admin: true}, snap.ID, "cleanup")
+	_, err = e.svc.DeleteRoom(ctx, room.User{ID: "mallory", Admin: true}, snap.ID, "cleanup", false)
 	wantCode(t, err, "not_allowed")
 
 	ada := mustUser(t, e.svc, "ada")
-	_, err = e.svc.DeleteRoom(ctx, ada, "r_missing", "cleanup")
+	_, err = e.svc.DeleteRoom(ctx, ada, "r_missing", "cleanup", false)
 	wantCode(t, err, "not_found")
 	for _, reason := range []string{"", "   ", strings.Repeat("x", 501), "bad\x00byte"} {
-		_, err = e.svc.DeleteRoom(ctx, ada, snap.ID, reason)
+		_, err = e.svc.DeleteRoom(ctx, ada, snap.ID, reason, false)
 		wantCode(t, err, "validation")
 	}
 	if _, err := e.svc.GetRoom(ctx, snap.ID); err != nil {
@@ -618,7 +619,7 @@ func TestDeleteOpenRoom(t *testing.T) {
 	}
 	ada := mustUser(t, e.svc, "ada")
 	e.clock.Advance(time.Hour)
-	d, err := e.svc.DeleteRoom(ctx, ada, snap.ID, "pasted a password")
+	d, err := e.svc.DeleteRoom(ctx, ada, snap.ID, "pasted a password", false)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -645,7 +646,7 @@ func TestDeleteOpenRoom(t *testing.T) {
 		t.Fatalf("hook calls = %v", hooks)
 	}
 
-	again, err := e.svc.DeleteRoom(ctx, ada, snap.ID, "second try")
+	again, err := e.svc.DeleteRoom(ctx, ada, snap.ID, "second try", false)
 	if err != nil || again != d {
 		t.Fatalf("repeat delete = %+v %v, want the first row %+v", again, err, d)
 	}
@@ -664,7 +665,7 @@ func TestDeleteFreesAlertKey(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("first alert: %v %v", created, err)
 	}
-	if _, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "ada"), first.ID, "test data"); err != nil {
+	if _, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "ada"), first.ID, "test data", false); err != nil {
 		t.Fatal(err)
 	}
 	second, created, err := e.svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", raw)
@@ -685,7 +686,7 @@ func TestDeleteArchivesFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum, want := exportRoomFor(t, e.svc, snap.ID)
-	d, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "ada"), snap.ID, "erasure request")
+	d, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "ada"), snap.ID, "erasure request", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -716,7 +717,7 @@ func TestDeleteArchivesFirst(t *testing.T) {
 		t.Fatalf("left-over files in the archive dir: %v", entries)
 	}
 	// A repeat reports the archive that exists.
-	again, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "ada"), snap.ID, "again")
+	again, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "ada"), snap.ID, "again", true)
 	if err != nil || !again.Archived {
 		t.Fatalf("repeat: %+v %v", again, err)
 	}
@@ -728,7 +729,7 @@ func TestDeleteArchiveFailureKeepsRoom(t *testing.T) {
 	e := newLimitsEnv(t, config.Limits{ArchiveDir: filepath.Join(t.TempDir(), "missing")})
 	ctx := context.Background()
 	snap := createRoom(t, e.svc, "arjun")
-	_, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "ada"), snap.ID, "cleanup")
+	_, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "ada"), snap.ID, "cleanup", true)
 	wantCode(t, err, "archive_failed")
 	if _, err := e.st.GetRoom(ctx, snap.ID); err != nil {
 		t.Fatalf("room deleted although the archive failed: %v", err)
@@ -740,6 +741,64 @@ func TestDeleteArchiveFailureKeepsRoom(t *testing.T) {
 	if _, err := e.svc.AddComment(ctx, mustUser(t, e.svc, "priya"), snap.ID, "", "still here"); err != nil {
 		t.Fatalf("room refuses writes after a failed delete: %v", err)
 	}
+}
+
+// TestDeleteErasesByDefault: a delete keeps no copy unless asked, even with an
+// archive directory configured; asking without one is 400.
+func TestDeleteErasesByDefault(t *testing.T) {
+	dir := t.TempDir()
+	e := newLimitsEnv(t, config.Limits{ArchiveDir: dir})
+	ctx := context.Background()
+	snap := createRoom(t, e.svc, "arjun")
+	d, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "ada"), snap.ID, "erase", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Archived {
+		t.Fatal("archived = true for a plain delete")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Fatalf("a plain delete wrote to the archive dir: %v", entries)
+	}
+
+	noDir := newLimitsEnv(t, config.Limits{})
+	other := createRoom(t, noDir.svc, "arjun")
+	_, err = noDir.svc.DeleteRoom(ctx, mustUser(t, noDir.svc, "ada"), other.ID, "keep a copy", true)
+	wantCode(t, err, "validation")
+	if _, err := noDir.st.GetRoom(ctx, other.ID); err != nil {
+		t.Fatalf("room deleted although archive=true could not be honoured: %v", err)
+	}
+}
+
+// TestShadowLogCapStopsTheRun: the room's caps hold for its shadow log; the
+// agent's events stop at the cap, the run is cancelled and ends as budget,
+// and nothing reaches the room log.
+func TestShadowLogCapStopsTheRun(t *testing.T) {
+	st := &shadowStore{Store: memstore.New()}
+	st.SetLimits(store.Limits{MaxEvents: 100})
+	var refused atomic.Bool
+	e := newShadowEnv(t, shadowCfg{st: st, fn: func(ctx context.Context, _ int, d agent.Deps) error {
+		for i := 0; i < 300; i++ {
+			if err := d.Sink.Emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: "step"}); errors.Is(err, store.ErrLogFull) {
+				refused.Store(true)
+				break
+			}
+		}
+		<-ctx.Done() // the service cancels the run
+		return nil
+	}})
+	snap := e.open(t, "cap")
+	run := e.waitFinished(t, snap.ID)
+	if !refused.Load() {
+		t.Fatal("no agent event was refused")
+	}
+	if run.Status != store.ShadowBudget {
+		t.Fatalf("run status = %q, want %q", run.Status, store.ShadowBudget)
+	}
+	if n := len(e.shadowLog(t, snap.ID)); n != 100 {
+		t.Fatalf("shadow log = %d events, want the cap 100", n)
+	}
+	assertNoAgentLeak(t, e.roomLog(t, snap.ID))
 }
 
 // gatedStore blocks Since while armed, so a test can act while DeleteRoom is
@@ -775,7 +834,7 @@ func TestDeleteRefusesWritesWhileArchiving(t *testing.T) {
 	close(g.armed)
 	done := make(chan error, 1)
 	go func() {
-		_, err := svc.DeleteRoom(ctx, mustUser(t, svc, "ada"), snap.ID, "cleanup")
+		_, err := svc.DeleteRoom(ctx, mustUser(t, svc, "ada"), snap.ID, "cleanup", true)
 		done <- err
 	}()
 	select {
@@ -863,6 +922,17 @@ func TestPurgeByPolicy(t *testing.T) {
 	if res, _ := svc.PurgeByPolicy(ctx, c.Now(), room.NewRetentionPolicy(30, twoPipelineOwners())); len(res.RoomIDs) != 1 || res.RoomIDs[0] != billing {
 		t.Fatalf("billing at 31 days: %v", res.RoomIDs)
 	}
+	// Each purge left a content-free audit row naming the days that applied.
+	for id, want := range map[string]store.RoomDeletion{
+		orders:  {RoomID: orders, PipelineID: "orders", DeletedBy: "system", Reason: "retention: closed 10 days", EventCount: 3},
+		billing: {RoomID: billing, PipelineID: "billing", DeletedBy: "system", Reason: "retention: closed 30 days", EventCount: 3},
+	} {
+		got, err := st.GetRoomDeletion(ctx, id)
+		got.DeletedAt = time.Time{}
+		if err != nil || got != want {
+			t.Fatalf("audit row of %s = %+v %v, want %+v", id, got, err, want)
+		}
+	}
 }
 
 // TestRetentionArchivesBeforePurge: with an archive dir the closed room's
@@ -914,5 +984,18 @@ func TestRetentionArchivesBeforePurge(t *testing.T) {
 	}
 	if _, err := st.GetRoom(ctx, snap.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("room kept after its archive: %v", err)
+	}
+	// The purge wrote its audit row in the same step; the failed run did not.
+	row, err := st.GetRoomDeletion(ctx, snap.ID)
+	if err != nil || row.DeletedBy != "system" || row.Reason != "retention: closed 30 days" || row.EventCount == 0 ||
+		row.PipelineID != "orders" || !row.DeletedAt.Equal(c.Now()) {
+		t.Fatalf("retention audit row = %+v %v", row, err)
+	}
+	// An admin delete of a room retention removed answers that row.
+	admins := room.New(room.Deps{Store: st, Users: adminUsers(t), Owners: testOwners(), Run: fakeRun, Now: c.Now, Limits: config.Limits{ArchiveDir: good}})
+	t.Cleanup(admins.Close)
+	d, err := admins.DeleteRoom(ctx, mustUser(t, admins, "ada"), snap.ID, "erase", false)
+	if err != nil || d.RoomDeletion != row || !d.Archived {
+		t.Fatalf("delete of a purged room = %+v %v, want the retention row (archived)", d, err)
 	}
 }

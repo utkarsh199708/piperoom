@@ -103,7 +103,7 @@ func (s *PG) purgeOne(ctx context.Context, id string, q PurgeQuery) (PurgeResult
 		}
 		wantSeq = seq
 	}
-	return s.purgeRoom(ctx, id, q.Cutoff, wantSeq)
+	return s.purgeRoom(ctx, id, q, wantSeq)
 }
 
 func (s *PG) expiredRoomIDs(ctx context.Context, q PurgeQuery) ([]string, error) {
@@ -137,20 +137,24 @@ func (s *PG) expiredRoomIDs(ctx context.Context, q PurgeQuery) ([]string, error)
 	return ids, nil
 }
 
-// purgeRoom deletes one room and everything keyed by it in one transaction.
-// ok is false when the room no longer qualifies (already gone, or not closed
-// before cutoff), which is not an error. wantSeq >= 0 is the last seq the
-// archive covered: a room whose log has moved on is left (ErrRoomChanged).
-func (s *PG) purgeRoom(ctx context.Context, id string, cutoff time.Time, wantSeq int64) (PurgeResult, bool, error) {
+// purgeRoom deletes one room and everything keyed by it, and writes its
+// content-free room_deletions row (q.audit), in one transaction. ok is false
+// when the room no longer qualifies (already gone, or not closed before the
+// cutoff), which is not an error. wantSeq >= 0 is the last seq the archive
+// covered: a room whose log has moved on is left (ErrRoomChanged).
+func (s *PG) purgeRoom(ctx context.Context, id string, q PurgeQuery, wantSeq int64) (PurgeResult, bool, error) {
 	var res PurgeResult
 	found := false
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		// Lock the row and re-check: it also makes a late Append wait, then
 		// fail with not-found, instead of writing into a half-deleted room.
-		var lastSeq int64
+		var (
+			lastSeq  int64
+			pipeline string
+		)
 		err := tx.QueryRow(ctx,
-			`SELECT last_seq FROM rooms WHERE id = $1 AND status = 'closed' AND closed_at IS NOT NULL AND closed_at < $2 FOR UPDATE`,
-			id, cutoff).Scan(&lastSeq)
+			`SELECT last_seq, pipeline_id FROM rooms WHERE id = $1 AND status = 'closed' AND closed_at IS NOT NULL AND closed_at < $2 FOR UPDATE`,
+			id, q.Cutoff).Scan(&lastSeq, &pipeline)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -161,8 +165,16 @@ func (s *PG) purgeRoom(ctx context.Context, id string, cutoff time.Time, wantSeq
 			return fmt.Errorf("store: purge %s: archived %d events, room has %d: %w", id, wantSeq, lastSeq, ErrRoomChanged)
 		}
 		found = true
-		res, err = deleteRoomTx(ctx, tx, id)
-		return err
+		if res, err = deleteRoomTx(ctx, tx, id); err != nil {
+			return err
+		}
+		d := q.Audit(id, pipeline, res.Events, s.now)
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO room_deletions (room_id, pipeline_id, deleted_by, deleted_at, reason, event_count) VALUES ($1, $2, $3, $4, $5, $6)`,
+			d.RoomID, d.PipelineID, d.DeletedBy, d.DeletedAt, d.Reason, d.EventCount); err != nil {
+			return fmt.Errorf("store: purge %s: audit row: %w", id, classify(err))
+		}
+		return nil
 	})
 	if err != nil {
 		return PurgeResult{}, false, err

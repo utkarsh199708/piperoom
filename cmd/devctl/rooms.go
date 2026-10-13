@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const roomsUsage = "usage: devctl rooms delete <room-id> --reason <text> [--as <admin>] [--server <url>]"
+const roomsUsage = "usage: devctl rooms delete <room-id> --reason <text> [--archive] [--as <admin>] [--server <url>]"
 
 // roomsDeleteTimeout covers the server's own budget for DELETE (5 minutes,
 // with the archive write) plus slack.
@@ -27,8 +27,10 @@ const maxRoomsReply = 4 << 20
 // roomsCmd runs `devctl rooms delete <id> --reason <text>`
 // (docs/design/retention.md section 6). It calls DELETE /api/rooms/{id} on
 // the running server, so the server's cache and the room's WebSockets go with
-// the rows. --as sends X-User (dev mode); in oidc mode put the admin's session
-// cookie ("name=value") in PIPEROOM_COOKIE. Only a users.yaml admin succeeds.
+// the rows. A delete is an erase; --archive keeps a copy in the server's
+// PIPEROOM_ARCHIVE_DIR first. --as sends X-User (dev mode); in oidc mode put
+// the admin's session cookie ("name=value") in PIPEROOM_COOKIE. Only a
+// users.yaml admin succeeds.
 func roomsCmd(ctx context.Context, st *stack, args []string, out io.Writer) error {
 	if len(args) == 0 || args[0] != "delete" {
 		return errors.New(roomsUsage)
@@ -38,6 +40,7 @@ func roomsCmd(ctx context.Context, st *stack, args []string, out io.Writer) erro
 	reason := fs.String("reason", "", "why the room is deleted (stored in the audit row)")
 	as := fs.String("as", "", "admin user id, sent as X-User (dev mode)")
 	server := fs.String("server", "", "server base URL (default http://PIPEROOM_HTTP_ADDR)")
+	archive := fs.Bool("archive", false, "write the room's export to the server's PIPEROOM_ARCHIVE_DIR before deleting")
 	// The room id may come before or after the flags.
 	var pos []string
 	rest := args[1:]
@@ -64,7 +67,7 @@ func roomsCmd(ctx context.Context, st *stack, args []string, out io.Writer) erro
 	}
 	cctx, cancel := context.WithTimeout(ctx, roomsDeleteTimeout)
 	defer cancel()
-	return deleteRoom(cctx, &http.Client{Timeout: roomsDeleteTimeout}, base, pos[0], *reason, *as, cookie, out)
+	return deleteRoom(cctx, &http.Client{Timeout: roomsDeleteTimeout}, base, pos[0], *reason, *archive, *as, cookie, out)
 }
 
 // serverURL turns PIPEROOM_HTTP_ADDR into a base URL; an empty host means the
@@ -99,13 +102,17 @@ type apiError struct {
 
 // deleteRoom sends the request and prints what the server did. The cookie is
 // never printed or logged.
-func deleteRoom(ctx context.Context, hc *http.Client, base, roomID, reason, as, cookie string, out io.Writer) error {
+func deleteRoom(ctx context.Context, hc *http.Client, base, roomID, reason string, archive bool, as, cookie string, out io.Writer) error {
 	u, err := url.Parse(strings.TrimRight(base, "/"))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("devctl: bad server URL %q", base)
 	}
 	u = u.JoinPath("api", "rooms", roomID)
-	u.RawQuery = url.Values{"reason": {reason}}.Encode()
+	q := url.Values{"reason": {reason}}
+	if archive {
+		q.Set("archive", "true")
+	}
+	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u.String(), nil)
 	if err != nil {
 		return fmt.Errorf("devctl: build request: %w", err)

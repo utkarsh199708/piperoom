@@ -41,16 +41,21 @@ func (s *Service) IsAdmin(user User) bool {
 	return ok && u.Admin
 }
 
-// DeleteRoom is DELETE /api/rooms/{id}?reason= (docs/design/retention.md
+// DeleteRoom is DELETE /api/rooms/{id}?reason=&archive= (docs/design/retention.md
 // section 6): an admin hard-deletes one room, open or closed, with every row
-// keyed by it, and leaves a content-free audit row. With PIPEROOM_ARCHIVE_DIR
-// set the room's export is written first; if that fails nothing is deleted.
-// A room that is already deleted answers with its audit row (idempotent); an
-// id that never existed is 404. The caller closes the room's WebSockets.
-func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason string) (Deletion, error) {
+// keyed by it, and leaves a content-free audit row. A delete is an erase: no
+// copy is kept unless archive is true, and then the room's export is written to
+// PIPEROOM_ARCHIVE_DIR first (archive without that directory is 400); if the
+// write fails nothing is deleted. A room that is already deleted, by an admin
+// or by retention, answers with its audit row (idempotent); an id that never
+// existed is 404. The caller closes the room's WebSockets.
+func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason string, archive bool) (Deletion, error) {
 	// The role first, so a non-admin learns nothing about which ids exist.
 	if !s.IsAdmin(user) {
 		return Deletion{}, ErrDeleteNotAllowed()
+	}
+	if archive && s.limits.ArchiveDir == "" {
+		return Deletion{}, validation("archive=true needs PIPEROOM_ARCHIVE_DIR on the server")
 	}
 	if strings.TrimSpace(reason) == "" {
 		return Deletion{}, validation("reason is required")
@@ -93,7 +98,7 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 	}
 	wantSeq := int64(-1)
 	archived := false
-	if s.limits.ArchiveDir != "" {
+	if archive {
 		seq, err := s.archiveRoom(ctx, roomID)
 		if err != nil {
 			undo()

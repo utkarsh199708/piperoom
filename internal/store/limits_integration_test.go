@@ -284,7 +284,9 @@ func TestPGPurgeClosedPipelineAndArchive(t *testing.T) {
 		archived = append(archived, id)
 		return 1, nil
 	}
-	res, err := s.PurgeClosed(ctx, store.PurgeQuery{Cutoff: time.Now().UTC(), PipelineID: pipeline, MaxRooms: 10, Archive: archive})
+	at := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	res, err := s.PurgeClosed(ctx, store.PurgeQuery{Cutoff: time.Now().UTC(), PipelineID: pipeline, MaxRooms: 10, Archive: archive,
+		AuditReason: "retention: closed 2 days", DeletedAt: at})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,5 +305,58 @@ func TestPGPurgeClosedPipelineAndArchive(t *testing.T) {
 		if _, err := s.GetRoom(ctx, id); err != nil {
 			t.Fatalf("%s must be kept: %v", id, err)
 		}
+		if _, err := s.GetRoomDeletion(ctx, id); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("%s kept but has an audit row: %v", id, err)
+		}
+	}
+	// The purged room's audit row came with the purge.
+	row, err := s.GetRoomDeletion(ctx, ok)
+	want := store.RoomDeletion{RoomID: ok, PipelineID: pipeline, DeletedBy: "system", DeletedAt: at, Reason: "retention: closed 2 days", EventCount: 1}
+	if err != nil || row != want {
+		t.Fatalf("audit row = %+v %v, want %+v", row, err, want)
+	}
+}
+
+// TestPGShadowLogCaps: the room caps hold for the shadow log on the run
+// row's own counters; the room log does not count against it.
+func TestPGShadowLogCaps(t *testing.T) {
+	s, _ := requireStore(t)
+	s.SetLimits(store.Limits{MaxEvents: 100, MaxBytes: 1 << 20})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	roomID := createTestRoom(t, s)
+	if err := s.CreateShadowRun(ctx, store.ShadowRun{RoomID: roomID, Status: store.ShadowQueued}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 50; i++ {
+		appendComment(ctx, t, s, roomID, i)
+	}
+	for i := 0; i < 100; i++ {
+		if _, err := s.AppendShadow(ctx, roomID, events.AgentMessage, agentActor, map[string]int{"i": i}); err != nil {
+			t.Fatalf("shadow event %d: %v", i+1, err)
+		}
+	}
+	if _, err := s.AppendShadow(ctx, roomID, events.AgentMessage, agentActor, map[string]int{"i": 100}); !errors.Is(err, store.ErrLogFull) {
+		t.Fatalf("shadow event 101: %v, want ErrLogFull", err)
+	}
+	if run, err := s.GetShadowRun(ctx, roomID); err != nil || run.LastSeq != 100 {
+		t.Fatalf("shadow last_seq = %d (%v), want 100", run.LastSeq, err)
+	}
+	if _, err := s.AppendShadow(ctx, testenv.Name("nope"), events.AgentMessage, agentActor, map[string]int{"i": 0}); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("shadow append without a run row: %v, want ErrNotFound", err)
+	}
+
+	other := createTestRoom(t, s)
+	if err := s.CreateShadowRun(ctx, store.ShadowRun{RoomID: other, Status: store.ShadowQueued}); err != nil {
+		t.Fatal(err)
+	}
+	big := strings.Repeat("x", 300<<10)
+	var err error
+	n := 0
+	for ; n < 10 && err == nil; n++ {
+		_, err = s.AppendShadow(ctx, other, events.AgentMessage, agentActor, map[string]string{"text": big})
+	}
+	if !errors.Is(err, store.ErrLogFull) || n != 4 {
+		t.Fatalf("byte cap: refused after %d appends (%v), want the 4th of 300 KiB refused under 1 MiB", n, err)
 	}
 }

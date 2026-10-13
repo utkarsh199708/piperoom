@@ -24,7 +24,7 @@ func (s *Server) handleExtendRoom(w http.ResponseWriter, r *http.Request) {
 	writeEvent(w, http.StatusOK, ev)
 }
 
-// handleDeleteRoom is DELETE /api/rooms/{id}?reason=: an admin deletes one
+// handleDeleteRoom is DELETE /api/rooms/{id}?reason=&archive=: an admin deletes one
 // room and its open WebSockets get the room.deleted frame and close
 // (docs/api.md). A repeat for a deleted room answers its audit row again; its
 // sockets were closed the first time.
@@ -32,7 +32,17 @@ func (s *Server) handleDeleteRoom(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	u := userFrom(ctx)
 	roomID := chi.URLParam(r, "id")
-	d, err := s.svc.DeleteRoom(ctx, u, roomID, r.URL.Query().Get("reason"))
+	// A delete is an erase; ?archive=true keeps a copy first (docs/api.md).
+	var archive bool
+	switch v := r.URL.Query().Get("archive"); v {
+	case "", "false":
+	case "true":
+		archive = true
+	default:
+		s.writeErr(w, validation("archive must be true or false"))
+		return
+	}
+	d, err := s.svc.DeleteRoom(ctx, u, roomID, r.URL.Query().Get("reason"), archive)
 	if err != nil {
 		s.writeErr(w, err)
 		return

@@ -123,6 +123,9 @@ type roomState struct {
 	shadowActive    bool
 	shadowInAttempt bool
 	graceTimer      *time.Timer
+	// shadowLogFull is set when the shadow log reached the room's cap: the
+	// run is cancelled and ends with status budget.
+	shadowLogFull bool
 
 	// deleting is set while DeleteRoom archives and deletes the room: every
 	// append through the service is refused, so the archive and the delete
@@ -523,7 +526,11 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, err
 // refuses every append.
 func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	if st.snap.Shadow && actor == events.AgentActor {
-		return s.appendShadowLocked(ctx, roomID, typ, payload)
+		e, err := s.appendShadowLocked(ctx, roomID, typ, payload)
+		if errors.Is(err, store.ErrLogFull) {
+			s.shadowLogFullLocked(roomID, st)
+		}
+		return e, err
 	}
 	if st.deleting {
 		return events.Event{}, fmt.Errorf("room: append %s: %w", typ, errRoomDeleting())

@@ -116,6 +116,31 @@ type PurgeQuery struct {
 	// returned (else the room fails with ErrRoomChanged and is tried again on
 	// the next run). An archive error fails the room the same way.
 	Archive ArchiveFunc
+	// AuditReason and DeletedAt fill the room_deletions row each purged room
+	// gets in its own transaction (deleted_by RetentionActor). "" means
+	// "retention"; the zero time means the store's clock.
+	AuditReason string
+	DeletedAt   time.Time
+}
+
+// RetentionActor is room_deletions.deleted_by for a retention purge.
+const RetentionActor = "system"
+
+// Audit builds the room_deletions row of one purged room. Postgres keeps
+// microseconds, so the time is cut there for every store alike.
+func (q PurgeQuery) Audit(roomID, pipelineID string, events int64, now func() time.Time) RoomDeletion {
+	reason := q.AuditReason
+	if reason == "" {
+		reason = "retention"
+	}
+	at := q.DeletedAt
+	if at.IsZero() {
+		at = now()
+	}
+	return RoomDeletion{
+		RoomID: roomID, PipelineID: pipelineID, DeletedBy: RetentionActor,
+		DeletedAt: at.UTC().Truncate(time.Microsecond), Reason: reason, EventCount: events,
+	}
 }
 
 // Purger is the retention surface. It is separate from Store so a store (or a
@@ -184,7 +209,9 @@ type ShadowStore interface {
 	// agent.hypothesis event also sets first_hypothesis_at (once),
 	// final_hypothesis_at and final_hypothesis in the same transaction, so a
 	// crash never leaves the run row behind its log. A room without a run row
-	// wraps ErrNotFound.
+	// wraps ErrNotFound. The room log caps (SetLimits) hold for the shadow log
+	// on their own counts, with the same classes as Append: past them it wraps
+	// ErrLogFull and uses no seq.
 	AppendShadow(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error)
 	// ShadowSince returns shadow events with Seq > afterSeq in order, at most
 	// limit.

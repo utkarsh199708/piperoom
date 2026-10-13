@@ -28,7 +28,7 @@ func TestRoomsDeleteSendsTheRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Method != http.MethodDelete || got.URL.Path != "/api/rooms/r_1" || got.URL.Query().Get("reason") != "x y" {
+	if got.Method != http.MethodDelete || got.URL.Path != "/api/rooms/r_1" || got.URL.Query().Get("reason") != "x y" || got.URL.Query().Has("archive") {
 		t.Fatalf("request = %s %s", got.Method, got.URL)
 	}
 	if got.Header.Get("X-User") != "ada" || got.Header.Get("Content-Type") != "application/json" || got.Header.Get("Cookie") != "" {
@@ -41,10 +41,10 @@ func TestRoomsDeleteSendsTheRequest(t *testing.T) {
 	// Flags first, cookie from the environment, no --as.
 	t.Setenv("PIPEROOM_COOKIE", "__Host-piperoom_session=abc")
 	out.Reset()
-	if err := roomsCmd(context.Background(), st, []string{"delete", "--server", srv.URL, "--reason", "r", "r_2"}, &out); err != nil {
+	if err := roomsCmd(context.Background(), st, []string{"delete", "--server", srv.URL, "--archive", "--reason", "r", "r_2"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if got.URL.Path != "/api/rooms/r_2" || got.Header.Get("Cookie") != "__Host-piperoom_session=abc" || got.Header.Get("X-User") != "" {
+	if got.URL.Path != "/api/rooms/r_2" || got.URL.Query().Get("archive") != "true" || got.Header.Get("Cookie") != "__Host-piperoom_session=abc" || got.Header.Get("X-User") != "" {
 		t.Fatalf("cookie request = %s %v", got.URL, got.Header)
 	}
 	if strings.Contains(out.String(), "abc") {

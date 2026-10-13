@@ -31,6 +31,7 @@ type Store struct {
 
 	shadowRuns   map[string]*store.ShadowRun
 	shadowEvents map[string][]events.Event
+	shadowBytes  map[string]int64 // stored payload bytes of each shadow log (the byte cap's measure)
 
 	limits    store.Limits                  // per-room caps (SetLimits); zero = none
 	deletions map[string]store.RoomDeletion // room_deletions rows by room id
@@ -64,6 +65,7 @@ func New() *Store {
 
 		shadowRuns:   map[string]*store.ShadowRun{},
 		shadowEvents: map[string][]events.Event{},
+		shadowBytes:  map[string]int64{},
 		deletions:    map[string]store.RoomDeletion{},
 	}
 }

@@ -121,6 +121,15 @@ func TestDeleteRoomRoute(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest || limitErrCode(t, resp) != "validation" {
 		t.Fatalf("no reason: %d", resp.StatusCode)
 	}
+	// A copy is kept only on request, and only where an archive dir exists.
+	resp = doJSON(t, http.MethodDelete, deleteURL(srv, roomID, "x")+"&archive=yes", "ada", "")
+	if resp.StatusCode != http.StatusBadRequest || limitErrCode(t, resp) != "validation" {
+		t.Fatalf("archive=yes: %d", resp.StatusCode)
+	}
+	resp = doJSON(t, http.MethodDelete, deleteURL(srv, roomID, "x")+"&archive=true", "ada", "")
+	if resp.StatusCode != http.StatusBadRequest || limitErrCode(t, resp) != "validation" {
+		t.Fatalf("archive=true without PIPEROOM_ARCHIVE_DIR: %d", resp.StatusCode)
+	}
 
 	resp = doJSON(t, http.MethodDelete, deleteURL(srv, roomID, "pasted a secret"), "ada", "")
 	if resp.StatusCode != http.StatusOK {
