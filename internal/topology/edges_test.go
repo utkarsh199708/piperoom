@@ -475,6 +475,7 @@ func TestJavaReplacement(t *testing.T) {
 		{"${1}", `(a)`, "", true},             // Java names must start with a letter
 		{"${nosuch}", `(?<name>a)`, "", true}, // no such group
 		{"${a-b}", `(a)`, "", true},           // not a group name
+		{"${a_b}", `(?<a_b>a)`, "", true},     // Go allows the name, Java does not
 	}
 	for _, tc := range cases {
 		got, err := javaReplacement(tc.in, regexp.MustCompile(tc.regex))
