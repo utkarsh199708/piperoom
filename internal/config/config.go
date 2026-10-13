@@ -309,9 +309,9 @@ const MaxPipelineDailyCostUSD = 1_000_000_000
 // ParseCost validates the spend fields. Empty means off (no table, no cap).
 // PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET is a whole number, "0" = off.
 // PIPEROOM_PIPELINE_DAILY_COST_USD is a plain decimal such as 25 or 12.50
-// with at most six decimals,
-// "0" = off; a value above 0 needs PIPEROOM_MODEL_PRICES. The price file
-// itself is read by the agent package at start-up.
+// with at most six decimals, "0" = off; a value above 0 needs
+// PIPEROOM_MODEL_PRICES. The price file itself is read by the agent package
+// at start-up.
 func ParseCost(c Config) (Cost, error) {
 	out := Cost{PricesFile: strings.TrimSpace(c.ModelPrices)}
 	var err error
