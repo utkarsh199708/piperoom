@@ -518,8 +518,9 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, err
 //
 // It also applies the room log caps (docs/design/retention.md section 5.3):
 // the store refuses an event over the cap with store.ErrLogFull, and after
-// each append the usage it returns decides the one 90% warning and the
-// log_full stop. A room being deleted refuses every append.
+// each append the room's usage (the seq, and the payload bytes added up)
+// decides the one 90% warning and the log_full stop. A room being deleted
+// refuses every append.
 func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	if st.snap.Shadow && actor == events.AgentActor {
 		return s.appendShadowLocked(ctx, roomID, typ, payload)
