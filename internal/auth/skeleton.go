@@ -57,9 +57,10 @@ var lowerLookalikes = map[rune]rune{
 	// into these small letters).
 	'\u0585': 'o', '\u0570': 'h', '\u057d': 'u', '\u0578': 'n', '\u0566': 'q', '\u0581': 'g', '\u0575': 'j',
 	// Cherokee capitals, which look like Latin capitals, and their small
-	// letters (capital + 0x97D0, U+AB70 on): Unicode case folding goes from
-	// small to capital for Cherokee but x/text/cases folds capital to small,
-	// so both are listed.
+	// letters (capital + 0x97D0, U+AB70 on; U+13FC for YV). x/text/cases.Fold
+	// (v0.43.0) turns the capitals into small letters and the small letters
+	// into capitals, so each form reaches this map as the other: both are
+	// listed, and the tests feed both.
 	'\u13a0': 'd', '\u13a1': 'r', '\u13a2': 't', '\u13a5': 'i', '\u13a9': 'y', '\u13aa': 'a', '\u13ab': 'j', '\u13ac': 'e',
 	'\u13b3': 'w', '\u13b7': 'm', '\u13bb': 'h', '\u13bd': 'y', '\u13c0': 'g', '\u13c2': 'h', '\u13c3': 'z', '\u13cf': 'b',
 	'\u13d2': 'r', '\u13d3': 'w', '\u13d4': 'w', '\u13d9': 'v', '\u13da': 's', '\u13de': 'l', '\u13df': 'c', '\u13e2': 'p',
