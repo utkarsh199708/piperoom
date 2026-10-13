@@ -1,0 +1,718 @@
+package wiring
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+
+	"piperoom/internal/clients"
+	"piperoom/internal/config"
+	"piperoom/internal/owners"
+	"piperoom/internal/tools"
+	"piperoom/internal/topology"
+)
+
+// spy implements every client interface and counts every call. Its data
+// names both fixture pipelines' objects, so only the tools' own scope rules
+// and the client set they were built over decide what is read.
+type spy struct {
+	label string
+	calls atomic.Int64
+	mu    sync.Mutex
+	what  []string
+}
+
+func (s *spy) hit(m string) {
+	s.calls.Add(1)
+	s.mu.Lock()
+	s.what = append(s.what, m)
+	s.mu.Unlock()
+}
+
+func (s *spy) ReplicationSlots(context.Context) ([]clients.ReplicationSlot, error) {
+	s.hit("ReplicationSlots")
+	return []clients.ReplicationSlot{{Name: "debezium", Active: true}}, nil
+}
+func (s *spy) RecentDDL(context.Context, time.Time, int) ([]clients.DDLChange, error) {
+	s.hit("RecentDDL")
+	return nil, nil
+}
+func (s *spy) LongTransactions(context.Context, time.Duration) ([]clients.Transaction, error) {
+	s.hit("LongTransactions")
+	return nil, nil
+}
+func (s *spy) Row(_ context.Context, _, _, pk string) (map[string]any, bool, error) {
+	s.hit("Row")
+	return map[string]any{"id": pk}, true, nil
+}
+func (s *spy) Freshness(context.Context, string, string) (time.Time, error) {
+	s.hit("Freshness")
+	return time.Now(), nil
+}
+func (s *spy) ListConnectors(context.Context) ([]string, error) {
+	s.hit("ListConnectors")
+	return []string{"pa-connector", "pb-connector"}, nil
+}
+func (s *spy) Status(_ context.Context, name string) (clients.ConnectorStatus, error) {
+	s.hit("Status")
+	return clients.ConnectorStatus{Name: name, State: "RUNNING", Tasks: []clients.TaskStatus{{ID: 0, State: "RUNNING"}}}, nil
+}
+func (s *spy) Config(context.Context, string) (map[string]string, error) {
+	s.hit("Config")
+	return map[string]string{"connector.class": "io.debezium.connector.postgresql.PostgresConnector"}, nil
+}
+func (s *spy) RestartTask(context.Context, string, int) error { s.hit("RestartTask"); return nil }
+func (s *spy) RestartConnector(context.Context, string) error {
+	s.hit("RestartConnector")
+	return nil
+}
+func (s *spy) Topics(context.Context) ([]string, error) {
+	s.hit("Topics")
+	return []string{"pa.public.a", "pb.public.b"}, nil
+}
+func (s *spy) TopicOffsets(context.Context, string) ([]clients.PartitionOffsets, error) {
+	s.hit("TopicOffsets")
+	return []clients.PartitionOffsets{{Partition: 0, End: 1}}, nil
+}
+func (s *spy) ConsumerGroups(context.Context) ([]string, error) {
+	s.hit("ConsumerGroups")
+	return []string{"pa-sync", "pb-sync"}, nil
+}
+func (s *spy) GroupLag(_ context.Context, g string) (clients.GroupLag, error) {
+	s.hit("GroupLag")
+	return clients.GroupLag{Group: g}, nil
+}
+func (s *spy) FindByKey(context.Context, string, string, time.Time, int) ([]clients.RecordRef, error) {
+	s.hit("FindByKey")
+	return nil, nil
+}
+func (s *spy) Subjects(context.Context) ([]string, error) {
+	s.hit("Subjects")
+	return []string{"pa.public.a-value", "pb.public.b-value"}, nil
+}
+func (s *spy) Versions(context.Context, string) ([]int, error) {
+	s.hit("Versions")
+	return []int{1}, nil
+}
+func (s *spy) Schema(_ context.Context, subject string, v int) (clients.SchemaVersion, error) {
+	s.hit("Schema")
+	return clients.SchemaVersion{Subject: subject, Version: 1, ID: 1, Schema: `"string"`}, nil
+}
+func (s *spy) Compatibility(context.Context, string) (string, bool, error) {
+	s.hit("Compatibility")
+	return "BACKWARD", true, nil
+}
+func (s *spy) SetCompatibility(context.Context, string, string) error {
+	s.hit("SetCompatibility")
+	return nil
+}
+func (s *spy) Register(context.Context, string, string) (int, error) {
+	s.hit("Register")
+	return 1, nil
+}
+
+var (
+	_ clients.SourceDB             = (*spy)(nil)
+	_ clients.Warehouse            = (*spy)(nil)
+	_ clients.ConnectClient        = (*spy)(nil)
+	_ clients.KafkaAdmin           = (*spy)(nil)
+	_ clients.SchemaRegistryClient = (*spy)(nil)
+)
+
+// twoTenantYAML: pipeline pa (tenant a) reads its DSNs from A_* variables,
+// pb (tenant b) from B_*; each owns one layer, nothing is shared.
+func twoTenantYAML(extraPipelines string) string {
+	conns := func(p string) string {
+		return `
+    connections:
+      source_db_url: {env: ` + p + `_SOURCE_DB_URL}
+      warehouse_db_url: {env: ` + p + `_WAREHOUSE_DB_URL}
+      kafka_brokers: {env: ` + p + `_KAFKA_BROKERS}
+      connect_url: {env: ` + p + `_CONNECT_URL}
+      schema_registry_url: {env: ` + p + `_SR_URL}
+      kafka_sasl_password: {env: ` + p + `_KAFKA_PASSWORD}`
+	}
+	pipe := func(id, tenant, table, p string) string {
+		return `
+  - id: ` + id + `
+    tenant: ` + tenant + `
+    topic_prefix: ` + id + `
+    source_tables: [public.` + table + `]
+    connectors: [` + id + `-connector]
+    consumer_groups: [` + id + `-sync]
+    sink_tables: [analytics.` + table + `]
+    sink_ts_column: updated_at` + conns(p)
+	}
+	return "tenants:\n  a: {}\n  b: {}\npipelines:" + pipe("pa", "a", "a", "A") + pipe("pb", "b", "b", "B") + extraPipelines + "\n"
+}
+
+func loadOwners(t *testing.T, y string) *owners.Owners {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "owners.yaml")
+	if err := os.WriteFile(path, []byte(y), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o, err := owners.Load(path)
+	if err != nil {
+		t.Fatalf("owners.Load: %v", err)
+	}
+	return o
+}
+
+// env is a fake environment; "secret-*" values let a test check that no value
+// reaches an error.
+func env(m map[string]string) connSource {
+	return connSource{
+		lookupEnv: func(k string) (string, bool) { v, ok := m[k]; return v, ok },
+		readFile:  func(p string) ([]byte, error) { return nil, &fs.PathError{Op: "open", Path: p, Err: fs.ErrNotExist} },
+		canRead:   func(p string) error { return &fs.PathError{Op: "open", Path: p, Err: fs.ErrNotExist} },
+	}
+}
+
+func twoTenantEnv() map[string]string {
+	m := map[string]string{}
+	for _, p := range []string{"A", "B"} {
+		l := strings.ToLower(p)
+		m[p+"_SOURCE_DB_URL"] = "src-" + l
+		m[p+"_WAREHOUSE_DB_URL"] = "wh-" + l
+		m[p+"_KAFKA_BROKERS"] = "kafka-" + l
+		m[p+"_CONNECT_URL"] = "connect-" + l
+		m[p+"_SR_URL"] = "sr-" + l
+		m[p+"_KAFKA_PASSWORD"] = "secret-kafka-" + l
+	}
+	return m
+}
+
+// fakeOpener records each set's settings and gives it a spy labelled by its
+// source DSN, wired exactly as openClients wires real clients.
+type fakeOpener struct {
+	mu      sync.Mutex
+	cfgs    []config.Config
+	spies   map[string]*spy
+	closed  []string
+	failOn  string // a source DSN whose open fails
+	openErr error
+}
+
+func newFakeOpener() *fakeOpener { return &fakeOpener{spies: map[string]*spy{}} }
+
+func (f *fakeOpener) open(_ context.Context, cfg config.Config, _ *aws.Config, o *owners.Owners) (*Wired, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cfgs = append(f.cfgs, cfg)
+	if cfg.SourceDBURL == f.failOn {
+		return nil, f.openErr
+	}
+	s := &spy{label: cfg.SourceDBURL}
+	f.spies[cfg.SourceDBURL] = s
+	label := cfg.SourceDBURL
+	return &Wired{
+		Source: s, Warehouse: s, Connect: s, Kafka: s, Registry: s,
+		Builder: topology.NewBuilder(o, s, s, s, s),
+		Owners:  o,
+		close: func() {
+			f.mu.Lock()
+			f.closed = append(f.closed, label)
+			f.mu.Unlock()
+		},
+	}, nil
+}
+
+func (f *fakeOpener) deps(src connSource) stackDeps {
+	return stackDeps{open: f.open, src: src, loadAWS: func(context.Context, config.Config) (*aws.Config, error) {
+		return nil, errors.New("loadAWS must not be called")
+	}}
+}
+
+// inputFor builds a plausible input for a tool from its schema, naming the
+// objects of the pipeline with this id and table.
+func inputFor(tl tools.Tool, id, table string) json.RawMessage {
+	props, _ := tl.InputSchema()["properties"].(map[string]any)
+	vals := map[string]any{
+		"connector": id + "-connector", "topic": id + ".public." + table, "group": id + "-sync",
+		"subject": id + ".public." + table + "-value", "table": "public." + table, "pk_column": "id",
+		"pk": "1", "key": "1", "pipeline_id": id, "query": "connector failed",
+		"since": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	}
+	if strings.HasPrefix(tl.Name(), "warehouse_") {
+		vals["table"] = "analytics." + table
+		vals["ts_column"] = "updated_at"
+	}
+	in := map[string]any{}
+	for name, raw := range props {
+		if v, ok := vals[name]; ok {
+			in[name] = v
+			continue
+		}
+		if p, _ := raw.(map[string]any); p != nil && (p["type"] == "integer" || p["type"] == "number") {
+			in[name] = 1
+		}
+	}
+	b, _ := json.Marshal(in)
+	return b
+}
+
+// runAll calls every read tool of reg with ctx scoped to pipeline id.
+func runAll(t *testing.T, reg *tools.Registry, id, table string) (okCalls int, errs []error) {
+	t.Helper()
+	for _, tl := range reg.All() {
+		if tl.Kind() != tools.KindRead {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(tools.WithPipelineID(context.Background(), id), 5*time.Second)
+		_, err := tl.Run(ctx, inputFor(tl, id, table))
+		cancel()
+		if err != nil {
+			errs = append(errs, err)
+		} else {
+			okCalls++
+		}
+	}
+	return okCalls, errs
+}
+
+// TestTwoTenantsToolsHitOnlyTheirOwnClients is the core isolation test: each
+// pipeline's tools, actions and topology reach only the spy built from that
+// pipeline's own variables.
+func TestTwoTenantsToolsHitOnlyTheirOwnClients(t *testing.T) {
+	own := loadOwners(t, twoTenantYAML(""))
+	f := newFakeOpener()
+	st, err := openStacks(context.Background(), config.Config{SourceDBURL: "src-process"}, nil, own, StackOptions{}, f.deps(env(twoTenantEnv())))
+	if err != nil {
+		t.Fatalf("openStacks: %v", err)
+	}
+	defer st.Close()
+
+	// Two sets, each from its own variables; the process-wide set is not
+	// opened because every pipeline has its own connections.
+	if len(f.cfgs) != 2 || len(st.All()) != 2 {
+		t.Fatalf("opened %d sets (%d), want 2", len(f.cfgs), len(st.All()))
+	}
+	for _, c := range f.cfgs {
+		if c.SourceDBURL == "src-process" {
+			t.Fatal("the process-wide set was opened although no pipeline uses it")
+		}
+	}
+	a, b := f.spies["src-a"], f.spies["src-b"]
+	if a == nil || b == nil {
+		t.Fatalf("spies = %v", f.spies)
+	}
+	sa, sb := st.For("pa"), st.For("pb")
+	if sa == sb || sa.Name != "pipeline pa" || sb.Name != "pipeline pb" {
+		t.Fatalf("sets: %q %q", sa.Name, sb.Name)
+	}
+
+	okA, errsA := runAll(t, sa.Tools, "pa", "a")
+	t.Logf("pa: %d read tools ok, %d failed (%v); client calls %v", okA, len(errsA), errsA, a.what)
+	if a.calls.Load() == 0 || okA == 0 {
+		t.Fatalf("pa's tools never reached pa's clients (ok=%d)", okA)
+	}
+	if n := b.calls.Load(); n != 0 {
+		t.Fatalf("pa's tools reached pb's clients %d times: %v", n, b.what)
+	}
+	beforeA := a.calls.Load()
+	okB, _ := runAll(t, sb.Tools, "pb", "b")
+	if b.calls.Load() == 0 || okB == 0 {
+		t.Fatalf("pb's tools never reached pb's clients (ok=%d)", okB)
+	}
+	if a.calls.Load() != beforeA {
+		t.Fatalf("pb's tools reached pa's clients: %v", a.what[beforeA:])
+	}
+
+	// A context that names the other pipeline (a bug in a caller, or a stale
+	// context) still cannot reach it: pa's tools do not even know pb.
+	beforeA, beforeB := a.calls.Load(), b.calls.Load()
+	_, errs := runAll(t, sa.Tools, "pb", "b")
+	for _, err := range errs {
+		if !errors.Is(err, tools.ErrOutOfScope) && !errors.Is(err, tools.ErrBadInput) {
+			t.Errorf("pa tool with pb scope: err = %v, want ErrOutOfScope", err)
+		}
+	}
+	if a.calls.Load() != beforeA || b.calls.Load() != beforeB {
+		t.Fatal("a pa tool run with pb's scope touched a client")
+	}
+
+	// Actions: pa's restart runs on pa's Connect only.
+	act, ok := sa.Actions.Get("connect_restart_connector")
+	if !ok {
+		t.Fatal("pa's set has no connect_restart_connector")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	_, _ = act.Execute(ctx, json.RawMessage(`{"connector":"pa-connector"}`))
+	cancel()
+	if !slices.Contains(a.what, "RestartConnector") || slices.Contains(b.what, "RestartConnector") {
+		t.Fatalf("restart went to a=%v b=%v", a.what, b.what)
+	}
+
+	// Topology routes by pipeline id.
+	beforeA, beforeB = a.calls.Load(), b.calls.Load()
+	g, err := st.Build(context.Background(), "pb")
+	if err != nil || g.PipelineID != "pb" {
+		t.Fatalf("Build(pb) = %+v, %v", g, err)
+	}
+	if a.calls.Load() != beforeA || b.calls.Load() == beforeB {
+		t.Fatal("Build(pb) must read pb's clients only")
+	}
+	if st.Render(g) == "" {
+		t.Fatal("Render(pb graph) is empty")
+	}
+
+	// The settings: no inheritance from the process-wide config.
+	for _, c := range f.cfgs {
+		if c.KafkaSecurityProtocol != "" || c.ConnectPassword != "" {
+			t.Fatalf("a pipeline set inherited process settings: %+v", c)
+		}
+	}
+}
+
+// TestUnknownPipelineGetsEmptySet: with no process-wide set, a room whose
+// pipeline is unknown gets no client at all.
+func TestUnknownPipelineGetsEmptySet(t *testing.T) {
+	own := loadOwners(t, twoTenantYAML(""))
+	f := newFakeOpener()
+	st, err := openStacks(context.Background(), config.Config{}, nil, own, StackOptions{}, f.deps(env(twoTenantEnv())))
+	if err != nil {
+		t.Fatalf("openStacks: %v", err)
+	}
+	defer st.Close()
+	for _, id := range []string{"", "nope"} {
+		s := st.For(id)
+		if s.Name != NoStack || s.Clients != nil || len(s.Actions.All()) != 0 {
+			t.Fatalf("For(%q) = %q", id, s.Name)
+		}
+		names := []string{}
+		for _, tl := range s.Tools.All() {
+			names = append(names, tl.Name())
+		}
+		if !slices.Equal(names, []string{"runbook_lookup"}) {
+			t.Fatalf("empty set tools = %v", names)
+		}
+		if _, err := st.Build(context.Background(), id); !errors.Is(err, errNoClientSet) {
+			t.Fatalf("Build(%q) err = %v", id, err)
+		}
+		if _, err := st.Trace(context.Background(), id, "public.a", "1"); !errors.Is(err, errNoClientSet) {
+			t.Fatalf("Trace(%q) err = %v", id, err)
+		}
+	}
+}
+
+// TestMixedProcessWideAndOwn: a pipeline with no connections uses the
+// process-wide set (today's behaviour); unknown ids fall back to it.
+func TestMixedProcessWideAndOwn(t *testing.T) {
+	y := strings.Replace(twoTenantYAML(""), "tenants:\n  a: {}\n  b: {}\n", "tenants:\n  a: {}\n  b: {}\n  c: {}\n", 1) +
+		"  - {id: pc, tenant: c, topic_prefix: pc, source_tables: [public.c], connectors: [pc-connector]}\n"
+	own := loadOwners(t, y)
+	f := newFakeOpener()
+	proc := config.Config{SourceDBURL: "src-process", KafkaSASLPassword: "secret-process",
+		ConnectUsername: "process-user", ConnectPassword: "secret-process-connect", KafkaSecurityProtocol: "SASL_SSL", WarehouseKind: "snowflake"}
+	st, err := openStacks(context.Background(), proc, nil, own, StackOptions{}, f.deps(env(twoTenantEnv())))
+	if err != nil {
+		t.Fatalf("openStacks: %v", err)
+	}
+	defer st.Close()
+	if got := st.For("pc"); got.Name != ProcessWideStack || !slices.Equal(got.Pipelines, []string{"pc"}) {
+		t.Fatalf("For(pc) = %q %v", got.Name, got.Pipelines)
+	}
+	if st.For("unknown") != st.For("pc") {
+		t.Fatal("an unknown pipeline must fall back to the process-wide set")
+	}
+	if st.All()[0].Name != ProcessWideStack {
+		t.Fatal("the process-wide set comes first")
+	}
+	// The process-wide set's owners view holds pc only.
+	if _, ok := st.For("pc").Clients.Owners.Pipeline("pa"); ok {
+		t.Fatal("the process-wide view must not know pa")
+	}
+	// No inheritance: a key a pipeline leaves out stays empty, it never takes
+	// the process-wide value.
+	for _, c := range f.cfgs {
+		if c.SourceDBURL == "src-process" {
+			if c.ConnectPassword != "secret-process-connect" {
+				t.Fatal("the process-wide set must keep its own settings")
+			}
+			continue
+		}
+		if c.KafkaSASLPassword == "secret-process" || c.ConnectUsername != "" || c.ConnectPassword != "" || c.KafkaSecurityProtocol != "" || c.WarehouseKind != "" {
+			t.Fatalf("a pipeline set inherited process-wide settings: %+v", c)
+		}
+	}
+}
+
+// TestNoPipelinesOpensProcessSet keeps today's start for an owners file with
+// no pipeline.
+func TestNoPipelinesOpensProcessSet(t *testing.T) {
+	own := loadOwners(t, "{}\n")
+	f := newFakeOpener()
+	st, err := openStacks(context.Background(), config.Config{SourceDBURL: "src-process"}, nil, own, StackOptions{}, f.deps(env(nil)))
+	if err != nil {
+		t.Fatalf("openStacks: %v", err)
+	}
+	defer st.Close()
+	if len(f.cfgs) != 1 || st.For("anything").Name != ProcessWideStack {
+		t.Fatalf("cfgs=%d set=%q", len(f.cfgs), st.For("anything").Name)
+	}
+}
+
+func TestOpenStacksErrors(t *testing.T) {
+	own := loadOwners(t, twoTenantYAML(""))
+	cases := []struct {
+		name   string
+		mutate func(map[string]string, *connSource)
+		want   []string
+	}{
+		{"missing env var", func(m map[string]string, _ *connSource) { delete(m, "B_CONNECT_URL") },
+			[]string{`pipeline "pb"`, "connections.connect_url", "B_CONNECT_URL", "not set"}},
+		{"empty env var", func(m map[string]string, _ *connSource) { m["A_SR_URL"] = "  " },
+			[]string{`pipeline "pa"`, "connections.schema_registry_url", "A_SR_URL", "empty"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := twoTenantEnv()
+			src := env(m)
+			tc.mutate(m, &src)
+			f := newFakeOpener()
+			_, err := openStacks(context.Background(), config.Config{}, nil, own, StackOptions{}, f.deps(src))
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			if !errors.Is(err, errConnRef) {
+				t.Errorf("err = %v, want errConnRef", err)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("err %q does not contain %q", err, w)
+				}
+			}
+			if strings.Contains(err.Error(), "secret-") {
+				t.Errorf("err leaks a value: %v", err)
+			}
+			if len(f.cfgs) != 0 {
+				t.Errorf("%d sets opened before the references resolved", len(f.cfgs))
+			}
+		})
+	}
+}
+
+func TestResolveFileRefs(t *testing.T) {
+	dir := t.TempDir()
+	dsn := filepath.Join(dir, "dsn")
+	if err := os.WriteFile(dsn, []byte("  secret-dsn-from-file\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty := filepath.Join(dir, "empty")
+	if err := os.WriteFile(empty, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	big := filepath.Join(dir, "big")
+	if err := os.WriteFile(big, make([]byte, maxConnFileBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pem := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(pem, make([]byte, 3*maxConnFileBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing")
+
+	v, err := resolveRef("source_db_url", owners.ConnRef{File: dsn}, osConnSource)
+	if err != nil || v != "secret-dsn-from-file" {
+		t.Fatalf("file value = %q, %v", v, err)
+	}
+	// A TLS key gets the path itself, and a large CA bundle is fine.
+	if v, err := resolveRef("kafka_tls_ca_file", owners.ConnRef{File: pem}, osConnSource); err != nil || v != pem {
+		t.Fatalf("path key = %q, %v", v, err)
+	}
+	for name, tc := range map[string]struct {
+		key, path, want string
+	}{
+		"unreadable file":     {"source_db_url", missing, "read file"},
+		"unreadable pem":      {"connect_tls_cert_file", missing, "open file"},
+		"empty file":          {"connect_password", empty, "is empty"},
+		"file over the limit": {"connect_password", big, "larger than"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := resolveRef(tc.key, owners.ConnRef{File: tc.path}, osConnSource)
+			if err == nil || !errors.Is(err, errConnRef) || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), tc.path) {
+				t.Fatalf("err = %v, want %q naming %s", err, tc.want, tc.path)
+			}
+		})
+	}
+	if _, err := resolveRef("source_db_url", owners.ConnRef{}, osConnSource); !errors.Is(err, errConnRef) {
+		t.Fatalf("no reference: err = %v", err)
+	}
+	if _, err := pipelineConfig(owners.Pipeline{ID: "x", Connections: owners.Connections{"nope": {Env: "X"}}}, osConnSource); !errors.Is(err, errConnRef) {
+		t.Fatalf("unknown key: err = %v", err)
+	}
+}
+
+// TestUnreadableFileStopsStart runs a file reference through openStacks.
+func TestUnreadableFileStopsStart(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "nope", "warehouse")
+	y := strings.Replace(twoTenantYAML(""), "{env: A_WAREHOUSE_DB_URL}", "{file: "+missing+"}", 1)
+	own := loadOwners(t, y)
+	f := newFakeOpener()
+	src := env(twoTenantEnv())
+	src.readFile = readCapped
+	_, err := openStacks(context.Background(), config.Config{}, nil, own, StackOptions{}, f.deps(src))
+	if err == nil || !strings.Contains(err.Error(), `pipeline "pa"`) || !strings.Contains(err.Error(), "connections.warehouse_db_url") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(f.cfgs) != 0 {
+		t.Fatal("a set was opened")
+	}
+}
+
+// TestOpenFailureClosesEarlierSets: when the second set fails, the first is
+// closed and the error names the failing pipeline.
+func TestOpenFailureClosesEarlierSets(t *testing.T) {
+	own := loadOwners(t, twoTenantYAML(""))
+	f := newFakeOpener()
+	f.failOn, f.openErr = "src-b", errors.New("dial failed")
+	_, err := openStacks(context.Background(), config.Config{}, nil, own, StackOptions{}, f.deps(env(twoTenantEnv())))
+	if err == nil || !strings.Contains(err.Error(), `pipeline "pb"`) || !strings.Contains(err.Error(), "dial failed") {
+		t.Fatalf("err = %v", err)
+	}
+	if !slices.Equal(f.closed, []string{"src-a"}) {
+		t.Fatalf("closed = %v, want [src-a]", f.closed)
+	}
+}
+
+// TestRealOpenerNamesPipeline runs the real openClients with a pipeline's own
+// bad source DSN: it fails before any network call and names the pipeline.
+func TestRealOpenerNamesPipeline(t *testing.T) {
+	y := twoTenantYAML("")
+	for _, p := range []string{"A", "B"} {
+		// A SASL password without a SASL protocol is refused by netsec;
+		// this test is about the source step.
+		y = strings.Replace(y, "\n      kafka_sasl_password: {env: "+p+"_KAFKA_PASSWORD}", "", 1)
+	}
+	own := loadOwners(t, y)
+	m := twoTenantEnv()
+	for _, p := range []string{"A", "B"} {
+		m[p+"_SOURCE_DB_URL"] = "postgres://%zz"
+		m[p+"_KAFKA_BROKERS"] = "localhost:1"
+		m[p+"_CONNECT_URL"] = "http://localhost:1"
+		m[p+"_SR_URL"] = "http://localhost:1"
+	}
+	d := stackDeps{open: openClients, src: env(m)}
+	_, err := openStacks(context.Background(), config.Config{}, nil, own, StackOptions{}, d)
+	if err == nil || !strings.Contains(err.Error(), `pipeline "pa"`) || !strings.Contains(err.Error(), "source postgres") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestOnlyOpensOnePipeline(t *testing.T) {
+	own := loadOwners(t, twoTenantYAML(""))
+	f := newFakeOpener()
+	m := twoTenantEnv()
+	delete(m, "A_SOURCE_DB_URL") // pa is not opened, so its references are not read
+	st, err := openStacks(context.Background(), config.Config{}, nil, own, StackOptions{Only: []string{"pb"}}, f.deps(env(m)))
+	if err != nil {
+		t.Fatalf("openStacks: %v", err)
+	}
+	defer st.Close()
+	if len(f.cfgs) != 1 || f.cfgs[0].SourceDBURL != "src-b" || st.For("pa").Name != NoStack {
+		t.Fatalf("cfgs=%v pa=%q", f.cfgs, st.For("pa").Name)
+	}
+	if _, err := openStacks(context.Background(), config.Config{}, nil, own, StackOptions{Only: []string{"zz"}}, f.deps(env(m))); err == nil || !strings.Contains(err.Error(), `"zz"`) {
+		t.Fatalf("unknown Only: err = %v", err)
+	}
+}
+
+func TestBadWarehouseKindNamesPipeline(t *testing.T) {
+	y := strings.Replace(twoTenantYAML(""), "      kafka_sasl_password: {env: B_KAFKA_PASSWORD}", "      kafka_sasl_password: {env: B_KAFKA_PASSWORD}\n      warehouse_kind: {value: oracle}", 1)
+	own := loadOwners(t, y)
+	_, err := openStacks(context.Background(), config.Config{}, nil, own, StackOptions{}, newFakeOpener().deps(env(twoTenantEnv())))
+	if err == nil || !strings.Contains(err.Error(), `pipeline "pb"`) || !strings.Contains(err.Error(), "WAREHOUSE_KIND") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// TestMSKIAMIsASharedIdentity: two tenants on MSK IAM share the process AWS
+// identity, which is refused; one tenant loads AWS when the caller had none.
+func TestMSKIAMIsASharedIdentity(t *testing.T) {
+	msk := "\n      kafka_security_protocol: {value: SASL_SSL}\n      kafka_sasl_mechanism: {value: AWS_MSK_IAM}"
+	both := strings.Replace(twoTenantYAML(""), "{env: A_KAFKA_PASSWORD}", "{env: A_KAFKA_PASSWORD}"+msk, 1)
+	both = strings.Replace(both, "{env: B_KAFKA_PASSWORD}", "{env: B_KAFKA_PASSWORD}"+msk, 1)
+	_, err := openStacks(context.Background(), config.Config{}, nil, loadOwners(t, both), StackOptions{}, newFakeOpener().deps(env(twoTenantEnv())))
+	if err == nil || !strings.Contains(err.Error(), awsProcessIdentityRef) {
+		t.Fatalf("err = %v, want the shared AWS identity refused", err)
+	}
+
+	one := strings.Replace(twoTenantYAML(""), "{env: A_KAFKA_PASSWORD}", "{env: A_KAFKA_PASSWORD}"+msk, 1)
+	f := newFakeOpener()
+	d := f.deps(env(twoTenantEnv()))
+	var loaded atomic.Int64
+	d.loadAWS = func(_ context.Context, c config.Config) (*aws.Config, error) {
+		loaded.Add(1)
+		if !usesMSKIAM(c) || c.AWSRegion != "eu-west-1" {
+			t.Errorf("loadAWS cfg: mechanism %q region %q", c.KafkaSASLMechanism, c.AWSRegion)
+		}
+		return &aws.Config{}, nil
+	}
+	st, err := openStacks(context.Background(), config.Config{AWSRegion: "eu-west-1"}, nil, loadOwners(t, one), StackOptions{}, d)
+	if err != nil {
+		t.Fatalf("one tenant on MSK IAM: %v", err)
+	}
+	st.Close()
+	if loaded.Load() != 1 {
+		t.Fatalf("loadAWS called %d times, want 1", loaded.Load())
+	}
+	d.loadAWS = func(context.Context, config.Config) (*aws.Config, error) { return nil, errors.New("no credentials") }
+	if _, err := openStacks(context.Background(), config.Config{}, nil, loadOwners(t, one), StackOptions{}, d); err == nil || !strings.Contains(err.Error(), "MSK IAM") {
+		t.Fatalf("AWS load failure: err = %v", err)
+	}
+}
+
+func TestConnFieldsMatchOwnersKeys(t *testing.T) {
+	var keys []string
+	for k := range connFields {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	if !slices.Equal(keys, owners.ConnectionKeys()) {
+		t.Fatalf("wiring keys %v\nowners keys %v", keys, owners.ConnectionKeys())
+	}
+	// Every setter reaches a distinct field.
+	var c config.Config
+	for i, k := range keys {
+		*connFields[k](&c) = strings.Repeat("x", i+1)
+	}
+	seen := map[string]bool{}
+	for _, k := range keys {
+		v := *connFields[k](&c)
+		if seen[v] {
+			t.Fatalf("two keys write the same field (%s)", k)
+		}
+		seen[v] = true
+	}
+}
+
+func TestStacksCloseNilSafe(t *testing.T) {
+	var s *Stacks
+	s.Close()
+	own := loadOwners(t, twoTenantYAML(""))
+	f := newFakeOpener()
+	st, err := openStacks(context.Background(), config.Config{}, nil, own, StackOptions{}, f.deps(env(twoTenantEnv())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	st.Close()
+	if len(f.closed) != 2 {
+		t.Fatalf("closed %v, want each set once", f.closed)
+	}
+	if _, err := openStacks(context.Background(), config.Config{}, nil, nil, StackOptions{}, f.deps(env(nil))); err == nil {
+		t.Fatal("nil owners: want an error")
+	}
+}
