@@ -433,10 +433,11 @@ func TestRender(t *testing.T) {
 			{ID: "pg:public.orders", Kind: KindSourceTable, Name: "public.orders", Layer: "postgres", Owner: "priya", Health: HealthWarn, Facts: map[string]string{"slot_retained": "1.3 GiB", "slot_active": "false"}},
 			{ID: "connect:c1", Kind: KindConnector, Name: "c1", Layer: "kafka-connect", Owner: "arjun", Health: HealthFail, Facts: map[string]string{"tasks_failed": "1"}},
 		},
+		Edges: []Edge{{From: "pg:public.orders", To: "connect:c1"}},
 	}
 	b := NewBuilder(testOwners(), nil, nil, nil, nil)
 	got := b.Render(g)
-	want := "pipeline orders\n1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.3 GiB\n2 connect:c1 [kafka-connect, owner arjun] FAIL tasks_failed=1\n"
+	want := "pipeline orders\n" + renderLegend + "\n1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=1.3 GiB\n2 connect:c1 [kafka-connect, owner arjun] FAIL tasks_failed=1\n  from: pg:public.orders\n"
 	if got != want {
 		t.Fatalf("Render mismatch:\ngot:  %q\nwant: %q", got, want)
 	}

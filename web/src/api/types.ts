@@ -302,6 +302,10 @@ export interface TopologyNode {
 export interface TopologyEdge {
   from: string
   to: string
+  /** Absent means 'data'. 'depends_on': `from` needs `to` to work; no records flow (docs/api.md "Topology"). */
+  kind?: 'data' | 'depends_on'
+  /** Absent means 'mapped' (proven). 'inferred': assumed from owners.yaml, shown as unconfirmed. */
+  mapping?: 'mapped' | 'inferred'
 }
 
 export interface Topology {

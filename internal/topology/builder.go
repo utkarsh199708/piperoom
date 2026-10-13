@@ -38,6 +38,10 @@ type Thresholds struct {
 	// for the topic to warn. Build overrides it per pipeline with owners
 	// watch.dlq_growth.window (ThresholdsFor); this is the base default.
 	DLQRecentWarn time.Duration
+	// SchemaRecentWarn is how long after this builder saw a subject's latest
+	// version change the subject still counts as registered recently (and
+	// warns).
+	SchemaRecentWarn time.Duration
 }
 
 // DefaultThresholds returns the thresholds the task specifies.
@@ -49,6 +53,7 @@ func DefaultThresholds() Thresholds {
 		SinkStaleFail:         30 * time.Minute,
 		HealthBudget:          5 * time.Second,
 		DLQRecentWarn:         time.Hour,
+		SchemaRecentWarn:      time.Hour,
 	}
 }
 
@@ -81,11 +86,31 @@ type builder struct {
 	// already reported by this builder instance.
 	warnMu sync.Mutex
 	warned map[string]bool
+
+	// sr is optional: without it the graph has no schema-subject nodes.
+	sr clients.SchemaRegistryClient
+	// srMu guards subjects, this builder's last reading of each subject's
+	// latest version (see subjectSeen).
+	srMu     sync.Mutex
+	subjects map[string]subjectSeen
+}
+
+// Option configures a Builder made by NewBuilder.
+type Option func(*builder)
+
+// WithSchemaRegistry lets the builder add the Schema Registry subjects the
+// pipeline's connectors and consumers depend on, with depends_on edges.
+func WithSchemaRegistry(sr clients.SchemaRegistryClient) Option {
+	return func(b *builder) { b.sr = sr }
 }
 
 // NewBuilder constructs a Builder with default thresholds.
-func NewBuilder(o *owners.Owners, connect clients.ConnectClient, kafka clients.KafkaAdmin, src clients.SourceDB, wh clients.Warehouse) Builder {
-	return newBuilder(o, connect, kafka, src, wh, slog.Default())
+func NewBuilder(o *owners.Owners, connect clients.ConnectClient, kafka clients.KafkaAdmin, src clients.SourceDB, wh clients.Warehouse, opts ...Option) Builder {
+	b := newBuilder(o, connect, kafka, src, wh, slog.Default())
+	for _, opt := range opts {
+		opt(b)
+	}
+	return b
 }
 
 // newBuilder is NewBuilder with an explicit logger; same-package tests use it
@@ -95,15 +120,16 @@ func newBuilder(o *owners.Owners, connect clients.ConnectClient, kafka clients.K
 		log = slog.Default()
 	}
 	return &builder{
-		o:       o,
-		connect: connect,
-		kafka:   kafka,
-		src:     src,
-		wh:      wh,
-		t:       DefaultThresholds(),
-		log:     log,
-		now:     time.Now,
-		warned:  map[string]bool{},
+		o:        o,
+		connect:  connect,
+		kafka:    kafka,
+		src:      src,
+		wh:       wh,
+		t:        DefaultThresholds(),
+		log:      log,
+		now:      time.Now,
+		warned:   map[string]bool{},
+		subjects: map[string]subjectSeen{},
 	}
 }
 
@@ -120,50 +146,20 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 
 	info := b.collect(cctx, p)
 
-	g := Graph{PipelineID: pipelineID}
-
-	for _, tbl := range p.SourceTables {
-		g.Nodes = append(g.Nodes, b.sourceNode(p, tbl, info))
-	}
-
-	var topics []string
-	connTopics := map[string][]string{}
-	placeholder := map[string]bool{}
-	connIdx := map[string]int{}
-	for _, cn := range p.Connectors {
-		connIdx[cn] = len(g.Nodes)
-		g.Nodes = append(g.Nodes, b.connectorNode(p, cn, info))
-		var ts []string
-		isFallback := false
-		if snap, ok := info.connect[cn]; ok && snap.err == nil {
-			ts = deriveTopics(snap.config, p.SourceTables, b.warnBadListEntry)
-		} else {
-			// Connect unreachable: keep the graph shape with placeholder
-			// topics so the topic node and its edges still exist.
-			ts = fallbackTopics(p.SourceTables)
-			isFallback = true
-		}
-		connTopics[cn] = ts
-		for _, t := range ts {
-			if !slices.Contains(topics, t) {
-				topics = append(topics, t)
-			}
-			if isFallback {
-				placeholder[t] = true
-			}
-		}
-	}
+	// Topics and data edges come from config and metadata collect already
+	// read (edges.go); the schema subjects follow from the topics' users.
+	fp := b.planFlow(p, info)
+	dlqs := discoverDLQs(p, info)
+	subjects, deps := b.planSubjects(info, fp)
 
 	// Only query Kafka for topics we actually derived; placeholder topics have
 	// unknown health because their real names are unavailable.
-	var realTopics []string
-	for _, t := range topics {
-		if !placeholder[t] {
-			realTopics = append(realTopics, t)
+	var queried []string
+	for _, t := range fp.topics {
+		if !fp.placeholder[t] {
+			queried = append(queried, t)
 		}
 	}
-	dlqs := discoverDLQs(p, info)
-	queried := slices.Clone(realTopics)
 	for _, d := range dlqs {
 		// A DLQ that is also a CDC topic is refused when owners.yaml loads;
 		// the guard only keeps one Kafka call per name.
@@ -171,16 +167,31 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 			queried = append(queried, d.topic)
 		}
 	}
-	b.collectTopics(cctx, queried, info)
+	// Kafka and the registry are independent, so they share the budget.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		b.collectTopics(cctx, queried, info)
+	}()
+	go func() {
+		defer wg.Done()
+		b.collectSchemas(cctx, subjects, info)
+	}()
+	wg.Wait()
 
-	// Connector DLQ facts need the DLQ topic reading (dlq_topic_missing), so
-	// they are added after the Kafka phase; node order is unchanged.
-	for _, cn := range p.Connectors {
-		b.addConnectorDLQFacts(&g.Nodes[connIdx[cn]], info.connect[cn], info)
+	g := Graph{PipelineID: pipelineID}
+	for _, tbl := range p.SourceTables {
+		g.Nodes = append(g.Nodes, b.sourceNode(p, tbl, info))
 	}
-
-	for _, t := range topics {
-		if placeholder[t] {
+	for _, cn := range p.Connectors {
+		n := b.connectorNode(p, cn, info)
+		// Connector DLQ facts need the DLQ topic reading (dlq_topic_missing).
+		b.addConnectorDLQFacts(&n, info.connect[cn], info)
+		g.Nodes = append(g.Nodes, n)
+	}
+	for _, t := range fp.topics {
+		if fp.placeholder[t] {
 			g.Nodes = append(g.Nodes, b.placeholderTopicNode(p, t))
 		} else {
 			g.Nodes = append(g.Nodes, b.topicNode(p, t, info))
@@ -196,34 +207,21 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	for _, s := range p.SinkTables {
 		g.Nodes = append(g.Nodes, b.sinkNode(p, s, info))
 	}
+	// Subjects are side nodes, after the data flow.
+	for _, s := range subjects {
+		g.Nodes = append(g.Nodes, b.subjectNode(s, info, th))
+	}
 
-	// Edges: table -> connector -> topic -> group -> sink.
-	for _, tbl := range p.SourceTables {
-		for _, cn := range p.Connectors {
-			g.Edges = append(g.Edges, Edge{From: "pg:" + tbl, To: "connect:" + cn})
-		}
-	}
-	for _, cn := range p.Connectors {
-		for _, t := range connTopics[cn] {
-			g.Edges = append(g.Edges, Edge{From: "connect:" + cn, To: "topic:" + t})
-		}
-	}
-	for _, t := range topics {
-		for _, gr := range p.ConsumerGroups {
-			g.Edges = append(g.Edges, Edge{From: "topic:" + t, To: "group:" + gr})
-		}
-	}
-	for _, gr := range p.ConsumerGroups {
-		for _, s := range p.SinkTables {
-			g.Edges = append(g.Edges, Edge{From: "group:" + gr, To: "wh:" + s})
-		}
-	}
+	g.Edges = fp.edges
 	// DLQ edges are side edges into the dead-letter node; nothing leaves it.
+	// Their writers come from connector config or an explicit owners.yaml
+	// declaration, so they are mapped.
 	for _, d := range dlqs {
 		for _, w := range d.writerIDs() {
 			g.Edges = append(g.Edges, Edge{From: w, To: "dlq:" + d.topic})
 		}
 	}
+	g.Edges = append(g.Edges, deps...)
 
 	return g, nil
 }
@@ -276,7 +274,9 @@ func (b *builder) sourceNode(p owners.Pipeline, tbl string, info *collected) Nod
 func (b *builder) slotName(p owners.Pipeline, tbl string, info *collected) string {
 	for _, cn := range p.Connectors {
 		snap, ok := info.connect[cn]
-		if !ok || snap.err != nil {
+		// A sink has no include list, which would read as "streams every
+		// table" and lend the table the default slot name.
+		if !ok || snap.err != nil || isSinkConnector(snap) {
 			continue
 		}
 		if streamsTable(snap.config, tbl, b.warnBadListEntry) {

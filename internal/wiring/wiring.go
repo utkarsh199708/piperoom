@@ -210,7 +210,7 @@ func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, e
 		Connect:       a2.Connect,
 		Kafka:         a2.Kafka,
 		Registry:      a2.Registry,
-		Builder:       topology.NewBuilder(o, a2.Connect, a2.Kafka, src, wh),
+		Builder:       topology.NewBuilder(o, a2.Connect, a2.Kafka, src, wh, topology.WithSchemaRegistry(a2.Registry)),
 		Owners:        o,
 		close:         func() { once.Do(closeOpened) },
 	}, nil
@@ -223,7 +223,7 @@ func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, e
 func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error {
 	b := w.Builder
 	if b == nil {
-		b = topology.NewBuilder(w.Owners, w.Connect, w.Kafka, w.Source, w.Warehouse)
+		b = topology.NewBuilder(w.Owners, w.Connect, w.Kafka, w.Source, w.Warehouse, topology.WithSchemaRegistry(w.Registry))
 		w.Builder = b
 	}
 	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: w.Connect}); err != nil {
