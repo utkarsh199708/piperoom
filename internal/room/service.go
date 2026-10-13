@@ -113,6 +113,9 @@ type roomState struct {
 	shadowActive  bool
 	shadowStarted bool
 	graceTimer    *time.Timer
+	// shadowClosed is closed when the room closes, so a supervisor in its
+	// retry backoff wakes and stops instead of retrying on a closed room.
+	shadowClosed chan struct{}
 }
 
 // Service is the room domain logic. All state derives from the event log; the

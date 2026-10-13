@@ -86,6 +86,8 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 	st.agentCancel = cancel
 	st.agentRun++
 	st.shadowActive = true
+	st.shadowClosed = make(chan struct{})
+	closed := st.shadowClosed
 	gate := &agentGate{s: s, st: st, roomID: roomID}
 	s.wg.Add(1)
 	go func() {
@@ -93,7 +95,7 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 		defer cancel()
 		defer gate.release()
 		var tokens atomic.Int64
-		status := s.superviseShadow(ctx, roomID, title, pipelineID, raw, st, gate, &tokens)
+		status := s.superviseShadow(ctx, roomID, title, pipelineID, raw, st, gate, &tokens, closed)
 		gate.release()
 		s.finishShadow(roomID, st, status, tokens.Load())
 	}()
@@ -103,7 +105,7 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 // "" when the run row could not be created (then nothing ran and nothing is
 // written). A nil return maps to ShadowHypothesised here; finishShadow lowers
 // it to no_hypothesis when the run emitted none.
-func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID string, raw json.RawMessage, st *roomState, gate *agentGate, tokens *atomic.Int64) string {
+func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID string, raw json.RawMessage, st *roomState, gate *agentGate, tokens *atomic.Int64, closed <-chan struct{}) string {
 	// Second try (the first was at open): no row means nothing could store
 	// the run's output, so no tokens are spent on it.
 	cctx, ccancel := context.WithTimeout(ctx, shadowWriteTimeout)
@@ -125,6 +127,13 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 	backoff := agentRetryBackoff
 	started := false
 	for attempt := 1; ; attempt++ {
+		// No attempt after the first may start on a closed room: the
+		// room-closed hook has dropped its token count, so a retry would
+		// spend a fresh budget (design 3.3, M4). With grace > 0 the close
+		// does not cancel ctx, so this is checked here, not only after a run.
+		if attempt > 1 && s.shadowRoomClosed(st) {
+			return store.ShadowInterrupted
+		}
 		if err := gate.acquire(ctx); err != nil {
 			return store.ShadowInterrupted // closed or shut down while queued
 		}
@@ -158,6 +167,8 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 		}
 		select {
 		case <-ctx.Done():
+			return store.ShadowInterrupted
+		case <-closed:
 			return store.ShadowInterrupted
 		case <-time.After(backoff):
 		}
@@ -254,6 +265,10 @@ func (s *Service) finishShadow(roomID string, st *roomState, status string, toke
 // not started yet is cancelled at once. A room whose run has ended is revealed
 // here. Caller holds s.mu, after room.closed was appended.
 func (s *Service) closeShadowLocked(ctx context.Context, roomID string, st *roomState, cancel context.CancelFunc) context.CancelFunc {
+	if st.shadowClosed != nil {
+		close(st.shadowClosed) // CloseRoom runs once per room
+		st.shadowClosed = nil
+	}
 	if st.shadowActive {
 		if s.shadowGrace > 0 && st.shadowStarted && cancel != nil {
 			st.graceTimer = time.AfterFunc(s.shadowGrace, cancel)
