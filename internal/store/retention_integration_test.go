@@ -33,7 +33,7 @@ func seedRoomWithChildren(ctx context.Context, t *testing.T, s *store.PG, closed
 	}); err != nil {
 		t.Fatalf("create proposal: %v", err)
 	}
-	if err := s.RecordApproval(ctx, proposalID, "postgres", "approved", ""); err != nil {
+	if err := s.RecordApproval(ctx, store.ApprovalRow{ProposalID: proposalID, Layer: "postgres", Decision: "approved"}); err != nil {
 		t.Fatalf("approval: %v", err)
 	}
 	if err := s.StartProposalStep(ctx, proposalID, 0); err != nil {

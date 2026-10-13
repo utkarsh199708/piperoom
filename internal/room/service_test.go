@@ -59,7 +59,10 @@ func (a *fakeAction) Name() string     { return a.name }
 func (a *fakeAction) Layer() string    { return a.layer }
 func (a *fakeAction) Describe() string { return a.name }
 func (a *fakeAction) ParamsSchema() map[string]any {
-	return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{}}
+	// No "properties": the fake accepts any parameter names, so tests can use
+	// whatever params they like (CreateProposal only checks case-folded
+	// duplicate keys for a schema like this; see strictAction for the rest).
+	return map[string]any{"type": "object"}
 }
 func (a *fakeAction) Validate(json.RawMessage) error { return nil }
 
@@ -130,6 +133,25 @@ func mustUser(t *testing.T, svc *room.Service, id string) room.User {
 		t.Fatalf("user %q not found", id)
 	}
 	return u
+}
+
+// proposalHash returns the params_hash the snapshot shows for an open proposal,
+// the value the web app sends back with approve and reject.
+func proposalHash(t *testing.T, svc *room.Service, proposalID string) string {
+	t.Helper()
+	rooms, err := svc.ListRooms(context.Background())
+	if err != nil {
+		t.Fatalf("list rooms: %v", err)
+	}
+	for _, r := range rooms {
+		for _, p := range r.OpenProposals {
+			if p.ProposalID == proposalID {
+				return p.ParamsHash
+			}
+		}
+	}
+	t.Fatalf("proposal %s is not open in any room", proposalID)
+	return ""
 }
 
 func createRoom(t *testing.T, svc *room.Service, userID string) room.RoomSnapshot {
@@ -322,11 +344,11 @@ func TestApproveRequiresLayerOwnership(t *testing.T) {
 	}
 
 	// arjun does not own postgres.
-	_, err = svc.ApproveProposal(context.Background(), mustUser(t, svc, "arjun"), pid, "postgres")
+	_, err = svc.ApproveProposal(context.Background(), mustUser(t, svc, "arjun"), pid, "postgres", proposalHash(t, svc, pid))
 	wantCode(t, err, "not_layer_owner")
 
 	// priya owns postgres.
-	if _, err = svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err = svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 }
@@ -343,10 +365,10 @@ func TestDoubleApprovalConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create proposal: %v", err)
 	}
-	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("first approve: %v", err)
 	}
-	_, err = svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres")
+	_, err = svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid))
 	wantCode(t, err, "already_decided")
 }
 
@@ -467,10 +489,10 @@ func TestExecutorStopsAtFirstFailure(t *testing.T) {
 		t.Fatalf("create proposal: %v", err)
 	}
 
-	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve postgres: %v", err)
 	}
-	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "meera"), pid, "warehouse"); err != nil {
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "meera"), pid, "warehouse", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve warehouse: %v", err)
 	}
 
@@ -593,11 +615,11 @@ func TestRequiredLayersDerivedFromSteps(t *testing.T) {
 	}
 
 	// Approving an unrelated layer is rejected.
-	_, err = svc.ApproveProposal(context.Background(), mustUser(t, svc, "kabir"), pid, "consumer")
+	_, err = svc.ApproveProposal(context.Background(), mustUser(t, svc, "kabir"), pid, "consumer", proposalHash(t, svc, pid))
 	wantCode(t, err, "validation")
 
 	// Approving only postgres must not execute anything.
-	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve postgres: %v", err)
 	}
 	if pgAct.Calls() != 0 || whAct.Calls() != 0 {
@@ -605,7 +627,7 @@ func TestRequiredLayersDerivedFromSteps(t *testing.T) {
 	}
 
 	// Approving warehouse executes both steps.
-	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "meera"), pid, "warehouse"); err != nil {
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "meera"), pid, "warehouse", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve warehouse: %v", err)
 	}
 	waitFor(t, 5*time.Second, func() bool {
@@ -633,7 +655,7 @@ func TestExecutorFailureMarksFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create proposal: %v", err)
 	}
-	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 
@@ -866,7 +888,7 @@ func TestCloseStopsGoroutinesIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create proposal: %v", err)
 	}
-	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	waitFor(t, 5*time.Second, func() bool {
@@ -931,7 +953,7 @@ func TestCloseDuringExecutionFinishesStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create proposal: %v", err)
 	}
-	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	select {
@@ -991,7 +1013,7 @@ func TestExecutorNeverRunsAPreClaimedStep(t *testing.T) {
 	if err := st.StartProposalStep(context.Background(), pid, 0); err != nil {
 		t.Fatalf("pre-claim step: %v", err)
 	}
-	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 
@@ -1320,7 +1342,7 @@ func TestExecutorRoomClosedPathRecordsOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create proposal: %v", err)
 	}
-	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 
@@ -1662,7 +1684,7 @@ func TestActionResultCarriesStepOutcome(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create proposal %s: %v", action, err)
 		}
-		if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+		if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 			t.Fatalf("approve %s: %v", action, err)
 		}
 		return pid
@@ -1676,7 +1698,7 @@ func TestActionResultCarriesStepOutcome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create proposal to reject: %v", err)
 	}
-	if _, err := svc.RejectProposal(context.Background(), mustUser(t, svc, "priya"), rejectedPID, "postgres", "not now"); err != nil {
+	if _, err := svc.RejectProposal(context.Background(), mustUser(t, svc, "priya"), rejectedPID, "postgres", "not now", proposalHash(t, svc, rejectedPID)); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
 

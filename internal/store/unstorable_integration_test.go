@@ -99,8 +99,8 @@ func checkUnstorable(t *testing.T, s store.Store) {
 	if err := s.CreateProposal(ctx, store.ProposalRow{ProposalID: pid, RoomID: roomID, Title: "t", Status: "open", RequiredLayers: []string{"postgres"}, Steps: steps}); err != nil {
 		t.Fatalf("create good proposal: %v", err)
 	}
-	want("approval reason", s.RecordApproval(ctx, pid, "postgres", "rejected", "no\x00"))
-	if err := s.RecordApproval(ctx, pid, "postgres", "rejected", "no"); err != nil {
+	want("approval reason", s.RecordApproval(ctx, store.ApprovalRow{ProposalID: pid, Layer: "postgres", Decision: "rejected", Reason: "no\x00"}))
+	if err := s.RecordApproval(ctx, store.ApprovalRow{ProposalID: pid, Layer: "postgres", Decision: "rejected", Reason: "no"}); err != nil {
 		t.Errorf("a refused approval must not consume the layer: %v", err)
 	}
 	if err := s.StartProposalStep(ctx, pid, 0); err != nil {

@@ -92,15 +92,15 @@ func TestUserTextUnstorableIs400AndWritesNothing(t *testing.T) {
 					return err
 				},
 				"reject reason": func() error {
-					_, err := svc.RejectProposal(ctx, priya, pid, "postgres", bad)
+					_, err := svc.RejectProposal(ctx, priya, pid, "postgres", bad, proposalHash(t, svc, pid))
 					return err
 				},
 				"reject layer": func() error {
-					_, err := svc.RejectProposal(ctx, priya, pid, bad, "no")
+					_, err := svc.RejectProposal(ctx, priya, pid, bad, "no", proposalHash(t, svc, pid))
 					return err
 				},
 				"approve layer": func() error {
-					_, err := svc.ApproveProposal(ctx, priya, pid, bad)
+					_, err := svc.ApproveProposal(ctx, priya, pid, bad, proposalHash(t, svc, pid))
 					return err
 				},
 				"close resolution": func() error {
@@ -129,7 +129,7 @@ func TestUserTextUnstorableIs400AndWritesNothing(t *testing.T) {
 	if p, err := st.GetProposal(ctx, pid); err != nil || p.Status != "open" {
 		t.Fatalf("proposal = %+v, %v; want still open", p, err)
 	}
-	if _, err := svc.RejectProposal(ctx, priya, pid, "postgres", "not now"); err != nil {
+	if _, err := svc.RejectProposal(ctx, priya, pid, "postgres", "not now", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("valid reject after refused ones: %v", err)
 	}
 	if _, err := svc.CloseRoom(ctx, arjun, roomID, "done"); err != nil {
@@ -235,7 +235,7 @@ func TestAgentTextIsSanitizedNotRejected(t *testing.T) {
 	}
 
 	// The executor output of an approved step is cleaned too.
-	if _, err := svc.ApproveProposal(ctx, mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err := svc.ApproveProposal(ctx, mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	waitFor(t, 5*time.Second, func() bool {

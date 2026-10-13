@@ -49,6 +49,10 @@ type Proposal struct {
 	Rollback       string                `json:"rollback"`
 	RequiredLayers []string              `json:"required_layers"`
 	Approvals      map[string]string     `json:"approvals"` // layer -> approved|pending|rejected
+	// ParamsHash is the proposal's params_hash (design section 3.1); the UI
+	// sends it back with approve and reject. "" only for a proposal that
+	// predates the hash and cannot be hashed.
+	ParamsHash string `json:"params_hash"`
 }
 
 // Suggestion is a non-driver's pending steer.
@@ -231,6 +235,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			Rollback:       p.Rollback,
 			RequiredLayers: p.RequiredLayers,
 			Approvals:      approvals,
+			ParamsHash:     eventParamsHash(e.RoomID, p),
 		})
 
 	case events.ApprovalGiven:
@@ -262,6 +267,21 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	}
 
 	return normalize(snap)
+}
+
+// eventParamsHash is the params_hash a proposal.created event carries. An event
+// written before auth PR 4 has none: the hash is then computed from the event's
+// own fields, which is the value creation would have stored (params are frozen).
+// It is "" only when the proposal cannot be hashed (see ComputeParamsHash).
+func eventParamsHash(roomID string, p events.ProposalCreatedPayload) string {
+	if p.ParamsHash != "" {
+		return p.ParamsHash
+	}
+	h, err := ComputeParamsHash(roomID, p.ProposalID, p.Title, p.Risk, p.Rollback, p.RequiredLayers, p.Steps)
+	if err != nil {
+		return ""
+	}
+	return h
 }
 
 // normalize returns the snapshot with every array non-nil and the agent state

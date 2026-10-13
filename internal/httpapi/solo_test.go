@@ -70,7 +70,24 @@ func TestSoloModeApprovalNeedsConfirm(t *testing.T) {
 		}
 		return pid
 	}
+	hashOf := func(pid string) string {
+		rooms, err := svc.ListRooms(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range rooms {
+			for _, p := range r.OpenProposals {
+				if p.ProposalID == pid {
+					return p.ParamsHash
+				}
+			}
+		}
+		t.Fatalf("proposal %s is not open", pid)
+		return ""
+	}
+	// approve sends the body with the proposal's params_hash added, as the web app does.
 	approve := func(user, pid, body string) *http.Response {
+		body = strings.Replace(body, "{", `{"params_hash":"`+hashOf(pid)+`",`, 1)
 		return doJSON(t, http.MethodPost, srv.URL+"/api/proposals/"+pid+"/approve", user, body)
 	}
 

@@ -62,10 +62,17 @@ type exportProposal struct {
 	Rollback       string                `json:"rollback"`
 	RequiredLayers []string              `json:"required_layers"`
 	Steps          []events.ProposalStep `json:"steps"`
-	CreatedBy      events.Actor          `json:"created_by"`
-	CreatedAt      time.Time             `json:"created_at"`
-	CreatedSeq     int64                 `json:"created_seq"`
-	Status         string                `json:"status"` // open | approved | rejected | executed | failed
+	// ParamsHash is hex SHA-256 of the RFC 8785 form of {"v":2,"room_id",
+	// "proposal_id","title","risk","rollback","required_layers","steps"} built
+	// from this entry and the room id (design section 3.1), so an auditor can
+	// re-hash it. A proposal created before auth PR 4 has no hash in its event;
+	// the export computes it from the same fields. Empty only when the
+	// proposal cannot be hashed.
+	ParamsHash string       `json:"params_hash"`
+	CreatedBy  events.Actor `json:"created_by"`
+	CreatedAt  time.Time    `json:"created_at"`
+	CreatedSeq int64        `json:"created_seq"`
+	Status     string       `json:"status"` // open | approved | rejected | executed | failed
 
 	approved map[string]bool
 	rejected bool
@@ -82,6 +89,10 @@ type exportApproval struct {
 	Reason     string       `json:"reason"`
 	Approver   events.Actor `json:"approver"`
 	At         time.Time    `json:"at"`
+	// ParamsHash and Identity are what the approval event recorded (design
+	// section 3.2). Both are empty/null for a decision made before auth PR 4.
+	ParamsHash string           `json:"params_hash"`
+	Identity   *events.Identity `json:"identity"`
 }
 
 // exportActionResult is the outcome of one executed proposal step.
@@ -93,6 +104,9 @@ type exportActionResult struct {
 	Output     string       `json:"output"`
 	Executor   events.Actor `json:"executor"`
 	At         time.Time    `json:"at"`
+	// ParamsHash is the hash the executor checked before this step ("" for a
+	// result recorded before auth PR 4).
+	ParamsHash string `json:"params_hash"`
 }
 
 // exportHandoff is a hand-off with the agent-written summary.
@@ -279,7 +293,8 @@ func (e *Export) fold(ev events.Event) error {
 		ep := &exportProposal{
 			ProposalID: p.ProposalID, Title: p.Title, Risk: p.Risk, Rollback: p.Rollback,
 			RequiredLayers: nonNilStrings(p.RequiredLayers), Steps: nonNilSteps(p.Steps),
-			CreatedBy: ev.Actor, CreatedAt: ev.At, CreatedSeq: ev.Seq, approved: map[string]bool{},
+			ParamsHash: eventParamsHash(ev.RoomID, p),
+			CreatedBy:  ev.Actor, CreatedAt: ev.At, CreatedSeq: ev.Seq, approved: map[string]bool{},
 		}
 		e.proposals = append(e.proposals, ep)
 		e.proposalIdx[p.ProposalID] = ep
@@ -290,6 +305,7 @@ func (e *Export) fold(ev events.Event) error {
 		}
 		e.approvals = append(e.approvals, exportApproval{
 			Seq: ev.Seq, ProposalID: p.ProposalID, Layer: p.Layer, Decision: "approved", Approver: ev.Actor, At: ev.At,
+			ParamsHash: p.ParamsHash, Identity: p.Identity,
 		})
 		if ep := e.proposalIdx[p.ProposalID]; ep != nil {
 			ep.approved[p.Layer] = true
@@ -301,6 +317,7 @@ func (e *Export) fold(ev events.Event) error {
 		}
 		e.approvals = append(e.approvals, exportApproval{
 			Seq: ev.Seq, ProposalID: p.ProposalID, Layer: p.Layer, Decision: "rejected", Reason: p.Reason, Approver: ev.Actor, At: ev.At,
+			ParamsHash: p.ParamsHash, Identity: p.Identity,
 		})
 		if ep := e.proposalIdx[p.ProposalID]; ep != nil {
 			ep.rejected = true
@@ -312,6 +329,7 @@ func (e *Export) fold(ev events.Event) error {
 		}
 		e.results = append(e.results, exportActionResult{
 			Seq: ev.Seq, ProposalID: p.ProposalID, StepIndex: p.StepIndex, OK: p.OK, Output: p.Output, Executor: ev.Actor, At: ev.At,
+			ParamsHash: p.ParamsHash,
 		})
 		if ep := e.proposalIdx[p.ProposalID]; ep != nil {
 			if p.OK {

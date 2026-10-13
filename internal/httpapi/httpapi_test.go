@@ -197,7 +197,7 @@ func TestStoreDownReturns500(t *testing.T) {
 func TestUnknownProposalAndHandoffReturn404(t *testing.T) {
 	srv, _ := newServer(t)
 
-	resp := doJSON(t, http.MethodPost, srv.URL+"/api/proposals/nope/approve", "arjun", `{"layer":"postgres"}`)
+	resp := doJSON(t, http.MethodPost, srv.URL+"/api/proposals/nope/approve", "arjun", `{"layer":"postgres","params_hash":"x"}`)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("proposal approve: want 404, got %d", resp.StatusCode)
 	}

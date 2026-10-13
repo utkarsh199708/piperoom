@@ -42,6 +42,23 @@ func scanNumbers(raw []byte, fn func(start, end int)) {
 	}
 }
 
+// maxExactTokenLen caps the length of a number token that is compared exactly
+// with big.Rat. A longer token is classified inexact.
+const maxExactTokenLen = 1000
+
+// mantissaIsZero reports whether the digits before any exponent are all zero.
+func mantissaIsZero(tok string) bool {
+	for i := 0; i < len(tok); i++ {
+		switch c := tok[i]; {
+		case c == 'e' || c == 'E':
+			return true
+		case c >= '1' && c <= '9':
+			return false
+		}
+	}
+	return true
+}
+
 // numberClass says how a number token fares as a float64.
 type numberClass int
 
@@ -53,6 +70,13 @@ const (
 )
 
 // classifyNumber classifies one number token.
+//
+// The cost is bounded by the token length. big.Rat is only used once
+// strconv.ParseFloat has shown the value is a finite, non-zero double; for such
+// a token the decimal exponent cannot be larger than about 330 plus the number
+// of digits, so building 10^exponent is cheap. A token such as 1e-999999 parses
+// to 0 (underflow) and is classified without big.Rat: it used to build
+// 10^999999, about 27 ms a token.
 func classifyNumber(tok string) numberClass {
 	f, err := strconv.ParseFloat(tok, 64)
 	if err != nil {
@@ -60,6 +84,19 @@ func classifyNumber(tok string) numberClass {
 			return numberOutOfRange
 		}
 		return numberIgnore
+	}
+	if f == 0 {
+		// Zero, or a non-zero value that underflowed to zero.
+		if mantissaIsZero(tok) {
+			return numberExact
+		}
+		return numberInexact
+	}
+	if len(tok) > maxExactTokenLen {
+		// A double's exact decimal expansion is at most about 770 characters,
+		// and JCS writes far fewer; a longer token is never written back as
+		// the same text and is not worth the arithmetic.
+		return numberInexact
 	}
 	want, ok := new(big.Rat).SetString(tok)
 	if !ok {

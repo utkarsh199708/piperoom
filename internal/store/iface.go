@@ -33,7 +33,15 @@ type Store interface {
 	CreateProposal(ctx context.Context, p ProposalRow) error
 	DeleteProposal(ctx context.Context, proposalID string) error
 	GetProposal(ctx context.Context, proposalID string) (ProposalRow, error)
-	RecordApproval(ctx context.Context, proposalID, layer, decision, reason string) error
+	// RecordApproval stores one decision with its params_hash and identity; a
+	// second decision on the same layer wraps ErrAlreadyExists.
+	RecordApproval(ctx context.Context, a ApprovalRow) error
+	// ListApprovals returns a proposal's decisions ordered by layer.
+	ListApprovals(ctx context.Context, proposalID string) ([]ApprovalRow, error)
+	// SetProposalParamsHash fills the hash of a proposal that has none (a row
+	// from before auth PR 4). It never replaces an existing hash: a different
+	// one wraps ErrParamsHashConflict, the same one is a no-op.
+	SetProposalParamsHash(ctx context.Context, proposalID, hash string) error
 	DeleteApproval(ctx context.Context, proposalID, layer string) error
 	StartProposalStep(ctx context.Context, proposalID string, stepIndex int) error
 	FinishProposalStep(ctx context.Context, proposalID string, stepIndex int, status, output string) error

@@ -29,6 +29,10 @@ var ErrRoomNotEmpty = errors.New("store: room has events")
 // (e.g. a second decision on the same proposal layer).
 var ErrAlreadyExists = errors.New("store: already exists")
 
+// ErrParamsHashConflict is returned by SetProposalParamsHash when the row
+// already holds a different, non-empty params_hash.
+var ErrParamsHashConflict = errors.New("store: proposal already has a different params_hash")
+
 // ErrStepOrder is returned when a proposal step is used out of order: started
 // twice, or finished without having been started (or finished twice). The
 // room service re-exports it as room.ErrStepOrder and surfaces it instead of
@@ -72,6 +76,26 @@ type ProposalRow struct {
 	Steps          json.RawMessage
 	Risk           string
 	Rollback       string
+	// ParamsHash is the proposal's params_hash (docs/design/auth.md section 3.1);
+	// "" on a row written before auth PR 4.
+	ParamsHash string
+}
+
+// ApprovalRow is the approvals table row: one decision on one layer, the
+// params_hash the decider saw and who they were (design section 3.2).
+type ApprovalRow struct {
+	ProposalID string
+	Layer      string
+	Decision   string // "approved" | "rejected"
+	Reason     string
+	ParamsHash string
+	// Identity columns. IdentityAuthTime is the zero time when the row has none.
+	IdentityIss       string
+	IdentitySub       string
+	IdentitySessionID string
+	IdentityMethod    string
+	IdentityGrant     string
+	IdentityAuthTime  time.Time
 }
 
 // SuggestionRow is the suggestions table row.
@@ -502,9 +526,9 @@ func (s *PG) CreateProposal(ctx context.Context, p ProposalRow) error {
 		return fmt.Errorf("store: marshal proposal layers: %w", err)
 	}
 	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO proposals (proposal_id, room_id, title, status, required_layers, steps, risk, rollback)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		p.ProposalID, p.RoomID, p.Title, p.Status, layers, p.Steps, p.Risk, p.Rollback); err != nil {
+		`INSERT INTO proposals (proposal_id, room_id, title, status, required_layers, steps, risk, rollback, params_hash)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		p.ProposalID, p.RoomID, p.Title, p.Status, layers, p.Steps, p.Risk, p.Rollback, p.ParamsHash); err != nil {
 		return fmt.Errorf("store: create proposal %s: %w", p.ProposalID, classify(err))
 	}
 	return nil
@@ -532,9 +556,9 @@ func (s *PG) GetProposal(ctx context.Context, proposalID string) (ProposalRow, e
 	var p ProposalRow
 	var layers, steps []byte
 	err := s.pool.QueryRow(ctx,
-		`SELECT proposal_id, room_id, title, status, required_layers, steps, risk, rollback
+		`SELECT proposal_id, room_id, title, status, required_layers, steps, risk, rollback, params_hash
 		 FROM proposals WHERE proposal_id = $1`, proposalID).
-		Scan(&p.ProposalID, &p.RoomID, &p.Title, &p.Status, &layers, &steps, &p.Risk, &p.Rollback)
+		Scan(&p.ProposalID, &p.RoomID, &p.Title, &p.Status, &layers, &steps, &p.Risk, &p.Rollback, &p.ParamsHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ProposalRow{}, fmt.Errorf("store: proposal %s: %w", proposalID, ErrNotFound)
 	}
@@ -548,23 +572,96 @@ func (s *PG) GetProposal(ctx context.Context, proposalID string) (ProposalRow, e
 	return p, nil
 }
 
-// RecordApproval records one decision on a proposal layer. A second decision
-// on the same layer returns ErrAlreadyExists.
-func (s *PG) RecordApproval(ctx context.Context, proposalID, layer, decision, reason string) error {
-	if err := CheckText(proposalID, layer, decision, reason); err != nil {
-		return fmt.Errorf("store: record approval %s/%s: %w", proposalID, layer, err)
+// RecordApproval records one decision on a proposal layer with its params_hash
+// and identity. A second decision on the same layer returns ErrAlreadyExists.
+func (s *PG) RecordApproval(ctx context.Context, a ApprovalRow) error {
+	if err := a.Check(); err != nil {
+		return fmt.Errorf("store: record approval %s/%s: %w", a.ProposalID, a.Layer, err)
+	}
+	ctx, cancel := dbCtx(ctx)
+	defer cancel()
+	var authTime *time.Time
+	if !a.IdentityAuthTime.IsZero() {
+		t := a.IdentityAuthTime.UTC()
+		authTime = &t
+	}
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO approvals (proposal_id, layer, decision, reason, params_hash,
+		     identity_iss, identity_sub, identity_session_id, identity_method, identity_grant, identity_auth_time)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		 ON CONFLICT (proposal_id, layer) DO NOTHING`,
+		a.ProposalID, a.Layer, a.Decision, a.Reason, a.ParamsHash,
+		a.IdentityIss, a.IdentitySub, a.IdentitySessionID, a.IdentityMethod, a.IdentityGrant, authTime)
+	if err != nil {
+		return fmt.Errorf("store: record approval %s/%s: %w", a.ProposalID, a.Layer, classify(err))
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("store: approval %s/%s: %w", a.ProposalID, a.Layer, ErrAlreadyExists)
+	}
+	return nil
+}
+
+// ListApprovals returns the decisions recorded for a proposal, ordered by layer.
+func (s *PG) ListApprovals(ctx context.Context, proposalID string) ([]ApprovalRow, error) {
+	if CheckText(proposalID) != nil {
+		return nil, nil
+	}
+	ctx, cancel := dbCtx(ctx)
+	defer cancel()
+	rows, err := s.pool.Query(ctx,
+		`SELECT proposal_id, layer, decision, reason, params_hash,
+		        identity_iss, identity_sub, identity_session_id, identity_method, identity_grant, identity_auth_time
+		 FROM approvals WHERE proposal_id = $1 ORDER BY layer`, proposalID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list approvals %s: %w", proposalID, err)
+	}
+	defer rows.Close()
+	var out []ApprovalRow
+	for rows.Next() {
+		var a ApprovalRow
+		var authTime *time.Time
+		if err := rows.Scan(&a.ProposalID, &a.Layer, &a.Decision, &a.Reason, &a.ParamsHash,
+			&a.IdentityIss, &a.IdentitySub, &a.IdentitySessionID, &a.IdentityMethod, &a.IdentityGrant, &authTime); err != nil {
+			return nil, fmt.Errorf("store: scan approval: %w", err)
+		}
+		if authTime != nil {
+			a.IdentityAuthTime = authTime.UTC()
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list approvals %s: %w", proposalID, err)
+	}
+	return out, nil
+}
+
+// SetProposalParamsHash stores the params_hash of a proposal that has none (a
+// row written before auth PR 4). It never replaces an existing hash: a
+// different value is ErrParamsHashConflict, the same value is a no-op. A missing
+// proposal is ErrNotFound.
+func (s *PG) SetProposalParamsHash(ctx context.Context, proposalID, hash string) error {
+	if err := CheckText(proposalID, hash); err != nil {
+		return fmt.Errorf("store: set params hash %s: %w", proposalID, err)
 	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	tag, err := s.pool.Exec(ctx,
-		`INSERT INTO approvals (proposal_id, layer, decision, reason) VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (proposal_id, layer) DO NOTHING`,
-		proposalID, layer, decision, reason)
+		`UPDATE proposals SET params_hash = $2 WHERE proposal_id = $1 AND params_hash = ''`, proposalID, hash)
 	if err != nil {
-		return fmt.Errorf("store: record approval %s/%s: %w", proposalID, layer, classify(err))
+		return fmt.Errorf("store: set params hash %s: %w", proposalID, err)
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("store: approval %s/%s: %w", proposalID, layer, ErrAlreadyExists)
+		var cur string
+		err := s.pool.QueryRow(ctx, `SELECT params_hash FROM proposals WHERE proposal_id = $1`, proposalID).Scan(&cur)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("store: proposal %s: %w", proposalID, ErrNotFound)
+		}
+		if err != nil {
+			return fmt.Errorf("store: set params hash %s: %w", proposalID, err)
+		}
+		if cur != hash {
+			return fmt.Errorf("store: set params hash %s: %w", proposalID, ErrParamsHashConflict)
+		}
 	}
 	return nil
 }

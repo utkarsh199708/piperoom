@@ -37,7 +37,7 @@ map) must agree; the server checks this at start-up and refuses to start on a mi
 
 ### Login (auth PRs 2–4, design `docs/design/auth.md`)
 
-PR 2 (dev sessions, Host allow-list, proxy guard) is live; items marked PR 3 or PR 4 are not yet.
+PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, identities, roles, `/api/people`); items marked PR 4 are not yet.
 
 - **Mode.** `PIPEROOM_AUTH_MODE` = `dev` (default) or `oidc`. In `oidc` mode `X-User` is ignored and a request with
   no session answers `401 session_expired`; the unsigned `POST /api/alerts/webhook` is not mounted (`404`), so
@@ -48,7 +48,9 @@ PR 2 (dev sessions, Host allow-list, proxy guard) is live; items marked PR 3 or 
   `piperoom_session` (no `Secure`) in `dev` mode over plain http. The cookie wins over `X-User` when both name the
   same user.
 - **Routes.** `GET /auth/login?return=/path` → IdP redirect; `GET /auth/callback` (finds the login row by the
-  login cookie, then checks `state` and nonce; single use); `POST /auth/logout` (`204`; revokes this session and closes this session's WebSockets);
+  login cookie, then checks `state` and nonce; single use; on success `302` to `return`; on failure `302` to
+  `/?login_error=<code>` with the same code as the JSON error — `login_expired`, `unauthenticated`,
+  `not_provisioned`, `rate_limited`, `idp_unavailable` — never a JSON page in the browser); `POST /auth/logout` (`204`; revokes this session and closes this session's WebSockets);
   `POST /auth/dev-login {user}` (dev mode only).
 - **Host allow-list.** `Host` must be a loopback name (any port), a value in `PIPEROOM_ALLOWED_HOSTS`, or the host
   of `PIPEROOM_PUBLIC_URL` (exact) — in `oidc` mode always, in `dev` mode only with
@@ -137,7 +139,7 @@ IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_
 | Method | Path | Body | Result | Notes |
 |---|---|---|---|---|
 | GET | `/api/people` | – | `[{id, name, email?}]` | after auth PR 3: the people a driver may grant control or hand off to: `users.yaml` users plus members with a live session (`LookupPerson`). `email` only for IdP users; pickers show `id` or `email` next to `name`. Members only: a viewer gets `403 viewer` (the list holds emails and viewers cannot grant or hand off anyway) |
-| GET | `/api/me` | – | `{id,name,layers}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request |
+| GET | `/api/me` | – | `{id,name,layers}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request; `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise) |
 | GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first |
 | POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation` |
 | POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |

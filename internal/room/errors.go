@@ -68,3 +68,10 @@ func roomClosed(msg string) *Error {
 func leaseHeld(msg string) *Error {
 	return &Error{Status: 409, Code: codeLeaseHeld, Msg: msg}
 }
+
+// paramsMismatch is "the params_hash the approver sent is not the proposal's"
+// (docs/design/auth.md section 3.2). The stored steps are frozen, so this means
+// a stale or wrong client; the fix is to reload the room and review again.
+func paramsMismatch(msg string) *Error {
+	return &Error{Status: 409, Code: "params_mismatch", Msg: msg}
+}

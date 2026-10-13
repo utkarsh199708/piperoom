@@ -246,7 +246,7 @@ func TestAgentCapRealAgentApprovalWait(t *testing.T) {
 
 	// The last owner approves. The agent wakes, sees the proposal is fully
 	// approved with results owed, and waits for them: no slot while it waits.
-	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	waitFor(t, 10*time.Second, func() bool {

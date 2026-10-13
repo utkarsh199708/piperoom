@@ -21,12 +21,16 @@ type meResponse struct {
 	Layers        []string `json:"layers"`
 	Role          string   `json:"role"`
 	GroupsMissing bool     `json:"groups_missing"`
+	// Solo is true only for the PIPEROOM_SOLO_USER; left out for everyone else
+	// so the web app shows the typed-confirm box for this user alone.
+	Solo bool `json:"solo,omitempty"`
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	writeJSON(w, http.StatusOK, meResponse{
 		ID: u.ID, Name: u.Name, Layers: s.svc.LayersFor(u), Role: roleFrom(r.Context()), GroupsMissing: u.GroupsMissing,
+		Solo: s.svc.IsSolo(u.ID),
 	})
 }
 
@@ -252,6 +256,9 @@ func (s *Server) handleTrace(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleApproveProposal(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Layer string `json:"layer"`
+		// ParamsHash is the proposal's params_hash as the approver saw it; it
+		// is required (design §3.2): missing is 400, a different one 409.
+		ParamsHash string `json:"params_hash"`
 		// Confirm is the solo-mode speed bump: "<pipeline_id>/<layer>", typed
 		// by hand (design §5.3). Ignored for anyone but the solo user.
 		Confirm string `json:"confirm"`
@@ -260,7 +267,7 @@ func (s *Server) handleApproveProposal(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
-	ev, err := s.svc.ApproveProposalConfirm(r.Context(), userFrom(r.Context()), chi.URLParam(r, "pid"), body.Layer, body.Confirm)
+	ev, err := s.svc.ApproveProposalConfirm(r.Context(), userFrom(r.Context()), chi.URLParam(r, "pid"), body.Layer, body.ParamsHash, body.Confirm)
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -270,14 +277,15 @@ func (s *Server) handleApproveProposal(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRejectProposal(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Layer  string `json:"layer"`
-		Reason string `json:"reason"`
+		Layer      string `json:"layer"`
+		Reason     string `json:"reason"`
+		ParamsHash string `json:"params_hash"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		s.writeErr(w, err)
 		return
 	}
-	ev, err := s.svc.RejectProposal(r.Context(), userFrom(r.Context()), chi.URLParam(r, "pid"), body.Layer, body.Reason)
+	ev, err := s.svc.RejectProposal(r.Context(), userFrom(r.Context()), chi.URLParam(r, "pid"), body.Layer, body.Reason, body.ParamsHash)
 	if err != nil {
 		s.writeErr(w, err)
 		return

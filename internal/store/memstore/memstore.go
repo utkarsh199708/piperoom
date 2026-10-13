@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,7 +26,7 @@ type Store struct {
 	proposals   map[string]*store.ProposalRow
 	suggestions map[string]*store.SuggestionRow
 	handoffs    map[string]*store.HandoffRow
-	approvals   map[string]struct{}
+	approvals   map[string]store.ApprovalRow
 	steps       map[string]string // proposalID + "\x00" + stepIndex -> status
 }
 
@@ -51,7 +52,7 @@ func New() *Store {
 		proposals:   map[string]*store.ProposalRow{},
 		suggestions: map[string]*store.SuggestionRow{},
 		handoffs:    map[string]*store.HandoffRow{},
-		approvals:   map[string]struct{}{},
+		approvals:   map[string]store.ApprovalRow{},
 		steps:       map[string]string{},
 	}
 }
@@ -386,17 +387,54 @@ func (s *Store) GetProposal(ctx context.Context, proposalID string) (store.Propo
 }
 
 // RecordApproval enforces one decision per layer.
-func (s *Store) RecordApproval(ctx context.Context, proposalID, layer, decision, reason string) error {
-	if err := store.CheckText(proposalID, layer, decision, reason); err != nil {
-		return fmt.Errorf("memstore: approval %s/%s: %w", proposalID, layer, err)
+func (s *Store) RecordApproval(ctx context.Context, a store.ApprovalRow) error {
+	if err := a.Check(); err != nil {
+		return fmt.Errorf("memstore: approval %s/%s: %w", a.ProposalID, a.Layer, err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := proposalID + "\x00" + layer
+	key := a.ProposalID + "\x00" + a.Layer
 	if _, ok := s.approvals[key]; ok {
-		return fmt.Errorf("memstore: approval %s/%s: %w", proposalID, layer, store.ErrAlreadyExists)
+		return fmt.Errorf("memstore: approval %s/%s: %w", a.ProposalID, a.Layer, store.ErrAlreadyExists)
 	}
-	s.approvals[key] = struct{}{}
+	if !a.IdentityAuthTime.IsZero() {
+		a.IdentityAuthTime = a.IdentityAuthTime.UTC()
+	}
+	s.approvals[key] = a
+	return nil
+}
+
+// ListApprovals returns a proposal's decisions ordered by layer.
+func (s *Store) ListApprovals(ctx context.Context, proposalID string) ([]store.ApprovalRow, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []store.ApprovalRow
+	for key, a := range s.approvals {
+		if strings.HasPrefix(key, proposalID+"\x00") {
+			out = append(out, a)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Layer < out[j].Layer })
+	return out, nil
+}
+
+// SetProposalParamsHash fills the hash of a proposal that has none; it never
+// replaces an existing one.
+func (s *Store) SetProposalParamsHash(ctx context.Context, proposalID, hash string) error {
+	if err := store.CheckText(proposalID, hash); err != nil {
+		return fmt.Errorf("memstore: set params hash %s: %w", proposalID, err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.proposals[proposalID]
+	if !ok {
+		return fmt.Errorf("memstore: proposal %q not found: %w", proposalID, store.ErrNotFound)
+	}
+	if p.ParamsHash == "" {
+		p.ParamsHash = hash
+	} else if p.ParamsHash != hash {
+		return fmt.Errorf("memstore: set params hash %s: %w", proposalID, store.ErrParamsHashConflict)
+	}
 	return nil
 }
 

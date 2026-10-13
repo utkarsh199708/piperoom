@@ -65,13 +65,19 @@ func CheckAppend(roomID string, typ events.Type, payload, actor []byte) error {
 // Check is the pre-check for a proposals row: every text column, the layer
 // list and the steps JSON.
 func (p ProposalRow) Check() error {
-	if err := CheckText(p.ProposalID, p.RoomID, p.Title, p.Status, p.Risk, p.Rollback); err != nil {
+	if err := CheckText(p.ProposalID, p.RoomID, p.Title, p.Status, p.Risk, p.Rollback, p.ParamsHash); err != nil {
 		return err
 	}
 	if err := CheckText(p.RequiredLayers...); err != nil {
 		return err
 	}
 	return CheckJSON(p.Steps)
+}
+
+// Check is the pre-check for an approvals row.
+func (a ApprovalRow) Check() error {
+	return CheckText(a.ProposalID, a.Layer, a.Decision, a.Reason, a.ParamsHash,
+		a.IdentityIss, a.IdentitySub, a.IdentitySessionID, a.IdentityMethod, a.IdentityGrant)
 }
 
 // Check is the pre-check for a suggestions row.

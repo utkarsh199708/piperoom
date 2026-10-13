@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
@@ -49,11 +50,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
 	if !s.loginLimit.allow(limitKey(s.clientIP(r)), now) {
 		w.Header().Set("Retry-After", "60")
-		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts from this address; try again in a minute")
+		s.loginFailure(w, r, "rate_limited")
 		return
 	}
 	if s.oidc == nil || !s.oidc.Ready() {
-		writeIdPUnavailable(w)
+		s.loginFailure(w, r, "idp_unavailable")
 		return
 	}
 	ret := auth.SafeReturn(r.URL.Query().Get("return"))
@@ -63,13 +64,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	id, err3 := auth.NewLoginStateID()
 	if err := errors.Join(err1, err2, err3); err != nil {
 		s.log.Error("auth: login random values", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		s.loginFailure(w, r, "internal_error")
 		return
 	}
 	verifier := auth.NewVerifier()
 	target, err := s.oidc.AuthCodeURL(state, nonce, verifier)
 	if err != nil {
-		writeIdPUnavailable(w)
+		s.loginFailure(w, r, "idp_unavailable")
 		return
 	}
 
@@ -83,7 +84,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ID: id, State: state, Nonce: nonce, Verifier: verifier, ReturnPath: ret, ExpiresAt: expires,
 	}, replaces, now); err != nil {
 		s.log.Error("auth: store login state", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		s.loginFailure(w, r, "internal_error")
 		return
 	}
 	http.SetCookie(w, s.loginCookie(id, expires, int(auth.LoginStateTTL.Seconds())))
@@ -96,14 +97,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	if s.oidc == nil || !s.oidc.Ready() {
-		writeIdPUnavailable(w)
+		s.loginFailure(w, r, "idp_unavailable")
 		return
 	}
 	// 1. The login cookie. None: the login expired, or this browser never
 	// started one (the login-CSRF case).
 	c, err := r.Cookie(s.authSettings.LoginCookieName())
 	if err != nil || c.Value == "" {
-		writeError(w, http.StatusBadRequest, "login_expired", "the login expired or was not started in this browser; sign in again")
+		s.loginFailure(w, r, "login_expired")
 		return
 	}
 	// The cookie is spent whatever happens next.
@@ -112,12 +113,12 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// 2. DELETE ... RETURNING: single use, so a replayed callback finds nothing.
 	row, err := s.loginStates.Take(r.Context(), c.Value, s.now())
 	if errors.Is(err, auth.ErrLoginStateNotFound) {
-		writeError(w, http.StatusBadRequest, "login_expired", "the login expired or was already used; sign in again")
+		s.loginFailure(w, r, "login_expired")
 		return
 	}
 	if err != nil {
 		s.log.Error("auth: take login state", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		s.loginFailure(w, r, "internal_error")
 		return
 	}
 
@@ -125,18 +126,18 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(row.State)) != 1 {
 		s.log.Warn("auth: callback state mismatch")
-		writeError(w, http.StatusUnauthorized, "unauthenticated", "login state did not match; sign in again")
+		s.loginFailure(w, r, "unauthenticated")
 		return
 	}
 	if e := q.Get("error"); e != "" {
 		// The IdP refused (access_denied, ...). Only a short code is logged.
 		s.log.Info("auth: the identity provider refused the login", "error", truncateCode(e))
-		writeError(w, http.StatusUnauthorized, "unauthenticated", "the identity provider did not sign you in")
+		s.loginFailure(w, r, "unauthenticated")
 		return
 	}
 	code := q.Get("code")
 	if code == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "the callback has no code")
+		s.loginFailure(w, r, "bad_request")
 		return
 	}
 
@@ -146,23 +147,23 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, auth.ErrIDPUnavailable) {
 			s.log.Warn("auth: identity provider unavailable during callback", "err", err)
-			writeIdPUnavailable(w)
+			s.loginFailure(w, r, "idp_unavailable")
 			return
 		}
 		s.log.Warn("auth: login refused", "err", err)
-		writeError(w, http.StatusUnauthorized, "unauthenticated", "the identity provider's answer was not accepted; sign in again")
+		s.loginFailure(w, r, "unauthenticated")
 		return
 	}
 
 	// 6. Map the identity, run the login gate, create the session.
 	userID, name, aerr := s.mapIdentity(r.Context(), claims)
 	if aerr != nil {
-		writeError(w, aerr.status, aerr.code, aerr.msg)
+		s.loginFailure(w, r, aerr.code)
 		return
 	}
 	if _, ok := s.svc.RoleFor(userID, claims.Groups); !ok {
 		s.log.Info("auth: login refused by the gate (not provisioned)", "user", userID, "iss", claims.Issuer)
-		writeError(w, http.StatusForbidden, "not_provisioned", "this account is not set up for Piperoom; ask an admin to add you")
+		s.loginFailure(w, r, "not_provisioned")
 		return
 	}
 	if claims.GroupsMissing {
@@ -172,7 +173,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	token, hash, err := auth.NewToken()
 	if err != nil {
 		s.log.Error("auth: new token", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		s.loginFailure(w, r, "internal_error")
 		return
 	}
 	now := s.now().UTC()
@@ -196,7 +197,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.sessions.Create(r.Context(), sess); err != nil {
 		s.log.Error("auth: create session", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
+		s.loginFailure(w, r, "internal_error")
 		return
 	}
 	// Signing in again in the same browser: the old session is no longer wanted.
@@ -307,9 +308,31 @@ func DerivedUserID(iss, sub string) string {
 	return "u_" + hex.EncodeToString(sum[:])[:12]
 }
 
-func writeIdPUnavailable(w http.ResponseWriter) {
-	w.Header().Set("Retry-After", "5")
-	writeError(w, http.StatusServiceUnavailable, "idp_unavailable", "the identity provider is not reachable right now; try again shortly")
+// loginErrorCodes is the fixed set of codes the login routes put in
+// /?login_error=<code> (docs/api.md). Nothing from the IdP or the request is
+// ever copied into the redirect.
+var loginErrorCodes = map[string]bool{
+	"login_expired": true, "unauthenticated": true, "not_provisioned": true,
+	"rate_limited": true, "idp_unavailable": true,
+}
+
+// loginFailure ends a browser navigation to /auth/login or /auth/callback that
+// failed: 302 to /?login_error=<code>, never a JSON page the browser would
+// show raw. A code outside the fixed set (bad_request, internal_error) is sent
+// as "unauthenticated" and the real reason stays in the server log. Retry-After
+// is kept for the two codes that have one.
+func (s *Server) loginFailure(w http.ResponseWriter, r *http.Request, code string) {
+	switch code {
+	case "rate_limited":
+		w.Header().Set("Retry-After", "60")
+	case "idp_unavailable":
+		w.Header().Set("Retry-After", "5")
+	}
+	if !loginErrorCodes[code] {
+		code = "unauthenticated"
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	http.Redirect(w, r, "/?login_error="+url.QueryEscape(code), http.StatusFound)
 }
 
 func truncateCode(s string) string {

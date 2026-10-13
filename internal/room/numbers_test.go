@@ -1,6 +1,10 @@
 package room
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestClassifyNumber(t *testing.T) {
 	for _, tc := range []struct {
@@ -19,7 +23,12 @@ func TestClassifyNumber(t *testing.T) {
 		{"12345678901234567890", numberInexact},
 		{"0.12345678901234567890123", numberInexact}, // more than 17 significant digits
 		{"1e-400", numberInexact},                    // underflows to 0
-		{"1.7976931348623157e308", numberExact},      // largest double
+		{"1e-999999", numberInexact},                 // underflow, must not build 10^999999
+		{"123e-99999999999", numberInexact},
+		{"0e999999", numberExact}, // zero stays zero whatever the exponent
+		{"0.000", numberExact},
+		{"5e-324", numberExact},                 // the smallest denormal is a double
+		{"1.7976931348623157e308", numberExact}, // largest double
 		{"1e309", numberOutOfRange},
 		{"1e400", numberOutOfRange},
 		{"-1e400", numberOutOfRange},
@@ -75,5 +84,33 @@ func TestHasOutOfRangeNumberIgnoresStringsAndGarbage(t *testing.T) {
 		if got := hasOutOfRangeNumber([]byte(in)); got != want {
 			t.Errorf("hasOutOfRangeNumber(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// The cost of classifying a number is bounded by its length: 1 MB of tokens
+// like 1e-999999 (each used to build 10^999999 with big.Rat, about 27 ms) must
+// finish at once in both the webhook guard and the hash form.
+func TestNumberClassificationIsCheap(t *testing.T) {
+	tok := "1e-999999,"
+	body := []byte("[" + strings.Repeat(tok, 1<<20/len(tok)) + "0]")
+	start := time.Now()
+	if hasOutOfRangeNumber(body) {
+		t.Fatal("underflow is not out of range")
+	}
+	if _, n := hashForm(body); n == 0 {
+		t.Fatal("hashForm should count the underflowing numbers as inexact")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("1 MB of 1e-999999 took %v, want well under 1 s", d)
+	}
+
+	// One huge token (a million digits) is also cheap and is inexact.
+	long := []byte(`{"n":1` + strings.Repeat("0", 1<<20) + `}`)
+	start = time.Now()
+	if _, n := hashForm(long); n != 1 {
+		t.Fatalf("inexact = %d, want 1", n)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("one 1 MB token took %v", d)
 	}
 }

@@ -32,7 +32,7 @@ func roomWithChildren(t *testing.T, svc *room.Service, st *memstore.Store) (room
 	if err != nil {
 		t.Fatalf("proposal: %v", err)
 	}
-	if _, err := svc.ApproveProposal(ctx, mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err := svc.ApproveProposal(ctx, mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	waitFor(t, 5*time.Second, func() bool {
@@ -107,7 +107,7 @@ func TestPurgeExpiredDeletesOnlyOldClosedRooms(t *testing.T) {
 	if st.ProposalStepStatus(aPid, 0) != "" {
 		t.Fatalf("proposal step of purged room still there")
 	}
-	if err := st.RecordApproval(ctx, aPid, "postgres", "approved", ""); err != nil {
+	if err := st.RecordApproval(ctx, store.ApprovalRow{ProposalID: aPid, Layer: "postgres", Decision: "approved"}); err != nil {
 		t.Fatalf("approval row of purged room should be gone (insert must succeed): %v", err)
 	}
 
