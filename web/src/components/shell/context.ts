@@ -44,3 +44,18 @@ export function useRegisterRoomCommands(commands: RoomCommands | null): void {
 
 /** The element in the top bar where a screen can put its own controls (see TopBarSlot). */
 export const TopBarSlotContext = createContext<HTMLElement | null>(null)
+
+/** Where a screen says what to show after "Rooms ›" in the breadcrumb. Null outside the shell. */
+export const BreadcrumbTailContext = createContext<((label: string | null) => void) | null>(null)
+
+/**
+ * Called by the room screen with its pipeline id: the breadcrumb reads "Rooms › orders",
+ * never the room id. Undefined clears it. Outside the shell it does nothing.
+ */
+export function useBreadcrumbTail(label: string | undefined): void {
+  const set = useContext(BreadcrumbTailContext)
+  useEffect(() => {
+    set?.(label ?? null)
+    return () => set?.(null)
+  }, [set, label])
+}

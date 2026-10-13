@@ -14,10 +14,13 @@ export function useRoomList() {
     setLoading(true)
     try {
       if (isFixtures()) {
-        setRooms(fixtureRooms)
+        // A copy: the fixture array is edited in place (new room, take control).
+        setRooms([...fixtureRooms])
+        setError(null)
         return
       }
       setRooms(await api.rooms())
+      setError(null) // a Retry that works clears the error
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {

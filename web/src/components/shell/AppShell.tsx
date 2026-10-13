@@ -8,7 +8,7 @@ import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useTheme } from '@/context/theme'
 import { useRoomList } from '@/hooks/useRoomList'
-import { InShellContext, RoomCommandsContext, TopBarSlotContext } from './context'
+import { BreadcrumbTailContext, InShellContext, RoomCommandsContext, TopBarSlotContext } from './context'
 import type { RoomCommandRegistry, RoomCommands } from './context'
 import { isEditableTarget } from './keys'
 import { pipelineSummaries } from './pipelines'
@@ -45,6 +45,8 @@ export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(false)
   const [slotEl, setSlotEl] = useState<HTMLElement | null>(null)
+  // The pipeline the open room screen reports for the breadcrumb (useBreadcrumbTail).
+  const [crumbPipeline, setCrumbPipeline] = useState<string | null>(null)
   // Bumps on every navigation; the sidebar row of the open room's pipeline refetches on it.
   const [navKey, setNavKey] = useState(0)
   // The palette's chunk loads on first open and stays.
@@ -122,6 +124,7 @@ export function AppShell() {
     <InShellContext.Provider value>
       <RoomCommandsContext.Provider value={registry}>
         <TopBarSlotContext.Provider value={slotEl}>
+         <BreadcrumbTailContext.Provider value={setCrumbPipeline}>
           <TooltipProvider>
             <div className="flex min-h-0 flex-1 bg-background text-sm text-foreground">
               <a
@@ -175,7 +178,7 @@ export function AppShell() {
                     <Menu aria-hidden="true" />
                   </Button>
                   <BrandMark className="md:hidden" />
-                  <Breadcrumb />
+                  <Breadcrumb pipelineId={crumbPipeline ?? currentPipelineId} />
                   <div className="ml-auto flex min-w-0 items-center gap-2">
                     <div ref={setSlotEl} className="flex min-w-0 items-center gap-2" data-testid="topbar-slot" />
                     <ThemeToggle />
@@ -195,6 +198,7 @@ export function AppShell() {
             )}
             <Toaster />
           </TooltipProvider>
+         </BreadcrumbTailContext.Provider>
         </TopBarSlotContext.Provider>
       </RoomCommandsContext.Provider>
     </InShellContext.Provider>
@@ -209,26 +213,34 @@ function safeDecode(v: string): string {
   }
 }
 
-// "Rooms" or "Rooms > r_abc". Plain text, not a heading: each screen has its own h1.
-function Breadcrumb() {
+// The page title in the top bar. On the room list it is the page's h1 ("Rooms"), so the list
+// draws no header of its own. In a room it is "Rooms › <pipeline>" (never the room id; the
+// room screen has its own h1 with the title). The pipeline comes from the room screen
+// (useBreadcrumbTail) and, until it has loaded, from the room list the shell already holds.
+function Breadcrumb({ pipelineId }: { pipelineId?: string }) {
   const { pathname } = useLocation()
   const inRoom = pathname.startsWith('/rooms/')
-  const id = inRoom ? safeDecode(pathname.split('/')[2] ?? '') : ''
+  if (!inRoom) {
+    return (
+      <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Rooms</h1>
+    )
+  }
   return (
     <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-sm">
-      {inRoom ? (
-        <>
-          <Link to="/" className="text-muted-foreground hover:text-foreground">
-            Rooms
-          </Link>
-          <ChevronRight className="size-3 shrink-0 text-subtle-foreground" aria-hidden="true" />
-          <span className="truncate font-mono text-foreground" aria-current="page">
-            {id}
-          </span>
-        </>
+      <Link to="/" className="text-muted-foreground hover:text-foreground">
+        Rooms
+      </Link>
+      <ChevronRight className="size-3 shrink-0 text-subtle-foreground" aria-hidden="true" />
+      {pipelineId ? (
+        <Link
+          to={`/?pipeline=${encodeURIComponent(pipelineId)}`}
+          className="truncate font-mono text-foreground hover:underline"
+        >
+          {pipelineId}
+        </Link>
       ) : (
-        <span className="font-medium text-foreground" aria-current="page">
-          Rooms
+        <span className="truncate text-muted-foreground" aria-current="page">
+          Room
         </span>
       )}
     </nav>

@@ -1,37 +1,837 @@
-import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import type { FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { FormEvent, ReactNode } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { AlertTriangle, ChevronDown, Plus, X } from 'lucide-react'
+import { toast } from 'sonner'
 import type { RoomSnapshot } from '../api/types'
 import { api, isFixtures } from '../api/client'
 import { useCurrentUser } from '../context/user'
 import { isViewer } from '../state/permissions'
-import { addFixtureRoom, emptySnapshot } from '../fixtures/player'
+import type { CurrentUser } from '../state/permissions'
+import { addFixtureRoom, emptySnapshot, fixtureRooms } from '../fixtures/player'
 import { useRoomList } from '../hooks/useRoomList'
-import { ageLabel } from '../lib/time'
-import { sortRoomsForList } from '../lib/rooms'
+import { ageLabel, updatedAgoLabel } from '../lib/time'
+import {
+  ROOM_TABS,
+  agentCell,
+  canTakeControlOf,
+  layersNeedingYou,
+  needsYou,
+  pipelineIds,
+  roomStats,
+  roomStatusCell,
+  roomsForPipeline,
+  roomsForTab,
+  sortRoomsForList,
+} from '../lib/rooms'
+import type { Dot, RoomTab } from '../lib/rooms'
 import { errorText } from '../lib/errors'
-import { Chip, Empty } from './ui'
-import { severityTone } from '../lib/tones'
-import { UserSwitcher } from './UserSwitcher'
+import { initials, personColor } from '../lib/people'
+import { cn } from '../lib/utils'
+import { Avatar, AvatarFallback } from './ui/avatar'
+import { Badge } from './ui/badge'
+import { Button } from './ui/button'
+import { Card } from './ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from './ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from './ui/dropdown-menu'
+import { Input } from './ui/input'
+import { Kbd } from './ui/kbd'
+import { Skeleton } from './ui/skeleton'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
+import { TopBarSlot } from './shell/TopBarSlot'
+import { useInShell } from './shell/context'
+import { isEditableTarget } from './shell/keys'
 
 const SEVERITIES = ['sev1', 'sev2', 'sev3', 'sev4']
+const POLL_MS = 15_000
 
+const TAB_LABEL: Record<RoomTab, string> = {
+  open: 'Open',
+  mine: 'Mine',
+  resolved: 'Resolved',
+  all: 'All',
+}
+
+const DOT_CLASS: Record<Dot, string> = {
+  ok: 'bg-success',
+  warn: 'bg-warning',
+  fail: 'bg-destructive',
+  info: 'bg-info',
+  agent: 'bg-agent',
+  idle: 'bg-subtle-foreground',
+}
+
+function StatusDot({ dot }: { dot: Dot }) {
+  return <span className={cn('size-1.5 shrink-0 rounded-full', DOT_CLASS[dot])} aria-hidden="true" />
+}
+
+function severityVariant(sev: string) {
+  return sev === 'sev1' || sev === 'sev2' || sev === 'sev3' || sev === 'sev4' ? sev : 'neutral'
+}
+
+// The rooms home (docs/design/ui-v2 Main.dc.html, Rooms-Empty.dc.html). The page title and
+// the controls live in the shell's top bar; this component draws the stat strip and the table.
 export function RoomList() {
   const navigate = useNavigate()
+  const inShell = useInShell()
   const { user } = useCurrentUser()
-  const viewer = isViewer(user) // a viewer cannot create rooms (POST /api/rooms is 403 viewer)
-  const { rooms, loading, error } = useRoomList()
+  const viewer = isViewer(user) // a viewer cannot create rooms or take control (the server answers 403 viewer)
+  const { rooms, loading, error, reload } = useRoomList()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const pipeline = searchParams.get('pipeline') || null
+  const [tab, setTab] = useState<RoomTab>('open')
+  const [active, setActive] = useState(-1) // keyboard row, an index into `visible`
+  const [newOpen, setNewOpen] = useState(false)
+  const [taking, setTaking] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState(false)
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null)
+  const rowLinks = useRef(new Map<string, HTMLAnchorElement>())
+
+  // "Live": the list is fetched again every 15 s while the tab is visible. The skeleton is only for
+  // the first load; a refresh keeps the table on screen.
+  useEffect(() => {
+    if (!loading) {
+      setLoaded(true)
+      if (!error) setUpdatedAt(Date.now())
+    }
+  }, [loading, error])
+  useEffect(() => {
+    const t = window.setInterval(() => {
+      if (!document.hidden) void reload()
+    }, POLL_MS)
+    return () => window.clearInterval(t)
+  }, [reload])
+
+  const sorted = useMemo(() => sortRoomsForList(rooms), [rooms])
+  const scoped = useMemo(() => roomsForPipeline(sorted, pipeline), [sorted, pipeline])
+  const visible = useMemo(() => roomsForTab(scoped, tab, user), [scoped, tab, user])
+  const counts = useMemo(
+    () => ({
+      open: roomsForTab(scoped, 'open', user).length,
+      mine: roomsForTab(scoped, 'mine', user).length,
+      resolved: roomsForTab(scoped, 'resolved', user).length,
+    }),
+    [scoped, user],
+  )
+  const stats = useMemo(() => roomStats(scoped, user), [scoped, user])
+  const pipelines = useMemo(() => pipelineIds(sorted), [sorted])
+
+  const setPipeline = useCallback(
+    (id: string | null) => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev)
+          if (id) next.set('pipeline', id)
+          else next.delete('pipeline')
+          return next
+        },
+        { replace: true },
+      )
+      setActive(-1)
+    },
+    [setSearchParams],
+  )
+
+  const takeControl = useCallback(
+    async (room: RoomSnapshot) => {
+      setTaking(room.id)
+      try {
+        if (isFixtures()) {
+          const i = fixtureRooms.findIndex((r) => r.id === room.id)
+          const lease = new Date(Date.now() + 30 * 60 * 1000).toISOString()
+          if (i >= 0) fixtureRooms[i] = { ...room, driver: { id: user.id, name: user.name, lease_until: lease } }
+        } else {
+          await api.grantControl(room.id, user.id)
+        }
+        toast.success(`You now drive "${room.title}"`)
+        await reload()
+      } catch (err) {
+        toast.error(errorText(err))
+      } finally {
+        setTaking(null)
+      }
+    },
+    [reload, user.id, user.name],
+  )
+
+  const focusRow = (index: number) => {
+    setActive(index)
+    const room = visible[index]
+    if (room) rowLinks.current.get(room.id)?.focus()
+  }
+
+  // J/K move, Enter opens, T takes control, C opens the new-room dialog. Never while typing, never
+  // with a modifier, never while a dialog (the new-room form, ⌘K, the phone drawer) is open.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return
+      if (isEditableTarget(e.target) || document.querySelector('[role="dialog"], [role="menu"]')) return
+      const key = e.key.toLowerCase()
+      if (key === 'j' || key === 'k') {
+        if (visible.length === 0) return
+        e.preventDefault()
+        const next = key === 'j' ? Math.min(active + 1, visible.length - 1) : Math.max(active - 1, 0)
+        focusRow(next)
+      } else if (key === 'enter') {
+        // On a link or button, Enter already does its own thing.
+        if ((e.target as Element | null)?.closest?.('a, button, [role="tab"], [role="menuitem"]')) return
+        const room = visible[active]
+        if (room) navigate(`/rooms/${room.id}`)
+      } else if (e.repeat) {
+        return
+      } else if (key === 't') {
+        const room = visible[active]
+        if (room && canTakeControlOf(room, user)) void takeControl(room)
+      } else if (key === 'c' && !viewer) {
+        e.preventDefault()
+        setNewOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
+
+  const changeTab = (next: string) => {
+    setTab(next as RoomTab)
+    setActive(-1)
+  }
+
+  const controls = (
+    <>
+      <LivePill updatedAt={updatedAt} error={error !== null} />
+      {!viewer && (
+        <Button
+          size="sm"
+          aria-label="New room"
+          aria-keyshortcuts="C"
+          className="max-sm:w-8 max-sm:px-0"
+          onClick={() => setNewOpen(true)}
+        >
+          <Plus aria-hidden="true" />
+          <span className="max-sm:hidden" aria-hidden="true">
+            New room
+          </span>
+          <Kbd className="max-sm:hidden" aria-hidden="true">
+            C
+          </Kbd>
+        </Button>
+      )}
+    </>
+  )
+
+  const firstLoad = loading && !loaded
+  const failed = error !== null && rooms.length === 0
+
+  return (
+    <div className="flex flex-col gap-4 px-3 py-5 md:px-6">
+      {inShell ? (
+        <TopBarSlot>{controls}</TopBarSlot>
+      ) : (
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-xl font-semibold tracking-tight">Rooms</h1>
+          {controls}
+        </div>
+      )}
+
+      {firstLoad ? (
+        <ListSkeleton />
+      ) : failed ? (
+        <ErrorCard message={error} onRetry={() => void reload()} />
+      ) : (
+        <>
+          {error && (
+            <p
+              role="alert"
+              className="flex items-center gap-2 rounded-md border border-border bg-warning-subtle px-3 py-2 text-sm text-warning-foreground"
+            >
+              <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
+              Could not refresh the list: {error}
+              <Button variant="ghost" size="sm" className="ml-auto h-7" onClick={() => void reload()}>
+                Retry
+              </Button>
+            </p>
+          )}
+
+          <StatStrip stats={stats} />
+
+          <Card className="flex min-h-0 flex-col">
+            <Tabs value={tab} onValueChange={changeTab} className="flex flex-col">
+              <div className="flex flex-wrap items-center gap-2 px-3">
+                <TabsList className="border-b-0">
+                  {ROOM_TABS.map((t) => (
+                    <TabsTrigger key={t} value={t}>
+                      {TAB_LABEL[t]}
+                      {t !== 'all' && (
+                        <span className="font-mono text-[11px] text-subtle-foreground">{counts[t]}</span>
+                      )}
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+                <div className="ml-auto flex items-center gap-1.5 py-1">
+                  {pipeline && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2"
+                      aria-label={`Clear pipeline filter ${pipeline}`}
+                      onClick={() => setPipeline(null)}
+                    >
+                      <X className="!size-3" aria-hidden="true" />
+                      Clear
+                    </Button>
+                  )}
+                  <PipelineFilter pipelines={pipelines} value={pipeline} onChange={setPipeline} />
+                </div>
+              </div>
+              <div className="h-px bg-border" />
+              <TabsContent value={tab} className="min-w-0">
+                {visible.length === 0 ? (
+                  <EmptyPanel
+                    tab={tab}
+                    pipeline={pipeline}
+                    viewer={viewer}
+                    onNew={() => setNewOpen(true)}
+                    onResolved={() => changeTab('resolved')}
+                    onClearFilter={() => setPipeline(null)}
+                  />
+                ) : (
+                  <RoomTable
+                    rooms={visible}
+                    user={user}
+                    active={active}
+                    taking={taking}
+                    linkRefs={rowLinks.current}
+                    onActive={setActive}
+                    onOpen={(id) => navigate(`/rooms/${id}`)}
+                    onTake={(r) => void takeControl(r)}
+                  />
+                )}
+              </TabsContent>
+            </Tabs>
+            <div className="h-px bg-border" />
+            <div className="flex flex-wrap items-center gap-3 px-3 py-2 text-xs text-subtle-foreground">
+              <span>
+                {visible.length} {visible.length === 1 ? 'room' : 'rooms'}
+              </span>
+              <span className="ml-auto hidden items-center gap-2.5 sm:inline-flex" aria-hidden="true">
+                <Hint keys={['J', 'K']} label="move" />
+                <Hint keys={['⏎']} label="open" />
+                {!viewer && <Hint keys={['T']} label="take control" />}
+              </span>
+            </div>
+          </Card>
+        </>
+      )}
+
+      {!viewer && (
+        <NewRoomDialog open={newOpen} onOpenChange={setNewOpen} pipelines={pipelines} defaultPipeline={pipeline} />
+      )}
+    </div>
+  )
+}
+
+function Hint({ keys, label }: { keys: string[]; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      {keys.map((k) => (
+        <Kbd key={k}>{k}</Kbd>
+      ))}
+      {label}
+    </span>
+  )
+}
+
+// "live · updated 5s ago". It ticks on its own so the table does not re-render every second.
+// On a phone only the dot shows (the words stay for screen readers).
+function LivePill({ updatedAt, error }: { updatedAt: number | null; error: boolean }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(t)
+  }, [])
+  const ago = updatedAgoLabel(updatedAt, now)
+  const text = error ? 'offline · retrying' : ago ? `live · ${ago}` : 'live'
+  return (
+    <span className="inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-border bg-card px-2 text-xs font-medium text-muted-foreground max-sm:w-6 max-sm:justify-center max-sm:px-0">
+      <span className={cn('size-1.5 rounded-full', error ? 'bg-warning' : 'bg-success')} aria-hidden="true" />
+      <span className="max-sm:sr-only">{text}</span>
+    </span>
+  )
+}
+
+function Stat({
+  label,
+  dot,
+  value,
+  caption,
+  valueClass,
+  className,
+}: {
+  label: string
+  dot?: Dot
+  value: number
+  caption: string
+  valueClass?: string
+  className?: string
+}) {
+  return (
+    <div className={cn('flex min-w-0 flex-col gap-1 border-border p-4', className)}>
+      <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+        {dot && <StatusDot dot={dot} />}
+        {label}
+      </span>
+      <span className={cn('text-xl font-semibold leading-6 tracking-tight tabular-nums', valueClass)}>{value}</span>
+      <span className="truncate text-xs text-subtle-foreground">{caption}</span>
+    </div>
+  )
+}
+
+function StatStrip({ stats }: { stats: ReturnType<typeof roomStats> }) {
+  // Two columns on a phone, four from md. The borders follow the grid.
+  const cell = 'max-md:[&:nth-child(even)]:border-l max-md:[&:nth-child(n+3)]:border-t md:[&:nth-child(n+2)]:border-l'
+  return (
+    <Card className="grid grid-cols-2 md:grid-cols-4" aria-label="Summary" role="group">
+      <Stat
+        className={cell}
+        label="Open"
+        value={stats.open}
+        caption={stats.open === 0 ? 'nothing firing' : `${stats.openWithDriver} with a driver`}
+      />
+      <Stat
+        className={cell}
+        label="Needs you"
+        dot="warn"
+        value={stats.needsYou}
+        valueClass={stats.needsYou > 0 ? 'text-warning-foreground' : undefined}
+        caption={stats.needsYou > 0 ? `${stats.needsYouLayers.join(', ')} approval` : 'no pending approvals'}
+      />
+      <Stat
+        className={cell}
+        label="Agent working"
+        dot="agent"
+        value={stats.agentWorking}
+        valueClass={stats.agentWorking > 0 ? 'text-agent-foreground' : undefined}
+        caption={stats.agentCaption}
+      />
+      <Stat
+        className={cell}
+        label="Resolved today"
+        value={stats.resolvedToday}
+        caption={stats.medianMinutes === null ? 'none yet' : `median ${stats.medianMinutes} min`}
+      />
+    </Card>
+  )
+}
+
+function PipelineFilter({
+  pipelines,
+  value,
+  onChange,
+}: {
+  pipelines: string[]
+  value: string | null
+  onChange: (id: string | null) => void
+}) {
+  // A filter that came from the URL may name a pipeline no room mentions; keep it in the menu.
+  const list = value && !pipelines.includes(value) ? [value, ...pipelines] : pipelines
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm" className="h-7 px-2">
+          {value ? (
+            <>
+              Pipeline: <span className="font-mono text-foreground">{value}</span>
+            </>
+          ) : (
+            'Pipeline'
+          )}
+          <ChevronDown className="!size-3" aria-hidden="true" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-[10rem]">
+        <DropdownMenuRadioGroup value={value ?? ''} onValueChange={(v) => onChange(v || null)}>
+          <DropdownMenuRadioItem value="">All pipelines</DropdownMenuRadioItem>
+          {list.map((p) => (
+            <DropdownMenuRadioItem key={p} value={p} className="font-mono">
+              {p}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+const TH = 'h-9 whitespace-nowrap px-3 text-left text-xs font-medium text-subtle-foreground'
+
+function RoomTable({
+  rooms,
+  user,
+  active,
+  taking,
+  linkRefs,
+  onActive,
+  onOpen,
+  onTake,
+}: {
+  rooms: RoomSnapshot[]
+  user: CurrentUser
+  active: number
+  taking: string | null
+  linkRefs: Map<string, HTMLAnchorElement>
+  onActive: (i: number) => void
+  onOpen: (id: string) => void
+  onTake: (room: RoomSnapshot) => void
+}) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-sm" aria-label="Rooms">
+        <thead>
+          <tr className="border-b border-border">
+            <th scope="col" className={cn(TH, 'w-[38%]')}>
+              Incident
+            </th>
+            <th scope="col" className={TH}>
+              Severity
+            </th>
+            <th scope="col" className={cn(TH, 'max-md:hidden')}>
+              Status
+            </th>
+            <th scope="col" className={cn(TH, 'max-md:hidden')}>
+              Pipeline
+            </th>
+            <th scope="col" className={TH}>
+              Driver
+            </th>
+            <th scope="col" className={cn(TH, 'max-lg:hidden')}>
+              Agent
+            </th>
+            <th scope="col" className={cn(TH, 'text-right max-md:hidden')}>
+              Opened
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {rooms.map((room, i) => (
+            <RoomRow
+              key={room.id}
+              room={room}
+              user={user}
+              active={i === active}
+              taking={taking === room.id}
+              linkRef={(el) => {
+                if (el) linkRefs.set(room.id, el)
+                else linkRefs.delete(room.id)
+              }}
+              onActivate={() => onActive(i)}
+              onOpen={() => onOpen(room.id)}
+              onTake={() => onTake(room)}
+            />
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+const TD = 'h-11 whitespace-nowrap border-b border-border px-3 group-last:border-b-0'
+
+function RoomRow({
+  room,
+  user,
+  active,
+  taking,
+  linkRef,
+  onActivate,
+  onOpen,
+  onTake,
+}: {
+  room: RoomSnapshot
+  user: CurrentUser
+  active: boolean
+  taking: boolean
+  linkRef: (el: HTMLAnchorElement | null) => void
+  onActivate: () => void
+  onOpen: () => void
+  onTake: () => void
+}) {
+  const tinted = needsYou(room, user) // only for layers this person owns
+  const status = roomStatusCell(room)
+  const agent = agentCell(room)
+  const layers = layersNeedingYou(room, user)
+  const canTake = canTakeControlOf(room, user)
+  return (
+    <tr
+      data-room-id={room.id}
+      data-active={active || undefined}
+      className={cn(
+        'group cursor-pointer transition-colors',
+        tinted ? 'bg-warning-subtle' : 'hover:bg-accent/60',
+        active && 'bg-accent',
+        'focus-within:bg-accent',
+      )}
+      onClick={(e) => {
+        // The title link, the Take control button and text selection keep their own behaviour.
+        if ((e.target as Element).closest('a, button')) return
+        if (window.getSelection()?.toString()) return
+        onOpen()
+      }}
+    >
+      <td className={cn(TD, 'max-w-0')}>
+        {/* Wide: the title and its badge on one line. Phone: the title, then the badge and the pipeline (its column is hidden). */}
+        <div className="flex min-w-0 items-center gap-x-2 max-md:flex-wrap max-md:py-1">
+          <Link
+            ref={linkRef}
+            to={`/rooms/${room.id}`}
+            onFocus={onActivate}
+            className="min-w-0 truncate rounded-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-md:basis-full"
+          >
+            {room.title}
+          </Link>
+          {tinted && (
+            <Badge variant="warning" title={`Waiting on your ${layers.join(', ')} approval`}>
+              Needs you
+            </Badge>
+          )}
+          <span className="truncate font-mono text-xs text-muted-foreground md:hidden">{room.pipeline_id}</span>
+        </div>
+      </td>
+      <td className={TD}>
+        <Badge variant={severityVariant(room.severity)} className="uppercase">
+          {room.severity}
+        </Badge>
+      </td>
+      <td className={cn(TD, 'max-md:hidden')}>
+        <span className="inline-flex items-center gap-1.5">
+          <StatusDot dot={status.dot} />
+          {status.label}
+        </span>
+      </td>
+      <td className={cn(TD, 'font-mono text-muted-foreground max-md:hidden')}>{room.pipeline_id}</td>
+      <td className={TD}>
+        {canTake ? (
+          <Button
+            variant="outline"
+            className="h-[26px] gap-1.5 px-2 text-xs"
+            disabled={taking}
+            title={room.driver ? `${room.driver.name}'s lease has expired` : undefined}
+            onClick={onTake}
+          >
+            Take control
+            <Kbd className="h-4 min-w-4 max-sm:hidden" aria-hidden="true">
+              T
+            </Kbd>
+          </Button>
+        ) : room.driver ? (
+          <span className="inline-flex items-center gap-1.5">
+            <Avatar className="size-5">
+              <AvatarFallback
+                className="text-[9px]"
+                style={{ backgroundColor: personColor(room.driver.id) }}
+                aria-hidden="true"
+              >
+                {initials(room.driver.name)}
+              </AvatarFallback>
+            </Avatar>
+            {room.driver.name}
+            <span className="sr-only">, driver</span>
+          </span>
+        ) : (
+          <span className="text-muted-foreground">{room.status === 'open' ? 'No driver' : '—'}</span>
+        )}
+      </td>
+      <td className={cn(TD, 'max-lg:hidden')}>
+        <span className={cn('inline-flex items-center gap-1.5', agent.agent ? 'text-agent-foreground' : 'text-muted-foreground')}>
+          <StatusDot dot={agent.dot} />
+          {agent.label}
+        </span>
+      </td>
+      <td className={cn(TD, 'text-right tabular-nums text-muted-foreground max-md:hidden')}>
+        <span title={room.opened_at}>
+          <span className="sr-only">opened </span>
+          {ageLabel(room.opened_at)}
+          <span className="sr-only"> ago</span>
+        </span>
+      </td>
+    </tr>
+  )
+}
+
+function EmptyPanel({
+  tab,
+  pipeline,
+  viewer,
+  onNew,
+  onResolved,
+  onClearFilter,
+}: {
+  tab: RoomTab
+  pipeline: string | null
+  viewer: boolean
+  onNew: () => void
+  onResolved: () => void
+  onClearFilter: () => void
+}) {
+  let title: string
+  let body: ReactNode
+  let actions: ReactNode = null
+  if (pipeline) {
+    title = tab === 'mine' ? `Nothing for you in ${pipeline}` : `No ${TAB_LABEL[tab].toLowerCase()} rooms in ${pipeline}`
+    body = 'The pipeline filter is on. Clear it to see every pipeline.'
+    actions = (
+      <Button variant="outline" onClick={onClearFilter}>
+        Clear pipeline filter
+      </Button>
+    )
+  } else if (tab === 'open') {
+    title = 'No open rooms'
+    body = viewer
+      ? 'Alerts land here. A room opens the moment a rule fires.'
+      : 'Alerts land here. A room opens the moment a rule fires. You can also open one by hand.'
+    actions = (
+      <>
+        {!viewer && (
+          <Button onClick={onNew}>
+            New room
+            <Kbd aria-hidden="true">C</Kbd>
+          </Button>
+        )}
+        <Button variant="ghost" onClick={onResolved}>
+          See resolved rooms
+        </Button>
+      </>
+    )
+  } else if (tab === 'mine') {
+    title = 'Nothing needs you right now'
+    body = 'Rooms you drive, or where one of your layers has to approve, show up here.'
+  } else if (tab === 'resolved') {
+    title = 'No resolved rooms yet'
+    body = 'A room moves here when it is closed.'
+  } else {
+    title = 'No rooms yet'
+    body = 'Alerts land here.'
+  }
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 px-6 py-12 text-center">
+      {tab === 'open' && !pipeline && (
+        <div className="flex items-center opacity-70" aria-hidden="true">
+          <Ghost node />
+          <Ghost />
+          <Ghost node />
+          <Ghost />
+          <Ghost node />
+          <Ghost className="max-sm:hidden" />
+          <Ghost node className="max-sm:hidden" />
+          <Ghost className="max-sm:hidden" />
+          <Ghost node className="max-sm:hidden" />
+        </div>
+      )}
+      <p className="mt-2 text-base font-medium">{title}</p>
+      <p className="max-w-[52ch] text-muted-foreground">{body}</p>
+      {actions && <div className="mt-1 flex flex-wrap justify-center gap-2">{actions}</div>}
+    </div>
+  )
+}
+
+// A dashed pipeline node, or the dashed edge between two.
+function Ghost({ node, className }: { node?: boolean; className?: string }) {
+  return node ? (
+    <span className={cn('h-10 w-16 rounded-md border border-dashed border-input sm:w-[120px]', className)} />
+  ) : (
+    <span className={cn('w-7 border-t-2 border-dashed border-input', className)} />
+  )
+}
+
+function ListSkeleton() {
+  return (
+    <div role="status" aria-label="Loading rooms" className="flex flex-col gap-4">
+      <span className="sr-only">Loading rooms…</span>
+      <Card className="grid grid-cols-2 md:grid-cols-4">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="flex flex-col gap-2 p-4">
+            <Skeleton className="h-3 w-16" />
+            <Skeleton className="h-6 w-8" />
+            <Skeleton className="h-3 w-24" />
+          </div>
+        ))}
+      </Card>
+      <Card className="flex flex-col">
+        <div className="flex gap-3 px-3 py-2.5">
+          <Skeleton className="h-5 w-16" />
+          <Skeleton className="h-5 w-16" />
+          <Skeleton className="h-5 w-16" />
+        </div>
+        <div className="h-px bg-border" />
+        {[0, 1, 2, 3, 4].map((i) => (
+          <div key={i} className="flex h-11 items-center gap-4 border-b border-border px-3 last:border-b-0">
+            <Skeleton className="h-4 w-1/3" />
+            <Skeleton className="h-5 w-12" />
+            <Skeleton className="h-4 w-20 max-md:hidden" />
+            <Skeleton className="ml-auto h-4 w-10" />
+          </div>
+        ))}
+      </Card>
+    </div>
+  )
+}
+
+function ErrorCard({ message, onRetry }: { message: string | null; onRetry: () => void }) {
+  return (
+    <Card role="alert" className="flex flex-col items-center gap-3 px-6 py-12 text-center">
+      <AlertTriangle className="size-5 text-destructive-fg" aria-hidden="true" />
+      <p className="text-base font-medium">Could not load rooms</p>
+      <p className="max-w-[52ch] text-muted-foreground">{message}</p>
+      <Button variant="outline" onClick={onRetry}>
+        Retry
+      </Button>
+    </Card>
+  )
+}
+
+const FIELD_LABEL = 'text-xs font-medium text-muted-foreground'
+
+function NewRoomDialog({
+  open,
+  onOpenChange,
+  pipelines,
+  defaultPipeline,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  pipelines: string[]
+  defaultPipeline: string | null
+}) {
+  const navigate = useNavigate()
   const [title, setTitle] = useState('')
   const [severity, setSeverity] = useState('sev2')
-  const [pipelineId, setPipelineId] = useState('orders')
+  const [pipelineId, setPipelineId] = useState('')
   const [busy, setBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
 
-  // Open rooms first, then newest opened first (lib/rooms.ts); the two sections
-  // below share the same order within their group.
-  const sorted = sortRoomsForList(rooms)
-  const openRooms = sorted.filter((r) => r.status === 'open')
-  const closedRooms = sorted.filter((r) => r.status !== 'open')
+  const change = (next: boolean) => {
+    if (!next) {
+      setTitle('')
+      setCreateError(null)
+    }
+    onOpenChange(next)
+  }
+  // However it was opened (button, C key, empty state): the pipeline defaults to the filter, else the first one.
+  useEffect(() => {
+    if (open) setPipelineId((p) => p || (defaultPipeline ?? pipelines[0] ?? 'orders'))
+  }, [open, defaultPipeline, pipelines])
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -39,23 +839,17 @@ export function RoomList() {
     setBusy(true)
     setCreateError(null)
     try {
+      const pipeline = pipelineId.trim() || 'orders'
+      let id: string
       if (isFixtures()) {
-        const snapshot = emptySnapshot(
-          `r_${Date.now().toString(36)}`,
-          title.trim(),
-          severity,
-          pipelineId.trim() || 'orders',
-        )
+        const snapshot = emptySnapshot(`r_${Date.now().toString(36)}`, title.trim(), severity, pipeline)
         addFixtureRoom(snapshot)
-        navigate(`/rooms/${snapshot.id}`)
-        return
+        id = snapshot.id
+      } else {
+        id = (await api.createRoom({ title: title.trim(), severity, pipeline_id: pipeline })).id
       }
-      const room = await api.createRoom({
-        title: title.trim(),
-        severity,
-        pipeline_id: pipelineId.trim() || 'orders',
-      })
-      navigate(`/rooms/${room.id}`)
+      change(false)
+      navigate(`/rooms/${id}`)
     } catch (err) {
       setCreateError(errorText(err))
     } finally {
@@ -64,115 +858,78 @@ export function RoomList() {
   }
 
   return (
-    <div className="shell">
-      <header className="topbar">
-        <h1 className="brand">Piperoom</h1>
-        <div className="topbar__right">
-          {isFixtures() && <Chip tone="info">fixture mode</Chip>}
-          <UserSwitcher />
-        </div>
-      </header>
-
-      <main className="roomlist">
-        {!viewer && (
-        <section className="panel">
-          <div className="panel__body">
-            <form className="new-room" onSubmit={onSubmit}>
-              <h2 className="panel__title">New room</h2>
-              <div className="field">
-                <label htmlFor="new-title">Title</label>
-                <input
-                  id="new-title"
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  placeholder="Warehouse orders stale"
-                  required
-                />
-              </div>
-              <div className="field">
-                <label htmlFor="new-severity">Severity</label>
-                <select id="new-severity" value={severity} onChange={(e) => setSeverity(e.target.value)}>
-                  {SEVERITIES.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="field">
-                <label htmlFor="new-pipeline">Pipeline</label>
-                <input
-                  id="new-pipeline"
-                  value={pipelineId}
-                  onChange={(e) => setPipelineId(e.target.value)}
-                  placeholder="orders"
-                />
-              </div>
-              <button type="submit" className="btn btn--primary" disabled={busy || !title.trim()}>
-                Open room
-              </button>
-            </form>
-            {createError && <p className="error-text">{createError}</p>}
+    <Dialog open={open} onOpenChange={change}>
+      <DialogContent>
+        <form className="grid gap-4" onSubmit={onSubmit}>
+          <DialogHeader>
+            <DialogTitle>New room</DialogTitle>
+            <DialogDescription>Open a room by hand. Alerts open one on their own.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-1.5">
+            <label htmlFor="new-title" className={FIELD_LABEL}>
+              Title
+            </label>
+            <Input
+              id="new-title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Warehouse orders stale"
+              required
+              autoFocus
+            />
           </div>
-        </section>
-        )}
-
-        <section className="panel roomlist__section">
-          <div className="panel__head">
-            <h2 className="panel__title">Open rooms</h2>
-            <span className="panel__right muted">{openRooms.length}</span>
-          </div>
-          <div className="panel__body">
-            {loading && <Empty>Loading rooms…</Empty>}
-            {error && <p className="error-text">{error}</p>}
-            {!loading && !error && openRooms.length === 0 && <Empty>No open rooms.</Empty>}
-            <ul className="room-cards">
-              {openRooms.map((r) => (
-                <RoomCard key={r.id} room={r} />
-              ))}
-            </ul>
-          </div>
-        </section>
-
-        {closedRooms.length > 0 && (
-          <section className="panel roomlist__section">
-            <div className="panel__head">
-              <h2 className="panel__title">Closed</h2>
-              <span className="panel__right muted">{closedRooms.length}</span>
-            </div>
-            <div className="panel__body">
-              <ul className="room-cards">
-                {closedRooms.map((r) => (
-                  <RoomCard key={r.id} room={r} />
+          <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-1.5">
+              <label htmlFor="new-severity" className={FIELD_LABEL}>
+                Severity
+              </label>
+              <select
+                id="new-severity"
+                value={severity}
+                onChange={(e) => setSeverity(e.target.value)}
+                className="h-8 w-full rounded-md border border-input-border bg-background px-2 text-sm uppercase text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+              >
+                {SEVERITIES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
                 ))}
-              </ul>
+              </select>
             </div>
-          </section>
-        )}
-      </main>
-    </div>
-  )
-}
-
-function RoomCard({ room }: { room: RoomSnapshot }) {
-  return (
-    <li>
-      <Link to={`/rooms/${room.id}`} className="room-card">
-        <span className="room-card__main">
-          <span className="room-card__title">{room.title}</span>
-          <span className="room-card__meta muted">
-            {room.pipeline_id} · opened {ageLabel(room.opened_at)} ·{' '}
-            {room.driver ? `driver ${room.driver.name}` : 'no driver'}
-          </span>
-        </span>
-        <span className="room-card__side">
-          <Chip tone={severityTone(room.severity)}>{room.severity}</Chip>
-          <Chip tone={room.agent_status.state === 'error' ? 'fail' : 'info'}>
-            {room.agent_status.state}
-            {room.agent_status.detail ? ` · ${room.agent_status.detail}` : ''}
-          </Chip>
-        </span>
-      </Link>
-    </li>
+            <div className="grid gap-1.5">
+              <label htmlFor="new-pipeline" className={FIELD_LABEL}>
+                Pipeline
+              </label>
+              <Input
+                id="new-pipeline"
+                className="font-mono"
+                list="new-pipeline-options"
+                value={pipelineId}
+                onChange={(e) => setPipelineId(e.target.value)}
+                placeholder="orders"
+              />
+              <datalist id="new-pipeline-options">
+                {pipelines.map((p) => (
+                  <option key={p} value={p} />
+                ))}
+              </datalist>
+            </div>
+          </div>
+          {createError && (
+            <p role="alert" className="text-sm text-destructive-fg">
+              {createError}
+            </p>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={() => change(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={busy || !title.trim()}>
+              Open room
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   )
 }

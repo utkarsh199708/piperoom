@@ -28,6 +28,19 @@ describe('LoginScreen', () => {
     expect(screen.getByRole('button', { name: 'Priya' })).toBeDisabled()
   })
 
+  it('only the first user row is highlighted ("on"), has focus, and shows the Enter key', () => {
+    render(<LoginScreen onPick={vi.fn()} busy={false} />)
+    const [first, ...others] = DEV_USERS.map((u) => screen.getByRole('button', { name: u.name }))
+    expect(first).toHaveAttribute('data-on', 'true')
+    expect(first.className).toMatch(/(^|\s)bg-accent(\s|$)/)
+    expect(first).toHaveTextContent('⏎')
+    expect(first).toHaveFocus()
+    for (const o of others) {
+      expect(o).not.toHaveAttribute('data-on')
+      expect(o.className).not.toMatch(/(^|\s)bg-accent(\s|$)/)
+    }
+  })
+
   it('the SSO button is a link only when the server has SSO', () => {
     const { rerender } = render(<LoginScreen onPick={vi.fn()} busy={false} />)
     expect(screen.getByRole('button', { name: 'Continue with SSO' })).toBeDisabled()

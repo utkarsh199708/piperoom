@@ -18,7 +18,7 @@ import { TracePanel } from './TracePanel'
 import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import { NoDriverBanner } from './NoDriverBanner'
 import { StaleBanner } from './StaleBanner'
-import { useRegisterRoomCommands } from './shell/context'
+import { useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
 
 export function RoomScreen() {
   const { roomId = '' } = useParams()
@@ -80,6 +80,8 @@ export function RoomScreen() {
       () => undefined,
     )
   }
+
+  useBreadcrumbTail(state?.pipeline_id) // shell breadcrumb: "Rooms › <pipeline>"
 
   // The command menu (⌘K) offers what this room offers right now. Same permission
   // checks and callbacks as the buttons below; a viewer gets none of the writes.
