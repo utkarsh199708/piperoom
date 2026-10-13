@@ -162,7 +162,7 @@ func TestPGCapsHoldUnderConcurrency(t *testing.T) {
 	}
 	u, _ := s.RoomUsage(ctx, roomID)
 	if u.Events != 204 {
-		t.Fatalf("event_count = %d, want 204", u.Events)
+		t.Fatalf("usage events (last_seq) = %d, want 204", u.Events)
 	}
 }
 

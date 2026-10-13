@@ -113,6 +113,11 @@ func TestDeleteRoomRoute(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("member delete of an unknown id: %d, want 403 (no id leak)", resp.StatusCode)
 	}
+	// The role is checked first: a bad archive value from a member is 403, not 400.
+	resp = doJSON(t, http.MethodDelete, deleteURL(srv, roomID, "cleanup")+"&archive=yes", "arjun", "")
+	if resp.StatusCode != http.StatusForbidden || limitErrCode(t, resp) != "not_allowed" {
+		t.Fatalf("member delete with archive=yes: %d, want 403", resp.StatusCode)
+	}
 	resp = doJSON(t, http.MethodDelete, deleteURL(srv, "r_missing", "cleanup"), "ada", "")
 	if resp.StatusCode != http.StatusNotFound || limitErrCode(t, resp) != "not_found" {
 		t.Fatalf("unknown room: %d", resp.StatusCode)
@@ -137,7 +142,7 @@ func TestDeleteRoomRoute(t *testing.T) {
 	}
 	body := decode[map[string]any](t, resp)
 	if body["room_id"] != roomID || body["pipeline_id"] != "orders" || body["deleted_by"] != "ada" ||
-		body["reason"] != "pasted a secret" || body["event_count"] != float64(2) || body["archived"] != false || body["deleted_at"] == nil {
+		body["reason"] != "pasted a secret" || body["event_count"] != float64(2) || body["archived"] != false || body["archive_removed"] != false || body["deleted_at"] == nil {
 		t.Fatalf("delete body = %v", body)
 	}
 

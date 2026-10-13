@@ -220,8 +220,8 @@ func (s *PG) CreateRoom(ctx context.Context, r Room) error {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO rooms (id, title, severity, pipeline_id, status, opened_at, last_seq, driver_id, driver_name, driver_lease_until)
-		 VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9)`,
+		`INSERT INTO rooms (id, title, severity, pipeline_id, status, opened_at, last_seq, byte_size, driver_id, driver_name, driver_lease_until)
+		 VALUES ($1, $2, $3, $4, $5, $6, 0, 0, $7, $8, $9)`,
 		r.ID, r.Title, r.Severity, r.PipelineID, r.Status, r.OpenedAt, nullString(r.DriverID), nullString(r.DriverName), r.DriverLeaseUntil)
 	if err != nil {
 		return fmt.Errorf("store: create room %s: %w", r.ID, classify(err))
@@ -406,19 +406,27 @@ func (s *PG) currentLimits() Limits {
 	return Limits{}
 }
 
-// RoomUsage returns the room's event count and stored payload bytes with the
-// caps they are held to, or an error wrapping ErrNotFound.
+// RoomUsage returns the room's event count (last_seq) and stored payload
+// bytes with the caps they are held to, or an error wrapping ErrNotFound.
+// Bytes is 0 and BytesUnknown true for a room from before migration 00012
+// whose byte_size BackfillByteSize has not counted yet.
 func (s *PG) RoomUsage(ctx context.Context, roomID string) (Usage, error) {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	l := s.currentLimits()
 	u := Usage{MaxEvents: l.MaxEvents, MaxBytes: l.MaxBytes}
-	err := s.pool.QueryRow(ctx, `SELECT event_count, byte_size FROM rooms WHERE id = $1`, roomID).Scan(&u.Events, &u.Bytes)
+	var bytes *int64
+	err := s.pool.QueryRow(ctx, `SELECT last_seq, byte_size FROM rooms WHERE id = $1`, roomID).Scan(&u.Events, &bytes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Usage{}, fmt.Errorf("store: room usage %s: %w", roomID, ErrNotFound)
 	}
 	if err != nil {
 		return Usage{}, fmt.Errorf("store: room usage %s: %w", roomID, err)
+	}
+	if bytes == nil {
+		u.BytesUnknown = true
+	} else {
+		u.Bytes = *bytes
 	}
 	return u, nil
 }
@@ -457,20 +465,22 @@ func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor e
 	var seq int64
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
-			`UPDATE rooms SET last_seq = last_seq + 1, event_count = event_count + 1, byte_size = byte_size + $2
-			 WHERE id = $1 AND ($3::bigint = 0 OR event_count + 1 <= $3) AND ($4::bigint = 0 OR byte_size + $2 <= $4)
+			`UPDATE rooms SET last_seq = last_seq + 1, byte_size = byte_size + $2
+			 WHERE id = $1 AND ($3::bigint = 0 OR last_seq + 1 <= $3)
+			   AND ($4::bigint = 0 OR byte_size IS NULL OR byte_size + $2 <= $4)
 			 RETURNING last_seq`, roomID, size, maxEvents, maxBytes).Scan(&seq)
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Missing room or over the cap: the row (or its absence) says which.
-			var n, b int64
-			err := tx.QueryRow(ctx, `SELECT event_count, byte_size FROM rooms WHERE id = $1`, roomID).Scan(&n, &b)
+			var n int64
+			var b *int64
+			err := tx.QueryRow(ctx, `SELECT last_seq, byte_size FROM rooms WHERE id = $1`, roomID).Scan(&n, &b)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("store: append to unknown room %s: %w", roomID, ErrNotFound)
 			}
 			if err != nil {
 				return fmt.Errorf("store: reserve seq for %s: %w", roomID, err)
 			}
-			return fmt.Errorf("store: append %s to %s (%d events, %d bytes): %w", typ, roomID, n, b, ErrLogFull)
+			return fmt.Errorf("store: append %s to %s (%d events, %s bytes): %w", typ, roomID, n, byteText(b), ErrLogFull)
 		}
 		if err != nil {
 			return fmt.Errorf("store: reserve seq for %s: %w", roomID, err)

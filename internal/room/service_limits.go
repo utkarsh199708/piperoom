@@ -56,6 +56,29 @@ func (s *Service) loadUsageLocked(ctx context.Context, roomID string, st *roomSt
 	st.logBytes = u.Bytes
 }
 
+// ReloadUsage reads every cached room's byte counter from the store again.
+// The server calls it after BackfillByteSize has counted the rooms from
+// before migration 00012, so their 90% warning and log_full stop use the
+// counted size instead of the bytes appended since the start.
+func (s *Service) ReloadUsage(ctx context.Context) {
+	s.mu.Lock()
+	ids := make([]string, 0, len(s.rooms))
+	for id := range s.rooms {
+		ids = append(ids, id)
+	}
+	s.mu.Unlock()
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return
+		}
+		s.mu.Lock()
+		if st, ok := s.rooms[id]; ok {
+			s.loadUsageLocked(ctx, id, st)
+		}
+		s.mu.Unlock()
+	}
+}
+
 // checkCapLocked reacts to the usage after an append: the one 90% warning,
 // then the stop at 100%. Both are system events, held to the reserve, and both
 // are folded into the snapshot (LogCap), so neither repeats, not even after a
@@ -162,7 +185,6 @@ func (s *Service) EnforceOpenLimit(ctx context.Context) (OpenLimitResult, error)
 	if s.limits.MaxOpenDays <= 0 {
 		return res, nil
 	}
-	now := s.now().UTC()
 	s.mu.Lock()
 	if err := s.ensureAllLoadedLocked(ctx, false); err != nil {
 		s.mu.Unlock()
@@ -183,6 +205,9 @@ func (s *Service) EnforceOpenLimit(ctx context.Context) (OpenLimitResult, error)
 		if !ok {
 			continue
 		}
+		// Per room: a pass over many rooms (each warning is a write) must not
+		// judge the last room by the time the pass started.
+		now := s.now().UTC()
 		if d.warned {
 			if !now.Before(d.closeAt) {
 				expired = append(expired, id)
@@ -212,7 +237,7 @@ func (s *Service) EnforceOpenLimit(ctx context.Context) (OpenLimitResult, error)
 		if err := ctx.Err(); err != nil {
 			return res, fmt.Errorf("room: open-room limit: %w", err)
 		}
-		closed, err := s.autoClose(ctx, id, now)
+		closed, err := s.autoClose(ctx, id)
 		if err != nil {
 			s.log.Warn("room: open-room limit could not close a room", "room", id, "err", err)
 			res.Failed++
@@ -233,8 +258,9 @@ func openDays(opened, deadline time.Time) int {
 // autoClose closes a room past its warned close time as the system actor.
 // The check runs again under the lock: an extension or a close may have
 // happened since the scan. closed is false when the room was no longer due.
-func (s *Service) autoClose(ctx context.Context, roomID string, now time.Time) (closed bool, err error) {
+func (s *Service) autoClose(ctx context.Context, roomID string) (closed bool, err error) {
 	_, err = s.closeRoom(ctx, roomID, systemActor, func(st *roomState) (string, error) {
+		now := s.now().UTC() // read under the lock, with the room's latest state
 		d, ok := s.deadline(st.snap)
 		if !ok || !d.warned || now.Before(d.closeAt) {
 			return "", errNotDue

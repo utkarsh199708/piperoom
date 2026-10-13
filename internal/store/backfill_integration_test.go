@@ -5,16 +5,20 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
 	"piperoom/internal/config"
 	"piperoom/internal/events"
+	"piperoom/internal/store"
 	"piperoom/internal/testenv"
 	"piperoom/migrations"
 )
@@ -36,9 +40,11 @@ func (w *writtenStats) add(raw []byte) {
 }
 
 // TestBackfillByteSizeWithinBound seeds rooms and a shadow log at migration
-// 00009 (before the counters existed), runs the rest of the migrations, and
-// checks event_count = last_seq and that byte_size is within the stated bound
-// of the bytes the store would have counted:
+// 00009 (before the counters existed) and runs the rest of the migrations.
+// Their byte_size is NULL then: the event cap (last_seq) holds, the byte cap
+// does not, and a second backfiller finds the lock taken. After
+// BackfillByteSize, byte_size is within the stated bound of the bytes the
+// store would have counted:
 // written - 5 x escaped <= byte_size <= written + (':' and ',').
 func TestBackfillByteSizeWithinBound(t *testing.T) {
 	cfg := config.Load()
@@ -127,6 +133,55 @@ func TestBackfillByteSizeWithinBound(t *testing.T) {
 		t.Fatalf("migrate to the end: %v", err)
 	}
 
+	// The migration counted nothing: every old row is NULL.
+	for _, tbl := range []string{"rooms", "shadow_runs"} {
+		var n int64
+		if err := conn.QueryRow(ctx, `SELECT count(*) FROM `+pgx.Identifier{schema, tbl}.Sanitize()+` WHERE byte_size IS NOT NULL`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Fatalf("%s: %d rows counted by the migration, want 0", tbl, n)
+		}
+	}
+
+	s := pinnedStore(ctx, t, cfg.RoomDBURL, schema)
+	// Uncounted: the event cap holds, the byte cap does not.
+	s.SetLimits(store.Limits{MaxEvents: 3, MaxBytes: 1})
+	if _, err := s.Append(ctx, "plain", events.AgentMessage, events.AgentActor, events.AgentMessagePayload{Text: "fourth"}); !errors.Is(err, store.ErrLogFull) {
+		t.Fatalf("agent event past the event cap of an uncounted room: %v, want ErrLogFull", err)
+	}
+	extra := events.AgentMessagePayload{Text: "third, far over a 1-byte cap"}
+	if _, err := s.Append(ctx, "escaped", events.AgentMessage, events.AgentActor, extra); err != nil {
+		t.Fatalf("uncounted room under its event cap: %v, want stored (no byte cap yet)", err)
+	}
+	raw, _ := json.Marshal(extra)
+	want["escaped"].add(raw)
+	rooms["escaped"] = append(rooms["escaped"], extra)
+	if u, err := s.RoomUsage(ctx, "escaped"); err != nil || !u.BytesUnknown || u.Events != 3 {
+		t.Fatalf("usage of an uncounted room = %+v %v, want 3 events, bytes unknown", u, err)
+	}
+	s.SetLimits(store.Limits{})
+
+	// Another replica holds the lock: this one skips.
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, store.BackfillLockKey); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.BackfillByteSize(ctx, 1)
+	if err != nil || !res.Skipped || res.Rooms != 0 {
+		t.Fatalf("backfill while locked = %+v %v, want skipped", res, err)
+	}
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, store.BackfillLockKey); err != nil {
+		t.Fatal(err)
+	}
+	// Batch 1: every row takes its own batch, so the loop is exercised.
+	res, err = s.BackfillByteSize(ctx, 1)
+	if err != nil || res.Skipped || res.Rooms != 2 || res.ShadowRuns != 1 {
+		t.Fatalf("backfill = %+v %v, want 2 rooms and 1 shadow run", res, err)
+	}
+	if res, err := s.BackfillByteSize(ctx, 0); err != nil || res.Rooms != 0 || res.ShadowRuns != 0 {
+		t.Fatalf("second backfill = %+v %v, want nothing left", res, err)
+	}
+
 	inBound := func(name string, got int64, w *writtenStats) {
 		t.Helper()
 		lo, hi := w.bytes-5*w.escaped, w.bytes+w.colons
@@ -136,13 +191,13 @@ func TestBackfillByteSizeWithinBound(t *testing.T) {
 		t.Logf("%s: byte_size %d, written %d, bound [%d, %d]", name, got, w.bytes, lo, hi)
 	}
 	for id, w := range want {
-		var count, lastSeq, size int64
-		if err := conn.QueryRow(ctx, `SELECT event_count, last_seq, byte_size FROM `+pgx.Identifier{schema, "rooms"}.Sanitize()+` WHERE id = $1`, id).
-			Scan(&count, &lastSeq, &size); err != nil {
+		var lastSeq, size int64
+		if err := conn.QueryRow(ctx, `SELECT last_seq, byte_size FROM `+pgx.Identifier{schema, "rooms"}.Sanitize()+` WHERE id = $1`, id).
+			Scan(&lastSeq, &size); err != nil {
 			t.Fatal(err)
 		}
-		if count != lastSeq || count != int64(len(rooms[id])) {
-			t.Fatalf("%s: event_count %d, last_seq %d, want both %d", id, count, lastSeq, len(rooms[id]))
+		if lastSeq != int64(len(rooms[id])) {
+			t.Fatalf("%s: last_seq %d, want %d", id, lastSeq, len(rooms[id]))
 		}
 		inBound(id, size, w)
 		switch id {
@@ -157,9 +212,32 @@ func TestBackfillByteSizeWithinBound(t *testing.T) {
 			}
 		}
 	}
+	// Counted: the byte cap applies now.
+	s.SetLimits(store.Limits{MaxBytes: 1})
+	if _, err := s.Append(ctx, "escaped", events.AgentMessage, events.AgentActor, extra); !errors.Is(err, store.ErrLogFull) {
+		t.Fatalf("counted room past its byte cap: %v, want ErrLogFull", err)
+	}
+	s.SetLimits(store.Limits{})
 	var shadowSize int64
 	if err := conn.QueryRow(ctx, `SELECT byte_size FROM `+pgx.Identifier{schema, "shadow_runs"}.Sanitize()+` WHERE room_id = 'plain'`).Scan(&shadowSize); err != nil {
 		t.Fatal(err)
 	}
 	inBound("shadow", shadowSize, shadow)
+}
+
+// pinnedStore is a store on schema, which the caller migrated.
+func pinnedStore(ctx context.Context, t *testing.T, url, schema string) *store.PG {
+	t.Helper()
+	poolCfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	poolCfg.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := store.NewPool(pool, url, slog.Default())
+	t.Cleanup(s.Close)
+	return s
 }

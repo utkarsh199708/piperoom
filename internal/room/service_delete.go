@@ -23,6 +23,9 @@ const maxDeleteReason = 500
 type Deletion struct {
 	store.RoomDeletion
 	Archived bool `json:"archived"`
+	// ArchiveRemoved is true when an erase also removed an export of the room
+	// left in PIPEROOM_ARCHIVE_DIR by an earlier attempt.
+	ArchiveRemoved bool `json:"archive_removed"`
 }
 
 // ErrDeleteNotAllowed is the 403 for a delete by anyone but an admin.
@@ -79,9 +82,15 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 		s.mu.Unlock()
 		var re *Error
 		if errors.As(err, &re) && re.Code == codeNotFound {
-			return s.priorDeletion(ctx, del, roomID)
+			return s.priorDeletion(ctx, del, user, roomID)
 		}
 		return Deletion{}, err
+	}
+	// Tenancy: a room of a pipeline the admin may not see is answered like a
+	// room that does not exist.
+	if !s.canSeePipeline(user, st.snap.PipelineID) {
+		s.mu.Unlock()
+		return Deletion{}, notFound("room not found")
 	}
 	// From here every append through the service is refused, so the archive
 	// and the delete cover the same log.
@@ -115,7 +124,7 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 		undo()
 		if errors.Is(err, store.ErrNotFound) {
 			// Retention removed it in between.
-			return s.priorDeletion(ctx, del, roomID)
+			return s.priorDeletion(ctx, del, user, roomID)
 		}
 		return Deletion{}, fmt.Errorf("room: delete %s: %w", roomID, err)
 	}
@@ -125,17 +134,38 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 	if wasOpen && s.onRoomClosed != nil && !s.isClosed() {
 		s.onRoomClosed(s.ctx, roomID, pipelineID, hookKey)
 	}
+	// An erase must not leave a copy behind: an earlier archive=true delete
+	// that failed after its write, or a retention run whose purge was
+	// skipped, may have left the room's export in the archive directory. It
+	// goes after the database delete committed, so a failure here never keeps
+	// the room; it is logged and reported as archive_removed false.
+	removed := false
+	if !archive && s.limits.ArchiveDir != "" {
+		var rerr error
+		if removed, rerr = s.removeArchive(d.PipelineID, roomID); rerr != nil {
+			s.log.Error("room: delete: could not remove an old archive of the room", "room", roomID, "err", rerr)
+		}
+	}
 	// Ids and counts only; the reason may name a person, so it stays out.
 	s.log.Info("room deleted", "room", roomID, "pipeline", d.PipelineID, "by", d.DeletedBy,
-		"events", res.Events, "proposals", res.Proposals, "approvals", res.Approvals, "archived", archived)
-	return Deletion{RoomDeletion: d, Archived: archived}, nil
+		"events", res.Events, "proposals", res.Proposals, "approvals", res.Approvals, "archived", archived, "archive_removed", removed)
+	return Deletion{RoomDeletion: d, Archived: archived, ArchiveRemoved: removed}, nil
+}
+
+// canSeePipeline is Deps.CanSeePipeline, or true when it is not set.
+func (s *Service) canSeePipeline(user User, pipelineID string) bool {
+	return s.canSee == nil || s.canSee(user, pipelineID)
 }
 
 // priorDeletion answers a delete of a room that is not there: its audit row
-// when an admin deleted it before, 404 otherwise.
-func (s *Service) priorDeletion(ctx context.Context, del store.Deleter, roomID string) (Deletion, error) {
+// when it was deleted before (by an admin or retention) and its pipeline is
+// visible to the user, 404 otherwise.
+func (s *Service) priorDeletion(ctx context.Context, del store.Deleter, user User, roomID string) (Deletion, error) {
 	d, err := del.GetRoomDeletion(ctx, roomID)
 	if errors.Is(err, store.ErrNotFound) {
+		return Deletion{}, notFound("room not found")
+	}
+	if err == nil && !s.canSeePipeline(user, d.PipelineID) {
 		return Deletion{}, notFound("room not found")
 	}
 	if err != nil {
@@ -220,7 +250,47 @@ func (s *Service) archiveRoom(ctx context.Context, roomID string) (int64, error)
 		_ = root.Remove(tmp)
 		return 0, fmt.Errorf("room: archive %s: write: %w", roomID, werr)
 	}
+	// The rename is durable only once the directory is synced; the caller
+	// deletes the room right after, so sync before returning.
+	if err := syncDir(root, dir); err != nil {
+		return 0, fmt.Errorf("room: archive %s: sync dir: %w", roomID, err)
+	}
 	return ex.upTo, nil
+}
+
+// syncDir fsyncs a directory inside root.
+func syncDir(root *os.Root, dir string) error {
+	d, err := root.Open(dir)
+	if err != nil {
+		return err
+	}
+	serr := d.Sync()
+	if cerr := d.Close(); serr == nil {
+		serr = cerr
+	}
+	return serr
+}
+
+// removeArchive deletes the room's export from the archive directory, if
+// there is one, and syncs the directory. removed is false when there was
+// none.
+func (s *Service) removeArchive(pipelineID, roomID string) (removed bool, err error) {
+	root, err := os.OpenRoot(s.limits.ArchiveDir)
+	if err != nil {
+		return false, fmt.Errorf("room: remove archive %s: open dir: %w", roomID, err)
+	}
+	defer root.Close()
+	p := archivePath(pipelineID, roomID)
+	if err := root.Remove(p); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("room: remove archive %s: %w", roomID, err)
+	}
+	if err := syncDir(root, path.Dir(p)); err != nil {
+		return true, fmt.Errorf("room: remove archive %s: sync dir: %w", roomID, err)
+	}
+	return true, nil
 }
 
 // archiveExists reports whether the archive directory holds the room's export.

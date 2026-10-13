@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,8 +72,10 @@ func pgStore(t *testing.T) *store.PG {
 }
 
 // TestPGRoomLogCap is TestLogCapWarningAndFull on Postgres: the 90% warning
-// once, the stop at 100% once, the reserve for people, close always, and a
-// restarted service reads the byte counter back from the rooms row.
+// once, the stop at 100% once, the reserve for people, close always, the
+// rooms row's counters match the log, and a restarted service keeps the room
+// stopped. TestPGRestartReadsByteCount covers the byte counter after a
+// restart.
 func TestPGRoomLogCap(t *testing.T) {
 	st := pgStore(t)
 	l := config.Limits{RoomMaxEvents: 100, RoomMaxBytes: 1 << 30}
@@ -117,7 +120,7 @@ func TestPGRoomLogCap(t *testing.T) {
 	}
 	waitFor(t, 5*time.Second, func() bool { _, stops := runs.counts(); return stops == 1 })
 
-	// The service's byte count matches the rooms row after a restart.
+	// The rooms row's counters match the log the store wrote.
 	u, err := st.RoomUsage(ctx, snap.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -151,6 +154,64 @@ func TestPGRoomLogCap(t *testing.T) {
 	}
 	if r, _ := st.GetRoom(ctx, snap.ID); r.LastSeq != 103 {
 		t.Fatalf("last_seq = %d, want 102 (cap + reserve) + room.closed", r.LastSeq)
+	}
+}
+
+// TestPGRestartReadsByteCount is TestRestartReadsByteCount on Postgres: a
+// restarted service takes the byte count from the rooms row, so a comment
+// that takes the log past 90% gets the warning.
+func TestPGRestartReadsByteCount(t *testing.T) {
+	st := pgStore(t)
+	l := config.Limits{RoomMaxEvents: 100000, RoomMaxBytes: 20000}
+	st.SetLimits(store.Limits{MaxEvents: l.RoomMaxEvents, MaxBytes: l.RoomMaxBytes})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	runs := newRunRecorder()
+	svc := room.New(room.Deps{Store: st, Users: adminUsers(t), Owners: testOwners(), Run: runs.run, Limits: l})
+	snap, err := svc.CreateRoom(ctx, mustUser(t, svc, "arjun"), "bytes", "sev2", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := runs.sink(t)
+	text := strings.Repeat("x", 500)
+	for {
+		u, err := st.RoomUsage(ctx, snap.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if u.Bytes >= 16500 {
+			break
+		}
+		if err := sink.Emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: text}); err != nil {
+			t.Fatalf("emit: %v", err)
+		}
+	}
+	svc.Close()
+
+	svc2 := room.New(room.Deps{Store: st, Users: adminUsers(t), Owners: testOwners(), Run: fakeRun, Limits: l})
+	t.Cleanup(svc2.Close)
+	if err := svc2.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc2.AddComment(ctx, mustUser(t, svc2, "priya"), snap.ID, "", strings.Repeat("y", 1600)); err != nil {
+		t.Fatalf("comment: %v", err)
+	}
+	evs, err := st.Since(ctx, snap.ID, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warns := 0
+	for _, e := range evs {
+		if e.Type == events.RoomLogCapWarning {
+			warns++
+			p, _ := events.Decode[events.RoomLogCapWarningPayload](e)
+			if p.Bytes < 18000 {
+				t.Fatalf("warning payload = %+v, want the stored bytes counted", p)
+			}
+		}
+	}
+	if warns != 1 {
+		t.Fatalf("cap warnings after restart = %d, want 1", warns)
 	}
 }
 

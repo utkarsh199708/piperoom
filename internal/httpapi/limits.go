@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"piperoom/internal/events"
+	"piperoom/internal/room"
 )
 
 // deleteTimeout bounds DELETE /api/rooms/{id}: with PIPEROOM_ARCHIVE_DIR set it
@@ -32,6 +33,12 @@ func (s *Server) handleDeleteRoom(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	u := userFrom(ctx)
 	roomID := chi.URLParam(r, "id")
+	// The role first (docs/api.md): a non-admin gets 403 whatever else the
+	// request says.
+	if !s.svc.IsAdmin(u) {
+		s.writeErr(w, room.ErrDeleteNotAllowed())
+		return
+	}
 	// A delete is an erase; ?archive=true keeps a copy first (docs/api.md).
 	var archive bool
 	switch v := r.URL.Query().Get("archive"); v {

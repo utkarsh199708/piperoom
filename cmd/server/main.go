@@ -320,6 +320,14 @@ func run() error {
 	// after Load and stops before the service closes (LIFO defers).
 	stopOpenLimit := startOpenLimit(ctx, svc, limits.MaxOpenDays, openLimitInterval, openLimitRunTimeout, log)
 	defer stopOpenLimit()
+	// Rooms from before migration 00012 get their byte_size counted in the
+	// background; their byte cap applies once that is done.
+	var backfiller byteSizeBackfiller
+	if pg, ok := st.(*store.PG); ok {
+		backfiller = pg
+	}
+	stopBackfill := startByteSizeBackfill(ctx, backfiller, svc.ReloadUsage, log)
+	defer stopBackfill()
 	// Dead sessions and login states are pruned whatever PIPEROOM_RETENTION_DAYS
 	// says: the job above is off by default, this one is always on.
 	sessionPruner, loginStatePruner := authPruners(sessions, loginStates)

@@ -102,10 +102,14 @@ func (l Limits) Usage(events, bytes int64) Usage {
 
 // Usage is one room's log size after an append, with the caps it is held to.
 type Usage struct {
-	Events    int64
-	Bytes     int64
-	MaxEvents int64 // 0 = no cap
-	MaxBytes  int64 // 0 = no cap
+	Events int64
+	Bytes  int64
+	// BytesUnknown is true for a Postgres room from before migration 00012
+	// whose byte_size is not counted yet (BackfillByteSize): its byte cap is
+	// not enforced until then, and Bytes is 0.
+	BytesUnknown bool
+	MaxEvents    int64 // 0 = no cap
+	MaxBytes     int64 // 0 = no cap
 }
 
 // AtWarning reports whether either measure reached WarnPercent of its cap.

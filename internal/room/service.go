@@ -92,6 +92,12 @@ type Deps struct {
 	// every limit off (unit tests).
 	Limits config.Limits
 
+	// CanSeePipeline, when set, decides whether a user may see a pipeline's
+	// rooms (tenancy, #112). DeleteRoom answers 404 for a room, live or in its
+	// audit row, of a pipeline the admin may not see. Nil means every user
+	// sees every pipeline.
+	CanSeePipeline func(user User, pipelineID string) bool
+
 	// OnRoomClosed, when set, is called once per room closed by CloseRoom, after
 	// room.closed is appended, the alert key released and the close persisted,
 	// and after s.mu is released. It runs on the closing request, before
@@ -164,6 +170,7 @@ type Service struct {
 	viewerGroups map[string]struct{}
 	soloUser     string
 	limits       config.Limits
+	canSee       func(user User, pipelineID string) bool
 	// deleteMu serialises DeleteRoom calls: deletions are rare, and one at a
 	// time makes a concurrent repeat find the first one's audit row.
 	deleteMu sync.Mutex
@@ -243,6 +250,7 @@ func New(d Deps) *Service {
 		viewerGroups: groupSet(d.ViewerGroups),
 		soloUser:     d.SoloUser,
 		limits:       d.Limits,
+		canSee:       d.CanSeePipeline,
 		ctx:          ctx,
 		cancel:       cancel,
 		rooms:        map[string]*roomState{},
