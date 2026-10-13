@@ -48,12 +48,18 @@ func docker(ctx context.Context, args ...string) (string, error) {
 
 // StartPostgres runs a throwaway postgres:16 container named
 // <prefix>-pg-<random> on a docker-assigned loopback port and waits until it
-// accepts connections. Close removes it.
-func StartPostgres(ctx context.Context, prefix string) (*Postgres, error) {
+// accepts connections. Close removes it. tmpfsData puts the data directory in
+// memory: faster to start, but no disk I/O, so only CI smoke runs use it.
+func StartPostgres(ctx context.Context, prefix string, tmpfsData bool) (*Postgres, error) {
 	name := fmt.Sprintf("%s-pg-%s", prefix, randHex(4))
-	if _, err := docker(ctx, "run", "-d", "--rm", "--name", name,
+	args := []string{"run", "-d", "--rm", "--name", name,
 		"-e", "POSTGRES_USER=lt", "-e", "POSTGRES_PASSWORD=lt-local-only", "-e", "POSTGRES_DB=lt",
-		"-p", "127.0.0.1::5432", PostgresImage, "-c", "max_connections=300"); err != nil {
+		"-p", "127.0.0.1::5432"}
+	if tmpfsData {
+		args = append(args, "--tmpfs", "/var/lib/postgresql/data:rw")
+	}
+	args = append(args, PostgresImage, "-c", "max_connections=300")
+	if _, err := docker(ctx, args...); err != nil {
 		return nil, fmt.Errorf("loadtest: start postgres: %w", err)
 	}
 	p := &Postgres{container: name}

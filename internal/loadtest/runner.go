@@ -111,7 +111,9 @@ type Env struct {
 	Replicas int
 	Short    bool
 	Log      *slog.Logger
-	HTTP     *http.Client
+	// MutexProfile is passed to every server (ServerConfig.MutexProfileFraction).
+	MutexProfile int
+	HTTP         *http.Client
 
 	modelSrv *http.Server
 	modelLn  net.Listener
@@ -121,13 +123,17 @@ type Env struct {
 type EnvConfig struct {
 	// DBURL is an existing Postgres admin URL; empty starts a throwaway
 	// postgres:16 container named <Prefix>-pg-<random>.
-	DBURL    string
-	Prefix   string
-	Replicas int
-	Short    bool
-	LogDir   string
-	Command  func() (string, []string, []string)
-	Log      *slog.Logger
+	DBURL string
+	// TmpfsData keeps the throwaway database in memory (CI smoke only).
+	TmpfsData bool
+	Prefix    string
+	Replicas  int
+	Short     bool
+	LogDir    string
+	Command   func() (string, []string, []string)
+	Log       *slog.Logger
+	// MutexProfile is ServerConfig.MutexProfileFraction for every server.
+	MutexProfile int
 }
 
 // NewEnv starts the database (or connects to one) and the fake model.
@@ -141,12 +147,12 @@ func NewEnv(ctx context.Context, c EnvConfig) (*Env, error) {
 	if err := os.MkdirAll(c.LogDir, 0o755); err != nil {
 		return nil, fmt.Errorf("loadtest: log dir: %w", err)
 	}
-	e := &Env{Model: NewFakeModel(ModelConfig{}), Replicas: max(1, c.Replicas), Short: c.Short, Log: c.Log, HTTP: newHTTPClient()}
+	e := &Env{Model: NewFakeModel(ModelConfig{}), Replicas: max(1, c.Replicas), Short: c.Short, MutexProfile: c.MutexProfile, Log: c.Log, HTTP: newHTTPClient()}
 	var err error
 	if c.DBURL != "" {
 		e.PG, err = ExistingPostgres(ctx, c.DBURL)
 	} else {
-		e.PG, err = StartPostgres(ctx, c.Prefix)
+		e.PG, err = StartPostgres(ctx, c.Prefix, c.TmpfsData)
 	}
 	if err != nil {
 		return nil, err
@@ -192,12 +198,16 @@ func (e *Env) newStack(ctx context.Context, name string, sc ServerConfig, seed f
 		}
 	}
 	sc.DBURL = db.URL
+	if sc.MutexProfileFraction == 0 {
+		sc.MutexProfileFraction = e.MutexProfile
+	}
 	c, err := e.Launcher.Start(ctx, sc, e.Replicas, name)
 	if err != nil {
 		db.Drop()
 		return nil, err
 	}
 	s := &stack{db: db, cluster: c}
+	e.Log.Info("loadtest: servers up", "run", name, "urls", c.urls(), "db", db.Name)
 	for _, p := range c.Procs {
 		s.apis = append(s.apis, &API{Base: p.URL, HTTP: e.HTTP})
 	}
@@ -353,6 +363,15 @@ func RunProfiles(ctx context.Context, env *Env, profiles []Profile, overrides []
 		results = append(results, res)
 	}
 	return results, errors.Join(errs...)
+}
+
+// settle is how long to let a join storm's presence broadcasts die down
+// before measuring; short (CI) runs wait less.
+func (e *Env) settle() time.Duration {
+	if e.Short {
+		return 200 * time.Millisecond
+	}
+	return time.Second
 }
 
 // loadAvg returns the first three fields of /proc/loadavg ("" elsewhere).

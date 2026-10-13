@@ -89,6 +89,7 @@ func run(args []string) error {
 	out := fs.String("out", "", "output directory (default loadtest-out/<time>)")
 	dbURL := fs.String("db-url", "", "existing Postgres admin URL; default starts a throwaway postgres:16 container")
 	prefix := fs.String("prefix", "s2lt", "docker container name prefix")
+	mutex := fs.Int("mutex-profile", 0, "mutex profile fraction for the servers (0 = off); read /debug/pprof/mutex on a server URL")
 	var params multi
 	fs.Var(&params, "p", "parameter override key=value or profile.key=value (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -120,7 +121,8 @@ func run(args []string) error {
 	defer stop()
 	env, err := loadtest.NewEnv(ctx, loadtest.EnvConfig{
 		DBURL: *dbURL, Prefix: *prefix, Replicas: *replicas, Short: *short, LogDir: filepath.Join(*out, "logs"), Log: log,
-		Command: func() (string, []string, []string) { return self, []string{"serve"}, nil },
+		MutexProfile: *mutex,
+		Command:      func() (string, []string, []string) { return self, []string{"serve"}, nil },
 	})
 	if err != nil {
 		return err

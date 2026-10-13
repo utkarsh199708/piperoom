@@ -55,9 +55,11 @@ type ReplayGroup struct {
 	Pool            PoolStats      `json:"pool"`
 	Closes          map[string]int `json:"server_closes"`
 	DialErrors      int            `json:"dial_errors"`
+	Reconnects      int            `json:"reconnects"` // join storm only: clients reconnect with after=, as the web UI does
 	BytesPerClient  int64          `json:"bytes_per_client"`
 	GapsDupsMisses  int64          `json:"gaps_dups_mismatches"`
 	ServerRSSPeakMB float64        `json:"server_rss_after_mb"`
+	CPU             CPUUse         `json:"cpu"`
 }
 
 // ReplayData is the replay scenario's output.
@@ -83,12 +85,12 @@ func (d ReplayData) markdown() string {
 		for _, g := range gs {
 			rows = append(rows, []string{fmt.Sprint(g.Size), fmt.Sprint(g.Clients), fmt.Sprint(g.Completed), fms(g.Time.P50MS), fms(g.Time.P95MS), fms(g.Time.MaxMS),
 				fmt.Sprintf("%.0f", g.WallMS), fmtMiB(g.BaselineHeap), fmtMiB(g.PeakHeap), fmtMiB(g.PerClientHeap), fmt.Sprint(g.PeakGoroutines),
-				fmt.Sprintf("%d/%d %.0f%%", g.Pool.MaxAcquired, g.Pool.MaxConns, 100*g.Pool.SaturatedRatio), fmt.Sprint(g.Closes)})
+				fmt.Sprintf("%d/%d %.0f%%", g.Pool.MaxAcquired, g.Pool.MaxConns, 100*g.Pool.SaturatedRatio), fmt.Sprint(g.Closes), fmt.Sprint(g.Reconnects), g.CPU.String()})
 		}
-		b.WriteString(mdTable([]string{"room size", "clients", "completed", "p50 ms", "p95", "max", "wall ms", "heap before", "peak heap", "heap/client", "peak goroutines", "pool", "server closes"}, rows))
+		b.WriteString(mdTable([]string{"room size", "clients", "completed", "p50 ms", "p95", "max", "wall ms", "heap before", "peak heap", "heap/client", "peak goroutines", "pool", "server closes", "reconnects", "CPU (avg cores)"}, rows))
 	}
 	group("Concurrent replays (server memory per replaying client)", d.Memory)
-	group("Join storm (all subscribers dial at once)", d.Join)
+	group("Join storm (all subscribers dial at once; they reconnect with after= like the web UI)", d.Join)
 	return b.String()
 }
 
@@ -192,7 +194,7 @@ func runReplay(ctx context.Context, env *Env, p Params) (*Result, error) {
 		one := ReplaySingle{Size: size, Events: targets[size]}
 		var times []time.Duration
 		for r := 0; r < p.Int("repeats"); r++ {
-			g := replayGroup(ctx, env, st, size, ids[size], targets[size], 1, timeout)
+			g := replayGroup(ctx, env, st, size, ids[size], targets[size], 1, false, timeout)
 			if g.Completed == 1 {
 				times = append(times, time.Duration(g.Time.MaxMS*float64(time.Millisecond)))
 				one.Bytes = g.BytesPerClient
@@ -208,7 +210,7 @@ func runReplay(ctx context.Context, env *Env, p Params) (*Result, error) {
 		res.check(fmt.Sprintf("size %d: single replays complete", size), one.Failed == 0, "%d of %d failed", one.Failed, p.Int("repeats"))
 	}
 	for _, size := range sizes {
-		g := replayGroup(ctx, env, st, size, ids[size], targets[size], p.Int("concurrent"), timeout)
+		g := replayGroup(ctx, env, st, size, ids[size], targets[size], p.Int("concurrent"), false, timeout)
 		data.Memory = append(data.Memory, g)
 		res.check(fmt.Sprintf("size %d: %d concurrent replays complete and gap-free", size, g.Clients), g.Completed == g.Clients && g.GapsDupsMisses == 0,
 			"completed %d, gaps+dups+mismatches %d, closes %v", g.Completed, g.GapsDupsMisses, g.Closes)
@@ -218,15 +220,19 @@ func runReplay(ctx context.Context, env *Env, p Params) (*Result, error) {
 		if !ok {
 			return nil, fmt.Errorf("loadtest: replay: join size %d is not in sizes", size)
 		}
-		g := replayGroup(ctx, env, st, size, id, targets[size], p.Int("join"), timeout)
+		g := replayGroup(ctx, env, st, size, id, targets[size], p.Int("join"), true, timeout)
 		data.Join = append(data.Join, g)
-		// A join storm is allowed to fail: it is where the limit shows. The
-		// check records it; the finding says what broke.
-		res.check(fmt.Sprintf("size %d: join storm of %d completes", size, g.Clients), g.Completed == g.Clients,
-			"completed %d of %d, closes %v, dial errors %d", g.Completed, g.Clients, g.Closes, g.DialErrors)
+		// A join storm may not complete: that is a capacity result, reported
+		// as a finding. What every client did receive must still be in order.
+		res.check(fmt.Sprintf("size %d: join storm of %d is gap-free", size, g.Clients), g.GapsDupsMisses == 0,
+			"gaps+dups+mismatches %d (completed %d of %d)", g.GapsDupsMisses, g.Completed, g.Clients)
 		if g.Completed < g.Clients {
-			res.finding("Join storm on a %d-event room: only %d of %d subscribers finished the replay; server closes %v (replay timeout is 30 s in internal/ws).",
-				targets[size], g.Completed, g.Clients, g.Closes)
+			res.finding("Join storm on a %d-event room: only %d of %d subscribers caught up within %s; server closes %v.",
+				targets[size], g.Completed, g.Clients, timeout, g.Closes)
+		}
+		if n := g.Closes["1008 replay timeout"]; n > 0 {
+			res.finding("Join storm on a %d-event room: %d replays were cut by the gateway's 30 s replay timeout (internal/ws replayTimeout) and resumed with after=; %d reconnects in total.",
+				targets[size], n, g.Reconnects)
 		}
 	}
 	res.Data = data
@@ -247,13 +253,14 @@ func runReplay(ctx context.Context, env *Env, p Params) (*Result, error) {
 // replayGroup starts n subscribers on roomID from seq 0 at the same moment
 // and waits until each has seen target (or the timeout). It measures the
 // server heap around it.
-func replayGroup(ctx context.Context, env *Env, st *stack, size int, roomID string, target int64, n int, timeout time.Duration) ReplayGroup {
+func replayGroup(ctx context.Context, env *Env, st *stack, size int, roomID string, target int64, n int, reconnect bool, timeout time.Duration) ReplayGroup {
 	g := ReplayGroup{Size: size, Clients: n, Closes: map[string]int{}}
 	_ = st.cluster.GC(ctx)
 	_ = st.cluster.Reset(ctx)
 	if before, err := st.serverStats(ctx); err == nil && len(before) > 0 {
 		g.BaselineHeap = before[0].HeapInuse
 	}
+	cpu0 := env.cpuMark(ctx, st)
 	gctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	subs := make([]*Sub, n)
@@ -261,6 +268,7 @@ func replayGroup(ctx context.Context, env *Env, st *stack, size int, roomID stri
 	start := time.Now()
 	for i := range subs {
 		subs[i] = NewSub(roomID, loadUsers[i%len(loadUsers)], target, nil)
+		subs[i].Reconnect = reconnect
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -275,6 +283,7 @@ func replayGroup(ctx context.Context, env *Env, st *stack, size int, roomID stri
 		}
 	}
 	g.WallMS = ms(time.Since(start))
+	g.CPU = cpu0.until(env.cpuMark(ctx, st))
 	if after, err := st.serverStats(ctx); err == nil && len(after) > 0 {
 		g.PeakHeap = after[0].PeakHeapInuse
 		g.PeakGoroutines = after[0].PeakGoroutines
@@ -293,6 +302,7 @@ func replayGroup(ctx context.Context, env *Env, st *stack, size int, roomID stri
 			g.Closes[k] += v
 		}
 		g.DialErrors += s.DialErrors
+		g.Reconnects += s.Reconnects
 		g.GapsDupsMisses += s.Gaps + s.Dups + s.Mismatches
 	}
 	g.Time = Summarize(times)

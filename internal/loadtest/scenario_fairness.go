@@ -65,6 +65,7 @@ type FairnessData struct {
 	RoundRobinBoundMS float64        `json:"round_robin_bound_ms"`
 	MaxModelInFlight  int            `json:"max_model_in_flight"`
 	Model             ModelStatsLite `json:"model"`
+	CPU               CPUUse         `json:"cpu"`
 	Server            []ServerStats  `json:"server"`
 	Rooms             []timeline     `json:"rooms"`
 }
@@ -103,8 +104,8 @@ func (d FairnessData) markdown() string {
 			fms(p.QueueWait.P50MS), fms(p.QueueWait.P95MS), fms(p.QueueWait.MaxMS), fmt.Sprint(p.Overtaken)})
 	}
 	b.WriteString(mdTable([]string{"pipeline", "rooms", "queued", "TTFT p50 ms", "p95", "max", "queue wait p50 ms", "p95", "max", "max overtaken"}, rows))
-	fmt.Fprintf(&b, "\nB/C max queue wait **%.0f ms**, max TTFT **%.0f ms**. Run hold (slot to idle) p50 %.0f ms, p95 %.0f ms; a pipeline-fair queue would bound the first B/C room's wait to about one run hold (%.0f ms). Fake model max in-flight %d.\n",
-		d.SmallMaxWait, d.SmallMaxTTFT, d.RunHold.P50MS, d.RunHold.P95MS, d.RoundRobinBoundMS, d.MaxModelInFlight)
+	fmt.Fprintf(&b, "\nB/C max queue wait **%.0f ms**, max TTFT **%.0f ms**. Run hold (slot to idle) p50 %.0f ms, p95 %.0f ms; a pipeline-fair queue would bound the first B/C room's wait to about one run hold (%.0f ms). Fake model max in-flight %d. CPU: %s.\n",
+		d.SmallMaxWait, d.SmallMaxTTFT, d.RunHold.P50MS, d.RunHold.P95MS, d.RoundRobinBoundMS, d.MaxModelInFlight, d.CPU)
 	return b.String()
 }
 
@@ -123,6 +124,7 @@ func runFairness(ctx context.Context, env *Env, p Params) (*Result, error) {
 	if err := st.cluster.Reset(ctx); err != nil {
 		return nil, err
 	}
+	cpu0 := env.cpuMark(ctx, st)
 
 	big, small := p.Int("big_rooms"), p.Int("small_rooms")
 	var aTitles, aPipes, bcTitles, bcPipes []string
@@ -158,6 +160,7 @@ func runFairness(ctx context.Context, env *Env, p Params) (*Result, error) {
 	if err := env.waitRuns(ctx, all, p.Dur("timeout")); err != nil {
 		return nil, err
 	}
+	cpu1 := env.cpuMark(ctx, st)
 	tls, err := st.fetchTimelines(ctx, all)
 	if err != nil {
 		return nil, err
@@ -168,7 +171,7 @@ func runFairness(ctx context.Context, env *Env, p Params) (*Result, error) {
 		return nil, err
 	}
 
-	data := FairnessData{Rooms: tls, Server: srv, MaxModelInFlight: mst.MaxInFlight, Model: liteModel(mst, all)}
+	data := FairnessData{Rooms: tls, Server: srv, MaxModelInFlight: mst.MaxInFlight, Model: liteModel(mst, all), CPU: cpu0.until(cpu1)}
 	byPipe := map[string][]timeline{}
 	for _, t := range tls {
 		byPipe[t.Pipeline] = append(byPipe[t.Pipeline], t)

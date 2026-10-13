@@ -44,7 +44,7 @@ func TestSmokeAllProfiles(t *testing.T) {
 	}
 	out := t.TempDir()
 	env, err := NewEnv(ctx, EnvConfig{
-		DBURL: dbURL, Prefix: "s2lt-it", Short: true, LogDir: out + "/logs",
+		DBURL: dbURL, Prefix: "s2lt-it", Short: true, TmpfsData: true, LogDir: out + "/logs",
 		Command: func() (string, []string, []string) {
 			return self, []string{"-test.run=^$"}, []string{serveSwitch + "=1"}
 		},

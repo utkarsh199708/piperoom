@@ -159,6 +159,14 @@ func (c *Cluster) Stop() {
 	wg.Wait()
 }
 
+func (c *Cluster) urls() []string {
+	out := make([]string, 0, len(c.Procs))
+	for _, p := range c.Procs {
+		out = append(out, p.URL)
+	}
+	return out
+}
+
 // URL returns the base URL of replica i mod n.
 func (c *Cluster) URL(i int) string { return c.Procs[i%len(c.Procs)].URL }
 

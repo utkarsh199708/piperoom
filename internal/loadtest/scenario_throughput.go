@@ -42,6 +42,7 @@ type ThroughputRun struct {
 	PeakGoroutines int            `json:"peak_goroutines"`
 	Model          ModelStatsLite `json:"model"`
 	Subs           SubTotals      `json:"subs"`
+	CPU            CPUUse         `json:"cpu"`
 	Server         []ServerStats  `json:"server"`
 }
 
@@ -59,10 +60,10 @@ func (d ThroughputData) markdown() string {
 		rows = append(rows, []string{fmt.Sprint(r.MaxAgents), fmt.Sprint(r.Rooms), fmt.Sprint(r.Turns),
 			fmt.Sprintf("%.1f", r.MakespanMS/1000), fmt.Sprintf("%.2f", r.TurnsPerSec), fmt.Sprintf("%.2f", r.IdealPerSec),
 			fmt.Sprintf("%.0f", r.EventsPerSec), fms(r.QueueWait.P50MS), fms(r.QueueWait.P95MS), fms(r.QueueWait.MaxMS),
-			fms(r.Appends.P50MS), fms(r.Appends.P95MS), fms(r.Appends.P99MS), pool, fmtMiB(r.PeakHeap)})
+			fms(r.Appends.P50MS), fms(r.Appends.P95MS), fms(r.Appends.P99MS), pool, fmtMiB(r.PeakHeap), r.CPU.String()})
 	}
 	b.WriteString(mdTable([]string{"max_agents", "rooms", "turns", "makespan s", "turns/s", "ideal turns/s", "events/s",
-		"queue wait p50 ms", "p95", "max", "insert p50 ms", "p95", "p99", "pool (max acquired/max; saturated; waits)", "peak heap"}, rows))
+		"queue wait p50 ms", "p95", "max", "insert p50 ms", "p95", "p99", "pool (max acquired/max; saturated; waits)", "peak heap", "CPU (avg cores)"}, rows))
 	return b.String()
 }
 
@@ -116,6 +117,7 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 	if err := st.cluster.Reset(ctx); err != nil {
 		return ThroughputRun{}, err
 	}
+	cpu0 := env.cpuMark(ctx, st)
 	n := p.Int("rooms")
 	titles, pp := make([]string, n), make([]string, n)
 	for i := range titles {
@@ -142,6 +144,7 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 		}
 	}
 	waitErr := env.waitRuns(ctx, ids, p.Dur("timeout"))
+	cpu1 := env.cpuMark(ctx, st)
 	srv, sErr := st.serverStats(ctx)
 	stopSubs()
 	wg.Wait()
@@ -156,7 +159,7 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 		return ThroughputRun{}, err
 	}
 	mst := env.Model.Stats()
-	run := ThroughputRun{MaxAgents: maxAgents, Rooms: n, Server: srv, Model: liteModel(mst, ids), Subs: Totals(subs, nil)}
+	run := ThroughputRun{MaxAgents: maxAgents, Rooms: n, Server: srv, Model: liteModel(mst, ids), Subs: Totals(subs, nil), CPU: cpu0.until(cpu1)}
 	var first, last time.Time
 	for _, t := range tls {
 		if first.IsZero() || t.Created.Before(first) {

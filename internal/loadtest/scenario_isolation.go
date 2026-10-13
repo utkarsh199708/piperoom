@@ -16,7 +16,7 @@ func isolationProfile() Profile {
 			{Name: "quiet_rooms", Kind: KindInt, Full: "10", Short: "2", Min: 1},
 			{Name: "subs_per_room", Kind: KindInt, Full: "20", Short: "3", Min: 1},
 			{Name: "rate", Kind: KindFloat, Full: "2", Short: "4", Min: 0.01, Help: "comments per second per quiet room"},
-			{Name: "window", Kind: KindDuration, Full: "20s", Short: "2s", Min: float64(100 * time.Millisecond), Help: "length of each phase"},
+			{Name: "window", Kind: KindDuration, Full: "20s", Short: "1500ms", Min: float64(100 * time.Millisecond), Help: "length of each phase"},
 			{Name: "pad", Kind: KindInt, Full: "300", Short: "50", Min: 0},
 			{Name: "warmup", Kind: KindDuration, Full: "3s", Short: "500ms", Help: "unrecorded comment traffic before the baseline"},
 			{Name: "flood_tools_per_turn", Kind: KindInt, Full: "8", Short: "4", Min: 1, Help: "tool calls per model turn in the flood room"},
@@ -40,7 +40,10 @@ type IsolationPhase struct {
 	Posted   int64     `json:"comments_posted"`
 	Failed   int64     `json:"comment_errors"`
 	FloodEPS float64   `json:"flood_room_events_per_sec"`
+	Achieved float64   `json:"comments_accepted_per_sec"`
+	Offered  float64   `json:"comments_offered_per_sec"`
 	Pool     PoolStats `json:"pool"`
+	CPU      CPUUse    `json:"cpu"`
 }
 
 // IsolationData is the isolation scenario's output.
@@ -49,6 +52,8 @@ type IsolationData struct {
 	Flood         IsolationPhase `json:"flood"`
 	FloodDelivery Dist           `json:"flood_room_event_to_delivery"`
 	FloodEvents   int64          `json:"flood_room_events"`
+	FloodTurns    int            `json:"flood_room_model_turns"`
+	FloodTools    int            `json:"flood_room_tool_calls"`
 	P95Ratio      float64        `json:"quiet_delivery_p95_ratio"`
 	P95DeltaMS    float64        `json:"quiet_delivery_p95_delta_ms"`
 	E2EP95Ratio   float64        `json:"quiet_post_to_delivery_p95_ratio"`
@@ -62,12 +67,13 @@ func (d IsolationData) markdown() string {
 	b.WriteString("## Isolation: quiet rooms alone vs. while one room floods\n\n")
 	rows := [][]string{}
 	for _, ph := range []IsolationPhase{d.Baseline, d.Flood} {
-		rows = append(rows, []string{ph.Name, fmt.Sprintf("%.0f", ph.FloodEPS),
+		rows = append(rows, []string{ph.Name, fmt.Sprintf("%.0f", ph.FloodEPS), fmt.Sprintf("%.1f / %.1f", ph.Achieved, ph.Offered),
 			fms(ph.Delivery.P50MS), fms(ph.Delivery.P95MS), fms(ph.Delivery.P99MS),
 			fms(ph.EndToEnd.P50MS), fms(ph.EndToEnd.P95MS), fms(ph.Post.P50MS), fms(ph.Post.P95MS),
-			fms(ph.Appends.P50MS), fms(ph.Appends.P95MS), fmt.Sprintf("%d/%d %.0f%%", ph.Pool.MaxAcquired, ph.Pool.MaxConns, 100*ph.Pool.SaturatedRatio)})
+			fms(ph.Appends.P50MS), fms(ph.Appends.P95MS), fmt.Sprintf("%d/%d %.0f%% (%d waits)", ph.Pool.MaxAcquired, ph.Pool.MaxConns, 100*ph.Pool.SaturatedRatio, ph.Pool.EmptyAcquires),
+			ph.CPU.String()})
 	}
-	b.WriteString(mdTable([]string{"phase", "flood events/s", "quiet event->delivery p50 ms", "p95", "p99", "post->delivery p50", "p95", "POST p50", "POST p95", "insert p50", "insert p95", "pool"}, rows))
+	b.WriteString(mdTable([]string{"phase", "flood events/s", "quiet comments/s accepted / offered", "quiet event->delivery p50 ms", "p95", "p99", "post->delivery p50", "p95", "POST p50", "POST p95", "insert p50", "insert p95", "pool", "CPU (avg cores)"}, rows))
 	fmt.Fprintf(&b, "\nQuiet-room delivery p95 ratio flood/baseline: **%.2fx** (+%.1f ms); post->delivery p95 ratio %.2fx; POST p95 ratio %.2fx. Flood room delivery p95 %.1f ms over %d events.\n",
 		d.P95Ratio, d.P95DeltaMS, d.E2EP95Ratio, d.PostP95Ratio, d.FloodDelivery.P95MS, d.FloodEvents)
 	return b.String()
@@ -102,7 +108,7 @@ func runIsolation(ctx context.Context, env *Env, p Params) (*Result, error) {
 	if _, err := rg.connect(quiet, p.Int("quiet_rooms")*p.Int("subs_per_room"), quietSink, timeout); err != nil {
 		return nil, err
 	}
-	sleepCtx(ctx, time.Second)
+	sleepCtx(ctx, env.settle())
 	// Unrecorded warm-up, as in fanout.
 	rg.comment(ctx, quiet, p.Float("rate"), p.Dur("warmup"), p.Int("pad"), NewRecorder(1))
 
@@ -120,13 +126,17 @@ func runIsolation(ctx context.Context, env *Env, p Params) (*Result, error) {
 		quietSink.From.Store(time.Now().UnixNano())
 		quietSink.Off.Store(false)
 		post := NewRecorder(0)
+		cpu0 := env.cpuMark(ctx, st)
 		t0 := time.Now()
 		ph.Posted, ph.Failed = rg.comment(ctx, quiet, p.Float("rate"), p.Dur("window"), p.Int("pad"), post)
 		elapsed := time.Since(t0)
+		ph.Offered = round3(p.Float("rate") * float64(len(quiet)))
+		ph.Achieved = round3(float64(ph.Posted) / elapsed.Seconds())
 		if floodRoom != "" {
 			end, _ := st.api(0).LastSeq(ctx, loadUsers[0], floodRoom)
 			ph.FloodEPS = round3(float64(end-floodStart) / elapsed.Seconds())
 		}
+		ph.CPU = cpu0.until(env.cpuMark(ctx, st))
 		// Late deliveries of this phase's comments still count.
 		if _, err := rg.drain(ctx, quiet, 15*time.Second); err != nil {
 			return ph, err
@@ -189,6 +199,9 @@ func runIsolation(ctx context.Context, env *Env, p Params) (*Result, error) {
 		return nil, err
 	}
 	data.FloodEvents, _ = st.api(0).LastSeq(ctx, loadUsers[0], flood)
+	if rs := env.Model.Stats().Rooms[flood]; rs != nil {
+		data.FloodTurns, data.FloodTools = rs.Requests, rs.ToolUses
+	}
 	if err := st.api(0).CloseRoom(ctx, loadUsers[0], flood); err != nil {
 		res.finding("closing the flood room failed: %v", err)
 	}

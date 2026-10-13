@@ -14,10 +14,10 @@ func fanoutProfile() Profile {
 		Name: "fanout",
 		Help: "subs WebSocket subscribers over rooms rooms while every room gets rate comments/s; event-to-delivery latency, slow-consumer drops, goroutines after close",
 		Params: []ParamSpec{
-			{Name: "subs", Kind: KindIntList, Full: "500,1000,2000", Short: "12,24", Min: 1, Help: "subscriber counts, one run each"},
+			{Name: "subs", Kind: KindIntList, Full: "500,1000,2000", Short: "16", Min: 1, Help: "subscriber counts, one run each"},
 			{Name: "rooms", Kind: KindInt, Full: "50", Short: "4", Min: 1},
 			{Name: "rate", Kind: KindFloat, Full: "1", Short: "4", Min: 0.01, Help: "comments per second per room"},
-			{Name: "window", Kind: KindDuration, Full: "30s", Short: "2s", Min: float64(100 * time.Millisecond), Help: "measured window"},
+			{Name: "window", Kind: KindDuration, Full: "30s", Short: "1500ms", Min: float64(100 * time.Millisecond), Help: "measured window"},
 			{Name: "pad", Kind: KindInt, Full: "300", Short: "50", Min: 0, Help: "comment text bytes"},
 			{Name: "warmup", Kind: KindDuration, Full: "3s", Short: "500ms", Help: "unrecorded comment traffic before the window"},
 			{Name: "timeout", Kind: KindDuration, Full: "5m", Short: "60s", Min: float64(time.Second)},
@@ -33,6 +33,8 @@ type FanoutRun struct {
 	ConnectMS        float64       `json:"connect_ms"`
 	Posted           int64         `json:"comments_posted"`
 	PostErrors       int64         `json:"comment_errors"`
+	OfferedPerSec    float64       `json:"comments_offered_per_sec"`
+	AchievedPerSec   float64       `json:"comments_accepted_per_sec"`
 	Post             Dist          `json:"comment_post_latency"`
 	Delivery         Dist          `json:"event_to_delivery"`
 	EndToEnd         Dist          `json:"post_to_delivery"`
@@ -44,6 +46,8 @@ type FanoutRun struct {
 	GoroutinesAfter  int           `json:"server_goroutines_after_close"`
 	PeakHeap         uint64        `json:"peak_heap_inuse"`
 	Pool             PoolStats     `json:"pool"`
+	QueriesPerSec    float64       `json:"pool_acquires_per_sec"`
+	CPU              CPUUse        `json:"cpu"`
 	Server           []ServerStats `json:"server"`
 }
 
@@ -57,14 +61,16 @@ func (d FanoutData) markdown() string {
 	b.WriteString("## WebSocket fan-out\n\n")
 	rows := [][]string{}
 	for _, r := range d.Runs {
-		rows = append(rows, []string{fmt.Sprint(r.Subs), fmt.Sprint(r.Rooms), fmt.Sprintf("%.0f", r.DeliveredPerSec),
+		rows = append(rows, []string{fmt.Sprint(r.Subs), fmt.Sprint(r.Rooms), fmt.Sprintf("%.1f / %.1f", r.AchievedPerSec, r.OfferedPerSec),
+			fmt.Sprintf("%.0f", r.DeliveredPerSec),
 			fms(r.Delivery.P50MS), fms(r.Delivery.P95MS), fms(r.Delivery.P99MS), fms(r.Delivery.MaxMS),
-			fms(r.EndToEnd.P50MS), fms(r.EndToEnd.P99MS), fms(r.Post.P50MS), fms(r.Post.P99MS),
+			fms(r.EndToEnd.P50MS), fms(r.EndToEnd.P99MS), fms(r.Post.P50MS), fms(r.Post.P99MS), fms(r.Appends.P50MS),
 			fmt.Sprint(r.Totals.SlowClosed), fmt.Sprint(r.Totals.Reconnects), fmt.Sprintf("%d/%d/%d", r.GoroutinesBefore, r.GoroutinesPeak, r.GoroutinesAfter),
-			fmt.Sprintf("%d/%d %.0f%% (%d waits)", r.Pool.MaxAcquired, r.Pool.MaxConns, 100*r.Pool.SaturatedRatio, r.Pool.EmptyAcquires), fmtMiB(r.PeakHeap)})
+			fmt.Sprintf("%d/%d %.0f%%, %.0f q/s, %d waits", r.Pool.MaxAcquired, r.Pool.MaxConns, 100*r.Pool.SaturatedRatio, r.QueriesPerSec, r.Pool.EmptyAcquires),
+			fmtMiB(r.PeakHeap), r.CPU.String()})
 	}
-	b.WriteString(mdTable([]string{"subs", "rooms", "deliveries/s", "event->delivery p50 ms", "p95", "p99", "max", "post->delivery p50", "p99",
-		"POST p50", "POST p99", "send-buffer-full closes", "reconnects", "goroutines before/peak/after", "pool", "peak heap"}, rows))
+	b.WriteString(mdTable([]string{"subs", "rooms", "comments/s accepted / offered", "deliveries/s", "event->delivery p50 ms", "p95", "p99", "max", "post->delivery p50", "p99",
+		"POST p50", "POST p99", "insert p50", "send-buffer-full closes", "reconnects", "server goroutines before/peak/after", "pool", "peak heap", "CPU (avg cores)"}, rows))
 	return b.String()
 }
 
@@ -216,9 +222,9 @@ func runFanout(ctx context.Context, env *Env, p Params) (*Result, error) {
 			return nil, fmt.Errorf("subs=%d: %w", n, err)
 		}
 		data.Runs = append(data.Runs, run)
-		res.finding("%d subscribers over %d rooms: event->delivery p50 %.1f ms, p95 %.1f ms, p99 %.1f ms; %d send-buffer-full closes, %d reconnects; pool %d/%d busy in %.0f%% of samples with %d waits; server goroutines %d before, %d after close.",
-			n, run.Rooms, run.Delivery.P50MS, run.Delivery.P95MS, run.Delivery.P99MS, run.Totals.SlowClosed, run.Totals.Reconnects,
-			run.Pool.MaxAcquired, run.Pool.MaxConns, 100*run.Pool.SaturatedRatio, run.Pool.EmptyAcquires, run.GoroutinesBefore, run.GoroutinesAfter)
+		res.finding("%d subscribers over %d rooms: the server accepted %.1f of %.1f comments/s offered (POST p50 %.0f ms, p99 %.0f ms); event->delivery p50 %.1f ms, p95 %.1f ms, p99 %.1f ms; %d send-buffer-full closes, %d reconnects; pool %d/%d busy in %.0f%% of samples, %.0f acquires/s, %d waits; server goroutines %d before, %d after close; CPU %s.",
+			n, run.Rooms, run.AchievedPerSec, run.OfferedPerSec, run.Post.P50MS, run.Post.P99MS, run.Delivery.P50MS, run.Delivery.P95MS, run.Delivery.P99MS, run.Totals.SlowClosed, run.Totals.Reconnects,
+			run.Pool.MaxAcquired, run.Pool.MaxConns, 100*run.Pool.SaturatedRatio, run.QueriesPerSec, run.Pool.EmptyAcquires, run.GoroutinesBefore, run.GoroutinesAfter, run.CPU)
 	}
 	res.Data = data
 	return res, nil
@@ -238,6 +244,11 @@ func fanoutOnce(ctx context.Context, env *Env, p Params, n int, res *Result) (Fa
 	}
 	run := FanoutRun{Subs: n, Rooms: len(rooms)}
 	_ = st.cluster.Reset(ctx)
+	// Idle keep-alive HTTP connections each hold a server goroutine (the
+	// server sets no IdleTimeout); close them so the leak check counts only
+	// what the WebSocket subscribers leave behind.
+	env.HTTP.CloseIdleConnections()
+	sleepCtx(ctx, 200*time.Millisecond)
 	before, err := st.serverStats(ctx)
 	if err != nil {
 		return FanoutRun{}, err
@@ -255,7 +266,7 @@ func fanoutOnce(ctx context.Context, env *Env, p Params, n int, res *Result) (Fa
 		return FanoutRun{}, err
 	}
 	run.ConnectMS = ms(time.Since(t0))
-	sleepCtx(ctx, time.Second) // let the join presence broadcasts settle
+	sleepCtx(ctx, env.settle()) // let the join presence broadcasts settle
 	// Warm-up traffic, not recorded: new pool connections, HTTP keep-alives
 	// and the first queries' plans would otherwise land in the window.
 	rg.comment(ctx, rooms, p.Float("rate"), p.Dur("warmup"), p.Int("pad"), NewRecorder(1))
@@ -266,11 +277,14 @@ func fanoutOnce(ctx context.Context, env *Env, p Params, n int, res *Result) (Fa
 	sink.From.Store(time.Now().UnixNano())
 	sink.Off.Store(false)
 	post := NewRecorder(0)
+	cpu0 := env.cpuMark(ctx, st)
 	wStart := time.Now()
 	run.Posted, run.PostErrors = rg.comment(ctx, rooms, p.Float("rate"), p.Dur("window"), p.Int("pad"), post)
+	postDur := time.Since(wStart)
 	final, err := rg.drain(ctx, rooms, 15*time.Second)
 	wDur := time.Since(wStart)
 	sink.Off.Store(true)
+	run.CPU = cpu0.until(env.cpuMark(ctx, st))
 	srv, sErr := st.serverStats(ctx)
 	rg.close()
 	if err != nil {
@@ -279,10 +293,14 @@ func fanoutOnce(ctx context.Context, env *Env, p Params, n int, res *Result) (Fa
 	if sErr != nil {
 		return FanoutRun{}, sErr
 	}
+	run.OfferedPerSec = round3(p.Float("rate") * float64(len(rooms)))
+	run.AchievedPerSec = round3(float64(run.Posted) / postDur.Seconds())
+	run.QueriesPerSec = round3(float64(srv[0].Pool.Acquires) / wDur.Seconds())
 	// The gateway's goroutines end asynchronously after a close; give them a
 	// moment, then count.
 	var after []ServerStats
 	for i := 0; i < 20; i++ {
+		env.HTTP.CloseIdleConnections()
 		sleepCtx(ctx, 250*time.Millisecond)
 		if after, err = st.serverStats(ctx); err != nil {
 			return FanoutRun{}, err

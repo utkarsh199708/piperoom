@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"net/url"
 	"os"
 	"os/signal"
@@ -54,6 +55,9 @@ type ServerConfig struct {
 	SampleEvery time.Duration `json:"sample_every"`
 	// LogLevel is debug, info, warn (default) or error.
 	LogLevel string `json:"log_level"`
+	// MutexProfileFraction > 0 turns on mutex profiling at that rate, read
+	// at /debug/pprof/mutex.
+	MutexProfileFraction int `json:"mutex_profile_fraction"`
 }
 
 // Server is the room service, HTTP API and WebSocket gateway exactly as
@@ -221,6 +225,13 @@ func StartServer(ctx context.Context, cfg ServerConfig, log *slog.Logger) (*Serv
 		runtime.GC()
 		w.WriteHeader(http.StatusNoContent)
 	})
+	// Profiles of the server under load (loopback only; a load-test server).
+	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	if cfg.MutexProfileFraction > 0 {
+		runtime.SetMutexProfileFraction(cfg.MutexProfileFraction)
+	}
 	mux.Handle("/", s.api)
 
 	ln, err := net.Listen("tcp", cfg.Listen)
@@ -286,6 +297,7 @@ type ServerStats struct {
 	AppendsDropped int64          `json:"appends_dropped"`
 	ProbeRuns      int64          `json:"probe_runs"`
 	ActionRuns     map[string]int `json:"action_runs"`
+	CPUSeconds     float64        `json:"cpu_seconds"`
 }
 
 func (s *Server) stats() ServerStats {
@@ -317,6 +329,7 @@ func (s *Server) stats() ServerStats {
 		AppendsDropped: dropped,
 		ProbeRuns:      s.probeRuns.Load(),
 		ActionRuns:     acts,
+		CPUSeconds:     processCPUSeconds(),
 	}
 }
 
