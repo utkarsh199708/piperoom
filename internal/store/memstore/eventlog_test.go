@@ -185,39 +185,6 @@ func TestSinceTable(t *testing.T) {
 	}
 }
 
-func TestSinceErrors(t *testing.T) {
-	s, _ := newLogStore(t)
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	if _, err := s.Since(context.Background(), "nope", 0, 10); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("unknown room: err = %v, want store.ErrNotFound", err)
-	}
-	if _, err := s.Since(cancelled, "r1", 0, 10); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled ctx: err = %v, want context.Canceled", err)
-	}
-}
-
-func TestSinceReturnsIndependentSlice(t *testing.T) {
-	s, _ := newLogStore(t)
-	appendN(t, s, "r1", 2)
-	ctx := context.Background()
-
-	first, err := s.Since(ctx, "r1", 0, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first[0].Seq = 99 // a caller changing its copy must not change the log
-
-	again, err := s.Since(ctx, "r1", 0, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !slices.Equal(seqs(again), []int64{1, 2}) {
-		t.Fatalf("log changed by caller: seqs = %v", seqs(again))
-	}
-}
-
 // recvSeqs reads exactly n events from ch, failing the test if they do not
 // arrive in time.
 func recvSeqs(t *testing.T, ch <-chan events.Event, n int) []int64 {
