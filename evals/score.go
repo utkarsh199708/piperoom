@@ -9,7 +9,6 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
-	"piperoom/internal/owners"
 )
 
 // Score weights. They add up to 100. Root cause dominates on purpose: a
@@ -43,16 +42,20 @@ type RunResult struct {
 	// and RootCauseLayerNamed on diagnose, OutcomeOK otherwise.
 	Correct bool `json:"correct"`
 	// ClaimsCause: the final hypothesis has medium or high confidence (on a
-	// healthy scenario, unless it says the pipeline is healthy).
+	// healthy scenario, unless it is itself a healthy verdict with no current
+	// fault in it).
 	ClaimsCause bool `json:"claims_cause"`
-	// Abstained: the run held back. On ask scenarios that is AskedDriver;
-	// everywhere else it is no proposal and no ClaimsCause.
+	// Abstained: the run held back: no proposal, and no ClaimsCause (on ask
+	// scenarios: AskedDriver instead).
 	Abstained bool `json:"abstained"`
-	// AskedDriver: an agent message to the room (not a reply to a watcher's
-	// comment) asked a question before any proposal was created.
+	// AskedDriver: after the first steer or comment reached the agent, and
+	// before any proposal, an agent message to the room (not a reply to a
+	// watcher's comment) ended a sentence with "?".
 	AskedDriver bool `json:"asked_driver"`
-	// SaysHealthy: the last agent message says the pipeline is healthy or
-	// that there is nothing to fix, in a clause that does not negate it.
+	// SaysHealthy: the final hypothesis or the last agent message says the
+	// pipeline is healthy, resolved or has nothing to fix, not denied and
+	// with no current fault in the same text; and the last message states no
+	// current fault.
 	SaysHealthy bool `json:"says_healthy"`
 
 	// RootCause: final hypothesis matches expect.root_cause, in clauses that
@@ -150,7 +153,12 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 	proposed := map[string]bool{}
 	var propSteps []events.ProposalStep
 	var last *events.AgentHypothesisPayload
+	var atLast *evidence // the steps as they were when last was posted
 	lastMessage := ""
+	// inputDelivered turns true at the first steer or comment the harness
+	// hands the agent (scriptedInbox logs them as steer.sent and
+	// comment.added): a question before it cannot be about that input.
+	inputDelivered := false
 	for _, e := range tr.Events {
 		switch e.Type {
 		case events.AgentStepStart:
@@ -184,6 +192,7 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 			}
 			res.Hypotheses++
 			last = &p
+			atLast = ev.snapshot()
 			if res.ToolCallsToRootCause < 0 && rootCauseMatches(sc.Expect, p.Text) {
 				res.ToolCallsToRootCause = res.ToolCalls
 			}
@@ -199,9 +208,11 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 			// A reply to a watcher's comment is addressed to that watcher;
 			// anything else the agent posts is to the room and its driver.
 			// Events are in order, so Proposals is the count so far.
-			if p.ReplyTo == "" && res.Proposals == 0 && strings.Contains(p.Text, "?") {
+			if inputDelivered && p.ReplyTo == "" && res.Proposals == 0 && asksQuestion(p.Text) {
 				res.AskedDriver = true
 			}
+		case events.SteerSent, events.CommentAdded:
+			inputDelivered = true
 		case events.ProposalCreated:
 			var p events.ProposalCreatedPayload
 			if json.Unmarshal(e.Payload, &p) != nil {
@@ -215,18 +226,28 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		}
 	}
 
+	// A diagnosis is judged on the steps that existed when its final
+	// hypothesis was posted: a step that ran after it, or that it cites
+	// before it ran, cannot be what it rests on. Healthy, abstain and ask
+	// runs end on a message, so their facts count over the whole run.
+	basis := ev
 	if last != nil {
 		res.FinalHypothesis = last.Text
 		res.Confidence = last.Confidence
 		res.RootCause = rootCauseMatches(sc.Expect, last.Text)
 		res.ForbiddenCause = matchForbidden(sc.Expect.RootCauseForbidden, last.Text)
-		res.CitesSteps = ev.citesSteps(last.BasedOnSteps, last.Confidence)
+		res.CitesSteps = atLast.citesSteps(last.BasedOnSteps, last.Confidence)
+		if res.Outcome == OutcomeDiagnose {
+			basis = atLast
+		}
 	}
 	res.LayerNamed = layerGraded(sc, sc.Expect.FirstFailingLayer, last)
 	res.RootCauseLayerNamed = layerGraded(sc, sc.Expect.RootCauseLayer, last)
-	res.SaysHealthy = saysHealthy(lastMessage)
+	// The healthy verdict may come from the final hypothesis or the last
+	// message; a current fault in the last message cancels it.
+	res.SaysHealthy = (healthyVerdict(lastMessage) || (last != nil && healthyVerdict(last.Text))) && !hasFault(lastMessage)
 	res.ClaimsCause = last != nil && (last.Confidence == "medium" || last.Confidence == "high") &&
-		!(res.Outcome == OutcomeHealthy && saysHealthy(last.Text))
+		!(res.Outcome == OutcomeHealthy && healthyVerdict(last.Text))
 
 	for _, t := range sc.Expect.EvidenceTools {
 		if !ev.observed[t] {
@@ -236,7 +257,7 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 			}
 		}
 	}
-	factSteps := ev.facts(sc.Expect.ExpectedFacts)
+	factSteps := basis.facts(sc.Expect.ExpectedFacts)
 	for _, f := range sc.Expect.ExpectedFacts {
 		if len(factSteps[f.ID]) > 0 {
 			res.FactsFound = append(res.FactsFound, f.ID)
@@ -290,12 +311,13 @@ func finish(sc Scenario, res *RunResult) {
 	case OutcomeAbstain:
 		res.OutcomeOK = res.Proposals == 0 && !res.ClaimsCause
 	case OutcomeAsk:
-		res.OutcomeOK = res.AskedDriver
+		// Asking and then acting without an answer is not asking.
+		res.OutcomeOK = res.AskedDriver && res.Proposals == 0
 	default:
 		res.OutcomeOK = res.RootCause
 	}
 	if res.Outcome == OutcomeAsk {
-		res.Abstained = res.AskedDriver
+		res.Abstained = res.AskedDriver && res.Proposals == 0
 	} else {
 		res.Abstained = res.Proposals == 0 && !res.ClaimsCause
 	}
@@ -414,12 +436,13 @@ func failures(sc Scenario, res RunResult) []string {
 			f = append(f, fmt.Sprintf("claimed a cause at %s confidence although the evidence names none", res.Confidence))
 		}
 	case OutcomeAsk:
-		if !res.AskedDriver {
-			if res.Proposals > 0 {
-				f = append(f, "proposed a fix before asking the driver what they meant")
-			} else {
-				f = append(f, "did not ask the driver what they meant")
-			}
+		switch {
+		case !res.AskedDriver && res.Proposals > 0:
+			f = append(f, "proposed a fix before asking the driver what they meant")
+		case !res.AskedDriver:
+			f = append(f, "did not ask the driver what they meant")
+		case res.Proposals > 0:
+			f = append(f, "proposed a fix without an answer from the driver")
 		}
 	default:
 		f = append(f, diagnoseFailures(sc, res)...)
@@ -486,77 +509,10 @@ func missingRequired(sc Scenario, res RunResult) []string {
 	return out
 }
 
-// matchGroups reports whether every group has a term that occurs, affirmed,
-// in text. Terms match whole words over a normalised token stream (see
-// tokenize), not as substrings: "rebalanc" does not match
-// "PreparingRebalance", "rebalanc*" does. An occurrence counts only when it is
-// affirmed (see affirmedAt): "not an amount change", "no DDL on amount" do not
-// name amount, and a question names nothing.
-func matchGroups(groups [][]string, text string) bool {
-	if len(groups) == 0 {
-		return false
-	}
-	frags := fragments(text)
-	for _, g := range groups {
-		hit := false
-		for _, f := range frags {
-			if anyAffirmed(f, g) {
-				hit = true
-				break
-			}
-		}
-		if !hit {
-			return false
-		}
-	}
-	return true
-}
-
-// negationWindow is how many words before a term a negator cancels it:
-// "not a Connect problem", "is not the schema registry", "instead of the
-// connector". A negator further away usually negates something else ("the
-// record at offset 25377154 on partition 1 is not Avro" still blames
-// partition 1), so the window stays short.
-const negationWindow = 3
-
-// fragmentSplit cuts a sentence into the pieces a negation or an
-// exoneration stays inside: at , : ( ) [ ] and before a contrast word.
-// "STOPPED (not FAILED)" keeps its "not" to itself, and "Connect is healthy
-// but order-sync crashes" blames order-sync.
-var fragmentSplit = regexp.MustCompile(`(?i)[,:()\[\]]|\s(?:but|while|whereas|although|though)\s`)
-
-// fragments splits text into sentences (clauseSplit), drops the ones that
-// are questions, cuts the rest at fragmentSplit and returns each fragment's
-// tokens.
-func fragments(text string) [][]string {
-	var out [][]string
-	add := func(sentence string) {
-		for _, f := range fragmentSplit.Split(sentence, -1) {
-			if toks := tokenize(f); len(toks) > 0 {
-				out = append(out, toks)
-			}
-		}
-	}
-	start := 0
-	for _, m := range clauseSplit.FindAllStringIndex(text, -1) {
-		if text[m[0]] != '?' {
-			add(text[start:m[0]])
-		}
-		start = m[1]
-	}
-	add(text[start:])
-	return out
-}
-
-// affirmedAt reports whether no negator sits in the negationWindow words
-// before position i of the fragment.
-func affirmedAt(frag []string, i int) bool {
-	return !negated(frag[max(0, i-negationWindow):i])
-}
-
-// clauseSplit cuts text into clauses at ; ! ? newlines and at a full stop
-// followed by space or the end, so "pg.public.orders" stays whole.
-var clauseSplit = regexp.MustCompile(`[;!?\n]|\.(\s|$)`)
+// clauseSplit cuts text into clauses at ; ! newlines and at a full stop or
+// question mark followed by space or the end, so "pg.public.orders" and a URL
+// query ("status?expand=info") stay whole.
+var clauseSplit = regexp.MustCompile(`[;!\n]|[.?](\s|$)`)
 
 // negators mark a clause as advice against, or a denial of, whatever else it
 // says: "do NOT reset to latest", "never reset", "avoid resetting", "instead of
@@ -745,92 +701,4 @@ func checkSteps(sc Scenario, steps []events.ProposalStep) []string {
 		}
 	}
 	return bad
-}
-
-// layerTerms are the words that name each pipeline layer (events.Layers) in a
-// hypothesis. Kafka itself is matched by its parts, not the word "kafka",
-// because "Kafka Connect" would otherwise name both layers. Postgres also
-// covers the source-side objects a root cause lives in (DDL, migrations,
-// publications, table ownership, WAL).
-var layerTerms = map[string][]string{
-	"postgres": {"postgres*", "replication slot", "source table", "source db", "source database", "transaction*",
-		"ddl", "alter table", "drop column", "migration*", "publication*", "table owner*", "wal"},
-	"kafka-connect":   {"connect", "connector*", "debezium"},
-	"schema-registry": {"schema registry", "registry", "subject*"},
-	"kafka":           {"topic*", "broker*", "partition*", "retention", "log start"},
-	"consumer":        {"consumer*"},
-	"warehouse":       {"warehouse*", "sink table"},
-}
-
-// layerTermsFor adds the pipeline's own names to a layer's words: its
-// consumer groups name the consumer ("order-sync is stuck"), its connectors
-// Connect and its sink tables the warehouse.
-func layerTermsFor(p owners.Pipeline, layer string) []string {
-	terms := append([]string(nil), layerTerms[layer]...)
-	switch layer {
-	case "consumer":
-		terms = append(terms, p.ConsumerGroups...)
-	case "kafka-connect":
-		terms = append(terms, p.Connectors...)
-	case "warehouse":
-		terms = append(terms, p.SinkTables...)
-	}
-	return terms
-}
-
-// exonerators clear whatever a fragment names: "Connect is healthy", "a long
-// transaction is ruled out", "the registry is not the cause". They are
-// themselves negation-aware, so "Connect is not healthy" still names Connect.
-var exonerators = []string{"healthy", "fine", "ruled out", "unrelated", "unaffected", "not involved",
-	"not the cause", "not at fault", "red herring"}
-
-// namesLayer reports whether text names a layer through one of terms in an
-// affirmed occurrence (see matchGroups) inside a fragment that does not
-// exonerate it.
-func namesLayer(terms []string, text string) bool {
-	for _, f := range fragments(text) {
-		if anyAffirmed(f, exonerators) {
-			continue
-		}
-		if anyAffirmed(f, terms) {
-			return true
-		}
-	}
-	return false
-}
-
-// anyAffirmed reports whether one of terms occurs affirmed in the fragment.
-func anyAffirmed(frag []string, terms []string) bool {
-	for _, term := range terms {
-		for _, i := range findTerm(frag, term) {
-			if affirmedAt(frag, i) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// healthyTerms say there is nothing to fix.
-var healthyTerms = []string{"healthy", "nothing to fix", "nothing needs fixing", "nothing needs to be fixed",
-	"no fix needed", "no fix is needed", "no fix required", "no fix is required",
-	"no action needed", "no action is needed", "no action required", "no action is required"}
-
-// saysHealthy reports whether text says the pipeline is healthy or that there
-// is nothing to fix. It is stricter than matchGroups: any negator anywhere
-// else in the fragment cancels the phrase ("there is no sign it is healthy",
-// "can't confirm it is healthy"), since a wrong "healthy" passes a run.
-func saysHealthy(text string) bool {
-	for _, f := range fragments(text) {
-		for _, phrase := range healthyTerms {
-			want, _, _ := termTokens(phrase)
-			for _, i := range findTerm(f, phrase) {
-				rest := append(append([]string(nil), f[:i]...), f[i+len(want):]...)
-				if !negated(rest) {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }

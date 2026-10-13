@@ -217,7 +217,7 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 		return RunResult{}, Transcript{}, err
 	}
 	rec := newRecorder()
-	inbox := newScriptedInbox(sc.humanInputs())
+	inbox := newScriptedInbox(sc.humanInputs(), rec)
 	alert := sc.agentAlert(fmt.Sprintf("eval_%s_%d", sc.Name, run))
 
 	runCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)

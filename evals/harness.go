@@ -81,10 +81,16 @@ type scriptedInbox struct {
 	queue   []agent.HumanInput
 	pending []agent.HumanInput
 	idles   int
+	// log, when set, records each steer and comment as the room log would
+	// (steer.sent, comment.added) at the moment the agent receives it, so the
+	// transcript shows what the agent had been told when it spoke (the ask
+	// outcome counts only questions after the first one). Approval and
+	// action results have no event of their own here: theirs need a proposal.
+	log agent.Sink
 }
 
-func newScriptedInbox(inputs []agent.HumanInput) *scriptedInbox {
-	return &scriptedInbox{queue: append([]agent.HumanInput(nil), inputs...)}
+func newScriptedInbox(inputs []agent.HumanInput, log agent.Sink) *scriptedInbox {
+	return &scriptedInbox{queue: append([]agent.HumanInput(nil), inputs...), log: log}
 }
 
 // Drain implements agent.Inbox.
@@ -93,10 +99,30 @@ func (in *scriptedInbox) Drain(ctx context.Context) ([]agent.HumanInput, error) 
 		return nil, err
 	}
 	in.mu.Lock()
-	defer in.mu.Unlock()
 	out := in.pending
 	in.pending = nil
+	in.mu.Unlock()
+	if in.log != nil {
+		for _, h := range out {
+			if err := in.logInput(ctx, h); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return out, nil
+}
+
+// logInput records one delivered input in the room log's shape.
+func (in *scriptedInbox) logInput(ctx context.Context, h agent.HumanInput) error {
+	switch h.Kind {
+	case "steer":
+		return in.log.Emit(ctx, events.SteerSent, events.SteerSentPayload{Text: h.Text})
+	case "comment":
+		return in.log.Emit(ctx, events.CommentAdded, events.CommentAddedPayload{
+			CommentID: h.CommentID, StepID: h.StepID, Text: h.Text, MentionsAgent: true,
+		})
+	}
+	return nil
 }
 
 // Wait implements agent.Inbox. The agent calls it only when it is idle with

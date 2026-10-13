@@ -140,6 +140,23 @@ func TestEvaluateDeliversInputsOnIdle(t *testing.T) {
 	if strings.Join(acks, "|") != "ack: check the registry|ack: why?" {
 		t.Errorf("acks = %q", acks)
 	}
+	// The harness logs each delivered steer and comment as the room would.
+	var logged []string
+	for _, ev := range tr.Events {
+		switch ev.Type {
+		case events.SteerSent:
+			var p events.SteerSentPayload
+			_ = json.Unmarshal(ev.Payload, &p)
+			logged = append(logged, "steer:"+p.Text)
+		case events.CommentAdded:
+			var p events.CommentAddedPayload
+			_ = json.Unmarshal(ev.Payload, &p)
+			logged = append(logged, "comment:"+p.CommentID+":"+p.Text)
+		}
+	}
+	if strings.Join(logged, "|") != "steer:check the registry|comment:c_1:why?" {
+		t.Errorf("logged inputs = %q", logged)
+	}
 	if tr.Idles != 3 {
 		t.Errorf("idles = %d, want 3 (two inputs, then closed)", tr.Idles)
 	}

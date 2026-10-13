@@ -16,10 +16,17 @@ var confidenceLevels = []string{"low", "medium", "high"}
 // Calibration says whether the agent's confidence matches how often it is
 // right, and whether it holds back where it should. Runs that ended in a run
 // error (the runner itself failed) are left out: they say nothing about the
-// agent's judgement. A run is right when RunResult.Correct holds.
+// agent's judgement.
+//
+// Brier, the reliability table and Overconfident cover diagnose runs only
+// (and reports written before outcomes existed, whose runs are all
+// diagnose). There the confidence is about the stated root cause, and a run
+// is right when RunResult.Correct holds. On healthy, abstain and ask runs the
+// confidence is not a probability of being right (a correct abstention says
+// "low"), so those runs are judged by the abstention numbers instead.
 type Calibration struct {
-	// RatedRuns had a final hypothesis, so a confidence; UnratedRuns did not
-	// and are not in Brier or the table.
+	// RatedRuns are diagnose runs with a final hypothesis, so a confidence;
+	// UnratedRuns are diagnose runs without one.
 	RatedRuns   int `json:"rated_runs"`
 	UnratedRuns int `json:"unrated_runs"`
 	// Brier is the mean of (p - right)^2 over rated runs, with p from
@@ -27,7 +34,7 @@ type Calibration struct {
 	// said at "50%". -1 when no run is rated.
 	Brier       float64             `json:"brier"`
 	Reliability []ReliabilityBucket `json:"reliability"`
-	// Overconfident counts runs at high confidence that were wrong.
+	// Overconfident counts rated runs at high confidence that were wrong.
 	Overconfident int `json:"overconfident"`
 
 	// AbstainRuns are runs on healthy, abstain and ask scenarios, where
@@ -77,18 +84,19 @@ func calibrate(results []RunResult) Calibration {
 		if r.Error != "" {
 			continue
 		}
-		if r.Outcome == OutcomeDiagnose || r.Outcome == "" {
-			c.DiagnoseRuns++
-			if r.Abstained {
-				c.FalseAbstentions++
-			}
-		} else {
+		if r.Outcome != OutcomeDiagnose && r.Outcome != "" {
 			c.AbstainRuns++
 			if r.Abstained {
 				c.Abstentions++
 			}
+			continue
 		}
-		// Confidence is empty exactly when there was no hypothesis.
+		c.DiagnoseRuns++
+		if r.Abstained {
+			c.FalseAbstentions++
+		}
+		// Confidence is empty exactly when there was no hypothesis;
+		// update_hypothesis accepts only the three lower-case words.
 		b, rated := buckets[r.Confidence]
 		if !rated {
 			c.UnratedRuns++
@@ -156,7 +164,7 @@ func writeQuality(b *strings.Builder, c *Calibration, e *EvidenceTotals) {
 	if c.Brier >= 0 {
 		brier = fmt.Sprintf("%.3f", c.Brier)
 	}
-	fmt.Fprintf(b, "\n**Calibration** (confidence low=%.1f, medium=%.1f, high=%.1f): Brier %s over %d rated run(s), %d without a hypothesis · overconfident (high and wrong) %d\n\n",
+	fmt.Fprintf(b, "\n**Calibration** on diagnose runs (confidence low=%.1f, medium=%.1f, high=%.1f): Brier %s over %d rated run(s), %d without a hypothesis · overconfident (high and wrong) %d\n\n",
 		confidenceProb["low"], confidenceProb["medium"], confidenceProb["high"], brier, c.RatedRuns, c.UnratedRuns, c.Overconfident)
 	b.WriteString("| confidence | runs | right | accuracy |\n|---|---|---|---|\n")
 	for _, r := range c.Reliability {

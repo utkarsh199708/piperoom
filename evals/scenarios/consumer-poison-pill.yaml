@@ -219,8 +219,13 @@ inputs:
     text: 'order-sync pod log, same line on every restart: level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@25377154: not confluent wire format"'
 
 expect:
+  # The first group names why the record breaks order-sync, not the symptom
+  # ("stuck at offset 25377154" is true of any stuck consumer): a hypothesis
+  # that says "stuck at 25377154, but not because of a poison pill" is wrong.
+  # Terms that start with a negator ("no magic byte", "not avro") are phrases
+  # of their own, so the denial matcher does not cancel them.
   root_cause:
-    - ['25377154', poison*, wire format, deserializ*, decod*, magic byte, stuck]
+    - [poison*, wire format, deserializ*, decod*, undecodable, unreadable, magic byte, no magic byte, not avro, non avro, not a valid, malformed, corrupt*, junk, garbage, bad record]
     - [partition 1, orders/1]
   # Resetting the whole group to latest is the trap named in the header: it
   # skips every partition's unread changes.

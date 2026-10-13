@@ -417,6 +417,9 @@ func (s Scenario) checkOutcome() []error {
 	if s.Judge == JudgeClaude {
 		errs = append(errs, fmt.Errorf("judge: %q grades a root cause; outcome %s has none", JudgeClaude, e.Outcome))
 	}
+	if e.Outcome == OutcomeAsk && !s.hasDriverInput() {
+		errs = append(errs, errors.New("inputs: outcome ask needs a steer or comment to ask about; only questions after the first one count"))
+	}
 	sort.Slice(errs, func(i, j int) bool { return errs[i].Error() < errs[j].Error() })
 	return errs
 }
@@ -469,15 +472,42 @@ func (s Scenario) checkFacts(toolInputs map[string][]string) []error {
 	return errs
 }
 
-// factRecorded reports whether a successful recording of f.Tool contains
-// every term of f, so a run that calls the tool can establish the fact.
-func (s Scenario) factRecorded(f Fact) bool {
-	for _, r := range s.Recordings {
-		if r.Tool == f.Tool && r.Error == "" && factIn(f, r.Summary) {
+// hasDriverInput reports whether an input is a steer or a comment: the inputs
+// the harness logs, which mark when the agent can first ask about them.
+func (s Scenario) hasDriverInput() bool {
+	for _, in := range s.Inputs {
+		if in.Kind == "steer" || in.Kind == "comment" {
 			return true
 		}
 	}
 	return false
+}
+
+// factRecorded reports whether a successful result of f.Tool that the replay
+// can return contains every term of f, so a run that calls the tool can
+// establish the fact.
+func (s Scenario) factRecorded(f Fact) bool {
+	for _, r := range s.Recordings {
+		if r.Tool != f.Tool {
+			continue
+		}
+		for _, summary := range successfulSummaries(r) {
+			if factIn(f, summary) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// successfulSummaries are the summaries a recording can return as a
+// successful result. It is the one place that knows a recording's shape: a
+// recording that returns several observations over time adds them here.
+func successfulSummaries(r Recording) []string {
+	if r.Error != "" {
+		return nil
+	}
+	return []string{r.Summary}
 }
 
 // checkGroups rejects empty groups and blank terms; with a known list, it

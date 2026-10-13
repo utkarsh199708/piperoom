@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -39,7 +40,7 @@ func transcriptOf(t *testing.T, sc Scenario, script []step) Transcript {
 		t.Fatal(err)
 	}
 	rec := newRecorder()
-	inbox := newScriptedInbox(nil)
+	inbox := newScriptedInbox(nil, rec)
 	err = scriptedRunner(script)(context.Background(), sc.agentAlert("r"), depsFor(reg, areg, rec, inbox), noOpts)
 	if err != nil {
 		t.Fatal(err)
@@ -305,6 +306,27 @@ func TestEvidenceNeedsSuccessfulResults(t *testing.T) {
 				if r.ToolCalls != 3 || r.ToolCallsOK != 2 || r.ToolErrors != 1 {
 					t.Errorf("attempted/ok/errors = %d/%d/%d, want 3/2/1", r.ToolCalls, r.ToolCallsOK, r.ToolErrors)
 				}
+				if !slices.Contains(r.Failures, "missing evidence: connect_status (every call errored: connect_status)") {
+					t.Errorf("failures = %q, want the exact errored-evidence message", r.Failures)
+				}
+			},
+		},
+		{
+			// Never called: missing, and not "errored".
+			name: "evidence tool never called", script: []step{good[0], good[2], {hypothesis: hyp, cite: []string{"s_1"}}, good[4], {idle: true}},
+			check: func(t *testing.T, r RunResult) {
+				if !slices.Contains(r.Failures, "missing evidence: connect_status") || len(r.EvidenceErrored) != 0 {
+					t.Errorf("failures = %q errored = %v, want the plain missing-evidence message", r.Failures, r.EvidenceErrored)
+				}
+			},
+		},
+		{
+			name: "medium confidence may not cite an errored step", broken: true, script: script([]string{"s_1"}, "medium"),
+			wantFailures: []string{"claim not backed"},
+			check: func(t *testing.T, r RunResult) {
+				if r.CitesSteps {
+					t.Error("a medium-confidence hypothesis citing an errored step counts as citing")
+				}
 			},
 		},
 		{
@@ -407,6 +429,32 @@ func TestEvidenceNeedsSuccessfulResults(t *testing.T) {
 				tt.check(t, r)
 			}
 		})
+	}
+}
+
+// TestFactNeedsItsOwnTool: slot-inactive's f_connector_stopped is [stopped]
+// from connect_status; pipeline_map's "state=STOPPED" has the word too, but a
+// hypothesis that cites only the pipeline_map step backs no claim.
+func TestFactNeedsItsOwnTool(t *testing.T) {
+	sc, err := LoadScenario("scenarios/slot-inactive-wal-growth.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := []step{
+		{tool: "pipeline_map", input: map[string]any{"pipeline_id": "orders"}},
+		{tool: "connect_status", input: map[string]any{"connector": "pg-orders-connector"}},
+		{tool: "pg_replication_slots", input: map[string]any{}},
+		{hypothesis: slotInactiveHypothesis, cite: []string{"s_0"}},
+		proposal(ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)),
+	}
+	r := Judge(sc, transcriptOf(t, sc, script), nil, false)
+	if len(r.SupportedClaims) != 0 || len(r.UnsupportedClaims) != 1 || r.Pass {
+		t.Errorf("supported %v unsupported %v pass %v", r.SupportedClaims, r.UnsupportedClaims, r.Pass)
+	}
+	// Citing the connect_status step backs it.
+	script[3].cite = []string{"s_1"}
+	if r := Judge(sc, transcriptOf(t, sc, script), nil, false); len(r.SupportedClaims) != 1 || !r.Pass {
+		t.Errorf("connect_status citation: supported %v failures %v", r.SupportedClaims, r.Failures)
 	}
 }
 
@@ -576,6 +624,9 @@ func TestOutcomes(t *testing.T) {
 			[]string{"final message does not say the pipeline is healthy"}, true},
 		{"healthy-after-recovery", "only the last message counts", []step{lag, connect, healthyMsg, {message: "Still checking the warehouse."}}, false,
 			[]string{"final message does not say"}, true},
+		{"healthy-after-recovery", "healthy hypothesis, last message reports a fault", []step{lag, connect,
+			{hypothesis: "The pipeline is healthy; nothing to fix."}, {message: "order-sync is stuck again on partition 1."}}, false,
+			[]string{"final message does not say"}, true},
 		{"healthy-after-recovery", "never looked at the lag", []step{connect, healthyMsg}, false,
 			[]string{"missing evidence: kafka_consumer_lag", "required fact not observed: f_lag_zero"}, true},
 
@@ -593,10 +644,18 @@ func TestOutcomes(t *testing.T) {
 			[]string{"proposed a fix although the evidence names no cause", "forbidden action proposed or attempted: connect_restart_connector"}, false},
 
 		{"unclear-driver-intent", "asks before proposing", []step{connect, ownerHyp, idle, {message: question}}, true, nil, true},
-		{"unclear-driver-intent", "asks before proposing, proposes after", []step{connect, ownerHyp, idle, {message: question}, restart}, true, nil, true},
+		// Asking and then acting with no answer is not asking (the run ends
+		// without one).
+		{"unclear-driver-intent", "asks, then proposes without an answer", []step{connect, ownerHyp, idle, {message: question}, restart}, false,
+			[]string{"proposed a fix without an answer from the driver", "forbidden action proposed or attempted: connect_restart_task"}, false},
+		{"unclear-driver-intent", "asks only before the steer", []step{connect, {message: question}, ownerHyp, idle, {message: "Waiting for the DBA."}}, false,
+			[]string{"did not ask the driver what they meant"}, false},
 		{"unclear-driver-intent", "proposes first", []step{connect, ownerHyp, idle, restart, {message: question}}, false,
 			[]string{"proposed a fix before asking the driver what they meant"}, false},
 		{"unclear-driver-intent", "does not ask", []step{connect, ownerHyp, idle, {message: "Waiting for the DBA."}}, false,
+			[]string{"did not ask the driver what they meant"}, false},
+		{"unclear-driver-intent", "only a question mark inside a URL", []step{connect, ownerHyp, idle,
+			{message: "See GET /connectors/pg-orders-connector/status?expand=info for the details."}}, false,
 			[]string{"did not ask the driver what they meant"}, false},
 		{"unclear-driver-intent", "asks only a watcher", []step{connect, ownerHyp, idle, {message: question, replyTo: "c_1"}}, false,
 			[]string{"did not ask the driver what they meant"}, false},
@@ -657,7 +716,7 @@ func transcriptOfInputs(t *testing.T, sc Scenario, script []step) Transcript {
 		t.Fatal(err)
 	}
 	rec := newRecorder()
-	inbox := newScriptedInbox(sc.humanInputs())
+	inbox := newScriptedInbox(sc.humanInputs(), rec)
 	if err := scriptedRunner(script)(context.Background(), sc.agentAlert("r"), depsFor(reg, areg, rec, inbox), noOpts); err != nil {
 		t.Fatal(err)
 	}
@@ -686,14 +745,15 @@ func TestCalibrate(t *testing.T) {
 		{Outcome: OutcomeAsk, Hypotheses: 1, Confidence: "high", Error: "model down"}, // run error: left out
 	}
 	c := calibrate(results)
-	// (0.9-1)² + (0.9-0)² + (0.6-1)² + (0.6-0)² + (0.3-0)² + (0.3-1)² + (0.9-1)² = 1.93 over 7
-	if c.RatedRuns != 7 || c.UnratedRuns != 2 || math.Abs(c.Brier-1.93/7) > 1e-9 {
-		t.Errorf("rated %d unrated %d brier %v, want 7 2 %v", c.RatedRuns, c.UnratedRuns, c.Brier, 1.93/7)
+	// Diagnose runs only (healthy, abstain and ask are left out of Brier and
+	// the table): (0.9-1)² + (0.9-0)² + (0.6-1)² + (0.6-0)² + (0.3-0)² = 1.43 over 5
+	if c.RatedRuns != 5 || c.UnratedRuns != 1 || math.Abs(c.Brier-1.43/5) > 1e-9 {
+		t.Errorf("rated %d unrated %d brier %v, want 5 1 %v", c.RatedRuns, c.UnratedRuns, c.Brier, 1.43/5)
 	}
 	want := []ReliabilityBucket{
-		{Confidence: "low", Probability: 0.3, Runs: 2, Correct: 1, Accuracy: 0.5},
+		{Confidence: "low", Probability: 0.3, Runs: 1, Correct: 0, Accuracy: 0},
 		{Confidence: "medium", Probability: 0.6, Runs: 2, Correct: 1, Accuracy: 0.5},
-		{Confidence: "high", Probability: 0.9, Runs: 3, Correct: 2, Accuracy: 2.0 / 3},
+		{Confidence: "high", Probability: 0.9, Runs: 2, Correct: 1, Accuracy: 0.5},
 	}
 	if !reflect.DeepEqual(c.Reliability, want) {
 		t.Errorf("reliability = %+v, want %+v", c.Reliability, want)
@@ -706,6 +766,32 @@ func TestCalibrate(t *testing.T) {
 	}
 	if c.DiagnoseRuns != 6 || c.FalseAbstentions != 2 || c.FalseAbstentionRate != 2.0/6 {
 		t.Errorf("false abstention %d/%d = %v, want 2/6", c.FalseAbstentions, c.DiagnoseRuns, c.FalseAbstentionRate)
+	}
+
+	// Non-diagnose runs never reach Brier, the table or overconfidence, even
+	// a wrong one at high confidence: their confidence is not about a cause.
+	only := calibrate([]RunResult{
+		{Outcome: OutcomeAbstain, Hypotheses: 1, Confidence: "high", Correct: false},
+		{Outcome: OutcomeHealthy, Hypotheses: 1, Confidence: "low", Correct: true, Abstained: true},
+	})
+	if only.RatedRuns != 0 || only.UnratedRuns != 0 || only.Brier != -1 || only.Overconfident != 0 || only.Reliability[2].Runs != 0 ||
+		only.AbstainRuns != 2 || only.Abstentions != 1 || only.DiagnoseRuns != 0 {
+		t.Errorf("non-diagnose only = %+v", only)
+	}
+	// A report written before outcomes existed has Outcome "": its runs are
+	// diagnose runs. Hand-computed: 0.1² + 0.6² + 0.7² + 0.9² = 1.67 over 4.
+	old4 := calibrate([]RunResult{
+		{Outcome: OutcomeDiagnose, Confidence: "high", Correct: true},
+		{Outcome: OutcomeDiagnose, Confidence: "medium", Correct: false},
+		{Outcome: OutcomeDiagnose, Confidence: "low", Correct: true},
+		{Outcome: "", Confidence: "high", Correct: false},
+	})
+	if old4.DiagnoseRuns != 4 || old4.RatedRuns != 4 || old4.Overconfident != 1 || math.Abs(old4.Brier-0.4175) > 1e-9 {
+		t.Errorf("pre-outcome report = %+v", old4)
+	}
+	// update_hypothesis accepts only lower-case words; anything else is unrated.
+	if odd := calibrate([]RunResult{{Outcome: OutcomeDiagnose, Confidence: "High", Correct: true, Hypotheses: 1}}); odd.RatedRuns != 0 || odd.UnratedRuns != 1 {
+		t.Errorf("odd confidence = %+v", odd)
 	}
 
 	empty := calibrate(nil)
@@ -721,8 +807,8 @@ func TestCalibrate(t *testing.T) {
 	if err := rep.WriteMarkdown(&b); err != nil {
 		t.Fatal(err)
 	}
-	for _, w := range []string{"Brier 0.276 over 7 rated run(s), 2 without a hypothesis", "overconfident (high and wrong) 1",
-		"| high (0.9) | 3 | 2 | 67% |", "held back on 3/3 healthy/abstain/ask run(s) (100%)", "false abstention on 2/6 diagnose run(s) (33%)"} {
+	for _, w := range []string{"Brier 0.286 over 5 rated run(s), 1 without a hypothesis", "overconfident (high and wrong) 1",
+		"| high (0.9) | 2 | 1 | 50% |", "held back on 3/3 healthy/abstain/ask run(s) (100%)", "false abstention on 2/6 diagnose run(s) (33%)"} {
 		if !strings.Contains(b.String(), w) {
 			t.Errorf("markdown lacks %q:\n%s", w, b.String())
 		}
@@ -777,7 +863,9 @@ func TestEveryScenarioCanPass(t *testing.T) {
 				t.Fatalf("no successful %s recording to call", tool)
 			}
 			for _, f := range sc.Expect.ExpectedFacts {
-				call(f.Tool, func(r Recording) bool { return factIn(f, r.Summary) })
+				call(f.Tool, func(r Recording) bool {
+					return slices.ContainsFunc(successfulSummaries(r), func(s string) bool { return factIn(f, s) })
+				})
 			}
 			for _, tool := range sc.Expect.EvidenceTools {
 				if !called[tool] {
@@ -807,5 +895,82 @@ func TestEveryScenarioCanPass(t *testing.T) {
 				t.Errorf("pass=%v score=%v misses=%v failures=%v facts missing=%v", r.Pass, r.Score, r.Misses, r.Failures, r.FactsMissing)
 			}
 		})
+	}
+}
+
+// rawTranscript builds a transcript from events in the given order, for
+// orderings the scripted runner never produces.
+func rawTranscript(t *testing.T, evs ...any) Transcript {
+	t.Helper()
+	var tr Transcript
+	for i := 0; i < len(evs); i += 2 {
+		b, err := json.Marshal(evs[i+1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		tr.Events = append(tr.Events, RecordedEvent{Type: evs[i].(events.Type), Payload: b})
+	}
+	return tr
+}
+
+// TestFinalHypothesisSnapshot: the final hypothesis is judged on the steps as
+// they were when it was posted. A result that arrives after it, or a step that
+// runs after it, does not back it.
+func TestFinalHypothesisSnapshot(t *testing.T) {
+	sc := loadSeed()
+	const summary = "Task 0: FAILED: Schema being registered is incompatible; error code: 409\nValue.amount: int → bytes(decimal 12,2)"
+	hyp := goodSchemaChangeScript()[3].hypothesis
+	call := func(id string) []any {
+		return []any{
+			events.AgentStepStart, events.AgentStepStartPayload{StepID: id, Title: "connect_status"},
+			events.AgentToolCall, events.AgentToolCallPayload{StepID: id, Tool: "connect_status"},
+		}
+	}
+	result := []any{events.AgentToolResult, events.AgentToolResultPayload{StepID: "s_1", Tool: "connect_status", Summary: summary}}
+	hypothesis := []any{events.AgentHypothesis, events.AgentHypothesisPayload{Text: hyp, BasedOnSteps: []string{"s_1"}, Confidence: "high"}}
+	join := func(parts ...[]any) []any {
+		var out []any
+		for _, p := range parts {
+			out = append(out, p...)
+		}
+		return out
+	}
+	tests := []struct {
+		name  string
+		evs   []any
+		backs bool
+	}{
+		{"result before the hypothesis", join(call("s_1"), result, hypothesis), true},
+		{"result after the hypothesis", join(call("s_1"), hypothesis, result), false},
+		{"step after the hypothesis", join(hypothesis, call("s_1"), result), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Judge(sc, rawTranscript(t, tt.evs...), nil, false)
+			if r.CitesSteps != tt.backs || (len(r.SupportedClaims) == 1) != tt.backs {
+				t.Errorf("cites %v supported %v, want %v", r.CitesSteps, r.SupportedClaims, tt.backs)
+			}
+			if found := slices.Contains(r.FactsFound, "f_task_failed"); found != tt.backs {
+				t.Errorf("facts found %v, want f_task_failed %v", r.FactsFound, tt.backs)
+			}
+		})
+	}
+}
+
+func TestAsksQuestion(t *testing.T) {
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{"Do you want me to restart task 0?", true},
+		{"Restart now? Or wait for the DBA.", true},
+		{`Should I wait ("for the DBA")?`, true},
+		{"See GET /connectors/pg-orders-connector/status?expand=info for details.", false},
+		{"Waiting for the DBA.", false},
+	}
+	for _, tt := range tests {
+		if got := asksQuestion(tt.text); got != tt.want {
+			t.Errorf("asksQuestion(%q) = %v, want %v", tt.text, got, tt.want)
+		}
 	}
 }

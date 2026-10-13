@@ -157,6 +157,22 @@ func TestValidate(t *testing.T) {
 			s.Expect.Claims = []Claim{{About: "fix", Facts: []string{"f_ok"}}}
 		}, `unknown about "fix"`},
 		{"claim without facts", func(s *Scenario) { s.Expect.Claims = []Claim{{About: ClaimRootCause}} }, "facts is empty"},
+		{"root cause layer on a healthy scenario", func(s *Scenario) {
+			s.Expect.Outcome, s.Expect.RootCause, s.Expect.RootCauseLayer = OutcomeHealthy, nil, "postgres"
+		}, "expect.root_cause_layer: only graded when outcome is diagnose"},
+		{"claims on an abstain scenario", func(s *Scenario) {
+			s.Expect.Outcome, s.Expect.RootCause = OutcomeAbstain, nil
+			s.Expect.ExpectedFacts = []Fact{{ID: "f_ok", Tool: "connect_status", Match: []string{"ok"}}}
+			s.Expect.Claims = []Claim{{About: ClaimRootCause, Facts: []string{"f_ok"}}}
+		}, "expect.claims: only graded when outcome is diagnose"},
+		{"ask without a steer or comment", func(s *Scenario) {
+			s.Expect.Outcome, s.Expect.RootCause = OutcomeAsk, nil
+			s.Inputs = []Input{{Kind: "approval_result", Text: "approved"}}
+		}, "outcome ask needs a steer or comment"},
+		{"ask with a steer", func(s *Scenario) {
+			s.Expect.Outcome, s.Expect.RootCause = OutcomeAsk, nil
+			s.Inputs = []Input{{Kind: "steer", Text: "fix it"}}
+		}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

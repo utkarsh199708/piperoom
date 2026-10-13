@@ -39,9 +39,14 @@ go run -tags claude ./evals/cmd/evalrun -judge claude -out report.json   # model
 
 A model grades the final hypothesis (JSON-schema structured output, low effort, no sampling
 parameters: current models reject them; the reply is still parsed strictly) against the scenario `description`,
-`first_failing_layer`, `root_cause` and `root_cause_forbidden`, answering
-`{layer_correct, root_cause_correct, reason}`; a refusal or a cut-off reply is an error; the hypothesis is wrapped as untrusted data. Its verdict
-replaces the terms for root cause and layer; the terms verdict stays in the report as `judged`.
+`first_failing_layer`, `root_cause_layer`, `root_cause` and `root_cause_forbidden`, answering
+`{layer_correct, root_cause_correct, root_cause_layer_correct, reason}`; a refusal or a cut-off reply is an error; the hypothesis is wrapped as untrusted data. Its verdict
+replaces the terms for the root cause and both layers; the terms verdict stays in the report as `judged`.
+
+**Word grading is a floor; `-judge claude` is authoritative.** The deterministic grader reads the
+agent's words with the rules below. They catch the common ways a text mentions the right words while
+denying them, and accept the common ways a correct agent writes, but they are not an understanding of
+English: when the two disagree, trust the judge.
 `go test -tags claude ./evals -run TestJudgeAgreement -v` (needs the key) measures judge-vs-terms
 agreement. Default tests and CI never call the network.
 
@@ -120,22 +125,41 @@ split on punctuation and camelCase (`PreparingRebalance` = `preparing rebalance`
 prefix match on its last word: `rebalanc*` matches `rebalancing` and `PreparingRebalance`, plain
 `rebalanc` matches nothing. Write `deserializ*`, `compatib*`, `retain*` where a stem is meant.
 
-In a hypothesis a term counts only where it is **affirmed**: not in a question, and with no negator
-(`not`, `never`, `no`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`) in the three
-words before it, within its fragment (a sentence cut at `, : ( ) [ ]` and before `but`, `while`,
-`whereas`, `although`, `though`). "Not an amount change" does not name amount; "the record on
-partition 1 is not Avro" still names partition 1.
+In a hypothesis a `root_cause` or layer term counts only where no **denial** covers it, and never in a
+question (a sentence that ends in `?`). Text is cut into clauses (`; !`, newline, and `.` or `?`
+before a space), fragments (at `: ( ) [ ]` and before `but`, `while`, `whereas`, `although`, `though`,
+`however`), and inside a fragment at `,`, `and`, `so`, `which`. The denials (`textmatch.go`):
+
+- **to the end of the clause**: `doubt`, `unlikely`, `don't think`/`believe`, and `not`/`n't`/`no`/`never`
+  directly followed by `because`, `due`, `caused`, `the case`, `a case` or `that` ("it is not because
+  ...", "it is not the case that ...", "not a case where ...", "I doubt that ...");
+- **forward to the next `,` / `and` / `so` / `which`**: `no`, `nobody`, `neither`, `nor`, `instead of`,
+  `rather than` always ("no amount change"); `not`, `n't`, `never`, `cannot` only before a noun phrase
+  or `be` ("not a Connect problem", "it can't be amount"), not before a verb ("cannot register the
+  schema", "can't decode the record", "is not active") or a passive ("cannot be read as numeric");
+- **backward over the same part of the fragment** (a plain comma list stays one part): `ruled out`,
+  `is not the cause`/`problem`/`issue`, `isn't the cause`/`problem`, `not to blame`, `not at fault`,
+  `not involved`, `red herring` ("an ALTER TABLE ... is ruled out").
+
+`no longer`, `without` and `nothing` are not denials ("records no longer include amount", "records
+without amount", "nothing reads the slot" all state the cause). A term that starts with a negator
+(`no longer`, `not avro`, `never reached`, `not the owner`) is its own phrase. For layers, a part of
+the fragment that ends in `healthy`, `fine`, `unrelated`, `unaffected` or `working normally` (and not
+`not healthy`) clears what it names: "Connect is healthy" does not name Connect. Known limits, left to
+the judge: "piperoom is not the owner" reads as a denial of `owner` (scenarios add the phrase as a
+term), a denial set off by commas ("it was not, as some thought, the amount") is not seen, and
+"Connect is healthy and order-sync crashes" clears both.
 
 | field | type | meaning |
 |---|---|---|
 | `outcome` | string | how a good run ends: `diagnose` (default), `healthy`, `abstain` or `ask`. See **Outcomes** below. `root_cause`, `root_cause_forbidden`, both layers, `fix` and `claims` are graded only for `diagnose`; validation rejects them on any other outcome |
 | `root_cause` | [][]string | required for `diagnose`. The **final** hypothesis (`update_hypothesis`) must match every group, affirmed |
 | `root_cause_forbidden` | [][]string | optional wrong stories. Each **row** is an AND of terms (same matching) that must all sit in **one clause** (clauses split at `; ! ?`, newline and `. `). A clause with a negator (`not`, `never`, `no`, `avoid*`, `without`, `n't`, `instead of`, `rather than`, `against`) is skipped, so "do not reset to latest" is fine. If a row fires the root cause is wrong even when `root_cause` matches, e.g. `[[reset*, latest]]` |
-| `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. The final hypothesis must name it (the words per layer are `layerTerms` in `score.go`, plus the pipeline's `consumer_groups`, `connectors` and `sink_tables`), affirmed and in a fragment that does not clear it (`healthy`, `fine`, `ruled out`, `unrelated`, `unaffected`, `not involved`, `not the cause`, `not at fault`, `red herring`): "Connect is healthy" does not name Connect |
+| `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`: the most upstream layer that is broken. The final hypothesis must name it (the words per layer are `layerTerms` in `textmatch.go`, plus the pipeline's `consumer_groups`, `connectors` and `sink_tables`), not denied and not cleared (see above) |
 | `root_cause_layer` | string | the layer the root cause sits in, graded apart from `first_failing_layer` with the same matcher: a schema change fails in Connect first, but the cause is a Postgres DDL |
 | `evidence_tools` | []string | tools that must each return at least one **successful** result. A call that errored was attempted, not observed |
 | `expected_facts` | list | what the diagnosis must rest on, see below |
-| `claims` | list | `[{about: root_cause, facts: [ids]}]`: the final hypothesis's `based_on_steps` must include a step that established at least one of these facts |
+| `claims` | list | `[{about: root_cause, facts: [ids]}]`: the final hypothesis's `based_on_steps` must include a step that established at least one of these facts **before** the hypothesis was posted |
 | `fix` | [][]string | action-name groups that must all appear among the proposed steps. Absent = no particular fix expected |
 | `forbidden_actions` | []string | actions that must never be proposed in this scenario. A **rejected attempt** counts too: `propose_fix` drops a proposal whose step fails `Validate` and leaves no event, so the harness records every `Validate` call and fails a run that even tried a forbidden action |
 | `max_tool_calls` | int | read-tool budget (calls attempted); 0 = none |
@@ -143,8 +167,12 @@ partition 1 is not Avro" still names partition 1.
 **`expected_facts[]`**: `id` (unique), `tool`, `match` ([]string), `required` (bool). A fact is
 established at a step when the step called `tool`, the result was **not an error**, and every `match`
 term occurs in that result's summary (whole words, as above; no negation handling: `active=false` is
-data, not a denial). A required fact the run never established fails it. `-validate` rejects a fact
-that no successful recording of its tool contains in full, so a typo fails before any model call.
+data, not a denial). The fact counts only from its own tool: "STOPPED" in `pipeline_map` does not
+establish a `connect_status` fact. A diagnosis is judged as of its **final hypothesis**: steps that ran
+after it, or that it cites before they ran, do not count for its facts, citations or claims (healthy,
+abstain and ask runs end on a message, so their facts count over the whole run). A required fact the
+run never established fails it. `-validate` rejects a fact that no successful recording of its tool
+contains in full, so a typo fails before any model call.
 
 ```yaml
 expect:
@@ -167,9 +195,9 @@ expect:
 | outcome | a run passes the outcome when |
 |---|---|
 | `diagnose` | root cause, both layers, claims and fix as above |
-| `healthy` | no proposal; the final hypothesis, if any, is low confidence or itself says the pipeline is healthy; and the **last** agent message says the pipeline is healthy or that there is nothing to fix (`healthy`, `nothing to fix`, `no fix needed`, `no action needed` and similar), with no negator anywhere else in its fragment and not as a question |
-| `abstain` | no proposal, and no hypothesis or a final one at low confidence |
-| `ask` | an agent message to the room (not a reply to a watcher's comment) containing `?` comes before any proposal. There is no `ask_driver` tool; a question in `post_message` or the agent's own text is how it asks |
+| `healthy` | no proposal; the final hypothesis, if any, is low confidence or is itself a healthy verdict; and the final hypothesis or the **last** agent message gives a healthy verdict, while the last message states no current fault. A healthy verdict is a phrase (`healthy`, `recovered`, `resolved`, `back to normal`, `all clear`, `nothing to fix`, `no fix needed`, `no action needed`/`necessary`, `no issues`, `stale alert` and similar) with no negator elsewhere in its part of the sentence, not followed by `yet`, not in a question, not answered by a bare "no", and with no current fault in the same text: `stuck`, `fail*`, `error*`, `crash*`, `broken`, `break*`, `is down`, `stopped`, `paused`, `lagging`, `falling behind`, `degraded`, `unhealthy`, unless negated just before ("no errors", "no longer lagging") or told in the past in the same part ("order-sync was stuck until 09:24") |
+| `abstain` | no proposal, and no hypothesis or a final one at low confidence. Known gap: a cause claimed only in a message, with no hypothesis, is not seen |
+| `ask` | after the first steer or comment reached the agent, an agent message to the room (not a reply to a watcher's comment) has a sentence that ends in `?` (a `?` inside a URL does not count), and the run proposes **nothing**: the run ends without an answer, so a proposal acts on an unanswered question. The scenario needs a `steer` or `comment` input (validation checks): the harness logs each delivered one as `steer.sent` / `comment.added`, and only questions after the first count, so "What broke?" before the steer is not asking. There is no `ask_driver` tool; a question in `post_message` or the agent's own text is how it asks |
 
 Every outcome also fails on a run error, a timeout, a missing evidence tool, a missing required fact,
 a forbidden or invalid proposal step, and the tool budget.
@@ -259,15 +287,18 @@ Per run the result also gives:
 - `facts_found` / `facts_missing`, `supported_claims` / `unsupported_claims`
 - `layer_named`, `root_cause_layer_named`, `correct` (root cause and root-cause layer on `diagnose`, the
   outcome otherwise), `claims_cause` (final hypothesis at medium or high confidence), `abstained` (no
-  proposal and no `claims_cause`; on `ask`, asked before proposing), `asked_driver`, `says_healthy`
+  proposal and no `claims_cause`; on `ask`, asked after the steer and proposed nothing), `asked_driver`, `says_healthy`
 - `tool_calls_to_root_cause`: read-tool calls made before the first hypothesis that matched
 - misses, action attempts and how many `Validate` rejected (`rejected_attempts`, the "rejected fixes"
   column), idles, duration
 
 The report adds, over all runs (`calibration.go`; runs that ended in a run error are left out):
-- **Calibration**: confidence is read as a probability (low 0.3, medium 0.6, high 0.9). The Brier score
-  is the mean of (p − right)² over runs with a final hypothesis (0 is perfect); a reliability table
-  gives runs and accuracy per confidence; "overconfident" counts high-confidence runs that were wrong.
+- **Calibration**, on **diagnose** runs only: confidence is read as a probability (low 0.3, medium 0.6,
+  high 0.9) that the stated root cause is right (`correct`: root cause and root-cause layer). The Brier
+  score is the mean of (p − right)² over runs with a final hypothesis (0 is perfect); a reliability
+  table gives runs and accuracy per confidence; "overconfident" counts high-confidence runs that were
+  wrong. Healthy, abstain and ask runs are left out: there a correct answer is often low confidence,
+  so their confidence is not a probability of being right. They are measured by abstention instead.
 - **Abstention**: how often the agent held back on `healthy`/`abstain`/`ask` scenarios, against how
   often it held back on `diagnose` scenarios, where that is a false abstention.
 - **Evidence**: tool calls attempted / ok / errored, expected facts found, claims backed.

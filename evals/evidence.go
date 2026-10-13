@@ -40,6 +40,25 @@ func (e *evidence) step(id string) *stepRecord {
 	return st
 }
 
+// snapshot copies the steps seen so far. Judge takes one at each hypothesis,
+// so the final hypothesis is judged on the steps that existed when it was
+// made, not on ones that ran after it.
+func (e *evidence) snapshot() *evidence {
+	c := &evidence{steps: make(map[string]*stepRecord, len(e.steps)), order: append([]string(nil), e.order...),
+		attempted: map[string]bool{}, observed: map[string]bool{}}
+	for id, st := range e.steps {
+		cp := *st
+		c.steps[id] = &cp
+	}
+	for k, v := range e.attempted {
+		c.attempted[k] = v
+	}
+	for k, v := range e.observed {
+		c.observed[k] = v
+	}
+	return c
+}
+
 func (e *evidence) start(id string) { e.step(id) }
 
 func (e *evidence) call(id, tool string) {

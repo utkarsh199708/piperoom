@@ -26,7 +26,7 @@ the recordings above (same text, or the same tool's format with that incident's 
 |---|---|---|---|
 | `healthy-after-recovery` | the poison-pill lag alert, re-notified after the fix | `healthy` | checks lag (0) and Connect, says the pipeline is healthy / nothing to fix, proposes nothing |
 | `ambiguous-lag-spike` | lag 4826, spread over all partitions | `abstain` | checks lag, Connect and DDL, finds no cause, says so at low confidence (or posts no hypothesis), proposes nothing |
-| `unclear-driver-intent` | publication-permission-denied's task 0 FAILED | `ask` | after the driver's "Sort out the owner thing and get it running again", asks the driver what they mean before proposing |
+| `unclear-driver-intent` | publication-permission-denied's task 0 FAILED | `ask` | after the driver's "Sort out the owner thing and get it running again", asks the driver what they mean (a sentence ending in `?`, not a reply to a watcher) and proposes nothing: no answer comes |
 
 ## Facts and claims
 

@@ -28,11 +28,12 @@ const judgeMaxTokens = 2048
 var verdictSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
-		"layer_correct":      map[string]any{"type": "boolean"},
-		"root_cause_correct": map[string]any{"type": "boolean"},
-		"reason":             map[string]any{"type": "string"},
+		"layer_correct":            map[string]any{"type": "boolean"},
+		"root_cause_correct":       map[string]any{"type": "boolean"},
+		"root_cause_layer_correct": map[string]any{"type": "boolean"},
+		"reason":                   map[string]any{"type": "string"},
 	},
-	"required":             []string{"layer_correct", "root_cause_correct", "reason"},
+	"required":             []string{"layer_correct", "root_cause_correct", "root_cause_layer_correct", "reason"},
 	"additionalProperties": false,
 }
 
