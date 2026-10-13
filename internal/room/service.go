@@ -15,6 +15,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
+	"piperoom/internal/auth"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/store"
@@ -56,6 +57,19 @@ type Deps struct {
 	// ExportMaxEvents caps the events one audit export may contain; a larger
 	// room answers 413 export_too_large. Zero means DefaultExportMaxEvents.
 	ExportMaxEvents int64
+
+	// Sessions lets LookupPerson find a person who is not in users.yaml by their
+	// newest live session (design section 2.1). Nil: users.yaml only.
+	// SessionIdle is the idle limit that decides whether a session is live.
+	Sessions    auth.Store
+	SessionIdle time.Duration
+	// ViewerGroups are the IdP groups that let a person in as a viewer
+	// (PIPEROOM_AUTH_VIEWER_GROUPS).
+	ViewerGroups []string
+	// SoloUser is PIPEROOM_SOLO_USER: that user may approve every layer, with a
+	// typed confirm and the grant "solo". The caller has already run
+	// CheckSoloUser.
+	SoloUser string
 
 	// OnRoomOpened, when set, is called once per room opened by CreateRoom or
 	// CreateRoomFromAlert, after room.created is appended. Each call runs in
@@ -104,6 +118,10 @@ type Service struct {
 	onRoomClosed func(ctx context.Context, roomID, pipelineID, dedupKey string)
 	slots        *agentSlots // global cap on concurrent agent runs
 	exportMax    int64
+	sessions     auth.Store
+	sessionIdle  time.Duration
+	viewerGroups map[string]struct{}
+	soloUser     string
 
 	// ctx is the service lifetime: every goroutine the service starts (agent
 	// supervisors, executor queues) derives from it. Close cancels it and
@@ -171,6 +189,10 @@ func New(d Deps) *Service {
 		onRoomClosed: d.OnRoomClosed,
 		slots:        newAgentSlots(d.MaxAgents),
 		exportMax:    d.ExportMaxEvents,
+		sessions:     d.Sessions,
+		sessionIdle:  d.SessionIdle,
+		viewerGroups: groupSet(d.ViewerGroups),
+		soloUser:     d.SoloUser,
 		ctx:          ctx,
 		cancel:       cancel,
 		rooms:        map[string]*roomState{},

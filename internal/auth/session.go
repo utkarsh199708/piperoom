@@ -36,10 +36,13 @@ var (
 // Session is one server-side login (design §1.3). Times are UTC. A zero
 // RevokedAt means the session is live; a zero AuthTime means unknown.
 type Session struct {
-	ID            string // public id, "ses_"+ULID; never the token
-	TokenHash     []byte // SHA-256 of the random token in the cookie
-	UserID        string
-	Name          string
+	ID        string // public id, "ses_"+ULID; never the token
+	TokenHash []byte // SHA-256 of the random token in the cookie
+	UserID    string
+	Name      string
+	// Email is the IdP email, kept only when email_verified was true; "" for a
+	// dev session or an unverified address. GET /api/people shows it.
+	Email         string
 	Iss           string
 	Sub           string
 	Groups        []string
@@ -80,6 +83,15 @@ type Store interface {
 	// ByID returns the session with this public id, live or not, or
 	// ErrNotFound. The WebSocket presence tick uses it.
 	ByID(ctx context.Context, id string) (Session, error)
+	// LiveByUserID returns the newest session of userID (by created_at) that is
+	// live at now: not revoked, before its absolute expiry and not idle for
+	// idle. ErrNotFound when there is none. Service.LookupPerson uses it to
+	// find a person who is not in users.yaml (design §2.1).
+	LiveByUserID(ctx context.Context, userID string, now time.Time, idle time.Duration) (Session, error)
+	// LiveSessions returns the newest live session of each user (same rule as
+	// LiveByUserID), at most limit of them, ordered by user id. GET /api/people
+	// uses it.
+	LiveSessions(ctx context.Context, now time.Time, idle time.Duration, limit int) ([]Session, error)
 	// Touch sets last_seen_at. A missing session is not an error.
 	Touch(ctx context.Context, id string, at time.Time) error
 	// Revoke sets revoked_at if it is not set yet. It is idempotent and a

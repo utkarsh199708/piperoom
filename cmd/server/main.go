@@ -128,6 +128,22 @@ func run() error {
 	if err := room.ValidateUsers(users, own); err != nil {
 		return fmt.Errorf("server: users/owners config: %w", err)
 	}
+	// Solo mode: refuse to start when the solo user is unknown or owners.yaml
+	// names anyone else (design section 5.3).
+	soloUser, err := soloSetup(cfg, users, own, log)
+	if err != nil {
+		return err
+	}
+	// The OIDC relying party (nil in dev mode). Discovery runs in the
+	// background and is retried, so an IdP that is down now does not stop the
+	// start; new logins answer 503 until it is up.
+	oidcRP, err := oidcSetup(cfg, authSettings, publicOrigin, log)
+	if err != nil {
+		return err
+	}
+	if oidcRP != nil {
+		oidcRP.Start(ctx)
+	}
 
 	// Signed alert routes (POST /api/alerts/{source}). Built before anything
 	// is opened so a bad PAGERDUTY_SERVICES refuses start at once. Only the
@@ -148,6 +164,9 @@ func run() error {
 		threads slackbridge.Threads = slackbridge.NewMemThreads()
 		// Login sessions: in memory in demo mode, the sessions table otherwise.
 		sessions auth.Store = auth.NewMemStore()
+		// The pre-login rows and the iss+sub bindings of OIDC login.
+		loginStates auth.LoginStateStore = auth.NewMemLoginStates()
+		identities  auth.IdentityStore   = auth.NewMemIdentities()
 	)
 	if *demoMode {
 		st = memstore.New()
@@ -167,6 +186,8 @@ func run() error {
 		ready = pg
 		threads = pg.SlackThreads()
 		sessions = pg.Sessions()
+		loginStates = pg.LoginStates()
+		identities = pg.Identities()
 		defer pg.Close()
 	}
 
@@ -241,6 +262,10 @@ func run() error {
 		},
 		Logger:       log,
 		MaxAgents:    maxAgents,
+		Sessions:     sessions,
+		SessionIdle:  authSettings.Idle,
+		ViewerGroups: authSettings.ViewerGroups,
+		SoloUser:     soloUser,
 		OnRoomOpened: slack.onRoomOpened(),
 		OnRoomClosed: closedHook.onClosed,
 	})
@@ -269,7 +294,11 @@ func run() error {
 	stopRetention := startRetention(ctx, svc, retentionDays, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopRetention()
 
-	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions)}
+	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions),
+		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities)}
+	if oidcRP != nil {
+		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
+	}
 	if cfg.WebDir != "" {
 		// Fail at start, not at the first page load, when the image or the
 		// mount has no built UI.

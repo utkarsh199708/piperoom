@@ -13,10 +13,9 @@ import (
 	"piperoom/internal/ws"
 )
 
-// Login (docs/design/auth.md, auth PR 2): server-side sessions in a cookie, the
-// dev login, logout, the Host allow-list and the dev proxy guard. OIDC login is
-// auth PR 3; here oidc mode only refuses X-User and has no way to create a
-// session yet.
+// Login (docs/design/auth.md): server-side sessions in a cookie, the dev login,
+// logout, the Host allow-list, the dev proxy guard and the role rules. The OIDC
+// login routes are in auth_oidc.go.
 
 // WithAuth sets the login settings (mode, session lengths, allowed hosts). The
 // default is dev mode with 8 h idle / 12 h absolute sessions.
@@ -50,6 +49,15 @@ func (s *Server) normalizeAuth() {
 	}
 	if s.now == nil {
 		s.now = time.Now
+	}
+	if s.loginStates == nil {
+		s.loginStates = auth.NewMemLoginStates()
+	}
+	if s.identities == nil {
+		s.identities = auth.NewMemIdentities()
+	}
+	if s.loginLimit == nil {
+		s.loginLimit = newRateLimiter(loginRateLimit, time.Minute)
 	}
 }
 
@@ -168,6 +176,7 @@ type ctxKey int
 const (
 	userKey ctxKey = iota + 1
 	sessionIDKey
+	roleKey
 )
 
 type authError struct {
@@ -178,7 +187,34 @@ type authError struct {
 
 type principal struct {
 	user      room.User
+	role      string // room.RoleMember or room.RoleViewer
 	sessionID string // "" for an X-User request with no cookie
+}
+
+// roleFrom is the role authenticate stored for the request.
+func roleFrom(ctx context.Context) string {
+	r, _ := ctx.Value(roleKey).(string)
+	return r
+}
+
+// person builds the room.User for a session (or an X-User request) and applies
+// the login gate and role rule to it (design §2.1). ok is false when the gate
+// now refuses the person. A users.yaml entry supplies the name and layers; a
+// person who is only in owners.yaml or a viewer group has the session's name.
+func (s *Server) person(id, name string, groups []string, groupsMissing bool) (room.User, string, bool) {
+	role, ok := s.svc.RoleFor(id, groups)
+	if !ok {
+		return room.User{}, "", false
+	}
+	u, inFile := s.svc.LookupUser(id)
+	if !inFile {
+		u = room.User{ID: id, Name: name, Layers: []string{}}
+		if u.Name == "" {
+			u.Name = id
+		}
+	}
+	u.Groups, u.GroupsMissing = groups, groupsMissing
+	return u, role, true
 }
 
 // authenticate resolves the caller and stores the user (and session id) in the
@@ -201,6 +237,7 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), userKey, p.user)
 		ctx = context.WithValue(ctx, sessionIDKey, p.sessionID)
+		ctx = context.WithValue(ctx, roleKey, p.role)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -231,16 +268,19 @@ func (s *Server) resolve(r *http.Request) (principal, *authError) {
 		if aerr != nil {
 			return principal{}, aerr
 		}
-		user, ok := s.svc.LookupUser(sess.UserID)
+		// The login gate runs on every request from the stored user id and
+		// groups (design §1.3): removed from users.yaml, owners.yaml or the
+		// viewer groups means out at once, not at the 12 h cap. Stale IdP group
+		// membership lasts until the next login.
+		user, role, ok := s.person(sess.UserID, sess.Name, sess.Groups, sess.GroupsMissing)
 		if !ok {
-			// Removed from users.yaml: out at once, not at the 12 h cap.
 			return principal{}, &authError{http.StatusUnauthorized, "session_expired", "this user is no longer allowed to sign in"}
 		}
 		if !oidc && hasXUser && xuser != sess.UserID {
 			return principal{}, &authError{http.StatusForbidden, "proxy_identity", proxyIdentityMsg}
 		}
 		s.touch(r.Context(), sess)
-		return principal{user: user, sessionID: sess.ID}, nil
+		return principal{user: user, role: role, sessionID: sess.ID}, nil
 	}
 
 	if oidc {
@@ -252,11 +292,16 @@ func (s *Server) resolve(r *http.Request) (principal, *authError) {
 		// is a curl user with a typo, and stays 401 unauthenticated below.
 		return principal{}, &authError{http.StatusUnauthorized, "session_expired", "sign in required"}
 	}
-	user, ok := s.svc.LookupUser(xuser)
+	// Dev only, curl only: X-User names a users.yaml user, so the gate passes
+	// as a member.
+	if _, ok := s.svc.LookupUser(xuser); !ok {
+		return principal{}, &authError{http.StatusUnauthorized, "unauthenticated", "unknown user " + xuser}
+	}
+	user, role, ok := s.person(xuser, "", nil, false)
 	if !ok {
 		return principal{}, &authError{http.StatusUnauthorized, "unauthenticated", "unknown user " + xuser}
 	}
-	return principal{user: user}, nil
+	return principal{user: user, role: role}, nil
 }
 
 // xUserValues returns every X-User value on the request: all header lines,
@@ -318,7 +363,7 @@ func (s *Server) sessionAlive(ctx context.Context, id ws.Identity) bool {
 	if sess.Check(s.now(), s.authSettings.Idle) != nil {
 		return false
 	}
-	_, ok := s.svc.LookupUser(sess.UserID)
+	_, _, ok := s.person(sess.UserID, sess.Name, sess.Groups, sess.GroupsMissing)
 	return ok
 }
 
@@ -453,7 +498,19 @@ func (s *Server) revokeCookieSession(r *http.Request) error {
 	return nil
 }
 
-// handleOIDCPending answers the two OIDC routes until auth PR 3 lands.
-func (s *Server) handleOIDCPending(w http.ResponseWriter, _ *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not_implemented", "OIDC login is not available in this build yet")
+// ---- roles ----
+
+// viewerGuard is the default-deny viewer rule (design §2.1): for a request whose
+// role is viewer, every method other than GET answers 403 viewer. It is a
+// method rule, not a route list, so a route added later is closed from its
+// first day. It sits after authenticate in the /api group; POST /auth/logout is
+// outside /api, and the signed alert routes have no session and so no role.
+func viewerGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if roleFrom(r.Context()) == room.RoleViewer && r.Method != http.MethodGet {
+			writeError(w, http.StatusForbidden, "viewer", "viewers can read and watch but cannot change anything")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
