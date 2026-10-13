@@ -49,6 +49,10 @@ type Scenario struct {
 	// closes and the run ends.
 	Inputs []Input `yaml:"inputs"`
 	Expect Expect  `yaml:"expect"`
+	// Judge picks how the root cause and layer are judged: "terms" (default,
+	// deterministic) or "claude" (LLM judge, see judge.go). The evalrun -judge
+	// flag overrides it.
+	Judge string `yaml:"judge"`
 }
 
 // Alert is what opens the room.
@@ -95,11 +99,21 @@ type Input struct {
 // Expect is what a good investigation of the scenario looks like.
 //
 // Term groups (RootCause, Fix) are AND of ORs: every group must match, and a
-// group matches when any one of its terms does. Text terms match
-// case-insensitively as substrings.
+// group matches when any one of its terms does. Text terms match whole words,
+// case-insensitively, over a normalised token stream: the text is lower-cased
+// and split on punctuation and camelCase, and a term is split the same way, so
+// "log start" and "log-start" are one term and "PreparingRebalance" holds the
+// words "preparing" and "rebalance". A term ending in "*" matches a word prefix
+// ("rebalanc*" matches rebalance, rebalancing, PreparingRebalance); without it
+// "rebalanc" matches nothing. A multi-word term must occur as consecutive words.
 type Expect struct {
 	// RootCause term groups must all appear in the agent's final hypothesis.
 	RootCause [][]string `yaml:"root_cause"`
+	// RootCauseForbidden lists wrong stories. Each row is an AND of terms
+	// (same matching as RootCause): when any row has all its terms in the
+	// final hypothesis, the root cause is judged wrong even if RootCause
+	// matches. Optional; catches "names the right word, tells the wrong story".
+	RootCauseForbidden [][]string `yaml:"root_cause_forbidden"`
 	// FirstFailingLayer is the most upstream layer that is actually broken
 	// (one of events.Layers). The final hypothesis must name it.
 	FirstFailingLayer string `yaml:"first_failing_layer"`
@@ -234,6 +248,12 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 		errs = append(errs, errors.New("expect.root_cause is empty: a run could never be judged"))
 	}
 	errs = append(errs, checkGroups("expect.root_cause", s.Expect.RootCause, nil)...)
+	errs = append(errs, checkGroups("expect.root_cause_forbidden", s.Expect.RootCauseForbidden, nil)...)
+	switch s.Judge {
+	case "", JudgeTerms, JudgeClaude:
+	default:
+		errs = append(errs, fmt.Errorf("judge: unknown judge %q (want %q or %q)", s.Judge, JudgeTerms, JudgeClaude))
+	}
 	errs = append(errs, checkGroups("expect.fix", s.Expect.Fix, actionNames)...)
 	if l := s.Expect.FirstFailingLayer; l != "" && layerTerms[l] == nil {
 		errs = append(errs, fmt.Errorf("expect.first_failing_layer: unknown layer %q (want one of %s)", l, strings.Join(events.Layers, ", ")))
@@ -307,6 +327,11 @@ func checkGroups(field string, groups [][]string, known []string) []error {
 				errs = append(errs, fmt.Errorf("%s[%d]: blank term", field, i))
 			} else if known != nil && !isKnown[term] {
 				errs = append(errs, fmt.Errorf("%s[%d]: unknown action %q", field, i, term))
+			} else if known == nil {
+				// Text terms: "*" only as the last character, and at least one word.
+				if _, _, ok := termTokens(term); !ok {
+					errs = append(errs, fmt.Errorf("%s[%d]: term %q has no words or a \"*\" that is not the last character", field, i, term))
+				}
 			}
 		}
 	}

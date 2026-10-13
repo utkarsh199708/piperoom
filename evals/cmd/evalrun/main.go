@@ -45,6 +45,8 @@ type flags struct {
 	effort      string
 	maxTurns    int
 	label       string
+	judge       string
+	judgeModel  string
 	out         string
 	md          string
 	transcripts string
@@ -87,6 +89,8 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.effort, "effort", "", "effort (default PIPEROOM_EFFORT / high)")
 	fs.IntVar(&f.maxTurns, "max-turns", 0, "agent max turns per episode (default 40)")
 	fs.StringVar(&f.label, "label", "", "name for this configuration in the report, e.g. main or prompt-v2")
+	fs.StringVar(&f.judge, "judge", "", `how root cause and layer are judged: "terms" (deterministic) or "claude" (LLM judge, needs a -tags claude build); default: each scenario's judge field, else terms`)
+	fs.StringVar(&f.judgeModel, "judge-model", "", "model for -judge claude (default claude-sonnet-5-5)")
 	fs.StringVar(&f.out, "out", "", "write the JSON report here")
 	fs.StringVar(&f.md, "md", "", "also write the markdown table here")
 	fs.StringVar(&f.transcripts, "transcripts", "", "write each run's full transcript and result as JSON into this directory")
@@ -161,6 +165,12 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	if opts.Effort == "" {
 		opts.Effort = cfg.Effort
 	}
+	var judgeClient evals.HypothesisJudge
+	if f.judge == evals.JudgeClaude || (f.judge == "" && anyClaudeJudge(scenarios)) {
+		if judgeClient, err = newJudge(f.judgeModel); err != nil {
+			return 1, err
+		}
+	}
 	logLevel := slog.LevelError
 	if f.verbose {
 		logLevel = slog.LevelInfo
@@ -177,12 +187,14 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	defer stop()
 
 	rep, runErr := evals.Evaluate(ctx, scenarios, evals.Config{
-		Label:    f.label,
-		Options:  opts,
-		Runs:     f.runs,
-		Parallel: f.parallel,
-		Timeout:  f.timeout,
-		Logger:   logger,
+		Label:       f.label,
+		Judge:       f.judge,
+		JudgeClient: judgeClient,
+		Options:     opts,
+		Runs:        f.runs,
+		Parallel:    f.parallel,
+		Timeout:     f.timeout,
+		Logger:      logger,
 		OnRun: func(r evals.RunResult, tr evals.Transcript) {
 			verdict := "PASS"
 			if !r.Pass {
@@ -220,6 +232,16 @@ func compare(base, cand evals.Report, f flags, stdout io.Writer) (int, error) {
 		return exitRegressed, nil
 	}
 	return 0, nil
+}
+
+// anyClaudeJudge reports whether a scenario asks for the LLM judge itself.
+func anyClaudeJudge(scenarios []evals.Scenario) bool {
+	for _, s := range scenarios {
+		if s.Judge == evals.JudgeClaude {
+			return true
+		}
+	}
+	return false
 }
 
 func filter(scenarios []evals.Scenario, only string) ([]evals.Scenario, error) {

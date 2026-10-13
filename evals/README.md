@@ -30,6 +30,20 @@ go run ./evals/cmd/evalrun -runs 3 -label sonnet -model claude-sonnet-5-5 -basel
 go run ./evals/cmd/evalrun -compare base.json,cand.json -fail-on-regression   # exit 2 on regression
 ```
 
+Optional LLM judge: `judge: claude` in a scenario, or `-judge claude` (overrides the scenario;
+`-judge terms` forces the default). It needs a build with `-tags claude` and `ANTHROPIC_API_KEY`:
+
+```sh
+go run -tags claude ./evals/cmd/evalrun -judge claude -judge-model claude-sonnet-5-5 -out report.json
+```
+
+A model (temperature 0) grades the final hypothesis against the scenario `description`,
+`first_failing_layer`, `root_cause` and `root_cause_forbidden` and answers strict JSON
+`{layer_correct, root_cause_correct, reason}`; the hypothesis is wrapped as untrusted data. Its verdict
+replaces the terms for root cause and layer; the terms verdict stays in the report as `judged`.
+`go test -tags claude ./evals -run TestJudgeAgreement -v` (needs the key) measures judge-vs-terms
+agreement. Default tests and CI never call the network.
+
 | flag | default | meaning |
 |---|---|---|
 | `-scenarios` | `evals/scenarios` | directory of `*.yaml` scenarios |
@@ -99,11 +113,16 @@ in the report. Misses mean the scenario should cover more inputs.
 `step_id`, `comment_id`.
 
 **`expect`**: term groups are an AND of ORs. Every group must match, and a group matches if any one
-of its terms appears (case-insensitive substring).
+of its terms appears. Terms match **whole words**, not substrings: text and term are lower-cased and
+split on punctuation and camelCase (`PreparingRebalance` = `preparing rebalance`; `log-start` =
+`log start`). A multi-word term must occur as consecutive words. A term ending in `*` is an explicit
+prefix match on its last word: `rebalanc*` matches `rebalancing` and `PreparingRebalance`, plain
+`rebalanc` matches nothing. Write `deserializ*`, `compatib*`, `retain*` where a stem is meant.
 
 | field | type | meaning |
 |---|---|---|
 | `root_cause` | [][]string | required. The **final** hypothesis (`update_hypothesis`) must match every group |
+| `root_cause_forbidden` | [][]string | optional wrong stories. Each **row** is an AND of terms (same matching); if any row has all its terms in the final hypothesis the root cause is wrong even when `root_cause` matches, e.g. `[[reset*, latest]]` |
 | `first_failing_layer` | string | one of `postgres`, `kafka-connect`, `schema-registry`, `kafka`, `consumer`, `warehouse`. The final hypothesis must name it (the words per layer are `layerTerms` in `score.go`) |
 | `evidence_tools` | []string | tools that must each be called at least once |
 | `fix` | [][]string | action-name groups that must all appear among the proposed steps. Absent = no particular fix expected |
