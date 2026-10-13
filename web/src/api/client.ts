@@ -14,7 +14,7 @@ import type {
   RoomSnapshot,
   Topology,
 } from './types'
-import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
+import { classifyAuthProblem, getAuthEpoch, reportAuthProblem } from '../lib/auth'
 import type { AuthMode } from '../lib/auth'
 
 export const isFixtures = () => import.meta.env.VITE_FIXTURES === '1'
@@ -33,8 +33,10 @@ export class ApiClientError extends Error {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
-  // CrossOriginProtection + the contract: every POST is application/json.
-  if (init.method === 'POST') headers.set('Content-Type', 'application/json')
+  // CrossOriginProtection + the contract: every non-GET request is application/json.
+  const method = (init.method ?? 'GET').toUpperCase()
+  if (method !== 'GET' && method !== 'HEAD') headers.set('Content-Type', 'application/json')
+  const epoch = getAuthEpoch() // a 401 that arrives after a login/logout is stale
   const res = await fetch(path, { ...init, headers, credentials: 'same-origin' })
   if (!res.ok) {
     let code = res.status === 421 ? 'bad_host' : 'unknown'
@@ -49,7 +51,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       // non-JSON error body; keep statusText
     }
     const problem = classifyAuthProblem(res.status, code, message, authMode)
-    if (problem) reportAuthProblem(problem)
+    if (problem) reportAuthProblem({ ...problem, epoch })
     throw new ApiClientError(res.status, code, message)
   }
   if (res.status === 204) return undefined as T
@@ -57,20 +59,26 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T
 }
 
+export interface SessionProbe {
+  /** GET /api/me answered 200: the session is valid after all. */
+  valid: boolean
+  /** `error.auth_mode` of the 401, when it said. */
+  mode?: AuthMode
+}
+
 /**
- * Ask the server which login it uses, without raising an auth problem.
- * GET /api/me answers 401 session_expired with `error.auth_mode`; undefined when
- * it does not say (or the call fails, or the session turned out to be valid).
+ * Ask GET /api/me whether there is a session and which login the server uses,
+ * without raising an auth problem (so it cannot loop).
  */
-export async function probeAuthMode(): Promise<AuthMode | undefined> {
+export async function probeSession(): Promise<SessionProbe> {
   try {
     const res = await fetch('/api/me', { credentials: 'same-origin' })
-    if (res.ok) return undefined
+    if (res.ok) return { valid: true }
     const body = (await res.json()) as { error?: { auth_mode?: AuthMode } }
     const m = body.error?.auth_mode
-    return m === 'dev' || m === 'oidc' ? m : undefined
+    return { valid: false, mode: m === 'dev' || m === 'oidc' ? m : undefined }
   } catch {
-    return undefined
+    return { valid: false }
   }
 }
 

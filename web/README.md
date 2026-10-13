@@ -17,7 +17,8 @@ paths only and never sends a user-id header. Under `npm run dev` a login screen 
 - On `401 session_expired` the server says its mode in `error.auth_mode` (`dev` shows the user picker,
   `oidc` goes to `/auth/login?return=...`). With no `auth_mode` the app asks `GET /api/me`, and if that does
   not say either it shows a plain "signed out" notice. It never redirects unless the mode is `oidc`.
-  `VITE_AUTH_MODE=dev|oidc` overrides the server answer for local work.
+  `VITE_AUTH_MODE=dev|oidc` is only a fallback for a server that sends no `auth_mode`. The app never
+  redirects twice within 30 s, nor from an `/auth/` page; it shows a "Sign in" link instead.
 
 ---
 

@@ -8,10 +8,13 @@ vi.mock('./env', () => ({
 }))
 
 import {
+  REDIRECT_AT_KEY,
   RETURN_HASH_KEY,
   classifyAuthProblem,
   loginRedirectUrl,
+  mayAutoRedirect,
   problemText,
+  redirectToLogin,
   resolveAuthMode,
   restoreReturnHash,
   saveReturnHash,
@@ -52,12 +55,36 @@ describe('resolveAuthMode', () => {
     expect(resolveAuthMode()).toBeUndefined()
   })
 
-  it('VITE_AUTH_MODE is a developer override', () => {
+  it('VITE_AUTH_MODE is only a fallback: the server answer wins', () => {
     vi.stubEnv('VITE_AUTH_MODE', 'dev')
-    expect(resolveAuthMode('oidc')).toBe('dev')
+    expect(resolveAuthMode('oidc')).toBe('oidc')
     expect(resolveAuthMode()).toBe('dev')
     vi.stubEnv('VITE_AUTH_MODE', 'nonsense')
-    expect(resolveAuthMode('oidc')).toBe('oidc')
+    expect(resolveAuthMode()).toBeUndefined()
+  })
+})
+
+describe('redirect-loop guard', () => {
+  beforeEach(() => sessionStorage.clear())
+
+  it('allows a first redirect from a normal page', () => {
+    expect(mayAutoRedirect(1_000_000, { pathname: '/' })).toBe(true)
+  })
+
+  it('never redirects from an /auth/ page', () => {
+    expect(mayAutoRedirect(1_000_000, { pathname: '/auth/login' })).toBe(false)
+    expect(mayAutoRedirect(1_000_000, { pathname: '/auth/callback' })).toBe(false)
+  })
+
+  it('does not redirect again within 30 seconds, then allows it', () => {
+    sessionStorage.setItem(REDIRECT_AT_KEY, '1000000')
+    expect(mayAutoRedirect(1_000_000 + 29_000, { pathname: '/' })).toBe(false)
+    expect(mayAutoRedirect(1_000_000 + 31_000, { pathname: '/' })).toBe(true)
+  })
+
+  it('redirectToLogin does nothing and returns false inside the cooldown', () => {
+    sessionStorage.setItem(REDIRECT_AT_KEY, String(Date.now()))
+    expect(redirectToLogin()).toBe(false)
   })
 })
 
@@ -105,6 +132,11 @@ describe('return hash across the IdP round trip', () => {
 })
 
 describe('loginRedirectUrl', () => {
+  it('collapses leading slashes so the server return check accepts it', () => {
+    expect(loginRedirectUrl({ pathname: '//evil.test/x', search: '' })).toBe('/auth/login?return=%2Fevil.test%2Fx')
+    expect(loginRedirectUrl({ pathname: '/\\evil', search: '' })).toBe('/auth/login?return=%2Fevil')
+  })
+
   it('returns to the current path and query, encoded', () => {
     expect(loginRedirectUrl({ pathname: '/rooms/r_x', search: '?a=1&b=2' })).toBe(
       '/auth/login?return=%2Frooms%2Fr_x%3Fa%3D1%26b%3D2',

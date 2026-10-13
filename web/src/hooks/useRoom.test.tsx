@@ -4,12 +4,14 @@ import type { Event, EventsPage, RoomSnapshot } from '../api/types'
 
 // The hook reads the current user from context; provide a fixed user so it can
 // render without a router/provider.
+const session = vi.hoisted(() => ({ epoch: 0 }))
+
 vi.mock('../context/user', () => ({
   useCurrentUser: () => ({
     user: { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] },
     setUserId: vi.fn(),
     logout: vi.fn(),
-    sessionEpoch: 0,
+    sessionEpoch: session.epoch,
   }),
 }))
 
@@ -23,6 +25,7 @@ vi.mock('../api/client', async (importOriginal) => {
     openRoomWs: vi.fn(),
     api: {
       ...actual.api,
+      me: vi.fn(),
       room: vi.fn(),
       events: vi.fn(),
       grantControl: vi.fn(),
@@ -31,6 +34,8 @@ vi.mock('../api/client', async (importOriginal) => {
 })
 
 import { ApiClientError, api, openRoomWs } from '../api/client'
+import { onAuthProblem } from '../lib/auth'
+import type { AuthProblem } from '../lib/auth'
 import { useRoom } from './useRoom'
 
 class FakeWebSocket {
@@ -43,7 +48,7 @@ class FakeWebSocket {
   closed = false
   onopen: (() => void) | null = null
   onmessage: ((m: { data: string }) => void) | null = null
-  onclose: (() => void) | null = null
+  onclose: ((ev: { reason: string }) => void) | null = null
   onerror: (() => void) | null = null
   send(data: string) {
     this.sent.push(data)
@@ -94,6 +99,7 @@ function wsMessage(event: Event) {
 beforeEach(() => {
   vi.stubGlobal('WebSocket', FakeWebSocket)
   vi.resetAllMocks()
+  session.epoch = 0
 })
 
 describe('useRoom transport', () => {
@@ -217,5 +223,148 @@ describe('useRoom transport', () => {
 
     await waitFor(() => expect(result.current.error).toBe('someone else holds control'))
     expect(api.grantControl).toHaveBeenCalledWith('r1', 'arjun')
+  })
+})
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+describe('useRoom session epochs and reconnects', () => {
+  it('an epoch bump closes the old socket and opens exactly one new socket with after=0', async () => {
+    const s1 = new FakeWebSocket()
+    const s2 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs)
+      .mockReturnValueOnce(s1 as unknown as WebSocket)
+      .mockReturnValueOnce(s2 as unknown as WebSocket)
+
+    const { rerender } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    s1.onopen?.()
+    await act(async () => {
+      s1.onmessage?.(wsMessage(ev(1)))
+    })
+
+    session.epoch = 1 // a login or logout happened
+    rerender()
+
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2))
+    expect(s1.closed).toBe(true)
+    expect(openRoomWs).toHaveBeenNthCalledWith(2, 'r1', 0) // full replay, not lastSeq
+    await sleep(50)
+    expect(openRoomWs).toHaveBeenCalledTimes(2)
+
+    // The old socket closing later (server side) must not reconnect or report.
+    const seen: AuthProblem[] = []
+    const off = onAuthProblem((p) => seen.push(p))
+    s1.onclose?.({ reason: 'session_expired' })
+    s1.onmessage?.({ data: JSON.stringify({ type: 'error', error: { code: 'session_expired', message: 'x' } }) })
+    off()
+    expect(seen).toEqual([])
+    await sleep(50)
+    expect(openRoomWs).toHaveBeenCalledTimes(2)
+  })
+
+  it('a close with reason session_expired reports the epoch and stops reconnects', async () => {
+    const s1 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(s1 as unknown as WebSocket)
+    const seen: AuthProblem[] = []
+    const off = onAuthProblem((p) => seen.push(p))
+
+    const { result } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    s1.onopen?.()
+    act(() => {
+      s1.onclose?.({ reason: 'session_expired' })
+    })
+    off()
+
+    expect(seen).toEqual([{ kind: 'session_expired', message: 'session_expired', epoch: 0 }])
+    expect(result.current.conn).toBe('error')
+    await sleep(1300) // longer than the first backoff
+    expect(openRoomWs).toHaveBeenCalledTimes(1)
+  })
+
+  it('error frames viewer and proxy_identity become banners', async () => {
+    const s1 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(s1 as unknown as WebSocket)
+    const seen: AuthProblem[] = []
+    const off = onAuthProblem((p) => seen.push(p))
+
+    renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    s1.onopen?.()
+    for (const code of ['viewer', 'proxy_identity']) {
+      act(() => {
+        s1.onmessage?.({ data: JSON.stringify({ type: 'error', error: { code, message: 'm' } }) })
+      })
+    }
+    off()
+    expect(seen.map((p) => p.kind)).toEqual(['viewer', 'proxy_identity'])
+  })
+
+  it('an upgrade refused before open asks /api/me, but only once per outage', async () => {
+    const s1 = new FakeWebSocket()
+    const s2 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(api.me).mockResolvedValue({ id: 'arjun', name: 'Arjun', layers: [] })
+    vi.mocked(openRoomWs)
+      .mockReturnValueOnce(s1 as unknown as WebSocket)
+      .mockReturnValueOnce(s2 as unknown as WebSocket)
+
+    renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    act(() => {
+      s1.readyState = FakeWebSocket.CLOSED
+      s1.onclose?.({ reason: '' }) // never opened
+    })
+    expect(api.me).toHaveBeenCalledTimes(1)
+
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2), { timeout: 3000 })
+    act(() => {
+      s2.readyState = FakeWebSocket.CLOSED
+      s2.onclose?.({ reason: '' }) // refused again
+    })
+    expect(api.me).toHaveBeenCalledTimes(1) // not re-probed on every retry
+  })
+
+  it('a socket that opened and dropped does not probe /api/me', async () => {
+    const s1 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(s1 as unknown as WebSocket)
+    renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    s1.onopen?.()
+    act(() => {
+      s1.readyState = FakeWebSocket.CLOSED
+      s1.onclose?.({ reason: '' })
+    })
+    expect(api.me).not.toHaveBeenCalled()
+  })
+
+  it('a reconnect in the same epoch resumes from lastSeq', async () => {
+    const s1 = new FakeWebSocket()
+    const s2 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs)
+      .mockReturnValueOnce(s1 as unknown as WebSocket)
+      .mockReturnValueOnce(s2 as unknown as WebSocket)
+
+    const { result } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    expect(openRoomWs).toHaveBeenNthCalledWith(1, 'r1', 0)
+    s1.onopen?.()
+    await act(async () => {
+      s1.onmessage?.(wsMessage(ev(1)))
+    })
+    await waitFor(() => expect(result.current.state?.last_seq).toBe(1))
+
+    act(() => {
+      s1.readyState = FakeWebSocket.CLOSED
+      s1.onclose?.({ reason: '' })
+    })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2), { timeout: 3000 })
+    expect(openRoomWs).toHaveBeenNthCalledWith(2, 'r1', 1)
   })
 })

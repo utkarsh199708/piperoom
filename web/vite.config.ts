@@ -14,8 +14,8 @@ export default defineConfig(({ mode }) => {
   // `Host: localhost:5173`, which is on its loopback allow-list (any port).
   // `ws: true` carries the room WebSocket (/api/rooms/{id}/ws) with its cookie.
   const proxy = {
-    '/api': { target: api, ws: true },
-    '/auth': { target: api },
+    '^/api(/|$)': { target: api, ws: true },
+    '^/auth(/|$)': { target: api },
   }
 
   return {

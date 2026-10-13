@@ -11,6 +11,20 @@ export interface AuthProblem {
   message: string
   /** `error.auth_mode` from the 401 body. */
   authMode?: AuthMode
+  /**
+   * The session epoch the failing request or socket belonged to. A report from an
+   * older epoch than the current one is stale (a login or logout happened since)
+   * and the UserProvider drops it.
+   */
+  epoch?: number
+}
+
+// The UserProvider bumps this on every login and logout; the client reads it when a
+// request starts, so a late 401 from before the switch carries the old epoch.
+let currentEpoch = 0
+export const getAuthEpoch = (): number => currentEpoch
+export const setAuthEpoch = (n: number): void => {
+  currentEpoch = n
 }
 
 /**
@@ -52,21 +66,26 @@ export function problemText(p: AuthProblem): string {
 /**
  * Which login to offer after `session_expired`, or undefined when unknown.
  *
- * The only source is `error.auth_mode` in the 401 body (docs/api.md, Errors).
- * `VITE_AUTH_MODE` (dev | oidc) is a developer override that wins over it.
- * There is no guess from the build type: with no answer the caller probes
- * GET /api/me, and if that does not say either, shows a plain signed-out notice.
+ * The source is `error.auth_mode` in the 401 body (docs/api.md, Errors).
+ * `VITE_AUTH_MODE` (dev | oidc) is only a FALLBACK for a server that gives no
+ * auth_mode; it never overrides the server. There is no guess from the build
+ * type: with no answer the caller probes GET /api/me, and if that does not say
+ * either, shows a plain signed-out notice.
  */
 export function resolveAuthMode(hint?: AuthMode): AuthMode | undefined {
+  if (hint === 'dev' || hint === 'oidc') return hint
   const built = import.meta.env.VITE_AUTH_MODE as string | undefined
   if (built === 'dev' || built === 'oidc') return built
-  if (hint === 'dev' || hint === 'oidc') return hint
   return undefined
 }
 
-/** `/auth/login?return=<current path>`: the server accepts only a path, never a URL. */
+/**
+ * `/auth/login?return=<current path>`: the server accepts only a path, never a URL.
+ * Leading slashes (or backslashes) are collapsed to one: `//evil` would be refused
+ * by the server's return check and the person would land on `/` instead.
+ */
 export function loginRedirectUrl(loc: Pick<Location, 'pathname' | 'search'> = window.location): string {
-  const ret = `${loc.pathname}${loc.search}` || '/'
+  const ret = `${loc.pathname}${loc.search}`.replace(/^[/\\]+/, '/') || '/'
   return `/auth/login?return=${encodeURIComponent(ret)}`
 }
 
@@ -97,10 +116,39 @@ export function restoreReturnHash(): void {
   }
 }
 
-/** Leave the app for the IdP login. Only call this when the server said `auth_mode: "oidc"`. */
-export function redirectToLogin(): void {
+// Redirect-loop guard: if /auth/login sends the person back and the app is still
+// signed out, do not bounce again at once; show the Sign in link instead.
+export const REDIRECT_AT_KEY = 'piperoom_login_redirect_at'
+export const REDIRECT_COOLDOWN_MS = 30_000
+
+export function mayAutoRedirect(
+  now: number = Date.now(),
+  loc: Pick<Location, 'pathname'> = window.location,
+): boolean {
+  if (loc.pathname.startsWith('/auth/')) return false
+  try {
+    const last = Number(sessionStorage.getItem(REDIRECT_AT_KEY))
+    if (last && now - last < REDIRECT_COOLDOWN_MS) return false
+  } catch {
+    // storage blocked: allow; the server-side cap still holds
+  }
+  return true
+}
+
+/**
+ * Leave the app for the IdP login. Only call this when the server said
+ * `auth_mode: "oidc"`. Returns false (and does nothing) when the loop guard says no.
+ */
+export function redirectToLogin(): boolean {
+  if (!mayAutoRedirect()) return false
   saveReturnHash()
-  window.location.assign(loginRedirectUrl())
+  try {
+    sessionStorage.setItem(REDIRECT_AT_KEY, String(Date.now()))
+  } catch {
+    // ignore
+  }
+  window.location.replace(loginRedirectUrl())
+  return true
 }
 
 // ---- a tiny event bus: the client reports, the UserProvider reacts ----

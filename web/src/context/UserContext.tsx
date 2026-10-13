@@ -3,8 +3,15 @@ import type { ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { DEFAULT_USER_ID, findUser } from '../dev/users'
 import type { CurrentUser } from '../state/permissions'
-import { ApiClientError, api, isFixtures, probeAuthMode } from '../api/client'
-import { loginRedirectUrl, onAuthProblem, redirectToLogin, resolveAuthMode, saveReturnHash } from '../lib/auth'
+import { ApiClientError, api, isFixtures, probeSession } from '../api/client'
+import {
+  loginRedirectUrl,
+  onAuthProblem,
+  redirectToLogin,
+  resolveAuthMode,
+  saveReturnHash,
+  setAuthEpoch,
+} from '../lib/auth'
 import type { AuthMode, AuthProblem } from '../lib/auth'
 import { errorText } from '../lib/errors'
 import { AuthBanner } from '../components/AuthBanner'
@@ -52,20 +59,61 @@ function FixtureUserProvider({ children }: { children: ReactNode }) {
 
 // Live mode: identity comes from the server session (HttpOnly cookie), read
 // through GET /api/me. The client never says who it is.
+//
+// Session transitions. Dev-login revokes the old cookie session, and the server
+// then closes the old room socket with `session_expired`. That is NOT a sign-out.
+// Three guards keep it from being treated as one:
+//   1. every report carries the session epoch of the request or socket it came
+//      from; a report older than the current epoch is dropped;
+//   2. reports are ignored while a dev-login or logout is in flight (`transition`);
+//   3. before showing "signed out" the provider asks GET /api/me; a 200 means the
+//      session is valid, so it reloads the user instead.
 function LiveUserProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<CurrentUser | null>(null)
-  const [phase, setPhase] = useState<Phase>('loading')
+  const [phase, setPhaseState] = useState<Phase>('loading')
   // null = the server did not say (see resolveAuthMode): show a plain signed-out notice.
   const [mode, setMode] = useState<AuthMode | null>(null)
-  const [epoch, setEpoch] = useState(0)
+  const [epoch, setEpochState] = useState(0)
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState<AuthProblem | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
 
+  const phaseRef = useRef<Phase>('loading')
+  const epochRef = useRef(0)
+  const transition = useRef(false) // a dev-login or logout is in flight
+  const expiring = useRef(false) // a session_expired report is being checked
+
+  const setPhase = useCallback((next: Phase | ((p: Phase) => Phase)) => {
+    const value = typeof next === 'function' ? next(phaseRef.current) : next
+    phaseRef.current = value
+    setPhaseState(value)
+  }, [])
+
+  const bumpEpoch = useCallback(() => {
+    epochRef.current += 1
+    setAuthEpoch(epochRef.current)
+    setEpochState(epochRef.current)
+  }, [])
+
+  const loadMe = useCallback(async (): Promise<boolean> => {
+    try {
+      const me = await api.me()
+      setUser({ id: me.id, name: me.name, layers: me.layers })
+      setPhase('ready')
+      setFailure(null)
+      return true
+    } catch (e) {
+      // session_expired is routed by the listener below.
+      if (e instanceof ApiClientError && e.code === 'session_expired') return false
+      setFailure(errorText(e))
+      setPhase((p) => (p === 'loading' ? 'failed' : p))
+      return false
+    }
+  }, [setPhase])
+
   // Auth failures from any fetch or from the WebSocket arrive here. The server
-  // mode comes from error.auth_mode (or the VITE_AUTH_MODE override); if the 401
-  // did not carry it, ask GET /api/me. Redirect to /auth/login only for "oidc".
-  const expiring = useRef(false)
+  // mode comes from error.auth_mode (VITE_AUTH_MODE is only a fallback); if the
+  // 401 did not carry it, ask GET /api/me. Redirect to /auth/login only for "oidc".
   useEffect(
     () =>
       onAuthProblem((p) => {
@@ -73,78 +121,80 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
           setProblem(p)
           return
         }
-        if (expiring.current) return
+        if (p.epoch !== undefined && p.epoch < epochRef.current) return // stale
+        if (transition.current || expiring.current || phaseRef.current === 'login') return
         expiring.current = true
+        const startEpoch = epochRef.current
         void (async () => {
           try {
-            const m = resolveAuthMode(p.authMode) ?? (await probeAuthMode())
-            if (m === 'oidc') {
-              redirectToLogin()
+            // Never show "signed out" for a valid session: ask GET /api/me first.
+            const probe = await probeSession()
+            if (epochRef.current !== startEpoch || transition.current) return
+            if (probe.valid) {
+              if (await loadMe()) bumpEpoch()
               return
             }
+            const m = resolveAuthMode(p.authMode ?? probe.mode)
+            if (m === 'oidc' && redirectToLogin()) return
+            // dev, unknown, or oidc with the loop guard on: show the sign-in choice
             setMode(m ?? null)
             setUser(null)
             setPhase('login')
-            setEpoch((n) => n + 1)
+            bumpEpoch()
           } finally {
             expiring.current = false
           }
         })()
       }),
-    [],
+    [bumpEpoch, loadMe, setPhase],
   )
 
-  const loadMe = useCallback(async () => {
-    try {
-      const me = await api.me()
-      setUser({ id: me.id, name: me.name, layers: me.layers })
-      setPhase('ready')
-      setFailure(null)
-    } catch (e) {
-      // session_expired was already routed to the login screen by the listener.
-      if (e instanceof ApiClientError && e.code === 'session_expired') return
-      setFailure(errorText(e))
-      setPhase((p) => (p === 'loading' ? 'failed' : p))
-    }
-  }, [])
-
   useEffect(() => {
+    setAuthEpoch(0)
     void loadMe()
   }, [loadMe])
 
   const setUserId = useCallback(
     (id: string) => {
+      transition.current = true
       setBusy(true)
       void (async () => {
         try {
           await api.devLogin(id)
-          await loadMe()
-          setEpoch((n) => n + 1) // reload data, reconnect the WebSocket
+          if (await loadMe()) bumpEpoch() // reload data, reconnect the WebSocket
+          else setFailure((f) => f ?? 'Could not sign in.')
         } catch (e) {
           setFailure(errorText(e))
         } finally {
+          transition.current = false
           setBusy(false)
         }
       })()
     },
-    [loadMe],
+    [bumpEpoch, loadMe],
   )
 
   const logout = useCallback(() => {
+    transition.current = true
     void (async () => {
       try {
-        await api.logout()
-      } catch {
-        // an expired session is as good as logged out
+        try {
+          await api.logout()
+        } catch {
+          // an expired session is as good as logged out
+        }
+        // Never jump to the IdP by itself here (its own session would sign the
+        // person straight back in): show the sign-in choice for the mode.
+        const probe = await probeSession()
+        setMode(probe.mode ?? resolveAuthMode() ?? null)
+        setUser(null)
+        setPhase('login')
+        bumpEpoch()
+      } finally {
+        transition.current = false
       }
-      // After logout never jump to the IdP by itself (its own session would sign
-      // the person straight back in): show the sign-in choice for the mode.
-      setMode(resolveAuthMode() ?? (await probeAuthMode()) ?? null)
-      setUser(null)
-      setPhase('login')
-      setEpoch((n) => n + 1)
     })()
-  }, [])
+  }, [bumpEpoch, setPhase])
 
   const banners = (
     <>
