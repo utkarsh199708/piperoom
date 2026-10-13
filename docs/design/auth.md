@@ -336,8 +336,9 @@ removed:
   `consumer: [user:kabir, group:consumers]` with `mallory: layers: [consumer]` refuses to start: the server cannot
   vouch for group membership at start-up, which is exactly why a `users.yaml` claim must not stand in for it.
 - `authorizeLayer` applies the same rule per request, so it holds even for a config that never went through the start
-  check: with an `owners.yaml` loaded, a `users.yaml` layer grants nothing that `owners.yaml` does not grant the same
-  user by name.
+  check: where `owners.yaml` `layers:` names a layer's approvers, a `users.yaml` layer grants it only to a user named
+  there as `user:`. (A layer with no `layers:` entry at all is refused by the start check; unit tests that load an
+  owners file without `layers:` keep the `users.yaml` source.)
 
 **`/api/me.layers` stays.** `docs/api.md:103` returns `{id,name,layers}` and the UI gates approve buttons on it
 (`web/src/context/UserContext.tsx:40`). `layers` becomes "the layers this session may approve", computed per
