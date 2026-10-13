@@ -44,18 +44,55 @@ func TestAttack_ReturnOpenRedirect(t *testing.T) {
 	}
 }
 
-// A-ID-4 (fixed). Format characters are dropped from display names.
+// A-ID-4 (fixed). The characters that can disguise a display name are dropped;
+// the joiners that real names need are kept.
 func TestAttack_StripFormat(t *testing.T) {
+	// Each stripped character, alone inside a name.
+	var stripped []rune
+	for r := rune(0x202A); r <= 0x202E; r++ {
+		stripped = append(stripped, r)
+	}
+	for r := rune(0x2066); r <= 0x2069; r++ {
+		stripped = append(stripped, r)
+	}
+	stripped = append(stripped, 0x200E, 0x200F, 0x200B, 0x2060, 0xFEFF)
+	for _, r := range stripped {
+		if got := stripFormat("Pri" + string(r) + "ya"); got != "Priya" {
+			t.Errorf("U+%04X: stripFormat = %q, want Priya", r, got)
+		}
+	}
 	for in, want := range map[string]string{
 		"\u202eayirP\u202c":       "ayirP",
-		"Pri\u200bya":             "Priya",
 		"\u2066Priya\u2069":       "Priya",
-		"Pr\u00adiya":             "Priya",
 		"\ufeffPriya\u200e\u200f": "Priya",
 		"Ana Mar\u00eda":          "Ana Mar\u00eda",
 	} {
 		if got := stripFormat(in); got != want {
 			t.Errorf("stripFormat(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Names that need ZWJ (U+200D) or ZWNJ (U+200C) stay byte-identical.
+func TestStripFormatKeepsJoiners(t *testing.T) {
+	for name, in := range map[string]string{
+		// Devanagari conjunct with an explicit ZWJ: k + virama + ZWJ + ssa.
+		"hindi ZWJ conjunct": "\u0915\u094d\u200d\u0937",
+		// Devanagari virama + ZWNJ (explicit halant), inside a full name.
+		"hindi ZWNJ": "\u0930\u093e\u0915\u094d\u200c\u0937 \u0936\u0930\u094d\u092e\u093e",
+		// Persian "mikhaham" (I want) is spelled with a ZWNJ after the mim-ya.
+		"persian ZWNJ":      "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645",
+		"persian name ZWNJ": "\u0647\u0645\u0627\u06cc\u0648\u0646 \u0646\u06cc\u06a9\u200c\u0646\u0627\u0645",
+	} {
+		if !strings.ContainsAny(in, "\u200c\u200d") {
+			t.Fatalf("%s: fixture has no joiner", name)
+		}
+		if got := stripFormat(in); got != in {
+			t.Errorf("%s: stripFormat(%q) = %q, want it unchanged", name, in, got)
+		}
+	}
+	// A joiner next to a character that is stripped: only that one goes.
+	if got := stripFormat("\u0915\u094d\u200d\u0937\u200b\u202e"); got != "\u0915\u094d\u200d\u0937" {
+		t.Errorf("mixed = %q", got)
 	}
 }

@@ -185,11 +185,11 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 			if !ok {
 				return fmt.Errorf("users file grants %q layer %q, which the owners file does not assign to anyone", user.ID, layer)
 			}
-			if !ps.AllUsers() {
-				continue // group rule: skipped above
-			}
+			// A layer that also lists groups is NOT skipped here: the server
+			// cannot vouch for group membership at start-up, so a users.yaml
+			// claim must not stand in for it (security audit A-AP-3).
 			if !ps.Contains(owners.Principal{Kind: owners.KindUser, Name: user.ID}) {
-				return fmt.Errorf("users file and owners file disagree: users file grants %q layer %q but the owners file assigns it to %q", user.ID, layer, ps.Display())
+				return fmt.Errorf("users file and owners file disagree: users file grants %q layer %q but the owners file assigns it to %q (a users.yaml layer must be a user: principal there, even when the layer also lists groups)", user.ID, layer, ps.Display())
 			}
 		}
 	}

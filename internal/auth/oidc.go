@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -375,12 +374,20 @@ func clean(s string, max int) string {
 	return s
 }
 
-// stripFormat removes Unicode format characters (category Cf: the bidi
-// embeddings, overrides and isolates, zero-width joiners and spaces, the soft
-// hyphen) from a display string.
+// stripFormat removes the invisible characters that can make one display name
+// render as another: the bidi embeddings, overrides and isolates (U+202A-202E,
+// U+2066-2069), the LRM/RLM marks (U+200E, U+200F), the zero-width space
+// (U+200B), the word joiner (U+2060) and the byte-order mark (U+FEFF). It
+// deliberately keeps the zero-width non-joiner and joiner (U+200C, U+200D):
+// Persian, Hindi and other scripts need them to spell ordinary names, so
+// dropping them would mangle those names.
 func stripFormat(s string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Cf, r) {
+		switch {
+		case r >= 0x202A && r <= 0x202E,
+			r >= 0x2066 && r <= 0x2069,
+			r == 0x200E, r == 0x200F,
+			r == 0x200B, r == 0x2060, r == 0xFEFF:
 			return -1
 		}
 		return r

@@ -472,9 +472,18 @@ func TestHostAllowList(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newAuthEnv(t, tc.opts...)
-			// /healthz is a probe: it must follow the same rule.
-			resp := e.do(t, http.MethodGet, "/healthz", "", "Host: "+tc.host)
-			wantStatus(t, resp, tc.want)
+			// A plain API route follows the rule. (/healthz and /readyz are exempt
+			// from it: TestHostGuardHealthProbeExemption.)
+			resp := e.do(t, http.MethodGet, "/api/rooms", "", "Host: "+tc.host, "X-User: priya")
+			// OK here means "past the Host check": oidc mode answers 401 for
+			// a request with no cookie, which is still not 421.
+			if tc.want == http.StatusOK {
+				if resp.StatusCode == http.StatusMisdirectedRequest {
+					t.Fatalf("status = 421, want the Host accepted")
+				}
+			} else {
+				wantStatus(t, resp, tc.want)
+			}
 			if tc.want == http.StatusMisdirectedRequest {
 				if b := readErr(t, resp); b.Error.Code != "bad_host" {
 					t.Fatalf("code = %q, want bad_host", b.Error.Code)
