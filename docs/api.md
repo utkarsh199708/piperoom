@@ -29,6 +29,10 @@ users:
     layers: [consumer]
 ```
 
+`admin: true` on a users.yaml entry makes that user an **admin**: the one role that may delete a room
+(`DELETE /api/rooms/{id}`, see Room limits). It is false when left out, grants nothing else, and is not in
+`owners.yaml`: an IdP user who maps to no users.yaml entry is never an admin.
+
 No cookie and no `X-User` → `401 session_expired`; an `X-User` naming no known user → `401 unauthenticated`. The
 WebSocket uses the session cookie (or `X-User` for non-browser clients in dev); `?user=` is gone.
 `dev/users.yaml` (who may approve a layer) and the `layers:` map in `dev/owners.yaml` (owner shown on the pipeline
@@ -77,12 +81,13 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 |---|---|
 | 400 | `bad_request`, `validation`; after auth PR 3: `login_expired` (login cookie or row missing/expired at `/auth/callback`) |
 | 401 | `unauthenticated`; after auth PR 2: `session_expired` (no, revoked or expired session). Its body also carries the server's mode: `{"error":{"code":"session_expired","message":"…","auth_mode":"dev"\|"oidc"}}` — the web app shows the dev picker or goes to `/auth/login?return=…`. A WebSocket whose session ends gets an `error` frame with code `session_expired` and is then closed with close reason `session_expired` |
-| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline), `not_provisioned` (login gate) |
+| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`), `not_provisioned` (login gate) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB) |
-| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period) |
+| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits) |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list) |
 | 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client) |
+| 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}` with `PIPEROOM_ARCHIVE_DIR` set could not write the archive, so nothing was deleted) |
 | 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working) |
 
 Text a person types (titles, comments, steers, resolutions, trace keys, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD).
@@ -113,7 +118,10 @@ trace or activity feed** — to render a room, the client replays the full event
   "shadow": false,                 // true when the room's pipeline had shadow enabled at open (room.created.shadow): the agent ran silently, no proposals; see Shadow mode
   "last_seq": 42,
   "driver": { "id": "arjun", "name": "Arjun", "lease_until": "..." },
-  "agent_status": { "state": "working", "detail": "step 6" },     // "idle" for a new room; states: working | idle | done | waiting_approval | queued ("waiting for an agent slot (N ahead)" when PIPEROOM_MAX_AGENTS runs are busy); in a shadow room the agent writes no status to the room log, so it stays "idle"
+  "agent_status": { "state": "working", "detail": "step 6" },     // "idle" for a new room; states: working | idle | done | waiting_approval | queued ("waiting for an agent slot (N ahead)" when PIPEROOM_MAX_AGENTS runs are busy) | log_full (the room log hit its cap; the agent stopped for good); in a shadow room the agent writes no status to the room log, so it stays "idle"
+  "auto_close_at": "...",          // open-room limit: when the server closes this open room (opened_at + PIPEROOM_MAX_OPEN_DAYS, or room.extended.close_at); null when the limit is off or the room is closed
+  "extended": false,               // the room's one extension was used (room.extended)
+  "log_cap": "ok",                 // ok | warning (room.log_cap_warning: 90% of a cap) | full (agent.status log_full)
   "hypothesis": { "text": "...", "based_on_steps": ["s_3","s_4"], "confidence": "high", "confirmed": false },
   "open_proposals": [ { "proposal_id": "p_01J...", "title": "...", "steps": [], "risk": "...", "rollback": "...",   // after auth PR 4 also "params_hash"
                         "required_layers": ["schema-registry","kafka-connect"],
@@ -147,7 +155,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | Method | Path | Body | Result | Notes |
 |---|---|---|---|---|
 | GET | `/api/people` | – | `[{id, name, email?}]` | after auth PR 3: the people a driver may grant control or hand off to: `users.yaml` users plus members with a live session (`LookupPerson`). `email` only for IdP users; pickers show `id` or `email` next to `name`. Members only: a viewer gets `403 viewer` (the list holds emails and viewers cannot grant or hand off anyway) |
-| GET | `/api/me` | – | `{id,name,layers}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request; `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise) |
+| GET | `/api/me` | – | `{id,name,layers}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request; `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise); `admin: true` when this user has `admin: true` in users.yaml (omitted otherwise) |
 | GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first |
 | POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation` |
 | POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |
@@ -159,7 +167,9 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/rooms/{id}/suggestions/{sid}/send` | – | `Event` | driver only; emits `steer.sent` with `suggestion_id` |
 | POST | `/api/rooms/{id}/control/request` | – | `Event` | |
 | POST | `/api/rooms/{id}/control/grant` | `{to}` | `Event` | driver only, or anyone if no driver / lease expired |
-| POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only; a shadow room refuses an empty resolution with `400 validation` |
+| POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only; a shadow room refuses an empty resolution with `400 validation`. A full room log never refuses `room.closed` |
+| POST | `/api/rooms/{id}/extend` | – | `Event` (`room.extended`) | driver only (`403 not_driver`); open rooms only (`409 room_closed`); once per room (`409 already_extended`); `400 validation` when `PIPEROOM_MAX_OPEN_DAYS=0`. Moves the auto-close deadline by `PIPEROOM_MAX_OPEN_DAYS` days and renews the driver lease. See Room limits |
+| DELETE | `/api/rooms/{id}?reason=` | – (send `Content-Type: application/json` like every non-GET) | `{room_id, pipeline_id, deleted_by, deleted_at, reason, event_count, archived}` | admin only (users.yaml `admin: true`): any other member `403 not_allowed`, a viewer `403 viewer`, checked before the room is looked up. `reason` 1–500 characters, else `400 validation`. Hard-deletes the room (open or closed) with its events, proposals, approvals, steps, suggestions, hand-offs, Slack thread state and shadow rows, and writes one content-free audit row (`room_deletions`). `event_count` is the number of events deleted; `archived` is true when `PIPEROOM_ARCHIVE_DIR` got the export first. Idempotent: a room already deleted answers `200` with its audit row and changes nothing; an id that never existed (or was removed by retention) is `404 not_found`. Archive write failed: `500 archive_failed`, nothing deleted. Open WebSockets of the room get a last `room.deleted` frame and close (see WebSocket) |
 | POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step. After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode) |
 | POST | `/api/proposals/{pid}/reject` | `{layer, reason}`; after auth PR 4 `{layer, reason, params_hash}` | `Event` | same hash rule as approve |
 | GET | `/api/rooms/{id}/export` | – | the room as one JSON document | header `X-Piperoom-Export-SHA256` = SHA-256 of the RFC 8785 (JCS) form without the top-level `integrity` member. Today any user may export. After auth PR 4: only an approver or backup for any layer of the room's pipeline (in dev mode: `users.yaml` `layers`) or an `auditors:` principal; the driver is not on the list; others → `403 not_allowed`. Proposals, approvals and action results then carry `params_hash`, and approvals also `identity`. `?include=shadow` (closed rooms only, else `409 room_open`; `409 not_labelled` before the blind label) adds a top-level `"shadow": {run, events}` member (with `data`) after `"schema"`; it is inside the hashed document, so the hash differs from the plain export. Same access rule |
@@ -225,6 +235,35 @@ labels blind (`POST …/shadow/blind`), reads the run (`GET …/shadow`) and gra
 re-grade), with the payloads in `internal/events/events.go`. The Slack mirror stops at `room.closed` and
 never shows shadow output.
 
+### Room limits (retention, caps, deletion) — design `docs/design/retention.md`
+
+- **Open-room limit.** `PIPEROOM_MAX_OPEN_DAYS` (default `14`, `0` = off). 24 h before a room's deadline
+  (`snapshot.auto_close_at`) the system actor appends `room.retention_warning {close_at, open_days}`, once per
+  deadline. At the deadline the system actor closes the room with the resolution
+  `retention: open longer than N days` (a normal `room.closed`; the closed-room retention below applies from then on).
+  The driver may extend once: `POST /api/rooms/{id}/extend` appends `room.extended {days, close_at}` and the
+  deadline moves by `PIPEROOM_MAX_OPEN_DAYS` days (a new warning comes 24 h before the new deadline).
+- **Closed-room retention.** `PIPEROOM_RETENTION_DAYS` (empty or `0` = keep forever) deletes closed rooms whose
+  `closed_at` is older. A pipeline's `retention_days:` in `owners.yaml` (1–36500) sets that pipeline's own value;
+  when `PIPEROOM_RETENTION_DAYS` is set too, the **shorter** wins. A bad value stops the server.
+- **Per-room log caps.** `PIPEROOM_ROOM_MAX_EVENTS` (default `20000`) and `PIPEROOM_ROOM_MAX_BYTES` (default
+  `256MiB`, the sum of the stored payload JSON sizes). At 90% of either cap the system actor appends one
+  `room.log_cap_warning {events, max_events, bytes, max_bytes}`. At 100% events of the agent actor (status, steps,
+  tool calls and results, messages, hypotheses) are refused, the agent stops and the system actor writes
+  `agent.status {state: "log_full"}`; a steer or `@agent` comment no longer starts it in that room. Every other
+  event (human comments, steers, suggestions, control, approvals and rejections, action results,
+  hand-offs, traces, system notes) may go up to 2% over the caps; past that the route answers `409 log_full`.
+  `room.closed` is always accepted, so a full room can still be closed.
+- **Data size.** `PIPEROOM_EVENT_MAX_DATA_BYTES` (default `64KiB`). A larger `agent.tool_result.data` is stored as
+  `{"truncated": true, "original_bytes": N, "preview": "<start of the JSON text>"}` and the payload's `truncated`
+  is true; a larger `action.executed.output` is cut and ends with `… [truncated: N bytes]`.
+- **Deletion.** `DELETE /api/rooms/{id}?reason=` (admin, see REST endpoints). `devctl rooms delete <id> --reason
+  <text> --as <admin>` calls this route.
+- **Archive.** With `PIPEROOM_ARCHIVE_DIR` (an absolute directory) set, retention and deletion first write the
+  room's export (the `GET /api/rooms/{id}/export` document, with its `integrity` hash) to
+  `<dir>/<pipeline_id>/<room_id>.json`, mode `0600`. If that write fails the room is not deleted: retention logs
+  the error and tries again on its next run; `DELETE` answers `500 archive_failed`.
+
 ## WebSocket
 
 `GET /api/rooms/{id}/ws?after=<seq>`
@@ -243,3 +282,7 @@ Client → server:
 ```
 The server marks a member `away` after 45 s without any client message (2× the heartbeat plus slack).
 Rules: the server first replays every event with `seq > after`, then streams live events. Events are never skipped or repeated. **On first open of a room the client connects with `after=0`** (full replay); on reconnect it passes its highest seen seq. Presence is not stored in the event log.
+
+Room deleted: when an admin deletes the room, each open connection gets one last frame
+`{ "type": "event", "event": { "room_id": "r_…", "seq": <last_seq + 1>, "type": "room.deleted", "actor": <the admin>, "payload": { "reason": "…" }, "at": "…" } }`
+and is then closed with status 1000 and close reason `room deleted`. That event is never stored; a reconnect gets `404`.

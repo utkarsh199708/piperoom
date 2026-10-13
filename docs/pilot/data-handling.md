@@ -48,8 +48,9 @@ are refused until the server restarts, and a restart is also needed to change th
 Closing a room drops its count: the server calls `Endpoint.Forget` from the room-closed hook
 (`cmd/server/watch.go`; `internal/agent/endpoint.go:236-250`), so the counts of closed rooms do not stay in memory.
 - **Room event log (`room_events`, `migrations/00001_init.sql:16`).** Every tool call, result `Data`,
-  comment, steer, proposal and approval is stored **permanently** in the Piperoom database and shown
-  to everyone who can open the room. There is no per-event redaction after the fact. Redaction
+  comment, steer, proposal and approval is stored in the Piperoom database until the room is deleted
+  by retention or by an admin (section 4), and shown to everyone who can open the room. There is no
+  per-event redaction after the fact: to remove one thing, delete the whole room. Redaction
   happens before the event is written: `pg_row` and `warehouse_row` return redacted `Data`
   (`internal/tools/dbtools/pg.go:264`, `wh.go:124`).
 - **Warehouse (Snowflake, only with `WAREHOUSE_KIND=snowflake`).** Warehouse queries go to the
@@ -173,10 +174,32 @@ guarantee. The controls that do not depend on the model are:
 
 ## 4. Retention and deletion
 
-- Retention is live (F6, partly closed). `PIPEROOM_RETENTION_DAYS` deletes closed rooms older than N
-  days, checked every 6 hours; an empty value or `0` keeps everything. Open rooms are never deleted.
-  Export a room first with `GET /api/rooms/{id}/export` if you must keep it. The event log still has
-  no size cap, and there is no UI for deletion.
+Design: `docs/design/retention.md`. Every value below is read at start; a bad value stops the server.
+
+- **Closed rooms.** `PIPEROOM_RETENTION_DAYS` deletes closed rooms older than N days, checked every 6
+  hours; an empty value or `0` keeps everything. A pipeline's `retention_days:` in `owners.yaml` sets
+  its own value; when both are set, the shorter wins. Rooms of a pipeline that is not in `owners.yaml`
+  use `PIPEROOM_RETENTION_DAYS`.
+- **Open rooms.** `PIPEROOM_MAX_OPEN_DAYS` (default 14, `0` = off) closes a room that has been open that
+  long. The room gets a warning 24 hours before; the driver can extend it once by the same number of
+  days. After the close, the closed-room retention above applies.
+- **Size of one room.** A room's log holds at most `PIPEROOM_ROOM_MAX_EVENTS` events (default 20000)
+  and `PIPEROOM_ROOM_MAX_BYTES` of stored payloads (default 256 MiB). At 90% the room gets a warning; at
+  100% the agent stops and its events are refused. People can still comment, approve, hand off and close,
+  within a 2% reserve. A tool result's `Data` over `PIPEROOM_EVENT_MAX_DATA_BYTES` (default 64 KiB) is
+  stored truncated (a preview and the original size), and so is a long action output.
+- **Deleting one room.** A users.yaml user with `admin: true` can delete a room, open or closed, with
+  `DELETE /api/rooms/{id}?reason=...` or `devctl rooms delete <id> --reason "..." --as <admin>`. It
+  removes the room's events, proposals, approvals, suggestions, hand-offs, Slack thread state and shadow
+  data from the Piperoom database, and closes open WebSockets of the room. A row in `room_deletions`
+  keeps the room id, pipeline, who, when, the reason and the event count, and nothing else. It does not
+  remove messages already posted to Slack or data already sent to the model provider.
+- **Archive (optional).** With `PIPEROOM_ARCHIVE_DIR` set, retention and deletion first write the room's
+  export (the same document as `GET /api/rooms/{id}/export`) to `<dir>/<pipeline>/<room>.json`, readable
+  only by the server's user (mode `0600`). If the write fails, the room is not deleted. **The archive
+  keeps the room's content**: with an archive set, a deletion removes the room from Piperoom but not from
+  that directory. Protect, back up and expire the directory under your own policy.
+- Without an archive, export a room first with `GET /api/rooms/{id}/export` if you must keep it.
 - Deleting the Piperoom database deletes the room history, the Slack thread state and everything
   else in it. Data sent to the model provider (Anthropic, Bedrock or Vertex), and messages already posted to Slack, are governed by
   your agreements with those providers, not by Piperoom.
