@@ -227,6 +227,9 @@ func (s Scope) CheckDLQTopic(topic string) error {
 	if contains(declared, topic) {
 		return nil
 	}
+	if len(declared) == 0 {
+		return refuse("DLQ topic", topic, s, "none declared (use connector for a sink's DLQ)")
+	}
 	return refuse("DLQ topic", topic, s, "declared DLQ topics: "+strings.Join(declared, ", "))
 }
 

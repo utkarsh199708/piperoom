@@ -171,6 +171,7 @@ func TestRiskTextNeverHoldsConfigValues(t *testing.T) {
 		"errors.log.include.messages":       "true",
 		"connection.password":               extra + "-password",
 		"connection.url":                    "jdbc:postgresql://" + extra + ":5432/orders",
+		"x.unknown.key":                     extra + "-unknown",
 		"topics":                            extra + "-topics",
 		"name":                              extra + "-name",
 	}
@@ -203,6 +204,13 @@ func TestRiskTextNeverHoldsConfigValues(t *testing.T) {
 		// "SENTINEL.class.JdbcSinkConnector" ends in SinkConnector: a sink.
 		for _, r := range Risks(Parse(m), v.ex) {
 			raised[r.Code] = true
+			wantSev := map[string]string{
+				RiskSilentDropSink: SevSev2, RiskSilentSkipSource: SevSev2, RiskDebeziumSkip: SevSev2,
+				RiskDLQTopicMissing: SevSev3, RiskDLQNoLog: SevSev3, RiskDLQLogMessages: SevSev3, RiskDLQNoHeaders: SevInfo,
+			}[r.Code]
+			if r.Sev != wantSev || r.Text != riskText(r.Code) || r.Text == "" {
+				t.Errorf("%s / %s: got Sev %q Text %q, want Sev %q and the fixed text", v.name, r.Code, r.Sev, r.Text, wantSev)
+			}
 			for _, s := range sentinels {
 				if strings.Contains(r.Text, s) {
 					t.Errorf("%s / %s: Text %q contains config value %q", v.name, r.Code, r.Text, s)
