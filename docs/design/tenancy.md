@@ -1,11 +1,19 @@
-# Tenancy — design (main @ b81248b, 2026-10-13)
+# Tenancy — design rev 2 (main @ 09473b2, 2026-10-13)
 
 Closes security finding F7 (one process-wide credential set for every pipeline,
 `docs/security/findings.md`) and the visibility gap next to it (any signed-in user can list and open
 every room). The decisions in this document are LEAD-ARCH's; they are not open for review here.
-Implementation: PR `[T1] tenancy: per-pipeline client sets and tenant visibility`, stacked on the
-contract PR `[LEAD] contract: tenancy` that holds this file, `PIPEROOM_TENANCY_MODE` in
-`internal/config/config.go` and the `docs/api.md` lines.
+Implementation: PR `[T1] tenancy: per-pipeline client sets and tenant visibility` (#112), stacked on
+the contract PR `[LEAD] contract: tenancy` (#111) that holds this file, `PIPEROOM_TENANCY_MODE` in
+`internal/config/config.go` and the `docs/api.md` lines. #112 also carries the DLQ watcher (#102) and
+`dlq_peek` (#103) ported to per-pipeline client sets, so it merges after them.
+
+**Rev 2 (review of #111/#112).** A null `tenants:`, `connections:` or `tenant:` is refused (3.1, 3.2).
+The four literal keys are checked before a client sees them, so a wrong reference never echoes a
+secret (3.2). TLS key and certificate files count by their resolved path, wherever they were named, and
+CA bundles are not references (3.3). The libpq `PG*` variables and home files stop the start when a
+pipeline has its own connections (3.5). An unknown or empty pipeline always gets the empty set (5).
+DLQ topic names are compared per Kafka cluster (5). New known gaps in section 8.
 
 ## 1. Problem
 
@@ -75,8 +83,13 @@ pipelines:
 - With a `tenants:` block, a pipeline's `tenant:` must be a key of it (`default` may be left out).
   Without one, a pipeline may only say `tenant: default`: naming another tenant without declaring
   it is refused, so a forgotten block cannot silently show that tenant's rooms to everyone.
-- An empty `tenants: {}` is refused (write no block for a single tenant). Unknown keys inside a
-  tenant are refused, like every other `owners.yaml` block.
+- An empty `tenants: {}` is refused (write no block for a single tenant), and so is a null one:
+  `tenants:` with no value, `tenants: ~`, or every entry commented out. A null `tenant:` on a pipeline
+  is refused too (it would quietly mean `default`). YAML decoders skip a null value, so these are found
+  on the parsed node tree (`owners.checkNullBlocks`). Unknown keys inside a tenant are refused, like
+  every other `owners.yaml` block.
+- An error never quotes a key or a tenant name that is not a plain name (`^[A-Za-z0-9_.-]{1,64}$`): a
+  DSN pasted in the wrong place must not reach the start-up log.
 - Tenant members are principals that `owners.yaml` names, so solo mode (`PIPEROOM_SOLO_USER`)
   refuses to start when `tenants:` names anyone else.
 
@@ -113,11 +126,20 @@ exactly one reference:
 - **No inheritance.** A pipeline with `connections:` uses only what it lists. A key it leaves out is
   empty (PLAINTEXT, no login, the system CA roots), never the process-wide value: one tenant's broker
   must never be sent another tenant's password.
-- A pipeline with no `connections:` uses the process-wide settings, which keeps today's behaviour.
+- A pipeline with no `connections:` uses the process-wide settings, which keeps today's behaviour. A
+  null `connections:` (no value, `~`, or every entry commented out) is refused, not read as "no
+  block": it would silently fall back to the process-wide credentials, in teams mode too.
 - `owners.Load` checks the shape (known key, exactly one reference, literal only where allowed,
   absolute path, variable-name syntax, the five required keys). `wiring` resolves the references at
   start. Any failure stops the start with an error that names the pipeline, the key and the
   reference (variable name or path), **never the value**.
+- "Never the value" covers the four literal keys too when they come from `{env}` or `{file}`: a
+  reference to the wrong variable may hold a DSN or a password, and the client's own error would quote
+  it. `wiring` checks them before any client sees them, against what the clients accept:
+  `warehouse_kind` `postgres`|`snowflake`; `kafka_security_protocol`
+  `PLAINTEXT`|`SSL`|`SASL_PLAINTEXT`|`SASL_SSL`; `kafka_sasl_mechanism`
+  `PLAIN`|`SCRAM-SHA-256`|`SCRAM-SHA-512`|`AWS_MSK_IAM` (both without regard to case); and
+  `kafka_tls_server_name` a host name. The refusal names the key and the reference only.
 - MSK IAM (`kafka_sasl_mechanism` = `AWS_MSK_IAM`) uses the process's one AWS identity; see 3.3.
 
 ### 3.3 Shared references
@@ -128,9 +150,17 @@ tenant:
 - `{env: NAME}` and `{file: path}` are references; `{value: X}` is not. Variable names compare
   without regard to case (Windows), paths after `filepath.Clean`, also without regard to case.
 - A pipeline with no `connections:` references the process-wide variables: `env:SOURCE_DB_URL`,
-  `env:KAFKA_SASL_PASSWORD` and so on, one per key in 3.2.
+  `env:KAFKA_SASL_PASSWORD` and so on, one per key in 3.2 except the CA bundles.
+- **TLS keys and certificates** (`*_tls_key_file`, `*_tls_cert_file`) also count by the path a client
+  really opens: the resolved value, made absolute and cleaned, with symbolic links followed when the
+  file exists. So a key reached through two names (a process-wide `KAFKA_TLS_KEY_FILE` and another
+  tenant's `{file:}`, or one tenant's `{env:}` holding the path and another's `{file:}`, or a link) is
+  one shared credential. This is added at resolution, for the process-wide settings too.
+- **CA bundles are excluded** (`*_tls_ca_file`, LEAD-ARCH decision): a CA is public, and one corporate CA
+  for every team is normal.
 - A pipeline whose resolved `kafka_sasl_mechanism` is `AWS_MSK_IAM` references the process AWS
-  identity.
+  identity; so does every pipeline without `connections:` when the process-wide mechanism is
+  `AWS_MSK_IAM`.
 
 When one reference is used by pipelines of two or more tenants, the start fails unless **every**
 pipeline that uses it sets `shared_connections: true`. The error names the reference, the tenants and
@@ -162,6 +192,18 @@ Consequences, all deliberate:
   no tenant: with the filter on, nobody sees it, and the server logs a warning with the room id when
   it opens. Fix the alert's pipeline, or set `DEFAULT_ALERT_PIPELINE` for alerts that name none.
 
+### 3.5 libpq defaults
+
+pgx (`pgconn.ParseConfig`) fills anything a DSN leaves out from the libpq environment and home files:
+`PGPASSWORD`, `PGPASSFILE` and `~/.pgpass`, `PGSERVICE`/`PGSERVICEFILE` and `~/.pg_service.conf`,
+`PGSSLCERT`/`PGSSLKEY`/`PGSSLPASSWORD` and `~/.postgresql/postgresql.key`, `PGUSER`, `PGHOST`,
+`PGDATABASE`. With per-pipeline DSNs, one tenant's DSN that omits its password, user, host or client
+key would silently log in with the process's one. So, **when any opened pipeline has `connections:`,
+the start is refused** while any of those variables is set (not empty) or any of those home files
+exists (home = `os.UserHomeDir`, as pgconn uses). The error names the variables and files, never a
+value. Put everything a pipeline needs in its own DSN. Without any `connections:` block nothing changes:
+the process-wide DSN may rely on libpq defaults as before.
+
 ## 4. Mode
 
 `PIPEROOM_TENANCY_MODE` (`internal/config/config.go`, `config.ParseTenancyMode`):
@@ -181,8 +223,11 @@ No value is ever logged.
 
 - `wiring.OpenStacks` builds **one client set per pipeline with `connections:`**, once at start, and
   **one process-wide set** shared by the pipelines without `connections:`. The process-wide set is
-  opened only when at least one pipeline uses it (or `owners.yaml` has no pipeline), so a deployment
-  where every pipeline has its own connections never opens the process-wide defaults.
+  opened only when at least one pipeline uses it, so a deployment where every pipeline has its own
+  connections never opens the process-wide defaults.
+- `StackOptions.Prepare(w)` runs for every opened set after its clients exist and before its tools are
+  registered, with the set's own `Wired`. The server uses it to hand each set what only the server
+  owns (the room store reader of `similar_incidents`, #100).
 - Every set gets its own read-tool registry, action registry and topology builder, built over its own
   clients only, and an `owners` view holding only the pipelines it serves. A tool cannot reach another
   pipeline's client because it holds none, and it cannot name another pipeline because `tools.ScopeFor`
@@ -196,10 +241,16 @@ No value is ever logged.
     the given pipeline (`GET /api/pipelines/{pid}/topology`, the room's first prompt, `POST .../trace`);
   - **watcher**: `watch.Deps.ClientsFor(pipelineID)`; each tick groups pipelines by client set and reads
     each set once (one `pg_replication_slots` query per set; a connector name is read on each set's own
-    Connect cluster, so two clusters may both have a connector of that name);
+    Connect cluster, so two clusters may both have a connector of that name). The DLQ signals (#102)
+    read DLQ offsets once per set from the set's own Kafka (`PipelineClients.Kafka`), and a topic's
+    sample ring is keyed by set and topic: two clusters may both have a DLQ topic of one name;
   - **`cmd/investigate`** opens only the set of the pipeline it investigates.
-- A room whose pipeline is unknown or empty gets the process-wide set when one exists (the tools then
-  refuse it, as today), else an empty set: `runbook_lookup` only, no actions, topology refuses.
+- A room whose pipeline is unknown or empty gets the **empty set**, whatever other sets exist:
+  `runbook_lookup` only, no actions, topology refuses. A room never reaches a client by naming a
+  pipeline nobody configured.
+- Topic names are unique per Kafka cluster, so `owners.yaml` checks on DLQ topic names (a DLQ declared
+  by two pipelines, a DLQ named like a CDC topic) compare them per `kafka_brokers` reference (the
+  process-wide one for pipelines without `connections:`).
 - Each set is opened in turn with the existing `openTimeout` (10 s); one unreachable source or
   warehouse stops the start, as today. `Close` closes every set.
 
@@ -224,9 +275,10 @@ object did not exist when it is outside the caller's tenants. **404, never 403**
 
 The check is one function, `room.Service.CanSeePipeline(user, pipelineID)`, over
 `owners.CanSeePipeline`. The HTTP layer wraps every `/rooms/{id}` route with it; the approve, reject
-and accept paths call it inside the service after loading the row. A route test walks the chi router
-and fails when a route that takes an id has no tenant case. With the filter off (no `tenants:`
-block), nothing changes.
+and accept paths call it inside the service after loading the row. The check reads the room's
+pipeline id from the cache or the rooms row; it clones and rebuilds nothing. A route test walks the chi
+router and fails unless every route is classified: a room-id route (with its 404 case), an aggregate
+that filters by tenant, or public. With the filter off (no `tenants:` block), nothing changes.
 
 ## 7. Migration
 
@@ -245,6 +297,18 @@ None. No database change, no event change, no `RoomSnapshot` field. An `owners.y
 - Signed alert secrets are per source, not per tenant: whoever holds one can open a room for any
   pipeline (the reply no longer shows its content).
 - MSK IAM and Bedrock use the process's one AWS identity (MSK IAM counts as a shared reference, 3.3).
-- The shared-reference check compares names, not values or file contents.
+- The shared-reference check compares names, not values or file contents: two variables that hold the
+  same DSN pass (TLS key and certificate paths are the exception, 3.3). The same holds for DLQ topic
+  names per `kafka_brokers` reference (5).
+- pgx reads the libpq variables and home files (3.5); the start refuses them when a pipeline has its
+  own connections, but a process-wide DSN may still use them.
 - A `users.yaml` `layers:` entry still grants that layer on every pipeline in dev mode; the filter
   stops it at 404 before the approval is checked.
+- **Membership is not re-checked on a live WebSocket.** The subscribe is checked once, before the
+  upgrade; the gateway's tick checks the session, not the tenant. Membership cannot change without a
+  restart today (owners.yaml and IdP groups are read at start or at login). Any owners.yaml hot reload
+  or group refresh must add a tenant re-check to the WebSocket tick and close connections that lost it.
+- **A grant or hand-off target who is a member only through an IdP group is refused** (fails closed).
+  `LookupPerson` returns a `users.yaml` user without groups, so a `users.yaml` user who is in the tenant
+  only through `group:` cannot be given control or a hand-off; list them by `user:` in `members:`.
+  (An IdP-only user's live session carries its groups and works.)

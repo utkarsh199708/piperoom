@@ -283,8 +283,15 @@ Design and every rule: [docs/design/tenancy.md](../design/tenancy.md).
     reads, and takes nothing from the process-wide `SOURCE_DB_URL`, `KAFKA_*` and so on; a pipeline
     without it uses those, as before.
   - The start fails when two tenants use the same variable or file (pipelines without `connections:`
-    count as using the process-wide variables) unless every pipeline involved sets
-    `shared_connections: true`.
+    count as using the process-wide variables, and a TLS client key or certificate counts by its real
+    path however it was named) unless every pipeline involved sets `shared_connections: true`. A CA
+    bundle may be shared.
+  - With any `connections:` block, unset the libpq variables (`PGPASSWORD`, `PGUSER`, `PGHOST`,
+    `PGDATABASE`, `PGPASSFILE`, `PGSERVICE`, `PGSERVICEFILE`, `PGSSLCERT`, `PGSSLKEY`, `PGSSLPASSWORD`)
+    and remove `~/.pgpass`, `~/.pg_service.conf` and `~/.postgresql/postgresql.key` on the Piperoom
+    host: pgx would add them to a DSN that leaves something out, so the start refuses them.
+  - A `tenants:`, `connections:` or `tenant:` key with no value (or with every entry commented out) is
+    refused; remove the key instead.
   - Set `PIPEROOM_TENANCY_MODE=teams` so the server refuses to start if the `tenants:` block is ever
     lost. The start-up log prints the mode and which pipelines use their own connections.
   - On Helm, mount per-team secret files with `extraVolumes`/`extraVolumeMounts`, or add per-team
