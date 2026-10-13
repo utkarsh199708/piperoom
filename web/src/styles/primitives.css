@@ -1,0 +1,758 @@
+/*
+ * Primitives: buttons, inputs, chips, avatars, panels, empty states,
+ * skeleton, status pill, layer tags, plus the motion scaffold.
+ *
+ * Static is the base. Every animation, transition and transform lives in the
+ * `prefers-reduced-motion: no-preference` block at the bottom.
+ */
+
+/* ---- buttons ---- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line-2);
+  background: var(--bg-2);
+  color: var(--fg);
+  font-weight: 500;
+  font-size: 14px;
+  line-height: 1.2;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-3);
+  border-color: var(--fg-3);
+}
+
+.btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-strong);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  filter: brightness(1.08);
+}
+
+/* .btn--approve is an alias of .btn--ok (ProposalsPanel and its tests use it) */
+.btn--ok,
+.btn--approve {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: var(--on-strong);
+  font-weight: 600;
+}
+
+.btn--ok:hover:not(:disabled),
+.btn--approve:hover:not(:disabled) {
+  background: var(--ok);
+  border-color: var(--ok);
+  filter: brightness(1.06);
+}
+
+.btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--fg-2);
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--bg-3);
+  border-color: transparent;
+  color: var(--fg);
+}
+
+/* .btn--reject is an alias of .btn--danger */
+.btn--danger,
+.btn--reject {
+  background: transparent;
+  border-color: transparent;
+  color: var(--fail);
+}
+
+.btn--danger:hover:not(:disabled),
+.btn--reject:hover:not(:disabled) {
+  background: var(--fail-tint);
+  border-color: transparent;
+}
+
+.btn--small {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.btn--link {
+  background: none;
+  border: none;
+  padding: 0;
+  min-height: 0;
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.btn--link:hover:not(:disabled) {
+  background: none;
+  text-decoration: underline;
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  color: var(--fg-2);
+  font-size: 20px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.icon-btn:hover {
+  background: var(--bg-3);
+  color: var(--fg);
+}
+
+/* ---- inputs ---- */
+input,
+select,
+textarea {
+  font: inherit;
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+  min-height: 34px;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: var(--ring-accent);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--fg-3);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+  min-height: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.field label {
+  font: var(--t-small);
+  font-weight: 500;
+  color: var(--fg-2);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+/* ---- chips ---- */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  background: var(--bg-3);
+  color: var(--fg-2);
+  font: var(--t-small);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.chip .icon {
+  width: 12px;
+  height: 12px;
+  vertical-align: 0;
+}
+
+.chip--fail {
+  background: var(--fail-tint);
+  color: var(--fail);
+}
+
+.chip--warn {
+  background: var(--warn-tint);
+  color: var(--warn);
+}
+
+.chip--info {
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.chip--ok {
+  background: var(--ok-tint);
+  color: var(--ok);
+}
+
+.chip--agent {
+  background: var(--agent-tint);
+  color: var(--agent);
+}
+
+.chip--muted {
+  background: var(--bg-3);
+  color: var(--fg-2);
+}
+
+/* ---- layer tags ---- */
+.layer-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  font: var(--t-mono-sm);
+  font-weight: 500;
+  line-height: 1;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+
+.layer-tag--postgres {
+  color: var(--layer-postgres);
+  border-color: color-mix(in srgb, var(--layer-postgres) 40%, transparent);
+}
+
+.layer-tag--kafka-connect {
+  color: var(--layer-kafka-connect);
+  border-color: color-mix(in srgb, var(--layer-kafka-connect) 40%, transparent);
+}
+
+.layer-tag--schema-registry {
+  color: var(--layer-schema-registry);
+  border-color: color-mix(in srgb, var(--layer-schema-registry) 40%, transparent);
+}
+
+.layer-tag--kafka {
+  color: var(--layer-kafka);
+  border-color: color-mix(in srgb, var(--layer-kafka) 40%, transparent);
+}
+
+.layer-tag--consumer {
+  color: var(--layer-consumer);
+  border-color: color-mix(in srgb, var(--layer-consumer) 40%, transparent);
+}
+
+.layer-tag--warehouse {
+  color: var(--layer-warehouse);
+  border-color: color-mix(in srgb, var(--layer-warehouse) 40%, transparent);
+}
+
+/* ---- avatars ---- */
+.avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border-radius: 50%;
+  background: var(--bg-3);
+  color: var(--fg);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* Initials are decorative (aria-hidden, name in title); they are the only
+   text below the 13px floor. */
+.avatar--xs {
+  width: 16px;
+  height: 16px;
+  font-size: 8px;
+}
+
+.avatar--sm {
+  width: 24px;
+  height: 24px;
+  font-size: 10px;
+}
+
+.avatar--md {
+  width: 28px;
+  height: 28px;
+  font-size: 11px;
+}
+
+.avatar--lg {
+  width: 40px;
+  height: 40px;
+  font-size: 14px;
+}
+
+.avatar--h1 {
+  background: var(--h1);
+  color: var(--on-strong);
+}
+
+.avatar--h2 {
+  background: var(--h2);
+  color: var(--on-strong);
+}
+
+.avatar--h3 {
+  background: var(--h3);
+  color: var(--on-strong);
+}
+
+.avatar--h4 {
+  background: var(--h4);
+  color: var(--on-strong);
+}
+
+.avatar--h5 {
+  background: var(--h5);
+  color: var(--on-strong);
+}
+
+.avatar--h6 {
+  background: var(--h6);
+  color: var(--on-strong);
+}
+
+.avatar--agent {
+  background: var(--agent-tint);
+  color: var(--agent);
+}
+
+.avatar--system {
+  background: var(--bg-3);
+  color: var(--fg-3);
+}
+
+.avatar--driver {
+  box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 4px var(--accent);
+}
+
+.avatar__badge {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  width: 12px;
+  height: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-strong);
+  box-shadow: 0 0 0 2px var(--bg-1);
+}
+
+.avatar__badge .icon {
+  width: 8px;
+  height: 8px;
+  vertical-align: 0;
+  stroke-width: 3;
+}
+
+/* overlapping stack of avatars (room header, home cards) */
+.stack,
+.presence-avatars {
+  display: inline-flex;
+  align-items: center;
+}
+
+.stack .avatar,
+.presence-avatars .avatar {
+  margin-left: -6px;
+  box-shadow: 0 0 0 2px var(--bg-1);
+}
+
+.stack .avatar:first-child,
+.presence-avatars .avatar:first-child {
+  margin-left: 0;
+}
+
+.stack .avatar--driver,
+.presence-avatars .avatar--driver {
+  box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 4px var(--accent);
+}
+
+.stack .more,
+.presence-avatars .more {
+  margin-left: 6px;
+  font: var(--t-small);
+  color: var(--fg-3);
+}
+
+/* ---- dots ---- */
+.dot {
+  position: relative;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.dot--hollow {
+  background: transparent;
+  border: 1.5px solid currentColor;
+}
+
+/* ---- panel ---- */
+.panel {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-1);
+}
+
+.panel__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.panel__title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font: var(--t-h3);
+  color: var(--fg);
+}
+
+.panel__count {
+  font: var(--t-small);
+  font-weight: 500;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.panel__right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel__body {
+  padding: 14px 16px;
+  font: var(--t-panel);
+}
+
+/* ---- empty state ---- */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 18px 8px;
+  text-align: center;
+  font: var(--t-small);
+  color: var(--fg-2);
+}
+
+.empty .icon {
+  width: 22px;
+  height: 22px;
+  margin-bottom: 4px;
+  color: var(--fg-3);
+  opacity: 0.8;
+}
+
+.empty__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-2);
+}
+
+.empty__hint {
+  color: var(--fg-3);
+}
+
+/* ---- skeleton ---- */
+.skeleton {
+  display: block;
+  min-height: 14px;
+  background: var(--bg-3);
+  border-radius: var(--r-sm);
+}
+
+/* ---- status pill ---- */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 10px 0 9px;
+  border-radius: var(--r-pill);
+  background: var(--bg-3);
+  color: var(--fg-2);
+  font: var(--t-small);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.status-pill--agent {
+  background: var(--agent-tint);
+  color: var(--agent);
+}
+
+.status-pill--info {
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+.status-pill--warn {
+  background: var(--warn-tint);
+  color: var(--warn);
+}
+
+.status-pill--ok {
+  background: var(--ok-tint);
+  color: var(--ok);
+}
+
+.status-pill--fail {
+  background: var(--fail-tint);
+  color: var(--fail);
+}
+
+.status-pill--muted {
+  background: var(--bg-3);
+  color: var(--fg-2);
+}
+
+.status-pill__dot {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-pill .icon {
+  width: 12px;
+  height: 12px;
+  vertical-align: 0;
+}
+
+/* ---- spinner (static ring; spins only with motion allowed) ---- */
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+}
+
+/* ---- phone: touch targets ---- */
+@media (max-width: 600px) {
+  .btn,
+  input,
+  select,
+  textarea,
+  .icon-btn {
+    min-height: var(--touch);
+  }
+
+  .icon-btn {
+    min-width: var(--touch);
+  }
+
+  .btn--small {
+    min-height: var(--touch);
+  }
+
+  .btn--link {
+    min-height: var(--touch);
+  }
+
+  input[type='checkbox'],
+  input[type='radio'] {
+    min-height: 0;
+  }
+}
+
+/* ======================================================================
+   Motion (opt-in). Nothing outside this block animates or transitions.
+   ====================================================================== */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes ping {
+    0% {
+      transform: scale(0.6);
+      opacity: 0.7;
+    }
+    100% {
+      transform: scale(1.6);
+      opacity: 0;
+    }
+  }
+
+  @keyframes slide {
+    to {
+      left: 100%;
+    }
+  }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+
+  @keyframes shimmer {
+    to {
+      background-position: -200% 0;
+    }
+  }
+
+  /* one-off "look here": scale-in plus a fading ring */
+  @keyframes attn {
+    from {
+      transform: scale(0.985);
+      box-shadow: 0 0 0 8px var(--warn-tint);
+    }
+  }
+
+  /* banner and dialog entrances */
+  @keyframes drop {
+    from {
+      opacity: 0;
+      transform: translateY(-8px);
+    }
+  }
+
+  @keyframes fade {
+    from {
+      opacity: 0;
+    }
+  }
+
+  @keyframes pop {
+    from {
+      opacity: 0;
+      transform: scale(0.98);
+    }
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* a new thing appears: fade and rise once */
+  .enter {
+    animation: rise var(--dur) var(--ease) both;
+  }
+
+  /* state cross-fades */
+  .btn,
+  .icon-btn,
+  .chip,
+  .status-pill,
+  a,
+  input,
+  select,
+  textarea {
+    transition:
+      background var(--dur-fast),
+      border-color var(--dur-fast),
+      color var(--dur-fast),
+      filter var(--dur-fast),
+      box-shadow var(--dur-fast);
+  }
+
+  /* the agent is working: one calm ring on the dot */
+  .status-pill__dot.is-live::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    border: 1.5px solid currentColor;
+    animation: ping 1.8s var(--ease) infinite;
+  }
+
+  .skeleton {
+    background: linear-gradient(90deg, var(--bg-3) 0%, var(--bg-2) 50%, var(--bg-3) 100%);
+    background-size: 200% 100%;
+    animation: shimmer 1.6s linear infinite;
+  }
+
+  .spinner {
+    animation: spin 0.8s linear infinite;
+  }
+
+  .banner {
+    animation: drop var(--dur-slow) var(--ease) both;
+  }
+
+  .overlay {
+    animation: fade var(--dur-fast) linear both;
+  }
+
+  .dialog {
+    animation: pop var(--dur-slow) var(--ease) both;
+  }
+}
+
+/* Belt and braces: with reduced motion requested, nothing moves, whatever
+   other style files add. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

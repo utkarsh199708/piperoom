@@ -1,0 +1,206 @@
+/*
+ * Piperoom design tokens (docs: reviews/ui-refresh.md sections 2 to 5).
+ *
+ * Dark is the default. Light applies when the OS prefers light (unless the
+ * theme is pinned to dark) or when <html data-theme="light"> is set. A pinned
+ * theme lives in localStorage['piperoom.theme'] and is applied before first
+ * paint by the inline script in index.html.
+ *
+ * `node scripts/contrast.mjs` parses this file and checks every
+ * text pair. If you change a colour here, run it.
+ */
+
+/* ---- theme-independent tokens + dark colours (default) ---- */
+:root {
+  color-scheme: dark;
+
+  /* surfaces */
+  --bg-0: #0b0e14;
+  --bg-1: #10141c;
+  --bg-2: #161c27;
+  --bg-3: #1d2432;
+  --line: #232c3b;
+  --line-2: #2f3a4c;
+
+  /* text */
+  --fg: #e6ebf2;
+  --fg-2: #a9b4c4;
+  --fg-3: #818c9e;
+
+  /* one hue, one meaning */
+  --accent: #5b9dff;
+  --fail: #ff7b72;
+  --warn: #ffb454;
+  --ok: #3ecf8e;
+  --agent: #b48cff;
+  --on-strong: #0b0e14; /* text on a filled accent/ok/fail/warn/agent */
+
+  --accent-tint: rgba(91, 157, 255, 0.12);
+  --fail-tint: rgba(255, 123, 114, 0.12);
+  --warn-tint: rgba(255, 180, 84, 0.12);
+  --ok-tint: rgba(62, 207, 142, 0.12);
+  --agent-tint: rgba(180, 140, 255, 0.1);
+
+  --ring-accent: 0 0 0 3px rgba(91, 157, 255, 0.22);
+  --ring-fail: 0 0 0 3px rgba(255, 123, 114, 0.22);
+  --ring-warn: 0 0 0 3px rgba(255, 180, 84, 0.22);
+  --warn-line: rgba(255, 180, 84, 0.45);
+
+  --shadow-1: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --overlay: rgba(5, 7, 10, 0.6);
+
+  /* layer colours (text on --bg-2 / --bg-3) */
+  --layer-postgres: #7cc4ff;
+  --layer-kafka-connect: var(--warn);
+  --layer-schema-registry: var(--agent);
+  --layer-kafka: #8fd3ff;
+  --layer-consumer: var(--ok);
+  --layer-warehouse: #ff9fd4;
+
+  /* people hues: avatar fill, text on it is --on-strong */
+  --h1: #ff8fab;
+  --h2: #7dd3fc;
+  --h3: #c4b5fd;
+  --h4: #fcd34d;
+  --h5: #86efac;
+  --h6: #fdba74;
+
+  /* fonts */
+  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
+
+  /* type: font shorthands (weight size/line family). Use `font: var(--t-h3)`.
+     Letter-spacing and case are separate (--ls-*). 13px is the floor;
+     12.5px is only for mono arg tags, hashes and node facts. */
+  --t-display: 600 24px/30px var(--font-sans);
+  --t-title: 600 20px/26px var(--font-sans);
+  --t-h2: 600 17px/24px var(--font-sans);
+  --t-h3: 600 15px/22px var(--font-sans);
+  --t-body: 400 15px/22px var(--font-sans);
+  --t-panel: 400 14px/21px var(--font-sans);
+  --t-small: 400 13px/19px var(--font-sans);
+  --t-kicker: 600 12px/16px var(--font-sans);
+  --t-mono: 400 13px/19px var(--font-mono);
+  --t-mono-sm: 400 12.5px/17px var(--font-mono);
+  --ls-heading: -0.01em;
+  --ls-kicker: 0.08em;
+
+  /* spacing, radius */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+  --s10: 40px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+  --touch: 44px;
+
+  /* motion: only used inside @media (prefers-reduced-motion: no-preference) */
+  --dur-fast: 120ms;
+  --dur: 200ms;
+  --dur-slow: 320ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+
+  /* aliases: the old names, so components not yet restyled keep working */
+  --bg: var(--bg-0);
+  --panel: var(--bg-1);
+  --panel-2: var(--bg-2);
+  --border: var(--line);
+  --text: var(--fg);
+  --muted: var(--fg-2);
+  --blue: var(--accent);
+  --orange: var(--warn);
+  --red: var(--fail);
+  --green: var(--ok);
+  --radius: var(--r-md);
+}
+
+/* ---- light: OS preference, unless the theme is pinned to dark ---- */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    color-scheme: light;
+    --bg-0: #f3f5f9;
+    --bg-1: #ffffff;
+    --bg-2: #f7f9fc;
+    --bg-3: #eef2f7;
+    --line: #dfe5ee;
+    --line-2: #c9d2df;
+    --fg: #111827;
+    --fg-2: #4b5565;
+    --fg-3: #5f6977;
+    --accent: #185fd0;
+    --fail: #c0392b;
+    --warn: #8f5300;
+    --ok: #167244;
+    --agent: #6a3ad1;
+    --on-strong: #ffffff;
+    --accent-tint: #e4eefc;
+    --fail-tint: #fde8e6;
+    --warn-tint: #fff1d6;
+    --ok-tint: #dff7ea;
+    --agent-tint: #efe8ff;
+    --ring-accent: 0 0 0 3px rgba(24, 95, 208, 0.2);
+    --ring-fail: 0 0 0 3px rgba(192, 57, 43, 0.2);
+    --ring-warn: 0 0 0 3px rgba(143, 83, 0, 0.2);
+    --warn-line: #f0c98a;
+    --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+    --shadow-2: 0 12px 32px rgba(16, 24, 40, 0.14);
+    --overlay: rgba(16, 24, 40, 0.45);
+    --layer-postgres: #145ea8;
+    --layer-kafka: #0f6b9c;
+    --layer-warehouse: #b0286f;
+    --h1: #c2185b;
+    --h2: #0369a1;
+    --h3: #6d28d9;
+    --h4: #a16207;
+    --h5: #15803d;
+    --h6: #c2410c;
+  }
+}
+
+/* ---- light: pinned ---- */
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg-0: #f3f5f9;
+  --bg-1: #ffffff;
+  --bg-2: #f7f9fc;
+  --bg-3: #eef2f7;
+  --line: #dfe5ee;
+  --line-2: #c9d2df;
+  --fg: #111827;
+  --fg-2: #4b5565;
+  --fg-3: #5f6977;
+  --accent: #185fd0;
+  --fail: #c0392b;
+  --warn: #8f5300;
+  --ok: #167244;
+  --agent: #6a3ad1;
+  --on-strong: #ffffff;
+  --accent-tint: #e4eefc;
+  --fail-tint: #fde8e6;
+  --warn-tint: #fff1d6;
+  --ok-tint: #dff7ea;
+  --agent-tint: #efe8ff;
+  --ring-accent: 0 0 0 3px rgba(24, 95, 208, 0.2);
+  --ring-fail: 0 0 0 3px rgba(192, 57, 43, 0.2);
+  --ring-warn: 0 0 0 3px rgba(143, 83, 0, 0.2);
+  --warn-line: #f0c98a;
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-2: 0 12px 32px rgba(16, 24, 40, 0.14);
+  --overlay: rgba(16, 24, 40, 0.45);
+  --layer-postgres: #145ea8;
+  --layer-kafka: #0f6b9c;
+  --layer-warehouse: #b0286f;
+  --h1: #c2185b;
+  --h2: #0369a1;
+  --h3: #6d28d9;
+  --h4: #a16207;
+  --h5: #15803d;
+  --h6: #c2410c;
+}
