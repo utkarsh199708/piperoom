@@ -60,7 +60,7 @@ func (s *Store) GetShadowRun(ctx context.Context, roomID string) (store.ShadowRu
 	return copyRun(*r), nil
 }
 
-// UpdateShadowRun implements store.ShadowStore; revealed_at and last_seq stay.
+// UpdateShadowRun implements store.ShadowStore; see the interface for the columns.
 func (s *Store) UpdateShadowRun(ctx context.Context, r store.ShadowRun) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -74,8 +74,11 @@ func (s *Store) UpdateShadowRun(ctx context.Context, r store.ShadowRun) error {
 	if !ok {
 		return fmt.Errorf("memstore: update shadow run %q: %w", r.RoomID, store.ErrNotFound)
 	}
+	// Same columns as the Postgres store: the hypothesis columns belong to
+	// AppendShadow, revealed_at to MarkRevealed.
 	cp := copyRun(r)
 	cp.LastSeq, cp.RevealedAt = cur.LastSeq, cur.RevealedAt
+	cp.FirstHypothesisAt, cp.FinalHypothesisAt, cp.FinalHypothesis = cur.FirstHypothesisAt, cur.FinalHypothesisAt, cur.FinalHypothesis
 	s.shadowRuns[r.RoomID] = &cp
 	return nil
 }

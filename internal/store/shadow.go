@@ -155,12 +155,11 @@ func (s *PG) UpdateShadowRun(ctx context.Context, r ShadowRun) error {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE shadow_runs SET status = $2, model = $3, pipeline_map = $4, started_at = $5, first_hypothesis_at = $6,
-		     final_hypothesis_at = $7, finished_at = $8, finished_after_close = $9, final_hypothesis = $10,
-		     tool_calls = $11, tokens = $12
+		`UPDATE shadow_runs SET status = $2, model = $3, pipeline_map = $4, started_at = $5,
+		     finished_at = $6, finished_after_close = $7, tool_calls = $8, tokens = $9
 		 WHERE room_id = $1`,
-		r.RoomID, r.Status, r.Model, r.PipelineMap, r.StartedAt, r.FirstHypothesisAt,
-		r.FinalHypothesisAt, r.FinishedAt, r.FinishedAfterClose, nullJSON(r.FinalHypothesis), r.ToolCalls, r.Tokens)
+		r.RoomID, r.Status, r.Model, r.PipelineMap, r.StartedAt,
+		r.FinishedAt, r.FinishedAfterClose, r.ToolCalls, r.Tokens)
 	if err != nil {
 		return fmt.Errorf("store: update shadow run %s: %w", r.RoomID, classify(err))
 	}

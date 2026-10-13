@@ -207,12 +207,18 @@ func TestShadowRunLifecycle(t *testing.T) {
 	fin := time.Now().UTC()
 	run.Status, run.FinishedAt, run.Tokens, run.ToolCalls = store.ShadowHypothesised, &fin, 1234, 1
 	run.RevealedAt = nil
+	run.FirstHypothesisAt, run.FinalHypothesisAt, run.FinalHypothesis = nil, nil, json.RawMessage(`{"text":"stale"}`)
 	if err := s.UpdateShadowRun(ctx, run); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.GetShadowRun(ctx, roomID)
 	if err != nil || got.RevealedAt == nil || got.Status != store.ShadowHypothesised || got.Tokens != 1234 || got.LastSeq != 3 {
 		t.Fatalf("after update: %+v %v", got, err)
+	}
+	// The hypothesis columns belong to AppendShadow: an update never changes them.
+	var kept events.AgentHypothesisPayload
+	if json.Unmarshal(got.FinalHypothesis, &kept); kept.Text != "final" || got.FirstHypothesisAt == nil || got.FinalHypothesisAt == nil {
+		t.Fatalf("update touched the hypothesis columns: %+v", got)
 	}
 	if err := s.UpdateShadowRun(ctx, store.ShadowRun{RoomID: roomID, Status: "x", Model: "a\x00"}); !errors.Is(err, store.ErrUnstorable) {
 		t.Fatalf("NUL model: %v", err)

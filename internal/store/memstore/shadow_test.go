@@ -124,12 +124,13 @@ func TestShadowStoreSemantics(t *testing.T) {
 	if first, err := st.MarkRevealed(ctx, "r1", now); first || err != nil {
 		t.Fatalf("second reveal %v %v", first, err)
 	}
-	r.RevealedAt = nil
+	r.RevealedAt, r.FirstHypothesisAt, r.FinalHypothesisAt, r.FinalHypothesis = nil, nil, nil, nil
 	if err := st.UpdateShadowRun(ctx, r); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := st.GetShadowRun(ctx, "r1"); got.RevealedAt == nil {
-		t.Fatal("update cleared revealed_at")
+	if got, _ := st.GetShadowRun(ctx, "r1"); got.RevealedAt == nil || got.FirstHypothesisAt == nil ||
+		got.FinalHypothesisAt == nil || len(got.FinalHypothesis) == 0 {
+		t.Fatalf("update cleared a column it does not own: %+v", got)
 	}
 
 	res, err := st.PurgeClosedBefore(ctx, closedAt.Add(time.Hour), 10, nil)

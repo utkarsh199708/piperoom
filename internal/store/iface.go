@@ -128,10 +128,12 @@ type ShadowStore interface {
 	// GetShadowRun returns the run row of a room, or an error wrapping
 	// ErrNotFound.
 	GetShadowRun(ctx context.Context, roomID string) (ShadowRun, error)
-	// UpdateShadowRun writes every mutable column of r (status, model,
-	// pipeline_map, the times, finished_after_close, final_hypothesis,
-	// tool_calls, tokens). revealed_at and last_seq are never touched. A
-	// missing row wraps ErrNotFound.
+	// UpdateShadowRun writes the supervisor's columns of r: status, model,
+	// pipeline_map, started_at, finished_at, finished_after_close, tool_calls
+	// and tokens. It never touches the columns AppendShadow owns
+	// (first_hypothesis_at, final_hypothesis_at, final_hypothesis), nor
+	// revealed_at or last_seq, so a read-modify-write cannot undo a hypothesis
+	// appended in between. A missing row wraps ErrNotFound.
 	UpdateShadowRun(ctx context.Context, r ShadowRun) error
 	// AppendShadow appends one event to the room's shadow log with the next
 	// gap-free seq. It runs CheckAppend first (the jsonb guard). An
