@@ -32,6 +32,28 @@ Unknown or missing `X-User` → `401`. The WebSocket takes `?user=<id>` instead 
 map) must agree; the server checks this at start-up and refuses to start on a mismatch. Real mode requires
 `USERS_FILE`; the built-in users are for `--demo` only. Real login is designed in `docs/design/auth.md` (C9).
 
+### Login (auth PRs 2–4, design `docs/design/auth.md`) — contract fixed, not live yet
+
+The X-User stub above stays until auth PR 2. After it:
+
+- **Mode.** `PIPEROOM_AUTH_MODE` = `dev` (default) or `oidc`. In `oidc` mode `X-User` is ignored and a request with
+  no session answers `401`. In `dev` mode `POST /auth/dev-login {user}` picks a `users.yaml` user; `curl` with
+  `X-User` and no cookie still works.
+- **Session.** A server-side session in a cookie: `__Host-piperoom_session` in `oidc` mode (https),
+  `piperoom_session` (no `Secure`) in `dev` mode over plain http. The cookie wins over `X-User` when both name the
+  same user.
+- **Routes.** `GET /auth/login?return=/path` → IdP redirect; `GET /auth/callback` (finds the login row by the
+  login cookie, then checks `state` and nonce; single use); `POST /auth/logout` (also closes the user's WebSockets);
+  `POST /auth/dev-login {user}` (dev mode only).
+- **Host allow-list.** `Host` must be a loopback name (any port), the host of `PIPEROOM_PUBLIC_URL` (exact), or a
+  value in `PIPEROOM_ALLOWED_HOSTS`; otherwise `421 bad_host`. Cross-origin browser POSTs → `403`.
+- **Roles.** `member` (any `users.yaml` user or `owners.yaml` principal) may act; rights to approve still come from
+  layer ownership. `viewer` (`PIPEROOM_AUTH_VIEWER_GROUPS`, or an `auditors:`-only principal): GET (not export) and
+  WebSocket only; every non-GET under `/api` → `403 viewer`. An `auditors:` principal may also export.
+- **Proxy guard (dev mode).** `POST /auth/dev-login` on a request carrying `X-User`, or a request with a session
+  cookie plus an `X-User` naming a different user → `403 proxy_identity`. A reverse proxy needs
+  `PIPEROOM_AUTH_MODE=oidc` (or the git tag `pre-auth`).
+
 ## Errors
 
 ```json
@@ -42,10 +64,11 @@ map) must agree; the server checks this at start-up and refuses to start on a mi
 |---|---|
 | 400 | `bad_request`, `validation` |
 | 401 | `unauthenticated` |
-| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`) |
+| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB) |
-| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff` |
+| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; after auth PR 4: `params_mismatch` |
+| 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list) |
 
 Text a person types (titles, comments, steers, resolutions, trace keys, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD).
 
@@ -100,7 +123,7 @@ IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_
 
 | Method | Path | Body | Result | Notes |
 |---|---|---|---|---|
-| GET | `/api/me` | – | `{id,name,layers}` | |
+| GET | `/api/me` | – | `{id,name,layers}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request |
 | GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first |
 | POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation` |
 | POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |
@@ -113,8 +136,9 @@ IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_
 | POST | `/api/rooms/{id}/control/request` | – | `Event` | |
 | POST | `/api/rooms/{id}/control/grant` | `{to}` | `Event` | driver only, or anyone if no driver / lease expired |
 | POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only |
-| POST | `/api/proposals/{pid}/approve` | `{layer}` | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step |
-| POST | `/api/proposals/{pid}/reject` | `{layer, reason}` | `Event` | |
+| POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}` | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step. After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` |
+| POST | `/api/proposals/{pid}/reject` | `{layer, reason}`; after auth PR 4 `{layer, reason, params_hash}` | `Event` | same hash rule as approve |
+| GET | `/api/rooms/{id}/export` | – | the room as one JSON document | header `X-Piperoom-Export-SHA256` = SHA-256 of the RFC 8785 (JCS) form without the top-level `integrity` member. Today any user may export. After auth PR 4: only layer owners (approvers) of the room's pipeline and `auditors:` principals; others → `403 not_allowed`. Proposals, approvals and action results then carry `params_hash` |
 | POST | `/api/rooms/{id}/handoffs` | `{to, stay_as_watcher}` | `Event` | driver only; server asks the agent for the summary (can take up to 3 min; this route is exempt from the 60 s request timeout) |
 | POST | `/api/handoffs/{hid}/accept` | – | `Event` | only the `to` user; moves driver role |
 | GET | `/api/pipelines/{pid}/topology` | – | `Topology` | unknown pipeline → `404 not_found` |
@@ -153,6 +177,8 @@ closes; `--demo` forces it off.
 ## WebSocket
 
 `GET /api/rooms/{id}/ws?user=<id>&after=<seq>`
+
+After auth PR 2 the WebSocket uses the session cookie and `?user=` is removed; no cookie → `401`.
 
 Server → client messages:
 ```json
