@@ -106,6 +106,9 @@ grade where it matters):
   from its term, in another sentence ("Many suspected X. That was wrong.") is not seen.
 - A clearing word can clear the wrong term ("the connector failed, the consumer is fine" keeps the
   connector; "the connector task, whose consumer is fine, failed" may not).
+- A subject-less denial ("..., which was restarted, is not the problem") negates only the clause that
+  holds its subject (plus relative clauses in between); if the true cause shares that clause with the
+  denied subject, it is negated too. "not only X but also Y" keeps X.
 - "but another subject" ends a clearing scan, so "failed but the consumer is fine" is read correctly,
   while "failed but this was expected" is read as cleared.
 - Layer detection is keyword based: a cause described in another layer's words (a Postgres migration

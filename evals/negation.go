@@ -69,15 +69,44 @@ func clauseTokens(text string) []clause {
 			pending = (pending && !hasContrast(sc[i].toks)) || endsOnNegator(sc[i].toks)
 		}
 		for j := range sc {
+			if clearsBackRef(sc[j].toks) && j > 0 {
+				// "The task failed, but this is fine now": the clearing
+				// word is about the clause before the comma.
+				sc[j-1].laterNeg = true
+			}
 			if !barePredicateDenial(sc[j].toks) {
 				continue
 			}
+			// The denial is about its own subject only: walk back over
+			// relative or parenthetical clauses ("which was restarted"),
+			// mark the clause that holds the subject, and stop, so a true
+			// cause stated earlier stays positive.
 			for i := j - 1; i >= 0 && !hasContrast(sc[i].toks); i-- {
 				sc[i].laterNeg = true
+				if !relativeStart[sc[i].toks[0]] {
+					break
+				}
 			}
 		}
 	}
 	return out
+}
+
+// relativeStart opens a clause that hangs on the subject before it.
+var relativeStart = map[string]bool{"which": true, "who": true, "whose": true, "that": true, "as": true, "where": true}
+
+// clearsBackRef: "but this is fine now", a contrast word, a back-reference
+// and a clearing word close behind.
+func clearsBackRef(toks []string) bool {
+	if len(toks) < 3 || !contrastWords[toks[0]] || !backRefs[toks[1]] {
+		return false
+	}
+	for i := 2; i < len(toks) && i < 2+negWindow; i++ {
+		if clearedWords[toks[i]] {
+			return true
+		}
+	}
+	return false
 }
 
 func hasContrast(toks []string) bool {
@@ -124,6 +153,8 @@ func negatorAt(toks []string, i int) bool {
 	switch t := toks[i]; {
 	case t == "no":
 		return next != "longer" // "no longer carry amount" states a fact
+	case t == "not" && (next == "only" || next == "just"):
+		return false // "not only X but also Y" asserts X
 	case t == "not", t == "never", t == "t", t == "without", t == "against", t == "neither", t == "nor", strings.HasPrefix(t, "avoid"):
 		return true
 	case t == "instead":
