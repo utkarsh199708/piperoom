@@ -9,10 +9,7 @@
 // section 3.1.1).
 package dlq
 
-import (
-	"regexp"
-	"strings"
-)
+import "strings"
 
 // Config keys the package reads. Nothing else in a connector config is ever
 // looked at, copied or printed.
@@ -61,12 +58,19 @@ type ErrorsConfig struct {
 	DebeziumSkip bool
 }
 
-// topicRE is Kafka's rule for a topic name.
-var topicRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,249}$`)
-
-// ValidTopic reports whether s is a legal Kafka topic name.
+// ValidTopic reports whether s is a legal Kafka topic name:
+// [A-Za-z0-9._-], 1 to 249 bytes, and not "." or "..".
 func ValidTopic(s string) bool {
-	return s != "." && s != ".." && topicRE.MatchString(s)
+	if s == "" || len(s) > 249 || s == "." || s == ".." {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // Parse reads the error-handling keys of a connector config. A nil or empty

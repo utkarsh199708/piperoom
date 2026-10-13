@@ -24,9 +24,28 @@ func TestRedactMessage(t *testing.T) {
 			"Unexpected character ('x' (code 120)): was expecting double-quote to start field name at <redacted>"},
 		{"Jackson unrecognized token with real text",
 			"com.fasterxml.jackson.core.JsonParseException: Unrecognized token 'hello': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false')\n at [Source: (byte[])\"hello world\"; line: 1, column: 5]",
-			// The 'hello' fragment is single-quoted and stays: the design doc keeps
-			// single quotes (section 4.2, honest limits). The Source tail goes.
-			"com.fasterxml.jackson.core.JsonParseException: Unrecognized token 'hello': was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false') at <redacted>"},
+			// The operand after "Unrecognized token" is record data even when it
+			// looks like an identifier. 'null', 'true', 'false' are keywords and stay.
+			"com.fasterxml.jackson.core.JsonParseException: Unrecognized token <redacted>: was expecting (JSON String, Number, Array, Object or token 'null', 'true' or 'false') at <redacted>"},
+		{"Jackson token with an email", "Unrecognized token 'jane@example.com': was expecting JSON", "Unrecognized token <redacted>: was expecting JSON"},
+		{"Jackson token bare word", "Unrecognized token abc: was expecting JSON", "Unrecognized token <redacted>: was expecting JSON"},
+		{"Jackson token unterminated", "Unrecognized token 'jane", "Unrecognized token <redacted>"},
+		{"Jackson token at the end", "Unrecognized token", "Unrecognized token"},
+		{"MySQL duplicate entry", "Duplicate entry 'jane@example.com' for key 'users.email'", "Duplicate entry <redacted> for key 'users.email'"},
+		{"MySQL incorrect integer", "Incorrect integer value: 'abc 123' for column 'amount' at row 1", "Incorrect integer value: <redacted> for column 'amount' at row 1"},
+		{"JDBC batch VALUES", "Batch entry 0 INSERT INTO orders (id, email) VALUES (5,'jane@example.com') was aborted: ERROR: x", "Batch entry 0 INSERT INTO orders (id, email) VALUES <redacted> was aborted: ERROR: x"},
+		{"VALUES lower case, several tuples", "insert into t(a,b) values (1, 'x'), (2,'it''s ) ok') returning", "insert into t(a,b) values <redacted> returning"},
+		{"VALUES with a close paren in a quoted value", "VALUES (1,'a)b') end", "VALUES <redacted> end"},
+		{"VALUES unbalanced", "VALUES (1,2", "VALUES <redacted>"},
+		{"values in prose is kept", "the values must be positive", "the values must be positive"},
+		{"identifier-shaped single quotes are kept", "Cannot cast field 'amount' of type 'VALUE_CONVERTER' to 'users.order-id' (null 'x')", "Cannot cast field 'amount' of type 'VALUE_CONVERTER' to 'users.order-id' (null 'x')"},
+		{"number in single quotes", "bad id '5' here", "bad id <redacted> here"},
+		{"empty single quotes", "bad id '' here", "bad id <redacted> here"},
+		{"apostrophes in prose are not quotes", "can't convert, don't retry, it's the users' table", "can't convert, don't retry, it's the users' table"},
+		{"prose apostrophe then a real span", "can't map 'jane doe' to string", "can't map <redacted> to string"},
+		{"single quote span with an inner apostrophe", "bad 'it's mine' value", "bad <redacted> value"},
+		{"unterminated single quote is an apostrophe", "bad 'jane", "bad 'jane"},
+		{"Det NUL ail tail", "x Det\x00ail: Key (id)=(5)", "x <redacted>"},
 		{"Jackson Source tail with a JSON record in it",
 			"Unexpected end-of-input at [Source: (byte[])" + `"` + jsonSnippet + `"; line: 1, column: 46]`,
 			"Unexpected end-of-input at <redacted>"},
@@ -64,7 +83,7 @@ func TestRedactMessage(t *testing.T) {
 		{"unterminated quote takes the rest", `got "secret and more`, "got <redacted>"},
 		{"stray closers are dropped", "a ] b } c", "a b c"},
 		{"stray closers do not fuse words", "Det}ail: Key (id)=(5)", "Det ail: Key (id)=(5)"},
-		{"control characters and runs of spaces", "a\x00b\tc\r\n  d​e", "a b c de"},
+		{"control characters and runs of spaces", "a\x00b\tc\r\n  d​e", "ab c de"},
 		{"bidi override is dropped", "abc‮def", "abcdef"},
 		{"empty quotes and braces", `x "" {} [] y`, "x <redacted> <redacted> <redacted> y"},
 		{"invalid UTF-8", "bad \xff\xfe byte", "bad �� byte"},
@@ -217,13 +236,39 @@ func TestRedactMessageRealTexts(t *testing.T) {
 	}
 }
 
-// Known residual (design doc section 4.2, "honest limits"): text in single
-// quotes or parentheses is not matched by any pattern. This test pins the
-// behaviour so a change is a conscious one.
+// Known residual: a bare identifier-shaped value in single quotes looks like a
+// column name and is kept, and typographic/fullwidth quotes are not
+// recognised. This test pins both so a change is a conscious one.
 func TestRedactMessageKnownResidual(t *testing.T) {
-	got := RedactMessage("Unrecognized token 'jane@example.com': was expecting JSON")
-	if !strings.Contains(got, "'jane@example.com'") {
-		t.Fatalf("single-quoted text is no longer kept: %q (update the design doc and the PR note)", got)
+	if got := RedactMessage("Duplicate entry 'jane' for key 'users.email'"); got != "Duplicate entry 'jane' for key 'users.email'" {
+		t.Fatalf("identifier-shaped value changed: %q", got)
+	}
+	if got := RedactMessage("bad \u201cjane@example.com\u201d here"); !strings.Contains(got, "jane@example.com") {
+		t.Fatalf("typographic quotes are now handled: %q (update the PR note)", got)
+	}
+}
+
+// Cap first: a group opened before rune 300 and closed after it. Without the
+// first cap the closing brace is found, the group is removed and SECRETPLAIN
+// (outside any quote or group) survives.
+func TestRedactMessageCapIsAppliedFirst(t *testing.T) {
+	in := strings.Repeat("a", 100) + "{" + strings.Repeat("x", 300) + "} SECRETPLAIN"
+	got := RedactMessage(in)
+	if strings.Contains(got, "SECRETPLAIN") {
+		t.Fatalf("text past the 300-rune cap survived: %q", got)
+	}
+	if want := strings.Repeat("a", 100) + Redacted; got != want {
+		t.Fatalf("got %q, want the group redacted to the end", got)
+	}
+}
+
+// The cap never leaves half a marker.
+func TestRedactMessageNoPartialMarker(t *testing.T) {
+	for n := 270; n < 300; n++ {
+		got := RedactMessage(strings.Repeat("a", n) + ` "x" "y" "z"`)
+		if i := strings.LastIndex(got, "<"); i >= 0 && !strings.HasPrefix(got[i:], Redacted) {
+			t.Errorf("n=%d: partial marker at the end: %q", n, got[i:])
+		}
 	}
 }
 
@@ -236,6 +281,7 @@ func FuzzRedactMessage(f *testing.F) {
 		`{"a":"}`, `"\"`, `"\`, "[{[{[", "}}]]", `"" "" ""`, "Det}ail:", "[Sou}rce:", `Det"x"ail:`,
 		"a\x00b", "\xff\xfe", "‮​", strings.Repeat(`""`, 400), strings.Repeat("[", 400),
 		"Where:Where:", "wHeRe: x", "deTAIL:", "[SOURCE:",
+		"Unrecognized token 'a': x", "VALUES (1,'a'), (2", "Det\x00ail:", "'a b' 'c d'", "''''", "x 'it's' y",
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -254,8 +300,31 @@ func FuzzRedactMessage(f *testing.F) {
 		if strings.ContainsAny(got, "\"{}[]") {
 			t.Fatalf("a quote, brace or bracket survived: %q", got)
 		}
+		if r := openSpan(got); r != "" {
+			t.Fatalf("single-quoted span with a non-identifier body survived (%q): %q", r, got)
+		}
 		if strings.ContainsAny(got, "\x00\r\n\t") {
 			t.Fatalf("control character survived: %q", got)
 		}
 	})
+}
+
+// openSpan finds a '...' span (opener at a word start, closer not followed by
+// a letter or digit) whose body is not identifier-shaped, and returns it.
+func openSpan(s string) string {
+	rs := []rune(s)
+	for i := 0; i < len(rs); i++ {
+		if rs[i] != '\'' || !wordStart(rs, i) {
+			continue
+		}
+		end := apostropheEnd(rs, i)
+		if end < 0 {
+			continue
+		}
+		if !isIdentifier(rs[i+1 : end]) {
+			return string(rs[i : end+1])
+		}
+		i = end // a kept span: its closer is not the next opener
+	}
+	return ""
 }
