@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiClientError, api, roomWsUrl } from './client'
+import { ApiClientError, api, probeAuthMode, roomWsUrl } from './client'
 import { onAuthProblem } from '../lib/auth'
 import type { AuthProblem } from '../lib/auth'
 
@@ -147,6 +147,29 @@ describe('auth failures', () => {
     fetchMock.mockResolvedValue(jsonResponse(401, { error: { code: 'unauthenticated', message: 'no' } }))
     await expect(api.me()).rejects.toBeInstanceOf(ApiClientError)
     expect(seen).toEqual([])
+  })
+})
+
+describe('probeAuthMode', () => {
+  it('reads error.auth_mode from GET /api/me without reporting a problem', async () => {
+    const seen: AuthProblem[] = []
+    const off = onAuthProblem((p) => seen.push(p))
+    fetchMock.mockResolvedValue(
+      jsonResponse(401, { error: { code: 'session_expired', message: 'x', auth_mode: 'dev' } }),
+    )
+    expect(await probeAuthMode()).toBe('dev')
+    expect(lastCall().url).toBe('/api/me')
+    expect(seen).toEqual([])
+    off()
+  })
+
+  it('is undefined when the body has no auth_mode, the session is valid, or fetch fails', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(401, { error: { code: 'session_expired', message: 'x' } }))
+    expect(await probeAuthMode()).toBeUndefined()
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { id: 'a', name: 'A', layers: [] }))
+    expect(await probeAuthMode()).toBeUndefined()
+    fetchMock.mockRejectedValueOnce(new Error('network'))
+    expect(await probeAuthMode()).toBeUndefined()
   })
 })
 

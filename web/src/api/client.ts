@@ -57,6 +57,23 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T
 }
 
+/**
+ * Ask the server which login it uses, without raising an auth problem.
+ * GET /api/me answers 401 session_expired with `error.auth_mode`; undefined when
+ * it does not say (or the call fails, or the session turned out to be valid).
+ */
+export async function probeAuthMode(): Promise<AuthMode | undefined> {
+  try {
+    const res = await fetch('/api/me', { credentials: 'same-origin' })
+    if (res.ok) return undefined
+    const body = (await res.json()) as { error?: { auth_mode?: AuthMode } }
+    const m = body.error?.auth_mode
+    return m === 'dev' || m === 'oidc' ? m : undefined
+  } catch {
+    return undefined
+  }
+}
+
 const room = (roomId: string) => `/api/rooms/${encodeURIComponent(roomId)}`
 
 export const api = {

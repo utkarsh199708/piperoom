@@ -14,8 +14,10 @@ paths only and never sends a user-id header. Under `npm run dev` a login screen 
 - Keep Vite on `localhost` (or `127.0.0.1`): the proxy does not rewrite `Host`, and the server
   allows loopback names on any port (`421 bad_host` otherwise).
 - `VITE_FIXTURES=1 npm run dev` runs the UI without a server (no login).
-- `VITE_AUTH_MODE=dev|oidc` (optional) says which login to show on `401 session_expired`; by default a
-  Vite dev build means `dev` and a production build means `oidc` (redirect to `/auth/login?return=...`).
+- On `401 session_expired` the server says its mode in `error.auth_mode` (`dev` shows the user picker,
+  `oidc` goes to `/auth/login?return=...`). With no `auth_mode` the app asks `GET /api/me`, and if that does
+  not say either it shows a plain "signed out" notice. It never redirects unless the mode is `oidc`.
+  `VITE_AUTH_MODE=dev|oidc` overrides the server answer for local work.
 
 ---
 

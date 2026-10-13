@@ -14,11 +14,12 @@ vi.mock('../api/client', async (importOriginal) => {
   return {
     ...actual,
     isFixtures: () => false,
+    probeAuthMode: vi.fn(),
     api: { ...actual.api, me: vi.fn(), devLogin: vi.fn(), logout: vi.fn() },
   }
 })
 
-import { ApiClientError, api } from '../api/client'
+import { ApiClientError, api, probeAuthMode } from '../api/client'
 import { reportAuthProblem, redirectToLogin } from '../lib/auth'
 import { UserProvider } from './UserContext'
 import { useCurrentUser } from './user'
@@ -53,6 +54,8 @@ beforeEach(() => {
   vi.mocked(api.devLogin).mockReset()
   vi.mocked(api.logout).mockReset()
   vi.mocked(redirectToLogin).mockReset()
+  vi.mocked(probeAuthMode).mockReset()
+  vi.mocked(probeAuthMode).mockResolvedValue(undefined)
 })
 
 describe('UserProvider (live mode)', () => {
@@ -63,9 +66,9 @@ describe('UserProvider (live mode)', () => {
     expect(api.me).toHaveBeenCalledWith()
   })
 
-  it('shows the user picker when /api/me answers 401 session_expired (dev)', async () => {
+  it('shows the user picker when the 401 says auth_mode dev', async () => {
     vi.mocked(api.me).mockImplementation(() => {
-      reportAuthProblem({ kind: 'session_expired', message: 'expired' })
+      reportAuthProblem({ kind: 'session_expired', message: 'expired', authMode: 'dev' })
       return Promise.reject(expired())
     })
     renderProvider()
@@ -100,8 +103,37 @@ describe('UserProvider (live mode)', () => {
     vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
     renderProvider()
     await screen.findByTestId('who')
-    act(() => reportAuthProblem({ kind: 'session_expired', message: 'expired' }))
+    act(() => reportAuthProblem({ kind: 'session_expired', message: 'expired', authMode: 'dev' }))
     expect(await screen.findByText('Sign in')).toBeInTheDocument()
+  })
+
+  it('without auth_mode it asks GET /api/me: dev shows the picker', async () => {
+    vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
+    vi.mocked(probeAuthMode).mockResolvedValue('dev')
+    renderProvider()
+    await screen.findByTestId('who')
+    act(() => reportAuthProblem({ kind: 'session_expired', message: 'expired' }))
+    expect(await screen.findByRole('button', { name: 'Priya' })).toBeInTheDocument()
+    expect(probeAuthMode).toHaveBeenCalledTimes(1)
+  })
+
+  it('without auth_mode it asks GET /api/me: oidc redirects', async () => {
+    vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
+    vi.mocked(probeAuthMode).mockResolvedValue('oidc')
+    renderProvider()
+    await screen.findByTestId('who')
+    act(() => reportAuthProblem({ kind: 'session_expired', message: 'expired' }))
+    await waitFor(() => expect(redirectToLogin).toHaveBeenCalledTimes(1))
+  })
+
+  it('with no answer at all it shows a signed-out notice and never redirects', async () => {
+    vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
+    renderProvider()
+    await screen.findByTestId('who')
+    act(() => reportAuthProblem({ kind: 'session_expired', message: 'expired' }))
+    expect(await screen.findByText(/You are signed out\. Reload/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Priya' })).not.toBeInTheDocument()
+    expect(redirectToLogin).not.toHaveBeenCalled()
   })
 
   it('logout calls POST /auth/logout and shows the picker', async () => {
@@ -109,6 +141,7 @@ describe('UserProvider (live mode)', () => {
     vi.mocked(api.logout).mockResolvedValue(undefined)
     renderProvider()
     await screen.findByTestId('who')
+    vi.mocked(probeAuthMode).mockResolvedValue('dev')
     fireEvent.click(screen.getByText('out'))
     expect(await screen.findByText('Sign in')).toBeInTheDocument()
     expect(api.logout).toHaveBeenCalledTimes(1)

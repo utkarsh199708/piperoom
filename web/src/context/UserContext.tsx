@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { DEFAULT_USER_ID, findUser } from '../dev/users'
 import type { CurrentUser } from '../state/permissions'
-import { ApiClientError, api, isFixtures } from '../api/client'
-import { loginRedirectUrl, onAuthProblem, redirectToLogin, resolveAuthMode } from '../lib/auth'
+import { ApiClientError, api, isFixtures, probeAuthMode } from '../api/client'
+import { loginRedirectUrl, onAuthProblem, redirectToLogin, resolveAuthMode, saveReturnHash } from '../lib/auth'
 import type { AuthMode, AuthProblem } from '../lib/auth'
 import { errorText } from '../lib/errors'
 import { AuthBanner } from '../components/AuthBanner'
@@ -55,13 +55,17 @@ function FixtureUserProvider({ children }: { children: ReactNode }) {
 function LiveUserProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<CurrentUser | null>(null)
   const [phase, setPhase] = useState<Phase>('loading')
-  const [mode, setMode] = useState<AuthMode>(() => resolveAuthMode())
+  // null = the server did not say (see resolveAuthMode): show a plain signed-out notice.
+  const [mode, setMode] = useState<AuthMode | null>(null)
   const [epoch, setEpoch] = useState(0)
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState<AuthProblem | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
 
-  // Auth failures from any fetch or from the WebSocket arrive here.
+  // Auth failures from any fetch or from the WebSocket arrive here. The server
+  // mode comes from error.auth_mode (or the VITE_AUTH_MODE override); if the 401
+  // did not carry it, ask GET /api/me. Redirect to /auth/login only for "oidc".
+  const expiring = useRef(false)
   useEffect(
     () =>
       onAuthProblem((p) => {
@@ -69,15 +73,23 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
           setProblem(p)
           return
         }
-        const m = resolveAuthMode(p.authMode)
-        setMode(m)
-        if (m === 'oidc') {
-          redirectToLogin()
-          return
-        }
-        setUser(null)
-        setPhase('login')
-        setEpoch((n) => n + 1)
+        if (expiring.current) return
+        expiring.current = true
+        void (async () => {
+          try {
+            const m = resolveAuthMode(p.authMode) ?? (await probeAuthMode())
+            if (m === 'oidc') {
+              redirectToLogin()
+              return
+            }
+            setMode(m ?? null)
+            setUser(null)
+            setPhase('login')
+            setEpoch((n) => n + 1)
+          } finally {
+            expiring.current = false
+          }
+        })()
       }),
     [],
   )
@@ -125,6 +137,9 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
       } catch {
         // an expired session is as good as logged out
       }
+      // After logout never jump to the IdP by itself (its own session would sign
+      // the person straight back in): show the sign-in choice for the mode.
+      setMode(resolveAuthMode() ?? (await probeAuthMode()) ?? null)
       setUser(null)
       setPhase('login')
       setEpoch((n) => n + 1)
@@ -144,11 +159,23 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
         {banners}
         {mode === 'dev' ? (
           <LoginScreen onPick={setUserId} busy={busy} />
-        ) : (
+        ) : mode === 'oidc' ? (
           <main className="roomlist">
             <p className="empty">
-              You are signed out. <a href={loginRedirectUrl()}>Sign in</a>
+              You are signed out.{' '}
+              <a href={loginRedirectUrl()} onClick={() => saveReturnHash()}>
+                Sign in
+              </a>
             </p>
+          </main>
+        ) : (
+          <main className="roomlist">
+            <div className="banner banner--error" role="alert">
+              <span>You are signed out. Reload the page to sign in again.</span>
+              <button type="button" className="btn btn--ghost btn--small" onClick={() => window.location.reload()}>
+                Reload
+              </button>
+            </div>
           </main>
         )}
       </div>

@@ -1,8 +1,6 @@
 // Auth helpers shared by the API client and the UI (docs/design/auth.md).
 // The session is an HttpOnly cookie the browser sends by itself; nothing here
 // touches a credential. This module only decides what an auth failure means.
-import { isDev } from './env'
-
 export type AuthMode = 'dev' | 'oidc'
 
 /** The auth failures the UI shows to the person (docs/api.md, Errors). */
@@ -11,7 +9,7 @@ export type AuthProblemKind = 'session_expired' | 'proxy_identity' | 'bad_host' 
 export interface AuthProblem {
   kind: AuthProblemKind
   message: string
-  /** Server mode if the 401 body said so (not in the contract yet, see resolveAuthMode). */
+  /** `error.auth_mode` from the 401 body. */
   authMode?: AuthMode
 }
 
@@ -52,18 +50,18 @@ export function problemText(p: AuthProblem): string {
 }
 
 /**
- * Which login to offer after `session_expired`.
+ * Which login to offer after `session_expired`, or undefined when unknown.
  *
- * The contract has no field that tells the web app the server mode. Order:
- *   1. `auth_mode` in the 401 body, if the server sends it (proposed addition);
- *   2. the build-time `VITE_AUTH_MODE` (dev | oidc);
- *   3. a Vite dev build means dev, any other build means oidc.
+ * The only source is `error.auth_mode` in the 401 body (docs/api.md, Errors).
+ * `VITE_AUTH_MODE` (dev | oidc) is a developer override that wins over it.
+ * There is no guess from the build type: with no answer the caller probes
+ * GET /api/me, and if that does not say either, shows a plain signed-out notice.
  */
-export function resolveAuthMode(hint?: AuthMode): AuthMode {
-  if (hint === 'dev' || hint === 'oidc') return hint
+export function resolveAuthMode(hint?: AuthMode): AuthMode | undefined {
   const built = import.meta.env.VITE_AUTH_MODE as string | undefined
   if (built === 'dev' || built === 'oidc') return built
-  return isDev ? 'dev' : 'oidc'
+  if (hint === 'dev' || hint === 'oidc') return hint
+  return undefined
 }
 
 /** `/auth/login?return=<current path>`: the server accepts only a path, never a URL. */
@@ -72,8 +70,36 @@ export function loginRedirectUrl(loc: Pick<Location, 'pathname' | 'search'> = wi
   return `/auth/login?return=${encodeURIComponent(ret)}`
 }
 
-/** Leave the app for the IdP login (oidc mode). Kept here so tests can replace it. */
+// The app uses a HashRouter, so `#/rooms/r_x` never reaches the server and
+// `return=` carries only path and query. Keep the hash across the IdP round trip.
+export const RETURN_HASH_KEY = 'piperoom_return_hash'
+
+export function saveReturnHash(hash: string = window.location.hash): void {
+  try {
+    if (hash && hash !== '#' && hash !== '#/') sessionStorage.setItem(RETURN_HASH_KEY, hash)
+  } catch {
+    // storage blocked: the person lands on the room list instead
+  }
+}
+
+/** Restore the saved hash once (only onto an empty location), then delete the key. */
+export function restoreReturnHash(): void {
+  try {
+    const saved = sessionStorage.getItem(RETURN_HASH_KEY)
+    if (saved === null) return
+    sessionStorage.removeItem(RETURN_HASH_KEY)
+    const cur = window.location.hash
+    if (saved.startsWith('#/') && (cur === '' || cur === '#' || cur === '#/')) {
+      window.location.hash = saved
+    }
+  } catch {
+    // storage blocked: nothing to restore
+  }
+}
+
+/** Leave the app for the IdP login. Only call this when the server said `auth_mode: "oidc"`. */
 export function redirectToLogin(): void {
+  saveReturnHash()
   window.location.assign(loginRedirectUrl())
 }
 

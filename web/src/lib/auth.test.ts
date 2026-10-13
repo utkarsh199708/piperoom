@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const flags = vi.hoisted(() => ({ dev: true }))
 vi.mock('./env', () => ({
@@ -7,7 +7,15 @@ vi.mock('./env', () => ({
   },
 }))
 
-import { classifyAuthProblem, loginRedirectUrl, problemText, resolveAuthMode } from './auth'
+import {
+  RETURN_HASH_KEY,
+  classifyAuthProblem,
+  loginRedirectUrl,
+  problemText,
+  resolveAuthMode,
+  restoreReturnHash,
+  saveReturnHash,
+} from './auth'
 
 describe('classifyAuthProblem', () => {
   it('maps the four auth failures', () => {
@@ -33,18 +41,66 @@ describe('problemText', () => {
 })
 
 describe('resolveAuthMode', () => {
-  it('prefers the server hint', () => {
-    flags.dev = true
+  afterEach(() => vi.unstubAllEnvs())
+
+  it('uses the server hint and does not guess from the build type', () => {
     expect(resolveAuthMode('oidc')).toBe('oidc')
-    flags.dev = false
     expect(resolveAuthMode('dev')).toBe('dev')
+    flags.dev = true
+    expect(resolveAuthMode()).toBeUndefined()
+    flags.dev = false
+    expect(resolveAuthMode()).toBeUndefined()
   })
 
-  it('falls back to dev for a Vite dev build and oidc for a production build', () => {
-    flags.dev = true
+  it('VITE_AUTH_MODE is a developer override', () => {
+    vi.stubEnv('VITE_AUTH_MODE', 'dev')
+    expect(resolveAuthMode('oidc')).toBe('dev')
     expect(resolveAuthMode()).toBe('dev')
-    flags.dev = false
-    expect(resolveAuthMode()).toBe('oidc')
+    vi.stubEnv('VITE_AUTH_MODE', 'nonsense')
+    expect(resolveAuthMode('oidc')).toBe('oidc')
+  })
+})
+
+describe('return hash across the IdP round trip', () => {
+  beforeEach(() => {
+    sessionStorage.clear()
+    window.location.hash = ''
+  })
+
+  it('saves the hash under piperoom_return_hash', () => {
+    window.location.hash = '#/rooms/r_x'
+    saveReturnHash()
+    expect(sessionStorage.getItem('piperoom_return_hash')).toBe('#/rooms/r_x')
+  })
+
+  it('does not save an empty or root hash', () => {
+    saveReturnHash('')
+    saveReturnHash('#/')
+    expect(sessionStorage.getItem(RETURN_HASH_KEY)).toBeNull()
+  })
+
+  it('restores it once, then deletes the key', () => {
+    sessionStorage.setItem(RETURN_HASH_KEY, '#/rooms/r_x')
+    restoreReturnHash()
+    expect(window.location.hash).toBe('#/rooms/r_x')
+    expect(sessionStorage.getItem(RETURN_HASH_KEY)).toBeNull()
+    window.location.hash = '#/rooms/other'
+    restoreReturnHash()
+    expect(window.location.hash).toBe('#/rooms/other')
+  })
+
+  it('does not overwrite a hash that is already there, but still deletes the key', () => {
+    window.location.hash = '#/rooms/now'
+    sessionStorage.setItem(RETURN_HASH_KEY, '#/rooms/old')
+    restoreReturnHash()
+    expect(window.location.hash).toBe('#/rooms/now')
+    expect(sessionStorage.getItem(RETURN_HASH_KEY)).toBeNull()
+  })
+
+  it('ignores a saved value that is not a route hash', () => {
+    sessionStorage.setItem(RETURN_HASH_KEY, 'javascript:alert(1)')
+    restoreReturnHash()
+    expect(window.location.hash).toBe('')
   })
 })
 
