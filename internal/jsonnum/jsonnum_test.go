@@ -66,3 +66,44 @@ func TestQuote(t *testing.T) {
 		t.Error("Quote copied an input it did not change")
 	}
 }
+
+// An exponent that fits an int64 is clamped before the scale arithmetic, so
+// adding the fraction length or the trailing zeros cannot wrap it around. The
+// wrapped values used to swap the sign of the clamp for a huge positive
+// exponent and a huge negative one.
+func TestSignificantClampsExponentBeforeScale(t *testing.T) {
+	const clamp = 1 << 40
+	for _, tc := range []struct {
+		tok   string
+		exp10 int
+	}{
+		{"10e9223372036854775807", clamp},
+		{"0.1e-9223372036854775808", -clamp},
+		{"1.0e9223372036854775807", clamp},
+		{"10e92233720368547758070", clamp}, // beyond int64: Atoi reports ErrRange
+		{"0.1e-92233720368547758080", -clamp},
+		{"1" + strings.Repeat("0", 5000) + "e-9223372036854775808", -clamp + 5000}, // padding still adds to the clamped exponent
+	} {
+		digits, exp10, ok := Significant(tc.tok)
+		if !ok || exp10 != tc.exp10 || digits == "0" {
+			t.Errorf("Significant(%.40q) = %q, %d, %v; want exp10 %d", tc.tok, digits, exp10, ok, tc.exp10)
+		}
+	}
+	for _, tok := range []string{"0e9223372036854775807", "0.0e-9223372036854775808", "0e-92233720368547758080"} {
+		if digits, _, ok := Significant(tok); !ok || digits != "0" {
+			t.Errorf("Significant(%q) = %q, %v; a zero mantissa stays zero", tok, digits, ok)
+		}
+	}
+	// Both huge exponents are outside the double range (the negative one
+	// underflows to zero); the room package tells them apart.
+	for _, tok := range []string{"10e9223372036854775807", "0.1e-9223372036854775808", "10e92233720368547758070"} {
+		if !OutOfRange(tok) {
+			t.Errorf("OutOfRange(%q) = false, want true", tok)
+		}
+	}
+	for _, tok := range []string{"0e9223372036854775807", "0.0e-9223372036854775808"} {
+		if OutOfRange(tok) {
+			t.Errorf("OutOfRange(%q) = true, want false (zero)", tok)
+		}
+	}
+}

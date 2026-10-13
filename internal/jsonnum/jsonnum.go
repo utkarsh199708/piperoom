@@ -104,6 +104,9 @@ func Significant(tok string) (digits string, exp10 int, ok bool) {
 		default:
 			return "", 0, false
 		}
+		// Clamp here, before the fraction length and trailing zeros are added
+		// below: an exponent near the int64 limit would wrap around there.
+		exp = min(max(exp, -maxExpClamp), maxExpClamp)
 		i = len(tok)
 	}
 	if i != len(tok) || intPart == "" && fracPart == "" {
