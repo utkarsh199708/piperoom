@@ -85,6 +85,14 @@ func run() error {
 		return err
 	}
 
+	// Shadow mode numbers (docs/design/shadow.md 5.3): a bad
+	// PIPEROOM_SHADOW_* value stops the server like a bad watcher value. Which
+	// pipelines are shadow comes from owners.yaml.
+	shadowCfg, err := config.ParseShadow(cfg)
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
+
 	// Login settings (docs/design/auth.md): a bad PIPEROOM_AUTH_MODE or oidc
 	// config refuses start, and so does a reachable-from-outside listen
 	// address in dev mode without PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 (security
@@ -127,6 +135,10 @@ func run() error {
 	}
 	if err := room.ValidateUsers(users, own); err != nil {
 		return fmt.Errorf("server: users/owners config: %w", err)
+	}
+	if own.AnyShadow() {
+		log.Info("server: shadow mode", "pipelines", shadowPipelines(own), "grace", shadowCfg.Grace.String(),
+			"token_budget", shadowCfg.TokenBudget, "max_turns", shadowCfg.MaxTurns)
 	}
 	// Solo mode: refuse to start when the solo user is unknown or owners.yaml
 	// names anyone else (design section 5.3).
@@ -260,6 +272,13 @@ func run() error {
 			Effort:   cfg.Effort,
 			MaxTurns: 40,
 		},
+		ShadowOptions: agent.Options{
+			Model:       cfg.Model,
+			Effort:      cfg.Effort,
+			MaxTurns:    shadowCfg.MaxTurns,
+			TokenBudget: shadowCfg.TokenBudget,
+		},
+		ShadowGrace:  shadowCfg.Grace,
 		Logger:       log,
 		MaxAgents:    maxAgents,
 		Sessions:     sessions,
@@ -393,4 +412,15 @@ func migrateRoomDB(ctx context.Context, dbURL string, log *slog.Logger) error {
 	}
 	log.Info("server: migrations applied", "count", n)
 	return nil
+}
+
+// shadowPipelines lists the ids of the pipelines with shadow mode on.
+func shadowPipelines(own *owners.Owners) []string {
+	var ids []string
+	for _, p := range own.Pipelines {
+		if p.Shadow() {
+			ids = append(ids, p.ID)
+		}
+	}
+	return ids
 }
