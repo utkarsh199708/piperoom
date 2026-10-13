@@ -1,0 +1,239 @@
+/*
+ * TEMP until P1 (tokens.css, primitives.css) lands. Delete this file and the @import in home.css
+ * at rebase. It holds (1) the spec §2 tokens, new names only (no old aliases, so the rest of the
+ * app is unchanged), and (2) the primitive classes that the P2 stand-ins in
+ * components/p2Standins.tsx need.
+ *
+ * Light theme applies only when data-theme="light" is pinned; the media-query form arrives with P1,
+ * because the rest of the app is dark-only until then.
+ */
+:root {
+  --bg-0: #0b0e14;
+  --bg-1: #10141c;
+  --bg-2: #161c27;
+  --bg-3: #1d2432;
+  --line: #232c3b;
+  --line-2: #2f3a4c;
+  --fg: #e6ebf2;
+  --fg-2: #a9b4c4;
+  --fg-3: #7f8a9c;
+  --accent: #5b9dff;
+  --fail: #ff7b72;
+  --warn: #ffb454;
+  --ok: #3ecf8e;
+  --agent: #b48cff;
+  --on-strong: #0b0e14;
+  --accent-tint: rgba(91, 157, 255, 0.12);
+  --fail-tint: rgba(255, 123, 114, 0.12);
+  --warn-tint: rgba(255, 180, 84, 0.12);
+  --ok-tint: rgba(62, 207, 142, 0.12);
+  --agent-tint: rgba(180, 140, 255, 0.1);
+  --ring-accent: 0 0 0 3px rgba(91, 157, 255, 0.22);
+  --ring-fail: 0 0 0 3px rgba(255, 123, 114, 0.22);
+  --ring-warn: 0 0 0 3px rgba(255, 180, 84, 0.22);
+  --warn-line: rgba(255, 180, 84, 0.45);
+  --shadow-1: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --overlay: rgba(5, 7, 10, 0.6);
+  --layer-postgres: #7cc4ff;
+  --layer-kafka-connect: var(--warn);
+  --layer-schema-registry: var(--agent);
+  --layer-kafka: #8fd3ff;
+  --layer-consumer: var(--ok);
+  --layer-warehouse: #ff9fd4;
+  --h1: #ff8fab;
+  --h2: #7dd3fc;
+  --h3: #c4b5fd;
+  --h4: #fcd34d;
+  --h5: #86efac;
+  --h6: #fdba74;
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+  --s10: 40px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+  --dur-fast: 120ms;
+  --dur: 200ms;
+  --dur-slow: 320ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+:root[data-theme='light'] {
+  --bg-0: #f3f5f9;
+  --bg-1: #ffffff;
+  --bg-2: #f7f9fc;
+  --bg-3: #eef2f7;
+  --line: #dfe5ee;
+  --line-2: #c9d2df;
+  --fg: #111827;
+  --fg-2: #4b5565;
+  --fg-3: #5f6977;
+  --accent: #185fd0;
+  --fail: #c0392b;
+  --warn: #8f5300;
+  --ok: #167244;
+  --agent: #6a3ad1;
+  --on-strong: #ffffff;
+  --accent-tint: #e4eefc;
+  --fail-tint: #fde8e6;
+  --warn-tint: #fff1d6;
+  --ok-tint: #dff7ea;
+  --agent-tint: #efe8ff;
+  --ring-accent: 0 0 0 3px rgba(24, 95, 208, 0.2);
+  --ring-fail: 0 0 0 3px rgba(192, 57, 43, 0.2);
+  --ring-warn: 0 0 0 3px rgba(143, 83, 0, 0.2);
+  --warn-line: #f0c98a;
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-2: 0 12px 32px rgba(16, 24, 40, 0.14);
+  --overlay: rgba(16, 24, 40, 0.45);
+  --layer-postgres: #145ea8;
+  --layer-kafka: #0f6b9c;
+  --layer-warehouse: #b0286f;
+  --h1: #c2185b;
+  --h2: #0369a1;
+  --h3: #6d28d9;
+  --h4: #a16207;
+  --h5: #15803d;
+  --h6: #c2410c;
+}
+
+/* ---- primitives used by the stand-ins ---- */
+.icon {
+  flex: none;
+  vertical-align: -3px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.kicker {
+  font-size: 12px;
+  line-height: 16px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--fg-3);
+}
+
+.layer-tag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--fg-2);
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.layer-tag--postgres {
+  color: var(--layer-postgres);
+  border-color: color-mix(in srgb, var(--layer-postgres) 40%, transparent);
+}
+.layer-tag--kafka-connect {
+  color: var(--layer-kafka-connect);
+  border-color: color-mix(in srgb, var(--layer-kafka-connect) 40%, transparent);
+}
+.layer-tag--schema-registry {
+  color: var(--layer-schema-registry);
+  border-color: color-mix(in srgb, var(--layer-schema-registry) 40%, transparent);
+}
+.layer-tag--kafka {
+  color: var(--layer-kafka);
+  border-color: color-mix(in srgb, var(--layer-kafka) 40%, transparent);
+}
+.layer-tag--consumer {
+  color: var(--layer-consumer);
+  border-color: color-mix(in srgb, var(--layer-consumer) 40%, transparent);
+}
+.layer-tag--warehouse {
+  color: var(--layer-warehouse);
+  border-color: color-mix(in srgb, var(--layer-warehouse) 40%, transparent);
+}
+
+.skeleton {
+  background: var(--bg-3);
+  border-radius: var(--r-sm);
+  min-height: 14px;
+}
+
+.avatar--xs {
+  width: 16px;
+  height: 16px;
+  font-size: 8px;
+}
+.avatar--h1 {
+  background: var(--h1);
+  color: var(--on-strong);
+}
+.avatar--h2 {
+  background: var(--h2);
+  color: var(--on-strong);
+}
+.avatar--h3 {
+  background: var(--h3);
+  color: var(--on-strong);
+}
+.avatar--h4 {
+  background: var(--h4);
+  color: var(--on-strong);
+}
+.avatar--h5 {
+  background: var(--h5);
+  color: var(--on-strong);
+}
+.avatar--h6 {
+  background: var(--h6);
+  color: var(--on-strong);
+}
+.avatar--driver {
+  box-shadow:
+    0 0 0 2px var(--bg-1),
+    0 0 0 4px var(--accent);
+}
+
+div.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 4px;
+  padding: 18px 8px;
+  color: var(--fg-3);
+  font-size: 13px;
+}
+div.empty .icon {
+  opacity: 0.6;
+  margin-bottom: 4px;
+}
+div.empty b {
+  color: var(--fg-2);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .skeleton {
+    background: linear-gradient(90deg, var(--bg-3) 0%, var(--bg-2) 50%, var(--bg-3) 100%);
+    background-size: 200% 100%;
+    animation: p2-shimmer 1.6s linear infinite;
+  }
+  @keyframes p2-shimmer {
+    to {
+      background-position: -200% 0;
+    }
+  }
+}

@@ -1,8 +1,25 @@
-import { useState } from 'react'
+import { Fragment, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import type { TraceState } from '../state/types'
 import type { RoomActions } from '../hooks/useRoom'
 import { Chip } from './ui'
+// TEMP until P1: LayerTag comes from './ui' once it lands.
+import { LayerTag } from './p2Standins'
+import '../styles/flow.css'
+
+/** Trace stage status → the node health it borrows its look from (§7.11). */
+const STAGE_HEALTH: Record<string, string> = {
+  seen: 'ok',
+  not_seen: 'unknown',
+  stopped_here: 'fail',
+}
+
+function stageTone(status: string): string {
+  if (status === 'stopped_here') return 'fail'
+  if (status === 'seen') return 'ok'
+  if (status === 'not_seen') return 'muted'
+  return 'warn'
+}
 
 export function TracePanel({
   trace,
@@ -16,6 +33,25 @@ export function TracePanel({
   const [table, setTable] = useState('public.orders')
   const [key, setKey] = useState('10042')
   const [busy, setBusy] = useState(false)
+  const tableRef = useRef<HTMLInputElement>(null)
+  const onCloseRef = useRef(onClose)
+  useEffect(() => {
+    onCloseRef.current = onClose
+  })
+
+  // Open on the first field, close on Esc, and give focus back to whatever opened the dialog.
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    tableRef.current?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCloseRef.current()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      opener?.focus()
+    }
+  }, [])
 
   const submit = (e: FormEvent) => {
     e.preventDefault()
@@ -24,6 +60,8 @@ export function TracePanel({
     actions.trace(table.trim(), key.trim())
     window.setTimeout(() => setBusy(false), 400)
   }
+
+  const stages = trace?.stages ?? []
 
   return (
     <div className="overlay" role="dialog" aria-modal="true" aria-label="Trace a record">
@@ -38,7 +76,13 @@ export function TracePanel({
         <form className="trace__form" onSubmit={submit}>
           <div className="field">
             <label htmlFor="trace-table">Table</label>
-            <input id="trace-table" value={table} onChange={(e) => setTable(e.target.value)} required />
+            <input
+              id="trace-table"
+              ref={tableRef}
+              value={table}
+              onChange={(e) => setTable(e.target.value)}
+              required
+            />
           </div>
           <div className="field">
             <label htmlFor="trace-key">Key</label>
@@ -51,37 +95,40 @@ export function TracePanel({
 
         {trace && (
           <div className="trace__stages">
-            {(trace.stages ?? []).map((s, i) => (
-              <div key={i} className={`trace-stage trace-stage--${s.status}`}>
-                {i > 0 && <span className="trace-stage__arrow" aria-hidden="true">→</span>}
-                <div className="trace-stage__card">
-                  <div className="trace-stage__name">{s.name}</div>
-                  <div className="trace-stage__meta muted">{s.layer}</div>
-                  <Chip
-                    tone={
-                      s.status === 'stopped_here'
-                        ? 'fail'
-                        : s.status === 'seen'
-                          ? 'ok'
-                          : s.status === 'not_seen'
-                            ? 'muted'
-                            : 'warn'
-                    }
+            {stages.map((s, i) => (
+              <Fragment key={i}>
+                {i > 0 && (
+                  <div
+                    className={`edge ${stages[i - 1].status === 'stopped_here' ? 'edge--stalled' : 'edge--flow'}`}
+                    aria-hidden="true"
                   >
-                    {s.status.replace('_', ' ')}
-                  </Chip>
-                  {s.facts && (
-                    <dl className="trace-stage__facts">
+                    <div className="edge__line" />
+                  </div>
+                )}
+                <div
+                  className={`trace-stage trace-stage--${s.status} node-card node-card--${STAGE_HEALTH[s.status] ?? 'warn'}`}
+                >
+                  <div className="node-card__top">
+                    <LayerTag layer={s.layer} />
+                  </div>
+                  <div className="node-card__name" title={s.name}>
+                    {s.name}
+                  </div>
+                  {s.facts && Object.keys(s.facts).length > 0 && (
+                    <dl className="node-card__facts">
                       {Object.entries(s.facts).map(([k, v]) => (
-                        <div key={k}>
+                        <Fragment key={k}>
                           <dt>{k}</dt>
                           <dd>{v}</dd>
-                        </div>
+                        </Fragment>
                       ))}
                     </dl>
                   )}
+                  <div className="node-card__foot">
+                    <Chip tone={stageTone(s.status)}>{s.status.replace('_', ' ')}</Chip>
+                  </div>
                 </div>
-              </div>
+              </Fragment>
             ))}
           </div>
         )}
