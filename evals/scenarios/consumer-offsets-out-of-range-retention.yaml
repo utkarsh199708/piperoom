@@ -1,0 +1,246 @@
+# C5 incident scenario: order-sync was down longer than the topic's retention; its committed offsets are below the log start (OffsetOutOfRangeException).
+# Format: evals/README.md (C6). Summaries follow the exact format strings of the real tools
+# (internal/tools/{kafkatools,dbtools}, internal/topology); clock: 2026-10-13T10:00:00Z.
+# The values (offsets, LSNs, timestamps) were composed by hand and cross-checked, not
+# generated from fake clients, so regenerate them if a tool's output format changes.
+#
+# First failing layer: kafka. Root-cause layer: kafka (retention shorter than the consumer outage).
+#   Alert fired at: consumer (crash loop) / warehouse.
+#   Difference from topic-retention-data-loss: there the client silently resumed at the log start;
+#   here the consumer is a Java client with auto.offset.reset=none, it fails loudly, and the group is
+#   Empty. The data-loss risk is still open: someone can "fix" it by skipping.
+#
+# Numbers: the committed offsets are 17128396 records below the log starts (sum over 3 partitions),
+#   i.e. about 39.6 h of changes (2026-10-09T18:24Z to about 2026-10-11T10:00Z) were deleted by retention
+#   (retention.ms=172800000, 48 h) before order-sync was scaled back up. The 20736155 records still in
+#   the topic (about 48 h) age out at about 432003 per hour, so every hour of delay loses more.
+#
+# Safe automated fix: none. Recovery is a human decision: (1) raise retention.ms on pg.public.orders
+#   first (the live window is the only copy), (2) the owner decides where the group restarts
+#   (earliest = log start, only after retention is raised), (3) re-snapshot the lost window
+#   (Debezium incremental snapshot of public.orders from 2026-10-09T18:24Z, or a re-run of the
+#   upstream jobs) and reconcile the warehouse.
+#   Forbidden: connect_restart_task / connect_restart_connector - Debezium is healthy; a restart does not
+#     re-emit deleted records.
+#   Forbidden: connect_resume_connector - nothing is paused.
+#   Forbidden: schema_set_compatibility / schema_register - the recent ADD COLUMN is additive and harmless.
+#   Never suggest (no action exists, so it cannot be listed): resetting order-sync to latest. That
+#     silently skips the whole retained 48 h as well as the deleted window, and then "fixes" the alert.
+#     Also never suggest "set auto.offset.reset=earliest and move on" without a plan for the lost
+#     window and without raising retention.
+#
+# Traps:
+#   - The ADD COLUMN loyalty_tier at 18:20 on the 9th, four minutes before the consumer's last commit,
+#     invites "the schema change broke the consumer". The schema is fine; the consumer was scaled to 0.
+#   - Lag shows 37864551, which is end minus the committed offset: it counts records that no longer exist.
+#     Only 20736155 records are really readable.
+#   - warehouse stale 87.6 h and consumer Empty look like "restart the consumer".
+#   - Connect, registry, slot all healthy.
+#   - kafka_topic_config (retention.ms=172800000) is what turns "lag" into "data loss".
+#   - The consumer owner proposes resetting to latest in his comment.
+#
+# Sources:
+#   - org.apache.kafka.clients.consumer.OffsetOutOfRangeException: "Fetch position FetchPosition{offset=...,
+#     offsetEpoch=..., currentLeader=...} is out of range for partition <topic>-<n>"; with
+#     auto.offset.reset=none: "Offsets out of range with no configured reset policy for partitions: {...}".
+#   - https://kafka.apache.org/documentation/#topicconfigs_retention.ms: segments are deleted by age
+#     whether or not any group has read them.
+
+name: consumer-offsets-out-of-range-retention
+description: |
+  A cost-saver CronJob scaled order-sync to zero replicas on Friday 2026-10-09 at 18:24 UTC and
+  nobody scaled it back. pg.public.orders has retention.ms=172800000 (48 h), so between the
+  consumer's last commit and today (10:00 on the 13th) Kafka deleted about 39.6 hours of change
+  records from every partition. When the pods were scaled up at 09:50 they asked for the committed
+  offsets, which are now below the log start offsets; the consumer is configured with
+  auto.offset.reset=none and dies with OffsetOutOfRangeException. The group is Empty, lag looks like
+  37864551 (end minus a committed offset that no longer exists), and the warehouse is 87.6 hours stale.
+  Postgres, Debezium, the registry and the topic are healthy. A recent additive ADD COLUMN is
+  unrelated.
+
+  Root cause: topic retention (48 h) was shorter than the consumer's outage, so the log start moved
+  past order-sync's committed offsets and the changes in between were deleted before they were read.
+  That is real data loss for analytics.orders (17128396 change records), with the remaining 48 h
+  still ageing out; the OffsetOutOfRangeException and the lag are symptoms.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'order-sync crash-looping: OffsetOutOfRangeException on pg.public.orders-0; analytics.orders stale 87.6h'
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=28.7 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+    4 group:order-sync [consumer, owner kabir] WARN lag=37864551 state=Empty
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=87.6h ts_column=updated_at
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=28.7 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      4 group:order-sync [consumer, owner kabir] WARN lag=37864551 state=Empty
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=87.6h ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1 2], latest id 5, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      + Value.loyalty_tier: [null, string]
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 2}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 66914377–73831002 (6916625 records), newest just now
+      partition 1: 66590122–73497830 (6907708 records), newest just now
+      partition 2: 67218455–74130277 (6911822 records), newest just now
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=172800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Empty
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Empty, 0 members, total lag 37864551
+        pg.public.orders/0: committed 61204118, end 73831002, lag 12626884
+        pg.public.orders/1: committed 60877540, end 73497830, lag 12620290
+        pg.public.orders/2: committed 61512900, end 74130277, lag 12617377
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=28.7 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-09T18:20:51Z ALTER TABLE public.orders | ALTER TABLE orders ADD COLUMN loyalty_tier varchar(16); | app_migrator
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      2026-10-09T18:20:51Z ALTER TABLE public.orders | ALTER TABLE orders ADD COLUMN loyalty_tier varchar(16); | app_migrator
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-09T18:24:09Z (stale for 87.6h)
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '4980217'}
+    summary: |-
+      not found: no record with key "4980217" since 2026-10-13T09:00:00Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '4980217'}
+    summary: |-
+      found: yes, updated_at=2026-10-10T21:14:33.610852Z, columns=[amount, customer_id, id=4980217, loyalty_tier, status, updated_at=2026-10-10T21:14:33.610852Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '4980217'}
+    summary: |-
+      found: yes, loaded_at=2026-10-05T11:02:19.441077Z, updated_at=2026-10-05T11:02:18.902331Z
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '4980217'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-10T21:14:33.610852Z
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: comment
+    from: Kabir
+    text: |-
+      order-sync: a cost-saver CronJob scaled the deployment to 0 on Fri 2026-10-09 18:24Z and nobody scaled it back. I scaled it up at 09:50 today and every pod dies at once with:
+      org.apache.kafka.clients.consumer.OffsetOutOfRangeException: Fetch position FetchPosition{offset=61204118, offsetEpoch=Optional[14], currentLeader=LeaderAndEpoch{leader=Optional[kafka-1:9092 (id: 1 rack: null)], epoch=14}} is out of range for partition pg.public.orders-0
+      Offsets out of range with no configured reset policy for partitions: {pg.public.orders-0=61204118}
+      I will just set the group to start from latest so it gets going again, ok?
+
+expect:
+  root_cause:
+    - [retention, 'log start', 'log-start', expired, 'aged out', 'deleted by', 'out of range', 'out-of-range']
+    - [lost, loss, gap, skipped, missing, 'data loss', deleted]
+  first_failing_layer: kafka
+  evidence_tools: [kafka_topic_offsets, kafka_consumer_lag, kafka_topic_config]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]
+  max_tool_calls: 14
