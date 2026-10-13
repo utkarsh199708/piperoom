@@ -1,9 +1,18 @@
 # Design: OIDC login, identity-bound approvals, params hash
 
-C9, 2026-10-13, **revision 4**, against `main` @ 0172826. Replaces PR #10's `auth.md`. Covers F1, F2 and feedback
+C9, 2026-10-13, **revision 5**, against `main` @ 0172826. Replaces PR #10's `auth.md`. Covers F1, F2 and feedback
 T1, T5, T6. Revision 1 was reviewed in `reviews/auth-design-critique.md` (verdict: approve with changes). Revision 2
 was reviewed by two critics (security, fit with `main`); revision 3 answers them. Revision 4 answers the review of
-revision 3 (PR #44 at be6f3c2).
+revision 3 (PR #44 at be6f3c2). Revision 5 (lead, 2026-10-13) answers three items of
+`reviews/security-audit-2026-10.md`.
+
+## Changes in revision 5
+
+| Item | What changed | Section |
+|---|---|---|
+| A-ID-2 | Display-name impersonation: `verified` on every person in events and API responses; IdP names that look like a `users.yaml` person get the email (or id) appended; `identity.email` on approvals | §2.1 |
+| A-AP-3 | The users → owners check of `ValidateUsers` no longer skips layers that list groups; `authorizeLayer` applies the same rule per request | §2.3 |
+| A-ID-5 | Unbind revokes the live sessions of the user and of the removed `iss`+`sub` | §2.1 |
 
 ## Changes in revision 4
 
@@ -212,13 +221,37 @@ The session cookie is checked at upgrade; **`?user=` is removed**. `OriginPatter
 - `users.yaml` (additive): each user may add `email:` and/or `sub:`. `sub` wins. Email matches only when
   `email_verified` is true. The first email match binds `iss`+`sub` in an `identities` table; a later login with the
   same email and a different `sub` is refused (recycled account).
-- A user with no `users.yaml` entry gets id `u_` + first 12 hex of SHA-256(`iss`|`sub`), name from `name`.
+- A user with no `users.yaml` entry gets id `u_` + first 12 hex of SHA-256(`iss`|`sub`), name from `name` (format
+  characters dropped), else the email if `email_verified`, else the id. The name is a label, never an identity; see
+  **Display names and `verified`** below.
 - **Login gate (fail closed):** login works only if the user is in `users.yaml`, or is named in `owners.yaml`
   (a `user:` or `group:` in `layers:`, in a pipeline `owners:` block as approver or backup, or in `auditors:`), or is
   in a group of `PIPEROOM_AUTH_VIEWER_GROUPS`. Else `403 not_provisioned`. The gate decides **who gets in**. The role
   below decides **what they may do**, and the two are not the same list.
 - **Unbind:** an admin who moves a user to a new IdP account deletes that user's `identities` row; the next
   verified-email login binds the new `iss`+`sub`. A `devctl identities unbind <user>` helper is A1 work in PR 3.
+  The same transaction revokes every live session of that user or of the removed `iss`+`sub` (security audit
+  A-ID-5), and `devctl` prints how many: the unbound account stops at its next request (`401 session_expired`) and its
+  WebSockets close on the next presence tick.
+
+**Display names and `verified` (revision 5, security audit A-ID-2).** Anyone can set their own IdP name claim, so a
+member who got in through a group could call themself "Priya". Three rules keep a name from passing for a person:
+
+- **`verified`.** Every person in events and API responses carries `verified` (`events.Actor.Verified`,
+  `docs/api.md`): `true` for a `users.yaml` person, whose name is the `users.yaml` name; `false` for a derived `u_`
+  id. The agent and system actors are `true`. It is decided when the event is written. The UI marks `false` with a
+  badge and shows the id or email next to the name.
+- **Look-alike names.** The name of a person who is not in `users.yaml` is compared with every `users.yaml` id, name
+  and email, at login and again on every request (so a `users.yaml` entry added later, or a session made before this
+  rule, is caught too). The comparison form is a skeleton in the spirit of Unicode TR39: drop format characters,
+  NFKD (fullwidth and other compatibility forms), drop combining marks, map Greek and Cyrillic capitals that look
+  Latin, Unicode case folding, map the lower-case Latin, Greek and Cyrillic look-alikes to Latin (a small built-in
+  table), fold `i`/`l`/`1`/`|` and `0`/`o`, `rn`→`m`, `vv`→`w`, and ignore spaces, punctuation and symbols. On a
+  match the name becomes `"<name> (<email>)"` with the verified email, or `"<name> (<u_ id>)"` without one, and the
+  login is logged at Warn with both ids. It is **not refused**: the person may really be called Priya, and the suffix
+  plus the badge tell the two apart. A false match costs only a suffix, so the mapping errs wide.
+- **Decisions carry a mailbox.** `approval.given` / `approval.rejected` `identity.email` is the session's verified
+  IdP email, else the `users.yaml` `email:` of the user, beside the actor id; an audit never rests on the name.
 
 **Roles**, computed per request from the session's user and groups:
 
@@ -292,9 +325,19 @@ auditors: [group:security, user:meera]
 ```
 
 Rights are derived per request from the session's user and groups. `users.yaml` `layers` is deprecated.
-`ValidateUsers` (`internal/room/users.go:70-110`) keeps checking agreement **only for a layer whose principals are
-all `user:`**. The server does not know group membership at start-up, so a layer that lists any `group:` is skipped
-with one Info log. The check goes away when `users.yaml` `layers` is removed.
+`ValidateUsers` (`internal/room/users.go`) checks the two files in both directions until `users.yaml` `layers` is
+removed:
+
+- **owners → users** (every owner listed must exist and list the layer): **only for a layer whose principals are all
+  `user:`**. The server does not know group membership at start-up, so a layer that lists any `group:` is skipped
+  with one Info log.
+- **users → owners** (revision 5, security audit A-AP-3): **always**, groups or not. Every layer a `users.yaml` user
+  lists must name that same user as a `user:` principal in `owners.yaml` (in `layers:`). A layer
+  `consumer: [user:kabir, group:consumers]` with `mallory: layers: [consumer]` refuses to start: the server cannot
+  vouch for group membership at start-up, which is exactly why a `users.yaml` claim must not stand in for it.
+- `authorizeLayer` applies the same rule per request, so it holds even for a config that never went through the start
+  check: with an `owners.yaml` loaded, a `users.yaml` layer grants nothing that `owners.yaml` does not grant the same
+  user by name.
 
 **`/api/me.layers` stays.** `docs/api.md:103` returns `{id,name,layers}` and the UI gates approve buttons on it
 (`web/src/context/UserContext.tsx:40`). `layers` becomes "the layers this session may approve", computed per
