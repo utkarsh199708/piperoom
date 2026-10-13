@@ -196,8 +196,10 @@ Each replica caches every room's snapshot (as before) and now keeps it current:
 - **On every notify** for a cached room, a follower goroutine folds the new events (fetched outside
   the service lock, applied under it). That is how the owner's inbox gets steers within
   milliseconds, how a close on B stops the agent on A (its executor too, and the shadow grace rules
-  run there), and how the leader's watcher hears `OnRoomClosed` for rooms closed elsewhere. A new
-  room (seq 1) is loaded, so the alert index and `OpenRoomForPipeline` know it.
+  run there), and how the leader's watcher hears `OnRoomClosed` for rooms closed elsewhere (every
+  replica that folds a close runs its room-closed hook, asynchronously). A notify for a room the
+  replica does not have loads it, so the alert index and `OpenRoomForPipeline` know rooms other
+  replicas opened. While LISTEN is down, the follower re-reads every room every poll interval.
 - `emitLocked` folds any events another replica appended between the last fold and its own append
   before it applies its own, so the snapshot never skips a seq.
 - `ListRooms` and `OpenRoomForPipeline` refresh from one `ListRooms` query (load new rooms, fold
@@ -242,6 +244,11 @@ them once; the others wait for the lock, then find nothing to do.
    `shadow.revealed` in a narrow window; the reveal row (`revealed_at`) is set once.
 6. Leader loops that were mid-tick when leadership moved are cut by context cancellation (the purge
    transaction of the room in flight rolls back; nothing is half-deleted).
+7. **Connections.** Each replica holds, besides its request pool, one LISTEN connection, one lock
+   connection per leader loop it holds (up to four) and short-lived alert-key lock connections from
+   the pool. Size Postgres `max_connections` for replicas × (pool + 5).
+8. **Retention on other replicas.** The leader evicts purged rooms from its cache at once; other
+   replicas evict them at their next access or refresh (a purged room reads as not found).
 
 ## 10. Constants
 
