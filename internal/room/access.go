@@ -60,6 +60,11 @@ func (s *Service) IsAuditor(userID string, groups []string) bool {
 	return s.owners.IsAuditor(userID, groups)
 }
 
+// IsSolo reports whether PIPEROOM_SOLO_USER is this user (design section 5.3).
+func (s *Service) IsSolo(userID string) bool {
+	return s.soloUser != "" && userID == s.soloUser
+}
+
 // LayersFor returns the layers the person may approve, for GET /api/me:
 // the users.yaml layers, the owners.yaml layers they own as a user, through a
 // group or as a backup, and every layer for the solo user. The result is in
@@ -246,6 +251,34 @@ func (s *Service) layerListsGroup(pipelineID, layer string) bool {
 		}
 	}
 	return false
+}
+
+// ErrExportNotAllowed is the 403 not_allowed answer for an export (design
+// section 3.4).
+func ErrExportNotAllowed() *Error {
+	return &Error{Status: 403, Code: "not_allowed", Msg: "exporting a room needs the approver or auditor role"}
+}
+
+// CheckExportAccess decides whether user may export the room (design section
+// 3.4): an auditors: principal, or an approver or backup for any layer of the
+// room's pipeline (owners.yaml principals; in dev mode the users.yaml layers;
+// the solo user). The current driver is not on the list, and neither is a plain
+// member or a viewer. It answers *Error 403 not_allowed, or 404 for an unknown
+// room when the person is not an auditor.
+func (s *Service) CheckExportAccess(ctx context.Context, user User, roomID string) error {
+	if s.IsAuditor(user.ID, user.Groups) {
+		return nil
+	}
+	snap, err := s.GetRoom(ctx, roomID)
+	if err != nil {
+		return err
+	}
+	for _, layer := range events.Layers {
+		if _, err := s.authorizeLayer(snap.PipelineID, user, layer, "", false); err == nil {
+			return nil
+		}
+	}
+	return ErrExportNotAllowed()
 }
 
 // backupNote is the system message the room gets when a backup approves

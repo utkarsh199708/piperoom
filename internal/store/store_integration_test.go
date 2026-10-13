@@ -431,16 +431,16 @@ func TestProposalRowRoundTripAndCompensation(t *testing.T) {
 
 	// Approvals: second decision on a layer is ErrAlreadyExists; delete
 	// re-opens it for another decision (compensation path).
-	if err := s.RecordApproval(ctx, pid, "postgres", "approved", ""); err != nil {
+	if err := s.RecordApproval(ctx, store.ApprovalRow{ProposalID: pid, Layer: "postgres", Decision: "approved"}); err != nil {
 		t.Fatalf("record approval: %v", err)
 	}
-	if err := s.RecordApproval(ctx, pid, "postgres", "approved", ""); !errors.Is(err, store.ErrAlreadyExists) {
+	if err := s.RecordApproval(ctx, store.ApprovalRow{ProposalID: pid, Layer: "postgres", Decision: "approved"}); !errors.Is(err, store.ErrAlreadyExists) {
 		t.Fatalf("duplicate approval: want ErrAlreadyExists, got %v", err)
 	}
 	if err := s.DeleteApproval(ctx, pid, "postgres"); err != nil {
 		t.Fatalf("delete approval: %v", err)
 	}
-	if err := s.RecordApproval(ctx, pid, "postgres", "approved", ""); err != nil {
+	if err := s.RecordApproval(ctx, store.ApprovalRow{ProposalID: pid, Layer: "postgres", Decision: "approved"}); err != nil {
 		t.Fatalf("re-record approval: %v", err)
 	}
 

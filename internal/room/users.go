@@ -31,6 +31,13 @@ type User struct {
 	// none (design section 2.2). Neither is part of users.yaml or the JSON.
 	Groups        []string `json:"-" yaml:"-"`
 	GroupsMissing bool     `json:"-" yaml:"-"`
+
+	// Identity is how this request logged in: the session's iss, sub, public
+	// session id, method and auth time (design section 3.2). The HTTP layer
+	// fills it from the session; the service adds the grant when it records an
+	// approval. The zero value means no session (a dev-mode X-User request, a
+	// test): approvals then record method "dev" and no session id.
+	Identity events.Identity `json:"-" yaml:"-"`
 }
 
 // Users is the user directory parsed from dev/users.yaml.

@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -335,6 +336,25 @@ func errCode(t *testing.T, resp *http.Response) (code, msg string) {
 	return b.Error.Code, b.Error.Message
 }
 
+// wantLoginError checks a failed browser navigation to a login route: 302 to
+// /?login_error=<code>, never a JSON page (docs/api.md). code is one of the
+// fixed set.
+func wantLoginError(t *testing.T, resp *http.Response, code string) {
+	t.Helper()
+	if resp.StatusCode != http.StatusFound {
+		b := new(bytes.Buffer)
+		_, _ = b.ReadFrom(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("status = %d, want 302 to /?login_error=%s; body %s", resp.StatusCode, code, b.String())
+	}
+	if got, want := resp.Header.Get("Location"), "/?login_error="+code; got != want {
+		t.Fatalf("Location = %q, want %q", got, want)
+	}
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "json") {
+		t.Fatalf("Content-Type = %q: a failed login must not answer a JSON page", ct)
+	}
+}
+
 // Users the tests sign in as.
 var (
 	idpPriya   = testenv.IDPUser{Sub: "idp-priya", Email: "priya@example.com", EmailVerified: true, Name: "Priya From IdP", Groups: []string{}}
@@ -450,19 +470,13 @@ func TestOIDCCallbackFailures(t *testing.T) {
 		_, _, au := e.startLogin(t, "/")
 		code, state := e.idpAuthorize(t, au)
 		resp := e.callback(t, code, state, nil)
-		wantStatus(t, resp, http.StatusBadRequest)
-		if c, _ := errCode(t, resp); c != "login_expired" {
-			t.Fatalf("code = %q", c)
-		}
+		wantLoginError(t, resp, "login_expired")
 	})
 	t.Run("a cookie naming no row is 400 login_expired", func(t *testing.T) {
 		_, _, au := e.startLogin(t, "/")
 		code, state := e.idpAuthorize(t, au)
 		resp := e.callback(t, code, state, &http.Cookie{Name: auth.OIDCLoginCookie, Value: "nosuchrow"})
-		wantStatus(t, resp, http.StatusBadRequest)
-		if c, _ := errCode(t, resp); c != "login_expired" {
-			t.Fatalf("code = %q", c)
-		}
+		wantLoginError(t, resp, "login_expired")
 	})
 	t.Run("an expired row is 400 login_expired", func(t *testing.T) {
 		_, lc, au := e.startLogin(t, "/")
@@ -471,27 +485,21 @@ func TestOIDCCallbackFailures(t *testing.T) {
 		past := time.Now().Add(-time.Minute)
 		_ = e.states.Create(context.Background(), auth.LoginState{ID: lc.Value, State: state, Nonce: "n", Verifier: "v", ReturnPath: "/", ExpiresAt: past}, lc.Value, past.Add(-time.Hour))
 		resp := e.callback(t, code, state, lc)
-		wantStatus(t, resp, http.StatusBadRequest)
-		if c, _ := errCode(t, resp); c != "login_expired" {
-			t.Fatalf("code = %q", c)
-		}
+		wantLoginError(t, resp, "login_expired")
 	})
 	t.Run("a replayed callback is 400", func(t *testing.T) {
 		out := e.login(t, idpPriya, "/")
-		if out.callback.StatusCode != http.StatusFound {
+		if out.callback.StatusCode != http.StatusFound || out.session == nil {
 			t.Fatalf("first callback = %d", out.callback.StatusCode)
 		}
 		again := e.callback(t, out.code, out.state, out.lcookie)
-		wantStatus(t, again, http.StatusBadRequest)
-		if c, _ := errCode(t, again); c != "login_expired" {
-			t.Fatalf("replay code = %q, want login_expired (the row is single use)", c)
-		}
+		wantLoginError(t, again, "login_expired") // the row is single use
 	})
 	t.Run("a wrong state is 401", func(t *testing.T) {
 		_, lc, au := e.startLogin(t, "/")
 		code, _ := e.idpAuthorize(t, au)
 		resp := e.callback(t, code, "not-the-state", lc)
-		wantStatus(t, resp, http.StatusUnauthorized)
+		wantLoginError(t, resp, "unauthenticated")
 		if cookieNamed(resp, auth.OIDCSessionCookie) != nil {
 			t.Fatal("a session was issued")
 		}
@@ -500,7 +508,7 @@ func TestOIDCCallbackFailures(t *testing.T) {
 		_, lc, au := e.startLogin(t, "/")
 		code, _ := e.idpAuthorize(t, au)
 		resp := e.do(t, http.MethodGet, "/auth/callback?code="+url.QueryEscape(code), "", ck(lc))
-		wantStatus(t, resp, http.StatusUnauthorized)
+		wantLoginError(t, resp, "unauthenticated")
 	})
 	t.Run("login CSRF: the attacker's code and state in the victim's browser", func(t *testing.T) {
 		// The victim started a login (cookie cv). The attacker finished the IdP
@@ -509,7 +517,7 @@ func TestOIDCCallbackFailures(t *testing.T) {
 		_, ca, au := e.startLogin(t, "/")
 		codeA, stateA := e.idpAuthorize(t, au)
 		resp := e.callback(t, codeA, stateA, cv)
-		wantStatus(t, resp, http.StatusUnauthorized)
+		wantLoginError(t, resp, "unauthenticated")
 		if cookieNamed(resp, auth.OIDCSessionCookie) != nil {
 			t.Fatal("the victim was logged in as the attacker")
 		}
@@ -525,7 +533,7 @@ func TestOIDCCallbackFailures(t *testing.T) {
 			e.idp.SetFault(fault)
 			defer e.idp.SetFault(testenv.FaultNone)
 			out := e.login(t, idpPriya, "/")
-			wantStatus(t, out.callback, http.StatusUnauthorized)
+			wantLoginError(t, out.callback, "unauthenticated")
 			if out.session != nil {
 				t.Fatal("a session was issued")
 			}
@@ -534,7 +542,7 @@ func TestOIDCCallbackFailures(t *testing.T) {
 	t.Run("the IdP refusing the login is 401", func(t *testing.T) {
 		_, lc, au := e.startLogin(t, "/")
 		resp := e.do(t, http.MethodGet, "/auth/callback?error=access_denied&state="+url.QueryEscape(au.Query().Get("state")), "", ck(lc))
-		wantStatus(t, resp, http.StatusUnauthorized)
+		wantLoginError(t, resp, "unauthenticated")
 		if !strings.Contains(e.logs.String(), "refused the login") {
 			t.Fatal("the IdP refusal path was not taken")
 		}
@@ -543,7 +551,7 @@ func TestOIDCCallbackFailures(t *testing.T) {
 		_, lc, au := e.startLogin(t, "/")
 		_, state := e.idpAuthorize(t, au)
 		resp := e.do(t, http.MethodGet, "/auth/callback?state="+url.QueryEscape(state), "", ck(lc))
-		wantStatus(t, resp, http.StatusBadRequest)
+		wantLoginError(t, resp, "unauthenticated") // bad_request is not in the fixed set
 	})
 }
 
@@ -557,7 +565,7 @@ func TestOIDCNewLoginReplacesTheOldRow(t *testing.T) {
 	}
 	code, state := e.idpAuthorize(t, au)
 	// The old cookie's row is gone.
-	wantStatus(t, e.callback(t, code, state, c1), http.StatusBadRequest)
+	wantLoginError(t, e.callback(t, code, state, c1), "login_expired")
 	_, c3, au3 := e.startLogin(t, "/")
 	code3, state3 := e.idpAuthorize(t, au3)
 	wantStatus(t, e.callback(t, code3, state3, c3), http.StatusFound)
@@ -603,17 +611,14 @@ func TestOIDCLoginGate(t *testing.T) {
 
 	t.Run("an unmapped user is 403 not_provisioned", func(t *testing.T) {
 		out := e.login(t, testenv.IDPUser{Sub: "stranger", Email: "x@example.com", EmailVerified: true, Name: "Stranger"}, "/")
-		wantStatus(t, out.callback, http.StatusForbidden)
+		wantLoginError(t, out.callback, "not_provisioned")
 		if out.session != nil || cookieNamed(out.callback, auth.OIDCSessionCookie) != nil {
 			t.Fatal("a cookie was set")
-		}
-		if c, _ := errCode(t, out.callback); c != "not_provisioned" {
-			t.Fatalf("code = %q", c)
 		}
 	})
 	t.Run("a group that owners.yaml does not name is 403", func(t *testing.T) {
 		out := e.login(t, testenv.IDPUser{Sub: "s2", Groups: []string{"random-group"}}, "/")
-		wantStatus(t, out.callback, http.StatusForbidden)
+		wantLoginError(t, out.callback, "not_provisioned")
 	})
 	t.Run("a group that owners.yaml names passes, as a member", func(t *testing.T) {
 		s := e.mustLogin(t, idpOncall)
@@ -690,21 +695,21 @@ func TestOIDCIdentityMapping(t *testing.T) {
 	// A recycled email: the same address on a different sub is refused.
 	recycled := testenv.IDPUser{Sub: "idp-priya-2", Email: "priya@example.com", EmailVerified: true, Name: "Someone Else"}
 	out := e.login(t, recycled, "/")
-	wantStatus(t, out.callback, http.StatusForbidden)
+	wantLoginError(t, out.callback, "not_provisioned")
 	if out.session != nil {
 		t.Fatal("a recycled email got a session")
 	}
 
 	// Unverified email never matches: meera's address, not verified, is a stranger.
 	out = e.login(t, testenv.IDPUser{Sub: "idp-meera-fake", Email: "meera@example.com", EmailVerified: false, Name: "Not Meera"}, "/")
-	wantStatus(t, out.callback, http.StatusForbidden)
+	wantLoginError(t, out.callback, "not_provisioned")
 	if bound, err := e.idents.UserFor(ctx, e.idp.Issuer, "idp-meera-fake"); err == nil {
 		t.Fatalf("an unverified email was bound to %q", bound)
 	}
 
 	// A users.yaml user pinned to a sub is not matched by email on another sub.
 	out = e.login(t, testenv.IDPUser{Sub: "other-sub", Email: "kabir@example.com", EmailVerified: true}, "/")
-	wantStatus(t, out.callback, http.StatusForbidden)
+	wantLoginError(t, out.callback, "not_provisioned")
 	if got := user(e.mustLogin(t, testenv.IDPUser{Sub: "sub-kabir"})); got != "kabir" {
 		t.Fatalf("kabir by sub: %q", got)
 	}
@@ -719,7 +724,7 @@ func TestOIDCIdentityMapping(t *testing.T) {
 	// ... and the old sub now falls to the email rule, which finds priya bound
 	// elsewhere, so it is refused.
 	out = e.login(t, idpPriya, "/")
-	wantStatus(t, out.callback, http.StatusForbidden)
+	wantLoginError(t, out.callback, "not_provisioned")
 }
 
 // ---- roles ----
@@ -938,9 +943,28 @@ func (e *oidcEnv) proposal(t *testing.T, roomID string, layers ...string) string
 	return pid
 }
 
+// hash is the params_hash the snapshot shows for an open proposal, the value
+// the web app sends back with approve and reject.
+func (e *oidcEnv) hash(t *testing.T, pid string) string {
+	t.Helper()
+	rooms, err := e.svc.ListRooms(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rooms {
+		for _, p := range r.OpenProposals {
+			if p.ProposalID == pid {
+				return p.ParamsHash
+			}
+		}
+	}
+	t.Fatalf("proposal %s is not open", pid)
+	return ""
+}
+
 func (e *oidcEnv) approve(t *testing.T, c *http.Cookie, pid, layer string) *http.Response {
 	t.Helper()
-	return e.do(t, http.MethodPost, "/api/proposals/"+pid+"/approve", fmt.Sprintf(`{"layer":%q}`, layer), ck(c))
+	return e.do(t, http.MethodPost, "/api/proposals/"+pid+"/approve", fmt.Sprintf(`{"layer":%q,"params_hash":%q}`, layer, e.hash(t, pid)), ck(c))
 }
 
 func TestOIDCApprovals(t *testing.T) {
@@ -1000,9 +1024,10 @@ func TestOIDCApprovals(t *testing.T) {
 		wantStatus(t, e.approve(t, consumers, pid, "consumer"), http.StatusOK)
 		// Rejection uses the same rights.
 		pid = e.proposal(t, snap.ID, "consumer")
-		resp := e.do(t, http.MethodPost, "/api/proposals/"+pid+"/reject", `{"layer":"consumer","reason":"no"}`, ck(consumers))
+		body := fmt.Sprintf(`{"layer":"consumer","reason":"no","params_hash":%q}`, e.hash(t, pid))
+		resp := e.do(t, http.MethodPost, "/api/proposals/"+pid+"/reject", body, ck(consumers))
 		wantStatus(t, resp, http.StatusOK)
-		resp = e.do(t, http.MethodPost, "/api/proposals/"+pid+"/reject", `{"layer":"consumer","reason":"no"}`, ck(oncall))
+		resp = e.do(t, http.MethodPost, "/api/proposals/"+pid+"/reject", body, ck(oncall))
 		wantStatus(t, resp, http.StatusConflict) // already decided, rights were not the problem
 	})
 }
@@ -1081,9 +1106,9 @@ func TestOIDCIdPUnavailable(t *testing.T) {
 
 	for _, p := range []string{"/auth/login?return=/", "/auth/callback?code=x&state=y"} {
 		resp := e.do(t, http.MethodGet, p, "")
-		wantStatus(t, resp, http.StatusServiceUnavailable)
-		if c, _ := errCode(t, resp); c != "idp_unavailable" {
-			t.Fatalf("GET %s: code %q, want idp_unavailable", p, c)
+		wantLoginError(t, resp, "idp_unavailable")
+		if resp.Header.Get("Retry-After") == "" {
+			t.Errorf("GET %s: no Retry-After", p)
 		}
 	}
 	// Live sessions keep working: they never touch the IdP.
@@ -1107,12 +1132,12 @@ func TestOIDCLoginRateLimit(t *testing.T) {
 		}
 	}
 	resp := e.do(t, http.MethodGet, "/auth/login", "")
-	wantStatus(t, resp, http.StatusTooManyRequests)
+	wantLoginError(t, resp, "rate_limited")
 	if resp.Header.Get("Retry-After") == "" {
 		t.Error("no Retry-After")
 	}
 	// X-Forwarded-For does not buy a new budget from an untrusted peer.
-	wantStatus(t, e.do(t, http.MethodGet, "/auth/login", "", "X-Forwarded-For: 203.0.113.9"), http.StatusTooManyRequests)
+	wantLoginError(t, e.do(t, http.MethodGet, "/auth/login", "", "X-Forwarded-For: 203.0.113.9"), "rate_limited")
 	// The login rows stayed bounded: one per cookie-less call is replaced only by
 	// expiry, but never more than were made.
 	if e.states.Len() > 300 {
@@ -1129,13 +1154,13 @@ func TestOIDCLoginRateLimitBehindATrustedProxy(t *testing.T) {
 			t.Fatalf("request %d = %d", i, resp.StatusCode)
 		}
 	}
-	wantStatus(t, e.do(t, http.MethodGet, "/auth/login", "", "X-Forwarded-For: 203.0.113.9"), http.StatusTooManyRequests)
+	wantLoginError(t, e.do(t, http.MethodGet, "/auth/login", "", "X-Forwarded-For: 203.0.113.9"), "rate_limited")
 	// Another client behind the same proxy is not locked out.
 	wantStatus(t, e.do(t, http.MethodGet, "/auth/login", "", "X-Forwarded-For: 203.0.113.10"), http.StatusFound)
 	// A spoofed leftmost entry does not help: the rightmost untrusted one counts.
-	wantStatus(t, e.do(t, http.MethodGet, "/auth/login", "", "X-Forwarded-For: 198.51.100.1, 203.0.113.9"), http.StatusTooManyRequests)
+	wantLoginError(t, e.do(t, http.MethodGet, "/auth/login", "", "X-Forwarded-For: 198.51.100.1, 203.0.113.9"), "rate_limited")
 	// With the proxy's own address at the end, it is skipped.
-	wantStatus(t, e.do(t, http.MethodGet, "/auth/login", "", "X-Forwarded-For: 203.0.113.9, 127.0.0.1"), http.StatusTooManyRequests)
+	wantLoginError(t, e.do(t, http.MethodGet, "/auth/login", "", "X-Forwarded-For: 203.0.113.9, 127.0.0.1"), "rate_limited")
 }
 
 // ---- the secret ----

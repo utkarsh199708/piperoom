@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-
-	"piperoom/internal/room"
 )
 
 // exportTimeout bounds one audit export. It replaces the 60 s default because a
@@ -26,19 +24,17 @@ const exportTimeout = 5 * time.Minute
 const exportHashHeader = "X-Piperoom-Export-SHA256"
 
 // handleExportRoom serves GET /api/rooms/{id}/export: the whole room as one
-// JSON document, with its hash known before the first byte. Any user in
-// users.yaml may call it (the authenticate middleware has already run).
+// JSON document, with its hash known before the first byte. Only an approver or
+// backup for a layer of the room's pipeline, or an auditors: principal, may
+// call it (design §3.4); the driver, a plain member and a viewer may not. The
+// authenticate middleware has already run.
 func (s *Server) handleExportRoom(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	// A viewer may export only if also named in auditors: (design §3.4). An
-	// auditor-only principal is a viewer plus export. The wider PR 4 rule
-	// (approvers, backups and auditors only) is not applied yet: a member can
-	// still export today.
-	if u := userFrom(ctx); roleFrom(ctx) == room.RoleViewer && !s.svc.IsAuditor(u.ID, u.Groups) {
-		writeError(w, http.StatusForbidden, "not_allowed", "exporting a room needs the auditor role")
+	roomID := chi.URLParam(r, "id")
+	if err := s.svc.CheckExportAccess(ctx, userFrom(ctx), roomID); err != nil {
+		s.writeErr(w, err)
 		return
 	}
-	roomID := chi.URLParam(r, "id")
 	ex, err := s.svc.PrepareExport(ctx, roomID)
 	if err != nil {
 		s.writeErr(w, err)

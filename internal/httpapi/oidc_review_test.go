@@ -20,13 +20,12 @@ func TestOIDCOldIdentityRowDoesNotBeatASubPin(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := e.login(t, testenv.IDPUser{Sub: "attacker-sub", Email: "kabir@example.com", EmailVerified: true, Name: "Attacker"}, "/")
-	wantStatus(t, out.callback, http.StatusForbidden)
+	wantLoginError(t, out.callback, "not_provisioned")
 	if out.session != nil {
 		t.Fatal("the stale row logged the attacker in as kabir")
 	}
-	code, msg := errCode(t, out.callback)
-	if code != "not_provisioned" || !strings.Contains(msg, "not the one pinned for kabir") {
-		t.Fatalf("error = %q %q", code, msg)
+	if !strings.Contains(e.logs.String(), "now pinned to another sub") {
+		t.Fatalf("the refusal reason is not in the log: %s", e.logs.String())
 	}
 	// The pinned sub still works.
 	s := e.mustLogin(t, testenv.IDPUser{Sub: "sub-kabir", Name: "Kabir"})
@@ -43,7 +42,7 @@ func TestOIDCEmailMatchIsASCIIOnly(t *testing.T) {
 		"long s":      "kſenia@example.com", // folds to s
 	} {
 		out := e.login(t, testenv.IDPUser{Sub: "idp-" + name, Email: email, EmailVerified: true, Name: "Lookalike"}, "/")
-		wantStatus(t, out.callback, http.StatusForbidden)
+		wantLoginError(t, out.callback, "not_provisioned")
 		if out.session != nil {
 			t.Fatalf("%s: a lookalike email got a session", name)
 		}
@@ -63,9 +62,9 @@ func TestOIDCAZPMustBeOurClient(t *testing.T) {
 	e := newOIDCEnv(t, oidcOpts{})
 	e.idp.AZP = "some-other-client"
 	out := e.login(t, idpPriya, "/")
-	wantStatus(t, out.callback, http.StatusUnauthorized)
-	if c, _ := errCode(t, out.callback); c != "unauthenticated" || out.session != nil {
-		t.Fatalf("code %q, session %v", c, out.session)
+	wantLoginError(t, out.callback, "unauthenticated")
+	if out.session != nil {
+		t.Fatalf("session %v", out.session)
 	}
 	e.idp.AZP = e.idp.ClientID
 	out = e.login(t, idpPriya, "/")
@@ -85,10 +84,7 @@ func TestOIDCLoginRateLimitIPv6Prefix(t *testing.T) {
 	}
 	// Another address in the same /64: no fresh budget.
 	resp := e.do(t, http.MethodGet, "/auth/login", "", "X-Forwarded-For: 2001:db8:0:1:ffff:ffff:ffff:ffff")
-	wantStatus(t, resp, http.StatusTooManyRequests)
-	if c, _ := errCode(t, resp); c != "rate_limited" {
-		t.Fatalf("code = %q, want rate_limited", c)
-	}
+	wantLoginError(t, resp, "rate_limited")
 	// The next /64 is somebody else.
 	wantStatus(t, e.do(t, http.MethodGet, "/auth/login", "", "X-Forwarded-For: 2001:db8:0:2::1"), http.StatusFound)
 	// An entry with a port is not an address: the chain falls back to the peer.

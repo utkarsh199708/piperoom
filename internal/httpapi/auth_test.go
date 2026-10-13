@@ -74,13 +74,16 @@ func (e *authEnv) do(t *testing.T, method, path, body string, hdr ...string) *ht
 		}
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := noRedirectClient.Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
 	}
 	t.Cleanup(func() { resp.Body.Close() })
 	return resp
 }
+
+// noRedirectClient does not follow redirects, so a test sees the 302 itself.
+var noRedirectClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 type errBody struct {
 	Error struct {
@@ -352,10 +355,10 @@ func TestOIDCModeIgnoresXUser(t *testing.T) {
 	if b.Error.Code != "session_expired" || b.Error.AuthMode != "oidc" {
 		t.Fatalf("error = %+v, want session_expired with auth_mode oidc", b.Error)
 	}
-	// Dev login is not mounted; the OIDC routes answer 503 while discovery has not run.
+	// Dev login is not mounted; the OIDC routes redirect to /?login_error=idp_unavailable while discovery has not run.
 	wantStatus(t, e.do(t, http.MethodPost, "/auth/dev-login", `{"user":"arjun"}`), http.StatusNotFound)
-	wantStatus(t, e.do(t, http.MethodGet, "/auth/login?return=/", ""), http.StatusServiceUnavailable)
-	wantStatus(t, e.do(t, http.MethodGet, "/auth/callback", ""), http.StatusServiceUnavailable)
+	wantLoginError(t, e.do(t, http.MethodGet, "/auth/login?return=/", ""), "idp_unavailable")
+	wantLoginError(t, e.do(t, http.MethodGet, "/auth/callback", ""), "idp_unavailable")
 }
 
 // With the web UI served, an unmounted or unknown /auth path is a JSON 404, not
@@ -379,9 +382,13 @@ func TestAuthPathsAreNeverTheSPAShell(t *testing.T) {
 
 	// In oidc mode the two routes exist (503 until discovery succeeds); the rest is still 404.
 	oidc := newWebServer(t, httpapi.WithWebDir(webDir(t)), httpapi.WithAuth(oidcSettings()))
-	resp, _ = fetch(t, http.MethodGet, oidc.URL+"/auth/login")
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("GET /auth/login in oidc mode: %d, want 503", resp.StatusCode)
+	resp, err := noRedirectClient.Get(oidc.URL + "/auth/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/?login_error=idp_unavailable" {
+		t.Fatalf("GET /auth/login in oidc mode: %d %q, want 302 to /?login_error=idp_unavailable", resp.StatusCode, resp.Header.Get("Location"))
 	}
 	resp, body = fetch(t, http.MethodGet, oidc.URL+"/auth/nothing")
 	if resp.StatusCode != http.StatusNotFound || !strings.Contains(body, `"not_found"`) {

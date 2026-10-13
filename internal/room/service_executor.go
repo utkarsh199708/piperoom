@@ -168,14 +168,14 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 
 	var steps []events.ProposalStep
 	if err := json.Unmarshal(p.Steps, &steps); err != nil {
-		s.failProposal(p.RoomID, p.ProposalID, 0, "cannot decode steps: "+err.Error())
+		s.failProposal(p.RoomID, p.ProposalID, 0, p.ParamsHash, "cannot decode steps: "+err.Error())
 		return fmt.Errorf("room: decode proposal %s steps: %w", p.ProposalID, err)
 	}
 	tracker := newStepTracker(len(steps))
 
-	for i, step := range steps {
+	for i := range steps {
 		if !s.isRoomOpen(ctx, p.RoomID) {
-			s.failProposal(p.RoomID, p.ProposalID, i, "room closed before this step ran")
+			s.failProposal(p.RoomID, p.ProposalID, i, p.ParamsHash, "room closed before this step ran")
 			return nil
 		}
 		if err := tracker.claim(i); err != nil {
@@ -191,10 +191,20 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 			if errors.Is(err, ErrStepOrder) {
 				output := fmt.Sprintf("step %d was already claimed by an earlier run: %v", i, err)
 				s.finishClaimedStep(p.ProposalID, i, output)
-				s.failProposal(p.RoomID, p.ProposalID, i, output)
+				s.failProposal(p.RoomID, p.ProposalID, i, p.ParamsHash, output)
 				return fmt.Errorf("room: proposal %s: claim step %d: %w", p.ProposalID, i, err)
 			}
 			return fmt.Errorf("room: proposal %s: start step %d: %w", p.ProposalID, i, err)
+		}
+
+		// Design section 3.2: re-read the row and recompute the hash right
+		// before the write. The step that runs is the one the fresh row holds
+		// and the hash covers, not the copy queued at approval time.
+		step, hash, why := s.recheckStep(ctx, p, i)
+		p.ParamsHash = hash
+		if why != "" {
+			s.stopOnStep(tracker, p, i, why)
+			return nil
 		}
 
 		action, ok := s.actions.Get(step.Action)
@@ -220,12 +230,12 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 		if err != nil {
 			output = err.Error()
 		}
-		if err := s.finishStep(p.RoomID, p.ProposalID, tracker, i, err == nil, output); err != nil {
+		if err := s.finishStep(p.RoomID, p.ProposalID, p.ParamsHash, tracker, i, err == nil, output); err != nil {
 			// The local or store transition failed: finish the store row
 			// directly (best effort) and record the outcome anyway, so the
 			// proposal never stays open without an event.
 			s.finishClaimedStep(p.ProposalID, i, output)
-			s.failProposal(p.RoomID, p.ProposalID, i, output)
+			s.failProposal(p.RoomID, p.ProposalID, i, p.ParamsHash, output)
 			return err
 		}
 		if err != nil {
@@ -242,18 +252,57 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 // fails the outcome event is still emitted best-effort (review item 4), so the
 // room UI never learns the step stopped but not why.
 func (s *Service) stopOnStep(t *stepTracker, p store.ProposalRow, i int, output string) {
-	if err := s.finishStep(p.RoomID, p.ProposalID, t, i, false, output); err != nil {
+	if err := s.finishStep(p.RoomID, p.ProposalID, p.ParamsHash, t, i, false, output); err != nil {
 		s.log.Warn("room: record step stop failed", "proposal", p.ProposalID, "step", i, "err", err)
 		s.finishClaimedStep(p.ProposalID, i, output)
-		s.failStep(p.RoomID, p.ProposalID, i, output)
+		s.failStep(p.RoomID, p.ProposalID, i, p.ParamsHash, output)
 	}
 	s.setProposalStatus(p.ProposalID, "failed")
+}
+
+// paramsHashMismatchOutput is the step output when the hash check refuses to
+// run a step (design section 3.2).
+const paramsHashMismatchOutput = "params hash mismatch"
+
+// recheckStep is the executor's integrity check (design section 3.2). It
+// re-reads the proposal row, recomputes the hash from what the row holds now
+// and compares it with the row's stored params_hash. It returns the step to run
+// (taken from that same fresh row), the stored hash for the action.executed
+// event, and, when the step must not run, the failure output.
+//
+// A row written before auth PR 4 and approved before the upgrade has no stored
+// hash; it is computed and stored here, once, and the step runs. That is the
+// one case where the row vouches for itself, and it only exists for proposals
+// that were already open at upgrade.
+//
+// This catches an edit of the row between approval and execution. It does not
+// catch someone who edits both steps and params_hash (design section 3.3).
+func (s *Service) recheckStep(ctx context.Context, queued store.ProposalRow, i int) (events.ProposalStep, string, string) {
+	cur, err := s.store.GetProposal(ctx, queued.ProposalID)
+	if err != nil {
+		return events.ProposalStep{}, queued.ParamsHash, "cannot re-read the proposal before running the step: " + err.Error()
+	}
+	got, steps, err := rowParamsHash(cur)
+	if err != nil {
+		return events.ProposalStep{}, cur.ParamsHash, paramsHashMismatchOutput + " (cannot recompute: " + err.Error() + ")"
+	}
+	if cur.ParamsHash == "" {
+		if err := s.store.SetProposalParamsHash(ctx, cur.ProposalID, got); err != nil {
+			return events.ProposalStep{}, got, "cannot store the hash of a proposal that predates params_hash: " + err.Error()
+		}
+		s.log.Info("room: stored params_hash of a proposal created before it existed", "proposal", cur.ProposalID)
+		cur.ParamsHash = got
+	}
+	if got != cur.ParamsHash || i >= len(steps) {
+		return events.ProposalStep{}, cur.ParamsHash, paramsHashMismatchOutput
+	}
+	return steps[i], cur.ParamsHash, ""
 }
 
 // finishStep checks the local transition, records the step result in the store
 // and emits the action.executed event. The store write and the event use
 // resultCtx so they complete even while the service shuts down (review item 3).
-func (s *Service) finishStep(roomID, proposalID string, t *stepTracker, i int, ok bool, output string) error {
+func (s *Service) finishStep(roomID, proposalID, paramsHash string, t *stepTracker, i int, ok bool, output string) error {
 	output = sanitizeAgentText(output) // action output is tool text
 	status := "done"
 	if !ok {
@@ -269,7 +318,7 @@ func (s *Service) finishStep(roomID, proposalID string, t *stepTracker, i int, o
 	}
 	// The DB state is authoritative; a failed event append must not undo it.
 	if err := s.executorEmit(rctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
-		ProposalID: proposalID, StepIndex: i, OK: ok, Output: output,
+		ProposalID: proposalID, StepIndex: i, OK: ok, Output: output, ParamsHash: paramsHash,
 	}); err != nil {
 		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", err)
 	}
@@ -280,19 +329,19 @@ func (s *Service) finishStep(roomID, proposalID string, t *stepTracker, i int, o
 // 13): a failing action.executed for the given step plus proposal status
 // "failed". It is used on stop paths where the local tracker did not (or could
 // not) finish a step: decode error, closed room, failed claim.
-func (s *Service) failProposal(roomID, proposalID string, stepIndex int, output string) {
-	s.failStep(roomID, proposalID, stepIndex, output)
+func (s *Service) failProposal(roomID, proposalID string, stepIndex int, paramsHash, output string) {
+	s.failStep(roomID, proposalID, stepIndex, paramsHash, output)
 	s.setProposalStatus(proposalID, "failed")
 }
 
 // failStep emits a failing action.executed for a step that was never claimed
 // (so there is no step state to finish).
-func (s *Service) failStep(roomID, proposalID string, i int, output string) {
+func (s *Service) failStep(roomID, proposalID string, i int, paramsHash, output string) {
 	output = sanitizeAgentText(output)
 	rctx, cancel := s.resultCtx()
 	defer cancel()
 	if err := s.executorEmit(rctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
-		ProposalID: proposalID, StepIndex: i, OK: false, Output: output,
+		ProposalID: proposalID, StepIndex: i, OK: false, Output: output, ParamsHash: paramsHash,
 	}); err != nil {
 		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", err)
 	}

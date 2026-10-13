@@ -334,6 +334,7 @@ func (s *Service) interruptStaleProposalsLocked(ctx context.Context, roomID stri
 			ProposalID: p.ProposalID,
 			StepIndex:  next,
 			OK:         false,
+			ParamsHash: p.ParamsHash,
 			Output:     "proposal was interrupted by a service restart before it finished; create a new proposal to retry",
 		}); err != nil {
 			s.log.Warn("room: emit interruption failed", "proposal", p.ProposalID, "err", err)

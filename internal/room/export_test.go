@@ -125,7 +125,7 @@ func richRoom(t *testing.T) (*room.Service, *memstore.Store, *clock, string) {
 	pid, err := svc.CreateProposal(ctx, roomID, events.ProposalCreatedPayload{
 		Title: "widen column",
 		Steps: []events.ProposalStep{
-			{Action: "pg_act", Layer: "postgres", Params: json.RawMessage(`{"table":"public.orders","n":12345678901234567890}`), Description: "alter"},
+			{Action: "pg_act", Layer: "postgres", Params: json.RawMessage(`{"table":"public.orders","n":"12345678901234567890"}`), Description: "alter"},
 			{Action: "wh_act", Layer: "warehouse", Params: json.RawMessage(`{"table":"orders"}`), Description: "alter sink"},
 		},
 		RequiredLayers: []string{"postgres", "warehouse"},
@@ -135,11 +135,11 @@ func richRoom(t *testing.T) (*room.Service, *memstore.Store, *clock, string) {
 		t.Fatalf("proposal: %v", err)
 	}
 	c.Advance(time.Minute)
-	if _, err := svc.ApproveProposal(ctx, mustUser(t, svc, "priya"), pid, "postgres"); err != nil {
+	if _, err := svc.ApproveProposal(ctx, mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve pg: %v", err)
 	}
 	c.Advance(time.Minute)
-	if _, err := svc.ApproveProposal(ctx, mustUser(t, svc, "meera"), pid, "warehouse"); err != nil {
+	if _, err := svc.ApproveProposal(ctx, mustUser(t, svc, "meera"), pid, "warehouse", proposalHash(t, svc, pid)); err != nil {
 		t.Fatalf("approve wh: %v", err)
 	}
 	waitFor(t, 5*time.Second, func() bool {
@@ -191,7 +191,7 @@ func TestExportShape(t *testing.T) {
 	if !bytes.Contains(body, []byte("<b>schema</b> & drift")) {
 		t.Fatalf("html characters were escaped in the export")
 	}
-	// Numbers stay exactly as stored (no float rounding).
+	// Large values stay exactly as stored (proposals quote them as strings: a number above 2^53 is refused, see params_hash_test.go).
 	if !bytes.Contains(body, []byte("12345678901234567890")) {
 		t.Fatalf("large number was altered")
 	}

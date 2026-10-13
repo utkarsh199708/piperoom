@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"piperoom/internal/auth"
+	"piperoom/internal/events"
 	"piperoom/internal/room"
 	"piperoom/internal/ws"
 )
@@ -280,6 +281,10 @@ func (s *Server) resolve(r *http.Request) (principal, *authError) {
 			return principal{}, &authError{http.StatusForbidden, "proxy_identity", proxyIdentityMsg}
 		}
 		s.touch(r.Context(), sess)
+		user.Identity = events.Identity{
+			Iss: sess.Iss, Sub: sess.Sub, SessionID: sess.ID,
+			Method: sess.Method, AuthTime: sess.AuthTime.UTC(),
+		}
 		return principal{user: user, role: role, sessionID: sess.ID}, nil
 	}
 

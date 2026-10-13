@@ -133,6 +133,19 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 	if err != nil {
 		return "", fmt.Errorf("room: marshal proposal steps: %w", err)
 	}
+	// The hash is always computed here, over the parsed and sanitized proposal
+	// that is about to be stored. A value the caller put in ParamsHash is
+	// overwritten: nobody but the server may say what the hash is (design
+	// section 3.1). A number a double cannot hold exactly, or a duplicate key,
+	// is a 400 now, before anything is stored.
+	hash, err := ComputeParamsHash(roomID, p.ProposalID, p.Title, p.Risk, p.Rollback, p.RequiredLayers, p.Steps)
+	if err != nil {
+		if errors.Is(err, errParamsNumber) {
+			return "", validation(err.Error())
+		}
+		return "", validation("proposal cannot be hashed: " + err.Error())
+	}
+	p.ParamsHash = hash
 	// Row first so a crash cannot leave an event with no backing row; if the
 	// event append fails we remove the row again (compensation).
 	if err := s.store.CreateProposal(ctx, store.ProposalRow{
@@ -144,6 +157,7 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 		Steps:          stepsJSON,
 		Risk:           p.Risk,
 		Rollback:       p.Rollback,
+		ParamsHash:     p.ParamsHash,
 	}); err != nil {
 		return "", err
 	}
@@ -159,16 +173,23 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 // ApproveProposal records a layer owner's approval. When every required layer
 // is approved the executor runs the steps in order (asynchronously, on the
 // service lifetime context, not the request context).
-func (s *Service) ApproveProposal(ctx context.Context, user User, proposalID, layer string) (events.Event, error) {
-	return s.ApproveProposalConfirm(ctx, user, proposalID, layer, "")
+//
+// paramsHash is the params_hash the approver saw (design section 3.2). It is
+// required: empty is 400 validation, and a value that is not the proposal's
+// hash is 409 params_mismatch.
+func (s *Service) ApproveProposal(ctx context.Context, user User, proposalID, layer, paramsHash string) (events.Event, error) {
+	return s.ApproveProposalConfirm(ctx, user, proposalID, layer, paramsHash, "")
 }
 
 // ApproveProposalConfirm is ApproveProposal with the solo-mode confirm string
 // (docs/design/auth.md section 5.3): the solo user must send
 // "<pipeline_id>/<layer>". Anyone else's confirm is ignored.
-func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposalID, layer, confirm string) (events.Event, error) {
-	if err := rejectUnstorable(layer); err != nil {
+func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposalID, layer, paramsHash, confirm string) (events.Event, error) {
+	if err := rejectUnstorable(layer, paramsHash); err != nil {
 		return events.Event{}, err
+	}
+	if paramsHash == "" {
+		return events.Event{}, validation("params_hash is required: send the params_hash shown with the proposal")
 	}
 	var prow store.ProposalRow
 	var ev events.Event
@@ -202,14 +223,21 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		if approvalFor(st.snap, proposalID, layer) != "pending" {
 			return alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
 		}
-		if err := s.store.RecordApproval(ctx, proposalID, layer, "approved", ""); err != nil {
+		// The hash the approver echoed must be the proposal's. A proposal
+		// from before the hash existed gets its hash here, on first use.
+		if err := s.checkParamsHash(ctx, &p, paramsHash); err != nil {
+			return err
+		}
+		prow = p
+		ident := identityFor(user, grant)
+		if err := s.store.RecordApproval(ctx, approvalRow(proposalID, layer, "approved", "", p.ParamsHash, ident)); err != nil {
 			if errors.Is(err, store.ErrAlreadyExists) {
 				return alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
 			}
 			return err
 		}
 		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, humanActor(user), events.ApprovalGivenPayload{
-			ProposalID: proposalID, Layer: layer,
+			ProposalID: proposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: &ident,
 		})
 		if err != nil {
 			if delErr := s.store.DeleteApproval(ctx, proposalID, layer); delErr != nil {
@@ -217,8 +245,6 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 			}
 			return err
 		}
-		// The grant string goes into the events in auth PR 4 (identity on
-		// approval.given). Until then it is in the log.
 		s.log.Info("room: approval given", "proposal", proposalID, "layer", layer, "user", user.ID, "grant", grant)
 		if strings.HasPrefix(grant, owners.GrantBackupPrefix) {
 			if _, err := s.emitLocked(ctx, st, p.RoomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: backupNote(user, layer, grant)}); err != nil {
@@ -238,10 +264,15 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 	return ev, nil
 }
 
-// RejectProposal records a layer owner's rejection.
-func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, layer, reason string) (events.Event, error) {
-	if err := rejectUnstorable(layer, reason); err != nil {
+// RejectProposal records a layer owner's rejection. paramsHash follows the same
+// rule as in ApproveProposal: required, and 409 params_mismatch when it is not
+// the proposal's hash.
+func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, layer, reason, paramsHash string) (events.Event, error) {
+	if err := rejectUnstorable(layer, reason, paramsHash); err != nil {
 		return events.Event{}, err
+	}
+	if paramsHash == "" {
+		return events.Event{}, validation("params_hash is required: send the params_hash shown with the proposal")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -270,14 +301,18 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	if approvalFor(st.snap, proposalID, layer) != "pending" {
 		return events.Event{}, alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
 	}
-	if err := s.store.RecordApproval(ctx, proposalID, layer, "rejected", reason); err != nil {
+	if err := s.checkParamsHash(ctx, &p, paramsHash); err != nil {
+		return events.Event{}, err
+	}
+	ident := identityFor(user, grant)
+	if err := s.store.RecordApproval(ctx, approvalRow(proposalID, layer, "rejected", reason, p.ParamsHash, ident)); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
 			return events.Event{}, alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
 		}
 		return events.Event{}, err
 	}
 	ev, err := s.emitLocked(ctx, st, p.RoomID, events.ApprovalRejected, humanActor(user), events.ApprovalRejectedPayload{
-		ProposalID: proposalID, Layer: layer, Reason: reason,
+		ProposalID: proposalID, Layer: layer, Reason: reason, ParamsHash: p.ParamsHash, Identity: &ident,
 	})
 	if err != nil {
 		if delErr := s.store.DeleteApproval(ctx, proposalID, layer); delErr != nil {

@@ -84,8 +84,8 @@ func TestSideTableWritesRefuseUnstorable(t *testing.T) {
 	if err := s.CreateProposal(ctx, store.ProposalRow{ProposalID: "p2", RoomID: roomID, Title: "ok", Steps: okSteps}); err != nil {
 		t.Fatalf("create good proposal: %v", err)
 	}
-	unstorable("approval reason", s.RecordApproval(ctx, "p2", "postgres", "rejected", "no\x00"))
-	if err := s.RecordApproval(ctx, "p2", "postgres", "rejected", "no"); err != nil {
+	unstorable("approval reason", s.RecordApproval(ctx, store.ApprovalRow{ProposalID: "p2", Layer: "postgres", Decision: "rejected", Reason: "no\x00"}))
+	if err := s.RecordApproval(ctx, store.ApprovalRow{ProposalID: "p2", Layer: "postgres", Decision: "rejected", Reason: "no"}); err != nil {
 		t.Errorf("a refused approval must not consume the layer: %v", err)
 	}
 	if err := s.StartProposalStep(ctx, "p2", 0); err != nil {
