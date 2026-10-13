@@ -632,7 +632,7 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 			defer wg.Done()
 			defer func() {
 				if p := recover(); p != nil {
-					r.log.Error("agent: read tool panicked", "tool", u.name, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+					r.log.Error("agent: read tool panicked", "tool", u.name, "panic", scrubPanic(p), "stack", string(debug.Stack()))
 					panicMu.Lock()
 					if !panicked {
 						panicked, firstPanic = true, p
@@ -712,10 +712,11 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	res, err := entry.tool.Run(tctx, cleaned)
 	took := time.Since(start).Milliseconds()
 
+	res = r.scrubToolResult(u.name, res)
 	data := r.toolDataJSON(u.name, res.Data)
 
 	if err != nil {
-		msg := "error: " + err.Error()
+		msg := "error: " + r.scrubToolError(u.name, err).Error()
 		summary, truncated := tools.Truncate(msg)
 		r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 			StepID:    stepID,
