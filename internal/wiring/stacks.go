@@ -60,12 +60,12 @@ type Stack struct {
 // topology.Builder: Build and Trace go to the set of the given pipeline.
 type Stacks struct {
 	byPipeline map[string]*Stack
-	// fallback serves a pipeline id owners.yaml does not define, and an empty
-	// one: the process-wide set when it exists (its tools refuse such an id,
-	// as before tenancy), else the empty set.
-	fallback *Stack
-	all      []*Stack
-	once     sync.Once
+	// empty serves every pipeline id owners.yaml does not define, and the
+	// empty id: no client at all, whatever sets exist. A room can never reach
+	// a client by naming a pipeline nobody configured.
+	empty *Stack
+	all   []*Stack
+	once  sync.Once
 }
 
 var _ topology.Builder = (*Stacks)(nil)
@@ -75,6 +75,13 @@ type StackOptions struct {
 	// Only, when set, opens the sets of these pipelines alone
 	// (cmd/investigate). An id owners.yaml does not define is an error.
 	Only []string
+	// Prepare, when set, is called for every opened client set after its
+	// clients exist and before its tools and actions are registered, with the
+	// set's own Wired (its Owners holds only the set's pipelines). The server
+	// uses it to give each set what only the server owns, for example the room
+	// store reader of similar_incidents (#100: w.Rooms = ...). It must not
+	// replace the clients.
+	Prepare func(w *Wired)
 }
 
 // stackDeps are OpenStacks' collaborators; tests replace them so no stack,
@@ -87,10 +94,12 @@ type stackDeps struct {
 
 // OpenStacks builds the client sets of own: one per pipeline with a
 // connections: block, and the process-wide set from cfg when at least one
-// pipeline has none (or own has no pipeline). awsCfg is LoadAWS's result; when
-// it is nil and a pipeline's connections use MSK IAM, the AWS chain is loaded
-// here. Any failure closes what was opened and returns an error that names the
-// pipeline and the reference, never a value. The caller must Close the result.
+// pipeline has none. awsCfg is LoadAWS's result; when it is nil and a
+// pipeline's connections use MSK IAM, the AWS chain is loaded here. When any
+// opened pipeline has a connections: block, the libpq PG* variables and home
+// files are refused (checkLibpqDefaults). Any failure closes what was opened
+// and returns an error that names the pipeline and the reference, never a
+// value. The caller must Close the result.
 func OpenStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own *owners.Owners, opts StackOptions) (*Stacks, error) {
 	return openStacks(ctx, cfg, awsCfg, own, opts, stackDeps{
 		open: openClients,
@@ -121,13 +130,17 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 	// variable or file fails the start without a half-built process.
 	var procIDs, ownIDs []string
 	pcfg := map[string]config.Config{}
+	// extra holds the references only resolution can see: the process AWS
+	// identity of MSK IAM, and the resolved paths of TLS keys and
+	// certificates, whichever variable or file named them.
 	extra := map[string][]string{}
 	needAWS := false
 	for _, p := range selected {
 		if !p.HasConnections() {
 			procIDs = append(procIDs, p.ID)
+			extra[p.ID] = append(extra[p.ID], tlsPathRefs(cfg)...)
 			if usesMSKIAM(cfg) {
-				extra[p.ID] = []string{awsProcessIdentityRef}
+				extra[p.ID] = append(extra[p.ID], awsProcessIdentityRef)
 			}
 			continue
 		}
@@ -140,12 +153,20 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 		}
 		// Settings that are not connections (the AWS region) stay process-wide.
 		pc.AWSRegion = cfg.AWSRegion
+		extra[p.ID] = append(extra[p.ID], tlsPathRefs(pc)...)
 		if usesMSKIAM(pc) {
-			extra[p.ID] = []string{awsProcessIdentityRef}
+			extra[p.ID] = append(extra[p.ID], awsProcessIdentityRef)
 			needAWS = true
 		}
 		ownIDs = append(ownIDs, p.ID)
 		pcfg[p.ID] = pc
+	}
+	if len(ownIDs) > 0 {
+		// pgx falls back to libpq's variables and home files for anything a
+		// DSN leaves out, so one tenant's DSN could log in with them.
+		if err := checkLibpqDefaults(d.src); err != nil {
+			return nil, err
+		}
 	}
 	if err := own.CheckSharedRefs(extra); err != nil {
 		return nil, fmt.Errorf("wiring: %w", err)
@@ -161,13 +182,17 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 		awsCfg = ac
 	}
 
-	s := &Stacks{byPipeline: map[string]*Stack{}}
+	empty, err := emptyStack()
+	if err != nil {
+		return nil, err
+	}
+	s := &Stacks{byPipeline: map[string]*Stack{}, empty: empty}
 	add := func(name string, ids []string, c config.Config) error {
 		w, err := d.open(ctx, c, awsCfg, own.Only(ids...))
 		if err != nil {
 			return err
 		}
-		st, err := newStack(name, ids, w)
+		st, err := newStack(name, ids, w, opts.Prepare)
 		if err != nil {
 			w.Close()
 			return err
@@ -178,11 +203,10 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 		}
 		return nil
 	}
-	if len(procIDs) > 0 || (len(own.Pipelines) == 0 && opts.Only == nil) {
+	if len(procIDs) > 0 {
 		if err := add(ProcessWideStack, procIDs, cfg); err != nil {
 			return nil, err
 		}
-		s.fallback = s.all[0]
 	}
 	for _, id := range ownIDs {
 		if err := add("pipeline "+id, []string{id}, pcfg[id]); err != nil {
@@ -190,19 +214,15 @@ func openStacks(ctx context.Context, cfg config.Config, awsCfg *aws.Config, own 
 			return nil, fmt.Errorf("wiring: pipeline %q: %w", id, err)
 		}
 	}
-	if s.fallback == nil {
-		empty, err := emptyStack()
-		if err != nil {
-			s.Close()
-			return nil, err
-		}
-		s.fallback = empty
-	}
 	return s, nil
 }
 
-// newStack registers the tools and actions of one client set.
-func newStack(name string, ids []string, w *Wired) (*Stack, error) {
+// newStack registers the tools and actions of one client set, after prepare
+// (StackOptions.Prepare) has seen its Wired.
+func newStack(name string, ids []string, w *Wired, prepare func(*Wired)) (*Stack, error) {
+	if prepare != nil {
+		prepare(w)
+	}
 	reg, areg := tools.NewRegistry(), actions.NewRegistry()
 	if err := RegisterTools(reg, areg, w); err != nil {
 		return nil, err
@@ -220,12 +240,14 @@ func emptyStack() (*Stack, error) {
 	return &Stack{Name: NoStack, Tools: reg, Actions: actions.NewRegistry(), Topology: noTopology{}}, nil
 }
 
-// For returns the set of the pipeline. It never returns nil.
+// For returns the set of the pipeline, or the empty set for an id no set
+// serves (unknown, empty, or not opened by StackOptions.Only). It never
+// returns nil.
 func (s *Stacks) For(pipelineID string) *Stack {
 	if st, ok := s.byPipeline[pipelineID]; ok {
 		return st
 	}
-	return s.fallback
+	return s.empty
 }
 
 // All returns every opened set (not the empty one), process-wide first.

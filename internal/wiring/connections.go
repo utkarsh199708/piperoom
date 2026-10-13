@@ -5,9 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
+	"piperoom/internal/clients/netsec"
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 )
@@ -53,9 +57,20 @@ type connSource struct {
 	// canRead checks that a file (TLS material, which may be a large CA
 	// bundle) can be opened; the client reads it later.
 	canRead func(string) error
+	// homeDir is the directory pgx reads its default files from
+	// (os.UserHomeDir, as pgconn does); exists reports whether a path exists.
+	homeDir func() (string, error)
+	exists  func(string) bool
 }
 
-var osConnSource = connSource{lookupEnv: os.LookupEnv, readFile: readCapped, canRead: canOpen}
+var osConnSource = connSource{
+	lookupEnv: os.LookupEnv, readFile: readCapped, canRead: canOpen,
+	homeDir: os.UserHomeDir,
+	exists: func(p string) bool {
+		_, err := os.Stat(p)
+		return err == nil
+	},
+}
 
 func canOpen(path string) error {
 	f, err := os.Open(path)
@@ -104,14 +119,132 @@ func pipelineConfig(p owners.Pipeline, src connSource) (config.Config, error) {
 			// owners.Load refuses unknown keys; this guards a hand-built Owners.
 			return config.Config{}, fmt.Errorf("wiring: pipeline %q: connections: unknown key %q: %w", p.ID, k, errConnRef)
 		}
-		v, err := resolveRef(k, p.Connections[k], src)
+		r := p.Connections[k]
+		v, err := resolveRef(k, r, src)
 		if err != nil {
 			return config.Config{}, fmt.Errorf("wiring: pipeline %q: connections.%s: %w", p.ID, k, err)
+		}
+		// The non-secret settings are checked here, before a client sees them:
+		// the client's own error would quote the value, and a reference that
+		// points at the wrong variable may hold a DSN or a password.
+		if owners.IsLiteralKey(k) && !literalOK(k, v) {
+			return config.Config{}, fmt.Errorf("wiring: pipeline %q: connections.%s: the value from %s is not %s (value not shown): %w",
+				p.ID, k, refName(r), literalWant[k], errConnRef)
 		}
 		*field(&pc) = v
 	}
 	return pc, nil
 }
+
+// literalWant says, per non-secret key, what literalOK accepts.
+var literalWant = map[string]string{
+	"warehouse_kind":          "postgres or snowflake",
+	"kafka_security_protocol": "PLAINTEXT, SSL, SASL_PLAINTEXT or SASL_SSL",
+	"kafka_sasl_mechanism":    "PLAIN, SCRAM-SHA-256, SCRAM-SHA-512 or AWS_MSK_IAM",
+	"kafka_tls_server_name":   "a host name",
+}
+
+// hostNameRE is an RFC 1123 host name of at most 253 characters (checked
+// separately).
+var hostNameRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$`)
+
+// literalOK reports whether v is an allowed value of a non-secret key. The
+// sets match what the clients accept: wiring.warehouseKind and netsec
+// (protocols and mechanisms, compared without regard to case).
+func literalOK(key, v string) bool {
+	v = strings.TrimSpace(v)
+	switch key {
+	case "warehouse_kind":
+		return slices.Contains([]string{WarehousePostgres, WarehouseSnowflake}, strings.ToLower(v))
+	case "kafka_security_protocol":
+		return slices.Contains([]string{netsec.Plaintext, netsec.SSL, netsec.SASLPlaintext, netsec.SASLSSL}, strings.ToUpper(v))
+	case "kafka_sasl_mechanism":
+		return slices.Contains([]string{netsec.MechPlain, netsec.MechSCRAMSHA256, netsec.MechSCRAMSHA512, netsec.MechAWSMSKIAM}, strings.ToUpper(v))
+	case "kafka_tls_server_name":
+		return len(v) <= 253 && hostNameRE.MatchString(v)
+	}
+	return false
+}
+
+// refName names a reference for an error: the variable or the path, or
+// "value:" for a literal (whose text is not repeated either).
+func refName(r owners.ConnRef) string {
+	switch {
+	case r.Env != "":
+		return "environment variable " + r.Env
+	case r.File != "":
+		return "file " + r.File
+	}
+	return "value:"
+}
+
+// tlsPathRefs are the connection references of the TLS client certificate
+// and key files in c: their resolved, cleaned paths (owners.FileRef, after
+// filepath.Abs and, when the file exists, filepath.EvalSymlinks). They are
+// what a client really opens, whichever variable or file reference named
+// them, so two tenants that reach one key file through different names still
+// share it (owners.CheckSharedRefs). CA bundles are left out (owners.IsCAKey).
+func tlsPathRefs(c config.Config) []string {
+	var out []string
+	for _, k := range owners.ConnectionKeys() {
+		if !owners.IsPathKey(k) || owners.IsCAKey(k) {
+			continue
+		}
+		p := strings.TrimSpace(*connFields[k](&c))
+		if p == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			p = resolved
+		}
+		out = append(out, owners.FileRef(p))
+	}
+	return out
+}
+
+// libpqVars are the libpq variables pgx reads for anything a DSN leaves out
+// (pgconn.ParseConfig): logins, client certificates and routing.
+var libpqVars = []string{
+	"PGPASSWORD", "PGPASSFILE", "PGSERVICEFILE", "PGSERVICE", "PGSSLCERT", "PGSSLKEY",
+	"PGSSLPASSWORD", "PGUSER", "PGHOST", "PGDATABASE",
+}
+
+// libpqHomeFiles are the files pgx reads from the home directory by default
+// (pgconn defaultSettings): a password file, a service file that can hold
+// logins, and a client key.
+var libpqHomeFiles = []string{".pgpass", ".pg_service.conf", filepath.Join(".postgresql", "postgresql.key")}
+
+// checkLibpqDefaults refuses the start when a libpq variable is set (not
+// empty) or a libpq home file exists. With per-pipeline connections, a DSN
+// that leaves out its password, user, host or certificate would silently get
+// the process's one, so one tenant's pipeline could log in as another. The
+// error names the variables and files, never their values.
+func checkLibpqDefaults(src connSource) error {
+	var found []string
+	for _, v := range libpqVars {
+		if val, ok := src.lookupEnv(v); ok && strings.TrimSpace(val) != "" {
+			found = append(found, v)
+		}
+	}
+	if home, err := src.homeDir(); err == nil && home != "" {
+		for _, f := range libpqHomeFiles {
+			if p := filepath.Join(home, f); src.exists(p) {
+				found = append(found, p)
+			}
+		}
+	}
+	if len(found) > 0 {
+		return fmt.Errorf("wiring: a pipeline has its own connections:, but libpq defaults that pgx would add to its DSN are present (%s); unset or remove them, and put everything a pipeline needs in its own DSN: %w",
+			strings.Join(found, ", "), errLibpqDefaults)
+	}
+	return nil
+}
+
+// errLibpqDefaults wraps the checkLibpqDefaults refusal.
+var errLibpqDefaults = errors.New("libpq defaults present")
 
 // resolveRef returns the value a reference names.
 func resolveRef(key string, r owners.ConnRef, src connSource) (string, error) {
