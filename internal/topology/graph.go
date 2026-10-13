@@ -21,6 +21,11 @@ const (
 	KindTopic         NodeKind = "topic"
 	KindConsumerGroup NodeKind = "consumer_group"
 	KindSinkTable     NodeKind = "sink_table"
+	// KindDLQTopic is a dead-letter topic written by one of the pipeline's
+	// sink connectors (errors.deadletterqueue.topic.name) or declared in
+	// owners.yaml (watch.dlq_topics). It is a side node: edges lead into it,
+	// never out. Its layer and owner are the writer's.
+	KindDLQTopic NodeKind = "dlq_topic"
 )
 
 // Health is a node's state.
@@ -34,7 +39,8 @@ const (
 )
 
 // Node is one part of a pipeline. ID is "<prefix>:<name>" with prefixes
-// pg, connect, topic, group, wh (e.g. "connect:pg-orders-connector").
+// pg, connect, topic, dlq, group, wh (e.g. "connect:pg-orders-connector",
+// "dlq:orders-dlq").
 type Node struct {
 	ID     string            `json:"id"`
 	Kind   NodeKind          `json:"kind"`
