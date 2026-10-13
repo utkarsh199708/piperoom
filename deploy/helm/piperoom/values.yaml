@@ -116,6 +116,11 @@ env:
   PIPEROOM_WATCH_COOLDOWN: ""         # default 60m
   PIPEROOM_RETENTION_DAYS: ""         # empty/0 = keep everything
 
+  # --- shadow mode (docs/design/shadow.md; which pipelines are shadow is set in owners.yaml) ---
+  PIPEROOM_SHADOW_GRACE: ""           # Go duration a run may continue after close; default 0 = cancel at close
+  PIPEROOM_SHADOW_TOKEN_BUDGET: ""    # tokens per shadow room; default 500000, 0 = no cap
+  PIPEROOM_SHADOW_MAX_TURNS: ""       # model turns per shadow run; default 20
+
   # --- Kafka security (empty protocol = PLAINTEXT) ---
   KAFKA_SECURITY_PROTOCOL: ""
   KAFKA_SASL_MECHANISM: ""
@@ -268,7 +273,13 @@ networkPolicy:
       ports: [5432]
     kafka:
       to: []
-      ports: [9092, 9093]
+      # 9092 PLAINTEXT (Apache Kafka, MSK plaintext)
+      # 9093 TLS (Apache Kafka SSL listener, Strimzi)
+      # 9094 TLS (MSK TLS listener)
+      # 9096 SASL/SCRAM over TLS (MSK)
+      # 9098 SASL/IAM over TLS (MSK)
+      # Remove the ports your brokers do not use.
+      ports: [9092, 9093, 9094, 9096, 9098]
     connect:
       to: []
       ports: [8083]
@@ -278,5 +289,19 @@ networkPolicy:
     https:                # IdP (OIDC issuer), model API, Slack, https Registry/Connect
       to: []
       ports: [443]
+    # Cloud metadata server, opt-in (null = closed). Needed when the pod gets
+    # its cloud credentials from the metadata server: instance roles on the
+    # node (EC2 / EKS without IRSA) or GKE Workload Identity. Not needed for
+    # IRSA (that uses STS over 443) or for static keys from the Secret. Any
+    # extra key here is one more group, so you can add both under different names.
+    #   AWS / most clouds, instance metadata (IMDS):
+    #     metadata:
+    #       to: [{ipBlock: {cidr: 169.254.169.254/32}}]
+    #       ports: [80]
+    #   GKE Workload Identity (GKE metadata server on the node):
+    #     metadataGke:
+    #       to: [{ipBlock: {cidr: 169.254.169.252/32}}]
+    #       ports: [988]
+    metadata: null
   # Extra raw egress rules appended as-is.
   extraEgress: []

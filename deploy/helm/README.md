@@ -27,6 +27,8 @@ The variable names and meanings are those of `deploy/pilot.env.example` and
      SCHEMA_REGISTRY_URL: http://schema-registry:8081
    networkPolicy: {enabled: true}
    ```
+
+   A complete example is in `deploy/helm/piperoom/ci/oidc-values.yaml`.
 4. Install, giving the two YAML files (start from `deploy/config/*.example.yaml`):
 
    ```sh
@@ -58,10 +60,11 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
 
 ## Behaviour worth knowing
 
-- **Auth** defaults to `PIPEROOM_AUTH_MODE=oidc`. The image sets
-  `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`; in oidc mode the server ignores it and logs a warning at
-  every start (expected). oidc needs an https `PIPEROOM_PUBLIC_URL`; the chart derives it from
-  `ingress.host` when `ingress.tlsSecretName` is set.
+- **Auth** defaults to `PIPEROOM_AUTH_MODE=oidc`. In oidc mode the render fails unless
+  `PIPEROOM_PUBLIC_URL` is an `https://` URL (the chart derives it from `ingress.host` when
+  `ingress.tlsSecretName` is set) and `PIPEROOM_OIDC_ISSUER` and `PIPEROOM_OIDC_CLIENT_ID` are
+  set. The chart sets `PIPEROOM_DEV_ALLOW_NONLOOPBACK` to an empty value, so the image's
+  dev default does not apply.
 - **Dev mode is blocked.** The chart always renders `PIPEROOM_AUTH_MODE` (an empty value means
   oidc) and `PIPEROOM_DEV_ALLOW_NONLOOPBACK` (empty in oidc mode, overriding the image). Any
   other mode fails the render unless `allowDevMode=true`, and dev mode with an Ingress always
@@ -69,16 +72,45 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
   and no Ingress, then `kubectl port-forward svc/<release>-piperoom 8090:8090`.
 - **Guard rails.** The render also fails when `env` holds a secret-looking name (PASSWORD, SECRET,
   TOKEN, `_KEY`, `_DB_URL`...), a variable that is also listed under `secrets`, a chart-managed
-  variable (`PIPEROOM_HTTP_ADDR`, `OWNERS_FILE`, `USERS_FILE`), or when `PIPEROOM_PUBLIC_URL`
+  variable (`PIPEROOM_HTTP_ADDR`, `OWNERS_FILE`, `USERS_FILE`), a `*_PROXY` URL with a user name
+  or password (`://user:pass@`; use `secrets.refs`), or when `PIPEROOM_PUBLIC_URL`
   has a different host than `ingress.host` and `ingress.host` is not in `PIPEROOM_ALLOWED_HOSTS`.
   `values.schema.json` rejects wrong types (for example `networkPolicy.egress.kafka.ports=9092`
-  must be a list).
+  must be a list) and empty egress `ports` lists.
 - **With an Ingress** set `env.PIPEROOM_TRUSTED_PROXIES` to the ingress controller pod CIDR.
   Without it the server sees the controller's address for every user, so all users share one
   login rate-limit bucket.
 - **Probes** call `/healthz` (liveness) and `/readyz` (readiness, also pings the room database)
   with `Host: localhost`. The server checks the Host header on every route including probes, and
-  kubelet would otherwise send the pod IP and get 421.
+  kubelet would otherwise send the pod IP and get 421. A load balancer that health-checks the
+  pods directly (GKE container-native LB with NEGs, AWS Load Balancer Controller in IP mode)
+  also sends the pod IP as `Host`, so it gets 421 and marks the backend unhealthy until the
+  server exempts `/healthz` and `/readyz` from the Host check. Until then, set the Host
+  the health check sends. On GKE with the Gateway API:
+
+  ```yaml
+  apiVersion: networking.gke.io/v1
+  kind: HealthCheckPolicy
+  metadata:
+    name: piperoom
+  spec:
+    default:
+      config:
+        type: HTTP
+        httpHealthCheck:
+          portSpecification: USE_SERVING_PORT
+          requestPath: /readyz
+          host: piperoom.corp.example   # a host the server accepts (the public URL host)
+    targetRef:
+      group: ""
+      kind: Service
+      name: piperoom-piperoom           # the chart's Service name
+  ```
+
+  A classic GKE Ingress `BackendConfig` cannot set the health check Host, and an AWS target
+  group health check cannot either. There, keep an in-cluster ingress controller (for example
+  ingress-nginx) between the cloud load balancer and Piperoom, so the load balancer checks the
+  controller and kubelet's probes (which send `Host: localhost`) check Piperoom.
 - **One replica.** `replicaCount` defaults to 1 and the Deployment strategy is `Recreate`. The agent
   runner, watcher, retention sweep and action executor run in every server process and the code has
   no leader election or lock, so a second replica would duplicate investigations, watcher checks
@@ -91,8 +123,11 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
   (nginx upgrades the connection itself). Other controllers need their own settings.
 - **NetworkPolicy** (`networkPolicy.enabled=true`): ingress only on 8090 from
   `networkPolicy.ingressFrom` (default: namespace `ingress-nginx`); egress to kube-dns and to the
-  ports for Postgres 5432, Kafka 9092/9093, Connect 8083, Schema Registry 8081 and HTTPS 443
-  (IdP, model API, Slack). Those groups have an empty `to`, meaning any address on that port; set
+  ports for Postgres 5432, Kafka 9092/9093/9094/9096/9098 (plaintext, TLS, MSK TLS, SCRAM and
+  IAM), Connect 8083, Schema Registry 8081 and HTTPS 443 (IdP, model API, Slack). An opt-in
+  `egress.metadata` group (null by default) opens the cloud metadata server for instance roles
+  (`169.254.169.254/32` port 80) or GKE Workload Identity (`169.254.169.252/32` port 988); see
+  the examples in `values.yaml`. Those groups have an empty `to`, meaning any address on that port; set
   `to` to your CIDRs or selectors, and change `ports` if your services listen elsewhere. Add
   other rules with `extraEgress`. Caveats: in-cluster alert senders (Alertmanager, Grafana)
   need their namespace in `ingressFrom`; DNS egress assumes `k8s-app: kube-dns` (NodeLocal
@@ -134,8 +169,14 @@ pod (checksum annotation). The server applies database migrations at start; the 
 
 ## Checks
 
+`deploy/helm/piperoom/ci/` has two values files: `oidc-values.yaml` (a valid production-style
+setup, also a good starting point for your own values) and `dev-values.yaml` (the throwaway
+passwordless try-out). The chart does not render with its bare defaults, because oidc mode needs
+a public URL, an issuer and a client id.
+
 ```sh
-helm lint deploy/helm/piperoom
-helm template piperoom deploy/helm/piperoom | kubeconform -strict -summary
-helm template piperoom deploy/helm/piperoom --set ingress.enabled=true --set networkPolicy.enabled=true | kubeconform -strict -summary
+for f in oidc dev; do
+  helm lint deploy/helm/piperoom -f deploy/helm/piperoom/ci/$f-values.yaml
+  helm template piperoom deploy/helm/piperoom -f deploy/helm/piperoom/ci/$f-values.yaml | kubeconform -strict -summary
+done
 ```

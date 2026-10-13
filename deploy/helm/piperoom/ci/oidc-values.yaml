@@ -1,0 +1,20 @@
+# Valid production-style values: oidc login behind a TLS Ingress with a
+# NetworkPolicy. Used by helm lint / helm template in CI and in the README.
+image:
+  repository: registry.example.com/piperoom
+  tag: pilot
+ingress:
+  enabled: true
+  className: nginx
+  host: piperoom.corp.example
+  tlsSecretName: piperoom-tls
+env:
+  PIPEROOM_PUBLIC_URL: https://piperoom.corp.example
+  PIPEROOM_OIDC_ISSUER: https://idp.corp.example
+  PIPEROOM_OIDC_CLIENT_ID: piperoom
+  PIPEROOM_TRUSTED_PROXIES: 10.0.0.0/8
+  KAFKA_BROKERS: kafka-0.kafka:9092
+  CONNECT_URL: http://connect:8083
+  SCHEMA_REGISTRY_URL: http://schema-registry:8081
+networkPolicy:
+  enabled: true
