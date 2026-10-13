@@ -70,7 +70,8 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 | `SCHEMA_REGISTRY_URL` | Schema Registry base URL |
 | `OWNERS_FILE` | pipelines and layer owners (step 2) |
 | `USERS_FILE` | users and the layers each owns (step 2) |
-| `PIPEROOM_PUBLIC_URL` | optional. The externally visible base URL, used for room links in Slack. It is a WebSocket origin only when `PIPEROOM_WEB_DIR` is set; without a web dir the WebSocket ignores it (section 4). Its host is also the public host in the served UI's content-security policy. Must be a plain `http(s)` host, with no wildcard. An invalid value stops the start (`cmd/server/main.go:84-87`; `internal/httpapi/static.go:41-75`; `internal/httpapi/server.go:150-158`; `internal/ws/gateway.go:186-189`; `internal/httpapi/static.go:195-197`). Empty means no links |
+| `PIPEROOM_PUBLIC_URL` | optional. The externally visible base URL, used for room links in Slack. It is a WebSocket origin only when `PIPEROOM_WEB_DIR` is set; without a web dir the WebSocket ignores it (section 4). Its host is also the public host in the served UI's content-security policy. Must be a plain `http(s)` host, with no wildcard. An invalid value stops the start (`cmd/server/main.go:84-87`; `internal/httpapi/static.go:41-75`; `internal/httpapi/server.go:150-158`; `internal/ws/gateway.go:186-189`; `internal/httpapi/static.go:195-197`). Empty means no links. **Required in `oidc` mode, and it must be `https` there** (it sets the OIDC redirect URI) |
+| Login: `PIPEROOM_AUTH_MODE`, `PIPEROOM_OIDC_*`, `PIPEROOM_AUTH_VIEWER_GROUPS`, `PIPEROOM_SESSION_IDLE`, `PIPEROOM_SESSION_MAX`, `PIPEROOM_TRUSTED_PROXIES`, `PIPEROOM_ALLOWED_HOSTS`, `PIPEROOM_SOLO_USER` | `PIPEROOM_AUTH_MODE` is `dev` (default) or `oidc`. Every one of these is described in [deploy/README.md](../../deploy/README.md#2-settings-in-deployenv), with the identity provider setup. They are read in `internal/config/config.go` and checked in `internal/auth/settings.go` and `cmd/server/authsetup.go` |
 | `PIPEROOM_WEB_DIR` | **Live.** When set, the server also serves the built web UI (`web/dist`) at `/`, and refuses to start if the directory has no `index.html` (`cmd/server/main.go:242-249`, `checkWebDir` at `:292`; `internal/httpapi/static.go:16-20`). The Docker image sets it to `/web` (`Dockerfile:44`). Unset, the server serves the API and the probes only |
 | `PIPEROOM_RETENTION_DAYS` | **Live.** Deletes whole closed rooms (events, proposals, approvals, hand-offs) closed more than this many days ago, checked every 6 hours (`cmd/server/retention.go`; `internal/store/retention.go`). Open rooms are never deleted. Empty or `0` keeps everything; a value must be a whole number from 0 to 36500, or the start stops. Deletion cannot be undone: export a room first with `GET /api/rooms/{id}/export` (SHA-256 over the JCS form, `internal/room/service_export.go`) |
 
@@ -248,6 +249,10 @@ Rules of thumb:
   grants identical to these lists
   ([data-handling.md](data-handling.md#3-prompt-injection-and-untrusted-text), F4, F11).
 - Put the real people in `users.yaml`; remove the dev users.
+- For OIDC login the same two files also say **who may log in and what they may do**: optional
+  `email:` and `sub:` on a user, `group:` and `user:` principals, per-pipeline `owners:`
+  (approvers and backups) and `auditors:` in `owners.yaml`. Short examples and the rules are in
+  [deploy/README.md](../../deploy/README.md#identity-and-rights).
 - A pipeline may also have an optional `watch:` block (`internal/owners/watch.go`). It turns the
   watcher on or off for the pipeline and sets, per signal, `enabled`, `action` (`log` or `room`) and
   `for`; for `slot_wal` also `fire`, `clear` and `eta_sev1`; and the pipeline's `slot` name and
@@ -280,7 +285,10 @@ on `PIPEROOM_HTTP_ADDR` and exits 0 when it is healthy (`cmd/server/main.go:54`,
    Any disagreement stops the start, in **both** directions: every layer in `owners.yaml` must name
    a user who exists in `users.yaml` and lists that layer, and every layer a user lists must be
    assigned to that same user in `owners.yaml`. A layer name that is not one of the six known
-   layers also stops the start. The error names the user and the layer.
+   layers also stops the start. The error names the user and the layer. The check covers only a
+   layer whose owners are all `user:` principals; a layer that lists a `group:` is skipped (and
+   logged once). It also refuses a `users.yaml` id that starts with `u_` and an `email:` that is
+   not ASCII.
 3. Applies the goose migrations to `PIPEROOM_DB_URL` (`:137`, `migrations/migrate.go`), then opens
    the room store (`:143`). A database that cannot be reached stops the start.
 4. Starts the Slack mirror if `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` are set (`:157`). A wrong
@@ -336,8 +344,10 @@ origin checks stop browsers only. A non-browser client is not blocked by them. T
 server also checks the `Host` header (`421 bad_host`): loopback names are always allowed; set
 `PIPEROOM_ALLOWED_HOSTS` for a tunnel or proxy that rewrites `Host`.
 
-Log in by opening the UI and picking a user from `users.yaml` (dev login: no password, a session
-cookie; there are no `?user=` links). To check startup from the shell:
+In `oidc` mode you sign in at your identity provider instead
+([deploy/README.md](../../deploy/README.md#single-sign-on-oidc)). In dev mode, log in by opening the
+UI and picking a user from `users.yaml` (dev login: no password, a session
+cookie; there are no `?user=` links). To check startup from the shell in dev mode:
 `curl -H 'X-User: <user id>' http://127.0.0.1:8090/api/me` returns that user. This `X-User` form
 works only in dev mode and only when the request carries no session cookie. The same call with an
 unknown id returns `401`. Every `POST` from curl needs `-H 'Content-Type: application/json'`
@@ -385,17 +395,25 @@ far the interrupted step got, before you ask for a new proposal.
 
 ### Network exposure
 
-There is no real login yet (F1). The server runs in dev auth mode (`PIPEROOM_AUTH_MODE=dev`): a
-person picks a user from `users.yaml` in the UI, with no password (`docs/api.md` §Login;
-`docs/design/auth.md`). OIDC login is auth PR 3 and is not live yet.
+The server has two login modes (F1; `docs/api.md` §Login; `docs/design/auth.md`).
+
+- **`oidc`** (`PIPEROOM_AUTH_MODE=oidc`): real single sign-on through your identity provider. Only
+  people named in `users.yaml` or `owners.yaml`, or in a viewer group, can log in. This is the mode
+  for a TLS reverse proxy and for any wider network. Set it up with
+  [deploy/README.md](../../deploy/README.md#single-sign-on-oidc). The server needs no
+  `PIPEROOM_DEV_ALLOW_NONLOOPBACK` there (it ignores it and warns).
+- **`dev`** (the default, and what the image starts in): a person picks a user from `users.yaml` in
+  the UI, with no password. The rest of this section is about dev mode.
+
 In dev mode `cmd/server` refuses to listen on any address other than loopback unless
 `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` is set (the old `--allow-remote` flag is a deprecated alias).
 Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. With the switch it
 starts and logs a loud warning (`cmd/server/listen.go`). Keep `PIPEROOM_HTTP_ADDR` on loopback,
 and reach it through an SSH tunnel or a VPN. An authenticating reverse proxy needs
-`PIPEROOM_AUTH_MODE=oidc` (PR 3): dev mode cannot trust a proxy's identity header, and it answers
-`403 proxy_identity` to a request that sends `X-User` to the dev login. Until PR 3, a pilot behind
-a proxy builds from the git tag `pre-auth`
+`PIPEROOM_AUTH_MODE=oidc`: dev mode cannot trust a proxy's identity header, and it answers
+`403 proxy_identity` to a request that sends `X-User` to the dev login. A pilot that has moved
+behind a proxy with `oidc` mode no longer needs the git tag `pre-auth`; only a proxy pilot that
+cannot use OIDC yet stays on that tag
 ([deploy/README.md](../../deploy/README.md#read-this-first-network-exposure)). The switch adds no
 authentication. The Docker image sets it because the server must listen on `0.0.0.0` inside the
 container; the published port is still the control (section 4).
@@ -415,8 +433,8 @@ container; the published port is still the control (section 4).
    role is meant to write. Same for Kafka produce with the Piperoom principal.
 4. Confirm the approval gate: have the agent propose a fix and confirm it does not run
    until every required owner has approved. Reject it, and confirm nothing changed.
-   Note that dev login is not proof of identity (F1), so the approval check is only as good as
-   your network control.
+   In dev mode, dev login is not proof of identity (F1), so the approval check is only as good as
+   your network control. In `oidc` mode the approver is the signed-in person.
 5. Practise a hand-off between two engineers.
 6. If you enabled Slack: check that the room's parent message appears once in the channel, and
    that replies go into its thread.
@@ -498,8 +516,11 @@ an identical body (`service_room.go:109-125`; index key at `:196`);
 
 ## 6c. Not built yet
 
-- **Real login** (F1; design `docs/design/auth.md`). OIDC is auth PR 3 and is not live yet. Until
-  it lands, anyone who can reach the API or the WebSocket can pick any user in dev mode.
+- **Some of the login design is not built yet** (`docs/design/auth.md`). OIDC login, roles, solo
+  mode and the identity mapping are live. Still to come (auth PR 4): the hash of the proposal
+  shown to the approver, the identity of the approver stored on the approval event, and the rule
+  that a member who is not an approver, backup or auditor cannot export. In dev mode (the default)
+  anyone who can reach the API or the WebSocket can still pick any user.
 - **Room retention and export** are live (section 1). With `PIPEROOM_RETENTION_DAYS` unset or `0`,
   nothing deletes closed rooms by age.
 - **Snowflake** is selectable with `WAREHOUSE_KIND=snowflake` (section 1 and
@@ -541,6 +562,7 @@ an identical body (`service_room.go:109-125`; index key at `:196`);
 | Slack thread never appears | bot not in the channel (`not_in_channel` in the log), or the room was opened before Slack was enabled and the server was not restarted |
 | A repeat alert opened a second room | the body differs between sends (no `dedup_key`, or a changing field), the `pipeline_id` differs, or the first room was already closed |
 | Web UI cannot reach the API (network errors, `421`, `403`) | the UI must be same-origin with the API: use `npm run dev` (Vite proxies `/api` and `/auth`) or the served `PIPEROOM_WEB_DIR`. There is no CORS. A tunnel or proxy that rewrites `Host` needs `PIPEROOM_ALLOWED_HOSTS` |
+| Login problems in `oidc` mode (`login_expired`, `not_provisioned`, `idp_unavailable`, `rate_limited`, `403 viewer`, `groups_missing`) | the table in [deploy/README.md](../../deploy/README.md#troubleshooting) has one row for each |
 | Web UI shows WebSocket errors | the page's origin host is not the server's own host, the `PIPEROOM_PUBLIC_URL` host, a `PIPEROOM_ALLOWED_HOSTS` entry, or (no web dir, not oidc) `localhost:5173` / `127.0.0.1:5173`. Add the name to `PIPEROOM_ALLOWED_HOSTS`. These checks are browser-only |
 | Server exits at start with "index.html" | `PIPEROOM_WEB_DIR` does not point at a built UI (`cmd/server/main.go:292`) |
 | A fix shows "interrupted by a service restart" | the server restarted mid-fix; check the system, then re-propose |

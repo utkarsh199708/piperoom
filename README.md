@@ -152,6 +152,16 @@ Once PR #24 lands, the token, channel ID and public web URL will be given to the
 through the env vars above; the token and channel must be set together. Operations
 (token rotation, turning it off, error codes) are in `docs/runbook.md`.
 
+## Running a pilot (Docker, login)
+
+`deploy/README.md` is the guide: one image, one compose file, its own Postgres. The image starts in
+**dev** login mode (pick a user, no password), which is only for a laptop, a VPN or an SSH tunnel.
+For real single sign-on set `PIPEROOM_AUTH_MODE=oidc` and connect your identity provider. A TLS
+reverse proxy is supported in that mode only. The setup, the settings, who may log in and what each
+role can do, and the troubleshooting table are in
+[deploy/README.md](deploy/README.md#single-sign-on-oidc). The pilot limits are in
+[docs/pilot/README.md](docs/pilot/README.md).
+
 ## How the team works
 
 Ten coding agents own separate parts of the codebase and raise pull requests; three Claude
