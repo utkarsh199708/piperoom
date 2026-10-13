@@ -98,7 +98,7 @@ func TestGatedInboxDrainAlwaysHoldsSlot(t *testing.T) {
 				return
 			default:
 			}
-			w, _ := svc.slots.request()
+			w, _ := svc.slots.request("orders")
 			select {
 			case <-w.ready:
 			case <-stop:

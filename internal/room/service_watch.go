@@ -35,11 +35,22 @@ func hookDedupKey(pipelineID, indexKey string) string {
 // for the pipeline, it returns the newest one (latest opened_at; the smaller
 // id on a tie, the same order as the stores), so evidence lands in the room
 // people are most likely watching. It reads the room cache, which Load fills at
-// start-up; it does no store I/O. A pipelineID that is not a valid pipeline id
-// (pipelineIDRe) matches nothing.
+// start-up; with a single-process store it does no store I/O, with a shared
+// one it refreshes the cache first (one ListRooms read). A pipelineID that is
+// not a valid pipeline id (pipelineIDRe) matches nothing.
 func (s *Service) OpenRoomForPipeline(pipelineID string) (roomID string, ok bool) {
 	if !pipelineIDRe.MatchString(pipelineID) {
 		return "", false
+	}
+	if s.coord != nil {
+		// Shared store: rooms other replicas opened or closed since the last
+		// fold count too. The reads happen outside s.mu (refreshAll); a
+		// failure falls back to the cache (the follower keeps it close).
+		ctx, cancel := context.WithTimeout(s.ctx, lastRoomLookupTimeout)
+		if err := s.refreshAll(ctx); err != nil && s.ctx.Err() == nil {
+			s.log.Warn("room: open room for pipeline: refresh failed; using the cache", "pipeline", pipelineID, "err", err)
+		}
+		cancel()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -99,6 +110,13 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 	// the snapshot wins.
 	s.mu.Lock()
 	if st, cached := s.rooms[row.ID]; cached {
+		// Shared store: fold a close another replica wrote first. A room
+		// deleted meanwhile is not found and simply loses the snapshot vote.
+		_ = s.syncLocked(ctx, row.ID, st)
+		if s.rooms[row.ID] != st {
+			s.mu.Unlock()
+			return row.ID, closedAt, true
+		}
 		if s.roomOpen(st) {
 			closedAt = nil
 		} else if st.snap.ClosedAt != nil {
@@ -142,6 +160,8 @@ func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {
 	if err := rejectUnstorable(text); err != nil {
 		return err
 	}
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.getStateLocked(ctx, roomID)
