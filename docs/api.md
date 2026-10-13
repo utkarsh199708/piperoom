@@ -87,7 +87,7 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 | 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits) |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list) |
 | 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client) |
-| 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}` with `PIPEROOM_ARCHIVE_DIR` set could not write the archive, so nothing was deleted) |
+| 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}?archive=true` could not write the archive, so nothing was deleted) |
 | 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working) |
 
 Text a person types (titles, comments, steers, resolutions, trace keys, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD).
@@ -169,7 +169,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/rooms/{id}/control/grant` | `{to}` | `Event` | driver only, or anyone if no driver / lease expired |
 | POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only; a shadow room refuses an empty resolution with `400 validation`. A full room log never refuses `room.closed` |
 | POST | `/api/rooms/{id}/extend` | – | `Event` (`room.extended`) | driver only (`403 not_driver`); open rooms only (`409 room_closed`); once per room (`409 already_extended`); `400 validation` when `PIPEROOM_MAX_OPEN_DAYS=0`. Moves the auto-close deadline by `PIPEROOM_MAX_OPEN_DAYS` days and renews the driver lease. See Room limits |
-| DELETE | `/api/rooms/{id}?reason=` | – (send `Content-Type: application/json` like every non-GET) | `{room_id, pipeline_id, deleted_by, deleted_at, reason, event_count, archived}` | admin only (users.yaml `admin: true`): any other member `403 not_allowed`, a viewer `403 viewer`, checked before the room is looked up. `reason` 1–500 characters, else `400 validation`. Hard-deletes the room (open or closed) with its events, proposals, approvals, steps, suggestions, hand-offs, Slack thread state and shadow rows, and writes one content-free audit row (`room_deletions`). `event_count` is the number of events deleted; `archived` is true when `PIPEROOM_ARCHIVE_DIR` got the export first. Idempotent: a room already deleted answers `200` with its audit row and changes nothing; an id that never existed (or was removed by retention) is `404 not_found`. Archive write failed: `500 archive_failed`, nothing deleted. Open WebSockets of the room get a last `room.deleted` frame and close (see WebSocket) |
+| DELETE | `/api/rooms/{id}?reason=&archive=` | – (send `Content-Type: application/json` like every non-GET) | `{room_id, pipeline_id, deleted_by, deleted_at, reason, event_count, archived}` | admin only (users.yaml `admin: true`): any other member `403 not_allowed`, a viewer `403 viewer`, checked before the room is looked up. `reason` 1–500 characters, else `400 validation`. **A delete is an erase**: it hard-deletes the room (open or closed) with its events, proposals, approvals, steps, suggestions, hand-offs, Slack thread state and shadow rows, keeps no copy, and writes one content-free audit row (`room_deletions`). `archive=true` writes the room's export to `PIPEROOM_ARCHIVE_DIR` first (`400 validation` when the server has no archive directory, or for a value other than `true`/`false`; a failed write is `500 archive_failed` and nothing is deleted). `event_count` is the number of events deleted; `archived` is true when an export of the room is in the archive directory. Idempotent: a room already deleted, by an admin or by retention, answers `200` with its audit row (`deleted_by: "system"` for retention) and changes nothing; an id that never existed is `404 not_found`. Open WebSockets of the room get a last `room.deleted` frame and close (see WebSocket) |
 | POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step. After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode) |
 | POST | `/api/proposals/{pid}/reject` | `{layer, reason}`; after auth PR 4 `{layer, reason, params_hash}` | `Event` | same hash rule as approve |
 | GET | `/api/rooms/{id}/export` | – | the room as one JSON document | header `X-Piperoom-Export-SHA256` = SHA-256 of the RFC 8785 (JCS) form without the top-level `integrity` member. Today any user may export. After auth PR 4: only an approver or backup for any layer of the room's pipeline (in dev mode: `users.yaml` `layers`) or an `auditors:` principal; the driver is not on the list; others → `403 not_allowed`. Proposals, approvals and action results then carry `params_hash`, and approvals also `identity`. `?include=shadow` (closed rooms only, else `409 room_open`; `409 not_labelled` before the blind label) adds a top-level `"shadow": {run, events}` member (with `data`) after `"schema"`; it is inside the hashed document, so the hash differs from the plain export. Same access rule |
@@ -259,12 +259,16 @@ never shows shadow output.
 - **Data size.** `PIPEROOM_EVENT_MAX_DATA_BYTES` (default `64KiB`). A larger `agent.tool_result.data` is stored as
   `{"truncated": true, "original_bytes": N, "preview": "<start of the JSON text>"}` and the payload's `truncated`
   is true; a larger `action.executed.output` is cut and ends with `… [truncated: N bytes]`.
-- **Deletion.** `DELETE /api/rooms/{id}?reason=` (admin, see REST endpoints). `devctl rooms delete <id> --reason
-  <text> --as <admin>` calls this route.
-- **Archive.** With `PIPEROOM_ARCHIVE_DIR` (an absolute directory) set, retention and deletion first write the
+- **Deletion.** `DELETE /api/rooms/{id}?reason=` (admin, see REST endpoints) erases a room; add `archive=true` to keep
+  a copy first. `devctl rooms delete <id> --reason <text> --as <admin> [--archive]` calls this route.
+- **Audit.** Every deleted room leaves one content-free `room_deletions` row (room id, pipeline, deleted_by,
+  deleted_at, reason, event_count): an admin delete with the admin and their reason, a retention purge with
+  `deleted_by: "system"` and `reason: "retention: closed N days"`, in the purge's transaction.
+- **Archive.** With `PIPEROOM_ARCHIVE_DIR` (an absolute directory) set, retention (always) and an admin delete with
+  `archive=true` first write the
   room's export (the `GET /api/rooms/{id}/export` document, with its `integrity` hash) to
   `<dir>/<pipeline_id>/<room_id>.json`, mode `0600`. If that write fails the room is not deleted: retention logs
-  the error and tries again on its next run; `DELETE` answers `500 archive_failed`.
+  the error and tries again on its next run; `DELETE …&archive=true` answers `500 archive_failed`.
 
 ## WebSocket
 
