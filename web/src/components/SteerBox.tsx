@@ -1,43 +1,62 @@
-import { useState } from 'react'
-import type { FormEvent } from 'react'
+import { useRef, useState } from 'react'
+import type { FormEvent, KeyboardEvent } from 'react'
+import { Eye, Lock } from 'lucide-react'
 import type { RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canRequestControl, canSteer, canTakeControl, isViewer } from '../state/permissions'
 import type { RoomActions } from '../hooks/useRoom'
+import { modKeyLabel } from '@/lib/envLabel'
+import { Button } from '@/components/ui/button'
+import { Kbd } from '@/components/ui/kbd'
+import { Textarea } from '@/components/ui/textarea'
 import { PersonSelect } from './PersonSelect'
+import { PersonAvatar } from './room/PersonAvatar'
+import { StatusDot } from './room/StatusDot'
+import { minutesLeft, useNow } from './room/useNow'
 
 // Driver only: give control to anyone GET /api/people lists. Loads the list on open.
-function GrantPicker({ user, onGrant }: { user: CurrentUser; onGrant: (to: string) => void }) {
-  const [open, setOpen] = useState(false)
+function GrantPicker({
+  user,
+  open,
+  onClose,
+  onGrant,
+}: {
+  user: CurrentUser
+  open: boolean
+  onClose: () => void
+  onGrant: (to: string) => void
+}) {
   const [to, setTo] = useState('')
-  if (!open) {
-    return (
-      <button type="button" className="btn btn--ghost" onClick={() => setOpen(true)}>
-        Give control to…
-      </button>
-    )
-  }
+  if (!open) return null
   return (
-    <div className="grant-picker">
-      <label htmlFor="grant-to">Give control to</label>
-      <PersonSelect id="grant-to" selfId={user.id} value={to} onChange={setTo} />
-      <button
-        type="button"
-        className="btn btn--small btn--primary"
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-card px-3 py-2">
+      <label htmlFor="grant-to" className="text-xs text-muted-foreground">
+        Give control to
+      </label>
+      <div className="min-w-[10rem] [&_select]:h-8 [&_select]:w-full">
+        <PersonSelect id="grant-to" selfId={user.id} value={to} onChange={setTo} />
+      </div>
+      <Button
+        size="sm"
         disabled={!to}
         onClick={() => {
           onGrant(to)
-          setOpen(false)
+          onClose()
         }}
       >
         Give control
-      </button>
-      <button type="button" className="btn btn--small btn--ghost" onClick={() => setOpen(false)}>
+      </Button>
+      <Button size="sm" variant="ghost" onClick={onClose}>
         Cancel
-      </button>
+      </Button>
     </div>
   )
 }
+
+// The composer sticks to the bottom of the room column. Same field for everyone, but
+// what it does depends on who you are: the driver steers the agent, anyone else leaves a
+// suggestion in the driver's queue, a viewer reads. (Roles: docs/api.md, state/permissions.ts.)
+const BAR = 'sticky bottom-0 z-10 mt-auto border-t border-border bg-background px-4 pb-4 pt-3 sm:px-6'
 
 export function SteerBox({
   state,
@@ -49,108 +68,176 @@ export function SteerBox({
   actions: RoomActions
 }) {
   const [text, setText] = useState('')
+  const [granting, setGranting] = useState(false)
+  const ref = useRef<HTMLTextAreaElement>(null)
+  const now = useNow()
   const isDriver = canSteer(state, user)
 
   if (isViewer(user)) {
     return (
-      <section className="panel steer">
-        <div className="panel__head">
-          <h2 className="panel__title">Steer</h2>
-        </div>
-        <div className="panel__body">
-          <p className="muted">View only: you can read this room but not steer it.</p>
-        </div>
+      <section aria-label="Steer" className={`${BAR} flex items-center gap-2 pb-3`}>
+        <Eye className="size-3.5 shrink-0 text-subtle-foreground" aria-hidden="true" />
+        <p className="m-0 text-muted-foreground">
+          View only: you can read this room but not steer it. Ask a member to take control.
+        </p>
       </section>
     )
   }
 
-  const submit = (e: FormEvent) => {
-    e.preventDefault()
-    if (!text.trim()) return
+  if (state.status !== 'open') {
+    return (
+      <section aria-label="Steer" className={`${BAR} flex items-center gap-2 pb-3`}>
+        <Lock className="size-3.5 shrink-0 text-subtle-foreground" aria-hidden="true" />
+        <p className="m-0 text-muted-foreground">This room is closed. Nothing more to steer.</p>
+      </section>
+    )
+  }
+
+  const noDriver = state.driver === null
+  const take = !isDriver && canTakeControl(state, user)
+  const request = !isDriver && !take && canRequestControl(state, user)
+  const mod = modKeyLabel()
+  const left = minutesLeft(state.driver?.lease_until, now)
+
+  const send = () => {
+    if (!text.trim() || noDriver) return
     actions.steer(text.trim())
     setText('')
+    if (ref.current) ref.current.style.height = ''
+  }
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    send()
+  }
+  const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+      e.preventDefault()
+      send()
+    }
+  }
+  // Grow with the text, up to about six lines.
+  const grow = (el: HTMLTextAreaElement) => {
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`
+  }
+
+  let status: string
+  // minutesLeft is 0 only once the lease has run out (it rounds up while time remains).
+  if (isDriver) {
+    status = left === 0 ? 'You are driving · lease expired' : left != null ? `You are driving · lease ${left}m` : 'You are driving'
+  } else if (noDriver) {
+    status = 'No driver · take control to steer the agent'
+  } else {
+    const name = state.driver?.name ?? 'Someone'
+    const lease = left === 0 ? ' · lease expired' : left != null ? ` · lease ${left}m left` : ''
+    status = `${name} is driving${lease} · your message goes to ${name}'s queue`
   }
 
   return (
-    <section className="panel steer">
-      <div className="panel__head">
-        <h2 className="panel__title">Steer</h2>
-        {!isDriver && state.driver && (
-          <span className="muted steer__hint">Your message goes to {state.driver.name}'s queue</span>
-        )}
-      </div>
-      <div className="panel__body">
-        {isDriver && state.suggestions.length > 0 && (
-          <ul className="suggestions">
-            {state.suggestions.map((s) => (
-              <li key={s.suggestion_id} className="suggestion">
-                <div className="suggestion__body">
-                  <strong>{s.from.name}</strong>
-                  <p className="suggestion__text">{s.text}</p>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn--small btn--primary"
-                  onClick={() => actions.sendSuggestion(s.suggestion_id)}
-                >
-                  Send to agent
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
+    <section aria-label="Steer" className={`${BAR} flex flex-col gap-2`}>
+      {isDriver && state.suggestions.length > 0 && (
+        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+          {state.suggestions.map((s) => (
+            <li
+              key={s.suggestion_id}
+              className="flex items-start gap-2.5 rounded-md border border-border bg-card px-3 py-2"
+            >
+              <PersonAvatar actor={s.from} size={20} className="mt-0.5" />
+              <div className="min-w-0 flex-1">
+                <strong className="font-medium">{s.from.name}</strong>
+                <p className="m-0 break-words text-muted-foreground">{s.text}</p>
+              </div>
+              <Button size="sm" onClick={() => actions.sendSuggestion(s.suggestion_id)}>
+                Send to agent
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
 
-        <form className="steer__form" onSubmit={submit}>
-          <textarea
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            placeholder={isDriver ? 'Steer the agent…' : 'Suggest a steer…'}
-            aria-label="Steer the agent"
-            rows={2}
-          />
-          <div className="steer__actions">
-            {!isDriver && canTakeControl(state, user) && (
-              <button
-                type="button"
-                className="btn btn--ghost"
-                onClick={() => actions.grantControl(user.id)}
-              >
-                Take control
-              </button>
-            )}
-            {!isDriver && !canTakeControl(state, user) && canRequestControl(state, user) && (
-              <button type="button" className="btn btn--ghost" onClick={actions.requestControl}>
-                Request control
-              </button>
-            )}
-            <button type="submit" className="btn btn--primary" disabled={!text.trim()}>
+      {isDriver && state.control_requests.length > 0 && (
+        <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
+          {state.control_requests.map((r) => (
+            <li
+              key={r.from.id}
+              className="flex items-center gap-2.5 rounded-md border border-border bg-card px-3 py-2"
+            >
+              <PersonAvatar actor={r.from} size={20} />
+              <div className="min-w-0 flex-1">
+                <strong className="font-medium">{r.from.name}</strong>
+                <span className="text-muted-foreground"> wants control</span>
+              </div>
+              <Button size="sm" variant="secondary" onClick={() => actions.grantControl(r.from.id)}>
+                Grant control
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <StatusDot tone={noDriver ? 'warn' : 'accent'} />
+        <span className="text-xs text-muted-foreground">{status}</span>
+        <div className="ml-auto flex items-center gap-1">
+          {isDriver && (
+            <Button variant="ghost" className="h-7" aria-expanded={granting} onClick={() => setGranting((g) => !g)}>
+              Give control to…
+            </Button>
+          )}
+          {take && (
+            <Button variant="ghost" className="h-7" aria-keyshortcuts="T" onClick={() => actions.grantControl(user.id)}>
+              Take control
+              <Kbd aria-hidden="true">T</Kbd>
+            </Button>
+          )}
+          {request && (
+            <Button variant="ghost" className="h-7" aria-keyshortcuts="T" onClick={actions.requestControl}>
+              Request control
+              <Kbd aria-hidden="true">T</Kbd>
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {isDriver && (
+        <GrantPicker user={user} open={granting} onClose={() => setGranting(false)} onGrant={actions.grantControl} />
+      )}
+
+      <form className="flex flex-col gap-2" onSubmit={submit}>
+        <Textarea
+          ref={ref}
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value)
+            grow(e.currentTarget)
+          }}
+          onKeyDown={onKeyDown}
+          placeholder={
+            noDriver
+              ? 'Take control to steer the agent'
+              : isDriver
+                ? 'Steer the agent…'
+                : `Suggest a step for ${state.driver?.name ?? 'the driver'}…`
+          }
+          aria-label="Steer the agent"
+          rows={1}
+          disabled={noDriver}
+        />
+        {!noDriver && (
+          <div className="flex items-center gap-2">
+            <Button
+              type="submit"
+              variant={isDriver ? 'default' : 'secondary'}
+              className="ml-auto"
+              disabled={!text.trim()}
+              aria-keyshortcuts={`${mod === '⌘' ? 'Meta' : 'Control'}+Enter`}
+            >
               {isDriver ? 'Send to agent' : 'Suggest'}
-            </button>
+              <Kbd aria-hidden="true">{mod}⏎</Kbd>
+            </Button>
           </div>
-        </form>
-
-        {isDriver && <GrantPicker user={user} onGrant={actions.grantControl} />}
-
-        {isDriver && state.control_requests.length > 0 && (
-          <ul className="suggestions">
-            {state.control_requests.map((r) => (
-              <li key={r.from.id} className="suggestion">
-                <div className="suggestion__body">
-                  <strong>{r.from.name}</strong>
-                  <p className="suggestion__text">wants control</p>
-                </div>
-                <button
-                  type="button"
-                  className="btn btn--small btn--primary"
-                  onClick={() => actions.grantControl(r.from.id)}
-                >
-                  Grant control
-                </button>
-              </li>
-            ))}
-          </ul>
         )}
-      </div>
+      </form>
     </section>
   )
 }

@@ -1,13 +1,21 @@
 import type { PresenceMember } from '../api/types'
 import type { MemberState } from '../state/types'
-import { Avatar, Chip, Panel } from './ui'
+import { cn } from '@/lib/utils'
+import { Badge } from '@/components/ui/badge'
+import { PersonAvatar } from './room/PersonAvatar'
 
 export function PresencePanel({
   members,
   presence,
+  selfId,
+  selfIsViewer = false,
 }: {
   members: MemberState[]
   presence: PresenceMember[]
+  /** The signed-in person: that row says "you". */
+  selfId?: string
+  /** The signed-in person is a viewer: that row says "viewer". */
+  selfIsViewer?: boolean
 }) {
   const rows = members.map((m) => {
     const p = presence.find((x) => x.id === m.id)
@@ -20,25 +28,29 @@ export function PresencePanel({
   }
 
   return (
-    <Panel
-      className="presence"
-      title="Who's here"
-      right={<span className="muted">{rows.length}</span>}
-    >
-      <ul className="presence__list">
-        {rows.map((r) => (
-          <li key={r.id} className="presence__row">
-            <Avatar actor={{ kind: 'human', id: r.id, name: r.name }} size="sm" />
-            <span className="presence__name">
-              {r.name}
-              {r.role === 'driver' && <Chip tone="info">driver</Chip>}
-            </span>
-            <span className={`presence__state ${r.state === 'away' ? 'presence__state--away' : ''}`}>
-              {r.state}
-            </span>
-          </li>
-        ))}
+    <section aria-labelledby="presence-heading" className="flex flex-col gap-1.5 px-4 py-3.5">
+      <h2 id="presence-heading" className="m-0 flex items-center gap-1.5 text-sm font-medium">
+        Who&rsquo;s here
+        <span className="font-mono text-[11px] font-medium text-subtle-foreground">{rows.length}</span>
+      </h2>
+      <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
+        {rows.map((r) => {
+          const driver = r.role === 'driver'
+          const away = r.state === 'away'
+          return (
+            <li key={r.id} className={cn('flex min-h-8 items-center gap-2', away && 'opacity-70')}>
+              <PersonAvatar actor={{ id: r.id, name: r.name }} driver={driver} className={driver ? 'mx-0.5' : undefined} />
+              <span className="min-w-0 truncate font-medium">{r.name}</span>
+              {r.id === selfId && <span className="text-xs text-muted-foreground">you</span>}
+              {driver && <Badge variant="accent">Driver</Badge>}
+              {r.id === selfId && selfIsViewer && <Badge variant="outline">viewer</Badge>}
+              <span className={cn('ml-auto shrink-0 text-xs', away ? 'text-muted-foreground' : 'text-subtle-foreground')}>
+                {r.state}
+              </span>
+            </li>
+          )
+        })}
       </ul>
-    </Panel>
+    </section>
   )
 }

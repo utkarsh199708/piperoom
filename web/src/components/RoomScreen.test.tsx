@@ -111,7 +111,9 @@ describe('RoomScreen — agent done status and resolution', () => {
     show(webhookRoom({ agent_status: { state: 'done', detail: 'fix applied' } }))
     const chip = screen.getByText('resolved — verified')
     expect(chip).toBeInTheDocument()
-    expect(chip).toHaveClass('chip--ok')
+    // The pill is a polite live region; its tone is a data attribute (was the chip--ok class).
+    const pill = chip.closest('[aria-live="polite"]')
+    expect(pill).toHaveAttribute('data-tone', 'ok')
   })
 
   it('shows the resolution once the room is closed', () => {
