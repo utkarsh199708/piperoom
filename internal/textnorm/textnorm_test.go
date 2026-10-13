@@ -76,6 +76,12 @@ func TestMasking(t *testing.T) {
 		{"pg failing row", "Failing row contains (5, bob, 2026-01-01).", "Failing row contains (<row>)."},
 		{"debezium struct", "bad Struct{id=5,name=bob,amount=12.50}", "bad Struct{<fields>}"},
 		{"brace kv", "WorkerSourceTask{id=pg-orders-0} stopped", "WorkerSourceTask{<fields>} stopped"},
+		{"error code host", "error code:40401 now", "error code:40401 now"},
+		{"volatile after error", "Error 25377154 records skipped", "Error <n> records skipped"},
+		{"volatile after status", "status 1760175420 reached", "status <n> reached"},
+		{"volatile after code", "code 77 retry", "code <n> retry"},
+		{"value enum", `Could not find value "Bob" in enum`, `Could not find value "<str>" in enum`},
+		{"partition suffix", "table orders_2026_10_13 gone", "table orders_<n>_<n>_<n> gone"},
 		{"fqdn tld", "no route to broker.example.io", "no route to <host>"},
 		{"class not host", "failed javax.net.ssl.SSLHandshakeException here", "failed javax.net.ssl.SSLHandshakeException here"},
 		{"setting not host", "request.timeout:30000 exceeded", "request.timeout:<n> exceeded"},
@@ -327,6 +333,10 @@ func scenarioTexts(t *testing.T) []string {
 
 var digitRun = regexp.MustCompile(`\b\d+\b`)
 
+// evidencePosition lists, independently of the package code, where the
+// scenarios carry evidence codes that must not be bumped.
+var evidencePosition = regexp.MustCompile(`(?i)(sqlstate|error[ _]?code|status|http\S*|error)[\s:="'\[(]*$`)
+
 // bumpNumbers changes every standalone number to another of the same shape
 // (timestamps stay timestamps), except evidence codes, which are kept on purpose.
 func bumpNumbers(s string) string {
@@ -336,7 +346,7 @@ func bumpNumbers(s string) string {
 	for _, m := range idx {
 		b.WriteString(s[last:m[0]])
 		d := s[m[0]:m[1]]
-		if keepNumber(s[:m[0]], len(d)) {
+		if evidencePosition.MatchString(s[:m[0]]) {
 			b.WriteString(d)
 		} else {
 			bs := []byte(d)
@@ -429,4 +439,82 @@ func scenarioSeeds() []string {
 		out = out[:40]
 	}
 	return out
+}
+
+func TestNestedBodiesMasked(t *testing.T) {
+	tests := []struct{ name, in string }{
+		{"nested struct", "bad Struct{id=5,name=bob,addr=Struct{city=Paris}} here"},
+		{"nested braces", "bad {id=5, name=bob, addr={city=Paris}} here"},
+		{"envelope", "Struct{before=Struct{id=5,name=bob},after=Struct{id=5,name=bobby},op=u}"},
+		{"inner parens", "Key (name)=(bob (jr)) already exists."},
+		{"failing row", "Failing row contains (5, bob (jr), 2026-01-01)."},
+	}
+	for _, tc := range tests {
+		got := Normalize(tc.in).String()
+		for _, leak := range []string{"bob", "Paris", "jr"} {
+			if strings.Contains(got, leak) {
+				t.Errorf("%s: %q leaked into %q", tc.name, leak, got)
+			}
+		}
+	}
+	if got := maskMessage("Key (name)=(bob (jr)) already exists."); got != "Key (name)=(<val>) already exists." {
+		t.Errorf("inner parens: %q", got)
+	}
+}
+
+// A body that is cut by the line cap has no closer; everything after the
+// opener is a value and must be masked to the end of the line.
+func TestCutBodiesMasked(t *testing.T) {
+	pad := strings.Repeat("x", 300)
+	openers := []string{"Struct{name=bob,", "{id=5,name=bob,", "Failing row contains (5, bob, ", "Key (email)=(bob"}
+	for _, o := range openers {
+		in := pad + " " + o + strings.Repeat("secretvalue ", 100) + "}) tail"
+		got := Normalize(in).String()
+		if strings.Contains(got, "bob") || strings.Contains(got, "secret") {
+			t.Errorf("opener %q leaked: %q", o, got)
+		}
+	}
+	// Opener early in the line, closer beyond the line cap: no closer is seen.
+	in := "msg Struct{name=bob," + strings.Repeat("a", 500) + "} tail"
+	if got := Normalize(in).String(); strings.Contains(got, "bob") || strings.Contains(got, "tail") {
+		t.Errorf("line cap not applied before masking: %q", got)
+	}
+}
+
+func TestLineCapAndBudget(t *testing.T) {
+	// maxLineBytes: a line is cut before parsing, so text past it is gone.
+	long := "a.b.CException: " + strings.Repeat("a", maxLineBytes) + " Struct{name=bob}"
+	if got := Normalize(long).String(); strings.Contains(got, "Struct") {
+		t.Errorf("text past maxLineBytes survived: %q", got)
+	}
+	// budgetBytes: head causes stop once the budget is spent; the final cause stays.
+	var b strings.Builder
+	for i := 0; i < 100; i++ {
+		b.WriteString("a.b.CException: " + strings.Repeat("w", 300) + "\n")
+	}
+	b.WriteString("a.b.RootException: the end\n")
+	tpl := Normalize(b.String())
+	if max := budgetBytes/300 + 2; len(tpl.Causes) > max {
+		t.Errorf("causes = %d, want <= %d", len(tpl.Causes), max)
+	}
+	if len(tpl.Causes) < 20 {
+		t.Errorf("budget too small: %d causes", len(tpl.Causes))
+	}
+	if last := tpl.Causes[len(tpl.Causes)-1]; last.Class != "a.b.RootException" {
+		t.Errorf("root lost: %q", last.Class)
+	}
+}
+
+func TestRootIsLastClassCause(t *testing.T) {
+	// A trailing log line must not become the root: frames of the real root
+	// (the last class-bearing cause) still count only up to RootFrames.
+	a := "a.b.OuterException: x\nCaused by: a.b.RootException: y\n\tat r.One.m(One.java:1)\n\tat r.Two.m(Two.java:1)\nWorker stopped"
+	b := strings.Replace(a, "r.Two.m", "r.Other.m", 1)
+	if Fingerprint(a) != Fingerprint(b) {
+		t.Error("second root frame changed the fingerprint with a trailing log line")
+	}
+	c := strings.Replace(a, "r.One.m", "r.Other.m", 1)
+	if Fingerprint(a) == Fingerprint(c) {
+		t.Error("first root frame ignored with a trailing log line")
+	}
 }
