@@ -16,8 +16,8 @@ import (
 // rooms x pipelines x these caps whatever a room contains.
 const (
 	rareEventLimit    = 16  // room.created, room.closed, shadow.labelled: one each in practice
-	handoffEventLimit = 64  // hand-offs; the last one is used
-	resultEventLimit  = 100 // agent.tool_result events read per room
+	handoffEventLimit = 64  // newest hand-offs read; the last one is used
+	resultEventLimit  = 100 // newest agent.tool_result events read per room
 	maxFingerprints   = 8   // distinct traces kept per room
 	maxFieldBytes     = 2000
 	maxTraceTextKeep  = 1500 // masked trace text indexed per room

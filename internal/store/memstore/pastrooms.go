@@ -57,15 +57,14 @@ func (s *Store) EventsOfTypes(ctx context.Context, roomID string, types []events
 		s.mu.Unlock()
 		return []events.Event{}, nil
 	}
+	// The newest limit matches, in seq order, like Postgres.
 	var picked []events.Event
-	for _, e := range log.events {
-		if len(picked) >= limit {
-			break
-		}
-		if slices.Contains(types, e.Type) {
-			picked = append(picked, e)
+	for i := len(log.events) - 1; i >= 0 && len(picked) < limit; i-- {
+		if slices.Contains(types, log.events[i].Type) {
+			picked = append(picked, log.events[i])
 		}
 	}
+	slices.Reverse(picked)
 	s.mu.Unlock()
 	out := make([]events.Event, 0, len(picked))
 	for _, e := range picked {

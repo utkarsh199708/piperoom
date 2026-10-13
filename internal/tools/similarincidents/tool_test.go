@@ -287,7 +287,11 @@ func TestResultDataHoldsOnlyWhatTheSummaryShows(t *testing.T) {
 // its masked template, so a record value or DSN in a trace cannot be probed.
 func TestRecordValuesInTracesAreNotIndexed(t *testing.T) {
 	trace := "pg-orders-connector (source): RUNNING.\nTask 0: FAILED:\norg.apache.kafka.connect.errors.ConnectException: Tolerance exceeded\n" +
-		"Caused by: org.postgresql.util.PSQLException: ERROR: duplicate key value violates unique constraint \"orders_pkey\"\n  Detail: Key (email)=(zzsecretvalue@example.com) already exists."
+		"Caused by: org.postgresql.util.PSQLException: ERROR: duplicate key value violates unique constraint \"orders_pkey\"\n  Detail: Key (email)=(zzsecretvalue@example.com) already exists.\n" +
+		// A frame after the Detail line keeps the Detail line inside the trace
+		// block; without it extractTrace would cut the block before the value
+		// and the test would pass even if the raw trace were indexed.
+		"\tat org.postgresql.core.v3.QueryExecutorImpl.receiveErrorResponse(QueryExecutorImpl.java:2713)"
 	st := seeded(t, fake.Room{ID: "r-1", Title: "load failing", ClosedAt: day(9, 1), Resolution: "stopped duplicate writer",
 		ToolResults: []fake.ToolResult{{Tool: "connect_status", Summary: trace}}})
 	tl := similarincidents.New(similarincidents.Deps{Source: similarincidents.FromStore(st)})

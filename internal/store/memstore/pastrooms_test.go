@@ -81,6 +81,14 @@ func TestClosedRoomReader(t *testing.T) {
 	if !strings.Contains(string(all[1].Payload), "big") {
 		t.Errorf("EventsOfTypes changed the stored event: %s", all[1].Payload)
 	}
+	// Over the limit the newest events are kept, in seq order.
+	for i := range 5 {
+		app(events.AgentToolResult, events.AgentToolResultPayload{Tool: "x", Summary: string(rune('a' + i))})
+	}
+	last, err := s.EventsOfTypes(ctx, "a", []events.Type{events.AgentToolResult}, 2)
+	if err != nil || len(last) != 2 || last[0].Seq >= last[1].Seq || last[1].Seq != int64(len(all)+5) {
+		t.Errorf("newest 2 = %+v, %v", last, err)
+	}
 	// A room deleted since it was listed has no events, as in Postgres.
 	if got, err := s.EventsOfTypes(ctx, "zzz", []events.Type{events.RoomClosed}, 1); err != nil || len(got) != 0 {
 		t.Errorf("missing room: %v, %v; want no events and no error", got, err)

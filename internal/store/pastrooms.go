@@ -18,7 +18,8 @@ type ClosedRoomReader interface {
 	// (ties by id). pipelineID "" means every pipeline.
 	ListClosedRooms(ctx context.Context, pipelineID string, limit int) ([]Room, error)
 	// EventsOfTypes returns the room's events whose type is in types, in seq
-	// order, at most limit. The "data" field of an agent.tool_result payload is
+	// order, at most limit. When more match, the NEWEST limit are returned (still
+	// in seq order), so "the last hand-off" is never lost to the limit. The "data" field of an agent.tool_result payload is
 	// dropped: it can be megabytes and the caller reads the summary only.
 	EventsOfTypes(ctx context.Context, roomID string, types []events.Type, limit int) ([]events.Event, error)
 }
@@ -90,9 +91,11 @@ func (s *PG) EventsOfTypes(ctx context.Context, roomID string, types []events.Ty
 	// "payload - 'data'" drops the key in the database, so a tool result's
 	// recorded data never crosses the wire.
 	rows, err := s.pool.Query(ctx,
-		`SELECT seq, type, actor,
-		        CASE WHEN type = 'agent.tool_result' THEN payload - 'data' ELSE payload END, at
-		 FROM room_events WHERE room_id = $1 AND type = ANY($2) ORDER BY seq ASC LIMIT $3`,
+		`SELECT seq, type, actor, payload, at FROM (
+		   SELECT seq, type, actor,
+		          CASE WHEN type = 'agent.tool_result' THEN payload - 'data' ELSE payload END AS payload, at
+		   FROM room_events WHERE room_id = $1 AND type = ANY($2) ORDER BY seq DESC LIMIT $3
+		 ) newest ORDER BY seq ASC`,
 		roomID, names, limit)
 	if err != nil {
 		return nil, fmt.Errorf("store: events of types %s: %w", roomID, err)

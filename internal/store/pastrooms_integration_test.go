@@ -94,8 +94,9 @@ func TestClosedRoomReaderMatchesMemstore(t *testing.T) {
 		if err != nil || res.Tool != "connect_status" || !strings.Contains(res.Summary, "must be owner") {
 			t.Errorf("%s: tool result lost its summary: %+v, %v", name, res, err)
 		}
-		if one, err := r.EventsOfTypes(ctx, "pr-old", types, 1); err != nil || len(one) != 1 {
-			t.Errorf("%s: limit 1: %d events, %v", name, len(one), err)
+		// Over the limit the NEWEST events are kept, still in seq order.
+		if one, err := r.EventsOfTypes(ctx, "pr-old", types, 1); err != nil || len(one) != 1 || one[0].Type != events.RoomClosed {
+			t.Errorf("%s: limit 1: %+v, %v; want the newest (room.closed)", name, one, err)
 		}
 		if none, err := r.EventsOfTypes(ctx, "pr-old", nil, 10); err != nil || len(none) != 0 {
 			t.Errorf("%s: no types: %d events, %v", name, len(none), err)

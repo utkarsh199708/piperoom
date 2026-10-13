@@ -65,7 +65,9 @@ func (s scanSource) ListClosedRooms(ctx context.Context, pipelineID string, limi
 func (s scanSource) EventsOfTypes(ctx context.Context, roomID string, types []events.Type, limit int) ([]events.Event, error) {
 	var out []events.Event
 	var after int64
-	for scanned := 0; scanned < fallbackMaxScan && len(out) < limit; {
+	// The newest limit matches, like the stores' own implementations; the scan
+	// is capped, so beyond fallbackMaxScan events "newest" means newest seen.
+	for scanned := 0; scanned < fallbackMaxScan; {
 		page, err := s.st.Since(ctx, roomID, after, fallbackPage)
 		if errors.Is(err, store.ErrNotFound) {
 			return []events.Event{}, nil // deleted since it was listed, as in Postgres
@@ -79,12 +81,15 @@ func (s scanSource) EventsOfTypes(ctx context.Context, roomID string, types []ev
 		for _, e := range page {
 			after = e.Seq
 			scanned++
-			if len(out) < limit && slices.Contains(types, e.Type) {
+			if slices.Contains(types, e.Type) {
 				e, err := store.StripToolResultData(e)
 				if err != nil {
 					return nil, fmt.Errorf("similarincidents: %w", err)
 				}
 				out = append(out, e)
+				if len(out) > limit {
+					out = out[1:]
+				}
 			}
 		}
 	}

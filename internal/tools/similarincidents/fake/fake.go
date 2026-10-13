@@ -38,8 +38,10 @@ type Room struct {
 	Layer      string
 	LabelTerms []string
 	// Handoff, when set, adds a handoff.created event (a person starts it).
-	Handoff     *events.HandoffSummary
-	ToolResults []ToolResult
+	Handoff *events.HandoffSummary
+	// MoreHandoffs are written after Handoff, in order.
+	MoreHandoffs []events.HandoffSummary
+	ToolResults  []ToolResult
 }
 
 var (
@@ -84,6 +86,11 @@ func Seed(ctx context.Context, st store.Store, r Room) error {
 	}
 	if r.Handoff != nil {
 		if err := app(events.HandoffCreated, human, events.HandoffCreatedPayload{HandoffID: "h-" + r.ID, To: human, Summary: *r.Handoff}); err != nil {
+			return err
+		}
+	}
+	for i, h := range r.MoreHandoffs {
+		if err := app(events.HandoffCreated, human, events.HandoffCreatedPayload{HandoffID: fmt.Sprintf("h%d-%s", i, r.ID), To: human, Summary: h}); err != nil {
 			return err
 		}
 	}
