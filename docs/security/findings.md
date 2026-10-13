@@ -19,7 +19,7 @@ hardening, or dev-only exposure).
 ## F1 — Any room participant can become any user, including every layer owner, with zero credentials
 
 - **Severity:** critical
-- **Status (2026-10-13):** design in `docs/design/auth.md` (OIDC login, server-side session, `X-User` dev-only on loopback). Not built.
+- **Status (2026-10-13, design rev 2):** design in `docs/design/auth.md` (OIDC login, server-side session, `X-User` dev-only; dev mode listens on loopback unless `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`, which the Docker image sets with loud warnings; Host allow-list against DNS rebinding). On `main` @ 9a97cb2 the listen guard exists (`cmd/server/listen.go`), the image passes `--allow-remote` (`Dockerfile:66`) and the pilot compose binds the host side to `127.0.0.1` by default. Login is not built.
 - **Where:** `docs/api.md` §Auth (contract); `web/src/components/UserSwitcher.tsx:1-18`;
   `web/src/context/UserContext.tsx:9-49`
 - **Scenario:** The entire approval model rests on "only the owner of a layer may approve a
@@ -47,7 +47,7 @@ hardening, or dev-only exposure).
 ## F2 — Layer owners approve a free-text description, never the actual action parameters
 
 - **Severity:** high
-- **Status (2026-10-13):** design in `docs/design/auth.md` §3 (`params_hash` sent with each approval, `409 params_mismatch`, approver identity in the event). Params display is merged (857f059); the hash binding is not built.
+- **Status (2026-10-13, design rev 2):** design in `docs/design/auth.md` §3 (`params_hash` over title, risk, rollback, required layers and the stored steps; sent with each approval, `409 params_mismatch`; executor re-check; the same hash on `action.executed`; approver identity in the event). Steps are frozen at creation on `main` (`internal/room/service_proposals.go:112-127`) and the model's params text is parsed before storage (PR #45). The hash binding is not built. Limit stated in the design: the re-check does not catch a DB admin; only the export copy does.
 - **Where:** `web/src/components/ProposalsPanel.tsx:90-98` (`Proposal` renders `s.action`,
   `s.layer`, `s.description` only); confirmed `params` is present on the wire type
   (`web/src/api/types.ts:128`, `ProposalStep.params: unknown`) but is never read anywhere in
@@ -73,6 +73,7 @@ hardening, or dev-only exposure).
 ## F3 — Full row values, not just the model-visible summary, are pushed into the permanent, broadcast room log
 
 - **Severity:** high
+- **Status (2026-10-13):** `Data` of `pg_row` / `warehouse_row` is cut to key and timestamp at the source (a3/row-scope, a1ceb36). The audit export `GET /api/rooms/{id}/export` (46c3d3a) returns the whole log to **any** `users.yaml` user (`internal/httpapi/export.go:26-29`); once viewer groups can log in, a viewer could export a full room. `docs/design/auth.md` §3.4 limits export to layer owners, the driver and `auditors:` principals.
 - **Where:** `internal/tools/dbtools/pg.go:171-179` (`pgRowTool`: `Data: row` — the full
   `map[string]any` from `SELECT *`); `internal/tools/dbtools/wh.go:91-99` (`warehouseRowTool`,
   same pattern); consumed by `internal/agent/run.go:430-437` and `:461-470`
@@ -227,6 +228,7 @@ hardening, or dev-only exposure).
 ## F9 — The alert webhook's authentication model is undefined
 
 - **Severity:** needs confirmation (potential high if unauthenticated)
+- **Status (2026-10-13):** signed routes `POST /api/alerts/{source}` are merged (f4ce4b5, `internal/alertin`) and sit outside `X-User` (`internal/httpapi/server.go:119`). The unsigned `POST /api/alerts/webhook` is still inside the `X-User` group (`server.go:135`); `docs/design/auth.md` §4 makes it dev-mode only.
 - **Where:** `docs/api.md:92` — `POST /api/alerts/webhook | any JSON | RoomSnapshot | generic
   alert; ... driver = none until someone takes control`. The same document's Auth section says
   "Every request sends `X-User: <user id>`" but does not say whether the webhook — which by

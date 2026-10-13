@@ -12,6 +12,14 @@
 > **Status (C9, 2026-10-13):** `docs/design/auth.md` rewritten against `main` @ 2a7bc34 on branch `c9/auth-design`
 > (OIDC + PKCE, server-side session, owners.yaml principals/groups/backup, solo mode, `params_hash` on approvals,
 > 4-PR split). It replaces PR #10's `auth.md`; `webhook-auth.md` and `event-retention.md` stay in PR #10.
+>
+> **Revision 2 (C9, 2026-10-13, PR #44):** rebased on `main` @ 9a97cb2 and revised for every item of
+> `reviews/auth-design-critique.md`: dev non-loopback opt-in `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (keeps the Docker
+> image working), Host allow-list against DNS rebinding, login CSRF (row by cookie, then `state`), mode-specific
+> cookie names, `params_hash` on `action.executed` with title/risk/rollback hashed and a JCS number rule, export
+> limited to owners/driver/auditors, solo start check, `ValidateUsers` group rule, `return` parsing, client secret
+> rule, groups-overage message. The "Changes in revision 2" table at the top of `auth.md` maps item → section.
+> `jcs` is already a direct dependency on `main`; only `go-oidc` is new.
 
 Read these first: `AGENTS.md`, `docs/collab.md`, `docs/security/findings.md` (F1–F10), `docs/security/threat-model.md`, `docs/api.md`,
 `internal/events/events.go`, `internal/config/config.go`, `internal/owners/owners.go`, `dev/users.yaml`, `dev/owners.yaml`,
