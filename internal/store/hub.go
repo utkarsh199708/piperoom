@@ -145,7 +145,7 @@ type hub struct {
 	listen     bool          // false: never LISTEN, poll only (tests of the fallback)
 	poll       time.Duration // poll interval while not listening
 
-	ctx        context.Context // the hub's lifetime; feeds derive from it
+	ctx context.Context // the hub's lifetime; feeds derive from it
 
 	mu        sync.Mutex
 	feeds     map[string]*roomFeed
