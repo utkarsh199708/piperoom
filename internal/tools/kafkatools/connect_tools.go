@@ -70,7 +70,7 @@ func (t *connectList) Run(ctx context.Context, _ json.RawMessage) (tools.Result,
 		}
 		fmt.Fprintf(&sb, "%s (%s): %s, %d failed tasks", r.Name, r.Type, r.State, r.FailedTasks)
 	}
-	appendLine(&sb, tools.NotShown(other, "connectors"))
+	appendLine(&sb, tools.NotShown(other, "connector", "connectors"))
 	return res(sb.String(), rows), nil
 }
 

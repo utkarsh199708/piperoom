@@ -73,19 +73,50 @@ func TestBuildGroupLagCountsOnlyThePipelinesTopics(t *testing.T) {
 
 func TestPipelineLag(t *testing.T) {
 	own := map[string]bool{"pg.public.orders": true}
-	got := pipelineLag(clients.GroupLag{TotalLag: 11, Partitions: []clients.PartitionLag{
+	got, ok := pipelineLag(clients.GroupLag{TotalLag: 11, Partitions: []clients.PartitionLag{
 		{Topic: "pg.public.orders", Lag: 4}, {Topic: "x", Lag: 7},
 	}}, own)
-	if got.TotalLag != 4 || len(got.Partitions) != 1 || got.Partitions[0].Topic != "pg.public.orders" {
-		t.Fatalf("pipelineLag = %+v", got)
+	if !ok || got.TotalLag != 4 || len(got.Partitions) != 1 || got.Partitions[0].Topic != "pg.public.orders" {
+		t.Fatalf("pipelineLag = %+v, %v", got, ok)
 	}
-	// Every partition foreign: zero lag, not the group's total.
-	got = pipelineLag(clients.GroupLag{TotalLag: 7, Partitions: []clients.PartitionLag{{Topic: "x", Lag: 7}}}, own)
-	if got.TotalLag != 0 || len(got.Partitions) != 0 {
-		t.Fatalf("pipelineLag all foreign = %+v", got)
+	// Every partition foreign: the lag is unknown, neither 0 nor the group's total.
+	got, ok = pipelineLag(clients.GroupLag{TotalLag: 7, Partitions: []clients.PartitionLag{{Topic: "x", Lag: 7}}}, own)
+	if ok || got.TotalLag == 7 || len(got.Partitions) != 0 {
+		t.Fatalf("pipelineLag all foreign = %+v, %v; want not ok and no foreign lag", got, ok)
 	}
 	// No partitions: nothing to tell apart, the total is kept.
-	if got := pipelineLag(clients.GroupLag{TotalLag: 5}, own); got.TotalLag != 5 {
-		t.Fatalf("pipelineLag without partitions = %+v", got)
+	if got, ok := pipelineLag(clients.GroupLag{TotalLag: 5}, own); !ok || got.TotalLag != 5 {
+		t.Fatalf("pipelineLag without partitions = %+v, %v", got, ok)
 	}
+}
+
+// A group whose partitions are all on topics that are not the pipeline's (for
+// example renamed by a RegexRouter) shows lag unknown, not "0" and ok.
+func TestBuildGroupWithNoPipelinePartitionIsUnknown(t *testing.T) {
+	now := time.Now()
+	b := NewBuilder(testOwners(),
+		&fakeConnect{
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
+		},
+		&fakeKafka{lags: map[string]clients.GroupLag{"order-sync": {State: "Stable", TotalLag: 5000, Partitions: []clients.PartitionLag{
+			{Topic: "routed.orders", Partition: 0, Lag: 5000},
+		}}}},
+		&fakeSource{slots: []clients.ReplicationSlot{{Name: "debezium", Active: true}}},
+		&fakeWarehouse{fresh: map[string]time.Time{"analytics.orders": now}},
+	)
+	g, err := b.Build(context.Background(), "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range g.Nodes {
+		if n.Kind != KindConsumerGroup {
+			continue
+		}
+		if n.Health != HealthUnknown || n.Facts["lag"] != "unknown (no partition of this pipeline's topics)" || n.Facts["state"] != "Stable" {
+			t.Fatalf("group node = %+v, want health unknown and lag unknown", n)
+		}
+		return
+	}
+	t.Fatal("no consumer group node")
 }

@@ -54,7 +54,7 @@ func (t *registrySubjects) Run(ctx context.Context, input json.RawMessage) (tool
 	}
 	var sb strings.Builder
 	sb.WriteString(strings.Join(out, "\n"))
-	appendLine(&sb, tools.NotShown(other, "subjects"))
+	appendLine(&sb, tools.NotShown(other, "subject", "subjects"))
 	return res(sb.String(), out), nil
 }
 

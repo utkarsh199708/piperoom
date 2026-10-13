@@ -447,24 +447,29 @@ func TestRiseToSev1ReopensAClosedRoomOncePerEpisode(t *testing.T) {
 // ---- slot name, evidence size ----
 
 func TestInvalidSlotNameIsNeverReplacedByAnotherSlot(t *testing.T) {
-	h := newHarness(t, opts{})
-	h.conn.mu.Lock()
-	h.conn.cfg["pg-orders"] = map[string]string{
-		"connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-		"slot.name":       "Bad-Name",
-	}
-	h.conn.mu.Unlock()
-	// Another pipeline's slot, named like Debezium's default, is breaching.
-	h.src.update("debezium", func(r *clients.ReplicationSlot) { r.Active, r.RetainedWALBytes = false, 5*gib })
-	h.steps(15, time.Minute)
-	if h.phase("orders", owners.SignalSlotInactive) != phaseOK || h.phase("orders", owners.SignalSlotWAL) != phaseOK {
-		t.Fatal("the pipeline took another slot")
-	}
-	if got := len(h.rooms.created()); got != 0 {
-		t.Fatalf("rooms = %d", got)
-	}
-	if !strings.Contains(h.logs.String(), "invalid slot.name") {
-		t.Fatalf("no warning\n%s", h.logs)
+	// A blank slot.name is set, so it is invalid too, not "use the default" (T2).
+	for _, name := range []string{"Bad-Name", "", "   "} {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			h := newHarness(t, opts{})
+			h.conn.mu.Lock()
+			h.conn.cfg["pg-orders"] = map[string]string{
+				"connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+				"slot.name":       name,
+			}
+			h.conn.mu.Unlock()
+			// Another pipeline's slot, named like Debezium's default, is breaching.
+			h.src.update("debezium", func(r *clients.ReplicationSlot) { r.Active, r.RetainedWALBytes = false, 5*gib })
+			h.steps(15, time.Minute)
+			if h.phase("orders", owners.SignalSlotInactive) != phaseOK || h.phase("orders", owners.SignalSlotWAL) != phaseOK {
+				t.Fatal("the pipeline took another slot")
+			}
+			if got := len(h.rooms.created()); got != 0 {
+				t.Fatalf("rooms = %d", got)
+			}
+			if !strings.Contains(h.logs.String(), "invalid slot.name") {
+				t.Fatalf("no warning\n%s", h.logs)
+			}
+		})
 	}
 }
 

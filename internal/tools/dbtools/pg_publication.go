@@ -125,7 +125,7 @@ func pgPublicationTablesTool(d Deps) tools.Tool {
 
 			text := publicationSummary(conn.publication, conn.role, p.SourceTables, tables)
 			if !sc.Unscoped() {
-				if line := tools.NotShown(other, "tables in publication "+conn.publication); line != "" {
+				if line := tools.NotShown(other, "table in publication "+conn.publication, "tables in publication "+conn.publication); line != "" {
 					text += line + "\n"
 				}
 			}

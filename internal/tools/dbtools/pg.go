@@ -56,7 +56,7 @@ func pgReplicationSlotsTool(d Deps) tools.Tool {
 					fmt.Fprintf(&head, "slot %s: not found in pg_replication_slots\n", n)
 				}
 			}
-			if line := tools.NotShown(other, "replication slots"); line != "" {
+			if line := tools.NotShown(other, "replication slot", "replication slots"); line != "" {
 				head.WriteString(line + "\n")
 			}
 			return slotsResult(slots, head.String()), nil
@@ -174,7 +174,7 @@ func pgRecentDDLTool(d Deps) tools.Tool {
 func pgLongTransactionsTool(d Deps) tools.Tool {
 	return &tool{
 		name: "pg_long_transactions",
-		desc: "List transactions on the source Postgres that have been open longer than a threshold (pid, user, application, state, age, wait event, statement verb; no query text). In a room, only transactions that hold or wait for a lock on the pipeline's source tables are listed; the others are only counted, with how many of them are writers. has_xid marks writers that hold the WAL horizon; long read-only transactions are listed too because they block DDL and VACUUM.",
+		desc: "List transactions on the source Postgres that have been open longer than a threshold (pid, user, application, state, age, wait event, statement verb; no query text). In a room, only transactions that hold or wait for a lock on the pipeline's source tables are listed; the others are counted, and the oldest writers among them (a writer on any table or database holds back every logical slot) are shown with pid, same_database, state, age, xid_age and wait type only. has_xid marks writers that hold the WAL horizon; long read-only transactions are listed too because they block DDL and VACUUM.",
 		schema: objSchema(map[string]any{
 			"older_than_minutes": intProp("Minimum transaction age in minutes. Default 5."),
 		}),
@@ -200,21 +200,21 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
 			var txns []clients.Transaction
-			var other, otherWriters int
+			var tt postgres.TableTransactions
 			if sc.Unscoped() {
 				txns, err = d.Src.LongTransactions(ctx, olderThan)
 			} else {
 				// Scoped: only sessions of the source database that lock one of
-				// the pipeline's tables. Other sessions belong to other
-				// pipelines, users or databases and are only counted. A client
+				// the pipeline's tables are listed. Other sessions belong to
+				// other pipelines, users or databases: they are counted, and
+				// the oldest writers among them are shown anonymised. A client
 				// that cannot filter is refused, never read in full.
 				l, ok := d.Src.(tableTxnLister)
 				if !ok {
 					return tools.Result{}, errors.New("dbtools: pg_long_transactions: the source client cannot filter transactions by table, so none are shown")
 				}
-				var tt postgres.TableTransactions
 				tt, err = l.LongTransactionsOnTables(ctx, olderThan, sc.Pipeline().SourceTables)
-				txns, other, otherWriters = tt.Transactions, tt.Other, tt.OtherWriters
+				txns = tt.Transactions
 			}
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_long_transactions: %w", err)
@@ -238,21 +238,103 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 				fmt.Fprintf(&sb, "pid=%d user=%s app=%s state=%s age=%s wait=%s verb=%s writer=%s\n",
 					r.PID, r.User, r.ApplicationName, r.State, r.Age, orDash(r.WaitEvent), orDash(r.Verb), writer)
 			}
-			if len(txns) == 0 {
-				if sc.Unscoped() {
+			if sc.Unscoped() {
+				if len(txns) == 0 {
 					sb.WriteString("(no long transactions)\n")
-				} else {
-					sb.WriteString("(no long transactions on this pipeline's tables)\n")
 				}
+				summary, truncated := tools.Truncate(sb.String())
+				return tools.Result{Summary: summary, Data: rows, Truncated: truncated}, nil
 			}
-			if line := tools.NotShown(other, "long transactions"); line != "" {
-				// Only counts: a writer anywhere can still hold back this
-				// pipeline's slot, so the agent must know one exists.
-				fmt.Fprintf(&sb, "%s; %d of them are writers (has_xid) and can hold back the WAL a slot keeps\n", line, otherWriters)
+
+			if len(txns) == 0 {
+				sb.WriteString("(no long transactions on this pipeline's tables)\n")
+			}
+			data := scopedTxns{Transactions: rows, OtherNotShown: tt.Other, OtherWriters: tt.OtherWriters}
+			if line := tools.NotShown(tt.Other, "long transaction", "long transactions"); line != "" {
+				fmt.Fprintf(&sb, "%s; %d of them %s (has_xid)\n", line, tt.OtherWriters, tools.Plural(tt.OtherWriters, "is a writer", "are writers"))
+			}
+			// A writer on any table, in any database, holds back the
+			// restart_lsn of every logical slot: the classic cause of a slot
+			// that keeps WAL. Show the oldest ones, with the allow-listed
+			// fields only, so the agent can name the cause and a DBA can act.
+			for i, w := range tt.OldestOtherWriters {
+				if i == postgres.MaxOtherWriters {
+					break
+				}
+				ow := anonWriter(w)
+				data.OldestOtherWriters = append(data.OldestOtherWriters, ow)
+				if i == 0 {
+					sb.WriteString("oldest writers outside this pipeline's tables (they hold back every logical slot's restart_lsn; no user, application, database or query shown):\n")
+				}
+				fmt.Fprintf(&sb, "  pid=%d same_database=%s state=%s age=%s xid_age=%d wait_type=%s\n",
+					ow.PID, yesNo(ow.SameDatabase), orDash(ow.State), ow.Age, ow.XIDAge, orDash(ow.WaitEventType))
+			}
+			if more := tt.OtherWriters - len(data.OldestOtherWriters); more > 0 && len(data.OldestOtherWriters) > 0 {
+				fmt.Fprintf(&sb, "  (%d more %s not listed)\n", more, tools.Plural(more, "writer", "writers"))
 			}
 			summary, truncated := tools.Truncate(sb.String())
-			return tools.Result{Summary: summary, Data: rows, Truncated: truncated}, nil
+			return tools.Result{Summary: summary, Data: data, Truncated: truncated}, nil
 		},
+	}
+}
+
+// scopedTxns is Data of a scoped pg_long_transactions call. Unscoped calls
+// keep the plain []longTxn.
+type scopedTxns struct {
+	// Transactions are the long transactions on the pipeline's tables.
+	Transactions []longTxn `json:"transactions"`
+	// OtherNotShown counts every other long transaction, in any database;
+	// OtherWriters the writers (has_xid) among them.
+	OtherNotShown int `json:"other_not_shown"`
+	OtherWriters  int `json:"other_writers"`
+	// OldestOtherWriters are the oldest of those writers (at most
+	// postgres.MaxOtherWriters), anonymised.
+	OldestOtherWriters []otherWriter `json:"oldest_other_writers,omitempty"`
+}
+
+// otherWriter is the whole allow-list for a session outside the pipeline's
+// tables: what tells whether it pins a slot and for how long. It has no field
+// for the user, application, client address, database name, query or verb, so
+// none of them can reach Summary or Data.
+type otherWriter struct {
+	PID           int    `json:"pid"`
+	SameDatabase  bool   `json:"same_database"`
+	State         string `json:"state"`
+	Age           string `json:"age"`
+	AgeSeconds    int64  `json:"age_seconds"`
+	XIDAge        int64  `json:"xid_age"`
+	WaitEventType string `json:"wait_event_type"`
+}
+
+// backendStates are the values of pg_stat_activity.state.
+var backendStates = map[string]bool{
+	"active": true, "idle": true, "idle in transaction": true, "idle in transaction (aborted)": true,
+	"fastpath function call": true, "disabled": true,
+}
+
+// waitEventTypes are the values of pg_stat_activity.wait_event_type
+// (PostgreSQL 13-17, "Wait Event Types" in the monitoring docs).
+var waitEventTypes = map[string]bool{
+	"Activity": true, "BufferPin": true, "Client": true, "Extension": true, "InjectionPoint": true,
+	"IO": true, "IPC": true, "Lock": true, "LWLock": true, "Timeout": true,
+}
+
+// anonWriter maps a client row onto the allow-list. State and wait type are
+// fixed vocabularies in Postgres; anything else (a client that is not the real
+// one) becomes "?", so no free text gets through.
+func anonWriter(w postgres.OtherWriter) otherWriter {
+	state := w.State
+	if !backendStates[state] {
+		state = "?"
+	}
+	wait := w.WaitEventType
+	if wait != "" && !waitEventTypes[wait] {
+		wait = "?"
+	}
+	age := time.Duration(w.AgeSeconds) * time.Second
+	return otherWriter{
+		PID: w.PID, SameDatabase: w.SameDatabase, State: state,
+		Age: topology.HumanAge(age), AgeSeconds: w.AgeSeconds, XIDAge: w.XIDAge, WaitEventType: wait,
 	}
 }
 

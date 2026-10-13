@@ -323,13 +323,21 @@ func (s Scope) filter(names []string, keep func(string) bool) []string {
 }
 
 // NotShown is the line a scoped list tool adds when it dropped objects that
-// are not the pipeline's: a count and a kind, never a name. It is "" for
-// n <= 0.
-func NotShown(n int, kind string) string {
+// are not the pipeline's: a count and a kind (one for n == 1, many else),
+// never a name. It is "" for n <= 0.
+func NotShown(n int, one, many string) string {
 	if n <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d other %s not shown (not part of this room's pipeline)", n, kind)
+	return fmt.Sprintf("%d other %s not shown (not part of this room's pipeline)", n, Plural(n, one, many))
+}
+
+// Plural returns one when n is 1 and many otherwise.
+func Plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // ---- source database objects ----
@@ -357,8 +365,9 @@ var slotNameRE = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
 //
 // It fails closed. A connector config that cannot be read is an error, never
 // "every slot": the caller then shows no slot. A slot.name that is set but is
-// not a valid slot name is an error too, so it never turns into the default
-// slot, which can belong to another pipeline. An empty list with a nil error
+// not a valid slot name (blank included) is an error too, so it never turns
+// into the default slot, which can belong to another pipeline. Only a config
+// with no slot.name key means the default. An empty list with a nil error
 // means no connector of the pipeline is a Debezium Postgres source.
 //
 // Unscoped callers do not filter, so calling it unscoped is an error.
@@ -379,7 +388,7 @@ func (s Scope) Slots(ctx context.Context, cr ConfigReader) ([]string, error) {
 			return nil, fmt.Errorf("tools: pipeline %q: read connector %q config to find its slot (set watch.slot in owners.yaml to name it without Connect): %w", s.p.ID, name, err)
 		}
 		slot := ""
-		if n, present := cfg["slot.name"]; present && strings.TrimSpace(n) != "" {
+		if n, present := cfg["slot.name"]; present {
 			if !slotNameRE.MatchString(n) {
 				return nil, fmt.Errorf("tools: pipeline %q: connector %q has an invalid slot.name %q", s.p.ID, name, shorten(n))
 			}

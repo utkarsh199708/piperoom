@@ -30,16 +30,21 @@ func assertNoForeign(t *testing.T, r tools.Result) {
 
 // markedFakes serves the "orders" pipeline's objects next to the "billing"
 // pipeline's and unowned ones, all of the latter with foreignMark in the name.
+// The pipeline has a second group, order-audit, that reads none of its topics.
 func markedFakes() Deps {
 	d, _ := scopeFakes()
+	d.Owners.Pipelines[0].ConsumerGroups = append(d.Owners.Pipelines[0].ConsumerGroups, "order-audit")
 	d.Connect.(*fakeConnect).listFn = func(context.Context) ([]string, error) {
 		return []string{"bill-" + foreignMark, "pg-orders-connector", "other-" + foreignMark}, nil
 	}
 	fk := d.Kafka.(*fakeKafkaConfig)
 	fk.groupsFn = func(context.Context) ([]string, error) {
-		return []string{"order-sync", "bill-sync-" + foreignMark, "other-" + foreignMark, "x-" + foreignMark}, nil
+		return []string{"order-sync", "order-audit", "bill-sync-" + foreignMark, "other-" + foreignMark, "x-" + foreignMark}, nil
 	}
 	fk.lagFn = func(_ context.Context, g string) (clients.GroupLag, error) {
+		if g == "order-audit" {
+			return clients.GroupLag{Group: g, State: "Empty", Partitions: []clients.PartitionLag{{Topic: "audit.events", Partition: 0}}}, nil
+		}
 		return clients.GroupLag{Group: g, State: "Stable", Members: 2, TotalLag: 990012, Partitions: []clients.PartitionLag{
 			{Topic: "pg.public.orders", Partition: 0, Committed: 5, End: 17, Lag: 12},
 			{Topic: "bill.public." + foreignMark, Partition: 0, Lag: 990000},
@@ -56,20 +61,23 @@ func TestScopedListsCountOtherObjects(t *testing.T) {
 	cases := []struct {
 		tool, in  string
 		mine      string // a line of the pipeline's own object
+		absent    string // a pipeline object the input's filter drops: not shown, not counted
 		countLine string
 	}{
-		{"connect_list_connectors", `{}`, "pg-orders-connector (source): RUNNING, 0 failed tasks",
+		{"connect_list_connectors", `{}`, "pg-orders-connector (source): RUNNING, 0 failed tasks", "",
 			"2 other connectors not shown (not part of this room's pipeline)"},
-		{"kafka_list_groups", `{}`, "order-sync: Stable",
+		{"kafka_list_groups", `{}`, "order-audit: Empty", "",
 			"3 other consumer groups not shown (not part of this room's pipeline)"},
-		// The topic filter does not change the count: it cannot probe names.
-		{"kafka_list_groups", `{"topic":"pg.public.orders"}`, "order-sync: Stable",
+		// The count is taken before the topic filter: order-audit, the
+		// pipeline's group that does not read the topic, is dropped but not
+		// counted, and a topic cannot probe other groups through the count.
+		{"kafka_list_groups", `{"topic":"pg.public.orders"}`, "order-sync: Stable", "order-audit",
 			"3 other consumer groups not shown (not part of this room's pipeline)"},
-		{"schema_registry_subjects", `{}`, "pg.public.orders-key",
+		{"schema_registry_subjects", `{}`, "pg.public.orders-key", "",
 			"2 other subjects not shown (not part of this room's pipeline)"},
-		{"schema_registry_subjects", `{"prefix":"bill"}`, "",
+		{"schema_registry_subjects", `{"prefix":"bill"}`, "", "pg.public.orders",
 			"2 other subjects not shown (not part of this room's pipeline)"},
-		{"kafka_consumer_lag", `{"group":"order-sync"}`, "order-sync: Stable, 2 members, total lag 12",
+		{"kafka_consumer_lag", `{"group":"order-sync"}`, "order-sync: Stable, 2 members, total lag 12", "",
 			"2 other topic partitions not shown (not part of this room's pipeline); the total lag above counts only this pipeline's partitions"},
 	}
 	for _, tc := range cases {
@@ -81,6 +89,9 @@ func TestScopedListsCountOtherObjects(t *testing.T) {
 			assertNoForeign(t, r)
 			if !strings.Contains(r.Summary, tc.mine) {
 				t.Fatalf("summary misses %q: %q", tc.mine, r.Summary)
+			}
+			if tc.absent != "" && strings.Contains(r.Summary, tc.absent) {
+				t.Fatalf("summary shows %q, which the input filters out: %q", tc.absent, r.Summary)
 			}
 			lines := strings.Split(r.Summary, "\n")
 			if last := lines[len(lines)-1]; last != tc.countLine {

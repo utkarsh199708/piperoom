@@ -64,6 +64,16 @@ func TestSlotsFromConnectorConfigs(t *testing.T) {
 	}
 }
 
+// The longest valid slot name (63 characters, Postgres's NAMEDATALEN - 1).
+func TestSlotsLongestValidName(t *testing.T) {
+	long := strings.Repeat("a", 62) + "9"
+	cr := &configs{cfg: map[string]map[string]string{"src-a": {"connector.class": pgClass, "slot.name": long}}}
+	got, err := slotScope(t, "src-a").Slots(context.Background(), cr)
+	if err != nil || !slices.Equal(got, []string{long}) {
+		t.Fatalf("Slots = %v, %v; want the 63-character name", got, err)
+	}
+}
+
 func TestSlotsNoPostgresSourceIsEmpty(t *testing.T) {
 	cr := &configs{cfg: map[string]map[string]string{"sink": {"connector.class": "SomeSink"}}}
 	got, err := slotScope(t, "sink").Slots(context.Background(), cr)
@@ -94,13 +104,22 @@ func TestSlotsFailClosed(t *testing.T) {
 			t.Fatalf("Slots = %v, %v; want an error and no partial list", got, err)
 		}
 	})
-	t.Run("invalid slot.name", func(t *testing.T) {
-		cr := &configs{cfg: map[string]map[string]string{"src-a": {"connector.class": pgClass, "slot.name": "Bad-Slot; drop"}}}
-		got, err := slotScope(t, "src-a").Slots(context.Background(), cr)
-		if err == nil || got != nil {
-			t.Fatalf("Slots = %v, %v; want an error, never the default slot", got, err)
-		}
-	})
+	// Set but invalid, blank included: an error, never the default slot.
+	for name, slot := range map[string]string{
+		"invalid characters": "Bad-Slot; drop",
+		"upper case":         "Orders_slot",
+		"64 characters":      strings.Repeat("a", 64),
+		"empty":              "",
+		"blank":              "   ",
+	} {
+		t.Run("slot.name "+name, func(t *testing.T) {
+			cr := &configs{cfg: map[string]map[string]string{"src-a": {"connector.class": pgClass, "slot.name": slot}}}
+			got, err := slotScope(t, "src-a").Slots(context.Background(), cr)
+			if err == nil || got != nil {
+				t.Fatalf("Slots = %v, %v; want an error, never the default slot", got, err)
+			}
+		})
+	}
 	t.Run("no Connect client", func(t *testing.T) {
 		got, err := slotScope(t, "src-a").Slots(context.Background(), nil)
 		if err == nil || got != nil {
@@ -152,10 +171,13 @@ layers:
 }
 
 func TestNotShown(t *testing.T) {
-	if NotShown(0, "slots") != "" || NotShown(-1, "slots") != "" {
+	if NotShown(0, "slot", "slots") != "" || NotShown(-1, "slot", "slots") != "" {
 		t.Fatal("NotShown must be empty for n <= 0")
 	}
-	if got, want := NotShown(3, "replication slots"), "3 other replication slots not shown (not part of this room's pipeline)"; got != want {
+	if got, want := NotShown(3, "replication slot", "replication slots"), "3 other replication slots not shown (not part of this room's pipeline)"; got != want {
+		t.Fatalf("NotShown = %q, want %q", got, want)
+	}
+	if got, want := NotShown(1, "replication slot", "replication slots"), "1 other replication slot not shown (not part of this room's pipeline)"; got != want {
 		t.Fatalf("NotShown = %q, want %q", got, want)
 	}
 }

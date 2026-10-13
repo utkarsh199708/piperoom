@@ -138,7 +138,7 @@ func TestReplicationSlotsScopedMissingSlotIsReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoForeign(t, r)
-	want := "slot orders_slot: not found in pg_replication_slots\n1 other replication slots not shown (not part of this room's pipeline)\n"
+	want := "slot orders_slot: not found in pg_replication_slots\n1 other replication slot not shown (not part of this room's pipeline)\n"
 	if r.Summary != want || len(r.Data.([]clients.ReplicationSlot)) != 0 {
 		t.Fatalf("summary = %q, data = %v", r.Summary, r.Data)
 	}
@@ -212,18 +212,25 @@ layers:
 	}
 }
 
-// Three long transactions: one locks the room's table, one another
-// pipeline's table (a writer), one no table at all. Only the first is shown;
-// the others are counted, with the writer count, and named nowhere.
+// Four long transactions: one locks the room's table; one is a writer on
+// another pipeline's table; one is a reader with no lock on the room's
+// tables; one is a writer in another database. Only the first is listed in
+// full. The two writers, which hold back every logical slot, are listed
+// anonymised, oldest first. The reader is only counted. No user, application
+// or verb of the others shows anywhere.
 func TestLongTransactionsScopedShowOnlyThePipelinesSessions(t *testing.T) {
 	src := &txnSource{fakeSource: &fakeSource{}, txns: []clients.Transaction{
 		{PID: 11, Username: "orders_app", ApplicationName: "orders-api", State: "idle in transaction", Age: 20 * time.Minute, Query: "UPDATE", HasXID: true},
-		{PID: 12, Username: foreignMark + "_billing", ApplicationName: foreignMark + "-api", State: "idle in transaction", Age: 30 * time.Minute, Query: "UPDATE", HasXID: true},
+		{PID: 12, Username: foreignMark + "_billing", ApplicationName: foreignMark + "-api", State: "idle in transaction", Age: 30 * time.Minute,
+			WaitEvent: "Client:ClientRead", Query: "DELETE", HasXID: true},
 		{PID: 13, Username: foreignMark + "_etl", ApplicationName: foreignMark + "-etl", State: "active", Age: 9 * time.Minute, Query: "SELECT"},
+		{PID: 14, Username: foreignMark + "_hr", ApplicationName: foreignMark + "-hr", State: "active", Age: 40 * time.Minute,
+			WaitEvent: "Lock:transactionid", Query: "INSERT", HasXID: true},
 	}, locks: map[int][]string{
 		11: {"public.orders"},
 		12: {"public.payments"},
-	}}
+		14: {"public.orders"}, // the same table name, but in another database
+	}, otherDB: map[int]bool{14: true}}
 	tl := scopedTool(t, metaDeps(src), "pg_long_transactions")
 
 	r, err := tl.Run(roomCtx(), json.RawMessage(`{}`))
@@ -231,14 +238,26 @@ func TestLongTransactionsScopedShowOnlyThePipelinesSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoForeign(t, r)
-	if !strings.Contains(r.Summary, "pid=11 user=orders_app") || strings.Contains(r.Summary, "pid=12") || strings.Contains(r.Summary, "pid=13") {
-		t.Fatalf("summary = %q", r.Summary)
+	want := "pid=11 user=orders_app app=orders-api state=idle in transaction age=20m wait=- verb=UPDATE writer=yes\n" +
+		"3 other long transactions not shown (not part of this room's pipeline); 2 of them are writers (has_xid)\n" +
+		"oldest writers outside this pipeline's tables (they hold back every logical slot's restart_lsn; no user, application, database or query shown):\n" +
+		"  pid=14 same_database=no state=active age=40m xid_age=1014 wait_type=Lock\n" +
+		"  pid=12 same_database=yes state=idle in transaction age=30m xid_age=1012 wait_type=Client\n"
+	if r.Summary != want {
+		t.Fatalf("summary =\n%s\nwant\n%s", r.Summary, want)
 	}
-	if !strings.Contains(r.Summary, "2 other long transactions not shown (not part of this room's pipeline); 1 of them are writers") {
-		t.Fatalf("summary misses the count-only line: %q", r.Summary)
+	for _, leak := range []string{"pid=13", "DELETE", "INSERT", "ClientRead", "transactionid"} {
+		if strings.Contains(r.Summary, leak) || strings.Contains(string(mustJSON(t, r.Data)), leak) {
+			t.Fatalf("output shows %q of another session:\n%s\n%s", leak, r.Summary, mustJSON(t, r.Data))
+		}
 	}
-	if rows := r.Data.([]longTxn); len(rows) != 1 || rows[0].PID != 11 {
-		t.Fatalf("data = %+v, want only pid 11", rows)
+	data := r.Data.(scopedTxns)
+	if len(data.Transactions) != 1 || data.Transactions[0].PID != 11 || data.OtherNotShown != 3 || data.OtherWriters != 2 {
+		t.Fatalf("data = %+v", data)
+	}
+	if len(data.OldestOtherWriters) != 2 || data.OldestOtherWriters[0].PID != 14 || data.OldestOtherWriters[0].SameDatabase ||
+		data.OldestOtherWriters[1].PID != 12 || !data.OldestOtherWriters[1].SameDatabase {
+		t.Fatalf("oldest other writers = %+v", data.OldestOtherWriters)
 	}
 
 	// The opt-out keeps the old, unfiltered list.
@@ -248,6 +267,9 @@ func TestLongTransactionsScopedShowOnlyThePipelinesSessions(t *testing.T) {
 	}
 	if !strings.Contains(r.Summary, "pid=12") || !strings.Contains(r.Summary, "pid=13") || strings.Contains(r.Summary, "not shown") {
 		t.Fatalf("unscoped summary = %q", r.Summary)
+	}
+	if _, ok := r.Data.([]longTxn); !ok {
+		t.Fatalf("unscoped data is %T, want []longTxn as before", r.Data)
 	}
 }
 
@@ -260,10 +282,118 @@ func TestLongTransactionsScopedNoneOnThePipeline(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoForeign(t, r)
-	want := "(no long transactions on this pipeline's tables)\n1 other long transactions not shown (not part of this room's pipeline); 0 of them are writers (has_xid) and can hold back the WAL a slot keeps\n"
+	// A reader cannot hold a slot back: it stays a count, with no listing.
+	want := "(no long transactions on this pipeline's tables)\n1 other long transaction not shown (not part of this room's pipeline); 0 of them are writers (has_xid)\n"
 	if r.Summary != want {
 		t.Fatalf("summary = %q, want %q", r.Summary, want)
 	}
+}
+
+func TestLongTransactionsScopedOtherWritersCapped(t *testing.T) {
+	src := &txnSource{fakeSource: &fakeSource{}, locks: map[int][]string{}}
+	for pid := 20; pid < 27; pid++ {
+		src.txns = append(src.txns, clients.Transaction{PID: pid, Username: foreignMark, State: "idle in transaction", Age: time.Duration(pid) * time.Minute, HasXID: true})
+	}
+	r, err := scopedTool(t, metaDeps(src), "pg_long_transactions").Run(roomCtx(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoForeign(t, r)
+	if n := strings.Count(r.Summary, "  pid="); n != postgres.MaxOtherWriters {
+		t.Fatalf("%d writers listed, want %d:\n%s", n, postgres.MaxOtherWriters, r.Summary)
+	}
+	if !strings.Contains(r.Summary, "7 other long transactions not shown") || !strings.HasSuffix(r.Summary, "  (2 more writers not listed)\n") {
+		t.Fatalf("summary = %q", r.Summary)
+	}
+	if got := r.Data.(scopedTxns).OldestOtherWriters; len(got) != postgres.MaxOtherWriters || got[0].PID != 26 {
+		t.Fatalf("oldest other writers = %+v, want 5, oldest (pid 26) first", got)
+	}
+}
+
+// The anonymised writer has exactly the allow-listed fields, and its two text
+// fields take only Postgres's fixed vocabulary: anything else becomes "?".
+func TestOtherWriterAllowList(t *testing.T) {
+	var keys []string
+	var m map[string]any
+	if err := json.Unmarshal(mustJSON(t, otherWriter{}), &m); err != nil {
+		t.Fatal(err)
+	}
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	want := []string{"age", "age_seconds", "pid", "same_database", "state", "wait_event_type", "xid_age"}
+	if !slices.Equal(keys, want) {
+		t.Fatalf("otherWriter fields = %v, want exactly %v", keys, want)
+	}
+
+	cases := []struct {
+		state, wait         string
+		wantState, wantWait string
+	}{
+		{"idle in transaction", "Client", "idle in transaction", "Client"},
+		{"active", "", "active", ""},
+		{"idle in transaction (aborted)", "Lock", "idle in transaction (aborted)", "Lock"},
+		{foreignMark + " billing-api", "Client:ClientRead", "?", "?"},
+		{"UPDATE payments SET card='4111'", foreignMark + " app", "?", "?"},
+	}
+	for _, tc := range cases {
+		got := anonWriter(postgres.OtherWriter{PID: 7, State: tc.state, WaitEventType: tc.wait, AgeSeconds: 90, XIDAge: 3})
+		if got.State != tc.wantState || got.WaitEventType != tc.wantWait || got.PID != 7 || got.Age != "1m" || got.XIDAge != 3 {
+			t.Errorf("anonWriter(%q, %q) = %+v, want state %q wait %q", tc.state, tc.wait, got, tc.wantState, tc.wantWait)
+		}
+	}
+
+	// End to end: a client that returns free text in those fields leaks none of it.
+	src := &writerSource{fakeSource: &fakeSource{}, ws: []postgres.OtherWriter{{PID: 9, State: foreignMark + "-state", WaitEventType: foreignMark}}}
+	r, err := scopedTool(t, metaDeps(src), "pg_long_transactions").Run(roomCtx(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoForeign(t, r)
+	if !strings.Contains(r.Summary, "pid=9 same_database=no state=? age=0s xid_age=0 wait_type=?") {
+		t.Fatalf("summary = %q", r.Summary)
+	}
+}
+
+// writerSource returns other writers as the client gives them, uncapped.
+type writerSource struct {
+	*fakeSource
+	ws []postgres.OtherWriter
+}
+
+func (s *writerSource) LongTransactionsOnTables(context.Context, time.Duration, []string) (postgres.TableTransactions, error) {
+	return postgres.TableTransactions{Other: len(s.ws), OtherWriters: len(s.ws), OldestOtherWriters: s.ws}, nil
+}
+
+// The tool caps the listing itself, whatever the client returns.
+func TestLongTransactionsScopedToolCapsOtherWriters(t *testing.T) {
+	src := &writerSource{fakeSource: &fakeSource{}}
+	for pid := 30; pid < 38; pid++ {
+		src.ws = append(src.ws, postgres.OtherWriter{PID: pid, State: "idle in transaction", WaitEventType: "Client"})
+	}
+	r, err := scopedTool(t, metaDeps(src), "pg_long_transactions").Run(roomCtx(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(r.Summary, "  pid="); n != postgres.MaxOtherWriters || strings.Contains(r.Summary, "pid=35") {
+		t.Fatalf("%d writers listed, want the first %d:\n%s", n, postgres.MaxOtherWriters, r.Summary)
+	}
+	if got := r.Data.(scopedTxns).OldestOtherWriters; len(got) != postgres.MaxOtherWriters {
+		t.Fatalf("data lists %d writers, want %d", len(got), postgres.MaxOtherWriters)
+	}
+	if !strings.HasSuffix(r.Summary, "  (3 more writers not listed)\n") {
+		t.Fatalf("summary = %q", r.Summary)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // tablesSource records the tables the lock filter is asked for.

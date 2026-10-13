@@ -139,7 +139,7 @@ func (t *listGroups) Run(ctx context.Context, input json.RawMessage) (tools.Resu
 		}
 		fmt.Fprintf(&sb, "%s: %s", r.Group, r.State)
 	}
-	appendLine(&sb, tools.NotShown(other, "consumer groups"))
+	appendLine(&sb, tools.NotShown(other, "consumer group", "consumer groups"))
 	return res(sb.String(), rows), nil
 }
 
@@ -211,7 +211,7 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 	for _, pl := range worst {
 		fmt.Fprintf(&sb, "\n  %s/%d: committed %d, end %d, lag %d", pl.Topic, pl.Partition, pl.Committed, pl.End, pl.Lag)
 	}
-	if line := tools.NotShown(other, "topic partitions"); line != "" {
+	if line := tools.NotShown(other, "topic partition", "topic partitions"); line != "" {
 		appendLine(&sb, line+"; the total lag above counts only this pipeline's partitions")
 	}
 	return res(sb.String(), map[string]any{

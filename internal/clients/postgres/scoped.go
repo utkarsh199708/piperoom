@@ -69,19 +69,49 @@ type TableTransactions struct {
 	Transactions []clients.Transaction
 	// Other counts every other long transaction, in any database of the
 	// server; OtherWriters counts those of them that hold a transaction id
-	// (backend_xid), so they hold the WAL horizon. They are counted in SQL and
-	// none of their columns is read.
+	// (backend_xid).
 	Other        int
 	OtherWriters int
+	// OldestOtherWriters are the oldest of those writers, at most
+	// MaxOtherWriters, oldest first, anonymised (OtherWriter). A writer on any
+	// table, in any database, holds back the restart_lsn of every logical
+	// slot, so the room must see that one exists and how old it is.
+	OldestOtherWriters []OtherWriter
 }
 
-// longTxnScope is the shared part of both LongTransactionsOnTables queries: the
+// MaxOtherWriters caps TableTransactions.OldestOtherWriters.
+const MaxOtherWriters = 5
+
+// OtherWriter is a long writer outside the pipeline's tables, with only the
+// fields that tell whether it pins a slot and for how long. Its user,
+// application, client address, database name and query (even the verb) are
+// never selected: they belong to another pipeline or team.
+type OtherWriter struct {
+	PID int `json:"pid"`
+	// SameDatabase is datname = current_database(); the name itself is not read.
+	SameDatabase bool   `json:"same_database"`
+	State        string `json:"state"`
+	// AgeSeconds is the transaction's age (now() - xact_start).
+	AgeSeconds int64 `json:"age_seconds"`
+	// XIDAge is age(backend_xid): how many transaction ids ago it got its xid.
+	XIDAge int64 `json:"xid_age"`
+	// WaitEventType is wait_event_type only, e.g. "Client"; not the wait event.
+	WaitEventType string `json:"wait_event_type"`
+}
+
+// longTxnScope is the shared part of the LongTransactionsOnTables queries: the
 // long transactions ($1 seconds) of every database but this backend, with
 // on_tables true for a session of this database that holds or waits for a
 // relation lock on one of the tables ($2 schemas, $3 names, matched pairwise).
 // pg_locks is used because a transaction's open locks are what ties it to a
 // table: an UPDATE holds RowExclusiveLock and a read AccessShareLock until the
 // transaction ends.
+//
+// The datname check matters for a database cloned with CREATE DATABASE ...
+// TEMPLATE: its tables keep the template's oids, so a lock on the clone's copy
+// of a pipeline table matches the oid. on_tables is never NULL (a session with
+// no datname, such as a background worker, is false), so NOT on_tables counts
+// every other session.
 const longTxnScope = `
 	WITH rel AS (
 		SELECT c.oid
@@ -90,12 +120,12 @@ const longTxnScope = `
 		JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = v.relname
 	), lt AS (
 		SELECT a.*,
-		       (a.datname = current_database() AND EXISTS (
+		       COALESCE(a.datname = current_database() AND EXISTS (
 		           SELECT 1 FROM pg_locks l
 		           WHERE l.pid = a.pid
 		             AND l.locktype = 'relation'
 		             AND l.database = a.datid
-		             AND l.relation IN (SELECT oid FROM rel))) AS on_tables
+		             AND l.relation IN (SELECT oid FROM rel)), false) AS on_tables
 		FROM pg_stat_activity a
 		WHERE a.xact_start IS NOT NULL
 		  AND a.xact_start < now() - make_interval(secs => $1)
@@ -104,9 +134,10 @@ const longTxnScope = `
 
 // LongTransactionsOnTables is LongTransactions limited to the sessions of this
 // database that hold or wait for a lock on one of tables (each
-// "schema.table"). Every other long transaction is only counted (Other,
-// OtherWriters). Like LongTransactions it never selects query text, only the
-// statement verb.
+// "schema.table"). Every other long transaction is counted (Other,
+// OtherWriters), and the oldest other writers are returned anonymised
+// (OldestOtherWriters). Like LongTransactions it never selects query text,
+// only the statement verb of the pipeline's own sessions.
 func (d *DB) LongTransactionsOnTables(ctx context.Context, olderThan time.Duration, tables []string) (TableTransactions, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
@@ -158,6 +189,34 @@ func (d *DB) LongTransactionsOnTables(ctx context.Context, olderThan time.Durati
 	FROM lt
 	WHERE NOT on_tables`, secs, schemas, names).Scan(&out.Other, &out.OtherWriters); err != nil {
 		return TableTransactions{}, fmt.Errorf("postgres: count other long transactions: %w", err)
+	}
+
+	// Only the allow-listed columns of the oldest other writers. Readers
+	// (no xid) cannot hold a slot's restart_lsn back and stay a count.
+	wrows, err := d.pool.Query(ctx, longTxnScope+`
+	SELECT pid,
+	       COALESCE(datname = current_database(), false),
+	       COALESCE(state, ''),
+	       EXTRACT(EPOCH FROM (now() - xact_start))::bigint,
+	       age(backend_xid)::bigint,
+	       COALESCE(wait_event_type, '')
+	FROM lt
+	WHERE NOT on_tables AND backend_xid IS NOT NULL
+	ORDER BY xact_start ASC
+	LIMIT $4`, secs, schemas, names, MaxOtherWriters)
+	if err != nil {
+		return TableTransactions{}, fmt.Errorf("postgres: list other long writers: %w", err)
+	}
+	defer wrows.Close()
+	for wrows.Next() {
+		var w OtherWriter
+		if err := wrows.Scan(&w.PID, &w.SameDatabase, &w.State, &w.AgeSeconds, &w.XIDAge, &w.WaitEventType); err != nil {
+			return TableTransactions{}, fmt.Errorf("postgres: scan other long writer: %w", err)
+		}
+		out.OldestOtherWriters = append(out.OldestOtherWriters, w)
+	}
+	if err := wrows.Err(); err != nil {
+		return TableTransactions{}, fmt.Errorf("postgres: read other long writers: %w", err)
 	}
 	return out, nil
 }

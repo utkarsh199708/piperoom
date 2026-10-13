@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -153,7 +154,7 @@ func TestScopedSlotAndPublicationToolsIntegration(t *testing.T) {
 		if !strings.Contains(r.Summary, "slot "+slotMine+": active=false") {
 			t.Fatalf("summary misses the room's slot: %q", r.Summary)
 		}
-		if want := tools.NotShown(len(foreign)-2, "replication slots"); !strings.Contains(r.Summary, want) {
+		if want := tools.NotShown(len(foreign)-2, "replication slot", "replication slots"); !strings.Contains(r.Summary, want) {
 			t.Fatalf("summary misses %q: %q", want, r.Summary)
 		}
 		// The opt-out still lists every slot.
@@ -172,7 +173,7 @@ func TestScopedSlotAndPublicationToolsIntegration(t *testing.T) {
 		for _, want := range []string{
 			"publication " + pubMine,
 			"public." + tMine + ": in_publication=yes, selectable=yes",
-			"1 other tables in publication " + pubMine + " not shown",
+			"1 other table in publication " + pubMine + " not shown",
 		} {
 			if !strings.Contains(r.Summary, want) {
 				t.Fatalf("summary misses %q: %q", want, r.Summary)
@@ -194,4 +195,135 @@ func TestScopedSlotAndPublicationToolsIntegration(t *testing.T) {
 			}
 		}
 	})
+}
+
+// shortTxnSource is the real client with the long-transaction threshold cut
+// to 50 ms: the tool's own minimum is one minute, too slow for a test. The SQL
+// and the tool's rendering are the real ones.
+type shortTxnSource struct{ *postgres.DB }
+
+func (s shortTxnSource) LongTransactionsOnTables(ctx context.Context, _ time.Duration, tables []string) (postgres.TableTransactions, error) {
+	return s.DB.LongTransactionsOnTables(ctx, 50*time.Millisecond, tables)
+}
+
+// withDB returns dsn with another database and, when user is set, another
+// login and application_name.
+func withDB(t *testing.T, dsn, db, user, password, app string) string {
+	t.Helper()
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Path = "/" + db
+	if user != "" {
+		u.User = url.UserPassword(user, password)
+	}
+	if app != "" {
+		q := u.Query()
+		q.Set("application_name", app)
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
+// An idle-in-transaction writer in another database holds back every logical
+// slot's restart_lsn. The scoped pg_long_transactions lists it anonymised
+// (pid, same_database=no, state, ages, wait type); its login, application_name
+// and database (markers) appear nowhere in Summary or Data.
+func TestScopedLongTransactionsOtherDatabaseIntegration(t *testing.T) {
+	dsn := scopePGURL()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	db, err := postgres.New(ctx, dsn)
+	if err != nil {
+		t.Skipf("postgres not reachable at %s (set PIPEROOM_SCOPE_PG_URL): %v", pgHost(dsn), err)
+	}
+	t.Cleanup(db.Close)
+	admin, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("admin connection to %s: %v", pgHost(dsn), err)
+	}
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+
+	p := testenv.Name("txdb")
+	mine := p + "_mine"
+	dbB, role := p+"_b", p+"_mkuser"
+	const rolePW = "it-only-password"
+	app := foreignMark + "-" + p
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_, _ = admin.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{dbB}.Sanitize()+" WITH (FORCE)")
+		_, _ = admin.Exec(ctx, "DROP ROLE IF EXISTS "+pgx.Identifier{role}.Sanitize())
+		_, _ = admin.Exec(ctx, "DROP TABLE IF EXISTS "+pgx.Identifier{"public", mine}.Sanitize())
+	})
+	for _, q := range []string{
+		"CREATE TABLE " + pgx.Identifier{"public", mine}.Sanitize() + " (id int PRIMARY KEY)",
+		"CREATE DATABASE " + pgx.Identifier{dbB}.Sanitize(),
+		"CREATE ROLE " + pgx.Identifier{role}.Sanitize() + " LOGIN PASSWORD '" + rolePW + "'",
+	} {
+		if _, err := admin.Exec(ctx, q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+	setupB, err := pgx.Connect(ctx, withDB(t, dsn, dbB, "", "", ""))
+	if err != nil {
+		t.Fatalf("connect %s: %v", dbB, err)
+	}
+	for _, q := range []string{
+		"CREATE TABLE public.billing (id int PRIMARY KEY)",
+		"GRANT INSERT ON public.billing TO " + pgx.Identifier{role}.Sanitize(),
+	} {
+		if _, err := setupB.Exec(ctx, q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+	_ = setupB.Close(ctx)
+
+	open := func(dsn, stmt string) int {
+		c, err := pgx.Connect(ctx, dsn)
+		if err != nil {
+			t.Fatalf("connect: %v", err)
+		}
+		t.Cleanup(func() { _ = c.Close(context.Background()) })
+		var pid int
+		if err := c.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid); err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range []string{"BEGIN", stmt} {
+			if _, err := c.Exec(ctx, q); err != nil {
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
+		return pid
+	}
+	pidMine := open(dsn, "INSERT INTO "+pgx.Identifier{"public", mine}.Sanitize()+" VALUES (1)")
+	pidB := open(withDB(t, dsn, dbB, role, rolePW, app), "INSERT INTO public.billing VALUES (1)")
+	time.Sleep(200 * time.Millisecond)
+
+	o := &owners.Owners{Pipelines: []owners.Pipeline{
+		{ID: "mine", TopicPrefix: "pg", SourceTables: []string{"public." + mine}, Connectors: []string{"conn-mine"}},
+	}}
+	reg := tools.NewRegistry()
+	if err := Register(reg, Deps{Src: shortTxnSource{db}, Owners: o}); err != nil {
+		t.Fatal(err)
+	}
+	tl, _ := reg.Get("pg_long_transactions")
+	r, err := tl.Run(tools.WithPipelineID(context.Background(), "mine"), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("scoped summary:\n%s", r.Summary)
+	data, _ := json.Marshal(r.Data)
+	for _, mark := range []string{role, app, dbB, "billing", foreignMark} {
+		if strings.Contains(r.Summary, mark) || strings.Contains(string(data), mark) {
+			t.Fatalf("output names %q of the other database's session:\nsummary: %s\ndata: %s", mark, r.Summary, data)
+		}
+	}
+	if !strings.Contains(r.Summary, "pid="+strconv.Itoa(pidMine)+" user=") {
+		t.Fatalf("the pipeline's own session %d is not listed: %s", pidMine, r.Summary)
+	}
+	if !strings.Contains(r.Summary, "  pid="+strconv.Itoa(pidB)+" same_database=no state=idle in transaction ") {
+		t.Fatalf("the other database's writer %d is not listed anonymised: %s", pidB, r.Summary)
+	}
 }
