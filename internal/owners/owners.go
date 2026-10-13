@@ -4,7 +4,10 @@
 package owners
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -53,7 +56,13 @@ func Load(path string) (*Owners, error) {
 		return nil, fmt.Errorf("owners: read %s: %w", path, err)
 	}
 	var o Owners
-	if err := yaml.Unmarshal(data, &o); err != nil {
+	// Unknown keys are refused. A pipeline `owner:` (for `owners:`) would
+	// otherwise be dropped and the layer would fall back to the top-level
+	// owners: a typo that widens who may approve (security audit 2026-10,
+	// A-OWN-1).
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&o); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("owners: parse %s: %w", path, err)
 	}
 	if err := o.validate(); err != nil {

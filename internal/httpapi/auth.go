@@ -274,7 +274,7 @@ func (s *Server) resolve(r *http.Request) (principal, *authError) {
 		// viewer groups means out at once, not at the 12 h cap. Stale IdP group
 		// membership lasts until the next login.
 		user, role, ok := s.person(sess.UserID, sess.Name, sess.Groups, sess.GroupsMissing)
-		if !ok {
+		if !ok || s.pinMismatch(sess) {
 			return principal{}, &authError{http.StatusUnauthorized, "session_expired", "this user is no longer allowed to sign in"}
 		}
 		if !oidc && hasXUser && xuser != sess.UserID {
@@ -369,7 +369,21 @@ func (s *Server) sessionAlive(ctx context.Context, id ws.Identity) bool {
 		return false
 	}
 	_, _, ok := s.person(sess.UserID, sess.Name, sess.Groups, sess.GroupsMissing)
-	return ok
+	return ok && !s.pinMismatch(sess)
+}
+
+// pinMismatch reports whether an oidc session belongs to an IdP account that
+// the users.yaml sub: pin of its user no longer names. mapIdentity refuses such
+// a login, but a session made before the pin was added (sessions outlive a
+// restart in Postgres) would otherwise keep acting as that user until the 12 h
+// cap: the recycled-account case the pin exists for (security audit 2026-10,
+// A-ID-3).
+func (s *Server) pinMismatch(sess auth.Session) bool {
+	if sess.Method != auth.MethodOIDC {
+		return false
+	}
+	u, ok := s.svc.LookupUser(sess.UserID)
+	return ok && u.Sub != "" && u.Sub != sess.Sub
 }
 
 // wsIdentify hands the gateway the identity authenticate already resolved.

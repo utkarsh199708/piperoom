@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -274,7 +275,13 @@ func (o *OIDC) claimsFrom(idt *oidc.IDToken, all map[string]json.RawMessage) Cla
 	c := Claims{Issuer: idt.Issuer, Subject: idt.Subject}
 	c.Email = clean(stringClaim(all["email"]), maxClaimBytes)
 	c.EmailVerified = boolClaim(all["email_verified"])
-	c.Name = clean(stringClaim(all["name"]), 200)
+	// The name is shown to other people as the author of comments, steers and
+	// approvals, so bidirectional and other invisible format characters are
+	// dropped: U+202E could make one name render as another (security audit
+	// 2026-10, A-ID-4). Only the name: the email is matched against
+	// users.yaml, and silently removing characters from it could turn one
+	// address into another.
+	c.Name = clean(stripFormat(stringClaim(all["name"])), 200)
 	c.ACR = clean(stringClaim(all["acr"]), maxClaimBytes)
 	for _, v := range stringsClaim(all["amr"]) {
 		if v = clean(v, 64); v != "" && len(c.AMR) < 16 {
@@ -366,6 +373,18 @@ func clean(s string, max int) string {
 		s = strings.ToValidUTF8(s[:max], "")
 	}
 	return s
+}
+
+// stripFormat removes Unicode format characters (category Cf: the bidi
+// embeddings, overrides and isolates, zero-width joiners and spaces, the soft
+// hyphen) from a display string.
+func stripFormat(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func validText(s string) bool {
