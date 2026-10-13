@@ -131,9 +131,20 @@ IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_
 { "pipeline_id": "orders",
   "nodes": [ { "id": "pg:public.orders", "kind": "source_table", "name": "public.orders", "layer": "postgres",
                "owner": "priya", "health": "warn", "facts": { "slot_retained": "12.4 GB" } } ],
-  "edges": [ { "from": "pg:public.orders", "to": "connect:pg-orders-connector" } ] }
+  "edges": [ { "from": "pg:public.orders", "to": "connect:pg-orders-connector" },
+             { "from": "group:order-sync", "to": "wh:analytics.orders", "mapping": "inferred" },
+             { "from": "connect:pg-orders-connector", "to": "sr:pg.public.orders-value", "kind": "depends_on" } ] }
 ```
-`kind`: `source_table | connector | topic | dlq_topic | consumer_group | sink_table`. `health`: `ok | warn | fail | unknown`.
+Node `kind`: `source_table | connector | topic | dlq_topic | consumer_group | sink_table | schema_subject`. `health`: `ok | warn | fail | unknown`.
+Edge `kind`: `data` (records flow `from` → `to`) or `depends_on` (`from` needs `to` to work; no records flow, so `to` is
+upstream of `from` when looking for a root cause). Edge `mapping`: `mapped` (proven from connector config, committed
+group offsets, Schema Registry subjects, or an explicit owners.yaml declaration) or `inferred` (assumed only because
+owners.yaml lists both ends; never a cross-product shown as proven). Both fields are omitted when they hold the default
+(`data`, `mapped`), so a client that ignores them reads every edge as proven data flow, as before.
+A `schema_subject` node (`id` `sr:<subject>`, `layer` `schema-registry`) is a Schema Registry subject a connector or
+consumer group serializes or deserializes with; only `depends_on` edges point at it. Its `facts` carry `compatibility`,
+`latest_version` and `registered_recently` (`true | false | unknown`; the registry API has no registration time, so
+this is what the server saw change between its own readings), or `error=unreachable` with `health` `unknown`.
 A `dlq_topic` node (`id` `dlq:<topic>`) is a dead-letter topic of the pipeline; its `layer` and `owner` are the
 writer's (`kafka-connect` for a sink connector, `consumer` for a declared consumer group), edges lead into it only,
 and `facts` carry `records` (end minus start offsets, summed), `newest_record`, `writer` and `exists`. A `connector`
