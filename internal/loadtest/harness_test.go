@@ -51,21 +51,6 @@ func TestBuildTimeline(t *testing.T) {
 	}
 }
 
-func TestAgentLimit(t *testing.T) {
-	tests := []struct{ per, replicas, global, want int }{
-		{3, 1, 0, 3},
-		{3, 3, 0, 9},
-		{3, 3, 4, 4},
-		{3, 3, 20, 9}, // a global cap above the sum changes nothing
-		{10, 2, 10, 10},
-	}
-	for _, tc := range tests {
-		if got := agentLimit(tc.per, tc.replicas, tc.global); got != tc.want {
-			t.Errorf("agentLimit(%d, %d, %d) = %d, want %d", tc.per, tc.replicas, tc.global, got, tc.want)
-		}
-	}
-}
-
 func TestExecStatsCountExecuted(t *testing.T) {
 	var es ExecStats
 	es.countExecuted([]timeline{{Proposals: 1, Executed: 1}, {Proposals: 1, Executed: 3}, {Proposals: 0, Executed: 0}})

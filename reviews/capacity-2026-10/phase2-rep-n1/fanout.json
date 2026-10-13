@@ -1,0 +1,586 @@
+{
+  "profile": "fanout",
+  "short": false,
+  "replicas": 1,
+  "params": {
+    "pad": "300",
+    "rate": "1",
+    "rooms": "50",
+    "subs": "500,1000,2000",
+    "timeout": "5m",
+    "warmup": "3s",
+    "window": "30s"
+  },
+  "started": "2026-10-13T18:46:20.812467139Z",
+  "wall_s": 133.496,
+  "data": {
+    "runs": [
+      {
+        "subs": 500,
+        "rooms": 50,
+        "connect_ms": 959.235,
+        "comments_posted": 1500,
+        "comment_errors": 0,
+        "comments_offered_per_sec": 50,
+        "comments_accepted_per_sec": 48.406,
+        "comment_post_latency": {
+          "n": 1500,
+          "min_ms": 1.418,
+          "p50_ms": 6.992,
+          "p95_ms": 152.819,
+          "p99_ms": 243.202,
+          "max_ms": 389.804,
+          "mean_ms": 28.999
+        },
+        "event_to_delivery": {
+          "n": 15000,
+          "min_ms": 1.35,
+          "p50_ms": 5.288,
+          "p95_ms": 38.833,
+          "p99_ms": 107.628,
+          "max_ms": 212.385,
+          "mean_ms": 10.671
+        },
+        "post_to_delivery": {
+          "n": 15000,
+          "min_ms": 1.858,
+          "p50_ms": 8.538,
+          "p95_ms": 158.018,
+          "p99_ms": 246.816,
+          "max_ms": 391.304,
+          "mean_ms": 31.766
+        },
+        "same_replica_delivery": {
+          "n": 15000,
+          "min_ms": 1.35,
+          "p50_ms": 5.288,
+          "p95_ms": 38.833,
+          "p99_ms": 107.628,
+          "max_ms": 212.385,
+          "mean_ms": 10.671
+        },
+        "cross_replica_delivery": {
+          "n": 0,
+          "min_ms": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "mean_ms": 0
+        },
+        "deliveries_per_sec": 483.119,
+        "event_insert_latency": {
+          "n": 1500,
+          "min_ms": 0.719,
+          "p50_ms": 3.426,
+          "p95_ms": 24.644,
+          "p99_ms": 89.993,
+          "max_ms": 208.515,
+          "mean_ms": 7.678
+        },
+        "subs_totals": {
+          "subs": 500,
+          "received": 19940,
+          "bytes": 11115155,
+          "gaps": 0,
+          "dups": 0,
+          "reconnects": 0,
+          "dial_errors": 0,
+          "parse_mismatches": 0,
+          "server_closes": {},
+          "send_buffer_full_closes": 0,
+          "missing_at_end": 0
+        },
+        "server_goroutines_before_subs": 69,
+        "server_goroutines_peak": 2156,
+        "server_goroutines_after_close": 69,
+        "peak_heap_inuse": 32006144,
+        "pool": {
+          "max_conns": 4,
+          "total_conns": 4,
+          "acquired_conns": 0,
+          "idle_conns": 4,
+          "acquires": 4609,
+          "empty_acquires": 7,
+          "canceled_acquires": 0,
+          "empty_wait_ms": 47.791,
+          "acquire_ms": 50.904,
+          "samples": 637,
+          "samples_at_max": 0,
+          "max_acquired": 3,
+          "saturated_ratio": 0
+        },
+        "pools": [
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 4609,
+            "empty_acquires": 7,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 47.791,
+            "acquire_ms": 50.904,
+            "samples": 637,
+            "samples_at_max": 0,
+            "max_acquired": 3,
+            "saturated_ratio": 0
+          }
+        ],
+        "pool_acquires_per_sec": 148.446,
+        "cpu": {
+          "wall_s": 31.685,
+          "server_cpu_s": 2.507,
+          "driver_cpu_s": 1.305,
+          "postgres_cpu_s": 1.325
+        },
+        "server": [
+          {
+            "replica": 0,
+            "replica_id": "lt-r0-ee4e79",
+            "pid": 11691,
+            "goroutines": 2139,
+            "peak_goroutines": 2156,
+            "heap_inuse": 29827072,
+            "peak_heap_inuse": 32006144,
+            "heap_alloc": 25883792,
+            "sys": 57075992,
+            "total_alloc": 105707712,
+            "num_gc": 13,
+            "rss": 81891328,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 4609,
+              "empty_acquires": 7,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 47.791,
+              "acquire_ms": 50.904,
+              "samples": 637,
+              "samples_at_max": 0,
+              "max_acquired": 3,
+              "saturated_ratio": 0
+            },
+            "appends": {
+              "n": 1500,
+              "min_ms": 0.719,
+              "p50_ms": 3.426,
+              "p95_ms": 24.644,
+              "p99_ms": 89.993,
+              "max_ms": 208.515,
+              "mean_ms": 7.678
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 0,
+            "action_runs": {},
+            "cpu_seconds": 3.418143
+          }
+        ]
+      },
+      {
+        "subs": 1000,
+        "rooms": 50,
+        "connect_ms": 1917.838,
+        "comments_posted": 1500,
+        "comment_errors": 0,
+        "comments_offered_per_sec": 50,
+        "comments_accepted_per_sec": 48.418,
+        "comment_post_latency": {
+          "n": 1500,
+          "min_ms": 1.586,
+          "p50_ms": 12.611,
+          "p95_ms": 211.716,
+          "p99_ms": 402.327,
+          "max_ms": 575.798,
+          "mean_ms": 46.067
+        },
+        "event_to_delivery": {
+          "n": 30000,
+          "min_ms": 1.265,
+          "p50_ms": 6.931,
+          "p95_ms": 48.516,
+          "p99_ms": 119.93,
+          "max_ms": 509.589,
+          "mean_ms": 13.141
+        },
+        "post_to_delivery": {
+          "n": 30000,
+          "min_ms": 1.828,
+          "p50_ms": 15.037,
+          "p95_ms": 224.231,
+          "p99_ms": 403.777,
+          "max_ms": 577.25,
+          "mean_ms": 49.351
+        },
+        "same_replica_delivery": {
+          "n": 30000,
+          "min_ms": 1.265,
+          "p50_ms": 6.931,
+          "p95_ms": 48.516,
+          "p99_ms": 119.93,
+          "max_ms": 509.589,
+          "mean_ms": 13.141
+        },
+        "cross_replica_delivery": {
+          "n": 0,
+          "min_ms": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "mean_ms": 0
+        },
+        "deliveries_per_sec": 967.015,
+        "event_insert_latency": {
+          "n": 1500,
+          "min_ms": 0.772,
+          "p50_ms": 4.723,
+          "p95_ms": 31.322,
+          "p99_ms": 92.346,
+          "max_ms": 406.858,
+          "mean_ms": 9.492
+        },
+        "subs_totals": {
+          "subs": 1000,
+          "received": 39880,
+          "bytes": 22861389,
+          "gaps": 0,
+          "dups": 0,
+          "reconnects": 0,
+          "dial_errors": 0,
+          "parse_mismatches": 0,
+          "server_closes": {},
+          "send_buffer_full_closes": 0,
+          "missing_at_end": 0
+        },
+        "server_goroutines_before_subs": 69,
+        "server_goroutines_peak": 4175,
+        "server_goroutines_after_close": 69,
+        "peak_heap_inuse": 57901056,
+        "pool": {
+          "max_conns": 4,
+          "total_conns": 4,
+          "acquired_conns": 0,
+          "idle_conns": 4,
+          "acquires": 4607,
+          "empty_acquires": 10,
+          "canceled_acquires": 0,
+          "empty_wait_ms": 315.204,
+          "acquire_ms": 317.983,
+          "samples": 628,
+          "samples_at_max": 3,
+          "max_acquired": 4,
+          "saturated_ratio": 0.005
+        },
+        "pools": [
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 4607,
+            "empty_acquires": 10,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 315.204,
+            "acquire_ms": 317.983,
+            "samples": 628,
+            "samples_at_max": 3,
+            "max_acquired": 4,
+            "saturated_ratio": 0.005
+          }
+        ],
+        "pool_acquires_per_sec": 148.501,
+        "cpu": {
+          "wall_s": 31.381,
+          "server_cpu_s": 2.876,
+          "driver_cpu_s": 1.628,
+          "postgres_cpu_s": 1.315
+        },
+        "server": [
+          {
+            "replica": 0,
+            "replica_id": "lt-r0-3d9610",
+            "pid": 13856,
+            "goroutines": 4149,
+            "peak_goroutines": 4175,
+            "heap_inuse": 46333952,
+            "peak_heap_inuse": 57901056,
+            "heap_alloc": 30218176,
+            "sys": 96069912,
+            "total_alloc": 170344288,
+            "num_gc": 13,
+            "rss": 118456320,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 4607,
+              "empty_acquires": 10,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 315.204,
+              "acquire_ms": 317.983,
+              "samples": 628,
+              "samples_at_max": 3,
+              "max_acquired": 4,
+              "saturated_ratio": 0.005
+            },
+            "appends": {
+              "n": 1500,
+              "min_ms": 0.772,
+              "p50_ms": 4.723,
+              "p95_ms": 31.322,
+              "p99_ms": 92.346,
+              "max_ms": 406.858,
+              "mean_ms": 9.492
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 0,
+            "action_runs": {},
+            "cpu_seconds": 4.420679
+          }
+        ]
+      },
+      {
+        "subs": 2000,
+        "rooms": 50,
+        "connect_ms": 4433.389,
+        "comments_posted": 1500,
+        "comment_errors": 0,
+        "comments_offered_per_sec": 50,
+        "comments_accepted_per_sec": 48.414,
+        "comment_post_latency": {
+          "n": 1500,
+          "min_ms": 1.493,
+          "p50_ms": 18.442,
+          "p95_ms": 525.772,
+          "p99_ms": 1353.189,
+          "max_ms": 1438.011,
+          "mean_ms": 113.512
+        },
+        "event_to_delivery": {
+          "n": 60000,
+          "min_ms": 1.499,
+          "p50_ms": 8.049,
+          "p95_ms": 58.164,
+          "p99_ms": 141.346,
+          "max_ms": 446.704,
+          "mean_ms": 16.185
+        },
+        "post_to_delivery": {
+          "n": 60000,
+          "min_ms": 2.044,
+          "p50_ms": 23.028,
+          "p95_ms": 531.523,
+          "p99_ms": 1366.309,
+          "max_ms": 1440.812,
+          "mean_ms": 119.391
+        },
+        "same_replica_delivery": {
+          "n": 60000,
+          "min_ms": 1.499,
+          "p50_ms": 8.049,
+          "p95_ms": 58.164,
+          "p99_ms": 141.346,
+          "max_ms": 446.704,
+          "mean_ms": 16.185
+        },
+        "cross_replica_delivery": {
+          "n": 0,
+          "min_ms": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "mean_ms": 0
+        },
+        "deliveries_per_sec": 1934.719,
+        "event_insert_latency": {
+          "n": 1500,
+          "min_ms": 0.722,
+          "p50_ms": 4.93,
+          "p95_ms": 34.78,
+          "p99_ms": 82.582,
+          "max_ms": 345.052,
+          "mean_ms": 9.834
+        },
+        "subs_totals": {
+          "subs": 2000,
+          "received": 79720,
+          "bytes": 48267744,
+          "gaps": 0,
+          "dups": 0,
+          "reconnects": 0,
+          "dial_errors": 0,
+          "parse_mismatches": 0,
+          "server_closes": {},
+          "send_buffer_full_closes": 0,
+          "missing_at_end": 0
+        },
+        "server_goroutines_before_subs": 67,
+        "server_goroutines_peak": 8217,
+        "server_goroutines_after_close": 67,
+        "peak_heap_inuse": 103202816,
+        "pool": {
+          "max_conns": 4,
+          "total_conns": 4,
+          "acquired_conns": 0,
+          "idle_conns": 4,
+          "acquires": 4607,
+          "empty_acquires": 23,
+          "canceled_acquires": 0,
+          "empty_wait_ms": 367.171,
+          "acquire_ms": 370.537,
+          "samples": 623,
+          "samples_at_max": 1,
+          "max_acquired": 4,
+          "saturated_ratio": 0.002
+        },
+        "pools": [
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 4607,
+            "empty_acquires": 23,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 367.171,
+            "acquire_ms": 370.537,
+            "samples": 623,
+            "samples_at_max": 1,
+            "max_acquired": 4,
+            "saturated_ratio": 0.002
+          }
+        ],
+        "pool_acquires_per_sec": 148.554,
+        "cpu": {
+          "wall_s": 31.283,
+          "server_cpu_s": 4.124,
+          "driver_cpu_s": 2.218,
+          "postgres_cpu_s": 1.363
+        },
+        "server": [
+          {
+            "replica": 0,
+            "replica_id": "lt-r0-92b88d",
+            "pid": 16952,
+            "goroutines": 8167,
+            "peak_goroutines": 8217,
+            "heap_inuse": 89710592,
+            "peak_heap_inuse": 103202816,
+            "heap_alloc": 70021952,
+            "sys": 160999736,
+            "total_alloc": 311702352,
+            "num_gc": 15,
+            "rss": 185475072,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 4607,
+              "empty_acquires": 23,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 367.171,
+              "acquire_ms": 370.537,
+              "samples": 623,
+              "samples_at_max": 1,
+              "max_acquired": 4,
+              "saturated_ratio": 0.002
+            },
+            "appends": {
+              "n": 1500,
+              "min_ms": 0.722,
+              "p50_ms": 4.93,
+              "p95_ms": 34.78,
+              "p99_ms": 82.582,
+              "max_ms": 345.052,
+              "mean_ms": 9.834
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 0,
+            "action_runs": {},
+            "cpu_seconds": 6.757647
+          }
+        ]
+      }
+    ]
+  },
+  "findings": [
+    "500 subscribers over 50 rooms: the server accepted 48.4 of 50.0 comments/s offered (POST p50 7 ms, p99 243 ms); event-\u003edelivery p50 5.3 ms, p95 38.8 ms, p99 107.6 ms; 0 send-buffer-full closes, 0 reconnects; pool 3/4 busy in 0% of samples, 148 acquires/s, 7 waits; server goroutines 69 before, 69 after close; CPU server 0.08, driver 0.04, postgres 0.04 cores.",
+    "1000 subscribers over 50 rooms: the server accepted 48.4 of 50.0 comments/s offered (POST p50 13 ms, p99 402 ms); event-\u003edelivery p50 6.9 ms, p95 48.5 ms, p99 119.9 ms; 0 send-buffer-full closes, 0 reconnects; pool 4/4 busy in 0% of samples, 149 acquires/s, 10 waits; server goroutines 69 before, 69 after close; CPU server 0.09, driver 0.05, postgres 0.04 cores.",
+    "2000 subscribers over 50 rooms: the server accepted 48.4 of 50.0 comments/s offered (POST p50 18 ms, p99 1353 ms); event-\u003edelivery p50 8.0 ms, p95 58.2 ms, p99 141.3 ms; 0 send-buffer-full closes, 0 reconnects; pool 4/4 busy in 0% of samples, 149 acquires/s, 23 waits; server goroutines 67 before, 67 after close; CPU server 0.13, driver 0.07, postgres 0.04 cores."
+  ],
+  "checks": [
+    {
+      "name": "subs=500: every subscriber saw every event once, in order",
+      "ok": true,
+      "detail": "gaps 0 dups 0 missing-at-end 0 parse mismatches 0"
+    },
+    {
+      "name": "subs=500: comments accepted",
+      "ok": true,
+      "detail": "posted 1500, errors 0"
+    },
+    {
+      "name": "subs=500: no server goroutine leak after close",
+      "ok": true,
+      "detail": "69 before subscribers, 69 after they closed"
+    },
+    {
+      "name": "subs=500: no append errors",
+      "ok": true,
+      "detail": "append errors 0"
+    },
+    {
+      "name": "subs=1000: every subscriber saw every event once, in order",
+      "ok": true,
+      "detail": "gaps 0 dups 0 missing-at-end 0 parse mismatches 0"
+    },
+    {
+      "name": "subs=1000: comments accepted",
+      "ok": true,
+      "detail": "posted 1500, errors 0"
+    },
+    {
+      "name": "subs=1000: no server goroutine leak after close",
+      "ok": true,
+      "detail": "69 before subscribers, 69 after they closed"
+    },
+    {
+      "name": "subs=1000: no append errors",
+      "ok": true,
+      "detail": "append errors 0"
+    },
+    {
+      "name": "subs=2000: every subscriber saw every event once, in order",
+      "ok": true,
+      "detail": "gaps 0 dups 0 missing-at-end 0 parse mismatches 0"
+    },
+    {
+      "name": "subs=2000: comments accepted",
+      "ok": true,
+      "detail": "posted 1500, errors 0"
+    },
+    {
+      "name": "subs=2000: no server goroutine leak after close",
+      "ok": true,
+      "detail": "67 before subscribers, 67 after they closed"
+    },
+    {
+      "name": "subs=2000: no append errors",
+      "ok": true,
+      "detail": "append errors 0"
+    }
+  ],
+  "loadavg_start_end": [
+    "37.66 35.86 39.51",
+    "45.13 39.79 40.48"
+  ]
+}

@@ -290,7 +290,7 @@ func TestChildEnvDropsRealCredentials(t *testing.T) {
 			t.Fatalf("child env keeps %q:\n%s", bad, got)
 		}
 	}
-	for _, want := range []string{"PATH=/bin", "EXTRA=1", "ANTHROPIC_BASE_URL=http://127.0.0.1:1/", ServerEnv + "={}"} {
+	for _, want := range []string{"PATH=/bin", "EXTRA=1", "ANTHROPIC_BASE_URL=http://127.0.0.1:1/", "ANTHROPIC_API_KEY=" + FakeAPIKey, ServerEnv + "={}"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("child env lacks %q:\n%s", want, got)
 		}

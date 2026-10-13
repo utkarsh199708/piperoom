@@ -23,8 +23,8 @@ func Percentile(sorted []time.Duration, p float64) time.Duration {
 		return sorted[n-1]
 	}
 	// Rank is ceil(p/100 * n), 1-based. The small epsilon keeps a product that
-	// floating point puts a hair above a whole number (for example
-	// 0.95*100 = 95.00000000000001) from moving one rank up.
+	// floating point puts a hair above a whole number (for example 7/100*100 =
+	// 7.0000000000000009) from moving one rank up.
 	rank := int(math.Ceil(p/100*float64(n) - 1e-9))
 	if rank < 1 {
 		rank = 1

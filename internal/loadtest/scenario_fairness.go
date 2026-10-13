@@ -80,21 +80,6 @@ type ModelStatsLite struct {
 	ConcurrentDup int   `json:"rooms_with_concurrent_model_calls"`
 }
 
-func liteModel(st ModelStats, rooms []string) ModelStatsLite {
-	l := ModelStatsLite{Requests: st.Requests, BadRequests: st.BadRequests, MaxInFlight: st.MaxInFlight}
-	for _, r := range rooms {
-		if rs := st.Rooms[r]; rs != nil {
-			if rs.RunStarts > 1 {
-				l.DuplicateRuns++
-			}
-			if rs.MaxInFlight > 1 {
-				l.ConcurrentDup++
-			}
-		}
-	}
-	return l
-}
-
 func (d FairnessData) markdown() string {
 	var b strings.Builder
 	b.WriteString("## Time to first agent turn per pipeline\n\n")
@@ -213,11 +198,8 @@ func runFairness(ctx context.Context, env *Env, p Params) (*Result, error) {
 		}
 	}
 	res.check("every room got a first agent turn", missing == 0, "%d of %d rooms without slot or first turn", missing, len(tls))
-	limit := agentLimit(maxAgents, env.Replicas, p.Int("max_agents_global"))
-	res.check("agent cap respected (fake model in-flight <= limit)", mst.MaxInFlight <= limit,
-		"max in-flight %d, limit %d (%d per replica x %d replicas, global %d)", mst.MaxInFlight, limit, maxAgents, env.Replicas, p.Int("max_agents_global"))
-	res.check("no duplicate agent runs", data.Model.DuplicateRuns == 0 && data.Model.ConcurrentDup == 0,
-		"rooms with >1 run start %d, rooms with concurrent model calls %d", data.Model.DuplicateRuns, data.Model.ConcurrentDup)
+	res.add(agentCapCheck(mst.MaxInFlight, maxAgents, env.Replicas, p.Int("max_agents_global")))
+	res.add(dupRunCheck(data.Model))
 	res.check("no append errors", sumAppendErrors(srv) == 0, "append errors %d", sumAppendErrors(srv))
 
 	a := data.Pipelines[0]
@@ -228,16 +210,6 @@ func runFairness(ctx context.Context, env *Env, p Params) (*Result, error) {
 			data.SmallMaxWait/data.RoundRobinBoundMS, data.RoundRobinBoundMS)
 	}
 	return res, nil
-}
-
-// agentLimit is the most agent runs that may call the model at once: the
-// per-replica cap times the replicas, or the global cap when it is lower.
-func agentLimit(perReplica, replicas, global int) int {
-	limit := perReplica * replicas
-	if global > 0 && global < limit {
-		limit = global
-	}
-	return limit
 }
 
 func maxOvertaken(ps []PipelineFairness) int {

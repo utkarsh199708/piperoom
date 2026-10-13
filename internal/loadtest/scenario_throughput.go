@@ -224,23 +224,17 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 	}
 	run.Appends = srv[0].Appends // per replica in Server; replica 0 for the table
 	label := fmt.Sprintf("max_agents=%d: ", maxAgents)
-	limit := agentLimit(maxAgents, env.Replicas, p.Int("max_agents_global"))
-	res.check(label+"agent cap respected", mst.MaxInFlight <= limit, "max in-flight %d, limit %d (%d per replica x %d replicas, global %d)", mst.MaxInFlight, limit, maxAgents, env.Replicas, p.Int("max_agents_global"))
-	res.check(label+"no duplicate agent runs", run.Model.DuplicateRuns == 0 && run.Model.ConcurrentDup == 0,
-		"rooms with >1 run start %d, with concurrent model calls %d", run.Model.DuplicateRuns, run.Model.ConcurrentDup)
+	res.add(labeled(label, agentCapCheck(mst.MaxInFlight, maxAgents, env.Replicas, p.Int("max_agents_global"))))
+	res.add(labeled(label, dupRunCheck(run.Model)))
 	want := n * turns
 	if propose {
 		want += n // the propose_fix turn
 	}
 	res.check(label+"every run made all its turns", run.Turns == int64(want), "model turns %d, want %d", run.Turns, want)
 	if e := run.Exec; e != nil {
-		res.check(label+"every approved fix executed exactly once", e.Approved == n && e.ApproveErr == 0 && e.DuplicateExecutions == 0 &&
-			e.MissingExecutions == 0 && e.DuplicateExecEvents == 0 && e.ExecutedEvents == e.Approved,
-			"proposals %d approved %d approve errors %d; executions %d (duplicate %d, missing %d); action.executed events %d (duplicate %d)",
-			e.Proposals, e.Approved, e.ApproveErr, e.Executions, e.DuplicateExecutions, e.MissingExecutions, e.ExecutedEvents, e.DuplicateExecEvents)
+		res.add(labeled(label, execCheck(*e, n)))
 	}
-	res.check(label+"viewers saw gap-free logs", run.Subs.Gaps == 0 && run.Subs.Dups == 0 && run.Subs.Mismatches == 0,
-		"gaps %d dups %d parse mismatches %d", run.Subs.Gaps, run.Subs.Dups, run.Subs.Mismatches)
+	res.add(labeled(label, seqCheck(run.Subs)))
 	res.check(label+"no append errors", sumAppendErrors(srv) == 0, "append errors %d", sumAppendErrors(srv))
 	return run, nil
 }

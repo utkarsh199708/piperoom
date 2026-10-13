@@ -8,6 +8,8 @@
 // (build tag "integration") runs every profile at its CI size. See
 // reviews/capacity-2026-10.md for the method, the commands and the numbers.
 //
-// ws_load_test.go (build tag "load") is the earlier in-process WebSocket
-// fan-out test on the in-memory store; see reviews/load-test-2026-10.md.
+// The earlier in-process WebSocket fan-out test on the in-memory store
+// (ws_load_test.go, build tag "load", reviews/load-test-2026-10.md) was
+// removed: the fanout profile supersedes it on Postgres. It is in the history
+// at b81248b.
 package loadtest

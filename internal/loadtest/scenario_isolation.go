@@ -225,8 +225,7 @@ func runIsolation(ctx context.Context, env *Env, p Params) (*Result, error) {
 	res.Data = data
 
 	t := data.Totals
-	res.check("every subscriber saw every event once, in order", t.Gaps == 0 && t.Dups == 0 && t.MissingTail == 0 && t.Mismatches == 0,
-		"gaps %d dups %d missing-at-end %d parse mismatches %d", t.Gaps, t.Dups, t.MissingTail, t.Mismatches)
+	res.add(seqCheck(t))
 	res.check("comments accepted in both phases", data.Baseline.Failed == 0 && data.Flood.Failed == 0 && data.Baseline.Posted > 0 && data.Flood.Posted > 0,
 		"baseline %d/%d failed, flood %d/%d failed", data.Baseline.Failed, data.Baseline.Posted, data.Flood.Failed, data.Flood.Posted)
 	res.check("the flood room really flooded", data.Flood.FloodEPS > 0, "%.0f events/s", data.Flood.FloodEPS)

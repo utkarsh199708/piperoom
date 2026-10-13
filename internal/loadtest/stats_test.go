@@ -42,7 +42,11 @@ func TestPercentileNearestRank(t *testing.T) {
 		// ceil(0.5*4)=2 -> second value; no interpolation between 2 and 3.
 		{"p50 of four", durs(1, 2, 3, 4), 50, 2 * time.Millisecond},
 		{"p51 of four", durs(1, 2, 3, 4), 51, 3 * time.Millisecond},
-		// ceil(0.95*20)=19, not 20 (float 0.95*20 = 19.000000000000004).
+		// 7/100*100 is 7.0000000000000009 in float64: without the epsilon the
+		// rank would be 8. 29/100*100 = 28.999999999999996 must still give 29.
+		{"p7 of 1..100", hundred, 7, 7 * time.Millisecond},
+		{"p29 of 1..100", hundred, 29, 29 * time.Millisecond},
+		{"p57 of 1..100", hundred, 57, 57 * time.Millisecond},
 		{"p95 of twenty", durs(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20), 95, 19 * time.Millisecond},
 		{"p99 of ten is max", durs(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), 99, 10 * time.Millisecond},
 	}

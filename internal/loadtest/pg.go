@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,7 +54,10 @@ func docker(ctx context.Context, args ...string) (string, error) {
 // memory: faster to start, but no disk I/O, so only CI smoke runs use it.
 func StartPostgres(ctx context.Context, prefix string, tmpfsData bool) (*Postgres, error) {
 	name := fmt.Sprintf("%s-pg-%s", prefix, randHex(4))
+	// The labels let a later run remove this container if this process dies
+	// without cleaning up (SIGKILL, a go test timeout): see RemoveStale.
 	args := []string{"run", "-d", "--rm", "--name", name,
+		"--label", labelPrefix + "=" + prefix, "--label", fmt.Sprintf("%s=%d", labelOwner, os.Getpid()),
 		"-e", "POSTGRES_USER=lt", "-e", "POSTGRES_PASSWORD=lt-local-only", "-e", "POSTGRES_DB=lt",
 		"-p", "127.0.0.1::5432"}
 	if tmpfsData {
@@ -76,6 +81,51 @@ func StartPostgres(ctx context.Context, prefix string, tmpfsData bool) (*Postgre
 		return nil, err
 	}
 	return p, nil
+}
+
+// Container labels: the name prefix and the PID of the driver that owns it.
+const (
+	labelPrefix = "piperoom.loadtest.prefix"
+	labelOwner  = "piperoom.loadtest.owner-pid"
+)
+
+// staleContainers picks, from `docker ps` lines of "<name> <owner pid>", the
+// containers named <prefix>-pg-* whose owner process is gone. A line with no
+// parsable PID is left alone (not ours to judge).
+func staleContainers(psOutput, prefix string, alive func(int) bool) []string {
+	var out []string
+	for _, line := range strings.Split(psOutput, "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 || !strings.HasPrefix(f[0], prefix+"-pg-") {
+			continue
+		}
+		pid, err := strconv.Atoi(f[1])
+		if err != nil || pid <= 0 {
+			continue
+		}
+		if !alive(pid) {
+			out = append(out, f[0])
+		}
+	}
+	return out
+}
+
+// RemoveStale removes this prefix's database containers left behind by a
+// driver that died without cleaning up, and returns their names. Containers
+// of a live driver (another run in progress) are kept.
+func RemoveStale(ctx context.Context, prefix string) ([]string, error) {
+	out, err := docker(ctx, "ps", "-a", "--filter", "label="+labelPrefix+"="+prefix,
+		"--format", "{{.Names}} {{.Label \""+labelOwner+"\"}}")
+	if err != nil {
+		return nil, fmt.Errorf("loadtest: list stale containers: %w", err)
+	}
+	stale := staleContainers(out, prefix, processAlive)
+	for _, name := range stale {
+		if _, err := docker(ctx, "rm", "-f", name); err != nil {
+			return stale, fmt.Errorf("loadtest: remove stale container %s: %w", name, err)
+		}
+	}
+	return stale, nil
 }
 
 // ExistingPostgres uses the server at adminURL; the caller's role must be
@@ -118,6 +168,28 @@ func (p *Postgres) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_, _ = docker(ctx, "rm", "-f", p.container)
+}
+
+// withQuery adds the k=v&k=v parameters of extra to the query of a database
+// URL; a key that is already there is replaced.
+func withQuery(dbURL, extra string) (string, error) {
+	u, err := url.Parse(dbURL)
+	if err != nil {
+		return "", fmt.Errorf("loadtest: database url: %w", err)
+	}
+	add, err := url.ParseQuery(extra)
+	if err != nil {
+		return "", fmt.Errorf("loadtest: extra database parameters %q: %w", extra, err)
+	}
+	q := u.Query()
+	for k, vs := range add {
+		if k == "" || len(vs) == 0 {
+			return "", fmt.Errorf("loadtest: extra database parameters %q: empty key or value", extra)
+		}
+		q.Set(k, vs[len(vs)-1])
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 // Database is one scenario run's database.

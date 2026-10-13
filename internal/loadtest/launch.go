@@ -56,7 +56,7 @@ func childEnv(parent []string, modelURL string, cfgJSON []byte, extra []string) 
 	out = append(out, extra...)
 	return append(out,
 		"ANTHROPIC_BASE_URL="+modelURL,
-		"ANTHROPIC_API_KEY=lt-fake-key-not-a-secret",
+		"ANTHROPIC_API_KEY="+FakeAPIKey,
 		ServerEnv+"="+string(cfgJSON),
 	)
 }

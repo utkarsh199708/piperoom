@@ -109,6 +109,23 @@ func (t *timedStore) Append(ctx context.Context, roomID string, typ events.Type,
 	return e, err
 }
 
+// FakeAPIKey is the only API key a load-test server accepts. It is not a
+// secret: it makes sure the SDK never falls back to a real key, an auth token
+// or a profile file (~/.config/anthropic) of the machine.
+const FakeAPIKey = "lt-fake-key-not-a-secret"
+
+// checkModelEnv refuses to start unless the model endpoint is loopback and
+// the API key is FakeAPIKey.
+func checkModelEnv(getenv func(string) string) error {
+	if err := checkModelURL(getenv("ANTHROPIC_BASE_URL")); err != nil {
+		return err
+	}
+	if getenv("ANTHROPIC_API_KEY") != FakeAPIKey {
+		return errors.New("loadtest: ANTHROPIC_API_KEY must be the load test's fake key; refusing to start with any other credential")
+	}
+	return nil
+}
+
 // checkModelURL refuses a model endpoint that is not on this machine, so a
 // load run can never send its traffic (or a real key) to a real model API.
 func checkModelURL(raw string) error {
@@ -141,7 +158,7 @@ func parseLevel(s string) slog.Level {
 
 // StartServer assembles and starts one server. The caller must Close it.
 func StartServer(ctx context.Context, cfg ServerConfig, log *slog.Logger) (*Server, error) {
-	if err := checkModelURL(os.Getenv("ANTHROPIC_BASE_URL")); err != nil {
+	if err := checkModelEnv(os.Getenv); err != nil {
 		return nil, err
 	}
 	if cfg.DBURL == "" {
