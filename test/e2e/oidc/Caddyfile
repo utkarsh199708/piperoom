@@ -1,0 +1,22 @@
+# TLS front for the OIDC e2e stack. Both origins are https://localhost:<port>,
+# served with the test certificate from certgen (no ACME, no Caddy-managed CA).
+# The piperoom container shares this container's network namespace, so
+# "localhost" means the same thing to the test on the host, to Caddy and to the
+# piperoom server: see README.md, "One issuer for everyone".
+{
+	admin off
+	auto_https off
+}
+
+# Piperoom (PIPEROOM_PUBLIC_URL). The server listens on 0.0.0.0:8090 in this
+# same network namespace.
+https://localhost:8443 {
+	tls /certs/server.crt /certs/server.key
+	reverse_proxy 127.0.0.1:8090
+}
+
+# Keycloak (the issuer, https://localhost:8444/realms/piperoom).
+https://localhost:8444 {
+	tls /certs/server.crt /certs/server.key
+	reverse_proxy keycloak:8080
+}

@@ -1,0 +1,85 @@
+{
+  "realm": "piperoom",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "bruteForceProtected": false,
+  "groups": [
+    { "name": "dataeng-oncall", "path": "/dataeng-oncall" },
+    { "name": "piperoom-viewers", "path": "/piperoom-viewers" }
+  ],
+  "clients": [
+    {
+      "clientId": "piperoom",
+      "name": "Piperoom e2e",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "piperoom-e2e-test-only-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": false,
+      "redirectUris": ["https://localhost:8443/auth/callback"],
+      "webOrigins": ["https://localhost:8443"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "https://localhost:8443/"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "alice",
+      "enabled": true,
+      "email": "alice@e2e.example",
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Oncall",
+      "requiredActions": [],
+      "credentials": [{ "type": "password", "value": "alice-e2e-password", "temporary": false }],
+      "groups": ["/dataeng-oncall"]
+    },
+    {
+      "username": "bob",
+      "enabled": true,
+      "email": "bob@e2e.example",
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Nogroup",
+      "requiredActions": [],
+      "credentials": [{ "type": "password", "value": "bob-e2e-password", "temporary": false }],
+      "groups": []
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "email": "carol@e2e.example",
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Viewer",
+      "requiredActions": [],
+      "credentials": [{ "type": "password", "value": "carol-e2e-password", "temporary": false }],
+      "groups": ["/piperoom-viewers"]
+    }
+  ]
+}
