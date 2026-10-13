@@ -289,7 +289,17 @@ func TestShadowRoomOverHTTP(t *testing.T) {
 		t.Fatalf("per_room = %v", m["per_room"])
 	}
 
-	wantErr(t, doJSON(t, http.MethodGet, path+"/export?include=nope", "priya", ""), http.StatusBadRequest, "validation")
+	// Unknown include= values on the export are ignored, as before shadow mode.
+	resp = doJSON(t, http.MethodGet, path+"/export?include=nope", "priya", "")
+	wantStatus(t, resp, http.StatusOK)
+	if b := decode[map[string]json.RawMessage](t, resp); b["shadow"] != nil {
+		t.Fatal("include=nope added the shadow member")
+	}
+	resp = doJSON(t, http.MethodGet, path+"/export?include=nope,shadow", "priya", "")
+	wantStatus(t, resp, http.StatusOK)
+	if b := decode[map[string]json.RawMessage](t, resp); b["shadow"] == nil {
+		t.Fatal("include=nope,shadow lost the shadow member")
+	}
 	resp = doJSON(t, http.MethodGet, path+"/export?include=shadow", "priya", "")
 	wantStatus(t, resp, http.StatusOK)
 	withShadow := resp.Header.Get("X-Piperoom-Export-SHA256")
@@ -344,6 +354,7 @@ func TestShadowRoutesLiveRoom404(t *testing.T) {
 	}
 	path := srv.URL + "/api/rooms/" + snap["id"].(string)
 	wantStatus(t, doJSON(t, http.MethodPost, path+"/close", "arjun", `{"resolution":""}`), http.StatusOK)
+	wantStatus(t, doJSON(t, http.MethodGet, path+"/export?include=nope", "arjun", ""), http.StatusOK)
 	wantErr(t, doJSON(t, http.MethodGet, path+"/shadow", "arjun", ""), http.StatusNotFound, "not_found")
 	wantErr(t, doJSON(t, http.MethodPost, path+"/shadow/blind", "arjun", `{"actual_layer":"kafka","root_cause_terms":["x"]}`), http.StatusNotFound, "not_found")
 	wantErr(t, doJSON(t, http.MethodPost, path+"/shadow/grade", "arjun", `{"layer_correct":true,"root_cause":"yes"}`), http.StatusNotFound, "not_found")

@@ -37,13 +37,13 @@ func (s *Server) handleExportRoom(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
-	inc, err := parseInclude(r, "shadow")
-	if err != nil {
-		s.writeErr(w, err)
-		return
-	}
-	var ex *room.Export
-	if inc["shadow"] {
+	// Unknown include= values are ignored here, as they were before shadow
+	// mode: only "shadow" changes the export.
+	var (
+		ex  *room.Export
+		err error
+	)
+	if hasInclude(r, "shadow") {
 		// Closed, labelled shadow rooms only; the shadow member is inside the
 		// hashed document (docs/api.md).
 		ex, err = s.svc.PrepareExportShadow(ctx, roomID)

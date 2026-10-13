@@ -37,6 +37,18 @@ func parseInclude(r *http.Request, allowed ...string) (map[string]bool, error) {
 	return out, nil
 }
 
+// hasInclude reports whether ?include= lists name; other values are ignored.
+func hasInclude(r *http.Request, name string) bool {
+	for _, raw := range r.URL.Query()["include"] {
+		for _, v := range strings.Split(raw, ",") {
+			if strings.TrimSpace(v) == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (s *Server) handleShadowBlind(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ActualLayer    string   `json:"actual_layer"`
