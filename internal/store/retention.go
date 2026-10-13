@@ -163,6 +163,9 @@ func (s *PG) purgeRoom(ctx context.Context, id string, cutoff time.Time) (PurgeR
 			{`DELETE FROM suggestions WHERE room_id = $1`, &res.Suggestions},
 			{`DELETE FROM handoffs WHERE room_id = $1`, &res.Handoffs},
 			{`DELETE FROM slack_threads WHERE room_id = $1`, &res.SlackThreads},
+			// Shadow events before their run row (the run row is their parent).
+			{`DELETE FROM shadow_events WHERE room_id = $1`, &res.ShadowEvents},
+			{`DELETE FROM shadow_runs WHERE room_id = $1`, &res.ShadowRuns},
 		}
 		for _, c := range children {
 			tag, err := tx.Exec(ctx, c.sql, id)

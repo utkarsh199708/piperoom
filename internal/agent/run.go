@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -214,9 +215,11 @@ func (r *runner) run(ctx context.Context) error {
 		if err != nil {
 			// The room's token budget is spent: stop here, between turns. Tool
 			// calls of the previous turn have all finished by now.
+			// The error is returned so a supervisor can tell this stop from a
+			// normal end; it must treat it as a stop (no retry, no error status).
 			if be, ok := asBudgetError(err); ok {
 				r.stopForBudget(ctx, be)
-				return nil
+				return fmt.Errorf("agent: stopped: %w", be)
 			}
 			// A cancelled context is a clean shutdown (room closed), not an error.
 			if ctx.Err() != nil {
@@ -609,8 +612,17 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 
 	// Read tools in parallel. Unknown names also go through runReadTool, which
 	// reports them as an error tool_result rather than dropping the tool_use.
+	//
+	// A panic in a read tool must not escape its goroutine: nothing there can
+	// recover it, so it would end the process before Deps.Usage runs and before
+	// the room supervisor sees it. Each goroutine recovers, the first panic is
+	// kept (the stack goes to the log), and it is raised again on this
+	// goroutine once every tool has stopped.
 	sem := make(chan struct{}, maxParallelTools)
 	var wg sync.WaitGroup
+	var panicMu sync.Mutex
+	var firstPanic any
+	var panicked bool
 	for i, u := range uses {
 		if e, ok := r.toolList.byName[u.name]; ok && e.isRoom {
 			continue
@@ -618,6 +630,16 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 		wg.Add(1)
 		go func(i int, u toolUse) {
 			defer wg.Done()
+			defer func() {
+				if p := recover(); p != nil {
+					r.log.Error("agent: read tool panicked", "tool", u.name, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+					panicMu.Lock()
+					if !panicked {
+						panicked, firstPanic = true, p
+					}
+					panicMu.Unlock()
+				}
+			}()
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
@@ -633,6 +655,9 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 		}(i, u)
 	}
 	wg.Wait()
+	if panicked {
+		panic(firstPanic)
+	}
 
 	blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(results))
 	for _, res := range results {

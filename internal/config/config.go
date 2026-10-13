@@ -125,7 +125,7 @@ type Config struct {
 	// Kept as strings like the watcher fields; ParseShadow types them and
 	// names the env var on error.
 	ShadowGrace       string // PIPEROOM_SHADOW_GRACE: Go duration the run may keep going after close; default 0 = cancel at close
-	ShadowTokenBudget string // PIPEROOM_SHADOW_TOKEN_BUDGET: tokens per shadow room; default 500000; "0" = no cap
+	ShadowTokenBudget string // PIPEROOM_SHADOW_TOKEN_BUDGET: tokens per shadow room; default 500000; "0" = use PIPEROOM_ROOM_TOKEN_BUDGET (there is no uncapped shadow run)
 	ShadowMaxTurns    string // PIPEROOM_SHADOW_MAX_TURNS: model turns per shadow run; default 20
 }
 
@@ -239,7 +239,8 @@ type Shadow struct {
 	// Grace is how long a shadow run may keep going after the room closes.
 	// 0 = cancel at close, as a live run is.
 	Grace time.Duration
-	// TokenBudget caps model tokens per shadow room; 0 = no cap.
+	// TokenBudget caps model tokens per shadow room; 0 = use the room
+	// default (PIPEROOM_ROOM_TOKEN_BUDGET), as agent.Options.TokenBudget 0 does.
 	TokenBudget int64
 	// MaxTurns caps model turns per shadow run.
 	MaxTurns int
@@ -247,8 +248,7 @@ type Shadow struct {
 
 // ParseShadow validates the PIPEROOM_SHADOW_* fields. Empty fields mean the
 // default. Grace accepts "0" and any non-negative Go duration; TokenBudget
-// follows PIPEROOM_ROOM_TOKEN_BUDGET's rule (whole number >= 1, or "0" for no
-// cap); MaxTurns is a whole number >= 1.
+// is a whole number >= 1, or "0" for the room default; MaxTurns is a whole number >= 1.
 func ParseShadow(c Config) (Shadow, error) {
 	var sh Shadow
 	g := strings.TrimSpace(c.ShadowGrace)

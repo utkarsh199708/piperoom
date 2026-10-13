@@ -48,8 +48,15 @@ type Deps struct {
 	Run          agent.Runner
 	WriteHandoff agent.HandoffWriter
 	Options      agent.Options
-	Logger       *slog.Logger
-	Now          func() time.Time
+	// ShadowOptions are the agent options of a shadow room's run
+	// (docs/design/shadow.md section 3.3): the same model, fewer turns and a
+	// lower token budget (config.ParseShadow).
+	ShadowOptions agent.Options
+	// ShadowGrace is how long a shadow run may keep going after its room
+	// closes; 0 cancels it at close like a live run.
+	ShadowGrace time.Duration
+	Logger      *slog.Logger
+	Now         func() time.Time
 
 	// MaxAgents caps agent runs working at the same time across all rooms; a
 	// room over the cap waits in a FIFO queue. 0 or less means DefaultMaxAgents.
@@ -98,6 +105,16 @@ type roomState struct {
 	execCancel  context.CancelFunc // cancels the room's executor on close
 	exec        *execQueue         // nil until the first proposal is approved
 	dedupKey    string             // alert index key of an alert room; "" otherwise
+
+	// Shadow run state (shadow.go). shadowActive is true from the start of
+	// the shadow supervisor until it has written the run's final status.
+	// shadowInAttempt is true only while an attempt runs (runGuarded), so a
+	// close gives grace to a run that is mid-investigation and cancels a run
+	// that is queued or backing off. graceTimer cancels a run that is still
+	// going PIPEROOM_SHADOW_GRACE after the close.
+	shadowActive    bool
+	shadowInAttempt bool
+	graceTimer      *time.Timer
 }
 
 // Service is the room domain logic. All state derives from the event log; the
@@ -112,6 +129,9 @@ type Service struct {
 	run          agent.Runner
 	writeHandoff agent.HandoffWriter
 	opts         agent.Options
+	shadowOpts   agent.Options
+	shadowGrace  time.Duration
+	shadow       store.ShadowStore // nil when the store cannot hold shadow runs
 	log          *slog.Logger
 	now          func() time.Time
 	onRoomOpened func(ctx context.Context, roomID string)
@@ -172,6 +192,7 @@ func New(d Deps) *Service {
 	if topo == nil {
 		topo = noopTopology{}
 	}
+	shadowStore, _ := d.Store.(store.ShadowStore)
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
 		store:        d.Store,
@@ -183,6 +204,9 @@ func New(d Deps) *Service {
 		run:          run,
 		writeHandoff: wh,
 		opts:         d.Options,
+		shadowOpts:   d.ShadowOptions,
+		shadowGrace:  d.ShadowGrace,
+		shadow:       shadowStore,
 		log:          log,
 		now:          now,
 		onRoomOpened: d.OnRoomOpened,
@@ -228,9 +252,16 @@ func (s *Service) AllUsers() []User { return s.users.All() }
 // mentions the agent (ensureAgentLocked). A restart must not spend model calls
 // on rooms nobody is watching.
 func (s *Service) Load(ctx context.Context) error {
+	if s.shadow == nil && s.owners.AnyShadow() {
+		return fmt.Errorf("room: load: owners.yaml turns shadow mode on, but the store cannot hold shadow runs")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.ensureAllLoadedLocked(ctx, true)
+	if err := s.ensureAllLoadedLocked(ctx, true); err != nil {
+		return err
+	}
+	s.sweepShadowLocked(ctx)
+	return nil
 }
 
 // ensureAllLoadedLocked rebuilds every room not yet cached. restarted is true
@@ -259,12 +290,15 @@ func (s *Service) ensureAllLoadedLocked(ctx context.Context, restarted bool) err
 			s.log.Warn("room: rebuild failed", "room", r.ID, "err", err)
 			continue
 		}
-		st := &roomState{snap: snap, inbox: newInbox()}
+		st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow)}
 		s.rooms[r.ID] = st
 		if snap.Status == "open" {
 			s.indexAlertRoomLocked(ctx, r.ID, st)
 			s.interruptStaleProposalsLocked(ctx, r.ID, st)
-			if restarted {
+			// A shadow room never resumes its agent, so the "steer to
+			// resume" notice would be wrong there (the sweep in Load marks
+			// its run interrupted instead).
+			if restarted && !snap.Shadow {
 				if err := s.noteRestartLocked(ctx, r.ID, st); err != nil {
 					s.log.Warn("room: restart notice failed", "room", r.ID, "err", err)
 				}
@@ -301,7 +335,9 @@ func (s *Service) noteRestartLocked(ctx context.Context, roomID string, st *room
 // room restored by Load has none until someone steers it or mentions the agent;
 // a room whose agent was already started is left alone. Caller must hold s.mu.
 func (s *Service) ensureAgentLocked(ctx context.Context, roomID string, st *roomState) {
-	if st.agentCancel != nil || !s.roomOpen(st) {
+	// A shadow run is one-shot: steers, suggestions and @agent comments are
+	// logged but never start or restart it (docs/design/shadow.md 3.3).
+	if st.snap.Shadow || st.agentCancel != nil || !s.roomOpen(st) {
 		return
 	}
 	s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, s.rawAlert(ctx, roomID), st)
@@ -404,7 +440,7 @@ func (s *Service) getStateLocked(ctx context.Context, roomID string) (*roomState
 	if err != nil {
 		return nil, fmt.Errorf("room: rebuild %s: %w", roomID, err)
 	}
-	st := &roomState{snap: snap, inbox: newInbox()}
+	st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow)}
 	s.rooms[roomID] = st
 	if snap.Status == "open" {
 		s.indexAlertRoomLocked(ctx, roomID, st)
@@ -447,8 +483,15 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, err
 }
 
 // emitLocked appends one event, folds it into the cached snapshot and feeds
-// the agent inbox. Caller must hold s.mu.
+// the agent inbox. In a shadow room every event of the agent actor goes to the
+// shadow log instead (docs/design/shadow.md 3.2): it is not folded and not fed,
+// so no agent text, status or error reaches the room log, the WebSocket, the
+// Slack mirror or the export before the reveal. This is the one place that
+// decides it. Caller must hold s.mu.
 func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
+	if st.snap.Shadow && actor == events.AgentActor {
+		return s.appendShadowLocked(ctx, roomID, typ, payload)
+	}
 	e, err := s.store.Append(ctx, roomID, typ, actor, payload)
 	if err != nil {
 		return events.Event{}, fmt.Errorf("room: append %s: %w", typ, err)
@@ -604,17 +647,34 @@ type inbox struct {
 	mu    sync.Mutex
 	items []agent.HumanInput
 	wake  chan struct{}
+	// closed is set for a shadow room: nothing is ever delivered, and Wait
+	// returns agent.ErrInboxClosed so the run ends at its first end_turn.
+	closed bool
 }
 
 func newInbox() *inbox {
 	return &inbox{wake: make(chan struct{}, 1)}
 }
 
+// newClosedInbox is a shadow room's inbox: Drain returns nothing and Wait
+// returns agent.ErrInboxClosed at once.
+func newClosedInbox() *inbox {
+	return &inbox{wake: make(chan struct{}, 1), closed: true}
+}
+
+// newRoomInbox returns the inbox for a room: closed for a shadow room.
+func newRoomInbox(shadow bool) *inbox {
+	if shadow {
+		return newClosedInbox()
+	}
+	return newInbox()
+}
+
 // pushFront returns drained input to the head of the queue, ahead of anything
 // that arrived since, and wakes a waiter. Used when a Drain could not get a
 // slot for the input it took.
 func (in *inbox) pushFront(items []agent.HumanInput) {
-	if len(items) == 0 {
+	if len(items) == 0 || in.closed {
 		return
 	}
 	in.mu.Lock()
@@ -634,6 +694,9 @@ func (in *inbox) pending() int {
 }
 
 func (in *inbox) push(inp agent.HumanInput) {
+	if in.closed {
+		return
+	}
 	in.mu.Lock()
 	in.items = append(in.items, inp)
 	in.mu.Unlock()
@@ -655,8 +718,12 @@ func (in *inbox) Drain(ctx context.Context) ([]agent.HumanInput, error) {
 	return out, nil
 }
 
-// Wait blocks until at least one input is pending or ctx ends.
+// Wait blocks until at least one input is pending or ctx ends. A closed inbox
+// returns agent.ErrInboxClosed at once.
 func (in *inbox) Wait(ctx context.Context) error {
+	if in.closed {
+		return agent.ErrInboxClosed
+	}
 	select {
 	case <-in.wake:
 		return nil
@@ -667,7 +734,7 @@ func (in *inbox) Wait(ctx context.Context) error {
 
 // feedInbox converts relevant events into agent.HumanInput. Caller holds s.mu.
 func (s *Service) feedInbox(st *roomState, e events.Event) {
-	if st.inbox == nil {
+	if st.inbox == nil || st.snap.Shadow {
 		return
 	}
 	var input *agent.HumanInput
@@ -765,6 +832,10 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	if s.closed {
 		return
 	}
+	if st.snap.Shadow {
+		s.startShadowLocked(roomID, title, pipelineID, raw, st)
+		return
+	}
 	ctx, cancel := context.WithCancel(s.ctx)
 	st.agentCancel = cancel
 	st.agentRun++
@@ -802,9 +873,12 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 					tcancel()
 				}
 			}
-			err := s.runGuarded(ctx, roomID, alert, deps)
+			err := s.runGuarded(ctx, roomID, alert, deps, s.opts)
 			gate.release()
-			if err == nil || ctx.Err() != nil {
+			// A spent token budget is a stop, not a failure: the runner has
+			// already written the idle status and the message, so no retry
+			// and no "error" status (agent.Runner contract).
+			if err == nil || ctx.Err() != nil || isBudgetStop(err) {
 				return
 			}
 			s.log.Warn("room: agent run returned error", "room", roomID, "attempt", attempt, "err", err)
@@ -828,14 +902,21 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 
 // runGuarded calls the agent runner and turns a panic into an error, so a bug
 // in one room's run neither takes the server down nor leaves its slot held.
-func (s *Service) runGuarded(ctx context.Context, roomID string, alert agent.Alert, deps agent.Deps) (err error) {
+func (s *Service) runGuarded(ctx context.Context, roomID string, alert agent.Alert, deps agent.Deps, opts agent.Options) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.log.Error("room: agent run panicked", "room", roomID, "panic", r)
 			err = fmt.Errorf("room: agent run panicked: %v", r)
 		}
 	}()
-	return s.run(ctx, alert, deps, s.opts)
+	return s.run(ctx, alert, deps, opts)
+}
+
+// isBudgetStop reports whether a run ended because the room's token budget is
+// spent (an error wrapping *agent.BudgetError).
+func isBudgetStop(err error) bool {
+	var be *agent.BudgetError
+	return errors.As(err, &be)
 }
 
 // releaseAgent frees the room's agent slot when its supervisor gives up, so the

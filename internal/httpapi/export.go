@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"piperoom/internal/room"
 )
 
 // exportTimeout bounds one audit export. It replaces the 60 s default because a
@@ -35,7 +37,19 @@ func (s *Server) handleExportRoom(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err)
 		return
 	}
-	ex, err := s.svc.PrepareExport(ctx, roomID)
+	// Unknown include= values are ignored here, as they were before shadow
+	// mode: only "shadow" changes the export.
+	var (
+		ex  *room.Export
+		err error
+	)
+	if hasInclude(r, "shadow") {
+		// Closed, labelled shadow rooms only; the shadow member is inside the
+		// hashed document (docs/api.md).
+		ex, err = s.svc.PrepareExportShadow(ctx, roomID)
+	} else {
+		ex, err = s.svc.PrepareExport(ctx, roomID)
+	}
 	if err != nil {
 		s.writeErr(w, err)
 		return
