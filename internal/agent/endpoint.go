@@ -234,12 +234,23 @@ func (e *Endpoint) TokenLimit() int64 { return e.limit }
 
 // budget returns the room's budget, creating it on first use.
 func (e *Endpoint) budget(roomID string) *tokenBudget {
+	return e.budgetWithLimit(roomID, 0)
+}
+
+// budgetWithLimit returns the room's budget like budget, and when limit > 0
+// makes it the room's cap, whether the entry is new or not. An existing entry
+// keeps its count: a hand-off written while the run was queued may have created
+// it with e.limit, and that must not pin the room to the default.
+func (e *Endpoint) budgetWithLimit(roomID string, limit int64) *tokenBudget {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	b, ok := e.budgets[roomID]
 	if !ok {
 		b = newTokenBudget(e.limit)
 		e.budgets[roomID] = b
+	}
+	if limit > 0 {
+		b.setLimit(limit)
 	}
 	return b
 }
@@ -255,9 +266,21 @@ func (e *Endpoint) Forget(roomID string) {
 
 // Run is an agent.Runner: the investigation loop on this endpoint, with the
 // room's token budget and, when configured, the triage model.
+//
+// Options.TokenBudget > 0 becomes the room's cap (see budgetWithLimit).
+// Deps.Usage, when set, is called exactly once with the room's count when Run
+// ends, from a defer so a panic still reports the tokens (and still
+// propagates). When the budget stops the loop, Run returns an error wrapping
+// *BudgetError.
 func (e *Endpoint) Run(ctx context.Context, alert Alert, deps Deps, opts Options) error {
 	opts = opts.withDefaults()
-	m := &budgetModel{inner: e.model, budget: e.budget(alert.RoomID), loop: true}
+	b := e.budgetWithLimit(alert.RoomID, opts.TokenBudget)
+	if usage := deps.Usage; usage != nil {
+		// b is this run's own pointer, so a Forget(roomID) from the room-closed
+		// hook cannot change what is reported.
+		defer func() { usage(b.Used()) }()
+	}
+	m := &budgetModel{inner: e.model, budget: b, loop: true}
 	r, err := newRunnerWith(alert, deps, opts, m)
 	if err != nil {
 		return err
