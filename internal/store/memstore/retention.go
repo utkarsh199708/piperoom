@@ -96,6 +96,7 @@ func (s *Store) PurgeClosedBefore(ctx context.Context, cutoff time.Time, maxRoom
 			delete(s.shadowEvents, c.id)
 			delete(s.shadowRuns, c.id)
 		}
+		s.dropRoomSpendLocked(c.id)
 		res.RoomIDs = append(res.RoomIDs, c.id)
 	}
 	return res, nil

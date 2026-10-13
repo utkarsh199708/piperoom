@@ -31,6 +31,8 @@ type Store struct {
 
 	shadowRuns   map[string]*store.ShadowRun
 	shadowEvents map[string][]events.Event
+
+	spend spendTables
 }
 
 type roomLog struct {
@@ -60,6 +62,8 @@ func New() *Store {
 
 		shadowRuns:   map[string]*store.ShadowRun{},
 		shadowEvents: map[string][]events.Event{},
+
+		spend: newSpendTables(),
 	}
 }
 
