@@ -43,6 +43,8 @@ COPY --from=web /app/dist /web
 # environment.
 ENV PIPEROOM_WEB_DIR=/web \
     PIPEROOM_HTTP_ADDR=0.0.0.0:8090 \
+    PIPEROOM_AUTH_MODE=dev \
+    PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 \
     OWNERS_FILE=/config/owners.yaml \
     USERS_FILE=/config/users.yaml
 
@@ -55,13 +57,19 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
     CMD ["/piperoom", "--healthcheck"]
 
 # Inside a container the server must listen on 0.0.0.0, or Docker's port
-# mapping cannot reach it. The server refuses any non-loopback address unless it
-# is started with --allow-remote, because its only login today is the X-User
-# header stub: anyone who can reach the port can act as any user. So do not
-# publish this port to the internet. Run it behind the customer's VPN or an
-# authenticating reverse proxy (see deploy/README.md).
+# mapping cannot reach it. Dev mode refuses a non-loopback address unless
+# PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 (set in ENV above), because dev login has no
+# password: anyone who can reach the port can pick any user. So do not publish
+# this port to the internet. Keep it on the customer's VPN or behind an SSH
+# tunnel.
 #
-# --allow-remote is in ENTRYPOINT, not CMD, so a command override such as
+# A reverse proxy that does the authenticating needs PIPEROOM_AUTH_MODE=oidc,
+# which arrives in auth PR 3 (docs/design/auth.md sections 5.1 and 5.4). Until
+# then, pilots behind a proxy build from the git tag "pre-auth". The image sets
+# its mode explicitly so a later change of the default cannot lock out this
+# path. See deploy/README.md.
+#
+# These are ENV values, not a flag in ENTRYPOINT, so a command override such as
 # "--demo" still starts a server that Docker's port mapping can reach.
 USER nonroot:nonroot
-ENTRYPOINT ["/piperoom", "--allow-remote"]
+ENTRYPOINT ["/piperoom"]

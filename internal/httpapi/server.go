@@ -85,11 +85,6 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	r.Use(middleware.Recoverer)
 	if s.webDir != "" {
 		r.Use(s.securityHeaders)
-	} else {
-		// The dev UI is a separate origin and needs CORS. When the server
-		// serves the UI itself, everything is same-origin and CORS stays off.
-		// (Removed by the lead once the Vite proxy has landed, design §1.4.)
-		r.Use(cors)
 	}
 	r.Use(requestLog(log))
 	// Host allow-list first (DNS rebinding, design §1.5), then the cross-origin
@@ -246,20 +241,6 @@ func (s *Server) crossOriginProtection() *http.CrossOriginProtection {
 func userFrom(ctx context.Context) room.User {
 	u, _ := ctx.Value(userKey).(room.User)
 	return u
-}
-
-// cors allows the A6 dev UI.
-func cors(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5173")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-User")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func requestLog(log *slog.Logger) func(http.Handler) http.Handler {
