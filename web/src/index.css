@@ -1,4 +1,5 @@
 /* Piperoom dark theme. All colours live here as CSS variables. */
+@import "./styles/proposals.css";
 :root {
   --bg: #0d1015;
   --panel: #141922;
