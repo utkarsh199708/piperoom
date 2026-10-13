@@ -37,19 +37,27 @@ map) must agree; the server checks this at start-up and refuses to start on a mi
 The X-User stub above stays until auth PR 2. After it:
 
 - **Mode.** `PIPEROOM_AUTH_MODE` = `dev` (default) or `oidc`. In `oidc` mode `X-User` is ignored and a request with
-  no session answers `401`. In `dev` mode `POST /auth/dev-login {user}` picks a `users.yaml` user; `curl` with
-  `X-User` and no cookie still works.
+  no session answers `401 session_expired`; the unsigned `POST /api/alerts/webhook` is not mounted (`404`), so
+  pilots send alerts to `/api/alerts/generic`. In `dev` mode `POST /auth/dev-login {user}` picks a `users.yaml` user;
+  `curl` with `X-User` and no cookie still works. Dev mode refuses to start on a non-loopback listen address unless
+  `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (loud warnings); `--allow-remote` is a deprecated alias for one release.
 - **Session.** A server-side session in a cookie: `__Host-piperoom_session` in `oidc` mode (https),
   `piperoom_session` (no `Secure`) in `dev` mode over plain http. The cookie wins over `X-User` when both name the
   same user.
 - **Routes.** `GET /auth/login?return=/path` → IdP redirect; `GET /auth/callback` (finds the login row by the
   login cookie, then checks `state` and nonce; single use); `POST /auth/logout` (also closes the user's WebSockets);
   `POST /auth/dev-login {user}` (dev mode only).
-- **Host allow-list.** `Host` must be a loopback name (any port), the host of `PIPEROOM_PUBLIC_URL` (exact), or a
-  value in `PIPEROOM_ALLOWED_HOSTS`; otherwise `421 bad_host`. Cross-origin browser POSTs → `403`.
-- **Roles.** `member` (any `users.yaml` user or `owners.yaml` principal) may act; rights to approve still come from
-  layer ownership. `viewer` (`PIPEROOM_AUTH_VIEWER_GROUPS`, or an `auditors:`-only principal): GET (not export) and
+- **Host allow-list.** `Host` must be a loopback name (any port), a value in `PIPEROOM_ALLOWED_HOSTS`, or the host
+  of `PIPEROOM_PUBLIC_URL` (exact) — in `oidc` mode always, in `dev` mode only with
+  `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`; otherwise `421 bad_host`. Cross-origin browser POSTs get Go's
+  `CrossOriginProtection` `403` (plain text, not the JSON error shape).
+- **Login gate.** Login works only for a `users.yaml` user, a principal named in `owners.yaml` (`layers:`, a pipeline
+  `owners:` block, or `auditors:`), or a member of `PIPEROOM_AUTH_VIEWER_GROUPS`; else `403 not_provisioned`.
+- **Roles.** `member` (a `users.yaml` user, or a `user:`/`group:` in `layers:` or a pipeline `owners:` block as
+  approver or backup) may act; rights to approve still come from layer ownership. `viewer` (`PIPEROOM_AUTH_VIEWER_GROUPS`, or an `auditors:`-only principal): GET (not export) and
   WebSocket only; every non-GET under `/api` → `403 viewer`. An `auditors:` principal may also export.
+- **Solo mode.** With `PIPEROOM_SOLO_USER`, that user may approve every layer; each approve also sends
+  `confirm: "<pipeline_id>/<layer>"`, and the approval records `grant: "solo"`.
 - **Proxy guard (dev mode).** `POST /auth/dev-login` on a request carrying `X-User`, or a request with a session
   cookie plus an `X-User` naming a different user → `403 proxy_identity`. A reverse proxy needs
   `PIPEROOM_AUTH_MODE=oidc` (or the git tag `pre-auth`).
@@ -62,13 +70,15 @@ The X-User stub above stays until auth PR 2. After it:
 
 | HTTP | code examples |
 |---|---|
-| 400 | `bad_request`, `validation` |
-| 401 | `unauthenticated` |
-| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export) |
+| 400 | `bad_request`, `validation`; after auth PR 3: `login_expired` (login cookie or row missing/expired at `/auth/callback`) |
+| 401 | `unauthenticated`; after auth PR 2: `session_expired` (no, revoked or expired session — the web app goes to `/auth/login?return=…`) |
+| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export), `not_provisioned` (login gate) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB) |
 | 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; after auth PR 4: `params_mismatch` |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list) |
+| 429 | after auth PR 3: `/auth/login` over 300 per minute per client |
+| 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working) |
 
 Text a person types (titles, comments, steers, resolutions, trace keys, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD).
 
@@ -99,7 +109,7 @@ trace or activity feed** — to render a room, the client replays the full event
   "driver": { "id": "arjun", "name": "Arjun", "lease_until": "..." },
   "agent_status": { "state": "working", "detail": "step 6" },     // "idle" for a new room; states: working | idle | done | waiting_approval | queued ("waiting for an agent slot (N ahead)" when PIPEROOM_MAX_AGENTS runs are busy)
   "hypothesis": { "text": "...", "based_on_steps": ["s_3","s_4"], "confidence": "high", "confirmed": false },
-  "open_proposals": [ { "proposal_id": "p_01J...", "title": "...", "steps": [], "risk": "...", "rollback": "...",
+  "open_proposals": [ { "proposal_id": "p_01J...", "title": "...", "steps": [], "risk": "...", "rollback": "...",   // after auth PR 4 also "params_hash"
                         "required_layers": ["schema-registry","kafka-connect"],
                         "approvals": { "schema-registry": "approved", "kafka-connect": "pending" } } ],
   "pending_suggestions": [ { "suggestion_id": "g_01J...", "from": {"id":"kabir","name":"Kabir"}, "text": "..." } ],
@@ -136,9 +146,9 @@ IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_
 | POST | `/api/rooms/{id}/control/request` | – | `Event` | |
 | POST | `/api/rooms/{id}/control/grant` | `{to}` | `Event` | driver only, or anyone if no driver / lease expired |
 | POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only |
-| POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}` | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step. After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` |
+| POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step. After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode) |
 | POST | `/api/proposals/{pid}/reject` | `{layer, reason}`; after auth PR 4 `{layer, reason, params_hash}` | `Event` | same hash rule as approve |
-| GET | `/api/rooms/{id}/export` | – | the room as one JSON document | header `X-Piperoom-Export-SHA256` = SHA-256 of the RFC 8785 (JCS) form without the top-level `integrity` member. Today any user may export. After auth PR 4: only layer owners (approvers) of the room's pipeline and `auditors:` principals; others → `403 not_allowed`. Proposals, approvals and action results then carry `params_hash` |
+| GET | `/api/rooms/{id}/export` | – | the room as one JSON document | header `X-Piperoom-Export-SHA256` = SHA-256 of the RFC 8785 (JCS) form without the top-level `integrity` member. Today any user may export. After auth PR 4: only an approver or backup for any layer of the room's pipeline (in dev mode: `users.yaml` `layers`) or an `auditors:` principal; the driver is not on the list; others → `403 not_allowed`. Proposals, approvals and action results then carry `params_hash`, and approvals also `identity` |
 | POST | `/api/rooms/{id}/handoffs` | `{to, stay_as_watcher}` | `Event` | driver only; server asks the agent for the summary (can take up to 3 min; this route is exempt from the 60 s request timeout) |
 | POST | `/api/handoffs/{hid}/accept` | – | `Event` | only the `to` user; moves driver role |
 | GET | `/api/pipelines/{pid}/topology` | – | `Topology` | unknown pipeline → `404 not_found` |

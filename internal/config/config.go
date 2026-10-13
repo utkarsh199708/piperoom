@@ -53,7 +53,7 @@ type Config struct {
 	// Slack mirror of rooms. Off unless both token and channel are set.
 	SlackBotToken  string // SLACK_BOT_TOKEN (secret)
 	SlackChannelID string // SLACK_CHANNEL_ID
-	PublicURL      string // PIPEROOM_PUBLIC_URL: base URL for room links in Slack; empty = no links
+	PublicURL      string // PIPEROOM_PUBLIC_URL: base URL for Slack room links, the WS origin, and (auth) the OIDC redirect URI and Host allow-list
 
 	// Warehouse kind. "postgres" (default) uses WAREHOUSE_DB_URL as a Postgres URL;
 	// "snowflake" uses it as a gosnowflake DSN.
@@ -302,7 +302,9 @@ func parseWatchDuration(name, v, def string) (time.Duration, error) {
 }
 
 // getSet is get, except that a variable set to "" keeps "" (for settings
-// where empty means off, like PIPEROOM_OIDC_GROUPS_CLAIM).
+// where empty means off, like PIPEROOM_OIDC_GROUPS_CLAIM). Compose files must
+// not pass such a variable as ${VAR:-} (that sets ""); use ${VAR-default} or
+// leave it out.
 func getSet(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok {
 		return v
