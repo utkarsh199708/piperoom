@@ -60,7 +60,7 @@ function registered(user: CurrentUser, state: RoomState): RoomCommands | null {
     conn: 'live',
     error: null,
     actions,
-    stale: false,
+    stale: null,
     dismissStale: vi.fn(),
     reload: vi.fn(),
   })

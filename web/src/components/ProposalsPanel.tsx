@@ -13,11 +13,11 @@ import type { CurrentUser } from '../state/permissions'
 import { canDecideLayer } from '../state/permissions'
 import { soloConfirmText } from '../lib/solo'
 import { describeIdentity, identityDetails, shortHash } from '../lib/hash'
-import { initials, personColor } from '../lib/people'
 import { clockTime, timeAgo } from '../lib/time'
 import { cn } from '@/lib/utils'
-import type { RoomActions } from '../hooks/useRoom'
-import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import type { RoomActions, StaleInfo } from '../hooks/useRoom'
+import { isEditableTarget } from './shell/keys'
+import { PersonAvatar } from './room/PersonAvatar'
 import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -72,11 +72,16 @@ function riskVariant(risk: string): 'success' | 'warning' | 'destructive' | 'neu
   }
 }
 
-function isTypingTarget(target: EventTarget | null): boolean {
-  return (
-    target instanceof HTMLElement &&
-    target.closest('input, textarea, select, [contenteditable=""], [contenteditable="true"], [role="textbox"], [role="combobox"]') !== null
-  )
+// Keys A and R stay out of the way of anything that owns the keyboard right now: a field, or an
+// open overlay (solo dialog, command menu, hand-off dialog, the account menu, a select list).
+const OVERLAY_OPEN = '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]'
+
+function keyIsForTheCard(e: KeyboardEvent): boolean {
+  if (e.defaultPrevented || e.repeat || e.isComposing) return false
+  if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return false
+  if (isEditableTarget(e.target)) return false
+  if (e.target instanceof Element && e.target.closest('[role="textbox"], [role="combobox"]')) return false
+  return document.querySelector(OVERLAY_OPEN) === null
 }
 
 function StepParams({ params }: { params: unknown }) {
@@ -233,6 +238,7 @@ function SoloConfirmDialog({
   rejected,
   onConfirm,
   onCancel,
+  onClosed,
 }: {
   proposal: ProposalState
   layer: string
@@ -242,6 +248,8 @@ function SoloConfirmDialog({
   rejected: boolean
   onConfirm: (typed: string) => void
   onCancel: () => void
+  /** The dialog has closed: put focus back (Radix would use the element focused when it opened). */
+  onClosed: () => void
 }) {
   const [typed, setTyped] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -264,6 +272,10 @@ function SoloConfirmDialog({
         onOpenAutoFocus={(e) => {
           e.preventDefault()
           inputRef.current?.focus()
+        }}
+        onCloseAutoFocus={(e) => {
+          e.preventDefault()
+          onClosed()
         }}
       >
         <form
@@ -341,16 +353,6 @@ function SoloConfirmDialog({
   )
 }
 
-function PersonAvatar({ id, name }: { id: string; name: string }) {
-  return (
-    <Avatar className="size-5" aria-hidden="true">
-      <AvatarFallback className="text-[9px]" style={{ backgroundColor: personColor(id) }}>
-        {initials(name)}
-      </AvatarFallback>
-    </Avatar>
-  )
-}
-
 // One row of the approval matrix: a layer, who decided it (grant and method), when, and for
 // the layer you own, the buttons.
 function LayerRow({
@@ -361,8 +363,8 @@ function LayerRow({
   pipelineId,
   shortcuts,
   noHashNoteId,
+  headingId,
   onSolo,
-  onMismatch,
 }: {
   proposal: ProposalState
   layer: string
@@ -372,16 +374,25 @@ function LayerRow({
   /** This row's buttons answer to A and R (the first layer you can decide). */
   shortcuts: boolean
   noHashNoteId: string
+  /** The card heading: focus goes there when the Approve button is gone after the dialog closes. */
+  headingId: string
   /** The server asked for a solo confirm: the panel shows the solo banner. */
   onSolo: () => void
-  /** 409 params_mismatch on approve: the hash that was on screen. */
-  onMismatch: (looked: string) => void
 }) {
   const [rejecting, setRejecting] = useState(false)
   const [reason, setReason] = useState('')
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
   const [refused, setRefused] = useState(false)
+  const approveRef = useRef<HTMLButtonElement>(null)
+
+  // After the solo dialog closes focus goes back to Approve. On the server-asks path Approve was
+  // disabled while the call ran, so the browser had already dropped focus to the page body.
+  const restoreFocus = () => {
+    const button = approveRef.current
+    if (button && !button.disabled) button.focus()
+    else document.getElementById(headingId)?.focus()
+  }
 
   // Not solo (as far as we know): the first approve goes without `confirm`, and a
   // 400 "solo mode:" answer opens the box. Solo (`/api/me.solo`): the box opens
@@ -399,10 +410,10 @@ function LayerRow({
         ...(confirm !== undefined ? { confirm } : {}),
       })
       if (res?.mismatch) {
-        // Stale screen: close the box. No retry; the room is reloading.
+        // Stale screen: close the box. No retry; the room is reloading, and the hook keeps
+        // what the person looked at for the card to show afterwards.
         setConfirming(false)
         setRefused(false)
-        onMismatch(proposal.params_hash)
       } else if (res?.needsConfirm) {
         onSolo()
         setRefused(confirm !== undefined)
@@ -442,11 +453,9 @@ function LayerRow({
   useEffect(() => {
     if (!shortcuts) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.repeat || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return
       const key = e.key.toLowerCase()
       if (key !== 'a' && key !== 'r') return
-      // Never inside a field, and not while a dialog (solo confirm, command menu, hand-off) is open.
-      if (isTypingTarget(e.target) || document.querySelector('[role="dialog"]')) return
+      if (!keyIsForTheCard(e)) return
       if (latest.current(key)) e.preventDefault()
     }
     window.addEventListener('keydown', onKey)
@@ -479,7 +488,7 @@ function LayerRow({
             {decidedAt && ` at ${decidedAt}`}
           </span>
           <span className="inline-flex min-w-0 items-center gap-2.5" aria-hidden="true">
-            <PersonAvatar id={decision.by.id} name={decidedName} />
+            <PersonAvatar actor={{ id: decision.by.id, name: decidedName }} size={20} />
             <span className="font-medium">{decidedName}</span>
             {decision.identity?.grant && (
               <span className="font-mono text-xs text-subtle-foreground">{decision.identity.grant}</span>
@@ -507,7 +516,7 @@ function LayerRow({
         </>
       ) : canDecide ? (
         <>
-          <PersonAvatar id={user.id} name={user.name} />
+          <PersonAvatar actor={{ id: user.id, name: user.name }} size={20} />
           <span className="font-medium">{user.name}</span>
           <span className="text-xs text-muted-foreground">you</span>
           {/* muted, not subtle: subtle text is 4.2:1 on the amber tint of this row */}
@@ -530,6 +539,7 @@ function LayerRow({
           <Button
             variant="success"
             size="sm"
+            ref={approveRef}
             disabled={busy || !hashed}
             aria-describedby={hashed ? undefined : noHashNoteId}
             aria-keyshortcuts={shortcuts ? 'A' : undefined}
@@ -595,6 +605,7 @@ function LayerRow({
             setConfirming(false)
             setRefused(false)
           }}
+          onClosed={restoreFocus}
         />
       )}
     </div>
@@ -659,6 +670,7 @@ function Proposal({
   actions,
   pipelineId,
   shortcutLayer,
+  sentHash,
   onSolo,
 }: {
   proposal: ProposalState
@@ -667,13 +679,15 @@ function Proposal({
   pipelineId: string
   /** The layer whose buttons answer to A and R in this card, if any. */
   shortcutLayer: string | undefined
+  /** The hash the person looked at when the server answered 409 for this proposal (kept by useRoom). */
+  sentHash: string | null
   onSolo: () => void
 }) {
   const titleId = useId()
   const noteId = useId()
-  // The hash the person was looking at when the server said 409. Kept so the card can say
-  // "you looked at X, the server now has Y" once the room has reloaded.
-  const [looked, setLooked] = useState<string | null>(null)
+  // "Got it" hides the note for one stale hash. The note itself comes from `sentHash`, which
+  // useRoom keeps across the room reload (this card is unmounted while the room loads).
+  const [acknowledged, setAcknowledged] = useState<string | null>(null)
 
   const mine = proposal.required_layers.filter((l) => canDecideLayer(proposal, user, l))
   const open = proposal.status === 'open'
@@ -694,7 +708,7 @@ function Proposal({
       <div className="flex flex-col gap-3 px-3.5 pb-3 pt-3.5">
         <div className="flex flex-wrap items-start gap-2.5">
           <div className="flex min-w-0 flex-1 basis-80 flex-col gap-1">
-            <h3 id={titleId} className="text-lg font-semibold [text-wrap:balance]">
+            <h3 id={titleId} tabIndex={-1} className="text-lg font-semibold outline-none [text-wrap:balance]">
               {proposal.title}
             </h3>
             {(proposal.risk || proposal.rollback) && (
@@ -761,13 +775,13 @@ function Proposal({
           </p>
         )}
 
-        {looked !== null && hashed && looked !== proposal.params_hash && (
+        {sentHash && hashed && sentHash !== proposal.params_hash && acknowledged !== sentHash && (
           <div className="flex flex-wrap items-center gap-2 text-muted-foreground">
             <span>You looked at</span>
-            <HashPill hash={looked} struck />
+            <HashPill hash={sentHash} struck />
             <span>· server now has</span>
             <HashPill hash={proposal.params_hash} />
-            <Button variant="ghost" size="sm" className="ml-auto h-6 px-1.5 text-xs" onClick={() => setLooked(null)}>
+            <Button variant="ghost" size="sm" className="ml-auto h-6 px-1.5 text-xs" onClick={() => setAcknowledged(sentHash)}>
               Got it
             </Button>
           </div>
@@ -786,8 +800,8 @@ function Proposal({
             pipelineId={pipelineId}
             shortcuts={shortcutLayer === layer}
             noHashNoteId={noteId}
+            headingId={titleId}
             onSolo={onSolo}
-            onMismatch={setLooked}
           />
         ))}
       </div>
@@ -800,18 +814,19 @@ export function ProposalsPanel({
   state,
   user,
   actions,
+  stale = null,
 }: {
   state: RoomState
   user: CurrentUser
   actions: RoomActions
+  /** From useRoom: the 409 that is being shown, if any. Survives the room reload. */
+  stale?: StaleInfo | null
 }) {
   const proposals = state.proposals
-  const headingId = useId()
   // `/api/me.solo` says so up front; on an older server the first approve that
   // asks for a confirm tells us.
   const [soloSeen, setSoloSeen] = useState(false)
   const solo = user.solo === true || soloSeen
-  const openCount = proposals.filter((p) => p.status === 'open').length
 
   // A and R belong to one row at a time: the first layer you can decide, in the first such proposal.
   let shortcutKey = ''
@@ -824,13 +839,7 @@ export function ProposalsPanel({
   }
 
   return (
-    <section className="flex flex-col gap-2.5 text-sm" aria-labelledby={headingId}>
-      <h2 id={headingId} className="flex items-center gap-1.5 text-sm font-medium">
-        Proposals
-        <span className="font-mono text-[11px] font-medium text-subtle-foreground">
-          {openCount > 0 ? `${openCount} open` : proposals.length}
-        </span>
-      </h2>
+    <section className="flex flex-col gap-2.5 text-sm" aria-label="Proposals">
       {solo && (
         <p
           className="flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-md bg-warning-subtle px-3 py-1.5 text-sm font-medium text-warning-foreground"
@@ -854,6 +863,7 @@ export function ProposalsPanel({
               user={user}
               actions={actions}
               pipelineId={state.pipeline_id}
+              sentHash={stale?.proposalId === p.proposal_id ? stale.sentHash : null}
               shortcutLayer={shortcutKey.startsWith(`${p.proposal_id}/`) ? shortcutKey.slice(p.proposal_id.length + 1) : undefined}
               onSolo={() => setSoloSeen(true)}
             />

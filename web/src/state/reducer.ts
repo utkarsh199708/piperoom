@@ -286,6 +286,9 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
 
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(event)
+      // A second proposal.created with the same id (a replay over a snapshot, a retry) is
+      // ignored: the first one stays, with the decisions it already collected.
+      if (state.proposals.some((x) => x.proposal_id === p.proposal_id)) break
       const approvals: Record<string, 'pending'> = {}
       for (const layer of p.required_layers ?? []) approvals[layer] = 'pending'
       next = {

@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { toast } from 'sonner'
 import { ProposalsPanel } from './ProposalsPanel'
 import { StaleBanner } from './StaleBanner'
-import type { RoomActions } from '../hooks/useRoom'
+import { hideStaleToast, showStaleToast } from '../lib/staleToast'
+import type { RoomActions, StaleInfo } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
 import { emptyRoomState } from '../state/types'
 import type { ProposalState } from '../state/types'
@@ -71,8 +73,8 @@ const proposal: ProposalState = {
   executed: [],
 }
 const roomWith = (p: ProposalState) => ({ ...emptyRoomState('r1'), pipeline_id: 'orders', proposals: [p] })
-const show = (user: CurrentUser, p: ProposalState = proposal) =>
-  render(<ProposalsPanel state={roomWith(p)} user={user} actions={actions} />)
+const show = (user: CurrentUser, p: ProposalState = proposal, stale: StaleInfo | null = null) =>
+  render(<ProposalsPanel state={roomWith(p)} user={user} actions={actions} stale={stale} />)
 
 beforeEach(() => {
   approve.mockReset()
@@ -151,6 +153,16 @@ describe('the approval moment', () => {
   })
 })
 
+describe('the panel', () => {
+  it('has no heading of its own (the room rail has it) and is a labelled region', () => {
+    show(arjun)
+    expect(screen.getByRole('region', { name: 'Proposals' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: /^Proposals/ })).not.toBeInTheDocument()
+    // The card heading is still there.
+    expect(screen.getByRole('heading', { level: 3 })).toHaveTextContent(/Set subject compatibility/)
+  })
+})
+
 describe('keys A and R', () => {
   it('A approves the layer you own with the hash on screen', async () => {
     approve.mockResolvedValue({ ok: true })
@@ -192,6 +204,42 @@ describe('keys A and R', () => {
     expect(approve).not.toHaveBeenCalled()
   })
 
+  it('do nothing while an open menu (the account menu) owns the keyboard', async () => {
+    show(arjun)
+    render(
+      <DropdownMenu open>
+        <DropdownMenuTrigger>Account</DropdownMenuTrigger>
+        <DropdownMenuContent>
+          <DropdownMenuItem>Sign out</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>,
+    )
+    expect(await screen.findByRole('menu')).toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'a' })
+    fireEvent.keyDown(window, { key: 'r' })
+    expect(approve).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('Rejection reason for kafka-connect')).not.toBeInTheDocument()
+  })
+
+  it.each(['alertdialog', 'listbox'])('do nothing while a %s is open', (role) => {
+    show(arjun)
+    const overlay = document.createElement('div')
+    overlay.setAttribute('role', role)
+    document.body.appendChild(overlay)
+    fireEvent.keyDown(window, { key: 'a' })
+    fireEvent.keyDown(window, { key: 'r' })
+    expect(approve).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('Rejection reason for kafka-connect')).not.toBeInTheDocument()
+    overlay.remove()
+  })
+
+  it('ignore key repeat and IME composition', () => {
+    show(arjun)
+    fireEvent.keyDown(window, { key: 'a', repeat: true })
+    fireEvent.keyDown(window, { key: 'a', isComposing: true })
+    expect(approve).not.toHaveBeenCalled()
+  })
+
   it('A does nothing without a hash', () => {
     show(arjun, { ...proposal, params_hash: '' })
     fireEvent.keyDown(window, { key: 'a' })
@@ -230,19 +278,97 @@ describe('the solo confirm dialog', () => {
 
   it('a params_mismatch closes the dialog, shows what was looked at and is not retried', async () => {
     approve.mockResolvedValue({ ok: false, mismatch: true })
-    const { rerender } = show(soloUser)
+    const first = show(soloUser)
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
     fireEvent.change(screen.getByLabelText(/Solo mode: type/), { target: { value: 'orders/kafka-connect' } })
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Approve' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect(approve).toHaveBeenCalledTimes(1)
-    // The room reloads: the card now has the server's hash, and says what changed under the person.
-    rerender(<ProposalsPanel state={roomWith({ ...proposal, params_hash: NEW_HASH })} user={soloUser} actions={actions} />)
+    // The room reloads: the whole panel is unmounted ("Loading room…") and comes back with the
+    // server's hash. useRoom kept what the person looked at; the card says what changed under them.
+    first.unmount()
+    show(soloUser, { ...proposal, params_hash: NEW_HASH }, { proposalId: 'p1', sentHash: HASH })
     expect(screen.getByText('You looked at')).toBeInTheDocument()
     expect(screen.getByText('9f2c 1e7a … 0a1b').closest('span[title]')).toHaveClass('line-through')
     // The server's hash shows in the fingerprint row and in this note.
     expect(screen.getAllByText('b31d 77e0 … 4c92')).toHaveLength(2)
     expect(approve).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the stale note', () => {
+  it('is not shown while the card still has the hash that was sent, or for another proposal', () => {
+    const { unmount } = show(arjun, proposal, { proposalId: 'p1', sentHash: HASH })
+    expect(screen.queryByText('You looked at')).not.toBeInTheDocument()
+    unmount()
+    show(arjun, { ...proposal, params_hash: NEW_HASH }, { proposalId: 'other', sentHash: HASH })
+    expect(screen.queryByText('You looked at')).not.toBeInTheDocument()
+  })
+
+  it('"Got it" hides it', () => {
+    show(arjun, { ...proposal, params_hash: NEW_HASH }, { proposalId: 'p1', sentHash: HASH })
+    fireEvent.click(screen.getByRole('button', { name: 'Got it' }))
+    expect(screen.queryByText('You looked at')).not.toBeInTheDocument()
+  })
+})
+
+describe('focus after the solo dialog', () => {
+  it('goes back to Approve when the person had clicked it (solo user, dialog opens at once)', async () => {
+    show({ ...arjun, solo: true })
+    const approveButton = screen.getByRole('button', { name: 'Approve' })
+    approveButton.focus()
+    fireEvent.click(approveButton)
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /Cancel/ }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toHaveFocus())
+  })
+
+  it('goes back to Approve when the server asked for the confirm (Approve was disabled while it ran)', async () => {
+    let answer: (v: unknown) => void = () => undefined
+    approve.mockReturnValueOnce(new Promise((r) => (answer = r)))
+    show(arjun)
+    const approveButton = screen.getByRole('button', { name: 'Approve' })
+    approveButton.focus()
+    fireEvent.click(approveButton)
+    // While the call runs Approve is off, and a disabled button gives up focus.
+    expect(approveButton).toBeDisabled()
+    // (A browser drops focus on its own; jsdom does not, so do it by hand.)
+    approveButton.removeAttribute('disabled')
+    approveButton.blur()
+    expect(document.body).toHaveFocus()
+    answer({ ok: false, needsConfirm: true })
+    const dialog = await screen.findByRole('dialog')
+    expect(screen.getByLabelText(/Solo mode: type/)).toHaveFocus()
+    fireEvent.click(within(dialog).getByRole('button', { name: /Cancel/ }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Approve' })).toHaveFocus())
+  })
+
+  it('goes to the card heading when Approve is gone', async () => {
+    approve.mockResolvedValueOnce({ ok: false, needsConfirm: true })
+    const state = roomWith(proposal)
+    const { rerender } = render(<ProposalsPanel state={state} user={arjun} actions={actions} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    const dialog = await screen.findByRole('dialog')
+    // The decision lands while the dialog is open: this layer has no buttons any more.
+    approve.mockResolvedValueOnce({ ok: true })
+    const decided: ProposalState = {
+      ...proposal,
+      approvals: { 'schema-registry': 'approved', 'kafka-connect': 'approved' },
+      decisions: {
+        ...proposal.decisions,
+        'kafka-connect': {
+          outcome: 'approved',
+          by: { kind: 'human', id: 'arjun', name: 'Arjun' },
+          params_hash: HASH,
+          at: '2026-10-11T10:06:00Z',
+        },
+      },
+    }
+    rerender(<ProposalsPanel state={roomWith(decided)} user={arjun} actions={actions} />)
+    expect(dialog.isConnected).toBe(false)
+    await waitFor(() => expect(screen.getByRole('heading', { level: 3 })).toHaveFocus())
   })
 })
 
@@ -263,10 +389,18 @@ describe('executed steps', () => {
   })
 })
 
-describe('the stale 409 banner', () => {
+describe('the stale 409 banner and toast', () => {
+  it('mounting the banner raises no toast (useRoom raises it where the 409 happens)', () => {
+    const { unmount } = render(<StaleBanner onReload={vi.fn()} onDismiss={vi.fn()} />)
+    unmount()
+    render(<StaleBanner onReload={vi.fn()} onDismiss={vi.fn()} />)
+    expect(toast.warning).not.toHaveBeenCalled()
+    expect(toast.dismiss).not.toHaveBeenCalled()
+  })
+
   it('raises one Sonner toast with a Reload action, without retrying', () => {
     const onReload = vi.fn()
-    render(<StaleBanner onReload={onReload} onDismiss={vi.fn()} />)
+    showStaleToast(onReload)
     expect(toast.warning).toHaveBeenCalledTimes(1)
     const [title, options] = vi.mocked(toast.warning).mock.calls[0]
     expect(title).toBe('Proposal changed since you looked')
@@ -277,9 +411,8 @@ describe('the stale 409 banner', () => {
     expect(onReload).toHaveBeenCalledTimes(1)
   })
 
-  it('takes the toast down when the banner goes away', () => {
-    const { unmount } = render(<StaleBanner onReload={vi.fn()} onDismiss={vi.fn()} />)
-    unmount()
-    expect(toast.dismiss).toHaveBeenCalled()
+  it('takes the toast down by its id', () => {
+    hideStaleToast()
+    expect(toast.dismiss).toHaveBeenCalledWith('stale-params-mismatch')
   })
 })
