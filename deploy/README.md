@@ -6,21 +6,39 @@ database, Kafka, Kafka Connect, Schema Registry, the warehouse, and `api.anthrop
 
 ## Read this first: network exposure
 
-Piperoom has **no real login yet**. A user is whoever the `X-User` header says. Anyone who can
-reach the port can act as any user, **including approving fixes**. So:
+Piperoom has **no real login yet**. The image runs in **dev auth mode**
+(`PIPEROOM_AUTH_MODE=dev`): you open the UI and pick a user from `users.yaml`. There is no
+password. Anyone who can reach the port can pick any user, **including approving fixes**.
+Real login (OIDC, `PIPEROOM_AUTH_MODE=oidc`) arrives in auth PR 3 and is **not live yet**.
+So:
 
-- Run it behind the customer's **VPN** or an **authenticating reverse proxy**. Never publish
+- Pilots build from source with `deploy/docker-compose.pilot.yml`. Proxy pilots build from the git tag `pre-auth` until PR 3.
+- Run it on a laptop, behind the customer's **VPN**, or behind an SSH tunnel. Never publish
   it to the internet.
-- A proxy that does the authenticating must control **both** places where the server reads
-  the identity: the `X-User` header (set it itself, strip any client value) **and** the
-  `?user=` query parameter on the WebSocket route `/api/rooms/{id}/ws`, because browsers
-  cannot send headers on a WebSocket. Force `user` to the authenticated user there, or
-  reject requests whose `user` differs. Otherwise a logged-in person can watch a room
-  as someone else.
-- Inside the container the server must listen on `0.0.0.0`, so the image starts it with
-  `--allow-remote` (the server refuses non-loopback addresses without it).
+- **An authenticating reverse proxy needs `PIPEROOM_AUTH_MODE=oidc`, so it is not a
+  supported setup on this version.** Dev mode cannot trust an identity header from a proxy:
+  the browser logs in with its own cookie, which a proxy cannot force, and a request that
+  carries `X-User` together with a cookie for another user (or calls `/auth/dev-login`)
+  gets `403 proxy_identity`. A pilot that already runs behind a proxy that sets `X-User`
+  and forces `?user=` must stay on the git tag `pre-auth` (`git checkout pre-auth`, then
+  rebuild with `up -d --build`) until PR 3 lands. Do not upgrade it to this version.
+- Inside the container the server must listen on `0.0.0.0`, so the image sets
+  `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (dev mode refuses a non-loopback address without it
+  and logs a loud warning when it is on). The old `--allow-remote` flag still works for one
+  release but is deprecated; use the variable.
 - The compose file publishes the port on `127.0.0.1` only. To let other machines reach it, set
   `PIPEROOM_BIND` in `deploy/.env` to the host's VPN address (better) or `0.0.0.0`.
+- **Host check.** The server answers `421 bad_host` to a request whose `Host` header is not
+  a loopback name (any port), the host of `PIPEROOM_PUBLIC_URL`, or a value in
+  `PIPEROOM_ALLOWED_HOSTS`. The allow-list counts in every mode. In dev mode the
+  `PIPEROOM_PUBLIC_URL` host counts only with `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`, which the
+  image sets. Set `PIPEROOM_ALLOWED_HOSTS`
+  (comma-separated, `host` or `host:port`, compared as written) when a tunnel or proxy
+  rewrites `Host`, for example an SSH tunnel to `localhost:9000`, or a name the VPN uses
+  for the machine. The signed alert routes `POST /api/alerts/{source}` skip this check
+  (see [Alerts](#alerts)); the unsigned dev webhook does not.
+- **Export.** Today any user in `users.yaml` may export a room. From auth PR 4, members
+  who are not owners or auditors cannot export and must be added to `auditors:`.
 
 More limits: [docs/pilot/README.md](../docs/pilot/README.md#read-this-first-pilot-limits).
 
@@ -75,7 +93,11 @@ Run these from the repository root.
    Add `-d` to run in the background.
 
 5. **Open it:** `http://<host>:8090` (`http://localhost:8090` on the same machine; with the
-   default `PIPEROOM_BIND` that is the only place it works). Pick a user from `users.yaml`.
+   default `PIPEROOM_BIND` that is the only place it works). The login screen lists the users
+   from `users.yaml`: pick one. That is the **dev login**; the page sets a session cookie
+   (`piperoom_session`) and the user switcher in the UI changes user later. There are no more
+   `?user=` links: a link cannot choose the user. Behind an SSH tunnel to a different port,
+   or by a name other than `localhost`, set `PIPEROOM_ALLOWED_HOSTS` (see the Host check above).
 
 ## Check that it works
 
@@ -85,6 +107,21 @@ curl http://localhost:8090/healthz                                # {"status":"o
 curl http://localhost:8090/readyz                                 # also checks the room database
 curl -H 'X-User: alice' http://localhost:8090/api/me              # your user, from users.yaml
 docker compose -f deploy/docker-compose.pilot.yml logs -f piperoom
+```
+
+**Using curl in dev mode.** Every `POST` needs `-H 'Content-Type: application/json'`, except
+the signed `POST /api/alerts/{source}` routes, which take the sender's own content type.
+Without it the server answers `400 bad_request` (this is part of the browser-request
+protection). curl may still send `X-User: <id>` when it sends no cookie; that works only in
+dev mode. Send exactly one `X-User` value: more than one (several header lines, or one line
+with a comma) answers `403 proxy_identity`, with or without a cookie. If you send a session
+cookie too, the `X-User` must name the same user, or the answer is `403 proxy_identity`.
+In `oidc` mode `X-User` is ignored.
+
+```sh
+curl -X POST -H 'X-User: alice' -H 'Content-Type: application/json' \
+  -d '{"title":"test","severity":"sev2","pipeline_id":"<pipeline id>"}' \
+  http://localhost:8090/api/rooms
 ```
 
 Then follow [docs/pilot/setup.md](../docs/pilot/setup.md#5-verify-with-a-dry-run-no-real-alert-needed)
@@ -97,8 +134,9 @@ Alert senders call the signed routes `POST /api/alerts/{source}`, where `{source
 `deploy/.env` (section 10 of the file); a source with an empty secret answers 401. Sender
 setup for each system is in [internal/alertin/README.md](../internal/alertin/README.md).
 
-These routes have **no `X-User`**: the sender's token or signature is the login. That matters
-behind a proxy:
+These routes have **no `X-User`** and no session cookie: the sender's token or signature is the
+login. They also **skip the Host check**, because the signature is their protection and
+in-cluster senders often use an internal DNS name. That matters behind a proxy:
 
 - If the proxy requires a login for everything, it must let `POST /api/alerts/<source>` through
   without one. PagerDuty, Datadog and Grafana Cloud cannot log in to your proxy.
@@ -201,13 +239,13 @@ from 0 to 36500; anything else stops the server at start-up.
 Deletion cannot be undone. If you must keep a room, export it before it ages out:
 
 ```sh
-curl -H 'X-User: alice' http://localhost:8090/api/rooms/<room id>/export > room.json
+curl -H 'X-User: alice' http://localhost:8090/api/rooms/<room id>/export > room.json   # dev mode
 ```
 
 The export carries a SHA-256 over the JCS (RFC 8785) form of the room with the top-level
 `integrity` member removed (also sent in the `X-Piperoom-Export-SHA256` header), so a plain
 `sha256sum` of the file will not match it. Use it to check later that the file was not changed.
-Any user in `users.yaml` may export.
+Today any user in `users.yaml` may export. From auth PR 4, members who are not owners or auditors cannot export and must be added to `auditors:`.
 
 ## Watcher
 
@@ -226,7 +264,7 @@ No database, keys or data stack needed. Scripted agent, in-memory, nothing is sa
 docker compose -f deploy/docker-compose.pilot.yml run --rm --no-deps --service-ports piperoom --demo
 ```
 
-`--no-deps` keeps the bundled Postgres from starting; the image already adds `--allow-remote`.
+`--no-deps` keeps the bundled Postgres from starting; the image already sets `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`.
 Demo mode still needs:
 
 - `deploy/.env` with `PIPEROOM_POSTGRES_PASSWORD` set to any value (compose refuses to read
@@ -246,12 +284,15 @@ It needs no API key and no data stack. Do not use demo mode for a real incident.
 | Runs as | uid 65532 (`nonroot`), read-only root filesystem in compose, all capabilities dropped |
 | Listens on | `0.0.0.0:8090` (`PIPEROOM_HTTP_ADDR`); the UI is served from `/web` (`PIPEROOM_WEB_DIR`) at `/`, the API at `/api` |
 | Health | `HEALTHCHECK` runs `/piperoom --healthcheck`, which calls `GET /healthz` (distroless has no curl). `GET /readyz` also checks the room database, and suits a load balancer or Kubernetes readiness probe |
-| Browser rules | The UI calls the API and WebSocket on its own origin, so no CORS setup is needed (CORS and the `localhost:5173` dev origins are off when the server serves the UI). The server sends a CSP, `X-Content-Type-Options`, `Referrer-Policy` and `frame-ancestors 'none'` |
+| Auth | `PIPEROOM_AUTH_MODE=dev` and `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` are set in the image (dev login, no password; see the top of this file) |
+| Browser rules | The UI calls the API and WebSocket on its own origin, so there is no CORS at all (the server sends no `Access-Control-*` headers). Cross-origin browser `POST`s are refused with `403`. The server sends a CSP, `X-Content-Type-Options`, `Referrer-Policy` and `frame-ancestors 'none'` |
 
 Build the image alone: `docker build -t piperoom:pilot .`
 
-Behind a reverse proxy that changes the `Host` header, set `PIPEROOM_PUBLIC_URL` (for example
-`https://piperoom.corp.example`) so WebSocket connections from that address are accepted.
+Behind a reverse proxy that changes the `Host` header (an oidc setup, from auth PR 3), set
+`PIPEROOM_PUBLIC_URL` (for example `https://piperoom.corp.example`) so WebSocket connections
+from that address are accepted, and `PIPEROOM_ALLOWED_HOSTS` for any other `Host` value the
+proxy sends.
 It must be a plain `http(s)` URL with a host name or IPv4 address (no wildcard, user name or
 query); anything else stops the server at start-up with an error that names the variable.
 The proxy must pass WebSocket upgrades on `/api/rooms/<id>/ws`.
@@ -280,6 +321,10 @@ room. A fix that was approved but not finished is marked failed, not re-run
 | Exits with `PIPEROOM_WEB_DIR ... has no index.html` | the image was built without the UI; rebuild with `up --build` |
 | Exits with `open the data stack` | a URL or login in `deploy/.env` is wrong or unreachable from the container |
 | Page does not load from another machine | `PIPEROOM_BIND` is still `127.0.0.1` |
+| `421 bad_host` | the `Host` header is not allowed: add it to `PIPEROOM_ALLOWED_HOSTS` (tunnel or proxy that rewrites `Host`) |
+| `403 proxy_identity` | in dev mode: more than one `X-User` value (several header lines, or a comma in one line), cookie or not; or `X-User` sent to `/auth/dev-login`; or `X-User` with a cookie for another user. A proxy needs `PIPEROOM_AUTH_MODE=oidc`; until PR 3, build from the git tag `pre-auth` |
+| `400 bad_request` on a curl `POST` | add `-H 'Content-Type: application/json'` (not needed on the signed `/api/alerts/{source}` routes) |
+| Exits with `refusing to listen on ... listen address is not loopback` | dev mode needs `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`. The image and the compose file set it, so you see this only if the variable is overridden with an empty value (for example `docker run -e PIPEROOM_DEV_ALLOW_NONLOOPBACK=`) or with a value other than `1` |
 | UI loads but live updates fail behind a proxy | the proxy does not pass WebSocket upgrades, or `PIPEROOM_PUBLIC_URL` is not set |
 | No agent answer | the model provider's credentials are missing, or egress to its API is blocked (behind a proxy, set `HTTPS_PROXY` and `NO_PROXY`) |
 | Exits at start with an error about the model provider, region, project or credentials | see [Model provider](#model-provider); the error names the setting |

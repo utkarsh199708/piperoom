@@ -60,7 +60,7 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 
 | Variable | Meaning |
 |---|---|
-| `PIPEROOM_HTTP_ADDR` | listen address of the room service. Default `127.0.0.1:8090`. Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. Any other host, including an empty host or `0.0.0.0`, is refused unless you pass `--allow-remote` (`cmd/server/listen.go:19-41`). The Docker image listens on `0.0.0.0` and passes `--allow-remote` (`Dockerfile:67`) |
+| `PIPEROOM_HTTP_ADDR` | listen address of the room service. Default `127.0.0.1:8090`. Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. Any other host, including an empty host or `0.0.0.0`, is refused in dev auth mode unless `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` is set (`cmd/server/listen.go`; the deprecated `--allow-remote` flag does the same). The Docker image listens on `0.0.0.0` and sets `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (`Dockerfile`) |
 | `PIPEROOM_DB_URL` | Piperoom's own database: room events, proposals, Slack thread state. Use a role that owns only this database. Migrated automatically at start-up |
 | `SOURCE_DB_URL` | source Postgres, the **read-only** role |
 | `WAREHOUSE_KIND` | `postgres` (default) or `snowflake`. Any other value stops the start (`internal/wiring/warehouse.go:50-60`). Read from `config.go:146` |
@@ -268,8 +268,8 @@ Rules of thumb:
 
 `cmd/server` is the room service: HTTP API, WebSocket, agent runner, the Slack mirror (if
 configured), the model endpoint, the web UI (if `PIPEROOM_WEB_DIR` is set) and the executor for
-approved fixes. It takes two flags, `--demo` and `--allow-remote` (see
-[Network exposure](#network-exposure)), and a third, `--healthcheck`, which probes `GET /healthz`
+approved fixes. It takes the flags `--demo` and `--healthcheck` (and the deprecated `--allow-remote`, an alias of
+`PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`; see [Network exposure](#network-exposure)). `--healthcheck` probes `GET /healthz`
 on `PIPEROOM_HTTP_ADDR` and exits 0 when it is healthy (`cmd/server/main.go:54`,
 `cmd/server/healthcheck.go:29`). The rest comes from the environment above.
 
@@ -308,8 +308,8 @@ go run ./cmd/server
 **The Docker path.** [deploy/README.md](../../deploy/README.md) builds one image with the server and
 the web UI, and starts it with a compose file that includes its own Postgres. It has its own
 10-minute path: copy `deploy/pilot.env.example` to `deploy/.env`, copy the two example YAML files
-under `deploy/config/`, then start the compose file. The image runs `/piperoom --allow-remote`
-(`Dockerfile:67`), and its health check calls `--healthcheck` (`Dockerfile:54`). The compose file
+under `deploy/config/`, then start the compose file. The image runs `/piperoom` with `PIPEROOM_AUTH_MODE=dev` and
+`PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` set in its environment (`Dockerfile`), and its health check calls `--healthcheck` (`Dockerfile:54`). The compose file
 publishes the port on `PIPEROOM_BIND`, which defaults to `127.0.0.1` (`deploy/docker-compose.pilot.yml:133`).
 Compose passes only the variables it lists; the list covers every setting in section 1 (see the compose
 note there).
@@ -324,24 +324,31 @@ Nothing in it touches your systems. **But demo mode does post to the real Slack 
 Unset them for a demo, or use a throwaway channel.
 
 **The web UI.** Run it from the source tree with `cd web && npm ci && npm run dev`. That serves it on
-`localhost:5173` (`web/package.json:7`) and calls `http://localhost:8090` by default
-(`web/src/api/client.ts:14`, override with `VITE_API_BASE`). Or set `PIPEROOM_WEB_DIR` to a built
-`web/dist` and the server serves the UI at `/` itself (step 7, `cmd/server/main.go:242-249`).
-CORS allows only the origin `http://localhost:5173` (`internal/httpapi/server.go:216`). WebSocket
-origins are `localhost:5173` and `127.0.0.1:5173` (`internal/ws/gateway.go:186-189`) when no web dir
-is set, and `PIPEROOM_PUBLIC_URL` is ignored for the WebSocket then. With `PIPEROOM_WEB_DIR` set, the
-dev origins are dropped, the request's own host is accepted, and the `PIPEROOM_PUBLIC_URL` host is
-added (`internal/httpapi/server.go:150-158`). These origin checks stop
-browsers only. A non-browser client is not blocked by them. A UI served from any other origin is
-blocked until a reverse proxy puts both under one origin.
+`localhost:5173` (`web/package.json:7`). The Vite dev server proxies `/api` (with the WebSocket)
+and `/auth` to the Go server at `http://127.0.0.1:8090`, so the browser sees one origin
+(`web/vite.config.ts`; override the target with `PIPEROOM_API`). Or set `PIPEROOM_WEB_DIR` to a
+built `web/dist` and the server serves the UI at `/` itself (step 7, `cmd/server/main.go`).
+There is no CORS: the server sends no `Access-Control-*` headers, and a cross-origin browser `POST`
+gets `403`. The WebSocket always accepts its own host, the `PIPEROOM_PUBLIC_URL` host and the
+`PIPEROOM_ALLOWED_HOSTS` entries. It adds `localhost:5173` and `127.0.0.1:5173` only when no web
+dir is set and the mode is not oidc (`wsOriginPatterns` in `internal/httpapi/server.go`). These
+origin checks stop browsers only. A non-browser client is not blocked by them. The
+server also checks the `Host` header (`421 bad_host`): loopback names are always allowed; set
+`PIPEROOM_ALLOWED_HOSTS` for a tunnel or proxy that rewrites `Host`.
 
-Verify startup: `curl -H 'X-User: <user id>' http://127.0.0.1:8090/api/me` returns that user.
-The same call with an unknown id returns `401` (`internal/httpapi/server.go:190-206`).
+Log in by opening the UI and picking a user from `users.yaml` (dev login: no password, a session
+cookie; there are no `?user=` links). To check startup from the shell:
+`curl -H 'X-User: <user id>' http://127.0.0.1:8090/api/me` returns that user. This `X-User` form
+works only in dev mode and only when the request carries no session cookie. The same call with an
+unknown id returns `401`. Every `POST` from curl needs `-H 'Content-Type: application/json'`
+(else `400`), except the signed `POST /api/alerts/{source}` routes, which take the sender's own
+content type. In dev mode more than one `X-User` value (several header lines, or a comma in one
+line) answers `403 proxy_identity`.
 
 ### Routes you need
 
-All under `/api`, all JSON, and all (except the WebSocket) require `X-User`
-(`internal/httpapi/server.go:111-149`; the full contract is `docs/api.md`):
+All under `/api`, all JSON, and all need a logged-in user: the session cookie, or in dev mode `X-User`
+when curl sends no cookie. The signed alert routes need neither. (The full contract is `docs/api.md`.)
 
 | Purpose | Route |
 |---|---|
@@ -350,7 +357,7 @@ All under `/api`, all JSON, and all (except the WebSocket) require `X-User`
 | open a room from a signed alert | `POST /api/alerts/{source}`, `source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic` (section 6) |
 | open a room from an unsigned dev alert | `POST /api/alerts/webhook` (section 6; no sender check, F9) |
 | list / read rooms | `GET /api/rooms`, `GET /api/rooms/{id}`, `GET /api/rooms/{id}/events?after=&limit=` |
-| live view | `GET /api/rooms/{id}/ws?user=<id>&after=<seq>` (WebSocket; `?user=` is the identity, `internal/ws/gateway.go:163`) |
+| live view | `GET /api/rooms/{id}/ws?after=<seq>` (WebSocket; the identity is the session cookie, or in dev mode `X-User` when there is no cookie; neither gives `401`) |
 | talk to the room | `POST /api/rooms/{id}/comments`, `/steer`, `/suggestions/{sid}/send`, `/control/request`, `/control/grant`, `/close`, `/trace` |
 | fixes | `POST /api/proposals/{pid}/approve`, `/reject` |
 | shift change | `POST /api/rooms/{id}/handoffs`, `POST /api/handoffs/{hid}/accept` |
@@ -378,16 +385,20 @@ far the interrupted step got, before you ask for a new proposal.
 
 ### Network exposure
 
-There is no real login yet (F1). `docs/api.md` §Auth identifies users by the `X-User` header.
-`cmd/server` refuses to listen on any address other than loopback unless you pass `--allow-remote`.
-Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. With the flag it starts
-and logs a warning (`cmd/server/main.go:72-80`; `cmd/server/listen.go:19-41`). Keep
-`PIPEROOM_HTTP_ADDR` on loopback. Reach it through an SSH tunnel, a VPN, or an authenticating
-reverse proxy that sets `X-User` itself and strips the header from client requests. The WebSocket
-takes the same unverified `?user=` value, so the proxy must control that parameter too
-([deploy/README.md](../../deploy/README.md#read-this-first-network-exposure)). `--allow-remote` adds
-no authentication. The Docker image uses `--allow-remote` because the server must listen on
-`0.0.0.0` inside the container; the published port is still the control (section 4).
+There is no real login yet (F1). The server runs in dev auth mode (`PIPEROOM_AUTH_MODE=dev`): a
+person picks a user from `users.yaml` in the UI, with no password (`docs/api.md` §Login;
+`docs/design/auth.md`). OIDC login is auth PR 3 and is not live yet.
+In dev mode `cmd/server` refuses to listen on any address other than loopback unless
+`PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` is set (the old `--allow-remote` flag is a deprecated alias).
+Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any letter case. With the switch it
+starts and logs a loud warning (`cmd/server/listen.go`). Keep `PIPEROOM_HTTP_ADDR` on loopback,
+and reach it through an SSH tunnel or a VPN. An authenticating reverse proxy needs
+`PIPEROOM_AUTH_MODE=oidc` (PR 3): dev mode cannot trust a proxy's identity header, and it answers
+`403 proxy_identity` to a request that sends `X-User` to the dev login. Until PR 3, a pilot behind
+a proxy builds from the git tag `pre-auth`
+([deploy/README.md](../../deploy/README.md#read-this-first-network-exposure)). The switch adds no
+authentication. The Docker image sets it because the server must listen on `0.0.0.0` inside the
+container; the published port is still the control (section 4).
 
 ## 5. Verify with a dry run (no real alert needed)
 
@@ -404,7 +415,7 @@ no authentication. The Docker image uses `--allow-remote` because the server mus
    role is meant to write. Same for Kafka produce with the Piperoom principal.
 4. Confirm the approval gate: have the agent propose a fix and confirm it does not run
    until every required owner has approved. Reject it, and confirm nothing changed.
-   Note that `X-User` is not proof of identity (F1), so the approval check is only as good as
+   Note that dev login is not proof of identity (F1), so the approval check is only as good as
    your network control.
 5. Practise a hand-off between two engineers.
 6. If you enabled Slack: check that the room's parent message appears once in the channel, and
@@ -426,8 +437,8 @@ Point your alerting system at `POST /api/alerts/webhook` only if you cannot use 
 (`internal/httpapi/server.go:133`, handler `internal/httpapi/handlers.go:48-68`). What it does on
 `main`:
 
-- **Auth.** It needs `X-User: <user id>` of a user in `users.yaml`, like every other route
-  (`server.go:190-206`). **It does not verify the sender.** Nothing checks a signature or a token.
+- **Auth.** In dev mode it needs `X-User: <user id>` of a user in `users.yaml` (or a dev session),
+  like every other route outside the signed ones. In oidc mode it is not mounted. **It does not verify the sender.** Nothing checks a signature or a token.
   The signed routes call `internal/alertin` (`internal/alertin/verify.go:109-115`); this route does not. Treat the
   endpoint as open to anyone who can reach it and send that header. Keep it reachable only from
   your alerting system, or do not expose it (F9).
@@ -487,8 +498,8 @@ an identical body (`service_room.go:109-125`; index key at `:196`);
 
 ## 6c. Not built yet
 
-- **Real login** (F1; the design doc named in `docs/api.md` is not on `main`). Until it exists,
-  anyone who can reach the API or the WebSocket can act as any user.
+- **Real login** (F1; design `docs/design/auth.md`). OIDC is auth PR 3 and is not live yet. Until
+  it lands, anyone who can reach the API or the WebSocket can pick any user in dev mode.
 - **Room retention and export** are live (section 1). With `PIPEROOM_RETENTION_DAYS` unset or `0`,
   nothing deletes closed rooms by age.
 - **Snowflake** is selectable with `WAREHOUSE_KIND=snowflake` (section 1 and
@@ -529,8 +540,8 @@ an identical body (`service_room.go:109-125`; index key at `:196`);
 | Server exits at start with "slack bridge" | only one of `SLACK_BOT_TOKEN` / `SLACK_CHANNEL_ID` is set, or the channel is a `#name` not an ID |
 | Slack thread never appears | bot not in the channel (`not_in_channel` in the log), or the room was opened before Slack was enabled and the server was not restarted |
 | A repeat alert opened a second room | the body differs between sends (no `dedup_key`, or a changing field), the `pipeline_id` differs, or the first room was already closed |
-| Web UI shows CORS errors | the UI is not on `http://localhost:5173`. CORS allows only that origin (`internal/httpapi/server.go:216`) |
-| Web UI shows WebSocket errors | the UI is not on `localhost:5173`, `127.0.0.1:5173` or the `PIPEROOM_PUBLIC_URL` host (`internal/ws/gateway.go:188`). These checks are browser-only |
+| Web UI cannot reach the API (network errors, `421`, `403`) | the UI must be same-origin with the API: use `npm run dev` (Vite proxies `/api` and `/auth`) or the served `PIPEROOM_WEB_DIR`. There is no CORS. A tunnel or proxy that rewrites `Host` needs `PIPEROOM_ALLOWED_HOSTS` |
+| Web UI shows WebSocket errors | the page's origin host is not the server's own host, the `PIPEROOM_PUBLIC_URL` host, a `PIPEROOM_ALLOWED_HOSTS` entry, or (no web dir, not oidc) `localhost:5173` / `127.0.0.1:5173`. Add the name to `PIPEROOM_ALLOWED_HOSTS`. These checks are browser-only |
 | Server exits at start with "index.html" | `PIPEROOM_WEB_DIR` does not point at a built UI (`cmd/server/main.go:292`) |
 | A fix shows "interrupted by a service restart" | the server restarted mid-fix; check the system, then re-propose |
 | No agent response after a restart | the agent is idle until a driver steers or someone mentions `@agent` (step 4) |

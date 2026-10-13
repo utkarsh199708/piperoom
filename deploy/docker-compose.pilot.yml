@@ -55,6 +55,33 @@ services:
       # Fixed by the image and the mounts below.
       PIPEROOM_HTTP_ADDR: 0.0.0.0:8090
       PIPEROOM_WEB_DIR: /web
+      # Auth (docs/design/auth.md). The image sets dev mode and the non-loopback
+      # switch; they are repeated here with the same defaults, because a
+      # variable listed here replaces the image's value (with "" if unset).
+      # dev = pick a user in the UI, no password. oidc = real login, used from
+      # auth PR 3 (not live yet); a reverse proxy needs oidc.
+      PIPEROOM_AUTH_MODE: ${PIPEROOM_AUTH_MODE:-dev}
+      # Dev mode only: lets it listen on 0.0.0.0 inside the container. Ignored
+      # (with a warning) in oidc mode.
+      PIPEROOM_DEV_ALLOW_NONLOOPBACK: ${PIPEROOM_DEV_ALLOW_NONLOOPBACK:-1}
+      # Extra Host values for a tunnel or proxy that rewrites Host.
+      PIPEROOM_ALLOWED_HOSTS: ${PIPEROOM_ALLOWED_HOSTS:-}
+      # CIDRs whose X-Forwarded-For is trusted. oidc mode only.
+      PIPEROOM_TRUSTED_PROXIES: ${PIPEROOM_TRUSTED_PROXIES:-}
+      # OIDC login: used from auth PR 3.
+      PIPEROOM_OIDC_ISSUER: ${PIPEROOM_OIDC_ISSUER:-}
+      PIPEROOM_OIDC_CLIENT_ID: ${PIPEROOM_OIDC_CLIENT_ID:-}
+      PIPEROOM_OIDC_CLIENT_SECRET: ${PIPEROOM_OIDC_CLIENT_SECRET:-}
+      PIPEROOM_OIDC_PUBLIC_CLIENT: ${PIPEROOM_OIDC_PUBLIC_CLIENT:-}
+      PIPEROOM_OIDC_SCOPES: ${PIPEROOM_OIDC_SCOPES:-}
+      # Do NOT write this as ${PIPEROOM_OIDC_GROUPS_CLAIM:-}: an explicit empty
+      # value turns group rights off. The "-" form (no colon) passes "groups"
+      # when the variable is unset and keeps an intentional empty value.
+      PIPEROOM_OIDC_GROUPS_CLAIM: ${PIPEROOM_OIDC_GROUPS_CLAIM-groups}
+      PIPEROOM_AUTH_VIEWER_GROUPS: ${PIPEROOM_AUTH_VIEWER_GROUPS:-}
+      PIPEROOM_SESSION_IDLE: ${PIPEROOM_SESSION_IDLE:-}
+      PIPEROOM_SESSION_MAX: ${PIPEROOM_SESSION_MAX:-}
+      PIPEROOM_SOLO_USER: ${PIPEROOM_SOLO_USER:-}
       OWNERS_FILE: /config/owners.yaml
       USERS_FILE: /config/users.yaml
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -132,7 +159,7 @@ services:
       GENERIC_ALERT_SECRET: ${GENERIC_ALERT_SECRET:-}
       DEFAULT_ALERT_PIPELINE: ${DEFAULT_ALERT_PIPELINE:-}
     ports:
-      # Loopback by default: there is no real login yet (see deploy/README.md).
+      # Loopback by default: dev login has no password (see deploy/README.md).
       - "${PIPEROOM_BIND:-127.0.0.1}:${PIPEROOM_PORT:-8090}:8090"
     volumes:
       # owners.yaml and users.yaml: who owns which layer, and who may approve.

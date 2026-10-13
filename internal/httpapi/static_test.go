@@ -295,31 +295,25 @@ func TestStaticAllowHeaderAndCaseInsensitiveAPI(t *testing.T) {
 	}
 }
 
-func TestStaticTurnsDevCORSOff(t *testing.T) {
-	srv := newWebServer(t, httpapi.WithWebDir(webDir(t)))
-	req, _ := http.NewRequest(http.MethodOptions, srv.URL+"/api/rooms", nil)
-	req.Header.Set("Origin", "http://localhost:5173")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
-		t.Fatalf("CORS header %q set although the server serves the UI", got)
-	}
-}
-
-func TestDevCORSStillWorksWithoutWebDir(t *testing.T) {
-	srv := newWebServer(t)
-	req, _ := http.NewRequest(http.MethodOptions, srv.URL+"/api/rooms", nil)
-	req.Header.Set("Origin", "http://localhost:5173")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent || resp.Header.Get("Access-Control-Allow-Origin") != "http://localhost:5173" {
-		t.Fatalf("OPTIONS = %d, ACAO %q", resp.StatusCode, resp.Header.Get("Access-Control-Allow-Origin"))
+// The web app is same-origin (Vite proxy in dev, the image in production), so
+// the server sends no CORS headers in either mode (design §1.4).
+func TestNoCORSHeaders(t *testing.T) {
+	for name, srv := range map[string]*httptest.Server{
+		"with web dir":    newWebServer(t, httpapi.WithWebDir(webDir(t))),
+		"without web dir": newWebServer(t),
+	} {
+		req, _ := http.NewRequest(http.MethodOptions, srv.URL+"/api/rooms", nil)
+		req.Header.Set("Origin", "http://localhost:5173")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		for h := range resp.Header {
+			if strings.HasPrefix(strings.ToLower(h), "access-control-") {
+				t.Fatalf("%s: unexpected CORS header %q", name, h)
+			}
+		}
 	}
 }
 

@@ -39,11 +39,9 @@ func (s *Server) handleExportRoom(w http.ResponseWriter, r *http.Request) {
 	h.Set("Content-Type", "application/json")
 	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": exportFilename(ex.RoomID())}))
 	h.Set(exportHashHeader, ex.SHA256())
-	// Incident evidence: never cached by a proxy or the browser, and a browser
-	// must expose the hash header to a page that calls this from another origin.
+	// Incident evidence: never cached by a proxy or the browser.
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Content-Type-Options", "nosniff")
-	h.Set("Access-Control-Expose-Headers", exportHashHeader+", Content-Disposition")
 	w.WriteHeader(http.StatusOK)
 
 	if err := ex.Write(ctx, w); err != nil {

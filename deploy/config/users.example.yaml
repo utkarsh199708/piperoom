@@ -2,8 +2,8 @@
 # Copy to deploy/config/users.yaml and put in your real people (remove these).
 # A fix runs only after the owner of EVERY layer it touches approves.
 #
-# Today a person is identified by the X-User header alone (no password), so keep
-# the port on the customer VPN. See deploy/README.md.
+# Today a person picks their user in the UI (dev login, no password), so keep
+# the port on the customer VPN. Real login (OIDC) is auth PR 3. See deploy/README.md.
 users:
   - id: alice
     name: Alice

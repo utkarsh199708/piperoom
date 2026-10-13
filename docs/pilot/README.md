@@ -23,7 +23,7 @@ below is from the code.
 
 | ID | Status | What the code does now | Where |
 |---|---|---|---|
-| F1 | **open** | Identity is the `X-User` header on HTTP, checked only against `users.yaml`. The WebSocket takes the same thing as `?user=` with no other check, so the same weakness applies there. Any client that can reach the API can act as any user, including a layer owner. The web app still renders a user switcher. The CORS and WebSocket origin checks stop browsers only; a non-browser client is not blocked by them. | `internal/httpapi/server.go:190-206,216`; `internal/ws/gateway.go:163,188`; `web/src/components/RoomList.tsx:70`, `RoomScreen.tsx:89,136` |
+| F1 | **open** | Dev auth mode (the only mode live today): a person picks a user from `users.yaml` in the web app, and the server sets a session cookie (`POST /auth/dev-login`). There is no password. The WebSocket uses the same cookie; `?user=` is gone. `curl` may still send `X-User` when it sends no cookie. Any client that can reach the API can act as any user, including a layer owner. The Host check, the cross-origin check and the WebSocket origin check stop browsers and DNS rebinding only; a non-browser client is not blocked by them. OIDC login (`PIPEROOM_AUTH_MODE=oidc`) is auth PR 3 and is not live yet. | `internal/httpapi/auth.go`; `internal/ws/gateway.go`; `web/src/components/UserSwitcher.tsx`; design `docs/design/auth.md` |
 | F2 | **fixed in the UI** | The approval view shows each step's `params` as key/value rows, one row per field. Raw JSON is shown only when `params` is not an object. Read the params before you approve. | `web/src/components/ProposalsPanel.tsx:22-54,146`; proposal step updates in `internal/store/store.go:544,561` change only status and output |
 | F3 | **fixed** for `pg_row` and `warehouse_row` | `pg_row` keeps key and timestamp values; other columns are names with `null` values. `warehouse_row` keeps only timestamp-named columns and drops the rest, **including the key**. A column counts as a timestamp by name only: `at` or any name ending in `_at`, not by type. Only these two tools were checked. | `internal/tools/dbtools/pg.go:264,272-282`; `wh.go:124,132-140`; `dbtools.go:242-244`; the same column rule applies on Snowflake, where names come back lower-cased (`internal/clients/snowflake/snowflake.go:148`) |
 | F4 | **fixed** (with F11) | Row tools accept only tables listed in the `source_tables` / `sink_tables` of the room's pipeline. The `pipeline_id` in a tool input must be the room's own pipeline, or the tool refuses. | `internal/tools/dbtools/pg.go`, `wh.go`, `dbtools.go` (`resolve`, `scopedTable`); `internal/tools/scope.go` |
@@ -31,16 +31,18 @@ below is from the code.
 | F6 | **partly closed** | Retention and export are live: `PIPEROOM_RETENTION_DAYS` deletes whole closed rooms older than N days, checked every 6 hours; an empty value or `0` keeps everything; `GET /api/rooms/{id}/export` saves a room first. Still open: there is no event cap or size cap on a room's event log, and nothing archives a room except that export. | `cmd/server/retention.go`; `internal/store/retention.go`; `internal/room/service_export.go`; the orphan-room delete is `internal/store/store.go:335` |
 | F7 | **open** | One set of connection settings (databases, Kafka, Connect, Registry) per process, shared by every pipeline in `owners.yaml`. | `internal/config/config.go:14-104`; `internal/wiring/wiring.go:135-193` |
 | F8 | **fixed** | The dev terminal sink removes control characters (including DEL and C1) and caps printed size. Dev CLI only, not the room service. | `cmd/investigate/sink.go:69-98` |
-| F9 | **partly fixed** | The signed routes `POST /api/alerts/{source}` check the sender with a token or HMAC, and a source with no secret answers 401. The unsigned dev route `POST /api/alerts/webhook` still has no sender check: anyone who sends the `X-User` of a user in `users.yaml` can open rooms through it. | `internal/httpapi/alerts.go:31-41`; `internal/alertin/verify.go:90-102,109-115`; `internal/httpapi/handlers.go:48-68`; `internal/httpapi/server.go:133` |
+| F9 | **partly fixed** | The signed routes `POST /api/alerts/{source}` check the sender with a token or HMAC, and a source with no secret answers 401. The unsigned dev route `POST /api/alerts/webhook` still has no sender check: in dev mode anyone who can reach it and sends the `X-User` of a user in `users.yaml` (or has a dev session) can open rooms through it. In oidc mode (auth PR 3) it is not mounted. | `internal/httpapi/alerts.go:31-41`; `internal/alertin/verify.go:90-102,109-115`; `internal/httpapi/handlers.go:48-68`; `internal/httpapi/server.go:133` |
 | F10 | **fixed** for write actions | Every write action is scope-checked against the room's pipeline when the proposal is created and again right before it runs. | `internal/room/service_proposals.go:94`; `service_executor.go:211,315-330`; `internal/actions/scope_test.go` |
 | F11 | **fixed** | Every read tool is scoped to the room's pipeline. The runner takes the pipeline from the alert, never from the model, and a tool refuses a `pipeline_id`, connector, topic, consumer group, subject or table outside it before any client call. List tools return only the pipeline's own items. A room with no pipeline gets no reads (only `runbook_lookup` works). `connect_config` shows only `type`/`field` settings of transforms; `pg_long_transactions` returns no query text. `pg_replication_slots` (slot metadata) and `pg_long_transactions` stay database-wide. | `internal/tools/scope.go`; `internal/agent/run.go` (`toolScope`); `internal/tools/kafkatools/*`; `internal/tools/dbtools/*`; `cmd/investigate/scope_guard_test.go` |
 
 ### Other limits
 
-- **Real login is not built.** The design docs named in `docs/api.md` (`docs/design/auth.md`,
-  `docs/design/webhook-auth.md`) are not in the repo on `main`. Until login exists, keep the HTTP
-  and WebSocket ports on loopback or behind a proxy that does real authentication. See
-  [setup.md](setup.md#network-exposure).
+- **Real login is not live yet.** The design is `docs/design/auth.md`. Today the image runs in dev
+  auth mode: a person picks a user in the UI and there is no password. OIDC login arrives in auth
+  PR 3. Until then, keep the HTTP and WebSocket ports on loopback, a VPN or an SSH tunnel. A
+  reverse proxy that does the authenticating needs `PIPEROOM_AUTH_MODE=oidc`, so a pilot behind a
+  proxy builds from the git tag `pre-auth` until PR 3. See [setup.md](setup.md#network-exposure)
+  and [deploy/README.md](../../deploy/README.md).
 - **Slack is wired, outbound only.** Room events are mirrored to one thread per room in one
   Slack channel. Nothing typed in Slack reaches a room, and approvals happen only in Piperoom.
   It is on only when both `SLACK_BOT_TOKEN` and `SLACK_CHANNEL_ID` are set. Slack can repeat one
@@ -65,8 +67,9 @@ below is from the code.
 - **A restart does not resume the agent.** Open rooms come back with the agent idle. A driver's
   steer, an `@agent` mention or a sent suggestion starts it again. A fix that was approved but not
   finished is marked failed, not re-run. See [setup.md](setup.md#what-happens-on-a-restart).
-- **Listen address is checked.** The server refuses any non-loopback `PIPEROOM_HTTP_ADDR` unless it
-  is started with `--allow-remote`. Loopback means all of `127.0.0.0/8`, `::1`, or `localhost` in
+- **Listen address is checked.** In dev auth mode the server refuses any non-loopback
+  `PIPEROOM_HTTP_ADDR` unless `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` is set (the old `--allow-remote`
+  flag is a deprecated alias). Loopback means all of `127.0.0.0/8`, `::1`, or `localhost` in
   any letter case. See [setup.md](setup.md#network-exposure).
 - **Redaction is partial.** `pg_row` keeps key and timestamp values; `warehouse_row` keeps only
   timestamp values and drops the key (F3). A timestamp column is one named `at` or ending in `_at`,
