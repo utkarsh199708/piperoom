@@ -1,0 +1,737 @@
+/*
+ * Room screen (spec sections 4, 7.1, 7.5, 7.7, 7.9, 7.10, 7.11, 8): topbar parts, hero wrapper,
+ * situation cards, two-column grid, composer, presence and activity rail, hand-off dialog,
+ * loading and error screens.
+ *
+ * Everything is scoped to `.room-ui` (the RoomScreen root) so the old index.css rules
+ * for the same class names keep working elsewhere until P1 splits that file. All motion
+ * lives in the single no-preference block at the bottom.
+ */
+
+/* ---- topbar (room) ---- */
+.room-ui .topbar > * {
+  flex: none;
+}
+.room-ui .topbar__spacer {
+  flex: 1;
+}
+.room-ui .topbar__room {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.room-ui .topbar__title {
+  flex: 0 1 auto;
+  min-width: 80px;
+  font-size: 20px;
+  line-height: 26px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.room-ui .topbar__room > * {
+  flex: none;
+}
+.room-ui .topbar__room > .topbar__title {
+  flex: 0 1 auto;
+}
+.room-ui .topbar__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.room-ui .topbar__id {
+  font-size: 13px;
+  color: var(--fg-3);
+}
+.room-ui .topbar__age {
+  color: var(--fg-3);
+}
+.room-ui .topbar__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex: none;
+}
+.room-ui .stack {
+  display: inline-flex;
+  align-items: center;
+  padding-right: 4px;
+}
+.room-ui .stack .avatar {
+  margin-left: -6px;
+  box-shadow: 0 0 0 2px var(--bg-1);
+}
+.room-ui .stack .avatar:first-child {
+  margin-left: 0;
+}
+.room-ui .stack .avatar--driver {
+  box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 4px var(--accent);
+}
+.room-ui .stack .more {
+  margin-left: 6px;
+  font-size: 13px;
+  color: var(--fg-3);
+}
+.room-ui .banner--paused {
+  background: var(--warn-tint);
+}
+.room-ui .banner--paused::before {
+  background: var(--warn);
+}
+
+@media (max-width: 1180px) {
+  .room-ui .topbar__meta {
+    display: none;
+  }
+}
+
+/* ---- page layout ---- */
+.room-ui .room-wrap {
+  flex: 1;
+  width: 100%;
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 16px 20px 40px;
+}
+.room-ui .room-hero {
+  min-width: 0;
+}
+.room-ui .situation {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+}
+.room-ui .room-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 16px;
+  align-items: start;
+  margin-top: 16px;
+  padding: 0;
+  max-width: none;
+}
+.room-ui .room-col {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+.room-ui .room-col--side {
+  position: sticky;
+  top: 68px;
+}
+.room-ui .room-proposals:empty {
+  display: none;
+}
+/* Proposals already sit first in the main column, so this class changes nothing. */
+.room-ui .room-grid--approve-first {
+  order: 0;
+}
+
+@media (max-width: 1100px) {
+  .room-ui .room-grid {
+    grid-template-columns: minmax(0, 1fr) 280px;
+  }
+}
+@media (max-width: 900px) {
+  .room-ui .room-grid {
+    grid-template-columns: 1fr;
+  }
+  .room-ui .room-col--side {
+    position: static;
+  }
+}
+@media (max-width: 720px) {
+  .room-ui .situation {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 600px) {
+  .room-ui .room-wrap {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  .room-ui .room-grid {
+    display: grid;
+    padding: 0;
+  }
+  .room-ui .topbar {
+    flex-wrap: wrap;
+    padding: 8px 16px;
+    gap: 8px;
+  }
+  .room-ui .topbar__room {
+    order: 5;
+    flex-basis: 100%;
+    flex-wrap: wrap;
+  }
+  .room-ui .topbar__title {
+    flex-basis: 100%;
+    white-space: normal;
+    font-size: 18px;
+  }
+}
+
+/* ---- situation cards (7.5) ---- */
+.room-ui .sit-card {
+  padding: 14px 18px;
+  min-width: 0;
+}
+.room-ui .sit-card .eyebrow {
+  display: block;
+  margin-bottom: 6px;
+}
+.room-ui .sit-card--now {
+  border-top: 3px solid var(--agent);
+}
+.room-ui .sit-card__text {
+  font-size: 17px;
+  line-height: 24px;
+  font-weight: 500;
+}
+.room-ui .sit-card__text--quiet {
+  color: var(--fg-2);
+  font-weight: 400;
+}
+.room-ui .sit-card__text--with-avatar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.room-ui .sit-card__foot {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.room-ui .meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.room-ui .meter i {
+  display: inline-block;
+  width: 14px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line-2);
+}
+.room-ui .meter i.on {
+  background: var(--agent);
+}
+.room-ui .step-chip {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  min-height: 0;
+  background: var(--bg-3);
+  color: var(--fg-2);
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.room-ui .step-chip:hover {
+  border-color: var(--line-2);
+  color: var(--fg);
+}
+.room-ui .sit-card--approve {
+  background: linear-gradient(180deg, var(--warn-tint), transparent 70%), var(--bg-1);
+  border-color: var(--warn-line);
+  box-shadow: var(--ring-warn);
+}
+.room-ui .sit-card--approve .eyebrow {
+  color: var(--warn);
+}
+.room-ui .sit-card--control {
+  background: linear-gradient(180deg, var(--warn-tint), transparent 70%), var(--bg-1);
+  border-color: var(--warn-line);
+}
+.room-ui .sit-card--control .eyebrow {
+  color: var(--warn);
+}
+.room-ui .sit-card--handoff,
+.room-ui .sit-card--driving {
+  background: linear-gradient(180deg, var(--accent-tint), transparent 70%), var(--bg-1);
+}
+.room-ui .sit-card--handoff .eyebrow,
+.room-ui .sit-card--driving .eyebrow {
+  color: var(--accent);
+}
+.room-ui .sit-card--done {
+  background: linear-gradient(180deg, var(--ok-tint), transparent 70%), var(--bg-1);
+}
+.room-ui .sit-card--done .eyebrow {
+  color: var(--ok);
+}
+.room-ui .sit-card--viewer .sit-card__text,
+.room-ui .sit-card--quiet .sit-card__text {
+  color: var(--fg-2);
+  font-weight: 400;
+}
+.room-ui .sit-card--approve .sit-card__foot .btn,
+.room-ui .sit-card--control .sit-card__foot .btn,
+.room-ui .sit-card--handoff .sit-card__foot .btn {
+  margin-left: auto;
+}
+
+/* ---- composer (7.7) ---- */
+.room-ui .composer {
+  position: sticky;
+  bottom: 12px;
+  z-index: 3;
+  padding: 10px 12px;
+  border-radius: var(--r-lg);
+  border-color: var(--line-2);
+  background: var(--bg-1);
+  box-shadow: var(--shadow-2);
+}
+.room-ui .composer__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--fg-2);
+}
+.room-ui .composer__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.room-ui .composer__expired {
+  color: var(--warn);
+  font-weight: 500;
+}
+.room-ui .steer__hint {
+  font-size: 13px;
+}
+.room-ui .steer__form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.room-ui .steer__form textarea {
+  width: 100%;
+  min-height: 38px;
+  max-height: 160px;
+  resize: vertical;
+  overflow: auto;
+}
+.room-ui .composer__foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 8px;
+}
+.room-ui .composer__foot .kbd {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--fg-3);
+}
+.room-ui .kbd kbd {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  border: 1px solid var(--line-2);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.room-ui .steer--viewer {
+  padding: 10px 14px;
+  box-shadow: var(--shadow-1);
+}
+.room-ui .steer__viewer {
+  font-size: 13px;
+}
+.room-ui .suggestions {
+  margin: 0 0 8px;
+}
+.room-ui .suggestion {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+.room-ui .suggestion__body {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+}
+.room-ui .suggestion__body strong {
+  font-weight: 600;
+}
+.room-ui .suggestion__text {
+  margin: 0;
+  font-size: 14px;
+  color: var(--fg-2);
+}
+.room-ui .grant-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.room-ui .grant-picker label {
+  font-size: 13px;
+  color: var(--fg-2);
+}
+
+@media (max-height: 720px) {
+  .room-ui .composer {
+    position: static;
+  }
+}
+
+/* ---- presence (7.9) ---- */
+.room-ui .who {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.room-ui .who__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  font-size: 14px;
+}
+.room-ui .who__av {
+  position: relative;
+  display: inline-flex;
+}
+.room-ui .who__dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 2px var(--bg-1);
+}
+.room-ui .who__dot--away {
+  width: 8px;
+  height: 8px;
+  background: var(--bg-1);
+  border: 2px solid var(--fg-3);
+  box-shadow: none;
+}
+.room-ui .who__name {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+.room-ui .who__me {
+  color: var(--fg-3);
+  font-size: 13px;
+}
+.room-ui .who__row--away {
+  opacity: 0.65;
+}
+.room-ui .presence__state {
+  font-size: 13px;
+  color: var(--ok);
+}
+.room-ui .presence__state--away {
+  color: var(--fg-3);
+}
+
+/* ---- activity (7.10) ---- */
+.room-ui .feed {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  max-height: 360px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.room-ui .feed__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--fg-2);
+}
+.room-ui .feed__row .avatar {
+  margin-top: 1px;
+}
+.room-ui .feed__text {
+  flex: 1;
+  min-width: 0;
+}
+.room-ui .feed__time {
+  padding-top: 1px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--fg-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- hand-off dialog (7.11) ---- */
+.room-ui .dialog__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.room-ui .handoff__form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.room-ui .handoff .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.room-ui .handoff .field label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg-2);
+}
+.room-ui .check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.room-ui .check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+.room-ui .handoff__summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.room-ui .handoff__summary > * {
+  min-width: 0;
+}
+.room-ui .handoff__intro,
+.room-ui .handoff__section--prose,
+.room-ui .handoff__summary .dialog__actions {
+  grid-column: 1 / -1;
+}
+.room-ui .handoff__section {
+  padding: 12px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  border-left: 1px solid var(--line);
+}
+.room-ui .handoff__subtitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 19px;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--fg-2);
+}
+.room-ui .handoff__glyph {
+  font-size: 12px;
+}
+.room-ui .handoff__section--ok .handoff__glyph {
+  color: var(--ok);
+}
+.room-ui .handoff__section--muted .handoff__glyph {
+  color: var(--fg-3);
+}
+.room-ui .handoff__section--warn .handoff__glyph {
+  color: var(--warn);
+}
+.room-ui .handoff__section--fail .handoff__glyph {
+  color: var(--fail);
+}
+.room-ui .handoff__section p {
+  font-size: 14px;
+}
+.room-ui .handoff__list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 14px;
+}
+.room-ui .dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+.room-ui .handoff__summary .dialog__actions {
+  margin-top: 4px;
+}
+
+@media (max-width: 600px) {
+  .room-ui .handoff__summary {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- loading and error screens (8) ---- */
+.room-ui .room-hero--loading {
+  padding: 14px 20px;
+}
+.room-ui .room-skel__lane {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 44px;
+}
+.room-ui .room-skel__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 16px;
+}
+.room-ui .room-loading {
+  margin-top: 16px;
+  text-align: center;
+}
+.room-ui .room-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 520px;
+  margin: 48px auto;
+  padding: 24px;
+  text-align: center;
+  color: var(--fail);
+  background: var(--fail-tint);
+  border: 1px solid var(--fail);
+  border-radius: var(--r-lg);
+}
+.room-ui .room-error .btn {
+  color: var(--fg);
+}
+
+@media (max-width: 900px) {
+  .room-ui .room-skel__lane {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+}
+
+/* ---- motion: opt-in only (5) ---- */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes room-ping {
+    0% {
+      transform: scale(0.6);
+      opacity: 0.7;
+    }
+    100% {
+      transform: scale(1.6);
+      opacity: 0;
+    }
+  }
+  @keyframes room-rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+  @keyframes room-attn {
+    from {
+      transform: scale(0.985);
+      box-shadow: 0 0 0 8px var(--warn-tint);
+    }
+  }
+  @keyframes room-shimmer {
+    to {
+      background-position: -200% 0;
+    }
+  }
+  @keyframes room-dialog-in {
+    from {
+      transform: scale(0.98);
+      opacity: 0;
+    }
+  }
+  @keyframes room-fade-in {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes room-banner-in {
+    from {
+      transform: translateY(-100%);
+      opacity: 0;
+    }
+  }
+  .room-ui .status-pill__dot.is-live::after {
+    content: '';
+    position: absolute;
+    inset: -4px;
+    border-radius: 50%;
+    border: 1.5px solid currentColor;
+    animation: room-ping 1.8s var(--ease) infinite;
+  }
+  .room-ui .sit-card--approve {
+    animation: room-attn 600ms var(--ease) 1;
+  }
+  .room-ui .skeleton {
+    background: linear-gradient(90deg, var(--bg-3) 0%, var(--bg-2) 50%, var(--bg-3) 100%);
+    background-size: 200% 100%;
+    animation: room-shimmer 1.6s linear infinite;
+  }
+  .room-ui .overlay {
+    animation: room-fade-in var(--dur-fast) var(--ease) both;
+  }
+  .room-ui .dialog {
+    animation: room-dialog-in var(--dur-slow) var(--ease) both;
+  }
+  .room-ui .banner--paused {
+    animation: room-banner-in var(--dur-slow) var(--ease) both;
+  }
+  .room-ui .steer__form textarea {
+    transition: min-height var(--dur) var(--ease);
+  }
+  .room-ui .feed__row {
+    animation: room-rise var(--dur) var(--ease) both;
+  }
+  .room-ui .btn,
+  .room-ui .step-chip,
+  .room-ui .chip {
+    transition: background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast);
+  }
+}
+
+/* Same compact-to-grown composer without motion: it still grows, just not animated. */
+.room-ui .composer:focus-within textarea {
+  min-height: 84px;
+}

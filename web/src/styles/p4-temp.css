@@ -1,0 +1,619 @@
+/*
+ * TEMP until P1 merges (spec sections 2, 3, 6). Delete this whole file at rebase, then
+ * remove its import from RoomScreen.tsx and the `ui-p4-temp.tsx` stand-ins.
+ *
+ * It copies the section 2 tokens and the few global primitive styles the room screen
+ * needs, scoped to `.room-ui` so no other screen changes while P1 is still open.
+ * When P1's tokens.css / base.css / primitives.css / shell.css land, the same names
+ * come from :root and this scope is not needed.
+ */
+
+/* ---- tokens: dark (default) ---- */
+.room-ui {
+  --bg-0: #0b0e14;
+  --bg-1: #10141c;
+  --bg-2: #161c27;
+  --bg-3: #1d2432;
+  --line: #232c3b;
+  --line-2: #2f3a4c;
+  --fg: #e6ebf2;
+  --fg-2: #a9b4c4;
+  --fg-3: #7f8a9c;
+  --accent: #5b9dff;
+  --fail: #ff7b72;
+  --warn: #ffb454;
+  --ok: #3ecf8e;
+  --agent: #b48cff;
+  --on-strong: #0b0e14;
+  --accent-tint: rgba(91, 157, 255, 0.12);
+  --fail-tint: rgba(255, 123, 114, 0.12);
+  --warn-tint: rgba(255, 180, 84, 0.12);
+  --ok-tint: rgba(62, 207, 142, 0.12);
+  --agent-tint: rgba(180, 140, 255, 0.1);
+  --ring-accent: 0 0 0 3px rgba(91, 157, 255, 0.22);
+  --ring-fail: 0 0 0 3px rgba(255, 123, 114, 0.22);
+  --ring-warn: 0 0 0 3px rgba(255, 180, 84, 0.22);
+  --warn-line: rgba(255, 180, 84, 0.45);
+  --shadow-1: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --overlay: rgba(5, 7, 10, 0.6);
+  --layer-postgres: #7cc4ff;
+  --layer-kafka-connect: var(--warn);
+  --layer-schema-registry: var(--agent);
+  --layer-kafka: #8fd3ff;
+  --layer-consumer: var(--ok);
+  --layer-warehouse: #ff9fd4;
+  --h1: #ff8fab;
+  --h2: #7dd3fc;
+  --h3: #c4b5fd;
+  --h4: #fcd34d;
+  --h5: #86efac;
+  --h6: #fdba74;
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+  --s10: 40px;
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-pill: 999px;
+  --dur-fast: 120ms;
+  --dur: 200ms;
+  --dur-slow: 320ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* aliases, so the old index.css rules inside the room take the new colours */
+  --bg: var(--bg-0);
+  --panel: var(--bg-1);
+  --panel-2: var(--bg-2);
+  --border: var(--line);
+  --text: var(--fg);
+  --muted: var(--fg-2);
+  --blue: var(--accent);
+  --orange: var(--warn);
+  --red: var(--fail);
+  --green: var(--ok);
+  --radius: var(--r-md);
+
+  background: var(--bg-0);
+  color: var(--fg);
+}
+
+/* ---- tokens: light ---- */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) .room-ui {
+    --bg-0: #f3f5f9;
+    --bg-1: #ffffff;
+    --bg-2: #f7f9fc;
+    --bg-3: #eef2f7;
+    --line: #dfe5ee;
+    --line-2: #c9d2df;
+    --fg: #111827;
+    --fg-2: #4b5565;
+    --fg-3: #5f6977;
+    --accent: #185fd0;
+    --fail: #c0392b;
+    --warn: #8f5300;
+    --ok: #167244;
+    --agent: #6a3ad1;
+    --on-strong: #ffffff;
+    --accent-tint: #e4eefc;
+    --fail-tint: #fde8e6;
+    --warn-tint: #fff1d6;
+    --ok-tint: #dff7ea;
+    --agent-tint: #efe8ff;
+    --ring-accent: 0 0 0 3px rgba(24, 95, 208, 0.2);
+    --ring-fail: 0 0 0 3px rgba(192, 57, 43, 0.2);
+    --ring-warn: 0 0 0 3px rgba(143, 83, 0, 0.2);
+    --warn-line: #f0c98a;
+    --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+    --shadow-2: 0 12px 32px rgba(16, 24, 40, 0.14);
+    --overlay: rgba(16, 24, 40, 0.45);
+    --layer-postgres: #145ea8;
+    --layer-kafka: #0f6b9c;
+    --layer-warehouse: #b0286f;
+    --h1: #c2185b;
+    --h2: #0369a1;
+    --h3: #6d28d9;
+    --h4: #a16207;
+    --h5: #15803d;
+    --h6: #c2410c;
+  }
+}
+:root[data-theme='light'] .room-ui {
+  --bg-0: #f3f5f9;
+  --bg-1: #ffffff;
+  --bg-2: #f7f9fc;
+  --bg-3: #eef2f7;
+  --line: #dfe5ee;
+  --line-2: #c9d2df;
+  --fg: #111827;
+  --fg-2: #4b5565;
+  --fg-3: #5f6977;
+  --accent: #185fd0;
+  --fail: #c0392b;
+  --warn: #8f5300;
+  --ok: #167244;
+  --agent: #6a3ad1;
+  --on-strong: #ffffff;
+  --accent-tint: #e4eefc;
+  --fail-tint: #fde8e6;
+  --warn-tint: #fff1d6;
+  --ok-tint: #dff7ea;
+  --agent-tint: #efe8ff;
+  --ring-accent: 0 0 0 3px rgba(24, 95, 208, 0.2);
+  --ring-fail: 0 0 0 3px rgba(192, 57, 43, 0.2);
+  --ring-warn: 0 0 0 3px rgba(143, 83, 0, 0.2);
+  --warn-line: #f0c98a;
+  --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-2: 0 12px 32px rgba(16, 24, 40, 0.14);
+  --overlay: rgba(16, 24, 40, 0.45);
+  --layer-postgres: #145ea8;
+  --layer-kafka: #0f6b9c;
+  --layer-warehouse: #b0286f;
+  --h1: #c2185b;
+  --h2: #0369a1;
+  --h3: #6d28d9;
+  --h4: #a16207;
+  --h5: #15803d;
+  --h6: #c2410c;
+}
+
+/* ---- base ---- */
+.room-ui {
+  line-height: 1.5;
+}
+.room-ui p {
+  margin: 0;
+}
+.room-ui .muted {
+  color: var(--fg-2);
+}
+.room-ui .mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.room-ui :focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.room-ui .icon {
+  flex: none;
+  vertical-align: -3px;
+}
+.room-ui .eyebrow {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg-2);
+}
+
+/* ---- chips, pill, avatars ---- */
+.room-ui .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.room-ui .chip--fail {
+  background: var(--fail-tint);
+  color: var(--fail);
+}
+.room-ui .chip--warn {
+  background: var(--warn-tint);
+  color: var(--warn);
+}
+.room-ui .chip--info {
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+.room-ui .chip--ok {
+  background: var(--ok-tint);
+  color: var(--ok);
+}
+.room-ui .chip--muted {
+  background: var(--bg-3);
+  color: var(--fg-2);
+}
+.room-ui .status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 12px 0 10px;
+  border-radius: var(--r-pill);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.room-ui .status-pill--agent {
+  background: var(--agent-tint);
+  color: var(--agent);
+}
+.room-ui .status-pill--warn {
+  background: var(--warn-tint);
+  color: var(--warn);
+}
+.room-ui .status-pill--ok {
+  background: var(--ok-tint);
+  color: var(--ok);
+}
+.room-ui .status-pill--fail {
+  background: var(--fail-tint);
+  color: var(--fail);
+}
+.room-ui .status-pill--muted {
+  background: var(--bg-3);
+  color: var(--fg-2);
+}
+.room-ui .status-pill__dot {
+  position: relative;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+.room-ui .avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-3);
+  color: var(--fg);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  flex: none;
+}
+.room-ui .avatar--xs {
+  width: 16px;
+  height: 16px;
+  font-size: 8px;
+}
+.room-ui .avatar--sm {
+  width: 24px;
+  height: 24px;
+  font-size: 10px;
+}
+.room-ui .avatar--md {
+  width: 28px;
+  height: 28px;
+  font-size: 11px;
+}
+.room-ui .avatar--lg {
+  width: 40px;
+  height: 40px;
+  font-size: 14px;
+}
+.room-ui .avatar--h1 {
+  background: var(--h1);
+  color: var(--on-strong);
+}
+.room-ui .avatar--h2 {
+  background: var(--h2);
+  color: var(--on-strong);
+}
+.room-ui .avatar--h3 {
+  background: var(--h3);
+  color: var(--on-strong);
+}
+.room-ui .avatar--h4 {
+  background: var(--h4);
+  color: var(--on-strong);
+}
+.room-ui .avatar--h5 {
+  background: var(--h5);
+  color: var(--on-strong);
+}
+.room-ui .avatar--h6 {
+  background: var(--h6);
+  color: var(--on-strong);
+}
+.room-ui .avatar--agent {
+  background: var(--agent-tint);
+  color: var(--agent);
+}
+.room-ui .avatar--system {
+  background: var(--bg-3);
+  color: var(--fg-3);
+}
+.room-ui .avatar--driver {
+  box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 4px var(--accent);
+}
+
+/* ---- buttons, inputs ---- */
+.room-ui .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line-2);
+  background: var(--bg-2);
+  color: var(--fg);
+  font-weight: 500;
+  font-size: 14px;
+  cursor: pointer;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.room-ui .btn:hover:not(:disabled) {
+  background: var(--bg-3);
+  border-color: var(--fg-3);
+}
+.room-ui .btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-strong);
+}
+.room-ui .btn--primary:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  filter: brightness(1.08);
+}
+.room-ui .btn--ok,
+.room-ui .btn--approve {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: var(--on-strong);
+  font-weight: 600;
+}
+.room-ui .btn--ok:hover:not(:disabled),
+.room-ui .btn--approve:hover:not(:disabled) {
+  background: var(--ok);
+  border-color: var(--ok);
+  filter: brightness(1.06);
+}
+.room-ui .btn--danger,
+.room-ui .btn--reject {
+  background: transparent;
+  border-color: transparent;
+  color: var(--fail);
+}
+.room-ui .btn--danger:hover:not(:disabled),
+.room-ui .btn--reject:hover:not(:disabled) {
+  background: var(--fail-tint);
+  border-color: transparent;
+}
+.room-ui .btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--fg-2);
+}
+.room-ui .btn--ghost:hover:not(:disabled) {
+  background: var(--bg-3);
+  color: var(--fg);
+  border-color: transparent;
+}
+.room-ui .btn--small {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+.room-ui .btn--link {
+  background: none;
+  border: none;
+  padding: 0;
+  min-height: 0;
+  color: var(--accent);
+  font-size: 13px;
+}
+.room-ui .btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.room-ui .icon-btn {
+  width: 32px;
+  height: 32px;
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  color: var(--fg-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.room-ui .icon-btn:hover {
+  background: var(--bg-3);
+  color: var(--fg);
+}
+.room-ui input,
+.room-ui select,
+.room-ui textarea {
+  font: inherit;
+  font-size: 14px;
+  color: var(--fg);
+  background: var(--bg-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  padding: 6px 10px;
+  min-height: 34px;
+}
+.room-ui input::placeholder,
+.room-ui textarea::placeholder {
+  color: var(--fg-3);
+}
+.room-ui input:focus-visible,
+.room-ui select:focus-visible,
+.room-ui textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  box-shadow: var(--ring-accent);
+}
+.room-ui input[type='checkbox'] {
+  min-height: 0;
+}
+
+/* ---- panels ---- */
+.room-ui .panel {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-1);
+}
+.room-ui .panel__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.room-ui .panel__title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--fg);
+}
+.room-ui .panel__count {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.room-ui .panel__right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.room-ui .panel__body {
+  padding: 14px 16px;
+  font-size: 14px;
+}
+.room-ui .empty {
+  display: block;
+  color: var(--fg-3);
+  font-size: 13px;
+  margin: 8px 0;
+}
+.room-ui .skeleton {
+  background: var(--bg-3);
+  border-radius: var(--r-sm);
+}
+
+/* ---- topbar and banners (shell) ---- */
+.room-ui .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 12px;
+  min-height: 52px;
+  padding: 0 20px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.room-ui .topbar__back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 4px;
+  border-radius: 6px;
+  color: var(--fg-2);
+  font-size: 14px;
+  font-weight: 500;
+}
+.room-ui .topbar__back:hover {
+  background: var(--bg-3);
+  color: var(--fg);
+}
+.room-ui .banner {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  min-height: 44px;
+  padding: 6px 20px 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  color: var(--fg);
+}
+.room-ui .banner::before {
+  content: '';
+  width: 6px;
+  align-self: stretch;
+  margin-right: 8px;
+  background: var(--fg-3);
+}
+.room-ui .banner > .btn,
+.room-ui .banner > .banner__actions {
+  margin-left: auto;
+}
+.room-ui .banner--nodriver {
+  background: var(--warn-tint);
+}
+.room-ui .banner--nodriver::before {
+  background: var(--warn);
+}
+.room-ui .banner--accept {
+  background: var(--accent-tint);
+}
+.room-ui .banner--accept::before {
+  background: var(--accent);
+}
+.room-ui .banner--error {
+  background: var(--fail-tint);
+  color: var(--fail);
+}
+.room-ui .banner--error::before {
+  background: var(--fail);
+}
+.room-ui .banner--resolved {
+  background: var(--ok-tint);
+  color: var(--ok);
+}
+.room-ui .banner--resolved::before {
+  background: var(--ok);
+}
+
+/* ---- dialog shell ---- */
+.room-ui .overlay {
+  background: var(--overlay);
+}
+.room-ui .dialog {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-2);
+  padding: 24px;
+}
+.room-ui .dialog__title {
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+
+@media (max-width: 600px) {
+  .room-ui .btn,
+  .room-ui input,
+  .room-ui select,
+  .room-ui textarea {
+    min-height: 44px;
+  }
+  .room-ui .btn--small,
+  .room-ui .btn--link {
+    min-height: 44px;
+  }
+  .room-ui input[type='checkbox'] {
+    min-height: 0;
+  }
+}

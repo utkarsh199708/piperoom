@@ -1,0 +1,441 @@
+/*
+ * Investigation stream (spec section 7.6): numbered rail, live / error / ghost steps,
+ * layer-coloured tool tags, arg tags, evidence, agent messages and comment threads.
+ *
+ * Scoped to `.room-ui`. Static is the base: every animation sits in the one
+ * no-preference block at the bottom, so reduced motion keeps the meaning (a static
+ * 2px bar and the "running tool…" text) and loses only the movement.
+ */
+
+.room-ui .timeline {
+  position: relative;
+  display: block;
+  padding-top: 4px;
+}
+/* the rail */
+.room-ui .timeline::before {
+  content: '';
+  position: absolute;
+  left: 11px;
+  top: 8px;
+  bottom: 14px;
+  width: 2px;
+  background: var(--line);
+}
+
+.room-ui .step {
+  position: relative;
+  display: block;
+  padding: 0 0 0 36px;
+  margin: 0 0 18px;
+  border-left: 0;
+}
+.room-ui .step:last-child {
+  margin-bottom: 4px;
+}
+.room-ui .step__dot {
+  position: absolute;
+  left: 0;
+  top: 1px;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--bg-3);
+  color: var(--fg-2);
+  box-shadow: 0 0 0 3px var(--bg-1);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.room-ui .step__head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.room-ui .step__title {
+  font-size: 15px;
+  line-height: 22px;
+}
+.room-ui .step__meta {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--fg-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* live step: the last step while the agent works */
+.room-ui .step--live {
+  margin-left: -4px;
+  padding-left: 40px;
+  box-shadow: inset 3px 0 0 var(--agent);
+}
+.room-ui .step--live .step__dot {
+  left: 4px;
+  background: var(--agent);
+  color: var(--on-strong);
+}
+/* failed step */
+.room-ui .step--error .step__dot {
+  background: var(--fail-tint);
+  color: var(--fail);
+}
+/* the dashed "thinking…" step */
+.room-ui .step--ghost .step__dot {
+  background: var(--bg-1);
+  border: 2px dashed var(--line-2);
+  color: var(--fg-3);
+}
+.room-ui .step--ghost {
+  margin-bottom: 4px;
+}
+.room-ui .step--room .step__dot {
+  display: none;
+}
+
+/* evidence */
+.room-ui .toolcalls {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.room-ui .toolcall {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: 8px 10px;
+}
+.room-ui .toolcall--error {
+  border-color: var(--fail);
+  box-shadow: inset 3px 0 0 var(--fail);
+}
+.room-ui .toolcall__head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+}
+.room-ui .toolcall__tool {
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: var(--bg-3);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+}
+.room-ui .toolcall__tool--postgres {
+  color: var(--layer-postgres);
+}
+.room-ui .toolcall__tool--kafka-connect {
+  color: var(--layer-kafka-connect);
+}
+.room-ui .toolcall__tool--schema-registry {
+  color: var(--layer-schema-registry);
+}
+.room-ui .toolcall__tool--kafka {
+  color: var(--layer-kafka);
+}
+.room-ui .toolcall__tool--consumer {
+  color: var(--layer-consumer);
+}
+.room-ui .toolcall__tool--warehouse {
+  color: var(--layer-warehouse);
+}
+.room-ui .toolcall__tool.is-bad {
+  color: var(--fail);
+  background: var(--fail-tint);
+}
+.room-ui .arg {
+  display: inline-flex;
+  gap: 5px;
+  max-width: 260px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-3);
+  color: var(--fg-2);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+.room-ui .arg b {
+  font-weight: 500;
+  color: var(--fg-3);
+}
+.room-ui .arg span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.room-ui .toolcall__took {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.room-ui .toolcall__raw {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--fg-3);
+}
+.room-ui .toolcall__raw summary {
+  width: max-content;
+  cursor: pointer;
+}
+.room-ui .toolcall__raw pre,
+.room-ui .toolcall__input {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  background: var(--bg-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--fg-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.room-ui .toolcall__summary {
+  margin: 8px 0 0;
+  padding: 8px 10px 8px 12px;
+  background: var(--bg-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.room-ui .toolcall__summary--error {
+  color: var(--fail);
+  box-shadow: inset 3px 0 0 var(--fail);
+  border: 0;
+}
+.room-ui .toolcall__more {
+  margin-top: 6px;
+}
+.room-ui .toolcall__trunc {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--fg-3);
+}
+
+/* live tail */
+.room-ui .live {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-top: 8px;
+  background: var(--agent-tint);
+  border-radius: var(--r-md);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--agent);
+}
+.room-ui .step--ghost .live {
+  margin-top: 0;
+  border: 1px dashed var(--line-2);
+}
+.room-ui .live__detail {
+  font-weight: 400;
+  color: var(--fg-2);
+}
+/* base: a static 2px bar. Motion is added below under no-preference. */
+.room-ui .live__bar {
+  position: relative;
+  flex: 1;
+  height: 2px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--agent) 30%, transparent);
+}
+.room-ui .live__bar::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  width: 40%;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--agent);
+}
+
+/* agent messages */
+.room-ui .agent-msgs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.room-ui .step > .agent-msgs {
+  margin-top: 8px;
+}
+.room-ui .agent-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 10px 8px 12px;
+  background: var(--agent-tint);
+  border-radius: var(--r-md);
+  box-shadow: inset 3px 0 0 var(--agent);
+  font-size: 14px;
+}
+.room-ui .agent-msg .avatar {
+  margin-top: 3px;
+}
+.room-ui .agent-msg__tag {
+  color: var(--agent);
+  font-weight: 600;
+}
+
+/* comments */
+.room-ui .thread {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+.room-ui .thread__comment {
+  display: flex;
+  gap: 8px;
+}
+.room-ui .thread__comment--agent {
+  padding-left: 20px;
+  opacity: 1;
+}
+.room-ui .thread__body {
+  flex: 1;
+  min-width: 0;
+}
+.room-ui .thread__meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+.room-ui .thread__meta strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.room-ui .thread__meta .muted {
+  color: var(--fg-3);
+  font-variant-numeric: tabular-nums;
+}
+.room-ui .thread__agent {
+  color: var(--agent);
+}
+.room-ui .thread__text {
+  margin: 1px 0 0;
+  font-size: 14px;
+}
+.room-ui .thread__reply,
+.room-ui .replybox {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.room-ui .thread__reply {
+  margin-top: 0;
+}
+.room-ui .thread__reply input,
+.room-ui .replybox input {
+  flex: 1;
+  min-width: 0;
+  min-height: 32px;
+  font-size: 13px;
+}
+.room-ui .replybox input {
+  background: transparent;
+  border-color: var(--line);
+}
+.room-ui .replybox input:focus-visible {
+  background: var(--bg-3);
+}
+
+/* empty */
+.room-ui .empty--timeline {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 18px 8px;
+  text-align: center;
+}
+.room-ui .empty__icon {
+  opacity: 0.6;
+  margin-bottom: 4px;
+}
+.room-ui .empty__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-2);
+}
+.room-ui .empty__hint {
+  font-size: 13px;
+  color: var(--fg-3);
+}
+
+/* ---- motion: opt-in only (5) ---- */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes room-ping {
+    0% {
+      transform: scale(0.6);
+      opacity: 0.7;
+    }
+    100% {
+      transform: scale(1.6);
+      opacity: 0;
+    }
+  }
+  @keyframes room-slide {
+    to {
+      left: 100%;
+    }
+  }
+  @keyframes room-rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+  /* a new step fades in and rises once */
+  .room-ui .step {
+    animation: room-rise var(--dur) var(--ease) both;
+  }
+  /* the live step: ring ping on the disc, bar slides */
+  .room-ui .step--live .step__dot::after {
+    content: '';
+    position: absolute;
+    inset: -3px;
+    border-radius: 50%;
+    border: 2px solid var(--agent);
+    opacity: 0.5;
+    animation: room-ping 1.8s var(--ease) infinite;
+  }
+  .room-ui .live__bar::after {
+    left: -40%;
+    animation: room-slide 1.4s var(--ease) infinite;
+  }
+  .room-ui .toolcall__raw summary,
+  .room-ui .arg {
+    transition: color var(--dur-fast);
+  }
+}
