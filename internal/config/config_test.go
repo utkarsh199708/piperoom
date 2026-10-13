@@ -139,6 +139,7 @@ func TestParseLimitsErrors(t *testing.T) {
 		{"bytes too small", Config{RoomMaxBytes: "1023KiB"}, "PIPEROOM_ROOM_MAX_BYTES"},
 		{"bytes too large", Config{RoomMaxBytes: "17GiB"}, "PIPEROOM_ROOM_MAX_BYTES"},
 		{"bytes overflow", Config{RoomMaxBytes: "9999999999999GiB"}, "PIPEROOM_ROOM_MAX_BYTES"},
+		{"bytes overflow just past int64/GiB", Config{RoomMaxBytes: "17179869185GiB"}, "PIPEROOM_ROOM_MAX_BYTES"},
 		{"data too small", Config{EventMaxDataBytes: "1023"}, "PIPEROOM_EVENT_MAX_DATA_BYTES"},
 		{"data too large", Config{EventMaxDataBytes: "17MiB"}, "PIPEROOM_EVENT_MAX_DATA_BYTES"},
 		{"data negative", Config{EventMaxDataBytes: "-64KiB"}, "PIPEROOM_EVENT_MAX_DATA_BYTES"},
