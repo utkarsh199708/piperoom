@@ -49,6 +49,10 @@ type FakeIdP struct {
 	GroupsClaim string
 	// Lifetime is how long an ID token is valid. Default 1 hour.
 	Lifetime time.Duration
+	// RequirePKCE makes /token refuse a code that was issued without a
+	// code_challenge (invalid_grant). NewFakeIdP sets it to true; set false to
+	// test a client that does not use PKCE.
+	RequirePKCE bool
 	// OmitNonce stops the IdP echoing the nonce (a non-compliant IdP).
 	OmitNonce bool
 	// Now is the clock. Default time.Now.
@@ -56,10 +60,11 @@ type FakeIdP struct {
 
 	srv *httptest.Server
 
-	mu    sync.Mutex
-	user  IDPUser
-	fault IDPFault
-	codes map[string]idpCode
+	mu                  sync.Mutex
+	lastChallengeMethod string
+	user                IDPUser
+	fault               IDPFault
+	codes               map[string]idpCode
 }
 
 // IDPUser is the identity the fake IdP signs in. The zero values of Email,
@@ -133,6 +138,7 @@ func NewFakeIdP(t testing.TB) *FakeIdP {
 		ClientID:     "piperoom-test",
 		ClientSecret: "test-secret",
 		GroupsClaim:  "groups",
+		RequirePKCE:  true,
 		Lifetime:     time.Hour,
 		Now:          time.Now,
 		codes:        map[string]idpCode{},
@@ -149,6 +155,14 @@ func NewFakeIdP(t testing.TB) *FakeIdP {
 	f.Issuer = f.srv.URL
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// LastChallengeMethod returns the code_challenge_method of the most recent
+// /authorize request ("" when it sent none), so a test can assert S256.
+func (f *FakeIdP) LastChallengeMethod() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastChallengeMethod
 }
 
 // Server returns the underlying httptest server.
@@ -388,6 +402,9 @@ func (f *FakeIdP) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec := idpCode{nonce: q.Get("nonce"), redirectURI: redirect}
+	f.mu.Lock()
+	f.lastChallengeMethod = q.Get("code_challenge_method")
+	f.mu.Unlock()
 	if ch := q.Get("code_challenge"); ch != "" {
 		if q.Get("code_challenge_method") != "S256" {
 			out.Set("error", "invalid_request")
@@ -413,7 +430,17 @@ func (f *FakeIdP) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, secret, basic := r.BasicAuth()
-	if !basic {
+	if basic {
+		// RFC 6749 section 2.3.1: the id and secret are form-encoded before
+		// they are put in the Basic header, so decode them again.
+		var err1, err2 error
+		id, err1 = url.QueryUnescape(id)
+		secret, err2 = url.QueryUnescape(secret)
+		if err1 != nil || err2 != nil {
+			oauthError(w, http.StatusUnauthorized, "invalid_client")
+			return
+		}
+	} else {
 		id, secret = r.PostForm.Get("client_id"), r.PostForm.Get("client_secret")
 	}
 	if id != f.ClientID || subtle.ConstantTimeCompare([]byte(secret), []byte(f.ClientSecret)) != 1 {
@@ -431,6 +458,10 @@ func (f *FakeIdP) handleToken(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	if !ok || rec.redirectURI != r.PostForm.Get("redirect_uri") {
 		oauthError(w, http.StatusBadRequest, "invalid_grant")
+		return
+	}
+	if rec.challenge == "" && f.RequirePKCE {
+		oauthError(w, http.StatusBadRequest, "invalid_grant") // PKCE required, no code_challenge was sent
 		return
 	}
 	if rec.challenge != "" && subtle.ConstantTimeCompare([]byte(PKCEChallenge(r.PostForm.Get("code_verifier"))), []byte(rec.challenge)) != 1 {

@@ -14,6 +14,7 @@ import (
 )
 
 const testRedirect = "http://localhost:9999/auth/callback"
+const testVerifier = "a-long-random-verifier-0123456789-0123456789-abcdefghij"
 
 type idpClaims struct {
 	Sub           string   `json:"sub"`
@@ -44,7 +45,8 @@ func login(t *testing.T, f *FakeIdP, nonce string) (*oidc.IDToken, idpClaims, er
 	}
 	// Build the authorize URL with oauth2 (checks our discovery endpoints), then
 	// follow it without a browser.
-	authURL := cfg.AuthCodeURL("state-1", oidc.Nonce(nonce))
+	verifier := oauth2.GenerateVerifier()
+	authURL := cfg.AuthCodeURL("state-1", oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier))
 	if !strings.HasPrefix(authURL, f.Issuer+"/authorize?") {
 		t.Fatalf("authorize endpoint = %s", authURL)
 	}
@@ -61,7 +63,10 @@ func login(t *testing.T, f *FakeIdP, nonce string) (*oidc.IDToken, idpClaims, er
 	if loc.Query().Get("state") != "state-1" {
 		t.Fatalf("state = %q", loc.Query().Get("state"))
 	}
-	tok, err := cfg.Exchange(ctx, loc.Query().Get("code"))
+	if got := f.LastChallengeMethod(); got != "S256" {
+		t.Fatalf("LastChallengeMethod = %q, want S256", got)
+	}
+	tok, err := cfg.Exchange(ctx, loc.Query().Get("code"), oauth2.VerifierOption(verifier))
 	if err != nil {
 		return nil, idpClaims{}, err
 	}
@@ -217,21 +222,21 @@ func TestFakeIdPCodeRules(t *testing.T) {
 	f := NewFakeIdP(t)
 
 	t.Run("code is single use", func(t *testing.T) {
-		code, state := f.Authorize(t, testRedirect, "st", "n", "")
+		code, state := f.Authorize(t, testRedirect, "st", "n", PKCEChallenge(testVerifier))
 		if state != "st" || code == "" {
 			t.Fatalf("code %q state %q", code, state)
 		}
-		if _, err := f.Exchange(t, code, testRedirect, ""); err != nil {
+		if _, err := f.Exchange(t, code, testRedirect, testVerifier); err != nil {
 			t.Fatalf("first exchange: %v", err)
 		}
-		if _, err := f.Exchange(t, code, testRedirect, ""); err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+		if _, err := f.Exchange(t, code, testRedirect, testVerifier); err == nil || !strings.Contains(err.Error(), "invalid_grant") {
 			t.Fatalf("replay: %v, want invalid_grant", err)
 		}
 	})
 
 	t.Run("redirect_uri must match", func(t *testing.T) {
-		code, _ := f.Authorize(t, testRedirect, "st", "n", "")
-		if _, err := f.Exchange(t, code, "http://evil.test/cb", ""); err == nil {
+		code, _ := f.Authorize(t, testRedirect, "st", "n", PKCEChallenge(testVerifier))
+		if _, err := f.Exchange(t, code, "http://evil.test/cb", testVerifier); err == nil {
 			t.Fatal("exchange with another redirect_uri succeeded")
 		}
 	})
@@ -248,9 +253,72 @@ func TestFakeIdPCodeRules(t *testing.T) {
 		}
 	})
 
-	t.Run("client authentication", func(t *testing.T) {
+	t.Run("RequirePKCE: a code issued without a challenge is refused", func(t *testing.T) {
+		if !f.RequirePKCE {
+			t.Fatal("RequirePKCE should default to true")
+		}
 		code, _ := f.Authorize(t, testRedirect, "st", "n", "")
-		form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {testRedirect}}
+		if got := f.LastChallengeMethod(); got != "" {
+			t.Errorf("LastChallengeMethod = %q, want empty when none was sent", got)
+		}
+		if _, err := f.Exchange(t, code, testRedirect, ""); err == nil || !strings.Contains(err.Error(), "invalid_grant") {
+			t.Fatalf("no code_challenge: %v, want invalid_grant", err)
+		}
+		f2 := NewFakeIdP(t)
+		f2.RequirePKCE = false
+		code, _ = f2.Authorize(t, testRedirect, "st", "n", "")
+		if _, err := f2.Exchange(t, code, testRedirect, ""); err != nil {
+			t.Fatalf("RequirePKCE=false: %v", err)
+		}
+	})
+
+	t.Run("records a non-S256 challenge method", func(t *testing.T) {
+		raw := f.Issuer + "/authorize?response_type=code&client_id=" + f.ClientID +
+			"&redirect_uri=" + url.QueryEscape(testRedirect) + "&code_challenge=x&code_challenge_method=plain&state=s"
+		noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		resp, err := noRedirect.Get(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		if got := f.LastChallengeMethod(); got != "plain" {
+			t.Errorf("LastChallengeMethod = %q, want plain", got)
+		}
+		if loc := resp.Header.Get("Location"); !strings.Contains(loc, "error=invalid_request") {
+			t.Errorf("plain method should be refused: %s", loc)
+		}
+	})
+
+	t.Run("basic auth credentials are form-decoded (RFC 6749 2.3.1)", func(t *testing.T) {
+		f3 := NewFakeIdP(t)
+		f3.ClientID = "app id/1"
+		f3.ClientSecret = "s3cr+t &=é%"
+		code, _ := f3.Authorize(t, testRedirect, "st", "n", PKCEChallenge(testVerifier))
+		form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {testRedirect}, "code_verifier": {testVerifier}}
+		do := func(user, pass string) int {
+			req, _ := http.NewRequest(http.MethodPost, f3.Issuer+"/token", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.SetBasicAuth(user, pass)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			return resp.StatusCode
+		}
+		// Raw (undecoded) values are what a non-compliant client sends: refused.
+		if got := do(f3.ClientID, f3.ClientSecret); got != http.StatusUnauthorized {
+			t.Fatalf("raw credentials: status %d, want 401", got)
+		}
+		// Encoded as the RFC says: accepted (the code was not burned above).
+		if got := do(url.QueryEscape(f3.ClientID), url.QueryEscape(f3.ClientSecret)); got != http.StatusOK {
+			t.Fatalf("form-encoded credentials: status %d, want 200", got)
+		}
+	})
+
+	t.Run("client authentication", func(t *testing.T) {
+		code, _ := f.Authorize(t, testRedirect, "st", "n", PKCEChallenge(testVerifier))
+		form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {testRedirect}, "code_verifier": {testVerifier}}
 		req, _ := http.NewRequest(http.MethodPost, f.Issuer+"/token", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		req.SetBasicAuth(f.ClientID, "wrong")

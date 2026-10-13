@@ -5,6 +5,8 @@ import (
 	"slices"
 	"sort"
 
+	"gopkg.in/yaml.v3"
+
 	"piperoom/internal/events"
 )
 
@@ -18,6 +20,16 @@ import (
 type LayerRights struct {
 	Approvers Principals `yaml:"approvers"`
 	Backup    Principals `yaml:"backup"`
+}
+
+// UnmarshalYAML rejects unknown keys: yaml.Unmarshal ignores them, so a typo
+// such as `backups:` would silently drop the backup.
+func (r *LayerRights) UnmarshalYAML(node *yaml.Node) error {
+	if err := checkKeys(node, "owners", "approvers", "backup"); err != nil {
+		return err
+	}
+	type plain LayerRights // no methods, so Decode does not recurse
+	return node.Decode((*plain)(r))
 }
 
 // This file holds the pure rights helpers that the auth layer calls once it
@@ -44,20 +56,23 @@ const (
 
 // rightsFor returns the approvers and backup for a layer of a pipeline. A
 // pipeline `owners:` entry for the layer replaces the top-level `layers:`
-// entry. An unknown pipeline id falls back to `layers:`.
+// entry. Only an empty pipeline id uses `layers:` alone. A non-empty id that
+// matches no pipeline gets no rights (fail closed): a renamed or removed
+// pipeline must not quietly fall back to the default owners.
 func (o *Owners) rightsFor(pipelineID, layer string) (approvers, backup Principals) {
-	if pipelineID != "" {
-		for i := range o.Pipelines {
-			if o.Pipelines[i].ID != pipelineID {
-				continue
-			}
-			if r, ok := o.Pipelines[i].Owners[layer]; ok {
-				return r.Approvers, r.Backup
-			}
-			break
-		}
+	if pipelineID == "" {
+		return o.Layers[layer], nil
 	}
-	return o.Layers[layer], nil
+	for i := range o.Pipelines {
+		if o.Pipelines[i].ID != pipelineID {
+			continue
+		}
+		if r, ok := o.Pipelines[i].Owners[layer]; ok {
+			return r.Approvers, r.Backup
+		}
+		return o.Layers[layer], nil
+	}
+	return nil, nil
 }
 
 // CanApprove reports whether the session may approve or reject the layer of

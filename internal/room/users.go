@@ -6,6 +6,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 
@@ -47,6 +48,11 @@ func ParseUsers(data []byte) (*Users, error) {
 	for _, user := range f.Users {
 		if user.ID == "" {
 			return nil, fmt.Errorf("room: user with empty id")
+		}
+		// A colon or space in an id would let user "group:x" print like the
+		// principal group:x (LayerOwner labels drop the user: prefix).
+		if strings.ContainsFunc(user.ID, func(r rune) bool { return r == ':' || unicode.IsSpace(r) }) {
+			return nil, fmt.Errorf("room: user id %q: a colon or whitespace is not allowed", user.ID)
 		}
 		if user.Email != "" {
 			if !strings.Contains(user.Email, "@") || strings.ContainsAny(user.Email, " \t\r\n") {

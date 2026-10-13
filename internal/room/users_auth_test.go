@@ -149,6 +149,24 @@ func TestCheckSoloUser(t *testing.T) {
 	}
 }
 
+func TestParseUsersRefusesColonAndSpaceInIDs(t *testing.T) {
+	for _, id := range []string{"group:x", "user:bob", "a b", `a\tb`, "a:"} {
+		src := "users:\n  - {id: \"" + id + "\", name: X}\n"
+		if _, err := ParseUsers([]byte(src)); err == nil || !strings.Contains(err.Error(), "colon or whitespace") {
+			t.Errorf("id %q: error = %v", id, err)
+		}
+	}
+	if _, err := ParseUsers([]byte("users:\n  - {id: priya.k-2_x, name: P}\n")); err != nil {
+		t.Errorf("plain id refused: %v", err)
+	}
+	// The committed users files stay valid.
+	for _, path := range []string{"../../dev/users.yaml", "../../deploy/config/users.example.yaml"} {
+		if _, err := LoadUsers(path); err != nil {
+			t.Errorf("LoadUsers(%s): %v", path, err)
+		}
+	}
+}
+
 func TestParseUsersEmailAndSub(t *testing.T) {
 	u, err := ParseUsers([]byte(`
 users:

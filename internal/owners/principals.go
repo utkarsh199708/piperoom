@@ -92,6 +92,9 @@ func (ps *Principals) UnmarshalYAML(n *yaml.Node) error {
 		if v.Kind != yaml.ScalarNode {
 			return fmt.Errorf("line %d: a principal must be a string like user:<id> or group:<name>", v.Line)
 		}
+		if v.Tag == "!!null" {
+			return fmt.Errorf("line %d: a null item in a principal list; write user:<id> or group:<name>", v.Line)
+		}
 		p, err := ParsePrincipal(v.Value)
 		if err != nil {
 			return fmt.Errorf("line %d: %w", v.Line, err)
