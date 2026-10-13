@@ -139,7 +139,9 @@ func fixedVectorDoc(t *testing.T) (string, []byte) {
 // small Node script (sorted keys, ECMAScript number text, 1e400 as a string),
 // from the document this test builds, so a change to the canonicalization or to
 // the document shape fails here instead of silently changing every hash.
-const fixedVectorSHA256 = "03cab4ddbc8aa8aa07e5511b3cc63c4e64ace9dd959f0a7d6a50e4109a2d31a5"
+// Recomputed the same way when events.Actor gained "verified" (A-ID-2); the
+// same script still gives the old value 03cab4dd...31a5 for the old shape.
+const fixedVectorSHA256 = "8b96e714f1b92f212e550fbde70484b9342f863fc67684bb4c8f2a79d4c65ff1"
 
 func TestExportFixedVector(t *testing.T) {
 	sum, body := fixedVectorDoc(t)

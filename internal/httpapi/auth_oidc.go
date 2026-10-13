@@ -169,6 +169,15 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	if claims.GroupsMissing {
 		s.log.Warn("auth: no groups claim in id token", "user", userID, "iss", claims.Issuer, "claim", s.oidc.GroupsClaim())
 	}
+	// A person who is not in users.yaml chose their own name in the IdP. One
+	// that renders like a users.yaml person is stored with the email (or id)
+	// appended, not refused: they may really share the name (design §2.1,
+	// security audit A-ID-2). Only ids are logged; the name is the IdP's text.
+	name, resembles := s.svc.ShownName(userID, name, verifiedEmail(claims))
+	if resembles != "" {
+		s.log.Warn("auth: IdP display name looks like a users.yaml person; shown with the email or id appended",
+			"user", userID, "resembles", resembles, "iss", claims.Issuer)
+	}
 
 	token, hash, err := auth.NewToken()
 	if err != nil {
@@ -286,7 +295,8 @@ func isASCII(s string) bool {
 }
 
 // displayName is the users.yaml name when the id is in users.yaml, else the
-// name claim, else the email, else the id.
+// name claim, else the email if it is verified, else the id. An unverified
+// email is never shown as a name: anyone can put priya@example.com there.
 func (s *Server) displayName(id string, c auth.Claims) string {
 	if u, ok := s.svc.LookupUser(id); ok && u.Name != "" {
 		return u.Name
@@ -294,7 +304,7 @@ func (s *Server) displayName(id string, c auth.Claims) string {
 	switch {
 	case c.Name != "":
 		return c.Name
-	case c.Email != "":
+	case verifiedEmail(c) != "":
 		return c.Email
 	}
 	return id

@@ -115,20 +115,61 @@ func (s *Service) LookupPerson(ctx context.Context, id string) (User, error) {
 	if role, ok := s.RoleFor(sess.UserID, sess.Groups); !ok || role != RoleMember {
 		return User{}, errNotAPerson()
 	}
-	name := sess.Name
-	if name == "" {
-		name = sess.UserID
-	}
+	name, _ := s.ShownName(sess.UserID, sess.Name, sess.Email)
 	return User{ID: sess.UserID, Name: name, Groups: sess.Groups, GroupsMissing: sess.GroupsMissing}, nil
+}
+
+// serverActorNames are the names the server's own actors write under. A person
+// may not pass for them either.
+var serverActorNames = []string{events.AgentActor.Name, systemActor.Name, executorActor.Name}
+
+// ShownName is the name the room shows for a person (design section 2.1,
+// security audit A-ID-2). A users.yaml person is shown with their users.yaml
+// name. Anyone else chose their own name in the IdP, so when that name renders
+// like a users.yaml id, name or email, or like a server actor (auth.Skeleton),
+// it is shown as "<name> (<email>)", or "<name> (<id>)" without a verified
+// email. resembles is the users.yaml id (or server actor name) it looks like,
+// "" when none. An empty name becomes the email, else the id. The result is
+// stable: a name that already carries the suffix no longer looks like anyone.
+func (s *Service) ShownName(id, name, email string) (shown, resembles string) {
+	if u, ok := s.users.Get(id); ok {
+		return u.Name, ""
+	}
+	if name == "" {
+		name = email
+	}
+	if name == "" {
+		return id, ""
+	}
+	if u, ok := s.users.Lookalike(name); ok {
+		resembles = u.ID
+	} else {
+		for _, n := range serverActorNames {
+			if auth.LooksLike(name, n) {
+				resembles = n
+				break
+			}
+		}
+	}
+	if resembles == "" {
+		return name, ""
+	}
+	tag := email
+	if tag == "" {
+		tag = id
+	}
+	return name + " (" + tag + ")", resembles
 }
 
 // PersonEntry is one entry of GET /api/people: someone a driver may give control or a
 // hand-off to. Email is set only for an IdP user whose token said
-// email_verified; users.yaml users have none.
+// email_verified; users.yaml users have none. Verified is true for users.yaml
+// users only (design section 2.1).
 type PersonEntry struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Email string `json:"email,omitempty"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Email    string `json:"email,omitempty"`
+	Verified bool   `json:"verified"`
 }
 
 // maxPeople bounds the list.
@@ -143,7 +184,7 @@ func (s *Service) People(ctx context.Context) ([]PersonEntry, error) {
 	out := make([]PersonEntry, 0, len(s.users.All()))
 	listed := map[string]bool{}
 	for _, u := range s.users.All() {
-		out = append(out, PersonEntry{ID: u.ID, Name: u.Name})
+		out = append(out, PersonEntry{ID: u.ID, Name: u.Name, Verified: true})
 		listed[u.ID] = true
 	}
 	if s.sessions == nil {
@@ -161,10 +202,7 @@ func (s *Service) People(ctx context.Context) ([]PersonEntry, error) {
 		if role, ok := s.RoleFor(sess.UserID, sess.Groups); !ok || role != RoleMember {
 			continue
 		}
-		name := sess.Name
-		if name == "" {
-			name = sess.UserID
-		}
+		name, _ := s.ShownName(sess.UserID, sess.Name, sess.Email)
 		idp = append(idp, PersonEntry{ID: sess.UserID, Name: name, Email: sess.Email})
 	}
 	sort.Slice(idp, func(i, j int) bool {
@@ -206,7 +244,7 @@ func (s *Service) authorizeLayer(pipelineID string, user User, layer, confirm st
 			return g, nil
 		}
 	}
-	if user.OwnsLayer(layer) && !s.userLayersBlocked(pipelineID, layer) {
+	if user.OwnsLayer(layer) && !s.userLayersBlocked(pipelineID, layer) && s.ownersNameUser(layer, user.ID) {
 		return owners.GrantUserPrefix + user.ID, nil
 	}
 	if user.GroupsMissing && s.layerListsGroup(pipelineID, layer) {
@@ -240,6 +278,25 @@ func (s *Service) userLayersBlocked(pipelineID, layer string) bool {
 	}
 	_, over := p.Owners[layer]
 	return over
+}
+
+// ownersNameUser reports whether a users.yaml layer may stand (design section
+// 2.3, security audit A-AP-3): the owners file's layers: has no entry for the
+// layer (no owners file, or one without layers:, as in unit tests; the start
+// check refuses that in a real config), or the entry names this same user as a
+// user: principal. Where owners.yaml names a layer's approvers, a users.yaml
+// claim cannot add one, not even to a layer that lists a group: the server
+// cannot vouch for that membership. ValidateUsers refuses such a config at
+// start-up; this keeps the rule for a config that never went through it.
+func (s *Service) ownersNameUser(layer, userID string) bool {
+	if s.owners == nil {
+		return true
+	}
+	ps, ok := s.owners.Layers[layer]
+	if !ok || len(ps) == 0 {
+		return true
+	}
+	return ps.Contains(owners.Principal{Kind: owners.KindUser, Name: userID})
 }
 
 // layerListsGroup reports whether the layer's approvers or backups for the

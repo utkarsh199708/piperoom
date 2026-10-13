@@ -536,10 +536,16 @@ func TestAttack_ExportAccessAndContent(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	doc := string(body)
 	sessCookie := priya.Value
-	for _, leak := range []string{sessCookie, "priya@example.com", "audit@example.com", "token_hash", "security", "dataeng-oncall", e.idp.ClientSecret} {
+	for _, leak := range []string{sessCookie, "audit@example.com", "ksenia@example.com", "token_hash", "security", "dataeng-oncall", e.idp.ClientSecret} {
 		if leak != "" && strings.Contains(doc, leak) {
 			t.Errorf("the export contains %q", leak)
 		}
+	}
+	// The one email in the file is the approver's own, recorded with their
+	// decision (design section 2.1, A-ID-2): once in the approval.given event
+	// and once in approvals[].identity.
+	if n := strings.Count(doc, `"email":"priya@example.com"`); n != 2 {
+		t.Errorf("the approver's email appears %d times, want 2 (the event and approvals[].identity)", n)
 	}
 	if !strings.Contains(doc, `"params_hash"`) {
 		t.Error("the export has no params_hash")
