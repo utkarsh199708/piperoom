@@ -125,15 +125,15 @@ func (s *Store) Since(ctx context.Context, roomID string, afterSeq int64, limit 
 	if !ok {
 		return nil, fmt.Errorf("memstore: room %q not found: %w", roomID, store.ErrNotFound)
 	}
-	out := []events.Event{}
-	for _, e := range log.events {
-		if e.Seq > afterSeq {
-			out = append(out, e)
-			if len(out) >= limit {
-				break
-			}
-		}
-	}
+	// The log is in seq order (Append assigns seqs under s.mu), so a binary
+	// search finds the first event after afterSeq. Every live subscriber calls
+	// Since on every append while holding the store-wide lock, so a linear scan
+	// of the whole room log made fan-out O(subscribers x room length).
+	evs := log.events
+	i := sort.Search(len(evs), func(i int) bool { return evs[i].Seq > afterSeq })
+	n := min(len(evs)-i, limit)
+	out := make([]events.Event, n)
+	copy(out, evs[i:i+n])
 	return out, nil
 }
 
@@ -142,7 +142,7 @@ func (s *Store) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	sub := &subscriber{roomID: roomID, lastSeq: afterSeq, ch: make(chan events.Event, 256), wake: make(chan struct{}, 1)}
+	sub := &subscriber{roomID: roomID, lastSeq: afterSeq, ch: make(chan events.Event, store.SubscribeBuffer), wake: make(chan struct{}, 1)}
 	s.mu.Lock()
 	log, ok := s.rooms[roomID]
 	if !ok {

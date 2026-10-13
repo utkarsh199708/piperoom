@@ -495,6 +495,15 @@ func scanEvent(roomID string, row scanner) (events.Event, error) {
 	return e, nil
 }
 
+// SubscribeBuffer is the channel capacity of one Subscribe call. The
+// subscriber goroutine blocks on a full channel and re-reads from its last
+// seq, so the size only trades memory for burst absorption; nothing is lost.
+// Each slot holds an events.Event by value (136 B), and the WebSocket gateway
+// opens one subscription per connection and drains it into its own send
+// buffer straight away, so 256 slots cost ~35 KB per open socket for no
+// latency benefit (reviews/load-test-2026-10.md).
+const SubscribeBuffer = 16
+
 // Subscribe replays events after afterSeq then streams new ones live from the
 // shared LISTEN hub. The channel closes when ctx ends.
 func (s *PG) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-chan events.Event, error) {
@@ -504,7 +513,7 @@ func (s *PG) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-ch
 	sub := &subscriber{
 		roomID:  roomID,
 		lastSeq: afterSeq,
-		ch:      make(chan events.Event, 256),
+		ch:      make(chan events.Event, SubscribeBuffer),
 		wake:    make(chan struct{}, 1),
 	}
 	s.hub.register(sub)
