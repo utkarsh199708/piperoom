@@ -145,6 +145,7 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	defer cancel()
 
 	info := b.collect(cctx, p)
+	info.matchers = b.sourceMatchers(p, info)
 
 	// Topics and data edges come from config and metadata collect already
 	// read (edges.go); the schema subjects follow from the topics' users.
@@ -271,16 +272,14 @@ func (b *builder) sourceNode(p owners.Pipeline, tbl string, info *collected) Nod
 }
 
 // slotName finds the replication slot name for the connector that streams tbl.
+// info.matchers holds only readable source connectors: a sink has no include
+// list, which would read as "streams every table" and lend the table the
+// default slot name.
 func (b *builder) slotName(p owners.Pipeline, tbl string, info *collected) string {
 	for _, cn := range p.Connectors {
-		snap, ok := info.connect[cn]
-		// A sink has no include list, which would read as "streams every
-		// table" and lend the table the default slot name.
-		if !ok || snap.err != nil || isSinkConnector(snap) {
-			continue
-		}
-		if streamsTable(snap.config, tbl, b.warnBadListEntry) {
-			return slotNameFor(cn, snap.config)
+		m, ok := info.matchers[cn]
+		if ok && m.streams(tbl) {
+			return slotNameFor(cn, info.connect[cn].config)
 		}
 	}
 	return ""
@@ -413,13 +412,15 @@ func (p listPattern) matches(id string) bool {
 type listMatcher struct {
 	includes []listPattern
 	excludes []listPattern
+	// exact is false when some entry may not match the way Java's regex
+	// engine would (see compileList); what the lists prove is then unconfirmed.
+	exact bool
 }
 
 func newListMatcher(include, exclude string, warn func(string)) listMatcher {
-	return listMatcher{
-		includes: compileList(include, warn),
-		excludes: compileList(exclude, warn),
-	}
+	inc, incExact := compileList(include, warn)
+	exc, excExact := compileList(exclude, warn)
+	return listMatcher{includes: inc, excludes: exc, exact: incExact && excExact}
 }
 
 func (m listMatcher) matches(id string) bool {
@@ -443,30 +444,39 @@ func anyPatternMatches(ps []listPattern, id string) bool {
 // identifier (Strings.setOfRegex + Matcher.matches in its Predicates), so
 // every entry is compiled as "(?i)^(?:entry)$". Entries without regex
 // metacharacters take the literal fast path and match case-insensitively via
-// EqualFold. warn, when non-nil, is called for each entry that fails to
-// compile; callers dedupe.
-func compileList(list string, warn func(string)) []listPattern {
+// EqualFold. An entry compileConfigRegex refuses (RE2 rejects it, or Go may
+// not give Java's answer) is compared literally and reported to warn, when
+// non-nil; callers dedupe. A list longer than maxConfigRegex compiles none of
+// its regex entries. Either way exact is false.
+func compileList(list string, warn func(string)) (patterns []listPattern, exact bool) {
 	entries := splitCSV(list)
 	if len(entries) == 0 {
-		return nil
+		return nil, true
 	}
+	tooLong := len(list) > maxConfigRegex
+	exact = !tooLong
 	out := make([]listPattern, 0, len(entries))
 	for _, e := range entries {
 		if !strings.ContainsAny(e, regexMetaChars) {
 			out = append(out, listPattern{literal: e})
 			continue
 		}
-		re, err := regexp.Compile("(?i)^(?:" + e + ")$")
-		if err != nil {
+		if tooLong {
+			out = append(out, listPattern{literal: e})
+			continue
+		}
+		re, _, ok := compileConfigRegex("(?i)", e)
+		if !ok {
 			if warn != nil {
 				warn(e)
 			}
+			exact = false
 			out = append(out, listPattern{literal: e})
 			continue
 		}
 		out = append(out, listPattern{re: re})
 	}
-	return out
+	return out, exact
 }
 
 // warnBadListEntry reports once per builder instance that a list entry did not
@@ -487,7 +497,7 @@ func (b *builder) warnBadListEntry(entry string) {
 	if log == nil {
 		log = slog.Default()
 	}
-	log.Warn("topology: include/exclude list entry is not a valid regex, comparing literally", "entry", entry)
+	log.Warn("topology: include/exclude list entry is not a regex Go can evaluate like Java, comparing literally", "entry", entry)
 }
 
 // streamMatcher decides which pipeline tables a connector streams, following
@@ -510,6 +520,9 @@ func (m streamMatcher) streams(tbl string) bool {
 	return m.tables.matches(tbl) && m.schemas.matches(schema)
 }
 
+// exact reports whether streams gives the connector's own answer.
+func (m streamMatcher) exact() bool { return m.tables.exact && m.schemas.exact }
+
 // streamsTable reports whether a connector with the given config streams tbl.
 // An empty include list streams every table in the pipeline. warn, when
 // non-nil, receives invalid list entries for reporting.
@@ -529,24 +542,6 @@ func slotNameFor(_ string, cfg map[string]string) string {
 // unknown, so the fully-qualified table names stand in for the topics.
 func fallbackTopics(tables []string) []string {
 	return append([]string(nil), tables...)
-}
-
-// deriveTopics returns the Debezium topic names for the pipeline tables this
-// connector streams: <topic.prefix>.<schema>.<table>. warn is passed to the
-// matching for invalid list entries.
-func deriveTopics(cfg map[string]string, tables []string, warn func(string)) []string {
-	prefix := cfg["topic.prefix"]
-	if prefix == "" {
-		return nil
-	}
-	m := newStreamMatcher(cfg, warn)
-	var topics []string
-	for _, t := range tables {
-		if m.streams(t) {
-			topics = append(topics, prefix+"."+t)
-		}
-	}
-	return topics
 }
 
 func splitCSV(s string) []string {

@@ -155,8 +155,10 @@ func TestSchemaDependsOnInheritsInferredDataEdge(t *testing.T) {
 	}
 }
 
-// Schema Registry unreachable: a subject the connector's own converter config
-// proves is still a node, unknown, with the dependency kept.
+// Schema Registry unreachable: every real topic gets both subjects as unknown
+// nodes, so the outage shows in the map. A dependency the connector's own
+// config proves stays mapped; one its config rules out is not drawn; the rest
+// are unconfirmed.
 func TestSchemaSubjectRegistryUnreachable(t *testing.T) {
 	cfg := map[string]string{
 		"topic.prefix": "pg", "table.include.list": "public.orders",
@@ -165,16 +167,15 @@ func TestSchemaSubjectRegistryUnreachable(t *testing.T) {
 		"key.converter":                       "org.apache.kafka.connect.storage.StringConverter",
 	}
 	g := mustBuild(t, srBuilder(cfg, &fakeSR{subjectsErr: errors.New("dial tcp: connection refused")}))
-	n := g.mustNode(t, "sr:pg.public.orders-value")
-	if n.Health != HealthUnknown || n.Facts["error"] != "unreachable" || len(n.Facts) != 1 {
-		t.Fatalf("node = %+v, want unknown with error=unreachable", n)
+	for _, id := range []string{"sr:pg.public.orders-key", "sr:pg.public.orders-value"} {
+		n := g.mustNode(t, id)
+		if n.Health != HealthUnknown || n.Facts["error"] != "unreachable" || len(n.Facts) != 1 {
+			t.Fatalf("node = %+v, want unknown with error=unreachable", n)
+		}
 	}
-	if _, ok := g.node("sr:pg.public.orders-key"); ok {
-		t.Fatal("key subject drawn although the key converter is not a registry converter")
-	}
-	// The connector's config proves its dependency; the group's is assumed.
 	wantDeps := []string{
 		"connect:pg-orders-connector>sr:pg.public.orders-value dep",
+		"group:order-sync>sr:pg.public.orders-key dep ~",
 		"group:order-sync>sr:pg.public.orders-value dep ~",
 	}
 	if got := depEdges(g); !slices.Equal(got, wantDeps) {
@@ -182,29 +183,30 @@ func TestSchemaSubjectRegistryUnreachable(t *testing.T) {
 	}
 }
 
-// A subject this builder saw before stays in the map during an outage, as
-// unknown, with every dependency unconfirmed.
-func TestSchemaSubjectRememberedDuringOutage(t *testing.T) {
-	sr := &fakeSR{
-		subjects: []string{"pg.public.orders-value"},
-		versions: map[string][]int{"pg.public.orders-value": {1}},
-		compat:   map[string]string{"pg.public.orders-value": "BACKWARD"},
+// A fresh builder (cmd/investigate, a server restart) with the registry down
+// and converters set on the Connect worker (as in the dev stack) must still
+// show the registry: it fails closed, not open.
+func TestSchemaSubjectOutageWithoutConfigProof(t *testing.T) {
+	g := mustBuild(t, srBuilder(nil, &fakeSR{subjectsErr: errors.New("timeout")}))
+	var ids []string
+	for _, n := range g.Nodes {
+		if n.Kind == KindSchemaSubject {
+			ids = append(ids, n.ID)
+			if n.Health != HealthUnknown || n.Facts["error"] != "unreachable" {
+				t.Errorf("node = %+v, want unknown", n)
+			}
+		}
 	}
-	b := srBuilder(nil, sr)
-	mustBuild(t, b)
-	sr.subjectsErr = errors.New("timeout")
-	g := mustBuild(t, b)
-	if n := g.mustNode(t, "sr:pg.public.orders-value"); n.Health != HealthUnknown || n.Facts["error"] != "unreachable" {
-		t.Fatalf("node = %+v", n)
+	if !slices.Equal(ids, []string{"sr:pg.public.orders-key", "sr:pg.public.orders-value"}) {
+		t.Fatalf("subject nodes = %v", ids)
 	}
 	for _, s := range depEdges(g) {
 		if !strings.HasSuffix(s, " ~") {
-			t.Errorf("edge %s is mapped during an outage", s)
+			t.Errorf("edge %s is mapped during an outage without config proof", s)
 		}
 	}
-	// A fresh builder has seen nothing, so it draws no subject at all.
-	if g := mustBuild(t, srBuilder(nil, sr)); len(depEdges(g)) != 0 {
-		t.Fatalf("fresh builder drew subjects during an outage: %v", depEdges(g))
+	if len(depEdges(g)) != 4 {
+		t.Fatalf("depends_on edges = %v, want connector and group on both subjects", depEdges(g))
 	}
 }
 
@@ -225,6 +227,35 @@ func TestSchemaSubjectNotInPlay(t *testing.T) {
 	}
 }
 
+// A connector whose own converter is not a registry converter does not
+// depend on the subject, even when the registry lists it; the group, whose
+// deserializer the builder cannot see, still does. When nobody can use the
+// subject it is not drawn.
+func TestSchemaSubjectRuledOutByConverter(t *testing.T) {
+	sr := &fakeSR{
+		subjects: []string{"pg.public.orders-key", "pg.public.orders-value"},
+		versions: map[string][]int{"pg.public.orders-key": {1}, "pg.public.orders-value": {1}},
+	}
+	cfg := map[string]string{
+		"topic.prefix":    "pg",
+		"value.converter": "org.apache.kafka.connect.json.JsonConverter",
+		"key.converter":   "org.apache.kafka.connect.storage.StringConverter",
+	}
+	want := []string{
+		"group:order-sync>sr:pg.public.orders-key dep",
+		"group:order-sync>sr:pg.public.orders-value dep",
+	}
+	if got := depEdges(mustBuild(t, srBuilder(cfg, sr))); !slices.Equal(got, want) {
+		t.Fatalf("depends_on edges:\n got %v\nwant %v", got, want)
+	}
+	// Only the connector uses the topic: no subject at all.
+	b := srBuilder(cfg, sr)
+	b.o.Pipelines[0].ConsumerGroups = nil
+	if g := mustBuild(t, b); len(depEdges(g)) != 0 {
+		t.Fatalf("subjects drawn for a JSON-only pipeline: %v", depEdges(g))
+	}
+}
+
 func TestSchemaSubjectConfiguredButMissing(t *testing.T) {
 	cfg := map[string]string{"topic.prefix": "pg", "value.converter": "io.confluent.connect.avro.AvroConverter"}
 	sr := &fakeSR{}
@@ -239,31 +270,37 @@ func TestSchemaSubjectConfiguredButMissing(t *testing.T) {
 }
 
 func TestSchemaSubjectConverterProof(t *testing.T) {
+	const avro = "io.confluent.connect.avro.AvroConverter"
 	cases := []struct {
 		name string
+		part string
 		cfg  map[string]string
-		want bool
+		want regProof
 	}{
-		{"worker default converter", map[string]string{}, false},
-		{"avro", map[string]string{"value.converter": "io.confluent.connect.avro.AvroConverter"}, true},
-		{"protobuf", map[string]string{"value.converter": "io.confluent.connect.protobuf.ProtobufConverter"}, true},
-		{"json schema", map[string]string{"value.converter": "io.confluent.connect.json.JsonSchemaConverter"}, true},
-		{"plain json", map[string]string{"value.converter": "org.apache.kafka.connect.json.JsonConverter"}, false},
-		{"url alone is not a converter", map[string]string{"value.converter.schema.registry.url": "http://sr"}, false},
-		{"topic name strategy", map[string]string{"value.converter": "io.confluent.connect.avro.AvroConverter", "value.converter.value.subject.name.strategy": "io.confluent.kafka.serializers.subject.TopicNameStrategy"}, true},
-		{"record name strategy", map[string]string{"value.converter": "io.confluent.connect.avro.AvroConverter", "value.converter.value.subject.name.strategy": "io.confluent.kafka.serializers.subject.RecordNameStrategy"}, false},
+		{"worker default converter", "value", map[string]string{}, regUnknown},
+		{"avro", "value", map[string]string{"value.converter": avro}, regYes},
+		{"protobuf", "value", map[string]string{"value.converter": "io.confluent.connect.protobuf.ProtobufConverter"}, regYes},
+		{"json schema", "value", map[string]string{"value.converter": "io.confluent.connect.json.JsonSchemaConverter"}, regYes},
+		{"plain json", "value", map[string]string{"value.converter": "org.apache.kafka.connect.json.JsonConverter"}, regNo},
+		{"string", "key", map[string]string{"key.converter": "org.apache.kafka.connect.storage.StringConverter"}, regNo},
+		{"url alone is not a converter", "value", map[string]string{"value.converter.schema.registry.url": "http://sr"}, regUnknown},
+		{"topic name strategy", "value", map[string]string{"value.converter": avro, "value.converter.value.subject.name.strategy": "io.confluent.kafka.serializers.subject.TopicNameStrategy"}, regYes},
+		{"record name strategy", "value", map[string]string{"value.converter": avro, "value.converter.value.subject.name.strategy": "io.confluent.kafka.serializers.subject.RecordNameStrategy"}, regNo},
+		// The key side reads its own strategy key, not the value's.
+		{"key record name strategy", "key", map[string]string{"key.converter": avro, "key.converter.key.subject.name.strategy": "io.confluent.kafka.serializers.subject.RecordNameStrategy"}, regNo},
+		{"key ignores value strategy", "key", map[string]string{"key.converter": avro, "key.converter.value.subject.name.strategy": "io.confluent.kafka.serializers.subject.RecordNameStrategy"}, regYes},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			info := &collected{connect: map[string]connectSnapshot{"c": {config: tc.cfg}}}
-			if got := usesRegistry(info, "connect:c", "value"); got != tc.want {
-				t.Fatalf("usesRegistry = %v, want %v", got, tc.want)
+			if got := registryProof(info, "connect:c", tc.part); got != tc.want {
+				t.Fatalf("registryProof = %v, want %v", got, tc.want)
 			}
 		})
 	}
 	info := &collected{connect: map[string]connectSnapshot{"c": {err: errors.New("down")}}}
-	if usesRegistry(info, "connect:c", "value") || usesRegistry(info, "group:g", "value") {
-		t.Fatal("an unreadable connector or a group proved a registry dependency")
+	if registryProof(info, "connect:c", "value") != regUnknown || registryProof(info, "group:g", "value") != regUnknown {
+		t.Fatal("an unreadable connector or a group proved or ruled out a registry dependency")
 	}
 }
 
@@ -322,13 +359,19 @@ func TestSchemaRegisteredRecently(t *testing.T) {
 		versions []int
 		recent   string
 		health   Health
-		seen     string
+		seen     string // new_version_seen
+		deleted  string // version_deleted_seen
 	}{
-		{0, []int{1, 2}, "unknown", HealthOK, ""},                // first reading: no baseline
-		{30 * time.Minute, []int{1, 2}, "unknown", HealthOK, ""}, // watched less than the window
-		{20 * time.Minute, []int{1, 2, 3}, "true", HealthWarn, "0s ago"},
-		{10 * time.Minute, []int{1, 2, 3}, "true", HealthWarn, "10m ago"},
-		{time.Hour, []int{1, 2, 3}, "false", HealthOK, ""}, // change is older than the window
+		{0, []int{1, 2}, "unknown", HealthOK, "", ""},                // first reading: no baseline
+		{30 * time.Minute, []int{1, 2}, "unknown", HealthOK, "", ""}, // watched less than the window
+		{20 * time.Minute, []int{1, 2, 3}, "true", HealthWarn, "0s ago", ""},
+		{10 * time.Minute, []int{1, 2, 3}, "true", HealthWarn, "10m ago", ""},
+		{50 * time.Minute, []int{1, 2, 3}, "false", HealthOK, "", ""}, // exactly one window after the change: no longer recent
+		// The latest version is deleted: a change, but not a registration.
+		{5 * time.Minute, []int{1, 2}, "false", HealthWarn, "", "0s ago"},
+		{time.Hour, []int{1, 2}, "false", HealthOK, "", ""},
+		// Registered again after the deletion.
+		{time.Minute, []int{1, 2, 4}, "true", HealthWarn, "0s ago", ""},
 	}
 	for i, s := range steps {
 		clock = clock.Add(s.advance)
@@ -336,8 +379,9 @@ func TestSchemaRegisteredRecently(t *testing.T) {
 		sr.versions["pg.public.orders-value"] = s.versions
 		sr.mu.Unlock()
 		n := read()
-		if n.Facts["registered_recently"] != s.recent || n.Health != s.health || n.Facts["new_version_seen"] != s.seen {
-			t.Fatalf("step %d: node = %s %v, want registered_recently=%s health=%s new_version_seen=%q", i, n.Health, n.Facts, s.recent, s.health, s.seen)
+		if n.Facts["registered_recently"] != s.recent || n.Health != s.health || n.Facts["new_version_seen"] != s.seen || n.Facts["version_deleted_seen"] != s.deleted {
+			t.Fatalf("step %d: node = %s %v, want registered_recently=%s health=%s new_version_seen=%q version_deleted_seen=%q",
+				i, n.Health, n.Facts, s.recent, s.health, s.seen, s.deleted)
 		}
 	}
 }

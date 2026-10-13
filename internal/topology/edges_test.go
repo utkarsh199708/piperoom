@@ -3,6 +3,7 @@ package topology
 import (
 	"context"
 	"errors"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -208,6 +209,17 @@ func TestBuildSinkConnectorEdges(t *testing.T) {
 			want: []string{"connect:orders-sink>wh:analytics.orders ~", "topic:pg.public.orders>connect:orders-sink"},
 		},
 		{
+			// Connect matches the whole name: a prefix of it is no match.
+			name: "topics regex must match the whole name",
+			sink: map[string]string{"connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector", "topics.regex": `pg\.public`},
+			want: []string{"connect:orders-sink>wh:analytics.orders ~"},
+		},
+		{
+			name: "topics regex Go may read differently",
+			sink: map[string]string{"connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector", "topics.regex": `pg[[:alpha:].]*`},
+			want: []string{"connect:orders-sink>wh:analytics.orders ~", "topic:pg.public.orders>connect:orders-sink ~"},
+		},
+		{
 			name: "topics regex names another topic",
 			sink: map[string]string{"connector.class": "io.confluent.connect.jdbc.JdbcSinkConnector", "topics.regex": `other\..*`},
 			want: []string{"connect:orders-sink>wh:analytics.orders ~"},
@@ -392,6 +404,44 @@ func TestRouteTopics(t *testing.T) {
 			map[string]string{"transforms": "o", "transforms.o.type": "io.debezium.transforms.outbox.EventRouter"},
 			[]string{"a"}, []string{"a"}, false,
 		},
+		{
+			// Java: matches() succeeds through the second branch, then
+			// replaceFirst searches again from the start and the first branch
+			// wins, leaving the "s".
+			"replaceFirst searches again",
+			map[string]string{"transforms": "r", "transforms.r.type": regexRouterClass, "transforms.r.regex": `pg\.public\.order|pg\.public\.orders`, "transforms.r.replacement": "x"},
+			[]string{"pg.public.orders"}, []string{"xs"}, true,
+		},
+		{
+			"unknown named group",
+			map[string]string{"transforms": "r", "transforms.r.type": regexRouterClass, "transforms.r.regex": `pg\.(.*)`, "transforms.r.replacement": "cdc.${nosuch}"},
+			[]string{"pg.a"}, []string{"pg.a"}, false,
+		},
+		{
+			"named group",
+			map[string]string{"transforms": "r", "transforms.r.type": regexRouterClass, "transforms.r.regex": `pg\.(?<tbl>.*)`, "transforms.r.replacement": "cdc.${tbl}"},
+			[]string{"pg.a"}, []string{"cdc.a"}, true,
+		},
+		{
+			"POSIX bracket reads differently in Java",
+			map[string]string{"transforms": "r", "transforms.r.type": regexRouterClass, "transforms.r.regex": `pg[[:alpha:]]*`, "transforms.r.replacement": "x"},
+			[]string{"pgab"}, []string{"pgab"}, false,
+		},
+		{
+			"class intersection reads differently in Java",
+			map[string]string{"transforms": "r", "transforms.r.type": regexRouterClass, "transforms.r.regex": `pg[a-z&&[^b]]*`, "transforms.r.replacement": "x"},
+			[]string{"pga"}, []string{"pga"}, false,
+		},
+		{
+			"regex over 4 KiB",
+			map[string]string{"transforms": "r", "transforms.r.type": regexRouterClass, "transforms.r.regex": strings.Repeat("a", maxConfigRegex+1), "transforms.r.replacement": "x"},
+			[]string{"a"}, []string{"a"}, false,
+		},
+		{
+			"only valid once wrapped",
+			map[string]string{"transforms": "r", "transforms.r.type": regexRouterClass, "transforms.r.regex": `a)|(b`, "transforms.r.replacement": "x"},
+			[]string{"a"}, []string{"a"}, false,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -406,26 +456,30 @@ func TestRouteTopics(t *testing.T) {
 func TestJavaReplacement(t *testing.T) {
 	cases := []struct {
 		in      string
-		groups  int
+		regex   string
 		want    string
 		wantErr bool
 	}{
-		{"cdc.$1", 1, "cdc.${1}", false},
-		{"$1x", 1, "${1}x", false},
-		{"$12", 1, "${1}2", false}, // Java stops at the last digit that names a group
-		{"$12", 12, "${12}", false},
-		{"${name}.x", 1, "${name}.x", false},
-		{`a\$b`, 0, "a$$b", false},
-		{`a\\b`, 0, `a\b`, false},
-		{"$2", 1, "", true},
-		{"a$", 0, "", true},
-		{`a\`, 0, "", true},
-		{"${open", 1, "", true},
+		{"cdc.$1", `(a)`, "cdc.${1}", false},
+		{"$1x", `(a)`, "${1}x", false},
+		{"$12", `(a)`, "${1}2", false}, // Java stops at the last digit that names a group
+		{"$12", `(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)(l)`, "${12}", false},
+		{"${name}.x", `(?<name>a)`, "${name}.x", false},
+		{"${n1}", `(?P<n1>a)`, "${n1}", false},
+		{`a\$b`, `a`, "a$$b", false},
+		{`a\\b`, `a`, `a\b`, false},
+		{"$2", `(a)`, "", true},
+		{"a$", `a`, "", true},
+		{`a\`, `a`, "", true},
+		{"${open", `(a)`, "", true},
+		{"${1}", `(a)`, "", true},             // Java names must start with a letter
+		{"${nosuch}", `(?<name>a)`, "", true}, // no such group
+		{"${a-b}", `(a)`, "", true},           // not a group name
 	}
 	for _, tc := range cases {
-		got, err := javaReplacement(tc.in, tc.groups)
+		got, err := javaReplacement(tc.in, regexp.MustCompile(tc.regex))
 		if (err != nil) != tc.wantErr || got != tc.want {
-			t.Errorf("javaReplacement(%q, %d) = %q, %v; want %q, err %v", tc.in, tc.groups, got, err, tc.want, tc.wantErr)
+			t.Errorf("javaReplacement(%q, %s) = %q, %v; want %q, err %v", tc.in, tc.regex, got, err, tc.want, tc.wantErr)
 		}
 	}
 }

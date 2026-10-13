@@ -16,6 +16,39 @@ import (
 // the agent treats it as a hypothesis. It never draws the old cross product
 // (every table to every connector, every topic to every group) as proven:
 // with two connectors or two groups that showed data flows that do not exist.
+//
+// Topic names come from connector config, which the map prints into the
+// model's prompt, so a derived or routed name is used only when it is a legal
+// Kafka topic name (dlq.ValidTopic): a name with a newline or a space could
+// otherwise forge lines of the map.
+
+// maxConfigRegex caps a regex read from connector config. A longer one is not
+// evaluated, and what it would prove stays unconfirmed.
+const maxConfigRegex = 4 << 10
+
+// javaRegexSafe reports whether RE2 can be trusted to give java.util.regex's
+// answer for a config pattern: not too long, and no POSIX bracket ("[:") or
+// class intersection ("&&"), which the two engines read differently.
+func javaRegexSafe(expr string) bool {
+	return len(expr) <= maxConfigRegex && !strings.Contains(expr, "[:") && !strings.Contains(expr, "&&")
+}
+
+// compileConfigRegex compiles a config pattern for whole-name matching (whole,
+// Java's Matcher.matches, with flags such as "(?i)" in front) and as written
+// (bare, for a search), or reports that it cannot be trusted (javaRegexSafe,
+// or RE2 rejects it). expr must compile on its own: "a)|(b" only parses once
+// wrapped, and Java refuses it.
+func compileConfigRegex(flags, expr string) (whole, bare *regexp.Regexp, ok bool) {
+	if !javaRegexSafe(expr) {
+		return nil, nil, false
+	}
+	bare, err := regexp.Compile(expr)
+	if err != nil {
+		return nil, nil, false
+	}
+	whole, err = regexp.Compile(flags + "^(?:" + expr + ")$")
+	return whole, bare, err == nil
+}
 
 // flowPlan is the data-flow half of a graph: which topics exist, which are
 // placeholders, and every data edge with how it is known.
@@ -33,6 +66,58 @@ func isSinkConnector(snap connectSnapshot) bool {
 		return true
 	}
 	return strings.TrimSpace(snap.config["topics"]) != "" || strings.TrimSpace(snap.config["topics.regex"]) != ""
+}
+
+// isDebezium reports whether the builder may read a source connector's
+// config the Debezium way. An unset class is read as Debezium.
+func isDebezium(cfg map[string]string) bool {
+	c := strings.TrimSpace(cfg["connector.class"])
+	return c == "" || strings.HasPrefix(c, "io.debezium.connector.")
+}
+
+// defaultTopicNaming reports whether a Debezium connector names its topics
+// <topic.prefix>.<schema>.<table>: the default delimiter and naming strategy.
+func defaultTopicNaming(cfg map[string]string) bool {
+	if d := cfg["topic.delimiter"]; d != "" && d != "." {
+		return false
+	}
+	s := strings.TrimSpace(cfg["topic.naming.strategy"])
+	return s == "" || s == "io.debezium.schema.SchemaTopicNamingStrategy"
+}
+
+// sourceMatchers compiles the include/exclude lists of every readable source
+// connector once per Build.
+func (b *builder) sourceMatchers(p owners.Pipeline, info *collected) map[string]streamMatcher {
+	out := map[string]streamMatcher{}
+	for _, cn := range p.Connectors {
+		if snap, ok := info.connect[cn]; ok && snap.err == nil && !isSinkConnector(snap) {
+			out[cn] = newStreamMatcher(snap.config, b.warnBadListEntry)
+		}
+	}
+	return out
+}
+
+// sourceTopics returns the topics a source connector writes for the streamed
+// tables: <topic.prefix>.<table>, routed. proven is false when the routing
+// cannot be evaluated. placeholder is true when a derived or routed name is
+// not a legal topic name: the table names then stand in, as for an unreadable
+// config, so no untrusted name reaches the map.
+func sourceTopics(cfg map[string]string, streamed []string) (topics []string, proven, placeholder bool) {
+	prefix := cfg["topic.prefix"]
+	if prefix == "" {
+		return nil, true, false
+	}
+	names := make([]string, len(streamed))
+	for i, tbl := range streamed {
+		names[i] = prefix + "." + tbl
+	}
+	topics, proven = routeTopics(cfg, names)
+	for _, t := range topics {
+		if !dlq.ValidTopic(t) {
+			return fallbackTopics(streamed), false, true
+		}
+	}
+	return topics, proven, false
 }
 
 // planFlow derives the topics and data edges of p from what collect read.
@@ -66,19 +151,29 @@ func (b *builder) planFlow(p owners.Pipeline, info *collected) flowPlan {
 			}
 			continue
 		}
-		if isSinkConnector(snap) {
+		m, source := info.matchers[cn]
+		if !source {
 			sinks[cn] = true
 			continue
 		}
-		m := newStreamMatcher(snap.config, b.warnBadListEntry)
+		// Debezium's list semantics prove which tables stream only for a
+		// Debezium connector whose lists Go evaluates exactly.
+		exact := m.exact() && isDebezium(snap.config)
+		var streamed []string
 		for _, tbl := range p.SourceTables {
-			if m.streams(tbl) {
+			switch {
+			case !exact:
+				streamed = append(streamed, tbl)
+				fromTables = append(fromTables, inferred(Edge{From: "pg:" + tbl, To: cid}))
+			case m.streams(tbl):
+				streamed = append(streamed, tbl)
 				fromTables = append(fromTables, Edge{From: "pg:" + tbl, To: cid})
 			}
 		}
-		ts, proven := routeTopics(snap.config, deriveTopics(snap.config, p.SourceTables, b.warnBadListEntry))
+		ts, proven, placeholder := sourceTopics(snap.config, streamed)
+		proven = proven && exact && defaultTopicNaming(snap.config)
 		for _, t := range ts {
-			addTopic(t, false)
+			addTopic(t, placeholder)
 			e := Edge{From: cid, To: "topic:" + t}
 			if !proven {
 				e = inferred(e)
@@ -149,7 +244,7 @@ func groupTopics(snap groupSnapshot, topics []string) []string {
 
 // sinkInputs returns which of topics a sink connector reads, from its topics
 // list or its topics.regex (Connect matches the whole name). ok is false when
-// the config says neither, or the regex is not one Go can evaluate.
+// the config says neither, or the regex cannot be trusted (compileConfigRegex).
 func sinkInputs(cfg map[string]string, topics []string) (read []string, ok bool) {
 	if list := splitCSV(cfg["topics"]); len(list) > 0 {
 		for _, t := range topics {
@@ -163,8 +258,8 @@ func sinkInputs(cfg map[string]string, topics []string) (read []string, ok bool)
 	if expr == "" {
 		return nil, false
 	}
-	re, err := regexp.Compile("^(?:" + expr + ")$")
-	if err != nil {
+	re, _, ok := compileConfigRegex("", expr)
+	if !ok {
 		return nil, false
 	}
 	for _, t := range topics {
@@ -183,8 +278,9 @@ func inferred(e Edge) Edge {
 // ---- topic routing transforms ----
 
 // Router transforms whose topic rewrite the builder evaluates. Both rewrite a
-// topic only when their regex matches the whole name, then replace it with
-// the expanded replacement (Java Matcher.matches + replaceFirst).
+// topic only when their regex matches the whole name, and then replace the
+// first match found from the start (Java Matcher.matches, then replaceFirst,
+// which resets the matcher and searches again).
 const (
 	regexRouterClass       = "org.apache.kafka.connect.transforms.RegexRouter"
 	logicalTableRouterType = "io.debezium.transforms.ByLogicalTableRouter"
@@ -192,16 +288,18 @@ const (
 
 // topicRouter is one evaluable routing transform.
 type topicRouter struct {
-	re   *regexp.Regexp
-	tmpl string // Go Expand template
+	whole *regexp.Regexp // anchored: Matcher.matches
+	first *regexp.Regexp // unanchored: Matcher.replaceFirst
+	tmpl  string         // Go Expand template
 }
 
 // routeTopics applies the connector's routing transforms to its derived
 // topics, in chain order, and de-duplicates the result (a logical-table
 // router merges shards into one topic). proven is false when the chain holds
 // a transform that may rename topics but cannot be evaluated here (another
-// router class, a predicate, or a regex RE2 cannot compile): the names are
-// then the unrouted ones and must be treated as unconfirmed.
+// router class, a predicate, an untrusted regex or a replacement Java would
+// refuse): the names are then the unrouted ones and must be treated as
+// unconfirmed.
 func routeTopics(cfg map[string]string, topics []string) (out []string, proven bool) {
 	routers, proven := topicRouters(cfg)
 	for _, t := range topics {
@@ -216,11 +314,14 @@ func routeTopics(cfg map[string]string, topics []string) (out []string, proven b
 }
 
 func (r topicRouter) apply(topic string) string {
-	m := r.re.FindStringSubmatchIndex(topic)
-	if m == nil {
+	if !r.whole.MatchString(topic) {
 		return topic
 	}
-	return string(r.re.ExpandString(nil, r.tmpl, topic, m))
+	m := r.first.FindStringSubmatchIndex(topic)
+	if m == nil {
+		return topic // cannot happen: the whole name matched
+	}
+	return topic[:m[0]] + string(r.first.ExpandString(nil, r.tmpl, topic, m)) + topic[m[1]:]
 }
 
 // topicRouters reads the transforms chain. Only the routing transforms are
@@ -247,17 +348,17 @@ func topicRouters(cfg map[string]string) (routers []topicRouter, proven bool) {
 			proven = false
 			continue
 		}
-		re, err := regexp.Compile("^(?:" + expr + ")$")
+		whole, first, ok := compileConfigRegex("", expr)
+		if !ok {
+			proven = false
+			continue
+		}
+		tmpl, err := javaReplacement(repl, first)
 		if err != nil {
 			proven = false
 			continue
 		}
-		tmpl, err := javaReplacement(repl, re.NumSubexp())
-		if err != nil {
-			proven = false
-			continue
-		}
-		routers = append(routers, topicRouter{re: re, tmpl: tmpl})
+		routers = append(routers, topicRouter{whole: whole, first: first, tmpl: tmpl})
 	}
 	return routers, proven
 }
@@ -271,13 +372,18 @@ func mayRenameTopic(class string) bool {
 	return strings.Contains(c, "router") || strings.Contains(c, "topic")
 }
 
+// groupNameRE is Java's rule for a named-group reference in a replacement.
+var groupNameRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]*$`)
+
 // javaReplacement converts a java.util.regex replacement string to a Go
-// Expand template, following Matcher.appendReplacement: "${name}" is a named
-// group; "$" takes its first digit as a group number and each further digit
-// only while the number stays within groups; a backslash quotes the next
-// character; a literal "$" becomes "$$". A reference Java would refuse is an
-// error, so the caller treats the routing as unproven.
-func javaReplacement(s string, groups int) (string, error) {
+// Expand template for re, following Matcher.appendReplacement: "${name}"
+// names a group of re (letters and digits, starting with a letter; a number
+// or an unknown name is refused); "$" takes its first digit as a group number
+// and each further digit only while the number stays within re's groups; a
+// backslash quotes the next character; a literal "$" becomes "$$". Anything
+// Java would refuse is an error, so the caller treats the routing as unproven.
+func javaReplacement(s string, re *regexp.Regexp) (string, error) {
+	groups := re.NumSubexp()
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
 		c := s[i]
@@ -299,7 +405,11 @@ func javaReplacement(s string, groups int) (string, error) {
 				if end < 0 {
 					return "", fmt.Errorf("unclosed group name")
 				}
-				b.WriteString(s[i : j+end+1])
+				name := s[j+1 : j+end]
+				if !groupNameRE.MatchString(name) || re.SubexpIndex(name) < 0 {
+					return "", fmt.Errorf("no group named %q", name)
+				}
+				b.WriteString("${" + name + "}")
 				i = j + end
 				continue
 			}

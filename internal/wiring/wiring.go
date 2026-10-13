@@ -203,17 +203,24 @@ func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, e
 	opened = append(opened, closeWh)
 
 	var once sync.Once
-	return &Wired{
+	w := &Wired{
 		Source:        src,
 		Warehouse:     wh,
 		WarehouseKind: whKind,
 		Connect:       a2.Connect,
 		Kafka:         a2.Kafka,
 		Registry:      a2.Registry,
-		Builder:       topology.NewBuilder(o, a2.Connect, a2.Kafka, src, wh, topology.WithSchemaRegistry(a2.Registry)),
 		Owners:        o,
 		close:         func() { once.Do(closeOpened) },
-	}, nil
+	}
+	w.Builder = newTopologyBuilder(w)
+	return w, nil
+}
+
+// newTopologyBuilder is the one place a Builder is made from w's clients, the
+// Schema Registry included, for Open and RegisterTools alike.
+func newTopologyBuilder(w *Wired) topology.Builder {
+	return topology.NewBuilder(w.Owners, w.Connect, w.Kafka, w.Source, w.Warehouse, topology.WithSchemaRegistry(w.Registry))
 }
 
 // RegisterTools registers the A3 db tools, A2's read-only Kafka/Connect/
@@ -223,7 +230,7 @@ func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, e
 func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error {
 	b := w.Builder
 	if b == nil {
-		b = topology.NewBuilder(w.Owners, w.Connect, w.Kafka, w.Source, w.Warehouse, topology.WithSchemaRegistry(w.Registry))
+		b = newTopologyBuilder(w)
 		w.Builder = b
 	}
 	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: w.Connect}); err != nil {

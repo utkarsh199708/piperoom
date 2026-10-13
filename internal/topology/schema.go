@@ -35,7 +35,8 @@ type subjectSnapshot struct {
 type subjectSeen struct {
 	version   int
 	firstSeen time.Time
-	changedAt time.Time // zero until a reading shows a new version
+	changedAt time.Time // zero until a reading shows a higher version
+	deletedAt time.Time // zero until a reading shows a lower version
 }
 
 // compatLevelRE accepts the registry's fixed compatibility vocabulary
@@ -75,13 +76,23 @@ func topicUsers(edges []Edge, topicID string) []topicUser {
 	return out
 }
 
+// regProof is what a user's own config says about one subject.
+type regProof int
+
+const (
+	regUnknown regProof = iota // no config to read, or the worker's converter
+	regYes                     // a registry converter under TopicNameStrategy
+	regNo                      // another converter or subject naming: not this subject
+)
+
 // planSubjects picks the schema subjects of the pipeline's topics and the
 // depends_on edges into them. A subject is in play when the registry lists
-// it, when a user's own converter config proves it, or, while the registry
-// is unreachable, when this builder saw it before (so an outage keeps the
-// node, as unknown, instead of dropping it). An edge is mapped only when the
-// user's data edge is proven and the registry listing or the user's config
-// proves the subject; otherwise it is inferred.
+// it, when a user's own converter config proves it, or whenever the registry
+// is unreachable: an outage must show the registry in the map as unknown,
+// not hide it, so every real topic then gets both subjects. A user whose own
+// config rules the subject out gets no edge. An edge is mapped only when the
+// user's data edge is proven and the listing or the user's config proves the
+// subject; otherwise it is inferred.
 func (b *builder) planSubjects(info *collected, fp flowPlan) ([]string, []Edge) {
 	if b.sr == nil {
 		return nil, nil
@@ -92,53 +103,58 @@ func (b *builder) planSubjects(info *collected, fp flowPlan) ([]string, []Edge) 
 		if fp.placeholder[t] {
 			continue // the real topic name, and so its subject, is unknown
 		}
-		// Every CDC topic has at least its writer, so users is never empty.
 		users := topicUsers(fp.edges, "topic:"+t)
 		for _, part := range []string{"key", "value"} {
 			subject := t + "-" + part
 			listed := info.srErr == nil && info.srListed[subject]
-			proofs := make([]bool, len(users))
+			var edges []Edge
 			anyProof := false
-			for i, u := range users {
-				proofs[i] = usesRegistry(info, u.id, part)
-				anyProof = anyProof || proofs[i]
+			for _, u := range users {
+				proof := registryProof(info, u.id, part)
+				if proof == regNo {
+					continue
+				}
+				anyProof = anyProof || proof == regYes
+				e := Edge{From: u.id, To: "sr:" + subject, Kind: EdgeDependsOn}
+				if !u.mapped || !(listed || proof == regYes) {
+					e = inferred(e)
+				}
+				edges = append(edges, e)
 			}
-			known := info.srErr != nil && b.seenSubject(subject)
-			if !listed && !anyProof && !known {
+			if len(edges) == 0 || !(listed || anyProof || info.srErr != nil) {
 				continue
 			}
 			subjects = append(subjects, subject)
-			for i, u := range users {
-				e := Edge{From: u.id, To: "sr:" + subject, Kind: EdgeDependsOn}
-				if !u.mapped || !(listed || proofs[i]) {
-					e = inferred(e)
-				}
-				deps = append(deps, e)
-			}
+			deps = append(deps, edges...)
 		}
 	}
 	return subjects, deps
 }
 
-// usesRegistry reports whether a connector's own config proves it serializes
-// (or deserializes) part ("key" or "value") with the registry under
-// TopicNameStrategy. Groups have no config the builder can read, and a
-// connector that relies on the worker's converter proves nothing either.
-func usesRegistry(info *collected, id, part string) bool {
+// registryProof reads a connector's own converter config for part ("key" or
+// "value"). Groups have no config the builder can read, and a connector that
+// relies on the worker's converter says nothing either.
+func registryProof(info *collected, id, part string) regProof {
 	name, ok := strings.CutPrefix(id, "connect:")
 	if !ok {
-		return false
+		return regUnknown
 	}
 	snap, ok := info.connect[name]
 	if !ok || snap.err != nil {
-		return false
+		return regUnknown
 	}
 	conv := strings.ToLower(strings.TrimSpace(snap.config[part+".converter"]))
-	if !strings.Contains(conv, "avroconverter") && !strings.Contains(conv, "protobufconverter") && !strings.Contains(conv, "jsonschemaconverter") {
-		return false
+	switch {
+	case conv == "":
+		return regUnknown
+	case !strings.Contains(conv, "avroconverter") && !strings.Contains(conv, "protobufconverter") && !strings.Contains(conv, "jsonschemaconverter"):
+		return regNo // JsonConverter, StringConverter, ...: no registry
 	}
 	strategy := strings.TrimSpace(snap.config[part+".converter."+part+".subject.name.strategy"])
-	return strategy == "" || strings.HasSuffix(strategy, ".TopicNameStrategy")
+	if strategy == "" || strings.HasSuffix(strategy, ".TopicNameStrategy") {
+		return regYes
+	}
+	return regNo // the subject is named some other way
 }
 
 // collectSchemas reads the latest version and compatibility of every listed
@@ -202,23 +218,36 @@ func (b *builder) subjectNode(subject string, info *collected, t Thresholds) Nod
 	if snap.compatErr == nil && compatLevelRE.MatchString(snap.compat) {
 		n.Facts["compatibility"] = snap.compat
 	}
-	recent, age := b.observeSubject(subject, latest, info.now, t.SchemaRecentWarn)
-	n.Facts["registered_recently"] = recent
+	r := b.observeSubject(subject, latest, info.now, t.SchemaRecentWarn)
+	n.Facts["registered_recently"] = r.registered
 	n.Health = HealthOK
-	if recent == "true" {
-		// A new version is the change to look at first, like a fresh DLQ record.
-		n.Facts["new_version_seen"] = HumanAge(age) + " ago"
+	// A new or a deleted latest version is the change to look at first, like
+	// a fresh DLQ record.
+	if r.registered == "true" {
+		n.Facts["new_version_seen"] = HumanAge(r.newAge) + " ago"
+		n.Health = HealthWarn
+	}
+	if r.deleted {
+		n.Facts["version_deleted_seen"] = HumanAge(r.deletedAge) + " ago"
 		n.Health = HealthWarn
 	}
 	return n
 }
 
-// observeSubject records a reading of a subject's latest version and says
-// whether a new version was registered within window: "true" when this
-// builder saw the version change less than window ago (age is how long ago),
-// "false" when it has watched the subject for at least window without a
-// change in it, "unknown" otherwise.
-func (b *builder) observeSubject(subject string, version int, now time.Time, window time.Duration) (string, time.Duration) {
+// subjectRecency is what observeSubject saw change within the window.
+type subjectRecency struct {
+	registered string        // "true", "false" or "unknown"
+	newAge     time.Duration // since the new version was seen, when registered is "true"
+	deleted    bool          // the latest version went down within the window
+	deletedAge time.Duration
+}
+
+// observeSubject records a reading of a subject's latest version. registered
+// is "true" when this builder saw the version go up less than window ago,
+// "false" when it has watched the subject for at least window without that,
+// "unknown" otherwise. A version going down is a deletion, never a
+// registration: it is reported as deleted instead.
+func (b *builder) observeSubject(subject string, version int, now time.Time, window time.Duration) subjectRecency {
 	b.srMu.Lock()
 	defer b.srMu.Unlock()
 	if b.subjects == nil {
@@ -227,27 +256,28 @@ func (b *builder) observeSubject(subject string, version int, now time.Time, win
 	s, ok := b.subjects[subject]
 	if !ok {
 		b.subjects[subject] = subjectSeen{version: version, firstSeen: now}
-		return "unknown", 0
-	}
-	if s.version != version {
-		s.version = version
-		s.changedAt = now
-		b.subjects[subject] = s
+		return subjectRecency{registered: "unknown"}
 	}
 	switch {
-	case !s.changedAt.IsZero() && now.Sub(s.changedAt) < window:
-		return "true", now.Sub(s.changedAt)
-	case now.Sub(s.firstSeen) >= window:
-		return "false", 0
-	default:
-		return "unknown", 0
+	case version > s.version:
+		s.changedAt = now
+	case version < s.version:
+		s.deletedAt = now
 	}
-}
+	s.version = version
+	b.subjects[subject] = s
 
-// seenSubject reports whether this builder has read the subject before.
-func (b *builder) seenSubject(subject string) bool {
-	b.srMu.Lock()
-	defer b.srMu.Unlock()
-	_, ok := b.subjects[subject]
-	return ok
+	var r subjectRecency
+	switch {
+	case !s.changedAt.IsZero() && now.Sub(s.changedAt) < window:
+		r.registered, r.newAge = "true", now.Sub(s.changedAt)
+	case now.Sub(s.firstSeen) >= window:
+		r.registered = "false"
+	default:
+		r.registered = "unknown"
+	}
+	if !s.deletedAt.IsZero() && now.Sub(s.deletedAt) < window {
+		r.deleted, r.deletedAge = true, now.Sub(s.deletedAt)
+	}
+	return r
 }

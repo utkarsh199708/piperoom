@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // renderLegend tells the model how to read the listing. It is fixed text, so
 // the rendering stays deterministic.
 const renderLegend = `legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. ` +
-	`(unconfirmed) = assumed, not proven by config or metadata; verify it with tools. ` +
+	`(unconfirmed) = not proven; implied by owners.yaml or an earlier reading; verify it with tools. ` +
 	`First failing component and root cause can differ; check upstream dependencies of the first failing component.`
 
 // Render returns the canonical dependency listing of g for the model's first
@@ -36,7 +37,7 @@ func (b *builder) Render(g Graph) string {
 	}
 
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "pipeline %s\n", g.PipelineID)
+	fmt.Fprintf(&sb, "pipeline %s\n", printable(g.PipelineID))
 	sb.WriteString(renderLegend)
 	sb.WriteByte('\n')
 	for i, idx := range order {
@@ -162,7 +163,7 @@ func renderLinks(edges []Edge, end func(Edge) string, pos map[string]int) string
 	})
 	parts := make([]string, len(ids))
 	for i, id := range ids {
-		parts[i] = id
+		parts[i] = printable(id)
 		if unconfirmed[id] {
 			parts[i] += " (unconfirmed)"
 		}
@@ -172,14 +173,38 @@ func renderLinks(edges []Edge, end func(Edge) string, pos map[string]int) string
 
 func renderNode(i int, n Node) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%d %s [%s, owner %s] %s", i, n.ID, n.Layer, n.Owner, strings.ToUpper(string(n.Health)))
+	fmt.Fprintf(&sb, "%d %s [%s, owner %s] %s", i, printable(n.ID), printable(n.Layer), printable(n.Owner),
+		printable(strings.ToUpper(string(n.Health))))
 	keys := make([]string, 0, len(n.Facts))
 	for k := range n.Facts {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		fmt.Fprintf(&sb, " %s=%s", k, n.Facts[k])
+		fmt.Fprintf(&sb, " %s=%s", printable(k), printable(n.Facts[k]))
 	}
 	return sb.String()
+}
+
+// printable shows control, format and line/paragraph-separator characters as
+// {U+XXXX}. Every text in the map comes from config or a live system, and the
+// map is one line per node, so a newline in a name or fact must not start a
+// forged line (a fake "depends on:" or node) in the model's prompt.
+func printable(s string) string {
+	if !strings.ContainsFunc(s, unprintable) {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if unprintable(r) {
+			fmt.Fprintf(&b, "{U+%04X}", r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func unprintable(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == ' ' || r == ' '
 }

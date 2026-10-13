@@ -287,7 +287,17 @@ func TestDeriveTopics(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := deriveTopics(tc.cfg, tc.tables, nil)
+			m := newStreamMatcher(tc.cfg, nil)
+			var streamed []string
+			for _, tbl := range tc.tables {
+				if m.streams(tbl) {
+					streamed = append(streamed, tbl)
+				}
+			}
+			got, proven, placeholder := sourceTopics(tc.cfg, streamed)
+			if !proven || placeholder {
+				t.Fatalf("sourceTopics proven=%v placeholder=%v, want a proven real name", proven, placeholder)
+			}
 			if len(got) != len(tc.want) {
 				t.Fatalf("topics = %v, want %v", got, tc.want)
 			}

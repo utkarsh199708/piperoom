@@ -47,6 +47,10 @@ type collected struct {
 	srErr    error
 	subjects map[string]subjectSnapshot
 
+	// matchers are the include/exclude lists of each readable source
+	// connector, compiled once per Build (Build fills them after collect).
+	matchers map[string]streamMatcher
+
 	now time.Time
 }
 
