@@ -5,7 +5,8 @@
 //	go run ./evals/cmd/evalrun -scenarios evals/scenarios -out report.json
 //	go run ./evals/cmd/evalrun -runs 3 -label prompt-v2 -baseline base.json -out cand.json
 //	go run ./evals/cmd/evalrun -compare base.json,cand.json
-//	go run ./evals/cmd/evalrun -validate   # (or -check) validate scenarios, no model calls
+//	go run ./evals/cmd/evalrun -agreement saved-shadow-responses/   # offline; see evals/README.md
+//	go run ./evals/cmd/evalrun -validate  # (or -check) validate scenarios, no model calls
 package main
 
 import (
@@ -52,6 +53,7 @@ type flags struct {
 	transcripts string
 	baseline    string
 	compare     string
+	agreement   string
 	tolerance   float64
 	failOnRegr  bool
 	check       bool
@@ -96,6 +98,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.transcripts, "transcripts", "", "write each run's full transcript and result as JSON into this directory")
 	fs.StringVar(&f.baseline, "baseline", "", "after the run, compare against this earlier report")
 	fs.StringVar(&f.compare, "compare", "", "BASE.json,CANDIDATE.json: compare two reports and exit; no model calls")
+	fs.StringVar(&f.agreement, "agreement", "", "FILE-OR-DIR of saved GET /shadow?include=data,room responses: score the agent's final hypothesis against the human label and print the agreement table; offline, never for graders before they grade (-out writes the JSON summary, -judge claude uses the LLM judge)")
 	fs.Float64Var(&f.tolerance, "tolerance", evals.DefaultScoreTolerance, "score drop per scenario that counts as a regression")
 	fs.BoolVar(&f.failOnRegr, "fail-on-regression", false, "exit 2 when a comparison finds a regression")
 	fs.BoolVar(&f.check, "check", false, "validate scenarios against the live tool and action definitions and exit; no model calls")
@@ -122,6 +125,10 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 			return 1, err
 		}
 		return compare(base, cand, f, stdout)
+	}
+
+	if f.agreement != "" {
+		return runAgreement(f, stdout)
 	}
 
 	scenarios, err := evals.LoadScenarios(f.scenarios)

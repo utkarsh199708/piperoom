@@ -67,6 +67,55 @@ Tests: `go test ./evals/...` needs no network and no key. It uses a scripted fak
 that drives the real replay tools, inbox, sink and proposals. The live test is
 `go test -tags claude ./evals -run TestLiveSchemaChange -v` and needs `ANTHROPIC_API_KEY`.
 
+## Agreement scoring for shadow runs
+
+`evalrun -agreement <dir-or-file>` reads saved `GET /api/rooms/{id}/shadow?include=data,room`
+responses (one JSON document per file; `data` is optional) and checks the agent's final hypothesis
+against the human's **blind label** (`room.labelled`: `actual_layer`, `root_cause_terms`). It never
+calls a server.
+
+```sh
+go run ./evals/cmd/evalrun -agreement evals/testdata/shadow-agreement/            # table
+go run ./evals/cmd/evalrun -agreement saved/ -out agreement.json                  # + JSON summary
+go run -tags claude ./evals/cmd/evalrun -agreement saved/ -judge claude           # LLM judge, needs the key
+```
+
+- **layer_agree**: the layer the hypothesis blames equals the label. The layer is that of the first
+  clause that reports a failure (`fail*`, `stuck`, `rejected`, `stopped` ...) and names a layer by
+  keyword (`layerTerms` of `score.go` plus a few cause words); after "because", "due to", "caused by"
+  the cause side wins; the keyword that comes first in the clause wins. Consumer-group and connector
+  names from the run's `pipeline_map` count as keywords. Clauses that clear a layer ("Connect is
+  healthy") or deny it ("not the importer") are skipped.
+- **cause_agree**: any one label term (the terms are **one OR group**, as `evalrun -from-shadow`
+  builds them) is stated outside a negation. A negator in the five words before a term, or a clearing
+  word ("healthy", "fine", "ruled out") in the five after it, negates it, up to a contrast word
+  ("but", "however"): "it is not the bulk import; it's the poll timeout" agrees with `poll timeout`
+  and not with `bulk import`. Matching is `score.go`'s whole-word matcher. Labellers must pick
+  distinctive terms: a term the whole pipeline mentions makes every run agree.
+- A run with no hypothesis (`no_hypothesis`, `error`, `budget` before one, `interrupted`) scores
+  `no`/`no` and still counts in the totals, like the metrics denominator ("every closed room").
+  A response without `room.labelled` (saved without `?include=room`, or not yet labelled) is listed
+  as skipped.
+- **Totals**: layer, cause and both agreement rates over scored rooms. When rooms carry a grade
+  (`room.graded`, the last one wins): **auto equals human** is how often `cause_agree` equals the
+  human's `root_cause` (`yes` = true, `no` = false; `partial` has no yes/no, so it is counted apart and
+  left out of the rate) and how often `layer_agree` equals the human's `layer_correct`. Disagreements
+  are split into auto-yes/human-no and auto-no/human-yes.
+- `-judge claude` (build tag `claude`) replaces both verdicts with the LLM judge's, using the label as
+  ground truth, the hypothesis in the untrusted wrapper, the configured model, no temperature, and the
+  strict schema of the scenario judge. An empty hypothesis never reaches the model.
+
+**Blind rule** (`docs/design/shadow.md` 3.5). The agreement tool is for scoring *after* grading and for
+tuning: it **must never be used to show a run's hypothesis, or an automatic verdict, to a grader
+before they have graded it.** It reads only files you saved after the blind label. It refuses to score
+a run whose status is `queued` or `running` (the whole call fails; no partial table), and an unknown
+status. The hypothesis text is untrusted data: it is tokenised and compared, never executed.
+
+Accuracy of the deterministic mode on the 6 scenarios' good, lazy (the alert title) and wrong
+hypotheses, against outcomes decided by reading each text: `go test ./evals -run
+TestAgreementSyntheticAccuracy -v` (35 of 36). Known miss: `source-column-dropped` good text blames
+Postgres (the migration), the scenario's label says `consumer`.
+
 ## Scenario format (YAML)
 
 One file per scenario in `evals/scenarios/<name>.yaml`. **Unknown fields are an error**, so a typo
