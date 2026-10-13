@@ -20,6 +20,14 @@
 > limited to owners/driver/auditors, solo start check, `ValidateUsers` group rule, `return` parsing, client secret
 > rule, groups-overage message. The "Changes in revision 2" table at the top of `auth.md` maps item → section.
 > `jcs` is already a direct dependency on `main`; only `go-oidc` is new.
+>
+> **Revision 3 (C9, 2026-10-13, PR #44):** answers the two critic reviews of revision 2 (security; fit with `main`).
+> Viewer role (`403 viewer` on every room and proposal POST, so a viewer can never take the driver role), driver
+> dropped from the export list, `/auth/login` limit raised to 300/min with `PIPEROOM_TRUSTED_PROXIES`, loopback
+> hosts on any port plus `PIPEROOM_ALLOWED_HOSTS`, the dev-mode `X-Forwarded-For` 403 deleted, a reverse proxy
+> needs `oidc` (proxy pilots stay on the pre-PR-2 image until PR 3), `--allow-remote` kept one release as an alias,
+> `/api/me.layers` stays, Vite proxy is a PR 2 prerequisite before `cors` goes, line refs fixed. The "Changes in
+> revision 3" table at the top of `auth.md` maps item → section; §10 lists what was narrowed or rejected and why.
 
 Read these first: `AGENTS.md`, `docs/collab.md`, `docs/security/findings.md` (F1–F10), `docs/security/threat-model.md`, `docs/api.md`,
 `internal/events/events.go`, `internal/config/config.go`, `internal/owners/owners.go`, `dev/users.yaml`, `dev/owners.yaml`,
