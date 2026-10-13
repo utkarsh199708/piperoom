@@ -21,6 +21,14 @@ import (
 type Transition struct {
 	On TransitionOn `yaml:"on"`
 	To string       `yaml:"to"`
+	// From, when set, limits the transition to runs in that phase. An
+	// after_calls transition needs it in a scenario that can be fixed, so
+	// time passing cannot undo a fix.
+	From string `yaml:"from"`
+	// Verify, when set, lists the only tools whose reads count as the
+	// re-check after this transition into a recovered phase (see
+	// verify_score.go). Empty means any tool.
+	Verify []string `yaml:"verify"`
 }
 
 // TransitionOn is what fires a transition: exactly one of Action and
@@ -114,14 +122,16 @@ func (s Scenario) recoveredPhases() map[string]bool {
 
 // onKey identifies a trigger, to find transitions that can never fire because
 // an earlier one with the same trigger always wins.
-func (o TransitionOn) onKey() string {
+func (t Transition) onKey() string {
+	o := t.On
+	from := "from " + t.From + " "
 	switch {
 	case o.Action != "" && o.OK == nil:
-		return "action " + o.Action + " ok=any"
+		return from + "action " + o.Action + " ok=any"
 	case o.Action != "":
-		return fmt.Sprintf("action %s ok=%v", o.Action, *o.OK)
+		return fmt.Sprintf("%saction %s ok=%v", from, o.Action, *o.OK)
 	case o.AfterCalls != nil:
-		return fmt.Sprintf("after_calls %s %d", o.AfterCalls.Tool, o.AfterCalls.N)
+		return fmt.Sprintf("%safter_calls %s %d", from, o.AfterCalls.Tool, o.AfterCalls.N)
 	}
 	return ""
 }
@@ -150,7 +160,19 @@ func (s Scenario) validatePhases(toolInputs map[string][]string, actionNames []s
 		if !known[t.To] {
 			errs = append(errs, fmt.Errorf("%s: to unknown phase %q", where, t.To))
 		}
+		if t.From != "" && !known[t.From] {
+			errs = append(errs, fmt.Errorf("%s: from unknown phase %q", where, t.From))
+		}
+		for _, tool := range t.Verify {
+			if _, ok := toolInputs[tool]; !ok {
+				errs = append(errs, fmt.Errorf("%s: verify: unknown tool %q", where, tool))
+			}
+		}
+		if t.On.AfterCalls != nil && t.From == "" && len(s.recoveredPhases()) > 0 {
+			errs = append(errs, fmt.Errorf("%s: an after_calls transition needs from in a scenario with a recovered phase, or time passing could undo the fix", where))
+		}
 		on := t.On
+		anyKey := t.From + "|" + on.Action
 		shadowed := false
 		switch {
 		case on.Action != "" && on.AfterCalls != nil:
@@ -159,11 +181,11 @@ func (s Scenario) validatePhases(toolInputs map[string][]string, actionNames []s
 			if !isAction[on.Action] {
 				errs = append(errs, fmt.Errorf("%s: on.action: unknown action %q", where, on.Action))
 			}
-			if j, ok := anyOK[on.Action]; ok {
+			if j, ok := anyOK[anyKey]; ok {
 				shadowed = true
 				errs = append(errs, fmt.Errorf("%s: never fires: transitions[%d] matches %s with any outcome first", where, j, on.Action))
 			} else if on.OK == nil {
-				anyOK[on.Action] = i
+				anyOK[anyKey] = i
 			}
 		case on.AfterCalls != nil:
 			if on.OK != nil {
@@ -178,7 +200,7 @@ func (s Scenario) validatePhases(toolInputs map[string][]string, actionNames []s
 		default:
 			errs = append(errs, fmt.Errorf("%s: on needs action or after_calls", where))
 		}
-		if k := on.onKey(); k != "" && !shadowed {
+		if k := t.onKey(); k != "" && !shadowed {
 			if j, dup := seen[k]; dup {
 				errs = append(errs, fmt.Errorf("%s: never fires: same trigger as transitions[%d] (%s)", where, j, k))
 			} else {
@@ -195,6 +217,9 @@ func (s Scenario) validatePhases(toolInputs map[string][]string, actionNames []s
 		} else {
 			errs = append(errs, fmt.Errorf("recordings[%d] (%s): unknown phase %q (want one of %s)", i, r.Tool, r.Phase, strings.Join(s.Phases, ", ")))
 		}
+	}
+	if s.Expect.MaxVerifyCalls < 0 {
+		errs = append(errs, errors.New("expect.max_verify_calls is negative"))
 	}
 	errs = append(errs, s.checkStatusPhase()...)
 	return errs
@@ -256,12 +281,21 @@ func checkSequence(i int, r Recording) []error {
 // checkExecutedInput validates the action fields of one input.
 func checkExecutedInput(i int, in Input, isAction map[string]bool) []error {
 	if in.Action == "" {
+		var errs []error
 		if in.OK != nil {
-			return []error{fmt.Errorf("inputs[%d]: ok needs action", i)}
+			errs = append(errs, fmt.Errorf("inputs[%d]: ok needs action", i))
 		}
-		return nil
+		if in.Params != nil {
+			errs = append(errs, fmt.Errorf("inputs[%d]: params needs action", i))
+		}
+		return errs
 	}
 	var errs []error
+	if in.OK == nil {
+		// The room always knows a step's outcome once it ran; a scripted
+		// fix must say it.
+		errs = append(errs, fmt.Errorf("inputs[%d]: an executed step (action) needs ok: true or false", i))
+	}
 	if in.Kind != "action_result" {
 		errs = append(errs, fmt.Errorf("inputs[%d]: action applies only to kind action_result, not %q", i, in.Kind))
 	}

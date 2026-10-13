@@ -95,19 +95,22 @@ func standardCalls(p pipe) []call {
 			call{tool: "trace_record", input: m("pipeline_id", p.id, "table", p.tables[0], "key", p.key)},
 		)
 	}
-	// Wildcards last: an exact recording above always wins over them.
+	// Wildcards last: an exact recording above always wins over them. Each
+	// is recorded with a concrete name a model might guess wrongly, so the
+	// answer it gets reads like a real one (no placeholders reach it).
+	topic := p.prefix + "." + p.tables[0]
 	calls = append(calls,
-		call{tool: "pipeline_map", input: m("pipeline_id", "<id>"), wildcard: true},
-		call{tool: "connect_status", input: m("connector", "<name>"), wildcard: true},
-		call{tool: "connect_config", input: m("connector", "<name>"), wildcard: true},
-		call{tool: "schema_registry_versions", input: m("subject", "<subject>"), wildcard: true},
-		call{tool: "schema_registry_diff", input: m("subject", "<subject>", "from_version", 1), wildcard: true},
-		call{tool: "kafka_topic_offsets", input: m("topic", "<topic>"), wildcard: true},
-		call{tool: "kafka_consumer_lag", input: m("group", "<group>"), wildcard: true},
-		call{tool: "kafka_find_by_key", input: m("topic", p.prefix+"."+p.tables[0], "key", "<key>", "since", ago(10*time.Minute)), wildcard: true},
-		call{tool: "pg_row", input: m("pipeline_id", p.id, "table", p.tables[0], "pk_column", "id", "key", "<key>"), wildcard: true},
-		call{tool: "warehouse_row", input: m("pipeline_id", p.id, "table", p.sinks[0], "pk_column", "id", "key", "<key>"), wildcard: true},
-		call{tool: "trace_record", input: m("pipeline_id", p.id, "table", p.tables[0], "key", "<key>"), wildcard: true},
+		call{tool: "pipeline_map", input: m("pipeline_id", "default"), wildcard: true},
+		call{tool: "connect_status", input: m("connector", p.id+"-connector"), wildcard: true},
+		call{tool: "connect_config", input: m("connector", p.id+"-connector"), wildcard: true},
+		call{tool: "schema_registry_versions", input: m("subject", p.id+"-value"), wildcard: true},
+		call{tool: "schema_registry_diff", input: m("subject", p.id+"-value", "from_version", 1), wildcard: true},
+		call{tool: "kafka_topic_offsets", input: m("topic", p.id+".events"), wildcard: true},
+		call{tool: "kafka_consumer_lag", input: m("group", p.id+"-consumer"), wildcard: true},
+		call{tool: "kafka_find_by_key", input: m("topic", topic, "key", "1", "since", ago(10*time.Minute)), wildcard: true},
+		call{tool: "pg_row", input: m("pipeline_id", p.id, "table", p.tables[0], "pk_column", "id", "key", "1"), wildcard: true},
+		call{tool: "warehouse_row", input: m("pipeline_id", p.id, "table", p.sinks[0], "pk_column", "id", "key", "1"), wildcard: true},
+		call{tool: "trace_record", input: m("pipeline_id", p.id, "table", p.tables[0], "key", "1"), wildcard: true},
 	)
 	return calls
 }
@@ -140,15 +143,18 @@ func paymentsWorld(c clock, _ string, _ int) *world {
 		debezium("payments-db", "payments", "public.payments", "pay", "debezium_payments"),
 		task(0, "RUNNING", "connect-1:8083", ""))
 	w.addConnector("jdbc-payments-sink", "sink", "RUNNING", "connect-2:8083", map[string]string{
-		"connector.class":                   "io.debezium.connector.jdbc.JdbcSinkConnector",
+		"connector.class":                   "io.confluent.connect.jdbc.JdbcSinkConnector",
 		"topics":                            "pay.public.payments",
 		"connection.url":                    "jdbc:postgresql://warehouse-db:5432/analytics",
-		"connection.username":               "loader",
+		"connection.user":                   "loader",
 		"connection.password":               "redacted-by-the-tool",
 		"insert.mode":                       "upsert",
-		"primary.key.mode":                  "record_key",
-		"schema.evolution":                  "none",
+		"pk.mode":                           "record_key",
+		"auto.create":                       "false",
+		"auto.evolve":                       "false",
 		"table.name.format":                 "analytics.payments",
+		"transforms":                        "unwrap",
+		"transforms.unwrap.type":            "io.debezium.transforms.ExtractNewRecordState",
 		"errors.tolerance":                  "all",
 		"errors.deadletterqueue.topic.name": "dlq.jdbc-payments-sink",
 		"errors.deadletterqueue.context.headers.enable": "true",

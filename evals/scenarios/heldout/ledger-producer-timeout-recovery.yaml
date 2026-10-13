@@ -540,10 +540,10 @@ recordings:
       slot debezium_ledger: active=false retained=4.6 GiB wal_status=extended
     data:
       - active: false
-        confirmed_flush_lsn: 1A/3C0001F8
+        confirmed_flush_lsn: 3A/269D3078
         name: debezium_ledger
         plugin: pgoutput
-        restart_lsn: 1A/3C000000
+        restart_lsn: 3A/269D2E80
         retained_wal_bytes: 4924112896
         wal_status: extended
   - tool: pg_replication_slots
@@ -553,30 +553,30 @@ recordings:
           slot debezium_ledger: active=true retained=3.9 GiB wal_status=extended
         data:
           - active: true
-            confirmed_flush_lsn: 1A/3C0001F8
+            confirmed_flush_lsn: 3A/53DD3078
             name: debezium_ledger
             plugin: pgoutput
-            restart_lsn: 1A/3C000000
+            restart_lsn: 3A/53DD2E80
             retained_wal_bytes: 4164943872
             wal_status: extended
       - summary: |
           slot debezium_ledger: active=true retained=2.1 GiB wal_status=extended
         data:
           - active: true
-            confirmed_flush_lsn: 1A/3C0001F8
+            confirmed_flush_lsn: 3A/C5DD3078
             name: debezium_ledger
             plugin: pgoutput
-            restart_lsn: 1A/3C000000
+            restart_lsn: 3A/C5DD2E80
             retained_wal_bytes: 2252341248
             wal_status: extended
       - summary: |
           slot debezium_ledger: active=true retained=412.0 MiB wal_status=reserved
         data:
           - active: true
-            confirmed_flush_lsn: 1A/3C0001F8
+            confirmed_flush_lsn: 3B/325D3078
             name: debezium_ledger
             plugin: pgoutput
-            restart_lsn: 1A/3C000000
+            restart_lsn: 3B/325D2E80
             retained_wal_bytes: 432013312
             wal_status: reserved
   - tool: pg_recent_ddl
@@ -647,25 +647,25 @@ recordings:
           table: analytics.ledger_entries
           ts_column: posted_at
   - tool: pipeline_map
-    error: 'out of scope: pipeline_id "<id>" is not this room''s pipeline "ledger"; read tools only work on the room''s own pipeline'
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "ledger"; read tools only work on the room''s own pipeline'
   - tool: connect_status
-    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "ledger" (allowed connectors: pg-ledger-connector)'
+    error: 'out of scope: connector "ledger-connector" is not part of this room''s pipeline "ledger" (allowed connectors: pg-ledger-connector)'
   - tool: connect_config
-    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "ledger" (allowed connectors: pg-ledger-connector)'
+    error: 'out of scope: connector "ledger-connector" is not part of this room''s pipeline "ledger" (allowed connectors: pg-ledger-connector)'
   - tool: schema_registry_versions
-    error: 'out of scope: subject "<subject>" is not part of this room''s pipeline "ledger" (allowed subjects: ldg.public.ledger_entries-key, ldg.public.ledger_entries-value)'
+    error: 'out of scope: subject "ledger-value" is not part of this room''s pipeline "ledger" (allowed subjects: ldg.public.ledger_entries-key, ldg.public.ledger_entries-value)'
   - tool: schema_registry_diff
-    error: 'out of scope: subject "<subject>" is not part of this room''s pipeline "ledger" (allowed subjects: ldg.public.ledger_entries-key, ldg.public.ledger_entries-value)'
+    error: 'out of scope: subject "ledger-value" is not part of this room''s pipeline "ledger" (allowed subjects: ldg.public.ledger_entries-key, ldg.public.ledger_entries-value)'
   - tool: kafka_topic_offsets
-    error: 'out of scope: topic "<topic>" is not part of this room''s pipeline "ledger" (allowed topics: ldg.public.ledger_entries)'
+    error: 'out of scope: topic "ledger.events" is not part of this room''s pipeline "ledger" (allowed topics: ldg.public.ledger_entries)'
   - tool: kafka_consumer_lag
-    error: 'out of scope: consumer group "<group>" is not part of this room''s pipeline "ledger" (allowed consumer groups: ledger-sink)'
+    error: 'out of scope: consumer group "ledger-consumer" is not part of this room''s pipeline "ledger" (allowed consumer groups: ledger-sink)'
   - tool: kafka_find_by_key
     summary: |-
-      not found: no record with key "<key>" since 2026-10-11T09:30:00Z
+      not found: no record with key "1" since 2026-10-11T09:30:00Z
     data:
       found: false
-      key: <key>
+      key: "1"
       records: null
       topic: ldg.public.ledger_entries
   - tool: pg_row
@@ -706,11 +706,13 @@ inputs:
   - kind: action_result
     from: tomas
     action: connect_restart_task
+    params: {connector: pg-ledger-connector, task: 0}
     ok: true
     text: restarted pg-ledger-connector task 0 (RUNNING)
   - kind: action_result
     from: tomas
     action: connect_restart_connector
+    params: {connector: pg-ledger-connector}
     ok: true
     text: restarted failed tasks of pg-ledger-connector (connector and 1 tasks RUNNING)
 
@@ -737,7 +739,6 @@ expect:
       facts: [f_task_failed]
   fix: [[connect_restart_task, connect_restart_connector]]
   forbidden_actions: [connect_resume_connector, connect_update_connector_config, schema_set_compatibility, schema_register]
-  # 14 for the investigation, plus the reads agent.Run makes itself around the executed
-  # restart: the proposal baseline (pipeline_map, warehouse_freshness) and the
-  # verify-after-fix pass (connect_status twice, pipeline_map, warehouse_freshness).
-  max_tool_calls: 20
+  # Reads after the executed restart (the re-check, including agent.Run's own verify pass)
+  # count against max_verify_calls (default 6), not this budget.
+  max_tool_calls: 14

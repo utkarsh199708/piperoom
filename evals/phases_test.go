@@ -442,6 +442,25 @@ func TestValidatePhases(t *testing.T) {
 		{"ok without action", func(s *Scenario) { s.Inputs[0].Action = "" }, "inputs[0]: ok needs action"},
 		{"action on a steer", func(s *Scenario) { s.Inputs[0].Kind = "steer" }, `inputs[0]: action applies only to kind action_result, not "steer"`},
 		{"unknown input action", func(s *Scenario) { s.Inputs[0].Action = "drop_slot" }, `inputs[0]: unknown action "drop_slot"`},
+		{"action without ok", func(s *Scenario) { s.Inputs[0].OK = nil }, "inputs[0]: an executed step (action) needs ok"},
+		{"params without action", func(s *Scenario) {
+			s.Inputs = append(s.Inputs, Input{Kind: "steer", Text: "x", Params: map[string]any{"task": 0}})
+		}, "inputs[1]: params needs action"},
+		{"params with action", func(s *Scenario) { s.Inputs[0].Params = map[string]any{"task": 0} }, ""},
+		{"from unknown phase", func(s *Scenario) { s.Transitions[0].From = "nowhere" }, `transitions[0]: from unknown phase "nowhere"`},
+		{"verify unknown tool", func(s *Scenario) { s.Transitions[0].Verify = []string{"nope"} }, `transitions[0]: verify: unknown tool "nope"`},
+		{"verify known tool", func(s *Scenario) { s.Transitions[0].Verify = []string{"connect_status"} }, ""},
+		{"after_calls without from undoes a fix", func(s *Scenario) {
+			s.Transitions = append(s.Transitions, Transition{On: TransitionOn{AfterCalls: &AfterCalls{Tool: "connect_status", N: 3}}, To: "broken"})
+		}, "transitions[1]: an after_calls transition needs from"},
+		{"after_calls with from", func(s *Scenario) {
+			s.Transitions = append(s.Transitions, Transition{On: TransitionOn{AfterCalls: &AfterCalls{Tool: "connect_status", N: 3}}, To: "recovered", From: "broken"})
+		}, ""},
+		{"same trigger from different phases", func(s *Scenario) {
+			s.Transitions[0].From = "broken"
+			s.Transitions = append(s.Transitions, Transition{On: TransitionOn{Action: "connect_restart_task", OK: okp(true)}, To: "broken", From: "recovered"})
+		}, ""},
+		{"negative verify budget", func(s *Scenario) { s.Expect.MaxVerifyCalls = -1 }, "max_verify_calls is negative"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

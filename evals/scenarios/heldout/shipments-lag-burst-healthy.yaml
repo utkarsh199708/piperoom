@@ -366,10 +366,10 @@ recordings:
       slot debezium_shipments: active=true retained=9.6 MiB wal_status=reserved
     data:
       - active: true
-        confirmed_flush_lsn: 1A/3C0001F8
+        confirmed_flush_lsn: 3B/4B83D078
         name: debezium_shipments
         plugin: pgoutput
-        restart_lsn: 1A/3C000000
+        restart_lsn: 3B/4B83CE80
         retained_wal_bytes: 10051584
         wal_status: reserved
   - tool: pg_recent_ddl
@@ -414,25 +414,25 @@ recordings:
       table: analytics.shipments
       ts_column: updated_at
   - tool: pipeline_map
-    error: 'out of scope: pipeline_id "<id>" is not this room''s pipeline "shipments"; read tools only work on the room''s own pipeline'
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "shipments"; read tools only work on the room''s own pipeline'
   - tool: connect_status
-    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "shipments" (allowed connectors: pg-shipments-connector)'
+    error: 'out of scope: connector "shipments-connector" is not part of this room''s pipeline "shipments" (allowed connectors: pg-shipments-connector)'
   - tool: connect_config
-    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "shipments" (allowed connectors: pg-shipments-connector)'
+    error: 'out of scope: connector "shipments-connector" is not part of this room''s pipeline "shipments" (allowed connectors: pg-shipments-connector)'
   - tool: schema_registry_versions
-    error: 'out of scope: subject "<subject>" is not part of this room''s pipeline "shipments" (allowed subjects: shp.public.shipments-key, shp.public.shipments-value)'
+    error: 'out of scope: subject "shipments-value" is not part of this room''s pipeline "shipments" (allowed subjects: shp.public.shipments-key, shp.public.shipments-value)'
   - tool: schema_registry_diff
-    error: 'out of scope: subject "<subject>" is not part of this room''s pipeline "shipments" (allowed subjects: shp.public.shipments-key, shp.public.shipments-value)'
+    error: 'out of scope: subject "shipments-value" is not part of this room''s pipeline "shipments" (allowed subjects: shp.public.shipments-key, shp.public.shipments-value)'
   - tool: kafka_topic_offsets
-    error: 'out of scope: topic "<topic>" is not part of this room''s pipeline "shipments" (allowed topics: shp.public.shipments)'
+    error: 'out of scope: topic "shipments.events" is not part of this room''s pipeline "shipments" (allowed topics: shp.public.shipments)'
   - tool: kafka_consumer_lag
-    error: 'out of scope: consumer group "<group>" is not part of this room''s pipeline "shipments" (allowed consumer groups: shipment-tracker)'
+    error: 'out of scope: consumer group "shipments-consumer" is not part of this room''s pipeline "shipments" (allowed consumer groups: shipment-tracker)'
   - tool: kafka_find_by_key
     summary: |-
-      not found: no record with key "<key>" since 2026-10-11T09:30:00Z
+      not found: no record with key "1" since 2026-10-11T09:30:00Z
     data:
       found: false
-      key: <key>
+      key: "1"
       records: null
       topic: shp.public.shipments
   - tool: pg_row

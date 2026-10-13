@@ -76,12 +76,23 @@ func topicConfig(topic string, partitions int, retention string) kafka.TopicConf
 	}
 }
 
+// currentLSN is the source's WAL insert position in every generated world.
+// A slot's restart_lsn is retained bytes behind it, and its confirmed flush
+// a little after that, so the LSNs move forward as retained WAL falls.
+const currentLSN = int64(0x3B4C1D2E80)
+
 func slot(name string, active bool, retained int64, walStatus string) clients.ReplicationSlot {
+	restart := currentLSN - retained
 	return clients.ReplicationSlot{
 		Name: name, Plugin: "pgoutput", Active: active,
-		RestartLSN: "1A/3C000000", ConfirmedFlushLSN: "1A/3C0001F8",
+		RestartLSN: lsn(restart), ConfirmedFlushLSN: lsn(restart + 0x1F8),
 		RetainedWALBytes: retained, WALStatus: walStatus,
 	}
+}
+
+// lsn renders a WAL position the way Postgres prints pg_lsn.
+func lsn(pos int64) string {
+	return fmt.Sprintf("%X/%X", pos>>32, pos&0xFFFFFFFF)
 }
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }

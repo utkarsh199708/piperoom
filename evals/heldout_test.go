@@ -165,6 +165,11 @@ func TestHeldoutWrongAnswersFail(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sc := loadScenario(t, filepath.Join(heldoutDir, tt.name+".yaml"))
+			if sc.Expect.pendingNoCause() {
+				// Without E2's outcome grading every run on it fails, the
+				// right one too, so a failing wrong answer proves nothing.
+				t.Skipf("outcome %q is not graded by this build", sc.Expect.pendingOutcome())
+			}
 			if r, _ := evalOnce(t, sc, tt.script); r.Pass {
 				t.Fatalf("wrong answer passed: %+v", r)
 			}

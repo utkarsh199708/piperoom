@@ -385,10 +385,10 @@ recordings:
       slot debezium_users: active=true retained=22.3 MiB wal_status=reserved
     data:
       - active: true
-        confirmed_flush_lsn: 1A/3C0001F8
+        confirmed_flush_lsn: 3B/4AB88078
         name: debezium_users
         plugin: pgoutput
-        restart_lsn: 1A/3C000000
+        restart_lsn: 3B/4AB87E80
         retained_wal_bytes: 23375872
         wal_status: reserved
   - tool: pg_recent_ddl
@@ -471,25 +471,25 @@ recordings:
       subject: usr.public.users-value
       to_version: 4
   - tool: pipeline_map
-    error: 'out of scope: pipeline_id "<id>" is not this room''s pipeline "users"; read tools only work on the room''s own pipeline'
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "users"; read tools only work on the room''s own pipeline'
   - tool: connect_status
-    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "users" (allowed connectors: pg-users-connector)'
+    error: 'out of scope: connector "users-connector" is not part of this room''s pipeline "users" (allowed connectors: pg-users-connector)'
   - tool: connect_config
-    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "users" (allowed connectors: pg-users-connector)'
+    error: 'out of scope: connector "users-connector" is not part of this room''s pipeline "users" (allowed connectors: pg-users-connector)'
   - tool: schema_registry_versions
-    error: 'out of scope: subject "<subject>" is not part of this room''s pipeline "users" (allowed subjects: usr.public.users-key, usr.public.users-value)'
+    error: 'out of scope: subject "users-value" is not part of this room''s pipeline "users" (allowed subjects: usr.public.users-key, usr.public.users-value)'
   - tool: schema_registry_diff
-    error: 'out of scope: subject "<subject>" is not part of this room''s pipeline "users" (allowed subjects: usr.public.users-key, usr.public.users-value)'
+    error: 'out of scope: subject "users-value" is not part of this room''s pipeline "users" (allowed subjects: usr.public.users-key, usr.public.users-value)'
   - tool: kafka_topic_offsets
-    error: 'out of scope: topic "<topic>" is not part of this room''s pipeline "users" (allowed topics: usr.public.users)'
+    error: 'out of scope: topic "users.events" is not part of this room''s pipeline "users" (allowed topics: usr.public.users)'
   - tool: kafka_consumer_lag
-    error: 'out of scope: consumer group "<group>" is not part of this room''s pipeline "users" (allowed consumer groups: user-profile-sync)'
+    error: 'out of scope: consumer group "users-consumer" is not part of this room''s pipeline "users" (allowed consumer groups: user-profile-sync)'
   - tool: kafka_find_by_key
     summary: |-
-      not found: no record with key "<key>" since 2026-10-11T09:30:00Z
+      not found: no record with key "1" since 2026-10-11T09:30:00Z
     data:
       found: false
-      key: <key>
+      key: "1"
       records: null
       topic: usr.public.users
   - tool: pg_row
@@ -535,9 +535,10 @@ inputs:
 # after E2's word matching lands.
 expect:
   outcome: diagnose
+  # The root cause is the subject-level override, not the DDL (unlike source-column-dropped,
+  # where the DDL is): the hypothesis must name compatibility NONE as an override.
   root_cause:
-    - [none]
-    - [compatibility, compatible]
+    - [compatibility none, compatibility override none, compatibility to none, compatibility set to none, none override, override to none]
     - [loyalty_tier]
   first_failing_layer: consumer
   root_cause_layer: schema-registry

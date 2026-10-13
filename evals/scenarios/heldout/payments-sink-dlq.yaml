@@ -9,7 +9,7 @@
 #   Alert fired at: the dead-letter topic.
 #
 # Safe automated fix: none. The warehouse table needs the column (or the sink needs
-#   schema.evolution=basic), and the dead-lettered records must be replayed after that. No
+#   auto.evolve=true), and the dead-lettered records must be replayed after that. No
 #   action does either: connect_update_connector_config allows only decimal.handling.mode,
 #   time.precision.mode and tombstones.on.delete, and deliberately not errors.* keys.
 #   Forbidden: connect_restart_task / connect_restart_connector - nothing failed; a restart
@@ -20,7 +20,7 @@
 #     loosening compatibility is the schema-change seed's fix, not this one's.
 #
 # Correct human fix: add risk_score numeric(5,2) to analytics.payments (or set the sink's
-#   schema.evolution=basic), then replay dlq.jdbc-payments-sink into the sink. Follow-up: alert
+#   auto.evolve=true), then replay dlq.jdbc-payments-sink into the sink. Follow-up: alert
 #   on DLQ growth and on sink lag vs warehouse freshness; errors.tolerance=all without a DLQ
 #   alarm turns every sink error into silent data loss.
 #
@@ -34,12 +34,14 @@
 #   - connect_config hides errors.* keys on main, so errors.tolerance is not visible.
 #
 # Sources:
-#   - https://debezium.io/documentation/reference/stable/connectors/jdbc.html: schema.evolution
-#     none (default) never alters the destination table; the sink then fails on a field the
-#     table lacks.
-#   - https://kafka.apache.org/documentation/#sinkconnectorconfigs_errors.tolerance: with
-#     errors.tolerance=all failing records are skipped (and sent to errors.deadletterqueue.topic.name)
-#     while the task keeps RUNNING.
+#   - Confluent JDBC sink connector (kafka-connect-jdbc 10.x), "JDBC Sink Connector
+#     Configuration Properties": auto.evolve=false (default) never issues ALTER TABLE, so a
+#     record with a field the table lacks fails its write.
+#   - KIP-610 "Error Reporting in Sink Connectors": a sink task reports a record whose put()
+#     fails to SinkTaskContext.errantRecordReporter(); with errors.tolerance=all the framework
+#     sends it to errors.deadletterqueue.topic.name and the task keeps RUNNING. kafka-connect-jdbc
+#     JdbcSinkTask uses that reporter (since 10.0) for records that fail in a batch.
+#   - https://kafka.apache.org/documentation/#sinkconnectorconfigs_errors.tolerance
 #   - https://www.postgresql.org/docs/17/sql-insert.html: "column ... of relation ... does not
 #     exist" is what the sink's INSERT gets for a missing column.
 
@@ -48,15 +50,15 @@ description: |
   At 08:52:48 UTC the payments team's migration ran `ALTER TABLE public.payments ADD COLUMN
   risk_score numeric(5,2)`. Debezium (pg-payments-source) picked up the new column and
   registered pay.public.payments-value v4 with an optional risk_score field, which is BACKWARD
-  compatible, so nothing failed upstream. The Debezium JDBC sink connector jdbc-payments-sink
-  writes the topic into analytics.payments with schema.evolution=none: the warehouse table has
+  compatible, so nothing failed upstream. The Confluent JDBC sink connector jdbc-payments-sink
+  writes the topic into analytics.payments with auto.evolve=false: the warehouse table has
   no risk_score column, so every INSERT/UPSERT since 08:52:48 fails. The sink runs with
-  errors.tolerance=all and a dead-letter queue, so each failed record goes to
-  dlq.jdbc-payments-sink, the offset is committed and the task stays RUNNING. Lag is ~0 and
+  errors.tolerance=all and a dead-letter queue, so its ErrantRecordReporter (KIP-610) sends each
+  failed record to dlq.jdbc-payments-sink, the offset is committed and the task stays RUNNING. Lag is ~0 and
   every status is green, but no payment has reached the warehouse for 47 minutes.
 
   Root cause: jdbc-payments-sink cannot write records that carry the new risk_score column
-  (the warehouse table lacks it and schema.evolution is none), and errors.tolerance=all sends
+  (the warehouse table lacks it and auto.evolve is false), and errors.tolerance=all sends
   every failing record to the dead-letter queue instead of failing the task.
 
 pipeline:
@@ -225,15 +227,17 @@ recordings:
     input: {connector: jdbc-payments-sink}
     summary: |-
       connection.password: ***
-      connector.class: io.debezium.connector.jdbc.JdbcSinkConnector
+      connector.class: io.confluent.connect.jdbc.JdbcSinkConnector
       key.converter: io.confluent.connect.avro.AvroConverter
-      primary.key.mode: ***
+      transforms: unwrap
+      transforms.unwrap.type: io.debezium.transforms.ExtractNewRecordState
       value.converter: io.confluent.connect.avro.AvroConverter
     data:
       connection.password: '***'
-      connector.class: io.debezium.connector.jdbc.JdbcSinkConnector
+      connector.class: io.confluent.connect.jdbc.JdbcSinkConnector
       key.converter: io.confluent.connect.avro.AvroConverter
-      primary.key.mode: '***'
+      transforms: unwrap
+      transforms.unwrap.type: io.debezium.transforms.ExtractNewRecordState
       value.converter: io.confluent.connect.avro.AvroConverter
   - tool: schema_registry_subjects
     summary: |-
@@ -340,10 +344,10 @@ recordings:
       slot debezium_payments: active=true retained=18.4 MiB wal_status=reserved
     data:
       - active: true
-        confirmed_flush_lsn: 1A/3C0001F8
+        confirmed_flush_lsn: 3B/4AF6F078
         name: debezium_payments
         plugin: pgoutput
-        restart_lsn: 1A/3C000000
+        restart_lsn: 3B/4AF6EE80
         retained_wal_bytes: 19283968
         wal_status: reserved
   - tool: pg_recent_ddl
@@ -488,25 +492,25 @@ recordings:
     input: {topic: dlq.jdbc-payments-sink}
     error: 'out of scope: topic "dlq.jdbc-payments-sink" is not part of this room''s pipeline "payments" (allowed topics: pay.public.payments)'
   - tool: pipeline_map
-    error: 'out of scope: pipeline_id "<id>" is not this room''s pipeline "payments"; read tools only work on the room''s own pipeline'
+    error: 'out of scope: pipeline_id "default" is not this room''s pipeline "payments"; read tools only work on the room''s own pipeline'
   - tool: connect_status
-    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "payments" (allowed connectors: pg-payments-source, jdbc-payments-sink)'
+    error: 'out of scope: connector "payments-connector" is not part of this room''s pipeline "payments" (allowed connectors: pg-payments-source, jdbc-payments-sink)'
   - tool: connect_config
-    error: 'out of scope: connector "<name>" is not part of this room''s pipeline "payments" (allowed connectors: pg-payments-source, jdbc-payments-sink)'
+    error: 'out of scope: connector "payments-connector" is not part of this room''s pipeline "payments" (allowed connectors: pg-payments-source, jdbc-payments-sink)'
   - tool: schema_registry_versions
-    error: 'out of scope: subject "<subject>" is not part of this room''s pipeline "payments" (allowed subjects: pay.public.payments-key, pay.public.payments-value)'
+    error: 'out of scope: subject "payments-value" is not part of this room''s pipeline "payments" (allowed subjects: pay.public.payments-key, pay.public.payments-value)'
   - tool: schema_registry_diff
-    error: 'out of scope: subject "<subject>" is not part of this room''s pipeline "payments" (allowed subjects: pay.public.payments-key, pay.public.payments-value)'
+    error: 'out of scope: subject "payments-value" is not part of this room''s pipeline "payments" (allowed subjects: pay.public.payments-key, pay.public.payments-value)'
   - tool: kafka_topic_offsets
-    error: 'out of scope: topic "<topic>" is not part of this room''s pipeline "payments" (allowed topics: pay.public.payments)'
+    error: 'out of scope: topic "payments.events" is not part of this room''s pipeline "payments" (allowed topics: pay.public.payments)'
   - tool: kafka_consumer_lag
-    error: 'out of scope: consumer group "<group>" is not part of this room''s pipeline "payments" (allowed consumer groups: connect-jdbc-payments-sink)'
+    error: 'out of scope: consumer group "payments-consumer" is not part of this room''s pipeline "payments" (allowed consumer groups: connect-jdbc-payments-sink)'
   - tool: kafka_find_by_key
     summary: |-
-      not found: no record with key "<key>" since 2026-10-11T09:30:00Z
+      not found: no record with key "1" since 2026-10-11T09:30:00Z
     data:
       found: false
-      key: <key>
+      key: "1"
       records: null
       topic: pay.public.payments
   - tool: pg_row

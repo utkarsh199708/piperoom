@@ -148,17 +148,42 @@ func TestClaimedRecoveryWithoutRecheck(t *testing.T) {
 	}
 }
 
-// A recovery claim while the stack is still broken fails even if a correct
-// fix and check follow.
-func TestClaimInBrokenPhaseFails(t *testing.T) {
+// A recovery claim before any fix ran is not judged here ("recovered on its
+// own" is left to the outcome grading); after a fix step ran but failed, a
+// claim while the stack is still broken fails.
+func TestClaimBeforeAnyFixIsNotJudged(t *testing.T) {
 	sc := loadScenario(t, "scenarios/slot-inactive-wal-growth.yaml")
 	script := append([]step{{message: "Looks like the pipeline recovered on its own."}}, resumeScript(t,
 		step{tool: "connect_status", input: map[string]any{"connector": "pg-orders-connector"}},
 		step{message: recoveredMessage},
 	)...)
 	r, _ := evalOnce(t, sc, script)
-	if r.Pass || !r.ClaimedRecoveryWithoutCheck || !r.VerifiedAfterFix {
+	if !r.Pass || r.ClaimedRecoveryWithoutCheck || !r.VerifiedAfterFix {
 		t.Fatalf("pass=%v claimedWithoutCheck=%v verified=%v failures=%v", r.Pass, r.ClaimedRecoveryWithoutCheck, r.VerifiedAfterFix, r.Failures)
+	}
+
+	sc.Inputs[0].OK = okp(false)
+	sc.Inputs[0].Text = "resume failed: connect: 503"
+	r, _ = evalOnce(t, sc, resumeScript(t, step{message: "The pipeline has recovered."}))
+	if r.Pass || !r.ClaimedRecoveryWithoutCheck {
+		t.Fatalf("claim after a failed fix: pass=%v claimedWithoutCheck=%v failures=%v", r.Pass, r.ClaimedRecoveryWithoutCheck, r.Failures)
+	}
+}
+
+// A claim followed by a question in another clause is still a claim.
+func TestClaimWithTrailingQuestion(t *testing.T) {
+	sc := loadScenario(t, "scenarios/slot-inactive-wal-growth.yaml")
+	for _, msg := range []string{
+		"The pipeline has recovered, shall I close the room?",
+		"Recovered — want me to close the incident?",
+	} {
+		r, _ := evalOnce(t, sc, resumeScript(t,
+			step{message: msg},
+			step{tool: "connect_status", input: map[string]any{"connector": "pg-orders-connector"}},
+		))
+		if r.Pass || !r.ClaimedRecoveryWithoutCheck {
+			t.Errorf("%q: pass=%v claimedWithoutCheck=%v", msg, r.Pass, r.ClaimedRecoveryWithoutCheck)
+		}
 	}
 }
 
@@ -184,8 +209,11 @@ func TestUnproposedActionIsNotExecuted(t *testing.T) {
 	if got := strings.Join(r.PhasesVisited, ","); got != "broken" {
 		t.Fatalf("phases = %s", got)
 	}
-	if tr.Replay == nil || len(tr.Replay.Unexecuted) != 1 || !strings.Contains(tr.Replay.Unexecuted[0], "inputs[0]: no proposal of this run has a connect_resume_connector step") {
+	if tr.Replay == nil || len(tr.Replay.Unexecuted) != 1 || !strings.Contains(tr.Replay.Unexecuted[0], "inputs[0]: no executable proposal of this run has a connect_resume_connector step") {
 		t.Fatalf("unexecuted = %+v", tr.Replay)
+	}
+	if len(r.UnexecutedInputs) != 1 || r.UnexecutedInputs[0] != tr.Replay.Unexecuted[0] {
+		t.Errorf("result unexecuted inputs = %v", r.UnexecutedInputs)
 	}
 	for _, f := range r.Failures {
 		if strings.Contains(f, "re-check") {
@@ -349,6 +377,9 @@ func TestRecoveryClaim(t *testing.T) {
 		{"The incident is resolved.", true},
 		{"The fix worked: rows arrive.", true},
 		{"The issue is fixed now.", true},
+		{"The pipeline has recovered, shall I close the room?", true},
+		{"Recovered — want me to close the incident?", true},
+		{"Is data flowing again", false},
 		{"[verification] already verified: recovered; no checks were run again", true},
 		{"NOT recovered: a layer check did not pass.", false},
 		{"NOT recovered: data flow not verified.", false},
@@ -409,8 +440,8 @@ func TestJudgeReplayOrdersMarksAndEvents(t *testing.T) {
 	marks := func(serveAfter int) []ReplayMark {
 		return []ReplayMark{
 			{AfterEvents: 0, Kind: markExecuted, Action: "connect_restart_task", OK: okp(true)},
-			{AfterEvents: 0, Kind: markTransition, From: "broken", Phase: "recovered"},
-			{AfterEvents: serveAfter, Kind: markServe, Tool: "connect_status", Recording: &idx, Phase: "recovered"},
+			{AfterEvents: 0, Kind: markTransition, From: "broken", Phase: "recovered", Transition: &idx},
+			{AfterEvents: serveAfter, Kind: markServe, Tool: "connect_status", Recording: &idx, Phase: "recovered", Changed: true},
 		}
 	}
 	tr := Transcript{Events: evs, Replay: &ReplayTrace{Phases: []string{"broken", "recovered"}, Marks: marks(1)}}
@@ -421,13 +452,41 @@ func TestJudgeReplayOrdersMarksAndEvents(t *testing.T) {
 	if r := judgeReplay(sc, tr); r.VerifiedAfterFix || !r.ClaimedRecoveryWithoutCheck {
 		t.Errorf("serve after the claim: %+v", r)
 	}
+	// A serve whose answer did not change from the broken phase is no check.
+	tr.Replay.Marks = marks(1)
+	tr.Replay.Marks[2].Changed = false
+	if r := judgeReplay(sc, tr); r.VerifiedAfterFix || !r.ClaimedRecoveryWithoutCheck {
+		t.Errorf("unchanged serve: %+v", r)
+	}
+	// With verify tools on the transition, only those reads count.
+	sc.Transitions[0].Verify = []string{"pg_replication_slots"}
+	tr.Replay.Marks = marks(1)
+	if r := judgeReplay(sc, tr); r.VerifiedAfterFix {
+		t.Errorf("read outside verify list counted: %+v", r)
+	}
+	tr.Replay.Marks[2].Tool = "pg_replication_slots"
+	if r := judgeReplay(sc, tr); !r.VerifiedAfterFix {
+		t.Errorf("read in verify list not counted: %+v", r)
+	}
+	sc.Transitions[0].Verify = nil
 	// A serve of a recording from another phase is not a check.
 	tr.Replay.Marks = marks(1)
 	tr.Replay.Marks[2].Phase = "broken"
 	if r := judgeReplay(sc, tr); r.VerifiedAfterFix || !r.ClaimedRecoveryWithoutCheck {
 		t.Errorf("serve of another phase: %+v", r)
 	}
+	// Every episode is judged: a second move into recovered (after a
+	// re-break) that is never re-checked leaves the run unverified.
+	tr.Replay.Marks = append(marks(1),
+		ReplayMark{AfterEvents: 2, Kind: markTransition, From: "recovered", Phase: "broken"},
+		ReplayMark{AfterEvents: 2, Kind: markExecuted, Action: "connect_restart_task", OK: okp(true)},
+		ReplayMark{AfterEvents: 2, Kind: markTransition, From: "broken", Phase: "recovered", Transition: &idx},
+	)
+	if r := judgeReplay(sc, tr); r.VerifiedAfterFix || r.ClaimedRecoveryWithoutCheck {
+		t.Errorf("unchecked second episode: %+v", r)
+	}
 	// Without a recovered phase only the phases are reported.
+	tr.Replay.Marks = marks(1)
 	sc.Transitions[0].On.OK = okp(false)
 	if r := judgeReplay(sc, tr); r.VerifiedAfterFix || r.ClaimedRecoveryWithoutCheck || len(r.PhasesVisited) != 2 {
 		t.Errorf("no recovered phase: %+v", r)

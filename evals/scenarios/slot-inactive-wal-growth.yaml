@@ -376,30 +376,30 @@ recordings:
           slot debezium_orders: active=true retained=44.1 GiB wal_status=extended
         data:
           - active: true
-            confirmed_flush_lsn: 1A/3C0001F8
+            confirmed_flush_lsn: 30/45DD3078
             name: debezium_orders
             plugin: pgoutput
-            restart_lsn: 1A/3C000000
+            restart_lsn: 30/45DD2E80
             retained_wal_bytes: 47349497856
             wal_status: extended
       - summary: |
           slot debezium_orders: active=true retained=31.7 GiB wal_status=extended
         data:
           - active: true
-            confirmed_flush_lsn: 1A/3C0001F8
+            confirmed_flush_lsn: 33/605D3078
             name: debezium_orders
             plugin: pgoutput
-            restart_lsn: 1A/3C000000
+            restart_lsn: 33/605D2E80
             retained_wal_bytes: 34019999744
             wal_status: extended
       - summary: |
           slot debezium_orders: active=true retained=18.2 GiB wal_status=extended
         data:
           - active: true
-            confirmed_flush_lsn: 1A/3C0001F8
+            confirmed_flush_lsn: 36/BF9D3078
             name: debezium_orders
             plugin: pgoutput
-            restart_lsn: 1A/3C000000
+            restart_lsn: 36/BF9D2E80
             retained_wal_bytes: 19537068032
             wal_status: extended
   - tool: warehouse_freshness
@@ -462,6 +462,7 @@ inputs:
   - kind: action_result
     from: arjun
     action: connect_resume_connector
+    params: {connector: pg-orders-connector}
     ok: true
     text: resumed pg-orders-connector (RUNNING)
 
@@ -474,7 +475,6 @@ expect:
   evidence_tools: [connect_status, pg_replication_slots]
   fix: [[connect_resume_connector]]
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
-  # 14 for the investigation, plus 6 for the reads agent.Run makes itself around the executed
-  # resume: the proposal baseline (pipeline_map) and the verify-after-fix pass (connect_status
-  # twice, pipeline_map, warehouse_freshness twice).
-  max_tool_calls: 20
+  # Reads after the executed resume (the re-check, including agent.Run's own verify pass)
+  # count against max_verify_calls (default 6), not this budget.
+  max_tool_calls: 14

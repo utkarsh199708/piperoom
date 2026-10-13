@@ -145,8 +145,11 @@ type replayer struct {
 	// counts zero.
 	events func() int
 
-	mu         sync.Mutex
-	phase      string
+	mu    sync.Mutex
+	phase string
+	// from is the phase the run left on its last transition; a serve in
+	// the new phase is compared with what that phase would have answered.
+	from       string
 	visited    []string
 	calls      map[string]int
 	seqPos     map[int]int // recording index -> next observation
@@ -187,11 +190,18 @@ type ReplayMark struct {
 	// transition.
 	Phase string `json:"phase,omitempty"`
 	From  string `json:"from,omitempty"`
-	// Action and OK: an executed proposal step.
-	Action string `json:"action,omitempty"`
-	OK     *bool  `json:"ok,omitempty"`
-	// Cause names what fired a transition, e.g. "transitions[0]".
-	Cause string `json:"cause,omitempty"`
+	// Changed: a serve whose result differs from what the same call got
+	// in the phase the run came from, so it shows the new state.
+	Changed bool `json:"changed,omitempty"`
+	// Action and OK: an executed proposal step. ParamsMismatch: the step's
+	// params were not the scripted ones, so it failed and fired nothing.
+	Action         string `json:"action,omitempty"`
+	OK             *bool  `json:"ok,omitempty"`
+	ParamsMismatch bool   `json:"params_mismatch,omitempty"`
+	// Transition is the index of the transition that fired (in the
+	// scenario's transitions); Cause names it, e.g. "transitions[0]".
+	Transition *int   `json:"transition,omitempty"`
+	Cause      string `json:"cause,omitempty"`
 }
 
 // Mark kinds.
@@ -342,14 +352,34 @@ func (r *replayer) serve(tool string, input json.RawMessage) (replayObs, bool) {
 	}
 	rec := r.recs[i]
 	pos := r.seqPos[i]
+	if rec.Phase != "" {
+		changed := r.changedFromLast(tool, input, rec.obs[pos])
+		idx := i
+		r.mark(ReplayMark{Kind: markServe, Tool: tool, Recording: &idx, Observation: pos, Phase: rec.Phase, Changed: changed})
+	}
 	if pos < len(rec.obs)-1 {
 		r.seqPos[i] = pos + 1
 	}
-	if rec.Phase != "" {
-		idx := i
-		r.mark(ReplayMark{Kind: markServe, Tool: tool, Recording: &idx, Observation: pos, Phase: rec.Phase})
-	}
 	return rec.obs[pos], true
+}
+
+// changedFromLast reports whether ob differs from what the same call would
+// get in the phase the run last left, without serving that answer (no
+// sequence advances). A call that phase could not answer counts as changed.
+// The caller holds r.mu.
+func (r *replayer) changedFromLast(tool string, input json.RawMessage, ob replayObs) bool {
+	if r.from == "" {
+		return false
+	}
+	cur := r.phase
+	r.phase = r.from
+	j, ok := r.match(tool, input)
+	r.phase = cur
+	if !ok {
+		return true
+	}
+	old := r.recs[j].obs[r.seqPos[j]]
+	return old.summary != ob.summary || old.err != ob.err || old.truncated != ob.truncated || string(old.data) != string(ob.data)
 }
 
 // countCall counts one call of tool and fires the after_calls transitions it
@@ -357,10 +387,16 @@ func (r *replayer) serve(tool string, input json.RawMessage) (replayObs, bool) {
 func (r *replayer) countCall(tool string) {
 	r.calls[tool]++
 	for i, t := range r.transitions {
-		if ac := t.On.AfterCalls; ac != nil && t.On.Action == "" && ac.Tool == tool && ac.N == r.calls[tool] {
-			r.enter(t.To, fmt.Sprintf("transitions[%d]", i))
+		if ac := t.On.AfterCalls; ac != nil && t.On.Action == "" && ac.Tool == tool && ac.N == r.calls[tool] && r.inFrom(t) {
+			r.enter(t.To, i)
 		}
 	}
+}
+
+// inFrom reports whether t may fire in the current phase. The caller holds
+// r.mu.
+func (r *replayer) inFrom(t Transition) bool {
+	return t.From == "" || t.From == r.phase
 }
 
 // executed records that the harness executed a proposal step and fires the
@@ -377,17 +413,31 @@ func (r *replayer) executed(action string, ok *bool) {
 		if on.OK != nil && (ok == nil || *ok != *on.OK) {
 			continue
 		}
-		r.enter(t.To, fmt.Sprintf("transitions[%d]", i))
+		if !r.inFrom(t) {
+			continue
+		}
+		r.enter(t.To, i)
 		return
 	}
 }
 
-// enter moves the run to phase to. The caller holds r.mu.
-func (r *replayer) enter(to, cause string) {
+// executedWrongParams records an executed step whose params were not the
+// scripted ones: it failed, and nothing fires.
+func (r *replayer) executedWrongParams(action string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	failed := false
+	r.mark(ReplayMark{Kind: markExecuted, Action: action, OK: &failed, ParamsMismatch: true})
+}
+
+// enter moves the run to phase to through transition idx. The caller holds
+// r.mu.
+func (r *replayer) enter(to string, idx int) {
 	if to == r.phase {
 		return
 	}
-	r.mark(ReplayMark{Kind: markTransition, From: r.phase, Phase: to, Cause: cause})
+	r.mark(ReplayMark{Kind: markTransition, From: r.phase, Phase: to, Transition: &idx, Cause: fmt.Sprintf("transitions[%d]", idx)})
+	r.from = r.phase
 	r.phase = to
 	r.visited = append(r.visited, to)
 }

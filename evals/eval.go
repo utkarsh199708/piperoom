@@ -209,7 +209,7 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	}
 	rec := newRecorder()
 	rp.events = rec.count
-	inbox := newScenarioInbox(sc, newExecutor(rec, rp))
+	inbox := newScenarioInbox(sc, newExecutor(sc, rec, rp))
 	alert := sc.agentAlert(fmt.Sprintf("eval_%s_%d", sc.Name, run))
 
 	runCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)

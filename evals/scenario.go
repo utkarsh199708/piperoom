@@ -110,8 +110,13 @@ type Input struct {
 	// approvals and step results the room would (see executor in harness.go).
 	// An input whose action was never proposed is skipped.
 	Action string `yaml:"action"`
-	// OK is the outcome of that step: true, false, or absent for unknown.
+	// OK is the outcome of that step: true or false (required with Action).
 	OK *bool `yaml:"ok"`
+	// Params, when set, are the step params the scripted outcome is for,
+	// matched like a recording's input (every field present, equal value).
+	// A bound step with other params fails (ok false, not found) and fires
+	// no transition: the wrong fix does not recover the stack.
+	Params map[string]any `yaml:"params"`
 }
 
 // Expect is what a good investigation of the scenario looks like.
@@ -138,6 +143,11 @@ type Expect struct {
 	// silently drop an expectation. Once E2's typed fields exist they take
 	// those keys and Pending stays empty.
 	Pending map[string]any `yaml:",inline"`
+	// MaxVerifyCalls is the read-tool budget after the first executed fix
+	// step (the re-check, including agent.Run's own verify reads); those
+	// reads do not count against MaxToolCalls. Zero means the default,
+	// defaultMaxVerifyCalls; it applies only to scenarios that execute a fix.
+	MaxVerifyCalls int `yaml:"max_verify_calls"`
 	// MaxToolCalls is the read-tool budget a focused investigation stays
 	// within. Zero means no budget.
 	MaxToolCalls int `yaml:"max_tool_calls"`

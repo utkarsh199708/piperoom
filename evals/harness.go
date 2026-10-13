@@ -1,6 +1,7 @@
 package evals
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -118,6 +119,7 @@ type scriptedInput struct {
 	in     agent.HumanInput
 	action string
 	ok     *bool
+	params map[string]any
 	from   string // the approver's name for an executed step
 }
 
@@ -137,6 +139,7 @@ func newScenarioInbox(sc Scenario, x *executor) *scriptedInbox {
 		in.queue[i].action = sc.Inputs[i].Action
 		in.queue[i].ok = sc.Inputs[i].OK
 		in.queue[i].from = sc.Inputs[i].From
+		in.queue[i].params = sc.Inputs[i].Params
 	}
 	in.exec = x
 	return in
@@ -184,99 +187,138 @@ func (in *scriptedInbox) Wait(ctx context.Context) error {
 // executor plays the room and the action executor for scripted action
 // results. Nothing is written anywhere: executing a step means delivering
 // what the room would and telling the replayer, whose transitions then move
-// the recorded stack to its next phase.
+// the recorded stack to its next phase. It mirrors the room's rules: a
+// proposal whose steps the room refuses at creation (unknown action, failed
+// Validate or CheckScope; internal/room service_proposals.go) never runs, a
+// proposal runs all its steps in order once it is approved, and the executor
+// stops at the first step that does not succeed (service_executor.go).
 type executor struct {
+	sc  Scenario
 	rec *recorder
 	rp  *replayer
 
-	mu   sync.Mutex
-	done map[string]bool // "<proposal id>/<step index>" already executed
+	mu      sync.Mutex
+	done    map[string]bool // "<proposal id>/<step index>" already executed
+	stopped map[string]bool // proposals whose execution ended at a failed step
+	refused map[string]bool // proposals the room would have refused
 }
 
-func newExecutor(rec *recorder, rp *replayer) *executor {
-	return &executor{rec: rec, rp: rp, done: map[string]bool{}}
+func newExecutor(sc Scenario, rec *recorder, rp *replayer) *executor {
+	return &executor{sc: sc, rec: rec, rp: rp, done: map[string]bool{}, stopped: map[string]bool{}, refused: map[string]bool{}}
 }
 
-// run executes the step an input names: the first not yet executed step with
-// that action in the newest proposal that has one. Like the room's executor
-// it runs the proposal's steps in order, so the earlier unexecuted steps run
-// first and succeed. It returns the inputs the room would deliver: one
-// approval per required layer (on the proposal's first execution), then one
+// run executes the proposal an input names: the newest proposal of the run
+// that the room would accept, that has not stopped at a failed step, and
+// that has a not yet executed step with the input's action. It returns the
+// inputs the room would deliver: one approval per required layer, then one
 // action_result per executed step, formatted as internal/room formats them.
-// It returns nil when nothing could be executed.
+// It returns nil when nothing could be executed; the skip is reported.
 func (x *executor) run(si scriptedInput) []agent.HumanInput {
 	props := x.rec.createdProposals()
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	for p := len(props) - 1; p >= 0; p-- {
+		id := props[p].ProposalID
+		if x.stopped[id] || x.isRefused(props[p]) {
+			continue
+		}
 		for i, st := range props[p].Steps {
-			if st.Action == si.action && !x.done[stepKey(props[p].ProposalID, i)] {
+			if st.Action == si.action && !x.done[stepKey(id, i)] {
 				return x.execute(props[p], i, si)
 			}
 		}
 	}
-	x.rp.skip(fmt.Sprintf("inputs[%d]: no proposal of this run has a %s step left to execute", si.index, si.action))
+	x.rp.skip(fmt.Sprintf("inputs[%d]: no executable proposal of this run has a %s step left to run", si.index, si.action))
 	return nil
+}
+
+// isRefused reports whether the room would have refused p when the agent
+// proposed it, so it can never run. The caller holds x.mu.
+func (x *executor) isRefused(p events.ProposalCreatedPayload) bool {
+	r, ok := x.refused[p.ProposalID]
+	if !ok {
+		r = len(checkSteps(x.sc, p.Steps)) > 0
+		x.refused[p.ProposalID] = r
+	}
+	return r
 }
 
 func stepKey(proposalID string, step int) string {
 	return proposalID + "/" + strconv.Itoa(step)
 }
 
-// execute runs steps of p up to and including step. The caller holds x.mu.
+// execute runs p as the room's executor would once every layer approved it:
+// the steps in order, earlier ones succeeding, the named one with the
+// scripted outcome, and the later ones succeeding too, unless a step fails,
+// where it stops. The caller holds x.mu.
 func (x *executor) execute(p events.ProposalCreatedPayload, step int, si scriptedInput) []agent.HumanInput {
 	var out []agent.HumanInput
-	first := true
-	for i := range p.Steps {
-		if x.done[stepKey(p.ProposalID, i)] {
-			first = false
-		}
+	approver := events.Actor{Kind: events.ActorHuman, ID: "approver", Name: "approver"}
+	if si.from != "" {
+		approver.ID, approver.Name = si.from, si.from
 	}
-	if first {
-		approver := events.Actor{Kind: events.ActorHuman, ID: "approver", Name: "approver"}
-		if si.from != "" {
-			approver.ID, approver.Name = si.from, si.from
-		}
-		approved := true
-		seen := map[string]bool{}
-		for _, st := range p.Steps {
-			if st.Layer == "" || seen[st.Layer] {
-				continue
-			}
-			seen[st.Layer] = true
-			out = append(out, agent.HumanInput{
-				Seq: si.in.Seq, Actor: approver, Kind: "approval_result",
-				Text:       fmt.Sprintf("layer %q approved proposal %s", st.Layer, p.ProposalID),
-				ProposalID: p.ProposalID, Layer: st.Layer, Approved: &approved,
-			})
-		}
-	}
-	system := events.Actor{Kind: events.ActorSystem, ID: "executor", Name: "executor"}
-	for i := 0; i <= step; i++ {
-		key := stepKey(p.ProposalID, i)
-		if x.done[key] {
+	approved := true
+	seen := map[string]bool{}
+	for _, st := range p.Steps {
+		if st.Layer == "" || seen[st.Layer] {
 			continue
 		}
-		x.done[key] = true
-		// An earlier step had to succeed for the executor to reach this one.
-		succeeded := true
-		stepOK, output := &succeeded, "succeeded"
-		if i == step {
-			stepOK, output = nil, si.in.Text
-			if si.ok != nil {
-				v := *si.ok
-				stepOK = &v
-			}
+		seen[st.Layer] = true
+		out = append(out, agent.HumanInput{
+			Seq: si.in.Seq, Actor: approver, Kind: "approval_result",
+			Text:       fmt.Sprintf("layer %q approved proposal %s", st.Layer, p.ProposalID),
+			ProposalID: p.ProposalID, Layer: st.Layer, Approved: &approved,
+		})
+	}
+	system := events.Actor{Kind: events.ActorSystem, ID: "executor", Name: "executor"}
+	// run binds only proposals with no step run yet (a proposal runs all its
+	// steps at once, or stops), so every step here is new.
+	for i, st := range p.Steps {
+		x.done[stepKey(p.ProposalID, i)] = true
+		ok, output := true, "succeeded"
+		switch {
+		case i == step && si.params != nil && !paramsMatch(si.params, st.Params):
+			// Not the step the scenario scripted (another task, another
+			// connector): the target says no, and the stack does not move.
+			ok, output = false, fmt.Sprintf("actions: %s %s: not found", st.Action, compactJSON(st.Params))
+			x.rp.executedWrongParams(st.Action)
+		case i == step:
+			ok, output = si.ok != nil && *si.ok, si.in.Text
+			x.rp.executed(st.Action, &ok)
+		default:
+			x.rp.executed(st.Action, &ok)
 		}
-		x.rp.executed(p.Steps[i].Action, stepOK)
-		idx := i
+		stepOK, idx := ok, i
 		out = append(out, agent.HumanInput{
 			Seq: si.in.Seq, Actor: system, Kind: "action_result",
 			Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, i, output),
-			OK:   stepOK, ProposalID: p.ProposalID, StepIndex: &idx,
+			OK:   &stepOK, ProposalID: p.ProposalID, StepIndex: &idx,
 		})
+		if !ok {
+			x.stopped[p.ProposalID] = true
+			break
+		}
 	}
 	return out
+}
+
+// paramsMatch reports whether every scripted param is in the step's params
+// with an equal value (the recording input rule).
+func paramsMatch(want map[string]any, params json.RawMessage) bool {
+	var got map[string]any
+	if err := json.Unmarshal(params, &got); err != nil {
+		return false
+	}
+	return matches(want, got)
+}
+
+// compactJSON renders step params for a result text.
+func compactJSON(raw json.RawMessage) string {
+	var b bytes.Buffer
+	if err := json.Compact(&b, raw); err != nil {
+		return string(raw)
+	}
+	return b.String()
 }
 
 func (in *scriptedInbox) idleCount() int {

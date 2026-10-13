@@ -202,6 +202,9 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 			}
 			fmt.Fprintf(stderr, "%s #%d: %s (score %.0f, %d tool calls, %s)\n",
 				r.Scenario, r.Run, verdict, r.Score, r.ToolCalls, time.Duration(r.DurationMS)*time.Millisecond)
+			for _, u := range r.UnexecutedInputs {
+				fmt.Fprintf(stderr, "  scripted fix not executed: %s\n", u)
+			}
 			if f.transcripts != "" {
 				if err := writeTranscript(f.transcripts, r, tr); err != nil {
 					fmt.Fprintln(stderr, "evalrun:", err)
