@@ -269,7 +269,7 @@ Rules of thumb:
 `cmd/server` is the room service: HTTP API, WebSocket, agent runner, the Slack mirror (if
 configured), the model endpoint, the web UI (if `PIPEROOM_WEB_DIR` is set) and the executor for
 approved fixes. It takes the flags `--demo` and `--healthcheck` (and the deprecated `--allow-remote`, an alias of
-`PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`; see [Network exposure](#network-exposure)). `--healthcheck` which probes `GET /healthz`
+`PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`; see [Network exposure](#network-exposure)). `--healthcheck` probes `GET /healthz`
 on `PIPEROOM_HTTP_ADDR` and exits 0 when it is healthy (`cmd/server/main.go:54`,
 `cmd/server/healthcheck.go:29`). The rest comes from the environment above.
 
@@ -329,10 +329,10 @@ and `/auth` to the Go server at `http://127.0.0.1:8090`, so the browser sees one
 (`web/vite.config.ts`; override the target with `PIPEROOM_API`). Or set `PIPEROOM_WEB_DIR` to a
 built `web/dist` and the server serves the UI at `/` itself (step 7, `cmd/server/main.go`).
 There is no CORS: the server sends no `Access-Control-*` headers, and a cross-origin browser `POST`
-gets `403`. WebSocket origins are `localhost:5173` and `127.0.0.1:5173` when no web dir is set, and
-`PIPEROOM_PUBLIC_URL` is ignored for the WebSocket then. With `PIPEROOM_WEB_DIR` set, the dev
-origins are dropped, the request's own host is accepted, and the `PIPEROOM_PUBLIC_URL` host is
-added. These origin checks stop browsers only. A non-browser client is not blocked by them. The
+gets `403`. The WebSocket always accepts its own host, the `PIPEROOM_PUBLIC_URL` host and the
+`PIPEROOM_ALLOWED_HOSTS` entries. It adds `localhost:5173` and `127.0.0.1:5173` only when no web
+dir is set and the mode is not oidc (`wsOriginPatterns` in `internal/httpapi/server.go`). These
+origin checks stop browsers only. A non-browser client is not blocked by them. The
 server also checks the `Host` header (`421 bad_host`): loopback names are always allowed; set
 `PIPEROOM_ALLOWED_HOSTS` for a tunnel or proxy that rewrites `Host`.
 
@@ -340,8 +340,10 @@ Log in by opening the UI and picking a user from `users.yaml` (dev login: no pas
 cookie; there are no `?user=` links). To check startup from the shell:
 `curl -H 'X-User: <user id>' http://127.0.0.1:8090/api/me` returns that user. This `X-User` form
 works only in dev mode and only when the request carries no session cookie. The same call with an
-unknown id returns `401`. Every `POST` from curl must send `-H 'Content-Type: application/json'`
-(else `400`).
+unknown id returns `401`. Every `POST` from curl needs `-H 'Content-Type: application/json'`
+(else `400`), except the signed `POST /api/alerts/{source}` routes, which take the sender's own
+content type. In dev mode more than one `X-User` value (several header lines, or a comma in one
+line) answers `403 proxy_identity`.
 
 ### Routes you need
 
@@ -355,7 +357,7 @@ when curl sends no cookie. The signed alert routes need neither. (The full contr
 | open a room from a signed alert | `POST /api/alerts/{source}`, `source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic` (section 6) |
 | open a room from an unsigned dev alert | `POST /api/alerts/webhook` (section 6; no sender check, F9) |
 | list / read rooms | `GET /api/rooms`, `GET /api/rooms/{id}`, `GET /api/rooms/{id}/events?after=&limit=` |
-| live view | `GET /api/rooms/{id}/ws?after=<seq>` (WebSocket; the session cookie is the identity, no cookie gives `401`) |
+| live view | `GET /api/rooms/{id}/ws?after=<seq>` (WebSocket; the identity is the session cookie, or in dev mode `X-User` when there is no cookie; neither gives `401`) |
 | talk to the room | `POST /api/rooms/{id}/comments`, `/steer`, `/suggestions/{sid}/send`, `/control/request`, `/control/grant`, `/close`, `/trace` |
 | fixes | `POST /api/proposals/{pid}/approve`, `/reject` |
 | shift change | `POST /api/rooms/{id}/handoffs`, `POST /api/handoffs/{hid}/accept` |
@@ -539,7 +541,7 @@ an identical body (`service_room.go:109-125`; index key at `:196`);
 | Slack thread never appears | bot not in the channel (`not_in_channel` in the log), or the room was opened before Slack was enabled and the server was not restarted |
 | A repeat alert opened a second room | the body differs between sends (no `dedup_key`, or a changing field), the `pipeline_id` differs, or the first room was already closed |
 | Web UI cannot reach the API (network errors, `421`, `403`) | the UI must be same-origin with the API: use `npm run dev` (Vite proxies `/api` and `/auth`) or the served `PIPEROOM_WEB_DIR`. There is no CORS. A tunnel or proxy that rewrites `Host` needs `PIPEROOM_ALLOWED_HOSTS` |
-| Web UI shows WebSocket errors | the UI is not on `localhost:5173`, `127.0.0.1:5173` or the `PIPEROOM_PUBLIC_URL` host (`internal/ws/gateway.go:188`). These checks are browser-only |
+| Web UI shows WebSocket errors | the page's origin host is not the server's own host, the `PIPEROOM_PUBLIC_URL` host, a `PIPEROOM_ALLOWED_HOSTS` entry, or (no web dir, not oidc) `localhost:5173` / `127.0.0.1:5173`. Add the name to `PIPEROOM_ALLOWED_HOSTS`. These checks are browser-only |
 | Server exits at start with "index.html" | `PIPEROOM_WEB_DIR` does not point at a built UI (`cmd/server/main.go:292`) |
 | A fix shows "interrupted by a service restart" | the server restarted mid-fix; check the system, then re-propose |
 | No agent response after a restart | the agent is idle until a driver steers or someone mentions `@agent` (step 4) |

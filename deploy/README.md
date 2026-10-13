@@ -30,8 +30,9 @@ So:
   `PIPEROOM_BIND` in `deploy/.env` to the host's VPN address (better) or `0.0.0.0`.
 - **Host check.** The server answers `421 bad_host` to a request whose `Host` header is not
   a loopback name (any port), the host of `PIPEROOM_PUBLIC_URL`, or a value in
-  `PIPEROOM_ALLOWED_HOSTS`. In dev mode the public host and the allow-list count only with
-  `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`, which the image sets. Set `PIPEROOM_ALLOWED_HOSTS`
+  `PIPEROOM_ALLOWED_HOSTS`. The allow-list counts in every mode. In dev mode the
+  `PIPEROOM_PUBLIC_URL` host counts only with `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`, which the
+  image sets. Set `PIPEROOM_ALLOWED_HOSTS`
   (comma-separated, `host` or `host:port`, compared as written) when a tunnel or proxy
   rewrites `Host`, for example an SSH tunnel to `localhost:9000`, or a name the VPN uses
   for the machine. The signed alert routes `POST /api/alerts/{source}` skip this check
@@ -108,11 +109,14 @@ curl -H 'X-User: alice' http://localhost:8090/api/me              # your user, f
 docker compose -f deploy/docker-compose.pilot.yml logs -f piperoom
 ```
 
-**Using curl in dev mode.** Every `POST` must send `-H 'Content-Type: application/json'`;
-without it the server answers `400 bad_request` (this is part of the browser-request
+**Using curl in dev mode.** Every `POST` needs `-H 'Content-Type: application/json'`, except
+the signed `POST /api/alerts/{source}` routes, which take the sender's own content type.
+Without it the server answers `400 bad_request` (this is part of the browser-request
 protection). curl may still send `X-User: <id>` when it sends no cookie; that works only in
-dev mode. If you send a session cookie too, the `X-User` must name the same user, or the
-answer is `403 proxy_identity`. In `oidc` mode `X-User` is ignored.
+dev mode. Send exactly one `X-User` value: more than one (several header lines, or one line
+with a comma) answers `403 proxy_identity`, with or without a cookie. If you send a session
+cookie too, the `X-User` must name the same user, or the answer is `403 proxy_identity`.
+In `oidc` mode `X-User` is ignored.
 
 ```sh
 curl -X POST -H 'X-User: alice' -H 'Content-Type: application/json' \
@@ -318,9 +322,9 @@ room. A fix that was approved but not finished is marked failed, not re-run
 | Exits with `open the data stack` | a URL or login in `deploy/.env` is wrong or unreachable from the container |
 | Page does not load from another machine | `PIPEROOM_BIND` is still `127.0.0.1` |
 | `421 bad_host` | the `Host` header is not allowed: add it to `PIPEROOM_ALLOWED_HOSTS` (tunnel or proxy that rewrites `Host`) |
-| `403 proxy_identity` | a proxy (or curl) sent `X-User` to `/auth/dev-login`, or with a cookie for another user. A proxy needs `PIPEROOM_AUTH_MODE=oidc`; until PR 3, build from the git tag `pre-auth` |
-| `400 bad_request` on a curl `POST` | add `-H 'Content-Type: application/json'` |
-| Exits with `non-loopback` | dev mode needs `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (the image sets it; check you did not set it empty) |
+| `403 proxy_identity` | in dev mode: more than one `X-User` value (several header lines, or a comma in one line), cookie or not; or `X-User` sent to `/auth/dev-login`; or `X-User` with a cookie for another user. A proxy needs `PIPEROOM_AUTH_MODE=oidc`; until PR 3, build from the git tag `pre-auth` |
+| `400 bad_request` on a curl `POST` | add `-H 'Content-Type: application/json'` (not needed on the signed `/api/alerts/{source}` routes) |
+| Exits with `refusing to listen on ... listen address is not loopback` | dev mode needs `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`. The image and the compose file set it, so you see this only if the variable is overridden with an empty value (for example `docker run -e PIPEROOM_DEV_ALLOW_NONLOOPBACK=`) or with a value other than `1` |
 | UI loads but live updates fail behind a proxy | the proxy does not pass WebSocket upgrades, or `PIPEROOM_PUBLIC_URL` is not set |
 | No agent answer | the model provider's credentials are missing, or egress to its API is blocked (behind a proxy, set `HTTPS_PROXY` and `NO_PROXY`) |
 | Exits at start with an error about the model provider, region, project or credentials | see [Model provider](#model-provider); the error names the setting |
