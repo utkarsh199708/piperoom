@@ -96,7 +96,7 @@ func TestOpenRejectsUnknownWarehouseKindBeforeAnyClient(t *testing.T) {
 	cfg := devA2Config()
 	cfg.OwnersFile = ownersFile
 	cfg.WarehouseKind = "oracle"
-	_, err := Open(context.Background(), cfg)
+	_, err := Open(context.Background(), cfg, nil)
 	if err == nil || !strings.Contains(err.Error(), "unknown WAREHOUSE_KIND") {
 		t.Fatalf("Open error = %v, want the unknown WAREHOUSE_KIND error (before any database ping)", err)
 	}

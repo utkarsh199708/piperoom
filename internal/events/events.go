@@ -42,6 +42,12 @@ const (
 	HandoffAccepted Type = "handoff.accepted"
 
 	TracePinned Type = "trace.pinned"
+
+	// Shadow mode (docs/design/shadow.md). All three are written only to a
+	// closed shadow room, after room.closed.
+	ShadowRevealed Type = "shadow.revealed"
+	ShadowLabelled Type = "shadow.labelled"
+	ShadowGraded   Type = "shadow.graded"
 )
 
 // ActorKind says who caused an event.
@@ -111,6 +117,11 @@ type RoomCreatedPayload struct {
 	// DedupKey is the exact index key the room was opened under, so a restart
 	// rebuilds the same alert index instead of re-deriving it from Alert.
 	DedupKey string `json:"dedup_key,omitempty"`
+	// Shadow is true when the room's pipeline has shadow enabled in owners.yaml
+	// at open time: the agent runs silently, proposes nothing, and its output
+	// is revealed after the room closes. Frozen here so a restart keeps it.
+	// Never set by CreateRoom (POST /api/rooms).
+	Shadow bool `json:"shadow,omitempty"`
 }
 
 // RoomClosedPayload ends a room.
@@ -120,7 +131,7 @@ type RoomClosedPayload struct {
 
 // AgentStatusPayload reports the agent's state.
 type AgentStatusPayload struct {
-	State  string `json:"state"` // "working" | "idle" | "waiting_approval" | "error" | "done"
+	State  string `json:"state"` // "working" | "idle" | "waiting_approval" | "error" | "done" | "queued"
 	Detail string `json:"detail,omitempty"`
 }
 
@@ -290,6 +301,42 @@ type TracePinnedPayload struct {
 	Table  string       `json:"table"`
 	Key    string       `json:"key"`
 	Stages []TraceStage `json:"stages"`
+}
+
+// ---- Shadow mode ----
+
+// ShadowRevealedPayload says a shadow run's result exists. Written once per
+// room, by the system actor, when both the room is closed and the run has
+// ended. It carries numbers only: the hypothesis itself is read from
+// GET /api/rooms/{id}/shadow after the blind label, so this event cannot
+// un-blind a labeller.
+type ShadowRevealedPayload struct {
+	Status string `json:"status"` // "hypothesised" | "no_hypothesis" | "error" | "budget" | "interrupted"
+	// Seconds from rooms.opened_at; -1 when there was no hypothesis.
+	TimeToFirstHypothesisS int64 `json:"time_to_first_hypothesis_s"`
+	TimeToFinalHypothesisS int64 `json:"time_to_final_hypothesis_s"`
+	// HumanMTTRS is closed_at - opened_at in seconds.
+	HumanMTTRS         int64 `json:"human_mttr_s"`
+	FinishedAfterClose bool  `json:"finished_after_close"`
+	ToolCalls          int   `json:"tool_calls"`
+	Tokens             int64 `json:"tokens"` // 0 when the runner counts no tokens (demo, plain Run)
+}
+
+// ShadowLabelledPayload is the blind label a pipeline member gives after the
+// room is closed and before they may read the run. One per room.
+type ShadowLabelledPayload struct {
+	ActualLayer    string    `json:"actual_layer"`     // one of Layers
+	RootCauseTerms []string  `json:"root_cause_terms"` // 1..20, each 1..200 chars
+	Identity       *Identity `json:"identity,omitempty"`
+}
+
+// ShadowGradedPayload is a pipeline member's grade of the revealed run against
+// the resolution and the label. Re-grading appends another; the last wins.
+type ShadowGradedPayload struct {
+	LayerCorrect bool      `json:"layer_correct"`
+	RootCause    string    `json:"root_cause"` // "yes" | "partial" | "no"
+	Notes        string    `json:"notes,omitempty"`
+	Identity     *Identity `json:"identity,omitempty"`
 }
 
 // Layers are the pipeline layers that own nodes and approve fixes.
