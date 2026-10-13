@@ -87,7 +87,7 @@ func run(args []string) error {
 	short := fs.Bool("short", false, "use the small (CI smoke) defaults")
 	replicas := fs.Int("replicas", 1, "server processes on one database")
 	out := fs.String("out", "", "output directory (default loadtest-out/<time>)")
-	dbURL := fs.String("db-url", "", "existing Postgres admin URL; default starts a throwaway postgres:16 container")
+	dbURL := fs.String("db-url", "", "existing Postgres admin URL: ALL load goes to that server (the harness only creates and drops its own lt_<hex> databases there); default starts a throwaway postgres:16 container")
 	prefix := fs.String("prefix", "s2lt", "docker container name prefix")
 	mutex := fs.Int("mutex-profile", 0, "mutex profile fraction for the servers (0 = off); read /debug/pprof/mutex on a server URL")
 	dbParams := fs.String("server-db-params", "", "extra k=v&k=v parameters for the servers' database URL, e.g. pool_max_conns=20")

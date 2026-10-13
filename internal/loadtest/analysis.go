@@ -206,18 +206,7 @@ func approveAll(ctx context.Context, st *stack, rooms []string, timeout time.Dur
 		}
 	}
 	sleepCtx(ctx, 2*time.Second) // a duplicate executor would run within this
-	total := runs()
-	for _, v := range total {
-		es.Executions += v
-		if v > 1 {
-			es.DuplicateExecutions++
-		}
-	}
-	for k := range keys {
-		if total[k] == 0 {
-			es.MissingExecutions++
-		}
-	}
+	es.Executions, es.DuplicateExecutions, es.MissingExecutions = execCounts(runs(), keys)
 	return es
 }
 
@@ -264,10 +253,6 @@ func distOrDash(v float64, n int) string {
 		return "-"
 	}
 	return fms(v)
-}
-
-func distCells(d Dist) []string {
-	return []string{fmt.Sprint(d.N), fms(d.P50MS), fms(d.P95MS), fms(d.P99MS), fms(d.MaxMS)}
 }
 
 func fmtMiB(b uint64) string { return fmt.Sprintf("%.1f MiB", float64(b)/(1<<20)) }

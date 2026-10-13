@@ -160,6 +160,13 @@ func NewEnv(ctx context.Context, c EnvConfig) (*Env, error) {
 	if c.DBURL != "" {
 		e.PG, err = ExistingPostgres(ctx, c.DBURL)
 	} else {
+		// A driver killed before its cleanup (SIGKILL, a go test timeout)
+		// leaves its container behind; remove those first.
+		if gone, err := RemoveStale(ctx, c.Prefix); err != nil {
+			c.Log.Warn("loadtest: stale container cleanup failed", "err", err)
+		} else if len(gone) > 0 {
+			c.Log.Info("loadtest: removed stale containers", "names", gone)
+		}
 		e.PG, err = StartPostgres(ctx, c.Prefix, c.TmpfsData)
 	}
 	if err != nil {
@@ -209,7 +216,12 @@ func (e *Env) newStack(ctx context.Context, name string, sc ServerConfig, seed f
 	if e.ServerDBParams != "" {
 		// Extra connection-string parameters for the servers only, such as
 		// pool_max_conns=20 (what an operator would put in PIPEROOM_DB_URL).
-		sc.DBURL += "&" + e.ServerDBParams
+		u, err := withQuery(db.URL, e.ServerDBParams)
+		if err != nil {
+			db.Drop()
+			return nil, err
+		}
+		sc.DBURL = u
 	}
 	if sc.PoolMaxConns == 0 {
 		sc.PoolMaxConns = e.PoolMaxConns
@@ -295,6 +307,10 @@ func (s *stack) openRooms(ctx context.Context, titles, pipelines []string, worke
 	if err := errors.Join(errs...); err != nil {
 		return nil, nil, err
 	}
+	// A cancelled ctx stops handing out rooms: some ids are then empty.
+	if err := ctx.Err(); err != nil {
+		return nil, nil, fmt.Errorf("loadtest: open rooms: %w", err)
+	}
 	return ids, lat, nil
 }
 
@@ -345,6 +361,9 @@ func RunProfiles(ctx context.Context, env *Env, profiles []Profile, overrides []
 	var results []*Result
 	var errs []error
 	for _, pr := range profiles {
+		if err := ctx.Err(); err != nil {
+			return results, errors.Join(append(errs, fmt.Errorf("loadtest: stopped before %s: %w", pr.Name, err))...)
+		}
 		p, err := ParseParams(pr.Name, pr.Params, env.Short, overrides)
 		if err != nil {
 			return results, err

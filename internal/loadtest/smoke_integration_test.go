@@ -4,8 +4,12 @@ package loadtest
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -30,7 +34,12 @@ func TestMain(m *testing.M) {
 // requires every correctness check to pass. It is the CI-sized proof that
 // the harness works end to end, not a capacity measurement.
 func TestSmokeAllProfiles(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	// SIGINT/SIGTERM (a CI cancel) end the run through ctx, so the deferred
+	// env.Close removes the container; a run killed outright leaves it for
+	// the next NewEnv to remove (RemoveStale).
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(sigCtx, 3*time.Minute)
 	defer cancel()
 	dbURL := os.Getenv("LOADTEST_DB_URL")
 	if dbURL == "" {
@@ -76,4 +85,45 @@ func TestSmokeAllProfiles(t *testing.T) {
 		}
 	}
 	t.Logf("smoke run took %s", time.Since(start).Round(time.Millisecond))
+}
+
+// TestRemoveStale starts a container labelled as owned by a process that has
+// exited and one owned by this process, and checks that RemoveStale removes
+// only the first.
+func TestRemoveStale(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if err := DockerAvailable(ctx); err != nil {
+		t.Skip(err)
+	}
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	prefix := "s2lt-stale-" + randHex(3)
+	start := func(owner int) string {
+		name := fmt.Sprintf("%s-pg-%s", prefix, randHex(3))
+		if _, err := docker(ctx, "run", "-d", "--rm", "--name", name, "--label", labelPrefix+"="+prefix,
+			"--label", fmt.Sprintf("%s=%d", labelOwner, owner), "--entrypoint", "sleep", PostgresImage, "120"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = docker(context.Background(), "rm", "-f", name) })
+		return name
+	}
+	stale := start(dead.Process.Pid)
+	live := start(os.Getpid())
+	removed, err := RemoveStale(ctx, prefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0] != stale {
+		t.Fatalf("removed %v, want only %s", removed, stale)
+	}
+	out, err := docker(ctx, "ps", "-a", "--filter", "label="+labelPrefix+"="+prefix, "--format", "{{.Names}}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, stale) || !strings.Contains(out, live) {
+		t.Fatalf("containers left: %q", out)
+	}
 }

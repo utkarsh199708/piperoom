@@ -206,7 +206,7 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 	run.TTFT = Summarize(durations(tls, timeline.TTFT))
 	run.RunHold = Summarize(durations(tls, timeline.Hold))
 	if run.RunHold.P50MS > 0 {
-		slots := min(maxAgents*env.Replicas, n)
+		slots := min(agentLimit(maxAgents, env.Replicas, 0), n)
 		run.IdealPerSec = round3(float64(slots) * float64(run.Turns) / float64(n) / (run.RunHold.P50MS / 1000))
 	}
 	for _, s := range srv {
@@ -216,22 +216,17 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 	}
 	run.Appends = srv[0].Appends // per replica in Server; replica 0 for the table
 	label := fmt.Sprintf("max_agents=%d: ", maxAgents)
-	res.check(label+"agent cap respected", mst.MaxInFlight <= maxAgents*env.Replicas, "max in-flight %d, cap %d x %d replicas", mst.MaxInFlight, maxAgents, env.Replicas)
-	res.check(label+"no duplicate agent runs", run.Model.DuplicateRuns == 0 && run.Model.ConcurrentDup == 0,
-		"rooms with >1 run start %d, with concurrent model calls %d", run.Model.DuplicateRuns, run.Model.ConcurrentDup)
+	res.add(labeled(label, agentCapCheck(mst.MaxInFlight, maxAgents, env.Replicas, 0)))
+	res.add(labeled(label, dupRunCheck(run.Model)))
 	want := n * turns
 	if propose {
 		want += n // the propose_fix turn
 	}
 	res.check(label+"every run made all its turns", run.Turns == int64(want), "model turns %d, want %d", run.Turns, want)
 	if e := run.Exec; e != nil {
-		res.check(label+"every approved fix executed exactly once", e.Approved == n && e.ApproveErr == 0 && e.DuplicateExecutions == 0 &&
-			e.MissingExecutions == 0 && e.DuplicateExecEvents == 0 && e.ExecutedEvents == e.Approved,
-			"proposals %d approved %d approve errors %d; executions %d (duplicate %d, missing %d); action.executed events %d (duplicate %d)",
-			e.Proposals, e.Approved, e.ApproveErr, e.Executions, e.DuplicateExecutions, e.MissingExecutions, e.ExecutedEvents, e.DuplicateExecEvents)
+		res.add(labeled(label, execCheck(*e, n)))
 	}
-	res.check(label+"viewers saw gap-free logs", run.Subs.Gaps == 0 && run.Subs.Dups == 0 && run.Subs.Mismatches == 0,
-		"gaps %d dups %d parse mismatches %d", run.Subs.Gaps, run.Subs.Dups, run.Subs.Mismatches)
+	res.add(labeled(label, seqCheck(run.Subs)))
 	res.check(label+"no append errors", sumAppendErrors(srv) == 0, "append errors %d", sumAppendErrors(srv))
 	return run, nil
 }

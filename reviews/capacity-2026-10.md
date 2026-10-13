@@ -10,6 +10,16 @@ Phase 2 (2 and 3 replicas on S1's `s1/replicas`) is a separate PR and section 9.
 > The supported-scale statement in section 7 is a proposal for the pilot docs, with 2x headroom below
 > what broke first here; section 8 lists what must be re-run on production-like hardware before anyone
 > publishes a scale target.
+>
+> **They are also optimistic in other ways.** Calling them a floor covers only the noisy box; in these
+> respects the setup is easier than production:
+> - Postgres on loopback (no network round trip in the serialized append path, section 6.1).
+> - Dev auth (`X-User`): no session lookup in the database on each request or WebSocket.
+> - No watcher, topology builder (no pipeline map per run), retention, Slack mirror, shadow mode or OIDC.
+> - Server logging at warn (no per-request info lines).
+> - Latencies of the comment POSTs are service times of accepted requests from closed-loop clients (4.4).
+>
+> Raw data for every table: `reviews/capacity-2026-10/` (section 3).
 
 ## 1. Summary — what broke first
 
@@ -87,6 +97,17 @@ executions by key, summed over every server — the duplicate-execution detector
   mismatches in every run). Viewers send presence every 20 s and reconnect with `after=` like the web UI,
   except in the replay measurements, which count a cut replay as not completed.
 
+**What the duplicate and cap detectors can miss.** Each is a lower bound, not proof of absence:
+
+- **Agent cap:** the check counts concurrent *model calls* at the fake model. A run that holds a slot
+  without a call open (between turns, in a tool) is not counted.
+- **`RunStarts`** counts requests whose history is only the opening message. A duplicate run that
+  resumes with history (a takeover that replays earlier turns) is not counted.
+- **Per-room `MaxInFlight`** catches only duplicates whose model calls overlap in time. Two runs of one
+  room that take turns are missed unless they also both start fresh (`RunStarts`).
+- **Executions** are counted until every approved key ran once, plus a **2 s grace**. A re-execution
+  later than that (for example after a stale-claim sweep, minutes later) is not seen.
+
 ## 3. Exact commands
 
 ```sh
@@ -113,9 +134,27 @@ go test -tags integration -run TestSmokeAllProfiles ./internal/loadtest/
 ```
 
 Every run writes `<profile>.json` (all raw numbers, per-room timelines, per-server stats) and
-`<profile>.md`, plus `machine.json` and one log per server process under `logs/`. `-db-url` uses an existing
-Postgres instead of a container; `-replicas N` starts N servers on one database; `-p key=value` (or
-`profile.key=value`) overrides a parameter; `-short` uses the CI sizes.
+`<profile>.md`, plus `machine.json` and one log per server process under `logs/`.
+
+- `-db-url` uses an existing Postgres instead of a container. **The whole load then goes to that server.**
+  The harness only creates and drops its own `lt_<hex>` databases there and touches no other database, but
+  it does load the server, so do not point it at a shared production instance.
+- `-replicas N` starts N servers on one database.
+- `-p key=value` (or `profile.key=value`) overrides a parameter; `-short` uses the CI sizes.
+- Containers carry the driver's PID as a label. A driver that dies without cleaning up (SIGKILL, a go test
+  timeout) leaves its container; the next run with the same prefix removes it (`RemoveStale`).
+
+**Raw data.** The JSON and markdown of every run in this report are committed under
+`reviews/capacity-2026-10/`:
+
+| directory | used in |
+|---|---|
+| `run1/`, `run2/` | sections 1 and 4 (the two full runs) |
+| `zero-1726/`, `zero-1809/` | 4.2 (zero-latency throughput) |
+| `profiled-fanout-1747/` | 4.4 (mutex and CPU profiles, `.pb.gz`) |
+| `pool20-1812/` | 4.4 and 4.5 (pool-size experiment) |
+| `pool-max-conns-url-1810/` | 6.3 (with the server log excerpt) |
+| `exploratory-*/` | 4.3, 4.4 and 4.5 exploratory rows; made by earlier harness commits, so some fields (CPU, accepted/offered) are missing |
 
 ## 4. Results (raw numbers)
 
@@ -219,6 +258,12 @@ Clients that reconnect with `after=` keep their progress, so the storm does fini
 unrecorded warm-up). The commenters are closed-loop (one request at a time per room), so a slow server shows
 up as fewer comments accepted.
 
+**The POST and post→delivery latencies are the service times of accepted requests.** They are timed from
+the moment each request was sent, not from its scheduled tick. When the server falls behind, the time a
+comment waited to be sent is missing, so under overload (the 2,000-viewer rows) the real user-facing delay
+is larger than shown. The accepted/offered column is the measure of that overload. Event→delivery is not
+affected: it starts at the server's append.
+
 | run | viewers | comments/s accepted / offered | deliveries/s | event→delivery p50 ms | p95 | p99 | max | post→delivery p50 | p95 | comment POST p50 | p99 | insert p50 | pool acquires/s (waits) | send-buffer-full closes | server goroutines before / peak / after close | peak heap | CPU server / driver / pg |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | run1 (18.8→22.4) | 500 | 48.4 / 50 | 484 | 4.1 | 13.2 | 33.4 | 76.8 | 4.5 | 16.8 | 2.7 | 62.0 | 2.0 | 2,017 (49,374) | 0 | 65 / 2,079 / 65 | 33.2 MiB | 0.24 / 0.06 / 0.16 |
@@ -286,7 +331,17 @@ claimed here.
 
 ## 6. Bugs and issues for the owners (A5: `internal/room`, `internal/store`, `internal/ws`, `cmd/server`)
 
-No code outside `internal/loadtest/**` and `cmd/loadtest/**` was changed.
+No code outside `internal/loadtest/**` and `cmd/loadtest/**` was changed. All six are confirmed on `main` by
+LEAD-REVIEW. Summary for the follow-up task (line numbers on `main` @ b81248b):
+
+| # | Issue | Severity | File:line | Minimal fix |
+|---|---|---|---|---|
+| 6.3 | `pool_*` params in `PIPEROOM_DB_URL` reach Postgres as runtime params: the server cannot start, and the LISTEN hub cannot connect | HIGH | `cmd/server/main.go:402` (`migrateRoomDB`: `pgx.ParseConfig(dbURL)`); `internal/store/hub.go:119` (`hub.connect`: `pgx.ParseConfig(h.connString)`) | Build both connections from `pgxpool.ParseConfig(url)` → `.ConnConfig` (as S1's elector does with `pool.Config().ConnConfig`). Add a test with `?pool_max_conns=20`, and document the knob |
+| 6.1 | `Service.mu` held across `store.Append` (BEGIN…COMMIT plus pool wait) serializes every room's writes | HIGH | `internal/room/service.go:491-495` (`emitLocked` → `s.store.Append` under `s.mu`; callers `agentEmit`, `emitAs`, `AddComment`, `CreateRoom`, `emitQueued`) | Per-room lock for the snapshot/seq; do the DB append outside the service-wide lock, or at least without holding it across the pool wait |
+| 6.2 | One store subscription per WebSocket: `Since` on every NOTIFY, re-drain, 1 s safety tick | (fixed by S1) | `internal/store/hub.go:199-204` (`runSub`, `tick := time.NewTicker(time.Second)`), `:230` (`drain`, no `len < limit` early return); `internal/store/store.go:510` (`Subscribe`) | Done in `s1/replicas` (one feed per room per replica, section 9) |
+| 6.4 | Join-storm replay cliff: concurrent replays share throughput and all hit the 30 s timeout together | MEDIUM | `internal/ws/gateway.go:44` (`replayTimeout`), `:253` (per-client `g.store.Since(rctx, roomID, lastSeq, replayBatch)` + per-client `json.Marshal`) | Share replay pages and marshalled bytes per room; or cap concurrent replays per room and queue the rest; or make the timeout progress-based |
+| 6.5 | FIFO agent queue starves small pipelines | (fixed by S1) | `internal/room/agentslots.go:56` (`a.queue = append(a.queue, w)`) | Done in `s1/replicas` (round-robin across pipelines, section 9) |
+| 6.6 | No `IdleTimeout`: an idle keep-alive connection holds a goroutine forever | LOW | `cmd/server/main.go:339` (`http.Server{… ReadHeaderTimeout: 10 * time.Second}`) | Set `IdleTimeout` (e.g. 120 s) |
 
 ### 6.1 `Service.mu` is held across every event append (all rooms serialize on one DB round trip)
 
@@ -353,13 +408,15 @@ harness closed its idle connections). Ingresses usually close idle connections; 
 
 For the pilot docs, **to be confirmed on production-like hardware (section 8)**:
 
-> One Piperoom replica on 4 vCPUs with the default database pool supports: up to **50 open rooms**; up to **500
+> One Piperoom replica on 4 vCPUs with the default database pool was **tested with up to 60 open rooms** (not a
+> limit: the room count was never pushed further); it supports up to **500
 > connected viewers in total** (about 20 per room); up to **25 room events per second** across all rooms;
 > `PIPEROOM_MAX_AGENTS` up to 10 (the agent cap is limited by model cost, not by the server); rooms up to
 > **10,000 events**, with up to **20 people opening the same 10,000-event room at the same moment**. Beyond
 > these, comments and agent events slow down for every room before anything is dropped.
 
-Headroom: each figure is about half of where something broke first on this box — the write path at
+Headroom: each figure except the room count is about half of where something broke first on this box (the
+room count has no headroom evidence: 50–60 rooms worked, more were not tried) — the write path at
 1,000–2,000 viewers and ~30–50 accepted comments/s with them, replay join storms beyond ~200 × 1k or ~20 × 20k
 events within 30 s, and FIFO queue order with any burst larger than the cap. **These are floor numbers from a
 shared 4-vCPU VM, not a target.** The fairness problem (4.1) is a queue-order issue, not a scale issue, and no

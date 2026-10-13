@@ -313,7 +313,7 @@ func fanoutOnce(ctx context.Context, env *Env, p Params, n int, res *Result) (Fa
 			g += s.Goroutines
 		}
 		run.GoroutinesAfter = g
-		if g <= run.GoroutinesBefore+5 {
+		if g <= run.GoroutinesBefore+goroutineSlack {
 			break
 		}
 	}
@@ -335,11 +335,9 @@ func fanoutOnce(ctx context.Context, env *Env, p Params, n int, res *Result) (Fa
 
 	label := fmt.Sprintf("subs=%d: ", n)
 	t := run.Totals
-	res.check(label+"every subscriber saw every event once, in order", t.Gaps == 0 && t.Dups == 0 && t.MissingTail == 0 && t.Mismatches == 0,
-		"gaps %d dups %d missing-at-end %d parse mismatches %d", t.Gaps, t.Dups, t.MissingTail, t.Mismatches)
+	res.add(labeled(label, seqCheck(t)))
 	res.check(label+"comments accepted", run.PostErrors == 0 && run.Posted > 0, "posted %d, errors %d", run.Posted, run.PostErrors)
-	res.check(label+"no server goroutine leak after close", run.GoroutinesAfter <= run.GoroutinesBefore+5,
-		"%d before subscribers, %d after they closed", run.GoroutinesBefore, run.GoroutinesAfter)
+	res.add(labeled(label, leakCheck(run.GoroutinesBefore, run.GoroutinesAfter)))
 	res.check(label+"no append errors", sumAppendErrors(srv) == 0, "append errors %d", sumAppendErrors(srv))
 	return run, nil
 }
