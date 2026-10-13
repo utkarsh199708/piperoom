@@ -308,7 +308,8 @@
         ],
         "risk": "low",
         "rollback": "set compatibility back to BACKWARD",
-        "required_layers": ["schema-registry", "kafka-connect"]
+        "required_layers": ["schema-registry", "kafka-connect"],
+        "params_hash": "9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b"
       },
       "at": "2026-10-11T10:00:45Z"
     },
@@ -317,7 +318,7 @@
       "seq": 26,
       "type": "approval.given",
       "actor": { "kind": "human", "id": "priya", "name": "Priya" },
-      "payload": { "proposal_id": "p_1", "layer": "schema-registry" },
+      "payload": { "proposal_id": "p_1", "layer": "schema-registry", "params_hash": "9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b", "identity": { "iss": "https://idp.example.com", "sub": "priya", "method": "oidc", "grant": "user:priya" } },
       "at": "2026-10-11T10:01:10Z"
     },
     {
@@ -325,7 +326,7 @@
       "seq": 27,
       "type": "approval.given",
       "actor": { "kind": "human", "id": "arjun", "name": "Arjun" },
-      "payload": { "proposal_id": "p_1", "layer": "kafka-connect" },
+      "payload": { "proposal_id": "p_1", "layer": "kafka-connect", "params_hash": "9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b", "identity": { "iss": "https://idp.example.com", "sub": "kabir", "method": "oidc", "grant": "backup:group:sre" } },
       "at": "2026-10-11T10:01:32Z"
     },
     {
@@ -333,7 +334,7 @@
       "seq": 28,
       "type": "action.executed",
       "actor": { "kind": "system", "id": "executor", "name": "Executor" },
-      "payload": { "proposal_id": "p_1", "step_index": 0, "ok": true, "output": "pg.public.orders-value compatibility BACKWARD → NONE" },
+      "payload": { "proposal_id": "p_1", "step_index": 0, "ok": true, "output": "pg.public.orders-value compatibility BACKWARD → NONE", "params_hash": "9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b" },
       "at": "2026-10-11T10:01:34Z"
     },
     {
@@ -341,7 +342,7 @@
       "seq": 29,
       "type": "action.executed",
       "actor": { "kind": "system", "id": "executor", "name": "Executor" },
-      "payload": { "proposal_id": "p_1", "step_index": 1, "ok": true, "output": "restarted pg-orders-connector task 0 (RUNNING)" },
+      "payload": { "proposal_id": "p_1", "step_index": 1, "ok": true, "output": "restarted pg-orders-connector task 0 (RUNNING)", "params_hash": "9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b" },
       "at": "2026-10-11T10:01:36Z"
     },
     {

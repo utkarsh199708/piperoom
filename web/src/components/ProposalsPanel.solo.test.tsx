@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ProposalsPanel } from './ProposalsPanel'
 import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
@@ -23,6 +23,7 @@ const actions: RoomActions = {
 
 const solo: CurrentUser = { id: 'sam', name: 'Sam', layers: ['kafka-connect'] }
 const soloKnown: CurrentUser = { ...solo, solo: true }
+const HASH = 'abc123abc123def456abc123abc123def456abc123abc123def456abc123abc1'
 const BOX = /Solo mode: type orders\/kafka-connect to approve/
 
 const proposal: ProposalState = {
@@ -34,6 +35,8 @@ const proposal: ProposalState = {
   required_layers: ['kafka-connect'],
   approvals: { 'kafka-connect': 'pending' },
   status: 'open',
+  decisions: {},
+  params_hash: HASH,
   executed: [],
 }
 const state = { ...emptyRoomState('r1'), pipeline_id: 'orders', proposals: [proposal] }
@@ -47,7 +50,7 @@ describe('solo-mode confirm', () => {
     approve.mockResolvedValue({ ok: true })
     render(<ProposalsPanel state={state} user={solo} actions={actions} />)
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
-    await waitFor(() => expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', undefined))
+    await waitFor(() => expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', { params_hash: HASH }))
     expect(screen.queryByText(/Solo mode/)).not.toBeInTheDocument()
   })
 
@@ -63,7 +66,8 @@ describe('solo-mode confirm', () => {
     expect(screen.getByRole('status')).toHaveTextContent(/Solo mode/)
     // The text to type is shown, with no copy button.
     expect(screen.getByText('orders/kafka-connect')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /copy/i })).not.toBeInTheDocument()
+    // (The proposal's hash has its own copy button, outside this form.)
+    expect(within(box.closest('form') as HTMLElement).queryByRole('button', { name: /copy/i })).not.toBeInTheDocument()
 
     // Approve stays off until the text matches exactly.
     const go = screen.getAllByRole('button', { name: 'Approve' }).at(-1) as HTMLElement
@@ -75,7 +79,7 @@ describe('solo-mode confirm', () => {
 
     fireEvent.click(go)
     await waitFor(() =>
-      expect(approve).toHaveBeenLastCalledWith('p1', 'kafka-connect', { confirm: 'orders/kafka-connect' }),
+      expect(approve).toHaveBeenLastCalledWith('p1', 'kafka-connect', { params_hash: HASH, confirm: 'orders/kafka-connect' }),
     )
     expect(approve).toHaveBeenCalledTimes(2)
     // The box closes after a good answer.
@@ -135,7 +139,7 @@ describe('solo mode known from /api/me.solo', () => {
     fireEvent.change(box, { target: { value: 'orders/kafka-connect' } })
     fireEvent.click(screen.getAllByRole('button', { name: 'Approve' }).at(-1) as HTMLElement)
     await waitFor(() =>
-      expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', { confirm: 'orders/kafka-connect' }),
+      expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', { params_hash: HASH, confirm: 'orders/kafka-connect' }),
     )
     expect(approve).toHaveBeenCalledTimes(1)
   })
@@ -144,6 +148,6 @@ describe('solo mode known from /api/me.solo', () => {
     approve.mockResolvedValue({ ok: true })
     render(<ProposalsPanel state={state} user={solo} actions={actions} />)
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
-    await waitFor(() => expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', undefined))
+    await waitFor(() => expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', { params_hash: HASH }))
   })
 })

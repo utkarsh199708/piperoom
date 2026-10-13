@@ -29,6 +29,8 @@ const proposal: ProposalState = {
   required_layers: ['schema-registry', 'kafka-connect'],
   approvals: { 'schema-registry': 'pending', 'kafka-connect': 'pending' },
   status: 'open',
+  decisions: {},
+  params_hash: 'abc123abc123',
   executed: [],
 }
 
@@ -59,6 +61,8 @@ const proposalWithParams: ProposalState = {
   required_layers: ['schema-registry', 'kafka-connect'],
   approvals: { 'schema-registry': 'pending', 'kafka-connect': 'pending' },
   status: 'open',
+  decisions: {},
+  params_hash: 'abc123abc123',
   executed: [],
 }
 

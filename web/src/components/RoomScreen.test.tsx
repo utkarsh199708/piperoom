@@ -33,6 +33,7 @@ const actions: RoomActions = {
   acceptHandoff: vi.fn(),
   trace: vi.fn(),
 }
+const staleOff = { stale: false, dismissStale: vi.fn(), reload: vi.fn() }
 
 function webhookRoom(over: Partial<RoomState> = {}): RoomState {
   return {
@@ -46,13 +47,15 @@ function webhookRoom(over: Partial<RoomState> = {}): RoomState {
   }
 }
 
-function show(state: RoomState) {
+function show(state: RoomState, stale = false) {
   vi.mocked(useRoom).mockReturnValue({
     state,
     presence: [],
     conn: 'live',
     error: null,
     actions,
+    ...staleOff,
+    stale,
   })
   vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null })
   return render(
@@ -132,6 +135,8 @@ describe('RoomScreen — topology refresh wiring', () => {
             rollback: 'undo',
             required_layers: [],
             approvals: {},
+            decisions: {},
+            params_hash: '',
             status: 'approved',
             executed: [
               { proposal_id: 'p1', step_index: 0, ok: true, output: 'a' },
@@ -145,5 +150,22 @@ describe('RoomScreen — topology refresh wiring', () => {
 
     show(webhookRoom({ status: 'closed', resolution: 'done' }))
     expect(useTopology).toHaveBeenLastCalledWith('orders', { refreshKey: 0, active: false })
+  })
+})
+
+describe('RoomScreen — stale fix banner (params_mismatch)', () => {
+  it('shows the banner when the hook says the fix changed, and Reload/Dismiss call the hook', () => {
+    show(webhookRoom(), true)
+    const banner = screen.getByRole('alert')
+    expect(banner).toHaveTextContent('This fix changed since you loaded it. Reload to see the new version.')
+    fireEvent.click(within(banner).getByRole('button', { name: 'Reload' }))
+    fireEvent.click(within(banner).getByRole('button', { name: 'Dismiss' }))
+    expect(staleOff.reload).toHaveBeenCalledTimes(1)
+    expect(staleOff.dismissStale).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows no banner by default', () => {
+    show(webhookRoom())
+    expect(screen.queryByText(/This fix changed since you loaded it/)).not.toBeInTheDocument()
   })
 })

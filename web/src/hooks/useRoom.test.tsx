@@ -30,6 +30,7 @@ vi.mock('../api/client', async (importOriginal) => {
       events: vi.fn(),
       grantControl: vi.fn(),
       approve: vi.fn(),
+      reject: vi.fn(),
     },
   }
 })
@@ -245,7 +246,7 @@ describe('useRoom approve', () => {
     const { result } = await setup()
     let res: unknown
     await act(async () => {
-      res = await result.current.actions.approve('p1', 'kafka')
+      res = await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
     })
     expect(res).toEqual({ ok: false, needsConfirm: true })
     expect(result.current.error).toBeNull()
@@ -256,10 +257,10 @@ describe('useRoom approve', () => {
     const { result } = await setup()
     let res: unknown
     await act(async () => {
-      res = await result.current.actions.approve('p1', 'kafka', { confirm: 'orders/kafka' })
+      res = await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1', confirm: 'orders/kafka' })
     })
     expect(res).toEqual({ ok: true })
-    expect(api.approve).toHaveBeenCalledWith('p1', 'kafka', { confirm: 'orders/kafka' })
+    expect(api.approve).toHaveBeenCalledWith('p1', 'kafka', { params_hash: 'h1', confirm: 'orders/kafka' })
   })
 
   it('any other error is shown in the banner and is not needsConfirm', async () => {
@@ -269,10 +270,59 @@ describe('useRoom approve', () => {
     const { result } = await setup()
     let res: unknown
     await act(async () => {
-      res = await result.current.actions.approve('p1', 'kafka')
+      res = await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
     })
     expect(res).toEqual({ ok: false })
     expect(result.current.error).toBe('user arjun does not own layer "kafka"')
+  })
+
+  it('409 params_mismatch on approve raises the stale flag, reloads the room and does not retry', async () => {
+    vi.mocked(api.approve).mockRejectedValue(
+      new ApiClientError(409, 'params_mismatch', 'params_hash does not match the proposal'),
+    )
+    const { result } = await setup()
+    expect(api.room).toHaveBeenCalledTimes(1)
+    let res: unknown
+    await act(async () => {
+      res = await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
+    })
+    expect(res).toEqual({ ok: false, mismatch: true })
+    expect(result.current.stale).toBe(true)
+    // Not the generic error banner, and no second approve call.
+    expect(result.current.error).toBeNull()
+    // The room state is fetched again (snapshot), which is the reload.
+    await waitFor(() => expect(api.room).toHaveBeenCalledTimes(2))
+    expect(api.approve).toHaveBeenCalledTimes(1)
+    // The flag survives the reload until it is dismissed.
+    expect(result.current.stale).toBe(true)
+    act(() => result.current.dismissStale())
+    expect(result.current.stale).toBe(false)
+  })
+
+  it('409 params_mismatch on reject sends the rendered hash, raises the stale flag and does not retry', async () => {
+    vi.mocked(api.reject).mockRejectedValue(
+      new ApiClientError(409, 'params_mismatch', 'params_hash does not match the proposal'),
+    )
+    const { result } = await setup()
+    act(() => result.current.actions.reject('p1', 'kafka', 'wrong', 'h1'))
+    await waitFor(() => expect(result.current.stale).toBe(true))
+    expect(api.reject).toHaveBeenCalledWith('p1', 'kafka', 'wrong', 'h1')
+    await waitFor(() => expect(api.room).toHaveBeenCalledTimes(2))
+    expect(api.reject).toHaveBeenCalledTimes(1)
+    expect(result.current.error).toBeNull()
+  })
+
+  it('a 409 that is not params_mismatch (already_decided) stays an ordinary error', async () => {
+    vi.mocked(api.approve).mockRejectedValue(
+      new ApiClientError(409, 'already_decided', 'layer "kafka" already decided'),
+    )
+    const { result } = await setup()
+    await act(async () => {
+      await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
+    })
+    expect(result.current.stale).toBe(false)
+    expect(result.current.error).toBe('layer "kafka" already decided')
+    expect(api.room).toHaveBeenCalledTimes(1)
   })
 })
 
