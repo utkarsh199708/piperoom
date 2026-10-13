@@ -207,7 +207,11 @@ type Watcher struct {
 	// dlqState is the sample ring of each DLQ topic (topics are cluster-wide,
 	// so pipelines that name the same topic share one ring). dlqNoReaderLogged
 	// keeps the "cannot read DLQ offsets" line to one.
-	dlqState          map[string]*dlqTopicState
+	dlqState map[string]*dlqTopicState
+	// dlqSeen is, per pipeline/connector, the DLQ setting last read from its
+	// config; a connector that now answers 404 keeps its DLQ topic in the plan
+	// for the ring window (see planDLQ).
+	dlqSeen           map[string]dlqSeen
 	dlqNoReaderLogged bool
 }
 
@@ -251,7 +255,7 @@ func New(d Deps) (*Watcher, error) {
 		src: d.Source, conn: d.Connect, kafka: d.Kafka, own: d.Owners, rooms: d.Rooms,
 		cfg: cfg, maxRooms: d.MaxOpenRooms, clock: d.Clock, log: d.Log, jitter: d.Jitter,
 		pipes: map[string]*pipeState{}, closed: map[string]bool{}, storms: map[string][]string{},
-		dlqState: map[string]*dlqTopicState{},
+		dlqState: map[string]*dlqTopicState{}, dlqSeen: map[string]dlqSeen{},
 	}
 	if w.maxRooms <= 0 {
 		w.maxRooms = defaultMaxOpenRooms

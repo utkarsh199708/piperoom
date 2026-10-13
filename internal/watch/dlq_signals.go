@@ -59,7 +59,9 @@ type dlqPlan struct {
 // planDLQ lists the DLQ topics per pipeline: the declared ones first, then the
 // ones sink connectors name in their config. A topic that is also a CDC topic
 // of the pipeline is dropped: counting it would make every change look bad.
-func planDLQ(ts []target, obs *observation) *dlqPlan {
+func (w *Watcher) planDLQ(ts []target, obs *observation) *dlqPlan {
+	now := w.clock.Now()
+	keep := dlqKeep(ts)
 	plan := &dlqPlan{topics: map[string][]dlqTopic{}, cfgFail: map[string]bool{}}
 	users := map[string]map[string]bool{} // topic -> pipelines
 	want := map[string]bool{}
@@ -95,8 +97,15 @@ func planDLQ(ts []target, obs *observation) *dlqPlan {
 		}
 		for _, c := range t.connectors {
 			co := obs.conns[c]
+			key := t.p.ID + "/" + c
 			if connectorGone(co) {
-				continue // connector_down already says "missing"; it writes no DLQ
+				// connector_down already says "missing". Its DLQ topic stays in the
+				// plan for the ring window, so the ring and the verdict go on: a
+				// 404 must not make the signal look clear and resolve the room.
+				if ec, ok := w.seenDLQ(key, now, keep); ok {
+					add(ec.Topic, c, false, false, &ec)
+				}
+				continue
 			}
 			if co == nil || !co.cfgTried || co.cfgErr != nil {
 				plan.cfgFail[t.p.ID] = true
@@ -104,8 +113,10 @@ func planDLQ(ts []target, obs *observation) *dlqPlan {
 			}
 			ec := dlq.Parse(co.cfg)
 			if !ec.IsSink || ec.Topic == "" || cdc[ec.Topic] {
+				w.rememberDLQ(key, nil, now)
 				continue
 			}
+			w.rememberDLQ(key, &ec, now)
 			add(ec.Topic, c, false, false, &ec)
 		}
 		plan.topics[t.p.ID] = list
@@ -132,6 +143,46 @@ func planDLQ(ts []target, obs *observation) *dlqPlan {
 	return plan
 }
 
+// dlqSeen is the DLQ setting last read from one connector's config.
+type dlqSeen struct {
+	ec dlq.ErrorsConfig
+	at time.Time
+}
+
+// rememberDLQ records what a good config read said (nil = no DLQ topic).
+func (w *Watcher) rememberDLQ(key string, ec *dlq.ErrorsConfig, now time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if ec == nil {
+		delete(w.dlqSeen, key)
+		return
+	}
+	w.dlqSeen[key] = dlqSeen{ec: *ec, at: now}
+}
+
+// seenDLQ returns the setting last read from a connector that is gone now, as
+// long as it is no older than keep.
+func (w *Watcher) seenDLQ(key string, now time.Time, keep time.Duration) (dlq.ErrorsConfig, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	s, ok := w.dlqSeen[key]
+	if ok && now.Sub(s.at) > keep {
+		delete(w.dlqSeen, key)
+		ok = false
+	}
+	return s.ec, ok
+}
+
+// dlqKeep is how long a ring (and a remembered connector) lives: one hour, or
+// the longest dlq_growth window if that is longer.
+func dlqKeep(ts []target) time.Duration {
+	keep := time.Hour
+	for _, t := range ts {
+		keep = max(keep, t.cfg.DLQGrowth.Window)
+	}
+	return keep
+}
+
 // connectorGone: Kafka Connect does not know the connector (404 on Status or
 // Config). It has no config to read and writes no DLQ topic; connector_down
 // reports the missing connector.
@@ -143,7 +194,7 @@ func connectorGone(co *connObs) bool {
 // every target, de-duplicated. No topics: no call (a client may list the whole
 // cluster for an empty list). The call has its own deadline and its own error.
 func (w *Watcher) observeDLQ(ctx context.Context, ts []target, obs *observation) {
-	obs.plan = planDLQ(ts, obs)
+	obs.plan = w.planDLQ(ts, obs)
 	if w.kafka == nil {
 		obs.dlqNoReader = true
 		return
@@ -194,10 +245,7 @@ func (w *Watcher) recordDLQ(now time.Time, ts []target, obs *observation) map[st
 	if obs.plan == nil {
 		return snaps
 	}
-	keep := time.Hour
-	for _, t := range ts {
-		keep = max(keep, t.cfg.DLQGrowth.Window)
-	}
+	keep := dlqKeep(ts)
 	// Forget topics nobody has asked for during the whole ring window.
 	for _, name := range obs.plan.want {
 		if st := w.dlqState[name]; st != nil {

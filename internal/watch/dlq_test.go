@@ -1092,3 +1092,139 @@ func TestDLQMissingConnectorDoesNotLeaveTheSignalUnknown(t *testing.T) {
 		t.Fatalf("a 404 connector was reported as an unreadable config\n%s", h.logs)
 	}
 }
+
+// ---- review round 3 ----
+
+// firingSinkDLQ sets up a pipeline whose sink connector names the DLQ topic
+// and gets that signal firing in a room.
+func firingSinkDLQ(t *testing.T) *harness {
+	t.Helper()
+	h := newHarness(t, opts{})
+	h.setSinkConfig("orders", map[string]string{
+		"errors.tolerance": "all", "errors.deadletterqueue.topic.name": "orders-sink-dlq",
+		"errors.log.enable": "true", "errors.deadletterqueue.context.headers.enable": "true",
+	})
+	h.kafka.set("orders-sink-dlq", 0, 0)
+	h.step(time.Minute)
+	h.kafka.add("orders-sink-dlq", 3)
+	h.steps(7, time.Minute)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseFiring || len(h.rooms.created()) != 1 {
+		t.Fatalf("setup: dlq_growth is not firing in one room\n%s", h.logs)
+	}
+	return h
+}
+
+func TestDLQSinkReturning404DoesNotResolveAndRefire(t *testing.T) {
+	h := firingSinkDLQ(t)
+	h.conn.setStatusErr("pg-orders", fmt.Errorf("connect: %w", clients.ErrNotFound))
+	for range 10 { // longer than `for`
+		h.step(time.Minute)
+		if h.sigPhase(owners.SignalDLQGrowth) != phaseFiring {
+			t.Fatalf("dlq_growth left firing while the sink answered 404\n%s", h.logs)
+		}
+	}
+	h.conn.mu.Lock()
+	delete(h.conn.statusErr, "pg-orders") // the connector is back, records unchanged
+	h.conn.mu.Unlock()
+	before := len(h.rooms.postsContaining("new signal"))
+	h.steps(10, time.Minute)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseFiring {
+		t.Fatalf("dlq_growth not firing after the connector came back\n%s", h.logs)
+	}
+	if n := len(h.rooms.resolved()); n != 0 {
+		t.Fatalf("%d resolved alerts: the room was resolved by a 404\n%s", n, h.logs)
+	}
+	if after := len(h.rooms.postsContaining("new signal")); after != before {
+		t.Fatalf("dlq_growth re-fired into the room as a new signal (%d -> %d)", before, after)
+	}
+	for _, line := range strings.Split(h.logs.String(), "\n") {
+		if strings.Contains(line, "signal resolved") && strings.Contains(line, "signal=dlq_growth") {
+			t.Fatalf("dlq_growth resolved: %s", line)
+		}
+	}
+}
+
+func TestDLQRememberedConnectorExpires(t *testing.T) {
+	h := firingSinkDLQ(t)
+	h.conn.setStatusErr("pg-orders", fmt.Errorf("connect: %w", clients.ErrNotFound))
+	// Gone for longer than the ring window: nothing is watched any more.
+	h.steps(70, time.Minute)
+	h.w.mu.Lock()
+	n := len(h.w.dlqSeen)
+	h.w.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("a connector gone for longer than the window is still remembered (%d)", n)
+	}
+}
+
+func TestDLQFiringStaysFiringOnStatus500(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.kafka.set("orders-dlq", 0, 0)
+	h.step(time.Minute)
+	h.kafka.add("orders-dlq", 3)
+	h.steps(7, time.Minute)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseFiring {
+		t.Fatalf("did not fire\n%s", h.logs)
+	}
+	h.conn.setStatusErr("pg-orders", errors.New("connect: 500"))
+	h.steps(80, time.Minute) // quiet for longer than window + for
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseFiring || len(h.rooms.resolved()) != 0 {
+		t.Fatalf("a 500 on Status let dlq_growth resolve\n%s", h.logs)
+	}
+}
+
+func TestConfigRiskWith404ConnectorIsNotUnknown(t *testing.T) {
+	h := newHarness(t, opts{})
+	h.conn.setStatusErr("pg-orders", fmt.Errorf("connect: %w", clients.ErrNotFound))
+	h.steps(5, time.Minute)
+	h.w.mu.Lock()
+	errText := h.w.pipes["orders"].sigs[owners.SignalConfigRisk].errText
+	h.w.mu.Unlock()
+	if errText != "" || strings.Contains(h.logs.String(), "config not read") {
+		t.Fatalf("config_risk is unknown behind a 404 connector: %q\n%s", errText, h.logs)
+	}
+}
+
+func TestDLQConfigNotFoundMeansNoDLQTopic(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.kafka.set("orders-dlq", 0, 0)
+	h.step(time.Minute)
+	h.kafka.add("orders-dlq", 3)
+	h.steps(7, time.Minute)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseFiring {
+		t.Fatalf("did not fire\n%s", h.logs)
+	}
+	// Status works, Config answers 404: no config to find a DLQ topic in. The
+	// declared topic is still watched and, quiet, resolves; no "unknown".
+	h.conn.mu.Lock()
+	h.conn.cfgErr["pg-orders"] = fmt.Errorf("connect: %w", clients.ErrNotFound)
+	h.conn.mu.Unlock()
+	h.steps(80, time.Minute)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseOK {
+		t.Fatalf("a 404 on Config left dlq_growth unknown\n%s", h.logs)
+	}
+	if strings.Contains(h.logs.String(), "DLQ topics unknown") {
+		t.Fatalf("a 404 on Config was reported as unreadable\n%s", h.logs)
+	}
+}
+
+func TestDLQSamplesStayBoundedAfterDaysAbsent(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.steps(3*24*60, time.Minute) // three days with the topic missing
+	h.w.mu.Lock()
+	st := h.w.dlqState["orders-dlq"]
+	n := len(st.samples)
+	h.w.mu.Unlock()
+	if n > maxDLQSamples || n > 62 {
+		t.Fatalf("%d samples after 3 days absent, want about window/interval (60)", n)
+	}
+	// And the same once it exists.
+	h.kafka.set("orders-dlq", 0, 5)
+	h.steps(3*24*60, time.Minute)
+	h.w.mu.Lock()
+	n = len(h.w.dlqState["orders-dlq"].samples)
+	h.w.mu.Unlock()
+	if n > 62 {
+		t.Fatalf("%d samples after 3 days present, want about 60", n)
+	}
+}
