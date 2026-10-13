@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -26,6 +27,19 @@ var tenantNameRE = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
 // envNameRE is a portable environment variable name.
 var envNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// shownNameRE is what an error may quote from owners.yaml: a key, a tenant or
+// a setting name. Anything else (a DSN or password pasted in the wrong place,
+// as a key or as a value) is not echoed into the start-up log.
+var shownNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,64}$`)
+
+// quoteName returns s quoted when it looks like a name, else a placeholder.
+func quoteName(s string) string {
+	if shownNameRE.MatchString(s) {
+		return strconv.Quote(s)
+	}
+	return "(a value that is not a plain name; not shown)"
+}
 
 // Tenant is one entry of the top-level tenants: block.
 type Tenant struct {
@@ -69,7 +83,7 @@ func (r *ConnRef) UnmarshalYAML(node *yaml.Node) error {
 	}
 	for i := 1; i < len(node.Content); i += 2 {
 		if v := node.Content[i]; v.Kind != yaml.ScalarNode {
-			return fmt.Errorf("line %d: connections: %s must be a string", v.Line, node.Content[i-1].Value)
+			return fmt.Errorf("line %d: connections: %s must be a string", v.Line, quoteName(node.Content[i-1].Value))
 		}
 	}
 	type plain ConnRef
@@ -91,7 +105,7 @@ func (c *Connections) UnmarshalYAML(node *yaml.Node) error {
 			return fmt.Errorf("line %d: connections: a key must be a setting name", k.Line)
 		}
 		if _, dup := m[k.Value]; dup {
-			return fmt.Errorf("line %d: connections: %s is set twice", k.Line, k.Value)
+			return fmt.Errorf("line %d: connections: %s is set twice", k.Line, quoteName(k.Value))
 		}
 		var r ConnRef
 		if err := r.UnmarshalYAML(node.Content[i+1]); err != nil {
@@ -108,6 +122,9 @@ type connKey struct {
 	required bool // every connections: block must set it
 	literal  bool // {value: X} allowed: the setting is never a secret
 	path     bool // the value is a file path (TLS material)
+	// ca: a CA bundle path. It is public material and a shared corporate CA
+	// is normal, so it is not a connection reference (CheckSharedRefs).
+	ca bool
 }
 
 // connKeys are the lower-case names of the process-wide settings a pipeline
@@ -122,20 +139,20 @@ var connKeys = map[string]connKey{
 	"kafka_sasl_mechanism":          {literal: true},
 	"kafka_sasl_username":           {},
 	"kafka_sasl_password":           {},
-	"kafka_tls_ca_file":             {path: true},
+	"kafka_tls_ca_file":             {path: true, ca: true},
 	"kafka_tls_cert_file":           {path: true},
 	"kafka_tls_key_file":            {path: true},
 	"kafka_tls_server_name":         {literal: true},
 	"connect_url":                   {required: true},
 	"connect_username":              {},
 	"connect_password":              {},
-	"connect_tls_ca_file":           {path: true},
+	"connect_tls_ca_file":           {path: true, ca: true},
 	"connect_tls_cert_file":         {path: true},
 	"connect_tls_key_file":          {path: true},
 	"schema_registry_url":           {required: true},
 	"schema_registry_username":      {},
 	"schema_registry_password":      {},
-	"schema_registry_tls_ca_file":   {path: true},
+	"schema_registry_tls_ca_file":   {path: true, ca: true},
 	"schema_registry_tls_cert_file": {path: true},
 	"schema_registry_tls_key_file":  {path: true},
 }
@@ -154,6 +171,19 @@ func ConnectionKeys() []string {
 // keys): a {file: p} reference then means the path p itself.
 func IsPathKey(key string) bool { return connKeys[key].path }
 
+// IsCAKey reports whether the key is a TLS CA bundle (*_tls_ca_file). A CA is
+// public and often shared by every team, so it never counts as a shared
+// connection reference.
+func IsCAKey(key string) bool { return connKeys[key].ca }
+
+// IsLiteralKey reports whether the key is one of the non-secret settings that
+// may be written as {value: X}.
+func IsLiteralKey(key string) bool { return connKeys[key].literal }
+
+// FileRef is the canonical connection reference of a file path (see
+// ConnRefs): cleaned and lower case, because Windows paths ignore case.
+func FileRef(path string) string { return "file:" + strings.ToLower(filepath.Clean(path)) }
+
 // TenantName returns the pipeline's tenant: its tenant: value, or DefaultTenant.
 func (p Pipeline) TenantName() string {
 	if p.Tenant == "" {
@@ -165,6 +195,26 @@ func (p Pipeline) TenantName() string {
 // HasConnections reports whether the pipeline has its own connections: block.
 // Without one it uses the process-wide settings.
 func (p Pipeline) HasConnections() bool { return len(p.Connections) > 0 }
+
+// kafkaClusterKey names the Kafka cluster the pipeline reaches, as far as
+// owners.yaml can tell without reading a value: "process" for the
+// process-wide KAFKA_BROKERS, else the pipeline's kafka_brokers reference.
+// Topic names are unique per cluster, so checks on topic names (validateDLQ)
+// compare them within one key. Two references that hold the same brokers look
+// like two clusters here; that check is by name, like CheckSharedRefs.
+func (p Pipeline) kafkaClusterKey() string {
+	if !p.HasConnections() {
+		return "process"
+	}
+	r := p.Connections["kafka_brokers"]
+	switch {
+	case r.Env != "":
+		return refEnv(r.Env)
+	case r.File != "":
+		return FileRef(r.File)
+	}
+	return "pipeline:" + p.ID
+}
 
 // TenancyOn reports whether owners.yaml has a tenants: block, i.e. whether the
 // tenant filter is on. Without one every signed-in user sees every room.
@@ -300,12 +350,14 @@ func (o *Owners) Only(ids ...string) *Owners {
 }
 
 // ProcessRefs are the references of a pipeline with no connections: block: it
-// uses the process-wide variables, one per connection key.
+// uses the process-wide variables, one per connection key except the CA
+// bundles (IsCAKey).
 func ProcessRefs() []string {
-	keys := ConnectionKeys()
-	out := make([]string, len(keys))
-	for i, k := range keys {
-		out[i] = refEnv(strings.ToUpper(k))
+	var out []string
+	for _, k := range ConnectionKeys() {
+		if !IsCAKey(k) {
+			out = append(out, refEnv(strings.ToUpper(k)))
+		}
 	}
 	return out
 }
@@ -313,19 +365,24 @@ func ProcessRefs() []string {
 // ConnRefs returns the canonical references the pipeline uses, sorted:
 // "env:NAME" (upper case: Windows variable names ignore case) and
 // "file:<path>" (cleaned, lower case, for the same reason on Windows paths).
-// A literal is not a reference. A pipeline with no connections: block uses
-// ProcessRefs.
+// A literal is not a reference, and neither is a CA bundle (IsCAKey). A
+// pipeline with no connections: block uses ProcessRefs. wiring adds the
+// resolved paths of the TLS key and certificate files, wherever they came
+// from, once the references are read.
 func (p Pipeline) ConnRefs() []string {
 	if !p.HasConnections() {
 		return ProcessRefs()
 	}
 	set := map[string]bool{}
-	for _, r := range p.Connections {
+	for k, r := range p.Connections {
+		if IsCAKey(k) {
+			continue
+		}
 		switch {
 		case r.Env != "":
 			set[refEnv(r.Env)] = true
 		case r.File != "":
-			set["file:"+strings.ToLower(filepath.Clean(r.File))] = true
+			set[FileRef(r.File)] = true
 		}
 	}
 	out := make([]string, 0, len(set))
@@ -389,23 +446,23 @@ func (o *Owners) validateTenancy() error {
 	}
 	for _, name := range o.TenantNames() {
 		if !tenantNameRE.MatchString(name) {
-			return fmt.Errorf("tenants: tenant name %q must match %s", name, tenantNameRE)
+			return fmt.Errorf("tenants: tenant name %s must match %s", quoteName(name), tenantNameRE)
 		}
 	}
 	for i := range o.Pipelines {
 		p := &o.Pipelines[i]
 		if p.Tenant != "" && !tenantNameRE.MatchString(p.Tenant) {
-			return fmt.Errorf("pipeline %q: tenant %q must match %s", p.ID, p.Tenant, tenantNameRE)
+			return fmt.Errorf("pipeline %q: tenant %s must match %s", p.ID, quoteName(p.Tenant), tenantNameRE)
 		}
 		t := p.TenantName()
 		if o.TenancyOn() {
 			if _, ok := o.Tenants[t]; !ok && t != DefaultTenant {
-				return fmt.Errorf("pipeline %q: tenant %q is not declared in tenants: (declared: %s)", p.ID, t, strings.Join(o.TenantNames(), ", "))
+				return fmt.Errorf("pipeline %q: tenant %s is not declared in tenants: (declared: %s)", p.ID, quoteName(t), strings.Join(o.TenantNames(), ", "))
 			}
 		} else if t != DefaultTenant {
 			// Without the block the filter is off, so naming a tenant would
 			// look like isolation while every user still sees the rooms.
-			return fmt.Errorf("pipeline %q: tenant %q needs a tenants: block that declares it (members may be empty)", p.ID, t)
+			return fmt.Errorf("pipeline %q: tenant %s needs a tenants: block that declares it (members may be empty)", p.ID, quoteName(t))
 		}
 		if p.Connections != nil && len(p.Connections) == 0 {
 			return fmt.Errorf("pipeline %q: connections: is empty; remove it to use the process-wide settings", p.ID)
@@ -431,7 +488,7 @@ func validateConnections(c Connections) error {
 	for _, k := range keys {
 		info, ok := connKeys[k]
 		if !ok {
-			return fmt.Errorf("connections: unknown key %q (allowed: %s)", k, strings.Join(ConnectionKeys(), ", "))
+			return fmt.Errorf("connections: unknown key %s (allowed: %s)", quoteName(k), strings.Join(ConnectionKeys(), ", "))
 		}
 		r := c[k]
 		n := 0
@@ -468,4 +525,61 @@ func validateConnections(c Connections) error {
 // so a file written on Linux checks the same way on a Windows dev machine.
 func isAbsPath(p string) bool {
 	return filepath.IsAbs(p) || strings.HasPrefix(p, "/")
+}
+
+// checkNullBlocks refuses a tenants:, connections: or tenant: key whose value
+// is null: written empty, as ~, or with every entry commented out. yaml.v3
+// never calls UnmarshalYAML for a null value, so after decoding such a key
+// looks absent, and a lost connections: block would silently fall back to the
+// process-wide credentials (a lost tenants: block would turn the filter
+// off). The key's presence is read from the node tree. root is the decoded
+// document; anything that is not a mapping is left to the normal decoder.
+func checkNullBlocks(root *yaml.Node) error {
+	doc := root
+	if doc.Kind == yaml.DocumentNode {
+		if len(doc.Content) == 0 {
+			return nil
+		}
+		doc = doc.Content[0]
+	}
+	if doc.Kind != yaml.MappingNode {
+		return nil
+	}
+	if v, ok := mapValue(doc, "tenants"); ok && isNull(v) {
+		return fmt.Errorf("line %d: tenants: is empty (null); declare at least one tenant, or remove the key to keep one tenant", v.Line)
+	}
+	pipes, ok := mapValue(doc, "pipelines")
+	if !ok || pipes.Kind != yaml.SequenceNode {
+		return nil
+	}
+	for i, p := range pipes.Content {
+		if p.Kind != yaml.MappingNode {
+			continue
+		}
+		name := fmt.Sprintf("pipelines[%d]", i)
+		if id, ok := mapValue(p, "id"); ok && id.Kind == yaml.ScalarNode && !isNull(id) {
+			name = "pipeline " + quoteName(id.Value)
+		}
+		if v, ok := mapValue(p, "connections"); ok && isNull(v) {
+			return fmt.Errorf("line %d: %s: connections: is empty (null); list the connections, or remove the key to use the process-wide settings", v.Line, name)
+		}
+		if v, ok := mapValue(p, "tenant"); ok && isNull(v) {
+			return fmt.Errorf("line %d: %s: tenant: is empty (null); name the tenant, or remove the key for tenant %q", v.Line, name, DefaultTenant)
+		}
+	}
+	return nil
+}
+
+// mapValue returns the value node of key in a mapping node.
+func mapValue(m *yaml.Node, key string) (*yaml.Node, bool) {
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1], true
+		}
+	}
+	return nil, false
+}
+
+func isNull(n *yaml.Node) bool {
+	return n.Kind == yaml.ScalarNode && n.ShortTag() == "!!null"
 }

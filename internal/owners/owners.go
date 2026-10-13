@@ -81,6 +81,15 @@ func Load(path string) (*Owners, error) {
 	if err := dec.Decode(&o); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("owners: parse %s: %w", path, err)
 	}
+	// The decode above succeeded, so this one parses the same document; it
+	// only finds keys that are present with a null value (tenancy.go).
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("owners: parse %s: %w", path, err)
+	}
+	if err := checkNullBlocks(&root); err != nil {
+		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
+	}
 	if err := o.validate(); err != nil {
 		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
 	}

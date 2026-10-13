@@ -209,6 +209,16 @@ func TestConnectionsNeverEchoSecrets(t *testing.T) {
 		"secret in file":   head + ", connections: {source_db_url: {file: 'u:" + secret + "@h'}}}\n",
 		"secret as value":  head + ", connections: {connect_password: {value: " + secret + "}}}\n",
 		"nested ref value": head + ", connections: {source_db_url: {env: [" + secret + "]}}}\n",
+		// A short plain scalar: yaml.v3's own error would quote it whole.
+		"short plain password": "pipelines:\n  - id: p1\n    topic_prefix: pg\n    source_tables: [public.t]\n    connectors: [c1]\n    connections:\n      kafka_sasl_password: " + secret + "\n",
+		// A DSN pasted where a name belongs.
+		"dsn as a connections key": head + ", connections: {'postgres://u:" + secret + "@h': {env: X}}}\n",
+		"dsn as a reference key":   head + ", connections: {source_db_url: {'postgres://u:" + secret + "@h': x}}}\n",
+		"dsn as a duplicate key":   head + ", connections: {'u:" + secret + "': {env: X}, 'u:" + secret + "': {env: Y}}}\n",
+		"dsn as a tenant":          head + ", tenant: 'postgres://u:" + secret + "@h'}\ntenants:\n  a: {}\n",
+		"dsn as a tenant name":     head + "}\ntenants:\n  'postgres://u:" + secret + "@h': {}\n",
+		"dsn as a tenants key":     head + "}\ntenants:\n  a: {'u:" + secret + "': x}\n",
+		"dsn as a watch key":       head + ", watch: {'u:" + secret + "': x}}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := Load(writeTemp(t, y))
@@ -333,5 +343,99 @@ func TestConnectionKeys(t *testing.T) {
 	}
 	if !IsPathKey("kafka_tls_ca_file") || IsPathKey("kafka_sasl_password") || IsPathKey("nope") {
 		t.Fatal("IsPathKey")
+	}
+}
+
+// TestNullBlocksRefused: a tenants:, connections: or tenant: key written with
+// no value (empty, ~, or every entry commented out) is refused. yaml.v3 skips
+// UnmarshalYAML for null, so without the check a lost connections: block
+// would silently use the process-wide credentials, and a lost tenants: block
+// would turn the filter off.
+func TestNullBlocksRefused(t *testing.T) {
+	pipe := "pipelines:\n  - id: pa\n    topic_prefix: pa\n    source_tables: [public.a]\n    connectors: [c1]\n"
+	cases := map[string]struct{ yaml, want string }{
+		"tenants empty":     {"tenants:\n" + pipe, "tenants: is empty (null)"},
+		"tenants tilde":     {"tenants: ~\n" + pipe, "tenants: is empty (null)"},
+		"tenants null":      {"tenants: null\n" + pipe, "tenants: is empty (null)"},
+		"tenants commented": {"tenants:\n#  a: {members: [user:ann]}\n#  b: {}\n" + pipe, "tenants: is empty (null)"},
+		"connections empty": {"tenants:\n  a: {}\n" + pipe + "    tenant: a\n    connections:\n", `pipeline "pa": connections: is empty (null)`},
+		"connections tilde": {pipe + "    connections: ~\n", `pipeline "pa": connections: is empty (null)`},
+		"connections commented": {"tenants:\n  a: {}\n" + pipe + "    tenant: a\n    connections:\n#      source_db_url: {env: A_SRC}\n#      kafka_brokers: {env: A_K}\n",
+			`pipeline "pa": connections: is empty (null)`},
+		"connections flow, no id": {"pipelines:\n  - {topic_prefix: pa, source_tables: [public.a], connectors: [c1], connections: }\n", "pipelines[0]: connections: is empty (null)"},
+		"tenant empty":            {"tenants:\n  a: {}\n" + pipe + "    tenant:\n", `pipeline "pa": tenant: is empty (null)`},
+		"tenant commented":        {"tenants:\n  a: {}\n" + pipe + "    tenant: # a\n", `pipeline "pa": tenant: is empty (null)`},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(writeTemp(t, tc.yaml))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+	// An absent key is fine: one tenant, process-wide settings.
+	if _, err := Load(writeTemp(t, pipe)); err != nil {
+		t.Fatalf("no blocks at all: %v", err)
+	}
+	// An empty file is still an empty config.
+	if _, err := Load(writeTemp(t, "")); err != nil {
+		t.Fatalf("empty file: %v", err)
+	}
+}
+
+// TestDLQTopicNamesPerCluster: a DLQ topic name is unique per Kafka cluster,
+// so two tenants on their own clusters may both declare "dlq"; on one
+// cluster (one kafka_brokers reference) the old rule stands.
+func TestDLQTopicNamesPerCluster(t *testing.T) {
+	dlq := func(y, pipe, topic string) string {
+		return strings.Replace(y, "    connectors: ["+pipe+"-connector]",
+			"    connectors: ["+pipe+"-connector]\n    consumer_groups: ["+pipe+"-sync]\n    watch:\n      dlq_topics:\n        - {topic: "+topic+", written_by: "+pipe+"-sync}", 1)
+	}
+	two := dlq(dlq(twoTenants(), "pa", "dlq"), "pb", "dlq")
+	if _, err := Load(writeTemp(t, two)); err != nil {
+		t.Fatalf("one DLQ name on two clusters: %v", err)
+	}
+	// pb's DLQ named like pa's CDC topic, on another cluster: fine.
+	if _, err := Load(writeTemp(t, dlq(twoTenants(), "pb", "pa.public.a"))); err != nil {
+		t.Fatalf("another cluster's CDC topic name: %v", err)
+	}
+	// One cluster: pb reads its brokers from A's variable (shared on purpose).
+	one := strings.Replace(two, "{env: B_KAFKA_BROKERS}", "{env: A_KAFKA_BROKERS}", 1)
+	one = strings.ReplaceAll(one, "    tenant: a\n", "    tenant: a\n    shared_connections: true\n")
+	one = strings.ReplaceAll(one, "    tenant: b\n", "    tenant: b\n    shared_connections: true\n")
+	if _, err := Load(writeTemp(t, one)); err == nil || !strings.Contains(err.Error(), `"dlq" is declared by "pa" and "pb"`) {
+		t.Fatalf("one DLQ name on one cluster: err = %v", err)
+	}
+}
+
+// TestCABundlesAreNotSharedRefs: a CA bundle is public and one corporate CA
+// for every team is normal, so it is no connection reference.
+func TestCABundlesAreNotSharedRefs(t *testing.T) {
+	y := strings.ReplaceAll(twoTenants(), "      kafka_security_protocol: {value: SASL_SSL}",
+		"      kafka_security_protocol: {value: SASL_SSL}\n      kafka_tls_ca_file: {file: /etc/ssl/corp-ca.pem}\n      connect_tls_ca_file: {env: CORP_CA}")
+	o, err := Load(writeTemp(t, y))
+	if err != nil {
+		t.Fatalf("two tenants on one CA: %v", err)
+	}
+	pa, _ := o.Pipeline("pa")
+	for _, r := range pa.ConnRefs() {
+		if strings.Contains(r, "corp-ca") || strings.Contains(r, "CORP_CA") {
+			t.Fatalf("ConnRefs has the CA: %v", pa.ConnRefs())
+		}
+	}
+	for _, r := range ProcessRefs() {
+		if strings.Contains(r, "_CA_FILE") {
+			t.Fatalf("ProcessRefs has a CA: %v", ProcessRefs())
+		}
+	}
+	// A client key file is a credential: shared, it is refused.
+	key := strings.ReplaceAll(twoTenants(), "      kafka_security_protocol: {value: SASL_SSL}",
+		"      kafka_security_protocol: {value: SASL_SSL}\n      kafka_tls_key_file: {file: /etc/ssl/client.key}")
+	if _, err := Load(writeTemp(t, key)); err == nil || !strings.Contains(err.Error(), "file:/etc/ssl/client.key") {
+		t.Fatalf("shared key file: err = %v", err)
+	}
+	if !IsCAKey("schema_registry_tls_ca_file") || IsCAKey("kafka_tls_key_file") || !IsLiteralKey("kafka_tls_server_name") || IsLiteralKey("connect_password") {
+		t.Fatal("IsCAKey / IsLiteralKey")
 	}
 }
