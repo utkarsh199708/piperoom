@@ -12,7 +12,7 @@ import (
 
 // Config holds every setting. Defaults match dev/docker-compose.yml.
 type Config struct {
-	HTTPAddr          string // PIPEROOM_HTTP_ADDR (loopback by default: no real login yet, security F1)
+	HTTPAddr          string // PIPEROOM_HTTP_ADDR (loopback by default; dev mode off loopback needs PIPEROOM_DEV_ALLOW_NONLOOPBACK)
 	RoomDBURL         string // PIPEROOM_DB_URL (room service state + event log)
 	SourceDBURL       string // SOURCE_DB_URL (the CDC source Postgres)
 	WarehouseDBURL    string // WAREHOUSE_DB_URL (dev warehouse; Postgres)

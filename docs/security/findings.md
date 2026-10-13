@@ -23,7 +23,7 @@ hardening, or dev-only exposure).
 - **Where:** `docs/api.md` §Auth (contract); `web/src/components/UserSwitcher.tsx:1-18`;
   `web/src/context/UserContext.tsx:9-49`
 - **Scenario:** The entire approval model rests on "only the owner of a layer may approve a
-  write for it." Identity is the `X-User` HTTP header (or `?user=` on the WebSocket), checked
+  write for it." Identity was the `X-User` HTTP header (or `?user=` on the WebSocket) until auth PR 2 (main d034ae7, which added dev cookie sessions and removed `?user=`), checked
   only against a *name*, not a credential, in `dev/users.yaml`. The web app's own
   `UserSwitcher` is a `<select>` listing every known user — one click turns Kabir (consumer
   owner) into Arjun (kafka-connect/kafka/schema-registry owner) or Meera (warehouse owner), no
