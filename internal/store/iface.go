@@ -99,19 +99,63 @@ func (r *PurgeResult) Add(o PurgeResult) {
 	r.ShadowRuns += o.ShadowRuns
 }
 
+// ArchiveFunc writes a room's archive before its delete and returns the last
+// seq the archive covers. An error skips the delete of that room.
+type ArchiveFunc func(ctx context.Context, roomID string) (lastSeq int64, err error)
+
+// PurgeQuery selects the closed rooms one PurgeClosed call deletes.
+type PurgeQuery struct {
+	Cutoff     time.Time // closed_at before this
+	PipelineID string    // "" = every pipeline
+	MaxRooms   int
+	// Exclude skips rooms (the caller passes rooms that already failed in
+	// this run).
+	Exclude []string
+	// Archive, when set, runs for each room before its transaction; the room
+	// is then deleted only while its last_seq is still the one the archive
+	// returned (else the room fails with ErrRoomChanged and is tried again on
+	// the next run). An archive error fails the room the same way.
+	Archive ArchiveFunc
+}
+
 // Purger is the retention surface. It is separate from Store so a store (or a
 // test fake) that cannot delete simply does not implement it. Both *PG and
 // memstore.Store do.
 type Purger interface {
-	// PurgeClosedBefore deletes up to maxRooms closed rooms whose closed_at is
-	// before cutoff, with every event and child row. Open rooms are never
-	// touched. Each room goes in its own transaction with its own timeout.
-	// Rooms in exclude are skipped (the caller passes rooms that already
-	// failed in this run). One room failing does not stop the others: it is
-	// reported in Failed and the call carries on. The returned error is only
-	// for the call itself (listing failed, ctx done). Examined < maxRooms
-	// means no qualifying room is left.
-	PurgeClosedBefore(ctx context.Context, cutoff time.Time, maxRooms int, exclude []string) (PurgeResult, error)
+	// PurgeClosed deletes up to q.MaxRooms closed rooms whose closed_at is
+	// before q.Cutoff (of q.PipelineID only, when set), oldest first, with
+	// every event and child row. Open rooms are never touched. Each room goes
+	// in its own transaction with its own timeout, after its archive. One
+	// room failing does not stop the others: it is reported in Failed and the
+	// call carries on. The returned error is only for the call itself
+	// (listing failed, ctx done). Examined < MaxRooms means no qualifying room
+	// is left.
+	PurgeClosed(ctx context.Context, q PurgeQuery) (PurgeResult, error)
+}
+
+// RoomDeletion is the room_deletions row: the content-free audit record of one
+// admin deletion (DELETE /api/rooms/{id}).
+type RoomDeletion struct {
+	RoomID     string    `json:"room_id"`
+	PipelineID string    `json:"pipeline_id"`
+	DeletedBy  string    `json:"deleted_by"`
+	DeletedAt  time.Time `json:"deleted_at"`
+	Reason     string    `json:"reason"`
+	EventCount int64     `json:"event_count"`
+}
+
+// Deleter is the admin deletion surface. Both *PG and memstore.Store
+// implement it.
+type Deleter interface {
+	// DeleteRoom deletes the room d.RoomID, open or closed, with every row
+	// keyed by it, and inserts d into room_deletions with PipelineID taken
+	// from the room and EventCount set to the events deleted, all in one
+	// transaction. wantSeq >= 0 deletes only while the room's last_seq is
+	// wantSeq (ErrRoomChanged otherwise). A missing room wraps ErrNotFound.
+	DeleteRoom(ctx context.Context, d RoomDeletion, wantSeq int64) (RoomDeletion, PurgeResult, error)
+	// GetRoomDeletion returns the audit row of a deleted room, or an error
+	// wrapping ErrNotFound.
+	GetRoomDeletion(ctx context.Context, roomID string) (RoomDeletion, error)
 }
 
 // ShadowStore is the shadow log and run table (docs/design/shadow.md section

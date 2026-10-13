@@ -254,9 +254,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			timedOut := rctx.Err() != nil
 			rcancel()
-			if timedOut {
+			switch {
+			case timedOut:
 				c.shutdown(websocket.StatusPolicyViolation, "replay timeout")
-			} else {
+			case errors.Is(err, store.ErrNotFound):
+				// Deleted while this connection was still replaying: it was
+				// not registered yet, so CloseRoom could not reach it.
+				c.shutdown(websocket.StatusNormalClosure, RoomDeletedReason)
+			default:
 				c.shutdown(websocket.StatusInternalError, "replay failed")
 			}
 			return
@@ -299,6 +304,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	g.addClient(roomID, c)
+	// A delete that finished after the first lookup found no connection here
+	// to close; now that this one is registered, CloseRoom would reach it, so
+	// one more lookup closes the gap.
+	if _, err := g.svc.GetRoom(ctx, roomID); err != nil {
+		var re *room.Error
+		if errors.As(err, &re) && re.Code == "not_found" {
+			c.shutdown(websocket.StatusNormalClosure, RoomDeletedReason)
+		} else {
+			c.shutdown(websocket.StatusInternalError, "room lookup failed")
+		}
+		return
+	}
 
 	ch, err := g.store.Subscribe(ctx, roomID, lastSeq)
 	if err != nil {

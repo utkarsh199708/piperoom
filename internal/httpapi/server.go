@@ -158,6 +158,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 			protected.Post("/rooms/{id}/handoffs", withTimeout(handoffTimeout, s.handleCreateHandoff))
 			// The audit export reads the whole log, so it has its own budget.
 			protected.Get("/rooms/{id}/export", withTimeout(exportTimeout, s.handleExportRoom))
+			// Deletion may write the same export to the archive first.
+			protected.Delete("/rooms/{id}", withTimeout(deleteTimeout, s.handleDeleteRoom))
 
 			protected.Group(func(short chi.Router) {
 				short.Use(middleware.Timeout(requestTimeout))
@@ -180,6 +182,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/rooms/{id}/control/request", s.handleRequestControl)
 				short.Post("/rooms/{id}/control/grant", s.handleGrantControl)
 				short.Post("/rooms/{id}/close", s.handleCloseRoom)
+				short.Post("/rooms/{id}/extend", s.handleExtendRoom)
 				short.Post("/rooms/{id}/trace", s.handleTrace)
 				short.Post("/rooms/{id}/shadow/blind", s.handleShadowBlind)
 				short.Get("/rooms/{id}/shadow", s.handleShadow)
@@ -305,6 +308,11 @@ func (s *Server) writeErr(w http.ResponseWriter, err error) {
 	// 400, never a 500. The message does not quote the text.
 	if errors.Is(err, store.ErrUnstorable) {
 		writeError(w, http.StatusBadRequest, "validation", "text contains characters that cannot be stored")
+		return
+	}
+	// The room log is past its cap and its reserve (docs/api.md, Room limits).
+	if errors.Is(err, store.ErrLogFull) {
+		writeError(w, http.StatusConflict, "log_full", "this room's log is full; it can still be closed")
 		return
 	}
 	s.log.Error("http: request failed", "err", err)

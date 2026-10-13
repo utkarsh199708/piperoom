@@ -9,6 +9,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"piperoom/internal/events"
 	"piperoom/internal/room"
 )
 
@@ -196,6 +197,48 @@ func (g *Gateway) CloseSession(sessionID string) {
 			}
 		}
 	}
+}
+
+// RoomDeletedReason is the close reason of a deleted room's connections
+// (docs/api.md, WebSocket).
+const RoomDeletedReason = "room deleted"
+
+// CloseRoom ends every connection to a deleted room: the room.deleted event
+// (never stored) as the last frame, then a normal close with the reason "room
+// deleted". It returns at once; the frames go out on their own goroutines.
+func (g *Gateway) CloseRoom(roomID string, deleted events.Event) {
+	b, err := json.Marshal(serverMsg{Type: "event", Event: &deleted})
+	if err != nil {
+		g.log.Error("ws: encode room.deleted", "room", roomID, "err", err)
+		b = nil
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	hub := g.rooms[roomID]
+	if hub == nil {
+		return
+	}
+	for c := range hub.conns {
+		g.spawnRoomDeleted(c, b)
+	}
+}
+
+// spawnRoomDeleted writes the last frame and closes, on its own goroutine.
+// Caller holds g.mu (see spawnShutdown for why that keeps wg safe).
+func (g *Gateway) spawnRoomDeleted(c *client, frame []byte) {
+	if g.closed {
+		return
+	}
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		if frame != nil {
+			// Best effort: a client that cannot take the frame still gets the
+			// close reason.
+			_ = c.write(g.ctx, frame)
+		}
+		c.shutdown(websocket.StatusNormalClosure, RoomDeletedReason)
+	}()
 }
 
 // recheckSessions asks SessionAlive about each cookie session that has a live

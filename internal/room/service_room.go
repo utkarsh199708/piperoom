@@ -3,6 +3,7 @@ package room
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -320,7 +321,12 @@ func (s *Service) joinAlertRoomLocked(ctx context.Context, roomID string, st *ro
 		text = fmt.Sprintf("alert %q reported resolved at its source; the room stays open until the driver closes it", title)
 	}
 	if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: text}); err != nil {
-		return RoomSnapshot{}, err
+		// A full log cannot take the note, but the alert still belongs to
+		// this room: answering an error would make the sender retry forever.
+		if !errors.Is(err, store.ErrLogFull) {
+			return RoomSnapshot{}, err
+		}
+		s.log.Warn("room: repeat alert joined a room whose log is full; note not stored", "room", roomID)
 	}
 	return st.snap.Clone(), nil
 }
@@ -450,6 +456,24 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 	if err := rejectUnstorable(resolution); err != nil {
 		return events.Event{}, err
 	}
+	return s.closeRoom(ctx, roomID, humanActor(user), func(st *roomState) (string, error) {
+		if !s.isDriver(st, user.ID) {
+			return "", ErrNotDriver()
+		}
+		// The resolution is what the shadow run is graded against.
+		if st.snap.Shadow && strings.TrimSpace(resolution) == "" {
+			return "", validation("a shadow room needs a resolution to grade against")
+		}
+		return resolution, nil
+	})
+}
+
+// closeRoom closes an open room as actor. check runs under s.mu after the
+// open check and returns the resolution to record, or an error that stops the
+// close. The driver's close and the open-room limit's close share everything
+// else: the alert key release, the persisted close, the shadow grace and
+// reveal, the agent and executor stop and the room-closed hook.
+func (s *Service) closeRoom(ctx context.Context, roomID string, actor events.Actor, check func(st *roomState) (string, error)) (events.Event, error) {
 	s.mu.Lock()
 	st, err := s.getStateLocked(ctx, roomID)
 	if err != nil {
@@ -460,16 +484,12 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 		s.mu.Unlock()
 		return events.Event{}, roomClosed("room already closed")
 	}
-	if !s.isDriver(st, user.ID) {
+	resolution, err := check(st)
+	if err != nil {
 		s.mu.Unlock()
-		return events.Event{}, ErrNotDriver()
+		return events.Event{}, err
 	}
-	// The resolution is what the shadow run is graded against.
-	if st.snap.Shadow && strings.TrimSpace(resolution) == "" {
-		s.mu.Unlock()
-		return events.Event{}, validation("a shadow room needs a resolution to grade against")
-	}
-	e, err := s.emitLocked(ctx, st, roomID, events.RoomClosed, humanActor(user), events.RoomClosedPayload{Resolution: resolution})
+	e, err := s.emitLocked(ctx, st, roomID, events.RoomClosed, actor, events.RoomClosedPayload{Resolution: resolution})
 	if err != nil {
 		s.mu.Unlock()
 		return events.Event{}, err

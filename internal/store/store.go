@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -131,6 +132,8 @@ type PG struct {
 	now        func() time.Time
 	cancel     context.CancelFunc
 	hubWg      sync.WaitGroup
+	// limits are the per-room log caps (SetLimits); nil means none.
+	limits atomic.Pointer[Limits]
 }
 
 // New connects to Postgres and starts the LISTEN/NOTIFY hub. The returned
@@ -390,8 +393,46 @@ func (s *PG) DeleteEmptyRoom(ctx context.Context, id string) error {
 
 // ---- events.Store ----
 
+var _ Capped = (*PG)(nil)
+
+// SetLimits sets the per-room log caps every later Append enforces. The server
+// calls it once at start; a store whose limits were never set has no caps.
+func (s *PG) SetLimits(l Limits) { s.limits.Store(&l) }
+
+func (s *PG) currentLimits() Limits {
+	if l := s.limits.Load(); l != nil {
+		return *l
+	}
+	return Limits{}
+}
+
+// RoomUsage returns the room's event count and stored payload bytes with the
+// caps they are held to, or an error wrapping ErrNotFound.
+func (s *PG) RoomUsage(ctx context.Context, roomID string) (Usage, error) {
+	ctx, cancel := dbCtx(ctx)
+	defer cancel()
+	l := s.currentLimits()
+	u := Usage{MaxEvents: l.MaxEvents, MaxBytes: l.MaxBytes}
+	err := s.pool.QueryRow(ctx, `SELECT event_count, byte_size FROM rooms WHERE id = $1`, roomID).Scan(&u.Events, &u.Bytes)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Usage{}, fmt.Errorf("store: room usage %s: %w", roomID, ErrNotFound)
+	}
+	if err != nil {
+		return Usage{}, fmt.Errorf("store: room usage %s: %w", roomID, err)
+	}
+	return u, nil
+}
+
 // Append assigns the next seq atomically, inserts the event and notifies
 // subscribers, all in one transaction. Seq has no gaps within a room.
+//
+// It also enforces the room's log caps (SetLimits): the cap check and the
+// counter update are one UPDATE of the rooms row, in the insert's
+// transaction. The row lock serialises concurrent appends of a room and
+// Postgres re-checks the WHERE on the newest row version, so no interleaving
+// passes a cap. Agent events stop at the cap, human and system events at the
+// cap plus ReservePercent, room.closed never (classOf). A refused event wraps
+// ErrLogFull and uses no seq. The bytes counted are len(Event.Payload).
 func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
@@ -409,14 +450,29 @@ func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor e
 	if err := CheckAppend(roomID, typ, payloadJSON, actorJSON); err != nil {
 		return events.Event{}, fmt.Errorf("store: append to %s: %w", roomID, err)
 	}
+	l := s.currentLimits()
+	maxEvents, maxBytes := l.bounds(classOf(typ, actor))
+	size := int64(len(payloadJSON))
 	at := s.now().UTC()
 	var seq int64
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx,
-			`UPDATE rooms SET last_seq = last_seq + 1 WHERE id = $1 RETURNING last_seq`, roomID).Scan(&seq); err != nil {
+		err := tx.QueryRow(ctx,
+			`UPDATE rooms SET last_seq = last_seq + 1, event_count = event_count + 1, byte_size = byte_size + $2
+			 WHERE id = $1 AND ($3::bigint = 0 OR event_count + 1 <= $3) AND ($4::bigint = 0 OR byte_size + $2 <= $4)
+			 RETURNING last_seq`, roomID, size, maxEvents, maxBytes).Scan(&seq)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Missing room or over the cap: the row (or its absence) says which.
+			var n, b int64
+			err := tx.QueryRow(ctx, `SELECT event_count, byte_size FROM rooms WHERE id = $1`, roomID).Scan(&n, &b)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("store: append to unknown room %s: %w", roomID, ErrNotFound)
 			}
+			if err != nil {
+				return fmt.Errorf("store: reserve seq for %s: %w", roomID, err)
+			}
+			return fmt.Errorf("store: append %s to %s (%d events, %d bytes): %w", typ, roomID, n, b, ErrLogFull)
+		}
+		if err != nil {
 			return fmt.Errorf("store: reserve seq for %s: %w", roomID, err)
 		}
 		if _, err := tx.Exec(ctx,
