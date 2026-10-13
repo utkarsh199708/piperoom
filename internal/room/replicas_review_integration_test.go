@@ -188,7 +188,11 @@ func TestReplicasStepNeverRunsAfterDeclaredUnknown(t *testing.T) {
 	if _, err := a.ApproveProposal(ctx, user(t, a, "arjun"), pid, "kafka", row.ParamsHash); err != nil {
 		t.Fatal(err)
 	}
-	<-ss.stalled
+	select {
+	case <-ss.stalled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the executor never reached the claimed step start")
+	}
 	executed := func() []events.ActionExecutedPayload {
 		var out []events.ActionExecutedPayload
 		for _, e := range lrEvents(t, b, room) {

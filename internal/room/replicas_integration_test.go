@@ -420,8 +420,10 @@ func TestReplicasLeaseTakeover(t *testing.T) {
 	schema := pgSchema(t)
 	log := newAgentLog()
 	fa := &faultyCoord{PG: pgReplicaStore(t, schema, store.Options{})}
-	a := newReplica(t, fa, "r0", log, nil)
-	b := newReplica(t, pgReplicaStore(t, schema, store.Options{}), "r1", log, nil, func(d *Deps) { d.ResumeOnTakeover = true })
+	// The action is registered so a late proposal from r0 would be valid:
+	// only the fence may refuse it.
+	a := newReplica(t, fa, "r0", log, &itAction{})
+	b := newReplica(t, pgReplicaStore(t, schema, store.Options{}), "r1", log, &itAction{}, func(d *Deps) { d.ResumeOnTakeover = true })
 	ctx := context.Background()
 	arjun := user(t, a, "arjun")
 
