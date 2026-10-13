@@ -64,10 +64,19 @@ type Actor struct {
 	Kind ActorKind `json:"kind"`
 	ID   string    `json:"id"`
 	Name string    `json:"name"`
+	// Verified is true when the server vouches for ID and Name: a person in
+	// users.yaml (kind human), or the server itself (kinds agent and system).
+	// It is false for a person known only to the IdP: a derived "u_" id that
+	// got in through an owners.yaml group or user: principal, auditors: or a
+	// viewer group. That person's Name comes from the IdP name claim, which
+	// they can set, so clients must mark it (docs/design/auth.md §2.1). It is
+	// decided when the event is written, from the users.yaml loaded then.
+	// Events written before this field read as false.
+	Verified bool `json:"verified"`
 }
 
 // AgentActor is the actor used for every event the agent emits.
-var AgentActor = Actor{Kind: ActorAgent, ID: "agent", Name: "Agent"}
+var AgentActor = Actor{Kind: ActorAgent, ID: "agent", Name: "Agent", Verified: true}
 
 // Event is one entry in a room's log. Seq starts at 1 and has no gaps
 // within a room.
@@ -236,6 +245,11 @@ type Identity struct {
 	Method    string    `json:"method"`          // "oidc" | "dev"
 	Grant     string    `json:"grant,omitempty"` // "user:…" | "group:…" | "backup:…" | "solo"
 	AuthTime  time.Time `json:"auth_time,omitzero"`
+	// Email ties the decision to a mailbox as well as to the actor id, so the
+	// audit trail never rests on a display name (docs/design/auth.md §2.1):
+	// the session's IdP email when the token said email_verified, else the
+	// users.yaml email: of the user. Empty when the server knows neither.
+	Email string `json:"email,omitempty"`
 }
 
 // ApprovalGivenPayload is one layer owner's approval.
