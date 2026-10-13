@@ -9,7 +9,15 @@
     "final_hypothesis_at": "2026-10-11T09:55:30Z",
     "finished_at": "2026-10-11T09:55:31Z",
     "finished_after_close": false,
-    "final_hypothesis": "Connector pg-orders-connector task 0 is FAILED: the Avro value schema for pg.public.orders changed amount from int to bytes(decimal 12,2), and Schema Registry rejected it as incompatible (409, BACKWARD). The consumer is healthy; the warehouse is stale because nothing new reaches the topic. Evidence: s1, s2.",
+    "final_hypothesis": {
+      "text": "Connector pg-orders-connector task 0 is FAILED: the Avro value schema for pg.public.orders changed amount from int to bytes(decimal 12,2), and Schema Registry rejected it as incompatible (409, BACKWARD). The consumer is healthy; the warehouse is stale because nothing new reaches the topic. Evidence: s1, s2.",
+      "based_on_steps": [
+        "s1",
+        "s2"
+      ],
+      "confidence": "high",
+      "confirmed": false
+    },
     "tool_calls": 4,
     "tokens": 18420,
     "revealed_at": "2026-10-11T10:20:02Z"
@@ -230,7 +238,7 @@
         "step_id": "s2",
         "tool_use_id": "toolu_04",
         "tool": "schema_registry_diff",
-        "summary": "schemareg: GET /subjects/pg.public.orders-value/versions/2: not found: schema registry error 40402: Version 2 not found.",
+        "summary": "error: schemareg: GET /subjects/pg.public.orders-value/versions/2: not found: schema registry error 40402: Version 2 not found.",
         "is_error": true,
         "took_ms": 120
       },
@@ -276,38 +284,71 @@
   ],
   "room": {
     "created": {
-      "title": "orders stale",
-      "severity": "sev2",
-      "pipeline_id": "orders",
-      "alert": {
-        "alertname": "WarehouseStale",
-        "table": "analytics.orders"
+      "room_id": "room_8f3a1c7e",
+      "seq": 1,
+      "type": "room.created",
+      "actor": {
+        "kind": "human",
+        "id": "arjun",
+        "name": "Arjun"
       },
-      "alert_source": "webhook",
-      "dedup_key": "webhook:orders:WarehouseStale",
-      "shadow": true
+      "payload": {
+        "title": "orders stale",
+        "severity": "sev2",
+        "pipeline_id": "orders",
+        "alert": {
+          "alertname": "WarehouseStale",
+          "table": "analytics.orders"
+        },
+        "alert_source": "webhook",
+        "dedup_key": "webhook:orders:WarehouseStale",
+        "shadow": true
+      },
+      "at": "2026-10-11T09:54:50Z"
     },
     "labelled": {
-      "actual_layer": "kafka-connect",
-      "root_cause_terms": [
-        "amount",
-        "numeric",
-        "schema registry",
-        "409"
-      ],
-      "identity": {
-        "method": "dev",
-        "grant": "solo"
-      }
+      "room_id": "room_8f3a1c7e",
+      "seq": 9,
+      "type": "shadow.labelled",
+      "actor": {
+        "kind": "human",
+        "id": "priya",
+        "name": "Priya"
+      },
+      "payload": {
+        "actual_layer": "kafka-connect",
+        "root_cause_terms": [
+          "amount",
+          "numeric",
+          "schema registry",
+          "409"
+        ],
+        "identity": {
+          "method": "dev",
+          "grant": "user:priya"
+        }
+      },
+      "at": "2026-10-11T10:21:10Z"
     },
     "graded": {
-      "layer_correct": true,
-      "root_cause": "yes",
-      "notes": "Same cause the team found; the agent got there in four calls.",
-      "identity": {
-        "method": "dev",
-        "grant": "solo"
-      }
+      "room_id": "room_8f3a1c7e",
+      "seq": 10,
+      "type": "shadow.graded",
+      "actor": {
+        "kind": "human",
+        "id": "priya",
+        "name": "Priya"
+      },
+      "payload": {
+        "layer_correct": true,
+        "root_cause": "yes",
+        "notes": "Same cause the team found; the agent got there in four calls.",
+        "identity": {
+          "method": "dev",
+          "grant": "user:priya"
+        }
+      },
+      "at": "2026-10-11T10:25:40Z"
     }
   }
 }

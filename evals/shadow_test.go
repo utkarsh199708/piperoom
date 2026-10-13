@@ -1,6 +1,7 @@
 package evals
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -8,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"piperoom/internal/events"
 	"piperoom/internal/owners"
+	"piperoom/internal/room"
 )
 
 const shadowSample = "testdata/shadow-run.json"
@@ -63,8 +66,9 @@ func TestScenarioFromShadowSample(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScenarioFromShadow: %v", err)
 	}
-	if len(res.Warnings) != 0 {
-		t.Errorf("a complete run warned: %v", res.Warnings)
+	// The only warning on a complete run is the one about production values in data.
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "production values") {
+		t.Errorf("warnings = %q, want the data review warning only", res.Warnings)
 	}
 
 	// Round trip through the real loader and validator, from a file, as
@@ -132,8 +136,9 @@ func TestScenarioFromShadowSample(t *testing.T) {
 	if m, _ := cs.Data.(map[string]any); m == nil || m["state"] != "RUNNING" {
 		t.Errorf("connect_status data = %#v", cs.Data)
 	}
-	if r := byTool["schema_registry_diff"]; r.Error == "" || r.Summary != "" {
-		t.Errorf("failed call must become an error recording: %+v", r)
+	// The agent loop's "error: " prefix is stripped once; replay adds its own.
+	if r := byTool["schema_registry_diff"]; r.Summary != "" || !strings.HasPrefix(r.Error, "schemareg: GET ") {
+		t.Errorf("failed call must become an error recording without the error: prefix: %+v", r)
 	}
 	if r := byTool["pg_replication_slots"]; len(r.Input) != 0 {
 		t.Errorf("empty input after stripping why = %v", r.Input)
@@ -166,23 +171,23 @@ func TestScenarioFromShadowErrors(t *testing.T) {
 			want: ErrShadowUnlabelled, text: "no ground truth"},
 		{name: "label member missing", mutate: func(m map[string]any) { delete(sub(m, "room"), "labelled") },
 			want: ErrShadowUnlabelled},
-		{name: "label without terms", mutate: func(m map[string]any) { sub(sub(m, "room"), "labelled")["root_cause_terms"] = []any{"  ", ""} },
+		{name: "label without terms", mutate: func(m map[string]any) { part(m, "labelled")["root_cause_terms"] = []any{"  ", ""} },
 			want: ErrShadowUnlabelled, text: "root_cause_terms"},
-		{name: "label without layer", mutate: func(m map[string]any) { sub(sub(m, "room"), "labelled")["actual_layer"] = "" },
+		{name: "label without layer", mutate: func(m map[string]any) { part(m, "labelled")["actual_layer"] = "" },
 			want: ErrShadowUnlabelled},
-		{name: "unknown layer", mutate: func(m map[string]any) { sub(sub(m, "room"), "labelled")["actual_layer"] = "etl" },
+		{name: "unknown layer", mutate: func(m map[string]any) { part(m, "labelled")["actual_layer"] = "etl" },
 			want: ErrShadowUnknownLayer, text: "etl"},
-		{name: "layer in other case", mutate: func(m map[string]any) { sub(sub(m, "room"), "labelled")["actual_layer"] = "Kafka-Connect" },
+		{name: "layer in other case", mutate: func(m map[string]any) { part(m, "labelled")["actual_layer"] = "Kafka-Connect" },
 			want: ErrShadowUnknownLayer},
 		{name: "too many terms", mutate: func(m map[string]any) {
 			var ts []any
 			for i := 0; i < maxTerms+1; i++ {
 				ts = append(ts, "term"+strings.Repeat("x", i))
 			}
-			sub(sub(m, "room"), "labelled")["root_cause_terms"] = ts
+			part(m, "labelled")["root_cause_terms"] = ts
 		}, want: ErrShadowMalformed},
 		{name: "term too long", mutate: func(m map[string]any) {
-			sub(sub(m, "room"), "labelled")["root_cause_terms"] = []any{strings.Repeat("a", maxTermLen+1)}
+			part(m, "labelled")["root_cause_terms"] = []any{strings.Repeat("a", maxTermLen+1)}
 		}, want: ErrShadowMalformed},
 		{name: "missing include=room", mutate: func(m map[string]any) { delete(m, "room") },
 			want: ErrShadowNoRoom, text: "include=data,room"},
@@ -213,9 +218,9 @@ func TestScenarioFromShadowErrors(t *testing.T) {
 			want: ErrShadowMalformed},
 		{name: "unknown status", mutate: func(m map[string]any) { sub(m, "run")["status"] = "exploded" },
 			want: ErrShadowMalformed},
-		{name: "created has no pipeline", mutate: func(m map[string]any) { sub(sub(m, "room"), "created")["pipeline_id"] = "" },
+		{name: "created has no pipeline", mutate: func(m map[string]any) { part(m, "created")["pipeline_id"] = "" },
 			want: ErrShadowMalformed},
-		{name: "unknown pipeline", mutate: func(m map[string]any) { sub(sub(m, "room"), "created")["pipeline_id"] = "payments" },
+		{name: "unknown pipeline", mutate: func(m map[string]any) { part(m, "created")["pipeline_id"] = "payments" },
 			want: ErrShadowUnknownPipeline},
 		{name: "tool_result for another tool", mutate: func(m map[string]any) {
 			for _, e := range evList(m) {
@@ -289,7 +294,7 @@ func TestScenarioFromShadowPartial(t *testing.T) {
 			m := sampleDoc(t)
 			run := sub(m, "run")
 			run["status"] = status
-			run["final_hypothesis"] = ""
+			run["final_hypothesis"] = nil
 			// Drop the last result (toolu_04) and the hypothesis: cut off mid-call.
 			var keep []any
 			for _, e := range evList(m) {
@@ -349,9 +354,9 @@ func TestScenarioFromShadowHostileText(t *testing.T) {
 					p["data"] = map[string]any{"state": h, "list": []any{h, 12345678901234567, 1.5}}
 				}
 			}
-			sub(sub(m, "room"), "created")["title"] = h + "x"
+			part(m, "created")["title"] = h + "x"
 			sub(m, "run")["pipeline_map"] = h
-			sub(sub(m, "room"), "labelled")["root_cause_terms"] = []any{"amount", h + "t"}
+			part(m, "labelled")["root_cause_terms"] = []any{"amount", h + "t"}
 			raw := encode(t, m)
 			res, err := ScenarioFromShadow(raw, lookupOrders, "")
 			if err != nil {
@@ -427,9 +432,172 @@ func TestScenarioFromShadowCaps(t *testing.T) {
 		t.Errorf("warnings = %v", res.Warnings)
 	}
 
-	// Input over the cap is refused before any parsing.
-	if _, err := ScenarioFromShadow(make([]byte, MaxShadowInputBytes+1), lookupOrders, ""); !errors.Is(err, ErrShadowMalformed) {
-		t.Errorf("oversized input: %v", err)
+}
+
+// Valid JSON padded past the byte cap: only the cap itself can refuse it.
+func TestScenarioFromShadowInputCap(t *testing.T) {
+	m := sampleDoc(t)
+	m["pad"] = strings.Repeat("x", MaxShadowInputBytes)
+	big := encode(t, m)
+	if !json.Valid(big) || len(big) <= MaxShadowInputBytes {
+		t.Fatalf("test input is not valid JSON over the cap (%d bytes)", len(big))
+	}
+	_, err := ScenarioFromShadow(big, lookupOrders, "")
+	if !errors.Is(err, ErrShadowMalformed) || !strings.Contains(err.Error(), "exceeds the") {
+		t.Fatalf("oversized input: %v", err)
+	}
+	// The same document under the cap loads, so the cap was what refused it.
+	delete(m, "pad")
+	if _, err := ScenarioFromShadow(encode(t, m), lookupOrders, ""); err != nil {
+		t.Fatalf("unpadded: %v", err)
+	}
+}
+
+// part returns the payload of room.<key>, which is a whole event.
+func part(m map[string]any, key string) map[string]any {
+	p := sub(m, "room")[key].(map[string]any)
+	if pl, ok := p["payload"].(map[string]any); ok {
+		return pl
+	}
+	return p
+}
+
+// The agent loop answers a call to an unknown tool, or with input the schema
+// does not allow, with an error result without running anything. Those are
+// skipped (and still count as calls); the same shape with a successful
+// result is a hard error.
+func TestScenarioFromShadowRejectedCalls(t *testing.T) {
+	m := sampleDoc(t)
+	evs := evList(m)
+	n := len(evs)
+	add := func(i int, tool string, input map[string]any, summary string) {
+		id := "toolu_x" + string(rune('a'+i))
+		evs = append(evs,
+			map[string]any{"room_id": "r", "seq": n + 2*i + 1, "type": "agent.tool_call", "shadow": true,
+				"payload": map[string]any{"step_id": "s3", "tool_use_id": id, "tool": tool, "input": input}},
+			map[string]any{"room_id": "r", "seq": n + 2*i + 2, "type": "agent.tool_result", "shadow": true,
+				"payload": map[string]any{"step_id": "s3", "tool_use_id": id, "tool": tool, "summary": summary, "is_error": true}})
+	}
+	add(0, "connect_teleport", map[string]any{"x": 1}, "error: unknown tool")
+	add(1, "connect_status", map[string]any{"connector_name": "c", "why": "w"}, "error: invalid input: unknown property connector_name")
+	m["events"] = evs
+	res, err := ScenarioFromShadow(encode(t, m), lookupOrders, "")
+	if err != nil {
+		t.Fatalf("rejected calls killed the conversion: %v", err)
+	}
+	if len(res.Scenario.Recordings) != 4 {
+		t.Errorf("%d recordings, want the 4 real ones", len(res.Scenario.Recordings))
+	}
+	if res.Scenario.Expect.MaxToolCalls != 6+toolCallSlack {
+		t.Errorf("max_tool_calls = %d, rejected calls still count", res.Scenario.Expect.MaxToolCalls)
+	}
+	if !strings.Contains(strings.Join(res.Warnings, "\n"), "2 call(s) the agent loop rejected") {
+		t.Errorf("warnings = %q", res.Warnings)
+	}
+}
+
+// yaml.v3 writes a "<<" key unquoted, and the loader reads it as a merge key:
+// data {"<<": {"injected": 1}, "a": 2} would come back with "injected" at the
+// top. Data that does not survive is dropped; input that does not survive
+// refuses the run.
+func TestScenarioFromShadowMergeKey(t *testing.T) {
+	cases := map[string]any{
+		"top level": map[string]any{"<<": map[string]any{"injected": 1}, "a": 2},
+		"nested":    map[string]any{"a": map[string]any{"b": []any{map[string]any{"<<": map[string]any{"injected": 1}}}}},
+		"scalar":    map[string]any{"<<": "x"},
+	}
+	for name, data := range cases {
+		t.Run("data "+name, func(t *testing.T) {
+			m := sampleDoc(t)
+			for _, e := range evList(m) {
+				p := sub(e.(map[string]any), "payload")
+				if p["tool_use_id"] == "toolu_01" && p["summary"] != nil {
+					p["data"] = data
+				}
+			}
+			res, err := ScenarioFromShadow(encode(t, m), lookupOrders, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range res.Scenario.Recordings {
+				if r.Tool == "connect_status" {
+					if r.Data != nil {
+						t.Errorf("data that reads back differently was kept: %#v", r.Data)
+					}
+					if r.Summary == "" {
+						t.Error("summary lost with the data")
+					}
+				}
+			}
+			if !strings.Contains(strings.Join(res.Warnings, "\n"), `"<<" key`) {
+				t.Errorf("no warning: %q", res.Warnings)
+			}
+		})
+	}
+	t.Run("input", func(t *testing.T) {
+		m := sampleDoc(t)
+		for _, e := range evList(m) {
+			p := sub(e.(map[string]any), "payload")
+			if p["tool_use_id"] == "toolu_01" && p["input"] != nil {
+				p["input"] = map[string]any{"connector": map[string]any{"<<": map[string]any{"injected": 1}, "a": 2}}
+			}
+		}
+		if _, err := ScenarioFromShadow(encode(t, m), lookupOrders, ""); !errors.Is(err, ErrShadowInvalid) {
+			t.Fatalf("err = %v, want ErrShadowInvalid", err)
+		}
+	})
+}
+
+// A top-level free-choice input field is listed so the reviewer can drop it.
+func TestScenarioFromShadowFreeChoiceWarning(t *testing.T) {
+	m := sampleDoc(t)
+	evs := evList(m)
+	n := len(evs)
+	m["events"] = append(evs,
+		map[string]any{"room_id": "r", "seq": n + 1, "type": "agent.tool_call", "shadow": true,
+			"payload": map[string]any{"step_id": "s3", "tool_use_id": "toolu_ddl", "tool": "pg_recent_ddl",
+				"input": map[string]any{"since": "2026-10-11T09:00:00Z", "table": "public.orders", "why": "w"}}},
+		map[string]any{"room_id": "r", "seq": n + 2, "type": "agent.tool_result", "shadow": true,
+			"payload": map[string]any{"step_id": "s3", "tool_use_id": "toolu_ddl", "tool": "pg_recent_ddl",
+				"summary": "ALTER TABLE public.orders\n", "is_error": false, "data": map[string]any{"n": 1}}})
+	res, err := ScenarioFromShadow(encode(t, m), lookupOrders, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "free choices") {
+			got = w
+		}
+	}
+	if !strings.Contains(got, "(pg_recent_ddl)") || !strings.Contains(got, "since") || strings.Contains(got, "table") {
+		t.Errorf("free-choice warning = %q (warnings %q)", got, res.Warnings)
+	}
+	if w := freeChoiceWarnings([]outRecord{{Tool: "t", Input: map[string]any{"topic": "x", "limit": 5, "since": "y"}}}); len(w) != 1 ||
+		!strings.Contains(w[0], "limit, since") {
+		t.Errorf("warnings = %q", w)
+	}
+}
+
+// The sample must be what the server sends: strict-decode it into the
+// server's own type, so a renamed or retyped field fails here.
+func TestShadowSampleMatchesServerType(t *testing.T) {
+	raw, err := os.ReadFile(shadowSample)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var v room.ShadowView
+	if err := dec.Decode(&v); err != nil {
+		t.Fatalf("sample is not a room.ShadowView: %v", err)
+	}
+	if v.Room == nil || v.Room.Created == nil || v.Room.Labelled == nil || v.Room.Graded == nil {
+		t.Fatalf("room parts: %+v", v.Room)
+	}
+	var h events.AgentHypothesisPayload
+	if err := json.Unmarshal(v.Run.FinalHypothesis, &h); err != nil || h.Text == "" {
+		t.Fatalf("final_hypothesis is not a hypothesis payload: %v", err)
 	}
 }
 
@@ -438,9 +606,10 @@ func TestScenarioFromShadowCaps(t *testing.T) {
 func TestScenarioFromShadowShapes(t *testing.T) {
 	m := sampleDoc(t)
 	room := sub(m, "room")
-	room["created"] = map[string]any{"type": "room.created", "payload": room["created"]}
-	room["labelled"] = map[string]any{"type": "shadow.labelled", "payload": room["labelled"]}
-	room["graded"] = map[string]any{"type": "shadow.graded", "payload": room["graded"]}
+	// The sample has whole events (the real shape); a bare payload also loads.
+	for _, k := range []string{"created", "labelled", "graded"} {
+		room[k] = room[k].(map[string]any)["payload"]
+	}
 
 	evs := evList(m)
 	n := len(evs)

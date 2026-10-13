@@ -199,10 +199,24 @@ Things to know before you commit the file:
 - **`data` must be in the response.** Without `include=data` the file is refused, because replayed
   `data` is what `connect_resume_connector` validates against. `include=room` is required too: it carries
   the alert and the label.
-- **Everything in the response is untrusted** (agent and tool output). It is only written as YAML string
-  and number values, never executed, never turned into structure; sizes are capped (summary 8000 bytes,
-  data 64 KiB per recording, 200 recordings, 16 MiB input), and data over the cap is dropped with a warning.
-- A tool or input field that no longer exists in this build fails validation, and nothing is written.
+- **Recorded `data` may hold production values** (hosts, IPs, record values, names) because the agent
+  read them from the real stack. Review and redact the file before you commit it. The command prints
+  this warning whenever any recording has `data`.
+- **Everything in the response is untrusted** (agent and tool output). It is written only through the
+  YAML encoder as string and number values and never executed. After encoding, the file is read back
+  and compared with what was meant (every recording, the alert, the label terms). That check exists
+  because YAML can change meaning on the way back: a `"<<"` map key is a merge key, so a recording whose
+  `data` holds one has its `data` dropped (with a warning), and a call whose `input` holds one fails the
+  conversion. Sizes are capped (summary 8000 bytes, data 64 KiB per recording, 200 recordings, 16 MiB
+  input); data over the cap is dropped with a warning.
+- **Failed calls.** An `is_error` result becomes an `error` recording (a leading `error: ` is removed,
+  the replay adds its own). A call the agent loop rejected before running it (unknown tool, or input the
+  schema does not allow) is skipped with a warning and still counts toward `max_tool_calls`. A
+  *successful* result for a tool or input field that no longer exists in this build fails validation,
+  and nothing is written.
+- **Free-choice inputs.** A recorded input field such as `since`, `limit` or a timestamp matches only
+  that exact value. The command lists them per recording; delete the ones whose value does not matter
+  (see "Matching" above), or the replay will miss when the agent picks another.
 - Read the file once: the root-cause terms were written for a human reading a resolution, so check that
   they are specific enough to fail a wrong hypothesis.
 

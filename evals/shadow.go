@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -92,19 +93,19 @@ type shadowDoc struct {
 }
 
 type shadowRun struct {
-	RoomID             string     `json:"room_id"`
-	Status             string     `json:"status"`
-	Model              string     `json:"model"`
-	PipelineMap        string     `json:"pipeline_map"`
-	StartedAt          *time.Time `json:"started_at"`
-	FirstHypothesisAt  *time.Time `json:"first_hypothesis_at"`
-	FinalHypothesisAt  *time.Time `json:"final_hypothesis_at"`
-	FinishedAt         *time.Time `json:"finished_at"`
-	FinishedAfterClose bool       `json:"finished_after_close"`
-	FinalHypothesis    string     `json:"final_hypothesis"`
-	ToolCalls          int        `json:"tool_calls"`
-	Tokens             int64      `json:"tokens"`
-	RevealedAt         *time.Time `json:"revealed_at"`
+	RoomID             string          `json:"room_id"`
+	Status             string          `json:"status"`
+	Model              string          `json:"model"`
+	PipelineMap        string          `json:"pipeline_map"`
+	StartedAt          *time.Time      `json:"started_at"`
+	FirstHypothesisAt  *time.Time      `json:"first_hypothesis_at"`
+	FinalHypothesisAt  *time.Time      `json:"final_hypothesis_at"`
+	FinishedAt         *time.Time      `json:"finished_at"`
+	FinishedAfterClose bool            `json:"finished_after_close"`
+	FinalHypothesis    json.RawMessage `json:"final_hypothesis"` // events.AgentHypothesisPayload, or null
+	ToolCalls          int             `json:"tool_calls"`
+	Tokens             int64           `json:"tokens"`
+	RevealedAt         *time.Time      `json:"revealed_at"`
 }
 
 // shadowEvent is events.Event plus the "shadow": true marker.
@@ -113,10 +114,10 @@ type shadowEvent struct {
 	Shadow bool `json:"shadow"`
 }
 
-// shadowRoom is the include=room member. Each part is the event payload
-// (room.created, shadow.labelled, the latest shadow.graded); a part given as
-// the whole Event is unwrapped, because the design names the keys but not
-// their depth.
+// shadowRoom is the include=room member (room.ShadowRoomEvents): each part is
+// a whole events.Event (room.created, shadow.labelled, the last shadow.graded),
+// null when missing. A bare payload is accepted too, so a hand-edited file
+// still loads.
 type shadowRoom struct {
 	Created  json.RawMessage `json:"created"`
 	Labelled json.RawMessage `json:"labelled"`
@@ -212,6 +213,14 @@ func ScenarioFromShadow(raw []byte, lookup func(id string) (owners.Pipeline, boo
 		return ShadowResult{}, fmt.Errorf("%w: run.status %q is not a shadow status", ErrShadowMalformed, run.Status)
 	}
 
+	// store.ShadowRun.FinalHypothesis is the hypothesis event payload, an object.
+	if !isNullJSON(run.FinalHypothesis) {
+		var h events.AgentHypothesisPayload
+		if err := json.Unmarshal(run.FinalHypothesis, &h); err != nil {
+			return ShadowResult{}, fmt.Errorf("%w: run.final_hypothesis: %v", ErrShadowMalformed, err)
+		}
+	}
+
 	created, err := decodePart[events.RoomCreatedPayload](doc.Room.Created, events.RoomCreated)
 	if err != nil {
 		return ShadowResult{}, fmt.Errorf("%w: room.created: %v", ErrShadowMalformed, err)
@@ -244,8 +253,12 @@ func ScenarioFromShadow(raw []byte, lookup func(id string) (owners.Pipeline, boo
 		return ShadowResult{}, fmt.Errorf("%w: %q", ErrShadowUnknownPipeline, clip(created.PipelineID, 80))
 	}
 
+	defs, err := LiveTools()
+	if err != nil {
+		return ShadowResult{}, err
+	}
 	var warnings []string
-	recs, observed, skipped, err := recordingsFromEvents(doc.Events, &warnings)
+	recs, observed, skipped, err := recordingsFromEvents(doc.Events, ToolInputs(defs), &warnings)
 	if err != nil {
 		return ShadowResult{}, err
 	}
@@ -274,33 +287,111 @@ func ScenarioFromShadow(raw []byte, lookup func(id string) (owners.Pipeline, boo
 			MaxToolCalls:      observed + toolCallSlack,
 		},
 	}
+	warnings = append(warnings, freeChoiceWarnings(recs)...)
+	if anyData(recs) {
+		warnings = append(warnings, "recorded tool data may contain production values (hosts, IPs, record values, names); review and redact the scenario before committing it")
+	}
 	if run.Status != "hypothesised" {
 		warnings = append(warnings, fmt.Sprintf("partial run (status %s): the recordings stop where the agent stopped; see evals/README.md", run.Status))
 	}
 
-	body, err := yaml.Marshal(sc)
-	if err != nil {
-		return ShadowResult{}, fmt.Errorf("evals: encode scenario: %w", err)
-	}
-	out := append([]byte(shadowYAMLHeader), body...)
-	if len(out) > maxScenarioBytes {
-		return ShadowResult{}, fmt.Errorf("%w: scenario would be %d bytes, cap %d", ErrShadowMalformed, len(out), maxScenarioBytes)
-	}
-
-	// Same path as `evalrun -check`: parse what a reader of the file gets, and
-	// validate it against the live tool and action definitions.
-	parsed, err := ParseScenario(out)
-	if err != nil {
-		return ShadowResult{}, fmt.Errorf("%w: %v", ErrShadowInvalid, err)
-	}
-	defs, err := LiveTools()
+	out, parsed, err := encodeChecked(&sc, &warnings)
 	if err != nil {
 		return ShadowResult{}, err
 	}
+	// Same path as `evalrun -check`: validate what a reader of the file gets
+	// against the live tool and action definitions.
 	if err := ValidateAll([]Scenario{parsed}, defs); err != nil {
 		return ShadowResult{}, fmt.Errorf("%w: %v", ErrShadowInvalid, err)
 	}
 	return ShadowResult{YAML: out, Scenario: parsed, Warnings: warnings}, nil
+}
+
+// encodeChecked marshals sc, parses the text back the way the loader will, and
+// compares what came back with what was meant. YAML has constructs that change
+// meaning on the way back (a "<<" key is a merge key, for one), and the text
+// is untrusted, so the comparison covers every recording and every string the
+// run supplied. A recording whose data does not survive loses its data, with a
+// warning; anything else that differs is an error.
+func encodeChecked(sc *outScenario, warnings *[]string) ([]byte, Scenario, error) {
+	for pass := 0; pass < 2; pass++ {
+		body, err := yaml.Marshal(sc)
+		if err != nil {
+			return nil, Scenario{}, fmt.Errorf("evals: encode scenario: %w", err)
+		}
+		out := append([]byte(shadowYAMLHeader), body...)
+		if len(out) > maxScenarioBytes {
+			return nil, Scenario{}, fmt.Errorf("%w: scenario would be %d bytes, cap %d", ErrShadowMalformed, len(out), maxScenarioBytes)
+		}
+		parsed, err := ParseScenario(out)
+		if err != nil {
+			return nil, Scenario{}, fmt.Errorf("%w: %v", ErrShadowInvalid, err)
+		}
+		bad, err := roundTripMismatches(sc, parsed)
+		if err != nil {
+			return nil, Scenario{}, err
+		}
+		if len(bad) == 0 {
+			return out, parsed, nil
+		}
+		if pass == 1 {
+			return nil, Scenario{}, fmt.Errorf("%w: text changed meaning in YAML (recordings %v)", ErrShadowInvalid, bad)
+		}
+		for _, i := range bad {
+			sc.Recordings[i].Data = nil
+			*warnings = append(*warnings, fmt.Sprintf("recordings[%d] (%s): data dropped because it does not survive YAML (a \"<<\" key reads back as a merge)", i, sc.Recordings[i].Tool))
+		}
+	}
+	return nil, Scenario{}, errors.New("evals: unreachable")
+}
+
+// roundTripMismatches returns the recordings whose data differs after the
+// round trip. Any other difference is an error: those fields cannot be dropped.
+func roundTripMismatches(sc *outScenario, parsed Scenario) ([]int, error) {
+	fail := func(what string) error {
+		return fmt.Errorf("%w: %s changed in the YAML round trip", ErrShadowInvalid, what)
+	}
+	if parsed.Name != sc.Name || parsed.Description != sc.Description ||
+		parsed.Alert != sc.Alert || parsed.Expect.FirstFailingLayer != sc.Expect.FirstFailingLayer ||
+		parsed.Expect.MaxToolCalls != sc.Expect.MaxToolCalls ||
+		!reflect.DeepEqual(parsed.Expect.RootCause, sc.Expect.RootCause) {
+		return nil, fail("name, description, alert or expectation")
+	}
+	if len(parsed.Recordings) != len(sc.Recordings) {
+		return nil, fail("the recording list")
+	}
+	var bad []int
+	for i, r := range sc.Recordings {
+		p := parsed.Recordings[i]
+		if p.Tool != r.Tool || p.Summary != r.Summary || p.Error != r.Error || p.Truncated != r.Truncated {
+			return nil, fail(fmt.Sprintf("recordings[%d]", i))
+		}
+		if !sameJSON(p.Input, r.Input) {
+			return nil, fail(fmt.Sprintf("recordings[%d].input", i))
+		}
+		if !sameJSON(p.Data, r.Data) {
+			bad = append(bad, i)
+		}
+	}
+	return bad, nil
+}
+
+// sameJSON compares two values by their JSON form (sorted keys), which treats
+// int and int64 alike and nil map and absent alike.
+func sameJSON(a, b any) bool {
+	ja, ea := json.Marshal(a)
+	jb, eb := json.Marshal(b)
+	if ea != nil || eb != nil {
+		return false
+	}
+	na, nb := string(ja), string(jb)
+	if na == "{}" {
+		na = "null"
+	}
+	if nb == "{}" {
+		nb = "null"
+	}
+	return na == nb
 }
 
 func isNullJSON(b json.RawMessage) bool {
@@ -339,7 +430,7 @@ func decodePart[T any](raw json.RawMessage, want events.Type) (T, error) {
 // recordingsFromEvents pairs agent.tool_call with agent.tool_result by
 // tool_use_id, in call order. observed counts every tool call in the run;
 // skipped counts calls with no result.
-func recordingsFromEvents(evs []shadowEvent, warnings *[]string) (recs []outRecord, observed, skipped int, err error) {
+func recordingsFromEvents(evs []shadowEvent, toolInputs map[string][]string, warnings *[]string) (recs []outRecord, observed, skipped int, err error) {
 	type call struct {
 		tool  string
 		input json.RawMessage
@@ -376,7 +467,7 @@ func recordingsFromEvents(evs []shadowEvent, warnings *[]string) (recs []outReco
 	observed = len(order)
 
 	seen := map[string]bool{}
-	var live, dups, bigData, orphan int
+	var live, dups, bigData, mergeData, orphan, rejected int
 	for _, id := range order {
 		c := calls[id]
 		res, ok := results[id]
@@ -393,7 +484,29 @@ func recordingsFromEvents(evs []shadowEvent, warnings *[]string) (recs []outReco
 		}
 		input, err := cleanInput(c.input)
 		if err != nil {
+			if res.IsError {
+				rejected++ // the agent loop refused input that was not an object
+				continue
+			}
 			return nil, 0, 0, fmt.Errorf("%w: tool_call %q input: %v", ErrShadowMalformed, clip(id, 40), err)
+		}
+		// The agent loop rejects a call to an unknown tool or with input the
+		// schema does not allow before running anything, and records it as an
+		// error result. Such a call can never match in replay (and would fail
+		// validation), so it is not recorded. A successful result for the same
+		// shape is a real mismatch and stays a hard error (ValidateAll).
+		if res.IsError && !knownCall(toolInputs, c.tool, input) {
+			rejected++
+			continue
+		}
+		// A "<<" key anywhere in the input would be read back as a YAML merge.
+		// Input that cannot be written faithfully cannot match a replayed call.
+		if hasMergeKey(input) {
+			if res.IsError {
+				rejected++
+				continue
+			}
+			return nil, 0, 0, fmt.Errorf("%w: tool_call %q input has a \"<<\" key, which YAML would read as a merge", ErrShadowInvalid, clip(id, 40))
 		}
 		key, _ := json.Marshal(struct {
 			T string
@@ -411,6 +524,9 @@ func recordingsFromEvents(evs []shadowEvent, warnings *[]string) (recs []outReco
 			if strings.TrimSpace(msg) == "" {
 				msg = "tool failed (no message recorded)"
 			}
+			// The agent loop prefixes tool errors with "error: " and the replay
+			// tool adds its own, so keep one.
+			msg = strings.TrimPrefix(msg, "error: ")
 			r.Error, _ = truncateTo(msg, maxToolErrorBytes)
 		} else {
 			if strings.TrimSpace(res.Summary) == "" {
@@ -426,6 +542,8 @@ func recordingsFromEvents(evs []shadowEvent, warnings *[]string) (recs []outReco
 					bigData++
 				} else if v, err := jsonToNative(res.Data); err != nil {
 					return nil, 0, 0, fmt.Errorf("%w: tool_result %q data: %v", ErrShadowMalformed, clip(id, 40), err)
+				} else if hasMergeKey(v) {
+					mergeData++ // yaml.v3 writes "<<" unquoted and the loader merges it
 				} else {
 					r.Data = v
 				}
@@ -445,6 +563,12 @@ func recordingsFromEvents(evs []shadowEvent, warnings *[]string) (recs []outReco
 	if dups > 0 {
 		*warnings = append(*warnings, fmt.Sprintf("%d repeated call(s) with identical input folded into the first result", dups))
 	}
+	if rejected > 0 {
+		*warnings = append(*warnings, fmt.Sprintf("%d call(s) the agent loop rejected before running (unknown tool or input the schema does not allow) were not recorded; they still count toward max_tool_calls", rejected))
+	}
+	if mergeData > 0 {
+		*warnings = append(*warnings, fmt.Sprintf("data dropped from %d recording(s) holding a \"<<\" key (YAML reads it as a merge)", mergeData))
+	}
 	if bigData > 0 {
 		*warnings = append(*warnings, fmt.Sprintf("data dropped from %d recording(s) larger than %d bytes", bigData, maxRecordingData))
 	}
@@ -452,6 +576,63 @@ func recordingsFromEvents(evs []shadowEvent, warnings *[]string) (recs []outReco
 		*warnings = append(*warnings, fmt.Sprintf("%d result(s) with an empty summary were not recorded", orphan))
 	}
 	return recs, observed, skipped, nil
+}
+
+// hasMergeKey reports whether v holds a map key "<<" at any depth.
+func hasMergeKey(v any) bool {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, e := range t {
+			if k == "<<" || hasMergeKey(e) {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range t {
+			if hasMergeKey(e) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// knownCall reports whether tool exists and every top-level input key is one
+// of its schema properties.
+func knownCall(toolInputs map[string][]string, tool string, input map[string]any) bool {
+	fields, ok := toolInputs[tool]
+	if !ok {
+		return false
+	}
+	known := set(fields)
+	for k := range input {
+		if !known[k] {
+			return false
+		}
+	}
+	return true
+}
+
+// freeChoice matches input field names whose value the model picks freely
+// (see Recording in scenario.go): times, windows, limits.
+var freeChoice = regexp.MustCompile(`(?i)^(since|until|from|to|start|end|limit|offset|lookback|window|timeout|timestamp|time|ts|max_?\w*|\w*_(at|ts|time|since|until|ms|seconds|minutes|hours))$`)
+
+// freeChoiceWarnings lists, per recording, input fields that look like free
+// model choices. They make the recording match only that exact value.
+func freeChoiceWarnings(recs []outRecord) []string {
+	var out []string
+	for i, r := range recs {
+		var names []string
+		for _, k := range sortedKeys(r.Input) {
+			if freeChoice.MatchString(k) {
+				names = append(names, k)
+			}
+		}
+		if len(names) > 0 {
+			out = append(out, fmt.Sprintf("recordings[%d] (%s): input field(s) %s look like free choices (times, limits); a call with another value will miss. Delete them from the input unless the value matters", i, r.Tool, strings.Join(names, ", ")))
+		}
+	}
+	return out
 }
 
 // cleanInput removes the injected "why" property (the model's reason, not a
