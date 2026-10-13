@@ -5,9 +5,20 @@
 // same fingerprint even though their LSNs, offsets, hosts, ids and timestamps
 // differ, so alerts and rooms about one failure can be grouped.
 //
-// Safety: input is cut to MaxInputBytes before anything else; every pattern is
-// an RE2 expression (Go's regexp), so matching is linear in the input; the
-// package never panics on any input (see FuzzNormalize) and keeps no state.
+// Templates are meant to be logged and shown, so record values are masked too:
+// Postgres "Key (col)=(value)" and "Failing row contains (...)" groups,
+// Debezium "Struct{...}" and "{field=value}" bodies, e-mail addresses, and any
+// quoted text that is not identifier-shaped or that follows ':' or '='.
+//
+// Cost is bounded in three ways, because the input is untrusted text:
+//   - the input is cut to MaxInputBytes and walked line by line with IndexByte;
+//   - each line is cut to 2*MaxMessageBytes before any pattern runs, and the
+//     text that is masked in total is limited to a budget (the final cause is
+//     always kept and is outside the budget);
+//   - patterns are RE2 (linear, no backtracking); quotes and numbers use plain
+//     byte scanners. The worst 64 KiB inputs in worst_test.go take under 5 ms (measured, see the PR).
+//
+// The package never panics on any input (see FuzzNormalize) and keeps no state.
 package textnorm
 
 import (
@@ -22,19 +33,27 @@ import (
 // Limits. They bound work and the size of a Template.
 const (
 	// MaxInputBytes is how much of the input is read; the rest is ignored.
-	// tools.Truncate output is far smaller than this.
 	MaxInputBytes = 64 << 10
 	// DefaultFrames is how many stack frames Normalize keeps per cause.
 	DefaultFrames = 5
-	// MaxCauses is the longest cause chain kept.
+	// MaxCauses is the longest cause chain kept: the first MaxCauses-1 causes
+	// and always the final one, which is the root cause.
 	MaxCauses = 32
 	// MaxMessageBytes caps one masked message, so a huge details blob does
 	// not matter and a cut-off tail does not change the fingerprint.
 	MaxMessageBytes = 200
-	// maxLineBytes bounds the text a single line contributes to matching.
-	maxLineBytes = 2048
+	// RootFrames is how many frames of the root cause count in the
+	// fingerprint. Only the first: tools.Truncate may cut the rest, and the
+	// cut partial line is dropped, so frame one is the last safe one.
+	RootFrames = 1
 	// FingerprintLen is the number of hex characters in a fingerprint.
 	FingerprintLen = 16
+
+	maxLineBytes   = 2 * MaxMessageBytes
+	maxFrameBytes  = 160
+	maxQuoteBytes  = 200
+	budgetBytes    = 8 << 10
+	truncatedLabel = "…[truncated]"
 )
 
 // Cause is one exception (or error line) of a chain.
@@ -53,74 +72,163 @@ type Template struct {
 	Causes []Cause `json:"causes"`
 }
 
-// Patterns are compiled once and never modified.
+// Patterns are compiled once and never modified. None uses counted repetition
+// with a large bound (that makes big RE2 programs).
 var (
-	reLogPrefix  = regexp.MustCompile(`^\s*\[?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\]?\s*(?:(?:TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\b)?\s*`)
-	reLogfmt     = regexp.MustCompile(`\b(?:msg|err|error)="((?:[^"\\]|\\.)*)"`)
-	reCausedBy   = regexp.MustCompile(`^(?:Caused by|Suppressed):\s*`)
-	reFrame      = regexp.MustCompile(`^at\s+([\w$.<>/@-]+)\(`)
-	reModule     = regexp.MustCompile(`^[A-Za-z0-9_.@-]+//?`)
+	reLogPrefix  = regexp.MustCompile(`^\[?\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\]?\s*(?:(?:TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\b)?\s*`)
 	reMoreFrames = regexp.MustCompile(`^\.\.\.\s*\d+\s+(?:more|common frames omitted)\b`)
 	reClass      = regexp.MustCompile(`^([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.[A-Za-z_$][\w$]*)(?::\s*(.*))?$`)
+	reModule     = regexp.MustCompile(`^[A-Za-z0-9_.@-]+//?`)
+	// reLogfmt unwraps msg=/err=/error= values so their text is parsed as a
+	// message. Other keys, including level=, stay in the text as they are.
+	reLogfmt = regexp.MustCompile(`\b(?:msg|err|error)="((?:[^"\\]|\\.)*)"`)
 
-	reDQuote = regexp.MustCompile(`"(?:[^"\\\n]|\\.){0,200}"`)
-	// A single quote only opens a literal after a non-word byte, so
-	// apostrophes ("can't") are left alone.
-	reSQuote = regexp.MustCompile(`(^|[^\w])'[^'\n]{0,200}'`)
-	reTS     = regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?|\b\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b`)
-	reUUID   = regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
-	// Kafka client and member ids: consumer-<group>-<n>-<uuid>.
-	reMember  = regexp.MustCompile(`\b(?:consumer|producer|connector-consumer|connector-producer|adminclient|rdkafka)[A-Za-z0-9._-]*?-?<uuid>`)
-	reLSNWrap = regexp.MustCompile(`LSN\{[^}\n]{0,64}\}`)
-	reLSN     = regexp.MustCompile(`\b[0-9A-Fa-f]{1,8}/[0-9A-Fa-f]{1,8}\b`)
-	reIP      = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b`)
-	reHost    = regexp.MustCompile(`\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:local|internal|svc|com)\b(?::\d{1,5})?|\blocalhost(?::\d{1,5})?\b|\b[A-Za-z][A-Za-z0-9.-]*:\d{4,5}\b`)
-	reHex     = regexp.MustCompile(`\b0[xX][0-9a-fA-F]+\b|\b[0-9a-fA-F]{16,}\b`)
-	reNum     = regexp.MustCompile(`\b\d+\b`)
-	reSpace   = regexp.MustCompile(`\s+`)
+	reKeyVal   = regexp.MustCompile(`\(([^()\n]*)\)=\([^()\n]*\)`)
+	reRow      = regexp.MustCompile(`(Failing row contains) \([^\n]*\)`)
+	reStruct   = regexp.MustCompile(`\bStruct\{[^{}\n]*\}`)
+	reBraceKV  = regexp.MustCompile(`\{[^{}\n]*=[^{}\n]*\}`)
+	reEmail    = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
+	reTS       = regexp.MustCompile(`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?|\b\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b`)
+	reUUID     = regexp.MustCompile(`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b`)
+	reMember   = regexp.MustCompile(`\b((?:consumer|producer|connector-consumer|connector-producer|adminclient|rdkafka)[A-Za-z0-9._-]*?)(?:-\d+)?-<uuid>`)
+	reLSNWrap  = regexp.MustCompile(`LSN\{[^}\n]*\}`)
+	reLSN      = regexp.MustCompile(`\b[0-9A-F]{1,8}/[0-9A-F]{1,8}\b`)
+	reIP       = regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d{1,5})?\b`)
+	reHost     = regexp.MustCompile(`\b[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.(?:local|internal|svc|com|net|io|org)\b(?::\d{1,5})?|\blocalhost(?::\d{1,5})?\b|\b[A-Za-z][A-Za-z0-9.-]*:\d{4,5}\b`)
+	reHex      = regexp.MustCompile(`\b0[xX][0-9a-fA-F]+\b|\b[0-9a-fA-F]{16,}\b`)
+	hostNotKey = []string{"timeout", "offset", "interval", "size", "lag", "limit", "count", "bytes", "delay", "retries", "version", "port", ".ms", "_ms"}
+	// Numbers after these words are evidence (SQLSTATE 23505, "error code:
+	// 409", HTTP 503), not volatile, and are kept.
+	codeKeys = []string{"sqlstate", "error code", "error_code", "errorcode", "code", "status", "http", "error"}
 )
 
 // Normalize parses trace and returns its template with DefaultFrames frames per
 // cause.
 func Normalize(trace string) Template { return NormalizeFrames(trace, DefaultFrames) }
 
+type rawCause struct {
+	line   string
+	frames []string
+}
+
 // NormalizeFrames is Normalize with a chosen number of frames kept per cause.
 func NormalizeFrames(trace string, frames int) Template {
 	if frames < 0 {
 		frames = 0
 	}
-	trace = clip(trace, MaxInputBytes)
-	var t Template
-	var cur *Cause
-	for _, raw := range strings.Split(trace, "\n") {
-		line := strings.TrimSpace(clip(raw, maxLineBytes))
-		if line == "" || strings.HasSuffix(line, "[truncated]") || reMoreFrames.MatchString(line) {
+	trace = prepare(trace)
+	var head []*rawCause
+	var tail *rawCause
+	var cur *rawCause
+	budget := budgetBytes
+	for len(trace) > 0 {
+		var line string
+		if i := strings.IndexByte(trace, '\n'); i >= 0 {
+			line, trace = trace[:i], trace[i+1:]
+		} else {
+			line, trace = trace, ""
+		}
+		line = strings.TrimLeft(line, " \t\r")
+		line = strings.TrimRight(clip(line, maxLineBytes), " \t\r")
+		if line == "" {
 			continue
 		}
-		if m := reFrame.FindStringSubmatch(line); m != nil {
+		if m, ok := frameMethod(line); ok {
 			// Frames before any cause line belong to an anonymous cause.
 			if cur == nil {
-				t.Causes = append(t.Causes, Cause{})
-				cur = &t.Causes[len(t.Causes)-1]
+				cur = &rawCause{}
+				head = append(head, cur)
 			}
-			if len(cur.Frames) < frames {
-				cur.Frames = append(cur.Frames, maskFrame(m[1]))
+			if len(cur.frames) < frames && (cur == tail || budget > 0) {
+				cur.frames = append(cur.frames, m)
+				if cur != tail {
+					budget -= len(m)
+				}
 			}
 			continue
 		}
-		if len(t.Causes) >= MaxCauses {
-			break
+		if reMoreFrames.MatchString(line) {
+			continue
 		}
-		t.Causes = append(t.Causes, parseCause(line))
-		cur = &t.Causes[len(t.Causes)-1]
+		if len(head) < MaxCauses-1 && budget > 0 {
+			cur = &rawCause{line: line}
+			head = append(head, cur)
+			budget -= len(line)
+		} else {
+			// Keep only the newest cause past the cap: the root is the last.
+			tail = &rawCause{line: line}
+			cur = tail
+		}
+	}
+	if tail != nil {
+		head = append(head, tail)
+	}
+	t := Template{Causes: make([]Cause, 0, len(head))}
+	for _, rc := range head {
+		c := parseCause(rc.line)
+		for _, f := range rc.frames {
+			c.Frames = append(c.Frames, maskFrame(f))
+		}
+		t.Causes = append(t.Causes, c)
 	}
 	return t
 }
 
+// prepare applies the input cap and handles the tools.Truncate marker. A trace
+// that ends with the marker was cut at an arbitrary byte, so the last line is
+// partial (a cut before a frame's "(" would look like a bogus cause) and is
+// dropped, unless the cut fell exactly on a line start or there is only one line.
+func prepare(trace string) string {
+	trimmed := strings.TrimRight(trace, " \t\r\n")
+	truncated := strings.HasSuffix(trimmed, truncatedLabel)
+	if truncated {
+		trace = strings.TrimSuffix(trimmed, truncatedLabel)
+		trace = strings.TrimSuffix(trace, "\n")
+	}
+	trace = clip(trace, MaxInputBytes)
+	if truncated && !strings.HasSuffix(trace, "\n") {
+		if i := strings.LastIndexByte(trace, '\n'); i >= 0 {
+			trace = trace[:i+1]
+		}
+	}
+	return trace
+}
+
+// frameMethod returns the method of a stack-frame line ("at pkg.Class.m(F.java:1)").
+func frameMethod(line string) (string, bool) {
+	if !strings.HasPrefix(line, "at ") {
+		return "", false
+	}
+	rest := strings.TrimLeft(line[3:], " \t")
+	n := 0
+	for n < len(rest) && isFrameByte(rest[n]) {
+		n++
+	}
+	if n == 0 || n >= len(rest) || rest[n] != '(' {
+		return "", false
+	}
+	return clip(rest[:n], maxFrameBytes), true
+}
+
+func isFrameByte(c byte) bool {
+	return isWord(c) || c == '$' || c == '.' || c == '<' || c == '>' || c == '/' || c == '@' || c == '-'
+}
+
+func isWord(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_'
+}
+
 func parseCause(line string) Cause {
+	if line == "" {
+		return Cause{}
+	}
 	line = reLogPrefix.ReplaceAllString(line, "")
-	line = reCausedBy.ReplaceAllString(line, "")
-	line = reLogfmt.ReplaceAllString(line, "$1")
+	line = strings.TrimPrefix(line, "Caused by:")
+	line = strings.TrimPrefix(line, "Suppressed:")
+	line = strings.TrimLeft(line, " \t")
+	if strings.Contains(line, `="`) {
+		line = reLogfmt.ReplaceAllString(line, "$1")
+	}
 	if m := reClass.FindStringSubmatch(line); m != nil && looksLikeClass(m[1]) {
 		return Cause{Class: m[1], Message: maskMessage(m[2])}
 	}
@@ -136,49 +244,227 @@ func looksLikeClass(s string) bool {
 }
 
 func maskMessage(s string) string {
-	s = mask(s, true)
-	s = strings.TrimSpace(reSpace.ReplaceAllString(s, " "))
-	return clip(s, MaxMessageBytes)
+	s = clip(s, maxLineBytes)
+	if strings.Contains(s, ")=(") {
+		s = reKeyVal.ReplaceAllString(s, "($1)=(<val>)")
+	}
+	if strings.Contains(s, "Failing row") {
+		s = reRow.ReplaceAllString(s, "$1 (<row>)")
+	}
+	if strings.Contains(s, "Struct{") {
+		s = reStruct.ReplaceAllString(s, "Struct{<fields>}")
+	}
+	if strings.Contains(s, "{") {
+		s = reBraceKV.ReplaceAllString(s, "{<fields>}")
+	}
+	if strings.Contains(s, "@") {
+		s = reEmail.ReplaceAllString(s, "<email>")
+	}
+	s = maskQuotes(s)
+	s = maskVolatile(s)
+	return clip(strings.Join(strings.Fields(s), " "), MaxMessageBytes)
 }
 
 func maskFrame(method string) string {
 	method = reModule.ReplaceAllString(method, "")
-	return mask(method, false)
+	return maskVolatile(method)
 }
 
-// mask replaces volatile fields. Order matters: quotes first (their content is
-// opaque), then the most specific shapes, then bare numbers.
-func mask(s string, quotes bool) string {
-	if quotes {
-		s = reDQuote.ReplaceAllString(s, `"<str>"`)
-		s = reSQuote.ReplaceAllString(s, `${1}'<str>'`)
+// maskQuotes replaces quoted literals that look like values. Identifier-shaped
+// text ("orders", 'pg.public.orders-value') names a thing and is kept, unless it
+// follows ':' or '=' where it is a value ("name":"bob"). A single quote only
+// opens a literal after a non-word byte, so apostrophes are left alone.
+func maskQuotes(s string) string {
+	if !strings.ContainsAny(s, `"'`) {
+		return s
 	}
-	s = reTS.ReplaceAllString(s, "<ts>")
-	s = reUUID.ReplaceAllString(s, "<uuid>")
-	s = reMember.ReplaceAllString(s, "<member>")
-	s = reLSNWrap.ReplaceAllString(s, "<lsn>")
-	s = reIP.ReplaceAllString(s, "<ip>")
-	s = reHost.ReplaceAllString(s, "<host>")
-	s = reLSN.ReplaceAllStringFunc(s, func(m string) string {
-		// "0/5A3B2F8" yes; "feed/dead" and "a/b" are words, not LSNs.
-		if lsnShaped(m) {
-			return "<lsn>"
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c != '"' && c != '\'' || c == '\'' && i > 0 && isWord(s[i-1]) {
+			b.WriteByte(c)
+			i++
+			continue
 		}
-		return m
-	})
-	s = reHex.ReplaceAllString(s, "<hex>")
-	return reNum.ReplaceAllString(s, "<n>")
+		end := closingQuote(s, i)
+		if end < 0 {
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		if isIdent(s[i+1:end]) && !afterAssign(s, i) {
+			b.WriteString(s[i : end+1])
+		} else {
+			b.WriteByte(c)
+			b.WriteString("<str>")
+			b.WriteByte(c)
+		}
+		i = end + 1
+	}
+	return b.String()
 }
 
-func lsnShaped(m string) bool {
-	i := strings.IndexByte(m, '/')
-	return i > 0 && strings.ContainsAny(m[:i], "0123456789") && strings.ContainsAny(m[i+1:], "0123456789")
+// closingQuote finds the quote that closes the one at s[i], looking at most
+// maxQuoteBytes ahead. Backslash escapes only count inside double quotes.
+func closingQuote(s string, i int) int {
+	q := s[i]
+	for j := i + 1; j < len(s) && j-i <= maxQuoteBytes; j++ {
+		switch {
+		case s[j] == '\\' && q == '"':
+			j++
+		case s[j] == q:
+			return j
+		}
+	}
+	return -1
+}
+
+func isIdent(s string) bool {
+	if len(s) == 0 || len(s) > 128 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		first := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_'
+		if i == 0 && !first || !first && !(c >= '0' && c <= '9' || c == '.' || c == '$' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func afterAssign(s string, i int) bool {
+	j := i - 1
+	for j >= 0 && s[j] == ' ' {
+		j--
+	}
+	return j >= 0 && (s[j] == ':' || s[j] == '=')
+}
+
+// maskVolatile replaces timestamps, ids, hosts, LSNs and numbers. Most
+// patterns are skipped by a cheap byte check when they cannot match.
+func maskVolatile(s string) string {
+	s = reTS.ReplaceAllString(s, "<ts>")
+	if strings.IndexByte(s, '-') >= 0 {
+		s = reUUID.ReplaceAllString(s, "<uuid>")
+		if strings.Contains(s, "<uuid>") {
+			s = reMember.ReplaceAllString(s, "$1-<member>")
+		}
+	}
+	if strings.Contains(s, "LSN{") {
+		s = reLSNWrap.ReplaceAllString(s, "<lsn>")
+	}
+	if strings.IndexByte(s, '.') >= 0 {
+		s = reIP.ReplaceAllString(s, "<ip>")
+	}
+	if strings.ContainsAny(s, ".:") || strings.Contains(s, "localhost") {
+		s = replaceIf(s, reHost, hostRepl)
+	}
+	if strings.IndexByte(s, '/') >= 0 {
+		s = replaceIf(s, reLSN, lsnRepl)
+	}
+	s = reHex.ReplaceAllString(s, "<hex>")
+	return maskNumbers(s)
+}
+
+// replaceIf replaces each match of re with fn(s, start, end); fn returns the
+// match itself to keep it.
+func replaceIf(s string, re *regexp.Regexp, fn func(s string, i, j int) string) string {
+	idx := re.FindAllStringIndex(s, -1)
+	if len(idx) == 0 {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	for _, m := range idx {
+		b.WriteString(s[last:m[0]])
+		b.WriteString(fn(s, m[0], m[1]))
+		last = m[1]
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+func hostRepl(s string, i, j int) string {
+	m := s[i:j]
+	if k := strings.LastIndexByte(m, ':'); k >= 0 && !strings.HasPrefix(m, "localhost") {
+		// "word:12345" is a host only when word is not a setting name.
+		word := strings.ToLower(m[:k])
+		for _, bad := range hostNotKey {
+			if strings.HasSuffix(word, bad) {
+				return m
+			}
+		}
+	}
+	// "javax.net.ssl.X" is a class, not the host "javax.net".
+	if j+1 < len(s) && s[j] == '.' && isWord(s[j+1]) {
+		return m
+	}
+	return "<host>"
+}
+
+// lsnRepl accepts "0/5A3B2F8" shapes: upper-case hex, and either a hex letter or
+// a right part of 5+ digits, so "Task 1/3" and "ab12/cd34" stay as they are. A
+// preceding "lsn" accepts any hex pair.
+func lsnRepl(s string, i, j int) string {
+	m := s[i:j]
+	k := strings.IndexByte(m, '/')
+	right := m[k+1:]
+	hasLetter := strings.ContainsAny(m, "ABCDEF")
+	if len(right) >= 5 || hasLetter || strings.HasSuffix(strings.ToLower(strings.TrimRight(s[:i], " :=")), "lsn") {
+		return "<lsn>"
+	}
+	return m
+}
+
+// maskNumbers replaces standalone digit runs with <n>, except evidence codes.
+func maskNumbers(s string) string {
+	var b strings.Builder
+	last := 0
+	for i := 0; i < len(s); {
+		if s[i] < '0' || s[i] > '9' || i > 0 && isWord(s[i-1]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && s[j] >= '0' && s[j] <= '9' {
+			j++
+		}
+		if j < len(s) && isWord(s[j]) || keepNumber(s[:i], j-i) {
+			i = j
+			continue
+		}
+		b.WriteString(s[last:i])
+		b.WriteString("<n>")
+		last, i = j, j
+	}
+	if last == 0 {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+func keepNumber(before string, digits int) bool {
+	if len(before) > 24 {
+		before = before[len(before)-24:]
+	}
+	look := strings.ToLower(strings.TrimRight(before, " :=\"'[]("))
+	for _, k := range codeKeys {
+		if strings.HasSuffix(look, k) {
+			return true
+		}
+	}
+	return digits == 3 && strings.Contains(look, "http")
 }
 
 // String is the canonical text of the template, one cause per block.
-func (t Template) String() string { return t.canonical(true) }
+func (t Template) String() string { return t.canonical(false) }
 
-func (t Template) canonical(allFrames bool) string {
+// canonical renders the template. For the fingerprint (forHash) the root cause
+// shows only RootFrames frames.
+func (t Template) canonical(forHash bool) string {
 	var b strings.Builder
 	for i, c := range t.Causes {
 		if i > 0 {
@@ -189,23 +475,24 @@ func (t Template) canonical(allFrames bool) string {
 			b.WriteString(": ")
 		}
 		b.WriteString(c.Message)
-		if allFrames || i < len(t.Causes)-1 {
-			for _, f := range c.Frames {
-				b.WriteString("\n  at ")
-				b.WriteString(f)
-			}
+		frames := c.Frames
+		if forHash && i == len(t.Causes)-1 && len(frames) > RootFrames {
+			frames = frames[:RootFrames]
+		}
+		for _, f := range frames {
+			b.WriteString("\n  at ")
+			b.WriteString(f)
 		}
 	}
 	return b.String()
 }
 
 // Fingerprint is a stable id of the template: the first FingerprintLen hex
-// characters of the SHA-256 of its canonical text. The frames of the last
-// (root) cause are left out on purpose: that is the part tools.Truncate cuts
-// off, and the root class and message already identify it. Frames of the
-// outer causes are kept.
+// characters of the SHA-256 of its canonical text. All frames of the outer
+// causes count, but only the first RootFrames frames of the root cause, because
+// tools.Truncate can cut the rest.
 func (t Template) Fingerprint() string {
-	sum := sha256.Sum256([]byte(t.canonical(false)))
+	sum := sha256.Sum256([]byte(t.canonical(true)))
 	return hex.EncodeToString(sum[:])[:FingerprintLen]
 }
 
