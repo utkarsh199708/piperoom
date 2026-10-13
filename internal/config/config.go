@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -95,8 +96,16 @@ type Config struct {
 	// model; empty = always Model.
 	TriageModel string // PIPEROOM_TRIAGE_MODEL
 	// RoomTokenBudget caps model tokens (input + output) per room; when reached
-	// the agent stops and says so. Empty = default 2000000; "0" = no cap.
+	// the agent stops and says so. Empty = default 2000000; "0" = no cap. The
+	// server keeps the count in the room database (docs/design/cost.md), so it
+	// survives a restart.
 	RoomTokenBudget string // PIPEROOM_ROOM_TOKEN_BUDGET
+
+	// Model spend (docs/design/cost.md). Kept as strings like the shadow
+	// fields; ParseCost types them and names the env var on error.
+	ModelPrices              string // PIPEROOM_MODEL_PRICES: path of the JSON price table (model id -> USD per million tokens: input, output, cache_write, cache_read); empty = no table, so cost is omitted, never guessed
+	PipelineDailyTokenBudget string // PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET: model tokens per pipeline per UTC day, kept in the room database; empty or "0" = off
+	PipelineDailyCostUSD     string // PIPEROOM_PIPELINE_DAILY_COST_USD: estimated USD per pipeline per UTC day, kept in the room database; empty or "0" = off; needs PIPEROOM_MODEL_PRICES
 
 	// RetentionDays deletes whole closed rooms (events, proposals, approvals,
 	// hand-offs) whose closed_at is older than this many days. Open rooms are
@@ -195,6 +204,10 @@ func Load() Config {
 		TriageModel:     get("PIPEROOM_TRIAGE_MODEL", ""),
 		RoomTokenBudget: get("PIPEROOM_ROOM_TOKEN_BUDGET", ""),
 
+		ModelPrices:              get("PIPEROOM_MODEL_PRICES", ""),
+		PipelineDailyTokenBudget: get("PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET", ""),
+		PipelineDailyCostUSD:     get("PIPEROOM_PIPELINE_DAILY_COST_USD", ""),
+
 		RetentionDays: get("PIPEROOM_RETENTION_DAYS", ""),
 
 		AuthMode:            get("PIPEROOM_AUTH_MODE", DefaultAuthMode),
@@ -275,6 +288,71 @@ func ParseShadow(c Config) (Shadow, error) {
 	}
 	sh.MaxTurns = int(n)
 	return sh, nil
+}
+
+// Cost holds the typed spend settings (docs/design/cost.md).
+type Cost struct {
+	// PricesFile is the PIPEROOM_MODEL_PRICES path; "" = no price table, so
+	// every cost is omitted and no cost budget can be set.
+	PricesFile string
+	// PipelineDailyTokens caps model tokens per pipeline per UTC day; 0 = off.
+	PipelineDailyTokens int64
+	// PipelineDailyCostUSD caps the estimated cost per pipeline per UTC day,
+	// in USD; 0 = off.
+	PipelineDailyCostUSD float64
+}
+
+// MaxPipelineDailyCostUSD bounds PIPEROOM_PIPELINE_DAILY_COST_USD, so the cap
+// in millionths of a USD (the unit the spend tables keep) fits an int64.
+const MaxPipelineDailyCostUSD = 1_000_000_000
+
+// ParseCost validates the spend fields. Empty means off (no table, no cap).
+// PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET is a whole number, "0" = off.
+// PIPEROOM_PIPELINE_DAILY_COST_USD is a plain decimal such as 25 or 12.50,
+// "0" = off; a value above 0 needs PIPEROOM_MODEL_PRICES. The price file
+// itself is read by the agent package at start-up.
+func ParseCost(c Config) (Cost, error) {
+	out := Cost{PricesFile: strings.TrimSpace(c.ModelPrices)}
+	var err error
+	if out.PipelineDailyTokens, err = parseWholeNumber("PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET", c.PipelineDailyTokenBudget, "0", true); err != nil {
+		return Cost{}, err
+	}
+	if out.PipelineDailyCostUSD, err = parseUSD("PIPEROOM_PIPELINE_DAILY_COST_USD", c.PipelineDailyCostUSD); err != nil {
+		return Cost{}, err
+	}
+	if out.PipelineDailyCostUSD > 0 && out.PricesFile == "" {
+		return Cost{}, fmt.Errorf("config: PIPEROOM_PIPELINE_DAILY_COST_USD=%q needs PIPEROOM_MODEL_PRICES: without a price table there is no cost to count", c.PipelineDailyCostUSD)
+	}
+	return out, nil
+}
+
+// parseUSD parses a plain non-negative decimal amount (digits, at most one
+// point with digits on both sides); empty is 0. Exponents, signs, NaN and Inf
+// are refused so a typo cannot turn into an unexpected cap.
+func parseUSD(name, v string) (float64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	digits, points := 0, 0
+	for i, r := range v {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r == '.' && points == 0 && i > 0 && i < len(v)-1:
+			points++
+		default:
+			return 0, fmt.Errorf("config: %s=%q: want a plain amount in USD such as 25 or 12.50", name, v)
+		}
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || digits == 0 {
+		return 0, fmt.Errorf("config: %s=%q: want a plain amount in USD such as 25 or 12.50", name, v)
+	}
+	if f > MaxPipelineDailyCostUSD {
+		return 0, fmt.Errorf("config: %s=%q: too large (at most %d)", name, v, MaxPipelineDailyCostUSD)
+	}
+	return f, nil
 }
 
 // parseWholeNumber parses a non-negative whole number; empty uses def. With
