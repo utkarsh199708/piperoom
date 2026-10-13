@@ -15,7 +15,8 @@ func throughputProfile() Profile {
 		Params: append([]ParamSpec{
 			{Name: "rooms", Kind: KindInt, Full: "60", Short: "4", Min: 1, Help: "rooms opened at once"},
 			{Name: "turns", Kind: KindInt, Full: "5", Short: "2", Min: 1, Help: "model turns per agent run (turns-1 tool calls, then end_turn)"},
-			{Name: "max_agents", Kind: KindIntList, Full: "3,10,30", Short: "2", Min: 1, Help: "PIPEROOM_MAX_AGENTS values, one run each"},
+			{Name: "max_agents", Kind: KindIntList, Full: "3,10,30", Short: "2", Min: 1, Help: "PIPEROOM_MAX_AGENTS values (per replica), one run each"},
+			{Name: "max_agents_global", Kind: KindInt, Full: "0", Min: 0, Help: "PIPEROOM_MAX_AGENTS_GLOBAL (0 = off)"},
 			{Name: "subs_per_room", Kind: KindInt, Full: "2", Short: "1", Min: 0, Help: "WebSocket viewers per room during the run"},
 			{Name: "propose", Kind: KindBool, Full: "false", Short: "true", Help: "each run proposes a no-op fix; the driver approves it and counts executions"},
 			{Name: "timeout", Kind: KindDuration, Full: "15m", Short: "60s", Min: float64(time.Second)},
@@ -66,6 +67,13 @@ func (d ThroughputData) markdown() string {
 	}
 	b.WriteString(mdTable([]string{"max_agents", "rooms", "turns", "makespan s", "turns/s", "ideal turns/s", "events/s",
 		"queue wait p50 ms", "p95", "max", "insert p50 ms", "p95", "p99", "pool (max acquired/max; saturated; waits)", "peak heap", "CPU (avg cores)"}, rows))
+	for _, r := range d.Runs {
+		if e := r.Exec; e != nil {
+			fmt.Fprintf(&b, "\nmax_agents=%d approvals: %d proposals, %d approved (%d errors); %d executions (%d duplicate, %d missing); %d action.executed events (%d duplicate). Agent runs: %d rooms with more than one run start, %d with concurrent model calls.\n",
+				r.MaxAgents, e.Proposals, e.Approved, e.ApproveErr, e.Executions, e.DuplicateExecutions, e.MissingExecutions, e.ExecutedEvents, e.DuplicateExecEvents,
+				r.Model.DuplicateRuns, r.Model.ConcurrentDup)
+		}
+	}
 	return b.String()
 }
 
@@ -94,7 +102,7 @@ func runThroughput(ctx context.Context, env *Env, p Params) (*Result, error) {
 			eff = r.TurnsPerSec / r.IdealPerSec
 		}
 		res.finding("max_agents=%d: %.2f turns/s (%.0f%% of the %.2f an ideal %d-slot pool gives at the measured turn time), insert p99 %.1f ms, queue wait p95 %.0f ms, pool %s.",
-			r.MaxAgents, r.TurnsPerSec, 100*eff, r.IdealPerSec, min(r.MaxAgents*env.Replicas, r.Rooms), r.Appends.P99MS, r.QueueWait.P95MS, poolSummary(r.Pool))
+			r.MaxAgents, r.TurnsPerSec, 100*eff, r.IdealPerSec, min(agentLimit(r.MaxAgents, env.Replicas, p.Int("max_agents_global")), r.Rooms), r.Appends.P99MS, r.QueueWait.P95MS, poolSummary(r.Pool))
 		if i > 0 {
 			prev := data.Runs[i-1]
 			if r.TurnsPerSec < 1.2*prev.TurnsPerSec && r.MaxAgents > prev.MaxAgents {
@@ -108,7 +116,7 @@ func runThroughput(ctx context.Context, env *Env, p Params) (*Result, error) {
 func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res *Result) (ThroughputRun, error) {
 	pipes := []string{"pa"}
 	st, err := env.newStack(ctx, fmt.Sprintf("throughput-m%d", maxAgents), ServerConfig{
-		MaxAgents: maxAgents, ToolLatency: p.Dur("tool_latency"), ToolSummaryBytes: p.Int("tool_summary_bytes"), Pipelines: pipes,
+		MaxAgents: maxAgents, MaxAgentsGlobal: p.Int("max_agents_global"), ToolLatency: p.Dur("tool_latency"), ToolSummaryBytes: p.Int("tool_summary_bytes"), Pipelines: pipes,
 	}, nil)
 	if err != nil {
 		return ThroughputRun{}, err
@@ -206,7 +214,7 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 	run.TTFT = Summarize(durations(tls, timeline.TTFT))
 	run.RunHold = Summarize(durations(tls, timeline.Hold))
 	if run.RunHold.P50MS > 0 {
-		slots := min(maxAgents*env.Replicas, n)
+		slots := min(agentLimit(maxAgents, env.Replicas, p.Int("max_agents_global")), n)
 		run.IdealPerSec = round3(float64(slots) * float64(run.Turns) / float64(n) / (run.RunHold.P50MS / 1000))
 	}
 	for _, s := range srv {
@@ -216,7 +224,8 @@ func throughputOnce(ctx context.Context, env *Env, p Params, maxAgents int, res 
 	}
 	run.Appends = srv[0].Appends // per replica in Server; replica 0 for the table
 	label := fmt.Sprintf("max_agents=%d: ", maxAgents)
-	res.check(label+"agent cap respected", mst.MaxInFlight <= maxAgents*env.Replicas, "max in-flight %d, cap %d x %d replicas", mst.MaxInFlight, maxAgents, env.Replicas)
+	limit := agentLimit(maxAgents, env.Replicas, p.Int("max_agents_global"))
+	res.check(label+"agent cap respected", mst.MaxInFlight <= limit, "max in-flight %d, limit %d (%d per replica x %d replicas, global %d)", mst.MaxInFlight, limit, maxAgents, env.Replicas, p.Int("max_agents_global"))
 	res.check(label+"no duplicate agent runs", run.Model.DuplicateRuns == 0 && run.Model.ConcurrentDup == 0,
 		"rooms with >1 run start %d, with concurrent model calls %d", run.Model.DuplicateRuns, run.Model.ConcurrentDup)
 	want := n * turns

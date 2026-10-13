@@ -47,7 +47,8 @@ type FanoutRun struct {
 	GoroutinesPeak   int           `json:"server_goroutines_peak"`
 	GoroutinesAfter  int           `json:"server_goroutines_after_close"`
 	PeakHeap         uint64        `json:"peak_heap_inuse"`
-	Pool             PoolStats     `json:"pool"`
+	Pool             PoolStats     `json:"pool"`  // replica 0
+	Pools            []PoolStats   `json:"pools"` // every replica
 	QueriesPerSec    float64       `json:"pool_acquires_per_sec"`
 	CPU              CPUUse        `json:"cpu"`
 	Server           []ServerStats `json:"server"`
@@ -68,7 +69,7 @@ func (d FanoutData) markdown() string {
 			fms(r.Delivery.P50MS), fms(r.Delivery.P95MS), fms(r.Delivery.P99MS), fms(r.Delivery.MaxMS),
 			fms(r.EndToEnd.P50MS), fms(r.EndToEnd.P99MS), distOrDash(r.CrossReplica.P50MS, r.CrossReplica.N), distOrDash(r.CrossReplica.P99MS, r.CrossReplica.N), fms(r.Post.P50MS), fms(r.Post.P99MS), fms(r.Appends.P50MS),
 			fmt.Sprint(r.Totals.SlowClosed), fmt.Sprint(r.Totals.Reconnects), fmt.Sprintf("%d/%d/%d", r.GoroutinesBefore, r.GoroutinesPeak, r.GoroutinesAfter),
-			fmt.Sprintf("%d/%d %.0f%%, %.0f q/s, %d waits", r.Pool.MaxAcquired, r.Pool.MaxConns, 100*r.Pool.SaturatedRatio, r.QueriesPerSec, r.Pool.EmptyAcquires),
+			fmt.Sprintf("%s; %.0f q/s", poolSummary(r.Pools), r.QueriesPerSec),
 			fmtMiB(r.PeakHeap), r.CPU.String()})
 	}
 	b.WriteString(mdTable([]string{"subs", "rooms", "comments/s accepted / offered", "deliveries/s", "event->delivery p50 ms", "p95", "p99", "max", "post->delivery p50", "p99", "cross-replica delivery p50", "p99",
@@ -298,7 +299,11 @@ func fanoutOnce(ctx context.Context, env *Env, p Params, n int, res *Result) (Fa
 	}
 	run.OfferedPerSec = round3(p.Float("rate") * float64(len(rooms)))
 	run.AchievedPerSec = round3(float64(run.Posted) / postDur.Seconds())
-	run.QueriesPerSec = round3(float64(srv[0].Pool.Acquires) / wDur.Seconds())
+	var acq int64
+	for _, s := range srv {
+		acq += s.Pool.Acquires
+	}
+	run.QueriesPerSec = round3(float64(acq) / wDur.Seconds()) // all replicas
 	// The gateway's goroutines end asynchronously after a close; give them a
 	// moment, then count.
 	var after []ServerStats
@@ -332,6 +337,9 @@ func fanoutOnce(ctx context.Context, env *Env, p Params, n int, res *Result) (Fa
 	}
 	run.Appends = srv[0].Appends
 	run.Pool = srv[0].Pool
+	for _, s := range srv {
+		run.Pools = append(run.Pools, s.Pool)
+	}
 
 	label := fmt.Sprintf("subs=%d: ", n)
 	t := run.Totals

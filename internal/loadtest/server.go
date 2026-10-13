@@ -61,6 +61,8 @@ type ServerConfig struct {
 	// PoolMaxConns > 0 sets the pool size directly (an experiment; 0 keeps
 	// the pgxpool default that cmd/server gets: max(4, NumCPU)).
 	PoolMaxConns int `json:"pool_max_conns"`
+	// MaxAgentsGlobal is PIPEROOM_MAX_AGENTS_GLOBAL (0 = off).
+	MaxAgentsGlobal int `json:"max_agents_global"`
 }
 
 // Server is the room service, HTTP API and WebSocket gateway exactly as
@@ -217,8 +219,12 @@ func StartServer(ctx context.Context, cfg ServerConfig, log *slog.Logger) (*Serv
 		Options:      agent.Options{MaxTurns: 40},
 		Logger:       log,
 		MaxAgents:    cfg.MaxAgents,
-		Sessions:     pg.Sessions(),
-		OnRoomClosed: func(_ context.Context, roomID, _, _ string) { ep.Forget(roomID) },
+		// As cmd/server does (cmd/server/replicas.go): a per-process id in
+		// leases and executor claims, and the optional global cap.
+		ReplicaID:       fmt.Sprintf("lt-r%d-%s", cfg.Replica, randHex(3)),
+		MaxAgentsGlobal: cfg.MaxAgentsGlobal,
+		Sessions:        pg.Sessions(),
+		OnRoomClosed:    func(_ context.Context, roomID, _, _ string) { ep.Forget(roomID) },
 	})
 	lctx, lcancel := context.WithTimeout(ctx, 60*time.Second)
 	err = s.svc.Load(lctx)
@@ -294,6 +300,7 @@ type PoolStats struct {
 // ServerStats is what GET /loadtest/stats returns.
 type ServerStats struct {
 	Replica        int            `json:"replica"`
+	ReplicaID      string         `json:"replica_id"`
 	PID            int            `json:"pid"`
 	Goroutines     int            `json:"goroutines"`
 	PeakGoroutines int            `json:"peak_goroutines"`
@@ -326,6 +333,7 @@ func (s *Server) stats() ServerStats {
 	ps, peakHeap, peakG := s.sampler.read()
 	return ServerStats{
 		Replica:        s.cfg.Replica,
+		ReplicaID:      s.svc.ReplicaID(),
 		PID:            os.Getpid(),
 		Goroutines:     runtime.NumGoroutine(),
 		PeakGoroutines: peakG,

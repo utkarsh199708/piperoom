@@ -4,6 +4,7 @@ package loadtest
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -25,11 +26,11 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// TestSmokeAllProfiles runs every profile at its -short size against real
-// server processes on a throwaway postgres:16 (or LOADTEST_DB_URL), and
-// requires every correctness check to pass. It is the CI-sized proof that
-// the harness works end to end, not a capacity measurement.
-func TestSmokeAllProfiles(t *testing.T) {
+// smoke runs profiles at their -short size against real server processes on
+// a throwaway postgres:16 (or LOADTEST_DB_URL) and requires every
+// correctness check to pass.
+func smoke(t *testing.T, replicas int, profiles []Profile) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	dbURL := os.Getenv("LOADTEST_DB_URL")
@@ -44,7 +45,7 @@ func TestSmokeAllProfiles(t *testing.T) {
 	}
 	out := t.TempDir()
 	env, err := NewEnv(ctx, EnvConfig{
-		DBURL: dbURL, Prefix: "s2lt-it", Short: true, TmpfsData: true, LogDir: out + "/logs",
+		DBURL: dbURL, Prefix: "s2lt-it", Short: true, TmpfsData: true, Replicas: replicas, LogDir: out + "/logs",
 		Command: func() (string, []string, []string) {
 			return self, []string{"-test.run=^$"}, []string{serveSwitch + "=1"}
 		},
@@ -54,12 +55,12 @@ func TestSmokeAllProfiles(t *testing.T) {
 	}
 	defer env.Close()
 	start := time.Now()
-	results, err := RunProfiles(ctx, env, Profiles(), nil, out)
+	results, err := RunProfiles(ctx, env, profiles, nil, out)
 	if err != nil {
 		t.Fatalf("RunProfiles: %v (server logs in %s)", err, out)
 	}
-	if len(results) != len(Profiles()) {
-		t.Fatalf("got %d results, want %d", len(results), len(Profiles()))
+	if len(results) != len(profiles) {
+		t.Fatalf("got %d results, want %d", len(results), len(profiles))
 	}
 	for _, r := range results {
 		if len(r.Checks) == 0 {
@@ -71,9 +72,30 @@ func TestSmokeAllProfiles(t *testing.T) {
 		if !strings.Contains(r.Markdown, "## Checks") {
 			t.Errorf("%s: markdown report has no checks section", r.Profile)
 		}
-		if _, err := os.Stat(out + "/" + r.Profile + ".json"); err != nil {
+		name := r.Profile
+		if replicas > 1 {
+			name = fmt.Sprintf("%s-r%d", r.Profile, replicas)
+		}
+		if _, err := os.Stat(out + "/" + name + ".json"); err != nil {
 			t.Errorf("%s: no JSON report: %v", r.Profile, err)
 		}
 	}
-	t.Logf("smoke run took %s", time.Since(start).Round(time.Millisecond))
+	t.Logf("smoke run (%d replicas) took %s", replicas, time.Since(start).Round(time.Millisecond))
+}
+
+// TestSmokeAllProfiles is the CI-sized proof that the harness works end to
+// end on one server, not a capacity measurement.
+func TestSmokeAllProfiles(t *testing.T) {
+	smoke(t, 1, Profiles())
+}
+
+// TestSmokeReplicas runs the multi-replica profiles (fairness, throughput
+// with approvals, fan-out) on two servers sharing one database: no duplicate
+// agent run, every approved fix executed once, every subscriber gap-free.
+func TestSmokeReplicas(t *testing.T) {
+	ps, err := SelectProfiles("fairness,throughput,fanout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	smoke(t, 2, ps)
 }
