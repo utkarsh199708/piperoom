@@ -2,6 +2,7 @@ package room
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -9,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"piperoom/internal/store"
 )
 
 // Postgres stores room.created in a jsonb column and the room title in a text
@@ -38,6 +41,9 @@ func mapUnstorable(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && unstorableCodes[pgErr.Code] {
 		return validation("alert body cannot be stored (value out of range or not valid text)")
+	}
+	if errors.Is(err, store.ErrUnstorable) {
+		return validation(unstorableTextMsg)
 	}
 	return err
 }
@@ -107,14 +113,44 @@ func hexEscape(raw []byte, at int) (int, bool) {
 	return int(n), true
 }
 
-// checkTextStorable reports why s cannot go into a Postgres text column or a
-// jsonb string, or nil: no NUL and valid UTF-8.
-func checkTextStorable(field, s string) error {
-	if !utf8.ValidString(s) {
-		return validation(fmt.Sprintf("%s is not valid UTF-8", field))
-	}
-	if strings.IndexByte(s, 0) >= 0 {
-		return validation(fmt.Sprintf("%s contains a NUL character", field))
+// unstorableTextMsg is the 400 message for user text Postgres cannot hold.
+const unstorableTextMsg = "text contains characters that cannot be stored"
+
+// replacementChar stands in for bytes agent text cannot store (U+FFFD).
+const replacementChar = string(rune(0xFFFD))
+
+// rejectUnstorable is the policy for text a person typed (comment, steer,
+// resolution, trace key, reject reason, room title): if any field holds a NUL or
+// invalid UTF-8 the request is refused with a 400 validation error before any
+// write. Nothing is changed, because the person should see that the text did
+// not go through. The message never quotes the text.
+func rejectUnstorable(fields ...string) error {
+	if err := store.CheckText(fields...); err != nil {
+		return validation(unstorableTextMsg)
 	}
 	return nil
+}
+
+// sanitizeAgentText is the policy for text a model or a tool produced (agent
+// steps, hypothesis, proposal fields, hand-off summary, action output): NUL and
+// invalid UTF-8 become U+FFFD, so an agent run never fails on bad tool output.
+func sanitizeAgentText(s string) string {
+	if err := store.CheckText(s); err == nil {
+		return s
+	}
+	return strings.ReplaceAll(strings.ToValidUTF8(s, replacementChar), "\x00", replacementChar)
+}
+
+// sanitizeAgentPayload applies the agent policy to an event payload of any
+// shape: it is marshalled and every NUL byte, \u0000 escape or lone-surrogate escape and
+// every invalid UTF-8 byte in the JSON becomes U+FFFD. The result is the
+// marshalled payload as a json.RawMessage, ready for Append. This also covers
+// json.RawMessage fields (tool input, tool result data), which pass through
+// json.Marshal unchanged.
+func sanitizeAgentPayload(payload any) (any, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("room: marshal agent payload: %w", err)
+	}
+	return json.RawMessage(store.SanitizeJSON(raw)), nil
 }

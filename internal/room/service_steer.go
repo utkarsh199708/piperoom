@@ -24,6 +24,9 @@ func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, tex
 	if strings.TrimSpace(text) == "" {
 		return events.Event{}, validation("text is required")
 	}
+	if err := rejectUnstorable(stepID, text); err != nil {
+		return events.Event{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.getStateLocked(ctx, roomID)
@@ -51,6 +54,9 @@ func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, tex
 func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (events.Event, error) {
 	if strings.TrimSpace(text) == "" {
 		return events.Event{}, validation("text is required")
+	}
+	if err := rejectUnstorable(text); err != nil {
+		return events.Event{}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

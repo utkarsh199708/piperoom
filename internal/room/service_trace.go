@@ -44,6 +44,9 @@ func (s *Service) Trace(ctx context.Context, user User, roomID, table, key strin
 	if !tableRe.MatchString(table) {
 		return events.Event{}, validation(fmt.Sprintf("table %q must be schema.name", table))
 	}
+	if err := rejectUnstorable(key); err != nil {
+		return events.Event{}, err
+	}
 
 	s.mu.Lock()
 	st, err := s.getStateLocked(ctx, roomID)

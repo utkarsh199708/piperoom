@@ -21,8 +21,8 @@ const handoffListMax = 10
 // sanitizeHandoff bounds every agent-written summary string and list before it
 // is stored, so raw tool output blobs cannot leak into the log or the UI.
 func sanitizeHandoff(s events.HandoffSummary) events.HandoffSummary {
-	s.WhatBroke = truncateDetail(s.WhatBroke)
-	s.Why = truncateDetail(s.Why)
+	s.WhatBroke = truncateDetail(sanitizeAgentText(s.WhatBroke))
+	s.Why = truncateDetail(sanitizeAgentText(s.Why))
 	s.Done = sanitizeHandoffList(s.Done)
 	s.RuledOut = sanitizeHandoffList(s.RuledOut)
 	s.Open = sanitizeHandoffList(s.Open)
@@ -36,7 +36,7 @@ func sanitizeHandoffList(in []string) []string {
 	}
 	out := make([]string, 0, len(in))
 	for _, item := range in {
-		out = append(out, truncateDetail(item))
+		out = append(out, truncateDetail(sanitizeAgentText(item)))
 	}
 	return out
 }

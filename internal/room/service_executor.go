@@ -254,6 +254,7 @@ func (s *Service) stopOnStep(t *stepTracker, p store.ProposalRow, i int, output 
 // and emits the action.executed event. The store write and the event use
 // resultCtx so they complete even while the service shuts down (review item 3).
 func (s *Service) finishStep(roomID, proposalID string, t *stepTracker, i int, ok bool, output string) error {
+	output = sanitizeAgentText(output) // action output is tool text
 	status := "done"
 	if !ok {
 		status = "failed"
@@ -287,6 +288,7 @@ func (s *Service) failProposal(roomID, proposalID string, stepIndex int, output 
 // failStep emits a failing action.executed for a step that was never claimed
 // (so there is no step state to finish).
 func (s *Service) failStep(roomID, proposalID string, i int, output string) {
+	output = sanitizeAgentText(output)
 	rctx, cancel := s.resultCtx()
 	defer cancel()
 	if err := s.executorEmit(rctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
@@ -301,6 +303,7 @@ func (s *Service) failStep(roomID, proposalID string, i int, output string) {
 // to this run but the local transition failed): ErrStepOrder simply means
 // there is no "started" row to finish. The write uses resultCtx (review item 3).
 func (s *Service) finishClaimedStep(proposalID string, i int, output string) {
+	output = sanitizeAgentText(output)
 	rctx, cancel := s.resultCtx()
 	defer cancel()
 	if err := s.store.FinishProposalStep(rctx, proposalID, i, "failed", output); err != nil && !errors.Is(err, ErrStepOrder) {

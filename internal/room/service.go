@@ -456,13 +456,19 @@ func (s *Service) agentEmit(ctx context.Context, roomID string, typ events.Type,
 	if !agentEventTypes[typ] {
 		return fmt.Errorf("room: agent sink refused event type %q", typ)
 	}
+	// Model and tool text may hold NUL or invalid bytes; the run must not fail
+	// on them, so they become U+FFFD before the append.
+	payload, err := sanitizeAgentPayload(payload)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, ok := s.rooms[roomID]
 	if !ok {
 		return fmt.Errorf("room: agent emit on unknown room %q", roomID)
 	}
-	_, err := s.emitLocked(ctx, st, roomID, typ, events.AgentActor, payload)
+	_, err = s.emitLocked(ctx, st, roomID, typ, events.AgentActor, payload)
 	return err
 }
 

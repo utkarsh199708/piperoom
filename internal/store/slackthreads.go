@@ -48,6 +48,9 @@ func (t *SlackThreads) Get(ctx context.Context, roomID string) (slackbridge.Thre
 
 // Put implements slackbridge.Threads as an upsert. The room must exist.
 func (t *SlackThreads) Put(ctx context.Context, roomID string, th slackbridge.Thread) error {
+	if err := CheckText(roomID, th.Channel, th.TS); err != nil {
+		return fmt.Errorf("store: slack thread put: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(ctx, slackThreadTimeout)
 	defer cancel()
 	_, err := t.pool.Exec(ctx, `
