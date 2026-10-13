@@ -382,7 +382,7 @@ row (`service_proposals.go:131`), compute `params_hash` = hex SHA-256 of the **R
 ## 4. Machine routes
 
 - `POST /api/alerts/{source}` (merged, f4ce4b5) stays signature/token-based, outside session auth. Cookies are
-  ignored there. The Host allow-list (§1.5) still applies.
+  ignored there. **Lead decision (2026-10-13, PR #61):** the signed `POST /api/alerts/{source}` routes are exempt from the Host allow-list (§1.5): the signature is their auth, DNS rebinding cannot forge it, and in-cluster senders use internal DNS names. The unsigned dev `/api/alerts/webhook` stays under the Host check.
 - `POST /api/alerts/webhook` (unsigned, today in the `X-User` group, `server.go:135`) and the `X-User` header work
   **only in dev mode**. In OIDC mode the webhook route is not mounted (404) and `X-User` is ignored. Use
   `/api/alerts/generic` (HMAC, `GENERIC_ALERT_SECRET`).
