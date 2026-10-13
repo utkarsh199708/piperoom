@@ -306,6 +306,35 @@ func TestReplicasOneAgentPerRoom(t *testing.T) {
 	if runs := log.runsOf(room); len(runs) != 1 || runs[0].replica != "r0" {
 		t.Fatalf("runs = %+v, want exactly one on r0", runs)
 	}
+	// Three replicas wrote to the room at once; each one's snapshot is still
+	// exactly the fold of the whole log (no event skipped in a seq gap).
+	// Postgres keeps microseconds; the replica that wrote an event folded
+	// its nanoseconds (as a single server always has), so times are compared
+	// at the precision the log keeps.
+	norm := func(s RoomSnapshot) []byte {
+		s.OpenedAt = s.OpenedAt.Truncate(time.Microsecond)
+		if s.Driver != nil {
+			d := *s.Driver
+			d.LeaseUntil = d.LeaseUntil.Truncate(time.Microsecond)
+			s.Driver = &d
+		}
+		b, _ := json.Marshal(s)
+		return b
+	}
+	want, _, err := a.rebuild(ctx, room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantJSON := norm(want)
+	for _, s := range svcs {
+		got, err := s.GetRoom(ctx, room)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gotJSON := norm(got); string(gotJSON) != string(wantJSON) {
+			t.Fatalf("snapshot on %s differs from the log:\n got %s\nwant %s", s.replica, gotJSON, wantJSON)
+		}
+	}
 
 	// A room whose agent runs nowhere (opened by another process that
 	// stopped): @agent on all three replicas at once starts exactly one run.
@@ -601,7 +630,10 @@ func TestReplicasCacheFollowsLog(t *testing.T) {
 	a := newReplica(t, pgReplicaStore(t, schema, store.Options{}), "r0", log, nil, func(d *Deps) {
 		d.OnRoomClosed = func(context.Context, string, string, string) { closedOnA.Add(1) }
 	})
-	b := newReplica(t, pgReplicaStore(t, schema, store.Options{}), "r1", log, nil)
+	// B hears no notifications at all (no LISTEN, no poll in the test's
+	// time): whatever B knows about A's writes comes from reading the log
+	// before it acts, which is the guard under test.
+	b := newReplica(t, pgReplicaStore(t, schema, store.Options{NoListen: true, PollInterval: time.Hour}), "r1", log, nil)
 	ctx := context.Background()
 	arjun, priya := user(t, a, "arjun"), user(t, a, "priya")
 
