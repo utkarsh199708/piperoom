@@ -25,6 +25,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
+	"piperoom/internal/auth"
 	"piperoom/internal/config"
 	"piperoom/internal/httpapi"
 	"piperoom/internal/owners"
@@ -51,7 +52,7 @@ func main() {
 // including the listen-error path.
 func run() error {
 	demoMode := flag.Bool("demo", false, "run a scripted fake agent (no real tools/agent)")
-	allowRemote := flag.Bool("allow-remote", false, "allow PIPEROOM_HTTP_ADDR to be non-loopback (auth is the dev X-User stub)")
+	allowRemote := flag.Bool("allow-remote", false, "DEPRECATED alias of PIPEROOM_DEV_ALLOW_NONLOOPBACK=1: allow dev auth on a non-loopback PIPEROOM_HTTP_ADDR")
 	probe := flag.Bool("healthcheck", false, "probe GET /healthz on PIPEROOM_HTTP_ADDR and exit 0 if healthy (for the container HEALTHCHECK)")
 	flag.Parse()
 
@@ -84,15 +85,15 @@ func run() error {
 		return err
 	}
 
-	// Refuse a reachable-from-outside listen address before anything else
-	// starts: the only auth is the X-User stub (security F1).
-	remote, err := checkListenAddr(cfg.HTTPAddr, *allowRemote)
+	// Login settings (docs/design/auth.md): a bad PIPEROOM_AUTH_MODE or oidc
+	// config refuses start, and so does a reachable-from-outside listen
+	// address in dev mode without PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 (security
+	// F1). Both run before anything else starts.
+	authSettings, err := authSetup(cfg, *allowRemote, *demoMode, log)
 	if err != nil {
 		return err
 	}
-	if remote {
-		log.Warn("server: listening on a non-loopback address; auth is the dev X-User stub, so any client that can reach it can act as any user", "addr", cfg.HTTPAddr)
-	}
+	log.Info("server: auth", "mode", authSettings.Mode, "session_idle", authSettings.Idle.String(), "session_max", authSettings.Max.String())
 
 	// PIPEROOM_PUBLIC_URL becomes an allowed WebSocket origin, so a malformed
 	// value (a wildcard, say) must stop the start rather than widen access.
@@ -145,6 +146,8 @@ func run() error {
 		st      store.Store
 		ready   httpapi.Pinger      // nil in demo mode: the in-memory store is always ready
 		threads slackbridge.Threads = slackbridge.NewMemThreads()
+		// Login sessions: in memory in demo mode, the sessions table otherwise.
+		sessions auth.Store = auth.NewMemStore()
 	)
 	if *demoMode {
 		st = memstore.New()
@@ -163,6 +166,7 @@ func run() error {
 		st = pg
 		ready = pg
 		threads = pg.SlackThreads()
+		sessions = pg.Sessions()
 		defer pg.Close()
 	}
 
@@ -265,7 +269,7 @@ func run() error {
 	stopRetention := startRetention(ctx, svc, retentionDays, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopRetention()
 
-	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin)}
+	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions)}
 	if cfg.WebDir != "" {
 		// Fail at start, not at the first page load, when the image or the
 		// mount has no built UI.

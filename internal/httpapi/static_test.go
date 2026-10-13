@@ -147,7 +147,7 @@ func TestStaticDoesNotShadowAPI(t *testing.T) {
 
 	// A real API route still answers (needs X-User: 401 JSON, not HTML).
 	resp, body := fetch(t, http.MethodGet, srv.URL+"/api/me")
-	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(body, `"unauthenticated"`) {
+	if resp.StatusCode != http.StatusUnauthorized || !strings.Contains(body, `"session_expired"`) {
 		t.Fatalf("GET /api/me = %d %q", resp.StatusCode, body)
 	}
 	// Probes are not shadowed.

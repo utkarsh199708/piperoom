@@ -47,15 +47,25 @@ func newRoomServer(t *testing.T) (*httptest.Server, *room.Service) {
 
 func dialWS(t *testing.T, srv *httptest.Server, roomID, user string, after int64) *websocket.Conn {
 	t.Helper()
-	url := strings.Replace(srv.URL, "http", "ws", 1) + "/api/rooms/" + roomID + "/ws?user=" + user + "&after=" + itoa(after)
+	url := strings.Replace(srv.URL, "http", "ws", 1) + "/api/rooms/" + roomID + "/ws?after=" + itoa(after)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, url, nil)
+	conn, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{HTTPHeader: http.Header{"X-User": {user}}})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { conn.Close(websocket.StatusNormalClosure, "") })
 	return conn
+}
+
+// headerIdentify is the test Identify for a gateway mounted without httpapi:
+// the X-User header names the user. Production never reads ?user= or a header
+// here; httpapi's authenticate middleware decides (session cookie first).
+func headerIdentify(svc *room.Service) func(*http.Request) (ws.Identity, bool) {
+	return func(r *http.Request) (ws.Identity, bool) {
+		u, ok := svc.LookupUser(r.Header.Get("X-User"))
+		return ws.Identity{User: u}, ok
+	}
 }
 
 func itoa(n int64) string { return fmt.Sprintf("%d", n) }
@@ -166,7 +176,12 @@ func TestWebSocketNegativeAfterRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create room: %v", err)
 	}
-	resp, err := http.Get(srv.URL + "/api/rooms/" + snap.ID + "/ws?user=arjun&after=-5")
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/rooms/"+snap.ID+"/ws?after=-5", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-User", "arjun")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -280,14 +295,15 @@ func TestWebSocketReplayDeadline(t *testing.T) {
 	}
 
 	gw := ws.NewGateway(svc, slowStore{st}, nil)
+	gw.Identify = headerIdentify(svc)
 	gw.ReplayTimeout = 200 * time.Millisecond
 	mux := chi.NewRouter()
 	mux.Get("/api/rooms/{id}/ws", gw.ServeHTTP)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(func() { srv.Close(); gw.Close() })
 
-	url := strings.Replace(srv.URL, "http", "ws", 1) + "/api/rooms/" + snap.ID + "/ws?user=arjun&after=0"
-	conn, _, err := websocket.Dial(context.Background(), url, nil)
+	url := strings.Replace(srv.URL, "http", "ws", 1) + "/api/rooms/" + snap.ID + "/ws?after=0"
+	conn, _, err := websocket.Dial(context.Background(), url, &websocket.DialOptions{HTTPHeader: http.Header{"X-User": {"arjun"}}})
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -353,6 +369,7 @@ func TestGatewayCloseClosesAllClients(t *testing.T) {
 	roomID := snap.ID
 
 	gw := ws.NewGateway(svc, st, nil)
+	gw.Identify = headerIdentify(svc)
 	mux := chi.NewRouter()
 	mux.Get("/api/rooms/{id}/ws", gw.ServeHTTP)
 	srv := httptest.NewServer(mux)

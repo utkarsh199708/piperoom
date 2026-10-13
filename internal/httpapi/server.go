@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"piperoom/internal/alertin"
+	"piperoom/internal/auth"
 	"piperoom/internal/room"
 	"piperoom/internal/store"
 	"piperoom/internal/ws"
@@ -50,6 +51,11 @@ type Server struct {
 	webDir  string
 	webRoot *os.Root
 	public  PublicOrigin
+
+	// Login (WithAuth, WithSessions): auth.go.
+	authSettings auth.Settings
+	sessions     auth.Store
+	now          func() time.Time
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -71,6 +77,9 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	for _, o := range opts {
 		o(s)
 	}
+	s.normalizeAuth()
+	s.gw.Identify = wsIdentify
+	s.gw.SessionAlive = s.sessionAlive
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -79,9 +88,14 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	} else {
 		// The dev UI is a separate origin and needs CORS. When the server
 		// serves the UI itself, everything is same-origin and CORS stays off.
+		// (Removed by the lead once the Vite proxy has landed, design §1.4.)
 		r.Use(cors)
 	}
 	r.Use(requestLog(log))
+	// Host allow-list first (DNS rebinding, design §1.5), then the cross-origin
+	// check, on every route including probes and signed alerts.
+	r.Use(s.hostGuard)
+	r.Use(s.crossOriginProtection().Handler)
 	// Router-level misses use the same JSON envelope as every other error.
 	notFound := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "not found")
@@ -108,18 +122,35 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	r.Get(pathHealthz, s.handleHealthz)
 	r.Get(pathReadyz, s.handleReadyz)
 
-	r.Route("/api", func(api chi.Router) {
-		// WebSocket authenticates via ?user= (browsers cannot set headers) and
-		// runs outside the request timeout: the connection outlives the
-		// request. Replay has its own deadline in the gateway.
-		api.Get("/rooms/{id}/ws", s.gw.ServeHTTP)
+	// Login routes (auth.go). Dev login exists only in dev mode; in oidc mode
+	// the two OIDC routes answer 501 until auth PR 3.
+	r.Route("/auth", func(a chi.Router) {
+		a.Use(requireJSON)
+		a.Use(middleware.Timeout(requestTimeout))
+		a.Post("/logout", s.handleLogout)
+		if s.authSettings.IsOIDC() {
+			a.Get("/login", s.handleOIDCPending)
+			a.Get("/callback", s.handleOIDCPending)
+		} else {
+			a.Post("/dev-login", s.handleDevLogin)
+		}
+	})
 
+	r.Route("/api", func(api chi.Router) {
 		// Signed alert routes: the sender's signature or token is the auth, so
-		// no X-User. A source without a secret answers 401.
+		// no session. They take the sender's own content type (no requireJSON).
+		// A source without a secret answers 401.
 		api.With(middleware.Timeout(requestTimeout)).Post("/alerts/{source}", s.handleSignedAlert)
 
 		api.Group(func(protected chi.Router) {
-			protected.Use(authenticate(svc))
+			protected.Use(s.authenticate)
+			protected.Use(requireJSON)
+
+			// The WebSocket authenticates by the session cookie (or, in dev
+			// mode, X-User for curl and wscat) like every other route, and
+			// runs outside the request timeout: the connection outlives the
+			// request. Replay has its own deadline in the gateway.
+			protected.Get("/rooms/{id}/ws", s.gw.ServeHTTP)
 
 			// The hand-off route is exempt from the default budget.
 			protected.Post("/rooms/{id}/handoffs", withTimeout(handoffTimeout, s.handleCreateHandoff))
@@ -132,7 +163,12 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/me", s.handleMe)
 				short.Get("/rooms", s.handleListRooms)
 				short.Post("/rooms", s.handleCreateRoom)
-				short.Post("/alerts/webhook", s.handleAlertWebhook)
+				if !s.authSettings.IsOIDC() {
+					// Unsigned: dev mode only (design §4). In oidc mode this
+					// path is not mounted and falls to /alerts/{source}, which
+					// answers 404 for the unknown source "webhook".
+					short.Post("/alerts/webhook", s.handleAlertWebhook)
+				}
 				short.Get("/rooms/{id}", s.handleGetRoom)
 				short.Get("/rooms/{id}/events", s.handleRoomEvents)
 				short.Post("/rooms/{id}/comments", s.handleAddComment)
@@ -149,15 +185,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 			})
 		})
 	})
-	if s.webDir != "" {
-		// Same-origin only (the library always accepts the request's own
-		// host), plus the validated public host. The dev origins are for the
-		// Vite dev server, which this mode does not use.
-		s.gw.OriginPatterns = []string{}
-		if s.public.Host != "" {
-			s.gw.OriginPatterns = append(s.gw.OriginPatterns, s.public.Host)
-		}
-	}
+	s.gw.OriginPatterns = s.wsOriginPatterns()
 	s.handler = r
 	return s
 }
@@ -182,29 +210,37 @@ func (s *Server) Close() {
 	s.svc.Close()
 }
 
-// ---- auth ----
-
-type ctxKey int
-
-const userKey ctxKey = 1
-
-// authenticate resolves X-User and stores the user in the context.
-func authenticate(svc *room.Service) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id := r.Header.Get("X-User")
-			if id == "" {
-				writeError(w, http.StatusUnauthorized, "unauthenticated", "missing X-User header")
-				return
-			}
-			u, ok := svc.LookupUser(id)
-			if !ok {
-				writeError(w, http.StatusUnauthorized, "unauthenticated", "unknown user "+id)
-				return
-			}
-			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, u)))
-		})
+// wsOriginPatterns are the extra WebSocket origin hosts (the library always
+// accepts the request's own host). They follow the Host allow-list (design
+// §1.6): the validated public host and PIPEROOM_ALLOWED_HOSTS entries, which
+// are the names a proxy shows the browser while rewriting Host. When the
+// server does not serve the UI itself (dev), the Vite dev server's origins are
+// added too.
+func (s *Server) wsOriginPatterns() []string {
+	patterns := []string{}
+	if s.public.Host != "" {
+		patterns = append(patterns, s.public.Host)
 	}
+	patterns = append(patterns, s.authSettings.AllowedHosts...)
+	if s.webDir == "" && !s.authSettings.IsOIDC() {
+		patterns = append(patterns, "localhost:5173", "127.0.0.1:5173")
+	}
+	return patterns
+}
+
+// crossOriginProtection builds Go's CSRF check (design §1.4): a non-safe
+// request from another origin, by Sec-Fetch-Site or by Origin against Host, is
+// refused with 403. Requests with neither header (curl, alert senders) pass.
+// Behind a proxy that rewrites Host, the browser's Origin is the public origin,
+// which is trusted here.
+func (s *Server) crossOriginProtection() *http.CrossOriginProtection {
+	cop := http.NewCrossOriginProtection()
+	if h := s.publicHostInList(); h != "" {
+		if err := cop.AddTrustedOrigin(s.public.Scheme + "://" + h); err != nil {
+			s.log.Error("httpapi: trusted origin", "host", h, "err", err)
+		}
+	}
+	return cop
 }
 
 func userFrom(ctx context.Context) room.User {
