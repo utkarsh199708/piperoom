@@ -308,9 +308,10 @@ const MaxPipelineDailyCostUSD = 1_000_000_000
 
 // ParseCost validates the spend fields. Empty means off (no table, no cap).
 // PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET is a whole number, "0" = off.
-// PIPEROOM_PIPELINE_DAILY_COST_USD is a plain decimal such as 25 or 12.50,
-// "0" = off; a value above 0 needs PIPEROOM_MODEL_PRICES. The price file
-// itself is read by the agent package at start-up.
+// PIPEROOM_PIPELINE_DAILY_COST_USD is a plain decimal such as 25 or 12.50
+// with at most six decimals, "0" = off; a value above 0 needs
+// PIPEROOM_MODEL_PRICES. The price file itself is read by the agent package
+// at start-up.
 func ParseCost(c Config) (Cost, error) {
 	out := Cost{PricesFile: strings.TrimSpace(c.ModelPrices)}
 	var err error
@@ -326,24 +327,35 @@ func ParseCost(c Config) (Cost, error) {
 	return out, nil
 }
 
+// maxUSDDecimals is the finest amount PIPEROOM_PIPELINE_DAILY_COST_USD takes:
+// one millionth of a USD, the unit the spend tables keep.
+const maxUSDDecimals = 6
+
 // parseUSD parses a plain non-negative decimal amount (digits, at most one
-// point with digits on both sides); empty is 0. Exponents, signs, NaN and Inf
-// are refused so a typo cannot turn into an unexpected cap.
+// point with digits on both sides, at most six decimals); empty is 0.
+// Exponents, signs, NaN, Inf and amounts finer than the stored millionth are
+// refused so a typo cannot turn into an unexpected cap.
 func parseUSD(name, v string) (float64, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0, nil
 	}
-	digits, points := 0, 0
+	digits, points, decimals := 0, 0, 0
 	for i, r := range v {
 		switch {
 		case r >= '0' && r <= '9':
 			digits++
+			if points > 0 {
+				decimals++
+			}
 		case r == '.' && points == 0 && i > 0 && i < len(v)-1:
 			points++
 		default:
 			return 0, fmt.Errorf("config: %s=%q: want a plain amount in USD such as 25 or 12.50", name, v)
 		}
+	}
+	if decimals > maxUSDDecimals {
+		return 0, fmt.Errorf("config: %s=%q: at most %d decimal places (millionths of a USD)", name, v, maxUSDDecimals)
 	}
 	f, err := strconv.ParseFloat(v, 64)
 	if err != nil || digits == 0 {
