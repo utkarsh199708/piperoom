@@ -102,24 +102,29 @@ func (m *MemIdentities) Bind(_ context.Context, iss, sub, userID, _ string) erro
 	return nil
 }
 
-// Unbind implements IdentityStore.
+// Unbind implements IdentityStore. It revokes while holding the lock so a
+// concurrent Bind cannot interleave, and on a revoke error puts the binding
+// back and reports nothing done, like the Postgres transaction rolling back.
 func (m *MemIdentities) Unbind(ctx context.Context, userID string, at time.Time) (UnbindResult, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	pair, ok := m.byUser[userID]
 	if ok {
 		delete(m.byUser, userID)
 		delete(m.byPair, pair)
 	}
-	rev := m.sessions
-	m.mu.Unlock()
 	var res UnbindResult
 	if ok {
 		res.Unbound = 1
 	}
-	if rev != nil {
-		n, err := rev.RevokeBinding(ctx, userID, pair[0], pair[1], at)
+	if m.sessions != nil {
+		n, err := m.sessions.RevokeBinding(ctx, userID, pair[0], pair[1], at)
 		if err != nil {
-			return res, err
+			if ok {
+				m.byUser[userID] = pair
+				m.byPair[pair] = userID
+			}
+			return UnbindResult{}, err
 		}
 		res.Revoked = n
 	}

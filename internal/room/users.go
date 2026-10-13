@@ -150,9 +150,11 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 		layers = append(layers, layer)
 	}
 	sort.Strings(layers) // deterministic error for the same config
-	// Group rule (docs/design/auth.md section 2.3): the server does not know
-	// group membership at start-up, so a layer that lists any group: principal
-	// is not checked against users.yaml. Log it once.
+	// Group rule (docs/design/auth.md section 2.3), owners -> users direction
+	// only: the server does not know group membership at start-up, so a layer
+	// that lists any group: principal cannot be checked against users.yaml for
+	// who must list it. The users -> owners direction below is always checked.
+	// Log the skipped layers once.
 	var skipped []string
 	for _, layer := range layers {
 		if !own.Layers[layer].AllUsers() {
@@ -160,7 +162,7 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 		}
 	}
 	if len(skipped) > 0 {
-		slog.Info("users: layers with group principals are not checked against users.yaml", "layers", skipped)
+		slog.Info("users: owners->users check skips layers with group principals (not checked against users.yaml); users->owners is always checked", "layers", skipped)
 	}
 	for _, layer := range layers {
 		ps := own.Layers[layer]

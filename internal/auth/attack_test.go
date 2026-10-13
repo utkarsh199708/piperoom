@@ -55,7 +55,8 @@ func TestAttack_StripFormat(t *testing.T) {
 	for r := rune(0x2066); r <= 0x2069; r++ {
 		stripped = append(stripped, r)
 	}
-	stripped = append(stripped, 0x200E, 0x200F, 0x200B, 0x2060, 0xFEFF)
+	stripped = append(stripped, 0x200E, 0x200F, 0x200B, 0x2060, 0xFEFF,
+		0x061C, 0x00AD, 0x2062, 0x2061, 0x2064, 0x206A, 0x206F, 0xFFF9, 0xFFFB, 0x180E, 0xE0001, 0xE0041, 0xE007F)
 	for _, r := range stripped {
 		if got := stripFormat("Pri" + string(r) + "ya"); got != "Priya" {
 			t.Errorf("U+%04X: stripFormat = %q, want Priya", r, got)
@@ -65,6 +66,8 @@ func TestAttack_StripFormat(t *testing.T) {
 		"\u202eayirP\u202c":       "ayirP",
 		"\u2066Priya\u2069":       "Priya",
 		"\ufeffPriya\u200e\u200f": "Priya",
+		"Pr\u00adiya":             "Priya",
+		"Pri\U000E0041ya":         "Priya",
 		"Ana Mar\u00eda":          "Ana Mar\u00eda",
 	} {
 		if got := stripFormat(in); got != want {
