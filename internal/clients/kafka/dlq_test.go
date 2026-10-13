@@ -25,6 +25,8 @@ import (
 // fakeLister answers ListStart/EndOffsets from fixed tables and counts calls.
 type fakeLister struct {
 	starts, ends kadm.ListedOffsets
+	stable       kadm.ListedOffsets // last stable offsets; nil means same as ends
+	stableCalls  atomic.Int32
 	err          error
 	calls        atomic.Int32
 	lastTopics   []string
@@ -41,6 +43,14 @@ func (f *fakeLister) ListStartOffsets(ctx context.Context, topics ...string) (ka
 func (f *fakeLister) ListEndOffsets(ctx context.Context, topics ...string) (kadm.ListedOffsets, error) {
 	f.calls.Add(1)
 	return f.ends, f.err
+}
+
+func (f *fakeLister) ListCommittedOffsets(ctx context.Context, topics ...string) (kadm.ListedOffsets, error) {
+	f.stableCalls.Add(1)
+	if f.stable == nil {
+		return f.ends, f.err
+	}
+	return f.stable, f.err
 }
 
 func listed(topic string, offs map[int32]int64) map[string]map[int32]kadm.ListedOffset {
@@ -314,6 +324,166 @@ func TestMergeNewestOrder(t *testing.T) {
 	if n := len(mergeNewest(in, 2)); n != 2 {
 		t.Fatalf("cut to limit: %d", n)
 	}
+
+	// Equal timestamps across partitions: the lower partition wins, whatever
+	// the input order.
+	tie := []clients.DLQRecord{
+		{Partition: 3, Offset: 50, Timestamp: t0},
+		{Partition: 1, Offset: 5, Timestamp: t0},
+		{Partition: 2, Offset: 99, Timestamp: t0},
+	}
+	got = mergeNewest(tie, 3)
+	if got[0].Partition != 1 || got[1].Partition != 2 || got[2].Partition != 3 {
+		t.Fatalf("tie-break order = %+v, want partitions 1,2,3", got)
+	}
+}
+
+// fnConsumer lets a test script PollFetches.
+type fnConsumer struct {
+	poll   func(ctx context.Context) kgo.Fetches
+	closed atomic.Bool
+}
+
+func (f *fnConsumer) PollFetches(ctx context.Context) kgo.Fetches { return f.poll(ctx) }
+func (f *fnConsumer) Close()                                      { f.closed.Store(true) }
+
+func clientWith(l *fakeLister, cons dlqConsumer) *Client {
+	return &Client{offs: l, consumerFn: func(map[string]map[int32]kgo.Offset) (dlqConsumer, error) { return cons, nil }}
+}
+
+func controlRec(p int32, off int64) *kgo.Record {
+	r := rec(p, off, time.Now())
+	r.Attrs = kgo.NewRecordAttrs(kgo.RecordAttrsOpts{Control: true, Transactional: true})
+	return r
+}
+
+// TestPeekDLQAbortMarkerPastEnd: a transaction open when the offsets were
+// listed aborts afterwards; its marker lands past the planned end and must
+// still finish the partition.
+func TestPeekDLQAbortMarkerPastEnd(t *testing.T) {
+	now := time.Now()
+	cons := &fakeConsumer{polls: []kgo.Fetches{fetchOf("d",
+		rec(0, 1, now), rec(0, 2, now.Add(time.Second)), // offsets 3..5 were aborted and are dropped
+		controlRec(0, 6))}}
+	c := peekClient(merge(listed("d", map[int32]int64{0: 0})), merge(listed("d", map[int32]int64{0: 4})), cons, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	got, err := c.PeekDLQ(ctx, "d", 3)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("waited for the deadline: the marker past end did not finish the partition")
+	}
+}
+
+// TestPeekDLQPlansAgainstLastStableOffset: with LSO < HWM (an open
+// transaction at the tail) the consumer starts and ends below the LSO.
+func TestPeekDLQPlansAgainstLastStableOffset(t *testing.T) {
+	now := time.Now()
+	l := &fakeLister{
+		starts: merge(listed("d", map[int32]int64{0: 0, 1: 0})),
+		ends:   merge(listed("d", map[int32]int64{0: 10, 1: 6})),
+		stable: merge(listed("d", map[int32]int64{0: 4, 1: 6})), // p0 has an open txn from offset 4
+	}
+	var opened map[string]map[int32]kgo.Offset
+	cons := &fakeConsumer{polls: []kgo.Fetches{fetchOf("d",
+		rec(0, 2, now), rec(0, 3, now.Add(time.Second)),
+		rec(1, 5, now.Add(2*time.Second)))}}
+	c := &Client{offs: l, consumerFn: func(p map[string]map[int32]kgo.Offset) (dlqConsumer, error) {
+		opened = p
+		return cons, nil
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	got, err := c.PeekDLQ(ctx, "d", 2)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Fatal("waited for offsets above the last stable offset")
+	}
+	if len(opened["d"]) != 2 {
+		t.Fatalf("opened %v", opened)
+	}
+	// DLQOffsets itself still reports the high watermark (watcher growth).
+	offs, err := c.DLQOffsets(context.Background(), "d")
+	if err != nil || offs["d"][0].End != 10 {
+		t.Fatalf("DLQOffsets must keep the high watermark: %+v, %v", offs, err)
+	}
+}
+
+func TestPeekDLQStableOffsetErrors(t *testing.T) {
+	base := func() *fakeLister {
+		return &fakeLister{
+			starts: merge(listed("d", map[int32]int64{0: 0})),
+			ends:   merge(listed("d", map[int32]int64{0: 2})),
+		}
+	}
+	unused := &fakeConsumer{}
+	l := base()
+	l.stable = merge(missing("d"))
+	if _, err := clientWith(l, unused).PeekDLQ(context.Background(), "d", 1); !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("topic gone: %v", err)
+	}
+	l = base()
+	l.stable = merge(listed("d", map[int32]int64{7: 1})) // partition 0 missing
+	if _, err := clientWith(l, unused).PeekDLQ(context.Background(), "d", 1); err == nil {
+		t.Fatal("missing partition in LSO response accepted")
+	}
+	l = base()
+	l.stable = merge(map[string]map[int32]kadm.ListedOffset{"d": {0: {Partition: 0, Err: kerr.NotLeaderForPartition}}})
+	if _, err := clientWith(l, unused).PeekDLQ(context.Background(), "d", 1); !errors.Is(err, kerr.NotLeaderForPartition) {
+		t.Fatalf("partition error: %v", err)
+	}
+	if unused.closed.Load() {
+		t.Fatal("consumer should not have been opened")
+	}
+}
+
+// TestPeekDLQContextExpiresBetweenPolls exercises the ctx.Err check after a
+// poll that returned records without an error fetch: with a record it is a
+// sample, without one an error. It also checks the debug line is counts only.
+func TestPeekDLQContextExpiresBetweenPolls(t *testing.T) {
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(old)
+
+	mk := func(withRecord bool) (*Client, context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cons := &fnConsumer{poll: func(context.Context) kgo.Fetches {
+			cancel() // the deadline passes while the poll returns normally
+			if withRecord {
+				r := rec(0, 0, time.Now())
+				r.Value = []byte("JUNKVAL-ctx")
+				return fetchOf("d", r)
+			}
+			return kgo.Fetches{}
+		}}
+		l := &fakeLister{starts: merge(listed("d", map[int32]int64{0: 0})), ends: merge(listed("d", map[int32]int64{0: 2}))}
+		return clientWith(l, cons), ctx, cancel
+	}
+
+	c, ctx, cancel := mk(true)
+	got, err := c.PeekDLQ(ctx, "d", 2)
+	cancel()
+	if err != nil || len(got) != 1 {
+		t.Fatalf("with a record: got %+v, %v; want the sample", got, err)
+	}
+	if !strings.Contains(logs.String(), "cut short") || !strings.Contains(logs.String(), "partitions_planned=1") ||
+		strings.Contains(logs.String(), "JUNKVAL") {
+		t.Fatalf("debug line: %q", logs.String())
+	}
+
+	c, ctx, cancel = mk(false)
+	_, err = c.PeekDLQ(ctx, "d", 2)
+	cancel()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("without a record: err = %v, want Canceled", err)
+	}
 }
 
 func TestPlanPeek(t *testing.T) {
@@ -413,8 +583,11 @@ func TestPeekDLQLeakInMessageErrorsAndLogs(t *testing.T) {
 	}
 
 	// Failing paths: the error text must not carry record content either.
-	bad := &fakeConsumer{polls: []kgo.Fetches{kgo.NewErrFetch(errors.New("boom"))}}
-	c2 := peekClient(merge(listed("d", map[int32]int64{0: 0})), merge(listed("d", map[int32]int64{0: 1})), bad, nil)
+	// The same consumer first delivers a record carrying the marker, then fails.
+	r2 := rec(0, 0, now, hdr("__connect.errors.exception.message", marker))
+	r2.Key, r2.Value = []byte(marker), []byte(marker)
+	bad := &fakeConsumer{polls: []kgo.Fetches{fetchOf("d", r2), kgo.NewErrFetch(errors.New("boom"))}}
+	c2 := peekClient(merge(listed("d", map[int32]int64{0: 0})), merge(listed("d", map[int32]int64{0: 2})), bad, nil)
 	if _, err := c2.PeekDLQ(context.Background(), "d", 1); err == nil || strings.Contains(err.Error(), marker) {
 		t.Fatalf("err = %v", err)
 	}

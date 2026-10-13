@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -40,6 +41,7 @@ const (
 type offsetLister interface {
 	ListStartOffsets(ctx context.Context, topics ...string) (kadm.ListedOffsets, error)
 	ListEndOffsets(ctx context.Context, topics ...string) (kadm.ListedOffsets, error)
+	ListCommittedOffsets(ctx context.Context, topics ...string) (kadm.ListedOffsets, error)
 }
 
 // dlqConsumer is the part of *kgo.Client that PeekDLQ uses.
@@ -125,7 +127,10 @@ func (c *Client) DLQOffsets(ctx context.Context, topics ...string) (map[string][
 // for a moment (Kafka has no headers-only fetch). Known limits: the read
 // stops at 8 MiB of record bytes and returns what it has, with no flag; if
 // the deadline cuts the read short and at least one record arrived, those
-// records are returned (a sample), with none it is an error. Only committed
+// records are returned with a nil error: the result is then a possibly
+// incomplete sample (a debug log line says so, with counts only); with no
+// record it is an error. The read plans against the last stable offset, so a
+// transaction left open at the tail is not waited for. Only committed
 // records are read, and transaction markers count toward "partition done"
 // but are never returned.
 func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]clients.DLQRecord, error) {
@@ -143,6 +148,10 @@ func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]client
 	parts, ok := offs[topic]
 	if !ok {
 		return nil, fmt.Errorf("kafka: peek dlq %s: %w", topic, clients.ErrNotFound)
+	}
+	parts, err = c.clampToStable(ctx, topic, parts)
+	if err != nil {
+		return nil, fmt.Errorf("kafka: peek dlq %s: %w", topic, err)
 	}
 	plan := planPeek(parts, limit)
 	if len(plan) == 0 {
@@ -164,6 +173,36 @@ func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]client
 		return nil, fmt.Errorf("kafka: peek dlq %s: %w", topic, err)
 	}
 	return mergeNewest(recs, limit), nil
+}
+
+// clampToStable lowers each partition's End from the high watermark to the
+// last stable offset. A transaction left open at the tail would otherwise
+// make a ReadCommitted consumer wait for offsets that are not readable until
+// the transaction ends. DLQOffsets keeps the high watermark (the watcher
+// counts growth with it); only a peek needs the readable end.
+func (c *Client) clampToStable(ctx context.Context, topic string, parts []clients.PartitionOffsets) ([]clients.PartitionOffsets, error) {
+	lso, err := c.lister().ListCommittedOffsets(ctx, topic)
+	if err != nil {
+		return nil, fmt.Errorf("last stable offsets: %w", err)
+	}
+	if topicMissing(lso[topic]) {
+		return nil, fmt.Errorf("last stable offsets: %w", clients.ErrNotFound)
+	}
+	out := make([]clients.PartitionOffsets, len(parts))
+	copy(out, parts)
+	for i := range out {
+		l, ok := lso.Lookup(topic, out[i].Partition)
+		if !ok {
+			return nil, fmt.Errorf("last stable offset %d: missing from response", out[i].Partition)
+		}
+		if l.Err != nil {
+			return nil, fmt.Errorf("last stable offset %d: %w", out[i].Partition, l.Err)
+		}
+		if l.Offset >= 0 && l.Offset < out[i].End {
+			out[i].End = l.Offset
+		}
+	}
+	return out, nil
 }
 
 // mergeNewest orders records per partition by offset descending, then merges
@@ -263,22 +302,22 @@ func collectPeek(ctx context.Context, cons dlqConsumer, topic string, plan []pee
 				continue // informational: kgo resets and goes on
 			}
 			if errors.Is(fe.Err, context.Canceled) || errors.Is(fe.Err, context.DeadlineExceeded) {
-				if len(out) > 0 {
-					return out, nil // a sample is better than nothing
-				}
-				return nil, fmt.Errorf("read incomplete after 0 records: %w", fe.Err)
+				return cutShort(ctx, out, len(ends), len(done), fe.Err)
 			}
 			return nil, fmt.Errorf("fetch %s/%d: %w", fe.Topic, fe.Partition, fe.Err)
 		}
 		for _, r := range fetches.Records() {
 			end, planned := ends[r.Partition]
-			if !planned || r.Offset >= end {
+			if !planned {
 				continue
 			}
+			// Mark done before skipping: the abort marker of a transaction that
+			// was open when the offsets were listed lands at or past end, and
+			// nothing else ever reaches end-1 then.
 			if r.Offset+1 >= end {
 				done[r.Partition] = true
 			}
-			if r.Attrs.IsControl() {
+			if r.Offset >= end || r.Attrs.IsControl() {
 				continue
 			}
 			total += recordSize(r)
@@ -288,13 +327,23 @@ func collectPeek(ctx context.Context, cons dlqConsumer, topic string, plan []pee
 			}
 		}
 		if err := ctx.Err(); err != nil && len(done) < len(ends) {
-			if len(out) > 0 {
-				return out, nil
-			}
-			return nil, fmt.Errorf("read incomplete after 0 records: %w", err)
+			return cutShort(ctx, out, len(ends), len(done), err)
 		}
 	}
 	return out, nil
+}
+
+// cutShort handles a deadline or cancellation before every partition was
+// read. With at least one record it returns them with a nil error (the
+// DLQReader contract has no "incomplete" field), so the result is a possibly
+// incomplete sample; with none it is an error. The log line has counts only.
+func cutShort(ctx context.Context, out []clients.DLQRecord, planned, done int, cause error) ([]clients.DLQRecord, error) {
+	slog.DebugContext(ctx, "kafka: dlq peek cut short",
+		"partitions_planned", planned, "partitions_done", done, "records", len(out))
+	if len(out) > 0 {
+		return out, nil
+	}
+	return nil, fmt.Errorf("read incomplete after 0 records: %w", cause)
 }
 
 // recordSize is what a record weighs against the 8 MiB bound.
