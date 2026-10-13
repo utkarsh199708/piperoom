@@ -71,7 +71,7 @@ The X-User stub above stays until auth PR 2. After it:
 | HTTP | code examples |
 |---|---|
 | 400 | `bad_request`, `validation`; after auth PR 3: `login_expired` (login cookie or row missing/expired at `/auth/callback`) |
-| 401 | `unauthenticated`; after auth PR 2: `session_expired` (no, revoked or expired session — the web app goes to `/auth/login?return=…`) |
+| 401 | `unauthenticated`; after auth PR 2: `session_expired` (no, revoked or expired session). Its body also carries the server's mode: `{"error":{"code":"session_expired","message":"…","auth_mode":"dev"\|"oidc"}}` — the web app shows the dev picker or goes to `/auth/login?return=…`. A WebSocket whose session ends gets an `error` frame with code `session_expired` and is then closed with close reason `session_expired` |
 | 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export), `not_provisioned` (login gate) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB) |
