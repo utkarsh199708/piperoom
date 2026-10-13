@@ -25,9 +25,14 @@
 > Viewer role (`403 viewer` on every room and proposal POST, so a viewer can never take the driver role), driver
 > dropped from the export list, `/auth/login` limit raised to 300/min with `PIPEROOM_TRUSTED_PROXIES`, loopback
 > hosts on any port plus `PIPEROOM_ALLOWED_HOSTS`, the dev-mode `X-Forwarded-For` 403 deleted, a reverse proxy
-> needs `oidc` (proxy pilots stay on the pre-PR-2 image until PR 3), `--allow-remote` kept one release as an alias,
+> needs `oidc` (proxy pilots build from git tag `pre-auth` until PR 3), `--allow-remote` kept one release as an alias,
 > `/api/me.layers` stays, Vite proxy is a PR 2 prerequisite before `cors` goes, line refs fixed. The "Changes in
 > revision 3" table at the top of `auth.md` maps item → section; §10 lists what was narrowed or rejected and why.
+>
+> **Lead decisions (2026-10-13):** written into `auth.md` §9 rows 7–9 and the sections they touch; the open questions are gone.
+> (7) `PIPEROOM_TRUSTED_PROXIES` is kept, oidc mode only, added by the lead in the PR 1 contract commit. (8) No image
+> pipeline: pilots build from source with `deploy/docker-compose.pilot.yml`; the image tag `piperoom:pre-auth` became a
+> git tag `pre-auth`. (9) Members who are not owners or auditors cannot export; they go in `auditors:`.
 
 Read these first: `AGENTS.md`, `docs/collab.md`, `docs/security/findings.md` (F1–F10), `docs/security/threat-model.md`, `docs/api.md`,
 `internal/events/events.go`, `internal/config/config.go`, `internal/owners/owners.go`, `dev/users.yaml`, `dev/owners.yaml`,

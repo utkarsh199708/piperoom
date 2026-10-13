@@ -11,10 +11,11 @@ was reviewed by two critics (security, fit with `main`); revision 3 answers them
 | S1 | Roles. A **viewer** (only in `PIPEROOM_AUTH_VIEWER_GROUPS`) gets GET and the WebSocket; every POST answers `403 viewer`. So a viewer can never become driver. The driver clause is dropped from export. | §2.1, §3.4, §7 |
 | S2 | The `/auth/login` IP limit is no longer a lockout: 300 per minute per client IP, with `PIPEROOM_TRUSTED_PROXIES` so `X-Forwarded-For` is trusted only from listed CIDRs. | §1.1, §6, §7 |
 | S3, F2 | Loopback hosts match on **any port**. Only the `PIPEROOM_PUBLIC_URL` host is exact. `PIPEROOM_ALLOWED_HOSTS` for a proxy that rewrites `Host`. A non-loopback `PIPEROOM_BIND` needs one of the two. | §1.5, §6 |
-| S4, F1 | The dev-mode `X-Forwarded-For` 403 is deleted. A reverse proxy needs `PIPEROOM_AUTH_MODE=oidc`. Proxy pilots stay on the pre-PR-2 image until PR 3. `--allow-remote` stays as a deprecated alias for one release. The Dockerfile comment and the pilot docs are in A1's list. | §5.1, §5.4, §8 |
+| S4, F1 | The dev-mode `X-Forwarded-For` 403 is deleted. A reverse proxy needs `PIPEROOM_AUTH_MODE=oidc`. Proxy pilots build from git tag `pre-auth` until PR 3. `--allow-remote` stays as a deprecated alias for one release. The Dockerfile comment and the pilot docs are in A1's list. | §5.1, §5.4, §8 |
 | F3 | `/api/me.layers` stays: the layers this session may approve, computed per request. The UI needs no change. | §2.3, §8 |
 | F4 | Stale fact fixed: `main` has no Vite proxy. PR 2 (A6) adds one, and `cors` goes only after it. | §1.4, §8 |
 | F5 | Line refs: `Dockerfile:44-47` (ENV) and `:67` (ENTRYPOINT). | §0 |
+| Lead decisions (2026-10-13) | `PIPEROOM_TRUSTED_PROXIES` is kept (oidc mode only). No image pipeline: git tag `pre-auth`, pilots build from source. Members who are not owners or auditors cannot export. They answer the old open questions. | §1.1, §2.1, §3.4, §5.4, §6, §8, §9, §10 |
 | Small | Nonce compared in constant time; login gate re-run per request; `group:` values should be IdP group ids; `identities` unbind; cookie wins over `X-User`; `return` checked after decoding; `LayerOwner` display rule; export row in `docs/api.md`; §9 row 6 has a default. | §1.1–1.3, §2.1–2.3, §5.2, §8, §9 |
 
 ## Changes in revision 2
@@ -100,7 +101,9 @@ Apache-2.0). CSRF: `net/http.CrossOriginProtection` (Go 1.27). Hashing: `jcs.Tra
   anonymous lockout (ten `curl` calls a minute from anywhere, and nobody can log in). Behind a TLS proxy every user
   shares one `RemoteAddr`, so the client IP is taken from `X-Forwarded-For` **only** when the peer is in
   `PIPEROOM_TRUSTED_PROXIES` (CIDR list, §6); then the rightmost address not in that list is the client. With no
-  trusted proxy the peer address is the client. The limit is in memory, per process.
+  trusted proxy the peer address is the client. This is used **only in `oidc` mode**, for this rate limit and for the
+  request log. In `dev` mode the limit and the log key on `RemoteAddr`. The limit is in memory, per process.
+  (Lead decision, 2026-10-13: the field is kept, §9 row 7.)
 - Client secret: `PIPEROOM_OIDC_CLIENT_SECRET` is **required**. Okta, Entra and Google register a server app as a
   confidential client; some IdPs refuse PKCE-only backends. `PIPEROOM_OIDC_PUBLIC_CLIENT=1` allows an empty secret
   for an IdP that wants a public client. PKCE is always on, with or without the secret.
@@ -206,7 +209,7 @@ The session cookie is checked at upgrade; **`?user=` is removed**. `OriginPatter
 | Role | Who | May |
 |---|---|---|
 | viewer | passes the gate **only** through `PIPEROOM_AUTH_VIEWER_GROUPS` | every GET and the WebSocket. **Every POST under `/api/rooms` and `/api/proposals` answers `403 viewer`.** No room create, no comment, no steer, no control request or grant, no export |
-| member | in `users.yaml`, or in a group named in `owners.yaml` | all of today's room actions: create, comment, steer, suggest, request and take control, close, trace |
+| member | in `users.yaml`, or in a group named in `owners.yaml` | all of today's room actions: create, comment, steer, suggest, request and take control, close, trace. **Not export:** a member who is not an approver and not in `auditors:` gets `403 not_allowed` on export (§3.4) |
 | approver | member whose `user:` or `group:` is listed for a layer (or is its backup) | approve or reject that layer (§2.3) |
 | auditor | in `auditors:` | export (§3.4) |
 
@@ -325,7 +328,10 @@ row (`service_proposals.go:112`), compute `params_hash` = hex SHA-256 of the **R
 - Access: `GET /api/rooms/{id}/export` answers `403 not_allowed` unless the user is (a) an approver or backup for
   any layer of the room's pipeline, or (b) an `auditors:` principal. **The driver is not on the list.** Revision 2
   had "the current driver" there; on `main` anyone can become driver of a quiet room (§0), so that clause was a
-  door, not a rule. A driver who needs the file goes in `auditors:`. Viewers (§2.1) cannot export. In dev mode (a)
+  door, not a rule. A driver who needs the file goes in `auditors:`. Viewers (§2.1) cannot export.
+  **Accepted (lead, 2026-10-13):** a member who is not an owner, not a backup and not an auditor cannot export either.
+  Today any `users.yaml` user can; from PR 4 such a member must be added to `auditors:` to export. Pilots are told
+  in `deploy/README.md` (PR 2, A1 scope) so nobody finds out when the first export returns `403`. In dev mode (a)
   uses `users.yaml` `layers`. The log line in `export.go:57` (who exported what) stays.
 - Content: `proposals[]` gains `params_hash`; `approvals[]` gains `params_hash` and `identity`; `action_results[]`
   gains `params_hash`. The `proposals[]` entry already carries the frozen `title`, `risk`, `rollback`,
@@ -398,8 +404,10 @@ Old events keep their actor (new fields empty). One additive migration adds `ses
 
 **Proxy pilots between PR 2 and PR 3.** Today's docs send pilots behind an authenticating proxy that sets `X-User`
 and forces `?user=`. PR 2 removes `?user=` and moves the dev login to a cookie the proxy cannot force; OIDC arrives
-only in PR 3. So: **a pilot on the proxy path stays on the pre-PR-2 image until PR 3 lands.** A1 tags that image
-(`piperoom:pre-auth`) before PR 2 merges and says this in `deploy/README.md`. Local, VPN and SSH-tunnel pilots are
+only in PR 3. So: **a pilot on the proxy path stays on the old code until PR 3 lands.** There is no image-publishing pipeline:
+pilots build from source with `deploy/docker-compose.pilot.yml`. The lead puts a git tag `pre-auth` on the last
+`main` commit before PR 2 merges (agents do not touch `main`), and A1 says in `deploy/README.md` that proxy pilots
+build from tag `pre-auth` until PR 3 (lead decision, 2026-10-13, §9 row 8). Local, VPN and SSH-tunnel pilots are
 not affected; their users pick themselves in `UserSwitcher` as today. PR 2 does not keep `?user=` as a fallback:
 with dev-login any proxied user could pick any name, so the fallback would only look like protection.
 
@@ -411,7 +419,7 @@ with dev-login any proxied user could pick any name, so the fallback would only 
 | `PIPEROOM_DEV_ALLOW_NONLOOPBACK` | `""` | `1` lets dev mode listen on a non-loopback address (loud warnings); replaces `--allow-remote` |
 | `PIPEROOM_PUBLIC_URL` | `""` (exists) | `https` origin in oidc mode; redirect URI = this + `/auth/callback`; its host joins the Host allow-list (exact) |
 | `PIPEROOM_ALLOWED_HOSTS` | `""` | comma list of extra `Host` values (`host` or `host:port`, compared as written) for a proxy or tunnel that rewrites `Host` (§1.5) |
-| `PIPEROOM_TRUSTED_PROXIES` | `""` | comma list of CIDRs; `X-Forwarded-For` is read only from these peers, for the `/auth/login` rate limit and the request log (§1.1) |
+| `PIPEROOM_TRUSTED_PROXIES` | `""` | comma list of CIDRs; `X-Forwarded-For` is read only from these peers, for the `/auth/login` rate limit and the request log (§1.1). **Used only in `oidc` mode**; dev mode keys on `RemoteAddr`. The lead adds the field in the PR 1 contract commit |
 | `PIPEROOM_OIDC_ISSUER` | `""` | issuer URL |
 | `PIPEROOM_OIDC_CLIENT_ID` | `""` | |
 | `PIPEROOM_OIDC_CLIENT_SECRET` | `""` | secret, never logged; required unless the next flag is set |
@@ -444,21 +452,21 @@ with dev-login any proxied user could pick any name, so the fallback would only 
 | Edited proposal row | Executor re-hash (accidents); export copy outside the DB (admin); signed approvals later (§3.3) |
 | Stale groups / recycled email | Groups refresh at login (worst case 12 h); `iss`+`sub` binding in `identities` |
 | Solo mode on a multi-owner install | Refuse to start (§5.3) |
-| Export by a viewer (F3 data) | Export limited to approvers and auditors (§3.4) |
+| Export by a viewer or a plain member (F3 data) | Export limited to approvers, backups and auditors (§3.4) |
 | Proxy rewrites `Host` | `PIPEROOM_ALLOWED_HOSTS` (§1.5); never a wildcard |
 
 ## 8. PR split
 
 | PR | Owner | Scope | Done when |
 |---|---|---|---|
-| 1 | Lead (contract) | `config.go` fields (§6, including `PIPEROOM_ALLOWED_HOSTS` and `PIPEROOM_TRUSTED_PROXIES`); `events.go` `ParamsHash` on `ProposalCreatedPayload` and `ActionExecutedPayload`, `ParamsHash` + `Identity` on approval payloads; `docs/api.md`: auth, `/auth/*`, approve body, `409 params_mismatch`, `421 bad_host`, `403 viewer`, `/api/me` keeps `layers` and gains `role` + `groups_missing`, a new row for `GET /api/rooms/{id}/export` with the §3.4 access rule (there is none today), WS without `?user=` | `go build ./...` passes; api.md matches this doc |
-| 2 | A5 + A6 + A1 | Sessions, mode-specific cookie names, `/auth/dev-login`, `/auth/logout`, cookie WS, `?user=` removed, Host allow-list (loopback any port, public host exact, `PIPEROOM_ALLOWED_HOSTS`), `CrossOriginProtection`, `PIPEROOM_DEV_ALLOW_NONLOOPBACK` with `--allow-remote` as a deprecated alias, webhook dev-only, cookie wins over `X-User`. **A6 first:** Vite proxy (`/api`, `/auth`, `ws: true`), same-origin client, cookie client, `UserSwitcher` via dev-login, 401 redirect; **then** A5 deletes `cors` and the expose header. A1: Dockerfile env + comment, compose pass-through, tag `piperoom:pre-auth`, `deploy/README.md` and the pilot docs listed in §5.1 | `X-User` in oidc mode → 401; dev on `0.0.0.0` without the switch refuses start; with the switch or the old flag warns; `Host: evil.test` → 421; `Host: localhost:5173` and `Host: 127.0.0.1:9000` → 200; WS without cookie → 401; cross-origin POST → 403; logout closes WS; `npm run dev` works through the proxy; the pilot image starts; `deploy/README.md` says proxy pilots stay on `piperoom:pre-auth` until PR 3 |
+| 1 | Lead (contract) | `config.go` fields (§6, including `PIPEROOM_ALLOWED_HOSTS` and `PIPEROOM_TRUSTED_PROXIES`; the lead adds `PIPEROOM_TRUSTED_PROXIES` in the lead contract commit, oidc mode only); `events.go` `ParamsHash` on `ProposalCreatedPayload` and `ActionExecutedPayload`, `ParamsHash` + `Identity` on approval payloads; `docs/api.md`: auth, `/auth/*`, approve body, `409 params_mismatch`, `421 bad_host`, `403 viewer`, `/api/me` keeps `layers` and gains `role` + `groups_missing`, a new row for `GET /api/rooms/{id}/export` with the §3.4 access rule (there is none today), WS without `?user=` | `go build ./...` passes; api.md matches this doc |
+| 2 | A5 + A6 + A1 | Sessions, mode-specific cookie names, `/auth/dev-login`, `/auth/logout`, cookie WS, `?user=` removed, Host allow-list (loopback any port, public host exact, `PIPEROOM_ALLOWED_HOSTS`), `CrossOriginProtection`, `PIPEROOM_DEV_ALLOW_NONLOOPBACK` with `--allow-remote` as a deprecated alias, webhook dev-only, cookie wins over `X-User`. **A6 first:** Vite proxy (`/api`, `/auth`, `ws: true`), same-origin client, cookie client, `UserSwitcher` via dev-login, 401 redirect; **then** A5 deletes `cors` and the expose header. A1: Dockerfile env + comment, compose pass-through, `deploy/README.md` and the pilot docs listed in §5.1. The `deploy/README.md` text lists: pilots build from source with `deploy/docker-compose.pilot.yml`; proxy pilots build from git tag `pre-auth` (made by the lead on the last `main` commit before PR 2); from PR 4 members who are not owners or auditors cannot export and must be added to `auditors:` | `X-User` in oidc mode → 401; dev on `0.0.0.0` without the switch refuses start; with the switch or the old flag warns; `Host: evil.test` → 421; `Host: localhost:5173` and `Host: 127.0.0.1:9000` → 200; WS without cookie → 401; cross-origin POST → 403; logout closes WS; `npm run dev` works through the proxy; the pilot image starts; `deploy/README.md` says: "Pilots build from source with `deploy/docker-compose.pilot.yml`. Proxy pilots build from the git tag `pre-auth` until PR 3." It also says that members who are not owners or auditors cannot export and must be added to `auditors:` |
 | 3 | A5 + A3 + A1 | OIDC login (§1.1–1.2 order, nonce in constant time, `return` check on the decoded path, 300/min limit with trusted proxies), `identities` + unbind helper, login gate at login and per request, secret rule, **roles** (§2.1: `403 viewer` on every room and proposal POST), rights from `owners.yaml` principals, `/api/me.layers` computed per request, groups + overage message, backup, solo start check, `ValidateUsers` group rule. A3: `internal/owners` `Principals` type, per-pipeline `owners:`, `auditors:`, `LayerOwner` display string. A1: fake IdP (`httptest`) in `internal/testenv`, `devctl identities unbind` | With the fake IdP: bad nonce/state → 401; callback without the login cookie → 400; replayed callback → 400; unmapped user → 403; viewer `POST …/control/grant` → `403 viewer`; viewer GET and WS → 200; group owner approves; `/api/me.layers` lists the group's layer; missing groups claim → 403 with the overage message; removed `users.yaml` user → 401 on the next request; solo + other owners → no start |
-| 4 | A5 + A6 | `params_hash` compute/store/check (§3.1 object, number rule), executor re-check, `action.executed` hash, approval identity columns, export access (approvers + auditors, no driver) + fields (§3.4). A6: show params + hash, send hash, solo confirm box | Changed params → `409`; DB-edited row → executor refuses; params with `2^53+1` → `400`; viewer export → `403`; member-only driver export → `403`; auditor export → 200; export row re-hashes to `params_hash` |
+| 4 | A5 + A6 | `params_hash` compute/store/check (§3.1 object, number rule), executor re-check, `action.executed` hash, approval identity columns, export access (approvers + auditors, no driver) + fields (§3.4). A6: show params + hash, send hash, solo confirm box | Changed params → `409`; DB-edited row → executor refuses; params with `2^53+1` → `400`; viewer export → `403`; member-only driver export → `403`; plain member (not owner, not auditor) export → `403`; auditor export → 200; export row re-hashes to `params_hash` |
 
-## 9. Decisions (founder)
+## 9. Decisions
 
-The critique recommended these defaults. They are written into this design; the founder confirms or changes them.
+Rows 1–6: the critique recommended these defaults. They are written into this design; the founder confirms or changes them.
 
 | # | Question | Proposed | Why |
 |---|---|---|---|
@@ -469,9 +477,19 @@ The critique recommended these defaults. They are written into this design; the 
 | 5 | New module `go-oidc` v3.21.0 | Yes | Hand-rolled JWKS/JWT checking is the riskier path; API verified; Apache-2.0. `jcs` is already in `go.mod` |
 | 6 | Scheduled export to storage outside the DB (§3.3) | **Not in the pilot.** Documented as a pilot-side cron (an auditor token calling the export route every N hours into write-once storage) | Needed only for pilots that must detect a DB admin; no pilot in the next 8 weeks asks for it; the route and hash header already exist, so nothing in the server has to change |
 
-## 10. Open questions / rejected (revision 3)
+Rows 7–9 are **lead decisions, 2026-10-13**. They answer the open questions that ended revision 3. They are final and
+are written into every section they touch.
 
-Each line is one critic item that is not applied as written, and why.
+| # | Question | Decision (lead, 2026-10-13) | Where |
+|---|---|---|---|
+| 7 | Keep `PIPEROOM_TRUSTED_PROXIES`? | **Kept.** Used only in `oidc` mode, for the `/auth/login` rate limit and the request log. Dev mode keys on `RemoteAddr`. The lead adds the config field in the PR 1 lead contract commit. | §1.1, §6, §8 (PR 1) |
+| 8 | Image tag `piperoom:pre-auth`? | **No image pipeline.** Pilots build from source with `deploy/docker-compose.pilot.yml`. Every mention of the image tag becomes a git tag `pre-auth` on the last `main` commit before PR 2. Proxy pilots build from tag `pre-auth` until PR 3. PR 2's `deploy/README.md` says so. | §5.4, §8 (PR 2), §10 |
+| 9 | Members who are not owners or auditors and export? | **Accepted.** They cannot export. To export, add them to `auditors:`. Said in §3.4, in PR 2's `deploy/README.md` text list (A1 scope) and in `docs/security/findings.md` F3. | §2.1, §3.4, §8 (PR 2, PR 4) |
+
+## 10. Rejected or narrowed (revision 3)
+
+Each line is one critic item that is not applied as written, and why. No open questions are left; the three that
+remained were decided by the lead on 2026-10-13 (§9 rows 7–9).
 
 - **Security S1, "control request/grant and room create need an `owners.yaml` principal of the room's pipeline":
   narrowed.** Those actions need the **member** role (§2.1), not an owner principal. Today every `users.yaml` user
@@ -480,12 +498,7 @@ Each line is one critic item that is not applied as written, and why.
   make `owners.yaml` the room-membership list, which it is not.
 - **Fit F1 option (a), "dev mode keeps `X-User` and `?user=` as fallbacks until PR 3": rejected for option (b).**
   With `POST /auth/dev-login {user}` any proxied user picks any name, so the proxy no longer controls identity. A
-  fallback would only look like protection. Proxy pilots stay on `piperoom:pre-auth` until PR 3 (§5.4).
+  fallback would only look like protection. Proxy pilots build from git tag `pre-auth` until PR 3 (§5.4).
 - **Fit nice-to-have, "drop the IP limit": not dropped, raised.** Without any per-IP limit one client can create one
   row per call with a fresh cookie each time. 300 per minute per client IP keeps that bounded without locking anyone
   out (§1.1).
-- **Open for the lead:** `PIPEROOM_TRUSTED_PROXIES` is a new config field only for the rate limit and the request
-  log. If the lead prefers fewer fields, the limit can key on `RemoteAddr` only and the pilot docs can say "behind a
-  proxy the limit is shared"; 300/min shared is still far above normal use.
-- **Open for the lead:** the `piperoom:pre-auth` tag assumes the image is built and pushed by A1's pipeline; if images
-  are built per pilot from source, the README says "build from the commit before PR 2" instead.
