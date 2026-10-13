@@ -16,6 +16,7 @@ import (
 	"piperoom/internal/tools/dbtools"
 	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/tools/runbooks"
+	"piperoom/internal/tools/similarincidents"
 )
 
 // errNoRecording is what the model sees when it calls a tool with an input the
@@ -55,6 +56,11 @@ func LiveTools() ([]tools.Tool, error) {
 	}
 	if err := runbooks.Register(reg); err != nil {
 		return nil, fmt.Errorf("evals: runbook tool definitions: %w", err)
+	}
+	// Definition only (no room store): scenarios record its answers, the
+	// harness never runs it. See similar_fixture_test.go.
+	if err := similarincidents.Register(reg, similarincidents.Deps{}); err != nil {
+		return nil, fmt.Errorf("evals: similar_incidents tool definition: %w", err)
 	}
 	return reg.All(), nil
 }
