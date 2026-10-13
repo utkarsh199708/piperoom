@@ -14,6 +14,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"piperoom/internal/events"
+	"piperoom/internal/jsonnum"
 	"piperoom/internal/tools"
 )
 
@@ -516,6 +517,29 @@ func (r *runner) emit(ctx context.Context, typ events.Type, payload any) {
 	}
 }
 
+// toolDataJSON marshals a tool's structured data for its tool_result event. A
+// number outside the double range (a NUMERIC column read back as 1e131072, a
+// metric of 1e-16384) is a valid JSON number, but jsonb refuses some of them
+// (SQLSTATE 22003, "value overflows numeric format") and the whole event would
+// be lost. Such numbers are written as strings holding their exact text, so the
+// event is kept and the value is still readable. The model never sees this
+// data; it reads the summary.
+func (r *runner) toolDataJSON(tool string, v any) json.RawMessage {
+	if v == nil {
+		return nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		r.log.Warn("agent: tool data marshal failed", "tool", tool, "err", err)
+		return nil
+	}
+	out, n := jsonnum.Quote(b)
+	if n > 0 {
+		r.log.Warn("agent: tool data had numbers outside the double range; kept them as strings", "tool", tool, "count", n)
+	}
+	return out
+}
+
 // stopErr maps a clean shutdown (context.Canceled or a closed inbox) to nil so
 // the room service does not treat a closed room as a failure.
 func stopErr(err error) error {
@@ -663,14 +687,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	res, err := entry.tool.Run(tctx, cleaned)
 	took := time.Since(start).Milliseconds()
 
-	var data json.RawMessage
-	if res.Data != nil {
-		if b, mErr := json.Marshal(res.Data); mErr == nil {
-			data = b
-		} else {
-			r.log.Warn("agent: tool data marshal failed", "tool", u.name, "err", mErr)
-		}
-	}
+	data := r.toolDataJSON(u.name, res.Data)
 
 	if err != nil {
 		msg := "error: " + err.Error()

@@ -168,7 +168,7 @@ func TestUnstorableAppendErrorIs400(t *testing.T) {
 	// this test feeds the store error directly to cover the SQLSTATE mapping that
 	// backs up the guard for anything else Postgres rejects.
 	body := json.RawMessage(`{"n":1}`)
-	for _, code := range []string{"22003", "22P02", "22P05", "22021"} {
+	for _, code := range []string{"22003", "22P05", "22021"} {
 		t.Run(code, func(t *testing.T) {
 			mem := memstore.New()
 			pgErr := &pgconn.PgError{Code: code, Message: "value overflows numeric format: 1e131072"}
@@ -189,15 +189,20 @@ func TestUnstorableAppendErrorIs400(t *testing.T) {
 		})
 	}
 
-	t.Run("other error stays a plain error", func(t *testing.T) {
-		boom := fmt.Errorf("store: insert event: %w", &pgconn.PgError{Code: "08006", Message: "connection failure"})
-		svc, _, _ := guardSetup(t, failAppendStore{Store: memstore.New(), err: boom})
-		_, _, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", body)
-		var re *room.Error
-		if err == nil || errors.As(err, &re) {
-			t.Fatalf("err = %v, want the plain store error", err)
-		}
-	})
+	// 22P02 is not a client-content error after the pre-checks: it means our own
+	// bug (a bad cast, malformed jsonb we built), so it stays a plain error that
+	// the HTTP layer logs and answers with a 500.
+	for name, code := range map[string]string{"connection failure": "08006", "invalid text representation": "22P02"} {
+		t.Run("other error stays a plain error: "+name, func(t *testing.T) {
+			boom := fmt.Errorf("store: insert event: %w", &pgconn.PgError{Code: code, Message: "boom"})
+			svc, _, _ := guardSetup(t, failAppendStore{Store: memstore.New(), err: boom})
+			_, _, err := svc.CreateRoomFromAlert(ctx, "lag", "sev2", "orders", body)
+			var re *room.Error
+			if err == nil || errors.As(err, &re) {
+				t.Fatalf("err = %v, want the plain store error", err)
+			}
+		})
+	}
 }
 
 // failAppendStore refuses to append room.created, as a real store would for a

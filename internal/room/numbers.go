@@ -6,57 +6,67 @@ import (
 	"strconv"
 
 	"github.com/gowebpki/jcs"
+
+	"piperoom/internal/jsonnum"
 )
 
-// numberChar reports whether c can be part of a JSON number token.
-func numberChar(c byte) bool {
-	return c >= '0' && c <= '9' || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E'
-}
+// maxExactSigDigits caps the significant digits of a number that is compared
+// exactly with big.Rat; a number with more is classified inexact. The exact
+// decimal expansion of any double has at most 767 significant digits, so 800
+// keeps every value a double can hold exactly. Significant digits are the
+// digits of the value without sign, leading zeros, trailing zeros or exponent,
+// so the count is the same before and after a jsonb round trip.
+const maxExactSigDigits = 800
 
-// scanNumbers calls fn for every number token in JSON text, outside strings,
-// with the token's [start, end) offsets. It is a tolerant scanner, not a
-// validator: text that is not valid JSON never makes it fail or panic, it only
-// may yield odd tokens, which callers ignore when they do not parse.
-func scanNumbers(raw []byte, fn func(start, end int)) {
-	for i := 0; i < len(raw); {
-		switch c := raw[i]; {
-		case c == '"':
-			i++
-			for i < len(raw) && raw[i] != '"' {
-				if raw[i] == '\\' {
-					i++
-				}
-				i++
-			}
-			i++ // closing quote
-		case c == '-' || c >= '0' && c <= '9':
-			j := i + 1
-			for j < len(raw) && numberChar(raw[j]) {
-				j++
-			}
-			fn(i, j)
-			i = j
-		default:
+// significantForm splits a finite number token into its significant digits
+// (no sign, no leading zeros, no trailing zeros) and a decimal exponent, so the
+// value is digits * 10^exp10. ok is false when the token is not a plain JSON
+// number or its exponent does not fit an int. The work is linear in the token
+// length and allocates at most that much; it never builds a big number.
+func significantForm(tok string) (digits string, exp10 int, ok bool) {
+	i := 0
+	if i < len(tok) && (tok[i] == '-' || tok[i] == '+') {
+		i++
+	}
+	start := i
+	for i < len(tok) && tok[i] >= '0' && tok[i] <= '9' {
+		i++
+	}
+	intPart := tok[start:i]
+	fracPart := ""
+	if i < len(tok) && tok[i] == '.' {
+		i++
+		fs := i
+		for i < len(tok) && tok[i] >= '0' && tok[i] <= '9' {
 			i++
 		}
+		fracPart = tok[fs:i]
 	}
-}
-
-// maxExactTokenLen caps the length of a number token that is compared exactly
-// with big.Rat. A longer token is classified inexact.
-const maxExactTokenLen = 1000
-
-// mantissaIsZero reports whether the digits before any exponent are all zero.
-func mantissaIsZero(tok string) bool {
-	for i := 0; i < len(tok); i++ {
-		switch c := tok[i]; {
-		case c == 'e' || c == 'E':
-			return true
-		case c >= '1' && c <= '9':
-			return false
+	exp := 0
+	if i < len(tok) && (tok[i] == 'e' || tok[i] == 'E') {
+		n, err := strconv.Atoi(tok[i+1:])
+		if err != nil {
+			return "", 0, false
 		}
+		exp = n
+		i = len(tok)
 	}
-	return true
+	if i != len(tok) || intPart == "" && fracPart == "" {
+		return "", 0, false
+	}
+	all := intPart + fracPart
+	lead := 0
+	for lead < len(all) && all[lead] == '0' {
+		lead++
+	}
+	end := len(all)
+	for end > lead && all[end-1] == '0' {
+		end--
+	}
+	if lead == end {
+		return "0", 0, true // zero in any spelling
+	}
+	return all[lead:end], exp - len(fracPart) + (len(all) - end), true
 }
 
 // numberClass says how a number token fares as a float64.
@@ -87,20 +97,32 @@ func classifyNumber(tok string) numberClass {
 	}
 	if f == 0 {
 		// Zero, or a non-zero value that underflowed to zero.
-		if mantissaIsZero(tok) {
+		if jsonnum.MantissaIsZero(tok) {
 			return numberExact
 		}
 		return numberInexact
 	}
-	if len(tok) > maxExactTokenLen {
-		// A double's exact decimal expansion is at most about 770 characters,
-		// and JCS writes far fewer; a longer token is never written back as
-		// the same text and is not worth the arithmetic.
+	// The cap is on significant digits, not on token length. jsonb keeps the
+	// decimal scale, so the same value comes back with a different length
+	// (1.<700 zeros>e-320 is 707 characters in and 1022 after the round trip),
+	// and a length cap would class one value two ways. Significant digits are
+	// the same for every spelling of a value.
+	digits, exp10, ok := significantForm(tok)
+	if !ok || len(digits) > maxExactSigDigits {
+		// A double's exact decimal expansion has at most 767 significant
+		// digits; with more, the token is never the same value as any double.
 		return numberInexact
 	}
-	want, ok := new(big.Rat).SetString(tok)
+	// want = digits * 10^exp10. The token is a finite non-zero double, so
+	// 5e-324 <= want <= 1.8e308 and digits has at most maxExactSigDigits
+	// digits: exp10 is between about -1125 and 308, so building 10^|exp10| is
+	// cheap whatever the token's length or spelling.
+	want, ok := new(big.Rat).SetString(digits + "e" + strconv.Itoa(exp10))
 	if !ok {
 		return numberInexact // too large an exponent to model; treat as not exact
+	}
+	if f < 0 {
+		want.Neg(want)
 	}
 	written, err := jcs.NumberToJSON(f)
 	if err != nil {
@@ -118,7 +140,7 @@ func classifyNumber(tok string) numberClass {
 // but the audit export's canonical form cannot represent them as numbers.
 func hasOutOfRangeNumber(raw []byte) bool {
 	found := false
-	scanNumbers(raw, func(s, e int) {
+	jsonnum.Scan(raw, func(s, e int) {
 		if !found && classifyNumber(string(raw[s:e])) == numberOutOfRange {
 			found = true
 		}
@@ -133,7 +155,7 @@ func hasOutOfRangeNumber(raw []byte) bool {
 func hashForm(exact []byte) (out []byte, inexact int) {
 	out = make([]byte, 0, len(exact)+8)
 	last := 0
-	scanNumbers(exact, func(s, e int) {
+	jsonnum.Scan(exact, func(s, e int) {
 		switch classifyNumber(string(exact[s:e])) {
 		case numberInexact:
 			inexact++
