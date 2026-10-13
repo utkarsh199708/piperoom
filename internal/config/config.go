@@ -127,6 +127,12 @@ type Config struct {
 	ShadowGrace       string // PIPEROOM_SHADOW_GRACE: Go duration the run may keep going after close; default 0 = cancel at close
 	ShadowTokenBudget string // PIPEROOM_SHADOW_TOKEN_BUDGET: tokens per shadow room; default 500000; "0" = use PIPEROOM_ROOM_TOKEN_BUDGET (there is no uncapped shadow run)
 	ShadowMaxTurns    string // PIPEROOM_SHADOW_MAX_TURNS: model turns per shadow run; default 20
+
+	// Tenancy (docs/design/tenancy.md). Tenants, their members and each
+	// pipeline's connections live in owners.yaml; this only states which
+	// model the operator expects, so a lost tenants: block stops the start
+	// instead of silently showing every room to everyone.
+	TenancyMode string // PIPEROOM_TENANCY_MODE: auto (default) | single | teams
 }
 
 // Load reads the environment and applies dev defaults.
@@ -215,7 +221,35 @@ func Load() Config {
 		ShadowGrace:       get("PIPEROOM_SHADOW_GRACE", DefaultShadowGrace),
 		ShadowTokenBudget: get("PIPEROOM_SHADOW_TOKEN_BUDGET", DefaultShadowTokenBudget),
 		ShadowMaxTurns:    get("PIPEROOM_SHADOW_MAX_TURNS", DefaultShadowMaxTurns),
+
+		TenancyMode: get("PIPEROOM_TENANCY_MODE", TenancyAuto),
 	}
+}
+
+// Tenancy modes (docs/design/tenancy.md section 4).
+const (
+	// TenancyAuto follows owners.yaml: a tenants: block turns the tenant
+	// filter on (teams); no block keeps one tenant (single).
+	TenancyAuto = "auto"
+	// TenancySingle requires owners.yaml to have no tenants: block. Every
+	// signed-in user sees every room, as before tenancy.
+	TenancySingle = "single"
+	// TenancyTeams requires a tenants: block. A user sees only the rooms of
+	// pipelines in their tenants.
+	TenancyTeams = "teams"
+)
+
+// ParseTenancyMode validates PIPEROOM_TENANCY_MODE. Empty means auto. The
+// caller compares the result with owners.yaml; this function does no I/O.
+func ParseTenancyMode(c Config) (string, error) {
+	m := strings.ToLower(strings.TrimSpace(c.TenancyMode))
+	switch m {
+	case "":
+		return TenancyAuto, nil
+	case TenancyAuto, TenancySingle, TenancyTeams:
+		return m, nil
+	}
+	return "", fmt.Errorf("config: PIPEROOM_TENANCY_MODE=%q: want auto, single or teams", c.TenancyMode)
 }
 
 // Login defaults (docs/design/auth.md §6).
