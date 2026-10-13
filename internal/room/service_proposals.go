@@ -40,10 +40,29 @@ func checkPlanText(field, text string) error {
 	return nil
 }
 
+// sanitizeProposal applies the agent text policy to every model-written field
+// of a proposal. It copies the steps, so the caller's slice is not changed.
+func sanitizeProposal(p events.ProposalCreatedPayload) events.ProposalCreatedPayload {
+	p.Title = sanitizeAgentText(p.Title)
+	p.Risk = sanitizeAgentText(p.Risk)
+	p.Rollback = sanitizeAgentText(p.Rollback)
+	steps := make([]events.ProposalStep, len(p.Steps))
+	for i, st := range p.Steps {
+		st.Action = sanitizeAgentText(st.Action)
+		st.Layer = sanitizeAgentText(st.Layer)
+		st.Description = sanitizeAgentText(st.Description)
+		st.Params = store.SanitizeJSON(st.Params)
+		steps[i] = st
+	}
+	p.Steps = steps
+	return p
+}
+
 // CreateProposal validates every step against the actions registry and its
 // scope, derives the required approval layers from the step layers, and stores
 // the proposal (and its proposal.created event). It never executes anything.
 func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor) (string, error) {
+	p = sanitizeProposal(p)
 	if len(p.Steps) == 0 {
 		return "", validation("proposal requires at least one step")
 	}
@@ -140,6 +159,9 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 // is approved the executor runs the steps in order (asynchronously, on the
 // service lifetime context, not the request context).
 func (s *Service) ApproveProposal(ctx context.Context, user User, proposalID, layer string) (events.Event, error) {
+	if err := rejectUnstorable(layer); err != nil {
+		return events.Event{}, err
+	}
 	var prow store.ProposalRow
 	var ev events.Event
 
@@ -201,6 +223,9 @@ func (s *Service) ApproveProposal(ctx context.Context, user User, proposalID, la
 
 // RejectProposal records a layer owner's rejection.
 func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, layer, reason string) (events.Event, error) {
+	if err := rejectUnstorable(layer, reason); err != nil {
+		return events.Event{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

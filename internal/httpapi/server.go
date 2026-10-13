@@ -271,6 +271,13 @@ func (s *Server) writeErr(w http.ResponseWriter, err error) {
 		writeError(w, re.Status, re.Code, re.Msg)
 		return
 	}
+	// The room service refuses unstorable text before it writes. If one gets
+	// through (a path with no check yet), it is still the client's text and a
+	// 400, never a 500. The message does not quote the text.
+	if errors.Is(err, store.ErrUnstorable) {
+		writeError(w, http.StatusBadRequest, "validation", "text contains characters that cannot be stored")
+		return
+	}
 	s.log.Error("http: request failed", "err", err)
 	writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 }

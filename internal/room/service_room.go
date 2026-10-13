@@ -26,7 +26,7 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 		return RoomSnapshot{}, validation("title and pipeline_id are required")
 	}
 	// The title is client text stored in a Postgres text column and in jsonb.
-	if err := checkTextStorable("title", title); err != nil {
+	if err := rejectUnstorable(title); err != nil {
 		return RoomSnapshot{}, err
 	}
 	// The shape check applies even without an owners config (demo, unit
@@ -176,7 +176,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	if err := checkJSONBStorable(raw); err != nil {
 		return RoomSnapshot{}, false, err
 	}
-	if err := checkTextStorable("title", title); err != nil {
+	if err := rejectUnstorable(title); err != nil {
 		return RoomSnapshot{}, false, err
 	}
 	if title == "" {
@@ -437,6 +437,9 @@ func (s *Service) Events(ctx context.Context, roomID string, afterSeq int64, lim
 
 // CloseRoom closes the room (driver only) and stops the agent.
 func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution string) (events.Event, error) {
+	if err := rejectUnstorable(resolution); err != nil {
+		return events.Event{}, err
+	}
 	s.mu.Lock()
 	st, err := s.getStateLocked(ctx, roomID)
 	if err != nil {

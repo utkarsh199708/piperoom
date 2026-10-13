@@ -22,9 +22,6 @@ import (
 // runaway caller must not fill the event log.
 const maxNoteBytes = 4096
 
-// replacementChar stands in for bytes a note cannot store (U+FFFD).
-const replacementChar = string(rune(0xFFFD))
-
 // hookDedupKey turns a room's alert index key ("<pipeline>|<key>") back into the
 // key the alert source gave, which is what OnRoomClosed passes and what
 // LastRoomForKey takes. A room with no key gives "".
@@ -129,7 +126,7 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 // that the stored note, ellipsis included, is at most 4096 bytes, on a UTF-8
 // boundary.
 func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {
-	text = strings.ReplaceAll(strings.ToValidUTF8(text, replacementChar), string(rune(0)), replacementChar)
+	text = sanitizeAgentText(text)
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return validation("note text is required")
@@ -142,7 +139,7 @@ func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {
 		text = text[:cut] + "…"
 	}
 	// Backstop: the steps above leave nothing for this to refuse.
-	if err := checkTextStorable("note", text); err != nil {
+	if err := rejectUnstorable(text); err != nil {
 		return err
 	}
 	s.mu.Lock()

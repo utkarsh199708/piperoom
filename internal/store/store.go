@@ -187,6 +187,9 @@ func (s *PG) Close() {
 // CreateRoom inserts the room row with last_seq 0. The room.created event is
 // appended afterwards by the room service.
 func (s *PG) CreateRoom(ctx context.Context, r Room) error {
+	if err := CheckText(r.ID, r.Title, r.Severity, r.PipelineID, r.Status, r.DriverID, r.DriverName); err != nil {
+		return fmt.Errorf("store: create room: %w", err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	_, err := s.pool.Exec(ctx,
@@ -194,13 +197,16 @@ func (s *PG) CreateRoom(ctx context.Context, r Room) error {
 		 VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9)`,
 		r.ID, r.Title, r.Severity, r.PipelineID, r.Status, r.OpenedAt, nullString(r.DriverID), nullString(r.DriverName), r.DriverLeaseUntil)
 	if err != nil {
-		return fmt.Errorf("store: create room %s: %w", r.ID, err)
+		return fmt.Errorf("store: create room %s: %w", r.ID, classify(err))
 	}
 	return nil
 }
 
 // GetRoom returns a room row or ErrNotFound.
 func (s *PG) GetRoom(ctx context.Context, id string) (Room, error) {
+	if CheckText(id) != nil {
+		return Room{}, fmt.Errorf("store: get room: %w", ErrNotFound) // no such id can be stored
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	var r Room
@@ -270,6 +276,9 @@ func (s *PG) LastRoomByDedupKey(ctx context.Context, dedupKey string) (Room, err
 	if dedupKey == "" {
 		return Room{}, fmt.Errorf("store: last room by dedup key: empty key: %w", ErrNotFound)
 	}
+	if CheckText(dedupKey) != nil {
+		return Room{}, fmt.Errorf("store: last room by dedup key: %w", ErrNotFound)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	var r Room
@@ -302,19 +311,25 @@ func (s *PG) LastRoomByDedupKey(ctx context.Context, dedupKey string) (Room, err
 // UpdateDriver records the current driver and lease on the rooms row (kept in
 // sync with the event log; the log remains the source of truth).
 func (s *PG) UpdateDriver(ctx context.Context, id, driverID, driverName string, leaseUntil time.Time) error {
+	if err := CheckText(id, driverID, driverName); err != nil {
+		return fmt.Errorf("store: update driver: %w", err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	_, err := s.pool.Exec(ctx,
 		`UPDATE rooms SET driver_id = $2, driver_name = $3, driver_lease_until = $4 WHERE id = $1`,
 		id, driverID, driverName, leaseUntil)
 	if err != nil {
-		return fmt.Errorf("store: update driver %s: %w", id, err)
+		return fmt.Errorf("store: update driver %s: %w", id, classify(err))
 	}
 	return nil
 }
 
 // CloseRoom marks a room closed.
 func (s *PG) CloseRoom(ctx context.Context, id string, closedAt time.Time) error {
+	if err := CheckText(id); err != nil {
+		return fmt.Errorf("store: close room: %w", err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	_, err := s.pool.Exec(ctx,
@@ -364,6 +379,12 @@ func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor e
 	if err != nil {
 		return events.Event{}, fmt.Errorf("store: marshal actor: %w", err)
 	}
+	// Before the transaction: a refused event must not reserve a seq or leave
+	// a gap (the INSERT failing would roll the seq back too, but a check here
+	// costs no round trip).
+	if err := CheckAppend(roomID, typ, payloadJSON, actorJSON); err != nil {
+		return events.Event{}, fmt.Errorf("store: append to %s: %w", roomID, err)
+	}
 	at := s.now().UTC()
 	var seq int64
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
@@ -377,7 +398,7 @@ func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor e
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO room_events (room_id, seq, type, actor, payload, at) VALUES ($1, $2, $3, $4, $5, $6)`,
 			roomID, seq, string(typ), actorJSON, payloadJSON, at); err != nil {
-			return fmt.Errorf("store: insert event %s/%d: %w", roomID, seq, err)
+			return fmt.Errorf("store: insert event %s/%d: %w", roomID, seq, classify(err))
 		}
 		if _, err := tx.Exec(ctx,
 			`SELECT pg_notify('room_events', $1)`, roomID+":"+strconv.FormatInt(seq, 10)); err != nil {
@@ -471,6 +492,9 @@ func (s *PG) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-ch
 
 // CreateProposal stores a proposal for cross-restart lookup.
 func (s *PG) CreateProposal(ctx context.Context, p ProposalRow) error {
+	if err := p.Check(); err != nil {
+		return fmt.Errorf("store: create proposal %s: %w", p.ProposalID, err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	layers, err := json.Marshal(p.RequiredLayers)
@@ -481,7 +505,7 @@ func (s *PG) CreateProposal(ctx context.Context, p ProposalRow) error {
 		`INSERT INTO proposals (proposal_id, room_id, title, status, required_layers, steps, risk, rollback)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		p.ProposalID, p.RoomID, p.Title, p.Status, layers, p.Steps, p.Risk, p.Rollback); err != nil {
-		return fmt.Errorf("store: create proposal %s: %w", p.ProposalID, err)
+		return fmt.Errorf("store: create proposal %s: %w", p.ProposalID, classify(err))
 	}
 	return nil
 }
@@ -500,6 +524,9 @@ func (s *PG) DeleteProposal(ctx context.Context, proposalID string) error {
 
 // GetProposal returns a proposal row or ErrNotFound.
 func (s *PG) GetProposal(ctx context.Context, proposalID string) (ProposalRow, error) {
+	if CheckText(proposalID) != nil {
+		return ProposalRow{}, fmt.Errorf("store: proposal: %w", ErrNotFound)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	var p ProposalRow
@@ -524,6 +551,9 @@ func (s *PG) GetProposal(ctx context.Context, proposalID string) (ProposalRow, e
 // RecordApproval records one decision on a proposal layer. A second decision
 // on the same layer returns ErrAlreadyExists.
 func (s *PG) RecordApproval(ctx context.Context, proposalID, layer, decision, reason string) error {
+	if err := CheckText(proposalID, layer, decision, reason); err != nil {
+		return fmt.Errorf("store: record approval %s/%s: %w", proposalID, layer, err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	tag, err := s.pool.Exec(ctx,
@@ -531,7 +561,7 @@ func (s *PG) RecordApproval(ctx context.Context, proposalID, layer, decision, re
 		 ON CONFLICT (proposal_id, layer) DO NOTHING`,
 		proposalID, layer, decision, reason)
 	if err != nil {
-		return fmt.Errorf("store: record approval %s/%s: %w", proposalID, layer, err)
+		return fmt.Errorf("store: record approval %s/%s: %w", proposalID, layer, classify(err))
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("store: approval %s/%s: %w", proposalID, layer, ErrAlreadyExists)
@@ -555,6 +585,9 @@ func (s *PG) DeleteApproval(ctx context.Context, proposalID, layer string) error
 // StartProposalStep marks a step as started so it never runs twice. A second
 // call for the same (proposal, step) returns ErrStepOrder.
 func (s *PG) StartProposalStep(ctx context.Context, proposalID string, stepIndex int) error {
+	if err := CheckText(proposalID); err != nil {
+		return fmt.Errorf("store: start step %s/%d: %w", proposalID, stepIndex, err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	tag, err := s.pool.Exec(ctx,
@@ -574,6 +607,9 @@ func (s *PG) StartProposalStep(ctx context.Context, proposalID string, stepIndex
 // Only a step in state "started" can be finished; finishing a step that was
 // never started (or finishing it twice) returns ErrStepOrder.
 func (s *PG) FinishProposalStep(ctx context.Context, proposalID string, stepIndex int, status, output string) error {
+	if err := CheckText(proposalID, status, output); err != nil {
+		return fmt.Errorf("store: finish step %s/%d: %w", proposalID, stepIndex, err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	tag, err := s.pool.Exec(ctx,
@@ -581,7 +617,7 @@ func (s *PG) FinishProposalStep(ctx context.Context, proposalID string, stepInde
 		 WHERE proposal_id = $1 AND step_index = $2 AND status = 'started'`,
 		proposalID, stepIndex, status, output)
 	if err != nil {
-		return fmt.Errorf("store: finish step %s/%d: %w", proposalID, stepIndex, err)
+		return fmt.Errorf("store: finish step %s/%d: %w", proposalID, stepIndex, classify(err))
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("store: step %s/%d is not started: %w", proposalID, stepIndex, ErrStepOrder)
@@ -591,6 +627,9 @@ func (s *PG) FinishProposalStep(ctx context.Context, proposalID string, stepInde
 
 // SetProposalStatus updates a proposal's status (executed / failed / rejected).
 func (s *PG) SetProposalStatus(ctx context.Context, proposalID, status string) error {
+	if err := CheckText(proposalID, status); err != nil {
+		return fmt.Errorf("store: set proposal status %s: %w", proposalID, err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	if _, err := s.pool.Exec(ctx,
@@ -604,13 +643,16 @@ func (s *PG) SetProposalStatus(ctx context.Context, proposalID, status string) e
 
 // CreateSuggestion stores a pending suggestion.
 func (s *PG) CreateSuggestion(ctx context.Context, r SuggestionRow) error {
+	if err := r.Check(); err != nil {
+		return fmt.Errorf("store: create suggestion %s: %w", r.SuggestionID, err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO suggestions (suggestion_id, room_id, from_id, from_name, text, status)
 		 VALUES ($1, $2, $3, $4, $5, 'pending')`,
 		r.SuggestionID, r.RoomID, r.FromID, r.FromName, r.Text); err != nil {
-		return fmt.Errorf("store: create suggestion %s: %w", r.SuggestionID, err)
+		return fmt.Errorf("store: create suggestion %s: %w", r.SuggestionID, classify(err))
 	}
 	return nil
 }
@@ -629,6 +671,9 @@ func (s *PG) DeleteSuggestion(ctx context.Context, suggestionID string) error {
 
 // GetSuggestion returns a suggestion row or ErrNotFound.
 func (s *PG) GetSuggestion(ctx context.Context, suggestionID string) (SuggestionRow, error) {
+	if CheckText(suggestionID) != nil {
+		return SuggestionRow{}, fmt.Errorf("store: suggestion: %w", ErrNotFound)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	var r SuggestionRow
@@ -646,6 +691,9 @@ func (s *PG) GetSuggestion(ctx context.Context, suggestionID string) (Suggestion
 
 // SetSuggestionStatus marks a suggestion sent.
 func (s *PG) SetSuggestionStatus(ctx context.Context, suggestionID, status string) error {
+	if err := CheckText(suggestionID, status); err != nil {
+		return fmt.Errorf("store: set suggestion status %s: %w", suggestionID, err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	if _, err := s.pool.Exec(ctx,
@@ -659,13 +707,16 @@ func (s *PG) SetSuggestionStatus(ctx context.Context, suggestionID, status strin
 
 // CreateHandoff stores a pending handoff.
 func (s *PG) CreateHandoff(ctx context.Context, h HandoffRow) error {
+	if err := h.Check(); err != nil {
+		return fmt.Errorf("store: create handoff %s: %w", h.HandoffID, err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	if _, err := s.pool.Exec(ctx,
 		`INSERT INTO handoffs (handoff_id, room_id, from_id, from_name, to_id, to_name, status, summary, stay_as_watcher)
 		 VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)`,
 		h.HandoffID, h.RoomID, h.FromID, h.FromName, h.ToID, h.ToName, h.Summary, h.StayAsWatcher); err != nil {
-		return fmt.Errorf("store: create handoff %s: %w", h.HandoffID, err)
+		return fmt.Errorf("store: create handoff %s: %w", h.HandoffID, classify(err))
 	}
 	return nil
 }
@@ -684,6 +735,9 @@ func (s *PG) DeleteHandoff(ctx context.Context, handoffID string) error {
 
 // GetHandoff returns a handoff row or ErrNotFound.
 func (s *PG) GetHandoff(ctx context.Context, handoffID string) (HandoffRow, error) {
+	if CheckText(handoffID) != nil {
+		return HandoffRow{}, fmt.Errorf("store: handoff: %w", ErrNotFound)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	var h HandoffRow
@@ -703,6 +757,9 @@ func (s *PG) GetHandoff(ctx context.Context, handoffID string) (HandoffRow, erro
 
 // SetHandoffStatus marks a handoff accepted or voided.
 func (s *PG) SetHandoffStatus(ctx context.Context, handoffID, status string) error {
+	if err := CheckText(handoffID, status); err != nil {
+		return fmt.Errorf("store: set handoff status %s: %w", handoffID, err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	if _, err := s.pool.Exec(ctx,
@@ -714,6 +771,9 @@ func (s *PG) SetHandoffStatus(ctx context.Context, handoffID, status string) err
 
 // VoidHandoffs voids every pending handoff in a room except the accepted one.
 func (s *PG) VoidHandoffs(ctx context.Context, roomID, exceptHandoffID string) error {
+	if err := CheckText(roomID, exceptHandoffID); err != nil {
+		return fmt.Errorf("store: void handoffs %s: %w", roomID, err)
+	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	if _, err := s.pool.Exec(ctx,

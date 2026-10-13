@@ -74,6 +74,14 @@ func (s *Store) Append(ctx context.Context, roomID string, typ events.Type, acto
 	if err != nil {
 		return events.Event{}, fmt.Errorf("memstore: marshal payload: %w", err)
 	}
+	actorJSON, err := json.Marshal(actor)
+	if err != nil {
+		return events.Event{}, fmt.Errorf("memstore: marshal actor: %w", err)
+	}
+	// Same pre-check as the Postgres store, before a seq is assigned.
+	if err := store.CheckAppend(roomID, typ, raw, actorJSON); err != nil {
+		return events.Event{}, fmt.Errorf("memstore: append to %s: %w", roomID, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	log, ok := s.rooms[roomID]
@@ -211,6 +219,9 @@ func (s *Store) CreateRoom(ctx context.Context, r store.Room) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := store.CheckText(r.ID, r.Title, r.Severity, r.PipelineID, r.Status, r.DriverID, r.DriverName); err != nil {
+		return fmt.Errorf("memstore: create room: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.rooms[r.ID]; ok {
@@ -307,6 +318,9 @@ func createdWithKey(evs []events.Event, dedupKey string) bool {
 
 // UpdateDriver records the current driver on the room row.
 func (s *Store) UpdateDriver(ctx context.Context, id, driverID, driverName string, leaseUntil time.Time) error {
+	if err := store.CheckText(id, driverID, driverName); err != nil {
+		return fmt.Errorf("memstore: update driver: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	log, ok := s.rooms[id]
@@ -321,6 +335,9 @@ func (s *Store) UpdateDriver(ctx context.Context, id, driverID, driverName strin
 
 // CloseRoom marks a room closed.
 func (s *Store) CloseRoom(ctx context.Context, id string, closedAt time.Time) error {
+	if err := store.CheckText(id); err != nil {
+		return fmt.Errorf("memstore: close room: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	log, ok := s.rooms[id]
@@ -336,6 +353,9 @@ func (s *Store) CloseRoom(ctx context.Context, id string, closedAt time.Time) er
 
 // CreateProposal stores a proposal.
 func (s *Store) CreateProposal(ctx context.Context, p store.ProposalRow) error {
+	if err := p.Check(); err != nil {
+		return fmt.Errorf("memstore: create proposal %s: %w", p.ProposalID, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.proposals[p.ProposalID]; ok {
@@ -367,6 +387,9 @@ func (s *Store) GetProposal(ctx context.Context, proposalID string) (store.Propo
 
 // RecordApproval enforces one decision per layer.
 func (s *Store) RecordApproval(ctx context.Context, proposalID, layer, decision, reason string) error {
+	if err := store.CheckText(proposalID, layer, decision, reason); err != nil {
+		return fmt.Errorf("memstore: approval %s/%s: %w", proposalID, layer, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := proposalID + "\x00" + layer
@@ -388,6 +411,9 @@ func (s *Store) DeleteApproval(ctx context.Context, proposalID, layer string) er
 // StartProposalStep marks a step started; a second call returns
 // store.ErrStepOrder, exactly like the Postgres store.
 func (s *Store) StartProposalStep(ctx context.Context, proposalID string, stepIndex int) error {
+	if err := store.CheckText(proposalID); err != nil {
+		return fmt.Errorf("memstore: start step %s/%d: %w", proposalID, stepIndex, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := fmt.Sprintf("%s\x00%d", proposalID, stepIndex)
@@ -401,6 +427,9 @@ func (s *Store) StartProposalStep(ctx context.Context, proposalID string, stepIn
 // FinishProposalStep records the final state of a step. Only a "started" step
 // can be finished; anything else returns store.ErrStepOrder.
 func (s *Store) FinishProposalStep(ctx context.Context, proposalID string, stepIndex int, status, output string) error {
+	if err := store.CheckText(proposalID, status, output); err != nil {
+		return fmt.Errorf("memstore: finish step %s/%d: %w", proposalID, stepIndex, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := fmt.Sprintf("%s\x00%d", proposalID, stepIndex)
@@ -413,6 +442,9 @@ func (s *Store) FinishProposalStep(ctx context.Context, proposalID string, stepI
 
 // SetProposalStatus updates a proposal's status.
 func (s *Store) SetProposalStatus(ctx context.Context, proposalID, status string) error {
+	if err := store.CheckText(proposalID, status); err != nil {
+		return fmt.Errorf("memstore: set proposal status %s: %w", proposalID, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.proposals[proposalID]
@@ -437,6 +469,9 @@ func (s *Store) ProposalStepStatus(proposalID string, stepIndex int) string {
 
 // CreateSuggestion stores a pending suggestion.
 func (s *Store) CreateSuggestion(ctx context.Context, r store.SuggestionRow) error {
+	if err := r.Check(); err != nil {
+		return fmt.Errorf("memstore: create suggestion %s: %w", r.SuggestionID, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.suggestions[r.SuggestionID]; ok {
@@ -469,6 +504,9 @@ func (s *Store) GetSuggestion(ctx context.Context, suggestionID string) (store.S
 
 // SetSuggestionStatus marks a suggestion sent.
 func (s *Store) SetSuggestionStatus(ctx context.Context, suggestionID, status string) error {
+	if err := store.CheckText(suggestionID, status); err != nil {
+		return fmt.Errorf("memstore: set suggestion status %s: %w", suggestionID, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	r, ok := s.suggestions[suggestionID]
@@ -483,6 +521,9 @@ func (s *Store) SetSuggestionStatus(ctx context.Context, suggestionID, status st
 
 // CreateHandoff stores a pending handoff.
 func (s *Store) CreateHandoff(ctx context.Context, h store.HandoffRow) error {
+	if err := h.Check(); err != nil {
+		return fmt.Errorf("memstore: create handoff %s: %w", h.HandoffID, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.handoffs[h.HandoffID]; ok {
@@ -515,6 +556,9 @@ func (s *Store) GetHandoff(ctx context.Context, handoffID string) (store.Handoff
 
 // SetHandoffStatus marks a handoff accepted or voided.
 func (s *Store) SetHandoffStatus(ctx context.Context, handoffID, status string) error {
+	if err := store.CheckText(handoffID, status); err != nil {
+		return fmt.Errorf("memstore: set handoff status %s: %w", handoffID, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	h, ok := s.handoffs[handoffID]
@@ -527,6 +571,9 @@ func (s *Store) SetHandoffStatus(ctx context.Context, handoffID, status string) 
 
 // VoidHandoffs voids every pending handoff in a room except the accepted one.
 func (s *Store) VoidHandoffs(ctx context.Context, roomID, exceptHandoffID string) error {
+	if err := store.CheckText(roomID, exceptHandoffID); err != nil {
+		return fmt.Errorf("memstore: void handoffs %s: %w", roomID, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, h := range s.handoffs {
