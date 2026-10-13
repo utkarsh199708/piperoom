@@ -91,7 +91,7 @@ func TestMeAndAuth(t *testing.T) {
 	}
 	body := decode[map[string]any](t, resp)
 	errObj := body["error"].(map[string]any)
-	if errObj["code"] != "unauthenticated" {
+	if errObj["code"] != "session_expired" {
 		t.Fatalf("bad error code: %+v", errObj)
 	}
 
@@ -270,7 +270,11 @@ func TestEveryRouteRequiresXUser(t *testing.T) {
 				t.Fatalf("%s %s (user %q): want 401, got %d", rt.method, rt.path, user, resp.StatusCode)
 			}
 			body := decode[map[string]any](t, resp)
-			if body["error"].(map[string]any)["code"] != "unauthenticated" {
+			wantCode := "unauthenticated"
+			if user == "" {
+				wantCode = "session_expired" // no session at all: the web app shows the dev picker
+			}
+			if body["error"].(map[string]any)["code"] != wantCode {
 				t.Fatalf("%s %s: bad envelope %+v", rt.method, rt.path, body)
 			}
 		}

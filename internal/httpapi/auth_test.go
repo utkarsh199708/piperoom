@@ -193,8 +193,15 @@ func TestXUserWithoutCookieWorks(t *testing.T) {
 	wantStatus(t, resp, http.StatusOK)
 	resp = e.do(t, http.MethodGet, "/api/me", "")
 	wantStatus(t, resp, http.StatusUnauthorized)
-	if b := readErr(t, resp); b.Error.Code != "unauthenticated" {
-		t.Fatalf("no credentials: code %q, want unauthenticated", b.Error.Code)
+	// No cookie and no X-User: the web app shows the dev picker on this code.
+	if b := readErr(t, resp); b.Error.Code != "session_expired" || b.Error.AuthMode != "dev" {
+		t.Fatalf("no credentials: %+v, want session_expired with auth_mode dev", b.Error)
+	}
+	// An X-User that names nobody (a curl typo) stays unauthenticated.
+	resp = e.do(t, http.MethodGet, "/api/me", "", "X-User: nobody")
+	wantStatus(t, resp, http.StatusUnauthorized)
+	if b := readErr(t, resp); b.Error.Code != "unauthenticated" || b.Error.AuthMode != "" {
+		t.Fatalf("unknown X-User: %+v, want unauthenticated without auth_mode", b.Error)
 	}
 }
 
@@ -264,10 +271,77 @@ func TestXForwardedForAloneChangesNothing(t *testing.T) {
 	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", xff, "X-User: arjun"), http.StatusOK)
 	resp := e.do(t, http.MethodGet, "/api/me", "", xff)
 	wantStatus(t, resp, http.StatusUnauthorized)
-	if b := readErr(t, resp); b.Error.Code != "unauthenticated" {
+	if b := readErr(t, resp); b.Error.Code != "session_expired" {
 		t.Fatalf("code = %q", b.Error.Code)
 	}
 	wantStatus(t, e.do(t, http.MethodPost, "/auth/dev-login", `{"user":"meera"}`, xff), http.StatusOK)
+}
+
+// Dev mode, no cookie, no X-User: 401 session_expired with auth_mode dev, so a
+// fresh browser gets the picker. An empty X-User counts as none.
+func TestDevNoCredentialsIsSessionExpiredWithAuthMode(t *testing.T) {
+	e := newAuthEnv(t)
+	for _, hdr := range [][]string{nil, {"X-User: "}} {
+		resp := e.do(t, http.MethodGet, "/api/me", "", hdr...)
+		wantStatus(t, resp, http.StatusUnauthorized)
+		b := readErr(t, resp)
+		if b.Error.Code != "session_expired" || b.Error.AuthMode != "dev" {
+			t.Fatalf("headers %v: %+v, want session_expired with auth_mode dev", hdr, b.Error)
+		}
+	}
+}
+
+// §5.2(b) with several X-User values: a proxy that APPENDS its own header
+// leaves [client value, proxy value]. Reading only the first would let
+// [priya, bob] pass as priya.
+func TestMultipleXUserValuesAreProxyIdentity(t *testing.T) {
+	e := newAuthEnv(t)
+	c := e.devLogin(t, "priya")
+
+	two := func(h http.Header, a, b string) { h.Add("X-User", a); h.Add("X-User", b) }
+	do := func(withCookie bool, a, b string) *http.Response {
+		req, _ := http.NewRequest(http.MethodGet, e.srv.URL+"/api/me", nil)
+		two(req.Header, a, b)
+		if withCookie {
+			req.AddCookie(c)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return resp
+	}
+	// Cookie priya + [priya, bob]: 403.
+	resp := do(true, "priya", "bob")
+	wantStatus(t, resp, http.StatusForbidden)
+	if b := readErr(t, resp); b.Error.Code != "proxy_identity" {
+		t.Fatalf("code = %q", b.Error.Code)
+	}
+	// Both orders, the same name twice, and without a cookie: 403.
+	wantStatus(t, do(true, "bob", "priya"), http.StatusForbidden)
+	wantStatus(t, do(true, "priya", "priya"), http.StatusForbidden)
+	wantStatus(t, do(false, "bob", "priya"), http.StatusForbidden)
+	wantStatus(t, do(false, "arjun", "arjun"), http.StatusForbidden)
+	// One header line folded with a comma counts as several values.
+	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", cookieHdr(c), "X-User: priya, bob"), http.StatusForbidden)
+	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", "X-User: bob,priya"), http.StatusForbidden)
+	// A single value still works: priya with the cookie, and a lone curl user.
+	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", cookieHdr(c), "X-User: priya"), http.StatusOK)
+	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", "X-User: bob"), http.StatusUnauthorized) // bob is not a user
+	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", "X-User: arjun"), http.StatusOK)
+	// One valid and one different single value with the cookie: 403.
+	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", cookieHdr(c), "X-User: arjun"), http.StatusForbidden)
+}
+
+// In oidc mode X-User is ignored, however many values it has.
+func TestOIDCIgnoresMultipleXUserValues(t *testing.T) {
+	e := newAuthEnv(t, httpapi.WithAuth(oidcSettings()))
+	resp := e.do(t, http.MethodGet, "/api/me", "", "X-User: arjun, priya")
+	wantStatus(t, resp, http.StatusUnauthorized)
+	if b := readErr(t, resp); b.Error.Code != "session_expired" || b.Error.AuthMode != "oidc" {
+		t.Fatalf("error = %+v", b.Error)
+	}
 }
 
 func TestOIDCModeIgnoresXUser(t *testing.T) {
@@ -510,7 +584,7 @@ func TestInvalidCookie(t *testing.T) {
 // Only 401 session_expired carries auth_mode.
 func TestAuthModeOnlyOnSessionExpired(t *testing.T) {
 	e := newAuthEnv(t)
-	resp := e.do(t, http.MethodGet, "/api/me", "")
+	resp := e.do(t, http.MethodGet, "/api/me", "", "X-User: nobody")
 	wantStatus(t, resp, http.StatusUnauthorized)
 	raw, _ := io.ReadAll(resp.Body)
 	if bytes.Contains(raw, []byte("auth_mode")) {

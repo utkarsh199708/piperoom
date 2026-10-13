@@ -215,15 +215,23 @@ func (g *Gateway) recheckSessions() {
 		}
 	}
 	g.mu.Unlock()
+	// One shared deadline for the whole pass, so a hanging database cannot hold
+	// the presence loop for N x its statement timeout. A check cut off by the
+	// deadline errors, and SessionAlive treats an error as "still alive".
+	ctx, cancel := context.WithTimeout(g.ctx, recheckTimeout)
+	defer cancel()
 	for id, ident := range seen {
-		if g.ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return
 		}
-		if !g.SessionAlive(g.ctx, ident) {
+		if !g.SessionAlive(ctx, ident) {
 			g.CloseSession(id)
 		}
 	}
 }
+
+// recheckTimeout bounds one whole session recheck pass on a presence tick.
+const recheckTimeout = 5 * time.Second
 
 // awayAfter is how long a connection may go without any client message
 // before it is marked away: 2x the 20 s presence heartbeat plus slack

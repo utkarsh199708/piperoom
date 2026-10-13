@@ -213,7 +213,18 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 func (s *Server) resolve(r *http.Request) (principal, *authError) {
 	oidc := s.authSettings.IsOIDC()
 	hasXUser := len(r.Header.Values("X-User")) > 0
-	xuser := strings.TrimSpace(r.Header.Get("X-User"))
+	xusers := xUserValues(r)
+	xuser := ""
+	if len(xusers) > 0 {
+		xuser = xusers[0]
+	}
+	// A proxy that APPENDS its own X-User leaves the client's value first and
+	// its own second; reading only one of them would let [priya, bob] pass as
+	// priya. More than one value is never a curl user, so it is refused in dev
+	// mode, with or without a cookie.
+	if !oidc && len(xusers) > 1 {
+		return principal{}, &authError{http.StatusForbidden, "proxy_identity", proxyIdentityMsg}
+	}
 
 	if c, err := r.Cookie(s.authSettings.CookieName()); err == nil && c.Value != "" {
 		sess, aerr := s.sessionFromToken(r.Context(), c.Value)
@@ -236,13 +247,30 @@ func (s *Server) resolve(r *http.Request) (principal, *authError) {
 		return principal{}, &authError{http.StatusUnauthorized, "session_expired", "sign in required"}
 	}
 	if xuser == "" {
-		return principal{}, &authError{http.StatusUnauthorized, "unauthenticated", "missing X-User header"}
+		// No session at all: the web app shows the dev picker on this code
+		// (with auth_mode dev). An X-User that names nobody is different: that
+		// is a curl user with a typo, and stays 401 unauthenticated below.
+		return principal{}, &authError{http.StatusUnauthorized, "session_expired", "sign in required"}
 	}
 	user, ok := s.svc.LookupUser(xuser)
 	if !ok {
 		return principal{}, &authError{http.StatusUnauthorized, "unauthenticated", "unknown user " + xuser}
 	}
 	return principal{user: user}, nil
+}
+
+// xUserValues returns every X-User value on the request: all header lines,
+// each split on commas (a proxy may fold repeated headers into one line) and
+// trimmed. An empty header yields one empty value, so "present but empty" stays
+// visible to the caller.
+func xUserValues(r *http.Request) []string {
+	var out []string
+	for _, line := range r.Header.Values("X-User") {
+		for _, v := range strings.Split(line, ",") {
+			out = append(out, strings.TrimSpace(v))
+		}
+	}
+	return out
 }
 
 // sessionFromToken loads the session a cookie value names and checks it. Any
