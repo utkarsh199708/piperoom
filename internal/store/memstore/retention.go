@@ -90,6 +90,12 @@ func (s *Store) PurgeClosedBefore(ctx context.Context, cutoff time.Time, maxRoom
 				delete(s.handoffs, id)
 			}
 		}
+		if _, ok := s.shadowRuns[c.id]; ok {
+			res.ShadowEvents += int64(len(s.shadowEvents[c.id]))
+			res.ShadowRuns++
+			delete(s.shadowEvents, c.id)
+			delete(s.shadowRuns, c.id)
+		}
 		res.RoomIDs = append(res.RoomIDs, c.id)
 	}
 	return res, nil

@@ -72,6 +72,8 @@ type PurgeResult struct {
 	Suggestions  int64
 	Handoffs     int64
 	SlackThreads int64
+	ShadowEvents int64
+	ShadowRuns   int64
 }
 
 // PurgeFailure is one room that could not be purged. Its transaction rolled
@@ -93,6 +95,8 @@ func (r *PurgeResult) Add(o PurgeResult) {
 	r.Suggestions += o.Suggestions
 	r.Handoffs += o.Handoffs
 	r.SlackThreads += o.SlackThreads
+	r.ShadowEvents += o.ShadowEvents
+	r.ShadowRuns += o.ShadowRuns
 }
 
 // Purger is the retention surface. It is separate from Store so a store (or a
@@ -108,4 +112,48 @@ type Purger interface {
 	// for the call itself (listing failed, ctx done). Examined < maxRooms
 	// means no qualifying room is left.
 	PurgeClosedBefore(ctx context.Context, cutoff time.Time, maxRooms int, exclude []string) (PurgeResult, error)
+}
+
+// ShadowStore is the shadow log and run table (docs/design/shadow.md section
+// 3.2). It is separate from Store like Purger: a store without it cannot host
+// shadow rooms, and the room service's Load refuses to start when a pipeline
+// is shadow and the store does not implement it. Both *PG and memstore.Store
+// do.
+type ShadowStore interface {
+	// CreateShadowRun inserts the run row of a shadow room. It is idempotent:
+	// a second call for the same room changes nothing and is not an error
+	// (INSERT ... ON CONFLICT DO NOTHING), so the room service can call it
+	// again wherever the first try may have failed.
+	CreateShadowRun(ctx context.Context, r ShadowRun) error
+	// GetShadowRun returns the run row of a room, or an error wrapping
+	// ErrNotFound.
+	GetShadowRun(ctx context.Context, roomID string) (ShadowRun, error)
+	// UpdateShadowRun writes every mutable column of r (status, model,
+	// pipeline_map, the times, finished_after_close, final_hypothesis,
+	// tool_calls, tokens). revealed_at and last_seq are never touched. A
+	// missing row wraps ErrNotFound.
+	UpdateShadowRun(ctx context.Context, r ShadowRun) error
+	// AppendShadow appends one event to the room's shadow log with the next
+	// gap-free seq. It runs CheckAppend first (the jsonb guard). An
+	// agent.hypothesis event also sets first_hypothesis_at (once),
+	// final_hypothesis_at and final_hypothesis in the same transaction, so a
+	// crash never leaves the run row behind its log. A room without a run row
+	// wraps ErrNotFound.
+	AppendShadow(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error)
+	// ShadowSince returns shadow events with Seq > afterSeq in order, at most
+	// limit.
+	ShadowSince(ctx context.Context, roomID string, afterSeq int64, limit int) ([]events.Event, error)
+	// CountShadowEvents counts the room's shadow events of one type.
+	CountShadowEvents(ctx context.Context, roomID string, typ events.Type) (int, error)
+	// MarkRevealed sets revealed_at once; first is false when it was set
+	// before. A missing row wraps ErrNotFound.
+	MarkRevealed(ctx context.Context, roomID string, at time.Time) (first bool, err error)
+	// ListShadowRuns returns the runs of closed rooms, newest close first (ties
+	// by room id), joined with the room row and room.created. pipelineID ""
+	// means every pipeline; rooms closed before since are left out (the zero
+	// time keeps all).
+	ListShadowRuns(ctx context.Context, pipelineID string, since time.Time) ([]ShadowRunRoom, error)
+	// UnrevealedShadowRuns lists the room ids of finished runs of closed rooms
+	// with no revealed_at (the Load sweep), in room id order.
+	UnrevealedShadowRuns(ctx context.Context) ([]string, error)
 }
