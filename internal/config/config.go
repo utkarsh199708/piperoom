@@ -119,6 +119,14 @@ type Config struct {
 	SessionIdle         string // PIPEROOM_SESSION_IDLE: Go duration
 	SessionMax          string // PIPEROOM_SESSION_MAX: Go duration
 	SoloUser            string // PIPEROOM_SOLO_USER: "" = off
+
+	// Shadow mode (docs/design/shadow.md). Which pipelines are shadow is set
+	// per pipeline in owners.yaml (shadow: block); these are the numbers.
+	// Kept as strings like the watcher fields; ParseShadow types them and
+	// names the env var on error.
+	ShadowGrace       string // PIPEROOM_SHADOW_GRACE: Go duration the run may keep going after close; default 0 = cancel at close
+	ShadowTokenBudget string // PIPEROOM_SHADOW_TOKEN_BUDGET: tokens per shadow room; default 500000; "0" = no cap
+	ShadowMaxTurns    string // PIPEROOM_SHADOW_MAX_TURNS: model turns per shadow run; default 20
 }
 
 // Load reads the environment and applies dev defaults.
@@ -203,6 +211,10 @@ func Load() Config {
 		SessionIdle:         get("PIPEROOM_SESSION_IDLE", DefaultSessionIdle),
 		SessionMax:          get("PIPEROOM_SESSION_MAX", DefaultSessionMax),
 		SoloUser:            get("PIPEROOM_SOLO_USER", ""),
+
+		ShadowGrace:       get("PIPEROOM_SHADOW_GRACE", DefaultShadowGrace),
+		ShadowTokenBudget: get("PIPEROOM_SHADOW_TOKEN_BUDGET", DefaultShadowTokenBudget),
+		ShadowMaxTurns:    get("PIPEROOM_SHADOW_MAX_TURNS", DefaultShadowMaxTurns),
 	}
 }
 
@@ -214,6 +226,79 @@ const (
 	DefaultSessionIdle     = "8h"
 	DefaultSessionMax      = "12h"
 )
+
+// Shadow defaults.
+const (
+	DefaultShadowGrace       = "0"
+	DefaultShadowTokenBudget = "500000"
+	DefaultShadowMaxTurns    = "20"
+)
+
+// Shadow holds the typed shadow settings.
+type Shadow struct {
+	// Grace is how long a shadow run may keep going after the room closes.
+	// 0 = cancel at close, as a live run is.
+	Grace time.Duration
+	// TokenBudget caps model tokens per shadow room; 0 = no cap.
+	TokenBudget int64
+	// MaxTurns caps model turns per shadow run.
+	MaxTurns int
+}
+
+// ParseShadow validates the PIPEROOM_SHADOW_* fields. Empty fields mean the
+// default. Grace accepts "0" and any non-negative Go duration; TokenBudget
+// follows PIPEROOM_ROOM_TOKEN_BUDGET's rule (whole number >= 1, or "0" for no
+// cap); MaxTurns is a whole number >= 1.
+func ParseShadow(c Config) (Shadow, error) {
+	var sh Shadow
+	g := strings.TrimSpace(c.ShadowGrace)
+	if g == "" {
+		g = DefaultShadowGrace
+	}
+	if g != "0" {
+		d, err := time.ParseDuration(g)
+		if err != nil {
+			return Shadow{}, fmt.Errorf("config: PIPEROOM_SHADOW_GRACE=%q: not a duration like 0, 30s or 10m: %w", c.ShadowGrace, err)
+		}
+		if d < 0 {
+			return Shadow{}, fmt.Errorf("config: PIPEROOM_SHADOW_GRACE=%q: must not be negative", c.ShadowGrace)
+		}
+		sh.Grace = d
+	}
+	var err error
+	if sh.TokenBudget, err = parseWholeNumber("PIPEROOM_SHADOW_TOKEN_BUDGET", c.ShadowTokenBudget, DefaultShadowTokenBudget, true); err != nil {
+		return Shadow{}, err
+	}
+	n, err := parseWholeNumber("PIPEROOM_SHADOW_MAX_TURNS", c.ShadowMaxTurns, DefaultShadowMaxTurns, false)
+	if err != nil {
+		return Shadow{}, err
+	}
+	sh.MaxTurns = int(n)
+	return sh, nil
+}
+
+// parseWholeNumber parses a non-negative whole number; empty uses def. With
+// zeroOK, "0" is allowed (no cap); otherwise the value must be >= 1.
+func parseWholeNumber(name, v, def string, zeroOK bool) (int64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		v = def
+	}
+	var n int64
+	for _, r := range v {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("config: %s=%q: want a whole number", name, v)
+		}
+		if n > (1<<62)/10 {
+			return 0, fmt.Errorf("config: %s=%q: too large", name, v)
+		}
+		n = n*10 + int64(r-'0')
+	}
+	if n == 0 && !zeroOK {
+		return 0, fmt.Errorf("config: %s=%q: must be at least 1", name, v)
+	}
+	return n, nil
+}
 
 // Watcher defaults and limits.
 const (

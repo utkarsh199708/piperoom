@@ -76,6 +76,13 @@ type Deps struct {
 	Sink      Sink
 	Proposals Proposals
 	Logger    *slog.Logger
+	// Usage, when set, is called exactly once when Run ends, however it ends
+	// (nil, error or panic), with the model tokens the room has used in this
+	// process (input + output, cache included; the count behind
+	// PIPEROOM_ROOM_TOKEN_BUDGET). Only an Endpoint run counts tokens; the
+	// plain Run and the demo runner never call it. Shadow mode records the
+	// value. Nil = not wanted.
+	Usage func(used int64)
 }
 
 // Options tune the model call.
@@ -83,6 +90,12 @@ type Options struct {
 	Model    string // default "claude-opus-5-5"
 	Effort   string // default "high"
 	MaxTurns int    // safety stop; default 40
+	// TokenBudget caps model tokens for this run's room. 0 = the Endpoint's
+	// default (PIPEROOM_ROOM_TOKEN_BUDGET). A value > 0 becomes the room's
+	// limit when Run starts, even if the room's count already exists (a
+	// hand-off may have created it); the count so far is kept. Shadow rooms
+	// set it lower.
+	TokenBudget int64
 }
 
 // Runner is implemented by A4 in run.go:
@@ -91,6 +104,11 @@ type Options struct {
 //
 // Run investigates until ctx ends or the room is closed. When the model
 // finishes a turn it emits AgentStatus "idle" and calls Inbox.Wait.
+// An Inbox whose Wait returns ErrInboxClosed ends the run cleanly (nil) after
+// the current turn. When the room's token budget stops the run, Run returns an
+// error wrapping *BudgetError after it has emitted the idle status and the
+// message; a caller must treat it as a stop, not a failure (no retry, no
+// non-zero exit).
 type Runner func(ctx context.Context, alert Alert, deps Deps, opts Options) error
 
 // HandoffWriter is implemented by A4 in handoff.go:
