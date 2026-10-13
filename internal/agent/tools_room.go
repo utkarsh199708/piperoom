@@ -197,6 +197,7 @@ func (t *proposeFixTool) Description() string {
 	b.WriteString(`params is the action's parameters as JSON object text in a string, for example "{\"connector\":\"c1\"}". `)
 	b.WriteString(`A param that is itself JSON, such as the Avro schema of schema_register, is escaped once more: "{\"subject\":\"orders-value\",\"schema\":\"{\\\"type\\\":\\\"string\\\"}\"}". `)
 	b.WriteString("A step with a wrong or missing param is refused and nothing is stored. ")
+	b.WriteString("Params are hashed for the approvers: a number above 2^53 (a Kafka offset, a large id) cannot be hashed exactly and the proposal is refused, so write such values as strings. ")
 	b.WriteString("risk and rollback are required short text: never empty and never a placeholder such as n/a.")
 	return b.String()
 }
