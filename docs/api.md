@@ -7,9 +7,11 @@ Base URL in dev: `http://localhost:8090`; the server listens on `127.0.0.1:8090`
 real login yet). All bodies are JSON. Times are RFC 3339 **UTC** (`Z`), also when read back from Postgres.
 Arrays in responses are always JSON arrays (`[]`), never `null`.
 
-## Auth (MVP)
+## Auth
 
-No SSO yet. Every request sends `X-User: <user id>`. Users come from `dev/users.yaml`:
+Dev mode (the default, live since auth PR 2): the web app logs in with `POST /auth/dev-login {user}` and a
+session cookie (see **Login** below); `curl` may instead send `X-User: <user id>` when it sends no cookie. SSO (OIDC)
+is auth PR 3. Users come from `dev/users.yaml`:
 
 ```yaml
 users:
@@ -27,14 +29,15 @@ users:
     layers: [consumer]
 ```
 
-Unknown or missing `X-User` → `401`. The WebSocket takes `?user=<id>` instead (browsers cannot set headers on WS).
+No cookie and no `X-User` → `401 session_expired`; an `X-User` naming no known user → `401 unauthenticated`. The
+WebSocket uses the session cookie (or `X-User` for non-browser clients in dev); `?user=` is gone.
 `dev/users.yaml` (who may approve a layer) and the `layers:` map in `dev/owners.yaml` (owner shown on the pipeline
 map) must agree; the server checks this at start-up and refuses to start on a mismatch. Real mode requires
 `USERS_FILE`; the built-in users are for `--demo` only. Real login is designed in `docs/design/auth.md` (C9).
 
-### Login (auth PRs 2–4, design `docs/design/auth.md`) — contract fixed, not live yet
+### Login (auth PRs 2–4, design `docs/design/auth.md`)
 
-The X-User stub above stays until auth PR 2. After it:
+PR 2 (dev sessions, Host allow-list, proxy guard) is live; items marked PR 3 or PR 4 are not yet.
 
 - **Mode.** `PIPEROOM_AUTH_MODE` = `dev` (default) or `oidc`. In `oidc` mode `X-User` is ignored and a request with
   no session answers `401 session_expired`; the unsigned `POST /api/alerts/webhook` is not mounted (`404`), so
@@ -186,9 +189,9 @@ closes; `--demo` forces it off.
 
 ## WebSocket
 
-`GET /api/rooms/{id}/ws?user=<id>&after=<seq>`
+`GET /api/rooms/{id}/ws?after=<seq>`
 
-After auth PR 2 the WebSocket uses the session cookie and `?user=` is removed; no cookie → `401`.
+The WebSocket uses the session cookie (dev: or `X-User` for non-browser clients); no credentials → `401`.
 
 Server → client messages:
 ```json
