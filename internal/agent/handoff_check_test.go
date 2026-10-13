@@ -19,6 +19,13 @@ func extraCases() []handoffCase {
 		{"duplicate-proposal", (&logBuilder{}).room("x").
 			propose("p_1", "Fix it", "kafka-connect").propose("p_1", "Fix it", "kafka-connect").evs, base},
 		{"thousands", (&logBuilder{}).room("x").tool("kafka_consumer_lag", "lag 12,000 records").evs, base},
+		{"failed-step0-two-step", (&logBuilder{}).room("x").
+			propose("p_8", "Two step fix", "schema-registry", "kafka-connect").
+			approve("p_8", "schema-registry").approve("p_8", "kafka-connect").
+			failedAction("p_8", 0, "refused").evs, base},
+		{"restarted-run", (&logBuilder{}).room("x").status("working").callOnly("connect_status").
+			status("working").tool("connect_status", "ok").status("done").evs, base},
+		{"order-sync-1", (&logBuilder{}).room("x").tool("kafka_list_groups", "group order-sync-1 Stable").evs, base},
 	}
 }
 
@@ -176,6 +183,29 @@ func TestCheckHandoffViolations(t *testing.T) {
 		{"comma-separated number in the log", "thousands",
 			func(s *events.HandoffSummary) { s.Risks = []string{"Lag is 12000 records and 3 partitions"} },
 			nil, []string{RuleUnknownNumber}},
+		{"failed step 0 of two, only in risks, is not an open proposal", "failed-step0-two-step",
+			func(s *events.HandoffSummary) { s.Open = nil; s.Risks = []string{"p_8 failed at step 0"} },
+			nil, []string{RuleOpenProposal, RuleFailedAction}},
+		{"a run that restarted and finished is not interrupted", "restarted-run",
+			func(s *events.HandoffSummary) {}, nil, []string{RuleInterruptedRun}},
+		{"bare agent word is not a run note", "interrupted-run",
+			func(s *events.HandoffSummary) {
+				s.Open = []string{"The agent found the connector stopped"}
+				s.Risks = nil
+			},
+			[]string{RuleInterruptedRun}, nil},
+		{"agent stopped is a run note", "interrupted-run",
+			func(s *events.HandoffSummary) {
+				s.Open = []string{"The agent stopped before a hypothesis"}
+				s.Risks = nil
+			},
+			nil, []string{RuleInterruptedRun}},
+		{"trailing digit hyphen name is checked", "order-sync-1",
+			func(s *events.HandoffSummary) { s.Why = "order-sync-2 is lagging" },
+			[]string{RuleUnknownName}, nil},
+		{"trailing digit hyphen name in the log", "order-sync-1",
+			func(s *events.HandoffSummary) { s.Why = "order-sync-1 is lagging" },
+			nil, []string{RuleUnknownName}},
 		{"empty list item", "schema-change",
 			func(s *events.HandoffSummary) { s.Done = append(s.Done, "") },
 			[]string{RuleEmptyField}, nil},
@@ -259,6 +289,8 @@ func TestCheckHandoffProseIsNotFlagged(t *testing.T) {
 		"decimal(12,2) is the new type",
 		"Used a well-known trick, a one-off fix",
 		"Roughly 1,000 rows",
+		"Went through the tasks one-by-one over HTTP/2, 24/7",
+		"Did it step-by-step",
 	}
 	for _, p := range prose {
 		s := events.HandoffSummary{WhatBroke: "pg-orders-connector FAILED.", Why: p, Done: []string{p}, RuledOut: []string{}, Open: []string{}, Risks: []string{}}

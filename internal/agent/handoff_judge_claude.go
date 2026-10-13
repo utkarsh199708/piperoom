@@ -72,7 +72,8 @@ func JudgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSumma
 }
 
 // JudgeHandoff is JudgeHandoff on the endpoint's model client, so the
-// provider (Bedrock, Vertex) and the room's token accounting apply.
+// provider (Bedrock, Vertex) applies. Its tokens count against the room's
+// budget, like WriteHandoff's, and an exhausted budget does not refuse it.
 func (e *Endpoint) JudgeHandoff(ctx context.Context, evs []events.Event, s events.HandoffSummary, opts Options) (HandoffVerdict, error) {
 	opts = opts.withDefaults()
 	if len(evs) == 0 {

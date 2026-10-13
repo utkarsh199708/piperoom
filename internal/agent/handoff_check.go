@@ -189,6 +189,13 @@ func indexLog(evs []events.Event) logIndex {
 		case events.AgentStatus:
 			if p, err := events.Decode[events.AgentStatusPayload](e); err == nil {
 				lastStatus = p.State
+				switch p.State {
+				case "done", "idle", "waiting_approval":
+					// The run ended cleanly after whatever it left dangling (a
+					// restarted run), so earlier calls are not interrupted work.
+					openCalls = map[string]bool{}
+					lastWork = ""
+				}
 			}
 		case events.RoomClosed:
 			closed = true
@@ -288,7 +295,8 @@ var (
 	// A path with slashes (public/orders); checked only with a digit, _ or .
 	slashName = regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9._]*(?:/[A-Za-z0-9][A-Za-z0-9._]*)+`)
 	// A hyphenated token whose segments all have 2+ characters.
-	hyphName = regexp.MustCompile(`[A-Za-z][A-Za-z0-9]+(?:-[A-Za-z0-9]{2,})+`)
+	// A trailing or inner number segment may be one digit (order-sync-1).
+	hyphName = regexp.MustCompile(`[A-Za-z][A-Za-z0-9]+(?:-(?:[A-Za-z0-9]{2,}|\d))+`)
 
 	isoDate        = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}(?:[T ]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?`)
 	clockTime      = regexp.MustCompile(`\b\d{1,2}:\d{2}(?::\d{2})?\b`)
@@ -305,7 +313,8 @@ var (
 var englishCompounds = map[string]bool{
 	"up-to-date": true, "out-of-sync": true, "out-of-date": true, "at-least-once": true,
 	"at-most-once": true, "end-to-end": true, "state-of-the-art": true,
-	"first-in-first-out": true, "on-call-to-on-call": true, "day-to-day": true,
+	"one-by-one": true, "step-by-step": true, "line-by-line": true, "side-by-side": true,
+	"point-in-time": true, "top-to-bottom": true, "first-in-first-out": true, "on-call-to-on-call": true, "day-to-day": true,
 	"one-to-one": true, "one-to-many": true, "many-to-many": true, "run-time-error": true,
 	"read-after-write": true, "check-in-check-out": true,
 	"hand-off-to-hand-off": true, "time-to-live": true, "per-partition-per-topic": true,
@@ -389,7 +398,7 @@ func candidateNames(text string) []string {
 		out = append(out, t)
 	}
 	for _, t := range slashName.FindAllString(rest, -1) {
-		if strings.ContainsAny(t, "_.0123456789") {
+		if looksLikePath(t) {
 			out = append(out, strings.TrimRight(t, "."))
 		}
 	}
@@ -504,6 +513,23 @@ func checkFailedActions(idx logIndex, s events.HandoffSummary) []HandoffViolatio
 	return out
 }
 
+// looksLikePath reports whether a slash token is a name (public/orders_v2,
+// pg.public/orders, orders2/x) and not prose like Kafka/Connect, HTTP/2 or
+// 24/7: it needs an underscore, a dot, or a segment mixing letters and digits.
+func looksLikePath(t string) bool {
+	if strings.ContainsAny(t, "_.") {
+		return true
+	}
+	for _, seg := range strings.Split(t, "/") {
+		hasLetter := strings.IndexFunc(seg, func(r rune) bool { return r >= 'A' && r <= 'z' }) >= 0
+		hasDigit := strings.ContainsAny(seg, "0123456789")
+		if hasLetter && hasDigit {
+			return true
+		}
+	}
+	return false
+}
+
 // mentionsLayer matches a layer name as a whole word, so "kafka" does not
 // match inside "kafka-connect".
 func mentionsLayer(lowText, layer string) bool {
@@ -515,9 +541,9 @@ func mentionsLayer(lowText, layer string) bool {
 // item must refer to the agent run itself: the run/agent/investigation next
 // to an interrupt, stop, error or unfinished word, within 60 characters.
 var (
-	runWord  = `(?:agent|investigation|run)`
+	runWord  = `(?:agent run|the run|investigation|run of the agent)`
 	haltWord = `(?:interrupt\w*|stopp\w*|unfinish\w*|incomplete|crash\w*|abort\w*|errored|error|cut off|gave up|did not (?:finish|complete)|not (?:finished|complete\w*)|in progress|still running)`
-	runHalt  = regexp.MustCompile(`(?i)\b` + runWord + `\b.{0,60}\b` + haltWord + `\b|\b` + haltWord + `\b.{0,60}\b` + runWord + `\b`)
+	runHalt  = regexp.MustCompile(`(?i)\b` + runWord + `\b.{0,60}\b` + haltWord + `\b|\b` + haltWord + `\b.{0,60}\b` + runWord + `\b|\bagent (?:was |has |had )?(?:interrupted|stopped|crashed|errored|aborted|gave up)\b`)
 )
 
 func checkInterrupted(idx logIndex, s events.HandoffSummary) []HandoffViolation {

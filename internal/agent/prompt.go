@@ -305,7 +305,7 @@ func renderRoomEvents(evs []events.Event) string {
 
 	keep := make([]bool, len(evs))
 	for i, e := range evs {
-		if lines[i] != "" && isHandoffCritical(e.Type) {
+		if lines[i] != "" && (isHandoffCritical(e.Type) || isErrorStatus(e)) {
 			keep[i] = true
 		}
 	}
@@ -378,6 +378,16 @@ func renderHandoffWindow(evs []events.Event, lines []string, keep []bool) string
 	}
 	flushOmitted()
 	return b.String()
+}
+
+// isErrorStatus reports an agent.status event with state "error": the run
+// died, which the next driver must hear even in a long log.
+func isErrorStatus(e events.Event) bool {
+	if e.Type != events.AgentStatus {
+		return false
+	}
+	p, err := events.Decode[events.AgentStatusPayload](e)
+	return err == nil && p.State == "error"
 }
 
 // isHandoffCritical reports whether every event of this type must survive into
@@ -472,6 +482,18 @@ func renderRoomEvent(e events.Event) string {
 			return ""
 		}
 		return fmt.Sprintf("hypothesis (%s): %s", capFreeText(p.Confidence), wrapUntrusted(capFreeText(p.Text)))
+	case events.AgentStatus:
+		p, err := events.Decode[events.AgentStatusPayload](e)
+		if err != nil {
+			return ""
+		}
+		// The state says whether the run finished; the detail can carry an
+		// error text, so it is capped and wrapped like any untrusted text.
+		line := "agent status " + capFreeText(p.State)
+		if p.Detail != "" {
+			line += ": " + wrapUntrusted(capFreeText(p.Detail))
+		}
+		return line
 	case events.CommentAdded:
 		p, err := events.Decode[events.CommentAddedPayload](e)
 		if err != nil {
@@ -495,7 +517,9 @@ func renderRoomEvent(e events.Event) string {
 		if err != nil {
 			return ""
 		}
-		return "proposal " + capFreeText(p.ProposalID) + ": " + wrapUntrusted(capFreeText(p.Title))
+		// required_layers is what a hand-off needs to say who still has to approve.
+		return "proposal " + capFreeText(p.ProposalID) + ": " + wrapUntrusted(capFreeText(p.Title)) +
+			" needs: " + wrapUntrusted(capFreeText(strings.Join(p.RequiredLayers, ", ")))
 	case events.ApprovalGiven:
 		p, err := events.Decode[events.ApprovalGivenPayload](e)
 		if err != nil {
@@ -513,7 +537,11 @@ func renderRoomEvent(e events.Event) string {
 		if err != nil {
 			return ""
 		}
-		return fmt.Sprintf("action %s step %d: %s", capFreeText(p.ProposalID), p.StepIndex, wrapUntrusted(truncatePromptField(p.Output, handoffActionOutputBytes)))
+		result := "ok"
+		if !p.OK {
+			result = "FAILED"
+		}
+		return fmt.Sprintf("action %s step %d %s: %s", capFreeText(p.ProposalID), p.StepIndex, result, wrapUntrusted(truncatePromptField(p.Output, handoffActionOutputBytes)))
 	default:
 		return string(e.Type) + " by " + wrapUntrusted(capFreeText(actorName(e.Actor)))
 	}
