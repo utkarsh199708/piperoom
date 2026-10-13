@@ -742,3 +742,180 @@ func TestCommas(t *testing.T) {
 		}
 	}
 }
+
+// ---- review round 1 ----
+
+// lastSev is the severity of the latest reading of a signal.
+func (h *harness) lastSev(sig string) string {
+	h.w.mu.Lock()
+	defer h.w.mu.Unlock()
+	return h.w.pipes["orders"].sigs[sig].last.sev
+}
+
+func TestConfigRiskSurvivesKafkaErrors(t *testing.T) {
+	h := newHarness(t, opts{})
+	h.setSinkConfig("orders", map[string]string{
+		"errors.tolerance": "all", "errors.deadletterqueue.topic.name": "orders-sink-dlq",
+		"errors.log.enable": "true", "errors.deadletterqueue.context.headers.enable": "true",
+	})
+	h.steps(4, time.Minute) // the topic is missing: dlq_topic_missing fires
+	if h.sigPhase(owners.SignalConfigRisk) != phaseFiring {
+		t.Fatalf("setup: not firing\n%s", h.logs)
+	}
+	h.kafka.setErr(errors.New("broker unreachable"))
+	h.steps(3, time.Minute)
+	if h.sigPhase(owners.SignalConfigRisk) != phaseFiring {
+		t.Fatalf("a failed Kafka read resolved config_risk\n%s", h.logs)
+	}
+	// Even with no last answer in memory, the read error is unknown, not clear.
+	h.w.mu.Lock()
+	h.w.dlqState = map[string]*dlqTopicState{}
+	h.w.mu.Unlock()
+	h.steps(5, time.Minute)
+	if h.sigPhase(owners.SignalConfigRisk) != phaseFiring {
+		t.Fatalf("config_risk resolved on an unknown topic state\n%s", h.logs)
+	}
+	if h.logs.count("signal resolved") != 0 {
+		t.Fatalf("a resolve was logged\n%s", h.logs)
+	}
+}
+
+func TestDLQOneAbsentAnswerDoesNotMakeTheBacklogNew(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.kafka.set("orders-dlq", 0, 1204)
+	h.steps(5, time.Minute)
+	h.kafka.remove("orders-dlq") // a broker restart answers "unknown topic" once
+	h.step(time.Minute)
+	h.kafka.set("orders-dlq", 0, 1204)
+	h.steps(20, time.Minute)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseOK || len(h.rooms.created()) != 0 {
+		t.Fatalf("an old backlog fired after one absent answer\n%s", h.logs)
+	}
+	// Records that arrived during the gap are still counted.
+	h.kafka.remove("orders-dlq")
+	h.step(time.Minute)
+	h.kafka.set("orders-dlq", 0, 1210)
+	h.steps(7, time.Minute)
+	if len(h.rooms.created()) != 1 {
+		t.Fatalf("records written during the gap were lost\n%s", h.logs)
+	}
+	if ev := h.openedEv(t, owners.SignalDLQGrowth); num(t, ev, "new_in_window") != 6 {
+		t.Fatalf("evidence = %v", ev)
+	}
+}
+
+func TestDLQSteadyTrickleStaysSev3(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.kafka.set("orders-dlq", 0, 0)
+	h.step(time.Minute)
+	sawFiring := false
+	for m := 1; m <= 180; m++ {
+		if m%20 == 0 {
+			h.kafka.add("orders-dlq", 1)
+		}
+		h.step(time.Minute)
+		if h.sigPhase(owners.SignalDLQGrowth) == phaseFiring {
+			sawFiring = true
+			if sev := h.lastSev(owners.SignalDLQGrowth); sev != "sev3" {
+				t.Fatalf("minute %d: one record per 20 minutes is %s, want sev3", m, sev)
+			}
+		}
+	}
+	if !sawFiring {
+		t.Fatalf("never fired\n%s", h.logs)
+	}
+}
+
+func TestDLQAcceleratingTrickleBecomesSev2(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.kafka.set("orders-dlq", 0, 0)
+	h.step(time.Minute)
+	for m := 1; m <= 60; m++ {
+		if m%20 == 0 {
+			h.kafka.add("orders-dlq", 1)
+		}
+		h.step(time.Minute)
+	}
+	if sev := h.lastSev(owners.SignalDLQGrowth); sev != "sev3" {
+		t.Fatalf("before the burst: %s, want sev3", sev)
+	}
+	for range 5 { // five records in five minutes, still under 10 in the window
+		h.kafka.add("orders-dlq", 1)
+		h.step(time.Minute)
+	}
+	if sev := h.lastSev(owners.SignalDLQGrowth); sev != "sev2" {
+		t.Fatalf("an accelerating trickle is %s, want sev2", sev)
+	}
+}
+
+func TestDLQWindowPrunesOldSamples(t *testing.T) {
+	// window 30m is below the ring's one-hour keep, so only the window cutoff
+	// can make the old records stop counting.
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("        dlq_growth: {window: 30m, for: 2m}\n")}})
+	h.kafka.set("orders-dlq", 0, 0)
+	h.step(time.Minute)
+	h.kafka.add("orders-dlq", 3)
+	h.steps(4, time.Minute)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseFiring {
+		t.Fatalf("did not fire\n%s", h.logs)
+	}
+	h.steps(34, time.Minute)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseOK {
+		t.Fatalf("records older than the window still count\n%s", h.logs)
+	}
+}
+
+func TestDLQUnreadableConfigDoesNotResolve(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.kafka.set("orders-dlq", 0, 0)
+	h.step(time.Minute)
+	h.kafka.add("orders-dlq", 3)
+	h.steps(7, time.Minute)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseFiring {
+		t.Fatalf("did not fire\n%s", h.logs)
+	}
+	h.conn.mu.Lock()
+	h.conn.cfgErr["pg-orders"] = errors.New("connect: 500")
+	h.conn.mu.Unlock()
+	h.steps(80, time.Minute) // the topic is quiet for longer than window + for
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseFiring || len(h.rooms.resolved()) != 0 {
+		t.Fatalf("an unreadable config let dlq_growth resolve\n%s", h.logs)
+	}
+}
+
+func TestDLQRisksInEvidenceOnlyWithConfigRiskOn(t *testing.T) {
+	for _, on := range []bool{true, false} {
+		sig := fmt.Sprintf("        config_risk: {enabled: %t}\n", on)
+		h := newHarness(t, opts{pipes: []pipeSpec{{id: "orders", watch: "    watch:\n      signals:\n" + sig}}})
+		h.setSinkConfig("orders", map[string]string{"errors.deadletterqueue.topic.name": "orders-sink-dlq"})
+		h.kafka.set("orders-sink-dlq", 0, 0)
+		h.step(time.Minute)
+		h.kafka.add("orders-sink-dlq", 7)
+		h.steps(7, time.Minute)
+		ev := h.openedEv(t, owners.SignalDLQGrowth)
+		if _, has := ev["risks"]; has != on {
+			t.Fatalf("config_risk enabled=%t but risks present=%t: %v", on, has, ev)
+		}
+	}
+}
+
+func TestDLQIdleTopicStateIsDropped(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.w.mu.Lock()
+	h.w.dlqState["gone-dlq"] = &dlqTopicState{lastWanted: t0}
+	h.w.mu.Unlock()
+	h.step(30 * time.Minute)
+	h.w.mu.Lock()
+	_, kept := h.w.dlqState["gone-dlq"]
+	h.w.mu.Unlock()
+	if !kept {
+		t.Fatal("dropped too early")
+	}
+	h.step(90 * time.Minute)
+	h.w.mu.Lock()
+	_, kept = h.w.dlqState["gone-dlq"]
+	h.w.mu.Unlock()
+	if kept {
+		t.Fatal("a topic nobody asks for stayed in memory")
+	}
+}

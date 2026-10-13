@@ -155,6 +155,16 @@ type dlqTopicState struct {
 	// backlog: the first sample already had records, so they are "older than
 	// the watcher". A topic seen missing and then present has no backlog.
 	backlog bool
+	// absent: the last reading found the topic missing. The ring keeps the last
+	// end sum, so a topic that comes back (a broker restart can answer
+	// UNKNOWN_TOPIC_OR_PARTITION for a moment) does not make its old records new.
+	absent bool
+	// known/exists: the last good reading of the topic, used by config_risk
+	// when a later read fails.
+	known, exists bool
+	// lastWanted is the last tick that asked for the topic; idle topics are
+	// dropped after the ring window.
+	lastWanted time.Time
 }
 
 // dlqSnap is what one tick learned about one topic.
@@ -171,23 +181,42 @@ type dlqSnap struct {
 // holds w.mu.
 func (w *Watcher) recordDLQ(now time.Time, ts []target, obs *observation) map[string]dlqSnap {
 	snaps := map[string]dlqSnap{}
-	if obs.plan == nil || !obs.dlqTried || obs.dlqErr != nil {
-		return snaps // unknown: rings and timers stay as they are
+	if obs.plan == nil {
+		return snaps
 	}
 	keep := time.Hour
 	for _, t := range ts {
 		keep = max(keep, t.cfg.DLQGrowth.Window)
 	}
+	// Forget topics nobody has asked for during the whole ring window.
+	for _, name := range obs.plan.want {
+		if st := w.dlqState[name]; st != nil {
+			st.lastWanted = now
+		}
+	}
+	for name, st := range w.dlqState {
+		if now.Sub(st.lastWanted) > keep {
+			delete(w.dlqState, name)
+		}
+	}
+	if !obs.dlqTried || obs.dlqErr != nil {
+		return snaps // unknown: rings and timers stay as they are
+	}
 	for _, name := range obs.plan.want {
 		st := w.dlqState[name]
 		if st == nil {
-			st = &dlqTopicState{}
+			st = &dlqTopicState{lastWanted: now}
 			w.dlqState[name] = st
 		}
 		parts, ok := obs.dlqOffsets[name]
 		if !ok {
-			// Absent: zero records, and the next appearance counts as new.
-			st.samples, st.backlog = []sample{{at: now}}, false
+			// Absent. A topic never seen before has zero records, so its first
+			// appearance counts as new. A topic that had records keeps its last
+			// end sum: one missing answer must not turn its backlog into news.
+			if len(st.samples) == 0 {
+				st.samples, st.backlog = []sample{{at: now}}, false
+			}
+			st.absent, st.known, st.exists = true, true, false
 			snaps[name] = dlqSnap{known: true}
 			continue
 		}
@@ -200,10 +229,15 @@ func (w *Watcher) recordDLQ(now time.Time, ts []target, obs *observation) map[st
 		case n == 0:
 			st.backlog = snap.records > 0 // the baseline: never a rise
 		case snap.endSum < st.samples[n-1].retained:
-			// Offsets went back: the topic was deleted and created again between
-			// two ticks. All its records are new.
-			st.samples = []sample{{at: st.samples[n-1].at}}
+			// Offsets went back: the topic was deleted and created again. All its
+			// records are new.
+			at := st.samples[n-1].at
+			if st.absent {
+				at = now
+			}
+			st.samples = []sample{{at: at}}
 		}
+		st.absent, st.known, st.exists = false, true, true
 		st.samples = append(st.samples, sample{at: now, retained: snap.endSum})
 		cutoff := now.Add(-keep)
 		i := 0
@@ -226,6 +260,7 @@ type dlqTopicReading struct {
 	newN     int64
 	rate     float64 // records per second
 	rateOK   bool
+	rising   bool
 	first    time.Time
 	backlog  bool
 	contexts string // "true" | "false" | "" (unknown)
@@ -235,9 +270,13 @@ type dlqTopicReading struct {
 // new_in_window = end_sum(now) - end_sum(oldest sample inside the window); the
 // end offsets only grow, so it is exact. first is the time of the first rising
 // sample inside the window.
-func windowed(st *dlqTopicState, now time.Time, window time.Duration) (newN int64, rate float64, rateOK bool, first time.Time) {
+//
+// rising says growth is accelerating: the newer half of the window got at least
+// two records more than the older half. Counts are integers and a slow trickle
+// puts one or two records in a half, so a difference of one is noise.
+func windowed(st *dlqTopicState, now time.Time, window, slack time.Duration) (newN int64, rate float64, rateOK bool, first time.Time, rising bool) {
 	if st == nil || len(st.samples) == 0 {
-		return 0, 0, false, time.Time{}
+		return 0, 0, false, time.Time{}, false
 	}
 	cutoff := now.Add(-window)
 	base := 0
@@ -253,7 +292,17 @@ func windowed(st *dlqTopicState, now time.Time, window time.Duration) (newN int6
 		}
 	}
 	rate, rateOK = slope(st.samples, now, window)
-	return newN, rate, rateOK, first
+	mid := base
+	for mid < len(st.samples)-1 && st.samples[mid].at.Before(now.Add(-window/2)) {
+		mid++
+	}
+	older := st.samples[mid].retained - st.samples[base].retained
+	newer := cur.retained - st.samples[mid].retained
+	// Half a window of history cannot show acceleration (a fresh ring would
+	// read every first record as a surge), so the ring must reach back to the
+	// start of the window, give or take a tick.
+	covered := st.samples[base].at.Sub(cutoff) <= slack
+	return newN, rate, rateOK, first, covered && newer-older >= 2
 }
 
 // evaluateDLQ steps config_risk and dlq_growth for one pipeline. Caller holds w.mu.
@@ -285,6 +334,11 @@ func (w *Watcher) evaluateDLQ(now time.Time, t target, ps *pipeState, obs *obser
 		r = reading{v: vClear, value: "no DLQ topic", threshold: dlqThreshold(t.cfg.DLQGrowth)}
 	default:
 		r = w.dlqGrowthReading(now, t, ps, obs, topics, snaps)
+		if r.v != vBreach && obs.plan.cfgFail[id] {
+			// A connector config could not be read, so a DLQ topic may be missing
+			// from the list: clear or hold would be a guess.
+			r = reading{v: vUnknown, err: errDLQConfig}
+		}
 	}
 	ss := ps.sig(owners.SignalDLQGrowth)
 	w.apply(now, t, ps, owners.SignalDLQGrowth, t.cfg.DLQGrowth.WatchSignal, r, fired)
@@ -307,7 +361,7 @@ func (w *Watcher) dlqGrowthReading(now time.Time, t target, ps *pipeState, obs *
 		st := w.dlqState[d.name]
 		var first time.Time
 		if tr.snap.exists {
-			tr.newN, tr.rate, tr.rateOK, first = windowed(st, now, sc.Window)
+			tr.newN, tr.rate, tr.rateOK, first, tr.rising = windowed(st, now, sc.Window, 2*w.cfg.Interval)
 			tr.backlog = st != nil && st.backlog
 		}
 		if tr.newN > 0 {
@@ -350,10 +404,11 @@ func (w *Watcher) dlqGrowthReading(now time.Time, t target, ps *pipeState, obs *
 	default:
 		r.v = vHold
 	}
-	// A trickle with no rate yet is sev3. sev1 is never set: a DLQ does not lose
-	// data by itself.
+	// A trickle (under 10 new records) is sev3 unless it is accelerating; with no
+	// rate yet it cannot be shown to accelerate. sev1 is never set: a DLQ does
+	// not lose data by itself.
 	r.sev = "sev2"
-	if p.newN < troubleTrickle && (!p.rateOK || p.rate <= 0) {
+	if p.newN < troubleTrickle && (!p.rateOK || !p.rising) {
 		r.sev = "sev3"
 	}
 	ratePerHour := int64(math.Round(p.rate * 3600))
@@ -389,7 +444,7 @@ func (w *Watcher) dlqGrowthReading(now time.Time, t target, ps *pipeState, obs *
 	if p.contexts != "" {
 		ev["context_headers"] = p.contexts == "true"
 	}
-	if codes := dlqRiskCodes(p.t, snaps); len(codes) > 0 {
+	if codes := w.dlqRiskCodes(p.t, snaps); len(codes) > 0 && t.cfg.ConfigRisk.Enabled {
 		ev["risks"] = codes
 	}
 	if len(rs) > 1 {
@@ -423,10 +478,10 @@ func contextHeaders(d dlqTopic) string {
 }
 
 // dlqRiskCodes are the risk codes of the connectors that write the topic.
-func dlqRiskCodes(d dlqTopic, snaps map[string]dlqSnap) []string {
+func (w *Watcher) dlqRiskCodes(d dlqTopic, snaps map[string]dlqSnap) []string {
 	var codes []string
 	for _, c := range d.cfgs {
-		for _, code := range dlq.Codes(dlq.Risks(c, existsOf(c, snaps))) {
+		for _, code := range dlq.Codes(dlq.Risks(c, w.existsOf(c, snaps))) {
 			if !slices.Contains(codes, code) {
 				codes = append(codes, code)
 			}
@@ -437,16 +492,21 @@ func dlqRiskCodes(d dlqTopic, snaps map[string]dlqSnap) []string {
 
 // existsOf is the watcher's last reading of the connector's DLQ topic: nil
 // when the connector has none or the offsets were not read.
-func existsOf(c dlq.ErrorsConfig, snaps map[string]dlqSnap) *bool {
+func (w *Watcher) existsOf(c dlq.ErrorsConfig, snaps map[string]dlqSnap) *bool {
 	if c.Topic == "" {
 		return nil
 	}
-	s, ok := snaps[c.Topic]
-	if !ok || !s.known {
-		return nil
+	if s, ok := snaps[c.Topic]; ok && s.known {
+		e := s.exists
+		return &e
 	}
-	e := s.exists
-	return &e
+	// This tick's read failed: the last good answer stands (offsets errors are
+	// "unknown", never "resolved").
+	if st := w.dlqState[c.Topic]; st != nil && st.known {
+		e := st.exists
+		return &e
+	}
+	return nil
 }
 
 func nonNil(s []string) []string {
@@ -489,6 +549,7 @@ type connRisk struct {
 func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs *observation, snaps map[string]dlqSnap, fired map[string][]string) {
 	var found []connRisk
 	var firstErr error
+	existsUnknown := false
 	for _, c := range t.connectors {
 		co := obs.conns[c]
 		switch {
@@ -504,7 +565,11 @@ func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs
 			continue
 		}
 		ec := dlq.Parse(co.cfg)
-		for _, rk := range dlq.Risks(ec, existsOf(ec, snaps)) {
+		ex := w.existsOf(ec, snaps)
+		if ex == nil && ec.IsSink && ec.Topic != "" && obs.dlqErr != nil {
+			existsUnknown = true // dlq_topic_missing cannot be judged this tick
+		}
+		for _, rk := range dlq.Risks(ec, ex) {
 			found = append(found, connRisk{conn: c, risk: rk})
 		}
 	}
@@ -547,6 +612,9 @@ func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs
 		}
 	case firstErr != nil:
 		r = reading{v: vUnknown, err: firstErr}
+	case existsUnknown:
+		// A failed Kafka read must not resolve a finding that needs its answer.
+		r = reading{v: vUnknown, err: obs.dlqErr}
 	default:
 		r = reading{v: vClear, value: "no risk", threshold: th}
 	}
