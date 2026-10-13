@@ -423,26 +423,37 @@ func TestAttack_IdentitySpoofOIDC(t *testing.T) {
 func TestAttack_SessionOutlivesSubPin(t *testing.T) {
 	e := newOIDCEnv(t, oidcOpts{})
 	now := time.Now().UTC()
-	seed := func(sub string) string {
+	seed := func(sub string) (cookie, id string) {
 		token, hash, err := auth.NewToken()
 		if err != nil {
 			t.Fatal(err)
 		}
+		id = room.NewID("ses_")
 		if err := e.sessions.Create(context.Background(), auth.Session{
-			ID: room.NewID("ses_"), TokenHash: hash, UserID: "arjun", Name: "Arjun", Method: auth.MethodOIDC,
+			ID: id, TokenHash: hash, UserID: "arjun", Name: "Arjun", Method: auth.MethodOIDC,
 			Iss: e.idp.Issuer, Sub: sub, CreatedAt: now, LastSeenAt: now, ExpiresAt: now.Add(time.Hour),
 		}); err != nil {
 			t.Fatal(err)
 		}
-		return "Cookie: " + auth.OIDCSessionCookie + "=" + token
+		return "Cookie: " + auth.OIDCSessionCookie + "=" + token, id
 	}
-	resp := e.do(t, http.MethodGet, "/api/me", "", seed("recycled-account"))
+	recycled, recycledID := seed("recycled-account")
+	resp := e.do(t, http.MethodGet, "/api/me", "", recycled)
 	wantStatus(t, resp, http.StatusUnauthorized)
 	if c, _ := errCode(t, resp); c != "session_expired" {
 		t.Fatalf("code = %q", c)
 	}
 	// The pinned account itself is fine.
-	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", seed("sub-arjun")), http.StatusOK)
+	pinned, pinnedID := seed("sub-arjun")
+	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", pinned), http.StatusOK)
+	// The WebSocket presence tick (sessionAlive) applies the same pin: the
+	// recycled account's connection is closed, the pinned one's stays open.
+	if e.api.SessionAliveForTest(context.Background(), recycledID) {
+		t.Error("presence tick: the recycled account's session is still alive")
+	}
+	if !e.api.SessionAliveForTest(context.Background(), pinnedID) {
+		t.Error("presence tick: the pinned account's session was closed")
+	}
 	// A users.yaml user with no pin is not affected by the rule (priya binds by email).
 	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", ck(e.mustLogin(t, idpPriya))), http.StatusOK)
 }
@@ -465,22 +476,24 @@ func TestAttack_NameClaimBidiOverride(t *testing.T) {
 	}
 }
 
-// A-ID-5 (design, documented). An admin unbinds priya's identity because the
-// mailbox was recycled (design section 2.1, "Unbind"). The unbind removes the
-// identities row but not the sessions that row produced: the old account keeps
-// acting as priya until idle or absolute expiry. This test pins the current
-// behaviour; see the report for the proposed fix.
+// A-ID-5 (fixed). An admin unbinds priya's identity because the mailbox was
+// recycled (design section 2.1, "Unbind"). The unbind now also revokes the
+// sessions that account holds, so it stops acting as priya at once.
 func TestAttack_UnbindLeavesSessionsAlive(t *testing.T) {
 	e := newOIDCEnv(t, oidcOpts{})
 	old := e.mustLogin(t, idpPriya)
 	if me := e.me(t, old); me["id"] != "priya" {
 		t.Fatalf("me = %v", me)
 	}
-	if n, err := e.idents.Unbind(context.Background(), "priya"); err != nil || n != 1 {
-		t.Fatalf("unbind = %d, %v", n, err)
+	// A bystander's session must survive the unbind.
+	kabir := e.mustLogin(t, testenv.IDPUser{Sub: "sub-kabir"})
+	r, err := e.idents.Unbind(context.Background(), "priya", time.Now())
+	if err != nil || r.Unbound != 1 || r.Revoked != 1 {
+		t.Fatalf("unbind = %+v, %v; want 1 binding and 1 session", r, err)
 	}
-	if me := e.me(t, old); me["id"] != "priya" {
-		t.Fatalf("design changed? the old session is %v after unbind", me)
+	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", ck(old)), http.StatusUnauthorized)
+	if me := e.me(t, kabir); me["id"] != "kabir" {
+		t.Fatalf("bystander session = %v", me)
 	}
 }
 
