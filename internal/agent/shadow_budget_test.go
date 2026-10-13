@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -204,5 +205,73 @@ func TestPlainRunNeverReportsUsage(t *testing.T) {
 	}
 	if len(u.calls) != 0 {
 		t.Fatalf("Usage calls = %v, want none outside Endpoint.Run", u.calls)
+	}
+}
+
+// forgettingModel drops the room's entry mid-run, as the room-closed hook does
+// when a room closes while its run is still going.
+type forgettingModel struct {
+	ep   *Endpoint
+	room string
+	turn anthropic.BetaMessage
+}
+
+func (m *forgettingModel) Turn(context.Context, anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
+	m.ep.Forget(m.room)
+	return m.turn, nil
+}
+
+func TestEndpointRunUsageReportsTheRunsOwnEntryAfterForget(t *testing.T) {
+	m := &forgettingModel{room: "r", turn: mustMessage(t, `{"stop_reason":"end_turn","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":80,"output_tokens":30}}`)}
+	ep := testEndpoint(m, 0)
+	m.ep = ep
+	u := &usageRecorder{}
+	if err := runEndpoint(ep, "r", Deps{Usage: u.fn}, Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	u.once(t, 110)
+}
+
+// TestTokenBudgetLimitIsGuardedByTheMutex is for -race: a run setting the
+// room's limit while another call on the same entry is admitted must not race.
+func TestTokenBudgetLimitIsGuardedByTheMutex(t *testing.T) {
+	ep := testEndpoint(&scriptedModel{}, 1000)
+	b := ep.budget("r")
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = b.admit(1)
+		}()
+		go func(n int64) {
+			defer wg.Done()
+			<-start
+			if got := ep.budgetWithLimit("r", n); got != b {
+				t.Errorf("budgetWithLimit returned a different entry")
+			}
+		}(int64(100 + i))
+	}
+	close(start)
+	wg.Wait()
+	if l := b.Limit(); l < 100 || l >= 150 {
+		t.Fatalf("limit = %d, want one of the run limits 100..149", l)
+	}
+}
+
+func TestBudgetErrorTextNamesTheSourceOfTheCap(t *testing.T) {
+	env := newTokenBudget(100)
+	env.record(usageTokens{input: 100}, true)
+	if err := env.admit(0); err == nil || !strings.Contains(err.Error(), budgetEnv) {
+		t.Fatalf("env cap: %v, want the text to name %s", err, budgetEnv)
+	}
+	run := newTokenBudget(1000)
+	run.setLimit(100)
+	run.record(usageTokens{input: 100}, true)
+	err := run.admit(0)
+	if err == nil || strings.Contains(err.Error(), budgetEnv) || !strings.Contains(err.Error(), "token budget reached (100 of 100)") {
+		t.Fatalf("run cap: %v, want neutral text without %s", err, budgetEnv)
 	}
 }
