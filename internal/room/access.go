@@ -76,7 +76,9 @@ func (s *Service) LayersFor(u User) []string {
 	fromOwners := s.owners.LayersFor(u.ID, u.Groups)
 	out := []string{}
 	for _, l := range events.Layers {
-		if slices.Contains(u.Layers, l) || slices.Contains(fromOwners, l) {
+		// A users.yaml layer counts only where authorizeLayer would honour it,
+		// so the UI never shows an approve button that answers 403.
+		if (slices.Contains(u.Layers, l) && s.ownersNameUser(l, u.ID)) || slices.Contains(fromOwners, l) {
 			out = append(out, l)
 		}
 	}
