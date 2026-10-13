@@ -1,9 +1,8 @@
-import { ChevronRight, CornerDownLeft, LogIn } from 'lucide-react'
+import { ChevronRight, LogIn } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { Kbd } from '@/components/ui/kbd'
 import { DEV_USERS } from '../dev/users'
 import { envLabel } from '@/lib/envLabel'
 import { initials, personColor } from '@/lib/people'
@@ -67,7 +66,7 @@ export function LoginScreen({
         </div>
 
         <ul className="-mx-1 flex flex-col gap-0.5" aria-label="Dev users">
-          {DEV_USERS.map((u, i) => {
+          {DEV_USERS.map((u) => {
             const viewer = u.role === 'viewer'
             return (
               <li key={u.id}>
@@ -78,7 +77,7 @@ export function LoginScreen({
                   // Name is the person's name alone; the layers are in the description.
                   aria-label={u.name}
                   aria-describedby={`dev-user-${u.id}-layers`}
-                  className="flex h-11 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex min-h-11 w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Avatar className="size-7">
                     <AvatarFallback className="text-[11px]" style={{ backgroundColor: personColor(u.id) }} aria-hidden="true">
@@ -97,13 +96,7 @@ export function LoginScreen({
                       ))
                     )}
                   </span>
-                  {i === 0 ? (
-                    <Kbd className="ml-auto" aria-hidden="true">
-                      <CornerDownLeft className="size-3" />
-                    </Kbd>
-                  ) : (
-                    <ChevronRight className="ml-auto size-4 shrink-0 text-subtle-foreground" aria-hidden="true" />
-                  )}
+                  <ChevronRight className="ml-auto size-4 shrink-0 text-subtle-foreground" aria-hidden="true" />
                 </button>
               </li>
             )

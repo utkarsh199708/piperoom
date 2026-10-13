@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { ChevronRight, Menu } from 'lucide-react'
 import { Link, Outlet, useLocation } from 'react-router-dom'
@@ -8,13 +8,32 @@ import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useTheme } from '@/context/theme'
 import { useRoomList } from '@/hooks/useRoomList'
-import { CommandMenu } from './CommandMenu'
 import { InShellContext, RoomCommandsContext, TopBarSlotContext } from './context'
 import type { RoomCommandRegistry, RoomCommands } from './context'
+import { isEditableTarget } from './keys'
 import { pipelineSummaries } from './pipelines'
 import { BrandMark } from './BrandMark'
 import { SidebarContent } from './Sidebar'
 import { ThemeToggle } from './ThemeToggle'
+
+// cmdk and the menu are only needed once it is opened: a separate chunk.
+const CommandMenu = lazy(() => import('./CommandMenu').then((m) => ({ default: m.CommandMenu })))
+
+// True from 768px (Tailwind md). Without matchMedia (tests) it is true.
+function useIsDesktop(): boolean {
+  const query = '(min-width: 768px)'
+  const [matches, setMatches] = useState(() =>
+    typeof window.matchMedia === 'function' ? window.matchMedia(query).matches : true,
+  )
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const mq = window.matchMedia(query)
+    const onChange = () => setMatches(mq.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
+  return matches
+}
 
 // The app frame (docs/design/ui-v2 Main.dc.html): sidebar, a top bar with a slot for
 // screen controls, and the routed screen. Below 768px the sidebar is a drawer.
@@ -26,6 +45,10 @@ export function AppShell() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [navOpen, setNavOpen] = useState(false)
   const [slotEl, setSlotEl] = useState<HTMLElement | null>(null)
+  // Bumps on every navigation; the sidebar row of the open room's pipeline refetches on it.
+  const [navKey, setNavKey] = useState(0)
+  // The palette's chunk loads on first open and stays.
+  const [paletteLoaded, setPaletteLoaded] = useState(false)
 
   // The sidebar's room count and pipeline list follow navigation (a room opened, a
   // room closed), because the list call has no live feed. Skip the first run: the
@@ -36,8 +59,11 @@ export function AppShell() {
       firstPath.current = false
       return
     }
-    void reload()
-  }, [location.pathname, reload])
+    setNavKey((k) => k + 1)
+  }, [location.pathname])
+  useEffect(() => {
+    if (navKey > 0) void reload()
+  }, [navKey, reload])
 
   // The open room's callbacks, written by RoomScreen on every render and read by the menu.
   const roomCommands = useRef<RoomCommands | null>(null)
@@ -53,12 +79,17 @@ export function AppShell() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Not while an IME is composing, and not on key repeat (a held key would flicker the menu).
+      if (e.isComposing || e.repeat) return
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return
       const key = e.key.toLowerCase()
       if (key === 'k' && !e.shiftKey) {
+        // The one shortcut that works everywhere, also inside a text field.
         e.preventDefault()
         setPaletteOpen((o) => !o)
       } else if (key === 'l' && e.shiftKey) {
+        // Anything else never fires while the person is typing.
+        if (isEditableTarget(e.target)) return
         e.preventDefault()
         toggleTheme()
       }
@@ -67,24 +98,25 @@ export function AppShell() {
     return () => window.removeEventListener('keydown', onKey)
   }, [toggleTheme])
 
-  // The drawer only exists below md: close it if the window grows past that.
+  // The sidebar exists once: the fixed column from md up, the drawer below. Only the one on
+  // screen is mounted, so only it polls pipeline health.
+  const desktop = useIsDesktop()
   useEffect(() => {
-    if (typeof window.matchMedia !== 'function') return
-    const mq = window.matchMedia('(min-width: 768px)')
-    const onChange = () => {
-      if (mq.matches) setNavOpen(false)
-    }
-    mq.addEventListener('change', onChange)
-    return () => mq.removeEventListener('change', onChange)
-  }, [])
+    if (desktop) setNavOpen(false)
+  }, [desktop])
 
   const openPalette = useCallback(() => {
     setNavOpen(false)
     setPaletteOpen(true)
   }, [])
+  useEffect(() => {
+    if (paletteOpen) setPaletteLoaded(true)
+  }, [paletteOpen])
 
   const openRooms = rooms.filter((r) => r.status === 'open').length
   const pipelines = useMemo(() => pipelineSummaries(rooms), [rooms])
+  const roomId = location.pathname.startsWith('/rooms/') ? safeDecode(location.pathname.split('/')[2] ?? '') : ''
+  const currentPipelineId = rooms.find((r) => r.id === roomId)?.pipeline_id
 
   return (
     <InShellContext.Provider value>
@@ -99,11 +131,19 @@ export function AppShell() {
                 Skip to content
               </a>
 
-              <aside className="hidden w-60 shrink-0 border-r border-sidebar-border md:block" aria-label="Sidebar">
-                <SidebarContent openRooms={openRooms} pipelines={pipelines} onSearch={openPalette} />
-              </aside>
+              {desktop && (
+                <aside className="w-60 shrink-0 border-r border-sidebar-border" aria-label="Sidebar">
+                  <SidebarContent
+                    openRooms={openRooms}
+                    pipelines={pipelines}
+                    currentPipelineId={currentPipelineId}
+                    navKey={navKey}
+                    onSearch={openPalette}
+                  />
+                </aside>
+              )}
 
-              <DialogPrimitive.Root open={navOpen} onOpenChange={setNavOpen}>
+              <DialogPrimitive.Root open={navOpen && !desktop} onOpenChange={setNavOpen}>
                 <DialogPrimitive.Portal>
                   <DialogOverlay className="md:hidden" />
                   <DialogPrimitive.Content
@@ -114,6 +154,8 @@ export function AppShell() {
                     <SidebarContent
                       openRooms={openRooms}
                       pipelines={pipelines}
+                      currentPipelineId={currentPipelineId}
+                      navKey={navKey}
                       onSearch={openPalette}
                       onNavigate={() => setNavOpen(false)}
                     />
@@ -146,7 +188,11 @@ export function AppShell() {
                 </main>
               </div>
             </div>
-            <CommandMenu open={paletteOpen} onOpenChange={setPaletteOpen} rooms={rooms} registry={registry} />
+            {paletteLoaded && (
+              <Suspense fallback={null}>
+                <CommandMenu open={paletteOpen} onOpenChange={setPaletteOpen} rooms={rooms} registry={registry} />
+              </Suspense>
+            )}
             <Toaster />
           </TooltipProvider>
         </TopBarSlotContext.Provider>

@@ -44,15 +44,17 @@ export function CommandMenu({
   const navigate = useNavigate()
   const { user, logout, busy } = useCurrentUser()
   const { theme, toggleTheme } = useTheme()
-  const ranRef = useRef(false)
+  // What closed the menu: null = Esc or a click outside (focus goes back where it was),
+  // 'dialog' = an action that opens a dialog (it keeps the focus), 'other' = anything else.
+  const closedBy = useRef<'dialog' | 'other' | null>(null)
   const mod = modKeyLabel()
 
   // Read when the menu renders, i.e. when it opens: the room screen wrote it by then.
   const room = open ? registry.get() : null
   const sorted = sortRoomsForList(rooms).slice(0, 25)
 
-  const run = (fn: () => void) => {
-    ranRef.current = true
+  const run = (fn: () => void, opensDialog = false) => {
+    closedBy.current = opensDialog ? 'dialog' : 'other'
     onOpenChange(false)
     // After the menu has closed, so a dialog it opens (hand-off, trace) keeps the focus.
     window.setTimeout(fn, 0)
@@ -62,12 +64,16 @@ export function CommandMenu({
     <CommandDialog
       open={open}
       onOpenChange={(next) => {
-        if (next) ranRef.current = false
+        if (next) closedBy.current = null
         onOpenChange(next)
       }}
-      // Esc or a click outside returns focus to where it was; running an action does not.
+      // Esc or a click outside returns focus to where it was. After a hand-off or trace the
+      // new dialog keeps it; after any other action the page content gets it, because the
+      // thing that opened the menu may be gone (a link followed, a theme switched).
       onCloseAutoFocus={(e) => {
-        if (ranRef.current) e.preventDefault()
+        if (closedBy.current === null) return
+        e.preventDefault()
+        if (closedBy.current === 'other') document.getElementById('main')?.focus()
       }}
     >
       {room && (
@@ -110,7 +116,7 @@ export function CommandMenu({
               <CommandItem
                 value="hand off the room"
                 keywords={['handoff', 'shift', 'transfer']}
-                onSelect={() => run(() => registry.get()?.handoff?.())}
+                onSelect={() => run(() => registry.get()?.handoff?.(), true)}
               >
                 <GitCompareArrows aria-hidden="true" />
                 Hand off the room
@@ -120,7 +126,7 @@ export function CommandMenu({
               <CommandItem
                 value="trace a record through the pipeline"
                 keywords={['record', 'key', 'table']}
-                onSelect={() => run(() => registry.get()?.trace?.())}
+                onSelect={() => run(() => registry.get()?.trace?.(), true)}
               >
                 <Route aria-hidden="true" />
                 Trace a record through the pipeline

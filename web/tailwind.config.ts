@@ -29,6 +29,7 @@ const config: Config = {
         accent: { DEFAULT: token('--accent'), foreground: token('--accent-foreground') },
         border: token('--border'),
         input: token('--input'),
+        'input-border': token('--input-border'),
         ring: token('--ring'),
         sidebar: { DEFAULT: token('--sidebar'), border: token('--sidebar-border') },
         'subtle-foreground': token('--subtle-foreground'),

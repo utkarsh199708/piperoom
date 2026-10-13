@@ -1,6 +1,6 @@
 import { Activity, Inbox, Search, Workflow } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { Link, NavLink } from 'react-router-dom'
+import { NavLink } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
@@ -29,17 +29,32 @@ const DOT: Record<Health, string> = {
 
 // A pipeline row. Its dot is the worst node health from the topology the room screen
 // already uses (useTopology), so the sidebar and the pipeline map agree.
-function PipelineItem({ pipeline, onNavigate }: { pipeline: PipelineSummary; onNavigate?: () => void }) {
-  const { topology } = useTopology(pipeline.id)
+// Not a link yet: the room list has no pipeline filter (U2 adds it, then this becomes one).
+// Polling is kept small on purpose, there is one topology call per pipeline:
+//  - a pipeline that only closed rooms mention is not fetched at all (unknown dot);
+//  - the pipeline of the room on screen is not polled here, the room screen already polls
+//    it; this row refetches once per navigation instead.
+function PipelineItem({
+  pipeline,
+  quiet,
+  navKey,
+}: {
+  pipeline: PipelineSummary
+  /** The open room is on this pipeline: do not run a second 30 s poll. */
+  quiet: boolean
+  navKey: number
+}) {
+  const { topology } = useTopology(pipeline.open > 0 ? pipeline.id : '', {
+    active: !quiet,
+    refreshKey: navKey,
+  })
   const health = pipelineHealth(topology)
   return (
-    <li>
-      <Link to={`/?pipeline=${encodeURIComponent(pipeline.id)}`} className={itemClass} onClick={onNavigate}>
-        <span className={cn('size-1.5 shrink-0 rounded-full', DOT[health])} aria-hidden="true" />
-        <span className="truncate">{pipeline.id}</span>
-        <span className="sr-only">, {HEALTH_LABEL[health]}</span>
-        {pipeline.open > 0 && <Count>{pipeline.open} open</Count>}
-      </Link>
+    <li className={itemClass}>
+      <span className={cn('size-1.5 shrink-0 rounded-full', DOT[health])} aria-hidden="true" />
+      <span className="truncate">{pipeline.id}</span>
+      <span className="sr-only">, {HEALTH_LABEL[health]}</span>
+      {pipeline.open > 0 && <Count>{pipeline.open} open</Count>}
     </li>
   )
 }
@@ -64,11 +79,17 @@ function SoonItem({ icon, label }: { icon: ReactNode; label: string }) {
 export function SidebarContent({
   openRooms,
   pipelines,
+  currentPipelineId,
+  navKey,
   onSearch,
   onNavigate,
 }: {
   openRooms: number
   pipelines: PipelineSummary[]
+  /** The pipeline of the room on screen, if any. */
+  currentPipelineId?: string
+  /** Changes on every navigation: the quiet row refetches. */
+  navKey: number
   onSearch: () => void
   /** Called after a link is followed, so the phone drawer can close. */
   onNavigate?: () => void
@@ -125,13 +146,11 @@ export function SidebarContent({
           <div className="px-4 pb-1.5 pt-5 text-xs font-medium text-subtle-foreground" id="sidebar-pipelines">
             Pipelines
           </div>
-          <nav aria-labelledby="sidebar-pipelines" className="min-h-0 overflow-y-auto px-2">
-            <ul className="flex flex-col gap-0.5">
-              {pipelines.map((p) => (
-                <PipelineItem key={p.id} pipeline={p} onNavigate={onNavigate} />
-              ))}
-            </ul>
-          </nav>
+          <ul aria-labelledby="sidebar-pipelines" className="flex min-h-0 flex-col gap-0.5 overflow-y-auto px-2">
+            {pipelines.map((p) => (
+              <PipelineItem key={p.id} pipeline={p} quiet={p.id === currentPipelineId} navKey={navKey} />
+            ))}
+          </ul>
         </>
       )}
 

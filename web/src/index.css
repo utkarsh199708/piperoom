@@ -42,7 +42,8 @@
   --destructive: #d34247; /* handoff #e5484d: darker for white text at 4.5:1 */
   --destructive-foreground: #ffffff;
   --border: #222228;
-  --input: #2d2d35;
+  --input: #2d2d35; /* decorative edges */
+  --input-border: #6e6e78; /* edges of text fields: 3:1 on the page (WCAG 1.4.11) */
   --ring: #5b7cfa;
   --sidebar: #0e0e10;
   --sidebar-border: #222228;
@@ -106,20 +107,21 @@
   --destructive-foreground: #ffffff;
   --border: #e4e4e7;
   --input: #d4d4d8;
+  --input-border: #85858e;
   --ring: #4f6ef2;
   --sidebar: #fafafa;
   --sidebar-border: #e4e4e7;
 
   --subtle-foreground: #6a6a73; /* handoff #71717a is 4.4:1 on muted */
   --primary-subtle: rgb(79 110 242 / 0.1);
-  --primary-fg: #3b5bdb;
+  --primary-fg: #3856d0;
   --success: #1f9d5f;
   --success-solid: #1b8752;
   --success-subtle: rgb(31 157 95 / 0.12);
-  --success-foreground: #157d3c; /* handoff #15803d: 4.4:1 on its tint */
+  --success-foreground: #126e35; /* handoff #15803d: 4.4:1 on its tint, less on hover rows */
   --warning: #c58f0a;
   --warning-subtle: rgb(197 143 10 / 0.12);
-  --warning-foreground: #946605; /* handoff #9a6a05: 4.2:1 on its tint */
+  --warning-foreground: #815904; /* handoff #9a6a05: 4.2:1 on its tint */
   --danger-subtle: rgb(220 61 67 / 0.1);
   --danger-foreground: #b91c1c;
   --info: #2b7fff;
@@ -128,13 +130,13 @@
   --agent: #7c4ddc;
   --agent-subtle: rgb(124 77 220 / 0.1);
   --agent-foreground: #6d28d9;
-  /* Layer text on its own 12% tint was 3.7-4.4:1 for five of six; each is a few % darker now. */
-  --layer-postgres: #1b68cb;
-  --layer-kafka-connect: #a75409;
-  --layer-schema-registry: #0d7868;
-  --layer-kafka: #bc356b;
-  --layer-consumer: #55760c;
-  --layer-warehouse: #4a5fd0;
+  /* Tinted text must hold 4.5:1 on its own tint AND on the hover/selected rows (--accent #ececee, --muted, sidebar). */
+  --layer-postgres: #185eb7;
+  --layer-kafka-connect: #964c08;
+  --layer-schema-registry: #0c6c5e;
+  --layer-kafka: #a93060;
+  --layer-consumer: #4c690b;
+  --layer-warehouse: #4356bd;
 
   --overlay: rgb(24 24 27 / 0.45);
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.08);
@@ -163,19 +165,20 @@
     --destructive: #d83c42;
     --border: #e4e4e7;
     --input: #d4d4d8;
+    --input-border: #85858e;
     --ring: #4f6ef2;
     --sidebar: #fafafa;
     --sidebar-border: #e4e4e7;
     --subtle-foreground: #6a6a73;
     --primary-subtle: rgb(79 110 242 / 0.1);
-    --primary-fg: #3b5bdb;
+    --primary-fg: #3856d0;
     --success: #1f9d5f;
     --success-solid: #1b8752;
     --success-subtle: rgb(31 157 95 / 0.12);
-    --success-foreground: #157d3c;
+    --success-foreground: #126e35;
     --warning: #c58f0a;
     --warning-subtle: rgb(197 143 10 / 0.12);
-    --warning-foreground: #946605;
+    --warning-foreground: #815904;
     --danger-subtle: rgb(220 61 67 / 0.1);
     --danger-foreground: #b91c1c;
     --info: #2b7fff;
@@ -184,12 +187,12 @@
     --agent: #7c4ddc;
     --agent-subtle: rgb(124 77 220 / 0.1);
     --agent-foreground: #6d28d9;
-    --layer-postgres: #1b68cb;
-    --layer-kafka-connect: #a75409;
-    --layer-schema-registry: #0d7868;
-    --layer-kafka: #bc356b;
-    --layer-consumer: #55760c;
-    --layer-warehouse: #4a5fd0;
+    --layer-postgres: #185eb7;
+    --layer-kafka-connect: #964c08;
+    --layer-schema-registry: #0c6c5e;
+    --layer-kafka: #a93060;
+    --layer-consumer: #4c690b;
+    --layer-warehouse: #4356bd;
     --overlay: rgb(24 24 27 / 0.45);
     --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.08);
     --shadow-md: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 24px rgb(0 0 0 / 0.08);

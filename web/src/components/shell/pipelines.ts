@@ -8,9 +8,12 @@ export interface PipelineSummary {
 
 /**
  * The server has no "list pipelines" call, so the sidebar lists the pipelines that
- * rooms mention. Most open rooms first, then by name.
+ * rooms mention. Most open rooms first, then by name; at most 10 (each row costs
+ * one topology call).
  */
-export function pipelineSummaries(rooms: RoomSnapshot[]): PipelineSummary[] {
+export const MAX_SIDEBAR_PIPELINES = 10
+
+export function pipelineSummaries(rooms: RoomSnapshot[], limit = MAX_SIDEBAR_PIPELINES): PipelineSummary[] {
   const counts = new Map<string, number>()
   for (const r of rooms) {
     if (!r.pipeline_id) continue
@@ -19,6 +22,7 @@ export function pipelineSummaries(rooms: RoomSnapshot[]): PipelineSummary[] {
   return [...counts.entries()]
     .map(([id, open]) => ({ id, open }))
     .sort((a, b) => b.open - a.open || a.id.localeCompare(b.id))
+    .slice(0, limit)
 }
 
 export type Health = 'ok' | 'warn' | 'fail' | 'unknown'
