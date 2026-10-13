@@ -287,6 +287,26 @@ func wantError(t *testing.T, resp *http.Response, status int, code string) {
 	}
 }
 
+// joined waits until the connection has seen a presence frame that lists
+// userID. The gateway registers a connection only after its replay, so a
+// presence tick (or CloseSession) that runs before this would find nothing to
+// close; the real tick runs again 20 s later, a test has to wait instead.
+func joined(t *testing.T, conn *websocket.Conn, userID string) {
+	t.Helper()
+	readUntil(t, conn, "presence listing "+userID, func(m map[string]any) bool {
+		if m["type"] != "presence" {
+			return false
+		}
+		ms, _ := m["members"].([]any)
+		for _, raw := range ms {
+			if mm, _ := raw.(map[string]any); mm["id"] == userID {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func dialRoom(t *testing.T, e *oidcEnv, roomID string, c *http.Cookie) *websocket.Conn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -384,7 +404,9 @@ func TestLifecycle_UnbindEndsSessionsAndSockets(t *testing.T) {
 	priya := signIn(t, e, auth.ModeOIDC, "priya")
 	kabir := signIn(t, e, auth.ModeOIDC, "kabir")
 	pConn := dialRoom(t, e, snap.ID, priya)
+	joined(t, pConn, "priya")
 	kConn := dialRoom(t, e, snap.ID, kabir)
+	joined(t, kConn, "kabir")
 	pID, kID := sessionID(t, e, priya), sessionID(t, e, kabir)
 	pid := e.proposal(t, snap.ID, "postgres")
 	hash := e.hash(t, pid)
