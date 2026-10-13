@@ -45,12 +45,77 @@ const (
 	hExcTrace   = "exception.stacktrace"
 )
 
-// identRE is the shape of every header value shown in "classes" mode: a Java
-// class name, a stage constant, a connector name, a task id. Anything else
-// (a value somebody wrote into a header to carry text) is shown as "?" and
-// counted as "other", so the fixed-vocabulary promise holds even when the
-// writer of the DLQ record is not Connect.
-var identRE = regexp.MustCompile(`^[A-Za-z0-9_$][A-Za-z0-9_$.:\-]{0,119}$`)
+// Header values are written by whoever produced the DLQ record, so each field
+// is checked against the narrowest shape its real values have. A value that
+// fails is shown as "?": the fixed-vocabulary promise holds even when the
+// writer is not Connect, and a digit string, hex or base64 cannot pass for a
+// Java class name.
+var (
+	// fqcnRE is a Java fully qualified class name.
+	fqcnRE = regexp.MustCompile(`^([A-Za-z_$][A-Za-z0-9_$]*\.)*[A-Za-z_$][A-Za-z0-9_$]*$`)
+	// identRE is a plain name, for a connector name when there is no
+	// pipeline to compare it with.
+	identRE = regexp.MustCompile(`^[A-Za-z_$][A-Za-z0-9_$.\-]{0,119}$`)
+)
+
+const maxClassNameLen = 200
+
+// connectStages are the values of __connect.errors.stage
+// (org.apache.kafka.connect.runtime.errors.Stage).
+var connectStages = map[string]bool{
+	"KEY_CONVERTER": true, "VALUE_CONVERTER": true, "HEADER_CONVERTER": true, "TRANSFORMATION": true,
+	"TASK_PUT": true, "TASK_POLL": true, "KAFKA_PRODUCE": true, "KAFKA_CONSUME": true,
+}
+
+// className returns v when it is a Java class name, "?" otherwise.
+func className(v string) string {
+	if len(v) > maxClassNameLen || !fqcnRE.MatchString(v) {
+		return "?"
+	}
+	return v
+}
+
+// operatorClassName is className plus the shape of a real operator class (a
+// converter, a transformation): a package, then a capitalised class name. A
+// bare word, hex or base64 string has no package and is refused. A dotted,
+// capitalised name made up by a writer still passes; that is the residual the
+// PR states.
+func operatorClassName(v string) string {
+	if className(v) == "?" {
+		return "?"
+	}
+	i := strings.LastIndexByte(v, '.')
+	if i < 1 || i == len(v)-1 {
+		return "?"
+	}
+	if c := v[i+1]; c < 'A' || c > 'Z' {
+		return "?"
+	}
+	return v
+}
+
+// excClassName is className plus the rule that a throwable's simple name ends
+// in Exception, Error or Throwable.
+func excClassName(v string) string {
+	if className(v) == "?" {
+		return "?"
+	}
+	last := v[strings.LastIndexByte(v, '.')+1:]
+	for _, suf := range []string{"Exception", "Error", "Throwable"} {
+		if strings.HasSuffix(last, suf) {
+			return v
+		}
+	}
+	return "?"
+}
+
+// stageName returns v when it is one of Connect's stages, "?" otherwise.
+func stageName(v string) string {
+	if connectStages[v] {
+		return v
+	}
+	return "?"
+}
 
 type dlqPeek struct{ d Deps }
 
@@ -118,6 +183,7 @@ type dlqData struct {
 	ContextHeaders      *bool           `json:"context_headers,omitempty"`
 	HeaderMode          string          `json:"header_mode"`
 	NewInWindow         *int64          `json:"new_in_window,omitempty"`
+	Window              string          `json:"window,omitempty"`
 	Risks               []string        `json:"risks,omitempty"`
 }
 
@@ -177,7 +243,9 @@ func (t *dlqPeek) Run(ctx context.Context, input json.RawMessage) (tools.Result,
 			return res(sb.String(), data), nil
 		}
 	} else {
-		data.Declared = true
+		// Scoped, CheckDLQTopic passed above, so the topic is declared.
+		// Unscoped (CLI, dev) the declaration is not known.
+		data.Declared = !sc.Unscoped()
 		data.Writer = declaredWriter(sc, topic)
 	}
 	data.Topic = topic
@@ -195,8 +263,9 @@ func (t *dlqPeek) Run(ctx context.Context, input json.RawMessage) (tools.Result,
 		data.Risks = dlq.Codes(risks)
 	}
 	if t.d.DLQStats != nil {
-		if n, _, ok := t.d.DLQStats(topic); ok {
+		if n, w, ok := t.d.DLQStats(topic); ok {
 			data.NewInWindow = &n
+			data.Window = windowText(w)
 		}
 	}
 
@@ -241,7 +310,7 @@ func (t *dlqPeek) Run(ctx context.Context, input json.RawMessage) (tools.Result,
 			withHeaders++
 		}
 		if c, ok := h[hExcClass]; ok {
-			data.ExceptionClassCount[ident(c)]++
+			data.ExceptionClassCount[excClassName(c)]++
 		}
 		if data.NewestTimestamp == nil || r.Timestamp.After(*data.NewestTimestamp) {
 			ts := r.Timestamp
@@ -314,12 +383,46 @@ func filterWriters(recs []clients.DLQRecord, sc tools.Scope) ([]clients.DLQRecor
 	return kept, other
 }
 
-// ident returns v when it has the shape of an identifier and "?" otherwise.
-func ident(v string) string {
-	if identRE.MatchString(v) {
+// connectorName shows a connector.name header only when it is one of the
+// pipeline's connectors (scoped) or has the shape of a name (unscoped).
+func connectorName(v string, sc tools.Scope) string {
+	if sc.Unscoped() {
+		if identRE.MatchString(v) {
+			return v
+		}
+		return "?"
+	}
+	if sc.CheckConnector(v) == nil {
 		return v
 	}
 	return "?"
+}
+
+// windowText renders the watcher's window ("1h", "90m").
+func windowText(w time.Duration) string {
+	switch {
+	case w >= time.Hour && w%time.Hour == 0:
+		return fmt.Sprintf("%dh", int(w/time.Hour))
+	case w >= time.Minute && w%time.Minute == 0:
+		return fmt.Sprintf("%dm", int(w/time.Minute))
+	}
+	return w.String()
+}
+
+// firstLine cuts s at the first line break of any kind (\r, \n, U+0085,
+// U+2028, U+2029, and the vertical tab and form feed): a stack trace must not
+// bring a second line into the summary through an unusual separator.
+func firstLine(s string) string {
+	if i := strings.IndexFunc(s, func(r rune) bool {
+		switch r {
+		case '\r', '\n', '\v', '\f', '\u0085', ' ', ' ':
+			return true
+		}
+		return false
+	}); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 func describeTopic(topic string, d dlqData) string {
@@ -342,15 +445,29 @@ func (t *dlqPeek) summary(topic string, d dlqData, recs []clients.DLQRecord, wit
 	fmt.Fprintf(&sb, "%s: %d records in %d partitions", describeTopic(topic, d), d.Records, d.Partitions)
 	switch {
 	case d.NewInWindow != nil:
-		fmt.Fprintf(&sb, ", %d new in the watcher's window", *d.NewInWindow)
+		fmt.Fprintf(&sb, ", %d new in the last %s", *d.NewInWindow, d.Window)
 	default:
-		sb.WriteString(", arrival rate unknown (no watcher in this process)")
+		sb.WriteString(", last hour: unknown (no watcher in this process)")
 	}
 	if d.NewestTimestamp != nil {
 		fmt.Fprintf(&sb, "; newest %s", d.NewestTimestamp.UTC().Format(time.RFC3339))
 	}
 	if d.OtherWriters > 0 {
-		fmt.Fprintf(&sb, "\n%d sampled records written by other connectors were left out", d.OtherWriters)
+		// The record count and rate above are for the whole topic, and the
+		// filter runs after PeekDLQ(limit): the newest records may all belong
+		// to other connectors, leaving fewer than limit to show.
+		fmt.Fprintf(&sb, "\n%d sampled records written by other connectors were left out; counts above are for the whole topic, which other connectors share", d.OtherWriters)
+	}
+	if !sc.Unscoped() {
+		noName := 0
+		for _, r := range recs {
+			if _, ok := connectHeaders(r.Headers)[hConnector]; !ok {
+				noName++
+			}
+		}
+		if noName > 0 {
+			fmt.Fprintf(&sb, "\n%d shown records have no connector.name header, so they may belong to another connector", noName)
+		}
 	}
 	if len(recs) == 0 {
 		if d.Records > 0 {
@@ -396,7 +513,7 @@ func (t *dlqPeek) summary(topic string, d dlqData, recs []clients.DLQRecord, wit
 	fmt.Fprintf(&sb, "\nnewest %d:", len(recs))
 	for _, r := range recs {
 		sb.WriteString("\n  ")
-		sb.WriteString(recordLine(r, d.HeaderMode))
+		sb.WriteString(recordLine(r, d.HeaderMode, sc))
 	}
 	return sb.String()
 }
@@ -404,28 +521,28 @@ func (t *dlqPeek) summary(topic string, d dlqData, recs []clients.DLQRecord, wit
 // recordLine renders one record for the mode. In counts_only it holds the
 // partition, offset and timestamp. In classes it adds header values that pass
 // identRE (or are numbers). Messages mode adds the redacted free text.
-func recordLine(r clients.DLQRecord, mode string) string {
+func recordLine(r clients.DLQRecord, mode string, sc tools.Scope) string {
 	line := fmt.Sprintf("p%d@%d %s", r.Partition, r.Offset, r.Timestamp.UTC().Format(time.RFC3339))
 	if mode == owners.DLQHeadersCountsOnly {
 		return line
 	}
 	h := connectHeaders(r.Headers)
 	if v, ok := h[hExcClass]; ok {
-		line += " " + ident(v)
+		line += " " + excClassName(v)
 	}
 	if v, ok := h[hStage]; ok {
-		line += " stage=" + ident(v)
+		line += " stage=" + stageName(v)
 	}
 	if v, ok := h[hClassName]; ok {
-		line += " class=" + ident(v)
+		line += " class=" + operatorClassName(v)
 	}
 	if v, ok := h[hConnector]; ok {
-		line += " connector=" + ident(v)
+		line += " connector=" + connectorName(v, sc)
 	}
 	if v, ok := h[hTask]; ok {
 		line += " task=" + numOrQ(v)
 	}
-	if orig := origin(h); orig != "" {
+	if orig := origin(h, sc); orig != "" {
 		line += " from " + orig
 	}
 	if mode == owners.DLQHeadersMessages {
@@ -435,8 +552,7 @@ func recordLine(r clients.DLQRecord, mode string) string {
 			line += fmt.Sprintf(" msg=%q", dlq.RedactMessage(v))
 		}
 		if v, ok := h[hExcTrace]; ok && strings.TrimSpace(v) != "" {
-			first, _, _ := strings.Cut(v, "\n")
-			line += fmt.Sprintf(" trace=%q", dlq.RedactMessage(first))
+			line += fmt.Sprintf(" trace=%q", dlq.RedactMessage(firstLine(v)))
 		}
 	}
 	return line
@@ -444,12 +560,17 @@ func recordLine(r clients.DLQRecord, mode string) string {
 
 // origin renders the original topic/partition@offset, or "" when the headers
 // do not carry a well-formed one.
-func origin(h map[string]string) string {
+func origin(h map[string]string, sc tools.Scope) string {
 	tp, ok := h[hTopic]
 	if !ok || !dlq.ValidTopic(tp) {
 		return ""
 	}
-	out := tp
+	// The topic is shown only when it is one of this pipeline's topics: the
+	// header is writer-controlled and could name anything.
+	out := "?"
+	if sc.CheckTopic(tp) == nil {
+		out = tp
+	}
 	if p, ok := h[hPartition]; ok {
 		out += "/" + numOrQ(p)
 	}

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"piperoom/internal/dlq"
 	"piperoom/internal/owners"
 )
 
@@ -97,7 +98,7 @@ func (a *updateConnectorConfig) allowList() map[string]map[string]bool {
 func (a *updateConnectorConfig) Name() string  { return "connect_update_connector_config" }
 func (a *updateConnectorConfig) Layer() string { return "kafka-connect" }
 func (a *updateConnectorConfig) Describe() string {
-	return "Changes one setting that sets the connector's output schema or precision: decimal.handling.mode precise|double|string; time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, on a sink connector, errors.log.enable true and errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks. To undo an output setting, set the old value."
+	return "Changes one setting that sets the connector's output schema or precision: decimal.handling.mode precise|double|string; time.precision.mode adaptive|adaptive_time_microseconds|connect; tombstones.on.delete true|false; and, errors.log.enable true (refused while errors.log.include.messages is true) and, on a sink connector only, errors.deadletterqueue.context.headers.enable true (they add worker-log lines and Connect error headers on DLQ records; they never change which records are kept). Output settings take effect for new events only; events already emitted keep the old form. Connect restarts the tasks. To undo an output setting, set the old value."
 }
 func (a *updateConnectorConfig) ParamsSchema() map[string]any {
 	// propose_fix no longer inlines this schema into the strict request (the
@@ -148,7 +149,36 @@ func (a *updateConnectorConfig) Validate(raw json.RawMessage) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	return a.d.connectorExists(ctx, p.Connector)
+	if err := a.d.connectorExists(ctx, p.Connector); err != nil {
+		return err
+	}
+	if p.Key != dlq.KeyLogEnable && p.Key != dlq.KeyContextHeaders {
+		return nil
+	}
+	cfg, err := a.d.Connect.Config(ctx, p.Connector)
+	if err != nil {
+		return fmt.Errorf("actions: read config of %s: %w", p.Connector, err)
+	}
+	return checkVisibilityGuard(p, cfg)
+}
+
+// checkVisibilityGuard refuses the two errors.* switches where they would not
+// be "visibility only": errors.log.enable=true on a connector that already has
+// errors.log.include.messages=true starts writing record keys and values into
+// the worker log, and the DLQ context headers exist only on sink connectors.
+func checkVisibilityGuard(p updateConnectorConfigParams, cfg map[string]string) error {
+	ec := dlq.Parse(cfg)
+	switch p.Key {
+	case dlq.KeyLogEnable:
+		if ec.LogMessages {
+			return fmt.Errorf("actions: %s=true is refused on %s: errors.log.include.messages is true, so enabling the error log would write failed record values into the worker log; turn errors.log.include.messages off first", p.Key, p.Connector)
+		}
+	case dlq.KeyContextHeaders:
+		if !ec.IsSink {
+			return fmt.Errorf("actions: %s only applies to a sink connector; %s is not one", p.Key, p.Connector)
+		}
+	}
+	return nil
 }
 
 func (a *updateConnectorConfig) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
@@ -189,6 +219,12 @@ func (a *updateConnectorConfig) Execute(ctx context.Context, raw json.RawMessage
 	before, err := a.d.Connect.Config(ctx, p.Connector)
 	if err != nil {
 		return "", fmt.Errorf("actions: update config %s: %w", p.Connector, err)
+	}
+	// The state may have changed since Validate: check again on what is there now.
+	if p.Key == dlq.KeyLogEnable || p.Key == dlq.KeyContextHeaders {
+		if err := checkVisibilityGuard(p, before); err != nil {
+			return "", err
+		}
 	}
 	old := configText(before, p.Key)
 	if cur, set := before[p.Key]; set && cur == p.Value {

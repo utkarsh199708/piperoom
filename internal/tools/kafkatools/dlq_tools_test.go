@@ -335,7 +335,7 @@ func TestDLQPeekConnectorResolvesTopic(t *testing.T) {
 	if !k.deadline {
 		t.Fatal("Kafka call had no deadline")
 	}
-	for _, want := range []string{"orders-dlq (DLQ of pg-orders-sink): 55 records in 2 partitions", "arrival rate unknown", "DataException x1", "p1@412 2026-10-13T09:58:00Z DataException stage=VALUE_CONVERTER"} {
+	for _, want := range []string{"orders-dlq (DLQ of pg-orders-sink): 55 records in 2 partitions", "last hour: unknown (no watcher in this process)", "DataException x1", "p1@412 2026-10-13T09:58:00Z DataException stage=VALUE_CONVERTER"} {
 		if !strings.Contains(r.Summary, want) {
 			t.Errorf("summary lacks %q:\n%s", want, r.Summary)
 		}
@@ -551,7 +551,7 @@ func TestDLQPeekStatsFromWatcher(t *testing.T) {
 	d := dlqDeps(t, "", k, defaultCfgs())
 	d.DLQStats = func(topic string) (int64, time.Duration, bool) { return 37, time.Hour, topic == "orders-dlq" }
 	r, err := peekTool(t, d).Run(scoped(), json.RawMessage(`{"connector":"pg-orders-sink"}`))
-	if err != nil || !strings.Contains(r.Summary, "37 new in the watcher's window") || *r.Data.(dlqData).NewInWindow != 37 {
+	if err != nil || !strings.Contains(r.Summary, "37 new in the last 1h") || *r.Data.(dlqData).NewInWindow != 37 {
 		t.Fatalf("%v\n%s", err, r.Summary)
 	}
 }
