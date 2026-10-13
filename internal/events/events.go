@@ -186,6 +186,10 @@ const (
 	UsageRoleMain       = "main"       // an investigation turn on the main model (Options.Model)
 	UsageRoleHandoff    = "handoff"    // the hand-off summary request
 	UsageRoleCompaction = "compaction" // the server-side compaction pass inside a triage or main request
+	// UsageRoleJudge is a model call that grades agent output (an LLM judge of
+	// a hand-off or an eval run). Reserved: nothing emits it until the judges
+	// of #93 and the evals are wired to usage and spend (docs/design/cost.md 2).
+	UsageRoleJudge = "judge"
 )
 
 // AgentUsagePayload is the cost of one model call (docs/design/cost.md). The
