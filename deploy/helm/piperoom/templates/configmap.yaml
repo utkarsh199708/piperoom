@@ -1,0 +1,13 @@
+{{- if not .Values.files.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "piperoom.configMapName" . }}
+  labels:
+    {{- include "piperoom.labels" . | nindent 4 }}
+data:
+  owners.yaml: |
+    {{- .Values.files.owners | nindent 4 }}
+  users.yaml: |
+    {{- .Values.files.users | nindent 4 }}
+{{- end }}
