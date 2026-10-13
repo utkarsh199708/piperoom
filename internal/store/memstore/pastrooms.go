@@ -53,8 +53,9 @@ func (s *Store) EventsOfTypes(ctx context.Context, roomID string, types []events
 	s.mu.Lock()
 	log, ok := s.rooms[roomID]
 	if !ok {
+		// Like Postgres, a room deleted since it was listed has no events.
 		s.mu.Unlock()
-		return nil, fmt.Errorf("memstore: room %q not found: %w", roomID, store.ErrNotFound)
+		return []events.Event{}, nil
 	}
 	var picked []events.Event
 	for _, e := range log.events {

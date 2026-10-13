@@ -56,23 +56,47 @@ func extractTrace(text string) string {
 }
 
 // fingerprints holds the two ids of one trace. Full covers the whole cause
-// chain. Root covers only the final cause, so a query that quotes just the
-// last "Caused by" line still meets the room that had the whole chain.
+// chain. Root covers only the root cause (the last cause that names a class,
+// else the last non-log cause), so a query that quotes just the final "Caused
+// by" line still meets the room that had the whole chain.
 type fingerprints struct {
 	Full, Root string
 }
 
-// fingerprint returns the ids of the trace block in text, and false when text
-// has no trace.
-func fingerprint(text string) (fingerprints, bool) {
+// analyze returns the ids of the trace block in text and the masked template
+// text (record values, hosts and ids replaced by textnorm), which is what gets
+// indexed instead of the raw trace. ok is false when text has no trace.
+func analyze(text string) (fp fingerprints, masked string, ok bool) {
 	block := extractTrace(text)
 	if block == "" {
-		return fingerprints{}, false
+		return fingerprints{}, "", false
 	}
 	t := textnorm.Normalize(block)
 	if len(t.Causes) == 0 {
-		return fingerprints{}, false
+		return fingerprints{}, "", false
 	}
-	root := textnorm.Template{Causes: t.Causes[len(t.Causes)-1:]}
-	return fingerprints{Full: t.Fingerprint(), Root: root.Fingerprint()}, true
+	root := len(t.Causes) - 1
+	found := false
+	for i := root; i >= 0; i-- {
+		if t.Causes[i].Class != "" {
+			root, found = i, true
+			break
+		}
+	}
+	if !found {
+		for i := len(t.Causes) - 1; i >= 0; i-- {
+			if !t.Causes[i].Log {
+				root = i
+				break
+			}
+		}
+	}
+	rt := textnorm.Template{Causes: t.Causes[root : root+1]}
+	return fingerprints{Full: t.Fingerprint(), Root: rt.Fingerprint()}, t.String(), true
+}
+
+// fingerprint is analyze without the masked text.
+func fingerprint(text string) (fingerprints, bool) {
+	fp, _, ok := analyze(text)
+	return fp, ok
 }

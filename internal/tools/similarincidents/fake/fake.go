@@ -29,10 +29,15 @@ type Room struct {
 	Resolution string
 	// Shadow marks a room opened under shadow mode.
 	Shadow bool
+	// NoCreated leaves out room.created; CorruptCreated writes one whose
+	// payload does not decode. Both must make the tool treat the room as
+	// possibly shadow.
+	NoCreated      bool
+	CorruptCreated bool
 	// Layer and LabelTerms, when Layer is set, add a shadow.labelled event.
 	Layer      string
 	LabelTerms []string
-	// Handoff, when set, adds a handoff.created event written by the agent.
+	// Handoff, when set, adds a handoff.created event (a person starts it).
 	Handoff     *events.HandoffSummary
 	ToolResults []ToolResult
 }
@@ -58,8 +63,16 @@ func Seed(ctx context.Context, st store.Store, r Room) error {
 		}
 		return nil
 	}
-	if err := app(events.RoomCreated, sys, events.RoomCreatedPayload{Title: r.Title, Severity: "sev2", PipelineID: pipeline, Shadow: r.Shadow}); err != nil {
-		return err
+	switch {
+	case r.NoCreated:
+	case r.CorruptCreated:
+		if err := app(events.RoomCreated, sys, []int{1}); err != nil {
+			return err
+		}
+	default:
+		if err := app(events.RoomCreated, sys, events.RoomCreatedPayload{Title: r.Title, Severity: "sev2", PipelineID: pipeline, Shadow: r.Shadow}); err != nil {
+			return err
+		}
 	}
 	for i, tr := range r.ToolResults {
 		if err := app(events.AgentToolResult, events.AgentActor, events.AgentToolResultPayload{
@@ -70,7 +83,7 @@ func Seed(ctx context.Context, st store.Store, r Room) error {
 		}
 	}
 	if r.Handoff != nil {
-		if err := app(events.HandoffCreated, events.AgentActor, events.HandoffCreatedPayload{HandoffID: "h-" + r.ID, To: human, Summary: *r.Handoff}); err != nil {
+		if err := app(events.HandoffCreated, human, events.HandoffCreatedPayload{HandoffID: "h-" + r.ID, To: human, Summary: *r.Handoff}); err != nil {
 			return err
 		}
 	}

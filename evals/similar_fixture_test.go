@@ -38,19 +38,16 @@ Caused by: io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientEx
 func historyFor(name string) []fake.Room {
 	base := []fake.Room{
 		{ID: "r_01J8N4Q2M7ZK3V9T6B5N8C1D0E", Title: "orders stale: connector task failed", ClosedAt: pastAt(8, 3, 11),
-			Resolution: "Debezium registered an incompatible Avro value schema after an ALTER COLUMN. Set compatibility of pg.public.orders-value to NONE for one registration, restarted task 0, then set BACKWARD again.",
-			Layer:      "kafka-connect", LabelTerms: []string{"schema compatibility"},
+			Resolution:  "Debezium registered an incompatible Avro value schema after an ALTER COLUMN. Set compatibility of pg.public.orders-value to NONE for one registration, restarted task 0, then set BACKWARD again.",
 			ToolResults: []fake.ToolResult{{Tool: "connect_status", Summary: pastConnectSchemaTrace}}},
 		{ID: "r_01J9A7C5D8XH2R4W6Y1E3F5G7H", Title: "order-sync lag growing on partition 1, pod restarting", ClosedAt: pastAt(8, 30, 9),
-			Resolution: "A hand-written record without the Avro magic byte crash-looped order-sync. Skipped the offset after the consumer owner approved and added a dead-letter topic.",
-			Layer:      "consumer", LabelTerms: []string{"poison pill"}},
+			Resolution: "A hand-written record without the Avro magic byte crash-looped order-sync. Skipped the offset after the consumer owner approved and added a dead-letter topic."},
 	}
 	switch name {
 	case "recurring-schema-deleted":
 		return append(base,
 			fake.Room{ID: "r_01JA3M6S9T4V8W2X5Y7Z0B1C3D", Title: "order-sync failing: Schema 2 not found (error code 40403)", ClosedAt: pastAt(9, 15, 14),
-				Resolution: "A cleanup script hard-deleted schema version 1 (id 2) of pg.public.orders-value. Re-registered the same schema under its ORIGINAL id 2 by putting the subject in IMPORT mode, then back to READWRITE, and restarted order-sync. A normal register would have created a new id and left old records unreadable. Removed delete rights from the cleanup service account.",
-				Layer:      "schema-registry", LabelTerms: []string{"schema deleted", "original schema id"},
+				Resolution:  "A cleanup script hard-deleted schema version 1 (id 2) of pg.public.orders-value. Re-registered the same schema under its ORIGINAL id 2 by putting the subject in IMPORT mode, then back to READWRITE, and restarted order-sync. A normal register would have created a new id and left old records unreadable. Removed delete rights from the cleanup service account.",
 				Handoff:     &events.HandoffSummary{WhatBroke: "order-sync could not decode records written with schema id 2.", Why: "Schema id 2 was hard-deleted from the registry.", Open: []string{"limit who can hard-delete schemas"}},
 				ToolResults: []fake.ToolResult{{Tool: "kafka_consumer_lag", IsError: true, Summary: pastSchemaTrace}}},
 		)
@@ -58,8 +55,7 @@ func historyFor(name string) []fake.Room {
 		return append(base,
 			fake.Room{ID: "r_01JA9B2E4F6G8H1J3K5M7N9P0Q", Title: "analytics.orders stale for 3h, no failed tasks", ClosedAt: pastAt(9, 22, 6),
 				Resolution: "The nightly maintenance job pauses pg-orders-connector at 02:00 and resumes it at 02:30. Its resume call timed out and the connector stayed PAUSED. Resumed the connector (safe: the slot stayed active, no data lost) and made the job retry the resume and alert if the connector is still paused.",
-				Layer:      "kafka-connect", LabelTerms: []string{"paused connector", "maintenance job"},
-				Handoff: &events.HandoffSummary{WhatBroke: "Nothing flowed after 02:00.", Why: "The maintenance job did not resume the connector.", Risks: []string{"WAL grows while paused"}}},
+				Handoff:    &events.HandoffSummary{WhatBroke: "Nothing flowed after 02:00.", Why: "The maintenance job did not resume the connector.", Risks: []string{"WAL grows while paused"}}},
 		)
 	}
 	return base

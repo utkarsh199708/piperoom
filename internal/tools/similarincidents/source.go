@@ -2,6 +2,7 @@ package similarincidents
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -66,6 +67,9 @@ func (s scanSource) EventsOfTypes(ctx context.Context, roomID string, types []ev
 	var after int64
 	for scanned := 0; scanned < fallbackMaxScan && len(out) < limit; {
 		page, err := s.st.Since(ctx, roomID, after, fallbackPage)
+		if errors.Is(err, store.ErrNotFound) {
+			return []events.Event{}, nil // deleted since it was listed, as in Postgres
+		}
 		if err != nil {
 			return nil, fmt.Errorf("similarincidents: read room %s: %w", roomID, err)
 		}

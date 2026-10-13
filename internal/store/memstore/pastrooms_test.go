@@ -81,8 +81,9 @@ func TestClosedRoomReader(t *testing.T) {
 	if !strings.Contains(string(all[1].Payload), "big") {
 		t.Errorf("EventsOfTypes changed the stored event: %s", all[1].Payload)
 	}
-	if _, err := s.EventsOfTypes(ctx, "zzz", []events.Type{events.RoomClosed}, 1); !errors.Is(err, store.ErrNotFound) {
-		t.Errorf("missing room: err = %v", err)
+	// A room deleted since it was listed has no events, as in Postgres.
+	if got, err := s.EventsOfTypes(ctx, "zzz", []events.Type{events.RoomClosed}, 1); err != nil || len(got) != 0 {
+		t.Errorf("missing room: %v, %v; want no events and no error", got, err)
 	}
 	cctx, cancel := context.WithCancel(ctx)
 	cancel()

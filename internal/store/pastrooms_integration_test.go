@@ -100,6 +100,10 @@ func TestClosedRoomReaderMatchesMemstore(t *testing.T) {
 		if none, err := r.EventsOfTypes(ctx, "pr-old", nil, 10); err != nil || len(none) != 0 {
 			t.Errorf("%s: no types: %d events, %v", name, len(none), err)
 		}
+		// A room deleted since it was listed: no events, no error, on both stores.
+		if gone, err := r.EventsOfTypes(ctx, "pr-deleted", types, 10); err != nil || len(gone) != 0 {
+			t.Errorf("%s: unknown room: %d events, %v; want none and no error", name, len(gone), err)
+		}
 	}
 	// A cancelled context is an error on Postgres.
 	cctx, ccancel := context.WithCancel(ctx)

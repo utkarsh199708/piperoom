@@ -152,13 +152,42 @@ func TestScopeIsThePipelineOfTheRoom(t *testing.T) {
 	if _, err := run(t, tl, context.Background(), input(q, 3)); !errors.Is(err, tools.ErrNoScope) {
 		t.Fatalf("no scope: err = %v, want ErrNoScope", err)
 	}
-	// Unscoped CLI use may search everything.
-	res, err = run(t, tl, tools.WithUnscoped(context.Background()), input(q, 5))
-	if err != nil {
-		t.Fatal(err)
+	// There is no "search all pipelines" mode: an unscoped caller is refused,
+	// and so is a scoped context whose pipeline id is empty (it would have
+	// listed every pipeline).
+	if _, err := run(t, tl, tools.WithUnscoped(context.Background()), input(q, 5)); !errors.Is(err, tools.ErrNoScope) {
+		t.Fatalf("unscoped: err = %v, want ErrNoScope", err)
 	}
-	if ids := hitIDs(t, res); !slices.Contains(ids, "r-pay-schema") {
-		t.Fatalf("unscoped search did not reach payments: %v", ids)
+	if _, err := run(t, tl, scoped(""), input(q, 5)); !errors.Is(err, tools.ErrNoScope) {
+		t.Fatalf("empty pipeline: err = %v, want ErrNoScope", err)
+	}
+	if _, err := run(t, tl, tools.WithUnscoped(scoped("")), `{"query":"x","pipeline_id":"payments"}`); !errors.Is(err, tools.ErrNoScope) {
+		t.Fatalf("unscoped with pipeline_id: err = %v, want ErrNoScope", err)
+	}
+}
+
+// listCountingSource records every pipeline the tool asked the store for.
+type pipelineSpy struct {
+	similarincidents.Source
+	mu        sync.Mutex
+	pipelines []string
+}
+
+func (p *pipelineSpy) ListClosedRooms(ctx context.Context, pl string, n int) ([]store.Room, error) {
+	p.mu.Lock()
+	p.pipelines = append(p.pipelines, pl)
+	p.mu.Unlock()
+	return p.Source.ListClosedRooms(ctx, pl, n)
+}
+
+func TestStoreIsNeverAskedForAllPipelines(t *testing.T) {
+	spy := &pipelineSpy{Source: similarincidents.FromStore(seeded(t, corpus()...))}
+	tl := similarincidents.New(similarincidents.Deps{Source: spy})
+	for _, ctx := range []context.Context{scoped(""), context.Background(), tools.WithUnscoped(context.Background()), scoped("orders")} {
+		_, _ = run(t, tl, ctx, input("avro schema", 3))
+	}
+	if !slices.Equal(spy.pipelines, []string{"orders"}) {
+		t.Fatalf("store was asked for pipelines %q, want only \"orders\"", spy.pipelines)
 	}
 }
 
@@ -188,6 +217,124 @@ func TestShadowRoomAgentTextIsNeverIndexedOrReturned(t *testing.T) {
 	}
 	if strings.Contains(res.Summary, "SHADOWSECRET") {
 		t.Fatal("shadow agent text in summary")
+	}
+}
+
+// TestAgentTextNeedsAReadableRoomCreated: agent text is indexed only when
+// room.created was read and says Shadow is false. A missing or corrupt
+// room.created is "unknown", not "not shadow".
+func TestAgentTextNeedsAReadableRoomCreated(t *testing.T) {
+	mk := func(id string, mod func(*fake.Room)) fake.Room {
+		r := fake.Room{ID: id, Title: "plain title", ClosedAt: day(9, 1), Resolution: "human words",
+			Handoff:     &events.HandoffSummary{WhatBroke: "zzhandoffword"},
+			ToolResults: []fake.ToolResult{{Tool: "connect_status", Summary: connectSchemaTrace}}}
+		mod(&r)
+		return r
+	}
+	st := seeded(t,
+		mk("r-ok", func(*fake.Room) {}),
+		mk("r-missing", func(r *fake.Room) { r.NoCreated = true }),
+		mk("r-corrupt", func(r *fake.Room) { r.CorruptCreated = true }),
+		mk("r-shadow2", func(r *fake.Room) { r.Shadow = true }),
+	)
+	tl := similarincidents.New(similarincidents.Deps{Source: similarincidents.FromStore(st)})
+	res, err := run(t, tl, scoped("orders"), input("zzhandoffword", 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := hitIDs(t, res); !slices.Equal(ids, []string{"r-ok"}) {
+		t.Fatalf("hand-off text matched %v, want only r-ok", ids)
+	}
+	res, err = run(t, tl, scoped("orders"), input(connectSchemaTrace, 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range res.Data.(similarincidents.Data).Hits {
+		if h.RoomID != "r-ok" && h.Fingerprint != "" {
+			t.Fatalf("room %s matched by trace fingerprint", h.RoomID)
+		}
+	}
+	// Their human text stays searchable.
+	res, _ = run(t, tl, scoped("orders"), input("human words", 5))
+	if ids := hitIDs(t, res); len(ids) != 4 {
+		t.Fatalf("human text hits = %v, want all 4 rooms", ids)
+	}
+}
+
+// TestResultDataHoldsOnlyWhatTheSummaryShows: Result.Data is stored in the new
+// room's log, so past hand-off text and label terms must not be in it.
+func TestResultDataHoldsOnlyWhatTheSummaryShows(t *testing.T) {
+	st := seeded(t, fake.Room{ID: "r-1", Title: "kafka lag", ClosedAt: day(9, 1), Resolution: "raised",
+		Shadow: true, Layer: "kafka", LabelTerms: []string{"zzlabelterm"}})
+	st2 := seeded(t, fake.Room{ID: "r-2", Title: "kafka lag", ClosedAt: day(9, 1), Resolution: "raised",
+		Handoff: &events.HandoffSummary{WhatBroke: "zzwhatbroke", Why: "zzwhy", Open: []string{"zzopen"}, Risks: []string{"zzrisk"}}})
+	for _, s := range []*memstore.Store{st, st2} {
+		tl := similarincidents.New(similarincidents.Deps{Source: similarincidents.FromStore(s)})
+		res, err := run(t, tl, scoped("orders"), input("kafka lag zzlabelterm zzwhatbroke", 5))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(res.Data)
+		for _, w := range []string{"zzlabelterm", "zzwhatbroke", "zzwhy", "zzopen", "zzrisk", "what_broke", "root_cause_terms", `"query"`} {
+			if strings.Contains(string(b), w) || strings.Contains(res.Summary, w) {
+				t.Errorf("%q leaked into the result: %s", w, b)
+			}
+		}
+	}
+}
+
+// TestRecordValuesInTracesAreNotIndexed: the raw trace is not indexed, only
+// its masked template, so a record value or DSN in a trace cannot be probed.
+func TestRecordValuesInTracesAreNotIndexed(t *testing.T) {
+	trace := "pg-orders-connector (source): RUNNING.\nTask 0: FAILED:\norg.apache.kafka.connect.errors.ConnectException: Tolerance exceeded\n" +
+		"Caused by: org.postgresql.util.PSQLException: ERROR: duplicate key value violates unique constraint \"orders_pkey\"\n  Detail: Key (email)=(zzsecretvalue@example.com) already exists."
+	st := seeded(t, fake.Room{ID: "r-1", Title: "load failing", ClosedAt: day(9, 1), Resolution: "stopped duplicate writer",
+		ToolResults: []fake.ToolResult{{Tool: "connect_status", Summary: trace}}})
+	tl := similarincidents.New(similarincidents.Deps{Source: similarincidents.FromStore(st)})
+	for _, q := range []string{"zzsecretvalue", "zzsecretvalue@example.com", "example.com"} {
+		res, err := run(t, tl, scoped("orders"), input(q, 5))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ids := hitIDs(t, res); len(ids) != 0 {
+			t.Errorf("query %q matched %v: a record value is indexed", q, ids)
+		}
+	}
+	// The failure itself is still found by its words.
+	res, _ := run(t, tl, scoped("orders"), input("duplicate key violates unique constraint orders_pkey", 5))
+	if ids := hitIDs(t, res); !slices.Equal(ids, []string{"r-1"}) {
+		t.Errorf("masked trace words not searchable: %v", ids)
+	}
+}
+
+// TestRootFingerprintIgnoresTrailingLogLines: a trace followed by a log line
+// has the same root fingerprint as the trace alone.
+func TestRootFingerprintIgnoresTrailingLogLines(t *testing.T) {
+	st := seeded(t, fake.Room{ID: "r-1", Title: "x", ClosedAt: day(9, 1), Resolution: "y",
+		ToolResults: []fake.ToolResult{{Tool: "connect_status", Summary: "org.a.b.FooException: outer\nCaused by: org.a.b.BarException: root cause here\n2026-10-11 09:41:07,118 ERROR task stopped"}}})
+	tl := similarincidents.New(similarincidents.Deps{Source: similarincidents.FromStore(st)})
+	res, err := run(t, tl, scoped("orders"), input("Caused by: org.a.b.BarException: root cause here", 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := res.Data.(similarincidents.Data)
+	if len(d.Hits) != 1 || d.Hits[0].Fingerprint != "root" {
+		t.Fatalf("hits = %+v, want a root fingerprint match", d.Hits)
+	}
+}
+
+func TestWeakTailIsDropped(t *testing.T) {
+	st := seeded(t,
+		fake.Room{ID: "r-strong", Title: "replication slot inactive wal growth", ClosedAt: day(9, 1), Resolution: "resumed connector, slot active, wal drained"},
+		fake.Room{ID: "r-weak", Title: "other", ClosedAt: day(9, 2), Resolution: "the slot was mentioned once in passing among many other unrelated words about kafka brokers disks and certificates and acl"},
+	)
+	tl := similarincidents.New(similarincidents.Deps{Source: similarincidents.FromStore(st)})
+	res, err := run(t, tl, scoped("orders"), input("replication slot inactive wal growth", 5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := hitIDs(t, res); !slices.Equal(ids, []string{"r-strong"}) {
+		t.Fatalf("hits = %v, want the weak tail dropped", ids)
 	}
 }
 
@@ -270,8 +417,8 @@ func TestOutputIsOneLinePerFieldAndCapped(t *testing.T) {
 		t.Fatalf("summary %d bytes", len(res.Summary))
 	}
 	h := res.Data.(similarincidents.Data).Hits[0]
-	if len(h.Resolution) > 410 || len(h.WhatBroke) > 310 || len(h.Open) > 4 {
-		t.Fatalf("fields not capped: resolution %d, what_broke %d, open %d", len(h.Resolution), len(h.WhatBroke), len(h.Open))
+	if len(h.Resolution) > 410 || len(h.Title) > 170 {
+		t.Fatalf("fields not capped: resolution %d, title %d", len(h.Resolution), len(h.Title))
 	}
 	if _, err := json.Marshal(res.Data); err != nil {
 		t.Fatalf("data does not marshal: %v", err)
@@ -393,8 +540,8 @@ func TestLateLabelIsPickedUpButSettledRoomsAreNotReread(t *testing.T) {
 		t.Fatalf("late label not found: %v", ids)
 	}
 	// r-old was read in the first build, long after it closed: settled, kept.
-	if got := src.events - first; got != 2 { // r-new only: key events + tool results
-		t.Fatalf("second build made %d event reads, want 2 (r-new only)", got)
+	if got := src.events - first; got != 3 { // r-new only: rare events, hand-offs, tool results
+		t.Fatalf("second build made %d event reads, want 3 (r-new only)", got)
 	}
 }
 
@@ -403,8 +550,8 @@ func TestSlowStoreGivesPartialAnswerAndCancelStops(t *testing.T) {
 		fake.Room{ID: "r-1", Title: "kafka lag", ClosedAt: day(9, 3), Resolution: "one"},
 		fake.Room{ID: "r-2", Title: "kafka lag", ClosedAt: day(9, 2), Resolution: "two"},
 	)
-	// Reads 1 and 2 serve room r-1; the third (r-2) stalls until the build deadline.
-	src := &countingSource{Source: similarincidents.FromStore(st), stallAt: 3}
+	// Reads 1-3 serve room r-1; the fourth (r-2) stalls until the build deadline.
+	src := &countingSource{Source: similarincidents.FromStore(st), stallAt: 4}
 	tl := similarincidents.New(similarincidents.Deps{Source: src, BuildTimeout: 50 * time.Millisecond})
 	res, err := run(t, tl, scoped("orders"), input("kafka lag", 5))
 	if err != nil {
@@ -545,5 +692,31 @@ func TestDefinition(t *testing.T) {
 	}
 	if err := similarincidents.Register(reg, similarincidents.Deps{}); err == nil {
 		t.Fatal("duplicate registration was accepted")
+	}
+}
+
+func TestOldIndexIsNotServedForeverWhenTheStoreStaysDown(t *testing.T) {
+	// Closed an hour before the first call, so the room is not "settled" and
+	// a rebuild has to read it again.
+	st := seeded(t, fake.Room{ID: "r-1", Title: "kafka lag", ClosedAt: day(9, 4).Add(-time.Hour), Resolution: "one"})
+	src := &countingSource{Source: similarincidents.FromStore(st)}
+	now := day(9, 4)
+	tl := similarincidents.New(similarincidents.Deps{Source: src, Now: func() time.Time { return now }, TTL: time.Minute})
+	if _, err := run(t, tl, scoped("orders"), input("kafka lag", 3)); err != nil {
+		t.Fatal(err)
+	}
+	src.mu.Lock()
+	src.failAt, src.err, src.events = 1, errors.New("db down"), 0
+	src.mu.Unlock()
+	now = now.Add(5 * time.Minute)
+	if _, err := run(t, tl, scoped("orders"), input("kafka lag", 3)); err != nil {
+		t.Fatalf("5 min old index should still be served: %v", err)
+	}
+	src.mu.Lock()
+	src.events = 0
+	src.mu.Unlock()
+	now = now.Add(20 * time.Minute)
+	if _, err := run(t, tl, scoped("orders"), input("kafka lag", 3)); err == nil {
+		t.Fatal("an index 25 minutes old was served while the store is down")
 	}
 }

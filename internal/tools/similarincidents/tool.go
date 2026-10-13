@@ -5,7 +5,7 @@
 //
 // Index lifecycle: the index is built on demand, per pipeline, from the store
 // and cached for TTL (2 minutes). A build reads the newest MaxRooms closed
-// rooms of the pipeline (default 200), two bounded queries per room, under one
+// rooms of the pipeline (default 200), up to three bounded queries per room, under one
 // 10 s deadline; a room that is settled (read at least a day after it closed)
 // is reused by later builds, one that may still get a label is re-read. A build
 // that runs out of time keeps what it has, marks the answer partial and is
@@ -18,8 +18,9 @@
 // only the rooms of that pipeline, whoever is in the room, and refuses any
 // other pipeline_id. A person who may read two pipelines does not get both in
 // one call; the limit is that this tool cannot narrow further per participant
-// (all of a pipeline's closed rooms are visible to its current room). Unscoped
-// callers (CLI, dev) may name a pipeline or search all of them.
+// (all of a pipeline's closed rooms are visible to its current room). It fails
+// closed: a call with no room pipeline, or an unscoped (CLI/dev) call, gets
+// ErrNoScope; there is no "search all pipelines" mode.
 //
 // Everything that comes from a past room is untrusted text; the agent loop
 // wraps tool output as untrusted data like any other read tool.
@@ -71,14 +72,16 @@ const (
 	// Per-field caps of one hit, so one room cannot fill the answer.
 	maxTitleBytes      = 160
 	maxResolutionBytes = 400
-	maxSummaryField    = 300
-	maxListItems       = 4
 
 	// fpExact / fpRoot are added to the BM25 score when the query's trace
 	// fingerprint equals one of the room's (whole chain / root cause only).
 	// BM25 of a short query is mostly below 15, so a full match tops the list.
 	fpExact = 30.0
-	fpRoot  = 15.0
+	// scoreFloor drops hits scoring below this share of the top hit.
+	scoreFloor = 0.15
+	// maxStale is how long a failed rebuild keeps serving the old index.
+	maxStale = 10 * time.Minute
+	fpRoot   = 15.0
 )
 
 // Field weights: what a human wrote about the failure counts most.
@@ -195,30 +198,26 @@ func (t *Tool) InputSchema() map[string]any {
 	}
 }
 
-// Hit is one past room in Result.Data.
+// Hit is one past room in Result.Data. It carries only what the summary shows:
+// Result.Data is stored in the new room's log, so it must not hold more past
+// text than the model sees (hand-off fields and label terms stay in the index).
 type Hit struct {
-	RoomID     string   `json:"room_id"`
-	PipelineID string   `json:"pipeline_id"`
-	Title      string   `json:"title"`
-	ClosedAt   string   `json:"closed_at"`
-	Layer      string   `json:"layer,omitempty"`
-	Terms      []string `json:"root_cause_terms,omitempty"`
-	Resolution string   `json:"resolution"`
-	WhatBroke  string   `json:"what_broke,omitempty"`
-	Why        string   `json:"why,omitempty"`
-	Open       []string `json:"open,omitempty"`
-	Risks      []string `json:"risks,omitempty"`
-	Score      float64  `json:"score"`
+	RoomID     string  `json:"room_id"`
+	PipelineID string  `json:"pipeline_id"`
+	Title      string  `json:"title"`
+	ClosedAt   string  `json:"closed_at"`
+	Layer      string  `json:"layer,omitempty"`
+	Resolution string  `json:"resolution"`
+	Score      float64 `json:"score"`
 	// Fingerprint is "exact" (same cause chain), "root" (same root cause) or "".
 	Fingerprint string `json:"fingerprint_match,omitempty"`
 }
 
 // Data is Result.Data.
 type Data struct {
-	Query   string `json:"query"`
-	Indexed int    `json:"indexed_rooms"`
-	Partial bool   `json:"partial,omitempty"`
-	Hits    []Hit  `json:"hits"`
+	Indexed int   `json:"indexed_rooms"`
+	Partial bool  `json:"partial,omitempty"`
+	Hits    []Hit `json:"hits"`
 }
 
 // Run implements tools.Tool.
@@ -262,10 +261,15 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 	if err != nil {
 		return tools.Result{}, err
 	}
+	// Fail closed: the tool never searches across pipelines. A call with no
+	// room pipeline (unscoped, or an empty pipeline id) is refused.
+	pipeline := scope.Pipeline().ID
+	if scope.Unscoped() || pipeline == "" {
+		return tools.Result{}, fmt.Errorf("%w: similar_incidents searches the room's own pipeline only", tools.ErrNoScope)
+	}
 	if err := scope.CheckPipelineID(p.PipelineID); err != nil {
 		return tools.Result{}, err
 	}
-	pipeline := scope.PipelineID(p.PipelineID)
 	if t.d.Source == nil {
 		return tools.Result{}, errors.New("similarincidents: no room store configured (wiring error)")
 	}
@@ -275,12 +279,9 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 		return tools.Result{}, err
 	}
 	hits := rank(idx, p.Query, limit)
-	data := Data{Query: clipRunes(oneLine(p.Query), 200), Indexed: len(idx.rooms), Partial: idx.partial, Hits: hits}
+	data := Data{Indexed: len(idx.rooms), Partial: idx.partial, Hits: hits}
 
 	where := "pipeline " + pipeline
-	if pipeline == "" {
-		where = "all pipelines"
-	}
 	if len(hits) == 0 {
 		s, tr := tools.Truncate(fmt.Sprintf("No similar closed incident found on %s (%d past rooms searched).%s", where, len(idx.rooms), partialNote(idx)))
 		return tools.Result{Summary: s, Data: data, Truncated: tr || idx.partial}, nil
@@ -296,9 +297,6 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 		if h.Fingerprint != "" {
 			fmt.Fprintf(&sb, ", %s trace fingerprint match", h.Fingerprint)
 		}
-		if pipeline == "" {
-			fmt.Fprintf(&sb, ", pipeline %s", h.PipelineID)
-		}
 		fmt.Fprintf(&sb, "\n    title: %s\n    resolution: %s", h.Title, h.Resolution)
 	}
 	s, tr := tools.Truncate(sb.String())
@@ -307,7 +305,7 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 
 func partialNote(idx *index) string {
 	if idx.partial {
-		return " The search is partial: the room store was slow."
+		return " The search is partial: some past rooms could not be read in time."
 	}
 	return ""
 }
@@ -356,6 +354,11 @@ func rank(idx *index, query string, limit int) []Hit {
 	})
 	hits := []Hit{}
 	for _, r := range res[:min(limit, len(res))] {
+		// A weak tail next to a strong top hit is noise, not history. A
+		// fingerprint match is always kept.
+		if r.fp == "" && r.score < scoreFloor*res[0].score {
+			continue
+		}
 		hits = append(hits, hitOf(idx.rooms[r.i], r.score, r.fp))
 	}
 	return hits
@@ -371,28 +374,13 @@ func hitOf(r pastRoom, score float64, fp string) Hit {
 		ClosedAt:    r.ClosedAt.UTC().Format("2006-01-02"),
 		Layer:       r.Layer,
 		Resolution:  clipRunes(oneLine(r.Resolution), maxResolutionBytes),
-		WhatBroke:   clipRunes(oneLine(r.WhatBroke), maxSummaryField),
-		Why:         clipRunes(oneLine(r.Why), maxSummaryField),
 		Score:       math.Round(score*100) / 100,
 		Fingerprint: fp,
 	}
 	if h.Resolution == "" {
 		h.Resolution = "(no resolution text)"
 	}
-	for _, x := range r.Terms[:min(len(r.Terms), maxListItems*2)] {
-		h.Terms = append(h.Terms, clipRunes(oneLine(x), 60))
-	}
-	h.Open = lines(r.Open)
-	h.Risks = lines(r.Risks)
 	return h
-}
-
-func lines(xs []string) []string {
-	var out []string
-	for _, x := range xs[:min(len(xs), maxListItems)] {
-		out = append(out, clipRunes(oneLine(x), maxSummaryField))
-	}
-	return out
 }
 
 // indexFor returns the pipeline's index, building it when missing or stale.
@@ -416,7 +404,7 @@ func (t *Tool) indexFor(ctx context.Context, pipeline string) (*index, error) {
 	}
 	idx, rooms, err := t.build(ctx, pipeline, e.rooms, now)
 	if err != nil {
-		if e.idx != nil && ctx.Err() == nil {
+		if e.idx != nil && ctx.Err() == nil && now.Sub(e.idx.built) < maxStale {
 			// Better a few minutes stale than no answer while the store is down.
 			t.d.Logger.Warn("similar_incidents: index rebuild failed, using the previous index", "pipeline", pipeline, "err", err)
 			return e.idx, nil

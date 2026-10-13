@@ -16,16 +16,12 @@ import (
 )
 
 // stopwords carry no meaning for lookup.
-var stopwords = map[string]bool{}
-
-func init() {
-	for _, w := range []string{
-		"a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from", "has", "how", "if",
-		"in", "is", "it", "its", "my", "no", "not", "of", "on", "or", "so", "the", "then", "there", "this",
-		"to", "was", "what", "when", "why", "with",
-	} {
-		stopwords[w] = true
-	}
+var stopwords = map[string]bool{
+	"a": true, "an": true, "and": true, "are": true, "as": true, "at": true, "be": true, "by": true,
+	"can": true, "do": true, "does": true, "for": true, "from": true, "has": true, "how": true, "if": true,
+	"in": true, "is": true, "it": true, "its": true, "my": true, "no": true, "not": true, "of": true,
+	"on": true, "or": true, "so": true, "the": true, "then": true, "there": true, "this": true,
+	"to": true, "was": true, "what": true, "when": true, "why": true, "with": true,
 }
 
 // lsnRe matches a Postgres LSN such as 0/16B3748 or 1A/2B000028.
