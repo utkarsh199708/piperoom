@@ -19,6 +19,12 @@ export interface HeaderMember {
 
 const MAX_AVATARS = 4
 
+// "Kabir · driving", "Arjun · you", "Arjun · you, driving".
+function avatarLabel(name: string, you: boolean, driver: boolean): string {
+  if (you) return driver ? `${name} · you, driving` : `${name} · you`
+  return driver ? `${name} · driving` : name
+}
+
 function Sep() {
   return (
     <span aria-hidden="true" className="text-subtle-foreground">
@@ -136,7 +142,7 @@ export function RoomHeader({
                     actor={{ id: m.id, name: m.name }}
                     driver={driver}
                     stacked
-                    label={driver ? `${m.name} · driving` : m.name}
+                    label={avatarLabel(m.name, m.id === user.id, driver)}
                     className={driver ? 'ring-offset-0' : undefined}
                   />
                 </li>

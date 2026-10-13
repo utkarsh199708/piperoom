@@ -24,12 +24,21 @@ describe('agentPill', () => {
     const steps = [1, 2, 3].map((i) => ({ id: `s${i}`, title: 't', tool_calls: [], messages: [] }))
     expect(agentPill(room({ agent_status: { state: 'working', detail: 'x' }, steps }))).toMatchObject({
       tone: 'agent',
-      text: 'Agent working · step 3',
+      text: 'Agent working',
+      step: 3,
       title: 'x',
     })
   })
   it('working before the first step has no number', () => {
-    expect(agentPill(room({ agent_status: { state: 'working' } })).text).toBe('Agent working')
+    const p = agentPill(room({ agent_status: { state: 'working' } }))
+    expect(p.text).toBe('Agent working')
+    expect(p.step).toBeUndefined()
+  })
+  it('the live text never carries the step number, so a new step is not announced', () => {
+    for (const n of [1, 2, 9]) {
+      const steps = Array.from({ length: n }, (_, i) => ({ id: `s${i}`, title: 't', tool_calls: [], messages: [] }))
+      expect(agentPill(room({ agent_status: { state: 'working' }, steps })).text).toBe('Agent working')
+    }
   })
   it('waiting shows how many layers approved', () => {
     expect(agentPill(room({ agent_status: { state: 'waiting_approval' }, proposals: [proposal] }))).toMatchObject({

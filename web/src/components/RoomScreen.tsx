@@ -65,8 +65,10 @@ export function RoomScreen() {
         }
       }
     }
+    // You are here too, even before the server has reported you.
+    if (!ids.has(user.id)) rows.push({ id: user.id, name: user.name })
     return rows
-  }, [presence, state])
+  }, [presence, state, user.id, user.name])
 
   const invite = () => {
     const url = window.location.href
@@ -216,6 +218,7 @@ export function RoomScreen() {
             members={state.members}
             presence={presence}
             selfId={user.id}
+            selfName={user.name}
             selfIsViewer={viewer}
           />
           <div className="h-px shrink-0 bg-border" />

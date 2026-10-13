@@ -98,8 +98,16 @@ describe('RoomScreen header', () => {
     const facts = screen.getByText('#r_schema_change').closest('p') as HTMLElement
     expect(facts).toHaveTextContent('orders')
     expect(facts).toHaveTextContent(/opened/)
-    const pill = screen.getByText('Agent working · step 2').closest('[aria-live]')
-    expect(pill).toHaveAttribute('aria-live', 'polite')
+    // Only the state words are live; the step number is outside the live region and hidden from
+    // assistive technology, so a new step is not announced.
+    const live = screen.getByText('Agent working')
+    expect(live).toHaveAttribute('aria-live', 'polite')
+    expect(live).not.toHaveTextContent('step')
+    const step = screen.getByTestId('agent-step')
+    expect(step).toHaveTextContent('step 2')
+    expect(step).toHaveAttribute('aria-hidden', 'true')
+    expect(live.contains(step)).toBe(false)
+    expect(step.closest('[aria-live]')).toBeNull()
   })
 
   it('shows the people stack with the driver and "Kabir is driving"', () => {
@@ -270,5 +278,56 @@ describe('RoomScreen keys', () => {
     press('h')
     fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('H and T do nothing while a dialog is open', () => {
+    show(kabir, room())
+    press('T', { shiftKey: true })
+    expect(screen.getByRole('dialog', { name: 'Trace a record' })).toBeInTheDocument()
+    press('h')
+    press('t')
+    press('T', { shiftKey: true })
+    // Still only the trace dialog; no hand-off dialog, no control call.
+    expect(screen.getAllByRole('dialog')).toHaveLength(1)
+    expect(screen.queryByRole('dialog', { name: 'Hand off the room' })).not.toBeInTheDocument()
+    expect(actions.grantControl).not.toHaveBeenCalled()
+    expect(actions.requestControl).not.toHaveBeenCalled()
+  })
+
+  it('H and T do nothing while a menu or an alert dialog is open', () => {
+    show(arjun, room({ driver: null }))
+    for (const role of ['menu', 'alertdialog']) {
+      const el = document.createElement('div')
+      el.setAttribute('role', role)
+      document.body.appendChild(el)
+      press('t')
+      press('T', { shiftKey: true })
+      expect(actions.grantControl).not.toHaveBeenCalled()
+      expect(screen.queryByRole('dialog', { name: 'Trace a record' })).not.toBeInTheDocument()
+      el.remove()
+    }
+    // With nothing open the same key works.
+    press('t')
+    expect(actions.grantControl).toHaveBeenCalledWith('arjun')
+  })
+})
+
+describe('RoomScreen lists you', () => {
+  it('shows the signed-in person as "you" in the header and Who’s here before presence reports them', () => {
+    // Vera is in neither presence nor members.
+    show(vera, room())
+    const people = screen.getByRole('list', { name: 'People in the room' })
+    expect(within(people).getByRole('img', { name: 'Vera · you' })).toBeInTheDocument()
+    expect(screen.getByText('3 here')).toBeInTheDocument()
+    const rail = screen.getByRole('complementary', { name: 'Room details' })
+    const row = within(rail).getByText('Vera').closest('li') as HTMLElement
+    expect(within(row).getByText('you')).toBeInTheDocument()
+  })
+
+  it('does not list you twice when you are already a member', () => {
+    show(arjun, room())
+    expect(screen.getByText('2 here')).toBeInTheDocument()
+    const rail = screen.getByRole('complementary', { name: 'Room details' })
+    expect(within(rail).getAllByText('Arjun')).toHaveLength(1)
   })
 })

@@ -13,14 +13,15 @@ const TEXT: Record<PillTone, string> = {
 }
 
 /**
- * "Agent working · step 5". A live region (aria-live polite, not role=status: the
- * screen already has banners with that role), so a new state is announced once, quietly.
+ * "Agent working · step 5". The live region (aria-live polite, not role=status: the screen
+ * already has banners with that role) holds only the state words, so a screen reader hears
+ * "Agent working" once and "resolved — verified" at the end, not every new step. The
+ * "· step N" is drawn next to it, hidden from assistive technology.
  */
 export function AgentPill({ state }: { state: RoomState }) {
   const p = agentPill(state)
   return (
     <span
-      aria-live="polite"
       data-tone={p.tone}
       title={p.title}
       className={cn(
@@ -29,7 +30,12 @@ export function AgentPill({ state }: { state: RoomState }) {
       )}
     >
       <StatusDot tone={p.tone} />
-      <span>{p.text}</span>
+      <span aria-live="polite">{p.text}</span>
+      {p.step != null && (
+        <span aria-hidden="true" data-testid="agent-step" className="-ml-1">
+          · step {p.step}
+        </span>
+      )}
     </span>
   )
 }

@@ -184,7 +184,8 @@ export function SteerBox({
               Give control to…
             </Button>
           )}
-          {take && (
+          {/* With no driver the banner (and the empty state) already offer it; an expired lease still shows it here. */}
+          {take && !noDriver && (
             <Button variant="ghost" className="h-7" aria-keyshortcuts="T" onClick={() => actions.grantControl(user.id)}>
               Take control
               <Kbd aria-hidden="true">T</Kbd>

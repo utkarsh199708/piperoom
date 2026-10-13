@@ -5,12 +5,15 @@ export type PillTone = 'ok' | 'warn' | 'fail' | 'agent' | 'muted'
 export interface AgentPillInfo {
   tone: PillTone
   text: string
+  /** Shown after the text but kept out of the live region: a new step number must not be announced. */
+  step?: number
   /** The agent's own detail line, kept as a tooltip. */
   title?: string
 }
 
-// "Agent working · step 5", "Agent waiting · 1 of 2 approvals", "resolved — verified" ...
-// The pill in the room header. It is a live region, so a change is read out politely.
+// The pill in the room header. `text` holds the state words only ("Agent working", "Agent waiting · 1 of 2
+// approvals", "resolved — verified"): AgentPill puts it in the aria-live region, so a screen reader hears a
+// change of state. `step` ("· step 5") changes with every step and is drawn outside the live region.
 export function agentPill(state: RoomState): AgentPillInfo {
   const { state: s, detail } = state.agent_status
   switch (s) {
@@ -27,7 +30,8 @@ export function agentPill(state: RoomState): AgentPillInfo {
     case 'working':
       return {
         tone: 'agent',
-        text: state.steps.length > 0 ? `Agent working · step ${state.steps.length}` : 'Agent working',
+        text: 'Agent working',
+        step: state.steps.length > 0 ? state.steps.length : undefined,
         title: detail,
       }
     case 'idle':

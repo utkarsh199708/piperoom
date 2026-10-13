@@ -24,7 +24,8 @@ export function useRoomShortcuts(shortcuts: RoomShortcuts): void {
     const onKey = (e: KeyboardEvent) => {
       if (e.isComposing || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return
       if (isEditableTarget(e.target)) return
-      if (document.querySelector('[role="dialog"]')) return
+      // A dialog, an alert dialog or an open menu has the keyboard: the keys are not ours then.
+      if (document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) return
       const key = e.key.toLowerCase()
       const s = latest.current
       let run: (() => void) | undefined

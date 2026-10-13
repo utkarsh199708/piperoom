@@ -8,12 +8,15 @@ export function PresencePanel({
   members,
   presence,
   selfId,
+  selfName,
   selfIsViewer = false,
 }: {
   members: MemberState[]
   presence: PresenceMember[]
   /** The signed-in person: that row says "you". */
   selfId?: string
+  /** With selfId: the signed-in person is listed (as "you") even before presence reports them. */
+  selfName?: string
   /** The signed-in person is a viewer: that row says "viewer". */
   selfIsViewer?: boolean
 }) {
@@ -25,6 +28,10 @@ export function PresencePanel({
     if (!rows.some((r) => r.id === p.id)) {
       rows.push({ id: p.id, name: p.name, role: 'watching', state: p.state })
     }
+  }
+
+  if (selfId && selfName && !rows.some((r) => r.id === selfId)) {
+    rows.push({ id: selfId, name: selfName, role: 'watching', state: 'viewing' })
   }
 
   return (

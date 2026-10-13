@@ -99,6 +99,15 @@ describe('SteerBox composer (U3)', () => {
     expect(screen.queryByRole('button', { name: 'Suggest' })).not.toBeInTheDocument()
   })
 
+  it('with no driver the composer has no Take control (the banner offers it); with an expired lease it does', () => {
+    const { rerender } = render(<SteerBox state={emptyRoomState('r1')} user={kabir} actions={actions} />)
+    expect(screen.queryByRole('button', { name: 'Take control' })).not.toBeInTheDocument()
+    const expired = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: '2020-01-01T00:00:00Z' } }
+    rerender(<SteerBox state={expired} user={kabir} actions={actions} />)
+    expect(screen.getByRole('button', { name: 'Take control' })).toBeInTheDocument()
+    expect(screen.getByText(/lease expired/)).toBeInTheDocument()
+  })
+
   it('a viewer gets a read-only bar and no field', () => {
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
     render(<SteerBox state={state} user={{ ...kabir, role: 'viewer' }} actions={actions} />)
