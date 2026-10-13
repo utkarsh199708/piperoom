@@ -201,7 +201,7 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 // the check passes. Otherwise it returns an error when
 //   - the solo user is not in users.yaml, or
 //   - owners.yaml names any principal other than user:<soloUser> (in layers:,
-//     any pipeline owners: block, or auditors:). A group counts as another
+//     any pipeline owners: block, auditors:, or tenants: members). A group counts as another
 //     principal.
 //
 // own may be nil (no owners file), which passes the second rule. The caller

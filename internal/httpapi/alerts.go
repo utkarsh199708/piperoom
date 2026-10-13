@@ -78,7 +78,7 @@ func (s *Server) handleSignedAlert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	snap, created, err := s.svc.OpenAlertRoom(r.Context(), a)
-	s.writeAlertRoom(w, snap, created, err)
+	s.writeSignedAlertRoom(w, snap, created, err)
 }
 
 // writeAlertRoom answers the result of room.Service.OpenAlertRoom /

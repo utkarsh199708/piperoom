@@ -116,7 +116,7 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 	// Actions and Proposals stay nil: propose_fix lists "(none)" and refuses,
 	// so a shadow run can never reach a write (design section 4).
 	deps := agent.Deps{
-		Tools:  s.tools,
+		Tools:  s.toolsFor(pipelineID),
 		Inbox:  gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
 		Sink:   roomSink{s: s, roomID: roomID},
 		Logger: s.log,
@@ -756,6 +756,12 @@ var shadowStatuses = []string{
 // ShadowMetrics aggregates every closed shadow room of pipelineID ("" = all)
 // closed at or after since (zero = all).
 func (s *Service) ShadowMetrics(ctx context.Context, pipelineID string, since time.Time) (ShadowMetrics, error) {
+	return s.shadowMetrics(ctx, pipelineID, since, nil)
+}
+
+// shadowMetrics is ShadowMetrics over the runs whose pipeline keep accepts
+// (nil = all), for the tenant filter (ShadowMetricsFor).
+func (s *Service) shadowMetrics(ctx context.Context, pipelineID string, since time.Time, keep func(pipelineID string) bool) (ShadowMetrics, error) {
 	m := ShadowMetrics{ByStatus: map[string]int{}, PerRoom: []ShadowMetricsRoom{},
 		MedianTimeToFirstS: -1, MedianTimeToFinalS: -1, MedianHumanMTTRS: -1}
 	for _, st := range shadowStatuses {
@@ -767,6 +773,9 @@ func (s *Service) ShadowMetrics(ctx context.Context, pipelineID string, since ti
 	runs, err := s.shadow.ListShadowRuns(ctx, pipelineID, since)
 	if err != nil {
 		return m, fmt.Errorf("room: shadow metrics: %w", err)
+	}
+	if keep != nil {
+		runs = slices.DeleteFunc(runs, func(r store.ShadowRunRoom) bool { return !keep(r.PipelineID) })
 	}
 	s.mu.Lock()
 	if err := s.ensureAllLoadedLocked(ctx, false); err != nil {
