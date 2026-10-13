@@ -209,8 +209,9 @@ func TestConnectionsNeverEchoSecrets(t *testing.T) {
 		"secret in file":   head + ", connections: {source_db_url: {file: 'u:" + secret + "@h'}}}\n",
 		"secret as value":  head + ", connections: {connect_password: {value: " + secret + "}}}\n",
 		"nested ref value": head + ", connections: {source_db_url: {env: [" + secret + "]}}}\n",
-		// A short plain scalar: yaml.v3's own error would quote it whole.
-		"short plain password": "pipelines:\n  - id: p1\n    topic_prefix: pg\n    source_tables: [public.t]\n    connectors: [c1]\n    connections:\n      kafka_sasl_password: " + secret + "\n",
+		// A short plain scalar: yaml.v3's own error quotes values of up to
+		// 10 characters whole (and the first 7 of longer ones).
+		"short plain password": "pipelines:\n  - id: p1\n    topic_prefix: pg\n    source_tables: [public.t]\n    connectors: [c1]\n    connections:\n      kafka_sasl_password: hunter2\n",
 		// A DSN pasted where a name belongs.
 		"dsn as a connections key": head + ", connections: {'postgres://u:" + secret + "@h': {env: X}}}\n",
 		"dsn as a reference key":   head + ", connections: {source_db_url: {'postgres://u:" + secret + "@h': x}}}\n",
@@ -225,8 +226,11 @@ func TestConnectionsNeverEchoSecrets(t *testing.T) {
 			if err == nil {
 				t.Fatal("want an error")
 			}
-			if strings.Contains(err.Error(), secret) {
-				t.Fatalf("error echoes the secret: %v", err)
+			// Not even yaml.v3's 7-character prefix of a longer value.
+			for _, leak := range []string{secret[:7], "hunter2"} {
+				if strings.Contains(err.Error(), leak) {
+					t.Fatalf("error echoes the secret: %v", err)
+				}
 			}
 		})
 	}
