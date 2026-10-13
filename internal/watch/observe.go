@@ -26,11 +26,15 @@ type target struct {
 	// connectors are the pipeline's connectors, filtered through the tool scope
 	// rules: object names come only from owners.Pipeline.
 	connectors []string
-	// set names the pipeline's client set; src and conn are its clients
-	// (Deps.ClientsFor), or Deps.Source and Deps.Connect for every pipeline.
-	set  string
-	src  SourceDB
-	conn ConnectClient
+	// cdcTopics are the pipeline's CDC topics: never a DLQ.
+	cdcTopics []string
+	// set names the pipeline's client set; src, conn and kafka are its
+	// clients (Deps.ClientsFor), or Deps.Source, Deps.Connect and Deps.Kafka
+	// for every pipeline.
+	set   string
+	src   SourceDB
+	conn  ConnectClient
+	kafka clients.DLQReader
 }
 
 // connObs is what one tick learned about one connector.
@@ -44,10 +48,21 @@ type connObs struct {
 
 // observation is the raw material of one tick.
 type observation struct {
+	// set is the client set this observation read (target.set).
+	set        string
 	slots      []clients.ReplicationSlot
 	slotsErr   error
 	slotsTried bool
 	conns      map[string]*connObs
+
+	// DLQ offsets: one call per tick for all DLQ topics of the set's pipelines.
+	// plan says which topics each pipeline looks at; dlqNoReader means the
+	// Kafka client cannot read offsets of DLQ topics.
+	plan        *dlqPlan
+	dlqOffsets  map[string][]clients.PartitionOffsets
+	dlqErr      error
+	dlqTried    bool
+	dlqNoReader bool
 }
 
 // targets lists the pipelines to watch, in owners order. A pipeline that opted
@@ -56,7 +71,8 @@ func (w *Watcher) targets(ctx context.Context) []target {
 	var out []target
 	for _, p := range w.own.Pipelines {
 		cfg := p.Watch()
-		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled) {
+		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled ||
+			cfg.DLQGrowth.Enabled || cfg.ConfigRisk.Enabled) {
 			continue
 		}
 		t := target{p: p, cfg: cfg}
@@ -68,11 +84,12 @@ func (w *Watcher) targets(ctx context.Context) []target {
 			continue
 		}
 		t.connectors = sc.FilterConnectors(p.Connectors)
+		t.cdcTopics = sc.Topics()
 		if w.clientsFor != nil {
 			pc := w.clientsFor(p.ID)
-			t.set, t.src, t.conn = pc.Set, pc.Source, pc.Connect
+			t.set, t.src, t.conn, t.kafka = pc.Set, pc.Source, pc.Connect, pc.Kafka
 		} else {
-			t.src, t.conn = w.src, w.conn
+			t.src, t.conn, t.kafka = w.src, w.conn, w.kafka
 		}
 		out = append(out, t)
 	}
@@ -105,7 +122,7 @@ func (w *Watcher) observe(ctx context.Context, ts []target) map[string]*observat
 		go func() {
 			defer wg.Done()
 			// Every target of a set has that set's clients.
-			o := w.observeSet(ctx, g, g[0].src, g[0].conn)
+			o := w.observeSet(ctx, set, g, g[0].src, g[0].conn, g[0].kafka)
 			mu.Lock()
 			out[set] = o
 			mu.Unlock()
@@ -120,11 +137,13 @@ func (w *Watcher) observe(ctx context.Context, ts []target) map[string]*observat
 // goroutine. Every call has its own deadline and its own error, so one slow or
 // broken layer never holds up or hides another (same shape as devctl's
 // runHealth).
-func (w *Watcher) observeSet(ctx context.Context, ts []target, src SourceDB, conn ConnectClient) *observation {
-	obs := &observation{conns: map[string]*connObs{}}
+func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src SourceDB, conn ConnectClient, kafka clients.DLQReader) *observation {
+	obs := &observation{set: set, conns: map[string]*connObs{}}
 	needCfg := map[string]bool{}
 	for _, t := range ts {
-		slotCfg := t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled
+		// The slot name, the heartbeat, the DLQ topic and the risks all come from the config.
+		slotCfg := t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled ||
+			t.cfg.DLQGrowth.Enabled || t.cfg.ConfigRisk.Enabled
 		for _, c := range t.connectors {
 			if _, ok := obs.conns[c]; !ok {
 				obs.conns[c] = &connObs{}
@@ -169,6 +188,8 @@ func (w *Watcher) observeSet(ctx context.Context, ts []target, src SourceDB, con
 		}
 	}
 	wg.Wait()
+	// After the configs: the DLQ topics are discovered from them.
+	w.observeDLQ(ctx, ts, obs, kafka)
 	return obs
 }
 

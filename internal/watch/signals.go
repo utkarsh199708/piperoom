@@ -31,12 +31,27 @@ const (
 // pipelines that fired in this tick (the storm cap needs that).
 func (w *Watcher) evaluate(now time.Time, ts []target, bySet map[string]*observation) map[string][]string {
 	fired := map[string][]string{}
+	// DLQ rings are per set: a topic name is unique only within one cluster.
+	perSet := map[string][]target{}
+	for _, t := range ts {
+		perSet[t.set] = append(perSet[t.set], t)
+	}
+	snapsBySet := make(map[string]map[string]dlqSnap, len(perSet))
+	for set, sts := range perSet {
+		if obs := bySet[set]; obs != nil {
+			snapsBySet[set] = w.recordDLQ(now, sts, obs)
+		}
+	}
 	for _, t := range ts {
 		obs := bySet[t.set]
 		if obs == nil {
 			// observe reads every set it is given; this only guards a caller
 			// that passes targets it did not observe.
-			obs = &observation{slotsErr: errNotObserved, conns: map[string]*connObs{}}
+			obs = &observation{set: t.set, slotsErr: errNotObserved, conns: map[string]*connObs{}}
+		}
+		snaps := snapsBySet[t.set]
+		if snaps == nil {
+			snaps = map[string]dlqSnap{}
 		}
 		ps := w.pipe(t.p.ID)
 		cr := classifyConnectors(t.connectors, obs)
@@ -46,6 +61,7 @@ func (w *Watcher) evaluate(now time.Time, ts []target, bySet map[string]*observa
 		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled {
 			w.evaluateSlot(now, t, ps, cr, obs, fired)
 		}
+		w.evaluateDLQ(now, t, ps, obs, snaps, fired)
 		w.logStill(now, t, ps)
 	}
 	return fired
