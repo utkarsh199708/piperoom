@@ -18,9 +18,11 @@ oidc_client_id = "piperoom"
 # vertex = Claude on Vertex AI with the VM's service account (no key).
 # anthropic = Anthropic API; then store the key in the anthropic-api-key secret.
 model_provider = "vertex"
-# Must be a Vertex model id when model_provider = "vertex". Take it from Model Garden.
-# model         = "<vertex model id>"
-# vertex_region = "us-central1"
+# REQUIRED with vertex (plan fails without them). The model must be a Vertex
+# model id and the region one where it is served: take both from Model Garden.
+# The server default model id is an Anthropic API id and does not work on Vertex.
+model         = "<vertex model id>"
+vertex_region = "<region where that model is served, or global / us / eu>"
 
 # Optional Cloud Armor allow-list (office / VPN egress ranges AND your alert
 # senders). Empty = reachable from the whole internet behind OIDC login.

@@ -81,7 +81,10 @@ trap 'rm -rf "$WORK"' EXIT
 
 # ---- Compose file and image override ----------------------------------------
 
-md piperoom-compose-b64 | base64 -d > "$APP_DIR/docker-compose.pilot.yml"
+COMPOSE_B64=$(md piperoom-compose-b64)
+[ -n "$COMPOSE_B64" ] || die "metadata piperoom-compose-b64 is empty"
+printf '%s' "$COMPOSE_B64" | base64 -d > "$APP_DIR/docker-compose.pilot.yml"
+[ -s "$APP_DIR/docker-compose.pilot.yml" ] || die "decoded compose file is empty"
 chmod 0644 "$APP_DIR/docker-compose.pilot.yml"
 
 IMAGE=$(md piperoom-image)
@@ -107,7 +110,10 @@ install -m 0440 -o 65532 -g 65532 "$WORK/users.yaml" "$APP_DIR/config/users.yaml
 
 # ---- Env file -------------------------------------------------------------------
 
-ENVTMP="$WORK/env"
+# Order matters: compose lets a later duplicate win. The pipeline-env secret goes
+# FIRST (after the filter below) and the settings this stack manages go LAST, so
+# nothing in pipeline-env can override the auth mode, bind address and so on.
+ENVTMP="$WORK/managed.env"
 : > "$ENVTMP"
 MANAGED_KEYS="PIPEROOM_POSTGRES_PASSWORD"
 
@@ -120,6 +126,34 @@ quote_val() {
   [ "$(printf '%s' "$1" | wc -l)" -eq 0 ] || return 1
   printf "'%s'" "$1"
 }
+
+# BEGIN filter_pipeline_env (extracted and tested by test/filter_test.sh)
+# filter_pipeline_env <managed keys, space separated>: stdin -> stdout.
+# Drops every line that sets a managed key. The key is read the way the compose
+# env-file parser reads it: leading blanks and an optional "export" keyword are
+# ignored, as are blanks around the name.
+filter_pipeline_env() {
+  awk -v managed="$1" '
+    BEGIN { n = split(managed, a, " "); for (i = 1; i <= n; i++) skip[a[i]] = 1 }
+    /^[[:space:]]*(#|$)/ { print; next }
+    { line = $0
+      sub(/^[[:space:]]+/, "", line)
+      sub(/^export[[:space:]]+/, "", line)
+      key = line
+      sub(/[[:space:]]*=.*/, "", key)
+      if (key in skip) { print "piperoom-startup: ignoring managed setting " key " in pipeline-env" > "/dev/stderr"; next }
+      # A quoted value that is not closed on its line could swallow the managed
+      # lines that follow (compose allows multi-line quoted values).
+      val = line
+      sub(/^[^=]*=[[:space:]]*/, "", val)
+      sub(/[[:space:]]+$/, "", val)
+      c = substr(val, 1, 1)
+      if ((c == "\"" || c == "\047") && (length(val) < 2 || substr(val, length(val), 1) != c)) {
+        print "piperoom-startup: ignoring line with an unclosed quote for " key " in pipeline-env" > "/dev/stderr"; next }
+      print }
+  '
+}
+# END filter_pipeline_env
 
 # Non-secret settings from Terraform.
 while IFS= read -r line; do
@@ -147,27 +181,26 @@ done < <(md piperoom-secret-vars)
 # is not started here (Cloud SQL is used), so a throw-away value is enough.
 printf "PIPEROOM_POSTGRES_PASSWORD='%s'\n" "$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')" >> "$ENVTMP"
 
-# Pipeline settings (SOURCE_DB_URL, KAFKA_*, ...). Lines that would override a
-# setting managed above are dropped, so this secret cannot switch the auth mode.
+# Pipeline settings (SOURCE_DB_URL, KAFKA_*, ...): filtered, then the managed lines.
 secret_to "$(md piperoom-secret-envfile)" "$WORK/pipeline.env"
-awk -v managed="$MANAGED_KEYS" '
-  BEGIN { n = split(managed, a, " "); for (i = 1; i <= n; i++) skip[a[i]] = 1 }
-  /^[[:space:]]*(#|$)/ { print; next }
-  { key = $0; sub(/=.*/, "", key); gsub(/[[:space:]]/, "", key)
-    if (key in skip) { print "piperoom-startup: ignoring managed setting " key " in pipeline-env" > "/dev/stderr"; next }
-    print }
-' "$WORK/pipeline.env" >> "$ENVTMP"
+{
+  filter_pipeline_env "$MANAGED_KEYS" < "$WORK/pipeline.env"
+  echo
+  cat "$ENVTMP"
+} > "$WORK/env"
 
-install -m 0600 -o root -g root "$ENVTMP" "$APP_DIR/.env"
+install -m 0600 -o root -g root "$WORK/env" "$APP_DIR/.env"
 
 # ---- Registry login (Artifact Registry / GCR) ------------------------------------
 
 REG_HOST=${IMAGE%%/*}
-LOGGED_IN=""
+# The token lives in a throw-away Docker config that the EXIT trap deletes, not
+# in /root/.docker.
+export DOCKER_CONFIG="$WORK/docker"
+install -d -m 0700 "$DOCKER_CONFIG"
 case $REG_HOST in
   *-docker.pkg.dev | docker.pkg.dev | gcr.io | *.gcr.io)
     access_token | docker login -u oauth2accesstoken --password-stdin "https://$REG_HOST" >/dev/null
-    LOGGED_IN=$REG_HOST
     ;;
 esac
 
@@ -176,7 +209,5 @@ esac
 cd "$APP_DIR"
 # --no-deps: do not start the bundled postgres service.
 docker compose -f docker-compose.pilot.yml -f docker-compose.override.yml up -d --no-deps --pull always piperoom
-
-[ -z "$LOGGED_IN" ] || docker logout "$REG_HOST" >/dev/null 2>&1 || true
 
 log "done. Check: docker compose -f $APP_DIR/docker-compose.pilot.yml -f $APP_DIR/docker-compose.override.yml ps"

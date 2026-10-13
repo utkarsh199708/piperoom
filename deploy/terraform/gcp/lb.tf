@@ -32,9 +32,11 @@ resource "google_compute_ssl_policy" "tls12" {
 
 # The server's real liveness endpoint: GET /healthz (internal/httpapi/health.go).
 # It answers while the process serves HTTP and does not touch the database, so a
-# database blip does not take the whole load balancer backend out. It is exempt
-# from the Host and auth checks. /readyz also pings the database; use it if you
-# prefer the load balancer to stop sending traffic when the database is down.
+# database blip does not take the whole backend out. It is NOT exempt from the
+# Host check (internal/httpapi/server.go applies hostGuard to every route): a
+# probe that sends the backend IP as Host gets 421. So the check sends
+# Host: <domain>, which PIPEROOM_PUBLIC_URL allows. /readyz also pings the
+# database; use it instead if you want traffic to stop when the database is down.
 resource "google_compute_health_check" "server" {
   name                = "${var.name_prefix}-hc"
   check_interval_sec  = 10
@@ -45,6 +47,7 @@ resource "google_compute_health_check" "server" {
   http_health_check {
     port         = local.server_port
     request_path = "/healthz"
+    host         = var.domain
   }
 }
 

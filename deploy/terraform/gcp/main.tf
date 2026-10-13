@@ -164,7 +164,7 @@ resource "google_sql_database_instance" "db" {
       enabled                        = true
       start_time                     = var.db_backup_start_time
       point_in_time_recovery_enabled = true
-      transaction_log_retention_days = 7
+      transaction_log_retention_days = min(7, var.db_retained_backups)
 
       backup_retention_settings {
         retained_backups = var.db_retained_backups

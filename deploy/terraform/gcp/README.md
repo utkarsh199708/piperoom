@@ -51,7 +51,8 @@ Everything is ordinary Terraform (provider `hashicorp/google` `~> 6.50`, Terrafo
   Model Garden, in the region you choose. If `anthropic`: an API key.
 - To SSH later: `roles/iap.tunnelResourceAccessor` and `roles/compute.osLogin` (or
   `osAdminLogin` for sudo) for each person, plus `roles/iam.serviceAccountUser` on the VM service
-  account if they need sudo.
+  account: OS Login on a VM that runs as a service account needs it for every user, not only for
+  sudo.
 
 ## Step by step
 
@@ -102,18 +103,15 @@ PGPW=$(openssl rand -hex 24)
 gcloud sql users create piperoom --instance "$(terraform output -raw cloudsql_instance)" --password "$PGPW"
 ```
 
-The server runs its own migrations at start, so the `piperoom` user must own the database. Give
-yourself a way in once and hand ownership over (the VM has `psql` installed by the start-up
-script):
-
-```bash
-gcloud sql users set-password postgres --instance "$(terraform output -raw cloudsql_instance)" --prompt-for-password
-# then, from the VM (step 8 shows how to SSH):  psql "host=<cloudsql_private_ip> user=postgres dbname=piperoom sslmode=require"
-#   GRANT piperoom TO postgres;  ALTER DATABASE piperoom OWNER TO piperoom;  GRANT ALL ON SCHEMA public TO piperoom;
-```
-
-(This ownership step was written from the Cloud SQL docs, not run. If `ALTER DATABASE ... OWNER`
-is refused, `GRANT ALL ON SCHEMA public TO piperoom;` alone is usually enough on Postgres 16.)
+Nothing more to do now. The server runs its own migrations when it starts (step 6). **Unverified:**
+a user created with `gcloud sql users create` is a member of `cloudsqlsuperuser` but is not a real
+superuser, and on Postgres 16 the `public` schema is owned by `pg_database_owner`, so the first
+migration might fail. Only if the server log (step 8) shows `permission denied` on a migration, fix
+it as follows (also unverified, written from the Cloud SQL and Postgres docs): set a password for
+the built-in `postgres` user (`gcloud sql users set-password postgres --instance ... --prompt-for-password`),
+connect from the VM with `psql "host=<cloudsql_private_ip> user=postgres dbname=piperoom sslmode=require"`,
+and run `ALTER DATABASE piperoom OWNER TO piperoom;` (if refused because `postgres` is not a member
+of `piperoom`, run `GRANT piperoom TO postgres;` first). Report what worked so this can be fixed here.
 
 ### 5. Set the secret values
 
@@ -142,8 +140,12 @@ gcloud secrets versions add piperoom-pipeline-env --project $P --data-file=pipel
 
 `pipeline.env` holds `SOURCE_DB_URL`, `WAREHOUSE_DB_URL`, `KAFKA_BROKERS`, `CONNECT_URL`,
 `SCHEMA_REGISTRY_URL`, the Kafka/Connect/Registry logins, Slack and alert secrets. Settings that
-this stack manages itself (auth mode, public URL, OIDC id, database URL, bind, proxies, provider,
-model, Vertex project) are dropped from it with a log line, so the secret cannot weaken them.
+this stack manages itself are dropped from it with a log line, so the secret cannot weaken them: auth
+mode, public URL, OIDC issuer and id, database URL, bind and listen address, the dev-mode switch,
+trusted proxies, model provider, and `PIPEROOM_MODEL` and `VERTEX_*` (the last two only when set by
+Terraform; with `anthropic` and no `model`, `PIPEROOM_MODEL` may come from pipeline-env). The
+drop also covers `export NAME=...` and indented forms, and lines with an unclosed quote. The
+managed lines are written last. `test/filter_test.sh` tests the filter.
 Use `--data-file=-` with a here-doc instead of a file if you do not want `pipeline.env` on disk.
 Delete the local copies afterwards.
 
@@ -215,7 +217,10 @@ terraform destroy -var db_deletion_protection=false
 (`disable_on_destroy = false`). The Artifact Registry repository from step 2 and any DNS record
 were created by hand and are yours to remove. Cloud SQL automated backups are deleted with the
 instance. If destroy stops on the private-services peering, run it again; the connection is set
-to be abandoned, and the peering disappears with the VPC.
+to be abandoned, and the peering disappears with the VPC. If the reserved address range
+(`piperoom-private-services`) cannot be deleted ("address is already being used"), the peering is
+still in place: delete it with `gcloud services vpc-peerings delete --service=servicenetworking.googleapis.com --network=piperoom-vpc`
+(wait until Cloud SQL is fully gone first), then run `terraform destroy` again.
 
 ## Variables you will most likely touch
 
@@ -226,7 +231,7 @@ All variables have descriptions and validation in `variables.tf`.
 | `project_id`, `domain`, `piperoom_image`, `oidc_issuer`, `oidc_client_id` | required | where, address, image, login |
 | `region` | `us-central1` | everything except the global load balancer |
 | `model_provider` | `vertex` | `vertex` uses the VM's service account; `anthropic` uses the API-key secret |
-| `model`, `vertex_region` | `null` | `PIPEROOM_MODEL`, `VERTEX_REGION` (null region = `region`) |
+| `model`, `vertex_region` | `null` | `PIPEROOM_MODEL`, `VERTEX_REGION`. **Both required with `vertex`** (plan fails otherwise): a Vertex model id and a region that serves it, from Model Garden |
 | `allowed_cidrs` | `[]` | non-empty creates a Cloud Armor allow-list (default deny, 403) |
 | `backend_timeout_sec` | `3600` | longest WebSocket lifetime through the load balancer |
 | `db_deletion_protection` | `true` | Cloud SQL guard (Terraform and API) |
@@ -328,7 +333,7 @@ Anthropic API is billed per token, `PIPEROOM_ROOM_TOKEN_BUDGET` caps a room, and
 
 Done on the machine that wrote this: `terraform fmt -check -recursive`, `terraform init
 -backend=false`, `terraform validate` and `tflint` (default `terraform` ruleset, recommended
-preset), `bash -n startup.sh`. **Not done**: `terraform plan` or `apply` against a real project,
+preset), `bash -n startup.sh`, `bash test/filter_test.sh` (the env-file filter against hostile input). **Not done**: `terraform plan` or `apply` against a real project,
 running `startup.sh` on a Debian VM, and a Cloud Armor, certificate or WebSocket test through the
 real load balancer. Expect to fix small things on the first real apply; report them.
 

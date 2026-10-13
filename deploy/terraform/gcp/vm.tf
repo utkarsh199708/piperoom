@@ -5,19 +5,22 @@ locals {
   # turned into the env file by startup.sh. Secrets are fetched at boot instead.
   managed_env = merge(
     {
-      PIPEROOM_AUTH_MODE       = "oidc"
-      PIPEROOM_PUBLIC_URL      = local.public_url
-      PIPEROOM_OIDC_ISSUER     = var.oidc_issuer
-      PIPEROOM_OIDC_CLIENT_ID  = var.oidc_client_id
-      PIPEROOM_MODEL_PROVIDER  = var.model_provider
-      PIPEROOM_BIND            = "0.0.0.0"
-      PIPEROOM_PORT            = tostring(local.server_port)
-      PIPEROOM_TRUSTED_PROXIES = join(",", concat(local.google_lb_ranges, ["${google_compute_global_address.lb.address}/32"]))
+      PIPEROOM_AUTH_MODE      = "oidc"
+      PIPEROOM_PUBLIC_URL     = local.public_url
+      PIPEROOM_OIDC_ISSUER    = var.oidc_issuer
+      PIPEROOM_OIDC_CLIENT_ID = var.oidc_client_id
+      PIPEROOM_MODEL_PROVIDER = var.model_provider
+      PIPEROOM_BIND           = "0.0.0.0"
+      PIPEROOM_PORT           = tostring(local.server_port)
+      PIPEROOM_HTTP_ADDR      = "0.0.0.0:8090"
+      # Dev-mode switch; forced off so no setting can make it listen openly.
+      PIPEROOM_DEV_ALLOW_NONLOOPBACK = "0"
+      PIPEROOM_TRUSTED_PROXIES       = join(",", concat(local.google_lb_ranges, ["${google_compute_global_address.lb.address}/32"]))
     },
     var.model != null ? { PIPEROOM_MODEL = var.model } : {},
     local.vertex ? {
       VERTEX_PROJECT_ID = var.project_id
-      VERTEX_REGION     = coalesce(var.vertex_region, var.region)
+      VERTEX_REGION     = var.vertex_region
     } : {},
     var.extra_env,
   )
@@ -76,6 +79,17 @@ resource "google_compute_instance" "piperoom" {
     piperoom-secret-owners  = google_secret_manager_secret.this["owners-yaml"].secret_id
     piperoom-secret-users   = google_secret_manager_secret.this["users-yaml"].secret_id
     piperoom-ops-agent      = tostring(var.install_ops_agent)
+  }
+
+  lifecycle {
+    precondition {
+      condition     = !local.vertex || var.model != null
+      error_message = "model_provider = \"vertex\" needs model set to a Vertex model id: the server default is an Anthropic API id and does not work on Vertex."
+    }
+    precondition {
+      condition     = !local.vertex || var.vertex_region != null
+      error_message = "model_provider = \"vertex\" needs vertex_region set to a region (or global/us/eu) where your Claude model is served; check Model Garden."
+    }
   }
 
   depends_on = [

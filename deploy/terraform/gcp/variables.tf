@@ -178,13 +178,13 @@ variable "model_provider" {
 }
 
 variable "model" {
-  description = "PIPEROOM_MODEL. Must be an id the chosen provider knows (a Vertex model id for vertex). null keeps the server default, which is an Anthropic API id and is wrong for vertex."
+  description = "PIPEROOM_MODEL. REQUIRED when model_provider is vertex (checked at plan time): a Vertex model id from Model Garden. For anthropic, null keeps the server default."
   type        = string
   default     = null
 }
 
 variable "vertex_region" {
-  description = "VERTEX_REGION when model_provider is vertex: a region such as europe-west4, or global/us/eu (multi-region endpoints: the request may be served anywhere in that area). null means var.region."
+  description = "VERTEX_REGION. REQUIRED when model_provider is vertex (checked at plan time): a region where your Claude model is served (see Model Garden), or global/us/eu (multi-region endpoints: the request may be served anywhere in that area). There is no default because var.region may not serve the model."
   type        = string
   default     = null
 }
@@ -263,7 +263,7 @@ variable "extra_env" {
     condition = length(setintersection(toset(keys(var.extra_env)), toset([
       "PIPEROOM_DB_URL", "PIPEROOM_AUTH_MODE", "PIPEROOM_PUBLIC_URL", "PIPEROOM_OIDC_ISSUER",
       "PIPEROOM_OIDC_CLIENT_ID", "PIPEROOM_OIDC_CLIENT_SECRET", "PIPEROOM_MODEL_PROVIDER", "PIPEROOM_MODEL",
-      "PIPEROOM_BIND", "PIPEROOM_PORT", "PIPEROOM_TRUSTED_PROXIES", "VERTEX_PROJECT_ID", "VERTEX_REGION",
+      "PIPEROOM_BIND", "PIPEROOM_PORT", "PIPEROOM_HTTP_ADDR", "PIPEROOM_DEV_ALLOW_NONLOOPBACK", "PIPEROOM_TRUSTED_PROXIES", "VERTEX_PROJECT_ID", "VERTEX_REGION",
       "ANTHROPIC_API_KEY", "PIPEROOM_POSTGRES_PASSWORD",
     ]))) == 0
     error_message = "extra_env must not set a variable that this stack manages itself (database, auth, public URL, bind, proxies, model provider, keys)."
