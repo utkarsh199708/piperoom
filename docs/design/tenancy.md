@@ -195,7 +195,8 @@ No value is ever logged.
   - **topology**: the stacks value is a `topology.Builder` that sends `Build` and `Trace` to the set of
     the given pipeline (`GET /api/pipelines/{pid}/topology`, the room's first prompt, `POST .../trace`);
   - **watcher**: `watch.Deps.ClientsFor(pipelineID)`; each tick groups pipelines by client set and reads
-    each set once (one `pg_replication_slots` query per source database, connectors per Connect cluster);
+    each set once (one `pg_replication_slots` query per set; a connector name is read on each set's own
+    Connect cluster, so two clusters may both have a connector of that name);
   - **`cmd/investigate`** opens only the set of the pipeline it investigates.
 - A room whose pipeline is unknown or empty gets the process-wide set when one exists (the tools then
   refuse it, as today), else an empty set: `runbook_lookup` only, no actions, topology refuses.
