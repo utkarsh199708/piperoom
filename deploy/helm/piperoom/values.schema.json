@@ -3,6 +3,20 @@
   "type": "object",
   "properties": {
     "replicaCount": {"type": "integer", "minimum": 0},
+    "rollingUpdate": {
+      "type": "object",
+      "properties": {
+        "maxSurge": {"type": "integer", "minimum": 0},
+        "maxUnavailable": {"type": "integer", "minimum": 0}
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "minAvailable": {"type": "integer", "minimum": 0}
+      }
+    },
     "allowDevMode": {"type": "boolean"},
     "image": {
       "type": "object",

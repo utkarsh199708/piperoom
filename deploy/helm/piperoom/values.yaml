@@ -1,13 +1,27 @@
 # Piperoom Helm chart values. Variable names match internal/config/config.go and
 # deploy/pilot.env.example. An empty string means "use the server default (or off)".
 
-# Replicas. Keep 1: the agent runner, the watcher, the retention sweep and the
-# action executor run inside every server process and nothing elects a leader
-# (no lease or advisory lock in the code), so a second replica would run the
-# same investigations, watcher checks and approved fixes twice. The event log
-# fan-out (LISTEN/NOTIFY) and the HTTP/WebSocket layer would cope with more,
-# but the background workers do not. See deploy/helm/README.md.
+# Replicas. More than one is safe (docs/design/replicas.md): each room's agent
+# runs on one replica (a lease in Postgres), an approved fix runs exactly once
+# (a claim), the watcher, retention and Slack mirror run on one elected leader,
+# and every replica serves every room's WebSocket from the shared event log.
+# Postgres is the only coordination service. With 1 the strategy is Recreate;
+# with more it is RollingUpdate and a PodDisruptionBudget is rendered. Limits
+# (presence and the token budget are per replica): deploy/helm/README.md.
 replicaCount: 1
+
+# Rollout with replicaCount > 1. maxUnavailable 0 keeps every replica serving
+# while a new one starts; the old pod hands its rooms' agents over when it
+# stops (they resume on another replica).
+rollingUpdate:
+  maxSurge: 1
+  maxUnavailable: 0
+
+# Rendered only with replicaCount > 1: voluntary disruptions (node drains)
+# keep at least minAvailable pods.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
 
 # The chart refuses env.PIPEROOM_AUTH_MODE=dev (passwordless login) unless this
 # is true, and never together with an Ingress. For a throwaway try-out only;
@@ -97,7 +111,9 @@ env:
   PIPEROOM_MODEL_PROVIDER: ""         # anthropic | bedrock | vertex (empty = anthropic)
   PIPEROOM_MODEL: ""                  # default claude-opus-5-5
   PIPEROOM_EFFORT: ""                 # default high
-  PIPEROOM_MAX_AGENTS: ""             # default 3
+  PIPEROOM_MAX_AGENTS: ""             # per replica; default 3
+  PIPEROOM_MAX_AGENTS_GLOBAL: ""      # across all replicas; empty/0 = off
+  # PIPEROOM_REPLICA_ID is set by the chart to the pod name.
   PIPEROOM_TRIAGE_MODEL: ""
   PIPEROOM_ROOM_TOKEN_BUDGET: ""      # default 2000000, 0 = no cap
   ANTHROPIC_WORKSPACE_ID: ""          # only for user keys (sk-ant-usr-...)

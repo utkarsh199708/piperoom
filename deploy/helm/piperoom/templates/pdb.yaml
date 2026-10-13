@@ -1,0 +1,16 @@
+{{- if and (gt (int .Values.replicaCount) 1) .Values.podDisruptionBudget.enabled }}
+# Several replicas share the rooms (docs/design/replicas.md): a node drain must
+# leave at least minAvailable of them serving. One replica gets no PDB, so a
+# drain is never blocked by it.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "piperoom.fullname" . }}
+  labels:
+    {{- include "piperoom.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "piperoom.selectorLabels" . | nindent 6 }}
+{{- end }}

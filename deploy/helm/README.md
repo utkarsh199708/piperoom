@@ -111,10 +111,31 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
   group health check cannot either. There, keep an in-cluster ingress controller (for example
   ingress-nginx) between the cloud load balancer and Piperoom, so the load balancer checks the
   controller and kubelet's probes (which send `Host: localhost`) check Piperoom.
-- **One replica.** `replicaCount` defaults to 1 and the Deployment strategy is `Recreate`. The agent
-  runner, watcher, retention sweep and action executor run in every server process and the code has
-  no leader election or lock, so a second replica would duplicate investigations, watcher checks
-  and approved fixes. Do not scale up until that changes.
+- **Replicas.** `replicaCount` defaults to 1 (strategy `Recreate`). More replicas are safe and add
+  capacity; Postgres is the only coordination service (design: `docs/design/replicas.md`):
+  - each room's agent runs on one replica, which holds a lease row renewed every 10 s (TTL 30 s).
+    Steers and comments sent to any replica reach that agent through the event log. When a pod
+    stops, its rooms are handed over: an agent that was working resumes on another replica (a new
+    run that gets the room's unanswered input), an idle one stays paused until someone steers;
+  - an approved fix runs exactly once: the executor claims the proposal in Postgres first. A step
+    that was running when its pod died is never run again; after about 2.5 minutes it is recorded
+    as failed with "outcome unknown";
+  - the watcher, the retention purge, the auth prune and the Slack mirror run on one elected leader
+    each (a Postgres advisory lock); another replica takes over within about 20 s of losing it;
+  - every replica serves every room's WebSocket from the shared event log (one LISTEN connection per
+    pod, polling every 2 s while it reconnects), so the load balancer needs no sticky sessions;
+  - `PIPEROOM_MAX_AGENTS` is per replica; `PIPEROOM_MAX_AGENTS_GLOBAL` caps working agents across
+    all replicas.
+
+  With `replicaCount > 1` the strategy is `RollingUpdate` (`rollingUpdate.maxSurge` 1,
+  `maxUnavailable` 0) and a `PodDisruptionBudget` keeps `podDisruptionBudget.minAvailable` (1) pods
+  through node drains. Each pod uses about 5 Postgres connections more than the request pool (one
+  LISTEN, one per leader loop it holds, short-lived lock connections), so size `max_connections`
+  for replicas x (pool + 5). Limits: who is viewing a room (presence) is per replica, so people on
+  different pods do not see each other in the member list; the room token budget
+  (`PIPEROOM_ROOM_TOKEN_BUDGET`) and the login and alert rate limits are counted per replica; two
+  conflicting commands sent to two replicas in the same instant (two people taking control) can
+  both pass, last write wins, while approvals, executions and alert rooms stay one-only.
 - **Security context**: non-root (uid 65532), read-only root file system, all capabilities dropped,
   seccomp `RuntimeDefault`. `/tmp` is a small in-memory emptyDir; `/config` is the read-only
   owners/users ConfigMap. Kafka/Connect TLS files: mount a Secret with `extraVolumes` and
@@ -142,7 +163,10 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
 | Value | Default | Meaning |
 |---|---|---|
 | `image.repository`, `image.tag`, `image.digest` | `piperoom`, `pilot`, empty | image to run; digest wins |
-| `replicaCount` | `1` | keep 1, see above |
+| `replicaCount` | `1` | pods; more than 1 is safe, see above |
+| `rollingUpdate.maxSurge`, `.maxUnavailable` | `1`, `0` | rollout with more than one replica |
+| `podDisruptionBudget.enabled`, `.minAvailable` | `true`, `1` | PDB, rendered only with more than one replica |
+| `env.PIPEROOM_MAX_AGENTS`, `env.PIPEROOM_MAX_AGENTS_GLOBAL` | empty (3 per replica, no global cap) | agent cost caps |
 | `secrets.existingSecret` | `piperoom-secrets` | Secret with the env-named keys |
 | `secrets.requiredKeys` / `optionalKeys` / `refs` | see values.yaml | which variables come from Secrets |
 | `env.*` | see values.yaml | every plain server variable; `""` = server default |
@@ -163,8 +187,11 @@ helm upgrade piperoom deploy/helm/piperoom -n piperoom -f my-values.yaml \
 ```
 
 Pass the same `-f`/`--set-file` inputs every time. A changed owners/users ConfigMap restarts the
-pod (checksum annotation). The server applies database migrations at start; the Deployment is
-`Recreate`, so there is a short gap during an upgrade. Roll back with `helm rollback piperoom <rev>`
+pod (checksum annotation). The server applies database migrations at start, one pod at a time
+(an advisory lock). With one replica the Deployment is `Recreate`, so there is a short gap during an
+upgrade; with more it rolls one pod at a time with no gap, and old and new pods share the database
+for a moment, so a release whose migrations the old version cannot run against needs
+`replicaCount: 1` for that upgrade (its notes say so). Roll back with `helm rollback piperoom <rev>`
 (migrations are not undone).
 
 ## Checks
@@ -179,4 +206,7 @@ for f in oidc dev; do
   helm lint deploy/helm/piperoom -f deploy/helm/piperoom/ci/$f-values.yaml
   helm template piperoom deploy/helm/piperoom -f deploy/helm/piperoom/ci/$f-values.yaml | kubeconform -strict -summary
 done
+# several replicas: RollingUpdate and a PodDisruptionBudget
+helm template piperoom deploy/helm/piperoom -f deploy/helm/piperoom/ci/oidc-values.yaml --set replicaCount=3 \
+  | grep -E 'kind: PodDisruptionBudget|type: RollingUpdate'
 ```
