@@ -1,5 +1,6 @@
 import type { RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
+import { isViewer } from '../state/permissions'
 import type { RoomActions } from '../hooks/useRoom'
 
 // Webhook-opened rooms have no driver until someone takes control, and nobody
@@ -16,7 +17,7 @@ export function NoDriverBanner({
   user: CurrentUser
   actions: RoomActions
 }) {
-  if (state.status !== 'open' || state.driver !== null) return null
+  if (state.status !== 'open' || state.driver !== null || isViewer(user)) return null
   return (
     <div className="banner banner--nodriver" role="status">
       <span>

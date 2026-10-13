@@ -2,9 +2,10 @@ import { isDev } from '../lib/env'
 import { isFixtures } from '../api/client'
 import { DEV_USERS } from '../dev/users'
 import { useCurrentUser } from '../context/user'
+import { isViewer } from '../state/permissions'
 
 export function UserSwitcher() {
-  const { user, setUserId, logout } = useCurrentUser()
+  const { user, setUserId, logout, busy } = useCurrentUser()
   return (
     <span className="user-switcher">
       {/* The switcher lets a client sign in as any user (F1): it must never
@@ -16,6 +17,7 @@ export function UserSwitcher() {
           <select
             value={user.id}
             onChange={(e) => setUserId(e.target.value)}
+            disabled={busy}
             aria-label="Switch user"
           >
             {DEV_USERS.map((u) => (
@@ -27,6 +29,11 @@ export function UserSwitcher() {
         </label>
       ) : (
         <span className="user-switcher__label">{user.name}</span>
+      )}
+      {isViewer(user) && (
+        <span className="chip chip--muted view-only" title="You can read rooms but not change anything">
+          View only
+        </span>
       )}
       {!isFixtures() && (
         <button type="button" className="btn btn--ghost btn--small" onClick={logout}>

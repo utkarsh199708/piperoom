@@ -212,3 +212,46 @@ describe('roomWsUrl', () => {
     expect(url.startsWith(`ws://${window.location.host}/api/rooms/r_1/ws`)).toBe(true)
   })
 })
+
+describe('people and approve (auth PR 3)', () => {
+  it('GET /api/people returns the list as the server sent it', async () => {
+    const list = [{ id: 'priya', name: 'Priya' }, { id: 'u_0a1b2c3d4e5f', name: 'Meera', email: 'm@example.com' }]
+    fetchMock.mockResolvedValue(jsonResponse(200, list))
+    await expect(api.people()).resolves.toEqual(list)
+    expect(lastCall().url).toBe('/api/people')
+  })
+
+  it('a viewer gets 403 viewer from /api/people and the banner report', async () => {
+    const seen: AuthProblem[] = []
+    const off = onAuthProblem((p) => seen.push(p))
+    fetchMock.mockResolvedValue(jsonResponse(403, { error: { code: 'viewer', message: 'read-only' } }))
+    const err = await api.people().catch((e: unknown) => e)
+    off()
+    expect(err).toBeInstanceOf(ApiClientError)
+    expect((err as ApiClientError).status).toBe(403)
+    expect(seen.map((p) => p.kind)).toEqual(['viewer'])
+  })
+
+  it('approve sends only {layer} by default and adds confirm for solo mode', async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(jsonResponse(200, {})))
+    await api.approve('p_1', 'kafka')
+    expect(lastCall().init.body).toBe(JSON.stringify({ layer: 'kafka' }))
+    await api.approve('p_1', 'kafka', { confirm: 'orders/kafka' })
+    expect(lastCall().url).toBe('/api/proposals/p_1/approve')
+    expect(JSON.parse(lastCall().init.body as string)).toEqual({ layer: 'kafka', confirm: 'orders/kafka' })
+  })
+
+  it.each([
+    [400, 'login_expired', 'login_expired'],
+    [403, 'not_provisioned', 'not_provisioned'],
+    [429, 'rate_limited', 'rate_limited'],
+    [503, 'idp_unavailable', 'idp_unavailable'],
+  ])('reports %i %s as an auth problem', async (status, code, kind) => {
+    const seen: AuthProblem[] = []
+    const off = onAuthProblem((p) => seen.push(p))
+    fetchMock.mockResolvedValue(jsonResponse(status, { error: { code, message: 'm' } }))
+    await api.me().catch(() => undefined)
+    off()
+    expect(seen.map((p) => p.kind)).toEqual([kind])
+  })
+})

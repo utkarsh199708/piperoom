@@ -2,8 +2,9 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import type { HandoffState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
+import { canAcceptHandoff } from '../state/permissions'
 import type { RoomActions } from '../hooks/useRoom'
-import { DEV_USERS } from '../dev/users'
+import { PersonSelect } from './PersonSelect'
 
 function SummaryList({ title, items }: { title: string; items: string[] }) {
   if (!items || items.length === 0) return null
@@ -30,8 +31,7 @@ export function HandoffDialog({
   actions: RoomActions
   onClose: () => void
 }) {
-  const candidates = DEV_USERS.filter((u) => u.id !== user.id)
-  const [to, setTo] = useState(candidates[0]?.id ?? '')
+  const [to, setTo] = useState('')
   const [stay, setStay] = useState(false)
   const pending = state.handoffs.find((h) => h.status === 'pending')
 
@@ -57,13 +57,7 @@ export function HandoffDialog({
           <form className="handoff__form" onSubmit={submit}>
             <div className="field">
               <label htmlFor="handoff-to">Hand off to</label>
-              <select id="handoff-to" value={to} onChange={(e) => setTo(e.target.value)}>
-                {candidates.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name}
-                  </option>
-                ))}
-              </select>
+              <PersonSelect id="handoff-to" selfId={user.id} value={to} onChange={setTo} />
             </div>
             <label className="check">
               <input type="checkbox" checked={stay} onChange={(e) => setStay(e.target.checked)} />
@@ -131,7 +125,7 @@ export function HandoffAcceptBanner({
   user: CurrentUser
   actions: RoomActions
 }) {
-  const mine = state.handoffs.find((h) => h.status === 'pending' && h.to.id === user.id)
+  const mine = state.handoffs.find((h) => canAcceptHandoff(user, h))
   if (!mine) return null
   return (
     <div className="banner banner--accept" role="status">

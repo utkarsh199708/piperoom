@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canDecideLayer } from '../state/permissions'
+import { soloConfirmText } from '../lib/solo'
 import type { RoomActions } from '../hooks/useRoom'
 import { Chip, Empty, Panel } from './ui'
 
@@ -53,19 +54,93 @@ function StepParams({ params }: { params: unknown }) {
   )
 }
 
+// Solo mode (docs/design/auth.md 5.3): the person types "<pipeline_id>/<layer>" by
+// hand. A speed bump, not a control: no copy button, and paste is blocked.
+function SoloConfirm({
+  want,
+  busy,
+  rejected,
+  onConfirm,
+  onCancel,
+}: {
+  want: string
+  busy: boolean
+  /** The server refused the typed text once already. */
+  rejected: boolean
+  onConfirm: (typed: string) => void
+  onCancel: () => void
+}) {
+  const [typed, setTyped] = useState('')
+  return (
+    <form
+      className="solo-confirm"
+      onSubmit={(e) => {
+        e.preventDefault()
+        if (typed === want && !busy) onConfirm(typed)
+      }}
+    >
+      <label className="solo-confirm__label">
+        Solo mode: type <code className="mono">{want}</code> to approve
+        <input
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+          onPaste={(e) => e.preventDefault()}
+          onDrop={(e) => e.preventDefault()}
+          aria-label="Type the pipeline and layer to confirm"
+          autoComplete="off"
+          autoFocus
+        />
+      </label>
+      {rejected && <span className="error-text">The server did not accept that text.</span>}
+      <button type="submit" className="btn btn--small btn--approve" disabled={busy || typed !== want}>
+        Approve
+      </button>
+      <button type="button" className="btn btn--small btn--ghost" onClick={onCancel}>
+        Cancel
+      </button>
+    </form>
+  )
+}
+
 function LayerDecision({
   proposal,
   layer,
   user,
   actions,
+  pipelineId,
+  onSolo,
 }: {
   proposal: ProposalState
   layer: string
   user: CurrentUser
   actions: RoomActions
+  pipelineId: string
+  /** The server asked for a solo confirm: the panel shows the solo banner. */
+  onSolo: () => void
 }) {
   const [rejecting, setRejecting] = useState(false)
   const [reason, setReason] = useState('')
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [refused, setRefused] = useState(false)
+
+  // The first approve goes without `confirm`; only a 400 solo error opens the box.
+  const approve = async (extra?: { confirm: string }) => {
+    setBusy(true)
+    try {
+      const res = await actions.approve(proposal.proposal_id, layer, extra)
+      if (res?.needsConfirm) {
+        onSolo()
+        setRefused(extra !== undefined)
+        setConfirming(true)
+      } else {
+        setConfirming(false)
+        setRefused(false)
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
   const state = proposal.approvals[layer] ?? 'pending'
   const canDecide = canDecideLayer(proposal, user, layer)
 
@@ -73,12 +148,25 @@ function LayerDecision({
     <div className={`approval approval--${state}`}>
       <span className="approval__layer">{layer}</span>
       <Chip tone={state === 'approved' ? 'ok' : state === 'rejected' ? 'fail' : 'warn'}>{state}</Chip>
-      {canDecide && !rejecting && (
+      {canDecide && confirming && (
+        <SoloConfirm
+          want={soloConfirmText(pipelineId, layer)}
+          busy={busy}
+          rejected={refused}
+          onConfirm={(typed) => void approve({ confirm: typed })}
+          onCancel={() => {
+            setConfirming(false)
+            setRefused(false)
+          }}
+        />
+      )}
+      {canDecide && !rejecting && !confirming && (
         <span className="approval__actions">
           <button
             type="button"
             className="btn btn--small btn--approve"
-            onClick={() => actions.approve(proposal.proposal_id, layer)}
+            disabled={busy}
+            onClick={() => void approve()}
           >
             Approve
           </button>
@@ -118,10 +206,12 @@ function LayerDecision({
   )
 }
 
-function Proposal({ proposal, user, actions }: {
+function Proposal({ proposal, user, actions, pipelineId, onSolo }: {
   proposal: ProposalState
   user: CurrentUser
   actions: RoomActions
+  pipelineId: string
+  onSolo: () => void
 }) {
   return (
     <article className="proposal">
@@ -149,7 +239,15 @@ function Proposal({ proposal, user, actions }: {
       </ul>
       <div className="proposal__approvals">
         {proposal.required_layers.map((layer) => (
-          <LayerDecision key={layer} proposal={proposal} layer={layer} user={user} actions={actions} />
+          <LayerDecision
+            key={layer}
+            proposal={proposal}
+            layer={layer}
+            user={user}
+            actions={actions}
+            pipelineId={pipelineId}
+            onSolo={onSolo}
+          />
         ))}
       </div>
       {proposal.executed.length > 0 && (
@@ -176,18 +274,33 @@ export function ProposalsPanel({
   actions: RoomActions
 }) {
   const proposals = state.proposals
+  // No API field says "solo"; the first approve that asks for a confirm tells us.
+  const [solo, setSolo] = useState(false)
   return (
     <Panel
       className="proposals"
       title="Proposals"
       right={<span className="muted">{proposals.length}</span>}
     >
+      {solo && (
+        <p className="solo-banner" role="status">
+          Solo mode: you can approve every layer. Each approval needs you to type the pipeline
+          and layer by hand.
+        </p>
+      )}
       {proposals.length === 0 ? (
         <Empty>No proposals yet.</Empty>
       ) : (
         <div className="proposals__list">
           {proposals.map((p) => (
-            <Proposal key={p.proposal_id} proposal={p} user={user} actions={actions} />
+            <Proposal
+              key={p.proposal_id}
+              proposal={p}
+              user={user}
+              actions={actions}
+              pipelineId={state.pipeline_id}
+              onSolo={() => setSolo(true)}
+            />
           ))}
         </div>
       )}

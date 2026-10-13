@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 
@@ -22,6 +22,7 @@ vi.mock('../api/client', async (importOriginal) => {
 import { ApiClientError, api, probeSession } from '../api/client'
 import { getAuthEpoch, reportAuthProblem, redirectToLogin } from '../lib/auth'
 import { UserProvider } from './UserContext'
+import { UserSwitcher } from '../components/UserSwitcher'
 import { useCurrentUser } from './user'
 
 function Who() {
@@ -232,5 +233,94 @@ describe('UserProvider (live mode)', () => {
     await screen.findByTestId('who')
     act(() => reportAuthProblem({ kind, message: '' }))
     expect(await screen.findByRole('alert')).toHaveTextContent(text)
+  })
+})
+
+describe('UserProvider: roles, groups notice, switcher, login errors', () => {
+  const NOTICE = 'Your sign-in had no groups claim; group-based rights are not available (IdP overage?)'
+
+  function Role() {
+    const { user } = useCurrentUser()
+    return <span data-testid="role">{user.role}</span>
+  }
+
+  function renderWith(child: React.ReactNode) {
+    return render(
+      <MemoryRouter>
+        <UserProvider>{child}</UserProvider>
+      </MemoryRouter>,
+    )
+  }
+
+  it('maps /api/me.role: viewer is a viewer, no role or an unknown role is a member', async () => {
+    vi.mocked(api.me).mockResolvedValue({ ...meOf('vera'), role: 'viewer' })
+    const first = renderWith(<Role />)
+    expect(await screen.findByTestId('role')).toHaveTextContent('viewer')
+    first.unmount()
+
+    vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
+    renderWith(<Role />)
+    expect(await screen.findByTestId('role')).toHaveTextContent('member')
+  })
+
+  it('shows the quiet groups notice only when groups_missing is true', async () => {
+    vi.mocked(api.me).mockResolvedValue({ ...meOf('arjun'), role: 'member', groups_missing: true })
+    const first = renderWith(<Role />)
+    expect(await screen.findByText(NOTICE)).toBeInTheDocument()
+    // Quiet: a status line, not an alert banner.
+    expect(screen.getByTestId('groups-missing')).toHaveAttribute('role', 'status')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    first.unmount()
+
+    vi.mocked(api.me).mockResolvedValue({ ...meOf('arjun'), role: 'member', groups_missing: false })
+    renderWith(<Role />)
+    await screen.findByTestId('role')
+    expect(screen.queryByText(NOTICE)).not.toBeInTheDocument()
+  })
+
+  it('disables the dev switcher while a dev-login is in flight, then enables it', async () => {
+    vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
+    let finish!: () => void
+    vi.mocked(api.devLogin).mockReturnValue(new Promise<void>((r) => (finish = r)))
+    renderWith(<UserSwitcher />)
+
+    const select = await screen.findByLabelText('Switch user')
+    expect(select).toBeEnabled()
+    vi.mocked(api.me).mockResolvedValue(meOf('priya'))
+    fireEvent.change(select, { target: { value: 'priya' } })
+    await waitFor(() => expect(screen.getByLabelText('Switch user')).toBeDisabled())
+
+    finish()
+    await waitFor(() => expect(screen.getByLabelText('Switch user')).toBeEnabled())
+    expect(api.devLogin).toHaveBeenCalledTimes(1)
+  })
+
+  describe('OIDC callback errors (?login_error=)', () => {
+    afterEach(() => window.history.replaceState({}, '', '/'))
+
+    it.each([
+      ['login_expired', 'Your sign-in expired', true],
+      ['unauthenticated', 'Sign-in could not be checked', true],
+      ['not_provisioned', 'No access yet', false],
+      ['rate_limited', 'Too many sign-in attempts', true],
+      ['idp_unavailable', 'Sign-in is not available', true],
+      ['something_else', 'Sign-in failed', true],
+    ] as const)('shows a page for %s and never calls the API', (code, title, canRetry) => {
+      window.history.replaceState({}, '', `/?login_error=${code}`)
+      renderWith(<Role />)
+      expect(screen.getByRole('heading', { name: title })).toBeInTheDocument()
+      const link = screen.queryByRole('link', { name: 'Sign in again' })
+      if (canRetry) expect(link).toHaveAttribute('href', '/auth/login?return=%2F')
+      else expect(link).not.toBeInTheDocument()
+      // No loop: no /api/me call, no automatic redirect.
+      expect(api.me).not.toHaveBeenCalled()
+      expect(redirectToLogin).not.toHaveBeenCalled()
+    })
+
+    it('reads the code from a hash route too', () => {
+      window.history.replaceState({}, '', '/#/?login_error=rate_limited')
+      renderWith(<Role />)
+      expect(screen.getByRole('heading', { name: 'Too many sign-in attempts' })).toBeInTheDocument()
+    })
   })
 })

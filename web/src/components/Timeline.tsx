@@ -48,9 +48,11 @@ function AgentMessageList({ messages }: { messages: AgentMessageState[] }) {
 function CommentThread({
   comment,
   onReply,
+  readOnly = false,
 }: {
   comment: CommentState
   onReply: (text: string) => void
+  readOnly?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
@@ -87,7 +89,7 @@ function CommentThread({
           </div>
         </div>
       ))}
-      {open ? (
+      {readOnly ? null : open ? (
         <form className="thread__reply" onSubmit={submit}>
           <input
             value={text}
@@ -114,11 +116,14 @@ export function Timeline({
   messages,
   comments,
   onComment,
+  readOnly = false,
 }: {
   steps: StepState[]
   messages: AgentMessageState[]
   comments: CommentState[]
   onComment: (text: string, stepId?: string) => void
+  /** A viewer reads comments but cannot write any. */
+  readOnly?: boolean
 }) {
   const unanchored = comments.filter((c) => !c.step_id)
   if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
@@ -140,9 +145,9 @@ export function Timeline({
             <ToolCall step={step} />
             <AgentMessageList messages={step.messages} />
             {stepComments.map((c) => (
-              <CommentThread key={c.id} comment={c} onReply={(t) => onComment(t, step.id)} />
+              <CommentThread key={c.id} comment={c} onReply={(t) => onComment(t, step.id)} readOnly={readOnly} />
             ))}
-            <ReplyBox onSubmit={(t) => onComment(t, step.id)} />
+            {!readOnly && <ReplyBox onSubmit={(t) => onComment(t, step.id)} />}
           </div>
         )
       })}
@@ -151,7 +156,7 @@ export function Timeline({
         <div className="step">
           <h3 className="step__title">Room comments</h3>
           {unanchored.map((c) => (
-            <CommentThread key={c.id} comment={c} onReply={(t) => onComment(t)} />
+            <CommentThread key={c.id} comment={c} onReply={(t) => onComment(t)} readOnly={readOnly} />
           ))}
         </div>
       )}

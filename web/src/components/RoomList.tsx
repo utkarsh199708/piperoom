@@ -3,6 +3,8 @@ import { Link, useNavigate } from 'react-router-dom'
 import type { FormEvent } from 'react'
 import type { RoomSnapshot } from '../api/types'
 import { api, isFixtures } from '../api/client'
+import { useCurrentUser } from '../context/user'
+import { isViewer } from '../state/permissions'
 import { addFixtureRoom, emptySnapshot } from '../fixtures/player'
 import { useRoomList } from '../hooks/useRoomList'
 import { ageLabel } from '../lib/time'
@@ -16,6 +18,8 @@ const SEVERITIES = ['sev1', 'sev2', 'sev3', 'sev4']
 
 export function RoomList() {
   const navigate = useNavigate()
+  const { user } = useCurrentUser()
+  const viewer = isViewer(user) // a viewer cannot create rooms (POST /api/rooms is 403 viewer)
   const { rooms, loading, error } = useRoomList()
   const [title, setTitle] = useState('')
   const [severity, setSeverity] = useState('sev2')
@@ -70,6 +74,7 @@ export function RoomList() {
       </header>
 
       <main className="roomlist">
+        {!viewer && (
         <section className="panel">
           <div className="panel__body">
             <form className="new-room" onSubmit={onSubmit}>
@@ -110,6 +115,7 @@ export function RoomList() {
             {createError && <p className="error-text">{createError}</p>}
           </div>
         </section>
+        )}
 
         <section className="panel roomlist__section">
           <div className="panel__head">
