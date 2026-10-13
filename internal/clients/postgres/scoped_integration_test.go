@@ -42,9 +42,32 @@ type scopeFixture struct {
 	admin                 *pgx.Conn
 }
 
+// scopeTestLock is the advisory lock key that serialises the T2 integration
+// tests on one server. go test runs packages in parallel, and these tests
+// count server-wide sessions and slots: another package's fixture must not
+// appear in the middle of one. internal/tools/dbtools uses the same key.
+const scopeTestLock = 74020001
+
+// lockScopeTests holds scopeTestLock until the test ends. The holding session
+// is idle outside a transaction, so it is no long transaction itself.
+func lockScopeTests(t *testing.T, dsn string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	c, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Skipf("postgres not reachable at %s (set PIPEROOM_SCOPE_PG_URL): %v", hostPort(dsn), err)
+	}
+	t.Cleanup(func() { _ = c.Close(context.Background()) })
+	if _, err := c.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(scopeTestLock)); err != nil {
+		t.Fatalf("scope test lock: %v", err)
+	}
+}
+
 func newScopeFixture(t *testing.T) (*DB, scopeFixture) {
 	t.Helper()
 	url := scopeURL()
+	lockScopeTests(t, url)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	db, err := New(ctx, url)
@@ -223,6 +246,63 @@ func TestLongTransactionsOnTablesIntegration(t *testing.T) {
 	}
 }
 
+// Six writers on the other pipeline's table, opened one after another: the
+// other-writer list holds at most MaxOtherWriters of them, oldest first, so the
+// newest of the six is never in it.
+func TestLongTransactionsOnTablesOldestWritersIntegration(t *testing.T) {
+	db, f := newScopeFixture(t)
+	url := scopeURL()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	schema, name, _ := splitTable(f.tableOther)
+	other := pgx.Identifier{schema, name}.Sanitize()
+
+	var opened []int // oldest first
+	for i := 1; i <= MaxOtherWriters+1; i++ {
+		c := writeConn(t, url)
+		var pid int
+		if err := c.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Exec(ctx, "BEGIN"); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _, _ = c.Exec(context.Background(), "ROLLBACK") })
+		// A distinct key per session, so no insert waits on another.
+		if _, err := c.Exec(ctx, "INSERT INTO "+other+" VALUES ($1, 'x')", i); err != nil {
+			t.Fatal(err)
+		}
+		opened = append(opened, pid)
+		time.Sleep(30 * time.Millisecond) // distinct xact_start
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	got, err := db.LongTransactionsOnTables(ctx, 50*time.Millisecond, []string{f.tableMine})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.OldestOtherWriters) != MaxOtherWriters {
+		t.Fatalf("other writers = %d, want %d (LIMIT): %+v", len(got.OldestOtherWriters), MaxOtherWriters, got.OldestOtherWriters)
+	}
+	if got.OtherWriters < MaxOtherWriters+1 {
+		t.Fatalf("other writer count = %d, want at least %d", got.OtherWriters, MaxOtherWriters+1)
+	}
+	// Ours, in list order. Older writers of other sessions can only come
+	// before them; ours must be a prefix of the order they were opened in.
+	var ours []int
+	for _, w := range got.OldestOtherWriters {
+		if slices.Contains(opened, w.PID) {
+			ours = append(ours, w.PID)
+		}
+	}
+	if len(ours) == 0 || !slices.Equal(ours, opened[:len(ours)]) {
+		t.Fatalf("listed writers %v are not the oldest of %v in order", ours, opened)
+	}
+	if newest := opened[len(opened)-1]; slices.Contains(ours, newest) {
+		t.Fatalf("the newest writer %d is listed; want the %d oldest: %v", newest, MaxOtherWriters, ours)
+	}
+}
+
 // dsnFor returns base with another database and, when user is set, another
 // login and application_name.
 func dsnFor(t *testing.T, base, db, user, password, app string) string {
@@ -250,6 +330,7 @@ func dsnFor(t *testing.T, base, db, user, password, app string) string {
 // application_name (markers) appear nowhere in the result.
 func TestLongTransactionsOnTablesClonedDatabaseIntegration(t *testing.T) {
 	base := scopeURL()
+	lockScopeTests(t, base)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	probe, err := New(ctx, base)

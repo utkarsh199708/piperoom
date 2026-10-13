@@ -80,7 +80,11 @@ returned, or read into the process, that is not the pipeline's.
    pipeline's tables are listed with pid, `same_database`, state, age, `age(backend_xid)` and
    wait event type: enough for the agent to name the cause and for a DBA to act on the pid. Their
    user, application, client address, database name and query (even the verb) are never selected.
-   Readers (no xid) cannot pin a slot and stay a count. A session is the pipeline's when it holds
+   Readers (no xid) cannot pin a slot and stay a count. The other-writer lines are guaranteed to
+   fit in Summary: the count line, at most 5 writer lines and the "more" line come first (a bounded
+   block well under 2 KB), and the pipeline's own sessions follow, the 30 oldest only, with
+   "(K more sessions on this pipeline's tables, in Data)"; truncation can only cut those. A
+   session is the pipeline's when it holds
    or waits for a lock on a pipeline table in the source database; a clone of the database
    (`CREATE DATABASE … TEMPLATE`) has the same table oids, so the `datname` check keeps it out.
 7. **`dlq_peek` counts are for the whole DLQ topic**, which other connectors may share (D4 says so

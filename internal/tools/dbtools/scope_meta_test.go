@@ -238,11 +238,13 @@ func TestLongTransactionsScopedShowOnlyThePipelinesSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoForeign(t, r)
-	want := "pid=11 user=orders_app app=orders-api state=idle in transaction age=20m wait=- verb=UPDATE writer=yes\n" +
-		"3 other long transactions not shown (not part of this room's pipeline); 2 of them are writers (has_xid)\n" +
+	// The bounded block about the other sessions comes first, the
+	// pipeline's own rows after it.
+	want := "3 other long transactions not shown (not part of this room's pipeline); 2 of them are writers (has_xid)\n" +
 		"oldest writers outside this pipeline's tables (they hold back every logical slot's restart_lsn; no user, application, database or query shown):\n" +
 		"  pid=14 same_database=no state=active age=40m xid_age=1014 wait_type=Lock\n" +
-		"  pid=12 same_database=yes state=idle in transaction age=30m xid_age=1012 wait_type=Client\n"
+		"  pid=12 same_database=yes state=idle in transaction age=30m xid_age=1012 wait_type=Client\n" +
+		"pid=11 user=orders_app app=orders-api state=idle in transaction age=20m wait=- verb=UPDATE writer=yes\n"
 	if r.Summary != want {
 		t.Fatalf("summary =\n%s\nwant\n%s", r.Summary, want)
 	}
@@ -283,7 +285,7 @@ func TestLongTransactionsScopedNoneOnThePipeline(t *testing.T) {
 	}
 	assertNoForeign(t, r)
 	// A reader cannot hold a slot back: it stays a count, with no listing.
-	want := "(no long transactions on this pipeline's tables)\n1 other long transaction not shown (not part of this room's pipeline); 0 of them are writers (has_xid)\n"
+	want := "1 other long transaction not shown (not part of this room's pipeline); 0 of them are writers (has_xid)\n(no long transactions on this pipeline's tables)\n"
 	if r.Summary != want {
 		t.Fatalf("summary = %q, want %q", r.Summary, want)
 	}
@@ -302,7 +304,7 @@ func TestLongTransactionsScopedOtherWritersCapped(t *testing.T) {
 	if n := strings.Count(r.Summary, "  pid="); n != postgres.MaxOtherWriters {
 		t.Fatalf("%d writers listed, want %d:\n%s", n, postgres.MaxOtherWriters, r.Summary)
 	}
-	if !strings.Contains(r.Summary, "7 other long transactions not shown") || !strings.HasSuffix(r.Summary, "  (2 more writers not listed)\n") {
+	if !strings.HasPrefix(r.Summary, "7 other long transactions not shown") || !strings.Contains(r.Summary, "  (2 more writers not listed)\n") {
 		t.Fatalf("summary = %q", r.Summary)
 	}
 	if got := r.Data.(scopedTxns).OldestOtherWriters; len(got) != postgres.MaxOtherWriters || got[0].PID != 26 {
@@ -382,8 +384,53 @@ func TestLongTransactionsScopedToolCapsOtherWriters(t *testing.T) {
 	if got := r.Data.(scopedTxns).OldestOtherWriters; len(got) != postgres.MaxOtherWriters {
 		t.Fatalf("data lists %d writers, want %d", len(got), postgres.MaxOtherWriters)
 	}
-	if !strings.HasSuffix(r.Summary, "  (3 more writers not listed)\n") {
+	if !strings.Contains(r.Summary, "  (3 more writers not listed)\n") {
 		t.Fatalf("summary = %q", r.Summary)
+	}
+}
+
+// Hundreds of long sessions on the pipeline's tables, with application names
+// of the maximum length, must not push the other writers out of Summary: the
+// slot-lag cause is in the first lines, and Summary shows only the 30 oldest
+// pipeline sessions (Data has all of them).
+func TestLongTransactionsScopedOtherWritersSurviveManyPipelineRows(t *testing.T) {
+	src := &txnSource{fakeSource: &fakeSource{}, locks: map[int][]string{}, otherDB: map[int]bool{9999: true}}
+	app := strings.Repeat("a", 63) // NAMEDATALEN - 1, the longest application_name
+	for pid := 1000; pid < 1200; pid++ {
+		src.txns = append(src.txns, clients.Transaction{PID: pid, Username: strings.Repeat("u", 63), ApplicationName: app,
+			State: "idle in transaction", Age: time.Duration(pid) * time.Second, WaitEvent: "Client:ClientRead", Query: "UPDATE", HasXID: true})
+		src.locks[pid] = []string{"public.orders"}
+	}
+	src.txns = append(src.txns, clients.Transaction{PID: 9999, Username: foreignMark, ApplicationName: foreignMark,
+		State: "idle in transaction", Age: time.Minute, WaitEvent: "Client:ClientRead", HasXID: true})
+
+	r, err := scopedTool(t, metaDeps(src), "pg_long_transactions").Run(roomCtx(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertNoForeign(t, r)
+	if len(r.Summary) > tools.MaxSummaryBytes || r.Truncated {
+		t.Fatalf("summary is %d bytes (truncated %v), over %d", len(r.Summary), r.Truncated, tools.MaxSummaryBytes)
+	}
+	// The bounded block is first, whatever the pipeline rows hold.
+	if !strings.HasPrefix(r.Summary, "1 other long transaction not shown") {
+		t.Fatalf("summary does not start with the count line:\n%s", r.Summary[:200])
+	}
+	for _, want := range []string{
+		"1 other long transaction not shown (not part of this room's pipeline); 1 of them is a writer (has_xid)\n",
+		"  pid=9999 same_database=no state=idle in transaction age=1m xid_age=10999 wait_type=Client\n",
+		"(170 more sessions on this pipeline's tables, in Data)\n",
+	} {
+		if !strings.Contains(r.Summary, want) {
+			t.Fatalf("summary misses %q:\n%s", want, r.Summary)
+		}
+	}
+	// The 30 oldest pipeline sessions are shown: pids 1199 down to 1170.
+	if n := strings.Count(r.Summary, " user=uuu"); n != 30 || !strings.Contains(r.Summary, "pid=1199 ") || !strings.Contains(r.Summary, "pid=1170 ") || strings.Contains(r.Summary, "pid=1169 ") {
+		t.Fatalf("%d pipeline rows in summary, want the 30 oldest:\n%s", n, r.Summary)
+	}
+	if got := r.Data.(scopedTxns).Transactions; len(got) != 200 {
+		t.Fatalf("data has %d pipeline rows, want all 200", len(got))
 	}
 }
 

@@ -45,8 +45,30 @@ func pgHost(dsn string) string {
 	return u.Host
 }
 
+// scopeTestLock serialises the T2 integration tests that share one server
+// across packages (same key as internal/clients/postgres): they count
+// server-wide sessions and slots.
+const scopeTestLock = 74020001
+
+// lockScopeTests holds scopeTestLock until the test ends, from a session that
+// is idle outside a transaction.
+func lockScopeTests(t *testing.T, dsn string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	c, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		t.Skipf("postgres not reachable at %s (set PIPEROOM_SCOPE_PG_URL): %v", pgHost(dsn), err)
+	}
+	t.Cleanup(func() { _ = c.Close(context.Background()) })
+	if _, err := c.Exec(ctx, "SELECT pg_advisory_lock($1)", int64(scopeTestLock)); err != nil {
+		t.Fatalf("scope test lock: %v", err)
+	}
+}
+
 func TestScopedSlotAndPublicationToolsIntegration(t *testing.T) {
 	dsn := scopePGURL()
+	lockScopeTests(t, dsn)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	db, err := postgres.New(ctx, dsn)
@@ -232,6 +254,7 @@ func withDB(t *testing.T, dsn, db, user, password, app string) string {
 // and database (markers) appear nowhere in Summary or Data.
 func TestScopedLongTransactionsOtherDatabaseIntegration(t *testing.T) {
 	dsn := scopePGURL()
+	lockScopeTests(t, dsn)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	db, err := postgres.New(ctx, dsn)

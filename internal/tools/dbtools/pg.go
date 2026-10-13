@@ -1,6 +1,7 @@
 package dbtools
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -223,22 +224,18 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 			// Query text is never returned: it often holds literal row values.
 			// Keep the diagnostics and at most the statement verb.
 			rows := make([]longTxn, 0, len(txns))
-			var sb strings.Builder
 			for _, t := range txns {
-				r := longTxn{
+				rows = append(rows, longTxn{
 					PID: t.PID, User: t.Username, ApplicationName: t.ApplicationName, State: t.State,
 					Age: topology.HumanAge(t.Age), AgeSeconds: int64(t.Age / time.Second),
 					WaitEvent: t.WaitEvent, Verb: statementVerb(t.Query), HasXID: t.HasXID,
-				}
-				rows = append(rows, r)
-				writer := "no"
-				if r.HasXID {
-					writer = "yes"
-				}
-				fmt.Fprintf(&sb, "pid=%d user=%s app=%s state=%s age=%s wait=%s verb=%s writer=%s\n",
-					r.PID, r.User, r.ApplicationName, r.State, r.Age, orDash(r.WaitEvent), orDash(r.Verb), writer)
+				})
 			}
 			if sc.Unscoped() {
+				var sb strings.Builder
+				for _, r := range rows {
+					writeTxnLine(&sb, r)
+				}
 				if len(txns) == 0 {
 					sb.WriteString("(no long transactions)\n")
 				}
@@ -246,17 +243,20 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 				return tools.Result{Summary: summary, Data: rows, Truncated: truncated}, nil
 			}
 
-			if len(txns) == 0 {
-				sb.WriteString("(no long transactions on this pipeline's tables)\n")
-			}
+			// Scoped. The bounded block about the other sessions comes first:
+			// the count line, at most MaxOtherWriters writer lines and the
+			// "more" line (well under 2 KB). The pipeline's own rows follow,
+			// capped, so truncation can never cut the other writers, which are
+			// the classic cause of a slot that keeps WAL.
+			var sb strings.Builder
 			data := scopedTxns{Transactions: rows, OtherNotShown: tt.Other, OtherWriters: tt.OtherWriters}
 			if line := tools.NotShown(tt.Other, "long transaction", "long transactions"); line != "" {
 				fmt.Fprintf(&sb, "%s; %d of them %s (has_xid)\n", line, tt.OtherWriters, tools.Plural(tt.OtherWriters, "is a writer", "are writers"))
 			}
 			// A writer on any table, in any database, holds back the
-			// restart_lsn of every logical slot: the classic cause of a slot
-			// that keeps WAL. Show the oldest ones, with the allow-listed
-			// fields only, so the agent can name the cause and a DBA can act.
+			// restart_lsn of every logical slot. Show the oldest ones, with the
+			// allow-listed fields only, so the agent can name the cause and a
+			// DBA can act.
 			for i, w := range tt.OldestOtherWriters {
 				if i == postgres.MaxOtherWriters {
 					break
@@ -272,10 +272,41 @@ func pgLongTransactionsTool(d Deps) tools.Tool {
 			if more := tt.OtherWriters - len(data.OldestOtherWriters); more > 0 && len(data.OldestOtherWriters) > 0 {
 				fmt.Fprintf(&sb, "  (%d more %s not listed)\n", more, tools.Plural(more, "writer", "writers"))
 			}
+
+			if len(rows) == 0 {
+				sb.WriteString("(no long transactions on this pipeline's tables)\n")
+			}
+			// The oldest maxPipelineTxnLines rows go to Summary; Data has all.
+			shown := slices.Clone(rows)
+			slices.SortStableFunc(shown, func(a, b longTxn) int { return cmp.Compare(b.AgeSeconds, a.AgeSeconds) })
+			if len(shown) > maxPipelineTxnLines {
+				shown = shown[:maxPipelineTxnLines]
+			}
+			for _, r := range shown {
+				writeTxnLine(&sb, r)
+			}
+			if more := len(rows) - len(shown); more > 0 {
+				fmt.Fprintf(&sb, "(%d more %s on this pipeline's tables, in Data)\n", more, tools.Plural(more, "session", "sessions"))
+			}
 			summary, truncated := tools.Truncate(sb.String())
 			return tools.Result{Summary: summary, Data: data, Truncated: truncated}, nil
 		},
 	}
+}
+
+// maxPipelineTxnLines caps the pipeline's own long transactions in a scoped
+// Summary (the oldest ones); Data keeps every row.
+const maxPipelineTxnLines = 30
+
+// writeTxnLine renders one long transaction of the pipeline (or of any
+// session, unscoped).
+func writeTxnLine(sb *strings.Builder, r longTxn) {
+	writer := "no"
+	if r.HasXID {
+		writer = "yes"
+	}
+	fmt.Fprintf(sb, "pid=%d user=%s app=%s state=%s age=%s wait=%s verb=%s writer=%s\n",
+		r.PID, r.User, r.ApplicationName, r.State, r.Age, orDash(r.WaitEvent), orDash(r.Verb), writer)
 }
 
 // scopedTxns is Data of a scoped pg_long_transactions call. Unscoped calls
