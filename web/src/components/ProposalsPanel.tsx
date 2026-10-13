@@ -168,6 +168,9 @@ function LayerDecision({
   }
   const state = proposal.approvals[layer] ?? 'pending'
   const decision = proposal.decisions?.[layer]
+  // No params_hash (the server could not fingerprint the fix): nothing can be
+  // sent that the server would accept, so Approve and Reject stay off.
+  const hashed = proposal.params_hash !== ''
   const canDecide = canDecideLayer(proposal, user, layer)
 
   return (
@@ -202,7 +205,7 @@ function LayerDecision({
           <button
             type="button"
             className="btn btn--small btn--approve"
-            disabled={busy}
+            disabled={busy || !hashed}
             onClick={() => (user.solo ? setConfirming(true) : void approve())}
           >
             Approve
@@ -210,6 +213,7 @@ function LayerDecision({
           <button
             type="button"
             className="btn btn--small btn--reject"
+            disabled={!hashed}
             onClick={() => setRejecting(true)}
           >
             Reject
@@ -250,8 +254,9 @@ function ParamsHash({ hash }: { hash: string }) {
   const [copied, setCopied] = useState(false)
   if (!hash) {
     return (
-      <p className="proposal__hash muted" data-testid="params-hash-missing">
-        params hash: not available for this proposal
+      <p className="proposal__hash error-text" data-testid="params-hash-missing" role="note">
+        This fix can't be approved or rejected here: its parameters could not be fingerprinted (see the server
+        log).
       </p>
     )
   }

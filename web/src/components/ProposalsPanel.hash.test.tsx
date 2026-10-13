@@ -70,10 +70,25 @@ describe('params hash in the proposal card', () => {
     expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument()
   })
 
-  it('says so when a proposal has no hash', () => {
+  it('with no hash: says so and disables Approve and Reject', () => {
     render(<ProposalsPanel state={roomWith({ ...proposal, params_hash: '' })} user={arjun} actions={actions} />)
-    expect(screen.getByTestId('params-hash-missing')).toBeInTheDocument()
+    expect(screen.getByTestId('params-hash-missing')).toHaveTextContent(
+      "This fix can't be approved or rejected here: its parameters could not be fingerprinted (see the server log).",
+    )
     expect(screen.queryByTestId('params-hash-short')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Reject' }))
+    expect(approve).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('Rejection reason for kafka-connect')).not.toBeInTheDocument()
+  })
+
+  it('with no hash, a solo user cannot open the confirm box', () => {
+    render(<ProposalsPanel state={roomWith({ ...proposal, params_hash: '' })} user={soloUser} actions={actions} />)
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    expect(screen.queryByLabelText(/Solo mode: type/)).not.toBeInTheDocument()
   })
 })
 
