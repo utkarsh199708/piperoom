@@ -5,7 +5,6 @@ import type { RoomSnapshot } from '../api/types'
 import { api, isFixtures } from '../api/client'
 import { addFixtureRoom, emptySnapshot } from '../fixtures/player'
 import { useRoomList } from '../hooks/useRoomList'
-import { useCurrentUser } from '../context/user'
 import { ageLabel } from '../lib/time'
 import { sortRoomsForList } from '../lib/rooms'
 import { errorText } from '../lib/errors'
@@ -17,7 +16,6 @@ const SEVERITIES = ['sev1', 'sev2', 'sev3', 'sev4']
 
 export function RoomList() {
   const navigate = useNavigate()
-  const { user } = useCurrentUser()
   const { rooms, loading, error } = useRoomList()
   const [title, setTitle] = useState('')
   const [severity, setSeverity] = useState('sev2')
@@ -48,7 +46,7 @@ export function RoomList() {
         navigate(`/rooms/${snapshot.id}`)
         return
       }
-      const room = await api.createRoom(user.id, {
+      const room = await api.createRoom({
         title: title.trim(),
         severity,
         pipeline_id: pipelineId.trim() || 'orders',

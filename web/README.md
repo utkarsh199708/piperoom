@@ -1,4 +1,23 @@
-# React + TypeScript + Vite
+# Piperoom web (Vite, React, TypeScript)
+
+## Dev workflow
+
+1. Start the Go server (dev auth mode, the default) on `127.0.0.1:8090`.
+2. `npm run dev`, then open <http://localhost:5173>.
+
+The browser talks to ONE origin. Vite proxies `/api` (with the room WebSocket) and `/auth` to the Go
+server, so the HttpOnly `piperoom_session` cookie works over plain http. The client uses relative
+paths only and never sends a user-id header. Under `npm run dev` a login screen / user switcher calls
+`POST /auth/dev-login`; "Log out" calls `POST /auth/logout`.
+
+- `PIPEROOM_API=http://127.0.0.1:9000 npm run dev` points the proxy at another server port.
+- Keep Vite on `localhost` (or `127.0.0.1`): the proxy does not rewrite `Host`, and the server
+  allows loopback names on any port (`421 bad_host` otherwise).
+- `VITE_FIXTURES=1 npm run dev` runs the UI without a server (no login).
+- `VITE_AUTH_MODE=dev|oidc` (optional) says which login to show on `401 session_expired`; by default a
+  Vite dev build means `dev` and a production build means `oidc` (redirect to `/auth/login?return=...`).
+
+---
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 

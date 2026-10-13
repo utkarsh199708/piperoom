@@ -8,6 +8,8 @@ vi.mock('../context/user', () => ({
   useCurrentUser: () => ({
     user: { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] },
     setUserId: vi.fn(),
+    logout: vi.fn(),
+    sessionEpoch: 0,
   }),
 }))
 
@@ -108,7 +110,7 @@ describe('useRoom transport', () => {
     vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
 
     const { result } = renderHook(() => useRoom('r1'))
-    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 'arjun', 0))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
     socket.onopen?.()
 
     await act(async () => {
@@ -118,7 +120,7 @@ describe('useRoom transport', () => {
     })
 
     await waitFor(() => expect(result.current.state?.last_seq).toBe(3))
-    expect(api.events).toHaveBeenCalledWith('arjun', 'r1', 0)
+    expect(api.events).toHaveBeenCalledWith('r1', 0)
     expect(result.current.state?.comments).toHaveLength(2)
   })
 
@@ -129,7 +131,7 @@ describe('useRoom transport', () => {
     vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
 
     const { result } = renderHook(() => useRoom('r1'))
-    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 'arjun', 0))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
     socket.onopen?.()
 
     await act(async () => {
@@ -155,7 +157,7 @@ describe('useRoom transport', () => {
     vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
 
     const { result } = renderHook(() => useRoom('r1'))
-    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 'arjun', 0))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
     socket.onopen?.()
 
     // Two messages while the first gap fetch is still pending.
@@ -171,8 +173,8 @@ describe('useRoom transport', () => {
 
     await waitFor(() => expect(result.current.state?.last_seq).toBe(4))
     expect(api.events).toHaveBeenCalledTimes(2)
-    expect(api.events).toHaveBeenNthCalledWith(1, 'arjun', 'r1', 0)
-    expect(api.events).toHaveBeenNthCalledWith(2, 'arjun', 'r1', 2)
+    expect(api.events).toHaveBeenNthCalledWith(1, 'r1', 0)
+    expect(api.events).toHaveBeenNthCalledWith(2, 'r1', 2)
   })
 
   it('shows short user text for a lease_held error instead of the raw message', async () => {
@@ -181,7 +183,7 @@ describe('useRoom transport', () => {
     vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
 
     const { result } = renderHook(() => useRoom('r1'))
-    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 'arjun', 0))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
     socket.onopen?.()
 
     await act(async () => {
@@ -205,7 +207,7 @@ describe('useRoom transport', () => {
     )
 
     const { result } = renderHook(() => useRoom('r1'))
-    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 'arjun', 0))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
     socket.onopen?.()
 
     // The no-driver banner grants control to the current user.
@@ -214,6 +216,6 @@ describe('useRoom transport', () => {
     })
 
     await waitFor(() => expect(result.current.error).toBe('someone else holds control'))
-    expect(api.grantControl).toHaveBeenCalledWith('arjun', 'r1', 'arjun')
+    expect(api.grantControl).toHaveBeenCalledWith('r1', 'arjun')
   })
 })

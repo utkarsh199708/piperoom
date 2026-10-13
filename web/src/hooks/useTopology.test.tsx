@@ -7,6 +7,8 @@ vi.mock('../context/user', () => ({
   useCurrentUser: () => ({
     user: { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] },
     setUserId: vi.fn(),
+    logout: vi.fn(),
+    sessionEpoch: 0,
   }),
 }))
 
@@ -45,7 +47,7 @@ describe('useTopology — refresh cadence', () => {
     await flush()
 
     expect(api.topology).toHaveBeenCalledTimes(1)
-    expect(api.topology).toHaveBeenCalledWith('arjun', 'orders')
+    expect(api.topology).toHaveBeenCalledWith('orders')
 
     await act(async () => {
       vi.advanceTimersByTime(TOPOLOGY_REFRESH_MS)

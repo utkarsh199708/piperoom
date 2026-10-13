@@ -1,22 +1,38 @@
 import { isDev } from '../lib/env'
+import { isFixtures } from '../api/client'
 import { DEV_USERS } from '../dev/users'
 import { useCurrentUser } from '../context/user'
 
 export function UserSwitcher() {
-  const { user, setUserId } = useCurrentUser()
-  // The switcher lets a client impersonate any user (F1): it must never render
-  // in a production build, where identity comes from the server's session.
-  if (!isDev) return null
+  const { user, setUserId, logout } = useCurrentUser()
   return (
-    <label className="user-switcher">
-      <span className="user-switcher__label">You are</span>
-      <select value={user.id} onChange={(e) => setUserId(e.target.value)} aria-label="Switch user">
-        {DEV_USERS.map((u) => (
-          <option key={u.id} value={u.id}>
-            {u.name}
-          </option>
-        ))}
-      </select>
-    </label>
+    <span className="user-switcher">
+      {/* The switcher lets a client sign in as any user (F1): it must never
+          render in a production build, where identity comes from the server's
+          session. In dev, picking a user calls POST /auth/dev-login. */}
+      {isDev ? (
+        <label className="user-switcher">
+          <span className="user-switcher__label">You are</span>
+          <select
+            value={user.id}
+            onChange={(e) => setUserId(e.target.value)}
+            aria-label="Switch user"
+          >
+            {DEV_USERS.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : (
+        <span className="user-switcher__label">{user.name}</span>
+      )}
+      {!isFixtures() && (
+        <button type="button" className="btn btn--ghost btn--small" onClick={logout}>
+          Log out
+        </button>
+      )}
+    </span>
   )
 }

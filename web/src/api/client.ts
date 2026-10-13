@@ -1,7 +1,11 @@
 // REST + WebSocket client for the Piperoom API (docs/api.md).
-// Base URL: VITE_API_BASE if set; else the local room service under `npm run
-// dev` (the UI is on :5173, the API on :8090); else same-origin, which is how
-// the built UI is served by the server itself (PIPEROOM_WEB_DIR).
+//
+// Same-origin only. Every URL is relative (`/api/...`, `/auth/...`). Under
+// `npm run dev` the Vite proxy forwards them to the Go server (vite.config.ts);
+// in production the server serves the UI itself (PIPEROOM_WEB_DIR). Identity is
+// the HttpOnly `piperoom_session` cookie, which the browser sends by itself.
+// This client never sends the old user-id header: with a cookie for another user
+// the server answers 403 proxy_identity (docs/design/auth.md section 5.2).
 import type {
   ApiError,
   Event,
@@ -10,10 +14,8 @@ import type {
   RoomSnapshot,
   Topology,
 } from './types'
-
-const BASE =
-  (import.meta.env.VITE_API_BASE as string | undefined) ??
-  (import.meta.env.DEV ? 'http://localhost:8090' : '')
+import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
+import type { AuthMode } from '../lib/auth'
 
 export const isFixtures = () => import.meta.env.VITE_FIXTURES === '1'
 
@@ -29,118 +31,105 @@ export class ApiClientError extends Error {
   }
 }
 
-async function request<T>(
-  path: string,
-  userId: string,
-  init: RequestInit = {},
-): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
-  headers.set('X-User', userId)
-  if (init.body) headers.set('Content-Type', 'application/json')
-  const res = await fetch(`${BASE}${path}`, { ...init, headers })
+  // CrossOriginProtection + the contract: every POST is application/json.
+  if (init.method === 'POST') headers.set('Content-Type', 'application/json')
+  const res = await fetch(path, { ...init, headers, credentials: 'same-origin' })
   if (!res.ok) {
-    let code = 'unknown'
+    let code = res.status === 421 ? 'bad_host' : 'unknown'
     let message = res.statusText
+    let authMode: AuthMode | undefined
     try {
-      const body = (await res.json()) as ApiError
+      const body = (await res.json()) as ApiError & { error?: { auth_mode?: AuthMode } }
       code = body.error?.code ?? code
       message = body.error?.message ?? message
+      authMode = body.error?.auth_mode
     } catch {
       // non-JSON error body; keep statusText
     }
+    const problem = classifyAuthProblem(res.status, code, message, authMode)
+    if (problem) reportAuthProblem(problem)
     throw new ApiClientError(res.status, code, message)
   }
   if (res.status === 204) return undefined as T
-  return (await res.json()) as T
+  const text = await res.text()
+  return (text ? JSON.parse(text) : undefined) as T
 }
 
+const room = (roomId: string) => `/api/rooms/${encodeURIComponent(roomId)}`
+
 export const api = {
-  me: (userId: string) => request<Me>('/api/me', userId),
-  rooms: (userId: string) => request<RoomSnapshot[]>('/api/rooms', userId),
-  createRoom: (
-    userId: string,
-    body: { title: string; severity: string; pipeline_id: string },
-  ) =>
-    request<RoomSnapshot>('/api/rooms', userId, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
-  room: (userId: string, roomId: string) =>
-    request<RoomSnapshot>(`/api/rooms/${encodeURIComponent(roomId)}`, userId),
-  events: (userId: string, roomId: string, after: number, limit = 500) =>
-    request<EventsPage>(
-      `/api/rooms/${encodeURIComponent(roomId)}/events?after=${after}&limit=${limit}`,
-      userId,
-    ),
-  topology: (userId: string, pipelineId: string) =>
-    request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`, userId),
-  comment: (userId: string, roomId: string, body: { step_id?: string; text: string }) =>
-    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/comments`, userId, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
-  steer: (userId: string, roomId: string, text: string) =>
-    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/steer`, userId, {
-      method: 'POST',
-      body: JSON.stringify({ text }),
-    }),
-  sendSuggestion: (userId: string, roomId: string, suggestionId: string) =>
-    request<Event>(
-      `/api/rooms/${encodeURIComponent(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/send`,
-      userId,
-      { method: 'POST' },
-    ),
-  requestControl: (userId: string, roomId: string) =>
-    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/control/request`, userId, {
+  me: () => request<Me>('/api/me'),
+  // Dev mode only: issues the piperoom_session cookie for a users.yaml user.
+  devLogin: (user: string) =>
+    request<void>('/auth/dev-login', { method: 'POST', body: JSON.stringify({ user }) }),
+  logout: () => request<void>('/auth/logout', { method: 'POST' }),
+  rooms: () => request<RoomSnapshot[]>('/api/rooms'),
+  createRoom: (body: { title: string; severity: string; pipeline_id: string }) =>
+    request<RoomSnapshot>('/api/rooms', { method: 'POST', body: JSON.stringify(body) }),
+  room: (roomId: string) => request<RoomSnapshot>(room(roomId)),
+  events: (roomId: string, after: number, limit = 500) =>
+    request<EventsPage>(`${room(roomId)}/events?after=${after}&limit=${limit}`),
+  topology: (pipelineId: string) =>
+    request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`),
+  comment: (roomId: string, body: { step_id?: string; text: string }) =>
+    request<Event>(`${room(roomId)}/comments`, { method: 'POST', body: JSON.stringify(body) }),
+  steer: (roomId: string, text: string) =>
+    request<Event>(`${room(roomId)}/steer`, { method: 'POST', body: JSON.stringify({ text }) }),
+  sendSuggestion: (roomId: string, suggestionId: string) =>
+    request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/send`, {
       method: 'POST',
     }),
-  grantControl: (userId: string, roomId: string, to: string) =>
-    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/control/grant`, userId, {
+  requestControl: (roomId: string) =>
+    request<Event>(`${room(roomId)}/control/request`, { method: 'POST' }),
+  grantControl: (roomId: string, to: string) =>
+    request<Event>(`${room(roomId)}/control/grant`, {
       method: 'POST',
       body: JSON.stringify({ to }),
     }),
-  closeRoom: (userId: string, roomId: string, resolution: string) =>
-    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/close`, userId, {
+  closeRoom: (roomId: string, resolution: string) =>
+    request<Event>(`${room(roomId)}/close`, {
       method: 'POST',
       body: JSON.stringify({ resolution }),
     }),
-  approve: (userId: string, proposalId: string, layer: string) =>
-    request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/approve`, userId, {
+  approve: (proposalId: string, layer: string) =>
+    request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/approve`, {
       method: 'POST',
       body: JSON.stringify({ layer }),
     }),
-  reject: (userId: string, proposalId: string, layer: string, reason: string) =>
-    request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/reject`, userId, {
+  reject: (proposalId: string, layer: string, reason: string) =>
+    request<Event>(`/api/proposals/${encodeURIComponent(proposalId)}/reject`, {
       method: 'POST',
       body: JSON.stringify({ layer, reason }),
     }),
-  handoff: (userId: string, roomId: string, to: string, stayAsWatcher: boolean) =>
-    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/handoffs`, userId, {
+  handoff: (roomId: string, to: string, stayAsWatcher: boolean) =>
+    request<Event>(`${room(roomId)}/handoffs`, {
       method: 'POST',
       body: JSON.stringify({ to, stay_as_watcher: stayAsWatcher }),
     }),
-  acceptHandoff: (userId: string, handoffId: string) =>
-    request<Event>(`/api/handoffs/${encodeURIComponent(handoffId)}/accept`, userId, {
-      method: 'POST',
-    }),
-  trace: (userId: string, roomId: string, table: string, key: string) =>
-    request<Event>(`/api/rooms/${encodeURIComponent(roomId)}/trace`, userId, {
+  acceptHandoff: (handoffId: string) =>
+    request<Event>(`/api/handoffs/${encodeURIComponent(handoffId)}/accept`, { method: 'POST' }),
+  trace: (roomId: string, table: string, key: string) =>
+    request<Event>(`${room(roomId)}/trace`, {
       method: 'POST',
       body: JSON.stringify({ table, key }),
     }),
 }
 
-export function openRoomWs(
+/**
+ * WebSocket URL for a room: same origin as the page (ws or wss by protocol),
+ * no user query parameter (the session cookie is checked at upgrade).
+ */
+export function roomWsUrl(
   roomId: string,
-  userId: string,
   after: number,
-): WebSocket {
-  const url = new URL(
-    `${BASE}/api/rooms/${encodeURIComponent(roomId)}/ws`,
-    window.location.href, // resolves a same-origin (empty) BASE
-  )
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-  url.searchParams.set('user', userId)
-  url.searchParams.set('after', String(after))
-  return new WebSocket(url.toString())
+  loc: Pick<Location, 'protocol' | 'host'> = window.location,
+): string {
+  const scheme = loc.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${scheme}//${loc.host}${room(roomId)}/ws?after=${after}`
+}
+
+export function openRoomWs(roomId: string, after: number): WebSocket {
+  return new WebSocket(roomWsUrl(roomId, after))
 }
