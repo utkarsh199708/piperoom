@@ -21,6 +21,8 @@ const actions: RoomActions = {
   reject,
   handoff: vi.fn(),
   acceptHandoff: vi.fn(),
+  label: vi.fn(),
+  checklist: vi.fn(),
   trace: vi.fn(),
 }
 

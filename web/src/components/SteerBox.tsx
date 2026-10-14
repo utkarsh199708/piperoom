@@ -186,12 +186,21 @@ export function SteerBox({
   state,
   user,
   actions,
+  prefill,
 }: {
   state: RoomState
   user: CurrentUser
   actions: RoomActions
+  /** Text to put in the field ("Ask the agent" on a checklist item); `n` makes the same text count again. */
+  prefill?: { text: string; n: number }
 }) {
   const [text, setText] = useState(() => readStore('local', draftKey(state.id)))
+  const [seenPrefill, setSeenPrefill] = useState(0)
+  // Set during render (React's derived-state pattern), so the field is filled before it paints.
+  if (prefill && prefill.n !== seenPrefill) {
+    setSeenPrefill(prefill.n)
+    setText(prefill.text)
+  }
   const [granting, setGranting] = useState(false)
   const [focused, setFocused] = useState(false)
   const [section, setSection] = useState<HTMLElement | null>(null)
