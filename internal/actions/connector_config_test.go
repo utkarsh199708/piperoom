@@ -57,7 +57,7 @@ func configAction(c *configConnect) *updateConnectorConfig {
 	return &updateConnectorConfig{d: Deps{Connect: c, Registry: &fakeRegistry{}}}
 }
 
-const updateIn = `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"double"}`
+const updateIn = `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"string"}`
 
 // Live behaviour: right after the PATCH the first status read still shows the
 // old RUNNING tasks, so the result says "at first read" and makes no claim
@@ -68,11 +68,11 @@ func TestUpdateConnectorConfigExecuteHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	want := "pg-orders-connector decimal.handling.mode: precise → double; status RUNNING at first read (Connect restarts tasks asynchronously)"
+	want := "pg-orders-connector decimal.handling.mode: precise → string; status RUNNING at first read (Connect restarts tasks asynchronously)"
 	if out != want {
 		t.Fatalf("out %q, want %q", out, want)
 	}
-	if len(c.updates) != 1 || c.updates[0] != "pg-orders-connector decimal.handling.mode=double" {
+	if len(c.updates) != 1 || c.updates[0] != "pg-orders-connector decimal.handling.mode=string" {
 		t.Fatalf("updates %v", c.updates)
 	}
 	if c.statusCalls != 1 {
@@ -90,7 +90,7 @@ func TestUpdateConnectorConfigTaskNotRunningAtFirstRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a non-RUNNING task after the write must not be an error: %v", err)
 	}
-	want := "pg-orders-connector decimal.handling.mode: precise → double; status connector RUNNING, task 0 FAILED at first read (Connect restarts tasks asynchronously)"
+	want := "pg-orders-connector decimal.handling.mode: precise → string; status connector RUNNING, task 0 FAILED at first read (Connect restarts tasks asynchronously)"
 	if out != want {
 		t.Fatalf("out %q, want %q", out, want)
 	}
@@ -108,7 +108,7 @@ func TestUpdateConnectorConfigSendsOnlyOneKey(t *testing.T) {
 		case r.URL.Path == "/connectors/pg-orders-connector/config" && r.Method == http.MethodGet:
 			v := "precise"
 			if patches > 0 {
-				v = "double"
+				v = "string"
 			}
 			w.Write([]byte(`{"name":"pg-orders-connector","decimal.handling.mode":"` + v + `","database.password":"hunter2"}`))
 		case r.URL.Path == "/connectors/pg-orders-connector/config" && r.Method == http.MethodPatch:
@@ -131,10 +131,10 @@ func TestUpdateConnectorConfigSendsOnlyOneKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if out != "pg-orders-connector decimal.handling.mode: precise → double; status RUNNING at first read (Connect restarts tasks asynchronously)" {
+	if out != "pg-orders-connector decimal.handling.mode: precise → string; status RUNNING at first read (Connect restarts tasks asynchronously)" {
 		t.Fatalf("out %q", out)
 	}
-	if patchMethod != http.MethodPatch || patchBody != `{"decimal.handling.mode":"double"}` {
+	if patchMethod != http.MethodPatch || patchBody != `{"decimal.handling.mode":"string"}` {
 		t.Fatalf("%s body %q", patchMethod, patchBody)
 	}
 }
@@ -146,19 +146,19 @@ func TestUpdateConnectorConfigUnsetOldValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "decimal.handling.mode: unset → double;") {
+	if !strings.Contains(out, "decimal.handling.mode: unset → string;") {
 		t.Fatalf("out %q", out)
 	}
 }
 
 func TestUpdateConnectorConfigAlreadySetMakesNoWrite(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
-	c.cfg["decimal.handling.mode"] = "double"
+	c.cfg["decimal.handling.mode"] = "string"
 	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.updates) != 0 || !strings.Contains(out, "already double") {
+	if len(c.updates) != 0 || !strings.Contains(out, "already string") {
 		t.Fatalf("out %q, updates %v", out, c.updates)
 	}
 }
@@ -233,7 +233,10 @@ func TestUpdateConnectorConfigValidate(t *testing.T) {
 		params  string
 		wantErr string // substring; empty means no error
 	}{
-		{"ok double", updateIn, ""},
+		{"double refused with reason", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"double"}`, "double loses precision"},
+		{"double names allowed values", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"double"}`, "allowed values: precise, string"},
+		{"double lookalike Double", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"Double"}`, "not allowed for"},
+		{"double padded", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":" double"}`, "not allowed for"},
 		{"ok string", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"string"}`, ""},
 		{"ok precise", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"precise"}`, ""},
 		{"ok time precision", `{"connector":"pg-orders-connector","key":"time.precision.mode","value":"connect"}`, ""},
@@ -278,7 +281,7 @@ func TestUpdateConnectorConfigValidate(t *testing.T) {
 func TestUpdateConnectorConfigExactMatchOnly(t *testing.T) {
 	const (
 		key = "decimal.handling.mode"
-		val = "double"
+		val = "string"
 	)
 	cases := []struct{ name, key, value string }{
 		{"key mixed case", "Decimal.Handling.Mode", val},
@@ -287,12 +290,12 @@ func TestUpdateConnectorConfigExactMatchOnly(t *testing.T) {
 		{"key trailing space", key + " ", val},
 		{"key trailing zero width space", key + "​", val},
 		{"key cyrillic e", "dеcimal.handling.mode", val}, // U+0435
-		{"value upper case", key, "DOUBLE"},
-		{"value leading space", key, " double"},
-		{"value trailing space", key, "double "},
-		{"value trailing zero width space", key, "double​"},
-		{"value cyrillic lookalike", key, "dоuble"}, // U+043E
-		{"value newline", key, "double\n"},
+		{"value upper case", key, "STRING"},
+		{"value leading space", key, " string"},
+		{"value trailing space", key, "string "},
+		{"value trailing zero width space", key, "string​"},
+		{"value cyrillic lookalike", key, "strіng"}, // U+043E
+		{"value newline", key, "string\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -317,7 +320,7 @@ func TestUpdateConnectorConfigExactMatchOnly(t *testing.T) {
 func TestUpdateConnectorConfigSecretCheckBeatsAllowList(t *testing.T) {
 	a := &updateConnectorConfig{
 		d:     testDeps(),
-		allow: map[string]map[string]bool{"database.password": {"x": true}, "decimal.handling.mode": {"double": true}},
+		allow: map[string]map[string]bool{"database.password": {"x": true}, "decimal.handling.mode": {"string": true}},
 	}
 	err := a.Validate(json.RawMessage(`{"connector":"pg-orders-connector","key":"database.password","value":"x"}`))
 	if err == nil || !strings.Contains(err.Error(), "credential") {
@@ -373,7 +376,7 @@ func TestUpdateConnectorConfigScope(t *testing.T) {
 	if err := a.CheckScope(testPipeline(), json.RawMessage(updateIn)); err != nil {
 		t.Fatalf("in scope: %v", err)
 	}
-	other := `{"connector":"pg-inventory-connector","key":"decimal.handling.mode","value":"double"}`
+	other := `{"connector":"pg-inventory-connector","key":"decimal.handling.mode","value":"string"}`
 	if err := a.CheckScope(testPipeline(), json.RawMessage(other)); err == nil {
 		t.Fatal("want error for another pipeline's connector")
 	}
@@ -406,7 +409,7 @@ func TestUpdateConnectorConfigSchemaAndRegistry(t *testing.T) {
 			t.Errorf("Describe does not name %q", k)
 		}
 	}
-	for _, bad := range []string{"low-risk", "errors.tolerance"} {
+	for _, bad := range []string{"low-risk", "errors.tolerance", "precise|double", "double|string"} {
 		if strings.Contains(d, bad) {
 			t.Errorf("Describe contains %q", bad)
 		}
