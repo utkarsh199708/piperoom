@@ -28,6 +28,8 @@ const actions: RoomActions = {
   label: vi.fn(),
   checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 
 const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: [] }

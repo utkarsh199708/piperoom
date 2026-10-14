@@ -208,6 +208,11 @@ func (g *Gateway) CloseSession(sessionID string) {
 			}
 		}
 	}
+	for c := range g.lists {
+		if c.sessionID == sessionID {
+			g.spawnSessionEnd(c)
+		}
+	}
 }
 
 // RoomDeletedReason is the close reason of a deleted room's connections
@@ -266,6 +271,11 @@ func (g *Gateway) recheckSessions() {
 			if c.sessionID != "" {
 				seen[c.sessionID] = Identity{User: room.User{ID: c.userID, Name: c.userName}, SessionID: c.sessionID}
 			}
+		}
+	}
+	for c := range g.lists {
+		if c.sessionID != "" {
+			seen[c.sessionID] = Identity{User: room.User{ID: c.userID, Name: c.userName}, SessionID: c.sessionID}
 		}
 	}
 	g.mu.Unlock()

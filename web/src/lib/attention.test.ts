@@ -82,7 +82,7 @@ describe('new kinds', () => {
     const next = {
       ...base,
       status: 'closed' as const,
-      activity: [{ seq: 1, at: '', actor: { kind: 'human' as const, id: 'k', name: 'Kabir' }, text: 'closed the room' }],
+      activity: [{ seq: 1, at: '', actor: { kind: 'human' as const, id: 'k', name: 'Kabir' }, text: 'closed the room', kind: 'decision' as const }],
     }
     expect(attentionItems(base, next, meera)).toMatchObject([{ kind: 'resolved', body: 'Closed by Kabir' }])
   })

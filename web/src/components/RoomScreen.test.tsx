@@ -35,6 +35,8 @@ const actions: RoomActions = {
   label: vi.fn(),
   checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 const staleOff = { stale: null, dismissStale: vi.fn(), reload: vi.fn() }
 
@@ -60,7 +62,7 @@ function show(state: RoomState, stale: StaleInfo | null = null) {
     ...staleOff,
     stale,
   })
-  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null })
+  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null, notFound: false, retry: () => undefined })
   return render(
     <MemoryRouter initialEntries={['/rooms/r_webhook']}>
       <Routes>

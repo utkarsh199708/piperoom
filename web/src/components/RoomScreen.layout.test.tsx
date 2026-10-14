@@ -36,6 +36,8 @@ const actions: RoomActions = {
   label: vi.fn(),
   checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 const reload = vi.fn()
 
@@ -76,7 +78,7 @@ function show(user: CurrentUser, state: RoomState | null, conn: ConnState = 'liv
     dismissStale: vi.fn(),
     reload,
   })
-  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null })
+  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null, notFound: false, retry: () => undefined })
   return render(
     <MemoryRouter initialEntries={['/rooms/r_schema_change']}>
       <Routes>
@@ -184,6 +186,8 @@ describe('RoomScreen rail and column', () => {
           based_on_steps: ['s2', 's1'],
           confidence: 'high',
           confirmed: false,
+          seq: 3,
+          verdicts: [],
         },
       }),
     )
@@ -267,7 +271,7 @@ describe('RoomScreen loading and error', () => {
 
   it('shows an error state with Try again and Back to rooms', () => {
     show(arjun, null, 'error', 'boom')
-    expect(screen.getByText('Could not load room: boom')).toBeInTheDocument()
+    expect(screen.getByText('boom')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(reload).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('link', { name: 'Back to rooms' }))

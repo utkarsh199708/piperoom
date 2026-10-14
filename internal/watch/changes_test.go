@@ -400,3 +400,115 @@ func TestChangeFeedOffWithoutWriter(t *testing.T) {
 	h.conn.setStatus("pg-orders", failed("pg-orders", "boom"))
 	h.step(time.Minute) // must not panic and must not need a config read
 }
+
+func TestSensitiveConfigKey(t *testing.T) {
+	for _, tc := range []struct {
+		key  string
+		want bool
+	}{
+		{"database.password", true},
+		{"database.PASSWORD", true},
+		{"snowflake.private.key.passphrase", true},
+		{"ssl.key.password", true},
+		{"database.passwd", true},
+		{"sink.pwd", true},
+		{"apikey", true},
+		{"api_key", true},
+		{"API-KEY", true},
+		{"aws.secret.access.key", true},
+		{"consumer.override.sasl.jaas.config", true},
+		{"credentials", true},
+		{"gcp.credentials.json", true},
+		{"http.authorization", true},
+		{"oauth.token.endpoint", true},
+		{"key.converter", false},
+		{"value.converter", false},
+		{"heartbeat.interval.ms", false},
+		{"connection.url", false},
+		{"database.hostname", false},
+		{"cwd", false},
+	} {
+		if got := sensitiveConfigKey(tc.key); got != tc.want {
+			t.Errorf("sensitiveConfigKey(%q) = %v, want %v", tc.key, got, tc.want)
+		}
+	}
+}
+
+func TestConfigDiffMasksWidenedKeys(t *testing.T) {
+	h := newChangesHarness(t)
+	keys := []string{"apikey", "api_key", "credentials", "sink.pwd", "sasl.jaas.config", "private.key.passphrase"}
+	for _, k := range keys {
+		h.setCfg(k, "old-"+k)
+	}
+	h.step(0)
+	for _, k := range keys {
+		h.setCfg(k, "new-"+k)
+	}
+	h.step(time.Minute)
+	rows := h.ch.all()
+	if len(rows) != 1 {
+		t.Fatalf("rows = %v", kinds(rows))
+	}
+	b, a := jsonMap(t, rows[0].Before), jsonMap(t, rows[0].After)
+	whole := string(rows[0].Before) + string(rows[0].After) + rows[0].Summary + rows[0].Fingerprint
+	for _, k := range keys {
+		if b[k] != "***" || a[k] != "***" {
+			t.Errorf("%s not masked: %v / %v", k, b[k], a[k])
+		}
+		if strings.Contains(whole, "old-"+k) || strings.Contains(whole, "new-"+k) {
+			t.Errorf("%s value reached the row", k)
+		}
+	}
+}
+
+func TestConfigDiffRedactsValues(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, before, after string
+		secrets                  []string
+	}{
+		{"url password", "connection.url", "jdbc:postgresql://app:hunter2old@db:5432/orders", "jdbc:postgresql://app:hunter2new@db:5432/orders", []string{"hunter2old", "hunter2new"}},
+		{"url password and host", "database.url", "postgres://app:s3cretold@db1/x", "postgres://app:s3cretnew@db2/x", []string{"s3cretold", "s3cretnew"}},
+		{"query password", "connection.url", "http://h/x?password=abc123old&a=b", "http://h/x?password=abc123new&a=b", []string{"abc123old", "abc123new"}},
+		{"jaas in a plain key", "sasl.config", `x password="oldpassw0rd";`, `x password="newpassw0rd";`, []string{"oldpassw0rd", "newpassw0rd"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newChangesHarness(t)
+			h.setCfg(tc.key, tc.before)
+			h.step(0)
+			h.setCfg(tc.key, tc.after)
+			h.step(time.Minute)
+			rows := h.ch.all()
+			if len(rows) != 1 || rows[0].Kind != clients.ChangeConnectorConfig {
+				t.Fatalf("a secret-only change must still be recorded once: %v", kinds(rows))
+			}
+			whole := string(rows[0].Before) + string(rows[0].After) + rows[0].Summary + rows[0].Fingerprint
+			for _, s := range tc.secrets {
+				if strings.Contains(whole, s) {
+					t.Fatalf("secret %q reached the row: %+v", s, rows[0])
+				}
+			}
+			if !strings.Contains(string(rows[0].After), "[redacted") {
+				t.Fatalf("after should show the mask: %s", rows[0].After)
+			}
+		})
+	}
+}
+
+func TestConfigDiffKeepsPlainValuesAndSeesSecretOnlyChange(t *testing.T) {
+	h := newChangesHarness(t)
+	h.setCfg("connection.url", "jdbc:postgresql://app:pw-one-1234@db:5432/orders")
+	h.step(0)
+	h.setCfg("connection.url", "jdbc:postgresql://app:pw-two-5678@db:5432/orders")
+	h.step(time.Minute)
+	h.setCfg("connection.url", "jdbc:postgresql://app:pw-three-9@db:5432/orders")
+	h.step(time.Minute)
+	if rows := h.ch.all(); len(rows) != 2 || rows[0].Fingerprint == rows[1].Fingerprint {
+		t.Fatalf("two different password changes must be two rows: %v", kinds(rows))
+	}
+	h.setCfg("heartbeat.interval.ms", "5000")
+	h.step(time.Minute)
+	last := h.ch.all()[2]
+	if jsonMap(t, last.After)["heartbeat.interval.ms"] != "5000" {
+		t.Fatalf("a plain value must stay readable: %s", last.After)
+	}
+}

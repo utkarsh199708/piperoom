@@ -1,4 +1,4 @@
-import { useCallback, useContext, useMemo, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowDown } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useParams, useSearchParams } from 'react-router-dom'
@@ -8,6 +8,7 @@ import { errorText } from '../lib/errors'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
 import { useMediaQuery } from '../hooks/useMediaQuery'
+import { rememberRoomTitle } from '../lib/signinNotice'
 import { useJumpToLatest } from '../hooks/useJumpToLatest'
 import { useRoomAttention } from '../hooks/useRoomAttention'
 import { useCurrentUser } from '../context/user'
@@ -36,6 +37,7 @@ import { DecisionHandleContext, RoomListContext, useBreadcrumbTail, useRegisterR
 import type { DecisionHandle } from './shell/context'
 import { DecisionBar } from './room/DecisionBar'
 import { HypothesisCard } from './room/HypothesisCard'
+import { usePeople } from '../hooks/usePeople'
 import { PROPOSAL_ANCHOR, ProposalsSummary } from './room/ProposalsSummary'
 import { RoomError } from './room/RoomError'
 import { RoomHeader } from './room/RoomHeader'
@@ -122,10 +124,15 @@ export function RoomScreen() {
     () => (state ? state.proposals.reduce((n, p) => n + p.executed.length, 0) : 0),
     [state],
   )
-  const { topology, updatedAt } = useTopology(state?.pipeline_id ?? '', {
+  const { topology, updatedAt, notFound, retry: retryTopology } = useTopology(state?.pipeline_id ?? '', {
     refreshKey: executedCount,
     active: state?.status === 'open',
   })
+  // The sign-in screen names this room if the session ends while it is open.
+  useEffect(() => {
+    rememberRoomTitle(state?.title)
+    return () => rememberRoomTitle(undefined)
+  }, [state?.title])
   const [layerFilter, setLayerFilter] = useState<string | null>(null)
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
@@ -135,6 +142,9 @@ export function RoomScreen() {
   const [prefill, setPrefill] = useState<{ text: string; n: number } | undefined>()
   const [copied, setCopied] = useState(false)
   const [exporting, setExporting] = useState(false)
+  // One GET /api/people per room mount: layers for the presence rows and the pending layers. A viewer gets none.
+  const peopleState = usePeople()
+  const peopleList = peopleState.status === 'ready' ? peopleState.people : undefined
   const now = useNow(5_000) // a request past expires_at stops counting as in flight
 
   const headerMembers = useMemo(() => {
@@ -259,6 +269,8 @@ export function RoomScreen() {
     <PipelineMap
       topology={topology}
       updatedAt={updatedAt}
+        notFound={notFound}
+        onRetry={retryTopology}
       pipelineId={state.pipeline_id}
       stalledFor={stalledFor}
       onTrace={viewer ? undefined : () => setTraceOpen(true)}
@@ -267,16 +279,20 @@ export function RoomScreen() {
     />
   )
   const hypothesis = state.hypothesis ? (
-      <HypothesisCard
-        hypothesis={state.hypothesis}
-        steps={state.steps}
-        pipelineId={state.pipeline_id}
-        insight={state.insight}
-      />
-    ) : null
+    <HypothesisCard
+      hypothesis={state.hypothesis}
+      steps={state.steps}
+      history={state.hypothesis_history}
+      selfId={user.id}
+      canDecide={!viewer && state.status === 'open'}
+      onVerdict={actions.hypothesisVerdict}
+      pipelineId={state.pipeline_id}
+      insight={state.insight}
+    />
+  ) : null
   const proposalsCard = showProposals ? (
     <div id={PROPOSAL_ANCHOR} tabIndex={-1} className="scroll-mt-4 focus:outline-none">
-      <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} />
+      <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} people={peopleList} presence={presence} />
     </div>
   ) : null
   const investigation = (
@@ -322,6 +338,7 @@ export function RoomScreen() {
       selfId={user.id}
       selfName={user.name}
       selfIsViewer={viewer}
+      people={peopleList}
     />
   )
   const suggestions = <SuggestionsPanel suggestions={state.suggestions} />
@@ -422,7 +439,7 @@ export function RoomScreen() {
                 {suggestions}
                 <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
                 <div className="h-px shrink-0 bg-border" />
-                <ActivityFeed activity={state.activity} />
+                <ActivityFeed activity={state.activity} openedAt={state.opened_at} />
               </TabsContent>
             </Tabs>
           )}
@@ -441,7 +458,7 @@ export function RoomScreen() {
             </button>
           )}
 
-          <SteerBox state={state} user={user} actions={actions} prefill={prefill} />
+          <SteerBox state={state} user={user} actions={actions} prefill={prefill} conn={conn} />
         </div>
 
         {wide && (
@@ -454,7 +471,7 @@ export function RoomScreen() {
             {suggestions}
             <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
             <div className="h-px shrink-0 bg-border" />
-            <ActivityFeed activity={state.activity} />
+            <ActivityFeed activity={state.activity} openedAt={state.opened_at} />
           </aside>
         )}
       </div>

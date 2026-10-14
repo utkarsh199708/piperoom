@@ -169,7 +169,7 @@ describe('useJumpToLatest', () => {
   })
   afterEach(() => vi.unstubAllGlobals())
 
-  const act1 = (seq: number) => ({ seq, at: '', actor: kabir, text: 'x' })
+  const act1 = (seq: number) => ({ seq, at: '', actor: kabir, text: 'x', kind: 'human' as const })
 
   function Harness({ activity, replaying = false }: { activity: ReturnType<typeof act1>[]; replaying?: boolean }) {
     const { sentinelRef, unseen, jump } = useJumpToLatest(activity, replaying)

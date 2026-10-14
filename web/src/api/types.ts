@@ -29,6 +29,7 @@ export type EventType =
   | 'steer.declined'
   | 'control.requested'
   | 'control.granted'
+  | 'control.lease_expired'
   | 'proposal.created'
   | 'approval.given'
   | 'approval.rejected'
@@ -38,6 +39,8 @@ export type EventType =
   | 'handoff.created'
   | 'handoff.accepted'
   | 'trace.pinned'
+  | 'hypothesis.verdict'
+  | 'approval.nudged'
   | 'room.labelled'
   | 'checklist.step_done'
 
@@ -167,6 +170,12 @@ export interface SteerSentPayload {
 export interface SteerDeclinedPayload {
   suggestion_id: string
   reason?: string
+}
+
+/** System actor; the driver's lease ran out with no renewal and no new driver. */
+export interface ControlLeaseExpiredPayload {
+  driver: Actor
+  lease_until: string
 }
 
 export type ControlRequestedPayload = Record<string, never>
@@ -339,6 +348,25 @@ export interface HypothesisSummary {
   based_on_steps: string[]
   confidence: string
   confirmed: boolean
+  /** F9: seq of the agent.hypothesis event. */
+  seq?: number
+  /** F9: latest verdict per person on `seq`. */
+  verdicts?: { verdict: HypothesisVerdict; by: { id: string; name: string; verified?: boolean }; note?: string; at: string }[]
+}
+
+export type HypothesisVerdict = 'confirmed' | 'disputed'
+
+/** hypothesis.verdict (F9). hypothesis_seq is the agent.hypothesis it answers. */
+export interface HypothesisVerdictPayload {
+  verdict: HypothesisVerdict
+  note?: string
+  hypothesis_seq: number
+}
+
+/** approval.nudged (F9): ids only. */
+export interface ApprovalNudgedPayload {
+  proposal_id: string
+  layer: string
 }
 
 export interface RoomSnapshot {
@@ -460,12 +488,16 @@ export interface Person {
   name: string
   /** Only for IdP users with a verified email. */
   email?: string
+  /** F9: the layers the person may approve; absent from an old server. */
+  layers?: string[]
 }
 
 export interface PresenceMember {
   id: string
   name: string
   state: 'viewing' | 'away'
+  /** F9: when the member entered `state`, RFC 3339 UTC; absent from an old server. */
+  since?: string
 }
 
 export interface EventsPage {

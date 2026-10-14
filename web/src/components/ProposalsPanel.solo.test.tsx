@@ -22,6 +22,8 @@ const actions: RoomActions = {
   label: vi.fn(),
   checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 
 const solo: CurrentUser = { id: 'sam', name: 'Sam', layers: ['kafka-connect'] }
