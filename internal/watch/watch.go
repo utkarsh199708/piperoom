@@ -186,6 +186,9 @@ type pipeState struct {
 	// ackLocked, in memory). A storm follower never had a room under its own
 	// dedup key, so the room service cannot tell its cooldown; this can.
 	lastClosed time.Time
+	// resolvedRoom is the room this process last resolved: the room service
+	// keeps it open, so a new fire joins it, and that is not a restart.
+	resolvedRoom string
 	// warned* keep "skipped" lines to one per episode.
 	warnedCooldown, warnedMax, warnedOpen, warnedResolve bool
 }

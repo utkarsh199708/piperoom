@@ -409,8 +409,16 @@ func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view,
 	}
 	if !created {
 		// The service only writes "fired again" with the title on a join; the
-		// numbers go in as evidence (a room that survived a restart).
-		w.post(ctx, roomID, fmt.Sprintf("watcher: %s (re-attached after a restart)\nevidence: %s", title, ev))
+		// numbers go in as evidence. The room is either one this process
+		// resolved earlier, or one that survived a restart.
+		w.mu.Lock()
+		again := w.pipes[id].resolvedRoom == roomID
+		w.mu.Unlock()
+		why := "re-attached after a restart"
+		if again {
+			why = "fired again after it resolved"
+		}
+		w.post(ctx, roomID, fmt.Sprintf("watcher: %s (%s)\nevidence: %s", title, why, ev))
 	}
 	w.assignFollowers(now, id, roomID, storm, led)
 	if len(affected) > 1 {
@@ -580,6 +588,9 @@ func (w *Watcher) resolve(ctx context.Context, now time.Time, t target, v view) 
 	}
 	w.mu.Lock()
 	ps := w.pipes[id]
+	if v.roomID != "" && v.owned {
+		ps.resolvedRoom = v.roomID
+	}
 	ps.episode, ps.roomID, ps.owned, ps.follower = false, "", false, false
 	ps.postedSev, ps.lastPost = "", time.Time{}
 	ps.reopened, ps.bypassCooldown = false, false

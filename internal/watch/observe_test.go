@@ -44,6 +44,27 @@ func TestTickIsOneCheckTimeout(t *testing.T) {
 	}
 }
 
+// TestRefireAfterResolveIsNotARestart: the room service keeps a resolved room
+// open, so the next fire joins it; the note must not claim a restart.
+func TestRefireAfterResolveIsNotARestart(t *testing.T) {
+	h := newHarness(t, opts{})
+	h.breakConnector("orders", "boom")
+	h.steps(5, time.Minute)
+	h.fixConnector("orders")
+	h.steps(5, time.Minute)
+	if got := len(h.rooms.resolved()); got != 1 {
+		t.Fatalf("resolved = %d, want 1\n%s", got, h.logs)
+	}
+	h.breakConnector("orders", "boom again")
+	h.steps(5, time.Minute)
+	if got := h.rooms.postsContaining("re-attached after a restart"); len(got) != 0 {
+		t.Fatalf("a re-fire in the same process claimed a restart: %+v", got)
+	}
+	if got := h.rooms.postsContaining("fired again after it resolved"); len(got) != 1 {
+		t.Fatalf("re-fire note = %+v, want one", got)
+	}
+}
+
 // TestDLQNewTopicIsReadAfterConfig: a topic the prefetch did not know (the
 // config changed) is still read in the same tick.
 func TestDLQNewTopicIsReadAfterConfig(t *testing.T) {
