@@ -505,8 +505,24 @@ func TestCleanTermsDeduplicatesCaseInsensitively(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"Amount", "409"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"amount", "409"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("cleanTerms = %q, want %q", got, want)
+	}
+}
+
+// Label terms are free text; they are stored in the matcher's word form so
+// the scenario validates and matches what the label means.
+func TestCleanTermsWordForm(t *testing.T) {
+	got, err := cleanTerms([]string{"LeaveGroup", "0x1F", "*alias &anchor", "rebalanc*", "***", "leave group"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"leave group", "0x1 f", "alias anchor", "rebalanc"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("cleanTerms = %q, want %q", got, want)
+	}
+	if errs := checkGroups("t", [][]string{got}, nil); len(errs) > 0 {
+		t.Errorf("word-form terms do not validate: %v", errs)
 	}
 }
 
