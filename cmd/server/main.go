@@ -2,9 +2,10 @@
 // scripted fake agent and fake topology over the REAL actions running on
 // in-memory clients, so the UI can be built against it with no stack; without
 // --demo it applies the migrations, opens the real stack clients via
-// wiring.Open, registers the real tools/actions and runs the real agent
-// (agent.Run). Owners are loaded and cross-checked against the users file in
-// both modes.
+// wiring.OpenStacks (one client set per pipeline with its own connections,
+// docs/design/tenancy.md), registers the real tools/actions and runs the real
+// agent (agent.Run). Owners are loaded and cross-checked against the users
+// file in both modes.
 package main
 
 import (
@@ -35,6 +36,7 @@ import (
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 	"piperoom/internal/watch"
 	"piperoom/internal/wiring"
@@ -73,10 +75,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	resumeOnTakeover, err := parseResumeOnTakeover(cfg.ResumeOnTakeover)
+	if err != nil {
+		return err
+	}
 	// The name of this process in room leases, executor claims and leader
 	// logs (docs/design/replicas.md section 2).
 	replica := replicaID(cfg.ReplicaID)
-	log.Info("server: agent cap", "max_agents_per_replica", maxAgents, "max_agents_global", maxAgentsGlobal, "replica", replica)
+	log.Info("server: agent cap", "max_agents_per_replica", maxAgents, "max_agents_global", maxAgentsGlobal, "replica", replica, "resume_on_takeover", resumeOnTakeover)
 
 	// A bad retention value stops the server: a typo must never silently keep
 	// (or delete) incident data.
@@ -142,6 +148,12 @@ func run() error {
 	}
 	if err := room.ValidateUsers(users, own); err != nil {
 		return fmt.Errorf("server: users/owners config: %w", err)
+	}
+	// Tenancy (docs/design/tenancy.md): PIPEROOM_TENANCY_MODE must agree with
+	// the owners file, and the chosen model is logged.
+	slackCfg := slackFromConfig(cfg)
+	if _, err := tenancySetup(cfg, own, slackCfg.Token != "" && slackCfg.ChannelID != "", log); err != nil {
+		return err
 	}
 	if own.AnyShadow() {
 		log.Info("server: shadow mode", "pipelines", shadowPipelines(own), "grace", shadowCfg.Grace.String(),
@@ -217,7 +229,7 @@ func run() error {
 	// Slack mirroring is on only when SLACK_BOT_TOKEN/SLACK_CHANNEL_ID are set,
 	// in both modes; a wrong setting refuses start. The deferred stop runs
 	// before the store's Close (defers are LIFO), so no mirror outlives it.
-	slack, err := newMirrors(ctx, st, threads, slackFromConfig(cfg), log)
+	slack, err := newMirrors(ctx, st, threads, slackCfg, log)
 	if err != nil {
 		return err
 	}
@@ -229,7 +241,10 @@ func run() error {
 		topo     topology.Builder
 		run      = agent.Run
 		write    = agent.WriteHandoff
-		wired    *wiring.Wired // nil in demo mode
+		stacks   *wiring.Stacks // nil in demo mode
+		// stackFor is room.Deps.StackFor: nil in demo mode, where every
+		// room uses acts and toolsReg.
+		stackFor func(string) room.PipelineStack
 		// closedHook is room.Deps.OnRoomClosed: it forgets the room's token
 		// count and tells the watcher, which is set once it exists.
 		closedHook = &roomClosedHook{}
@@ -261,23 +276,30 @@ func run() error {
 		write = ep.WriteHandoff
 		closedHook.setForget(ep)
 
-		w, err := wiring.Open(ctx, cfg, awsCfg)
+		// One client set per pipeline with connections: in owners.yaml, plus
+		// the process-wide set when a pipeline uses it (docs/design/tenancy.md
+		// section 5). Each room, the topology and the watcher reach only the
+		// set of their own pipeline.
+		sets, err := wiring.OpenStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{
+			// similar_incidents reads past closed rooms from the room store;
+			// each set's Owners holds only its own pipelines.
+			Prepare: func(w *wiring.Wired) { w.Rooms = similarincidents.FromStore(st) },
+		})
 		if err != nil {
 			return fmt.Errorf("server: open the data stack: %w", err)
 		}
-		defer w.Close()
-		wired = w
-		acts = actions.NewRegistry()
-		if err := wiring.RegisterTools(toolsReg, acts, w); err != nil {
-			return fmt.Errorf("server: register tools and actions: %w", err)
-		}
-		topo = w.Builder
+		defer sets.Close()
+		logStacks(log, sets)
+		stacks = sets
+		stackFor = roomStacks(sets)
+		topo = sets
 	}
 
 	svc := room.New(room.Deps{
 		Store:        st,
 		Actions:      acts,
 		Tools:        toolsReg,
+		StackFor:     stackFor,
 		Topology:     topo,
 		Users:        users,
 		Owners:       own,
@@ -288,18 +310,19 @@ func run() error {
 			Effort:   cfg.Effort,
 			MaxTurns: 40,
 		},
-		ShadowOptions:   shadowAgentOptions(cfg, shadowCfg),
-		ShadowGrace:     shadowCfg.Grace,
-		Logger:          log,
-		MaxAgents:       maxAgents,
-		ReplicaID:       replica,
-		MaxAgentsGlobal: maxAgentsGlobal,
-		Sessions:        sessions,
-		SessionIdle:     authSettings.Idle,
-		ViewerGroups:    authSettings.ViewerGroups,
-		SoloUser:        soloUser,
-		OnRoomOpened:    slack.onRoomOpened(),
-		OnRoomClosed:    closedHook.onClosed,
+		ShadowOptions:    shadowAgentOptions(cfg, shadowCfg),
+		ShadowGrace:      shadowCfg.Grace,
+		Logger:           log,
+		MaxAgents:        maxAgents,
+		ReplicaID:        replica,
+		MaxAgentsGlobal:  maxAgentsGlobal,
+		ResumeOnTakeover: resumeOnTakeover,
+		Sessions:         sessions,
+		SessionIdle:      authSettings.Idle,
+		ViewerGroups:     authSettings.ViewerGroups,
+		SoloUser:         soloUser,
+		OnRoomOpened:     slack.onRoomOpened(),
+		OnRoomClosed:     closedHook.onClosed,
 	})
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
@@ -364,8 +387,8 @@ func run() error {
 		Config:       watchCfg,
 		MaxOpenRooms: maxAgents,
 	}
-	if wired != nil {
-		watchDeps.Source, watchDeps.Connect = wired.Source, wired.Connect
+	if stacks != nil {
+		watchDeps.ClientsFor = watchClients(stacks)
 	}
 	stopWatch, err := startElectedWatcher(ctx, elector, watchDeps, closedHook, log)
 	if err != nil {

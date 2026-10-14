@@ -148,7 +148,9 @@ func TestLeaderLoopsOneReplicaAndTakeover(t *testing.T) {
 	}()
 	for i := 0; i < n; i++ {
 		st := leaderStore(t, schema)
-		electors[i] = st.Elector(fmt.Sprintf("r%d", i))
+		// Unique per run: leader connections are found by application_name, and
+		// other packages' tests run electors on the same server at once.
+		electors[i] = st.Elector(fmt.Sprintf("%s-r%d", schema, i))
 		hooks[i] = &roomClosedHook{}
 		stops = append(stops, startElectedRetention(ctx, electors[i], replicaExpirer{log: plog, replica: i}, 30, 100*time.Millisecond, time.Second, time.Now, discardLog()))
 		stop, err := startElectedWatcher(ctx, electors[i], watch.Deps{

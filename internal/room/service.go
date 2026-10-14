@@ -39,9 +39,14 @@ var ErrStepOrder = store.ErrStepOrder
 // get a safe default (used by tests), except Owners: scope checks fail closed
 // without it.
 type Deps struct {
-	Store        store.Store
-	Actions      *actions.Registry
-	Tools        *tools.Registry
+	Store   store.Store
+	Actions *actions.Registry
+	Tools   *tools.Registry
+	// StackFor, when set, gives each room the read tools and write actions
+	// built over its own pipeline's clients (docs/design/tenancy.md section
+	// 5), and Tools and Actions are not used. A nil field in the result
+	// means none (fail closed), never the process-wide registry.
+	StackFor     func(pipelineID string) PipelineStack
 	Topology     topology.Builder
 	Users        *Users
 	Owners       *owners.Owners // pipeline definitions for actions.Scoped checks
@@ -75,6 +80,11 @@ type Deps struct {
 	// ReplicaTimings shortens the lease and sweep periods (tests); the zero
 	// value is the production timing.
 	ReplicaTimings ReplicaTimings
+	// ResumeOnTakeover is PIPEROOM_RESUME_ON_TAKEOVER: a replica that takes
+	// over the lease of a replica that stopped resumes an agent that was
+	// working (at most 3 times per room per hour) instead of pausing it.
+	// Off by default.
+	ResumeOnTakeover bool
 	// ExportMaxEvents caps the events one audit export may contain; a larger
 	// room answers 413 export_too_large. Zero means DefaultExportMaxEvents.
 	ExportMaxEvents int64
@@ -146,6 +156,7 @@ type Service struct {
 	store        store.Store
 	actions      *actions.Registry
 	tools        *tools.Registry
+	stackFor     func(pipelineID string) PipelineStack
 	topo         topology.Builder
 	users        *Users
 	owners       *owners.Owners
@@ -168,12 +179,14 @@ type Service struct {
 
 	// Multi-replica coordination (replicas.go). coord is nil with a store that
 	// belongs to one process (memstore); then nothing below runs.
-	coord     store.Coordinator
-	replica   string
-	global    globalSlots // nil: no cap across replicas
-	timing    ReplicaTimings
-	follow    *follower
-	coordOnce sync.Once
+	coord   store.Coordinator
+	replica string
+	global  globalSlots // nil: no cap across replicas
+	timing  ReplicaTimings
+	follow  *follower
+	// resumeOnTakeover is Deps.ResumeOnTakeover.
+	resumeOnTakeover bool
+	coordOnce        sync.Once
 
 	// ctx is the service lifetime: every goroutine the service starts (agent
 	// supervisors, executor queues) derives from it. Close cancels it and
@@ -230,6 +243,7 @@ func New(d Deps) *Service {
 		store:        d.Store,
 		actions:      acts,
 		tools:        tls,
+		stackFor:     d.StackFor,
 		topo:         topo,
 		users:        users,
 		owners:       d.Owners,
@@ -262,6 +276,7 @@ func New(d Deps) *Service {
 		}
 		s.timing = d.ReplicaTimings.withDefaults()
 		s.follow = newFollower()
+		s.resumeOnTakeover = d.ResumeOnTakeover
 		if d.MaxAgentsGlobal > 0 {
 			s.global = coordSlots{s: s, max: d.MaxAgentsGlobal}
 		}
@@ -524,14 +539,11 @@ func (s *Service) roomCreated(ctx context.Context, roomID string) (events.RoomCr
 }
 
 // getStateLocked returns the cached room state, rebuilding it from the log if
-// the room is not cached. With a shared store a cached room is first brought
-// up to the log (syncLocked), so every check runs against what every replica
-// wrote. Caller must hold s.mu.
+// the room is not cached. It does no read for a cached room: with a shared
+// store the follower keeps the cache close to the log, and a command calls
+// syncRoom (outside s.mu) before it locks. Caller must hold s.mu.
 func (s *Service) getStateLocked(ctx context.Context, roomID string) (*roomState, error) {
 	if st, ok := s.rooms[roomID]; ok {
-		if err := s.syncLocked(ctx, roomID, st); err != nil {
-			return nil, err
-		}
 		return st, nil
 	}
 	if _, err := s.store.GetRoom(ctx, roomID); err != nil {
@@ -644,7 +656,7 @@ var agentEventTypes = map[events.Type]bool{
 // agentEmit is the agent Sink: the agent's events enter the same log and cache.
 // Only agent.* event types are accepted, so the sink cannot forge
 // control-plane events (control.granted, approval.given, ...).
-func (s *Service) agentEmit(ctx context.Context, roomID string, typ events.Type, payload any) error {
+func (s *Service) agentEmit(ctx context.Context, roomID string, run uint64, typ events.Type, payload any) error {
 	if !agentEventTypes[typ] {
 		return fmt.Errorf("room: agent sink refused event type %q", typ)
 	}
@@ -660,13 +672,31 @@ func (s *Service) agentEmit(ctx context.Context, roomID string, typ events.Type,
 	if !ok {
 		return fmt.Errorf("room: agent emit on unknown room %q", roomID)
 	}
-	// Only the lease owner's agent may write: a run that lost its lease is
-	// being stopped, and another replica may already run the room's agent.
-	if s.coord != nil && !st.leased {
-		return fmt.Errorf("room: agent emit on %s: %w", roomID, store.ErrLeaseLost)
+	if err := s.fenceLocked(roomID, st, run); err != nil {
+		return err
 	}
 	_, err = s.emitLocked(ctx, st, roomID, typ, events.AgentActor, payload)
 	return err
+}
+
+// fenceLocked refuses a write of agent run `run` that may no longer speak for
+// the room (docs/design/replicas.md 4.1): with a shared store only the lease
+// owner's current run may write, and only before the lease's local deadline, so
+// a run whose lease is lost (or about to be) writes nothing even before its
+// context cancellation reaches it. Caller holds s.mu.
+func (s *Service) fenceLocked(roomID string, st *roomState, run uint64) error {
+	if s.coord == nil {
+		return nil
+	}
+	switch {
+	case !st.leased:
+		return fmt.Errorf("room: agent write on %s: %w", roomID, store.ErrLeaseLost)
+	case run != st.agentRun:
+		return fmt.Errorf("room: agent write on %s from a replaced run: %w", roomID, store.ErrLeaseLost)
+	case time.Now().After(st.leaseValid):
+		return fmt.Errorf("room: agent write on %s after the lease deadline: %w", roomID, store.ErrLeaseLost)
+	}
+	return nil
 }
 
 // executorEmit appends an event on behalf of the action executor.
@@ -721,8 +751,8 @@ func (s *Service) touchDriverLease(ctx context.Context, st *roomState, roomID st
 	if remaining >= leaseLogThreshold {
 		return
 	}
-	if _, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, humanActor(User{ID: d.ID, Name: d.Name}), events.ControlGrantedPayload{
-		To:         events.Actor{Kind: events.ActorHuman, ID: d.ID, Name: d.Name},
+	if _, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, s.humanActor(User{ID: d.ID, Name: d.Name}), events.ControlGrantedPayload{
+		To:         s.humanActor(User{ID: d.ID, Name: d.Name}),
 		LeaseUntil: lease,
 	}); err != nil {
 		s.log.Warn("room: emit lease renewal failed", "room", roomID, "err", err)
@@ -755,13 +785,17 @@ func (s *Service) proposalsDisabled(st *roomState) bool {
 	return s.owners != nil && st.snap.PipelineID != "" && !s.knownPipeline(st.snap.PipelineID)
 }
 
-func humanActor(u User) events.Actor {
-	return events.Actor{Kind: events.ActorHuman, ID: u.ID, Name: u.Name}
+// humanActor is the event actor for a person. Verified comes from users.yaml
+// itself, never from the caller's User value, so no code path can mark an IdP
+// person as vouched for (design section 2.1, security audit A-ID-2).
+func (s *Service) humanActor(u User) events.Actor {
+	_, inFile := s.users.Get(u.ID)
+	return events.Actor{Kind: events.ActorHuman, ID: u.ID, Name: u.Name, Verified: inFile}
 }
 
-var systemActor = events.Actor{Kind: events.ActorSystem, ID: "system", Name: "System"}
+var systemActor = events.Actor{Kind: events.ActorSystem, ID: "system", Name: "System", Verified: true}
 
-var executorActor = events.Actor{Kind: events.ActorSystem, ID: "executor", Name: "Executor"}
+var executorActor = events.Actor{Kind: events.ActorSystem, ID: "executor", Name: "Executor", Verified: true}
 
 func mapStoreErr(err error) error {
 	if errors.Is(err, store.ErrNotFound) {
@@ -941,12 +975,18 @@ func inputFor(e events.Event) *agent.HumanInput {
 		}
 		// OK tells the agent whether the step succeeded; it must not claim the
 		// pipeline recovered from a failed step (agent.HumanInput.OK).
-		stepOK := p.OK
+		// An unknown outcome is OK nil: the agent must claim neither
+		// recovery nor failure (docs/design/replicas.md section 5).
+		var okp *bool
+		if !p.OutcomeUnknown {
+			stepOK := p.OK
+			okp = &stepOK
+		}
 		stepIndex := p.StepIndex
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "action_result",
 			Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, p.StepIndex, p.Output),
-			OK:   &stepOK, ProposalID: p.ProposalID, StepIndex: &stepIndex,
+			OK:   okp, ProposalID: p.ProposalID, StepIndex: &stepIndex,
 		}
 	}
 	return nil
@@ -955,23 +995,29 @@ func inputFor(e events.Event) *agent.HumanInput {
 // ---- agent supervisor ----
 
 // roomSink implements agent.Sink, appending agent events to the room log.
+// run is the generation of the run it serves (fenceLocked).
 type roomSink struct {
 	s      *Service
 	roomID string
+	run    uint64
 }
 
 func (r roomSink) Emit(ctx context.Context, typ events.Type, payload any) error {
-	return r.s.agentEmit(ctx, r.roomID, typ, payload)
+	return r.s.agentEmit(ctx, r.roomID, r.run, typ, payload)
 }
 
-// proposalCreator implements agent.Proposals.
+// proposalCreator implements agent.Proposals for one run, fenced like its
+// Sink.
 type proposalCreator struct {
 	s      *Service
 	roomID string
+	run    uint64
 }
 
 func (p proposalCreator) Create(ctx context.Context, payload events.ProposalCreatedPayload) (string, error) {
-	return p.s.CreateProposal(ctx, p.roomID, payload, events.AgentActor)
+	return p.s.createProposal(ctx, p.roomID, payload, events.AgentActor, func(st *roomState) error {
+		return p.s.fenceLocked(p.roomID, st, p.run)
+	})
 }
 
 // Agent auto-restart bounds (LEAD-ARCH round 4, arch should-fix): a failed
@@ -1013,17 +1059,25 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 		defer gate.release()
 		alert := agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw}
 		deps := agent.Deps{
-			Tools:     s.tools,
-			Actions:   s.actions,
+			Tools:     s.toolsFor(pipelineID),
+			Actions:   s.actionsFor(pipelineID),
 			Inbox:     gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
-			Sink:      roomSink{s: s, roomID: roomID},
-			Proposals: proposalCreator{s: s, roomID: roomID},
+			Sink:      roomSink{s: s, roomID: roomID, run: run},
+			Proposals: proposalCreator{s: s, roomID: roomID, run: run},
 			Logger:    s.log,
 		}
 		backoff := agentRetryBackoff
 		mapped := false
 		for attempt := 1; ; attempt++ {
 			if err := gate.acquire(ctx); err != nil {
+				if ctx.Err() == nil && !s.isClosed() {
+					// The slot could not be had for another reason (the
+					// lease was lost while queued): give the room's agent
+					// up, so the next steer can start one, here or on the
+					// replica that owns the room now.
+					s.log.Warn("room: agent slot not granted; agent released", "room", roomID, "err", err)
+					s.releaseAgent(st, run, cancel)
+				}
 				return // room closed or service stopped while queued
 			}
 			if !mapped {
@@ -1048,7 +1102,7 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			}
 			s.log.Warn("room: agent run returned error", "room", roomID, "attempt", attempt, "err", err)
 			ectx, ecancel := context.WithTimeout(s.ctx, 5*time.Second)
-			_ = s.agentEmit(ectx, roomID, events.AgentStatus, events.AgentStatusPayload{State: "error", Detail: truncateDetail(err.Error())})
+			_ = s.agentEmit(ectx, roomID, run, events.AgentStatus, events.AgentStatusPayload{State: "error", Detail: truncateDetail(err.Error())})
 			ecancel()
 			if attempt >= maxAgentAttempts {
 				s.log.Error("room: agent gave up after repeated failures", "room", roomID, "attempts", attempt)

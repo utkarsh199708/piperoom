@@ -62,8 +62,9 @@ describe('solo-mode confirm', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
 
     const box = await screen.findByLabelText(BOX)
-    // The solo banner appears once the server has asked.
-    expect(screen.getByRole('status')).toHaveTextContent(/Solo mode/)
+    // The solo banner appears once the server has asked. (The open dialog hides the page behind it
+    // from the accessibility tree, hence `hidden`.)
+    expect(screen.getByRole('status', { hidden: true })).toHaveTextContent(/Solo mode/)
     // The text to type is shown, with no copy button.
     expect(screen.getByText('orders/kafka-connect')).toBeInTheDocument()
     // (The proposal's hash has its own copy button, outside this form.)

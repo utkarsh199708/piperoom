@@ -63,6 +63,13 @@ func sanitizeProposal(p events.ProposalCreatedPayload) events.ProposalCreatedPay
 // scope, derives the required approval layers from the step layers, and stores
 // the proposal (and its proposal.created event). It never executes anything.
 func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor) (string, error) {
+	return s.createProposal(ctx, roomID, p, actor, nil)
+}
+
+// createProposal is CreateProposal with an optional fence, checked under s.mu
+// before anything is written: the agent's proposals refuse a run that lost its
+// lease (fenceLocked).
+func (s *Service) createProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor, fence func(st *roomState) error) (string, error) {
 	p = sanitizeProposal(p)
 	if len(p.Steps) == 0 {
 		return "", validation("proposal requires at least one step")
@@ -73,9 +80,12 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 	if err := checkPlanText("rollback", p.Rollback); err != nil {
 		return "", err
 	}
-	// Structural checks first: they do not need the room.
+	// The actions of the room's own pipeline (docs/design/tenancy.md): their
+	// Validate reads that pipeline's systems only.
+	acts := s.actionsFor(s.roomPipeline(ctx, roomID))
+	// Structural checks first: they do not need the room state.
 	for i, step := range p.Steps {
-		a, ok := s.actions.Get(step.Action)
+		a, ok := acts.Get(step.Action)
 		if !ok {
 			return "", validation(fmt.Sprintf("unknown action %q", step.Action))
 		}
@@ -95,11 +105,18 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 		}
 	}
 
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.getStateLocked(ctx, roomID)
 	if err != nil {
 		return "", err
+	}
+	if fence != nil {
+		if err := fence(st); err != nil {
+			return "", err
+		}
 	}
 	if !s.roomOpen(st) {
 		return "", roomClosed("room is closed")
@@ -115,7 +132,7 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 	// implement actions.Scoped and must stay inside that pipeline. A scope
 	// violation is a validation error, not a server error.
 	for i, step := range p.Steps {
-		a, _ := s.actions.Get(step.Action)
+		a, _ := acts.Get(step.Action)
 		if err := s.scopeCheck(st.snap.PipelineID, a, step.Params); err != nil {
 			return "", validation(fmt.Sprintf("step %d (%s): %v", i, step.Action, err))
 		}
@@ -198,6 +215,7 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 	}
 	var prow store.ProposalRow
 	var ev events.Event
+	s.syncProposalRoom(ctx, proposalID)
 
 	if err := func() error {
 		s.mu.Lock()
@@ -206,6 +224,9 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		p, err := s.store.GetProposal(ctx, proposalID)
 		if err != nil {
 			return mapStoreErr(err)
+		}
+		if err := s.checkVisibleLocked(ctx, user, p.RoomID); err != nil {
+			return err
 		}
 		prow = p
 		if p.Status != "open" {
@@ -241,14 +262,14 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 			}
 		}
 		prow = p
-		ident := identityFor(user, grant)
+		ident := s.identityFor(user, grant)
 		if err := s.store.RecordApproval(ctx, approvalRow(proposalID, layer, "approved", "", p.ParamsHash, ident)); err != nil {
 			if errors.Is(err, store.ErrAlreadyExists) {
 				return alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
 			}
 			return err
 		}
-		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, humanActor(user), events.ApprovalGivenPayload{
+		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, s.humanActor(user), events.ApprovalGivenPayload{
 			ProposalID: proposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: &ident,
 		})
 		if err != nil {
@@ -285,12 +306,16 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	}
 	// An empty params_hash is allowed only for a proposal that cannot be
 	// hashed; checkParamsHash decides once it has the row.
+	s.syncProposalRoom(ctx, proposalID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	p, err := s.store.GetProposal(ctx, proposalID)
 	if err != nil {
 		return events.Event{}, mapStoreErr(err)
+	}
+	if err := s.checkVisibleLocked(ctx, user, p.RoomID); err != nil {
+		return events.Event{}, err
 	}
 	if p.Status != "open" {
 		return events.Event{}, alreadyDecided("proposal already decided")
@@ -315,14 +340,14 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	if err := s.checkParamsHash(ctx, &p, paramsHash, true); err != nil {
 		return events.Event{}, err
 	}
-	ident := identityFor(user, grant)
+	ident := s.identityFor(user, grant)
 	if err := s.store.RecordApproval(ctx, approvalRow(proposalID, layer, "rejected", reason, p.ParamsHash, ident)); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
 			return events.Event{}, alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
 		}
 		return events.Event{}, err
 	}
-	ev, err := s.emitLocked(ctx, st, p.RoomID, events.ApprovalRejected, humanActor(user), events.ApprovalRejectedPayload{
+	ev, err := s.emitLocked(ctx, st, p.RoomID, events.ApprovalRejected, s.humanActor(user), events.ApprovalRejectedPayload{
 		ProposalID: proposalID, Layer: layer, Reason: reason, ParamsHash: p.ParamsHash, Identity: &ident,
 	})
 	if err != nil {

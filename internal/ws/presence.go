@@ -17,6 +17,7 @@ type client struct {
 	sessionID string // "" for an X-User (dev, no cookie) connection
 	userID    string
 	userName  string
+	verified  bool
 	state     string
 	lastSeen  time.Time
 	send      chan []byte
@@ -24,6 +25,10 @@ type client struct {
 	cancel    func()
 	onClose   func()
 	once      sync.Once
+	// sessionEnded is set (under Gateway.mu) once the session-end frames are
+	// on their way, so a logout and the register-time check never both send
+	// them.
+	sessionEnded bool
 }
 
 // roomHub is the set of connections for one room.
@@ -107,7 +112,7 @@ func (h *roomHub) members() []Member {
 	for c := range h.conns {
 		m, ok := byID[c.userID]
 		if !ok {
-			m = Member{ID: c.userID, Name: c.userName, State: c.state}
+			m = Member{ID: c.userID, Name: c.userName, Verified: c.verified, State: c.state}
 		} else if c.state == "viewing" {
 			m.State = "viewing"
 		}
@@ -165,9 +170,10 @@ const sessionExpiredReason = "session_expired"
 // session_expired (docs/api.md), then a close with the same reason text. Like
 // spawnShutdown it runs on its own goroutine and the caller holds g.mu.
 func (g *Gateway) spawnSessionEnd(c *client) {
-	if g.closed {
+	if g.closed || c.sessionEnded {
 		return
 	}
+	c.sessionEnded = true
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()

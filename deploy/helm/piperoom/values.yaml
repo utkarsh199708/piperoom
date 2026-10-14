@@ -104,6 +104,9 @@ env:
   # --- the pipeline (non-secret parts; the DB URLs with passwords are secrets) ---
   KAFKA_BROKERS: ""
   CONNECT_URL: ""
+  # Your registry URL, or `off` when the pipelines use none. The chart skips empty
+  # values, so "" is unset and the server falls back to the dev default
+  # http://localhost:8081 (unreachable in a pod: the map shows the registry as unknown).
   SCHEMA_REGISTRY_URL: ""
   WAREHOUSE_KIND: postgres            # postgres | snowflake
 
@@ -113,6 +116,7 @@ env:
   PIPEROOM_EFFORT: ""                 # default high
   PIPEROOM_MAX_AGENTS: ""             # per replica; default 3
   PIPEROOM_MAX_AGENTS_GLOBAL: ""      # across all replicas; empty/0 = off
+  PIPEROOM_RESUME_ON_TAKEOVER: ""     # 1 = resume a working agent on the replica that takes its room over; default off
   # PIPEROOM_REPLICA_ID is set by the chart to the pod name.
   PIPEROOM_TRIAGE_MODEL: ""
   PIPEROOM_ROOM_TOKEN_BUDGET: ""      # default 2000000, 0 = no cap
@@ -227,8 +231,8 @@ resources:
   limits:
     memory: 1Gi
 
-# Probes go through the server's Host check, and kubelet would send the pod IP
-# as Host (answered 421 bad_host). The chart sends "Host: localhost" instead.
+# GET /healthz and /readyz skip the server's Host allow-list, so kubelet probes
+# work with the pod IP as Host. The chart's Host: localhost header is optional.
 probes:
   liveness:
     path: /healthz

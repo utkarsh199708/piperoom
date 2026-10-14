@@ -61,6 +61,27 @@ describe('PipelineMap — lane', () => {
     }
   })
 
+  it('labels a dead-letter topic node DLQ topic', () => {
+    const withDLQ: Topology = {
+      ...five,
+      nodes: [
+        ...five.nodes,
+        {
+          id: 'dlq:orders-dlq',
+          kind: 'dlq_topic',
+          name: 'orders-dlq',
+          layer: 'kafka-connect',
+          owner: 'arjun',
+          health: 'warn',
+          facts: { records: '1204', recent: 'true' },
+        },
+      ],
+    }
+    render(<PipelineMap topology={withDLQ} />)
+    expect(screen.getByText('DLQ topic')).toBeInTheDocument()
+    expect(screen.getByText('orders-dlq')).toBeInTheDocument()
+  })
+
   it('shows health as a word, not only a colour', () => {
     render(<PipelineMap topology={five} />)
     expect(screen.getByText('healthy')).toBeInTheDocument()

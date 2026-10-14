@@ -2,6 +2,7 @@ package room
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 
@@ -13,6 +14,11 @@ import (
 // start the text or follow a non-word character, and must not run on into more
 // letters, so "@agentless" or "text@agent" do not wake the agent.
 var agentMention = regexp.MustCompile(`(?i)(^|\W)@agent\b`)
+
+// errNoLongerDriver ends a driver's checked steer when another replica moved
+// the driver role between the check and the write; the steer then becomes a
+// suggestion.
+var errNoLongerDriver = errors.New("room: no longer the driver")
 
 // mentionsAgent reports whether a comment addresses the agent.
 func mentionsAgent(text string) bool {
@@ -27,6 +33,8 @@ func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, tex
 	if err := rejectUnstorable(stepID, text); err != nil {
 		return events.Event{}, err
 	}
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.getStateLocked(ctx, roomID)
@@ -42,7 +50,7 @@ func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, tex
 		Text:          text,
 		MentionsAgent: mentionsAgent(text),
 	}
-	e, err := s.emitLocked(ctx, st, roomID, events.CommentAdded, humanActor(user), payload)
+	e, err := s.emitLocked(ctx, st, roomID, events.CommentAdded, s.humanActor(user), payload)
 	if err == nil && payload.MentionsAgent {
 		s.ensureAgentLocked(ctx, roomID, st)
 	}
@@ -58,6 +66,8 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 	if err := rejectUnstorable(text); err != nil {
 		return events.Event{}, err
 	}
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.getStateLocked(ctx, roomID)
@@ -68,12 +78,26 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 		return events.Event{}, roomClosed("room is closed")
 	}
 	if s.isDriver(st, user.ID) {
-		e, err := s.emitLocked(ctx, st, roomID, events.SteerSent, humanActor(user), events.SteerSentPayload{Text: text})
+		// Checked append: if another replica moved the driver role in
+		// between, the steer is not logged as the driver's
+		// (docs/design/replicas.md 9.1); it becomes a suggestion below.
+		e, err := s.emitCheckedLocked(ctx, st, roomID, func() error {
+			if !s.roomOpen(st) {
+				return roomClosed("room is closed")
+			}
+			if !s.isDriver(st, user.ID) {
+				return errNoLongerDriver
+			}
+			return nil
+		}, events.SteerSent, s.humanActor(user), events.SteerSentPayload{Text: text})
 		if err == nil {
 			s.touchDriverLease(ctx, st, roomID)
 			s.ensureAgentLocked(ctx, roomID, st)
+			return e, nil
 		}
-		return e, err
+		if !errors.Is(err, errNoLongerDriver) {
+			return e, err
+		}
 	}
 	suggestionID := NewID("g_")
 	// Row first; if the event append fails we remove the row (compensation).
@@ -86,7 +110,7 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 	}); err != nil {
 		return events.Event{}, err
 	}
-	e, err := s.emitLocked(ctx, st, roomID, events.SteerSuggested, humanActor(user), events.SteerSuggestedPayload{
+	e, err := s.emitLocked(ctx, st, roomID, events.SteerSuggested, s.humanActor(user), events.SteerSuggestedPayload{
 		SuggestionID: suggestionID,
 		Text:         text,
 	})
@@ -101,6 +125,8 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 
 // SendSuggestion lets the driver forward a pending suggestion to the agent.
 func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggestionID string) (events.Event, error) {
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.getStateLocked(ctx, roomID)
@@ -128,7 +154,15 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 	if err := s.store.SetSuggestionStatus(ctx, suggestionID, "sent"); err != nil {
 		return events.Event{}, err
 	}
-	e, err := s.emitLocked(ctx, st, roomID, events.SteerSent, humanActor(user), events.SteerSentPayload{
+	e, err := s.emitCheckedLocked(ctx, st, roomID, func() error {
+		if !s.roomOpen(st) {
+			return roomClosed("room is closed")
+		}
+		if !s.isDriver(st, user.ID) {
+			return ErrNotDriver()
+		}
+		return nil
+	}, events.SteerSent, s.humanActor(user), events.SteerSentPayload{
 		SuggestionID: suggestionID,
 		Text:         sugg.Text,
 	})
@@ -146,6 +180,8 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 
 // RequestControl asks the current driver for control.
 func (s *Service) RequestControl(ctx context.Context, user User, roomID string) (events.Event, error) {
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.getStateLocked(ctx, roomID)
@@ -155,7 +191,7 @@ func (s *Service) RequestControl(ctx context.Context, user User, roomID string) 
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
-	return s.emitLocked(ctx, st, roomID, events.ControlRequested, humanActor(user), events.ControlRequestedPayload{})
+	return s.emitLocked(ctx, st, roomID, events.ControlRequested, s.humanActor(user), events.ControlRequestedPayload{})
 }
 
 // GrantControl moves the driver role: the driver can grant, or anyone when
@@ -166,6 +202,8 @@ func (s *Service) GrantControl(ctx context.Context, user User, roomID, toID stri
 	if err != nil {
 		return events.Event{}, err
 	}
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.getStateLocked(ctx, roomID)
@@ -178,9 +216,23 @@ func (s *Service) GrantControl(ctx context.Context, user User, roomID, toID stri
 	if !s.isDriver(st, user.ID) && !s.leaseExpired(st) {
 		return events.Event{}, leaseHeld("another user's driver lease is still live")
 	}
+	if err := s.checkTargetVisible(to, st.snap.PipelineID); err != nil {
+		return events.Event{}, err
+	}
 	lease := s.now().UTC().Add(DriverLease)
-	e, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, humanActor(user), events.ControlGrantedPayload{
-		To:         humanActor(to),
+	// Checked append: two people taking control on two replicas at once get
+	// one driver; the second re-checks against the first's grant
+	// (docs/design/replicas.md 9.1).
+	e, err := s.emitCheckedLocked(ctx, st, roomID, func() error {
+		if !s.roomOpen(st) {
+			return roomClosed("room is closed")
+		}
+		if !s.isDriver(st, user.ID) && !s.leaseExpired(st) {
+			return leaseHeld("another user's driver lease is still live")
+		}
+		return nil
+	}, events.ControlGranted, s.humanActor(user), events.ControlGrantedPayload{
+		To:         s.humanActor(to),
 		LeaseUntil: lease,
 	})
 	if err != nil {

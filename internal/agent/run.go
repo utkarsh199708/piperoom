@@ -632,6 +632,9 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 			defer wg.Done()
 			defer func() {
 				if p := recover(); p != nil {
+					// The value goes on to the room supervisor, which logs it and
+					// puts it in the room status, so it is masked here.
+					p = scrubPanic(p)
 					r.log.Error("agent: read tool panicked", "tool", u.name, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
 					panicMu.Lock()
 					if !panicked {
@@ -712,10 +715,11 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	res, err := entry.tool.Run(tctx, cleaned)
 	took := time.Since(start).Milliseconds()
 
+	res = r.scrubToolResult(u.name, res)
 	data := r.toolDataJSON(u.name, res.Data)
 
 	if err != nil {
-		msg := "error: " + err.Error()
+		msg := "error: " + r.scrubToolError(u.name, err).Error()
 		summary, truncated := tools.Truncate(msg)
 		r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 			StepID:    stepID,
@@ -728,7 +732,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		})
 		return toolResult{
 			toolUseID: u.id,
-			content:   wrapToolOutput(u.name, stepID, msg),
+			content:   r.wrapReadToolOutput(u.name, stepID, summary),
 			isError:   true,
 		}
 	}
@@ -748,7 +752,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	})
 	return toolResult{
 		toolUseID: u.id,
-		content:   wrapToolOutput(u.name, stepID, summary),
+		content:   r.wrapReadToolOutput(u.name, stepID, summary),
 		isError:   false,
 	}
 }

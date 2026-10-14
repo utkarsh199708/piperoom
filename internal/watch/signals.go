@@ -26,12 +26,33 @@ const (
 	maxEvidenceTraces     = 3
 )
 
-// evaluate turns one observation into signal readings and steps every state
-// machine. Caller holds w.mu. It returns, per signal, the pipelines that fired
-// in this tick (the storm cap needs that).
-func (w *Watcher) evaluate(now time.Time, ts []target, obs *observation) map[string][]string {
+// evaluate turns the observations (one per client set) into signal readings and
+// steps every state machine. Caller holds w.mu. It returns, per signal, the
+// pipelines that fired in this tick (the storm cap needs that).
+func (w *Watcher) evaluate(now time.Time, ts []target, bySet map[string]*observation) map[string][]string {
 	fired := map[string][]string{}
+	// DLQ rings are per set: a topic name is unique only within one cluster.
+	perSet := map[string][]target{}
 	for _, t := range ts {
+		perSet[t.set] = append(perSet[t.set], t)
+	}
+	snapsBySet := make(map[string]map[string]dlqSnap, len(perSet))
+	for set, sts := range perSet {
+		if obs := bySet[set]; obs != nil {
+			snapsBySet[set] = w.recordDLQ(now, sts, obs)
+		}
+	}
+	for _, t := range ts {
+		obs := bySet[t.set]
+		if obs == nil {
+			// observe reads every set it is given; this only guards a caller
+			// that passes targets it did not observe.
+			obs = &observation{set: t.set, slotsErr: errNotObserved, conns: map[string]*connObs{}}
+		}
+		snaps := snapsBySet[t.set]
+		if snaps == nil {
+			snaps = map[string]dlqSnap{}
+		}
 		ps := w.pipe(t.p.ID)
 		cr := classifyConnectors(t.connectors, obs)
 		if t.cfg.ConnectorDown.Enabled {
@@ -40,6 +61,7 @@ func (w *Watcher) evaluate(now time.Time, ts []target, obs *observation) map[str
 		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled {
 			w.evaluateSlot(now, t, ps, cr, obs, fired)
 		}
+		w.evaluateDLQ(now, t, ps, obs, snaps, fired)
 		w.logStill(now, t, ps)
 	}
 	return fired
@@ -320,7 +342,7 @@ func slotFromConfigs(t target, obs *observation) (string, error) {
 		if co == nil || co.cfg == nil {
 			continue
 		}
-		if n, present := co.cfg["slot.name"]; present && strings.TrimSpace(n) != "" {
+		if n, present := co.cfg["slot.name"]; present {
 			if !slotNameRE.MatchString(n) {
 				return "", fmt.Errorf("watch: pipeline %s: connector %s has an invalid slot.name %q", t.p.ID, c, clean(n, 40))
 			}

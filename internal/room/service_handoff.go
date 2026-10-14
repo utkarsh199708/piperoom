@@ -48,6 +48,8 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 		return events.Event{}, err
 	}
 
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	st, err := s.getStateLocked(ctx, roomID)
 	if err != nil {
@@ -66,6 +68,10 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 		s.mu.Unlock()
 		return events.Event{}, validation("cannot hand off to yourself")
 	}
+	if err := s.checkTargetVisible(to, st.snap.PipelineID); err != nil {
+		s.mu.Unlock()
+		return events.Event{}, err
+	}
 	s.mu.Unlock()
 
 	roomEvents, err := s.allEvents(ctx, roomID)
@@ -83,9 +89,6 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st2 := s.rooms[roomID]
-	if st2 != nil && s.syncLocked(ctx, roomID, st2) != nil {
-		st2 = nil // deleted meanwhile (shared store)
-	}
 	if st2 == nil {
 		return events.Event{}, notFound("room not found")
 	}
@@ -114,9 +117,17 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 	}); err != nil {
 		return events.Event{}, err
 	}
-	e, err := s.emitLocked(ctx, st2, roomID, events.HandoffCreated, humanActor(user), events.HandoffCreatedPayload{
+	e, err := s.emitCheckedLocked(ctx, st2, roomID, func() error {
+		if !s.roomOpen(st2) {
+			return roomClosed("room is closed")
+		}
+		if !s.isDriver(st2, user.ID) {
+			return ErrNotDriver()
+		}
+		return nil
+	}, events.HandoffCreated, s.humanActor(user), events.HandoffCreatedPayload{
 		HandoffID:     handoffID,
-		To:            humanActor(to),
+		To:            s.humanActor(to),
 		Summary:       summary,
 		StayAsWatcher: stayAsWatcher,
 	})
@@ -139,12 +150,16 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 // (control.granted) and emits handoff.accepted. Only the handoff recipient may
 // accept, and only while the handoff's creator is still the driver.
 func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string) (events.Event, error) {
+	s.syncHandoffRoom(ctx, handoffID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	h, err := s.store.GetHandoff(ctx, handoffID)
 	if err != nil {
 		return events.Event{}, mapStoreErr(err)
+	}
+	if err := s.checkVisibleLocked(ctx, user, h.RoomID); err != nil {
+		return events.Event{}, err
 	}
 	if h.Status == "voided" {
 		// A handoff is voided when a newer one supersedes it (review item 10):
@@ -169,10 +184,20 @@ func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string
 	if !s.isDriver(st, h.FromID) {
 		return events.Event{}, staleHandoff("the handoff creator is no longer the driver")
 	}
-	to := events.Actor{Kind: events.ActorHuman, ID: h.ToID, Name: h.ToName}
+	to := s.humanActor(User{ID: h.ToID, Name: h.ToName})
 	lease := s.now().UTC().Add(DriverLease)
 
-	if _, err := s.emitLocked(ctx, st, h.RoomID, events.ControlGranted, humanActor(user), events.ControlGrantedPayload{
+	// Checked append: two accepts on two replicas, or a control change
+	// elsewhere, cannot both move the role (docs/design/replicas.md 9.1).
+	if _, err := s.emitCheckedLocked(ctx, st, h.RoomID, func() error {
+		if !s.roomOpen(st) {
+			return roomClosed("room is closed")
+		}
+		if !s.isDriver(st, h.FromID) {
+			return staleHandoff("the handoff creator is no longer the driver")
+		}
+		return nil
+	}, events.ControlGranted, s.humanActor(user), events.ControlGrantedPayload{
 		To: to, LeaseUntil: lease,
 	}); err != nil {
 		return events.Event{}, err
@@ -186,7 +211,7 @@ func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string
 	if err := s.store.VoidHandoffs(ctx, h.RoomID, handoffID); err != nil {
 		s.log.Warn("room: void other handoffs failed", "room", h.RoomID, "err", err)
 	}
-	return s.emitLocked(ctx, st, h.RoomID, events.HandoffAccepted, humanActor(user), events.HandoffAcceptedPayload{
+	return s.emitLocked(ctx, st, h.RoomID, events.HandoffAccepted, s.humanActor(user), events.HandoffAcceptedPayload{
 		HandoffID: handoffID,
 	})
 }

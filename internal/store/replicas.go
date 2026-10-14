@@ -8,6 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"piperoom/internal/events"
 )
 
 // Coordinator is the multi-replica surface of a store that several server
@@ -63,6 +65,28 @@ type Coordinator interface {
 	// not stale any more or another replica was faster.
 	InterruptProposal(ctx context.Context, proposalID, owner string, claimStale, unclaimedStale time.Duration) (ok bool, err error)
 
+	// StartClaimedStep marks a step started, like StartProposalStep, but only
+	// while owner still holds the proposal's claim (claimed_by = owner, status
+	// open). A lost claim wraps ErrClaimLost; a step already started wraps
+	// ErrStepOrder.
+	StartClaimedStep(ctx context.Context, proposalID string, stepIndex int, owner string) error
+	// FinishClaimedStep records a started step's result, like
+	// FinishProposalStep, only while owner holds the claim, and refreshes the
+	// claim in the same transaction. A lost claim wraps ErrClaimLost; a step
+	// that is not "started" wraps ErrStepOrder.
+	FinishClaimedStep(ctx context.Context, proposalID string, stepIndex int, owner, status, output string) error
+	// SetClaimedProposalStatus sets the final status only while owner holds
+	// the claim of an open proposal. A lost claim wraps ErrClaimLost.
+	SetClaimedProposalStatus(ctx context.Context, proposalID, owner, status string) error
+	// NoteResume counts one resume of the room's agent by owner, the current
+	// lease holder: at most max per window (docs/design/replicas.md 4.3). ok
+	// false means the cap is reached (or owner no longer holds the lease).
+	NoteResume(ctx context.Context, roomID, owner string, max int, window time.Duration) (ok bool, err error)
+	// AppendIfLast appends only when the room's last seq is expectSeq;
+	// another writer in between wraps ErrSeqConflict (docs/design/replicas.md
+	// 9.1).
+	AppendIfLast(ctx context.Context, roomID string, expectSeq int64, typ events.Type, actor events.Actor, payload any) (events.Event, error)
+
 	// WatchAppends calls w for every append notification until ctx ends
 	// (hub.go).
 	WatchAppends(ctx context.Context, w AppendWatch)
@@ -75,6 +99,10 @@ type Coordinator interface {
 // ErrLeaseLost is returned (wrapped) when a lease the caller relied on is not
 // its own any more.
 var ErrLeaseLost = errors.New("store: room lease lost")
+
+// ErrClaimLost is returned (wrapped) when an executor's proposal claim is not
+// its own any more (the stale sweep took it, or the proposal was decided).
+var ErrClaimLost = errors.New("store: proposal claim lost")
 
 // RoomLease is one room_agent_leases row.
 type RoomLease struct {

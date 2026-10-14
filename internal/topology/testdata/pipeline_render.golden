@@ -1,0 +1,20 @@
+pipeline orders
+legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=3.0 MiB
+2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+  from: pg:public.orders
+  depends on: sr:pg.public.orders-key, sr:pg.public.orders-value
+3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=40m ago
+  from: connect:pg-orders-connector
+4 connect:orders-sink [kafka-connect, owner arjun] OK dlq=orders-dlq errors_tolerance=all
+  from: topic:pg.public.orders
+  depends on: sr:pg.public.orders-key, sr:pg.public.orders-value
+5 dlq:orders-dlq [kafka-connect, owner arjun] OK newest_record=never records=0 writer=orders-sink
+  from: connect:orders-sink
+6 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+  from: topic:pg.public.orders
+  depends on: sr:pg.public.orders-key, sr:pg.public.orders-value
+7 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=45m ts_column=updated_at
+  from: connect:orders-sink (unconfirmed), group:order-sync (unconfirmed)
+8 sr:pg.public.orders-key [schema-registry, owner priya] OK compatibility=BACKWARD latest_version=1 registered_recently=unknown
+9 sr:pg.public.orders-value [schema-registry, owner priya] OK compatibility=BACKWARD latest_version=2 registered_recently=unknown

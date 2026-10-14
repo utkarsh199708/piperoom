@@ -29,6 +29,10 @@ var ErrRoomNotEmpty = errors.New("store: room has events")
 // (e.g. a second decision on the same proposal layer).
 var ErrAlreadyExists = errors.New("store: already exists")
 
+// ErrSeqConflict is returned (wrapped) by AppendIfLast when another writer
+// appended to the room after the expected seq.
+var ErrSeqConflict = errors.New("store: room changed since the expected seq")
+
 // ErrParamsHashConflict is returned by SetProposalParamsHash when the row
 // already holds a different, non-empty params_hash.
 var ErrParamsHashConflict = errors.New("store: proposal already has a different params_hash")
@@ -165,6 +169,10 @@ type Options struct {
 	// PollInterval is the fallback poll period while LISTEN is down; zero
 	// means DefaultPollInterval.
 	PollInterval time.Duration
+	// SafetyPoll is how often every feed and watcher re-reads while LISTEN is
+	// up, so a notification lost on a socket that died silently is caught;
+	// zero means DefaultSafetyPoll. It is checked on the PollInterval tick.
+	SafetyPoll time.Duration
 }
 
 // NewPoolOptions is NewPool with Options.
@@ -185,6 +193,9 @@ func newPG(pool *pgxpool.Pool, connString string, log *slog.Logger, opts Options
 		cancel:     cancel,
 	}
 	s.hub = newHub(hubCtx, s, connString, listenAppName(), log, !opts.NoListen, opts.PollInterval)
+	if opts.SafetyPoll > 0 {
+		s.hub.safetyPoll = opts.SafetyPoll
+	}
 	s.hubWg.Add(1)
 	go func() {
 		defer s.hubWg.Done()
@@ -409,6 +420,22 @@ func (s *PG) DeleteEmptyRoom(ctx context.Context, id string) error {
 // Append assigns the next seq atomically, inserts the event and notifies
 // subscribers, all in one transaction. Seq has no gaps within a room.
 func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
+	return s.appendEvent(ctx, roomID, -1, typ, actor, payload)
+}
+
+// AppendIfLast is Append that only writes when the room's last seq is still
+// expectSeq: the caller checked a rule against the log up to expectSeq, and
+// the rule must still hold when the event lands. Another writer in between
+// wraps ErrSeqConflict and nothing is written (docs/design/replicas.md 9.1).
+func (s *PG) AppendIfLast(ctx context.Context, roomID string, expectSeq int64, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
+	if expectSeq < 0 {
+		return events.Event{}, fmt.Errorf("store: append to %s: negative expected seq %d: %w", roomID, expectSeq, ErrSeqConflict)
+	}
+	return s.appendEvent(ctx, roomID, expectSeq, typ, actor, payload)
+}
+
+// appendEvent appends one event; expectSeq < 0 means unconditionally.
+func (s *PG) appendEvent(ctx context.Context, roomID string, expectSeq int64, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	payloadJSON, err := json.Marshal(payload)
@@ -429,8 +456,16 @@ func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor e
 	var seq int64
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx,
-			`UPDATE rooms SET last_seq = last_seq + 1 WHERE id = $1 RETURNING last_seq`, roomID).Scan(&seq); err != nil {
+			`UPDATE rooms SET last_seq = last_seq + 1 WHERE id = $1 AND ($2::bigint < 0 OR last_seq = $2) RETURNING last_seq`,
+			roomID, expectSeq).Scan(&seq); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
+				var exists bool
+				if qerr := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM rooms WHERE id = $1)`, roomID).Scan(&exists); qerr != nil {
+					return fmt.Errorf("store: reserve seq for %s: %w", roomID, qerr)
+				}
+				if exists {
+					return fmt.Errorf("store: append to %s after seq %d: %w", roomID, expectSeq, ErrSeqConflict)
+				}
 				return fmt.Errorf("store: append to unknown room %s: %w", roomID, ErrNotFound)
 			}
 			return fmt.Errorf("store: reserve seq for %s: %w", roomID, err)

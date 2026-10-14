@@ -42,18 +42,18 @@ func (s *Service) OpenRoomForPipeline(pipelineID string) (roomID string, ok bool
 	if !pipelineIDRe.MatchString(pipelineID) {
 		return "", false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.coord != nil {
 		// Shared store: rooms other replicas opened or closed since the last
-		// fold count too. One ListRooms read; a failure falls back to the
-		// cache (the follower keeps it close).
+		// fold count too. The reads happen outside s.mu (refreshAll); a
+		// failure falls back to the cache (the follower keeps it close).
 		ctx, cancel := context.WithTimeout(s.ctx, lastRoomLookupTimeout)
-		if err := s.refreshAllLocked(ctx); err != nil && s.ctx.Err() == nil {
+		if err := s.refreshAll(ctx); err != nil && s.ctx.Err() == nil {
 			s.log.Warn("room: open room for pipeline: refresh failed; using the cache", "pipeline", pipelineID, "err", err)
 		}
 		cancel()
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var newest *roomState
 	for id, st := range s.rooms {
 		if st.snap.PipelineID != pipelineID || !s.roomOpen(st) {
@@ -108,15 +108,12 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 	// The event log is the source of truth. When the room is cached and its
 	// snapshot disagrees with the row (the row write after room.closed failed),
 	// the snapshot wins.
+	// Shared store: fold a close another replica wrote first, reading the
+	// store before s.mu is taken. A room deleted meanwhile is evicted and
+	// simply loses the snapshot vote.
+	s.syncRoom(ctx, row.ID)
 	s.mu.Lock()
 	if st, cached := s.rooms[row.ID]; cached {
-		// Shared store: fold a close another replica wrote first. A room
-		// deleted meanwhile is not found and simply loses the snapshot vote.
-		_ = s.syncLocked(ctx, row.ID, st)
-		if s.rooms[row.ID] != st {
-			s.mu.Unlock()
-			return row.ID, closedAt, true
-		}
 		if s.roomOpen(st) {
 			closedAt = nil
 		} else if st.snap.ClosedAt != nil {
@@ -160,6 +157,8 @@ func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {
 	if err := rejectUnstorable(text); err != nil {
 		return err
 	}
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.getStateLocked(ctx, roomID)

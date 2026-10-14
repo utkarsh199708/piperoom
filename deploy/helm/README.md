@@ -81,12 +81,11 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
   Without it the server sees the controller's address for every user, so all users share one
   login rate-limit bucket.
 - **Probes** call `/healthz` (liveness) and `/readyz` (readiness, also pings the room database)
-  with `Host: localhost`. The server checks the Host header on every route including probes, and
-  kubelet would otherwise send the pod IP and get 421. A load balancer that health-checks the
-  pods directly (GKE container-native LB with NEGs, AWS Load Balancer Controller in IP mode)
-  also sends the pod IP as `Host`, so it gets 421 and marks the backend unhealthy until the
-  server exempts `/healthz` and `/readyz` from the Host check. Until then, set the Host
-  the health check sends. On GKE with the Gateway API:
+  with `Host: localhost`. Exact `GET /healthz` and `GET /readyz` requests skip the Host allow-list,
+  so kubelet and load balancers that send the pod IP as `Host` work without a configured host.
+  The chart still sends `Host: localhost`, but this is optional. Probe responses contain only fixed
+  status and reason values, never raw errors. On GKE with the Gateway API, `host` is optional and
+  can be kept if your health-check routing needs it:
 
   ```yaml
   apiVersion: networking.gke.io/v1
@@ -100,23 +99,24 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
         httpHealthCheck:
           portSpecification: USE_SERVING_PORT
           requestPath: /readyz
-          host: piperoom.corp.example   # a host the server accepts (the public URL host)
+          host: piperoom.corp.example   # optional; the probe route also accepts the pod IP
     targetRef:
       group: ""
       kind: Service
       name: piperoom-piperoom           # the chart's Service name
   ```
 
-  A classic GKE Ingress `BackendConfig` cannot set the health check Host, and an AWS target
-  group health check cannot either. There, keep an in-cluster ingress controller (for example
-  ingress-nginx) between the cloud load balancer and Piperoom, so the load balancer checks the
-  controller and kubelet's probes (which send `Host: localhost`) check Piperoom.
+  A classic GKE Ingress `BackendConfig` and AWS target group health checks may not set the Host;
+  that is fine because the probe routes accept the backend IP. No intermediary is needed just to
+  satisfy the Host allow-list.
 - **Replicas.** `replicaCount` defaults to 1 (strategy `Recreate`). More replicas are safe and add
   capacity; Postgres is the only coordination service (design: `docs/design/replicas.md`):
   - each room's agent runs on one replica, which holds a lease row renewed every 10 s (TTL 30 s).
     Steers and comments sent to any replica reach that agent through the event log. When a pod
-    stops, its rooms are handed over: an agent that was working resumes on another replica (a new
-    run that gets the room's unanswered input), an idle one stays paused until someone steers;
+    stops, its rooms are handed over and stay paused until someone steers. With
+    `PIPEROOM_RESUME_ON_TAKEOVER=1` an agent that was working resumes on another replica (a new
+    run that gets the room's unanswered input and its open proposals), at most 3 times per room per
+    hour;
   - an approved fix runs exactly once: the executor claims the proposal in Postgres first. A step
     that was running when its pod died is never run again; after about 2.5 minutes it is recorded
     as failed with "outcome unknown";
@@ -134,8 +134,8 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
   for replicas x (pool + 5). Limits: who is viewing a room (presence) is per replica, so people on
   different pods do not see each other in the member list; the room token budget
   (`PIPEROOM_ROOM_TOKEN_BUDGET`) and the login and alert rate limits are counted per replica; two
-  conflicting commands sent to two replicas in the same instant (two people taking control) can
-  both pass, last write wins, while approvals, executions and alert rooms stay one-only.
+  conflicting driver commands sent to two replicas in the same instant (two people taking control)
+  are serialized: one wins and the other gets `409 conflict` and retries.
 - **Security context**: non-root (uid 65532), read-only root file system, all capabilities dropped,
   seccomp `RuntimeDefault`. `/tmp` is a small in-memory emptyDir; `/config` is the read-only
   owners/users ConfigMap. Kafka/Connect TLS files: mount a Secret with `extraVolumes` and

@@ -15,6 +15,8 @@ import (
 var (
 	errNoConnect = errors.New("watch: no Kafka Connect client configured")
 	errNoSource  = errors.New("watch: no source database client configured")
+	// errNotObserved: the pipeline's client set was not read in this tick.
+	errNotObserved = errors.New("watch: the pipeline's client set was not read")
 )
 
 // target is one pipeline the watcher looks at in a tick.
@@ -24,6 +26,15 @@ type target struct {
 	// connectors are the pipeline's connectors, filtered through the tool scope
 	// rules: object names come only from owners.Pipeline.
 	connectors []string
+	// cdcTopics are the pipeline's CDC topics: never a DLQ.
+	cdcTopics []string
+	// set names the pipeline's client set; src, conn and kafka are its
+	// clients (Deps.ClientsFor), or Deps.Source, Deps.Connect and Deps.Kafka
+	// for every pipeline.
+	set   string
+	src   SourceDB
+	conn  ConnectClient
+	kafka clients.DLQReader
 }
 
 // connObs is what one tick learned about one connector.
@@ -37,10 +48,21 @@ type connObs struct {
 
 // observation is the raw material of one tick.
 type observation struct {
+	// set is the client set this observation read (target.set).
+	set        string
 	slots      []clients.ReplicationSlot
 	slotsErr   error
 	slotsTried bool
 	conns      map[string]*connObs
+
+	// DLQ offsets: one call per tick for all DLQ topics of the set's pipelines.
+	// plan says which topics each pipeline looks at; dlqNoReader means the
+	// Kafka client cannot read offsets of DLQ topics.
+	plan        *dlqPlan
+	dlqOffsets  map[string][]clients.PartitionOffsets
+	dlqErr      error
+	dlqTried    bool
+	dlqNoReader bool
 }
 
 // targets lists the pipelines to watch, in owners order. A pipeline that opted
@@ -49,7 +71,8 @@ func (w *Watcher) targets(ctx context.Context) []target {
 	var out []target
 	for _, p := range w.own.Pipelines {
 		cfg := p.Watch()
-		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled) {
+		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled ||
+			cfg.DLQGrowth.Enabled || cfg.ConfigRisk.Enabled) {
 			continue
 		}
 		t := target{p: p, cfg: cfg}
@@ -61,6 +84,13 @@ func (w *Watcher) targets(ctx context.Context) []target {
 			continue
 		}
 		t.connectors = sc.FilterConnectors(p.Connectors)
+		t.cdcTopics = sc.Topics()
+		if w.clientsFor != nil {
+			pc := w.clientsFor(p.ID)
+			t.set, t.src, t.conn, t.kafka = pc.Set, pc.Source, pc.Connect, pc.Kafka
+		} else {
+			t.src, t.conn, t.kafka = w.src, w.conn, w.kafka
+		}
 		out = append(out, t)
 	}
 	return out
@@ -76,15 +106,44 @@ func needsSlots(ts []target) bool {
 	return false
 }
 
-// observe makes every call of the tick. The source is read once and the rows are
-// fanned out to the pipelines later; each connector is read in its own goroutine.
-// Every call has its own deadline and its own error, so one slow or broken layer
-// never holds up or hides another (same shape as devctl's runHealth).
-func (w *Watcher) observe(ctx context.Context, ts []target) *observation {
-	obs := &observation{conns: map[string]*connObs{}}
+// observe makes every call of the tick, one observation per client set (a
+// connector name or a slot in one set says nothing about another set's
+// cluster). The sets are read at the same time.
+func (w *Watcher) observe(ctx context.Context, ts []target) map[string]*observation {
+	groups := map[string][]target{}
+	for _, t := range ts {
+		groups[t.set] = append(groups[t.set], t)
+	}
+	out := make(map[string]*observation, len(groups))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for set, g := range groups {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Every target of a set has that set's clients.
+			o := w.observeSet(ctx, set, g, g[0].src, g[0].conn, g[0].kafka)
+			mu.Lock()
+			out[set] = o
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return out
+}
+
+// observeSet makes the calls of one client set. The source is read once and the
+// rows are fanned out to the pipelines later; each connector is read in its own
+// goroutine. Every call has its own deadline and its own error, so one slow or
+// broken layer never holds up or hides another (same shape as devctl's
+// runHealth).
+func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src SourceDB, conn ConnectClient, kafka clients.DLQReader) *observation {
+	obs := &observation{set: set, conns: map[string]*connObs{}}
 	needCfg := map[string]bool{}
 	for _, t := range ts {
-		slotCfg := t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled
+		// The slot name, the heartbeat, the DLQ topic and the risks all come from the config.
+		slotCfg := t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled ||
+			t.cfg.DLQGrowth.Enabled || t.cfg.ConfigRisk.Enabled
 		for _, c := range t.connectors {
 			if _, ok := obs.conns[c]; !ok {
 				obs.conns[c] = &connObs{}
@@ -96,17 +155,17 @@ func (w *Watcher) observe(ctx context.Context, ts []target) *observation {
 	}
 
 	var wg sync.WaitGroup
-	if needsSlots(ts) && w.src == nil {
+	if needsSlots(ts) && src == nil {
 		obs.slotsErr = errNoSource
 	} else if needsSlots(ts) {
 		obs.slotsTried = true
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			obs.slots, obs.slotsErr = call(ctx, w.cfg.CheckTimeout, "read replication slots", w.src.ReplicationSlots)
+			obs.slots, obs.slotsErr = call(ctx, w.cfg.CheckTimeout, "read replication slots", src.ReplicationSlots)
 		}()
 	}
-	if w.conn == nil {
+	if conn == nil {
 		for _, co := range obs.conns {
 			co.statusErr = errNoConnect
 		}
@@ -116,19 +175,21 @@ func (w *Watcher) observe(ctx context.Context, ts []target) *observation {
 			go func() {
 				defer wg.Done()
 				co.status, co.statusErr = call(ctx, w.cfg.CheckTimeout, "connector status", func(c context.Context) (clients.ConnectorStatus, error) {
-					return w.conn.Status(c, name)
+					return conn.Status(c, name)
 				})
 				if co.statusErr != nil || !needCfg[name] {
 					return
 				}
 				co.cfgTried = true
 				co.cfg, co.cfgErr = call(ctx, w.cfg.CheckTimeout, "connector config", func(c context.Context) (map[string]string, error) {
-					return w.conn.Config(c, name)
+					return conn.Config(c, name)
 				})
 			}()
 		}
 	}
 	wg.Wait()
+	// After the configs: the DLQ topics are discovered from them.
+	w.observeDLQ(ctx, ts, obs, kafka)
 	return obs
 }
 

@@ -12,7 +12,11 @@ CREATE TABLE room_agent_leases (
     pipeline_id text        NOT NULL DEFAULT '',
     slot        boolean     NOT NULL DEFAULT false,
     acquired_at timestamptz NOT NULL DEFAULT now(),
-    expires_at  timestamptz NOT NULL
+    expires_at  timestamptz NOT NULL,
+    -- Resumes after a takeover (PIPEROOM_RESUME_ON_TAKEOVER): at most 3 per
+    -- room per hour, counted from resume_window.
+    resumes       integer     NOT NULL DEFAULT 0,
+    resume_window timestamptz
 );
 
 CREATE INDEX room_agent_leases_owner_idx ON room_agent_leases (owner);

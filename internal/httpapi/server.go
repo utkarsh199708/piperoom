@@ -94,7 +94,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	}
 	r.Use(requestLog(log, s.clientIP))
 	// Host allow-list first (DNS rebinding, design §1.5), then the cross-origin
-	// check, on every route including probes and signed alerts.
+	// check, except signed alert routes and GET /healthz and /readyz (hostGuard).
 	r.Use(s.hostGuard)
 	r.Use(s.crossOriginProtection().Handler)
 	// Router-level misses use the same JSON envelope as every other error.
@@ -148,16 +148,21 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 			protected.Use(viewerGuard)
 			protected.Use(requireJSON)
 
+			// Every /rooms/{id} route answers 404 for a room outside the
+			// caller's tenants before its handler runs (tenancy.go);
+			// approve, reject and accept check inside the service.
+			visible := s.roomVisible
+
 			// The WebSocket authenticates by the session cookie (or, in dev
 			// mode, X-User for curl and wscat) like every other route, and
 			// runs outside the request timeout: the connection outlives the
 			// request. Replay has its own deadline in the gateway.
-			protected.Get("/rooms/{id}/ws", s.gw.ServeHTTP)
+			protected.Get("/rooms/{id}/ws", visible(s.gw.ServeHTTP))
 
 			// The hand-off route is exempt from the default budget.
-			protected.Post("/rooms/{id}/handoffs", withTimeout(handoffTimeout, s.handleCreateHandoff))
+			protected.Post("/rooms/{id}/handoffs", withTimeout(handoffTimeout, visible(s.handleCreateHandoff)))
 			// The audit export reads the whole log, so it has its own budget.
-			protected.Get("/rooms/{id}/export", withTimeout(exportTimeout, s.handleExportRoom))
+			protected.Get("/rooms/{id}/export", withTimeout(exportTimeout, visible(s.handleExportRoom)))
 
 			protected.Group(func(short chi.Router) {
 				short.Use(middleware.Timeout(requestTimeout))
@@ -172,23 +177,23 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 					// answers 404 for the unknown source "webhook".
 					short.Post("/alerts/webhook", s.handleAlertWebhook)
 				}
-				short.Get("/rooms/{id}", s.handleGetRoom)
-				short.Get("/rooms/{id}/events", s.handleRoomEvents)
-				short.Post("/rooms/{id}/comments", s.handleAddComment)
-				short.Post("/rooms/{id}/steer", s.handleSteer)
-				short.Post("/rooms/{id}/suggestions/{sid}/send", s.handleSendSuggestion)
-				short.Post("/rooms/{id}/control/request", s.handleRequestControl)
-				short.Post("/rooms/{id}/control/grant", s.handleGrantControl)
-				short.Post("/rooms/{id}/close", s.handleCloseRoom)
-				short.Post("/rooms/{id}/trace", s.handleTrace)
-				short.Post("/rooms/{id}/shadow/blind", s.handleShadowBlind)
-				short.Get("/rooms/{id}/shadow", s.handleShadow)
-				short.Post("/rooms/{id}/shadow/grade", s.handleShadowGrade)
+				short.Get("/rooms/{id}", visible(s.handleGetRoom))
+				short.Get("/rooms/{id}/events", visible(s.handleRoomEvents))
+				short.Post("/rooms/{id}/comments", visible(s.handleAddComment))
+				short.Post("/rooms/{id}/steer", visible(s.handleSteer))
+				short.Post("/rooms/{id}/suggestions/{sid}/send", visible(s.handleSendSuggestion))
+				short.Post("/rooms/{id}/control/request", visible(s.handleRequestControl))
+				short.Post("/rooms/{id}/control/grant", visible(s.handleGrantControl))
+				short.Post("/rooms/{id}/close", visible(s.handleCloseRoom))
+				short.Post("/rooms/{id}/trace", visible(s.handleTrace))
+				short.Post("/rooms/{id}/shadow/blind", visible(s.handleShadowBlind))
+				short.Get("/rooms/{id}/shadow", visible(s.handleShadow))
+				short.Post("/rooms/{id}/shadow/grade", visible(s.handleShadowGrade))
 				short.Get("/shadow/metrics", s.handleShadowMetrics)
 				short.Post("/proposals/{pid}/approve", s.handleApproveProposal)
 				short.Post("/proposals/{pid}/reject", s.handleRejectProposal)
 				short.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)
-				short.Get("/pipelines/{pid}/topology", s.handleTopology)
+				short.Get("/pipelines/{pid}/topology", s.pipelineVisible(s.handleTopology))
 			})
 		})
 	})

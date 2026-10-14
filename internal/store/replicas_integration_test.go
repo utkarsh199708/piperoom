@@ -94,7 +94,9 @@ func TestElectorOneLeaderTakeover(t *testing.T) {
 	stores := []*store.PG{s0, openReplica(t, schema, store.Options{}), openReplica(t, schema, store.Options{})}
 	electors := make([]*store.PGElector, len(stores))
 	for i, s := range stores {
-		e := s.Elector(fmt.Sprintf("r%d", i))
+		// Replica names unique per run: leader connections are found by
+		// application_name, and other packages' tests run electors at once.
+		e := s.Elector(fmt.Sprintf("%s-r%d", schema, i))
 		// The others retry faster than the leader checks its connection, so
 		// without the settle delay a new loop would start while the old one
 		// still runs; Settle > Check + CheckTimeout is what prevents it.
@@ -441,6 +443,11 @@ func TestStaleUnclaimedProposal(t *testing.T) {
 	if sp, _ := s.StaleProposals(ctx, time.Minute, time.Minute, 10); len(sp) != 0 {
 		t.Fatalf("just-approved proposal listed as stale: %+v", sp)
 	}
+	// The interrupt re-checks the rule itself: a caller with a stale list
+	// (or none) cannot interrupt a proposal that is not stale.
+	if ok, err := s.InterruptProposal(ctx, "p_two", "sweeper", time.Minute, time.Minute); err != nil || ok {
+		t.Fatalf("interrupt of a just-approved proposal: ok=%v err=%v, want false", ok, err)
+	}
 	execSQL(t, schema, `UPDATE approvals SET decided_at = now() - interval '10 minutes'`)
 	sp, err := s.StaleProposals(ctx, time.Minute, time.Minute, 10)
 	if err != nil || len(sp) != 1 || sp[0].ClaimedBy != "" {
@@ -507,6 +514,40 @@ func TestSubscribeAcrossReplicas(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// While LISTEN is up, an append whose notification never arrives (a socket
+// that died without an error) still reaches subscribers through the safety
+// poll (docs/design/replicas.md section 6.1).
+func TestSafetyPollWhileListening(t *testing.T) {
+	a, _, schema := requireStoreSchema(t)
+	b := openReplica(t, schema, store.Options{PollInterval: 100 * time.Millisecond, SafetyPoll: 500 * time.Millisecond})
+	roomID := createTestRoom(t, a)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ch, err := b.Subscribe(ctx, roomID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(10 * time.Second); !b.HubListening(); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("replica b never started listening")
+		}
+	}
+	// An event written without pg_notify, as if its notification was lost.
+	execSQL(t, schema, `UPDATE rooms SET last_seq = 1 WHERE id = $1`, roomID)
+	execSQL(t, schema, `INSERT INTO room_events (room_id, seq, type, actor, payload, at) VALUES ($1, 1, 'comment.added', '{"kind":"human","id":"arjun","name":"Arjun"}', '{"comment_id":"c_silent","text":"x"}', now())`, roomID)
+	select {
+	case e := <-ch:
+		if e.Seq != 1 {
+			t.Fatalf("seq %d, want 1", e.Seq)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("an event with a lost notification never arrived while listening (listening now: %v)", b.HubListening())
+	}
+	if !b.HubListening() {
+		t.Fatal("LISTEN dropped during the test; the delivery may have come from the fallback poll")
 	}
 }
 
