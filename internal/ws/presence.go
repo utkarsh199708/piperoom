@@ -22,6 +22,9 @@ type client struct {
 	state     string
 	lastSeen  time.Time
 	send      chan []byte
+	slow      chan struct{} // closed once (slowOnce) when send overflows
+	slowOnce  sync.Once
+	writeTO   time.Duration // per-frame write deadline; zero means writeTimeout
 	conn      *websocket.Conn
 	cancel    func()
 	onClose   func()
@@ -40,7 +43,11 @@ type roomHub struct {
 // write sends one message directly (blocking, with a deadline). Used during
 // replay so the backlog is delivered in order without buffering.
 func (c *client) write(ctx context.Context, b []byte) error {
-	wctx, cancel := context.WithTimeout(ctx, writeTimeout)
+	to := c.writeTO
+	if to <= 0 {
+		to = writeTimeout
+	}
+	wctx, cancel := context.WithTimeout(ctx, to)
 	defer cancel()
 	return c.conn.Write(wctx, websocket.MessageText, b)
 }
@@ -54,6 +61,11 @@ func (c *client) trySend(b []byte) bool {
 	default:
 		return false
 	}
+}
+
+// markSlow tells writeLoop to close the connection as a slow consumer.
+func (c *client) markSlow() {
+	c.slowOnce.Do(func() { close(c.slow) })
 }
 
 // shutdown ends the connection exactly once. The connection is closed BEFORE
@@ -140,26 +152,9 @@ func (g *Gateway) broadcastLocked(roomID string) {
 	}
 	for c := range hub.conns {
 		if !c.trySend(b) {
-			g.spawnShutdown(c, "send buffer full")
+			c.markSlow()
 		}
 	}
-}
-
-// spawnShutdown shuts a client down (policy violation, with reason) on its own
-// goroutine so the close frame and the onClose cleanup never block the caller.
-// Caller holds g.mu. The goroutine is tracked by g.wg; it is never started
-// after Close has begun (g.closed), so g.wg.Add never races with g.wg.Wait.
-func (g *Gateway) spawnShutdown(c *client, reason string) {
-	if g.closed {
-		// Close is already shutting every client down; do not add work after
-		// the WaitGroup may have started waiting.
-		return
-	}
-	g.wg.Add(1)
-	go func() {
-		defer g.wg.Done()
-		c.shutdown(websocket.StatusPolicyViolation, reason)
-	}()
 }
 
 // sessionExpiredReason is the close reason when a session ends under a live
@@ -168,8 +163,10 @@ func (g *Gateway) spawnShutdown(c *client, reason string) {
 const sessionExpiredReason = "session_expired"
 
 // spawnSessionEnd tells a client its session ended: an error frame with code
-// session_expired (docs/api.md), then a close with the same reason text. Like
-// spawnShutdown it runs on its own goroutine and the caller holds g.mu.
+// session_expired (docs/api.md), then a close with the same reason text. It
+// runs on its own goroutine and the caller holds g.mu. The goroutine is
+// tracked by g.wg; it is never started after Close has begun (g.closed), so
+// g.wg.Add never races with g.wg.Wait.
 func (g *Gateway) spawnSessionEnd(c *client) {
 	if g.closed || c.sessionEnded {
 		return
@@ -230,7 +227,7 @@ func (g *Gateway) CloseRoom(roomID string, deleted events.Event) {
 }
 
 // spawnRoomDeleted writes the last frame and closes, on its own goroutine.
-// Caller holds g.mu (see spawnShutdown for why that keeps wg safe).
+// Caller holds g.mu (see spawnSessionEnd for why that keeps wg safe).
 func (g *Gateway) spawnRoomDeleted(c *client, frame []byte) {
 	if g.closed {
 		return
