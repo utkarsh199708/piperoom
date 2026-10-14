@@ -12,6 +12,7 @@ import (
 
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
+	"piperoom/internal/topology"
 )
 
 func TestSystemPromptIsStable(t *testing.T) {
@@ -287,6 +288,54 @@ func TestSystemPromptCarriesGuidancePoints(t *testing.T) {
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("system prompt missing guidance point %q", want)
+		}
+	}
+}
+
+// TestSystemPromptPipelineModel pins E1's pipeline model: Debezium runs inside
+// Kafka Connect, Schema Registry is a dependency rather than a stage, the
+// method walks data and dependency links upstream from the failing component,
+// and the hypothesis separates the failing component from the root cause.
+// The old flow strings put Connect after Kafka and Schema Registry in line.
+func TestSystemPromptPipelineModel(t *testing.T) {
+	prompt := systemPrompt()
+	for _, want := range []string{
+		"Postgres (WAL, slot) -> Debezium source connector in Kafka Connect -> Kafka topics -> consumers / sink connectors -> warehouse",
+		"Schema Registry is a dependency of connectors and consumers, not a stage",
+		`Find the most downstream failing component, then walk its upstream links, both "from:" (data) and "depends on:", to the root cause`,
+		"Treat (unconfirmed) links as hypotheses to verify with tools",
+		"update_hypothesis must name the failing component and, separately, the root-cause component.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("system prompt missing %q", want)
+		}
+	}
+	for _, gone := range []string{
+		"Postgres -> Debezium -> Kafka -> Connect -> consumers -> warehouse",
+		"warehouse -> consumer -> Kafka -> Connect -> Schema Registry -> Postgres",
+		"first unhealthy layer going downstream to upstream",
+		"Kafka -> Connect",
+	} {
+		if strings.Contains(prompt, gone) {
+			t.Errorf("system prompt still says %q", gone)
+		}
+	}
+
+	// The prompt's words for the map must be the words the map uses.
+	g := topology.Graph{
+		PipelineID: "p",
+		Nodes:      []topology.Node{{ID: "pg:t"}, {ID: "connect:c"}, {ID: "group:g"}, {ID: "sr:t-value"}},
+		Edges: []topology.Edge{
+			{From: "pg:t", To: "connect:c"},
+			{From: "connect:c", To: "group:g", Mapping: topology.MappingInferred},
+			{From: "connect:c", To: "sr:t-value", Kind: topology.EdgeDependsOn},
+		},
+	}
+	pipelineMap := topology.NewBuilder(nil, nil, nil, nil, nil).Render(g)
+	for _, word := range []string{"  from: pg:t", "  depends on: sr:t-value", "connect:c (unconfirmed)",
+		"First failing component and root cause can differ; check upstream dependencies of the first failing component"} {
+		if !strings.Contains(pipelineMap, word) {
+			t.Errorf("pipeline map does not use %q, which the prompt relies on:\n%s", word, pipelineMap)
 		}
 	}
 }

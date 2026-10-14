@@ -41,6 +41,16 @@ type collected struct {
 	topicRecords map[string]int64 // sum of end-start over partitions
 	topicErr     map[string]error
 
+	// srListed is the registry's subject listing and srErr its error; both
+	// stay empty when the builder has no Schema Registry client.
+	srListed map[string]bool
+	srErr    error
+	subjects map[string]subjectSnapshot
+
+	// matchers are the include/exclude lists of each readable source
+	// connector, compiled once per Build (Build fills them after collect).
+	matchers map[string]streamMatcher
+
 	now time.Time
 }
 
@@ -53,6 +63,8 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline) *collected {
 		topicNewest:  map[string]time.Time{},
 		topicRecords: map[string]int64{},
 		topicErr:     map[string]error{},
+		srListed:     map[string]bool{},
+		subjects:     map[string]subjectSnapshot{},
 		now:          b.now(),
 	}
 
@@ -66,6 +78,17 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline) *collected {
 		}()
 	}
 
+	if b.sr != nil {
+		run(func() {
+			subs, err := b.sr.Subjects(ctx)
+			mu.Lock()
+			c.srErr = err
+			for _, s := range subs {
+				c.srListed[s] = true
+			}
+			mu.Unlock()
+		})
+	}
 	run(func() {
 		slots, err := b.src.ReplicationSlots(ctx)
 		mu.Lock()
