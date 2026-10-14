@@ -1,5 +1,5 @@
 import type { SuggestionState, SuggestionStatus } from '../../state/types'
-import { clockTime } from '../../lib/time'
+import { Clock } from './Clock'
 import { Badge } from '@/components/ui/badge'
 import { PersonAvatar } from './PersonAvatar'
 
@@ -36,7 +36,7 @@ export function SuggestionsPanel({ suggestions }: { suggestions: SuggestionState
               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
                 <strong className="font-medium">{s.from.name}</strong>
                 <Badge variant={VARIANT[s.status]}>{LABEL[s.status]}</Badge>
-                {s.at && <span className="font-mono text-xs text-subtle-foreground">{clockTime(s.at)}</span>}
+                {s.at && <Clock iso={s.at} className="font-mono text-xs text-subtle-foreground" />}
               </div>
               <p className="m-0 break-words text-muted-foreground">{s.text}</p>
             </div>

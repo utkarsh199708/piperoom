@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import type { FormEvent, ReactNode } from 'react'
+import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertTriangle, ChevronDown, Plus, X } from 'lucide-react'
 import { toast } from 'sonner'
@@ -11,7 +11,7 @@ import type { CurrentUser } from '../state/permissions'
 import { addFixtureRoom, emptySnapshot, fixtureRooms } from '../fixtures/player'
 import { useRoomList } from '../hooks/useRoomList'
 import { usePipelines } from '../hooks/usePipelines'
-import { ageLabel, updatedAgoLabel } from '../lib/time'
+import { ageLabel, durationLabel, updatedAgoLabel, utcLabel } from '../lib/time'
 import {
   ROOM_TABS,
   agentCell,
@@ -29,6 +29,7 @@ import type { Dot, RoomTab } from '../lib/rooms'
 import { errorText } from '../lib/errors'
 import { initials, personColor } from '../lib/people'
 import { cn } from '../lib/utils'
+import { modKeyLabel } from '../lib/envLabel'
 import { Avatar, AvatarFallback } from './ui/avatar'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
@@ -337,6 +338,7 @@ export function RoomList() {
                     onActive={setActiveId}
                     onOpen={(id) => navigate(`/rooms/${id}`)}
                     onTake={(r) => void takeControl(r)}
+                    showResolution={tab === 'resolved'}
                   />
                 )}
               </TabsContent>
@@ -506,7 +508,9 @@ function RoomTable({
   onActive,
   onOpen,
   onTake,
+  showResolution,
 }: {
+  showResolution?: boolean
   rooms: RoomSnapshot[]
   user: CurrentUser
   active: number
@@ -559,6 +563,7 @@ function RoomTable({
               onActivate={() => onActive(room.id)}
               onOpen={() => onOpen(room.id)}
               onTake={() => onTake(room)}
+              showResolution={showResolution}
             />
           ))}
         </tbody>
@@ -578,7 +583,9 @@ function RoomRow({
   onActivate,
   onOpen,
   onTake,
+  showResolution,
 }: {
+  showResolution?: boolean
   room: RoomSnapshot
   user: CurrentUser
   active: boolean
@@ -589,7 +596,10 @@ function RoomRow({
   onTake: () => void
 }) {
   const tinted = needsYou(room, user) // only for layers this person owns
+  const resolved = room.status !== 'open'
   const status = roomStatusCell(room)
+  // A closed room reads "Resolved · 6 min": how long it was open, not a stale live state.
+  const duration = resolved && room.closed_at ? durationLabel(room.opened_at, room.closed_at) : ''
   const agent = agentCell(room)
   const layers = layersNeedingYou(room, user)
   const canTake = canTakeControlOf(room, user)
@@ -628,6 +638,9 @@ function RoomRow({
           )}
           <span className="truncate font-mono text-xs text-muted-foreground md:hidden">{room.pipeline_id}</span>
         </div>
+        {showResolution && resolved && room.resolution && (
+          <p className="m-0 line-clamp-1 whitespace-normal text-xs text-muted-foreground">{room.resolution.slice(0, 100)}</p>
+        )}
       </td>
       <td className={TD}>
         <Badge variant={severityVariant(room.severity)} className="uppercase">
@@ -637,7 +650,7 @@ function RoomRow({
       <td className={cn(TD, 'max-md:hidden')}>
         <span className="inline-flex items-center gap-1.5">
           <StatusDot dot={status.dot} />
-          {status.label}
+          {resolved && duration ? `Resolved · ${duration}` : status.label}
         </span>
       </td>
       <td className={cn(TD, 'font-mono text-muted-foreground max-md:hidden')}>{room.pipeline_id}</td>
@@ -680,11 +693,17 @@ function RoomRow({
         </span>
       </td>
       <td className={cn(TD, 'text-right tabular-nums text-muted-foreground max-md:hidden')}>
-        <span title={room.opened_at}>
-          <span className="sr-only">opened </span>
-          {ageLabel(room.opened_at)}
-          <span className="sr-only"> ago</span>
-        </span>
+        {resolved && room.closed_at ? (
+          <span title={utcLabel(room.closed_at)}>
+            closed {ageLabel(room.closed_at)} ago
+          </span>
+        ) : (
+          <span title={utcLabel(room.opened_at)}>
+            <span className="sr-only">opened </span>
+            {ageLabel(room.opened_at)}
+            <span className="sr-only"> ago</span>
+          </span>
+        )}
       </td>
     </tr>
   )
@@ -846,6 +865,7 @@ function NewRoomDialog({
 
 function NewRoomForm({ onClose, defaultPipeline }: { onClose: () => void; defaultPipeline: string | null }) {
   const loaded = usePipelines()
+  const mod = modKeyLabel()
   const pipelines = loaded.status === 'ready' ? loaded.data : []
   const navigate = useNavigate()
   const [title, setTitle] = useState('')
@@ -880,8 +900,16 @@ function NewRoomForm({ onClose, defaultPipeline }: { onClose: () => void; defaul
     }
   }
 
+  // Same shortcut as the close and hand-off dialogs.
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLFormElement>) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+      e.preventDefault()
+      e.currentTarget.requestSubmit()
+    }
+  }
+
   return (
-        <form className="grid gap-4" onSubmit={onSubmit}>
+        <form className="grid gap-4" onSubmit={onSubmit} onKeyDown={onKeyDown}>
           <DialogHeader>
             <DialogTitle>New room</DialogTitle>
             <DialogDescription>Open a room by hand. Alerts open one on their own.</DialogDescription>
@@ -959,8 +987,13 @@ function NewRoomForm({ onClose, defaultPipeline }: { onClose: () => void; defaul
             <Button type="button" variant="ghost" onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy || !title.trim() || !chosen}>
+            <Button
+              type="submit"
+              disabled={busy || !title.trim() || !chosen}
+              aria-keyshortcuts={`${mod === '⌘' ? 'Meta' : 'Control'}+Enter`}
+            >
               Open room
+              <Kbd aria-hidden="true">{mod}⏎</Kbd>
             </Button>
           </DialogFooter>
         </form>
