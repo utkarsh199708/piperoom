@@ -10,6 +10,7 @@ import type {
   AgentTriagePayload,
   ApprovalGivenPayload,
   ApprovalRejectedPayload,
+  ChecklistStepDonePayload,
   CommentAddedPayload,
   ControlGrantedPayload,
   Event,
@@ -18,6 +19,7 @@ import type {
   ProposalCreatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
+  RoomLabelledPayload,
   SteerSentPayload,
   SteerSuggestedPayload,
   TracePinnedPayload,
@@ -29,7 +31,11 @@ function as<T>(e: Event): T {
 
 // One short sentence for the activity feed. `driverBefore` is the driver id just
 // before this event was applied; it distinguishes a lease renewal from a take-over.
-export function describeEvent(e: Event, driverBefore: string | null = null): string {
+export function describeEvent(
+  e: Event,
+  driverBefore: string | null = null,
+  runbookItem?: (toolUseId: string, hit: number, item: number) => { section: string; text: string } | null,
+): string {
   const who = e.actor.kind === 'agent' ? 'Agent' : e.actor.name || e.actor.id
   switch (e.type) {
     case 'room.created': {
@@ -122,6 +128,17 @@ export function describeEvent(e: Event, driverBefore: string | null = null): str
     }
     case 'handoff.accepted':
       return `${who} accepted the hand-off`
+    case 'room.labelled': {
+      const p = as<RoomLabelledPayload>(e)
+      return `${who} labelled the room: cause ${p.cause}${p.fix_that_worked ? ` · fix ${p.fix_that_worked}` : ''}`
+    }
+    case 'checklist.step_done': {
+      const p = as<ChecklistStepDonePayload>(e)
+      const found = runbookItem?.(p.tool_use_id, p.hit, p.item)
+      const verb = p.done ? 'ticked' : 'unticked'
+      if (!found) return `${who} ${verb} step ${p.item + 1} of a runbook`
+      return `${who} ${verb} "${found.text}" (step ${p.item + 1}${found.section ? ` of ${found.section}` : ''})`
+    }
     case 'trace.pinned': {
       const p = as<TracePinnedPayload>(e)
       return `Trace pinned for ${p.table} ${p.key}`

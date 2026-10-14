@@ -26,6 +26,7 @@ type clusterAdmin interface {
 	ListPartitionReassignments(ctx context.Context, s kadm.TopicsSet) (kadm.ListPartitionReassignmentsResponses, error)
 	ListOffsetsAfterMilli(ctx context.Context, millisecond int64, topics ...string) (kadm.ListedOffsets, error)
 	ListEndOffsets(ctx context.Context, topics ...string) (kadm.ListedOffsets, error)
+	DescribeACLs(ctx context.Context, b *kadm.ACLBuilder) (kadm.DescribeACLsResults, error)
 }
 
 // clusterAdm returns the test seam when set, else the real kadm client.

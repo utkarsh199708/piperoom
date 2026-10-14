@@ -8,6 +8,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 type fakeCluster struct {
@@ -20,7 +21,9 @@ type fakeCluster struct {
 	after    kadm.ListedOffsets
 	ends     kadm.ListedOffsets
 	afterErr error
-	calls    []string
+	acls     kadm.DescribeACLsResults
+	aclsErr  error
+	gotACLs  *kadm.ACLBuilder
 }
 
 func (f *fakeCluster) Metadata(context.Context, ...string) (kadm.Metadata, error) {
@@ -171,3 +174,68 @@ func TestPartitionRatesErrors(t *testing.T) {
 		t.Fatalf("no topics: %v %v", rs, err)
 	}
 }
+
+func (f *fakeCluster) DescribeACLs(_ context.Context, b *kadm.ACLBuilder) (kadm.DescribeACLsResults, error) {
+	f.gotACLs = b
+	return f.acls, f.aclsErr
+}
+
+func aclResult(ds ...kadm.DescribedACL) kadm.DescribeACLsResults {
+	return kadm.DescribeACLsResults{{Described: ds}}
+}
+
+func TestACLsFilterToPipeline(t *testing.T) {
+	topicT, groupT := kmsgTopic(), kmsgGroup()
+	f := &fakeCluster{acls: aclResult(
+		kadm.DescribedACL{Principal: "User:debezium", Host: "*", Type: topicT, Name: "pg.", Pattern: kadm.ACLPatternPrefixed, Operation: kadm.OpRead, Permission: kmsgAllow()},
+		kadm.DescribedACL{Principal: "User:debezium", Host: "*", Type: topicT, Name: "pg.public.orders", Pattern: kadm.ACLPatternLiteral, Operation: kadm.OpWrite, Permission: kmsgAllow()},
+		kadm.DescribedACL{Principal: "User:other", Host: "*", Type: topicT, Name: "billing.public.x", Pattern: kadm.ACLPatternLiteral, Operation: kadm.OpRead, Permission: kmsgAllow()},
+		kadm.DescribedACL{Principal: "User:other", Host: "*", Type: topicT, Name: "pg.public.orders2", Pattern: kadm.ACLPatternPrefixed, Operation: kadm.OpRead, Permission: kmsgAllow()},
+		kadm.DescribedACL{Principal: "User:sink", Host: "*", Type: groupT, Name: "order-sync", Pattern: kadm.ACLPatternLiteral, Operation: kadm.OpRead, Permission: kmsgAllow()},
+		kadm.DescribedACL{Principal: "User:other2", Host: "*", Type: groupT, Name: "billing-sync", Pattern: kadm.ACLPatternLiteral, Operation: kadm.OpRead, Permission: kmsgAllow()},
+	)}
+	es, err := (&Client{clusterFn: f}).ACLs(context.Background(), []string{"pg.public.orders"}, []string{"order-sync"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range es {
+		got = append(got, e.Principal+" "+e.Operation+" "+e.Resource)
+	}
+	want := []string{"User:debezium READ pg.", "User:debezium WRITE pg.public.orders", "User:sink READ order-sync"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v (other pipelines' principals must be dropped)", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+	if err := f.gotACLs.ValidateDescribe(); err != nil {
+		t.Fatalf("filter invalid: %v", err)
+	}
+}
+
+func TestACLsErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		f    *fakeCluster
+		want error
+	}{
+		{"denied", &fakeCluster{aclsErr: &kadm.AuthError{Err: kerr.ClusterAuthorizationFailed}}, ErrACLDescribeDenied},
+		{"no authorizer", &fakeCluster{aclsErr: kerr.SecurityDisabled}, ErrNoAuthorizer},
+		{"per-filter denial", &fakeCluster{acls: kadm.DescribeACLsResults{{Err: kerr.ClusterAuthorizationFailed}}}, ErrACLDescribeDenied},
+	} {
+		if _, err := (&Client{clusterFn: tt.f}).ACLs(context.Background(), []string{"t"}, nil); !errors.Is(err, tt.want) {
+			t.Errorf("%s: err = %v", tt.name, err)
+		}
+	}
+	boom := errors.New("down")
+	if _, err := (&Client{clusterFn: &fakeCluster{aclsErr: boom}}).ACLs(context.Background(), []string{"t"}, nil); !errors.Is(err, boom) {
+		t.Errorf("other error lost: %v", err)
+	}
+}
+
+func kmsgTopic() kmsg.ACLResourceType   { return kmsg.ACLResourceTypeTopic }
+func kmsgGroup() kmsg.ACLResourceType   { return kmsg.ACLResourceTypeGroup }
+func kmsgAllow() kmsg.ACLPermissionType { return kmsg.ACLPermissionTypeAllow }

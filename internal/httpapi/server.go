@@ -172,6 +172,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 			protected.Post("/rooms/{id}/handoffs", withTimeout(handoffTimeout, visible(s.handleCreateHandoff)))
 			// The audit export reads the whole log, so it has its own budget.
 			protected.Get("/rooms/{id}/export", withTimeout(exportTimeout, visible(s.handleExportRoom)))
+			// The post-mortem draft reads the whole log too.
+			protected.Get("/rooms/{id}/postmortem.md", withTimeout(exportTimeout, visible(s.handleRoomPostmortem)))
 			// Deletion may write the same export to the archive first. Not
 			// wrapped in visible: the admin check answers first (403 for
 			// anyone else, whatever the id), then DeleteRoom answers 404 for
@@ -215,6 +217,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)
 				short.Get("/pipelines", s.handlePipelines)
 				short.Get("/pipelines/{pid}/topology", s.pipelineVisible(s.handleTopology))
+				short.Get("/pipelines/{pid}/agent-stats", s.handleAgentStats)
 			})
 		})
 	})

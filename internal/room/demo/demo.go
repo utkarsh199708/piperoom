@@ -23,8 +23,9 @@ import (
 )
 
 var (
-	_ agent.Runner        = Run
-	_ agent.HandoffWriter = WriteHandoff
+	_ agent.Runner           = Run
+	_ agent.HandoffWriter    = WriteHandoff
+	_ agent.PostmortemWriter = WritePostmortem
 )
 
 // Action names the demo proposal references.
@@ -108,7 +109,7 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value. I've written a fix proposal."})
 
-	proposalID, err := deps.Proposals.Create(ctx, events.ProposalCreatedPayload{
+	_, err := deps.Proposals.Create(ctx, events.ProposalCreatedPayload{
 		Title: "Set subject compatibility to NONE and restart the connector task",
 		Steps: []events.ProposalStep{
 			{
@@ -139,8 +140,8 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 		}
 		return err
 	}
-	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Proposal " + proposalID + " is waiting for schema-registry and kafka-connect owners."})
-	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: "proposal " + proposalID})
+	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "The fix proposal is waiting for the schema-registry and kafka-connect owners."})
+	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: "1 proposal open"})
 	return waitForInput(ctx, deps, emit)
 }
 
@@ -181,6 +182,13 @@ func WriteHandoff(ctx context.Context, roomEvents []events.Event, opts agent.Opt
 		Open:      []string{"Consider pinning decimal.handling.mode"},
 		Risks:     []string{"BACKWARD compatibility is off until re-enabled"},
 	}, nil
+}
+
+// WritePostmortem is a fake closing-summary writer returning the fixture
+// summary, with no grounding violations.
+func WritePostmortem(ctx context.Context, roomEvents []events.Event, opts agent.Options) (agent.PostmortemDraft, error) {
+	s, err := WriteHandoff(ctx, roomEvents, opts)
+	return agent.PostmortemDraft{Summary: s}, err
 }
 
 // Builder is a fake topology.Builder for the orders pipeline.
