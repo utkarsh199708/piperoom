@@ -6,6 +6,7 @@
 //	go run ./evals/cmd/evalrun -runs 3 -label prompt-v2 -baseline base.json -out cand.json
 //	go run ./evals/cmd/evalrun -compare base.json,cand.json
 //	go run ./evals/cmd/evalrun -validate   # (or -check) validate scenarios, no model calls
+//	go run ./evals/cmd/evalrun -from-shadow run.json -o evals/scenarios/new.yaml   # scenario from a graded shadow run
 //	go run ./evals/cmd/evalrun -validate -set heldout   # the held-out set; never tune prompts on it
 package main
 
@@ -28,6 +29,7 @@ import (
 	"piperoom/evals"
 	"piperoom/internal/agent"
 	"piperoom/internal/config"
+	"piperoom/internal/owners"
 )
 
 // exitRegressed is the exit code when -fail-on-regression finds one, so CI can
@@ -57,6 +59,9 @@ type flags struct {
 	tolerance   float64
 	failOnRegr  bool
 	check       bool
+	fromShadow  string
+	owners      string
+	name        string
 	verbose     bool
 }
 
@@ -103,6 +108,10 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.BoolVar(&f.failOnRegr, "fail-on-regression", false, "exit 2 when a comparison finds a regression")
 	fs.BoolVar(&f.check, "check", false, "validate scenarios against the live tool and action definitions and exit; no model calls")
 	fs.BoolVar(&f.check, "validate", false, "same as -check")
+	fs.StringVar(&f.fromShadow, "from-shadow", "", "build a scenario from a saved GET /api/rooms/{id}/shadow?include=room response and exit; YAML goes to stdout or -out/-o; no model calls")
+	fs.StringVar(&f.owners, "owners", "", "owners.yaml for -from-shadow (default OWNERS_FILE, else dev/owners.yaml)")
+	fs.StringVar(&f.name, "name", "", "scenario name for -from-shadow (default shadow-<room id>)")
+	fs.StringVar(&f.out, "o", "", "same as -out")
 	fs.BoolVar(&f.verbose, "v", false, "show the agent's own logs")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
@@ -125,6 +134,10 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 			return 1, err
 		}
 		return compare(base, cand, f, stdout)
+	}
+
+	if f.fromShadow != "" {
+		return runFromShadow(f, stdout, stderr)
 	}
 
 	dir, err := scenarioDir(f)
@@ -316,6 +329,19 @@ func writeFile(path string, write func(io.Writer) error) (err error) {
 	return write(fh)
 }
 
+func writeNewFile(path string, write func(io.Writer) error) (err error) {
+	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create %s without overwriting: %w", path, err)
+	}
+	defer func() {
+		if cerr := fh.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close %s: %w", path, cerr)
+		}
+	}()
+	return write(fh)
+}
+
 func writeTranscript(dir string, r evals.RunResult, tr evals.Transcript) error {
 	// Scenario names come from YAML files; keep them from escaping dir.
 	name := unsafeChars.ReplaceAllString(r.Scenario, "_")
@@ -331,6 +357,50 @@ func writeTranscript(dir string, r evals.RunResult, tr evals.Transcript) error {
 		}
 		return nil
 	})
+}
+
+// runFromShadow turns one saved shadow response into a scenario file. The YAML
+// goes to -out/-o when given, else to stdout (so it can be piped); notes go to
+// stderr. The scenario is validated like -check before anything is written.
+func runFromShadow(f flags, stdout, stderr io.Writer) (int, error) {
+	fh, err := os.Open(f.fromShadow)
+	if err != nil {
+		return 1, fmt.Errorf("open shadow response: %w", err)
+	}
+	defer fh.Close()
+	raw, err := io.ReadAll(io.LimitReader(fh, evals.MaxShadowInputBytes+1))
+	if err != nil {
+		return 1, fmt.Errorf("read shadow response: %w", err)
+	}
+	ownersPath := f.owners
+	if ownersPath == "" {
+		ownersPath = config.Load().OwnersFile
+	}
+	own, err := owners.Load(ownersPath)
+	if err != nil {
+		return 1, fmt.Errorf("load owners for -from-shadow: %w", err)
+	}
+	res, err := evals.ScenarioFromShadow(raw, own.Pipeline, f.name)
+	if err != nil {
+		return 1, err
+	}
+	for _, w := range res.Warnings {
+		fmt.Fprintln(stderr, "evalrun: warning:", w)
+	}
+	if f.out == "" {
+		if _, err := stdout.Write(res.YAML); err != nil {
+			return 1, fmt.Errorf("write scenario: %w", err)
+		}
+		return 0, nil
+	}
+	if err := writeNewFile(f.out, func(w io.Writer) error {
+		_, err := w.Write(res.YAML)
+		return err
+	}); err != nil {
+		return 1, err
+	}
+	fmt.Fprintf(stderr, "evalrun: wrote scenario %q to %s (validated)\n", res.Scenario.Name, f.out)
+	return 0, nil
 }
 
 // Scenario sets. The held-out set lives in its own subdirectory, which
