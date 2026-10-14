@@ -10,11 +10,13 @@ export type StatusKind =
   | 'closed'
   | 'resolved'
   | 'agent-error'
+  | 'log-full'
   | 'executing'
   | 'fix-failed'
   | 'fixed'
   | 'needs-approval'
   | 'no-driver'
+  | 'queued'
   | 'investigating'
   | 'idle'
 export type StatusTone = 'ok' | 'warn' | 'fail' | 'agent' | 'muted'
@@ -71,6 +73,7 @@ export function roomStatus(input: RoomStatusInput, now = Date.now()): RoomStatus
     return info('closed', 'Closed', 'muted')
   }
   if (agent === 'error') return info('agent-error', 'Agent error', 'fail')
+  if (agent === 'log_full') return info('log-full', 'Log full · agent stopped', 'fail')
 
   // The newest approved proposal decides executing / failed / fixed. These outrank the agent's own
   // status: the demo agent re-emits waiting_approval after every approval.
@@ -92,6 +95,7 @@ export function roomStatus(input: RoomStatusInput, now = Date.now()): RoomStatus
   if (!liveDriver(input.driver, now)) {
     return info('no-driver', `No driver · ${ageLabel(input.opened_at, now) || 'now'}`, 'warn')
   }
+  if (agent === 'queued') return info('queued', 'Queued · waiting for an agent slot', 'agent')
   if (agent === 'working') {
     return info('investigating', input.steps > 0 ? `Investigating · step ${input.steps}` : 'Investigating', 'agent')
   }

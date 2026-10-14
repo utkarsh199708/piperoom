@@ -30,6 +30,8 @@ describe('roomStatus', () => {
     ['resolved', { status: 'closed', resolution: 'fixed' }, 'Resolved', 'ok'],
     ['resolved', { status: 'closed', agent: { state: 'done' } }, 'Resolved · verified', 'ok'],
     ['agent-error', { agent: { state: 'error' } }, 'Agent error', 'fail'],
+    ['log-full', { agent: { state: 'log_full' } }, 'Log full · agent stopped', 'fail'],
+    ['queued', { agent: { state: 'queued' } }, 'Queued · waiting for an agent slot', 'agent'],
     ['executing', { proposals: [prop({ status: 'approved', executed: ok(1) })] }, 'Executing fix · 2 of 2', 'agent'],
     [
       'fix-failed',
