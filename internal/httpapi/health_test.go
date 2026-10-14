@@ -16,6 +16,7 @@ import (
 	"piperoom/internal/httpapi"
 	"piperoom/internal/room"
 	"piperoom/internal/store/memstore"
+	"piperoom/internal/version"
 )
 
 type fakePinger struct {
@@ -80,7 +81,7 @@ func TestHealthz(t *testing.T) {
 	// Even a failing store must not affect liveness.
 	srv, logs := newProbeServer(t, httpapi.WithReady(&fakePinger{err: errors.New("down")}))
 	code, body := get(t, http.MethodGet, srv.URL+"/healthz")
-	if code != http.StatusOK || body != `{"status":"ok"}` {
+	if code != http.StatusOK || body != `{"status":"ok","version":"dev"}` {
 		t.Fatalf("GET /healthz = %d %s", code, body)
 	}
 	l := logs.String()
@@ -191,5 +192,21 @@ func TestReadyzWarnRateLimited(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "suppressed=1") {
 		t.Fatalf("second warning should report 1 suppressed failure: %s", logs.String())
+	}
+}
+
+// GET /healthz reports the linked build version (docs/api.md). It sets the
+// package-level version.Version, so neither it nor any other test in this
+// package may call t.Parallel.
+func TestHealthzVersion(t *testing.T) {
+	srv, _ := newProbeServer(t)
+	for _, tc := range []struct{ set, want string }{{"", "dev"}, {"v9.9.9", "v9.9.9"}} {
+		old := version.Version
+		version.Version = tc.set
+		code, body := get(t, http.MethodGet, srv.URL+"/healthz")
+		version.Version = old
+		if code != http.StatusOK || body != `{"status":"ok","version":"`+tc.want+`"}` {
+			t.Fatalf("Version=%q: GET /healthz = %d %s", tc.set, code, body)
+		}
 	}
 }

@@ -1,6 +1,8 @@
 SHELL := /bin/sh
 
-.PHONY: ci go-ci web-ci fmt vet build test evals discover-draft web-install web-lint web-build web-test
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+.PHONY: ci go-ci web-ci fmt vet build build-server test evals discover-draft web-install web-lint web-build web-test
 
 ci: go-ci web-ci
 
@@ -16,6 +18,10 @@ vet:
 
 build:
 	go build ./...
+
+# The server binary with its build version (internal/version, GET /healthz).
+build-server:
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X piperoom/internal/version.Version=$(VERSION)" -o bin/piperoom ./cmd/server
 
 test:
 	go test ./...

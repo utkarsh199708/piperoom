@@ -156,6 +156,9 @@ type hub struct {
 	feeds     map[string]*roomFeed
 	watchers  map[*AppendWatch]struct{}
 	listening bool
+	// listenChanged is closed and replaced (under mu) whenever listening
+	// changes, so a waiter wakes on the change itself.
+	listenChanged chan struct{}
 	// stopped is set under mu when run returns, so register never adds a
 	// feed goroutine to hubWg after Close's Wait could have returned.
 	stopped bool
@@ -176,6 +179,8 @@ func newHub(ctx context.Context, store *PG, connString, appName string, log *slo
 		ctx:        ctx,
 		feeds:      map[string]*roomFeed{},
 		watchers:   map[*AppendWatch]struct{}{},
+
+		listenChanged: make(chan struct{}),
 	}
 }
 
@@ -287,7 +292,11 @@ func (h *hub) pollLoop(ctx context.Context) {
 
 func (h *hub) setListening(v bool) {
 	h.mu.Lock()
-	h.listening = v
+	if h.listening != v {
+		h.listening = v
+		close(h.listenChanged)
+		h.listenChanged = make(chan struct{})
+	}
 	h.mu.Unlock()
 }
 

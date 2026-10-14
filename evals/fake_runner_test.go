@@ -87,9 +87,23 @@ func scriptedRunner(script []step) agent.Runner {
 				if !valid {
 					continue
 				}
-				if _, err := d.Proposals.Create(ctx, *s.proposal); err != nil {
-					return err
+				// What propose_fix sends: the plan texts and each step's
+				// layer. A refusal (the room's scope or plan checks) is
+				// the tool's answer to the model, not a run error.
+				p := *s.proposal
+				if p.Risk == "" {
+					p.Risk = "a restart replays the failed batch"
 				}
+				if p.Rollback == "" {
+					p.Rollback = "set the previous value again"
+				}
+				p.Steps = append([]events.ProposalStep(nil), p.Steps...)
+				for i := range p.Steps {
+					if a, ok := d.Actions.Get(p.Steps[i].Action); ok && p.Steps[i].Layer == "" {
+						p.Steps[i].Layer = a.Layer()
+					}
+				}
+				_, _ = d.Proposals.Create(ctx, p)
 			case s.proposeFix != "":
 				_, _ = agent.NewProposeFixTool(d.Actions, d.Proposals).Run(ctx, json.RawMessage(s.proposeFix))
 			case s.idle:

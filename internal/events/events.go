@@ -37,6 +37,14 @@ const (
 	// AgentUsage reports the tokens, latency and estimated cost of one model
 	// call (docs/design/cost.md). Counts only, never text.
 	AgentUsage Type = "agent.usage"
+	// AgentVerification is the agent's verdict after the last step of a
+	// proposal ran: the layer checks and the data-flow check it made. It
+	// replaces the plain-text "[verification]" agent.message. (F4)
+	AgentVerification Type = "agent.verification"
+	// AgentTriage is the bounded first look written by the triage pass before
+	// the full investigation (docs/design: tasks/F6-proactive-triage.md). One
+	// per run of the pass; a room may hold several (a re-fire re-runs it). (F6)
+	AgentTriage Type = "agent.triage"
 
 	CommentAdded   Type = "comment.added"
 	SteerSuggested Type = "steer.suggested"
@@ -55,6 +63,23 @@ const (
 	ApprovalGiven    Type = "approval.given"
 	ApprovalRejected Type = "approval.rejected"
 	ActionExecuted   Type = "action.executed"
+	// ProposalPreviewed is written by the system actor once per proposal,
+	// after proposal.created, with what each step would do (actions.Preview).
+	// Informational: it is not part of params_hash and can be absent (no
+	// preview support, a restart mid-preview). (F4)
+	ProposalPreviewed Type = "proposal.previewed"
+	// ApprovalNudged records that a member asked a pending layer's owners to
+	// look (POST /api/rooms/{id}/nudge); at most one per proposal and layer
+	// per 10 minutes. The Slack mirror renders it as a thread reply. (F9)
+	ApprovalNudged Type = "approval.nudged"
+
+	// HypothesisVerdict is a person's confirm or dispute of the agent's
+	// current hypothesis (POST /api/rooms/{id}/hypothesis). HypothesisSeq is
+	// the seq of the agent.hypothesis it answers; a later agent.hypothesis
+	// starts over with no verdicts. Any member may write one; the snapshot
+	// keeps the latest per person. AgentHypothesisPayload.Confirmed is never
+	// set by the agent: clients and the snapshot derive it from these events. (F9)
+	HypothesisVerdict Type = "hypothesis.verdict"
 
 	// HandoffRequested is written when the driver asks for a hand-off, before
 	// the agent writes the summary (which can take minutes). It ends with
@@ -66,6 +91,22 @@ const (
 	HandoffAccepted  Type = "handoff.accepted"
 
 	TracePinned Type = "trace.pinned"
+
+	// PostmortemDrafted says a closing draft exists for a closed room; the
+	// Markdown itself is rendered on request by GET /api/rooms/{id}/postmortem.md
+	// and never stored. Written once by the system actor after room.closed (not
+	// in shadow rooms). PostmortemFailed says the model pass failed; the
+	// events-only draft still renders. Never written for an open room. (F2)
+	PostmortemDrafted Type = "postmortem.drafted"
+	PostmortemFailed  Type = "postmortem.failed"
+
+	// RoomLabelled is the human label of a closed room (POST /api/rooms/{id}/label):
+	// what the cause was and what fixed it, for similar_incidents and evals.
+	// Any room, shadow or not; re-labelling appends another and the last wins. (F8)
+	RoomLabelled Type = "room.labelled"
+	// ChecklistStepDone records that a person did (or undid) one item of a
+	// runbook section shown in the room (POST /api/rooms/{id}/checklist). (F8)
+	ChecklistStepDone Type = "checklist.step_done"
 
 	// Shadow mode (docs/design/shadow.md). All three are written only to a
 	// closed shadow room, after room.closed.
@@ -242,6 +283,21 @@ type AgentToolResultPayload struct {
 	IsError   bool            `json:"is_error"`
 	Truncated bool            `json:"truncated,omitempty"` // Summary or Data (or both) was cut; see above
 	TookMS    int64           `json:"took_ms"`
+	// Provenance is the list of reads behind Summary (the receipt), redacted
+	// and capped by the agent (tools.MaxProvenanceCalls). It is outside Data:
+	// a cut Data keeps its receipt. Empty for room tools and replayed tools. (F3)
+	Provenance []ToolCall `json:"provenance,omitempty"`
+}
+
+// ToolCall mirrors tools.Call (same fields and JSON tags) so this package stays
+// a leaf. The agent converts and applies tools' caps before emitting. (F3)
+type ToolCall struct {
+	Kind           string    `json:"kind"`
+	Target         string    `json:"target"`
+	Text           string    `json:"text"`
+	ParamsRedacted []string  `json:"params_redacted,omitempty"`
+	At             time.Time `json:"at"`
+	TookMS         int64     `json:"took_ms"`
 }
 
 // TruncatedData replaces a tool_result.data over PIPEROOM_EVENT_MAX_DATA_BYTES.
@@ -306,7 +362,38 @@ type AgentHypothesisPayload struct {
 	Text         string   `json:"text"`
 	BasedOnSteps []string `json:"based_on_steps"`
 	Confidence   string   `json:"confidence"` // "low" | "medium" | "high"
-	Confirmed    bool     `json:"confirmed"`  // true only after a human confirms
+	// Confirmed is always false when written by the agent; derived state
+	// (snapshot and clients) sets it from hypothesis.verdict events. Kept for
+	// wire compatibility. (F9)
+	Confirmed bool `json:"confirmed"`
+	// UnbackedTerms are identifier-like names and numbers in Text that none of
+	// the cited steps' summaries contain (agent grounding, F3). The UI marks
+	// them; they never block the hypothesis. At most 20, each ≤ 80 bytes.
+	UnbackedTerms []string `json:"unbacked_terms,omitempty"`
+}
+
+// HypothesisVerdictPayload: Verdict is "confirmed" or "disputed"; Note is the
+// person's optional reason (typed text, at most 500 characters). (F9)
+type HypothesisVerdictPayload struct {
+	Verdict       string `json:"verdict"`
+	Note          string `json:"note,omitempty"`
+	HypothesisSeq int64  `json:"hypothesis_seq"`
+}
+
+// AgentTriagePayload is the triage pass's one-line verdict. It is labelled
+// "triage, unverified" wherever it is shown and never carries a proposal.
+// Status "ok" has a Headline; "failed" has none and Reason says why (fixed
+// codes: "timeout", "model_error", "budget", "refused", "no_tools", "off"). (F6)
+type AgentTriagePayload struct {
+	Status         string   `json:"status"`                    // "ok" | "failed"
+	Reason         string   `json:"reason,omitempty"`          // failed only
+	Headline       string   `json:"headline,omitempty"`        // one sentence, ≤ 200 chars, plain text
+	SuspectedLayer string   `json:"suspected_layer,omitempty"` // one of Layers, or "" when unsure
+	Confidence     string   `json:"confidence,omitempty"`      // "low" | "medium" | "high"
+	EvidenceRefs   []string `json:"evidence_refs"`             // step ids of the pass's reads; never null
+	NextCheck      string   `json:"next_check,omitempty"`      // the one read the full run should do first, ≤ 120 chars
+	Model          string   `json:"model"`
+	TookMS         int64    `json:"took_ms"`
 }
 
 // Roles of a model call in AgentUsagePayload.Role.
@@ -319,6 +406,11 @@ const (
 	// a hand-off or an eval run). Reserved: nothing emits it until the judges
 	// of #93 and the evals are wired to usage and spend (docs/design/cost.md 2).
 	UsageRoleJudge = "judge"
+	// UsageRolePostmortem is the closing-summary request of a closed room (F2c).
+	UsageRolePostmortem = "postmortem"
+	// UsageRoleFirstLook is a model call of the triage pass (agent.triage, F6).
+	// Not to be confused with UsageRoleTriage, a turn on PIPEROOM_TRIAGE_MODEL.
+	UsageRoleFirstLook = "first_look"
 )
 
 // AgentUsagePayload is the cost of one model call (docs/design/cost.md). The
@@ -406,6 +498,87 @@ type ProposalStep struct {
 	Layer       string          `json:"layer"`  // see Layers
 	Params      json.RawMessage `json:"params"`
 	Description string          `json:"description"`
+	// Verify says what the agent will check after this step runs, in one
+	// sentence ("task 0 RUNNING within 60 s"). Optional; agent text, ≤ 200
+	// chars after the room's sanitizing. Part of the hashed proposal; omitted
+	// when empty, so a proposal without it hashes as before. (F4)
+	Verify string `json:"verify,omitempty"`
+}
+
+// PreviewResult is what one write action would do, read before approval.
+// Current and Expected are short human sentences; Current names the read it
+// came from. Downstream is filled by the room service from the topology (node
+// ids, data edges only, ≤ 12); actions leave it nil. (F4)
+type PreviewResult struct {
+	Target     string        `json:"target"`
+	Current    string        `json:"current"`
+	Expected   string        `json:"expected"`
+	Downstream []string      `json:"downstream,omitempty"`
+	Reversible bool          `json:"reversible"`
+	Rollback   string        `json:"rollback,omitempty"` // how to undo, as an action and params, when Reversible
+	DryRun     *DryRunResult `json:"dry_run,omitempty"`  // nil when the target system has no dry-run
+}
+
+// DryRunResult is the target system's own answer to "would this be accepted"
+// (Registry compatibility check, Connect config validate). Skipped is set,
+// with OK false, when the check exists but was not run (the reason says why). (F4)
+type DryRunResult struct {
+	OK      bool   `json:"ok"`
+	Source  string `json:"source"`            // "registry compatibility check" | "connect config validate"
+	Text    string `json:"text"`              // the system's messages, redacted, ≤ 2 KiB
+	Skipped string `json:"skipped,omitempty"` // why the check was not run
+}
+
+// StepPreview is one step's preview or the reason there is none. (F4)
+type StepPreview struct {
+	StepIndex int            `json:"step_index"`
+	Preview   *PreviewResult `json:"preview,omitempty"`
+	Error     string         `json:"error,omitempty"` // redacted, ≤ 500 bytes
+}
+
+// ProposalPreviewedPayload carries every step's preview, in step order. (F4)
+type ProposalPreviewedPayload struct {
+	ProposalID string        `json:"proposal_id"`
+	Steps      []StepPreview `json:"steps"`
+	At         time.Time     `json:"at"`
+}
+
+// VerificationCheck is one read-tool check of a layer after a fix. (F4)
+type VerificationCheck struct {
+	Layer  string `json:"layer"` // one of Layers
+	Name   string `json:"name"`  // the read tool, e.g. "connect_status"
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"` // the tool summary line, clipped (agent.clipLine)
+}
+
+// SinkCheck is one warehouse table in the data-flow check. (F4)
+type SinkCheck struct {
+	Table    string    `json:"table"`
+	Newest   time.Time `json:"newest,omitzero"`   // newest row seen; zero when unread
+	Baseline time.Time `json:"baseline,omitzero"` // proposal-time newest row; zero when unknown
+	Passed   bool      `json:"passed"`
+	PassedBy string    `json:"passed_by,omitempty"` // "rows since proposal" | "rows during check"
+}
+
+// DataFlowCheck says whether new rows reached every sink after the fix.
+// Checked is false when the check could not run (Detail says why). (F4)
+type DataFlowCheck struct {
+	Checked bool        `json:"checked"`
+	Fresh   bool        `json:"fresh"`
+	Sinks   []SinkCheck `json:"sinks,omitempty"`
+	Detail  string      `json:"detail,omitempty"`
+}
+
+// AgentVerificationPayload is the verdict on one proposal's fix. Repeat is
+// true for a repeated last-step result: no check ran again, Checks is empty
+// and Recovered repeats the first verdict. (F4)
+type AgentVerificationPayload struct {
+	ProposalID string              `json:"proposal_id"`
+	Checks     []VerificationCheck `json:"checks"`
+	DataFlow   *DataFlowCheck      `json:"data_flow,omitempty"`
+	Recovered  bool                `json:"recovered"`
+	Verdict    string              `json:"verdict"` // one line, e.g. "recovered: every layer check passed and data is flowing again"
+	Repeat     bool                `json:"repeat,omitempty"`
 }
 
 // ProposalCreatedPayload is a fix waiting for approvals.
@@ -454,6 +627,12 @@ type ApprovalRejectedPayload struct {
 	Identity   *Identity `json:"identity,omitempty"`
 }
 
+// ApprovalNudgedPayload names the proposal and the layer still pending on it. (F9)
+type ApprovalNudgedPayload struct {
+	ProposalID string `json:"proposal_id"`
+	Layer      string `json:"layer"`
+}
+
 // ActionExecutedPayload is the result of running one approved step. An Output
 // over PIPEROOM_EVENT_MAX_DATA_BYTES is cut at a UTF-8 boundary and ends with
 // "… [truncated: N bytes]", N being the original size.
@@ -480,6 +659,20 @@ type HandoffSummary struct {
 	RuledOut  []string `json:"ruled_out"`
 	Open      []string `json:"open"`
 	Risks     []string `json:"risks"`
+	// Violations are the checks the summary still fails after the agent's
+	// one self-correction pass (agent.CheckHandoff rules: unknown_reference,
+	// unknown_identifier, unknown_number, open_proposal_missing, …). Shown to
+	// the recipient before Accept; they never block a hand-off. nil on
+	// summaries written before F3; [] when checked and clean. (F3)
+	Violations []HandoffViolation `json:"violations,omitempty"`
+}
+
+// HandoffViolation is one failed hand-off check (agent.HandoffViolation's
+// wire form). Detail may quote the summary; it is agent text, ≤ 200 bytes. (F3)
+type HandoffViolation struct {
+	Rule   string `json:"rule"`
+	Field  string `json:"field"`
+	Detail string `json:"detail"`
 }
 
 // HandoffRequestedPayload is written, with the driver as actor, when
@@ -542,6 +735,53 @@ type TracePinnedPayload struct {
 	Table  string       `json:"table"`
 	Key    string       `json:"key"`
 	Stages []TraceStage `json:"stages"`
+}
+
+// ---- Post-mortem (F2) ----
+
+// PostmortemDraftedPayload names where the draft's prose sections come from.
+// Source "handoff": the summary of hand-off SummaryRef, written after the last
+// proposal, action and hypothesis. "model": Summary holds a fresh closing
+// summary (HandoffSummary shape, sanitized like a hand-off) and Violations the
+// grounding rules it failed (rule names of internal/agent CheckHandoff, no
+// text). "events": no prose; the render uses the final hypothesis and the
+// resolution only.
+type PostmortemDraftedPayload struct {
+	Source     string          `json:"source"` // "handoff" | "model" | "events"
+	SummaryRef string          `json:"summary_ref,omitempty"`
+	Summary    *HandoffSummary `json:"summary,omitempty"`
+	Violations []string        `json:"violations,omitempty"`
+}
+
+// PostmortemFailedPayload: Reason is a fixed code (HandoffFailedSummary or
+// HandoffFailedInternal), never error text.
+type PostmortemFailedPayload struct {
+	Reason string `json:"reason"`
+}
+
+// ---- Labels and checklists (F8) ----
+
+// RoomLabelledPayload generalises ShadowLabelledPayload to every closed room.
+type RoomLabelledPayload struct {
+	ActualLayer   string    `json:"actual_layer,omitempty"`    // one of Layers, "" = unknown
+	Cause         string    `json:"cause"`                     // 1..500 chars, typed text
+	FixThatWorked string    `json:"fix_that_worked,omitempty"` // ≤ 500 chars; "" = none / not fixed by a Piperoom action
+	FixProposalID string    `json:"fix_proposal_id,omitempty"` // the executed proposal, when the fix was one
+	AgentHelped   *bool     `json:"agent_helped,omitempty"`
+	Identity      *Identity `json:"identity,omitempty"`
+}
+
+// ChecklistStepDonePayload ticks or unticks item Item (0-based) of the runbook
+// section that tool result ToolUseID (an agent.tool_result of runbook_lookup)
+// returned as hits[Hit].items. By is the event actor; Note is optional typed
+// text ≤ 300 chars.
+type ChecklistStepDonePayload struct {
+	StepID    string `json:"step_id"`
+	ToolUseID string `json:"tool_use_id"`
+	Hit       int    `json:"hit"`
+	Item      int    `json:"item"`
+	Done      bool   `json:"done"`
+	Note      string `json:"note,omitempty"`
 }
 
 // ---- Shadow mode ----

@@ -46,7 +46,9 @@ describe('TracePanel as a dialog', () => {
     render(<TracePanel trace={trace} actions={actions} onClose={vi.fn()} />)
     const dialog = screen.getByRole('dialog', { name: 'Trace a record' })
     expect(within(dialog).getByText('stopped here')).toBeInTheDocument()
-    expect(within(dialog).getByLabelText('Table')).toHaveValue('public.orders')
+    // No made-up table or key: the person types both.
+    expect(within(dialog).getByLabelText('Table')).toHaveValue('')
+    expect(within(dialog).getByLabelText('Key')).toHaveValue('')
   })
 
   it('Esc and the X both ask to close', () => {
@@ -60,6 +62,8 @@ describe('TracePanel as a dialog', () => {
 
   it('submitting traces the table and key', () => {
     render(<TracePanel trace={null} actions={actions} onClose={vi.fn()} />)
+    expect(screen.getByRole('button', { name: 'Trace' })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Table'), { target: { value: 'public.orders' } })
     fireEvent.change(screen.getByLabelText('Key'), { target: { value: '7' } })
     fireEvent.click(screen.getByRole('button', { name: 'Trace' }))
     expect(actions.trace).toHaveBeenCalledWith('public.orders', '7')

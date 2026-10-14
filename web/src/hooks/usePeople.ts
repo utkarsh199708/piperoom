@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { Person } from '../api/types'
 import { ApiClientError, api, isFixtures } from '../api/client'
-import { DEV_USERS } from '../dev/users'
+import { DEV_USERS } from '../fixtures/users'
 import { errorText } from '../lib/errors'
 
 export type PeopleState =

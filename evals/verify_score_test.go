@@ -3,6 +3,8 @@ package evals
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -36,8 +38,27 @@ func loadScenario(t *testing.T, path string) Scenario {
 	return sc
 }
 
-// messages returns the text of every agent message in tr.
+// roomProposalID matches the ids the room service gives proposals.
+var roomProposalID = regexp.MustCompile(`p_[0-9A-Z]{26}`)
+
+// messages returns the text of every agent message in tr, with the room's
+// proposal ids renamed p_1, p_2, ... in order of appearance.
 func messages(tr Transcript) []string {
+	ids := map[string]string{}
+	rename := func(id string) string {
+		if _, ok := ids[id]; !ok {
+			ids[id] = fmt.Sprintf("p_%d", len(ids)+1)
+		}
+		return ids[id]
+	}
+	for _, ev := range tr.Events {
+		if ev.Type == events.ProposalCreated {
+			var p events.ProposalCreatedPayload
+			if json.Unmarshal(ev.Payload, &p) == nil {
+				rename(p.ProposalID)
+			}
+		}
+	}
 	var out []string
 	for _, ev := range tr.Events {
 		if ev.Type != events.AgentMessage {
@@ -45,7 +66,7 @@ func messages(tr Transcript) []string {
 		}
 		var p events.AgentMessagePayload
 		if json.Unmarshal(ev.Payload, &p) == nil {
-			out = append(out, p.Text)
+			out = append(out, roomProposalID.ReplaceAllStringFunc(p.Text, rename))
 		}
 	}
 	return out
@@ -209,7 +230,7 @@ func TestUnproposedActionIsNotExecuted(t *testing.T) {
 	if got := strings.Join(r.PhasesVisited, ","); got != "broken" {
 		t.Fatalf("phases = %s", got)
 	}
-	if tr.Replay == nil || len(tr.Replay.Unexecuted) != 1 || !strings.Contains(tr.Replay.Unexecuted[0], "inputs[0]: no executable proposal of this run has a connect_resume_connector step") {
+	if tr.Replay == nil || len(tr.Replay.Unexecuted) != 1 || !strings.Contains(tr.Replay.Unexecuted[0], "inputs[0]: no open proposal of this run has a connect_resume_connector step") {
 		t.Fatalf("unexecuted = %+v", tr.Replay)
 	}
 	if len(r.UnexecutedInputs) != 1 || r.UnexecutedInputs[0] != tr.Replay.Unexecuted[0] {

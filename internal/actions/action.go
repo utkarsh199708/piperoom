@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sync"
 
+	"piperoom/internal/events"
 	"piperoom/internal/owners"
 )
 
@@ -44,6 +45,25 @@ type Scoped interface {
 	// It must not do I/O: decide from params and p alone.
 	CheckScope(p owners.Pipeline, params json.RawMessage) error
 }
+
+// Preview is implemented by an action that can say, without writing, what
+// Execute would do to the target: its current state, the expected state after,
+// whether it can be undone, and the target system's own dry-run verdict where
+// one exists. The room service calls it once per step after proposal.created
+// (10 s, read-only, the pipeline scope in ctx) and stores the result on
+// proposal.previewed; a Preview error is stored as the step's error and never
+// blocks the proposal. Preview must call only *Reader client methods plus the
+// documented dry-run endpoints; it never changes a system. (F4)
+type Preview interface {
+	Preview(ctx context.Context, params json.RawMessage) (PreviewResult, error)
+}
+
+// PreviewResult and DryRunResult are the event types, so one definition serves
+// the action, the room log and the API.
+type (
+	PreviewResult = events.PreviewResult
+	DryRunResult  = events.DryRunResult
+)
 
 // Registry holds actions in registration order.
 type Registry struct {
