@@ -294,7 +294,12 @@ func TestBounds(t *testing.T) {
 	if m := Normalize(strings.Repeat("a1b ", 1<<18)).Causes[0].Message; len(m) != MaxMessageBytes {
 		t.Errorf("message len %d, want %d", len(m), MaxMessageBytes)
 	}
-	for _, in := range []string{"", "\n\n", "\xff\xfe", "Caused by:", "at (", "at x(", strings.Repeat("(", 5000)} {
+	for _, in := range []string{"", "\n\n", " \t\r\n "} {
+		if fp := Fingerprint(in); fp != "" {
+			t.Errorf("fingerprint(%q) = %q, want empty", in, fp)
+		}
+	}
+	for _, in := range []string{"\xff\xfe", "Caused by:", "at (", "at x(", strings.Repeat("(", 5000)} {
 		if len(Fingerprint(in)) != FingerprintLen {
 			t.Errorf("fingerprint(%q) wrong length", in)
 		}
@@ -419,8 +424,18 @@ func FuzzNormalize(f *testing.F) {
 				t.Fatalf("unbounded cause: %+v", c)
 			}
 		}
+		if line := strings.TrimSpace(s); line != "" && !strings.ContainsAny(line, "\r\n") {
+			c := parseCause(line)
+			if logged, class := classify(line); logged != c.Log || class != (c.Class != "") {
+				t.Fatalf("classify(%q) = (%v, %v), parseCause = %+v", line, logged, class, c)
+			}
+		}
 		fp := tpl.Fingerprint()
-		if len(fp) != FingerprintLen || fp != Fingerprint(s) {
+		want := FingerprintLen
+		if len(tpl.Causes) == 0 {
+			want = 0
+		}
+		if len(fp) != want || fp != Fingerprint(s) {
 			t.Fatalf("bad or unstable fingerprint %q", fp)
 		}
 	})
@@ -615,5 +630,93 @@ func TestLoggerNameIsNotAClass(t *testing.T) {
 	got := Normalize("[2026-10-13 09:00:01,123] ERROR java.net.ConnectException: refused").Causes[0]
 	if got.Class != "java.net.ConnectException" {
 		t.Errorf("logged exception lost: %+v", got)
+	}
+}
+
+// Past the cause cap or the budget, trailing log lines must not displace the
+// root exception: two traces that differ only in the root must differ.
+func TestRootSurvivesLogNoisePastCap(t *testing.T) {
+	var noise strings.Builder
+	for i := 0; i < 35; i++ {
+		noise.WriteString("[2026-10-13 09:00:01,123] INFO WorkerSourceTask{id=orders-0} Committing offsets " + strings.Repeat("x", 300) + "\n")
+	}
+	mk := func(root string) string {
+		return noise.String() + root + "\n\tat a.B.c(B.java:1)\n[2026-10-13 09:00:02,000] INFO Worker stopped\n"
+	}
+	a := mk("java.net.ConnectException: boom A")
+	b := mk("org.postgresql.util.PSQLException: boom A")
+	if Fingerprint(a) == Fingerprint(b) {
+		t.Fatal("different root exceptions share a fingerprint past the cap")
+	}
+	tpl := Normalize(a)
+	if len(tpl.Causes) > MaxCauses {
+		t.Fatalf("causes = %d", len(tpl.Causes))
+	}
+	if last := tpl.Causes[len(tpl.Causes)-1]; last.Class != "java.net.ConnectException" || len(last.Frames) != 1 {
+		t.Errorf("root not kept last: %+v", last)
+	}
+	// The trailing log line still does not count.
+	if Fingerprint(a) != Fingerprint(strings.TrimSuffix(a, "[2026-10-13 09:00:02,000] INFO Worker stopped\n")) {
+		t.Error("trailing log line changed the fingerprint past the cap")
+	}
+	// A bare message line after the root past the cap still counts.
+	c := mk("java.net.ConnectException: boom A\nERROR: disk full")
+	d := mk("java.net.ConnectException: boom A\nERROR: out of memory")
+	if Fingerprint(c) == Fingerprint(d) {
+		t.Error("bare line after the root ignored past the cap")
+	}
+}
+
+func TestLevelKeyNeedsBoundary(t *testing.T) {
+	if Normalize("ERROR: logical decoding requires wal_level=logical").Causes[0].Log {
+		t.Error("wal_level= taken as a log level")
+	}
+	for _, in := range []string{"level=ERROR msg=x", `time=x level=ERROR msg="x"`, "ts=x\tlevel=WARN"} {
+		if !Normalize(in).Causes[0].Log {
+			t.Errorf("%q not taken as a log line", in)
+		}
+	}
+}
+
+func TestClipLeadingContinuationBytes(t *testing.T) {
+	in := strings.Repeat("\x80", 10) + "abc"
+	if got := clip(in, 5); got != in[:5] {
+		t.Errorf("clip = %q, want %q", got, in[:5])
+	}
+	if got := clip("héllo", 2); got != "h" {
+		t.Errorf("clip split a rune: %q", got)
+	}
+}
+
+// classify is a fast copy of parseCause's Log/Class decision; they must agree.
+func TestClassifyMatchesParse(t *testing.T) {
+	lines := []string{
+		"", "a.B", "a.b", "a.B:", "a.B: x", "a.B x", "1a.B", "$a.$B", "a..B", "a.B.", "x",
+		"java.net.ConnectException: Connection refused",
+		"Caused by: org.postgresql.util.PSQLException: ERROR: x",
+		"Suppressed: a.b.CException",
+		"[2026-10-13 09:00:01,123] ERROR org.apache.kafka.connect.runtime.WorkerTask: Task threw",
+		"[2026-10-13 09:00:01,123] ERROR java.net.ConnectException: refused",
+		"2026-10-13T09:00:01Z INFO a.b.CException: x",
+		`level=ERROR msg="a.b.CException: x"`,
+		`msg="a.b.CException: x" level=ERROR`,
+		`msg="a.b.Logger: x"`,
+		`err="a.b.CException: x" other="y"`,
+		"ERROR: logical decoding requires wal_level=logical",
+		"time=x level=INFO msg=y",
+		"Detail: Key (id)=(5) already exists.",
+		"\xff\xfe a.B",
+	}
+	lines = append(lines, strings.Split(schemaTrace, "\n")...)
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		c := parseCause(l)
+		logged, class := classify(l)
+		if logged != c.Log || class != (c.Class != "") {
+			t.Errorf("%q: classify = (%v, %v), parseCause = (%v, %q)", l, logged, class, c.Log, c.Class)
+		}
 	}
 }

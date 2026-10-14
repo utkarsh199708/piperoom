@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import type { RoomActions } from '../hooks/useRoom'
+import type { RoomActions, StaleInfo } from '../hooks/useRoom'
 import type { RoomState } from '../state/types'
 import { emptyRoomState } from '../state/types'
 
@@ -33,7 +33,7 @@ const actions: RoomActions = {
   acceptHandoff: vi.fn(),
   trace: vi.fn(),
 }
-const staleOff = { stale: false, dismissStale: vi.fn(), reload: vi.fn() }
+const staleOff = { stale: null, dismissStale: vi.fn(), reload: vi.fn() }
 
 function webhookRoom(over: Partial<RoomState> = {}): RoomState {
   return {
@@ -47,7 +47,7 @@ function webhookRoom(over: Partial<RoomState> = {}): RoomState {
   }
 }
 
-function show(state: RoomState, stale = false) {
+function show(state: RoomState, stale: StaleInfo | null = null) {
   vi.mocked(useRoom).mockReturnValue({
     state,
     presence: [],
@@ -111,7 +111,9 @@ describe('RoomScreen — agent done status and resolution', () => {
     show(webhookRoom({ agent_status: { state: 'done', detail: 'fix applied' } }))
     const chip = screen.getByText('resolved — verified')
     expect(chip).toBeInTheDocument()
-    expect(chip).toHaveClass('chip--ok')
+    // The pill's tone is a data attribute (was the chip--ok class).
+    const pill = chip.closest('[data-tone]')
+    expect(pill).toHaveAttribute('data-tone', 'ok')
   })
 
   it('shows the resolution once the room is closed', () => {
@@ -155,7 +157,7 @@ describe('RoomScreen — topology refresh wiring', () => {
 
 describe('RoomScreen — stale fix banner (params_mismatch)', () => {
   it('shows the banner when the hook says the fix changed, and Reload/Dismiss call the hook', () => {
-    show(webhookRoom(), true)
+    show(webhookRoom(), { proposalId: "p1", sentHash: "h1" })
     const banner = screen.getByRole('alert')
     expect(banner).toHaveTextContent('This fix changed since you loaded it. Reload to see the new version.')
     fireEvent.click(within(banner).getByRole('button', { name: 'Reload' }))
