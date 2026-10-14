@@ -10,7 +10,7 @@ export interface EmptyState {
 // reaches a shadow agent, so there is nothing to offer.
 const SHADOW_EMPTY: EmptyState = {
   title: 'The agent investigates silently in a shadow room.',
-  hint: 'Its steps and conclusion are shown after the room is closed and you record your own answer.',
+  hint: 'Its steps and conclusion are shown below once the room is closed and you record your own answer.',
   busy: false,
   offerSteer: false,
 }
