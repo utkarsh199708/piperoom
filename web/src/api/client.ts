@@ -229,3 +229,13 @@ export function roomWsUrl(
 export function openRoomWs(roomId: string, after: number): WebSocket {
   return new WebSocket(roomWsUrl(roomId, after))
 }
+
+/** WebSocket URL of the room list push (GET /api/rooms/ws, F6): same origin, no cursor. */
+export function roomsWsUrl(loc: Pick<Location, 'protocol' | 'host'> = window.location): string {
+  const scheme = loc.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${scheme}//${loc.host}/api/rooms/ws`
+}
+
+export function openListWs(): WebSocket {
+  return new WebSocket(roomsWsUrl())
+}

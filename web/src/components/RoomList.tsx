@@ -27,11 +27,13 @@ import {
 } from '../lib/rooms'
 import type { Dot, RoomTab } from '../lib/rooms'
 import { errorText } from '../lib/errors'
+import { triageLine } from '../lib/triage'
+import { useNow } from './room/useNow'
 import { initials, personColor } from '../lib/people'
 import { cn } from '../lib/utils'
 import { modKeyLabel } from '../lib/envLabel'
 import { Avatar, AvatarFallback } from './ui/avatar'
-import { Badge } from './ui/badge'
+import { Badge, layerVariant } from './ui/badge'
 import { Button } from './ui/button'
 import { Card } from './ui/card'
 import {
@@ -58,7 +60,6 @@ import { RoomListContext, useInShell } from './shell/context'
 import { isEditableTarget } from './shell/keys'
 
 const SEVERITIES = ['sev1', 'sev2', 'sev3', 'sev4']
-const POLL_MS = 15_000
 
 const TAB_LABEL: Record<RoomTab, string> = {
   open: 'Open',
@@ -94,7 +95,8 @@ export function RoomList() {
   // In the shell the list is the shell's copy (the sidebar shows it too); on its own it loads its own.
   const shared = useContext(RoomListContext)
   const own = useRoomList({ enabled: shared === null })
-  const { rooms, loading, error, reload } = shared ?? own
+  // Pushed over GET /api/rooms/ws (F6); `updatedAt` is set only while the list falls back to polling.
+  const { rooms, loading, error, reload, updatedAt } = shared ?? own
   const [searchParams, setSearchParams] = useSearchParams()
   const pipeline = searchParams.get('pipeline') || null
   const [tab, setTab] = useState<RoomTab>('open')
@@ -103,31 +105,12 @@ export function RoomList() {
   const [newOpen, setNewOpen] = useState(false)
   const [taking, setTaking] = useState<string | null>(null)
   const [loaded, setLoaded] = useState(false)
-  const [updatedAt, setUpdatedAt] = useState<number | null>(null)
   const rowLinks = useRef(new Map<string, HTMLAnchorElement>())
 
-  // "Live": the list is fetched again every 15 s while the tab is visible. The skeleton is only for
-  // the first load; a refresh keeps the table on screen.
+  // The skeleton is only for the first load; a later update keeps the table on screen.
   useEffect(() => {
-    if (!loading) {
-      setLoaded(true)
-      if (!error) setUpdatedAt(Date.now())
-    }
-  }, [loading, error])
-  useEffect(() => {
-    const t = window.setInterval(() => {
-      if (!document.hidden) void reload()
-    }, POLL_MS)
-    // Back to the tab after a while: do not wait for the next tick.
-    const onVisible = () => {
-      if (!document.hidden) void reload()
-    }
-    document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      window.clearInterval(t)
-      document.removeEventListener('visibilitychange', onVisible)
-    }
-  }, [reload])
+    if (!loading) setLoaded(true)
+  }, [loading])
 
   const sorted = useMemo(() => sortRoomsForList(rooms), [rooms])
   const scoped = useMemo(() => roomsForPipeline(sorted, pipeline), [sorted, pipeline])
@@ -232,7 +215,7 @@ export function RoomList() {
 
   const controls = (
     <>
-      <LivePill updatedAt={updatedAt} error={error !== null} />
+      <LivePill updatedAt={updatedAt ?? null} error={error !== null} />
       {!viewer && (
         <Button
           size="sm"
@@ -643,6 +626,7 @@ function RoomRow({
             </span>
           )}
         </div>
+        <TriageRowLine room={room} />
         {showResolution && resolved && room.resolution && (
           <p className="m-0 line-clamp-1 whitespace-normal text-xs text-muted-foreground">{room.resolution.slice(0, 100)}</p>
         )}
@@ -711,6 +695,43 @@ function RoomRow({
         )}
       </td>
     </tr>
+  )
+}
+
+// The row's second line (F6): the first look's headline, "triage, unverified". A young open
+// room with no first look yet shows a shimmer; a failed or old-enough-to-miss one shows nothing.
+function TriageRowLine({ room }: { room: RoomSnapshot }) {
+  const now = useNow(10_000)
+  const line = triageLine(room, now)
+  if (line.kind === 'none') return null
+  if (line.kind === 'pending') {
+    return (
+      <span role="status" aria-label="First look in progress" className="mt-0.5 flex items-center gap-1" data-testid="triage-pending">
+        {[0, 1, 2].map((i) => (
+          <span
+            key={i}
+            aria-hidden="true"
+            className="size-1 animate-pulse rounded-full bg-agent/60"
+            style={{ animationDelay: `${i * 150}ms` }}
+          />
+        ))}
+      </span>
+    )
+  }
+  return (
+    <div className="mt-0.5 flex min-w-0 items-center gap-1.5" data-testid="triage-line">
+      <Badge variant="agent" className="shrink-0" title="triage, unverified">
+        first look
+      </Badge>
+      {line.layer && (
+        <Badge variant={layerVariant(line.layer)} className="shrink-0">
+          {line.layer}
+        </Badge>
+      )}
+      <span className="min-w-0 truncate text-xs text-muted-foreground" title={line.headline}>
+        {line.headline}
+      </span>
+    </div>
   )
 }
 

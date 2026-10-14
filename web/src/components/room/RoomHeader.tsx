@@ -14,6 +14,7 @@ import { AgentPill } from './AgentPill'
 import { CostChip } from './CostChip'
 import { PersonAvatar } from './PersonAvatar'
 import { StatusDot } from './StatusDot'
+import { TriageCard } from './TriageCard'
 
 export interface HeaderMember {
   id: string
@@ -184,6 +185,8 @@ export function RoomHeader({
           )}
         </div>
       </div>
+
+      <TriageCard state={state} />
 
       <p className="m-0 flex flex-wrap items-center gap-x-2.5 font-mono text-xs text-subtle-foreground">
         {state.pipeline_id && (
