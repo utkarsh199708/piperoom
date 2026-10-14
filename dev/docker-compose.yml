@@ -90,5 +90,7 @@ services:
       KAFKA_BROKERS: kafka:9092
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
       WAREHOUSE_DB_URL: postgres://piperoom:piperoom-dev@postgres:5432/warehouse?sslmode=disable
+      PIPEROOM_LOG_LEVEL: ${PIPEROOM_LOG_LEVEL:-info}
+      PIPEROOM_LOG_FORMAT: ${PIPEROOM_LOG_FORMAT:-text}
       FAIL_ON_ID: ${DEVCONSUMER_FAIL_ON_ID:-0}
       DELAY: ${DEVCONSUMER_DELAY:-0s}

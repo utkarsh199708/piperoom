@@ -101,6 +101,16 @@ func TestCommittedDemoProfile(t *testing.T) {
 	if w.Mode != config.WatchRooms || w.Interval != 15*time.Second || w.Cooldown != 30*time.Second {
 		t.Fatalf("profile = %+v, want rooms / 15s / 30s", w)
 	}
+	// The committed profile must not point the server at the DB that reset wipes.
+	if err := checkRoomDB(env["PIPEROOM_DB_URL"], config.Load().SourceDBURL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := config.ParseLog(config.Config{LogLevel: env["PIPEROOM_LOG_LEVEL"], LogFormat: env["PIPEROOM_LOG_FORMAT"]}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := env["PIPEROOM_DEV_ACK"]; ok {
+		t.Fatal("PIPEROOM_DEV_ACK must stay commented out in the demo profile")
+	}
 }
 
 func TestCheckDemoProfile(t *testing.T) {
@@ -304,7 +314,7 @@ func TestHTTPRooms(t *testing.T) {
 	}
 
 	bad, _ := newHTTPRooms(srv.URL, "nobody")
-	if _, err := bad.OpenRooms(context.Background(), "orders"); err == nil || !strings.Contains(err.Error(), "HTTP 401") {
+	if _, err := bad.OpenRooms(context.Background(), "orders"); err == nil || !strings.Contains(err.Error(), "HTTP 401") || !strings.Contains(err.Error(), "dev auth mode only") {
 		t.Fatalf("err = %v, want HTTP 401", err)
 	}
 	srv.Close()
@@ -315,5 +325,42 @@ func TestHTTPRooms(t *testing.T) {
 		if _, err := newHTTPRooms(u, "a"); err == nil {
 			t.Errorf("newHTTPRooms(%q) = nil, want error", u)
 		}
+	}
+}
+
+func TestCheckRoomDB(t *testing.T) {
+	const stack = "postgres://piperoom:piperoom-dev@localhost:5432/orders?sslmode=disable"
+	t.Setenv("PIPEROOM_DB_URL", "")
+	tests := []struct {
+		name    string
+		room    string
+		wantErr string
+	}{
+		{"separate port", "postgres://u:p@localhost:5433/piperoom", ""},
+		{"separate host", "postgres://u:p@db.internal:5432/piperoom", ""},
+		{"unset means the dev default, which reset wipes", "", "devctl reset"},
+		{"same port on 127.0.0.1", "postgres://u:p@127.0.0.1:5432/piperoom", "devctl reset"},
+		{"no port means 5432", "postgres://u:p@localhost/piperoom", "devctl reset"},
+		{"not a url", "nonsense", "PIPEROOM_DB_URL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkRoomDB(tt.room, stack)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+			}
+			if err != nil && strings.Contains(err.Error(), "p@") {
+				t.Fatalf("error leaks the URL credentials: %v", err)
+			}
+		})
+	}
+	if err := checkRoomDB("postgres://u:p@localhost:5433/piperoom", "garbage"); err == nil {
+		t.Fatal("bad SOURCE_DB_URL = nil error")
 	}
 }

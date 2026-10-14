@@ -19,11 +19,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"sort"
 	"strings"
+
+	"piperoom/internal/config"
 )
 
 const usage = `devctl — local pipeline control
@@ -52,7 +53,7 @@ scenarios: %s
 `
 
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	log := newLogger(os.Stderr, config.Load())
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 

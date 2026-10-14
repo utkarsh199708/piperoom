@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"piperoom/internal/config"
+	"piperoom/internal/stacklock"
 )
 
 const (
@@ -92,6 +93,7 @@ func parseDemoFlags(args []string, defaultOwner string) (demoOpts, error) {
 		if o.timeout <= 0 || o.poll > o.timeout {
 			return demoOpts{}, fmt.Errorf("devctl demo: --timeout %s: must be positive and at least --poll (%s)", o.timeout, o.poll)
 		}
+		// --as is dev auth only: it sends X-User, which the server ignores in oidc mode.
 		if strings.TrimSpace(o.asUser) == "" {
 			return demoOpts{}, errors.New("devctl demo: --as must not be empty")
 		}
@@ -156,6 +158,49 @@ func checkDemoProfile(env map[string]string) (config.Watch, error) {
 		return config.Watch{}, fmt.Errorf("devctl: demo profile has PIPEROOM_WATCH_MODE=%q; the demo needs rooms", w.Mode)
 	}
 	return w, nil
+}
+
+// stackHostPort reduces a Postgres URL to "host:port" for comparison. localhost,
+// 127.0.0.1 and ::1 count as one host; a missing port is 5432. The password is
+// never read out.
+func stackHostPort(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", errors.New("not a postgres URL")
+	}
+	host, port := u.Hostname(), u.Port()
+	if port == "" {
+		port = "5432"
+	}
+	if host == "localhost" || host == "::1" {
+		host = "127.0.0.1"
+	}
+	return host + ":" + port, nil
+}
+
+// checkRoomDB refuses a profile whose room database is the Postgres that
+// `devctl reset` wipes (docker compose down -v): the rehearsal would delete
+// the rooms it waits for, and the server migrates only at start, so it would
+// not recreate them. roomURL is PIPEROOM_DB_URL from the profile (empty =
+// the config default, which is the dev stack's Postgres); stackURL is the
+// stack's source database URL.
+func checkRoomDB(roomURL, stackURL string) error {
+	if strings.TrimSpace(roomURL) == "" {
+		// The server's own default.
+		roomURL = config.Load().RoomDBURL
+	}
+	room, err := stackHostPort(roomURL)
+	if err != nil {
+		return fmt.Errorf("devctl: PIPEROOM_DB_URL in the demo profile: %w", err)
+	}
+	stack, err := stackHostPort(stackURL)
+	if err != nil {
+		return fmt.Errorf("devctl: SOURCE_DB_URL: %w", err)
+	}
+	if room == stack {
+		return fmt.Errorf("devctl: the demo profile's room database (%s) is the dev stack's Postgres, which `devctl reset` wipes with `docker compose down -v`; set PIPEROOM_DB_URL in dev/demo.env to the separate room database (docker compose -f dev/demo-room-db.yml up -d --wait) and restart the server", room)
+	}
+	return nil
 }
 
 // rehearsalSteps are the stack actions a rehearsal performs. The real
@@ -328,6 +373,9 @@ func (h *httpRooms) get(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("GET %s: read reply: %w", path, err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			return nil, fmt.Errorf("GET %s: HTTP %d (--as sends X-User, which works in dev auth mode only and needs a user from dev/users.yaml)", path, resp.StatusCode)
+		}
 		return nil, fmt.Errorf("GET %s: HTTP %d", path, resp.StatusCode)
 	}
 	return body, nil
@@ -373,7 +421,7 @@ func (p stackSteps) Load(ctx context.Context) error {
 func (p stackSteps) Break(ctx context.Context) error { return p.sc.breakIt(ctx, p.s) }
 
 // rehearseCmd is `devctl demo --rehearse`. It holds the stack lock for the
-// whole run and releases it at the end.
+// whole run; it releases it at the end unless the caller already held it.
 func rehearseCmd(ctx context.Context, s *stack, o demoOpts, out io.Writer) error {
 	envPath := o.envFile
 	if !filepath.IsAbs(envPath) {
@@ -392,6 +440,9 @@ func rehearseCmd(ctx context.Context, s *stack, o demoOpts, out io.Writer) error
 	if err != nil {
 		return fmt.Errorf("devctl: demo profile %s: %w", envPath, err)
 	}
+	if err := checkRoomDB(env["PIPEROOM_DB_URL"], s.cfg.SourceDBURL); err != nil {
+		return err
+	}
 	base := o.server
 	if base == "" {
 		base = serverURL(s.cfg.HTTPAddr)
@@ -400,18 +451,31 @@ func rehearseCmd(ctx context.Context, s *stack, o demoOpts, out io.Writer) error
 	if err != nil {
 		return err
 	}
+	// Acquire is re-entrant. Release at the end only what this run took, so an
+	// operator who locked the stack first (the demo script does) keeps the lock
+	// for the live run and the final `unlock`.
+	heldBefore := lockHeldBy(o.owner)
 	if err := acquireLock(o.owner); err != nil {
 		return err
 	}
-	defer func() {
-		if err := releaseLock(o.owner); err != nil {
-			s.log.Warn("demo: release lock failed", "owner", o.owner, "err", err)
-		}
-	}()
+	if !heldBefore {
+		defer func() {
+			if err := releaseLock(o.owner); err != nil {
+				s.log.Warn("demo: release lock failed", "owner", o.owner, "err", err)
+			}
+		}()
+	}
 	r := &rehearser{
 		steps: stackSteps{s: s, sc: scenarios[o.scenario]}, rooms: rooms, out: out,
 		now: time.Now, sleep: sleepCtx, scenario: o.scenario,
 		poll: o.poll, timeout: o.timeout, watch: w,
 	}
 	return r.run(ctx)
+}
+
+// lockHeldBy reports whether owner holds the stack lock now. A read error
+// counts as not held: the run then takes the lock and releases it again.
+func lockHeldBy(owner string) bool {
+	rec, err := stacklock.New(stacklock.Path()).Status()
+	return err == nil && rec != nil && rec.Owner == owner
 }
