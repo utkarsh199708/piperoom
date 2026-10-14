@@ -162,12 +162,32 @@ type RoomSnapshot struct {
 	// proposal appears.
 	pendingPreviews map[string]events.ProposalPreviewedPayload
 
+	// Postmortem is the closing draft's state (F2): "none", "drafting" from
+	// room.closed until postmortem.drafted or postmortem.failed, "drafted" or
+	// "failed". The Markdown is rendered on request, never stored.
+	Postmortem PostmortemState `json:"postmortem"`
+
 	// handoffReq is the room's latest hand-off request (handoff.requested),
 	// cleared by the handoff.created or handoff.failed with its request_id.
 	// It is in flight while set and before its expires_at (docs/api.md,
 	// Hand-off requests). Unexported, like the shadow facts.
 	handoffReq handoffRequest
 }
+
+// PostmortemState mirrors the snapshot's postmortem member (docs/api.md).
+type PostmortemState struct {
+	Status string `json:"status"`           // none | drafting | drafted | failed
+	Source string `json:"source,omitempty"` // handoff | model | events, when drafted
+	Reason string `json:"reason,omitempty"` // fixed code, when failed
+}
+
+// Postmortem states of PostmortemState.Status.
+const (
+	PostmortemNone     = "none"
+	PostmortemDrafting = "drafting"
+	PostmortemDrafted  = "drafted"
+	PostmortemFailed   = "failed"
+)
 
 // handoffRequest is the fold of the last unfinished handoff.requested.
 type handoffRequest struct {
@@ -196,6 +216,7 @@ func NewSnapshot() RoomSnapshot {
 		AgentStatus:        AgentStatus{State: "idle"},
 		Insight:            Insight{TimeToFirstHypothesisS: -1},
 		LogCap:             LogCapOK,
+		Postmortem:         PostmortemState{Status: PostmortemNone},
 		OpenProposals:      []Proposal{},
 		PendingSuggestions: []Suggestion{},
 		Members:            []Member{},
@@ -369,6 +390,20 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Status = "closed"
 		snap.ClosedAt = &at
 		snap.Resolution = p.Resolution
+		// A shadow room's log holds no agent events: no draft.
+		if !snap.Shadow && snap.Postmortem.Status == PostmortemNone {
+			snap.Postmortem = PostmortemState{Status: PostmortemDrafting}
+		}
+
+	case events.PostmortemDrafted:
+		if p, ok := decode[events.PostmortemDraftedPayload](e); ok {
+			snap.Postmortem = PostmortemState{Status: PostmortemDrafted, Source: p.Source}
+		}
+
+	case events.PostmortemFailed:
+		if p, ok := decode[events.PostmortemFailedPayload](e); ok {
+			snap.Postmortem = PostmortemState{Status: PostmortemFailed, Reason: p.Reason}
+		}
 
 	case events.AgentStatus:
 		p, ok := decode[events.AgentStatusPayload](e)
