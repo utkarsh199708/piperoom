@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"piperoom/internal/dlq"
 )
 
 // Watch actions: what a firing signal does.
@@ -415,8 +417,6 @@ var (
 	// identRE is Postgres's rule for a replication slot name: lower-case
 	// letters, digits and underscore, at most 63 bytes (NAMEDATALEN - 1).
 	identRE = regexp.MustCompile(`^[a-z0-9_]{1,63}$`)
-	// topicRE is Kafka's rule for a topic name.
-	topicRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,249}$`)
 	sizeRE  = regexp.MustCompile(`^\s*([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]*)\s*$`)
 )
 
@@ -481,8 +481,7 @@ func resolveDLQTopics(p Pipeline, w *WatchConfig) error {
 	}
 	for i, d := range p.WatchSpec.DLQTopics {
 		where := fmt.Sprintf("watch.dlq_topics[%d]", i)
-		// "." and ".." match the regexp but Kafka refuses them as topic names.
-		if !topicRE.MatchString(d.Topic) || d.Topic == "." || d.Topic == ".." {
+		if !dlq.ValidTopic(d.Topic) {
 			return fmt.Errorf("%s: topic %q: not a valid Kafka topic name (letters, digits, '.', '_', '-', at most 249 characters)", where, d.Topic)
 		}
 		if d.WrittenBy == "" {

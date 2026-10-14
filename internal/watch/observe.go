@@ -24,6 +24,8 @@ type target struct {
 	// connectors are the pipeline's connectors, filtered through the tool scope
 	// rules: object names come only from owners.Pipeline.
 	connectors []string
+	// cdcTopics are the pipeline's CDC topics: never a DLQ.
+	cdcTopics []string
 }
 
 // connObs is what one tick learned about one connector.
@@ -41,6 +43,15 @@ type observation struct {
 	slotsErr   error
 	slotsTried bool
 	conns      map[string]*connObs
+
+	// DLQ offsets: one call per tick for all DLQ topics of all pipelines.
+	// plan says which topics each pipeline looks at; dlqNoReader means the
+	// Kafka client cannot read offsets of DLQ topics.
+	plan        *dlqPlan
+	dlqOffsets  map[string][]clients.PartitionOffsets
+	dlqErr      error
+	dlqTried    bool
+	dlqNoReader bool
 }
 
 // targets lists the pipelines to watch, in owners order. A pipeline that opted
@@ -49,7 +60,8 @@ func (w *Watcher) targets(ctx context.Context) []target {
 	var out []target
 	for _, p := range w.own.Pipelines {
 		cfg := p.Watch()
-		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled) {
+		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled ||
+			cfg.DLQGrowth.Enabled || cfg.ConfigRisk.Enabled) {
 			continue
 		}
 		t := target{p: p, cfg: cfg}
@@ -61,6 +73,7 @@ func (w *Watcher) targets(ctx context.Context) []target {
 			continue
 		}
 		t.connectors = sc.FilterConnectors(p.Connectors)
+		t.cdcTopics = sc.Topics()
 		out = append(out, t)
 	}
 	return out
@@ -84,7 +97,9 @@ func (w *Watcher) observe(ctx context.Context, ts []target) *observation {
 	obs := &observation{conns: map[string]*connObs{}}
 	needCfg := map[string]bool{}
 	for _, t := range ts {
-		slotCfg := t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled
+		// The slot name, the heartbeat, the DLQ topic and the risks all come from the config.
+		slotCfg := t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled ||
+			t.cfg.DLQGrowth.Enabled || t.cfg.ConfigRisk.Enabled
 		for _, c := range t.connectors {
 			if _, ok := obs.conns[c]; !ok {
 				obs.conns[c] = &connObs{}
@@ -129,6 +144,8 @@ func (w *Watcher) observe(ctx context.Context, ts []target) *observation {
 		}
 	}
 	wg.Wait()
+	// After the configs: the DLQ topics are discovered from them.
+	w.observeDLQ(ctx, ts, obs)
 	return obs
 }
 

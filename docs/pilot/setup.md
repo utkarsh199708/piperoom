@@ -40,7 +40,8 @@ for those before you plan the install.
   Connect and Schema Registry are not contacted at start-up, so a wrong URL shows up on the first
   tool or action that uses it. For Bedrock, the AWS credentials are fetched once at start-up, and
   for Vertex the Google default credentials are looked up (section 1).
-- **The credentials** from [permissions.md](permissions.md). One credential set per process (F7).
+- **The credentials** from [permissions.md](permissions.md). One credential set per process, or one
+  per pipeline with `connections:` in `owners.yaml` (section 2a, F7).
 - Read [README.md](README.md#read-this-first-pilot-limits) for the current limits.
 
 ## 1. Configure the environment
@@ -67,7 +68,7 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 | `WAREHOUSE_DB_URL` | the warehouse, read-only role. With `postgres`: a Postgres URL. With `snowflake`: a gosnowflake DSN, `user:password@account/database/schema?warehouse=...&role=...`, with the password **URL-encoded** (a raw `%`, `+`, `?`, `@`, `/` or `:` breaks it, `internal/clients/snowflake/README.md`). Startup errors are redacted of the DSN (`internal/wiring/warehouse.go:74`). Read-only access comes only from the DSN's role (`internal/clients/snowflake/snowflake.go:6-10`). See [permissions.md](permissions.md#warehouse) |
 | `KAFKA_BROKERS` | comma-separated brokers |
 | `CONNECT_URL` | Kafka Connect REST base URL |
-| `SCHEMA_REGISTRY_URL` | Schema Registry base URL. Set it to empty or `off` when the pipelines use no Schema Registry: the pipeline map then has no schema-subject nodes and the schema tools answer "Schema Registry not configured". Unset, it falls back to the dev default `http://localhost:8081` (`internal/config/config.go`) |
+| `SCHEMA_REGISTRY_URL` | Schema Registry base URL, or `off` when the pipelines use no Schema Registry (the pipeline map then has no schema-subject nodes and the schema tools answer "Schema Registry not configured"). **Docker Compose: required** (`deploy/docker-compose.pilot.yml` refuses to start without it; a blank value is an error, so a forgotten registry is never read as none). **Helm:** the chart skips empty values, so an empty value is unset and the server falls back to the dev default `http://localhost:8081`, which a pod cannot reach: the registry then shows as unknown in the map. Set the URL or `off`. In the server itself (`internal/config/config.go`) an explicitly empty value also means none |
 | `OWNERS_FILE` | pipelines and layer owners (step 2) |
 | `USERS_FILE` | users and the layers each owns (step 2) |
 | `PIPEROOM_PUBLIC_URL` | optional. The externally visible base URL, used for room links in Slack. It is a WebSocket origin only when `PIPEROOM_WEB_DIR` is set; without a web dir the WebSocket ignores it (section 4). Its host is also the public host in the served UI's content-security policy. Must be a plain `http(s)` host, with no wildcard. An invalid value stops the start (`cmd/server/main.go:84-87`; `internal/httpapi/static.go:41-75`; `internal/httpapi/server.go:150-158`; `internal/ws/gateway.go:186-189`; `internal/httpapi/static.go:195-197`). Empty means no links. **Required in `oidc` mode, and it must be `https` there** (it sets the OIDC redirect URI) |
@@ -260,6 +261,44 @@ Rules of thumb:
   map (`internal/topology/builder.go:55`). Without the block, the defaults apply. See
   [docs/design/watcher.md](../design/watcher.md).
 
+### 2a. Tenancy
+
+Design and every rule: [docs/design/tenancy.md](../design/tenancy.md).
+
+- **Separate customers or legal entities: one deployment each.** This is the only hard boundary.
+  Install the Helm chart once per tenant (own namespace, Secret, values, ingress host, OIDC client),
+  or run one Terraform apply or one compose project per tenant, each with an `owners.yaml` that lists
+  only that tenant's pipelines.
+- **Teams within one organisation: one deployment, in-process tenants.** In `owners.yaml`:
+  - `tenants: {<name>: {members: [group:..., user:...]}}` turns the room filter on: a person sees only
+    the rooms of pipelines in their tenants. A person is in a tenant when listed in its `members:` or
+    when they may approve any layer of one of its pipelines (so a top-level `layers:` owner is in every
+    tenant whose pipelines do not override that layer: give each pipeline its own `owners:` block).
+    Everything else answers `404`.
+  - `tenant: <name>` on a pipeline (default `default`).
+  - `connections:` on a pipeline names the **environment variables or files** that hold its DSNs, URLs
+    and logins, for example `source_db_url: {env: PAYMENTS_SOURCE_DB_URL}` or
+    `kafka_sasl_password: {file: /run/secrets/payments/kafka-password}`. Never put a secret in
+    `owners.yaml`. A pipeline with `connections:` gets its own clients, tools, actions and watcher
+    reads, and takes nothing from the process-wide `SOURCE_DB_URL`, `KAFKA_*` and so on; a pipeline
+    without it uses those, as before.
+  - The start fails when two tenants use the same variable or file (pipelines without `connections:`
+    count as using the process-wide variables, and a TLS client key or certificate counts by its real
+    path however it was named) unless every pipeline involved sets `shared_connections: true`. A CA
+    bundle may be shared.
+  - With any `connections:` block, unset the libpq variables (`PGPASSWORD`, `PGUSER`, `PGHOST`,
+    `PGDATABASE`, `PGPASSFILE`, `PGSERVICE`, `PGSERVICEFILE`, `PGSSLCERT`, `PGSSLKEY`, `PGSSLPASSWORD`)
+    and remove `~/.pgpass`, `~/.pg_service.conf` and `~/.postgresql/postgresql.key` on the Piperoom
+    host: pgx would add them to a DSN that leaves something out, so the start refuses them.
+  - A `tenants:`, `connections:` or `tenant:` key with no value (or with every entry commented out) is
+    refused; remove the key instead.
+  - Set `PIPEROOM_TENANCY_MODE=teams` so the server refuses to start if the `tenants:` block is ever
+    lost. The start-up log prints the mode and which pipelines use their own connections.
+  - On Helm, mount per-team secret files with `extraVolumes`/`extraVolumeMounts`, or add per-team
+    variables with `secrets.refs`.
+- Not per tenant in one deployment: the model key and its cost, `PIPEROOM_MAX_AGENTS`, the room
+  database, the Slack channel and the people list.
+
 ## 3. Prepare the source database
 
 1. Create the read-only role and grants ([permissions.md](permissions.md#source-postgres)).
@@ -286,8 +325,10 @@ on `PIPEROOM_HTTP_ADDR` and exits 0 when it is healthy (`cmd/server/main.go:54`,
    a user who exists in `users.yaml` and lists that layer, and every layer a user lists must be
    assigned to that same user in `owners.yaml`. A layer name that is not one of the six known
    layers also stops the start. The error names the user and the layer. The check covers only a
-   layer whose owners are all `user:` principals; a layer that lists a `group:` is skipped (and
-   logged once). It also refuses a `users.yaml` id that starts with `u_` and an `email:` that is
+   layer whose owners are all `user:` principals for the owners-to-users direction. The reverse
+   users-to-owners check always applies: every layer a user lists must include that user as
+   `user:<id>` in `owners.yaml`, even if the layer also lists groups. Skipped owners-to-users layers
+   are logged once. It also refuses a `users.yaml` id that starts with `u_` and an `email:` that is
    not ASCII.
 3. Applies the goose migrations to `PIPEROOM_DB_URL` (`:137`, `migrations/migrate.go`), then opens
    the room store (`:143`). A database that cannot be reached stops the start.

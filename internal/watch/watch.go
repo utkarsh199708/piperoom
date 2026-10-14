@@ -4,7 +4,10 @@
 // docs/design/watcher.md.
 //
 // v1 signals: connector_down, slot_inactive, slot_wal (with a growth rate and
-// an ETA). Every check is a read; the watcher never fixes anything and never
+// an ETA). dlq_growth and config_risk come from docs/design/dlq.md: the first
+// counts new records in dead-letter topics from offsets alone, the second
+// reads connector configs for settings that drop records silently. Every
+// check is a read; the watcher never fixes anything and never
 // calls a model. Object names come only from owners.Pipeline.
 //
 // Wiring: see cmd/server/watch.go. It calls Run in a goroutine after the room
@@ -86,7 +89,12 @@ type Deps struct {
 	// "unknown" and a warning names the missing client.
 	Source  SourceDB
 	Connect ConnectClient
-	Owners  *owners.Owners
+	// Kafka reads the start and end offsets of dead-letter topics. It is nil
+	// when the Kafka client cannot (wire it with
+	// `deps.Kafka, _ = admin.(clients.DLQReader)`): dlq_growth is then off
+	// with one log line, and config_risk cannot tell a missing DLQ topic.
+	Kafka  clients.DLQReader
+	Owners *owners.Owners
 	// Rooms is required in mode "rooms"; modes "log" and "off" never call it.
 	Rooms RoomSink
 	// Config comes from config.ParseWatch.
@@ -115,8 +123,10 @@ const (
 	stormThreshold = 3
 )
 
-// signalIDs lists the v1 signals in a fixed order, so titles and logs are stable.
-var signalIDs = []string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL}
+// signalIDs lists the signals in a fixed order, so titles and logs are stable.
+// New signals go at the end so existing titles keep their order.
+var signalIDs = []string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
+	owners.SignalDLQGrowth, owners.SignalConfigRisk}
 
 // DedupKey is the alert dedup key of a pipeline's watcher room: one open
 // watcher room per pipeline.
@@ -128,6 +138,12 @@ type pipeState struct {
 	samples []sample
 	// slot is the slot name found for the pipeline (cached across ticks).
 	slot string
+	// dlqFirst is, per DLQ topic, when the current growth episode was first
+	// seen (the first rising sample). It is cleared when the signal quiets.
+	dlqFirst map[string]time.Time
+	// risks are the current config findings of the pipeline (codes only), added
+	// to the evidence of whatever signal opens a room.
+	risks []map[string]any
 	// roomID is the room the watcher posts to now; owned is true when the
 	// watcher opened it (the dedup key is ours), false when it joined a room
 	// someone else opened.
@@ -169,6 +185,7 @@ func (ps *pipeState) sig(id string) *sigState {
 type Watcher struct {
 	src      SourceDB
 	conn     ConnectClient
+	kafka    clients.DLQReader
 	own      *owners.Owners
 	rooms    RoomSink
 	cfg      config.Watch
@@ -187,6 +204,15 @@ type Watcher struct {
 	// storms carries a storm over to the next tick when its leader could not
 	// get a room: signal id -> member pipelines still waiting.
 	storms map[string][]string
+	// dlqState is the sample ring of each DLQ topic (topics are cluster-wide,
+	// so pipelines that name the same topic share one ring). dlqNoReaderLogged
+	// keeps the "cannot read DLQ offsets" line to one.
+	dlqState map[string]*dlqTopicState
+	// dlqSeen is, per pipeline/connector, the DLQ setting last read from its
+	// config; a connector that now answers 404 keeps its DLQ topic in the plan
+	// for the ring window (see planDLQ).
+	dlqSeen           map[string]dlqSeen
+	dlqNoReaderLogged bool
 }
 
 const maxClosedRemembered = 256
@@ -226,9 +252,10 @@ func New(d Deps) (*Watcher, error) {
 		cfg.Cooldown = 60 * time.Minute
 	}
 	w := &Watcher{
-		src: d.Source, conn: d.Connect, own: d.Owners, rooms: d.Rooms,
+		src: d.Source, conn: d.Connect, kafka: d.Kafka, own: d.Owners, rooms: d.Rooms,
 		cfg: cfg, maxRooms: d.MaxOpenRooms, clock: d.Clock, log: d.Log, jitter: d.Jitter,
 		pipes: map[string]*pipeState{}, closed: map[string]bool{}, storms: map[string][]string{},
+		dlqState: map[string]*dlqTopicState{}, dlqSeen: map[string]dlqSeen{},
 	}
 	if w.maxRooms <= 0 {
 		w.maxRooms = defaultMaxOpenRooms

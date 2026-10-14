@@ -375,12 +375,16 @@ func clean(s string, max int) string {
 	return s
 }
 
-// stripFormat removes Unicode format characters (category Cf: the bidi
-// embeddings, overrides and isolates, zero-width joiners and spaces, the soft
-// hyphen) from a display string.
+// stripFormat removes every Unicode format character (category Cf) from a
+// display string: the bidi embeddings, overrides, isolates and marks (including
+// U+061C), zero-width spaces, the word joiner, the soft hyphen, invisible math
+// operators, interlinear annotation marks, the BOM and the tag block (U+E0000
+// range, used to smuggle hidden ASCII). Safe default: anything new in Cf goes.
+// The one carve-out is the zero-width non-joiner and joiner (U+200C, U+200D):
+// Persian, Hindi and other scripts need them to spell ordinary names.
 func stripFormat(s string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Cf, r) {
+		if unicode.Is(unicode.Cf, r) && r != 0x200C && r != 0x200D {
 			return -1
 		}
 		return r

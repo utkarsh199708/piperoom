@@ -202,8 +202,20 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	for _, d := range dlqs {
 		g.Nodes = append(g.Nodes, b.dlqNode(d, th, info))
 	}
+	// The pipeline's topics, for the group lag: the ones derived from the
+	// connector configs plus "<topic_prefix>.<table>" from owners.yaml, so
+	// the filter still knows them while Connect is down.
+	ownTopics := map[string]bool{}
+	for _, t := range topics {
+		ownTopics[t] = true
+	}
+	if p.TopicPrefix != "" {
+		for _, t := range p.SourceTables {
+			ownTopics[p.TopicPrefix+"."+t] = true
+		}
+	}
 	for _, gr := range p.ConsumerGroups {
-		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info))
+		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info, ownTopics))
 	}
 	for _, s := range p.SinkTables {
 		g.Nodes = append(g.Nodes, b.sinkNode(p, s, info))
@@ -341,7 +353,7 @@ func (b *builder) placeholderTopicNode(p owners.Pipeline, topic string, invalid 
 	return n
 }
 
-func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected) Node {
+func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected, ownTopics map[string]bool) Node {
 	n := Node{
 		ID:     "group:" + gr,
 		Kind:   KindConsumerGroup,
@@ -355,8 +367,43 @@ func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected) Node 
 		n.Facts = map[string]string{"error": "unreachable"}
 		return n
 	}
-	n.Health, n.Facts = groupHealth(snap.lag, b.t)
+	lag, ok := pipelineLag(snap.lag, ownTopics)
+	if !ok {
+		// The group reads partitions, but none of this pipeline's topics (a
+		// RegexRouter or topic-routing SMT renames them, or the group reads
+		// other topics only). Its lag is unknown here, not zero.
+		n.Facts = map[string]string{"lag": lagUnknown, "state": lag.State}
+		return n
+	}
+	n.Health, n.Facts = groupHealth(lag, b.t)
 	return n
+}
+
+// lagUnknown is the lag fact of a group none of whose partitions is one of the
+// pipeline's topics.
+const lagUnknown = "unknown (no partition of this pipeline's topics)"
+
+// pipelineLag keeps only the partitions of the pipeline's own topics and sums
+// the lag again from them. A group can also read other pipelines' topics:
+// their lag is not this pipeline's health and must not show on its map (the
+// same rule as kafka_consumer_lag). ok is false when the group has partitions
+// but none of them is the pipeline's: the lag is then unknown, never 0. A lag
+// without partitions is kept as it is: there is nothing to tell apart, and the
+// real client only returns one when the group has no readable partition.
+func pipelineLag(l clients.GroupLag, ownTopics map[string]bool) (clients.GroupLag, bool) {
+	if len(l.Partitions) == 0 {
+		return l, true
+	}
+	var kept []clients.PartitionLag
+	var total int64
+	for _, pl := range l.Partitions {
+		if ownTopics[pl.Topic] {
+			kept = append(kept, pl)
+			total += pl.Lag
+		}
+	}
+	l.Partitions, l.TotalLag = kept, total
+	return l, len(kept) > 0
 }
 
 func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {

@@ -34,6 +34,11 @@ type Client struct {
 	cl       *kgo.Client
 	sr       *schemareg.Client
 
+	// offs and consumerFn are test seams for the DLQ reader; nil means the
+	// real kadm/kgo clients.
+	offs       offsetLister
+	consumerFn func(map[string]map[int32]kgo.Offset) (dlqConsumer, error)
+
 	srMu    sync.Mutex
 	srCache map[int]avro.Schema
 }
