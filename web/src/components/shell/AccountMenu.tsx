@@ -1,4 +1,5 @@
-import { ChevronsUpDown, LogOut, Moon, Sun, User } from 'lucide-react'
+import { useState } from 'react'
+import { Bell, ChevronsUpDown, LogOut, Moon, Sun, User } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import {
@@ -16,6 +17,8 @@ import { useTheme } from '@/context/theme'
 import { isDev } from '@/lib/env'
 import { initials, personColor } from '@/lib/people'
 import { isViewer } from '@/state/permissions'
+import { notifyPermission, requestNotifyPermission } from '@/lib/notify'
+import type { NotifyPermission } from '@/lib/notify'
 
 // The signed-in person at the foot of the sidebar. The menu carries what the old
 // header switcher did: in a dev build, "switch user" (POST /auth/dev-login through
@@ -25,6 +28,8 @@ export function AccountMenu({ onNavigate }: { onNavigate?: () => void }) {
   const { user, setUserId, logout, busy } = useCurrentUser()
   const { theme, toggleTheme } = useTheme()
   const viewer = isViewer(user)
+  const [permission, setPermission] = useState<NotifyPermission>(() => notifyPermission())
+  const notifyWord = permission === 'granted' ? 'on' : permission === 'denied' ? 'blocked' : 'off'
   const role = viewer ? 'View only' : user.layers.length > 0 ? `${user.layers.join(', ')} owner` : 'member'
 
   return (
@@ -59,6 +64,20 @@ export function AccountMenu({ onNavigate }: { onNavigate?: () => void }) {
             {theme === 'dark' ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
             Switch to {theme === 'dark' ? 'light' : 'dark'} theme
           </DropdownMenuItem>
+          {permission !== 'unsupported' && (
+            <DropdownMenuItem
+              disabled={permission !== 'default'}
+              title={permission === 'denied' ? 'Blocked in your browser settings' : undefined}
+              onSelect={(e) => {
+                if (permission !== 'default') return
+                e.preventDefault()
+                void requestNotifyPermission().then(setPermission)
+              }}
+            >
+              <Bell aria-hidden="true" />
+              Browser notifications · {notifyWord}
+            </DropdownMenuItem>
+          )}
           {isDev && (
             <>
               <DropdownMenuSeparator />

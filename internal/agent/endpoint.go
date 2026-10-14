@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -65,6 +66,14 @@ type EndpointConfig struct {
 	// RoomTokenBudget is the raw PIPEROOM_ROOM_TOKEN_BUDGET value; see
 	// ParseRoomTokenBudget.
 	RoomTokenBudget string
+	// TriagePass, TriagePassModel and TriagePassTimeout set the first look
+	// (Endpoint.Triage), from config.ParseTriagePass. TriagePass false makes
+	// every pass emit agent.triage "failed"/"off" without a model call. An
+	// empty model or a zero timeout means the default; a timeout over
+	// config.MaxTriagePassTimeout is cut to it.
+	TriagePass        bool
+	TriagePassModel   string
+	TriagePassTimeout time.Duration
 }
 
 // providerLoaders are the two places that read cloud credentials. Tests
@@ -201,6 +210,11 @@ type Endpoint struct {
 	// triage off for all rooms (see modelTurn).
 	triageSw triageSwitch
 
+	// triagePass is the first-look setup (Triage, triage_pass.go);
+	// firstLookWarned turns true once a failed first-look request is logged.
+	triagePass      triagePassConfig
+	firstLookWarned atomic.Bool
+
 	mu      sync.Mutex
 	budgets map[string]*tokenBudget
 	// spend is the durable spend setup (SetSpend, spend.go); nil = in-memory
@@ -233,6 +247,7 @@ func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) st
 		provider:    cfg.Provider,
 		triageModel: cfg.TriageModel,
 		triageTurns: cfg.TriageTurns,
+		triagePass:  triagePassSettings(cfg),
 		limit:       limit,
 		model:       &anthropicModel{client: anthropic.NewClient(opts...), log: log},
 		log:         log,
@@ -242,6 +257,13 @@ func newEndpoint(ctx context.Context, cfg EndpointConfig, getenv func(string) st
 
 // Provider reports the normalized provider name.
 func (e *Endpoint) Provider() string { return e.provider }
+
+// FirstLook reports the triage pass setup (Triage): whether it is on, its
+// model and its deadline. The room service waits for a pass at most the
+// deadline plus a margin.
+func (e *Endpoint) FirstLook() (on bool, model string, timeout time.Duration) {
+	return e.triagePass.on, e.triagePass.model, e.triagePass.timeout
+}
 
 // TokenLimit reports the per-room limit; 0 means no cap.
 func (e *Endpoint) TokenLimit() int64 { return e.limit }
@@ -317,4 +339,15 @@ func (e *Endpoint) WriteHandoff(ctx context.Context, roomEvents []events.Event, 
 		return events.HandoffSummary{}, fmt.Errorf("agent: cannot write handoff from an empty room")
 	}
 	return writeHandoff(ctx, roomEvents, opts, e.handoffModel(roomEvents))
+}
+
+// WritePostmortem is an agent.PostmortemWriter: the closing summary of a closed
+// room, grounded like a hand-off. Its tokens count against the room's budget
+// (never refused) and are reported with role events.UsageRolePostmortem.
+func (e *Endpoint) WritePostmortem(ctx context.Context, roomEvents []events.Event, opts Options) (PostmortemDraft, error) {
+	opts = opts.withDefaults()
+	if len(roomEvents) == 0 {
+		return PostmortemDraft{}, fmt.Errorf("agent: cannot write postmortem from an empty room")
+	}
+	return writePostmortem(ctx, roomEvents, opts, e.summaryModel(roomEvents, events.UsageRolePostmortem))
 }

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useContext, useMemo, useRef, useState } from 'react'
 import { ArrowDown } from 'lucide-react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -10,8 +10,9 @@ import { useMediaQuery } from '../hooks/useMediaQuery'
 import { useJumpToLatest } from '../hooks/useJumpToLatest'
 import { useRoomAttention } from '../hooks/useRoomAttention'
 import { useCurrentUser } from '../context/user'
-import { canClose, canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
+import { canAcceptHandoff, canClose, canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
 import { ageLabel } from '../lib/time'
+import { needsYou } from '../lib/rooms'
 import { handoffInFlight } from '../lib/handoff'
 import { useNow } from './room/useNow'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -22,11 +23,11 @@ import { ProposalsPanel } from './ProposalsPanel'
 import { PresencePanel } from './PresencePanel'
 import { ActivityFeed } from './ActivityFeed'
 import { TracePanel } from './TracePanel'
-import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
+import { HANDOFF_READ_ID, HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import { CloseRoomDialog } from './CloseRoomDialog'
 import { NoDriverBanner } from './NoDriverBanner'
 import { StaleBanner } from './StaleBanner'
-import { DecisionHandleContext, useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
+import { DecisionHandleContext, RoomListContext, useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
 import type { DecisionHandle } from './shell/context'
 import { DecisionBar } from './room/DecisionBar'
 import { HypothesisCard } from './room/HypothesisCard'
@@ -48,29 +49,6 @@ export function RoomScreen() {
   const { roomId = '' } = useParams()
   const [searchParams] = useSearchParams()
   const { user } = useCurrentUser()
-  const { state, presence, conn, error, actions, stale, dismissStale, reload } = useRoom(roomId)
-  // R10: the first replay is done once the log has been folded up to the snapshot's last_seq.
-  const replayTarget = state?.replay_target ?? 0
-  const replaying =
-    replayTarget > 0 && (state?.last_seq ?? 0) < replayTarget && conn !== 'error' && conn !== 'not_found'
-  const { permission, enable: enableNotify } = useRoomAttention(state, user, replaying)
-  const { sentinelRef, unseen, jump } = useJumpToLatest(state?.activity ?? [], replaying)
-  // One topology refetch per executed action, plus the hook's 30 s refresh
-  // while the room is open (stops once closed).
-  const executedCount = useMemo(
-    () => (state ? state.proposals.reduce((n, p) => n + p.executed.length, 0) : 0),
-    [state],
-  )
-  const { topology, updatedAt } = useTopology(state?.pipeline_id ?? '', {
-    refreshKey: executedCount,
-    active: state?.status === 'open',
-  })
-  const [layerFilter, setLayerFilter] = useState<string | null>(null)
-  const [traceOpen, setTraceOpen] = useState(false)
-  const [handoffOpen, setHandoffOpen] = useState(false)
-  const [closeOpen, setCloseOpen] = useState(false)
-  const [copied, setCopied] = useState(false)
-  const [exporting, setExporting] = useState(false)
   const handleRef = useRef<DecisionHandle | null>(null)
   // Below 1280px the rail becomes tabs; the chosen one is remembered per room for this visit.
   const wide = useMediaQuery('(min-width: 1280px)')
@@ -109,6 +87,45 @@ export function RoomScreen() {
     }),
     [setTab],
   )
+  const roomList = useContext(RoomListContext)
+  const elsewhereNeedsMe = useMemo(
+    () => (roomList?.rooms ?? []).some((r) => r.id !== roomId && needsYou(r, user)),
+    [roomList, roomId, user],
+  )
+  const { state, presence, conn, error, actions, stale, dismissStale, reload } = useRoom(roomId)
+  // R10: the first replay is done once the log has been folded up to the snapshot's last_seq.
+  const replayTarget = state?.replay_target ?? 0
+  const replaying =
+    replayTarget > 0 && (state?.last_seq ?? 0) < replayTarget && conn !== 'error' && conn !== 'not_found'
+  const { permission, enable: enableNotify } = useRoomAttention(
+    state,
+    user,
+    replaying,
+    {
+      approve: () => handleRef.current?.approve(),
+      view: () => decisionRegistry.get()?.scrollTo(),
+      readHandoff: () => document.getElementById(HANDOFF_READ_ID)?.click(),
+      steer: () => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Steer the agent"]')?.focus(),
+    },
+    elsewhereNeedsMe,
+  )
+  const { sentinelRef, unseen, jump } = useJumpToLatest(state?.activity ?? [], replaying)
+  // One topology refetch per executed action, plus the hook's 30 s refresh
+  // while the room is open (stops once closed).
+  const executedCount = useMemo(
+    () => (state ? state.proposals.reduce((n, p) => n + p.executed.length, 0) : 0),
+    [state],
+  )
+  const { topology, updatedAt } = useTopology(state?.pipeline_id ?? '', {
+    refreshKey: executedCount,
+    active: state?.status === 'open',
+  })
+  const [layerFilter, setLayerFilter] = useState<string | null>(null)
+  const [traceOpen, setTraceOpen] = useState(false)
+  const [handoffOpen, setHandoffOpen] = useState(false)
+  const [closeOpen, setCloseOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const now = useNow(5_000) // a request past expires_at stops counting as in flight
 
   const headerMembers = useMemo(() => {
@@ -184,6 +201,9 @@ export function RoomScreen() {
           trace: openTrace,
           closeRoom: openClose,
           invite,
+          readHandoff: state.handoffs.some((h) => canAcceptHandoff(user, h))
+            ? () => document.getElementById(HANDOFF_READ_ID)?.click()
+            : undefined,
         }
       : null,
   )
