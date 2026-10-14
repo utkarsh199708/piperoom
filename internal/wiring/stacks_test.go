@@ -91,6 +91,10 @@ func (s *spy) LoadErrors(context.Context, string, time.Time, int) ([]clients.Loa
 	s.hit("LoadErrors")
 	return nil, nil
 }
+func (s *spy) CountByBucket(context.Context, string, string, time.Time, time.Time, time.Duration) ([]clients.MinuteCount, error) {
+	s.hit("CountByBucket")
+	return nil, nil
+}
 func (s *spy) ListConnectors(context.Context) ([]string, error) {
 	s.hit("ListConnectors")
 	return []string{"pa-connector", "pb-connector"}, nil
@@ -352,8 +356,9 @@ func runEach(t *testing.T, reg *tools.Registry, id, table string, own, other *sp
 	return out
 }
 
-// clientFree are the read tools that need no client (runbook text is embedded).
-var clientFree = []string{"runbook_lookup"}
+// clientFree are the read tools that need no client of the set: runbook text is
+// embedded, and debezium_metrics answers "not configured" without a metrics URL.
+var clientFree = []string{"runbook_lookup", "debezium_metrics"}
 
 // TestTwoTenantsToolsHitOnlyTheirOwnClients is the core isolation test: each
 // pipeline's tools, actions and topology reach only the spy built from that

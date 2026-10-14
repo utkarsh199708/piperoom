@@ -18,13 +18,19 @@
 // connector_down also covers a connector that Kafka Connect does not know
 // (HTTP 404): it fires as "missing" at sev2.
 //
-// Known gap (v2): a connector that crash-loops faster than `for` (FAILED for a
-// few seconds, then RUNNING again, repeatedly) is seen as RUNNING most ticks and
-// never fires. v2 needs a restart counter or a flap rule.
+// connector_down also counts task restarts (FAILED -> RUNNING) and reports a
+// task that restarts crashloop_restarts times in crashloop_window as
+// crash-looping, even while it reads RUNNING. Loops faster than the interval
+// stay invisible (crashloop.go).
+//
+// The consumer-group signals (F6): consumer_lag, group_unstable and
+// offset_below_log_start read GroupLag per group (Deps.Lag) and the log-start
+// offsets of the CDC topics (lag_signals.go).
 package watch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"math/rand/v2"
@@ -83,6 +89,16 @@ type RoomSink interface {
 	PostEvidence(ctx context.Context, roomID, text string) error
 }
 
+// EvidenceSink is an optional RoomSink extension (F6): a join that carries
+// the watcher's evidence JSON beside the text, so the service can feed the
+// numbers to the agent as an alert_update (agent.AlertEvidenceText). When the
+// RoomSink implements it, the watcher calls it instead of PostEvidence for
+// every post; evidence is nil for a post without numbers (the "all clear" note
+// in a room the watcher only joined). Same errors as PostEvidence.
+type EvidenceSink interface {
+	PostEvidenceJSON(ctx context.Context, roomID, text string, evidence json.RawMessage) error
+}
+
 // PipelineClients are the clients of one pipeline's client set. Either may be
 // nil, like Deps.Source and Deps.Connect.
 type PipelineClients struct {
@@ -100,6 +116,9 @@ type PipelineClients struct {
 	// the set's pipelines, as with Deps.Registry and Deps.DDL).
 	Registry clients.SchemaRegistryReader
 	DDL      DDLReader
+	// Lag reads consumer-group lag on the set's cluster (nil: the
+	// consumer-group signals stay unknown, as with Deps.Lag).
+	Lag LagReader
 }
 
 // Deps are the watcher's dependencies.
@@ -120,17 +139,24 @@ type Deps struct {
 	Changes  clients.ChangeWriter
 	Registry clients.SchemaRegistryReader
 	DDL      DDLReader
+	// Lag reads consumer-group lag (wire it from the same Kafka client). Nil:
+	// consumer_lag, group_unstable and offset_below_log_start stay unknown,
+	// with one log line. offset_below_log_start also needs Kafka for the
+	// log-start offsets.
+	Lag LagReader
 	// ClientsFor, when set, gives each pipeline the clients of its own client
 	// set (docs/design/tenancy.md section 5) and Source, Connect and Kafka are
-	// not used. Pipelines of one set share each read of a tick.
+	// not used (nor Lag). Pipelines of one set share each read of a tick.
 	ClientsFor func(pipelineID string) PipelineClients
 	Owners     *owners.Owners
 	// Rooms is required in mode "rooms"; modes "log" and "off" never call it.
 	Rooms RoomSink
 	// Config comes from config.ParseWatch.
 	Config config.Watch
-	// MaxOpenRooms is max_open_watcher_rooms: the most rooms this watcher keeps
-	// open at once. Wire it to PIPEROOM_MAX_AGENTS. Zero means 3.
+	// MaxOpenRooms is the most rooms this watcher keeps open at once. Wire it
+	// from PIPEROOM_WATCH_MAX_OPEN_ROOMS (config.ParseWatchMaxOpenRooms), not
+	// from PIPEROOM_MAX_AGENTS: a room beyond the agent pool still opens, gets
+	// the triage pass and queues for an agent. Zero means 6.
 	MaxOpenRooms int
 	// Clock defaults to the wall clock.
 	Clock Clock
@@ -147,8 +173,8 @@ const (
 	// overrunMargin: a tick that ends less than this before the next one is
 	// due has overrun (design §3: interval − 5 s).
 	overrunMargin = 5 * time.Second
-	// defaultMaxOpenRooms matches PIPEROOM_MAX_AGENTS.
-	defaultMaxOpenRooms = 3
+	// defaultMaxOpenRooms matches config.DefaultWatchMaxOpenRooms.
+	defaultMaxOpenRooms = 6
 	// stormThreshold: this many pipelines on one signal in one tick = one room.
 	stormThreshold = 3
 )
@@ -156,7 +182,8 @@ const (
 // signalIDs lists the signals in a fixed order, so titles and logs are stable.
 // New signals go at the end so existing titles keep their order.
 var signalIDs = []string{owners.SignalConnectorDown, owners.SignalSlotInactive, owners.SignalSlotWAL,
-	owners.SignalDLQGrowth, owners.SignalConfigRisk}
+	owners.SignalDLQGrowth, owners.SignalConfigRisk,
+	owners.SignalConsumerLag, owners.SignalGroupUnstable, owners.SignalOffsetBelowLogStart}
 
 // DedupKey is the alert dedup key of a pipeline's watcher room: one open
 // watcher room per pipeline.
@@ -171,6 +198,10 @@ type pipeState struct {
 	// dlqFirst is, per DLQ topic, when the current growth episode was first
 	// seen (the first rising sample). It is cleared when the signal quiets.
 	dlqFirst map[string]time.Time
+	// groups is the memory of each consumer group (lag samples, states).
+	groups map[string]*groupMem
+	// taskHist is each connector task's recent state changes (crash loops).
+	taskHist map[string]*taskHist
 	// risks are the current config findings of the pipeline (codes only), added
 	// to the evidence of whatever signal opens a room.
 	risks []map[string]any
@@ -216,6 +247,7 @@ type Watcher struct {
 	src        SourceDB
 	conn       ConnectClient
 	kafka      clients.DLQReader
+	lag        LagReader
 	clientsFor func(pipelineID string) PipelineClients
 	own        *owners.Owners
 	rooms      RoomSink
@@ -255,6 +287,8 @@ type Watcher struct {
 	ddlOK      map[string]time.Time   // client set -> last tick whose DDL rows were all recorded
 	ddlWarned  map[string]bool
 	chgFailing bool
+	// lagNoReaderLogged keeps the "no lag reader" line to one.
+	lagNoReaderLogged bool
 }
 
 const maxClosedRemembered = 256
@@ -294,7 +328,7 @@ func New(d Deps) (*Watcher, error) {
 		cfg.Cooldown = 60 * time.Minute
 	}
 	w := &Watcher{
-		src: d.Source, conn: d.Connect, kafka: d.Kafka, clientsFor: d.ClientsFor, own: d.Owners, rooms: d.Rooms,
+		src: d.Source, conn: d.Connect, kafka: d.Kafka, lag: d.Lag, clientsFor: d.ClientsFor, own: d.Owners, rooms: d.Rooms,
 		cfg: cfg, maxRooms: d.MaxOpenRooms, clock: d.Clock, log: d.Log, jitter: d.Jitter,
 		pipes: map[string]*pipeState{}, closed: map[string]bool{}, storms: map[string][]string{},
 		dlqState: map[string]*dlqTopicState{}, dlqSeen: map[string]dlqSeen{},
