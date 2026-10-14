@@ -18,6 +18,8 @@ import (
 	"piperoom/migrations"
 )
 
+const authPruneMigrationVersion int64 = 10
+
 // The prune DELETEs must use an index, or every run scans the whole table.
 // The test seeds enough rows for the planner to prefer an index on its own
 // (ANALYZE first), then checks the plan the code's SQL actually gets. Each
@@ -57,6 +59,23 @@ func TestAuthPruneDeletesUseIndexesOnPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatalf("goose provider: %v", err)
 	}
+	sources := provider.ListSources()
+	if len(sources) == 0 {
+		t.Fatal("goose provider has no migration sources")
+	}
+	var latestVersion int64
+	var rollbackVersion int64
+	for _, source := range sources {
+		if source.Version > latestVersion {
+			latestVersion = source.Version
+		}
+		if source.Version < authPruneMigrationVersion && source.Version > rollbackVersion {
+			rollbackVersion = source.Version
+		}
+	}
+	if latestVersion == 0 || rollbackVersion == 0 {
+		t.Fatalf("goose migration versions: latest=%d, before auth prune=%d", latestVersion, rollbackVersion)
+	}
 
 	// Connection for EXPLAIN and seeding, pinned to the same schema.
 	conn, err := pgx.ConnectConfig(ctx, sqlCfg)
@@ -70,21 +89,21 @@ func TestAuthPruneDeletesUseIndexesOnPostgres(t *testing.T) {
 		if _, err := provider.Up(ctx); err != nil {
 			t.Fatalf("%s: migrate up: %v", label, err)
 		}
-		if v, err := provider.GetDBVersion(ctx); err != nil || v != 10 {
-			t.Fatalf("%s: db version = %d, %v; want 10", label, v, err)
+		if v, err := provider.GetDBVersion(ctx); err != nil || v != latestVersion {
+			t.Fatalf("%s: db version = %d, %v; want latest migration %d", label, v, err, latestVersion)
 		}
 	}
 	upAll("first up")
 
-	seed(t, ctx, conn)
+	seedPruneRows(t, ctx, conn)
 
 	cutoff := time.Now().UTC().Add(-auth.SessionGrace)
 	at := time.Now().UTC()
 
 	// The plans for the exact statements authprune.go issues.
 	t.Run("planner choice", func(t *testing.T) {
-		sessPlan := explain(t, ctx, conn, pruneSessionsSQL, cutoff)
-		lsPlan := explain(t, ctx, conn, pruneLoginStatesSQL, at)
+		sessPlan := explainPrunePlan(t, ctx, conn, pruneSessionsSQL, cutoff)
+		lsPlan := explainPrunePlan(t, ctx, conn, pruneLoginStatesSQL, at)
 		t.Logf("sessions prune plan:\n%s", sessPlan)
 		t.Logf("login_states prune plan:\n%s", lsPlan)
 		if !strings.Contains(sessPlan, "sessions_expires_at_idx") || !strings.Contains(sessPlan, "sessions_revoked_at_idx") {
@@ -107,19 +126,20 @@ func TestAuthPruneDeletesUseIndexesOnPostgres(t *testing.T) {
 		if _, err := tx.Exec(ctx, `SET LOCAL enable_seqscan = off`); err != nil {
 			t.Fatalf("set: %v", err)
 		}
-		plan := explainTx(t, ctx, tx, pruneSessionsSQL, cutoff)
+		plan := explainPrunePlanTx(t, ctx, tx, pruneSessionsSQL, cutoff)
 		t.Logf("sessions prune plan (seqscan off):\n%s", plan)
 		if !strings.Contains(plan, "sessions_expires_at_idx") || !strings.Contains(plan, "sessions_revoked_at_idx") {
 			t.Errorf("an OR arm of the sessions prune cannot use its index:\n%s", plan)
 		}
 	})
 
-	// Down to 00008 removes exactly the two session indexes; up restores them.
-	if _, err := provider.DownTo(ctx, 8); err != nil {
-		t.Fatalf("migrate down to 8: %v", err)
+	// Roll back migration 00010 and any later migrations to the highest source
+	// version before this PR's migration; the isolated schema preserves main's base.
+	if _, err := provider.DownTo(ctx, rollbackVersion); err != nil {
+		t.Fatalf("migrate down to %d: %v", rollbackVersion, err)
 	}
-	if v, err := provider.GetDBVersion(ctx); err != nil || v != 8 {
-		t.Fatalf("after down: version = %d, %v; want 8", v, err)
+	if v, err := provider.GetDBVersion(ctx); err != nil || v != rollbackVersion {
+		t.Fatalf("after down: version = %d, %v; want %d", v, err, rollbackVersion)
 	}
 	if got := indexNames(t, ctx, conn, "sessions_expires_at_idx", "sessions_revoked_at_idx"); len(got) != 0 {
 		t.Fatalf("after down: indexes still present: %v", got)
@@ -144,7 +164,7 @@ func dropPruneSchema(url, schema string) {
 
 // seed fills sessions and login_states so an index is the cheap plan: about 1%
 // of rows match each prune condition, and ANALYZE gives the planner the counts.
-func seed(t *testing.T, ctx context.Context, conn *pgx.Conn) {
+func seedPruneRows(t *testing.T, ctx context.Context, conn *pgx.Conn) {
 	t.Helper()
 	const n = 50000
 	if _, err := conn.Exec(ctx, `
@@ -167,7 +187,7 @@ FROM generate_series(1, $1::int) g`, n); err != nil {
 	}
 }
 
-func explain(t *testing.T, ctx context.Context, conn *pgx.Conn, query string, arg any) string {
+func explainPrunePlan(t *testing.T, ctx context.Context, conn *pgx.Conn, query string, arg any) string {
 	t.Helper()
 	rows, err := conn.Query(ctx, "EXPLAIN "+query, arg)
 	if err != nil {
@@ -176,7 +196,7 @@ func explain(t *testing.T, ctx context.Context, conn *pgx.Conn, query string, ar
 	return collectPlan(t, rows)
 }
 
-func explainTx(t *testing.T, ctx context.Context, tx pgx.Tx, query string, arg any) string {
+func explainPrunePlanTx(t *testing.T, ctx context.Context, tx pgx.Tx, query string, arg any) string {
 	t.Helper()
 	rows, err := tx.Query(ctx, "EXPLAIN "+query, arg)
 	if err != nil {

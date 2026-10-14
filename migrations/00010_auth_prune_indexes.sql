@@ -10,8 +10,8 @@
 -- prune's "revoked_at IS NOT NULL AND revoked_at < cutoff" arm can use it.
 --
 -- Plain CREATE INDEX (not CONCURRENTLY): this runs once at server startup,
--- before the listener opens, and the sessions table is small. CONCURRENTLY
--- cannot run inside goose's transaction and can leave an INVALID index behind
+-- before the listener opens, and the sessions table is small. CONCURRENTLY would
+-- require a goose NO TRANSACTION annotation and can leave an INVALID index behind
 -- if it fails, so it is not worth the extra moving parts here.
 CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions (expires_at);
 CREATE INDEX IF NOT EXISTS sessions_revoked_at_idx ON sessions (revoked_at)
