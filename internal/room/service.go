@@ -242,6 +242,9 @@ type Service struct {
 	// alertRooms maps the dedup key of each open webhook room to that room, so
 	// a repeat of the same alert joins the room instead of opening another.
 	alertRooms map[string]string
+
+	// list pushes rooms-list changes to SubscribeRooms (listhub.go).
+	list *listHub
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -310,6 +313,7 @@ func New(d Deps) *Service {
 		cancel:       cancel,
 		rooms:        map[string]*roomState{},
 		alertRooms:   map[string]string{},
+		list:         newListHub(),
 	}
 	if coord, ok := d.Store.(store.Coordinator); ok {
 		s.coord = coord
@@ -719,6 +723,7 @@ var agentEventTypes = map[events.Type]bool{
 	events.AgentMessage:    true,
 	events.AgentHypothesis: true,
 	events.AgentUsage:      true,
+	events.AgentTriage:     true,
 }
 
 // outsideRun is the run number of an agent event written outside any agent run

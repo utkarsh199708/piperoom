@@ -229,9 +229,10 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 
 // aggregateRoutes return or act on several pipelines' objects; each filters by
 // tenant and has its own test here (TestRoomListAndMetricsAreFiltered,
-// TestCreateAndAlertRoutingRespectTenants).
+// TestCreateAndAlertRoutingRespectTenants, TestListGatewayTenancyFilter).
 var aggregateRoutes = []string{
 	"GET /api/rooms",
+	"GET /api/rooms/ws",
 	"GET /api/shadow/metrics",
 	"POST /api/rooms",
 	"GET /api/pipelines",

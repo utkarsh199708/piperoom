@@ -801,6 +801,7 @@ func (s *Service) foldLocked(ctx context.Context, roomID string, st *roomState, 
 	s.setDeadline(&st.snap)
 	trackPending(st, e)
 	s.feedInbox(st, e)
+	s.markListDirtyLocked(roomID)
 	if remote && wasOpen && !s.roomOpen(st) {
 		s.closedElsewhereLocked(ctx, roomID, st)
 	}
@@ -876,6 +877,7 @@ func (s *Service) evictLocked(roomID string, st *roomState) {
 		delete(s.alertRooms, st.dedupKey)
 	}
 	delete(s.rooms, roomID)
+	s.markListDirtyLocked(roomID)
 }
 
 // refreshAll brings the whole cache up to the store: rooms other replicas
@@ -972,6 +974,7 @@ func (s *Service) refreshAll(ctx context.Context) error {
 		if b.snap.Status == "open" {
 			s.indexAlertRoomLocked(ctx, id, st)
 		}
+		s.markListDirtyLocked(id)
 	}
 	return nil
 }
