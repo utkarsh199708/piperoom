@@ -1,196 +1,183 @@
-# Design: what the room log stores, and for how long
+# Design: what the room log stores — deltas on `retention.md`
 
-Task C9, doc 3 of 3 (`auth.md`, `webhook-auth.md`). Design only, no code changed. Written against `main` @ `f417abf`;
-A5 facts are cited "(a5 @ 935f17d)" from the lead's task file.
-**Findings:** F3 (record values in a permanent, broadcast log), F6 (no limit on log growth). Audit needs for F1/F2/F10.
-GDPR is cited as a reason for limits (Art. 5(1)(c) data minimisation, 5(1)(e) storage limitation, 17 erasure); this is not legal advice and the customer's own obligations win.
+Task C9, doc 3 of 3. This is a design only; no code is changed. **Findings:** F3 (sensitive text in a permanent,
+broadcast log) and the audit needs of F1/F2/F10. GDPR is cited as a reason for limits: Art. 5(1)(c) data
+minimisation, 5(1)(e) storage limitation, Art. 17 erasure. This is not legal advice; the customer's own obligations
+take precedence.
 
-## 1. Problem
+**Baseline: `docs/design/retention.md`** (the lead's contract, merged in #113; implemented by `t4/retention`). It
+already decides:
+- the open-room limit (`PIPEROOM_MAX_OPEN_DAYS`);
+- per-pipeline closed-room retention (`PIPEROOM_RETENTION_DAYS`, `owners.yaml` `retention_days:`);
+- per-room caps (`PIPEROOM_ROOM_MAX_EVENTS`, `PIPEROOM_ROOM_MAX_BYTES`), enforced in the store;
+- the 64 KiB tool-data cap (`PIPEROOM_EVENT_MAX_DATA_BYTES`);
+- admin room delete as an erase, with `room_deletions` audit rows;
+- the optional archive (`PIPEROOM_ARCHIVE_DIR`), which holds the export with its `integrity` hash.
 
-- `room_events` is append-only with `PK(room_id, seq)`, and `ON DELETE CASCADE` from `rooms` (a5 @ 935f17d, `migrations/00001_init.sql`). `Seq` has no gaps (`events.go:66-67`);
-  `Subscribe` never skips or repeats (`events.go:84-86`); WS `after=N` replays everything after `N` (`docs/api.md:128-143`).
-- `rebuild` folds the whole log from seq 0 for every room snapshot (`internal/room/service.go:199`), and the hand-off reads all events (`service_handoff.go:149`). So rows cannot simply be deleted.
-- Everything is broadcast live and kept forever. F3 is fixed at the source for the row tools (`a1ceb36`, `bd6e5e9`: `Data` keeps key and timestamp only), but other payloads still hold sensitive text (inventory below).
-- Who approved is stored only as the event's `Actor` (the `approvals` table has no approver column, a5 @ 935f17d). If events are pruned, so is the audit trail.
-- Nothing caps event size, so one tool result or alert can add megabytes (F6).
+This doc does not change any of that and adds no retention period or size cap of its own. It proposes four deltas.
 
-## 2. Inventory: where PII or secrets can sit
+## 1. What main does today, beyond `retention.md`
 
-| Event type (`events.go`) | Fields that can hold sensitive data | Why |
-|---|---|---|
-| `room.created` (:101) | `Alert` (raw webhook body, up to 1 MB), `Title` | sender text; may contain hostnames, user names, tokens in labels |
-| `agent.tool_call` (:126) | `Input` | key values, e.g. `pg_row` key, table names |
-| `agent.tool_result` (:134) | `Data`, `Summary` | `pg_row`/`warehouse_row` now reduced; `Query` and `Username` in `pg_long_transactions` / `pg_recent_ddl` (`clients.Transaction`, `clients.DDLChange`) can hold SQL with literals and role names; connector config (A2 already redacts secret-like keys) |
-| `agent.message`, `agent.hypothesis` (:148, :155) | `Text` | model text may repeat any of the above |
-| `comment.added`, `steer.suggested`, `steer.sent` (:162-178) | `Text` | free text from people; pasted logs, tokens, customer ids |
-| `proposal.created` (:199) | `Params`, `Description`, `Risk`, `Rollback` | params are action-validated (connector, subject), descriptions are model text |
-| `approval.given` / `approval.rejected` (:209, :215) | `Reason` (free text); `Subject` (proposed in `auth.md`) | `Subject` is a personal identifier |
-| `action.executed` (:222) | `Output` | text returned by Connect or the Registry |
-| `handoff.created` (:240) | `Summary.*` | model text from the whole room |
-| `trace.pinned` (:261) | `Key`, `Stages[].Facts` | record key and per-stage facts |
-| every event | `Actor.Name` | a person's display name |
+| What | Where |
+|---|---|
+| Read-tool summaries, data and errors are masked for secrets before they are emitted, stored or wrapped for the model | `internal/agent/redact.go` (`scrubToolResult`, `scrubToolError`), rules in `internal/redact` |
+| Past room text is redacted when the similar-incidents index is built | `internal/tools/similarincidents/room.go` |
+| Human text (comments, steers, suggestions, rejection reasons), the raw alert body in `room.created.alert`, and `action.executed.output` are stored as sent | `internal/store/store.go:395` (`PG.Append` marshals the payload unchanged) |
+| A snapshot is rebuilt by folding the whole log from seq 0 in pages of 1000 (`Load` for every room at start, and on a cache miss) | `internal/room/service.go:460-480`, callers `:295`, `:446` |
+| Who approved is the event's `Actor` (`kind`, `id`, `name`, `verified`); no other record of it survives a purge or delete except `room_deletions` (ids and counts only) | `internal/events/events.go:73`, `retention.md` §6 |
+| Person erasure: none. `retention.md` erases rooms; `auth.md` unbinds an IdP identity, but the person's display name stays in every event they wrote | `docs/design/auth.md` (Unbind), `retention.md` §6 |
 
-## 3. Options
+## 2. Delta 1 — write-time redaction of human and system text
 
-### 3a. Where to redact at write time
+**Problem.** Secret masking covers only what the agent's read tools return. Engineers paste logs, connection strings
+and tokens into comments and steers. Alert senders put tokens and URLs with user-info into labels. Connect returns
+config in action output. All of it is stored for the room's lifetime and broadcast to every viewer, Slack and the
+export.
 
-| | A. In each tool (A3/A2) | B. In the agent `Sink` (A4) | C. In `Store.Append` (A5) |
+| | A. At each route (comments, steers, webhook, executor) | B. One wrapper around `events.Store.Append` (recommended) | C. A Postgres trigger |
 |---|---|---|---|
-| Security | best at the source, but every new tool must remember | covers agent events only; human events (comments, steers) bypass it | one choke point for **all** event types, including human text and webhook bodies |
-| Effort | already done for row tools | small | medium; one policy table |
-| Gap | no cover for human text | no cover for human text | cannot know what a tool meant to hide, so it also needs caps and key-based rules |
+| Coverage | only the routes someone remembered | every event type, every writer (room service, watcher, executor, shadow) | every row, including scripts |
+| Fits the size caps | yes | yes, if it runs before the store counts bytes | no: the count is taken in Go before the insert |
+| Effort | several small changes | one wrapper type, one policy table | PL/pgSQL rules duplicating `internal/redact` |
 
-### 3b. Retention without breaking replay
+**Proposal (B).**
+- `store.Redacting(events.Store, *redact.Redactor) events.Store` wraps `Append` (and `AppendShadow`). It applies
+  `redact.JSON` to the payload before it is passed on. The rules are the existing ones in `internal/redact`, and so
+  are the stats, which are logged as counts only, never values.
+- `cmd/server` wires the wrapper once around the real store, so the byte count of `retention.md` §5.2 sees the
+  redacted payload.
+- **Policy per event type.** Free text and raw bodies are redacted. Ids, seqs, layers, step indexes and the action
+  `params` are not, because changing `params` would break `params_hash` (`auth.md`). A unit test fails when a new
+  `events.Type` has no policy entry.
+- **Dedup is unaffected.** The byte-identical dedup key is hashed from the incoming body before anything is stored
+  (`internal/alertin/parse.go:335-340`). The policy must leave `room.created.dedup_key` unredacted, because
+  `LastRoomByDedupKey` reads it. A test sends the same body containing a token twice and expects one room.
+- The agent-side scrub stays: it masks the text before the model sees it, which this wrapper cannot do. On agent
+  events the wrapper is a no-op in practice, because masking is idempotent.
 
-| | A. Keep forever, write-time redaction only | B. Compact in place: keep `room_id, seq, type, actor, at`, remove content from `payload` (recommended) | C. Archive closed rooms after N days, then delete |
+No contract file changes: `events.Store` keeps its signature. The doc comment for `Append` gains one sentence ("may
+mask secrets in the payload before storing"), which is for the lead to add.
+
+## 3. Delta 2 — audit hash chain with an external anchor
+
+**Problem.** After a retention purge or an admin delete, nothing shows who approved which action, unless the operator
+set an archive. The archive holds all of the room's content, which defeats the erase. Inside the database, anyone with
+`UPDATE` on `room_events` can rewrite an approval. The export `integrity` hash only covers one export at the moment it
+is taken.
+
+| | A. Keep the archive only | B. `audit_log` table with a per-room hash chain (recommended) | C. B plus a daily anchor of chain heads outside the database (recommended with B) |
 |---|---|---|---|
-| Replay / `after=N` | unchanged | unchanged: every seq still exists, so no gaps and no skipped events | a client below the first kept seq gets nothing |
-| Storage limit (GDPR 5(1)(e)) | not met | met for content; audit rows stay for their own period | met |
-| Audit | full | preserved: audit types keep non-text fields | lost unless copied elsewhere |
-| Snapshot rebuild | unchanged | must tolerate removed fields (§4 rule 6) | rooms vanish |
-| Effort | none | medium (compactor + client rendering) | medium + a 410 path in API and WS |
-| Dev impact | none | none (off when env empty) | none |
+| Survives purge without keeping content | no | yes: ids, types, actor ids, hashes; no free text | yes |
+| Detects edits by a DBA or a restored backup | no | no: the whole chain can be recomputed | yes, back to the last anchor |
+| Effort | none | migration + insert in the append transaction | + one daily loop and a file sink |
 
-If option C were chosen, `GET /api/rooms/{id}/events?after=N` on a deleted room answers `410 gone` with `{"error":{"code":"gone"}}`, and the WebSocket sends an `error` message with
-`code:"gone"` then closes. A kept room with `after` below its first kept seq cannot occur, because C deletes whole rooms only.
+**Proposal (B + C).**
+- New table `audit_log(room_id, seq, type, actor_kind, actor_id, at, fields jsonb, prev_hash bytea, hash bytea, primary key (room_id, seq))`.
+  - `hash = SHA-256(prev_hash || JCS(row without hash))`, one chain per room.
+  - `fields` holds only non-text fields: `pipeline_id`, `proposal_id`, `layer`, `step_index`, `ok`, `params_hash`.
+  - It holds no `actor.name`. That way erasing a person (Delta 4) never breaks a chain.
+- Rows are written in the same transaction as each audit-class append: `room.created`, `room.closed`,
+  `proposal.created`, `approval.given`, `approval.rejected`, `action.executed`, `control.*`, `handoff.accepted`.
+- The application role gets `INSERT, SELECT` on `audit_log`, not `UPDATE` or `DELETE`. Audit rows are kept after a
+  purge or delete, like `room_deletions`; their own retention is Open question 1.
+- **Anchor.** With `PIPEROOM_AUDIT_ANCHOR_DIR` set:
+  - Once a day, the leader (`replicas.md` §3) writes one file `<dir>/<yyyy-mm-dd>.jsonl` with `(room_id, seq, hash)`
+    for every chain that changed.
+  - The operator points the directory at append-only storage, such as an object-store bucket with a retention lock.
+  - `devctl audit verify <room>` recomputes the chain and compares it with the last anchored head.
+- Honest limit: edits made after the last anchor and before the next one are not detected.
 
-## 4. Recommendation
+Contract change in `internal/config/config.go`. `git apply --check` passes on main:
 
-1. **Redact in `Store.Append` (3a-C), with sources still minimising (3a-A).** The append path applies a per-type field policy and caps before writing, so the broadcast
-   (which comes from the stored event) is redacted too.
-   - `agent.tool_result.Data` > `MaxToolDataBytes` (16 KiB) → `{"truncated":true,"bytes":N}`. `Alert` > `MaxAlertBytes` (64 KiB) → same shape. Any `Text`/`Output`/`Reason` > `MaxTextBytes` (4 KiB) is cut with an ellipsis.
-   - JSON values under keys matching `password|secret|token|authorization|api[_-]?key|credential` (case-insensitive, any depth) → `"***"`, for `Alert`, `Data`, `Input`, `Params`. A2's `sensitiveKey` in `kafkatools` is the model.
-   - URL user-info `scheme://user:pass@host` → `scheme://***@host` in all text fields.
-   - A3 strips literals from SQL in `Query` (strings and numbers → `?`) before it enters `Data`.
-2. **Compact in place (3b-B).** `events.Compactor.Compact(ctx, closedBefore)` runs from a ctx-bound loop in `cmd/server`. For rooms closed before `now - PIPEROOM_RETENTION_CONTENT_DAYS`:
-   - **Content types** (`agent.*`, `comment.added`, `steer.*`, `handoff.created`, `trace.pinned`): payload becomes `{"_redacted":true}` plus the non-sensitive structural keys (`step_id`, `tool`, `tool_use_id`, `is_error`, `comment_id`, `suggestion_id`, `handoff_id`, `table`).
-   - **Audit types** (`room.created`, `room.closed`, `proposal.created`, `approval.*`, `action.executed`, `control.*`, `handoff.accepted`): keep all non-free-text fields (`pipeline_id`, `severity`, `proposal_id`, `layer`, `step_index`, `ok`, `Subject`, `Params`, `required_layers`);
-     remove `Alert`, `Description`, `Risk`, `Rollback`, `Reason`, `Output`; keep `Title` and `Params` (they are action-validated, so they hold names not data), and set `_redacted:true`.
-   - Idempotent; touches `payload` only. `Seq`, `Type`, `Actor`, `At` never change.
-3. **Audit rows outlive content.** A second, shorter list is kept for `PIPEROOM_RETENTION_AUDIT_DAYS` after close: in the same transaction as each audit-type append, A5 also inserts into an append-only `audit_log` table
-   (`room_id, seq, type, actor, at, retained fields, prev_hash, hash`) where `hash = SHA-256(prev_hash || canonical row)`, one chain per room. The application role gets `INSERT, SELECT` only (no `UPDATE`/`DELETE`)
-   (OWASP Logging cheat sheet, "Protection"). After the audit period the room and its audit rows are deleted together.
-   Honest limit: a chain inside the same database is tamper-evident only against someone without `UPDATE` on it; a DBA or a restored backup can rewrite a whole chain.
-   So once a day the service writes every room's current chain head (`room_id, seq, hash`) as one line to an **external, append-only store** the application role cannot
-   modify (object storage with retention lock, or a separate write-only log account). `verify-audit` recomputes a chain and compares it with the last external head.
-4. **Defaults.** Both settings empty = nothing is compacted or deleted (development). The pilot proposal: content 30 days, audit 400 days (Open question 1).
-5. **Erasure (Art. 17).** `cmd/server erase --user <id>`: replaces `Actor.Name` with `(removed)` in that user's events and clears `Subject`; the internal `Actor.ID` stays as a pseudonym, and clearing `iss`/`sub`/`name` on the `users` row (`auth.md` §3.7) severs it from a person.
-6. **Rebuild must tolerate compaction, and must stop folding from seq 0.** `rebuild` (`service.go:199`) uses only fields that survive for closed rooms (`title`, `severity`, `pipeline_id`,
-   `status`, `opened_at`, `closed_at`, `resolution`, driver, approvals). Hypothesis text and open suggestions are empty after compaction. A5 tests this.
-   Folding the whole log on every snapshot read is O(events) per request and is the real limit on long rooms. Add `room_checkpoints(room_id, seq, state jsonb, at)`:
-   after every 500 appends (and at `room.closed`) the service stores the folded state at that `seq`; `rebuild` loads the latest checkpoint and folds only events after it.
-   Checkpoints are derived data: deleting them is always safe, and the compactor deletes a room's checkpoints when it deletes the room. The **client contract is unchanged**
-   (`after=0` still replays the whole log); a client-side checkpoint (`GET /api/rooms/{id}` returning `last_seq` + state, then `after=last_seq`) is Open question 7.
-7. **Compaction runs on one replica at a time.** The loop takes `pg_try_advisory_lock(<constant>)` per tick and skips the tick if another replica holds it. Redaction and deletion
-   go in batches of 1,000 events per transaction, oldest rooms first, so a large room never holds a long lock. Metrics: events compacted, rooms deleted, lag between a room's due
-   date and its compaction.
-8. **Growth.** With caps from rule 1, a busy room is ~5–20 MB of JSON; at 1,000 rooms a month the table is tens of GB a year before compaction and a few GB after. That fits one
-   Postgres; range-partitioning `room_events` by month of `at` (purge = drop partition) is worth it only past ~100 M rows and is not proposed now (Open question 8).
-9. **Clients** treat `payload._redacted == true` as "content removed by retention policy" and render the event row without its text.
-
-## 5. Contract changes
-
-`internal/events/events.go` (caps, marker, `Compactor`; additive, `Store` is unchanged):
-````diff
---- a/internal/events/events.go
-+++ b/internal/events/events.go
-@@ -86,6 +86,24 @@
- 	Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-chan Event, error)
- }
- 
-+// Size caps applied by the room service when it appends an event (docs/design/event-retention.md).
-+const (
-+	MaxToolDataBytes = 16 << 10 // AgentToolResultPayload.Data; larger → {"truncated":true,"bytes":N}
-+	MaxAlertBytes    = 64 << 10 // RoomCreatedPayload.Alert
-+	MaxTextBytes     = 4 << 10  // comment, steer, hypothesis, agent message, action output, rejection reason
-+)
-+
-+// PayloadRedacted is the payload key set to true on an event whose content was removed after retention.
-+const PayloadRedacted = "_redacted"
-+
-+// Compactor removes content from the events of closed rooms. It never changes Seq, Type, Actor or At, so replay
-+// by Seq still works. It is separate from Store so existing Store implementations keep compiling.
-+type Compactor interface {
-+	// Compact redacts the payloads of rooms closed before the given time and returns how many events it changed.
-+	// It is idempotent. Event types that are audit records keep their non-text fields.
-+	Compact(ctx context.Context, closedBefore time.Time) (int, error)
-+}
-+
- // Decode unmarshals an event payload into T.
- func Decode[T any](e Event) (T, error) {
- 	var v T
-````
-`docs/api.md` (replay rule):
-````diff
---- a/docs/api.md
-+++ b/docs/api.md
-@@ -140,4 +140,4 @@
- { "type": "presence", "state": "viewing" }    // send every 20 s; "away" when tab hidden
- ```
- The server marks a member `away` after 45 s without any client message (2× the heartbeat plus slack).
--Rules: the server first replays every event with `seq > after`, then streams live events. Events are never skipped or repeated. **On first open of a room the client connects with `after=0`** (full replay); on reconnect it passes its highest seen seq. Presence is not stored in the event log.
-+Rules: the server first replays every event with `seq > after`, then streams live events. After the retention period (`docs/design/event-retention.md`) the events of a closed room stay in the log with the same `seq`, `type`, `actor` and `at`, but free-text and data fields in `payload` are removed and `payload._redacted` is `true`; clients must render such events without those fields. Events are never skipped or repeated. **On first open of a room the client connects with `after=0`** (full replay); on reconnect it passes its highest seen seq. Presence is not stored in the event log.
-````
-`internal/config/config.go` (empty = off):
 ````diff
 --- a/internal/config/config.go
 +++ b/internal/config/config.go
-@@ -18,6 +18,8 @@
- 	UsersFile         string // USERS_FILE
- 	Model             string // PIPEROOM_MODEL
- 	Effort            string // PIPEROOM_EFFORT
-+	RetentionContent  string // PIPEROOM_RETENTION_CONTENT_DAYS (days after room.closed; "" = never redact content)
-+	RetentionAudit    string // PIPEROOM_RETENTION_AUDIT_DAYS (days after room.closed; "" = never delete)
- 	// The Anthropic SDK reads ANTHROPIC_API_KEY itself; it is never stored here.
+@@ -143,6 +143,9 @@ type Config struct {
+ 	RoomMaxBytes      string // PIPEROOM_ROOM_MAX_BYTES: stored payload bytes of one room log; default 256MiB
+ 	EventMaxDataBytes string // PIPEROOM_EVENT_MAX_DATA_BYTES: tool_result.data (and action.executed.output) bytes of one event; default 64KiB
+ 	ArchiveDir        string // PIPEROOM_ARCHIVE_DIR: absolute directory; when set, retention writes the room's export there before a purge, and an admin delete does when asked (?archive=true); empty = off
++	// AuditAnchorDir receives one file per day with every room's audit chain head
++	// (docs/design/event-retention.md); point it at append-only storage. Empty = off.
++	AuditAnchorDir string // PIPEROOM_AUDIT_ANCHOR_DIR
  
- 	// Kafka connection security (internal/clients/netsec). Empty = PLAINTEXT, no login (dev stack).
-@@ -60,6 +62,8 @@
- 		UsersFile:         get("USERS_FILE", "dev/users.yaml"),
- 		Model:             get("PIPEROOM_MODEL", "claude-opus-5-5"),
- 		Effort:            get("PIPEROOM_EFFORT", "high"),
-+		RetentionContent:  get("PIPEROOM_RETENTION_CONTENT_DAYS", ""),
-+		RetentionAudit:    get("PIPEROOM_RETENTION_AUDIT_DAYS", ""),
+ 	// Login (docs/design/auth.md §6). Raw strings; the auth package parses and
+ 	// checks them at start-up. Not wired until auth PR 2.
+@@ -256,6 +259,7 @@ func Load() Config {
+ 		RoomMaxBytes:      get("PIPEROOM_ROOM_MAX_BYTES", DefaultRoomMaxBytes),
+ 		EventMaxDataBytes: get("PIPEROOM_EVENT_MAX_DATA_BYTES", DefaultEventMaxDataBytes),
+ 		ArchiveDir:        get("PIPEROOM_ARCHIVE_DIR", ""),
++		AuditAnchorDir:    get("PIPEROOM_AUDIT_ANCHOR_DIR", ""),
  
- 		KafkaSecurityProtocol: get("KAFKA_SECURITY_PROTOCOL", ""),
- 		KafkaSASLMechanism:    get("KAFKA_SASL_MECHANISM", ""),
+ 		AuthMode:            get("PIPEROOM_AUTH_MODE", DefaultAuthMode),
+ 		DevAllowNonLoopback: get("PIPEROOM_DEV_ALLOW_NONLOOPBACK", ""),
 ````
 
-## 6. Migration from today's dev mode
+## 4. Delta 3 — snapshot checkpoints (measure first)
 
-1. Caps and key redaction apply from the first deploy; existing rows are not rewritten except by `Compact`. Dev stays on empty retention settings, so nothing is compacted.
-2. `audit_log` is filled for new events only. For rooms created before the migration, the chain starts at the first audit event after it (a documented gap).
-3. `MaxAlertBytes` (64 KiB) is smaller than `alertin.MaxBodyBytes` (1 MiB): alerts between the two are stored as `{"truncated":true,"bytes":N}`. The webhook still accepts them.
-4. Run `Compact` once on a copy of a real dataset before the first production use; it must be a no-op on rows already compacted.
+**Problem.** `rebuild` folds every event of a room (`internal/room/service.go:460`). It runs for every room at start
+(`Load`) and on every cache miss, and on followers it also runs for rooms another replica opened (`replicas.md` §6).
+With the `retention.md` cap of 20 000 events (and up to 490 000 when configured) this cost is bounded but can still be
+large.
 
-## 7. Tasks per owner
+**Proposal.**
+- **Step 1 (A5, small).** Add a benchmark of `rebuild` on rooms of 20 000 and 200 000 events from the fake store, and
+  measure start time on a seeded Postgres. Go to step 2 only if one rebuild takes over 50 ms or start takes over 10 s
+  at the pilot's room count.
+- **Step 2.** Add a table `room_checkpoints(room_id, seq, state jsonb, at)`.
+  - Write a checkpoint after every 500 appends and at `room.closed`.
+  - `rebuild` loads the latest checkpoint and folds only the events after it.
+  - Checkpoints are derived data. Deleting them is always safe, and the purge and delete paths of `retention.md` §6
+    delete them with the room.
+  - A snapshot-version field makes the code ignore checkpoints written by an older `Apply`.
+- The client contract does not change: `after=0` still replays the whole log.
 
-- **A5 (1)** Redaction in `Store.Append`: caps, key-based and URL redaction, per-type policy table; unit test that **every** `events.Type` has a policy (new types fail the test until classified).
-- **A5 (2)** `Compactor` implementation, loop in `cmd/server` (stops with ctx, advisory lock, batches of 1,000), idempotence test, replay test (`after=0` returns contiguous seqs after compaction), rebuild test, two-replica test (second loop skips).
-- **A5 (2b)** `room_checkpoints` table and checkpoint every 500 appends; `rebuild` folds from the latest checkpoint; benchmark: a 20,000-event room renders in < 50 ms from a checkpoint.
-- **A5 (3)** `audit_log` migration with hash chain and an `INSERT, SELECT` role grant; daily export of chain heads to the external store (interface + a file-backed dev implementation); `verify-audit` subcommand that walks a chain and checks the external head.
-- **A5 (4)** `erase --user` subcommand; stop storing a fresh `Actor.Name` copy if the lead agrees (Open question 3).
-- **A3** Strip literals from `Query` and drop `Username` in `pg_long_transactions` / `pg_recent_ddl` results before they reach `Data`.
-- **A4** Make `Sink` and hand-off input use only `Summary`, never `Data` (already true for hand-off, `renderRoomEvents`); add a test.
-- **A6** Render `_redacted` events as a one-line notice; Vitest cases for `agent.tool_result` and `comment.added`; the reducer must not crash on missing text.
-- **A1** Seed/test data for a closed old room; dev env leaves retention empty.
-- **C5** none.
+No contract file changes.
 
-## 8. Open questions
+## 5. Delta 4 — erase a person's name from the log
 
-1. Durations: content 30 days and audit 400 days are proposals. What does the pilot customer's policy say?
-2. Keep `Title` and `Params` in audit events after compaction? Proposed yes (action-validated); `Title` comes from alert text cleaned by alertin.
-3. Stop persisting `Actor.Name` in `room_events.actor` and resolve names from `users.yaml` at read time? That changes the `Event` JSON shape for clients, so it is a contract decision.
-4. Is a per-room legal hold needed in the first release? Not designed here.
-5. Backups: compaction does not touch backups. State the backup retention in the customer contract.
-6. Anthropic-side retention of requests is a contract matter and was not verified here.
-7. Client-side checkpoints: should `GET /api/rooms/{id}` return the folded state plus `last_seq` so a first open sends `after=last_seq` instead of `after=0`? It makes first paint O(1) in
-   room length but changes the contract in `docs/api.md:62-66` ("the client replays the full event log"). Not proposed now; the server-side checkpoint already fixes the server cost.
-8. Partition `room_events` by month of `at` once it passes ~100 M rows? Needs `at` in the primary key; decide from real volume.
-9. Where does the external chain-head store live for the pilot (object storage bucket with retention lock, or a file on a separate host)? A1 may need to add it to the dev stack.
-10. Live fan-out across replicas (`Store.Subscribe` is per process) is not retention and not designed here, but it is the other thing that keeps the room service on one replica today.
+**Problem.** A person who leaves, or who asks for erasure (Art. 17), stays named in every event they wrote:
+`Actor.Name`, and approval `identity.email` once auth PR 4 lands. The only tool today is to delete whole rooms.
 
-## 9. References
+**Proposal.**
+- An admin-only `devctl users erase <id> --reason <text>` that calls a new route.
+- In one transaction per room, the route sets `actor.name` to `(removed)` and clears `identity.email` in that user's
+  events. It also writes a `user_erasures(user_id, erased_by, at, reason, event_count)` row.
+- `Actor.ID` stays as a pseudonym. Deleting the `identities` row (`auth.md` Unbind) and removing the person from
+  `users.yaml` cut the link to the person.
+- Open rooms in the cache are re-folded. Connected WebSockets keep the old name until they reload; that is accepted
+  and documented.
+- **Interactions.**
+  - The audit chain (Delta 2) holds no names, so it stays valid.
+  - Exports and archives written earlier keep the name, because they are files the operator controls. Their
+    `integrity` hash is unaffected.
+  - Slack messages already posted keep the name.
+- The route is a `docs/api.md` change. Its exact row waits for the lead's decision on the route shape (Open question
+  3), so no diff is given here.
 
-OWASP Logging cheat sheet ("Data to exclude", "Protection") and the GDPR articles are cited from the lead's task file; they could not be fetched from this sandbox and need a reviewer check.
-- OWASP Logging: https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html
-- GDPR Art. 5: https://gdpr-info.eu/art-5-gdpr/  Art. 17: https://gdpr-info.eu/art-17-gdpr/
+## 6. Tasks per owner
+
+- **A5 (1)** Delta 1: `store.Redacting`, the policy table plus a test that every `events.Type` is classified, the webhook dedup test, wiring in `cmd/server`.
+- **A5 (2)** Delta 2: the `audit_log` migration (next free number) and grant, the insert in the append transaction, chain tests (tamper one row → verify fails).
+- **A5 (3)** Delta 2: the anchor loop under the leader lock, `PIPEROOM_AUDIT_ANCHOR_DIR` (start fails on an unwritable directory, as for `PIPEROOM_ARCHIVE_DIR`).
+- **A5 (4)** Delta 3 step 1 (the benchmark); step 2 only if the threshold is hit.
+- **A5 (5)** Delta 4: the erase route, the `user_erasures` table, the re-fold of cached rooms.
+- **A1** `devctl audit verify`, `devctl users erase`; the dev stack leaves the anchor directory empty.
+- **A6** none for Deltas 1–3. Delta 4: render `(removed)` as plain text (no avatar lookup).
+- **A3** none. Tool data is already capped and masked.
+
+## 7. Open questions
+
+1. How long are `audit_log` rows kept after their room is gone: forever like `room_deletions`, or a separate period
+   chosen by the pilot customer?
+2. Should the redaction policy also mask e-mail addresses in human text? `redact.DefaultOptions` masks e-mails in tool
+   text, but people mention colleagues on purpose.
+3. Delta 4 route shape: `DELETE /api/users/{id}/names` or `POST /api/admin/erase-user`? Is a per-room scope needed?
+4. Should Anthropic-side retention of requests be covered by the pilot contract? It was not verified here.
+
+## 8. References
+
+- GDPR Art. 5 and 17: https://eur-lex.europa.eu/eli/reg/2016/679/oj
+- OWASP Logging Cheat Sheet (what not to log; protecting logs): https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html
+- RFC 8785 (JCS), already used by the export hash: https://www.rfc-editor.org/rfc/rfc8785
+
+The design sandbox could not fetch these pages; the reviewer should confirm them.
