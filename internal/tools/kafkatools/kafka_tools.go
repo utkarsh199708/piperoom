@@ -315,7 +315,7 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
-	refs, err := t.d.Kafka.FindByKey(cctx, p.Topic, p.Key, since, p.MaxScan)
+	scan, err := scanKey(cctx, t.d.Kafka, p.Topic, p.Key, since, p.MaxScan)
 	if errors.Is(err, clients.ErrNotFound) {
 		return res(fmt.Sprintf("not found: topic %q does not exist", p.Topic),
 			map[string]any{"topic": p.Topic, "key": p.Key, "found": false, "topic_exists": false}), nil
@@ -323,29 +323,66 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	if err != nil {
 		return tools.Result{}, err
 	}
+	refs := scan.Refs
 	// Oldest first, so the newest occurrence (latest update or tombstone) is
 	// the one marked and, when the list is long, the one kept.
-	sortRefsOldestFirst(refs)
+	kafka.SortRefs(refs)
+	cut := map[int32]bool{}
+	for _, pt := range scan.Truncated {
+		cut[pt] = true
+	}
+	// The newest occurrence per partition is its highest offset; a partition
+	// the scan did not finish has no known newest.
+	newestIdx := map[int32]int{}
+	for i, r := range refs {
+		if !cut[r.Partition] {
+			newestIdx[r.Partition] = i
+		}
+	}
+	multi := len(newestIdx) > 1
 	var sb strings.Builder
 	if len(refs) == 0 {
 		fmt.Fprintf(&sb, "not found: no record with key %q since %s", p.Key, p.Since)
 	} else {
 		fmt.Fprintf(&sb, "found %d record(s) with key %q, oldest first", len(refs), p.Key)
-		shown := refs
-		if len(shown) > maxRefsShown {
-			fmt.Fprintf(&sb, "\n  (%d older not shown)", len(shown)-maxRefsShown)
-			shown = shown[len(shown)-maxRefsShown:]
+		first := 0
+		if len(refs) > maxRefsShown {
+			first = len(refs) - maxRefsShown
+			fmt.Fprintf(&sb, "\n  (%d older not shown)", first)
 		}
-		for i, r := range shown {
+		for i := first; i < len(refs); i++ {
+			r := refs[i]
 			fmt.Fprintf(&sb, "\n  partition %d, offset %d, %s", r.Partition, r.Offset, r.Timestamp.Format(time.RFC3339))
-			if i == len(shown)-1 {
-				sb.WriteString(" (newest)")
+			if newestIdx[r.Partition] == i && !cut[r.Partition] {
+				if multi {
+					fmt.Fprintf(&sb, " (newest in partition %d)", r.Partition)
+				} else {
+					sb.WriteString(" (newest)")
+				}
 			}
 		}
 	}
-	data := map[string]any{"topic": p.Topic, "key": p.Key, "found": len(refs) > 0, "records": refs}
-	if len(refs) > 0 {
-		data["newest"] = refs[len(refs)-1]
+	if len(scan.Truncated) > 0 {
+		fmt.Fprintf(&sb, "\nscan stopped at max_scan before partition end (partitions %v) — newer matches may exist; raise max_scan or use a later since", scan.Truncated)
+	}
+	data := map[string]any{"topic": p.Topic, "key": p.Key, "found": len(refs) > 0, "records": refs,
+		"truncated": len(scan.Truncated) > 0}
+	if len(scan.Truncated) > 0 {
+		data["truncated_partitions"] = scan.Truncated
+	}
+	if len(newestIdx) > 0 {
+		byPart := map[int32]clients.RecordRef{}
+		last := -1
+		for pt, i := range newestIdx {
+			byPart[pt] = refs[i]
+			if i > last {
+				last = i
+			}
+		}
+		data["newest_by_partition"] = byPart
+		if len(scan.Truncated) == 0 {
+			data["newest"] = refs[last]
+		}
 	}
 	return res(sb.String(), data), nil
 }
@@ -353,19 +390,20 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 // maxRefsShown caps the matches listed in the summary; Data has them all.
 const maxRefsShown = 10
 
-// sortRefsOldestFirst puts the newest match last whatever order the client
-// returned them in (ties: partition, then offset).
-func sortRefsOldestFirst(refs []clients.RecordRef) {
-	sort.SliceStable(refs, func(i, j int) bool {
-		a, b := refs[i], refs[j]
-		if !a.Timestamp.Equal(b.Timestamp) {
-			return a.Timestamp.Before(b.Timestamp)
-		}
-		if a.Partition != b.Partition {
-			return a.Partition < b.Partition
-		}
-		return a.Offset < b.Offset
-	})
+// keyScanReporter is the local adapter for FindByKeyReport until
+// clients.KafkaAdmin can signal a scan cut short by max_scan (contract change
+// request): the real client implements it; other KafkaAdmins get plain
+// FindByKey and no truncation report.
+type keyScanReporter interface {
+	FindByKeyReport(ctx context.Context, topic, key string, since time.Time, maxScan int) (kafka.KeyScan, error)
+}
+
+func scanKey(ctx context.Context, k clients.KafkaAdmin, topic, key string, since time.Time, maxScan int) (kafka.KeyScan, error) {
+	if r, ok := k.(keyScanReporter); ok {
+		return r.FindByKeyReport(ctx, topic, key, since, maxScan)
+	}
+	refs, err := k.FindByKey(ctx, topic, key, since, maxScan)
+	return kafka.KeyScan{Refs: refs}, err
 }
 
 // ---- kafka_topic_config ----

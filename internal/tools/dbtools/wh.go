@@ -11,6 +11,11 @@ import (
 	"piperoom/internal/topology"
 )
 
+// whFutureSkew is how far ahead of this server's clock a newest value may be
+// and still read as "now": ordinary clock skew. It matches futureSkew in
+// internal/topology/health.go so the map and this tool agree.
+const whFutureSkew = time.Minute
+
 func warehouseFreshnessTool(d Deps) tools.Tool {
 	return &tool{
 		name: "warehouse_freshness",
@@ -53,7 +58,7 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 			if ts.IsZero() {
 				summary = "no rows (empty table)"
 				data["newest"] = nil
-			} else if ahead := time.Until(ts); ahead > 0 {
+			} else if ahead := time.Until(ts); ahead > whFutureSkew {
 				// A newest value in the future says nothing about freshness:
 				// the column is not a load time (bad data, a scheduled date) or
 				// a clock is wrong. Shown as "stale for 0s" it would read as
@@ -64,7 +69,7 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 				data["in_future"] = true
 				data["ahead_by"] = topology.HumanAge(ahead)
 			} else {
-				stale := -ahead
+				stale := max(-ahead, 0) // within the skew allowance reads as now
 				summary = fmt.Sprintf("newest=%s (stale for %s)", topology.FormatTS(ts), topology.HumanAge(stale))
 				data["newest"] = topology.FormatTS(ts)
 				data["stale_for"] = topology.HumanAge(stale)
