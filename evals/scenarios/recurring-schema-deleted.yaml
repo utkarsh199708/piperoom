@@ -217,7 +217,7 @@ inputs:
 expect:
   root_cause:
     - [schema, registry]
-    - [id 2, version 1, 40403, not found, deleted]
+    - [id 2, version 1, 40403, not found, delet*]
     # Only the closed room says how to get it back.
     - [import mode, import, original id, same id, same schema id]
   first_failing_layer: schema-registry

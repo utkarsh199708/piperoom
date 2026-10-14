@@ -234,7 +234,7 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "Retention on pg.public.orders deleted change records before order-sync read them: its committed offset sits just above the log start, so those changes were lost and never reached analytics.orders.",
 		wrong: "order-sync is just slow after the re-pricing job; retention is fine, so reset order-sync to latest to catch up and skip the skipped backlog.",
 	},
-	// The five scenarios below were added by #87 after the migration, so
+	// The scenarios below were added by #87 and #100 after the migration, so
 	// they have no legacyTerms.
 	"avro-schema-id-deleted-sink-failed": {
 		good:  "The registry cleanup job svc-schema-cleanup permanently deleted version 3 of pg.public.orders-value (schema id 7) at 08:37, but Debezium still stamps id 7 on every record. After connect-2 restarted, wh-orders-sink's cold AvroConverter cache got 40403 for id 7 and the task failed. Do not register a new schema or restart the sink until id 7 is restored.",
@@ -255,6 +255,15 @@ var hypotheses = map[string]struct{ good, wrong string }{
 	"sink-connector-paused-warehouse-stale": {
 		good:  "wh-orders-sink was paused deliberately by Meera at 07:31Z for a warehouse migration and backfill, so the sink connector writes nothing to analytics.orders. It is not a failure: ask Meera before any resume.",
 		wrong: "The sink connector wh-orders-sink is paused because its tasks crashed after a warehouse outage; resume it.",
+	},
+	// Added by #100 (similar_incidents): the third group needs the closed room.
+	"recurring-connector-paused": {
+		good:  "pg-orders-connector has been PAUSED since 02:00: the nightly maintenance job paused it for the vacuum window and its resume call timed out, the same as last month's closed room. Resume the connector.",
+		wrong: "pg-orders-connector is paused because its task failed on a bad record; restart the task.",
+	},
+	"recurring-schema-deleted": {
+		good:  "A cleanup job hard-deleted schema id 2 (version 1 of pg.public.orders-value) from the Schema Registry, so order-sync's empty cache gets 40403 Schema 2 not found after the redeploy. Same as last month's closed room: restore it under its original id in IMPORT mode, then restart order-sync.",
+		wrong: "order-sync keeps crashing after the 09:12 redeploy because of a bad build; roll the deploy back.",
 	},
 }
 

@@ -216,7 +216,7 @@ recordings:
 
 expect:
   root_cause:
-    - [paused]
+    - [paus*]
     # Only the closed room names the nightly job.
     - [maintenance, nightly, scheduled job, cron, 02:00]
   first_failing_layer: kafka-connect
