@@ -26,6 +26,7 @@ export type EventType =
   | 'comment.added'
   | 'steer.suggested'
   | 'steer.sent'
+  | 'steer.declined'
   | 'control.requested'
   | 'control.granted'
   | 'proposal.created'
@@ -129,6 +130,11 @@ export interface SteerSuggestedPayload {
 export interface SteerSentPayload {
   suggestion_id?: string // set when forwarding a suggestion
   text: string
+}
+
+export interface SteerDeclinedPayload {
+  suggestion_id: string
+  reason?: string
 }
 
 export type ControlRequestedPayload = Record<string, never>
