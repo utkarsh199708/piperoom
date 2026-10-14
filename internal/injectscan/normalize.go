@@ -9,7 +9,9 @@ import (
 // normalize undoes the cheap tricks that hide an instruction from a plain
 // pattern match. The standard library has no NFKC, so this is a small, fixed
 // mapping:
-//   - format characters (Unicode Cf: zero-width space/joiners, word joiner,
+//   - Unicode tag characters U+E0020..U+E007E map to the ASCII they shadow
+//     (U+E0069 reads "i"), so instructions smuggled in tags are scanned;
+//   - other format characters (Unicode Cf: zero-width space/joiners, word joiner,
 //     BOM, soft hyphen, bidi embeddings/overrides/isolates) and variation
 //     selectors are dropped, and so are combining marks (Mn), so "i̇gnore"
 //     reads "ignore";
@@ -31,7 +33,20 @@ func normalize(s string, cfAsSpace bool) (out string, origin []int, changed, had
 	b.Grow(len(s))
 	origin = make([]int, 0, len(s)+1)
 	inSpace, newlines := false, 0
+	inTag := false
 	for i, r := range s {
+		// A run of tag characters is a separate hidden message: it is read
+		// as its own words, so "ok"+tags("ignore...") does not glue into
+		// "okignore".
+		if tag := isTagRune(r); tag != inTag {
+			inTag = tag
+			if b.Len() > 0 && !inSpace {
+				b.WriteByte(' ')
+				origin = append(origin, i)
+				inSpace, newlines = true, 0
+				changed = true
+			}
+		}
 		m, keep := mapRune(r)
 		if !keep {
 			changed = true
@@ -79,6 +94,9 @@ func normalize(s string, cfAsSpace bool) (out string, origin []int, changed, had
 	return b.String(), origin, changed, hadCf
 }
 
+// isTagRune reports the Unicode tag block (U+E0000..U+E007F).
+func isTagRune(r rune) bool { return r >= 0xE0000 && r <= 0xE007F }
+
 func isSpaceRune(r rune) bool {
 	return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\v' || r == '\f'
 }
@@ -88,6 +106,11 @@ func mapRune(r rune) (rune, bool) {
 	switch {
 	case r < 0x80:
 		return r, true
+	case r >= 0xE0020 && r <= 0xE007E: // tags: see isTagRune
+		// Unicode tag characters render as nothing but each one shadows a
+		// printable ASCII character ("ASCII smuggling"); models read them.
+		// They become that ASCII so the hidden text is scanned.
+		return r - 0xE0000, true
 	case unicode.Is(unicode.Cf, r),
 		r >= 0xFE00 && r <= 0xFE0F, // variation selectors
 		r == 0x180E, r == 0x034F,   // Mongolian vowel separator, combining grapheme joiner

@@ -44,7 +44,8 @@ const (
 	// KindObfuscated marks a finding that was only visible after stripping
 	// invisible characters or mapping lookalike letters.
 	KindObfuscated Kind = "obfuscated"
-	// KindEncoded is a base64 blob that decodes to instruction-like text.
+	// KindEncoded is a base64 (also line-wrapped), hex, %-encoded or HTML
+	// character-reference run that decodes to instruction-like text.
 	KindEncoded Kind = "encoded"
 )
 
@@ -134,6 +135,7 @@ func scanWindow(s string, base int) []Finding {
 		}
 	}
 	found = append(found, scanBase64(norm, origin)...)
+	found = append(found, scanDecoded(norm, origin)...)
 	for i := range found {
 		found[i].Offset += base
 	}
