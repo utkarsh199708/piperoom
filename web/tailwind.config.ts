@@ -8,9 +8,10 @@ import animate from 'tailwindcss-animate'
 // color-mix of the token, without one it is the plain token.
 // (Tailwind accepts the function at runtime; its types only list strings, hence the cast.)
 const token = (name: string): string =>
-  (({ opacityValue }: { opacityValue?: string }) =>
+  (({ opacityValue }: { opacityValue?: string | number }) =>
     // With no modifier Tailwind passes undefined or its own var(--tw-*-opacity): use the plain token.
-    opacityValue === undefined || opacityValue === '1' || opacityValue.startsWith('var(')
+    // Gradient stops (`from-background`) pass a number, hence the String().
+    opacityValue === undefined || String(opacityValue) === '1' || String(opacityValue).startsWith('var(')
       ? `var(${name})`
       : `color-mix(in srgb, var(${name}) ${Number(opacityValue) * 100}%, transparent)`) as unknown as string
 
