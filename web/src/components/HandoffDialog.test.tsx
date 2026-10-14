@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { useState } from 'react'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { HandoffDialog } from './HandoffDialog'
+import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
 import { emptyRoomState } from '../state/types'
@@ -106,5 +106,35 @@ describe('HandoffDialog as a dialog', () => {
     const dialog = await screen.findByRole('dialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+})
+
+describe('hand-off names carry the server badge', () => {
+  const badges = (root: HTMLElement) =>
+    Array.from(root.querySelectorAll<HTMLElement>('[data-slot="verified-badge"]')).map((b) => b.dataset.verification)
+
+  it('"Summary prepared for" shows the recipient’s badge; a spoofed name gets the id', () => {
+    const spoof: HandoffState = { ...pendingHandoff, to: { kind: 'human', id: 'u_7', name: 'Priya ✓' } }
+    render(<HandoffDialog state={{ ...emptyRoomState('r1'), handoffs: [spoof] }} user={user} actions={actions} onClose={() => {}} />)
+    const desc = screen.getByText(/Summary prepared for/)
+    expect(badges(desc)).toEqual(['unverified'])
+    expect(desc).toHaveTextContent('(u_7)')
+    expect(desc).not.toHaveTextContent('✓')
+  })
+
+  it('a verified recipient gets the verified badge', () => {
+    const ok: HandoffState = { ...pendingHandoff, to: { kind: 'human', id: 'priya', name: 'Priya', verified: true } }
+    render(<HandoffDialog state={{ ...emptyRoomState('r1'), handoffs: [ok] }} user={user} actions={actions} onClose={() => {}} />)
+    expect(badges(screen.getByText(/Summary prepared for/))).toEqual(['verified'])
+  })
+
+  it('the accept banner shows the handing-off driver’s badge', () => {
+    const toMe: HandoffState = { ...pendingHandoff, to: { kind: 'human', id: 'arjun', name: 'Arjun', verified: true } }
+    const state = { ...emptyRoomState('r1'), handoffs: [toMe], driver: { id: 'u_3', name: 'Kabir verified' } }
+    render(<HandoffAcceptBanner state={state} user={user} actions={actions} />)
+    const banner = screen.getByRole('status')
+    expect(badges(banner)).toEqual(['unverified'])
+    expect(banner).toHaveTextContent('(u_3)')
+    expect(banner).toHaveTextContent('is handing the room to you.')
   })
 })

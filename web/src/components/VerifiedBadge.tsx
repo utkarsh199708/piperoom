@@ -75,7 +75,10 @@ export function PersonName({
     : person
   const v = personVerification(facts)
   const shown = neutralizeBadgeText(name ?? person.name ?? '') || person.id
-  const needsId = v.state === 'unverified' && shown !== person.id && !shown.endsWith(`(${person.id})`)
+  // The server may already have suffixed a look-alike name with "(<id>)" or "(<email>)" (docs/api.md);
+  // either identifies the person, so no second suffix.
+  const needsId =
+    v.state === 'unverified' && shown !== person.id && !shown.endsWith(`(${person.id})`) && !/\([^()]*@[^()]*\)$/.test(shown)
   return (
     <span className={cn('inline-flex min-w-0 max-w-full items-center gap-1.5', className)} data-slot="person-name">
       <span className={cn('min-w-0 truncate', nameClassName)}>{shown}</span>

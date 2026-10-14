@@ -7,6 +7,7 @@
 //  - `canDecideLayer` is the only gate for the buttons (plus "no hash" and "busy", which only
 //    switch them off). A viewer or a non-owner gets no buttons at all.
 import { PersonName } from '@/components/VerifiedBadge'
+import { personVerification } from '@/lib/verification'
 import { useEffect, useId, useRef, useState } from 'react'
 import { CircleCheck, CircleX, Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
 import type { ProposalState, RoomState } from '../state/types'
@@ -487,7 +488,7 @@ function LayerRow({
             {decision.identity && ` (${describeIdentity(decision.identity)})`}
             {reasonText ? `: ${reasonText}` : ''}
             {decidedAt && ` at ${decidedAt}`}
-            {decision.by.verified !== true && `. ${decision.by.id} is not verified`}
+            {personVerification(decision.by).state !== 'verified' && `. ${decision.by.id} is not verified`}
           </span>
           <span className="inline-flex min-w-0 items-center gap-2.5" aria-hidden="true">
             <PersonAvatar actor={{ id: decision.by.id, name: decidedName }} size={20} />

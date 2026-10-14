@@ -16,8 +16,9 @@ export function ActivityFeed({ activity }: { activity: ActivityEntry[] }) {
           <li key={a.seq} className="flex min-h-6 items-start gap-2">
             <PersonAvatar actor={a.actor} size={20} className="mt-0.5" />
             {/* A person's row gets their server-set badge, and its sentence (their name and their
-                text, both untrusted) is neutralized so it cannot add a second verdict. Agent and
-                system rows carry no badge and keep their text as written. */}
+                text, both untrusted) is neutralized so it cannot add a second verdict. That also
+                blanks a legitimate "verified" or "✅" in a comment here; the Timeline shows the
+                comment as written. Agent and system rows carry no badge and keep their text. */}
             {a.actor.kind === 'human' && <VerifiedBadge verification={personVerification(a.actor)} className="mt-0.5" />}
             <span className="min-w-0 break-words text-muted-foreground">
               {a.actor.kind === 'human' ? neutralizeBadgeText(a.text) : a.text}

@@ -12,7 +12,7 @@ import { PersonAvatar } from './PersonAvatar'
 import { StatusDot } from './StatusDot'
 import { cn } from '@/lib/utils'
 import { PersonName, VerifiedBadge } from '@/components/VerifiedBadge'
-import { alertSourceLabel, alertVerification, neutralizeBadgeText } from '@/lib/verification'
+import { alertSourceLabel, alertVerification, neutralizeBadgeText, personVerification } from '@/lib/verification'
 import type { DotTone } from './StatusDot'
 
 export interface HeaderMember {
@@ -28,7 +28,9 @@ const MAX_AVATARS = 4
 // adds their id: "Priya (u_7f3a) · unverified".
 function avatarLabel(m: HeaderMember, you: boolean, driver: boolean): string {
   const name =
-    m.verified === true ? neutralizeBadgeText(m.name) : `${neutralizeBadgeText(m.name)} (${m.id}) · unverified`
+    personVerification(m).state === 'verified'
+      ? neutralizeBadgeText(m.name)
+      : `${neutralizeBadgeText(m.name)} (${m.id}) · unverified`
   if (you) return driver ? `${name} · you, driving` : `${name} · you`
   return driver ? `${name} · driving` : name
 }
@@ -168,7 +170,7 @@ export function RoomHeader({
                 <li
                   key={m.id}
                   className={cn('relative', i === 0 ? '' : '-ml-1.5')}
-                  data-verification={m.verified === true ? 'verified' : 'unverified'}
+                  data-verification={personVerification(m).state}
                 >
                   <PersonAvatar
                     actor={{ id: m.id, name: m.name }}
@@ -177,7 +179,7 @@ export function RoomHeader({
                     label={avatarLabel(m, m.id === user.id, driver)}
                     className={driver ? 'ring-offset-0' : undefined}
                   />
-                  {m.verified !== true && (
+                  {personVerification(m).state !== 'verified' && (
                     // Drawn mark, like the badge: avatars have no room for the full pill.
                     <ShieldAlert
                       aria-hidden="true"

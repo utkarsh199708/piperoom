@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/dialog'
 import { Kbd } from '@/components/ui/kbd'
 import { PersonSelect } from './PersonSelect'
+import { PersonName } from './VerifiedBadge'
 import { RoomDialogClose } from './room/RoomDialogClose'
 import { useRestoreFocus } from './room/useRestoreFocus'
 
@@ -80,9 +81,13 @@ export function HandoffDialog({
         <DialogHeader>
           <DialogTitle>Hand off the room</DialogTitle>
           <DialogDescription>
-            {pending
-              ? `Summary prepared for ${pending.to.name}. They must accept to take over.`
-              : 'The agent writes a summary for the person who takes over. They accept it to become the driver.'}
+            {pending ? (
+              <>
+                Summary prepared for <PersonName person={pending.to} />. They must accept to take over.
+              </>
+            ) : (
+              'The agent writes a summary for the person who takes over. They accept it to become the driver.'
+            )}
           </DialogDescription>
         </DialogHeader>
 
@@ -169,7 +174,12 @@ export function HandoffAcceptBanner({
       className="flex min-h-10 flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-border bg-primary-subtle px-4 py-1.5 font-medium text-primary-fg sm:px-6"
     >
       <span>
-        <strong>{state.driver?.name ?? 'Someone'}</strong> is handing the room to you.
+        {state.driver ? (
+          <PersonName person={{ ...state.driver, kind: 'human' }} nameClassName="font-semibold" />
+        ) : (
+          <strong>Someone</strong>
+        )}{' '}
+        is handing the room to you.
       </span>
       <Button className="ml-auto h-7 px-2.5" onClick={() => actions.acceptHandoff(mine.handoff_id)}>
         Accept

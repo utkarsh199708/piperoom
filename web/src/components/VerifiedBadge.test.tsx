@@ -296,3 +296,11 @@ describe('PresencePanel: the signed-in person', () => {
     expect(badges()[0].dataset.verification).toBe('unverified')
   })
 })
+
+describe('PersonName: the server’s own suffix', () => {
+  it('does not add the id when the server already appended an email', () => {
+    const { container } = render(<PersonName person={{ id: 'u_7f3a', name: 'Priya (priya@example.com)', verified: false }} />)
+    expect(container).not.toHaveTextContent('(u_7f3a)')
+    expect(badges(container).map((b) => b.dataset.verification)).toEqual(['unverified'])
+  })
+})
