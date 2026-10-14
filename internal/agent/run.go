@@ -652,10 +652,15 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 			defer wg.Done()
 			defer func() {
 				if p := recover(); p != nil {
+					stack := debug.Stack()
+					if tp, ok := p.(toolPanic); ok {
+						// Raised again by runToolBounded: keep the tool's own stack.
+						p, stack = tp.value, tp.stack
+					}
 					// The value goes on to the room supervisor, which logs it and
 					// puts it in the room status, so it is masked here.
 					p = scrubPanic(p)
-					r.log.Error("agent: read tool panicked", "tool", u.name, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+					r.log.Error("agent: read tool panicked", "tool", u.name, "panic", fmt.Sprint(p), "stack", string(stack))
 					panicMu.Lock()
 					if !panicked {
 						panicked, firstPanic = true, p
@@ -687,6 +692,73 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 		blocks = append(blocks, anthropic.NewBetaToolResultBlock(res.toolUseID, res.content, res.isError))
 	}
 	return blocks
+}
+
+// toolPanic carries a read tool's panic, with the tool's own stack, from the
+// goroutine runToolBounded ran it on to the goroutine that recovers it.
+type toolPanic struct {
+	value any
+	stack []byte
+}
+
+// toolOutcome is what one read tool call ended with.
+type toolOutcome struct {
+	res      tools.Result
+	err      error
+	panicked bool
+	panicVal toolPanic
+}
+
+// errToolAbandoned marks a read tool that kept running past its deadline or
+// the run's cancellation and was left behind.
+var errToolAbandoned = errors.New("tool did not stop when its context ended")
+
+// runToolBounded runs t on its own goroutine and waits for it at most until
+// ctx ends plus timing.toolGrace. The Tool contract says Run respects ctx, and
+// every tool in this repo does; this bounds the one that does not, so a
+// cancelled room never waits on it (QA7: Run hung in wg.Wait). A well-behaved
+// tool returns within the grace and nothing is left running. An abandoned
+// call's goroutine ends when the tool finally returns; its result is dropped,
+// a late panic is recovered and logged, and the abandonment is logged.
+func (r *runner) runToolBounded(ctx context.Context, t tools.Tool, name string, input json.RawMessage) (tools.Result, error) {
+	done := make(chan toolOutcome, 1) // buffered: an abandoned call never blocks
+	go func() {
+		var out toolOutcome
+		defer func() {
+			if p := recover(); p != nil {
+				out.panicked, out.panicVal = true, toolPanic{value: p, stack: debug.Stack()}
+			}
+			done <- out
+		}()
+		out.res, out.err = t.Run(ctx, input)
+	}()
+	take := func(o toolOutcome) (tools.Result, error) {
+		if o.panicked {
+			panic(o.panicVal)
+		}
+		return o.res, o.err
+	}
+	select {
+	case o := <-done:
+		return take(o)
+	case <-ctx.Done():
+	}
+	grace := time.NewTimer(r.timing.toolGrace)
+	defer grace.Stop()
+	select {
+	case o := <-done:
+		return take(o)
+	case <-grace.C:
+	}
+	r.log.Warn("agent: read tool ignored its context; the run no longer waits for it",
+		"tool", name, "grace", r.timing.toolGrace.String(), "cause", ctx.Err())
+	go func() {
+		if o := <-done; o.panicked {
+			r.log.Error("agent: abandoned read tool panicked", "tool", name,
+				"panic", fmt.Sprint(scrubPanic(o.panicVal.value)), "stack", string(o.panicVal.stack))
+		}
+	}()
+	return tools.Result{}, fmt.Errorf("agent: %s: %w after %s: %w", name, errToolAbandoned, r.timing.toolGrace, ctx.Err())
 }
 
 // toolScope returns ctx carrying the room's pipeline, so every read tool is
@@ -732,7 +804,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	tctx, cancel := context.WithTimeout(r.toolScope(ctx), r.timing.toolTimeout)
 	defer cancel()
 	start := time.Now()
-	res, err := entry.tool.Run(tctx, cleaned)
+	res, err := r.runToolBounded(tctx, entry.tool, u.name, cleaned)
 	took := time.Since(start).Milliseconds()
 
 	res = r.scrubToolResult(u.name, res)

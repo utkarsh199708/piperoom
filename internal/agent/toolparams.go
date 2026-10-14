@@ -91,7 +91,15 @@ func buildToolListWithCap(reg *tools.Registry, room []tools.Tool, cap int) toolL
 	tl := toolList{byName: map[string]toolEntry{}}
 	var reads []tools.Tool
 	if reg != nil {
-		reads = reg.All()
+		// Only read tools are offered from the registry. A tool of any other
+		// kind registered there by mistake (a write, or a room tool that
+		// belongs in room) never reaches the model: the agent runs read
+		// tools directly, without approval, so the kind is the guard.
+		for _, t := range reg.All() {
+			if t.Kind() == tools.KindRead {
+				reads = append(reads, t)
+			}
+		}
 	}
 	// Room tools claim strict slots first; read tools get what is left.
 	strictReads := strictReadSet(reads, max(cap-len(room), 0))

@@ -3,6 +3,7 @@ package redact
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 )
 
 // JSON masks secrets in the string values of v; see JSONStats.
@@ -19,7 +20,8 @@ func (r *Redactor) JSON(v any) any {
 // (password, client_secret, api_key, credentials...) every scalar below it is
 // masked, numbers included, through nested lists and objects. Under a key
 // that only may name one (token, auth, session) a random-looking string is
-// masked. Every other string goes through Text.
+// masked. Under a key that names PII (ssn, phone, card_number), a string
+// holding a digit or a number is masked. Every other string goes through Text.
 //
 // v is never modified. When nothing is masked, v itself is returned, so a
 // caller's typed value (and its JSON field order) survives. If v cannot be
@@ -97,6 +99,18 @@ func (r *Redactor) walk(v any, secret bool, st *Stats) any {
 func (r *Redactor) walkField(key string, v any, secret bool, st *Stats) any {
 	if secret {
 		return r.walk(v, true, st)
+	}
+	if r.pii && piiKey(key) {
+		switch t := v.(type) {
+		case string:
+			if strings.ContainsAny(t, "0123456789") && !isMasked(t) {
+				st.add(KindPIIValue)
+				return mask(t, styleSecret)
+			}
+		case json.Number:
+			st.add(KindPIIValue)
+			return mask(string(t), styleSecret)
+		}
 	}
 	switch secretKey(key) {
 	case keyStrong:

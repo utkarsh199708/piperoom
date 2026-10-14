@@ -41,6 +41,9 @@ const (
 	// defaultToolTimeout bounds a single read tool call. The turn continues with
 	// the other results if one tool times out.
 	defaultToolTimeout = 10 * time.Second
+	// defaultToolGrace is how long a read tool may run past its deadline or
+	// the run's cancellation before the run stops waiting for it.
+	defaultToolGrace = 2 * time.Second
 	// defaultRoomToolTimeout bounds one room tool call (hypothesis, proposal,
 	// message).
 	defaultRoomToolTimeout = 10 * time.Second
@@ -74,6 +77,7 @@ const (
 // level state is shared between runs.
 type timing struct {
 	toolTimeout     time.Duration
+	toolGrace       time.Duration
 	roomToolTimeout time.Duration
 	drainBackoffMin time.Duration
 	drainBackoffMax time.Duration
@@ -89,6 +93,7 @@ type timing struct {
 func defaultTiming() timing {
 	return timing{
 		toolTimeout:     defaultToolTimeout,
+		toolGrace:       defaultToolGrace,
 		roomToolTimeout: defaultRoomToolTimeout,
 		drainBackoffMin: defaultDrainBackoffMin,
 		drainBackoffMax: defaultDrainBackoffMax,
