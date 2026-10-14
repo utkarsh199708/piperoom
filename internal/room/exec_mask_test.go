@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
@@ -73,6 +74,11 @@ func (s *syncBuf) String() string {
 // output, and the captured log.
 func runMasked(t *testing.T, out string, aerr error) (event, stored, logs string) {
 	t.Helper()
+	return runMaskedLimits(t, out, aerr, config.Limits{})
+}
+
+func runMaskedLimits(t *testing.T, out string, aerr error, lim config.Limits) (event, stored, logs string) {
+	t.Helper()
 	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
 	ms := memstore.NewWithClock(c.Now)
 	st := &recStore{Store: ms}
@@ -83,7 +89,7 @@ func runMasked(t *testing.T, out string, aerr error) (event, stored, logs string
 	var buf syncBuf
 	svc := room.New(room.Deps{
 		Store: st, Actions: reg, Users: room.DefaultUsers(), Owners: testOwners(),
-		Run: fakeRun, WriteHandoff: fakeWrite, Now: c.Now,
+		Run: fakeRun, WriteHandoff: fakeWrite, Now: c.Now, Limits: lim,
 		Logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	t.Cleanup(svc.Close)
@@ -218,5 +224,20 @@ func TestExecutorOutputKnownRedactorGaps(t *testing.T) {
 				t.Skipf("known gap in internal/redact: %q survives masking", tc.secret)
 			}
 		})
+	}
+}
+
+// TestExecutorMasksBeforeTheEventCap slides a secret across the event size cap.
+// Masking after the cap would leave the secret's first half (before the cut)
+// in the event; masking first keeps only the mask.
+func TestExecutorMasksBeforeTheEventCap(t *testing.T) {
+	const pw = "Zx9!hunter2-Qw7"
+	const capBytes = 1024
+	for off := capBytes - 120; off <= capBytes-20; off += 7 {
+		out := strings.Repeat("x", off) + " password=" + pw + " tail"
+		ev, _, _ := runMaskedLimits(t, out, nil, config.Limits{EventMaxDataBytes: capBytes})
+		if strings.Contains(ev, "Zx9!") || strings.Contains(ev, "hunter2") {
+			t.Fatalf("offset %d: secret (or its first half) reached the event:\n%.1500s", off, ev)
+		}
 	}
 }
