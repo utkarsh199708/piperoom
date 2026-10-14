@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
@@ -44,7 +44,7 @@ const actions: RoomActions = {
   acceptHandoff: vi.fn(),
   trace: vi.fn(),
 }
-const staleOff = { stale: false, dismissStale: vi.fn(), reload: vi.fn() }
+const staleOff = { stale: null, dismissStale: vi.fn(), reload: vi.fn() }
 
 const member: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'], role: 'member' }
 const viewer: CurrentUser = { id: 'vera', name: 'Vera', layers: ['kafka-connect'], role: 'viewer' }
@@ -151,7 +151,24 @@ describe('role-aware room screen', () => {
 })
 
 describe('role-aware room list', () => {
-  const rooms: RoomSnapshot[] = []
+  // One open room nobody drives: a member may take it, a viewer may not.
+  const rooms: RoomSnapshot[] = [
+    {
+      id: 'r_nodriver',
+      title: 'No driver here',
+      severity: 'sev2',
+      pipeline_id: 'orders',
+      status: 'open',
+      opened_at: '2026-10-11T10:00:00Z',
+      last_seq: 1,
+      driver: null,
+      agent_status: { state: 'idle' },
+      hypothesis: null,
+      open_proposals: [],
+      pending_suggestions: [],
+      members: [],
+    },
+  ]
   beforeEach(() => {
     vi.mocked(useRoomList).mockReturnValue({ rooms, loading: false, error: null, reload: vi.fn() })
   })
@@ -162,18 +179,28 @@ describe('role-aware room list', () => {
         <RoomList />
       </MemoryRouter>,
     )
+    expect(screen.getByRole('button', { name: /Take control/ })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'New room' }))
     expect(screen.getByRole('button', { name: 'Open room' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Title')).toBeInTheDocument()
   })
 
-  it('a viewer cannot create a room and sees the badge', () => {
+  it('a viewer cannot create a room or take control', () => {
     ctx.user = viewer
     render(
       <MemoryRouter>
         <RoomList />
       </MemoryRouter>,
     )
+    expect(screen.queryByRole('button', { name: 'New room' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Open room' })).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Title')).not.toBeInTheDocument()
-    expect(screen.getByText('View only')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Take control/ })).not.toBeInTheDocument()
+    // The room is still listed, read-only. (The "View only" badge is in the shell's account
+    // menu now, and AppShell.test.tsx covers it.)
+    expect(screen.getByRole('link', { name: 'No driver here' })).toBeInTheDocument()
+    // The C key opens nothing for a viewer.
+    fireEvent.keyDown(window, { key: 'c' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 })

@@ -61,7 +61,12 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 
 	// The model endpoint (provider, triage model, token budget) comes from the
 	// same settings as the server; a bad value stops the run before any tool opens.
-	ep, err := wiring.NewAgentEndpoint(ctx, cfg, nil)
+	// One AWS config for the process, shared by Bedrock and MSK IAM.
+	awsCfg, err := wiring.LoadAWS(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("investigate: %w", err)
+	}
+	ep, err := wiring.NewAgentEndpoint(ctx, cfg, nil, awsCfg)
 	if err != nil {
 		return fmt.Errorf("investigate: %w", err)
 	}
@@ -73,7 +78,7 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 			return fmt.Errorf("investigate: register fake tools: %w", err)
 		}
 	} else {
-		w, err := wiring.Open(ctx, cfg)
+		w, err := wiring.Open(ctx, cfg, awsCfg)
 		if err != nil {
 			return err
 		}

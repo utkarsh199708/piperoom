@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+
 	"piperoom/internal/agent"
 	"piperoom/internal/config"
 )
@@ -26,9 +28,12 @@ func EndpointConfig(cfg config.Config) agent.EndpointConfig {
 // NewAgentEndpoint builds the model endpoint shared by cmd/server and
 // cmd/investigate: provider client, triage model and per-room token budgets. A
 // bad provider, a missing region or project, or a bad token budget is an error
-// here, so the process refuses to start.
-func NewAgentEndpoint(ctx context.Context, cfg config.Config, log *slog.Logger) (*agent.Endpoint, error) {
-	ep, err := agent.NewEndpoint(ctx, EndpointConfig(cfg), log)
+// here, so the process refuses to start. awsCfg is the shared config from
+// LoadAWS, also passed to Open; nil keeps the endpoint's own AWS loader.
+func NewAgentEndpoint(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config) (*agent.Endpoint, error) {
+	ec := EndpointConfig(cfg)
+	ec.AWSConfig = awsCfg
+	ep, err := agent.NewEndpoint(ctx, ec, log)
 	if err != nil {
 		return nil, fmt.Errorf("wiring: model endpoint: %w", err)
 	}

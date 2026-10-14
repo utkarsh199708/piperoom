@@ -3,9 +3,13 @@ import { isFixtures } from '../api/client'
 import { DEV_USERS } from '../dev/users'
 import { useCurrentUser } from '../context/user'
 import { isViewer } from '../state/permissions'
+import { useInShell } from './shell/context'
 
 export function UserSwitcher() {
   const { user, setUserId, logout, busy } = useCurrentUser()
+  // Inside the app shell the sidebar's account menu does all of this.
+  const inShell = useInShell()
+  if (inShell) return null
   return (
     <span className="user-switcher">
       {/* The switcher lets a client sign in as any user (F1): it must never

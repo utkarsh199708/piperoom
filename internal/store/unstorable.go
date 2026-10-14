@@ -19,16 +19,29 @@ import (
 var ErrUnstorable = errors.New("store: content cannot be stored (NUL, invalid UTF-8 or lone surrogate)")
 
 // unstorableCodes are the Postgres SQLSTATEs for "this value cannot be stored":
-// invalid text representation, unsupported Unicode escape, invalid byte
-// sequence, numeric value out of range. A write that gets past the pre-check
-// and still fails with one of them is wrapped in ErrUnstorable too.
-var unstorableCodes = map[string]bool{"22P02": true, "22P05": true, "22021": true, "22003": true}
+// unsupported Unicode escape (22P05), invalid byte sequence (22021) and numeric
+// value out of range (22003). A write that gets past the pre-check and still
+// fails with one of them is wrapped in ErrUnstorable too.
+//
+// 22P02 (invalid text representation) is deliberately not here. After the
+// pre-checks it can only come from our own bug (a bad cast, a malformed jsonb
+// we built), not from client content, so it must stay a logged 500 and not
+// turn into a silent 400.
+var unstorableCodes = map[string]bool{"22P05": true, "22021": true, "22003": true}
+
+// IsUnstorablePGError reports whether err carries a Postgres "bad value"
+// SQLSTATE that means the client's content cannot be stored (see
+// unstorableCodes). A caller that holds a raw driver error uses it to apply
+// the same mapping as the store.
+func IsUnstorablePGError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && unstorableCodes[pgErr.Code]
+}
 
 // classify wraps err in ErrUnstorable when it is a Postgres "bad value" error.
 // The original error stays in the chain (errors.As finds the *pgconn.PgError).
 func classify(err error) error {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && unstorableCodes[pgErr.Code] {
+	if IsUnstorablePGError(err) {
 		return fmt.Errorf("%w: %w", ErrUnstorable, err)
 	}
 	return err

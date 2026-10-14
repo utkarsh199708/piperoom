@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Handoff</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+.pr{--background:#0a0a0b;--card:#121214;--muted:#19191d;--border:#222228;--border-strong:#2d2d35;--foreground:#ececf0;--muted-foreground:#9d9da8;--subtle-foreground:#6b6b76;--primary:#5b7cfa;--primary-fg:#8ea3ff;--warning-fg:#f0c04a;--success-fg:#4fd48f;--sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-family:var(--sans);font-size:13px;line-height:18px;color:var(--foreground);background:var(--background);-webkit-font-smoothing:antialiased;color-scheme:dark}
+.pr *{box-sizing:border-box}
+.h1{margin:0;font:600 20px/26px var(--sans);letter-spacing:-.01em}
+.h2{margin:0;font:600 14px/20px var(--sans)}
+.muted{color:var(--muted-foreground)}.subtle{color:var(--subtle-foreground)}
+pre{margin:0;padding:12px 14px;background:var(--card);border:1px solid var(--border);border-radius:8px;font:400 11.5px/16px var(--mono);color:var(--foreground);white-space:pre;overflow:hidden}
+pre .c{color:var(--subtle-foreground)}
+pre .k{color:var(--primary-fg)}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font:500 12px/16px var(--sans);color:var(--subtle-foreground);padding:6px 8px;border-bottom:1px solid var(--border)}
+td{padding:5px 8px;border-bottom:1px solid var(--border);vertical-align:top;font-size:12px;line-height:16px}
+td.m{font:500 11.5px/16px var(--mono)}
+td .mm{font:400 11.5px/16px var(--mono);color:var(--muted-foreground)}
+</style>
+</helmet>
+<div class="pr" style="width: 1440px; height: 1700px; padding: 32px 40px; display: grid; grid-template-columns: 560px 1fr; gap: 24px 40px; align-content: start; overflow: hidden;">
+  <div style="grid-column: span 2; display: flex; flex-direction: column; gap: 4px;">
+    <h1 class="h1">Handoff — tokens to shadcn/ui + Tailwind, components to shadcn/ui</h1>
+    <span class="muted">Dark first. Variable names are shadcn's own, so <span style="font-family: var(--mono);">tailwind.config</span> needs no mapping layer. Fonts: Geist + Geist Mono (decided once; replaces IBM Plex / JetBrains in <span style="font-family: var(--mono);">web/src/index.css</span>).</span>
+  </div>
+
+  <section style="display: flex; flex-direction: column; gap: 10px;">
+    <h2 class="h2">tokens.css — CSS variables (shadcn format)</h2>
+<pre><span class="c">/* dark is :root; .light (or [data-theme=light]) overrides */</span>
+:root {
+  --radius: 0.5rem;            <span class="c">/* lg 8 · md 6 · sm 4 */</span>
+  --background: #0a0a0b;       --foreground: #ececf0;
+  --card: #121214;             --card-foreground: #ececf0;
+  --popover: #121214;          --popover-foreground: #ececf0;
+  --primary: #5b7cfa;          --primary-foreground: #ffffff;
+  --secondary: #19191d;        --secondary-foreground: #ececf0;
+  --muted: #19191d;            --muted-foreground: #9d9da8;
+  --accent: #1f1f25;           --accent-foreground: #ececf0;  <span class="c">/* hover, selected */</span>
+  --destructive: #e5484d;      --destructive-foreground: #ffffff;
+  --border: #222228;           --input: #2d2d35;   --ring: #5b7cfa;
+  --sidebar: #0e0e10;          --sidebar-border: #222228;
+  <span class="c">/* piperoom additions */</span>
+  --subtle-foreground: #6b6b76;
+  --primary-subtle: rgb(91 124 250 / .14);   --primary-fg: #8ea3ff;
+  --success: #2ea36f;  --success-subtle: rgb(46 163 111 / .14);  --success-foreground: #4fd48f;
+  --warning: #d9a21b;  --warning-subtle: rgb(217 162 27 / .13);  --warning-foreground: #f0c04a;
+  --danger-subtle: rgb(229 72 77 / .14);     --danger-foreground: #ff7074;
+  --info: #3b9eff;     --info-subtle: rgb(59 158 255 / .14);     --info-foreground: #7cc0ff;
+  --agent: #8b5cf6;    --agent-subtle: rgb(139 92 246 / .14);    --agent-foreground: #b7a0ff;
+  --layer-postgres: #7cb8ff;  --layer-kafka-connect: #f0a35c;  --layer-schema-registry: #5ad3c0;
+  --layer-kafka: #f28fb4;     --layer-consumer: #b9d96b;       --layer-warehouse: #9fb3ff;
+  --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.light {
+  --background: #ffffff;  --foreground: #18181b;  --card: #ffffff;  --popover: #ffffff;
+  --primary: #4f6ef2;     --secondary: #f4f4f5;   --muted: #f4f4f5; --muted-foreground: #52525b;
+  --accent: #ececee;      --destructive: #dc3d43; --border: #e4e4e7; --input: #d4d4d8; --ring: #4f6ef2;
+  --sidebar: #fafafa;     --subtle-foreground: #71717a;
+  --primary-subtle: rgb(79 110 242 / .10);  --primary-fg: #3b5bdb;
+  --success: #1f9d5f; --success-subtle: rgb(31 157 95 / .12); --success-foreground: #15803d;
+  --warning: #c58f0a; --warning-subtle: rgb(197 143 10 / .12); --warning-foreground: #9a6a05;
+  --danger-subtle: rgb(220 61 67 / .10);   --danger-foreground: #b91c1c;
+  --info: #2b7fff;  --info-subtle: rgb(43 127 255 / .10);  --info-foreground: #1d4ed8;
+  --agent: #7c4ddc; --agent-subtle: rgb(124 77 220 / .10); --agent-foreground: #6d28d9;
+  --layer-postgres: #1d6fd8; --layer-kafka-connect: #b85c0a; --layer-schema-registry: #0f8a78;
+  --layer-kafka: #c0366d;    --layer-consumer: #5a7d0d;      --layer-warehouse: #4a5fd0;
+}</pre>
+    <h2 class="h2" style="margin-top: 6px;">tailwind.config.ts — theme.extend</h2>
+<pre>colors: {
+  <span class="c">// shadcn defaults (background, foreground, card, primary, muted, accent, destructive, border, input, ring) as usual</span>
+  'subtle-foreground': 'var(--subtle-foreground)',
+  primary: { DEFAULT: 'var(--primary)', foreground: 'var(--primary-foreground)', subtle: 'var(--primary-subtle)', fg: 'var(--primary-fg)' },
+  success: { DEFAULT: 'var(--success)', subtle: 'var(--success-subtle)', foreground: 'var(--success-foreground)' },
+  warning: { DEFAULT: 'var(--warning)', subtle: 'var(--warning-subtle)', foreground: 'var(--warning-foreground)' },
+  destructive: { DEFAULT: 'var(--destructive)', subtle: 'var(--danger-subtle)', foreground: 'var(--destructive-foreground)', fg: 'var(--danger-foreground)' },
+  info: { DEFAULT: 'var(--info)', subtle: 'var(--info-subtle)', foreground: 'var(--info-foreground)' },
+  agent: { DEFAULT: 'var(--agent)', subtle: 'var(--agent-subtle)', foreground: 'var(--agent-foreground)' },
+  layer: { postgres: 'var(--layer-postgres)', 'kafka-connect': 'var(--layer-kafka-connect)', 'schema-registry': 'var(--layer-schema-registry)', kafka: 'var(--layer-kafka)', consumer: 'var(--layer-consumer)', warehouse: 'var(--layer-warehouse)' },
+},
+fontFamily: { sans: ['var(--font-sans)'], mono: ['var(--font-mono)'] },
+borderRadius: { lg: 'var(--radius)', md: 'calc(var(--radius) - 2px)', sm: 'calc(var(--radius) - 4px)' },
+fontSize: { xs: ['12px','16px'], sm: ['13px','18px'], base: ['14px','20px'], lg: ['16px','22px'], xl: ['20px','26px'] }</pre>
+  </section>
+
+  <section style="display: flex; flex-direction: column; gap: 14px; min-width: 0;">
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <h2 class="h2">Figma variable → CSS variable</h2>
+      <table>
+        <thead><tr><th>Figma (Color Dark / Light)</th><th>CSS / Tailwind</th><th>Figma</th><th>CSS / Tailwind</th></tr></thead>
+        <tbody>
+          <tr><td class="m">bg/base</td><td class="mm">--background · bg-background</td><td class="m">accent/default · hover</td><td class="mm">--primary · bg-primary hover:bg-primary/90</td></tr>
+          <tr><td class="m">bg/sidebar</td><td class="mm">--sidebar · bg-sidebar</td><td class="m">accent/subtle · fg · on</td><td class="mm">--primary-subtle · --primary-fg · --primary-foreground</td></tr>
+          <tr><td class="m">bg/surface</td><td class="mm">--card, --popover · bg-card</td><td class="m">success/default · subtle · fg</td><td class="mm">--success · --success-subtle · --success-foreground</td></tr>
+          <tr><td class="m">bg/muted</td><td class="mm">--muted, --secondary · bg-muted</td><td class="m">warning/default · subtle · fg</td><td class="mm">--warning · --warning-subtle · --warning-foreground</td></tr>
+          <tr><td class="m">bg/hover</td><td class="mm">--accent · hover:bg-accent, data-[state=selected]</td><td class="m">danger/default · subtle · fg</td><td class="mm">--destructive · --danger-subtle · --danger-foreground</td></tr>
+          <tr><td class="m">bg/overlay</td><td class="mm">bg-black/60 (DialogOverlay)</td><td class="m">info/* · agent/*</td><td class="mm">--info* · --agent* (agent hue is the agent's only)</td></tr>
+          <tr><td class="m">border/default · strong</td><td class="mm">--border · --input</td><td class="m">layer/postgres … warehouse</td><td class="mm">--layer-* · text-layer-postgres bg-layer-postgres/[.12]</td></tr>
+          <tr><td class="m">fg/default · muted · subtle</td><td class="mm">--foreground · --muted-foreground · --subtle-foreground</td><td class="m">ring/focus</td><td class="mm">--ring · focus-visible:ring-2 ring-ring ring-offset-2</td></tr>
+          <tr><td class="m">fg/inverse</td><td class="mm">--primary-foreground</td><td class="m">radius/sm · md · lg · full</td><td class="mm">rounded-sm 4 · rounded-md 6 · rounded-lg 8 · rounded-full</td></tr>
+          <tr><td class="m">space/1..12</td><td class="mm">Tailwind 1..12 (4px grid)</td><td class="m">shadow/sm · md · lg</td><td class="mm">shadow-sm · shadow-md · shadow-lg (dark values in tokens)</td></tr>
+          <tr><td class="m">text/xs · sm · base · md · lg · xl</td><td class="mm">text-xs 12 · text-sm 13 · text-base 14 · text-lg 16 · text-xl 20</td><td class="m">mono/xs · sm</td><td class="mm">font-mono text-[11.5px] · font-mono text-xs/sm</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 6px;">
+      <h2 class="h2">Component → shadcn/ui</h2>
+      <table>
+        <thead><tr><th style="width: 150px;">Design</th><th style="width: 190px;">shadcn/ui</th><th>Anatomy / notes</th></tr></thead>
+        <tbody>
+          <tr><td class="m">Button</td><td class="mm">Button</td><td>variants default · secondary · outline · ghost + <span class="mm">success</span> and <span class="mm">ghost-danger</span> added to <span class="mm">buttonVariants</span>; sizes sm h-8 (toolbars), default h-9 (footers), icon h-8 w-8 no border; Kbd passed as children, inside filled buttons <span class="mm">bg-white/20</span>.</td></tr>
+          <tr><td class="m">Badge</td><td class="mm">Badge (cva)</td><td>h-5 px-1.5 rounded-md text-xs font-medium; variants sev1–4 · success · warning · destructive · info · accent · agent · neutral · outline; <span class="mm">mono</span> boolean; six <span class="mm">layer-*</span> variants (text + 12% tint). Never fully rounded.</td></tr>
+          <tr><td class="m">StatusDot / pill</td><td class="mm">local</td><td>6px dot + word. Pill form = <span class="mm">Badge variant="outline" rounded-full</span>, only when it carries a dot.</td></tr>
+          <tr><td class="m">Kbd</td><td class="mm">local Kbd</td><td>h-[18px] min-w-[18px] px-1 rounded-sm border bg-muted font-mono text-[11px] text-subtle-foreground.</td></tr>
+          <tr><td class="m">HashPill</td><td class="mm">Badge outline + Button ghost + Tooltip</td><td>one <span class="mm">#</span> glyph inside the pill, label "Approving exactly this", Copy as ghost Button, full hash in Tooltip.</td></tr>
+          <tr><td class="m">Avatar · AvatarStack</td><td class="mm">Avatar, AvatarFallback</td><td>sizes 20/24/28/32; driver = <span class="mm">ring-2 ring-primary ring-offset-2 ring-offset-background</span>; stack = wrapper with <span class="mm">-space-x-1.5</span>, +N as muted fallback; agent avatar bg-agent.</td></tr>
+          <tr><td class="m">Progress · Skeleton</td><td class="mm">Progress, Skeleton</td><td>indeterminate = child div with a CSS keyframe (Radix has none); Skeleton rounded-sm bg-muted, shimmer only under no-preference.</td></tr>
+          <tr><td class="m">Tooltip · Separator</td><td class="mm">Tooltip, Separator</td><td>OIDC issuer + time live in the approval status Tooltip, not on the row.</td></tr>
+          <tr><td class="m">Input · Textarea</td><td class="mm">Input, Textarea</td><td>Input h-8; composer Textarea <span class="mm">bg-muted border-0</span> inside a <span class="mm">border-t bg-background</span> div (no nested card); solo confirm input font-mono with paste blocked.</td></tr>
+          <tr><td class="m">Tabs</td><td class="mm">Tabs (line variant)</td><td>TabsList bg-transparent border-b; TabsTrigger h-9 with <span class="mm">data-[state=active]:border-b-foreground</span>; counts as mono children.</td></tr>
+          <tr><td class="m">Command menu</td><td class="mm">Command in Dialog (cmdk)</td><td>CommandInput, CommandGroup headings Needs you · Room · Agent · Navigate, CommandItem h-9 text-sm + CommandShortcut (Kbd); scope badge above the input; Esc only in the footer.</td></tr>
+          <tr><td class="m">Card · Proposal card</td><td class="mm">Card</td><td>Card p-4 rounded-lg border-border; proposal ribbon is a 36px div <span class="mm">bg-warning-subtle text-warning-foreground border-b</span>; status is never a card border.</td></tr>
+          <tr><td class="m">Dialog (Hand off · Solo)</td><td class="mm">Dialog, Select, Checkbox</td><td>p-6 rounded-lg shadow-lg; Select trigger h-9; Checkbox 16px rounded-sm; Cancel ghost, primary with Kbd; solo primary disabled until the typed string matches.</td></tr>
+          <tr><td class="m">Toast</td><td class="mm">Sonner</td><td>title one line (truncate), description, actions row bottom-right, close top-2 right-2 with 24px hit area.</td></tr>
+          <tr><td class="m">Table (Rooms)</td><td class="mm">Table</td><td>rows h-11; "mine" row <span class="mm">bg-warning-subtle</span> + Needs-you Badge only (no left bar, no coloured Agent cell); table fills to the footer with <span class="mm">flex-1</span>.</td></tr>
+          <tr><td class="m">Sidebar · user menu</td><td class="mm">Sidebar block, DropdownMenu</td><td>items h-8 text-sm one size; counts mono subtle; footer = DropdownMenu trigger aligned px-4.</td></tr>
+          <tr><td class="m">Sheet (Trace a record)</td><td class="mm">Sheet</td><td>right side, stages reuse the node visual.</td></tr>
+          <tr><td class="m">PipelineLane</td><td class="mm">custom (nodes = Card)</td><td>node min-w-[200px] p-3; kind label text-xs subtle, layer Badge shrink-0; failed = border-destructive; degraded = dot + word; edges = 2px dashed div, stalled solid destructive with caption pill on bg-background.</td></tr>
+          <tr><td class="m">AgentStep</td><td class="mm">custom row</td><td>done = compact row (number · title · tool Badge · args mono · ms · check); running = Card with Loader2 animate-spin + 2px indeterminate bar; error = destructive number disc.</td></tr>
+          <tr><td class="m">ApprovalRow</td><td class="mm">custom row</td><td>single line: layer Badge · Avatar · name · user:id mono subtle · status Badge or Reject (ghost-danger) + Approve (success) · tint only on the row you own.</td></tr>
+          <tr><td class="m">Banner (no driver · solo)</td><td class="mm">div</td><td>min-h-10 bg-warning-subtle text-warning-foreground border-b, one action right.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 4px;">
+      <h2 class="h2">Rules that keep it sharp</h2>
+      <span class="muted">One amber signal per fact. Page title 20/600, never bigger. Icon buttons are ghost, no border. Every technical value is mono. Every action shows its key. Nothing moves except the agent's own working signal.</span>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1700}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

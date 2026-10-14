@@ -49,6 +49,11 @@ type EndpointConfig struct {
 	Provider string
 	// AWSRegion is required for bedrock.
 	AWSRegion string
+	// AWSConfig, when set, is the process's one shared AWS config
+	// (wiring.LoadAWS) and bedrock uses it instead of loading its own, so
+	// Bedrock and MSK IAM read the same credential chain once. Nil keeps the
+	// endpoint's own loader.
+	AWSConfig *aws.Config
 	// VertexProject and VertexRegion are required for vertex.
 	VertexProject string
 	VertexRegion  string
@@ -139,9 +144,15 @@ func (c EndpointConfig) providerOptions(ctx context.Context, getenv func(string)
 	switch c.Provider {
 	case ProviderBedrock:
 		var cfg aws.Config
-		cfg, err = ld.awsConfig(ctx, c.AWSRegion)
-		if err != nil {
-			return nil, fmt.Errorf("agent: load AWS config for bedrock: %w", err)
+		if c.AWSConfig != nil {
+			// A shallow copy: the region set below stays local, while the
+			// credentials provider (and its cache) is the shared one.
+			cfg = c.AWSConfig.Copy()
+		} else {
+			cfg, err = ld.awsConfig(ctx, c.AWSRegion)
+			if err != nil {
+				return nil, fmt.Errorf("agent: load AWS config for bedrock: %w", err)
+			}
 		}
 		cfg.Region = c.AWSRegion
 		// A Bedrock API key (AWS_BEARER_TOKEN_BEDROCK) replaces AWS credentials.

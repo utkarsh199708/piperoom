@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -164,11 +166,35 @@ type fakeBroker struct {
 	metadata  int // Metadata requests served (only after auth when SASL is on)
 	connErrs  []error
 	wantsSASL bool
+
+	// iamAccessKey, when set, makes the broker offer AWS_MSK_IAM instead of
+	// PLAIN and accept a signed payload carrying this access key.
+	iamAccessKey string
+	iamPayloads  [][]byte // raw AWS_MSK_IAM payloads received
 }
 
 // newFakeBroker listens on 127.0.0.1; tlsCfg nil means plaintext. A non-empty
 // user turns on SASL PLAIN with that user/pass.
 func newFakeBroker(t *testing.T, tlsCfg *tls.Config, user, pass string) *fakeBroker {
+	t.Helper()
+	return startFakeBroker(t, tlsCfg, &fakeBroker{saslUser: user, saslPass: pass, wantsSASL: user != ""})
+}
+
+// newFakeMSKIAMBroker is a fake broker that only offers AWS_MSK_IAM and
+// accepts a payload signed with accessKey. It does not verify the signature:
+// that is franz-go's code, and the secret key never reaches the broker.
+func newFakeMSKIAMBroker(t *testing.T, tlsCfg *tls.Config, accessKey string) *fakeBroker {
+	t.Helper()
+	return startFakeBroker(t, tlsCfg, &fakeBroker{iamAccessKey: accessKey, wantsSASL: true})
+}
+
+func (b *fakeBroker) payloads() [][]byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([][]byte(nil), b.iamPayloads...)
+}
+
+func startFakeBroker(t *testing.T, tlsCfg *tls.Config, b *fakeBroker) *fakeBroker {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -177,7 +203,7 @@ func newFakeBroker(t *testing.T, tlsCfg *tls.Config, user, pass string) *fakeBro
 	if tlsCfg != nil {
 		ln = tls.NewListener(ln, tlsCfg)
 	}
-	b := &fakeBroker{ln: ln, saslUser: user, saslPass: pass, wantsSASL: user != ""}
+	b.ln = ln
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	go func() {
@@ -270,15 +296,36 @@ func (b *fakeBroker) serve(c net.Conn) error {
 			b.mechs = append(b.mechs, r.Mechanism)
 			b.mu.Unlock()
 			hr := resp.(*kmsg.SASLHandshakeResponse)
-			hr.SupportedMechanisms = []string{"PLAIN"}
-			if r.Mechanism != "PLAIN" {
+			supported := "PLAIN"
+			if b.iamAccessKey != "" {
+				supported = "AWS_MSK_IAM"
+			}
+			hr.SupportedMechanisms = []string{supported}
+			if r.Mechanism != supported {
 				hr.ErrorCode = 33 // UNSUPPORTED_SASL_MECHANISM
 			}
 		case *kmsg.SASLAuthenticateRequest:
 			ar := resp.(*kmsg.SASLAuthenticateResponse)
 			want := "\x00" + b.saslUser + "\x00" + b.saslPass
 			b.mu.Lock()
-			if string(r.SASLAuthBytes) == want {
+			if b.iamAccessKey != "" {
+				b.iamPayloads = append(b.iamPayloads, append([]byte(nil), r.SASLAuthBytes...))
+				var p map[string]string
+				if json.Unmarshal(r.SASLAuthBytes, &p) == nil &&
+					strings.HasPrefix(p["x-amz-credential"], b.iamAccessKey+"/") &&
+					p["action"] == "kafka-cluster:Connect" && p["x-amz-signature"] != "" {
+					b.authOK++
+					authed = true
+					// MSK answers with a non-empty JSON body; franz-go treats
+					// an empty one as a failure.
+					ar.SASLAuthBytes = []byte(`{"version":"2020_10_22","request-id":"fake"}`)
+				} else {
+					b.authFail++
+					ar.ErrorCode = 58 // SASL_AUTHENTICATION_FAILED
+					msg := "bad credentials"
+					ar.ErrorMessage = &msg
+				}
+			} else if string(r.SASLAuthBytes) == want {
 				b.authOK++
 				authed = true
 			} else {

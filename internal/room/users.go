@@ -1,7 +1,10 @@
 package room
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"sort"
@@ -53,10 +56,16 @@ type usersFile struct {
 // ParseUsers parses the users.yaml format.
 func ParseUsers(data []byte) (*Users, error) {
 	var f usersFile
-	if err := yaml.Unmarshal(data, &f); err != nil {
+	// Unknown keys are refused: a typo such as `subject:` for `sub:` would
+	// otherwise drop the pin silently and let an email match bind another
+	// account (security audit 2026-10, A-USR-2).
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&f); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("room: parse users: %w", err)
 	}
 	u := &Users{byID: map[string]User{}}
+	ids := map[string]string{}    // case-folded id -> id as written
 	emails := map[string]string{} // lower-cased email -> user id
 	subs := map[string]string{}
 	for _, user := range f.Users {
@@ -73,6 +82,14 @@ func ParseUsers(data []byte) (*Users, error) {
 		if strings.HasPrefix(user.ID, DerivedIDPrefix) {
 			return nil, fmt.Errorf("room: user id %q: the prefix %q is reserved for IdP users without an entry", user.ID, DerivedIDPrefix)
 		}
+		// A repeated id (or one that differs only in letter case) is refused:
+		// Get would answer with the last entry while BySub and ByEmail answer
+		// with the first, so a sub: pin on one entry could be bypassed through
+		// the email of the other (security audit 2026-10, A-USR-1).
+		if other, dup := ids[foldKey(user.ID)]; dup {
+			return nil, fmt.Errorf("room: user id %q is listed twice (as %q and %q); ids must be unique, ignoring letter case", user.ID, other, user.ID)
+		}
+		ids[foldKey(user.ID)] = user.ID
 		if user.Email != "" {
 			if !strings.Contains(user.Email, "@") || strings.ContainsAny(user.Email, " \t\r\n") || !isASCII(user.Email) {
 				return nil, fmt.Errorf("room: user %q: bad email %q (ASCII only, no spaces)", user.ID, user.Email)
@@ -133,9 +150,11 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 		layers = append(layers, layer)
 	}
 	sort.Strings(layers) // deterministic error for the same config
-	// Group rule (docs/design/auth.md section 2.3): the server does not know
-	// group membership at start-up, so a layer that lists any group: principal
-	// is not checked against users.yaml. Log it once.
+	// Group rule (docs/design/auth.md section 2.3), owners -> users direction
+	// only: the server does not know group membership at start-up, so a layer
+	// that lists any group: principal cannot be checked against users.yaml for
+	// who must list it. The users -> owners direction below is always checked.
+	// Log the skipped layers once.
 	var skipped []string
 	for _, layer := range layers {
 		if !own.Layers[layer].AllUsers() {
@@ -143,7 +162,7 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 		}
 	}
 	if len(skipped) > 0 {
-		slog.Info("users: layers with group principals are not checked against users.yaml", "layers", skipped)
+		slog.Info("users: owners->users check skips layers with group principals (not checked against users.yaml); users->owners is always checked", "layers", skipped)
 	}
 	for _, layer := range layers {
 		ps := own.Layers[layer]
@@ -168,11 +187,11 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 			if !ok {
 				return fmt.Errorf("users file grants %q layer %q, which the owners file does not assign to anyone", user.ID, layer)
 			}
-			if !ps.AllUsers() {
-				continue // group rule: skipped above
-			}
+			// A layer that also lists groups is NOT skipped here: the server
+			// cannot vouch for group membership at start-up, so a users.yaml
+			// claim must not stand in for it (security audit A-AP-3).
 			if !ps.Contains(owners.Principal{Kind: owners.KindUser, Name: user.ID}) {
-				return fmt.Errorf("users file and owners file disagree: users file grants %q layer %q but the owners file assigns it to %q", user.ID, layer, ps.Display())
+				return fmt.Errorf("users file and owners file disagree: users file grants %q layer %q but the owners file assigns it to %q (a users.yaml layer must be a user: principal there, even when the layer also lists groups)", user.ID, layer, ps.Display())
 			}
 		}
 	}

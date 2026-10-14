@@ -391,7 +391,7 @@ func TestScenarioFromShadowHostileText(t *testing.T) {
 			}
 			tasks := data["tasks"].([]any)
 			task := tasks[0].(map[string]any)
-			if task["id"] != int64(0) || task["state"] != h {
+			if task["id"] != 0 || task["state"] != h { // yaml.v3 decodes an integer into any as int
 				t.Errorf("task projection = %#v", task)
 			}
 			if _, ok := task["error"]; ok {

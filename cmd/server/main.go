@@ -237,7 +237,12 @@ func run() error {
 	} else {
 		// The model endpoint first: a wrong provider, region, project or token
 		// budget should stop the server before it opens any connection.
-		ep, err := wiring.NewAgentEndpoint(ctx, cfg, log)
+		// One AWS config for the process, shared by Bedrock and MSK IAM.
+		awsCfg, err := wiring.LoadAWS(ctx, cfg)
+		if err != nil {
+			return fmt.Errorf("server: %w", err)
+		}
+		ep, err := wiring.NewAgentEndpoint(ctx, cfg, log, awsCfg)
 		if err != nil {
 			return fmt.Errorf("server: %w", err)
 		}
@@ -245,7 +250,7 @@ func run() error {
 		write = ep.WriteHandoff
 		closedHook.setForget(ep)
 
-		w, err := wiring.Open(ctx, cfg)
+		w, err := wiring.Open(ctx, cfg, awsCfg)
 		if err != nil {
 			return fmt.Errorf("server: open the data stack: %w", err)
 		}
@@ -307,6 +312,11 @@ func run() error {
 	// disappear. The deferred stop runs before the store closes (LIFO).
 	stopRetention := startRetention(ctx, svc, retentionDays, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopRetention()
+	// Dead sessions and login states are pruned whatever PIPEROOM_RETENTION_DAYS
+	// says: the job above is off by default, this one is always on.
+	sessionPruner, loginStatePruner := authPruners(sessions, loginStates)
+	stopAuthPrune := startAuthPrune(ctx, sessionPruner, loginStatePruner, retentionInterval, retentionRunTimeout, time.Now, log)
+	defer stopAuthPrune()
 
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions),
 		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities)}

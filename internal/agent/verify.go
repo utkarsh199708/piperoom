@@ -927,15 +927,11 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 	res, err := entry.tool.Run(tctx, input)
 	took := time.Since(start).Milliseconds()
 
-	var data json.RawMessage
-	if res.Data != nil {
-		if b, mErr := json.Marshal(res.Data); mErr == nil {
-			data = b
-		} else {
-			r.log.Warn("agent: verify tool data marshal failed", "tool", name, "err", mErr)
-		}
-	}
+	res = r.scrubToolResult(name, res)
+	data := r.toolDataJSON(name, res.Data)
 	if err != nil {
+		// The verdict lines built from this error reach the model and the log.
+		err = r.scrubToolError(name, err)
 		summary, truncated := tools.Truncate("error: " + err.Error())
 		r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
 			StepID: stepID, ToolUseID: toolUseID, Tool: name,

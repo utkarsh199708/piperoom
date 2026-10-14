@@ -60,6 +60,15 @@ func TestPresenceTickClosesDeadSessions(t *testing.T) {
 	alive := dial("priya", "alive")
 	bare := dial("meera", "")
 
+	// Dial returns before the server registers the connection; a recheck that
+	// ran first would not see the session and never close it.
+	for deadline := time.Now().Add(5 * time.Second); gw.ConnCount() < 3; {
+		if time.Now().After(deadline) {
+			t.Fatalf("gateway registered %d of 3 connections", gw.ConnCount())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
 	deadSession.Store(true)
 	gw.RecheckSessions()
 

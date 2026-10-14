@@ -472,9 +472,16 @@ func TestHostAllowList(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newAuthEnv(t, tc.opts...)
-			// /healthz is a probe: it must follow the same rule.
-			resp := e.do(t, http.MethodGet, "/healthz", "", "Host: "+tc.host)
-			wantStatus(t, resp, tc.want)
+			// A plain API route follows the rule. (/healthz and /readyz are exempt
+			// from it: TestHostGuardHealthProbeExemption.)
+			resp := e.do(t, http.MethodGet, "/api/rooms", "", "Host: "+tc.host, "X-User: priya")
+			// Past the Host check, dev mode answers 200 (X-User) and oidc mode
+			// 401 session_expired (no cookie).
+			want := tc.want
+			if want == http.StatusOK && strings.Contains(tc.name, "oidc mode") {
+				want = http.StatusUnauthorized
+			}
+			wantStatus(t, resp, want)
 			if tc.want == http.StatusMisdirectedRequest {
 				if b := readErr(t, resp); b.Error.Code != "bad_host" {
 					t.Fatalf("code = %q, want bad_host", b.Error.Code)
@@ -761,6 +768,22 @@ func TestLogoutClosesWebSocket(t *testing.T) {
 			t.Fatalf("dial: %v", err)
 		}
 		t.Cleanup(func() { conn.CloseNow() })
+		// Dial returns before the gateway registers the connection, and a logout
+		// that ran first would find nothing to close. The gateway sends a
+		// presence frame only after it has registered the connection, so reading
+		// up to that frame makes the logout below race-free.
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				t.Fatalf("waiting for the presence frame: %v", err)
+			}
+			var m struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(data, &m) == nil && m.Type == "presence" {
+				break
+			}
+		}
 		return conn
 	}
 	pConn := dial(priya)

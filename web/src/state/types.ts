@@ -80,6 +80,8 @@ export interface DecisionState {
   identity?: Identity
   params_hash?: string
   reason?: string
+  /** When the decision was made (the event's time); absent on a decision built without an event. */
+  at?: string
 }
 
 export interface ProposalState {

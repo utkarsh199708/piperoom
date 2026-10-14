@@ -41,7 +41,7 @@ func TestNewAgentEndpointStartupErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewAgentEndpoint(context.Background(), tt.cfg, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+			_, err := NewAgentEndpoint(context.Background(), tt.cfg, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), nil)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want one containing %q", err, tt.want)
 			}
@@ -50,14 +50,14 @@ func TestNewAgentEndpointStartupErrors(t *testing.T) {
 }
 
 func TestNewAgentEndpointDefaultIsAnthropicWithTheDefaultCap(t *testing.T) {
-	ep, err := NewAgentEndpoint(context.Background(), config.Config{ModelProvider: "anthropic"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	ep, err := NewAgentEndpoint(context.Background(), config.Config{ModelProvider: "anthropic"}, slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ep.Provider() != agent.ProviderAnthropic || ep.TokenLimit() != agent.DefaultRoomTokenBudget {
 		t.Fatalf("endpoint = %s / %d", ep.Provider(), ep.TokenLimit())
 	}
-	ep, err = NewAgentEndpoint(context.Background(), config.Config{RoomTokenBudget: "0"}, nil)
+	ep, err = NewAgentEndpoint(context.Background(), config.Config{RoomTokenBudget: "0"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestNewAgentEndpointDefaultIsAnthropicWithTheDefaultCap(t *testing.T) {
 func TestNewAgentEndpointWarnsAboutIncompatibleTriageModel(t *testing.T) {
 	for model, wantWarn := range map[string]bool{"claude-haiku-4-5": true, "claude-haiku-5-5": false} {
 		var buf bytes.Buffer
-		_, err := NewAgentEndpoint(context.Background(), config.Config{TriageModel: model}, slog.New(slog.NewTextHandler(&buf, nil)))
+		_, err := NewAgentEndpoint(context.Background(), config.Config{TriageModel: model}, slog.New(slog.NewTextHandler(&buf, nil)), nil)
 		if err != nil {
 			t.Fatal(err)
 		}

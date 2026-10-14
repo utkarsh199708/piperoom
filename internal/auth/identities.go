@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 )
 
 // Errors returned by an IdentityStore.
@@ -24,8 +25,28 @@ type IdentityStore interface {
 	// same pair to the same user again is fine. A user that already has another
 	// pair, or a pair that belongs to another user, is ErrIdentityConflict.
 	Bind(ctx context.Context, iss, sub, userID, email string) error
-	// Unbind deletes the user's row and reports how many rows it deleted.
-	Unbind(ctx context.Context, userID string) (int64, error)
+	// Unbind deletes the user's row and, in the same step, revokes (at) every
+	// live session that belongs to the user or to the removed (iss, sub): the
+	// account that was just unbound must not keep acting as the user until its
+	// session expires (security audit A-ID-5). The result says how many rows
+	// and sessions it touched.
+	Unbind(ctx context.Context, userID string, at time.Time) (UnbindResult, error)
+}
+
+// UnbindResult is what IdentityStore.Unbind did.
+type UnbindResult struct {
+	// Unbound is the number of identities rows deleted (0 or 1).
+	Unbound int64
+	// Revoked is the number of live sessions revoked.
+	Revoked int64
+}
+
+// SessionRevoker revokes sessions by who they belong to. MemStore implements
+// it; the Postgres store does it inside Identities.Unbind's transaction.
+type SessionRevoker interface {
+	// RevokeBinding revokes every live session with user_id = userID, or with
+	// iss and sub both equal to the given non-empty pair, and returns how many.
+	RevokeBinding(ctx context.Context, userID, iss, sub string, at time.Time) (int64, error)
 }
 
 // MemIdentities is the in-memory IdentityStore, for tests and --demo.
@@ -33,6 +54,8 @@ type MemIdentities struct {
 	mu     sync.Mutex
 	byPair map[[2]string]string // (iss, sub) -> user id
 	byUser map[string][2]string
+	// sessions, when set, is revoked by Unbind like the Postgres store does.
+	sessions SessionRevoker
 }
 
 var _ IdentityStore = (*MemIdentities)(nil)
@@ -40,6 +63,14 @@ var _ IdentityStore = (*MemIdentities)(nil)
 // NewMemIdentities returns an empty MemIdentities.
 func NewMemIdentities() *MemIdentities {
 	return &MemIdentities{byPair: map[[2]string]string{}, byUser: map[string][2]string{}}
+}
+
+// WithSessions makes Unbind revoke sessions in r, and returns m.
+func (m *MemIdentities) WithSessions(r SessionRevoker) *MemIdentities {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessions = r
+	return m
 }
 
 // UserFor implements IdentityStore.
@@ -71,15 +102,31 @@ func (m *MemIdentities) Bind(_ context.Context, iss, sub, userID, _ string) erro
 	return nil
 }
 
-// Unbind implements IdentityStore.
-func (m *MemIdentities) Unbind(_ context.Context, userID string) (int64, error) {
+// Unbind implements IdentityStore. It revokes while holding the lock so a
+// concurrent Bind cannot interleave, and on a revoke error puts the binding
+// back and reports nothing done, like the Postgres transaction rolling back.
+func (m *MemIdentities) Unbind(ctx context.Context, userID string, at time.Time) (UnbindResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	pair, ok := m.byUser[userID]
-	if !ok {
-		return 0, nil
+	if ok {
+		delete(m.byUser, userID)
+		delete(m.byPair, pair)
 	}
-	delete(m.byUser, userID)
-	delete(m.byPair, pair)
-	return 1, nil
+	var res UnbindResult
+	if ok {
+		res.Unbound = 1
+	}
+	if m.sessions != nil {
+		n, err := m.sessions.RevokeBinding(ctx, userID, pair[0], pair[1], at)
+		if err != nil {
+			if ok {
+				m.byUser[userID] = pair
+				m.byPair[pair] = userID
+			}
+			return UnbindResult{}, err
+		}
+		res.Revoked = n
+	}
+	return res, nil
 }

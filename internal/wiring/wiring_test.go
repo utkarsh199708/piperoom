@@ -27,7 +27,7 @@ func TestSplitBrokers(t *testing.T) {
 func TestOpenFailsOnMissingOwners(t *testing.T) {
 	_, err := Open(context.Background(), config.Config{
 		OwnersFile: filepath.Join(t.TempDir(), "missing.yaml"),
-	})
+	}, nil)
 	if err == nil {
 		t.Fatal("Open with a missing owners file: want error, got nil")
 	}
@@ -48,7 +48,7 @@ func TestOpenFailsOnBadSourceURL(t *testing.T) {
 	cfg := devA2Config()
 	cfg.OwnersFile = ownersFile
 	cfg.SourceDBURL = "postgres://%zz"
-	_, err := Open(context.Background(), cfg)
+	_, err := Open(context.Background(), cfg, nil)
 	if err == nil {
 		t.Fatal("Open with a bad source URL: want error, got nil")
 	}
@@ -68,7 +68,7 @@ func devA2Config() config.Config {
 }
 
 func TestBuildA2ClientsEmptySecurity(t *testing.T) {
-	a2, err := buildA2Clients(devA2Config())
+	a2, err := buildA2Clients(devA2Config(), nil)
 	if err != nil {
 		t.Fatalf("buildA2Clients(empty security) = %v, want nil", err)
 	}
@@ -84,7 +84,7 @@ func TestBuildA2ClientsRejectsPlainWithoutTLS(t *testing.T) {
 	cfg.KafkaSASLMechanism = "PLAIN"
 	cfg.KafkaSASLUsername = "agent"
 	cfg.KafkaSASLPassword = "s3cret"
-	_, err := buildA2Clients(cfg)
+	_, err := buildA2Clients(cfg, nil)
 	if err == nil {
 		t.Fatal("buildA2Clients(PLAIN without TLS): want error, got nil")
 	}
@@ -110,7 +110,7 @@ func TestOpenRejectsBadKafkaSecurity(t *testing.T) {
 	cfg.KafkaSASLMechanism = "PLAIN"
 	cfg.KafkaSASLUsername = "agent"
 	cfg.KafkaSASLPassword = "s3cret"
-	_, err := Open(context.Background(), cfg)
+	_, err := Open(context.Background(), cfg, nil)
 	if err == nil {
 		t.Fatal("Open with bad Kafka security: want error, got nil")
 	}

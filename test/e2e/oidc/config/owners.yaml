@@ -1,0 +1,20 @@
+# owners.yaml for the OIDC e2e stack. The two Kafka layers are owned by the IdP
+# group dataeng-oncall, so alice (who has no users.yaml entry) is a member with
+# those layers through her groups claim. The other layers name dave, a users.yaml
+# user who never logs in, so the start-up check (users vs owners) passes.
+pipelines:
+  - id: orders
+    title: Orders CDC (e2e)
+    topic_prefix: pg
+    source_tables: [public.orders]
+    connectors: [pg-orders-connector]
+    consumer_groups: [order-sync]
+    sink_tables: [analytics.orders]
+    sink_ts_column: updated_at
+layers:
+  postgres: dave
+  schema-registry: dave
+  consumer: dave
+  warehouse: dave
+  kafka-connect: [group:dataeng-oncall]
+  kafka: [group:dataeng-oncall]

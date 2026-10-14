@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Room — loading</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+.pr{--background:#0a0a0b;--sidebar:#0e0e10;--card:#121214;--muted:#19191d;--hover:#1f1f25;--border:#222228;--border-strong:#2d2d35;--foreground:#ececf0;--muted-foreground:#9d9da8;--subtle-foreground:#6b6b76;--primary:#5b7cfa;--primary-on:#ffffff;--success:#2ea36f;--warning:#d9a21b;--danger:#e5484d;--ring:#5b7cfa;--sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-family:var(--sans);font-size:13px;line-height:18px;color:var(--foreground);background:var(--background);-webkit-font-smoothing:antialiased;color-scheme:dark}
+.pr[data-theme=light]{--background:#ffffff;--sidebar:#fafafa;--card:#ffffff;--muted:#f4f4f5;--hover:#ececee;--border:#e4e4e7;--border-strong:#d4d4d8;--foreground:#18181b;--muted-foreground:#52525b;--subtle-foreground:#71717a;--primary:#4f6ef2;--success:#1f9d5f;--warning:#c58f0a;--danger:#dc3d43;color-scheme:light}
+.pr *{box-sizing:border-box}
+.pr a{color:inherit;text-decoration:none}
+.ic{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic-14{width:14px;height:14px}.ic-12{width:12px;height:12px}
+.mono{font-family:var(--mono)}.muted{color:var(--muted-foreground)}.subtle{color:var(--subtle-foreground)}
+.t-xs{font-size:12px;line-height:16px}
+.w500{font-weight:500}.w600{font-weight:600}
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:6px;font:500 13px/18px var(--sans);border:1px solid transparent;background:transparent;color:var(--foreground);cursor:pointer;white-space:nowrap}
+.btn-outline{border-color:var(--border-strong);color:var(--foreground)}
+.btn-ghost{color:var(--muted-foreground)}
+.btn-icon{width:32px;padding:0;justify-content:center}
+.kbd{display:inline-flex;align-items:center;justify-content:center;height:18px;min-width:18px;padding:0 4px;border-radius:4px;border:1px solid var(--border-strong);background:var(--muted);color:var(--subtle-foreground);font:500 11px/16px var(--mono)}
+.badge{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 6px;border-radius:6px;font:500 12px/16px var(--sans);background:var(--muted);color:var(--muted-foreground);border:1px solid transparent;white-space:nowrap}
+.badge-outline{background:transparent;border-color:var(--border-strong);color:var(--muted-foreground)}
+.dot{width:6px;height:6px;border-radius:999px;background:var(--subtle-foreground);flex:none}.dot-ok{background:var(--success)}.dot-warn{background:var(--warning)}.dot-fail{background:var(--danger)}
+.pill{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px;border-radius:999px;border:1px solid var(--border);background:var(--card);font:500 12px/16px var(--sans);color:var(--muted-foreground);white-space:nowrap}
+.av{width:28px;height:28px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;font:600 11px/1 var(--sans);color:#fff;flex:none}
+.p-arjun{background:#1d4ed8}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px}
+.sep{height:1px;background:var(--border)}
+.sb{width:240px;flex:none;background:var(--sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:900px}
+.nav a{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border-radius:6px;color:var(--muted-foreground);font-weight:500}
+.nav a.on{background:var(--hover);color:var(--foreground)}
+.nav a .cnt{margin-left:auto;font:500 11px/16px var(--mono);color:var(--subtle-foreground)}
+.topbar{height:48px;padding:0 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.sk{background:var(--muted);border-radius:4px;display:block}
+@keyframes shimmer{0%{opacity:.6}50%{opacity:1}100%{opacity:.6}}
+@media (prefers-reduced-motion:no-preference){.sk{animation:shimmer 1.6s ease-in-out infinite}}
+.node{flex:1 1 0;min-width:200px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-height:92px}
+.edge{flex:0 0 44px;position:relative;height:0;align-self:center;border-top:2px dashed var(--border-strong);margin-top:-8px}
+.rail{width:300px;flex:none;border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:900px}
+.rail h2{margin:0;font:500 13px/18px var(--sans)}
+.row{display:flex;align-items:center;gap:8px;min-height:32px}
+</style>
+</helmet>
+<div class="pr" data-theme="{{theme}}" style="display: flex; flex-wrap: wrap; width: 100%; min-height: 900px;" aria-busy="true">
+  <aside class="sb">
+    <div style="height: 48px; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-bottom: 1px solid var(--border);">
+      <span style="width: 20px; height: 20px; border-radius: 5px; background: var(--primary); display: inline-flex; align-items: center; justify-content: center;"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true" style="stroke: #fff;"><path d="M4 12h5l2-5 3 10 2-5h4"/></svg></span>
+      <span class="w600" style="font-size: 13px;">Piperoom</span>
+      <span class="badge badge-outline mono" style="margin-left: auto; height: 18px; font-size: 11px;">staging</span>
+    </div>
+    <div style="padding: 12px 8px 0;">
+      <button class="btn btn-outline" type="button" style="width: 100%; justify-content: flex-start; color: var(--subtle-foreground); background: var(--background);"><svg class="ic ic-14" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>Search<span style="margin-left: auto; display: inline-flex; gap: 2px;"><span class="kbd">⌘</span><span class="kbd">K</span></span></button>
+    </div>
+    <nav class="nav" aria-label="Main" style="display: flex; flex-direction: column; gap: 2px; padding: 12px 8px 0;">
+      <a class="on" href="Main.dc.html"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>Rooms<span class="cnt">5</span></a>
+      <a href="#pipelines"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>Pipelines</a>
+      <a href="#audit"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>Audit log</a>
+    </nav>
+    <div style="padding: 20px 16px 6px; font: 500 12px/16px var(--sans); color: var(--subtle-foreground);">Pipelines</div>
+    <nav class="nav" aria-label="Pipelines" style="display: flex; flex-direction: column; gap: 2px; padding: 0 8px;">
+      <a class="on" href="#orders"><span class="dot dot-fail"></span>orders<span class="cnt">2 open</span></a>
+      <a href="#customers"><span class="dot dot-warn"></span>customers<span class="cnt">1 open</span></a>
+      <a href="#payments"><span class="dot dot-ok"></span>payments<span class="cnt">1 open</span></a>
+    </nav>
+    <div style="margin-top: auto; border-top: 1px solid var(--border); padding: 12px 16px; display: flex; align-items: center; gap: 10px;">
+      <span class="av p-arjun">AR</span>
+      <span style="display: flex; flex-direction: column; min-width: 0;"><span class="w500" style="font-size: 13px;">Arjun</span><span class="t-xs subtle">kafka-connect owner</span></span>
+    </div>
+  </aside>
+
+  <main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; min-height: 900px;">
+    <div class="topbar">
+      <a href="Main.dc.html" class="muted" style="display: inline-flex; align-items: center; gap: 6px;">Rooms<svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg><span class="mono">orders</span></a>
+      <span class="pill" style="margin-left: auto;"><span class="dot"></span>connecting…</span>
+    </div>
+    <div style="padding: 16px 24px 0; display: flex; flex-direction: column; gap: 10px;">
+      <div style="display: flex; align-items: center; gap: 10px;"><span class="sk" style="width: 320px; height: 22px;"></span><span class="sk" style="width: 48px; height: 20px;"></span><span class="sk" style="width: 96px; height: 20px;"></span></div>
+      <span class="sk" style="width: 420px; height: 12px;"></span>
+      <div style="display: flex; align-items: center; gap: 10px;"><span class="sk" style="width: 84px; height: 24px; border-radius: 999px;"></span><span class="sk" style="width: 120px; height: 12px;"></span></div>
+    </div>
+    <section style="padding: 16px 24px 0; display: flex; flex-direction: column; gap: 10px;">
+      <div style="display: flex; align-items: center; gap: 8px;"><span class="w500">Pipeline</span><span class="mono muted">orders</span><span class="t-xs subtle" style="margin-left: 8px;">Loading topology…</span></div>
+      <div style="display: flex; align-items: stretch; overflow-x: auto; padding-top: 12px;">
+        <div class="node"><span class="sk" style="width: 60%; height: 12px;"></span><span class="sk" style="width: 85%; height: 14px;"></span><span class="sk" style="width: 45%; height: 12px; margin-top: auto;"></span></div><div class="edge"></div>
+        <div class="node"><span class="sk" style="width: 60%; height: 12px;"></span><span class="sk" style="width: 85%; height: 14px;"></span><span class="sk" style="width: 45%; height: 12px; margin-top: auto;"></span></div><div class="edge"></div>
+        <div class="node"><span class="sk" style="width: 60%; height: 12px;"></span><span class="sk" style="width: 85%; height: 14px;"></span><span class="sk" style="width: 45%; height: 12px; margin-top: auto;"></span></div><div class="edge"></div>
+        <div class="node"><span class="sk" style="width: 60%; height: 12px;"></span><span class="sk" style="width: 85%; height: 14px;"></span><span class="sk" style="width: 45%; height: 12px; margin-top: auto;"></span></div><div class="edge"></div>
+        <div class="node"><span class="sk" style="width: 60%; height: 12px;"></span><span class="sk" style="width: 85%; height: 14px;"></span><span class="sk" style="width: 45%; height: 12px; margin-top: auto;"></span></div>
+      </div>
+    </section>
+    <section style="padding: 16px 24px 0; display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto;">
+      <div class="card" style="padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;"><div style="display: flex; align-items: center; gap: 8px;"><span class="sk" style="width: 20px; height: 20px; border-radius: 999px;"></span><span class="sk" style="width: 80px; height: 12px;"></span></div><span class="sk" style="width: 70%; height: 14px;"></span><span class="sk" style="width: 40%; height: 14px;"></span></div>
+      <div style="display: flex; align-items: center; gap: 8px;"><span class="w500">Investigation</span><span class="t-xs subtle">Loading room…</span></div>
+      <div style="display: flex; flex-direction: column; gap: 10px;">
+        <div class="row" style="padding: 0 8px;"><span class="sk" style="width: 22px; height: 22px; border-radius: 999px;"></span><span class="sk" style="width: 260px; height: 14px;"></span><span class="sk" style="width: 120px; height: 16px; border-radius: 6px;"></span><span class="sk" style="width: 48px; height: 12px; margin-left: auto;"></span></div>
+        <div class="row" style="padding: 0 8px;"><span class="sk" style="width: 22px; height: 22px; border-radius: 999px;"></span><span class="sk" style="width: 300px; height: 14px;"></span><span class="sk" style="width: 150px; height: 16px; border-radius: 6px;"></span><span class="sk" style="width: 48px; height: 12px; margin-left: auto;"></span></div>
+      </div>
+    </section>
+  </main>
+
+  <aside class="rail">
+    <div style="padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;"><h2>Proposals</h2><span class="sk" style="width: 80%; height: 12px;"></span></div>
+    <div class="sep"></div>
+    <div style="padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;"><h2>Who's here</h2>
+      <div class="row"><span class="sk" style="width: 24px; height: 24px; border-radius: 999px;"></span><span class="sk" style="width: 64px; height: 12px;"></span></div>
+      <div class="row"><span class="sk" style="width: 24px; height: 24px; border-radius: 999px;"></span><span class="sk" style="width: 80px; height: 12px;"></span></div>
+      <div class="row"><span class="sk" style="width: 24px; height: 24px; border-radius: 999px;"></span><span class="sk" style="width: 56px; height: 12px;"></span></div>
+    </div>
+    <div class="sep"></div>
+    <div style="padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;"><h2>Activity</h2><span class="sk" style="width: 90%; height: 12px;"></span><span class="sk" style="width: 70%; height: 12px;"></span><span class="sk" style="width: 80%; height: 12px;"></span></div>
+  </aside>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { theme: this.props.theme ?? 'dark' };
+  }
+}
+</script>
+</body>
+</html>

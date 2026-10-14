@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+
 	"piperoom/internal/actions"
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/connect"
@@ -81,8 +83,9 @@ type a2Clients struct {
 // buildA2Clients constructs the A2 clients from the C8 security settings
 // (internal/clients/netsec). Building performs no network I/O — kgo dials
 // lazily — so a bad security configuration fails here, before the database
-// pings in Open. The caller owns the Kafka client and must close it.
-func buildA2Clients(cfg config.Config) (*a2Clients, error) {
+// pings in Open. awsCfg is the shared AWS config (nil unless LoadAWS found a
+// user for it). The caller owns the Kafka client and must close it.
+func buildA2Clients(cfg config.Config, awsCfg *aws.Config) (*a2Clients, error) {
 	// The Schema Registry client comes first: the Kafka client uses it to
 	// decode Avro keys.
 	registry, err := schemareg.NewSecure(cfg.SchemaRegistryURL, netsec.HTTP{
@@ -111,7 +114,24 @@ func buildA2Clients(cfg config.Config) (*a2Clients, error) {
 		return nil, fmt.Errorf("wiring: connect client: %w", err)
 	}
 
-	kafkaClient, err := kafka.NewSecure(splitBrokers(cfg.KafkaBrokers), registry, netsec.Kafka{
+	sec, err := kafkaSecurity(cfg, awsCfg)
+	if err != nil {
+		return nil, err
+	}
+	kafkaClient, err := kafka.NewSecure(splitBrokers(cfg.KafkaBrokers), registry, sec)
+	if err != nil {
+		return nil, fmt.Errorf("wiring: kafka client: %w", err)
+	}
+
+	return &a2Clients{Connect: connectClient, Kafka: kafkaClient, Registry: registry}, nil
+}
+
+// kafkaSecurity maps the Kafka security settings of cfg onto netsec. With
+// KAFKA_SASL_MECHANISM=AWS_MSK_IAM the SASL credentials come from awsCfg, the
+// process's one shared AWS config; netsec then checks the protocol (SASL_SSL
+// only) and that no username or password is set.
+func kafkaSecurity(cfg config.Config, awsCfg *aws.Config) (netsec.Kafka, error) {
+	sec := netsec.Kafka{
 		Protocol:  cfg.KafkaSecurityProtocol,
 		Mechanism: cfg.KafkaSASLMechanism,
 		Username:  cfg.KafkaSASLUsername,
@@ -122,17 +142,21 @@ func buildA2Clients(cfg config.Config) (*a2Clients, error) {
 			KeyFile:    cfg.KafkaTLSKeyFile,
 			ServerName: cfg.KafkaTLSServerName,
 		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("wiring: kafka client: %w", err)
 	}
-
-	return &a2Clients{Connect: connectClient, Kafka: kafkaClient, Registry: registry}, nil
+	if usesMSKIAM(cfg) {
+		if awsCfg == nil || awsCfg.Credentials == nil {
+			return netsec.Kafka{}, errNoSharedAWS
+		}
+		sec.AWSCredentialsFunc = mskIAMCredentials(awsCfg)
+	}
+	return sec, nil
 }
 
-// Open constructs every client Wired needs. On a partial failure it closes
-// what it already opened and returns a wrapped error naming the failing step.
-func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
+// Open constructs every client Wired needs. awsCfg is the result of LoadAWS,
+// shared with NewAgentEndpoint; it may be nil, but MSK IAM is then a config
+// error. On a partial failure it closes what it already opened and returns a
+// wrapped error naming the failing step.
+func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, error) {
 	ctx, cancel := context.WithTimeout(ctx, openTimeout)
 	defer cancel()
 
@@ -149,7 +173,7 @@ func Open(ctx context.Context, cfg config.Config) (*Wired, error) {
 
 	// Build the A2 clients before any database ping so a bad security
 	// configuration fails Open even when no stack is reachable at all.
-	a2, err := buildA2Clients(cfg)
+	a2, err := buildA2Clients(cfg, awsCfg)
 	if err != nil {
 		return nil, err
 	}

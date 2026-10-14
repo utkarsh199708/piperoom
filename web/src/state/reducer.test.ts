@@ -483,6 +483,25 @@ describe('params_hash and approver identity (auth PR 4)', () => {
     ).toBe(other)
   })
 
+  it('ignores a second proposal.created with the same proposal_id and keeps the first', () => {
+    const first = applyEvent(base(), ev(1, 'proposal.created', { ...created, params_hash: HASH }))
+    const decided = applyEvent(
+      first,
+      ev(2, 'approval.given', { proposal_id: 'p1', layer: 'schema-registry', params_hash: HASH, identity }, human),
+    )
+    const dup = applyEvent(
+      decided,
+      ev(3, 'proposal.created', { ...created, title: 'replayed', params_hash: 'ab'.repeat(32) }),
+    )
+    expect(dup.proposals).toHaveLength(1)
+    expect(dup.proposals[0].title).toBe('fix')
+    expect(dup.proposals[0].params_hash).toBe(HASH)
+    expect(dup.proposals[0].approvals['schema-registry']).toBe('approved')
+    // A different id is still added.
+    const other = applyEvent(dup, ev(4, 'proposal.created', { ...created, proposal_id: 'p2' }))
+    expect(other.proposals.map((p) => p.proposal_id)).toEqual(['p1', 'p2'])
+  })
+
   it('is empty, not undefined, when neither the event nor the snapshot has a hash', () => {
     const s = applyEvent(base(), ev(1, 'proposal.created', created))
     expect(s.proposals[0].params_hash).toBe('')
@@ -499,6 +518,7 @@ describe('params_hash and approver identity (auth PR 4)', () => {
       by: human,
       identity,
       params_hash: HASH,
+      at: '2026-10-11T10:00:02Z',
     })
     expect(s.proposals[0].decisions['kafka-connect']).toBeUndefined()
     // An approval without identity (an old event) is still recorded.
@@ -524,6 +544,7 @@ describe('params_hash and approver identity (auth PR 4)', () => {
       identity,
       params_hash: HASH,
       reason: 'nope',
+      at: '2026-10-11T10:00:02Z',
     })
   })
 

@@ -7,6 +7,7 @@
 //	go run ./evals/cmd/evalrun -compare base.json,cand.json
 //	go run ./evals/cmd/evalrun -validate   # (or -check) validate scenarios, no model calls
 //	go run ./evals/cmd/evalrun -from-shadow run.json -o evals/scenarios/new.yaml   # scenario from a graded shadow run
+//	go run ./evals/cmd/evalrun -validate -set heldout   # the held-out set; never tune prompts on it
 package main
 
 import (
@@ -39,6 +40,7 @@ var unsafeChars = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 
 type flags struct {
 	scenarios   string
+	set         string
 	only        string
 	runs        int
 	parallel    int
@@ -84,6 +86,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs := flag.NewFlagSet("evalrun", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.StringVar(&f.scenarios, "scenarios", "evals/scenarios", "directory of *.yaml scenarios")
+	fs.StringVar(&f.set, "set", setDefault, `scenario set: "default" (the -scenarios directory) or "heldout" (its heldout/ subdirectory: report only, never tune prompts on it)`)
 	fs.StringVar(&f.only, "only", "", "comma-separated scenario names to run (default all)")
 	fs.IntVar(&f.runs, "runs", 1, "runs per scenario; use 3+ when comparing, the model is not deterministic")
 	fs.IntVar(&f.parallel, "parallel", 1, "runs at once")
@@ -133,7 +136,11 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		return runFromShadow(f, stdout, stderr)
 	}
 
-	scenarios, err := evals.LoadScenarios(f.scenarios)
+	dir, err := scenarioDir(f)
+	if err != nil {
+		return 1, err
+	}
+	scenarios, err := evals.LoadScenarios(dir)
 	if err != nil {
 		return 1, err
 	}
@@ -147,6 +154,11 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		}
 		if err := evals.ValidateAll(scenarios, defs); err != nil {
 			return 1, err
+		}
+		for _, sc := range scenarios {
+			for _, w := range sc.Warnings() {
+				fmt.Fprintf(stderr, "warning: %s: %s\n", sc.Name, w)
+			}
 		}
 		fmt.Fprintf(stdout, "%d scenario(s) OK\n", len(scenarios))
 		return 0, nil
@@ -203,6 +215,9 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 			}
 			fmt.Fprintf(stderr, "%s #%d: %s (score %.0f, %d tool calls, %s)\n",
 				r.Scenario, r.Run, verdict, r.Score, r.ToolCalls, time.Duration(r.DurationMS)*time.Millisecond)
+			for _, u := range r.UnexecutedInputs {
+				fmt.Fprintf(stderr, "  scripted fix not executed: %s\n", u)
+			}
 			if f.transcripts != "" {
 				if err := writeTranscript(f.transcripts, r, tr); err != nil {
 					fmt.Fprintln(stderr, "evalrun:", err)
@@ -364,4 +379,23 @@ func runFromShadow(f flags, stdout, stderr io.Writer) (int, error) {
 	}
 	fmt.Fprintf(stderr, "evalrun: wrote scenario %q to %s (validated)\n", res.Scenario.Name, f.out)
 	return 0, nil
+}
+
+// Scenario sets. The held-out set lives in its own subdirectory, which
+// LoadScenarios never reads for the default set (it does not recurse), so a
+// default run can never include it.
+const (
+	setDefault = "default"
+	setHeldout = "heldout"
+)
+
+// scenarioDir resolves -set against -scenarios.
+func scenarioDir(f flags) (string, error) {
+	switch f.set {
+	case "", setDefault:
+		return f.scenarios, nil
+	case setHeldout:
+		return filepath.Join(f.scenarios, setHeldout), nil
+	}
+	return "", fmt.Errorf("unknown -set %q (want %s or %s)", f.set, setDefault, setHeldout)
 }
