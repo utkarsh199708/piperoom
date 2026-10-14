@@ -247,14 +247,14 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 			}
 		}
 		prow = p
-		ident := identityFor(user, grant)
+		ident := s.identityFor(user, grant)
 		if err := s.store.RecordApproval(ctx, approvalRow(proposalID, layer, "approved", "", p.ParamsHash, ident)); err != nil {
 			if errors.Is(err, store.ErrAlreadyExists) {
 				return alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
 			}
 			return err
 		}
-		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, humanActor(user), events.ApprovalGivenPayload{
+		ev, err = s.emitLocked(ctx, st, p.RoomID, events.ApprovalGiven, s.humanActor(user), events.ApprovalGivenPayload{
 			ProposalID: proposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: &ident,
 		})
 		if err != nil {
@@ -324,14 +324,14 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	if err := s.checkParamsHash(ctx, &p, paramsHash, true); err != nil {
 		return events.Event{}, err
 	}
-	ident := identityFor(user, grant)
+	ident := s.identityFor(user, grant)
 	if err := s.store.RecordApproval(ctx, approvalRow(proposalID, layer, "rejected", reason, p.ParamsHash, ident)); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {
 			return events.Event{}, alreadyDecided(fmt.Sprintf("layer %q already decided", layer))
 		}
 		return events.Event{}, err
 	}
-	ev, err := s.emitLocked(ctx, st, p.RoomID, events.ApprovalRejected, humanActor(user), events.ApprovalRejectedPayload{
+	ev, err := s.emitLocked(ctx, st, p.RoomID, events.ApprovalRejected, s.humanActor(user), events.ApprovalRejectedPayload{
 		ProposalID: proposalID, Layer: layer, Reason: reason, ParamsHash: p.ParamsHash, Identity: &ident,
 	})
 	if err != nil {

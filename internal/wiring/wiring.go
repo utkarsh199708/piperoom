@@ -27,6 +27,7 @@ import (
 	"piperoom/internal/tools/dbtools"
 	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/tools/runbooks"
+	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 )
 
@@ -54,6 +55,11 @@ type Wired struct {
 	Builder topology.Builder
 	// Owners is the loaded owners config.
 	Owners *owners.Owners
+	// Rooms is where similar_incidents reads past closed rooms (the room
+	// store). The caller that owns the store sets it after Open, before
+	// RegisterTools; nil leaves the tool unregistered (CLI runs have no room
+	// store).
+	Rooms similarincidents.Source
 
 	// close is the closer built by Open: it releases the database pools and
 	// the Kafka client. Only Open sets it, so a zero Wired is safe to Close.
@@ -223,7 +229,7 @@ func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *
 }
 
 // RegisterTools registers the A3 db tools, A2's read-only Kafka/Connect/
-// Schema Registry tools, C11's runbook_lookup and the write actions the agent may propose (never
+// Schema Registry tools, C11's runbook_lookup, similar_incidents (when w.Rooms is set) and the write actions the agent may propose (never
 // run), reading every client from w. If w.Builder is nil it is built from
 // w's clients and stored back on w, so callers can use it afterwards.
 func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error {
@@ -241,6 +247,13 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 	// The runbook library is embedded in the binary, so it needs no client.
 	if err := runbooks.Register(reg); err != nil {
 		return fmt.Errorf("wiring: register runbooks: %w", err)
+	}
+	// similar_incidents needs the room store, which only the room service
+	// owns, so it is registered when the caller provided one.
+	if w.Rooms != nil {
+		if err := similarincidents.Register(reg, similarincidents.Deps{Source: w.Rooms, Owners: w.Owners}); err != nil {
+			return fmt.Errorf("wiring: register similar_incidents: %w", err)
+		}
 	}
 	if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: w.Registry}); err != nil {
 		return fmt.Errorf("wiring: register actions: %w", err)

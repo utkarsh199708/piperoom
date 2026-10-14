@@ -162,11 +162,13 @@ type clientMsg struct {
 	State string `json:"state"`
 }
 
-// Member is one presence entry.
+// Member is one presence entry. Verified is the connection user's
+// room.User.Verified (docs/design/auth.md section 2.1).
 type Member struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	State string `json:"state"` // "viewing" | "away"
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Verified bool   `json:"verified"`
+	State    string `json:"state"` // "viewing" | "away"
 }
 
 // Identity is who a connection belongs to. SessionID is the public id of the
@@ -224,6 +226,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sessionID: ident.SessionID,
 		userID:    user.ID,
 		userName:  user.Name,
+		verified:  user.Verified,
 		state:     "viewing",
 		lastSeen:  g.now(),
 		send:      make(chan []byte, sendBuffer),

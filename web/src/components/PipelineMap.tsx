@@ -14,6 +14,7 @@ const KIND_LABEL: Record<TopologyNode['kind'], string> = {
   source_table: 'Source',
   connector: 'Connector',
   topic: 'Topic',
+  dlq_topic: 'DLQ topic',
   consumer_group: 'Consumer',
   sink_table: 'Sink',
 }

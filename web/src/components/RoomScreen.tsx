@@ -4,7 +4,7 @@ import { isFixtures } from '../api/client'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
 import { useCurrentUser } from '../context/user'
-import { canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
+import { canClose, canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
 import { ageLabel } from '../lib/time'
 import { PipelineMap } from './PipelineMap'
 import { Timeline } from './Timeline'
@@ -14,6 +14,7 @@ import { PresencePanel } from './PresencePanel'
 import { ActivityFeed } from './ActivityFeed'
 import { TracePanel } from './TracePanel'
 import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
+import { CloseRoomDialog } from './CloseRoomDialog'
 import { NoDriverBanner } from './NoDriverBanner'
 import { StaleBanner } from './StaleBanner'
 import { useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
@@ -46,6 +47,7 @@ export function RoomScreen() {
   })
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
+  const [closeOpen, setCloseOpen] = useState(false)
   const [copied, setCopied] = useState(false)
 
   const headerMembers = useMemo(() => {
@@ -89,6 +91,7 @@ export function RoomScreen() {
     state && !takeControl && canRequestControl(state, user) ? actions.requestControl : undefined
   const openHandoff = state && canHandoff(state, user) ? () => setHandoffOpen(true) : undefined
   const openTrace = state && !isViewer(user) ? () => setTraceOpen(true) : undefined
+  const openClose = state && canClose(state, user) ? () => setCloseOpen(true) : undefined
 
   // The command menu (⌘K) offers what this room offers right now. Same permission
   // checks and callbacks as the buttons below; a viewer gets none of the writes.
@@ -100,12 +103,18 @@ export function RoomScreen() {
           requestControl,
           handoff: openHandoff,
           trace: openTrace,
+          closeRoom: openClose,
           invite,
         }
       : null,
   )
-  // The keys printed on the buttons (H, T, Shift+T).
-  useRoomShortcuts({ handoff: openHandoff, trace: openTrace, control: takeControl ?? requestControl })
+  // The keys printed on the buttons (H, C, T, Shift+T).
+  useRoomShortcuts({
+    handoff: openHandoff,
+    close: openClose,
+    trace: openTrace,
+    control: takeControl ?? requestControl,
+  })
 
   // `?loading=1` previews the skeleton in fixture mode, where the room loads at once.
   const previewLoading = isFixtures() && searchParams.get('loading') === '1'
@@ -162,6 +171,7 @@ export function RoomScreen() {
             conn={conn}
             copied={copied}
             onHandoff={() => setHandoffOpen(true)}
+            onCloseRoom={() => setCloseOpen(true)}
             onInvite={invite}
           />
 
@@ -229,6 +239,10 @@ export function RoomScreen() {
       {traceOpen && !viewer && <TracePanel trace={state.trace} actions={actions} onClose={() => setTraceOpen(false)} />}
       {handoffOpen && (
         <HandoffDialog state={state} user={user} actions={actions} onClose={() => setHandoffOpen(false)} />
+      )}
+      {/* Gone once room.closed arrives: the "Resolved" strip above takes over. */}
+      {closeOpen && state.status === 'open' && (
+        <CloseRoomDialog actions={actions} onClose={() => setCloseOpen(false)} />
       )}
     </div>
   )

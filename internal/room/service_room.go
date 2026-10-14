@@ -63,15 +63,15 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	st.snap.ID = roomID
 	s.rooms[roomID] = st
 
-	if _, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, humanActor(user), events.RoomCreatedPayload{
+	if _, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, s.humanActor(user), events.RoomCreatedPayload{
 		Title: title, Severity: severity, PipelineID: pipelineID,
 	}); err != nil {
 		s.discardNewRoomLocked(ctx, roomID)
 		s.mu.Unlock()
 		return RoomSnapshot{}, mapUnstorable(err)
 	}
-	if _, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, humanActor(user), events.ControlGrantedPayload{
-		To: humanActor(user), LeaseUntil: lease,
+	if _, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, s.humanActor(user), events.ControlGrantedPayload{
+		To: s.humanActor(user), LeaseUntil: lease,
 	}); err != nil {
 		s.mu.Unlock()
 		return RoomSnapshot{}, err
@@ -477,7 +477,7 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 		s.mu.Unlock()
 		return events.Event{}, validation("a shadow room needs a resolution to grade against")
 	}
-	e, err := s.emitLocked(ctx, st, roomID, events.RoomClosed, humanActor(user), events.RoomClosedPayload{Resolution: resolution})
+	e, err := s.emitLocked(ctx, st, roomID, events.RoomClosed, s.humanActor(user), events.RoomClosedPayload{Resolution: resolution})
 	if err != nil {
 		s.mu.Unlock()
 		return events.Event{}, err

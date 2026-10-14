@@ -503,8 +503,8 @@ func (s *Service) ShadowLabel(ctx context.Context, user User, roomID, actualLaye
 	if st.snap.shadowLabelled {
 		return events.Event{}, alreadyDecided("this shadow room is already labelled")
 	}
-	ident := identityFor(user, grant)
-	e, err := s.emitLocked(ctx, st, roomID, events.ShadowLabelled, humanActor(user), events.ShadowLabelledPayload{
+	ident := s.identityFor(user, grant)
+	e, err := s.emitLocked(ctx, st, roomID, events.ShadowLabelled, s.humanActor(user), events.ShadowLabelledPayload{
 		ActualLayer: actualLayer, RootCauseTerms: append([]string{}, terms...), Identity: &ident,
 	})
 	if err != nil {
@@ -544,8 +544,8 @@ func (s *Service) ShadowGrade(ctx context.Context, user User, roomID string, lay
 	if !st.snap.shadowRevealed {
 		return events.Event{}, errNotRevealed()
 	}
-	ident := identityFor(user, grant)
-	e, err := s.emitLocked(ctx, st, roomID, events.ShadowGraded, humanActor(user), events.ShadowGradedPayload{
+	ident := s.identityFor(user, grant)
+	e, err := s.emitLocked(ctx, st, roomID, events.ShadowGraded, s.humanActor(user), events.ShadowGradedPayload{
 		LayerCorrect: layerCorrect, RootCause: rootCause, Notes: notes, Identity: &ident,
 	})
 	if err != nil {

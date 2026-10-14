@@ -36,6 +36,7 @@ import (
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 	"piperoom/internal/watch"
 	"piperoom/internal/wiring"
@@ -264,7 +265,11 @@ func run() error {
 		// the process-wide set when a pipeline uses it (docs/design/tenancy.md
 		// section 5). Each room, the topology and the watcher reach only the
 		// set of their own pipeline.
-		sets, err := wiring.OpenStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{})
+		sets, err := wiring.OpenStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{
+			// similar_incidents reads past closed rooms from the room store;
+			// each set's Owners holds only its own pipelines.
+			Prepare: func(w *wiring.Wired) { w.Rooms = similarincidents.FromStore(st) },
+		})
 		if err != nil {
 			return fmt.Errorf("server: open the data stack: %w", err)
 		}

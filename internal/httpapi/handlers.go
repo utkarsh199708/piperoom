@@ -21,6 +21,9 @@ type meResponse struct {
 	Layers        []string `json:"layers"`
 	Role          string   `json:"role"`
 	GroupsMissing bool     `json:"groups_missing"`
+	// Verified is true for a users.yaml person only (docs/design/auth.md
+	// section 2.1).
+	Verified bool `json:"verified"`
 	// Solo is true only for the PIPEROOM_SOLO_USER; left out for everyone else
 	// so the web app shows the typed-confirm box for this user alone.
 	Solo bool `json:"solo,omitempty"`
@@ -30,7 +33,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	writeJSON(w, http.StatusOK, meResponse{
 		ID: u.ID, Name: u.Name, Layers: s.svc.LayersFor(u), Role: roleFrom(r.Context()), GroupsMissing: u.GroupsMissing,
-		Solo: s.svc.IsSolo(u.ID),
+		Verified: u.Verified, Solo: s.svc.IsSolo(u.ID),
 	})
 }
 
