@@ -6,6 +6,10 @@
 // A crash between a Slack post and saving the thread state can repeat one
 // message after a restart.
 //
+// Paging (see paging.go) mentions only Slack user IDs from PagingOptions, which
+// come from owner/config data, never from event text. A restart forgets the
+// in-memory page limits, so one page can repeat after a crash.
+//
 // Slack API references: chat.postMessage (arguments, errors)
 // https://docs.slack.dev/reference/methods/chat.postMessage ; rate limits
 // https://docs.slack.dev/apis/web-api/rate-limits ; Block Kit text limits
@@ -44,6 +48,7 @@ type Options struct {
 	HTTPClient *http.Client  // optional; redirects are never followed
 	Threads    Threads       // default NewMemThreads()
 	Logger     *slog.Logger  // default discards
+	Paging     PagingOptions // who may be mentioned; empty = no paging
 }
 
 // Bridge mirrors room events to Slack.
@@ -54,6 +59,7 @@ type Bridge struct {
 	publicURL string
 	threads   Threads
 	log       *slog.Logger
+	pager     *pager // nil = paging off
 
 	mu      sync.Mutex
 	running map[string]bool
@@ -94,8 +100,12 @@ func New(store events.Store, o Options) (*Bridge, error) {
 	if o.Logger == nil {
 		o.Logger = slog.New(slog.DiscardHandler)
 	}
+	pg, err := newPager(o.Paging)
+	if err != nil {
+		return nil, err
+	}
 	return &Bridge{
-		store: store, client: newClient(hc, base, o.Token), channel: o.ChannelID, publicURL: pub,
+		pager: pg, store: store, client: newClient(hc, base, o.Token), channel: o.ChannelID, publicURL: pub,
 		threads: o.Threads, log: o.Logger, running: map[string]bool{},
 	}, nil
 }
@@ -212,10 +222,35 @@ func (b *Bridge) mirror(ctx context.Context, r *renderer, e events.Event, th Thr
 			// Shutdown, not a Slack verdict: keep LastSeq so a restart re-posts it.
 			return th, ctx.Err()
 		}
+		if err == nil && b.pager != nil {
+			if err := b.page(ctx, r, e, th); err != nil {
+				return th, err
+			}
+		}
 	}
 	th.LastSeq = e.Seq
 	b.put(ctx, e, th)
 	return th, nil
+}
+
+// page posts the allow-listed mentions for e as a second reply in the thread.
+// Only fatal Slack errors and shutdown are returned; a failed page is logged.
+func (b *Bridge) page(ctx context.Context, r *renderer, e events.Event, th Thread) error {
+	m, ok, err := b.pager.message(r, e)
+	if err != nil {
+		b.log.Warn("slack page render failed", "room_id", e.RoomID, "seq", e.Seq, "type", string(e.Type), "err", err)
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	if _, err := b.send(ctx, e, m, cmp.Or(th.Channel, b.channel), th.TS); err != nil {
+		if isFatal(err) {
+			return err
+		}
+		return ctx.Err()
+	}
+	return nil
 }
 
 // put saves thread state. A failure is logged, not returned: the Slack post

@@ -1,0 +1,323 @@
+package slackbridge
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"piperoom/internal/events"
+)
+
+const (
+	owner1 = "U0ARJUN01"
+	owner2 = "U0BO0001A"
+)
+
+func pagingOpts() PagingOptions {
+	return PagingOptions{
+		Layers: map[string][]string{"kafka": {owner1}},
+		Users:  map[string]string{"bo": owner2},
+	}
+}
+
+// strings collects every string value in a decoded JSON document.
+func jsonStrings(v any, out *[]string) {
+	switch x := v.(type) {
+	case string:
+		*out = append(*out, x)
+	case []any:
+		for _, e := range x {
+			jsonStrings(e, out)
+		}
+	case map[string]any:
+		for _, e := range x {
+			jsonStrings(e, out)
+		}
+	}
+}
+
+var trustedMarkup = regexp.MustCompile(`<@(` + owner1 + `|` + owner2 + `)>|<https://pr\.example/rooms/r1\|Open room>`)
+
+// assertOnlyTrustedMarkup fails if any request holds a < or > that is not an
+// allow-listed mention or our own room link, i.e. if event text could render
+// as a mention, broadcast, link or channel reference.
+func assertOnlyTrustedMarkup(t *testing.T, reqs []map[string]any, attack string) {
+	t.Helper()
+	for i, r := range reqs {
+		var ss []string
+		jsonStrings(r, &ss)
+		for _, s := range ss {
+			rest := trustedMarkup.ReplaceAllString(s, "")
+			if strings.ContainsAny(rest, "<>") {
+				t.Errorf("attack %q: request %d has live markup: %q", attack, i, s)
+			}
+		}
+	}
+}
+
+func mentionCount(reqs []map[string]any) (n int, ids map[string]int) {
+	ids = map[string]int{}
+	re := regexp.MustCompile(`<@([^>]*)>`)
+	for _, r := range reqs {
+		raw, _ := json.Marshal(r)
+		var decoded map[string]any
+		_ = json.Unmarshal(raw, &decoded)
+		var ss []string
+		jsonStrings(decoded, &ss)
+		seen := false
+		for _, s := range ss {
+			for _, m := range re.FindAllStringSubmatch(s, -1) {
+				ids[m[1]]++
+				seen = true
+			}
+		}
+		if seen {
+			n++
+		}
+	}
+	return n, ids
+}
+
+var injections = []string{
+	"<@U0EVIL001>",
+	"<@U0EVIL001|admin>",
+	"<!here>",
+	"<!channel>",
+	"<!everyone>",
+	"<!subteam^S0EVIL001>",
+	"<!subteam^S0EVIL001|@oncall>",
+	"<#C0EVIL001|general>",
+	"&lt;@U0EVIL001&gt;",
+	"&lt;!channel&gt;",
+	"<https://evil.example|click here>",
+	"<mailto:a@evil.example|mail>",
+	"`<@U0EVIL001>`",
+	"```<!here>```",
+	"<\x00@U0EVIL001>",
+	"<​!channel>",
+	"‮<@U0EVIL001>",
+	"<@U0EVIL001\xff>",
+	"ok\n<!channel>\n<@U0EVIL001>",
+}
+
+// Every text field an event carries gets each injection attempt. Only the two
+// allow-listed IDs may ever render as mentions, once each.
+func TestPagingInjectionInEveryTextField(t *testing.T) {
+	for _, a := range injections {
+		t.Run(fmt.Sprintf("%q", a), func(t *testing.T) {
+			params, _ := json.Marshal(map[string]string{a: a})
+			steps := []events.ProposalStep{{Action: a, Layer: a, Description: a, Params: params}}
+			evs := []events.Event{
+				ev(1, events.RoomCreated, a, events.RoomCreatedPayload{Title: a, Severity: a, PipelineID: a, Alert: json.RawMessage(`{"x":"` + "<!channel>" + `"}`)}),
+				ev(2, events.AgentHypothesis, a, events.AgentHypothesisPayload{Text: a, Confidence: a}),
+				ev(3, events.ProposalCreated, a, events.ProposalCreatedPayload{ProposalID: a, Title: a, RequiredLayers: []string{"kafka", a}, Risk: a, Rollback: a, Steps: steps}),
+				ev(4, events.ApprovalGiven, a, events.ApprovalGivenPayload{ProposalID: a, Layer: a}),
+				ev(5, events.ApprovalRejected, a, events.ApprovalRejectedPayload{ProposalID: a, Layer: a, Reason: a}),
+				ev(6, events.ActionExecuted, a, events.ActionExecutedPayload{ProposalID: a, Output: a}),
+				ev(7, events.HandoffCreated, a, events.HandoffCreatedPayload{To: events.Actor{ID: "bo", Name: a},
+					Summary: events.HandoffSummary{WhatBroke: a, Why: a, Open: []string{a}, Risks: []string{a}}}),
+				ev(8, events.HandoffAccepted, a, struct{}{}),
+				ev(9, events.RoomClosed, a, events.RoomClosedPayload{Resolution: a}),
+			}
+			fs := &fakeSlack{}
+			b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) { o.Paging = pagingOpts() })
+			if err := b.Run(context.Background(), "r1"); err != nil {
+				t.Fatal(err)
+			}
+			if fs.count() != 11 { // 9 mirrored + proposal page + hand-off page
+				t.Fatalf("requests = %d, want 11", fs.count())
+			}
+			assertOnlyTrustedMarkup(t, fs.reqs, a)
+			n, ids := mentionCount(fs.reqs)
+			if n != 2 || len(ids) != 2 || ids[owner1] == 0 || ids[owner2] == 0 {
+				t.Errorf("mentions: messages=%d ids=%v", n, ids)
+			}
+			raw, _ := json.Marshal(fs.reqs)
+			if strings.Contains(string(raw), "U0EVIL001>") && strings.Contains(string(raw), "<@U0EVIL001") {
+				t.Error("injected ID rendered as a mention")
+			}
+		})
+	}
+}
+
+func TestPagingNotAllowListed(t *testing.T) {
+	cases := map[string]events.Event{
+		"unknown layer": ev(2, events.ProposalCreated, "agent", events.ProposalCreatedPayload{
+			ProposalID: "p1", Title: "t", RequiredLayers: []string{"unknown", "<@U0EVIL001>"}}),
+		"hand-off to a Slack-looking ID": ev(2, events.HandoffCreated, "ana", events.HandoffCreatedPayload{
+			To: events.Actor{ID: "U0EVIL001", Name: "Eve"}}),
+		"hand-off to an allow-listed Slack ID instead of a user key": ev(2, events.HandoffCreated, "ana", events.HandoffCreatedPayload{
+			To: events.Actor{ID: owner2, Name: "Bo"}}),
+		"hand-off with no target": ev(2, events.HandoffCreated, "ana", events.HandoffCreatedPayload{}),
+	}
+	for name, e := range cases {
+		t.Run(name, func(t *testing.T) {
+			evs := []events.Event{ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t", Severity: "sev2"}), e}
+			fs := &fakeSlack{}
+			b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) { o.Paging = pagingOpts() })
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			_ = b.Run(ctx, "r1")
+			if n, _ := mentionCount(fs.reqs); n != 0 || fs.count() != 2 {
+				t.Errorf("paged: requests=%d mention messages=%d", fs.count(), n)
+			}
+		})
+	}
+}
+
+func TestPagingEmptyAllowListIsOff(t *testing.T) {
+	fs := &fakeSlack{}
+	evs := []events.Event{
+		ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"}),
+		ev(2, events.ProposalCreated, "agent", events.ProposalCreatedPayload{ProposalID: "p1", Title: "t", RequiredLayers: []string{"kafka"}}),
+		ev(3, events.HandoffCreated, "ana", events.HandoffCreatedPayload{To: events.Actor{ID: "bo"}}),
+		ev(4, events.RoomClosed, "ana", events.RoomClosedPayload{Resolution: "ok"}),
+	}
+	b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) {
+		o.Paging = PagingOptions{Layers: map[string][]string{}, Users: map[string]string{}}
+	})
+	if b.pager != nil {
+		t.Fatal("pager built for an empty allow-list")
+	}
+	if err := b.Run(context.Background(), "r1"); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := mentionCount(fs.reqs); n != 0 || fs.count() != 4 {
+		t.Errorf("requests=%d mention messages=%d", fs.count(), n)
+	}
+}
+
+func TestPagingDuplicatesAndRateLimit(t *testing.T) {
+	prop := func(seq int64, id string) events.Event {
+		return ev(seq, events.ProposalCreated, "agent", events.ProposalCreatedPayload{ProposalID: id, Title: "t", RequiredLayers: []string{"kafka"}})
+	}
+	// Same proposal twice: one page. A second proposal inside the 10 minute
+	// gap: none. After the gap: paged again.
+	evs := []events.Event{
+		ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"}),
+		prop(2, "p1"), prop(3, "p1"), prop(4, "p2"), prop(5, "p3"),
+	}
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) { o.Paging = pagingOpts() })
+	now := time.Unix(1700000000, 0)
+	calls := 0
+	b.pager.now = func() time.Time {
+		calls++
+		if calls >= 3 { // p3 is evaluated after the gap has passed
+			return now.Add(11 * time.Minute)
+		}
+		return now
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_ = b.Run(ctx, "r1")
+	if n, ids := mentionCount(fs.reqs); n != 2 || ids[owner1] != 4 { // 4 = block + fallback text, twice
+		t.Errorf("mention messages=%d ids=%v, want 2 pages (p1, then p3)", n, ids)
+	}
+}
+
+func TestPagerAllowLimits(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	mk := func(l PagingLimits) *pager {
+		p, err := newPager(PagingOptions{Layers: map[string][]string{"k": {owner1}}, Limits: l})
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.now = func() time.Time { return now }
+		return p
+	}
+	t.Run("same reason twice", func(t *testing.T) {
+		p := mk(PagingLimits{UserRoomInterval: time.Nanosecond})
+		if !p.allow("r1", owner1, "x") {
+			t.Fatal("first denied")
+		}
+		now = now.Add(time.Hour)
+		if p.allow("r1", owner1, "x") {
+			t.Error("duplicate reason allowed")
+		}
+	})
+	t.Run("per user per room gap", func(t *testing.T) {
+		p := mk(PagingLimits{})
+		if !p.allow("r1", owner1, "a") || p.allow("r1", owner1, "b") {
+			t.Error("gap not enforced")
+		}
+		if !p.allow("r2", owner1, "c") {
+			t.Error("another room should not be blocked by the gap")
+		}
+		now = now.Add(11 * time.Minute)
+		if !p.allow("r1", owner1, "d") {
+			t.Error("gap should have passed")
+		}
+	})
+	t.Run("per user hourly cap across rooms", func(t *testing.T) {
+		p := mk(PagingLimits{UserPerHour: 2})
+		ok := []bool{p.allow("r1", owner1, "a"), p.allow("r2", owner1, "a"), p.allow("r3", owner1, "a")}
+		if !ok[0] || !ok[1] || ok[2] {
+			t.Errorf("got %v", ok)
+		}
+		now = now.Add(61 * time.Minute)
+		if !p.allow("r3", owner1, "b") {
+			t.Error("cap should have reset after an hour")
+		}
+	})
+	t.Run("per room hourly cap", func(t *testing.T) {
+		p := mk(PagingLimits{RoomPerHour: 2})
+		ok := []bool{p.allow("r1", "UAAAAAAAA1", "a"), p.allow("r1", "UAAAAAAAA2", "a"), p.allow("r1", "UAAAAAAAA3", "a"), p.allow("r2", "UAAAAAAAA3", "a")}
+		if !ok[0] || !ok[1] || ok[2] || !ok[3] {
+			t.Errorf("got %v", ok)
+		}
+	})
+}
+
+func TestPagingOptionsValidation(t *testing.T) {
+	bad := []PagingOptions{
+		{Layers: map[string][]string{"k": {"<@U0ARJUN01>"}}},
+		{Layers: map[string][]string{"k": {"U0ARJUN01>|x"}}},
+		{Layers: map[string][]string{"k": {"U0ARJUN01 U0ARJUN02"}}},
+		{Layers: map[string][]string{"k": {"u0arjun01"}}},
+		{Layers: map[string][]string{"k": {""}}},
+		{Layers: map[string][]string{"k": {"S0ARJUN01"}}}, // user group, not a user
+		{Layers: map[string][]string{"": {owner1}}},
+		{Users: map[string]string{"bo": "!here"}},
+		{Users: map[string]string{"": owner1}},
+	}
+	for i, o := range bad {
+		if _, err := newPager(o); err == nil {
+			t.Errorf("case %d accepted: %+v", i, o)
+		}
+	}
+	if _, err := newPager(pagingOpts()); err != nil {
+		t.Errorf("valid options rejected: %v", err)
+	}
+	// New surfaces the error and never echoes the token.
+	_, err := New(&fakeStore{}, Options{Token: testToken, ChannelID: "CCONF", Paging: bad[0]})
+	if err == nil || strings.Contains(err.Error(), testToken) {
+		t.Errorf("New err = %v", err)
+	}
+}
+
+func TestPagingFatalSlackErrorStopsRoom(t *testing.T) {
+	evs := []events.Event{
+		ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"}),
+		ev(2, events.ProposalCreated, "agent", events.ProposalCreatedPayload{ProposalID: "p1", Title: "t", RequiredLayers: []string{"kafka"}}),
+	}
+	fs := &fakeSlack{reply: func(n int, w http.ResponseWriter) {
+		if n == 3 { // the page
+			_, _ = w.Write([]byte(`{"ok":false,"error":"not_in_channel"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"channel":"CREAL","ts":"1700000000.000101"}`))
+	}}
+	b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) { o.Paging = pagingOpts() })
+	err := b.Run(context.Background(), "r1")
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Code != "not_in_channel" {
+		t.Errorf("err = %v", err)
+	}
+}
