@@ -70,9 +70,30 @@ type Config struct {
 	GenericAlertSecret   string // GENERIC_ALERT_SECRET (HMAC for /api/alerts/generic)
 	DefaultAlertPipeline string // DEFAULT_ALERT_PIPELINE: used when an alert names no pipeline
 
-	// Agent cost guard: at most this many agent runs at once across all rooms;
-	// further rooms wait in a queue. 0 or empty = default 3.
+	// Agent cost guard: at most this many agent runs working at once on THIS
+	// replica, across all its rooms; further rooms wait in a queue (round-robin
+	// across pipelines, FIFO within one). 0 or empty = default 3. With several
+	// replicas the total is replicas x this, unless MaxAgentsGlobal is set.
 	MaxAgents string // PIPEROOM_MAX_AGENTS
+	// MaxAgentsGlobal caps agent runs working at once across ALL replicas,
+	// counted from the live room leases in Postgres (docs/design/replicas.md
+	// section 4). 0 or empty = off (only the per-replica cap applies). Ignored
+	// with the in-memory store (--demo), which is one process.
+	MaxAgentsGlobal string // PIPEROOM_MAX_AGENTS_GLOBAL
+
+	// ReplicaID names this server process in room leases, executor claims and
+	// leader logs (docs/design/replicas.md section 2). Empty = the host name
+	// (in Kubernetes, the pod name). The server always appends a random
+	// per-process suffix, so a restarted container never mistakes the old
+	// process's leases or claims for its own.
+	ReplicaID string // PIPEROOM_REPLICA_ID
+
+	// ResumeOnTakeover: when a replica takes over the agent lease of a
+	// replica that stopped, "1" resumes an agent that was working (a fresh
+	// run, at most 3 resumes per room per hour); empty or "0" (default) pauses
+	// it as a restart does, until someone steers or mentions @agent
+	// (docs/design/replicas.md section 4.3).
+	ResumeOnTakeover string // PIPEROOM_RESUME_ON_TAKEOVER
 
 	// Built-in watcher (internal/watch). Kept as strings like the other fields;
 	// ParseWatch turns them into typed values and names the env var on error.
@@ -194,7 +215,10 @@ func Load() Config {
 		GenericAlertSecret:   get("GENERIC_ALERT_SECRET", ""),
 		DefaultAlertPipeline: get("DEFAULT_ALERT_PIPELINE", ""),
 
-		MaxAgents: get("PIPEROOM_MAX_AGENTS", ""),
+		MaxAgents:        get("PIPEROOM_MAX_AGENTS", ""),
+		MaxAgentsGlobal:  get("PIPEROOM_MAX_AGENTS_GLOBAL", ""),
+		ReplicaID:        get("PIPEROOM_REPLICA_ID", ""),
+		ResumeOnTakeover: get("PIPEROOM_RESUME_ON_TAKEOVER", ""),
 
 		WatchMode:         get("PIPEROOM_WATCH_MODE", DefaultWatchMode),
 		WatchInterval:     get("PIPEROOM_WATCH_INTERVAL", DefaultWatchInterval),

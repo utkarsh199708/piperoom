@@ -300,6 +300,12 @@ type ActionExecutedPayload struct {
 	Output     string `json:"output"`
 	// ParamsHash is the proposal's params_hash the executor checked before Execute.
 	ParamsHash string `json:"params_hash,omitempty"`
+	// OutcomeUnknown is true when the step may or may not have run: its
+	// executor stopped after it claimed the step and before it recorded the
+	// result (docs/design/replicas.md section 5). OK is then false, the step is
+	// never run again, and the agent is told the outcome is unknown
+	// (HumanInput.OK nil): the target must be checked before a retry.
+	OutcomeUnknown bool `json:"outcome_unknown,omitempty"`
 }
 
 // HandoffSummary is the agent-written shift hand-off.
