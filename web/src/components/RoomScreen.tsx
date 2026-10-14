@@ -318,6 +318,7 @@ export function RoomScreen() {
         checklist={checklist}
         filterLayer={layerFilter ?? undefined}
         onClearFilter={() => setLayerFilter(null)}
+        shadow={state.shadow}
       />
     </section>
     </>
@@ -358,7 +359,8 @@ export function RoomScreen() {
           {state.labelled ? (
             <span className="font-normal text-muted-foreground">· labelled</span>
           ) : (
-            !viewer && (
+            // A shadow room takes the F8 label only after the blind label (409 not_labelled).
+            !viewer && (!state.shadow || state.shadow_labelled) && (
               <Button size="sm" variant="outline" className="ml-auto" onClick={() => setLabelOpen(true)}>
                 Add label
               </Button>
@@ -438,7 +440,7 @@ export function RoomScreen() {
               </TabsContent>
               <TabsContent value="fix" forceMount hidden={tab !== 'fix'} className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
                 {proposalsCard}
-                <ProposalsSummary proposals={state.proposals} />
+                <ProposalsSummary proposals={state.proposals} shadow={state.shadow} />
               </TabsContent>
               <TabsContent value="people" forceMount hidden={tab !== 'people'}>
                 {people}
@@ -473,7 +475,7 @@ export function RoomScreen() {
         {wide && (
           <aside aria-label="Room details" className="flex w-full shrink-0 flex-col border-t border-border xl:w-[300px] xl:border-l xl:border-t-0">
             {similar}
-            <ProposalsSummary proposals={state.proposals} />
+            <ProposalsSummary proposals={state.proposals} shadow={state.shadow} />
             <div className="h-px shrink-0 bg-border" />
             {people}
             <div className="h-px shrink-0 bg-border" />

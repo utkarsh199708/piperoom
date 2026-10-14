@@ -260,6 +260,8 @@ export interface RoomState {
   shadow?: boolean
   /** Set by shadow.revealed: the run has ended and its result exists (grading may start). */
   shadow_revealed?: boolean
+  /** Set by shadow.labelled: the blind label exists, so the F8 label may follow. */
+  shadow_labelled?: boolean
 }
 
 export function emptyRoomState(id: string): RoomState {

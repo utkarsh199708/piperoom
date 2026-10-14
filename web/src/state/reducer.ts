@@ -590,6 +590,10 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       next = { ...state, shadow_revealed: true }
       break
 
+    case 'shadow.labelled':
+      next = { ...state, shadow_labelled: true }
+      break
+
     default:
       break
   }

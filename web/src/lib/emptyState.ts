@@ -6,9 +6,19 @@ export interface EmptyState {
   offerSteer: boolean
 }
 
+// A shadow room's log holds no agent events, so its status says nothing true; and a steer never
+// reaches a shadow agent, so there is nothing to offer.
+const SHADOW_EMPTY: EmptyState = {
+  title: 'The agent investigates silently in a shadow room.',
+  hint: 'Its steps and conclusion are shown after the room is closed and you record your own answer.',
+  busy: false,
+  offerSteer: false,
+}
+
 // What the empty investigation says, by agent status. `starting` is not in the API's list yet but the
 // runner may send it; any state we do not know falls back to the idle wording.
-export function emptyStateFor(agent?: { state: string; detail?: string }): EmptyState {
+export function emptyStateFor(agent?: { state: string; detail?: string }, shadow = false): EmptyState {
+  if (shadow) return SHADOW_EMPTY
   const detail = agent?.detail
   switch (agent?.state) {
     case 'starting':

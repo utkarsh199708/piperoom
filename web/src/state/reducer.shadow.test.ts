@@ -49,6 +49,14 @@ describe('shadow rooms in the reducer', () => {
     expect(applyEvent({ ...start, shadow: false }, hyp).hypothesis?.text).toBe('secret')
   })
 
+  it('shadow.labelled marks the blind label as recorded (the F8 label may follow)', () => {
+    const start = { ...emptyRoomState('r1'), shadow: true, status: 'closed' as const, last_seq: 6 }
+    expect(start.shadow_labelled).toBeUndefined()
+    const next = applyEvent(start, ev(7, 'shadow.labelled', { actual_layer: 'kafka', root_cause_terms: ['x'] }, human))
+    expect(next.shadow_labelled).toBe(true)
+    expect(next.last_seq).toBe(7)
+  })
+
   it('shadow.labelled and shadow.graded describe the actor, not the content', () => {
     expect(describeEvent(ev(7, 'shadow.labelled', { actual_layer: 'kafka', root_cause_terms: ['secret term'] }, human))).toBe(
       'Arjun recorded a blind label',
