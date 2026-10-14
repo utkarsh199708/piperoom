@@ -8,7 +8,7 @@ import { StatusDot } from './StatusDot'
 // polite "Loading room…" line tell a screen reader what is going on.
 export function RoomSkeleton({ pipelineId }: { pipelineId?: string }) {
   return (
-    <div aria-busy="true" className="flex min-h-[calc(100dvh-3rem)] flex-col xl:flex-row">
+    <div aria-busy="true" className="flex min-h-full flex-col xl:flex-row">
       <div className="flex min-w-0 flex-1 flex-col gap-4 px-4 pb-6 pt-4 sm:px-6">
         <p role="status" className="sr-only">
           Loading room…
