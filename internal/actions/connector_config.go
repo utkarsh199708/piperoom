@@ -147,7 +147,7 @@ func (a *updateConnectorConfig) Validate(raw json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := a.d.validateContext()
 	defer cancel()
 	if err := a.d.connectorExists(ctx, p.Connector); err != nil {
 		return err
