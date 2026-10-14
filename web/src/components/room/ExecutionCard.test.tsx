@@ -55,3 +55,21 @@ describe('ExecutionCard', () => {
     expect(screen.getByText('hash differs from proposal')).toBeInTheDocument()
   })
 })
+
+describe('ExecutionCard roll back', () => {
+  const rb = { asDriver: true, onSteer: async () => true }
+  it('is offered once the run is done, failed or unknown, not while running', () => {
+    const running = render(<ExecutionCard proposal={proposal({ executed: [ran(0)] })} rollback={rb} />)
+    expect(screen.queryByRole('button', { name: 'Roll back' })).not.toBeInTheDocument()
+    running.unmount()
+    const done = render(<ExecutionCard proposal={proposal({ executed: [ran(0), ran(1)] })} rollback={rb} />)
+    expect(screen.getByRole('button', { name: 'Roll back' })).toBeInTheDocument()
+    done.unmount()
+    render(<ExecutionCard proposal={proposal({ executed: [ran(0, false)] })} rollback={rb} />)
+    expect(screen.getByRole('button', { name: 'Roll back' })).toBeInTheDocument()
+  })
+  it('is not offered to a viewer (no rollback prop)', () => {
+    render(<ExecutionCard proposal={proposal({ executed: [ran(0), ran(1)] })} />)
+    expect(screen.queryByRole('button', { name: /roll back/i })).not.toBeInTheDocument()
+  })
+})

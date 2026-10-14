@@ -4,6 +4,7 @@ import { executionPhase } from '../../lib/execution'
 import { shortHash } from '../../lib/hash'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
+import { RollbackButton } from './RollbackButton'
 import { cn } from '@/lib/utils'
 
 function headerText(proposal: ProposalState): string {
@@ -25,7 +26,14 @@ function headerText(proposal: ProposalState): string {
 
 // What happened to an approved proposal's steps, one row each. The header is the card's single
 // live region. The "hash differs" badge and exec-hash test ids carry over from the old list.
-export function ExecutionCard({ proposal }: { proposal: ProposalState }) {
+export function ExecutionCard({
+  proposal,
+  rollback,
+}: {
+  proposal: ProposalState
+  /** Absent for a viewer. The driver's steer goes to the agent; a member's is a suggestion. */
+  rollback?: { asDriver: boolean; onSteer: (text: string) => Promise<boolean> }
+}) {
   const info = executionPhase(proposal)
   if (proposal.executed.length === 0 && info.phase !== 'running') return null
   const byStep = new Map(proposal.executed.map((x) => [x.step_index, x]))
@@ -87,6 +95,17 @@ export function ExecutionCard({ proposal }: { proposal: ProposalState }) {
           )
         })}
       </ol>
+      {rollback && (info.phase === 'done' || info.phase === 'failed' || info.phase === 'unknown') && (
+        <div className="flex">
+          <RollbackButton
+            title={proposal.title}
+            proposalId={proposal.proposal_id}
+            rollback={proposal.rollback}
+            asDriver={rollback.asDriver}
+            onSteer={rollback.onSteer}
+          />
+        </div>
+      )}
     </div>
   )
 }

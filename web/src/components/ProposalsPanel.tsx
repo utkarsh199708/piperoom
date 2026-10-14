@@ -17,6 +17,8 @@ import { clockTime, timeAgo } from '../lib/time'
 import { Clock } from './room/Clock'
 import { BlastRadius } from './room/BlastRadius'
 import { ExecutionCard } from './room/ExecutionCard'
+import { VerificationCard } from './room/VerificationCard'
+import type { CloseNudge } from './room/VerificationCard'
 import { cn } from '@/lib/utils'
 import type { RoomActions, StaleInfo } from '../hooks/useRoom'
 import { isEditableTarget } from './shell/keys'
@@ -771,7 +773,9 @@ function Proposal({
   onSolo,
   waiting,
   topology,
+  nudge,
 }: {
+  nudge: CloseNudge
   topology: Topology | null
   proposal: ProposalState
   user: CurrentUser
@@ -912,7 +916,11 @@ function Proposal({
           />
         ))}
       </div>
-      <ExecutionCard proposal={proposal} />
+      <ExecutionCard
+        proposal={proposal}
+        rollback={isViewer(user) ? undefined : { asDriver: nudge.isDriver, onSteer: actions.steer }}
+      />
+      {proposal.verification && <VerificationCard verification={proposal.verification} title={proposal.title} nudge={nudge} />}
     </article>
   )
 }
@@ -926,7 +934,10 @@ export function ProposalsPanel({
   people,
   presence = [],
   topology = null,
+  onCloseRoom,
 }: {
+  /** Opens the close dialog with the resolution filled in (the driver's "Close room" after a verified fix). */
+  onCloseRoom?: (initialText: string) => void
   /** From useTopology: names the downstream node ids a preview lists. */
   topology?: Topology | null
   state: RoomState
@@ -949,6 +960,12 @@ export function ProposalsPanel({
     canNudge: !isViewer(user) && state.status === 'open',
   }
   const proposals = state.proposals
+  const nudge: CloseNudge = {
+    roomOpen: state.status === 'open',
+    driverName: state.driver?.name,
+    isDriver: state.driver?.id === user.id,
+    onClose: onCloseRoom,
+  }
   // `/api/me.solo` says so up front; on an older server the first approve that
   // asks for a confirm tells us.
   const [soloSeen, setSoloSeen] = useState(false)
@@ -995,6 +1012,7 @@ export function ProposalsPanel({
               onSolo={() => setSoloSeen(true)}
               waiting={waiting}
               topology={topology}
+              nudge={nudge}
             />
           ))}
         </div>
