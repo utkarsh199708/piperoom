@@ -26,6 +26,7 @@ import (
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/dbtools"
+	"piperoom/internal/tools/debeziumtools"
 	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/tools/runbooks"
 	"piperoom/internal/tools/similarincidents"
@@ -51,6 +52,9 @@ type Wired struct {
 	Connect       clients.ConnectClient
 	Kafka         clients.KafkaAdmin
 	Registry      clients.SchemaRegistryClient
+	// DebeziumMetrics is the parsed DEBEZIUM_METRICS_URL/_PREFIX; an empty URL
+	// leaves debezium_metrics registered but answering "not configured".
+	DebeziumMetrics config.DebeziumMetrics
 
 	// Builder derives pipeline graphs with live health from the clients above.
 	Builder topology.Builder
@@ -189,6 +193,11 @@ func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *
 		return nil, err
 	}
 
+	dm, err := config.ParseDebeziumMetrics(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	// Build the A2 clients before any database ping so a bad security
 	// configuration fails Open even when no stack is reachable at all.
 	a2, err := buildA2Clients(cfg, awsCfg)
@@ -220,7 +229,9 @@ func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *
 	}
 	opened = append(opened, closeWh)
 
-	return assemble(o, whKind, a2, src, wh, closeOpened), nil
+	w := assemble(o, whKind, a2, src, wh, closeOpened)
+	w.DebeziumMetrics = dm
+	return w, nil
 }
 
 // assemble builds the Wired that Open returns from the clients it opened,
@@ -293,6 +304,9 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 	}
 	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: w.Connect, Registry: w.Registry, Kafka: w.Kafka, Owners: w.Owners}); err != nil {
 		return fmt.Errorf("wiring: register kafka tools: %w", err)
+	}
+	if err := debeziumtools.Register(reg, debeziumtools.Deps{Connect: w.Connect, Metrics: w.DebeziumMetrics, Owners: w.Owners}); err != nil {
+		return fmt.Errorf("wiring: register debezium tools: %w", err)
 	}
 	// The runbook library is embedded in the binary, so it needs no client.
 	if err := runbooks.Register(reg); err != nil {
