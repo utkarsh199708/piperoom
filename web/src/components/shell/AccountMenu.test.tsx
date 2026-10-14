@@ -116,3 +116,41 @@ describe('AccountMenu dev switcher', () => {
     expect(item('Log out')).not.toBeInTheDocument()
   })
 })
+
+describe('AccountMenu browser notifications', () => {
+  const stub = (permission: string, request = vi.fn().mockResolvedValue('granted')) => {
+    vi.stubGlobal('Notification', Object.assign(function N() {}, { permission, requestPermission: request }))
+    return request
+  }
+  const reset = () => {
+    flags.dev = false
+    flags.fixtures = false
+    ctx.busy = false
+  }
+
+  it('off asks for permission when clicked; blocked is disabled with the reason', () => {
+    reset()
+    const request = stub('default')
+    openMenu()
+    const row = item(/Browser notifications · off/)!
+    fireEvent.click(row)
+    expect(request).toHaveBeenCalled()
+    vi.unstubAllGlobals()
+  })
+
+  it('blocked is disabled', () => {
+    reset()
+    stub('denied')
+    openMenu()
+    expect(item(/Browser notifications · blocked/)).toHaveAttribute('aria-disabled', 'true')
+    vi.unstubAllGlobals()
+  })
+
+  it('is absent where notifications are unsupported', () => {
+    reset()
+    vi.stubGlobal('Notification', undefined)
+    openMenu()
+    expect(item(/Browser notifications/)).not.toBeInTheDocument()
+    vi.unstubAllGlobals()
+  })
+})
