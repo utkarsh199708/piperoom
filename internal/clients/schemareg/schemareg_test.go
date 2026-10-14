@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/tools"
 )
 
 func readFile(t *testing.T, name string) string {
@@ -240,5 +241,56 @@ func TestOversizedBody(t *testing.T) {
 	_, err := c.Subjects(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("want decode error for oversized body, got %v", err)
+	}
+}
+
+func recordCtx() (context.Context, *tools.Recorder) {
+	rec := tools.NewRecorder()
+	return tools.WithRecorder(context.Background(), rec), rec
+}
+
+func TestRegistrySchemaRecordsPath(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", mediaType)
+		w.Write([]byte(`{"subject":"pg.public.orders-value","version":3,"id":7,"schema":"{}"}`))
+	})
+	ctx, rec := recordCtx()
+	if _, err := c.Schema(ctx, "pg.public.orders-value", -1); err != nil {
+		t.Fatalf("Latest: %v", err)
+	}
+	calls := rec.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("got %d calls, want 1: %+v", len(calls), calls)
+	}
+	if calls[0].Kind != tools.CallRegistry || calls[0].Text != "GET /subjects/pg.public.orders-value/versions/latest" || calls[0].Target != c.baseURL {
+		t.Fatalf("call = %+v", calls[0])
+	}
+}
+
+func TestRegistryErrorStillRecords(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "<html>boom</html>", http.StatusInternalServerError)
+	})
+	ctx, rec := recordCtx()
+	if _, err := c.Subjects(ctx); err == nil {
+		t.Fatal("want error")
+	}
+	if calls := rec.Calls(); len(calls) != 1 || calls[0].Text != "GET /subjects" {
+		t.Fatalf("calls = %+v", calls)
+	}
+}
+
+func TestRegisterNeverRecordsSchema(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"id":1}`)) })
+	ctx, rec := recordCtx()
+	if _, err := c.Register(ctx, "s-value", `{"type":"string","doc":"SECRET-SCHEMA"}`); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	calls := rec.Calls()
+	if len(calls) != 1 || calls[0].Text != "POST /subjects/s-value/versions" {
+		t.Fatalf("calls = %+v", calls)
+	}
+	if b, _ := json.Marshal(calls); strings.Contains(string(b), "SECRET-SCHEMA") {
+		t.Fatalf("schema leaked: %s", b)
 	}
 }

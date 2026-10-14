@@ -1,8 +1,8 @@
 package room
 
-// AgentStats reports this replica's agent slots in use and the rooms queued
+// AgentSlotStats reports this replica's agent slots in use and the rooms queued
 // for one (PIPEROOM_MAX_AGENTS), for the /metrics gauges.
-func (s *Service) AgentStats() (inUse, queued int) {
+func (s *Service) AgentSlotStats() (inUse, queued int) {
 	return s.slots.stats()
 }
 

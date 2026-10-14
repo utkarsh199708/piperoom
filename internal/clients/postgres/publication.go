@@ -46,7 +46,7 @@ func (d *DB) PublicationTables(ctx context.Context, publication, role string, ta
 	defer cancel()
 
 	var exists bool
-	if err := d.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)`, publication).Scan(&exists); err != nil {
+	if err := d.queryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)`, publication).Scan(&exists); err != nil {
 		return nil, fmt.Errorf("postgres: check publication %q: %w", publication, err)
 	}
 	if !exists {
@@ -81,7 +81,7 @@ func (d *DB) PublicationTables(ctx context.Context, publication, role string, ta
 // privilege on each. The relation oid is resolved through pg_class so the
 // privilege check can use the oid form of has_table_privilege.
 func (d *DB) publicationMembers(ctx context.Context, publication, role string) ([]PublicationTable, error) {
-	rows, err := d.pool.Query(ctx, `
+	rows, err := d.query(ctx, `
 		SELECT pt.schemaname, pt.tablename,
 		       has_table_privilege($2::name, c.oid, 'SELECT')
 		FROM pg_publication_tables pt
@@ -153,7 +153,7 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 		LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = v.tablename
 		ORDER BY v.pos`)
 
-	rows, err := d.pool.Query(ctx, sb.String(), args...)
+	rows, err := d.query(ctx, sb.String(), args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: check publication %q source privileges: %w", publication, err)
 	}

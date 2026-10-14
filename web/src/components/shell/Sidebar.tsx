@@ -1,4 +1,4 @@
-import { Activity, Inbox, Search, Workflow } from 'lucide-react'
+import { Inbox, Search } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
@@ -76,25 +76,9 @@ function PipelineItem({
   )
 }
 
-// Pipelines and Audit log have no screen yet; they are listed (the design has them) but off.
-function SoonItem({ icon, label }: { icon: ReactNode; label: string }) {
-  return (
-    <li>
-      <span
-        aria-disabled="true"
-        title="Not available yet"
-        className={cn(rowClass, 'cursor-not-allowed opacity-60')}
-      >
-        {icon}
-        {label}
-        <span className="sr-only">, not available yet</span>
-      </span>
-    </li>
-  )
-}
-
 export function SidebarContent({
   openRooms,
+  needsYou = 0,
   pipelines,
   currentPipelineId,
   navKey,
@@ -102,6 +86,8 @@ export function SidebarContent({
   onNavigate,
 }: {
   openRooms: number
+  /** Open rooms with a layer waiting on this person. */
+  needsYou?: number
   pipelines: PipelineSummary[]
   /** The pipeline of the room on screen, if any. */
   currentPipelineId?: string
@@ -151,15 +137,20 @@ export function SidebarContent({
               to="/"
               className={cn(itemClass, onList && activeClass)}
               aria-current={onList ? 'page' : undefined}
+              aria-label={needsYou > 0 ? `Rooms, ${needsYou} need you` : undefined}
               onClick={onNavigate}
             >
               <Inbox aria-hidden="true" />
               Rooms
-              <Count>{openRooms}</Count>
+              {needsYou > 0 ? (
+                <Badge variant="warning" className="ml-auto">
+                  Needs you {needsYou}
+                </Badge>
+              ) : (
+                <Count>{openRooms}</Count>
+              )}
             </Link>
           </li>
-          <SoonItem icon={<Workflow aria-hidden="true" />} label="Pipelines" />
-          <SoonItem icon={<Activity aria-hidden="true" />} label="Audit log" />
         </ul>
       </nav>
 

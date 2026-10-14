@@ -1,36 +1,39 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderHook, waitFor, act } from '@testing-library/react'
 
+// Fixtures mode: no push socket, the list polls (the server path is in useRoomList.push.test.tsx).
 vi.mock('../context/user', () => ({
   useCurrentUser: () => ({ user: { id: 'arjun', name: 'Arjun', layers: [] }, sessionEpoch: 0 }),
 }))
-vi.mock('../api/client', () => ({ api: { rooms: vi.fn() }, isFixtures: () => false }))
+vi.mock('../api/client', () => ({ api: { rooms: vi.fn() }, isFixtures: () => true, openListWs: vi.fn() }))
+vi.mock('../fixtures/player', () => ({ fixtureRooms: [] }))
 
-import { api } from '../api/client'
+import { openListWs } from '../api/client'
 import { useRoomList } from './useRoomList'
 
 beforeEach(() => {
-  vi.mocked(api.rooms).mockReset()
+  vi.mocked(openListWs).mockReset()
 })
 
-describe('useRoomList', () => {
-  it('loads on mount', async () => {
-    vi.mocked(api.rooms).mockResolvedValue([])
+describe('useRoomList in fixtures mode', () => {
+  it('polls and never opens the push socket', async () => {
     const { result } = renderHook(() => useRoomList())
     await waitFor(() => expect(result.current.loading).toBe(false))
-    expect(api.rooms).toHaveBeenCalledTimes(1)
+    expect(result.current.mode).toBe('poll')
+    expect(result.current.updatedAt).not.toBeNull()
+    expect(openListWs).not.toHaveBeenCalled()
   })
 
   it('enabled: false loads nothing (the screen reads the shell list instead)', async () => {
-    renderHook(() => useRoomList({ enabled: false }))
+    const { result } = renderHook(() => useRoomList({ enabled: false }))
     await new Promise((r) => setTimeout(r, 20))
-    expect(api.rooms).not.toHaveBeenCalled()
+    expect(result.current.loading).toBe(true)
+    expect(openListWs).not.toHaveBeenCalled()
   })
 
-  it('a reload that works clears the error from the one that failed', async () => {
-    vi.mocked(api.rooms).mockRejectedValueOnce(new Error('boom')).mockResolvedValueOnce([])
+  it('reload refetches now', async () => {
     const { result } = renderHook(() => useRoomList())
-    await waitFor(() => expect(result.current.error).toBe('boom'))
+    await waitFor(() => expect(result.current.loading).toBe(false))
     await act(async () => {
       await result.current.reload()
     })

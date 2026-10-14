@@ -302,6 +302,59 @@ func (k *fakeKafka) callLists() [][]string {
 	return slices.Clone(k.calls)
 }
 
+// ---- fake lag reader ----
+
+type fakeLag struct {
+	mu    sync.Mutex
+	lags  map[string]clients.GroupLag
+	errs  map[string]error
+	calls []string
+}
+
+func newFakeLag() *fakeLag {
+	return &fakeLag{lags: map[string]clients.GroupLag{}, errs: map[string]error{}}
+}
+
+func (f *fakeLag) GroupLag(ctx context.Context, group string) (clients.GroupLag, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, group)
+	if err := f.errs[group]; err != nil {
+		return clients.GroupLag{}, err
+	}
+	gl, ok := f.lags[group]
+	if !ok {
+		return clients.GroupLag{Group: group, State: "Stable", Members: 1, Partitions: []clients.PartitionLag{}}, nil
+	}
+	gl.Partitions = slices.Clone(gl.Partitions)
+	return gl, nil
+}
+
+// set makes the group read state/members with total lag on one partition of topic.
+func (f *fakeLag) set(group, state string, members int, topic string, committed, end int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	lag := end - committed
+	if committed < 0 {
+		lag = end
+	}
+	f.lags[group] = clients.GroupLag{Group: group, State: state, Members: members, TotalLag: lag,
+		Partitions: []clients.PartitionLag{{Topic: topic, Partition: 0, Committed: committed, End: end, Lag: lag}}}
+	delete(f.errs, group)
+}
+
+func (f *fakeLag) setErr(group string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.errs[group] = err
+}
+
+func (f *fakeLag) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
 // ---- fake rooms ----
 
 type openRec struct {
@@ -310,7 +363,23 @@ type openRec struct {
 	created bool
 }
 
-type postRec struct{ roomID, text string }
+type postRec struct {
+	roomID, text string
+	ev           json.RawMessage
+}
+
+// evidenceRooms is a fakeRooms that also implements EvidenceSink.
+type evidenceRooms struct{ *fakeRooms }
+
+func (r evidenceRooms) PostEvidenceJSON(ctx context.Context, roomID, text string, ev json.RawMessage) error {
+	if err := r.PostEvidence(ctx, roomID, text); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.posts[len(r.posts)-1].ev = slices.Clone(ev)
+	return nil
+}
 
 type lastRoom struct {
 	roomID   string
@@ -407,7 +476,7 @@ func (r *fakeRooms) PostEvidence(ctx context.Context, roomID, text string) error
 		r.mu.Unlock()
 		return fmt.Errorf("fake: room %s: %w", roomID, ErrRoomClosed)
 	}
-	r.posts = append(r.posts, postRec{roomID, text})
+	r.posts = append(r.posts, postRec{roomID: roomID, text: text})
 	hook := r.onPosted
 	r.mu.Unlock()
 	if hook != nil {
@@ -536,6 +605,8 @@ type opts struct {
 	checkTimeout time.Duration
 	noHeartbeat  bool
 	noKafka      bool // Deps.Kafka stays nil: the client cannot read DLQ offsets
+	lag          bool // Deps.Lag is h.lag; otherwise nil
+	evidenceSink bool // Deps.Rooms also implements EvidenceSink
 }
 
 type harness struct {
@@ -546,6 +617,7 @@ type harness struct {
 	conn  *fakeConnect
 	rooms *fakeRooms
 	kafka *fakeKafka
+	lag   *fakeLag
 	logs  *logBuf
 	deps  Deps
 }
@@ -564,7 +636,7 @@ func newHarness(t *testing.T, o opts) *harness {
 	if o.checkTimeout == 0 {
 		o.checkTimeout = 200 * time.Millisecond
 	}
-	h := &harness{t: t, clk: newFakeClock(), src: &fakeSource{}, conn: newFakeConnect(), rooms: newFakeRooms(), kafka: newFakeKafka(), logs: &logBuf{}}
+	h := &harness{t: t, clk: newFakeClock(), src: &fakeSource{}, conn: newFakeConnect(), rooms: newFakeRooms(), kafka: newFakeKafka(), lag: newFakeLag(), logs: &logBuf{}}
 	for _, p := range o.pipes {
 		cfg := map[string]string{
 			"connector.class": "io.debezium.connector.postgresql.PostgresConnector",
@@ -588,6 +660,12 @@ func newHarness(t *testing.T, o opts) *harness {
 	}
 	if !o.noKafka {
 		d.Kafka = h.kafka
+	}
+	if o.lag {
+		d.Lag = h.lag
+	}
+	if o.evidenceSink {
+		d.Rooms = evidenceRooms{h.rooms}
 	}
 	h.deps = d
 	w, err := New(d)

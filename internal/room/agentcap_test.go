@@ -546,10 +546,10 @@ func waitQueuedEvent(t *testing.T, st *memstore.Store, roomID string) {
 	t.Fatalf("room %s: no queued agent.status before %v", roomID, ctx.Err())
 }
 
-// AgentStats and OpenRooms feed the /metrics gauges: one run holding the only
+// AgentSlotStats and OpenRooms feed the /metrics gauges: one run holding the only
 // slot, one room queued behind it, two open rooms; closing the queued room
 // takes it out of both.
-func TestAgentStatsAndOpenRooms(t *testing.T) {
+func TestAgentSlotStatsAndOpenRooms(t *testing.T) {
 	cr := newCapRunner()
 	cr.startCh = make(chan string, 4)
 	svc, st := newCapService(t, 1, cr.run)
@@ -560,8 +560,8 @@ func TestAgentStatsAndOpenRooms(t *testing.T) {
 	<-cr.startCh
 	queued := createRoom(t, svc, "arjun").ID
 	waitQueuedEvent(t, st, queued)
-	if inUse, q := svc.AgentStats(); inUse != 1 || q != 1 {
-		t.Fatalf("AgentStats = %d in use, %d queued; want 1, 1", inUse, q)
+	if inUse, q := svc.AgentSlotStats(); inUse != 1 || q != 1 {
+		t.Fatalf("AgentSlotStats = %d in use, %d queued; want 1, 1", inUse, q)
 	}
 	if n := svc.OpenRooms(); n != 2 {
 		t.Fatalf("OpenRooms = %d, want 2", n)

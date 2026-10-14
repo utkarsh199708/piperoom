@@ -99,6 +99,8 @@ func TestEvaluateRecordsMisses(t *testing.T) {
 	// Facts need their tools' recordings; validation refuses facts no run
 	// could establish.
 	sc.Expect.ExpectedFacts, sc.Expect.Claims = nil, nil
+	// Fix targets need a required fact to ground the fix on.
+	sc.Expect.FixTargets = nil
 	rep, err := Evaluate(context.Background(), []Scenario{sc}, Config{
 		Runner: scriptedRunner(goodSchemaChangeScript()), Logger: quietLogger(),
 	})
@@ -137,7 +139,9 @@ func TestEvaluateDeliversInputsOnIdle(t *testing.T) {
 			acks = append(acks, p.Text)
 		}
 	}
-	if strings.Join(acks, "|") != "ack: check the registry|ack: why?" {
+	// A room delivers a comment only when it mentions the agent; the harness
+	// adds the mention a scenario comment implies.
+	if strings.Join(acks, "|") != "ack: check the registry|ack: @agent why?" {
 		t.Errorf("acks = %q", acks)
 	}
 	// The harness logs each delivered steer and comment as the room would.
@@ -151,10 +155,11 @@ func TestEvaluateDeliversInputsOnIdle(t *testing.T) {
 		case events.CommentAdded:
 			var p events.CommentAddedPayload
 			_ = json.Unmarshal(ev.Payload, &p)
-			logged = append(logged, "comment:"+p.CommentID+":"+p.Text)
+			// The room assigns comment ids; the scenario's is not used.
+			logged = append(logged, "comment:"+p.Text)
 		}
 	}
-	if strings.Join(logged, "|") != "steer:check the registry|comment:c_1:why?" {
+	if strings.Join(logged, "|") != "steer:check the registry|comment:@agent why?" {
 		t.Errorf("logged inputs = %q", logged)
 	}
 	if tr.Idles != 3 {

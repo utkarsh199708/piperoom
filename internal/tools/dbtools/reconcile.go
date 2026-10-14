@@ -1,0 +1,301 @@
+package dbtools
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"piperoom/internal/clients"
+	"piperoom/internal/tools"
+	"piperoom/internal/topology"
+)
+
+const (
+	// maxReconcileWindow bounds since..until.
+	maxReconcileWindow = 6 * time.Hour
+	// reconcileBuckets is the most rows the comparison table has.
+	reconcileBuckets = 12
+	// reconcileTolerance is the share of a bucket's source rows the sink or the
+	// topic may lack before the bucket counts as a gap (updates and late rows
+	// make the three counts differ a little).
+	reconcileTolerance = 0.02
+)
+
+// ReconcileRow is one bucket of the comparison. Topic is -1 when topic rates
+// were not available.
+type ReconcileRow struct {
+	Bucket time.Time `json:"bucket"`
+	Source int64     `json:"source"`
+	Topic  int64     `json:"topic"`
+	Sink   int64     `json:"sink"`
+}
+
+func reconcileTool(d Deps) tools.Tool {
+	return &tool{
+		name: "reconcile",
+		desc: "Compare row counts per time bucket (at most 12) between the source table, the Kafka topic and the warehouse sink table, " +
+			"and say on which side the rows are lost: the connector side (topic is missing them) or the consumer side (topic has them, sink does not). " +
+			"Counts only, never a value or a key. Source and sink counts use the pipeline's sink_ts_column; the topic count is the number of change events.",
+		schema: objSchema(map[string]any{
+			"table":      strProp("Source table, \"schema.table\", one of the room's source tables."),
+			"since":      strProp("Start of the window, RFC 3339. The window is at most 6 hours."),
+			"until":      strProp("End of the window, RFC 3339. Default: now."),
+			"sink_table": strProp("Sink table, only needed when the pipeline has several sink tables and none has the source table's name."),
+		}, "table", "since"),
+		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
+			var input struct {
+				Table     string `json:"table"`
+				Since     string `json:"since"`
+				Until     string `json:"until"`
+				SinkTable string `json:"sink_table"`
+			}
+			if err := decode(in, &input); err != nil {
+				return tools.Result{}, err
+			}
+			if !validTable(input.Table) {
+				return tools.Result{}, fmt.Errorf("%w: table must be \"schema.table\"", tools.ErrBadInput)
+			}
+			since, err := parseRFC3339(input.Since)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			until := time.Now()
+			if input.Until != "" {
+				if until, err = parseRFC3339(input.Until); err != nil {
+					return tools.Result{}, err
+				}
+			}
+			if !until.After(since) {
+				return tools.Result{}, fmt.Errorf("%w: until must be after since", tools.ErrBadInput)
+			}
+			if until.Sub(since) > maxReconcileWindow {
+				return tools.Result{}, fmt.Errorf("%w: the window is %s, at most %s", tools.ErrBadInput, until.Sub(since).Round(time.Minute), maxReconcileWindow)
+			}
+			if input.SinkTable != "" && !d.validWarehouseTable(input.SinkTable) {
+				return tools.Result{}, fmt.Errorf("%w: invalid sink_table", tools.ErrBadInput)
+			}
+			sc, err := d.scope(ctx)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			if sc.Unscoped() {
+				return tools.Result{}, fmt.Errorf("%w: reconcile needs the room's pipeline", tools.ErrBadInput)
+			}
+			if err := sc.CheckSourceTable(input.Table); err != nil {
+				return tools.Result{}, err
+			}
+			p := sc.Pipeline()
+			if p.SinkTSColumn == "" {
+				return tools.Result{}, fmt.Errorf("%w: no timestamp column configured (sink_ts_column) for pipeline %q", tools.ErrBadInput, p.ID)
+			}
+			sink, err := pickSinkTable(input.Table, input.SinkTable, p.SinkTables)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			if err := sc.CheckSinkTable(sink); err != nil {
+				return tools.Result{}, err
+			}
+			topic := p.TopicPrefix + "." + input.Table
+
+			src, ok := d.Src.(clients.CountReader)
+			if !ok {
+				return tools.Result{Summary: "source counts are not supported by this client"}, nil
+			}
+			snk, ok := d.Wh.(clients.CountReader)
+			if !ok {
+				return tools.Result{Summary: "sink counts are not supported by this client"}, nil
+			}
+			ctx, cancel := toolCtx(ctx)
+			defer cancel()
+
+			width, n := reconcileGrid(since, until)
+			rows, err := d.reconcileCounts(ctx, src, snk, input.Table, sink, topic, p.SinkTSColumn, since, until, width, n)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			summary := reconcileSummary(input.Table, sink, topic, p.SinkTSColumn, width, rows)
+			summary, truncated := tools.Truncate(summary)
+			return tools.Result{Summary: summary, Data: rows, Truncated: truncated}, nil
+		},
+	}
+}
+
+// pickSinkTable chooses the sink table for a source table: the explicit one,
+// the only one, or the one with the same table name.
+func pickSinkTable(source, explicit string, sinks []string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	if len(sinks) == 1 {
+		return sinks[0], nil
+	}
+	name := source[strings.LastIndex(source, ".")+1:]
+	var match []string
+	for _, s := range sinks {
+		if s[strings.LastIndex(s, ".")+1:] == name {
+			match = append(match, s)
+		}
+	}
+	if len(match) == 1 {
+		return match[0], nil
+	}
+	return "", fmt.Errorf("%w: cannot tell which of %s is the sink of %s: pass sink_table", tools.ErrBadInput, strings.Join(sinks, ", "), source)
+}
+
+// reconcileGrid returns the bucket width (whole minutes, at least one) and the
+// number of buckets for the window: at most reconcileBuckets.
+func reconcileGrid(since, until time.Time) (time.Duration, int) {
+	w := until.Sub(since) / reconcileBuckets
+	width := ((w + time.Minute - 1) / time.Minute) * time.Minute
+	if width < time.Minute {
+		width = time.Minute
+	}
+	n := int((until.Sub(since) + width - 1) / width)
+	return width, n
+}
+
+// reconcileCounts reads the three counts in parallel. A topic that cannot be
+// measured (no RateReader, or its read failed) gives Topic = -1 in every row.
+func (d Deps) reconcileCounts(ctx context.Context, src, snk clients.CountReader, srcTable, sinkTable, topic, tsCol string, since, until time.Time, width time.Duration, n int) ([]ReconcileRow, error) {
+	var (
+		wg                        sync.WaitGroup
+		srcCounts, snkCounts      []clients.MinuteCount
+		srcErr, snkErr            error
+		topicCounts               []int64
+		topicErr                  error
+		topicWanted, topicCapable bool
+	)
+	rr, topicCapable := d.Kafka.(clients.RateReader)
+	topicWanted = d.Kafka != nil && topicCapable
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		srcCounts, srcErr = src.CountByBucket(ctx, srcTable, tsCol, since, until, width)
+	}()
+	go func() {
+		defer wg.Done()
+		snkCounts, snkErr = snk.CountByBucket(ctx, sinkTable, tsCol, since, until, width)
+	}()
+	if topicWanted {
+		wg.Add(1)
+		go func() { defer wg.Done(); topicCounts, topicErr = topicBuckets(ctx, rr, topic, since, until, width, n) }()
+	}
+	wg.Wait()
+	if srcErr != nil {
+		return nil, fmt.Errorf("dbtools: reconcile: source %s: %w", srcTable, srcErr)
+	}
+	if snkErr != nil {
+		return nil, fmt.Errorf("dbtools: reconcile: sink %s: %w", sinkTable, snkErr)
+	}
+	rows := make([]ReconcileRow, n)
+	for i := range rows {
+		rows[i] = ReconcileRow{Bucket: since.Add(time.Duration(i) * width).UTC(), Topic: -1}
+	}
+	fill := func(counts []clients.MinuteCount, set func(*ReconcileRow, int64)) {
+		for _, c := range counts {
+			if i := int(c.Bucket.Sub(since) / width); i >= 0 && i < n {
+				set(&rows[i], c.Count)
+			}
+		}
+	}
+	fill(srcCounts, func(r *ReconcileRow, v int64) { r.Source = v })
+	fill(snkCounts, func(r *ReconcileRow, v int64) { r.Sink = v })
+	if topicWanted && topicErr == nil {
+		for i := range rows {
+			rows[i].Topic = topicCounts[i]
+		}
+	}
+	return rows, nil
+}
+
+// topicBuckets counts the records written to topic in each bucket from offsets
+// alone: records since each bucket boundary, differenced. n+1 offset reads.
+func topicBuckets(ctx context.Context, rr clients.RateReader, topic string, since, until time.Time, width time.Duration, n int) ([]int64, error) {
+	since0 := make([]int64, n+1)
+	errs := make([]error, n+1)
+	var wg sync.WaitGroup
+	for i := 0; i <= n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			at := since.Add(time.Duration(i) * width)
+			if at.After(until) {
+				at = until
+			}
+			rates, err := rr.PartitionRates(ctx, at, topic)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			for _, r := range rates {
+				since0[i] += r.Records
+			}
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			if errors.Is(err, clients.ErrNotSupported) {
+				return nil, err
+			}
+			return nil, fmt.Errorf("topic rates: %w", err)
+		}
+	}
+	out := make([]int64, n)
+	for i := range out {
+		if v := since0[i] - since0[i+1]; v > 0 {
+			out[i] = v
+		}
+	}
+	return out, nil
+}
+
+// reconcileSummary renders the table and the verdict.
+func reconcileSummary(source, sink, topic, tsCol string, width time.Duration, rows []ReconcileRow) string {
+	var sb strings.Builder
+	haveTopic := rows[0].Topic >= 0
+	fmt.Fprintf(&sb, "reconcile %s → %s → %s by %s, buckets of %s from %s\n", source, topic, sink, tsCol, width, topology.FormatTS(rows[0].Bucket))
+	sb.WriteString("bucket | source | topic | sink | sink−source\n")
+	for _, r := range rows {
+		t := "n/a"
+		if r.Topic >= 0 {
+			t = fmt.Sprint(r.Topic)
+		}
+		fmt.Fprintf(&sb, "%s | %d | %s | %d | %+d\n", r.Bucket.Format("15:04"), r.Source, t, r.Sink, r.Sink-r.Source)
+	}
+	first, last := -1, -1
+	var missing, srcSum, topicSum int64
+	for i, r := range rows {
+		gap := r.Source - r.Sink
+		if gap >= 1 && float64(gap) > reconcileTolerance*float64(r.Source) {
+			if first < 0 {
+				first = i
+			}
+			last = i
+		}
+	}
+	if first < 0 {
+		sb.WriteString("verdict: the sink matches the source in every bucket (within 2%)")
+		return sb.String()
+	}
+	for _, r := range rows[first : last+1] {
+		missing += r.Source - r.Sink
+		srcSum += r.Source
+		topicSum += r.Topic
+	}
+	end := rows[last].Bucket.Add(width)
+	span := fmt.Sprintf("%s–%s", rows[first].Bucket.Format("15:04"), end.Format("15:04"))
+	switch {
+	case !haveTopic:
+		fmt.Fprintf(&sb, "verdict: sink is missing %d rows in %s; topic counts are not available, so the side is unknown", missing, span)
+	case float64(topicSum) >= (1-reconcileTolerance)*float64(srcSum):
+		fmt.Fprintf(&sb, "verdict: sink is missing %d rows in %s; topic has them (consumer side)", missing, span)
+	default:
+		fmt.Fprintf(&sb, "verdict: sink is missing %d rows in %s; topic is missing them (connector side)", missing, span)
+	}
+	return sb.String()
+}

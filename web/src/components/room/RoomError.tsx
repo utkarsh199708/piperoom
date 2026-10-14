@@ -12,7 +12,7 @@ export function RoomError({ message, onRetry }: { message: string; onRetry: () =
       </span>
       <h1 className="m-0 text-lg font-semibold">Could not load room</h1>
       <p role="alert" className="m-0 break-words text-muted-foreground">
-        Could not load room: {message}
+        {message}
       </p>
       <div className="mt-1 flex items-center gap-2">
         <Button variant="secondary" onClick={onRetry}>

@@ -154,6 +154,15 @@ F0 (the leads) carries every contract change of the wave; "Uses" names what each
 | F11 | A5 (F11a), A6 (F11b), C6 (`evals/README.md`) | `tasks/F11-cost-insight.md` | snapshot `insight`, `GET /api/pipelines/{pid}/agent-stats`, `AgentStats` |
 | F12 | A2 (F12a), A3 (F12b), C7 (F12c), C6 + C1 (F12d) | `tasks/F12-deep-signals-scenarios.md` | optional readers `ClusterReader`, `RateReader`, `ACLReader`, `LoadErrorReader`, `CountReader`, `clients.ErrNotSupported`, `DEBEZIUM_METRICS_URL`/`_PREFIX` |
 
+### L wave (dispatched 2026-10-14)
+
+PR titles start with `[L1a]`, `[L1b]`, `[L1c]`. Same rules as the F wave: each sub-task stays inside its agent's folders.
+L1 needs no contract change.
+
+| Task | Agents (sub-tasks) | Task file | Uses |
+|---|---|---|---|
+| L1 | C6 (L1a exporter, L1c baseline), A4 (L1b examples), C1 (L1c CI job), C7 (`learned-example-used.yaml`) | `tasks/L1-learn-from-rooms.md` | `room.labelled`, `hypothesis.verdict`, `agent.verification`, `GET /api/rooms/{id}/export`, `similar_incidents` |
+
 Merge order (vision §4): **F0 → F1, F5, F7, F10 in parallel → F3, F4 → F2, F9, F11 → F6, F8 → F12.** Inside a
 task, the task file's "Dependencies and merge order" section rules. A task split between agents is one PR per
 agent (and per sub-task when the task file says so).
