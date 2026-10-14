@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Progress } from '@/components/ui/progress'
 import { PersonAvatar } from './room/PersonAvatar'
+import { CollapsibleText } from './room/CollapsibleText'
 
 const AGENT = { kind: 'agent', id: 'agent', name: 'Agent' } as const
 
@@ -94,7 +95,7 @@ function AgentMessageList({ messages }: { messages: AgentMessageState[] }) {
           <PersonAvatar actor={AGENT} size={20} className="mt-px" />
           <span className="min-w-0 break-words text-muted-foreground">
             <span className="sr-only">Agent: </span>
-            {m.text}
+            <CollapsibleText text={m.text} />
           </span>
         </p>
       ))}
@@ -142,7 +143,9 @@ function CommentThread({
               <strong className="font-medium">Agent</strong>
               <span className="text-xs text-subtle-foreground">{clockTime(r.at)}</span>
             </div>
-            <p className="m-0 break-words text-muted-foreground">{r.text}</p>
+            <p className="m-0 break-words text-muted-foreground">
+              <CollapsibleText text={r.text} />
+            </p>
           </div>
         </div>
       ))}

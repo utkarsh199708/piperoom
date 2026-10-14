@@ -134,7 +134,8 @@ export function useRoom(roomId: string) {
     if (isFixtures()) {
       const snapshot = fixtureRoom(roomId) ?? emptySnapshot(roomId, roomId, 'sev3', 'orders')
       const events = fixtureEvents(roomId)
-      dispatch({ type: 'init', snapshot })
+      // R10: the scripted story is not a log replay; last_seq 0 keeps the replay progress bar off.
+      dispatch({ type: 'init', snapshot: { ...snapshot, last_seq: 0 } })
       lastSeqRef.current = 0
       setPresence(snapshot.members.map((m) => ({ id: m.id, name: m.name, state: 'viewing' })))
       setConn('live')
