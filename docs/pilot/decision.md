@@ -42,7 +42,7 @@ together:
 | hamba/avro GO-2026-5046/5047/5048, **reachable in production** through the Kafka key decode; `go.mod` still `v2.31.0` | medium–high | `reviews/vuln-report-2026-10.md` §Summary, §avro | any pilot that reads the customer's Kafka |
 | Go toolchain: 13 stdlib findings are cleared only by `go 1.27.2` in `go.mod` and `FROM golang:1.27.2-alpine`; `main` has `go 1.27.0` | per finding | same, §Go toolchain | any pilot |
 | gosnowflake GO-2026-6665 (v1, fix only in v2); no `ParseDSN` mitigation applied | — | same, §Summary | a Snowflake warehouse pilot |
-| Dev mode: "any client that can reach the API can act as any user, including a layer owner". The image bakes in `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` | F1 open in dev mode | `docs/pilot/README.md` F1; `Dockerfile` | any pilot on a shared network, until OIDC; `PIPEROOM_DEV_ACK` (R0 #138, server R9) makes it an explicit act |
+| Dev mode: "any client that can reach the API can act as any user, including a layer owner". The image bakes in `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (R6 #127 removes it) | F1 open in dev mode | `docs/pilot/README.md` F1; `Dockerfile` | any pilot on a shared network, until OIDC; `PIPEROOM_DEV_ACK` (R0 #138, server R9) makes it an explicit act |
 | A-ID-2 display-name impersonation: the server marks `verified`, the **web badge is pending** | Medium | `docs/api.md` Verified people; audit §A-ID-2 | OIDC pilots with IdP-only (group) members |
 | Capacity 6.1 (`Service.mu` held across every append, the write ceiling), 6.3 (`pool_max_conns` in the URL stops the server, so the pool cannot be raised), 6.4 (join-storm replay cliff) | HIGH, HIGH, MEDIUM | `reviews/capacity-2026-10.md` §6 | nothing at pilot scale; they bound it (2.3) |
 | Numbers measured on a **shared 4-vCPU VM with loopback Postgres**; the managed-Postgres re-run ("most important") and a multi-hour soak are not done; replica **failover not tested under load** | — | same, §8, §9.4 | the scale we may promise, not the start |
@@ -106,10 +106,10 @@ approvers have used phase 2.
 
 | Gate | What | Owner |
 |---|---|---|
-| G1 | Pin `go 1.27.2` in `go.mod` and `FROM golang:1.27.2-alpine`; CI green on it | A1 (Dockerfile) + C1 (CI); `go.mod` via any Go owner's PR |
+| G1 | Pin `go 1.27.2` in `go.mod` and `FROM golang:1.27.2-alpine`; CI green on it | C1, in R6 (#127, open) |
 | G2 | Replace hamba/avro with the maintained fork (`github.com/iskorotkov/avro/v2` v2.33.0, `Config.MaxMapAllocSize` set), per the vuln report | A2 |
-| G3 | Web "unverified" badge for IdP-only people (A-ID-2), since the pilot runs OIDC | A6 |
-| G4 | Dev mode cannot be exposed by accident: `PIPEROOM_DEV_ACK` (R0 #138 item 6) enforced | A5 (R9), A1 (R2) |
+| G3 | Web "unverified" badge for IdP-only people (A-ID-2), since the pilot runs OIDC | A6, in R3 (#135, open) |
+| G4 | Dev mode cannot be exposed by accident: `PIPEROOM_DEV_ACK` (R0 #138 item 6) enforced, and no dev auth baked into the image | A5 (R9, #145) + C1 (R6, #127) |
 | G5 | Pilot docs: fix the six disagreements in 2.4, add a shadow-rooms page and the 2.3 scale statement | C14 + leads |
 
 Not gates for phase 1, but due before phase 2: the managed-Postgres capacity re-run (capacity §8.2), capacity
@@ -148,5 +148,5 @@ For us:
 ## 6. What happens after this is decided
 
 `[LEAD-ARCH]` turns the chosen option's gates into dispatch messages (one per owner, `docs/collab.md` §4). G4 is
-already in the R wave (R2, R9). G1–G3 and G5 are new tasks. This page is updated to **decided** with the date and the
+already in the R wave (R9 #145, R6 #127), and so are G1 (R6 #127) and G3 (R3 #135). G2 and G5 are new tasks. This page is updated to **decided** with the date and the
 option. It does not change any setting by itself.

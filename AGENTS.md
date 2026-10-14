@@ -51,7 +51,7 @@ Each agent owns folders. **Never edit a file you do not own.**
 | A2 | `tasks/A2-kafka-tools.md` | `internal/clients/connect/**`, `internal/clients/schemareg/**`, `internal/clients/kafka/**`, `internal/tools/kafkatools/**`, `internal/actions/**` (not `action.go`) |
 | A3 | `tasks/A3-db-tools-topology.md` | `internal/clients/postgres/**`, `internal/clients/warehouse/**`, `internal/tools/dbtools/**`, `internal/tools/scope.go`, `internal/topology/**` (not `graph.go`), `internal/owners/**`, `internal/clients/pgconv/**` |
 | A4 | `tasks/A4-agent-loop.md` | `internal/agent/**` (not `contract.go`), `cmd/investigate/**`, `internal/wiring/**` (shared client/tool wiring) |
-| A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**` |
+| A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**`, `internal/auth/**` (A5 created it in auth PR 2, `e6dc2a1`) |
 | A6 | `tasks/A6-web.md` | `web/**` |
 | A7 | `docs/design/watcher.md` (watcher), `docs/design/dlq.md` | `internal/watch/**`, `internal/dlq/**` |
 | C1 (cloud) | `tasks/C1-ci-repo.md` | `.github/**`, `README.md`, `docs/runbook.md`, `Makefile` |
@@ -87,7 +87,7 @@ with the owners above, who carry any follow-up.
 | E4 | #117 | usage telemetry, durable spend limits | nothing (A4, A5, A6, C6 folders); design `docs/design/cost.md` |
 | T1 | #112 | tenancy | nothing (A3, A4, A5, A7 folders); design `docs/design/tenancy.md` |
 | T2 | #107 | tool scope for db/cluster-wide metadata | nothing (A2, A3, A7 folders) |
-| T3 | #115 | auth: approval lifecycle, display-name impersonation | `internal/auth/**` (had no owner) |
+| T3 | #115 | auth: approval lifecycle, display-name impersonation | nothing (`internal/auth/**` is A5's; also A5 folders) |
 | T4 | #118 | retention, caps, deletion, archive | nothing (A1, A3, A5 folders); design `docs/design/retention.md` |
 | N1 | #92 | runbooks: BM25 search | nothing (`internal/tools/runbooks/**` stays C11) |
 | N2 | #94 | evals: token matching, LLM judge | nothing (C6, C7 folders) |
@@ -98,7 +98,7 @@ with the owners above, who carry any follow-up.
 | N7 | #93 | hand-off summary checker | nothing (`internal/agent/**` stays A4) |
 | N8 | #97 | evals: shadow agreement scoring | nothing (C6 folders) |
 | S1 | #121 | replicas: leader, room leases, executor | nothing (A5 folders, `deploy/helm/**`); design `docs/design/replicas.md` |
-| S2 | #122, #123 | load-test harness, multi-replica runs | `cmd/loadtest/**`, `internal/loadtest/**`; its runs live in `reviews/capacity-2026-10/` (leads' folder) |
+| S2 | #122, #123 | load-test harness, multi-replica runs | `cmd/loadtest/**`; `internal/loadtest/**` (created by O5 in #77, extended by S2; the O wave has no row); its runs live in `reviews/capacity-2026-10/` (leads' folder) |
 
 ### R wave (dispatched 2026-10-14)
 
@@ -111,23 +111,23 @@ here, **inside that agent's own folders above**; a task that needs a file outsid
 |---|---|---|---|
 | R0 | leads (`[LEAD-ARCH]`) | contract files, `AGENTS.md`, `docs/**`, the `concurrency:` block of `.github/workflows/ci.yml` | — |
 | R1 | local (run on the Windows dev machine, not a cloud session) | as dispatched | — |
-| R2 | A1 | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**`, `Dockerfile`, `deploy/**` env examples | 6 (`PIPEROOM_DEV_ACK`, log vars), 8 (version build arg) |
+| R2 | A1 | A1 folders (`dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**` except its `Dockerfile`, `internal/testenv/**`) and `docs/demo/**` | 6 (`PIPEROOM_DEV_ACK`, log vars in the dev stack) |
 | R3 | A6 | `web/**` | 1, 2, 3, 4, 5 |
 | R4 | A5 | A5 folders | 1, 2, 4 |
 | R5a | A5 | A5 folders (`cmd/server`, `internal/room` registries) | 9 |
 | R5b | A4 | `internal/agent/**`, `internal/wiring/**`, `cmd/investigate/**` | 7, 9 |
 | R5c | A2 | A2 folders (`internal/tools/kafkatools/**`, `internal/actions/**` minus `action.go`) | 7, 9 |
 | R5d | C5 (cloud) | `internal/alertin/**` | — |
-| R6, R7 | C1 (cloud) | `.github/**` **except the `concurrency:` block of `ci.yml`** (R0 owns it), `Makefile`, `README.md`, `docs/runbook.md` | 8 (ldflags in `Makefile` / CI) |
+| R6, R7 | C1 (cloud) | C1 folders: `.github/**` **except the `concurrency:` block of `ci.yml`** (R0 owns it), `Makefile`, `README.md`, `docs/runbook.md`. For R6 also `Dockerfile`, `cmd/devconsumer/Dockerfile`, `deploy/**` and the `go` line of `go.mod` (no baked dev auth, OIDC default, Go 1.27.2: #127). R7's #133 also edits `internal/tools/dbtools/integration_test.go` (A3): ask A3 in thread | 6, 8 (ldflags and version build arg in `Makefile`, CI, `Dockerfile`) |
 | R8a | C6 (cloud) | `evals/**` (C6 rows above) | — |
 | R8b | A4 | A4 folders | — |
 | R9 | A5 | A5 folders | 6, 8 |
 | R10 | A6 | `web/**` | — |
-| R11 | A5 (driver leases, suggestion decline), C12 (Slack paging on lease expiry, `internal/slackbridge/**`), A4 (tool `Data` cap, A4 folders) | as listed | 3, 5 |
+| R11 | A5 (driver leases, suggestion decline), C12 (Slack paging, `internal/slackbridge/**`), A4 (tool `Data` cap, A4 folders) | as listed | A5: 3, 5. C12's #130 does not use 5 yet: paging on `control.lease_expired` is a follow-up C12 PR after the A5 R11 PR |
 | R12 | A6 + A1 | `web/**` (A6), A1 folders (A1) | — |
 
-A task split between two agents (R11, R12) is two PRs, one per agent, each titled with the task and the agent:
-`[R11] [A5] room: driver lease expiry`, `[R11] [C12] slackbridge: page on lease expiry`.
+A task split between two agents (R11, R12) is one PR per agent, titled as usual (`[R11] slackbridge: ...`,
+`[R11] agent: ...`); the folders tell the agents apart.
 
 ### Contract files (read them, code against them, never edit them)
 
@@ -255,10 +255,11 @@ author rebases (merges `main` into the branch for a cloud PR) once the predecess
    that makes `main` green again; every R PR needs it.
 2. **R4, R5b, R9** (A5 routes and events; A4 read-only wiring; A5 log/dev-ack/version). Any order among them; they
    touch different packages. R5a and R5c may merge with or after R5b.
-3. **R3, R11** (web, decline and leases) only after **all** of step 2: R3 calls R4's routes, and R11 builds on
-   R4's hand-off and lease code in `internal/room`.
-4. Everything else (R1, R2, R5d, R6, R7, R8a, R8b, R10, R12) after R0 PR 1, in any order, unless its thread says
-   it waits on another PR.
+3. Only after **all** of step 2: **#146** (R3, calls R4's routes) and the **A5 R11 PR** (decline and leases, built on
+   R4's hand-off and lease code in `internal/room`), and any later PR that uses items 1–5.
+4. Everything else after R0 PR 1, in any order, unless its thread says it waits on another PR: R1, R2, R5d, R6,
+   R7, R8a, R8b, R10, R12, and the R3/R11 PRs that use none of items 1–5 (#135 web verified badge, #130 slackbridge,
+   #136 agent Data cap).
 
 R0 PR 2 (process: this section, the CI `concurrency:` fix, `docs/pilot/decision.md`) has no code dependency and may
 merge at any time; merging it before R6/R7 keeps their `ci.yml` diffs off the `concurrency:` block.
