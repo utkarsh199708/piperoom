@@ -13,6 +13,11 @@
 //
 // Passwords and short values keep no characters at all.
 //
+// Social security numbers, payment card numbers (Luhn-checked) and phone
+// numbers are masked too (Options.PII, on by default); pii.go says how they
+// are told apart from LSNs, offsets and ids. A line that hides a secret behind
+// fullwidth letters is folded to ASCII before it is masked.
+//
 // Known gaps: a URL password holding a raw '@' or '/' (postgres://app:p@ss@db)
 // is not found, since the URL no longer parses one way; a bare key=value
 // password containing spaces is masked only up to its first space; JAAS
@@ -84,14 +89,18 @@ type Options struct {
 	// IPs masks IPv4 and IPv6 addresses. Off by default: worker and broker
 	// addresses are evidence far more often than they are sensitive.
 	IPs bool
+	// PII masks social security numbers, payment card numbers, phone
+	// numbers and the values of keys that name them (see pii.go).
+	PII bool
 }
 
-// DefaultOptions masks e-mails and keeps IP addresses.
-func DefaultOptions() Options { return Options{Emails: true} }
+// DefaultOptions masks e-mails and PII and keeps IP addresses.
+func DefaultOptions() Options { return Options{Emails: true, PII: true} }
 
 // Redactor masks secrets. It is immutable and safe for concurrent use.
 type Redactor struct {
 	rules []rule
+	pii   bool
 }
 
 // New builds a Redactor with the given optional detectors.
@@ -103,7 +112,10 @@ func New(o Options) *Redactor {
 	if o.IPs {
 		rs = append(rs, ipv4Rule, ipv6Rule)
 	}
-	return &Redactor{rules: rs}
+	if o.PII {
+		rs = append(rs, piiRules...)
+	}
+	return &Redactor{rules: rs, pii: o.PII}
 }
 
 // def is the Redactor behind the package-level functions. It is never
@@ -210,6 +222,7 @@ func (r *Redactor) scan(s string) (string, Stats) {
 		}
 		line := s[start:end]
 		out := r.lineFixed(line, lower[start:end], &st)
+		out = r.foldedLine(out, &st)
 		if out != line && !changed {
 			changed = true
 			b.Grow(len(s) + 64)
@@ -227,6 +240,51 @@ func (r *Redactor) scan(s string) (string, Stats) {
 		s = b.String()
 	}
 	return s, st
+}
+
+// foldedLine masks a line that hides a secret behind fullwidth forms
+// ("ｐａｓｓｗｏｒｄ＝hunter2"). The standard library has no NFKC; fullwidth
+// ASCII is the compatibility form that reaches logs in practice, so it is
+// folded to ASCII and the line is masked again. Only when that masks
+// something is the folded line kept: other lines keep their characters,
+// which may be the evidence (a key that differs by a fullwidth letter).
+func (r *Redactor) foldedLine(line string, st *Stats) string {
+	folded, ok := foldWidth(line)
+	if !ok {
+		return line
+	}
+	var fst Stats
+	out := r.lineFixed(folded, asciiLower(folded), &fst)
+	if fst.Total == 0 {
+		return line
+	}
+	st.merge(fst)
+	return out
+}
+
+// foldWidth maps fullwidth ASCII (U+FF01..U+FF5E) and the ideographic space
+// to ASCII. It reports false when s has none.
+func foldWidth(s string) (string, bool) {
+	// Every fullwidth form starts with byte 0xEF; the ideographic space is
+	// E3 80 80.
+	if !strings.Contains(s, "\xef\xbc") && !strings.Contains(s, "\xef\xbd") && !strings.Contains(s, "\u3000") {
+		return s, false
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	changed := false
+	for _, c := range s {
+		switch {
+		case c >= 0xFF01 && c <= 0xFF5E:
+			c -= 0xFEE0
+			changed = true
+		case c == 0x3000:
+			c = ' '
+			changed = true
+		}
+		b.WriteRune(c)
+	}
+	return b.String(), changed
 }
 
 // lineFixed masks one line until nothing more changes.

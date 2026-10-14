@@ -159,6 +159,14 @@ var baseRules = []rule{
 		ok:      kvOK,
 		styleOf: kvStyle,
 	},
+	{
+		kind:   KindKeyValue,
+		re:     spaceSepRe,
+		groups: []int{2, 3, 4},
+		style:  styleSecret,
+		pre:    containsAny("pass", "pw"),
+		ok:     spaceSepOK,
+	},
 }
 
 // kvAnchored matches one key/value pair starting at a candidate key: group 1
@@ -171,7 +179,7 @@ var kvAnchored = regexp.MustCompile(`^(?:\\?["'])?([A-Za-z][A-Za-z0-9_.-]{1,63})
 
 // kvWords are the fragments a secret key name contains; secretKey makes the
 // real decision.
-var kvWords = []string{"pass", "pwd", "secret", "token", "credential", "key", "auth", "session", "cookie", "sas"}
+var kvWords = []string{"pass", "pw", "secret", "token", "credential", "key", "auth", "session", "cookie", "sas"}
 
 func isKeyChar(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == '-'
@@ -184,8 +192,13 @@ func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 // candidate), it locates each fragment, widens it to the whole key, checks a
 // separator follows, and only then runs the anchored regexp there.
 func kvFind(s, lower string) [][]int {
+	return keyValueFind(s, lower, kvWords, kvOK)
+}
+
+// keyValueFind is kvFind for any key fragments and acceptance check.
+func keyValueFind(s, lower string, words []string, accept func(s string, m []int) bool) [][]int {
 	var starts []int
-	for _, w := range kvWords {
+	for _, w := range words {
 		for off := 0; off < len(lower); {
 			i := strings.Index(lower[off:], w)
 			if i < 0 {
@@ -246,7 +259,7 @@ func kvFind(s, lower string) [][]int {
 		}
 		// A pair that is not a secret must not hide the pairs inside its
 		// value: "sasl.jaas.config": "... password=\"x\"".
-		if !kvOK(s, m) {
+		if !accept(s, m) {
 			continue
 		}
 		out = append(out, m)
@@ -327,7 +340,7 @@ const (
 
 // strongWords are key words whose value is always a secret.
 var strongWords = map[string]bool{
-	"password": true, "passwd": true, "passphrase": true, "pwd": true, "pass": true,
+	"password": true, "passwd": true, "passphrase": true, "pwd": true, "pass": true, "pw": true,
 	"secret": true, "secrets": true, "credential": true, "credentials": true,
 	"apikey": true, "accesskey": true, "secretkey": true, "privatekey": true,
 	"accountkey": true, "signingkey": true, "masterkey": true, "sharedkey": true,
@@ -412,13 +425,48 @@ func secretKey(k string) keyStrength {
 		case weakWords[w]:
 			best = keyWeak
 		case strings.Contains(w, "password") || strings.Contains(w, "passwd") ||
-			strings.Contains(w, "secret") || strings.HasSuffix(w, "apikey"):
+			strings.Contains(w, "secret") || strings.HasSuffix(w, "apikey") || shortPWKey(w):
 			return keyStrong
 		case strings.HasSuffix(w, "token"):
 			best = keyWeak
 		}
 	}
 	return best
+}
+
+// shortPWKey reports the "pw" abbreviation as a key word or a word suffix:
+// pw, db_pw, PGPW, rootpw. Nothing else in ops text ends in "pw".
+func shortPWKey(w string) bool {
+	return strings.HasSuffix(w, "pw") && len(w) <= 8
+}
+
+// spaceSepRe finds a password written after its key with only whitespace
+// between: "passwd Sup3rS3cret", SQL "PASSWORD 'x'". Group 1 is the key,
+// groups 2-4 the quoted or bare value.
+var spaceSepRe = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_.-])(password|passwd|passphrase|pwd|pw)[ \t]+` +
+	`(?:'([^'\n]{2,})'|"([^"\n]{2,})"|([^\s,;&"'}\])<>\\=:][^\s,;&"'}\])<>\\]{5,}))`)
+
+// spaceSepOK accepts a quoted value always (only a password is quoted right
+// after the word) and a bare one only when it reads like a password rather
+// than the next word of a sentence ("password authentication failed") or a
+// path ("pwd /opt/kafka"): mixed letter classes with a digit or symbol.
+func spaceSepOK(s string, m []int) bool {
+	if m[4] >= 0 || m[6] >= 0 {
+		return true
+	}
+	v := s[m[8]:m[9]]
+	if strings.HasPrefix(v, "/") || strings.HasPrefix(v, "~") || strings.Contains(v, `\`) || strings.Contains(v, "://") {
+		return false
+	}
+	u, l, d := classes(v)
+	sym := len(v) - u - l - d
+	kinds := 0
+	for _, c := range []int{u, l, d, sym} {
+		if c > 0 {
+			kinds++
+		}
+	}
+	return kinds >= 2 && (d > 0 || sym > 0) && (u > 0 || l > 0)
 }
 
 func kvGroups(s string, m []int) (key, val string) {
@@ -451,7 +499,7 @@ func kvStyle(s string, m []int) maskStyle {
 // usual head and tail of anything else.
 func keyStyle(key string) maskStyle {
 	for _, w := range keyWords(key) {
-		if w == "pwd" || w == "pass" || strings.Contains(w, "passw") || strings.Contains(w, "passphrase") {
+		if w == "pwd" || w == "pass" || shortPWKey(w) || strings.Contains(w, "passw") || strings.Contains(w, "passphrase") {
 			return styleSecret
 		}
 	}
