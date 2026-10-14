@@ -318,7 +318,7 @@ describe('applyEvent — agent.usage (cost telemetry)', () => {
 
   it('leaves the activity feed, steps and messages unchanged and only advances last_seq', () => {
     const s = busyRoom()
-    expect(s.activity).toHaveLength(20)
+    expect(s.activity).toHaveLength(25)
     const after = applyEvent(s, ev(26, 'agent.usage', usage))
     expect(after.last_seq).toBe(26)
     expect(after.activity).toBe(s.activity)
@@ -687,6 +687,27 @@ describe('fromSnapshot', () => {
     expect(s.proposals).toEqual([])
     expect(s.suggestions).toEqual([])
     expect(s.members).toEqual([])
+  })
+})
+
+describe('applyEvent — activity feed', () => {
+  it('keeps the newest 50 entries and tags each with a kind', () => {
+    let s = base()
+    for (let i = 1; i <= 60; i++) s = applyEvent(s, ev(i, 'control.requested', {}, human))
+    expect(s.activity).toHaveLength(50)
+    expect(s.activity[0].seq).toBe(60)
+    expect(s.activity[0]).toMatchObject({ kind: 'control', text: 'Arjun asked for control' })
+  })
+
+  it('numbers a step that starts now and never prints its id', () => {
+    const s = applyEvent(base(), ev(1, 'agent.step.started', { step_id: 's_01M4ABCDEFGHJKMNPQRSTVWXYZ', title: 'Look' }))
+    expect(s.activity[0].text).toBe('Agent started step 1 · Look')
+  })
+
+  it('says raised when the hypothesis confidence goes up', () => {
+    let s = applyEvent(base(), ev(1, 'agent.hypothesis', { text: 'a', based_on_steps: [], confidence: 'low', confirmed: false }))
+    s = applyEvent(s, ev(2, 'agent.hypothesis', { text: 'b', based_on_steps: [], confidence: 'high', confirmed: false }))
+    expect(s.activity[0].text).toBe('Hypothesis raised to high confidence')
   })
 })
 

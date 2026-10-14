@@ -429,7 +429,7 @@ export function RoomScreen() {
                 {suggestions}
                 <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
                 <div className="h-px shrink-0 bg-border" />
-                <ActivityFeed activity={state.activity} />
+                <ActivityFeed activity={state.activity} openedAt={state.opened_at} />
               </TabsContent>
             </Tabs>
           )}
@@ -461,7 +461,7 @@ export function RoomScreen() {
             {suggestions}
             <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
             <div className="h-px shrink-0 bg-border" />
-            <ActivityFeed activity={state.activity} />
+            <ActivityFeed activity={state.activity} openedAt={state.opened_at} />
           </aside>
         )}
       </div>
