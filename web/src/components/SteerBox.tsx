@@ -13,7 +13,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { PersonSelect } from './PersonSelect'
 import { PersonAvatar } from './room/PersonAvatar'
 import { StatusDot } from './room/StatusDot'
-import { minutesLeft, useNow } from './room/useNow'
+import { leaseExpired, minutesLeft, useNow } from './room/useNow'
 
 // Driver only: give control to anyone GET /api/people lists. Loads the list on open.
 function GrantPicker({
@@ -121,7 +121,11 @@ export function SteerBox({
   const take = !isDriver && canTakeControl(state, user)
   const request = !isDriver && !take && canRequestControl(state, user)
   const mod = modKeyLabel()
-  const left = minutesLeft(state.driver?.lease_until, now)
+  const leaseIso = state.driver?.lease_until
+  const left = minutesLeft(leaseIso, now)
+  const expired = leaseExpired(leaseIso, now)
+  // "under a minute" while 0 whole minutes remain but the lease is still live.
+  const leaseText = expired ? 'lease expired' : left === 0 ? 'lease ends in under a minute' : left != null ? `lease ${left}m` : null
 
   const send = () => {
     if (!text.trim() || noDriver) return
@@ -146,14 +150,13 @@ export function SteerBox({
   }
 
   let status: string
-  // minutesLeft is 0 only once the lease has run out (it rounds up while time remains).
   if (isDriver) {
-    status = left === 0 ? 'You are driving · lease expired' : left != null ? `You are driving · lease ${left}m` : 'You are driving'
+    status = leaseText ? `You are driving · ${leaseText}` : 'You are driving'
   } else if (noDriver) {
     status = 'No driver · take control to steer the agent'
   } else {
     const name = state.driver?.name ?? 'Someone'
-    const lease = left === 0 ? ' · lease expired' : left != null ? ` · lease ${left}m left` : ''
+    const lease = leaseText ? ` · ${leaseText.replace(/^lease (\d+m)$/, 'lease $1 left')}` : ''
     status = `${name} is driving${lease} · your message goes to ${name}'s queue`
   }
 

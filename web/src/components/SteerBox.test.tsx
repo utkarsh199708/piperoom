@@ -184,3 +184,19 @@ describe('SteerBox idle row (F1b)', () => {
     vi.restoreAllMocks()
   })
 })
+
+describe('SteerBox lease copy', () => {
+  const drive = (leaseUntil: string) => ({ ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: leaseUntil } })
+  it('a fresh 30-minute lease reads 30m', () => {
+    render(<SteerBox state={drive(new Date(Date.now() + 30 * 60_000 + 5000).toISOString())} user={arjun} actions={actions} />)
+    expect(screen.getByText('You are driving · lease 30m')).toBeInTheDocument()
+  })
+  it('under a minute is not expired', () => {
+    render(<SteerBox state={drive(new Date(Date.now() + 30_000).toISOString())} user={arjun} actions={actions} />)
+    expect(screen.getByText('You are driving · lease ends in under a minute')).toBeInTheDocument()
+  })
+  it('a lapsed lease reads expired', () => {
+    render(<SteerBox state={drive(new Date(Date.now() - 1000).toISOString())} user={arjun} actions={actions} />)
+    expect(screen.getByText('You are driving · lease expired')).toBeInTheDocument()
+  })
+})

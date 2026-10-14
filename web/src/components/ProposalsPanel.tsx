@@ -14,6 +14,7 @@ import { canDecideLayer } from '../state/permissions'
 import { soloConfirmText } from '../lib/solo'
 import { describeIdentity, identityDetails, shortHash } from '../lib/hash'
 import { clockTime, timeAgo } from '../lib/time'
+import { Clock } from './room/Clock'
 import { cn } from '@/lib/utils'
 import type { RoomActions, StaleInfo } from '../hooks/useRoom'
 import { isEditableTarget } from './shell/keys'
@@ -594,7 +595,12 @@ function LayerRow({
               <X className="size-3" aria-hidden="true" />
             )}
             {decision.outcome === 'approved' ? 'Approved' : 'Rejected'}
-            {decidedAt && ` · ${decidedAt}`}
+            {decision.at && (
+              <>
+                {' · '}
+                <Clock iso={decision.at} />
+              </>
+            )}
           </Badge>
           {reasonText && (
             <span className="basis-full text-xs text-muted-foreground" aria-hidden="true">

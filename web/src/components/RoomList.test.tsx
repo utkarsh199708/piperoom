@@ -630,3 +630,44 @@ describe('top bar', () => {
     expect(screen.getByText(/^live/)).toBeInTheDocument()
   })
 })
+
+describe('New room — Ctrl+Enter', () => {
+  it('submits the form from the keyboard like the close and hand-off dialogs', async () => {
+    vi.mocked(api.createRoom).mockResolvedValueOnce(room({ id: 'r_kbd' }))
+    renderList()
+    fireEvent.click(screen.getAllByRole('button', { name: 'New room' })[0])
+    const title = screen.getByLabelText('Title')
+    fireEvent.change(title, { target: { value: 'From the keyboard' } })
+    fireEvent.keyDown(title, { key: 'Enter', ctrlKey: true })
+    await waitFor(() => expect(api.createRoom).toHaveBeenCalledTimes(1))
+  })
+
+  it('shows the shortcut on the button', () => {
+    renderList()
+    fireEvent.click(screen.getAllByRole('button', { name: 'New room' })[0])
+    expect(screen.getByRole('button', { name: 'Open room' })).toHaveAttribute('aria-keyshortcuts')
+  })
+})
+
+describe('resolved rows', () => {
+  it('read Resolved · duration, no driver, agent resolved, closed ago with a UTC title, and the resolution', () => {
+    mockList([
+      room({
+        id: 'c1',
+        title: 'Old one',
+        status: 'closed',
+        opened_at: '2026-10-11T10:00:00Z',
+        closed_at: '2026-10-11T10:06:00Z',
+        resolution: 'Restarted the connector task after the schema fix.',
+      }),
+    ])
+    renderList()
+    fireEvent.click(screen.getByRole('button', { name: 'See resolved rooms' }))
+    const row = screen.getByText('Old one').closest('tr')!
+    expect(within(row).getByText('Resolved · 6 min')).toBeInTheDocument()
+    expect(within(row).getByText('resolved')).toBeInTheDocument()
+    expect(within(row).getByText('—')).toBeInTheDocument()
+    expect(within(row).getByText(/^closed .* ago$/)).toHaveAttribute('title', '2026-10-11 10:06:00 UTC')
+    expect(within(row).getByText('Restarted the connector task after the schema fix.')).toBeInTheDocument()
+  })
+})
