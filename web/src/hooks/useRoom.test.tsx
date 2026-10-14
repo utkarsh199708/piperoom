@@ -34,6 +34,7 @@ vi.mock('../api/client', async (importOriginal) => {
       room: vi.fn(),
       events: vi.fn(),
       grantControl: vi.fn(),
+      declineSuggestion: vi.fn(),
       approve: vi.fn(),
       reject: vi.fn(),
     },
@@ -210,6 +211,22 @@ describe('useRoom transport', () => {
     })
 
     expect(result.current.error).toBe('someone else holds control')
+  })
+
+  it('a 409 already_decided on a suggestion decline gets friendly text', async () => {
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    vi.mocked(api.declineSuggestion).mockRejectedValue(new ApiClientError(409, 'already_decided', 'raw'))
+
+    const { result } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
+    socket.onopen?.()
+    await act(async () => {
+      result.current.actions.declineSuggestion('g1', 'no')
+    })
+    await waitFor(() => expect(result.current.error).toBe('this suggestion was already sent or declined'))
+    expect(api.declineSuggestion).toHaveBeenCalledWith('r1', 'g1', 'no')
   })
 
   it('maps a lease_held rejection from control/grant (self-grant race) to the friendly text', async () => {

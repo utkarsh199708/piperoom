@@ -30,7 +30,7 @@ describe('CollapsibleText', () => {
 })
 
 describe('SuggestionsPanel', () => {
-  it('shows pending and accepted; says nothing about declined until an event exists', () => {
+  it('shows pending and accepted, and declined only when a suggestion is declined', () => {
     render(
       <SuggestionsPanel
         suggestions={[
@@ -42,6 +42,10 @@ describe('SuggestionsPanel', () => {
     expect(screen.getByText('Pending')).toBeInTheDocument()
     expect(screen.getByText('Sent to agent')).toBeInTheDocument()
     expect(screen.queryByText('Declined')).toBeNull()
+  })
+  it('shows a declined suggestion', () => {
+    render(<SuggestionsPanel suggestions={[{ suggestion_id: 'g3', from: kabir, text: 'x', status: 'declined' }]} />)
+    expect(screen.getByText('Declined')).toBeInTheDocument()
   })
   it('renders nothing without suggestions', () => {
     const { container } = render(<SuggestionsPanel suggestions={[]} />)
