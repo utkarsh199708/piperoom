@@ -27,18 +27,20 @@ describe('CollapsibleText', () => {
 })
 
 describe('SuggestionsPanel', () => {
-  it('shows pending and accepted; says nothing about declined until an event exists', () => {
+  it('shows pending, accepted and declined with the driver note', () => {
     render(
       <SuggestionsPanel
         suggestions={[
           { suggestion_id: 'g1', from: kabir, text: 'check config', status: 'pending' },
           { suggestion_id: 'g2', from: kabir, text: 'restart task', status: 'accepted' },
+          { suggestion_id: 'g3', from: kabir, text: 'drop topic', status: 'declined', decline_reason: 'too risky' },
         ]}
       />,
     )
     expect(screen.getByText('Pending')).toBeInTheDocument()
     expect(screen.getByText('Sent to agent')).toBeInTheDocument()
-    expect(screen.queryByText('Declined')).toBeNull()
+    expect(screen.getByText('Declined')).toBeInTheDocument()
+    expect(screen.getByText('Reason: too risky')).toBeInTheDocument()
   })
   it('renders nothing without suggestions', () => {
     const { container } = render(<SuggestionsPanel suggestions={[]} />)

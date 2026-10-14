@@ -8,7 +8,6 @@ const SHOW_RESOLVED = 5
 const LABEL: Record<SuggestionStatus, string> = {
   pending: 'Pending',
   accepted: 'Sent to agent',
-  // HOOK(R10): the reducer never sets this until the API has a declined event (see state/types.ts).
   declined: 'Declined',
 }
 const VARIANT: Record<SuggestionStatus, 'warning' | 'success' | 'destructive'> = {
@@ -17,7 +16,7 @@ const VARIANT: Record<SuggestionStatus, 'warning' | 'success' | 'destructive'> =
   declined: 'destructive',
 }
 
-// Everyone sees what happened to each suggestion: waiting for the driver, sent to the agent.
+// Everyone sees what happened to each suggestion: waiting for the driver, sent to the agent, declined.
 // Pending first, then the latest few settled ones, so a room open for hours does not grow a wall.
 export function SuggestionsPanel({ suggestions }: { suggestions: SuggestionState[] }) {
   if (suggestions.length === 0) return null
@@ -40,6 +39,9 @@ export function SuggestionsPanel({ suggestions }: { suggestions: SuggestionState
                 {s.at && <span className="font-mono text-xs text-subtle-foreground">{clockTime(s.at)}</span>}
               </div>
               <p className="m-0 break-words text-muted-foreground">{s.text}</p>
+              {s.status === 'declined' && s.decline_reason && (
+                <p className="m-0 break-words text-xs text-subtle-foreground">Reason: {s.decline_reason}</p>
+              )}
             </div>
           </li>
         ))}

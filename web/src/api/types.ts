@@ -26,6 +26,7 @@ export type EventType =
   | 'comment.added'
   | 'steer.suggested'
   | 'steer.sent'
+  | 'steer.declined'
   | 'control.requested'
   | 'control.granted'
   | 'proposal.created'
@@ -124,6 +125,12 @@ export interface CommentAddedPayload {
 export interface SteerSuggestedPayload {
   suggestion_id: string
   text: string
+}
+
+/** The driver closed a pending suggestion without sending it (events.SteerDeclinedPayload). */
+export interface SteerDeclinedPayload {
+  suggestion_id: string
+  reason?: string
 }
 
 export interface SteerSentPayload {

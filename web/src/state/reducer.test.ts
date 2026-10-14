@@ -155,6 +155,15 @@ describe('applyEvent — every event type', () => {
     expect(s.suggestions[0].status).toBe('accepted')
   })
 
+  it('steer.declined marks the suggestion declined with its reason, and a later send cannot undo it', () => {
+    let s = applyEvent(base(), ev(1, 'steer.suggested', { suggestion_id: 'g1', text: 'try X' }, human))
+    s = applyEvent(s, ev(2, 'steer.declined', { suggestion_id: 'g1', reason: 'already ruled out' }, human))
+    expect(s.suggestions[0].status).toBe('declined')
+    expect(s.suggestions[0].decline_reason).toBe('already ruled out')
+    s = applyEvent(s, ev(3, 'steer.declined', { suggestion_id: 'nope' }, human))
+    expect(s.suggestions).toHaveLength(1)
+  })
+
   it('control.requested and control.granted move the driver', () => {
     let s = applyEvent(base(), ev(1, 'control.requested', {}, human))
     expect(s.control_requests).toHaveLength(1)
