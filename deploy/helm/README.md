@@ -81,12 +81,11 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
   Without it the server sees the controller's address for every user, so all users share one
   login rate-limit bucket.
 - **Probes** call `/healthz` (liveness) and `/readyz` (readiness, also pings the room database)
-  with `Host: localhost`. The server checks the Host header on every route including probes, and
-  kubelet would otherwise send the pod IP and get 421. A load balancer that health-checks the
-  pods directly (GKE container-native LB with NEGs, AWS Load Balancer Controller in IP mode)
-  also sends the pod IP as `Host`, so it gets 421 and marks the backend unhealthy until the
-  server exempts `/healthz` and `/readyz` from the Host check. Until then, set the Host
-  the health check sends. On GKE with the Gateway API:
+  with `Host: localhost`. Exact `GET /healthz` and `GET /readyz` requests skip the Host allow-list,
+  so kubelet and load balancers that send the pod IP as `Host` work without a configured host.
+  The chart still sends `Host: localhost`, but this is optional. Probe responses contain only fixed
+  status and reason values, never raw errors. On GKE with the Gateway API, `host` is optional and
+  can be kept if your health-check routing needs it:
 
   ```yaml
   apiVersion: networking.gke.io/v1
@@ -100,17 +99,16 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
         httpHealthCheck:
           portSpecification: USE_SERVING_PORT
           requestPath: /readyz
-          host: piperoom.corp.example   # a host the server accepts (the public URL host)
+          host: piperoom.corp.example   # optional; the probe route also accepts the pod IP
     targetRef:
       group: ""
       kind: Service
       name: piperoom-piperoom           # the chart's Service name
   ```
 
-  A classic GKE Ingress `BackendConfig` cannot set the health check Host, and an AWS target
-  group health check cannot either. There, keep an in-cluster ingress controller (for example
-  ingress-nginx) between the cloud load balancer and Piperoom, so the load balancer checks the
-  controller and kubelet's probes (which send `Host: localhost`) check Piperoom.
+  A classic GKE Ingress `BackendConfig` and AWS target group health checks may not set the Host;
+  that is fine because the probe routes accept the backend IP. No intermediary is needed just to
+  satisfy the Host allow-list.
 - **One replica.** `replicaCount` defaults to 1 and the Deployment strategy is `Recreate`. The agent
   runner, watcher, retention sweep and action executor run in every server process and the code has
   no leader election or lock, so a second replica would duplicate investigations, watcher checks

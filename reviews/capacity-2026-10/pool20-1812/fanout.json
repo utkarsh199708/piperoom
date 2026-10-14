@@ -1,0 +1,532 @@
+{
+  "profile": "fanout",
+  "short": false,
+  "replicas": 1,
+  "params": {
+    "pad": "300",
+    "rate": "1",
+    "rooms": "50",
+    "subs": "500,1000,2000",
+    "timeout": "5m",
+    "warmup": "3s",
+    "window": "30s"
+  },
+  "started": "2026-10-13T18:12:49.070284472Z",
+  "wall_s": 124.176,
+  "data": {
+    "runs": [
+      {
+        "subs": 500,
+        "rooms": 50,
+        "connect_ms": 236.872,
+        "comments_posted": 1500,
+        "comment_errors": 0,
+        "comments_offered_per_sec": 50,
+        "comments_accepted_per_sec": 48.412,
+        "comment_post_latency": {
+          "n": 1500,
+          "min_ms": 1.407,
+          "p50_ms": 7.331,
+          "p95_ms": 132.492,
+          "p99_ms": 401.309,
+          "max_ms": 555.099,
+          "mean_ms": 29.948
+        },
+        "event_to_delivery": {
+          "n": 15000,
+          "min_ms": 1.78,
+          "p50_ms": 7.124,
+          "p95_ms": 40.608,
+          "p99_ms": 80.223,
+          "max_ms": 526.609,
+          "mean_ms": 12.676
+        },
+        "post_to_delivery": {
+          "n": 15000,
+          "min_ms": 2.119,
+          "p50_ms": 9.897,
+          "p95_ms": 140.339,
+          "p99_ms": 403.29,
+          "max_ms": 557.225,
+          "mean_ms": 32.76
+        },
+        "same_replica_delivery": {
+          "n": 15000,
+          "min_ms": 1.78,
+          "p50_ms": 7.124,
+          "p95_ms": 40.608,
+          "p99_ms": 80.223,
+          "max_ms": 526.609,
+          "mean_ms": 12.676
+        },
+        "cross_replica_delivery": {
+          "n": 0,
+          "min_ms": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "mean_ms": 0
+        },
+        "deliveries_per_sec": 483.687,
+        "event_insert_latency": {
+          "n": 1500,
+          "min_ms": 0.987,
+          "p50_ms": 4.705,
+          "p95_ms": 34.78,
+          "p99_ms": 70.187,
+          "max_ms": 458.178,
+          "mean_ms": 9.531
+        },
+        "subs_totals": {
+          "subs": 500,
+          "received": 19940,
+          "bytes": 11111020,
+          "gaps": 0,
+          "dups": 0,
+          "reconnects": 0,
+          "dial_errors": 0,
+          "parse_mismatches": 0,
+          "server_closes": {},
+          "send_buffer_full_closes": 0,
+          "missing_at_end": 0
+        },
+        "server_goroutines_before_subs": 63,
+        "server_goroutines_peak": 2118,
+        "server_goroutines_after_close": 63,
+        "peak_heap_inuse": 38879232,
+        "pool": {
+          "max_conns": 20,
+          "total_conns": 20,
+          "acquired_conns": 0,
+          "idle_conns": 20,
+          "acquires": 62549,
+          "empty_acquires": 8843,
+          "canceled_acquires": 0,
+          "empty_wait_ms": 42424.433,
+          "acquire_ms": 42450.527,
+          "samples": 624,
+          "samples_at_max": 27,
+          "max_acquired": 20,
+          "saturated_ratio": 0.043
+        },
+        "pool_acquires_per_sec": 2016.942,
+        "cpu": {
+          "wall_s": 31.125,
+          "server_cpu_s": 5.259,
+          "driver_cpu_s": 1.449,
+          "postgres_cpu_s": 4.969
+        },
+        "server": [
+          {
+            "replica": 0,
+            "pid": 18543,
+            "goroutines": 2092,
+            "peak_goroutines": 2118,
+            "heap_inuse": 31080448,
+            "peak_heap_inuse": 38879232,
+            "heap_alloc": 26409208,
+            "sys": 65923352,
+            "total_alloc": 205490592,
+            "num_gc": 20,
+            "rss": 90988544,
+            "pool": {
+              "max_conns": 20,
+              "total_conns": 20,
+              "acquired_conns": 0,
+              "idle_conns": 20,
+              "acquires": 62549,
+              "empty_acquires": 8843,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 42424.433,
+              "acquire_ms": 42450.527,
+              "samples": 624,
+              "samples_at_max": 27,
+              "max_acquired": 20,
+              "saturated_ratio": 0.043
+            },
+            "appends": {
+              "n": 1500,
+              "min_ms": 0.987,
+              "p50_ms": 4.705,
+              "p95_ms": 34.78,
+              "p99_ms": 70.187,
+              "max_ms": 458.178,
+              "mean_ms": 9.531
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 0,
+            "action_runs": {},
+            "cpu_seconds": 6.490348
+          }
+        ]
+      },
+      {
+        "subs": 1000,
+        "rooms": 50,
+        "connect_ms": 790.718,
+        "comments_posted": 1500,
+        "comment_errors": 0,
+        "comments_offered_per_sec": 50,
+        "comments_accepted_per_sec": 48.415,
+        "comment_post_latency": {
+          "n": 1500,
+          "min_ms": 1.421,
+          "p50_ms": 22.896,
+          "p95_ms": 198.461,
+          "p99_ms": 375.826,
+          "max_ms": 425.657,
+          "mean_ms": 49.672
+        },
+        "event_to_delivery": {
+          "n": 30000,
+          "min_ms": 1.994,
+          "p50_ms": 12.083,
+          "p95_ms": 57.268,
+          "p99_ms": 106.007,
+          "max_ms": 317.298,
+          "mean_ms": 18.988
+        },
+        "post_to_delivery": {
+          "n": 30000,
+          "min_ms": 2.251,
+          "p50_ms": 27.393,
+          "p95_ms": 208.522,
+          "p99_ms": 379.844,
+          "max_ms": 430.916,
+          "mean_ms": 54.595
+        },
+        "same_replica_delivery": {
+          "n": 30000,
+          "min_ms": 1.994,
+          "p50_ms": 12.083,
+          "p95_ms": 57.268,
+          "p99_ms": 106.007,
+          "max_ms": 317.298,
+          "mean_ms": 18.988
+        },
+        "cross_replica_delivery": {
+          "n": 0,
+          "min_ms": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "mean_ms": 0
+        },
+        "deliveries_per_sec": 967.192,
+        "event_insert_latency": {
+          "n": 1500,
+          "min_ms": 1.058,
+          "p50_ms": 8.223,
+          "p95_ms": 43.971,
+          "p99_ms": 76.133,
+          "max_ms": 309.946,
+          "mean_ms": 13.624
+        },
+        "subs_totals": {
+          "subs": 1000,
+          "received": 39860,
+          "bytes": 22850797,
+          "gaps": 0,
+          "dups": 0,
+          "reconnects": 0,
+          "dial_errors": 0,
+          "parse_mismatches": 0,
+          "server_closes": {},
+          "send_buffer_full_closes": 0,
+          "missing_at_end": 0
+        },
+        "server_goroutines_before_subs": 63,
+        "server_goroutines_peak": 4104,
+        "server_goroutines_after_close": 63,
+        "peak_heap_inuse": 64929792,
+        "pool": {
+          "max_conns": 20,
+          "total_conns": 20,
+          "acquired_conns": 0,
+          "idle_conns": 20,
+          "acquires": 122565,
+          "empty_acquires": 60548,
+          "canceled_acquires": 0,
+          "empty_wait_ms": 560724.742,
+          "acquire_ms": 560837.457,
+          "samples": 627,
+          "samples_at_max": 189,
+          "max_acquired": 20,
+          "saturated_ratio": 0.301
+        },
+        "pool_acquires_per_sec": 3951.462,
+        "cpu": {
+          "wall_s": 31.172,
+          "server_cpu_s": 7.811,
+          "driver_cpu_s": 1.758,
+          "postgres_cpu_s": 8.378
+        },
+        "server": [
+          {
+            "replica": 0,
+            "pid": 21314,
+            "goroutines": 4085,
+            "peak_goroutines": 4104,
+            "heap_inuse": 51912704,
+            "peak_heap_inuse": 64929792,
+            "heap_alloc": 45341840,
+            "sys": 109111576,
+            "total_alloc": 384764624,
+            "num_gc": 20,
+            "rss": 126636032,
+            "pool": {
+              "max_conns": 20,
+              "total_conns": 20,
+              "acquired_conns": 0,
+              "idle_conns": 20,
+              "acquires": 122565,
+              "empty_acquires": 60548,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 560724.742,
+              "acquire_ms": 560837.457,
+              "samples": 627,
+              "samples_at_max": 189,
+              "max_acquired": 20,
+              "saturated_ratio": 0.301
+            },
+            "appends": {
+              "n": 1500,
+              "min_ms": 1.058,
+              "p50_ms": 8.223,
+              "p95_ms": 43.971,
+              "p99_ms": 76.133,
+              "max_ms": 309.946,
+              "mean_ms": 13.624
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 0,
+            "action_runs": {},
+            "cpu_seconds": 9.598124
+          }
+        ]
+      },
+      {
+        "subs": 2000,
+        "rooms": 50,
+        "connect_ms": 1019.178,
+        "comments_posted": 1475,
+        "comment_errors": 0,
+        "comments_offered_per_sec": 50,
+        "comments_accepted_per_sec": 47.853,
+        "comment_post_latency": {
+          "n": 1475,
+          "min_ms": 1.915,
+          "p50_ms": 400.715,
+          "p95_ms": 1203.262,
+          "p99_ms": 1473.485,
+          "max_ms": 1584.373,
+          "mean_ms": 508.357
+        },
+        "event_to_delivery": {
+          "n": 59000,
+          "min_ms": 2.071,
+          "p50_ms": 20.811,
+          "p95_ms": 84.406,
+          "p99_ms": 177.562,
+          "max_ms": 548.074,
+          "mean_ms": 31.063
+        },
+        "post_to_delivery": {
+          "n": 59000,
+          "min_ms": 2.347,
+          "p50_ms": 410.75,
+          "p95_ms": 1213.814,
+          "p99_ms": 1478.115,
+          "max_ms": 1592.41,
+          "mean_ms": 519.688
+        },
+        "same_replica_delivery": {
+          "n": 59000,
+          "min_ms": 2.071,
+          "p50_ms": 20.811,
+          "p95_ms": 84.406,
+          "p99_ms": 177.562,
+          "max_ms": 548.074,
+          "mean_ms": 31.063
+        },
+        "cross_replica_delivery": {
+          "n": 0,
+          "min_ms": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "mean_ms": 0
+        },
+        "deliveries_per_sec": 1905.695,
+        "event_insert_latency": {
+          "n": 1475,
+          "min_ms": 1.007,
+          "p50_ms": 12.723,
+          "p95_ms": 54.349,
+          "p99_ms": 134.407,
+          "max_ms": 442.338,
+          "mean_ms": 19.239
+        },
+        "subs_totals": {
+          "subs": 2000,
+          "received": 77480,
+          "bytes": 46910004,
+          "gaps": 0,
+          "dups": 0,
+          "reconnects": 0,
+          "dial_errors": 0,
+          "parse_mismatches": 0,
+          "server_closes": {},
+          "send_buffer_full_closes": 0,
+          "missing_at_end": 0
+        },
+        "server_goroutines_before_subs": 63,
+        "server_goroutines_peak": 8162,
+        "server_goroutines_after_close": 65,
+        "peak_heap_inuse": 121430016,
+        "pool": {
+          "max_conns": 20,
+          "total_conns": 20,
+          "acquired_conns": 20,
+          "idle_conns": 0,
+          "acquires": 241223,
+          "empty_acquires": 221860,
+          "canceled_acquires": 0,
+          "empty_wait_ms": 2967604.134,
+          "acquire_ms": 2967972.205,
+          "samples": 621,
+          "samples_at_max": 380,
+          "max_acquired": 20,
+          "saturated_ratio": 0.612
+        },
+        "pool_acquires_per_sec": 7791.482,
+        "cpu": {
+          "wall_s": 31.185,
+          "server_cpu_s": 13.008,
+          "driver_cpu_s": 2.628,
+          "postgres_cpu_s": 15.193
+        },
+        "server": [
+          {
+            "replica": 0,
+            "pid": 23769,
+            "goroutines": 8113,
+            "peak_goroutines": 8162,
+            "heap_inuse": 98541568,
+            "peak_heap_inuse": 121430016,
+            "heap_alloc": 83804216,
+            "sys": 191285560,
+            "total_alloc": 749258504,
+            "num_gc": 21,
+            "rss": 212594688,
+            "pool": {
+              "max_conns": 20,
+              "total_conns": 20,
+              "acquired_conns": 20,
+              "idle_conns": 0,
+              "acquires": 241223,
+              "empty_acquires": 221860,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 2967604.134,
+              "acquire_ms": 2967972.205,
+              "samples": 621,
+              "samples_at_max": 380,
+              "max_acquired": 20,
+              "saturated_ratio": 0.612
+            },
+            "appends": {
+              "n": 1475,
+              "min_ms": 1.007,
+              "p50_ms": 12.723,
+              "p95_ms": 54.349,
+              "p99_ms": 134.407,
+              "max_ms": 442.338,
+              "mean_ms": 19.239
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 0,
+            "action_runs": {},
+            "cpu_seconds": 15.918
+          }
+        ]
+      }
+    ]
+  },
+  "findings": [
+    "500 subscribers over 50 rooms: the server accepted 48.4 of 50.0 comments/s offered (POST p50 7 ms, p99 401 ms); event-\u003edelivery p50 7.1 ms, p95 40.6 ms, p99 80.2 ms; 0 send-buffer-full closes, 0 reconnects; pool 20/20 busy in 4% of samples, 2017 acquires/s, 8843 waits; server goroutines 63 before, 63 after close; CPU server 0.17, driver 0.05, postgres 0.16 cores.",
+    "1000 subscribers over 50 rooms: the server accepted 48.4 of 50.0 comments/s offered (POST p50 23 ms, p99 376 ms); event-\u003edelivery p50 12.1 ms, p95 57.3 ms, p99 106.0 ms; 0 send-buffer-full closes, 0 reconnects; pool 20/20 busy in 30% of samples, 3951 acquires/s, 60548 waits; server goroutines 63 before, 63 after close; CPU server 0.25, driver 0.06, postgres 0.27 cores.",
+    "2000 subscribers over 50 rooms: the server accepted 47.9 of 50.0 comments/s offered (POST p50 401 ms, p99 1473 ms); event-\u003edelivery p50 20.8 ms, p95 84.4 ms, p99 177.6 ms; 0 send-buffer-full closes, 0 reconnects; pool 20/20 busy in 61% of samples, 7791 acquires/s, 221860 waits; server goroutines 63 before, 65 after close; CPU server 0.42, driver 0.08, postgres 0.49 cores."
+  ],
+  "checks": [
+    {
+      "name": "subs=500: every subscriber saw every event once, in order",
+      "ok": true,
+      "detail": "gaps 0 dups 0 missing-at-end 0 parse mismatches 0"
+    },
+    {
+      "name": "subs=500: comments accepted",
+      "ok": true,
+      "detail": "posted 1500, errors 0"
+    },
+    {
+      "name": "subs=500: no server goroutine leak after close",
+      "ok": true,
+      "detail": "63 before subscribers, 63 after they closed"
+    },
+    {
+      "name": "subs=500: no append errors",
+      "ok": true,
+      "detail": "append errors 0"
+    },
+    {
+      "name": "subs=1000: every subscriber saw every event once, in order",
+      "ok": true,
+      "detail": "gaps 0 dups 0 missing-at-end 0 parse mismatches 0"
+    },
+    {
+      "name": "subs=1000: comments accepted",
+      "ok": true,
+      "detail": "posted 1500, errors 0"
+    },
+    {
+      "name": "subs=1000: no server goroutine leak after close",
+      "ok": true,
+      "detail": "63 before subscribers, 63 after they closed"
+    },
+    {
+      "name": "subs=1000: no append errors",
+      "ok": true,
+      "detail": "append errors 0"
+    },
+    {
+      "name": "subs=2000: every subscriber saw every event once, in order",
+      "ok": true,
+      "detail": "gaps 0 dups 0 missing-at-end 0 parse mismatches 0"
+    },
+    {
+      "name": "subs=2000: comments accepted",
+      "ok": true,
+      "detail": "posted 1475, errors 0"
+    },
+    {
+      "name": "subs=2000: no server goroutine leak after close",
+      "ok": true,
+      "detail": "63 before subscribers, 65 after they closed"
+    },
+    {
+      "name": "subs=2000: no append errors",
+      "ok": true,
+      "detail": "append errors 0"
+    }
+  ],
+  "loadavg_start_end": [
+    "24.56 27.99 27.45",
+    "32.02 29.14 27.91"
+  ]
+}

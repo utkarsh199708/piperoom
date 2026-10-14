@@ -1,6 +1,6 @@
 import { Activity, Inbox, Search, Workflow } from 'lucide-react'
 import type { ReactNode } from 'react'
-import { NavLink } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
@@ -12,8 +12,12 @@ import { BrandMark } from './BrandMark'
 import { HEALTH_LABEL, pipelineHealth } from './pipelines'
 import type { Health, PipelineSummary } from './pipelines'
 
-const itemClass =
-  'flex h-8 items-center gap-2 rounded-md px-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring [&_svg]:size-4 [&_svg]:shrink-0'
+// A row is `rowClass`; only a row that goes somewhere also gets `linkClass` (hover and focus).
+const rowClass =
+  'flex h-8 items-center gap-2 rounded-md px-2 text-sm font-medium text-muted-foreground [&_svg]:size-4 [&_svg]:shrink-0'
+const linkClass =
+  'transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring'
+const itemClass = cn(rowClass, linkClass)
 const activeClass = 'bg-accent text-foreground'
 
 function Count({ children }: { children: ReactNode }) {
@@ -29,7 +33,8 @@ const DOT: Record<Health, string> = {
 
 // A pipeline row. Its dot is the worst node health from the topology the room screen
 // already uses (useTopology), so the sidebar and the pipeline map agree.
-// Not a link yet: the room list has no pipeline filter (U2 adds it, then this becomes one).
+// A link to the room list filtered to this pipeline (/?pipeline=<id>); it is the current
+// row while that filter is on screen.
 // Polling is kept small on purpose, there is one topology call per pipeline:
 //  - a pipeline that only closed rooms mention is not fetched at all (unknown dot);
 //  - the pipeline of the room on screen is not polled here, the room screen already polls
@@ -38,11 +43,16 @@ function PipelineItem({
   pipeline,
   quiet,
   navKey,
+  current,
+  onNavigate,
 }: {
   pipeline: PipelineSummary
   /** The open room is on this pipeline: do not run a second 30 s poll. */
   quiet: boolean
   navKey: number
+  /** The room list is filtered to this pipeline right now. */
+  current: boolean
+  onNavigate?: () => void
 }) {
   const { topology } = useTopology(pipeline.open > 0 ? pipeline.id : '', {
     active: !quiet,
@@ -50,11 +60,18 @@ function PipelineItem({
   })
   const health = pipelineHealth(topology)
   return (
-    <li className={itemClass}>
-      <span className={cn('size-1.5 shrink-0 rounded-full', DOT[health])} aria-hidden="true" />
-      <span className="truncate">{pipeline.id}</span>
-      <span className="sr-only">, {HEALTH_LABEL[health]}</span>
-      {pipeline.open > 0 && <Count>{pipeline.open} open</Count>}
+    <li>
+      <Link
+        to={`/?pipeline=${encodeURIComponent(pipeline.id)}`}
+        className={cn(itemClass, current && activeClass)}
+        aria-current={current ? 'page' : undefined}
+        onClick={onNavigate}
+      >
+        <span className={cn('size-1.5 shrink-0 rounded-full', DOT[health])} aria-hidden="true" />
+        <span className="truncate">{pipeline.id}</span>
+        <span className="sr-only">, {HEALTH_LABEL[health]}</span>
+        {pipeline.open > 0 && <Count>{pipeline.open} open</Count>}
+      </Link>
     </li>
   )
 }
@@ -66,7 +83,7 @@ function SoonItem({ icon, label }: { icon: ReactNode; label: string }) {
       <span
         aria-disabled="true"
         title="Not available yet"
-        className={cn(itemClass, 'cursor-not-allowed opacity-60 hover:bg-transparent hover:text-muted-foreground')}
+        className={cn(rowClass, 'cursor-not-allowed opacity-60')}
       >
         {icon}
         {label}
@@ -95,6 +112,10 @@ export function SidebarContent({
   onNavigate?: () => void
 }) {
   const env = envLabel()
+  // The room list's pipeline filter, if the list is on screen.
+  const { pathname, search } = useLocation()
+  const filter = pathname === '/' ? new URLSearchParams(search).get('pipeline') : null
+  const onList = pathname === '/' && !filter // the unfiltered list is the current page of the Rooms link
   return (
     <div className="flex h-full min-h-0 flex-col bg-sidebar text-foreground">
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-sidebar-border px-4">
@@ -126,15 +147,16 @@ export function SidebarContent({
       <nav aria-label="Main" className="px-2 pt-3">
         <ul className="flex flex-col gap-0.5">
           <li>
-            <NavLink
+            <Link
               to="/"
-              className={({ isActive }) => cn(itemClass, isActive && activeClass)}
+              className={cn(itemClass, onList && activeClass)}
+              aria-current={onList ? 'page' : undefined}
               onClick={onNavigate}
             >
               <Inbox aria-hidden="true" />
               Rooms
               <Count>{openRooms}</Count>
-            </NavLink>
+            </Link>
           </li>
           <SoonItem icon={<Workflow aria-hidden="true" />} label="Pipelines" />
           <SoonItem icon={<Activity aria-hidden="true" />} label="Audit log" />
@@ -148,7 +170,14 @@ export function SidebarContent({
           </div>
           <ul aria-labelledby="sidebar-pipelines" className="flex min-h-0 flex-col gap-0.5 overflow-y-auto px-2">
             {pipelines.map((p) => (
-              <PipelineItem key={p.id} pipeline={p} quiet={p.id === currentPipelineId} navKey={navKey} />
+              <PipelineItem
+                key={p.id}
+                pipeline={p}
+                quiet={p.id === currentPipelineId}
+                navKey={navKey}
+                current={p.id === filter}
+                onNavigate={onNavigate}
+              />
             ))}
           </ul>
         </>

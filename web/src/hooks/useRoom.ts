@@ -12,6 +12,7 @@ import { mentionsAgent } from '../lib/mentions'
 import { applyEvent } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
 import type { RoomState } from '../state/types'
+import { hideStaleToast, showStaleToast } from '../lib/staleToast'
 
 // HTTP status an error frame code stands for (docs/api.md, Errors).
 const WS_FRAME_STATUS: Record<string, number> = {
@@ -35,6 +36,15 @@ export interface ApproveResult {
 /** True for the 409 the server sends when the params_hash sent is not the proposal's. */
 export function isParamsMismatch(e: unknown): boolean {
   return e instanceof ApiClientError && e.status === 409 && e.code === 'params_mismatch'
+}
+
+/**
+ * What the 409 params_mismatch was about: the proposal and the hash the person was looking at.
+ * Lives here, not in the panel, because the room reload unmounts the panel.
+ */
+export interface StaleInfo {
+  proposalId: string
+  sentHash: string
 }
 
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
@@ -85,7 +95,7 @@ export function useRoom(roomId: string) {
   const [error, setError] = useState<string | null>(null)
   // 409 params_mismatch: the stale-UI banner. Kept apart from `error` because the
   // reload it triggers clears `error`, and the banner must outlive the reload.
-  const [stale, setStale] = useState(false)
+  const [stale, setStale] = useState<StaleInfo | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
 
   const lastSeqRef = useRef(0)
@@ -323,15 +333,31 @@ export function useRoom(roomId: string) {
   }, [roomId, user.id, user.name, sessionEpoch, reloadKey])
 
   // Fetch the snapshot and replay the log again (a fresh socket, after=0).
-  const reload = useCallback(() => setReloadKey((k) => k + 1), [])
-  const dismissStale = useCallback(() => setStale(false), [])
+  // Reload closes the stale toast and it stays closed: the toast is raised only where the 409
+  // happens (onMismatch), never when the banner mounts.
+  const reload = useCallback(() => {
+    hideStaleToast()
+    setReloadKey((k) => k + 1)
+  }, [])
+  const clearStale = useCallback(() => {
+    setStale(null)
+    hideStaleToast()
+  }, [])
+  const dismissStale = clearStale
+
+  // Leaving the room takes the toast down with it.
+  useEffect(() => hideStaleToast, [])
 
   // A decision call failed with 409 params_mismatch: say so and reload the room.
   // Never retry; the person reviews the reloaded fix and decides again.
-  const onMismatch = useCallback(() => {
-    setStale(true)
-    setReloadKey((k) => k + 1)
-  }, [])
+  const onMismatch = useCallback(
+    (proposalId: string, sentHash: string) => {
+      setStale({ proposalId, sentHash })
+      showStaleToast(reload)
+      setReloadKey((k) => k + 1)
+    },
+    [reload],
+  )
 
   const runAction = useCallback((p: Promise<unknown>) => {
     p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))
@@ -436,12 +462,12 @@ export function useRoom(roomId: string) {
       try {
         await api.approve(proposalId, layer, extra)
         setError(null)
-        setStale(false)
+        clearStale()
         return { ok: true }
       } catch (e) {
         if (isParamsMismatch(e)) {
           setError(null)
-          onMismatch()
+          onMismatch(proposalId, extra.params_hash)
           return { ok: false, mismatch: true }
         }
         // Solo mode asks for the typed string; the confirm box handles it, so it
@@ -469,12 +495,12 @@ export function useRoom(roomId: string) {
         .reject(proposalId, layer, reason, paramsHash)
         .then(() => {
           setError(null)
-          setStale(false)
+          clearStale()
         })
         .catch((e: unknown) => {
           if (isParamsMismatch(e)) {
             setError(null)
-            onMismatch()
+            onMismatch(proposalId, paramsHash)
           } else {
             setError(errorText(e))
           }

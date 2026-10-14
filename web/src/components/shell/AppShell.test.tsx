@@ -40,7 +40,7 @@ vi.mock('@/hooks/useTopology', () => ({
 import { ThemeProvider } from '@/context/ThemeContext'
 import { THEME_KEY } from '@/lib/theme'
 import { AppShell } from './AppShell'
-import { useRegisterRoomCommands } from './context'
+import { useBreadcrumbTail, useRegisterRoomCommands } from './context'
 import type { RoomCommands } from './context'
 
 const room = (over: Partial<RoomSnapshot> & { id: string }) =>
@@ -51,8 +51,10 @@ function Where() {
 }
 
 let roomCommands: RoomCommands | null = null
+let breadcrumbTail: string | undefined
 function FakeRoom() {
   useRegisterRoomCommands(roomCommands)
+  useBreadcrumbTail(breadcrumbTail)
   return <p>room screen</p>
 }
 
@@ -72,7 +74,10 @@ function renderShell(path = '/') {
   )
 }
 
-beforeAll(() => {
+beforeAll(async () => {
+  // The command menu is a lazy chunk. Load it once up front so a test never waits on the
+  // first import (that wait timed out on a busy machine).
+  await import('./CommandMenu')
   // jsdom lacks these; cmdk and Radix use them.
   globalThis.ResizeObserver ??= class {
     observe() {}
@@ -90,6 +95,7 @@ beforeEach(() => {
   ]
   ctx.topology = { pipeline_id: 'orders', nodes: [{ id: 'a', health: 'fail' }], edges: [] } as unknown as Topology
   roomCommands = null
+  breadcrumbTail = undefined
   topologyCalls.length = 0
   window.localStorage.clear()
   document.documentElement.removeAttribute('data-theme')
@@ -104,9 +110,25 @@ describe('AppShell sidebar', () => {
     const row = within(pipelines).getByText('orders').closest('li')!
     expect(row).toHaveTextContent('failing')
     expect(row).toHaveTextContent('1 open')
-    // Not a link until the room list can filter by pipeline.
-    expect(within(pipelines).queryByRole('link')).not.toBeInTheDocument()
+    // A link to the room list filtered to this pipeline.
+    expect(within(pipelines).getByRole('link', { name: /orders/ })).toHaveAttribute('href', '/?pipeline=orders')
     expect(screen.getByText('rooms home')).toBeInTheDocument()
+  })
+
+  it('marks the pipeline row of the active filter as the current page, and not the Rooms link', () => {
+    renderShell('/?pipeline=orders')
+    const pipelines = screen.getByRole('list', { name: 'Pipelines' })
+    expect(within(pipelines).getByRole('link', { name: /orders/ })).toHaveAttribute('aria-current', 'page')
+    const main = screen.getByRole('navigation', { name: 'Main' })
+    expect(within(main).getByRole('link', { name: /Rooms/ })).not.toHaveAttribute('aria-current')
+  })
+
+  it('the Pipelines and Audit log rows that are not links have no hover style', () => {
+    renderShell()
+    const main = screen.getByRole('navigation', { name: 'Main' })
+    for (const row of within(main).getAllByText(/not available yet/)) {
+      expect(row.parentElement!.className).not.toMatch(/hover:/)
+    }
   })
 
   it('lists Pipelines and Audit log as unavailable, not as dead links', () => {
@@ -126,6 +148,31 @@ describe('AppShell sidebar', () => {
   })
 })
 
+describe('AppShell top bar', () => {
+  it('shows the page title "Rooms" as the h1 on the room list', () => {
+    renderShell()
+    expect(screen.getByRole('heading', { level: 1, name: 'Rooms' })).toBeInTheDocument()
+    expect(screen.queryByRole('navigation', { name: 'Breadcrumb' })).not.toBeInTheDocument()
+  })
+
+  it('in a room the breadcrumb is Rooms > pipeline, never the room id', () => {
+    renderShell('/rooms/r1')
+    const crumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    expect(within(crumb).getByRole('link', { name: 'Rooms' })).toHaveAttribute('href', '/')
+    expect(within(crumb).getByRole('link', { name: 'orders' })).toHaveAttribute('href', '/?pipeline=orders')
+    expect(crumb).not.toHaveTextContent('r1')
+  })
+
+  it('takes the pipeline the room screen registers, before the list has it', () => {
+    ctx.rooms = []
+    breadcrumbTail = 'payments'
+    renderShell('/rooms/r_new')
+    const crumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    expect(within(crumb).getByRole('link', { name: 'payments' })).toBeInTheDocument()
+    expect(crumb).not.toHaveTextContent('r_new')
+  })
+})
+
 describe('AppShell theme', () => {
   it('toggles the theme, puts it on <html> and remembers it', () => {
     renderShell()
@@ -141,7 +188,7 @@ describe('AppShell theme', () => {
 describe('command menu', () => {
   const open = () => fireEvent.keyDown(window, { key: 'k', ctrlKey: true })
   // The menu is a lazy chunk: it appears a moment after the first open.
-  const menu = () => screen.findByRole('dialog', { name: 'Command menu' })
+  const menu = () => screen.findByRole('dialog', { name: 'Command menu' }, { timeout: 5000 })
 
   it('opens with Ctrl+K, lists rooms, and going to one navigates', async () => {
     renderShell()
