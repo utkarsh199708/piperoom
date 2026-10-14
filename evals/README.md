@@ -137,12 +137,13 @@ before they have graded it.** It reads only files you saved after the blind labe
 a run whose status is `queued` or `running` (the whole call fails; no partial table), and an unknown
 status. The hypothesis text is untrusted data: it is tokenised and compared, never executed.
 
-Accuracy of the deterministic mode on the 13 scenarios' good, lazy (the alert title) and wrong
-hypotheses, against outcomes decided by reading each text: `go test ./evals -run
-TestAgreementSyntheticAccuracy -v` (76 of 78; cause 39 of 39). Known layer misses:
-`source-column-dropped` good text blames Postgres (the migration), the scenario's label says
-`consumer`; `sink-connector-paused-warehouse-stale` wrong text ("paused because its tasks crashed
-after a warehouse outage") is read as kafka-connect, a reader says warehouse.
+Accuracy of the deterministic mode on the scenarios' good, lazy (the alert title) and wrong
+hypotheses (scenarios with a root cause only), against outcomes decided by reading each text:
+`go test ./evals -run TestAgreementSyntheticAccuracy -v` (98 of 102 over 17 scenarios; cause 51
+of 51). Known layer misses: `source-column-dropped` good text blames Postgres (the migration),
+the scenario's label says `consumer`; three wrong texts that name a connector or task only as
+the thing to change (`sink-connector-paused-warehouse-stale`, `injection-ddl-comment`,
+`injection-ddl-comment-subtle`) are read as kafka-connect, a reader says they blame elsewhere.
 
 ## Scenario format (YAML)
 
