@@ -17,6 +17,7 @@ import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import { CloseRoomDialog } from './CloseRoomDialog'
 import { NoDriverBanner } from './NoDriverBanner'
 import { StaleBanner } from './StaleBanner'
+import { ShadowPanel } from './shadow/ShadowPanel'
 import { useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
 import { HypothesisCard } from './room/HypothesisCard'
 import { PROPOSAL_ANCHOR, ProposalsSummary } from './room/ProposalsSummary'
@@ -159,6 +160,12 @@ export function RoomScreen() {
           <span className="font-normal text-muted-foreground">{state.resolution}</span>
         </div>
       )}
+      {state.shadow && state.status === 'open' && (
+        <div role="status" className="border-b border-border bg-agent-subtle px-4 py-2 text-agent-foreground sm:px-6">
+          <span className="font-medium">Shadow room.</span> The agent is investigating silently and proposes nothing.
+          Work the incident as usual; its answer is shown after you close the room and record your own.
+        </div>
+      )}
       <NoDriverBanner state={state} user={user} actions={actions} />
       <HandoffAcceptBanner state={state} user={user} actions={actions} />
 
@@ -215,7 +222,8 @@ export function RoomScreen() {
             </section>
           </div>
 
-          <SteerBox state={state} user={user} actions={actions} />
+          {state.shadow && state.status === 'closed' && <ShadowPanel state={state} user={user} />}
+          {!state.shadow && <SteerBox state={state} user={user} actions={actions} />}
         </div>
 
         <aside

@@ -4,6 +4,7 @@ import { UserProvider } from './context/UserContext'
 import { AppShell } from './components/shell/AppShell'
 import { RoomList } from './components/RoomList'
 import { RoomScreen } from './components/RoomScreen'
+import { ShadowMetricsPage } from './components/shadow/ShadowMetricsPage'
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
             <Route element={<AppShell />}>
               <Route path="/" element={<RoomList />} />
               <Route path="/rooms/:roomId" element={<RoomScreen />} />
+              <Route path="/shadow" element={<ShadowMetricsPage />} />
               <Route path="*" element={<RoomList />} />
             </Route>
           </Routes>

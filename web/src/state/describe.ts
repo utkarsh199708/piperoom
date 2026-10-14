@@ -114,6 +114,13 @@ export function describeEvent(e: Event, driverBefore: string | null = null): str
       const p = as<TracePinnedPayload>(e)
       return `Trace pinned for ${p.table} ${p.key}`
     }
+    // Shadow events carry no agent text, so these lines cannot un-blind anyone.
+    case 'shadow.revealed':
+      return 'Shadow run finished: its result is ready to read after you label the room'
+    case 'shadow.labelled':
+      return `${who} recorded a blind label`
+    case 'shadow.graded':
+      return `${who} graded the shadow run`
     default:
       return e.type
   }

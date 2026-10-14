@@ -35,6 +35,9 @@ export type EventType =
   | 'handoff.created'
   | 'handoff.accepted'
   | 'trace.pinned'
+  | 'shadow.revealed'
+  | 'shadow.labelled'
+  | 'shadow.graded'
 
 export interface Event {
   room_id: string
@@ -52,6 +55,8 @@ export interface RoomCreatedPayload {
   severity: string // "sev1".."sev4"
   pipeline_id: string
   alert?: unknown
+  /** The pipeline had shadow mode on when the room opened (docs/design/shadow.md). */
+  shadow?: boolean
 }
 
 export interface RoomClosedPayload {
@@ -59,7 +64,7 @@ export interface RoomClosedPayload {
 }
 
 export interface AgentStatusPayload {
-  state: string // "working" | "idle" | "waiting_approval" | "error" | "done"
+  state: string // "working" | "idle" | "waiting_approval" | "error" | "done" | "queued"
   detail?: string
 }
 
@@ -301,6 +306,8 @@ export interface RoomSnapshot {
   open_proposals: ProposalSummary[]
   pending_suggestions: SuggestionSummary[]
   members: MemberSummary[]
+  /** True when the room opened as a shadow room: the agent ran silently, no proposals. */
+  shadow?: boolean
 }
 
 export interface TopologyNode {
@@ -363,3 +370,118 @@ export type WsServerMessage =
   | { type: 'event'; event: Event }
   | { type: 'presence'; members: PresenceMember[] }
   | { type: 'error'; error: { code: string; message: string } }
+
+// ---- Shadow mode (docs/api.md "Shadow mode", docs/design/shadow.md 5.2) ----
+
+/** shadow.revealed: numbers only, never the hypothesis text. */
+export interface ShadowRevealedPayload {
+  status: ShadowStatus
+  time_to_first_hypothesis_s: number // -1 when there was no hypothesis
+  time_to_final_hypothesis_s: number
+  human_mttr_s: number
+  finished_after_close: boolean
+  tool_calls: number
+  tokens: number
+}
+
+export interface ShadowLabelledPayload {
+  actual_layer: string
+  root_cause_terms: string[]
+  identity?: Identity
+}
+
+export type ShadowRootCause = 'yes' | 'partial' | 'no'
+
+export interface ShadowGradedPayload {
+  layer_correct: boolean
+  root_cause: ShadowRootCause
+  notes?: string
+  identity?: Identity
+}
+
+export type ShadowStatus =
+  | 'queued'
+  | 'running'
+  | 'hypothesised'
+  | 'no_hypothesis'
+  | 'error'
+  | 'budget'
+  | 'interrupted'
+
+/** GET /api/rooms/{id}/shadow -> run. Times are null when unset. */
+export interface ShadowRun {
+  room_id: string
+  status: ShadowStatus
+  model: string
+  pipeline_map: string
+  started_at: string | null
+  first_hypothesis_at: string | null
+  final_hypothesis_at: string | null
+  finished_at: string | null
+  finished_after_close: boolean
+  final_hypothesis: AgentHypothesisPayload | null
+  tool_calls: number
+  tokens: number
+  revealed_at: string | null
+}
+
+/** An event of the shadow log: its own seq, never fed to the room reducer. */
+export type ShadowEvent = Event & { shadow: true }
+
+export interface ShadowRoomContext {
+  created?: Event | null
+  labelled?: Event | null
+  graded?: Event | null
+}
+
+export interface ShadowResponse {
+  run: ShadowRun
+  events: ShadowEvent[]
+  room?: ShadowRoomContext
+}
+
+export interface ShadowBlindBody {
+  actual_layer: string
+  root_cause_terms: string[]
+}
+
+export interface ShadowGradeBody {
+  layer_correct: boolean
+  root_cause: ShadowRootCause
+  notes?: string
+}
+
+/** One closed shadow room in GET /api/shadow/metrics. */
+export interface ShadowMetricsRoom {
+  room_id: string
+  pipeline_id: string
+  alert_source: string
+  status: ShadowStatus
+  opened_at: string
+  closed_at: string
+  labelled: boolean
+  graded: boolean
+  layer_correct: boolean
+  root_cause: ShadowRootCause | ''
+  time_to_first_s: number // -1 when there was no value
+  time_to_final_s: number
+  human_mttr_s: number
+  tool_calls: number
+  tokens: number
+  finished_after_close: boolean
+}
+
+export interface ShadowMetrics {
+  rooms: number
+  labelled: number
+  graded: number
+  layer_correct: number
+  root_cause: { yes: number; partial: number; no: number }
+  by_status: Partial<Record<ShadowStatus, number>>
+  median_time_to_first_s: number // -1 when no room has the value
+  median_time_to_final_s: number
+  median_human_mttr_s: number
+  total_tokens: number
+  tokens_available: boolean
+  per_room: ShadowMetricsRoom[]
+}

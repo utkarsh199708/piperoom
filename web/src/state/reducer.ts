@@ -84,6 +84,7 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         title: p.title,
         severity: p.severity as RoomState['severity'],
         pipeline_id: p.pipeline_id,
+        shadow: p.shadow === true,
         status: 'open',
         opened_at: event.at,
         driver,
@@ -454,6 +455,10 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       }
       break
     }
+
+    case 'shadow.revealed':
+      next = { ...state, shadow_revealed: true }
+      break
 
     default:
       break

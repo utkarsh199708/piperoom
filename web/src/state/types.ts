@@ -171,6 +171,10 @@ export interface RoomState {
   trace: TraceState | null
   handoffs: HandoffState[]
   activity: ActivityEntry[]
+  /** Shadow room: the agent ran silently; the shadow panel replaces steering once closed. */
+  shadow?: boolean
+  /** Set by shadow.revealed: the run has ended and its result exists (grading may start). */
+  shadow_revealed?: boolean
 }
 
 export function emptyRoomState(id: string): RoomState {
@@ -216,6 +220,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     opened_at: snapshot.opened_at,
     closed_at: snapshot.closed_at,
     resolution: snapshot.resolution,
+    shadow: snapshot.shadow === true,
     last_seq: 0,
     snapshot_hashes: Object.fromEntries(
       (snapshot.open_proposals ?? [])
