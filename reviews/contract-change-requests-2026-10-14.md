@@ -40,8 +40,13 @@ Document that `ConnectClient.Status` may return a partial status together with
 Return `FreshnessInfo{TS time.Time; Coarse bool}` so a `date` column can be shown as
 day-precision in the map instead of being read as end of day.
 
-## 8. `docs/api.md` — behaviour the code now has
-- Signed alerts: identical copy within the replay window → `202 {"ignored":true,"reason":"duplicate delivery"}`; `429 rate_limited` (60/min per source, `Retry-After`); which header checks happen before the body is read.
+## 8. `internal/clients/clients.go` — `FindByKey` truncation
+`KafkaAdmin.FindByKey` cannot say that `max_scan` cut a partition short, so a
+"newest" match may not be the newest. Return `KeyScan{Refs, Truncated []int32}` (or
+add a `Truncated` field). Today the tool type-asserts for `kafka.FindByKeyReport`.
+
+## 9. `docs/api.md` — behaviour the code now has
+- Signed alerts: replays are checked before the rate limit and never spend it; identical copy within the replay window → `202 {"ignored":true,"reason":"duplicate delivery"}`; `429 rate_limited` (60/min per source, `Retry-After`); which header checks happen before the body is read.
 - Errors table: `413 too_large` for any JSON body over 1 MB; `400` for trailing data after the JSON object; comment/steer text ≤ 16 KiB.
 - Approve/reject: 404 for an unknown proposal is checked before body validation; empty `layer` → 400.
 - WebSocket: `after` past `last_seq` → HTTP 400 at upgrade; slow consumers closed with 1008 and a reason naming the resume seq.
