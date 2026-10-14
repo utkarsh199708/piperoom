@@ -765,7 +765,8 @@ func (s *Service) fenceLocked(roomID string, st *roomState, run uint64) error {
 // executorEmit appends an event on behalf of the action executor.
 func (s *Service) executorEmit(ctx context.Context, roomID string, typ events.Type, payload any) error {
 	if p, ok := payload.(events.ActionExecutedPayload); ok {
-		p.Output = s.capOutput(p.Output)
+		// Mask before the cap: a cap must not cut a secret in two.
+		p.Output = s.capOutput(maskExecOutput(p.Output))
 		payload = p
 	}
 	return s.emitAs(ctx, roomID, executorActor, typ, payload)
