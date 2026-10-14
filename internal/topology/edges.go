@@ -141,13 +141,16 @@ func (b *builder) planFlow(p owners.Pipeline, info *collected) flowPlan {
 		snap, ok := info.connect[cn]
 		if !ok || snap.err != nil {
 			// Config unreadable: keep today's shape (every table into the
-			// connector, placeholder topics out of it) but say none of it is
-			// proven.
+			// connector, topics out of it) but say none of it is proven. The
+			// topics take owners.yaml's topic_prefix names, which Kafka can
+			// still be asked about; only without one do placeholders stand in.
 			for _, tbl := range p.SourceTables {
 				fromTables = append(fromTables, inferred(Edge{From: "pg:" + tbl, To: cid}))
-			}
-			for _, t := range fallbackTopics(p.SourceTables) {
-				addTopic(t, true)
+				t, ok := prefixTopic(p, tbl)
+				if !ok {
+					t = fallbackTopics([]string{tbl})[0]
+				}
+				addTopic(t, !ok)
 				toTopics = append(toTopics, inferred(Edge{From: cid, To: "topic:" + t}))
 			}
 			continue

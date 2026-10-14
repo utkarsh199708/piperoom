@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/dlq"
 	"piperoom/internal/owners"
 )
 
@@ -333,7 +334,8 @@ func (b *builder) topicNode(p owners.Pipeline, topic string, info *collected) No
 	return n
 }
 
-// placeholderTopicNode is used when connector config is unavailable, or when
+// placeholderTopicNode is used when connector config is unavailable and
+// owners.yaml gives no usable topic_prefix, or when
 // it names an illegal topic (invalid): the config itself is then a likely root
 // cause, so the fact says so instead of "unreachable". The topic
 // node exists to keep the graph shape but its real name and health are unknown.
@@ -364,6 +366,13 @@ func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected, ownTo
 	}
 	snap := info.groups[gr]
 	if snap.err != nil {
+		// A group Kafka does not know has never committed: it warns (it may
+		// simply not have started yet) rather than reading as an outage.
+		if errors.Is(snap.err, clients.ErrNotFound) {
+			n.Health = HealthWarn
+			n.Facts = map[string]string{"missing": "true"}
+			return n
+		}
 		n.Facts = map[string]string{"error": "unreachable"}
 		return n
 	}
@@ -416,9 +425,14 @@ func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {
 		Health: HealthUnknown,
 	}
 	snap := info.freshness[s]
-	if snap.err != nil {
+	switch {
+	case errors.Is(snap.err, clients.ErrNotFound):
+		// The table (or its schema) does not exist: the warehouse answered.
+		n.Health = HealthFail
+		n.Facts = map[string]string{"missing": "true"}
+	case snap.err != nil:
 		n.Facts = map[string]string{"error": "unreachable"}
-	} else {
+	default:
 		n.Health, n.Facts = sinkHealth(snap.ts, info.now, b.t)
 	}
 	// The timestamp column is set on every sink node, including unreachable
@@ -594,6 +608,18 @@ func slotNameFor(_ string, cfg map[string]string) string {
 // unknown, so the fully-qualified table names stand in for the topics.
 func fallbackTopics(tables []string) []string {
 	return append([]string(nil), tables...)
+}
+
+// prefixTopic returns owners.yaml's name for a table's CDC topic,
+// "<topic_prefix>.<table>" (Debezium's default naming), when Connect cannot
+// say. ok is false when the pipeline has no prefix or the name is not a legal
+// topic name; the table name then stands in as a placeholder.
+func prefixTopic(p owners.Pipeline, table string) (string, bool) {
+	if p.TopicPrefix == "" {
+		return "", false
+	}
+	t := p.TopicPrefix + "." + table
+	return t, dlq.ValidTopic(t)
 }
 
 func splitCSV(s string) []string {

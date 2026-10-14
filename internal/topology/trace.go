@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 )
@@ -58,6 +60,13 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	if key == "" {
 		return nil, fmt.Errorf("%w: trace: empty key", ErrBadInput)
 	}
+	// Only the pipeline's own source tables may be traced. Trace reads the
+	// row at the source, so a table outside owners.yaml would make it a
+	// row-existence oracle on any table the read-only role can see, and the
+	// Connect-down fallback below would otherwise accept any name (QA6).
+	if !slices.Contains(p.SourceTables, table) {
+		return nil, fmt.Errorf("%w: table %q is not a source table of pipeline %q", ErrBadInput, table, pipelineID)
+	}
 	if len(p.ConsumerGroups) == 0 || len(p.SinkTables) == 0 {
 		return nil, fmt.Errorf("topology: pipeline %q has no consumer group or sink table", pipelineID)
 	}
@@ -77,7 +86,7 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 			return nil, cerr
 		}
 		conn = p.Connectors[0]
-		topic = fallbackTopic(table)
+		topic = fallbackTopic(p, table)
 		f.connectorErr = cerr
 	}
 	f.connector, f.topic = conn, topic
@@ -179,9 +188,12 @@ func (b *builder) connectorForTable(ctx context.Context, p owners.Pipeline, tabl
 }
 
 // fallbackTopic is used when connector config is unavailable, so the trace
-// keeps a topic stage. The Debezium topic prefix is unknown, so the
-// fully-qualified table name stands in for the topic.
-func fallbackTopic(table string) string {
+// keeps a topic stage: owners.yaml's "<topic_prefix>.<table>", or the table
+// name as a placeholder when that is not a legal topic name.
+func fallbackTopic(p owners.Pipeline, table string) string {
+	if t, ok := prefixTopic(p, table); ok {
+		return t
+	}
 	return table
 }
 
@@ -250,8 +262,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	topicStatus := "not_seen"
 	topicFacts := map[string]string{}
 	if f.topicErr != nil {
-		topicStatus = "unknown"
-		topicFacts["error"] = "unreachable"
+		topicStatus, topicFacts = errStage(f.topicErr)
 	} else if f.topicFound {
 		topicStatus = "seen"
 		topicFacts["offset"] = strconv.FormatInt(f.topicOffset, 10)
@@ -264,8 +275,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	groupStatus := "not_seen"
 	groupFacts := map[string]string{}
 	if f.groupErr != nil {
-		groupStatus = "unknown"
-		groupFacts["error"] = "unreachable"
+		groupStatus, groupFacts = errStage(f.groupErr)
 	} else if f.topicFound {
 		if f.groupCommitted >= 0 {
 			groupFacts["committed"] = strconv.FormatInt(f.groupCommitted, 10)
@@ -280,8 +290,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	sinkStatus := "not_seen"
 	sinkFacts := map[string]string{}
 	if f.sinkErr != nil {
-		sinkStatus = "unknown"
-		sinkFacts["error"] = "unreachable"
+		sinkStatus, sinkFacts = errStage(f.sinkErr)
 	} else if consumed && f.sinkFound {
 		sinkStatus = "seen"
 		if len(f.sinkDiff) > 0 {
@@ -290,14 +299,27 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	}
 	stage("warehouse", f.sink, sinkStatus, sinkFacts)
 
-	// Decide the single stuck point downstream of the connector.
+	// Decide the single stuck point downstream of the connector. A group or
+	// sink table that does not exist is where the record stops.
+	groupMissing := errors.Is(f.groupErr, clients.ErrNotFound)
+	sinkMissing := errors.Is(f.sinkErr, clients.ErrNotFound)
 	switch {
-	case f.topicFound && f.groupErr == nil && !consumed:
+	case f.topicFound && (groupMissing || f.groupErr == nil && !consumed):
 		stages[3].Status = "stopped_here"
-	case f.topicFound && f.groupErr == nil && consumed && !f.sinkFound && f.sinkErr == nil:
+	case f.topicFound && consumed && !f.sinkFound && (f.sinkErr == nil || sinkMissing):
 		stages[4].Status = "stopped_here"
 	}
 	return stages
+}
+
+// errStage maps a stage's read error to its status and facts: a resource the
+// system says does not exist is "not_seen" with missing=true (the system
+// answered); any other error is "unknown" and unreachable.
+func errStage(err error) (string, map[string]string) {
+	if errors.Is(err, clients.ErrNotFound) {
+		return "not_seen", map[string]string{"missing": "true"}
+	}
+	return "unknown", map[string]string{"error": "unreachable"}
 }
 
 func tsFromRow(row map[string]any) time.Time {
