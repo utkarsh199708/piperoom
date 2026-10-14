@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { SteerBox } from './SteerBox'
 import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
@@ -9,6 +9,7 @@ const actions: RoomActions = {
   comment: vi.fn(),
   steer: vi.fn(),
   sendSuggestion: vi.fn(),
+  declineSuggestion: vi.fn(),
   requestControl: vi.fn(),
   grantControl: vi.fn(),
   close: vi.fn(),
@@ -97,12 +98,16 @@ describe('SteerBox composer (U3)', () => {
     expect(screen.getByPlaceholderText(/Suggest a step for Arjun/)).toBeInTheDocument()
   })
 
-  it('with no driver the field is disabled and says how to start', () => {
+  it('with no driver a member can suggest', () => {
     const state = emptyRoomState('r1')
     render(<SteerBox state={state} user={kabir} actions={actions} />)
-    expect(screen.getByLabelText('Steer the agent')).toBeDisabled()
-    expect(screen.getByText(/No driver · take control/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Suggest' })).not.toBeInTheDocument()
+    const field = screen.getByLabelText('Steer the agent')
+    expect(field).toBeEnabled()
+    expect(field).toHaveAttribute('placeholder', 'Suggest a first step…')
+    expect(screen.getByText(/No driver · your suggestion is queued for whoever takes control/)).toBeInTheDocument()
+    fireEvent.change(field, { target: { value: 'check the connector' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest' }))
+    expect(actions.steer).toHaveBeenCalledWith('check the connector')
   })
 
   it('with no driver the composer has no Take control (the banner offers it); with an expired lease it does', () => {
@@ -184,5 +189,123 @@ describe('SteerBox idle row (F1b)', () => {
     unmount()
     expect(document.documentElement.style.getPropertyValue('--composer-h')).toBe('')
     vi.restoreAllMocks()
+  })
+
+  describe('F5 composer', () => {
+    const driverState = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
+    const field = () => screen.getByLabelText('Steer the agent')
+
+    afterEach(() => {
+      localStorage.clear()
+      sessionStorage.clear()
+      vi.useRealTimers()
+      vi.clearAllMocks()
+    })
+
+    it('names the mode before sending', () => {
+      render(<SteerBox state={driverState} user={kabir} actions={actions} />)
+      fireEvent.focus(field())
+      expect(screen.getByText(/Suggesting to Arjun/)).toBeInTheDocument()
+      fireEvent.change(field(), { target: { value: '?why is task 0 failing' } })
+      expect(screen.getByText('Asking the agent · it answers under Room comments')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Ask' }))
+      expect(actions.comment).toHaveBeenCalledWith('@agent why is task 0 failing')
+      expect(actions.steer).not.toHaveBeenCalled()
+    })
+
+    it('a driver question is a steer', () => {
+      render(<SteerBox state={driverState} user={arjun} actions={actions} />)
+      fireEvent.change(field(), { target: { value: '?why is task 0 failing' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Ask' }))
+      expect(actions.steer).toHaveBeenCalledWith('Question: why is task 0 failing')
+    })
+
+    it('a bare ? sends nothing', () => {
+      render(<SteerBox state={driverState} user={arjun} actions={actions} />)
+      fireEvent.change(field(), { target: { value: '?' } })
+      fireEvent.keyDown(field(), { key: 'Enter', ctrlKey: true })
+      expect(actions.steer).not.toHaveBeenCalled()
+    })
+
+    it('chips fill the field and never send', () => {
+      render(<SteerBox state={driverState} user={arjun} actions={actions} />)
+      fireEvent.focus(field())
+      fireEvent.click(screen.getByRole('button', { name: 'Check the connector status' }))
+      expect(field()).toHaveValue('Check the connector status')
+      expect(actions.steer).not.toHaveBeenCalled()
+    })
+
+    it('keeps the draft across a remount and clears it on send', () => {
+      vi.useFakeTimers()
+      const first = render(<SteerBox state={driverState} user={arjun} actions={actions} />)
+      fireEvent.change(field(), { target: { value: 'half a thought' } })
+      act(() => {
+        vi.advanceTimersByTime(400)
+      })
+      first.unmount()
+      render(<SteerBox state={driverState} user={arjun} actions={actions} />)
+      expect(field()).toHaveValue('half a thought')
+      fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+      expect(localStorage.getItem('piperoom.draft.r1')).toBeNull()
+    })
+
+    it('arrow up on an empty field recalls the last sent message', () => {
+      render(<SteerBox state={driverState} user={arjun} actions={actions} />)
+      fireEvent.change(field(), { target: { value: 'look at lag' } })
+      fireEvent.keyDown(field(), { key: 'Enter', ctrlKey: true })
+      expect(field()).toHaveValue('')
+      fireEvent.keyDown(field(), { key: 'ArrowUp' })
+      expect(field()).toHaveValue('look at lag')
+    })
+
+    it('storage that throws does not break the composer', () => {
+      const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+        throw new Error('blocked')
+      })
+      render(<SteerBox state={driverState} user={arjun} actions={actions} />)
+      expect(field()).toHaveValue('')
+      spy.mockRestore()
+    })
+
+    it('the driver can decline a suggestion with a reason', () => {
+      const state = {
+        ...driverState,
+        suggestions: [
+          { suggestion_id: 'g1', from: { kind: 'human' as const, id: 'kabir', name: 'Kabir' }, text: 'restart it', status: 'pending' as const },
+        ],
+      }
+      render(<SteerBox state={state} user={arjun} actions={actions} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Decline' }))
+      const input = screen.getByLabelText(/Reason for declining/)
+      fireEvent.change(input, { target: { value: 'too risky' } })
+      fireEvent.submit(input)
+      expect(actions.declineSuggestion).toHaveBeenCalledWith('g1', 'too risky')
+    })
+
+    it('shows the suggester what became of their suggestions', () => {
+      const me = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+      const driver = { kind: 'human' as const, id: 'arjun', name: 'Arjun' }
+      const state = {
+        ...driverState,
+        suggestions: [
+          { suggestion_id: 'g1', from: me, text: 'a', status: 'pending' as const },
+          { suggestion_id: 'g2', from: me, text: 'b', status: 'accepted' as const, sent_by: driver, sent_at: '2026-10-14T10:02:00Z' },
+          { suggestion_id: 'g3', from: me, text: 'c', status: 'declined' as const, declined_by: driver, reason: 'not now' },
+        ],
+      }
+      render(<SteerBox state={state} user={kabir} actions={actions} />)
+      fireEvent.focus(field())
+      expect(screen.getByText('Queued for Arjun')).toBeInTheDocument()
+      expect(screen.getByText(/^Sent by Arjun · /)).toBeInTheDocument()
+      expect(screen.getByText('Declined by Arjun')).toHaveAttribute('title', 'not now')
+    })
+
+    it('with no driver a pending chip says no driver yet', () => {
+      const me = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+      const state = { ...emptyRoomState('r1'), suggestions: [{ suggestion_id: 'g1', from: me, text: 'a', status: 'pending' as const }] }
+      render(<SteerBox state={state} user={kabir} actions={actions} />)
+      fireEvent.focus(field())
+      expect(screen.getByText('Queued · no driver yet')).toBeInTheDocument()
+    })
   })
 })

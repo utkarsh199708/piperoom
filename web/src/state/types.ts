@@ -70,8 +70,7 @@ export interface CommentState {
 
 /**
  * pending: waiting in the driver's queue. accepted: the driver sent it (steer.sent with its id).
- * declined: HOOK(R10) - no declined event exists in docs/api.md or events.go yet, so the reducer
- * never produces this value; it is here so the UI renders it the day the contract adds one.
+ * declined: the driver declined it (steer.declined); `declined_by` and `reason` say who and why.
  */
 export type SuggestionStatus = 'pending' | 'accepted' | 'declined'
 
@@ -82,6 +81,13 @@ export interface SuggestionState {
   status: SuggestionStatus
   /** When the suggestion was made. */
   at?: string
+  /** Who forwarded it to the agent, and when (steer.sent with its id). */
+  sent_by?: Actor
+  sent_at?: string
+  /** Who declined it, when, and the optional note (steer.declined). */
+  declined_by?: Actor
+  declined_at?: string
+  reason?: string
 }
 
 /** Who decided a layer, how they logged in, and the hash they decided on. */

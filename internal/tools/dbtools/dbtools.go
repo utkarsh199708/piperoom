@@ -32,6 +32,9 @@ type Deps struct {
 	// pg_publication_tables uses it, so it is nil-able; the tool reports a
 	// clear error when it needs Connect and the field is nil.
 	Connect clients.ConnectClient
+	// Kafka is read by reconcile for per-bucket topic counts (clients.RateReader,
+	// asserted at use time). Nil-able: reconcile then leaves the topic column out.
+	Kafka clients.KafkaReader
 	// Owners is the loaded owners config, used by the row tools to scope reads
 	// to the pipeline named by pipeline_id (security finding F4). It must be
 	// non-nil; the row tools refuse to run without it.
@@ -100,6 +103,7 @@ func Register(reg *tools.Registry, d Deps) error {
 		warehouseFreshnessTool(d),
 		warehouseRowTool(d),
 		warehouseLoadErrorsTool(d),
+		reconcileTool(d),
 		pipelineMapTool(d),
 		traceRecordTool(d),
 	}
