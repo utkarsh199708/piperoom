@@ -162,13 +162,14 @@ func TestDevLoginSetsCookieAndMe(t *testing.T) {
 	if len(c.Value) != 43 {
 		t.Fatalf("cookie value length = %d, want 43", len(c.Value))
 	}
-	// /api/me is {id,name,layers,role,groups_missing}.
+	// /api/me is {id,name,layers,role,groups_missing,admin} (admin is always
+	// present since the integrations contract).
 	resp = e.do(t, http.MethodGet, "/api/me", "", cookieHdr(c))
 	wantStatus(t, resp, http.StatusOK)
 	var me map[string]any
 	_ = json.NewDecoder(resp.Body).Decode(&me)
-	if me["id"] != "priya" || me["name"] == nil || me["layers"] == nil || me["role"] != "member" || me["groups_missing"] != false || len(me) != 5 {
-		t.Fatalf("/api/me = %+v, want exactly id, name, layers, role, groups_missing for priya", me)
+	if me["id"] != "priya" || me["name"] == nil || me["layers"] == nil || me["role"] != "member" || me["groups_missing"] != false || me["admin"] != false || len(me) != 6 {
+		t.Fatalf("/api/me = %+v, want exactly id, name, layers, role, groups_missing, admin for priya", me)
 	}
 	// Only the hash is stored.
 	hash, _ := auth.HashToken(c.Value)

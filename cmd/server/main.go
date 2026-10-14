@@ -28,6 +28,8 @@ import (
 	"piperoom/internal/auth"
 	"piperoom/internal/config"
 	"piperoom/internal/httpapi"
+	"piperoom/internal/integrations"
+	"piperoom/internal/integrations/spec"
 	"piperoom/internal/owners"
 	"piperoom/internal/room"
 	"piperoom/internal/room/demo"
@@ -62,6 +64,28 @@ func run() error {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(log)
+
+	// Secret managers (docs/design/secret-providers.md) come before anything
+	// reads the config: any secret variable may hold a secret:// reference,
+	// resolved here once and kept in memory only. A bad
+	// PIPEROOM_SECRET_PROVIDERS, or a reference that cannot be read, refuses
+	// start.
+	cfg = secretFileRootsForOS(cfg, log)
+	secretReg, err := newSecretsRegistry(context.Background(), cfg, log)
+	if err != nil {
+		return err
+	}
+	defer secretReg.Close()
+	reservedRefs := processSecretRefs(cfg)
+	if err := resolveEnvSecrets(context.Background(), &cfg, secretReg); err != nil {
+		return err
+	}
+	// PIPEROOM_ADMINS (docs/api.md "Who is admin"): a bad entry refuses start.
+	admins, err := httpapi.ParseAdmins(cfg.Admins)
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
+	envView := integrations.EnvFromLookup(os.LookupEnv)
 
 	// The agent cap is cost control: parse it first so a bad value stops the
 	// server before it connects to anything.
@@ -174,6 +198,8 @@ func run() error {
 		st      store.Store
 		ready   httpapi.Pinger      // nil in demo mode: the in-memory store is always ready
 		threads slackbridge.Threads = slackbridge.NewMemThreads()
+		// Saved integrations: in memory in demo mode, Postgres otherwise.
+		intStore spec.Store = memstore.NewIntegrations()
 		// Login sessions: in memory in demo mode, the sessions table otherwise.
 		sessions auth.Store = auth.NewMemStore()
 		// The pre-login rows and the iss+sub bindings of OIDC login.
@@ -200,6 +226,7 @@ func run() error {
 		sessions = pg.Sessions()
 		loginStates = pg.LoginStates()
 		identities = pg.Identities()
+		intStore = pg.Integrations()
 		defer pg.Close()
 	}
 
@@ -212,6 +239,7 @@ func run() error {
 	}
 	defer slack.stop(mirrorStopTimeout)
 
+	var intSvc spec.Service // the Integrations page logic, both modes
 	var (
 		acts     *actions.Registry
 		toolsReg = tools.NewRegistry()
@@ -222,6 +250,9 @@ func run() error {
 		// closedHook is room.Deps.OnRoomClosed: it forgets the room's token
 		// count and tells the watcher, which is set once it exists.
 		closedHook = &roomClosedHook{}
+		// notifier posts integration changes in open rooms once the room
+		// service exists.
+		notifier = &lateNotifier{}
 	)
 	if *demoMode {
 		// The real actions over the demo's in-memory clients (LEAD-ARCH round
@@ -234,10 +265,20 @@ func run() error {
 		topo = demo.Builder{}
 		run = demo.Run
 		write = demo.WriteHandoff
+		// Demo mode has the full Integrations page over an in-memory store;
+		// saving a row builds no client (the demo's clients are fakes).
+		ints, err := newIntegrations(cfg, intOptions{Store: intStore, Secrets: secretReg, Notifier: notifier, Env: envView, Log: log, Demo: true, ReservedRefs: reservedRefs})
+		if err != nil {
+			return err
+		}
+		intSvc = ints.svc
 	} else {
 		// The model endpoint first: a wrong provider, region, project or token
 		// budget should stop the server before it opens any connection.
 		// One AWS config for the process, shared by Bedrock and MSK IAM.
+		if err := checkAnthropicKey(os.LookupEnv); err != nil {
+			return err
+		}
 		awsCfg, err := wiring.LoadAWS(ctx, cfg)
 		if err != nil {
 			return fmt.Errorf("server: %w", err)
@@ -246,21 +287,66 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("server: %w", err)
 		}
-		run = ep.Run
-		write = ep.WriteHandoff
-		closedHook.setForget(ep)
 
-		w, err := wiring.Open(ctx, cfg, awsCfg)
-		if err != nil {
-			return fmt.Errorf("server: open the data stack: %w", err)
+		// Every client the tools, topology and watcher use is a wiring.Live
+		// wrapper, so an integration saved on the page takes effect without a
+		// restart (docs/design/integrations.md §4.5). Env wins: categories set
+		// by environment variables are opened from them as before, and a
+		// failure there still refuses start. With no data-stack variables the
+		// server starts in setup mode and saved rows fill the categories
+		// below. Setting only some of them is refused (dataStackFromEnv):
+		// wiring.Open cannot open a subset yet.
+		envCats := wiring.EnvCategories(os.LookupEnv)
+		live, lw := wiring.NewLive(wiring.LiveOptions{Owners: own, Env: envCats, Logger: log})
+		defer lw.Close()
+		// The model endpoint is always built from the config, as before; a
+		// saved Anthropic row replaces it unless the environment sets it.
+		if err := live.SwapModel(ep, nil); err != nil {
+			return fmt.Errorf("server: %w", err)
 		}
-		defer w.Close()
-		wired = w
+		model := live.Model()
+		run = model.Run
+		write = model.WriteHandoff
+		closedHook.setForget(model)
+
+		openEnv, err := dataStackFromEnv(envCats)
+		if err != nil {
+			return err
+		}
+		if openEnv {
+			w, err := wiring.Open(ctx, cfg, awsCfg)
+			if err != nil {
+				return fmt.Errorf("server: open the data stack set by environment variables: %w", err)
+			}
+			if err := live.Adopt(w); err != nil {
+				w.Close()
+				return fmt.Errorf("server: %w", err)
+			}
+		} else {
+			log.Info("server: no data-stack environment variables are set: starting in setup mode; connect the stack on the Integrations page")
+		}
+
+		ints, err := newIntegrations(cfg, intOptions{Store: intStore, Secrets: secretReg, Live: live, Notifier: notifier, Env: envView, Log: log, ReservedRefs: reservedRefs})
+		if err != nil {
+			return err
+		}
+		restored := ints.restore(ctx)
+		integrations.LogSources(log, envView, restored.applied)
+		if len(restored.alertSecrets) > 0 {
+			alerts = withSavedAlertSecrets(alerts, restored.alertSecrets)
+			log.Info("server: alert sources", "enabled", enabledAlertSources(alerts))
+		}
+		intSvc = ints.svc
+
+		// RegisterTools reads the warehouse kind once; take it from whichever
+		// warehouse is now live (env or a saved row).
+		lw.WarehouseKind = live.WarehouseKind()
+		wired = lw
 		acts = actions.NewRegistry()
-		if err := wiring.RegisterTools(toolsReg, acts, w); err != nil {
+		if err := wiring.RegisterTools(toolsReg, acts, lw); err != nil {
 			return fmt.Errorf("server: register tools and actions: %w", err)
 		}
-		topo = w.Builder
+		topo = lw.Builder
 	}
 
 	svc := room.New(room.Deps{
@@ -288,6 +374,8 @@ func run() error {
 		OnRoomOpened:  slack.onRoomOpened(),
 		OnRoomClosed:  closedHook.onClosed,
 	})
+	// Integration changes are posted in every open room from now on.
+	notifier.set(svc)
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
 	loadErr := svc.Load(loadCtx)
@@ -319,7 +407,8 @@ func run() error {
 	defer stopAuthPrune()
 
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions),
-		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities)}
+		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities),
+		httpapi.WithIntegrations(httpapi.Integrations{Service: intSvc, Admins: admins, AlertRestartRequired: true})}
 	if oidcRP != nil {
 		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
 	}

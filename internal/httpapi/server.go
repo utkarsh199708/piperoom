@@ -62,6 +62,9 @@ type Server struct {
 	loginStates auth.LoginStateStore
 	identities  auth.IdentityStore
 	loginLimit  *rateLimiter
+
+	// Integrations page API (WithIntegrations): integrations.go. nil = not mounted.
+	ints *Integrations
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -189,6 +192,9 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/proposals/{pid}/reject", s.handleRejectProposal)
 				short.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)
 				short.Get("/pipelines/{pid}/topology", s.handleTopology)
+				if s.ints != nil {
+					short.Route("/integrations", s.mountIntegrations)
+				}
 			})
 		})
 	})
