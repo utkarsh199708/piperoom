@@ -76,10 +76,7 @@ func TestEvictedElsewhereTellsOnRoomDeleted(t *testing.T) {
 		c.ev.Actor.ID != "ada" || c.ev.Actor.Name != "Ada" || p.Reason != "test data" {
 		t.Fatalf("hook call = %+v (%s)", c, c.ev.Payload)
 	}
-	s.mu.Lock()
-	_, cached := s.rooms[snap.ID]
-	s.mu.Unlock()
-	if cached {
+	if s.cached(snap.ID) != nil {
 		t.Fatal("the deleted room is still cached")
 	}
 }
@@ -99,7 +96,7 @@ func TestEvictedElsewhereWithoutAuditRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.mu.Lock()
-	s.evictLocked(snap.ID, s.rooms[snap.ID])
+	s.evictLocked(snap.ID, s.cached(snap.ID))
 	s.mu.Unlock()
 	if c := nextHookCall(t, calls); c.roomID != snap.ID || c.ev.Type != "" {
 		t.Fatalf("hook call = %+v, want the zero Event", c)

@@ -56,7 +56,7 @@ func (s *Service) OpenRoomForPipeline(pipelineID string) (roomID string, ok bool
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var newest *roomState
-	for id, st := range s.rooms {
+	for id, st := range s.cachedRooms() {
 		if st.snap.PipelineID != pipelineID || !s.roomOpen(st) {
 			continue
 		}
@@ -114,7 +114,7 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 	// simply loses the snapshot vote.
 	s.syncRoom(ctx, row.ID)
 	s.mu.Lock()
-	if st, cached := s.rooms[row.ID]; cached {
+	if st := s.cached(row.ID); st != nil {
 		if s.roomOpen(st) {
 			closedAt = nil
 		} else if st.snap.ClosedAt != nil {

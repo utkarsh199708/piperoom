@@ -388,7 +388,7 @@ func (g *agentGate) release() {
 func (s *Service) emitQueued(g *agentGate, waiting func() bool, detail string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || !s.roomOpen(g.st) || !waiting() {
+	if s.isClosed() || !s.roomOpen(g.st) || !waiting() {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
@@ -410,7 +410,7 @@ func (s *Service) emitQueued(g *agentGate, waiting func() bool, detail string) b
 func (s *Service) emitSlotAcquired(ctx context.Context, g *agentGate) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ctx.Err() != nil || s.closed || !s.roomOpen(g.st) {
+	if ctx.Err() != nil || s.isClosed() || !s.roomOpen(g.st) {
 		return
 	}
 	ectx, cancel := context.WithTimeout(s.ctx, 5*time.Second)

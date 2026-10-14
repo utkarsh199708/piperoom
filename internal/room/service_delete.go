@@ -239,12 +239,6 @@ func (s *Service) roomDeleted(roomID string, deleted events.Event) {
 	}
 }
 
-func (s *Service) isClosed() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closed
-}
-
 // ---- archive ----
 
 // archiveSegment makes one path element of an archive path: characters

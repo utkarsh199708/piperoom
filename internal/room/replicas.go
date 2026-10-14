@@ -189,13 +189,7 @@ func (s *Service) startCoordination() {
 		return
 	}
 	s.coordOnce.Do(func() {
-		s.mu.Lock()
-		closed := s.closed
-		if !closed {
-			s.wg.Add(3)
-		}
-		s.mu.Unlock()
-		if closed {
+		if !s.addWorkers(3) {
 			return
 		}
 		s.coord.WatchAppends(s.ctx, store.AppendWatch{OnAppend: s.follow.noteAppend, OnResync: s.follow.noteResync})
@@ -245,7 +239,7 @@ func (s *Service) runCoordination() {
 func (s *Service) renewLeases() {
 	s.mu.Lock()
 	var ids []string
-	for id, st := range s.rooms {
+	for id, st := range s.cachedRooms() {
 		if st.leased {
 			ids = append(ids, id)
 		}
@@ -272,7 +266,7 @@ func (s *Service) renewLeases() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, id := range ids {
-		st := s.rooms[id]
+		st := s.cached(id)
 		if st == nil || !st.leased {
 			continue
 		}
@@ -292,7 +286,7 @@ func (s *Service) renewLeases() {
 func (s *Service) touchQueuedClaims() {
 	s.mu.Lock()
 	var ids []string
-	for _, st := range s.rooms {
+	for _, st := range s.cachedRooms() {
 		if st.exec != nil {
 			ids = append(ids, st.exec.queuedIDs()...)
 		}
@@ -322,7 +316,7 @@ func (s *Service) runLeaseWatchdog() {
 		}
 		now := time.Now()
 		s.mu.Lock()
-		for id, st := range s.rooms {
+		for id, st := range s.cachedRooms() {
 			if st.leased && now.After(st.leaseValid) {
 				s.loseLeaseLocked(id, st, "no renew confirmed the lease in time")
 			}
@@ -384,7 +378,7 @@ func (s *Service) adoptRoom(roomID string, start time.Time) {
 	}
 	s.holdLeaseLocked(st, start)
 	switch {
-	case s.closed:
+	case s.isClosed():
 		return
 	case !s.roomOpen(st):
 		s.dropLeaseLocked(roomID, st)
@@ -404,7 +398,7 @@ func (s *Service) adoptRoom(roomID string, start time.Time) {
 		if in := openProposalsInput(st); in != nil {
 			st.inbox.push(*in)
 		}
-		s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, s.rawAlert(ctx, roomID), st)
+		s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, st.alertRaw, st)
 	default:
 		if err := s.noteRestartLocked(ctx, roomID, st); err != nil {
 			s.log.Warn("room: adopt room: pause notice failed", "room", roomID, "err", err)
@@ -665,12 +659,13 @@ func (s *Service) followRoom(roomID string, seq int64) {
 	ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
 	defer cancel()
 	s.mu.Lock()
-	st, cached := s.rooms[roomID]
+	st := s.cached(roomID)
+	cached := st != nil
 	var after int64
 	if cached {
 		after = st.snap.LastSeq
 	}
-	if s.closed {
+	if s.isClosed() {
 		s.mu.Unlock()
 		return
 	}
@@ -691,7 +686,7 @@ func (s *Service) followRoom(roomID string, seq int64) {
 		// Deleted by another replica (an admin or its retention) after the
 		// append that woke us.
 		s.mu.Lock()
-		if s.rooms[roomID] == st && !s.closed {
+		if s.cached(roomID) == st && !s.isClosed() {
 			s.evictLocked(roomID, st)
 		}
 		s.mu.Unlock()
@@ -704,7 +699,7 @@ func (s *Service) followRoom(roomID string, seq int64) {
 		return
 	}
 	s.mu.Lock()
-	if s.rooms[roomID] == st && !s.closed {
+	if s.cached(roomID) == st && !s.isClosed() {
 		s.foldFetchedLocked(ctx, roomID, st, evs)
 	}
 	s.mu.Unlock()
@@ -723,7 +718,7 @@ func (s *Service) loadNewRoom(ctx context.Context, roomID string) {
 		}
 		return
 	}
-	snap, pending, err := s.rebuild(ctx, roomID)
+	l, err := s.rebuild(ctx, roomID)
 	if err != nil {
 		if s.ctx.Err() == nil {
 			s.log.Debug("room: follow: load new room failed", "room", roomID, "err", err)
@@ -732,16 +727,15 @@ func (s *Service) loadNewRoom(ctx context.Context, roomID string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.isClosed() {
 		return
 	}
-	if _, ok := s.rooms[roomID]; ok {
+	st := l.state()
+	if !s.cacheRoom(roomID, st) {
 		return // loaded meanwhile; that copy may be newer
 	}
-	st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
-	s.rooms[roomID] = st
-	if snap.Status == "open" {
-		s.indexAlertRoomLocked(ctx, roomID, st)
+	if st.snap.Status == "open" {
+		s.indexAlertRoomLocked(roomID, st, l.dedupKey)
 	}
 }
 
@@ -863,9 +857,8 @@ func (s *Service) closedElsewhereLocked(ctx context.Context, roomID string, st *
 	if st.execCancel != nil {
 		st.execCancel()
 	}
-	if s.onRoomClosed != nil && !s.closed {
-		pipelineID, key := st.snap.PipelineID, hookDedupKey(st.snap.PipelineID, st.dedupKey)
-		s.wg.Add(1)
+	if s.onRoomClosed != nil && s.addWorker() {
+		pipelineID, key := st.snap.PipelineID, hookDedupKey(st.snap.PipelineID, s.dedupKeyOf(st))
 		go func() {
 			defer s.wg.Done()
 			s.onRoomClosed(s.ctx, roomID, pipelineID, key)
@@ -884,10 +877,7 @@ func (s *Service) evictLocked(roomID string, st *roomState) {
 		st.execCancel()
 	}
 	st.leased = false
-	if st.dedupKey != "" && s.alertRooms[st.dedupKey] == roomID {
-		delete(s.alertRooms, st.dedupKey)
-	}
-	delete(s.rooms, roomID)
+	s.uncacheRoom(roomID, st)
 	s.markListDirtyLocked(roomID)
 	s.goneElsewhereLocked(roomID)
 }
@@ -898,10 +888,9 @@ func (s *Service) evictLocked(roomID string, st *roomState) {
 // the row cannot be read the hook gets the zero Event and the sockets get only
 // the close. Caller holds s.mu.
 func (s *Service) goneElsewhereLocked(roomID string) {
-	if s.onRoomDeleted == nil || s.closed {
+	if s.onRoomDeleted == nil || !s.addWorker() {
 		return
 	}
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
@@ -925,12 +914,7 @@ func (s *Service) refreshAll(ctx context.Context) error {
 	}
 	// Only rooms cached before the list is read may be evicted for missing
 	// from it: a room opened here meanwhile is not in the list yet.
-	s.mu.Lock()
-	before := make(map[string]*roomState, len(s.rooms))
-	for id, st := range s.rooms {
-		before[id] = st
-	}
-	s.mu.Unlock()
+	before := s.cachedRooms()
 	rows, err := s.store.ListRooms(ctx)
 	if err != nil {
 		return fmt.Errorf("room: refresh: %w", err)
@@ -945,7 +929,8 @@ func (s *Service) refreshAll(ctx context.Context) error {
 	seen := make(map[string]bool, len(rows))
 	for _, r := range rows {
 		seen[r.ID] = true
-		st, ok := s.rooms[r.ID]
+		st := s.cached(r.ID)
+		ok := st != nil
 		switch {
 		case !ok && r.LastSeq > 0:
 			missing = append(missing, r)
@@ -957,7 +942,7 @@ func (s *Service) refreshAll(ctx context.Context) error {
 		}
 	}
 	for id, st := range before {
-		if !seen[id] && s.rooms[id] == st {
+		if !seen[id] && s.cached(id) == st {
 			s.evictLocked(id, st)
 		}
 	}
@@ -972,38 +957,33 @@ func (s *Service) refreshAll(ctx context.Context) error {
 		}
 		fetched[id] = evs
 	}
-	type built struct {
-		snap    RoomSnapshot
-		pending []agent.HumanInput
-	}
-	rebuilt := make(map[string]built, len(missing))
+	rebuilt := make(map[string]loadedRoom, len(missing))
 	for _, r := range missing {
-		snap, pending, err := s.rebuild(ctx, r.ID)
+		l, err := s.rebuild(ctx, r.ID)
 		if err != nil {
 			s.log.Warn("room: refresh: rebuild failed", "room", r.ID, "err", err)
 			continue
 		}
-		rebuilt[r.ID] = built{snap, pending}
+		rebuilt[r.ID] = l
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.isClosed() {
 		return nil
 	}
 	for id, evs := range fetched {
-		if st := s.rooms[id]; st == stale[id].st {
+		if st := s.cached(id); st == stale[id].st {
 			s.foldFetchedLocked(ctx, id, st, evs)
 		}
 	}
-	for id, b := range rebuilt {
-		if _, ok := s.rooms[id]; ok {
+	for id, l := range rebuilt {
+		st := l.state()
+		if !s.cacheRoom(id, st) {
 			continue // loaded meanwhile (a command or the follower)
 		}
-		st := &roomState{snap: b.snap, inbox: newRoomInbox(b.snap.Shadow), pending: b.pending}
-		s.rooms[id] = st
-		if b.snap.Status == "open" {
-			s.indexAlertRoomLocked(ctx, id, st)
+		if st.snap.Status == "open" {
+			s.indexAlertRoomLocked(id, st, l.dedupKey)
 		}
 		s.markListDirtyLocked(id)
 	}
@@ -1035,9 +1015,7 @@ func (s *Service) prepareAlertKeyRoom(ctx context.Context, indexKey string) stri
 	if s.coord == nil || indexKey == "" {
 		return ""
 	}
-	s.mu.Lock()
-	known := s.alertRooms[indexKey]
-	s.mu.Unlock()
+	known, _ := s.alertRoomFor(indexKey)
 	if known != "" {
 		s.syncRoom(ctx, known)
 	}
@@ -1045,10 +1023,7 @@ func (s *Service) prepareAlertKeyRoom(ctx context.Context, indexKey string) stri
 	if err != nil || row.Status != "open" || row.ID == known {
 		return ""
 	}
-	s.mu.Lock()
-	_, cached := s.rooms[row.ID]
-	s.mu.Unlock()
-	if cached {
+	if s.cached(row.ID) != nil {
 		s.syncRoom(ctx, row.ID)
 	} else {
 		s.loadNewRoom(ctx, row.ID)
@@ -1063,12 +1038,11 @@ func (s *Service) openAlertRoomSharedLocked(indexKey, roomID string) (string, bo
 	if roomID == "" {
 		return "", false
 	}
-	st, ok := s.rooms[roomID]
-	if !ok || !s.roomOpen(st) {
+	st := s.cached(roomID)
+	if st == nil || !s.roomOpen(st) {
 		return "", false
 	}
-	st.dedupKey = indexKey
-	s.alertRooms[indexKey] = roomID
+	s.setAlertKey(roomID, st, indexKey, true)
 	return roomID, true
 }
 
@@ -1128,7 +1102,7 @@ func (s *Service) syncRoom(ctx context.Context, roomID string) {
 	row, err := s.store.GetRoom(ctx, roomID)
 	if errors.Is(err, store.ErrNotFound) {
 		s.mu.Lock()
-		if st := s.rooms[roomID]; st != nil {
+		if st := s.cached(roomID); st != nil {
 			s.evictLocked(roomID, st)
 		}
 		s.mu.Unlock()
@@ -1139,7 +1113,7 @@ func (s *Service) syncRoom(ctx context.Context, roomID string) {
 		return
 	}
 	s.mu.Lock()
-	st := s.rooms[roomID]
+	st := s.cached(roomID)
 	var after int64
 	if st != nil {
 		s.adoptRowLeaseLocked(st, row)
@@ -1155,7 +1129,7 @@ func (s *Service) syncRoom(ctx context.Context, roomID string) {
 			return
 		}
 		s.mu.Lock()
-		if s.rooms[roomID] == st && !s.closed {
+		if s.cached(roomID) == st && !s.isClosed() {
 			s.foldFetchedLocked(ctx, roomID, st, evs)
 		}
 		after = st.snap.LastSeq

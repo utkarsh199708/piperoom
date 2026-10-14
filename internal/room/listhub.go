@@ -71,21 +71,22 @@ func (s *Service) markListDirtyLocked(roomID string) {
 func (s *Service) SubscribeRooms(ctx context.Context) <-chan RoomUpdate {
 	sub := &listSub{ch: make(chan RoomUpdate, listSubBuffer)}
 	h := s.list
-	s.mu.Lock()
-	closed := s.closed
-	if !closed {
-		h.once.Do(func() {
-			s.wg.Add(1)
-			go func() {
-				defer s.wg.Done()
-				s.runListHub()
-			}()
-		})
-	}
-	s.mu.Unlock()
-	if closed {
+	// The hub's place in wg is reserved before once decides whether this call
+	// starts it, and given back when the hub runs already.
+	if !s.addWorker() {
 		close(sub.ch)
 		return sub.ch
+	}
+	started := false
+	h.once.Do(func() {
+		started = true
+		go func() {
+			defer s.wg.Done()
+			s.runListHub()
+		}()
+	})
+	if !started {
+		s.wg.Done()
 	}
 	h.mu.Lock()
 	h.subs[sub] = struct{}{}
@@ -134,7 +135,7 @@ func (s *Service) runListHub() {
 		updates := make([]RoomUpdate, 0, len(ids))
 		s.mu.Lock()
 		for id := range ids {
-			if st, ok := s.rooms[id]; ok {
+			if st := s.cached(id); st != nil {
 				snap := st.snap.Clone()
 				updates = append(updates, RoomUpdate{Room: &snap})
 			} else {

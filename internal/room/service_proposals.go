@@ -192,12 +192,14 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		return "", err
 	}
 	// Preview runs outside s.mu, on the service lifetime context; it waits for
-	// this call to release the lock before it appends anything.
-	s.wg.Add(1)
-	go func(pipelineID string, steps []events.ProposalStep) {
-		defer s.wg.Done()
-		s.previewProposal(s.ctx, roomID, pipelineID, p.ProposalID, steps)
-	}(st.snap.PipelineID, p.Steps)
+	// this call to release the lock before it appends anything. A closing
+	// service previews nothing.
+	if s.addWorker() {
+		go func(pipelineID string, steps []events.ProposalStep) {
+			defer s.wg.Done()
+			s.previewProposal(s.ctx, roomID, pipelineID, p.ProposalID, steps)
+		}(st.snap.PipelineID, p.Steps)
+	}
 	return p.ProposalID, nil
 }
 

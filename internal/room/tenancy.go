@@ -99,7 +99,7 @@ func (s *Service) checkVisibleLocked(ctx context.Context, u User, roomID string)
 // its rooms row: no snapshot is cloned or rebuilt for a visibility check. A
 // missing room is the 404 of mapStoreErr. Caller must hold s.mu.
 func (s *Service) roomPipelineLocked(ctx context.Context, roomID string) (string, error) {
-	if st, ok := s.rooms[roomID]; ok {
+	if st := s.cached(roomID); st != nil {
 		return st.snap.PipelineID, nil
 	}
 	row, err := s.store.GetRoom(ctx, roomID)

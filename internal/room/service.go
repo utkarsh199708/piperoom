@@ -168,7 +168,13 @@ type roomState struct {
 	agentRun        uint64             // generation of the latest agent start; see releaseAgent
 	execCancel      context.CancelFunc // cancels the room's executor on close
 	exec            *execQueue         // nil until the first proposal is approved
-	dedupKey        string             // alert index key of an alert room; "" otherwise
+	// dedupKey is the alert index key of an alert room; "" otherwise. It is
+	// guarded by s.reg, not s.mu: the alert index reads the keys of other
+	// rooms (releaseAlertKeyLocked). Read it with dedupKeyOf.
+	dedupKey string
+	// alertRaw is room.created.alert, the raw alert every agent run of the
+	// room starts from; nil for a room opened by hand.
+	alertRaw json.RawMessage
 	// firstLook is set on a room opened in this process until its agent
 	// starts: only such a room gets the triage pass (service_triage.go).
 	firstLook bool
@@ -268,7 +274,13 @@ type Service struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu     sync.Mutex
+	// mu serialises the work on cached rooms: commands, folds and loads.
+	mu sync.Mutex
+
+	// reg guards the room registry (registry.go): the cache, the alert index
+	// and closed. It is a leaf lock, taken inside mu and never held across
+	// I/O, a hook or another lock.
+	reg    sync.Mutex
 	closed bool
 	rooms  map[string]*roomState
 	// alertRooms maps the dedup key of each open webhook room to that room, so
@@ -374,13 +386,15 @@ func New(d Deps) *Service {
 // started (agent supervisors, executor queues) to stop. It is idempotent and
 // returns promptly once all of them have exited.
 func (s *Service) Close() {
-	s.mu.Lock()
+	// closed is set under reg, where addWorker checks it, so no goroutine is
+	// added to wg once Wait may have started.
+	s.reg.Lock()
 	if s.closed {
-		s.mu.Unlock()
+		s.reg.Unlock()
 		return
 	}
 	s.closed = true
-	s.mu.Unlock()
+	s.reg.Unlock()
 	s.cancel()
 	s.wg.Wait()
 	if s.coord != nil {
@@ -453,7 +467,7 @@ func (s *Service) loadRowsLocked(ctx context.Context, rooms []store.Room, restar
 		}
 	}
 	for _, r := range rooms {
-		if _, ok := s.rooms[r.ID]; ok {
+		if s.cached(r.ID) != nil {
 			continue
 		}
 		if r.LastSeq == 0 {
@@ -466,16 +480,16 @@ func (s *Service) loadRowsLocked(ctx context.Context, rooms []store.Room, restar
 			}
 			continue
 		}
-		snap, pending, err := s.rebuild(ctx, r.ID)
+		l, err := s.rebuild(ctx, r.ID)
 		if err != nil {
 			s.log.Warn("room: rebuild failed", "room", r.ID, "err", err)
 			continue
 		}
-		st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
-		s.rooms[r.ID] = st
-		s.loadUsageLocked(ctx, r.ID, st)
+		st := l.state()
+		s.cacheRoom(r.ID, st)
+		snap := st.snap
 		if snap.Status == "open" {
-			s.indexAlertRoomLocked(ctx, r.ID, st)
+			s.indexAlertRoomLocked(r.ID, st, l.dedupKey)
 			// With a shared store a proposal may be running on another
 			// replica right now; the stale-claim sweep decides instead.
 			if s.coord == nil {
@@ -541,7 +555,7 @@ func (s *Service) ensureAgentLocked(ctx context.Context, roomID string, st *room
 	if st.snap.Shadow || st.agentCancel != nil || !s.roomOpen(st) || st.snap.LogCap == LogCapFull || st.deleting {
 		return
 	}
-	s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, s.rawAlert(ctx, roomID), st)
+	s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, st.alertRaw, st)
 }
 
 // interruptStaleProposalsLocked records the outcome of proposals that were
@@ -614,59 +628,75 @@ func (s *Service) interruptedStep(ctx context.Context, roomID string, p Proposal
 	return 0
 }
 
-func (s *Service) rawAlert(ctx context.Context, roomID string) json.RawMessage {
-	p, _ := s.roomCreated(ctx, roomID)
-	return p.Alert
-}
-
-// roomCreated returns the payload of a room's room.created event.
-func (s *Service) roomCreated(ctx context.Context, roomID string) (events.RoomCreatedPayload, bool) {
-	first, err := s.store.Since(ctx, roomID, 0, 1)
-	if err != nil || len(first) == 0 || first[0].Type != events.RoomCreated {
-		return events.RoomCreatedPayload{}, false
-	}
-	return decode[events.RoomCreatedPayload](first[0])
-}
-
 // getStateLocked returns the cached room state, rebuilding it from the log if
 // the room is not cached. It does no read for a cached room: with a shared
 // store the follower keeps the cache close to the log, and a command calls
 // syncRoom (outside s.mu) before it locks. Caller must hold s.mu.
 func (s *Service) getStateLocked(ctx context.Context, roomID string) (*roomState, error) {
-	if st, ok := s.rooms[roomID]; ok {
+	if st := s.cached(roomID); st != nil {
 		return st, nil
 	}
 	if _, err := s.store.GetRoom(ctx, roomID); err != nil {
 		return nil, mapStoreErr(err)
 	}
-	snap, pending, err := s.rebuild(ctx, roomID)
+	l, err := s.rebuild(ctx, roomID)
 	if err != nil {
 		return nil, fmt.Errorf("room: rebuild %s: %w", roomID, err)
 	}
-	st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
-	s.rooms[roomID] = st
-	s.loadUsageLocked(ctx, roomID, st)
-	if snap.Status == "open" {
-		s.indexAlertRoomLocked(ctx, roomID, st)
+	st := l.state()
+	s.cacheRoom(roomID, st)
+	if st.snap.Status == "open" {
+		s.indexAlertRoomLocked(roomID, st, l.dedupKey)
 	}
 	return st, nil
 }
 
+// loadedRoom is what rebuild reads from the store for a room that enters the
+// cache.
+type loadedRoom struct {
+	snap RoomSnapshot
+	// pending is the human input logged after the agent's last own event
+	// (trackPending).
+	pending []agent.HumanInput
+	// logBytes is the store's byte count of the log (loadUsage).
+	logBytes int64
+	// dedupKey is the alert index key from room.created (alertIndexKeyOf); ""
+	// for a room no alert opened.
+	dedupKey string
+	// alertRaw is room.created.alert.
+	alertRaw json.RawMessage
+}
+
+// state returns a new cache entry for the loaded room.
+func (l loadedRoom) state() *roomState {
+	return &roomState{
+		snap: l.snap, inbox: newRoomInbox(l.snap.Shadow), pending: l.pending,
+		logBytes: l.logBytes, alertRaw: l.alertRaw,
+	}
+}
+
 // rebuild folds the whole log into a snapshot, then refreshes the driver lease
-// from the rooms row (renewals are persisted there, not in the log). pending is
-// the human input logged after the agent's last own event (trackPending).
-func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, []agent.HumanInput, error) {
+// from the rooms row (renewals are persisted there, not in the log) and reads
+// the log's byte count. The room.created it folds gives the alert key and the
+// raw alert, so nothing reads that event again.
+func (s *Service) rebuild(ctx context.Context, roomID string) (loadedRoom, error) {
 	st := &roomState{snap: NewSnapshot()}
+	var created *events.RoomCreatedPayload
 	after := int64(0)
 	for {
 		evs, err := s.store.Since(ctx, roomID, after, 1000)
 		if err != nil {
-			return st.snap, nil, err
+			return loadedRoom{}, err
 		}
 		if len(evs) == 0 {
 			break
 		}
 		for _, e := range evs {
+			if after == 0 && e.Type == events.RoomCreated {
+				if p, ok := decode[events.RoomCreatedPayload](e); ok {
+					created = &p
+				}
+			}
 			st.snap = Apply(st.snap, e)
 			trackPending(st, e)
 			after = e.Seq
@@ -692,7 +722,12 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, []a
 			snap.Driver.LeaseUntil = row.DriverLeaseUntil.UTC()
 		}
 	}
-	return snap, st.pending, nil
+	l := loadedRoom{snap: snap, pending: st.pending, logBytes: s.loadUsage(ctx, roomID)}
+	if created != nil {
+		l.dedupKey = alertIndexKeyOf(*created, snap.PipelineID)
+		l.alertRaw = created.Alert
+	}
+	return l, nil
 }
 
 // emitLocked appends one event, folds it into the cached snapshot and feeds
@@ -796,8 +831,8 @@ func (s *Service) agentEmit(ctx context.Context, roomID string, run uint64, typ 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, ok := s.rooms[roomID]
-	if !ok {
+	st := s.cached(roomID)
+	if st == nil {
 		return fmt.Errorf("room: agent emit on unknown room %q", roomID)
 	}
 	if run != outsideRun {
@@ -842,8 +877,8 @@ func (s *Service) executorEmit(ctx context.Context, roomID string, typ events.Ty
 func (s *Service) emitAs(ctx context.Context, roomID string, actor events.Actor, typ events.Type, payload any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, ok := s.rooms[roomID]
-	if !ok {
+	st := s.cached(roomID)
+	if st == nil {
 		return fmt.Errorf("room: emit on unknown room %q", roomID)
 	}
 	_, err := s.emitLocked(ctx, st, roomID, typ, actor, payload)
@@ -1201,13 +1236,16 @@ const (
 // The room counts as having a run from this call on, so more steers or
 // mentions while it is queued do not queue it again.
 func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.RawMessage, st *roomState) {
-	if s.closed {
+	// The supervisor's place in wg is reserved first, so nothing below
+	// happens (no lease taken, no run counted) once Close has begun.
+	if !s.addWorker() {
 		return
 	}
 	// With a shared store only the lease owner runs the room's agent; when
 	// another replica owns it, that replica reads this room's input from the
 	// log (docs/design/replicas.md section 4).
 	if !s.claimLeaseLocked(roomID, st) {
+		s.wg.Done()
 		return
 	}
 	if st.snap.Shadow {
@@ -1226,7 +1264,6 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 		firstLook = s.startTriageLocked(ctx, roomID, run, agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw})
 	}
 	st.firstLook = false
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		// However the supervisor ends, its slot or queue entry goes back.

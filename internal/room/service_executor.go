@@ -91,7 +91,10 @@ func (q *execQueue) busy() bool {
 // replica refreshes, never "approved and unclaimed". A claim another executor
 // already holds queues nothing. Caller must hold s.mu.
 func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
-	if s.closed {
+	// The worker's place in wg is reserved before the claim, so a closing
+	// service claims nothing; it is given back when the room has its worker
+	// already or nothing is queued.
+	if !s.addWorker() {
 		return
 	}
 	if s.coord != nil {
@@ -103,10 +106,12 @@ func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
 			// not, the proposal reads "approved, unclaimed" and the stale
 			// sweep records it after its grace; if it did, as a dead claim.
 			s.log.Error("room: claim approved proposal failed; not queued", "proposal", p.ProposalID, "err", err)
+			s.wg.Done()
 			return
 		}
 		if !claimed {
 			s.log.Info("room: proposal already claimed by another executor; not queued here", "proposal", p.ProposalID)
+			s.wg.Done()
 			return
 		}
 	}
@@ -114,8 +119,9 @@ func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
 		st.exec = newExecQueue()
 		execCtx, cancel := context.WithCancel(s.ctx)
 		st.execCancel = cancel
-		s.wg.Add(1)
 		go s.runExecutor(execCtx, p.RoomID, st.exec)
+	} else {
+		s.wg.Done()
 	}
 	st.exec.push(p)
 }
@@ -629,6 +635,6 @@ func (s *Service) finishStepRow(ctx context.Context, proposalID string, i int, s
 func (s *Service) isRoomOpen(ctx context.Context, roomID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.rooms[roomID]
+	st := s.cached(roomID)
 	return st != nil && st.snap.Status == "open"
 }

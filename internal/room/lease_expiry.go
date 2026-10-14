@@ -83,13 +83,7 @@ func (s *Service) leaseExpiryDueLocked(st *roomState) (events.ControlLeaseExpire
 // when the service lifetime ends (Close).
 func (s *Service) startLeaseExpiry() {
 	s.leaseOnce.Do(func() {
-		s.mu.Lock()
-		closed := s.closed
-		if !closed {
-			s.wg.Add(1)
-		}
-		s.mu.Unlock()
-		if closed {
+		if !s.addWorker() {
 			return
 		}
 		// The ticker is made here, not in the goroutine, so that a Load after
@@ -134,13 +128,12 @@ func (s *Service) runLeaseExpiry(tick <-chan time.Time) {
 // the conditional append (emitCheckedLocked) makes sure only one event lands:
 // the others fold it, find the room no longer due and write nothing.
 func (s *Service) checkLeases(ctx context.Context) {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	if s.isClosed() {
 		return
 	}
+	s.mu.Lock()
 	var due []string
-	for id, st := range s.rooms {
+	for id, st := range s.cachedRooms() {
 		if _, ok := s.leaseExpiryDueLocked(st); ok {
 			due = append(due, id)
 		}
@@ -181,12 +174,12 @@ func (s *Service) checkLeases(ctx context.Context) {
 // emitLeaseExpired re-checks one room under s.mu and appends its
 // control.lease_expired as the system actor.
 func (s *Service) emitLeaseExpired(ctx context.Context, roomID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	if s.isClosed() {
 		return
 	}
-	st := s.rooms[roomID]
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.cached(roomID)
 	if st == nil {
 		return
 	}

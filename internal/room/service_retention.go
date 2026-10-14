@@ -173,8 +173,8 @@ func (s *Service) evictRooms(ids []string, frame func(roomID string, lastSeq int
 	lastSeqs := make(map[string]int64, len(ids))
 	s.mu.Lock()
 	for _, id := range ids {
-		st, ok := s.rooms[id]
-		if !ok {
+		st := s.cached(id)
+		if st == nil {
 			continue
 		}
 		lastSeqs[id] = st.snap.LastSeq
@@ -188,10 +188,7 @@ func (s *Service) evictRooms(ids []string, frame func(roomID string, lastSeq int
 			st.graceTimer.Stop()
 		}
 		s.releaseAlertKeyLocked(id, st)
-		if st.dedupKey != "" && s.alertRooms[st.dedupKey] == id {
-			delete(s.alertRooms, st.dedupKey)
-		}
-		delete(s.rooms, id)
+		s.uncacheRoom(id, st)
 		s.markListDirtyLocked(id)
 	}
 	s.mu.Unlock()

@@ -340,11 +340,11 @@ func TestReplicasOneAgentPerRoom(t *testing.T) {
 		b, _ := json.Marshal(s)
 		return b
 	}
-	want, _, err := a.rebuild(ctx, room)
+	want, err := a.rebuild(ctx, room)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantJSON := norm(want)
+	wantJSON := norm(want.snap)
 	for _, s := range svcs {
 		// Reads answer from the cache the follower keeps: give it a moment.
 		var gotJSON []byte

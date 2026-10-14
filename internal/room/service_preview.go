@@ -83,8 +83,8 @@ func (s *Service) previewProposal(parent context.Context, roomID, pipelineID, pr
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st, ok := s.rooms[roomID]
-	if !ok || !s.roomOpen(st) {
+	st := s.cached(roomID)
+	if st == nil || !s.roomOpen(st) {
 		return
 	}
 	open := false

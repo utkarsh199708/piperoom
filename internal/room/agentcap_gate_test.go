@@ -195,9 +195,7 @@ func TestGatedInboxDrainQueuedThenRoomClosed(t *testing.T) {
 	if inUse, queued := svc.slots.stats(); inUse != 1 || queued != 0 {
 		t.Fatalf("slots: in use %d, queued %d; want 1 (room A) and 0", inUse, queued)
 	}
-	svc.mu.Lock()
-	in := svc.rooms[b].inbox
-	svc.mu.Unlock()
+	in := svc.cached(b).inbox
 	if n := in.pending(); n != 2 {
 		t.Fatalf("inbox has %d inputs, want the 2 that were taken", n)
 	}

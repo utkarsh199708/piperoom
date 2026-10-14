@@ -150,7 +150,7 @@ func (s *Service) completeHandoff(ctx context.Context, user, to User, roomID, re
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st2 := s.rooms[roomID]
+	st2 := s.cached(roomID)
 	if st2 == nil {
 		return events.Event{}, notFound("room not found")
 	}
@@ -230,7 +230,7 @@ func (s *Service) failHandoff(ctx context.Context, roomID, requestID, reason str
 	s.syncRoom(fctx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.rooms[roomID]
+	st := s.cached(roomID)
 	if st == nil {
 		return
 	}

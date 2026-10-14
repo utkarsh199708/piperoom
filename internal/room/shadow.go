@@ -106,7 +106,7 @@ func (s *Service) updateShadowRun(ctx context.Context, roomID string, fn func(*s
 // startShadowLocked starts a shadow room's one-shot run (design 3.3). The run
 // gets no actions and no proposal creator, the room's inbox is closed so it
 // ends at its first end_turn, and its options are ShadowOptions. Caller holds
-// s.mu.
+// s.mu and has reserved the run's place in s.wg (startAgentLocked).
 func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.RawMessage, st *roomState) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	st.agentCancel = cancel
@@ -114,7 +114,6 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 	run := st.agentRun
 	st.shadowActive = true
 	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		defer cancel()
@@ -416,7 +415,7 @@ func (s *Service) sweepShadowLocked(ctx context.Context) {
 		}
 	}
 	now := s.now().UTC()
-	for id, st := range s.rooms {
+	for id, st := range s.cachedRooms() {
 		if !st.snap.Shadow {
 			continue
 		}
@@ -456,7 +455,7 @@ func (s *Service) sweepShadowLocked(ctx context.Context) {
 		return
 	}
 	for _, id := range ids {
-		if st, ok := s.rooms[id]; ok && st.snap.Shadow {
+		if st := s.cached(id); st != nil && st.snap.Shadow {
 			s.revealLocked(ctx, id, st)
 		}
 	}
@@ -832,7 +831,7 @@ func (s *Service) shadowMetrics(ctx context.Context, pipelineID string, since ti
 	}
 	snaps := make(map[string]RoomSnapshot, len(runs))
 	for _, r := range runs {
-		if st, ok := s.rooms[r.RoomID]; ok {
+		if st := s.cached(r.RoomID); st != nil {
 			snaps[r.RoomID] = st.snap.Clone()
 		}
 	}

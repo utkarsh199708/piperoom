@@ -77,7 +77,7 @@ func (s *Service) Trace(ctx context.Context, user User, roomID, table, key strin
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st2 := s.rooms[roomID]
+	st2 := s.cached(roomID)
 	if st2 == nil {
 		return events.Event{}, notFound("room not found")
 	}

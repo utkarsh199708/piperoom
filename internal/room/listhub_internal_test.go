@@ -67,7 +67,7 @@ func TestListHubCoalesces(t *testing.T) {
 	// Hold the service lock while many events fold: the hub cannot copy
 	// until it is released, so the burst becomes few updates.
 	s.mu.Lock()
-	st := s.rooms[snap.ID]
+	st := s.cached(snap.ID)
 	for i := range 50 {
 		if _, err := s.emitLocked(context.Background(), st, snap.ID, events.AgentMessage, events.AgentActor, events.AgentMessagePayload{Text: "m" + string(rune('a'+i%26))}); err != nil {
 			s.mu.Unlock()

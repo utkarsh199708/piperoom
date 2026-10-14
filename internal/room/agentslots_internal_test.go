@@ -280,9 +280,9 @@ func TestAgentGateRefusesOnClosingService(t *testing.T) {
 	}
 	// Close has begun (closed is set) but no context is cancelled yet: r1
 	// finishes and gives its slot to the queued r2.
-	s.mu.Lock()
+	s.reg.Lock()
 	s.closed = true
-	s.mu.Unlock()
+	s.reg.Unlock()
 	close(release)
 	time.Sleep(300 * time.Millisecond)
 	s.cancel()

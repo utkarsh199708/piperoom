@@ -40,20 +40,20 @@ func (s *Service) usage(st *roomState) store.Usage {
 	}
 }
 
-// loadUsageLocked reads a room's byte counter from the store when the room
+// loadUsage reads a room's byte counter from the store, for a room that
 // enters the cache from the log. A store without counters, or a failed read,
-// leaves 0: the store still enforces its caps, only the warning comes late.
-func (s *Service) loadUsageLocked(ctx context.Context, roomID string, st *roomState) {
+// gives 0: the store still enforces its caps, only the warning comes late.
+func (s *Service) loadUsage(ctx context.Context, roomID string) int64 {
 	c, ok := s.store.(store.Capped)
 	if !ok {
-		return
+		return 0
 	}
 	u, err := c.RoomUsage(ctx, roomID)
 	if err != nil {
 		s.log.Warn("room: read log usage failed", "room", roomID, "err", err)
-		return
+		return 0
 	}
-	st.logBytes = u.Bytes
+	return u.Bytes
 }
 
 // ReloadUsage reads every cached room's byte counter from the store again.
@@ -61,19 +61,13 @@ func (s *Service) loadUsageLocked(ctx context.Context, roomID string, st *roomSt
 // before migration 00012, so their 90% warning and log_full stop use the
 // counted size instead of the bytes appended since the start.
 func (s *Service) ReloadUsage(ctx context.Context) {
-	s.mu.Lock()
-	ids := make([]string, 0, len(s.rooms))
-	for id := range s.rooms {
-		ids = append(ids, id)
-	}
-	s.mu.Unlock()
-	for _, id := range ids {
+	for id := range s.cachedRooms() {
 		if ctx.Err() != nil {
 			return
 		}
 		s.mu.Lock()
-		if st, ok := s.rooms[id]; ok {
-			s.loadUsageLocked(ctx, id, st)
+		if st := s.cached(id); st != nil {
+			st.logBytes = s.loadUsage(ctx, id)
 		}
 		s.mu.Unlock()
 	}
@@ -190,14 +184,15 @@ func (s *Service) EnforceOpenLimit(ctx context.Context) (OpenLimitResult, error)
 		s.mu.Unlock()
 		return res, fmt.Errorf("room: open-room limit: %w", err)
 	}
-	ids := make([]string, 0, len(s.rooms))
-	for id := range s.rooms {
+	rooms := s.cachedRooms()
+	ids := make([]string, 0, len(rooms))
+	for id := range rooms {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids) // a stable order for logs and tests
 	var expired []string
 	for _, id := range ids {
-		st := s.rooms[id]
+		st := rooms[id]
 		if st.deleting {
 			continue
 		}

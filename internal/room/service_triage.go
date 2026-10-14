@@ -48,7 +48,10 @@ func (s *Service) startTriageLocked(ctx context.Context, roomID string, run uint
 		Sink:   roomSink{s: s, roomID: roomID, run: run},
 		Logger: s.log,
 	}
-	s.wg.Add(1)
+	if !s.addWorker() {
+		close(out) // a closing service runs no pass
+		return out
+	}
 	go func() {
 		defer s.wg.Done()
 		defer close(out)
@@ -122,7 +125,7 @@ func (s *Service) alertUpdateLocked(roomID string, st *roomState, seq int64, raw
 // agent.triage is at least refireTriageAfter old and the agent is idle or
 // queued. It uses no agent slot. Caller holds s.mu.
 func (s *Service) refireTriageLocked(roomID string, st *roomState, raw json.RawMessage) {
-	if s.triage == nil || s.closed || st.snap.Triage == nil || st.agentCancel == nil {
+	if s.triage == nil || s.isClosed() || st.snap.Triage == nil || st.agentCancel == nil {
 		return
 	}
 	if s.now().Sub(st.snap.Triage.At) < refireTriageAfter {

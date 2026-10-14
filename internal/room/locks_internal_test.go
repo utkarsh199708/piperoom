@@ -1,0 +1,942 @@
+package room
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"math/rand/v2"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"piperoom/internal/agent"
+	"piperoom/internal/alertin"
+	"piperoom/internal/events"
+	"piperoom/internal/owners"
+	"piperoom/internal/store"
+	"piperoom/internal/store/memstore"
+)
+
+// Tests for the room service's locking: a slow database call for one room
+// must not hold up reads of, or commands on, any other room; and the cache
+// must stay equal to the log under concurrent load.
+
+// gatedStore is a memstore that is slow for one room: while it is armed,
+// Append and AppendIfLast for that room wait before they write, and Since
+// for it waits after it has read, until the test releases it (or the call's
+// context ends). Calls for every other room go straight through.
+type gatedStore struct {
+	*memstore.Store
+	mu      sync.Mutex
+	room    string
+	gate    chan struct{}
+	entered chan string
+	loads   map[string]int // Since(room, 0, ...) calls: rebuilds of each room
+}
+
+func newGatedStore() *gatedStore {
+	return &gatedStore{Store: memstore.New(), entered: make(chan string, 64), loads: map[string]int{}}
+}
+
+// arm makes roomID slow until release is called. release is idempotent.
+func (g *gatedStore) arm(roomID string) (release func()) {
+	gate := make(chan struct{})
+	g.mu.Lock()
+	g.room, g.gate = roomID, gate
+	g.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			g.mu.Lock()
+			if g.gate == gate {
+				g.room, g.gate = "", nil
+			}
+			g.mu.Unlock()
+			close(gate)
+		})
+	}
+}
+
+// hold waits while roomID is armed and reports op as held.
+func (g *gatedStore) hold(ctx context.Context, op, roomID string) error {
+	g.mu.Lock()
+	gate := g.gate
+	if roomID != g.room {
+		gate = nil
+	}
+	g.mu.Unlock()
+	if gate == nil {
+		return nil
+	}
+	select {
+	case g.entered <- op:
+	default:
+	}
+	select {
+	case <-gate:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// waitHeld waits until a call of op is held.
+func (g *gatedStore) waitHeld(t *testing.T, op string) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case got := <-g.entered:
+			if got == op {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("no %s call was held", op)
+		}
+	}
+}
+
+func (g *gatedStore) loadsOf(roomID string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.loads[roomID]
+}
+
+func (g *gatedStore) Append(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
+	if err := g.hold(ctx, "append", roomID); err != nil {
+		return events.Event{}, err
+	}
+	return g.Store.Append(ctx, roomID, typ, actor, payload)
+}
+
+func (g *gatedStore) Since(ctx context.Context, roomID string, afterSeq int64, limit int) ([]events.Event, error) {
+	if afterSeq == 0 {
+		g.mu.Lock()
+		g.loads[roomID]++
+		g.mu.Unlock()
+	}
+	evs, err := g.Store.Since(ctx, roomID, afterSeq, limit)
+	if herr := g.hold(ctx, "since", roomID); herr != nil {
+		return nil, herr
+	}
+	return evs, err
+}
+
+// within fails the test unless f returns, without an error, within d. f runs
+// on its own goroutine: a call stuck behind a lock does not hang the test, it
+// ends when the test releases the store.
+func within(t *testing.T, d time.Duration, what string, f func() error) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- f() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	case <-time.After(d):
+		t.Fatalf("%s did not return within %s", what, d)
+	}
+}
+
+// tenantOwners turns tenancy on, so CheckRoomVisible has to look the room up:
+// arjun and priya see pipeline orders, kabir sees nothing.
+func tenantOwners() *owners.Owners {
+	return &owners.Owners{
+		Tenants: map[string]owners.Tenant{"a": {Members: owners.Principals{
+			{Kind: owners.KindUser, Name: "arjun"}, {Kind: owners.KindUser, Name: "priya"},
+		}}},
+		Pipelines: []owners.Pipeline{{ID: "orders", Tenant: "a", SourceTables: []string{"public.orders"}}},
+	}
+}
+
+func idleRun(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
+	<-ctx.Done()
+	return nil
+}
+
+func newLockService(t *testing.T, st store.Store) *Service {
+	t.Helper()
+	svc := New(Deps{Store: st, Users: DefaultUsers(), Owners: tenantOwners(), Run: idleRun})
+	t.Cleanup(svc.Close)
+	return svc
+}
+
+func lockUser(t *testing.T, svc *Service, id string) User {
+	t.Helper()
+	u, ok := svc.LookupUser(id)
+	if !ok {
+		t.Fatalf("no user %q", id)
+	}
+	return u
+}
+
+func createRooms(t *testing.T, svc *Service, n int) []string {
+	t.Helper()
+	arjun := lockUser(t, svc, "arjun")
+	ids := make([]string, n)
+	for i := range ids {
+		snap, err := svc.CreateRoom(context.Background(), arjun, fmt.Sprintf("room %d", i), "sev2", "orders")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = snap.ID
+	}
+	return ids
+}
+
+// stallAppend starts a comment on roomID whose append the store holds, and
+// returns once it is held. The comment finishes after release; wait returns
+// its error.
+func stallAppend(t *testing.T, svc *Service, st *gatedStore, roomID string) (release func(), wait func() error) {
+	t.Helper()
+	release = st.arm(roomID)
+	t.Cleanup(release)
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.AddComment(context.Background(), lockUser(t, svc, "arjun"), roomID, "", "held by a slow database")
+		done <- err
+	}()
+	st.waitHeld(t, "append")
+	return release, func() error {
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(5 * time.Second):
+			return errors.New("the held comment did not finish after release")
+		}
+	}
+}
+
+// While one room's append is stuck in the database, reads of other rooms, of
+// the room list and of the stuck room itself answer at once: from what each
+// room last published, not from behind the stuck command.
+func TestSlowAppendReadsDoNotWait(t *testing.T) {
+	t.Skip("enabled in step 3: reads answer from the published snapshot")
+	st := newGatedStore()
+	svc := newLockService(t, st)
+	ids := createRooms(t, svc, 2)
+	a, b := ids[0], ids[1]
+	before, err := svc.GetRoom(context.Background(), a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, wait := stallAppend(t, svc, st, a)
+	ctx := context.Background()
+
+	within(t, time.Second, "GetRoom(B)", func() error {
+		snap, err := svc.GetRoom(ctx, b)
+		if err == nil && snap.ID != b {
+			err = fmt.Errorf("got room %s", snap.ID)
+		}
+		return err
+	})
+	within(t, time.Second, "ListRooms", func() error {
+		list, err := svc.ListRooms(ctx)
+		if err == nil && len(list) != 2 {
+			err = fmt.Errorf("listed %d rooms, want 2", len(list))
+		}
+		return err
+	})
+	within(t, time.Second, "CheckRoomVisible(B)", func() error {
+		if err := svc.CheckRoomVisible(ctx, lockUser(t, svc, "priya"), b); err != nil {
+			return err
+		}
+		if err := svc.CheckRoomVisible(ctx, lockUser(t, svc, "kabir"), b); !isNotFound(err) {
+			return fmt.Errorf("kabir: err = %v, want not found", err)
+		}
+		return nil
+	})
+	within(t, time.Second, "GetRoom(A)", func() error {
+		snap, err := svc.GetRoom(ctx, a)
+		if err == nil && snap.LastSeq != before.LastSeq {
+			err = fmt.Errorf("last seq %d, want %d (the stuck comment is not published yet)", snap.LastSeq, before.LastSeq)
+		}
+		return err
+	})
+	within(t, time.Second, "Events(B)", func() error {
+		_, last, err := svc.Events(ctx, b, 0, 10)
+		if err == nil && last == 0 {
+			err = errors.New("last seq 0")
+		}
+		return err
+	})
+
+	release()
+	if err := wait(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := svc.GetRoom(ctx, a)
+	if err != nil || after.LastSeq != before.LastSeq+1 {
+		t.Fatalf("after release: last seq %d (err %v), want %d", after.LastSeq, err, before.LastSeq+1)
+	}
+}
+
+// While one room's append is stuck in the database, commands on other rooms
+// go through, and the room list socket hears about them.
+func TestSlowAppendOtherRoomCommandsDoNotWait(t *testing.T) {
+	t.Skip("enabled in phase B: per-room lock flip")
+	st := newGatedStore()
+	svc := newLockService(t, st)
+	ids := createRooms(t, svc, 2)
+	a, b := ids[0], ids[1]
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	updates := svc.SubscribeRooms(ctx)
+	release, wait := stallAppend(t, svc, st, a)
+	arjun := lockUser(t, svc, "arjun")
+
+	var seq int64
+	within(t, time.Second, "AddComment(B)", func() error {
+		e, err := svc.AddComment(ctx, arjun, b, "", "room B is fine")
+		seq = e.Seq
+		return err
+	})
+	within(t, time.Second, "Steer(B)", func() error {
+		e, err := svc.Steer(ctx, arjun, b, "look at the connector")
+		if err == nil && e.Type != events.SteerSent {
+			err = fmt.Errorf("steer logged as %s, want the driver's steer.sent", e.Type)
+		}
+		return err
+	})
+	within(t, time.Second, "room list update for B", func() error {
+		for up := range updates {
+			if up.Room != nil && up.Room.ID == b && up.Room.LastSeq >= seq {
+				return nil
+			}
+		}
+		return errors.New("updates closed")
+	})
+
+	release()
+	if err := wait(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// loadedLater opens n rooms through one service and returns a second service
+// on the same store that has cached none of them, as after a restart without
+// Load.
+func loadedLater(t *testing.T, st *gatedStore, n int) (*Service, []string) {
+	t.Helper()
+	first := New(Deps{Store: st, Users: DefaultUsers(), Owners: tenantOwners(), Run: idleRun})
+	ids := createRooms(t, first, n)
+	first.Close()
+	return newLockService(t, st), ids
+}
+
+// While one room's load is stuck in the database, a cached room still reads
+// at once.
+func TestSlowLoadCachedReadsDoNotWait(t *testing.T) {
+	t.Skip("enabled in step 3: reads answer from the published snapshot")
+	st := newGatedStore()
+	svc, ids := loadedLater(t, st, 2)
+	a, b := ids[0], ids[1]
+	ctx := context.Background()
+	if _, err := svc.GetRoom(ctx, b); err != nil { // B is cached from here on
+		t.Fatal(err)
+	}
+	release := st.arm(a)
+	t.Cleanup(release)
+	loaded := make(chan error, 1)
+	go func() {
+		_, err := svc.GetRoom(ctx, a)
+		loaded <- err
+	}()
+	st.waitHeld(t, "since")
+
+	within(t, time.Second, "GetRoom(B)", func() error {
+		_, err := svc.GetRoom(ctx, b)
+		return err
+	})
+	within(t, time.Second, "CheckRoomVisible(B)", func() error {
+		return svc.CheckRoomVisible(ctx, lockUser(t, svc, "arjun"), b)
+	})
+
+	release()
+	select {
+	case err := <-loaded:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("GetRoom(A) did not finish after release")
+	}
+}
+
+// While one room's load is stuck in the database, the room list still
+// answers.
+func TestSlowLoadListRoomsDoesNotWait(t *testing.T) {
+	t.Skip("enabled in phase B: per-room lock flip")
+	st := newGatedStore()
+	svc, ids := loadedLater(t, st, 2)
+	a, b := ids[0], ids[1]
+	ctx := context.Background()
+	if _, err := svc.GetRoom(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	release := st.arm(a)
+	t.Cleanup(release)
+	loaded := make(chan error, 1)
+	go func() {
+		_, err := svc.GetRoom(ctx, a)
+		loaded <- err
+	}()
+	st.waitHeld(t, "since")
+
+	within(t, time.Second, "ListRooms", func() error {
+		list, err := svc.ListRooms(ctx)
+		for _, r := range list {
+			if r.ID == b {
+				return err
+			}
+		}
+		if err == nil {
+			err = fmt.Errorf("room B missing from %d rooms", len(list))
+		}
+		return err
+	})
+
+	release()
+	if err := <-loaded; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Two reads of a room that is not cached share one rebuild from the log.
+func TestSlowLoadSharedRebuild(t *testing.T) {
+	st := newGatedStore()
+	svc, ids := loadedLater(t, st, 1)
+	a := ids[0]
+	ctx := context.Background()
+	base := st.loadsOf(a)
+	release := st.arm(a)
+	t.Cleanup(release)
+	type got struct {
+		snap RoomSnapshot
+		err  error
+	}
+	res := make(chan got, 2)
+	read := func() {
+		snap, err := svc.GetRoom(ctx, a)
+		res <- got{snap, err}
+	}
+	go read()
+	st.waitHeld(t, "since")
+	go read()
+	time.Sleep(50 * time.Millisecond) // let the second read find the load in flight
+	release()
+	var seqs []int64
+	for range 2 {
+		select {
+		case r := <-res:
+			if r.err != nil {
+				t.Fatal(r.err)
+			}
+			seqs = append(seqs, r.snap.LastSeq)
+		case <-time.After(5 * time.Second):
+			t.Fatal("a read did not finish")
+		}
+	}
+	if seqs[0] != seqs[1] || seqs[0] == 0 {
+		t.Fatalf("reads saw last seq %v, want the same room", seqs)
+	}
+	if n := st.loadsOf(a) - base; n != 1 {
+		t.Fatalf("%d rebuilds for two reads, want 1", n)
+	}
+}
+
+// A room that retention purges while it is being loaded does not come back:
+// it ends up out of the cache, and OnRoomDeleted runs once.
+func TestLoadRacingPurgeDoesNotResurrect(t *testing.T) {
+	st := newGatedStore()
+	first := New(Deps{Store: st, Users: DefaultUsers(), Owners: tenantOwners(), Run: idleRun})
+	a := createRooms(t, first, 1)[0]
+	first.Close()
+	var deleted atomic.Int32
+	svc := New(Deps{Store: st, Users: DefaultUsers(), Owners: tenantOwners(), Run: idleRun,
+		OnRoomDeleted: func(roomID string, _ events.Event) {
+			if roomID == a {
+				deleted.Add(1)
+			}
+		}})
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+
+	release := st.arm(a)
+	t.Cleanup(release)
+	loaded := make(chan struct{})
+	go func() {
+		defer close(loaded)
+		_, _ = svc.GetRoom(ctx, a) // either answer is fine; the cache is what counts
+	}()
+	st.waitHeld(t, "since") // the log is read; the load has not finished
+
+	// Retention's purge: the store delete, then the eviction.
+	if _, _, err := st.DeleteRoom(ctx, store.RoomDeletion{RoomID: a, DeletedBy: store.RetentionActor, DeletedAt: time.Now().UTC(), Reason: "retention"}, -1); err != nil {
+		t.Fatal(err)
+	}
+	evicted := make(chan struct{})
+	go func() {
+		defer close(evicted)
+		svc.evictRooms([]string{a}, func(string, int64) events.Event { return events.Event{} })
+	}()
+	time.Sleep(50 * time.Millisecond) // let the eviction reach the load
+	release()
+	for _, ch := range []chan struct{}{loaded, evicted} {
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("load or eviction did not finish")
+		}
+	}
+
+	if svc.cached(a) != nil {
+		t.Fatal("the purged room is cached again")
+	}
+	list, err := svc.ListRooms(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range list {
+		if r.ID == a {
+			t.Fatal("the purged room is listed again")
+		}
+	}
+	if _, err := svc.GetRoom(ctx, a); !isNotFound(err) {
+		t.Fatalf("GetRoom after the purge: err = %v, want not found", err)
+	}
+	time.Sleep(50 * time.Millisecond) // a second call would come from a goroutine
+	if n := deleted.Load(); n != 1 {
+		t.Fatalf("OnRoomDeleted ran %d times, want 1", n)
+	}
+}
+
+// Fifty copies of one alert at the same moment open one room; the others
+// join it.
+func TestAlertDedupConcurrent(t *testing.T) {
+	svc := New(Deps{Store: memstore.New(), Users: DefaultUsers(), Run: idleRun})
+	t.Cleanup(svc.Close)
+	a := alertin.Alert{
+		Source: alertin.Generic, Status: alertin.StatusFiring, Title: "Lag", Severity: "sev2",
+		PipelineID: "orders", DedupKey: "generic:lag", Raw: []byte(`{"title":"Lag"}`),
+	}
+	const n = 50
+	start := make(chan struct{})
+	type got struct {
+		id      string
+		created bool
+		err     error
+	}
+	res := make(chan got, n)
+	for range n {
+		go func() {
+			<-start
+			snap, created, err := svc.OpenAlertRoom(context.Background(), a)
+			res <- got{snap.ID, created, err}
+		}()
+	}
+	close(start)
+	ids := map[string]int{}
+	created := 0
+	for range n {
+		r := <-res
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		ids[r.id]++
+		if r.created {
+			created++
+		}
+	}
+	if len(ids) != 1 || created != 1 {
+		t.Fatalf("%d alerts opened %d rooms (%d reported created), want 1", n, len(ids), created)
+	}
+	list, err := svc.ListRooms(context.Background())
+	if err != nil || len(list) != 1 {
+		t.Fatalf("listed %d rooms (err %v), want 1", len(list), err)
+	}
+}
+
+// leaseStore is a gatedStore that says it is shared (store.Coordinator), with
+// the agent leases in memory: enough for the lease loop, the watchdog and the
+// follower. It counts the renewals of each room's lease. Coordinator methods
+// the test does not reach are left nil and panic if called.
+type leaseStore struct {
+	*gatedStore
+	store.Coordinator
+	lmu     sync.Mutex
+	leases  map[string]store.RoomLease
+	renewed map[string]int
+	watch   store.AppendWatch
+}
+
+func newLeaseStore() *leaseStore {
+	return &leaseStore{gatedStore: newGatedStore(), leases: map[string]store.RoomLease{}, renewed: map[string]int{}}
+}
+
+func (l *leaseStore) AcquireRoomLease(_ context.Context, roomID, owner, pipelineID string, ttl time.Duration) (bool, error) {
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	now := time.Now()
+	if cur, ok := l.leases[roomID]; ok && cur.Owner != owner && cur.ExpiresAt.After(now) {
+		return false, nil
+	}
+	l.leases[roomID] = store.RoomLease{RoomID: roomID, Owner: owner, PipelineID: pipelineID, ExpiresAt: now.Add(ttl)}
+	return true, nil
+}
+
+func (l *leaseStore) RenewRoomLeases(_ context.Context, owner string, roomIDs []string, ttl time.Duration) ([]string, error) {
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	now := time.Now()
+	var out []string
+	for _, id := range roomIDs {
+		cur, ok := l.leases[id]
+		if !ok || cur.Owner != owner || !cur.ExpiresAt.After(now) {
+			continue
+		}
+		cur.ExpiresAt = now.Add(ttl)
+		l.leases[id] = cur
+		l.renewed[id]++
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func (l *leaseStore) renewals(roomID string) int {
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	return l.renewed[roomID]
+}
+
+func (l *leaseStore) lease(roomID string) (store.RoomLease, bool) {
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	cur, ok := l.leases[roomID]
+	return cur, ok
+}
+
+func (l *leaseStore) ReleaseRoomLease(_ context.Context, roomID, owner string) error {
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	if l.leases[roomID].Owner == owner {
+		delete(l.leases, roomID)
+	}
+	return nil
+}
+
+func (l *leaseStore) ExpireRoomLeases(_ context.Context, owner string) error {
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	for id, cur := range l.leases {
+		if cur.Owner == owner {
+			cur.ExpiresAt = time.Now()
+			l.leases[id] = cur
+		}
+	}
+	return nil
+}
+
+func (l *leaseStore) ExpiredRoomLeases(context.Context, int) ([]store.RoomLease, error) {
+	return nil, nil // nobody else's leases to take over
+}
+
+func (l *leaseStore) RoomLeases(context.Context) (map[string]store.RoomLease, error) {
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	out := make(map[string]store.RoomLease, len(l.leases))
+	for id, cur := range l.leases {
+		out[id] = cur
+	}
+	return out, nil
+}
+
+func (l *leaseStore) StaleProposals(context.Context, time.Duration, time.Duration, int) ([]store.StaleProposal, error) {
+	return nil, nil
+}
+
+func (l *leaseStore) WatchAppends(_ context.Context, w store.AppendWatch) {
+	l.lmu.Lock()
+	l.watch = w
+	l.lmu.Unlock()
+}
+
+// appendElsewhere appends an event as another replica would, and sends the
+// notification the follower acts on.
+func (l *leaseStore) appendElsewhere(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
+	e, err := l.Store.Append(ctx, roomID, typ, actor, payload)
+	if err != nil {
+		return e, err
+	}
+	l.lmu.Lock()
+	w := l.watch
+	l.lmu.Unlock()
+	if w.OnAppend != nil {
+		w.OnAppend(roomID, e.Seq)
+	}
+	return e, nil
+}
+
+func (l *leaseStore) AppendIfLast(ctx context.Context, roomID string, expectSeq int64, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
+	if err := l.hold(ctx, "append", roomID); err != nil {
+		return events.Event{}, err
+	}
+	row, err := l.Store.GetRoom(ctx, roomID)
+	if err != nil {
+		return events.Event{}, err
+	}
+	if row.LastSeq != expectSeq {
+		return events.Event{}, fmt.Errorf("lease store: last seq %d, want %d: %w", row.LastSeq, expectSeq, store.ErrSeqConflict)
+	}
+	return l.Store.Append(ctx, roomID, typ, actor, payload)
+}
+
+// inputRun is an agent that records every input it drains and whether its
+// run is still going.
+type inputRun struct {
+	mu     sync.Mutex
+	inputs map[string][]agent.HumanInput
+	live   map[string]context.Context
+}
+
+func (r *inputRun) run(ctx context.Context, a agent.Alert, d agent.Deps, _ agent.Options) error {
+	r.mu.Lock()
+	r.live[a.RoomID] = ctx
+	r.mu.Unlock()
+	for {
+		if err := d.Inbox.Wait(ctx); err != nil {
+			return nil
+		}
+		items, err := d.Inbox.Drain(ctx)
+		if err != nil {
+			return nil
+		}
+		r.mu.Lock()
+		r.inputs[a.RoomID] = append(r.inputs[a.RoomID], items...)
+		r.mu.Unlock()
+	}
+}
+
+func (r *inputRun) running(roomID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ctx, ok := r.live[roomID]
+	return ok && ctx.Err() == nil
+}
+
+func (r *inputRun) got(roomID, text string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, in := range r.inputs[roomID] {
+		if in.Text == text {
+			return true
+		}
+	}
+	return false
+}
+
+// With a shared store, a room whose command is stuck in the database does not
+// hold up the other rooms' leases: they are renewed, their agents keep
+// running, and the follower keeps feeding them what other replicas append.
+func TestSharedStoreStalledRoomKeepsOthersLeased(t *testing.T) {
+	t.Skip("enabled in phase B: per-room lock flip")
+	ls := newLeaseStore()
+	runs := &inputRun{inputs: map[string][]agent.HumanInput{}, live: map[string]context.Context{}}
+	svc := New(Deps{
+		Store: ls, Users: DefaultUsers(), Owners: tenantOwners(), Run: runs.run, ReplicaID: "replica-a",
+		ReplicaTimings: ReplicaTimings{LeaseTTL: 900 * time.Millisecond, LeaseRenew: 150 * time.Millisecond, TakeoverScan: time.Hour, ExecSweep: time.Hour},
+	})
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+	if err := svc.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ids := createRooms(t, svc, 2)
+	a, b := ids[0], ids[1]
+	pollUntil(t, func() bool { return runs.running(a) && runs.running(b) })
+
+	release, wait := stallAppend(t, svc, ls.gatedStore, a)
+	renewedBefore := ls.renewals(b)
+	time.Sleep(2 * time.Second) // more than two lease TTLs
+
+	if n := ls.renewals(b) - renewedBefore; n < 5 {
+		t.Fatalf("B's lease was renewed %d times while A was stuck, want it kept renewed", n)
+	}
+	if l, ok := ls.lease(b); !ok || l.Owner != "replica-a" || !l.ExpiresAt.After(time.Now()) {
+		t.Fatalf("B's lease = %+v (held %v), want held by replica-a and live", l, ok)
+	}
+	if !runs.running(b) {
+		t.Fatal("B's agent was stopped while A was stuck")
+	}
+	priya := lockUser(t, svc, "priya")
+	if _, err := ls.appendElsewhere(ctx, b, events.SteerSent, svc.humanActor(priya), events.SteerSentPayload{Text: "from replica b"}); err != nil {
+		t.Fatal(err)
+	}
+	within(t, time.Second, "the follower feeding B", func() error {
+		for !runs.got(b, "from replica b") {
+			time.Sleep(5 * time.Millisecond)
+		}
+		return nil
+	})
+
+	release()
+	if err := wait(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// chatRun is an agent that answers every input with a message, so agent
+// appends race the commands of the stress test.
+func chatRun(ctx context.Context, _ agent.Alert, d agent.Deps, _ agent.Options) error {
+	for {
+		if err := d.Inbox.Wait(ctx); err != nil {
+			return nil
+		}
+		items, err := d.Inbox.Drain(ctx)
+		if err != nil {
+			return nil
+		}
+		for range items {
+			if err := d.Sink.Emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: "noted"}); err != nil {
+				return nil
+			}
+		}
+	}
+}
+
+// Many people working many rooms at once, with closes, deletes, list reads
+// and a list subscriber: nothing panics or deadlocks (run it with -race), and
+// once it is quiet every cached room equals its log.
+func TestRoomLocksStress(t *testing.T) {
+	users, err := ParseUsers([]byte("users:\n" +
+		"  - id: arjun\n    name: Arjun\n    layers: [kafka]\n" +
+		"  - id: priya\n    name: Priya\n    layers: [postgres]\n" +
+		"  - id: ada\n    name: Ada\n    admin: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := memstore.New()
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := New(Deps{Store: ms, Users: users, Run: chatRun, MaxAgents: 2, Logger: quiet})
+	t.Cleanup(svc.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	people := []User{lockUser(t, svc, "arjun"), lockUser(t, svc, "priya")}
+	ada := lockUser(t, svc, "ada")
+
+	var mu sync.Mutex
+	var rooms []string
+	open := func(u User) {
+		snap, err := svc.CreateRoom(ctx, u, "stress", "sev3", "orders")
+		if err == nil {
+			mu.Lock()
+			rooms = append(rooms, snap.ID)
+			mu.Unlock()
+		}
+	}
+	pick := func(r *rand.Rand) string {
+		mu.Lock()
+		defer mu.Unlock()
+		return rooms[r.IntN(len(rooms))]
+	}
+	for range 6 {
+		open(people[0])
+	}
+
+	go func() { // a list socket that keeps reading
+		for range svc.SubscribeRooms(ctx) {
+		}
+	}()
+
+	const workers, ops = 8, 400
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := rand.New(rand.NewPCG(uint64(w), 7))
+			for range ops {
+				u := people[r.IntN(len(people))]
+				id := pick(r)
+				switch n := r.IntN(100); {
+				case n < 25:
+					_, _ = svc.AddComment(ctx, u, id, "", "a comment")
+				case n < 35:
+					_, _ = svc.AddComment(ctx, u, id, "", "@agent what next?")
+				case n < 50:
+					_, _ = svc.Steer(ctx, u, id, "check the lag")
+				case n < 58:
+					other := people[r.IntN(len(people))]
+					_, _ = svc.GrantControl(ctx, u, id, other.ID)
+				case n < 63:
+					_, _ = svc.RequestControl(ctx, u, id)
+				case n < 75:
+					_, _ = svc.GetRoom(ctx, id)
+				case n < 83:
+					_, _ = svc.ListRooms(ctx)
+				case n < 90:
+					_, _, _ = svc.Events(ctx, id, 0, 50)
+				case n < 93:
+					_, _ = svc.CloseRoom(ctx, u, id, "done")
+				case n < 94:
+					_, _ = svc.DeleteRoom(ctx, ada, id, "stress", false)
+				default:
+					open(u)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Agents may still be answering; every room must settle on its log.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		bad := cacheVsLog(ctx, svc, ms)
+		if bad == "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal(bad)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// cacheVsLog compares every cached room with a fold of its log and returns
+// the first difference ("" when there is none).
+func cacheVsLog(ctx context.Context, svc *Service, ms *memstore.Store) string {
+	for id := range svc.cachedRooms() {
+		got, err := svc.GetRoom(ctx, id)
+		if err != nil {
+			return fmt.Sprintf("room %s: GetRoom: %v", id, err)
+		}
+		row, err := ms.GetRoom(ctx, id)
+		if err != nil {
+			return fmt.Sprintf("room %s: cached but not in the store: %v", id, err)
+		}
+		want, err := svc.rebuild(ctx, id)
+		if err != nil {
+			return fmt.Sprintf("room %s: rebuild: %v", id, err)
+		}
+		switch {
+		case got.LastSeq != row.LastSeq:
+			return fmt.Sprintf("room %s: cached last seq %d, store %d", id, got.LastSeq, row.LastSeq)
+		case got.Status != want.snap.Status:
+			return fmt.Sprintf("room %s: cached status %q, log %q", id, got.Status, want.snap.Status)
+		case driverID(got) != driverID(want.snap):
+			return fmt.Sprintf("room %s: cached driver %q, log %q", id, driverID(got), driverID(want.snap))
+		}
+	}
+	return ""
+}
+
+func driverID(s RoomSnapshot) string {
+	if s.Driver == nil {
+		return ""
+	}
+	return s.Driver.ID
+}

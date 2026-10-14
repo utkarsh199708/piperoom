@@ -25,10 +25,7 @@ var errPostmortemDecided = errors.New("room: postmortem already drafted")
 // drafting leaves no room without one. No model call after a restart. Caller
 // holds s.mu (Load).
 func (s *Service) sweepPostmortemsLocked() {
-	if s.closed {
-		return
-	}
-	for id, st := range s.rooms {
+	for id, st := range s.cachedRooms() {
 		sn := st.snap
 		if sn.Shadow || sn.Status != "closed" || sn.Postmortem.Status != PostmortemDrafting || sn.ClosedAt == nil {
 			continue
@@ -36,13 +33,15 @@ func (s *Service) sweepPostmortemsLocked() {
 		if s.now().Sub(*sn.ClosedAt) > postmortemRestartWindow {
 			continue
 		}
-		s.wg.Add(1)
+		if !s.addWorker() {
+			return
+		}
 		go s.draftPostmortem(id, false)
 	}
 }
 
 // draftPostmortem writes postmortem.drafted (or .failed) for a closed room. The
-// caller did wg.Add(1). It runs outside s.mu on the service context, after
+// caller reserved its place in wg (addWorker). It runs outside s.mu on the service context, after
 // room.closed, so closing never waits on the model. allowModel is false after a
 // restart.
 func (s *Service) draftPostmortem(roomID string, allowModel bool) {
@@ -63,7 +62,7 @@ func (s *Service) draftPostmortem(roomID string, allowModel bool) {
 	s.syncRoom(actx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	st := s.rooms[roomID]
+	st := s.cached(roomID)
 	if st == nil {
 		return
 	}

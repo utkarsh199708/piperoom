@@ -65,12 +65,12 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	}
 	st := &roomState{snap: NewSnapshot(), inbox: newInbox()}
 	st.snap.ID = roomID
-	s.rooms[roomID] = st
+	s.cacheRoom(roomID, st)
 
 	if _, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, s.humanActor(user), events.RoomCreatedPayload{
 		Title: title, Severity: severity, PipelineID: pipelineID,
 	}); err != nil {
-		s.discardNewRoomLocked(ctx, roomID)
+		s.discardNewRoomLocked(ctx, roomID, st)
 		s.mu.Unlock()
 		return RoomSnapshot{}, mapUnstorable(err)
 	}
@@ -106,8 +106,8 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 // log (those load any room that is not cached). The caller got an
 // error for a room that exists; a retry of an alert joins it by its dedup key.
 // Caller must hold s.mu.
-func (s *Service) discardNewRoomLocked(ctx context.Context, roomID string) {
-	delete(s.rooms, roomID)
+func (s *Service) discardNewRoomLocked(ctx context.Context, roomID string, st *roomState) {
+	s.uncacheRoom(roomID, st)
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err := s.store.DeleteEmptyRoom(dctx, roomID); err != nil {
@@ -231,7 +231,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 		existing, ok = s.openAlertRoomSharedLocked(indexKey, shared)
 	}
 	if ok {
-		st := s.rooms[existing]
+		st := s.cached(existing)
 		snap, err := s.joinAlertRoomLocked(ctx, existing, st, title, raw, resolved)
 		s.mu.Unlock()
 		return snap, false, err
@@ -248,15 +248,21 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	}
 	st := &roomState{snap: NewSnapshot(), inbox: newRoomInbox(shadow)}
 	st.snap.ID = roomID
-	s.rooms[roomID] = st
+	s.cacheRoom(roomID, st)
 
-	if _, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, systemActor, events.RoomCreatedPayload{
+	created, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, systemActor, events.RoomCreatedPayload{
 		Title: title, Severity: severity, PipelineID: pipelineID, Alert: raw,
 		AlertSource: alertSource, DedupKey: indexKey, Shadow: shadow,
-	}); err != nil {
-		s.discardNewRoomLocked(ctx, roomID)
+	})
+	if err != nil {
+		s.discardNewRoomLocked(ctx, roomID, st)
 		s.mu.Unlock()
 		return RoomSnapshot{}, false, mapUnstorable(err)
+	}
+	// Later runs of the agent start from the alert as the log holds it, as
+	// a room loaded from the log does.
+	if p, ok := decode[events.RoomCreatedPayload](created); ok {
+		st.alertRaw = p.Alert
 	}
 	if shadow {
 		// First try; the supervisor and the Load sweep try again, and a
@@ -264,8 +270,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 		_ = s.createShadowRun(ctx, roomID)
 	}
 	if indexKey != "" {
-		st.dedupKey = indexKey
-		s.alertRooms[indexKey] = roomID
+		s.setAlertKey(roomID, st, indexKey, true)
 	}
 	// A missing/unknown pipeline opens with a system message so the room shows
 	// why no fix is proposed. events.go has no dedicated system-message type,
@@ -332,12 +337,8 @@ func (s *Service) openAlertRoomLocked(indexKey string) (string, bool) {
 	if indexKey == "" {
 		return "", false
 	}
-	roomID, ok := s.alertRooms[indexKey]
-	if !ok {
-		return "", false
-	}
-	st, ok := s.rooms[roomID]
-	if !ok {
+	roomID, st := s.alertRoomFor(indexKey)
+	if st == nil {
 		return "", false
 	}
 	if !s.roomOpen(st) {
@@ -371,41 +372,42 @@ func (s *Service) joinAlertRoomLocked(ctx context.Context, roomID string, st *ro
 	return st.snap.Clone(), nil
 }
 
-// indexAlertRoomLocked puts an open alert room under the index key it was
-// opened under, so a repeat of the alert joins it after a restart too. The key
-// is read back exactly as stored in room.created (DedupKey); it is never
-// re-derived from the body, so a dev-webhook room cannot end up under a signed
-// source's key. A room from before the source was recorded (AlertSource empty)
-// can only have come from the dev webhook, so it gets the webhook key. A key
-// shared by several open rooms (rooms opened before dedup existed) goes to the
-// first; the others stay recorded in st.dedupKey and take over when it closes
-// (see releaseAlertKeyLocked). Caller must hold s.mu.
-func (s *Service) indexAlertRoomLocked(ctx context.Context, roomID string, st *roomState) {
-	p, ok := s.roomCreated(ctx, roomID)
-	if !ok {
-		return
+// alertIndexKeyOf returns the index key a room was opened under, from its
+// room.created payload p and its pipeline. The key is read back exactly as
+// stored in room.created (DedupKey); it is never re-derived from the body, so
+// a dev-webhook room cannot end up under a signed source's key. A room from
+// before the source was recorded (AlertSource empty) can only have come from
+// the dev webhook, so it gets the webhook key. "" for a room no alert opened.
+func alertIndexKeyOf(p events.RoomCreatedPayload, pipelineID string) string {
+	if p.AlertSource != "" {
+		return p.DedupKey
 	}
-	key := p.DedupKey
-	if p.AlertSource == "" {
-		dedupKey, _ := alertDedup(p.Alert)
-		key = ""
-		if dedupKey != "" {
-			key = alertIndexKey(st.snap.PipelineID, webhookKeyPrefix+dedupKey)
-		}
+	dedupKey, _ := alertDedup(p.Alert)
+	if dedupKey == "" {
+		return ""
 	}
+	return alertIndexKey(pipelineID, webhookKeyPrefix+dedupKey)
+}
+
+// indexAlertRoomLocked puts an open alert room under key, the index key it
+// was opened under (alertIndexKeyOf), so a repeat of the alert joins it after
+// a restart too. A key shared by several open rooms (rooms opened before
+// dedup existed) goes to the first; the others stay recorded in st.dedupKey
+// and take over when it closes (see releaseAlertKeyLocked). Caller must hold
+// s.mu.
+func (s *Service) indexAlertRoomLocked(roomID string, st *roomState, key string) {
 	if key == "" {
 		return
 	}
-	st.dedupKey = key
-	if _, taken := s.alertRooms[key]; !taken {
-		s.alertRooms[key] = roomID
-	}
+	s.setAlertKey(roomID, st, key, false)
 }
 
 // releaseAlertKeyLocked drops a closed room's alert key and hands it to another
 // open room that holds the same key, if there is one (only possible for rooms
 // opened before dedup existed). Caller must hold s.mu.
 func (s *Service) releaseAlertKeyLocked(roomID string, st *roomState) {
+	s.reg.Lock()
+	defer s.reg.Unlock()
 	key := st.dedupKey
 	if key == "" || s.alertRooms[key] != roomID {
 		return
@@ -420,13 +422,12 @@ func (s *Service) releaseAlertKeyLocked(roomID string, st *roomState) {
 }
 
 // notifyRoomOpenedLocked runs the OnRoomOpened hook off the request path, so
-// a slow hook never delays the HTTP response. Caller holds s.mu, which keeps
-// wg.Add from racing Close; after Close the hook is not called.
+// a slow hook never delays the HTTP response. After Close the hook is not
+// called (addWorker).
 func (s *Service) notifyRoomOpenedLocked(roomID string) {
-	if s.onRoomOpened == nil || s.closed {
+	if s.onRoomOpened == nil || !s.addWorker() {
 		return
 	}
-	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		s.onRoomOpened(s.ctx, roomID)
@@ -452,8 +453,9 @@ func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]RoomSnapshot, 0, len(s.rooms))
-	for _, st := range s.rooms {
+	rooms := s.cachedRooms()
+	out := make([]RoomSnapshot, 0, len(rooms))
+	for _, st := range rooms {
 		out = append(out, st.snap.Clone())
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -481,7 +483,7 @@ func (s *Service) Events(ctx context.Context, roomID string, afterSeq int64, lim
 		return nil, 0, fmt.Errorf("room: events: %w", err)
 	}
 	s.mu.Lock()
-	st := s.rooms[roomID]
+	st := s.cached(roomID)
 	lastSeq := int64(0)
 	if st != nil {
 		lastSeq = st.snap.LastSeq
@@ -562,14 +564,11 @@ func (s *Service) closeRoom(ctx context.Context, roomID string, actor events.Act
 	}
 	execCancel := st.execCancel
 	pipelineID := st.snap.PipelineID
-	hookKey := hookDedupKey(pipelineID, st.dedupKey)
-	runHook := s.onRoomClosed != nil && !s.closed
-	// A shadow room's log has no agent events: no draft. wg.Add under s.mu,
-	// like Close sets closed, so Close's Wait cannot miss the goroutine.
-	runDraft := !st.snap.Shadow && !s.closed
-	if runDraft {
-		s.wg.Add(1)
-	}
+	hookKey := hookDedupKey(pipelineID, s.dedupKeyOf(st))
+	runHook := s.onRoomClosed != nil && !s.isClosed()
+	// A shadow room's log has no agent events: no draft. The drafter's place
+	// in wg is taken here (addWorker), so Close's Wait cannot miss it.
+	runDraft := !st.snap.Shadow && s.addWorker()
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
