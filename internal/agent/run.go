@@ -15,7 +15,6 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"piperoom/internal/events"
-	"piperoom/internal/jsonnum"
 	"piperoom/internal/tools"
 )
 
@@ -547,20 +546,27 @@ func (r *runner) emit(ctx context.Context, typ events.Type, payload any) {
 // be lost. Such numbers are written as strings holding their exact text, so the
 // event is kept and the value is still readable. The model never sees this
 // data; it reads the summary.
-func (r *runner) toolDataJSON(tool string, v any) json.RawMessage {
+func (r *runner) toolDataJSON(tool string, v any) (json.RawMessage, bool) {
 	if v == nil {
-		return nil
+		return nil, false
 	}
-	b, err := json.Marshal(v)
+	raw, n, err := encodeToolData(v)
 	if err != nil {
 		r.log.Warn("agent: tool data marshal failed", "tool", tool, "err", err)
-		return nil
+		return nil, false
 	}
-	out, n := jsonnum.Quote(b)
 	if n > 0 {
 		r.log.Warn("agent: tool data had numbers outside the double range; kept them as strings", "tool", tool, "count", n)
 	}
-	return out
+	out, cut, err := capToolDataJSON(raw)
+	if err != nil {
+		r.log.Warn("agent: tool data cap failed", "tool", tool, "err", err)
+		return nil, false
+	}
+	if cut {
+		r.log.Info("agent: tool data over cap; sent a preview", "tool", tool, "original_bytes", len(raw))
+	}
+	return out, cut
 }
 
 // stopErr maps a clean shutdown (context.Canceled or a closed inbox) to nil so
@@ -736,7 +742,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	took := time.Since(start).Milliseconds()
 
 	res = r.scrubToolResult(u.name, res)
-	data := r.toolDataJSON(u.name, res.Data)
+	data, dataCut := r.toolDataJSON(u.name, res.Data)
 
 	if err != nil {
 		msg := "error: " + r.scrubToolError(u.name, err).Error()
@@ -767,7 +773,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		Summary:   summary,
 		Data:      data,
 		IsError:   false,
-		Truncated: res.Truncated || reTruncated,
+		Truncated: res.Truncated || reTruncated || dataCut,
 		TookMS:    took,
 	})
 	return toolResult{
