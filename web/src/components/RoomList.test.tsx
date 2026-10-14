@@ -589,3 +589,17 @@ describe('top bar', () => {
     expect(screen.getByText(/^live/)).toBeInTheDocument()
   })
 })
+
+describe('title column (QA9)', () => {
+  it('wraps a long title to two lines instead of truncating it, and the agent cell gives way', () => {
+    const title = 'Warehouse orders stale after the schema change on public.orders'
+    mockList([room({ id: 'long', title, agent_status: { state: 'error', detail: 'x'.repeat(200) } })])
+    renderList()
+    const link = screen.getByRole('link', { name: title })
+    expect(link).toHaveClass('line-clamp-2')
+    expect(link).not.toHaveClass('truncate')
+    expect(link).toHaveAttribute('title', title)
+    expect(link.closest('td')).toHaveClass('min-w-[14rem]', 'whitespace-normal')
+    expect(screen.getByTitle(/^error · x+$/).closest('td')).toHaveClass('max-w-[20rem]')
+  })
+})

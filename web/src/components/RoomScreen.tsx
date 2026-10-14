@@ -4,8 +4,9 @@ import { isFixtures } from '../api/client'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
 import { useCurrentUser } from '../context/user'
-import { canClose, canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
+import { canClose, canDecideLayer, canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
 import { ageLabel } from '../lib/time'
+import { cn } from '@/lib/utils'
 import { PipelineMap } from './PipelineMap'
 import { Timeline } from './Timeline'
 import { SteerBox } from './SteerBox'
@@ -34,7 +35,18 @@ export function RoomScreen() {
   const { roomId = '' } = useParams()
   const [searchParams] = useSearchParams()
   const { user } = useCurrentUser()
-  const { state, presence, conn, error, actions, stale, dismissStale, reload } = useRoom(roomId)
+  const { state: liveState, presence, conn, liveDown, error, actions, stale, dismissStale, reload } = useRoom(roomId)
+  // Nothing from the log has been applied yet and the socket is not open: the room is the snapshot only.
+  // Its proposals stand in until the replay rebuilds them, so the room never claims "no proposals"
+  // (QA9: live updates down showed "Proposals 0" for a room waiting on approval).
+  const snapshotOnly = !!liveState && liveState.last_seq === 0 && conn !== 'live'
+  const state = useMemo(
+    () =>
+      liveState && snapshotOnly && liveState.proposals.length === 0 && liveState.snapshot_proposals.length > 0
+        ? { ...liveState, proposals: liveState.snapshot_proposals }
+        : liveState,
+    [liveState, snapshotOnly],
+  )
   // One topology refetch per executed action, plus the hook's 30 s refresh
   // while the room is open (stops once closed).
   const executedCount = useMemo(
@@ -138,10 +150,26 @@ export function RoomScreen() {
   const viewer = isViewer(user)
   const stalledFor = state.status === 'open' && state.opened_at ? ageLabel(state.opened_at) : undefined
   const showProposals = state.proposals.length > 0 || user.solo === true
+  // On a phone the fix waiting on this person comes before the map and the hypothesis (QA9).
+  const needsMe = state.proposals.some(
+    (p) => p.status === 'open' && p.required_layers.some((l) => canDecideLayer(p, user, l)),
+  )
+  // Empty lists while the log has not arrived say so instead of "nothing happened yet".
+  const history: 'loading' | 'down' | undefined = snapshotOnly ? (liveDown ? 'down' : 'loading') : undefined
 
   return (
     <div className="flex min-h-[calc(100dvh-3rem)] flex-col text-sm">
       {stale && <StaleBanner onReload={reload} onDismiss={dismissStale} />}
+      {liveDown && (
+        <div
+          role="status"
+          data-testid="live-down"
+          className="flex flex-wrap items-center gap-x-2.5 border-b border-border bg-warning-subtle px-4 py-2 font-medium text-warning-foreground sm:px-6"
+        >
+          <span>Live updates down — showing last snapshot</span>
+          <span className="font-normal text-muted-foreground">Reconnecting… what you see may be out of date.</span>
+        </div>
+      )}
       {error && (
         <div
           role="alert"
@@ -187,7 +215,11 @@ export function RoomScreen() {
             {state.hypothesis && <HypothesisCard hypothesis={state.hypothesis} steps={state.steps} />}
 
             {showProposals && (
-              <div id={PROPOSAL_ANCHOR} tabIndex={-1} className="scroll-mt-4 focus:outline-none">
+              <div
+                id={PROPOSAL_ANCHOR}
+                tabIndex={-1}
+                className={cn('scroll-mt-4 focus:outline-none', needsMe && 'max-[599px]:order-first')}
+              >
                 <ProposalsPanel state={state} user={user} actions={actions} stale={stale} />
               </div>
             )}
@@ -211,6 +243,7 @@ export function RoomScreen() {
                 readOnly={viewer}
                 working={state.agent_status.state === 'working'}
                 onTakeControl={takeControl}
+                history={history}
               />
             </section>
           </div>
@@ -232,7 +265,7 @@ export function RoomScreen() {
             selfIsViewer={viewer}
           />
           <div className="h-px shrink-0 bg-border" />
-          <ActivityFeed activity={state.activity} />
+          <ActivityFeed activity={state.activity} history={history} />
         </aside>
       </div>
 

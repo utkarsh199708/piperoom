@@ -7,6 +7,7 @@
 //  - `canDecideLayer` is the only gate for the buttons (plus "no hash" and "busy", which only
 //    switch them off). A viewer or a non-owner gets no buttons at all.
 import { useEffect, useId, useRef, useState } from 'react'
+import type { RefObject } from 'react'
 import { CircleCheck, CircleX, Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
 import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
@@ -17,6 +18,7 @@ import { clockTime, timeAgo } from '../lib/time'
 import { cn } from '@/lib/utils'
 import type { RoomActions, StaleInfo } from '../hooks/useRoom'
 import { isEditableTarget } from './shell/keys'
+import { ClampedText } from './room/ClampedText'
 import { PersonAvatar } from './room/PersonAvatar'
 import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -74,9 +76,13 @@ function riskVariant(risk: string): 'success' | 'warning' | 'destructive' | 'neu
 
 // Keys A and R stay out of the way of anything that owns the keyboard right now: a field, or an
 // open overlay (solo dialog, command menu, hand-off dialog, the account menu, a select list).
+// They also only count when focus is inside this proposal's card (QA9: a stray "a" typed anywhere
+// on the page approved a fix, which then ran). A pressed A never approves on its own either: it
+// opens the confirm dialog (LayerRow).
 const OVERLAY_OPEN = '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]'
 
-function keyIsForTheCard(e: KeyboardEvent): boolean {
+function keyIsForTheCard(e: KeyboardEvent, card: HTMLElement | null): boolean {
+  if (!card || !(e.target instanceof Node) || !card.contains(e.target)) return false
   if (e.defaultPrevented || e.repeat || e.isComposing) return false
   if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return false
   if (isEditableTarget(e.target)) return false
@@ -228,12 +234,15 @@ function layerSummary(proposal: ProposalState, layer: string): string[] {
   })
 }
 
-// Solo mode (docs/design/auth.md 5.3): the person types "<pipeline_id>/<layer>" by
-// hand. A speed bump, not a control: no copy button, and paste is blocked.
-function SoloConfirmDialog({
+// The approve confirmation. Solo mode (docs/design/auth.md 5.3): the person types
+// "<pipeline_id>/<layer>" by hand. A speed bump, not a control: no copy button, and paste is
+// blocked. Not solo (`typed` false): the same box without the field, opened by the A key so a
+// key press alone never approves; focus starts on Cancel, so a stray Enter does not approve either.
+function ApproveConfirmDialog({
   proposal,
   layer,
   want,
+  typed: needTyping,
   busy,
   rejected,
   onConfirm,
@@ -243,21 +252,25 @@ function SoloConfirmDialog({
   proposal: ProposalState
   layer: string
   want: string
+  /** Solo mode: the exact text must be typed. */
+  typed: boolean
   busy: boolean
   /** The server refused the typed text once already. */
   rejected: boolean
-  onConfirm: (typed: string) => void
+  /** `typed` is the confirm text in solo mode, undefined otherwise. */
+  onConfirm: (typed: string | undefined) => void
   onCancel: () => void
   /** The dialog has closed: put focus back (Radix would use the element focused when it opened). */
   onClosed: () => void
 }) {
   const [typed, setTyped] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
+  const cancelRef = useRef<HTMLButtonElement>(null)
   const inputId = useId()
   const hintId = `${inputId}-hint`
-  const match = typed === want
+  const match = !needTyping || typed === want
   const submit = () => {
-    if (match && !busy) onConfirm(typed)
+    if (match && !busy) onConfirm(needTyping ? typed : undefined)
   }
   const progress = match
     ? 'It matches.'
@@ -271,7 +284,7 @@ function SoloConfirmDialog({
         className="max-w-[480px]"
         onOpenAutoFocus={(e) => {
           e.preventDefault()
-          inputRef.current?.focus()
+          ;(needTyping ? inputRef.current : cancelRef.current)?.focus()
         }}
         onCloseAutoFocus={(e) => {
           e.preventDefault()
@@ -288,9 +301,13 @@ function SoloConfirmDialog({
           <DialogHeader className="gap-1.5">
             <DialogTitle className="flex items-start gap-2">
               <Lock className="mt-0.5 size-4 shrink-0 text-warning-foreground" aria-hidden="true" />
-              <span>Approve {layer} in solo mode</span>
+              <span>{needTyping ? `Approve ${layer} in solo mode` : `Approve ${layer}?`}</span>
             </DialogTitle>
-            <DialogDescription>No second owner is online to check this.</DialogDescription>
+            <DialogDescription>
+              {needTyping
+                ? 'No second owner is online to check this.'
+                : 'Check what you are approving. The fix runs once every required layer has approved.'}
+            </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-1.5 rounded-lg border border-border bg-muted px-3 py-2.5">
             <span className="text-xs text-subtle-foreground">You are approving</span>
@@ -303,6 +320,7 @@ function SoloConfirmDialog({
               <span className="font-mono text-xs text-subtle-foreground">fingerprint {fingerprint(proposal.params_hash)}</span>
             )}
           </div>
+          {needTyping && (
           <div className="flex flex-col gap-1.5">
             {/* The label holds the exact string, so a screen reader announces what to type. */}
             <label htmlFor={inputId} className="text-sm font-medium">
@@ -337,14 +355,15 @@ function SoloConfirmDialog({
               </span>
             )}
           </div>
+          )}
           <DialogFooter className="items-center">
-            <Button variant="ghost" onClick={onCancel}>
+            <Button variant="ghost" ref={cancelRef} onClick={onCancel}>
               Cancel
               <Kbd aria-hidden="true">esc</Kbd>
             </Button>
             <Button type="submit" variant="success" disabled={busy || !match}>
               Approve
-              <Kbd aria-hidden="true">⌘⏎</Kbd>
+              {needTyping && <Kbd aria-hidden="true">⌘⏎</Kbd>}
             </Button>
           </DialogFooter>
         </form>
@@ -364,6 +383,8 @@ function LayerRow({
   shortcuts,
   noHashNoteId,
   headingId,
+  cardRef,
+  solo,
   onSolo,
 }: {
   proposal: ProposalState
@@ -371,6 +392,10 @@ function LayerRow({
   user: CurrentUser
   actions: RoomActions
   pipelineId: string
+  /** The proposal card: A and R count only while focus is inside it. */
+  cardRef: RefObject<HTMLElement | null>
+  /** Solo mode is known (from /api/me or an earlier answer): the confirm needs the typed text. */
+  solo: boolean
   /** This row's buttons answer to A and R (the first layer you can decide). */
   shortcuts: boolean
   noHashNoteId: string
@@ -434,7 +459,7 @@ function LayerRow({
   const hashed = proposal.params_hash !== ''
   const canDecide = canDecideLayer(proposal, user, layer)
 
-  const startApprove = () => (user.solo ? setConfirming(true) : void approve())
+  const startApprove = () => (solo ? setConfirming(true) : void approve())
 
   // A and R. The listener is added once; it calls the handler of the latest render.
   const latest = useRef<(key: 'a' | 'r') => boolean>(() => false)
@@ -443,7 +468,8 @@ function LayerRow({
       if (!canDecide || rejecting || confirming || busy) return false
       if (key === 'a') {
         if (!hashed) return false
-        startApprove()
+        // Never a direct approve from a key: always the confirm dialog (typed in solo mode).
+        setConfirming(true)
       } else {
         setRejecting(true)
       }
@@ -455,12 +481,12 @@ function LayerRow({
     const onKey = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase()
       if (key !== 'a' && key !== 'r') return
-      if (!keyIsForTheCard(e)) return
+      if (!keyIsForTheCard(e, cardRef.current)) return
       if (latest.current(key)) e.preventDefault()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [shortcuts])
+  }, [shortcuts, cardRef])
 
   const reasonText = decision?.outcome === 'rejected' ? decision.reason : undefined
   const decidedAt = decision?.at ? clockTime(decision.at) : ''
@@ -594,10 +620,11 @@ function LayerRow({
         </form>
       )}
       {canDecide && confirming && (
-        <SoloConfirmDialog
+        <ApproveConfirmDialog
           proposal={proposal}
           layer={layer}
           want={soloConfirmText(pipelineId, layer)}
+          typed={solo}
           busy={busy}
           rejected={refused}
           onConfirm={(typed) => void approve(typed)}
@@ -618,19 +645,20 @@ function ExecutedList({ proposal }: { proposal: ProposalState }) {
     <>
       <Separator />
       <ul className="flex flex-col gap-1.5 px-3.5 py-2.5 text-sm">
-        {proposal.executed.map((ex) => {
+        {proposal.executed.map((ex, i) => {
           // The executor checked this hash before it ran the step. A different
           // one than the card shows is flagged; an event without one is not.
           const differs = !!ex.params_hash && !!proposal.params_hash && ex.params_hash !== proposal.params_hash
           return (
-            <li key={ex.step_index} className="flex flex-wrap items-center gap-2">
+            // step_index is not unique: a step can run (and be reported) more than once.
+            <li key={`${ex.step_index}-${i}`} className="flex flex-wrap items-center gap-2">
               {ex.ok ? (
                 <CircleCheck className="size-4 text-success-foreground" role="img" aria-label="succeeded" />
               ) : (
                 <CircleX className="size-4 text-destructive-fg" role="img" aria-label="failed" />
               )}
               <span className="font-mono text-xs text-subtle-foreground">step {ex.step_index + 1}</span>
-              <span className="min-w-0 break-words">{ex.output}</span>
+              <ClampedText text={ex.output} className="min-w-0 basis-full sm:basis-auto sm:flex-1" />
               {ex.params_hash && (
                 <code
                   className="mono exec__hash rounded-md border border-input bg-muted px-1.5 py-0.5 font-mono text-xs"
@@ -671,12 +699,14 @@ function Proposal({
   pipelineId,
   shortcutLayer,
   sentHash,
+  solo,
   onSolo,
 }: {
   proposal: ProposalState
   user: CurrentUser
   actions: RoomActions
   pipelineId: string
+  solo: boolean
   /** The layer whose buttons answer to A and R in this card, if any. */
   shortcutLayer: string | undefined
   /** The hash the person looked at when the server answered 409 for this proposal (kept by useRoom). */
@@ -685,6 +715,7 @@ function Proposal({
 }) {
   const titleId = useId()
   const noteId = useId()
+  const cardRef = useRef<HTMLElement>(null)
   // "Got it" hides the note for one stale hash. The note itself comes from `sentHash`, which
   // useRoom keeps across the room reload (this card is unmounted while the room loads).
   const [acknowledged, setAcknowledged] = useState<string | null>(null)
@@ -697,7 +728,18 @@ function Proposal({
   const previous = latestDecision(proposal)
 
   return (
-    <article className="flex flex-col rounded-lg border border-border bg-card text-sm text-card-foreground" aria-labelledby={titleId}>
+    <article
+      ref={cardRef}
+      className={cn(
+        'flex flex-col rounded-lg border border-border bg-card text-sm text-card-foreground outline-none',
+        // On a phone the card waiting on you comes first (QA9).
+        open && mine.length > 0 && 'max-[599px]:order-first',
+      )}
+      aria-labelledby={titleId}
+      // Focusable from a click anywhere in the card, so A and R (focus-scoped) work after one.
+      tabIndex={-1}
+      data-needs-you={(open && mine.length > 0) || undefined}
+    >
       {mine.length > 0 && (
         <div className="flex min-h-9 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-t-lg border-b border-border bg-warning-subtle px-3.5 py-1.5 text-sm font-medium text-warning-foreground">
           <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
@@ -801,6 +843,8 @@ function Proposal({
             shortcuts={shortcutLayer === layer}
             noHashNoteId={noteId}
             headingId={titleId}
+            cardRef={cardRef}
+            solo={solo}
             onSolo={onSolo}
           />
         ))}
@@ -828,15 +872,6 @@ export function ProposalsPanel({
   const [soloSeen, setSoloSeen] = useState(false)
   const solo = user.solo === true || soloSeen
 
-  // A and R belong to one row at a time: the first layer you can decide, in the first such proposal.
-  let shortcutKey = ''
-  for (const p of proposals) {
-    const layer = p.required_layers.find((l) => canDecideLayer(p, user, l))
-    if (layer) {
-      shortcutKey = `${p.proposal_id}/${layer}`
-      break
-    }
-  }
 
   return (
     <section className="flex flex-col gap-2.5 text-sm" aria-label="Proposals">
@@ -864,7 +899,9 @@ export function ProposalsPanel({
               actions={actions}
               pipelineId={state.pipeline_id}
               sentHash={stale?.proposalId === p.proposal_id ? stale.sentHash : null}
-              shortcutLayer={shortcutKey.startsWith(`${p.proposal_id}/`) ? shortcutKey.slice(p.proposal_id.length + 1) : undefined}
+              // A and R act on the first layer you can decide in the card that has focus.
+              shortcutLayer={p.required_layers.find((l) => canDecideLayer(p, user, l))}
+              solo={solo}
               onSolo={() => setSoloSeen(true)}
             />
           ))}

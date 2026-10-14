@@ -20,6 +20,8 @@ import type {
   SteerSuggestedPayload,
   TracePinnedPayload,
 } from '../api/types'
+import { isolate } from '../lib/bidi'
+import { humanStatus } from '../lib/status'
 
 function as<T>(e: Event): T {
   return e.payload as T
@@ -28,23 +30,24 @@ function as<T>(e: Event): T {
 // One short sentence for the activity feed. `driverBefore` is the driver id just
 // before this event was applied; it distinguishes a lease renewal from a take-over.
 export function describeEvent(e: Event, driverBefore: string | null = null): string {
-  const who = e.actor.kind === 'agent' ? 'Agent' : e.actor.name || e.actor.id
+  // Every value that came from a person or the agent is a bidi isolate (lib/bidi.ts).
+  const who = e.actor.kind === 'agent' ? 'Agent' : isolate(e.actor.name || e.actor.id)
   switch (e.type) {
     case 'room.created': {
       const p = as<RoomCreatedPayload>(e)
-      return `${who} opened the room — ${p.title}`
+      return `${who} opened the room — ${isolate(p.title)}`
     }
     case 'room.closed': {
       const p = as<RoomClosedPayload>(e)
-      return `${who} closed the room: ${p.resolution}`
+      return `${who} closed the room: ${isolate(p.resolution)}`
     }
     case 'agent.status': {
       const p = as<AgentStatusPayload>(e)
-      return `Agent is ${p.state}${p.detail ? ` (${p.detail})` : ''}`
+      return `Agent is ${humanStatus(p.state)}${p.detail ? ` (${isolate(p.detail)})` : ''}`
     }
     case 'agent.step.started': {
       const p = as<AgentStepStartPayload>(e)
-      return `Agent started step: ${p.title}`
+      return `Agent started step: ${isolate(p.title)}`
     }
     case 'agent.tool_call': {
       const p = as<AgentToolCallPayload>(e)
@@ -53,27 +56,27 @@ export function describeEvent(e: Event, driverBefore: string | null = null): str
     case 'agent.tool_result': {
       const p = as<AgentToolResultPayload>(e)
       if (p.is_error) return `${p.tool} failed`
-      return `${p.tool} returned ${p.summary}`
+      return `${p.tool} returned ${isolate(p.summary)}`
     }
     case 'agent.message': {
       const p = as<AgentMessagePayload>(e)
-      return p.reply_to ? `Agent replied to a comment` : `Agent: ${p.text}`
+      return p.reply_to ? `Agent replied to a comment` : `Agent: ${isolate(p.text)}`
     }
     case 'agent.hypothesis': {
       const p = as<AgentHypothesisPayload>(e)
-      return `Agent hypothesis (${p.confidence}): ${p.text}`
+      return `Agent hypothesis (${p.confidence}): ${isolate(p.text)}`
     }
     case 'comment.added': {
       const p = as<CommentAddedPayload>(e)
-      return `${who} commented: ${p.text}`
+      return `${who} commented: ${isolate(p.text)}`
     }
     case 'steer.suggested': {
       const p = as<SteerSuggestedPayload>(e)
-      return `${who} suggested: ${p.text}`
+      return `${who} suggested: ${isolate(p.text)}`
     }
     case 'steer.sent': {
       const p = as<SteerSentPayload>(e)
-      return `${who} steered the agent: ${p.text}`
+      return `${who} steered the agent: ${isolate(p.text)}`
     }
     case 'control.requested':
       return `${who} requested control`
@@ -86,11 +89,11 @@ export function describeEvent(e: Event, driverBefore: string | null = null): str
           ? `${who} renewed the lease`
           : `${who} took control`
       }
-      return `${who} handed control to ${p.to.name}`
+      return `${who} handed control to ${isolate(p.to.name)}`
     }
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(e)
-      return `${who} proposed: ${p.title}`
+      return `${who} proposed: ${isolate(p.title)}`
     }
     case 'approval.given': {
       const p = as<ApprovalGivenPayload>(e)
@@ -98,7 +101,7 @@ export function describeEvent(e: Event, driverBefore: string | null = null): str
     }
     case 'approval.rejected': {
       const p = as<ApprovalRejectedPayload>(e)
-      return `${who} rejected ${p.layer}: ${p.reason}`
+      return `${who} rejected ${p.layer}: ${isolate(p.reason)}`
     }
     case 'action.executed': {
       const p = as<ActionExecutedPayload>(e)
@@ -106,13 +109,13 @@ export function describeEvent(e: Event, driverBefore: string | null = null): str
     }
     case 'handoff.created': {
       const p = as<HandoffCreatedPayload>(e)
-      return `${who} started a hand-off to ${p.to.name}`
+      return `${who} started a hand-off to ${isolate(p.to.name)}`
     }
     case 'handoff.accepted':
       return `${who} accepted the hand-off`
     case 'trace.pinned': {
       const p = as<TracePinnedPayload>(e)
-      return `Trace pinned for ${p.table} ${p.key}`
+      return `Trace pinned for ${isolate(p.table)} ${isolate(p.key)}`
     }
     default:
       return e.type

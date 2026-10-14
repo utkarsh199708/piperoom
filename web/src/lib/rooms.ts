@@ -3,6 +3,7 @@
 // refresh can return arbitrary order, so the sorting rule lives here too.
 import type { RoomSnapshot } from '../api/types'
 import { canDecideLayer, isViewer } from '../state/permissions'
+import { humanStatus } from './status'
 import type { CurrentUser } from '../state/permissions'
 
 function openedAtMs(room: RoomSnapshot): number {
@@ -191,6 +192,6 @@ export function agentCell(room: RoomSnapshot): { dot: Dot; label: string; agent:
     case 'error':
       return { dot: 'fail', label: detail ? `error · ${detail}` : 'error', agent: false }
     default:
-      return { dot: 'idle', label: state || 'idle', agent: false }
+      return { dot: 'idle', label: state ? humanStatus(state) : 'idle', agent: false }
   }
 }

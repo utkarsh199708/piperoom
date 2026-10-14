@@ -52,6 +52,7 @@ function show(state: RoomState, stale: StaleInfo | null = null) {
     state,
     presence: [],
     conn: 'live',
+    liveDown: false,
     error: null,
     actions,
     ...staleOff,

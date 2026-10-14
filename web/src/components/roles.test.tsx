@@ -77,7 +77,7 @@ function busyRoom(): RoomState {
 }
 
 function showRoom(state: RoomState) {
-  vi.mocked(useRoom).mockReturnValue({ state, presence: [], conn: 'live', error: null, actions, ...staleOff })
+  vi.mocked(useRoom).mockReturnValue({ state, presence: [], conn: 'live', liveDown: false, error: null, actions, ...staleOff })
   vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null })
   return render(
     <MemoryRouter initialEntries={['/rooms/r1']}>

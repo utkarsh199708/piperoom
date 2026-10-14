@@ -58,6 +58,7 @@ function registered(user: CurrentUser, state: RoomState): RoomCommands | null {
     state,
     presence: [],
     conn: 'live',
+    liveDown: false,
     error: null,
     actions,
     stale: null,

@@ -609,19 +609,22 @@ function RoomRow({
         onOpen()
       }}
     >
-      <td className={cn(TD, 'max-w-0')}>
+      {/* The title wraps (two lines at most) rather than truncating: with a "Needs you" badge and a long agent
+          line a nowrap title was squeezed to "Wa…". The cell keeps a floor width; the agent cell gives way instead. */}
+      <td className={cn(TD, 'min-w-[14rem] whitespace-normal py-1.5')}>
         {/* Wide: the title and its badge on one line. Phone: the title, then the badge and the pipeline (its column is hidden). */}
-        <div className="flex min-w-0 items-center gap-x-2 max-md:flex-wrap max-md:py-1">
+        <div className="flex min-w-0 items-center gap-x-2 gap-y-1 max-md:flex-wrap max-md:py-1">
           <Link
             ref={linkRef}
             to={`/rooms/${room.id}`}
             onFocus={onActivate}
-            className="min-w-0 truncate rounded-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-md:basis-full"
+            className="line-clamp-2 min-w-0 break-words rounded-sm font-medium text-foreground [overflow-wrap:anywhere] [unicode-bidi:isolate] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-md:basis-full"
+            title={room.title}
           >
             {room.title}
           </Link>
           {tinted && (
-            <Badge variant="warning" title={`Waiting on your ${layers.join(', ')} approval`}>
+            <Badge variant="warning" className="shrink-0" title={`Waiting on your ${layers.join(', ')} approval`}>
               Needs you
             </Badge>
           )}
@@ -672,10 +675,13 @@ function RoomRow({
           <span className="text-muted-foreground">{room.status === 'open' ? 'No driver' : '—'}</span>
         )}
       </td>
-      <td className={cn(TD, 'max-lg:hidden')}>
-        <span className={cn('inline-flex items-center gap-1.5', agent.agent ? 'text-agent-foreground' : 'text-muted-foreground')}>
+      <td className={cn(TD, 'max-w-[20rem] max-lg:hidden')}>
+        <span
+          className={cn('flex min-w-0 items-center gap-1.5', agent.agent ? 'text-agent-foreground' : 'text-muted-foreground')}
+          title={agent.label}
+        >
           <StatusDot dot={agent.dot} />
-          {agent.label}
+          <span className="min-w-0 truncate">{agent.label}</span>
         </span>
       </td>
       <td className={cn(TD, 'text-right tabular-nums text-muted-foreground max-md:hidden')}>

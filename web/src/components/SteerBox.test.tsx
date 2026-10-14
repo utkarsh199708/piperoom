@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { stripIsolates } from '../lib/bidi'
 import { SteerBox } from './SteerBox'
 import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
@@ -33,7 +34,7 @@ describe('SteerBox', () => {
   it('watcher sees "Suggest", "Request control", and the driver queue hint', () => {
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
     render(<SteerBox state={state} user={kabir} actions={actions} />)
-    expect(screen.getByText(/Arjun's queue/)).toBeInTheDocument()
+    expect(screen.getByTestId('steer-status')).toHaveTextContent(/Arjun's queue/)
     expect(screen.getByRole('button', { name: 'Suggest' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Request control' })).toBeInTheDocument()
   })
@@ -71,7 +72,7 @@ describe('SteerBox composer (U3)', () => {
     fireEvent.change(box, { target: { value: 'check the DDL log' } })
     fireEvent.click(send)
     expect(actions.steer).toHaveBeenCalledWith('check the DDL log')
-    expect(box).toHaveValue('')
+    return waitFor(() => expect(box).toHaveValue(''))
   })
 
   it('Ctrl+Enter sends too', () => {
@@ -87,8 +88,12 @@ describe('SteerBox composer (U3)', () => {
   it('a watcher is told whose queue the message goes to, and the lease', () => {
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
     render(<SteerBox state={state} user={kabir} actions={actions} />)
-    expect(screen.getByText(/Arjun is driving · lease 2[34]m left · your message goes to Arjun's queue/)).toBeInTheDocument()
-    expect(screen.getByPlaceholderText(/Suggest a step for Arjun/)).toBeInTheDocument()
+    expect(screen.getByTestId('steer-status')).toHaveTextContent(
+      /^Arjun is driving · lease 2[34]m left · your message goes to Arjun's queue$/,
+    )
+    expect(stripIsolates(screen.getByLabelText('Steer the agent').getAttribute('placeholder') ?? '')).toBe(
+      'Suggest a step for Arjun…',
+    )
   })
 
   it('with no driver the field is disabled and says how to start', () => {
@@ -133,5 +138,53 @@ describe('SteerBox composer (U3)', () => {
     render(<SteerBox state={state} user={arjun} actions={actions} />)
     fireEvent.click(screen.getByRole('button', { name: 'Grant control' }))
     expect(actions.grantControl).toHaveBeenCalledWith('kabir')
+  })
+})
+
+describe('SteerBox keeps the text until the steer is accepted (QA9)', () => {
+  const driving = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
+
+  it('keeps the text while the request runs and after it fails', async () => {
+    let finish: (ok: boolean) => void = () => undefined
+    const steer = vi.fn(() => new Promise<boolean>((resolve) => (finish = resolve)))
+    render(<SteerBox state={driving} user={arjun} actions={{ ...actions, steer }} />)
+    const box = screen.getByLabelText('Steer the agent')
+    fireEvent.change(box, { target: { value: 'restart the task' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    expect(steer).toHaveBeenCalledWith('restart the task')
+    // In flight: the text is still there and a second send is off.
+    expect(box).toHaveValue('restart the task')
+    expect(screen.getByRole('button', { name: 'Send to agent' })).toBeDisabled()
+    await act(async () => finish(false))
+    expect(box).toHaveValue('restart the task')
+    expect(screen.getByRole('button', { name: 'Send to agent' })).toBeEnabled()
+  })
+
+  it('keeps the text when the request rejects', async () => {
+    const steer = vi.fn(() => Promise.reject(new Error('500')))
+    render(<SteerBox state={driving} user={arjun} actions={{ ...actions, steer }} />)
+    const box = screen.getByLabelText('Steer the agent')
+    fireEvent.change(box, { target: { value: 'check lag' } })
+    await act(async () => {
+      fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true })
+    })
+    expect(steer).toHaveBeenCalledTimes(1)
+    expect(box).toHaveValue('check lag')
+  })
+
+  it('clears the text once the server has it', async () => {
+    const steer = vi.fn(() => Promise.resolve(true))
+    render(<SteerBox state={driving} user={arjun} actions={{ ...actions, steer }} />)
+    const box = screen.getByLabelText('Steer the agent')
+    fireEvent.change(box, { target: { value: 'go' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await waitFor(() => expect(box).toHaveValue(''))
+  })
+
+  it('isolates a driver name with a bidi override', () => {
+    const spoof = { ...emptyRoomState('r1'), driver: { id: 'x', name: 'Eve\u202E' } }
+    render(<SteerBox state={spoof} user={kabir} actions={actions} />)
+    const name = screen.getByTestId('steer-status').querySelector('bdi')
+    expect(name).toHaveTextContent('Eve\u202E')
   })
 })

@@ -34,6 +34,7 @@ vi.mock('../api/client', async (importOriginal) => {
       room: vi.fn(),
       events: vi.fn(),
       grantControl: vi.fn(),
+      steer: vi.fn(),
       approve: vi.fn(),
       reject: vi.fn(),
     },
@@ -43,7 +44,7 @@ vi.mock('../api/client', async (importOriginal) => {
 import { ApiClientError, api, openRoomWs } from '../api/client'
 import { onAuthProblem } from '../lib/auth'
 import type { AuthProblem } from '../lib/auth'
-import { useRoom } from './useRoom'
+import { LIVE_GRACE_MS, useRoom } from './useRoom'
 import { ProposalsPanel } from '../components/ProposalsPanel'
 
 class FakeWebSocket {
@@ -600,5 +601,72 @@ describe('useRoom session epochs and reconnects', () => {
     })
     await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2), { timeout: 3000 })
     expect(openRoomWs).toHaveBeenNthCalledWith(2, 'r1', 1)
+  })
+})
+
+describe('useRoom live-down and steer (QA9)', () => {
+  it('says live updates are down once the socket has been reconnecting past the grace, and clears it on open', async () => {
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue({
+      ...snapshot('r1'),
+      last_seq: 12,
+      open_proposals: [
+        {
+          proposal_id: 'p1',
+          title: 'Restart the task',
+          steps: [],
+          risk: 'low',
+          rollback: '',
+          required_layers: ['kafka-connect'],
+          approvals: { 'kafka-connect': 'pending' },
+          params_hash: 'abc',
+        },
+      ],
+    })
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    const { result } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
+    // The snapshot's proposals are kept for the screen to fall back on.
+    expect(result.current.state?.snapshot_proposals.map((p) => p.proposal_id)).toEqual(['p1'])
+    expect(result.current.state?.proposals).toEqual([])
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      act(() => socket.onopen?.())
+      expect(result.current.liveDown).toBe(false)
+      act(() => socket.onclose?.({ reason: '' }))
+      expect(result.current.conn).toBe('reconnecting')
+      // Inside the grace a blip is not reported.
+      act(() => vi.advanceTimersByTime(LIVE_GRACE_MS - 100))
+      expect(result.current.liveDown).toBe(false)
+      act(() => vi.advanceTimersByTime(200))
+      expect(result.current.liveDown).toBe(true)
+      act(() => socket.onopen?.())
+      expect(result.current.liveDown).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('steer resolves true on success and false (with the error banner) on failure', async () => {
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    const { result } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
+
+    vi.mocked(api.steer).mockResolvedValueOnce(undefined as never)
+    let ok: boolean | undefined
+    await act(async () => {
+      ok = await result.current.actions.steer('go')
+    })
+    expect(ok).toBe(true)
+
+    vi.mocked(api.steer).mockRejectedValueOnce(new ApiClientError(500, 'internal', 'boom'))
+    await act(async () => {
+      ok = await result.current.actions.steer('go again')
+    })
+    expect(ok).toBe(false)
+    expect(result.current.error).toBeTruthy()
   })
 })

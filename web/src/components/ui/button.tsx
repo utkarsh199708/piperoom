@@ -14,6 +14,9 @@ const buttonVariants = cva(
     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
     'disabled:pointer-events-none disabled:opacity-50',
     '[&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0',
+    // Phones: every button is at least a 44px touch target (WCAG 2.5.5), whatever height a
+    // screen gives it. min-height wins over the h-* a caller sets, so no screen has to opt in.
+    'max-[599px]:min-h-11',
   ],
   {
     variants: {
@@ -33,7 +36,7 @@ const buttonVariants = cva(
       size: {
         sm: 'h-8 px-2.5',
         default: 'h-9 px-3',
-        icon: 'h-8 w-8 border-0 p-0',
+        icon: 'h-8 w-8 border-0 p-0 max-[599px]:min-w-11',
       },
     },
     defaultVariants: { variant: 'default', size: 'default' },

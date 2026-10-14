@@ -65,7 +65,9 @@ export function RoomHeader({
   return (
     <header className="flex flex-col gap-2 px-4 pt-4 sm:px-6">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
-        <h1 className="m-0 min-w-0 text-xl font-semibold tracking-tight">{state.title}</h1>
+        <h1 className="m-0 min-w-0 break-words text-xl font-semibold tracking-tight [overflow-wrap:anywhere] [unicode-bidi:isolate]">
+          {state.title}
+        </h1>
         <Badge variant={state.severity} className="uppercase">
           {state.severity}
         </Badge>
@@ -166,8 +168,15 @@ export function RoomHeader({
             )}
           </ul>
         )}
-        <span className="text-muted-foreground">
-          {state.driver ? `${state.driver.name} is driving` : 'No driver'}
+        <span className="min-w-0 break-words text-muted-foreground [overflow-wrap:anywhere]" data-testid="driver-line">
+          {/* <bdi>: a name with a bidi override must not reorder the words after it. */}
+          {state.driver ? (
+            <>
+              <bdi>{state.driver.name}</bdi> is driving
+            </>
+          ) : (
+            'No driver'
+          )}
         </span>
         <Sep />
         <span className="text-subtle-foreground">{members.length} here</span>

@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Progress } from '@/components/ui/progress'
+import { ClampedText } from './room/ClampedText'
 import { PersonAvatar } from './room/PersonAvatar'
 
 const AGENT = { kind: 'agent', id: 'agent', name: 'Agent' } as const
@@ -89,13 +90,13 @@ function AgentMessageList({ messages }: { messages: AgentMessageState[] }) {
   return (
     <div className="flex flex-col gap-1.5">
       {messages.map((m, i) => (
-        <p key={i} className="m-0 flex items-start gap-2">
+        <div key={i} className="m-0 flex items-start gap-2">
           <PersonAvatar actor={AGENT} size={20} className="mt-px" />
           <span className="min-w-0 break-words text-muted-foreground">
             <span className="sr-only">Agent: </span>
-            {m.text}
+            <ClampedText text={m.text} />
           </span>
-        </p>
+        </div>
       ))}
     </div>
   )
@@ -347,6 +348,7 @@ export function Timeline({
   readOnly = false,
   working = false,
   onTakeControl,
+  history,
 }: {
   steps: StepState[]
   messages: AgentMessageState[]
@@ -358,9 +360,29 @@ export function Timeline({
   working?: boolean
   /** Offered in the empty state when the room has no driver and this person may take control. */
   onTakeControl?: () => void
+  /** The log has not been replayed yet (loading, or the live socket is down): no "not started" claim. */
+  history?: 'loading' | 'down'
 }) {
   const unanchored = comments.filter((c) => !c.step_id)
-  if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
+  const empty = steps.length === 0 && messages.length === 0 && unanchored.length === 0
+  if (empty && history) {
+    return (
+      <div
+        className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border bg-card p-6 text-center"
+        data-testid="timeline-history"
+      >
+        <p className="m-0 text-base font-medium">
+          {history === 'down' ? 'The investigation history is not loaded.' : 'Loading the investigation…'}
+        </p>
+        {history === 'down' && (
+          <p className="m-0 max-w-[48ch] text-muted-foreground">
+            Live updates are down. The steps appear here as soon as the connection is back.
+          </p>
+        )}
+      </div>
+    )
+  }
+  if (empty) {
     return (
       <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border bg-card p-6 text-center">
         <PersonAvatar actor={AGENT} size={28} className="opacity-70" />

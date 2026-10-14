@@ -1,4 +1,5 @@
 import type { RoomState } from '../state/types'
+import { humanStatus } from './status'
 
 export type PillTone = 'ok' | 'warn' | 'fail' | 'agent' | 'muted'
 
@@ -41,6 +42,6 @@ export function agentPill(state: RoomState): AgentPillInfo {
         title: detail,
       }
     default:
-      return { tone: 'muted', text: detail ? `Agent ${s} · ${detail}` : `Agent ${s}` }
+      return { tone: 'muted', text: detail ? `Agent ${humanStatus(s)} · ${detail}` : `Agent ${humanStatus(s)}` }
   }
 }
