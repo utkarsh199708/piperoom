@@ -31,12 +31,19 @@ type Store struct {
 
 	shadowRuns   map[string]*store.ShadowRun
 	shadowEvents map[string][]events.Event
+	shadowBytes  map[string]int64 // stored payload bytes of each shadow log (the byte cap's measure)
+
+	limits    store.Limits                  // per-room caps (SetLimits); zero = none
+	deletions map[string]store.RoomDeletion // room_deletions rows by room id
+
+	spend spendTables
 }
 
 type roomLog struct {
 	meta    store.Room
 	lastSeq int64
 	events  []events.Event
+	bytes   int64 // sum of the stored payload sizes (the byte cap's measure)
 	subs    map[*subscriber]struct{}
 }
 
@@ -60,6 +67,10 @@ func New() *Store {
 
 		shadowRuns:   map[string]*store.ShadowRun{},
 		shadowEvents: map[string][]events.Event{},
+		shadowBytes:  map[string]int64{},
+		deletions:    map[string]store.RoomDeletion{},
+
+		spend: newSpendTables(),
 	}
 }
 
@@ -72,7 +83,30 @@ func NewWithClock(now func() time.Time) *Store {
 
 var _ store.Store = (*Store)(nil)
 
-// Append assigns the next seq for the room and stores the event.
+var _ store.Capped = (*Store)(nil)
+
+// SetLimits sets the per-room log caps every later Append enforces; see
+// store.Limits.
+func (s *Store) SetLimits(l store.Limits) {
+	s.mu.Lock()
+	s.limits = l
+	s.mu.Unlock()
+}
+
+// RoomUsage returns the room's counts with its caps.
+func (s *Store) RoomUsage(ctx context.Context, roomID string) (store.Usage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	log, ok := s.rooms[roomID]
+	if !ok {
+		return store.Usage{}, fmt.Errorf("memstore: room %q not found: %w", roomID, store.ErrNotFound)
+	}
+	return s.limits.Usage(int64(len(log.events)), log.bytes), nil
+}
+
+// Append assigns the next seq for the room and stores the event, refusing it
+// with store.ErrLogFull past the room's cap with the same rule as the Postgres
+// store (store.Limits.Fits).
 func (s *Store) Append(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	if err := ctx.Err(); err != nil {
 		return events.Event{}, err
@@ -95,6 +129,11 @@ func (s *Store) Append(ctx context.Context, roomID string, typ events.Type, acto
 	if !ok {
 		return events.Event{}, fmt.Errorf("memstore: room %q not found: %w", roomID, store.ErrNotFound)
 	}
+	size := int64(len(raw))
+	if !s.limits.Fits(typ, actor, int64(len(log.events)), log.bytes, size) {
+		return events.Event{}, fmt.Errorf("memstore: append %s to %s (%d events, %d bytes): %w", typ, roomID, len(log.events), log.bytes, store.ErrLogFull)
+	}
+	log.bytes += size
 	log.lastSeq++
 	log.meta.LastSeq = log.lastSeq
 	e := events.Event{

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"piperoom/internal/room"
 	"piperoom/internal/store"
 )
 
@@ -20,26 +21,27 @@ const (
 
 // expirer is the part of room.Service the retention loop needs.
 type expirer interface {
-	PurgeExpired(ctx context.Context, cutoff time.Time) (store.PurgeResult, error)
+	PurgeByPolicy(ctx context.Context, now time.Time, p room.RetentionPolicy) (store.PurgeResult, error)
 }
 
-// startRetention deletes closed rooms older than days once now and then every
-// `every`, until ctx ends or the returned stop func is called (stop waits for a
-// run in flight). days <= 0 keeps everything and starts nothing. The first run
-// happens in the goroutine, so a large backlog never delays start-up. Logs hold
-// counts only, never room content.
-func startRetention(ctx context.Context, svc expirer, days int, every, timeout time.Duration, now func() time.Time, log *slog.Logger) (stop func()) {
-	if days <= 0 {
+// startRetention deletes closed rooms by the policy (PIPEROOM_RETENTION_DAYS
+// and each pipeline's retention_days) once now and then every `every`, until
+// ctx ends or the returned stop func is called (stop waits for a run in
+// flight). A policy that keeps everything starts nothing. The first run
+// happens in the goroutine, so a large backlog never delays start-up. Logs
+// hold counts only, never room content.
+func startRetention(ctx context.Context, svc expirer, policy room.RetentionPolicy, every, timeout time.Duration, now func() time.Time, log *slog.Logger) (stop func()) {
+	if policy.Off() {
 		log.Info("retention: off, closed rooms are kept forever")
 		return func() {}
 	}
-	log.Info("retention: on", "days", days, "every", every.String())
+	log.Info("retention: on", "days", policy.GlobalDays, "pipelines", policy.PipelineDays, "every", every.String())
 	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		runRetention(ctx, svc, days, timeout, now, log)
+		runRetention(ctx, svc, policy, timeout, now, log)
 		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
@@ -47,7 +49,7 @@ func startRetention(ctx context.Context, svc expirer, days int, every, timeout t
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				runRetention(ctx, svc, days, timeout, now, log)
+				runRetention(ctx, svc, policy, timeout, now, log)
 			}
 		}
 	}()
@@ -58,13 +60,12 @@ func startRetention(ctx context.Context, svc expirer, days int, every, timeout t
 }
 
 // runRetention is one purge run with its own deadline.
-func runRetention(ctx context.Context, svc expirer, days int, timeout time.Duration, now func() time.Time, log *slog.Logger) {
+func runRetention(ctx context.Context, svc expirer, policy room.RetentionPolicy, timeout time.Duration, now func() time.Time, log *slog.Logger) {
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cutoff := now().UTC().AddDate(0, 0, -days)
-	res, err := svc.PurgeExpired(rctx, cutoff)
+	res, err := svc.PurgeByPolicy(rctx, now().UTC(), policy)
 	attrs := []any{
-		"days", days,
+		"days", policy.GlobalDays,
 		"rooms", len(res.RoomIDs),
 		"events", res.Events,
 		"proposals", res.Proposals,
@@ -95,8 +96,69 @@ func runRetention(ctx context.Context, svc expirer, days int, timeout time.Durat
 		return
 	}
 	if len(res.RoomIDs) == 0 {
-		log.Debug("retention: nothing to purge", "days", days)
+		log.Debug("retention: nothing to purge", "days", policy.GlobalDays)
 		return
 	}
 	log.Info("retention: purged closed rooms", attrs...)
+}
+
+const (
+	// openLimitInterval is how often the open-room limit looks at open rooms.
+	// The warning comes 24 h ahead, so a few minutes of lateness do not matter.
+	openLimitInterval = 10 * time.Minute
+	// openLimitRunTimeout bounds one pass.
+	openLimitRunTimeout = 5 * time.Minute
+)
+
+// openLimiter is the part of room.Service the open-room limit loop needs.
+type openLimiter interface {
+	EnforceOpenLimit(ctx context.Context) (room.OpenLimitResult, error)
+}
+
+// startOpenLimit runs the open-room limit (PIPEROOM_MAX_OPEN_DAYS) once now and
+// then every `every`, like startRetention. days <= 0 starts nothing.
+func startOpenLimit(ctx context.Context, svc openLimiter, days int, every, timeout time.Duration, log *slog.Logger) (stop func()) {
+	if days <= 0 {
+		log.Info("open-room limit: off, open rooms stay open until closed")
+		return func() {}
+	}
+	log.Info("open-room limit: on", "days", days, "every", every.String())
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			runOpenLimit(ctx, svc, timeout, log)
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		wg.Wait()
+	}
+}
+
+// runOpenLimit is one pass with its own deadline. Counts only in the log.
+func runOpenLimit(ctx context.Context, svc openLimiter, timeout time.Duration, log *slog.Logger) {
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	res, err := svc.EnforceOpenLimit(rctx)
+	attrs := []any{"warned", res.Warned, "closed", res.Closed, "failed", res.Failed}
+	switch {
+	case err != nil && ctx.Err() != nil:
+		log.Info("open-room limit: stopped by shutdown", attrs...)
+	case err != nil:
+		log.Error("open-room limit: pass failed", append(attrs, "err", err)...)
+	case res.Failed > 0:
+		log.Warn("open-room limit: some rooms failed; they are tried again next pass", attrs...)
+	case res.Warned > 0 || res.Closed > 0:
+		log.Info("open-room limit: pass done", attrs...)
+	}
 }

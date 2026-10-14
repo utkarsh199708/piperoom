@@ -22,6 +22,7 @@ export type EventType =
   | 'agent.tool_result'
   | 'agent.message'
   | 'agent.hypothesis'
+  | 'agent.usage'
   | 'comment.added'
   | 'steer.suggested'
   | 'steer.sent'
@@ -96,6 +97,19 @@ export interface AgentHypothesisPayload {
   based_on_steps: string[]
   confidence: string // "low" | "medium" | "high"
   confirmed: boolean
+}
+
+// One model request's tokens, latency and estimated cost (docs/design/cost.md).
+// Cost telemetry: the reducer keeps it out of the activity feed and the steps.
+export interface AgentUsagePayload {
+  model: string
+  role: 'triage' | 'main' | 'handoff' | 'compaction'
+  input_tokens: number
+  cache_creation_input_tokens: number
+  cache_read_input_tokens: number
+  output_tokens: number
+  latency_ms: number
+  cost_usd?: number // omitted when no price is configured for the model
 }
 
 export interface CommentAddedPayload {
