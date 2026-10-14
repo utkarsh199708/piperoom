@@ -56,7 +56,10 @@ func TestAttack_StripFormat(t *testing.T) {
 		stripped = append(stripped, r)
 	}
 	stripped = append(stripped, 0x200E, 0x200F, 0x200B, 0x2060, 0xFEFF,
-		0x061C, 0x00AD, 0x2062, 0x2061, 0x2064, 0x206A, 0x206F, 0xFFF9, 0xFFFB, 0x180E, 0xE0001, 0xE0041, 0xE007F)
+		0x061C, 0x00AD, 0x2062, 0x2061, 0x2064, 0x206A, 0x206F, 0xFFF9, 0xFFFB, 0x180E, 0xE0001, 0xE0041, 0xE007F,
+		// Other_Default_Ignorable_Code_Point: the Hangul fillers (letters that
+		// render as nothing) and the combining grapheme joiner.
+		0x3164, 0x115F, 0x1160, 0xFFA0, 0x034F)
 	for _, r := range stripped {
 		if got := stripFormat("Pri" + string(r) + "ya"); got != "Priya" {
 			t.Errorf("U+%04X: stripFormat = %q, want Priya", r, got)

@@ -304,10 +304,13 @@ func TestAttack_ShippedUsersFilesStillLoad(t *testing.T) {
 	}
 }
 
-// A-AP-3 (fixed). users.yaml layers still grant approval rights, so a user who
-// lists a layer must be a user: principal of it in owners.yaml even when the
-// layer also lists groups: the server cannot vouch for group membership at
-// start-up. ValidateUsers refuses to start and names the user and the layer.
+// A-AP-3 (fixed). A user who lists a layer in users.yaml must be a user:
+// principal of it in owners.yaml even when the layer also lists groups: the
+// server cannot vouch for group membership at start-up. ValidateUsers refuses
+// to start and names the user and the layer; and should such a config reach
+// the service anyway, the users.yaml layer grants nothing (design section 2.3,
+// revision 5; the approve path is covered over HTTP in
+// httpapi TestLifecycle_UsersLayerOverGroupLayer).
 func TestAttack_UsersYAMLLayerOverGroupLayer(t *testing.T) {
 	users, err := room.ParseUsers([]byte("users:\n  - {id: kabir, layers: [consumer]}\n  - {id: mallory, layers: [consumer]}\n"))
 	if err != nil {
@@ -328,7 +331,11 @@ func TestAttack_UsersYAMLLayerOverGroupLayer(t *testing.T) {
 	svc := room.New(room.Deps{Store: memstore.New(), Users: users, Owners: own, Run: fakeRun, WriteHandoff: fakeWrite})
 	t.Cleanup(svc.Close)
 	mallory, _ := svc.LookupUser("mallory")
-	if got := svc.LayersFor(mallory); len(got) != 1 || got[0] != "consumer" {
-		t.Fatalf("design changed? mallory may approve %v", got)
+	if got := svc.LayersFor(mallory); len(got) != 0 {
+		t.Fatalf("mallory may approve %v without the start check, want nothing", got)
+	}
+	kabir, _ := svc.LookupUser("kabir")
+	if got := svc.LayersFor(kabir); len(got) != 1 || got[0] != "consumer" {
+		t.Fatalf("kabir may approve %v, want [consumer]", got)
 	}
 }
