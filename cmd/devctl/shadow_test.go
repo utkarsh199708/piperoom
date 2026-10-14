@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	"piperoom/internal/config"
 )
 
 // repoStack points a stack at the real repo (two levels up from cmd/devctl) so the
@@ -86,6 +88,8 @@ func TestHostEnvLines(t *testing.T) {
 		want := []string{
 			`export OWNERS_FILE='/repo with '\''quote/dev/owners.shadow.yaml'`,
 			`export PIPEROOM_SHADOW_GRACE='1m'`,
+			`export PIPEROOM_WATCH_COOLDOWN='5m'`,
+			`export PIPEROOM_WATCH_INTERVAL='15s'`,
 			`export PIPEROOM_WATCH_MODE='rooms'`,
 		}
 		if !reflect.DeepEqual(got, want) {
@@ -94,8 +98,14 @@ func TestHostEnvLines(t *testing.T) {
 	})
 	t.Run("powershell", func(t *testing.T) {
 		got := hostEnvLines(`C:\Users\me\piperoom`, shadowOpts{Shell: "powershell"})
-		if len(got) != 2 || !strings.HasPrefix(got[0], "$env:OWNERS_FILE = 'C:") || got[1] != "$env:PIPEROOM_WATCH_MODE = 'rooms'" {
+		if len(got) != 4 || !strings.HasPrefix(got[0], "$env:OWNERS_FILE = 'C:") || got[3] != "$env:PIPEROOM_WATCH_MODE = 'rooms'" {
 			t.Fatalf("got %v", got)
+		}
+	})
+	t.Run("an override beats the dev watcher timings", func(t *testing.T) {
+		out := strings.Join(hostEnvLines("/r", shadowOpts{Shell: "sh", WatchInterval: "30s"}), "\n")
+		if !strings.Contains(out, "PIPEROOM_WATCH_INTERVAL='30s'") || strings.Contains(out, "'15s'") {
+			t.Fatalf("got %s", out)
 		}
 	})
 	t.Run("never carries the API key", func(t *testing.T) {
@@ -105,6 +115,21 @@ func TestHostEnvLines(t *testing.T) {
 			t.Fatalf("env lines must not mention the key: %s", out)
 		}
 	})
+}
+
+func TestPsQuote(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"plain", "'plain'"},
+		{"it's", "'it''s'"},
+		{"Uj\u2019s repo", "'Uj\u2019\u2019s repo'"}, // a typographic quote would end the string
+		{"\u2018a\u201b", "'\u2018\u2018a\u201b\u201b'"},
+		{"", "''"},
+	}
+	for _, tt := range tests {
+		if got := psQuote(tt.in); got != tt.want {
+			t.Errorf("psQuote(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
 }
 
 func TestRequireAPIKey(t *testing.T) {
@@ -218,6 +243,17 @@ func TestComposeShadowService(t *testing.T) {
 	}
 	if svc.Environment["PIPEROOM_WATCH_MODE"] != "rooms" {
 		t.Fatal("the watcher must be in rooms mode or no shadow room ever opens")
+	}
+	for k, want := range map[string]string{
+		"PIPEROOM_SHADOW_GRACE":        "${PIPEROOM_SHADOW_GRACE:-" + config.DefaultShadowGrace + "}",
+		"PIPEROOM_SHADOW_TOKEN_BUDGET": "${PIPEROOM_SHADOW_TOKEN_BUDGET:-" + config.DefaultShadowTokenBudget + "}",
+		"PIPEROOM_SHADOW_MAX_TURNS":    "${PIPEROOM_SHADOW_MAX_TURNS:-" + config.DefaultShadowMaxTurns + "}",
+		"PIPEROOM_WATCH_INTERVAL":      "${PIPEROOM_WATCH_INTERVAL:-" + devWatchInterval + "}",
+		"PIPEROOM_WATCH_COOLDOWN":      "${PIPEROOM_WATCH_COOLDOWN:-" + devWatchCooldown + "}",
+	} {
+		if svc.Environment[k] != want {
+			t.Errorf("%s = %q, want %q (compose and the Go defaults must agree)", k, svc.Environment[k], want)
+		}
 	}
 	for k, v := range svc.Environment {
 		if strings.Contains(v, ":?") {

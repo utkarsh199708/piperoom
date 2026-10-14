@@ -10,7 +10,7 @@ file's shape only (no Docker). Do the checklist at the end the first time.
 
 ## What you need
 
-- The dev stack: `go run ./cmd/devctl up --owner <tag>` (take the lock first, `docs/collab.md`).
+- The dev stack: `go run ./cmd/devctl up --owner <tag>` (take the lock first, `docs/collab.md`). `shadow up` also starts any stack service that is down (it shares the compose project), but the connector is only registered by `devctl up`.
 - `ANTHROPIC_API_KEY` in your environment. Shadow mode runs the **real** agent, which costs tokens
   (default cap 500 000 per room, 20 turns). `devctl` checks the variable is set; it never prints it or
   writes it to a file.
@@ -47,7 +47,7 @@ devctl shadow up --owner <tag> --grace 10m --token-budget 200000 --max-turns 12 
 
 1. Open http://127.0.0.1:8090, choose a user (e.g. Arjun).
 2. Break something: `go run ./cmd/devctl break connector-down --owner <tag>` (scenarios: `dev/scenarios.md`).
-   Within about a minute the watcher opens a room. It is a shadow room: the banner says so, the steer
+   Within about a minute the watcher opens a room. It is a shadow room: a "Shadow" chip marks it (also after close), the steer
    box is hidden, and the room log shows no agent output.
 3. Take control (a watcher room has no driver), investigate by hand, then
    `go run ./cmd/devctl fix connector-down --owner <tag>` and **close the room with a resolution**
@@ -69,7 +69,8 @@ devctl shadow env [--shell sh|powershell] [flags]
 ```
 
 `shadow env` prints the settings to run the server on the host instead of in a container, handy while
-changing server code (key already exported; the dev stack's addresses are the config defaults):
+changing server code (key already exported; the dev stack's addresses are the config defaults; it sets the
+same 15s / 5m watcher timings as the container):
 
 ```
 go run ./cmd/devctl shadow env --shell powershell | Invoke-Expression

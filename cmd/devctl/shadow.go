@@ -23,6 +23,10 @@ const (
 	shadowOwnersRel = "dev/owners.shadow.yaml"
 	shadowURL       = "http://127.0.0.1:8090"
 	apiKeyEnv       = "ANTHROPIC_API_KEY"
+
+	// Watcher timings of the compose service (dev/docker-compose.yml), reused for host mode.
+	devWatchInterval = "15s"
+	devWatchCooldown = "5m"
 )
 
 const shadowUsage = `usage: devctl shadow up [flags] | down | status | env [--shell sh|powershell]
@@ -120,6 +124,13 @@ func (o shadowOpts) envPairs() map[string]string {
 // never printed: it must already be in the environment.
 func hostEnvLines(root string, o shadowOpts) []string {
 	pairs := o.envPairs()
+	// The same watcher timings the compose service uses; the server's own defaults
+	// (60s, 60m) would make a first room slow and a second round open none for an hour.
+	for k, v := range map[string]string{"PIPEROOM_WATCH_INTERVAL": devWatchInterval, "PIPEROOM_WATCH_COOLDOWN": devWatchCooldown} {
+		if _, set := pairs[k]; !set {
+			pairs[k] = v
+		}
+	}
 	pairs["OWNERS_FILE"] = filepath.Join(root, filepath.FromSlash(shadowOwnersRel))
 	pairs["PIPEROOM_WATCH_MODE"] = string(config.WatchRooms)
 	keys := make([]string, 0, len(pairs))
@@ -140,7 +151,21 @@ func hostEnvLines(root string, o shadowOpts) []string {
 
 func shQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
 
-func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+// psQuote single-quotes s for PowerShell, which treats the typographic single quotes
+// (U+2018, U+2019, U+201A, U+201B) as quote characters too; each is doubled.
+func psQuote(s string) string {
+	var b strings.Builder
+	b.WriteByte('\'')
+	for _, r := range s {
+		switch r {
+		case '\'', '\u2018', '\u2019', '\u201a', '\u201b':
+			b.WriteRune(r)
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('\'')
+	return b.String()
+}
 
 // requireAPIKey fails when the agent has no key. Only the presence is checked; the
 // value is never read into a message.
