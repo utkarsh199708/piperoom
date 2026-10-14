@@ -57,4 +57,45 @@ describe('agentPill', () => {
     expect(agentPill(room({ agent_status: { state: 'error' } })).tone).toBe('fail')
     expect(agentPill(room({ agent_status: { state: 'paused', detail: 'brb' } })).text).toBe('Agent paused · brb')
   })
+  const step2 = [{ tool: 'a' }, { tool: 'b' }] as unknown as ProposalState['steps']
+  const approved = (executed: ProposalState['executed']): ProposalState => ({
+    ...proposal,
+    status: 'approved',
+    steps: step2,
+    approvals: { 'kafka-connect': 'approved', 'schema-registry': 'approved' },
+    executed,
+  })
+  const ex = (i: number, ok = true) => ({ proposal_id: 'p1', step_index: i, ok, output: '' })
+  it('executed steps read as verifying, even if the agent still says waiting', () => {
+    const r = room({ agent_status: { state: 'waiting_approval' }, proposals: [approved([ex(0), ex(1)])] })
+    expect(agentPill(r)).toMatchObject({ tone: 'ok', text: 'Fix ran · verifying' })
+  })
+  it('a run in progress and a failed step', () => {
+    const running = room({ agent_status: { state: 'waiting_approval' }, proposals: [approved([ex(0)])] })
+    expect(agentPill(running)).toMatchObject({ tone: 'agent', text: 'Executing fix', step: 2 })
+    const failed = room({ proposals: [approved([ex(0), ex(1, false)])] })
+    expect(agentPill(failed)).toMatchObject({ tone: 'fail', text: 'Fix failed · step 2' })
+  })
+  it('a rejected proposal re-plans or waits for a steer', () => {
+    const rejected = { ...proposal, status: 'rejected' as const }
+    expect(agentPill(room({ agent_status: { state: 'working' }, proposals: [rejected] })).text).toBe(
+      'Proposal rejected · re-planning',
+    )
+    expect(agentPill(room({ agent_status: { state: 'waiting_approval' }, proposals: [rejected] })).text).toBe(
+      'Proposal rejected · waiting for a steer',
+    )
+  })
+  it('a closed room says the agent stopped', () => {
+    expect(agentPill(room({ status: 'closed', agent_status: { state: 'waiting_approval' } }))).toMatchObject({
+      tone: 'muted',
+      text: 'Agent stopped',
+    })
+  })
+})
+
+describe('agentPill queued and log_full', () => {
+  it('say what is happening instead of the raw state', () => {
+    expect(agentPill(room({ driver: { id: 'a', name: 'A' }, agent_status: { state: 'queued' } }))).toMatchObject({ tone: 'agent', text: 'Queued · waiting for an agent slot' })
+    expect(agentPill(room({ driver: { id: 'a', name: 'A' }, agent_status: { state: 'log_full' } }))).toMatchObject({ tone: 'fail', text: 'Log full · agent stopped' })
+  })
 })

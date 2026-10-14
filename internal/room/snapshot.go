@@ -1,6 +1,7 @@
 package room
 
 import (
+	"strconv"
 	"time"
 
 	"piperoom/internal/events"
@@ -63,6 +64,21 @@ type Proposal struct {
 	// sends it back with approve and reject. "" only for a proposal that
 	// predates the hash and cannot be hashed.
 	ParamsHash string `json:"params_hash"`
+	// Preview is what each step would do, written once by the system after
+	// the proposal exists (proposal.previewed, F4). Informational: it is not
+	// part of ParamsHash. nil until the event arrives.
+	Preview *events.ProposalPreviewedPayload `json:"preview,omitempty"`
+}
+
+// ChecklistTick says who ticked one runbook item and when.
+type ChecklistTick struct {
+	By Person    `json:"by"`
+	At time.Time `json:"at"`
+}
+
+// checklistKey is the key of RoomSnapshot.ChecklistDone.
+func checklistKey(toolUseID string, hit, item int) string {
+	return toolUseID + ":" + strconv.Itoa(hit) + ":" + strconv.Itoa(item)
 }
 
 // Suggestion is a non-driver's pending steer.
@@ -94,6 +110,13 @@ type RoomSnapshot struct {
 	PendingSuggestions []Suggestion `json:"pending_suggestions"`
 	Members            []Member     `json:"members"`
 
+	// Labelled is true once a room.labelled exists (F8). ChecklistDone holds
+	// the ticked runbook items, keyed "<tool_use_id>:<hit>:<item>" (see
+	// checklistKey); the last checklist.step_done per key wins and an untick
+	// removes the key. Never null.
+	Labelled      bool                     `json:"labelled"`
+	ChecklistDone map[string]ChecklistTick `json:"checklist_done"`
+
 	// Room limits (docs/design/retention.md). AutoCloseAt is set by the
 	// service, not by Apply: it depends on PIPEROOM_MAX_OPEN_DAYS. LogCap is
 	// "ok", "warning" (room.log_cap_warning) or "full" (agent.status
@@ -118,6 +141,10 @@ type RoomSnapshot struct {
 	shadowRevealed bool
 	shadowLabelled bool
 	shadowGrade    *events.ShadowGradedPayload // the last grade; nil before any
+	// pendingPreviews holds a proposal.previewed seen before its
+	// proposal.created (a replay over a snapshot); it is attached when the
+	// proposal appears.
+	pendingPreviews map[string]events.ProposalPreviewedPayload
 
 	// handoffReq is the room's latest hand-off request (handoff.requested),
 	// cleared by the handoff.created or handoff.failed with its request_id.
@@ -155,6 +182,7 @@ func NewSnapshot() RoomSnapshot {
 		OpenProposals:      []Proposal{},
 		PendingSuggestions: []Suggestion{},
 		Members:            []Member{},
+		ChecklistDone:      map[string]ChecklistTick{},
 	}
 }
 
@@ -177,13 +205,28 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 		g := *s.shadowGrade
 		c.shadowGrade = &g
 	}
+	if s.pendingPreviews != nil {
+		c.pendingPreviews = make(map[string]events.ProposalPreviewedPayload, len(s.pendingPreviews))
+		for k, v := range s.pendingPreviews {
+			c.pendingPreviews[k] = v
+		}
+	}
 	c.AutoCloseAt = cloneTime(s.AutoCloseAt)
 	c.extendedUntil = cloneTime(s.extendedUntil)
 	c.warnedFor = cloneTime(s.warnedFor)
 	c.OpenProposals = cloneProposals(s.OpenProposals)
 	c.PendingSuggestions = append([]Suggestion{}, s.PendingSuggestions...)
 	c.Members = append([]Member{}, s.Members...)
+	c.ChecklistDone = cloneTicks(s.ChecklistDone)
 	return c
+}
+
+func cloneTicks(in map[string]ChecklistTick) map[string]ChecklistTick {
+	out := make(map[string]ChecklistTick, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func cloneTime(t *time.Time) *time.Time {
@@ -194,12 +237,34 @@ func cloneTime(t *time.Time) *time.Time {
 	return &c
 }
 
+func clonePreview(in *events.ProposalPreviewedPayload) *events.ProposalPreviewedPayload {
+	if in == nil {
+		return nil
+	}
+	c := *in
+	c.Steps = make([]events.StepPreview, len(in.Steps))
+	for i, sp := range in.Steps {
+		c.Steps[i] = sp
+		if sp.Preview != nil {
+			pv := *sp.Preview
+			pv.Downstream = append([]string(nil), sp.Preview.Downstream...)
+			if sp.Preview.DryRun != nil {
+				dr := *sp.Preview.DryRun
+				pv.DryRun = &dr
+			}
+			c.Steps[i].Preview = &pv
+		}
+	}
+	return &c
+}
+
 func cloneProposals(in []Proposal) []Proposal {
 	out := make([]Proposal, len(in))
 	for i, p := range in {
 		out[i] = p
 		out[i].Steps = append([]events.ProposalStep{}, p.Steps...)
 		out[i].RequiredLayers = append([]string{}, p.RequiredLayers...)
+		out[i].Preview = clonePreview(p.Preview)
 		if p.Approvals != nil {
 			out[i].Approvals = make(map[string]string, len(p.Approvals))
 			for k, v := range p.Approvals {
@@ -223,6 +288,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	snap.Members = append([]Member(nil), snap.Members...)
 	snap.OpenProposals = append([]Proposal(nil), snap.OpenProposals...)
 	snap.PendingSuggestions = append([]Suggestion(nil), snap.PendingSuggestions...)
+	snap.ChecklistDone = cloneTicks(snap.ChecklistDone)
 	if e.Actor.Kind == events.ActorHuman {
 		snap.Members = upsertMember(snap.Members, e.Actor, "watching")
 	}
@@ -239,6 +305,21 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Shadow = p.Shadow
 		snap.Status = "open"
 		snap.OpenedAt = e.At
+
+	case events.RoomLabelled:
+		snap.Labelled = true
+
+	case events.ChecklistStepDone:
+		p, ok := decode[events.ChecklistStepDonePayload](e)
+		if !ok {
+			break
+		}
+		key := checklistKey(p.ToolUseID, p.Hit, p.Item)
+		if p.Done {
+			snap.ChecklistDone[key] = ChecklistTick{By: Person{ID: e.Actor.ID, Name: e.Actor.Name, Verified: e.Actor.Verified}, At: e.At}
+		} else {
+			delete(snap.ChecklistDone, key)
+		}
 
 	case events.ShadowRevealed:
 		snap.shadowRevealed = true
@@ -365,7 +446,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		for _, layer := range p.RequiredLayers {
 			approvals[layer] = "pending"
 		}
-		snap.OpenProposals = append(snap.OpenProposals, Proposal{
+		np := Proposal{
 			ProposalID:     p.ProposalID,
 			Title:          p.Title,
 			Steps:          p.Steps,
@@ -374,7 +455,42 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			RequiredLayers: p.RequiredLayers,
 			Approvals:      approvals,
 			ParamsHash:     eventParamsHash(e.RoomID, p),
-		})
+		}
+		if pv, ok := snap.pendingPreviews[p.ProposalID]; ok {
+			np.Preview = &pv
+			rest := make(map[string]events.ProposalPreviewedPayload, len(snap.pendingPreviews))
+			for k, v := range snap.pendingPreviews {
+				if k != p.ProposalID {
+					rest[k] = v
+				}
+			}
+			snap.pendingPreviews = rest
+		}
+		snap.OpenProposals = append(snap.OpenProposals, np)
+
+	case events.ProposalPreviewed:
+		p, ok := decode[events.ProposalPreviewedPayload](e)
+		if !ok {
+			break
+		}
+		found := false
+		for i := range snap.OpenProposals {
+			if snap.OpenProposals[i].ProposalID == p.ProposalID {
+				// A second event replaces the first (a future refresh).
+				pv := p
+				snap.OpenProposals[i].Preview = &pv
+				found = true
+				break
+			}
+		}
+		if !found {
+			m := make(map[string]events.ProposalPreviewedPayload, len(snap.pendingPreviews)+1)
+			for k, v := range snap.pendingPreviews {
+				m[k] = v
+			}
+			m[p.ProposalID] = p
+			snap.pendingPreviews = m
+		}
 
 	case events.ApprovalGiven:
 		p, ok := decode[events.ApprovalGivenPayload](e)
