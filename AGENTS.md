@@ -256,7 +256,7 @@ author rebases (merges `main` into the branch for a cloud PR) once the predecess
    that makes `main` green again; every R PR needs it.
 2. **R4, R5b, R9** (A5 routes and events; A4 read-only wiring; A5 log/dev-ack/version). Any order among them; they
    touch different packages. R5a and R5c may merge with or after R5b.
-3. Only after **all** of step 2: **#146** (R3, calls R4's routes) and the **A5 R11 PR** (decline and leases, built on
+3. Only after **all** of step 2: **#146** (R3, calls R4's routes) and **#147** (the A5 R11 PR: decline and leases, built on
    R4's hand-off and lease code in `internal/room`), and any later PR that uses items 1–5.
 4. Everything else after R0 PR 1, in any order, unless its thread says it waits on another PR: R1, R2, R5d, R6,
    R7, R8a, R8b, R10, R12, and the R3/R11 PRs that use none of items 1–5 (#135 web verified badge, #130 slackbridge,
