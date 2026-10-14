@@ -26,7 +26,8 @@ var ErrBadKey = errors.New("integrations: secret key must be 32 bytes, standard 
 
 // ErrOpen marks a sealed blob that no configured key opens: a wrong key, a
 // blob copied onto another row (additional data mismatch) or corruption.
-var ErrOpen = errors.New("integrations: cannot open sealed secrets")
+// It is spec.ErrSecretKeyMismatch, so the HTTP API answers 409.
+var ErrOpen = spec.ErrSecretKeyMismatch
 
 // sealKey is one AES-256 key and its id.
 type sealKey struct {

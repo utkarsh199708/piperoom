@@ -33,7 +33,56 @@ var (
 	ErrProviderUnreachable = errors.New("integrations: secret manager unreachable")
 	// ErrUnknownAlertSource: not alertmanager|grafana|pagerduty|datadog|generic → 404 not_found.
 	ErrUnknownAlertSource = errors.New("integrations: unknown alert source")
+	// ErrSecretKeyMismatch: a row's sealed secrets open with neither
+	// PIPEROOM_SECRET_KEY nor PIPEROOM_SECRET_KEY_PREVIOUS (the key changed,
+	// or the blob is corrupt) → 409 secret_key_mismatch.
+	ErrSecretKeyMismatch = errors.New("integrations: cannot open sealed secrets")
 )
+
+// SecretRefReason says why a secret:// reference cannot be read.
+type SecretRefReason string
+
+// Reasons a reference cannot be read, and their HTTP answers.
+const (
+	SecretRefInvalid         SecretRefReason = "invalid"          // 400 validation
+	SecretRefUnknownProvider SecretRefReason = "unknown_provider" // 400 validation
+	SecretRefDenied          SecretRefReason = "access_denied"    // 403 secret_access_denied
+	SecretRefNotFound        SecretRefReason = "not_found"        // 404 not_found
+	SecretRefUnreachable     SecretRefReason = "unreachable"      // 502 provider_unreachable
+	SecretRefOther           SecretRefReason = "other"            // 400 validation
+)
+
+// SecretRefError: the reference (or listing prefix) in Field cannot be read.
+// Err is the cause, for logs and errors.Is; it never holds a value.
+type SecretRefError struct {
+	Field  string
+	Reason SecretRefReason
+	Err    error
+}
+
+// Error implements error.
+func (e *SecretRefError) Error() string {
+	return fmt.Sprintf("integrations: field %s: secret reference cannot be read (%s): %v", e.Field, e.Reason, e.Err)
+}
+
+// Unwrap returns the cause.
+func (e *SecretRefError) Unwrap() error { return e.Err }
+
+// Dependent is a row that names a secret manager in a reference.
+type Dependent struct {
+	ID    string `json:"id"`
+	Kind  string `json:"kind"`
+	Title string `json:"title"`
+}
+
+// InUseError: a secret manager that enabled rows reference cannot be
+// deleted or disabled → 409 in_use with the dependents in the body.
+type InUseError struct{ Dependents []Dependent }
+
+// Error implements error.
+func (e *InUseError) Error() string {
+	return fmt.Sprintf("integrations: secret manager is used by %d integration(s)", len(e.Dependents))
+}
 
 // ValidationError is bad input on one field → 400 validation with "field".
 type ValidationError struct {

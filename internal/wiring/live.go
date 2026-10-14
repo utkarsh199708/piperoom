@@ -869,8 +869,8 @@ func (m *LiveModel) Forget(roomID string) {
 // the source of truth that the Integrations page shows; TestEnvVarsMatchIntegrations
 // fails when the two lists drift apart.
 var envVars = map[spec.Category][]string{
-	spec.CategorySourceDB:  {"SOURCE_DB_URL"},
-	spec.CategoryWarehouse: {"WAREHOUSE_DB_URL", "WAREHOUSE_KIND"},
+	spec.CategorySourceDB:  {"SOURCE_DB_URL", "SOURCE_DB_PASSWORD"},
+	spec.CategoryWarehouse: {"WAREHOUSE_DB_URL", "WAREHOUSE_DB_PASSWORD", "WAREHOUSE_KIND"},
 	spec.CategoryKafka: {
 		"KAFKA_BROKERS", "KAFKA_SECURITY_PROTOCOL", "KAFKA_SASL_MECHANISM", "KAFKA_SASL_USERNAME",
 		"KAFKA_SASL_PASSWORD", "KAFKA_TLS_CA_FILE", "KAFKA_TLS_CERT_FILE", "KAFKA_TLS_KEY_FILE", "KAFKA_TLS_SERVER_NAME",

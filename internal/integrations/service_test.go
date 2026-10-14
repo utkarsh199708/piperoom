@@ -501,7 +501,9 @@ func TestUpdateWithWrongKey(t *testing.T) {
 	in := connectInput()
 	delete(in.Secrets, "password")
 	_, _, err = h.svc.Update(ctx, ws, "a", view.ID, 1, in)
-	if !errors.Is(err, ErrOpen) || strings.Contains(err.Error(), canary) {
+	// A kept typed secret that cannot be opened must be entered again.
+	var ve *spec.ValidationError
+	if !errors.As(err, &ve) || ve.Field != "password" || strings.Contains(err.Error(), canary) {
 		t.Fatalf("err = %v", err)
 	}
 	// Rotation: the old key as previous opens it, and the save re-seals with the new key.

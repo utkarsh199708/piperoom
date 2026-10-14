@@ -26,10 +26,13 @@ const (
 
 // merged is an Input checked against a kind and merged over a stored row.
 type merged struct {
-	config  map[string]any           // what Integration.Config stores: text values and {"$ref"} entries
-	typed   map[string]netsec.Secret // typed-in secrets to seal
-	refs    map[string]string        // secret field → secret:// reference
-	changed []string                 // field names that changed, sorted
+	config map[string]any           // what Integration.Config stores: text values and {"$ref"} entries
+	typed  map[string]netsec.Secret // typed-in secrets to seal
+	refs   map[string]string        // secret field → secret:// reference
+	// textRefs are non-secret fields with Field.AllowRef that hold a
+	// reference instead of text (a Vault lease's user name).
+	textRefs map[string]string
+	changed  []string // field names that changed, sorted
 }
 
 // secretsSet lists the secret fields that have a value, sorted.
@@ -135,7 +138,7 @@ func mergeInput(k spec.Kind, in spec.Input, old *spec.Integration, oldTyped map[
 	for _, f := range k.Fields {
 		fields[f.Name] = f
 	}
-	m := merged{config: map[string]any{}, typed: map[string]netsec.Secret{}, refs: map[string]string{}}
+	m := merged{config: map[string]any{}, typed: map[string]netsec.Secret{}, refs: map[string]string{}, textRefs: map[string]string{}}
 	changed := map[string]bool{}
 	keptTyped := map[string]bool{} // typed-in secrets carried over from old
 
@@ -154,6 +157,8 @@ func mergeInput(k spec.Kind, in spec.Input, old *spec.Integration, oldTyped map[
 			}
 			if s, ok := v.(string); ok {
 				m.config[name] = s
+			} else if ref, ok := refOf(v); ok && f.AllowRef {
+				m.textRefs[name] = ref
 			}
 		}
 		for name, s := range oldTyped {
@@ -167,6 +172,7 @@ func mergeInput(k spec.Kind, in spec.Input, old *spec.Integration, oldTyped map[
 	// Non-secret fields. On update, the body is the whole form: a field
 	// left out is cleared (secrets are the exception, below).
 	newCfg := map[string]string{}
+	newRefs := map[string]string{}
 	for name, raw := range in.Config {
 		f, ok := fields[name]
 		if !ok {
@@ -174,6 +180,17 @@ func mergeInput(k spec.Kind, in spec.Input, old *spec.Integration, oldTyped map[
 		}
 		if f.Type.IsSecret() {
 			return merged{}, &spec.ValidationError{Field: name, Message: "secret fields go in secrets, not config"}
+		}
+		if mm, isMap := raw.(map[string]any); isMap && f.AllowRef {
+			ref, _ := mm[spec.RefKey].(string)
+			if len(mm) != 1 || ref == "" {
+				return merged{}, &spec.ValidationError{Field: name, Message: `a reference must be {"$ref": "secret://<provider>/<path>"}`}
+			}
+			if _, err := ParseRef(ref); err != nil {
+				return merged{}, &spec.ValidationError{Field: name, Message: err.Error()}
+			}
+			newRefs[name] = ref
+			continue
 		}
 		s, err := textValue(name, raw)
 		if err != nil {
@@ -193,7 +210,8 @@ func mergeInput(k spec.Kind, in spec.Input, old *spec.Integration, oldTyped map[
 		}
 		oldV, _ := m.config[f.Name].(string)
 		newV, has := newCfg[f.Name]
-		if oldV != newV {
+		newRef := newRefs[f.Name]
+		if oldV != newV || m.textRefs[f.Name] != newRef {
 			changed[f.Name] = true
 		}
 		if has {
@@ -201,7 +219,12 @@ func mergeInput(k spec.Kind, in spec.Input, old *spec.Integration, oldTyped map[
 		} else {
 			delete(m.config, f.Name)
 		}
-		if f.Required && newV == "" && f.Default == "" {
+		if newRef != "" {
+			m.textRefs[f.Name] = newRef
+		} else {
+			delete(m.textRefs, f.Name)
+		}
+		if f.Required && newV == "" && newRef == "" && f.Default == "" {
 			return merged{}, &spec.ValidationError{Field: f.Name, Message: "required"}
 		}
 	}
@@ -281,6 +304,9 @@ func mergeInput(k spec.Kind, in spec.Input, old *spec.Integration, oldTyped map[
 		}
 	}
 	for name, ref := range m.refs {
+		m.config[name] = map[string]any{spec.RefKey: ref}
+	}
+	for name, ref := range m.textRefs {
 		m.config[name] = map[string]any{spec.RefKey: ref}
 	}
 	if k.Category == spec.CategorySecretManager {
@@ -375,15 +401,30 @@ func viewConfig(k spec.Kind, known bool, cfg map[string]any) map[string]any {
 		if !ok {
 			continue
 		}
-		if f.Type.IsSecret() {
+		if f.Type.IsSecret() || f.AllowRef {
 			if ref, ok := refOf(v); ok {
 				out[f.Name] = map[string]any{spec.RefKey: ref}
+				continue
 			}
+		}
+		if f.Type.IsSecret() {
 			continue
 		}
 		if s, ok := v.(string); ok {
 			out[f.Name] = s
 		}
+	}
+	return out
+}
+
+// allRefs lists every reference of m: secret fields and AllowRef fields.
+func (m merged) allRefs() map[string]string {
+	out := make(map[string]string, len(m.refs)+len(m.textRefs))
+	for k, v := range m.refs {
+		out[k] = v
+	}
+	for k, v := range m.textRefs {
+		out[k] = v
 	}
 	return out
 }

@@ -20,8 +20,9 @@ type envVar struct {
 // envCategories lists, per category, the variables that make it env-managed
 // (integrations.md §4.4). Names match internal/config.
 var envCategories = map[spec.Category][]envVar{
-	spec.CategorySourceDB:  {{name: "SOURCE_DB_URL", dbURL: true}},
-	spec.CategoryWarehouse: {{name: "WAREHOUSE_DB_URL", dbURL: true}, {name: "WAREHOUSE_KIND"}},
+	spec.CategorySourceDB: {{name: "SOURCE_DB_URL", dbURL: true}, {name: "SOURCE_DB_PASSWORD", field: "password", secret: true}},
+	spec.CategoryWarehouse: {{name: "WAREHOUSE_DB_URL", dbURL: true}, {name: "WAREHOUSE_DB_PASSWORD", field: "password", secret: true},
+		{name: "WAREHOUSE_KIND"}},
 	spec.CategoryKafka: {
 		{name: "KAFKA_BROKERS", field: "brokers"}, {name: "KAFKA_SECURITY_PROTOCOL", field: "protocol"},
 		{name: "KAFKA_SASL_MECHANISM", field: "mechanism"}, {name: "KAFKA_SASL_USERNAME", field: "username"},
@@ -120,6 +121,13 @@ func EnvFromLookup(lookup func(string) (string, bool)) Env {
 // only reported as set. A Snowflake DSN (no scheme) shows nothing but that a
 // password may be set.
 func dbURLView(raw string, cfg map[string]any, secrets map[string]bool) {
+	if strings.HasPrefix(raw, spec.RefPrefix) {
+		// The whole URL comes from a secret manager: its parts are not
+		// known here, and parsing the reference as a URL would show the
+		// provider id as the host and the secret path as the database.
+		secrets["password"] = true
+		return
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		secrets["password"] = true

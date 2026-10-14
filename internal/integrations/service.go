@@ -3,6 +3,7 @@ package integrations
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -66,6 +67,11 @@ type Options struct {
 	// same secret is refused, so an admin cannot send the operator's
 	// credentials to a host of their choice.
 	ReservedRefs []string
+	// ReservedValues are the values of the server's own secret settings
+	// (after their references were resolved). A reference that resolves to
+	// one of them is refused whatever its spelling: the check by reference
+	// (ReservedRefs) cannot see every alias a secret manager has.
+	ReservedValues []netsec.Secret
 	// TestsPerMinute per admin; 0 = DefaultTestsPerMinute.
 	TestsPerMinute int
 	Now            func() time.Time
@@ -77,6 +83,19 @@ type Service struct {
 	o        Options
 	limiter  *limiter
 	reserved map[string]bool // secretIDOf(ReservedRefs)
+
+	// notLive holds, per enabled row id, why its client is not running
+	// (restore at start or a live apply after a save failed). The card then
+	// shows failing instead of the stored test's "connected".
+	liveMu  sync.Mutex
+	notLive map[string]string
+}
+
+// SecretIdentifier is implemented by a Resolver that can name the secret a
+// reference reads, so different spellings of one secret compare equal
+// (secrets.Registry: a files reference by the real path of its file).
+type SecretIdentifier interface {
+	SecretIdentity(workspaceID, ref string) (string, bool)
 }
 
 var _ spec.Service = (*Service)(nil)
@@ -107,7 +126,7 @@ func NewService(o Options) (*Service, error) {
 			reserved[id] = true
 		}
 	}
-	return &Service{o: o, limiter: newLimiter(o.TestsPerMinute, time.Minute), reserved: reserved}, nil
+	return &Service{o: o, limiter: newLimiter(o.TestsPerMinute, time.Minute), reserved: reserved, notLive: map[string]string{}}, nil
 }
 
 // secretIDOf names the secret a reference reads (provider and path; the
@@ -120,18 +139,84 @@ func secretIDOf(ref string) (string, bool) {
 	return r.Provider + "/" + strings.Trim(r.Path, "/"), true
 }
 
+// reservedMessage refuses a server secret without quoting the reference.
+const reservedMessage = "names a secret this server's own settings use; give Piperoom's integrations their own secret"
+
 // checkReserved refuses a reference to a secret the server's own settings
-// use (Options.ReservedRefs). The message does not quote the reference.
-func (s *Service) checkReserved(m merged) error {
+// use (Options.ReservedRefs). It compares the spelling and, when the
+// resolver can tell, what the reference reads: a symlinked files root or a
+// Kubernetes ..data link reaches the same file under another path. The
+// identities are computed on each call, since a mounted secret's links move
+// on every rotation.
+func (s *Service) checkReserved(ws string, m merged) error {
 	if len(s.reserved) == 0 {
 		return nil
 	}
-	for _, name := range sortedKeys(m.refs) {
-		if id, ok := secretIDOf(m.refs[name]); ok && s.reserved[id] {
-			return &spec.ValidationError{Field: name, Message: "names a secret this server's own settings use; give Piperoom's integrations their own secret"}
+	refs := m.allRefs()
+	idr, _ := s.o.Resolver.(SecretIdentifier)
+	var ids map[string]bool
+	if idr != nil {
+		ids = map[string]bool{}
+		for _, ref := range s.o.ReservedRefs {
+			// Process references live in the default workspace.
+			if id, ok := idr.SecretIdentity(spec.DefaultWorkspace, ref); ok {
+				ids[id] = true
+			}
+		}
+	}
+	for _, name := range sortedKeys(refs) {
+		if id, ok := secretIDOf(refs[name]); ok && s.reserved[id] {
+			return &spec.ValidationError{Field: name, Message: reservedMessage}
+		}
+		if idr != nil {
+			if id, ok := idr.SecretIdentity(ws, refs[name]); ok && ids[id] {
+				return &spec.ValidationError{Field: name, Message: reservedMessage}
+			}
 		}
 	}
 	return nil
+}
+
+// isReservedValue reports whether v equals a value of the server's own
+// secret settings, comparing in constant time.
+func (s *Service) isReservedValue(v netsec.Secret) bool {
+	if v == "" {
+		return false
+	}
+	found := false
+	for _, r := range s.o.ReservedValues {
+		if r != "" && subtle.ConstantTimeCompare([]byte(r.Reveal()), []byte(v.Reveal())) == 1 {
+			found = true
+		}
+	}
+	return found
+}
+
+// SecretRefErr turns a resolver or browse error into a *spec.SecretRefError
+// for field, so the HTTP API can answer 400/403/404/502 instead of 500.
+// spec.ErrListUnsupported passes through unchanged; nil stays nil.
+func SecretRefErr(field string, err error) error {
+	if err == nil || errors.Is(err, spec.ErrListUnsupported) {
+		return err
+	}
+	var se *spec.SecretRefError
+	if errors.As(err, &se) {
+		return err
+	}
+	reason := spec.SecretRefOther
+	switch {
+	case errors.Is(err, secrets.ErrInvalidRef):
+		reason = spec.SecretRefInvalid
+	case errors.Is(err, secrets.ErrUnknownProvider):
+		reason = spec.SecretRefUnknownProvider
+	case errors.Is(err, secrets.ErrAccessDenied), errors.Is(err, secrets.ErrOutsideRoots), errors.Is(err, secrets.ErrLogin):
+		reason = spec.SecretRefDenied
+	case errors.Is(err, secrets.ErrNotFound), errors.Is(err, secrets.ErrKeyNotFound):
+		reason = spec.SecretRefNotFound
+	case errors.Is(err, spec.ErrProviderUnreachable), errors.Is(err, context.DeadlineExceeded):
+		reason = spec.SecretRefUnreachable
+	}
+	return &spec.SecretRefError{Field: field, Reason: reason, Err: err}
 }
 
 // Catalog implements spec.Service.
@@ -149,6 +234,9 @@ func (s *Service) SetupScript(kind string, config map[string]any) (string, error
 	cfg := map[string]any{}
 	for _, f := range k.Fields {
 		if v, ok := config[f.Name]; ok && !f.Type.IsSecret() {
+			if _, isRef := refOf(v); isRef && f.AllowRef {
+				continue // a reference: the script shows the placeholder
+			}
 			t, err := textValue(f.Name, v)
 			if err != nil {
 				return "", err
@@ -239,7 +327,57 @@ func (s *Service) view(r spec.Integration) spec.View {
 	default:
 		v.Status = spec.StatusConnected
 	}
+	if r.Enabled {
+		if why, bad := s.liveFailure(r.ID); bad {
+			// The stored test passed, but the running server has no client
+			// built from this row: it is not connected, whatever that test said.
+			v.Status = spec.StatusFailing
+			v.LastTest = append(append([]spec.Check{}, v.LastTest...), spec.Check{
+				ID: "live", Title: "The connection is live", Status: spec.CheckFail, Detail: why,
+				Fix: "Fix the cause, then enable the integration again or restart the server.",
+			})
+		}
+	}
 	return v
+}
+
+// MarkNotLive records that enabled row id has no running client, and why
+// (restore at start could not build it). cause never holds a secret value:
+// it is reduced to a fixed text or a scrubbed error line.
+func (s *Service) MarkNotLive(id, prefix string, cause error) {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	s.notLive[id] = truncate(prefix+liveCause(cause), maxDetail)
+}
+
+// markLive forgets a recorded live failure of id.
+func (s *Service) markLive(id string) {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	delete(s.notLive, id)
+}
+
+func (s *Service) liveFailure(id string) (string, bool) {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	why, ok := s.notLive[id]
+	return why, ok
+}
+
+// liveCause is a one-line, value-free description of why a row is not live.
+func liveCause(err error) string {
+	var se *spec.SecretRefError
+	switch {
+	case err == nil:
+		return "unknown cause"
+	case errors.Is(err, spec.ErrSecretKeyMismatch):
+		return "its stored secrets cannot be opened with PIPEROOM_SECRET_KEY or PIPEROOM_SECRET_KEY_PREVIOUS"
+	case errors.Is(err, spec.ErrSecretKeyMissing):
+		return "it has typed-in secrets and PIPEROOM_SECRET_KEY is not set"
+	case errors.As(err, &se):
+		return "secret field " + se.Field + " cannot be read (" + string(se.Reason) + "): " + errText(se.Err)
+	}
+	return errText(err)
 }
 
 func nonNilStrings(s []string) []string {
@@ -286,33 +424,75 @@ func (s *Service) unseal(r spec.Integration) (map[string]netsec.Secret, error) {
 	return m, nil
 }
 
+// unsealForEdit opens r's typed-in secrets for an edit or a test with id.
+// When no configured key opens them (the key changed), the edit may still
+// repair the row: every typed-in field must then be entered again, cleared
+// or turned into a reference, and the unreadable blob is dropped.
+func (s *Service) unsealForEdit(r spec.Integration, in spec.Input) (map[string]netsec.Secret, error) {
+	typed, err := s.unseal(r)
+	if err == nil || !errors.Is(err, spec.ErrSecretKeyMismatch) {
+		return typed, err
+	}
+	for _, name := range r.SecretsSet {
+		if _, isRef := refOf(r.Config[name]); isRef {
+			continue
+		}
+		if si, ok := in.Secrets[name]; !ok || si.Op == spec.SecretKeep {
+			return nil, &spec.ValidationError{Field: name, Message: "must be entered again: the stored value cannot be opened with the server's PIPEROOM_SECRET_KEY"}
+		}
+	}
+	return map[string]netsec.Secret{}, nil
+}
+
 // values resolves the merged input into what a kind's Test and Build take.
-// A reference that cannot be resolved becomes a failing check.
-func (s *Service) values(ctx context.Context, ws string, k spec.Kind, m merged) (spec.Values, []spec.Check) {
-	v := spec.Values{Config: textConfig(k, m.config), Secrets: map[string]netsec.Secret{}}
+// A reference that cannot be resolved becomes a failing check; first is the
+// first such failure as an error (a *spec.SecretRefError or a
+// *spec.ValidationError), for callers that answer with an error instead.
+func (s *Service) values(ctx context.Context, ws string, k spec.Kind, m merged) (v spec.Values, bad []spec.Check, first error) {
+	v = spec.Values{Config: textConfig(k, m.config), Secrets: map[string]netsec.Secret{}}
 	for name, val := range m.typed {
 		v.Secrets[name] = val
 	}
-	var bad []spec.Check
-	for _, name := range sortedKeys(m.refs) {
-		ref := m.refs[name]
+	refs := m.allRefs()
+	for _, name := range sortedKeys(refs) {
+		ref := refs[name]
 		title := "Secret " + name + " can be read from its secret manager"
+		failWith := func(c spec.Check, err error) {
+			bad = append(bad, c)
+			if first == nil {
+				first = err
+			}
+		}
 		if s.o.Resolver == nil {
-			bad = append(bad, spec.Check{ID: "secret:" + name, Title: title, Status: spec.CheckFail,
-				Detail: "no secret manager support is configured on this server", Fix: "Enter the value instead, or connect a secret manager."})
+			failWith(spec.Check{ID: "secret:" + name, Title: title, Status: spec.CheckFail,
+				Detail: "no secret manager support is configured on this server", Fix: "Enter the value instead, or connect a secret manager."},
+				&spec.SecretRefError{Field: name, Reason: spec.SecretRefOther, Err: errors.New("integrations: no secret resolver is configured")})
 			continue
 		}
 		rctx, cancel := context.WithTimeout(ctx, DefaultCheckTimeout)
 		val, err := s.o.Resolver.Resolve(rctx, ws, ref)
 		cancel()
 		if err != nil {
-			bad = append(bad, spec.Check{ID: "secret:" + name, Title: title, Status: spec.CheckFail,
-				Detail: truncate(errText(err), maxDetail), Fix: "Check the reference and that Piperoom's identity may read it (see the secret manager card's setup script)."})
+			failWith(spec.Check{ID: "secret:" + name, Title: title, Status: spec.CheckFail,
+				Detail: truncate(errText(err), maxDetail), Fix: "Check the reference and that Piperoom's identity may read it (see the secret manager card's setup script)."},
+				SecretRefErr(name, err))
+			continue
+		}
+		if s.isReservedValue(val) {
+			// Another spelling or alias of a server secret: never send it.
+			failWith(spec.Check{ID: "secret:" + name, Title: title, Status: spec.CheckFail,
+				Detail: "the referenced secret holds a value this server's own settings use", Fix: "Give Piperoom's integrations their own secret."},
+				&spec.ValidationError{Field: name, Message: reservedMessage})
+			continue
+		}
+		if _, isText := m.textRefs[name]; isText {
+			// A user name from a lease: Build reads it as text.
+			v.Config[name] = val.Reveal()
 			continue
 		}
 		v.Secrets[name] = val
 	}
-	return v, bad
+	return v, bad, first
 }
 
 // runTest resolves references and runs the kind's checks, all within one
@@ -321,7 +501,7 @@ func (s *Service) values(ctx context.Context, ws string, k spec.Kind, m merged) 
 func (s *Service) runTest(ctx context.Context, ws string, k spec.Kind, m merged) (spec.Values, []spec.Check) {
 	ctx, cancel := context.WithTimeout(ctx, DefaultTestTimeout)
 	defer cancel()
-	v, bad := s.values(ctx, ws, k, m)
+	v, bad, _ := s.values(ctx, ws, k, m)
 	if len(bad) > 0 {
 		return v, bad
 	}
@@ -355,7 +535,7 @@ func (s *Service) Test(ctx context.Context, ws, actor string, in spec.Input) ([]
 		if r.Kind != in.Kind {
 			return nil, &spec.ValidationError{Field: "kind", Message: "must equal the saved integration's kind"}
 		}
-		if oldTyped, err = s.unseal(r); err != nil {
+		if oldTyped, err = s.unsealForEdit(r, in); err != nil {
 			return nil, err
 		}
 		old = &r
@@ -365,7 +545,7 @@ func (s *Service) Test(ctx context.Context, ws, actor string, in spec.Input) ([]
 	if err != nil {
 		return nil, err
 	}
-	if err := s.checkReserved(m); err != nil {
+	if err := s.checkReserved(ws, m); err != nil {
 		return nil, err
 	}
 	if err := s.allowTest(actor); err != nil {
@@ -432,7 +612,7 @@ func (s *Service) Create(ctx context.Context, ws, actor string, in spec.Input) (
 	if err != nil {
 		return spec.View{}, nil, err
 	}
-	if err := s.checkReserved(m); err != nil {
+	if err := s.checkReserved(ws, m); err != nil {
 		return spec.View{}, nil, err
 	}
 	if err := s.allowTest(actor); err != nil {
@@ -494,7 +674,7 @@ func (s *Service) Update(ctx context.Context, ws, actor, id string, ifVersion in
 	if old.Version != ifVersion {
 		return spec.View{}, nil, spec.ErrVersionConflict
 	}
-	oldTyped, err := s.unseal(old)
+	oldTyped, err := s.unsealForEdit(old, in)
 	if err != nil {
 		return spec.View{}, nil, err
 	}
@@ -502,7 +682,7 @@ func (s *Service) Update(ctx context.Context, ws, actor, id string, ifVersion in
 	if err != nil {
 		return spec.View{}, nil, err
 	}
-	if err := s.checkReserved(m); err != nil {
+	if err := s.checkReserved(ws, m); err != nil {
 		return spec.View{}, nil, err
 	}
 	if len(m.typed) > 0 && s.o.Keys == nil {
@@ -532,7 +712,10 @@ func (s *Service) Update(ctx context.Context, ws, actor, id string, ifVersion in
 	return s.view(stored), checks, nil
 }
 
-// SetEnabled implements spec.Service.
+// SetEnabled implements spec.Service. Disabling a disabled row changes
+// nothing. Enabling an enabled row rebuilds and applies its client (the
+// manual recovery after a rotation or a failed start) without a new
+// version, audit row or room notice.
 func (s *Service) SetEnabled(ctx context.Context, ws, actor, id string, enabled bool) (spec.View, error) {
 	if s.envViewID(ws, id) {
 		return spec.View{}, spec.ErrManagedByEnv
@@ -544,6 +727,9 @@ func (s *Service) SetEnabled(ctx context.Context, ws, actor, id string, enabled 
 	k, err := s.kind(r.Kind)
 	if err != nil {
 		return spec.View{}, err
+	}
+	if !enabled && !r.Enabled {
+		return s.view(r), nil
 	}
 	if enabled {
 		if err := s.checkNotEnv(ws, k); err != nil {
@@ -557,6 +743,11 @@ func (s *Service) SetEnabled(ctx context.Context, ws, actor, id string, enabled 
 		if err := s.apply(ctx, r, k, v); err != nil {
 			return spec.View{}, fmt.Errorf("integrations: enabling %s: %w", id, err)
 		}
+		if r.Enabled {
+			return s.view(r), nil
+		}
+	} else if err := s.checkNoDependents(ctx, r); err != nil {
+		return spec.View{}, err
 	}
 	stored, err := s.o.Store.SetEnabled(ctx, ws, id, enabled, actor)
 	if err != nil {
@@ -575,6 +766,118 @@ func (s *Service) SetEnabled(ctx context.Context, ws, actor, id string, enabled 
 	return s.view(stored), nil
 }
 
+// rowRefs returns every secret:// reference a stored row's config holds.
+func rowRefs(r spec.Integration) []string {
+	var out []string
+	for _, name := range sortedKeys(r.Config) {
+		if ref, ok := refOf(r.Config[name]); ok {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+// dependents lists the enabled rows of r's workspace whose references name
+// the secret manager r (by its provider name). nil for other categories.
+func (s *Service) dependents(ctx context.Context, r spec.Integration) ([]spec.Dependent, error) {
+	if r.Category != spec.CategorySecretManager {
+		return nil, nil
+	}
+	name, _ := r.Config[spec.ProviderNameField].(string)
+	if name == "" {
+		return nil, nil
+	}
+	rows, err := s.o.Store.List(ctx, r.WorkspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("integrations: listing: %w", err)
+	}
+	var out []spec.Dependent
+	for _, o := range rows {
+		if o.ID == r.ID || !o.Enabled || o.WorkspaceID != r.WorkspaceID {
+			continue
+		}
+		for _, ref := range rowRefs(o) {
+			if p, err := ParseRef(ref); err == nil && p == name {
+				title := o.Kind
+				if k, ok := s.o.Registry.Kind(o.Kind); ok {
+					title = k.Title
+				}
+				out = append(out, spec.Dependent{ID: o.ID, Kind: o.Kind, Title: title})
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// checkNoDependents refuses to remove a secret manager that enabled rows
+// still read from: they would keep cached values until the next restart and
+// then silently stop working.
+func (s *Service) checkNoDependents(ctx context.Context, r spec.Integration) error {
+	deps, err := s.dependents(ctx, r)
+	if err != nil {
+		return err
+	}
+	if len(deps) > 0 {
+		return &spec.InUseError{Dependents: deps}
+	}
+	return nil
+}
+
+// OpenRow unseals and resolves a stored row into what its kind's Build
+// takes. cmd/server's restore uses it, so start-up reads a row exactly as
+// enable does (reserved values and reference errors included).
+func (s *Service) OpenRow(ctx context.Context, r spec.Integration) (spec.Values, error) {
+	k, err := s.kind(r.Kind)
+	if err != nil {
+		return spec.Values{}, err
+	}
+	return s.storedValues(ctx, r, k)
+}
+
+// SecretChanged rebuilds the clients of the enabled rows of ws that read
+// the secret provider/path: a mounted file changed, or a lease was lost.
+// It is the registry's OnChange (secrets.Options). A row that cannot be
+// rebuilt keeps its old client and is shown as not live.
+func (s *Service) SecretChanged(ctx context.Context, ws, provider, path string) {
+	rows, err := s.o.Store.List(ctx, ws)
+	if err != nil {
+		s.o.Log.Error("integrations: a secret changed but the integrations cannot be listed", "provider", provider, "path", path, "err", err)
+		return
+	}
+	want := strings.Trim(path, "/")
+	for _, r := range rows {
+		if !r.Enabled || r.WorkspaceID != ws || s.envManagesRow(ws, r) || !readsSecret(r, provider, want) {
+			continue
+		}
+		k, ok := s.o.Registry.Kind(r.Kind)
+		if !ok {
+			continue
+		}
+		v, err := s.storedValues(ctx, r, k)
+		if err == nil {
+			err = s.apply(ctx, r, k, v)
+		}
+		if err != nil {
+			s.o.Log.Warn("integrations: rebuilding after a changed secret failed; the old client stays", "id", r.ID, "category", string(r.Category), "err", scrubErr(err, secretList(v)...))
+			s.MarkNotLive(r.ID, "a secret it reads changed, and rebuilding failed: ", scrubErr(err, secretList(v)...))
+			continue
+		}
+		s.o.Log.Info("integrations: rebuilt a client after a changed secret", "id", r.ID, "category", string(r.Category))
+	}
+}
+
+// readsSecret reports whether a row references provider/path (any key).
+func readsSecret(r spec.Integration, provider, path string) bool {
+	for _, ref := range rowRefs(r) {
+		p, err := secrets.ParseRef(ref)
+		if err == nil && p.Provider == provider && strings.Trim(p.Path, "/") == path {
+			return true
+		}
+	}
+	return false
+}
+
 // storedValues unseals and resolves a stored row for Build.
 func (s *Service) storedValues(ctx context.Context, r spec.Integration, k spec.Kind) (spec.Values, error) {
 	typed, err := s.unseal(r)
@@ -585,9 +888,11 @@ func (s *Service) storedValues(ctx context.Context, r spec.Integration, k spec.K
 	if err != nil {
 		return spec.Values{}, fmt.Errorf("integrations: stored %s no longer validates: %w", r.ID, err)
 	}
-	v, bad := s.values(ctx, r.WorkspaceID, k, m)
-	if len(bad) > 0 {
-		return spec.Values{}, fmt.Errorf("integrations: %s: %s", r.ID, bad[0].Detail)
+	v, _, first := s.values(ctx, r.WorkspaceID, k, m)
+	if first != nil {
+		// Wrapped, not flattened: the HTTP API maps the cause (502 for an
+		// unreachable manager, 4xx naming the field otherwise).
+		return spec.Values{}, fmt.Errorf("integrations: %s: %w", r.ID, first)
 	}
 	// A generated alert secret is no Field, so mergeInput leaves it out.
 	if k.Category == spec.CategoryAlerts {
@@ -602,8 +907,13 @@ func (s *Service) storedValues(ctx context.Context, r spec.Integration, k spec.K
 func stringConfig(k spec.Kind, cfg map[string]any) map[string]any {
 	out := map[string]any{}
 	for _, f := range k.Fields {
-		if s, ok := cfg[f.Name].(string); ok && !f.Type.IsSecret() {
+		if f.Type.IsSecret() {
+			continue
+		}
+		if s, ok := cfg[f.Name].(string); ok {
 			out[f.Name] = s
+		} else if ref, ok := refOf(cfg[f.Name]); ok && f.AllowRef {
+			out[f.Name] = map[string]any{spec.RefKey: ref}
 		}
 	}
 	return out
@@ -616,6 +926,9 @@ func (s *Service) Delete(ctx context.Context, ws, actor, id string) error {
 	}
 	r, err := s.get(ctx, ws, id)
 	if err != nil {
+		return err
+	}
+	if err := s.checkNoDependents(ctx, r); err != nil {
 		return err
 	}
 	if err := s.o.Store.Delete(ctx, ws, id); err != nil {
@@ -631,6 +944,7 @@ func (s *Service) Delete(ctx context.Context, ws, actor, id string) error {
 		title = k.Title
 	}
 	s.audit(ctx, r, spec.AuditDeleted, actor, []string{}, title)
+	s.markLive(id)
 	return nil
 }
 
@@ -844,6 +1158,7 @@ func (s *Service) saveTest(ctx context.Context, rec *spec.Integration, checks []
 func (s *Service) applyOrWarn(ctx context.Context, rec spec.Integration, k spec.Kind, v spec.Values, checks []spec.Check) []spec.Check {
 	if err := s.apply(ctx, rec, k, v); err != nil {
 		s.o.Log.Error("integrations: applying the new client failed", "id", rec.ID, "category", string(rec.Category), "err", scrubErr(err, secretList(v)...))
+		s.MarkNotLive(rec.ID, "saved, but not live: ", scrubErr(err, secretList(v)...))
 		return append(checks, spec.Check{ID: "apply", Title: "The new connection is live", Status: spec.CheckWarn,
 			Detail: truncate("saved, but the running server kept the previous connection: "+errText(scrubErr(err, secretList(v)...)), maxDetail),
 			Fix:    "Fix the cause and save again, or restart the server."})
@@ -860,6 +1175,14 @@ func secretList(v spec.Values) []netsec.Secret {
 }
 
 func (s *Service) apply(ctx context.Context, rec spec.Integration, k spec.Kind, v spec.Values) error {
+	if err := s.applyClient(ctx, rec, k, v); err != nil {
+		return err
+	}
+	s.markLive(rec.ID)
+	return nil
+}
+
+func (s *Service) applyClient(ctx context.Context, rec spec.Integration, k spec.Kind, v spec.Values) error {
 	if s.o.Applier != nil {
 		return s.o.Applier.Apply(ctx, rec, k, v)
 	}
@@ -875,6 +1198,7 @@ func (s *Service) apply(ctx context.Context, rec spec.Integration, k spec.Kind, 
 }
 
 func (s *Service) clear(ctx context.Context, rec spec.Integration) error {
+	s.markLive(rec.ID)
 	if s.o.Applier != nil {
 		return s.o.Applier.Clear(ctx, rec)
 	}

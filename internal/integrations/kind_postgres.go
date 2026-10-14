@@ -74,7 +74,11 @@ func pgFields(tablesHelp string) []spec.Field {
 		{Name: "host", Label: "Host", Help: "Database host name or IP address", Type: spec.FieldText, Required: true, Pattern: hostPattern},
 		{Name: "port", Label: "Port", Type: spec.FieldNumber, Default: "5432", Pattern: portPattern},
 		{Name: "database", Label: "Database", Type: spec.FieldText, Required: true, Pattern: `^[A-Za-z0-9_$-]+$`},
-		{Name: "user", Label: "User", Help: "A dedicated read-only role; the setup script creates one", Type: spec.FieldText, Required: true, Pattern: `^[A-Za-z0-9_.@-]+$`},
+		// AllowRef: a Vault database-engine lease issues a user name per
+		// lease, so it is referenced from the same secret as the password
+		// (secret://vault/database/creds/<role>#username and #password read
+		// one cached lease).
+		{Name: "user", Label: "User", Help: "A dedicated read-only role; the setup script creates one. For short-lived logins, a secret:// reference such as secret://vault/database/creds/ro#username", Type: spec.FieldText, Required: true, Pattern: `^[A-Za-z0-9_.@-]+$`, AllowRef: true},
 		{Name: "password", Label: "Password", Type: spec.FieldSecret, Required: true},
 		{Name: "sslmode", Label: "TLS mode", Help: "verify-full checks the certificate and the host name", Type: spec.FieldSelect, Default: sslVerifyFull, Options: []string{sslVerifyFull, sslVerifyCA, sslDisable}},
 		{Name: "ca_cert", Label: "CA certificate", Help: "PEM; empty = the system's trusted CAs", Type: spec.FieldPEM},

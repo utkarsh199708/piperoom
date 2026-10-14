@@ -118,6 +118,10 @@ type Field struct {
 	// Pattern is a Go regexp (RE2) the server checks on save and test; the
 	// browser check is only a hint. "" = no pattern.
 	Pattern string `json:"pattern"`
+	// AllowRef lets a non-secret field hold {"$ref": "secret://…"} in config
+	// instead of text, e.g. the user of a Vault database-engine lease, so the
+	// user name and the password come from the same lease.
+	AllowRef bool `json:"allow_ref"`
 }
 
 // CheckStatus is the outcome of one check.
