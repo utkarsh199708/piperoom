@@ -83,6 +83,7 @@ title starts with `[C<N>]`.
   `Runner`, `HandoffWriter` (`internal/agent/stubs.go` holds placeholders; A4 replaces it)
 - `internal/topology/graph.go` — `Graph`, `Node`, `Edge`, `Builder`
 - `internal/config/config.go` — environment variables
+- `internal/version/version.go` — build version (`-ldflags -X`), reported by `/healthz`
 - `docs/api.md` — HTTP + WebSocket API
 
 If a contract is wrong or missing something, **do not work around it silently**. Write a
