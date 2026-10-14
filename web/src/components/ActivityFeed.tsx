@@ -1,5 +1,6 @@
 import { Fragment, useState } from 'react'
 import type { ActivityEntry } from '../state/types'
+import { Clock } from './room/Clock'
 import { clockTime } from '../lib/time'
 import { Button } from '@/components/ui/button'
 import { PersonAvatar } from './room/PersonAvatar'
@@ -70,9 +71,7 @@ export function ActivityFeed({ activity, openedAt }: { activity: ActivityEntry[]
               <li className="flex min-h-6 items-start gap-2">
                 <PersonAvatar actor={a.actor} size={20} className="mt-0.5" />
                 <Line entry={a} />
-                <time dateTime={a.at} className="ml-auto shrink-0 font-mono text-xs tabular-nums text-subtle-foreground">
-                  {clockTime(a.at)}
-                </time>
+                <Clock iso={a.at} className="ml-auto shrink-0 font-mono text-xs tabular-nums text-subtle-foreground" />
               </li>
             </Fragment>
           )

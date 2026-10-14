@@ -193,6 +193,31 @@ describe('RoomList table', () => {
   })
 })
 
+describe('first-insight span', () => {
+  const insight = (s: number) => ({
+    first_hypothesis_at: null,
+    time_to_first_hypothesis_s: s,
+    final_confidence: '',
+    steps: 0,
+    tool_calls: 0,
+    tool_errors: 0,
+    usage: { calls: 0, unpriced_calls: 0, tokens: 0, cost_usd: null, latency_ms_total: 0 },
+  })
+
+  it('shows "insight 48 s" for an open room with a hypothesis, nothing for -1, closed or shadow rooms', () => {
+    mockList([
+      room({ id: 'with', insight: insight(48) }),
+      room({ id: 'without', insight: insight(-1) }),
+      room({ id: 'old' }),
+      room({ id: 'done', status: 'closed', closed_at: '2026-10-11T11:00:00Z', insight: insight(30) }),
+      room({ id: 'shadowed', shadow: true, insight: insight(30) }),
+    ])
+    renderList('/?tab=all')
+    expect(screen.getAllByText(/insight \d+ s/)).toHaveLength(1)
+    expect(screen.getByText(/insight 48 s/)).toBeInTheDocument()
+  })
+})
+
 describe('Needs you', () => {
   it('tints and badges only the rooms waiting on a layer the person owns', () => {
     mockList([
@@ -642,5 +667,46 @@ describe('top bar', () => {
     renderList()
     expect(screen.getByRole('heading', { level: 1, name: 'Rooms' })).toBeInTheDocument()
     expect(screen.getByText(/^live/)).toBeInTheDocument()
+  })
+})
+
+describe('New room — Ctrl+Enter', () => {
+  it('submits the form from the keyboard like the close and hand-off dialogs', async () => {
+    vi.mocked(api.createRoom).mockResolvedValueOnce(room({ id: 'r_kbd' }))
+    renderList()
+    fireEvent.click(screen.getAllByRole('button', { name: 'New room' })[0])
+    const title = screen.getByLabelText('Title')
+    fireEvent.change(title, { target: { value: 'From the keyboard' } })
+    fireEvent.keyDown(title, { key: 'Enter', ctrlKey: true })
+    await waitFor(() => expect(api.createRoom).toHaveBeenCalledTimes(1))
+  })
+
+  it('shows the shortcut on the button', () => {
+    renderList()
+    fireEvent.click(screen.getAllByRole('button', { name: 'New room' })[0])
+    expect(screen.getByRole('button', { name: 'Open room' })).toHaveAttribute('aria-keyshortcuts')
+  })
+})
+
+describe('resolved rows', () => {
+  it('read Resolved · duration, no driver, agent resolved, closed ago with a UTC title, and the resolution', () => {
+    mockList([
+      room({
+        id: 'c1',
+        title: 'Old one',
+        status: 'closed',
+        opened_at: '2026-10-11T10:00:00Z',
+        closed_at: '2026-10-11T10:06:00Z',
+        resolution: 'Restarted the connector task after the schema fix.',
+      }),
+    ])
+    renderList()
+    fireEvent.click(screen.getByRole('button', { name: 'See resolved rooms' }))
+    const row = screen.getByText('Old one').closest('tr')!
+    expect(within(row).getByText('Resolved · 6 min')).toBeInTheDocument()
+    expect(within(row).getByText('resolved')).toBeInTheDocument()
+    expect(within(row).getByText('—')).toBeInTheDocument()
+    expect(within(row).getByText(/^closed .* ago$/)).toHaveAttribute('title', '2026-10-11 10:06:00 UTC')
+    expect(within(row).getByText('Restarted the connector task after the schema fix.')).toBeInTheDocument()
   })
 })
