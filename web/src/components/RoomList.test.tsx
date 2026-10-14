@@ -219,7 +219,7 @@ describe('Needs you', () => {
       expect(within(r).queryByText('Needs you')).not.toBeInTheDocument()
       expect(r.className).not.toMatch(/bg-warning-subtle/)
       // Still readable as a status: someone has to approve.
-      expect(within(r).getByText('Needs approval')).toBeInTheDocument()
+      expect(within(r).getByText(/^Needs approval/)).toBeInTheDocument()
     }
     // The stat counts the rooms that need this person, with the layer in the caption.
     const strip = screen.getByRole('group', { name: 'Summary' })

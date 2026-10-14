@@ -1,4 +1,5 @@
 import type { RoomState } from '../state/types'
+import { roomStatus, statusInputFromState } from './roomStatus'
 
 export type PillTone = 'ok' | 'warn' | 'fail' | 'agent' | 'muted'
 
@@ -16,6 +17,21 @@ export interface AgentPillInfo {
 // change of state. `step` ("· step 5") changes with every step and is drawn outside the live region.
 export function agentPill(state: RoomState): AgentPillInfo {
   const { state: s, detail } = state.agent_status
+  // What the room is really doing outranks the agent's last status event (the agent keeps
+  // saying "waiting for approval" after the fix ran, after a rejection and on a closed room).
+  if (state.status !== 'open') return { tone: 'muted', text: 'Agent stopped', title: detail }
+  const derived = roomStatus(statusInputFromState(state))
+  if (derived.kind === 'fixed') return { tone: 'ok', text: 'Fix ran · verifying', title: detail }
+  if (derived.kind === 'fix-failed') return { tone: 'fail', text: derived.label, title: detail }
+  if (derived.kind === 'executing') return { tone: 'agent', text: 'Executing fix', step: derived.step, title: detail }
+  if (derived.kind === 'log-full') return { tone: 'fail', text: 'Log full · agent stopped', title: detail }
+  if (derived.kind === 'queued') return { tone: 'agent', text: 'Queued · waiting for an agent slot', title: detail }
+  const latest = state.proposals[state.proposals.length - 1]
+  if (latest?.status === 'rejected' && s !== 'error' && s !== 'done') {
+    return s === 'working'
+      ? { tone: 'agent', text: 'Proposal rejected · re-planning', title: detail }
+      : { tone: 'muted', text: 'Proposal rejected · waiting for a steer', title: detail }
+  }
   switch (s) {
     case 'done':
       return { tone: 'ok', text: 'resolved — verified', title: detail }
