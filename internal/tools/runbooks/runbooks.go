@@ -225,7 +225,7 @@ func splitSections(body []string) ([]Section, error) {
 
 // listItems returns the "- " items of a section, without the marker.
 func listItems(text string) []string {
-	var items []string
+	items := []string{} // non-nil: hit data says "items":[], not null
 	for _, l := range strings.Split(text, "\n") {
 		if it, ok := strings.CutPrefix(strings.TrimSpace(l), "- "); ok {
 			items = append(items, strings.TrimSpace(it))

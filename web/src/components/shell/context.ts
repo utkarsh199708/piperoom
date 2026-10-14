@@ -67,3 +67,20 @@ export function useBreadcrumbTail(label: string | undefined): void {
     return () => set?.(null)
   }, [set, label])
 }
+
+/**
+ * What the decision bar can ask of the approval card. The `LayerRow` that owns the A/R shortcuts
+ * registers these every render, so the bar, the keys and the card's own buttons all go through
+ * one `startApprove` (solo typed confirm, run confirm, 409 stale, missing hash stay in one place).
+ */
+export interface DecisionHandle {
+  approve: () => void
+  reject: () => void
+  scrollTo: () => void
+}
+
+/** A plain holder like RoomCommandRegistry: written on render, read on click. Null outside the room screen. */
+export const DecisionHandleContext = createContext<{
+  get(): DecisionHandle | null
+  set(h: DecisionHandle | null): void
+} | null>(null)

@@ -544,8 +544,8 @@ func TestLateLabelIsPickedUpButSettledRoomsAreNotReread(t *testing.T) {
 		t.Fatalf("late label not found: %v", ids)
 	}
 	// r-old was read in the first build, long after it closed: settled, kept.
-	if got := src.events - first; got != 3 { // r-new only: rare events, hand-offs, tool results
-		t.Fatalf("second build made %d event reads, want 3 (r-new only)", got)
+	if got := src.events - first; got != 4 { // r-new only: rare events, fix events, hand-offs, tool results
+		t.Fatalf("second build made %d event reads, want 4 (r-new only)", got)
 	}
 }
 
@@ -554,8 +554,8 @@ func TestSlowStoreGivesPartialAnswerAndCancelStops(t *testing.T) {
 		fake.Room{ID: "r-1", Title: "kafka lag", ClosedAt: day(9, 3), Resolution: "one"},
 		fake.Room{ID: "r-2", Title: "kafka lag", ClosedAt: day(9, 2), Resolution: "two"},
 	)
-	// Reads 1-3 serve room r-1; the fourth (r-2) stalls until the build deadline.
-	src := &countingSource{Source: similarincidents.FromStore(st), stallAt: 4}
+	// Reads 1-4 serve room r-1; the fifth (r-2) stalls until the build deadline.
+	src := &countingSource{Source: similarincidents.FromStore(st), stallAt: 5}
 	tl := similarincidents.New(similarincidents.Deps{Source: src, BuildTimeout: 50 * time.Millisecond})
 	res, err := run(t, tl, scoped("orders"), input("kafka lag", 5))
 	if err != nil {

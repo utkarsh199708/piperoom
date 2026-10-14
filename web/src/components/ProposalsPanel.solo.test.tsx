@@ -32,8 +32,9 @@ const proposal: ProposalState = {
   steps: [],
   risk: 'low',
   rollback: 'none',
-  required_layers: ['kafka-connect'],
-  approvals: { 'kafka-connect': 'pending' },
+  // A second layer still pending: this approval does not complete the set, so no run confirm.
+  required_layers: ['kafka-connect', 'consumer'],
+  approvals: { 'kafka-connect': 'pending', consumer: 'pending' },
   status: 'open',
   decisions: {},
   params_hash: HASH,
