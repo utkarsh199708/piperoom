@@ -101,8 +101,8 @@ func (s *PG) CreateShadowRun(ctx context.Context, r ShadowRun) error {
 	defer cancel()
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO shadow_runs (room_id, status, model, pipeline_map, started_at, first_hypothesis_at, final_hypothesis_at,
-		     finished_at, finished_after_close, final_hypothesis, tool_calls, tokens)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		     finished_at, finished_after_close, final_hypothesis, tool_calls, tokens, byte_size)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 0)
 		 ON CONFLICT (room_id) DO NOTHING`,
 		r.RoomID, r.Status, r.Model, r.PipelineMap, r.StartedAt, r.FirstHypothesisAt, r.FinalHypothesisAt,
 		r.FinishedAt, r.FinishedAfterClose, nullJSON(r.FinalHypothesis), r.ToolCalls, r.Tokens)
@@ -186,14 +186,32 @@ func (s *PG) AppendShadow(ctx context.Context, roomID string, typ events.Type, a
 	if err := CheckAppend(roomID, typ, payloadJSON, actorJSON); err != nil {
 		return events.Event{}, fmt.Errorf("store: append shadow to %s: %w", roomID, err)
 	}
+	// The room's log caps hold for its shadow log too (docs/design/retention.md
+	// section 5.2), checked and counted on the run row like Append does on the
+	// rooms row: the event count is last_seq.
+	maxEvents, maxBytes := s.currentLimits().bounds(classOf(typ, actor))
+	size := int64(len(payloadJSON))
 	at := s.now().UTC()
 	var seq int64
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx,
-			`UPDATE shadow_runs SET last_seq = last_seq + 1 WHERE room_id = $1 RETURNING last_seq`, roomID).Scan(&seq); err != nil {
+		err := tx.QueryRow(ctx,
+			`UPDATE shadow_runs SET last_seq = last_seq + 1, byte_size = byte_size + $2
+			 WHERE room_id = $1 AND ($3::bigint = 0 OR last_seq + 1 <= $3)
+			   AND ($4::bigint = 0 OR byte_size IS NULL OR byte_size + $2 <= $4)
+			 RETURNING last_seq`, roomID, size, maxEvents, maxBytes).Scan(&seq)
+		if errors.Is(err, pgx.ErrNoRows) {
+			var n int64
+			var b *int64
+			err := tx.QueryRow(ctx, `SELECT last_seq, byte_size FROM shadow_runs WHERE room_id = $1`, roomID).Scan(&n, &b)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("store: append shadow to %s: no run row: %w", roomID, ErrNotFound)
 			}
+			if err != nil {
+				return fmt.Errorf("store: reserve shadow seq for %s: %w", roomID, err)
+			}
+			return fmt.Errorf("store: append shadow %s to %s (%d events, %s bytes): %w", typ, roomID, n, byteText(b), ErrLogFull)
+		}
+		if err != nil {
 			return fmt.Errorf("store: reserve shadow seq for %s: %w", roomID, err)
 		}
 		if _, err := tx.Exec(ctx,
