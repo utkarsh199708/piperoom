@@ -10,6 +10,7 @@ import type {
   AgentStepStartPayload,
   AgentToolCallPayload,
   AgentToolResultPayload,
+  AgentUsagePayload,
   ApprovalGivenPayload,
   ApprovalRejectedPayload,
   ChecklistStepDonePayload,
@@ -36,7 +37,7 @@ import type { DescribeContext } from './describe'
 import { alertSource } from '../lib/alerts'
 import { runbookHits } from '../lib/f8'
 import { checklistKey } from './types'
-import type { HypothesisHistoryEntry, MemberState, RoomState, StepState, VerdictState } from './types'
+import type { HypothesisHistoryEntry, InsightState, MemberState, RoomState, StepState, VerdictState } from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
@@ -64,6 +65,50 @@ function upsertMember(members: MemberState[], actor: Actor): MemberState[] {
   if (!existing) return [...members, { id: actor.id, name: actor.name, role: 'watching' }]
   if (existing.name === actor.name) return members
   return members.map((m) => (m.id === actor.id ? { ...m, name: actor.name } : m))
+}
+
+// foldInsight mirrors the server's insight fold (internal/room/insight.go): same
+// rules, so the live chip and GET /api/rooms agree. A shadow room stays at zero.
+function foldInsight(state: RoomState, event: Event): InsightState {
+  const cur = state.insight
+  if (state.shadow) return cur
+  switch (event.type) {
+    case 'agent.step.started':
+      return { ...cur, steps: cur.steps + 1 }
+    case 'agent.tool_call':
+      return { ...cur, tool_calls: cur.tool_calls + 1 }
+    case 'agent.tool_result':
+      return as<AgentToolResultPayload>(event).is_error ? { ...cur, tool_errors: cur.tool_errors + 1 } : cur
+    case 'agent.hypothesis': {
+      if (cur.first_hypothesis_at) return cur
+      const secs = Math.floor((Date.parse(event.at) - Date.parse(state.opened_at)) / 1000)
+      return {
+        ...cur,
+        first_hypothesis_at: event.at,
+        time_to_first_hypothesis_s: Number.isFinite(secs) ? Math.max(0, secs) : 0,
+      }
+    }
+    case 'agent.usage': {
+      const p = as<AgentUsagePayload>(event)
+      const u = cur.usage
+      const priced = typeof p.cost_usd === 'number'
+      return {
+        ...cur,
+        usage: {
+          calls: u.calls + 1,
+          unpriced_calls: u.unpriced_calls + (priced ? 0 : 1),
+          tokens:
+            u.tokens + p.input_tokens + p.cache_creation_input_tokens + p.cache_read_input_tokens + p.output_tokens,
+          cost_usd: priced ? (u.cost_usd ?? 0) + (p.cost_usd as number) : u.cost_usd,
+          latency_ms_total: u.latency_ms_total + p.latency_ms,
+          cache_read_tokens: u.cache_read_tokens + p.cache_read_input_tokens,
+          models: { ...u.models, [p.model]: (u.models[p.model] ?? 0) + 1 },
+        },
+      }
+    }
+    default:
+      return cur
+  }
 }
 
 const ACTIVITY_WINDOW = 50
@@ -115,6 +160,12 @@ function runbookItemOf(state: RoomState, toolUseId: string, hit: number, item: n
 
 export function applyEvent(state: RoomState, event: Event): RoomState {
   if (event.seq <= state.last_seq) return state
+  const next = applyCore(state, event)
+  const insight = foldInsight(next, event)
+  return insight === next.insight ? next : { ...next, insight }
+}
+
+function applyCore(state: RoomState, event: Event): RoomState {
 
   // agent.usage is cost telemetry, one or two per model request. It moves
   // last_seq on (so the next event is not a gap) and nothing else: it must not
@@ -141,6 +192,7 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         title: p.title,
         severity: p.severity as RoomState['severity'],
         pipeline_id: p.pipeline_id,
+        shadow: p.shadow ?? state.shadow,
         status: 'open',
         opened_at: event.at,
         driver,

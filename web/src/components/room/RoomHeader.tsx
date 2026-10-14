@@ -11,6 +11,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Kbd } from '@/components/ui/kbd'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { AgentPill } from './AgentPill'
+import { CostChip } from './CostChip'
 import { PersonAvatar } from './PersonAvatar'
 import { StatusDot } from './StatusDot'
 
@@ -192,6 +193,12 @@ export function RoomHeader({
           </>
         )}
         <span className="hidden sm:inline">#{state.id}</span>
+        {!state.shadow && state.opened_at && (
+          <>
+            <Sep />
+            <CostChip state={state} />
+          </>
+        )}
         {state.opened_at && (
           <>
             <Sep />

@@ -324,7 +324,7 @@ describe('applyEvent — agent.usage (cost telemetry)', () => {
     expect(after.activity).toBe(s.activity)
     expect(after.steps).toBe(s.steps)
     expect(after.messages).toBe(s.messages)
-    expect({ ...after, last_seq: s.last_seq }).toEqual(s)
+    expect({ ...after, last_seq: s.last_seq, insight: s.insight }).toEqual(s)
   })
 
   it('never takes a slot of the activity window or renders as a raw line', () => {
@@ -487,7 +487,7 @@ describe('schema-change fixture activity', () => {
       s = applyEvent(s, e)
       textBySeq.set(e.seq, s.activity[0].text)
     }
-    expect(s.last_seq).toBe(34)
+    expect(s.last_seq).toBe(36)
     expect(textBySeq.get(2)).toBe('Arjun renewed the lease')
     expect(textBySeq.get(33)).toBe('Kabir took control')
   })

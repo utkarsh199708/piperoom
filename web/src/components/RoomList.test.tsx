@@ -193,6 +193,31 @@ describe('RoomList table', () => {
   })
 })
 
+describe('first-insight span', () => {
+  const insight = (s: number) => ({
+    first_hypothesis_at: null,
+    time_to_first_hypothesis_s: s,
+    final_confidence: '',
+    steps: 0,
+    tool_calls: 0,
+    tool_errors: 0,
+    usage: { calls: 0, unpriced_calls: 0, tokens: 0, cost_usd: null, latency_ms_total: 0 },
+  })
+
+  it('shows "insight 48 s" for an open room with a hypothesis, nothing for -1, closed or shadow rooms', () => {
+    mockList([
+      room({ id: 'with', insight: insight(48) }),
+      room({ id: 'without', insight: insight(-1) }),
+      room({ id: 'old' }),
+      room({ id: 'done', status: 'closed', closed_at: '2026-10-11T11:00:00Z', insight: insight(30) }),
+      room({ id: 'shadowed', shadow: true, insight: insight(30) }),
+    ])
+    renderList('/?tab=all')
+    expect(screen.getAllByText(/insight \d+ s/)).toHaveLength(1)
+    expect(screen.getByText(/insight 48 s/)).toBeInTheDocument()
+  })
+})
+
 describe('Needs you', () => {
   it('tints and badges only the rooms waiting on a layer the person owns', () => {
     mockList([
