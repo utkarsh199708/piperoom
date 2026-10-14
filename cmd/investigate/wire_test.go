@@ -159,6 +159,7 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"kafka_topic_config",
 		"dlq_peek",
 		"runbook_lookup",
+		"what_changed",
 	}
 	got := make([]string, 0, len(reg.All()))
 	for _, tl := range reg.All() {

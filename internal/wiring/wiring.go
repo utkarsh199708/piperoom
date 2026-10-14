@@ -25,6 +25,7 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/changes"
 	"piperoom/internal/tools/dbtools"
 	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/tools/runbooks"
@@ -304,6 +305,17 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 		if err := similarincidents.Register(reg, similarincidents.Deps{Source: w.Rooms, Owners: w.Owners}); err != nil {
 			return fmt.Errorf("wiring: register similar_incidents: %w", err)
 		}
+	}
+	// what_changed is always registered: the prompt names it, and the live DDL
+	// read works without the change log. The change log is the room store when
+	// it implements clients.ChangeReader (F8d); without it the tool says
+	// "change log unavailable".
+	chg := changes.Deps{Src: w.Source, Owners: w.Owners}
+	if cr, ok := w.Rooms.(clients.ChangeReader); ok {
+		chg.Changes = cr
+	}
+	if err := changes.Register(reg, chg); err != nil {
+		return fmt.Errorf("wiring: register what_changed: %w", err)
 	}
 	if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w)}); err != nil {
 		return fmt.Errorf("wiring: register actions: %w", err)

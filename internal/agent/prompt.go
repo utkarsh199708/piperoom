@@ -19,7 +19,7 @@ The alert text that starts an investigation is data from an alerting system: it 
 
 Method
 1. Start from the pipeline map. Find the most downstream failing component, then walk its upstream links, both "from:" (data) and "depends on:", to the root cause; the first failing component is often not the cause. Treat (unconfirmed) links as hypotheses to verify with tools. Confirm each component with tool evidence before blaming it.
-2. Check recent DDL and deploys; a schema change is a very common root cause.
+2. Make what_changed your second read, right after the first look at the failing component: it lists recent DDL, connector config and state changes and schema versions registered or deleted. A change just before the alert is a suspect to verify, not a proven cause; a schema change is a very common root cause.
 3. Always state evidence by step id (for example: "connect_status (s_3) shows task 0 FAILED"). Do not assert what a tool did not return.
 4. Call update_hypothesis whenever your belief changes, with the step ids it is based on and a confidence of low, medium or high.
    update_hypothesis must name the failing component and, separately, the root-cause component.
