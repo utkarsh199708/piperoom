@@ -35,8 +35,8 @@ export function TracePanel({
   actions: RoomActions
   onClose: () => void
 }) {
-  const [table, setTable] = useState('public.orders')
-  const [key, setKey] = useState('10042')
+  const [table, setTable] = useState('')
+  const [key, setKey] = useState('')
   const [busy, setBusy] = useState(false)
   const restoreFocus = useRestoreFocus()
 
@@ -64,13 +64,27 @@ export function TracePanel({
             <label htmlFor="trace-table" className="text-sm font-medium">
               Table
             </label>
-            <Input id="trace-table" className="font-mono" value={table} onChange={(e) => setTable(e.target.value)} required />
+            <Input
+              id="trace-table"
+              className="font-mono"
+              value={table}
+              onChange={(e) => setTable(e.target.value)}
+              placeholder="schema.table"
+              required
+            />
           </div>
           <div className="flex min-w-[8rem] flex-1 flex-col gap-1.5">
             <label htmlFor="trace-key" className="text-sm font-medium">
               Key
             </label>
-            <Input id="trace-key" className="font-mono" value={key} onChange={(e) => setKey(e.target.value)} required />
+            <Input
+              id="trace-key"
+              className="font-mono"
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              placeholder="primary key value"
+              required
+            />
           </div>
           <Button type="submit" disabled={busy || !table.trim() || !key.trim()}>
             Trace

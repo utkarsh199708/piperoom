@@ -22,6 +22,11 @@ vi.mock('../context/user', () => ({
   }),
 }))
 vi.mock('../hooks/useRoomList', () => ({ useRoomList: vi.fn() }))
+// What GET /api/pipelines answers; tests swap it to see the empty and error states.
+const pipelinesState = vi.hoisted(() => ({
+  value: { status: 'loading', reload: () => undefined } as Record<string, unknown>,
+}))
+vi.mock('../hooks/usePipelines', () => ({ usePipelines: () => pipelinesState.value }))
 vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
 vi.mock('../api/client', () => {
   class ApiClientError extends Error {
@@ -103,6 +108,14 @@ const titlesInOrder = () =>
 
 beforeEach(() => {
   ctx.user = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'] }
+  pipelinesState.value = {
+    status: 'ready',
+    reload: vi.fn(),
+    data: [
+      { id: 'payments', title: 'Payments', shadow: false },
+      { id: 'orders', title: '', shadow: false },
+    ],
+  }
   vi.clearAllMocks()
   vi.mocked(api.grantControl).mockReset()
   vi.mocked(api.createRoom).mockReset()
@@ -345,6 +358,34 @@ describe('New room', () => {
     fireEvent.click(screen.getByRole('button', { name: 'New room' }))
     expect(screen.getByLabelText('Pipeline')).toHaveValue('payments')
     expect(screen.getByLabelText('Title')).toHaveValue('')
+  })
+
+  it('offers the server\'s pipelines and nothing else', () => {
+    renderList()
+    fireEvent.click(screen.getAllByRole('button', { name: 'New room' })[0])
+    const options = within(screen.getByLabelText('Pipeline')).getAllByRole('option')
+    expect(options.map((o) => o.textContent)).toEqual(['payments · Payments', 'orders'])
+  })
+
+  it('with no pipelines it says so and cannot open a room (no made-up "orders")', () => {
+    pipelinesState.value = { status: 'ready', reload: vi.fn(), data: [] }
+    renderList()
+    fireEvent.click(screen.getAllByRole('button', { name: 'New room' })[0])
+    expect(screen.getByText(/no pipelines configured/)).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'x' } })
+    expect(screen.getByRole('button', { name: 'Open room' })).toBeDisabled()
+    expect(api.createRoom).not.toHaveBeenCalled()
+  })
+
+  it('shows the load error with Try again', () => {
+    const reloadPipelines = vi.fn()
+    pipelinesState.value = { status: 'error', message: 'boom: 500', reload: reloadPipelines }
+    renderList()
+    fireEvent.click(screen.getAllByRole('button', { name: 'New room' })[0])
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not load the pipelines: boom: 500')
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(reloadPipelines).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: 'Open room' })).toBeDisabled()
   })
 
   it('does not submit an empty title', () => {
