@@ -1784,8 +1784,8 @@ func TestActionResultCarriesStepOutcome(t *testing.T) {
 			if in.StepIndex == nil || *in.StepIndex != 0 || in.Layer != "" || in.Approved != nil {
 				t.Fatalf("action_result fields: want StepIndex 0 and no Layer/Approved, got %+v", in)
 			}
-			if !strings.Contains(in.Text, in.ProposalID) {
-				t.Fatalf("action_result text must keep naming the proposal: %+v", in)
+			if strings.Contains(in.Text, in.ProposalID) || !strings.HasPrefix(in.Text, "step 1:") {
+				t.Fatalf("action_result text must be id-free and 1-based: %+v", in)
 			}
 			got[in.ProposalID] = in.OK
 		case "approval_result":
@@ -2301,5 +2301,82 @@ func TestAgentSupervisorStopsOnUnretryable(t *testing.T) {
 	msgs := eventsOf[events.AgentMessagePayload](t, svc, roomID, events.AgentMessage)
 	if len(msgs) != 1 || !strings.HasPrefix(msgs[0].Text, "The agent stopped:") {
 		t.Fatalf("agent messages = %+v, want one starting with %q", msgs, "The agent stopped:")
+	}
+}
+
+// F5b: a member can suggest while nobody drives; the agent is not woken.
+func TestSteerWithNoDriverQueuesSuggestion(t *testing.T) {
+	started := make(chan struct{}, 1)
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	svc := room.New(room.Deps{
+		Store: memstore.NewWithClock(c.Now), Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
+		Run: func(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
+			started <- struct{}{}
+			<-ctx.Done()
+			return nil
+		},
+	})
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+	snap, _, err := svc.CreateRoomFromAlert(ctx, "alert", "sev2", "orders", json.RawMessage(`{"title":"lag"}`))
+	if err != nil || snap.Driver != nil {
+		t.Fatalf("alert room: driver %+v err %v", snap.Driver, err)
+	}
+	// Drain the start the alert itself caused, so a later one would be visible.
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("alert did not start the agent")
+	}
+	ev, err := svc.Steer(ctx, mustUser(t, svc, "priya"), snap.ID, "check the connector")
+	if err != nil || ev.Type != events.SteerSuggested {
+		t.Fatalf("steer with no driver = %s, %v; want steer.suggested", ev.Type, err)
+	}
+	got, _ := svc.GetRoom(ctx, snap.ID)
+	if len(got.PendingSuggestions) != 1 {
+		t.Fatalf("pending suggestions = %+v", got.PendingSuggestions)
+	}
+	select {
+	case <-started:
+		t.Fatal("a suggestion woke the agent")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// F5b: a pending suggestion survives a take-over and the new driver can send it.
+func TestSuggestionSurvivesTakeControl(t *testing.T) {
+	svc, st, _ := newTestService(t)
+	ctx := context.Background()
+	snap, _, err := svc.CreateRoomFromAlert(ctx, "alert", "sev2", "orders", json.RawMessage(`{"title":"lag"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	priya, arjun := mustUser(t, svc, "priya"), mustUser(t, svc, "arjun")
+	if _, err := svc.Steer(ctx, priya, snap.ID, "check the connector"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GrantControl(ctx, arjun, snap.ID, "arjun"); err != nil {
+		t.Fatalf("take control: %v", err)
+	}
+	got, _ := svc.GetRoom(ctx, snap.ID)
+	if len(got.PendingSuggestions) != 1 {
+		t.Fatalf("suggestion lost on take-over: %+v", got.PendingSuggestions)
+	}
+	id := got.PendingSuggestions[0].SuggestionID
+	if _, err := svc.SendSuggestion(ctx, arjun, snap.ID, id); err != nil {
+		t.Fatalf("send suggestion: %v", err)
+	}
+	var sent *events.SteerSentPayload
+	for _, e := range allEvents(t, st, snap.ID) {
+		if e.Type == events.SteerSent {
+			p, err := events.Decode[events.SteerSentPayload](e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sent = &p
+		}
+	}
+	if sent == nil || sent.SuggestionID != id {
+		t.Fatalf("steer.sent = %+v, want suggestion_id %s", sent, id)
 	}
 }

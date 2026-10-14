@@ -109,8 +109,8 @@ func TestVerifiedAfterFix(t *testing.T) {
 	// result, formatted as internal/room formats them.
 	msgs := strings.Join(messages(tr), "\n")
 	for _, want := range []string{
-		`ack: layer "kafka-connect" approved proposal p_1`,
-		"ack: proposal p_1 step 0: resumed pg-orders-connector (RUNNING)",
+		`ack: layer "kafka-connect" approved your proposal [p_1]`,
+		"ack: step 1: resumed pg-orders-connector (RUNNING)",
 	} {
 		if !strings.Contains(msgs, want) {
 			t.Errorf("inputs lack %q:\n%s", want, msgs)
@@ -254,7 +254,7 @@ func TestStepExecutesOnce(t *testing.T) {
 	_, tr := evalOnce(t, sc, resumeScript(t, step{idle: true}))
 	results := 0
 	for _, m := range messages(tr) {
-		if strings.Contains(m, "step 0: resumed") {
+		if strings.Contains(m, "step 1: resumed") {
 			results++
 		}
 	}
@@ -293,10 +293,10 @@ func TestExecutorRunsEarlierStepsAndApprovesEachLayer(t *testing.T) {
 		t.Fatalf("phases = %s", got)
 	}
 	want := []string{
-		`ack: layer "schema-registry" approved proposal p_1`,
-		`ack: layer "kafka-connect" approved proposal p_1`,
-		"ack: proposal p_1 step 0: succeeded",
-		"ack: proposal p_1 step 1: restarted pg-orders-connector task 0 (RUNNING)",
+		`ack: layer "schema-registry" approved your proposal [p_1]`,
+		`ack: layer "kafka-connect" approved your proposal [p_1]`,
+		"ack: step 1: succeeded [p_1]",
+		"ack: step 2: restarted pg-orders-connector task 0 (RUNNING) [p_1]",
 	}
 	if got := messages(tr); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("delivered inputs:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -340,7 +340,7 @@ func TestRetryAfterFailedStep(t *testing.T) {
 		t.Fatalf("pass=%v verified=%v failures=%v", r.Pass, r.VerifiedAfterFix, r.Failures)
 	}
 	msgs := strings.Join(messages(tr), "\n")
-	for _, want := range []string{"ack: proposal p_1 step 0: actions: restart", "ack: proposal p_2 step 0: restarted"} {
+	for _, want := range []string{"ack: step 1: actions: restart", "ack: step 1: restarted pg-ledger-connector task 0 (RUNNING) [p_2]"} {
 		if !strings.Contains(msgs, want) {
 			t.Errorf("inputs lack %q:\n%s", want, msgs)
 		}

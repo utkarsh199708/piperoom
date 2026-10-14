@@ -263,7 +263,7 @@ function DoneStep({
         aria-expanded={open}
         aria-controls={regionId}
         onClick={() => setOpen((o) => !o)}
-        className="flex min-h-9 w-full items-center gap-2.5 rounded-md px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex min-h-9 coarse:min-h-11 w-full items-center gap-2.5 rounded-md px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <ChevronRight
           aria-hidden="true"
@@ -309,12 +309,15 @@ function LiveStep({
   comments,
   onComment,
   readOnly,
+  offFilter = false,
 }: {
   step: StepState
   n: number
   comments: CommentState[]
   onComment: (text: string, stepId?: string) => void
   readOnly: boolean
+  /** The step is outside the active layer filter: kept so the live work stays visible. */
+  offFilter?: boolean
 }) {
   const first = step.tool_calls[0]
   const tags = first ? argTags(first.input) : []
@@ -330,7 +333,9 @@ function LiveStep({
         <h3 className="m-0 text-sm font-medium">{step.title}</h3>
         {first && <ToolBadge tool={first.tool} />}
         {tags[0] && <ArgTag>{tags[0]}</ArgTag>}
-        <span className="ml-auto font-mono text-xs text-subtle-foreground">running</span>
+        <span className="ml-auto font-mono text-xs text-subtle-foreground">
+          running{offFilter && <span className="ml-1.5 text-muted-foreground">(live)</span>}
+        </span>
       </div>
       <Progress
         aria-hidden="true"
@@ -352,6 +357,8 @@ export function Timeline({
   working = false,
   onTakeControl,
   agent,
+  filterLayer,
+  onClearFilter,
 }: {
   steps: StepState[]
   messages: AgentMessageState[]
@@ -365,6 +372,9 @@ export function Timeline({
   onTakeControl?: () => void
   /** The agent's status: the empty state says what it is doing instead of a fixed line. */
   agent?: { state: string; detail?: string }
+  /** Show only steps that called a tool of this layer (the live step is always kept). */
+  filterLayer?: string
+  onClearFilter?: () => void
 }) {
   const unanchored = comments.filter((c) => !c.step_id)
   if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
@@ -390,14 +400,39 @@ export function Timeline({
     )
   }
 
+  const matched = filterLayer
+    ? steps.filter((s) => s.tool_calls.some((t) => toolLayer(t.tool) === filterLayer)).length
+    : steps.length
+
   return (
     <div className="flex flex-col gap-2">
       {messages.length > 0 && <AgentMessageList messages={messages} />}
 
+      {filterLayer && (
+        <p role="status" className="m-0 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+          {matched === 0 ? (
+            <>
+              No steps on <Badge variant={layerVariant(filterLayer)} mono>{filterLayer}</Badge> yet
+            </>
+          ) : (
+            <>
+              Showing {matched} {matched === 1 ? 'step' : 'steps'} on{' '}
+              <Badge variant={layerVariant(filterLayer)} mono>{filterLayer}</Badge>
+            </>
+          )}
+          <span aria-hidden="true">·</span>
+          <Button variant="ghost" className="h-6 px-1.5 text-xs" onClick={onClearFilter}>
+            Clear
+          </Button>
+        </p>
+      )}
+
       <ol className="m-0 flex list-none flex-col gap-0.5 p-0">
         {steps.map((step, i) => {
-          const stepComments = comments.filter((c) => c.step_id === step.id)
           const live = working && i === steps.length - 1
+          const hit = !filterLayer || step.tool_calls.some((t) => toolLayer(t.tool) === filterLayer)
+          if (!hit && !live) return null
+          const stepComments = comments.filter((c) => c.step_id === step.id)
           return live ? (
             <LiveStep
               key={step.id}
@@ -406,6 +441,7 @@ export function Timeline({
               comments={stepComments}
               onComment={onComment}
               readOnly={readOnly}
+              offFilter={!hit}
             />
           ) : (
             <DoneStep

@@ -966,6 +966,7 @@ func TestPurgeByPolicy(t *testing.T) {
 		if _, err := svc.CloseRoom(ctx, mustUser(t, svc, "arjun"), snap.ID, "done"); err != nil {
 			t.Fatal(err)
 		}
+		waitPM(t, st, snap.ID) // the closing draft event is part of the log
 		return snap.ID
 	}
 	orders, billing := open("orders"), open("billing")
@@ -989,8 +990,8 @@ func TestPurgeByPolicy(t *testing.T) {
 	}
 	// Each purge left a content-free audit row naming the days that applied.
 	for id, want := range map[string]store.RoomDeletion{
-		orders:  {RoomID: orders, PipelineID: "orders", DeletedBy: "system", Reason: "retention: closed 10 days", EventCount: 3},
-		billing: {RoomID: billing, PipelineID: "billing", DeletedBy: "system", Reason: "retention: closed 30 days", EventCount: 3},
+		orders:  {RoomID: orders, PipelineID: "orders", DeletedBy: "system", Reason: "retention: closed 10 days", EventCount: 4},
+		billing: {RoomID: billing, PipelineID: "billing", DeletedBy: "system", Reason: "retention: closed 30 days", EventCount: 4},
 	} {
 		got, err := st.GetRoomDeletion(ctx, id)
 		got.DeletedAt = time.Time{}
@@ -1018,6 +1019,7 @@ func TestRetentionArchivesBeforePurge(t *testing.T) {
 	if _, err := broken.CloseRoom(ctx, mustUser(t, broken, "arjun"), snap.ID, "done"); err != nil {
 		t.Fatal(err)
 	}
+	waitPM(t, st, snap.ID) // the closing draft event must not land mid-archive
 	c.Advance(40 * 24 * time.Hour)
 
 	res, err := broken.PurgeExpired(ctx, c.Now().AddDate(0, 0, -30))

@@ -317,3 +317,38 @@ func TestCancelledContextAndDuplicateRegister(t *testing.T) {
 		t.Fatal("second Register must fail as a duplicate")
 	}
 }
+
+func TestRunbookHitItems(t *testing.T) {
+	tl := New([]Runbook{{ID: "rb", Title: "RB", Keywords: []string{"zebra"},
+		Sections: []Section{{Heading: "Steps", Text: "Intro zebra.\n- Resume the connector\n  - nested\n- Check lag\nTrailer"}, {Heading: "Prose", Text: "zebra only prose"}},
+		Sources:  []string{"https://debezium.io/documentation/"}}})
+	res, err := tl.Run(context.Background(), json.RawMessage(`{"query":"zebra","max_results":5}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(res.Data)
+	var d struct {
+		Hits []struct {
+			Section string   `json:"section"`
+			Items   []string `json:"items"`
+		} `json:"hits"`
+	}
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Hits) != 2 {
+		t.Fatalf("hits = %d", len(d.Hits))
+	}
+	for _, h := range d.Hits {
+		switch h.Section {
+		case "Steps":
+			if !slices.Equal(h.Items, []string{"Resume the connector", "nested", "Check lag"}) {
+				t.Errorf("items = %q", h.Items)
+			}
+		case "Prose":
+			if h.Items == nil || len(h.Items) != 0 {
+				t.Errorf("prose items = %#v, want empty non-nil", h.Items)
+			}
+		}
+	}
+}

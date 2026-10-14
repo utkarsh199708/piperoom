@@ -542,3 +542,13 @@ textarea:focus {
   align-items: center;
   text-decoration: none;
 }
+
+/* No keyboard on a touch screen: key caps are noise there. The cheat-sheet opts back in. */
+@media (pointer: coarse) {
+  kbd[data-slot='kbd'] {
+    display: none;
+  }
+  .kbd-visible kbd[data-slot='kbd'] {
+    display: inline-flex;
+  }
+}

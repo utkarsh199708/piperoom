@@ -1,5 +1,6 @@
 import type { Config } from 'tailwindcss'
 import animate from 'tailwindcss-animate'
+import plugin from 'tailwindcss/plugin'
 
 // Tokens live in src/index.css as full CSS colours (hex / rgb), per the UI v2
 // handoff (docs/design/ui-v2/project/Handoff.dc.html). Tailwind 3 cannot add an
@@ -8,9 +9,10 @@ import animate from 'tailwindcss-animate'
 // color-mix of the token, without one it is the plain token.
 // (Tailwind accepts the function at runtime; its types only list strings, hence the cast.)
 const token = (name: string): string =>
-  (({ opacityValue }: { opacityValue?: string }) =>
+  (({ opacityValue }: { opacityValue?: string | number }) =>
     // With no modifier Tailwind passes undefined or its own var(--tw-*-opacity): use the plain token.
-    opacityValue === undefined || opacityValue === '1' || opacityValue.startsWith('var(')
+    // Gradient stops (`from-background`) pass a number, hence the String().
+    opacityValue === undefined || String(opacityValue) === '1' || String(opacityValue).startsWith('var(')
       ? `var(${name})`
       : `color-mix(in srgb, var(${name}) ${Number(opacityValue) * 100}%, transparent)`) as unknown as string
 
@@ -112,7 +114,14 @@ const config: Config = {
       },
     },
   },
-  plugins: [animate],
+  plugins: [
+    animate,
+    // Touch screens: bigger hit targets (`coarse:h-11`) and no key caps; mouse screens keep both as they are.
+    plugin(({ addVariant }) => {
+      addVariant('coarse', '@media (pointer: coarse)')
+      addVariant('fine', '@media (pointer: fine)')
+    }),
+  ],
 }
 
 export default config
