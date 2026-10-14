@@ -166,7 +166,9 @@ func TestStaticDoesNotShadowAPI(t *testing.T) {
 		}
 	}
 	// A POST to a path the SPA owns is refused, not served.
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/rooms/abc", strings.NewReader("{}"))
+	// /rooms/{id} is the deep-link route (deeplink.go); any other app path
+	// still reaches the static handler.
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/some/route", strings.NewReader("{}"))
 	r, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -278,14 +280,16 @@ func TestStaticSymlinkCannotEscapeWebDir(t *testing.T) {
 
 func TestStaticAllowHeaderAndCaseInsensitiveAPI(t *testing.T) {
 	srv := newWebServer(t, httpapi.WithWebDir(webDir(t)))
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/rooms/abc", strings.NewReader("{}"))
+	// /rooms/{id} is the deep-link route (deeplink.go); any other app path
+	// still reaches the static handler.
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/some/route", strings.NewReader("{}"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != "GET, HEAD" {
-		t.Fatalf("POST /rooms/abc = %d, Allow %q", resp.StatusCode, resp.Header.Get("Allow"))
+		t.Fatalf("POST /some/route = %d, Allow %q", resp.StatusCode, resp.Header.Get("Allow"))
 	}
 	for _, p := range []string{"/API/rooms", "/Api/me", "/aPi"} {
 		resp, body := fetch(t, http.MethodGet, srv.URL+p)
