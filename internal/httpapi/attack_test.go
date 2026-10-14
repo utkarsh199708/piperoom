@@ -487,9 +487,35 @@ func TestAttack_UnbindLeavesSessionsAlive(t *testing.T) {
 	}
 	// A bystander's session must survive the unbind.
 	kabir := e.mustLogin(t, testenv.IDPUser{Sub: "sub-kabir"})
+	ctx := context.Background()
+	sessionID := func(cookie *http.Cookie) string {
+		t.Helper()
+		hash, ok := auth.HashToken(cookie.Value)
+		if !ok {
+			t.Fatal("session cookie has invalid token shape")
+		}
+		sess, err := e.sessions.ByTokenHash(ctx, hash)
+		if err != nil {
+			t.Fatalf("load session for %s: %v", cookie.Name, err)
+		}
+		return sess.ID
+	}
+	oldSessionID, kabirSessionID := sessionID(old), sessionID(kabir)
+	if !e.api.SessionAliveForTest(ctx, oldSessionID) {
+		t.Fatal("old session is not alive before unbind")
+	}
+	if !e.api.SessionAliveForTest(ctx, kabirSessionID) {
+		t.Fatal("bystander session is not alive before unbind")
+	}
 	r, err := e.idents.Unbind(context.Background(), "priya", time.Now())
 	if err != nil || r.Unbound != 1 || r.Revoked != 1 {
 		t.Fatalf("unbind = %+v, %v; want 1 binding and 1 session", r, err)
+	}
+	if e.api.SessionAliveForTest(ctx, oldSessionID) {
+		t.Error("WebSocket presence check kept the unbound user's session alive")
+	}
+	if !e.api.SessionAliveForTest(ctx, kabirSessionID) {
+		t.Error("WebSocket presence check closed a bystander's session")
 	}
 	wantStatus(t, e.do(t, http.MethodGet, "/api/me", "", ck(old)), http.StatusUnauthorized)
 	if me := e.me(t, kabir); me["id"] != "kabir" {

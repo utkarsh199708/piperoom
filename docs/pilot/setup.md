@@ -286,8 +286,10 @@ on `PIPEROOM_HTTP_ADDR` and exits 0 when it is healthy (`cmd/server/main.go:54`,
    a user who exists in `users.yaml` and lists that layer, and every layer a user lists must be
    assigned to that same user in `owners.yaml`. A layer name that is not one of the six known
    layers also stops the start. The error names the user and the layer. The check covers only a
-   layer whose owners are all `user:` principals; a layer that lists a `group:` is skipped (and
-   logged once). It also refuses a `users.yaml` id that starts with `u_` and an `email:` that is
+   layer whose owners are all `user:` principals for the owners-to-users direction. The reverse
+   users-to-owners check always applies: every layer a user lists must include that user as
+   `user:<id>` in `owners.yaml`, even if the layer also lists groups. Skipped owners-to-users layers
+   are logged once. It also refuses a `users.yaml` id that starts with `u_` and an `email:` that is
    not ASCII.
 3. Applies the goose migrations to `PIPEROOM_DB_URL` (`:137`, `migrations/migrate.go`), then opens
    the room store (`:143`). A database that cannot be reached stops the start.

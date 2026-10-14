@@ -211,8 +211,8 @@ resources:
   limits:
     memory: 1Gi
 
-# Probes go through the server's Host check, and kubelet would send the pod IP
-# as Host (answered 421 bad_host). The chart sends "Host: localhost" instead.
+# GET /healthz and /readyz skip the server's Host allow-list, so kubelet probes
+# work with the pod IP as Host. The chart's Host: localhost header is optional.
 probes:
   liveness:
     path: /healthz
