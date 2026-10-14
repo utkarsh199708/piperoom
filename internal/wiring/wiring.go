@@ -288,7 +288,7 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 		b = newTopologyBuilder(w)
 		w.Builder = b
 	}
-	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: w.Connect}); err != nil {
+	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: w.Connect, Kafka: w.Kafka}); err != nil {
 		return fmt.Errorf("wiring: register db tools: %w", err)
 	}
 	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: w.Connect, Registry: w.Registry, Kafka: w.Kafka, Owners: w.Owners}); err != nil {
