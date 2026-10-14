@@ -83,6 +83,20 @@ type RoomSink interface {
 	PostEvidence(ctx context.Context, roomID, text string) error
 }
 
+// PipelineClients are the clients of one pipeline's client set. Either may be
+// nil, like Deps.Source and Deps.Connect.
+type PipelineClients struct {
+	// Set names the client set. Pipelines with the same Set must get the same
+	// clients: they share one replication-slot query, one read per connector
+	// name and one DLQ offsets call in a tick.
+	Set     string
+	Source  SourceDB
+	Connect ConnectClient
+	// Kafka reads DLQ offsets on the set's own cluster (nil: dlq_growth is
+	// off for the set's pipelines, as with Deps.Kafka).
+	Kafka clients.DLQReader
+}
+
 // Deps are the watcher's dependencies.
 type Deps struct {
 	// Source and Connect may be nil: the signals that need them then stay
@@ -93,8 +107,12 @@ type Deps struct {
 	// when the Kafka client cannot (wire it with
 	// `deps.Kafka, _ = admin.(clients.DLQReader)`): dlq_growth is then off
 	// with one log line, and config_risk cannot tell a missing DLQ topic.
-	Kafka  clients.DLQReader
-	Owners *owners.Owners
+	Kafka clients.DLQReader
+	// ClientsFor, when set, gives each pipeline the clients of its own client
+	// set (docs/design/tenancy.md section 5) and Source, Connect and Kafka are
+	// not used. Pipelines of one set share each read of a tick.
+	ClientsFor func(pipelineID string) PipelineClients
+	Owners     *owners.Owners
 	// Rooms is required in mode "rooms"; modes "log" and "off" never call it.
 	Rooms RoomSink
 	// Config comes from config.ParseWatch.
@@ -183,16 +201,17 @@ func (ps *pipeState) sig(id string) *sigState {
 
 // Watcher is the built-in watcher.
 type Watcher struct {
-	src      SourceDB
-	conn     ConnectClient
-	kafka    clients.DLQReader
-	own      *owners.Owners
-	rooms    RoomSink
-	cfg      config.Watch
-	maxRooms int
-	clock    Clock
-	log      *slog.Logger
-	jitter   func(time.Duration) time.Duration
+	src        SourceDB
+	conn       ConnectClient
+	kafka      clients.DLQReader
+	clientsFor func(pipelineID string) PipelineClients
+	own        *owners.Owners
+	rooms      RoomSink
+	cfg        config.Watch
+	maxRooms   int
+	clock      Clock
+	log        *slog.Logger
+	jitter     func(time.Duration) time.Duration
 
 	mu    sync.Mutex
 	pipes map[string]*pipeState
@@ -204,8 +223,10 @@ type Watcher struct {
 	// storms carries a storm over to the next tick when its leader could not
 	// get a room: signal id -> member pipelines still waiting.
 	storms map[string][]string
-	// dlqState is the sample ring of each DLQ topic (topics are cluster-wide,
-	// so pipelines that name the same topic share one ring). dlqNoReaderLogged
+	// dlqState is the sample ring of each DLQ topic, keyed by dlqStateKey (a
+	// topic is cluster-wide, so pipelines of one client set that name the same
+	// topic share one ring; another set's topic of that name is another ring).
+	// dlqNoReaderLogged
 	// keeps the "cannot read DLQ offsets" line to one.
 	dlqState map[string]*dlqTopicState
 	// dlqSeen is, per pipeline/connector, the DLQ setting last read from its
@@ -252,7 +273,7 @@ func New(d Deps) (*Watcher, error) {
 		cfg.Cooldown = 60 * time.Minute
 	}
 	w := &Watcher{
-		src: d.Source, conn: d.Connect, kafka: d.Kafka, own: d.Owners, rooms: d.Rooms,
+		src: d.Source, conn: d.Connect, kafka: d.Kafka, clientsFor: d.ClientsFor, own: d.Owners, rooms: d.Rooms,
 		cfg: cfg, maxRooms: d.MaxOpenRooms, clock: d.Clock, log: d.Log, jitter: d.Jitter,
 		pipes: map[string]*pipeState{}, closed: map[string]bool{}, storms: map[string][]string{},
 		dlqState: map[string]*dlqTopicState{}, dlqSeen: map[string]dlqSeen{},
