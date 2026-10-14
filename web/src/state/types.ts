@@ -4,10 +4,12 @@ import type {
   ActionExecutedPayload,
   Actor,
   AgentStatusPayload,
+  AgentVerificationPayload,
   HandoffSummary,
   HypothesisSummary,
   HypothesisVerdict,
   Identity,
+  ProposalPreviewedPayload,
   ProposalStep,
   RoomLabelledPayload,
   RoomSnapshot,
@@ -144,6 +146,12 @@ export interface ProposalState {
   params_hash: string
   status: 'open' | 'approved' | 'rejected'
   executed: ActionExecutedPayload[]
+  /** When proposal.created was logged: the preview skeleton counts its 20 s from here. */
+  created_at?: string
+  /** What each step would do; absent until proposal.previewed arrives (it may never). */
+  preview?: ProposalPreviewedPayload
+  /** The agent's verdict after the last step ran. */
+  verification?: AgentVerificationPayload
 }
 
 export interface MemberState {
@@ -188,6 +196,40 @@ export interface HandoffFailureState {
 export interface AlertInfo {
   /** Best-effort source inferred from the raw body shape; null when unknown. */
   source: string | null
+}
+
+/** What the agent has cost in this room, folded from agent.usage (F11; same rules as the server's insight). */
+export interface InsightUsageState {
+  calls: number
+  unpriced_calls: number
+  tokens: number
+  /** null while no call is priced (never 0 for unknown); a lower bound while unpriced_calls > 0. */
+  cost_usd: number | null
+  latency_ms_total: number
+  cache_read_tokens: number
+  /** Model id -> number of calls, for the chip tooltip. */
+  models: Record<string, number>
+}
+
+export interface InsightState {
+  first_hypothesis_at: string | null
+  /** Whole seconds from opened_at to the first hypothesis, -1 before one exists. */
+  time_to_first_hypothesis_s: number
+  steps: number
+  tool_calls: number
+  tool_errors: number
+  usage: InsightUsageState
+}
+
+export function emptyInsight(): InsightState {
+  return {
+    first_hypothesis_at: null,
+    time_to_first_hypothesis_s: -1,
+    steps: 0,
+    tool_calls: 0,
+    tool_errors: 0,
+    usage: { calls: 0, unpriced_calls: 0, tokens: 0, cost_usd: null, latency_ms_total: 0, cache_read_tokens: 0, models: {} },
+  }
 }
 
 export type { ActivityKind } from './describe'
@@ -264,6 +306,9 @@ export interface RoomState {
   /** Ticked runbook items; the last event per key wins and an untick removes the key. */
   checklist_done: Record<string, ChecklistTick>
   activity: ActivityEntry[]
+  /** Shadow room: no cost chip until its numbers are revealed. */
+  shadow: boolean
+  insight: InsightState
 }
 
 export function emptyRoomState(id: string): RoomState {
@@ -297,6 +342,8 @@ export function emptyRoomState(id: string): RoomState {
     labelled: null,
     checklist_done: {},
     activity: [],
+    shadow: false,
+    insight: emptyInsight(),
   }
 }
 
@@ -317,6 +364,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     closed_at: snapshot.closed_at,
     resolution: snapshot.resolution,
     last_seq: 0,
+    shadow: snapshot.shadow ?? false,
     replay_target: snapshot.last_seq ?? 0,
     snapshot_hashes: Object.fromEntries(
       (snapshot.open_proposals ?? [])

@@ -10,10 +10,17 @@ export function useNow(ms = 30_000): number {
   return now
 }
 
-/** Whole minutes left until an RFC 3339 time, rounded up; null for no/invalid time. */
+/** Whole minutes left until an RFC 3339 time, rounded down (a fresh 30 min lease reads 30m, then 29m); null for no/invalid time. */
 export function minutesLeft(iso: string | undefined, now: number): number | null {
   if (!iso) return null
   const t = Date.parse(iso)
   if (Number.isNaN(t)) return null
-  return Math.max(0, Math.ceil((t - now) / 60_000))
+  return Math.max(0, Math.floor((t - now) / 60_000))
+}
+
+/** True once the instant has passed (not the rounded minute: "under a minute left" is not expired). */
+export function leaseExpired(iso: string | undefined, now: number): boolean {
+  if (!iso) return false
+  const t = Date.parse(iso)
+  return !Number.isNaN(t) && t <= now
 }

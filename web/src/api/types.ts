@@ -43,6 +43,8 @@ export type EventType =
   | 'approval.nudged'
   | 'room.labelled'
   | 'checklist.step_done'
+  | 'proposal.previewed'
+  | 'agent.verification'
 
 export interface Event {
   room_id: string
@@ -88,6 +90,8 @@ export interface RoomCreatedPayload {
   severity: string // "sev1".."sev4"
   pipeline_id: string
   alert?: unknown
+  /** Shadow mode: the agent runs silently and its numbers are revealed after close. */
+  shadow?: boolean
 }
 
 export interface RoomClosedPayload {
@@ -139,7 +143,7 @@ export interface AgentHypothesisPayload {
 // Cost telemetry: the reducer keeps it out of the activity feed and the steps.
 export interface AgentUsagePayload {
   model: string
-  role: 'triage' | 'main' | 'handoff' | 'compaction'
+  role: string // triage | main | handoff | compaction | postmortem | first_look | judge
   input_tokens: number
   cache_creation_input_tokens: number
   cache_read_input_tokens: number
@@ -188,6 +192,72 @@ export interface ProposalStep {
   layer: string
   params: unknown
   description: string
+  /** What the agent will check after this step runs, e.g. "task 0 RUNNING within 60 s". */
+  verify?: string
+}
+
+/** The target system's own answer to "would this be accepted" (registry check, connect validate). */
+export interface DryRunResult {
+  ok: boolean
+  source: string
+  text: string
+  skipped?: string
+}
+
+/** What one write step would do, read before approval (proposal.previewed). */
+export interface PreviewResult {
+  target: string
+  current: string
+  expected: string
+  /** Topology node ids reachable over data edges, at most 12; absent when unknown. */
+  downstream?: string[]
+  reversible: boolean
+  rollback?: string
+  dry_run?: DryRunResult
+}
+
+export interface StepPreview {
+  step_index: number
+  preview?: PreviewResult
+  error?: string
+}
+
+export interface ProposalPreviewedPayload {
+  proposal_id: string
+  steps: StepPreview[]
+  at: string
+}
+
+export interface VerificationCheck {
+  layer: string
+  name: string
+  ok: boolean
+  detail: string
+}
+
+export interface SinkCheck {
+  table: string
+  newest?: string
+  baseline?: string
+  passed: boolean
+  passed_by?: string
+}
+
+export interface DataFlowCheck {
+  checked: boolean
+  fresh: boolean
+  sinks?: SinkCheck[]
+  detail?: string
+}
+
+/** The agent's verdict on a fix (agent.verification). `repeat` means "already verified", no checks. */
+export interface AgentVerificationPayload {
+  proposal_id: string
+  checks: VerificationCheck[]
+  data_flow?: DataFlowCheck
+  recovered: boolean
+  verdict: string
+  repeat?: boolean
 }
 
 export interface ProposalCreatedPayload {
@@ -236,6 +306,8 @@ export interface ActionExecutedPayload {
   output: string
   /** The proposal's params_hash the executor checked before this step ran (auth PR 4). */
   params_hash?: string
+  /** The step may or may not have run (its executor stopped mid-step); never retried. */
+  outcome_unknown?: boolean
 }
 
 export interface HandoffSummary {
@@ -385,6 +457,48 @@ export interface RoomSnapshot {
   members: MemberSummary[]
   /** F8: a room.labelled exists. */
   labelled?: boolean
+  /** Shadow room (docs/api.md): its insight is zeros until revealed. */
+  shadow?: boolean
+  /** F11: cost and clock facts folded server-side; absent on an older server. */
+  insight?: RoomInsight
+}
+
+/** RoomSnapshot.insight (docs/api.md, F11). */
+export interface RoomInsight {
+  first_hypothesis_at: string | null
+  /** Whole seconds from opened_at to the first hypothesis; -1 before one exists. */
+  time_to_first_hypothesis_s: number
+  final_confidence: string
+  steps: number
+  tool_calls: number
+  tool_errors: number
+  usage: {
+    calls: number
+    unpriced_calls: number
+    tokens: number
+    cost_usd: number | null
+    latency_ms_total: number
+  }
+}
+
+/** GET /api/pipelines/{pid}/agent-stats (F11): the agent's track record on one pipeline. */
+export interface AgentStats {
+  pipeline_id: string
+  window_days: number
+  generated_at: string
+  rooms: number
+  hypothesised: number
+  labelled: number
+  graded: number
+  layer_correct: number
+  root_cause: { yes: number; partial: number; no: number }
+  by_confidence: { confidence: string; runs: number; correct: number; accuracy: number }[]
+  median_time_to_first_hypothesis_s: number
+  median_human_mttr_s: number
+  median_cost_usd: number
+  cost_available: boolean
+  enough_data: boolean
+  shadow: { rooms: number; graded: number; layer_correct: number }
 }
 
 export interface TopologyNode {

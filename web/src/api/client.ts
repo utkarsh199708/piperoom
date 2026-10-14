@@ -16,6 +16,7 @@ import type {
   LabelInput,
   Me,
   Person,
+  AgentStats,
   PipelineInfo,
   RoomSnapshot,
   Topology,
@@ -145,6 +146,8 @@ export const api = {
     request<EventsPage>(`${room(roomId)}/events?after=${after}&limit=${limit}`),
   topology: (pipelineId: string) =>
     request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`),
+  agentStats: (pipelineId: string) =>
+    request<AgentStats>(`/api/pipelines/${encodeURIComponent(pipelineId)}/agent-stats?days=90`),
   comment: (roomId: string, body: { step_id?: string; text: string }) =>
     request<Event>(`${room(roomId)}/comments`, { method: 'POST', body: JSON.stringify(body) }),
   steer: (roomId: string, text: string) =>
