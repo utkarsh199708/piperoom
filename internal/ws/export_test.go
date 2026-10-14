@@ -23,3 +23,10 @@ func (g *Gateway) Slots(roomID, userID string) (perRoom, perUser int) {
 	defer g.mu.Unlock()
 	return g.roomSlots[roomID], g.userSlots[userID]
 }
+
+// TotalSlots is how many connection slots the gateway holds in all.
+func (g *Gateway) TotalSlots() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.slots
+}
