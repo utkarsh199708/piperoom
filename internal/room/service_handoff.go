@@ -3,6 +3,7 @@ package room
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -41,14 +42,48 @@ func sanitizeHandoffList(in []string) []string {
 	return out
 }
 
+// handoffFailTimeout bounds the handoff.failed append. It runs on a context
+// detached from the request: a client that went away must not leave the
+// request in flight until its expires_at.
+const handoffFailTimeout = 10 * time.Second
+
+// HandoffInFlight answers 409 handoff_in_progress while a hand-off request of
+// the room is in flight (docs/api.md, Hand-off requests), and nil otherwise,
+// also for a room it does not know (the route's own checks answer that). The
+// HTTP layer calls it before it reads the body, so the 409 comes before every
+// other check but visibility; CreateHandoff checks again atomically with its
+// own handoff.requested append.
+func (s *Service) HandoffInFlight(ctx context.Context, roomID string) error {
+	s.syncRoom(ctx, roomID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, err := s.getStateLocked(ctx, roomID)
+	if err != nil {
+		return nil
+	}
+	if st.snap.handoffInFlight(s.now()) {
+		return handoffInProgress()
+	}
+	return nil
+}
+
 // CreateHandoff asks the agent for a shift summary and emits handoff.created.
+//
+// The request is logged first (handoff.requested, under s.mu and as a checked
+// append, so of two concurrent requests exactly one gets in and the other
+// answers 409 handoff_in_progress) and ends with handoff.created or
+// handoff.failed for the same request_id. The summary is written outside s.mu
+// and may take minutes; meanwhile the fold of handoff.requested keeps every
+// other request out, on this replica and, through the log, on the others.
 func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID string, stayAsWatcher bool) (events.Event, error) {
+	if err := s.HandoffInFlight(ctx, roomID); err != nil {
+		return events.Event{}, err
+	}
 	to, err := s.LookupPerson(ctx, toID)
 	if err != nil {
 		return events.Event{}, err
 	}
 
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
 	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	st, err := s.getStateLocked(ctx, roomID)
@@ -56,33 +91,60 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 		s.mu.Unlock()
 		return events.Event{}, err
 	}
-	if !s.roomOpen(st) {
-		s.mu.Unlock()
-		return events.Event{}, roomClosed("room is closed")
-	}
-	if !s.isDriver(st, user.ID) {
-		s.mu.Unlock()
-		return events.Event{}, ErrNotDriver()
-	}
-	if to.ID == user.ID {
-		s.mu.Unlock()
-		return events.Event{}, validation("cannot hand off to yourself")
-	}
-	if err := s.checkTargetVisible(to, st.snap.PipelineID); err != nil {
-		s.mu.Unlock()
+	now := s.now().UTC()
+	requestID := NewID("hr_")
+	expiresAt := now.Add(handoffSummaryTimeout)
+	_, err = s.emitCheckedLocked(ctx, st, roomID, func() error {
+		if st.snap.handoffInFlight(s.now()) {
+			return handoffInProgress()
+		}
+		if !s.roomOpen(st) {
+			return roomClosed("room is closed")
+		}
+		if !s.isDriver(st, user.ID) {
+			return ErrNotDriver()
+		}
+		if to.ID == user.ID {
+			return validation("cannot hand off to yourself")
+		}
+		return s.checkTargetVisible(to, st.snap.PipelineID)
+	}, events.HandoffRequested, s.humanActor(user), events.HandoffRequestedPayload{
+		RequestID:     requestID,
+		To:            s.humanActor(to),
+		StayAsWatcher: stayAsWatcher,
+		ExpiresAt:     expiresAt,
+	})
+	s.mu.Unlock()
+	if err != nil {
 		return events.Event{}, err
 	}
-	s.mu.Unlock()
 
+	e, err := s.completeHandoff(ctx, user, to, roomID, requestID, stayAsWatcher)
+	if err != nil {
+		s.failHandoff(ctx, roomID, requestID, handoffFailReason(err))
+		return events.Event{}, err
+	}
+	return e, nil
+}
+
+// errSummary marks a failed summary call, for handoffFailReason.
+var errSummary = errors.New("summary failed")
+
+// completeHandoff writes the summary and appends handoff.created for
+// requestID.
+func (s *Service) completeHandoff(ctx context.Context, user, to User, roomID, requestID string, stayAsWatcher bool) (events.Event, error) {
 	roomEvents, err := s.allEvents(ctx, roomID)
 	if err != nil {
 		return events.Event{}, fmt.Errorf("room: handoff: read events: %w", err)
 	}
+	// The same budget handoff.requested announced as expires_at. A relative
+	// timeout, not a deadline at expiresAt: that time is from s.now, which
+	// tests (and nothing else) set to another clock.
 	wctx, cancel := context.WithTimeout(ctx, handoffSummaryTimeout)
 	summary, err := s.writeHandoff(wctx, roomEvents, s.opts)
 	cancel()
 	if err != nil {
-		return events.Event{}, fmt.Errorf("room: handoff: write summary: %w", err)
+		return events.Event{}, fmt.Errorf("room: handoff: write summary: %w: %w", errSummary, err)
 	}
 	summary = sanitizeHandoff(summary)
 
@@ -127,6 +189,7 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 		return nil
 	}, events.HandoffCreated, s.humanActor(user), events.HandoffCreatedPayload{
 		HandoffID:     handoffID,
+		RequestID:     requestID,
 		To:            s.humanActor(to),
 		Summary:       summary,
 		StayAsWatcher: stayAsWatcher,
@@ -144,6 +207,40 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 		s.log.Warn("room: void older handoffs failed", "room", roomID, "handoff", handoffID, "err", err)
 	}
 	return e, nil
+}
+
+// handoffFailReason maps why a request ended to the fixed handoff.failed
+// reason; never error text, which can quote room content.
+func handoffFailReason(err error) string {
+	var re *Error
+	switch {
+	case errors.Is(err, errSummary):
+		return events.HandoffFailedSummary
+	case errors.As(err, &re) && re.Code == codeNotDriver:
+		return events.HandoffFailedNotDriver
+	case errors.As(err, &re) && re.Code == codeRoomClosed:
+		return events.HandoffFailedClosed
+	}
+	return events.HandoffFailedInternal
+}
+
+// failHandoff appends handoff.failed for requestID, ending the request. If
+// that append fails too, the request still ends at its expires_at.
+func (s *Service) failHandoff(ctx context.Context, roomID, requestID, reason string) {
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), handoffFailTimeout)
+	defer cancel()
+	s.syncRoom(fctx, roomID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.rooms[roomID]
+	if st == nil {
+		return
+	}
+	if _, err := s.emitLocked(fctx, st, roomID, events.HandoffFailed, systemActor, events.HandoffFailedPayload{
+		RequestID: requestID, Reason: reason,
+	}); err != nil {
+		s.log.Warn("room: append handoff.failed; the request ends at its expiry", "room", roomID, "request", requestID, "err", err)
+	}
 }
 
 // AcceptHandoff completes a hand-off: it moves the driver role
