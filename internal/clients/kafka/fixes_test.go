@@ -52,7 +52,7 @@ func TestSortRefsNewestLast(t *testing.T) {
 		{Partition: 1, Offset: 3, Timestamp: t0},
 		{Partition: 0, Offset: 7, Timestamp: t0.Add(time.Second)},
 	}
-	sortRefs(refs)
+	SortRefs(refs)
 	want := []int64{5, 3, 7, 9}
 	for i, w := range want {
 		if refs[i].Offset != w {
