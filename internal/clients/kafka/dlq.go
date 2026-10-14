@@ -19,6 +19,22 @@ import (
 
 var _ clients.DLQReader = (*Client)(nil)
 
+// knownConnectErrorHeaders are the headers Kafka Connect's dead letter queue
+// reporter writes. Any other key under the prefix was not written by Connect,
+// so it is dropped rather than passed on as untrusted text.
+var knownConnectErrorHeaders = map[string]bool{
+	connectErrorsPrefix + "topic":                true,
+	connectErrorsPrefix + "partition":            true,
+	connectErrorsPrefix + "offset":               true,
+	connectErrorsPrefix + "connector.name":       true,
+	connectErrorsPrefix + "task.id":              true,
+	connectErrorsPrefix + "stage":                true,
+	connectErrorsPrefix + "class.name":           true,
+	connectErrorsPrefix + "exception.class.name": true,
+	headerMessage:    true,
+	headerStacktrace: true,
+}
+
 const (
 	// connectErrorsPrefix is the only header namespace PeekDLQ returns.
 	connectErrorsPrefix = "__connect.errors."
@@ -367,14 +383,14 @@ func dlqRecordFrom(topic string, r *kgo.Record) clients.DLQRecord {
 	}
 }
 
-// connectErrorHeaders keeps only __connect.errors.* headers. Header values
+// connectErrorHeaders keeps only the known __connect.errors.* headers. Header values
 // are written by whoever produced the record, so they are untrusted text:
 // control characters are removed, the value is capped, the stack trace is cut
 // to its first line, and message and trace line are redacted.
 func connectErrorHeaders(hs []kgo.RecordHeader) map[string]string {
 	var out map[string]string
 	for _, h := range hs {
-		if !strings.HasPrefix(h.Key, connectErrorsPrefix) {
+		if !knownConnectErrorHeaders[h.Key] {
 			continue
 		}
 		v := string(h.Value)
@@ -403,11 +419,16 @@ func firstNonEmptyLine(s string) string {
 	return ""
 }
 
-// cleanHeader removes control characters, trims space and caps at
-// dlq.MaxMessageRunes runes.
+// cleanHeader turns whitespace control characters into spaces, removes the
+// other control characters, trims space and caps at dlq.MaxMessageRunes runes.
+// Whitespace must become a space, not vanish: "exists\nDetail:" fused into
+// "existsDetail:" would hide the marker from dlq.RedactMessage and keep the PII.
 func cleanHeader(s string) string {
 	s = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f {
+		switch {
+		case r == '\t' || r == '\n' || r == '\v' || r == '\f' || r == '\r':
+			return ' '
+		case r < 0x20 || r == 0x7f:
 			return -1
 		}
 		return r

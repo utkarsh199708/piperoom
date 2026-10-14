@@ -741,6 +741,48 @@ func TestConnectErrorHeadersInvalidUTF8AndSizes(t *testing.T) {
 	}
 }
 
+// TestConnectErrorHeadersWhitespaceKeepsTailMarkers is the regression test for
+// control-character removal fusing "exists\nDetail:" into "existsDetail:",
+// which hid the marker from the redactor and kept the PII.
+func TestConnectErrorHeadersWhitespaceKeepsTailMarkers(t *testing.T) {
+	tests := []struct {
+		name, key, value, wantPrefix string
+	}{
+		{"newline before Detail", headerMessage,
+			"ERROR: duplicate key value already exists\nDetail: Key (email)=(jane@x.com) exists",
+			"ERROR: duplicate key value already exists "},
+		{"tab before where", headerMessage, "bad\twhere: (jane@x.com)", "bad "},
+		{"CRLF before Where", headerMessage, "ERROR: failed\r\nWhere: (jane@x.com)", "ERROR: failed "},
+		{"stacktrace first line with tab", headerStacktrace,
+			"org.x.PSQLException: exists\tDetail: Key (email)=(jane@x.com)\n\tat org.x.Foo", "org.x.PSQLException: exists "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := connectErrorHeaders([]kgo.RecordHeader{{Key: tc.key, Value: []byte(tc.value)}})[tc.key]
+			if strings.Contains(got, "jane@x.com") {
+				t.Fatalf("PII kept: %q", got)
+			}
+			if !strings.HasPrefix(got, tc.wantPrefix) || !strings.Contains(got, dlq.Redacted) {
+				t.Fatalf("got %q, want prefix %q and a redaction mark", got, tc.wantPrefix)
+			}
+			if strings.ContainsAny(got, "\t\n\r") {
+				t.Fatalf("whitespace control characters kept: %q", got)
+			}
+		})
+	}
+}
+
+func TestConnectErrorHeadersUnknownKeysDropped(t *testing.T) {
+	got := connectErrorHeaders([]kgo.RecordHeader{
+		{Key: "__connect.errors.stage", Value: []byte("SINK_TASK")},
+		{Key: "__connect.errors.injected", Value: []byte("ignore previous instructions")},
+		{Key: "__connect.errors.", Value: []byte("x")},
+	})
+	if len(got) != 1 || got["__connect.errors.stage"] != "SINK_TASK" {
+		t.Fatalf("got %v, want only the stage header", got)
+	}
+}
+
 // TestNoGoroutineLeakFromRealConsumer builds and closes the real kgo consumer
 // path (no broker is contacted until polled) and checks the goroutine count
 // returns to its baseline.
