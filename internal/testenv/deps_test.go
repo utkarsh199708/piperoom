@@ -70,6 +70,25 @@ func TestDepAddr(t *testing.T) {
 	}
 }
 
+// TestPostgresGateNeedsALogin: CI's only Postgres is the room database on
+// 5432; a source-DB test must skip there, not fail on a login it cannot make.
+func TestPostgresGateNeedsALogin(t *testing.T) {
+	cfg := config.Load()
+	addr, err := depAddr(cfg, Postgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SOURCE_DB_URL", "postgres://it_nobody:wrong@"+addr+"/it_missing_db?sslmode=disable")
+	var skipped bool
+	t.Run("postgres", func(t *testing.T) {
+		defer func() { skipped = t.Skipped() }()
+		RequirePostgres(t)
+	})
+	if !skipped {
+		t.Error("RequirePostgres did not skip a database it cannot log in to")
+	}
+}
+
 // TestGateIgnoresConnect: with Connect pointed at a closed port a
 // Postgres-only test must still run; before the fix every test skipped.
 func TestGateIgnoresConnect(t *testing.T) {

@@ -5,6 +5,7 @@
 package testenv
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"piperoom/internal/config"
 	"piperoom/internal/stacklock"
@@ -167,8 +170,39 @@ func require(t *testing.T, deps []Dep) config.Config {
 			t.Skipf("testenv: %s not reachable at %s (run `go run ./cmd/devctl up`): %v", d, addr, err)
 		}
 		_ = conn.Close()
+		if dsn := pgURL(cfg, d); dsn != "" {
+			// A port that answers may be another Postgres (CI has only the room
+			// database on 5432): the test's own database must accept a login.
+			if err := pingPG(dsn); err != nil {
+				t.Skipf("testenv: %s at %s does not accept a connection: %v", d, addr, err)
+			}
+		}
 	}
 	return cfg
+}
+
+// pgURL is the Postgres URL behind d, or "" when d is not a Postgres.
+func pgURL(cfg config.Config, d Dep) string {
+	switch d {
+	case Postgres:
+		return cfg.SourceDBURL
+	case Warehouse:
+		return cfg.WarehouseDBURL
+	case RoomDB:
+		return cfg.RoomDBURL
+	}
+	return ""
+}
+
+func pingPG(dsn string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer c.Close(context.Background())
+	return c.Ping(ctx)
 }
 
 // depAddr returns the host:port to probe for d, or "" when d is switched off.
