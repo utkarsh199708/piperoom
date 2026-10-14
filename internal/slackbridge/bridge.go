@@ -234,22 +234,25 @@ func (b *Bridge) mirror(ctx context.Context, r *renderer, e events.Event, th Thr
 }
 
 // page posts the allow-listed mentions for e as a second reply in the thread.
-// Only fatal Slack errors and shutdown are returned; a failed page is logged.
+// Only fatal Slack errors and shutdown are returned; a failed page is logged
+// (by send) and dropped, never retried.
 func (b *Bridge) page(ctx context.Context, r *renderer, e events.Event, th Thread) error {
-	m, ok, err := b.pager.message(r, e)
+	m, keys, err := b.pager.message(r, e)
 	if err != nil {
 		b.log.Warn("slack page render failed", "room_id", e.RoomID, "seq", e.Seq, "type", string(e.Type), "err", err)
 		return nil
 	}
-	if !ok {
+	if len(keys) == 0 {
 		return nil
 	}
 	if _, err := b.send(ctx, e, m, cmp.Or(th.Channel, b.channel), th.TS); err != nil {
 		if isFatal(err) {
 			return err
 		}
+		// Not recorded, so the quota is untouched; the page itself is not retried.
 		return ctx.Err()
 	}
+	b.pager.record(keys)
 	return nil
 }
 

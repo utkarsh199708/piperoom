@@ -21,6 +21,12 @@ import (
 // event goes through clip, which escapes &, < and > so <@U…>, <!here>,
 // <!channel>, <!everyone>, <!subteam^…> and <url|label> render as plain text
 // (https://docs.slack.dev/messaging/formatting-message-text#escaping).
+// Delivery: limits and de-duplication are recorded only AFTER Slack accepted
+// the page, so a failed post does not use up a user's quota. A failed page is
+// logged by the bridge and NOT retried: the event's LastSeq still advances, so
+// that one page is dropped (the room link and the proposal itself are in the
+// thread's other messages).
+//
 // Explicit <@U…> markup still works inside a verbatim:true text object
 // (https://docs.slack.dev/reference/block-kit/composition-objects/text-object).
 
@@ -59,7 +65,7 @@ type pager struct {
 	last     map[[2]string]time.Time // room, user
 	userHits map[string][]time.Time
 	roomHits map[string][]time.Time
-	seen     map[string]struct{}
+	seen     map[pageKey]struct{}
 }
 
 // newPager validates o. It returns nil when nothing is allow-listed.
@@ -70,7 +76,7 @@ func newPager(o PagingOptions) (*pager, error) {
 	p := &pager{
 		layers: map[string][]string{}, users: map[string]string{}, lim: o.Limits, now: time.Now,
 		last: map[[2]string]time.Time{}, userHits: map[string][]time.Time{},
-		roomHits: map[string][]time.Time{}, seen: map[string]struct{}{},
+		roomHits: map[string][]time.Time{}, seen: map[pageKey]struct{}{},
 	}
 	if p.lim.UserRoomInterval <= 0 {
 		p.lim.UserRoomInterval = 10 * time.Minute
@@ -101,33 +107,53 @@ func newPager(o PagingOptions) (*pager, error) {
 	return p, nil
 }
 
-// allow decides whether to page user in room for reason, and records the page
-// when it says yes. The first rule that fails wins: a repeated reason is
+// pageKey names one page: who, in which room, for which reason.
+type pageKey struct{ room, user, reason string }
+
+// check reports whether key may be paged now, counting the pages already
+// planned in the same message. It records nothing; call record once Slack
+// accepted the post. The first rule that fails wins: a repeated reason is
 // never paged twice, then the per-user-per-room gap, then the hourly caps.
-func (p *pager) allow(room, user, reason string) bool {
+func (p *pager) check(key pageKey, planned []pageKey) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	key := room + "\x00" + user + "\x00" + reason
 	if _, dup := p.seen[key]; dup {
 		return false
 	}
 	now := p.now()
-	if t, ok := p.last[[2]string{room, user}]; ok && now.Sub(t) < p.lim.UserRoomInterval {
+	if t, ok := p.last[[2]string{key.room, key.user}]; ok && now.Sub(t) < p.lim.UserRoomInterval {
 		return false
 	}
-	uh, rh := recent(p.userHits[user], now), recent(p.roomHits[room], now)
-	if len(uh) >= p.lim.UserPerHour || len(rh) >= p.lim.RoomPerHour {
-		p.userHits[user], p.roomHits[room] = uh, rh
+	var userPlanned, roomPlanned int
+	for _, k := range planned {
+		if k.user == key.user {
+			userPlanned++
+		}
+		if k.room == key.room {
+			roomPlanned++
+		}
+	}
+	if len(recent(p.userHits[key.user], now))+userPlanned >= p.lim.UserPerHour ||
+		len(recent(p.roomHits[key.room], now))+roomPlanned >= p.lim.RoomPerHour {
 		return false
 	}
-	if len(p.seen) >= maxSeenPages {
-		clear(p.seen) // the rate limits above still hold
-	}
-	p.seen[key] = struct{}{}
-	p.last[[2]string{room, user}] = now
-	p.userHits[user] = append(uh, now)
-	p.roomHits[room] = append(rh, now)
 	return true
+}
+
+// record books pages that Slack accepted.
+func (p *pager) record(keys []pageKey) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	for _, k := range keys {
+		if len(p.seen) >= maxSeenPages {
+			clear(p.seen) // the rate limits still hold
+		}
+		p.seen[k] = struct{}{}
+		p.last[[2]string{k.room, k.user}] = now
+		p.userHits[k.user] = append(recent(p.userHits[k.user], now), now)
+		p.roomHits[k.room] = append(recent(p.roomHits[k.room], now), now)
+	}
 }
 
 func recent(ts []time.Time, now time.Time) []time.Time {
@@ -140,13 +166,14 @@ func recent(ts []time.Time, now time.Time) []time.Time {
 
 func mention(id string) string { return "<@" + id + ">" }
 
-// message builds the page for e. ok is false when nobody is to be paged.
-func (p *pager) message(r *renderer, e events.Event) (m message, ok bool, err error) {
+// message builds the page for e and the keys to record once it is posted;
+// keys is empty when nobody is to be paged.
+func (p *pager) message(r *renderer, e events.Event) (m message, keys []pageKey, err error) {
 	switch e.Type {
 	case events.ProposalCreated:
 		pl, err := events.Decode[events.ProposalCreatedPayload](e)
 		if err != nil {
-			return m, false, err
+			return m, nil, err
 		}
 		var lines, fb []string
 		picked := map[string]bool{}
@@ -156,10 +183,12 @@ func (p *pager) message(r *renderer, e events.Event) (m message, ok bool, err er
 			}
 			var ms []string
 			for _, id := range p.layers[layer] { // layer is only a map key
-				if picked[id] || len(picked) >= maxPagedUsers || !p.allow(e.RoomID, id, "proposal:"+pl.ProposalID) {
+				k := pageKey{e.RoomID, id, "proposal:" + pl.ProposalID}
+				if picked[id] || len(picked) >= maxPagedUsers || !p.check(k, keys) {
 					continue
 				}
 				picked[id] = true
+				keys = append(keys, k)
 				ms = append(ms, mention(id))
 			}
 			if len(ms) > 0 {
@@ -168,25 +197,26 @@ func (p *pager) message(r *renderer, e events.Event) (m message, ok bool, err er
 			}
 		}
 		if len(lines) == 0 {
-			return m, false, nil
+			return m, nil, nil
 		}
 		text := ":bell: *Approval needed* for " + clip(pl.Title, 200) + " (" + inlineCode(pl.ProposalID, 100) + ")\n" +
 			strings.Join(lines, "\n")
-		return r.pageMessage(e.RoomID, "Approval needed: ", fb, pl.Title, text, "Approve or reject in Piperoom"), true, nil
+		return r.pageMessage(e.RoomID, "Approval needed: ", fb, pl.Title, text, "Approve or reject in Piperoom"), keys, nil
 
 	case events.HandoffCreated:
 		pl, err := events.Decode[events.HandoffCreatedPayload](e)
 		if err != nil {
-			return m, false, err
+			return m, nil, err
 		}
 		id, listed := p.users[pl.To.ID] // To.ID is only a map key
-		if !listed || !p.allow(e.RoomID, id, "handoff:"+strconv.FormatInt(e.Seq, 10)) {
-			return m, false, nil
+		k := pageKey{e.RoomID, id, "handoff:" + strconv.FormatInt(e.Seq, 10)}
+		if !listed || !p.check(k, nil) {
+			return m, nil, nil
 		}
 		text := ":handshake: " + mention(id) + " " + clip(actorName(e.Actor), 100) + " is handing this room over to you"
-		return r.pageMessage(e.RoomID, "Hand-off to you: ", []string{mention(id)}, actorName(e.Actor), text, "Accept the hand-off in Piperoom"), true, nil
+		return r.pageMessage(e.RoomID, "Hand-off to you: ", []string{mention(id)}, actorName(e.Actor), text, "Accept the hand-off in Piperoom"), []pageKey{k}, nil
 	}
-	return m, false, nil
+	return m, nil, nil
 }
 
 // pageMessage wraps trusted+escaped text. The fallback text carries the

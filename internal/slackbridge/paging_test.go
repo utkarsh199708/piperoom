@@ -1,10 +1,12 @@
 package slackbridge
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
@@ -198,31 +200,90 @@ func TestPagingDuplicatesAndRateLimit(t *testing.T) {
 		return ev(seq, events.ProposalCreated, "agent", events.ProposalCreatedPayload{ProposalID: id, Title: "t", RequiredLayers: []string{"kafka"}})
 	}
 	// Same proposal twice: one page. A second proposal inside the 10 minute
-	// gap: none. After the gap: paged again.
-	evs := []events.Event{
-		ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"}),
-		prop(2, "p1"), prop(3, "p1"), prop(4, "p2"), prop(5, "p3"),
-	}
+	// gap: none. After the gap (second Run, clock moved): paged again.
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"})
+	st := &fakeStore{evs: []events.Event{created, prop(2, "p1"), prop(3, "p1"), prop(4, "p2")}}
 	fs := &fakeSlack{}
-	b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) { o.Paging = pagingOpts() })
+	th := NewMemThreads()
+	b, _, _ := newBridge(t, st, fs, func(o *Options) { o.Paging = pagingOpts(); o.Threads = th })
 	now := time.Unix(1700000000, 0)
-	calls := 0
-	b.pager.now = func() time.Time {
-		calls++
-		if calls >= 3 { // p3 is evaluated after the gap has passed
-			return now.Add(11 * time.Minute)
-		}
-		return now
+	b.pager.now = func() time.Time { return now }
+	run := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		_ = b.Run(ctx, "r1")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	_ = b.Run(ctx, "r1")
+	run()
+	if n, _ := mentionCount(fs.reqs); n != 1 {
+		t.Fatalf("mention messages=%d, want 1 (p1 only)", n)
+	}
+	now = now.Add(11 * time.Minute)
+	st.evs = append(st.evs, prop(5, "p3"))
+	run()
 	if n, ids := mentionCount(fs.reqs); n != 2 || ids[owner1] != 4 { // 4 = block + fallback text, twice
 		t.Errorf("mention messages=%d ids=%v, want 2 pages (p1, then p3)", n, ids)
 	}
 }
 
-func TestPagerAllowLimits(t *testing.T) {
+// A page that Slack did not accept is dropped, not retried, and must not use
+// up the user's quota; the room keeps mirroring.
+func TestPagingNonFatalSlackFailureDropsPageNotQuota(t *testing.T) {
+	cases := map[string]struct {
+		reply    func(n int, w http.ResponseWriter)
+		wantReqs int
+		wantCode string
+	}{
+		"503 five times": {func(n int, w http.ResponseWriter) {
+			if n >= 3 && n <= 7 { // the page and its 4 retries
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"channel":"CREAL","ts":"1700000000.000101"}`))
+		}, 8, "http_503"},
+		"429 with long Retry-After": {func(n int, w http.ResponseWriter) {
+			if n == 3 {
+				w.Header().Set("Retry-After", "600")
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"channel":"CREAL","ts":"1700000000.000101"}`))
+		}, 4, "rate_limited"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			evs := []events.Event{
+				ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"}),
+				ev(2, events.ProposalCreated, "agent", events.ProposalCreatedPayload{ProposalID: "p1", Title: "t", RequiredLayers: []string{"kafka"}}),
+				ev(3, events.RoomClosed, "ana", events.RoomClosedPayload{Resolution: "ok"}),
+			}
+			fs := &fakeSlack{reply: c.reply}
+			var logs bytes.Buffer
+			b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) {
+				o.Paging = pagingOpts()
+				o.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+			})
+			if err := b.Run(context.Background(), "r1"); err != nil {
+				t.Fatalf("Run = %v, want nil: the room must keep mirroring", err)
+			}
+			if fs.count() != c.wantReqs {
+				t.Errorf("requests = %d, want %d", fs.count(), c.wantReqs)
+			}
+			if !strings.Contains(logs.String(), "slack post failed") || !strings.Contains(logs.String(), "code="+c.wantCode) {
+				t.Errorf("drop not logged with code %s: %s", c.wantCode, logs.String())
+			}
+			if strings.Contains(logs.String(), testToken) {
+				t.Error("token in log")
+			}
+			// Nothing was booked, so the same user can still be paged.
+			k := pageKey{"r1", owner1, "proposal:p1"}
+			if len(b.pager.seen) != 0 || !b.pager.check(k, nil) {
+				t.Error("failed page was recorded")
+			}
+		})
+	}
+}
+
+func TestPagerLimits(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	mk := func(l PagingLimits) *pager {
 		p, err := newPager(PagingOptions{Layers: map[string][]string{"k": {owner1}}, Limits: l})
@@ -232,45 +293,68 @@ func TestPagerAllowLimits(t *testing.T) {
 		p.now = func() time.Time { return now }
 		return p
 	}
+	// page = check then record, as the bridge does after a successful post.
+	page := func(p *pager, room, user, reason string) bool {
+		k := pageKey{room, user, reason}
+		if !p.check(k, nil) {
+			return false
+		}
+		p.record([]pageKey{k})
+		return true
+	}
+	t.Run("check alone records nothing", func(t *testing.T) {
+		p := mk(PagingLimits{})
+		k := pageKey{"r1", owner1, "a"}
+		if !p.check(k, nil) || !p.check(k, nil) {
+			t.Error("check must not book the page")
+		}
+	})
 	t.Run("same reason twice", func(t *testing.T) {
 		p := mk(PagingLimits{UserRoomInterval: time.Nanosecond})
-		if !p.allow("r1", owner1, "x") {
+		if !page(p, "r1", owner1, "x") {
 			t.Fatal("first denied")
 		}
 		now = now.Add(time.Hour)
-		if p.allow("r1", owner1, "x") {
+		if page(p, "r1", owner1, "x") {
 			t.Error("duplicate reason allowed")
 		}
 	})
 	t.Run("per user per room gap", func(t *testing.T) {
 		p := mk(PagingLimits{})
-		if !p.allow("r1", owner1, "a") || p.allow("r1", owner1, "b") {
+		if !page(p, "r1", owner1, "a") || page(p, "r1", owner1, "b") {
 			t.Error("gap not enforced")
 		}
-		if !p.allow("r2", owner1, "c") {
+		if !page(p, "r2", owner1, "c") {
 			t.Error("another room should not be blocked by the gap")
 		}
 		now = now.Add(11 * time.Minute)
-		if !p.allow("r1", owner1, "d") {
+		if !page(p, "r1", owner1, "d") {
 			t.Error("gap should have passed")
 		}
 	})
 	t.Run("per user hourly cap across rooms", func(t *testing.T) {
 		p := mk(PagingLimits{UserPerHour: 2})
-		ok := []bool{p.allow("r1", owner1, "a"), p.allow("r2", owner1, "a"), p.allow("r3", owner1, "a")}
+		ok := []bool{page(p, "r1", owner1, "a"), page(p, "r2", owner1, "a"), page(p, "r3", owner1, "a")}
 		if !ok[0] || !ok[1] || ok[2] {
 			t.Errorf("got %v", ok)
 		}
 		now = now.Add(61 * time.Minute)
-		if !p.allow("r3", owner1, "b") {
+		if !page(p, "r3", owner1, "b") {
 			t.Error("cap should have reset after an hour")
 		}
 	})
 	t.Run("per room hourly cap", func(t *testing.T) {
 		p := mk(PagingLimits{RoomPerHour: 2})
-		ok := []bool{p.allow("r1", "UAAAAAAAA1", "a"), p.allow("r1", "UAAAAAAAA2", "a"), p.allow("r1", "UAAAAAAAA3", "a"), p.allow("r2", "UAAAAAAAA3", "a")}
+		ok := []bool{page(p, "r1", "UAAAAAAAA1", "a"), page(p, "r1", "UAAAAAAAA2", "a"), page(p, "r1", "UAAAAAAAA3", "a"), page(p, "r2", "UAAAAAAAA3", "a")}
 		if !ok[0] || !ok[1] || ok[2] || !ok[3] {
 			t.Errorf("got %v", ok)
+		}
+	})
+	t.Run("cap counts users planned in the same message", func(t *testing.T) {
+		p := mk(PagingLimits{RoomPerHour: 2})
+		planned := []pageKey{{"r1", "UAAAAAAAA1", "a"}, {"r1", "UAAAAAAAA2", "a"}}
+		if p.check(pageKey{"r1", "UAAAAAAAA3", "a"}, planned) {
+			t.Error("planned pages not counted")
 		}
 	})
 }
