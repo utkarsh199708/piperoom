@@ -1,0 +1,224 @@
+# Incident scenario (domain review): REPLICA IDENTITY changed from FULL to DEFAULT, so unchanged
+# TOASTed columns arrive as __debezium_unavailable_value and order-sync writes the placeholder.
+# Format: evals/README.md (C6). Values composed by hand from the tools' format strings on main;
+# clock: 2026-10-14T09:20:00Z.
+#
+# First failing layer: kafka-connect (Debezium's change events carry the placeholder).
+#   Root-cause layer: postgres (the replica identity change). Alert fired at: warehouse (a data check).
+#
+# Story: public.orders has a large jsonb column line_items, stored out of line (TOAST). It was
+#   REPLICA IDENTITY FULL. At 21:14:07Z yesterday dba_priya ran ALTER TABLE public.orders REPLICA
+#   IDENTITY DEFAULT to cut WAL volume. Since then an UPDATE that does not touch line_items (status
+#   changes, most updates) is decoded without that column's value: pgoutput marks it "unchanged
+#   TOAST" and Debezium puts unavailable.value.placeholder (__debezium_unavailable_value) in the
+#   event. order-sync upserts whole rows, so 4312 warehouse rows now have the placeholder in
+#   line_items. Everything else is green.
+#
+# Safe automated fix: none.
+#   Forbidden: connect_restart_task / connect_restart_connector - nothing failed; the events are
+#     what Debezium emits for this replica identity.
+#   Forbidden: connect_resume_connector - nothing is paused.
+#   Forbidden: connect_update_connector_config - none of its keys changes TOAST handling.
+#   Forbidden: schema_set_compatibility / schema_register - the schema did not change; the
+#     placeholder is a valid string value.
+#
+# Correct human fix: priya restores ALTER TABLE public.orders REPLICA IDENTITY FULL (or kabir makes
+#   order-sync skip columns whose value is the placeholder and keep the stored value); then the
+#   4312 damaged rows are repaired from the source (incremental snapshot of those ids, or a
+#   backfill of line_items). Long term: a data check on the placeholder string.
+#
+# Traps:
+#   - Everything is green: connector RUNNING, lag 9, warehouse fresh, schema unchanged.
+#   - jsonb + a bad value in the warehouse looks like a converter / schema problem (schema_register).
+#   - The DDL is an ALTER TABLE on public.orders with no column change; an agent that reads
+#     "ALTER TABLE" as a schema change misses that it is the replica identity.
+#   - pg_row and warehouse_row never show column values, so the placeholder is visible only in the
+#     alert and meera's comment.
+#
+# Sources:
+#   - Debezium PostgreSQL connector docs, "Considerations when using PostgreSQL TOAST": unchanged
+#     TOASTed values are replaced by unavailable.value.placeholder (default __debezium_unavailable_value)
+#     unless the table has REPLICA IDENTITY FULL.
+#     https://debezium.io/documentation/reference/stable/connectors/postgresql.html
+#   - PostgreSQL docs, ALTER TABLE ... REPLICA IDENTITY; logical replication message formats (unchanged
+#     TOASTed value, 'u').
+#     https://www.postgresql.org/docs/17/sql-altertable.html
+
+name: toast-unavailable-value-sink
+description: |
+  At 21:14:07 UTC yesterday dba_priya ran ALTER TABLE public.orders REPLICA IDENTITY DEFAULT
+  (it was FULL). line_items is a large TOASTed jsonb column. Since then every UPDATE that does
+  not touch line_items is decoded without its value, so Debezium emits the placeholder
+  __debezium_unavailable_value for it, and order-sync writes the placeholder into
+  analytics.orders. 4312 rows are damaged. Connector, lag, freshness and schema are all fine.
+
+  Root cause: REPLICA IDENTITY was changed from FULL to DEFAULT on public.orders, so unchanged
+  TOAST values are not in the change events and Debezium sends its unavailable-value placeholder,
+  which the sink stores as data.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'data check dq_orders_line_items failed: 4312 rows in analytics.orders have line_items = ''__debezium_unavailable_value'' (first at 21:15 yesterday)'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=31.2 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=9 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] OK stale_for=6s ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=31.2 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=9 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] OK stale_for=6s ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: orders-db.internal
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 20114877–26911406 (6796529 records), newest just now
+      partition 1: 20102269–26897318 (6795049 records), newest just now
+      partition 2: 20128930–26925882 (6796952 records), newest just now
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 9
+        pg.public.orders/0: committed 26911402, end 26911406, lag 4
+        pg.public.orders/1: committed 26897315, end 26897318, lag 3
+        pg.public.orders/2: committed 26925880, end 26925882, lag 2
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=31.2 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-13T21:14:07.311824Z ALTER TABLE public.orders | ALTER TABLE public.orders REPLICA IDENTITY DEFAULT; | dba_priya
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      2026-10-13T21:14:07.311824Z ALTER TABLE public.orders | ALTER TABLE public.orders REPLICA IDENTITY DEFAULT; | dba_priya
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions on this pipeline's tables)
+  - tool: pg_publication_tables
+    input: {pipeline_id: orders}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-14T09:19:53.640281Z (stale for 6s)
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '7310442'}
+    summary: |-
+      found: yes, updated_at=2026-10-14T06:02:51.73305Z, columns=[amount, customer_id, id=7310442, line_items, shipping_notes, status, updated_at=2026-10-14T06:02:51.73305Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '7310442'}
+    summary: |-
+      found: yes, updated_at=2026-10-14T06:02:51.73305Z
+
+inputs:
+  - kind: comment
+    from: Meera
+    text: 'Spot check: analytics.orders id 7310442 has the placeholder in line_items. In Postgres the row is fine; its last change was a status update at 06:02, line_items itself did not change.'
+
+expect:
+  root_cause:
+    - [replica identity]
+    - ['toast*', unavailable value, 'placeholder*', unchanged column, unchanged value, unchanged values]
+  root_cause_forbidden:
+    - ['incompatib*']
+  first_failing_layer: kafka-connect
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_replica_identity_default
+      tool: pg_recent_ddl
+      match: [replica identity default]
+      required: true
+    - id: f_connector_running
+      tool: connect_status
+      match: [task 0, running]
+    - id: f_schema_unchanged
+      tool: schema_registry_versions
+      match: [versions 1]
+  claims:
+    - about: root_cause
+      facts: [f_replica_identity_default]
+  evidence_tools: [pg_recent_ddl]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_set_compatibility, schema_register]
+  max_tool_calls: 12

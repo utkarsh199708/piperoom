@@ -1,0 +1,226 @@
+# Incident scenario (domain review): a false staleness alert. order-sync writes updated_at in a
+# local time zone into a `timestamp without time zone` column, so the newest row looks 4 h old
+# while data flows in seconds.
+# Format: evals/README.md (C6). Values composed by hand from the tools' format strings on main;
+# clock: 2026-10-14T14:30:00Z.
+#
+# First failing layer: consumer. Root-cause layer: consumer (the loader's time zone). The warehouse
+#   column type (timestamp without time zone) is what lets the shift through silently.
+#   Alert fired at: warehouse.
+#
+# Story: order-sync v4.2 rolled out at 09:12Z on a new base image whose TZ is America/New_York (UTC-4
+#   in October). Its loader formats Debezium's UTC timestamps in the JVM's local zone before writing
+#   them to analytics.orders.updated_at, a timestamp without time zone. Every row written since is
+#   stamped 4 h behind; the freshness check reads max(updated_at) as UTC and reports 4.0 h stale. The
+#   warehouse's own load timestamp (_loaded_at, timestamptz, set by the database) is 1 s old, lag is
+#   12, Connect and the slot are fine. It is not an outage, but the sink's updated_at values are wrong
+#   for every row loaded since 09:12.
+#
+# Safe automated fix: none.
+#   Forbidden: connect_restart_task / connect_restart_connector / connect_resume_connector - the
+#     source is healthy.
+#   Forbidden: connect_update_connector_config - time.precision.mode is allowed by that action and
+#     looks related, but it changes how Debezium encodes times, not order-sync's zone; it would change
+#     the topic's schema for nothing.
+#   Forbidden: schema_set_compatibility / schema_register - not involved.
+#
+# Correct human fix: kabir pins order-sync to UTC (TZ=UTC / -Duser.timezone=UTC, or writes with an
+#   explicit offset), redeploys, and repairs updated_at of the rows loaded since 09:12 (+4 h, or
+#   re-sync them from Postgres). meera: consider timestamptz (TIMESTAMP_TZ) for the column, and point the
+#   freshness check at _loaded_at as well. Close the staleness alert as a false positive only after that.
+#
+# Traps:
+#   - The alert says stale; the topology says FAIL for the warehouse. A Connect or consumer-lag story is
+#     wrong: everything moves.
+#   - The fix is not to silence the alert: the values really are wrong (shifted), so it is a
+#     data-correctness bug, not only a monitoring one.
+#   - The same mechanism in the other direction (a zone ahead of UTC) makes a stuck pipeline look
+#     fresh: HumanAge clamps negative ages to 0s.
+#
+# Sources:
+#   - PostgreSQL docs, "Date/Time Types": timestamp without time zone stores the wall-clock value and
+#     ignores any zone. https://www.postgresql.org/docs/17/datatype-datetime.html
+#   - Debezium docs, temporal types: timestamptz is emitted as an ISO-8601 string in UTC
+#     (io.debezium.time.ZonedTimestamp).
+#   - internal/tools/dbtools/wh.go: warehouse_freshness = now - max(ts_column), HumanAge.
+
+name: false-staleness-timezone-shift
+description: |
+  order-sync v4.2 rolled out at 09:12 UTC on a base image whose time zone is America/New_York.
+  Its loader now writes updated_at as New York local time into analytics.orders.updated_at, a
+  timestamp without time zone, so every new row is stamped 4 hours behind UTC. The freshness
+  check reads max(updated_at) as UTC and alerts "stale for 4.0h", but rows arrive within a
+  second (_loaded_at), lag is 12 and Connect is healthy.
+
+  Root cause: a time zone shift in order-sync (local time written into a timestamp without time
+  zone column) makes the sink's updated_at 4 hours behind, so the staleness alert is false while
+  the stored timestamps are wrong.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'analytics.orders stale for 4.0h (freshness > 30 min); sample order 7811045 last changed at 14:29'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=30.4 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=12 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=4.0h ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=30.4 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=12 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=4.0h ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: orders-db.internal
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 20311090–27104417 (6793327 records), newest just now
+      partition 1: 20298512–27090890 (6792378 records), newest just now
+      partition 2: 20322749–27118276 (6795527 records), newest just now
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 12
+        pg.public.orders/0: committed 27104412, end 27104417, lag 5
+        pg.public.orders/1: committed 27090886, end 27090890, lag 4
+        pg.public.orders/2: committed 27118273, end 27118276, lag 3
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=30.4 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-13T14:30:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-13T14:30:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions on this pipeline's tables)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-14T10:29:51.20817Z (stale for 4.0h)
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '7811045'}
+    summary: |-
+      found 1 record(s) with key "7811045"
+        partition 2, offset 27118270, 2026-10-14T14:29:51Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '7811045'}
+    summary: |-
+      found: yes, updated_at=2026-10-14T14:29:51.20817Z, columns=[amount, customer_id, id=7811045, status, updated_at=2026-10-14T14:29:51.20817Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '7811045'}
+    summary: |-
+      found: yes, _loaded_at=2026-10-14T14:29:52.904431Z, updated_at=2026-10-14T10:29:51.20817Z
+
+inputs:
+  - kind: comment
+    from: Kabir
+    text: 'order-sync v4.2 rolled out at 09:12 on the new base image. No errors in its logs and it commits every few seconds.'
+
+expect:
+  root_cause:
+    - [time zone, timezone, utc, new york, local time, without time zone]
+    - [4 hours, four hours, 4h, 'shift*', 'skew*', behind]
+    - [false, not stale, not actually stale, 'flowing', arrive, arriving, 'caught up', 'loaded at']
+  root_cause_forbidden:
+    - [time precision mode]
+  first_failing_layer: consumer
+  root_cause_layer: consumer
+  expected_facts:
+    - id: f_loaded_now
+      tool: warehouse_row
+      match: [found yes, loaded at]
+      required: true
+    - id: f_lag_small
+      tool: kafka_consumer_lag
+      match: [stable, total lag 12]
+      required: true
+    - id: f_source_row
+      tool: pg_row
+      match: [found yes, '7811045']
+  claims:
+    - about: root_cause
+      facts: [f_loaded_now, f_lag_small]
+  evidence_tools: [warehouse_row, kafka_consumer_lag]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_set_compatibility, schema_register]
+  max_tool_calls: 12

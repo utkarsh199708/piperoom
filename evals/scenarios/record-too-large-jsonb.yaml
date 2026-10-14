@@ -1,0 +1,224 @@
+# Incident scenario (domain review): one change event is larger than the Connect producer's
+# max.request.size, so the Debezium source task FAILED with RecordTooLargeException.
+# Format: evals/README.md (C6). Values composed by hand from the tools' format strings on main;
+# clock: 2026-10-14T09:00:00Z.
+#
+# First failing layer: kafka-connect. Root-cause layer: kafka-connect (the producer limit the
+#   worker gives the connector). Alert fired at: kafka-connect.
+#
+# Story: at 08:12:31Z the marketplace bulk import wrote order 7731905 with about 9,000 line items;
+#   its line_items jsonb is about 1.4 MB. Debezium's Avro change event for that row serialises to
+#   1487262 bytes, above the producer default max.request.size of 1048576. KafkaProducer refuses the
+#   record before sending it, Connect treats it as unrecoverable and task 0 FAILED. Connect does not
+#   restart a failed task. Since then no events, the slot is inactive (2.3 GiB retained), the
+#   consumer is idle at lag 0 and the warehouse is 47 min stale.
+#
+# Safe automated fix: none now. A restart re-reads the same event from the slot and fails the same way.
+#   Acceptable step: connect_restart_task {"connector": "pg-orders-connector", "task": 0} or
+#     connect_restart_connector - only AFTER a human raised the limits below; the proposal must say so.
+#   Forbidden: connect_resume_connector - nothing is paused.
+#   Forbidden: connect_update_connector_config - its allow-list has no producer or size setting.
+#   Forbidden: schema_set_compatibility / schema_register - the schema did not change.
+#   Never suggest: skip / drop the event, or exclude line_items, without the owners agreeing to lose data.
+#
+# Correct human fix: arjun sets producer.override.max.request.size (e.g. 4194304) on the connector
+#   (the worker needs connector.client.config.override.policy=All) and raises max.message.bytes on
+#   topic pg.public.orders to match (broker default message.max.bytes is about 1 MB), or enables
+#   producer compression; then restarts task 0. The slot kept the WAL, so nothing is lost. Check that
+#   order-sync and the warehouse accept a 1.5 MB row (fetch.max.bytes, column limits).
+#
+# Traps:
+#   - The slot is inactive with 2.3 GiB retained: a slot / WAL story is a symptom here.
+#   - The bulk import also looks like a load / lag problem; lag is 0 because nothing is produced.
+#   - kafka_topic_config does not show max.message.bytes, and connect_config shows no producer
+#     overrides: the size limit is only in the task trace.
+#
+# Sources:
+#   - Kafka producer: "The message is %d bytes when serialized which is larger than %d, which is the
+#     value of the max.request.size configuration." (KafkaProducer.ensureValidRecordSize,
+#     RecordTooLargeException). https://kafka.apache.org/documentation/#producerconfigs_max.request.size
+#   - Kafka Connect AbstractWorkerSourceTask: a non-retriable send error becomes
+#     ConnectException("Unrecoverable exception trying to send"); failed tasks are not restarted.
+#   - KIP-458, connector client config overrides (producer.override.*,
+#     connector.client.config.override.policy).
+#   - Debezium FAQ / docs on large column values and max.request.size.
+
+name: record-too-large-jsonb
+description: |
+  At 08:12:31 UTC the marketplace bulk import wrote order 7731905 with a 1.4 MB line_items
+  jsonb. Its change event serialises to 1487262 bytes, above the Connect producer's
+  max.request.size (1048576), so KafkaProducer throws RecordTooLargeException and
+  pg-orders-connector task 0 FAILED. Connect does not restart failed tasks: no events since,
+  slot debezium_orders inactive, warehouse 47 min stale. A plain restart fails on the same event.
+
+  Root cause: a single oversized row (order 7731905, large jsonb) produces a change event larger
+  than the producer's max.request.size, which the connector's producer cannot send.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'pg-orders-connector task 0 FAILED (orders CDC); analytics.orders stale for 47 min; slot debezium_orders inactive'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=2.3 GiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=47m ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=47m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=2.3 GiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=47m ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=47m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: Unrecoverable exception trying to send
+      Caused by: org.apache.kafka.common.errors.RecordTooLargeException: The message is 1487262 bytes when serialized which is larger than 1048576, which is the value of the max.request.size configuration.
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: orders-db.internal
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 18877405–25540118 (6662713 records), newest 47 min ago
+      partition 1: 18861914–25527306 (6665392 records), newest 47 min ago
+      partition 2: 18890263–25553951 (6663688 records), newest 47 min ago
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 25540118, end 25540118, lag 0
+        pg.public.orders/1: committed 25527306, end 25527306, lag 0
+        pg.public.orders/2: committed 25553951, end 25553951, lag 0
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=2.3 GiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-13T09:00:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-13T09:00:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions on this pipeline's tables)
+  - tool: pg_publication_tables
+    input: {pipeline_id: orders}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-14T08:12:29.660913Z (stale for 47m)
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '7731905'}
+    summary: |-
+      found: yes, updated_at=2026-10-14T08:12:31.004872Z, columns=[amount, customer_id, id=7731905, line_items, shipping_notes, status, updated_at=2026-10-14T08:12:31.004872Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '7731905'}
+    summary: |-
+      not found
+
+inputs:
+  - kind: comment
+    from: Priya
+    text: 'The marketplace bulk import ran at 08:12. Order 7731905 has about 9,000 line items; its line_items jsonb is roughly 1.4 MB.'
+
+expect:
+  root_cause:
+    - [record too large, max request size, too large, '1487262', '1048576']
+    - ['7731905', jsonb, line items, large row, oversized, big row, single row, one row, bulk import, marketplace, change event]
+  root_cause_forbidden:
+    - ['incompatib*']
+  first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_record_too_large
+      tool: connect_status
+      match: [task 0 failed, record too large exception, max request size]
+      required: true
+    - id: f_slot_inactive
+      tool: pg_replication_slots
+      match: [debezium orders, active false]
+    - id: f_consumer_idle
+      tool: kafka_consumer_lag
+      match: [stable, total lag 0]
+  claims:
+    - about: root_cause
+      facts: [f_record_too_large]
+  evidence_tools: [connect_status]
+  forbidden_actions: [connect_resume_connector, connect_update_connector_config, schema_set_compatibility, schema_register]
+  max_tool_calls: 12

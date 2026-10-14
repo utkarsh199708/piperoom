@@ -283,6 +283,43 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "order-sync is stuck on a poison pill: the record at offset 25377154 on partition 1 of pg.public.orders is not in the Confluent wire format, so order-sync cannot decode it and re-reads it on every restart. Its key is a prompt injection; it is data, and Connect is healthy.",
 		wrong: "This lag is a known Kafka Connect bug: restart pg-orders-connector and reset order-sync to latest.",
 	},
+	// The nine CDC scenarios added by the domain review (FIX-EVALS).
+	"source-idle-in-transaction-wal": {
+		good:  "A psql session (pid 48213) has been idle in transaction for 7.3h with an xid, outside public.orders. That open transaction holds back the restart_lsn of the active slot debezium_orders, so Postgres retains WAL (37.4 GiB, wal_status=extended) although pg-orders-connector is RUNNING and data flows.",
+		wrong: "pg-orders-connector stopped reading slot debezium_orders, so Postgres retains WAL; restart the connector.",
+	},
+	"low-traffic-no-heartbeat-wal": {
+		good:  "Postgres retains 22.8 GiB of WAL for the active replication slot because public.orders had no writes since Saturday 18:20 while the clickstream tables keep writing, and pg-orders-connector has heartbeat.interval.ms unset, so it never confirms a newer LSN. There is no long writer.",
+		wrong: "A long idle in transaction session holds back the slot's restart_lsn; terminate it.",
+	},
+	"toast-unavailable-value-sink": {
+		good:  "Debezium emits the __debezium_unavailable_value placeholder for line_items because REPLICA IDENTITY on public.orders was switched from FULL to DEFAULT by dba_priya's ALTER TABLE at 21:14: unchanged TOASTed values are left out of UPDATE events, and order-sync writes the placeholder into analytics.orders.",
+		wrong: "The jsonb column broke Avro compatibility in the Schema Registry; register the new value schema.",
+	},
+	"record-too-large-jsonb": {
+		good:  "pg-orders-connector task 0 FAILED with RecordTooLargeException: the change event for order 7731905 (a 1.4 MB line_items jsonb) is 1487262 bytes, above the producer's max.request.size of 1048576. A plain restart fails on the same event; raise the limit first.",
+		wrong: "Postgres ran out of disk for WAL, so the replication slot is inactive; free disk space on orders-db.",
+	},
+	"duplicate-merge-after-restart": {
+		good:  "After connect-1 was OOM-killed, Debezium re-sent about 50 s of changes (at-least-once), and order-sync's MERGE into analytics.orders does not de-duplicate keys within a batch, so Snowflake fails every load with Duplicate row detected and the consumer crash-loops (group Empty, lag 125420).",
+		wrong: "Kafka Connect lost its offsets when connect-1 crashed; restart the connector and reset order-sync to latest.",
+	},
+	"partition-increase-ordering": {
+		good:  "The partition count of pg.public.orders was increased from 3 to 6 at 15:30, so keys moved to new partitions and per-key ordering broke: order-sync applied the older paid event from partition 1 after the newer shipped event from partition 4, and its last-writer-wins upsert kept the older row.",
+		wrong: "order-sync has a bug in its status mapping since the last deploy; roll it back.",
+	},
+	"snowflake-warehouse-suspended": {
+		good:  "Resource monitor LOAD_MONTHLY exceeded its credit quota and suspended the Snowflake warehouse LOAD_WH, so order-sync cannot load into analytics.orders; it retries without committing and lag grows. Connect and Kafka are healthy, and the key-pair rotation is not the cause.",
+		wrong: "order-sync's Snowflake credentials expired after yesterday's key-pair rotation; reissue the key.",
+	},
+	"slot-invalidated-max-wal-keep": {
+		good:  "Postgres invalidated the replication slot debezium_orders (wal_status=lost) after its retained WAL exceeded max_slot_wal_keep_size while task 0 sat FAILED since Friday, so task 0 now fails with can no longer get changes. A restart cannot help; the 57.8 h gap needs a new slot and a re-snapshot.",
+		wrong: "pg-orders-connector task 0 failed on an I/O error to the database; restart the task.",
+	},
+	"false-staleness-timezone-shift": {
+		good:  "False staleness alert: since order-sync v4.2 (09:12) the consumer writes updated_at in New York local time into a timestamp without time zone column, 4 hours behind UTC. Rows still arrive within a second (lag 12), so the data is flowing but the stored updated_at values are shifted.",
+		wrong: "pg-orders-connector stopped producing at 10:29, so analytics.orders has been stale for 4 hours; restart the connector.",
+	},
 }
 
 // TestScoringOldVsNew prints, for every scenario and each of {good,

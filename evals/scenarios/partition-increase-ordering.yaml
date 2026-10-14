@@ -1,0 +1,229 @@
+# Incident scenario (domain review): the topic's partition count was raised 3 -> 6, keys moved
+# to other partitions, and order-sync applied an older change after a newer one for the same order.
+# Format: evals/README.md (C6). Values composed by hand from the tools' format strings on main;
+# clock: 2026-10-13T17:00:00Z.
+#
+# First failing layer: kafka. Root-cause layer: kafka (the partition change broke per-key ordering).
+#   Alert fired at: warehouse (reconciliation).
+#
+# Story: at 15:30:12Z arjun ran kafka-topics --alter --partitions 6 on pg.public.orders so order-sync
+#   could scale to two members. The producer's default partitioner picks hash(key) % partitions, so
+#   about half of all order ids moved from partition 0-2 to 3-5. Kafka orders records only within a
+#   partition: for an order updated just before and just after 15:30 the two events sat in different
+#   partitions. The rebalance gave partitions 3-5 to the new member, which read them from offset 0 at
+#   once, while partition 1 still had a backlog. For order 7650021 the "shipped" event (partition 4)
+#   was applied before the older "paid" event (partition 1), and order-sync's upsert is last-writer-wins
+#   without a version check, so analytics.orders keeps the older row. 1893 orders are affected.
+#
+# Safe automated fix: none.
+#   Forbidden: connect_restart_task / connect_restart_connector - Connect is fine; a restart re-emits
+#     changes and can reorder more.
+#   Forbidden: connect_resume_connector / connect_update_connector_config - not involved.
+#   Forbidden: schema_set_compatibility / schema_register - not involved.
+#   Never suggest: reduce the partition count (Kafka cannot), or reset the group to latest.
+#
+# Correct human fix: kabir makes order-sync apply a change only when it is newer than the stored row
+#   (compare the source LSN or updated_at in the MERGE/upsert), then the 1893 rows (orders changed
+#   15:29-15:36) are re-synced from Postgres (incremental snapshot of those ids). Partition changes on
+#   a CDC topic need a plan: pause the source, drain, change, resume; or create a new topic.
+#
+# Traps:
+#   - Every health signal is green: lag 41, warehouse 2 s fresh, Connect RUNNING.
+#   - No DDL and no schema change; the agent has to find the topic change (kafka_topic_config
+#     "6 partitions", partitions 3-5 starting at offset 0) itself.
+#   - Looks like a consumer bug (and the consumer's missing version check is a contributing cause),
+#     but nothing in order-sync changed: the trigger is the partition increase.
+#
+# Sources:
+#   - Kafka docs, "Modifying topics": adding partitions does not move existing data, so consumers
+#     relying on hash(key) % partitions see keys in new partitions.
+#     https://kafka.apache.org/documentation/#basic_ops_modify_topic
+#   - Kafka producer default partitioner: murmur2(key) % numPartitions.
+#   - Debezium docs: change events for one row go to one partition because the record key is the
+#     primary key; ordering holds per partition only.
+
+name: partition-increase-ordering
+description: |
+  At 15:30:12 UTC pg.public.orders was raised from 3 to 6 partitions so order-sync could scale
+  out. Keys are partitioned by hash(key) % partitions, so about half the order ids moved to the
+  new partitions 3-5. Kafka keeps order only within a partition, and order-sync's upsert applies
+  whatever arrives last: for orders changed around 15:30 an older event (old partition, still
+  backlogged) overwrote a newer one (new partition, read at once). 1893 warehouse rows are older
+  than Postgres. All health signals are green.
+
+  Root cause: the partition increase on pg.public.orders broke per-key ordering across the switch,
+  and the sink's last-writer-wins upsert stored the older change.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'reconciliation orders_recon_hourly: 1893 rows in analytics.orders older than public.orders (status and updated_at differ), all last changed 15:29-15:36'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=33.9 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=42 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] OK stale_for=2s ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=33.9 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=42 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] OK stale_for=2s ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: orders-db.internal
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 18930117–25901433 (6971316 records), newest just now
+      partition 1: 18921884–25887610 (6965726 records), newest just now
+      partition 2: 18942306–25915942 (6973636 records), newest just now
+      partition 3: 0–44210 (44210 records), newest just now
+      partition 4: 0–43871 (43871 records), newest just now
+      partition 5: 0–44502 (44502 records), newest just now
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 6 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 2 members, total lag 42
+        pg.public.orders/3: committed 44199, end 44210, lag 11
+        pg.public.orders/0: committed 25901424, end 25901433, lag 9
+        pg.public.orders/4: committed 43864, end 43871, lag 7
+        pg.public.orders/1: committed 25887604, end 25887610, lag 6
+        pg.public.orders/5: committed 44497, end 44502, lag 5
+        pg.public.orders/2: committed 25915938, end 25915942, lag 4
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=33.9 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-12T17:00:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-12T17:00:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions on this pipeline's tables)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-13T16:59:57.31884Z (stale for 2s)
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '7650021'}
+    summary: |-
+      found 3 record(s) with key "7650021"
+        partition 1, offset 25873310, 2026-10-13T15:29:58Z
+        partition 4, offset 112, 2026-10-13T15:30:41Z
+        partition 4, offset 2207, 2026-10-13T15:31:07Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '7650021'}
+    summary: |-
+      found: yes, updated_at=2026-10-13T15:31:07.442918Z, columns=[amount, customer_id, id=7650021, status, updated_at=2026-10-13T15:31:07.442918Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '7650021'}
+    summary: |-
+      found: yes, updated_at=2026-10-13T15:29:58.10377Z
+
+inputs:
+  - kind: comment
+    from: Meera
+    text: 'Example: order 7650021 is shipped in Postgres since 15:31:07, but analytics.orders still says paid (updated_at 15:29:58).'
+
+expect:
+  root_cause:
+    - ['partition*']
+    - ['increas*', added, 6 partitions, six partitions, 3 to 6, partition count, 'repartition*', new partitions]
+    - [ordering, out of order, 'reorder*', per key, older change, older event, 'overwr*']
+  first_failing_layer: kafka
+  root_cause_layer: kafka
+  expected_facts:
+    - id: f_six_partitions
+      tool: kafka_topic_config
+      match: [6 partitions]
+      required: true
+    - id: f_key_in_two_partitions
+      tool: kafka_find_by_key
+      match: [found 3 record, partition 1, partition 4]
+    - id: f_new_partitions
+      tool: kafka_topic_offsets
+      match: [partition 5]
+  claims:
+    - about: root_cause
+      facts: [f_six_partitions, f_key_in_two_partitions]
+  evidence_tools: [kafka_topic_config]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_set_compatibility, schema_register]
+  max_tool_calls: 12
