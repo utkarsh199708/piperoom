@@ -152,6 +152,13 @@ func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {
 		return roomClosed("room already closed")
 	}
 	if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: text}); err != nil {
+		// A full log cannot take more evidence; retrying would not help, so
+		// the note is dropped with a log line instead of an error the watcher
+		// would retry on every tick.
+		if errors.Is(err, store.ErrLogFull) {
+			s.log.Warn("room: note not stored, room log is full", "room", roomID)
+			return nil
+		}
 		return fmt.Errorf("room: post note: %w", mapUnstorable(err))
 	}
 	return nil

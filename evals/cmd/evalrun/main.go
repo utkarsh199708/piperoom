@@ -4,7 +4,8 @@
 //
 //	go run ./evals/cmd/evalrun -scenarios evals/scenarios -out report.json
 //	go run ./evals/cmd/evalrun -runs 3 -label prompt-v2 -baseline base.json -out cand.json
-//	go run ./evals/cmd/evalrun -compare base.json,cand.json
+//	go run ./evals/cmd/evalrun -compare base.json cand.json   # or base.json,cand.json
+//	go run ./evals/cmd/evalrun -prices prices.json -out report.json   # adds cost per run
 //	go run ./evals/cmd/evalrun -agreement saved-shadow-responses/   # offline; see evals/README.md
 //	go run ./evals/cmd/evalrun -validate   # (or -check) validate scenarios, no model calls
 //	go run ./evals/cmd/evalrun -from-shadow run.json -o evals/scenarios/new.yaml   # scenario from a graded shadow run
@@ -65,6 +66,9 @@ type flags struct {
 	owners      string
 	name        string
 	verbose     bool
+	prices      string
+	// args are the positional arguments: the candidate of -compare a.json b.json.
+	args []string
 }
 
 func main() {
@@ -105,7 +109,8 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.md, "md", "", "also write the markdown table here")
 	fs.StringVar(&f.transcripts, "transcripts", "", "write each run's full transcript and result as JSON into this directory")
 	fs.StringVar(&f.baseline, "baseline", "", "after the run, compare against this earlier report")
-	fs.StringVar(&f.compare, "compare", "", "BASE.json,CANDIDATE.json: compare two reports and exit; no model calls")
+	fs.StringVar(&f.compare, "compare", "", "BASE.json CANDIDATE.json (or BASE.json,CANDIDATE.json): compare two reports, with a paired run-by-run comparison, and exit; no model calls")
+	fs.StringVar(&f.prices, "prices", "", "model price table (JSON, as PIPEROOM_MODEL_PRICES) for cost per run; default PIPEROOM_MODEL_PRICES")
 	fs.StringVar(&f.agreement, "agreement", "", "FILE-OR-DIR of saved GET /shadow?include=data,room responses: score the agent's final hypothesis against the human label and print the agreement table; offline, never for graders before they grade (-out writes the JSON summary, -judge claude uses the LLM judge)")
 	fs.Float64Var(&f.tolerance, "tolerance", evals.DefaultScoreTolerance, "score drop per scenario that counts as a regression")
 	fs.BoolVar(&f.failOnRegr, "fail-on-regression", false, "exit 2 when a comparison finds a regression")
@@ -116,17 +121,40 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.name, "name", "", "scenario name for -from-shadow (default shadow-<room id>)")
 	fs.StringVar(&f.out, "o", "", "same as -out")
 	fs.BoolVar(&f.verbose, "v", false, "show the agent's own logs")
-	if err := fs.Parse(args); err != nil {
-		return flags{}, err
+	// Go's flag package stops at the first positional argument; parse on after
+	// each one so "-compare a.json b.json -fail-on-regression" keeps its flag.
+	for {
+		if err := fs.Parse(args); err != nil {
+			return flags{}, err
+		}
+		if fs.NArg() == 0 {
+			return f, nil
+		}
+		f.args = append(f.args, fs.Arg(0))
+		args = fs.Args()[1:]
 	}
-	return f, nil
+}
+
+// comparePaths returns the two reports of -compare: "a.json,b.json", or
+// "a.json" with b.json as the one positional argument.
+func comparePaths(compare string, args []string) ([]string, error) {
+	paths := strings.Split(compare, ",")
+	if len(paths) == 1 && len(args) == 1 {
+		paths = append(paths, args[0])
+	} else if len(args) > 0 {
+		return nil, fmt.Errorf("unexpected arguments: %s", strings.Join(args, " "))
+	}
+	if len(paths) != 2 {
+		return nil, errors.New("-compare wants BASE.json CANDIDATE.json (or BASE.json,CANDIDATE.json)")
+	}
+	return paths, nil
 }
 
 func run(f flags, stdout, stderr io.Writer) (int, error) {
 	if f.compare != "" {
-		paths := strings.Split(f.compare, ",")
-		if len(paths) != 2 {
-			return 1, errors.New("-compare wants BASE.json,CANDIDATE.json")
+		paths, err := comparePaths(f.compare, f.args)
+		if err != nil {
+			return 1, err
 		}
 		base, err := evals.LoadReport(strings.TrimSpace(paths[0]))
 		if err != nil {
@@ -137,6 +165,9 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 			return 1, err
 		}
 		return compare(base, cand, f, stdout)
+	}
+	if len(f.args) > 0 {
+		return 1, fmt.Errorf("unexpected arguments: %s", strings.Join(f.args, " "))
 	}
 
 	if f.agreement != "" {
@@ -190,6 +221,15 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	}
 
 	cfg := config.Load()
+	pricesFile := f.prices
+	if pricesFile == "" {
+		pricesFile = cfg.ModelPrices
+	}
+	prices, err := agent.LoadModelPrices(pricesFile)
+	if err != nil {
+		return 1, err
+	}
+	usage := evals.NewUsageCollector(prices)
 	opts := agent.Options{Model: f.model, Effort: f.effort, MaxTurns: f.maxTurns}
 	if opts.Model == "" {
 		opts.Model = cfg.Model
@@ -228,6 +268,7 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		Timeout:     f.timeout,
 		Logger:      logger,
 		OnRun: func(r evals.RunResult, tr evals.Transcript) {
+			usage.Add(r, tr)
 			verdict := "PASS"
 			if !r.Pass {
 				verdict = "FAIL " + strings.Join(r.Failures, "; ")
@@ -244,6 +285,7 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 			}
 		},
 	})
+	usage.Apply(&rep)
 	// A stopped or partly failed evaluation still writes what finished.
 	if err := writeReport(rep, f, stdout); err != nil {
 		return 1, errors.Join(runErr, err)
@@ -261,6 +303,9 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 func compare(base, cand evals.Report, f flags, stdout io.Writer) (int, error) {
 	c := evals.Compare(base, cand, f.tolerance)
 	if err := c.WriteMarkdown(stdout); err != nil {
+		return 1, err
+	}
+	if err := evals.ComparePaired(base, cand).WriteMarkdown(stdout); err != nil {
 		return 1, err
 	}
 	if f.failOnRegr && c.Regressions > 0 {

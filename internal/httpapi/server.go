@@ -62,6 +62,9 @@ type Server struct {
 	loginStates auth.LoginStateStore
 	identities  auth.IdentityStore
 	loginLimit  *rateLimiter
+
+	// Model spend routes (WithSpend): usage.go.
+	spend Spend
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -163,6 +166,11 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 			protected.Post("/rooms/{id}/handoffs", withTimeout(handoffTimeout, visible(s.handleCreateHandoff)))
 			// The audit export reads the whole log, so it has its own budget.
 			protected.Get("/rooms/{id}/export", withTimeout(exportTimeout, visible(s.handleExportRoom)))
+			// Deletion may write the same export to the archive first. Not
+			// wrapped in visible: the admin check answers first (403 for
+			// anyone else, whatever the id), then DeleteRoom answers 404 for
+			// a room, live or in its audit row, outside the admin's tenants.
+			protected.Delete("/rooms/{id}", withTimeout(deleteTimeout, s.handleDeleteRoom))
 
 			protected.Group(func(short chi.Router) {
 				short.Use(middleware.Timeout(requestTimeout))
@@ -185,11 +193,14 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/rooms/{id}/control/request", visible(s.handleRequestControl))
 				short.Post("/rooms/{id}/control/grant", visible(s.handleGrantControl))
 				short.Post("/rooms/{id}/close", visible(s.handleCloseRoom))
+				short.Post("/rooms/{id}/extend", visible(s.handleExtendRoom))
 				short.Post("/rooms/{id}/trace", visible(s.handleTrace))
 				short.Post("/rooms/{id}/shadow/blind", visible(s.handleShadowBlind))
 				short.Get("/rooms/{id}/shadow", visible(s.handleShadow))
 				short.Post("/rooms/{id}/shadow/grade", visible(s.handleShadowGrade))
 				short.Get("/shadow/metrics", s.handleShadowMetrics)
+				short.Get("/rooms/{id}/usage", visible(s.handleRoomUsage))
+				short.Get("/usage", s.handlePipelineUsage)
 				short.Post("/proposals/{pid}/approve", s.handleApproveProposal)
 				short.Post("/proposals/{pid}/reject", s.handleRejectProposal)
 				short.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)
@@ -310,6 +321,11 @@ func (s *Server) writeErr(w http.ResponseWriter, err error) {
 	// 400, never a 500. The message does not quote the text.
 	if errors.Is(err, store.ErrUnstorable) {
 		writeError(w, http.StatusBadRequest, "validation", "text contains characters that cannot be stored")
+		return
+	}
+	// The room log is past its cap and its reserve (docs/api.md, Room limits).
+	if errors.Is(err, store.ErrLogFull) {
+		writeError(w, http.StatusConflict, "log_full", "this room's log is full; it can still be closed")
 		return
 	}
 	s.log.Error("http: request failed", "err", err)
