@@ -214,6 +214,8 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"POST", "/api/rooms/{id}/close", "/api/rooms/" + f.rb + "/close", `{"resolution":"x"}`},
 		{"POST", "/api/rooms/{id}/extend", "/api/rooms/" + f.rb + "/extend", ""},
 		{"POST", "/api/rooms/{id}/handoffs", "/api/rooms/" + f.rb + "/handoffs", `{"to":"alice"}`},
+		{"POST", "/api/rooms/{id}/label", "/api/rooms/" + f.rb + "/label", `{"cause":"x"}`},
+		{"POST", "/api/rooms/{id}/checklist", "/api/rooms/" + f.rb + "/checklist", `{"step_id":"s","tool_use_id":"t","hit":0,"item":0,"done":true}`},
 		{"POST", "/api/rooms/{id}/trace", "/api/rooms/" + f.rb + "/trace", `{"table":"public.b","key":"1"}`},
 		{"GET", "/api/rooms/{id}/shadow", "/api/rooms/" + f.rbs + "/shadow", ""},
 		{"POST", "/api/rooms/{id}/shadow/blind", "/api/rooms/" + f.rbs + "/shadow/blind", `{"actual_layer":"postgres","root_cause_terms":["slot"]}`},

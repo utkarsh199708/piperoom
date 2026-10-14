@@ -1,6 +1,7 @@
 package room
 
 import (
+	"strconv"
 	"time"
 
 	"piperoom/internal/events"
@@ -69,6 +70,17 @@ type Proposal struct {
 	Preview *events.ProposalPreviewedPayload `json:"preview,omitempty"`
 }
 
+// ChecklistTick says who ticked one runbook item and when.
+type ChecklistTick struct {
+	By Person    `json:"by"`
+	At time.Time `json:"at"`
+}
+
+// checklistKey is the key of RoomSnapshot.ChecklistDone.
+func checklistKey(toolUseID string, hit, item int) string {
+	return toolUseID + ":" + strconv.Itoa(hit) + ":" + strconv.Itoa(item)
+}
+
 // Suggestion is a non-driver's pending steer.
 type Suggestion struct {
 	SuggestionID string `json:"suggestion_id"`
@@ -99,6 +111,13 @@ type RoomSnapshot struct {
 	Members            []Member     `json:"members"`
 	// Insight is the room's cost and clock facts (F11), folded from the log.
 	Insight Insight `json:"insight"`
+
+	// Labelled is true once a room.labelled exists (F8). ChecklistDone holds
+	// the ticked runbook items, keyed "<tool_use_id>:<hit>:<item>" (see
+	// checklistKey); the last checklist.step_done per key wins and an untick
+	// removes the key. Never null.
+	Labelled      bool                     `json:"labelled"`
+	ChecklistDone map[string]ChecklistTick `json:"checklist_done"`
 
 	// Room limits (docs/design/retention.md). AutoCloseAt is set by the
 	// service, not by Apply: it depends on PIPEROOM_MAX_OPEN_DAYS. LogCap is
@@ -166,6 +185,7 @@ func NewSnapshot() RoomSnapshot {
 		OpenProposals:      []Proposal{},
 		PendingSuggestions: []Suggestion{},
 		Members:            []Member{},
+		ChecklistDone:      map[string]ChecklistTick{},
 	}
 }
 
@@ -205,7 +225,16 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 	c.OpenProposals = cloneProposals(s.OpenProposals)
 	c.PendingSuggestions = append([]Suggestion{}, s.PendingSuggestions...)
 	c.Members = append([]Member{}, s.Members...)
+	c.ChecklistDone = cloneTicks(s.ChecklistDone)
 	return c
+}
+
+func cloneTicks(in map[string]ChecklistTick) map[string]ChecklistTick {
+	out := make(map[string]ChecklistTick, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func cloneTime(t *time.Time) *time.Time {
@@ -268,6 +297,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	snap.OpenProposals = append([]Proposal(nil), snap.OpenProposals...)
 	snap.PendingSuggestions = append([]Suggestion(nil), snap.PendingSuggestions...)
 	snap.Insight = foldInsight(snap, e)
+	snap.ChecklistDone = cloneTicks(snap.ChecklistDone)
 	if e.Actor.Kind == events.ActorHuman {
 		snap.Members = upsertMember(snap.Members, e.Actor, "watching")
 	}
@@ -284,6 +314,21 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Shadow = p.Shadow
 		snap.Status = "open"
 		snap.OpenedAt = e.At
+
+	case events.RoomLabelled:
+		snap.Labelled = true
+
+	case events.ChecklistStepDone:
+		p, ok := decode[events.ChecklistStepDonePayload](e)
+		if !ok {
+			break
+		}
+		key := checklistKey(p.ToolUseID, p.Hit, p.Item)
+		if p.Done {
+			snap.ChecklistDone[key] = ChecklistTick{By: Person{ID: e.Actor.ID, Name: e.Actor.Name, Verified: e.Actor.Verified}, At: e.At}
+		} else {
+			delete(snap.ChecklistDone, key)
+		}
 
 	case events.ShadowRevealed:
 		snap.shadowRevealed = true
