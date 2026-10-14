@@ -35,7 +35,12 @@ type target struct {
 	src   SourceDB
 	conn  ConnectClient
 	kafka clients.DLQReader
-	lag   LagReader
+	// reg and ddl feed the change feed; subjects are the pipeline's Schema
+	// Registry subjects, derived from its topics through the tool scope.
+	reg      clients.SchemaRegistryReader
+	ddl      DDLReader
+	subjects []string
+	lag      LagReader
 	// groups are the pipeline's consumer groups, filtered through the scope.
 	groups []string
 }
@@ -67,6 +72,8 @@ type observation struct {
 	dlqTried    bool
 	dlqNoReader bool
 
+	// chg is the change feed's read of the set (nil when the feed is off).
+	chg *setChanges
 	// Consumer groups: one GroupLag per group of the set, then one offsets
 	// call for the log start of the CDC topics they read (lag_signals.go).
 	lags          map[string]*lagObs
@@ -97,12 +104,17 @@ func (w *Watcher) targets(ctx context.Context) []target {
 		}
 		t.connectors = sc.FilterConnectors(p.Connectors)
 		t.cdcTopics = sc.Topics()
+		for _, topic := range t.cdcTopics {
+			t.subjects = append(t.subjects, topic+"-key", topic+"-value")
+		}
 		t.groups = sc.FilterGroups(p.ConsumerGroups)
 		if w.clientsFor != nil {
 			pc := w.clientsFor(p.ID)
 			t.set, t.src, t.conn, t.kafka, t.lag = pc.Set, pc.Source, pc.Connect, pc.Kafka, pc.Lag
+			t.reg, t.ddl = pc.Registry, pc.DDL
 		} else {
 			t.src, t.conn, t.kafka, t.lag = w.src, w.conn, w.kafka, w.lag
+			t.reg, t.ddl = w.registry, w.ddl
 		}
 		out = append(out, t)
 	}
@@ -161,7 +173,7 @@ func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src S
 			if _, ok := obs.conns[c]; !ok {
 				obs.conns[c] = &connObs{}
 			}
-			if slotCfg {
+			if slotCfg || w.changes != nil {
 				needCfg[c] = true // slot name and heartbeat come from the config
 			}
 		}
@@ -209,6 +221,9 @@ func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src S
 	wg.Wait()
 	// After the configs: the DLQ topics are discovered from them.
 	w.observeDLQ(ctx, ts, obs, kafka)
+	if w.changes != nil {
+		obs.chg = w.readChanges(ctx, ts)
+	}
 	return obs
 }
 
