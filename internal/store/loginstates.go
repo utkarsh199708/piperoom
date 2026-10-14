@@ -127,13 +127,41 @@ ON CONFLICT (iss, sub) DO UPDATE SET email = identities.email WHERE identities.u
 	return nil
 }
 
-// Unbind implements auth.IdentityStore.
-func (t *Identities) Unbind(ctx context.Context, userID string) (int64, error) {
+// Unbind implements auth.IdentityStore. The row delete and the session
+// revocation share one transaction, so a crash cannot leave the binding gone
+// with the old account's session still alive.
+func (t *Identities) Unbind(ctx context.Context, userID string, at time.Time) (auth.UnbindResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, sessionTimeout)
 	defer cancel()
-	tag, err := t.pool.Exec(ctx, `DELETE FROM identities WHERE user_id = $1`, userID)
+	tx, err := t.pool.Begin(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("store: identity unbind: %w", err)
+		return auth.UnbindResult{}, fmt.Errorf("store: identity unbind: %w", err)
 	}
-	return tag.RowsAffected(), nil
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	var res auth.UnbindResult
+	var iss, sub string
+	err = tx.QueryRow(ctx, `DELETE FROM identities WHERE user_id = $1 RETURNING iss, sub`, userID).Scan(&iss, &sub)
+	switch {
+	case err == nil:
+		res.Unbound = 1
+	case errors.Is(err, pgx.ErrNoRows):
+		// No binding: still revoke the user's own sessions below.
+	default:
+		return auth.UnbindResult{}, fmt.Errorf("store: identity unbind: %w", err)
+	}
+	// iss/sub are '' when nothing was bound; sessions of dev logins also have
+	// iss = sub = '', so an empty pair must never match.
+	tag, err := tx.Exec(ctx, `
+UPDATE sessions SET revoked_at = $2
+WHERE revoked_at IS NULL AND expires_at > $2
+  AND (user_id = $1 OR ($3 <> '' AND $4 <> '' AND iss = $3 AND sub = $4))`,
+		userID, at.UTC(), iss, sub)
+	if err != nil {
+		return auth.UnbindResult{}, fmt.Errorf("store: identity unbind: revoke sessions: %w", err)
+	}
+	res.Revoked = tag.RowsAffected()
+	if err := tx.Commit(ctx); err != nil {
+		return auth.UnbindResult{}, fmt.Errorf("store: identity unbind: commit: %w", err)
+	}
+	return res, nil
 }

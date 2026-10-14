@@ -1,0 +1,22 @@
+# Reviewed govulncheck findings that CI tolerates. Format, one per line:
+#   GO-YYYY-N | reason | owner | review-by (YYYY-MM-DD)
+# The vuln job fails on any reachable finding not listed here, and on an entry
+# past its review-by date. Remove an entry when its fix lands.
+GO-2026-6617 | Go stdlib go1.27.0 (net/http), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-6613 | Go stdlib go1.27.0 (net/http), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-6612 | Go stdlib go1.27.0 (net/http), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-6611 | Go stdlib go1.27.0 (net/http), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-6610 | Go stdlib go1.27.0 (net/http), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-6609 | Go stdlib go1.27.0 (net/http), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-6608 | Go stdlib go1.27.0 (net/textproto), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-6607 | Go stdlib go1.27.0 (crypto/tls), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-6605 | Go stdlib go1.27.0 (net/http), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-6604 | Go stdlib go1.27.0 (os, Windows junctions), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-6603 | Go stdlib go1.27.0 (net/http), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-6600 | Go stdlib go1.27.0 (html/template), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-6599 | Go stdlib go1.27.0 (html/template), fixed in go1.27.2; remove when go.mod moves to 1.27.2 | LEAD-ARCH | 2026-11-13
+GO-2026-5764 | aws-sdk-go-v2 eventstream DoS; the fix is in PR 85, remove when it merges | LEAD-ARCH | 2026-11-13
+GO-2026-5048 | hamba/avro v2.31.0 unbounded map allocations; no fixed version upstream; Avro input comes from our own Schema Registry | A2 | 2026-11-13
+GO-2026-5047 | hamba/avro v2.31.0 integer overflow in the decoder; no fixed version upstream; same exposure as GO-2026-5048 | A2 | 2026-11-13
+GO-2026-5046 | hamba/avro v2.31.0 CPU exhaustion in the decoder; no fixed version upstream; same exposure as GO-2026-5048 | A2 | 2026-11-13
+GO-2026-6665 | gosnowflake v1.19.1 logs sensitive information; no fixed version upstream; the Snowflake client is opt-in | A2 | 2026-11-13

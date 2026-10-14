@@ -131,6 +131,26 @@ func (m *MemStore) Revoke(_ context.Context, id string, at time.Time) error {
 	return nil
 }
 
+var _ SessionRevoker = (*MemStore)(nil)
+
+// RevokeBinding implements SessionRevoker. A session counts as live when it is
+// not revoked and not past its absolute expiry.
+func (m *MemStore) RevokeBinding(_ context.Context, userID, iss, sub string, at time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for _, s := range m.byID {
+		if !s.RevokedAt.IsZero() || !at.Before(s.ExpiresAt) {
+			continue
+		}
+		if s.UserID == userID || (iss != "" && sub != "" && s.Iss == iss && s.Sub == sub) {
+			s.RevokedAt = at.UTC()
+			n++
+		}
+	}
+	return n, nil
+}
+
 func clone(s Session) Session {
 	s.TokenHash = append([]byte(nil), s.TokenHash...)
 	s.Groups = append([]string(nil), s.Groups...)

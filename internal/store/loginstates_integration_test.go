@@ -149,11 +149,11 @@ func TestIdentitiesStore(t *testing.T) {
 		t.Fatalf("other issuer: %v", err)
 	}
 	// Unbind frees the user for a new account.
-	if n, err := ids.Unbind(ctx, user1); err != nil || n != 1 {
-		t.Fatalf("unbind = %d, %v", n, err)
+	if r, err := ids.Unbind(ctx, user1, time.Now()); err != nil || r.Unbound != 1 {
+		t.Fatalf("unbind = %+v, %v", r, err)
 	}
-	if n, err := ids.Unbind(ctx, user1); err != nil || n != 0 {
-		t.Fatalf("second unbind = %d, %v", n, err)
+	if r, err := ids.Unbind(ctx, user1, time.Now()); err != nil || r.Unbound != 0 {
+		t.Fatalf("second unbind = %+v, %v", r, err)
 	}
 	if _, err := ids.UserFor(ctx, iss, "sub-1"); !errors.Is(err, auth.ErrIdentityNotFound) {
 		t.Fatalf("after unbind: %v", err)

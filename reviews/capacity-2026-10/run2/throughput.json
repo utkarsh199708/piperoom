@@ -1,0 +1,513 @@
+{
+  "profile": "throughput",
+  "short": false,
+  "replicas": 1,
+  "params": {
+    "max_agents": "3,10,30",
+    "model_latency": "500ms",
+    "model_tokens": "300",
+    "rooms": "60",
+    "subs_per_room": "2",
+    "timeout": "15m",
+    "tool_latency": "50ms",
+    "tool_summary_bytes": "1024",
+    "turns": "5"
+  },
+  "started": "2026-10-13T18:01:16.657780656Z",
+  "wall_s": 91.815,
+  "data": {
+    "runs": [
+      {
+        "max_agents": 3,
+        "rooms": 60,
+        "model_turns": 300,
+        "makespan_ms": 60467.413,
+        "turns_per_sec": 4.961,
+        "ideal_turns_per_sec": 5.124,
+        "events": 1134,
+        "events_per_sec": 18.754,
+        "queue_wait": {
+          "n": 60,
+          "min_ms": 20.299,
+          "p50_ms": 27712.194,
+          "p95_ms": 53325.075,
+          "p99_ms": 56233.646,
+          "max_ms": 56233.646,
+          "mean_ms": 28550.334
+        },
+        "time_to_first_turn": {
+          "n": 60,
+          "min_ms": 739.885,
+          "p50_ms": 28309.646,
+          "p95_ms": 53845.561,
+          "p99_ms": 56753.373,
+          "max_ms": 56753.373,
+          "mean_ms": 29095.308
+        },
+        "run_hold": {
+          "n": 60,
+          "min_ms": 2766.301,
+          "p50_ms": 2927.28,
+          "p95_ms": 3242.007,
+          "p99_ms": 3871.202,
+          "max_ms": 3871.202,
+          "mean_ms": 2995.882
+        },
+        "event_insert_latency": {
+          "n": 1134,
+          "min_ms": 0.849,
+          "p50_ms": 4.017,
+          "p95_ms": 32.048,
+          "p99_ms": 77.881,
+          "max_ms": 244.829,
+          "mean_ms": 8.589
+        },
+        "pool": [
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 14214,
+            "empty_acquires": 5370,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 40410.872,
+            "acquire_ms": 40415.56,
+            "samples": 1211,
+            "samples_at_max": 21,
+            "max_acquired": 4,
+            "saturated_ratio": 0.017
+          }
+        ],
+        "peak_heap_inuse": 16834560,
+        "peak_goroutines": 566,
+        "model": {
+          "requests": 300,
+          "bad_requests": 0,
+          "max_in_flight": 3,
+          "rooms_with_more_than_one_run_start": 0,
+          "rooms_with_concurrent_model_calls": 0
+        },
+        "subs": {
+          "subs": 120,
+          "received": 2268,
+          "bytes": 1324798,
+          "gaps": 0,
+          "dups": 0,
+          "reconnects": 0,
+          "dial_errors": 0,
+          "parse_mismatches": 0,
+          "server_closes": {},
+          "send_buffer_full_closes": 0,
+          "missing_at_end": 0
+        },
+        "cpu": {
+          "wall_s": 60.731,
+          "server_cpu_s": 2.797,
+          "driver_cpu_s": 0.7,
+          "postgres_cpu_s": 1.739
+        },
+        "server": [
+          {
+            "replica": 0,
+            "pid": 9057,
+            "goroutines": 563,
+            "peak_goroutines": 566,
+            "heap_inuse": 14254080,
+            "peak_heap_inuse": 16834560,
+            "heap_alloc": 9783976,
+            "sys": 31840520,
+            "total_alloc": 93200808,
+            "num_gc": 17,
+            "rss": 60047360,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 14214,
+              "empty_acquires": 5370,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 40410.872,
+              "acquire_ms": 40415.56,
+              "samples": 1211,
+              "samples_at_max": 21,
+              "max_acquired": 4,
+              "saturated_ratio": 0.017
+            },
+            "appends": {
+              "n": 1134,
+              "min_ms": 0.849,
+              "p50_ms": 4.017,
+              "p95_ms": 32.048,
+              "p99_ms": 77.881,
+              "max_ms": 244.829,
+              "mean_ms": 8.589
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 240,
+            "action_runs": {},
+            "cpu_seconds": 2.817572
+          }
+        ]
+      },
+      {
+        "max_agents": 10,
+        "rooms": 60,
+        "model_turns": 300,
+        "makespan_ms": 18867.946,
+        "turns_per_sec": 15.9,
+        "ideal_turns_per_sec": 16.964,
+        "events": 1120,
+        "events_per_sec": 59.36,
+        "queue_wait": {
+          "n": 60,
+          "min_ms": 40.622,
+          "p50_ms": 6354.74,
+          "p95_ms": 14547.751,
+          "p99_ms": 14649.909,
+          "max_ms": 14649.909,
+          "mean_ms": 7438.553
+        },
+        "time_to_first_turn": {
+          "n": 60,
+          "min_ms": 738.409,
+          "p50_ms": 6920.325,
+          "p95_ms": 15071.582,
+          "p99_ms": 15227.755,
+          "max_ms": 15227.755,
+          "mean_ms": 7995.851
+        },
+        "run_hold": {
+          "n": 60,
+          "min_ms": 2765.678,
+          "p50_ms": 2947.473,
+          "p95_ms": 3513.375,
+          "p99_ms": 3552.06,
+          "max_ms": 3552.06,
+          "mean_ms": 3006.841
+        },
+        "event_insert_latency": {
+          "n": 1120,
+          "min_ms": 0.837,
+          "p50_ms": 3.508,
+          "p95_ms": 18.026,
+          "p99_ms": 44.06,
+          "max_ms": 101.2,
+          "mean_ms": 5.884
+        },
+        "pool": [
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 9007,
+            "empty_acquires": 2435,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 21561.77,
+            "acquire_ms": 21563.77,
+            "samples": 385,
+            "samples_at_max": 19,
+            "max_acquired": 4,
+            "saturated_ratio": 0.049
+          }
+        ],
+        "peak_heap_inuse": 18292736,
+        "peak_goroutines": 580,
+        "model": {
+          "requests": 300,
+          "bad_requests": 0,
+          "max_in_flight": 10,
+          "rooms_with_more_than_one_run_start": 0,
+          "rooms_with_concurrent_model_calls": 0
+        },
+        "subs": {
+          "subs": 120,
+          "received": 2240,
+          "bytes": 1317722,
+          "gaps": 0,
+          "dups": 0,
+          "reconnects": 0,
+          "dial_errors": 0,
+          "parse_mismatches": 0,
+          "server_closes": {},
+          "send_buffer_full_closes": 0,
+          "missing_at_end": 0
+        },
+        "cpu": {
+          "wall_s": 19.071,
+          "server_cpu_s": 2.089,
+          "driver_cpu_s": 0.523,
+          "postgres_cpu_s": 1.264
+        },
+        "server": [
+          {
+            "replica": 0,
+            "pid": 14286,
+            "goroutines": 563,
+            "peak_goroutines": 580,
+            "heap_inuse": 15515648,
+            "peak_heap_inuse": 18292736,
+            "heap_alloc": 11108968,
+            "sys": 40036632,
+            "total_alloc": 85970024,
+            "num_gc": 14,
+            "rss": 61120512,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 9007,
+              "empty_acquires": 2435,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 21561.77,
+              "acquire_ms": 21563.77,
+              "samples": 385,
+              "samples_at_max": 19,
+              "max_acquired": 4,
+              "saturated_ratio": 0.049
+            },
+            "appends": {
+              "n": 1120,
+              "min_ms": 0.837,
+              "p50_ms": 3.508,
+              "p95_ms": 18.026,
+              "p99_ms": 44.06,
+              "max_ms": 101.2,
+              "mean_ms": 5.884
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 240,
+            "action_runs": {},
+            "cpu_seconds": 2.108776
+          }
+        ]
+      },
+      {
+        "max_agents": 30,
+        "rooms": 60,
+        "model_turns": 300,
+        "makespan_ms": 7849.493,
+        "turns_per_sec": 38.219,
+        "ideal_turns_per_sec": 45.038,
+        "events": 1080,
+        "events_per_sec": 137.589,
+        "queue_wait": {
+          "n": 60,
+          "min_ms": 50.899,
+          "p50_ms": 293.213,
+          "p95_ms": 3544.842,
+          "p99_ms": 3574.106,
+          "max_ms": 3574.106,
+          "mean_ms": 1783.472
+        },
+        "time_to_first_turn": {
+          "n": 60,
+          "min_ms": 737.959,
+          "p50_ms": 1058.694,
+          "p95_ms": 4106.637,
+          "p99_ms": 4139.409,
+          "max_ms": 4139.409,
+          "mean_ms": 2421.517
+        },
+        "run_hold": {
+          "n": 60,
+          "min_ms": 3020.546,
+          "p50_ms": 3330.557,
+          "p95_ms": 3869.268,
+          "p99_ms": 3941.885,
+          "max_ms": 3941.885,
+          "mean_ms": 3443.511
+        },
+        "event_insert_latency": {
+          "n": 1080,
+          "min_ms": 0.709,
+          "p50_ms": 2.934,
+          "p95_ms": 11.38,
+          "p99_ms": 40.516,
+          "max_ms": 79.62,
+          "mean_ms": 4.603
+        },
+        "pool": [
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 7338,
+            "empty_acquires": 1379,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 10044.876,
+            "acquire_ms": 10046.531,
+            "samples": 167,
+            "samples_at_max": 8,
+            "max_acquired": 4,
+            "saturated_ratio": 0.048
+          }
+        ],
+        "peak_heap_inuse": 21028864,
+        "peak_goroutines": 620,
+        "model": {
+          "requests": 300,
+          "bad_requests": 0,
+          "max_in_flight": 30,
+          "rooms_with_more_than_one_run_start": 0,
+          "rooms_with_concurrent_model_calls": 0
+        },
+        "subs": {
+          "subs": 120,
+          "received": 2160,
+          "bytes": 1297360,
+          "gaps": 0,
+          "dups": 0,
+          "reconnects": 0,
+          "dial_errors": 0,
+          "parse_mismatches": 0,
+          "server_closes": {},
+          "send_buffer_full_closes": 0,
+          "missing_at_end": 0
+        },
+        "cpu": {
+          "wall_s": 8.136,
+          "server_cpu_s": 1.659,
+          "driver_cpu_s": 0.406,
+          "postgres_cpu_s": 1.043
+        },
+        "server": [
+          {
+            "replica": 0,
+            "pid": 15854,
+            "goroutines": 563,
+            "peak_goroutines": 620,
+            "heap_inuse": 14327808,
+            "peak_heap_inuse": 21028864,
+            "heap_alloc": 8331328,
+            "sys": 40229128,
+            "total_alloc": 84017256,
+            "num_gc": 13,
+            "rss": 64327680,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 7338,
+              "empty_acquires": 1379,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 10044.876,
+              "acquire_ms": 10046.531,
+              "samples": 167,
+              "samples_at_max": 8,
+              "max_acquired": 4,
+              "saturated_ratio": 0.048
+            },
+            "appends": {
+              "n": 1080,
+              "min_ms": 0.709,
+              "p50_ms": 2.934,
+              "p95_ms": 11.38,
+              "p99_ms": 40.516,
+              "max_ms": 79.62,
+              "mean_ms": 4.603
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 240,
+            "action_runs": {},
+            "cpu_seconds": 1.677319
+          }
+        ]
+      }
+    ]
+  },
+  "findings": [
+    "max_agents=3: 4.96 turns/s (97% of the 5.12 an ideal 3-slot pool gives at the measured turn time), insert p99 77.9 ms, queue wait p95 53325 ms, pool 4/4; 2%; 5370 waits 40411 ms.",
+    "max_agents=10: 15.90 turns/s (94% of the 16.96 an ideal 10-slot pool gives at the measured turn time), insert p99 44.1 ms, queue wait p95 14548 ms, pool 4/4; 5%; 2435 waits 21562 ms.",
+    "max_agents=30: 38.22 turns/s (85% of the 45.04 an ideal 30-slot pool gives at the measured turn time), insert p99 40.5 ms, queue wait p95 3545 ms, pool 4/4; 5%; 1379 waits 10045 ms."
+  ],
+  "checks": [
+    {
+      "name": "max_agents=3: agent cap respected",
+      "ok": true,
+      "detail": "max in-flight 3, cap 3 x 1 replicas"
+    },
+    {
+      "name": "max_agents=3: no duplicate agent runs",
+      "ok": true,
+      "detail": "rooms with \u003e1 run start 0, with concurrent model calls 0"
+    },
+    {
+      "name": "max_agents=3: every run made all its turns",
+      "ok": true,
+      "detail": "model turns 300, want 300"
+    },
+    {
+      "name": "max_agents=3: viewers saw gap-free logs",
+      "ok": true,
+      "detail": "gaps 0 dups 0 parse mismatches 0"
+    },
+    {
+      "name": "max_agents=3: no append errors",
+      "ok": true,
+      "detail": "append errors 0"
+    },
+    {
+      "name": "max_agents=10: agent cap respected",
+      "ok": true,
+      "detail": "max in-flight 10, cap 10 x 1 replicas"
+    },
+    {
+      "name": "max_agents=10: no duplicate agent runs",
+      "ok": true,
+      "detail": "rooms with \u003e1 run start 0, with concurrent model calls 0"
+    },
+    {
+      "name": "max_agents=10: every run made all its turns",
+      "ok": true,
+      "detail": "model turns 300, want 300"
+    },
+    {
+      "name": "max_agents=10: viewers saw gap-free logs",
+      "ok": true,
+      "detail": "gaps 0 dups 0 parse mismatches 0"
+    },
+    {
+      "name": "max_agents=10: no append errors",
+      "ok": true,
+      "detail": "append errors 0"
+    },
+    {
+      "name": "max_agents=30: agent cap respected",
+      "ok": true,
+      "detail": "max in-flight 30, cap 30 x 1 replicas"
+    },
+    {
+      "name": "max_agents=30: no duplicate agent runs",
+      "ok": true,
+      "detail": "rooms with \u003e1 run start 0, with concurrent model calls 0"
+    },
+    {
+      "name": "max_agents=30: every run made all its turns",
+      "ok": true,
+      "detail": "model turns 300, want 300"
+    },
+    {
+      "name": "max_agents=30: viewers saw gap-free logs",
+      "ok": true,
+      "detail": "gaps 0 dups 0 parse mismatches 0"
+    },
+    {
+      "name": "max_agents=30: no append errors",
+      "ok": true,
+      "detail": "append errors 0"
+    }
+  ],
+  "loadavg_start_end": [
+    "23.37 21.28 24.41",
+    "22.40 21.40 24.15"
+  ]
+}

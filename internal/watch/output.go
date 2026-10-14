@@ -45,7 +45,8 @@ type view struct {
 	sev        string // most severe of active
 	postedSev  string
 	lastPost   time.Time
-	bypass     bool // skip the cooldown (a rise to sev1 re-opened the incident)
+	bypass     bool             // skip the cooldown (a rise to sev1 re-opened the incident)
+	risks      []map[string]any // current config findings (codes only)
 }
 
 func (v view) pending() []sigSnap {
@@ -69,6 +70,10 @@ func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 		return cfg.ConnectorDown
 	case owners.SignalSlotInactive:
 		return cfg.SlotInactive
+	case owners.SignalDLQGrowth:
+		return cfg.DLQGrowth.WatchSignal
+	case owners.SignalConfigRisk:
+		return cfg.ConfigRisk
 	}
 	return cfg.SlotWAL.WatchSignal
 }
@@ -76,7 +81,7 @@ func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 // viewOf copies the state of a pipeline. Caller holds w.mu.
 func (w *Watcher) viewOf(t target, ps *pipeState) view {
 	v := view{roomID: ps.roomID, owned: ps.owned, follower: ps.follower, episode: ps.episode,
-		postedSev: ps.postedSev, lastPost: ps.lastPost, bypass: ps.bypassCooldown, sev: "sev9"}
+		postedSev: ps.postedSev, lastPost: ps.lastPost, bypass: ps.bypassCooldown, sev: "sev9", risks: ps.risks}
 	v.leaderGone = ps.follower && ps.roomID != "" && !w.roomLedLocked(ps.roomID)
 	for _, id := range signalIDs {
 		ss := ps.sigs[id]
@@ -612,12 +617,18 @@ func compose(pipelineID string, now time.Time, v view, reason string, affected [
 		}
 	}
 	title := pipelineID + ": " + strings.Join(frags, "; ")
+	// Whatever signal opened the room, the agent should see the connector
+	// settings that drop records. A config_risk signal lists them itself.
+	riskInEv := slices.ContainsFunc(v.active, func(s sigSnap) bool { return s.id == owners.SignalConfigRisk })
 	if len(affected) > 1 {
 		title += fmt.Sprintf(" (and %d other pipelines)", len(affected)-1)
 	}
 	body := map[string]any{
 		"source": "watcher", "pipeline": pipelineID, "severity": v.sev,
 		"at": now.UTC().Format(time.RFC3339), "reason": reason, "signals": sigs,
+	}
+	if len(v.risks) > 0 && !riskInEv {
+		body["config_risks"] = v.risks
 	}
 	if len(affected) > 1 {
 		body["affected_count"] = len(affected)
