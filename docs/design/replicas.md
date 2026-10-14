@@ -46,7 +46,9 @@ Loops that must run on exactly one replica: **watcher, retention purge, auth pru
 - The lock lives on a **dedicated connection** opened from the store's pool configuration
   (`application_name = piperoom-leader-<loop>`), held for the whole leadership term, not borrowed
   from the request pool. Server-side TCP keepalives are set on it (`tcp_keepalives_idle=10`,
-  `_interval=5`, `_count=3`) so Postgres frees the lock within ~25 s of a vanished client.
+  `_interval=5`, `_count=3`) so Postgres frees the lock within ~25 s of a vanished client, and the
+  client side sets `tcp_user_timeout` (4 s) so a write to a dead peer fails within the check's
+  deadline instead of hanging in the kernel.
 - A replica that does not get the lock **retries every 15 s**.
 - The leader **checks its connection every 2 s** (`SELECT 1`, 2 s deadline). Any error ends the
   term: the loop's context is cancelled, the connection is closed, and the replica goes back to
@@ -60,11 +62,18 @@ Loops that must run on exactly one replica: **watcher, retention purge, auth pru
   released` (shutdown), with `loop` and `replica`.
 - A leader's loop gets a fresh state each term (the watcher is rebuilt, so it never acts on
   episodes it observed before it lost the lock).
+- **Requirement on every leader loop:** it must stop its side effects within about 1 s of its
+  context being cancelled — every external call takes the loop's context, and nothing is written
+  after a cancelled call. The settle delay (5 s) only fences loops that obey this. The elector waits
+  for the loop to return (no stop timeout) before it releases the term, so a loop that ignores
+  cancellation holds the term rather than overlapping the next leader.
 
 The Slack mirror's leader also rescans open rooms every 15 s, because `OnRoomOpened` fires only on
 the replica that opened the room. Each mirror resumes from `slack_threads.last_seq`, so a new leader
-continues where the old one stopped; an event whose post succeeded but whose `last_seq` write did not
-can be posted twice at a leader change (at most one event per room).
+continues where the old one stopped. The `last_seq` write is a compare-and-set
+(`… WHERE last_seq = $previous`): a mirror whose write finds another writer moved on stops, so two
+mirrors never keep posting the same room. An event whose post succeeded but whose `last_seq` write
+did not can still be posted twice at a leader change (at most one event per room).
 
 ## 4. Room agents: one owner per room
 
@@ -83,8 +92,11 @@ room_agent_leases (room_id PK → rooms ON DELETE CASCADE, owner text, pipeline_
   expired or already ours. A replica that cannot acquire does not start the agent.
 - **Self-fencing.** If a renew does not confirm a lease within TTL − one renew interval (20 s after
   the last confirmed renew), the owner cancels that room's agent before the lease can expire; a renew
-  that reports the lease gone (taken over) cancels at once. The agent Sink refuses events from a room
-  whose lease this replica no longer holds.
+  that reports the lease gone (taken over) cancels at once.
+- **Per-run fence.** Each run has a generation number. The agent's Sink and its `Proposals.Create`
+  refuse a write unless this replica holds the lease, the run is the room's current generation, and
+  the local clock is before the lease's local deadline. A run that lost its lease (or was replaced)
+  can write nothing more, even before its context cancellation reaches it.
 - The lease is held for as long as the room "has an agent" in the old single-process sense
   (`roomState.agentCancel != nil`): while the run works *and* while it waits for input. It is deleted
   when the room closes (a shadow room: when its run has finished, grace included), when the
@@ -116,18 +128,19 @@ replica wins). The winner rebuilds the room from the log, then:
 |---|---|
 | closed | delete the lease |
 | shadow | mark the shadow run `interrupted` (as the Load sweep does), reveal if closed, delete the lease. Shadow runs are one-shot and never restart |
-| agent status `working` or `queued`, or human input logged after the agent's last event | **resume**: a system message ("the server running this room's agent stopped; the agent resumes on another server"), then a fresh run with the inbox primed (§4.2). It queues for a slot like any run |
-| otherwise (idle, done, error) | the restart notice the single-process server writes today ("agent paused; steer or @agent to resume"), delete the lease |
+| `PIPEROOM_RESUME_ON_TAKEOVER=1`, agent status `working` or `queued` (or human input logged after the agent's last event), and fewer than 3 resumes of this room in the last hour | **resume**: a system message ("the server running this room's agent stopped; the agent resumes on another server"), then a fresh run with the inbox primed (§4.2) plus one input listing the room's open proposals (id and title), so the run does not propose them again. It queues for a slot like any run |
+| otherwise (flag off — **the default** —, cap reached, idle, done, error) | the restart notice the single-process server writes today ("agent paused; steer or @agent to resume"), delete the lease |
 
-A resumed run starts from the alert, the pipeline map and the primed input; the runner keeps no
-memory between runs (`agent.Run`). This is the same model as a hand-off.
+The resume counter lives on the lease row (`resumes`, `resume_window`) and is bumped by the same
+conditional `UPDATE` that allows the resume, so the cap holds across replicas. A resumed run starts
+from the alert, the pipeline map and the primed input; the runner keeps no memory between runs
+(`agent.Run`). This is the same model as a hand-off.
 
 `Load` no longer writes "server restarted" into every open room. With leases, only a room whose
 agent status is `working`/`queued` but which has **no lease row at all** (a run from before this
 change, or a failed lease write) gets the notice at Load; everything else is handled by the
-takeover. On a single replica this means: an investigation that was mid-run when the server stopped
-resumes after the restart (once its lease expires, ≤ 40 s), an idle one stays paused. That replaces
-"every room pauses on restart"; it is deliberate and called out in the PR.
+takeover. With the flag off (default) the result matches main: every agent that was running pauses
+after its server stops; the notice arrives once the lease expires (≤ 40 s) instead of at Load.
 
 ### 4.4 Slots
 
@@ -141,7 +154,10 @@ resumes after the restart (once its lease expires, ≤ 40 s), an idle one stays 
   `slot = true AND expires_at > now()`; below the cap, set `slot = true` on its own lease. Above it,
   it shows `queued` ("waiting for a global agent slot") and retries every second. Giving the slot back
   sets `slot = false`. A dead replica's slots stop counting when its leases expire. Across replicas
-  the order is first-come at the retry, not round-robin; within a replica it is round-robin.
+  the order is first-come at the retry, not round-robin; within a replica it is round-robin. A
+  database error while taking a global slot is retried with backoff (1 s doubling to 10 s); only a
+  lost lease or the end of the run stops the wait, and then the room's agent is released so the next
+  steer can start one again (a room is never left "having an agent" that cannot run).
 
 ## 5. Action executor: exactly once per approved step
 
@@ -149,19 +165,26 @@ resumes after the restart (once its lease expires, ≤ 40 s), an idle one stays 
 proposals.claimed_by text, proposals.claimed_at timestamptz
 ```
 
-- Before the first step the executor claims the proposal:
+- The proposal is claimed **when it is queued** on the room's executor (the replica that recorded the
+  last approval), not when its turn comes:
   `UPDATE proposals SET claimed_by = $me, claimed_at = now() WHERE proposal_id = $1 AND claimed_by IS NULL AND status = 'open' RETURNING`.
-  No row: another executor has it (or had it) and this one returns **without writing anything**.
-- The existing per-step claim (`proposal_steps`, `INSERT … ON CONFLICT DO NOTHING`, "started" before
-  any side effect) stays: it is what makes a single step at-most-once even if a claim is wrongly
-  taken over.
-- Before each step the claimer refreshes `claimed_at` (`… WHERE claimed_by = $me`). If that update
-  finds no row the claim was declared dead: the step does not run.
-- **Crash after the claim, before the result.** Existing semantics, kept: such a step is never run
-  again; it is recorded as failed (`action.executed` with `ok=false`), with output saying the outcome
-  is unknown and the target must be checked before a new proposal retries. (`ok` is a bool in the
-  contract; there is no third value. The agent already treats a failed step as "do not claim
-  recovery".) What changes is *when*: not at the next `Load` of any replica (that would hit runs that
+  No row: another executor has it (or had it) and nothing is queued or written. Each room runs one
+  proposal at a time (review item 10), so a second approved proposal can wait in the queue behind a
+  long first one; the replica refreshes the claims of **queued** proposals on every lease renew
+  (10 s), so a live replica's queue is never mistaken for a dead one.
+- Every write of the executor is conditional on the claim (`claimed_by = $me AND status = 'open'`):
+  - the claim refresh before each step (no row: the claim was declared dead, the step does not run);
+  - the per-step start (`proposal_steps` insert happens only while the claim holds; the existing
+    `ON CONFLICT DO NOTHING` still makes a step at-most-once);
+  - the step finish, which also refreshes `claimed_at`;
+  - the final `executed`/`failed` status.
+  A write that finds the claim gone skips the result event: the sweep has already recorded the
+  outcome, and the room must not get two.
+- **Crash after the claim, before the result.** The step is never run again. It is recorded as
+  `action.executed {ok: false, outcome_unknown: true}` with output saying the target must be checked
+  before a new proposal retries; the agent gets `HumanInput.OK = nil` ("unknown"), so it never claims
+  the pipeline recovered or failed. The same applies when the per-step start finds the step already
+  started by an earlier run. *When*: not at the next `Load` of any replica (that would hit runs that
   are alive elsewhere) but once the claim is stale — `claimed_at` older than **step timeout (30 s) +
   2 min** — or, for an approved proposal nobody claimed, 2 min after its last approval. Every replica
   sweeps every 30 s; the interruption itself is a conditional `UPDATE … SET status = 'failed' …
@@ -180,7 +203,9 @@ proposals.claimed_by text, proposals.claimed_at timestamptz
   just connected, or it was slow) reads its gap from the store itself, then joins the buffer. One
   query per event per room per replica instead of ~3 per socket.
 - While the LISTEN connection is down or reconnecting, **every local feed polls every 2 s**. After a
-  reconnect every feed and every room cache catches up once. While LISTEN is up there is no polling.
+  reconnect every feed and every room cache catches up once. While LISTEN is up a **safety poll
+  every 15 s** does the same, so a notification lost without the connection noticing (a proxy that
+  drops idle traffic, a NOTIFY queue problem) costs at most 15 s, never a stuck room.
 - Replay after `seq N` is unchanged (`ws.Gateway` reads the backlog, then subscribes after the last
   seq it sent). No change in `internal/ws`.
 
@@ -188,11 +213,13 @@ proposals.claimed_by text, proposals.claimed_at timestamptz
 
 Each replica caches every room's snapshot (as before) and now keeps it current:
 
-- **On every access** (`getStateLocked`: every request and command), one `GetRoom` read; if
-  `rooms.last_seq` is ahead, the missing events are folded first. A room deleted by another
-  replica's retention is evicted. The driver lease persisted on the rooms row is taken over too
-  (renewals are not all in the log). So a command is always checked against the log as of a moment
-  before the check: read-your-writes across replicas.
+- **Before every command** (not before reads: `GET`s answer from the cache the follower keeps), one
+  `GetRoom` read, made outside the service lock; if `rooms.last_seq` is ahead, the missing events are
+  read (also outside the lock) and folded under it. A room deleted by another replica's retention is
+  evicted. The driver lease persisted on the rooms row is taken over too (renewals are not all in the
+  log). So a command is checked against the log as of a moment before the check: read-your-writes
+  across replicas.
+- **Commands whose check must hold at the write** (§9.1) append with `AppendIfLast(expectSeq)`.
 - **On every notify** for a cached room, a follower goroutine folds the new events (fetched outside
   the service lock, applied under it). That is how the owner's inbox gets steers within
   milliseconds, how a close on B stops the agent on A (its executor too, and the shadow grace rules
@@ -202,8 +229,11 @@ Each replica caches every room's snapshot (as before) and now keeps it current:
   replicas opened. While LISTEN is down, the follower re-reads every room every poll interval.
 - `emitLocked` folds any events another replica appended between the last fold and its own append
   before it applies its own, so the snapshot never skips a seq.
-- `ListRooms` and `OpenRoomForPipeline` refresh from one `ListRooms` query (load new rooms, fold
-  rooms that are behind, evict deleted ones).
+- `ListRooms` and `OpenRoomForPipeline` refresh from one `ListRooms` query, read outside the lock;
+  new rooms are rebuilt and rooms that are behind are read outside the lock too, and only the folds
+  and evictions take the lock.
+- Cost: each remote event costs one `Since` read per replica (the follower's), plus one per room feed
+  with local WebSocket subscribers; a command costs one `GetRoom`.
 
 ### 6.3 Alert dedup
 
@@ -226,19 +256,37 @@ them once; the others wait for the lock, then find nothing to do.
   default 1; `podDisruptionBudget.enabled` to turn it off).
 - `PIPEROOM_REPLICA_ID` comes from the pod name (downward API).
 - The "do not scale" warning is replaced by this model and its limits.
+- **The first upgrade to this version runs at `replicaCount: 1`.** Pods of the previous version
+  have no leases, claims or leader locks; a rolling update with more than one replica would run old
+  and new pods side by side. Scale up only after every pod runs this version.
+
+## 8a. Delivery and migration order
+
+Delivered as #120 (this contract), then three stacked PRs: (a) store (hub feeds, elector,
+migration lock, Coordinator SQL, migration `00014`), (b) room (leases, takeover, slots, executor
+claims, cache sync), (c) `cmd/server` leader wiring, Helm and README. `replicaCount > 1` stays
+unsafe until (c) is merged. Migrations merge in number order (`00010` → `00014`); S1's `00014`
+lands last, after the parallel `00010`–`00013`.
 
 ## 9. Limits and known gaps
 
-1. **Commands are checked, then appended; across replicas that is not one critical section.** Each
-   replica serializes its own commands under its service lock and syncs from the log before the
-   check, but two conflicting commands on two replicas within the same few milliseconds (two people
-   taking control at once, say) can both pass. Postgres still enforces what must never double: one
-   decision per approval layer (primary key), one start per step, one executor per proposal, one room
-   per alert key. The rest is last-writer-wins in the log, which every replica folds the same way.
+1. **Check and append are one step for the commands that need it (conditional append).** Each
+   replica serializes its own commands under its service lock, but two replicas do not share it.
+   The commands whose check must still hold when the event lands — `GrantControl`, the driver path
+   of `Steer`, `SendSuggestion`, `CreateHandoff`, `AcceptHandoff`, `CloseRoom` (and T4's
+   `ExtendRoom`, `DeleteRoom` when they land) — append with `AppendIfLast(room, expectSeq)`:
+   `UPDATE rooms SET last_seq = last_seq + 1 WHERE id = $1 AND last_seq = $expect`. If another
+   replica appended in between (`ErrSeqConflict`), the command folds the new events, runs its check
+   again and retries, at most 3 times, then answers `409 conflict`. So two people taking control at
+   once get one driver, and a driver replaced on another replica cannot steer as driver afterwards.
+   Commands that cannot conflict (comments, notes, agent events) append unconditionally. Postgres
+   also enforces one decision per approval layer, one start per step, one executor per proposal and
+   one room per alert key.
 2. **Presence is per replica.** `ws` presence is in memory; people on different replicas do not see
    each other in the member list. Events, approvals and everything else are shared.
-3. **Token budget is per replica.** `PIPEROOM_ROOM_TOKEN_BUDGET` is counted in the endpoint's memory;
-   a room whose agent moves to another replica starts a new count there.
+3. **The spend budget is per replica until E4 lands.** `PIPEROOM_ROOM_TOKEN_BUDGET` is counted in
+   the endpoint's memory; a room whose agent moves to another replica starts a new count there, so
+   a room can spend up to (replicas it ran on) × the budget. E4 (the shared spend ledger) closes this.
 4. **Rate limits are per replica** (login, alert routes).
 5. **Shadow reveal.** If a shadow run finishes on A while B closes the room, both may append
    `shadow.revealed` in a narrow window; the reveal row (`revealed_at`) is set once.
@@ -257,6 +305,10 @@ them once; the others wait for the lock, then find nothing to do.
 | lease TTL / renew / takeover scan | 30 s / 10 s / 10 s |
 | leader retry / health check / settle | 15 s / 2 s (2 s deadline) / 5 s |
 | feed poll while LISTEN is down | 2 s |
+| safety poll while LISTEN is up | 15 s |
+| resumes per room (flag on) | 3 per hour |
+| conditional append retries | 3, then `409 conflict` |
+| global slot error backoff | 1 s doubling to 10 s |
 | feed buffer | 64 events per room |
 | executor claim stale after | 30 s step timeout + 2 min |
 | unclaimed approved proposal stale after | 2 min after the last approval |

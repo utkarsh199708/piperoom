@@ -35,6 +35,13 @@ func (f *fakeSource) RecentDDL(context.Context, time.Time, int) ([]clients.DDLCh
 func (f *fakeSource) LongTransactions(context.Context, time.Duration) ([]clients.Transaction, error) {
 	return []clients.Transaction{{PID: 1, Username: "u", State: "active", Age: time.Minute, Query: "SELECT 1"}}, nil
 }
+
+// LongTransactionsOnTables treats every long transaction as one on the
+// pipeline's tables; txnSource models the lock filter itself.
+func (f *fakeSource) LongTransactionsOnTables(ctx context.Context, d time.Duration, _ []string) (postgres.TableTransactions, error) {
+	txns, err := f.LongTransactions(ctx, d)
+	return postgres.TableTransactions{Transactions: txns}, err
+}
 func (f *fakeSource) Row(_ context.Context, table, _, key string) (map[string]any, bool, error) {
 	f.rowCalls++
 	row, ok := f.rows[table+"|"+key]

@@ -63,6 +63,16 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
   WebSocket only; every non-GET under `/api` → `403 viewer`. An `auditors:` principal may also export.
 - **Solo mode.** With `PIPEROOM_SOLO_USER`, that user may approve every layer; each approve also sends
   `confirm: "<pipeline_id>/<layer>"`, and the approval records `grant: "solo"`.
+- **Tenants** (`docs/design/tenancy.md`). With a `tenants:` block in `owners.yaml`, a session sees only the rooms
+  of pipelines in its tenants (a member of `tenants.<t>.members`, or an approver or backup of any layer of one of
+  the tenant's pipelines; the solo user sees all). Anything outside them answers as if it did not exist, **404 not
+  403**: every `/api/rooms/{id}/...` route including the WebSocket (refused before the upgrade) → `404 not_found`
+  "not found"; `POST /api/proposals/{pid}/approve|reject` and `POST /api/handoffs/{hid}/accept` → `404 not_found`
+  before any `409`/`403`; `GET /api/pipelines/{pid}/topology` → `404 not_found`; `GET /api/rooms` and
+  `GET /api/shadow/metrics` leave those rooms out; `POST /api/rooms` → `400 validation` "unknown pipeline";
+  `POST /api/alerts/webhook` → `404 not_found`; `control/grant` and hand-offs refuse a target who cannot see the
+  room like an unknown person (`400 validation`). A room whose pipeline is not in `owners.yaml` is in no tenant.
+  `tenants:` grants no login and no role. Without a `tenants:` block nothing is filtered.
 - **Proxy guard (dev mode).** `POST /auth/dev-login` on a request carrying `X-User`, or a request with a session
   cookie plus an `X-User` naming a different user → `403 proxy_identity`. A reverse proxy needs
   `PIPEROOM_AUTH_MODE=oidc` (or the git tag `pre-auth`).
@@ -80,7 +90,7 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 | 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline), `not_provisioned` (login gate) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB) |
-| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period) |
+| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period) |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list) |
 | 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client) |
 | 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working) |
@@ -100,6 +110,27 @@ Exactly `events.Event` from `internal/events/events.go`:
   "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
   "payload": { "comment_id": "c_01J...", "step_id": "s_2", "text": "Wrong service?", "mentions_agent": false },
   "at": "2026-10-11T10:59:03Z" }
+```
+
+### Agent usage (`agent.usage`)
+One event per model request the agent sends (design `docs/design/cost.md`), actor `agent`: every investigation
+turn, the hand-off summary, and, as a second event, a server-side compaction pass. Counts only, never prompt,
+tool or model text. A request refused by a budget is never sent and gets no event; a request still in flight when
+the room closes still gets one. In a shadow room these events go to the shadow log like every other agent event.
+Clients that do not show cost ignore the type (the web reducer only advances `last_seq` for it).
+```json
+{ "model": "claude-opus-5-5", "role": "main",          // triage | main | handoff | compaction | judge (reserved)
+  "input_tokens": 1200, "cache_creation_input_tokens": 3000, "cache_read_input_tokens": 41000,
+  "output_tokens": 900, "latency_ms": 8123,             // 0 for compaction (its time is in the request's)
+  "cost_usd": 0.0412 }                                  // omitted when PIPEROOM_MODEL_PRICES has no price for model
+```
+
+### Usage
+The totals and per-model rows of `GET /api/rooms/{id}/usage` and `GET /api/usage` (finished calls only):
+```json
+{ "calls": 31, "unpriced_calls": 0, "input_tokens": 1200, "cache_creation_input_tokens": 90000,
+  "cache_read_input_tokens": 700000, "output_tokens": 21000, "tokens": 812200,
+  "cost_usd": 4.11 }        // null when no call in the row was priced; with unpriced_calls > 0 it is a lower bound
 ```
 
 ### RoomSnapshot
@@ -131,9 +162,27 @@ IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_
 { "pipeline_id": "orders",
   "nodes": [ { "id": "pg:public.orders", "kind": "source_table", "name": "public.orders", "layer": "postgres",
                "owner": "priya", "health": "warn", "facts": { "slot_retained": "12.4 GB" } } ],
-  "edges": [ { "from": "pg:public.orders", "to": "connect:pg-orders-connector" } ] }
+  "edges": [ { "from": "pg:public.orders", "to": "connect:pg-orders-connector" },
+             { "from": "group:order-sync", "to": "wh:analytics.orders", "mapping": "inferred" },
+             { "from": "connect:pg-orders-connector", "to": "sr:pg.public.orders-value", "kind": "depends_on" } ] }
 ```
-`kind`: `source_table | connector | topic | dlq_topic | consumer_group | sink_table`. `health`: `ok | warn | fail | unknown`.
+Node `kind`: `source_table | connector | topic | dlq_topic | consumer_group | sink_table | schema_subject`. `health`: `ok | warn | fail | unknown`.
+Edge `kind`: `data` (records flow `from` → `to`) or `depends_on` (`from` needs `to` to work; no records flow, so `to` is
+upstream of `from` when looking for a root cause). Edge `mapping`: `mapped` (proven from connector config, committed
+group offsets, Schema Registry subjects, or an explicit owners.yaml declaration) or `inferred` (not proven; implied by
+owners.yaml or a naming convention; never a cross-product shown as proven). Both fields are omitted when they hold the
+default (`data`, `mapped`), so a client that ignores them reads every edge as proven data flow, as before.
+A `schema_subject` node (`id` `sr:<subject>`, `layer` `schema-registry`) is a Schema Registry subject a connector or
+consumer group serializes or deserializes with; only `depends_on` edges point at it. Its `facts` carry `compatibility`,
+`latest_version` and `registered_recently` (`true | false | unknown`; the registry API has no registration time, so
+this is what the server saw change between its own readings), plus `new_version_seen` (`<age> ago`, `health` `warn`)
+when `registered_recently` is `true` and `version_deleted_seen` (`<age> ago`, `health` `warn`) when the latest version
+went down (a deletion, not a registration). A subject a converter config names but nothing registered has
+`exists=false` with `health` `warn`; an unreachable registry gives `error=unreachable` with `health` `unknown`.
+With no Schema Registry configured (`SCHEMA_REGISTRY_URL` set to empty or `off`) the graph has no `schema_subject`
+nodes and the schema tools answer "Schema Registry not configured".
+A `topic` node whose name the connector config would make illegal (not a valid Kafka topic name) is a placeholder named
+after the source table, with `health` `unknown` and the fact `topic_name=invalid`: the config itself is a likely cause.
 A `dlq_topic` node (`id` `dlq:<topic>`) is a dead-letter topic of the pipeline; its `layer` and `owner` are the
 writer's (`kafka-connect` for a sink connector, `consumer` for a declared consumer group), edges lead into it only,
 and `facts` carry `records` (end minus start offsets, summed), `newest_record`, `writer` and `exists`. A `connector`
@@ -148,10 +197,10 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 |---|---|---|---|---|
 | GET | `/api/people` | – | `[{id, name, email?}]` | after auth PR 3: the people a driver may grant control or hand off to: `users.yaml` users plus members with a live session (`LookupPerson`). `email` only for IdP users; pickers show `id` or `email` next to `name`. Members only: a viewer gets `403 viewer` (the list holds emails and viewers cannot grant or hand off anyway) |
 | GET | `/api/me` | – | `{id,name,layers}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request; `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise) |
-| GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first |
+| GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first; with `tenants:` only the rooms of your tenants (see Tenants above) |
 | POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation` |
 | POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |
-| POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert (label, `PAGERDUTY_SERVICES` map, owners match, or `DEFAULT_ALERT_PIPELINE`); the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name) and `dedup_key`. |
+| POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert (label, `PAGERDUTY_SERVICES` map, owners match, or `DEFAULT_ALERT_PIPELINE`); the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name) and `dedup_key`. With a `tenants:` block in `owners.yaml` the `200`/`201` body is `{"room_id": "r_…", "created": true\|false}` instead of the `RoomSnapshot`: a source secret is shared by every tenant, so the reply carries no room content. |
 | GET | `/api/rooms/{id}` | – | `RoomSnapshot` | |
 | GET | `/api/rooms/{id}/events?after=0&limit=500` | – | `{events:[Event], last_seq}` | limit max 1000; `events` is `[]` when nothing is after `after` |
 | POST | `/api/rooms/{id}/comments` | `{step_id?, text}` | `Event` | `@agent` in text sets `mentions_agent` |
@@ -160,7 +209,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/rooms/{id}/control/request` | – | `Event` | |
 | POST | `/api/rooms/{id}/control/grant` | `{to}` | `Event` | driver only, or anyone if no driver / lease expired |
 | POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only; a shadow room refuses an empty resolution with `400 validation` |
-| POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step. After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode) |
+| POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step (`{proposal_id, step_index, ok, output, params_hash, outcome_unknown?}`; `outcome_unknown: true` with `ok: false` when the server running the step stopped before it recorded the result: the step is never run again, check the target before retrying). After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode) |
 | POST | `/api/proposals/{pid}/reject` | `{layer, reason}`; after auth PR 4 `{layer, reason, params_hash}` | `Event` | same hash rule as approve |
 | GET | `/api/rooms/{id}/export` | – | the room as one JSON document | header `X-Piperoom-Export-SHA256` = SHA-256 of the RFC 8785 (JCS) form without the top-level `integrity` member. Today any user may export. After auth PR 4: only an approver or backup for any layer of the room's pipeline (in dev mode: `users.yaml` `layers`) or an `auditors:` principal; the driver is not on the list; others → `403 not_allowed`. Proposals, approvals and action results then carry `params_hash`, and approvals also `identity`. `?include=shadow` (closed rooms only, else `409 room_open`; `409 not_labelled` before the blind label) adds a top-level `"shadow": {run, events}` member (with `data`) after `"schema"`; it is inside the hashed document, so the hash differs from the plain export. Same access rule |
 | POST | `/api/rooms/{id}/handoffs` | `{to, stay_as_watcher}` | `Event` | driver only; server asks the agent for the summary (can take up to 3 min; this route is exempt from the 60 s request timeout) |
@@ -170,6 +219,8 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/rooms/{id}/shadow/blind` | `{actual_layer, root_cause_terms}` | `Event` (`shadow.labelled`) | closed shadow rooms only; once per room (`409 already_decided`); caller must be a member of the room's pipeline: the solo user, or an approver or backup for any layer of that pipeline in `owners.yaml` (in dev mode also a `users.yaml` user whose `layers:` grant a layer the pipeline's `owners:` block does not replace), the same rule as the export minus auditors; else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the six layers, `root_cause_terms` 1–20 strings of 1–200 chars → else `400 validation`; the event carries `identity` with the qualifying `grant` |
 | GET | `/api/rooms/{id}/shadow?include=data,room` | – | `{run: ShadowRun, events: [Event + "shadow": true]}` | closed shadow rooms only; `409 not_labelled` until the blind label; any logged-in user, viewers included (`include=data` too, as with `tool_result.data` on `GET /events`); `events` have their own `seq` and are never fed to the room reducer; `tool_result.data` is omitted unless `include=data`; `include=room` adds `room: {created, labelled, graded}` for the eval builder. `ShadowRun` = `{room_id, status, model, pipeline_map, started_at, first_hypothesis_at, final_hypothesis_at, finished_at, finished_after_close, final_hypothesis, tool_calls, tokens, revealed_at}` (null times when unset; `status` ∈ `queued\|running\|hypothesised\|no_hypothesis\|error\|budget\|interrupted`) |
 | POST | `/api/rooms/{id}/shadow/grade` | `{layer_correct, root_cause, notes?}` | `Event` (`shadow.graded`) | closed, labelled and revealed shadow rooms (before `shadow.revealed` → `409 not_revealed`); same caller rule as `blind`; `root_cause` ∈ `yes\|partial\|no`, `notes` ≤ 2000 chars; re-grade allowed, last wins |
+| GET | `/api/rooms/{id}/usage` | – | `{room_id, pipeline_id, charged: {tokens, cost_usd}, limit: {tokens}, totals: Usage, by_model: [Usage + model]}` | model spend of the room (design `docs/design/cost.md`). `charged` is what the room budget checks: finished calls plus the estimate of a call in flight, so it can run ahead of `totals`; `limit.tokens` is `PIPEROOM_ROOM_TOKEN_BUDGET` (0 = no cap; a shadow run's own cap is not shown). Any logged-in user who may see and read the room, viewers included (the same numbers are in its `agent.usage` events). A room the caller cannot see (tenancy, `docs/design/tenancy.md`) answers `404 not_found` exactly like a missing room; a shadow room answers `409 room_open` while it is open. `by_model` is sorted by model id |
+| GET | `/api/usage?pipeline=&day=` | – | `{pipeline_id, day, charged: {tokens, cost_usd}, limit: {tokens, cost_usd}, totals: Usage, by_model: [Usage + model]}` | model spend of one pipeline on one UTC day, shadow runs included. `pipeline` required (at most 200 bytes, valid UTF-8, no NUL); `day` is `YYYY-MM-DD` (UTC, default today) between `2000-01-01` and `2999-12-31`; else `400 validation`. Visibility is checked first: a pipeline `owners.yaml` does not define, or one outside the caller's tenants, answers `404 not_found` ("pipeline not found") before any role check. Then only an approver or backup for any layer of that pipeline (in dev mode also a `users.yaml` user whose `layers:` grant one), the solo user, or an `auditors:` principal (the export rule of `docs/design/auth.md` §3.4); others `403 not_allowed`. Auditors see only their tenants' pipelines. Rooms with no pipeline id, or a pipeline `owners.yaml` does not know, are counted in buckets this route cannot read; their room route still shows them. `limit` holds `PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET` and `PIPEROOM_PIPELINE_DAILY_COST_USD` (0 = off). A day with no spend answers zeros |
 | GET | `/api/shadow/metrics?pipeline=&since=` | – | `{rooms, labelled, graded, layer_correct, root_cause: {yes, partial, no}, by_status: {…}, median_time_to_first_s, median_time_to_final_s, median_human_mttr_s, total_tokens, tokens_available, per_room: [...]}` | over **every closed shadow room** matching the filters (errors included); `since` RFC 3339 on `closed_at`; medians `-1` when no room has the value; `tokens_available` false when every run reports 0 tokens (demo, plain runner); `per_room` rows: `{room_id, pipeline_id, alert_source, status, opened_at, closed_at, labelled, graded, layer_correct, root_cause, time_to_first_s, time_to_final_s, human_mttr_s, tool_calls, tokens, finished_after_close}`; "N of M matched" = `layer_correct` of `rooms` |
 
 Driver lease: 30 minutes, renewed by any driver action. So that clients folding the log see the same lease as
@@ -207,6 +258,19 @@ closes; `--demo` forces it off.
 - **After a restart** the watcher joins a room that is still open but does not wake the agent. A room closed
   less than `PIPEROOM_WATCH_COOLDOWN` ago (default 60 min) is not re-opened by the same incident.
 - Modes: `PIPEROOM_WATCH_MODE` = `off`, `log` (default: log transitions, open nothing) or `rooms`.
+
+### Spend limits (design `docs/design/cost.md`)
+
+`PIPEROOM_ROOM_TOKEN_BUDGET` (per room, default 2 000 000), `PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET` and
+`PIPEROOM_PIPELINE_DAILY_COST_USD` (per pipeline per UTC day, both `0` = off) are kept in the room database, so a
+restart does not reset them. The caps are soft: each model request is checked before it is sent, and requests in
+flight can run past a cap by what they use beyond their estimates: a room by one request plus a hand-off, a pipeline
+by up to `PIPEROOM_MAX_AGENTS` requests plus in-flight hand-offs. A spent cap stops the agent with an `agent.message` and an idle
+`agent.status` whose detail names the cap and the setting to raise (the room cap keeps its text: `token budget
+reached (N of M); a person must raise PIPEROOM_ROOM_TOKEN_BUDGET or continue manually`). If the spend store
+cannot be reached while any cap is set, the agent stops the same way with a detail that says so; with no cap set it
+goes on and the server logs a warning. The hand-off summary is counted but never refused. Cost is estimated from
+`PIPEROOM_MODEL_PRICES`; a cost cap needs that table.
 
 In a shadow room, steer, suggestion and comment events are logged but never start or wake an agent (the run is one-shot and takes no input).
 

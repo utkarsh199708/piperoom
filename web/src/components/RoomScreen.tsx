@@ -178,7 +178,7 @@ export function RoomScreen() {
 
             {showProposals && (
               <div id={PROPOSAL_ANCHOR} tabIndex={-1} className="scroll-mt-4 focus:outline-none">
-                <ProposalsPanel state={state} user={user} actions={actions} />
+                <ProposalsPanel state={state} user={user} actions={actions} stale={stale} />
               </div>
             )}
 

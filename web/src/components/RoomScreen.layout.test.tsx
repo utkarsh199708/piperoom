@@ -69,7 +69,7 @@ function show(user: CurrentUser, state: RoomState | null, conn: ConnState = 'liv
     conn,
     error,
     actions,
-    stale: false,
+    stale: null,
     dismissStale: vi.fn(),
     reload,
   })

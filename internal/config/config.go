@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -18,7 +19,7 @@ type Config struct {
 	WarehouseDBURL    string // WAREHOUSE_DB_URL (dev warehouse; Postgres)
 	KafkaBrokers      string // KAFKA_BROKERS (comma separated)
 	ConnectURL        string // CONNECT_URL
-	SchemaRegistryURL string // SCHEMA_REGISTRY_URL
+	SchemaRegistryURL string // SCHEMA_REGISTRY_URL; set to "" or "off" (any case) = no Schema Registry, and Load stores ""
 	OwnersFile        string // OWNERS_FILE
 	UsersFile         string // USERS_FILE
 	Model             string // PIPEROOM_MODEL
@@ -87,6 +88,13 @@ type Config struct {
 	// process's leases or claims for its own.
 	ReplicaID string // PIPEROOM_REPLICA_ID
 
+	// ResumeOnTakeover: when a replica takes over the agent lease of a
+	// replica that stopped, "1" resumes an agent that was working (a fresh
+	// run, at most 3 resumes per room per hour); empty or "0" (default) pauses
+	// it as a restart does, until someone steers or mentions @agent
+	// (docs/design/replicas.md section 4.3).
+	ResumeOnTakeover string // PIPEROOM_RESUME_ON_TAKEOVER
+
 	// Built-in watcher (internal/watch). Kept as strings like the other fields;
 	// ParseWatch turns them into typed values and names the env var on error.
 	WatchMode         string // PIPEROOM_WATCH_MODE: off | log | rooms (default log = shadow mode)
@@ -109,8 +117,16 @@ type Config struct {
 	// model; empty = always Model.
 	TriageModel string // PIPEROOM_TRIAGE_MODEL
 	// RoomTokenBudget caps model tokens (input + output) per room; when reached
-	// the agent stops and says so. Empty = default 2000000; "0" = no cap.
+	// the agent stops and says so. Empty = default 2000000; "0" = no cap. The
+	// server keeps the count in the room database (docs/design/cost.md), so it
+	// survives a restart.
 	RoomTokenBudget string // PIPEROOM_ROOM_TOKEN_BUDGET
+
+	// Model spend (docs/design/cost.md). Kept as strings like the shadow
+	// fields; ParseCost types them and names the env var on error.
+	ModelPrices              string // PIPEROOM_MODEL_PRICES: path of the JSON price table (model id -> USD per million tokens: input, output, cache_write, cache_read); empty = no table, so cost is omitted, never guessed
+	PipelineDailyTokenBudget string // PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET: model tokens per pipeline per UTC day, kept in the room database; empty or "0" = off
+	PipelineDailyCostUSD     string // PIPEROOM_PIPELINE_DAILY_COST_USD: estimated USD per pipeline per UTC day, kept in the room database; empty or "0" = off; needs PIPEROOM_MODEL_PRICES
 
 	// RetentionDays deletes whole closed rooms (events, proposals, approvals,
 	// hand-offs) whose closed_at is older than this many days. Open rooms are
@@ -141,6 +157,12 @@ type Config struct {
 	ShadowGrace       string // PIPEROOM_SHADOW_GRACE: Go duration the run may keep going after close; default 0 = cancel at close
 	ShadowTokenBudget string // PIPEROOM_SHADOW_TOKEN_BUDGET: tokens per shadow room; default 500000; "0" = use PIPEROOM_ROOM_TOKEN_BUDGET (there is no uncapped shadow run)
 	ShadowMaxTurns    string // PIPEROOM_SHADOW_MAX_TURNS: model turns per shadow run; default 20
+
+	// Tenancy (docs/design/tenancy.md). Tenants, their members and each
+	// pipeline's connections live in owners.yaml; this only states which
+	// model the operator expects, so a lost tenants: block stops the start
+	// instead of silently showing every room to everyone.
+	TenancyMode string // PIPEROOM_TENANCY_MODE: auto (default) | single | teams
 }
 
 // Load reads the environment and applies dev defaults.
@@ -152,7 +174,7 @@ func Load() Config {
 		WarehouseDBURL:    get("WAREHOUSE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/warehouse?sslmode=disable"),
 		KafkaBrokers:      get("KAFKA_BROKERS", "localhost:29092"),
 		ConnectURL:        get("CONNECT_URL", "http://localhost:8083"),
-		SchemaRegistryURL: get("SCHEMA_REGISTRY_URL", "http://localhost:8081"),
+		SchemaRegistryURL: registryURL(getSet("SCHEMA_REGISTRY_URL", "http://localhost:8081")),
 		OwnersFile:        get("OWNERS_FILE", "dev/owners.yaml"),
 		UsersFile:         get("USERS_FILE", "dev/users.yaml"),
 		Model:             get("PIPEROOM_MODEL", "claude-opus-5-5"),
@@ -193,9 +215,10 @@ func Load() Config {
 		GenericAlertSecret:   get("GENERIC_ALERT_SECRET", ""),
 		DefaultAlertPipeline: get("DEFAULT_ALERT_PIPELINE", ""),
 
-		MaxAgents:       get("PIPEROOM_MAX_AGENTS", ""),
-		MaxAgentsGlobal: get("PIPEROOM_MAX_AGENTS_GLOBAL", ""),
-		ReplicaID:       get("PIPEROOM_REPLICA_ID", ""),
+		MaxAgents:        get("PIPEROOM_MAX_AGENTS", ""),
+		MaxAgentsGlobal:  get("PIPEROOM_MAX_AGENTS_GLOBAL", ""),
+		ReplicaID:        get("PIPEROOM_REPLICA_ID", ""),
+		ResumeOnTakeover: get("PIPEROOM_RESUME_ON_TAKEOVER", ""),
 
 		WatchMode:         get("PIPEROOM_WATCH_MODE", DefaultWatchMode),
 		WatchInterval:     get("PIPEROOM_WATCH_INTERVAL", DefaultWatchInterval),
@@ -210,6 +233,10 @@ func Load() Config {
 		VertexRegion:    get("VERTEX_REGION", ""),
 		TriageModel:     get("PIPEROOM_TRIAGE_MODEL", ""),
 		RoomTokenBudget: get("PIPEROOM_ROOM_TOKEN_BUDGET", ""),
+
+		ModelPrices:              get("PIPEROOM_MODEL_PRICES", ""),
+		PipelineDailyTokenBudget: get("PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET", ""),
+		PipelineDailyCostUSD:     get("PIPEROOM_PIPELINE_DAILY_COST_USD", ""),
 
 		RetentionDays: get("PIPEROOM_RETENTION_DAYS", ""),
 
@@ -231,7 +258,35 @@ func Load() Config {
 		ShadowGrace:       get("PIPEROOM_SHADOW_GRACE", DefaultShadowGrace),
 		ShadowTokenBudget: get("PIPEROOM_SHADOW_TOKEN_BUDGET", DefaultShadowTokenBudget),
 		ShadowMaxTurns:    get("PIPEROOM_SHADOW_MAX_TURNS", DefaultShadowMaxTurns),
+
+		TenancyMode: get("PIPEROOM_TENANCY_MODE", TenancyAuto),
 	}
+}
+
+// Tenancy modes (docs/design/tenancy.md section 4).
+const (
+	// TenancyAuto follows owners.yaml: a tenants: block turns the tenant
+	// filter on (teams); no block keeps one tenant (single).
+	TenancyAuto = "auto"
+	// TenancySingle requires owners.yaml to have no tenants: block. Every
+	// signed-in user sees every room, as before tenancy.
+	TenancySingle = "single"
+	// TenancyTeams requires a tenants: block. A user sees only the rooms of
+	// pipelines in their tenants.
+	TenancyTeams = "teams"
+)
+
+// ParseTenancyMode validates PIPEROOM_TENANCY_MODE. Empty means auto. The
+// caller compares the result with owners.yaml; this function does no I/O.
+func ParseTenancyMode(c Config) (string, error) {
+	m := strings.ToLower(strings.TrimSpace(c.TenancyMode))
+	switch m {
+	case "":
+		return TenancyAuto, nil
+	case TenancyAuto, TenancySingle, TenancyTeams:
+		return m, nil
+	}
+	return "", fmt.Errorf("config: PIPEROOM_TENANCY_MODE=%q: want auto, single or teams", c.TenancyMode)
 }
 
 // Login defaults (docs/design/auth.md §6).
@@ -291,6 +346,83 @@ func ParseShadow(c Config) (Shadow, error) {
 	}
 	sh.MaxTurns = int(n)
 	return sh, nil
+}
+
+// Cost holds the typed spend settings (docs/design/cost.md).
+type Cost struct {
+	// PricesFile is the PIPEROOM_MODEL_PRICES path; "" = no price table, so
+	// every cost is omitted and no cost budget can be set.
+	PricesFile string
+	// PipelineDailyTokens caps model tokens per pipeline per UTC day; 0 = off.
+	PipelineDailyTokens int64
+	// PipelineDailyCostUSD caps the estimated cost per pipeline per UTC day,
+	// in USD; 0 = off.
+	PipelineDailyCostUSD float64
+}
+
+// MaxPipelineDailyCostUSD bounds PIPEROOM_PIPELINE_DAILY_COST_USD, so the cap
+// in millionths of a USD (the unit the spend tables keep) fits an int64.
+const MaxPipelineDailyCostUSD = 1_000_000_000
+
+// ParseCost validates the spend fields. Empty means off (no table, no cap).
+// PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET is a whole number, "0" = off.
+// PIPEROOM_PIPELINE_DAILY_COST_USD is a plain decimal such as 25 or 12.50
+// with at most six decimals, "0" = off; a value above 0 needs
+// PIPEROOM_MODEL_PRICES. The price file itself is read by the agent package
+// at start-up.
+func ParseCost(c Config) (Cost, error) {
+	out := Cost{PricesFile: strings.TrimSpace(c.ModelPrices)}
+	var err error
+	if out.PipelineDailyTokens, err = parseWholeNumber("PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET", c.PipelineDailyTokenBudget, "0", true); err != nil {
+		return Cost{}, err
+	}
+	if out.PipelineDailyCostUSD, err = parseUSD("PIPEROOM_PIPELINE_DAILY_COST_USD", c.PipelineDailyCostUSD); err != nil {
+		return Cost{}, err
+	}
+	if out.PipelineDailyCostUSD > 0 && out.PricesFile == "" {
+		return Cost{}, fmt.Errorf("config: PIPEROOM_PIPELINE_DAILY_COST_USD=%q needs PIPEROOM_MODEL_PRICES: without a price table there is no cost to count", c.PipelineDailyCostUSD)
+	}
+	return out, nil
+}
+
+// maxUSDDecimals is the finest amount PIPEROOM_PIPELINE_DAILY_COST_USD takes:
+// one millionth of a USD, the unit the spend tables keep.
+const maxUSDDecimals = 6
+
+// parseUSD parses a plain non-negative decimal amount (digits, at most one
+// point with digits on both sides, at most six decimals); empty is 0.
+// Exponents, signs, NaN, Inf and amounts finer than the stored millionth are
+// refused so a typo cannot turn into an unexpected cap.
+func parseUSD(name, v string) (float64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	digits, points, decimals := 0, 0, 0
+	for i, r := range v {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+			if points > 0 {
+				decimals++
+			}
+		case r == '.' && points == 0 && i > 0 && i < len(v)-1:
+			points++
+		default:
+			return 0, fmt.Errorf("config: %s=%q: want a plain amount in USD such as 25 or 12.50", name, v)
+		}
+	}
+	if decimals > maxUSDDecimals {
+		return 0, fmt.Errorf("config: %s=%q: at most %d decimal places (millionths of a USD)", name, v, maxUSDDecimals)
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || digits == 0 {
+		return 0, fmt.Errorf("config: %s=%q: want a plain amount in USD such as 25 or 12.50", name, v)
+	}
+	if f > MaxPipelineDailyCostUSD {
+		return 0, fmt.Errorf("config: %s=%q: too large (at most %d)", name, v, MaxPipelineDailyCostUSD)
+	}
+	return f, nil
 }
 
 // parseWholeNumber parses a non-negative whole number; empty uses def. With
@@ -411,6 +543,16 @@ func getSet(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// registryURL maps "off" to "": a pipeline without a Schema Registry says so
+// explicitly, instead of every client and map chasing an unreachable default.
+func registryURL(v string) string {
+	v = strings.TrimSpace(v)
+	if strings.EqualFold(v, "off") {
+		return ""
+	}
+	return v
 }
 
 func get(key, def string) string {

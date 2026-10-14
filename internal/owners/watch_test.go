@@ -1,6 +1,7 @@
 package owners
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ func TestWatchDefaultsWhenAbsent(t *testing.T) {
 	p, _ := o.Pipeline("orders")
 	w := p.Watch()
 	want := DefaultWatch()
-	if w != want {
+	if !reflect.DeepEqual(w, want) {
 		t.Fatalf("Watch() = %+v, want defaults %+v", w, want)
 	}
 	if !w.Enabled || w.Slot != "" || w.WALHeadroomBytes != 0 {
@@ -38,7 +39,7 @@ func TestWatchDefaultsWhenAbsent(t *testing.T) {
 		}
 	}
 	// A pipeline built in code (no Load) also gets defaults.
-	if (Pipeline{ID: "x"}).Watch() != want {
+	if !reflect.DeepEqual((Pipeline{ID: "x"}).Watch(), want) {
 		t.Fatal("zero Pipeline should return defaults")
 	}
 }
@@ -142,7 +143,7 @@ func TestWatchEmptyBlock(t *testing.T) {
 			t.Fatalf("Load(%q): %v", block, err)
 		}
 		p, _ := o.Pipeline("orders")
-		if p.Watch() != DefaultWatch() {
+		if !reflect.DeepEqual(p.Watch(), DefaultWatch()) {
 			t.Fatalf("%q: Watch() = %+v, want defaults", block, p.Watch())
 		}
 	}
