@@ -30,6 +30,10 @@ import (
 // Explicit <@U…> markup still works inside a verbatim:true text object
 // (https://docs.slack.dev/reference/block-kit/composition-objects/text-object).
 
+// The pages are: approval needed (proposal.created, to the required layers'
+// owners), hand-off (handoff.created, to Users[to.id]) and no active driver
+// (control.lease_expired, to Users[driver.id] plus NoDriver).
+
 // slackUserID is the shape of a Slack member ID. It also keeps `|`, `>` and
 // spaces out of a configured ID, so a config typo cannot break the markup.
 var slackUserID = regexp.MustCompile(`^[UW][A-Z0-9]{8,20}$`)
@@ -51,13 +55,17 @@ type PagingLimits struct {
 // IDs come from owner/config data, never from events.
 type PagingOptions struct {
 	Layers map[string][]string // required layer name -> Slack user IDs of its owners
-	Users  map[string]string   // Piperoom user ID (hand-off "to") -> Slack user ID
-	Limits PagingLimits
+	Users  map[string]string   // Piperoom user ID (hand-off "to", lapsed driver) -> Slack user ID
+	// NoDriver are the on-call Slack IDs paged, besides the lapsed driver, when
+	// a driver lease expires and the room has nobody steering.
+	NoDriver []string
+	Limits   PagingLimits
 }
 
 type pager struct {
 	layers map[string][]string
 	users  map[string]string
+	noDrv  []string
 	lim    PagingLimits
 	now    func() time.Time
 
@@ -70,7 +78,7 @@ type pager struct {
 
 // newPager validates o. It returns nil when nothing is allow-listed.
 func newPager(o PagingOptions) (*pager, error) {
-	if len(o.Layers) == 0 && len(o.Users) == 0 {
+	if len(o.Layers) == 0 && len(o.Users) == 0 && len(o.NoDriver) == 0 {
 		return nil, nil
 	}
 	p := &pager{
@@ -98,6 +106,12 @@ func newPager(o PagingOptions) (*pager, error) {
 		}
 		p.layers[layer] = append([]string(nil), ids...)
 	}
+	for _, id := range o.NoDriver {
+		if !slackUserID.MatchString(id) {
+			return nil, fmt.Errorf("slackbridge: paging: a no-driver on-call entry is not a valid Slack user ID")
+		}
+	}
+	p.noDrv = append([]string(nil), o.NoDriver...)
 	for user, id := range o.Users {
 		if user == "" || !slackUserID.MatchString(id) {
 			return nil, fmt.Errorf("slackbridge: paging: user %q has an empty key or an invalid Slack user ID", user)
@@ -215,6 +229,36 @@ func (p *pager) message(r *renderer, e events.Event) (m message, keys []pageKey,
 		}
 		text := ":handshake: " + mention(id) + " " + clip(actorName(e.Actor), 100) + " is handing this room over to you"
 		return r.pageMessage(e.RoomID, "Hand-off to you: ", []string{mention(id)}, actorName(e.Actor), text, "Accept the hand-off in Piperoom"), []pageKey{k}, nil
+
+	case events.ControlLeaseExpired:
+		pl, err := events.Decode[events.ControlLeaseExpiredPayload](e)
+		if err != nil {
+			return m, nil, err
+		}
+		// Driver.ID is only a map key. One page per lease: the event is
+		// written once per (room, lease_until), and the key repeats that.
+		reason := "lease:" + pl.LeaseUntil.UTC().Format(time.RFC3339)
+		ids := append([]string(nil), p.noDrv...)
+		if id, listed := p.users[pl.Driver.ID]; listed {
+			ids = append([]string{id}, ids...)
+		}
+		var ms []string
+		picked := map[string]bool{}
+		for _, id := range ids {
+			k := pageKey{e.RoomID, id, reason}
+			if picked[id] || len(picked) >= maxPagedUsers || !p.check(k, keys) {
+				continue
+			}
+			picked[id] = true
+			keys = append(keys, k)
+			ms = append(ms, mention(id))
+		}
+		if len(keys) == 0 {
+			return m, nil, nil
+		}
+		text := ":rotating_light: *Room has no active driver* " + strings.Join(ms, " ") + "\nThe lease of " +
+			clip(actorName(pl.Driver), 100) + " ran out at " + pl.LeaseUntil.UTC().Format(time.RFC3339) + "."
+		return r.pageMessage(e.RoomID, "No active driver: ", ms, actorName(pl.Driver), text, "Take control in Piperoom"), keys, nil
 	}
 	return m, nil, nil
 }

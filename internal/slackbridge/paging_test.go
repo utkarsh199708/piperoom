@@ -19,12 +19,15 @@ import (
 const (
 	owner1 = "U0ARJUN01"
 	owner2 = "U0BO0001A"
+	owner3 = "U0ANA0001" // lapsed driver "ana"
+	oncall = "U0ONCALL1" // NoDriver
 )
 
 func pagingOpts() PagingOptions {
 	return PagingOptions{
-		Layers: map[string][]string{"kafka": {owner1}},
-		Users:  map[string]string{"bo": owner2},
+		Layers:   map[string][]string{"kafka": {owner1}},
+		Users:    map[string]string{"bo": owner2, "ana": owner3},
+		NoDriver: []string{oncall},
 	}
 }
 
@@ -44,7 +47,7 @@ func jsonStrings(v any, out *[]string) {
 	}
 }
 
-var trustedMarkup = regexp.MustCompile(`<@(` + owner1 + `|` + owner2 + `)>|<https://pr\.example/rooms/r1\|Open room>`)
+var trustedMarkup = regexp.MustCompile(`<@(` + owner1 + `|` + owner2 + `|` + owner3 + `|` + oncall + `)>|<https://pr\.example/rooms/r1\|Open room>`)
 
 // assertOnlyTrustedMarkup fails if any request holds a < or > that is not an
 // allow-listed mention or our own room link, i.e. if event text could render
@@ -125,19 +128,21 @@ func TestPagingInjectionInEveryTextField(t *testing.T) {
 				ev(7, events.HandoffCreated, a, events.HandoffCreatedPayload{To: events.Actor{ID: "bo", Name: a},
 					Summary: events.HandoffSummary{WhatBroke: a, Why: a, Open: []string{a}, Risks: []string{a}}}),
 				ev(8, events.HandoffAccepted, a, struct{}{}),
-				ev(9, events.RoomClosed, a, events.RoomClosedPayload{Resolution: a}),
+				ev(9, events.ControlLeaseExpired, "system", events.ControlLeaseExpiredPayload{
+					Driver: events.Actor{ID: "ana", Name: a}, LeaseUntil: time.Unix(1700000000, 0)}),
+				ev(10, events.RoomClosed, a, events.RoomClosedPayload{Resolution: a}),
 			}
 			fs := &fakeSlack{}
 			b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) { o.Paging = pagingOpts() })
 			if err := b.Run(context.Background(), "r1"); err != nil {
 				t.Fatal(err)
 			}
-			if fs.count() != 11 { // 9 mirrored + proposal page + hand-off page
-				t.Fatalf("requests = %d, want 11", fs.count())
+			if fs.count() != 13 { // 10 mirrored + proposal, hand-off and lease pages
+				t.Fatalf("requests = %d, want 13", fs.count())
 			}
 			assertOnlyTrustedMarkup(t, fs.reqs, a)
 			n, ids := mentionCount(fs.reqs)
-			if n != 2 || len(ids) != 2 || ids[owner1] == 0 || ids[owner2] == 0 {
+			if n != 3 || len(ids) != 4 || ids[owner1] == 0 || ids[owner2] == 0 || ids[owner3] == 0 || ids[oncall] == 0 {
 				t.Errorf("mentions: messages=%d ids=%v", n, ids)
 			}
 			raw, _ := json.Marshal(fs.reqs)
@@ -171,6 +176,82 @@ func TestPagingNotAllowListed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func leaseEvent(seq int64, driverID string, until time.Time) events.Event {
+	return ev(seq, events.ControlLeaseExpired, "system", events.ControlLeaseExpiredPayload{
+		Driver: events.Actor{ID: driverID, Name: "Ana"}, LeaseUntil: until})
+}
+
+// Lease expiry pages the lapsed driver (if allow-listed) and the on-call IDs.
+// A driver ID that is not a Users key, even a Slack-looking one, pages nobody.
+func TestPagingLeaseExpired(t *testing.T) {
+	until := time.Unix(1700000000, 0)
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"})
+	cases := []struct {
+		name   string
+		opts   PagingOptions
+		driver string
+		want   []string // mentioned IDs, sorted by name below
+	}{
+		{"listed driver and on-call", pagingOpts(), "ana", []string{oncall, owner3}},
+		{"unlisted driver: on-call only", pagingOpts(), "U0EVIL001", []string{oncall}},
+		{"driver id is an allow-listed Slack ID, not a key", pagingOpts(), owner3, []string{oncall}},
+		{"no on-call configured, unlisted driver", PagingOptions{Users: map[string]string{"ana": owner3}}, "zed", nil},
+		{"no on-call configured, listed driver", PagingOptions{Users: map[string]string{"ana": owner3}}, "ana", []string{owner3}},
+		{"on-call only", PagingOptions{NoDriver: []string{oncall}}, "ana", []string{oncall}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fs := &fakeSlack{}
+			b, _, _ := newBridge(t, &fakeStore{evs: []events.Event{created, leaseEvent(2, c.driver, until)}}, fs, func(o *Options) { o.Paging = c.opts })
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			_ = b.Run(ctx, "r1")
+			_, ids := mentionCount(fs.reqs)
+			if len(ids) != len(c.want) {
+				t.Fatalf("mentioned %v, want %v", ids, c.want)
+			}
+			for _, w := range c.want {
+				if ids[w] == 0 {
+					t.Errorf("%s not paged: %v", w, ids)
+				}
+			}
+			if fs.count() != 3-boolToInt(len(c.want) == 0) { // parent, lease notice, page
+				t.Errorf("requests = %d", fs.count())
+			}
+			assertOnlyTrustedMarkup(t, fs.reqs, c.name)
+		})
+	}
+	t.Run("same lease twice pages once, a new lease later pages again", func(t *testing.T) {
+		st := &fakeStore{evs: []events.Event{created, leaseEvent(2, "ana", until), leaseEvent(3, "ana", until)}}
+		fs := &fakeSlack{}
+		b, _, _ := newBridge(t, st, fs, func(o *Options) { o.Paging = pagingOpts() })
+		now := time.Unix(1700000000, 0)
+		b.pager.now = func() time.Time { return now }
+		run := func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			_ = b.Run(ctx, "r1")
+		}
+		run()
+		if n, _ := mentionCount(fs.reqs); n != 1 {
+			t.Fatalf("pages = %d, want 1", n)
+		}
+		now = now.Add(11 * time.Minute)
+		st.evs = append(st.evs, leaseEvent(4, "ana", until.Add(15*time.Minute)))
+		run()
+		if n, _ := mentionCount(fs.reqs); n != 2 {
+			t.Errorf("pages = %d, want 2", n)
+		}
+	})
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func TestPagingEmptyAllowListIsOff(t *testing.T) {
@@ -370,6 +451,8 @@ func TestPagingOptionsValidation(t *testing.T) {
 		{Layers: map[string][]string{"": {owner1}}},
 		{Users: map[string]string{"bo": "!here"}},
 		{Users: map[string]string{"": owner1}},
+		{NoDriver: []string{"<!here>"}},
+		{NoDriver: []string{""}},
 	}
 	for i, o := range bad {
 		if _, err := newPager(o); err == nil {
