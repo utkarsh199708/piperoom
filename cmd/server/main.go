@@ -38,6 +38,7 @@ import (
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
+	"piperoom/internal/version"
 	"piperoom/internal/watch"
 	"piperoom/internal/wiring"
 	"piperoom/migrations"
@@ -56,14 +57,25 @@ func run() error {
 	demoMode := flag.Bool("demo", false, "run a scripted fake agent (no real tools/agent)")
 	allowRemote := flag.Bool("allow-remote", false, "DEPRECATED alias of PIPEROOM_DEV_ALLOW_NONLOOPBACK=1: allow dev auth on a non-loopback PIPEROOM_HTTP_ADDR")
 	probe := flag.Bool("healthcheck", false, "probe GET /healthz on PIPEROOM_HTTP_ADDR and exit 0 if healthy (for the container HEALTHCHECK)")
+	showVersion := flag.Bool("version", false, "print the build version and exit")
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Println(version.String())
+		return nil
+	}
 	cfg := config.Load()
 	if *probe {
 		return healthcheck(context.Background(), cfg.HTTPAddr)
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// A bad PIPEROOM_LOG_LEVEL or _FORMAT stops the start before anything is
+	// logged in a format the collector would not parse.
+	log, err := newLogger(cfg, os.Stderr)
+	if err != nil {
+		return err
+	}
 	slog.SetDefault(log)
+	log.Info("server: starting", "version", version.String())
 
 	// The agent cap is cost control: parse it first so a bad value stops the
 	// server before it connects to anything.

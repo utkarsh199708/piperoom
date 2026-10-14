@@ -3,3 +3,5 @@
 allowDevMode: true
 env:
   PIPEROOM_AUTH_MODE: dev
+  # Required from R9 for dev mode off loopback (docs: deploy/helm/README.md).
+  PIPEROOM_DEV_ACK: dev-login-has-no-password

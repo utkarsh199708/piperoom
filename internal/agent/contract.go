@@ -18,10 +18,13 @@ import (
 type HumanInput struct {
 	Seq       int64        `json:"seq"` // room event seq it came from
 	Actor     events.Actor `json:"actor"`
-	Kind      string       `json:"kind"` // "steer" | "comment" | "approval_result" | "action_result"
+	Kind      string       `json:"kind"` // "steer" | "comment" | "approval_result" | "action_result" | "alert_update"
 	StepID    string       `json:"step_id,omitempty"`
 	CommentID string       `json:"comment_id,omitempty"`
-	Text      string       `json:"text"`
+	// Text of an "alert_update" is the server's rendering of a re-fired or
+	// joined alert's evidence (AlertEvidenceText). It is untrusted data, it
+	// never wakes an idle agent and never resets the turn guard. (F6)
+	Text string `json:"text"`
 	// OK is set only for Kind "action_result": true when the step succeeded,
 	// false when it failed. Nil means the outcome is unknown, and the agent must
 	// then never claim the pipeline recovered.
@@ -66,6 +69,24 @@ type Alert struct {
 	Raw        json.RawMessage `json:"raw,omitempty"`
 	// PipelineMap is a text rendering of the topology, given to the model up front.
 	PipelineMap string `json:"pipeline_map"`
+	// Triage is the triage pass's result when it ran before this run (nil
+	// otherwise). Its steps are already in the room log; the runner lists
+	// them as known step ids so a hypothesis may cite them. (F6)
+	Triage *TriageResult `json:"triage,omitempty"`
+}
+
+// TriageResult is what the triage pass returns to its caller. (F6)
+type TriageResult struct {
+	Payload events.AgentTriagePayload `json:"payload"`
+	Steps   []TriageStep              `json:"steps"`
+}
+
+// TriageStep is one read the pass made, for the main run's first message. (F6)
+type TriageStep struct {
+	StepID  string `json:"step_id"`
+	Tool    string `json:"tool"`
+	Summary string `json:"summary"` // the tool summary, redacted; ≤ tools.MaxSummaryBytes
+	IsError bool   `json:"is_error"`
 }
 
 // Deps are the agent's collaborators.
@@ -120,3 +141,22 @@ type Runner func(ctx context.Context, alert Alert, deps Deps, opts Options) erro
 //
 // It makes one model call that turns the room log into a hand-off summary.
 type HandoffWriter func(ctx context.Context, roomEvents []events.Event, opts Options) (events.HandoffSummary, error)
+
+// Triager is implemented by A4 (Endpoint.Triage): one bounded first look on a
+// cheap model, at most 2 read tools, outside the agent pool. It emits its own
+// steps and one agent.triage through deps.Sink and returns the same payload.
+// It returns an error only when nothing was emitted (ctx ended first). (F6)
+type Triager func(ctx context.Context, alert Alert, deps Deps, opts Options) (TriageResult, error)
+
+// PostmortemDraft is a closing summary plus the grounding rules it failed. (F2)
+type PostmortemDraft struct {
+	Summary    events.HandoffSummary
+	Violations []string // CheckHandoff rule names, e.g. "unknown_number"
+}
+
+// PostmortemWriter is implemented by A4 in postmortem.go:
+//
+//	func WritePostmortem(ctx context.Context, roomEvents []events.Event, opts Options) (PostmortemDraft, error)
+//
+// One model call over a closed room's log, grounded like a hand-off. (F2)
+type PostmortemWriter func(ctx context.Context, roomEvents []events.Event, opts Options) (PostmortemDraft, error)

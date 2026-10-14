@@ -14,6 +14,19 @@ vi.mock('@/lib/env', () => ({
   },
 }))
 vi.mock('@/api/client', () => ({ isFixtures: () => flags.fixtures }))
+// What GET /auth/users answers; the menu draws exactly these rows.
+vi.mock('@/hooks/useAuthUsers', () => ({
+  useAuthUsers: () => ({
+    status: 'ready',
+    reload: vi.fn(),
+    data: [
+  { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] },
+  { id: 'priya', name: 'Priya', layers: ['postgres', 'schema-registry'] },
+  { id: 'meera', name: 'Meera', layers: ['warehouse'] },
+  { id: 'kabir', name: 'Kabir', layers: ['consumer'] },
+],
+  }),
+}))
 vi.mock('@/context/user', () => ({
   useCurrentUser: () => ({
     user: { id: 'arjun', name: 'Arjun', layers: ['kafka'] },

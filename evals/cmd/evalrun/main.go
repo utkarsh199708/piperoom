@@ -67,6 +67,8 @@ type flags struct {
 	name        string
 	verbose     bool
 	prices      string
+	commit      string
+	noTap       bool
 	// args are the positional arguments: the candidate of -compare a.json b.json.
 	args []string
 }
@@ -121,6 +123,8 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.name, "name", "", "scenario name for -from-shadow (default shadow-<room id>)")
 	fs.StringVar(&f.out, "o", "", "same as -out")
 	fs.BoolVar(&f.verbose, "v", false, "show the agent's own logs")
+	fs.StringVar(&f.commit, "commit", "", "source revision to record in every result (default: the build's VCS stamp, else git rev-parse HEAD)")
+	fs.BoolVar(&f.noTap, "no-tap", false, "do not put the model tap in front of the Anthropic API; results then record prompt_hash \"untapped\"")
 	// Go's flag package stops at the first positional argument; parse on after
 	// each one so "-compare a.json b.json -fail-on-regression" keeps its flag.
 	for {
@@ -201,14 +205,19 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 			for _, w := range sc.Warnings() {
 				fmt.Fprintf(stderr, "warning: %s: %s\n", sc.Name, w)
 			}
+			for _, n := range sc.Notes() {
+				fmt.Fprintf(stderr, "note: %s: %s\n", sc.Name, n)
+			}
 		}
 		fmt.Fprintf(stdout, "%d scenario(s) OK\n", len(scenarios))
 		return 0, nil
 	}
 
+	cfg := config.Load()
 	// Fail before any work rather than after the first model call; the key
-	// itself is read by the SDK and never touched or logged here.
-	if os.Getenv("ANTHROPIC_API_KEY") == "" {
+	// itself is read by the SDK and never touched or logged here. Bedrock
+	// and Vertex use their own credentials.
+	if p := strings.ToLower(strings.TrimSpace(cfg.ModelProvider)); (p == "" || p == agent.ProviderAnthropic) && os.Getenv("ANTHROPIC_API_KEY") == "" {
 		return 1, errors.New("ANTHROPIC_API_KEY is not set (use -check to validate scenarios without it)")
 	}
 	var baseline *evals.Report
@@ -220,7 +229,6 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 		baseline = &b
 	}
 
-	cfg := config.Load()
 	pricesFile := f.prices
 	if pricesFile == "" {
 		pricesFile = cfg.ModelPrices
@@ -258,8 +266,32 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// The agent runs as in cmd/server: the room service starts the Endpoint
+	// that wiring.NewAgentEndpoint builds. The tap goes in first, because the
+	// SDK reads its base URL when the Endpoint's client is built.
+	var tap *evals.ModelTap
+	if !f.noTap {
+		if tap, err = evals.InstallModelTap(cfg.ModelProvider); err != nil {
+			return 1, err
+		}
+		if tap != nil {
+			defer tap.Close()
+		}
+	}
+	runner, err := evals.NewEndpointRunner(ctx, cfg, logger)
+	if err != nil {
+		return 1, err
+	}
+	commit := f.commit
+	if commit == "" {
+		commit = evals.SourceCommit()
+	}
+
 	rep, runErr := evals.Evaluate(ctx, scenarios, evals.Config{
 		Label:       f.label,
+		Runner:      runner,
+		Tap:         tap,
+		Commit:      commit,
 		Judge:       f.judge,
 		JudgeClient: judgeClient,
 		Options:     opts,

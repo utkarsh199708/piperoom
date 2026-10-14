@@ -143,14 +143,16 @@ describe('applyEvent — every event type', () => {
     expect(s.comments[0].author.id).toBe('arjun')
   })
 
-  it('steer.suggested adds a pending suggestion; steer.sent with id removes it', () => {
+  it('steer.suggested adds a pending suggestion; steer.sent with id marks it accepted', () => {
     let s = applyEvent(
       base(),
       ev(1, 'steer.suggested', { suggestion_id: 'g1', text: 'try X' }, human),
     )
     expect(s.suggestions).toHaveLength(1)
+    expect(s.suggestions[0].status).toBe('pending')
     s = applyEvent(s, ev(2, 'steer.sent', { suggestion_id: 'g1', text: 'try X' }, human))
-    expect(s.suggestions).toHaveLength(0)
+    expect(s.suggestions).toHaveLength(1)
+    expect(s.suggestions[0].status).toBe('accepted')
   })
 
   it('control.requested and control.granted move the driver', () => {
@@ -230,6 +232,40 @@ describe('applyEvent — every event type', () => {
     s = applyEvent(s, ev(2, 'handoff.accepted', { handoff_id: 'h1' }, { kind: 'human', id: 'kabir', name: 'Kabir' }))
     expect(s.handoffs[0].status).toBe('accepted')
     expect(s.driver?.id).toBe('kabir')
+  })
+
+  it('handoff.requested is in flight until handoff.created / handoff.failed with its request_id', () => {
+    const to = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+    const summary = { what_broke: '', why: '', done: [], ruled_out: [], open: [], risks: [] }
+    const requested = ev(
+      1,
+      'handoff.requested',
+      { request_id: 'hr_1', to, stay_as_watcher: true, expires_at: '2026-10-11T10:03:00Z' },
+      human,
+    )
+    let s = applyEvent(base(), requested)
+    expect(s.handoff_request).toMatchObject({ request_id: 'hr_1', stay_as_watcher: true })
+
+    // Another request's ending does not end this one.
+    const other = applyEvent(s, ev(2, 'handoff.failed', { request_id: 'hr_other', reason: 'summary_failed' }, agent))
+    expect(other.handoff_request?.request_id).toBe('hr_1')
+
+    const done = applyEvent(
+      s,
+      ev(2, 'handoff.created', { handoff_id: 'h1', request_id: 'hr_1', to, summary, stay_as_watcher: true }, human),
+    )
+    expect(done.handoff_request).toBeNull()
+    expect(done.handoffs).toHaveLength(1)
+
+    s = applyEvent(s, ev(2, 'handoff.failed', { request_id: 'hr_1', reason: 'summary_failed' }, agent))
+    expect(s.handoff_request).toBeNull()
+    expect(s.handoff_failure).toEqual({ request_id: 'hr_1', reason: 'summary_failed' })
+    // A new request clears the old failure.
+    s = applyEvent(
+      s,
+      ev(3, 'handoff.requested', { request_id: 'hr_2', to, stay_as_watcher: false, expires_at: '2026-10-11T10:06:00Z' }, human),
+    )
+    expect(s.handoff_failure).toBeNull()
   })
 
   it('trace.pinned stores the trace', () => {

@@ -117,16 +117,20 @@ func TestWrongParamsDoNotRecover(t *testing.T) {
 }
 
 // A proposal the room refuses at creation (out of the pipeline's scope)
-// never runs.
+// never exists, so it never runs: the room's own CreateProposal refuses it
+// and the agent gets the refusal, as in production.
 func TestRefusedProposalNeverRuns(t *testing.T) {
 	sc := seedPhased(actionInput("connect_restart_task", true, "restarted"))
 	sc.Resources.Connectors = append(sc.Resources.Connectors, "billing-connector")
 	script := append(goodSchemaChangeScript()[:4],
-		proposal(ps("connect_restart_task", `{"connector":"billing-connector","task":0}`)),
+		step{proposeFix: proposeFixJSON(t, "connect_restart_task", `{"connector":"billing-connector","task":0}`)},
 		step{idle: true})
 	r, tr := evalOnce(t, sc, script)
-	if r.Proposals != 1 || len(r.BadSteps) == 0 {
-		t.Fatalf("the out-of-scope proposal was not created as expected: proposals=%d bad=%v", r.Proposals, r.BadSteps)
+	if r.Proposals != 0 {
+		t.Fatalf("the room created an out-of-scope proposal: proposals=%d", r.Proposals)
+	}
+	if len(r.Attempts) == 0 {
+		t.Errorf("the attempt was not logged")
 	}
 	if got := strings.Join(r.PhasesVisited, ","); got != "broken" {
 		t.Errorf("phases = %s", got)

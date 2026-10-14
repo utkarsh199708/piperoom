@@ -117,10 +117,10 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 |---|---|
 | 400 | `bad_request`, `validation`; after auth PR 3: `login_expired` (login cookie or row missing/expired at `/auth/callback`) |
 | 401 | `unauthenticated`; after auth PR 2: `session_expired` (no, revoked or expired session). Its body also carries the server's mode: `{"error":{"code":"session_expired","message":"…","auth_mode":"dev"\|"oidc"}}` — the web app shows the dev picker or goes to `/auth/login?return=…`. A WebSocket whose session ends gets an `error` frame with code `session_expired` and is then closed with close reason `session_expired` |
-| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`), `not_provisioned` (login gate) |
+| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`; F8: `POST /api/rooms/{id}/label` without being a member of its pipeline), `not_provisioned` (login gate) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB) |
-| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight) |
+| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list). R4: a browser `GET` outside `/api` and `/auth` that sends `Accept: text/html` gets a short HTML page instead (what happened and which of `PIPEROOM_PUBLIC_URL` / `PIPEROOM_ALLOWED_HOSTS` to set; the Host is HTML-escaped and clipped to 100 bytes; its own CSP `default-src 'none'`, no script). Every other request gets the JSON body, whose message never echoes the Host |
 | 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client); R4: `too_many_connections` (WebSocket, before the upgrade; see WebSocket) |
 | 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}?archive=true` could not write the archive, so nothing was deleted) |
@@ -151,11 +151,53 @@ tool or model text. A request refused by a budget is never sent and gets no even
 the room closes still gets one. In a shadow room these events go to the shadow log like every other agent event.
 Clients that do not show cost ignore the type (the web reducer only advances `last_seq` for it).
 ```json
-{ "model": "claude-opus-5-5", "role": "main",          // triage | main | handoff | compaction | judge (reserved)
+{ "model": "claude-opus-5-5", "role": "main",          // triage | main | handoff | compaction | judge (reserved) | postmortem (F2) | first_look (F6, the triage pass)
   "input_tokens": 1200, "cache_creation_input_tokens": 3000, "cache_read_input_tokens": 41000,
   "output_tokens": 900, "latency_ms": 8123,             // 0 for compaction (its time is in the request's)
   "cost_usd": 0.0412 }                                  // omitted when PIPEROOM_MODEL_PRICES has no price for model
 ```
+
+### F-wave events (F0; payloads in `internal/events/events.go`)
+
+Every type below is additive: a client that does not know a type ignores it (the web reducer only advances
+`last_seq`), and every new field on an existing payload is omitted when empty, so events written before F0 and
+their export hashes are unchanged. Text fields from the agent or a tool are untrusted: clients render them as text,
+never as HTML or Markdown.
+
+- **Evidence receipts (F3, implemented by A2/A3 clients and A4).** `agent.tool_result` may carry
+  `provenance: [{kind, target, text, params_redacted?, at, took_ms}]`, the reads behind the summary (≤ 16;
+  `kind` ∈ `sql | http | kafka | registry`; `text` is the statement or request with placeholders, never values,
+  ≤ 2 KiB; each `params_redacted` item ≤ 200 bytes; `target` names a system, never credentials). It is outside
+  `data`, so a cut `data` keeps its receipt. `agent.hypothesis` may carry `unbacked_terms: [string]` (≤ 20, each
+  ≤ 80 bytes): names and numbers in `text` that no cited step's summary contains; they never block the hypothesis.
+  `handoff.created.summary` may carry `violations: [{rule, field, detail}]`, the hand-off checks still failing
+  after the agent's self-correction pass; shown to the recipient before Accept, never blocking.
+- **Fix ceremony (F4).** `ProposalStep` gains `verify?` (one sentence, what the agent checks after the step;
+  part of the hashed proposal, omitted when empty). `proposal.previewed {proposal_id, steps: [{step_index,
+  preview?: {target, current, expected, downstream?, reversible, rollback?, dry_run?: {ok, source, text,
+  skipped?}}, error?}], at}` (system actor, once per proposal after `proposal.created`, informational, **not** part
+  of `params_hash`, may be absent; implemented by A5 with A2's `actions.Preview`). `agent.verification
+  {proposal_id, checks: [{layer, name, ok, detail}], data_flow?: {checked, fresh, sinks: [{table, newest?,
+  baseline?, passed, passed_by?}], detail?}, recovered, verdict, repeat?}` (agent actor, after the last step of a
+  proposal ran) replaces the plain-text `[verification]` `agent.message` (implemented by A4).
+- **Post-mortem (F2, implemented by A5; model pass by A4).** `postmortem.drafted {source: "handoff" | "model" |
+  "events", summary_ref?, summary?, violations?}` and `postmortem.failed {reason: "summary_failed" |
+  "internal_error"}` are written by the system actor **after `room.closed`**, like `shadow.revealed`: clients must
+  accept events after `room.closed`. Never written for an open room or a shadow room. `summary` has the
+  `HandoffSummary` shape; `violations` are rule names only.
+- **Hypothesis verdicts and nudges (F9, implemented by A5).** `hypothesis.verdict {verdict: "confirmed" |
+  "disputed", note?, hypothesis_seq}` (actor: the member who decided). `agent.hypothesis.confirmed` is always
+  `false` as written by the agent: clients and the snapshot derive it (at least one `confirmed` and no `disputed`
+  verdict on the current hypothesis seq); a new `agent.hypothesis` clears every verdict. `approval.nudged
+  {proposal_id, layer}` (actor: the member who nudged); ids only.
+- **Triage (F6, implemented by A4).** `agent.triage {status: "ok" | "failed", reason?, headline?, suspected_layer?,
+  confidence?, evidence_refs, next_check?, model, took_ms}` (agent actor), the triage pass's one-line first look,
+  labelled "triage, unverified" wherever shown. `reason` ∈ `timeout | model_error | budget | refused | no_tools |
+  off`; `evidence_refs` is the pass's own step ids, never `null`. A room may hold several (a re-fire re-runs the pass).
+- **Labels and checklists (F8, implemented by A5).** `room.labelled {actual_layer?, cause, fix_that_worked?,
+  fix_proposal_id?, agent_helped?, identity?}` (a closed room's human label; re-labelling appends, the last wins).
+  `checklist.step_done {step_id, tool_use_id, hit, item, done, note?}` (a person ticked or unticked item `item` of
+  `hits[hit].items` in the `runbook_lookup` result `tool_use_id`).
 
 ### Usage
 The totals and per-model rows of `GET /api/rooms/{id}/usage` and `GET /api/usage` (finished calls only):
@@ -190,7 +232,66 @@ trace or activity feed** — to render a room, the client replays the full event
 ```
 `closed_at` and `resolution` are set by `room.closed`. `required_layers` is always the set of the steps' layers
 (the server derives it; the proposer cannot choose it).
+#### F-wave snapshot fields (F0; implemented by A5 in `internal/room/snapshot.go`)
+
+Additive: each field is absent until the task that implements it lands, and clients must treat an absent field
+as its empty value. The shapes are fixed here.
+```json
+  "closed_by": { "kind": "human", "id": "priya", "name": "Priya", "verified": true },  // F10: closed rooms only, the actor of room.closed (a system actor for retention closes)
+  "hypothesis": { "text": "...", "based_on_steps": ["s_3"], "confidence": "high", "confirmed": true,
+                  "seq": 17,                                  // F9: seq of the agent.hypothesis event
+                  "verdicts": [ { "verdict": "confirmed",     // F9: latest verdict per person on this seq, in seq order
+                                  "by": { "id": "kabir", "name": "Kabir", "verified": true },
+                                  "note": "", "at": "..." } ],
+                  "unbacked_terms": ["order_id"] },           // F3: copied from the agent.hypothesis payload
+  "triage": { "status": "ok", "headline": "...", "suspected_layer": "kafka-connect", "confidence": "medium",
+              "evidence_refs": ["s_1","s_2"], "at": "..." },  // F6: the newest agent.triage, or null
+  "labelled": false,                                          // F8: a room.labelled exists
+  "checklist_done": { "<tool_use_id>:<hit>:<item>": { "by": { "id": "kabir", "name": "Kabir", "verified": true }, "at": "..." } },  // F8: open rooms; last event per key wins, done=false removes the key
+  "postmortem": { "status": "drafted", "source": "handoff" },  // F2: status none | drafting | drafted | failed; source? handoff | model | events; reason? summary_failed | internal_error
+  "insight": { "first_hypothesis_at": null, "time_to_first_hypothesis_s": -1, "final_confidence": "",
+               "steps": 0, "tool_calls": 0, "tool_errors": 0,
+               "usage": { "calls": 0, "unpriced_calls": 0, "tokens": 0, "cost_usd": null, "latency_ms_total": 0 } },  // F11
+  "open_proposals": [ { "...": "...", "preview": { "proposal_id": "p_…", "steps": [ … ], "at": "..." } } ]  // F4: the proposal.previewed payload, absent until it exists
+```
+- `closed_by` (F10, implemented by A5): set from `room.closed`'s actor in `Apply`; absent on open rooms.
+- `hypothesis.seq`, `hypothesis.verdicts` (F9, implemented by A5): `confirmed` is **derived**: at least one
+  `confirmed` and no `disputed` verdict on `seq`; the agent-written `confirmed` is ignored. A new
+  `agent.hypothesis` resets `verdicts` to `[]`. `hypothesis.unbacked_terms` (F3, implemented by A5): `[]` when none.
+- `triage` (F6, implemented by A5): folded from the newest `agent.triage`; `agent.hypothesis` does not clear it.
+  `GET /api/rooms` rows carry it.
+- `labelled`, `checklist_done` (F8, implemented by A5).
+- `postmortem` (F2, implemented by A5): `drafting` from `room.closed` until `postmortem.drafted` or
+  `postmortem.failed` (at most 3 min); `none` on open rooms and shadow rooms.
+- `insight` (F11, implemented by A5): folded from the room log (`agent.step.started`, `agent.tool_call`,
+  `agent.tool_result`, `agent.hypothesis`, `agent.usage`). `time_to_first_hypothesis_s` is whole seconds from
+  `opened_at` to the first `agent.hypothesis`, `-1` before one exists; `tokens` = input + cache creation + cache
+  read + output; `cost_usd` is `null` while no call is priced and a lower bound when `unpriced_calls > 0` (the
+  `Usage` rule); zeros in a shadow room. `GET /api/rooms` rows carry it.
+- `open_proposals[].preview` (F4, implemented by A5): the `proposal.previewed` payload of that proposal.
+
 IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_` proposal, `h_` hand-off, `hr_` hand-off request (R0).
+
+### AgentStats (F11, implemented by A5)
+The answer of `GET /api/pipelines/{pid}/agent-stats`: the agent's track record on one pipeline over closed rooms.
+Numbers only (no titles or hypothesis text).
+```json
+{ "pipeline_id": "orders", "window_days": 90, "generated_at": "…",
+  "rooms": 23, "hypothesised": 21, "labelled": 17, "graded": 17,
+  "layer_correct": 15, "root_cause": {"yes": 11, "partial": 4, "no": 2},
+  "by_confidence": [ {"confidence": "high", "runs": 12, "correct": 11, "accuracy": 0.917},
+                     {"confidence": "medium", "runs": 4, "correct": 2, "accuracy": 0.5},
+                     {"confidence": "low", "runs": 1, "correct": 0, "accuracy": 0} ],
+  "median_time_to_first_hypothesis_s": 48, "median_human_mttr_s": 720,
+  "median_cost_usd": 0.42, "cost_available": true, "enough_data": true,
+  "shadow": {"rooms": 6, "graded": 5, "layer_correct": 4} }
+```
+`by_confidence[]` uses the field names of `evals.ReliabilityBucket` (`confidence, runs, correct, accuracy`;
+`probability` omitted); `correct` = graded `root_cause: yes` (`partial` is not correct). Medians are `-1` when no room
+has the value; `cost_available` is false when every room is unpriced; `enough_data` = `graded >= 10` (clients show
+counts, never a rate, below it). A graded room needs a human grade of the hypothesis: `room.labelled` (F8)
+carries no grade, so a labelled live room counts in `labelled` only, and `graded`, `layer_correct`, `root_cause`
+and `by_confidence` come from shadow rooms until a grade for live rooms is added by a later contract change.
 
 ### Topology (pipeline map)
 ```json
@@ -232,21 +333,26 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 |---|---|---|---|---|
 | GET | `/rooms/{id}` | – | `302` | R4. Deep link (the room link Slack posts); outside `/api`, so no JSON. Signed in, or in dev mode: `302 /#/rooms/{id}`. Signed out in `oidc` mode: `302 /auth/login?return=/rooms/{id}`, and the callback lands back on the link. `{id}` must match `^[A-Za-z0-9_-]{1,64}$`; anything else is never redirected and falls to the web UI or `404`. `HEAD` answers the same |
 | GET | `/healthz` | – | `{status: "ok", version}` | outside `/api`, no auth, exempt from the Host allow-list (probes). `version` (R0; server R9) is the build version linked in with `-ldflags "-X piperoom/internal/version.Version=<v>"` (`internal/version`), `"dev"` for a plain `go build`. Liveness only: it checks nothing else. `GET /readyz` is unchanged (`{status, checks}`, `503` when the store does not answer) |
-| GET | `/api/people` | – | `[{id, name, email?, verified}]` | after auth PR 3: the people a driver may grant control or hand off to: `users.yaml` users plus members with a live session (`LookupPerson`). `email` only for IdP users; pickers show `id` or `email` next to `name`. `verified` is `true` for `users.yaml` users only. Members only: a viewer gets `403 viewer` (the list holds emails and viewers cannot grant or hand off anyway) |
+| GET | `/api/people` | – | `[{id, name, email?, verified, layers}]` | F9 (implemented by A5): `layers` are the layers the person may approve (`LayersFor`; for IdP members from their session groups), `[]` when none. After auth PR 3: the people a driver may grant control or hand off to: `users.yaml` users plus members with a live session (`LookupPerson`). `email` only for IdP users; pickers show `id` or `email` next to `name`. `verified` is `true` for `users.yaml` users only. Members only: a viewer gets `403 viewer` (the list holds emails and viewers cannot grant or hand off anyway) |
 | GET | `/api/me` | – | `{id,name,layers,verified}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request; `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise); `admin: true` when this user has `admin: true` in users.yaml (omitted otherwise); `verified` as for event actors |
-| GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first; with `tenants:` only the rooms of your tenants (see Tenants above) |
+| GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first; with `tenants:` only the rooms of your tenants (see Tenants above). Rows carry `triage` (F6) and `insight` (F11) like `GET /api/rooms/{id}`; the same list is pushed by `GET /api/rooms/ws` (F6, see WebSocket) |
 | POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation`. R4: `title` at most 200 characters (Unicode code points), else `400 validation` (the message gives the length and the limit, never the text). An alert's title is clipped to 200 with `…` instead, so an alert is never refused for it |
 | POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |
 | POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert (label, `PAGERDUTY_SERVICES` map, owners match, or `DEFAULT_ALERT_PIPELINE`); the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name) and `dedup_key`. With a `tenants:` block in `owners.yaml` the `200`/`201` body is `{"room_id": "r_…", "created": true\|false}` instead of the `RoomSnapshot`: a source secret is shared by every tenant, so the reply carries no room content. |
 | GET | `/api/rooms/{id}` | – | `RoomSnapshot` | |
 | GET | `/api/rooms/{id}/events?after=0&limit=500` | – | `{events:[Event], last_seq}` | limit max 1000; `events` is `[]` when nothing is after `after` |
 | POST | `/api/rooms/{id}/comments` | `{step_id?, text}` | `Event` | `@agent` in text sets `mentions_agent`. R4: `text` at most 4000 characters (code points), else `400 validation` |
-| POST | `/api/rooms/{id}/steer` | `{text}` | `Event` | driver → `steer.sent`; others → `steer.suggested`. R4: `text` at most 4000 characters (code points), else `400 validation` |
+| POST | `/api/rooms/{id}/steer` | `{text}` | `Event` | driver → `steer.sent`; others (also when no one drives or the lease expired) → `steer.suggested`, kept for the next driver (F5, implemented by A5; existing behaviour: a suggestion stays in `pending_suggestions` across `control.granted` and never wakes the agent; viewers `403 viewer`, closed rooms `409 room_closed`). R4: `text` at most 4000 characters (code points), else `400 validation` |
 | POST | `/api/rooms/{id}/suggestions/{sid}/send` | – | `Event` | driver only; emits `steer.sent` with `suggestion_id` |
 | POST | `/api/rooms/{id}/suggestions/{sid}/decline` | `{reason?}` | `Event` (`steer.declined`) | R0; server R11. Driver only (`403 not_driver`); open rooms only (`409 room_closed`); unknown `sid`, or one of another room, `404 not_found`; a suggestion that is no longer pending (sent or declined) `409 already_decided`, the same answer as a second `send`, so a retry after a lost response is safe to treat as done. `reason` optional, at most 500 characters, typed-text rule above (else `400 validation`). The suggestion leaves `pending_suggestions`; the agent never sees it |
 | POST | `/api/rooms/{id}/control/request` | – | `Event` | |
 | POST | `/api/rooms/{id}/control/grant` | `{to}` | `Event` | driver only, or anyone if no driver / lease expired |
 | POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only; a shadow room refuses an empty resolution with `400 validation`. A full room log never refuses `room.closed` |
+| POST | `/api/rooms/{id}/hypothesis` | `{verdict: "confirmed"\|"disputed", note?}` | `Event` (`hypothesis.verdict`) | F9 (server F9b, implemented by A5; web F9c, A6). Any member (viewers `403 viewer`); open rooms only (`409 room_closed`); a shadow room `409 room_open`; no hypothesis yet `409 no_hypothesis`; the same person repeating the same verdict on the same hypothesis `409 already_decided`; `note` ≤ 500 characters, typed-text rule. The event carries `hypothesis_seq`; a new `agent.hypothesis` clears every verdict. The agent receives it as a comment and wakes. Renews the driver lease only when the caller is the driver |
+| POST | `/api/rooms/{id}/nudge` | `{proposal_id, layer}` | `Event` (`approval.nudged`) | F9 (implemented by A5). Any member (viewers `403 viewer`); open rooms (`409 room_closed`); the proposal must be open and `layer` pending on it (`409 already_decided`); one per proposal and layer per 10 minutes (`409 already_nudged`). Mirrored to the Slack thread when the bridge is on (C12 follow-up) |
+| POST | `/api/rooms/{id}/label` | `{actual_layer?, cause, fix_that_worked?, fix_proposal_id?, agent_helped?}` | `Event` (`room.labelled`) | F8 (implemented by A5). Closed rooms only (`409 room_open`); caller = member of the room's pipeline (the `shadow/blind` rule), else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the six layers or absent; `cause` 1–500 characters, `fix_that_worked` ≤ 500, typed-text rule; `fix_proposal_id` must be a proposal of this room with an executed step (`400 validation`); re-label allowed, last wins. A shadow room still needs `shadow/blind` first (`409 not_labelled`) so the blind label stays blind. The event carries `identity` like `shadow.labelled` |
+| POST | `/api/rooms/{id}/checklist` | `{step_id, tool_use_id, hit, item, done, note?}` | `Event` (`checklist.step_done`) | F8 (implemented by A5). Open rooms only (`409 room_closed`); any member (viewers `403 viewer`); `tool_use_id` must be a `runbook_lookup` result of this room and `hit`/`item` within its `data` (`400 validation`); `note` ≤ 300 characters, typed-text rule; idempotent (the same state again still appends) |
+| GET | `/api/rooms/{id}/postmortem.md` | – | `text/markdown` | F2 (server F2b, implemented by A5; web F2a, A6). The room rendered as a post-mortem draft: timeline, root cause, actions + approvers, verification, open items, risks, agent cost; see `docs/design/postmortem.md` for the section list. Same access as `GET /api/rooms/{id}/events` (viewers included; tenancy `404 not_found`). Open rooms answer the draft so far. `?download=1` adds `Content-Disposition: attachment`. Every string from the log is Markdown-escaped; clients show it as text, never as HTML. Own timeout like the export. Headers `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` |
 | POST | `/api/rooms/{id}/extend` | – | `Event` (`room.extended`) | driver only (`403 not_driver`); open rooms only (`409 room_closed`); once per room (`409 already_extended`); `400 validation` when `PIPEROOM_MAX_OPEN_DAYS=0`. Moves the auto-close deadline by `PIPEROOM_MAX_OPEN_DAYS` days and renews the driver lease. See Room limits |
 | DELETE | `/api/rooms/{id}?reason=&archive=` | – (send `Content-Type: application/json` like every non-GET) | `{room_id, pipeline_id, deleted_by, deleted_at, reason, event_count, archived, archive_removed}` | admin only (users.yaml `admin: true`): any other member `403 not_allowed`, a viewer `403 viewer`, checked first, before the `archive` value and before the room is looked up. Then tenancy: a room whose pipeline the admin may not see (the live room's pipeline, or the pipeline in its audit row) answers `404 not_found` like a room that never existed. `reason` 1–500 characters, else `400 validation`. **A delete is an erase**: it hard-deletes the room (open or closed) with its events, proposals, approvals, steps, suggestions, hand-offs, Slack thread state and shadow rows, keeps no copy, and writes one content-free audit row (`room_deletions`). `archive=true` writes the room's export to `PIPEROOM_ARCHIVE_DIR` first (`400 validation` when the server has no archive directory, or for a value other than `true`/`false`; a failed write is `500 archive_failed` and nothing is deleted). `event_count` is the number of events deleted; `archived` is true when an export of the room is in the archive directory. An erase (no `archive=true`) also removes an export of the room left in `PIPEROOM_ARCHIVE_DIR` by an earlier failed attempt or retention run, after the database delete commits; `archive_removed` is then true. Idempotent: a room already deleted, by an admin or by retention, answers `200` with its audit row (`deleted_by: "system"` for retention) and changes nothing; an id that never existed is `404 not_found`. Open WebSockets of the room get a last `room.deleted` frame and close (see WebSocket) |
 | POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step (`{proposal_id, step_index, ok, output, params_hash, outcome_unknown?}`; `outcome_unknown: true` with `ok: false` when the server running the step stopped before it recorded the result: the step is never run again, check the target before retrying). After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode); `identity.email` is the session's verified IdP email, else the `users.yaml` `email:` (omitted when neither exists), so a decision is tied to the actor id and a mailbox, never to the name alone. `approval.rejected`, `shadow.labelled` and `shadow.graded` carry the same `identity.email` |
@@ -256,6 +362,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/handoffs/{hid}/accept` | – | `Event` | only the `to` user; moves driver role |
 | GET | `/api/pipelines` | – | `[{id, title, shadow}]` | R0; server R4, web R3. The pipelines this server knows: every pipeline of `owners.yaml`, in file order (with a `tenants:` block, only those of the caller's tenants; the solo user sees all). `title` is the pipeline's `title:` (`""` when unset); `shadow` is `true` when its `shadow:` block is enabled (rooms from alerts open as shadow rooms). Any logged-in user, viewers included. No other field (connections, owners, watch settings) is returned. `[]` when there are none: clients must not fall back to a made-up pipeline id such as `orders`; the new-room form then has no pipeline to offer |
 | GET | `/api/pipelines/{pid}/topology` | – | `Topology` | unknown pipeline → `404 not_found` |
+| GET | `/api/pipelines/{pid}/agent-stats?days=90` | – | `AgentStats` | F11 (server F11a, implemented by A5; web F11b, A6). The agent's track record on one pipeline over the last `days` (1–365, default 90, else `400 validation`) of **closed** rooms: counts, graded hit rate, reliability by confidence (`by_confidence[]` with the field names of `evals.ReliabilityBucket`), medians of time to first hypothesis, human MTTR and cost, plus the shadow subset. Visibility first (`404 not_found` for an unknown pipeline or one outside the caller's tenants), then any logged-in user, viewers included. `enough_data` is false under 10 graded rooms: clients show counts, never a rate. Cached 2 minutes per pipeline. Sources: `shadow.labelled/graded` and F8's `room.labelled`; before F8 only shadow rooms are graded |
 | POST | `/api/rooms/{id}/trace` | `{table, key}` | `Event` | runs a record trace; emits `trace.pinned`; table not in the pipeline or empty key → `400 validation` |
 | POST | `/api/rooms/{id}/shadow/blind` | `{actual_layer, root_cause_terms}` | `Event` (`shadow.labelled`) | closed shadow rooms only; once per room (`409 already_decided`); caller must be a member of the room's pipeline: the solo user, or an approver or backup for any layer of that pipeline in `owners.yaml` (in dev mode also a `users.yaml` user whose `layers:` grant a layer the pipeline's `owners:` block does not replace), the same rule as the export minus auditors; else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the six layers, `root_cause_terms` 1–20 strings of 1–200 chars → else `400 validation`; the event carries `identity` with the qualifying `grant` |
 | GET | `/api/rooms/{id}/shadow?include=data,room` | – | `{run: ShadowRun, events: [Event + "shadow": true]}` | closed shadow rooms only; `409 not_labelled` until the blind label; any logged-in user, viewers included (`include=data` too, as with `tool_result.data` on `GET /events`); `events` have their own `seq` and are never fed to the room reducer; `tool_result.data` is omitted unless `include=data`; `include=room` adds `room: {created, labelled, graded}` for the eval builder. `ShadowRun` = `{room_id, status, model, pipeline_map, started_at, first_hypothesis_at, final_hypothesis_at, finished_at, finished_after_close, final_hypothesis, tool_calls, tokens, revealed_at}` (null times when unset; `status` ∈ `queued\|running\|hypothesised\|no_hypothesis\|error\|budget\|interrupted`) |
@@ -315,7 +422,16 @@ closes; `--demo` forces it off.
   the watcher started never fire. A pipeline with no DLQ topics costs the watcher no Kafka call.
 - **After a restart** the watcher joins a room that is still open but does not wake the agent. A room closed
   less than `PIPEROOM_WATCH_COOLDOWN` ago (default 60 min) is not re-opened by the same incident.
-- Modes: `PIPEROOM_WATCH_MODE` = `off`, `log` (default: log transitions, open nothing) or `rooms`.
+- Modes: `PIPEROOM_WATCH_MODE` = `off`, `log` (default: log transitions, open nothing) or `rooms`. F6 plans `rooms` as
+  the default; until F6d lands the default stays `log`. The watcher keeps at most `PIPEROOM_WATCH_MAX_OPEN_ROOMS`
+  rooms open at once (default 6; F6, implemented by A7), independent of `PIPEROOM_MAX_AGENTS`.
+- **Alert updates (F6, implemented by A5 and A4).** A join carries the evidence JSON; the service feeds it, and a
+  re-fire of the same alert on any route, to the agent as `HumanInput{kind: "alert_update"}`: the server's rendering
+  of the evidence (`agent.AlertEvidenceText`), wrapped as untrusted data. It never wakes an idle agent and never
+  resets the turn guard; at most one pending `alert_update` per room (a newer one replaces it). It is not an event.
+- **Triage pass (F6, implemented by A4 and A5).** Before an agent slot is taken, a bounded first look
+  (`PIPEROOM_TRIAGE_PASS`, model `PIPEROOM_TRIAGE_PASS_MODEL`, deadline `PIPEROOM_TRIAGE_PASS_TIMEOUT`) writes its
+  own steps and one `agent.triage`; not in shadow rooms or rooms restored after a restart.
 
 ### Spend limits (design `docs/design/cost.md`)
 
@@ -396,7 +512,7 @@ cap was hit; a closed connection frees its slot.
 Server → client messages:
 ```json
 { "type": "event", "event": { ...Event } }
-{ "type": "presence", "members": [ { "id": "priya", "name": "Priya", "verified": true, "state": "viewing" } ] }
+{ "type": "presence", "members": [ { "id": "priya", "name": "Priya", "verified": true, "state": "viewing", "since": "2026-10-11T10:52:00Z" } ] }
 { "type": "error", "error": { "code": "...", "message": "..." } }
 ```
 Client → server:
@@ -404,9 +520,31 @@ Client → server:
 { "type": "presence", "state": "viewing" }    // send every 20 s; "away" when tab hidden
 ```
 The server marks a member `away` after 45 s without any client message (2× the heartbeat plus slack).
+`since` (F9, implemented by A5) is when the member entered its current state on the server (connect time for a new
+member; with several connections, the earliest among those in the winning state), RFC 3339 UTC; clients show
+`away 12m` from it, never from a client-measured time.
 Rules: the server first replays every event with `seq > after`, then streams live events. Events are never skipped or repeated. **On first open of a room the client connects with `after=0`** (full replay); on reconnect it passes its highest seen seq. Presence is not stored in the event log.
 
 Room deleted: when an admin deletes the room, each open connection gets one last frame
 `{ "type": "event", "event": { "room_id": "r_…", "seq": <last_seq + 1>, "type": "room.deleted", "actor": <the admin>, "payload": { "reason": "…" }, "at": "…" } }`
 and is then closed with status 1000 and close reason `room deleted`. That event is never stored; a reconnect gets `404`.
 A connection that was still replaying when the room was deleted gets only the close (same status and reason).
+
+### Room list socket (F6, implemented by A5)
+
+`GET /api/rooms/ws` — same auth, origin rules and per-user connection cap as `/api/rooms/{id}/ws`
+(`429 too_many_connections` before the upgrade). No replay cursor: the first frame is the truth.
+
+Server → client:
+```json
+{ "type": "rooms", "rooms": [RoomSnapshot…] }                 // first frame: exactly GET /api/rooms for this user
+{ "type": "room",  "room": RoomSnapshot }                      // one room changed (opened, updated, closed)
+{ "type": "room_deleted", "room_id": "r_…" }
+{ "type": "error", "error": { "code": "session_expired", "message": "…" } }   // then close, as the room socket
+```
+Client → server: `{ "type": "ping" }` every 20 s (read timeout 60 s). Rules: rooms outside the caller's tenants are
+never sent; a `room` frame is sent only when the room's list-relevant state changed (status, title, severity,
+driver, agent state, triage, hypothesis text and confidence, open proposals and their approvals, pending suggestion
+count, `closed_at`, resolution), so step churn and `last_seq` alone send nothing; at most one frame per room per
+500 ms; a full send buffer closes the socket with a policy-violation status and the client reconnects (it gets a
+fresh `rooms` frame). Clients fall back to polling `GET /api/rooms` when the socket cannot be opened.

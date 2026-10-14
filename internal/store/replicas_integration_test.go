@@ -530,19 +530,17 @@ func TestSafetyPollWhileListening(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for deadline := time.Now().Add(10 * time.Second); !b.HubListening(); time.Sleep(20 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("replica b never started listening")
-		}
+	if err := b.WaitHubListening(ctx); err != nil {
+		t.Fatalf("replica b never started listening: %v", err)
 	}
 	// An event written without pg_notify, as if its notification was lost.
-	// last_seq and the event are one statement, as in PG.Append (one
-	// transaction): as two statements, a feed whose first read landed between
-	// them learned last_seq = 1 with no event yet, and nothing ever woke the
-	// subscriber for an event that was already behind its tail (a flake under
-	// load, never a state the server produces).
-	execSQL(t, schema, `WITH r AS (UPDATE rooms SET last_seq = 1 WHERE id = $1)
-INSERT INTO room_events (room_id, seq, type, actor, payload, at) VALUES ($1, 1, 'comment.added', '{"kind":"human","id":"arjun","name":"Arjun"}', '{"comment_id":"c_silent","text":"x"}', now())`, roomID)
+	// One statement, like Append's one transaction: written as two, a feed
+	// whose first read fell between them took last_seq 1 as its starting
+	// tail before event 1 existed, and its subscriber then waited for an
+	// event the feed would never report (about 6 runs in 100 failed).
+	execSQL(t, schema, `WITH r AS (UPDATE rooms SET last_seq = 1 WHERE id = $1 RETURNING id)
+		INSERT INTO room_events (room_id, seq, type, actor, payload, at)
+		SELECT r.id, 1, 'comment.added', '{"kind":"human","id":"arjun","name":"Arjun"}', '{"comment_id":"c_silent","text":"x"}', now() FROM r`, roomID)
 	select {
 	case e := <-ch:
 		if e.Seq != 1 {

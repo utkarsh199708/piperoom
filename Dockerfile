@@ -18,7 +18,7 @@ COPY web/ ./
 RUN npm run build
 
 # ---- stage 2: server binary -> /out/piperoom --------------------------------
-FROM golang:1.27-alpine AS server
+FROM golang:1.27.2-alpine AS server
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -48,8 +48,7 @@ COPY --from=web /app/dist /web
 # environment.
 ENV PIPEROOM_WEB_DIR=/web \
     PIPEROOM_HTTP_ADDR=0.0.0.0:8090 \
-    PIPEROOM_AUTH_MODE=dev \
-    PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 \
+    PIPEROOM_AUTH_MODE=oidc \
     OWNERS_FILE=/config/owners.yaml \
     USERS_FILE=/config/users.yaml
 
@@ -61,22 +60,22 @@ EXPOSE 8090
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
     CMD ["/piperoom", "--healthcheck"]
 
-# Inside a container the server must listen on 0.0.0.0, or Docker's port
-# mapping cannot reach it. Dev mode refuses a non-loopback address unless
-# PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 (set in ENV above), because dev login has no
-# password: anyone who can reach the port can pick any user. So do not publish
-# this port to the internet. Keep it on the customer's VPN or behind an SSH
-# tunnel.
+# The image carries NO dev auth: no PIPEROOM_DEV_ALLOW_NONLOOPBACK, no dev
+# mode, no users file. Dev login has no password (anyone who can reach the port
+# can pick any user, including approving fixes), so it must be asked for
+# explicitly at run time: deploy/docker-compose.dev-auth.yml, or
+# -e PIPEROOM_AUTH_MODE=dev -e PIPEROOM_DEV_ALLOW_NONLOOPBACK=1.
+# From R9 dev mode off loopback (which a container always is) also needs the
+# acknowledgement -e PIPEROOM_DEV_ACK=dev-login-has-no-password, which the image
+# never sets: the operator states it in their own deployment.
 #
-# A reverse proxy needs PIPEROOM_AUTH_MODE=oidc (real login through the
-# customer's identity provider, set in deploy/.env; docs/design/auth.md sections
-# 5.1 and 5.4). In oidc mode the server ignores PIPEROOM_DEV_ALLOW_NONLOOPBACK
-# and logs a warning about it at every start; that warning is expected. A proxy
-# pilot that cannot use OIDC yet builds from the git tag "pre-auth". The image
-# sets its mode explicitly so a later change of the default cannot lock out this
-# path. See deploy/README.md, "Single sign-on (OIDC)".
+# The image starts in oidc mode and fails fast, with a message naming the
+# missing variable, unless PIPEROOM_PUBLIC_URL (https), PIPEROOM_OIDC_ISSUER,
+# PIPEROOM_OIDC_CLIENT_ID and PIPEROOM_OIDC_CLIENT_SECRET are set (see
+# deploy/README.md, "Single sign-on (OIDC)"). A proxy pilot that cannot use OIDC
+# yet builds from the git tag "pre-auth".
 #
-# These are ENV values, not a flag in ENTRYPOINT, so a command override such as
-# "--demo" still starts a server that Docker's port mapping can reach.
+# Command overrides such as "--demo" are not an auth switch: --demo forces dev
+# mode and, inside a container, still needs PIPEROOM_DEV_ALLOW_NONLOOPBACK=1.
 USER nonroot:nonroot
 ENTRYPOINT ["/piperoom"]
