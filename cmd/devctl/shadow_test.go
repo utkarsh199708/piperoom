@@ -148,6 +148,24 @@ func TestRequireAPIKey(t *testing.T) {
 	}
 }
 
+func TestRequireDevAck(t *testing.T) {
+	get := func(v string) func(string) string { return func(string) string { return v } }
+	if err := requireDevAck(get(config.DevAckValue)); err != nil {
+		t.Fatalf("exact ack: %v", err)
+	}
+	for _, v := range []string{"", "  "} {
+		err := requireDevAck(get(v))
+		if err == nil || !strings.Contains(err.Error(), config.DevAckValue) {
+			t.Fatalf("value %q: err = %v, want it to tell how to set the ack", v, err)
+		}
+	}
+	for _, v := range []string{"1", "true", "yes"} {
+		if err := requireDevAck(get(v)); err == nil || !strings.Contains(err.Error(), "PIPEROOM_DEV_ACK") {
+			t.Fatalf("value %q must be refused, got %v", v, err)
+		}
+	}
+}
+
 func TestShadowPipelines(t *testing.T) {
 	st := repoStack(t)
 	ids, err := shadowPipelines(filepath.Join(st.root, "dev", "owners.shadow.yaml"))
@@ -241,6 +259,21 @@ func TestComposeShadowService(t *testing.T) {
 	if got := svc.Environment["ANTHROPIC_API_KEY"]; got != "${ANTHROPIC_API_KEY:-}" {
 		t.Fatalf("ANTHROPIC_API_KEY = %q: must be a pass-through, never a value, and never required (that would break a plain `up`)", got)
 	}
+	// Dev auth must be explicit here: the image stops baking it in (#127), and the server
+	// then needs the ack (R9). The ack is a pass-through, never a value in the file.
+	for k, want := range map[string]string{
+		"PIPEROOM_AUTH_MODE":             "dev",
+		"PIPEROOM_DEV_ALLOW_NONLOOPBACK": "1",
+		"PIPEROOM_DEV_ACK":               "${PIPEROOM_DEV_ACK:-}",
+		"PIPEROOM_MODEL":                 "${PIPEROOM_MODEL:-}",
+	} {
+		if svc.Environment[k] != want {
+			t.Errorf("%s = %q, want %q", k, svc.Environment[k], want)
+		}
+	}
+	if want := strings.TrimPrefix(shadowURL, "http://"); len(svc.Ports) == 1 && svc.Ports[0] != want+":8090" {
+		t.Errorf("ports = %v: must publish %s:8090 so devctl's shadowURL %s reaches it", svc.Ports, want, shadowURL)
+	}
 	if svc.Environment["PIPEROOM_WATCH_MODE"] != "rooms" {
 		t.Fatal("the watcher must be in rooms mode or no shadow room ever opens")
 	}
@@ -293,6 +326,15 @@ func TestShadowCmd(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("up without the dev ack stops before the lock and Docker", func(t *testing.T) {
+		t.Setenv(apiKeyEnv, "sk-test")
+		t.Setenv(devAckEnv, "")
+		err := shadowCmd(ctx, st, []string{"up", "--owner", "nobody"}, &bytes.Buffer{})
+		if err == nil || !strings.Contains(err.Error(), devAckEnv) {
+			t.Fatalf("err = %v, want it to name %s", err, devAckEnv)
+		}
+	})
 
 	t.Run("up without an API key stops before the lock and Docker", func(t *testing.T) {
 		t.Setenv(apiKeyEnv, "")

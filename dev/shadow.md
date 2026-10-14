@@ -11,6 +11,10 @@ file's shape only (no Docker). Do the checklist at the end the first time.
 ## What you need
 
 - The dev stack: `go run ./cmd/devctl up --owner <tag>` (take the lock first, `docs/collab.md`). `shadow up` also starts any stack service that is down (it shares the compose project), but the connector is only registered by `devctl up`.
+- `PIPEROOM_DEV_ACK=dev-login-has-no-password` in your environment. The shadow server uses dev login (pick
+  a user, no password) inside the container, and newer servers refuse to start that way without this
+  statement. `devctl shadow up` stops with the exact line to export if it is missing; it never sets it for
+  you. The port is published on 127.0.0.1 only.
 - `ANTHROPIC_API_KEY` in your environment. Shadow mode runs the **real** agent, which costs tokens
   (default cap 500 000 per room, 20 turns). `devctl` checks the variable is set; it never prints it or
   writes it to a file.
@@ -32,7 +36,7 @@ starts it) on **http://127.0.0.1:8090** with:
 | `PIPEROOM_WATCH_INTERVAL` / `_COOLDOWN` | `15s` / `5m` (server defaults are 60s / 60m) |
 | `PIPEROOM_SHADOW_GRACE` / `_TOKEN_BUDGET` / `_MAX_TURNS` | `0` / `500000` / `20` |
 | Room database | `piperoom` on the dev Postgres (migrations run at start); data survives `shadow down` |
-| Auth | dev mode (pick a user from `dev/users.yaml`), published on loopback only |
+| Auth | dev mode set explicitly in the compose file (`PIPEROOM_AUTH_MODE=dev`, `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`, `PIPEROOM_DEV_ACK` from your environment), published on loopback only |
 
 Override the numbers with flags; each is checked with the server's own parser before anything is built,
 and the error names the env var:
@@ -47,7 +51,7 @@ devctl shadow up --owner <tag> --grace 10m --token-budget 200000 --max-turns 12 
 
 1. Open http://127.0.0.1:8090, choose a user (e.g. Arjun).
 2. Break something: `go run ./cmd/devctl break connector-down --owner <tag>` (scenarios: `dev/scenarios.md`).
-   Within about a minute the watcher opens a room. It is a shadow room: a "Shadow" chip marks it on the room screen (also after close; the room list has no chip yet), the steer
+   Within a few watcher intervals (dev settings: `for: 30s`, 15s interval, so usually under two minutes) the watcher opens a room. It is a shadow room: a "Shadow" chip marks it on the room screen (also after close; the room list has no chip yet), the steer
    box is hidden, and the room log shows no agent output.
 3. Take control (a watcher room has no driver), investigate by hand, then
    `go run ./cmd/devctl fix connector-down --owner <tag>` and **close the room with a resolution**

@@ -23,6 +23,7 @@ const (
 	shadowOwnersRel = "dev/owners.shadow.yaml"
 	shadowURL       = "http://127.0.0.1:8090"
 	apiKeyEnv       = "ANTHROPIC_API_KEY"
+	devAckEnv       = "PIPEROOM_DEV_ACK"
 
 	// Watcher timings of the compose service (dev/docker-compose.yml), reused for host mode.
 	devWatchInterval = "15s"
@@ -176,6 +177,21 @@ func requireAPIKey(getenv func(string) string) error {
 	return nil
 }
 
+// requireDevAck fails unless PIPEROOM_DEV_ACK holds the exact acknowledgement sentence.
+// The container listens on 0.0.0.0 in dev auth mode (login has no password), which the
+// server refuses to do without it; checking here turns a restart loop into one clear
+// message. devctl never sets the value for you: stating it is the point.
+func requireDevAck(getenv func(string) string) error {
+	given, err := config.ParseDevAck(config.Config{DevAck: getenv(devAckEnv)})
+	if err != nil {
+		return fmt.Errorf("devctl: %w", err)
+	}
+	if !given {
+		return fmt.Errorf("devctl: %s is not set: the shadow server uses dev login, which has no password. If that is fine on this machine, export %s=%s and run again (the container is published on 127.0.0.1 only)", devAckEnv, devAckEnv, config.DevAckValue)
+	}
+	return nil
+}
+
 // shadowPipelines loads the shadow owners file and returns its shadow pipeline ids.
 // An error here means `shadow up` would start a server that never opens a shadow room.
 func shadowPipelines(path string) ([]string, error) {
@@ -224,6 +240,9 @@ func shadowCmd(ctx context.Context, st *stack, args []string, out io.Writer) err
 		if err := requireAPIKey(os.Getenv); err != nil {
 			return err
 		}
+		if err := requireDevAck(os.Getenv); err != nil {
+			return err
+		}
 		if err := requireLock(owner); err != nil {
 			return err
 		}
@@ -231,7 +250,7 @@ func shadowCmd(ctx context.Context, st *stack, args []string, out io.Writer) err
 			return err
 		}
 		fmt.Fprintf(out, "shadow server is up at %s (shadow pipelines: %s)\n", shadowURL, strings.Join(ids, ", "))
-		fmt.Fprintln(out, "next: open it, choose a user, then `devctl break connector-down --owner <tag>`; the watcher opens a shadow room in about a minute. See dev/shadow.md.")
+		fmt.Fprintln(out, "next: open it, choose a user, then `devctl break connector-down --owner <tag>`; the watcher opens a shadow room within a few watcher intervals (the dev settings use a 30s `for:` and a 15s interval). See dev/shadow.md.")
 		return nil
 	case "down":
 		owner, rest, err := splitOwner(rest)
