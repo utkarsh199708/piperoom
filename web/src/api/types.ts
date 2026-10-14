@@ -305,7 +305,7 @@ export interface RoomSnapshot {
 
 export interface TopologyNode {
   id: string
-  kind: 'source_table' | 'connector' | 'topic' | 'consumer_group' | 'sink_table'
+  kind: 'source_table' | 'connector' | 'topic' | 'dlq_topic' | 'consumer_group' | 'sink_table'
   name: string
   layer: string
   owner: string

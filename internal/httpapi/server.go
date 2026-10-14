@@ -97,7 +97,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	}
 	r.Use(requestLog(log, s.clientIP))
 	// Host allow-list first (DNS rebinding, design §1.5), then the cross-origin
-	// check, on every route including probes and signed alerts.
+	// check, except signed alert routes and GET /healthz and /readyz (hostGuard).
 	r.Use(s.hostGuard)
 	r.Use(s.crossOriginProtection().Handler)
 	// Router-level misses use the same JSON envelope as every other error.

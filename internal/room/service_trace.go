@@ -90,5 +90,5 @@ func (s *Service) Trace(ctx context.Context, user User, roomID, table, key strin
 	if err != nil {
 		return events.Event{}, err
 	}
-	return s.emitLocked(ctx, st2, roomID, events.TracePinned, humanActor(user), payload)
+	return s.emitLocked(ctx, st2, roomID, events.TracePinned, s.humanActor(user), payload)
 }

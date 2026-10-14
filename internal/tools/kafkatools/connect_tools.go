@@ -37,8 +37,11 @@ func (t *connectList) Run(ctx context.Context, _ json.RawMessage) (tools.Result,
 	if err != nil {
 		return tools.Result{}, err
 	}
-	// Only this room's connectors; the others get no Status call either.
+	// Only this room's connectors; the others get no Status call either and
+	// are only counted.
+	all := len(names)
 	names = sc.FilterConnectors(names)
+	other := all - len(names)
 	type row struct {
 		Name        string `json:"name"`
 		Type        string `json:"type"`
@@ -67,6 +70,7 @@ func (t *connectList) Run(ctx context.Context, _ json.RawMessage) (tools.Result,
 		}
 		fmt.Fprintf(&sb, "%s (%s): %s, %d failed tasks", r.Name, r.Type, r.State, r.FailedTasks)
 	}
+	appendLine(&sb, tools.NotShown(other, "connector", "connectors"))
 	return res(sb.String(), rows), nil
 }
 
@@ -177,6 +181,13 @@ func (t *connectConfig) Run(ctx context.Context, input json.RawMessage) (tools.R
 		"key.converter": true, "value.converter": true, "decimal.handling.mode": true,
 		"database.hostname": true, "database.port": true, "database.dbname": true,
 		"database.user": true, "database.server.name": true,
+		// Error handling: switches and a topic name, never credentials. Without
+		// them the agent can see a DLQ but not why it exists (dlq_peek).
+		"errors.tolerance": true, "errors.deadletterqueue.topic.name": true,
+		"errors.log.enable": true, "errors.log.include.messages": true,
+		"errors.deadletterqueue.context.headers.enable": true,
+		"errors.retry.timeout":                          true,
+		"event.processing.failure.handling.mode":        true,
 	}
 	shown := map[string]string{}
 	for k, v := range cfg {

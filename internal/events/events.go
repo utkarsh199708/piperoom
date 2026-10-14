@@ -19,6 +19,13 @@ const (
 	RoomCreated Type = "room.created"
 	RoomClosed  Type = "room.closed"
 
+	// Room limits (docs/design/retention.md). The first three are stored in
+	// the room log; room.deleted never is (see RoomDeletedPayload).
+	RoomRetentionWarning Type = "room.retention_warning"
+	RoomExtended         Type = "room.extended"
+	RoomLogCapWarning    Type = "room.log_cap_warning"
+	RoomDeleted          Type = "room.deleted"
+
 	AgentStatus     Type = "agent.status"
 	AgentStepStart  Type = "agent.step.started"
 	AgentToolCall   Type = "agent.tool_call"
@@ -67,10 +74,21 @@ type Actor struct {
 	Kind ActorKind `json:"kind"`
 	ID   string    `json:"id"`
 	Name string    `json:"name"`
+	// Verified is true when the server vouches for ID and Name: a person in
+	// users.yaml (kind human), or the server itself (kinds agent and system).
+	// It is false for a person known only to the IdP: a derived "u_" id that
+	// got in through an owners.yaml group or user: principal, auditors: or a
+	// viewer group. That person's Name comes from the IdP name claim, which
+	// they can set, so clients must mark it (docs/design/auth.md §2.1). It is
+	// decided when the event is written, from the users.yaml loaded then.
+	// omitempty: false is written as no key, so an event from before this
+	// field serialises exactly as before and an export of an old room keeps
+	// its hash; a missing key reads as false.
+	Verified bool `json:"verified,omitempty"`
 }
 
 // AgentActor is the actor used for every event the agent emits.
-var AgentActor = Actor{Kind: ActorAgent, ID: "agent", Name: "Agent"}
+var AgentActor = Actor{Kind: ActorAgent, ID: "agent", Name: "Agent", Verified: true}
 
 // Event is one entry in a room's log. Seq starts at 1 and has no gaps
 // within a room.
@@ -127,14 +145,57 @@ type RoomCreatedPayload struct {
 	Shadow bool `json:"shadow,omitempty"`
 }
 
-// RoomClosedPayload ends a room.
+// RoomClosedPayload ends a room. A room closed by the open-room limit
+// (PIPEROOM_MAX_OPEN_DAYS) is closed by the system actor with the resolution
+// "retention: open longer than N days".
 type RoomClosedPayload struct {
 	Resolution string `json:"resolution"`
 }
 
-// AgentStatusPayload reports the agent's state.
+// RoomRetentionWarningPayload says the open-room limit will close the room at
+// CloseAt. Written by the system actor once per deadline, 24 h before it. A
+// room that is past its deadline when the limit first sees it (the limit was
+// just turned on or lowered) is warned at once with CloseAt 24 h later: no
+// room is closed less than 24 h after its warning. An extension moves the
+// deadline and gets its own warning.
+type RoomRetentionWarningPayload struct {
+	CloseAt  time.Time `json:"close_at"`
+	OpenDays int       `json:"open_days"` // days from opened_at to CloseAt
+}
+
+// RoomExtendedPayload records the room's one extension of the open-room limit
+// (POST /api/rooms/{id}/extend, driver only). CloseAt is the new deadline:
+// the close time the room showed (snapshot auto_close_at) plus Days.
+type RoomExtendedPayload struct {
+	Days    int       `json:"days"`
+	CloseAt time.Time `json:"close_at"`
+}
+
+// RoomLogCapWarningPayload says the room log reached 90% of a cap
+// (PIPEROOM_ROOM_MAX_EVENTS or PIPEROOM_ROOM_MAX_BYTES, bytes counted on the
+// stored payloads). Written once per room by the system actor. At 100% agent
+// events are refused and the agent stops (agent.status "log_full").
+type RoomLogCapWarningPayload struct {
+	Events    int64 `json:"events"`
+	MaxEvents int64 `json:"max_events"`
+	Bytes     int64 `json:"bytes"`
+	MaxBytes  int64 `json:"max_bytes"`
+}
+
+// RoomDeletedPayload says an admin deleted the room (DELETE /api/rooms/{id}).
+// It is never stored: the log is deleted with the room. The WebSocket sends it
+// as the last "event" frame of each open connection to the room, with Seq =
+// the room's last seq + 1, the admin as actor, and then closes with the close
+// reason "room deleted".
+type RoomDeletedPayload struct {
+	Reason string `json:"reason"`
+}
+
+// AgentStatusPayload reports the agent's state. "log_full" is written by the
+// system actor when the room log reached its cap: the agent has stopped and
+// cannot be woken in this room.
 type AgentStatusPayload struct {
-	State  string `json:"state"` // "working" | "idle" | "waiting_approval" | "error" | "done" | "queued"
+	State  string `json:"state"` // "working" | "idle" | "waiting_approval" | "error" | "done" | "queued" | "log_full"
 	Detail string `json:"detail,omitempty"`
 }
 
@@ -152,7 +213,12 @@ type AgentToolCallPayload struct {
 	Input     json.RawMessage `json:"input"`
 }
 
-// AgentToolResultPayload records a tool result inside a step.
+// AgentToolResultPayload records a tool result inside a step. A Data larger
+// than PIPEROOM_EVENT_MAX_DATA_BYTES is stored as a TruncatedData object
+// instead, and Truncated is then true. Truncated therefore means "something
+// in this result was cut": the Summary (tools.MaxSummaryBytes), the Data, or
+// both. A UI tells cut Data apart by its shape: an object with "truncated":
+// true, "original_bytes" and "preview" (TruncatedData).
 type AgentToolResultPayload struct {
 	StepID    string          `json:"step_id"`
 	ToolUseID string          `json:"tool_use_id"`
@@ -160,8 +226,17 @@ type AgentToolResultPayload struct {
 	Summary   string          `json:"summary"`
 	Data      json.RawMessage `json:"data,omitempty"`
 	IsError   bool            `json:"is_error"`
-	Truncated bool            `json:"truncated,omitempty"`
+	Truncated bool            `json:"truncated,omitempty"` // Summary or Data (or both) was cut; see above
 	TookMS    int64           `json:"took_ms"`
+}
+
+// TruncatedData replaces a tool_result.data over PIPEROOM_EVENT_MAX_DATA_BYTES.
+// Preview is the start of the original JSON text, cut at a UTF-8 boundary so
+// the whole object stays under the limit; it is not valid JSON on its own.
+type TruncatedData struct {
+	Truncated     bool   `json:"truncated"` // always true
+	OriginalBytes int64  `json:"original_bytes"`
+	Preview       string `json:"preview"`
 }
 
 // AgentMessagePayload is plain text the agent says to the room.
@@ -273,6 +348,11 @@ type Identity struct {
 	Method    string    `json:"method"`          // "oidc" | "dev"
 	Grant     string    `json:"grant,omitempty"` // "user:…" | "group:…" | "backup:…" | "solo"
 	AuthTime  time.Time `json:"auth_time,omitzero"`
+	// Email ties the decision to a mailbox as well as to the actor id, so the
+	// audit trail never rests on a display name (docs/design/auth.md §2.1):
+	// the session's IdP email when the token said email_verified, else the
+	// users.yaml email: of the user. Empty when the server knows neither.
+	Email string `json:"email,omitempty"`
 }
 
 // ApprovalGivenPayload is one layer owner's approval.
@@ -292,7 +372,9 @@ type ApprovalRejectedPayload struct {
 	Identity   *Identity `json:"identity,omitempty"`
 }
 
-// ActionExecutedPayload is the result of running one approved step.
+// ActionExecutedPayload is the result of running one approved step. An Output
+// over PIPEROOM_EVENT_MAX_DATA_BYTES is cut at a UTF-8 boundary and ends with
+// "… [truncated: N bytes]", N being the original size.
 type ActionExecutedPayload struct {
 	ProposalID string `json:"proposal_id"`
 	StepIndex  int    `json:"step_index"`
@@ -300,6 +382,12 @@ type ActionExecutedPayload struct {
 	Output     string `json:"output"`
 	// ParamsHash is the proposal's params_hash the executor checked before Execute.
 	ParamsHash string `json:"params_hash,omitempty"`
+	// OutcomeUnknown is true when the step may or may not have run: its
+	// executor stopped after it claimed the step and before it recorded the
+	// result (docs/design/replicas.md section 5). OK is then false, the step is
+	// never run again, and the agent is told the outcome is unknown
+	// (HumanInput.OK nil): the target must be checked before a retry.
+	OutcomeUnknown bool `json:"outcome_unknown,omitempty"`
 }
 
 // HandoffSummary is the agent-written shift hand-off.

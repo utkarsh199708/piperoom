@@ -13,6 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"piperoom/internal/auth"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 )
@@ -41,12 +42,21 @@ type User struct {
 	// approval. The zero value means no session (a dev-mode X-User request, a
 	// test): approvals then record method "dev" and no session id.
 	Identity events.Identity `json:"-" yaml:"-"`
+
+	// Verified is true for a users.yaml entry and false for a person known only
+	// to the IdP (docs/design/auth.md section 2.1). GET /api/me and WebSocket
+	// presence show it; event actors take it from users.yaml directly.
+	Verified bool `json:"verified" yaml:"-"`
 }
 
 // Users is the user directory parsed from dev/users.yaml.
 type Users struct {
 	byID  map[string]User
 	order []User
+	// skeletons maps the look-alike form (auth.Skeleton) of every id, name and
+	// email to the first user it belongs to, so an IdP name that renders like
+	// one of them is found (security audit A-ID-2).
+	skeletons map[string]string
 }
 
 type usersFile struct {
@@ -106,10 +116,40 @@ func ParseUsers(data []byte) (*Users, error) {
 			}
 			subs[user.Sub] = user.ID
 		}
+		user.Verified = true
 		u.byID[user.ID] = user
 		u.order = append(u.order, user)
 	}
+	u.indexSkeletons()
 	return u, nil
+}
+
+// indexSkeletons fills u.skeletons. A skeleton shared by two users (two people
+// called Alex) keeps the first; a look-up only needs to know that one exists.
+func (u *Users) indexSkeletons() {
+	u.skeletons = map[string]string{}
+	for _, user := range u.order {
+		for _, s := range []string{user.ID, user.Name, user.Email} {
+			k := auth.Skeleton(s)
+			if _, seen := u.skeletons[k]; k != "" && !seen {
+				u.skeletons[k] = user.ID
+			}
+		}
+	}
+}
+
+// Lookalike returns the users.yaml user whose id, name or email renders like
+// name (same auth.Skeleton), for the display-name rule of design section 2.1.
+func (u *Users) Lookalike(name string) (User, bool) {
+	k := auth.Skeleton(name)
+	if k == "" {
+		return User{}, false
+	}
+	id, ok := u.skeletons[k]
+	if !ok {
+		return User{}, false
+	}
+	return u.byID[id], true
 }
 
 // LoadUsers reads and parses the users file at path.
@@ -150,9 +190,11 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 		layers = append(layers, layer)
 	}
 	sort.Strings(layers) // deterministic error for the same config
-	// Group rule (docs/design/auth.md section 2.3): the server does not know
-	// group membership at start-up, so a layer that lists any group: principal
-	// is not checked against users.yaml. Log it once.
+	// Group rule (docs/design/auth.md section 2.3), owners -> users direction
+	// only: the server does not know group membership at start-up, so a layer
+	// that lists any group: principal cannot be checked against users.yaml for
+	// who must list it. The users -> owners direction below is always checked.
+	// Log the skipped layers once.
 	var skipped []string
 	for _, layer := range layers {
 		if !own.Layers[layer].AllUsers() {
@@ -160,7 +202,7 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 		}
 	}
 	if len(skipped) > 0 {
-		slog.Info("users: layers with group principals are not checked against users.yaml", "layers", skipped)
+		slog.Info("users: owners->users check skips layers with group principals (not checked against users.yaml); users->owners is always checked", "layers", skipped)
 	}
 	for _, layer := range layers {
 		ps := own.Layers[layer]
@@ -185,11 +227,11 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 			if !ok {
 				return fmt.Errorf("users file grants %q layer %q, which the owners file does not assign to anyone", user.ID, layer)
 			}
-			if !ps.AllUsers() {
-				continue // group rule: skipped above
-			}
+			// A layer that also lists groups is NOT skipped here: the server
+			// cannot vouch for group membership at start-up, so a users.yaml
+			// claim must not stand in for it (security audit A-AP-3).
 			if !ps.Contains(owners.Principal{Kind: owners.KindUser, Name: user.ID}) {
-				return fmt.Errorf("users file and owners file disagree: users file grants %q layer %q but the owners file assigns it to %q", user.ID, layer, ps.Display())
+				return fmt.Errorf("users file and owners file disagree: users file grants %q layer %q but the owners file assigns it to %q (a users.yaml layer must be a user: principal there, even when the layer also lists groups)", user.ID, layer, ps.Display())
 			}
 		}
 	}
@@ -244,9 +286,11 @@ func DefaultUsers() *Users {
 func mustUsers(users []User) *Users {
 	u := &Users{byID: map[string]User{}}
 	for _, user := range users {
+		user.Verified = true
 		u.byID[user.ID] = user
 		u.order = append(u.order, user)
 	}
+	u.indexSkeletons()
 	return u
 }
 
