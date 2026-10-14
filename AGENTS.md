@@ -68,10 +68,66 @@ Each agent owns folders. **Never edit a file you do not own.**
 | C12 (cloud) | `tasks/C12-slack-bridge.md` | `internal/slackbridge/**` |
 | C13 (cloud) | `tasks/C13-prompt-audit.md` | `docs/audits/**` — delivered as PR #12 |
 | C14 (cloud) | `tasks/C14-pilot-onboarding.md` | `docs/pilot/**` (no code changes) |
+| Claude leads | — | `AGENTS.md`, `tasks/**`, `docs/**`, `reviews/**`, and every **contract file** below |
 
 Cloud sessions started from claude.ai/code are bound to their own `claude/...` branch; that is accepted. Their PR
 title starts with `[C<N>]`.
-| Claude leads | — | `AGENTS.md`, `tasks/**`, `docs/**`, `reviews/**`, and every **contract file** below |
+
+### Earlier waves: E, T, N, S (all merged by 2026-10-14)
+
+These tags had no task file; their scope was in the dispatch message and the design doc named. A tag that created a
+package owns it for follow-ups. A tag that only extended other agents' folders owns nothing now: those folders stay
+with the owners above, who carry any follow-up.
+
+| Tag | PR | Topic | Owns now |
+|---|---|---|---|
+| E1 | #109 | topology + prompt: one dependency graph | nothing (edited A2, A3, A4, A6 folders) |
+| E2 | #110 | evals: evidence scoring, calibration, abstention | `evals/score.go`, `evals/calibration.go` (`docs/design/cost.md`) |
+| E3 | #119 | evals: phased replay, held-out set | `evals/gen/**`, `evals/scenarios/heldout/**` |
+| E4 | #117 | usage telemetry, durable spend limits | nothing (A4, A5, A6, C6 folders); design `docs/design/cost.md` |
+| T1 | #112 | tenancy | nothing (A3, A4, A5, A7 folders); design `docs/design/tenancy.md` |
+| T2 | #107 | tool scope for db/cluster-wide metadata | nothing (A2, A3, A7 folders) |
+| T3 | #115 | auth: approval lifecycle, display-name impersonation | `internal/auth/**` (had no owner) |
+| T4 | #118 | retention, caps, deletion, archive | nothing (A1, A3, A5 folders); design `docs/design/retention.md` |
+| N1 | #92 | runbooks: BM25 search | nothing (`internal/tools/runbooks/**` stays C11) |
+| N2 | #94 | evals: token matching, LLM judge | nothing (C6, C7 folders) |
+| N3 | #91 | trace normalise + fingerprint | `internal/textnorm/**` |
+| N4 | #100 | `similar_incidents` tool | `internal/tools/similarincidents/**`, `internal/textsearch/**` |
+| N5 | #96 | redact secrets in untrusted tool text | `internal/redact/**` |
+| N6 | #95 | injection scan of untrusted tool data | `internal/injectscan/**` |
+| N7 | #93 | hand-off summary checker | nothing (`internal/agent/**` stays A4) |
+| N8 | #97 | evals: shadow agreement scoring | nothing (C6 folders) |
+| S1 | #121 | replicas: leader, room leases, executor | nothing (A5 folders, `deploy/helm/**`); design `docs/design/replicas.md` |
+| S2 | #122, #123 | load-test harness, multi-replica runs | `cmd/loadtest/**`, `internal/loadtest/**`; its runs live in `reviews/capacity-2026-10/` (leads' folder) |
+
+### R wave (dispatched 2026-10-14)
+
+PR titles start with `[R<N>]` (e.g. `[R5b] wiring: tools get Reader clients`). An R task is done by the agent named
+here, **inside that agent's own folders above**; a task that needs a file outside them asks in its thread (§6 of
+`docs/collab.md`), it does not edit it. R0 (the leads) changes the contracts first; "Uses" names the R0 PR 1 items
+(#138) each task codes against.
+
+| Task | Agent | Folders | Uses (R0 PR 1 item) |
+|---|---|---|---|
+| R0 | leads (`[LEAD-ARCH]`) | contract files, `AGENTS.md`, `docs/**`, the `concurrency:` block of `.github/workflows/ci.yml` | — |
+| R1 | local (run on the Windows dev machine, not a cloud session) | as dispatched | — |
+| R2 | A1 | `dev/**`, `cmd/devctl/**`, `cmd/devconsumer/**`, `internal/testenv/**`, `Dockerfile`, `deploy/**` env examples | 6 (`PIPEROOM_DEV_ACK`, log vars), 8 (version build arg) |
+| R3 | A6 | `web/**` | 1, 2, 3, 4, 5 |
+| R4 | A5 | A5 folders | 1, 2, 4 |
+| R5a | A5 | A5 folders (`cmd/server`, `internal/room` registries) | 9 |
+| R5b | A4 | `internal/agent/**`, `internal/wiring/**`, `cmd/investigate/**` | 7, 9 |
+| R5c | A2 | A2 folders (`internal/tools/kafkatools/**`, `internal/actions/**` minus `action.go`) | 7, 9 |
+| R5d | C5 (cloud) | `internal/alertin/**` | — |
+| R6, R7 | C1 (cloud) | `.github/**` **except the `concurrency:` block of `ci.yml`** (R0 owns it), `Makefile`, `README.md`, `docs/runbook.md` | 8 (ldflags in `Makefile` / CI) |
+| R8a | C6 (cloud) | `evals/**` (C6 rows above) | — |
+| R8b | A4 | A4 folders | — |
+| R9 | A5 | A5 folders | 6, 8 |
+| R10 | A6 | `web/**` | — |
+| R11 | A5 (driver leases, suggestion decline), C12 (Slack paging on lease expiry, `internal/slackbridge/**`), A4 (tool `Data` cap, A4 folders) | as listed | 3, 5 |
+| R12 | A6 + A1 | `web/**` (A6), A1 folders (A1) | — |
+
+A task split between two agents (R11, R12) is two PRs, one per agent, each titled with the task and the agent:
+`[R11] [A5] room: driver lease expiry`, `[R11] [C12] slackbridge: page on lease expiry`.
 
 ### Contract files (read them, code against them, never edit them)
 
@@ -188,3 +244,22 @@ All six start now, in parallel, against the contracts.
 - **Milestone M3:** proposals → approvals → executor → hand-off, end to end.
 
 The demo scenario every part must support is in `tasks/A1-devstack.md` → *Scenario `schema-change`*.
+
+### Merge order (R wave)
+
+Lead 1 merges in this order. A PR whose predecessor has not merged waits even if both leads approved it; its
+author rebases (merges `main` into the branch for a cloud PR) once the predecessor lands.
+
+0. **Done:** PR #101 (`[D2]` Kafka client `DLQOffsets` / `PeekDLQ`), merged 2026-10-14. Nothing waits on it.
+1. **R0 PR 1** (#138, contracts). First, alone. It also carries the `gofmt` fix of `internal/clients/kafka/dlq.go`
+   that makes `main` green again; every R PR needs it.
+2. **R4, R5b, R9** (A5 routes and events; A4 read-only wiring; A5 log/dev-ack/version). Any order among them; they
+   touch different packages. R5a and R5c may merge with or after R5b.
+3. **R3, R11** (web, decline and leases) only after **all** of step 2: R3 calls R4's routes, and R11 builds on
+   R4's hand-off and lease code in `internal/room`.
+4. Everything else (R1, R2, R5d, R6, R7, R8a, R8b, R10, R12) after R0 PR 1, in any order, unless its thread says
+   it waits on another PR.
+
+R0 PR 2 (process: this section, the CI `concurrency:` fix, `docs/pilot/decision.md`) has no code dependency and may
+merge at any time; merging it before R6/R7 keeps their `ci.yml` diffs off the `concurrency:` block.
+

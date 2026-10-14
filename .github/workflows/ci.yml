@@ -10,10 +10,20 @@ on:
 permissions:
   contents: read
 
+# R0: owned by the leads. R6/R7 (C1) do not touch this block.
+#
+# A pull request shares one group per PR (refs/pull/N/merge), so a new push
+# cancels the run of the old head: only the latest head matters.
+#
+# Every other run (a push to main, a manual workflow_dispatch) gets a group of
+# its own (the run id), so nothing cancels or replaces it. A shared group is
+# not enough even with cancel-in-progress false: GitHub keeps one running and
+# ONE pending run per group, and a newer run replaces the pending one. When
+# several PRs merge within minutes, the merges in between were cancelled
+# without ever running (2026-10-14: #91, #94, #97, #112, #113, #115, #121, #124
+# and others), so a red main could not be traced to the merge that broke it.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  # Only cancel in-progress runs for PR pushes. On push to main, every run is a
-  # distinct merge and its result matters even if a newer merge follows fast.
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
