@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"piperoom/internal/alertin"
 	"piperoom/internal/clients"
 	"piperoom/internal/config"
@@ -657,7 +659,8 @@ func TestNewRequiresRoomsInRoomsMode(t *testing.T) {
 func TestSourceErrorDoesNotHideConnectorDown(t *testing.T) {
 	h := newHarness(t, opts{})
 	h.src.mu.Lock()
-	h.src.err = errors.New("pq: the database system is in recovery mode: recovery is in progress")
+	h.src.err = fmt.Errorf("postgres: replication slots: %w",
+		&pgconn.PgError{Code: "55000", Message: "recovery is in progress"})
 	h.src.mu.Unlock()
 	h.breakConnector("orders", "boom")
 	h.steps(5, time.Minute)
@@ -704,17 +707,32 @@ func TestSlotNameFromConfigAndExplicit(t *testing.T) {
 			t.Fatalf("explicit slot not used\n%s", h.logs)
 		}
 	})
-	t.Run("missing slot is unknown, not a breach", func(t *testing.T) {
+	t.Run("missing declared slot fires sev1 slot_inactive", func(t *testing.T) {
 		h := newHarness(t, opts{})
 		h.src.mu.Lock()
 		h.src.rows = nil
 		h.src.mu.Unlock()
 		h.steps(12, time.Minute)
-		if h.phase("orders", owners.SignalSlotInactive) != phaseOK || len(h.rooms.created()) != 0 {
-			t.Fatal("a missing slot fired a signal")
+		if h.phase("orders", owners.SignalSlotInactive) != phaseFiring {
+			t.Fatalf("a dropped slot did not fire\n%s", h.logs)
+		}
+		rooms := h.rooms.created()
+		if len(rooms) != 1 || rooms[0].alert.Severity != "sev1" {
+			t.Fatalf("rooms = %+v, want one sev1 room", rooms)
 		}
 		if !strings.Contains(h.logs.String(), "not found in pg_replication_slots") {
-			t.Fatalf("no warning\n%s", h.logs)
+			t.Fatalf("slot_wal should still log the missing slot\n%s", h.logs)
+		}
+	})
+	t.Run("plain error text is not a SQLSTATE", func(t *testing.T) {
+		if needsPrimaryPG13(errors.New("column safe_wal_size does not exist")) {
+			t.Fatal("matched on message text")
+		}
+		if !needsPrimaryPG13(fmt.Errorf("x: %w", &pgconn.PgError{Code: "42703"})) {
+			t.Fatal("42703 not recognised")
+		}
+		if needsPrimaryPG13(&pgconn.PgError{Code: "42P01"}) {
+			t.Fatal("unrelated SQLSTATE matched")
 		}
 	})
 }
