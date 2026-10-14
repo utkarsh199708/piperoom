@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/clients"
 	"piperoom/internal/events"
@@ -483,6 +484,36 @@ func TestDemoMessagesCarryNoIds(t *testing.T) {
 		b, _ := json.Marshal(p)
 		if re.Match(b) {
 			t.Fatalf("emitted payload names a proposal id: %s", b)
+		}
+	}
+}
+
+// The demo's fake clients must let the real actions preview, so the scripted
+// room shows a full preview card.
+func TestDemoActionsPreview(t *testing.T) {
+	reg := actions.NewRegistry()
+	if err := actions.Register(reg, FakeActionDeps()); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ action, params string }{
+		{ActionConnectRestartTask, `{"connector":"pg-orders-connector","task":0}`},
+		{ActionSchemaSetCompatibility, `{"subject":"pg.public.orders-value","level":"NONE"}`},
+	}
+	for _, c := range cases {
+		a, ok := reg.Get(c.action)
+		if !ok {
+			t.Fatalf("action %s not registered", c.action)
+		}
+		pv, ok := a.(actions.Preview)
+		if !ok {
+			t.Fatalf("action %s has no Preview", c.action)
+		}
+		res, err := pv.Preview(context.Background(), json.RawMessage(c.params))
+		if err != nil {
+			t.Fatalf("%s: %v", c.action, err)
+		}
+		if res.Current == "" || res.Expected == "" {
+			t.Fatalf("%s: preview is empty: %+v", c.action, res)
 		}
 	}
 }

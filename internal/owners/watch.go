@@ -23,15 +23,27 @@ const (
 )
 
 // Signal names. The first three are the v1 signals; dlq_growth and config_risk
-// come from docs/design/dlq.md. The names in v2Signals are accepted in the
+// come from docs/design/dlq.md; the consumer-group three from
+// tasks/F6-proactive-triage.md. The names in v2Signals are accepted in the
 // file so one owners.yaml works across versions, but nothing reads them yet.
 const (
-	SignalConnectorDown = "connector_down"
-	SignalSlotInactive  = "slot_inactive"
-	SignalSlotWAL       = "slot_wal"
-	SignalDLQGrowth     = "dlq_growth"
-	SignalConfigRisk    = "config_risk"
+	SignalConnectorDown       = "connector_down"
+	SignalSlotInactive        = "slot_inactive"
+	SignalSlotWAL             = "slot_wal"
+	SignalDLQGrowth           = "dlq_growth"
+	SignalConfigRisk          = "config_risk"
+	SignalConsumerLag         = "consumer_lag"
+	SignalGroupUnstable       = "group_unstable"
+	SignalOffsetBelowLogStart = "offset_below_log_start"
 )
+
+// knownSignals lists every signal the watcher reads, for error messages.
+var knownSignals = []string{SignalConnectorDown, SignalSlotInactive, SignalSlotWAL, SignalDLQGrowth, SignalConfigRisk,
+	SignalConsumerLag, SignalGroupUnstable, SignalOffsetBelowLogStart}
+
+// maxFlaps bounds group_unstable.flaps: the watcher keeps the last 12 group
+// states, so it can count at most 11 changes.
+const maxFlaps = 11
 
 // dlq_peek header modes (watch.dlq_peek.headers): how much Connect error-header
 // text the dlq_peek tool may show per record (docs/design/dlq.md section 3.2).
@@ -50,7 +62,7 @@ const MinDLQWindow = 30 * time.Minute
 
 var dlqHeaderModes = []string{DLQHeadersCountsOnly, DLQHeadersClasses, DLQHeadersMessages}
 
-var v2Signals = []string{"freshness", "consumer_lag", "long_tx", "compat_none", "unreachable"}
+var v2Signals = []string{"freshness", "long_tx", "compat_none", "unreachable"}
 
 // WatchSpec is the raw `watch:` block of a pipeline, as written in YAML. Use
 // Pipeline.Watch for the validated values with defaults applied.
@@ -141,7 +153,12 @@ type signalSpec struct {
 	Fire    string `yaml:"fire"`
 	Clear   string `yaml:"clear"`
 	EtaSev1 string `yaml:"eta_sev1"`
-	Window  string `yaml:"window"` // dlq_growth only
+	Window  string `yaml:"window"` // dlq_growth, group_unstable
+
+	MembersExpected   *bool  `yaml:"members_expected"`   // consumer_lag
+	Flaps             string `yaml:"flaps"`              // group_unstable
+	CrashloopRestarts string `yaml:"crashloop_restarts"` // connector_down
+	CrashloopWindow   string `yaml:"crashloop_window"`   // connector_down
 }
 
 // WatchSignal holds the settings every signal shares.
@@ -173,6 +190,39 @@ type DLQSignal struct {
 	Window time.Duration
 }
 
+// ConsumerLagSignal is the consumer_lag signal: total lag of a pipeline's
+// consumer group, with hysteresis between Fire and Clear.
+type ConsumerLagSignal struct {
+	WatchSignal
+	// FireLag: total lag (records) at or above this starts the timer. >= 1.
+	FireLag int64
+	// ClearLag: total lag below this (for For) resolves it. 1 <= ClearLag <= FireLag.
+	ClearLag int64
+	// MembersExpected: a lagging group with no members is sev2 (nobody is
+	// consuming), not sev3.
+	MembersExpected bool
+}
+
+// GroupUnstableSignal is the group_unstable signal: a group stuck outside
+// Stable/Empty for For, or one that changes state Flaps times inside Window.
+type GroupUnstableSignal struct {
+	WatchSignal
+	// Flaps is how many state changes inside Window fire at once. 2..11.
+	Flaps int
+	// Window is how far back flaps are counted.
+	Window time.Duration
+}
+
+// CrashLoop holds the connector_down crash-loop keys: a task that goes
+// FAILED -> RUNNING Restarts times inside Window counts as down even while
+// Connect reports it RUNNING.
+type CrashLoop struct {
+	// Restarts is the number of restarts that makes a loop. >= 2.
+	Restarts int
+	// Window is how far back restarts are counted.
+	Window time.Duration
+}
+
 // DLQTopic is a validated watch.dlq_topics[] declaration.
 type DLQTopic struct {
 	Topic     string
@@ -196,6 +246,15 @@ type WatchConfig struct {
 	DLQGrowth     DLQSignal
 	// ConfigRisk logs by default: a bad config is a fact, not an incident.
 	ConfigRisk WatchSignal
+	// ConnectorCrashLoop is the crash-loop counter inside connector_down
+	// (its keys sit in the connector_down block; enabled with it).
+	ConnectorCrashLoop CrashLoop
+
+	ConsumerLag   ConsumerLagSignal
+	GroupUnstable GroupUnstableSignal
+	// OffsetBelowLogStart has no `for`: it fires at once (records are gone)
+	// and clears after ConnectorDown.For with no partition below.
+	OffsetBelowLogStart WatchSignal
 
 	// DLQTopics are the declared dead-letter topics, in file order.
 	DLQTopics []DLQTopic
@@ -220,8 +279,21 @@ func DefaultWatch() WatchConfig {
 			FireRecords: 1,
 			Window:      time.Hour,
 		},
-		ConfigRisk:     WatchSignal{Enabled: true, Action: ActionLog, For: time.Minute},
-		DLQPeekHeaders: DLQHeadersClasses,
+		ConfigRisk:         WatchSignal{Enabled: true, Action: ActionLog, For: time.Minute},
+		ConnectorCrashLoop: CrashLoop{Restarts: 3, Window: 15 * time.Minute},
+		ConsumerLag: ConsumerLagSignal{
+			WatchSignal:     WatchSignal{Enabled: true, Action: ActionRoom, For: 10 * time.Minute},
+			FireLag:         1000,
+			ClearLag:        500,
+			MembersExpected: true,
+		},
+		GroupUnstable: GroupUnstableSignal{
+			WatchSignal: WatchSignal{Enabled: true, Action: ActionRoom, For: 5 * time.Minute},
+			Flaps:       3,
+			Window:      15 * time.Minute,
+		},
+		OffsetBelowLogStart: WatchSignal{Enabled: true, Action: ActionRoom},
+		DLQPeekHeaders:      DLQHeadersClasses,
 	}
 }
 
@@ -272,20 +344,26 @@ func resolveWatch(spec *WatchSpec) (WatchConfig, error) {
 			continue // parsed by the YAML decoder, ignored in v1
 		}
 		var s signalSpec
-		switch name {
-		case SignalConnectorDown, SignalSlotInactive, SignalSlotWAL, SignalDLQGrowth, SignalConfigRisk:
-		default:
-			return WatchConfig{}, fmt.Errorf("watch.signals.%s: unknown signal (known: %s, %s, %s, %s, %s; later: %s)",
-				name, SignalConnectorDown, SignalSlotInactive, SignalSlotWAL, SignalDLQGrowth, SignalConfigRisk, strings.Join(v2Signals, ", "))
+		if !slices.Contains(knownSignals, name) {
+			return WatchConfig{}, fmt.Errorf("watch.signals.%s: unknown signal (known: %s; later: %s)",
+				name, strings.Join(knownSignals, ", "), strings.Join(v2Signals, ", "))
 		}
 		// node.Decode ignores unknown keys, so check them first: `{fier: 2GiB}`
 		// must not silently keep the default.
 		allowed := []string{"enabled", "action", "for"}
-		if name == SignalSlotWAL {
+		switch name {
+		case SignalSlotWAL:
 			allowed = append(allowed, "fire", "clear", "eta_sev1")
-		}
-		if name == SignalDLQGrowth {
+		case SignalDLQGrowth:
 			allowed = append(allowed, "fire", "window")
+		case SignalConnectorDown:
+			allowed = append(allowed, "crashloop_restarts", "crashloop_window")
+		case SignalConsumerLag:
+			allowed = append(allowed, "fire", "clear", "members_expected")
+		case SignalGroupUnstable:
+			allowed = append(allowed, "flaps", "window")
+		case SignalOffsetBelowLogStart:
+			allowed = []string{"enabled", "action"} // fires at once; clears on connector_down.for
 		}
 		if err := checkKeys(&node, "watch.signals."+name, allowed...); err != nil {
 			return WatchConfig{}, err
@@ -296,7 +374,13 @@ func resolveWatch(spec *WatchSpec) (WatchConfig, error) {
 		var err error
 		switch name {
 		case SignalConnectorDown:
-			err = applySignal(&w.ConnectorDown, s)
+			err = applyConnectorDown(&w.ConnectorDown, &w.ConnectorCrashLoop, s)
+		case SignalConsumerLag:
+			err = applyConsumerLag(&w.ConsumerLag, s)
+		case SignalGroupUnstable:
+			err = applyGroupUnstable(&w.GroupUnstable, s)
+		case SignalOffsetBelowLogStart:
+			err = applySignal(&w.OffsetBelowLogStart, s)
 		case SignalSlotInactive:
 			err = applySignal(&w.SlotInactive, s)
 		case SignalSlotWAL:
@@ -353,6 +437,81 @@ func applyDLQ(dst *DLQSignal, s signalSpec) error {
 		}
 		if d < MinDLQWindow {
 			return fmt.Errorf("window %q: must be at least 30m (a rate needs 30m of samples)", s.Window)
+		}
+		dst.Window = d
+	}
+	return nil
+}
+
+func applyConnectorDown(dst *WatchSignal, loop *CrashLoop, s signalSpec) error {
+	if err := applySignal(dst, s); err != nil {
+		return err
+	}
+	if s.CrashloopRestarts != "" {
+		n, err := strconv.Atoi(s.CrashloopRestarts)
+		if err != nil || n < 2 {
+			return fmt.Errorf("crashloop_restarts %q: must be a whole number, at least 2 (one restart is not a loop)", s.CrashloopRestarts)
+		}
+		loop.Restarts = n
+	}
+	if s.CrashloopWindow != "" {
+		d, err := ParseDuration(s.CrashloopWindow)
+		if err != nil {
+			return fmt.Errorf("crashloop_window: %w", err)
+		}
+		loop.Window = d
+	}
+	return nil
+}
+
+// applyConsumerLag parses fire and clear as record counts. A fire with no
+// clear derives clear as half of fire, as the defaults do (1000/500).
+func applyConsumerLag(dst *ConsumerLagSignal, s signalSpec) error {
+	if err := applySignal(&dst.WatchSignal, s); err != nil {
+		return err
+	}
+	if s.MembersExpected != nil {
+		dst.MembersExpected = *s.MembersExpected
+	}
+	fireSet := false
+	if s.Fire != "" {
+		n, err := strconv.ParseInt(s.Fire, 10, 64)
+		if err != nil || n < 1 {
+			return fmt.Errorf("fire %q: must be a whole number of records, at least 1", s.Fire)
+		}
+		dst.FireLag = n
+		fireSet = true
+	}
+	if s.Clear != "" {
+		n, err := strconv.ParseInt(s.Clear, 10, 64)
+		if err != nil || n < 1 {
+			return fmt.Errorf("clear %q: must be a whole number of records, at least 1", s.Clear)
+		}
+		dst.ClearLag = n
+	} else if fireSet {
+		dst.ClearLag = max(dst.FireLag/2, 1)
+	}
+	if dst.ClearLag > dst.FireLag {
+		return fmt.Errorf("clear (%d records) must not be above fire (%d records)", dst.ClearLag, dst.FireLag)
+	}
+	return nil
+}
+
+func applyGroupUnstable(dst *GroupUnstableSignal, s signalSpec) error {
+	if err := applySignal(&dst.WatchSignal, s); err != nil {
+		return err
+	}
+	if s.Flaps != "" {
+		n, err := strconv.Atoi(s.Flaps)
+		if err != nil || n < 2 || n > maxFlaps {
+			return fmt.Errorf("flaps %q: must be a whole number from 2 to %d (the watcher keeps the last %d group states)", s.Flaps, maxFlaps, maxFlaps+1)
+		}
+		dst.Flaps = n
+	}
+	if s.Window != "" {
+		d, err := ParseDuration(s.Window)
+		if err != nil {
+			return fmt.Errorf("window: %w", err)
 		}
 		dst.Window = d
 	}
