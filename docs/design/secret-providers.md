@@ -3,8 +3,12 @@
 **Status (2026-10-14):** S1–S3 built in `internal/secrets` (parser, registry with cache and shared fetch, lease
 renewer, auth-failure retry helper; files, env, Vault/OpenBao, Kubernetes, AWS Secrets Manager, SSM) and
 `internal/secrets/{azure,gcp}`. The six tier-1 cards with setup scripts are in `internal/integrations/secretkinds`,
-and `secret://` in environment variables is resolved at start. Not built: S4 (rotation without a restart is not wired:
-`OnChange` and `RetryAfterAuthFailure` are unused by the clients), the §9 canary test over every agent tool, a
+and `secret://` in environment variables is resolved at start. S4 in part: `cmd/server` passes the
+registry an `OnChange` that rebuilds the clients of the rows reading a changed file or a lost lease
+(`integrations.Service.SecretChanged`), and a failed lease renewal is retried while a quarter of its time is left;
+`RetryAfterAuthFailure` is still unused by the clients (a rotated static secret is picked up on the next change
+notice, enable or restart, not on a login failure). `SOURCE_DB_PASSWORD` / `WAREHOUSE_DB_PASSWORD` are built (§6).
+Not built: the §9 canary test over every agent tool, a
 mounted-files card, Vault AWS/Azure/GCP auth, hosted cross-account access, Link, and tier 2 (S6). See
 `tasks/I-integrations.md`.
 

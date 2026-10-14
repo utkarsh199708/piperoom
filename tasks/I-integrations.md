@@ -30,6 +30,50 @@ Lead fixes made during integration:
 - `docs/api.md` now documents the rotate response's `restart_required`, PagerDuty's `400`, and that `PUT` replaces the whole non-secret form.
 - Corrected secret-providers.md §2: `Ref.Provider` is the row `name`, `Check` returns `spec.Check`, and `Value` has lease fields.
 
+## End-to-end review fixes (E1–E23, lead, 2026-10-14)
+
+Each item has a regression test (unit with fakes; the Postgres items also an integration test,
+`TestIntegrationPostgresSetupScriptAndColumnGrants`, run against a scratch PG 16 via `PIPEROOM_IT_PG_ADMIN_URL`).
+
+| # | Fixed | Where |
+|---|---|---|
+| E1 | Reserved references are compared by what they read (`Registry.SecretIdentity`: a files ref by its real path, so symlinked roots and `..data` links match), and a reference that resolves to any process secret value (`ReservedValues`: keys, alert tokens, URL passwords, constant-time compare) is refused in test, save, enable and restore | `integrations/service.go`, `secrets/files.go`, `secrets/registry.go`, `cmd/server/integrations.go` |
+| E2 | `read_only:<table>` also fails on `TRUNCATE`, `REFERENCES`, `TRIGGER` and column `INSERT`/`UPDATE` grants; the fix names the columns | `integrations/kind_postgres.go`, integrations.md §4.2 table |
+| E3 | `cmd/server` passes `OnChange`; `Service.SecretChanged` rebuilds the rows that read a changed file or a lost lease; a failed renewal is retried with backoff; the log says what happens | `cmd/server/integrations.go`, `integrations/service.go`, `secrets/renew.go`, `secrets/registry.go` |
+| E4 | A row restore or a live apply could not build is `failing` with a `live` check (not stored) | `integrations/service.go` (`MarkNotLive`), `cmd/server` restore |
+| E5 | `ErrOpen` is `spec.ErrSecretKeyMismatch` → `409 secret_key_mismatch`; `PUT` that retypes the typed secrets repairs the row, a kept one → `400 must be entered again`; stored resolve errors keep their cause (`*spec.SecretRefError`) → 400/403/404/502 | `integrations/service.go`, `spec/service.go`, `httpapi/integrations.go` |
+| E6 | Delete or disable of a secret manager with enabled dependents → `409 in_use` with `dependents` (the drawer shows the message) | `integrations/service.go`, `httpapi/integrations.go` |
+| E7 | Optional audit grants run in a `DO` block only when `piperoom_audit.ddl_log` exists | `kind_postgres.go`, `docs/pilot/permissions.md` |
+| E8 | The script creates the role without a password literal and says to `\password` it | same |
+| E9 | `spec.Field.AllowRef`: the Postgres `user` may be a `secret://` reference (one lease gives user and password); `SOURCE_DB_PASSWORD` / `WAREHOUSE_DB_PASSWORD` added to `internal/config` (**contract file, lead change**) and spliced into the URLs | `spec/spec.go`, `values.go`, `config.go`, `cmd/server`, web |
+| E10 | Picker refusals map to 400/403/404 with `field` instead of 500. Vault already wrapped a 404 as `ErrNotFound` (existing test `TestVaultKV2`); the 500 came from the missing mapping | `cmd/server` `browseErr`, `httpapi` |
+| E11 | Vault `Keys` honours the provider prefix | `secrets/vault.go` |
+| E12 | The least-privilege pass names the one probe it made and says other paths are not checked | `secrets/vault.go` |
+| E13 | Files refuse a non-regular file before opening it, and open with `O_NONBLOCK` (Unix) | `secrets/files.go`, `secrets/open_*.go` |
+| E14 | The env provider names the real refusal reason | `secrets/env.go` |
+| E15 | A refused TLS request is detected with an SSLRequest probe → `tls` fail "the server did not use TLS" | `kind_postgres.go` |
+| E16 | `slots_visible` fix is `GRANT SELECT ON pg_catalog.pg_replication_slots` | `kind_postgres.go` |
+| E17 | For a superuser the table checks fail with the not-superuser fix, not a REVOKE | `kind_postgres.go` |
+| E18 | Env rows count as connected in the checklist (web); documented | `web/src/lib/integrations.ts`, `docs/api.md` |
+| E19 | Repeating enable/disable writes no version, audit row or notice (enable still rebuilds the client) | `integrations/service.go` |
+| E20 | `If-Match: 0` reaches the service, so env rows answer `409 managed_by_env` | `httpapi/integrations.go` |
+| E21 | A `secret://` database URL in the env view is not parsed as a URL | `integrations/env.go` |
+| E22 | `GET /api/integrations/status` → `secret_key_set`; the drawer explains and offers references only | `httpapi`, web |
+| E23 | `docs/api.md` documents `env_alerts_<source>`, `200 []` audit for unknown ids, and the new codes | `docs/api.md` |
+
+Left open from this review:
+
+- **`RetryAfterAuthFailure` is still unused** (E3, rest of S4): a static secret rotated in a manager that sends no
+  change notice is picked up on enable or restart, not on the first `28P01` / SASL / 401. Needs the wrap in each
+  client login (A2, A3, A4).
+- Process variables resolved from references at start (`PIPEROOM_DB_URL`, `SOURCE_DB_URL` …) are not rebuilt on a
+  change; a restart applies them.
+- The `in_use` check does not know env-declared providers, so a page row shadowed by an env provider of the same name
+  is also refused while rows reference that name.
+- Vault least-privilege still probes one path (E12 made the text honest; deeper probing or
+  `sys/internal/ui/resultant-acl` remains I1 work).
+- The `live` state is in memory: a second server replica does not see it.
+
 ## Before merge
 
 1. Run `go test -tags integration ./internal/store/ ./internal/integrations/...` against the dev stack. The Postgres
@@ -61,13 +105,13 @@ Lead fixes made during integration:
 | 13 | Write actions whose client is not configured fail at run time, not at proposal time | A4 | check `Live.Configured()` when proposing |
 | 14 | In setup mode the watcher and `dlq_peek` log "not connected" errors each tick | A7 | `errors.Is(err, wiring.ErrNotConfigured)` / `errors.ErrUnsupported` → log once |
 | 15 | Web fixture mode has no Integrations data | A6 | fixtures in `web/src/test/integrationsData.ts` → fixture API |
-| 16 | `cmd/server` `storedValues` duplicates the service's unseal/defaults/reference logic | I2 | export `(*Service).StoredValues` or `Restore` |
+| 16 | ~~`cmd/server` `storedValues` duplicates the service's unseal/defaults/reference logic~~ **Done** (E4/E5: `(*Service).OpenRow`) | I2 | – |
 | 17 | `azure/httpx.go` and `gcp/httpx.go` copy about 230 lines of helpers from `internal/secrets` | I1 | export the HTTP and check helpers from `internal/secrets` |
 
 ## Secret managers: open work (secret-providers.md)
 
-- **S4, rotation without restart (A4).** Use `Registry` `OnChange` to rebuild clients when a referenced value changes.
-  Wrap client logins with `RetryAfterAuthFailure` (fetch once more, reconnect). Make every `netsec.Secret` field in wiring go
+- **S4, rotation without restart (A4).** `OnChange` is wired (E3): a changed file or a lost lease rebuilds the rows
+  that read it. Still open: wrap client logins with `RetryAfterAuthFailure` (fetch once more, reconnect). Make every `netsec.Secret` field in wiring go
   through `secrets`. Done when a rotated password is picked up without a restart (unit test with fakes).
 - **§9 canary test (A4 + I1).** Run every agent tool against fakes holding a dummy secret; fail if it appears in any
   `Result`, event or log line. Today only the `internal/secrets`, `internal/integrations` and `secretkinds` outputs
@@ -75,7 +119,7 @@ Lead fixes made during integration:
 - **Mounted-files card (I1).** The `files` provider is always on, but there is no card with the CSI
   `SecretProviderClass` / External Secrets YAML setup script (§5 table).
 - **Vault auth (I1).** AWS IAM, Azure and GCP auth methods are not built (token, AppRole, Kubernetes, JWT are).
-- **Least-privilege depth (I1).** Vault probes one fixed path outside the prefix. AWS and Azure report `skipped`.
+- **Least-privilege depth (I1).** Vault probes one fixed path outside the prefix (its pass text now says so). AWS and Azure report `skipped`.
   Kubernetes checks the namespace, not `resourceNames`.
 - **Smaller limits (I1).** These are documented in the code:
   - Vault List is one level deep, and KV v2 mounts are configured rather than detected.

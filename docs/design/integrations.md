@@ -190,8 +190,10 @@ CREATE TABLE integration_audit (
 
 Secrets are sealed with `crypto/aes` + `crypto/cipher` (GCM) from the standard library, with the row id and the
 category as additional data, so a ciphertext copied onto another row does not open. The key is
-`PIPEROOM_SECRET_KEY` (32 bytes, base64), injected from the customer's secret manager. Without a key, the Integrations
-page is read-only, and it tells the admin what is missing. Key rotation: `PIPEROOM_SECRET_KEY_PREVIOUS` is tried on
+`PIPEROOM_SECRET_KEY` (32 bytes, base64), injected from the customer's secret manager. Without a key, typed-in values
+cannot be saved (references still can): `GET /api/integrations/status` reports `secret_key_set: false`, and the drawer
+says what is missing and offers only references for new secrets. A row whose blob no key opens answers
+`409 secret_key_mismatch`; a `PUT` that enters every typed-in secret again repairs it. Key rotation: `PIPEROOM_SECRET_KEY_PREVIOUS` is tried on
 read, and each row is re-sealed on its next save. `key_id` is the first 8 hex characters of SHA-256 of the key.
 
 PEM files (CA, client certificate, key) are stored as secret fields. `netsec.TLS` takes file **paths** today

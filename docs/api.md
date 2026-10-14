@@ -77,14 +77,14 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 |---|---|
 | 400 | `bad_request`, `validation` (integrations: the body also carries `"field": "<name>"` when one field is wrong); after auth PR 3: `login_expired` (login cookie or row missing/expired at `/auth/callback`) |
 | 401 | `unauthenticated`; after auth PR 2: `session_expired` (no, revoked or expired session). Its body also carries the server's mode: `{"error":{"code":"session_expired","message":"…","auth_mode":"dev"\|"oidc"}}` — the web app shows the dev picker or goes to `/auth/login?return=…`. A WebSocket whose session ends gets an `error` frame with code `session_expired` and is then closed with close reason `session_expired` |
-| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline), `not_provisioned` (login gate); integrations: `not_admin` (caller is not an admin), `admin_needs_oidc` (dev auth mode on a non-loopback listen: integration writes are off) |
-| 404 | `not_found` |
+| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline), `not_provisioned` (login gate); integrations: `not_admin` (caller is not an admin), `admin_needs_oidc` (dev auth mode on a non-loopback listen: integration writes are off), `secret_access_denied` (a secret manager refused a reference, a prefix or a key listing: outside the provider's prefix or file roots, or not allowed by its policy; the body carries `field`) |
+| 404 | `not_found` (integrations: also a referenced secret, or its `#key`, that does not exist; the body then carries `field`) |
 | 413 | `too_large` (signed alert body over 1 MB) |
-| 409 | integrations: `version_conflict` (`If-Match` is not the stored version), `duplicate` (the category, alert source or secret-manager name is already connected), `managed_by_env` (that category is set by environment variables), `secret_key_missing` (a typed-in secret needs `PIPEROOM_SECRET_KEY`); `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period) |
+| 409 | integrations: `version_conflict` (`If-Match` is not the stored version), `duplicate` (the category, alert source or secret-manager name is already connected), `managed_by_env` (that category is set by environment variables), `secret_key_missing` (a typed-in secret needs `PIPEROOM_SECRET_KEY`), `secret_key_mismatch` (a row's sealed secrets open with neither `PIPEROOM_SECRET_KEY` nor `PIPEROOM_SECRET_KEY_PREVIOUS`: set the old key as `_PREVIOUS`, or `PUT` the row with every typed-in secret entered again; a kept one answers `400 validation` "must be entered again"), `in_use` (delete or disable of a secret manager that enabled rows reference; body `{"error":{…},"dependents":[{id, kind, title}]}`); `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period) |
 | 422 | `checks_failed` (integrations: a connection check failed; nothing saved; body `{"error":{…},"checks":[Check]}`) |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list) |
 | 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client; `POST /api/integrations/test`, create and update over 10 tests a minute per admin) |
-| 502 | `provider_unreachable` (integrations: the secret manager did not answer a name or key listing) |
+| 502 | `provider_unreachable` (integrations: the secret manager did not answer a name or key listing, or a stored reference on enable) |
 | 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working) |
 
 Text a person types (titles, comments, steers, resolutions, trace keys, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD).
@@ -260,6 +260,9 @@ Design: `docs/design/integrations.md` §4–§8 and `docs/design/secret-provider
 `category` ∈ `source_db | kafka | connect | registry | warehouse | model | alerts | chat | secret_manager`.
 Field `type` ∈ `text | secret | number | select | bool | pem | json_file`; `secret`, `pem` and `json_file` are secret
 fields (write-only). `pattern` is an RE2 regexp the server enforces; `options` is set for `select` only. Every
+`allow_ref: true` marks a non-secret field that may hold `{"$ref": "secret://…"}` in `config` instead of text (the
+Postgres `user`, so a Vault database lease gives user name and password: `…/database/creds/ro#username` and `#password`
+read one lease). Every
 `secret_manager` kind has a required text field `name` matching `^[a-z0-9][a-z0-9_-]{0,62}$`: the provider id that
 `secret://` references name (unique per workspace; `files` is reserved for the built-in mounted-files provider).
 
@@ -284,10 +287,16 @@ never contain a secret or a record value.
 ```
 `config` holds the non-secret fields, plus `{"$ref": "secret://…"}` for a secret field held as a reference (a
 reference is not a secret). Typed-in secret values never appear in any response; `secrets_set` names the secret fields
-that have a value. `status` ∈ `connected | failing | disabled | untested`. `source` ∈ `db | env`: a category with any
-of its environment variables set is `env` (id `env_<category>`, `version` 0, `updated_by` `"env"`, `config` holds
-no values from secret variables) and is read-only (`409 managed_by_env` on writes). `last_tested_at` is `null` and
-`last_test` `[]` before the first test.
+that have a value. `status` ∈ `connected | failing | disabled | untested`. An enabled row whose client is not running
+(the server could not build it at start, or a live apply after a save or a rotated secret failed) is `failing`, and
+its `last_test` ends with a check `{"id": "live", "status": "fail", "detail": "not connected at start: …"}` that is
+not stored; enabling it again (or a restart) retries. `source` ∈ `db | env`: a category with any
+of its environment variables set is `env` (id `env_<category>`, and `env_alerts_<source>` for an alert source whose
+secret variable is set, e.g. `env_alerts_grafana`; `version` 0, `updated_by` `"env"`, `config` holds
+no values from secret variables; a database URL held as a `secret://` reference shows an empty `config` and
+`secrets_set: ["password"]`) and is read-only (`409 managed_by_env` on writes, also with `If-Match: 0`). Env rows are
+not tested from the page: their `status` is `untested`, and the page counts them as configured (the server opened them
+at start, and a failure there refuses start). `last_tested_at` is `null` and `last_test` `[]` before the first test.
 
 **AuditEntry** (`spec.AuditEntry`):
 ```json
@@ -318,17 +327,18 @@ required field → `400 validation` with `field`.
 | GET | `/api/integrations/catalog` | – | `[CatalogKind]` | any logged-in user |
 | POST | `/api/integrations/catalog/{kind}/setup-script` | `{config}` | `{script}` | the least-privilege grant script filled from non-secret config; `script` is `""` when the kind has none (`has_setup_script: false`); unknown kind → `404 not_found` |
 | GET | `/api/integrations` | – | `[Integration]` | db rows and env-managed categories |
+| GET | `/api/integrations/status` | – | `{secret_key_set: bool}` | whether `PIPEROOM_SECRET_KEY` is set; without it typed-in secrets cannot be saved (references still can), and the drawer offers references only |
 | POST | `/api/integrations/test` | write body | `{checks: [Check]}` | tests unsaved values; stores nothing; `200` even when checks fail; at most 20 s; `429 rate_limited` over 10 a minute per admin |
 | POST | `/api/integrations` | write body | `201 {integration, checks}` | runs the test first; any `fail` → `422 checks_failed` with `checks`, nothing saved; `409 duplicate` |
-| PUT | `/api/integrations/{id}` | write body | `{integration, checks}` | header `If-Match: <version>` required (missing → `400 validation`); stale → `409 version_conflict`; `kind` must equal the row's kind; `config` is the whole non-secret form (a non-secret field left out is cleared; secret fields: absent or `""` keeps, `null` clears); tests first like create; the new client replaces the old one with no restart |
-| POST | `/api/integrations/{id}/enable` | – | `Integration` | builds and swaps in the client |
-| POST | `/api/integrations/{id}/disable` | – | `Integration` | keeps the row; tools then answer "not connected" |
-| DELETE | `/api/integrations/{id}` | – | `204` | removes the row and the client; audit rows stay |
-| GET | `/api/integrations/{id}/audit?limit=100` | – | `[AuditEntry]` | newest first; limit max 500 |
+| PUT | `/api/integrations/{id}` | write body | `{integration, checks}` | header `If-Match: <version>` required (missing or negative → `400 validation`; env rows advertise `0` and answer `409 managed_by_env`); stale → `409 version_conflict`; `kind` must equal the row's kind; `config` is the whole non-secret form (a non-secret field left out is cleared; secret fields: absent or `""` keeps, `null` clears); tests first like create; the new client replaces the old one with no restart |
+| POST | `/api/integrations/{id}/enable` | – | `Integration` | builds and swaps in the client; on an enabled row it rebuilds the client (the recovery after a failed start or rotation) with no new version, audit row or notice; `409 secret_key_mismatch`; a stored reference that cannot be read → `400 validation` / `403 secret_access_denied` / `404 not_found` with `field`, or `502 provider_unreachable` |
+| POST | `/api/integrations/{id}/disable` | – | `Integration` | keeps the row; tools then answer "not connected"; on a disabled row nothing changes (same version, no audit row); `409 in_use` for a secret manager that enabled rows reference |
+| DELETE | `/api/integrations/{id}` | – | `204` | removes the row and the client; audit rows stay; `409 in_use` for a secret manager that enabled rows reference |
+| GET | `/api/integrations/{id}/audit?limit=100` | – | `[AuditEntry]` | newest first; limit max 500; an unknown or deleted id answers `200 []` (no `404`), so the audit of a deleted row stays readable |
 | GET | `/api/integrations/alerts/{source}/setup` | – | `AlertSetup` | `source` ∈ `alertmanager \| grafana \| pagerduty \| datadog \| generic`, else `404 not_found` |
 | POST | `/api/integrations/alerts/{source}/rotate` | – | `AlertSetup` plus `"secret": "<value>"` and, while it applies, `"restart_required": true` | generates a new secret and returns it **once**; it is never readable again; `409 managed_by_env` when the env sets that source's secret; `400 validation` for `pagerduty`, which generates its own signing secret: that card is created with `POST /api/integrations` and its secret field `secret`. `restart_required: true` means the server accepts the new secret only after a restart (the old one keeps working until then) |
-| GET | `/api/integrations/{id}/secrets?prefix=` | – | `{names: [string], list_supported: bool}` | `{id}` must be a `secret_manager` row (else `400 validation`); secret **names** under `prefix`, at most 200, never values; a provider that cannot list → `{names: [], list_supported: false}`; manager down → `502 provider_unreachable` |
-| GET | `/api/integrations/{id}/secrets/keys?ref=` | – | `{keys: [string]}` | field names of the JSON / key-value secret `ref` (a URL-encoded `secret://` reference whose provider is `{id}`'s name), never values; `[]` for a plain secret |
+| GET | `/api/integrations/{id}/secrets?prefix=` | – | `{names: [string], list_supported: bool}` | `{id}` must be a `secret_manager` row (else `400 validation`); secret **names** under `prefix`, at most 200, never values; a provider that cannot list → `{names: [], list_supported: false}`; manager down → `502 provider_unreachable`; a `prefix` with `..` → `400 validation`, outside the provider's prefix → `403 secret_access_denied` (both with `field: "prefix"`) |
+| GET | `/api/integrations/{id}/secrets/keys?ref=` | – | `{keys: [string]}` | field names of the JSON / key-value secret `ref` (a URL-encoded `secret://` reference whose provider is `{id}`'s name), never values; `[]` for a plain secret; outside the provider's prefix → `403 secret_access_denied`, no such secret → `404 not_found` (both with `field: "ref"`) |
 
 `AlertSetup`:
 ```json
@@ -336,7 +346,8 @@ required field → `400 validation` with `field`.
   "snippet": "…contact point config with <secret> in place of the secret…", "snippet_lang": "yaml",
   "secret_set": true, "secret_source": "db" }
 ```
-`secret_source` ∈ `db | env | ""` (none yet). The rotate response adds `"secret"`; no other response carries it.
+`secret_source` ∈ `db | env | ""` (none yet). `integration_id` may name a saved row that the environment shadows
+while `secret_source` is `env`. The rotate response adds `"secret"`; no other response carries it.
 
 Every integration response passes through one encoder that drops typed-in secret values; a unit test checks every
 route's output for a canary secret. Later phases add `POST /api/integrations/discover`, `GET /slack/install` and
