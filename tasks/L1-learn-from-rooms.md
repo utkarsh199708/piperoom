@@ -26,11 +26,15 @@ with their confirmed cause and fix.
    has `cause` and `actual_layer`, and at least one `hypothesis.verdict` is `confirmed`. If a fix was executed,
    its `agent.verification` must say `recovered: true`. A room with only `disputed` verdicts is exported as a
    *hard* case (see L1a) and never as an example.
-2. **No customer data in git.** Every text the exporter writes (summaries, `data`, steers, comments, labels)
-   goes through `redact.Text`; the exporter refuses to write a file where a second `redact.Text` pass changes
-   anything. `data` larger than 4 KB is dropped (the model reads `summary`, not `data`). Export lands in
-   `evals/scenarios/learned/pending/`, which `evalrun` never reads; a person moves the file into
-   `learned/` in a PR. The move is the review.
+2. **No customer data in git. This repository is public**, so learned scenarios never live in it, redacted or
+   not: table, connector, topic and host names describe a customer's systems. The exporter requires `-out DIR`
+   and refuses a DIR inside the git working tree; the learned set lives in a private store (a private repo
+   checkout or a local folder) that `evalrun -learned DIR` reads. `evals/scenarios/learned/.gitignore`
+   (`*`, `!.gitignore`) stops an accidental commit. Inside the private store the same rules hold: every text the
+   exporter writes (summaries, `data`, steers, comments, labels) goes through `redact.Text`; it refuses to
+   write a file where a second `redact.Text` pass changes anything; `data` larger than 4 KB is dropped (the
+   model reads `summary`, not `data`). Export lands in `<store>/pending/`, which `evalrun` never replays; a
+   person moves the file into `<store>/` after reading it. The move is the review.
 3. **Examples are data, not instructions.** Past-room text enters the prompt only through the agent's
    untrusted wrapper, and only the fields a person typed or confirmed (`cause`, `fix_that_worked`,
    `actual_layer`, the confirmed hypothesis text). Never the hand-off, never tool-result text.
@@ -43,9 +47,9 @@ with their confirmed cause and fix.
 
 ## L1a — exporter (C6, `evals/cmd/roomcase/`, `evals/learned.go`)
 
-`go run ./evals/cmd/roomcase -export room.json -owners owners.yaml [-force] [-out DIR]` reads one room
+`go run ./evals/cmd/roomcase -export room.json -owners owners.yaml -out DIR [-force]` reads one room
 export (`GET /api/rooms/{id}/export`, the integrity-hashed JSON; the tool verifies the hash first) and writes
-`evals/scenarios/learned/pending/<pipeline>-<yyyy-mm-dd>-<short room id>.yaml`. No database access: the
+`DIR/pending/<pipeline>-<yyyy-mm-dd>-<short room id>.yaml`. DIR is the private store (guardrail 2). No database access: the
 export is the input, so this runs anywhere, including on the on-call engineer's laptop.
 
 Mapping (every field of the existing scenario schema; add no new fields):
@@ -74,10 +78,10 @@ Tests (unit, no network): a fixture export under `evals/testdata/rooms/` built w
 `evals/gen` fakes; table-driven mapping tests; a test that a planted `password=` in a summary never reaches
 the file; a test that the second `redact.Text` pass is a no-op on every written string; the dedup refusal;
 the per-pipeline cap; a shadow room and an unlabelled room are refused with a clear error; a hash mismatch is
-refused. `evalrun -validate` runs over `learned/` as part of the default set and `-check` runs over
-`learned/pending/` too (so a pending file is at least well-formed), without ever replaying `pending/`.
+refused; an `-out` inside the working tree is refused. `evalrun -learned DIR -validate` checks the store and
+`-check` also covers `DIR/pending/` (so a pending file is at least well-formed), without ever replaying it.
 
-README: a "Learned scenarios" section: how to export, the review checklist (the reviewer reads every
+README: a "Learned scenarios" section: where they live (a private store, never this public repo) and why, how to export, the review checklist (the reviewer reads every
 `summary` and `input`, confirms no row values, DSNs or names survive, and that `expect` says what the person
 on the room would have said), and the rule that `learned/` is never tuned on by hand: a wrong expectation is
 fixed by re-labelling the room and re-exporting.
@@ -120,6 +124,13 @@ A new job `evals-live`, separate from the existing jobs, that:
   `misses` grew; never fails on cost alone, but prints the cost delta;
 - has `concurrency` so a second push cancels the running eval, and `timeout-minutes: 30`.
 
+Public repository rules for this job: never `pull_request_target`; run only when
+`github.event.pull_request.head.repo.full_name == github.repository` (fork PRs get no secret anyway, and must not
+spend the key); put the job in a GitHub Environment `evals` holding `ANTHROPIC_API_KEY`, with the owner as
+required reviewer for PR runs, so no PR spends money without approval (the nightly run is approved by its
+schedule); upload only the report of the committed synthetic scenarios (logs and artifacts are public). The
+learned set runs from the private store, never in this repository's CI.
+
 Baseline: `evals/baseline/default.json` is the report of `main` on the pinned model, refreshed in the same PR
 as any *intended* prompt change (the PR author runs it and commits it; the lead reads the diff of the report,
 not just the code). The held-out set stays out of CI and out of the baseline: it is run by hand before a
@@ -145,8 +156,8 @@ on. `learned-example-used.yaml` (C7) follows L1b.
 ## Done when
 
 - A labelled room from the dev stack (`schema-change`, closed and labelled through the UI) exports to a
-  pending file that `-check` accepts, a person moves it, and `evalrun` replays it with the recorded
-  cause found in every run.
+  pending file in a private store that `-check` accepts, a person moves it, and `evalrun -learned` replays it
+  with the recorded cause found in every run. Nothing under `evals/scenarios/learned/` is tracked by git.
 - A planted secret in any room text never appears in the exported file (test).
 - A room opened on `orders` after that shows the past case in the agent's first turn, wrapped, and the triage
   headline cites the right layer in under 40 s on the dev stack.
