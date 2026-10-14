@@ -93,3 +93,41 @@ func TestLongTransactionsSchemaStatesRange(t *testing.T) {
 		}
 	}
 }
+
+// reconcile's since..until is the one window a model sets. The span is capped
+// at 6h whatever the endpoints are: time.Time.Sub saturates instead of
+// wrapping, so the extreme dates RFC 3339 allows still fail the check.
+func TestReconcileWindowExtremes(t *testing.T) {
+	tests := []struct {
+		name  string
+		since string
+		until string // "" omits until (now)
+		ok    bool
+	}{
+		{"exactly 6h", "2026-10-14T00:00:00Z", "2026-10-14T06:00:00Z", true},
+		{"6h and a nanosecond", "2026-10-14T00:00:00Z", "2026-10-14T06:00:00.000000001Z", false},
+		{"one nanosecond", "2026-10-14T03:00:00Z", "2026-10-14T03:00:00.000000001Z", true},
+		{"empty", "2026-10-14T03:00:00Z", "2026-10-14T03:00:00Z", false},
+		{"reversed", "2026-10-14T03:00:00Z", "2026-10-14T02:00:00Z", false},
+		{"year 1 to year 9999", "0001-01-01T00:00:00Z", "9999-12-31T23:59:59Z", false},
+		{"year 9999 to year 1", "9999-12-31T23:59:59Z", "0001-01-01T00:00:00Z", false},
+		{"year 1 to now", "0001-01-01T00:00:00Z", "", false},
+		{"year 9999 to now", "9999-12-31T23:59:59Z", "", false},
+	}
+	d := rcDeps(&countSrc{}, &countWh{}, nil)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			in := `{"table":"public.orders","since":"` + tc.since + `"`
+			if tc.until != "" {
+				in += `,"until":"` + tc.until + `"`
+			}
+			_, err := rcRun(t, d, "orders", in+`}`)
+			switch {
+			case tc.ok && err != nil:
+				t.Fatalf("err = %v, want ok", err)
+			case !tc.ok && !errors.Is(err, tools.ErrBadInput):
+				t.Fatalf("err = %v, want ErrBadInput", err)
+			}
+		})
+	}
+}
