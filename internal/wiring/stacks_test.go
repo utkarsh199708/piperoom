@@ -91,6 +91,10 @@ func (s *spy) LoadErrors(context.Context, string, time.Time, int) ([]clients.Loa
 	s.hit("LoadErrors")
 	return nil, nil
 }
+func (s *spy) CountByBucket(context.Context, string, string, time.Time, time.Time, time.Duration) ([]clients.MinuteCount, error) {
+	s.hit("CountByBucket")
+	return nil, nil
+}
 func (s *spy) ListConnectors(context.Context) ([]string, error) {
 	s.hit("ListConnectors")
 	return []string{"pa-connector", "pb-connector"}, nil
