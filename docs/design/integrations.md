@@ -146,7 +146,7 @@ deadline (default 5 s, the whole test 20 s). The checks never write:
 
 | Kind | Checks |
 |---|---|
-| Postgres source | TCP reach; TLS handshake; login; `server_version` ≥ 13 (watcher, `docs/pilot/setup.md` §1); `pg_is_in_recovery()` is false (watcher needs the primary); `SELECT` on `pg_replication_slots`; for each listed table `has_table_privilege(…, 'SELECT')` is true **and** `'INSERT'`, `'UPDATE'`, `'DELETE'` are false; `default_transaction_read_only` or a `statement_timeout` is set (warn if not) |
+| Postgres source | TCP reach; TLS handshake; login; `server_version` ≥ 13 (watcher, `docs/pilot/setup.md` §1); `pg_is_in_recovery()` is false (watcher needs the primary); `SELECT` on `pg_replication_slots`; for each listed table `has_table_privilege(…, 'SELECT')` is true **and** `'INSERT'`, `'UPDATE'`, `'DELETE'`, `'TRUNCATE'`, `'REFERENCES'`, `'TRIGGER'` are false **and** `has_any_column_privilege(…, 'INSERT')` / `(…, 'UPDATE')` are false (column grants are no table privilege; the fix names the granted columns); for a superuser the table checks fail with the not-superuser fix, since grants do not bind it; `default_transaction_read_only` or a `statement_timeout` is set (warn if not) |
 | Warehouse | the same privilege checks on the sink tables; Snowflake: `SHOW GRANTS TO ROLE` has no write privilege (**verify** the result shape) |
 | Kafka | metadata request lists brokers; `DescribeGroups` works; warn when the principal is allowed to produce (ACL describe, when the cluster allows it; otherwise `skipped` with the reason) |
 | Connect | `GET /connectors` returns 200; warn if no Debezium Postgres connector is found |

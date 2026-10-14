@@ -36,11 +36,12 @@ Create a read-only role limited to the pipeline's tables. Piperoom also forces
 first place.
 
 ```sql
-CREATE ROLE piperoom_ro LOGIN PASSWORD '<generated, from your secret store>'
+CREATE ROLE piperoom_ro LOGIN
   NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
   CONNECTION LIMIT 5;
 ALTER ROLE piperoom_ro SET default_transaction_read_only = on;
 ALTER ROLE piperoom_ro SET statement_timeout = '10s';
+-- Then set its password from your secret store, in psql: \password piperoom_ro
 
 GRANT CONNECT ON DATABASE <db> TO piperoom_ro;
 
@@ -49,8 +50,14 @@ GRANT USAGE ON SCHEMA public TO piperoom_ro;
 GRANT SELECT ON public.orders TO piperoom_ro;     -- repeat per pipeline table
 
 -- DDL audit log (see "DDL audit" below). Optional: without it pg_recent_ddl reports "not installed".
-GRANT USAGE ON SCHEMA piperoom_audit TO piperoom_ro;
-GRANT SELECT ON piperoom_audit.ddl_log TO piperoom_ro;
+-- Granted only when the schema exists, so the script also runs where it does not.
+DO $$
+BEGIN
+  IF to_regclass('piperoom_audit.ddl_log') IS NOT NULL THEN
+    GRANT USAGE ON SCHEMA piperoom_audit TO piperoom_ro;
+    GRANT SELECT ON piperoom_audit.ddl_log TO piperoom_ro;
+  END IF;
+END $$;
 ```
 
 Notes:
@@ -60,6 +67,13 @@ Notes:
   (`internal/tools/dbtools/pg.go:250`), but the credential is the real boundary: a bug or a
   changed `owners.yaml` must not widen what the role can read.
 - `pg_replication_slots` is readable by any role. No `REPLICATION` attribute is needed or wanted.
+  If `SELECT` on it was revoked from `PUBLIC`, grant it back to this role with
+  `GRANT SELECT ON pg_catalog.pg_replication_slots TO piperoom_ro;` (`pg_monitor` does not include it).
+- The role is created without a password, so running the script unedited never leaves a login
+  with a known password. Set it with `\password piperoom_ro` (or `ALTER ROLE ... PASSWORD`) from
+  your secret store.
+- The Integrations page's read-only checks also fail on `TRUNCATE`, `REFERENCES`, `TRIGGER` and
+  column-level `INSERT`/`UPDATE` grants, not only on table-wide `INSERT`/`UPDATE`/`DELETE`.
 - `pg_long_transactions` reads `pg_stat_activity`. The tool never returns query text: the
   client selects only the statement verb (first keyword). Without `pg_read_all_stats` the role
   also does not see other sessions' `query` at all, which is still the **preferred**

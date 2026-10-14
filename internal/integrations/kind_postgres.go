@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"regexp"
@@ -245,6 +247,40 @@ func (s pgxSession) TLS() bool {
 
 func (s pgxSession) Close(ctx context.Context) error { return s.c.Close(ctx) }
 
+// sslRequestCode is the SSLRequest message code of the Postgres protocol.
+const sslRequestCode = 80877103
+
+// sslRefused reports whether the server at host:port answers an SSLRequest
+// with 'N' (no TLS). pgconn turns that answer into an untyped error, so the
+// login error cannot tell it apart; asking again on a fresh connection can.
+// false when the probe cannot tell (no answer, dial error).
+func (d Deps) sslRefused(ctx context.Context, host, port string) bool {
+	if d.pgSSLProbe != nil {
+		return d.pgSSLProbe(ctx, host, port)
+	}
+	ctx, cancel := context.WithTimeout(ctx, d.checkTimeout())
+	defer cancel()
+	c, err := d.dial()(ctx, "tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = c.SetDeadline(dl)
+	}
+	msg := make([]byte, 8)
+	binary.BigEndian.PutUint32(msg[0:4], 8)
+	binary.BigEndian.PutUint32(msg[4:8], sslRequestCode)
+	if _, err := c.Write(msg); err != nil {
+		return false
+	}
+	reply := make([]byte, 1)
+	if _, err := io.ReadFull(c, reply); err != nil {
+		return false
+	}
+	return reply[0] == 'N'
+}
+
 // pgCode returns the SQLSTATE of err, or "".
 func pgCode(err error) string {
 	var pe *pgconn.PgError
@@ -288,6 +324,12 @@ func (d Deps) postgresTest(o pgKindOpts) func(ctx context.Context, v spec.Values
 		case t.SSLMode == sslDisable:
 			cl.add("tls", "Connection is encrypted (TLS)", warn("TLS is disabled: the password and query results cross the network in clear text",
 				"Set TLS mode to verify-full (and paste the server's CA if it is private)."))
+		case loginErr != nil && pgCode(loginErr) == "" && !isTLSError(loginErr) && d.sslRefused(ctx, t.Host, port):
+			// pgconn reports a refused SSLRequest as plain text, so the
+			// server is asked again on a fresh connection instead.
+			cl.add("tls", "TLS handshake", fail("the server did not use TLS: it refused the TLS request", "Enable ssl on the server, or set TLS mode to disable for a local test only."))
+			cl.skip("login", "Login works", "skipped: the server does not accept TLS")
+			return cl.result()
 		case loginErr != nil && isTLSError(loginErr):
 			cl.add("tls", "TLS handshake", fail("TLS handshake failed: "+errText(loginErr),
 				"Paste the CA certificate that signs the database's certificate (for RDS: the region's RDS CA bundle), or use the host name on the certificate."))
@@ -343,7 +385,9 @@ func (d Deps) postgresTest(o pgKindOpts) func(ctx context.Context, v spec.Values
 				var n int
 				if err := sess.QueryRow(ctx, "SELECT count(*) FROM pg_replication_slots").Scan(&n); err != nil {
 					return fail(fmt.Sprintf("%s cannot read pg_replication_slots: %s", role, errText(err)),
-						fmt.Sprintf("GRANT pg_monitor TO %s;", role))
+						// pg_monitor carries no SELECT on this view; the default
+						// grant is to PUBLIC, so a revoked one is granted back.
+						fmt.Sprintf("GRANT SELECT ON pg_catalog.pg_replication_slots TO %s;", role))
 				}
 				if n == 0 {
 					return warn("no replication slots exist; Debezium creates one when its connector starts", "")
@@ -352,8 +396,8 @@ func (d Deps) postgresTest(o pgKindOpts) func(ctx context.Context, v spec.Values
 			})
 		}
 
+		var super bool
 		cl.run("not_superuser", "Role is not a superuser", func(ctx context.Context) outcome {
-			var super bool
 			if err := sess.QueryRow(ctx, "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").Scan(&super); err != nil {
 				return fail("cannot read pg_roles: "+errText(err), "")
 			}
@@ -368,7 +412,7 @@ func (d Deps) postgresTest(o pgKindOpts) func(ctx context.Context, v spec.Values
 			cl.skip("tables", "Table privileges", "No tables listed: add the pipeline's tables to check that the role can read them and cannot write them.")
 		}
 		for _, tbl := range t.Tables {
-			pgTableChecks(cl, sess, tbl, role)
+			pgTableChecks(cl, sess, tbl, role, super)
 		}
 
 		cl.run("timeout", "Role has a statement_timeout or is read-only by default", func(ctx context.Context) outcome {
@@ -415,17 +459,30 @@ func pgLoginFailure(err error, timedOut bool, t pgTarget, role string) outcome {
 	}
 }
 
-// pgTableChecks adds the SELECT and read-only checks for one table.
-func pgTableChecks(cl *checklist, sess pgSession, tbl, role string) {
+// pgWritePrivs are the table privileges that let a role change a table or
+// its data. Column grants (INSERT/UPDATE on some columns) are no table
+// privilege, so they are checked with has_any_column_privilege.
+var pgWritePrivs = []string{"INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"}
+
+// pgTableChecks adds the SELECT and read-only checks for one table. super is
+// the not_superuser check's finding: grants do not bind a superuser, so a
+// REVOKE fix would do nothing.
+func pgTableChecks(cl *checklist, sess pgSession, tbl, role string, super bool) {
 	parts := strings.SplitN(tbl, ".", 2)
 	quoted := pgx.Identifier{parts[0], parts[1]}.Sanitize()
-	var sel, ins, upd, del bool
+	var sel, colIns, colUpd bool
+	table := make([]bool, len(pgWritePrivs))
 	var qerr error
 	cl.run("select:"+tbl, "Role can SELECT from "+tbl, func(ctx context.Context) outcome {
-		qerr = sess.QueryRow(ctx,
-			"SELECT has_table_privilege($1::text, 'SELECT'), has_table_privilege($1::text, 'INSERT'), "+
-				"has_table_privilege($1::text, 'UPDATE'), has_table_privilege($1::text, 'DELETE')", quoted).
-			Scan(&sel, &ins, &upd, &del)
+		dest := []any{&sel}
+		q := "SELECT has_table_privilege($1::text, 'SELECT')"
+		for i, p := range pgWritePrivs {
+			q += ", has_table_privilege($1::text, '" + p + "')"
+			dest = append(dest, &table[i])
+		}
+		q += ", has_any_column_privilege($1::text, 'INSERT'), has_any_column_privilege($1::text, 'UPDATE')"
+		dest = append(dest, &colIns, &colUpd)
+		qerr = sess.QueryRow(ctx, q, quoted).Scan(dest...)
 		switch {
 		case qerr != nil && pgCode(qerr) == "42P01":
 			return fail("table "+tbl+" does not exist", "Check the table name; list schema.table as it is in the database.")
@@ -436,26 +493,62 @@ func pgTableChecks(cl *checklist, sess pgSession, tbl, role string) {
 		}
 		return pass("")
 	})
+	if super {
+		cl.add("read_only:"+tbl, "Role cannot write to "+tbl, fail("superuser: table grants do not apply",
+			"Create a dedicated read-only role with the setup script and use it here."))
+		return
+	}
 	if qerr != nil {
 		cl.skip("read_only:"+tbl, "Role cannot write to "+tbl, "skipped: the privilege check failed")
 		return
 	}
-	cl.run("read_only:"+tbl, "Role cannot INSERT, UPDATE or DELETE "+tbl, func(context.Context) outcome {
-		var can []string
-		for _, p := range []struct {
-			name string
-			has  bool
-		}{{"INSERT", ins}, {"UPDATE", upd}, {"DELETE", del}} {
-			if p.has {
-				can = append(can, p.name)
+	cl.run("read_only:"+tbl, "Role cannot INSERT, UPDATE, DELETE or TRUNCATE "+tbl, func(ctx context.Context) outcome {
+		var can, fixes []string
+		var tablePrivs []string
+		for i, p := range pgWritePrivs {
+			if table[i] {
+				can = append(can, p)
+				tablePrivs = append(tablePrivs, p)
 			}
 		}
+		if len(tablePrivs) > 0 {
+			fixes = append(fixes, fmt.Sprintf("REVOKE %s ON %s FROM %s;", strings.Join(tablePrivs, ", "), sqlTable(tbl), role))
+		}
+		// A column grant shows only when the table grant of the same
+		// privilege is absent (has_any_column_privilege includes it).
+		for _, c := range []struct {
+			priv       string
+			col, whole bool
+		}{{"INSERT", colIns, table[0]}, {"UPDATE", colUpd, table[1]}} {
+			if !c.col || c.whole {
+				continue
+			}
+			can = append(can, c.priv+" (some columns)")
+			cols := pgGrantedColumns(ctx, sess, quoted, c.priv)
+			if cols == "" {
+				cols = "<columns>"
+			}
+			fixes = append(fixes, fmt.Sprintf("REVOKE %s (%s) ON %s FROM %s;", c.priv, cols, sqlTable(tbl), role))
+		}
 		if len(can) > 0 {
-			list := strings.Join(can, ", ")
-			return fail(role+" can "+list+" on "+tbl, fmt.Sprintf("REVOKE %s ON %s FROM %s;", list, sqlTable(tbl), role))
+			return fail(role+" can "+strings.Join(can, ", ")+" on "+tbl, strings.Join(fixes, " "))
 		}
 		return pass("")
 	})
+}
+
+// pgGrantedColumns lists the columns of quoted on which the current role
+// holds priv, quoted for a REVOKE, or "" when they cannot be read.
+func pgGrantedColumns(ctx context.Context, sess pgSession, quoted, priv string) string {
+	var cols string
+	err := sess.QueryRow(ctx,
+		"SELECT coalesce(string_agg(quote_ident(attname), ', ' ORDER BY attnum), '') FROM pg_attribute "+
+			"WHERE attrelid = $1::text::regclass AND attnum > 0 AND NOT attisdropped AND has_column_privilege(attrelid, attnum, $2::text)",
+		quoted, priv).Scan(&cols)
+	if err != nil {
+		return ""
+	}
+	return cols
 }
 
 // pgVersionText formats server_version_num: since Postgres 10 it is
@@ -533,10 +626,13 @@ func pgSetupScript(source bool) func(v spec.Values) string {
 		}
 		var b strings.Builder
 		fmt.Fprintf(&b, "-- Read-only role for Piperoom. Run as an admin of %s.\n", db)
-		fmt.Fprintf(&b, "CREATE ROLE %s LOGIN PASSWORD '<generated, from your secret store>'\n", role)
+		// No password literal: a script run unedited must not leave a login
+		// with a known (published) password. The admin sets it afterwards.
+		fmt.Fprintf(&b, "CREATE ROLE %s LOGIN\n", role)
 		b.WriteString("  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS\n  CONNECTION LIMIT 5;\n")
 		fmt.Fprintf(&b, "ALTER ROLE %s SET default_transaction_read_only = on;\n", role)
-		fmt.Fprintf(&b, "ALTER ROLE %s SET statement_timeout = '10s';\n\n", role)
+		fmt.Fprintf(&b, "ALTER ROLE %s SET statement_timeout = '10s';\n", role)
+		fmt.Fprintf(&b, "-- Then set its password from your secret store, in psql: \\password %s\n\n", role)
 		fmt.Fprintf(&b, "GRANT CONNECT ON DATABASE %s TO %s;\n", db, role)
 		if len(tables) == 0 {
 			fmt.Fprintf(&b, "\n-- Only the pipeline's tables (list them in the form to fill this in).\n")
@@ -556,8 +652,15 @@ func pgSetupScript(source bool) func(v spec.Values) string {
 			}
 		}
 		if source {
+			// Optional, so it must not fail the script (psql -1 rolls back
+			// everything on the first error) where the schema is absent.
 			b.WriteString("\n-- Optional DDL audit log (pg_recent_ddl); see docs/pilot/permissions.md.\n")
-			fmt.Fprintf(&b, "GRANT USAGE ON SCHEMA piperoom_audit TO %s;\nGRANT SELECT ON piperoom_audit.ddl_log TO %s;\n", role, role)
+			b.WriteString("-- Granted only when the piperoom_audit schema exists.\n")
+			b.WriteString("DO $$\nBEGIN\n")
+			b.WriteString("  IF to_regclass('piperoom_audit.ddl_log') IS NOT NULL THEN\n")
+			fmt.Fprintf(&b, "    GRANT USAGE ON SCHEMA piperoom_audit TO %s;\n", role)
+			fmt.Fprintf(&b, "    GRANT SELECT ON piperoom_audit.ddl_log TO %s;\n", role)
+			b.WriteString("  END IF;\nEND $$;\n")
 		}
 		return b.String()
 	}

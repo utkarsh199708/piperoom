@@ -56,8 +56,12 @@ type fakePG struct {
 	timeout string
 	ro      string
 	tables  map[string][4]bool
-	block   bool // every query waits for ctx
-	closed  bool
+	// extra holds TRUNCATE, REFERENCES, TRIGGER and column-only INSERT,
+	// UPDATE grants per quoted table; cols the granted columns by privilege.
+	extra  map[string][5]bool
+	cols   map[string]string
+	block  bool // every query waits for ctx
+	closed bool
 }
 
 func (f *fakePG) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
@@ -82,7 +86,11 @@ func (f *fakePG) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row 
 		if !ok {
 			return fakeRow{err: &pgconn.PgError{Code: "42P01", Message: "relation does not exist"}}
 		}
-		return fakeRow{vals: []any{p[0], p[1], p[2], p[3]}}
+		e := f.extra[args[0].(string)]
+		// has_any_column_privilege is also true for a table-wide grant.
+		return fakeRow{vals: []any{p[0], p[1], p[2], p[3], e[0], e[1], e[2], e[3] || p[1], e[4] || p[2]}}
+	case strings.Contains(sql, "has_column_privilege"):
+		return fakeRow{vals: []any{f.cols[args[1].(string)]}}
 	case strings.Contains(sql, "statement_timeout"):
 		return fakeRow{vals: []any{f.timeout, f.ro}}
 	}
@@ -99,6 +107,7 @@ func goodPG() *fakePG {
 
 func pgDeps(sess *fakePG, connErr error) Deps {
 	d := fastDeps()
+	d.pgSSLProbe = func(context.Context, string, string) bool { return false }
 	d.pgConnect = func(ctx context.Context, _ pgTarget) (pgSession, error) {
 		if connErr != nil {
 			if errors.Is(connErr, context.DeadlineExceeded) {
@@ -139,11 +148,37 @@ func TestPostgresSourceChecks(t *testing.T) {
 			f := goodPG()
 			f.slotErr = &pgconn.PgError{Code: "42501", Message: "permission denied"}
 			return f
-		}, want: map[string]spec.CheckStatus{"slots_visible": spec.CheckFail}, fix: map[string]string{"slots_visible": "GRANT pg_monitor TO piperoom_ro;"}},
+		}, want: map[string]spec.CheckStatus{"slots_visible": spec.CheckFail}, fix: map[string]string{"slots_visible": "GRANT SELECT ON pg_catalog.pg_replication_slots TO piperoom_ro;"}},
 		{name: "no slots", sess: func() *fakePG { f := goodPG(); f.slots = 0; return f },
 			want: map[string]spec.CheckStatus{"slots_visible": spec.CheckWarn}},
-		{name: "superuser", sess: func() *fakePG { f := goodPG(); f.super = true; return f },
-			want: map[string]spec.CheckStatus{"not_superuser": spec.CheckFail}},
+		{name: "superuser", sess: func() *fakePG {
+			f := goodPG()
+			f.super = true
+			f.tables[`"public"."orders"`] = [4]bool{true, true, true, true}
+			return f
+		},
+			want: map[string]spec.CheckStatus{"not_superuser": spec.CheckFail, "read_only:public.orders": spec.CheckFail},
+			fix:  map[string]string{"read_only:public.orders": "dedicated read-only role"}},
+		{name: "column update and truncate", sess: func() *fakePG {
+			f := goodPG()
+			f.extra = map[string][5]bool{`"public"."orders"`: {true, false, false, false, true}}
+			f.cols = map[string]string{"UPDATE": "status"}
+			return f
+		}, want: map[string]spec.CheckStatus{"read_only:public.orders": spec.CheckFail},
+			fix: map[string]string{"read_only:public.orders": "REVOKE TRUNCATE ON public.orders FROM piperoom_ro; REVOKE UPDATE (status) ON public.orders FROM piperoom_ro;"}},
+		{name: "column insert only", sess: func() *fakePG {
+			f := goodPG()
+			f.extra = map[string][5]bool{`"public"."orders"`: {false, false, false, true, false}}
+			f.cols = map[string]string{"INSERT": "id, note"}
+			return f
+		}, want: map[string]spec.CheckStatus{"read_only:public.orders": spec.CheckFail},
+			fix: map[string]string{"read_only:public.orders": "REVOKE INSERT (id, note) ON public.orders FROM piperoom_ro;"}},
+		{name: "references and trigger", sess: func() *fakePG {
+			f := goodPG()
+			f.extra = map[string][5]bool{`"public"."orders"`: {false, true, true, false, false}}
+			return f
+		}, want: map[string]spec.CheckStatus{"read_only:public.orders": spec.CheckFail},
+			fix: map[string]string{"read_only:public.orders": "REVOKE REFERENCES, TRIGGER ON public.orders"}},
 		{name: "cannot select", sess: func() *fakePG {
 			f := goodPG()
 			f.tables[`"public"."orders"`] = [4]bool{false, false, false, false}
@@ -393,14 +428,14 @@ func TestPGTableFixQuotesMixedCase(t *testing.T) {
 	ctx := context.Background()
 	f := &fakePG{tables: map[string][4]bool{`"public"."Orders"`: {false, true, false, false}}}
 	cl := newChecklist(ctx, time.Second, spec.Values{})
-	pgTableChecks(cl, f, "public.Orders", "piperoom_ro")
+	pgTableChecks(cl, f, "public.Orders", "piperoom_ro", false)
 	sel := wantStatus(t, cl.result(), "select:public.Orders", spec.CheckFail)
 	if !strings.Contains(sel.Fix, `GRANT SELECT ON public."Orders" TO piperoom_ro;`) {
 		t.Fatalf("select fix = %q", sel.Fix)
 	}
 	f.tables[`"public"."Orders"`] = [4]bool{true, true, false, false}
 	cl = newChecklist(ctx, time.Second, spec.Values{})
-	pgTableChecks(cl, f, "public.Orders", "piperoom_ro")
+	pgTableChecks(cl, f, "public.Orders", "piperoom_ro", false)
 	ro := wantStatus(t, cl.result(), "read_only:public.Orders", spec.CheckFail)
 	if ro.Fix != `REVOKE INSERT ON public."Orders" FROM piperoom_ro;` {
 		t.Fatalf("revoke fix = %q", ro.Fix)

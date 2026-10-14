@@ -35,6 +35,7 @@ type Deps struct {
 
 	// Test seams; nil = the real implementation.
 	pgConnect     pgConnector
+	pgSSLProbe    func(ctx context.Context, host, port string) bool
 	kafkaOpen     kafkaOpener
 	sfOpen        sfOpener
 	sfPort        string
