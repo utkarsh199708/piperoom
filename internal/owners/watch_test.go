@@ -55,7 +55,6 @@ func TestWatchFullBlock(t *testing.T) {
         slot_wal:       {fire: 2GiB, clear: 1.5GiB, for: 15m, eta_sev1: 12h}
         # v2 keys: parsed, ignored
         freshness:      {sla: 30m, clear: 15m, for: 5m, interval: 10m, tz: UTC}
-        consumer_lag:   {fire: 1000, clear: 500, for: 10m, members_expected: true}
         long_tx:        {age: 10m, for: 5m}
         compat_none:    {action: log}
         unreachable:    {for: 5m, action: log}
@@ -176,6 +175,24 @@ func TestWatchBadValues(t *testing.T) {
 		{"fire too small to derive clear", "signals:\n        slot_wal: {fire: 3 bytes}\n", []string{"slot_wal", "clear"}},
 		{"clear only, above default fire", "signals:\n        slot_wal: {clear: 2GiB}\n", []string{"clear", "above fire"}},
 		{"fractional bytes", "wal_headroom_bytes: 0.5 bytes\n", []string{"whole number of bytes"}},
+		{"lag fire is a size", "signals:\n        consumer_lag: {fire: 1k}\n", []string{"watch.signals.consumer_lag", "fire", "whole number of records"}},
+		{"lag fire zero", "signals:\n        consumer_lag: {fire: 0}\n", []string{"consumer_lag", "at least 1"}},
+		{"lag clear zero", "signals:\n        consumer_lag: {clear: 0}\n", []string{"consumer_lag", "clear", "at least 1"}},
+		{"lag clear above fire", "signals:\n        consumer_lag: {fire: 100, clear: 200}\n", []string{"consumer_lag", "above fire"}},
+		{"lag clear above default fire", "signals:\n        consumer_lag: {clear: 5000}\n", []string{"consumer_lag", "above fire"}},
+		{"lag members_expected not bool", "signals:\n        consumer_lag: {members_expected: maybe}\n", []string{"consumer_lag"}},
+		{"lag bad field", "signals:\n        consumer_lag: {eta_sev1: 1h}\n", []string{"consumer_lag", `unknown field "eta_sev1"`}},
+		{"flaps one", "signals:\n        group_unstable: {flaps: 1}\n", []string{"watch.signals.group_unstable", "flaps", "from 2 to 11"}},
+		{"flaps above ring", "signals:\n        group_unstable: {flaps: 12}\n", []string{"group_unstable", "flaps"}},
+		{"unstable bad window", "signals:\n        group_unstable: {window: 15}\n", []string{"group_unstable", "window", "unit"}},
+		{"unstable bad field", "signals:\n        group_unstable: {fire: 3}\n", []string{"group_unstable", `unknown field "fire"`}},
+		{"offset signal has no for", "signals:\n        offset_below_log_start: {for: 5m}\n", []string{"watch.signals.offset_below_log_start", `unknown field "for"`}},
+		{"offset bad action", "signals:\n        offset_below_log_start: {action: page}\n", []string{"offset_below_log_start", "action"}},
+		{"crashloop one restart", "signals:\n        connector_down: {crashloop_restarts: 1}\n", []string{"watch.signals.connector_down", "crashloop_restarts", "at least 2"}},
+		{"crashloop restarts not a number", "signals:\n        connector_down: {crashloop_restarts: three}\n", []string{"crashloop_restarts"}},
+		{"crashloop bad window", "signals:\n        connector_down: {crashloop_window: 0s}\n", []string{"crashloop_window", "greater than zero"}},
+		{"crashloop key on another signal", "signals:\n        slot_inactive: {crashloop_restarts: 3}\n", []string{"slot_inactive", `unknown field "crashloop_restarts"`}},
+		{"unknown signal lists new ones", "signals:\n        consumer_lagg: {}\n", []string{"unknown signal", "consumer_lag", "group_unstable", "offset_below_log_start"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -246,6 +263,63 @@ func TestParseDuration(t *testing.T) {
 	for _, in := range []string{"", "5", "3 minutes", "-1m", "0s", "1d"} {
 		if got, err := ParseDuration(in); err == nil {
 			t.Errorf("ParseDuration(%q) = %v, want error", in, got)
+		}
+	}
+}
+
+func TestWatchConsumerSignalDefaults(t *testing.T) {
+	w := DefaultWatch()
+	if l := w.ConsumerLag; !l.Enabled || l.Action != ActionRoom || l.For != 10*time.Minute || l.FireLag != 1000 || l.ClearLag != 500 || !l.MembersExpected {
+		t.Fatalf("consumer_lag defaults: %+v", l)
+	}
+	if g := w.GroupUnstable; !g.Enabled || g.Action != ActionRoom || g.For != 5*time.Minute || g.Flaps != 3 || g.Window != 15*time.Minute {
+		t.Fatalf("group_unstable defaults: %+v", g)
+	}
+	if o := w.OffsetBelowLogStart; !o.Enabled || o.Action != ActionRoom || o.For != 0 {
+		t.Fatalf("offset_below_log_start defaults: %+v", o)
+	}
+	if c := w.ConnectorCrashLoop; c.Restarts != 3 || c.Window != 15*time.Minute {
+		t.Fatalf("crash-loop defaults: %+v", c)
+	}
+}
+
+func TestWatchConsumerSignalsParsed(t *testing.T) {
+	o, err := Load(writeTemp(t, withWatch(`    watch:
+      signals:
+        consumer_lag:           {fire: 5000, clear: 100, for: 2m, members_expected: false, action: log}
+        group_unstable:         {for: 1m, flaps: 5, window: 30m}
+        offset_below_log_start: {enabled: false}
+        connector_down:         {for: 1m, crashloop_restarts: 4, crashloop_window: 1h}
+`)))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	p, _ := o.Pipeline("orders")
+	w := p.Watch()
+	if l := w.ConsumerLag; l.FireLag != 5000 || l.ClearLag != 100 || l.For != 2*time.Minute || l.MembersExpected || l.Action != ActionLog || !l.Enabled {
+		t.Fatalf("consumer_lag: %+v", l)
+	}
+	if g := w.GroupUnstable; g.Flaps != 5 || g.Window != 30*time.Minute || g.For != time.Minute {
+		t.Fatalf("group_unstable: %+v", g)
+	}
+	if w.OffsetBelowLogStart.Enabled || w.OffsetBelowLogStart.Action != ActionRoom {
+		t.Fatalf("offset_below_log_start: %+v", w.OffsetBelowLogStart)
+	}
+	if w.ConnectorDown.For != time.Minute || w.ConnectorCrashLoop != (CrashLoop{Restarts: 4, Window: time.Hour}) {
+		t.Fatalf("connector_down: %+v %+v", w.ConnectorDown, w.ConnectorCrashLoop)
+	}
+}
+
+// A custom fire with no clear derives clear as half of fire, never 0.
+func TestWatchLagClearDerivedFromFire(t *testing.T) {
+	for fire, clear := range map[string]int64{"5000": 2500, "1": 1, "3": 1} {
+		o, err := Load(writeTemp(t, withWatch("    watch:\n      signals:\n        consumer_lag: {fire: "+fire+"}\n")))
+		if err != nil {
+			t.Fatalf("fire %s: Load: %v", fire, err)
+		}
+		p, _ := o.Pipeline("orders")
+		if got := p.Watch().ConsumerLag.ClearLag; got != clear {
+			t.Errorf("fire %s: clear = %d, want %d", fire, got, clear)
 		}
 	}
 }

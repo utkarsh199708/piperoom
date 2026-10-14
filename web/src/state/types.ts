@@ -9,6 +9,7 @@ import type {
   HypothesisVerdict,
   Identity,
   ProposalStep,
+  RoomLabelledPayload,
   RoomSnapshot,
   TraceStage,
 } from '../api/types'
@@ -42,9 +43,9 @@ export interface HypothesisState {
   /** Derived (F9): at least one confirmed and no disputed verdict on this hypothesis. */
   confirmed: boolean
   /** seq of the agent.hypothesis event; hypothesis.verdict answers it. */
-  seq: number
+  seq?: number
   /** Latest verdict per person, in the order they were given. */
-  verdicts: VerdictState[]
+  verdicts?: VerdictState[]
 }
 
 /** One entry of the confidence path under the hypothesis heading. */
@@ -95,8 +96,7 @@ export interface CommentState {
 
 /**
  * pending: waiting in the driver's queue. accepted: the driver sent it (steer.sent with its id).
- * declined: HOOK(R10) - no declined event exists in docs/api.md or events.go yet, so the reducer
- * never produces this value; it is here so the UI renders it the day the contract adds one.
+ * declined: the driver declined it (steer.declined); `declined_by` and `reason` say who and why.
  */
 export type SuggestionStatus = 'pending' | 'accepted' | 'declined'
 
@@ -107,6 +107,13 @@ export interface SuggestionState {
   status: SuggestionStatus
   /** When the suggestion was made. */
   at?: string
+  /** Who forwarded it to the agent, and when (steer.sent with its id). */
+  sent_by?: Actor
+  sent_at?: string
+  /** Who declined it, when, and the optional note (steer.declined). */
+  declined_by?: Actor
+  declined_at?: string
+  reason?: string
 }
 
 /** Who decided a layer, how they logged in, and the hash they decided on. */
@@ -183,6 +190,18 @@ export interface AlertInfo {
   source: string | null
 }
 
+/** Who ticked one runbook item and when (checklist.step_done). */
+export interface ChecklistTick {
+  by: Actor
+  at: string
+  note?: string
+}
+
+/** Key of RoomState.checklist_done: "<tool_use_id>:<hit>:<item>". */
+export function checklistKey(toolUseId: string, hit: number, item: number): string {
+  return `${toolUseId}:${hit}:${item}`
+}
+
 export interface ActivityEntry {
   seq: number
   at: string
@@ -232,6 +251,10 @@ export interface RoomState {
   /** In flight until handoff.created / handoff.failed with its id, or `expires_at`. */
   handoff_request: HandoffRequestState | null
   handoff_failure: HandoffFailureState | null
+  /** The last room.labelled (re-labelling appends another, the last wins); null before any. */
+  labelled: RoomLabelledPayload | null
+  /** Ticked runbook items; the last event per key wins and an untick removes the key. */
+  checklist_done: Record<string, ChecklistTick>
   activity: ActivityEntry[]
 }
 
@@ -263,6 +286,8 @@ export function emptyRoomState(id: string): RoomState {
     handoffs: [],
     handoff_request: null,
     handoff_failure: null,
+    labelled: null,
+    checklist_done: {},
     activity: [],
   }
 }

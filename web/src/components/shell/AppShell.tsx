@@ -1,12 +1,14 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { ChevronRight, Menu } from 'lucide-react'
-import { Link, Outlet, useLocation } from 'react-router-dom'
+import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { DialogDescription, DialogOverlay, DialogTitle } from '@/components/ui/dialog'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useTheme } from '@/context/theme'
+import { useCurrentUser } from '@/context/user'
+import { roomsNeedingYou, useListAttention } from '@/hooks/useListAttention'
 import { useRoomList } from '@/hooks/useRoomList'
 import { BreadcrumbTailContext, InShellContext, RoomCommandsContext, RoomListContext, TopBarSlotContext } from './context'
 import type { RoomCommandRegistry, RoomCommands } from './context'
@@ -41,6 +43,8 @@ function useIsDesktop(): boolean {
 export function AppShell() {
   const { toggleTheme } = useTheme()
   const location = useLocation()
+  const navigate = useNavigate()
+  const { user } = useCurrentUser()
   // The one room list: the sidebar reads it here and the room list screen through RoomListContext.
   const { rooms, loading: roomsLoading, error: roomsError, reload } = useRoomList()
   const roomList = useMemo(
@@ -122,8 +126,10 @@ export function AppShell() {
 
   const openRooms = rooms.filter((r) => r.status === 'open').length
   const pipelines = useMemo(() => pipelineSummaries(rooms), [rooms])
+  const needsYouCount = useMemo(() => roomsNeedingYou(rooms, user).length, [rooms, user])
   const roomId = location.pathname.startsWith('/rooms/') ? safeDecode(location.pathname.split('/')[2] ?? '') : ''
   const currentPipelineId = rooms.find((r) => r.id === roomId)?.pipeline_id
+  useListAttention(rooms, user, roomsLoading, roomId !== '', (id) => navigate(`/rooms/${encodeURIComponent(id)}`))
 
   return (
     <InShellContext.Provider value>
@@ -144,6 +150,7 @@ export function AppShell() {
                 <aside className="w-60 shrink-0 border-r border-sidebar-border" aria-label="Sidebar">
                   <SidebarContent
                     openRooms={openRooms}
+                    needsYou={needsYouCount}
                     pipelines={pipelines}
                     currentPipelineId={currentPipelineId}
                     navKey={navKey}
@@ -162,6 +169,7 @@ export function AppShell() {
                     <DialogDescription className="sr-only">Rooms and pipelines</DialogDescription>
                     <SidebarContent
                       openRooms={openRooms}
+                    needsYou={needsYouCount}
                       pipelines={pipelines}
                       currentPipelineId={currentPipelineId}
                       navKey={navKey}
@@ -190,7 +198,7 @@ export function AppShell() {
                     <ThemeToggle />
                   </div>
                 </header>
-                <main id="main" tabIndex={-1} className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden [scroll-padding-bottom:var(--composer-h,0px)] [scroll-padding-top:3rem] focus:outline-none">
+                <main id="main" tabIndex={-1} className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden [scroll-padding-bottom:calc(var(--composer-h,0px)+var(--sheet-h,0px))] [scroll-padding-top:3rem] focus:outline-none">
                   <div className="min-h-full">
                     <Outlet />
                   </div>

@@ -12,6 +12,7 @@ import type {
   AgentToolResultPayload,
   ApprovalGivenPayload,
   ApprovalRejectedPayload,
+  ChecklistStepDonePayload,
   CommentAddedPayload,
   ControlGrantedPayload,
   Event,
@@ -24,12 +25,16 @@ import type {
   ProposalCreatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
+  RoomLabelledPayload,
+  SteerDeclinedPayload,
   SteerSentPayload,
   SteerSuggestedPayload,
   TracePinnedPayload,
 } from '../api/types'
 import { describeEvent } from './describe'
 import { alertSource } from '../lib/alerts'
+import { runbookHits } from '../lib/f8'
+import { checklistKey } from './types'
 import type { HypothesisHistoryEntry, MemberState, RoomState, StepState, VerdictState } from './types'
 
 function as<T>(e: Event): T {
@@ -70,6 +75,17 @@ const HISTORY_CAP = 20
 function pushConfidence(history: HypothesisHistoryEntry[], event: Event, confidence: string): HypothesisHistoryEntry[] {
   if (history.length > 0 && history[history.length - 1].confidence === confidence) return history
   return [...history, { seq: event.seq, at: event.at, confidence }].slice(-HISTORY_CAP)
+}
+
+// The text and section of a runbook item, looked up in the runbook_lookup result already in the
+// state (used for the activity line of a tick).
+function runbookItemOf(state: RoomState, toolUseId: string, hit: number, item: number) {
+  for (const s of state.steps) {
+    const t = s.tool_calls.find((c) => c.tool_use_id === toolUseId && c.tool === 'runbook_lookup')
+    const h = t ? runbookHits(t.data)[hit] : undefined
+    if (h && h.items[item] !== undefined) return { section: h.section, text: h.items[item] }
+  }
+  return null
 }
 
 export function applyEvent(state: RoomState, event: Event): RoomState {
@@ -237,7 +253,7 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       // A verdict on a replaced hypothesis is stale.
       if (!h || p.hypothesis_seq !== h.seq) break
       const verdicts = [
-        ...h.verdicts.filter((v) => v.by.id !== event.actor.id),
+        ...(h.verdicts ?? []).filter((v) => v.by.id !== event.actor.id),
         { verdict: p.verdict, by: event.actor, note: p.note || undefined, at: event.at },
       ]
       next = { ...state, hypothesis: { ...h, verdicts, confirmed: derivedConfirmed(verdicts) } }
@@ -298,16 +314,27 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
           ...state,
           // Kept, not dropped: the room shows what became of each suggestion.
           suggestions: state.suggestions.map((s) =>
-            s.suggestion_id === p.suggestion_id ? { ...s, status: 'accepted' as const } : s,
+            s.suggestion_id === p.suggestion_id
+              ? { ...s, status: 'accepted' as const, sent_by: event.actor, sent_at: event.at }
+              : s,
           ),
         }
       }
       break
     }
 
-    // HOOK(R10): a suggestion the driver declines. No such event is in docs/api.md or
-    // events.go yet. When the contract adds one, add its case here and set the matching
-    // suggestion's status to 'declined'; the suggestions panel already renders that state.
+    case 'steer.declined': {
+      const p = as<SteerDeclinedPayload>(event)
+      next = {
+        ...state,
+        suggestions: state.suggestions.map((s) =>
+          s.suggestion_id === p.suggestion_id
+            ? { ...s, status: 'declined' as const, declined_by: event.actor, declined_at: event.at, reason: p.reason }
+            : s,
+        ),
+      }
+      break
+    }
 
     case 'control.requested': {
       if (state.control_requests.some((r) => r.from.id === event.actor.id)) break
@@ -529,6 +556,21 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       break
     }
 
+    case 'room.labelled': {
+      next = { ...state, labelled: as<RoomLabelledPayload>(event) }
+      break
+    }
+
+    case 'checklist.step_done': {
+      const p = as<ChecklistStepDonePayload>(event)
+      const key = checklistKey(p.tool_use_id, p.hit, p.item)
+      const done = { ...state.checklist_done }
+      if (p.done) done[key] = { by: event.actor, at: event.at, note: p.note }
+      else delete done[key]
+      next = { ...state, checklist_done: done }
+      break
+    }
+
     case 'trace.pinned': {
       const p = as<TracePinnedPayload>(event)
       next = {
@@ -559,7 +601,7 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         actor: event.actor,
         // state is the pre-event state: describeEvent needs the driver before
         // this event to tell a lease renewal from a take-over.
-        text: describeEvent(event, state.driver?.id ?? null),
+        text: describeEvent(event, state.driver?.id ?? null, (id, hit, item) => runbookItemOf(state, id, hit, item)),
       },
       ...next.activity,
     ].slice(0, 20),

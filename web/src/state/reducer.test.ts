@@ -143,6 +143,15 @@ describe('applyEvent — every event type', () => {
     expect(s.comments[0].author.id).toBe('arjun')
   })
 
+  it('steer.declined marks the suggestion declined with who and why', () => {
+    let s = applyEvent(base(), ev(1, 'steer.suggested', { suggestion_id: 'g1', text: 'try X' }, { kind: 'human', id: 'kabir', name: 'Kabir' }))
+    s = applyEvent(s, ev(2, 'steer.declined', { suggestion_id: 'g1', reason: 'not now' }, human))
+    expect(s.suggestions[0]).toMatchObject({ status: 'declined', declined_by: human, reason: 'not now' })
+    // An unknown id changes nothing.
+    const t = applyEvent(s, ev(3, 'steer.declined', { suggestion_id: 'nope' }, human))
+    expect(t.suggestions).toEqual(s.suggestions)
+  })
+
   it('steer.suggested adds a pending suggestion; steer.sent with id marks it accepted', () => {
     let s = applyEvent(
       base(),
@@ -695,8 +704,8 @@ describe('applyEvent — hypothesis verdicts and nudges (F9)', () => {
     expect(s.hypothesis?.confirmed).toBe(true)
     s = applyEvent(s, ev(3, 'hypothesis.verdict', { verdict: 'disputed', note: 'DDL never ran', hypothesis_seq: 1 }, priya))
     expect(s.hypothesis?.confirmed).toBe(false)
-    expect(s.hypothesis?.verdicts.map((v) => `${v.by.id}:${v.verdict}`)).toEqual(['kabir:confirmed', 'priya:disputed'])
-    expect(s.hypothesis?.verdicts[1].note).toBe('DDL never ran')
+    expect(s.hypothesis?.verdicts?.map((v) => `${v.by.id}:${v.verdict}`)).toEqual(['kabir:confirmed', 'priya:disputed'])
+    expect(s.hypothesis?.verdicts?.[1].note).toBe('DDL never ran')
   })
 
   it('keeps the latest verdict per person, moved to the end', () => {
@@ -704,7 +713,7 @@ describe('applyEvent — hypothesis verdicts and nudges (F9)', () => {
     s = applyEvent(s, ev(2, 'hypothesis.verdict', { verdict: 'disputed', hypothesis_seq: 1 }, priya))
     s = applyEvent(s, ev(3, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, kabir))
     s = applyEvent(s, ev(4, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, priya))
-    expect(s.hypothesis?.verdicts.map((v) => v.by.id)).toEqual(['kabir', 'priya'])
+    expect(s.hypothesis?.verdicts?.map((v) => v.by.id)).toEqual(['kabir', 'priya'])
     expect(s.hypothesis?.confirmed).toBe(true)
   })
 
