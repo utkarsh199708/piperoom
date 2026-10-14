@@ -4,10 +4,12 @@ import type {
   ActionExecutedPayload,
   Actor,
   AgentStatusPayload,
+  AgentVerificationPayload,
   HandoffSummary,
   HypothesisSummary,
   HypothesisVerdict,
   Identity,
+  ProposalPreviewedPayload,
   ProposalStep,
   RoomLabelledPayload,
   RoomSnapshot,
@@ -144,6 +146,12 @@ export interface ProposalState {
   params_hash: string
   status: 'open' | 'approved' | 'rejected'
   executed: ActionExecutedPayload[]
+  /** When proposal.created was logged: the preview skeleton counts its 20 s from here. */
+  created_at?: string
+  /** What each step would do; absent until proposal.previewed arrives (it may never). */
+  preview?: ProposalPreviewedPayload
+  /** The agent's verdict after the last step ran. */
+  verification?: AgentVerificationPayload
 }
 
 export interface MemberState {

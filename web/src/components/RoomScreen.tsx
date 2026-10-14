@@ -292,7 +292,7 @@ export function RoomScreen() {
   ) : null
   const proposalsCard = showProposals ? (
     <div id={PROPOSAL_ANCHOR} tabIndex={-1} className="scroll-mt-4 focus:outline-none">
-      <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} people={peopleList} presence={presence} />
+      <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} people={peopleList} presence={presence} topology={topology} />
     </div>
   ) : null
   const investigation = (

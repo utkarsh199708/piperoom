@@ -3,6 +3,8 @@
 // filling (seq > last_seq + 1) is the transport's job (see hooks/useRoom.ts).
 import type {
   ActionExecutedPayload,
+  AgentVerificationPayload,
+  ProposalPreviewedPayload,
   Actor,
   AgentHypothesisPayload,
   AgentMessagePayload,
@@ -472,8 +474,33 @@ function applyCore(state: RoomState, event: Event): RoomState {
             params_hash: p.params_hash || state.snapshot_hashes[p.proposal_id] || '',
             status: 'open',
             executed: [],
+            created_at: event.at,
           },
         ],
+      }
+      break
+    }
+
+    // The preview is informational. The latest one wins (a refresh replaces the first).
+    case 'proposal.previewed': {
+      const p = as<ProposalPreviewedPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) => (prop.proposal_id === p.proposal_id ? { ...prop, preview: p } : prop)),
+      }
+      break
+    }
+
+    // A "repeat" (already verified, no checks) never overwrites a full verdict.
+    case 'agent.verification': {
+      const p = as<AgentVerificationPayload>(event)
+      next = {
+        ...state,
+        proposals: state.proposals.map((prop) => {
+          if (prop.proposal_id !== p.proposal_id) return prop
+          if (p.repeat && prop.verification && !prop.verification.repeat) return prop
+          return { ...prop, verification: p }
+        }),
       }
       break
     }
