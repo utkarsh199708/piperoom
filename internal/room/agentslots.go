@@ -42,6 +42,9 @@ type agentSlots struct {
 	order  []string
 	next   int
 	queued int
+	// closed is set by shutdown: a closing service grants no slot, so a room
+	// queued behind a run that Close just cancelled never starts its own.
+	closed bool
 }
 
 func newAgentSlots(max int) *agentSlots {
@@ -58,7 +61,7 @@ func (a *agentSlots) request(pipeline string) (w *slotWaiter, ahead int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	w = &slotWaiter{ready: make(chan struct{}), pipeline: pipeline}
-	if a.inUse < a.max && a.queued == 0 {
+	if !a.closed && a.inUse < a.max && a.queued == 0 {
 		a.inUse++
 		w.granted = true
 		close(w.ready)
@@ -171,7 +174,7 @@ func (a *agentSlots) dropPipelineLocked(p string) {
 // pumpLocked grants free slots, one pipeline at a time in rotation. Caller
 // holds a.mu.
 func (a *agentSlots) pumpLocked() {
-	for a.inUse < a.max && a.queued > 0 {
+	for !a.closed && a.inUse < a.max && a.queued > 0 {
 		p := a.order[a.next]
 		q := a.queues[p]
 		w := q[0]
@@ -187,6 +190,14 @@ func (a *agentSlots) pumpLocked() {
 		a.inUse++
 		close(w.ready)
 	}
+}
+
+// shutdown stops granting slots. Waiters stay queued until their context
+// ends and they cancel; slots in use are still released as usual.
+func (a *agentSlots) shutdown() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.closed = true
 }
 
 // stats returns slots in use and rooms queued (tests, logging).

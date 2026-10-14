@@ -293,3 +293,34 @@ func TestAgentGateRefusesOnClosingService(t *testing.T) {
 		t.Fatal("a room started a run on a closing service")
 	}
 }
+
+// Close cancels the running agents, and each cancel releases a slot. A
+// shut-down slot set must not hand that slot to a queued room (the cause of
+// TestAgentCapServiceCloseWithQueuedRooms seeing a second run start).
+func TestAgentSlotsShutdownGrantsNothing(t *testing.T) {
+	a := newAgentSlots(1)
+	running, _ := a.request("orders")
+	if !running.granted {
+		t.Fatal("first request not granted")
+	}
+	q1, _ := a.request("orders")
+	q2, _ := a.request("billing")
+	a.shutdown()
+	a.release() // the running agent stops
+	for name, w := range map[string]*slotWaiter{"q1": q1, "q2": q2} {
+		select {
+		case <-w.ready:
+			t.Fatalf("%s granted a slot after shutdown", name)
+		default:
+		}
+	}
+	if fresh, _ := a.request("orders"); fresh.granted {
+		t.Fatal("a new request was granted after shutdown")
+	}
+	// Queued rooms still leave cleanly when their context ends.
+	a.cancel(q1)
+	a.cancel(q2)
+	if inUse, queued := a.stats(); inUse != 0 || queued != 1 {
+		t.Fatalf("stats = %d in use, %d queued; want 0, 1 (the fresh request)", inUse, queued)
+	}
+}

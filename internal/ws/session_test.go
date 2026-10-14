@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -62,11 +63,10 @@ func TestPresenceTickClosesDeadSessions(t *testing.T) {
 
 	// Dial returns before the server registers the connection; a recheck that
 	// ran first would not see the session and never close it.
-	for deadline := time.Now().Add(5 * time.Second); gw.ConnCount() < 3; {
-		if time.Now().After(deadline) {
-			t.Fatalf("gateway registered %d of 3 connections", gw.ConnCount())
-		}
-		time.Sleep(5 * time.Millisecond)
+	wctx, wcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer wcancel()
+	if err := gw.WaitConns(wctx, 3); err != nil {
+		t.Fatalf("gateway registered %d of 3 connections: %v", gw.ConnCount(), err)
 	}
 
 	deadSession.Store(true)
@@ -97,19 +97,12 @@ func TestPresenceTickClosesDeadSessions(t *testing.T) {
 		t.Fatal("no {type:error, error:{code:session_expired}} frame before the close")
 	}
 
+	// The other two stay open: each is sent the member list without arjun,
+	// which the gateway broadcasts only once the dead connection has left.
+	// Getting that frame proves the connection is up, with no read deadline
+	// standing in for "nothing happened".
 	for name, c := range map[string]*websocket.Conn{"live session": alive, "X-User connection": bare} {
-		rctx, rcancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-		for {
-			_, _, err := c.Read(rctx)
-			if err == nil {
-				continue
-			}
-			if websocket.CloseStatus(err) != -1 {
-				t.Fatalf("%s was closed: %v", name, err)
-			}
-			break
-		}
-		rcancel()
+		waitPresenceWithout(t, c, name, "arjun")
 	}
 }
 
@@ -171,5 +164,29 @@ func TestSessionEndedBeforeRegisterClosesAtOnce(t *testing.T) {
 	}
 	if frames != 1 {
 		t.Fatalf("session_expired frames = %d, want 1", frames)
+	}
+}
+
+// waitPresenceWithout reads c until a presence frame whose member list leaves
+// out gone. Any close before that fails the test.
+func waitPresenceWithout(t *testing.T, c *websocket.Conn, name, gone string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		_, data, err := c.Read(ctx)
+		if err != nil {
+			t.Fatalf("%s: closed or no presence update without %s: %v", name, gone, err)
+		}
+		var m struct {
+			Type    string      `json:"type"`
+			Members []ws.Member `json:"members"`
+		}
+		if json.Unmarshal(data, &m) != nil || m.Type != "presence" {
+			continue
+		}
+		if !slices.ContainsFunc(m.Members, func(x ws.Member) bool { return x.ID == gone }) {
+			return
+		}
 	}
 }

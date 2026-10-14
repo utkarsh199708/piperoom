@@ -81,6 +81,9 @@ type Gateway struct {
 	mu     sync.Mutex
 	closed bool
 	rooms  map[string]*roomHub
+	// connsChanged is closed and replaced (under mu) whenever a connection
+	// registers or leaves, so a waiter wakes on the change itself.
+	connsChanged chan struct{}
 }
 
 // NewGateway builds the gateway and starts its presence loop.
@@ -89,7 +92,7 @@ func NewGateway(svc *room.Service, st store.Store, log *slog.Logger) *Gateway {
 		log = slog.Default()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	g := &Gateway{svc: svc, store: st, log: log, now: time.Now, ctx: ctx, cancel: cancel, rooms: map[string]*roomHub{}}
+	g := &Gateway{svc: svc, store: st, log: log, now: time.Now, ctx: ctx, cancel: cancel, rooms: map[string]*roomHub{}, connsChanged: make(chan struct{})}
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()

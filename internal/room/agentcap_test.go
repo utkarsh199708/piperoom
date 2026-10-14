@@ -27,6 +27,9 @@ type capRunner struct {
 	count   map[string]int // run starts per room
 	release map[string]chan struct{}
 	failing map[string]string // room id -> "error" | "panic": fail its first run
+	// startCh, when set, receives the room id of every run start, so a test
+	// waits on the start itself instead of polling.
+	startCh chan string
 }
 
 func newCapRunner() *capRunner {
@@ -67,7 +70,11 @@ func (c *capRunner) run(ctx context.Context, alert agent.Alert, _ agent.Deps, _ 
 		mode = c.failing[id]
 	}
 	ch := c.releaseCh(id)
+	notify := c.startCh
 	c.mu.Unlock()
+	if notify != nil {
+		notify <- id
+	}
 	defer func() {
 		c.mu.Lock()
 		c.cur--
@@ -487,12 +494,17 @@ func TestAgentCapIdleAgentGivesUpSlotAndRequeuesOnInput(t *testing.T) {
 
 func TestAgentCapServiceCloseWithQueuedRooms(t *testing.T) {
 	cr := newCapRunner()
-	svc, _ := newCapService(t, 1, cr.run)
-	createRoom(t, svc, "arjun")
-	cr.waitStarted(t, 1)
+	// Buffered past every possible start, so a wrong start never blocks the
+	// runner and is still counted below.
+	cr.startCh = make(chan string, 16)
+	svc, st := newCapService(t, 1, cr.run)
+	first := createRoom(t, svc, "arjun").ID
+	if got := <-cr.startCh; got != first {
+		t.Fatalf("first run started for %s, want %s", got, first)
+	}
 	for i := 0; i < 5; i++ {
 		r := createRoom(t, svc, "arjun").ID
-		waitQueued(t, svc, r)
+		waitQueuedEvent(t, st, r)
 	}
 	done := make(chan struct{})
 	go func() { svc.Close(); close(done) }()
@@ -501,7 +513,35 @@ func TestAgentCapServiceCloseWithQueuedRooms(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close hung with queued rooms")
 	}
+	// Close waited for every supervisor, so any run that started is already
+	// in the channel.
+	close(cr.startCh)
+	for id := range cr.startCh {
+		t.Errorf("run started for queued room %s during Close", id)
+	}
 	if n := len(cr.startedIDs()); n != 1 {
 		t.Fatalf("%d runs started, want 1", n)
 	}
+}
+
+// waitQueuedEvent blocks until the room's log holds agent.status "queued",
+// reading the store's subscription rather than polling the snapshot.
+func waitQueuedEvent(t *testing.T, st *memstore.Store, roomID string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ch, err := st.Subscribe(ctx, roomID, 0)
+	if err != nil {
+		t.Fatalf("subscribe %s: %v", roomID, err)
+	}
+	for e := range ch {
+		if e.Type != events.AgentStatus {
+			continue
+		}
+		var p events.AgentStatusPayload
+		if json.Unmarshal(e.Payload, &p) == nil && p.State == "queued" {
+			return
+		}
+	}
+	t.Fatalf("room %s: no queued agent.status before %v", roomID, ctx.Err())
 }
