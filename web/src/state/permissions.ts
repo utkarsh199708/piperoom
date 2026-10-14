@@ -16,6 +16,8 @@ export interface CurrentUser {
   groupsMissing?: boolean
   /** `/api/me.solo`: show the solo banner and ask for the typed confirm up front. */
   solo?: boolean
+  /** `/api/me.admin`: may change integrations. Absent = not an admin (the page is read-only). */
+  admin?: boolean
 }
 
 /** A viewer sees everything and changes nothing; the server enforces it, the UI hides the controls. */

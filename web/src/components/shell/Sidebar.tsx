@@ -1,4 +1,4 @@
-import { Activity, Inbox, Search, Workflow } from 'lucide-react'
+import { Activity, Inbox, Plug, Search, Workflow } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
@@ -7,6 +7,7 @@ import { Kbd } from '@/components/ui/kbd'
 import { useTopology } from '@/hooks/useTopology'
 import { envLabel, modKeyLabel } from '@/lib/envLabel'
 import { cn } from '@/lib/utils'
+import { useCurrentUser } from '@/context/user'
 import { AccountMenu } from './AccountMenu'
 import { BrandMark } from './BrandMark'
 import { HEALTH_LABEL, pipelineHealth } from './pipelines'
@@ -116,6 +117,8 @@ export function SidebarContent({
   const { pathname, search } = useLocation()
   const filter = pathname === '/' ? new URLSearchParams(search).get('pipeline') : null
   const onList = pathname === '/' && !filter // the unfiltered list is the current page of the Rooms link
+  const onIntegrations = pathname === '/integrations'
+  const admin = useCurrentUser().user.admin === true
   return (
     <div className="flex h-full min-h-0 flex-col bg-sidebar text-foreground">
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-sidebar-border px-4">
@@ -159,6 +162,19 @@ export function SidebarContent({
             </Link>
           </li>
           <SoonItem icon={<Workflow aria-hidden="true" />} label="Pipelines" />
+          <li>
+            <Link
+              to="/integrations"
+              className={cn(itemClass, onIntegrations && activeClass)}
+              aria-current={onIntegrations ? 'page' : undefined}
+              onClick={onNavigate}
+            >
+              <Plug aria-hidden="true" />
+              Integrations
+              {/* Everyone may look; only admins change anything (docs/api.md, Who is admin). */}
+              {!admin && <span className="sr-only">, read-only</span>}
+            </Link>
+          </li>
           <SoonItem icon={<Activity aria-hidden="true" />} label="Audit log" />
         </ul>
       </nav>

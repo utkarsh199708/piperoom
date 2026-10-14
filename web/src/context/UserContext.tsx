@@ -69,7 +69,9 @@ function FixtureUserProvider({ children }: { children: ReactNode }) {
   }
   // `?role=viewer` previews the read-only UI without a server.
   const role = searchParams.get('role') === 'viewer' ? 'viewer' : 'member'
-  const user: CurrentUser = { id: dev.id, name: dev.name, layers: dev.layers, role }
+  // `?admin=1` previews the admin view of the Integrations page.
+  const admin = searchParams.get('admin') === '1'
+  const user: CurrentUser = { id: dev.id, name: dev.name, layers: dev.layers, role, admin }
   return (
     <UserContext.Provider value={{ user, setUserId, logout: () => undefined, sessionEpoch: 0, busy: false }}>
       {children}
@@ -125,6 +127,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
         role: me.role === 'viewer' ? 'viewer' : 'member',
         groupsMissing: me.groups_missing === true,
         solo: me.solo === true,
+        admin: me.admin === true,
       })
       setPhase('ready')
       setFailure(null)

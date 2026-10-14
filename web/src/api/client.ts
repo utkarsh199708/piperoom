@@ -23,16 +23,23 @@ export const isFixtures = () => import.meta.env.VITE_FIXTURES === '1'
 export class ApiClientError extends Error {
   code: string
   status: number
+  /**
+   * The whole parsed JSON error body, when there was one. Integrations read
+   * `error.field` (400 validation) and the top-level `checks` (422 checks_failed) from it.
+   */
+  body?: unknown
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, body?: unknown) {
     super(message)
     this.name = 'ApiClientError'
     this.code = code
     this.status = status
+    this.body = body
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/** One same-origin JSON call; a non-2xx answer throws ApiClientError. */
+export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   // CrossOriginProtection + the contract: every non-GET request is application/json.
   const method = (init.method ?? 'GET').toUpperCase()
@@ -43,8 +50,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     let code = res.status === 421 ? 'bad_host' : 'unknown'
     let message = res.statusText
     let authMode: AuthMode | undefined
+    let parsed: unknown
     try {
       const body = (await res.json()) as ApiError & { error?: { auth_mode?: AuthMode } }
+      parsed = body
       code = body.error?.code ?? code
       message = body.error?.message ?? message
       authMode = body.error?.auth_mode
@@ -53,7 +62,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     }
     const problem = classifyAuthProblem(res.status, code, message, authMode)
     if (problem) reportAuthProblem({ ...problem, epoch })
-    throw new ApiClientError(res.status, code, message)
+    throw new ApiClientError(res.status, code, message, parsed)
   }
   if (res.status === 204) return undefined as T
   const text = await res.text()

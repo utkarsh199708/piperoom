@@ -227,6 +227,9 @@ function safeDecode(v: string): string {
 function Breadcrumb({ pipelineId }: { pipelineId?: string }) {
   const { pathname } = useLocation()
   const inRoom = pathname.startsWith('/rooms/')
+  if (pathname === '/integrations') {
+    return <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Integrations</h1>
+  }
   if (!inRoom) {
     return (
       <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">Rooms</h1>

@@ -320,6 +320,8 @@ export interface Me {
   groups_missing?: boolean
   /** This user is PIPEROOM_SOLO_USER (omitted otherwise): approvals need a typed confirm. */
   solo?: boolean
+  /** May this user change integrations (docs/api.md, Integrations). Absent on an older server: false. */
+  admin?: boolean
 }
 
 /** One row of GET /api/people: a person a driver may grant control or hand off to. */
