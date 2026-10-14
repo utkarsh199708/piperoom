@@ -66,6 +66,12 @@ func staleHandoff(msg string) *Error {
 	return &Error{Status: 409, Code: codeStaleHandoff, Msg: msg}
 }
 
+// handoffInProgress is 409 handoff_in_progress: a hand-off request of the room
+// is in flight (docs/api.md, Hand-off requests).
+func handoffInProgress() *Error {
+	return &Error{Status: 409, Code: "handoff_in_progress", Msg: "a hand-off for this room is already being written; wait for it to finish"}
+}
+
 func roomClosed(msg string) *Error {
 	return &Error{Status: 409, Code: codeRoomClosed, Msg: msg}
 }

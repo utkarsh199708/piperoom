@@ -5,6 +5,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -174,6 +175,16 @@ type Config struct {
 	// model the operator expects, so a lost tenants: block stops the start
 	// instead of silently showing every room to everyone.
 	TenancyMode string // PIPEROOM_TENANCY_MODE: auto (default) | single | teams
+
+	// Logging of the long-running commands (cmd/server first). Raw strings;
+	// ParseLog types them and names the env var on error.
+	LogLevel  string // PIPEROOM_LOG_LEVEL: debug | info (default) | warn | error
+	LogFormat string // PIPEROOM_LOG_FORMAT: text (default) | json
+
+	// DevAck is the operator's written acknowledgement that dev login (no
+	// password: anyone who reaches the port picks any user) is served on a
+	// non-loopback address. See ParseDevAck. Never baked into an image.
+	DevAck string // PIPEROOM_DEV_ACK: "" (default) | DevAckValue
 }
 
 // Load reads the environment and applies dev defaults.
@@ -277,7 +288,92 @@ func Load() Config {
 		ShadowMaxTurns:    get("PIPEROOM_SHADOW_MAX_TURNS", DefaultShadowMaxTurns),
 
 		TenancyMode: get("PIPEROOM_TENANCY_MODE", TenancyAuto),
+
+		LogLevel:  get("PIPEROOM_LOG_LEVEL", DefaultLogLevel),
+		LogFormat: get("PIPEROOM_LOG_FORMAT", DefaultLogFormat),
+
+		DevAck: get("PIPEROOM_DEV_ACK", ""),
 	}
+}
+
+// Log defaults.
+const (
+	DefaultLogLevel  = "info"
+	DefaultLogFormat = LogFormatText
+)
+
+// Log formats (PIPEROOM_LOG_FORMAT).
+const (
+	// LogFormatText is slog.NewTextHandler: key=value lines for a terminal.
+	LogFormatText = "text"
+	// LogFormatJSON is slog.NewJSONHandler: one JSON object per line for a
+	// log collector (Cloud Logging, Loki, CloudWatch).
+	LogFormatJSON = "json"
+)
+
+// Log holds the typed log settings. The command builds its handler from it
+// (slog.HandlerOptions{Level: Level}); this package creates no logger.
+type Log struct {
+	Level  slog.Level
+	Format string // LogFormatText | LogFormatJSON
+}
+
+// ParseLog validates PIPEROOM_LOG_LEVEL and PIPEROOM_LOG_FORMAT. Both are
+// trimmed and case-insensitive; empty means the default. Level is one of
+// debug, info, warn, error (no numeric offsets such as "info+2": a level the
+// operator cannot read back from the log line is a typo, not a setting).
+// The error names the env var. A debug line follows the same rule as every
+// other: no secrets and no record values (AGENTS.md section 7).
+func ParseLog(c Config) (Log, error) {
+	var l Log
+	switch lv := strings.ToLower(strings.TrimSpace(c.LogLevel)); lv {
+	case "", DefaultLogLevel:
+		l.Level = slog.LevelInfo
+	case "debug":
+		l.Level = slog.LevelDebug
+	case "warn":
+		l.Level = slog.LevelWarn
+	case "error":
+		l.Level = slog.LevelError
+	default:
+		return Log{}, fmt.Errorf("config: PIPEROOM_LOG_LEVEL=%q: want debug, info, warn or error", c.LogLevel)
+	}
+	switch f := strings.ToLower(strings.TrimSpace(c.LogFormat)); f {
+	case "":
+		l.Format = DefaultLogFormat
+	case LogFormatText, LogFormatJSON:
+		l.Format = f
+	default:
+		return Log{}, fmt.Errorf("config: PIPEROOM_LOG_FORMAT=%q: want text or json", c.LogFormat)
+	}
+	return l, nil
+}
+
+// DevAckValue is the only accepted value of PIPEROOM_DEV_ACK. It is a sentence,
+// not "1", so that it cannot be set by accident or by a copied default, and so
+// that whoever sets it has read what it means.
+const DevAckValue = "dev-login-has-no-password"
+
+// ParseDevAck validates PIPEROOM_DEV_ACK and reports whether it is given.
+// Empty is false; DevAckValue (exact, after trimming spaces) is true; any
+// other value is an error, so a "1" or "true" stops the start instead of
+// silently counting as no acknowledgement.
+//
+// The rule it serves (enforced by cmd/server, R9): in dev auth mode on a
+// non-loopback PIPEROOM_HTTP_ADDR the server needs BOTH
+// PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 and PIPEROOM_DEV_ACK=DevAckValue. The
+// Docker image sets only the first, so an image started as-is off loopback
+// refuses to start until the operator adds the acknowledgement in their own
+// deployment (deploy/.env, Helm values). Loopback, --demo and oidc mode do not
+// need it; in oidc mode it is ignored with one warning, like the switch.
+func ParseDevAck(c Config) (bool, error) {
+	switch strings.TrimSpace(c.DevAck) {
+	case "":
+		return false, nil
+	case DevAckValue:
+		return true, nil
+	}
+	return false, fmt.Errorf("config: PIPEROOM_DEV_ACK: want exactly %q (or unset)", DevAckValue)
 }
 
 // Tenancy modes (docs/design/tenancy.md section 4).
