@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -57,7 +58,14 @@ type Config struct {
 	// Slack mirror of rooms. Off unless both token and channel are set.
 	SlackBotToken  string // SLACK_BOT_TOKEN (secret)
 	SlackChannelID string // SLACK_CHANNEL_ID
-	PublicURL      string // PIPEROOM_PUBLIC_URL: base URL for Slack room links, the WS origin, and (auth) the OIDC redirect URI and Host allow-list
+	// SlackPageNoDriver is PIPEROOM_SLACK_PAGE_NO_DRIVER split on commas:
+	// the on-call Slack member IDs the bridge pages on control.lease_expired
+	// (slackbridge.PagingOptions.NoDriver, C12 #130; cmd/server builds the
+	// options, A5 follow-up). Empty means no paging on lease expiry. Load
+	// only splits and trims; cmd/server calls ParseSlackMemberIDs at start
+	// and refuses to run on a value that is not a Slack member ID.
+	SlackPageNoDriver []string
+	PublicURL         string // PIPEROOM_PUBLIC_URL: base URL for Slack room links, the WS origin, and (auth) the OIDC redirect URI and Host allow-list
 
 	// Warehouse kind. "postgres" (default) uses WAREHOUSE_DB_URL as a Postgres URL;
 	// "snowflake" uses it as a gosnowflake DSN.
@@ -213,7 +221,7 @@ type Config struct {
 
 // Load reads the environment and applies dev defaults.
 func Load() Config {
-	return Config{
+	c := Config{
 		HTTPAddr:          get("PIPEROOM_HTTP_ADDR", "127.0.0.1:8090"),
 		RoomDBURL:         get("PIPEROOM_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/piperoom?sslmode=disable"),
 		SourceDBURL:       get("SOURCE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/orders?sslmode=disable"),
@@ -330,6 +338,8 @@ func Load() Config {
 
 		DevAck: get("PIPEROOM_DEV_ACK", ""),
 	}
+	c.SlackPageNoDriver = splitList(get("PIPEROOM_SLACK_PAGE_NO_DRIVER", ""))
+	return c
 }
 
 // Log defaults.
@@ -410,6 +420,42 @@ func ParseDevAck(c Config) (bool, error) {
 		return true, nil
 	}
 	return false, fmt.Errorf("config: PIPEROOM_DEV_ACK: want exactly %q (or unset)", DevAckValue)
+}
+
+// slackMemberID is the shape of a Slack member ID ("U0…" for users, "W0…"
+// for Enterprise Grid users), which is what the paging allow-list holds.
+var slackMemberID = regexp.MustCompile(`^[UW][A-Z0-9]{2,}$`)
+
+// ParseSlackMemberIDs validates a list of Slack member IDs from the env var
+// name (Config.SlackPageNoDriver from PIPEROOM_SLACK_PAGE_NO_DRIVER): each
+// must match ^[UW][A-Z0-9]{2,}$. It returns a copy with duplicates removed,
+// in order, so a repeated ID pages once. An empty list is fine (no paging).
+func ParseSlackMemberIDs(name string, ids []string) ([]string, error) {
+	out := make([]string, 0, len(ids))
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if !slackMemberID.MatchString(id) {
+			return nil, fmt.Errorf("config: %s: %q is not a Slack member ID (want U… or W…, letters and digits)", name, id)
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// splitList splits a comma-separated env value, trims each item and drops
+// empty ones, so "a, b,,c" and "" read as expected.
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // Tenancy modes (docs/design/tenancy.md section 4).

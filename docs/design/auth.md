@@ -10,7 +10,7 @@ revision 3 (PR #44 at be6f3c2). Revision 5 (lead, 2026-10-13) answers three item
 
 | Item | What changed | Section |
 |---|---|---|
-| A-ID-2 | Display-name impersonation: `verified` on every person in events and API responses; IdP names that look like a `users.yaml` person get the email (or id) appended; `identity.email` on approvals | §2.1 |
+| A-ID-2 | Display-name impersonation: `verified` on every person in events and API responses; IdP names that look like a `users.yaml` person get the email (or id) appended; `identity.email` on approvals. Closed by the web badge, R3 #135 | §2.1 |
 | A-AP-3 | The users → owners check of `ValidateUsers` no longer skips layers that list groups; `authorizeLayer` applies the same rule per request | §2.3 |
 | A-ID-5 | Unbind revokes the live sessions of the user and of the removed `iss`+`sub` | §2.1 |
 
@@ -241,8 +241,7 @@ member who got in through a group could call themself "Priya". Three rules keep 
   `docs/api.md`): `true` for a `users.yaml` person, whose name is the `users.yaml` name; `false` for a derived `u_`
   id. The agent and system actors are `true`. It is decided when the event is written. In events the key is omitted
   when false, so old events and exports of old rooms keep their bytes and hash; missing means false. The UI marks
-  `false` with a badge and shows the id or email next to the name. **The web badge is an A6 follow-up; until it ships,
-  A-ID-2 stays open in the audit.** In a group-only OIDC setup most people are `u_` ids, and the suffix below protects
+  `false` with a badge and shows the id or email next to the name. **The web badge ships in R3 (#135), which closes A-ID-2 in the audit.** In a group-only OIDC setup most people are `u_` ids, and the suffix below protects
   only `users.yaml` names, so there the badge plus id or email is the real control.
 - **Look-alike names.** The IdP name is stored as sent (format and other default-ignorable code points stripped,
   A-ID-4). For a person who is not in `users.yaml`, the shown name is computed at login (which logs a match) and again
