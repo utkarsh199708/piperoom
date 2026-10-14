@@ -4,6 +4,7 @@ package kafka
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -42,4 +43,16 @@ func TestPartitionRatesIntegration(t *testing.T) {
 			t.Errorf("implausible rate %+v", r)
 		}
 	}
+}
+
+func TestACLsIntegration(t *testing.T) {
+	c := newClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	es, err := c.ACLs(ctx, []string{"pg.public.orders"}, nil)
+	// The dev broker runs without an authorizer: a clean typed answer, or no entries.
+	if err != nil && !errors.Is(err, ErrNoAuthorizer) && !errors.Is(err, ErrACLDescribeDenied) {
+		t.Fatal(err)
+	}
+	t.Logf("acls: err=%v entries=%d", err, len(es))
 }
