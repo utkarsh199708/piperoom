@@ -154,10 +154,10 @@ func TestRegister(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	all := reg.All()
-	if len(all) != 9 {
-		t.Fatalf("registered %d tools, want 9", len(all))
+	if len(all) != 10 {
+		t.Fatalf("registered %d tools, want 10", len(all))
 	}
-	want := []string{"pg_replication_slots", "pg_recent_ddl", "pg_long_transactions", "pg_row", "pg_publication_tables", "warehouse_freshness", "warehouse_row", "pipeline_map", "trace_record"}
+	want := []string{"pg_replication_slots", "pg_recent_ddl", "pg_long_transactions", "pg_row", "pg_publication_tables", "warehouse_freshness", "warehouse_row", "warehouse_load_errors", "pipeline_map", "trace_record"}
 	for i, name := range want {
 		if all[i].Name() != name {
 			t.Fatalf("tool %d = %s, want %s", i, all[i].Name(), name)
