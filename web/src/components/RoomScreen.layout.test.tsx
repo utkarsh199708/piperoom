@@ -25,6 +25,7 @@ const actions: RoomActions = {
   comment: vi.fn(),
   steer: vi.fn(),
   sendSuggestion: vi.fn(),
+  declineSuggestion: vi.fn(),
   requestControl: vi.fn(),
   grantControl: vi.fn(),
   close: vi.fn(),
@@ -199,10 +200,10 @@ describe('RoomScreen rail and column', () => {
     expect(screen.getByText(/you can read this room but not steer it/)).toBeInTheDocument()
   })
 
-  it('a room with no driver shows the banner, the idle pill and a disabled composer', () => {
+  it('a room with no driver shows the banner, the idle pill and a composer that takes a suggestion', () => {
     show(arjun, room({ driver: null, steps: [], agent_status: { state: 'idle' } }))
     expect(screen.getByText('Agent idle · waiting for a driver')).toBeInTheDocument()
-    expect(screen.getByLabelText('Steer the agent')).toBeDisabled()
+    expect(screen.getByLabelText('Steer the agent')).toBeEnabled()
     expect(screen.getByText('The agent is idle and has not started yet.')).toBeInTheDocument()
     // Banner, plus the empty state's own button.
     fireEvent.click(screen.getByRole('button', { name: 'Take control and steer' }))

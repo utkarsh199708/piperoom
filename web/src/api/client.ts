@@ -150,6 +150,11 @@ export const api = {
     request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/send`, {
       method: 'POST',
     }),
+  declineSuggestion: (roomId: string, suggestionId: string, reason?: string) =>
+    request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/decline`, {
+      method: 'POST',
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
   requestControl: (roomId: string) =>
     request<Event>(`${room(roomId)}/control/request`, { method: 'POST' }),
   grantControl: (roomId: string, to: string) =>
