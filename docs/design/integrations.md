@@ -383,6 +383,9 @@ Contract changes (lead commit, PR 0):
 
 PRs 1, 2 and 5 can start at once against the contracts. PR 3 needs PR 1's interfaces. PR 4 needs PRs 1 and 3.
 
+For the product and enterprise UX (stack picker, hand-off links, health page, deployment shapes) see
+`docs/design/integrations-ux.md`. It answers question 1 below: build self-hosted first, keep the API tenant-ready.
+
 ## 12. Open questions for the product owner
 
 1. **Self-hosted only, or will we host Piperoom?** Hosting turns Slack (§6.1) and AWS (§6.2) into true one-click flows,
