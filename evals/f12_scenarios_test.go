@@ -38,6 +38,21 @@ func f12Cases() []f12Case {
 		},
 		banned: []string{"connect_restart_task"},
 	}, {
+		file: "sasl-credential-rotated",
+		reads: []step{
+			{tool: "pipeline_map", input: map[string]any{"pipeline_id": "payments"}},
+			{tool: "connect_status", input: map[string]any{"connector": "pg-payments-connector"}},
+			{tool: "kafka_acls", input: map[string]any{"principal": "User:debezium"}},
+			{tool: "kafka_consumer_lag", input: map[string]any{"group": "connect-wh-payments-sink"}},
+		},
+		good: "pg-payments-connector task 0 failed in Kafka Connect with SaslAuthenticationException: the SCRAM password of the Kafka user debezium was rotated " +
+			"and the connector still uses the old credential, so the broker rejects its authentication. The ACLs of User:debezium are intact; the sink group is fine.",
+		traps: map[string]string{
+			"missing acls":  "pg-payments-connector task 0 failed in Kafka Connect because the ACLs of User:debezium are missing on the Kafka topic; grant the ACLs again.",
+			"postgres side": "pg-payments-connector task 0 failed in Kafka Connect because a long transaction holds the replication slot debezium_payments in Postgres.",
+		},
+		banned: []string{"connect_restart_task", "connect_restart_connector"},
+	}, {
 		file: "snapshot-stuck",
 		reads: []step{
 			{tool: "pipeline_map", input: pipe},

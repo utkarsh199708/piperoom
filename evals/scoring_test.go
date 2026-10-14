@@ -215,6 +215,10 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		good:  "pg-orders-connector task 0 failed with NotEnoughReplicasException because broker 2's log dir is 98% used (disk full): its replicas of p3 and p5 left the ISR, below min insync replicas 2.",
 		wrong: "pg-orders-connector task 0 failed because min.insync.replicas=2 is too strict; lower min.insync.replicas to 1.",
 	},
+	"sasl-credential-rotated": {
+		good:  "pg-payments-connector task 0 failed with SaslAuthenticationException: the SCRAM credential of the Kafka user debezium was rotated and the connector still uses the old password, so the Kafka broker rejects its authentication; the ACLs are intact.",
+		wrong: "pg-payments-connector task 0 failed because the ACLs of User:debezium are missing; grant the ACLs again.",
+	},
 	"snapshot-stuck": {
 		good:  "pg-orders-connector is still running its initial snapshot of public.orders (snapshot running=true, rows scanned rising); streaming has not started and nothing failed. A restart would restart the snapshot from zero.",
 		wrong: "The replication slot debezium_orders is inactive and retains 61.4 GiB of WAL, so pg-orders-connector stopped streaming.",
