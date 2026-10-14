@@ -68,9 +68,20 @@ var processSecretVars = map[string]bool{
 	"PAGERDUTY_ALERT_SECRET": true, "DATADOG_ALERT_TOKEN": true, "GENERIC_ALERT_SECRET": true,
 }
 
-func (p *EnvProvider) allowed(name string) bool {
-	return envNameRe.MatchString(name) && strings.HasPrefix(name, p.prefix) &&
-		!processSecretVars[name] && !strings.HasPrefix(name, "PIPEROOM_SECRET_KEY")
+func (p *EnvProvider) allowed(name string) bool { return p.refusal(name) == "" }
+
+// refusal says why name may not be read, or "" when it may. Each reason has
+// its own text, so the admin is told the real one.
+func (p *EnvProvider) refusal(name string) string {
+	switch {
+	case !envNameRe.MatchString(name):
+		return fmt.Sprintf("%q is not a valid environment variable name", name)
+	case processSecretVars[name] || strings.HasPrefix(name, "PIPEROOM_SECRET_KEY"):
+		return fmt.Sprintf("variable %s is one of Piperoom's own settings and cannot be read through a reference", name)
+	case !strings.HasPrefix(name, p.prefix):
+		return fmt.Sprintf("variable %s does not start with %s", name, p.prefix)
+	}
+	return ""
 }
 
 // Resolve reads one variable.
@@ -81,8 +92,8 @@ func (p *EnvProvider) Resolve(ctx context.Context, ref Ref) (Value, error) {
 	if ref.Version != "" {
 		return Value{}, fmt.Errorf("%w: environment variables have no versions", ErrInvalidRef)
 	}
-	if !p.allowed(ref.Path) {
-		return Value{}, fmt.Errorf("%w: variable %s does not start with %s", ErrAccessDenied, ref.Path, p.prefix)
+	if why := p.refusal(ref.Path); why != "" {
+		return Value{}, fmt.Errorf("%w: %s", ErrAccessDenied, why)
 	}
 	v, ok := p.lookup(ref.Path)
 	if !ok {

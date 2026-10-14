@@ -182,6 +182,16 @@ func rootForms(root string) []string {
 	return out
 }
 
+// identity names a files reference by the real path of its file, so every
+// spelling that reaches it (a symlinked root, a ..data link) is one secret.
+func (p *FilesProvider) identity(refPath string) (string, bool) {
+	real, err := filepath.EvalSymlinks(filePath(refPath))
+	if err != nil {
+		return "", false
+	}
+	return "file:" + filepath.Clean(real), true
+}
+
 // Resolve reads the file. Version is its size and modification time.
 func (p *FilesProvider) Resolve(ctx context.Context, ref Ref) (Value, error) {
 	if err := ctx.Err(); err != nil {
@@ -194,7 +204,12 @@ func (p *FilesProvider) Resolve(ctx context.Context, ref Ref) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	f, err := os.Open(real)
+	// Refuse a FIFO or device before opening it: open(2) on a FIFO blocks
+	// until a writer appears, and no deadline can interrupt it.
+	if lst, err := os.Stat(real); err == nil && !lst.Mode().IsRegular() {
+		return Value{}, fmt.Errorf("%w: %s is not a regular file", ErrNotFound, ref.Path)
+	}
+	f, err := openNoBlock(real)
 	if err != nil {
 		if errors.Is(err, fs.ErrPermission) {
 			return Value{}, fmt.Errorf("%w: cannot open %s", ErrAccessDenied, ref.Path)
@@ -202,6 +217,7 @@ func (p *FilesProvider) Resolve(ctx context.Context, ref Ref) (Value, error) {
 		return Value{}, fmt.Errorf("secrets: files: opening %s: %w", ref.Path, err)
 	}
 	defer f.Close()
+	// Checked again on the open file: one swapped in after the Stat is caught.
 	st, err := f.Stat()
 	if err != nil {
 		return Value{}, fmt.Errorf("secrets: files: stat %s: %w", ref.Path, err)

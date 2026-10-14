@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -277,6 +278,35 @@ func (r *Registry) RetryAfterAuthFailure(ctx context.Context, workspaceID string
 	return call(ctx)
 }
 
+// identifier is a provider whose paths can alias: several spellings of a
+// reference read the same secret (a files root reached through a symlink, a
+// Kubernetes ..data link). identity names the secret the path reads.
+type identifier interface {
+	identity(path string) (string, bool)
+}
+
+// SecretIdentity names the secret ref reads in workspace ws, so that two
+// spellings of one secret compare equal: a files reference is named by the
+// real path of its file, others by provider and path. The key and version do
+// not change which secret it is. false when ref does not parse.
+func (r *Registry) SecretIdentity(ws, ref string) (string, bool) {
+	parsed, err := ParseRef(ref)
+	if err != nil {
+		return "", false
+	}
+	r.mu.Lock()
+	pe, ok := r.providers[provKey{ws, parsed.Provider}]
+	r.mu.Unlock()
+	if ok {
+		if ip, ok := pe.p.(identifier); ok {
+			if id, ok := ip.identity(parsed.Path); ok {
+				return id, true
+			}
+		}
+	}
+	return parsed.Provider + "/" + strings.Trim(parsed.Path, "/"), true
+}
+
 // EntryInfo describes one cached secret for the health page. No value.
 type EntryInfo struct {
 	Ref       string    `json:"ref"` // without #key
@@ -440,7 +470,7 @@ func (r *Registry) leaseRenewer(p Provider, ck cacheKey, e *entry) *Renewer {
 		r.mu.Unlock()
 		lr, ok := p.(LeaseRenewer)
 		if !ok || !v.Renewable {
-			return time.Time{}, errors.New("secrets: lease is not renewable")
+			return time.Time{}, errLeaseNotRenewable
 		}
 		ctx, cancel := context.WithTimeout(ctx, r.timeout)
 		defer cancel()
@@ -464,7 +494,7 @@ func (r *Registry) leaseRenewer(p Provider, ck cacheKey, e *entry) *Renewer {
 			return
 		}
 		ref := Ref{Provider: ck.provider, Path: ck.path, Version: ck.version}
-		r.log.Info("secrets: lease lost; clients will get new credentials", "ref", ref.String(), "reason", err)
+		r.log.Info("secrets: lease lost; "+r.rebuildText(), "ref", ref.String(), "reason", err)
 		r.notify(ck.ws, ref)
 	}
 	return NewRenewer(renew, lost)
@@ -481,8 +511,17 @@ func (r *Registry) changed(ws, name, path string, gen uint64) {
 	dropped := r.dropLocked(func(ck cacheKey) bool { return ck.ws == ws && ck.provider == name && ck.path == path })
 	r.mu.Unlock()
 	stopAll(dropped)
-	r.log.Info("secrets: secret changed", "ref", Ref{Provider: name, Path: path}.String())
+	r.log.Info("secrets: secret changed; "+r.rebuildText(), "ref", Ref{Provider: name, Path: path}.String())
 	r.notify(ws, Ref{Provider: name, Path: path})
+}
+
+// rebuildText says in a log line what happens to the clients that use a
+// changed secret, which depends on whether anyone listens.
+func (r *Registry) rebuildText() string {
+	if r.onChange != nil {
+		return "rebuilding the clients that use it"
+	}
+	return "clients keep the old credentials until the integration is re-enabled or the server restarts"
 }
 
 // notify runs OnChange on its own goroutine. It is called from a files

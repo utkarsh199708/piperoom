@@ -556,6 +556,11 @@ func (p *VaultProvider) List(ctx context.Context, prefix string, limit int) ([]s
 // (a "creds" segment outside the KV mounts) it answers the database
 // engine's fields without reading, because each read issues a new login.
 func (p *VaultProvider) Keys(ctx context.Context, ref Ref) ([]string, error) {
+	// Browsing is limited to the prefix (§9), keys as well as names: the
+	// key names and whether a secret exists are themselves information.
+	if p.prefix != "" && !strings.HasPrefix(ref.Path, p.prefix) {
+		return nil, fmt.Errorf("%w: key listing is limited to the provider's prefix %s", ErrAccessDenied, p.prefix)
+	}
 	mount, rest := splitMount(ref.Path)
 	if !p.kv2[mount] && (rest == "creds" || strings.HasPrefix(rest, "creds/") || strings.Contains(rest, "/creds/")) {
 		return []string{"password", "username"}, nil
@@ -709,7 +714,18 @@ func (p *VaultProvider) checkLeastPrivilege(ctx context.Context, sample *Ref) sp
 		return warn(CheckTooMuch, title, strings.Join(problems, "; "),
 			"limit the policy to read on "+p.prefix+"* and list on its metadata")
 	}
-	return pass(CheckTooMuch, title, "read-only, inside the prefix")
+	// Only these paths were asked about: a policy can still grant other
+	// paths or mounts, so the pass says what was checked, not more.
+	var checked []string
+	for _, path := range list {
+		switch paths[path] {
+		case "outside":
+			checked = append(checked, "no read on "+path+" (one probe path outside "+p.prefix+")")
+		case "sample":
+			checked = append(checked, "no write on the sample")
+		}
+	}
+	return pass(CheckTooMuch, title, strings.Join(checked, "; ")+"; other paths and mounts are not checked")
 }
 
 // escapePath percent-escapes each segment of a Vault path.
