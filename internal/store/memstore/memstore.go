@@ -129,7 +129,11 @@ func (s *Store) Append(ctx context.Context, roomID string, typ events.Type, acto
 	if !ok {
 		return events.Event{}, fmt.Errorf("memstore: room %q not found: %w", roomID, store.ErrNotFound)
 	}
-	size := int64(len(raw))
+	// Same closed-room rule as the Postgres store.
+	if store.RefusedWhenClosed(typ) && log.meta.Status == "closed" {
+		return events.Event{}, fmt.Errorf("memstore: append %s to %s: %w", typ, roomID, store.ErrRoomClosed)
+	}
+	size := store.StoredSize(raw)
 	if !s.limits.Fits(typ, actor, int64(len(log.events)), log.bytes, size) {
 		return events.Event{}, fmt.Errorf("memstore: append %s to %s (%d events, %d bytes): %w", typ, roomID, len(log.events), log.bytes, store.ErrLogFull)
 	}
@@ -143,6 +147,13 @@ func (s *Store) Append(ctx context.Context, roomID string, typ events.Type, acto
 		Actor:   actor,
 		Payload: raw,
 		At:      s.now().UTC(),
+	}
+	if typ == events.RoomClosed {
+		log.meta.Status = "closed"
+		if log.meta.ClosedAt == nil {
+			at := e.At
+			log.meta.ClosedAt = &at
+		}
 	}
 	log.events = append(log.events, e)
 	for sub := range log.subs {
@@ -586,9 +597,10 @@ func (s *Store) GetSuggestion(ctx context.Context, suggestionID string) (store.S
 	return *r, nil
 }
 
-// SetSuggestionStatus marks a suggestion sent.
-func (s *Store) SetSuggestionStatus(ctx context.Context, suggestionID, status string) error {
-	if err := store.CheckText(suggestionID, status); err != nil {
+// SetSuggestionStatus moves a suggestion from status from to to, only while it
+// still has from (store.ErrStatusChanged otherwise).
+func (s *Store) SetSuggestionStatus(ctx context.Context, suggestionID, from, to string) error {
+	if err := store.CheckText(suggestionID, from, to); err != nil {
 		return fmt.Errorf("memstore: set suggestion status %s: %w", suggestionID, err)
 	}
 	s.mu.Lock()
@@ -597,7 +609,10 @@ func (s *Store) SetSuggestionStatus(ctx context.Context, suggestionID, status st
 	if !ok {
 		return fmt.Errorf("memstore: suggestion %q not found: %w", suggestionID, store.ErrNotFound)
 	}
-	r.Status = status
+	if r.Status != from {
+		return fmt.Errorf("memstore: set suggestion %s %s -> %s: %w", suggestionID, from, to, store.ErrStatusChanged)
+	}
+	r.Status = to
 	return nil
 }
 

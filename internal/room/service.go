@@ -10,8 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
@@ -170,6 +173,10 @@ type roomState struct {
 	// len(Payload) of each event appended. With snap.LastSeq (the event
 	// count) it drives the cap warning without a query per append.
 	logBytes int64
+	// agentErrorSeq is the seq of the newest agent.status "error" folded,
+	// so the supervisor writes no second error status for a failed attempt
+	// whose runner already wrote one.
+	agentErrorSeq int64
 }
 
 // Service is the room domain logic. All state derives from the event log; the
@@ -659,6 +666,9 @@ func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, 
 		if errors.Is(err, store.ErrLogFull) {
 			s.logFullLocked(ctx, st, roomID)
 		}
+		if errors.Is(err, store.ErrRoomClosed) {
+			return events.Event{}, s.closedByOtherLocked(ctx, roomID, st)
+		}
 		return events.Event{}, fmt.Errorf("room: append %s: %w", typ, err)
 	}
 	if s.coord != nil && e.Seq > st.snap.LastSeq+1 {
@@ -669,6 +679,17 @@ func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, 
 	// warning is written once.
 	s.checkCapLocked(ctx, st, roomID)
 	return e, nil
+}
+
+// closedByOtherLocked handles store.ErrRoomClosed: the room was closed (most
+// likely by another replica) after this command checked it was open. The
+// cache catches up so it shows the close, and the caller gets room_closed.
+// Caller must hold s.mu.
+func (s *Service) closedByOtherLocked(ctx context.Context, roomID string, st *roomState) error {
+	if s.coord != nil {
+		s.catchUpLocked(ctx, roomID, st)
+	}
+	return roomClosed("room is closed")
 }
 
 // fillGapLocked folds the events between the snapshot and seq (exclusive)
@@ -1159,6 +1180,7 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 					tcancel()
 				}
 			}
+			startSeq := s.roomSeq(roomID, st)
 			err := s.runGuarded(ctx, roomID, alert, deps, s.opts)
 			gate.release()
 			// A spent token budget is a stop, not a failure: the runner has
@@ -1167,10 +1189,16 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			if err == nil || ctx.Err() != nil || isBudgetStop(err) {
 				return
 			}
+			// The raw error can quote SDK and credential text: it goes to the
+			// server log only. The room gets a fixed, safe detail, and only
+			// when the runner has not already written its own error status
+			// for this attempt (one status per failed attempt, not two).
 			s.log.Warn("room: agent run returned error", "room", roomID, "attempt", attempt, "err", err)
-			ectx, ecancel := context.WithTimeout(s.ctx, 5*time.Second)
-			_ = s.agentEmit(ectx, roomID, run, events.AgentStatus, events.AgentStatusPayload{State: "error", Detail: truncateDetail(err.Error())})
-			ecancel()
+			if !s.agentWroteError(roomID, st, startSeq) {
+				ectx, ecancel := context.WithTimeout(s.ctx, 5*time.Second)
+				_ = s.agentEmit(ectx, roomID, run, events.AgentStatus, events.AgentStatusPayload{State: "error", Detail: agentErrorDetail(err)})
+				ecancel()
+			}
 			if attempt >= maxAgentAttempts {
 				s.log.Error("room: agent gave up after repeated failures", "room", roomID, "attempts", attempt)
 				s.releaseAgent(st, run, cancel)
@@ -1184,6 +1212,44 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			backoff *= 2
 		}
 	}()
+}
+
+// roomSeq is the cached room's last seq, or -1 when the room is no longer
+// cached here.
+func (s *Service) roomSeq(roomID string, st *roomState) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rooms[roomID] != st {
+		return -1
+	}
+	return st.snap.LastSeq
+}
+
+// agentWroteError reports whether an agent.status "error" was folded after
+// startSeq: the runner already reported this attempt's failure, so the
+// supervisor does not write a second status for it. A shadow room's agent
+// statuses go to the shadow log and are not folded, so there it is false.
+func (s *Service) agentWroteError(roomID string, st *roomState, startSeq int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return startSeq >= 0 && s.rooms[roomID] == st && st.agentErrorSeq > startSeq
+}
+
+// agentErrorDetail is the agent.status detail for a failed run. It never
+// echoes err's text, which can hold SDK messages, request ids or credential
+// hints that every watcher of the room would see.
+func agentErrorDetail(err error) string {
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		switch apiErr.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return "model unavailable: credentials missing or rejected"
+		case http.StatusTooManyRequests:
+			return "model unavailable: rate limited"
+		}
+		return "model unavailable"
+	}
+	return "agent run failed; details are in the server log"
 }
 
 // runGuarded calls the agent runner and turns a panic into an error, so a bug

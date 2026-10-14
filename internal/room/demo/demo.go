@@ -101,7 +101,7 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 	if deps.Proposals == nil {
 		_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value."})
 		_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "idle", Detail: "no proposals in this room"})
-		return waitForInput(ctx, deps, emit)
+		return waitForInput(ctx, deps, emit, nil)
 	}
 
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value. I've written a fix proposal."})
@@ -130,13 +130,82 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 		return err
 	}
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Proposal " + proposalID + " is waiting for schema-registry and kafka-connect owners."})
-	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: "proposal " + proposalID})
-	return waitForInput(ctx, deps, emit)
+	fix := newFixState(proposalID, 2, "schema-registry", "kafka-connect")
+	_ = emit(events.AgentStatus, fix.last)
+	return waitForInput(ctx, deps, emit, fix)
+}
+
+// fixState follows the demo proposal through the approval and action results
+// the inbox delivers, so the status written after each batch says where the
+// fix really is. The last approval and the step results of the execution it
+// started can arrive in one batch; the status must then say the fix ran, and
+// never "waiting_approval" again (QA sweep 2026-10-14).
+type fixState struct {
+	proposalID string
+	steps      int             // steps in the proposal
+	layers     map[string]bool // required layer -> approved
+	rejected   bool
+	finished   int  // step results seen
+	failed     bool // a step failed or its outcome is unknown
+	last       events.AgentStatusPayload
+}
+
+func newFixState(proposalID string, steps int, layers ...string) *fixState {
+	f := &fixState{proposalID: proposalID, steps: steps, layers: map[string]bool{}}
+	for _, l := range layers {
+		f.layers[l] = false
+	}
+	f.last = f.status()
+	return f
+}
+
+// observe folds one input and reports whether it was about the fix.
+func (f *fixState) observe(in agent.HumanInput) bool {
+	if in.ProposalID != f.proposalID {
+		return false
+	}
+	switch in.Kind {
+	case "approval_result":
+		if in.Approved != nil && !*in.Approved {
+			f.rejected = true
+		} else if _, ok := f.layers[in.Layer]; ok {
+			f.layers[in.Layer] = true
+		}
+		return true
+	case "action_result":
+		f.finished++
+		if in.OK == nil || !*in.OK {
+			f.failed = true
+		}
+		return true
+	}
+	return false
+}
+
+// status is the agent status the fix's progress calls for.
+func (f *fixState) status() events.AgentStatusPayload {
+	switch {
+	case f.rejected:
+		return events.AgentStatusPayload{State: "idle", Detail: "proposal " + f.proposalID + " was rejected"}
+	case f.failed:
+		return events.AgentStatusPayload{State: "idle", Detail: "proposal " + f.proposalID + " did not apply cleanly"}
+	case f.finished >= f.steps:
+		return events.AgentStatusPayload{State: "idle", Detail: "proposal " + f.proposalID + " applied"}
+	case f.finished > 0:
+		return events.AgentStatusPayload{State: "working", Detail: "applying proposal " + f.proposalID}
+	}
+	for _, ok := range f.layers {
+		if !ok {
+			return events.AgentStatusPayload{State: "waiting_approval", Detail: "proposal " + f.proposalID}
+		}
+	}
+	return events.AgentStatusPayload{State: "working", Detail: "applying proposal " + f.proposalID}
 }
 
 // waitForInput answers steers, comments and approval results until the room
 // closes. An inbox that is closed (a shadow room) ends it at once with nil.
-func waitForInput(ctx context.Context, deps agent.Deps, emit func(events.Type, any) error) error {
+// fix is nil when the run made no proposal.
+func waitForInput(ctx context.Context, deps agent.Deps, emit func(events.Type, any) error, fix *fixState) error {
 	for ctx.Err() == nil {
 		if err := deps.Inbox.Wait(ctx); err != nil {
 			return nil // room closed or ctx cancelled
@@ -145,16 +214,26 @@ func waitForInput(ctx context.Context, deps agent.Deps, emit func(events.Type, a
 		if err != nil {
 			return nil
 		}
+		moved := false
 		for _, in := range inputs {
 			switch in.Kind {
 			case "steer":
 				_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Got it: " + in.Text})
 			case "comment":
 				_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Noted from " + in.Actor.Name + ": " + in.Text, ReplyTo: in.CommentID})
-			case "approval_result":
-				_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: in.Text})
 			case "action_result":
 				_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: in.Text})
+			}
+			if fix != nil && fix.observe(in) {
+				moved = true
+			}
+		}
+		// One status per batch, after every result in it is folded, and only
+		// when it changed.
+		if moved {
+			if st := fix.status(); st != fix.last {
+				_ = emit(events.AgentStatus, st)
+				fix.last = st
 			}
 		}
 	}

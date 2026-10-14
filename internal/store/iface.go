@@ -50,7 +50,10 @@ type Store interface {
 	CreateSuggestion(ctx context.Context, r SuggestionRow) error
 	DeleteSuggestion(ctx context.Context, suggestionID string) error
 	GetSuggestion(ctx context.Context, suggestionID string) (SuggestionRow, error)
-	SetSuggestionStatus(ctx context.Context, suggestionID, status string) error
+	// SetSuggestionStatus moves a suggestion from status from to to, only while
+	// it still has from; otherwise it wraps ErrStatusChanged (another writer
+	// was first) or ErrNotFound.
+	SetSuggestionStatus(ctx context.Context, suggestionID, from, to string) error
 
 	CreateHandoff(ctx context.Context, h HandoffRow) error
 	DeleteHandoff(ctx context.Context, handoffID string) error

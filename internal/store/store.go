@@ -30,6 +30,15 @@ var ErrRoomNotEmpty = errors.New("store: room has events")
 // (e.g. a second decision on the same proposal layer).
 var ErrAlreadyExists = errors.New("store: already exists")
 
+// ErrRoomClosed is returned (wrapped) by Append for an event a closed room no
+// longer takes (RefusedWhenClosed). Nothing is written and no seq is used.
+var ErrRoomClosed = errors.New("store: room is closed")
+
+// ErrStatusChanged is returned (wrapped) by a conditional status change
+// (SetSuggestionStatus) when the row no longer has the expected status:
+// another writer, possibly on another replica, changed it first.
+var ErrStatusChanged = errors.New("store: status changed by another writer")
+
 // ErrSeqConflict is returned (wrapped) by AppendIfLast when another writer
 // appended to the room after the expected seq.
 var ErrSeqConflict = errors.New("store: room changed since the expected seq")
@@ -379,17 +388,21 @@ func (s *PG) UpdateDriver(ctx context.Context, id, driverID, driverName string, 
 	return nil
 }
 
-// CloseRoom marks a room closed.
+// CloseRoom marks a room closed and sets closed_at; a missing room wraps
+// ErrNotFound. The status alone is already set by the room.closed append.
 func (s *PG) CloseRoom(ctx context.Context, id string, closedAt time.Time) error {
 	if err := CheckText(id); err != nil {
 		return fmt.Errorf("store: close room: %w", err)
 	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
-	_, err := s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE rooms SET status = 'closed', closed_at = $2 WHERE id = $1`, id, closedAt)
 	if err != nil {
 		return fmt.Errorf("store: close room %s: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("store: close room %s: %w", id, ErrNotFound)
 	}
 	return nil
 }
@@ -467,7 +480,13 @@ func (s *PG) RoomUsage(ctx context.Context, roomID string) (Usage, error) {
 // Postgres re-checks the WHERE on the newest row version, so no interleaving
 // passes a cap. Agent events stop at the cap, human and system events at the
 // cap plus ReservePercent, room.closed never (classOf). A refused event wraps
-// ErrLogFull and uses no seq. The bytes counted are len(Event.Payload).
+// ErrLogFull and uses no seq. The bytes counted are StoredSize(Event.Payload),
+// the size jsonb renders it at.
+//
+// A closed room refuses the event types of RefusedWhenClosed with
+// ErrRoomClosed. room.closed sets rooms.status in the same UPDATE that
+// assigns its seq, so the check and the close are serialised by the row lock:
+// no replica appends a comment, steer or approval after room.closed.
 func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	return s.appendEvent(ctx, roomID, -1, typ, actor, payload)
 }
@@ -505,27 +524,36 @@ func (s *PG) appendEvent(ctx context.Context, roomID string, expectSeq int64, ty
 	}
 	l := s.currentLimits()
 	maxEvents, maxBytes := l.bounds(classOf(typ, actor))
-	size := int64(len(payloadJSON))
+	size := StoredSize(payloadJSON)
 	at := s.now().UTC()
+	closing := typ == events.RoomClosed
+	refusedClosed := RefusedWhenClosed(typ)
 	var seq int64
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
-			`UPDATE rooms SET last_seq = last_seq + 1, byte_size = byte_size + $2
+			`UPDATE rooms SET last_seq = last_seq + 1, byte_size = byte_size + $2,
+			        status = CASE WHEN $6::boolean THEN 'closed' ELSE status END,
+			        closed_at = CASE WHEN $6::boolean THEN COALESCE(closed_at, $8) ELSE closed_at END
 			 WHERE id = $1 AND ($3::bigint = 0 OR last_seq + 1 <= $3)
 			   AND ($4::bigint = 0 OR byte_size IS NULL OR byte_size + $2 <= $4)
 			   AND ($5::bigint < 0 OR last_seq = $5)
-			 RETURNING last_seq`, roomID, size, maxEvents, maxBytes, expectSeq).Scan(&seq)
+			   AND (NOT $7::boolean OR status <> 'closed')
+			 RETURNING last_seq`, roomID, size, maxEvents, maxBytes, expectSeq, closing, refusedClosed, at).Scan(&seq)
 		if errors.Is(err, pgx.ErrNoRows) {
-			// Missing room, another writer first, or over the cap: the row
-			// (or its absence) says which.
+			// Missing room, closed room, another writer first, or over the
+			// cap: the row (or its absence) says which.
 			var n int64
 			var b *int64
-			err := tx.QueryRow(ctx, `SELECT last_seq, byte_size FROM rooms WHERE id = $1`, roomID).Scan(&n, &b)
+			var status string
+			err := tx.QueryRow(ctx, `SELECT last_seq, byte_size, status FROM rooms WHERE id = $1`, roomID).Scan(&n, &b, &status)
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("store: append to unknown room %s: %w", roomID, ErrNotFound)
 			}
 			if err != nil {
 				return fmt.Errorf("store: reserve seq for %s: %w", roomID, err)
+			}
+			if refusedClosed && status == "closed" {
+				return fmt.Errorf("store: append %s to %s: %w", typ, roomID, ErrRoomClosed)
 			}
 			if expectSeq >= 0 && n != expectSeq {
 				return fmt.Errorf("store: append to %s after seq %d: %w", roomID, expectSeq, ErrSeqConflict)
@@ -914,18 +942,32 @@ func (s *PG) GetSuggestion(ctx context.Context, suggestionID string) (Suggestion
 	return r, nil
 }
 
-// SetSuggestionStatus marks a suggestion sent.
-func (s *PG) SetSuggestionStatus(ctx context.Context, suggestionID, status string) error {
-	if err := CheckText(suggestionID, status); err != nil {
+// SetSuggestionStatus moves a suggestion from status from to status to, only
+// while it still has from: one conditional UPDATE, so of two replicas sending
+// the same suggestion exactly one wins. The loser gets ErrStatusChanged; a
+// missing suggestion wraps ErrNotFound.
+func (s *PG) SetSuggestionStatus(ctx context.Context, suggestionID, from, to string) error {
+	if err := CheckText(suggestionID, from, to); err != nil {
 		return fmt.Errorf("store: set suggestion status %s: %w", suggestionID, err)
 	}
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE suggestions SET status = $2 WHERE suggestion_id = $1`, suggestionID, status); err != nil {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE suggestions SET status = $3 WHERE suggestion_id = $1 AND status = $2`, suggestionID, from, to)
+	if err != nil {
 		return fmt.Errorf("store: set suggestion status %s: %w", suggestionID, err)
 	}
-	return nil
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM suggestions WHERE suggestion_id = $1)`, suggestionID).Scan(&exists); err != nil {
+		return fmt.Errorf("store: set suggestion status %s: %w", suggestionID, err)
+	}
+	if !exists {
+		return fmt.Errorf("store: suggestion %s: %w", suggestionID, ErrNotFound)
+	}
+	return fmt.Errorf("store: set suggestion %s %s -> %s: %w", suggestionID, from, to, ErrStatusChanged)
 }
 
 // ---- handoffs ----

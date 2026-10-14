@@ -469,8 +469,15 @@ func TestSuggestionAndHandoffRows(t *testing.T) {
 	if sugg, err := s.GetSuggestion(ctx, sid); err != nil || sugg.Status != "pending" || sugg.RoomID != roomID {
 		t.Fatalf("bad suggestion row: %+v err=%v", sugg, err)
 	}
-	if err := s.SetSuggestionStatus(ctx, sid, "sent"); err != nil {
+	if err := s.SetSuggestionStatus(ctx, sid, "pending", "sent"); err != nil {
 		t.Fatalf("set suggestion status: %v", err)
+	}
+	// Conditional: a second pending -> sent (another replica) loses.
+	if err := s.SetSuggestionStatus(ctx, sid, "pending", "sent"); !errors.Is(err, store.ErrStatusChanged) {
+		t.Fatalf("second send: want ErrStatusChanged, got %v", err)
+	}
+	if err := s.SetSuggestionStatus(ctx, "g_missing_"+sid, "pending", "sent"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing suggestion: want ErrNotFound, got %v", err)
 	}
 	if err := s.DeleteSuggestion(ctx, sid); err != nil {
 		t.Fatalf("delete suggestion: %v", err)
