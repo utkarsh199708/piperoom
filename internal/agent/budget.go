@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -45,22 +46,70 @@ func ParseRoomTokenBudget(s string) (int64, error) {
 	return n, nil
 }
 
-// BudgetError reports that a room has used its token budget. The run stops on
-// it; it is not a failure of the model call itself.
+// BudgetError reports that a spend limit stopped the run: the room's token
+// budget, a pipeline's daily token or cost budget, or a spend store that cannot
+// be read while a limit is set (docs/design/cost.md 3.3). The run stops on it;
+// it is not a failure of the model call itself.
 type BudgetError struct {
+	// Used and Limit are tokens; for a pipeline's daily cost budget they are
+	// millionths of a USD.
 	Used  int64
 	Limit int64
 
 	// runLimit is true when the cap came from Options.TokenBudget, not from
 	// PIPEROOM_ROOM_TOKEN_BUDGET, so the text must not point at that setting.
 	runLimit bool
+	// scope says which limit; the zero value is the room's token budget.
+	scope budgetScope
+	// pipeline and day name the pipeline-day of a daily budget.
+	pipeline, day string
 }
 
+// budgetScope is the limit a BudgetError is about.
+type budgetScope int
+
+const (
+	budgetRoom budgetScope = iota
+	budgetPipelineTokens
+	budgetPipelineCost
+	budgetStore // the spend store failed while a limit was set
+)
+
+// Settings named in the budget texts.
+const (
+	pipelineTokensEnv = "PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET"
+	pipelineCostEnv   = "PIPEROOM_PIPELINE_DAILY_COST_USD"
+)
+
+// storeUnavailableText is the stop text when the spend store fails while a
+// spend limit is set.
+const storeUnavailableText = "spend store unavailable, so the spend limits cannot be checked; the agent stopped. A person can continue manually or steer the agent to try again"
+
 func (e *BudgetError) Error() string {
+	switch e.scope {
+	case budgetPipelineTokens:
+		return fmt.Sprintf("pipeline daily token budget reached for %q on %s UTC (%d of %d); a person must raise %s or continue manually",
+			e.pipeline, e.day, e.Used, e.Limit, pipelineTokensEnv)
+	case budgetPipelineCost:
+		return fmt.Sprintf("pipeline daily cost budget reached for %q on %s UTC ($%s of $%s); a person must raise %s or continue manually",
+			e.pipeline, e.day, usdText(e.Used), usdText(e.Limit), pipelineCostEnv)
+	case budgetStore:
+		return storeUnavailableText
+	}
 	if e.runLimit {
 		return runBudgetText(e.Used, e.Limit)
 	}
 	return budgetText(e.Used, e.Limit)
+}
+
+// usdText writes millionths of a USD as dollars with at least two decimals
+// and no trailing zeros beyond them: 50000000 is "50.00", 1100 is "0.0011".
+func usdText(micros int64) string {
+	s := strconv.FormatFloat(float64(micros)/1e6, 'f', 6, 64)
+	for strings.HasSuffix(s, "0") && len(s)-strings.IndexByte(s, '.') > 3 {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // budgetText is the sentence a person reads, in the agent message and in the
@@ -75,8 +124,11 @@ func runBudgetText(used, limit int64) string {
 }
 
 // tokenBudget counts the model tokens one room has used in this server
-// process. The Endpoint owns one per room, so it survives agent restarts. It is
-// not persisted: a server restart starts the count again at zero.
+// process. The Endpoint owns one per room, so it survives agent restarts. On
+// its own it is not persisted: a restart starts the count again at zero. With
+// a SpendLedger (SetSpend, the server) the caps are checked against the
+// persisted totals instead (spendGuard); tokenBudget then still holds the
+// room's cap, the next estimate and the count Deps.Usage reports.
 //
 // The unit is raw tokens: input, cache creation, cache reads, output and
 // compaction passes, each counted once at face value. Cache reads and writes
@@ -141,6 +193,13 @@ func (b *tokenBudget) setLimit(limit int64) {
 	b.mu.Unlock()
 }
 
+// limits reports the cap and whether it came from Options.TokenBudget.
+func (b *tokenBudget) limits() (limit int64, runLimit bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.limit, b.runLimit
+}
+
 // Limit reports the current cap; 0 means no cap.
 func (b *tokenBudget) Limit() int64 {
 	b.mu.Lock()
@@ -191,18 +250,33 @@ type budgetModel struct {
 	// limit. A hand-off is only counted: refusing it would leave a person who
 	// takes over a stopped room without a summary, and it is one bounded call.
 	loop bool
+	// guard, when set, checks the caps against the persisted totals and
+	// records every call there; nil = budget alone decides, in memory.
+	guard *spendGuard
 }
 
 func (m *budgetModel) Turn(ctx context.Context, params anthropic.BetaMessageNewParams) (anthropic.BetaMessage, error) {
+	var ch spendCharge
 	if m.loop {
-		if err := m.budget.admit(m.budget.nextEstimate()); err != nil {
-			return anthropic.BetaMessage{}, err
+		est := m.budget.nextEstimate()
+		if m.guard == nil {
+			if err := m.budget.admit(est); err != nil {
+				return anthropic.BetaMessage{}, err
+			}
+		} else {
+			var err error
+			if ch, err = m.guard.admit(ctx, m.budget, params.Model, est); err != nil {
+				return anthropic.BetaMessage{}, err
+			}
 		}
 	}
 	msg, err := m.inner.Turn(ctx, params)
 	// A failed stream may still have used tokens; count what the partial
 	// message reports.
 	m.budget.record(messageUsage(msg), m.loop)
+	if m.guard != nil {
+		m.guard.settle(ctx, ch, params.Model, msg)
+	}
 	return msg, err
 }
 

@@ -60,6 +60,35 @@ func TestAppendIfLastConflict(t *testing.T) {
 	}
 }
 
+// The seq condition and the log caps share one UPDATE: on a full log the
+// expected seq gets ErrLogFull, a stale one ErrSeqConflict, and neither
+// writes or uses a seq.
+func TestAppendIfLastWithLogCap(t *testing.T) {
+	a, _, _ := requireStoreSchema(t)
+	roomID := createTestRoom(t, a)
+	ctx := context.Background()
+	a.SetLimits(store.Limits{MaxEvents: 2})
+	t.Cleanup(func() { a.SetLimits(store.Limits{}) })
+	agent := events.AgentActor
+	msg := events.AgentMessagePayload{Text: "x"}
+	if _, err := a.AppendIfLast(ctx, roomID, 0, events.AgentMessage, agent, msg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.AppendIfLast(ctx, roomID, 1, events.AgentMessage, agent, msg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.AppendIfLast(ctx, roomID, 2, events.AgentMessage, agent, msg); !errors.Is(err, store.ErrLogFull) {
+		t.Fatalf("expected seq on a full log: %v, want ErrLogFull", err)
+	}
+	if _, err := a.AppendIfLast(ctx, roomID, 1, events.AgentMessage, agent, msg); !errors.Is(err, store.ErrSeqConflict) {
+		t.Fatalf("stale seq: %v, want ErrSeqConflict", err)
+	}
+	row, err := a.GetRoom(ctx, roomID)
+	if err != nil || row.LastSeq != 2 {
+		t.Fatalf("last seq = %d (%v), want 2", row.LastSeq, err)
+	}
+}
+
 // Every executor write holds only while its claim does.
 func TestClaimedStepWrites(t *testing.T) {
 	s, _, schema := requireStoreSchema(t)

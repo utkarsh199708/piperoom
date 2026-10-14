@@ -84,13 +84,6 @@ func run() error {
 	replica := replicaID(cfg.ReplicaID)
 	log.Info("server: agent cap", "max_agents_per_replica", maxAgents, "max_agents_global", maxAgentsGlobal, "replica", replica, "resume_on_takeover", resumeOnTakeover)
 
-	// A bad retention value stops the server: a typo must never silently keep
-	// (or delete) incident data.
-	retentionDays, err := store.ParseRetentionDays(cfg.RetentionDays)
-	if err != nil {
-		return fmt.Errorf("server: PIPEROOM_RETENTION_DAYS: %w", err)
-	}
-
 	// A bad PIPEROOM_WATCH_* value stops the server too; the error names the
 	// variable. --demo forces the watcher off.
 	watchCfg, err := watchConfig(cfg, *demoMode, log)
@@ -105,6 +98,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("server: %w", err)
 	}
+
+	// Spend limits and the price table (docs/design/cost.md): a bad value
+	// stops the server before it connects to anything.
+	spend, err := spendSetup(cfg)
+	if err != nil {
+		return err
+	}
+	spend.logSettings(log)
 
 	// Login settings (docs/design/auth.md): a bad PIPEROOM_AUTH_MODE or oidc
 	// config refuses start, and so does a reachable-from-outside listen
@@ -153,6 +154,13 @@ func run() error {
 	// the owners file, and the chosen model is logged.
 	slackCfg := slackFromConfig(cfg)
 	if _, err := tenancySetup(cfg, own, slackCfg.Token != "" && slackCfg.ChannelID != "", log); err != nil {
+		return err
+	}
+	// Retention and room limits (docs/design/retention.md): a bad value stops
+	// the server before it connects to anything; a typo must never silently
+	// keep (or delete) incident data.
+	limits, retention, err := limitsSetup(cfg, own, log)
+	if err != nil {
 		return err
 	}
 	if own.AnyShadow() {
@@ -225,6 +233,9 @@ func run() error {
 		identities = pg.Identities()
 		defer pg.Close()
 	}
+	// The per-room log caps are enforced by the store, in the insert's
+	// transaction (docs/design/retention.md section 5.2).
+	storeLimits(st, limits)
 
 	// Slack mirroring is on only when SLACK_BOT_TOKEN/SLACK_CHANNEL_ID are set,
 	// in both modes; a wrong setting refuses start. The deferred stop runs
@@ -248,7 +259,15 @@ func run() error {
 		// closedHook is room.Deps.OnRoomClosed: it forgets the room's token
 		// count and tells the watcher, which is set once it exists.
 		closedHook = &roomClosedHook{}
+		// usage hands the hand-off's agent.usage events to the room service
+		// once it exists.
+		usage = &usageRelay{log: log}
 	)
+	// Both stores keep the spend tables; the in-memory one only for --demo.
+	spendStore, ok := st.(store.SpendStore)
+	if !ok {
+		return errors.New("server: the room store keeps no spend tables")
+	}
 	if *demoMode {
 		// The real actions over the demo's in-memory clients (LEAD-ARCH round
 		// 4, item 3): the proposal path -- scope check, approval, executor --
@@ -270,6 +289,11 @@ func run() error {
 		}
 		ep, err := wiring.NewAgentEndpoint(ctx, cfg, log, awsCfg)
 		if err != nil {
+			return fmt.Errorf("server: %w", err)
+		}
+		// Spend limits are checked against the room database, so a restart
+		// does not reset them.
+		if err := ep.SetSpend(spend.options(spendStore, usage)); err != nil {
 			return fmt.Errorf("server: %w", err)
 		}
 		run = ep.Run
@@ -295,7 +319,7 @@ func run() error {
 		topo = sets
 	}
 
-	svc := room.New(room.Deps{
+	svc := newRoomService(room.Deps{
 		Store:        st,
 		Actions:      acts,
 		Tools:        toolsReg,
@@ -321,9 +345,10 @@ func run() error {
 		SessionIdle:      authSettings.Idle,
 		ViewerGroups:     authSettings.ViewerGroups,
 		SoloUser:         soloUser,
+		Limits:           limits,
 		OnRoomOpened:     slack.onRoomOpened(),
 		OnRoomClosed:     closedHook.onClosed,
-	})
+	}, usage)
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
 	loadErr := svc.Load(loadCtx)
@@ -347,8 +372,23 @@ func run() error {
 
 	// Retention starts after Load so the cache is built before any room can
 	// disappear. The deferred stop runs before the store closes (LIFO).
-	stopRetention := startElectedRetention(ctx, elector, svc, retentionDays, retentionInterval, retentionRunTimeout, time.Now, log)
+	stopRetention := startElectedRetention(ctx, elector, svc, retention, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopRetention()
+	// The open-room limit closes rooms through the service, so it too starts
+	// after Load and stops before the service closes (LIFO defers).
+	// With several replicas it runs on the elected leader only.
+	stopOpenLimit := startElectedOpenLimit(ctx, elector, svc, limits.MaxOpenDays, openLimitInterval, openLimitRunTimeout, log)
+	defer stopOpenLimit()
+	// Rooms from before migration 00012 get their byte_size counted in the
+	// background; their byte cap applies once that is done. Every replica
+	// runs it: each one reloads its own usage cache afterwards, and the
+	// backfill only fills rows still NULL, so a second pass finds nothing.
+	var backfiller byteSizeBackfiller
+	if pg, ok := st.(*store.PG); ok {
+		backfiller = pg
+	}
+	stopBackfill := startByteSizeBackfill(ctx, backfiller, svc.ReloadUsage, log)
+	defer stopBackfill()
 	// Dead sessions and login states are pruned whatever PIPEROOM_RETENTION_DAYS
 	// says: the job above is off by default, this one is always on.
 	sessionPruner, loginStatePruner := authPruners(sessions, loginStates)
@@ -356,7 +396,13 @@ func run() error {
 	defer stopAuthPrune()
 
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions),
-		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities)}
+		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities),
+		httpapi.WithSpend(httpapi.Spend{
+			Store:                spendStore,
+			RoomTokens:           spend.roomLimit,
+			PipelineDailyTokens:  spend.cost.PipelineDailyTokens,
+			PipelineDailyCostUSD: spend.cost.PipelineDailyCostUSD,
+		})}
 	if oidcRP != nil {
 		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
 	}
