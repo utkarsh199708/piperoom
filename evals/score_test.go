@@ -842,7 +842,8 @@ func TestEveryScenarioCanPass(t *testing.T) {
 	fixes := map[string][]events.ProposalStep{
 		"schema-change": {ps("schema_set_compatibility", `{"subject":"pg.public.orders-value","level":"NONE"}`),
 			ps("connect_restart_task", `{"connector":"pg-orders-connector","task":0}`)},
-		"slot-inactive-wal-growth": {ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)},
+		"slot-inactive-wal-growth":   {ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)},
+		"recurring-connector-paused": {ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)},
 	}
 	scs, err := LoadScenarios("scenarios")
 	if err != nil {
@@ -852,24 +853,33 @@ func TestEveryScenarioCanPass(t *testing.T) {
 		t.Run(sc.Name, func(t *testing.T) {
 			var script []step
 			called := map[string]bool{}
-			call := func(tool string, ok func(Recording) bool) {
+			// call reads tool until it gets a successful result that ok
+			// accepts. Only recordings the run can reach before any fix count
+			// (start-phase or untagged); the k-th result of a sequence takes
+			// k+1 calls.
+			call := func(tool string, ok func(Observation) bool) {
 				for _, r := range sc.Recordings {
-					if r.Tool == tool && r.Error == "" && ok(r) {
-						script = append(script, step{tool: tool, input: r.Input})
-						called[tool] = true
-						return
+					if r.Tool != tool || (r.Phase != "" && r.Phase != sc.startPhase()) {
+						continue
+					}
+					for k, o := range recordingResults(r) {
+						if o.Error == "" && ok(o) {
+							for range k + 1 {
+								script = append(script, step{tool: tool, input: r.Input})
+							}
+							called[tool] = true
+							return
+						}
 					}
 				}
 				t.Fatalf("no successful %s recording to call", tool)
 			}
 			for _, f := range sc.Expect.ExpectedFacts {
-				call(f.Tool, func(r Recording) bool {
-					return slices.ContainsFunc(successfulSummaries(r), func(s string) bool { return factIn(f, s) })
-				})
+				call(f.Tool, func(o Observation) bool { return factIn(f, o.Summary) })
 			}
 			for _, tool := range sc.Expect.EvidenceTools {
 				if !called[tool] {
-					call(tool, func(Recording) bool { return true })
+					call(tool, func(Observation) bool { return true })
 				}
 			}
 			switch sc.Expect.outcome() {
@@ -890,7 +900,16 @@ func TestEveryScenarioCanPass(t *testing.T) {
 				}
 			}
 			script = append(script, step{idle: true})
-			r := Judge(sc, transcriptOfInputs(t, sc, script), nil, false)
+			// After an executed fix, re-check the state in the recovered phase.
+			if rec := sc.recoveredPhases(); len(rec) > 0 {
+				for _, r := range sc.Recordings {
+					if res := recordingResults(r); rec[r.Phase] && len(res) > 0 && res[0].Error == "" {
+						script = append(script, step{tool: r.Tool, input: r.Input})
+						break
+					}
+				}
+			}
+			r, _ := evalOnce(t, sc, script)
 			if !r.Pass || r.Score != 100 || len(r.Misses) != 0 {
 				t.Errorf("pass=%v score=%v misses=%v failures=%v facts missing=%v", r.Pass, r.Score, r.Misses, r.Failures, r.FactsMissing)
 			}

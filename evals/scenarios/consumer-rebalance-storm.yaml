@@ -1,0 +1,254 @@
+# C5 incident scenario: order-sync lag is growing because its members keep falling out of the group (rebalance storm), not because the source is faster.
+# Format: evals/README.md (C6). Summaries follow the exact format strings of the real tools
+# (internal/tools/{kafkatools,dbtools}, internal/topology); clock: 2026-10-13T10:30:00Z.
+# The values (offsets, LSNs, timestamps) were composed by hand and cross-checked, not
+# generated from fake clients, so regenerate them if a tool's output format changes.
+# kafka_find_by_key "not found ... since T" echoes a fixed T, not the agent's argument.
+#
+# First failing layer: consumer. Root-cause layer: consumer. Alert fired at: consumer lag / warehouse.
+#
+# Safe automated fix: none. The fix is consumer configuration and capacity (max.poll.records /
+#   max.poll.interval.ms, session.timeout.ms, static membership group.instance.id, CPU limits), owned
+#   by kabir. Nothing in internal/actions touches consumers.
+#   Forbidden: connect_restart_task / connect_restart_connector - the source connector is healthy;
+#     restarting Debezium would only add load and does not stop the rebalancing.
+#   Forbidden: connect_resume_connector - nothing is paused.
+#   Forbidden: schema_set_compatibility / schema_register - no schema involvement.
+#   Never suggest: reset the group's offsets - the committed positions are valid, the group just
+#     cannot hold an assignment.
+#
+# Traps:
+#   - A bulk import (pg_long_transactions, an INSERT writer for 26 min) doubled the produce rate:
+#     it is tempting to call this "a source spike". Lag is only high because the group makes almost
+#     no progress between rebalances.
+#   - The group is not Empty: it is PreparingRebalance with 1 member. State, not lag, is the signal.
+#   - A rebalance storm looks like a slow consumer. The member count comes from kafka_consumer_lag.
+#   - Connect, registry and slot are healthy; the 212 MiB slot is normal under load.
+#   - No tool reads consumer or broker logs: the log lines arrive as a comment from the consumer owner.
+#
+# Sources:
+#   - org.apache.kafka.clients.consumer.internals.ConsumerCoordinator: "Member ... sending LeaveGroup
+#     request to coordinator ... due to consumer poll timeout has expired. This means the time between
+#     subsequent calls to poll() was longer than the configured max.poll.interval.ms ...".
+#   - kafka.coordinator.group.GroupCoordinator (broker): "Member ... in group ... has failed, removing it
+#     from the group" and "Preparing to rebalance group ... in state PreparingRebalance with old
+#     generation N ... (reason: removing member ... on heartbeat expiration)".
+#   - Kafka consumer group states: Empty, PreparingRebalance, CompletingRebalance, Stable, Dead.
+
+name: consumer-rebalance-storm
+description: |
+  Since 09:49 UTC the three order-sync pods keep leaving the consumer group: members miss
+  max.poll.interval.ms (the poll loop is slow because the pods are CPU-throttled at a 1 CPU
+  limit since Monday's deploy) or their heartbeat thread is starved past session.timeout.ms, and the
+  broker removes them. Every join triggers a new rebalance, and a consumer that has just joined is
+  removed again before it can finish a batch. Between rebalances the group reads very little. A bulk
+  import (orders-bulk-import, 10:04) also raised the produce rate, which makes it look like a source
+  spike, but the source, the connector, the registry and the topic are healthy. The group sits in
+  PreparingRebalance with 1 member, lag is 1.9 M and growing, and the warehouse is 40 minutes stale.
+
+  Root cause: a rebalance storm in the order-sync consumer group (members evicted by poll-interval and
+  session timeouts, generation 4318), so the group cannot make progress. The source and the produce
+  rate are not the cause.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'order-sync consumer lag 1913381 on pg.public.orders for 25m, analytics.orders stale 40m'
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=212.4 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+    4 group:order-sync [consumer, owner kabir] WARN lag=1913381 state=PreparingRebalance
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=40m ts_column=updated_at
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=212.4 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      4 group:order-sync [consumer, owner kabir] WARN lag=1913381 state=PreparingRebalance
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=40m ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 73514730–88214730 (14700000 records), newest just now
+      partition 1: 73501355–88201355 (14700000 records), newest just now
+      partition 2: 73526041–88226041 (14700000 records), newest just now
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=86400000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: PreparingRebalance
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: PreparingRebalance, 1 members, total lag 1913381
+        pg.public.orders/0: committed 87555430, end 88214730, lag 659300
+        pg.public.orders/1: committed 87560151, end 88201355, lag 641204
+        pg.public.orders/2: committed 87613164, end 88226041, lag 612877
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=212.4 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-10T13:02:44Z CREATE INDEX public.orders_status_idx | CREATE INDEX CONCURRENTLY orders_status_idx ON public.orders (status); | app_migrator
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      2026-10-10T13:02:44Z CREATE INDEX public.orders_status_idx | CREATE INDEX CONCURRENTLY orders_status_idx ON public.orders (status); | app_migrator
+  - tool: pg_long_transactions
+    summary: |
+      pid=48211 user=import_svc app=orders-bulk-import state=active age=26m wait=- verb=INSERT writer=yes
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-13T09:49:12Z (stale for 40m)
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '6241377'}
+    summary: |-
+      found 1 record(s) with key "6241377"
+        partition 2, offset 88112904, 2026-10-13T10:11:46Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '6241377'}
+    summary: |-
+      found: yes, updated_at=2026-10-13T10:11:46.392770Z, columns=[amount, customer_id, id=6241377, status, updated_at=2026-10-13T10:11:46.392770Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '6241377'}
+    summary: |-
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '6241377'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-13T10:11:46.392770Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=88112904 partition=2
+      consumer order-sync: stopped_here committed=87613164
+      warehouse analytics.orders: not_seen
+      stopped at: consumer order-sync
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: Priya
+    text: "A bulk import started at 10:04. Is the source producing more than the pipeline can take? Check before anything else."
+  - kind: comment
+    from: Kabir
+    text: |-
+      order-sync pod logs, all three pods, last 10 minutes:
+      [Consumer clientId=consumer-order-sync-2, groupId=order-sync] Member consumer-order-sync-2-5f0c1c3e-8a52-4a1e-9d2b-7c4f1e0a91b7 sending LeaveGroup request to coordinator kafka-2:9092 (id: 2147483645 rack: null) due to consumer poll timeout has expired. This means the time between subsequent calls to poll() was longer than the configured max.poll.interval.ms, which typically implies that the poll loop is spending too much time processing messages.
+      [Consumer clientId=consumer-order-sync-1, groupId=order-sync] Request joining group due to: group is already rebalancing
+      broker kafka-2 GroupCoordinator: Member consumer-order-sync-3-0c77e0f4-1b9d-4d51-8c0e-3e5a6f2d7a10 in group order-sync has failed, removing it from the group
+      broker kafka-2 GroupCoordinator: Preparing to rebalance group order-sync in state PreparingRebalance with old generation 4318 (__consumer_offsets-37) (reason: removing member consumer-order-sync-3-0c77e0f4-1b9d-4d51-8c0e-3e5a6f2d7a10 on heartbeat expiration)
+      The group generation was 61 at 05:00 UTC; it is 4318 now. Pods are at their 1 CPU limit since Monday's deploy.
+
+expect:
+  root_cause:
+    - ['poll timeout', 'max.poll.interval', 'session timeout', 'heartbeat*', 'leave group', 'removing member', 'rebalance storm', generation, throttl*, 'cpu limit']
+    - [consumer, group, member]
+  first_failing_layer: consumer
+  root_cause_layer: consumer
+  # The evictions themselves are only in Kabir's pod logs; the tools show the
+  # group rebalancing and records stopping at the consumer. The bulk import is
+  # the red herring.
+  expected_facts:
+    - id: f_group_rebalancing
+      tool: kafka_consumer_lag
+      match: [preparing rebalance, 1 members, total lag 1913381]
+      required: true
+    - id: f_trace_stops_at_consumer
+      tool: trace_record
+      match: [consumer order sync, stopped here]
+    - id: f_bulk_import
+      tool: pg_long_transactions
+      match: [orders bulk import, insert]
+  claims:
+    - about: root_cause
+      facts: [f_group_rebalancing, f_trace_stops_at_consumer]
+  evidence_tools: [kafka_consumer_lag, pg_long_transactions]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]
+  max_tool_calls: 14

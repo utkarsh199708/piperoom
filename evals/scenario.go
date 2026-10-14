@@ -43,6 +43,13 @@ type Scenario struct {
 	// against Connect and the Schema Registry.
 	Resources Resources `yaml:"resources"`
 	Alert     Alert     `yaml:"alert"`
+	// Phases name the states the recorded stack goes through, start phase
+	// first (e.g. broken, recovered). Empty means a static scenario. See
+	// phases.go.
+	Phases []string `yaml:"phases"`
+	// Transitions move the run to another phase when a fix step is executed
+	// or after a tool has been called n times.
+	Transitions []Transition `yaml:"transitions"`
 	// Recordings are the replayed tool results. See Recording for matching.
 	Recordings []Recording `yaml:"recordings"`
 	// Inputs are delivered one per idle, in order: when the agent finishes a
@@ -76,16 +83,23 @@ type Resources struct {
 // not mention are ignored, so leave out fields whose value the model picks
 // freely (timestamps such as "since"). An empty Input matches every call to
 // the tool. When several recordings match, the one with the most Input fields
-// wins; ties go to the earliest in the file.
+// wins; on a tie a recording of the current phase beats one without a phase,
+// and then the earliest in the file wins.
+//
+// Phase limits a recording to one phase of the scenario; empty means every
+// phase. Sequence replaces Summary/Data/Truncated/Error with observations
+// served in order, one per matching call; the last one repeats.
 type Recording struct {
 	Tool  string         `yaml:"tool"`
 	Input map[string]any `yaml:"input"`
+	Phase string         `yaml:"phase"`
 	// Summary and Data are returned as the tool's Result.
 	Summary   string `yaml:"summary"`
 	Data      any    `yaml:"data"`
 	Truncated bool   `yaml:"truncated"`
 	// Error, when set, makes the call fail as if the target system did.
-	Error string `yaml:"error"`
+	Error    string        `yaml:"error"`
+	Sequence []Observation `yaml:"sequence"`
 }
 
 // Input is one piece of human input.
@@ -95,6 +109,19 @@ type Input struct {
 	StepID    string `yaml:"step_id"`
 	CommentID string `yaml:"comment_id"`
 	Text      string `yaml:"text"`
+	// Action makes an action_result an executed fix step: the harness acts as
+	// the room and the executor, binds it to the newest proposal of this run
+	// that has a not yet executed step with this action, and delivers the
+	// approvals and step results the room would (see executor in harness.go).
+	// An input whose action was never proposed is skipped.
+	Action string `yaml:"action"`
+	// OK is the outcome of that step: true or false (required with Action).
+	OK *bool `yaml:"ok"`
+	// Params, when set, are the step params the scripted outcome is for,
+	// matched like a recording's input (every field present, equal value).
+	// A bound step with other params fails (ok false, not found) and fires
+	// no transition: the wrong fix does not recover the stack.
+	Params map[string]any `yaml:"params"`
 }
 
 // Expect is what a good investigation of the scenario looks like.
@@ -132,6 +159,11 @@ type Expect struct {
 	Fix [][]string `yaml:"fix"`
 	// ForbiddenActions must never be proposed in this scenario.
 	ForbiddenActions []string `yaml:"forbidden_actions"`
+	// MaxVerifyCalls is the read-tool budget after the first executed fix
+	// step (the re-check, including agent.Run's own verify reads); those
+	// reads do not count against MaxToolCalls. Zero means the default,
+	// defaultMaxVerifyCalls; it applies only to scenarios that execute a fix.
+	MaxVerifyCalls int `yaml:"max_verify_calls"`
 	// MaxToolCalls is the read-tool budget a focused investigation stays
 	// within. Zero means no budget.
 	MaxToolCalls int `yaml:"max_tool_calls"`
@@ -346,6 +378,12 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 				}
 			}
 		}
+		if r.Sequence != nil {
+			// The observations are the result; a top-level one would be
+			// silently ignored.
+			errs = append(errs, checkSequence(i, r)...)
+			continue
+		}
 		if r.Error == "" && r.Summary == "" {
 			errs = append(errs, fmt.Errorf("recordings[%d] (%s): needs summary or error", i, r.Tool))
 		}
@@ -355,6 +393,7 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 			}
 		}
 	}
+	errs = append(errs, s.validatePhases(toolInputs, actionNames)...)
 	for _, t := range s.Expect.EvidenceTools {
 		if _, ok := toolInputs[t]; !ok {
 			errs = append(errs, fmt.Errorf("expect.evidence_tools: unknown tool %q", t))
@@ -375,6 +414,7 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 		if strings.TrimSpace(in.Text) == "" {
 			errs = append(errs, fmt.Errorf("inputs[%d]: text is empty", i))
 		}
+		errs = append(errs, checkExecutedInput(i, in, isAction)...)
 	}
 	if s.Expect.MaxToolCalls < 0 {
 		errs = append(errs, errors.New("expect.max_tool_calls is negative"))
@@ -501,13 +541,17 @@ func (s Scenario) factRecorded(f Fact) bool {
 }
 
 // successfulSummaries are the summaries a recording can return as a
-// successful result. It is the one place that knows a recording's shape: a
-// recording that returns several observations over time adds them here.
+// successful result, in any phase and at any position of a sequence. It reads
+// the recording through recordingResults, the one place that knows a
+// recording's shape.
 func successfulSummaries(r Recording) []string {
-	if r.Error != "" {
-		return nil
+	var out []string
+	for _, o := range recordingResults(r) {
+		if o.Error == "" {
+			out = append(out, o.Summary)
+		}
 	}
-	return []string{r.Summary}
+	return out
 }
 
 // checkGroups rejects empty groups and blank terms; with a known list, it

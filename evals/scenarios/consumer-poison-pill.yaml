@@ -134,11 +134,85 @@ recordings:
       order-sync: Empty
   - tool: kafka_consumer_lag
     input: {group: order-sync}
-    summary: |-
-      order-sync: Empty, 0 members, total lag 14307
-        pg.public.orders/1: committed 25377154, end 25391062, lag 13908
-        pg.public.orders/0: committed 25610919, end 25611131, lag 212
-        pg.public.orders/2: committed 25792415, end 25792602, lag 187
+    sequence:
+      - summary: |-
+          order-sync: Empty, 0 members, total lag 14307
+            pg.public.orders/1: committed 25377154, end 25391062, lag 13908
+            pg.public.orders/0: committed 25610919, end 25611131, lag 212
+            pg.public.orders/2: committed 25792415, end 25792602, lag 187
+        data:
+          group: order-sync
+          members: 0
+          state: Empty
+          total_lag: 14307
+          worst_partitions:
+            - committed: 25377154
+              end: 25391062
+              lag: 13908
+              partition: 1
+              topic: pg.public.orders
+            - committed: 25610919
+              end: 25611131
+              lag: 212
+              partition: 0
+              topic: pg.public.orders
+            - committed: 25792415
+              end: 25792602
+              lag: 187
+              partition: 2
+              topic: pg.public.orders
+      - summary: |-
+          order-sync: PreparingRebalance, 1 members, total lag 14774
+            pg.public.orders/1: committed 25377154, end 25391523, lag 14369
+            pg.public.orders/2: committed 25792540, end 25792751, lag 211
+            pg.public.orders/0: committed 25611190, end 25611384, lag 194
+        data:
+          group: order-sync
+          members: 1
+          state: PreparingRebalance
+          total_lag: 14774
+          worst_partitions:
+            - committed: 25377154
+              end: 25391523
+              lag: 14369
+              partition: 1
+              topic: pg.public.orders
+            - committed: 25792540
+              end: 25792751
+              lag: 211
+              partition: 2
+              topic: pg.public.orders
+            - committed: 25611190
+              end: 25611384
+              lag: 194
+              partition: 0
+              topic: pg.public.orders
+      - summary: |-
+          order-sync: Empty, 0 members, total lag 15240
+            pg.public.orders/1: committed 25377154, end 25391990, lag 14836
+            pg.public.orders/0: committed 25611402, end 25611630, lag 228
+            pg.public.orders/2: committed 25792760, end 25792936, lag 176
+        data:
+          group: order-sync
+          members: 0
+          state: Empty
+          total_lag: 15240
+          worst_partitions:
+            - committed: 25377154
+              end: 25391990
+              lag: 14836
+              partition: 1
+              topic: pg.public.orders
+            - committed: 25611402
+              end: 25611630
+              lag: 228
+              partition: 0
+              topic: pg.public.orders
+            - committed: 25792760
+              end: 25792936
+              lag: 176
+              partition: 2
+              topic: pg.public.orders
   - tool: pg_replication_slots
     summary: |
       slot debezium_orders: active=true retained=31.0 MiB wal_status=reserved
