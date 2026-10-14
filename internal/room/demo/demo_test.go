@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -459,6 +460,31 @@ func TestDemoStopsWhenProposalsDisabled(t *testing.T) {
 	}
 	if hyps != 1 || !idle {
 		t.Fatalf("hypotheses = %d, idle = %v; want 1, true", hyps, idle)
+	}
+}
+
+type idProposals struct{}
+
+func (idProposals) Create(context.Context, events.ProposalCreatedPayload) (string, error) {
+	return "p_01M4ABCDEFGHJKMNPQRSTVWXYZ", nil
+}
+
+// F5b: nothing the scripted agent says names a proposal id.
+func TestDemoMessagesCarryNoIds(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	sink := &recordingSink{}
+	if err := Run(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: idProposals{}, Inbox: &closedInbox{}}, agent.Options{}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	re := regexp.MustCompile(`\bp_[0-9A-Z]{26}\b`)
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	for _, p := range sink.pays {
+		b, _ := json.Marshal(p)
+		if re.Match(b) {
+			t.Fatalf("emitted payload names a proposal id: %s", b)
+		}
 	}
 }
 

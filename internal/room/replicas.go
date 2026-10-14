@@ -572,7 +572,7 @@ func (s *Service) recordInterruption(sp store.StaleProposal) {
 		_ = json.Unmarshal(row.Steps, &p.Steps) // no steps: only the event is written
 	}
 	next := s.interruptedStep(ctx, sp.RoomID, p)
-	output := fmt.Sprintf("outcome unknown: the server running this proposal stopped before it recorded the result of step %d; check the target before you retry with a new proposal", next)
+	output := fmt.Sprintf("outcome unknown: the server running this proposal stopped before it recorded the result of step %d; check the target before you retry with a new proposal", next+1)
 	if sp.ClaimedBy == "" {
 		output = "the proposal was approved, but the server that should have run it stopped before it started; create a new proposal to retry"
 	}
