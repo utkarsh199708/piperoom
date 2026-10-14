@@ -5,11 +5,14 @@ package dbtools
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"piperoom/internal/clients/connect"
 	"piperoom/internal/clients/postgres"
 	"piperoom/internal/owners"
 	"piperoom/internal/testenv"
@@ -54,7 +57,11 @@ func TestPgPublicationTablesIntegration(t *testing.T) {
 	}
 
 	reg := tools.NewRegistry()
-	if err := Register(reg, Deps{Src: db, Owners: o}); err != nil {
+	// The tool reads the publication name from the Debezium connector config, so
+	// it needs the live Connect client (it errors on a nil one, see
+	// TestPgPublicationTablesNilConnect in dbtools_test.go).
+	cc := connect.New(cfg.ConnectURL, &http.Client{Timeout: 10 * time.Second})
+	if err := Register(reg, Deps{Src: db, Connect: cc, Owners: o}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	tt, ok := reg.Get("pg_publication_tables")
