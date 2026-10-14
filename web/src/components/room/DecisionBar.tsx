@@ -43,6 +43,23 @@ export function DecisionBar({
   const decision = decisionFor(state, user)
   const [, bump] = useState(0)
   const memory = useRef(new Set<string>())
+  const barRef = useRef<HTMLDivElement>(null)
+  const shown = decision !== null
+  // Publishes the bar's height so the tab list can stick right under it (F7c).
+  useEffect(() => {
+    const el = barRef.current
+    if (!el) return
+    const root = document.documentElement
+    const write = () => root.style.setProperty('--decision-h', `${Math.round(el.getBoundingClientRect().height)}px`)
+    write()
+    if (typeof ResizeObserver === 'undefined') return () => root.style.removeProperty('--decision-h')
+    const ro = new ResizeObserver(write)
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      root.style.removeProperty('--decision-h')
+    }
+  }, [shown])
 
   // "done ok" shows for 3 s, and only when this screen saw the proposal in some other state first
   // (a finished fix in an old room must not flash on load).
@@ -161,6 +178,7 @@ export function DecisionBar({
   // The tints are translucent: an opaque base keeps the room from showing through the sticky bar.
   return (
     <div
+      ref={barRef}
       role="region"
       aria-label="Decision"
       data-placement={placement}
