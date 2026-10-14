@@ -153,7 +153,10 @@ func (o *Owners) validate() error {
 		if err != nil {
 			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
+		if err := resolveDLQTopics(p, &w); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
+		}
 		o.Pipelines[i].watch = &w
 	}
-	return nil
+	return o.validateDLQ()
 }

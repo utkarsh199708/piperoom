@@ -32,6 +32,9 @@ const (
 	AgentToolResult Type = "agent.tool_result"
 	AgentMessage    Type = "agent.message"
 	AgentHypothesis Type = "agent.hypothesis"
+	// AgentUsage reports the tokens, latency and estimated cost of one model
+	// call (docs/design/cost.md). Counts only, never text.
+	AgentUsage Type = "agent.usage"
 
 	CommentAdded   Type = "comment.added"
 	SteerSuggested Type = "steer.suggested"
@@ -241,6 +244,40 @@ type AgentHypothesisPayload struct {
 	Confirmed    bool     `json:"confirmed"`  // true only after a human confirms
 }
 
+// Roles of a model call in AgentUsagePayload.Role.
+const (
+	UsageRoleTriage     = "triage"     // an investigation turn on PIPEROOM_TRIAGE_MODEL
+	UsageRoleMain       = "main"       // an investigation turn on the main model (Options.Model)
+	UsageRoleHandoff    = "handoff"    // the hand-off summary request
+	UsageRoleCompaction = "compaction" // the server-side compaction pass inside a triage or main request
+	// UsageRoleJudge is a model call that grades agent output (an LLM judge of
+	// a hand-off or an eval run). Reserved: nothing emits it until the judges
+	// of #93 and the evals are wired to usage and spend (docs/design/cost.md 2).
+	UsageRoleJudge = "judge"
+)
+
+// AgentUsagePayload is the cost of one model call (docs/design/cost.md). The
+// agent emits one per request it sends, failed requests included; a request
+// refused by a budget is never sent and gets none. When a request ran
+// server-side compaction, a second event with Role "compaction" carries the
+// compaction pass, whose tokens the API reports outside the request's own
+// usage fields; its LatencyMS is 0 because its time is part of the request's.
+//
+// It carries counts only: never prompt text, tool input or output, model text
+// or error text. Model is the model id the request named. CostUSD is
+// estimated from the PIPEROOM_MODEL_PRICES table; it is omitted (nil) when no
+// table is set or the table has no entry for Model, and it is never guessed.
+type AgentUsagePayload struct {
+	Model                    string   `json:"model"`
+	Role                     string   `json:"role"` // see UsageRole*
+	InputTokens              int64    `json:"input_tokens"`
+	CacheCreationInputTokens int64    `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64    `json:"cache_read_input_tokens"`
+	OutputTokens             int64    `json:"output_tokens"`
+	LatencyMS                int64    `json:"latency_ms"`
+	CostUSD                  *float64 `json:"cost_usd,omitempty"`
+}
+
 // CommentAddedPayload is a human comment, optionally anchored to a step.
 type CommentAddedPayload struct {
 	CommentID     string `json:"comment_id"`
@@ -329,6 +366,12 @@ type ActionExecutedPayload struct {
 	Output     string `json:"output"`
 	// ParamsHash is the proposal's params_hash the executor checked before Execute.
 	ParamsHash string `json:"params_hash,omitempty"`
+	// OutcomeUnknown is true when the step may or may not have run: its
+	// executor stopped after it claimed the step and before it recorded the
+	// result (docs/design/replicas.md section 5). OK is then false, the step is
+	// never run again, and the agent is told the outcome is unknown
+	// (HumanInput.OK nil): the target must be checked before a retry.
+	OutcomeUnknown bool `json:"outcome_unknown,omitempty"`
 }
 
 // HandoffSummary is the agent-written shift hand-off.

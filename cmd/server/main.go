@@ -35,6 +35,7 @@ import (
 	"piperoom/internal/store"
 	"piperoom/internal/store/memstore"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 	"piperoom/internal/watch"
 	"piperoom/internal/wiring"
@@ -259,6 +260,8 @@ func run() error {
 		}
 		defer w.Close()
 		wired = w
+		// similar_incidents reads past closed rooms from the room store.
+		w.Rooms = similarincidents.FromStore(st)
 		acts = actions.NewRegistry()
 		if err := wiring.RegisterTools(toolsReg, acts, w); err != nil {
 			return fmt.Errorf("server: register tools and actions: %w", err)

@@ -304,11 +304,10 @@ func TestAttack_ShippedUsersFilesStillLoad(t *testing.T) {
 	}
 }
 
-// A-AP-3 (design, documented). users.yaml layers still grant approval rights,
-// and ValidateUsers skips any layer whose owners.yaml entry names a group
-// (design section 2.3). So a users.yaml entry can claim a group-owned layer
-// that owners.yaml never gives it, and the server starts. This test pins the
-// current behaviour; see the report for the proposed check.
+// A-AP-3 (fixed). users.yaml layers still grant approval rights, so a user who
+// lists a layer must be a user: principal of it in owners.yaml even when the
+// layer also lists groups: the server cannot vouch for group membership at
+// start-up. ValidateUsers refuses to start and names the user and the layer.
 func TestAttack_UsersYAMLLayerOverGroupLayer(t *testing.T) {
 	users, err := room.ParseUsers([]byte("users:\n  - {id: kabir, layers: [consumer]}\n  - {id: mallory, layers: [consumer]}\n"))
 	if err != nil {
@@ -317,8 +316,14 @@ func TestAttack_UsersYAMLLayerOverGroupLayer(t *testing.T) {
 	own := &owners.Owners{Layers: map[string]owners.Principals{
 		"consumer": {{Kind: owners.KindUser, Name: "kabir"}, {Kind: owners.KindGroup, Name: "consumers"}},
 	}}
-	if err := room.ValidateUsers(users, own); err != nil {
-		t.Fatalf("design changed? ValidateUsers now refuses: %v", err)
+	err = room.ValidateUsers(users, own)
+	if err == nil || !strings.Contains(err.Error(), `"mallory"`) || !strings.Contains(err.Error(), `"consumer"`) {
+		t.Fatalf("ValidateUsers = %v, want an error naming mallory and consumer", err)
+	}
+	// The layer the user really owns still validates.
+	okUsers, _ := room.ParseUsers([]byte("users:\n  - {id: kabir, layers: [consumer]}\n"))
+	if err := room.ValidateUsers(okUsers, own); err != nil {
+		t.Fatalf("kabir alone: %v", err)
 	}
 	svc := room.New(room.Deps{Store: memstore.New(), Users: users, Owners: own, Run: fakeRun, WriteHandoff: fakeWrite})
 	t.Cleanup(svc.Close)

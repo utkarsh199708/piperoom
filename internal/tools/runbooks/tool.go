@@ -5,9 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 
 	"piperoom/internal/tools"
@@ -29,31 +29,58 @@ const (
 type Tool struct {
 	rbs   []Runbook
 	units []unit
+	syn   *synonyms
+	df    map[string]int // number of sections containing the term in any field
+	avgDL float64        // mean weighted section length
+	p     params
 }
 
 var _ tools.Tool = (*Tool)(nil)
 
-// unit is one searchable section, with its tokens counted once in New.
+// BM25 parameters and field boosts. A runbook title/keyword hit says more
+// about the topic than a heading hit, which says more than a body hit.
+type params struct{ k1, b, title, heading, body float64 }
+
+var defaultParams = params{k1: 1.2, b: 0.75, title: 3, heading: 2, body: 1}
+
+// unit is one searchable section. tf is the boost-weighted term frequency over
+// the runbook title and keywords, the section heading and the section text.
 type unit struct {
-	rb       int // index into Tool.rbs, which keeps file order
-	section  int // index into Runbook.Sections
-	runbook  map[string]bool
-	heading  map[string]bool
-	textFreq map[string]int
+	rb      int // index into Tool.rbs, which keeps file order
+	section int // index into Runbook.Sections
+	tf      map[string]float64
+	length  float64 // sum of tf
 }
 
 // New builds the tool. The runbooks are parsed already (Load/Embedded).
-func New(rbs []Runbook) *Tool {
-	t := &Tool{rbs: rbs}
+func New(rbs []Runbook) *Tool { return newWithParams(rbs, defaultParams) }
+
+func newWithParams(rbs []Runbook, p params) *Tool {
+	t := &Tool{rbs: rbs, syn: newSynonyms(), df: map[string]int{}, p: p}
+	var total float64
 	for i, rb := range rbs {
-		rbTerms := set(terms(rb.Title + " " + strings.Join(rb.Keywords, " ")))
+		title := terms(rb.Title + " " + strings.Join(rb.Keywords, " "))
 		for j, s := range rb.Sections {
-			freq := map[string]int{}
-			for _, w := range terms(s.Text) {
-				freq[w]++
+			u := unit{rb: i, section: j, tf: map[string]float64{}}
+			for _, w := range title {
+				u.tf[w] += t.p.title
 			}
-			t.units = append(t.units, unit{rb: i, section: j, runbook: rbTerms, heading: set(terms(s.Heading)), textFreq: freq})
+			for _, w := range terms(s.Heading) {
+				u.tf[w] += t.p.heading
+			}
+			for _, w := range terms(s.Text) {
+				u.tf[w] += t.p.body
+			}
+			for w, f := range u.tf {
+				u.length += f
+				t.df[w]++
+			}
+			total += u.length
+			t.units = append(t.units, u)
 		}
+	}
+	if len(t.units) > 0 {
+		t.avgDL = total / float64(len(t.units))
 	}
 	return t
 }
@@ -167,73 +194,73 @@ func (t *Tool) Run(ctx context.Context, input json.RawMessage) (tools.Result, er
 	return tools.Result{Summary: s, Data: data, Truncated: tr}, nil
 }
 
-func (t *Tool) search(query string, n int) []hit {
-	q := terms(query)
-	q = dedupe(q)
+// weighted is a query term with its weight.
+type weighted struct {
+	term   string
+	weight float64
+}
+
+// queryTerms tokenises the query, drops repeats, caps the typed terms and adds
+// synonym terms at a lower weight. The order is fixed so scores are
+// reproducible.
+func (t *Tool) queryTerms(query string) []weighted {
+	q := dedupe(terms(query))
 	if len(q) > maxQueryTerms {
 		q = q[:maxQueryTerms]
 	}
+	out := make([]weighted, 0, len(q))
+	for _, w := range q {
+		out = append(out, weighted{w, 1})
+	}
+	for _, w := range t.syn.expand(q) {
+		out = append(out, weighted{w, synonymWeight})
+	}
+	return out
+}
+
+// search ranks sections with BM25 over the boost-weighted fields. Units are in
+// file then section order, so the stable sort keeps ties in that order.
+func (t *Tool) search(query string, n int) []hit {
+	q := t.queryTerms(query)
 	type scored struct {
 		u     unit
-		score int
+		score float64
 	}
 	var res []scored
+	nDocs := float64(len(t.units))
 	for _, u := range t.units {
-		score := 0
-		for _, w := range q {
-			if u.runbook[w] {
-				score += 3
+		var score float64
+		for _, qt := range q {
+			f := u.tf[qt.term]
+			if f == 0 {
+				continue
 			}
-			if u.heading[w] {
-				score += 2
-			}
-			score += min(u.textFreq[w], 3)
+			df := float64(t.df[qt.term])
+			idf := math.Log(1 + (nDocs-df+0.5)/(df+0.5))
+			norm := t.p.k1 * (1 - t.p.b + t.p.b*u.length/t.avgDL)
+			score += qt.weight * idf * f * (t.p.k1 + 1) / (f + norm)
 		}
 		if score > 0 {
 			res = append(res, scored{u, score})
 		}
 	}
-	// Units are in file then section order, so a stable sort by score keeps
-	// ties in that order.
-	slices.SortStableFunc(res, func(a, b scored) int { return b.score - a.score })
+	slices.SortStableFunc(res, func(a, b scored) int {
+		switch {
+		case a.score > b.score:
+			return -1
+		case a.score < b.score:
+			return 1
+		}
+		return 0
+	})
 	hits := []hit{}
 	for _, r := range res[:min(n, len(res))] {
 		rb := t.rbs[r.u.rb]
 		s := rb.Sections[r.u.section]
-		hits = append(hits, hit{Runbook: rb.ID, Title: rb.Title, Section: s.Heading, Score: r.score, Text: s.Text, Sources: rb.Sources})
+		// Score is BM25 x 10, rounded; at least 1 for any match.
+		hits = append(hits, hit{Runbook: rb.ID, Title: rb.Title, Section: s.Heading, Score: max(1, int(math.Round(r.score*10))), Text: s.Text, Sources: rb.Sources})
 	}
 	return hits
-}
-
-// stopwords carry no meaning for lookup.
-var stopwords = set([]string{
-	"a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from", "has", "how", "if",
-	"in", "is", "it", "its", "my", "no", "not", "of", "on", "or", "so", "the", "then", "there", "this",
-	"to", "was", "what", "when", "why", "with",
-})
-
-// terms tokenizes text: lower case, split on anything but letters, digits,
-// '_' and '.', trim dots, drop short tokens and stopwords; dotted or
-// underscored tokens also contribute their parts.
-func terms(text string) []string {
-	var out []string
-	add := func(w string) {
-		if len(w) >= 2 && !stopwords[w] {
-			out = append(out, w)
-		}
-	}
-	for _, tok := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != '.'
-	}) {
-		tok = strings.Trim(tok, ".")
-		add(tok)
-		if strings.ContainsAny(tok, "_.") {
-			for _, part := range strings.FieldsFunc(tok, func(r rune) bool { return r == '_' || r == '.' }) {
-				add(part)
-			}
-		}
-	}
-	return out
 }
 
 func dedupe(xs []string) []string {

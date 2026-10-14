@@ -557,17 +557,28 @@ map warns exactly when the watcher would count the record as new.
   The facts carry the DLQ topic **name** and risk **codes** only, never another config value (same unit
   test as `Risk.Text`, §6.2).
 
-Rendered (`render.go`, unchanged code), for the eval `pipeline_map`:
+Rendered (`render.go`), for the eval `pipeline_map`. Since the topology edge-kinds contract the render is the
+canonical dependency listing (`graph.go` `Builder.Render`): nodes in data-flow order, each with its `from:` (data
+inputs) and `depends on:` lines, `(unconfirmed)` on links owners.yaml implies but nothing proves. Here the sink reads
+the topic by its `topics` setting and the group by its committed offsets; neither link to the warehouse table is
+provable:
 
 ```
 pipeline orders
+legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
 1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=1.1 MiB
 2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
-3 connect:pg-orders-sink [kafka-connect, owner arjun] WARN config_risk=dlq_no_log dlq=orders-dlq errors_tolerance=all
-4 topic:pg.public.orders [kafka, owner arjun] OK newest_record=12s ago
-5 dlq:orders-dlq [kafka-connect, owner arjun] WARN newest_record=3m ago records=1204 recent=true writer=pg-orders-sink
+  from: pg:public.orders
+3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=12s ago
+  from: connect:pg-orders-connector
+4 connect:pg-orders-sink [kafka-connect, owner arjun] OK config_risk=dlq_no_log dlq=orders-dlq errors_tolerance=all
+  from: topic:pg.public.orders
+5 dlq:orders-dlq [kafka-connect, owner arjun] WARN newest_record=3m ago recent=true records=1204 writer=pg-orders-sink
+  from: connect:pg-orders-sink
 6 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+  from: topic:pg.public.orders
 7 wh:analytics.orders [warehouse, owner meera] OK stale_for=1m ts_column=updated_at
+  from: connect:pg-orders-sink (unconfirmed), group:order-sync (unconfirmed)
 ```
 
 `trace_record` (`trace.go`) is untouched in this scope: it cannot say "this row is in the DLQ" without

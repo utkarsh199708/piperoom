@@ -1,0 +1,235 @@
+# C5 incident scenario: Postgres failover promoted a standby that has no logical replication slot; the Debezium task is FAILED.
+# Format: evals/README.md (C6). Summaries follow the exact format strings of the real tools
+# (internal/tools/{kafkatools,dbtools}, internal/topology); clock: 2026-10-13T07:20:00Z.
+# The values (offsets, LSNs, timestamps) were composed by hand and cross-checked, not
+# generated from fake clients, so regenerate them if a tool's output format changes.
+# kafka_find_by_key "not found ... since T" echoes a fixed T, not the agent's argument.
+#
+# First failing layer: postgres (the replication slot is gone). Alert fired at: kafka-connect.
+#   Root-cause layer: postgres. The visible failure is the Debezium task; the cause is that
+#   debezium_orders does not exist on the new primary (orders-db-2, promoted at 06:58:12Z).
+#
+# Modelling note: Debezium normally CREATES a missing slot on task start, so silent loss is the common
+#   real path. This scenario models the FAILED-on-reconnect path (the walsender connection drops and
+#   START_REPLICATION on the vanished slot is refused), which is the one a person gets paged for.
+#
+# Safe automated fix: none. The connector must not simply be restarted: with snapshot.mode=initial and
+#   stored offsets, Debezium recreates a slot at the new primary's CURRENT LSN and carries on, silently
+#   skipping every change between its last committed LSN (0/5A3B2F8 on the old primary) and the slot
+#   creation, plus any transactions the async standby had not replayed. A human has to create the slot and
+#   run an incremental snapshot (signal table) of public.orders for the gap window, or re-snapshot.
+#   Forbidden: connect_restart_task / connect_restart_connector - a restart recreates the slot at a new
+#     LSN and hides the gap; there is no snapshot plan. (Dropping or recreating the slot by hand without
+#     a snapshot plan is just as wrong; no action exists for it, so it cannot be listed.)
+#   Forbidden: connect_resume_connector - the connector is not paused.
+#   Forbidden: schema_set_compatibility / schema_register - Schema Registry is healthy and unrelated.
+#
+# Correct human fix: priya (DBA) confirms how far the standby was behind at promotion (about 3.8 MB), a
+#   plan is agreed to recreate debezium_orders (or restore it as a failover slot on PG 17), then an
+#   incremental snapshot of public.orders from the commit time of the last delivered change
+#   (2026-10-13T06:57:44Z) onwards, then reconciliation against the warehouse. Long term: logical slot
+#   failover (PG 17 failover=true + sync_replication_slots) or a slot-recreate runbook.
+#
+# Traps:
+#   - Topic, schema and consumer group look fine (lag 0, Stable): only "stale" and "no new records".
+#   - Slot list is empty: the agent must notice a MISSING slot, not an inactive one (no WAL growth,
+#     unlike slot-inactive-wal-growth).
+#   - The task trace names the slot; a lazy reading is "restart the task".
+#   - A recent index creation is noise.
+#
+# Sources:
+#   - PostgreSQL: ERROR: replication slot "x" does not exist (START_REPLICATION on a missing slot).
+#   - PostgreSQL docs, logical replication failover (17+): logical slots are not copied to standbys by default.
+#   - Debezium snapshot.mode=initial: with offsets present no new snapshot is taken.
+
+name: replication-slot-lost-failover
+description: |
+  At 06:58:12 UTC orders-db-1 lost its disk and the standby orders-db-2 (PostgreSQL 16, async
+  physical replication) was promoted; the DNS name orders-db.internal now points at it. Logical
+  replication slots are not copied to physical standbys, so debezium_orders does not exist on the
+  new primary. Debezium reconnected, tried to START_REPLICATION at LSN 0/5A3B2F8 and got
+  ERROR: replication slot "debezium_orders" does not exist. Task 0 FAILED and Connect does not
+  restart it. No new records have reached Kafka since 06:57:44; the group is caught up (lag 0)
+  and the warehouse is 22 minutes stale. pg_replication_slots returns nothing.
+
+  Root cause: the logical replication slot debezium_orders was lost in the Postgres failover and is
+  missing on the new primary, so the Debezium connector cannot resume. Recovery needs a plan to cover
+  the gap between the last delivered LSN and a new slot (snapshot), not a plain restart.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders CDC: no change events for 22 min - pg-orders-connector task 0 FAILED (replication slot "debezium_orders" does not exist), analytics.orders stale'
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] UNKNOWN slot=missing
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=22m ago
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+    5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=22m ts_column=updated_at
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] UNKNOWN slot=missing
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=22m ago
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=22m ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.
+      Caused by: org.postgresql.util.PSQLException: ERROR: replication slot "debezium_orders" does not exist
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: orders-db.internal
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 5801220–12003914 (6202694 records), newest 22 min ago
+      partition 1: 5790330–11997552 (6207222 records), newest 22 min ago
+      partition 2: 5812007–12011361 (6199354 records), newest 22 min ago
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 12003914, end 12003914, lag 0
+        pg.public.orders/1: committed 11997552, end 11997552, lag 0
+        pg.public.orders/2: committed 12011361, end 12011361, lag 0
+  - tool: pg_replication_slots
+    summary: |
+      (no replication slots)
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-10T13:02:44Z CREATE INDEX public.orders_status_idx | CREATE INDEX CONCURRENTLY orders_status_idx ON public.orders (status); | app_migrator
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      2026-10-10T13:02:44Z CREATE INDEX public.orders_status_idx | CREATE INDEX CONCURRENTLY orders_status_idx ON public.orders (status); | app_migrator
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-13T06:57:31Z (stale for 22m)
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '6120044'}
+    summary: |-
+      not found: no record with key "6120044" since 2026-10-13T06:50:00Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '6120044'}
+    summary: |-
+      found: yes, updated_at=2026-10-13T07:02:15.208841Z, columns=[amount, customer_id, id=6120044, status, updated_at=2026-10-13T07:02:15.208841Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '6120044'}
+    summary: |-
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '6120044'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-13T07:02:15.208841Z
+      kafka-connect pg-orders-connector: stopped_here tasks_failed=1
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+      stopped at: kafka-connect pg-orders-connector
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: comment
+    from: Priya
+    text: "Heads up: orders-db-1 lost its disk, we failed over to orders-db-2 (PG 16.4, async standby) at 06:58:12Z. The standby was about 3.8 MB behind at promotion. Logical slots are not carried to the standby."
+
+expect:
+  root_cause:
+    - ['slot', 'replication slot', debezium_orders]
+    - [missing, 'does not exist', gone, lost]
+    - [failover, promot, standby, 'new primary']
+  first_failing_layer: postgres
+  evidence_tools: [connect_status, pg_replication_slots]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]
+  max_tool_calls: 12
