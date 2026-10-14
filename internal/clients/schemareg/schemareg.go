@@ -192,3 +192,25 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 	}
 	return fmt.Errorf("schemareg: %s %s: %w", method, path, &serr)
 }
+
+// CheckCompatibility asks the Registry whether schema would be accepted as the
+// next version of subject, without registering it. Confluent documents the
+// POST as side-effect free. messages is nil on a Registry that predates the
+// verbose answer (before 6.1). A subject with no versions wraps
+// clients.ErrNotFound; an invalid schema is a *Error (42201). It is not on
+// clients.SchemaRegistryReader; the actions package asserts for it.
+func (c *Client) CheckCompatibility(ctx context.Context, subject, schema string) (ok bool, messages []string, err error) {
+	body, err := json.Marshal(map[string]string{"schema": schema})
+	if err != nil {
+		return false, nil, fmt.Errorf("schemareg: check compatibility: %w", err)
+	}
+	var out struct {
+		IsCompatible bool     `json:"is_compatible"`
+		Messages     []string `json:"messages"`
+	}
+	path := "/compatibility/subjects/" + url.PathEscape(subject) + "/versions/latest?verbose=true"
+	if err := c.do(ctx, http.MethodPost, path, bytes.NewReader(body), &out); err != nil {
+		return false, nil, err
+	}
+	return out.IsCompatible, out.Messages, nil
+}

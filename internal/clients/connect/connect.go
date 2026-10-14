@@ -193,3 +193,40 @@ func (c *Client) doBody(ctx context.Context, method, path string, in, out any) e
 	}
 	return nil
 }
+
+// ValidateResult is Connect's verdict on a config. Errors maps a config key to
+// its error messages; values are never kept, because they can be secrets.
+type ValidateResult struct {
+	ErrorCount int
+	Errors     map[string][]string
+}
+
+// ValidateConfig asks Connect to validate cfg for the connector plugin class
+// (PUT /connector-plugins/{class}/config/validate). The endpoint only
+// validates; it creates nothing. A Connect without it answers 405 or 404.
+// It is not on clients.ConnectReader; the actions package asserts for it.
+func (c *Client) ValidateConfig(ctx context.Context, class string, cfg map[string]string) (ValidateResult, error) {
+	if class == "" {
+		return ValidateResult{}, fmt.Errorf("connect: validate config: empty connector.class")
+	}
+	var out struct {
+		ErrorCount int `json:"error_count"`
+		Configs    []struct {
+			Value struct {
+				Name   string   `json:"name"`
+				Errors []string `json:"errors"`
+			} `json:"value"`
+		} `json:"configs"`
+	}
+	path := "/connector-plugins/" + url.PathEscape(class) + "/config/validate"
+	if err := c.doBody(ctx, http.MethodPut, path, cfg, &out); err != nil {
+		return ValidateResult{}, err
+	}
+	res := ValidateResult{ErrorCount: out.ErrorCount, Errors: map[string][]string{}}
+	for _, e := range out.Configs {
+		if len(e.Value.Errors) > 0 {
+			res.Errors[e.Value.Name] = append(res.Errors[e.Value.Name], e.Value.Errors...)
+		}
+	}
+	return res, nil
+}
