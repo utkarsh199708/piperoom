@@ -55,6 +55,10 @@ type Gateway struct {
 	// Set it before the gateway serves traffic.
 	ReplayTimeout time.Duration
 
+	// WriteTimeout overrides how long one frame write may block on a peer
+	// that is not reading; zero means writeTimeout. Set before serving.
+	WriteTimeout time.Duration
+
 	// OriginPatterns, when non-nil, replaces the default allowed WebSocket
 	// origin hosts (the Vite dev UI on localhost:5173). The request's own host
 	// is always accepted. Entries are matched with path.Match, so they must be
@@ -208,6 +212,27 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeHTTPError(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	// An after= past the room's head (a client holding seqs from a reset or
+	// another deployment) would replay nothing and then drop every live event
+	// up to that seq without a word. Refuse it so the client resyncs. The
+	// store is read, not the service cache, which may lag on another replica;
+	// a legitimate client's after was read from this log, so head >= after.
+	if after > 0 {
+		row, err := g.store.GetRoom(r.Context(), roomID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeHTTPError(w, http.StatusNotFound, "not_found", "room not found")
+			return
+		case err != nil:
+			g.log.Error("ws: read room head failed", "room", roomID, "err", err)
+			writeHTTPError(w, http.StatusInternalServerError, "internal_error", "internal error")
+			return
+		case after > row.LastSeq:
+			writeHTTPError(w, http.StatusBadRequest, "bad_request",
+				"after is beyond the room's last event (last_seq "+strconv.FormatInt(row.LastSeq, 10)+"); reconnect with after=0")
+			return
+		}
+	}
 
 	origins := g.OriginPatterns
 	if origins == nil {
@@ -230,6 +255,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		state:     "viewing",
 		lastSeen:  g.now(),
 		send:      make(chan []byte, sendBuffer),
+		slow:      make(chan struct{}),
+		writeTO:   g.WriteTimeout,
 		conn:      conn,
 		once:      sync.Once{},
 	}
@@ -367,10 +394,27 @@ func (g *Gateway) recheckNewClient(ctx context.Context, c *client, ident Identit
 	g.spawnSessionEnd(c)
 }
 
+// slowReason is the close reason for a client whose live queue overflowed.
+// The client already knows its highest seq, so it reconnects with after= that.
+const slowReason = "send buffer full (slow consumer); reconnect with after=<last seq>"
+
+// writeLoop is the only live writer, so it is also the one that closes a slow
+// client: closing from another goroutine waits for the write lock this loop
+// holds while blocked on the slow peer, and the library gives up on the close
+// frame after 5 s. Here the frame goes out as soon as the current write ends.
 func (g *Gateway) writeLoop(ctx context.Context, c *client) {
 	for {
 		select {
+		case <-c.slow:
+			c.shutdown(websocket.StatusPolicyViolation, slowReason)
+			return
+		default:
+		}
+		select {
 		case <-ctx.Done():
+			return
+		case <-c.slow:
+			c.shutdown(websocket.StatusPolicyViolation, slowReason)
 			return
 		case msg := <-c.send:
 			if err := c.write(ctx, msg); err != nil {
@@ -419,7 +463,8 @@ func (g *Gateway) eventLoop(ctx context.Context, c *client, ch <-chan events.Eve
 				continue
 			}
 			if !c.trySend(b) {
-				c.shutdown(websocket.StatusPolicyViolation, "send buffer full")
+				// writeLoop closes it (with the reason) after its current write.
+				c.markSlow()
 				return
 			}
 		}

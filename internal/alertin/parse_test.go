@@ -337,6 +337,13 @@ func TestCleanTitle(t *testing.T) {
 		{"bad\xffutf8", "badutf8"},
 		{"sep line", "sep line"},
 		{"\n\t ", "fallback"},
+		// Format characters (Cf) are dropped: bidi overrides and isolates
+		// could make a title read differently from what it says.
+		{"pay\u202Eslatot\u202C done", "payslatot done"},
+		{"a\u2066b\u2067c\u2068d\u2069e\u202Af\u202Bg\u202Dh", "abcdefgh"},
+		{"zero\u200Bwidth\u200C\u200D\uFEFF\u2060x\u200E\u200F", "zerowidthx"},
+		{"tag\U000E0041\U000E007Fs", "tags"},
+		{"\u202E\u200B", "fallback"},
 		{strings.Repeat("é", MaxTitleRunes+50), strings.Repeat("é", MaxTitleRunes)},
 		{strings.Repeat("a", MaxTitleRunes-1) + " b", strings.Repeat("a", MaxTitleRunes-1)},
 	}

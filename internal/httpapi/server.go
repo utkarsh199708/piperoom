@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -37,6 +39,7 @@ const handoffTimeout = 3 * time.Minute
 // Server wires the chi router to the room service.
 type Server struct {
 	svc     *room.Service
+	store   store.Store // read-only lookups the service does not expose (proposal existence)
 	gw      *ws.Gateway
 	log     *slog.Logger
 	handler http.Handler
@@ -46,6 +49,8 @@ type Server struct {
 	probeTimeout time.Duration
 	readyWarn    readyWarner
 	refuseWarn   refuseWarner
+	alertLimit   *rateLimiter         // verified alerts per source (alerts.go)
+	alertSeen    *alertin.ReplayCache // delivery keys already processed (alerts.go)
 
 	// Optional web UI serving (WithWebDir, WithPublicOrigin).
 	webDir  string
@@ -77,11 +82,14 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	}
 	s := &Server{
 		svc:          svc,
+		store:        st,
 		gw:           ws.NewGateway(svc, st, log),
 		log:          log,
 		probeTimeout: DefaultProbeTimeout,
 		readyWarn:    readyWarner{every: readyWarnEvery, now: time.Now},
 		refuseWarn:   refuseWarner{every: refuseWarnEvery, now: time.Now},
+		alertLimit:   newRateLimiter(alertRateLimit, alertRateWindow),
+		alertSeen:    alertin.NewReplayCache(alertin.DefaultReplayEntries),
 	}
 	for _, o := range opts {
 		o(s)
@@ -289,13 +297,91 @@ func requestLog(log *slog.Logger, client func(*http.Request) string) func(http.H
 
 // ---- helpers ----
 
+// unstorableMsg is the docs/api.md answer for typed text the log cannot hold.
+const unstorableMsg = "text contains characters that cannot be stored"
+
+// decodeBody reads one JSON object of at most maxBody bytes into dst. Over the
+// cap is 413 too_large. Invalid UTF-8 and lone UTF-16 surrogate escapes are
+// 400 validation (docs/api.md): encoding/json would silently turn both into
+// U+FFFD, so they are caught on the raw bytes first. Anything after the
+// object but whitespace is 400 too.
 func decodeBody(w http.ResponseWriter, r *http.Request, dst any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(dst); err != nil {
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return &room.Error{Status: http.StatusRequestEntityTooLarge, Code: "too_large", Msg: "request body over 1 MB"}
+		}
+		return validation("unreadable request body")
+	}
+	if !utf8.Valid(raw) || hasLoneSurrogate(raw) {
+		return validation(unstorableMsg)
+	}
+	// Unmarshal, unlike one Decoder.Decode, refuses trailing data.
+	if err := json.Unmarshal(raw, dst); err != nil {
 		return validation("invalid JSON body")
 	}
 	return nil
+}
+
+// hasLoneSurrogate reports whether raw JSON holds a \uD800-\uDFFF escape that
+// is not half of a high+low pair. It walks escapes in order, so an escaped
+// backslash followed by "ud800" is text, not an escape.
+func hasLoneSurrogate(raw []byte) bool {
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\\' {
+			continue
+		}
+		if i+1 >= len(raw) {
+			return false
+		}
+		if raw[i+1] != 'u' {
+			i++ // skip the escaped character (it may be a backslash)
+			continue
+		}
+		r, ok := hex4(raw, i+2)
+		if !ok {
+			return false // malformed; json.Unmarshal refuses it
+		}
+		i += 5
+		switch {
+		case r >= 0xDC00 && r <= 0xDFFF:
+			return true // low half with no high half before it
+		case r >= 0xD800 && r <= 0xDBFF:
+			if i+6 >= len(raw) || raw[i+1] != '\\' || raw[i+2] != 'u' {
+				return true
+			}
+			lo, ok := hex4(raw, i+3)
+			if !ok || lo < 0xDC00 || lo > 0xDFFF {
+				return true
+			}
+			i += 6
+		}
+	}
+	return false
+}
+
+// hex4 parses the four hex digits at raw[at:at+4].
+func hex4(raw []byte, at int) (rune, bool) {
+	if at+4 > len(raw) {
+		return 0, false
+	}
+	var r rune
+	for _, c := range raw[at : at+4] {
+		var d byte
+		switch {
+		case c >= '0' && c <= '9':
+			d = c - '0'
+		case c >= 'a' && c <= 'f':
+			d = c - 'a' + 10
+		case c >= 'A' && c <= 'F':
+			d = c - 'A' + 10
+		default:
+			return 0, false
+		}
+		r = r<<4 | rune(d)
+	}
+	return r, true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
