@@ -234,6 +234,7 @@ var aggregateRoutes = []string{
 	"GET /api/rooms",
 	"GET /api/shadow/metrics",
 	"POST /api/rooms",
+	"GET /api/pipelines",
 	"POST /api/alerts/webhook",
 	"POST /api/alerts/{source}",
 }
@@ -253,6 +254,9 @@ var publicRoutes = []string{
 	"GET /readyz",
 	"POST /auth/logout",
 	"POST /auth/dev-login",
+	"GET /auth/users",
+	"GET /rooms/{id}",
+	"HEAD /rooms/{id}",
 	"GET /api/me",
 	"GET /api/people",
 }
