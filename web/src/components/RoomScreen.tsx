@@ -42,8 +42,7 @@ export function RoomScreen() {
   const { user } = useCurrentUser()
   const { state, presence, conn, error, actions, stale, dismissStale, reload } = useRoom(roomId)
   // R10: the first replay is done once the log has been folded up to the snapshot's last_seq.
-  // Fixture mode plays the story with timers; that is not a log replay, so no progress bar.
-  const replayTarget = isFixtures() ? 0 : (state?.replay_target ?? 0)
+  const replayTarget = state?.replay_target ?? 0
   const replaying =
     replayTarget > 0 && (state?.last_seq ?? 0) < replayTarget && conn !== 'error' && conn !== 'not_found'
   const { permission, enable: enableNotify } = useRoomAttention(state, user, replaying)

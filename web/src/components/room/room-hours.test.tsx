@@ -183,6 +183,16 @@ describe('useJumpToLatest', () => {
     expect(screen.queryByRole('button')).toBeNull()
   })
 
+  it('does not scroll when the first replay ends', () => {
+    const scroll = vi.fn()
+    Element.prototype.scrollIntoView = scroll
+    const { rerender } = render(<Harness activity={[act1(1)]} replaying />)
+    rerender(<Harness activity={[act1(1), act1(2)]} />)
+    expect(scroll).not.toHaveBeenCalled()
+    rerender(<Harness activity={[act1(1), act1(2), act1(3)]} />)
+    expect(scroll).toHaveBeenCalledTimes(1)
+  })
+
   it('shows nothing when at the bottom or while replaying', () => {
     const { rerender } = render(<Harness activity={[act1(1)]} />)
     rerender(<Harness activity={[act1(1), act1(2)]} />)

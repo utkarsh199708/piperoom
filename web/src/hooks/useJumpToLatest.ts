@@ -15,6 +15,7 @@ export function useJumpToLatest(activity: ActivityEntry[], replaying: boolean) {
   const [atBottom, setAtBottom] = useState(true)
   const latest = activity.length > 0 ? activity[activity.length - 1].seq : 0
   const [seen, setSeen] = useState(latest)
+  const wasReplaying = useRef(replaying)
 
   useEffect(() => {
     const el = sentinelRef.current
@@ -33,7 +34,11 @@ export function useJumpToLatest(activity: ActivityEntry[], replaying: boolean) {
   // Runs after the new event rendered but before the observer reports the grown page, so the
   // ref still says where the person was.
   useLayoutEffect(() => {
-    if (replaying) {
+    const justReplayed = wasReplaying.current
+    wasReplaying.current = replaying
+    if (replaying || justReplayed) {
+      // The end of the first replay is not a reason to move the page: an open proposal
+      // near the top must stay where the person can see it.
       setSeen(latest)
       return
     }
