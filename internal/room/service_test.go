@@ -2260,3 +2260,46 @@ func TestAgentMentionWordBoundary(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentSupervisorStopsOnUnretryable pins that a validation error ends the
+// supervisor after one attempt with one error status and one explaining message.
+func TestAgentSupervisorStopsOnUnretryable(t *testing.T) {
+	c := &clock{t: time.Date(2026, 10, 11, 10, 0, 0, 0, time.UTC)}
+	var mu sync.Mutex
+	runs := 0
+	svc := room.New(room.Deps{
+		Store: memstore.NewWithClock(c.Now), Users: room.DefaultUsers(), Owners: testOwners(), Now: c.Now,
+		Run: func(context.Context, agent.Alert, agent.Deps, agent.Options) error {
+			mu.Lock()
+			runs++
+			mu.Unlock()
+			return &room.Error{Status: 400, Code: "validation", Msg: "input is not valid"}
+		},
+	})
+	t.Cleanup(svc.Close)
+	roomID := createRoom(t, svc, "arjun").ID
+	waitFor(t, 5*time.Second, func() bool {
+		return len(eventsOf[events.AgentMessagePayload](t, svc, roomID, events.AgentMessage)) >= 1
+	})
+	// A retry would wait out the one-second backoff; give it time to show up.
+	time.Sleep(1500 * time.Millisecond)
+	mu.Lock()
+	n := runs
+	mu.Unlock()
+	if n != 1 {
+		t.Fatalf("runs = %d, want 1", n)
+	}
+	errStatuses := 0
+	for _, s := range eventsOf[events.AgentStatusPayload](t, svc, roomID, events.AgentStatus) {
+		if s.State == "error" {
+			errStatuses++
+		}
+	}
+	if errStatuses != 1 {
+		t.Fatalf("error statuses = %d, want 1", errStatuses)
+	}
+	msgs := eventsOf[events.AgentMessagePayload](t, svc, roomID, events.AgentMessage)
+	if len(msgs) != 1 || !strings.HasPrefix(msgs[0].Text, "The agent stopped:") {
+		t.Fatalf("agent messages = %+v, want one starting with %q", msgs, "The agent stopped:")
+	}
+}

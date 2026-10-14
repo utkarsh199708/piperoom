@@ -1189,6 +1189,20 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			ectx, ecancel := context.WithTimeout(s.ctx, 5*time.Second)
 			_ = s.agentEmit(ectx, roomID, run, events.AgentStatus, events.AgentStatusPayload{State: "error", Detail: truncateDetail(err.Error())})
 			ecancel()
+			if isUnretryable(err) {
+				// The same input fails the same way each time, and a replay
+				// would repeat the story the agent already told.
+				s.log.Warn("room: agent stopped (unretryable)", "room", roomID, "err", err)
+				reason := truncateDetail(err.Error())
+				if s.proposalsDisabled(st) {
+					reason = fmt.Sprintf("proposals are disabled in this room because pipeline %q is not configured — add it to owners.yaml and restart the server", pipelineID)
+				}
+				mctx, mcancel := context.WithTimeout(s.ctx, 5*time.Second)
+				_ = s.agentEmit(mctx, roomID, run, events.AgentMessage, events.AgentMessagePayload{Text: "The agent stopped: " + reason})
+				mcancel()
+				s.releaseAgent(st, run, cancel)
+				return
+			}
 			if attempt >= maxAgentAttempts {
 				s.log.Error("room: agent gave up after repeated failures", "room", roomID, "attempts", attempt)
 				s.releaseAgent(st, run, cancel)
@@ -1221,6 +1235,16 @@ func (s *Service) runGuarded(ctx context.Context, roomID string, alert agent.Ale
 func isBudgetStop(err error) bool {
 	var be *agent.BudgetError
 	return errors.As(err, &be)
+}
+
+// isUnretryable reports an error a second attempt cannot cure: bad input, a
+// validation failure or a closed room.
+func isUnretryable(err error) bool {
+	if errors.Is(err, tools.ErrBadInput) || errors.Is(err, topology.ErrBadInput) {
+		return true
+	}
+	var re *Error
+	return errors.As(err, &re) && (re.Code == codeValidation || re.Code == codeRoomClosed)
 }
 
 // releaseAgent frees the room's agent slot when its supervisor gives up, so the
