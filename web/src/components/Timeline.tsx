@@ -13,6 +13,7 @@ import { Kbd } from '@/components/ui/kbd'
 import { Progress } from '@/components/ui/progress'
 import { PersonAvatar } from './room/PersonAvatar'
 import { CollapsibleText } from './room/CollapsibleText'
+import { stepAnchor } from '@/lib/triage'
 
 const AGENT = { kind: 'agent', id: 'agent', name: 'Agent' } as const
 
@@ -257,7 +258,7 @@ function DoneStep({
   const more = step.tool_calls.length - 1
 
   return (
-    <li className="flex flex-col gap-2">
+    <li id={stepAnchor(step.id)} className="flex flex-col gap-2 scroll-mt-4">
       <button
         type="button"
         aria-expanded={open}
@@ -322,7 +323,7 @@ function LiveStep({
   const first = step.tool_calls[0]
   const tags = first ? argTags(first.input) : []
   return (
-    <li className="flex flex-col gap-2.5 rounded-lg border border-input bg-card px-3 py-2.5">
+    <li id={stepAnchor(step.id)} className="flex scroll-mt-4 flex-col gap-2.5 rounded-lg border border-input bg-card px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
         <span
           role="img"

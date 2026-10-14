@@ -7,6 +7,7 @@ import type {
   AgentStepStartPayload,
   AgentToolCallPayload,
   AgentToolResultPayload,
+  AgentTriagePayload,
   ApprovalGivenPayload,
   ApprovalRejectedPayload,
   CommentAddedPayload,
@@ -59,6 +60,10 @@ export function describeEvent(e: Event, driverBefore: string | null = null): str
     case 'agent.message': {
       const p = as<AgentMessagePayload>(e)
       return p.reply_to ? `Agent replied to a comment` : `Agent: ${p.text}`
+    }
+    case 'agent.triage': {
+      const p = as<AgentTriagePayload>(e)
+      return p.status === 'ok' && p.headline ? `First look: ${p.headline}` : `First look failed (${p.reason || 'unknown'})`
     }
     case 'agent.hypothesis': {
       const p = as<AgentHypothesisPayload>(e)

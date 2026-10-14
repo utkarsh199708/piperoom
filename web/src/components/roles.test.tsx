@@ -173,7 +173,7 @@ describe('role-aware room list', () => {
     },
   ]
   beforeEach(() => {
-    vi.mocked(useRoomList).mockReturnValue({ rooms, loading: false, error: null, reload: vi.fn() })
+    vi.mocked(useRoomList).mockReturnValue({ rooms, loading: false, error: null, reload: vi.fn(), mode: 'push', updatedAt: null })
   })
 
   it('a member can create a room', () => {

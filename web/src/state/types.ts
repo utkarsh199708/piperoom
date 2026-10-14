@@ -34,6 +34,18 @@ export interface HypothesisState {
   confirmed: boolean
 }
 
+/** The newest agent.triage (F6): the first look, shown as "triage, unverified". */
+export interface TriageState {
+  status: 'ok' | 'failed'
+  reason?: string
+  headline?: string
+  suspected_layer?: string
+  confidence?: string
+  evidence_refs: string[]
+  next_check?: string
+  at: string
+}
+
 export interface ToolCallState {
   tool_use_id: string
   tool: string
@@ -190,6 +202,7 @@ export interface RoomState {
   alert: AlertInfo | null
   agent_status: AgentStatusState
   hypothesis: HypothesisState | null
+  triage: TriageState | null
   steps: StepState[]
   messages: AgentMessageState[]
   comments: CommentState[]
@@ -225,6 +238,7 @@ export function emptyRoomState(id: string): RoomState {
     alert: null,
     agent_status: { state: 'idle' },
     hypothesis: null,
+    triage: null,
     steps: [],
     messages: [],
     comments: [],
@@ -278,6 +292,9 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
           confidence: snapshot.hypothesis.confidence,
           confirmed: snapshot.hypothesis.confirmed,
         }
+      : null,
+    triage: snapshot.triage
+      ? { ...snapshot.triage, evidence_refs: snapshot.triage.evidence_refs ?? [] }
       : null,
   }
 }

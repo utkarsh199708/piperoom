@@ -53,7 +53,10 @@ export const TopBarSlotContext = createContext<HTMLElement | null>(null)
  * The one room list the shell loads. The sidebar and the room list screen read the same
  * copy, so there is one GET on load and one refresh updates both. Null outside the shell.
  */
-export const RoomListContext = createContext<ReturnType<typeof useRoomList> | null>(null)
+type RoomListHook = ReturnType<typeof useRoomList>
+/** The shell's room list; `mode` and `updatedAt` are optional so a test can pass a plain list. */
+export type RoomListValue = Omit<RoomListHook, 'mode' | 'updatedAt'> & Partial<Pick<RoomListHook, 'mode' | 'updatedAt'>>
+export const RoomListContext = createContext<RoomListValue | null>(null)
 
 /** Where a screen says what to show after "Rooms ›" in the breadcrumb. Null outside the shell. */
 export const BreadcrumbTailContext = createContext<((label: string | null) => void) | null>(null)

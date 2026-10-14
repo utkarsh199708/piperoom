@@ -80,7 +80,7 @@ function proposal(approvals: Record<string, 'pending' | 'approved'>) {
 
 const reload = vi.fn()
 function mockList(rooms: RoomSnapshot[], extra: Partial<ReturnType<typeof useRoomList>> = {}) {
-  vi.mocked(useRoomList).mockReturnValue({ rooms, loading: false, error: null, reload, ...extra })
+  vi.mocked(useRoomList).mockReturnValue({ rooms, loading: false, error: null, reload, mode: 'push', updatedAt: null, ...extra })
 }
 
 function Where() {
@@ -568,11 +568,18 @@ describe('keyboard', () => {
 })
 
 describe('refresh', () => {
-  it('reloads once when the tab becomes visible again', () => {
-    renderList()
-    expect(reload).not.toHaveBeenCalled()
-    document.dispatchEvent(new Event('visibilitychange'))
-    expect(reload).toHaveBeenCalledTimes(1)
+  // F6: the list hook keeps the rows current (push, or its own poll fallback); the screen
+  // no longer runs a timer or reloads on visibility.
+  it('the screen itself does not poll or reload on visibility', () => {
+    vi.useFakeTimers()
+    try {
+      renderList()
+      document.dispatchEvent(new Event('visibilitychange'))
+      vi.advanceTimersByTime(60_000)
+      expect(reload).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('in the shell it reads the shell list and does not load its own', () => {
@@ -589,10 +596,17 @@ describe('refresh', () => {
     )
     expect(titlesInOrder()).toEqual(['From the shell'])
     expect(vi.mocked(useRoomList)).toHaveBeenCalledWith({ enabled: false })
-    // Take control and the refresh go through the shell's reload, so the sidebar updates too.
-    document.dispatchEvent(new Event('visibilitychange'))
-    expect(shellReload).toHaveBeenCalledTimes(1)
     expect(reload).not.toHaveBeenCalled()
+  })
+
+  it('a polled list shows how old it is; a pushed one just says live', () => {
+    mockList([], { mode: 'poll', updatedAt: Date.now() - 5_000 })
+    const { unmount } = renderList()
+    expect(screen.getByText(/^live · updated/)).toBeInTheDocument()
+    unmount()
+    mockList([], { mode: 'push', updatedAt: null })
+    renderList()
+    expect(screen.getByText(/^live$/)).toBeInTheDocument()
   })
 })
 

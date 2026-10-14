@@ -5,6 +5,7 @@ import type {
   ActionExecutedPayload,
   Actor,
   AgentHypothesisPayload,
+  AgentTriagePayload,
   AgentMessagePayload,
   AgentStatusPayload,
   AgentStepStartPayload,
@@ -195,6 +196,25 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
           ...state,
           messages: [...state.messages, { text: p.text, at: event.at }],
         }
+      }
+      break
+    }
+
+    case 'agent.triage': {
+      // Last wins: a re-fire runs the pass again with new numbers.
+      const p = as<AgentTriagePayload>(event)
+      next = {
+        ...state,
+        triage: {
+          status: p.status,
+          reason: p.reason,
+          headline: p.headline,
+          suspected_layer: p.suspected_layer,
+          confidence: p.confidence,
+          evidence_refs: p.evidence_refs ?? [],
+          next_check: p.next_check,
+          at: event.at,
+        },
       }
       break
     }
