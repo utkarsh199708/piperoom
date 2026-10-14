@@ -25,6 +25,22 @@ export function emptyStateFor(agent?: { state: string; detail?: string }): Empty
         busy: true,
         offerSteer: false,
       }
+    case 'queued':
+      // PIPEROOM_MAX_AGENTS runs are busy; the server says how many are ahead in `detail`.
+      return {
+        title: 'The agent is waiting for a free slot.',
+        hint: detail,
+        busy: true,
+        offerSteer: false,
+      }
+    case 'log_full':
+      // The room log hit its cap and the agent stopped for good; the server refuses a steer.
+      return {
+        title: 'The agent has stopped: this room\'s log is full.',
+        hint: detail ?? 'Open a new room to keep investigating.',
+        busy: false,
+        offerSteer: false,
+      }
     case 'waiting_approval':
       return {
         title: 'The agent is waiting for an approval.',

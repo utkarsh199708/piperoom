@@ -164,4 +164,22 @@ describe('Timeline step stream', () => {
     view('idle')
     expect(screen.getByRole('button', { name: 'Take control and steer' })).toBeInTheDocument()
   })
+
+  it('queued and log_full are not "idle": no steer is offered', () => {
+    const take = vi.fn()
+    const view = (state: string, detail?: string) =>
+      render(
+        <Timeline steps={[]} messages={[]} comments={[]} onComment={vi.fn()} onTakeControl={take} agent={{ state, detail }} />,
+      )
+    const a = view('queued', 'waiting for an agent slot (2 ahead)')
+    expect(screen.getByText('The agent is waiting for a free slot.')).toBeInTheDocument()
+    expect(screen.getByText('waiting for an agent slot (2 ahead)')).toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(screen.queryByText(/idle/)).not.toBeInTheDocument()
+    a.unmount()
+    view('log_full')
+    expect(screen.getByText(/log is full/)).toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(screen.queryByText(/idle/)).not.toBeInTheDocument()
+  })
 })

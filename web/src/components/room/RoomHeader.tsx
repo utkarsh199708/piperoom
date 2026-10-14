@@ -58,7 +58,7 @@ export function RoomHeader({
   onHandoff: () => void
   onCloseRoom: () => void
   onInvite: () => void
-  /** Download the room transcript. Left out for viewers: the server refuses the export for them. */
+  /** Download the room transcript. Left out for viewers (read-only users); the server can still refuse with not_allowed. */
   onExport?: () => void
   exporting?: boolean
   /** A hand-off summary is being written: the button shows progress and opens the dialog to follow it. */
