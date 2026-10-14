@@ -342,7 +342,7 @@ func slotFromConfigs(t target, obs *observation) (string, error) {
 		if co == nil || co.cfg == nil {
 			continue
 		}
-		if n, present := co.cfg["slot.name"]; present && strings.TrimSpace(n) != "" {
+		if n, present := co.cfg["slot.name"]; present {
 			if !slotNameRE.MatchString(n) {
 				return "", fmt.Errorf("watch: pipeline %s: connector %s has an invalid slot.name %q", t.p.ID, c, clean(n, 40))
 			}

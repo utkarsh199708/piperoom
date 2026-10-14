@@ -68,7 +68,7 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 | `WAREHOUSE_DB_URL` | the warehouse, read-only role. With `postgres`: a Postgres URL. With `snowflake`: a gosnowflake DSN, `user:password@account/database/schema?warehouse=...&role=...`, with the password **URL-encoded** (a raw `%`, `+`, `?`, `@`, `/` or `:` breaks it, `internal/clients/snowflake/README.md`). Startup errors are redacted of the DSN (`internal/wiring/warehouse.go:74`). Read-only access comes only from the DSN's role (`internal/clients/snowflake/snowflake.go:6-10`). See [permissions.md](permissions.md#warehouse) |
 | `KAFKA_BROKERS` | comma-separated brokers |
 | `CONNECT_URL` | Kafka Connect REST base URL |
-| `SCHEMA_REGISTRY_URL` | Schema Registry base URL |
+| `SCHEMA_REGISTRY_URL` | Schema Registry base URL, or `off` when the pipelines use no Schema Registry (the pipeline map then has no schema-subject nodes and the schema tools answer "Schema Registry not configured"). **Docker Compose: required** (`deploy/docker-compose.pilot.yml` refuses to start without it; a blank value is an error, so a forgotten registry is never read as none). **Helm:** the chart skips empty values, so an empty value is unset and the server falls back to the dev default `http://localhost:8081`, which a pod cannot reach: the registry then shows as unknown in the map. Set the URL or `off`. In the server itself (`internal/config/config.go`) an explicitly empty value also means none |
 | `OWNERS_FILE` | pipelines and layer owners (step 2) |
 | `USERS_FILE` | users and the layers each owns (step 2) |
 | `PIPEROOM_PUBLIC_URL` | optional. The externally visible base URL, used for room links in Slack. It is a WebSocket origin only when `PIPEROOM_WEB_DIR` is set; without a web dir the WebSocket ignores it (section 4). Its host is also the public host in the served UI's content-security policy. Must be a plain `http(s)` host, with no wildcard. An invalid value stops the start (`cmd/server/main.go:84-87`; `internal/httpapi/static.go:41-75`; `internal/httpapi/server.go:150-158`; `internal/ws/gateway.go:186-189`; `internal/httpapi/static.go:195-197`). Empty means no links. **Required in `oidc` mode, and it must be `https` there** (it sets the OIDC redirect URI) |
@@ -325,8 +325,10 @@ on `PIPEROOM_HTTP_ADDR` and exits 0 when it is healthy (`cmd/server/main.go:54`,
    a user who exists in `users.yaml` and lists that layer, and every layer a user lists must be
    assigned to that same user in `owners.yaml`. A layer name that is not one of the six known
    layers also stops the start. The error names the user and the layer. The check covers only a
-   layer whose owners are all `user:` principals; a layer that lists a `group:` is skipped (and
-   logged once). It also refuses a `users.yaml` id that starts with `u_` and an `email:` that is
+   layer whose owners are all `user:` principals for the owners-to-users direction. The reverse
+   users-to-owners check always applies: every layer a user lists must include that user as
+   `user:<id>` in `owners.yaml`, even if the layer also lists groups. Skipped owners-to-users layers
+   are logged once. It also refuses a `users.yaml` id that starts with `u_` and an `email:` that is
    not ASCII.
 3. Applies the goose migrations to `PIPEROOM_DB_URL` (`:137`, `migrations/migrate.go`), then opens
    the room store (`:143`). A database that cannot be reached stops the start.

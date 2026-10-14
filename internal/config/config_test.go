@@ -1,10 +1,36 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// SCHEMA_REGISTRY_URL set to "" or "off" means no registry; unset keeps the
+// dev default.
+func TestSchemaRegistryURLOff(t *testing.T) {
+	for _, tc := range []struct {
+		val, want string
+		set       bool
+	}{
+		{"", "http://localhost:8081", false},
+		{"", "", true},
+		{"off", "", true},
+		{" OFF ", "", true},
+		{"https://sr.example:8081", "https://sr.example:8081", true},
+	} {
+		t.Setenv("SCHEMA_REGISTRY_URL", tc.val) // also restores it after the test
+		if !tc.set {
+			if err := os.Unsetenv("SCHEMA_REGISTRY_URL"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := Load().SchemaRegistryURL; got != tc.want {
+			t.Errorf("SCHEMA_REGISTRY_URL=%q (set=%v): got %q, want %q", tc.val, tc.set, got, tc.want)
+		}
+	}
+}
 
 func TestWatchDefaults(t *testing.T) {
 	for _, k := range []string{"PIPEROOM_WATCH_MODE", "PIPEROOM_WATCH_INTERVAL", "PIPEROOM_WATCH_CHECK_TIMEOUT", "PIPEROOM_WATCH_COOLDOWN"} {
