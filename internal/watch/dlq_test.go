@@ -866,7 +866,10 @@ func TestDLQWindowPrunesOldSamples(t *testing.T) {
 	}
 }
 
-func TestDLQUnreadableConfigDoesNotResolve(t *testing.T) {
+// TestDLQUnreadableConfigLetsAFiringDLQResolve: the declared topic that fired
+// is in the list, so its quiet window ends the episode even while a connector
+// config cannot be read (QA10: the room stayed open forever).
+func TestDLQUnreadableConfigLetsAFiringDLQResolve(t *testing.T) {
 	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
 	h.kafka.set("orders-dlq", 0, 0)
 	h.step(time.Minute)
@@ -879,8 +882,22 @@ func TestDLQUnreadableConfigDoesNotResolve(t *testing.T) {
 	h.conn.cfgErr["pg-orders"] = errors.New("connect: 500")
 	h.conn.mu.Unlock()
 	h.steps(80, time.Minute) // the topic is quiet for longer than window + for
-	if h.sigPhase(owners.SignalDLQGrowth) != phaseFiring || len(h.rooms.resolved()) != 0 {
-		t.Fatalf("an unreadable config let dlq_growth resolve\n%s", h.logs)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseOK || len(h.rooms.resolved()) != 1 {
+		t.Fatalf("a quiet DLQ stayed firing behind an unreadable config\n%s", h.logs)
+	}
+}
+
+// TestDLQUnreadableConfigIsUnknownWhileNotFiring: not firing, a clear over a
+// partial topic list is a guess, so the reading stays unknown and logged.
+func TestDLQUnreadableConfigIsUnknownWhileNotFiring(t *testing.T) {
+	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
+	h.kafka.set("orders-dlq", 0, 0)
+	h.conn.mu.Lock()
+	h.conn.cfgErr["pg-orders"] = errors.New("connect: 500")
+	h.conn.mu.Unlock()
+	h.steps(3, time.Minute)
+	if !strings.Contains(h.logs.String(), "DLQ topics unknown") {
+		t.Fatalf("no unknown reading for a partial DLQ list\n%s", h.logs)
 	}
 }
 
@@ -1157,7 +1174,7 @@ func TestDLQRememberedConnectorExpires(t *testing.T) {
 	}
 }
 
-func TestDLQFiringStaysFiringOnStatus500(t *testing.T) {
+func TestDLQFiringResolvesOnStatus500(t *testing.T) {
 	h := newHarness(t, opts{pipes: []pipeSpec{dlqPipe("")}})
 	h.kafka.set("orders-dlq", 0, 0)
 	h.step(time.Minute)
@@ -1168,8 +1185,8 @@ func TestDLQFiringStaysFiringOnStatus500(t *testing.T) {
 	}
 	h.conn.setStatusErr("pg-orders", errors.New("connect: 500"))
 	h.steps(80, time.Minute) // quiet for longer than window + for
-	if h.sigPhase(owners.SignalDLQGrowth) != phaseFiring || len(h.rooms.resolved()) != 0 {
-		t.Fatalf("a 500 on Status let dlq_growth resolve\n%s", h.logs)
+	if h.sigPhase(owners.SignalDLQGrowth) != phaseOK || len(h.rooms.resolved()) != 1 {
+		t.Fatalf("a 500 on Status kept a quiet declared DLQ firing\n%s", h.logs)
 	}
 }
 

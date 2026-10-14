@@ -434,6 +434,7 @@ func (w *Watcher) evaluateDLQ(now time.Time, t target, ps *pipeState, obs *obser
 	}
 	id := t.p.ID
 	topics := obs.plan.topics[id]
+	ss := ps.sig(owners.SignalDLQGrowth)
 	var r reading
 	switch {
 	case obs.dlqErr != nil:
@@ -444,13 +445,15 @@ func (w *Watcher) evaluateDLQ(now time.Time, t target, ps *pipeState, obs *obser
 		r = reading{v: vClear, value: "no DLQ topic", threshold: dlqThreshold(t.cfg.DLQGrowth)}
 	default:
 		r = w.dlqGrowthReading(now, t, ps, obs, topics, snaps)
-		if r.v != vBreach && obs.plan.cfgFail[id] {
+		if r.v != vBreach && obs.plan.cfgFail[id] && ss.phase == phaseOK {
 			// A connector config could not be read, so a DLQ topic may be missing
-			// from the list: clear or hold would be a guess.
+			// from the list: clear or hold would be a guess. Once firing, the
+			// topics that fired are in the list (declared, or read from a config
+			// earlier), so their quiet window may end the episode; an unread
+			// connector's own DLQ fires on its own once its config reads again.
 			r = reading{v: vUnknown, err: errDLQConfig}
 		}
 	}
-	ss := ps.sig(owners.SignalDLQGrowth)
 	w.apply(now, t, ps, owners.SignalDLQGrowth, t.cfg.DLQGrowth.WatchSignal, r, fired)
 	// A quiet window ends the episode: the next rise gets a new first_seen.
 	if r.v == vClear && ss.phase == phaseOK {
