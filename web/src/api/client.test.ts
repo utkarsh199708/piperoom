@@ -50,6 +50,7 @@ describe('request shape', () => {
     await api.comment('r_1', { text: 'hi' })
     await api.steer('r_1', 'go')
     await api.sendSuggestion('r_1', 's_1')
+    await api.declineSuggestion('r_1', 's_1', 'no')
     await api.requestControl('r_1')
     await api.grantControl('r_1', 'priya')
     await api.closeRoom('r_1', 'done')
@@ -58,7 +59,7 @@ describe('request shape', () => {
     await api.handoff('r_1', 'priya', true)
     await api.acceptHandoff('h_1')
     await api.trace('r_1', 'orders', 'k')
-    expect(fetchMock.mock.calls.length).toBe(16)
+    expect(fetchMock.mock.calls.length).toBe(17)
     for (const [url, init] of fetchMock.mock.calls as [string, RequestInit][]) {
       expect(url.startsWith('/api/')).toBe(true)
       expect(url).not.toContain('localhost')

@@ -42,11 +42,30 @@ type Room struct {
 	// MoreHandoffs are written after Handoff, in order.
 	MoreHandoffs []events.HandoffSummary
 	ToolResults  []ToolResult
+	// UnverifiedCloser closes the room as a person the server cannot vouch
+	// for (events.Actor.Verified false). The default closer is verified.
+	UnverifiedCloser bool
+	// Label, when set, adds a room.labelled event after the room's other events.
+	Label *events.RoomLabelledPayload
+	// Fix, when set, adds a proposal and its executed steps before closing.
+	Fix *Fix
+}
+
+// Fix is one proposal of a past room and how its steps ended.
+type Fix struct {
+	ProposalID string
+	Title      string
+	Actions    []string
+	// Failed marks the last executed step as failed (ok=false).
+	Failed bool
+	// NotRun creates the proposal without executing any step.
+	NotRun bool
 }
 
 var (
-	human = events.Actor{Kind: events.ActorHuman, ID: "arjun", Name: "Arjun"}
-	sys   = events.Actor{Kind: events.ActorSystem, ID: "system", Name: "System"}
+	human    = events.Actor{Kind: events.ActorHuman, ID: "arjun", Name: "Arjun"}
+	verified = events.Actor{Kind: events.ActorHuman, ID: "arjun", Name: "Arjun", Verified: true}
+	sys      = events.Actor{Kind: events.ActorSystem, ID: "system", Name: "System"}
 )
 
 // Seed creates the room in st, appends its events and closes it.
@@ -99,7 +118,35 @@ func Seed(ctx context.Context, st store.Store, r Room) error {
 			return err
 		}
 	}
-	if err := app(events.RoomClosed, human, events.RoomClosedPayload{Resolution: r.Resolution}); err != nil {
+	if r.Fix != nil {
+		f := r.Fix
+		var steps []events.ProposalStep
+		for _, a := range f.Actions {
+			steps = append(steps, events.ProposalStep{Action: a, Layer: "kafka-connect", Params: []byte(`{}`)})
+		}
+		if err := app(events.ProposalCreated, events.AgentActor, events.ProposalCreatedPayload{ProposalID: f.ProposalID, Title: f.Title, Steps: steps}); err != nil {
+			return err
+		}
+		for i := range steps {
+			if f.NotRun {
+				break
+			}
+			ok := !(f.Failed && i == len(steps)-1)
+			if err := app(events.ActionExecuted, sys, events.ActionExecutedPayload{ProposalID: f.ProposalID, StepIndex: i, OK: ok, Output: "done"}); err != nil {
+				return err
+			}
+		}
+	}
+	if r.Label != nil {
+		if err := app(events.RoomLabelled, human, *r.Label); err != nil {
+			return err
+		}
+	}
+	closer := verified
+	if r.UnverifiedCloser {
+		closer = human
+	}
+	if err := app(events.RoomClosed, closer, events.RoomClosedPayload{Resolution: r.Resolution}); err != nil {
 		return err
 	}
 	if err := st.CloseRoom(ctx, r.ID, r.ClosedAt); err != nil {

@@ -248,6 +248,9 @@ type Service struct {
 	// alertRooms maps the dedup key of each open webhook room to that room, so
 	// a repeat of the same alert joins the room instead of opening another.
 	alertRooms map[string]string
+
+	// statsCache serves GET /api/pipelines/{pid}/agent-stats (agentstats.go).
+	statsCache agentStatsCache
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.

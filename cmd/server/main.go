@@ -419,6 +419,14 @@ func run() error {
 	sessionPruner, loginStatePruner := authPruners(sessions, loginStates)
 	stopAuthPrune := startElectedAuthPrune(ctx, elector, sessionPruner, loginStatePruner, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopAuthPrune()
+	// The change log keeps PIPEROOM_CHANGES_RETENTION_DAYS (default 30) of rows.
+	changesDays, err := config.ParseChangesRetentionDays(cfg)
+	if err != nil {
+		return err
+	}
+	changesPurge, _ := st.(changesPurger)
+	stopChangesRetention := startElectedChangesRetention(ctx, elector, changesPurge, changesDays, retentionInterval, retentionRunTimeout, time.Now, log)
+	defer stopChangesRetention()
 
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions),
 		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities),

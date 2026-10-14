@@ -20,6 +20,7 @@ const actions: RoomActions = {
   comment: vi.fn(),
   steer: vi.fn(),
   sendSuggestion: vi.fn(),
+  declineSuggestion: vi.fn(),
   requestControl: vi.fn(),
   grantControl: vi.fn(),
   close: vi.fn(),
@@ -75,6 +76,9 @@ const proposal: ProposalState = {
 const roomWith = (p: ProposalState) => ({ ...emptyRoomState('r1'), pipeline_id: 'orders', proposals: [p] })
 const show = (user: CurrentUser, p: ProposalState = proposal, stale: StaleInfo | null = null) =>
   render(<ProposalsPanel state={roomWith(p)} user={user} actions={actions} stale={stale} />)
+
+// The approval that completes the set asks "Run this fix now?" first.
+const confirmRun = async () => fireEvent.click(await screen.findByRole('button', { name: 'Approve and run' }))
 
 beforeEach(() => {
   approve.mockReset()
@@ -168,6 +172,7 @@ describe('keys A and R', () => {
     approve.mockResolvedValue({ ok: true })
     show(arjun)
     fireEvent.keyDown(window, { key: 'a' })
+    await confirmRun()
     await waitFor(() => expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', { params_hash: HASH }))
   })
 
@@ -331,6 +336,7 @@ describe('focus after the solo dialog', () => {
     const approveButton = screen.getByRole('button', { name: 'Approve' })
     approveButton.focus()
     fireEvent.click(approveButton)
+    await confirmRun()
     // While the call runs Approve is off, and a disabled button gives up focus.
     expect(approveButton).toBeDisabled()
     // (A browser drops focus on its own; jsdom does not, so do it by hand.)
@@ -350,6 +356,7 @@ describe('focus after the solo dialog', () => {
     const state = roomWith(proposal)
     const { rerender } = render(<ProposalsPanel state={state} user={arjun} actions={actions} />)
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    await confirmRun()
     const dialog = await screen.findByRole('dialog')
     // The decision lands while the dialog is open: this layer has no buttons any more.
     approve.mockResolvedValueOnce({ ok: true })
@@ -414,5 +421,57 @@ describe('the stale 409 banner and toast', () => {
   it('takes the toast down by its id', () => {
     hideStaleToast()
     expect(toast.dismiss).toHaveBeenCalledWith('stale-params-mismatch')
+  })
+})
+
+describe('the run confirm (the approval that completes the set)', () => {
+  const nonCompleting: ProposalState = {
+    ...proposal,
+    required_layers: ['schema-registry', 'kafka-connect', 'consumer'],
+    approvals: { 'schema-registry': 'approved', 'kafka-connect': 'pending', consumer: 'pending' },
+  }
+  const soloArjun: CurrentUser = { ...arjun, solo: true }
+
+  it('A as the set-completing approver opens the run confirm, with the steps', () => {
+    show(arjun)
+    fireEvent.keyDown(window, { key: 'a' })
+    const dialog = screen.getByRole('alertdialog')
+    expect(within(dialog).getByText('Run this fix now?')).toBeInTheDocument()
+    expect(dialog).toHaveTextContent('runs 2 steps on schema-registry and kafka-connect right away')
+    expect(dialog).toHaveTextContent('1. schema-registry · set_compatibility')
+    expect(dialog).toHaveTextContent('2. kafka-connect · restart_connector_task')
+    expect(approve).not.toHaveBeenCalled()
+  })
+
+  it('Enter in the run confirm approves with the on-screen params_hash', async () => {
+    approve.mockResolvedValue({ ok: true })
+    show(arjun)
+    fireEvent.keyDown(window, { key: 'a' })
+    fireEvent.keyDown(screen.getByRole('alertdialog'), { key: 'Enter' })
+    await waitFor(() => expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', { params_hash: HASH }))
+  })
+
+  it('Esc leaves the proposal open and calls nothing', async () => {
+    show(arjun)
+    fireEvent.keyDown(window, { key: 'a' })
+    fireEvent.keyDown(screen.getByRole('alertdialog'), { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument())
+    expect(approve).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+  })
+
+  it('solo users get the typed dialog, not the run confirm', () => {
+    show(soloArjun)
+    fireEvent.keyDown(window, { key: 'a' })
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(screen.getByLabelText(/Solo mode: type/)).toBeInTheDocument()
+  })
+
+  it('a non-completing approval needs no confirm', async () => {
+    approve.mockResolvedValue({ ok: true })
+    show(arjun, nonCompleting)
+    fireEvent.keyDown(window, { key: 'a' })
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    await waitFor(() => expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', { params_hash: HASH }))
   })
 })
