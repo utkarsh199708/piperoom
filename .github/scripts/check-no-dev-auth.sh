@@ -20,8 +20,12 @@ if grep -vE '^\s*#' Dockerfile | grep -E 'COPY[^#]*users\.yaml|COPY[^#]*dev/'; t
   fail=1
 fi
 
-# The acknowledgement is typed by the operator; no shipped file may set it.
+# The acknowledgement is typed by the operator; no shipped file may set it. The
+# one exception is deploy/helm/piperoom/ci/dev-values.yaml, a CI-only fixture
+# for helm lint / template, which is deliberately not checked here. The chart's
+# own default values are.
 if grep -vE '^\s*#' Dockerfile deploy/docker-compose.dev-auth.yml deploy/docker-compose.pilot.yml \
+    deploy/helm/piperoom/values.yaml \
     | grep -E 'PIPEROOM_DEV_ACK[:=] *"?dev-login-has-no-password'; then
   echo "::error::PIPEROOM_DEV_ACK must never be set by a shipped file; the operator types it"
   fail=1

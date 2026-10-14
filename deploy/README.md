@@ -609,11 +609,15 @@ URL must point at the primary, PostgreSQL 13 or newer. See
 No database, keys or data stack needed. Scripted agent, in-memory, nothing is saved:
 
 ```sh
-docker compose -f deploy/docker-compose.pilot.yml run --rm --no-deps --service-ports piperoom --demo
+docker compose -f deploy/docker-compose.pilot.yml -f deploy/docker-compose.dev-auth.yml \
+  run --rm --no-deps --service-ports piperoom --demo
 ```
 
-`--no-deps` keeps the bundled Postgres from starting; the image already sets `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1`.
-Demo mode still needs:
+`--no-deps` keeps the bundled Postgres from starting. `--demo` always runs in dev mode, and inside
+the container the server listens on `0.0.0.0`, so it needs the non-loopback switch, which only the
+dev-auth override sets (the image and the pilot file do not). Without the override the server exits
+with `refusing to listen on "0.0.0.0:8090"`. `--demo` does **not** need `PIPEROOM_DEV_ACK` (from
+R9 the acknowledgement is for real dev logins, not the scripted demo). Demo mode still needs:
 
 - `deploy/.env` with `PIPEROOM_POSTGRES_PASSWORD` set to any value (compose refuses to read
   the file without it, even though demo mode never connects to the database);
@@ -670,7 +674,6 @@ room. A fix that was approved but not finished is marked failed, not re-run
 | Exits with `config: PIPEROOM_DEV_ACK: want exactly "dev-login-has-no-password" (or unset)` | `PIPEROOM_DEV_ACK` holds anything but that exact sentence (`1` and `true` are refused on purpose). Set it exactly, or clear it |
 | Dev mode exits, naming `PIPEROOM_DEV_ACK` (from R9) | dev login off loopback needs both `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (the dev-auth override sets it) and `PIPEROOM_DEV_ACK=dev-login-has-no-password` in `deploy/.env`. Not needed in `oidc` mode or with `--demo` |
 | Exits with `config: PIPEROOM_LOG_LEVEL=... want debug, info, warn or error` or `PIPEROOM_LOG_FORMAT=... want text or json` | fix or clear the variable. Defaults are `info` and `text` |
-| Exits with `auth: PIPEROOM_AUTH_MODE=oidc needs ...` | `oidc` mode needs `PIPEROOM_PUBLIC_URL` (https), `PIPEROOM_OIDC_ISSUER`, `PIPEROOM_OIDC_CLIENT_ID`, and `PIPEROOM_OIDC_CLIENT_SECRET` or `PIPEROOM_OIDC_PUBLIC_CLIENT=1`. The message names the missing one |
 | Exits with `PIPEROOM_OIDC_SCOPES must include openid`, or with an error about `PIPEROOM_SESSION_IDLE`, `PIPEROOM_SESSION_MAX` or `PIPEROOM_TRUSTED_PROXIES` | fix the named variable (durations look like `30m` or `8h`; proxies are CIDRs like `10.0.0.0/8` or plain addresses) |
 | Exits with `solo mode: ...` | `PIPEROOM_SOLO_USER` is not in `users.yaml`, or `owners.yaml` names someone else. Remove the variable or the other owners |
 | Exits with `user id "u_..." ... reserved` or `bad email` | `users.yaml`: ids may not start with `u_`, and emails must be ASCII with no spaces (see [Upgrade notes](#upgrade-notes)) |
