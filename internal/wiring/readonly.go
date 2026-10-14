@@ -21,6 +21,8 @@ import (
 // Reader itself.
 
 // ErrReadOnly is returned by a write method reached through a read-only client.
+// Not to be confused with tools.ErrNotReadOnly, which a read-only registry
+// returns for a tool whose Kind is not KindRead.
 var ErrReadOnly = errors.New("wiring: write through a read-only client")
 
 // readOnlyConnect is a ConnectReader dressed as a ConnectClient whose writes

@@ -76,10 +76,7 @@ func TestFirstUserMessageAlertInjectionStaysInsideWrapper(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, alert := range []Alert{
 				{Title: tc.title, PipelineID: "orders"},
-				{Title: "orders stale", PipelineID: "orders", Raw: alertJSON(t, map[string]any{
-					"description": tc.title,
-					"labels":      map[string]any{"team": tc.title},
-				})},
+				{Title: "orders stale", PipelineID: tc.title},
 			} {
 				msg := firstUserMessage(alert)
 				if out := outsideWrappers(t, msg); strings.Contains(out, marker) {
@@ -100,32 +97,35 @@ func TestFirstUserMessageMasksSecretsInAlert(t *testing.T) {
 	const (
 		dsnPass = "s3cr3tPassw0rdXyz"
 		token   = "ghp_" + "Zq9xLmN2pR7sT4vW8yB1cD5fG3hJ6kQ0aE2u"
-		labPass = "hunter2hunter2"
 	)
 	alert := Alert{
-		Title:      "orders stale: postgres://app:" + dsnPass + "@db:5432/orders refused",
-		PipelineID: "orders",
-		Raw: alertJSON(t, map[string]any{
-			"alerts": []any{map[string]any{
-				"labels":      map[string]any{"connector": "orders-src", "password": labPass},
-				"annotations": map[string]any{"description": "lag high; Authorization: Bearer " + token},
-			}},
-		}),
+		Title:      "orders stale: postgres://app:" + dsnPass + "@db:5432/orders refused; Authorization: Bearer " + token,
+		PipelineID: "orders password=" + dsnPass,
 	}
 	msg := firstUserMessage(alert)
-	for _, secret := range []string{dsnPass, token, labPass} {
+	for _, secret := range []string{dsnPass, token} {
 		if strings.Contains(msg, secret) {
 			t.Fatalf("secret %q reached the prompt:\n%s", secret, msg)
 		}
 	}
-	for _, want := range []string{"Alert description: <untrusted>", "Alert labels: <untrusted>", "connector=orders-src", "postgres://app:"} {
+	for _, want := range []string{"Alert: <untrusted>orders stale: postgres://app:", "Pipeline: <untrusted>orders"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, msg)
 		}
 	}
-	// Every alert field sits inside a wrapper.
-	if out := outsideWrappers(t, msg); strings.Contains(out, "orders-src") || strings.Contains(out, "lag high") {
-		t.Fatalf("alert detail outside the wrapper:\n%s", msg)
+}
+
+// TestFirstUserMessageNeverReadsRawBody pins that the webhook body stays out
+// of the prompt: internal/alertin selects the alert, the agent reads fields.
+func TestFirstUserMessageNeverReadsRawBody(t *testing.T) {
+	msg := firstUserMessage(Alert{
+		Title: "orders stale",
+		Raw:   json.RawMessage(`{"description":"RAW_DESC_MARKER","labels":{"team":"RAW_LABEL_MARKER"}}`),
+	})
+	for _, m := range []string{"RAW_DESC_MARKER", "RAW_LABEL_MARKER"} {
+		if strings.Contains(msg, m) {
+			t.Fatalf("raw body text %q reached the prompt:\n%s", m, msg)
+		}
 	}
 }
 
@@ -138,53 +138,6 @@ func TestRenderRoomEventMasksAlertTitle(t *testing.T) {
 	}
 }
 
-func TestAlertDetails(t *testing.T) {
-	long := strings.Repeat("x", 5000)
-	cases := []struct {
-		name       string
-		raw        string
-		wantDesc   string
-		wantLabels []string
-	}{
-		{"empty", ``, "", nil},
-		{"not json", `not json`, "", nil},
-		{"array body", `[1,2]`, "", nil},
-		{"generic", `{"description":"lag high","labels":{"b":"2","a":"1"}}`, "lag high", []string{"a=1", "b=2"}},
-		{"alertmanager", `{"commonAnnotations":{"summary":"lag"},"alerts":[{"labels":{"x":"y"}}],"commonLabels":{"x":"z"}}`, "lag", []string{"x=z"}},
-		{"non-string labels dropped", `{"labels":{"n":3,"s":"ok"}}`, "", []string{"s=ok"}},
-		{"bad alerts entry", `{"alerts":["oops"],"message":"m"}`, "m", nil},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			d, l := alertDetails(json.RawMessage(tc.raw))
-			if d != tc.wantDesc {
-				t.Fatalf("description = %q, want %q", d, tc.wantDesc)
-			}
-			if strings.Join(l, "|") != strings.Join(tc.wantLabels, "|") {
-				t.Fatalf("labels = %q, want %q", l, tc.wantLabels)
-			}
-		})
-	}
-	t.Run("caps", func(t *testing.T) {
-		labels := map[string]any{}
-		for i := 0; i < 50; i++ {
-			labels[string(rune('a'+i%26))+strings.Repeat("k", i)] = long
-		}
-		d, l := alertDetails(alertJSON(t, map[string]any{"description": long, "labels": labels}))
-		if len(d) > alertDescriptionBytes {
-			t.Fatalf("description %d bytes, cap %d", len(d), alertDescriptionBytes)
-		}
-		if len(l) != alertLabelCount {
-			t.Fatalf("labels = %d, want %d", len(l), alertLabelCount)
-		}
-		for _, s := range l {
-			if len(s) > alertLabelBytes {
-				t.Fatalf("label %d bytes, cap %d", len(s), alertLabelBytes)
-			}
-		}
-	})
-}
-
 // TestSystemPromptNeverCarriesAlertText proves the alert reaches the model
 // only through the first user turn: the system block is the fixed prompt, so
 // it stays cacheable and no alert text ever sits in the most trusted position.
@@ -194,7 +147,6 @@ func TestSystemPromptNeverCarriesAlertText(t *testing.T) {
 		Title:       title,
 		PipelineID:  "PIPELINE_MARKER",
 		PipelineMap: "MAP_MARKER pg -> kafka",
-		Raw:         alertJSON(t, map[string]any{"description": "DESC_MARKER", "labels": map[string]any{"l": "LABEL_MARKER"}}),
 	}
 	reg := tools.NewRegistry()
 	r, err := newRunner(alert, Deps{Tools: reg, Inbox: &fakeInbox{waitErr: context.Canceled}, Sink: &fakeSink{}, Logger: discardLogger()}, Options{MaxTurns: 1})
@@ -212,7 +164,7 @@ func TestSystemPromptNeverCarriesAlertText(t *testing.T) {
 		t.Fatal("system block must be exactly systemPrompt()")
 	}
 	sys := params.System[0].Text
-	for _, m := range []string{"ALERT_TITLE_MARKER", "PIPELINE_MARKER", "MAP_MARKER", "DESC_MARKER", "LABEL_MARKER"} {
+	for _, m := range []string{"ALERT_TITLE_MARKER", "PIPELINE_MARKER", "MAP_MARKER"} {
 		if strings.Contains(sys, m) {
 			t.Fatalf("system prompt carries alert text %q", m)
 		}
@@ -220,15 +172,6 @@ func TestSystemPromptNeverCarriesAlertText(t *testing.T) {
 			t.Fatalf("first user turn is missing alert text %q", m)
 		}
 	}
-}
-
-func alertJSON(t *testing.T, v any) json.RawMessage {
-	t.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	return b
 }
 
 // paramsModel records every request it is sent and ends each turn at once.

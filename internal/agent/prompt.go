@@ -103,17 +103,6 @@ func firstUserMessage(alert Alert) string {
 		b.WriteString(wrapUntrusted(maskAlertText(alert.PipelineID)))
 		b.WriteString("\n")
 	}
-	description, labels := alertDetails(alert.Raw)
-	if description != "" {
-		b.WriteString("Alert description: ")
-		b.WriteString(wrapUntrusted(description))
-		b.WriteString("\n")
-	}
-	if len(labels) > 0 {
-		b.WriteString("Alert labels: ")
-		b.WriteString(wrapUntrusted(strings.Join(labels, ", ")))
-		b.WriteString("\n")
-	}
 	if alert.RoomID != "" {
 		b.WriteString("Room: ")
 		b.WriteString(alert.RoomID)
