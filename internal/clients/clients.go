@@ -68,6 +68,38 @@ type TaskStatus struct {
 	Trace    string `json:"trace,omitempty"` // stack trace when FAILED
 }
 
+// ConnectLogReader reads the newest lines of the Kafka Connect worker log.
+// Debezium logs retriable errors there (a permission error, a corrupt WAL
+// read) while Connect still reports the task RUNNING, so it is the only
+// evidence of such a crash loop (QA G3). Optional: a client with no log
+// source (CONNECT_WORKER_LOG_FILE unset) returns ErrNotSupported. Lines are
+// raw log text: tools redact them and wrap them as untrusted data. (Q0)
+type ConnectLogReader interface {
+	WorkerLog(ctx context.Context, q WorkerLogQuery) ([]LogLine, error)
+}
+
+// WorkerLogQuery selects worker log lines. (Q0)
+type WorkerLogQuery struct {
+	// Connector keeps only lines that name this connector or one of its tasks
+	// ("pg-orders-connector", "pg-orders-connector-0"). Required.
+	Connector string
+	// Since drops lines older than this; zero = no lower bound.
+	Since time.Time
+	// MinLevel is "INFO", "WARN" (the default when empty) or "ERROR".
+	MinLevel string
+	// MaxLines caps the result, newest first after filtering; 0 = 50, at most 200.
+	MaxLines int
+}
+
+// LogLine is one worker log entry; a stack trace following a line is folded
+// into its Message. Message is at most 2 KiB, cut at a UTF-8 boundary. (Q0)
+type LogLine struct {
+	At      time.Time `json:"at,omitzero"` // zero when the line had no parseable timestamp
+	Level   string    `json:"level"`       // as logged: ERROR | WARN | INFO | …
+	Logger  string    `json:"logger,omitempty"`
+	Message string    `json:"message"`
+}
+
 // ---- Schema Registry (Confluent REST API) ----
 
 // SchemaRegistryReader is the read half of the Schema Registry client.

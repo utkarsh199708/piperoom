@@ -33,7 +33,7 @@ func TestSchemaRegistryURLOff(t *testing.T) {
 }
 
 func TestWatchDefaults(t *testing.T) {
-	for _, k := range []string{"PIPEROOM_WATCH_MODE", "PIPEROOM_WATCH_INTERVAL", "PIPEROOM_WATCH_CHECK_TIMEOUT", "PIPEROOM_WATCH_COOLDOWN"} {
+	for _, k := range []string{"PIPEROOM_WATCH_MODE", "PIPEROOM_WATCH_INTERVAL", "PIPEROOM_WATCH_CHECK_TIMEOUT", "PIPEROOM_WATCH_COOLDOWN", "PIPEROOM_WATCH_JOIN_MAX_AGE", "PIPEROOM_WATCH_ESCALATE_AFTER"} {
 		t.Setenv(k, "")
 	}
 	c := Load()
@@ -44,7 +44,8 @@ func TestWatchDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseWatch(defaults): %v", err)
 	}
-	want := Watch{Mode: WatchLog, Interval: time.Minute, CheckTimeout: 10 * time.Second, Cooldown: time.Hour}
+	want := Watch{Mode: WatchLog, Interval: time.Minute, CheckTimeout: 10 * time.Second, Cooldown: time.Hour,
+		JoinMaxAge: 2 * time.Hour, EscalateAfter: 10 * time.Minute}
 	if w != want {
 		t.Fatalf("ParseWatch(defaults) = %+v, want %+v", w, want)
 	}
@@ -56,6 +57,8 @@ func TestWatchEnvNames(t *testing.T) {
 	t.Setenv("PIPEROOM_WATCH_INTERVAL", "15s")
 	t.Setenv("PIPEROOM_WATCH_CHECK_TIMEOUT", "5s")
 	t.Setenv("PIPEROOM_WATCH_COOLDOWN", "2h")
+	t.Setenv("PIPEROOM_WATCH_JOIN_MAX_AGE", "30m")
+	t.Setenv("PIPEROOM_WATCH_ESCALATE_AFTER", "0")
 	c := Load()
 	if c.WatchMode != "rooms" || c.WatchInterval != "15s" || c.WatchCheckTimeout != "5s" || c.WatchCooldown != "2h" {
 		t.Fatalf("env not read: %+v", c)
@@ -64,7 +67,8 @@ func TestWatchEnvNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseWatch: %v", err)
 	}
-	want := Watch{Mode: WatchRooms, Interval: 15 * time.Second, CheckTimeout: 5 * time.Second, Cooldown: 2 * time.Hour}
+	want := Watch{Mode: WatchRooms, Interval: 15 * time.Second, CheckTimeout: 5 * time.Second, Cooldown: 2 * time.Hour,
+		JoinMaxAge: 30 * time.Minute}
 	if w != want {
 		t.Fatalf("ParseWatch = %+v, want %+v", w, want)
 	}

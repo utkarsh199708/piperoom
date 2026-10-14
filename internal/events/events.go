@@ -72,6 +72,23 @@ const (
 	// look (POST /api/rooms/{id}/nudge); at most one per proposal and layer
 	// per 10 minutes. The Slack mirror renders it as a thread reply. (F9)
 	ApprovalNudged Type = "approval.nudged"
+	// ProposalWithdrawn ends an open proposal without running it: the agent
+	// withdrew its own proposal (withdraw_proposal room tool), the driver
+	// withdrew it (POST /api/rooms/{id}/proposals/{pid}/withdraw), or the room
+	// closed while it was still open (system actor, reason
+	// ProposalWithdrawnRoomClosed, written right after room.closed). Only a
+	// proposal with no step claimed by the executor can be withdrawn. A
+	// withdrawn proposal takes no approval or rejection (409
+	// proposal_withdrawn) and leaves open_proposals. (Q0, QA G8/G9)
+	ProposalWithdrawn Type = "proposal.withdrawn"
+	// OwnerPaged records that the owners of one layer were asked to look at the
+	// room: by the agent (page_owner room tool), by a member (POST
+	// /api/rooms/{id}/page), or by the server itself when a watcher or alert
+	// room still has no driver PIPEROOM_PAGE_UNDRIVEN_AFTER after it opened
+	// (system actor, Auto). At most one per room and layer per 10 minutes. The
+	// web app shows it to the paged people; the notify webhook and the Slack
+	// bridge deliver it outside the app. (Q0, QA G2)
+	OwnerPaged Type = "owner.paged"
 
 	// HypothesisVerdict is a person's confirm or dispute of the agent's
 	// current hypothesis (POST /api/rooms/{id}/hypothesis). HypothesisSeq is
@@ -441,7 +458,15 @@ type CommentAddedPayload struct {
 	StepID        string `json:"step_id,omitempty"`
 	Text          string `json:"text"`
 	MentionsAgent bool   `json:"mentions_agent"`
+	// Kind is "" for a plain comment or CommentKindFixNote: a person logs what
+	// they did outside Piperoom ("restarted order-sync by hand"). The agent
+	// reads it as a comment; the post-mortem lists fix notes under "What was
+	// done" and treats the room as fixed by a person. (Q0, QA G10)
+	Kind string `json:"kind,omitempty"`
 }
+
+// CommentKindFixNote is CommentAddedPayload.Kind for a logged manual fix. (Q0)
+const CommentKindFixNote = "fix_note"
 
 // SteerSuggestedPayload is a non-driver's suggestion waiting for the driver.
 type SteerSuggestedPayload struct {
@@ -592,6 +617,54 @@ type ProposalCreatedPayload struct {
 	// ParamsHash is hex SHA-256 of the RFC 8785 (JCS) form of the frozen
 	// proposal (docs/design/auth.md §3.1). Empty on events written before auth PR 4.
 	ParamsHash string `json:"params_hash,omitempty"`
+	// ImpactedLayers are layers the fix does not write to but whose data it
+	// changes (a decimal precision change on the connector reaches the consumer
+	// and the warehouse). The proposer names them and an action may add more
+	// (actions.Impacting). The server keeps known layers only, drops the step
+	// layers, sorts them and adds them to RequiredLayers, so their owners must
+	// approve too; params_hash covers them through RequiredLayers. Omitted when
+	// empty. (Q0, QA G5)
+	ImpactedLayers []string `json:"impacted_layers,omitempty"`
+	// RiskLevel is "low" | "medium" | "high": the proposer's value, raised by the
+	// server to the highest actions.Impact level of the steps, never lowered;
+	// an unknown or empty proposer value counts as "medium". Derived from the
+	// hashed steps, so not hashed itself. Empty on events written before Q0. (Q0)
+	RiskLevel string `json:"risk_level,omitempty"`
+}
+
+// Risk levels of ProposalCreatedPayload.RiskLevel and actions.Impact. (Q0)
+const (
+	RiskLow    = "low"
+	RiskMedium = "medium"
+	RiskHigh   = "high"
+)
+
+// ProposalWithdrawnRoomClosed is the Reason of the system actor's withdrawal of
+// a proposal still open when its room closed. (Q0)
+const ProposalWithdrawnRoomClosed = "room closed"
+
+// ProposalWithdrawnPayload ends an open proposal without running it. Reason is
+// the withdrawer's one line (≤ 500 chars, sanitized like other agent text) or
+// ProposalWithdrawnRoomClosed. (Q0, QA G8/G9)
+type ProposalWithdrawnPayload struct {
+	ProposalID string `json:"proposal_id"`
+	Reason     string `json:"reason"`
+}
+
+// OwnerPagedPayload asks the owners of Layer to look at the room. Owners are
+// the user ids the server resolved for Layer from owners.yaml (approvers, then
+// backups), never chosen by the caller; [] when the layer has nobody, never
+// null. Reason is one line (≤ 300 chars, sanitized); agent text is untrusted
+// and clients render it as text. ProposalID names the proposal waiting on the
+// layer, when there is one. Auto is true when the server paged on its own (no
+// driver PIPEROOM_PAGE_UNDRIVEN_AFTER after a watcher or alert room opened).
+// (Q0, QA G2)
+type OwnerPagedPayload struct {
+	Layer      string   `json:"layer"`
+	Owners     []string `json:"owners"`
+	Reason     string   `json:"reason"`
+	ProposalID string   `json:"proposal_id,omitempty"`
+	Auto       bool     `json:"auto,omitempty"`
 }
 
 // Identity says who made a decision and how they logged in
@@ -693,7 +766,7 @@ type HandoffRequestedPayload struct {
 // Reasons in HandoffFailedPayload.Reason. Fixed codes, never error text: a
 // model or store error can quote room content.
 const (
-	HandoffFailedSummary   = "summary_failed" // the summary call failed or timed out
+	HandoffFailedSummary   = "summary_failed" // the summary call failed or timed out, or its summary stayed invalid after one repair (Q0: route 503 summary_failed, never 500)
 	HandoffFailedNotDriver = "not_driver"     // the requester stopped being the driver meanwhile
 	HandoffFailedClosed    = "room_closed"    // the room closed meanwhile
 	HandoffFailedInternal  = "internal_error" // anything else; details only in the server log
@@ -715,6 +788,10 @@ type HandoffCreatedPayload struct {
 	To            Actor          `json:"to"`
 	Summary       HandoffSummary `json:"summary"`
 	StayAsWatcher bool           `json:"stay_as_watcher"`
+	// Manual is true when the driver wrote Summary (POST
+	// /api/rooms/{id}/handoffs with a summary, typically after the agent's
+	// failed): no model call was made and Violations are not checked. (Q0, QA G4)
+	Manual bool `json:"manual,omitempty"`
 }
 
 // HandoffAcceptedPayload completes a hand-off.

@@ -38,6 +38,12 @@ type HumanInput struct {
 	// Approved is set only for Kind "approval_result": true for an approval,
 	// false for a rejection.
 	Approved *bool `json:"approved,omitempty"`
+	// NewIncident is set on an "alert_update" whose signals the room has not
+	// seen before: a different incident joined the room (QA G1). Unlike a
+	// "still firing" repeat it wakes an idle agent and resets the turn guard,
+	// like a steer; the runner tells the model a new signal arrived and that
+	// the earlier diagnosis may not cover it. Text is still untrusted. (Q0)
+	NewIncident bool `json:"new_incident,omitempty"`
 }
 
 // Inbox delivers human input to the agent between model turns.
@@ -59,6 +65,25 @@ type Proposals interface {
 	// Create validates every step and stores the proposal. It returns the
 	// proposal ID. It must not execute anything.
 	Create(ctx context.Context, p events.ProposalCreatedPayload) (string, error)
+}
+
+// ProposalWithdrawer is implemented by a Proposals that can withdraw an open
+// proposal of the room (the room service's adapter does; the CLI's need not).
+// It writes proposal.withdrawn with the agent actor. The runner offers the
+// withdraw_proposal tool only when deps.Proposals implements it, and only for
+// proposals this room's agent made. Errors are safe to show the model (not
+// found, already approved or executing, room closed). (Q0, QA G9)
+type ProposalWithdrawer interface {
+	Withdraw(ctx context.Context, proposalID, reason string) error
+}
+
+// Pager asks the owners of a layer to look at the room: it writes owner.paged
+// with the agent actor and returns the user ids paged ([] when the layer has
+// no owner). proposalID may be empty. Errors are safe to show the model
+// (unknown layer, paged within the last 10 minutes, room closed). The runner
+// offers the page_owner tool only when deps.Pager is set. (Q0, QA G2)
+type Pager interface {
+	Page(ctx context.Context, layer, reason, proposalID string) ([]string, error)
 }
 
 // Alert is what starts an investigation.
@@ -109,7 +134,9 @@ type Deps struct {
 	Inbox     Inbox
 	Sink      Sink
 	Proposals Proposals
-	Logger    *slog.Logger
+	// Pager, when set, gives the agent the page_owner tool (Q0). Nil = no tool.
+	Pager  Pager
+	Logger *slog.Logger
 	// Usage, when set, is called exactly once when Run ends, however it ends
 	// (nil, error or panic), with the model tokens the room has used in this
 	// process (input + output, cache included; the count behind

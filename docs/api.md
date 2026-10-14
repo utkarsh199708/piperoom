@@ -126,11 +126,11 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 | 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`; F8: `POST /api/rooms/{id}/label` without being a member of its pipeline), `not_provisioned` (login gate) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB) |
-| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room |
+| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; Q0: `proposal_withdrawn` (approve, reject or withdraw of a withdrawn proposal), `proposal_running` (withdraw after the executor claimed a step), `already_paged` (a second page of the same layer within 10 minutes; the message says how long ago) |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list). R4: a browser `GET` outside `/api` and `/auth` that sends `Accept: text/html` gets a short HTML page instead (what happened and which of `PIPEROOM_PUBLIC_URL` / `PIPEROOM_ALLOWED_HOSTS` to set; the Host is HTML-escaped and clipped to 100 bytes; its own CSP `default-src 'none'`, no script). Every other request gets the JSON body, whose message never echoes the Host |
 | 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client); R4: `too_many_connections` (WebSocket, before the upgrade; see WebSocket) |
 | 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}?archive=true` could not write the archive, so nothing was deleted) |
-| 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working) |
+| 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working); Q0: `summary_failed` (the agent could not write a hand-off summary, even after one repair; the message tells the driver to retry or send `summary` themselves) |
 
 Text a person types (titles, comments, steers, resolutions, trace keys, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD).
 
@@ -218,6 +218,32 @@ never as HTML or Markdown.
   `checklist.step_done {step_id, tool_use_id, hit, item, done, note?}` (a person ticked or unticked item `item` of
   `hits[hit].items` in the `runbook_lookup` result `tool_use_id`).
 
+### Q-wave events (Q0, QA run 2026-10-15; payloads in `internal/events/events.go`)
+
+Additive like the F-wave events: unknown types are ignored, new fields are omitted when empty.
+
+- **Withdrawals (QA G8/G9).** `proposal.withdrawn {proposal_id, reason}`: by the agent (its `withdraw_proposal`
+  tool, its own proposals only), the driver (route below), or the system actor right after `room.closed` with
+  `reason: "room closed"` for every proposal still open. Only a proposal no executor step has claimed can be
+  withdrawn. Approve, reject or withdraw of a withdrawn proposal answers `409 proposal_withdrawn`.
+- **Pages (QA G2).** `owner.paged {layer, owners, reason, proposal_id?, auto?}`: by the agent (`page_owner` tool),
+  a member (route below), or the system actor (`auto: true`, no driver `PIPEROOM_PAGE_UNDRIVEN_AFTER` after a
+  watcher or alert room opened). One per room and layer per 10 minutes. When `PIPEROOM_NOTIFY_WEBHOOK_URL` is set
+  the server POSTs, after the event is written, with a 5 s timeout and one retry on a 5xx or network error:
+  ```json
+  { "type": "owner.paged", "room_id": "r_…", "room_title": "…", "room_url": "https://…/rooms/r_…",
+    "pipeline_id": "orders", "layer": "consumer", "owners": [ { "id": "kabir", "name": "Kabir", "email": "…" } ],
+    "reason": "…", "proposal_id": "", "auto": false, "at": "…", "seq": 42 }
+  ```
+  with `X-Piperoom-Signature: sha256=<hex HMAC-SHA256 of the body with PIPEROOM_NOTIFY_WEBHOOK_SECRET>` when the
+  secret is set, `X-Piperoom-Event: owner.paged`, `Content-Type: application/json`. `room_url` is
+  `PIPEROOM_PUBLIC_URL` + `/rooms/{id}`, absent when that is unset; `email` only when users.yaml or the IdP has
+  one. A failed delivery is logged (status code only, never the body or secret) and never fails the page.
+- **Impact on proposals (QA G5).** `proposal.created` gains `impacted_layers` and `risk_level` (see
+  `ProposalCreatedPayload`). The agent's `propose_fix` takes `impacted_layers` and `risk_level`.
+- **Manual hand-off (QA G4).** `handoff.created` gains `manual: true` when the driver wrote the summary.
+- **Fix notes (QA G10).** `comment.added` gains `kind: "fix_note"`.
+
 ### Usage
 The totals and per-model rows of `GET /api/rooms/{id}/usage` and `GET /api/usage` (finished calls only):
 ```json
@@ -249,8 +275,9 @@ trace or activity feed** — to render a room, the client replays the full event
   "members": [ { "id": "priya", "name": "Priya", "verified": true, "role": "watching" } ]
 }
 ```
-`closed_at` and `resolution` are set by `room.closed`. `required_layers` is always the set of the steps' layers
-(the server derives it; the proposer cannot choose it).
+`closed_at` and `resolution` are set by `room.closed`. `required_layers` is the set of the steps' layers plus the
+proposal's `impacted_layers` (Q0): the server derives both; the proposer can add impacted layers, never remove a
+step layer.
 #### F-wave snapshot fields (F0; implemented by A5 in `internal/room/snapshot.go`)
 
 Additive: each field is absent until the task that implements it lands, and clients must treat an absent field
@@ -288,6 +315,24 @@ as its empty value. The shapes are fixed here.
   read + output; `cost_usd` is `null` while no call is priced and a lower bound when `unpriced_calls > 0` (the
   `Usage` rule); zeros in a shadow room. `GET /api/rooms` rows carry it.
 - `open_proposals[].preview` (F4, implemented by A5): the `proposal.previewed` payload of that proposal.
+
+#### Q-wave snapshot fields (Q0, QA run 2026-10-15)
+```json
+  "open_proposals": [ { "...": "...", "impacted_layers": ["consumer","warehouse"], "risk_level": "high",
+                        "impact_reasons": ["decimal.handling.mode=double turns NUMERIC columns into doubles: …"] } ],
+  "pages": [ { "layer": "consumer", "owners": ["kabir"], "reason": "...", "proposal_id": "",
+               "by": { "kind": "agent", "id": "agent", "name": "Agent" }, "auto": false, "at": "..." } ],
+  "title_flags": ["instruction_override"]
+```
+- `open_proposals[]` (Q0): a withdrawn proposal (`proposal.withdrawn`) leaves the list, as an executed one does; a
+  closed room has none (the close withdraws them). `impacted_layers`, `risk_level` are copied from
+  `proposal.created`; `impact_reasons` are the `actions.Impact` reasons of its steps (server-derived, not in the
+  event; `[]` when none).
+- `pages` (Q0): open rooms only, the newest `owner.paged` per layer, in seq order; `[]` on closed rooms. `GET
+  /api/rooms` rows carry it, so the room list socket tells a client that its user was paged: the web app shows a
+  banner (and a browser notification when allowed) when the user's id is in `owners` of a page newer than they saw.
+- `title_flags` (Q0): `injectscan.Kinds` of the room title, `[]` when clean. A flagged title is still shown, as
+  text, with a "suspicious alert text" chip; the agent already treats it as untrusted data.
 
 IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_` proposal, `h_` hand-off, `hr_` hand-off request (R0).
 
@@ -361,13 +406,15 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert (label, `PAGERDUTY_SERVICES` map, owners match, or `DEFAULT_ALERT_PIPELINE`); the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name), `dedup_key`, and `alert_verified: true` with `alert_verified_by` (see Event under Objects; R3 #135, A5 implements). With a `tenants:` block in `owners.yaml` the `200`/`201` body is `{"room_id": "r_…", "created": true\|false}` instead of the `RoomSnapshot`: a source secret is shared by every tenant, so the reply carries no room content. |
 | GET | `/api/rooms/{id}` | – | `RoomSnapshot` | |
 | GET | `/api/rooms/{id}/events?after=0&limit=500` | – | `{events:[Event], last_seq}` | limit max 1000; `events` is `[]` when nothing is after `after` |
-| POST | `/api/rooms/{id}/comments` | `{step_id?, text}` | `Event` | `@agent` in text sets `mentions_agent`. R4: `text` at most 4000 characters (code points), else `400 validation` |
+| POST | `/api/rooms/{id}/comments` | `{step_id?, text, kind?}` | `Event` | `@agent` in text sets `mentions_agent`. R4: `text` at most 4000 characters (code points), else `400 validation`. Q0 (QA G10): `kind` is absent/`""` or `"fix_note"` (a person logs what they did outside Piperoom; the post-mortem lists it under "What was done"); any other value `400 validation`. A fix note may be added to an open room, or to a closed one by its closer or a member of its pipeline (the label rule) for 24 h after the close |
 | POST | `/api/rooms/{id}/steer` | `{text}` | `Event` | driver → `steer.sent`; others (also when no one drives or the lease expired) → `steer.suggested`, kept for the next driver (F5, implemented by A5; existing behaviour: a suggestion stays in `pending_suggestions` across `control.granted` and never wakes the agent; viewers `403 viewer`, closed rooms `409 room_closed`). R4: `text` at most 4000 characters (code points), else `400 validation` |
 | POST | `/api/rooms/{id}/suggestions/{sid}/send` | – | `Event` | driver only; emits `steer.sent` with `suggestion_id` |
 | POST | `/api/rooms/{id}/suggestions/{sid}/decline` | `{reason?}` | `Event` (`steer.declined`) | R0; server R11. Driver only (`403 not_driver`); open rooms only (`409 room_closed`); unknown `sid`, or one of another room, `404 not_found`; a suggestion that is no longer pending (sent or declined) `409 already_decided`, the same answer as a second `send`, so a retry after a lost response is safe to treat as done. `reason` optional, at most 500 characters, typed-text rule above (else `400 validation`). The suggestion leaves `pending_suggestions`; the agent never sees it |
 | POST | `/api/rooms/{id}/control/request` | – | `Event` | |
 | POST | `/api/rooms/{id}/control/grant` | `{to}` | `Event` | driver only, or anyone if no driver / lease expired |
-| POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only; a shadow room refuses an empty resolution with `400 validation`. A full room log never refuses `room.closed` |
+| POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver, or (Q0, QA G16) an approver or backup of any layer of the room's pipeline (owners.yaml; in dev mode also a `users.yaml` user whose `layers:` grant one; the solo user); anyone else `403 not_driver`; a shadow room refuses an empty resolution with `400 validation`. A full room log never refuses `room.closed`. Q0: after `room.closed` the system actor writes `proposal.withdrawn {reason: "room closed"}` for every proposal still open |
+| POST | `/api/rooms/{id}/proposals/{pid}/withdraw` | `{reason?}` | `Event` (`proposal.withdrawn`) | Q0 (QA G9). Driver only (`403 not_driver`); open rooms (`409 room_closed`); `pid` must be a proposal of this room (`404 not_found`); a withdrawn one `409 proposal_withdrawn`; one with a step claimed by the executor, or fully approved, `409 proposal_running`. `reason` ≤ 500 characters, typed-text rule. The agent reads it as an `approval_result` with `approved: false` and the reason "withdrawn" |
+| POST | `/api/rooms/{id}/page` | `{layer, reason, proposal_id?}` | `Event` (`owner.paged`) | Q0 (QA G2). Any member (viewers `403 viewer`); open rooms (`409 room_closed`); `layer` one of the six layers (`400 validation`); `reason` 1–300 characters, typed-text rule; `proposal_id`, when given, an open proposal of the room; one page per room and layer per 10 minutes (`409 already_paged`). `owners` are resolved by the server. Delivered in-app (snapshot `pages`), to `PIPEROOM_NOTIFY_WEBHOOK_URL`, and by the Slack bridge when it is on. Renews the driver lease only when the caller is the driver |
 | POST | `/api/rooms/{id}/hypothesis` | `{verdict: "confirmed"\|"disputed", note?}` | `Event` (`hypothesis.verdict`) | F9 (server F9b, implemented by A5; web F9c, A6). Any member (viewers `403 viewer`); open rooms only (`409 room_closed`); a shadow room `409 room_open`; no hypothesis yet `409 no_hypothesis`; the same person repeating the same verdict on the same hypothesis `409 already_decided`; `note` ≤ 500 characters, typed-text rule. The event carries `hypothesis_seq`; a new `agent.hypothesis` clears every verdict. The agent receives it as a comment and wakes. Renews the driver lease only when the caller is the driver |
 | POST | `/api/rooms/{id}/nudge` | `{proposal_id, layer}` | `Event` (`approval.nudged`) | F9 (implemented by A5). Any member (viewers `403 viewer`); open rooms (`409 room_closed`); the proposal must be open and `layer` pending on it (`409 already_decided`); one per proposal and layer per 10 minutes (`409 already_nudged`). Mirrored to the Slack thread when the bridge is on (C12 follow-up) |
 | POST | `/api/rooms/{id}/label` | `{actual_layer?, cause, fix_that_worked?, fix_proposal_id?, agent_helped?}` | `Event` (`room.labelled`) | F8 (implemented by A5). Closed rooms only (`409 room_open`); caller = member of the room's pipeline (the `shadow/blind` rule), else `403 not_allowed`; viewers `403 viewer`; `actual_layer` one of the six layers or absent; `cause` 1–500 characters, `fix_that_worked` ≤ 500, typed-text rule; `fix_proposal_id` must be a proposal of this room with an executed step (`400 validation`); re-label allowed, last wins. A shadow room still needs `shadow/blind` first (`409 not_labelled`) so the blind label stays blind. The event carries `identity` like `shadow.labelled` |
@@ -378,7 +425,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step (`{proposal_id, step_index, ok, output, params_hash, outcome_unknown?}`; `outcome_unknown: true` with `ok: false` when the server running the step stopped before it recorded the result: the step is never run again, check the target before retrying). After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode); `identity.email` is the session's verified IdP email, else the `users.yaml` `email:` (omitted when neither exists), so a decision is tied to the actor id and a mailbox, never to the name alone. `approval.rejected`, `shadow.labelled` and `shadow.graded` carry the same `identity.email` |
 | POST | `/api/proposals/{pid}/reject` | `{layer, reason}`; after auth PR 4 `{layer, reason, params_hash}` | `Event` | same hash rule as approve |
 | GET | `/api/rooms/{id}/export` | – | the room as one JSON document | header `X-Piperoom-Export-SHA256` = SHA-256 of the RFC 8785 (JCS) form without the top-level `integrity` member. Today any user may export. After auth PR 4: only an approver or backup for any layer of the room's pipeline (in dev mode: `users.yaml` `layers`) or an `auditors:` principal; the driver is not on the list; others → `403 not_allowed`. Proposals, approvals and action results then carry `params_hash`, and approvals also `identity`. `?include=shadow` (closed rooms only, else `409 room_open`; `409 not_labelled` before the blind label) adds a top-level `"shadow": {run, events}` member (with `data`) after `"schema"`; it is inside the hashed document, so the hash differs from the plain export. Same access rule |
-| POST | `/api/rooms/{id}/handoffs` | `{to, stay_as_watcher}` | `Event` | driver only; server asks the agent for the summary (can take up to 3 min; this route is exempt from the 60 s request timeout). R0 (server R4): after its checks the server appends `handoff.requested` (see Hand-off requests below) and answers with the final `handoff.created`. While a request of the room is in flight, every further POST answers `409 handoff_in_progress`, from the driver or anyone else, before any other check but visibility. A request that ends without a hand-off appends `handoff.failed` and answers the matching error (`403 not_driver`, `409 room_closed`, else `500 internal_error`) |
+| POST | `/api/rooms/{id}/handoffs` | `{to, stay_as_watcher}` | `Event` | driver only; server asks the agent for the summary (can take up to 3 min; this route is exempt from the 60 s request timeout). R0 (server R4): after its checks the server appends `handoff.requested` (see Hand-off requests below) and answers with the final `handoff.created`. While a request of the room is in flight, every further POST answers `409 handoff_in_progress`, from the driver or anyone else, before any other check but visibility. A request that ends without a hand-off appends `handoff.failed` and answers the matching error (`403 not_driver`, `409 room_closed`, Q0: `503 summary_failed` for `summary_failed`, else `500 internal_error`). Q0 (QA G4): the body may carry `summary: {what_broke, why, done?, ruled_out?, open?, risks?}` written by the driver (`what_broke` and `why` 1–1000 characters, list items ≤ 500, at most 20 per list, typed-text rule, else `400 validation`): no model call is made and `handoff.created` has `manual: true`. The agent's summary is validated and repaired by one more model call when a required field is missing |
 | POST | `/api/handoffs/{hid}/accept` | – | `Event` | only the `to` user; moves driver role |
 | GET | `/api/pipelines` | – | `[{id, title, shadow}]` | R0; server R4, web R3. The pipelines this server knows: every pipeline of `owners.yaml`, in file order (with a `tenants:` block, only those of the caller's tenants; the solo user sees all). `title` is the pipeline's `title:` (`""` when unset); `shadow` is `true` when its `shadow:` block is enabled (rooms from alerts open as shadow rooms). Any logged-in user, viewers included. No other field (connections, owners, watch settings) is returned. `[]` when there are none: clients must not fall back to a made-up pipeline id such as `orders`; the new-room form then has no pipeline to offer |
 | GET | `/api/pipelines/{pid}/topology` | – | `Topology` | unknown pipeline → `404 not_found` |
@@ -449,6 +496,17 @@ closes; `--demo` forces it off.
   the watcher started never fire. A pipeline with no DLQ topics costs the watcher no Kafka call.
 - **After a restart** the watcher joins a room that is still open but does not wake the agent. A room closed
   less than `PIPEROOM_WATCH_COOLDOWN` ago (default 60 min) is not re-opened by the same incident.
+- **Incidents, not pipelines (Q0, QA G1; implemented by A7 and A5).** An *incident* is the set of signals a
+  watcher room carried. The cooldown and the close-while-firing ack apply to that set only: a signal outside it
+  opens a room (or joins an open one) at once, and the join tells the agent (`HumanInput.new_incident`, which wakes
+  an idle agent and restarts a stopped run after a server restart). A signal that is still firing
+  `PIPEROOM_WATCH_ESCALATE_AFTER` (default 10 min, `0` = never) after its room closed re-opens a room once, whatever
+  the cooldown or ack, with a note that it kept firing after the close. The watcher joins an open room only when its
+  newest event is younger than `PIPEROOM_WATCH_JOIN_MAX_AGE` (default 2 h) and it was opened by an alert or the
+  watcher, or by a person less than that long ago; otherwise it opens its own room. A watcher or alert room still
+  without a driver `PIPEROOM_PAGE_UNDRIVEN_AFTER` (default 5 min) after it opened pages the owners of the
+  suspected layer (the first signal's layer, else the triage pass's `suspected_layer`), once (`owner.paged`,
+  `auto: true`).
 - Modes: `PIPEROOM_WATCH_MODE` = `off`, `log` (default: log transitions, open nothing) or `rooms`. F6 plans `rooms` as
   the default; until F6d lands the default stays `log`. The watcher keeps at most `PIPEROOM_WATCH_MAX_OPEN_ROOMS`
   rooms open at once (default 6; F6, implemented by A7), independent of `PIPEROOM_MAX_AGENTS`.

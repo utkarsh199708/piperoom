@@ -58,6 +58,26 @@ type Preview interface {
 	Preview(ctx context.Context, params json.RawMessage) (PreviewResult, error)
 }
 
+// Impact is what a step changes beyond its own layer, for approvers. (Q0, QA G5)
+type Impact struct {
+	// Layers are the other layers whose data the step changes (events.Layers
+	// names), e.g. consumer and warehouse for a value-schema change.
+	Layers []string
+	// RiskLevel is events.RiskLow, RiskMedium or RiskHigh; "" = no opinion.
+	RiskLevel string
+	// Reason is one sentence for approvers, e.g. "decimal.handling.mode=double
+	// turns NUMERIC columns into doubles: money values can lose precision".
+	Reason string
+}
+
+// Impacting is implemented by an action whose effect can reach past its own
+// layer. The room service calls Impact at proposal creation, after Validate,
+// unions Layers into the proposal's ImpactedLayers and raises its RiskLevel.
+// Impact must not do I/O: decide from params alone. (Q0, QA G5)
+type Impacting interface {
+	Impact(params json.RawMessage) Impact
+}
+
 // PreviewResult and DryRunResult are the event types, so one definition serves
 // the action, the room log and the API.
 type (
