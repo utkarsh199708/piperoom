@@ -176,7 +176,7 @@ export function RoomScreen() {
   const showProposals = state.proposals.length > 0 || user.solo === true
 
   return (
-    <div className="flex min-h-[calc(100dvh-3rem)] flex-col text-sm">
+    <div className="flex min-h-full flex-col text-sm">
       {stale && <StaleBanner onReload={reload} onDismiss={dismissStale} />}
       {error && (
         <div
