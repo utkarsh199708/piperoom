@@ -1,8 +1,16 @@
 # Design: secret managers (rev 1)
 
+**Status (2026-10-14):** S1–S3 built in `internal/secrets` (parser, registry with cache and shared fetch, lease
+renewer, auth-failure retry helper; files, env, Vault/OpenBao, Kubernetes, AWS Secrets Manager, SSM) and
+`internal/secrets/{azure,gcp}`. The six tier-1 cards with setup scripts are in `internal/integrations/secretkinds`,
+and `secret://` in environment variables is resolved at start. Not built: S4 (rotation without a restart is not wired:
+`OnChange` and `RetryAfterAuthFailure` are unused by the clients), the §9 canary test over every agent tool, a
+mounted-files card, Vault AWS/Azure/GCP auth, hosted cross-account access, Link, and tier 2 (S6). See
+`tasks/I-integrations.md`.
+
 Part of the integrations work: `docs/design/integrations.md` (server) and `docs/design/integrations-ux.md`
 (product). Product decision (2026-10-14): Piperoom must work with **every** secret manager an enterprise uses, in
-both deployment shapes (in the customer's network and hosted). Nothing here is built. Every library call is marked
+both deployment shapes (in the customer's network and hosted). The text below is the original design. Every library call is marked
 **verify with `go doc`** until checked (AGENTS.md §4 rule 9).
 
 ## 1. Goal
@@ -26,7 +34,7 @@ New package `internal/secrets` (owner: the `internal/integrations` owner, §8).
 ```go
 // Ref names one secret value in one provider. It is stored; the value never is.
 type Ref struct {
-	Provider string // integration id of a secret_manager row, e.g. "int_aws_sm_prod"
+	Provider string // the secret_manager row's `name` field (unique per workspace), "files", or a PIPEROOM_SECRET_PROVIDERS id
 	Path     string // provider-native name: ARN, Vault path, Key Vault secret name, ...
 	Key      string // optional: one field of a JSON or key/value secret
 	Version  string // optional: pin a version; empty = latest
@@ -37,11 +45,14 @@ type Value struct {
 	Data      netsec.Secret
 	Version   string
 	ExpiresAt time.Time // zero = no lease; Vault dynamic credentials set it
+	LeaseID   string    // Vault lease, for renewal
+	Renewable bool
 }
 
 // Provider reads secrets from one manager. Every method takes a context with a deadline.
 type Provider interface {
-	// Resolve returns the current value of ref.
+	// Resolve returns the whole secret at ref.Path and ignores ref.Key; the
+	// Registry applies the key (ExtractKey), so one read serves several keys.
 	Resolve(ctx context.Context, ref Ref) (Value, error)
 	// List returns secret NAMES under prefix for the picker, at most limit. Never values.
 	// Providers that cannot list return ErrListUnsupported; the UI then shows a text field.
@@ -49,7 +60,7 @@ type Provider interface {
 	// Keys returns the field names of a JSON or key/value secret, for the key picker. Never values.
 	Keys(ctx context.Context, ref Ref) ([]string, error)
 	// Check runs the card's connection test (§5).
-	Check(ctx context.Context, sample *Ref) []integrations.Check
+	Check(ctx context.Context, sample *Ref) []spec.Check
 	// Close releases clients and stops lease renewal.
 	Close()
 }

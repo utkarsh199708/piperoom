@@ -1,7 +1,13 @@
 # Design: plug-and-play integrations (rev 1, draft for the leads)
 
+**Status (2026-10-14):** PRs 1, 3, 4 and 5 are built: `internal/integrations` (sealing, host guard, catalog, the
+phase-1 kinds, service), `wiring.Live`, the migration and stores, `/api/integrations/*`, setup mode in `cmd/server`
+and the web Integrations page. Not built: PR 2 (pasted CA for Postgres and the warehouse), PRs 6–8 (Slack OAuth, AWS
+role, pipelines in the UI). Known gaps: a saved Anthropic key and a saved Slack row are not used by the running
+server, a rotated alert secret needs a restart, and owners.yaml `admins:` is not read. See `tasks/I-integrations.md`.
+
 Base: `main` at the head of branch `claude/gifted-planck-gb2o6c`. File and line references were read from that tree.
-Nothing here is built yet. Every library call named below is marked **verify with `go doc`** where it was not checked
+The text below is the original design. Every library call named below is marked **verify with `go doc`** where it was not checked
 (AGENTS.md §4 rule 9).
 
 ## 1. Problem
@@ -333,7 +339,9 @@ There is no admin role today. The roles are viewer, member and auditor (`docs/de
 | Secret leak through the API | write-only fields; one response encoder strips secrets; test over every route (§5) |
 | Secret leak through logs | values held as `netsec.Secret` from parse to use (`internal/clients/netsec/netsec.go:34-50`); checks report field names only |
 | Secret at rest | AES-256-GCM, key outside the database, row-bound additional data (§4.3) |
-| SSRF through **Test** (the server dials any host a user types) | admin only; per-check deadlines; at most 10 tests a minute per admin; response bodies are never echoed, only status codes and short errors; optional `PIPEROOM_INTEGRATION_ALLOWED_HOSTS` (CIDR or host list) for strict installs; link-local `169.254.0.0/16` and `fd00:ec2::254` are blocked always (cloud metadata) |
+| SSRF through **Test** (the server dials any host a user types) | admin only; per-check deadlines; at most 10 tests a minute per admin; response bodies are never echoed, only status codes and short errors; optional `PIPEROOM_INTEGRATION_ALLOWED_HOSTS` (CIDR or host list) for strict installs; cloud metadata is blocked always: `169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, `fd20:ce::254`, `100.100.100.200`, and those IPv4 addresses inside NAT64 (`64:ff9b::/96`) or IPv4-compatible (`::a.b.c.d`) forms. Loopback is **allowed** while the allow list is empty (dev stacks run on localhost); strict installs set the allow list, which then also governs loopback |
+| A stored secret sent to a new host | a saved typed-in secret is reused on **Test** or **Update** only while every field that picks the destination (url, host, port, brokers, bootstrap, account, address, region, TLS/SSL mode, SASL mechanism, ...) is unchanged; after such a change the API answers 400 `validation` "`<field>` must be entered again", and the form asks for it. A secret manager's `name` (its provider id) cannot be changed after create |
+| Page references reaching the server's own secrets | a page row may name any secret Piperoom's identity can read; the references the server's own secret variables use (`PIPEROOM_SECRET_KEY`, `PIPEROOM_DB_URL`, ...) are refused for page rows, and the `env:` provider never reads Piperoom's own secret variables whatever its prefix. Operators should still give the integrations their own secrets and paths, and set `PIPEROOM_INTEGRATION_ALLOWED_HOSTS` on strict installs |
 | Changing a credential mid-incident | the swap posts a system message in open rooms; in-flight calls finish on the old client; the audit row names the actor |
 | A role that can write slips through | the read-only checks fail the save for sources and warehouses (§4.2); a person can override them only with `enabled_write_layers`, which is a separate, audited toggle per layer |
 | Stolen database dump | secrets cannot be opened without `PIPEROOM_SECRET_KEY` |

@@ -1,5 +1,12 @@
 # Integrations UX for enterprise customers (rev 1)
 
+**Status (2026-10-14):** phase 1 is mostly built: the setup checklist, the catalog, the connect drawer with live
+checks, fix text and setup scripts, the *Verified read-only* badge (a client-side rule), alert snippets, and the
+secret field toggle with name and key pickers. Tier-1 secret manager cards (phase 2 in §8) are built early. Not
+built: the sample room and test alert (§3.8), live use of a saved Anthropic key or Slack row, and all of phase 2
+except the secret managers: hand-off, stack tiles, pipelines, the health page, hosted workspaces, Link. See
+`tasks/I-integrations.md`.
+
 Companion to `docs/design/integrations.md`, which covers the server side: kinds, storage, the no-restart swap and
 the API. This doc covers the product: who sets Piperoom up at an enterprise, where it hurts today, and the screens
 and rules that take the pain away. Screen mockups: https://claude.ai/artifact/2FMVtuQEuNoSzozFFfmgNi (private until shared).

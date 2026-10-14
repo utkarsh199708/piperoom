@@ -68,6 +68,14 @@ Each agent owns folders. **Never edit a file you do not own.**
 | C12 (cloud) | `tasks/C12-slack-bridge.md` | `internal/slackbridge/**` |
 | C13 (cloud) | `tasks/C13-prompt-audit.md` | `docs/audits/**` — delivered as PR #12 |
 | C14 (cloud) | `tasks/C14-pilot-onboarding.md` | `docs/pilot/**` (no code changes) |
+| I1 | `docs/design/secret-providers.md` | `internal/secrets/**` (secret managers: `secret://` refs, providers, cache, leases) |
+| I2 | `docs/design/integrations.md` | `internal/integrations/**` except `internal/integrations/spec/**` (a contract file) |
+
+Integrations team note (2026-10-14): for the integrations feature this team also built, on behalf of the owners,
+`internal/wiring/live*.go` (for A4), the integrations migration, `internal/store` integrations files and
+`internal/httpapi` integrations routes, `internal/room/integrations.go` and `cmd/server/integrations.go` (for A5), and the web Settings → Integrations screens (for A6). Follow-ups
+in those files go back to A4, A5 and A6.
+Remaining work: `tasks/I-integrations.md`.
 
 Cloud sessions started from claude.ai/code are bound to their own `claude/...` branch; that is accepted. Their PR
 title starts with `[C<N>]`.
@@ -84,6 +92,8 @@ title starts with `[C<N>]`.
 - `internal/topology/graph.go` — `Graph`, `Node`, `Edge`, `Builder`
 - `internal/config/config.go` — environment variables
 - `docs/api.md` — HTTP + WebSocket API
+- `internal/integrations/spec/**` — integrations contract: `Kind`, `Field`, `Check`, `Values`, `Resolver`,
+  `Integration`, `AuditEntry`, `Store`, `Service`, `Applier`, `Notifier`
 
 If a contract is wrong or missing something, **do not work around it silently**. Write a
 `## Contract change request` section in your PR: what, why, exact proposed code. Keep working

@@ -27,10 +27,12 @@ type Config struct {
 
 	// Kafka connection security (internal/clients/netsec). Empty = PLAINTEXT, no login (dev stack).
 	// Passwords are secrets: never log them; wiring wraps them in netsec.Secret.
+	// Database URLs (PIPEROOM_DB_URL, SOURCE_DB_URL, WAREHOUSE_DB_URL) carry a
+	// password and are treated as secrets too.
 	KafkaSecurityProtocol string // KAFKA_SECURITY_PROTOCOL: PLAINTEXT | SSL | SASL_PLAINTEXT | SASL_SSL
 	KafkaSASLMechanism    string // KAFKA_SASL_MECHANISM: PLAIN | SCRAM-SHA-256 | SCRAM-SHA-512
 	KafkaSASLUsername     string // KAFKA_SASL_USERNAME
-	KafkaSASLPassword     string // KAFKA_SASL_PASSWORD (secret)
+	KafkaSASLPassword     string // KAFKA_SASL_PASSWORD (secret; may be a secret:// reference)
 	KafkaTLSCAFile        string // KAFKA_TLS_CA_FILE (PEM; empty = system roots)
 	KafkaTLSCertFile      string // KAFKA_TLS_CERT_FILE (PEM client cert, mutual TLS)
 	KafkaTLSKeyFile       string // KAFKA_TLS_KEY_FILE
@@ -38,20 +40,20 @@ type Config struct {
 
 	// Schema Registry login. TLS is on when SCHEMA_REGISTRY_URL is https.
 	SchemaRegistryUsername    string // SCHEMA_REGISTRY_USERNAME (Confluent Cloud: API key)
-	SchemaRegistryPassword    string // SCHEMA_REGISTRY_PASSWORD (Confluent Cloud: API secret; secret)
+	SchemaRegistryPassword    string // SCHEMA_REGISTRY_PASSWORD (Confluent Cloud: API secret; secret; may be a secret:// reference)
 	SchemaRegistryTLSCAFile   string // SCHEMA_REGISTRY_TLS_CA_FILE
 	SchemaRegistryTLSCertFile string // SCHEMA_REGISTRY_TLS_CERT_FILE
 	SchemaRegistryTLSKeyFile  string // SCHEMA_REGISTRY_TLS_KEY_FILE
 
 	// Kafka Connect login. TLS is on when CONNECT_URL is https.
 	ConnectUsername    string // CONNECT_USERNAME
-	ConnectPassword    string // CONNECT_PASSWORD (secret)
+	ConnectPassword    string // CONNECT_PASSWORD (secret; may be a secret:// reference)
 	ConnectTLSCAFile   string // CONNECT_TLS_CA_FILE
 	ConnectTLSCertFile string // CONNECT_TLS_CERT_FILE
 	ConnectTLSKeyFile  string // CONNECT_TLS_KEY_FILE
 
 	// Slack mirror of rooms. Off unless both token and channel are set.
-	SlackBotToken  string // SLACK_BOT_TOKEN (secret)
+	SlackBotToken  string // SLACK_BOT_TOKEN (secret; may be a secret:// reference)
 	SlackChannelID string // SLACK_CHANNEL_ID
 	PublicURL      string // PIPEROOM_PUBLIC_URL: base URL for Slack room links, the WS origin, and (auth) the OIDC redirect URI and Host allow-list
 
@@ -60,7 +62,8 @@ type Config struct {
 	WarehouseKind string // WAREHOUSE_KIND: postgres | snowflake
 
 	// Signed alert sources (internal/alertin). A source with an empty secret is
-	// disabled: its route answers 401. All secrets; never log them.
+	// disabled: its route answers 401. All secrets; never log them. Each may be
+	// a secret:// reference.
 	AlertmanagerToken    string // ALERTMANAGER_TOKEN
 	GrafanaAlertSecret   string // GRAFANA_ALERT_SECRET
 	PagerDutyAlertSecret string // PAGERDUTY_ALERT_SECRET
@@ -111,7 +114,7 @@ type Config struct {
 	TrustedProxies      string // PIPEROOM_TRUSTED_PROXIES: comma list of CIDRs; X-Forwarded-For read only from these (oidc mode only)
 	OIDCIssuer          string // PIPEROOM_OIDC_ISSUER
 	OIDCClientID        string // PIPEROOM_OIDC_CLIENT_ID
-	OIDCClientSecret    string // PIPEROOM_OIDC_CLIENT_SECRET (secret, never logged)
+	OIDCClientSecret    string // PIPEROOM_OIDC_CLIENT_SECRET (secret, never logged; may be a secret:// reference)
 	OIDCPublicClient    string // PIPEROOM_OIDC_PUBLIC_CLIENT: "1" allows an empty secret (PKCE only)
 	OIDCScopes          string // PIPEROOM_OIDC_SCOPES (space separated)
 	OIDCGroupsClaim     string // PIPEROOM_OIDC_GROUPS_CLAIM: "" = no group rights
@@ -127,6 +130,39 @@ type Config struct {
 	ShadowGrace       string // PIPEROOM_SHADOW_GRACE: Go duration the run may keep going after close; default 0 = cancel at close
 	ShadowTokenBudget string // PIPEROOM_SHADOW_TOKEN_BUDGET: tokens per shadow room; default 500000; "0" = use PIPEROOM_ROOM_TOKEN_BUDGET (there is no uncapped shadow run)
 	ShadowMaxTurns    string // PIPEROOM_SHADOW_MAX_TURNS: model turns per shadow run; default 20
+
+	// Integrations page (docs/design/integrations.md §4.3, §7, §8). Raw strings;
+	// internal/integrations parses them at start-up.
+	// SecretKey seals typed-in integration secrets at rest (AES-256-GCM): 32
+	// bytes, standard base64. Empty = the Integrations page is read-only.
+	// Secret; never logged. May itself be a secret:// reference.
+	SecretKey string // PIPEROOM_SECRET_KEY
+	// SecretKeyPrevious is the key before a rotation: tried on read, and each
+	// row is re-sealed with SecretKey on its next save. Secret; may be a secret:// reference.
+	SecretKeyPrevious string // PIPEROOM_SECRET_KEY_PREVIOUS
+	// Admins lists principals with the admin role (comma list of user ids,
+	// "user:<id>" or "group:<name>"), for a first install with no owners.yaml admins: block.
+	Admins string // PIPEROOM_ADMINS
+	// IntegrationAllowedHosts, when set, limits the hosts an integration test or
+	// client may dial (comma list of host names and CIDRs). Empty = any host
+	// except cloud metadata addresses, which are always blocked.
+	IntegrationAllowedHosts string // PIPEROOM_INTEGRATION_ALLOWED_HOSTS
+
+	// Secret managers (docs/design/secret-providers.md). Any secret field in this
+	// Config (the ones marked "secret") may hold a secret:// reference instead of
+	// the value; it is resolved at start through internal/secrets (§6).
+	// SecretProviders declares env-configured providers that secret://
+	// references may name: semicolon-separated "<id>=<type>:<address>" entries
+	// with ";key=value" options, e.g.
+	// "vault-corp=vault:https://vault.corp:8200;auth=kubernetes;role=piperoom".
+	// The exact grammar is internal/secrets' parser.
+	SecretProviders string // PIPEROOM_SECRET_PROVIDERS
+	// SecretCacheTTL is how long a resolved value stays in memory (Go duration).
+	// Empty = DefaultSecretCacheTTL. Values are never cached anywhere else.
+	SecretCacheTTL string // PIPEROOM_SECRET_CACHE_TTL
+	// SecretFileRoots is the comma list of directories a secret://files/...
+	// reference may read under (checked after symlinks are resolved).
+	SecretFileRoots string // PIPEROOM_SECRET_FILE_ROOTS
 }
 
 // Load reads the environment and applies dev defaults.
@@ -215,6 +251,15 @@ func Load() Config {
 		ShadowGrace:       get("PIPEROOM_SHADOW_GRACE", DefaultShadowGrace),
 		ShadowTokenBudget: get("PIPEROOM_SHADOW_TOKEN_BUDGET", DefaultShadowTokenBudget),
 		ShadowMaxTurns:    get("PIPEROOM_SHADOW_MAX_TURNS", DefaultShadowMaxTurns),
+
+		SecretKey:               get("PIPEROOM_SECRET_KEY", ""),
+		SecretKeyPrevious:       get("PIPEROOM_SECRET_KEY_PREVIOUS", ""),
+		Admins:                  get("PIPEROOM_ADMINS", ""),
+		IntegrationAllowedHosts: get("PIPEROOM_INTEGRATION_ALLOWED_HOSTS", ""),
+
+		SecretProviders: get("PIPEROOM_SECRET_PROVIDERS", ""),
+		SecretCacheTTL:  get("PIPEROOM_SECRET_CACHE_TTL", ""),
+		SecretFileRoots: get("PIPEROOM_SECRET_FILE_ROOTS", DefaultSecretFileRoots),
 	}
 }
 
@@ -225,6 +270,15 @@ const (
 	DefaultOIDCGroupsClaim = "groups"
 	DefaultSessionIdle     = "8h"
 	DefaultSessionMax      = "12h"
+)
+
+// Secret manager defaults (docs/design/secret-providers.md §3, §4.1).
+const (
+	// DefaultSecretCacheTTL applies when PIPEROOM_SECRET_CACHE_TTL is empty.
+	DefaultSecretCacheTTL = "5m"
+	// DefaultSecretFileRoots are the usual mount points of the Kubernetes
+	// Secrets Store CSI driver, Docker/Compose secrets and Vault Agent.
+	DefaultSecretFileRoots = "/run/secrets,/var/run/secrets,/mnt/secrets-store"
 )
 
 // Shadow defaults.

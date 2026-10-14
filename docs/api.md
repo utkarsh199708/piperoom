@@ -75,14 +75,16 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 
 | HTTP | code examples |
 |---|---|
-| 400 | `bad_request`, `validation`; after auth PR 3: `login_expired` (login cookie or row missing/expired at `/auth/callback`) |
+| 400 | `bad_request`, `validation` (integrations: the body also carries `"field": "<name>"` when one field is wrong); after auth PR 3: `login_expired` (login cookie or row missing/expired at `/auth/callback`) |
 | 401 | `unauthenticated`; after auth PR 2: `session_expired` (no, revoked or expired session). Its body also carries the server's mode: `{"error":{"code":"session_expired","message":"…","auth_mode":"dev"\|"oidc"}}` — the web app shows the dev picker or goes to `/auth/login?return=…`. A WebSocket whose session ends gets an `error` frame with code `session_expired` and is then closed with close reason `session_expired` |
-| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline), `not_provisioned` (login gate) |
+| 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline), `not_provisioned` (login gate); integrations: `not_admin` (caller is not an admin), `admin_needs_oidc` (dev auth mode on a non-loopback listen: integration writes are off) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB) |
-| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period) |
+| 409 | integrations: `version_conflict` (`If-Match` is not the stored version), `duplicate` (the category, alert source or secret-manager name is already connected), `managed_by_env` (that category is set by environment variables), `secret_key_missing` (a typed-in secret needs `PIPEROOM_SECRET_KEY`); `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period) |
+| 422 | `checks_failed` (integrations: a connection check failed; nothing saved; body `{"error":{…},"checks":[Check]}`) |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list) |
-| 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client) |
+| 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client; `POST /api/integrations/test`, create and update over 10 tests a minute per admin) |
+| 502 | `provider_unreachable` (integrations: the secret manager did not answer a name or key listing) |
 | 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working) |
 
 Text a person types (titles, comments, steers, resolutions, trace keys, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD).
@@ -147,7 +149,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | Method | Path | Body | Result | Notes |
 |---|---|---|---|---|
 | GET | `/api/people` | – | `[{id, name, email?}]` | after auth PR 3: the people a driver may grant control or hand off to: `users.yaml` users plus members with a live session (`LookupPerson`). `email` only for IdP users; pickers show `id` or `email` next to `name`. Members only: a viewer gets `403 viewer` (the list holds emails and viewers cannot grant or hand off anyway) |
-| GET | `/api/me` | – | `{id,name,layers}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request; `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise) |
+| GET | `/api/me` | – | `{id,name,layers}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request; `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise); `admin: bool` (always present) — may this user change integrations (see **Integrations**); in dev mode it is `false` when the server does not listen on loopback |
 | GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first |
 | POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation` |
 | POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |
@@ -224,6 +226,121 @@ labels blind (`POST …/shadow/blind`), reads the run (`GET …/shadow`) and gra
 `room.closed` in a shadow room: `shadow.revealed`, `shadow.labelled`, `shadow.graded` (one per
 re-grade), with the payloads in `internal/events/events.go`. The Slack mirror stops at `room.closed` and
 never shows shadow output.
+
+## Integrations (phase 1) — contract fixed, server in integrations PR 4
+
+Design: `docs/design/integrations.md` §4–§8 and `docs/design/secret-providers.md`. Go types:
+`internal/integrations/spec` (contract file). All routes are under `/api/integrations` and act on the caller's
+**workspace**, taken from the session, never from the URL or the body. A self-hosted install has one workspace,
+`"default"`. A row of another workspace answers `404 not_found`, exactly as a missing row does.
+
+### Who is admin
+
+- An **admin** is a user listed in `PIPEROOM_ADMINS` (comma list: `<id>`, `user:<id>` or `group:<name>`, matched
+  like `auditors:`), or in an `admins:` block at the top of `owners.yaml` (same form), or the `PIPEROOM_SOLO_USER`.
+- `GET /catalog` is open to every logged-in user (viewers included). Every other route needs an admin: anyone else
+  gets `403 not_admin` (a viewer gets `403 viewer` first on non-GET routes, as everywhere).
+- **Dev auth mode**: anyone can pick any user, so integration routes other than `GET /catalog` work only when the
+  server listens on loopback; otherwise they answer `403 admin_needs_oidc`, and `/api/me` reports `admin: false`.
+- Every write appends an audit row and posts a system message in every open room of the workspace (field names, never
+  values), e.g. `Kafka Connect integration updated by priya (url, password)`.
+
+### Objects
+
+**CatalogKind** (`spec.CatalogKind`):
+```json
+{ "id": "postgres-source", "category": "source_db", "title": "PostgreSQL", "summary": "The CDC source database",
+  "logo": "postgres", "reads": ["replication slot state", "table privileges"], "never": ["writes to any table"],
+  "required": true, "has_setup_script": true,
+  "fields": [ { "name": "host", "label": "Host", "help": "", "type": "text", "required": true,
+                "default": "", "options": [], "pattern": "^[A-Za-z0-9.-]+$" },
+              { "name": "password", "label": "Password", "help": "", "type": "secret", "required": true,
+                "default": "", "options": [], "pattern": "" } ] }
+```
+`category` ∈ `source_db | kafka | connect | registry | warehouse | model | alerts | chat | secret_manager`.
+Field `type` ∈ `text | secret | number | select | bool | pem | json_file`; `secret`, `pem` and `json_file` are secret
+fields (write-only). `pattern` is an RE2 regexp the server enforces; `options` is set for `select` only. Every
+`secret_manager` kind has a required text field `name` matching `^[a-z0-9][a-z0-9_-]{0,62}$`: the provider id that
+`secret://` references name (unique per workspace; `files` is reserved for the built-in mounted-files provider).
+
+**Check** (`spec.Check`):
+```json
+{ "id": "read_only", "title": "Role cannot INSERT into public.orders", "status": "fail",
+  "detail": "has_table_privilege returned true", "fix": "REVOKE INSERT ON public.orders FROM piperoom_ro;" }
+```
+`status` ∈ `pass | warn | fail | skipped`. Only `fail` blocks a save. `detail` and `fix` are `""` when empty and
+never contain a secret or a record value.
+
+**Integration** (`spec.View`):
+```json
+{ "id": "int_01J...", "workspace_id": "default", "category": "connect", "kind": "connect-rest",
+  "title": "Kafka Connect REST",
+  "config": { "url": "https://connect.corp:8083", "username": "piperoom",
+              "password": { "$ref": "secret://vault-corp/kafka/connect#password" } },
+  "secrets_set": ["password"], "version": 3, "enabled": true, "status": "connected",
+  "last_test": [ { "id": "reach", "title": "Can reach host", "status": "pass", "detail": "", "fix": "" } ],
+  "last_tested_at": "2026-10-14T09:12:00Z", "updated_by": "priya", "updated_at": "2026-10-14T09:12:01Z",
+  "source": "db" }
+```
+`config` holds the non-secret fields, plus `{"$ref": "secret://…"}` for a secret field held as a reference (a
+reference is not a secret). Typed-in secret values never appear in any response; `secrets_set` names the secret fields
+that have a value. `status` ∈ `connected | failing | disabled | untested`. `source` ∈ `db | env`: a category with any
+of its environment variables set is `env` (id `env_<category>`, `version` 0, `updated_by` `"env"`, `config` holds
+no values from secret variables) and is read-only (`409 managed_by_env` on writes). `last_tested_at` is `null` and
+`last_test` `[]` before the first test.
+
+**AuditEntry** (`spec.AuditEntry`):
+```json
+{ "seq": 41, "workspace_id": "default", "integration_id": "int_01J...", "action": "updated",
+  "actor": "priya", "changed": ["url", "password"], "at": "2026-10-14T09:12:01Z" }
+```
+`action` ∈ `created | updated | tested | enabled | disabled | deleted | secret_rotated`. `changed` holds field
+names only.
+
+**Write body** (test, create, update):
+```json
+{ "kind": "connect-rest", "id": "int_01J...",
+  "config": { "url": "https://connect.corp:8083", "username": "piperoom" },
+  "secrets": { "password": "typed value" } }
+```
+`id` is read by `POST /test` only (optional): stored secrets of that row fill the secret fields the body leaves out,
+so an edit can be tested without retyping a password. `config` values are strings, numbers or booleans. Each
+`secrets.<field>` is one of: absent or `""` = keep the stored value (create: unset); a string = a typed-in value,
+sealed at rest (needs `PIPEROOM_SECRET_KEY`, else `409 secret_key_missing`); `{"$ref": "secret://<provider>/<path>[#key][?version=v]"}`
+= a reference, resolved at run time; `null` = clear. A reference may name only a secret manager of the same workspace,
+`files`, or a provider from `PIPEROOM_SECRET_PROVIDERS`. Unknown field names, a `pattern` mismatch or a missing
+required field → `400 validation` with `field`.
+
+### Routes
+
+| Method | Path | Body | Result | Notes |
+|---|---|---|---|---|
+| GET | `/api/integrations/catalog` | – | `[CatalogKind]` | any logged-in user |
+| POST | `/api/integrations/catalog/{kind}/setup-script` | `{config}` | `{script}` | the least-privilege grant script filled from non-secret config; `script` is `""` when the kind has none (`has_setup_script: false`); unknown kind → `404 not_found` |
+| GET | `/api/integrations` | – | `[Integration]` | db rows and env-managed categories |
+| POST | `/api/integrations/test` | write body | `{checks: [Check]}` | tests unsaved values; stores nothing; `200` even when checks fail; at most 20 s; `429 rate_limited` over 10 a minute per admin |
+| POST | `/api/integrations` | write body | `201 {integration, checks}` | runs the test first; any `fail` → `422 checks_failed` with `checks`, nothing saved; `409 duplicate` |
+| PUT | `/api/integrations/{id}` | write body | `{integration, checks}` | header `If-Match: <version>` required (missing → `400 validation`); stale → `409 version_conflict`; `kind` must equal the row's kind; `config` is the whole non-secret form (a non-secret field left out is cleared; secret fields: absent or `""` keeps, `null` clears); tests first like create; the new client replaces the old one with no restart |
+| POST | `/api/integrations/{id}/enable` | – | `Integration` | builds and swaps in the client |
+| POST | `/api/integrations/{id}/disable` | – | `Integration` | keeps the row; tools then answer "not connected" |
+| DELETE | `/api/integrations/{id}` | – | `204` | removes the row and the client; audit rows stay |
+| GET | `/api/integrations/{id}/audit?limit=100` | – | `[AuditEntry]` | newest first; limit max 500 |
+| GET | `/api/integrations/alerts/{source}/setup` | – | `AlertSetup` | `source` ∈ `alertmanager \| grafana \| pagerduty \| datadog \| generic`, else `404 not_found` |
+| POST | `/api/integrations/alerts/{source}/rotate` | – | `AlertSetup` plus `"secret": "<value>"` and, while it applies, `"restart_required": true` | generates a new secret and returns it **once**; it is never readable again; `409 managed_by_env` when the env sets that source's secret; `400 validation` for `pagerduty`, which generates its own signing secret: that card is created with `POST /api/integrations` and its secret field `secret`. `restart_required: true` means the server accepts the new secret only after a restart (the old one keeps working until then) |
+| GET | `/api/integrations/{id}/secrets?prefix=` | – | `{names: [string], list_supported: bool}` | `{id}` must be a `secret_manager` row (else `400 validation`); secret **names** under `prefix`, at most 200, never values; a provider that cannot list → `{names: [], list_supported: false}`; manager down → `502 provider_unreachable` |
+| GET | `/api/integrations/{id}/secrets/keys?ref=` | – | `{keys: [string]}` | field names of the JSON / key-value secret `ref` (a URL-encoded `secret://` reference whose provider is `{id}`'s name), never values; `[]` for a plain secret |
+
+`AlertSetup`:
+```json
+{ "source": "grafana", "integration_id": "int_01J...", "webhook_url": "https://piperoom.corp/api/alerts/grafana",
+  "snippet": "…contact point config with <secret> in place of the secret…", "snippet_lang": "yaml",
+  "secret_set": true, "secret_source": "db" }
+```
+`secret_source` ∈ `db | env | ""` (none yet). The rotate response adds `"secret"`; no other response carries it.
+
+Every integration response passes through one encoder that drops typed-in secret values; a unit test checks every
+route's output for a canary secret. Later phases add `POST /api/integrations/discover`, `GET /slack/install` and
+`GET /slack/callback` (`integrations.md` §5, §6.1); they are not in this contract yet.
 
 ## WebSocket
 
