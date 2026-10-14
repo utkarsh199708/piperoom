@@ -16,6 +16,7 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/netsec"
+	"piperoom/internal/tools"
 )
 
 const mediaType = "application/vnd.schemaregistry.v1+json"
@@ -153,7 +154,21 @@ func (c *Client) Register(ctx context.Context, subject, schema string) (int, err
 
 // do performs a request and decodes JSON into out; nil out skips decoding.
 // Non-2xx responses are parsed into a typed *Error; 404 additionally wraps ErrNotFound.
+// It records one provenance call per request (method and path, never the body).
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader, out any) error {
+	start := time.Now()
+	err := c.roundTrip(ctx, method, path, body, out)
+	tools.Record(ctx, tools.Call{
+		Kind:   tools.CallRegistry,
+		Target: c.baseURL,
+		Text:   method + " " + path,
+		At:     start,
+		TookMS: time.Since(start).Milliseconds(),
+	})
+	return err
+}
+
+func (c *Client) roundTrip(ctx context.Context, method, path string, body io.Reader, out any) error {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
 	if err != nil {
 		return fmt.Errorf("schemareg: %s %s: %w", method, path, err)

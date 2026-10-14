@@ -8,10 +8,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"piperoom/internal/agent"
 	"piperoom/internal/clients"
 	"piperoom/internal/events"
+	"piperoom/internal/room"
 	"piperoom/internal/topology"
 )
 
@@ -410,5 +412,51 @@ func TestRunStopsWhenContextIsCancelled(t *testing.T) {
 	p, ok := sink.pays[0].(events.AgentStatusPayload)
 	if !ok || p.State != "working" {
 		t.Fatalf("first status payload = %#v, want state working", sink.pays[0])
+	}
+}
+
+// failingProposals answers every Create with the error the room service gives
+// for a pipeline that is not configured.
+type failingProposals struct{}
+
+func (failingProposals) Create(context.Context, events.ProposalCreatedPayload) (string, error) {
+	return "", &room.Error{Status: 400, Code: "validation", Msg: `pipeline "payments" is unknown; proposals are disabled for this room`}
+}
+
+func TestDemoStopsWhenProposalsDisabled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sink := &recordingSink{}
+	inbox := &closedInbox{}
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, agent.Alert{}, agent.Deps{Sink: sink, Proposals: failingProposals{}, Inbox: inbox}, agent.Options{})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned %v, want nil", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not end")
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	hyps, idle := 0, false
+	for i, typ := range sink.types {
+		switch typ {
+		case events.AgentHypothesis:
+			hyps++
+		case events.AgentStatus:
+			if p, ok := sink.pays[i].(events.AgentStatusPayload); ok && p.State == "idle" && p.Detail == "proposals disabled" {
+				idle = true
+			}
+			if p, ok := sink.pays[i].(events.AgentStatusPayload); ok && p.State == "error" {
+				t.Fatalf("unexpected error status: %+v", p)
+			}
+		}
+	}
+	if hyps != 1 || !idle {
+		t.Fatalf("hypotheses = %d, idle = %v; want 1, true", hyps, idle)
 	}
 }
