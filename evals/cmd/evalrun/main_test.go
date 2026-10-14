@@ -89,6 +89,43 @@ func TestParseFlagsValidateAlias(t *testing.T) {
 	}
 }
 
+func TestRunAgreement(t *testing.T) {
+	var out bytes.Buffer
+	sum := filepath.Join(t.TempDir(), "sum.json")
+	code, err := run(flags{agreement: "../../testdata/shadow-agreement", out: sum}, &out, &out)
+	if err != nil || code != 0 {
+		t.Fatalf("code %d err %v out %q", code, err, out.String())
+	}
+	for _, want := range []string{"room_agree_both", "both agree:", "with human grade"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("table lacks %q:\n%s", want, out.String())
+		}
+	}
+	if b, err := os.ReadFile(sum); err != nil || !strings.Contains(string(b), `"agreement_with_human_grade"`) {
+		t.Errorf("summary: %v %q", err, b)
+	}
+}
+
+func TestRunAgreementRefusesRunningRoom(t *testing.T) {
+	dir := t.TempDir()
+	doc := `{"run":{"room_id":"r","status":"running"},"room":{}}`
+	if err := os.WriteFile(filepath.Join(dir, "r.json"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code, err := run(flags{agreement: dir}, &out, &out)
+	if err == nil || code == 0 || !strings.Contains(err.Error(), "refusing") || out.Len() != 0 {
+		t.Fatalf("code %d err %v out %q", code, err, out.String())
+	}
+}
+
+func TestRunAgreementUnknownJudge(t *testing.T) {
+	var out bytes.Buffer
+	if _, err := run(flags{agreement: "../../testdata/shadow-agreement", judge: "bogus"}, &out, &out); err == nil {
+		t.Error("unknown judge accepted")
+	}
+}
+
 func TestParseFlagsCompareWithTwoPaths(t *testing.T) {
 	f, err := parseFlags([]string{"-compare", "a.json", "b.json", "-fail-on-regression", "-tolerance", "2"}, &bytes.Buffer{})
 	if err != nil || f.compare != "a.json" || len(f.args) != 1 || f.args[0] != "b.json" || !f.failOnRegr || f.tolerance != 2 {

@@ -6,6 +6,7 @@
 //	go run ./evals/cmd/evalrun -runs 3 -label prompt-v2 -baseline base.json -out cand.json
 //	go run ./evals/cmd/evalrun -compare base.json cand.json   # or base.json,cand.json
 //	go run ./evals/cmd/evalrun -prices prices.json -out report.json   # adds cost per run
+//	go run ./evals/cmd/evalrun -agreement saved-shadow-responses/   # offline; see evals/README.md
 //	go run ./evals/cmd/evalrun -validate   # (or -check) validate scenarios, no model calls
 //	go run ./evals/cmd/evalrun -from-shadow run.json -o evals/scenarios/new.yaml   # scenario from a graded shadow run
 //	go run ./evals/cmd/evalrun -validate -set heldout   # the held-out set; never tune prompts on it
@@ -57,6 +58,7 @@ type flags struct {
 	transcripts string
 	baseline    string
 	compare     string
+	agreement   string
 	tolerance   float64
 	failOnRegr  bool
 	check       bool
@@ -109,6 +111,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.baseline, "baseline", "", "after the run, compare against this earlier report")
 	fs.StringVar(&f.compare, "compare", "", "BASE.json CANDIDATE.json (or BASE.json,CANDIDATE.json): compare two reports, with a paired run-by-run comparison, and exit; no model calls")
 	fs.StringVar(&f.prices, "prices", "", "model price table (JSON, as PIPEROOM_MODEL_PRICES) for cost per run; default PIPEROOM_MODEL_PRICES")
+	fs.StringVar(&f.agreement, "agreement", "", "FILE-OR-DIR of saved GET /shadow?include=data,room responses: score the agent's final hypothesis against the human label and print the agreement table; offline, never for graders before they grade (-out writes the JSON summary, -judge claude uses the LLM judge)")
 	fs.Float64Var(&f.tolerance, "tolerance", evals.DefaultScoreTolerance, "score drop per scenario that counts as a regression")
 	fs.BoolVar(&f.failOnRegr, "fail-on-regression", false, "exit 2 when a comparison finds a regression")
 	fs.BoolVar(&f.check, "check", false, "validate scenarios against the live tool and action definitions and exit; no model calls")
@@ -165,6 +168,10 @@ func run(f flags, stdout, stderr io.Writer) (int, error) {
 	}
 	if len(f.args) > 0 {
 		return 1, fmt.Errorf("unexpected arguments: %s", strings.Join(f.args, " "))
+	}
+
+	if f.agreement != "" {
+		return runAgreement(f, stdout)
 	}
 
 	if f.fromShadow != "" {
