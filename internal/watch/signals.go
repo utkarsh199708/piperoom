@@ -31,6 +31,7 @@ const (
 // in this tick (the storm cap needs that).
 func (w *Watcher) evaluate(now time.Time, ts []target, obs *observation) map[string][]string {
 	fired := map[string][]string{}
+	snaps := w.recordDLQ(now, ts, obs)
 	for _, t := range ts {
 		ps := w.pipe(t.p.ID)
 		cr := classifyConnectors(t.connectors, obs)
@@ -40,6 +41,7 @@ func (w *Watcher) evaluate(now time.Time, ts []target, obs *observation) map[str
 		if t.cfg.SlotInactive.Enabled || t.cfg.SlotWAL.Enabled {
 			w.evaluateSlot(now, t, ps, cr, obs, fired)
 		}
+		w.evaluateDLQ(now, t, ps, obs, snaps, fired)
 		w.logStill(now, t, ps)
 	}
 	return fired
