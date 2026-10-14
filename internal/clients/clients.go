@@ -7,8 +7,9 @@
 // methods that read. A read-only tool (tools.KindRead), the topology builder,
 // the watcher and discovery take Readers only, so the compiler keeps writes
 // out of them. A type assertion from a Reader to a Writer or a *Client in such
-// a package defeats this and fails review. Writers exist only for Kafka Connect and Schema Registry, and only package
-// actions (and wiring, which builds them) may hold one. The full *Client
+// a package defeats this and fails review. Writers exist only for Kafka
+// Connect and Schema Registry, and only package actions (and wiring, which
+// builds them) may hold one. The full *Client
 // interfaces are Reader + Writer, so one concrete client implements both.
 // KafkaAdmin, SourceDB and Warehouse have no write methods: their Reader is
 // the same method set under the name tools should use.

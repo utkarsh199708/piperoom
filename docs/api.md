@@ -50,7 +50,7 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
   `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (loud warnings); `--allow-remote` is a deprecated alias for one release. From R9
   it also needs `PIPEROOM_DEV_ACK=dev-login-has-no-password` (`config.ParseDevAck`): the image sets only the switch,
   so the operator must state in their own deployment that dev login has no password. Any other non-empty value stops
-  the start.
+  the start. Not needed on a loopback address, in `oidc` mode (ignored there with one warning), or with `--demo`.
 - **Session.** A server-side session in a cookie: `__Host-piperoom_session` in `oidc` mode (https),
   `piperoom_session` (no `Secure`) in `dev` mode over plain http. The cookie wins over `X-User` when both name the
   same user.
@@ -276,6 +276,10 @@ renews the lease with a `control.granted` to themselves (which ends the signal),
 `control/grant`. Not written for a closed room or a room with no driver. A client shows the signal from the last
 `control.lease_expired` whose `lease_until` equals the driver's current `lease_until`.
 
+Proposals: a step's action must implement `actions.Scoped`; the server calls `Validate` and then
+`CheckScope(room's pipeline, params)` when the proposal is created and again right before `Execute`. Params are
+frozen at creation; approvals bind to those exact steps.
+
 ### Hand-off requests (R0; server R4, web R3)
 
 `handoff.requested {request_id, to, stay_as_watcher, expires_at}` (actor: the driver) is appended when
@@ -284,10 +288,6 @@ the first of: `handoff.created` with the same `request_id` (the normal end), `ha
 (system actor; `reason` ∈ `summary_failed | not_driver | room_closed | internal_error`, never error text), or
 `expires_at` (request time + 3 min, the summary deadline; covers a server that stopped mid-request). The server and
 clients use this same rule. `handoff.created` gains `request_id` (absent on events from before R0).
-
-Proposals: a step's action must implement `actions.Scoped`; the server calls `Validate` and then
-`CheckScope(room's pipeline, params)` when the proposal is created and again right before `Execute`. Params are
-frozen at creation; approvals bind to those exact steps.
 
 ### Watcher alerts (`alert_source: "watcher"`)
 

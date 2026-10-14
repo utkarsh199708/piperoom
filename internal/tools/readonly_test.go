@@ -27,7 +27,7 @@ func TestRegisterKinds(t *testing.T) {
 		{name: "plain refuses empty", kind: "", wantErr: true},
 		{name: "read-only takes read", readOnly: true, kind: KindRead},
 		{name: "read-only refuses room", readOnly: true, kind: KindRoom, wantErr: true, wantReadOnly: true},
-		{name: "read-only refuses unknown", readOnly: true, kind: "write", wantErr: true},
+		{name: "read-only refuses unknown", readOnly: true, kind: "write", wantErr: true, wantReadOnly: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
