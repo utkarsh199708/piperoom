@@ -69,7 +69,10 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
   oidc) and `PIPEROOM_DEV_ALLOW_NONLOOPBACK` (empty in oidc mode, overriding the image). Any
   other mode fails the render unless `allowDevMode=true`, and dev mode with an Ingress always
   fails. To try dev mode, install with `--set env.PIPEROOM_AUTH_MODE=dev --set allowDevMode=true`
-  and no Ingress, then `kubectl port-forward svc/<release>-piperoom 8090:8090`.
+  and no Ingress, then `kubectl port-forward svc/<release>-piperoom 8090:8090`. From R9 the server
+  also needs the acknowledgement for dev mode off loopback, so add
+  `--set env.PIPEROOM_DEV_ACK=dev-login-has-no-password` (the chart never sets it for you; any
+  other non-empty value stops the start; leave it unset in oidc mode).
 - **Guard rails.** The render also fails when `env` holds a secret-looking name (PASSWORD, SECRET,
   TOKEN, `_KEY`, `_DB_URL`...), a variable that is also listed under `secrets`, a chart-managed
   variable (`PIPEROOM_HTTP_ADDR`, `OWNERS_FILE`, `USERS_FILE`), a `*_PROXY` URL with a user name
