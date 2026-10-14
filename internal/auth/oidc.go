@@ -381,10 +381,14 @@ func clean(s string, max int) string {
 // operators, interlinear annotation marks, the BOM and the tag block (U+E0000
 // range, used to smuggle hidden ASCII). Safe default: anything new in Cf goes.
 // The one carve-out is the zero-width non-joiner and joiner (U+200C, U+200D):
-// Persian, Hindi and other scripts need them to spell ordinary names.
+// Persian, Hindi and other scripts need them to spell ordinary names. The
+// other default-ignorable code points go too (Other_Default_Ignorable_Code_Point):
+// the Hangul fillers U+115F, U+1160, U+3164 and U+FFA0 are letters that render
+// as nothing, so "Priya" plus a filler would otherwise show as "Priya"
+// (A-ID-2 review), and the combining grapheme joiner is invisible as well.
 func stripFormat(s string) string {
 	return strings.Map(func(r rune) rune {
-		if unicode.Is(unicode.Cf, r) && r != 0x200C && r != 0x200D {
+		if (unicode.Is(unicode.Cf, r) && r != 0x200C && r != 0x200D) || unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) {
 			return -1
 		}
 		return r

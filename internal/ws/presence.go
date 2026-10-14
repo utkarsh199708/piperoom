@@ -18,6 +18,7 @@ type client struct {
 	sessionID string // "" for an X-User (dev, no cookie) connection
 	userID    string
 	userName  string
+	verified  bool
 	state     string
 	lastSeen  time.Time
 	send      chan []byte
@@ -108,7 +109,7 @@ func (h *roomHub) members() []Member {
 	for c := range h.conns {
 		m, ok := byID[c.userID]
 		if !ok {
-			m = Member{ID: c.userID, Name: c.userName, State: c.state}
+			m = Member{ID: c.userID, Name: c.userName, Verified: c.verified, State: c.state}
 		} else if c.state == "viewing" {
 			m.State = "viewing"
 		}

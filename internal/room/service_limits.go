@@ -307,7 +307,7 @@ func (s *Service) ExtendRoom(ctx context.Context, user User, roomID string) (eve
 	}
 	// From the close time the room shows (auto_close_at), so a late warning's
 	// extra day is not lost.
-	e, err := s.emitLocked(ctx, st, roomID, events.RoomExtended, humanActor(user), events.RoomExtendedPayload{
+	e, err := s.emitLocked(ctx, st, roomID, events.RoomExtended, s.humanActor(user), events.RoomExtendedPayload{
 		Days: n, CloseAt: d.closeAt.AddDate(0, 0, n),
 	})
 	if err != nil {

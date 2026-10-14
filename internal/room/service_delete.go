@@ -96,7 +96,7 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 	}
 	// Tenancy: a room of a pipeline the admin may not see is answered like a
 	// room that does not exist.
-	if !s.canSeePipeline(user, st.snap.PipelineID) {
+	if !s.CanSeePipeline(user, st.snap.PipelineID) {
 		s.mu.Unlock()
 		return Deletion{}, notFound("room not found")
 	}
@@ -166,11 +166,6 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 	return Deletion{RoomDeletion: d, Archived: archived, ArchiveRemoved: removed}, nil
 }
 
-// canSeePipeline is Deps.CanSeePipeline, or true when it is not set.
-func (s *Service) canSeePipeline(user User, pipelineID string) bool {
-	return s.canSee == nil || s.canSee(user, pipelineID)
-}
-
 // priorDeletion answers a delete of a room that is not there: its audit row
 // when it was deleted before (by an admin or retention) and its pipeline is
 // visible to the user, 404 otherwise.
@@ -179,7 +174,7 @@ func (s *Service) priorDeletion(ctx context.Context, del store.Deleter, user Use
 	if errors.Is(err, store.ErrNotFound) {
 		return Deletion{}, notFound("room not found")
 	}
-	if err == nil && !s.canSeePipeline(user, d.PipelineID) {
+	if err == nil && !s.CanSeePipeline(user, d.PipelineID) {
 		return Deletion{}, notFound("room not found")
 	}
 	if err != nil {

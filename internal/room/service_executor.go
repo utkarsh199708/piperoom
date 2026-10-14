@@ -242,7 +242,11 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 			return nil
 		}
 
-		action, ok := s.actions.Get(step.Action)
+		// The action comes from the room's own pipeline's set
+		// (docs/design/tenancy.md), so its write reaches only that
+		// pipeline's systems.
+		pipelineID := s.roomPipeline(ctx, p.RoomID)
+		action, ok := s.actionsFor(pipelineID).Get(step.Action)
 		if !ok {
 			s.stopOnStep(tracker, p, i, "unknown action "+step.Action)
 			return nil
@@ -253,7 +257,7 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 		}
 		// Re-check the scope right before the write, per docs/api.md: an
 		// approved proposal must not write outside the room's pipeline.
-		if err := s.scopeCheck(s.roomPipeline(ctx, p.RoomID), action, step.Params); err != nil {
+		if err := s.scopeCheck(pipelineID, action, step.Params); err != nil {
 			s.stopOnStep(tracker, p, i, "scope check failed: "+err.Error())
 			return nil
 		}

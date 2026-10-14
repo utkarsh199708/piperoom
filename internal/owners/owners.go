@@ -40,6 +40,16 @@ type Pipeline struct {
 	// (docs/design/retention.md section 3). nil = not set. Load refuses a value
 	// outside 1..MaxRetentionDays. Read it with Retention().
 	RetentionDays *WholeDays `yaml:"retention_days"`
+	// Tenant is the optional tenant (docs/design/tenancy.md); read it with
+	// TenantName, which applies the default.
+	Tenant string `yaml:"tenant"`
+	// Connections is the optional `connections:` block (tenancy.go): where
+	// this pipeline's DSNs, URLs and logins come from. Nil = the process-wide
+	// settings.
+	Connections Connections `yaml:"connections"`
+	// SharedConnections allows a connection reference of this pipeline to be
+	// used by another tenant too (CheckSharedRefs).
+	SharedConnections bool `yaml:"shared_connections"`
 
 	// watch is WatchSpec after validation, with defaults applied. Set by Load.
 	watch *WatchConfig
@@ -86,6 +96,9 @@ type Owners struct {
 	Pipelines []Pipeline            `yaml:"pipelines"`
 	Layers    map[string]Principals `yaml:"layers"`
 	Auditors  Principals            `yaml:"auditors"`
+	// Tenants is the optional tenants: block (tenancy.go). Present, it turns
+	// the tenant filter on.
+	Tenants map[string]Tenant `yaml:"tenants"`
 }
 
 // Load reads and validates the owners file at path.
@@ -103,6 +116,15 @@ func Load(path string) (*Owners, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&o); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("owners: parse %s: %w", path, err)
+	}
+	// The decode above succeeded, so this one parses the same document; it
+	// only finds keys that are present with a null value (tenancy.go).
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("owners: parse %s: %w", path, err)
+	}
+	if err := checkNullBlocks(&root); err != nil {
+		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
 	}
 	if err := o.validate(); err != nil {
 		return nil, fmt.Errorf("owners: validate %s: %w", path, err)
@@ -158,5 +180,8 @@ func (o *Owners) validate() error {
 		}
 		o.Pipelines[i].watch = &w
 	}
-	return o.validateDLQ()
+	if err := o.validateDLQ(); err != nil {
+		return err
+	}
+	return o.validateTenancy()
 }

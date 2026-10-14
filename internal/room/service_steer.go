@@ -42,7 +42,7 @@ func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, tex
 		Text:          text,
 		MentionsAgent: mentionsAgent(text),
 	}
-	e, err := s.emitLocked(ctx, st, roomID, events.CommentAdded, humanActor(user), payload)
+	e, err := s.emitLocked(ctx, st, roomID, events.CommentAdded, s.humanActor(user), payload)
 	if err == nil && payload.MentionsAgent {
 		s.ensureAgentLocked(ctx, roomID, st)
 	}
@@ -68,7 +68,7 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 		return events.Event{}, roomClosed("room is closed")
 	}
 	if s.isDriver(st, user.ID) {
-		e, err := s.emitLocked(ctx, st, roomID, events.SteerSent, humanActor(user), events.SteerSentPayload{Text: text})
+		e, err := s.emitLocked(ctx, st, roomID, events.SteerSent, s.humanActor(user), events.SteerSentPayload{Text: text})
 		if err == nil {
 			s.touchDriverLease(ctx, st, roomID)
 			s.ensureAgentLocked(ctx, roomID, st)
@@ -86,7 +86,7 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 	}); err != nil {
 		return events.Event{}, err
 	}
-	e, err := s.emitLocked(ctx, st, roomID, events.SteerSuggested, humanActor(user), events.SteerSuggestedPayload{
+	e, err := s.emitLocked(ctx, st, roomID, events.SteerSuggested, s.humanActor(user), events.SteerSuggestedPayload{
 		SuggestionID: suggestionID,
 		Text:         text,
 	})
@@ -128,7 +128,7 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 	if err := s.store.SetSuggestionStatus(ctx, suggestionID, "sent"); err != nil {
 		return events.Event{}, err
 	}
-	e, err := s.emitLocked(ctx, st, roomID, events.SteerSent, humanActor(user), events.SteerSentPayload{
+	e, err := s.emitLocked(ctx, st, roomID, events.SteerSent, s.humanActor(user), events.SteerSentPayload{
 		SuggestionID: suggestionID,
 		Text:         sugg.Text,
 	})
@@ -155,7 +155,7 @@ func (s *Service) RequestControl(ctx context.Context, user User, roomID string) 
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
-	return s.emitLocked(ctx, st, roomID, events.ControlRequested, humanActor(user), events.ControlRequestedPayload{})
+	return s.emitLocked(ctx, st, roomID, events.ControlRequested, s.humanActor(user), events.ControlRequestedPayload{})
 }
 
 // GrantControl moves the driver role: the driver can grant, or anyone when
@@ -178,9 +178,12 @@ func (s *Service) GrantControl(ctx context.Context, user User, roomID, toID stri
 	if !s.isDriver(st, user.ID) && !s.leaseExpired(st) {
 		return events.Event{}, leaseHeld("another user's driver lease is still live")
 	}
+	if err := s.checkTargetVisible(to, st.snap.PipelineID); err != nil {
+		return events.Event{}, err
+	}
 	lease := s.now().UTC().Add(DriverLease)
-	e, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, humanActor(user), events.ControlGrantedPayload{
-		To:         humanActor(to),
+	e, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, s.humanActor(user), events.ControlGrantedPayload{
+		To:         s.humanActor(to),
 		LeaseUntil: lease,
 	})
 	if err != nil {

@@ -202,8 +202,9 @@ func TestPipelineMapUsesRealClients(t *testing.T) {
 	if g.PipelineID != "orders" {
 		t.Errorf("graph pipeline id = %q, want %q", g.PipelineID, "orders")
 	}
-	if len(g.Nodes) != 5 {
-		t.Errorf("graph nodes = %d, want 5", len(g.Nodes))
+	// Five pipeline stages plus the registry subject the fake lists.
+	if len(g.Nodes) != 6 || g.Nodes[5].ID != "sr:pg.public.orders-value" {
+		t.Errorf("graph nodes = %+v, want 5 stages and sr:pg.public.orders-value (builder wired to the registry)", g.Nodes)
 	}
 	if f.statusCalls.Load() == 0 {
 		t.Error("connect Status never called: builder not wired to the connect client")

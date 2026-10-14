@@ -142,7 +142,7 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 	// Actions and Proposals stay nil: propose_fix lists "(none)" and refuses,
 	// so a shadow run can never reach a write (design section 4).
 	deps := agent.Deps{
-		Tools:  s.tools,
+		Tools:  s.toolsFor(pipelineID),
 		Inbox:  gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
 		Sink:   roomSink{s: s, roomID: roomID},
 		Logger: s.log,
@@ -529,8 +529,8 @@ func (s *Service) ShadowLabel(ctx context.Context, user User, roomID, actualLaye
 	if st.snap.shadowLabelled {
 		return events.Event{}, alreadyDecided("this shadow room is already labelled")
 	}
-	ident := identityFor(user, grant)
-	e, err := s.emitLocked(ctx, st, roomID, events.ShadowLabelled, humanActor(user), events.ShadowLabelledPayload{
+	ident := s.identityFor(user, grant)
+	e, err := s.emitLocked(ctx, st, roomID, events.ShadowLabelled, s.humanActor(user), events.ShadowLabelledPayload{
 		ActualLayer: actualLayer, RootCauseTerms: append([]string{}, terms...), Identity: &ident,
 	})
 	if err != nil {
@@ -570,8 +570,8 @@ func (s *Service) ShadowGrade(ctx context.Context, user User, roomID string, lay
 	if !st.snap.shadowRevealed {
 		return events.Event{}, errNotRevealed()
 	}
-	ident := identityFor(user, grant)
-	e, err := s.emitLocked(ctx, st, roomID, events.ShadowGraded, humanActor(user), events.ShadowGradedPayload{
+	ident := s.identityFor(user, grant)
+	e, err := s.emitLocked(ctx, st, roomID, events.ShadowGraded, s.humanActor(user), events.ShadowGradedPayload{
 		LayerCorrect: layerCorrect, RootCause: rootCause, Notes: notes, Identity: &ident,
 	})
 	if err != nil {
@@ -782,6 +782,12 @@ var shadowStatuses = []string{
 // ShadowMetrics aggregates every closed shadow room of pipelineID ("" = all)
 // closed at or after since (zero = all).
 func (s *Service) ShadowMetrics(ctx context.Context, pipelineID string, since time.Time) (ShadowMetrics, error) {
+	return s.shadowMetrics(ctx, pipelineID, since, nil)
+}
+
+// shadowMetrics is ShadowMetrics over the runs whose pipeline keep accepts
+// (nil = all), for the tenant filter (ShadowMetricsFor).
+func (s *Service) shadowMetrics(ctx context.Context, pipelineID string, since time.Time, keep func(pipelineID string) bool) (ShadowMetrics, error) {
 	m := ShadowMetrics{ByStatus: map[string]int{}, PerRoom: []ShadowMetricsRoom{},
 		MedianTimeToFirstS: -1, MedianTimeToFinalS: -1, MedianHumanMTTRS: -1}
 	for _, st := range shadowStatuses {
@@ -793,6 +799,9 @@ func (s *Service) ShadowMetrics(ctx context.Context, pipelineID string, since ti
 	runs, err := s.shadow.ListShadowRuns(ctx, pipelineID, since)
 	if err != nil {
 		return m, fmt.Errorf("room: shadow metrics: %w", err)
+	}
+	if keep != nil {
+		runs = slices.DeleteFunc(runs, func(r store.ShadowRunRoom) bool { return !keep(r.PipelineID) })
 	}
 	s.mu.Lock()
 	if err := s.ensureAllLoadedLocked(ctx, false); err != nil {

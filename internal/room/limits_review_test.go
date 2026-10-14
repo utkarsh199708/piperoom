@@ -11,8 +11,10 @@ import (
 
 	"piperoom/internal/config"
 	"piperoom/internal/events"
+	"piperoom/internal/owners"
 	"piperoom/internal/room"
 	"piperoom/internal/store"
+	"piperoom/internal/store/memstore"
 )
 
 // fillLog has the agent emit until the store refuses it, then people comment
@@ -174,35 +176,62 @@ func TestEraseRemovesStaleArchive(t *testing.T) {
 	}
 }
 
-// TestDeleteTenancy: an admin who may not see the room's pipeline gets 404,
-// for a live room and for one deleted before (the audit row); a non-admin
-// still gets 403 first.
+// TestDeleteTenancy: with owners.yaml tenants (#112), an admin outside the
+// room's tenant gets 404, for a live room and for one deleted before (the
+// audit row); a non-admin still gets 403 first; an admin in the tenant
+// deletes.
 func TestDeleteTenancy(t *testing.T) {
-	e := newLimitsEnv(t, config.Limits{})
 	ctx := context.Background()
-	hidden := room.New(room.Deps{
-		Store: e.st, Users: adminUsers(t), Owners: testOwners(), Run: newRunRecorder().run, Now: e.clock.Now,
-		CanSeePipeline: func(u room.User, pipelineID string) bool { return pipelineID != "orders" },
-	})
-	t.Cleanup(hidden.Close)
+	users, err := room.ParseUsers([]byte(`
+users:
+  - {id: arjun, name: Arjun}
+  - {id: ada, name: Ada, admin: true}
+  - {id: eve, name: Eve, admin: true}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "owners.yaml")
+	if err := os.WriteFile(path, []byte(`tenants:
+  t1: {members: [user:arjun, user:eve]}
+  t2: {members: [user:ada]}
+pipelines:
+  - id: orders
+    tenant: t1
+    topic_prefix: orders
+    source_tables: [public.orders]
+    connectors: [orders-c]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	own, err := owners.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := memstore.New()
+	svc := room.New(room.Deps{Store: st, Users: users, Owners: own, Run: newRunRecorder().run})
+	t.Cleanup(svc.Close)
+	if !svc.TenancyOn() {
+		t.Fatal("tenancy is off")
+	}
 
-	live := createRoom(t, e.svc, "arjun")
-	_, err := hidden.DeleteRoom(ctx, mustUser(t, hidden, "arjun"), live.ID, "cleanup", false)
+	live := createRoom(t, svc, "arjun")
+	_, err = svc.DeleteRoom(ctx, mustUser(t, svc, "arjun"), live.ID, "cleanup", false)
 	wantCode(t, err, "not_allowed")
-	_, err = hidden.DeleteRoom(ctx, mustUser(t, hidden, "ada"), live.ID, "cleanup", false)
+	_, err = svc.DeleteRoom(ctx, mustUser(t, svc, "ada"), live.ID, "cleanup", false)
 	wantCode(t, err, "not_found")
-	if _, err := e.st.GetRoom(ctx, live.ID); err != nil {
+	if _, err := st.GetRoom(ctx, live.ID); err != nil {
 		t.Fatalf("hidden delete removed the room: %v", err)
 	}
 
-	gone := createRoom(t, e.svc, "arjun")
-	if _, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "ada"), gone.ID, "cleanup", false); err != nil {
+	gone := createRoom(t, svc, "arjun")
+	if _, err := svc.DeleteRoom(ctx, mustUser(t, svc, "eve"), gone.ID, "cleanup", false); err != nil {
 		t.Fatal(err)
 	}
-	_, err = hidden.DeleteRoom(ctx, mustUser(t, hidden, "ada"), gone.ID, "again", false)
+	_, err = svc.DeleteRoom(ctx, mustUser(t, svc, "ada"), gone.ID, "again", false)
 	wantCode(t, err, "not_found")
 	// The admin who can see it gets the row.
-	if d, err := e.svc.DeleteRoom(ctx, mustUser(t, e.svc, "ada"), gone.ID, "again", false); err != nil || d.RoomID != gone.ID {
+	if d, err := svc.DeleteRoom(ctx, mustUser(t, svc, "eve"), gone.ID, "again", false); err != nil || d.RoomID != gone.ID {
 		t.Fatalf("visible repeat: %+v %v", d, err)
 	}
 }
