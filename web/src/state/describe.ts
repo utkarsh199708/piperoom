@@ -17,6 +17,8 @@ import type {
   Event,
   HandoffCreatedPayload,
   HandoffRequestedPayload,
+  HypothesisVerdictPayload,
+  ApprovalNudgedPayload,
   ProposalCreatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
@@ -145,6 +147,14 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       const now = RANK[p.confidence]
       const verb = before === undefined || now === undefined || before === now ? 'at' : now > before ? 'raised to' : 'lowered to'
       return { text: `Hypothesis ${verb} ${clip(p.confidence, 20)} confidence`, detail: clip(p.text, 200), kind: 'step' }
+    }
+    case 'hypothesis.verdict': {
+      const p = as<HypothesisVerdictPayload>(e)
+      return { text: `${who} ${clip(p.verdict, 20)} the hypothesis${p.note ? `: ${clip(p.note, 80)}` : ''}`, kind: 'human' }
+    }
+    case 'approval.nudged': {
+      const p = as<ApprovalNudgedPayload>(e)
+      return { text: `${who} nudged ${clip(p.layer, 40)} owners`, kind: 'human' }
     }
     case 'comment.added': {
       const p = as<CommentAddedPayload>(e)

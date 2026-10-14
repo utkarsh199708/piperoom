@@ -62,6 +62,8 @@ describe('describeEvent', () => {
     ['room.closed', ev('room.closed', { resolution: 'fixed' }), { text: 'Arjun closed the room', detail: 'fixed', kind: 'decision' }],
     ['room.labelled', ev('room.labelled', { cause: 'schema change', fix_that_worked: 'restart task' }), { text: 'Arjun labelled the room: cause schema change · fix restart task', kind: 'human' }],
     ['checklist tick unknown item', ev('checklist.step_done', { tool_use_id: 'tu', hit: 0, item: 1, done: true }), { text: 'Arjun ticked step 2 of a runbook', kind: 'human' }],
+    ['hypothesis.verdict', ev('hypothesis.verdict', { verdict: 'disputed', note: 'DDL never ran', hypothesis_seq: 1 }), { text: 'Arjun disputed the hypothesis: DDL never ran', kind: 'human' }],
+    ['approval.nudged', ev('approval.nudged', { proposal_id: 'p_01M4ABCDEFGHJKMNPQRSTVWXYZ', layer: 'kafka-connect' }), { text: 'Arjun nudged kafka-connect owners', kind: 'human' }],
     ['unknown', ev('agent.usage' as Event['type'], {}, agent), { text: 'agent.usage', kind: 'system' }],
   ]
   it.each(cases)('%s', (_n, e, want) => {

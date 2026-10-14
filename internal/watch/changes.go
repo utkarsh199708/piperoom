@@ -45,8 +45,8 @@ const (
 var errNoDDL = errors.New("watch: no DDL audit reader configured")
 
 // cfgVal is one config key as the baseline keeps it. shown is what a row may
-// store; token is what is compared: the raw value, or for a credential key
-// only a hash, so a changed password is seen without keeping it.
+// store (masked); token is what is compared: a hash of the raw value, so a
+// changed secret is seen without keeping it.
 type cfgVal struct{ shown, token string }
 
 // connBase is what the watcher saw of one connector on the last tick whose
@@ -79,22 +79,41 @@ type versionObs struct {
 	err    error
 }
 
-// sensitiveConfigKey mirrors kafkatools.sensitiveKey: a key that holds a
-// credential. ".key" matches "ssl.key.password" but not "key.converter".
-func sensitiveConfigKey(k string) bool {
-	l := strings.ToLower(k)
-	return strings.Contains(l, "password") || strings.Contains(l, "secret") || strings.Contains(l, "token") || strings.Contains(l, ".key")
+// credentialKeyParts are the lower-case fragments that mark a config key as
+// holding a credential. It is wider than kafkatools.sensitiveKey on purpose:
+// this text is stored for good. ".key" matches "ssl.key.password" and
+// "api.key" but not "key.converter"; "jaas" covers sasl.jaas.config, whose value
+// embeds a password.
+var credentialKeyParts = []string{
+	"password", "passwd", "pwd", "passphrase", "secret", "token", "credential",
+	"apikey", "api_key", "api-key", "authorization", "jaas", ".key",
 }
 
+// sensitiveConfigKey reports whether a config key holds a credential.
+func sensitiveConfigKey(k string) bool {
+	l := strings.ToLower(k)
+	for _, part := range credentialKeyParts {
+		if strings.Contains(l, part) {
+			return true
+		}
+	}
+	return false
+}
+
+// makeCfg builds the baseline of one config. A credential key shows "***". Any
+// other value can still carry a secret (connection.url with user:pass@ or
+// ?password=), so what a row may show goes through redact.Text. Nothing keeps
+// the raw value: the compared token is always a hash, so a changed secret is
+// still seen as a change.
 func makeCfg(cfg map[string]string) map[string]cfgVal {
 	out := make(map[string]cfgVal, len(cfg))
 	for k, v := range cfg {
-		if sensitiveConfigKey(k) {
-			h := sha256.Sum256([]byte(v))
-			out[k] = cfgVal{shown: maskedValue, token: "h:" + hex.EncodeToString(h[:])}
-			continue
+		h := sha256.Sum256([]byte(v))
+		shown := maskedValue
+		if !sensitiveConfigKey(k) {
+			shown, _ = redact.Text(v)
 		}
-		out[k] = cfgVal{shown: v, token: "v:" + v}
+		out[k] = cfgVal{shown: shown, token: hex.EncodeToString(h[:])}
 	}
 	return out
 }

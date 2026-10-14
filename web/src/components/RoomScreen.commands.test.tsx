@@ -37,6 +37,8 @@ const actions: RoomActions = {
   label: vi.fn(),
   checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 
 const driver: CurrentUser = { id: 'kabir', name: 'Kabir', layers: ['consumer'], role: 'member' }

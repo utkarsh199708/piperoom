@@ -6,6 +6,7 @@ import type {
   AgentStatusPayload,
   HandoffSummary,
   HypothesisSummary,
+  HypothesisVerdict,
   Identity,
   ProposalStep,
   RoomLabelledPayload,
@@ -28,11 +29,36 @@ export interface AgentStatusState {
   detail?: string
 }
 
+export interface VerdictState {
+  verdict: HypothesisVerdict
+  by: Actor
+  note?: string
+  at: string
+}
+
 export interface HypothesisState {
   text: string
   based_on_steps: string[]
   confidence: HypothesisSummary['confidence']
+  /** Derived (F9): at least one confirmed and no disputed verdict on this hypothesis. */
   confirmed: boolean
+  /** seq of the agent.hypothesis event; hypothesis.verdict answers it. */
+  seq?: number
+  /** Latest verdict per person, in the order they were given. */
+  verdicts?: VerdictState[]
+}
+
+/** One entry of the confidence path under the hypothesis heading. */
+export interface HypothesisHistoryEntry {
+  seq: number
+  at: string
+  confidence: string
+}
+
+/** approval.nudged: when and by whom a pending layer was last nudged. */
+export interface NudgeState {
+  at: string
+  by: Actor
 }
 
 export interface ToolCallState {
@@ -211,6 +237,10 @@ export interface RoomState {
   alert: AlertInfo | null
   agent_status: AgentStatusState
   hypothesis: HypothesisState | null
+  /** The confidence path, capped at 20; a repeat of the same confidence is not added. */
+  hypothesis_history: HypothesisHistoryEntry[]
+  /** `${proposal_id}/${layer}` -> the last nudge. */
+  nudges: Record<string, NudgeState>
   steps: StepState[]
   messages: AgentMessageState[]
   comments: CommentState[]
@@ -250,6 +280,8 @@ export function emptyRoomState(id: string): RoomState {
     alert: null,
     agent_status: { state: 'idle' },
     hypothesis: null,
+    hypothesis_history: [],
+    nudges: {},
     steps: [],
     messages: [],
     comments: [],
@@ -304,6 +336,8 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
           based_on_steps: snapshot.hypothesis.based_on_steps ?? [],
           confidence: snapshot.hypothesis.confidence,
           confirmed: snapshot.hypothesis.confirmed,
+          seq: snapshot.hypothesis.seq ?? 0,
+          verdicts: [],
         }
       : null,
   }
