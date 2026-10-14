@@ -7,7 +7,7 @@ import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../fixtures/users'
-import { errorText, friendlyError } from '../lib/errors'
+import { errorText, friendlyError, isNetworkError } from '../lib/errors'
 import { mentionsAgent } from '../lib/mentions'
 import { applyEvent } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
@@ -53,11 +53,22 @@ export interface CloseResult {
   error?: string
 }
 
+/** A steer or comment that could not reach the server, kept for one retry. */
+interface PendingSend {
+  kind: 'steer' | 'comment'
+  text: string
+  stepId?: string
+}
+
+const MAX_PENDING = 5
+
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
 
 export interface RoomActions {
-  comment: (text: string, stepId?: string) => void
-  steer: (text: string) => void
+  /** Resolves true when the server took it. A failed network call is kept and retried once when the socket reopens. */
+  comment: (text: string, stepId?: string) => Promise<boolean>
+  /** Same contract as `comment`. */
+  steer: (text: string) => Promise<boolean>
   sendSuggestion: (suggestionId: string) => void
   requestControl: () => void
   grantControl: (to: string) => void
@@ -111,6 +122,7 @@ export function useRoom(roomId: string) {
   const lastSeqRef = useRef(0)
   const stateRef = useRef<RoomState | null>(null)
   const localIdRef = useRef(0)
+  const pendingRef = useRef<PendingSend[]>([])
   // Fixture mode: buffer synthetic (user) events until the story replay ends so
   // their seq can never collide with an upcoming story event's seq.
   const storyPlayingRef = useRef(false)
@@ -260,6 +272,17 @@ export function useRoom(roomId: string) {
         setConn('live')
         setError(null)
         sendPresence('viewing')
+        // Messages typed while the server was away: one retry each, in order. Success
+        // emits nothing here (the event arrives over the socket); a failure shows its text.
+        const kept = pendingRef.current
+        pendingRef.current = []
+        for (const item of kept) {
+          const call =
+            item.kind === 'steer'
+              ? api.steer(roomId, item.text)
+              : api.comment(roomId, { step_id: item.stepId, text: item.text })
+          call.catch((e: unknown) => setError(errorText(e)))
+        }
       }
       ws.onmessage = (m) => {
         if (cancelled) return // a socket from an older session epoch
@@ -370,6 +393,27 @@ export function useRoom(roomId: string) {
     [reload],
   )
 
+  // Steer and comment keep the person's words: a call that never reached the server is
+  // queued (max 5) and the caller learns it failed, so the field is not cleared.
+  const sendKept = useCallback(
+    async (item: PendingSend): Promise<boolean> => {
+      // A manual retry replaces the queued copy, so the text is not sent twice.
+      pendingRef.current = pendingRef.current.filter((p) => !(p.kind === item.kind && p.text === item.text && p.stepId === item.stepId))
+      try {
+        await (item.kind === 'steer'
+          ? api.steer(roomId, item.text)
+          : api.comment(roomId, { step_id: item.stepId, text: item.text }))
+        setError(null)
+        return true
+      } catch (e) {
+        if (isNetworkError(e) && pendingRef.current.length < MAX_PENDING) pendingRef.current.push(item)
+        setError(errorText(e))
+        return false
+      }
+    },
+    [roomId],
+  )
+
   const runAction = useCallback((p: Promise<unknown>) => {
     p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))
   }, [])
@@ -400,7 +444,7 @@ export function useRoom(roomId: string) {
   }, [])
 
   const actions: RoomActions = {
-    comment: (text, stepId) => {
+    comment: async (text, stepId) => {
       if (isFixtures()) {
         synthesize('comment.added', {
           comment_id: nextLocalId(),
@@ -408,11 +452,11 @@ export function useRoom(roomId: string) {
           text,
           mentions_agent: mentionsAgent(text),
         })
-        return
+        return true
       }
-      void runAction(api.comment(roomId, { step_id: stepId, text }))
+      return sendKept({ kind: 'comment', text, stepId })
     },
-    steer: (text) => {
+    steer: async (text) => {
       if (isFixtures()) {
         const s = stateRef.current
         const isDriver = s?.driver?.id === user.id
@@ -420,9 +464,9 @@ export function useRoom(roomId: string) {
           isDriver ? 'steer.sent' : 'steer.suggested',
           isDriver ? { text } : { suggestion_id: nextLocalId(), text },
         )
-        return
+        return true
       }
-      void runAction(api.steer(roomId, text))
+      return sendKept({ kind: 'steer', text })
     },
     sendSuggestion: (suggestionId) => {
       if (isFixtures()) {

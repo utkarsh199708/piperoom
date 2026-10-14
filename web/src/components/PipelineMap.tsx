@@ -100,14 +100,46 @@ function SkeletonNode() {
   )
 }
 
+// Set VITE_RUNBOOK_URL where the runbook is served; without it the link is not shown.
+const RUNBOOK_URL = (import.meta.env.VITE_RUNBOOK_URL as string | undefined) || ''
+
+function NotConfigured({ id, onRetry }: { id: string; onRetry?: () => void }) {
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border border-dashed border-border bg-card px-4 py-3">
+      <h2 className="m-0 text-sm font-medium">Pipeline &quot;{id}&quot; is not configured</h2>
+      <p className="m-0 text-muted-foreground">
+        Alerts for it open a room, but there is no topology to show and the agent cannot propose a fix here. Add the
+        pipeline to owners.yaml (see docs/runbook.md) and restart the server.
+      </p>
+      <div className="flex items-center gap-2">
+        {onRetry && (
+          <Button variant="secondary" size="sm" onClick={onRetry}>
+            Try again
+          </Button>
+        )}
+        {RUNBOOK_URL && (
+          <Button variant="ghost" size="sm" asChild>
+            <a href={RUNBOOK_URL}>Open runbook</a>
+          </Button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function PipelineMap({
   topology,
   updatedAt = null,
   onTrace,
   pipelineId,
   stalledFor,
+  notFound = false,
+  onRetry,
 }: {
   topology: Topology | null
+  /** The server answered 404 for this pipeline: it is not in owners.yaml. */
+  notFound?: boolean
+  onRetry?: () => void
   updatedAt?: number | null
   /** Absent for a viewer: tracing a record is a write (POST .../trace). */
   onTrace?: () => void
@@ -132,7 +164,7 @@ export function PipelineMap({
           Pipeline
         </h2>
         {id && <span className="font-mono text-muted-foreground">{id}</span>}
-        {updatedAt != null ? (
+        {notFound ? null : updatedAt != null ? (
           <span className="ml-2 text-xs text-subtle-foreground">{updatedAgoLabel(updatedAt, now)}</span>
         ) : (
           !topology && <span className="ml-2 text-xs text-subtle-foreground">Loading topology…</span>
@@ -151,6 +183,10 @@ export function PipelineMap({
         )}
       </div>
 
+      {notFound ? (
+        <NotConfigured id={id} onRetry={onRetry} />
+      ) : (
+      <>
       {/* Five 200px nodes do not fit a phone: the lane scrolls sideways, the page does not. */}
       <div
         role="group"
@@ -189,6 +225,8 @@ export function PipelineMap({
           })
         )}
       </div>
+      </>
+      )}
     </section>
   )
 }

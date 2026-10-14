@@ -4,13 +4,14 @@ import { Eye, Lock } from 'lucide-react'
 import type { RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canRequestControl, canSteer, canTakeControl, isViewer } from '../state/permissions'
-import type { RoomActions } from '../hooks/useRoom'
+import type { ConnState, RoomActions } from '../hooks/useRoom'
 import { modKeyLabel } from '@/lib/envLabel'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { Textarea } from '@/components/ui/textarea'
 import { PersonSelect } from './PersonSelect'
+import { OfflineStrip } from './room/OfflineStrip'
 import { PersonAvatar } from './room/PersonAvatar'
 import { StatusDot } from './room/StatusDot'
 import { minutesLeft, useNow } from './room/useNow'
@@ -81,12 +82,16 @@ export function SteerBox({
   state,
   user,
   actions,
+  conn,
 }: {
   state: RoomState
   user: CurrentUser
   actions: RoomActions
+  conn?: ConnState
 }) {
   const [text, setText] = useState('')
+  const [sending, setSending] = useState(false)
+  const [offline, setOffline] = useState(false)
   const [granting, setGranting] = useState(false)
   const [focused, setFocused] = useState(false)
   const [section, setSection] = useState<HTMLElement | null>(null)
@@ -123,20 +128,29 @@ export function SteerBox({
   const mod = modKeyLabel()
   const left = minutesLeft(state.driver?.lease_until, now)
 
-  const send = () => {
-    if (!text.trim() || noDriver) return
-    actions.steer(text.trim())
-    setText('')
-    if (ref.current) ref.current.style.height = ''
+  // The field clears only once the server took the message; a failed send keeps the words
+  // and puts the cursor back in the field.
+  const send = async () => {
+    if (!text.trim() || noDriver || sending) return
+    setSending(true)
+    const ok = await actions.steer(text.trim())
+    setSending(false)
+    setOffline(!ok)
+    if (ok) {
+      setText('')
+      if (ref.current) ref.current.style.height = ''
+    } else {
+      ref.current?.focus()
+    }
   }
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    send()
+    void send()
   }
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
       e.preventDefault()
-      send()
+      void send()
     }
   }
   // Grow with the text, up to about six lines.
@@ -268,15 +282,19 @@ export function SteerBox({
               type="submit"
               variant={isDriver ? 'default' : 'secondary'}
               className="ml-auto"
-              disabled={!text.trim()}
+              disabled={!text.trim() || sending}
               aria-keyshortcuts={`${mod === '⌘' ? 'Meta' : 'Control'}+Enter`}
             >
-              {isDriver ? 'Send to agent' : 'Suggest'}
-              <Kbd aria-hidden="true">{mod}⏎</Kbd>
+              {sending ? 'Sending…' : isDriver ? 'Send to agent' : 'Suggest'}
+              {!sending && <Kbd aria-hidden="true">{mod}⏎</Kbd>}
             </Button>
           </div>
         )}
       </form>
+      {offline && <OfflineStrip onRetry={() => void send()} disabled={sending} />}
+      {!offline && conn === 'reconnecting' && (
+        <p className="m-0 text-xs text-muted-foreground">Reconnecting — messages are kept until the room is back</p>
+      )}
     </section>
   )
 }

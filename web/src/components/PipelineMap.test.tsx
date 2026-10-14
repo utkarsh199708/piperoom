@@ -131,3 +131,15 @@ describe('PipelineMap — lane', () => {
     expect(screen.queryByRole('button', { name: 'Trace one record' })).not.toBeInTheDocument()
   })
 })
+
+describe('PipelineMap — pipeline not configured', () => {
+  it('shows the dashed card with a heading and Try again, not the skeleton', () => {
+    const retry = vi.fn()
+    render(<PipelineMap topology={null} pipelineId="payments" notFound onRetry={retry} />)
+    expect(screen.getByRole('heading', { name: 'Pipeline "payments" is not configured' })).toBeInTheDocument()
+    expect(screen.getByText(/owners\.yaml/)).toBeInTheDocument()
+    expect(screen.queryByText('Loading topology…')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(retry).toHaveBeenCalledTimes(1)
+  })
+})

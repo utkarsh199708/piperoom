@@ -95,3 +95,18 @@ describe('LoginScreen', () => {
     expect(screen.getByText(/no users to sign in as/)).toBeInTheDocument()
   })
 })
+
+describe('LoginScreen — why you are here', () => {
+  it('names the room after an expired session', () => {
+    render(<LoginScreen onPick={vi.fn()} busy={false} notice={{ kind: 'expired', title: 'orders stale' }} />)
+    expect(screen.getByText('Your session ended \u2014 sign in to return to \u201corders stale\u201d.')).toBeInTheDocument()
+  })
+  it('explains a sign-in in another tab', () => {
+    render(<LoginScreen onPick={vi.fn()} busy={false} notice={{ kind: 'replaced', title: 'orders stale' }} />)
+    expect(screen.getByText(/signed in as another user in a different tab/)).toBeInTheDocument()
+  })
+  it('shows nothing without a notice', () => {
+    render(<LoginScreen onPick={vi.fn()} busy={false} />)
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+})
