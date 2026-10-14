@@ -92,3 +92,10 @@ describe('agentPill', () => {
     })
   })
 })
+
+describe('agentPill queued and log_full', () => {
+  it('say what is happening instead of the raw state', () => {
+    expect(agentPill(room({ agent_status: { state: 'queued' } }))).toMatchObject({ tone: 'agent', text: 'Queued · waiting for an agent slot' })
+    expect(agentPill(room({ agent_status: { state: 'log_full' } }))).toMatchObject({ tone: 'fail', text: 'Log full · agent stopped' })
+  })
+})
