@@ -33,6 +33,12 @@ users:
 (`DELETE /api/rooms/{id}`, see Room limits). It is false when left out, grants nothing else, and is not in
 `owners.yaml`: an IdP user who maps to no users.yaml entry is never an admin.
 
+A users.yaml entry may also carry `slack_id: U0...` (the person's Slack member id). It is used only by the Slack
+bridge's allow-listed paging (`internal/slackbridge`, `PagingOptions`): the bridge pages a person on Slack only when
+their entry names a `slack_id`; it is never shown in the UI or returned by `/api/me` or `/api/people`, and an entry
+without one means the person cannot be paged. Implemented by A3 (owners lookup) and A5 (`cmd/server` wiring of
+`slackbridge.PagingOptions`), consumed by C12 #130.
+
 No cookie and no `X-User` → `401 session_expired`; an `X-User` naming no known user → `401 unauthenticated`. The
 WebSocket uses the session cookie (or `X-User` for non-browser clients in dev); `?user=` is gone.
 `dev/users.yaml` (who may approve a layer) and the `layers:` map in `dev/owners.yaml` (owner shown on the pipeline
@@ -99,7 +105,7 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
   (`events.Actor`, also inside the export) the key is **omitted when false** (`omitempty`), so events written before
   the field, and exports of old rooms, are unchanged; a missing `verified` counts as `false` everywhere. The other
   objects always carry `true` or `false`. Clients show an unverified person with a badge and their id or email next
-  to the name. **The web badge is pending (A6 follow-up)**, so security audit A-ID-2 stays open until it ships. An
+  to the name. The web badge ships in R3 (#135). An
   IdP name that looks like a `users.yaml` person is shown as `"<name> (<email>)"`, or `"<name> (<id>)"` without a
   verified email, and the login is logged, not refused. "Looks like": the whole name, or the name with its bracketed
   parts removed, equals a `users.yaml` id, name or email after the design §2.1 skeleton (default-ignorable code points
@@ -143,6 +149,19 @@ Exactly `events.Event` from `internal/events/events.go`:
   "at": "2026-10-11T10:59:03Z" }
 ```
 `actor.verified` is decided when the event is written (see **Verified people** under Login).
+
+`room.created` (`events.RoomCreatedPayload`) carries, besides `title`, `severity`, `pipeline_id`, `alert`,
+`alert_source`, `dedup_key` and `shadow`, the server's verification of the alert **sender** (R3 #135 contract change
+request; A5 implements):
+
+- `alert_verified` (bool, omitted when false): `true` when the server checked the sender before opening the room, a
+  signed route's signature or token (`internal/alertin`) or the built-in watcher. `false` for the unsigned dev
+  webhook (`POST /api/alerts/webhook`) and for rooms not opened by an alert. It vouches for the sender, not for the
+  alert's text.
+- `alert_verified_by` (string, omitted when empty): how the sender was checked, one of `bearer_token`, `hmac`,
+  `hmac_timestamp`, `header_token` or `watcher`. Empty when `alert_verified` is false.
+
+A client reads `alert_verified === true` and keeps any `alert_source` table only for the label.
 
 ### Agent usage (`agent.usage`)
 One event per model request the agent sends (design `docs/design/cost.md`), actor `agent`: every investigation
@@ -232,12 +251,13 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 |---|---|---|---|---|
 | GET | `/rooms/{id}` | – | `302` | R4. Deep link (the room link Slack posts); outside `/api`, so no JSON. Signed in, or in dev mode: `302 /#/rooms/{id}`. Signed out in `oidc` mode: `302 /auth/login?return=/rooms/{id}`, and the callback lands back on the link. `{id}` must match `^[A-Za-z0-9_-]{1,64}$`; anything else is never redirected and falls to the web UI or `404`. `HEAD` answers the same |
 | GET | `/healthz` | – | `{status: "ok", version}` | outside `/api`, no auth, exempt from the Host allow-list (probes). `version` (R0; server R9) is the build version linked in with `-ldflags "-X piperoom/internal/version.Version=<v>"` (`internal/version`), `"dev"` for a plain `go build`. Liveness only: it checks nothing else. `GET /readyz` is unchanged (`{status, checks}`, `503` when the store does not answer) |
+| GET | `/metrics` | – | Prometheus text format (0.0.4): counters/histogram `piperoom_http_requests_total{method,route,code}`, `piperoom_http_request_duration_seconds{method,route,code}` (histogram); gauges `piperoom_ws_connections`, `piperoom_agent_slots_in_use`, `piperoom_agent_rooms_queued`, `piperoom_rooms_open`, `piperoom_goroutines`, `piperoom_uptime_seconds` (all per replica) | R9 (#142). Outside `/api`, **no auth**, skips the Host allow-list like `/healthz` so a scraper can reach pods by IP; a deployment that publishes the server port beyond the cluster restricts `/metrics` at its proxy or ingress. `route` is the chi route pattern (`/api/rooms/{id}`, or `unmatched`), never a concrete path; `code` is the class (`2xx`…`5xx`); no label holds a room or user id. Gauges come from in-memory state (no store call per scrape) |
 | GET | `/api/people` | – | `[{id, name, email?, verified}]` | after auth PR 3: the people a driver may grant control or hand off to: `users.yaml` users plus members with a live session (`LookupPerson`). `email` only for IdP users; pickers show `id` or `email` next to `name`. `verified` is `true` for `users.yaml` users only. Members only: a viewer gets `403 viewer` (the list holds emails and viewers cannot grant or hand off anyway) |
 | GET | `/api/me` | – | `{id,name,layers,verified}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request; `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise); `admin: true` when this user has `admin: true` in users.yaml (omitted otherwise); `verified` as for event actors |
 | GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first; with `tenants:` only the rooms of your tenants (see Tenants above) |
 | POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation`. R4: `title` at most 200 characters (Unicode code points), else `400 validation` (the message gives the length and the limit, never the text). An alert's title is clipped to 200 with `…` instead, so an alert is never refused for it |
 | POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |
-| POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert (label, `PAGERDUTY_SERVICES` map, owners match, or `DEFAULT_ALERT_PIPELINE`); the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name) and `dedup_key`. With a `tenants:` block in `owners.yaml` the `200`/`201` body is `{"room_id": "r_…", "created": true\|false}` instead of the `RoomSnapshot`: a source secret is shared by every tenant, so the reply carries no room content. |
+| POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert (label, `PAGERDUTY_SERVICES` map, owners match, or `DEFAULT_ALERT_PIPELINE`); the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name), `dedup_key`, and `alert_verified: true` with `alert_verified_by` (see Event under Objects; R3 #135, A5 implements). With a `tenants:` block in `owners.yaml` the `200`/`201` body is `{"room_id": "r_…", "created": true\|false}` instead of the `RoomSnapshot`: a source secret is shared by every tenant, so the reply carries no room content. |
 | GET | `/api/rooms/{id}` | – | `RoomSnapshot` | |
 | GET | `/api/rooms/{id}/events?after=0&limit=500` | – | `{events:[Event], last_seq}` | limit max 1000; `events` is `[]` when nothing is after `after` |
 | POST | `/api/rooms/{id}/comments` | `{step_id?, text}` | `Event` | `@agent` in text sets `mentions_agent`. R4: `text` at most 4000 characters (code points), else `400 validation` |
@@ -276,6 +296,13 @@ the room's "nobody is driving" signal and moves nothing: the driver stays `snaps
 renews the lease with a `control.granted` to themselves (which ends the signal), and anyone may take control with
 `control/grant`. Not written for a closed room or a room with no driver. A client shows the signal from the last
 `control.lease_expired` whose `lease_until` equals the driver's current `lease_until`.
+
+Paging on lease expiry (C12 #130): `PIPEROOM_SLACK_PAGE_NO_DRIVER` is a comma-separated list of the on-call Slack
+member IDs (each `^[UW][A-Z0-9]{2,}$`, for example `U012ABC,W0XYZ99`) the Slack bridge pages when
+`control.lease_expired` is written; empty (the default) means no paging on lease expiry, and a value that is not a
+Slack member ID stops the server at start (`config.ParseSlackMemberIDs`). Read by `config.Load()` into
+`Config.SlackPageNoDriver`; consumed by `cmd/server` when building `slackbridge.PagingOptions` (`NoDriver`; A5
+follow-up), C12 #130.
 
 Proposals: a step's action must implement `actions.Scoped`; the server calls `Validate` and then
 `CheckScope(room's pipeline, params)` when the proposal is created and again right before `Execute`. Params are

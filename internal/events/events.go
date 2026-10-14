@@ -8,7 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
+	"unicode/utf8"
 )
 
 // Type names an event. Values are stable strings stored in the database and
@@ -249,6 +251,46 @@ type TruncatedData struct {
 	Truncated     bool   `json:"truncated"` // always true
 	OriginalBytes int64  `json:"original_bytes"`
 	Preview       string `json:"preview"`
+}
+
+// TruncateData is the one implementation of the Data cap for the room
+// (internal/room, A5 follow-up) and the agent (R11 #136), so both produce the
+// same TruncatedData bytes. It returns raw unchanged and false when len(raw)
+// <= max or max <= 0. Otherwise it returns the encoded TruncatedData (the
+// start of raw as Preview, cut at a UTF-8 boundary; JSON escaping can grow
+// the preview, so it is halved until the whole object fits in max bytes) and
+// true. An empty preview is returned when nothing fits.
+func TruncateData(raw json.RawMessage, max int) (json.RawMessage, bool) {
+	if max <= 0 || len(raw) <= max {
+		return raw, false
+	}
+	td := TruncatedData{Truncated: true, OriginalBytes: int64(len(raw))}
+	n := max
+	for {
+		td.Preview = cutUTF8(string(raw), n)
+		out, err := json.Marshal(td)
+		if err != nil {
+			// Unreachable: TruncatedData holds only a bool, an int64 and a
+			// string, which encoding/json always encodes (invalid UTF-8 in
+			// the preview becomes U+FFFD).
+			return json.RawMessage(`{"truncated":true,"original_bytes":` + strconv.Itoa(len(raw)) + `,"preview":""}`), true
+		}
+		if len(out) <= max || n == 0 {
+			return json.RawMessage(out), true
+		}
+		n /= 2
+	}
+}
+
+// cutUTF8 returns at most n bytes of s, never splitting a rune.
+func cutUTF8(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // AgentMessagePayload is plain text the agent says to the room.

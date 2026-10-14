@@ -66,6 +66,16 @@ type Alert struct {
 	Raw        json.RawMessage `json:"raw,omitempty"`
 	// PipelineMap is a text rendering of the topology, given to the model up front.
 	PipelineMap string `json:"pipeline_map"`
+	// Description is the alert's human description (annotation, summary or
+	// message), selected and filled once by internal/alertin from the first
+	// firing alert of the payload. It is untrusted text: the agent masks it
+	// (redact, untrusted-data wrapper) before it enters any prompt.
+	// Consumed by R5b (#140). Empty for rooms not opened by an alert.
+	Description string `json:"description,omitempty"`
+	// Labels are the alert's labels (Alertmanager labels, Grafana/Datadog tags,
+	// PagerDuty custom details), same source and trust level as Description.
+	// Consumed by R5b (#140).
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // Deps are the agent's collaborators.
@@ -99,6 +109,11 @@ type Options struct {
 	// hand-off may have created it); the count so far is kept. Shadow rooms
 	// set it lower.
 	TokenBudget int64
+	// MaxToolDataBytes caps a tool Result.Data, as encoded JSON bytes, before
+	// it enters an event (events.TruncateData); 0 means 64 KiB. cmd/server
+	// and internal/wiring pass config.Limits.EventMaxDataBytes so the agent
+	// and the room agree on one limit. Consumed by R11 (#136).
+	MaxToolDataBytes int64
 }
 
 // Runner is implemented by A4 in run.go:
