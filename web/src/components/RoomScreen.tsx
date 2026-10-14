@@ -8,6 +8,8 @@ import { useTopology } from '../hooks/useTopology'
 import { useCurrentUser } from '../context/user'
 import { canClose, canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
 import { ageLabel } from '../lib/time'
+import { handoffInFlight } from '../lib/handoff'
+import { useNow } from './room/useNow'
 import { PipelineMap } from './PipelineMap'
 import { Timeline } from './Timeline'
 import { SteerBox } from './SteerBox'
@@ -52,6 +54,7 @@ export function RoomScreen() {
   const [closeOpen, setCloseOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const now = useNow(5_000) // a request past expires_at stops counting as in flight
 
   const headerMembers = useMemo(() => {
     const ids = new Set<string>()
@@ -196,6 +199,7 @@ export function RoomScreen() {
             onInvite={invite}
             onExport={viewer ? undefined : exportTranscript}
             exporting={exporting}
+            handoffBusy={state ? handoffInFlight(state, now) !== null : false}
           />
 
           <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">

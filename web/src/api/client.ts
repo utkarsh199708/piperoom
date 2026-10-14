@@ -8,10 +8,12 @@
 // the server answers 403 proxy_identity (docs/design/auth.md section 5.2).
 import type {
   ApiError,
+  AuthUser,
   Event,
   EventsPage,
   Me,
   Person,
+  PipelineInfo,
   RoomSnapshot,
   Topology,
 } from './types'
@@ -128,6 +130,9 @@ export const api = {
   // Dev mode only: issues the piperoom_session cookie for a users.yaml user.
   devLogin: (user: string) =>
     request<void>('/auth/dev-login', { method: 'POST', body: JSON.stringify({ user }) }),
+  // Dev mode only (404 in oidc mode); needs no session: it is called before login.
+  authUsers: () => request<AuthUser[]>('/auth/users'),
+  pipelines: () => request<PipelineInfo[]>('/api/pipelines'),
   logout: () => request<void>('/auth/logout', { method: 'POST' }),
   rooms: () => request<RoomSnapshot[]>('/api/rooms'),
   createRoom: (body: { title: string; severity: string; pipeline_id: string }) =>

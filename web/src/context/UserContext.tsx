@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { DEFAULT_USER_ID, findUser } from '../dev/users'
+import { DEFAULT_USER_ID, findUser } from '../fixtures/users'
 import type { CurrentUser } from '../state/permissions'
 import { ApiClientError, api, isFixtures, probeSession } from '../api/client'
 import {

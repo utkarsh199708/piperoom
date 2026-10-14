@@ -1,62 +1,51 @@
-import { useId, useState } from "react";
-import { emptyStateFor } from "../lib/emptyState";
-import type { FormEvent } from "react";
-import { Check, ChevronRight, X } from "lucide-react";
-import type {
-  AgentMessageState,
-  CommentState,
-  StepState,
-  ToolCallState,
-} from "../state/types";
-import { clockTime } from "../lib/time";
-import { argTags, formatMs, toolLayer } from "../lib/toolLayers";
-import { cn } from "@/lib/utils";
-import { Badge, layerVariant } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Kbd } from "@/components/ui/kbd";
-import { Progress } from "@/components/ui/progress";
-import { PersonAvatar } from "./room/PersonAvatar";
+import { useId, useState } from 'react'
+import { emptyStateFor } from '../lib/emptyState'
+import type { FormEvent } from 'react'
+import { Check, ChevronRight, X } from 'lucide-react'
+import type { AgentMessageState, CommentState, StepState, ToolCallState } from '../state/types'
+import { clockTime } from '../lib/time'
+import { argTags, formatMs, toolLayer } from '../lib/toolLayers'
+import { cn } from '@/lib/utils'
+import { Badge, layerVariant } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Kbd } from '@/components/ui/kbd'
+import { Progress } from '@/components/ui/progress'
+import { PersonAvatar } from './room/PersonAvatar'
 
-const AGENT = { kind: "agent", id: "agent", name: "Agent" } as const;
+const AGENT = { kind: 'agent', id: 'agent', name: 'Agent' } as const
 
 function ToolBadge({ tool }: { tool: string }) {
   return (
     <Badge variant={layerVariant(toolLayer(tool))} mono>
       {tool}
     </Badge>
-  );
+  )
 }
 
 function ArgTag({ children }: { children: string }) {
-  return (
-    <span className="whitespace-nowrap font-mono text-[11.5px] leading-4 text-muted-foreground">
-      {children}
-    </span>
-  );
+  return <span className="whitespace-nowrap font-mono text-[11.5px] leading-4 text-muted-foreground">{children}</span>
 }
 
 function totalMs(step: StepState): number | null {
-  const times = step.tool_calls
-    .map((t) => t.took_ms)
-    .filter((m): m is number => m != null);
-  return times.length > 0 ? times.reduce((a, b) => a + b, 0) : null;
+  const times = step.tool_calls.map((t) => t.took_ms).filter((m): m is number => m != null)
+  return times.length > 0 ? times.reduce((a, b) => a + b, 0) : null
 }
 
 function rawJson(t: ToolCallState): string {
-  const raw: Record<string, unknown> = { input: t.input };
-  if (t.data !== undefined) raw.data = t.data;
+  const raw: Record<string, unknown> = { input: t.input }
+  if (t.data !== undefined) raw.data = t.data
   try {
-    return JSON.stringify(raw, null, 2);
+    return JSON.stringify(raw, null, 2)
   } catch {
-    return String(raw);
+    return String(raw)
   }
 }
 
 // One tool call as evidence: tool badge, arg tags, the summary the agent got back,
 // and the raw input/result behind a <details>. Plain text only (never HTML or links).
 function Evidence({ step }: { step: StepState }) {
-  if (step.tool_calls.length === 0) return null;
+  if (step.tool_calls.length === 0) return null
   return (
     <ul className="m-0 flex list-none flex-col gap-3 p-0">
       {step.tool_calls.map((t) => (
@@ -67,18 +56,14 @@ function Evidence({ step }: { step: StepState }) {
               <ArgTag key={a}>{a}</ArgTag>
             ))}
             {t.took_ms != null && (
-              <span className="ml-auto font-mono text-xs text-subtle-foreground">
-                {formatMs(t.took_ms)}
-              </span>
+              <span className="ml-auto font-mono text-xs text-subtle-foreground">{formatMs(t.took_ms)}</span>
             )}
           </div>
           {t.summary != null && (
             <pre
               className={cn(
-                "m-0 whitespace-pre-wrap break-words rounded-md border bg-muted px-2.5 py-2 font-mono text-xs leading-[17px]",
-                t.is_error
-                  ? "border-destructive/50 text-destructive-fg"
-                  : "border-border text-muted-foreground",
+                'm-0 whitespace-pre-wrap break-words rounded-md border bg-muted px-2.5 py-2 font-mono text-xs leading-[17px]',
+                t.is_error ? 'border-destructive/50 text-destructive-fg' : 'border-border text-muted-foreground',
               )}
             >
               {t.summary}
@@ -97,11 +82,11 @@ function Evidence({ step }: { step: StepState }) {
         </li>
       ))}
     </ul>
-  );
+  )
 }
 
 function AgentMessageList({ messages }: { messages: AgentMessageState[] }) {
-  if (messages.length === 0) return null;
+  if (messages.length === 0) return null
   return (
     <div className="flex flex-col gap-1.5">
       {messages.map((m, i) => (
@@ -114,7 +99,7 @@ function AgentMessageList({ messages }: { messages: AgentMessageState[] }) {
         </p>
       ))}
     </div>
-  );
+  )
 }
 
 function CommentThread({
@@ -122,20 +107,20 @@ function CommentThread({
   onReply,
   readOnly = false,
 }: {
-  comment: CommentState;
-  onReply: (text: string) => void;
-  readOnly?: boolean;
+  comment: CommentState
+  onReply: (text: string) => void
+  readOnly?: boolean
 }) {
-  const [open, setOpen] = useState(false);
-  const [text, setText] = useState("");
+  const [open, setOpen] = useState(false)
+  const [text, setText] = useState('')
 
   const submit = (e: FormEvent) => {
-    e.preventDefault();
-    if (!text.trim()) return;
-    onReply(text.trim());
-    setText("");
-    setOpen(false);
-  };
+    e.preventDefault()
+    if (!text.trim()) return
+    onReply(text.trim())
+    setText('')
+    setOpen(false)
+  }
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -144,13 +129,9 @@ function CommentThread({
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2">
             <strong className="font-medium">{comment.author.name}</strong>
-            <span className="text-xs text-subtle-foreground">
-              {clockTime(comment.at)}
-            </span>
+            <span className="text-xs text-subtle-foreground">{clockTime(comment.at)}</span>
           </div>
-          <p className="m-0 break-words text-muted-foreground">
-            {comment.text}
-          </p>
+          <p className="m-0 break-words text-muted-foreground">{comment.text}</p>
         </div>
       </div>
       {comment.replies.map((r, i) => (
@@ -159,9 +140,7 @@ function CommentThread({
           <div className="min-w-0">
             <div className="flex flex-wrap items-baseline gap-x-2">
               <strong className="font-medium">Agent</strong>
-              <span className="text-xs text-subtle-foreground">
-                {clockTime(r.at)}
-              </span>
+              <span className="text-xs text-subtle-foreground">{clockTime(r.at)}</span>
             </div>
             <p className="m-0 break-words text-muted-foreground">{r.text}</p>
           </div>
@@ -181,27 +160,22 @@ function CommentThread({
           </Button>
         </form>
       ) : (
-        <Button
-          variant="link"
-          size="sm"
-          className="ml-7 w-fit text-xs"
-          onClick={() => setOpen(true)}
-        >
+        <Button variant="link" size="sm" className="ml-7 w-fit text-xs" onClick={() => setOpen(true)}>
           Reply
         </Button>
       )}
     </div>
-  );
+  )
 }
 
 function ReplyBox({ onSubmit }: { onSubmit: (text: string) => void }) {
-  const [text, setText] = useState("");
+  const [text, setText] = useState('')
   const submit = (e: FormEvent) => {
-    e.preventDefault();
-    if (!text.trim()) return;
-    onSubmit(text.trim());
-    setText("");
-  };
+    e.preventDefault()
+    if (!text.trim()) return
+    onSubmit(text.trim())
+    setText('')
+  }
   return (
     <form className="flex items-center gap-2" onSubmit={submit}>
       <Input
@@ -210,31 +184,24 @@ function ReplyBox({ onSubmit }: { onSubmit: (text: string) => void }) {
         placeholder="Comment on this step…"
         aria-label="Comment on this step"
       />
-      <Button
-        type="submit"
-        variant="secondary"
-        size="sm"
-        disabled={!text.trim()}
-      >
+      <Button type="submit" variant="secondary" size="sm" disabled={!text.trim()}>
         Comment
       </Button>
     </form>
-  );
+  )
 }
 
 function StepNumber({ n, error }: { n: number; error: boolean }) {
   return (
     <span
       className={cn(
-        "inline-flex size-[22px] shrink-0 items-center justify-center rounded-full font-mono text-[11px] font-medium leading-none",
-        error
-          ? "bg-destructive-subtle text-destructive-fg"
-          : "bg-muted text-subtle-foreground",
+        'inline-flex size-[22px] shrink-0 items-center justify-center rounded-full font-mono text-[11px] font-medium leading-none',
+        error ? 'bg-destructive-subtle text-destructive-fg' : 'bg-muted text-subtle-foreground',
       )}
     >
       {error ? <X className="size-3" aria-label="failed" /> : n}
     </span>
-  );
+  )
 }
 
 // What sits under a step row: its agent messages, its comment threads and the comment box.
@@ -245,28 +212,21 @@ function StepExtras({
   readOnly,
   showReplyBox,
 }: {
-  step: StepState;
-  comments: CommentState[];
-  onComment: (text: string, stepId?: string) => void;
-  readOnly: boolean;
-  showReplyBox: boolean;
+  step: StepState
+  comments: CommentState[]
+  onComment: (text: string, stepId?: string) => void
+  readOnly: boolean
+  showReplyBox: boolean
 }) {
   return (
     <>
       <AgentMessageList messages={step.messages} />
       {comments.map((c) => (
-        <CommentThread
-          key={c.id}
-          comment={c}
-          onReply={(t) => onComment(t, step.id)}
-          readOnly={readOnly}
-        />
+        <CommentThread key={c.id} comment={c} onReply={(t) => onComment(t, step.id)} readOnly={readOnly} />
       ))}
-      {!readOnly && showReplyBox && (
-        <ReplyBox onSubmit={(t) => onComment(t, step.id)} />
-      )}
+      {!readOnly && showReplyBox && <ReplyBox onSubmit={(t) => onComment(t, step.id)} />}
     </>
-  );
+  )
 }
 
 // A finished step: one compact row (number, title, tool, args, time, check). The row opens
@@ -279,19 +239,19 @@ function DoneStep({
   onComment,
   readOnly,
 }: {
-  step: StepState;
-  n: number;
-  comments: CommentState[];
-  onComment: (text: string, stepId?: string) => void;
-  readOnly: boolean;
+  step: StepState
+  n: number
+  comments: CommentState[]
+  onComment: (text: string, stepId?: string) => void
+  readOnly: boolean
 }) {
-  const [open, setOpen] = useState(false);
-  const regionId = useId();
-  const first = step.tool_calls[0];
-  const tags = first ? argTags(first.input) : [];
-  const failed = step.tool_calls.some((t) => t.is_error);
-  const ms = totalMs(step);
-  const more = step.tool_calls.length - 1;
+  const [open, setOpen] = useState(false)
+  const regionId = useId()
+  const first = step.tool_calls[0]
+  const tags = first ? argTags(first.input) : []
+  const failed = step.tool_calls.some((t) => t.is_error)
+  const ms = totalMs(step)
+  const more = step.tool_calls.length - 1
 
   return (
     <li className="flex flex-col gap-2">
@@ -304,64 +264,38 @@ function DoneStep({
       >
         <ChevronRight
           aria-hidden="true"
-          className={cn(
-            "size-3.5 shrink-0 text-subtle-foreground transition-transform motion-reduce:transition-none",
-            open && "rotate-90",
-          )}
+          className={cn('size-3.5 shrink-0 text-subtle-foreground transition-transform motion-reduce:transition-none', open && 'rotate-90')}
         />
         <StepNumber n={n} error={failed} />
-        <span className="min-w-0 flex-1 truncate text-sm font-medium sm:flex-none">
-          {step.title}
-        </span>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium sm:flex-none">{step.title}</span>
         {first && <ToolBadge tool={first.tool} />}
-        {more > 0 && (
-          <span className="font-mono text-xs text-subtle-foreground">
-            +{more}
-          </span>
-        )}
+        {more > 0 && <span className="font-mono text-xs text-subtle-foreground">+{more}</span>}
         {tags[0] && (
-          <span className="hidden min-w-0 truncate font-mono text-[11.5px] text-muted-foreground md:inline">
-            {tags[0]}
-          </span>
+          <span className="hidden min-w-0 truncate font-mono text-[11.5px] text-muted-foreground md:inline">{tags[0]}</span>
         )}
         <span
           className={cn(
-            "ml-auto hidden shrink-0 whitespace-nowrap font-mono text-xs sm:inline",
-            failed ? "text-destructive-fg" : "text-subtle-foreground",
+            'ml-auto hidden shrink-0 whitespace-nowrap font-mono text-xs sm:inline',
+            failed ? 'text-destructive-fg' : 'text-subtle-foreground',
           )}
         >
-          {failed ? "error" : ms != null ? formatMs(ms) : ""}
+          {failed ? 'error' : ms != null ? formatMs(ms) : ''}
         </span>
-        {!failed && (
-          <Check
-            aria-label="done"
-            className="size-3.5 shrink-0 text-success-foreground max-sm:ml-auto"
-          />
-        )}
+        {!failed && <Check aria-label="done" className="size-3.5 shrink-0 text-success-foreground max-sm:ml-auto" />}
       </button>
 
-      <div
-        id={regionId}
-        hidden={!open}
-        className={cn("ml-10 flex-col gap-3 pb-1", open ? "flex" : "hidden")}
-      >
+      <div id={regionId} hidden={!open} className={cn("ml-10 flex-col gap-3 pb-1", open ? "flex" : "hidden")}>
         <Evidence step={step} />
         {!readOnly && <ReplyBox onSubmit={(t) => onComment(t, step.id)} />}
       </div>
 
       {(step.messages.length > 0 || comments.length > 0) && (
         <div className="ml-10 flex flex-col gap-2.5 pb-1">
-          <StepExtras
-            step={step}
-            comments={comments}
-            onComment={onComment}
-            readOnly={readOnly}
-            showReplyBox={false}
-          />
+          <StepExtras step={step} comments={comments} onComment={onComment} readOnly={readOnly} showReplyBox={false} />
         </div>
       )}
     </li>
-  );
+  )
 }
 
 // The step the agent is on right now: expanded, a spinner and a 2px indeterminate bar.
@@ -373,14 +307,14 @@ function LiveStep({
   onComment,
   readOnly,
 }: {
-  step: StepState;
-  n: number;
-  comments: CommentState[];
-  onComment: (text: string, stepId?: string) => void;
-  readOnly: boolean;
+  step: StepState
+  n: number
+  comments: CommentState[]
+  onComment: (text: string, stepId?: string) => void
+  readOnly: boolean
 }) {
-  const first = step.tool_calls[0];
-  const tags = first ? argTags(first.input) : [];
+  const first = step.tool_calls[0]
+  const tags = first ? argTags(first.input) : []
   return (
     <li className="flex flex-col gap-2.5 rounded-lg border border-input bg-card px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
@@ -393,9 +327,7 @@ function LiveStep({
         <h3 className="m-0 text-sm font-medium">{step.title}</h3>
         {first && <ToolBadge tool={first.tool} />}
         {tags[0] && <ArgTag>{tags[0]}</ArgTag>}
-        <span className="ml-auto font-mono text-xs text-subtle-foreground">
-          running
-        </span>
+        <span className="ml-auto font-mono text-xs text-subtle-foreground">running</span>
       </div>
       <Progress
         aria-hidden="true"
@@ -403,15 +335,9 @@ function LiveStep({
         indicatorClassName="rounded-sm bg-agent"
       />
       <Evidence step={step} />
-      <StepExtras
-        step={step}
-        comments={comments}
-        onComment={onComment}
-        readOnly={readOnly}
-        showReplyBox
-      />
+      <StepExtras step={step} comments={comments} onComment={onComment} readOnly={readOnly} showReplyBox />
     </li>
-  );
+  )
 }
 
 export function Timeline({
@@ -424,52 +350,41 @@ export function Timeline({
   onTakeControl,
   agent,
 }: {
-  steps: StepState[];
-  messages: AgentMessageState[];
-  comments: CommentState[];
-  onComment: (text: string, stepId?: string) => void;
+  steps: StepState[]
+  messages: AgentMessageState[]
+  comments: CommentState[]
+  onComment: (text: string, stepId?: string) => void
   /** A viewer reads comments but cannot write any. */
-  readOnly?: boolean;
+  readOnly?: boolean
   /** The agent is working: the last step is the live one. */
-  working?: boolean;
+  working?: boolean
   /** Offered in the empty state when the room has no driver and this person may take control. */
-  onTakeControl?: () => void;
+  onTakeControl?: () => void
   /** The agent's status: the empty state says what it is doing instead of a fixed line. */
-  agent?: { state: string; detail?: string };
+  agent?: { state: string; detail?: string }
 }) {
-  const unanchored = comments.filter((c) => !c.step_id);
+  const unanchored = comments.filter((c) => !c.step_id)
   if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
-    const empty = emptyStateFor(agent);
+    const empty = emptyStateFor(agent)
     return (
       <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border bg-card p-6 text-center">
-        <PersonAvatar
-          actor={AGENT}
-          size={28}
-          className={empty.busy ? "animate-pulse" : "opacity-70"}
-        />
+        <PersonAvatar actor={AGENT} size={28} className={empty.busy ? 'animate-pulse' : 'opacity-70'} />
         <p className="m-0 text-base font-medium">{empty.title}</p>
-        {empty.hint && (
-          <p className="m-0 max-w-[48ch] text-muted-foreground">{empty.hint}</p>
-        )}
+        {empty.hint && <p className="m-0 max-w-[48ch] text-muted-foreground">{empty.hint}</p>}
         {empty.offerSteer && onTakeControl && (
           <p className="m-0 max-w-[48ch] text-muted-foreground">
-            Take control and send a steer to start. A good first steer:
-            &ldquo;check consumer group orders-sync for a stuck
-            partition&rdquo;.
+            Take control and send a steer to start. A good first steer: &ldquo;check consumer group orders-sync for a
+            stuck partition&rdquo;.
           </p>
         )}
         {empty.offerSteer && onTakeControl && (
-          <Button
-            className="mt-1"
-            aria-keyshortcuts="T"
-            onClick={onTakeControl}
-          >
+          <Button className="mt-1" aria-keyshortcuts="T" onClick={onTakeControl}>
             Take control and steer
             <Kbd aria-hidden="true">T</Kbd>
           </Button>
         )}
       </div>
-    );
+    )
   }
 
   return (
@@ -478,8 +393,8 @@ export function Timeline({
 
       <ol className="m-0 flex list-none flex-col gap-0.5 p-0">
         {steps.map((step, i) => {
-          const stepComments = comments.filter((c) => c.step_id === step.id);
-          const live = working && i === steps.length - 1;
+          const stepComments = comments.filter((c) => c.step_id === step.id)
+          const live = working && i === steps.length - 1
           return live ? (
             <LiveStep
               key={step.id}
@@ -498,26 +413,18 @@ export function Timeline({
               onComment={onComment}
               readOnly={readOnly}
             />
-          );
+          )
         })}
       </ol>
 
       {unanchored.length > 0 && (
-        <section
-          aria-label="Room comments"
-          className="flex flex-col gap-2.5 pt-2"
-        >
+        <section aria-label="Room comments" className="flex flex-col gap-2.5 pt-2">
           <h3 className="m-0 text-sm font-medium">Room comments</h3>
           {unanchored.map((c) => (
-            <CommentThread
-              key={c.id}
-              comment={c}
-              onReply={(t) => onComment(t)}
-              readOnly={readOnly}
-            />
+            <CommentThread key={c.id} comment={c} onReply={(t) => onComment(t)} readOnly={readOnly} />
           ))}
         </section>
       )}
     </div>
-  );
+  )
 }
