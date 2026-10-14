@@ -258,7 +258,7 @@ func TestUpdateConnectorConfigValidate(t *testing.T) {
 		{"mixed case secret", `{"connector":"pg-orders-connector","key":"Database.PASSWORD","value":"x"}`, "credential"},
 		{"unknown connector", `{"connector":"pg-inventory-connector","key":"tombstones.on.delete","value":"true"}`, "not found"},
 		{"missing connector", `{"key":"tombstones.on.delete","value":"true"}`, "required"},
-		{"bad json", `{`, "required"},
+		{"bad json", `{`, "decode params"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
