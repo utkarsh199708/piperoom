@@ -210,6 +210,8 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"POST", "/api/rooms/{id}/steer", "/api/rooms/" + f.rb + "/steer", `{"text":"go"}`},
 		{"POST", "/api/rooms/{id}/suggestions/{sid}/send", "/api/rooms/" + f.rb + "/suggestions/g_x/send", ""},
 		{"POST", "/api/rooms/{id}/suggestions/{sid}/decline", "/api/rooms/" + f.rb + "/suggestions/g_x/decline", ""},
+		{"POST", "/api/rooms/{id}/hypothesis", "/api/rooms/" + f.rb + "/hypothesis", `{"verdict":"confirmed"}`},
+		{"POST", "/api/rooms/{id}/nudge", "/api/rooms/" + f.rb + "/nudge", `{"proposal_id":"p_x","layer":"kafka"}`},
 		{"POST", "/api/rooms/{id}/control/request", "/api/rooms/" + f.rb + "/control/request", ""},
 		{"POST", "/api/rooms/{id}/control/grant", "/api/rooms/" + f.rb + "/control/grant", `{"to":"alice"}`},
 		{"POST", "/api/rooms/{id}/close", "/api/rooms/" + f.rb + "/close", `{"resolution":"x"}`},
@@ -233,9 +235,10 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 
 // aggregateRoutes return or act on several pipelines' objects; each filters by
 // tenant and has its own test here (TestRoomListAndMetricsAreFiltered,
-// TestCreateAndAlertRoutingRespectTenants).
+// TestCreateAndAlertRoutingRespectTenants, TestListGatewayTenancyFilter).
 var aggregateRoutes = []string{
 	"GET /api/rooms",
+	"GET /api/rooms/ws",
 	"GET /api/shadow/metrics",
 	"POST /api/rooms",
 	"GET /api/pipelines",
