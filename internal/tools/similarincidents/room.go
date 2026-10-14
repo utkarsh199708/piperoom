@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"piperoom/internal/events"
+	"piperoom/internal/redact"
 	"piperoom/internal/store"
 )
 
@@ -67,7 +68,7 @@ type pastRoom struct {
 // "not shadow". The shadow-agent run itself lives in the shadow log, which this
 // tool never reads.
 func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pastRoom, error) {
-	pr := pastRoom{RoomID: r.ID, PipelineID: r.PipelineID, Title: clipRunes(r.Title, maxTitleBytes), fetched: now}
+	pr := pastRoom{RoomID: r.ID, PipelineID: r.PipelineID, Title: clipRunes(scrub(r.Title), maxTitleBytes), fetched: now}
 	if r.ClosedAt != nil {
 		pr.ClosedAt = *r.ClosedAt
 	}
@@ -86,11 +87,11 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 			}
 			agentTextOK = !p.Shadow
 			if p.Title != "" {
-				pr.Title = clipRunes(p.Title, maxTitleBytes)
+				pr.Title = clipRunes(scrub(p.Title), maxTitleBytes)
 			}
 		case events.RoomClosed:
 			if p, err := events.Decode[events.RoomClosedPayload](e); err == nil {
-				pr.Resolution = clipBytes(p.Resolution, maxFieldBytes)
+				pr.Resolution = clipBytes(scrub(p.Resolution), maxFieldBytes)
 			}
 		case events.ShadowLabelled:
 			// One label per room; the last wins if there were ever two.
@@ -100,7 +101,7 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 			}
 			pr.Layer, pr.Terms = p.ActualLayer, nil
 			for _, x := range p.RootCauseTerms[:min(len(p.RootCauseTerms), maxTerms)] {
-				pr.Terms = append(pr.Terms, clipBytes(x, maxTermBytes))
+				pr.Terms = append(pr.Terms, clipBytes(scrub(x), maxTermBytes))
 			}
 		}
 	}
@@ -113,8 +114,8 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 	}
 	for _, e := range hand {
 		if p, err := events.Decode[events.HandoffCreatedPayload](e); err == nil {
-			pr.WhatBroke = clipBytes(p.Summary.WhatBroke, maxSummaryField)
-			pr.Why = clipBytes(p.Summary.Why, maxSummaryField)
+			pr.WhatBroke = clipBytes(scrub(p.Summary.WhatBroke), maxSummaryField)
+			pr.Why = clipBytes(scrub(p.Summary.Why), maxSummaryField)
 			pr.Open = clipList(p.Summary.Open)
 			pr.Risks = clipList(p.Summary.Risks)
 		}
@@ -130,8 +131,19 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 func clipList(xs []string) []string {
 	var out []string
 	for _, x := range xs[:min(len(xs), maxListItems)] {
-		out = append(out, clipBytes(x, maxSummaryField))
+		out = append(out, clipBytes(scrub(x), maxSummaryField))
 	}
+	return out
+}
+
+// scrub masks secrets in room text before it is indexed. Rooms closed before
+// the room log was redacted (#96) still hold raw hand-offs and tool output;
+// indexing them raw would let a query that guesses a secret confirm it by
+// matching. It runs before clipping so a clip cannot cut a secret into a
+// prefix the redactor no longer recognises. Text already redacted is unchanged
+// (redact.Text is idempotent).
+func scrub(s string) string {
+	out, _ := redact.Text(s)
 	return out
 }
 
@@ -148,7 +160,7 @@ func (pr *pastRoom) addTraces(res []events.Event) {
 		if err != nil || p.Tool == ToolName {
 			continue
 		}
-		fp, masked, ok := analyze(p.Summary)
+		fp, masked, ok := analyze(scrub(p.Summary))
 		if !ok || slices.Contains(pr.Traces, fp) {
 			continue
 		}
