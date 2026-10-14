@@ -1,0 +1,231 @@
+{
+  "profile": "isolation",
+  "short": false,
+  "replicas": 1,
+  "params": {
+    "flood_model_latency": "0s",
+    "flood_subs": "20",
+    "flood_summary_bytes": "2000",
+    "flood_tool_latency": "0s",
+    "flood_tools_per_turn": "8",
+    "pad": "300",
+    "quiet_rooms": "10",
+    "rate": "2",
+    "subs_per_room": "20",
+    "timeout": "5m",
+    "warmup": "3s",
+    "window": "20s"
+  },
+  "started": "2026-10-13T17:32:28.096606291Z",
+  "wall_s": 48.956,
+  "data": {
+    "baseline": {
+      "name": "baseline",
+      "event_to_delivery": {
+        "n": 8000,
+        "min_ms": 2.6,
+        "p50_ms": 12.118,
+        "p95_ms": 66.674,
+        "p99_ms": 105.891,
+        "max_ms": 320.215,
+        "mean_ms": 20.377
+      },
+      "post_to_delivery": {
+        "n": 8000,
+        "min_ms": 3.059,
+        "p50_ms": 12.992,
+        "p95_ms": 94.551,
+        "p99_ms": 215.251,
+        "max_ms": 320.641,
+        "mean_ms": 25.903
+      },
+      "comment_post_latency": {
+        "n": 400,
+        "min_ms": 1.92,
+        "p50_ms": 6.8,
+        "p95_ms": 68.715,
+        "p99_ms": 172.093,
+        "max_ms": 312.678,
+        "mean_ms": 18.367
+      },
+      "event_insert_latency": {
+        "n": 400,
+        "min_ms": 1.369,
+        "p50_ms": 5.537,
+        "p95_ms": 39.008,
+        "p99_ms": 82.733,
+        "max_ms": 311.871,
+        "mean_ms": 12.219
+      },
+      "comments_posted": 400,
+      "comment_errors": 0,
+      "flood_room_events_per_sec": 0,
+      "pool": {
+        "max_conns": 4,
+        "total_conns": 4,
+        "acquired_conns": 0,
+        "idle_conns": 4,
+        "acquires": 28410,
+        "empty_acquires": 26583,
+        "canceled_acquires": 0,
+        "empty_wait_ms": 196819.763,
+        "acquire_ms": 196823.507,
+        "samples": 410,
+        "samples_at_max": 251,
+        "max_acquired": 4,
+        "saturated_ratio": 0.612
+      }
+    },
+    "flood": {
+      "name": "flood",
+      "event_to_delivery": {
+        "n": 8000,
+        "min_ms": 4.371,
+        "p50_ms": 24.131,
+        "p95_ms": 80.079,
+        "p99_ms": 191.263,
+        "max_ms": 567.578,
+        "mean_ms": 34.21
+      },
+      "post_to_delivery": {
+        "n": 8000,
+        "min_ms": 11.382,
+        "p50_ms": 64.618,
+        "p95_ms": 510.542,
+        "p99_ms": 738.279,
+        "max_ms": 920.6,
+        "mean_ms": 116.788
+      },
+      "comment_post_latency": {
+        "n": 400,
+        "min_ms": 3.828,
+        "p50_ms": 51.481,
+        "p95_ms": 407.786,
+        "p99_ms": 731.21,
+        "max_ms": 896.557,
+        "mean_ms": 102.444
+      },
+      "event_insert_latency": {
+        "n": 1157,
+        "min_ms": 1.002,
+        "p50_ms": 12.605,
+        "p95_ms": 45.391,
+        "p99_ms": 91.72,
+        "max_ms": 707.986,
+        "mean_ms": 17.693
+      },
+      "comments_posted": 400,
+      "comment_errors": 0,
+      "flood_room_events_per_sec": 34.96,
+      "pool": {
+        "max_conns": 4,
+        "total_conns": 4,
+        "acquired_conns": 4,
+        "idle_conns": 0,
+        "acquires": 66453,
+        "empty_acquires": 65110,
+        "canceled_acquires": 0,
+        "empty_wait_ms": 624915.297,
+        "acquire_ms": 624918.186,
+        "samples": 417,
+        "samples_at_max": 278,
+        "max_acquired": 4,
+        "saturated_ratio": 0.667
+      }
+    },
+    "flood_room_event_to_delivery": {
+      "n": 15340,
+      "min_ms": 2.185,
+      "p50_ms": 18.995,
+      "p95_ms": 68.073,
+      "p99_ms": 165.315,
+      "max_ms": 822.868,
+      "mean_ms": 27.817
+    },
+    "flood_room_events": 764,
+    "quiet_delivery_p95_ratio": 1.201,
+    "quiet_delivery_p95_delta_ms": 13.405,
+    "quiet_post_to_delivery_p95_ratio": 5.4,
+    "quiet_post_p95_ratio": 5.934,
+    "subs_totals": {
+      "subs": 220,
+      "received": 33820,
+      "bytes": 25750739,
+      "gaps": 0,
+      "dups": 0,
+      "reconnects": 0,
+      "dial_errors": 0,
+      "parse_mismatches": 0,
+      "server_closes": {},
+      "send_buffer_full_closes": 0,
+      "missing_at_end": 0
+    },
+    "server": [
+      {
+        "replica": 0,
+        "pid": 27215,
+        "goroutines": 914,
+        "peak_goroutines": 935,
+        "heap_inuse": 20226048,
+        "peak_heap_inuse": 28868608,
+        "heap_alloc": 15460232,
+        "sys": 48687384,
+        "total_alloc": 389804536,
+        "num_gc": 45,
+        "rss": 71815168,
+        "pool": {
+          "max_conns": 4,
+          "total_conns": 4,
+          "acquired_conns": 0,
+          "idle_conns": 4,
+          "acquires": 67031,
+          "empty_acquires": 65632,
+          "canceled_acquires": 2,
+          "empty_wait_ms": 626021.769,
+          "acquire_ms": 626024.987,
+          "samples": 419,
+          "samples_at_max": 279,
+          "max_acquired": 4,
+          "saturated_ratio": 0.666
+        },
+        "appends": {
+          "n": 1166,
+          "min_ms": 0.016,
+          "p50_ms": 12.543,
+          "p95_ms": 44.641,
+          "p99_ms": 91.72,
+          "max_ms": 707.986,
+          "mean_ms": 17.602
+        },
+        "append_errors": 2,
+        "appends_dropped": 0,
+        "probe_runs": 248,
+        "action_runs": {}
+      }
+    ]
+  },
+  "findings": [
+    "While one room appended 35 events/s, quiet-room event-\u003edelivery p95 went 66.7 -\u003e 80.1 ms (1.20x, +13.4 ms); post-\u003edelivery p95 94.6 -\u003e 510.5 ms (5.40x); comment POST p95 68.7 -\u003e 407.8 ms (5.93x)."
+  ],
+  "checks": [
+    {
+      "name": "every subscriber saw every event once, in order",
+      "ok": true,
+      "detail": "gaps 0 dups 0 missing-at-end 0 parse mismatches 0"
+    },
+    {
+      "name": "comments accepted in both phases",
+      "ok": true,
+      "detail": "baseline 0/400 failed, flood 0/400 failed"
+    },
+    {
+      "name": "the flood room really flooded",
+      "ok": true,
+      "detail": "35 events/s"
+    }
+  ],
+  "loadavg_start_end": [
+    "33.34 24.27 14.73",
+    "33.72 25.93 15.81"
+  ]
+}

@@ -1,0 +1,376 @@
+{
+  "profile": "replay",
+  "short": false,
+  "replicas": 1,
+  "params": {
+    "concurrent": "20",
+    "event_bytes": "600",
+    "join": "200",
+    "join_sizes": "1000,10000,20000",
+    "repeats": "3",
+    "sizes": "1000,10000,20000",
+    "timeout": "5m"
+  },
+  "started": "2026-10-13T17:27:12.001388695Z",
+  "wall_s": 113.047,
+  "data": {
+    "seed_seconds": 22.146,
+    "single": [
+      {
+        "size": 1000,
+        "events": 1002,
+        "time": {
+          "n": 3,
+          "min_ms": 26.651,
+          "p50_ms": 38.461,
+          "p95_ms": 39.858,
+          "p99_ms": 39.858,
+          "max_ms": 39.858,
+          "mean_ms": 34.99
+        },
+        "bytes": 561555,
+        "bytes_per_event": 560.434,
+        "failed": 0
+      },
+      {
+        "size": 10000,
+        "events": 10002,
+        "time": {
+          "n": 3,
+          "min_ms": 384.432,
+          "p50_ms": 581.838,
+          "p95_ms": 675.337,
+          "p99_ms": 675.337,
+          "max_ms": 675.337,
+          "mean_ms": 547.202
+        },
+        "bytes": 5635203,
+        "bytes_per_event": 563.408,
+        "failed": 0
+      },
+      {
+        "size": 20000,
+        "events": 20002,
+        "time": {
+          "n": 3,
+          "min_ms": 830.331,
+          "p50_ms": 1019.227,
+          "p95_ms": 1050.293,
+          "p99_ms": 1050.293,
+          "max_ms": 1050.293,
+          "mean_ms": 966.617
+        },
+        "bytes": 11288862,
+        "bytes_per_event": 564.387,
+        "failed": 0
+      }
+    ],
+    "memory": [
+      {
+        "size": 1000,
+        "clients": 20,
+        "completed": 20,
+        "per_client_time": {
+          "n": 20,
+          "min_ms": 483.353,
+          "p50_ms": 506.685,
+          "p95_ms": 542.93,
+          "p99_ms": 576.983,
+          "max_ms": 576.983,
+          "mean_ms": 515.869
+        },
+        "wall_ms": 579.006,
+        "baseline_heap_inuse": 3719168,
+        "peak_heap_inuse": 9469952,
+        "heap_per_client": 287539,
+        "peak_goroutines": 88,
+        "pool": {
+          "max_conns": 4,
+          "total_conns": 4,
+          "acquired_conns": 1,
+          "idle_conns": 3,
+          "acquires": 99,
+          "empty_acquires": 97,
+          "canceled_acquires": 0,
+          "empty_wait_ms": 8489.993,
+          "acquire_ms": 8489.994,
+          "samples": 58,
+          "samples_at_max": 45,
+          "max_acquired": 4,
+          "saturated_ratio": 0.776
+        },
+        "server_closes": {},
+        "dial_errors": 0,
+        "bytes_per_client": 564835,
+        "gaps_dups_mismatches": 0,
+        "server_rss_after_mb": 42.545
+      },
+      {
+        "size": 10000,
+        "clients": 20,
+        "completed": 20,
+        "per_client_time": {
+          "n": 20,
+          "min_ms": 5487.728,
+          "p50_ms": 5649.681,
+          "p95_ms": 5699.237,
+          "p99_ms": 5710.158,
+          "max_ms": 5710.158,
+          "mean_ms": 5635.533
+        },
+        "wall_ms": 5713.711,
+        "baseline_heap_inuse": 4628480,
+        "peak_heap_inuse": 17604608,
+        "heap_per_client": 648806,
+        "peak_goroutines": 88,
+        "pool": {
+          "max_conns": 4,
+          "total_conns": 4,
+          "acquired_conns": 1,
+          "idle_conns": 3,
+          "acquires": 460,
+          "empty_acquires": 453,
+          "canceled_acquires": 0,
+          "empty_wait_ms": 80339.369,
+          "acquire_ms": 80339.372,
+          "samples": 382,
+          "samples_at_max": 293,
+          "max_acquired": 4,
+          "saturated_ratio": 0.767
+        },
+        "server_closes": {},
+        "dial_errors": 0,
+        "bytes_per_client": 5635347,
+        "gaps_dups_mismatches": 0,
+        "server_rss_after_mb": 44.552
+      },
+      {
+        "size": 20000,
+        "clients": 20,
+        "completed": 20,
+        "per_client_time": {
+          "n": 20,
+          "min_ms": 12310.167,
+          "p50_ms": 12361.4,
+          "p95_ms": 12664.14,
+          "p99_ms": 12680.103,
+          "max_ms": 12680.103,
+          "mean_ms": 12491.619
+        },
+        "wall_ms": 12680.8,
+        "baseline_heap_inuse": 4841472,
+        "peak_heap_inuse": 14516224,
+        "heap_per_client": 483737,
+        "peak_goroutines": 84,
+        "pool": {
+          "max_conns": 4,
+          "total_conns": 4,
+          "acquired_conns": 3,
+          "idle_conns": 1,
+          "acquires": 859,
+          "empty_acquires": 855,
+          "canceled_acquires": 0,
+          "empty_wait_ms": 193191.351,
+          "acquire_ms": 193191.354,
+          "samples": 1076,
+          "samples_at_max": 957,
+          "max_acquired": 4,
+          "saturated_ratio": 0.889
+        },
+        "server_closes": {},
+        "dial_errors": 0,
+        "bytes_per_client": 11289754,
+        "gaps_dups_mismatches": 0,
+        "server_rss_after_mb": 43.749
+      }
+    ],
+    "join": [
+      {
+        "size": 1000,
+        "clients": 200,
+        "completed": 200,
+        "per_client_time": {
+          "n": 200,
+          "min_ms": 3720.36,
+          "p50_ms": 5375.453,
+          "p95_ms": 5602.11,
+          "p99_ms": 5637.859,
+          "max_ms": 5646.798,
+          "mean_ms": 5376.151
+        },
+        "wall_ms": 5652.199,
+        "baseline_heap_inuse": 4726784,
+        "peak_heap_inuse": 31432704,
+        "heap_per_client": 133529,
+        "peak_goroutines": 421,
+        "pool": {
+          "max_conns": 4,
+          "total_conns": 4,
+          "acquired_conns": 4,
+          "idle_conns": 0,
+          "acquires": 609,
+          "empty_acquires": 608,
+          "canceled_acquires": 0,
+          "empty_wait_ms": 1040369.887,
+          "acquire_ms": 1040369.888,
+          "samples": 380,
+          "samples_at_max": 243,
+          "max_acquired": 4,
+          "saturated_ratio": 0.639
+        },
+        "server_closes": {},
+        "dial_errors": 0,
+        "bytes_per_client": 580510,
+        "gaps_dups_mismatches": 0,
+        "server_rss_after_mb": 56.279
+      },
+      {
+        "size": 10000,
+        "clients": 200,
+        "completed": 0,
+        "per_client_time": {
+          "n": 0,
+          "min_ms": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "mean_ms": 0
+        },
+        "wall_ms": 30106.697,
+        "baseline_heap_inuse": 7839744,
+        "peak_heap_inuse": 32194560,
+        "heap_per_client": 121774,
+        "peak_goroutines": 264,
+        "pool": {
+          "max_conns": 4,
+          "total_conns": 4,
+          "acquired_conns": 3,
+          "idle_conns": 1,
+          "acquires": 2597,
+          "empty_acquires": 2595,
+          "canceled_acquires": 194,
+          "empty_wait_ms": 5584015.201,
+          "acquire_ms": 5584015.202,
+          "samples": 1990,
+          "samples_at_max": 1337,
+          "max_acquired": 4,
+          "saturated_ratio": 0.672
+        },
+        "server_closes": {
+          "1008 replay timeout": 199,
+          "error": 1
+        },
+        "dial_errors": 0,
+        "bytes_per_client": 0,
+        "gaps_dups_mismatches": 0,
+        "server_rss_after_mb": 55.226
+      },
+      {
+        "size": 20000,
+        "clients": 200,
+        "completed": 0,
+        "per_client_time": {
+          "n": 0,
+          "min_ms": 0,
+          "p50_ms": 0,
+          "p95_ms": 0,
+          "p99_ms": 0,
+          "max_ms": 0,
+          "mean_ms": 0
+        },
+        "wall_ms": 30050.674,
+        "baseline_heap_inuse": 6086656,
+        "peak_heap_inuse": 36159488,
+        "heap_per_client": 150364,
+        "peak_goroutines": 217,
+        "pool": {
+          "max_conns": 4,
+          "total_conns": 1,
+          "acquired_conns": 1,
+          "idle_conns": 0,
+          "acquires": 2464,
+          "empty_acquires": 2463,
+          "canceled_acquires": 190,
+          "empty_wait_ms": 5668554.525,
+          "acquire_ms": 5668554.526,
+          "samples": 2125,
+          "samples_at_max": 1519,
+          "max_acquired": 4,
+          "saturated_ratio": 0.715
+        },
+        "server_closes": {
+          "1008 replay timeout": 200
+        },
+        "dial_errors": 0,
+        "bytes_per_client": 0,
+        "gaps_dups_mismatches": 0,
+        "server_rss_after_mb": 64.43
+      }
+    ]
+  },
+  "findings": [
+    "Join storm on a 10002-event room: only 0 of 200 subscribers finished the replay; server closes map[1008 replay timeout:199 error:1] (replay timeout is 30 s in internal/ws).",
+    "Join storm on a 20002-event room: only 0 of 200 subscribers finished the replay; server closes map[1008 replay timeout:200] (replay timeout is 30 s in internal/ws).",
+    "New subscriber, 1002-event room: replay p50 38 ms, 0.6 MB on the wire (560 B/event).",
+    "New subscriber, 10002-event room: replay p50 582 ms, 5.6 MB on the wire (563 B/event).",
+    "New subscriber, 20002-event room: replay p50 1019 ms, 11.3 MB on the wire (564 B/event).",
+    "20 clients replaying a 1002-event room at once: about 0.3 MiB of server heap per replaying client (peak 9.0 MiB over a 3.5 MiB baseline), p95 543 ms each.",
+    "20 clients replaying a 10002-event room at once: about 0.6 MiB of server heap per replaying client (peak 16.8 MiB over a 4.4 MiB baseline), p95 5699 ms each.",
+    "20 clients replaying a 20002-event room at once: about 0.5 MiB of server heap per replaying client (peak 13.8 MiB over a 4.6 MiB baseline), p95 12664 ms each.",
+    "Join storm of 200 on a 1002-event room: p50 5375 ms, p95 5602 ms, max 5647 ms per client, wall 5652 ms, peak heap 30.0 MiB, pool 4/4 busy in 64% of samples.",
+    "Join storm of 200 on a 10002-event room: p50 0 ms, p95 0 ms, max 0 ms per client, wall 30107 ms, peak heap 30.7 MiB, pool 4/4 busy in 67% of samples.",
+    "Join storm of 200 on a 20002-event room: p50 0 ms, p95 0 ms, max 0 ms per client, wall 30051 ms, peak heap 34.5 MiB, pool 4/4 busy in 72% of samples."
+  ],
+  "checks": [
+    {
+      "name": "size 1000: single replays complete",
+      "ok": true,
+      "detail": "0 of 3 failed"
+    },
+    {
+      "name": "size 10000: single replays complete",
+      "ok": true,
+      "detail": "0 of 3 failed"
+    },
+    {
+      "name": "size 20000: single replays complete",
+      "ok": true,
+      "detail": "0 of 3 failed"
+    },
+    {
+      "name": "size 1000: 20 concurrent replays complete and gap-free",
+      "ok": true,
+      "detail": "completed 20, gaps+dups+mismatches 0, closes map[]"
+    },
+    {
+      "name": "size 10000: 20 concurrent replays complete and gap-free",
+      "ok": true,
+      "detail": "completed 20, gaps+dups+mismatches 0, closes map[]"
+    },
+    {
+      "name": "size 20000: 20 concurrent replays complete and gap-free",
+      "ok": true,
+      "detail": "completed 20, gaps+dups+mismatches 0, closes map[]"
+    },
+    {
+      "name": "size 1000: join storm of 200 completes",
+      "ok": true,
+      "detail": "completed 200 of 200, closes map[], dial errors 0"
+    },
+    {
+      "name": "size 10000: join storm of 200 completes",
+      "ok": false,
+      "detail": "completed 0 of 200, closes map[1008 replay timeout:199 error:1], dial errors 0"
+    },
+    {
+      "name": "size 20000: join storm of 200 completes",
+      "ok": false,
+      "detail": "completed 0 of 200, closes map[1008 replay timeout:200], dial errors 0"
+    }
+  ],
+  "loadavg_start_end": [
+    "13.53 12.78 8.61",
+    "28.25 18.11 11.00"
+  ]
+}

@@ -1,10 +1,36 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// SCHEMA_REGISTRY_URL set to "" or "off" means no registry; unset keeps the
+// dev default.
+func TestSchemaRegistryURLOff(t *testing.T) {
+	for _, tc := range []struct {
+		val, want string
+		set       bool
+	}{
+		{"", "http://localhost:8081", false},
+		{"", "", true},
+		{"off", "", true},
+		{" OFF ", "", true},
+		{"https://sr.example:8081", "https://sr.example:8081", true},
+	} {
+		t.Setenv("SCHEMA_REGISTRY_URL", tc.val) // also restores it after the test
+		if !tc.set {
+			if err := os.Unsetenv("SCHEMA_REGISTRY_URL"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := Load().SchemaRegistryURL; got != tc.want {
+			t.Errorf("SCHEMA_REGISTRY_URL=%q (set=%v): got %q, want %q", tc.val, tc.set, got, tc.want)
+		}
+	}
+}
 
 func TestWatchDefaults(t *testing.T) {
 	for _, k := range []string{"PIPEROOM_WATCH_MODE", "PIPEROOM_WATCH_INTERVAL", "PIPEROOM_WATCH_CHECK_TIMEOUT", "PIPEROOM_WATCH_COOLDOWN"} {
@@ -83,5 +109,27 @@ func TestParseWatchModeCaseAndEmpty(t *testing.T) {
 	}
 	if w.Mode != WatchOff || w.Interval != time.Minute {
 		t.Fatalf("got %+v, want mode off and default interval", w)
+	}
+}
+
+func TestParseTenancyMode(t *testing.T) {
+	t.Setenv("PIPEROOM_TENANCY_MODE", "")
+	if got := Load().TenancyMode; got != TenancyAuto {
+		t.Fatalf("default TenancyMode = %q, want %q", got, TenancyAuto)
+	}
+	t.Setenv("PIPEROOM_TENANCY_MODE", "teams")
+	if got := Load().TenancyMode; got != "teams" {
+		t.Fatalf("PIPEROOM_TENANCY_MODE not read: %q", got)
+	}
+	for in, want := range map[string]string{"": TenancyAuto, "auto": TenancyAuto, " Single ": TenancySingle, "TEAMS": TenancyTeams} {
+		got, err := ParseTenancyMode(Config{TenancyMode: in})
+		if err != nil || got != want {
+			t.Fatalf("ParseTenancyMode(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"team", "multi", "on"} {
+		if _, err := ParseTenancyMode(Config{TenancyMode: bad}); err == nil || !strings.Contains(err.Error(), "PIPEROOM_TENANCY_MODE") {
+			t.Fatalf("ParseTenancyMode(%q) err = %v, want one naming PIPEROOM_TENANCY_MODE", bad, err)
+		}
 	}
 }

@@ -238,6 +238,12 @@ func TestUpdateConnectorConfigValidate(t *testing.T) {
 		{"ok precise", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"precise"}`, ""},
 		{"ok time precision", `{"connector":"pg-orders-connector","key":"time.precision.mode","value":"connect"}`, ""},
 		{"ok tombstones", `{"connector":"pg-orders-connector","key":"tombstones.on.delete","value":"false"}`, ""},
+		{"ok errors.log.enable", `{"connector":"pg-orders-connector","key":"errors.log.enable","value":"true"}`, ""},
+		{"errors.log.enable false refused", `{"connector":"pg-orders-connector","key":"errors.log.enable","value":"false"}`, "not allowed for"},
+		{"dlq context headers false refused", `{"connector":"pg-orders-connector","key":"errors.deadletterqueue.context.headers.enable","value":"false"}`, "not allowed for"},
+		{"errors.log.enable case variant", `{"connector":"pg-orders-connector","key":"errors.log.enable","value":"True"}`, "not allowed for"},
+		{"errors.log.include.messages refused", `{"connector":"pg-orders-connector","key":"errors.log.include.messages","value":"true"}`, "not allowed"},
+		{"dlq topic name refused", `{"connector":"pg-orders-connector","key":"errors.deadletterqueue.topic.name","value":"x"}`, "not allowed"},
 		{"errors.tolerance removed", `{"connector":"pg-orders-connector","key":"errors.tolerance","value":"none"}`, "not allowed"},
 		{"errors.tolerance all removed", `{"connector":"pg-orders-connector","key":"errors.tolerance","value":"all"}`, "not allowed"},
 		{"key not allowed", `{"connector":"pg-orders-connector","key":"tasks.max","value":"4"}`, "not allowed"},
@@ -334,11 +340,18 @@ func TestDefaultAllowListIsFreshEachCall(t *testing.T) {
 	if _, bad := second["tasks.max"]; bad {
 		t.Fatal("allow-list is shared state")
 	}
-	if len(second) != 3 {
-		t.Fatalf("allow-list %v, want the 3 default keys", sortedKeys(second))
+	if len(second) != 5 {
+		t.Fatalf("allow-list %v, want the 5 default keys", sortedKeys(second))
 	}
-	if _, ok := second["errors.tolerance"]; ok {
-		t.Fatal("errors.tolerance must not be allow-listed")
+	for _, k := range []string{"errors.tolerance", "errors.log.include.messages"} {
+		if _, ok := second[k]; ok {
+			t.Fatalf("%s must not be allow-listed", k)
+		}
+	}
+	for _, k := range []string{"errors.log.enable", "errors.deadletterqueue.context.headers.enable"} {
+		if len(second[k]) != 1 || !second[k]["true"] {
+			t.Fatalf("%s must allow exactly \"true\", got %v", k, second[k])
+		}
 	}
 }
 
@@ -403,5 +416,52 @@ func TestUpdateConnectorConfigSchemaAndRegistry(t *testing.T) {
 		if _, ok := props[name]; !ok {
 			t.Errorf("schema lacks %q", name)
 		}
+	}
+}
+
+// errors.log.enable=true is visibility only, except where it would start
+// writing record values into the worker log.
+func TestVisibilityGuards(t *testing.T) {
+	const logIn = `{"connector":"pg-orders-connector","key":"errors.log.enable","value":"true"}`
+	const hdrIn = `{"connector":"pg-orders-connector","key":"errors.deadletterqueue.context.headers.enable","value":"true"}`
+	sink := "io.confluent.connect.jdbc.JdbcSinkConnector"
+	tests := []struct {
+		name    string
+		cfg     map[string]string
+		in      string
+		wantErr string
+	}{
+		{"log enable ok", map[string]string{"connector.class": sink}, logIn, ""},
+		{"log enable, include.messages false", map[string]string{"errors.log.include.messages": "false"}, logIn, ""},
+		{"log enable refused with include.messages", map[string]string{"errors.log.include.messages": "true"}, logIn, "turn errors.log.include.messages off first"},
+		{"include.messages config provider reference", map[string]string{"errors.log.include.messages": "${file:/etc/secrets/x.properties:incl}"}, logIn, "not false"},
+		{"include.messages garbage", map[string]string{"errors.log.include.messages": "maybe"}, logIn, "not false"},
+		{"include.messages empty", map[string]string{"errors.log.include.messages": ""}, logIn, "not false"},
+		{"include.messages FALSE with spaces", map[string]string{"errors.log.include.messages": " FALSE "}, logIn, ""},
+		{"include.messages any case", map[string]string{"errors.log.include.messages": " TRUE "}, logIn, "include.messages"},
+		{"headers ok on sink", map[string]string{"connector.class": sink}, hdrIn, ""},
+		{"headers refused on source", map[string]string{"connector.class": "io.debezium.connector.postgresql.PostgresConnector"}, hdrIn, "sink connector"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
+			c.cfg = tc.cfg
+			a := configAction(c)
+			check := func(what string, err error) {
+				t.Helper()
+				switch {
+				case tc.wantErr == "" && err != nil:
+					t.Fatalf("%s: %v", what, err)
+				case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+					t.Fatalf("%s: err = %v, want %q", what, err, tc.wantErr)
+				}
+			}
+			check("Validate", a.Validate(json.RawMessage(tc.in)))
+			_, err := a.Execute(context.Background(), json.RawMessage(tc.in))
+			check("Execute", err)
+			if tc.wantErr != "" && len(c.updates) != 0 {
+				t.Fatalf("a refused change was written: %v", c.updates)
+			}
+		})
 	}
 }

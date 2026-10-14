@@ -136,6 +136,9 @@ func TestScopeDLQTopicsNoneDeclared(t *testing.T) {
 	if !errors.Is(err, ErrOutOfScope) {
 		t.Fatalf("err = %v, want ErrOutOfScope", err)
 	}
+	if !strings.Contains(err.Error(), "none declared (use connector for a sink's DLQ)") {
+		t.Fatalf("error %q should say none are declared and point at connector", err)
+	}
 	if err = sc.CheckDLQTopic(""); !errors.Is(err, ErrOutOfScope) {
 		t.Fatalf("empty topic with none declared: err = %v, want ErrOutOfScope", err)
 	}
