@@ -28,7 +28,7 @@ func startByteSizeBackfill(ctx context.Context, bf byteSizeBackfiller, reload fu
 		defer close(done)
 		start := time.Now()
 		res, err := bf.BackfillByteSize(ctx, store.BackfillBatch)
-		attrs := []any{"rooms", res.Rooms, "shadow_runs", res.ShadowRuns, "took", time.Since(start).Round(time.Millisecond).String()}
+		attrs := []any{"rooms", res.Rooms, "shadow_runs", res.ShadowRuns, "left", res.Left, "took", time.Since(start).Round(time.Millisecond).String()}
 		switch {
 		case err != nil && ctx.Err() != nil:
 			log.Info("byte_size backfill: stopped by shutdown; the rest is counted on the next start", attrs...)

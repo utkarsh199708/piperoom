@@ -577,6 +577,71 @@ func TestActionOutputTruncated(t *testing.T) {
 
 // ---- deletion ----
 
+// releaseAction runs until release is closed.
+type releaseAction struct {
+	fakeAction
+	started chan struct{}
+	release chan struct{}
+}
+
+func (a *releaseAction) Execute(ctx context.Context, params json.RawMessage) (string, error) {
+	close(a.started)
+	select {
+	case <-a.release:
+		return "done", nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func (a *releaseAction) CheckScope(p owners.Pipeline, params json.RawMessage) error { return nil }
+
+// TestDeleteRefusedWhileFixRuns: a delete while an approved fix is executing
+// answers 409 conflict and keeps the room; once the run ends it erases.
+func TestDeleteRefusedWhileFixRuns(t *testing.T) {
+	act := &releaseAction{fakeAction: fakeAction{name: "slow_fix", layer: "postgres"}, started: make(chan struct{}), release: make(chan struct{})}
+	e := newLimitsEnv(t, config.Limits{}, act)
+	ctx := context.Background()
+	snap := createRoom(t, e.svc, "arjun")
+	pid, err := e.svc.CreateProposal(ctx, snap.ID, events.ProposalCreatedPayload{
+		Title: "fix", Risk: "low", Rollback: "re-run the previous config",
+		Steps:          []events.ProposalStep{{Action: "slow_fix", Layer: "postgres", Params: json.RawMessage(`{}`)}},
+		RequiredLayers: []string{"postgres"},
+	}, events.AgentActor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.ApproveProposal(ctx, mustUser(t, e.svc, "priya"), pid, "postgres", proposalHash(t, e.svc, pid)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-act.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the fix never started")
+	}
+	ada := mustUser(t, e.svc, "ada")
+	_, err = e.svc.DeleteRoom(ctx, ada, snap.ID, "cleanup", false)
+	wantCode(t, err, "conflict")
+	var re *room.Error
+	if !errors.As(err, &re) || re.Status != 409 {
+		t.Fatalf("err = %v, want a 409", err)
+	}
+	if _, err := e.st.GetRoom(ctx, snap.ID); err != nil {
+		t.Fatalf("room gone after a refused delete: %v", err)
+	}
+	// Not left in the deleting state: the executor can still record its step.
+	close(act.release)
+	waitFor(t, 5*time.Second, func() bool { return len(typedEvents(t, e.st, snap.ID, events.ActionExecuted)) == 1 })
+	var d room.Deletion
+	waitFor(t, 5*time.Second, func() bool {
+		d, err = e.svc.DeleteRoom(ctx, ada, snap.ID, "cleanup", false)
+		return err == nil
+	})
+	if d.RoomID != snap.ID {
+		t.Fatalf("deletion = %+v", d)
+	}
+}
+
 func TestDeleteRoomAccess(t *testing.T) {
 	e := newLimitsEnv(t, config.Limits{})
 	ctx := context.Background()

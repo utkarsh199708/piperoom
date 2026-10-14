@@ -241,3 +241,123 @@ func pinnedStore(ctx context.Context, t *testing.T, url, schema string) *store.P
 	t.Cleanup(s.Close)
 	return s
 }
+
+// TestBackfillByteSizeSkipsLockedRoom: a room whose row another transaction
+// holds (as an Append does) is left NULL after lock_timeout instead of the
+// backfill queueing behind it, the other rooms are counted, and nothing the
+// backfill does holds a row lock past its own short UPDATE. The sum stops at
+// the listed last_seq, so an event past it (an append that has not bumped
+// last_seq yet) is not counted.
+func TestBackfillByteSizeSkipsLockedRoom(t *testing.T) {
+	cfg := config.Load()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, cfg.RoomDBURL)
+	if err != nil {
+		t.Skipf("room Postgres unreachable at %s: %v", cfg.RoomDBURL, err)
+	}
+	defer conn.Close(ctx)
+	schema := testenv.Name("schema")
+	if _, err := conn.Exec(ctx, `CREATE SCHEMA `+pgx.Identifier{schema}.Sanitize()); err != nil {
+		t.Skipf("cannot create schema: %v", err)
+	}
+	t.Cleanup(func() { dropSchema(cfg.RoomDBURL, schema) })
+	sqlCfg, err := pgx.ParseConfig(cfg.RoomDBURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sqlCfg.RuntimeParams["search_path"] = schema
+	db := stdlib.OpenDB(*sqlCfg)
+	defer db.Close()
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, migrations.FS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.Up(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	rooms := pgx.Identifier{schema, "rooms"}.Sanitize()
+	evs := pgx.Identifier{schema, "room_events"}.Sanitize()
+	actor, _ := json.Marshal(events.AgentActor)
+	payload := []byte(`{"text":"0123456789"}`) // jsonb text: {"text": "0123456789"} = 22 bytes
+	for id, n := range map[string]int{"locked": 1, "free": 2, "ahead": 2} {
+		if _, err := conn.Exec(ctx, `INSERT INTO `+rooms+
+			` (id, title, severity, pipeline_id, status, opened_at, last_seq, byte_size) VALUES ($1, 't', 'sev2', 'orders', 'open', now(), $2, NULL)`,
+			id, n); err != nil {
+			t.Fatal(err)
+		}
+		for i := 1; i <= n; i++ {
+			if _, err := conn.Exec(ctx, `INSERT INTO `+evs+` (room_id, seq, type, actor, payload, at) VALUES ($1, $2, 'x', $3, $4, now())`,
+				id, i, actor, payload); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// "ahead" has an event past its last_seq.
+	if _, err := conn.Exec(ctx, `INSERT INTO `+evs+` (room_id, seq, type, actor, payload, at) VALUES ('ahead', 3, 'x', $1, $2, now())`, actor, payload); err != nil {
+		t.Fatal(err)
+	}
+
+	holder, err := pgx.Connect(ctx, cfg.RoomDBURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close(ctx)
+	tx, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM `+rooms+` WHERE id = 'locked' FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+
+	s := pinnedStore(ctx, t, cfg.RoomDBURL, schema)
+	start := time.Now()
+	res, err := s.BackfillByteSize(ctx, 1)
+	took := time.Since(start)
+	if err != nil || res.Rooms != 2 || res.Left != 1 {
+		t.Fatalf("backfill with a locked room = %+v %v, want 2 counted and 1 left", res, err)
+	}
+	if took > 10*time.Second {
+		t.Fatalf("backfill took %s behind a held row lock, want about lock_timeout", took)
+	}
+	sizes := func() map[string]*int64 {
+		out := map[string]*int64{}
+		rs, err := conn.Query(ctx, `SELECT id, byte_size FROM `+rooms)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rs.Next() {
+			var id string
+			var b *int64
+			if err := rs.Scan(&id, &b); err != nil {
+				t.Fatal(err)
+			}
+			out[id] = b
+		}
+		if err := rs.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	got := sizes()
+	if got["locked"] != nil {
+		t.Fatalf("locked room byte_size = %d, want NULL", *got["locked"])
+	}
+	if got["free"] == nil || *got["free"] != 44 {
+		t.Fatalf("free room byte_size = %v, want 44", got["free"])
+	}
+	if got["ahead"] == nil || *got["ahead"] != 44 {
+		t.Fatalf("ahead room byte_size = %v, want 44 (events up to last_seq only)", got["ahead"])
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The lock is free now: the next run counts it.
+	if res, err := s.BackfillByteSize(ctx, 0); err != nil || res.Rooms != 1 || res.Left != 0 {
+		t.Fatalf("second backfill = %+v %v, want the locked room counted", res, err)
+	}
+	if b := sizes()["locked"]; b == nil || *b != 22 {
+		t.Fatalf("locked room byte_size = %v, want 22", b)
+	}
+}

@@ -21,6 +21,12 @@
 -- form and repeated keys in a raw alert body. So: written - 5 x (escaped <>&)
 -- <= byte_size <= written + (number of ':' and ','), which store's backfill
 -- test pins.
+--
+-- goose runs this in one transaction, so SET LOCAL lasts exactly as long as
+-- the migration: if a long open transaction holds rooms, the ALTER gives up
+-- after 5s (and the start fails, to be retried) rather than queueing every
+-- room read and write behind its ACCESS EXCLUSIVE request.
+SET LOCAL lock_timeout = '5s';
 ALTER TABLE rooms ADD COLUMN byte_size bigint;
 ALTER TABLE shadow_runs ADD COLUMN byte_size bigint;
 

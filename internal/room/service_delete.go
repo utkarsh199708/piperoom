@@ -33,6 +33,14 @@ func ErrDeleteNotAllowed() *Error {
 	return &Error{Status: 403, Code: "not_allowed", Msg: "deleting a room needs the admin role (admin: true in users.yaml)"}
 }
 
+// errExecuting is the 409 for a delete while an approved fix runs: erasing the
+// room would delete the step rows the executor claims and records its results
+// in, mid-run. The code is the generic retry-later conflict of docs/api.md
+// (a dedicated code is a contract change request on PR #118).
+func errExecuting() *Error {
+	return &Error{Status: 409, Code: "conflict", Msg: "an approved fix is running in this room; delete it after the run ends"}
+}
+
 func archiveFailed() *Error {
 	return &Error{Status: 500, Code: "archive_failed", Msg: "the room's archive could not be written, so the room was not deleted"}
 }
@@ -91,6 +99,12 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 	if !s.canSeePipeline(user, st.snap.PipelineID) {
 		s.mu.Unlock()
 		return Deletion{}, notFound("room not found")
+	}
+	// Checked under s.mu, as the executor queue is fed under s.mu: once
+	// deleting is set no approval can append, so none can queue a run.
+	if st.exec.busy() {
+		s.mu.Unlock()
+		return Deletion{}, errExecuting()
 	}
 	// From here every append through the service is refused, so the archive
 	// and the delete cover the same log.
