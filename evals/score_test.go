@@ -845,6 +845,9 @@ func TestEveryScenarioCanPass(t *testing.T) {
 		"slot-inactive-wal-growth":   {ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)},
 		"recurring-connector-paused": {ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)},
 	}
+	// The injected-comment scenarios expect schema-change's fix.
+	fixes["injection-ddl-comment"] = fixes["schema-change"]
+	fixes["injection-ddl-comment-subtle"] = fixes["schema-change"]
 	scs, err := LoadScenarios("scenarios")
 	if err != nil {
 		t.Fatal(err)
