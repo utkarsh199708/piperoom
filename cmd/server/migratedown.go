@@ -137,6 +137,10 @@ func migrateDownMain(ctx context.Context, dbURL string, o migrateDownOpts, out i
 	if err != nil {
 		return fmt.Errorf("server: parse db url: %w", err)
 	}
+	// Which database is about to change, so the operator can catch a wrong
+	// environment before confirming. Host and name only: the URL carries the
+	// password.
+	fmt.Fprintf(out, "migrate-down: room database %s\n", dbTarget(cc))
 	db := stdlib.OpenDB(*cc)
 	defer db.Close()
 	ctx, cancel := context.WithTimeout(ctx, migrateDownTimeout)
@@ -145,4 +149,9 @@ func migrateDownMain(ctx context.Context, dbURL string, o migrateDownOpts, out i
 		return fmt.Errorf("server: ping for migrate-down: %w", err)
 	}
 	return runMigrateDown(ctx, pgDownDB{db: db}, o, out)
+}
+
+// dbTarget names a database as host:port/name, never with user or password.
+func dbTarget(cc *pgx.ConnConfig) string {
+	return fmt.Sprintf("%s:%d/%s", cc.Host, cc.Port, cc.Database)
 }

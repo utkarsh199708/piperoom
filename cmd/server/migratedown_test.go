@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"piperoom/migrations"
 )
 
@@ -170,5 +172,20 @@ func TestMigrateDownMainEarlyErrors(t *testing.T) {
 	}
 	if err := migrateDownMain(context.Background(), "::not a url::", migrateDownOpts{n: 1}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "parse db url") {
 		t.Fatalf("bad url: %v", err)
+	}
+}
+
+// The dry-run header names the database without its credentials.
+func TestDBTargetHidesCredentials(t *testing.T) {
+	cc, err := pgx.ParseConfig("postgres://piperoom:s3cret-pw@db.internal:6543/rooms?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := dbTarget(cc)
+	if got != "db.internal:6543/rooms" {
+		t.Fatalf("dbTarget = %q", got)
+	}
+	if strings.Contains(got, "s3cret") || strings.Contains(got, "piperoom") {
+		t.Fatalf("dbTarget leaks credentials: %q", got)
 	}
 }

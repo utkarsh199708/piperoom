@@ -109,6 +109,16 @@ func TestPlanDownRefusesBadCount(t *testing.T) {
 	}
 }
 
+// The case an operator hits: nothing is applied, so even one step is refused,
+// and the message says so.
+func TestPlanDownRefusesWhenNothingApplied(t *testing.T) {
+	p := &fakeProvider{all: []int64{1, 2, 3}, applied: map[int64]bool{}}
+	_, err := planDown(context.Background(), p, testFS, 1)
+	if !errors.Is(err, ErrDownCount) || !strings.Contains(err.Error(), "only 0 migrations are applied") {
+		t.Fatalf("err = %v, want ErrDownCount naming 0 applied", err)
+	}
+}
+
 func TestPlanDownStatusError(t *testing.T) {
 	p := newFake()
 	p.statusErr = errors.New("db down")
