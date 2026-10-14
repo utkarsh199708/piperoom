@@ -16,6 +16,9 @@ export function useRoomAttention(state: RoomState | null, user: CurrentUser, rep
   const [unread, setUnread] = useState(0)
   const [permission, setPermission] = useState<NotifyPermission>(() => notifyPermission())
   const prev = useRef<RoomState | null>(null)
+  // `replaying` flips to false on the render that folds the last replayed event; that event is
+  // still history, so the render right after a replay is skipped too.
+  const wasReplaying = useRef(replaying)
   const userRef = useRef(user)
   useEffect(() => {
     userRef.current = user
@@ -24,8 +27,10 @@ export function useRoomAttention(state: RoomState | null, user: CurrentUser, rep
   useEffect(() => {
     if (!state) return
     const before = prev.current
+    const justReplayed = wasReplaying.current
     prev.current = state
-    if (!before || replaying || before.id !== state.id) return
+    wasReplaying.current = replaying
+    if (!before || replaying || justReplayed || before.id !== state.id) return
     if (typeof document === 'undefined' || !document.hidden) return
     const items = attentionItems(before, state, userRef.current)
     if (items.length === 0) return

@@ -14,13 +14,13 @@ export function NotifyToggle({ permission, onEnable }: { permission: NotifyPermi
             Notify me about this room
           </Button>
           <p className="m-0 text-xs text-subtle-foreground">
-            When this tab is in the background: proposals, approvals, hand-offs and driver changes.
+            When this tab is in the background: proposals (including ones that need your approval), hand-offs and driver changes.
           </p>
         </>
       )}
       {permission === 'granted' && (
         <p className="m-0 text-xs text-muted-foreground">
-          Notifications on for proposals, approvals, hand-offs and driver changes while this tab is hidden.
+          Notifications on for proposals (including ones that need your approval), hand-offs and driver changes while this tab is hidden.
         </p>
       )}
       {permission === 'denied' && (

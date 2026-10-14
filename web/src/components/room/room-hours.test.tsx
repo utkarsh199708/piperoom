@@ -121,6 +121,19 @@ describe('useRoomAttention', () => {
     expect(document.title).toBe('Piperoom')
   })
 
+  it('treats the last replayed event as history, then notifies for the next live one', () => {
+    const a = { ...emptyRoomState('r1'), last_seq: 9, replay_target: 10 }
+    const h = run(true, [a])
+    // The render that folds the final replayed event is also the one where replaying flips to false.
+    act(() => h.rerender({ s: { ...a, last_seq: 10, proposals: [proposal] }, r: false }))
+    expect(h.result.current.unread).toBe(0)
+    expect(notes).toHaveLength(0)
+    act(() =>
+      h.rerender({ s: { ...a, last_seq: 11, proposals: [proposal, { ...proposal, proposal_id: 'p2' }] }, r: false }),
+    )
+    expect(h.result.current.unread).toBe(1)
+  })
+
   it('stays quiet during replay and while the tab is visible', () => {
     const a = emptyRoomState('r1')
     const h = run(true, [a])
