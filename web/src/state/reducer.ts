@@ -3,6 +3,7 @@
 // filling (seq > last_seq + 1) is the transport's job (see hooks/useRoom.ts).
 import type {
   ActionExecutedPayload,
+  Actor,
   AgentHypothesisPayload,
   AgentMessagePayload,
   AgentStatusPayload,
@@ -24,7 +25,8 @@ import type {
   TracePinnedPayload,
 } from '../api/types'
 import { describeEvent } from './describe'
-import type { RoomState, StepState } from './types'
+import { alertSource } from '../lib/alerts'
+import type { MemberState, RoomState, StepState } from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
@@ -44,6 +46,16 @@ function updateStep(
   return steps.map((s) => (s.id === stepId ? fn(s) : s))
 }
 
+// upsertMember mirrors the server's snapshot.Apply: every human actor is a room
+// member. New actors join as "watching"; an actor already in the list is never
+// downgraded (a driver who acts stays the driver).
+function upsertMember(members: MemberState[], actor: Actor): MemberState[] {
+  const existing = members.find((m) => m.id === actor.id)
+  if (!existing) return [...members, { id: actor.id, name: actor.name, role: 'watching' }]
+  if (existing.name === actor.name) return members
+  return members.map((m) => (m.id === actor.id ? { ...m, name: actor.name } : m))
+}
+
 export function applyEvent(state: RoomState, event: Event): RoomState {
   if (event.seq <= state.last_seq) return state
 
@@ -56,6 +68,12 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         event.actor.kind === 'human'
           ? { id: event.actor.id, name: event.actor.name }
           : state.driver
+      // Webhook-opened rooms carry the raw alert body here; a room created via
+      // POST /api/rooms has no alert at all.
+      const alert =
+        p.alert === undefined || p.alert === null
+          ? null
+          : { source: alertSource(p.alert) }
       next = {
         ...state,
         title: p.title,
@@ -64,6 +82,7 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         status: 'open',
         opened_at: event.at,
         driver,
+        alert,
         members:
           event.actor.kind === 'human'
             ? [{ id: event.actor.id, name: event.actor.name, role: 'driver' }]
@@ -267,6 +286,9 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
 
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(event)
+      // A second proposal.created with the same id (a replay over a snapshot, a retry) is
+      // ignored: the first one stays, with the decisions it already collected.
+      if (state.proposals.some((x) => x.proposal_id === p.proposal_id)) break
       const approvals: Record<string, 'pending'> = {}
       for (const layer of p.required_layers ?? []) approvals[layer] = 'pending'
       next = {
@@ -281,6 +303,10 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
             rollback: p.rollback,
             required_layers: p.required_layers ?? [],
             approvals,
+            decisions: {},
+            // The event's hash, else the snapshot's (an event written before the
+            // hash existed has none; the server computed one for the snapshot).
+            params_hash: p.params_hash || state.snapshot_hashes[p.proposal_id] || '',
             status: 'open',
             executed: [],
           },
@@ -299,7 +325,21 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
           const allApproved = (prop.required_layers ?? []).every(
             (l) => approvals[l] === 'approved',
           )
-          return { ...prop, approvals, status: allApproved ? 'approved' : 'open' }
+          return {
+            ...prop,
+            approvals,
+            decisions: {
+              ...prop.decisions,
+              [p.layer]: {
+                outcome: 'approved' as const,
+                by: event.actor,
+                identity: p.identity,
+                params_hash: p.params_hash,
+                at: event.at,
+              },
+            },
+            status: allApproved ? 'approved' : 'open',
+          }
         }),
       }
       break
@@ -314,6 +354,17 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
             ? {
                 ...prop,
                 approvals: { ...prop.approvals, [p.layer]: 'rejected' as const },
+                decisions: {
+                  ...prop.decisions,
+                  [p.layer]: {
+                    outcome: 'rejected' as const,
+                    by: event.actor,
+                    identity: p.identity,
+                    params_hash: p.params_hash,
+                    reason: p.reason,
+                    at: event.at,
+                  },
+                },
                 status: 'rejected',
               }
             : prop,
@@ -361,8 +412,14 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         handoffs: state.handoffs.map((h) =>
           h.handoff_id === p.handoff_id ? { ...h, status: 'accepted' as const } : h,
         ),
+        // The server emits control.granted (driver + lease) immediately before
+        // handoff.accepted; keep that lease rather than replacing it with a
+        // lease-less driver object. Only move the driver here as a fallback for
+        // a log that never saw the control.granted.
         driver: accepted
-          ? { id: accepted.to.id, name: accepted.to.name }
+          ? state.driver?.id === accepted.to.id
+            ? state.driver
+            : { id: accepted.to.id, name: accepted.to.name }
           : state.driver,
         members: accepted
           ? state.members.some((m) => m.id === accepted.to.id)
@@ -397,11 +454,25 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       break
   }
 
+  // Every human actor is a room member, mirroring the server's snapshot.Apply
+  // (which upserts the actor as "watching" before handling the event). Applied
+  // after the switch so no case's members rebuild can discard it.
+  const members =
+    event.actor.kind === 'human' ? upsertMember(next.members, event.actor) : next.members
+
   return {
     ...next,
+    members,
     last_seq: event.seq,
     activity: [
-      { seq: event.seq, at: event.at, actor: event.actor, text: describeEvent(event) },
+      {
+        seq: event.seq,
+        at: event.at,
+        actor: event.actor,
+        // state is the pre-event state: describeEvent needs the driver before
+        // this event to tell a lease renewal from a take-over.
+        text: describeEvent(event, state.driver?.id ?? null),
+      },
       ...next.activity,
     ].slice(0, 20),
   }

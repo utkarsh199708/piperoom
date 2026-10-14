@@ -1,0 +1,26 @@
+# users.yaml: the people who may use Piperoom, and the layers each may approve.
+# Copy to deploy/config/users.yaml and put in your real people (remove these).
+# A fix runs only after the owner of EVERY layer it touches approves.
+#
+# In dev mode a person picks their user in the UI (dev login, no password), so
+# keep the port on the customer VPN. In oidc mode people sign in at the identity
+# provider, and everyone listed here is a member. See deploy/README.md, "Single
+# sign-on (OIDC)" and "Identity and rights".
+users:
+  - id: alice
+    name: Alice
+    layers: [postgres, schema-registry]
+  - id: bob
+    name: Bob
+    layers: [kafka-connect, kafka]
+  - id: carol
+    name: Carol
+    layers: [consumer]
+  - id: dave
+    name: Dave
+    layers: [warehouse]
+
+# Optional, for OIDC login (oidc mode). Add to a user:
+#   email: alice@example.com   # ASCII only; matched only when the IdP says the email is verified
+#   sub: "00u1abcd"            # the IdP subject; wins over email
+# A user id must not start with "u_" (that prefix is for IdP users with no entry here).

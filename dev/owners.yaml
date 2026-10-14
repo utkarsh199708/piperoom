@@ -7,6 +7,14 @@ pipelines:
     consumer_groups: [order-sync]
     sink_tables: [analytics.orders]
     sink_ts_column: updated_at
+    # Short `for` so `devctl break ...` trips the watcher within a few intervals.
+    # slot_wal stays at the defaults (fire 1GiB): a healthy dev slot retains
+    # 0.8-1.1 MB under load (dev/scenarios.md), so any small fire would warn forever.
+    watch:
+      enabled: true
+      signals:
+        connector_down: {for: 30s}
+        slot_inactive: {for: 30s}
 layers:
   postgres: priya
   kafka-connect: arjun

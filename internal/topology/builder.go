@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"piperoom/internal/clients"
@@ -19,7 +22,9 @@ var ErrBadInput = errors.New("topology: bad input")
 
 // Thresholds holds the boundaries used to decide node health.
 type Thresholds struct {
-	// SlotRetainedWarnBytes is the retained WAL size above which a slot warns.
+	// SlotRetainedWarnBytes is the retained WAL size at or above which a slot
+	// warns. Build overrides it per pipeline with owners watch.slot_wal.fire
+	// (ThresholdsFor); this value is only the base default.
 	SlotRetainedWarnBytes int64
 	// GroupLagWarn is the consumer lag above which a group warns.
 	GroupLagWarn int64
@@ -29,6 +34,10 @@ type Thresholds struct {
 	SinkStaleFail time.Duration
 	// HealthBudget caps the parallel health-gathering phase.
 	HealthBudget time.Duration
+	// DLQRecentWarn is how young a dead-letter topic's newest record must be
+	// for the topic to warn. Build overrides it per pipeline with owners
+	// watch.dlq_growth.window (ThresholdsFor); this is the base default.
+	DLQRecentWarn time.Duration
 }
 
 // DefaultThresholds returns the thresholds the task specifies.
@@ -39,7 +48,21 @@ func DefaultThresholds() Thresholds {
 		SinkStaleWarn:         10 * time.Minute,
 		SinkStaleFail:         30 * time.Minute,
 		HealthBudget:          5 * time.Second,
+		DLQRecentWarn:         time.Hour,
 	}
+}
+
+// ThresholdsFor returns base with the pipeline's watch settings applied. It is
+// the one owners -> Thresholds mapping: the slot_wal "fire" size in owners.yaml
+// is also the retained-WAL level where pipeline_map warns, so the map and the
+// watcher cannot disagree about what "too much WAL" means. The dlq_growth
+// window is likewise the age under which a dead-letter record still counts as
+// new, so the map warns exactly when the watcher would count the record.
+func ThresholdsFor(base Thresholds, p owners.Pipeline) Thresholds {
+	w := p.Watch()
+	base.SlotRetainedWarnBytes = w.SlotWAL.FireBytes
+	base.DLQRecentWarn = w.DLQGrowth.Window
+	return base
 }
 
 // builder builds pipeline graphs and traces records.
@@ -50,11 +73,38 @@ type builder struct {
 	src     clients.SourceDB
 	wh      clients.Warehouse
 	t       Thresholds
+	log     *slog.Logger
+	// now is the clock for ages in node facts; tests replace it.
+	now func() time.Time
+
+	// warnMu guards warned, the set of invalid include/exclude list entries
+	// already reported by this builder instance.
+	warnMu sync.Mutex
+	warned map[string]bool
 }
 
 // NewBuilder constructs a Builder with default thresholds.
 func NewBuilder(o *owners.Owners, connect clients.ConnectClient, kafka clients.KafkaAdmin, src clients.SourceDB, wh clients.Warehouse) Builder {
-	return &builder{o: o, connect: connect, kafka: kafka, src: src, wh: wh, t: DefaultThresholds()}
+	return newBuilder(o, connect, kafka, src, wh, slog.Default())
+}
+
+// newBuilder is NewBuilder with an explicit logger; same-package tests use it
+// to capture warnings on their own logger.
+func newBuilder(o *owners.Owners, connect clients.ConnectClient, kafka clients.KafkaAdmin, src clients.SourceDB, wh clients.Warehouse, log *slog.Logger) *builder {
+	if log == nil {
+		log = slog.Default()
+	}
+	return &builder{
+		o:       o,
+		connect: connect,
+		kafka:   kafka,
+		src:     src,
+		wh:      wh,
+		t:       DefaultThresholds(),
+		log:     log,
+		now:     time.Now,
+		warned:  map[string]bool{},
+	}
 }
 
 // Build returns the current graph for a pipeline with live health. Unreachable
@@ -79,12 +129,14 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	var topics []string
 	connTopics := map[string][]string{}
 	placeholder := map[string]bool{}
+	connIdx := map[string]int{}
 	for _, cn := range p.Connectors {
+		connIdx[cn] = len(g.Nodes)
 		g.Nodes = append(g.Nodes, b.connectorNode(p, cn, info))
 		var ts []string
 		isFallback := false
 		if snap, ok := info.connect[cn]; ok && snap.err == nil {
-			ts = deriveTopics(snap.config["topic.prefix"], snap.config["table.include.list"], p.SourceTables)
+			ts = deriveTopics(snap.config, p.SourceTables, b.warnBadListEntry)
 		} else {
 			// Connect unreachable: keep the graph shape with placeholder
 			// topics so the topic node and its edges still exist.
@@ -110,7 +162,22 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 			realTopics = append(realTopics, t)
 		}
 	}
-	b.collectTopics(cctx, realTopics, info)
+	dlqs := discoverDLQs(p, info)
+	queried := slices.Clone(realTopics)
+	for _, d := range dlqs {
+		// A DLQ that is also a CDC topic is refused when owners.yaml loads;
+		// the guard only keeps one Kafka call per name.
+		if !slices.Contains(queried, d.topic) {
+			queried = append(queried, d.topic)
+		}
+	}
+	b.collectTopics(cctx, queried, info)
+
+	// Connector DLQ facts need the DLQ topic reading (dlq_topic_missing), so
+	// they are added after the Kafka phase; node order is unchanged.
+	for _, cn := range p.Connectors {
+		b.addConnectorDLQFacts(&g.Nodes[connIdx[cn]], info.connect[cn], info)
+	}
 
 	for _, t := range topics {
 		if placeholder[t] {
@@ -119,8 +186,24 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 			g.Nodes = append(g.Nodes, b.topicNode(p, t, info))
 		}
 	}
+	th := ThresholdsFor(b.t, p)
+	for _, d := range dlqs {
+		g.Nodes = append(g.Nodes, b.dlqNode(d, th, info))
+	}
+	// The pipeline's topics, for the group lag: the ones derived from the
+	// connector configs plus "<topic_prefix>.<table>" from owners.yaml, so
+	// the filter still knows them while Connect is down.
+	ownTopics := map[string]bool{}
+	for _, t := range topics {
+		ownTopics[t] = true
+	}
+	if p.TopicPrefix != "" {
+		for _, t := range p.SourceTables {
+			ownTopics[p.TopicPrefix+"."+t] = true
+		}
+	}
 	for _, gr := range p.ConsumerGroups {
-		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info))
+		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info, ownTopics))
 	}
 	for _, s := range p.SinkTables {
 		g.Nodes = append(g.Nodes, b.sinkNode(p, s, info))
@@ -145,6 +228,12 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	for _, gr := range p.ConsumerGroups {
 		for _, s := range p.SinkTables {
 			g.Edges = append(g.Edges, Edge{From: "group:" + gr, To: "wh:" + s})
+		}
+	}
+	// DLQ edges are side edges into the dead-letter node; nothing leaves it.
+	for _, d := range dlqs {
+		for _, w := range d.writerIDs() {
+			g.Edges = append(g.Edges, Edge{From: w, To: "dlq:" + d.topic})
 		}
 	}
 
@@ -191,7 +280,7 @@ func (b *builder) sourceNode(p owners.Pipeline, tbl string, info *collected) Nod
 		n.Facts = map[string]string{"slot": "missing"}
 		return n
 	}
-	n.Health, n.Facts = sourceHealth(*slot, b.t)
+	n.Health, n.Facts = sourceHealth(*slot, ThresholdsFor(b.t, p))
 	return n
 }
 
@@ -202,7 +291,7 @@ func (b *builder) slotName(p owners.Pipeline, tbl string, info *collected) strin
 		if !ok || snap.err != nil {
 			continue
 		}
-		if streamsTable(snap.config["table.include.list"], tbl) {
+		if streamsTable(snap.config, tbl, b.warnBadListEntry) {
 			return slotNameFor(cn, snap.config)
 		}
 	}
@@ -260,7 +349,7 @@ func (b *builder) placeholderTopicNode(p owners.Pipeline, topic string) Node {
 	return n
 }
 
-func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected) Node {
+func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected, ownTopics map[string]bool) Node {
 	n := Node{
 		ID:     "group:" + gr,
 		Kind:   KindConsumerGroup,
@@ -274,8 +363,43 @@ func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected) Node 
 		n.Facts = map[string]string{"error": "unreachable"}
 		return n
 	}
-	n.Health, n.Facts = groupHealth(snap.lag, b.t)
+	lag, ok := pipelineLag(snap.lag, ownTopics)
+	if !ok {
+		// The group reads partitions, but none of this pipeline's topics (a
+		// RegexRouter or topic-routing SMT renames them, or the group reads
+		// other topics only). Its lag is unknown here, not zero.
+		n.Facts = map[string]string{"lag": lagUnknown, "state": lag.State}
+		return n
+	}
+	n.Health, n.Facts = groupHealth(lag, b.t)
 	return n
+}
+
+// lagUnknown is the lag fact of a group none of whose partitions is one of the
+// pipeline's topics.
+const lagUnknown = "unknown (no partition of this pipeline's topics)"
+
+// pipelineLag keeps only the partitions of the pipeline's own topics and sums
+// the lag again from them. A group can also read other pipelines' topics:
+// their lag is not this pipeline's health and must not show on its map (the
+// same rule as kafka_consumer_lag). ok is false when the group has partitions
+// but none of them is the pipeline's: the lag is then unknown, never 0. A lag
+// without partitions is kept as it is: there is nothing to tell apart, and the
+// real client only returns one when the group has no readable partition.
+func pipelineLag(l clients.GroupLag, ownTopics map[string]bool) (clients.GroupLag, bool) {
+	if len(l.Partitions) == 0 {
+		return l, true
+	}
+	var kept []clients.PartitionLag
+	var total int64
+	for _, pl := range l.Partitions {
+		if ownTopics[pl.Topic] {
+			kept = append(kept, pl)
+			total += pl.Lag
+		}
+	}
+	l.Partitions, l.TotalLag = kept, total
+	return l, len(kept) > 0
 }
 
 func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {
@@ -290,17 +414,154 @@ func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {
 	snap := info.freshness[s]
 	if snap.err != nil {
 		n.Facts = map[string]string{"error": "unreachable"}
-		return n
+	} else {
+		n.Health, n.Facts = sinkHealth(snap.ts, info.now, b.t)
 	}
-	n.Health, n.Facts = sinkHealth(snap.ts, info.now, b.t)
+	// The timestamp column is set on every sink node, including unreachable
+	// ones, so the agent knows which column its recovery check must read.
+	if n.Facts == nil {
+		n.Facts = map[string]string{}
+	}
+	n.Facts["ts_column"] = p.SinkTSColumn
 	return n
 }
 
-// streamsTable reports whether a Debezium table.include.list includes tbl.
-// An empty include list streams every table in the pipeline.
-func streamsTable(includeList, tbl string) bool {
-	inc := splitCSV(includeList)
-	return len(inc) == 0 || slices.Contains(inc, tbl)
+// ---- Debezium include/exclude lists ----
+//
+// Debezium interprets table.include.list, table.exclude.list, schema.include.list
+// and schema.exclude.list as comma-separated regular expressions, each
+// anchored to the whole identifier and matched case-insensitively: table lists
+// match the fully-qualified schema.table id, schema lists match the schema
+// name. Exclude lists win over include lists. See "Advanced PostgreSQL
+// connector configuration properties"
+// in https://debezium.io/documentation/reference/stable/connectors/postgresql.html
+
+// regexMetaChars are the RE2 metacharacters. An entry without any of them can
+// only match itself, so it takes the literal fast path and skips compilation.
+const regexMetaChars = `\.+*?()|[]{}^$`
+
+// listPattern is one entry of a Debezium include or exclude list.
+type listPattern struct {
+	literal string         // compared case-insensitively when re is nil
+	re      *regexp.Regexp // nil for entries with no regex metacharacters
+}
+
+func (p listPattern) matches(id string) bool {
+	if p.re == nil {
+		return strings.EqualFold(p.literal, id)
+	}
+	return p.re.MatchString(id)
+}
+
+// listMatcher matches identifiers against one include/exclude list pair
+// (table-level or schema-level) the way the Debezium connector would: any
+// include entry must match (an empty include list accepts everything) and no
+// exclude entry may match.
+type listMatcher struct {
+	includes []listPattern
+	excludes []listPattern
+}
+
+func newListMatcher(include, exclude string, warn func(string)) listMatcher {
+	return listMatcher{
+		includes: compileList(include, warn),
+		excludes: compileList(exclude, warn),
+	}
+}
+
+func (m listMatcher) matches(id string) bool {
+	if len(m.includes) > 0 && !anyPatternMatches(m.includes, id) {
+		return false
+	}
+	return !anyPatternMatches(m.excludes, id)
+}
+
+func anyPatternMatches(ps []listPattern, id string) bool {
+	for _, p := range ps {
+		if p.matches(id) {
+			return true
+		}
+	}
+	return false
+}
+
+// compileList turns a comma-separated Debezium list into patterns. Debezium
+// compiles these lists with Pattern.CASE_INSENSITIVE and matches the whole
+// identifier (Strings.setOfRegex + Matcher.matches in its Predicates), so
+// every entry is compiled as "(?i)^(?:entry)$". Entries without regex
+// metacharacters take the literal fast path and match case-insensitively via
+// EqualFold. warn, when non-nil, is called for each entry that fails to
+// compile; callers dedupe.
+func compileList(list string, warn func(string)) []listPattern {
+	entries := splitCSV(list)
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]listPattern, 0, len(entries))
+	for _, e := range entries {
+		if !strings.ContainsAny(e, regexMetaChars) {
+			out = append(out, listPattern{literal: e})
+			continue
+		}
+		re, err := regexp.Compile("(?i)^(?:" + e + ")$")
+		if err != nil {
+			if warn != nil {
+				warn(e)
+			}
+			out = append(out, listPattern{literal: e})
+			continue
+		}
+		out = append(out, listPattern{re: re})
+	}
+	return out
+}
+
+// warnBadListEntry reports once per builder instance that a list entry did not
+// compile as a regex and was compared literally. The dedupe set lives on the
+// builder (no package-level state), so it covers both the Build and the Trace
+// matching paths and disappears with the builder.
+func (b *builder) warnBadListEntry(entry string) {
+	b.warnMu.Lock()
+	defer b.warnMu.Unlock()
+	if b.warned == nil {
+		b.warned = map[string]bool{}
+	}
+	if b.warned[entry] {
+		return
+	}
+	b.warned[entry] = true
+	log := b.log
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Warn("topology: include/exclude list entry is not a valid regex, comparing literally", "entry", entry)
+}
+
+// streamMatcher decides which pipeline tables a connector streams, following
+// Debezium: the table lists match the whole schema.table id, the schema lists
+// match its schema part.
+type streamMatcher struct {
+	tables  listMatcher
+	schemas listMatcher
+}
+
+func newStreamMatcher(cfg map[string]string, warn func(string)) streamMatcher {
+	return streamMatcher{
+		tables:  newListMatcher(cfg["table.include.list"], cfg["table.exclude.list"], warn),
+		schemas: newListMatcher(cfg["schema.include.list"], cfg["schema.exclude.list"], warn),
+	}
+}
+
+func (m streamMatcher) streams(tbl string) bool {
+	schema, _, _ := strings.Cut(tbl, ".")
+	return m.tables.matches(tbl) && m.schemas.matches(schema)
+}
+
+// streamsTable reports whether a connector with the given config streams tbl.
+// An empty include list streams every table in the pipeline. warn, when
+// non-nil, receives invalid list entries for reporting.
+func streamsTable(cfg map[string]string, tbl string, warn func(string)) bool {
+	return newStreamMatcher(cfg, warn).streams(tbl)
 }
 
 func slotNameFor(_ string, cfg map[string]string) string {
@@ -318,15 +579,17 @@ func fallbackTopics(tables []string) []string {
 }
 
 // deriveTopics returns the Debezium topic names for the pipeline tables this
-// connector streams: <topic.prefix>.<schema>.<table>.
-func deriveTopics(prefix, includeList string, tables []string) []string {
+// connector streams: <topic.prefix>.<schema>.<table>. warn is passed to the
+// matching for invalid list entries.
+func deriveTopics(cfg map[string]string, tables []string, warn func(string)) []string {
+	prefix := cfg["topic.prefix"]
 	if prefix == "" {
 		return nil
 	}
-	inc := splitCSV(includeList)
+	m := newStreamMatcher(cfg, warn)
 	var topics []string
 	for _, t := range tables {
-		if len(inc) == 0 || slices.Contains(inc, t) {
+		if m.streams(t) {
 			topics = append(topics, prefix+"."+t)
 		}
 	}

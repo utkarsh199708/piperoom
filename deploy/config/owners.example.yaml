@@ -1,0 +1,44 @@
+# owners.yaml: your pipelines and the default owner of each layer.
+# Copy to deploy/config/owners.yaml and edit. Full guide: docs/pilot/setup.md (step 2).
+#
+# The server refuses to start if this file and users.yaml disagree: every layer
+# below must name a user who exists in users.yaml and lists that layer there.
+pipelines:
+  - id: orders                       # the pipeline_id used in rooms and alerts
+    title: Orders CDC
+    topic_prefix: pg                 # Debezium topic.prefix of your connector
+    # The ONLY tables the agent may read at the source. Keep the SELECT grants
+    # of the read-only role identical to this list.
+    source_tables: [public.orders]
+    connectors: [pg-orders-connector]
+    consumer_groups: [order-sync]
+    # The ONLY tables the agent may read in the warehouse.
+    sink_tables: [analytics.orders]
+    sink_ts_column: updated_at       # used to measure freshness
+layers:                              # the default owner (a users.yaml id) of each layer
+  postgres: alice
+  kafka-connect: bob
+  schema-registry: alice
+  kafka: bob
+  consumer: carol
+  warehouse: dave
+
+# Optional (login with OIDC, oidc mode). A layer value may also be a list of
+# principals, user:<users.yaml id> or group:<IdP group>. A bare id means user:.
+# Use the IdP group ID where your IdP sends ids (Entra object ids), not a name
+# anyone can create. A layer whose principals are all user: must name users.yaml
+# users; a person with no users.yaml entry (id u_...) goes in a group:, a
+# pipeline owners: block or auditors:. See deploy/README.md, "Identity and rights".
+#   kafka: [user:bob, group:dataeng-oncall]
+#
+# Per pipeline, `owners:` replaces the default for that layer. A backup may approve too.
+#   pipelines:
+#     - id: orders
+#       ...
+#       owners:
+#         kafka-connect: { approvers: [group:dataeng-oncall], backup: [user:alice] }
+#
+# auditors: may export a room; they cannot steer, comment or approve.
+#   auditors: [group:security, user:dave]
+#
+# A layer that lists a group: is not compared with users.yaml at start-up.

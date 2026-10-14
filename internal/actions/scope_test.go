@@ -10,6 +10,7 @@ import (
 func testPipeline() owners.Pipeline {
 	return owners.Pipeline{
 		ID:           "pg-orders",
+		TopicPrefix:  "pg",
 		Connectors:   []string{"pg-orders-connector"},
 		SourceTables: []string{"public.orders"},
 	}
@@ -33,9 +34,14 @@ func TestCheckScope(t *testing.T) {
 		{name: "restart task other connector", action: "connect_restart_task", pipeline: p, params: `{"connector":"pg-inventory-connector","task":0}`, wantErr: true},
 		{name: "restart connector in scope", action: "connect_restart_connector", pipeline: p, params: `{"connector":"pg-orders-connector"}`},
 		{name: "restart connector other pipeline", action: "connect_restart_connector", pipeline: p, params: `{"connector":"pg-inventory-connector"}`, wantErr: true},
+		{name: "resume connector in scope", action: "connect_resume_connector", pipeline: p, params: `{"connector":"pg-orders-connector"}`},
+		{name: "resume connector other pipeline", action: "connect_resume_connector", pipeline: p, params: `{"connector":"pg-inventory-connector"}`, wantErr: true},
 		{name: "set compatibility value subject in scope", action: "schema_set_compatibility", pipeline: p, params: `{"subject":"pg.public.orders-value","level":"FULL"}`},
 		{name: "set compatibility key subject in scope", action: "schema_set_compatibility", pipeline: p, params: `{"subject":"pg.public.orders-key","level":"NONE"}`},
 		{name: "set compatibility other subject", action: "schema_set_compatibility", pipeline: p, params: `{"subject":"pg.public.customers-value","level":"NONE"}`, wantErr: true},
+		{name: "set compatibility foreign prefix", action: "schema_set_compatibility", pipeline: p, params: `{"subject":"billing.public.orders-value","level":"NONE"}`, wantErr: true},
+		{name: "set compatibility missing prefix", action: "schema_set_compatibility", pipeline: p, params: `{"subject":"public.orders-value","level":"NONE"}`, wantErr: true},
+		{name: "set compatibility empty subject", action: "schema_set_compatibility", pipeline: p, params: `{"subject":"","level":"NONE"}`, wantErr: true},
 		{name: "register schema in scope", action: "schema_register", pipeline: p, params: `{"subject":"pg.public.orders-value","schema":"{\"type\":\"string\"}"}`},
 		{name: "register schema other subject", action: "schema_register", pipeline: p, params: `{"subject":"pg.public.customers-value","schema":"{\"type\":\"string\"}"}`, wantErr: true},
 		{name: "subject without key or value suffix", action: "schema_set_compatibility", pipeline: p, params: `{"subject":"pg.public.orders","level":"NONE"}`, wantErr: true},

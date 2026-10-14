@@ -87,3 +87,61 @@ they assume the stack is in use and skip.
 - **Integration tests fail instead of skipping** — they should detect an unreachable stack and
   skip; if one fails hard, that's a bug in that test, not a reason to leave the stack running
   unnecessarily to work around it.
+
+## Re-running `discover` safely
+
+`go run ./cmd/discover -out owners.draft.yaml` (or `make discover-draft`) is read-only
+against the cluster and only ever writes the `-out` file (`README.md` → *Pilot onboarding*).
+
+- Without `-force` it refuses to touch an existing `-out` file, checking before it contacts
+  the cluster: `discover: owners.draft.yaml already exists (use -force to overwrite)`.
+- `-force` overwrites the `-out` file. The draft is fully rendered before the file is
+  opened, so a failed run never truncates an existing draft.
+- Point `-out` at a scratch file, never at the file `OWNERS_FILE` names: a re-run with
+  `-force` would replace the reviewed owners file with a fresh draft full of `TODO`s.
+  `discover` itself never reads or writes `OWNERS_FILE`; diff a new draft against it and
+  copy changes across by hand.
+- `-out -` prints the draft to stdout and writes no file at all.
+- Errors and warnings name env vars (`CONNECT_URL`, `KAFKA_BROKERS`, …) instead of quoting
+  addresses or secrets. `discover: discovery failed: … (raise -timeout?)` means the run hit
+  `-timeout` (default `2m`).
+
+## Slack bridge operations
+
+The bridge library (`internal/slackbridge`) is merged, but the server does not start it on
+`main` yet — wiring and the `SLACK_BOT_TOKEN` / `SLACK_CHANNEL_ID` / `PIPEROOM_PUBLIC_URL`
+env vars are pending in PR #24. These notes describe the library's behaviour, for when that
+lands.
+
+- **Rotating the token.** The token is read once, when the bridge is built at server start;
+  issue the new token in Slack, update the server's environment and restart the server. The
+  bridge never logs the token or message text — its log lines carry only room id, seq,
+  event type and the Slack error code.
+- **Turning it off.** Unset both the token and the channel ID; the bridge then reports
+  itself disabled and the server runs without it. Setting only one of the two is a
+  configuration error, not "off".
+- **`slack mirror stopped … code=not_in_channel`** (also `channel_not_found`, `is_archived`)
+  — the bot is not in the channel or the channel is gone. Invite the bot / fix the channel
+  ID.
+- **`slack mirror stopped … code=invalid_auth`** (also `not_authed`, `token_revoked`,
+  `token_expired`, `account_inactive`, `missing_scope`) — the token is wrong, revoked or
+  lacks `chat:write`. Rotate it as above.
+- In every such case **the room keeps working**: investigation, comments, approvals and
+  hand-offs are unaffected; only that room's Slack mirror stops. Other codes are logged at
+  Warn as `slack post failed` and that one message is skipped. How a stopped mirror is
+  restarted after the fix is part of the PR #24 wiring.
+
+## Upgrading to room limits (migration 00012)
+
+Migration `00012` (per-room log caps, `docs/design/retention.md`) adds two nullable columns and the
+`room_deletions` table. It rewrites no row, so it takes an instant whatever the size of the room database.
+Rooms that existed before it get their byte count in the background after the server starts:
+
+- Look for `byte_size backfill done rooms=N shadow_runs=M took=...` in the server log (or
+  `another replica holds the lock` on the other replicas). A shutdown during the backfill is fine: the next
+  start continues where it stopped.
+- Until then an old room's byte cap (`PIPEROOM_ROOM_MAX_BYTES`) is not enforced; its event cap is.
+- Expected duration: about 45 s per GB of stored event payloads (7 to 8 minutes for 10 GB), measured at
+  24 MB/s on postgres:16; see `docs/design/retention.md` section 5.2. Appends wait only for the batch of
+  500 rooms being counted.
+- Rooms not yet counted: `SELECT count(*) FROM rooms WHERE byte_size IS NULL;`

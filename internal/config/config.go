@@ -3,17 +3,24 @@
 // CONTRACT FILE — owned by the reviewer. Do not edit; request changes in your PR.
 package config
 
-import "os"
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
 
 // Config holds every setting. Defaults match dev/docker-compose.yml.
 type Config struct {
-	HTTPAddr          string // PIPEROOM_HTTP_ADDR (loopback by default: no real login yet, security F1)
+	HTTPAddr          string // PIPEROOM_HTTP_ADDR (loopback by default; dev mode off loopback needs PIPEROOM_DEV_ALLOW_NONLOOPBACK)
 	RoomDBURL         string // PIPEROOM_DB_URL (room service state + event log)
 	SourceDBURL       string // SOURCE_DB_URL (the CDC source Postgres)
 	WarehouseDBURL    string // WAREHOUSE_DB_URL (dev warehouse; Postgres)
 	KafkaBrokers      string // KAFKA_BROKERS (comma separated)
 	ConnectURL        string // CONNECT_URL
-	SchemaRegistryURL string // SCHEMA_REGISTRY_URL
+	SchemaRegistryURL string // SCHEMA_REGISTRY_URL; set to "" or "off" (any case) = no Schema Registry, and Load stores ""
 	OwnersFile        string // OWNERS_FILE
 	UsersFile         string // USERS_FILE
 	Model             string // PIPEROOM_MODEL
@@ -44,6 +51,129 @@ type Config struct {
 	ConnectTLSCAFile   string // CONNECT_TLS_CA_FILE
 	ConnectTLSCertFile string // CONNECT_TLS_CERT_FILE
 	ConnectTLSKeyFile  string // CONNECT_TLS_KEY_FILE
+
+	// Slack mirror of rooms. Off unless both token and channel are set.
+	SlackBotToken  string // SLACK_BOT_TOKEN (secret)
+	SlackChannelID string // SLACK_CHANNEL_ID
+	PublicURL      string // PIPEROOM_PUBLIC_URL: base URL for Slack room links, the WS origin, and (auth) the OIDC redirect URI and Host allow-list
+
+	// Warehouse kind. "postgres" (default) uses WAREHOUSE_DB_URL as a Postgres URL;
+	// "snowflake" uses it as a gosnowflake DSN.
+	WarehouseKind string // WAREHOUSE_KIND: postgres | snowflake
+
+	// Signed alert sources (internal/alertin). A source with an empty secret is
+	// disabled: its route answers 401. All secrets; never log them.
+	AlertmanagerToken    string // ALERTMANAGER_TOKEN
+	GrafanaAlertSecret   string // GRAFANA_ALERT_SECRET
+	PagerDutyAlertSecret string // PAGERDUTY_ALERT_SECRET
+	PagerDutyServices    string // PAGERDUTY_SERVICES: "SVCID=pipeline,SVCID2=pipeline2"
+	DatadogAlertToken    string // DATADOG_ALERT_TOKEN
+	GenericAlertSecret   string // GENERIC_ALERT_SECRET (HMAC for /api/alerts/generic)
+	DefaultAlertPipeline string // DEFAULT_ALERT_PIPELINE: used when an alert names no pipeline
+
+	// Agent cost guard: at most this many agent runs working at once on THIS
+	// replica, across all its rooms; further rooms wait in a queue (round-robin
+	// across pipelines, FIFO within one). 0 or empty = default 3. With several
+	// replicas the total is replicas x this, unless MaxAgentsGlobal is set.
+	MaxAgents string // PIPEROOM_MAX_AGENTS
+	// MaxAgentsGlobal caps agent runs working at once across ALL replicas,
+	// counted from the live room leases in Postgres (docs/design/replicas.md
+	// section 4). 0 or empty = off (only the per-replica cap applies). Ignored
+	// with the in-memory store (--demo), which is one process.
+	MaxAgentsGlobal string // PIPEROOM_MAX_AGENTS_GLOBAL
+
+	// ReplicaID names this server process in room leases, executor claims and
+	// leader logs (docs/design/replicas.md section 2). Empty = the host name
+	// (in Kubernetes, the pod name). The server always appends a random
+	// per-process suffix, so a restarted container never mistakes the old
+	// process's leases or claims for its own.
+	ReplicaID string // PIPEROOM_REPLICA_ID
+
+	// ResumeOnTakeover: when a replica takes over the agent lease of a
+	// replica that stopped, "1" resumes an agent that was working (a fresh
+	// run, at most 3 resumes per room per hour); empty or "0" (default) pauses
+	// it as a restart does, until someone steers or mentions @agent
+	// (docs/design/replicas.md section 4.3).
+	ResumeOnTakeover string // PIPEROOM_RESUME_ON_TAKEOVER
+
+	// Built-in watcher (internal/watch). Kept as strings like the other fields;
+	// ParseWatch turns them into typed values and names the env var on error.
+	WatchMode         string // PIPEROOM_WATCH_MODE: off | log | rooms (default log = shadow mode)
+	WatchInterval     string // PIPEROOM_WATCH_INTERVAL: Go duration, default 60s, minimum 15s
+	WatchCheckTimeout string // PIPEROOM_WATCH_CHECK_TIMEOUT: per-check deadline, default 10s (max 10s = the pilot role's statement_timeout)
+	WatchCooldown     string // PIPEROOM_WATCH_COOLDOWN: quiet time after a watcher room is closed, default 60m
+
+	// WebDir, when set, makes the server serve the built web UI (web/dist) at /.
+	WebDir string // PIPEROOM_WEB_DIR
+
+	// Model endpoint. "anthropic" (default) calls the Anthropic API with
+	// ANTHROPIC_API_KEY; "bedrock" uses AWS credentials from the default chain in
+	// AWSRegion (PIPEROOM_MODEL must then be a Bedrock model or inference-profile
+	// id, e.g. an India "in." profile); "vertex" uses Google ADC.
+	ModelProvider string // PIPEROOM_MODEL_PROVIDER: anthropic | bedrock | vertex
+	AWSRegion     string // AWS_REGION (bedrock)
+	VertexProject string // VERTEX_PROJECT_ID (vertex)
+	VertexRegion  string // VERTEX_REGION (vertex)
+	// TriageModel, when set, runs the first investigation turns on a cheaper
+	// model; empty = always Model.
+	TriageModel string // PIPEROOM_TRIAGE_MODEL
+	// RoomTokenBudget caps model tokens (input + output) per room; when reached
+	// the agent stops and says so. Empty = default 2000000; "0" = no cap. The
+	// server keeps the count in the room database (docs/design/cost.md), so it
+	// survives a restart.
+	RoomTokenBudget string // PIPEROOM_ROOM_TOKEN_BUDGET
+
+	// Model spend (docs/design/cost.md). Kept as strings like the shadow
+	// fields; ParseCost types them and names the env var on error.
+	ModelPrices              string // PIPEROOM_MODEL_PRICES: path of the JSON price table (model id -> USD per million tokens: input, output, cache_write, cache_read); empty = no table, so cost is omitted, never guessed
+	PipelineDailyTokenBudget string // PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET: model tokens per pipeline per UTC day, kept in the room database; empty or "0" = off
+	PipelineDailyCostUSD     string // PIPEROOM_PIPELINE_DAILY_COST_USD: estimated USD per pipeline per UTC day, kept in the room database; empty or "0" = off; needs PIPEROOM_MODEL_PRICES
+
+	// RetentionDays deletes whole closed rooms (events, proposals, approvals,
+	// hand-offs) whose closed_at is older than this many days. Open rooms are
+	// never deleted. Empty or "0" = keep forever. A pipeline's owners.yaml
+	// retention_days overrides it for that pipeline; when this value is set too,
+	// the shorter of the two wins (docs/design/retention.md section 3).
+	RetentionDays string // PIPEROOM_RETENTION_DAYS
+
+	// Room limits (docs/design/retention.md). Kept as strings like the
+	// watcher fields; ParseLimits types them and names the env var on error.
+	MaxOpenDays       string // PIPEROOM_MAX_OPEN_DAYS: whole days a room may stay open before the server closes it; default 14; "0" = off
+	RoomMaxEvents     string // PIPEROOM_ROOM_MAX_EVENTS: events in one room log; default 20000
+	RoomMaxBytes      string // PIPEROOM_ROOM_MAX_BYTES: stored payload bytes of one room log; default 256MiB
+	EventMaxDataBytes string // PIPEROOM_EVENT_MAX_DATA_BYTES: tool_result.data (and action.executed.output) bytes of one event; default 64KiB
+	ArchiveDir        string // PIPEROOM_ARCHIVE_DIR: absolute directory; when set, retention writes the room's export there before a purge, and an admin delete does when asked (?archive=true); empty = off
+
+	// Login (docs/design/auth.md §6). Raw strings; the auth package parses and
+	// checks them at start-up. Not wired until auth PR 2.
+	AuthMode            string // PIPEROOM_AUTH_MODE: dev (default) | oidc
+	DevAllowNonLoopback string // PIPEROOM_DEV_ALLOW_NONLOOPBACK: "1" lets dev mode listen off loopback (replaces --allow-remote)
+	AllowedHosts        string // PIPEROOM_ALLOWED_HOSTS: comma list of extra Host values for a proxy that rewrites Host
+	TrustedProxies      string // PIPEROOM_TRUSTED_PROXIES: comma list of CIDRs; X-Forwarded-For read only from these (oidc mode only)
+	OIDCIssuer          string // PIPEROOM_OIDC_ISSUER
+	OIDCClientID        string // PIPEROOM_OIDC_CLIENT_ID
+	OIDCClientSecret    string // PIPEROOM_OIDC_CLIENT_SECRET (secret, never logged)
+	OIDCPublicClient    string // PIPEROOM_OIDC_PUBLIC_CLIENT: "1" allows an empty secret (PKCE only)
+	OIDCScopes          string // PIPEROOM_OIDC_SCOPES (space separated)
+	OIDCGroupsClaim     string // PIPEROOM_OIDC_GROUPS_CLAIM: "" = no group rights
+	AuthViewerGroups    string // PIPEROOM_AUTH_VIEWER_GROUPS: comma list; viewer role
+	SessionIdle         string // PIPEROOM_SESSION_IDLE: Go duration
+	SessionMax          string // PIPEROOM_SESSION_MAX: Go duration
+	SoloUser            string // PIPEROOM_SOLO_USER: "" = off
+
+	// Shadow mode (docs/design/shadow.md). Which pipelines are shadow is set
+	// per pipeline in owners.yaml (shadow: block); these are the numbers.
+	// Kept as strings like the watcher fields; ParseShadow types them and
+	// names the env var on error.
+	ShadowGrace       string // PIPEROOM_SHADOW_GRACE: Go duration the run may keep going after close; default 0 = cancel at close
+	ShadowTokenBudget string // PIPEROOM_SHADOW_TOKEN_BUDGET: tokens per shadow room; default 500000; "0" = use PIPEROOM_ROOM_TOKEN_BUDGET (there is no uncapped shadow run)
+	ShadowMaxTurns    string // PIPEROOM_SHADOW_MAX_TURNS: model turns per shadow run; default 20
+
+	// Tenancy (docs/design/tenancy.md). Tenants, their members and each
+	// pipeline's connections live in owners.yaml; this only states which
+	// model the operator expects, so a lost tenants: block stops the start
+	// instead of silently showing every room to everyone.
+	TenancyMode string // PIPEROOM_TENANCY_MODE: auto (default) | single | teams
 }
 
 // Load reads the environment and applies dev defaults.
@@ -55,7 +185,7 @@ func Load() Config {
 		WarehouseDBURL:    get("WAREHOUSE_DB_URL", "postgres://piperoom:piperoom-dev@localhost:5432/warehouse?sslmode=disable"),
 		KafkaBrokers:      get("KAFKA_BROKERS", "localhost:29092"),
 		ConnectURL:        get("CONNECT_URL", "http://localhost:8083"),
-		SchemaRegistryURL: get("SCHEMA_REGISTRY_URL", "http://localhost:8081"),
+		SchemaRegistryURL: registryURL(getSet("SCHEMA_REGISTRY_URL", "http://localhost:8081")),
 		OwnersFile:        get("OWNERS_FILE", "dev/owners.yaml"),
 		UsersFile:         get("USERS_FILE", "dev/users.yaml"),
 		Model:             get("PIPEROOM_MODEL", "claude-opus-5-5"),
@@ -81,7 +211,484 @@ func Load() Config {
 		ConnectTLSCAFile:   get("CONNECT_TLS_CA_FILE", ""),
 		ConnectTLSCertFile: get("CONNECT_TLS_CERT_FILE", ""),
 		ConnectTLSKeyFile:  get("CONNECT_TLS_KEY_FILE", ""),
+
+		SlackBotToken:  get("SLACK_BOT_TOKEN", ""),
+		SlackChannelID: get("SLACK_CHANNEL_ID", ""),
+		PublicURL:      get("PIPEROOM_PUBLIC_URL", ""),
+
+		WarehouseKind: get("WAREHOUSE_KIND", "postgres"),
+
+		AlertmanagerToken:    get("ALERTMANAGER_TOKEN", ""),
+		GrafanaAlertSecret:   get("GRAFANA_ALERT_SECRET", ""),
+		PagerDutyAlertSecret: get("PAGERDUTY_ALERT_SECRET", ""),
+		PagerDutyServices:    get("PAGERDUTY_SERVICES", ""),
+		DatadogAlertToken:    get("DATADOG_ALERT_TOKEN", ""),
+		GenericAlertSecret:   get("GENERIC_ALERT_SECRET", ""),
+		DefaultAlertPipeline: get("DEFAULT_ALERT_PIPELINE", ""),
+
+		MaxAgents:        get("PIPEROOM_MAX_AGENTS", ""),
+		MaxAgentsGlobal:  get("PIPEROOM_MAX_AGENTS_GLOBAL", ""),
+		ReplicaID:        get("PIPEROOM_REPLICA_ID", ""),
+		ResumeOnTakeover: get("PIPEROOM_RESUME_ON_TAKEOVER", ""),
+
+		WatchMode:         get("PIPEROOM_WATCH_MODE", DefaultWatchMode),
+		WatchInterval:     get("PIPEROOM_WATCH_INTERVAL", DefaultWatchInterval),
+		WatchCheckTimeout: get("PIPEROOM_WATCH_CHECK_TIMEOUT", DefaultWatchCheckTimeout),
+		WatchCooldown:     get("PIPEROOM_WATCH_COOLDOWN", DefaultWatchCooldown),
+
+		WebDir: get("PIPEROOM_WEB_DIR", ""),
+
+		ModelProvider:   get("PIPEROOM_MODEL_PROVIDER", "anthropic"),
+		AWSRegion:       get("AWS_REGION", ""),
+		VertexProject:   get("VERTEX_PROJECT_ID", ""),
+		VertexRegion:    get("VERTEX_REGION", ""),
+		TriageModel:     get("PIPEROOM_TRIAGE_MODEL", ""),
+		RoomTokenBudget: get("PIPEROOM_ROOM_TOKEN_BUDGET", ""),
+
+		ModelPrices:              get("PIPEROOM_MODEL_PRICES", ""),
+		PipelineDailyTokenBudget: get("PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET", ""),
+		PipelineDailyCostUSD:     get("PIPEROOM_PIPELINE_DAILY_COST_USD", ""),
+
+		RetentionDays: get("PIPEROOM_RETENTION_DAYS", ""),
+
+		MaxOpenDays:       get("PIPEROOM_MAX_OPEN_DAYS", DefaultMaxOpenDays),
+		RoomMaxEvents:     get("PIPEROOM_ROOM_MAX_EVENTS", DefaultRoomMaxEvents),
+		RoomMaxBytes:      get("PIPEROOM_ROOM_MAX_BYTES", DefaultRoomMaxBytes),
+		EventMaxDataBytes: get("PIPEROOM_EVENT_MAX_DATA_BYTES", DefaultEventMaxDataBytes),
+		ArchiveDir:        get("PIPEROOM_ARCHIVE_DIR", ""),
+
+		AuthMode:            get("PIPEROOM_AUTH_MODE", DefaultAuthMode),
+		DevAllowNonLoopback: get("PIPEROOM_DEV_ALLOW_NONLOOPBACK", ""),
+		AllowedHosts:        get("PIPEROOM_ALLOWED_HOSTS", ""),
+		TrustedProxies:      get("PIPEROOM_TRUSTED_PROXIES", ""),
+		OIDCIssuer:          get("PIPEROOM_OIDC_ISSUER", ""),
+		OIDCClientID:        get("PIPEROOM_OIDC_CLIENT_ID", ""),
+		OIDCClientSecret:    get("PIPEROOM_OIDC_CLIENT_SECRET", ""),
+		OIDCPublicClient:    get("PIPEROOM_OIDC_PUBLIC_CLIENT", ""),
+		OIDCScopes:          get("PIPEROOM_OIDC_SCOPES", DefaultOIDCScopes),
+		OIDCGroupsClaim:     getSet("PIPEROOM_OIDC_GROUPS_CLAIM", DefaultOIDCGroupsClaim),
+		AuthViewerGroups:    get("PIPEROOM_AUTH_VIEWER_GROUPS", ""),
+		SessionIdle:         get("PIPEROOM_SESSION_IDLE", DefaultSessionIdle),
+		SessionMax:          get("PIPEROOM_SESSION_MAX", DefaultSessionMax),
+		SoloUser:            get("PIPEROOM_SOLO_USER", ""),
+
+		ShadowGrace:       get("PIPEROOM_SHADOW_GRACE", DefaultShadowGrace),
+		ShadowTokenBudget: get("PIPEROOM_SHADOW_TOKEN_BUDGET", DefaultShadowTokenBudget),
+		ShadowMaxTurns:    get("PIPEROOM_SHADOW_MAX_TURNS", DefaultShadowMaxTurns),
+
+		TenancyMode: get("PIPEROOM_TENANCY_MODE", TenancyAuto),
 	}
+}
+
+// Tenancy modes (docs/design/tenancy.md section 4).
+const (
+	// TenancyAuto follows owners.yaml: a tenants: block turns the tenant
+	// filter on (teams); no block keeps one tenant (single).
+	TenancyAuto = "auto"
+	// TenancySingle requires owners.yaml to have no tenants: block. Every
+	// signed-in user sees every room, as before tenancy.
+	TenancySingle = "single"
+	// TenancyTeams requires a tenants: block. A user sees only the rooms of
+	// pipelines in their tenants.
+	TenancyTeams = "teams"
+)
+
+// ParseTenancyMode validates PIPEROOM_TENANCY_MODE. Empty means auto. The
+// caller compares the result with owners.yaml; this function does no I/O.
+func ParseTenancyMode(c Config) (string, error) {
+	m := strings.ToLower(strings.TrimSpace(c.TenancyMode))
+	switch m {
+	case "":
+		return TenancyAuto, nil
+	case TenancyAuto, TenancySingle, TenancyTeams:
+		return m, nil
+	}
+	return "", fmt.Errorf("config: PIPEROOM_TENANCY_MODE=%q: want auto, single or teams", c.TenancyMode)
+}
+
+// Login defaults (docs/design/auth.md §6).
+const (
+	DefaultAuthMode        = "dev"
+	DefaultOIDCScopes      = "openid email profile"
+	DefaultOIDCGroupsClaim = "groups"
+	DefaultSessionIdle     = "8h"
+	DefaultSessionMax      = "12h"
+)
+
+// Shadow defaults.
+const (
+	DefaultShadowGrace       = "0"
+	DefaultShadowTokenBudget = "500000"
+	DefaultShadowMaxTurns    = "20"
+)
+
+// Shadow holds the typed shadow settings.
+type Shadow struct {
+	// Grace is how long a shadow run may keep going after the room closes.
+	// 0 = cancel at close, as a live run is.
+	Grace time.Duration
+	// TokenBudget caps model tokens per shadow room; 0 = use the room
+	// default (PIPEROOM_ROOM_TOKEN_BUDGET), as agent.Options.TokenBudget 0 does.
+	TokenBudget int64
+	// MaxTurns caps model turns per shadow run.
+	MaxTurns int
+}
+
+// ParseShadow validates the PIPEROOM_SHADOW_* fields. Empty fields mean the
+// default. Grace accepts "0" and any non-negative Go duration; TokenBudget
+// is a whole number >= 1, or "0" for the room default; MaxTurns is a whole number >= 1.
+func ParseShadow(c Config) (Shadow, error) {
+	var sh Shadow
+	g := strings.TrimSpace(c.ShadowGrace)
+	if g == "" {
+		g = DefaultShadowGrace
+	}
+	if g != "0" {
+		d, err := time.ParseDuration(g)
+		if err != nil {
+			return Shadow{}, fmt.Errorf("config: PIPEROOM_SHADOW_GRACE=%q: not a duration like 0, 30s or 10m: %w", c.ShadowGrace, err)
+		}
+		if d < 0 {
+			return Shadow{}, fmt.Errorf("config: PIPEROOM_SHADOW_GRACE=%q: must not be negative", c.ShadowGrace)
+		}
+		sh.Grace = d
+	}
+	var err error
+	if sh.TokenBudget, err = parseWholeNumber("PIPEROOM_SHADOW_TOKEN_BUDGET", c.ShadowTokenBudget, DefaultShadowTokenBudget, true); err != nil {
+		return Shadow{}, err
+	}
+	n, err := parseWholeNumber("PIPEROOM_SHADOW_MAX_TURNS", c.ShadowMaxTurns, DefaultShadowMaxTurns, false)
+	if err != nil {
+		return Shadow{}, err
+	}
+	sh.MaxTurns = int(n)
+	return sh, nil
+}
+
+// Cost holds the typed spend settings (docs/design/cost.md).
+type Cost struct {
+	// PricesFile is the PIPEROOM_MODEL_PRICES path; "" = no price table, so
+	// every cost is omitted and no cost budget can be set.
+	PricesFile string
+	// PipelineDailyTokens caps model tokens per pipeline per UTC day; 0 = off.
+	PipelineDailyTokens int64
+	// PipelineDailyCostUSD caps the estimated cost per pipeline per UTC day,
+	// in USD; 0 = off.
+	PipelineDailyCostUSD float64
+}
+
+// MaxPipelineDailyCostUSD bounds PIPEROOM_PIPELINE_DAILY_COST_USD, so the cap
+// in millionths of a USD (the unit the spend tables keep) fits an int64.
+const MaxPipelineDailyCostUSD = 1_000_000_000
+
+// ParseCost validates the spend fields. Empty means off (no table, no cap).
+// PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET is a whole number, "0" = off.
+// PIPEROOM_PIPELINE_DAILY_COST_USD is a plain decimal such as 25 or 12.50
+// with at most six decimals, "0" = off; a value above 0 needs
+// PIPEROOM_MODEL_PRICES. The price file itself is read by the agent package
+// at start-up.
+func ParseCost(c Config) (Cost, error) {
+	out := Cost{PricesFile: strings.TrimSpace(c.ModelPrices)}
+	var err error
+	if out.PipelineDailyTokens, err = parseWholeNumber("PIPEROOM_PIPELINE_DAILY_TOKEN_BUDGET", c.PipelineDailyTokenBudget, "0", true); err != nil {
+		return Cost{}, err
+	}
+	if out.PipelineDailyCostUSD, err = parseUSD("PIPEROOM_PIPELINE_DAILY_COST_USD", c.PipelineDailyCostUSD); err != nil {
+		return Cost{}, err
+	}
+	if out.PipelineDailyCostUSD > 0 && out.PricesFile == "" {
+		return Cost{}, fmt.Errorf("config: PIPEROOM_PIPELINE_DAILY_COST_USD=%q needs PIPEROOM_MODEL_PRICES: without a price table there is no cost to count", c.PipelineDailyCostUSD)
+	}
+	return out, nil
+}
+
+// maxUSDDecimals is the finest amount PIPEROOM_PIPELINE_DAILY_COST_USD takes:
+// one millionth of a USD, the unit the spend tables keep.
+const maxUSDDecimals = 6
+
+// parseUSD parses a plain non-negative decimal amount (digits, at most one
+// point with digits on both sides, at most six decimals); empty is 0.
+// Exponents, signs, NaN, Inf and amounts finer than the stored millionth are
+// refused so a typo cannot turn into an unexpected cap.
+func parseUSD(name, v string) (float64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	digits, points, decimals := 0, 0, 0
+	for i, r := range v {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+			if points > 0 {
+				decimals++
+			}
+		case r == '.' && points == 0 && i > 0 && i < len(v)-1:
+			points++
+		default:
+			return 0, fmt.Errorf("config: %s=%q: want a plain amount in USD such as 25 or 12.50", name, v)
+		}
+	}
+	if decimals > maxUSDDecimals {
+		return 0, fmt.Errorf("config: %s=%q: at most %d decimal places (millionths of a USD)", name, v, maxUSDDecimals)
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || digits == 0 {
+		return 0, fmt.Errorf("config: %s=%q: want a plain amount in USD such as 25 or 12.50", name, v)
+	}
+	if f > MaxPipelineDailyCostUSD {
+		return 0, fmt.Errorf("config: %s=%q: too large (at most %d)", name, v, MaxPipelineDailyCostUSD)
+	}
+	return f, nil
+}
+
+// parseWholeNumber parses a non-negative whole number; empty uses def. With
+// zeroOK, "0" is allowed (no cap); otherwise the value must be >= 1.
+func parseWholeNumber(name, v, def string, zeroOK bool) (int64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		v = def
+	}
+	var n int64
+	for _, r := range v {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("config: %s=%q: want a whole number", name, v)
+		}
+		if n > (1<<62)/10 {
+			return 0, fmt.Errorf("config: %s=%q: too large", name, v)
+		}
+		n = n*10 + int64(r-'0')
+	}
+	if n == 0 && !zeroOK {
+		return 0, fmt.Errorf("config: %s=%q: must be at least 1", name, v)
+	}
+	return n, nil
+}
+
+// Room limit defaults and bounds (docs/design/retention.md).
+const (
+	DefaultMaxOpenDays       = "14"
+	DefaultRoomMaxEvents     = "20000"
+	DefaultRoomMaxBytes      = "256MiB"
+	DefaultEventMaxDataBytes = "64KiB"
+
+	// MaxMaxOpenDays bounds PIPEROOM_MAX_OPEN_DAYS (ten years).
+	MaxMaxOpenDays = 3650
+	// MinRoomMaxEvents keeps a room able to hold its opening events and a
+	// short investigation.
+	MinRoomMaxEvents = 100
+	// MaxRoomMaxEvents keeps the cap plus its 2% reserve under the audit
+	// export's 500000-event limit, so every room can still be exported and
+	// archived (PIPEROOM_ARCHIVE_DIR).
+	MaxRoomMaxEvents = 490000
+	MinRoomMaxBytes  = 1 << 20 // 1 MiB
+	MaxRoomMaxBytes  = 16 << 30
+	MinEventMaxData  = 1 << 10 // 1 KiB
+	MaxEventMaxData  = 16 << 20
+)
+
+// Limits holds the typed room limits.
+type Limits struct {
+	// MaxOpenDays is how long a room may stay open before the server closes
+	// it; 0 = no limit.
+	MaxOpenDays int
+	// RoomMaxEvents and RoomMaxBytes cap one room's event log (count, and
+	// the sum of stored payload sizes). Human, system and close events may go
+	// 2% over them; agent events may not.
+	RoomMaxEvents int64
+	RoomMaxBytes  int64
+	// EventMaxDataBytes caps tool_result.data and action.executed.output of
+	// one event; larger values are stored truncated.
+	EventMaxDataBytes int64
+	// ArchiveDir is where retention writes a room's export before it purges
+	// it, and where an admin delete writes one when asked (?archive=true);
+	// "" = no archive. Always an absolute, cleaned path.
+	ArchiveDir string
+}
+
+// ParseLimits validates the room limit fields (PIPEROOM_MAX_OPEN_DAYS,
+// PIPEROOM_ROOM_MAX_EVENTS, PIPEROOM_ROOM_MAX_BYTES,
+// PIPEROOM_EVENT_MAX_DATA_BYTES, PIPEROOM_ARCHIVE_DIR). Empty fields mean the
+// default. Byte sizes are a whole number of bytes, optionally followed by KiB,
+// MiB or GiB ("64KiB", "268435456"). The error names the env var. Whether
+// ArchiveDir exists and is writable is checked by the server at start, not here.
+func ParseLimits(c Config) (Limits, error) {
+	var l Limits
+	days, err := parseWholeNumber("PIPEROOM_MAX_OPEN_DAYS", c.MaxOpenDays, DefaultMaxOpenDays, true)
+	if err != nil {
+		return Limits{}, err
+	}
+	if days > MaxMaxOpenDays {
+		return Limits{}, fmt.Errorf("config: PIPEROOM_MAX_OPEN_DAYS=%q: at most %d", c.MaxOpenDays, MaxMaxOpenDays)
+	}
+	l.MaxOpenDays = int(days)
+
+	if l.RoomMaxEvents, err = parseWholeNumber("PIPEROOM_ROOM_MAX_EVENTS", c.RoomMaxEvents, DefaultRoomMaxEvents, false); err != nil {
+		return Limits{}, err
+	}
+	if l.RoomMaxEvents < MinRoomMaxEvents || l.RoomMaxEvents > MaxRoomMaxEvents {
+		return Limits{}, fmt.Errorf("config: PIPEROOM_ROOM_MAX_EVENTS=%q: want %d to %d", c.RoomMaxEvents, MinRoomMaxEvents, MaxRoomMaxEvents)
+	}
+	if l.RoomMaxBytes, err = parseByteSize("PIPEROOM_ROOM_MAX_BYTES", c.RoomMaxBytes, DefaultRoomMaxBytes); err != nil {
+		return Limits{}, err
+	}
+	if l.RoomMaxBytes < MinRoomMaxBytes || l.RoomMaxBytes > MaxRoomMaxBytes {
+		return Limits{}, fmt.Errorf("config: PIPEROOM_ROOM_MAX_BYTES=%q: want 1MiB to 16GiB", c.RoomMaxBytes)
+	}
+	if l.EventMaxDataBytes, err = parseByteSize("PIPEROOM_EVENT_MAX_DATA_BYTES", c.EventMaxDataBytes, DefaultEventMaxDataBytes); err != nil {
+		return Limits{}, err
+	}
+	if l.EventMaxDataBytes < MinEventMaxData || l.EventMaxDataBytes > MaxEventMaxData {
+		return Limits{}, fmt.Errorf("config: PIPEROOM_EVENT_MAX_DATA_BYTES=%q: want 1KiB to 16MiB", c.EventMaxDataBytes)
+	}
+	if l.EventMaxDataBytes > l.RoomMaxBytes {
+		return Limits{}, fmt.Errorf("config: PIPEROOM_EVENT_MAX_DATA_BYTES=%q: must not be larger than PIPEROOM_ROOM_MAX_BYTES=%q", c.EventMaxDataBytes, c.RoomMaxBytes)
+	}
+
+	if dir := strings.TrimSpace(c.ArchiveDir); dir != "" {
+		if !filepath.IsAbs(dir) {
+			return Limits{}, fmt.Errorf("config: PIPEROOM_ARCHIVE_DIR=%q: want an absolute path", c.ArchiveDir)
+		}
+		l.ArchiveDir = filepath.Clean(dir)
+	}
+	return l, nil
+}
+
+// parseByteSize parses a whole number of bytes with an optional KiB, MiB or
+// GiB suffix; empty uses def. Zero is refused.
+func parseByteSize(name, v, def string) (int64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		v = def
+	}
+	mult := int64(1)
+	for _, u := range []struct {
+		suffix string
+		mult   int64
+	}{{"KiB", 1 << 10}, {"MiB", 1 << 20}, {"GiB", 1 << 30}} {
+		if strings.HasSuffix(v, u.suffix) {
+			v, mult = strings.TrimSuffix(v, u.suffix), u.mult
+			break
+		}
+	}
+	if v == "" || strings.TrimSpace(v) != v {
+		return 0, fmt.Errorf("config: %s: want a size like 65536, 64KiB or 256MiB", name)
+	}
+	n, err := parseWholeNumber(name, v, "", false)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s: want a size like 65536, 64KiB or 256MiB: %w", name, err)
+	}
+	if n > (1<<62)/mult {
+		return 0, fmt.Errorf("config: %s=%q: too large", name, v)
+	}
+	return n * mult, nil
+}
+
+// Watcher defaults and limits.
+const (
+	DefaultWatchMode         = "log"
+	DefaultWatchInterval     = "60s"
+	DefaultWatchCheckTimeout = "10s"
+	DefaultWatchCooldown     = "60m"
+
+	// MinWatchInterval keeps the watcher from hammering the source database.
+	MinWatchInterval = 15 * time.Second
+	// MaxWatchCheckTimeout must not exceed the pilot role's statement_timeout
+	// (docs/pilot/permissions.md), or a hung check would outlive the server's cap.
+	MaxWatchCheckTimeout = 10 * time.Second
+)
+
+// WatchMode says what the watcher does when a signal fires.
+type WatchMode string
+
+// Watcher modes.
+const (
+	// WatchOff does not start the watcher.
+	WatchOff WatchMode = "off"
+	// WatchLog checks and logs transitions but opens no rooms (shadow mode).
+	WatchLog WatchMode = "log"
+	// WatchRooms checks, logs, and opens or joins rooms.
+	WatchRooms WatchMode = "rooms"
+)
+
+// Watch holds the typed watcher settings.
+type Watch struct {
+	Mode         WatchMode
+	Interval     time.Duration
+	CheckTimeout time.Duration
+	Cooldown     time.Duration
+}
+
+// ParseWatch validates the PIPEROOM_WATCH_* fields. The error names the env var
+// so the operator knows what to fix. Empty fields mean the default.
+func ParseWatch(c Config) (Watch, error) {
+	var w Watch
+
+	mode := strings.ToLower(strings.TrimSpace(c.WatchMode))
+	if mode == "" {
+		mode = DefaultWatchMode
+	}
+	switch WatchMode(mode) {
+	case WatchOff, WatchLog, WatchRooms:
+		w.Mode = WatchMode(mode)
+	default:
+		return Watch{}, fmt.Errorf("config: PIPEROOM_WATCH_MODE=%q: want off, log or rooms", c.WatchMode)
+	}
+
+	var err error
+	if w.Interval, err = parseWatchDuration("PIPEROOM_WATCH_INTERVAL", c.WatchInterval, DefaultWatchInterval); err != nil {
+		return Watch{}, err
+	}
+	if w.Interval < MinWatchInterval {
+		return Watch{}, fmt.Errorf("config: PIPEROOM_WATCH_INTERVAL=%q: must be at least %s", c.WatchInterval, MinWatchInterval)
+	}
+	if w.CheckTimeout, err = parseWatchDuration("PIPEROOM_WATCH_CHECK_TIMEOUT", c.WatchCheckTimeout, DefaultWatchCheckTimeout); err != nil {
+		return Watch{}, err
+	}
+	if w.CheckTimeout > MaxWatchCheckTimeout {
+		return Watch{}, fmt.Errorf("config: PIPEROOM_WATCH_CHECK_TIMEOUT=%q: must be at most %s (the source role's statement_timeout)", c.WatchCheckTimeout, MaxWatchCheckTimeout)
+	}
+	if w.Cooldown, err = parseWatchDuration("PIPEROOM_WATCH_COOLDOWN", c.WatchCooldown, DefaultWatchCooldown); err != nil {
+		return Watch{}, err
+	}
+	return w, nil
+}
+
+// parseWatchDuration parses a positive Go duration; empty uses def.
+func parseWatchDuration(name, v, def string) (time.Duration, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		v = def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s=%q: not a duration like 30s or 5m: %w", name, v, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("config: %s=%q: must be greater than zero", name, v)
+	}
+	return d, nil
+}
+
+// getSet is get, except that a variable set to "" keeps "" (for settings
+// where empty means off, like PIPEROOM_OIDC_GROUPS_CLAIM). Compose files must
+// not pass such a variable as ${VAR:-} (that sets ""); use ${VAR-default} or
+// leave it out.
+func getSet(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return def
+}
+
+// registryURL maps "off" to "": a pipeline without a Schema Registry says so
+// explicitly, instead of every client and map chasing an unreachable default.
+func registryURL(v string) string {
+	v = strings.TrimSpace(v)
+	if strings.EqualFold(v, "off") {
+		return ""
+	}
+	return v
 }
 
 func get(key, def string) string {

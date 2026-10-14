@@ -27,21 +27,85 @@ type toolList struct {
 	byName map[string]toolEntry
 }
 
+// maxStrictTools caps the tools sent with strict: true. The API enforces two
+// limits on them: a count limit and a size limit on the grammar compiled from
+// their schemas. LEAD-ARCH's live bisect (TestLiveStrictToolCap, 2026-10-12,
+// fullRegistry + room tools) accepted 0–16 strict tools, rejected 20 with
+// "The compiled grammar is too large" and 21 with "Too many strict tools".
+// Eight sits well inside the accepted range; maxStrictSchemaBytes guards the
+// grammar size as schemas grow. Room tools take the slots first: propose_fix
+// guards the write path, where a malformed input costs the most. Its strict
+// schema holds only an enum of action names and the params as JSON text; each
+// action's own params are checked in code (see proposeFixTool.checkStep), so
+// the schema does not grow with every action.
+// strictReadTools fill the rest. Tools sent without strict are still checked in
+// code: validateInput runs on every read-tool input before Tool.Run, so nothing
+// goes unvalidated.
+const maxStrictTools = 8
+
+// maxStrictSchemaBytes caps the summed size of the marshalled input_schema of
+// every strict tool. Bytes are only a proxy for the compiled grammar size the
+// API limits, but they grow with it. The budget sits just under the largest
+// sum the API is known to accept (liveAcceptedSchemaBytes); configurations
+// that were never sent live do not count.
+//
+// History of the shipped cap-8 set (production registry, the real actions):
+// 4491 bytes on 2026-10-12, which ran live in LEAD-ARCH's M2 check; 5319 bytes
+// once more actions were registered and propose_fix nested each one's params;
+// 3088 bytes now that propose_fix holds only an enum of action names and the
+// params as JSON text. A new action adds about its name length to that enum
+// (TestProposeFixStrictBytesDoNotGrowWithActions holds the line). The current
+// shape has not been sent live yet: re-run TestLiveStrictToolCap once.
+const maxStrictSchemaBytes = 5400
+
+// liveAcceptedSchemaBytes is the largest strict schema sum the API accepted in
+// the live bisect of 2026-10-12 (TestLiveStrictToolCap, cap 16; that run used
+// an empty actions registry, so propose_fix was 625 bytes, not 2180). The
+// next measured point, 6461 bytes at cap 20, was rejected as too large.
+// Re-run the bisect with the production registry before raising the budget.
+const liveAcceptedSchemaBytes = 5484
+
+// strictReadTools take the strict slots left after the room tools, in this
+// order: the read tools the eval scenarios (evals/scenarios/*.yaml) call most.
+// Slots left over go to the other read tools in registration order.
+func strictReadTools() []string {
+	return []string{
+		"schema_registry_diff", "pipeline_map", "trace_record", "schema_registry_versions", "connect_status",
+	}
+}
+
 // buildToolList assembles the model-facing tool definitions. Registry (read)
 // tools keep their registration order; room tools follow in a fixed order. The
 // order is stable so the tool list is byte-identical across requests and the
 // prompt cache stays warm.
 func buildToolList(reg *tools.Registry, room []tools.Tool) toolList {
+	return buildToolListWithCap(reg, room, maxStrictTools)
+}
+
+// buildToolListWithCap is buildToolList with the strict cap as a parameter, so
+// the live claude-tagged test can vary only the cap while reusing the exact
+// strict-set selection and schema shaping production sends. cap < len(room)
+// leaves the last room tools non-strict; cap > len(room) hands the leftover
+// slots to read tools via strictReadSet exactly as buildToolList does.
+func buildToolListWithCap(reg *tools.Registry, room []tools.Tool, cap int) toolList {
 	tl := toolList{byName: map[string]toolEntry{}}
+	var reads []tools.Tool
 	if reg != nil {
-		for _, t := range reg.All() {
-			tl.byName[t.Name()] = toolEntry{tool: t, schema: t.InputSchema(), wrapWhy: true}
-			tl.params = append(tl.params, toolParam(t, true))
-		}
+		reads = reg.All()
 	}
-	for _, t := range room {
-		tl.byName[t.Name()] = toolEntry{tool: t, schema: t.InputSchema(), isRoom: true}
-		tl.params = append(tl.params, toolParam(t, false))
+	// Room tools claim strict slots first; read tools get what is left.
+	strictReads := strictReadSet(reads, max(cap-len(room), 0))
+	for _, t := range reads {
+		tl.byName[t.Name()] = toolEntry{tool: t, schema: t.InputSchema(), wrapWhy: true}
+		tl.params = append(tl.params, toolParam(t, true, strictReads[t.Name()]))
+	}
+	for i, t := range room {
+		schema := t.InputSchema()
+		if v, ok := t.(interface{ validationSchema() map[string]any }); ok {
+			schema = v.validationSchema() // a tool whose Run checks some fields itself
+		}
+		tl.byName[t.Name()] = toolEntry{tool: t, schema: schema, isRoom: true}
+		tl.params = append(tl.params, toolParam(t, false, i < cap))
 	}
 	// Put a cache breakpoint after the tool list (the last tool).
 	if n := len(tl.params); n > 0 {
@@ -53,11 +117,40 @@ func buildToolList(reg *tools.Registry, room []tools.Tool) toolList {
 	return tl
 }
 
+// strictReadSet picks the read tools that get the n strict slots: the
+// registered strictReadTools in list order, then the others in registration
+// order. The choice depends only on the registry, so the tool list stays
+// byte-identical across requests.
+func strictReadSet(reads []tools.Tool, n int) map[string]bool {
+	registered := make(map[string]bool, len(reads))
+	for _, t := range reads {
+		registered[t.Name()] = true
+	}
+	set := make(map[string]bool, n)
+	for _, name := range strictReadTools() {
+		if len(set) >= n {
+			break
+		}
+		if registered[name] {
+			set[name] = true
+		}
+	}
+	for _, t := range reads {
+		if len(set) >= n {
+			break
+		}
+		set[t.Name()] = true
+	}
+	return set
+}
+
 // toolParam converts one Piperoom tool into an SDK tool definition. When
 // wrapWhy is set, an extra required string property "why" is injected into the
 // schema; the agent strips it before calling Tool.Run and uses it as the step
-// title.
-func toolParam(t tools.Tool, wrapWhy bool) anthropic.BetaToolUnionParam {
+// title. strict asks the API to validate inputs against the schema (see
+// maxStrictTools); the schema is shaped the same either way, so what the model
+// sees does not depend on which slot the tool landed in.
+func toolParam(t tools.Tool, wrapWhy, strict bool) anthropic.BetaToolUnionParam {
 	schema := t.InputSchema()
 
 	props := map[string]any{}
@@ -96,9 +189,11 @@ func toolParam(t tools.Tool, wrapWhy bool) anthropic.BetaToolUnionParam {
 			Required:    required,
 			ExtraFields: map[string]any{"additionalProperties": false},
 		},
-		Strict:              anthropic.Bool(true),
 		EagerInputStreaming: anthropic.Bool(true),
 		Type:                anthropic.BetaToolTypeCustom,
+	}
+	if strict {
+		tp.Strict = anthropic.Bool(true)
 	}
 	return anthropic.BetaToolUnionParam{OfTool: &tp}
 }

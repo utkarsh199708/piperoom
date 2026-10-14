@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 
 	"piperoom/internal/events"
+	"piperoom/internal/jsonnum"
 	"piperoom/internal/tools"
 )
 
@@ -22,20 +24,6 @@ const (
 	maxParallelTools = 4
 	// maxTokens bounds one model turn.
 	maxTokens = 16000
-)
-
-var (
-	// toolTimeout bounds a single read tool call. The turn continues with the
-	// other results if one tool times out. A var so tests can shorten it.
-	toolTimeout = 10 * time.Second
-	// roomToolTimeout bounds one room tool call (hypothesis, proposal, message).
-	roomToolTimeout = 10 * time.Second
-	// drainBackoffMin/Max bound the backoff waitForInput applies when
-	// Inbox.Drain keeps failing while Wait keeps returning at once: without a
-	// backoff that combination spins the loop at full speed. Vars so tests can
-	// shrink them.
-	drainBackoffMin = 250 * time.Millisecond
-	drainBackoffMax = 5 * time.Second
 )
 
 // clock abstracts time so tests can verify backoff behavior without waiting
@@ -73,11 +61,43 @@ type runner struct {
 	log   *slog.Logger
 	model model
 	clk   clock
+	// timing holds this runner's waits and deadlines.
+	timing timing
 
 	toolList toolList
 	system   string
 
+	// proposals remembers the proposals the agent created this run, so a later
+	// action_result can be matched to its last step and verified.
+	proposals *proposalTracker
+
+	// recoveredIdle is true while the pipeline is verified recovered and nothing
+	// since has broken that (a failed or unknown step, or a NOT recovered
+	// verdict). An episode that ends while it is set stays "done" and waits for
+	// a human, instead of reporting idle.
+	recoveredIdle bool
+
+	// noneSubjects are the schema subjects a verified-recovered proposal left at
+	// compatibility NONE and no verified proposal has moved away from NONE since.
+	// Only a restore of such a subject is judged by its layer checks alone (see
+	// verifyProposal). It is lost on restart, which only makes the verdict
+	// stricter: the data-flow rule then applies.
+	noneSubjects map[string]bool
+
 	emitMu sync.Mutex
+
+	// triageModel, when set, runs the first triageTurns turns (see triage.go).
+	// triageRan counts the turns that did, and verified turns true once a
+	// [verification] verdict has gone to the model.
+	triageModel string
+	triageTurns int
+	triageRan   int
+	verified    bool
+	// escalated turns true once a triage turn asked for propose_fix and was
+	// re-run on the main model; the run stays on the main model after that.
+	escalated bool
+	// triageSw is the endpoint-wide "triage is off" flag; nil outside an Endpoint.
+	triageSw *triageSwitch
 }
 
 // Run investigates a pipeline incident: it calls Claude, executes read-only
@@ -95,6 +115,12 @@ func Run(ctx context.Context, alert Alert, deps Deps, opts Options) error {
 // newRunner validates dependencies and builds the loop state. Tests call it
 // and then swap in a scripted model.
 func newRunner(alert Alert, deps Deps, opts Options) (*runner, error) {
+	return newRunnerWith(alert, deps, opts, nil)
+}
+
+// newRunnerWith is newRunner with the model injected. A nil m builds the
+// production client from the environment (Anthropic API).
+func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, error) {
 	opts = opts.withDefaults()
 	if deps.Tools == nil {
 		return nil, errors.New("agent: Deps.Tools is nil")
@@ -108,29 +134,40 @@ func newRunner(alert Alert, deps Deps, opts Options) (*runner, error) {
 	if deps.Logger == nil {
 		deps.Logger = slog.Default()
 	}
+	if m == nil {
+		m = newModel(opts, deps.Logger)
+	}
 	return &runner{
-		alert: alert,
-		deps:  deps,
-		opts:  opts,
-		log:   deps.Logger,
-		model: newModel(opts, deps.Logger),
-		clk:   realClock{},
+		alert:     alert,
+		deps:      deps,
+		opts:      opts,
+		log:       deps.Logger,
+		model:     m,
+		clk:       realClock{},
+		timing:    defaultTiming(),
+		proposals: newProposalTracker(),
+
+		noneSubjects: map[string]bool{},
 	}, nil
 }
 
 func (r *runner) run(ctx context.Context) error {
-	r.toolList = buildToolList(r.deps.Tools, newRoomTools(r.deps))
+	r.toolList = buildToolList(r.deps.Tools, newRoomTools(r.deps, r.proposals))
 	r.system = systemPrompt()
 
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 
-	// Drain anything already waiting before the first turn so an early steer is
-	// part of the opening prompt.
-	messages := []anthropic.BetaMessageParam{r.initialMessage(r.drain(ctx))}
-
 	// turns counts model turns since the last human input. It is a per-episode
 	// runaway guard, not a lifetime cap: fresh human input resets it.
 	turns := 0
+
+	// Drain anything already waiting before the first turn so an early steer is
+	// part of the opening prompt.
+	initialInputs := r.drain(ctx)
+	// The model reads the verdict of an early recovery in its first turn. Only
+	// an episode that ends after a recovery parks, in pauseForHumanInput.
+	initialInputs, outcome := r.handleInputs(ctx, initialInputs)
+	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs, outcome.notes)}
 	for {
 		if err := ctx.Err(); err != nil {
 			return stopErr(err)
@@ -139,10 +176,15 @@ func (r *runner) run(ctx context.Context) error {
 		if turns >= r.opts.MaxTurns {
 			// Runaway guard: pause and wait for a human instead of abandoning the
 			// room. The room stays usable while someone is still steering it.
-			r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
-				State:  "idle",
-				Detail: "max turns reached; waiting for human input",
-			})
+			recovered := r.recoveredIdle
+			if recovered {
+				r.emitWaiting(ctx)
+			} else {
+				r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{
+					State:  "idle",
+					Detail: "max turns reached; waiting for human input",
+				})
+			}
 			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{
 				Text: "I have reached the turn limit for this episode and am pausing. Please steer me or confirm before I continue.",
 			})
@@ -153,13 +195,32 @@ func (r *runner) run(ctx context.Context) error {
 			if len(inputs) == 0 {
 				return nil
 			}
-			messages = append(messages, r.humanMessage(inputs))
+			inputs, outcome := r.handleInputs(ctx, inputs)
+			messages = appendUser(messages, r.inputBlocks(inputs, outcome.notes)...)
 			turns = 0
+			if r.parked(outcome) {
+				if !recovered {
+					r.emitWaiting(ctx)
+				}
+				if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
+					return err
+				}
+			} else if recovered && !outcome.statusSet {
+				r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
+			}
 			continue
 		}
 
-		resp, err := r.model.Turn(ctx, r.request(messages))
+		resp, err := r.modelTurn(ctx, messages)
 		if err != nil {
+			// The room's token budget is spent: stop here, between turns. Tool
+			// calls of the previous turn have all finished by now.
+			// The error is returned so a supervisor can tell this stop from a
+			// normal end; it must treat it as a stop (no retry, no error status).
+			if be, ok := asBudgetError(err); ok {
+				r.stopForBudget(ctx, be)
+				return fmt.Errorf("agent: stopped: %w", be)
+			}
 			// A cancelled context is a clean shutdown (room closed), not an error.
 			if ctx.Err() != nil {
 				return stopErr(err)
@@ -236,15 +297,18 @@ func (r *runner) run(ctx context.Context) error {
 			// message carries the tool results plus any human input that arrived
 			// while we were running.
 			inputs := r.drain(ctx)
+			inputs, outcome := r.handleInputs(ctx, inputs)
 			blocks := append([]anthropic.BetaContentBlockParamUnion(nil), resultBlocks...)
-			blocks = append(blocks, r.humanBlocks(inputs)...)
+			blocks = append(blocks, r.inputBlocks(inputs, outcome.notes)...)
 			if len(blocks) == 0 {
 				blocks = append(blocks, anthropic.NewBetaTextBlock("Continue."))
 			}
-			messages = append(messages, anthropic.NewBetaUserMessage(blocks...))
+			messages = appendUser(messages, blocks...)
 			if len(inputs) > 0 {
 				turns = 0
 			}
+			// No park here: a recovered episode keeps running until the model
+			// reaches end_turn, so it can read the verification note and reply.
 		}
 	}
 }
@@ -258,7 +322,10 @@ func (r *runner) run(ctx context.Context) error {
 // a stop. Run keeps history append-only either way — resp.ToParam() carries
 // that block back in the next request's messages exactly like any other
 // content block, never specially — which is what lets a room survive hours
-// of steers and tool calls without hitting the model's context window.
+// of steers and tool calls without hitting the model's context window. The
+// edit carries compactionInstructions() so the summary keeps step ids,
+// hypotheses, proposals and driver instructions, and keeps untrusted text
+// data instead of laundering its instructions into trusted history.
 func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMessageNewParams {
 	return anthropic.BetaMessageNewParams{
 		Model:     r.opts.Model,
@@ -278,7 +345,9 @@ func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMe
 		},
 		ContextManagement: anthropic.BetaContextManagementConfigParam{
 			Edits: []anthropic.BetaContextManagementConfigEditUnionParam{
-				{OfCompact20260112: &anthropic.BetaCompact20260112EditParam{}},
+				{OfCompact20260112: &anthropic.BetaCompact20260112EditParam{
+					Instructions: anthropic.String(compactionInstructions()),
+				}},
 			},
 		},
 		// Top-level cache control applies a breakpoint to the last cacheable
@@ -287,14 +356,27 @@ func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMe
 	}
 }
 
-func (r *runner) initialMessage(inputs []HumanInput) anthropic.BetaMessageParam {
+func (r *runner) initialMessage(inputs []HumanInput, notes []string) anthropic.BetaMessageParam {
 	blocks := []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(firstUserMessage(r.alert))}
-	blocks = append(blocks, r.humanBlocks(inputs)...)
+	blocks = append(blocks, r.inputBlocks(inputs, notes)...)
 	return anthropic.NewBetaUserMessage(blocks...)
 }
 
-func (r *runner) humanMessage(inputs []HumanInput) anthropic.BetaMessageParam {
-	return anthropic.NewBetaUserMessage(r.humanBlocks(inputs)...)
+// inputBlocks renders one batch of human input and its verification notes, in
+// the order the model reads them: the inputs, then what verification found.
+func (r *runner) inputBlocks(inputs []HumanInput, notes []string) []anthropic.BetaContentBlockParamUnion {
+	return append(r.humanBlocks(inputs), verifyBlocks(notes)...)
+}
+
+// appendUser adds blocks to the history as a user turn. When the last message
+// is already a user turn, the blocks join it, so the request never carries two
+// consecutive user messages.
+func appendUser(messages []anthropic.BetaMessageParam, blocks ...anthropic.BetaContentBlockParamUnion) []anthropic.BetaMessageParam {
+	if n := len(messages); n > 0 && messages[n-1].Role == anthropic.BetaMessageParamRoleUser {
+		messages[n-1].Content = append(messages[n-1].Content, blocks...)
+		return messages
+	}
+	return append(messages, anthropic.NewBetaUserMessage(blocks...))
 }
 
 func (r *runner) humanBlocks(inputs []HumanInput) []anthropic.BetaContentBlockParamUnion {
@@ -324,7 +406,7 @@ func (r *runner) drain(ctx context.Context) []HumanInput {
 // returning at once, draining again immediately would spin the loop at full
 // speed; an increasing backoff between failed drains bounds that.
 func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
-	backoff := drainBackoffMin
+	backoff := r.timing.drainBackoffMin
 	for {
 		inputs, err := r.deps.Inbox.Drain(ctx)
 		if err != nil {
@@ -332,15 +414,15 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 			if serr := r.clk.Sleep(ctx, backoff); serr != nil {
 				return nil, serr
 			}
-			if backoff *= 2; backoff > drainBackoffMax {
-				backoff = drainBackoffMax
+			if backoff *= 2; backoff > r.timing.drainBackoffMax {
+				backoff = r.timing.drainBackoffMax
 			}
 			continue
 		}
 		if len(inputs) > 0 {
 			return inputs, nil
 		}
-		backoff = drainBackoffMin
+		backoff = r.timing.drainBackoffMin
 		if err := r.deps.Inbox.Wait(ctx); err != nil {
 			return nil, err
 		}
@@ -362,7 +444,13 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 // dropped along with everything else: Run is about to return, so no further
 // request will ever need it.
 func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int, pending []anthropic.BetaContentBlockParamUnion) (bool, error) {
-	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
+	// A recovered episode ends "done" with the reason, not "idle".
+	recovered := r.recoveredIdle
+	if recovered {
+		r.emitWaiting(ctx)
+	} else {
+		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle"})
+	}
 	inputs, err := r.waitForInput(ctx)
 	if err != nil {
 		return true, stopErr(err)
@@ -370,10 +458,56 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 	if len(inputs) == 0 {
 		return true, nil
 	}
-	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.humanBlocks(inputs)...)
-	*messages = append(*messages, anthropic.NewBetaUserMessage(blocks...))
+	inputs, outcome := r.handleInputs(ctx, inputs)
+	blocks := append(append([]anthropic.BetaContentBlockParamUnion(nil), pending...), r.inputBlocks(inputs, outcome.notes)...)
+	*messages = appendUser(*messages, blocks...)
 	*turns = 0
+	if r.parked(outcome) {
+		if !recovered {
+			r.emitWaiting(ctx)
+		}
+		return r.holdAfterRecovery(ctx, messages, turns)
+	}
+	if recovered && !outcome.statusSet {
+		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
+	}
 	return false, nil
+}
+
+// holdAfterRecovery keeps a recovered episode alive. The pipeline is fixed, so
+// the model is not called until something needs an answer, but the run must
+// stay alive: a later steer or comment still gets a reply. It waits on the
+// Inbox exactly like the idle path and keeps the done status. It returns
+// stop=false when the model should run again (a human spoke, or a step failed
+// or is unknown) and stop=true when the room closed, with the error Run should
+// return.
+func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.BetaMessageParam, turns *int) (bool, error) {
+	for {
+		inputs, err := r.waitForInput(ctx)
+		if err != nil {
+			return true, stopErr(err)
+		}
+		inputs, outcome := r.handleInputs(ctx, inputs)
+		*messages = appendUser(*messages, r.inputBlocks(inputs, outcome.notes)...)
+		*turns = 0
+		if !r.parked(outcome) {
+			if !outcome.statusSet {
+				r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
+			}
+			return false, nil
+		}
+	}
+}
+
+// hasHumanInput reports whether inputs contain anything a person said, as
+// opposed to executor results. A person's words always get a model turn.
+func hasHumanInput(inputs []HumanInput) bool {
+	for _, in := range inputs {
+		if in.Kind != "action_result" {
+			return true
+		}
+	}
+	return false
 }
 
 // emit writes one event to the sink, serialized so parallel tool steps cannot
@@ -384,6 +518,29 @@ func (r *runner) emit(ctx context.Context, typ events.Type, payload any) {
 	if err := r.deps.Sink.Emit(ctx, typ, payload); err != nil {
 		r.log.Warn("agent: emit failed", "type", typ, "err", err)
 	}
+}
+
+// toolDataJSON marshals a tool's structured data for its tool_result event. A
+// number outside the double range (a NUMERIC column read back as 1e131072, a
+// metric of 1e-16384) is a valid JSON number, but jsonb refuses some of them
+// (SQLSTATE 22003, "value overflows numeric format") and the whole event would
+// be lost. Such numbers are written as strings holding their exact text, so the
+// event is kept and the value is still readable. The model never sees this
+// data; it reads the summary.
+func (r *runner) toolDataJSON(tool string, v any) json.RawMessage {
+	if v == nil {
+		return nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		r.log.Warn("agent: tool data marshal failed", "tool", tool, "err", err)
+		return nil
+	}
+	out, n := jsonnum.Quote(b)
+	if n > 0 {
+		r.log.Warn("agent: tool data had numbers outside the double range; kept them as strings", "tool", tool, "count", n)
+	}
+	return out
 }
 
 // stopErr maps a clean shutdown (context.Canceled or a closed inbox) to nil so
@@ -455,8 +612,17 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 
 	// Read tools in parallel. Unknown names also go through runReadTool, which
 	// reports them as an error tool_result rather than dropping the tool_use.
+	//
+	// A panic in a read tool must not escape its goroutine: nothing there can
+	// recover it, so it would end the process before Deps.Usage runs and before
+	// the room supervisor sees it. Each goroutine recovers, the first panic is
+	// kept (the stack goes to the log), and it is raised again on this
+	// goroutine once every tool has stopped.
 	sem := make(chan struct{}, maxParallelTools)
 	var wg sync.WaitGroup
+	var panicMu sync.Mutex
+	var firstPanic any
+	var panicked bool
 	for i, u := range uses {
 		if e, ok := r.toolList.byName[u.name]; ok && e.isRoom {
 			continue
@@ -464,13 +630,26 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 		wg.Add(1)
 		go func(i int, u toolUse) {
 			defer wg.Done()
+			defer func() {
+				if p := recover(); p != nil {
+					// The value goes on to the room supervisor, which logs it and
+					// puts it in the room status, so it is masked here.
+					p = scrubPanic(p)
+					r.log.Error("agent: read tool panicked", "tool", u.name, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
+					panicMu.Lock()
+					if !panicked {
+						panicked, firstPanic = true, p
+					}
+					panicMu.Unlock()
+				}
+			}()
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-ctx.Done():
 				results[i] = toolResult{
 					toolUseID: u.id,
-					content:   wrapToolOutput(u.name, "error: "+ctx.Err().Error()),
+					content:   wrapToolOutput(u.name, "", "error: "+ctx.Err().Error()),
 					isError:   true,
 				}
 				return
@@ -479,12 +658,25 @@ func (r *runner) runToolUses(ctx context.Context, uses []toolUse) []anthropic.Be
 		}(i, u)
 	}
 	wg.Wait()
+	if panicked {
+		panic(firstPanic)
+	}
 
 	blocks := make([]anthropic.BetaContentBlockParamUnion, 0, len(results))
 	for _, res := range results {
 		blocks = append(blocks, anthropic.NewBetaToolResultBlock(res.toolUseID, res.content, res.isError))
 	}
 	return blocks
+}
+
+// toolScope returns ctx carrying the room's pipeline, so every read tool is
+// scoped to the pipeline of the alert that opened the room and cannot be
+// pointed at another pipeline by its input (security finding F11). The
+// pipeline id comes from the alert, never from the model. An alert with no
+// pipeline clears any pipeline the context inherited: its tools are refused
+// unless the caller of Run opted out with tools.WithUnscoped.
+func (r *runner) toolScope(ctx context.Context) context.Context {
+	return tools.WithPipelineID(ctx, r.alert.PipelineID)
 }
 
 // runReadTool executes one registry tool within a step, emitting step.started,
@@ -517,23 +709,17 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		Input:     u.input,
 	})
 
-	tctx, cancel := context.WithTimeout(ctx, toolTimeout)
+	tctx, cancel := context.WithTimeout(r.toolScope(ctx), r.timing.toolTimeout)
 	defer cancel()
 	start := time.Now()
 	res, err := entry.tool.Run(tctx, cleaned)
 	took := time.Since(start).Milliseconds()
 
-	var data json.RawMessage
-	if res.Data != nil {
-		if b, mErr := json.Marshal(res.Data); mErr == nil {
-			data = b
-		} else {
-			r.log.Warn("agent: tool data marshal failed", "tool", u.name, "err", mErr)
-		}
-	}
+	res = r.scrubToolResult(u.name, res)
+	data := r.toolDataJSON(u.name, res.Data)
 
 	if err != nil {
-		msg := "error: " + err.Error()
+		msg := "error: " + r.scrubToolError(u.name, err).Error()
 		summary, truncated := tools.Truncate(msg)
 		r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 			StepID:    stepID,
@@ -546,7 +732,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		})
 		return toolResult{
 			toolUseID: u.id,
-			content:   wrapToolOutput(u.name, msg),
+			content:   wrapToolOutput(u.name, stepID, msg),
 			isError:   true,
 		}
 	}
@@ -566,7 +752,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	})
 	return toolResult{
 		toolUseID: u.id,
-		content:   wrapToolOutput(u.name, summary),
+		content:   wrapToolOutput(u.name, stepID, summary),
 		isError:   false,
 	}
 }
@@ -596,7 +782,7 @@ func (r *runner) failReadTool(ctx context.Context, u toolUse, title, msg string)
 	})
 	return toolResult{
 		toolUseID: u.id,
-		content:   wrapToolOutput(u.name, "error: "+msg),
+		content:   wrapToolOutput(u.name, stepID, "error: "+msg),
 		isError:   true,
 	}
 }
@@ -609,38 +795,49 @@ func (r *runner) runRoomTool(ctx context.Context, u toolUse) toolResult {
 	if !ok {
 		return toolResult{
 			toolUseID: u.id,
-			content:   wrapToolOutput(u.name, "error: unknown tool"),
+			content:   wrapToolOutput(u.name, "", "error: unknown tool"),
 			isError:   true,
 		}
 	}
 	if err := validateInput(entry.schema, u.input); err != nil {
 		return toolResult{
 			toolUseID: u.id,
-			content:   wrapToolOutput(u.name, "error: invalid input: "+err.Error()),
+			content:   wrapToolOutput(u.name, "", "error: invalid input: "+err.Error()),
 			isError:   true,
 		}
 	}
-	tctx, cancel := context.WithTimeout(ctx, roomToolTimeout)
+	tctx, cancel := context.WithTimeout(ctx, r.timing.roomToolTimeout)
 	defer cancel()
 	res, err := entry.tool.Run(tctx, u.input)
 	if err != nil {
 		return toolResult{
 			toolUseID: u.id,
-			content:   wrapToolOutput(u.name, "error: "+err.Error()),
+			content:   wrapToolOutput(u.name, "", "error: "+err.Error()),
 			isError:   true,
 		}
 	}
+	// A new proposal gets its creation baseline now, before anyone approves it,
+	// so rows that arrive during approval and execution count as the fix's.
+	if pr, ok := res.Data.(proposeFixResult); ok {
+		r.snapshotBaseline(ctx, pr.ProposalID)
+	}
 	return toolResult{
 		toolUseID: u.id,
-		content:   wrapToolOutput(u.name, res.Summary),
+		content:   wrapToolOutput(u.name, "", res.Summary),
 		isError:   false,
 	}
 }
 
 // wrapToolOutput marks tool output as untrusted data. The system prompt tells
 // the model to treat anything inside this wrapper as data, never instructions.
-// The text is escaped so a value containing </tool_output> cannot break out of
-// the wrapper.
-func wrapToolOutput(tool, text string) string {
-	return fmt.Sprintf("<tool_output tool=%q untrusted=\"true\">%s</tool_output>", tool, escapeToolText(text))
+// stepID is the room step the tool ran under (empty for room tools, which open
+// no step); the model cites it when it states evidence, so it must be visible
+// here. The text is escaped so a value containing </tool_output> cannot break
+// out of the wrapper.
+func wrapToolOutput(tool, stepID, text string) string {
+	attrs := fmt.Sprintf("tool=%q", tool)
+	if stepID != "" {
+		attrs += fmt.Sprintf(" step=%q", stepID)
+	}
+	return fmt.Sprintf("<tool_output %s untrusted=\"true\">%s</tool_output>", attrs, escapeToolText(text))
 }

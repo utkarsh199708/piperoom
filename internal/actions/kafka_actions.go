@@ -39,6 +39,8 @@ func Register(reg *Registry, d Deps) error {
 	for _, a := range []Action{
 		&restartTask{d: d},
 		&restartConnector{d: d},
+		&resumeConnector{d: d},
+		&updateConnectorConfig{d: d},
 		&setCompatibility{d: d},
 		&registerSchema{d: d},
 	} {
@@ -53,6 +55,7 @@ func Register(reg *Registry, d Deps) error {
 var (
 	_ Scoped = (*restartTask)(nil)
 	_ Scoped = (*restartConnector)(nil)
+	_ Scoped = (*resumeConnector)(nil)
 	_ Scoped = (*setCompatibility)(nil)
 	_ Scoped = (*registerSchema)(nil)
 )
@@ -81,14 +84,22 @@ func subjectTopic(subject string) (string, bool) {
 
 // inScopeSubject returns an error when subject is not derived from one of
 // p.SourceTables. A subject names "<topic>-key" or "<topic>-value", and the
-// topic must end with "." + sourceTable.
+// topic must be exactly "<p.TopicPrefix>.<sourceTable>": a suffix match would
+// accept another pipeline's topic that merely ends with the same table name,
+// e.g. "billing.public.orders-value" for the "pg" prefix.
 func inScopeSubject(p owners.Pipeline, subject string) error {
+	// owners.Load refuses an empty prefix, but a Pipeline built in code
+	// (demo mode, tests) skips that check; with an empty prefix the rule
+	// would accept any subject starting with a bare ".".
+	if p.TopicPrefix == "" {
+		return fmt.Errorf("actions: pipeline %q has no topic_prefix", p.ID)
+	}
 	topic, ok := subjectTopic(subject)
 	if !ok {
 		return fmt.Errorf("actions: subject %q is not a -key or -value subject", subject)
 	}
 	for _, st := range p.SourceTables {
-		if strings.HasSuffix(topic, "."+st) {
+		if topic == p.TopicPrefix+"."+st {
 			return nil
 		}
 	}
@@ -123,9 +134,69 @@ func (d Deps) subjectExists(ctx context.Context, subject string) error {
 	return fmt.Errorf("actions: subject %q not found", subject)
 }
 
+// pollEvery returns the poll interval: the test override when set, otherwise
+// resumePollInterval.
+func pollEvery(override time.Duration) time.Duration {
+	if override > 0 {
+		return override
+	}
+	return resumePollInterval
+}
+
+// awaitRunning calls read until it reports RUNNING or ctx ends. read returns ""
+// while the state is not known yet (for example a task id that is not in the
+// status list yet), and the loop keeps polling. It returns the last state seen
+// and whether RUNNING was reached. A read error is returned unless ctx has
+// already ended, which is reported as a timeout instead.
+func awaitRunning(ctx context.Context, interval time.Duration, read func(context.Context) (string, error)) (string, bool, error) {
+	last := ""
+	for {
+		state, err := read(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return last, false, nil
+			}
+			return last, false, err
+		}
+		if state != "" {
+			last = state
+		}
+		if state == "RUNNING" {
+			return state, true, nil
+		}
+		select {
+		case <-ctx.Done():
+			return last, false, nil
+		case <-time.After(interval):
+		}
+	}
+}
+
+// taskState returns the state of task id in st, or "" when the status does
+// not list it yet.
+func taskState(st clients.ConnectorStatus, id int) string {
+	for _, t := range st.Tasks {
+		if t.ID == id {
+			return t.State
+		}
+	}
+	return ""
+}
+
+func orUnknown(state string) string {
+	if state == "" {
+		return "UNKNOWN"
+	}
+	return state
+}
+
 // ---- connect_restart_task ----
 
-type restartTask struct{ d Deps }
+type restartTask struct {
+	d Deps
+	// pollInterval overrides resumePollInterval in tests; zero means the default.
+	pollInterval time.Duration
+}
 
 func (a *restartTask) Name() string  { return "connect_restart_task" }
 func (a *restartTask) Layer() string { return "kafka-connect" }
@@ -157,7 +228,7 @@ func (a *restartTask) Validate(raw json.RawMessage) error {
 func (a *restartTask) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
 	var params restartTaskParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return fmt.Errorf("actions: bad params: %v", err)
+		return fmt.Errorf("actions: bad params: %w", err)
 	}
 	return inScopeConnector(p, params.Connector)
 }
@@ -170,24 +241,34 @@ func (a *restartTask) Execute(ctx context.Context, raw json.RawMessage) (string,
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := a.d.Connect.RestartTask(ctx, p.Connector, p.Task); err != nil {
-		return "", err
+		return "", fmt.Errorf("actions: restart %s task %d: %w", p.Connector, p.Task, err)
 	}
-	st, err := a.d.Connect.Status(ctx, p.Connector)
-	if err != nil {
-		return "", err
-	}
-	state := "UNKNOWN"
-	for _, t := range st.Tasks {
-		if t.ID == p.Task {
-			state = t.State
+	// Connect applies a restart asynchronously. Once the restart call has
+	// succeeded, every later problem is a non-error result: an error would tell
+	// the agent the restart failed and invite a retry.
+	state, running, err := awaitRunning(ctx, pollEvery(a.pollInterval), func(ctx context.Context) (string, error) {
+		st, err := a.d.Connect.Status(ctx, p.Connector)
+		if err != nil {
+			return "", err
 		}
+		return taskState(st, p.Task), nil
+	})
+	switch {
+	case err != nil:
+		return fmt.Sprintf("restart accepted for %s task %d; status read failed: %v", p.Connector, p.Task, err), nil
+	case running:
+		return fmt.Sprintf("restarted %s task %d (RUNNING)", p.Connector, p.Task), nil
 	}
-	return fmt.Sprintf("restarted %s task %d (state now %s)", p.Connector, p.Task, state), nil
+	return fmt.Sprintf("restart accepted for %s task %d; state now %s (Connect applies restarts asynchronously)", p.Connector, p.Task, orUnknown(state)), nil
 }
 
 // ---- connect_restart_connector ----
 
-type restartConnector struct{ d Deps }
+type restartConnector struct {
+	d Deps
+	// pollInterval overrides resumePollInterval in tests; zero means the default.
+	pollInterval time.Duration
+}
 
 func (a *restartConnector) Name() string  { return "connect_restart_connector" }
 func (a *restartConnector) Layer() string { return "kafka-connect" }
@@ -215,7 +296,7 @@ func (a *restartConnector) Validate(raw json.RawMessage) error {
 func (a *restartConnector) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
 	var params restartConnectorParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return fmt.Errorf("actions: bad params: %v", err)
+		return fmt.Errorf("actions: bad params: %w", err)
 	}
 	return inScopeConnector(p, params.Connector)
 }
@@ -228,13 +309,149 @@ func (a *restartConnector) Execute(ctx context.Context, raw json.RawMessage) (st
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := a.d.Connect.RestartConnector(ctx, p.Connector); err != nil {
-		return "", err
+		return "", fmt.Errorf("actions: restart %s: %w", p.Connector, err)
 	}
+	// The call uses onlyFailed=true, so it restarts the connector and its
+	// failed tasks. Success needs the connector and every listed task RUNNING:
+	// a RUNNING connector with a FAILED task is not a fix.
+	taskCount := 0
+	state, running, err := awaitRunning(ctx, pollEvery(a.pollInterval), func(ctx context.Context) (string, error) {
+		st, err := a.d.Connect.Status(ctx, p.Connector)
+		if err != nil {
+			return "", err
+		}
+		desc, n, ok := connectorAndTasks(st)
+		taskCount = n
+		if ok {
+			return "RUNNING", nil
+		}
+		return desc, nil
+	})
+	switch {
+	case err != nil:
+		return fmt.Sprintf("restart accepted for %s; status read failed: %v", p.Connector, err), nil
+	case running:
+		return fmt.Sprintf("restarted failed tasks of %s (connector and %d tasks RUNNING)", p.Connector, taskCount), nil
+	}
+	return fmt.Sprintf("restart accepted for %s; %s (Connect applies restarts asynchronously)", p.Connector, orUnknown(state)), nil
+}
+
+// connectorAndTasks describes a connector status for connect_restart_connector.
+// ok is true only when the connector and every listed task are RUNNING and at
+// least one task is listed. Otherwise desc names each part that is not
+// RUNNING, for example "connector RUNNING, task 0 FAILED".
+func connectorAndTasks(st clients.ConnectorStatus) (desc string, n int, ok bool) {
+	parts := []string{"connector " + orUnknown(st.State)}
+	allRunning := st.State == "RUNNING" && len(st.Tasks) > 0
+	for _, t := range st.Tasks {
+		if t.State != "RUNNING" {
+			allRunning = false
+			parts = append(parts, fmt.Sprintf("task %d %s", t.ID, orUnknown(t.State)))
+		}
+	}
+	if len(st.Tasks) == 0 {
+		parts = append(parts, "no tasks listed")
+	}
+	if allRunning {
+		return "RUNNING", len(st.Tasks), true
+	}
+	return strings.Join(parts, ", "), len(st.Tasks), false
+}
+
+// ---- connect_resume_connector ----
+
+// connectorResumer is the local adapter for ConnectClient.Resume until the
+// method lands on clients.ConnectClient (contract change request in the PR):
+// the concrete connect client (internal/clients/connect) and the test fakes
+// implement it, and the action reports a clear error when the injected client
+// does not.
+type connectorResumer interface {
+	Resume(ctx context.Context, name string) error
+}
+
+type resumeConnector struct{ d Deps }
+
+func (a *resumeConnector) Name() string  { return "connect_resume_connector" }
+func (a *resumeConnector) Layer() string { return "kafka-connect" }
+func (a *resumeConnector) Describe() string {
+	return "Resumes a paused or stopped Kafka Connect connector."
+}
+func (a *resumeConnector) ParamsSchema() map[string]any {
+	return objectSchema(map[string]any{"connector": strProp("connector name")}, "connector")
+}
+
+type resumeConnectorParams struct {
+	Connector string `json:"connector"`
+}
+
+// resumePollInterval is how often Execute re-reads the connector state while
+// it waits for Connect to apply the resume.
+const resumePollInterval = 250 * time.Millisecond
+
+func (a *resumeConnector) Validate(raw json.RawMessage) error {
+	var p resumeConnectorParams
+	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" {
+		return fmt.Errorf("actions: connector is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := a.d.connectorExists(ctx, p.Connector); err != nil {
+		return err
+	}
+	// Resume only moves PAUSED or STOPPED connectors. Refusing the rest here
+	// keeps the agent from "resuming" a RUNNING connector or a FAILED one,
+	// which a resume does not fix (restart is the action for FAILED tasks).
 	st, err := a.d.Connect.Status(ctx, p.Connector)
 	if err != nil {
-		return "", err
+		return fmt.Errorf("actions: resume %s: read status: %w", p.Connector, err)
 	}
-	return fmt.Sprintf("restarted failed tasks of %s (connector state %s)", p.Connector, st.State), nil
+	if st.State != "PAUSED" && st.State != "STOPPED" {
+		return fmt.Errorf("actions: connector %q is %s; resume only applies to PAUSED or STOPPED", p.Connector, st.State)
+	}
+	return nil
+}
+
+func (a *resumeConnector) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
+	var params resumeConnectorParams
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return fmt.Errorf("actions: bad params: %w", err)
+	}
+	return inScopeConnector(p, params.Connector)
+}
+
+func (a *resumeConnector) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
+	var p resumeConnectorParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "", fmt.Errorf("actions: bad params: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	rc, ok := a.d.Connect.(connectorResumer)
+	if !ok {
+		return "", fmt.Errorf("actions: connect client does not support Resume")
+	}
+	if err := rc.Resume(ctx, p.Connector); err != nil {
+		return "", fmt.Errorf("actions: resume %s: %w", p.Connector, err)
+	}
+	// Connect applies a resume asynchronously. Once Resume has succeeded the
+	// write is done, so every later failure is reported as a non-error result:
+	// an error here would tell the agent the resume failed and invite a retry.
+	state := ""
+	for {
+		st, err := a.d.Connect.Status(ctx, p.Connector)
+		if err != nil {
+			return fmt.Sprintf("resume accepted for %s; status read failed: %v", p.Connector, err), nil
+		}
+		state = st.State
+		if state == "RUNNING" {
+			return fmt.Sprintf("resumed %s (RUNNING)", p.Connector), nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Sprintf("resume accepted for %s; state now %s (Connect applies resume asynchronously)", p.Connector, state), nil
+		case <-time.After(resumePollInterval):
+		}
+	}
 }
 
 // ---- schema_set_compatibility ----
@@ -279,7 +496,7 @@ func (a *setCompatibility) Validate(raw json.RawMessage) error {
 func (a *setCompatibility) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
 	var params setCompatibilityParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return fmt.Errorf("actions: bad params: %v", err)
+		return fmt.Errorf("actions: bad params: %w", err)
 	}
 	return inScopeSubject(p, params.Subject)
 }
@@ -291,14 +508,31 @@ func (a *setCompatibility) Execute(ctx context.Context, raw json.RawMessage) (st
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	// Read the level before writing it: after a fix that loosened the subject
+	// to NONE, the agent must know which level to restore. A failed read does
+	// not block the write; the old level is then reported as unknown.
+	old := "unknown"
+	if before, subjectLevel, err := a.d.Registry.Compatibility(ctx, p.Subject); err == nil && before != "" {
+		old = levelText(before, subjectLevel)
+	}
 	if err := a.d.Registry.SetCompatibility(ctx, p.Subject, p.Level); err != nil {
-		return "", err
+		return "", fmt.Errorf("actions: set compatibility %s: %w", p.Subject, err)
 	}
-	level, _, err := a.d.Registry.Compatibility(ctx, p.Subject)
+	level, subjectLevel, err := a.d.Registry.Compatibility(ctx, p.Subject)
 	if err != nil {
-		return fmt.Sprintf("%s compatibility now %s (set; re-read failed: %v)", p.Subject, p.Level, err), nil
+		return fmt.Sprintf("%s compatibility %s → %s (set; re-read failed: %v)", p.Subject, old, p.Level, err), nil
 	}
-	return fmt.Sprintf("%s compatibility now %s", p.Subject, level), nil
+	return fmt.Sprintf("%s compatibility %s → %s", p.Subject, old, levelText(level, subjectLevel)), nil
+}
+
+// levelText renders a compatibility level for the result. A level inherited
+// from the global default is marked "(global)", so the agent can tell that the
+// subject itself had no level of its own.
+func levelText(level string, subjectLevel bool) string {
+	if subjectLevel {
+		return level
+	}
+	return level + " (global)"
 }
 
 // ---- schema_register ----
@@ -338,7 +572,7 @@ func (a *registerSchema) Validate(raw json.RawMessage) error {
 func (a *registerSchema) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
 	var params registerSchemaParams
 	if err := json.Unmarshal(raw, &params); err != nil {
-		return fmt.Errorf("actions: bad params: %v", err)
+		return fmt.Errorf("actions: bad params: %w", err)
 	}
 	return inScopeSubject(p, params.Subject)
 }

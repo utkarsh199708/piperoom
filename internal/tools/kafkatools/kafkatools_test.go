@@ -88,7 +88,7 @@ func (f *fakeKafka) FindByKey(ctx context.Context, t, k string, s time.Time, m i
 
 func runTool(t *testing.T, tool tools.Tool, input string) tools.Result {
 	t.Helper()
-	r, err := tool.Run(context.Background(), json.RawMessage(input))
+	r, err := tool.Run(tools.WithUnscoped(context.Background()), json.RawMessage(input))
 	if err != nil {
 		t.Fatalf("%s: %v", tool.Name(), err)
 	}
@@ -203,9 +203,9 @@ func TestBadInput(t *testing.T) {
 	if err := Register(reg, Deps{}); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"connect_status", "connect_config", "schema_registry_versions", "schema_registry_diff", "kafka_topic_offsets", "kafka_consumer_lag", "kafka_find_by_key"} {
+	for _, name := range []string{"connect_status", "connect_config", "schema_registry_versions", "schema_registry_diff", "kafka_topic_offsets", "kafka_consumer_lag", "kafka_find_by_key", "kafka_topic_config"} {
 		tool, _ := reg.Get(name)
-		if _, err := tool.Run(context.Background(), json.RawMessage(`{}`)); err == nil || !errors.Is(err, tools.ErrBadInput) {
+		if _, err := tool.Run(tools.WithUnscoped(context.Background()), json.RawMessage(`{}`)); err == nil || !errors.Is(err, tools.ErrBadInput) {
 			t.Errorf("%s: want ErrBadInput, got %v", name, err)
 		}
 	}
@@ -345,7 +345,7 @@ func TestKafkaTopicOffsets(t *testing.T) {
 	if !strings.Contains(r.Summary, "partition 0: 0–100 (100 records)") || !strings.Contains(r.Summary, "newest 5 min ago") {
 		t.Fatalf("summary %q", r.Summary)
 	}
-	if _, err := tool.Run(context.Background(), json.RawMessage(`{"topic":"nope"}`)); !errors.Is(err, clients.ErrNotFound) {
+	if _, err := tool.Run(tools.WithUnscoped(context.Background()), json.RawMessage(`{"topic":"nope"}`)); !errors.Is(err, clients.ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
@@ -438,7 +438,7 @@ func TestToolRespectsCancelledContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	tool, _ := reg.Get("kafka_find_by_key")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(tools.WithUnscoped(context.Background()))
 	done := make(chan error, 1)
 	go func() {
 		_, err := tool.Run(ctx, json.RawMessage(`{"topic":"t","key":"k","since":"2026-10-11T00:00:00Z"}`))

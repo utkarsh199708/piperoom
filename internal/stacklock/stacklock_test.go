@@ -173,8 +173,8 @@ func TestStealNoLock(t *testing.T) {
 
 func TestPathEnvOverride(t *testing.T) {
 	t.Setenv(EnvPath, "")
-	if Path() != DefaultPath {
-		t.Fatalf("Path() = %q, want default %q", Path(), DefaultPath)
+	if Path() != DefaultPath() {
+		t.Fatalf("Path() = %q, want default %q", Path(), DefaultPath())
 	}
 	custom := filepath.Join(t.TempDir(), "custom.lock")
 	t.Setenv(EnvPath, custom)
@@ -184,6 +184,35 @@ func TestPathEnvOverride(t *testing.T) {
 	// New("") must also respect the env override.
 	if l := New(""); l.Path() != custom {
 		t.Fatalf("New(\"\").Path() = %q, want %q", l.Path(), custom)
+	}
+}
+
+func TestDefaultPathDerivation(t *testing.T) {
+	// The git common dir is <repo>/.git; the bus directory is a sibling of the
+	// repo, so the lock is <repo-parent>/piperoom-bus/stack.lock.
+	common := filepath.Join("work", "piperoom", ".git")
+	got := defaultPath(common)
+	want := filepath.Join("work", "piperoom-bus", "stack.lock")
+	if got != want {
+		t.Fatalf("defaultPath(%q) = %q, want %q", common, got, want)
+	}
+}
+
+func TestLockFailsClosedWithoutPath(t *testing.T) {
+	// A lock with no resolved path (git unavailable and $PIPEROOM_STACK_LOCK
+	// unset) must refuse every operation instead of writing a per-cwd file.
+	l := &Lock{path: ""}
+	if _, err := l.Acquire("alice"); err == nil || !strings.Contains(err.Error(), "no lock path") {
+		t.Fatalf("Acquire with empty path = %v, want 'no lock path'", err)
+	}
+	if _, err := l.Status(); err == nil || !strings.Contains(err.Error(), "no lock path") {
+		t.Fatalf("Status with empty path = %v, want 'no lock path'", err)
+	}
+	if err := l.Release("alice"); err == nil || !strings.Contains(err.Error(), "no lock path") {
+		t.Fatalf("Release with empty path = %v, want 'no lock path'", err)
+	}
+	if _, err := l.Steal(time.Minute); err == nil || !strings.Contains(err.Error(), "no lock path") {
+		t.Fatalf("Steal with empty path = %v, want 'no lock path'", err)
 	}
 }
 

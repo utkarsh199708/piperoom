@@ -2,15 +2,20 @@
 // develop and test Piperoom. Run it from anywhere inside the repo.
 //
 //	devctl up | down | reset | status
+//	devctl health                     read-only; exit 1 if a layer is unhealthy
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
+//	devctl demo [--fix] <scenario>
+//	devctl identities unbind <user>   move a user to a new IdP account
 //
-// Scenarios: schema-change, connector-down, consumer-stuck, long-transaction.
+// Scenarios: schema-change, connector-down, consumer-stuck, long-transaction,
+// slot-inactive, consumer-lag, connector-auth.
 // See dev/scenarios.md for what each one does and what it looks like.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -25,13 +30,16 @@ const usage = `devctl — local pipeline control
   devctl up                 start the stack, register the connector, start devconsumer
   devctl down               stop the stack
   devctl reset              remove all data and start clean
-  devctl status             one-screen pipeline health
+  devctl status             one-screen pipeline health (for humans)
+  devctl health             read-only check per layer; exit 1 unhealthy, 2 setup error
   devctl load [--rate N]    insert/update orders N per second until Ctrl+C
   devctl break <scenario>   cause a failure
   devctl fix <scenario>     apply the correct manual fix
+  devctl demo [--fix] <scenario>   one-command live demo (locks, resets, breaks)
   devctl lock --owner <tag> take the shared stack lock
   devctl unlock --owner <tag>  release the shared stack lock
   devctl lock status        show who holds the lock
+  devctl identities unbind <user>   delete the user's IdP binding (room database)
   devctl lock --steal       steal a stale (>15m) lock
 
 up/down/reset/load/break/fix mutate the shared stack and require --owner <tag>
@@ -52,12 +60,26 @@ func main() {
 	st, err := newStack(log)
 	if err != nil {
 		log.Error("devctl", "err", err)
-		os.Exit(1)
+		os.Exit(exitCode(os.Args[1]))
 	}
 	if err := runCommand(ctx, st, os.Args[1], os.Args[2:]); err != nil {
+		if errors.Is(err, errUnhealthy) {
+			// The report already names the layers; exit code is the answer.
+			os.Exit(1)
+		}
 		log.Error("devctl "+os.Args[1]+" failed", "err", err)
-		os.Exit(1)
+		os.Exit(exitCode(os.Args[1]))
 	}
+}
+
+// exitCode is 2 for a failed `health` run (setup: not in the repo, owners.yaml
+// unreadable, bad arguments) so it is never confused with "unhealthy" (1). Other
+// commands keep 1.
+func exitCode(cmd string) int {
+	if cmd == "health" {
+		return 2
+	}
+	return 1
 }
 
 func runCommand(ctx context.Context, st *stack, cmd string, args []string) error {
@@ -100,6 +122,11 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		return st.reset(ctx)
 	case "status":
 		return st.status(ctx, os.Stdout)
+	case "health":
+		if len(args) != 0 {
+			return fmt.Errorf("usage: devctl health")
+		}
+		return st.health(ctx, os.Stdout)
 	case "load":
 		owner, rest, err := splitOwner(args)
 		if err != nil {
@@ -141,6 +168,10 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 			return sc.breakIt(ctx, st)
 		}
 		return sc.fix(ctx, st)
+	case "demo":
+		return demoCmd(ctx, st, args)
+	case "identities":
+		return identitiesCmd(ctx, st, args, os.Stdout)
 	}
 	return fmt.Errorf("unknown command %q", cmd)
 }

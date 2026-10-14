@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Room — approval moment</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+.pr{--background:#0a0a0b;--sidebar:#0e0e10;--card:#121214;--muted:#19191d;--hover:#1f1f25;--overlay:rgba(0,0,0,.6);--border:#222228;--border-strong:#2d2d35;--foreground:#ececf0;--muted-foreground:#9d9da8;--subtle-foreground:#6b6b76;--primary:#5b7cfa;--primary-hover:#6f8cff;--primary-subtle:rgba(91,124,250,.14);--primary-fg:#8ea3ff;--primary-on:#ffffff;--success:#2ea36f;--success-subtle:rgba(46,163,111,.14);--success-fg:#4fd48f;--warning:#d9a21b;--warning-subtle:rgba(217,162,27,.13);--warning-fg:#f0c04a;--danger:#e5484d;--danger-subtle:rgba(229,72,77,.14);--danger-fg:#ff7074;--info:#3b9eff;--info-subtle:rgba(59,158,255,.14);--info-fg:#7cc0ff;--agent:#8b5cf6;--agent-subtle:rgba(139,92,246,.14);--agent-fg:#b7a0ff;--ring:#5b7cfa;--l-postgres:#7cb8ff;--l-kafka-connect:#f0a35c;--l-schema-registry:#5ad3c0;--l-kafka:#f28fb4;--l-consumer:#b9d96b;--l-warehouse:#9fb3ff;--shadow-md:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.4);--shadow-lg:0 2px 4px rgba(0,0,0,.5),0 24px 64px rgba(0,0,0,.6);--sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-family:var(--sans);font-size:13px;line-height:18px;color:var(--foreground);background:var(--background);-webkit-font-smoothing:antialiased;color-scheme:dark}
+.pr[data-theme=light]{--background:#ffffff;--sidebar:#fafafa;--card:#ffffff;--muted:#f4f4f5;--hover:#ececee;--overlay:rgba(24,24,27,.45);--border:#e4e4e7;--border-strong:#d4d4d8;--foreground:#18181b;--muted-foreground:#52525b;--subtle-foreground:#71717a;--primary:#4f6ef2;--primary-hover:#3b5bdb;--primary-subtle:rgba(79,110,242,.1);--primary-fg:#3b5bdb;--success:#1f9d5f;--success-subtle:rgba(31,157,95,.12);--success-fg:#15803d;--warning:#c58f0a;--warning-subtle:rgba(197,143,10,.12);--warning-fg:#9a6a05;--danger:#dc3d43;--danger-subtle:rgba(220,61,67,.1);--danger-fg:#b91c1c;--info:#2b7fff;--info-subtle:rgba(43,127,255,.1);--info-fg:#1d4ed8;--agent:#7c4ddc;--agent-subtle:rgba(124,77,220,.1);--agent-fg:#6d28d9;--l-postgres:#1d6fd8;--l-kafka-connect:#b85c0a;--l-schema-registry:#0f8a78;--l-kafka:#c0366d;--l-consumer:#5a7d0d;--l-warehouse:#4a5fd0;--shadow-md:0 1px 2px rgba(0,0,0,.06),0 8px 24px rgba(0,0,0,.08);--shadow-lg:0 2px 4px rgba(0,0,0,.06),0 24px 64px rgba(0,0,0,.14);color-scheme:light}
+.pr *{box-sizing:border-box}
+.pr a{color:inherit;text-decoration:none}
+.pr :focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.ic{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic-14{width:14px;height:14px}.ic-12{width:12px;height:12px}
+.mono{font-family:var(--mono)}.muted{color:var(--muted-foreground)}.subtle{color:var(--subtle-foreground)}
+.t-xs{font-size:12px;line-height:16px}.t-sm{font-size:13px;line-height:18px}.t-base{font-size:14px;line-height:20px}.t-lg{font-size:16px;line-height:22px;font-weight:600}.t-xl{font-size:20px;line-height:26px;font-weight:600;letter-spacing:-.01em}
+.w500{font-weight:500}.w600{font-weight:600}.tnum{font-variant-numeric:tabular-nums}
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:6px;font:500 13px/18px var(--sans);border:1px solid transparent;background:transparent;color:var(--foreground);cursor:pointer;white-space:nowrap}
+.btn-md{height:36px;padding:0 12px}
+.btn-primary{background:var(--primary);color:var(--primary-on)}
+.btn-secondary{background:var(--muted);border-color:var(--border);color:var(--foreground)}
+.btn-outline{border-color:var(--border-strong);color:var(--foreground)}
+.btn-ghost{color:var(--muted-foreground)}
+.btn-ghost-danger{color:var(--danger-fg)}
+.btn-success{background:var(--success);color:#ffffff}
+.btn-icon{width:32px;padding:0;justify-content:center}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.kbd{display:inline-flex;align-items:center;justify-content:center;height:18px;min-width:18px;padding:0 4px;border-radius:4px;border:1px solid var(--border-strong);background:var(--muted);color:var(--subtle-foreground);font:500 11px/16px var(--mono)}
+.btn-primary .kbd,.btn-success .kbd{background:rgba(255,255,255,.18);border-color:transparent;color:inherit}
+.badge{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 6px;border-radius:6px;font:500 12px/16px var(--sans);background:var(--muted);color:var(--muted-foreground);border:1px solid transparent;white-space:nowrap}
+.badge-sev1{background:var(--danger-subtle);color:var(--danger-fg)}.badge-sev2{background:var(--warning-subtle);color:var(--warning-fg)}.badge-sev3{background:var(--primary-subtle);color:var(--primary-fg)}.badge-sev4{background:var(--success-subtle);color:var(--success-fg)}
+.badge-ok{background:var(--success-subtle);color:var(--success-fg)}.badge-warn{background:var(--warning-subtle);color:var(--warning-fg)}.badge-fail{background:var(--danger-subtle);color:var(--danger-fg)}.badge-info{background:var(--info-subtle);color:var(--info-fg)}.badge-accent{background:var(--primary-subtle);color:var(--primary-fg)}.badge-agent{background:var(--agent-subtle);color:var(--agent-fg)}
+.badge-outline{background:transparent;border-color:var(--border-strong);color:var(--muted-foreground)}
+.badge-mono{font:500 11.5px/16px var(--mono)}
+.l-postgres{color:var(--l-postgres);background:color-mix(in srgb,var(--l-postgres) 12%,transparent)}.l-kafka-connect{color:var(--l-kafka-connect);background:color-mix(in srgb,var(--l-kafka-connect) 12%,transparent)}.l-schema-registry{color:var(--l-schema-registry);background:color-mix(in srgb,var(--l-schema-registry) 12%,transparent)}.l-kafka{color:var(--l-kafka);background:color-mix(in srgb,var(--l-kafka) 12%,transparent)}.l-consumer{color:var(--l-consumer);background:color-mix(in srgb,var(--l-consumer) 12%,transparent)}.l-warehouse{color:var(--l-warehouse);background:color-mix(in srgb,var(--l-warehouse) 12%,transparent)}
+.dot{width:6px;height:6px;border-radius:999px;background:var(--subtle-foreground);flex:none}.dot-ok{background:var(--success)}.dot-warn{background:var(--warning)}.dot-fail{background:var(--danger)}.dot-agent{background:var(--agent)}.dot-info{background:var(--info)}.dot-accent{background:var(--primary)}
+.pill{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px;border-radius:999px;border:1px solid var(--border);background:var(--card);font:500 12px/16px var(--sans);color:var(--muted-foreground);white-space:nowrap}
+.av{width:24px;height:24px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;font:600 10px/1 var(--sans);color:#fff;flex:none}
+.av-20{width:20px;height:20px;font-size:9px}.av-28{width:28px;height:28px;font-size:11px}.av-32{width:32px;height:32px;font-size:12px}
+.av-driver{box-shadow:0 0 0 2px var(--background),0 0 0 4px var(--primary)}
+.p-kabir{background:#b45309}.p-arjun{background:#1d4ed8}.p-priya{background:#0f766e}.p-meera{background:#be185d}.p-rohan{background:#4d7c0f}.av-agent{background:var(--agent)}
+.stack{display:inline-flex;align-items:center}.stack .av{margin-left:-6px;border:2px solid var(--background)}.stack .av:first-child{margin-left:0}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px}
+.sep{height:1px;background:var(--border)}
+.ta{display:block;width:100%;min-height:40px;padding:10px 12px;border-radius:6px;border:1px solid var(--border);background:var(--muted);color:var(--foreground);font:400 13px/18px var(--sans);resize:none}
+.sb{width:240px;flex:none;background:var(--sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:900px}
+.nav a{display:flex;align-items:center;gap:8px;height:32px;padding:0 8px;border-radius:6px;color:var(--muted-foreground);font-weight:500}
+.nav a.on{background:var(--hover);color:var(--foreground)}
+.nav a .cnt{margin-left:auto;font:500 11px/16px var(--mono);color:var(--subtle-foreground)}
+.topbar{height:48px;padding:0 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.node{flex:1 1 0;min-width:200px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-height:92px}
+.node-fail{border-color:var(--danger)}
+.node .k{display:flex;align-items:center;gap:8px}
+.node .k .kind{font-size:12px;line-height:16px;color:var(--subtle-foreground);white-space:nowrap}
+.node .k .badge{margin-left:auto;flex:none}
+.node .nm{font:500 13px/18px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node .f{display:flex;align-items:center;gap:6px;font-size:12px;line-height:16px;color:var(--muted-foreground);margin-top:auto}
+.edge{flex:0 0 44px;position:relative;height:0;align-self:center;border-top:2px dashed var(--border-strong);margin-top:-8px}
+.edge::after{content:"";position:absolute;right:-1px;top:-5px;border:4px solid transparent;border-left:6px solid var(--border-strong)}
+.edge-stalled{flex-basis:64px;border-top:2px solid var(--danger)}
+.edge-stalled::after{border-left-color:var(--danger)}
+.edge .cap{position:absolute;top:-24px;left:50%;transform:translateX(-50%);background:var(--background);border:1px solid var(--border);padding:0 6px;border-radius:4px;font:500 11px/16px var(--mono);color:var(--danger-fg);white-space:nowrap}
+.rail{width:300px;flex:none;border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:900px}
+.rail h2{margin:0;font:500 13px/18px var(--sans);display:flex;align-items:center;gap:6px}
+.rail h2 .cnt{font:500 11px/16px var(--mono);color:var(--subtle-foreground)}
+.row{display:flex;align-items:center;gap:8px;min-height:32px}
+.ribbon{height:36px;display:flex;align-items:center;gap:8px;padding:0 14px;background:var(--warning-subtle);color:var(--warning-fg);border-bottom:1px solid var(--border);border-radius:8px 8px 0 0;font-weight:500}
+.pstep{display:grid;grid-template-columns:22px 1fr;gap:10px;align-items:start}
+.pstep .n{width:22px;height:22px;border-radius:999px;background:var(--muted);color:var(--subtle-foreground);font:500 11px/1 var(--mono);display:inline-flex;align-items:center;justify-content:center}
+.params{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;font:400 12px/16px var(--mono);background:var(--muted);border:1px solid var(--border);border-radius:6px;padding:8px 10px}
+.params .key{color:var(--subtle-foreground)}
+.params .target{color:var(--foreground);font-weight:500}
+.params .from{color:var(--subtle-foreground);text-decoration:line-through}
+.arow{display:flex;align-items:center;gap:10px;min-height:44px;padding:0 14px}
+.arow+.arow{border-top:1px solid var(--border)}
+.arow-mine{background:var(--warning-subtle)}
+.hash{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px;border-radius:6px;border:1px solid var(--border-strong);background:var(--muted);font:500 12px/16px var(--mono);color:var(--foreground)}
+</style>
+</helmet>
+<div class="pr" data-theme="{{theme}}" style="display: flex; flex-wrap: wrap; width: 100%; min-height: 900px;">
+
+  <aside class="sb">
+    <div style="height: 48px; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-bottom: 1px solid var(--border);">
+      <span style="width: 20px; height: 20px; border-radius: 5px; background: var(--primary); display: inline-flex; align-items: center; justify-content: center;"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true" style="stroke: #fff;"><path d="M4 12h5l2-5 3 10 2-5h4"/></svg></span>
+      <span class="w600" style="font-size: 13px;">Piperoom</span>
+      <span class="badge badge-outline mono" style="margin-left: auto; height: 18px; font-size: 11px;">staging</span>
+    </div>
+    <div style="padding: 12px 8px 0;">
+      <button class="btn btn-outline" type="button" style="width: 100%; justify-content: flex-start; color: var(--subtle-foreground); background: var(--background);"><svg class="ic ic-14" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>Search<span style="margin-left: auto; display: inline-flex; gap: 2px;"><span class="kbd">⌘</span><span class="kbd">K</span></span></button>
+    </div>
+    <nav class="nav" aria-label="Main" style="display: flex; flex-direction: column; gap: 2px; padding: 12px 8px 0;">
+      <a class="on" href="Main.dc.html"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>Rooms<span class="cnt">5</span></a>
+      <a href="#pipelines"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg>Pipelines</a>
+      <a href="#audit"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>Audit log</a>
+    </nav>
+    <div style="padding: 20px 16px 6px; font: 500 12px/16px var(--sans); color: var(--subtle-foreground);">Pipelines</div>
+    <nav class="nav" aria-label="Pipelines" style="display: flex; flex-direction: column; gap: 2px; padding: 0 8px;">
+      <a class="on" href="#orders"><span class="dot dot-fail"></span>orders<span class="cnt">2 open</span></a>
+      <a href="#customers"><span class="dot dot-warn"></span>customers<span class="cnt">1 open</span></a>
+      <a href="#payments"><span class="dot dot-ok"></span>payments<span class="cnt">1 open</span></a>
+      <a href="#billing"><span class="dot dot-ok"></span>billing</a>
+    </nav>
+    <div style="margin-top: auto; border-top: 1px solid var(--border); padding: 12px 16px; display: flex; align-items: center; gap: 10px;">
+      <span class="av av-28 p-arjun">AR</span>
+      <span style="display: flex; flex-direction: column; min-width: 0;"><span class="w500" style="font-size: 13px;">Arjun</span><span class="t-xs subtle">kafka-connect owner</span></span>
+      <button class="btn btn-ghost btn-icon" type="button" aria-label="Account menu" style="margin-left: auto;"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/></svg></button>
+    </div>
+  </aside>
+
+  <main style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; min-height: 900px; position: relative;">
+    <div class="topbar">
+      <a href="Main.dc.html" class="muted" style="display: inline-flex; align-items: center; gap: 6px;">Rooms<svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg><span class="mono">orders</span></a>
+      <div style="margin-left: auto; display: flex; align-items: center; gap: 8px;">
+        <span class="pill" style="color: var(--warning-fg);"><span class="dot dot-warn"></span>Agent waiting · 1 of 2 approvals</span>
+        <button class="btn btn-secondary" type="button"><svg class="ic ic-14" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/></svg>Hand off<span class="kbd">H</span></button>
+        <button class="btn btn-ghost btn-icon" type="button" aria-label="Invite"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/></svg></button>
+        <button class="btn btn-ghost btn-icon" type="button" aria-label="More"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></button>
+      </div>
+    </div>
+
+    <div style="padding: 16px 24px 0; display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+        <h1 class="t-xl" style="margin: 0;">Warehouse orders stale</h1>
+        <span class="badge badge-sev2">SEV2</span>
+        <span class="badge badge-outline"><span class="dot dot-warn"></span>Needs approval · 52m</span>
+      </div>
+      <div class="mono t-xs subtle" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;"><span>#r_schema_change</span><span>·</span><span>Alertmanager</span><span>·</span><span>opened 10:00</span><span>·</span><span>newest warehouse row 09:58</span></div>
+      <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+        <span class="stack"><span class="av av-driver p-kabir" title="Kabir · driving">KA</span><span class="av p-arjun">AR</span><span class="av p-priya">PR</span><span class="av p-meera">ME</span></span>
+        <span class="muted">Kabir is driving</span><span class="subtle">·</span><span class="subtle">4 here</span>
+      </div>
+    </div>
+
+    <section style="padding: 16px 24px 0; display: flex; flex-direction: column; gap: 10px;">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span class="w500">Pipeline</span><span class="mono muted">orders</span><span class="t-xs subtle" style="margin-left: 8px;">updated 3s ago</span>
+        <button class="btn btn-ghost" type="button" style="margin-left: auto; height: 28px;"><svg class="ic ic-14" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/></svg>Trace a record<span class="kbd">⇧T</span></button>
+      </div>
+      <div style="display: flex; align-items: stretch; overflow-x: auto; padding-top: 20px;">
+        <div class="node"><div class="k"><span class="kind">Source</span><span class="badge badge-mono l-postgres">postgres</span></div><div class="nm">public.orders</div><div class="f"><span class="dot dot-ok"></span>healthy<span class="mono" style="margin-left: auto;">wal 2.1 MB/s</span></div></div>
+        <div class="edge"></div>
+        <div class="node node-fail"><div class="k"><span class="kind">Connector</span><span class="badge badge-mono l-kafka-connect">kafka-connect</span></div><div class="nm">pg-orders-connector</div><div class="f" style="color: var(--danger-fg);"><span class="dot dot-fail"></span>failed<span class="mono" style="margin-left: auto;">task 0 · 409</span></div></div>
+        <div class="edge edge-stalled"><span class="cap">no flow · 52m</span></div>
+        <div class="node"><div class="k"><span class="kind">Topic</span><span class="badge badge-mono l-kafka">kafka</span></div><div class="nm">pg.public.orders</div><div class="f"><span class="dot dot-warn"></span>degraded<span class="mono" style="margin-left: auto;">0 msg/s</span></div></div>
+        <div class="edge"></div>
+        <div class="node"><div class="k"><span class="kind">Consumer</span><span class="badge badge-mono l-consumer">consumer</span></div><div class="nm">orders-sync</div><div class="f"><span class="dot dot-warn"></span>degraded<span class="mono" style="margin-left: auto;">idle 52m</span></div></div>
+        <div class="edge"></div>
+        <div class="node"><div class="k"><span class="kind">Sink</span><span class="badge badge-mono l-warehouse">warehouse</span></div><div class="nm">analytics.orders</div><div class="f"><span class="dot dot-ok"></span>healthy<span class="mono" style="margin-left: auto;">newest 52m</span></div></div>
+      </div>
+    </section>
+
+    <section style="padding: 16px 24px 0; display: flex; flex-direction: column; gap: 12px; flex: 1 1 auto;">
+      <div class="row" style="gap: 10px;">
+        <span class="av av-20 av-agent"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/></svg></span>
+        <span class="w500">Hypothesis</span><span class="badge badge-ok"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>confirmed by Kabir</span>
+        <span class="muted" style="min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Schema change to <span class="mono">orders.amount</span> broke the connector on a Schema Registry incompatibility.</span>
+        <a href="Room-Investigating.dc.html" class="btn btn-ghost" style="margin-left: auto; height: 28px; flex: none;">5 steps · 2m 10s<svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></a>
+      </div>
+
+      <div class="card" style="display: flex; flex-direction: column;">
+        <div class="ribbon"><svg class="ic ic-14" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>Needs your approval · kafka-connect<span class="t-xs" style="margin-left: auto; font-weight: 400; color: var(--muted-foreground);">Priya approved schema-registry 2m ago</span></div>
+        <div style="padding: 14px 14px 12px; display: flex; flex-direction: column; gap: 12px;">
+          <div style="display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap;">
+            <div style="display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 320px;">
+              <span class="t-lg" style="text-wrap: balance;">Set subject compatibility to NONE, then restart the connector task</span>
+              <span class="t-xs muted" style="display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;"><span class="badge badge-ok">risk low</span><span style="display: inline-flex; align-items: center; gap: 4px;"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>rollback: set compatibility back to BACKWARD; the connector restarts cleanly</span></span>
+            </div>
+            <span class="t-xs subtle" style="flex: none;">proposed by the agent · 10:04</span>
+          </div>
+
+          <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;">
+            <div class="pstep"><span class="n">1</span><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0;"><div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;"><span class="badge badge-mono l-schema-registry">schema-registry</span><span class="mono w500">set_compatibility</span></div><div class="params"><span class="key">subject</span><span>pg.public.orders-value</span><span class="key">compatibility</span><span><span class="from">BACKWARD</span> → <span class="target">NONE</span> <span class="badge badge-outline" style="height: 16px; font-size: 11px; margin-left: 4px;">target</span></span></div></div></div>
+            <div class="pstep"><span class="n">2</span><div style="display: flex; flex-direction: column; gap: 6px; min-width: 0;"><div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;"><span class="badge badge-mono l-kafka-connect">kafka-connect</span><span class="mono w500">restart_connector_task</span></div><div class="params"><span class="key">connector</span><span>pg-orders-connector</span><span class="key">task</span><span>0</span></div></div></div>
+          </div>
+
+          <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+            <span class="muted">Approving exactly this</span>
+            <span class="hash" title="9f2c1e7a3b4d5c6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f80910a1b"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/></svg>9f2c 1e7a … 0a1b</span>
+            <button class="btn btn-ghost" type="button" style="height: 24px; padding: 0 6px; font-size: 12px;"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>Copy</button>
+            <span class="t-xs subtle" style="margin-left: auto;">if the steps change, this fingerprint changes and your approval is void</span>
+          </div>
+        </div>
+        <div class="sep"></div>
+        <div class="arow"><span class="badge badge-mono l-schema-registry">schema-registry</span><span class="av av-20 p-priya">PR</span><span class="w500">Priya</span><span class="t-xs subtle mono">user:priya</span><span class="badge badge-ok" style="margin-left: auto;" title="oidc · idp.example.com · 10:05"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Approved · 10:05</span></div>
+        <div class="arow arow-mine"><span class="badge badge-mono l-kafka-connect">kafka-connect</span><span class="av av-20 p-arjun">AR</span><span class="w500">Arjun</span><span class="t-xs muted">you</span><span class="t-xs subtle mono">user:arjun</span><span class="t-xs" style="color: var(--warning-fg); font-weight: 500;">pending · your layer</span><span style="margin-left: auto; display: inline-flex; gap: 8px;"><button class="btn btn-ghost-danger" type="button">Reject<span class="kbd">R</span></button><button class="btn btn-success" type="button">Approve kafka-connect<span class="kbd">A</span></button></span></div>
+      </div>
+    </section>
+
+    <div style="position: sticky; bottom: 0; margin-top: 16px; border-top: 1px solid var(--border); background: var(--background); padding: 12px 24px 16px; display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span class="dot dot-accent"></span><span class="t-xs muted">Kabir is driving · lease 20m left · your message goes to Kabir's queue</span>
+        <button class="btn btn-ghost" type="button" style="margin-left: auto; height: 28px;">Request control<span class="kbd">T</span></button>
+      </div>
+      <label for="suggest" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0);">Suggest a step</label>
+      <textarea id="suggest" class="ta" rows="1" placeholder="Suggest a step for Kabir…"></textarea>
+    </div>
+  </main>
+
+  <aside class="rail">
+    <div style="padding: 14px 16px; display: flex; flex-direction: column; gap: 10px;">
+      <h2>Proposals<span class="cnt">1 open</span></h2>
+      <a href="#proposal" class="card" style="padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; border-color: var(--border-strong);">
+        <span style="display: flex; align-items: center; gap: 6px;"><span class="dot dot-warn"></span><span class="t-xs w500" style="color: var(--warning-fg);">Waiting for you</span><span class="t-xs subtle mono" style="margin-left: auto;">1 of 2</span></span>
+        <span class="w500" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;">Set subject compatibility to NONE, then restart the connector task</span>
+        <span class="t-xs subtle">schema-registry ✓ · kafka-connect pending</span>
+      </a>
+    </div>
+    <div class="sep"></div>
+    <div style="padding: 14px 16px; display: flex; flex-direction: column; gap: 6px;">
+      <h2>Who's here<span class="cnt">4</span></h2>
+      <div class="row"><span class="av av-driver p-kabir" style="margin-left: 2px;">KA</span><span class="w500" style="margin-left: 2px;">Kabir</span><span class="badge badge-accent">Driver</span><span class="t-xs subtle" style="margin-left: auto;">postgres · kafka</span></div>
+      <div class="row"><span class="av p-arjun">AR</span><span class="w500">Arjun</span><span class="t-xs muted">you</span><span class="t-xs subtle" style="margin-left: auto;">kafka-connect</span></div>
+      <div class="row"><span class="av p-priya">PR</span><span class="w500">Priya</span><span class="t-xs subtle" style="margin-left: auto;">schema-registry · warehouse</span></div>
+      <div class="row" style="opacity: .6;"><span class="av p-meera">ME</span><span class="w500">Meera</span><span class="badge badge-outline">viewer</span><span class="t-xs subtle" style="margin-left: auto;">away 16m</span></div>
+    </div>
+    <div class="sep"></div>
+    <div style="padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; flex: 1 1 auto;">
+      <h2>Activity</h2>
+      <div class="row" style="min-height: 24px; align-items: flex-start;"><span class="av av-20 p-priya" style="margin-top: 2px;">PR</span><span class="muted" style="min-width: 0;">Priya approved <span class="mono">schema-registry</span></span><span class="t-xs subtle mono tnum" style="margin-left: auto; flex: none;">10:05</span></div>
+      <div class="row" style="min-height: 24px; align-items: flex-start;"><span class="av av-20 av-agent" style="margin-top: 2px;">A</span><span class="muted" style="min-width: 0;">Agent proposed a fix · 2 steps · risk low</span><span class="t-xs subtle mono tnum" style="margin-left: auto; flex: none;">10:04</span></div>
+      <div class="row" style="min-height: 24px; align-items: flex-start;"><span class="av av-20 p-kabir" style="margin-top: 2px;">KA</span><span class="muted" style="min-width: 0;">Kabir confirmed the hypothesis</span><span class="t-xs subtle mono tnum" style="margin-left: auto; flex: none;">10:03</span></div>
+      <div class="row" style="min-height: 24px; align-items: flex-start;"><span class="av av-20 av-agent" style="margin-top: 2px;">A</span><span class="muted" style="min-width: 0;">Step 5 done · no rows since 09:58</span><span class="t-xs subtle mono tnum" style="margin-left: auto; flex: none;">10:03</span></div>
+      <div class="row" style="min-height: 24px; align-items: flex-start;"><span class="av av-20 p-priya" style="margin-top: 2px;">PR</span><span class="muted" style="min-width: 0;">Priya commented on step 3</span><span class="t-xs subtle mono tnum" style="margin-left: auto; flex: none;">10:02</span></div>
+      <div class="row" style="min-height: 24px; align-items: flex-start;"><span class="av av-20 p-kabir" style="margin-top: 2px;">KA</span><span class="muted" style="min-width: 0;">Kabir took control · lease 30m</span><span class="t-xs subtle mono tnum" style="margin-left: auto; flex: none;">10:00</span></div>
+    </div>
+  </aside>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { theme: this.props.theme ?? 'dark' };
+  }
+}
+</script>
+</body>
+</html>

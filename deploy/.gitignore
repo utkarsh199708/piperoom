@@ -1,0 +1,9 @@
+# Real settings and secrets stay out of git. The *.example files are the templates.
+.env
+config/owners.yaml
+config/users.yaml
+certs/*
+!certs/.gitkeep
+# Optional Vertex AI service-account key and other secret files (see pilot.env.example)
+config/*.json
+secrets/

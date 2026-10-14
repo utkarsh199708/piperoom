@@ -1,9 +1,31 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
+import { ArrowRight } from 'lucide-react'
 import type { TraceState } from '../state/types'
 import type { RoomActions } from '../hooks/useRoom'
-import { Chip } from './ui'
+import { cn } from '@/lib/utils'
+import { Badge, layerVariant } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { RoomDialogClose } from './room/RoomDialogClose'
+import { useRestoreFocus } from './room/useRestoreFocus'
 
+const STATUS: Record<string, { variant: 'destructive' | 'success' | 'neutral' | 'warning'; word: string }> = {
+  stopped_here: { variant: 'destructive', word: 'stopped here' },
+  seen: { variant: 'success', word: 'seen' },
+  not_seen: { variant: 'neutral', word: 'not seen' },
+}
+
+// A shadcn Dialog: Esc and the X close it, focus is trapped inside and goes back to
+// whatever opened it. The stages reuse the pipeline node look; the stage where the
+// record stopped gets the only coloured border.
 export function TracePanel({
   trace,
   actions,
@@ -13,9 +35,10 @@ export function TracePanel({
   actions: RoomActions
   onClose: () => void
 }) {
-  const [table, setTable] = useState('orders')
-  const [key, setKey] = useState('id=10042')
+  const [table, setTable] = useState('public.orders')
+  const [key, setKey] = useState('10042')
   const [busy, setBusy] = useState(false)
+  const restoreFocus = useRestoreFocus()
 
   const submit = (e: FormEvent) => {
     e.preventDefault()
@@ -26,66 +49,88 @@ export function TracePanel({
   }
 
   return (
-    <div className="overlay" role="dialog" aria-modal="true" aria-label="Trace a record">
-      <div className="dialog trace">
-        <header className="dialog__head">
-          <h2 className="dialog__title">Trace a record</h2>
-          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close trace panel">
-            ×
-          </button>
-        </header>
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent hideClose className="max-h-[85vh] max-w-3xl overflow-y-auto" onCloseAutoFocus={restoreFocus}>
+        <RoomDialogClose label="Close trace panel" />
+        <DialogHeader>
+          <DialogTitle>Trace a record</DialogTitle>
+          <DialogDescription>
+            Follow one row from the source table to the warehouse and see where it stops.
+          </DialogDescription>
+        </DialogHeader>
 
-        <form className="trace__form" onSubmit={submit}>
-          <div className="field">
-            <label htmlFor="trace-table">Table</label>
-            <input id="trace-table" value={table} onChange={(e) => setTable(e.target.value)} required />
+        <form className="flex flex-wrap items-end gap-3" onSubmit={submit}>
+          <div className="flex min-w-[10rem] flex-1 flex-col gap-1.5">
+            <label htmlFor="trace-table" className="text-sm font-medium">
+              Table
+            </label>
+            <Input id="trace-table" className="font-mono" value={table} onChange={(e) => setTable(e.target.value)} required />
           </div>
-          <div className="field">
-            <label htmlFor="trace-key">Key</label>
-            <input id="trace-key" value={key} onChange={(e) => setKey(e.target.value)} required />
+          <div className="flex min-w-[8rem] flex-1 flex-col gap-1.5">
+            <label htmlFor="trace-key" className="text-sm font-medium">
+              Key
+            </label>
+            <Input id="trace-key" className="font-mono" value={key} onChange={(e) => setKey(e.target.value)} required />
           </div>
-          <button type="submit" className="btn btn--primary" disabled={busy || !table.trim() || !key.trim()}>
+          <Button type="submit" disabled={busy || !table.trim() || !key.trim()}>
             Trace
-          </button>
+          </Button>
         </form>
 
         {trace && (
-          <div className="trace__stages">
-            {(trace.stages ?? []).map((s, i) => (
-              <div key={i} className={`trace-stage trace-stage--${s.status}`}>
-                {i > 0 && <span className="trace-stage__arrow" aria-hidden="true">→</span>}
-                <div className="trace-stage__card">
-                  <div className="trace-stage__name">{s.name}</div>
-                  <div className="trace-stage__meta muted">{s.layer}</div>
-                  <Chip
-                    tone={
-                      s.status === 'stopped_here'
-                        ? 'fail'
-                        : s.status === 'seen'
-                          ? 'ok'
-                          : s.status === 'not_seen'
-                            ? 'muted'
-                            : 'warn'
-                    }
+          <div className="flex min-w-0 flex-col gap-2">
+            <p className="m-0 text-xs text-muted-foreground">
+              <span className="font-mono">{trace.table}</span> · key <span className="font-mono">{trace.key}</span>
+            </p>
+            <div
+              role="group"
+              aria-label="Trace stages, source to sink"
+              tabIndex={0}
+              className="flex items-stretch gap-1 overflow-x-auto rounded-md pb-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {(trace.stages ?? []).map((s, i) => {
+                const st = STATUS[s.status] ?? { variant: 'warning' as const, word: s.status.replace('_', ' ') }
+                return (
+                  <div
+                    key={i}
+                    data-status={s.status}
+                    className={cn('trace-stage flex items-stretch gap-1', `trace-stage--${s.status}`)}
                   >
-                    {s.status.replace('_', ' ')}
-                  </Chip>
-                  {s.facts && (
-                    <dl className="trace-stage__facts">
-                      {Object.entries(s.facts).map(([k, v]) => (
-                        <div key={k}>
-                          <dt>{k}</dt>
-                          <dd>{v}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  )}
-                </div>
-              </div>
-            ))}
+                    {i > 0 && (
+                      <ArrowRight className="size-4 shrink-0 self-center text-subtle-foreground" aria-hidden="true" />
+                    )}
+                    <div
+                      className={cn(
+                        'flex min-w-[160px] flex-col gap-1.5 rounded-lg border bg-card px-3 py-2.5',
+                        s.status === 'stopped_here' ? 'border-destructive' : 'border-border',
+                        s.status === 'unknown' && 'border-dashed',
+                      )}
+                    >
+                      <Badge variant={layerVariant(s.layer)} mono className="w-fit">
+                        {s.layer}
+                      </Badge>
+                      <div className="break-all font-mono text-sm font-medium">{s.name}</div>
+                      <Badge variant={st.variant} className="w-fit">
+                        {st.word}
+                      </Badge>
+                      {s.facts && (
+                        <dl className="m-0 flex flex-col gap-0.5 font-mono text-xs text-muted-foreground">
+                          {Object.entries(s.facts).map(([k, v]) => (
+                            <div key={k} className="flex gap-1.5">
+                              <dt className="text-subtle-foreground">{k}</dt>
+                              <dd className="m-0 break-all">{v}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
           </div>
         )}
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }

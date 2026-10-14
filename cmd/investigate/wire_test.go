@@ -10,11 +10,13 @@ import (
 	"time"
 
 	"piperoom/internal/actions"
+	"piperoom/internal/agent"
 	"piperoom/internal/clients"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/topology"
+	"piperoom/internal/wiring"
 )
 
 // fakeClients implements every client interface the wiring touches, replaying
@@ -114,14 +116,14 @@ func testOwners() *owners.Owners {
 			SinkTables:     []string{"analytics.orders"},
 			SinkTSColumn:   "updated_at",
 		}},
-		Layers: map[string]string{
+		Layers: owners.UserLayers(map[string]string{
 			"postgres":        "priya",
 			"kafka-connect":   "arjun",
-			"schema-registry": "arjun",
+			"schema-registry": "priya",
 			"kafka":           "arjun",
 			"consumer":        "kabir",
 			"warehouse":       "meera",
-		},
+		}),
 	}
 }
 
@@ -130,9 +132,16 @@ func wireFakes(t *testing.T) (*tools.Registry, *actions.Registry, *fakeClients) 
 	f := newFakeClients()
 	reg := tools.NewRegistry()
 	areg := actions.NewRegistry()
-	a2 := &a2Clients{connect: f, kafka: f, registry: f}
-	if err := registerTools(reg, areg, f, f, testOwners(), a2); err != nil {
-		t.Fatalf("registerTools: %v", err)
+	w := &wiring.Wired{
+		Source:    f,
+		Warehouse: f,
+		Connect:   f,
+		Kafka:     f,
+		Registry:  f,
+		Owners:    testOwners(),
+	}
+	if err := wiring.RegisterTools(reg, areg, w); err != nil {
+		t.Fatalf("wiring.RegisterTools: %v", err)
 	}
 	return reg, areg, f
 }
@@ -142,10 +151,14 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 
 	want := []string{
 		"pg_replication_slots", "pg_recent_ddl", "pg_long_transactions", "pg_row",
+		"pg_publication_tables",
 		"warehouse_freshness", "warehouse_row", "pipeline_map", "trace_record",
 		"connect_list_connectors", "connect_status", "connect_config",
 		"schema_registry_subjects", "schema_registry_versions", "schema_registry_diff",
 		"kafka_topic_offsets", "kafka_list_groups", "kafka_consumer_lag", "kafka_find_by_key",
+		"kafka_topic_config",
+		"dlq_peek",
+		"runbook_lookup",
 	}
 	got := make([]string, 0, len(reg.All()))
 	for _, tl := range reg.All() {
@@ -159,7 +172,7 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 	}
 
 	wantActions := []string{
-		"connect_restart_task", "connect_restart_connector",
+		"connect_restart_task", "connect_restart_connector", "connect_resume_connector", "connect_update_connector_config",
 		"schema_set_compatibility", "schema_register",
 	}
 	gotActions := make([]string, 0, len(areg.All()))
@@ -178,7 +191,7 @@ func TestPipelineMapUsesRealClients(t *testing.T) {
 	if !ok {
 		t.Fatal("pipeline_map not registered")
 	}
-	res, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders"}`))
+	res, err := tool.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"pipeline_id":"orders"}`))
 	if err != nil {
 		t.Fatalf("pipeline_map run: %v", err)
 	}
@@ -207,7 +220,7 @@ func TestTraceRecordUsesRealClients(t *testing.T) {
 	if !ok {
 		t.Fatal("trace_record not registered")
 	}
-	res, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"public.orders","key":"1"}`))
+	res, err := tool.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"pipeline_id":"orders","table":"public.orders","key":"1"}`))
 	if err != nil {
 		t.Fatalf("trace_record run: %v", err)
 	}
@@ -235,7 +248,7 @@ func TestPgRowScopedToPipeline(t *testing.T) {
 		t.Fatal("pg_row not registered")
 	}
 
-	res, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"public.orders","pk_column":"id","key":"1"}`))
+	res, err := tool.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"pipeline_id":"orders","table":"public.orders","pk_column":"id","key":"1"}`))
 	if err != nil {
 		t.Fatalf("pg_row in-scope: %v", err)
 	}
@@ -243,18 +256,40 @@ func TestPgRowScopedToPipeline(t *testing.T) {
 		t.Fatalf("pg_row data type %T, want map[string]any", res.Data)
 	}
 
-	if _, err := tool.Run(context.Background(), json.RawMessage(`{"pipeline_id":"orders","table":"public.payments","pk_column":"id","key":"1"}`)); !errors.Is(err, tools.ErrBadInput) {
+	if _, err := tool.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"pipeline_id":"orders","table":"public.payments","pk_column":"id","key":"1"}`)); !errors.Is(err, tools.ErrBadInput) {
 		t.Fatalf("pg_row other-table: err = %v, want ErrBadInput", err)
 	}
 }
 
-func TestSplitBrokers(t *testing.T) {
-	got := splitBrokers(" localhost:29092 , broker2:9092 , ")
-	want := []string{"localhost:29092", "broker2:9092"}
-	if !slices.Equal(got, want) {
-		t.Errorf("splitBrokers = %v, want %v", got, want)
+// TestSystemPromptNamesOnlyRealTools covers C13 P11: every tool or action name
+// the agent's system prompt mentions must be something the model can really
+// reach with this wiring — a read tool registered here, one of the agent's
+// room tools, or a write action it may name inside propose_fix. A prompt edit
+// that names a nonexistent callable fails this test.
+func TestSystemPromptNamesOnlyRealTools(t *testing.T) {
+	reg, areg, _ := wireFakes(t)
+
+	available := map[string]bool{}
+	for _, tl := range reg.All() {
+		available[tl.Name()] = true
 	}
-	if n := splitBrokers("  , , "); len(n) != 0 {
-		t.Errorf("splitBrokers(blanks) = %v, want empty", n)
+	// The agent builds these on top of the registry it is given.
+	for _, name := range agent.RoomToolNames() {
+		available[name] = true
+	}
+	// The write actions the model may name in propose_fix steps (the
+	// proposal tool refuses anything else).
+	for _, a := range areg.All() {
+		available[a.Name()] = true
+	}
+
+	names := agent.PromptToolNames()
+	if len(names) == 0 {
+		t.Fatal("no tool names found in the system prompt; the extraction may be broken")
+	}
+	for _, name := range names {
+		if !available[name] {
+			t.Errorf("system prompt tells the model to call %q, which is not a real tool", name)
+		}
 	}
 }

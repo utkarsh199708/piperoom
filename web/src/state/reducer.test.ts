@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Event, RoomSnapshot } from '../api/types'
+import { FIXTURE_ROOM_ID, fixtureEvents } from '../fixtures/player'
 import { applyEvent, detectGap } from './reducer'
 import { emptyRoomState, fromSnapshot } from './types'
 
@@ -172,13 +173,13 @@ describe('applyEvent — every event type', () => {
         steps: [],
         risk: 'low',
         rollback: 'undo',
-        required_layers: ['schema-registry', 'warehouse'],
+        required_layers: ['schema-registry', 'kafka-connect'],
       }),
     )
     expect(s.proposals[0].approvals['schema-registry']).toBe('pending')
     s = applyEvent(s, ev(2, 'approval.given', { proposal_id: 'p1', layer: 'schema-registry' }, human))
     expect(s.proposals[0].status).toBe('open')
-    s = applyEvent(s, ev(3, 'approval.given', { proposal_id: 'p1', layer: 'warehouse' }, human))
+    s = applyEvent(s, ev(3, 'approval.given', { proposal_id: 'p1', layer: 'kafka-connect' }, human))
     expect(s.proposals[0].status).toBe('approved')
   })
 
@@ -191,12 +192,12 @@ describe('applyEvent — every event type', () => {
         steps: [],
         risk: 'low',
         rollback: 'undo',
-        required_layers: ['warehouse'],
+        required_layers: ['kafka-connect'],
       }),
     )
-    s = applyEvent(s, ev(2, 'approval.rejected', { proposal_id: 'p1', layer: 'warehouse', reason: 'nope' }, human))
+    s = applyEvent(s, ev(2, 'approval.rejected', { proposal_id: 'p1', layer: 'kafka-connect', reason: 'nope' }, human))
     expect(s.proposals[0].status).toBe('rejected')
-    expect(s.proposals[0].approvals['warehouse']).toBe('rejected')
+    expect(s.proposals[0].approvals['kafka-connect']).toBe('rejected')
   })
 
   it('action.executed appends to the proposal', () => {
@@ -284,6 +285,276 @@ describe('applyEvent — robustness', () => {
 
     s = applyEvent(s, ev(3, 'trace.pinned', { table: 't', key: 'k', stages: null }))
     expect(s.trace?.stages).toEqual([])
+  })
+})
+
+describe('applyEvent — control.granted wording', () => {
+  const arjun = { kind: 'human' as const, id: 'arjun', name: 'Arjun' }
+  const kabir = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+  const created = (seq = 1) =>
+    ev(seq, 'room.created', { title: 'T', severity: 'sev2', pipeline_id: 'orders' }, arjun)
+
+  it('a self-grant by the sitting driver reads as a lease renewal', () => {
+    let s = applyEvent(base(), created())
+    s = applyEvent(
+      s,
+      ev(2, 'control.granted', { to: arjun, lease_until: '2026-10-11T10:30:00Z' }, arjun),
+    )
+    expect(s.activity[0].text).toBe('Arjun renewed the lease')
+    expect(s.driver?.id).toBe('arjun')
+  })
+
+  it('a self-grant by a non-driver reads as taking control', () => {
+    let s = applyEvent(base(), created())
+    s = applyEvent(
+      s,
+      ev(2, 'control.granted', { to: kabir, lease_until: '2026-10-11T10:35:00Z' }, kabir),
+    )
+    expect(s.activity[0].text).toBe('Kabir took control')
+    expect(s.driver?.id).toBe('kabir')
+  })
+
+  it('a grant to another user still reads as a hand-over', () => {
+    let s = applyEvent(base(), created())
+    s = applyEvent(
+      s,
+      ev(2, 'control.granted', { to: kabir, lease_until: '2026-10-11T10:35:00Z' }, arjun),
+    )
+    expect(s.activity[0].text).toBe('Arjun handed control to Kabir')
+  })
+})
+
+describe('applyEvent — room.created from an alert webhook', () => {
+  const system = { kind: 'system' as const, id: 'alertin', name: 'Alert webhook' }
+
+  it('keeps the room driverless and stores the detected alert source', () => {
+    const s = applyEvent(
+      base(),
+      ev(
+        1,
+        'room.created',
+        {
+          title: 'ConsumerLag firing',
+          severity: 'sev1',
+          pipeline_id: 'orders',
+          alert: { version: '4', groupKey: 'g', alerts: [{ status: 'firing' }] },
+        },
+        system,
+      ),
+    )
+    expect(s.driver).toBeNull()
+    expect(s.alert).toEqual({ source: 'Alertmanager' })
+  })
+
+  it('leaves alert null without an alert body, and source null for unknown shapes', () => {
+    const plain = applyEvent(
+      base(),
+      ev(1, 'room.created', { title: 'T', severity: 'sev2', pipeline_id: 'orders' }, human),
+    )
+    expect(plain.alert).toBeNull()
+
+    const unknown = applyEvent(
+      base(),
+      ev(
+        1,
+        'room.created',
+        { title: 'T', severity: 'sev2', pipeline_id: 'orders', alert: 'plain text alert' },
+        system,
+      ),
+    )
+    expect(unknown.alert).toEqual({ source: null })
+  })
+})
+
+describe('webhook-alert fixture room', () => {
+  it('replays to a driverless room whose header shows the alert source', () => {
+    let s = emptyRoomState('r_webhook_alert')
+    const events = fixtureEvents('r_webhook_alert')
+    expect(events.length).toBeGreaterThan(0)
+    for (const e of events) s = applyEvent(s, e)
+    expect(s.status).toBe('open')
+    expect(s.driver).toBeNull()
+    expect(s.alert?.source).toBe('Alertmanager')
+  })
+})
+
+describe('schema-change fixture activity', () => {
+  it('renders seq 2 as a renewal and seq 33 as taking control', () => {
+    let s = emptyRoomState(FIXTURE_ROOM_ID)
+    const textBySeq = new Map<number, string>()
+    for (const e of fixtureEvents(FIXTURE_ROOM_ID)) {
+      s = applyEvent(s, e)
+      textBySeq.set(e.seq, s.activity[0].text)
+    }
+    expect(s.last_seq).toBe(34)
+    expect(textBySeq.get(2)).toBe('Arjun renewed the lease')
+    expect(textBySeq.get(33)).toBe('Kabir took control')
+  })
+})
+
+describe('applyEvent — membership and hand-off lease', () => {
+  const kabir = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+
+  it('adds non-driver human actors as members when they comment or suggest', () => {
+    let s = applyEvent(
+      base(),
+      ev(1, 'room.created', { title: 'T', severity: 'sev2', pipeline_id: 'orders' }, human),
+    )
+    s = applyEvent(
+      s,
+      ev(2, 'comment.added', { comment_id: 'c1', text: 'hi', mentions_agent: false }, kabir),
+    )
+    expect(s.members.some((m) => m.id === 'kabir' && m.role === 'watching')).toBe(true)
+
+    // A driver who acts stays the driver (never downgraded to "watching").
+    s = applyEvent(s, ev(3, 'steer.sent', { text: 'go' }, human))
+    expect(s.members.find((m) => m.id === 'arjun')?.role).toBe('driver')
+  })
+
+  it('keeps the driver lease set by the control.granted before handoff.accepted', () => {
+    let s = applyEvent(
+      base(),
+      ev(1, 'room.created', { title: 'T', severity: 'sev2', pipeline_id: 'orders' }, human),
+    )
+    s = applyEvent(
+      s,
+      ev(2, 'handoff.created', {
+        handoff_id: 'h1',
+        to: { kind: 'human', id: 'kabir', name: 'Kabir' },
+        summary: { what_broke: '', why: '', done: [], ruled_out: [], open: [], risks: [] },
+        stay_as_watcher: false,
+      }, human),
+    )
+    s = applyEvent(
+      s,
+      ev(3, 'control.granted', {
+        to: { kind: 'human', id: 'kabir', name: 'Kabir' },
+        lease_until: '2026-10-11T10:35:00Z',
+      }, kabir),
+    )
+    s = applyEvent(s, ev(4, 'handoff.accepted', { handoff_id: 'h1' }, kabir))
+    expect(s.driver?.id).toBe('kabir')
+    expect(s.driver?.lease_until).toBe('2026-10-11T10:35:00Z')
+  })
+})
+
+describe('params_hash and approver identity (auth PR 4)', () => {
+  const HASH = '9f2c1e7ab04d58c3d6e1f0a7b92c4d835e6a1f0b7c3d9e2a48b5c6d7e8f90a1b'
+  const created = {
+    proposal_id: 'p1',
+    title: 'fix',
+    steps: [],
+    risk: 'low',
+    rollback: 'undo',
+    required_layers: ['schema-registry', 'kafka-connect'],
+  }
+  const identity = { iss: 'https://idp', sub: 'u-1', session_id: 's-1', method: 'oidc', grant: 'user:priya' }
+
+  it('keeps params_hash from proposal.created', () => {
+    const s = applyEvent(base(), ev(1, 'proposal.created', { ...created, params_hash: HASH }))
+    expect(s.proposals[0].params_hash).toBe(HASH)
+  })
+
+  it('falls back to the snapshot hash for a proposal.created written before the hash existed', () => {
+    const snap: RoomSnapshot = {
+      id: 'r1',
+      title: 'T',
+      severity: 'sev2',
+      pipeline_id: 'orders',
+      status: 'open',
+      opened_at: '2026-10-11T10:00:00Z',
+      last_seq: 5,
+      driver: null,
+      agent_status: { state: 'idle' },
+      hypothesis: null,
+      open_proposals: [
+        { ...created, approvals: { 'schema-registry': 'pending', 'kafka-connect': 'pending' }, params_hash: HASH },
+      ],
+      pending_suggestions: [],
+      members: [],
+    }
+    const seeded = fromSnapshot(snap)
+    expect(seeded.snapshot_hashes).toEqual({ p1: HASH })
+    expect(applyEvent(seeded, ev(1, 'proposal.created', created)).proposals[0].params_hash).toBe(HASH)
+    // The event's own hash wins when both are there.
+    const other = 'ab'.repeat(32)
+    expect(
+      applyEvent(seeded, ev(1, 'proposal.created', { ...created, params_hash: other })).proposals[0].params_hash,
+    ).toBe(other)
+  })
+
+  it('ignores a second proposal.created with the same proposal_id and keeps the first', () => {
+    const first = applyEvent(base(), ev(1, 'proposal.created', { ...created, params_hash: HASH }))
+    const decided = applyEvent(
+      first,
+      ev(2, 'approval.given', { proposal_id: 'p1', layer: 'schema-registry', params_hash: HASH, identity }, human),
+    )
+    const dup = applyEvent(
+      decided,
+      ev(3, 'proposal.created', { ...created, title: 'replayed', params_hash: 'ab'.repeat(32) }),
+    )
+    expect(dup.proposals).toHaveLength(1)
+    expect(dup.proposals[0].title).toBe('fix')
+    expect(dup.proposals[0].params_hash).toBe(HASH)
+    expect(dup.proposals[0].approvals['schema-registry']).toBe('approved')
+    // A different id is still added.
+    const other = applyEvent(dup, ev(4, 'proposal.created', { ...created, proposal_id: 'p2' }))
+    expect(other.proposals.map((p) => p.proposal_id)).toEqual(['p1', 'p2'])
+  })
+
+  it('is empty, not undefined, when neither the event nor the snapshot has a hash', () => {
+    const s = applyEvent(base(), ev(1, 'proposal.created', created))
+    expect(s.proposals[0].params_hash).toBe('')
+  })
+
+  it('keeps the identity and hash of an approval, per layer', () => {
+    let s = applyEvent(base(), ev(1, 'proposal.created', { ...created, params_hash: HASH }))
+    s = applyEvent(
+      s,
+      ev(2, 'approval.given', { proposal_id: 'p1', layer: 'schema-registry', params_hash: HASH, identity }, human),
+    )
+    expect(s.proposals[0].decisions['schema-registry']).toEqual({
+      outcome: 'approved',
+      by: human,
+      identity,
+      params_hash: HASH,
+      at: '2026-10-11T10:00:02Z',
+    })
+    expect(s.proposals[0].decisions['kafka-connect']).toBeUndefined()
+    // An approval without identity (an old event) is still recorded.
+    s = applyEvent(s, ev(3, 'approval.given', { proposal_id: 'p1', layer: 'kafka-connect' }, human))
+    expect(s.proposals[0].decisions['kafka-connect']?.identity).toBeUndefined()
+    expect(s.proposals[0].status).toBe('approved')
+  })
+
+  it('keeps the identity, hash and reason of a rejection', () => {
+    let s = applyEvent(base(), ev(1, 'proposal.created', { ...created, params_hash: HASH }))
+    s = applyEvent(
+      s,
+      ev(
+        2,
+        'approval.rejected',
+        { proposal_id: 'p1', layer: 'kafka-connect', reason: 'nope', params_hash: HASH, identity },
+        human,
+      ),
+    )
+    expect(s.proposals[0].decisions['kafka-connect']).toEqual({
+      outcome: 'rejected',
+      by: human,
+      identity,
+      params_hash: HASH,
+      reason: 'nope',
+      at: '2026-10-11T10:00:02Z',
+    })
+  })
+
+  it('keeps params_hash on the action result', () => {
+    let s = applyEvent(base(), ev(1, 'proposal.created', { ...created, params_hash: HASH }))
+    s = applyEvent(
+      s,
+      ev(2, 'action.executed', { proposal_id: 'p1', step_index: 0, ok: true, output: 'x', params_hash: HASH }),
+    )
+    expect(s.proposals[0].executed[0].params_hash).toBe(HASH)
   })
 })
 

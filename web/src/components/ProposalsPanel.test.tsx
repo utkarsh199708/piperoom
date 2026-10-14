@@ -26,13 +26,16 @@ const proposal: ProposalState = {
   steps: [],
   risk: 'low',
   rollback: 'undo',
-  required_layers: ['schema-registry', 'warehouse'],
-  approvals: { 'schema-registry': 'pending', warehouse: 'pending' },
+  required_layers: ['schema-registry', 'kafka-connect'],
+  approvals: { 'schema-registry': 'pending', 'kafka-connect': 'pending' },
   status: 'open',
+  decisions: {},
+  params_hash: 'abc123abc123',
   executed: [],
 }
 
-const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka', 'schema-registry'] }
+const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] }
+const priya: CurrentUser = { id: 'priya', name: 'Priya', layers: ['postgres', 'schema-registry'] }
 const meera: CurrentUser = { id: 'meera', name: 'Meera', layers: ['warehouse'] }
 const kabir: CurrentUser = { id: 'kabir', name: 'Kabir', layers: ['consumer'] }
 
@@ -55,17 +58,23 @@ const proposalWithParams: ProposalState = {
   ],
   risk: 'low',
   rollback: 'undo',
-  required_layers: ['schema-registry', 'warehouse'],
-  approvals: { 'schema-registry': 'pending', warehouse: 'pending' },
+  required_layers: ['schema-registry', 'kafka-connect'],
+  approvals: { 'schema-registry': 'pending', 'kafka-connect': 'pending' },
   status: 'open',
+  decisions: {},
+  params_hash: 'abc123abc123',
   executed: [],
 }
 
 describe('ProposalsPanel approval gating', () => {
-  it('shows Approve only on the layers the user owns', () => {
+  it('shows an Approve and Reject pair on every required layer the user owns', () => {
     const state = { ...emptyRoomState('r1'), proposals: [proposal] }
-    render(<ProposalsPanel state={state} user={meera} actions={actions} />)
-    // One Approve (warehouse) and one Reject (warehouse) visible.
+    // Arjun owns kafka-connect and Priya owns schema-registry (dev/users.yaml).
+    const arjunView = render(<ProposalsPanel state={state} user={arjun} actions={actions} />)
+    expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Reject' })).toHaveLength(1)
+    arjunView.unmount()
+    render(<ProposalsPanel state={state} user={priya} actions={actions} />)
     expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(1)
     expect(screen.getAllByRole('button', { name: 'Reject' })).toHaveLength(1)
   })
@@ -77,12 +86,12 @@ describe('ProposalsPanel approval gating', () => {
     expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
   })
 
-  it('Arjun owns schema-registry only', () => {
+  it('renders every required layer even for a user who cannot decide', () => {
     const state = { ...emptyRoomState('r1'), proposals: [proposal] }
-    render(<ProposalsPanel state={state} user={arjun} actions={actions} />)
+    render(<ProposalsPanel state={state} user={meera} actions={actions} />)
     expect(screen.getByText('schema-registry')).toBeInTheDocument()
-    expect(screen.getByText('warehouse')).toBeInTheDocument()
-    expect(screen.getAllByRole('button', { name: 'Approve' })).toHaveLength(1)
+    expect(screen.getByText('kafka-connect')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
   })
 })
 
@@ -116,7 +125,7 @@ describe('ProposalsPanel params rendering', () => {
       ...proposalWithParams,
       steps: [
         {
-          action: 'restart_connector',
+          action: 'connect_restart_connector',
           layer: 'kafka-connect',
           params: null,
           description: 'This step has no parameters.',

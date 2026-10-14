@@ -7,8 +7,8 @@
       "name": "public.orders",
       "layer": "postgres",
       "owner": "priya",
-      "health": "ok",
-      "facts": { "slot_retained": "12.4 GB" }
+      "health": "warn",
+      "facts": { "slot_retained": "12.4 GB", "slot_active": "true" }
     },
     {
       "id": "connect:pg-orders-connector",
@@ -17,7 +17,7 @@
       "layer": "kafka-connect",
       "owner": "arjun",
       "health": "fail",
-      "facts": { "task_0": "FAILED", "error": "SchemaRegistryException" }
+      "facts": { "tasks_failed": "1" }
     },
     {
       "id": "topic:pg.public.orders",
@@ -25,32 +25,47 @@
       "name": "pg.public.orders",
       "layer": "kafka",
       "owner": "arjun",
-      "health": "warn",
-      "facts": { "new_records": "none since 09:47" }
+      "health": "ok",
+      "facts": { "newest_record": "48m ago" }
     },
     {
-      "id": "cg:order-sync",
+      "id": "dlq:orders-dlq",
+      "kind": "dlq_topic",
+      "name": "orders-dlq",
+      "layer": "kafka-connect",
+      "owner": "arjun",
+      "health": "warn",
+      "facts": {
+        "newest_record": "3m ago",
+        "records": "1204",
+        "recent": "true",
+        "writer": "pg-orders-connector"
+      }
+    },
+    {
+      "id": "group:order-sync",
       "kind": "consumer_group",
       "name": "order-sync",
       "layer": "consumer",
       "owner": "kabir",
-      "health": "warn",
-      "facts": { "lag": "0" }
+      "health": "ok",
+      "facts": { "lag": "0", "state": "Stable" }
     },
     {
-      "id": "dw:analytics.orders",
+      "id": "wh:analytics.orders",
       "kind": "sink_table",
       "name": "analytics.orders",
       "layer": "warehouse",
       "owner": "meera",
       "health": "warn",
-      "facts": { "last_loaded_at": "2026-10-11T09:48:00Z" }
+      "facts": { "stale_for": "12m" }
     }
   ],
   "edges": [
     { "from": "pg:public.orders", "to": "connect:pg-orders-connector" },
     { "from": "connect:pg-orders-connector", "to": "topic:pg.public.orders" },
-    { "from": "topic:pg.public.orders", "to": "cg:order-sync" },
-    { "from": "cg:order-sync", "to": "dw:analytics.orders" }
+    { "from": "topic:pg.public.orders", "to": "group:order-sync" },
+    { "from": "group:order-sync", "to": "wh:analytics.orders" },
+    { "from": "connect:pg-orders-connector", "to": "dlq:orders-dlq" }
   ]
 }

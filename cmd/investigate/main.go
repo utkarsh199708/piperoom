@@ -6,8 +6,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -17,6 +19,7 @@ import (
 	"piperoom/internal/agent/fake"
 	"piperoom/internal/config"
 	"piperoom/internal/tools"
+	"piperoom/internal/wiring"
 )
 
 func main() {
@@ -30,14 +33,43 @@ func main() {
 	)
 	flag.Parse()
 
-	if err := run(*pipeline, *title, *fakeTools, *model, *effort, *maxTurns); err != nil {
-		fmt.Fprintln(os.Stderr, "investigate:", truncatePrinted(sanitizeTerminal(err.Error())))
-		os.Exit(1)
+	os.Exit(exitCode(run(*pipeline, *title, *fakeTools, *model, *effort, *maxTurns), os.Stderr))
+}
+
+// exitCode prints err (if any) as one line to w and returns the process exit
+// code. A spent room token budget is a stop, not a failure: the runner has
+// already written its message through the terminal sink, so this prints one
+// line and returns 0.
+func exitCode(err error, w io.Writer) int {
+	if err == nil {
+		return 0
 	}
+	var be *agent.BudgetError
+	if errors.As(err, &be) {
+		fmt.Fprintln(w, "investigate: stopped:", truncatePrinted(sanitizeTerminal(be.Error())))
+		return 0
+	}
+	fmt.Fprintln(w, "investigate:", truncatePrinted(sanitizeTerminal(err.Error())))
+	return 1
 }
 
 func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns int) error {
 	cfg := config.Load()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// The model endpoint (provider, triage model, token budget) comes from the
+	// same settings as the server; a bad value stops the run before any tool opens.
+	// One AWS config for the process, shared by Bedrock and MSK IAM.
+	awsCfg, err := wiring.LoadAWS(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("investigate: %w", err)
+	}
+	ep, err := wiring.NewAgentEndpoint(ctx, cfg, nil, awsCfg)
+	if err != nil {
+		return fmt.Errorf("investigate: %w", err)
+	}
 
 	reg := tools.NewRegistry()
 	areg := actions.NewRegistry()
@@ -46,11 +78,14 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 			return fmt.Errorf("investigate: register fake tools: %w", err)
 		}
 	} else {
-		cleanup, err := wireRealTools(cfg, reg, areg)
+		w, err := wiring.Open(ctx, cfg, awsCfg)
 		if err != nil {
 			return err
 		}
-		defer cleanup()
+		defer w.Close()
+		if err := wiring.RegisterTools(reg, areg, w); err != nil {
+			return err
+		}
 	}
 
 	opts := agent.Options{Model: model, Effort: effort, MaxTurns: maxTurns}
@@ -60,9 +95,6 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 	if opts.Effort == "" {
 		opts.Effort = cfg.Effort
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	inbox := newStdinInbox()
 	sink := newTerminalSink(os.Stdout)
@@ -75,7 +107,7 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 postgres: public.orders  ->  connect: pg-orders-connector  ->  topic: pg.public.orders  ->  consumer: order-sync  ->  warehouse: analytics.orders`, pipeline),
 	}
 
-	err := agent.Run(ctx, alert, agent.Deps{
+	err = ep.Run(ctx, alert, agent.Deps{
 		Tools:     reg,
 		Actions:   areg,
 		Inbox:     inbox,

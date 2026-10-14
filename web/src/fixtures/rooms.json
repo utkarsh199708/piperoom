@@ -1,12 +1,27 @@
 [
   {
+    "id": "r_webhook_alert",
+    "title": "ConsumerLag firing on orders-pipeline",
+    "severity": "sev1",
+    "pipeline_id": "orders",
+    "status": "open",
+    "opened_at": "2026-10-11T10:05:00Z",
+    "last_seq": 1,
+    "driver": null,
+    "agent_status": { "state": "idle" },
+    "hypothesis": null,
+    "open_proposals": [],
+    "pending_suggestions": [],
+    "members": []
+  },
+  {
     "id": "r_schema_change",
     "title": "Warehouse orders stale",
     "severity": "sev2",
     "pipeline_id": "orders",
     "status": "open",
     "opened_at": "2026-10-11T10:00:00Z",
-    "last_seq": 33,
+    "last_seq": 34,
     "driver": { "id": "kabir", "name": "Kabir", "lease_until": "2026-10-11T10:35:00Z" },
     "agent_status": { "state": "done", "detail": "fix applied" },
     "hypothesis": {

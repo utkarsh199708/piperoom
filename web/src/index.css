@@ -1,21 +1,216 @@
-/* Piperoom dark theme. All colours live here as CSS variables. */
+/*
+ * Piperoom UI v2 foundation.
+ *
+ * 1. Tailwind layers.
+ * 2. Design tokens (docs/design/ui-v2/project/Handoff.dc.html), in shadcn's own
+ *    variable names. Dark is the default. Light comes from
+ *    :root[data-theme='light'] (or a .light class), or from the OS setting when
+ *    the person never chose a theme and the page script did not run.
+ * 3. Legacy aliases, so the screens that U2/U3 have not restyled yet follow the theme.
+ * 4. The old stylesheet below stays until each screen is restyled.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Preflight leaves borders at a default grey; every border uses the token unless a class says otherwise. */
+@layer base {
+  *,
+  ::before,
+  ::after {
+    border-color: var(--border);
+  }
+}
+
 :root {
-  --bg: #0d1015;
-  --panel: #141922;
-  --panel-2: #1a2130;
-  --border: #262e3b;
-  --text: #e8ecf2;
-  --muted: #a3adbb;
-  --blue: #6ea8ff;
-  --orange: #ffa94d;
-  --red: #ff6b6b;
-  --green: #4cc38a;
+  --radius: 0.5rem; /* lg 8 · md 6 · sm 4 */
+  --background: #0a0a0b;
+  --foreground: #ececf0;
+  --card: #121214;
+  --card-foreground: #ececf0;
+  --popover: #121214;
+  --popover-foreground: #ececf0;
+  /* The handoff gives #5b7cfa. White text on it is 3.7:1, so the fill is 7% darker (4.5:1, WCAG AA). */
+  --primary: #516edf;
+  --primary-foreground: #ffffff;
+  --secondary: #19191d;
+  --secondary-foreground: #ececf0;
+  --muted: #19191d;
+  --muted-foreground: #9d9da8;
+  --accent: #1f1f25; /* hover, selected */
+  --accent-foreground: #ececf0;
+  --destructive: #d34247; /* handoff #e5484d: darker for white text at 4.5:1 */
+  --destructive-foreground: #ffffff;
+  --border: #222228;
+  --input: #2d2d35; /* decorative edges */
+  --input-border: #6e6e78; /* edges of text fields: 3:1 on the page (WCAG 1.4.11) */
+  --ring: #5b7cfa;
+  --sidebar: #0e0e10;
+  --sidebar-border: #222228;
 
-  --font-sans: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
+  /* Piperoom additions */
+  --subtle-foreground: #86868f; /* handoff #6b6b76 is 3.5:1 on cards; this is 4.5:1 on every surface */
+  --primary-subtle: rgb(91 124 250 / 0.14);
+  --primary-fg: #8ea3ff;
+  --success: #2ea36f;
+  --success-solid: #26865b; /* fill behind white text (the Approve button) */
+  --success-subtle: rgb(46 163 111 / 0.14);
+  --success-foreground: #4fd48f;
+  --warning: #d9a21b;
+  --warning-subtle: rgb(217 162 27 / 0.13);
+  --warning-foreground: #f0c04a;
+  --danger-subtle: rgb(229 72 77 / 0.14);
+  --danger-foreground: #ff7074;
+  --info: #3b9eff;
+  --info-subtle: rgb(59 158 255 / 0.14);
+  --info-foreground: #7cc0ff;
+  --agent: #8b5cf6;
+  --agent-subtle: rgb(139 92 246 / 0.14);
+  --agent-foreground: #b7a0ff;
+  --layer-postgres: #7cb8ff;
+  --layer-kafka-connect: #f0a35c;
+  --layer-schema-registry: #5ad3c0;
+  --layer-kafka: #f28fb4;
+  --layer-consumer: #b9d96b;
+  --layer-warehouse: #9fb3ff;
 
-  --radius: 10px;
+  --overlay: rgb(0 0 0 / 0.6);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-md: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px rgb(0 0 0 / 0.4);
+  --shadow-lg: 0 2px 4px rgb(0 0 0 / 0.5), 0 24px 64px rgb(0 0 0 / 0.6);
+
+  --font-sans: 'Geist Variable', 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono Variable', 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --touch: 44px;
+
+  color-scheme: dark;
+}
+
+/* Light theme: same names, same meanings. Tints drop to 10-12%, text colours darken for AA. */
+:root[data-theme='light'],
+.light {
+  --background: #ffffff;
+  --foreground: #18181b;
+  --card: #ffffff;
+  --card-foreground: #18181b;
+  --popover: #ffffff;
+  --popover-foreground: #18181b;
+  --primary: #4d6beb; /* handoff #4f6ef2: 4.3:1 with white, this is 4.5:1 */
+  --primary-foreground: #ffffff;
+  --secondary: #f4f4f5;
+  --secondary-foreground: #18181b;
+  --muted: #f4f4f5;
+  --muted-foreground: #52525b;
+  --accent: #ececee;
+  --accent-foreground: #18181b;
+  --destructive: #d83c42; /* handoff #dc3d43: darker for white text at 4.5:1 */
+  --destructive-foreground: #ffffff;
+  --border: #e4e4e7;
+  --input: #d4d4d8;
+  --input-border: #85858e;
+  --ring: #4f6ef2;
+  --sidebar: #fafafa;
+  --sidebar-border: #e4e4e7;
+
+  --subtle-foreground: #6a6a73; /* handoff #71717a is 4.4:1 on muted */
+  --primary-subtle: rgb(79 110 242 / 0.1);
+  --primary-fg: #3856d0;
+  --success: #1f9d5f;
+  --success-solid: #1b8752;
+  --success-subtle: rgb(31 157 95 / 0.12);
+  --success-foreground: #126e35; /* handoff #15803d: 4.4:1 on its tint, less on hover rows */
+  --warning: #c58f0a;
+  --warning-subtle: rgb(197 143 10 / 0.12);
+  --warning-foreground: #815904; /* handoff #9a6a05: 4.2:1 on its tint */
+  --danger-subtle: rgb(220 61 67 / 0.1);
+  --danger-foreground: #b91c1c;
+  --info: #2b7fff;
+  --info-subtle: rgb(43 127 255 / 0.1);
+  --info-foreground: #1d4ed8;
+  --agent: #7c4ddc;
+  --agent-subtle: rgb(124 77 220 / 0.1);
+  --agent-foreground: #6d28d9;
+  /* Tinted text must hold 4.5:1 on its own tint AND on the hover/selected rows (--accent #ececee, --muted, sidebar). */
+  --layer-postgres: #185eb7;
+  --layer-kafka-connect: #964c08;
+  --layer-schema-registry: #0c6c5e;
+  --layer-kafka: #a93060;
+  --layer-consumer: #4c690b;
+  --layer-warehouse: #4356bd;
+
+  --overlay: rgb(24 24 27 / 0.45);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.08);
+  --shadow-md: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 24px rgb(0 0 0 / 0.08);
+  --shadow-lg: 0 2px 4px rgb(0 0 0 / 0.06), 0 24px 64px rgb(0 0 0 / 0.14);
+
+  color-scheme: light;
+}
+
+/* No saved choice and no page script: follow the OS. (index.html normally sets data-theme before first paint.) */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]):not(.dark) {
+    --background: #ffffff;
+    --foreground: #18181b;
+    --card: #ffffff;
+    --card-foreground: #18181b;
+    --popover: #ffffff;
+    --popover-foreground: #18181b;
+    --primary: #4d6beb;
+    --secondary: #f4f4f5;
+    --secondary-foreground: #18181b;
+    --muted: #f4f4f5;
+    --muted-foreground: #52525b;
+    --accent: #ececee;
+    --accent-foreground: #18181b;
+    --destructive: #d83c42;
+    --border: #e4e4e7;
+    --input: #d4d4d8;
+    --input-border: #85858e;
+    --ring: #4f6ef2;
+    --sidebar: #fafafa;
+    --sidebar-border: #e4e4e7;
+    --subtle-foreground: #6a6a73;
+    --primary-subtle: rgb(79 110 242 / 0.1);
+    --primary-fg: #3856d0;
+    --success: #1f9d5f;
+    --success-solid: #1b8752;
+    --success-subtle: rgb(31 157 95 / 0.12);
+    --success-foreground: #126e35;
+    --warning: #c58f0a;
+    --warning-subtle: rgb(197 143 10 / 0.12);
+    --warning-foreground: #815904;
+    --danger-subtle: rgb(220 61 67 / 0.1);
+    --danger-foreground: #b91c1c;
+    --info: #2b7fff;
+    --info-subtle: rgb(43 127 255 / 0.1);
+    --info-foreground: #1d4ed8;
+    --agent: #7c4ddc;
+    --agent-subtle: rgb(124 77 220 / 0.1);
+    --agent-foreground: #6d28d9;
+    --layer-postgres: #185eb7;
+    --layer-kafka-connect: #964c08;
+    --layer-schema-registry: #0c6c5e;
+    --layer-kafka: #a93060;
+    --layer-consumer: #4c690b;
+    --layer-warehouse: #4356bd;
+    --overlay: rgb(24 24 27 / 0.45);
+    --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.08);
+    --shadow-md: 0 1px 2px rgb(0 0 0 / 0.06), 0 8px 24px rgb(0 0 0 / 0.08);
+    --shadow-lg: 0 2px 4px rgb(0 0 0 / 0.06), 0 24px 64px rgb(0 0 0 / 0.14);
+    color-scheme: light;
+  }
+}
+
+/* Names the old stylesheet below uses, now following the theme. */
+:root {
+  --bg: var(--background);
+  --panel: var(--card);
+  --panel-2: var(--muted);
+  --text: var(--foreground);
+  --blue: var(--primary-fg);
+  --orange: var(--warning-foreground);
+  --red: var(--danger-foreground);
+  --green: var(--success-foreground);
 }
 
 * {
@@ -28,15 +223,54 @@ body,
   height: 100%;
 }
 
+/* The shell fills what is left under the auth banners, which sit above it in this column. */
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
+  background: var(--background);
+  color: var(--foreground);
   font-family: var(--font-sans);
-  font-size: 15px;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 18px;
   -webkit-font-smoothing: antialiased;
 }
+
+/* Visible keyboard focus everywhere (WCAG 2.4.7). shadcn parts add their own ring on top. */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* The screens U2/U3 have not restyled yet keep their old type scale. */
+.legacy-surface {
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+/* Old screens draw their own page header (brand + user switcher). The shell owns both now. */
+.legacy-surface .shell {
+  min-height: 0;
+}
+
+.legacy-surface .brand {
+  display: none;
+}
+
 
 h1,
 h2,
@@ -53,7 +287,7 @@ a {
 }
 
 .muted {
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .mono {
@@ -61,7 +295,7 @@ a {
 }
 
 .empty {
-  color: var(--muted);
+  color: var(--muted-foreground);
   margin: 8px 0;
 }
 
@@ -92,7 +326,7 @@ a {
 }
 
 .topbar__back {
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-weight: 500;
   white-space: nowrap;
 }
@@ -248,7 +482,7 @@ a {
   font-size: 14px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .panel__right {
@@ -294,7 +528,7 @@ a {
 }
 
 .chip--muted {
-  color: var(--muted);
+  color: var(--muted-foreground);
   border-color: var(--border);
 }
 
@@ -304,7 +538,7 @@ a {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  background: #2a3446;
+  background: var(--accent);
   color: var(--text);
   font-weight: 600;
   flex: none;
@@ -335,7 +569,7 @@ a {
 
 .avatar--system {
   background: rgba(163, 173, 187, 0.2);
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 /* ---- buttons ---- */
@@ -365,9 +599,9 @@ a {
 }
 
 .btn--primary {
-  background: var(--blue);
-  border-color: var(--blue);
-  color: #0a0d12;
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-foreground);
 }
 
 .btn--primary:hover:not(:disabled) {
@@ -392,20 +626,10 @@ a {
   min-height: 0;
 }
 
-.btn--approve {
-  border-color: rgba(76, 195, 138, 0.5);
-  color: var(--green);
-}
-
-.btn--reject {
-  border-color: rgba(255, 107, 107, 0.5);
-  color: var(--red);
-}
-
 .icon-btn {
   border: none;
   background: none;
-  color: var(--muted);
+  color: var(--muted-foreground);
   font-size: 20px;
   cursor: pointer;
   width: 32px;
@@ -430,7 +654,7 @@ a {
 
 .field label {
   font-size: 12px;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 input,
@@ -471,7 +695,14 @@ textarea:focus {
 
 .user-switcher__label {
   font-size: 12px;
-  color: var(--muted);
+  color: var(--muted-foreground);
+}
+
+.login-users {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 /* ---- pipeline map ---- */
@@ -483,7 +714,7 @@ textarea:focus {
 
 .node-card {
   border: 1px solid var(--border);
-  border-left: 3px solid var(--muted);
+  border-left: 3px solid var(--muted-foreground);
   border-radius: 8px;
   padding: 10px 12px;
   background: var(--panel-2);
@@ -502,7 +733,7 @@ textarea:focus {
 }
 
 .node-card--unknown {
-  border-left-color: var(--muted);
+  border-left-color: var(--muted-foreground);
 }
 
 .node-card__head {
@@ -531,7 +762,7 @@ textarea:focus {
 }
 
 .node-dot--unknown {
-  background: var(--muted);
+  background: var(--muted-foreground);
 }
 
 .node-card__name {
@@ -562,7 +793,7 @@ textarea:focus {
 }
 
 .node-card__fact dt {
-  color: var(--muted);
+  color: var(--muted-foreground);
   min-width: 90px;
 }
 
@@ -791,152 +1022,12 @@ textarea:focus {
 .suggestion__text {
   margin: 2px 0 0;
   font-size: 13px;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
-/* ---- proposals ---- */
-.proposals__list {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.proposal {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px;
-  background: var(--panel-2);
-}
-
-.proposal__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.proposal__title {
-  font-size: 14px;
-}
-
-.proposal__meta {
-  font-size: 12px;
-  margin: 4px 0 8px;
-}
-
-.proposal__steps {
-  list-style: none;
-  margin: 0 0 8px;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.proposal__step {
-  display: flex;
-  flex-direction: column;
-  font-size: 13px;
-}
-
-.proposal__step-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.proposal__params {
-  margin: 4px 0 0;
-  padding: 6px 8px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  max-height: 140px;
-  overflow: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.proposal__params--empty {
-  color: var(--muted);
-  font-style: italic;
-}
-
-.proposal__param {
-  display: flex;
-  gap: 8px;
-  white-space: nowrap;
-}
-
-.proposal__param-key {
-  color: var(--muted);
-}
-
-.proposal__param-key--target {
-  color: var(--orange);
-  font-weight: 600;
-}
-
-.proposal__param-val--target {
-  color: var(--orange);
-}
-
-.proposal__approvals {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.approval {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.approval__layer {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--muted);
-  min-width: 120px;
-}
-
-.approval__actions {
+.banner__actions {
   display: flex;
   gap: 6px;
-  align-items: center;
-}
-
-.approval__actions input {
-  width: 140px;
-  min-height: 30px;
-  font-size: 13px;
-}
-
-.proposal__executed {
-  list-style: none;
-  margin: 10px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 13px;
-}
-
-.exec-ok {
-  color: var(--green);
-}
-
-.exec-fail {
-  color: var(--red);
 }
 
 /* ---- presence ---- */
@@ -968,7 +1059,7 @@ textarea:focus {
 }
 
 .presence__state--away {
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 /* ---- activity ---- */
@@ -1012,9 +1103,18 @@ textarea:focus {
   background: rgba(76, 195, 138, 0.12);
 }
 
+.banner--nodriver {
+  background: rgba(255, 169, 77, 0.12);
+}
+
 .banner--error {
   background: rgba(255, 107, 107, 0.12);
   color: var(--red);
+}
+
+.banner--resolved {
+  background: rgba(76, 195, 138, 0.12);
+  color: var(--green);
 }
 
 /* ---- dialogs / overlays ---- */
@@ -1079,7 +1179,7 @@ textarea:focus {
 }
 
 .trace-stage__arrow {
-  color: var(--muted);
+  color: var(--muted-foreground);
   padding: 0 6px;
 }
 
@@ -1114,7 +1214,7 @@ textarea:focus {
 }
 
 .trace-stage__facts dt {
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .trace-stage__facts dd {
@@ -1149,7 +1249,7 @@ textarea:focus {
   font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--muted);
+  color: var(--muted-foreground);
   margin-bottom: 4px;
 }
 
@@ -1199,4 +1299,30 @@ textarea:focus {
   .btn--link {
     min-height: var(--touch);
   }
+}
+
+/* ---- roles, solo mode, login errors (auth PR 3) ---- */
+.view-only {
+  white-space: nowrap;
+}
+
+.notice {
+  margin: 0;
+  padding: 6px 20px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.grant-picker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.login-error .btn {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
 }

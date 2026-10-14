@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Components</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0}
+.pr{--background:#0a0a0b;--sidebar:#0e0e10;--card:#121214;--muted:#19191d;--hover:#1f1f25;--border:#222228;--border-strong:#2d2d35;--foreground:#ececf0;--muted-foreground:#9d9da8;--subtle-foreground:#6b6b76;--primary:#5b7cfa;--primary-subtle:rgba(91,124,250,.14);--primary-fg:#8ea3ff;--primary-on:#ffffff;--success:#2ea36f;--success-subtle:rgba(46,163,111,.14);--success-fg:#4fd48f;--warning:#d9a21b;--warning-subtle:rgba(217,162,27,.13);--warning-fg:#f0c04a;--danger:#e5484d;--danger-subtle:rgba(229,72,77,.14);--danger-fg:#ff7074;--info:#3b9eff;--info-subtle:rgba(59,158,255,.14);--info-fg:#7cc0ff;--agent:#8b5cf6;--agent-subtle:rgba(139,92,246,.14);--agent-fg:#b7a0ff;--ring:#5b7cfa;--l-postgres:#7cb8ff;--l-kafka-connect:#f0a35c;--l-schema-registry:#5ad3c0;--l-kafka:#f28fb4;--l-consumer:#b9d96b;--l-warehouse:#9fb3ff;--shadow-md:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.4);--shadow-lg:0 2px 4px rgba(0,0,0,.5),0 24px 64px rgba(0,0,0,.6);--sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-family:var(--sans);font-size:13px;line-height:18px;color:var(--foreground);background:var(--background);-webkit-font-smoothing:antialiased;color-scheme:dark}
+.pr *{box-sizing:border-box}
+.pr a{color:inherit;text-decoration:none}
+.ic{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic-14{width:14px;height:14px}.ic-12{width:12px;height:12px}
+.mono{font-family:var(--mono)}.muted{color:var(--muted-foreground)}.subtle{color:var(--subtle-foreground)}
+.t-xs{font-size:12px;line-height:16px}.t-lg{font-size:16px;line-height:22px;font-weight:600}
+.w500{font-weight:500}.w600{font-weight:600}
+.sec{display:flex;flex-direction:column;gap:10px;min-width:0}
+.sec h2{margin:0;font:600 14px/20px var(--sans);display:flex;align-items:baseline;gap:8px}
+.sec h2 .m{font:400 11px/16px var(--mono);color:var(--subtle-foreground)}
+.rowx{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:6px;font:500 13px/18px var(--sans);border:1px solid transparent;background:transparent;color:var(--foreground);cursor:pointer;white-space:nowrap}
+.btn-md{height:36px;padding:0 12px}
+.btn-primary{background:var(--primary);color:var(--primary-on)}
+.btn-secondary{background:var(--muted);border-color:var(--border);color:var(--foreground)}
+.btn-outline{border-color:var(--border-strong);color:var(--foreground)}
+.btn-ghost{color:var(--muted-foreground)}
+.btn-ghost-danger{color:var(--danger-fg)}
+.btn-success{background:var(--success);color:#ffffff}
+.btn-icon{width:32px;padding:0;justify-content:center}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.kbd{display:inline-flex;align-items:center;justify-content:center;height:18px;min-width:18px;padding:0 4px;border-radius:4px;border:1px solid var(--border-strong);background:var(--muted);color:var(--subtle-foreground);font:500 11px/16px var(--mono)}
+.btn-primary .kbd,.btn-success .kbd{background:rgba(255,255,255,.18);border-color:transparent;color:inherit}
+.badge{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 6px;border-radius:6px;font:500 12px/16px var(--sans);background:var(--muted);color:var(--muted-foreground);border:1px solid transparent;white-space:nowrap}
+.badge-sev1{background:var(--danger-subtle);color:var(--danger-fg)}.badge-sev2{background:var(--warning-subtle);color:var(--warning-fg)}.badge-sev3{background:var(--primary-subtle);color:var(--primary-fg)}.badge-sev4{background:var(--success-subtle);color:var(--success-fg)}
+.badge-ok{background:var(--success-subtle);color:var(--success-fg)}.badge-warn{background:var(--warning-subtle);color:var(--warning-fg)}.badge-fail{background:var(--danger-subtle);color:var(--danger-fg)}.badge-info{background:var(--info-subtle);color:var(--info-fg)}.badge-accent{background:var(--primary-subtle);color:var(--primary-fg)}.badge-agent{background:var(--agent-subtle);color:var(--agent-fg)}
+.badge-outline{background:transparent;border-color:var(--border-strong);color:var(--muted-foreground)}
+.badge-mono{font:500 11.5px/16px var(--mono)}
+.l-postgres{color:var(--l-postgres);background:color-mix(in srgb,var(--l-postgres) 12%,transparent)}.l-kafka-connect{color:var(--l-kafka-connect);background:color-mix(in srgb,var(--l-kafka-connect) 12%,transparent)}.l-schema-registry{color:var(--l-schema-registry);background:color-mix(in srgb,var(--l-schema-registry) 12%,transparent)}.l-kafka{color:var(--l-kafka);background:color-mix(in srgb,var(--l-kafka) 12%,transparent)}.l-consumer{color:var(--l-consumer);background:color-mix(in srgb,var(--l-consumer) 12%,transparent)}.l-warehouse{color:var(--l-warehouse);background:color-mix(in srgb,var(--l-warehouse) 12%,transparent)}
+.dot{width:6px;height:6px;border-radius:999px;background:var(--subtle-foreground);flex:none}.dot-ok{background:var(--success)}.dot-warn{background:var(--warning)}.dot-fail{background:var(--danger)}.dot-agent{background:var(--agent)}.dot-info{background:var(--info)}.dot-accent{background:var(--primary)}
+.pill{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px;border-radius:999px;border:1px solid var(--border);background:var(--card);font:500 12px/16px var(--sans);color:var(--muted-foreground);white-space:nowrap}
+.av{width:24px;height:24px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;font:600 10px/1 var(--sans);color:#fff;flex:none}
+.av-20{width:20px;height:20px;font-size:9px}.av-28{width:28px;height:28px;font-size:11px}.av-32{width:32px;height:32px;font-size:12px}
+.av-driver{box-shadow:0 0 0 2px var(--background),0 0 0 4px var(--primary)}
+.p-kabir{background:#b45309}.p-arjun{background:#1d4ed8}.p-priya{background:#0f766e}.p-meera{background:#be185d}.p-rohan{background:#4d7c0f}.av-agent{background:var(--agent)}
+.stack{display:inline-flex;align-items:center}.stack .av{margin-left:-6px;border:2px solid var(--background)}.stack .av:first-child{margin-left:0}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px}
+.sep{height:1px;background:var(--border)}
+.input{height:32px;padding:0 10px;border-radius:6px;border:1px solid var(--border);background:var(--background);color:var(--foreground);font:400 13px/18px var(--sans);width:100%}
+.input.focus{border-color:var(--ring);outline:2px solid var(--primary-subtle)}
+.ta{display:block;width:100%;min-height:40px;padding:10px 12px;border-radius:6px;border:1px solid var(--border);background:var(--muted);color:var(--foreground);font:400 13px/18px var(--sans);resize:none}
+.tab{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 10px;color:var(--muted-foreground);font-weight:500;border-bottom:1px solid transparent;margin-bottom:-1px}
+.tab.on{color:var(--foreground);border-bottom-color:var(--foreground)}
+.tab .cnt{font:500 11px/16px var(--mono);color:var(--subtle-foreground)}
+.ci{display:flex;align-items:center;gap:10px;height:36px;padding:0 8px;border-radius:6px;color:var(--foreground)}
+.ci.on{background:var(--hover)}
+.ci .ic{color:var(--muted-foreground)}
+.hash{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px;border-radius:6px;border:1px solid var(--border-strong);background:var(--muted);font:500 12px/16px var(--mono);color:var(--foreground)}
+.sk{background:var(--muted);border-radius:4px;display:block}
+.bar{height:2px;border-radius:2px;background:var(--agent-subtle);overflow:hidden;position:relative}
+.bar::after{content:"";position:absolute;left:0;top:0;width:40%;height:100%;background:var(--agent);border-radius:2px}
+.prog{height:6px;border-radius:999px;background:var(--muted);overflow:hidden}
+.prog span{display:block;height:100%;background:var(--primary);border-radius:999px}
+.spin{width:14px;height:14px;border-radius:999px;border:2px solid var(--agent-subtle);border-top-color:var(--agent);flex:none}
+.node{flex:1 1 0;min-width:180px;background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;min-height:92px}
+.node-fail{border-color:var(--danger)}
+.node .k{display:flex;align-items:center;gap:8px}
+.node .k .kind{font-size:12px;line-height:16px;color:var(--subtle-foreground);white-space:nowrap}
+.node .k .badge{margin-left:auto;flex:none}
+.node .nm{font:500 13px/18px var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node .f{display:flex;align-items:center;gap:6px;font-size:12px;line-height:16px;color:var(--muted-foreground);margin-top:auto}
+.edge{flex:0 0 44px;position:relative;height:0;align-self:center;border-top:2px dashed var(--border-strong);margin-top:-8px}
+.edge::after{content:"";position:absolute;right:-1px;top:-5px;border:4px solid transparent;border-left:6px solid var(--border-strong)}
+.edge-stalled{flex-basis:64px;border-top:2px solid var(--danger)}
+.edge-stalled::after{border-left-color:var(--danger)}
+.edge .cap{position:absolute;top:-24px;left:50%;transform:translateX(-50%);background:var(--background);border:1px solid var(--border);padding:0 6px;border-radius:4px;font:500 11px/16px var(--mono);color:var(--danger-fg);white-space:nowrap}
+.step{display:flex;align-items:center;gap:10px;min-height:36px;padding:0 8px;border-radius:6px}
+.step .n{width:22px;height:22px;border-radius:999px;background:var(--muted);color:var(--subtle-foreground);font:500 11px/1 var(--mono);display:inline-flex;align-items:center;justify-content:center;flex:none}
+.step .n.err{background:var(--danger-subtle);color:var(--danger-fg)}
+.step .ti{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.step .tool{font:500 11.5px/16px var(--mono);color:var(--muted-foreground);white-space:nowrap}
+.step .tk{margin-left:auto;font:400 12px/16px var(--mono);color:var(--subtle-foreground);white-space:nowrap}
+.ev{background:var(--muted);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font:400 12px/17px var(--mono);color:var(--muted-foreground);white-space:pre-wrap}
+.arow{display:flex;align-items:center;gap:10px;min-height:44px;padding:0 14px}
+.arow+.arow{border-top:1px solid var(--border)}
+.arow-mine{background:var(--warning-subtle)}
+.ribbon{height:36px;display:flex;align-items:center;gap:8px;padding:0 14px;background:var(--warning-subtle);color:var(--warning-fg);border-bottom:1px solid var(--border);border-radius:8px 8px 0 0;font-weight:500}
+.tip{display:inline-flex;align-items:center;height:24px;padding:0 8px;border-radius:6px;background:var(--foreground);color:var(--background);font:500 12px/16px var(--sans);box-shadow:var(--shadow-md)}
+.chk{width:16px;height:16px;border-radius:4px;border:1px solid var(--border-strong);background:var(--background);display:inline-flex;align-items:center;justify-content:center;flex:none}
+.chk.on{background:var(--primary);border-color:var(--primary)}
+.sel{display:flex;align-items:center;gap:8px;height:36px;padding:0 10px;border-radius:6px;border:1px solid var(--border);background:var(--background);width:100%}
+</style>
+</helmet>
+<div class="pr" style="width: 1440px; height: 1200px; padding: 32px 40px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px 40px; align-content: start; overflow: hidden;">
+
+  <section class="sec">
+    <h2>Button <span class="m">shadcn Button · sm h-8 · default h-9 · icon h-8 w-8 · Kbd as children · success + ghost-danger added to buttonVariants</span></h2>
+    <div class="rowx"><button class="btn btn-primary" type="button">New room<span class="kbd">C</span></button><button class="btn btn-secondary" type="button">Hand off<span class="kbd">H</span></button><button class="btn btn-outline" type="button">Take control<span class="kbd">T</span></button><button class="btn btn-ghost" type="button">Request control</button><button class="btn btn-ghost-danger" type="button">Reject<span class="kbd">R</span></button><button class="btn btn-success" type="button">Approve kafka-connect<span class="kbd">A</span></button></div>
+    <div class="rowx"><button class="btn btn-primary btn-md" type="button">Start hand-off<span class="kbd">⌘⏎</span></button><button class="btn btn-success btn-md" type="button" disabled>Approve kafka-connect</button><button class="btn btn-ghost btn-icon" type="button" aria-label="More"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></svg></button><button class="btn btn-ghost btn-icon" type="button" aria-label="Copy"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg></button><button class="btn btn-ghost" type="button" style="height: 28px;">Jump to step<span class="kbd">J</span></button></div>
+  </section>
+
+  <section class="sec">
+    <h2>Badge <span class="m">shadcn Badge · h-5 px-1.5 rounded-md · cva variants + mono + layer</span></h2>
+    <div class="rowx"><span class="badge badge-sev1">SEV1</span><span class="badge badge-sev2">SEV2</span><span class="badge badge-sev3">SEV3</span><span class="badge badge-sev4">SEV4</span><span class="badge badge-ok">risk low</span><span class="badge badge-warn">Needs you</span><span class="badge badge-fail">rejected</span><span class="badge badge-info">info</span><span class="badge badge-accent">Driver</span><span class="badge badge-agent">high confidence</span><span class="badge">neutral</span><span class="badge badge-outline">viewer</span></div>
+    <div class="rowx"><span class="badge badge-mono l-postgres">postgres</span><span class="badge badge-mono l-kafka-connect">kafka-connect</span><span class="badge badge-mono l-schema-registry">schema-registry</span><span class="badge badge-mono l-kafka">kafka</span><span class="badge badge-mono l-consumer">consumer</span><span class="badge badge-mono l-warehouse">warehouse</span></div>
+    <h2 style="margin-top: 6px;">StatusDot + pill <span class="m">local · rounded-full only with a dot</span></h2>
+    <div class="rowx"><span class="pill"><span class="dot dot-ok"></span>live · 5s ago</span><span class="pill" style="color: var(--agent-fg);"><span class="dot dot-agent"></span>Agent working · step 5</span><span class="pill" style="color: var(--warning-fg);"><span class="dot dot-warn"></span>Agent waiting · 1 of 2</span><span class="pill"><span class="dot"></span>idle</span><span style="display: inline-flex; align-items: center; gap: 6px;"><span class="dot dot-fail"></span>failed</span><span style="display: inline-flex; align-items: center; gap: 6px;"><span class="dot dot-warn"></span>degraded</span><span style="display: inline-flex; align-items: center; gap: 6px;"><span class="dot dot-ok"></span>healthy</span></div>
+  </section>
+
+  <section class="sec">
+    <h2>Kbd · HashPill · Tooltip <span class="m">local Kbd · Badge outline + Button ghost + Tooltip</span></h2>
+    <div class="rowx"><span class="kbd">⌘</span><span class="kbd">K</span><span class="kbd">⇧T</span><span class="kbd">esc</span><span class="kbd">⏎</span><span class="kbd">?</span></div>
+    <div class="rowx"><span class="muted">Approving exactly this</span><span class="hash"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/></svg>9f2c 1e7a … 0a1b</span><button class="btn btn-ghost" type="button" style="height: 24px; padding: 0 6px; font-size: 12px;">Copy</button><span class="tip">oidc · idp.example.com · 10:05</span></div>
+    <h2 style="margin-top: 6px;">Avatar · AvatarStack <span class="m">Avatar + AvatarFallback · ring-2 ring-primary ring-offset-2 for the driver · -space-x-1.5 stack</span></h2>
+    <div class="rowx"><span class="av av-20 p-kabir">KA</span><span class="av p-arjun">AR</span><span class="av av-28 p-priya">PR</span><span class="av av-32 p-meera">ME</span><span class="av av-driver p-kabir" style="margin-left: 6px;">KA</span><span class="av av-agent" style="margin-left: 6px;">A</span><span class="stack" style="margin-left: 10px;"><span class="av av-driver p-kabir">KA</span><span class="av p-arjun">AR</span><span class="av p-priya">PR</span><span class="av p-meera">ME</span><span class="av" style="background: var(--muted); color: var(--muted-foreground);">+2</span></span></div>
+  </section>
+
+  <section class="sec">
+    <h2>Input · Textarea · Select · Checkbox <span class="m">Input h-8 · Textarea bg-muted · Select h-9 · Checkbox 16px rounded-sm</span></h2>
+    <input class="input" type="text" placeholder="Search rooms, people, pipelines…" aria-label="Search">
+    <input class="input focus" type="text" value="orders/kafka-c" aria-label="Confirmation" style="font-family: var(--mono); font-weight: 500;">
+    <textarea class="ta" rows="2" aria-label="Suggest a step" placeholder="Suggest a step for Kabir…"></textarea>
+    <div class="sel"><span class="av av-20 p-priya">PR</span><span>Priya</span><span class="badge badge-mono l-schema-registry">schema-registry</span><svg class="ic ic-14" viewBox="0 0 24 24" aria-hidden="true" style="margin-left: auto; color: var(--subtle-foreground);"><path d="m7 15 5 5 5-5"/><path d="m7 9 5-5 5 5"/></svg></div>
+    <label style="display: inline-flex; align-items: center; gap: 8px;"><span class="chk on"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true" style="stroke: #fff;"><path d="M20 6 9 17l-5-5"/></svg></span>Stay as watcher after hand-off</label>
+  </section>
+
+  <section class="sec">
+    <h2>Tabs · CommandItem <span class="m">Tabs variant="line" · cmdk CommandItem h-9 + CommandShortcut</span></h2>
+    <div style="display: flex; gap: 2px; border-bottom: 1px solid var(--border);"><a class="tab on" href="#open">Open<span class="cnt">3</span></a><a class="tab" href="#mine">Mine<span class="cnt">1</span></a><a class="tab" href="#resolved">Resolved<span class="cnt">2</span></a><a class="tab" href="#all">All</a></div>
+    <div class="card" style="padding: 6px; display: flex; flex-direction: column;">
+      <a class="ci on" href="#a"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--success-fg);"><path d="M20 6 9 17l-5-5"/></svg>Approve the kafka-connect step<span class="kbd" style="margin-left: auto;">A</span></a>
+      <a class="ci" href="#b"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/></svg>Hand off the room<span class="kbd" style="margin-left: auto;">H</span></a>
+    </div>
+    <h2 style="margin-top: 6px;">Progress · Skeleton <span class="m">Progress value · indeterminate = CSS keyframe child · Skeleton rounded-sm</span></h2>
+    <div class="prog"><span style="width: 50%;"></span></div>
+    <div class="bar" aria-hidden="true"></div>
+    <div style="display: flex; gap: 8px; align-items: center;"><span class="sk" style="width: 24px; height: 24px; border-radius: 999px;"></span><span class="sk" style="width: 180px; height: 12px;"></span><span class="sk" style="width: 80px; height: 12px;"></span></div>
+  </section>
+
+  <section class="sec">
+    <h2>Toast · Banner <span class="m">Sonner: title 1 line, description, actions row · Banner = div bg-warning-subtle</span></h2>
+    <div class="card" style="padding: 12px 12px 12px 14px; display: flex; flex-direction: column; gap: 8px; border-color: var(--border-strong); box-shadow: var(--shadow-md);">
+      <div style="display: flex; align-items: flex-start; gap: 10px;"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--warning-fg);"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg><div style="display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto;"><span class="w500" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">Proposal changed since you looked</span><span class="muted">The agent revised step 2 at 10:07. Your approval was not sent.</span></div><button class="btn btn-ghost btn-icon" type="button" aria-label="Dismiss" style="width: 24px; height: 24px; margin: -4px -4px 0 0;"><svg class="ic ic-14" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button></div>
+      <div style="display: flex; justify-content: flex-end; gap: 8px;"><button class="btn btn-ghost" type="button" style="height: 28px;">Dismiss</button><button class="btn btn-secondary" type="button" style="height: 28px;">Reload proposal</button></div>
+    </div>
+    <div style="min-height: 40px; display: flex; align-items: center; gap: 10px; padding: 6px 14px; background: var(--warning-subtle); border: 1px solid var(--border); border-radius: 8px; color: var(--warning-fg); font-weight: 500;"><svg class="ic ic-14" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>No one is driving — take control to steer the agent.<button class="btn btn-primary" type="button" style="margin-left: auto; height: 28px;">Take control<span class="kbd">T</span></button></div>
+  </section>
+
+  <section class="sec" style="grid-column: span 2;">
+    <h2>PipelineLane <span class="m">nodes = Card (p-3 rounded-lg) · failed = border-destructive · degraded = dot + word only · edges custom · caption pill on bg-background</span></h2>
+    <div style="display: flex; align-items: stretch; padding-top: 20px;">
+      <div class="node"><div class="k"><span class="kind">Source</span><span class="badge badge-mono l-postgres">postgres</span></div><div class="nm">public.orders</div><div class="f"><span class="dot dot-ok"></span>healthy<span class="mono" style="margin-left: auto;">wal 2.1 MB/s</span></div></div>
+      <div class="edge"></div>
+      <div class="node node-fail"><div class="k"><span class="kind">Connector</span><span class="badge badge-mono l-kafka-connect">kafka-connect</span></div><div class="nm">pg-orders-connector</div><div class="f" style="color: var(--danger-fg);"><span class="dot dot-fail"></span>failed<span class="mono" style="margin-left: auto;">task 0 · 409</span></div></div>
+      <div class="edge edge-stalled"><span class="cap">no flow · 48m</span></div>
+      <div class="node"><div class="k"><span class="kind">Topic</span><span class="badge badge-mono l-kafka">kafka</span></div><div class="nm">pg.public.orders</div><div class="f"><span class="dot dot-warn"></span>degraded<span class="mono" style="margin-left: auto;">0 msg/s</span></div></div>
+      <div class="edge"></div>
+      <div class="node" style="border-style: dashed;"><div class="k"><span class="kind">Consumer</span><span class="badge badge-mono l-consumer">consumer</span></div><div class="nm">orders-sync</div><div class="f"><span class="dot"></span>unknown<span class="mono" style="margin-left: auto;">no data</span></div></div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2>AgentStep <span class="m">done · running (Loader2 animate-spin) · error</span></h2>
+    <div class="step"><span class="n">1</span><span class="ti">Check the Debezium connector</span><span class="tool l-kafka-connect badge badge-mono">connect_status</span><span class="tk">412 ms</span><svg class="ic ic-14" viewBox="0 0 24 24" aria-hidden="true" style="color: var(--success-fg);"><path d="M20 6 9 17l-5-5"/></svg></div>
+    <div class="card" style="padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; border-color: var(--border-strong);"><div style="display: flex; align-items: center; gap: 10px;"><span class="spin" aria-label="Running"></span><span class="w500">Check the DDL log</span><span class="tool l-postgres badge badge-mono">pg_recent_ddl</span><span class="t-xs subtle mono" style="margin-left: auto;">running · 0.8 s</span></div><div class="bar" aria-hidden="true"></div></div>
+    <div class="step"><span class="n err"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></span><span class="ti">Read consumer offsets</span><span class="tool l-kafka badge badge-mono">kafka_offsets</span><span class="tk" style="color: var(--danger-fg);">timeout · 5.0 s</span></div>
+  </section>
+
+  <section class="sec" style="grid-column: span 2;">
+    <h2>Proposal card · ApprovalRow <span class="m">Card + ribbon div · rows: Badge mono · Avatar · name · id · status / actions · tint only on the row you own</span></h2>
+    <div class="card" style="display: flex; flex-direction: column;">
+      <div class="ribbon"><svg class="ic ic-14" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>Needs your approval · kafka-connect</div>
+      <div class="arow"><span class="badge badge-mono l-schema-registry">schema-registry</span><span class="av av-20 p-priya">PR</span><span class="w500">Priya</span><span class="t-xs subtle mono">user:priya</span><span class="badge badge-ok" style="margin-left: auto;"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>Approved · 10:05</span></div>
+      <div class="arow arow-mine"><span class="badge badge-mono l-kafka-connect">kafka-connect</span><span class="av av-20 p-arjun">AR</span><span class="w500">Arjun</span><span class="t-xs muted">you</span><span class="t-xs" style="color: var(--warning-fg); font-weight: 500;">pending · your layer</span><span style="margin-left: auto; display: inline-flex; gap: 8px;"><button class="btn btn-ghost-danger" type="button">Reject<span class="kbd">R</span></button><button class="btn btn-success" type="button">Approve kafka-connect<span class="kbd">A</span></button></span></div>
+      <div class="arow"><span class="badge badge-mono l-kafka">kafka</span><span class="av av-20 p-kabir">KA</span><span class="w500">Kabir</span><span class="t-xs subtle mono">user:kabir</span><span class="t-xs subtle" style="margin-left: auto;">waiting for kafka owner</span></div>
+      <div class="arow"><span class="badge badge-mono l-warehouse">warehouse</span><span class="av av-20 p-priya">PR</span><span class="w500">Priya</span><span class="badge badge-fail" style="margin-left: auto;"><svg class="ic ic-12" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>Rejected · "run after the 11:00 load"</span></div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2>Composer <span class="m">div border-t + Textarea bg-muted + Button · driver / member</span></h2>
+    <div style="border-top: 1px solid var(--border); padding: 12px 0 0; display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 8px;"><span class="dot dot-accent"></span><span class="t-xs muted">You are driving · lease 24m</span><button class="btn btn-ghost" type="button" style="margin-left: auto; height: 28px;">Give control to…</button></div>
+      <textarea class="ta" rows="1" aria-label="Steer the agent" placeholder="Steer the agent…"></textarea>
+      <div style="display: flex; align-items: center; gap: 8px;"><span class="t-xs subtle" style="display: inline-flex; align-items: center; gap: 4px;"><span class="kbd">?</span>ask the agent</span><button class="btn btn-primary" type="button" style="margin-left: auto;">Send to agent<span class="kbd">⌘⏎</span></button></div>
+    </div>
+    <div style="border-top: 1px solid var(--border); padding: 12px 0 0; display: flex; flex-direction: column; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 8px;"><span class="dot dot-accent"></span><span class="t-xs muted">Kabir is driving · your message goes to Kabir's queue</span><button class="btn btn-ghost" type="button" style="margin-left: auto; height: 28px;">Request control<span class="kbd">T</span></button></div>
+      <textarea class="ta" rows="1" aria-label="Suggest a step" placeholder="Suggest a step for Kabir…"></textarea>
+      <div style="display: flex; align-items: center; gap: 8px;"><button class="btn btn-secondary" type="button" style="margin-left: auto;">Suggest<span class="kbd">⌘⏎</span></button></div>
+    </div>
+  </section>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1200}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

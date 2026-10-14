@@ -106,6 +106,52 @@ type RecordRef struct {
 	Key       string    `json:"key"`
 }
 
+// ---- Kafka: dead-letter topics (optional on a KafkaAdmin) ----
+
+// DLQRecord is one record of a dead-letter topic with its key and value
+// removed on purpose: where it is, when it was written, and the Kafka Connect
+// error headers it carries. It is the only shape in which a DLQ record may
+// leave the client (docs/pilot/data-handling.md, dlq_peek row).
+type DLQRecord struct {
+	Topic     string    `json:"topic"`
+	Partition int32     `json:"partition"`
+	Offset    int64     `json:"offset"`
+	Timestamp time.Time `json:"timestamp"`
+	// Headers keeps only headers whose key starts with "__connect.errors."
+	// (Connect's DLQ context headers: topic, partition, offset, connector.name,
+	// task.id, stage, class.name, exception.class.name, exception.message,
+	// exception.stacktrace). Values are text with control characters removed
+	// and at most 300 runes; exception.stacktrace is its first line only;
+	// exception.message and that first line are redacted (dlq.RedactMessage:
+	// "[Source:", "Detail:" and "Where:" tails, braces, brackets and quoted
+	// strings removed) because converters and drivers quote record bytes in
+	// them. Empty when the sink does not set
+	// errors.deadletterqueue.context.headers.enable=true. Every other header
+	// is dropped: an application header is never returned.
+	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// DLQReader is optional on a KafkaAdmin. The watcher's dlq_growth signal and
+// the dlq_peek tool ask for it with a type assertion at use time; a
+// KafkaAdmin without it leaves the signal "unknown" (one log line) and makes
+// the tool return a clear error, so fakes and replay clients need not
+// implement it.
+type DLQReader interface {
+	// DLQOffsets returns the start and end offset of every partition of each
+	// topic, in two requests for all topics (ListStartOffsets, ListEndOffsets).
+	// LastTimestamp is always zero: it never fetches a record (unlike
+	// TopicOffsets). A topic that does not exist is absent from the result
+	// and is NOT an error. No topics returns nil, nil without any request:
+	// kadm lists the whole cluster for an empty topic list, and that must
+	// never happen on a tick.
+	DLQOffsets(ctx context.Context, topics ...string) (map[string][]PartitionOffsets, error)
+	// PeekDLQ returns the newest records of topic, newest first, at most limit
+	// in TOTAL across partitions (partitions are read newest end offset first
+	// and the read stops at limit or at 8 MiB of record bytes), as DLQRecord:
+	// never a value, never a key. limit <= 0 means 5; it is capped at 20.
+	PeekDLQ(ctx context.Context, topic string, limit int) ([]DLQRecord, error)
+}
+
 // ---- Source Postgres (the CDC source) ----
 
 type SourceDB interface {
@@ -113,6 +159,9 @@ type SourceDB interface {
 	// RecentDDL reads the DDL audit table written by an event trigger
 	// (see dev/postgres-init). Newest first.
 	RecentDDL(ctx context.Context, since time.Time, limit int) ([]DDLChange, error)
+	// LongTransactions lists open transactions older than olderThan. Read-only
+	// ones are included (they block DDL and VACUUM); Transaction.HasXID marks
+	// writers, the only ones that hold the WAL horizon for a slot.
 	LongTransactions(ctx context.Context, olderThan time.Duration) ([]Transaction, error)
 	// Row reads one row by primary key. table is "schema.table".
 	Row(ctx context.Context, table, pkColumn, pk string) (map[string]any, bool, error)
@@ -126,6 +175,12 @@ type ReplicationSlot struct {
 	ConfirmedFlushLSN string `json:"confirmed_flush_lsn"`
 	RetainedWALBytes  int64  `json:"retained_wal_bytes"` // pg_current_wal_lsn() - restart_lsn
 	WALStatus         string `json:"wal_status"`         // reserved | extended | unreserved | lost
+	// SafeWALBytes is pg_replication_slots.safe_wal_size (PG13+): bytes of WAL
+	// that can still be written before the slot becomes "unreserved". nil when
+	// Postgres reports NULL (max_slot_wal_keep_size = -1, or the slot is lost).
+	// It can be NEGATIVE once the slot is "unreserved" but not yet "lost": the
+	// limit has been passed. Do not divide by it as if it were headroom.
+	SafeWALBytes *int64 `json:"safe_wal_bytes,omitempty"`
 }
 
 type DDLChange struct {
@@ -136,12 +191,22 @@ type DDLChange struct {
 	Username       string    `json:"username"`
 }
 
+// Transaction is one open transaction. It never carries query text: pg_stat_activity
+// queries often hold literal row values, and the sessions belong to any pipeline.
 type Transaction struct {
-	PID      int           `json:"pid"`
-	Username string        `json:"username"`
-	State    string        `json:"state"`
-	Age      time.Duration `json:"age"`
-	Query    string        `json:"query"`
+	PID             int           `json:"pid"`
+	Username        string        `json:"username"`
+	ApplicationName string        `json:"application_name"`
+	State           string        `json:"state"`
+	Age             time.Duration `json:"age"`
+	// WaitEvent is "<wait_event_type>:<wait_event>", empty when not waiting.
+	WaitEvent string `json:"wait_event"`
+	// Query is at most the statement verb (the first keyword, upper case, e.g.
+	// "UPDATE"), never the statement text.
+	Query string `json:"query"`
+	// HasXID is true when the backend holds a transaction id (backend_xid), so
+	// it has written and holds the WAL horizon. False for read-only transactions.
+	HasXID bool `json:"has_xid"`
 }
 
 // ---- Warehouse (Snowflake in production; Postgres in dev) ----

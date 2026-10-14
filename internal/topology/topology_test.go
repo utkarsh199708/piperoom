@@ -2,7 +2,9 @@ package topology
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -142,14 +144,14 @@ func testOwners() *owners.Owners {
 			SinkTables:     []string{"analytics.orders"},
 			SinkTSColumn:   "updated_at",
 		}},
-		Layers: map[string]string{
+		Layers: owners.UserLayers(map[string]string{
 			"postgres":        "priya",
 			"kafka-connect":   "arjun",
-			"schema-registry": "arjun",
+			"schema-registry": "priya",
 			"kafka":           "arjun",
 			"consumer":        "kabir",
 			"warehouse":       "meera",
-		},
+		}),
 	}
 }
 
@@ -261,20 +263,31 @@ func TestSinkHealth(t *testing.T) {
 
 func TestDeriveTopics(t *testing.T) {
 	cases := []struct {
-		name    string
-		prefix  string
-		include string
-		tables  []string
-		want    []string
+		name   string
+		cfg    map[string]string
+		tables []string
+		want   []string
 	}{
-		{"single", "pg", "public.orders", []string{"public.orders"}, []string{"pg.public.orders"}},
-		{"empty include means all", "pg", "", []string{"public.orders", "public.items"}, []string{"pg.public.orders", "pg.public.items"}},
-		{"filtered", "pg", "public.orders", []string{"public.orders", "public.items"}, []string{"pg.public.orders"}},
-		{"no prefix", "", "public.orders", []string{"public.orders"}, nil},
+		{"single", map[string]string{"topic.prefix": "pg", "table.include.list": "public.orders"}, []string{"public.orders"}, []string{"pg.public.orders"}},
+		{"empty include means all", map[string]string{"topic.prefix": "pg"}, []string{"public.orders", "public.items"}, []string{"pg.public.orders", "pg.public.items"}},
+		{"filtered", map[string]string{"topic.prefix": "pg", "table.include.list": "public.orders"}, []string{"public.orders", "public.items"}, []string{"pg.public.orders"}},
+		{"no prefix", map[string]string{"table.include.list": "public.orders"}, []string{"public.orders"}, nil},
+		{
+			"regex include",
+			map[string]string{"topic.prefix": "pg", "table.include.list": "public.order.*"},
+			[]string{"public.orders", "public.order_items", "public.items"},
+			[]string{"pg.public.orders", "pg.public.order_items"},
+		},
+		{
+			"regex include with exclude",
+			map[string]string{"topic.prefix": "pg", "table.include.list": `public\..*`, "table.exclude.list": `public\.order_items`},
+			[]string{"public.orders", "public.order_items"},
+			[]string{"pg.public.orders"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := deriveTopics(tc.prefix, tc.include, tc.tables)
+			got := deriveTopics(tc.cfg, tc.tables, nil)
 			if len(got) != len(tc.want) {
 				t.Fatalf("topics = %v, want %v", got, tc.want)
 			}
@@ -284,6 +297,130 @@ func TestDeriveTopics(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ---- Debezium include/exclude lists (regex, anchored to the whole id, case-insensitive) ----
+
+func TestStreamsTableLists(t *testing.T) {
+	cases := []struct {
+		name  string
+		cfg   map[string]string
+		table string
+		want  bool
+	}{
+		// Literal fast path.
+		{"literal entry", map[string]string{"table.include.list": "public.orders"}, "public.orders", true},
+		{"literal entry other table", map[string]string{"table.include.list": "public.orders"}, "public.items", false},
+		{"empty include streams all", map[string]string{}, "public.orders", true},
+		{"no list keys at all", nil, "public.orders", true},
+		// Regex entries.
+		{"regex star matches base", map[string]string{"table.include.list": "public.order.*"}, "public.orders", true},
+		{"regex star matches suffix", map[string]string{"table.include.list": "public.order.*"}, "public.order_items", true},
+		{"regex star filters others", map[string]string{"table.include.list": "public.order.*"}, "public.items", false},
+		{"regex anchored to whole id", map[string]string{"table.include.list": "orders"}, "public.orders", false},
+		{"escaped dot is exact", map[string]string{"table.include.list": `public\.orders`}, "publicXorders", false},
+		{"escaped dot matches", map[string]string{"table.include.list": `public\.orders`}, "public.orders", true},
+		// Debezium treats an unescaped dot as a regex wildcard.
+		{"unescaped dot is wildcard", map[string]string{"table.include.list": "public.orders"}, "publicXorders", true},
+		{"schema wildcard", map[string]string{"table.include.list": `public\..*`}, "public.orders", true},
+		{"schema wildcard other schema", map[string]string{"table.include.list": `public\..*`}, "sales.orders", false},
+		{"alternation anchored", map[string]string{"table.include.list": `orders|items`}, "public.orders", false},
+		{"alternation entry", map[string]string{"table.include.list": `orders|items`}, "items", true},
+		{"alternation with escaped dots", map[string]string{"table.include.list": `public\.orders|public\.items`}, "public.items", true},
+		// Exclude lists.
+		{"exclude wins over include", map[string]string{"table.include.list": "public.*", "table.exclude.list": "public.order_items"}, "public.order_items", false},
+		{"exclude keeps the rest", map[string]string{"table.include.list": "public.*", "table.exclude.list": "public.order_items"}, "public.orders", true},
+		{"exclude alone filters", map[string]string{"table.exclude.list": `public\.orders`}, "public.orders", false},
+		{"exclude alone keeps others", map[string]string{"table.exclude.list": `public\.orders`}, "public.items", true},
+		// Case-insensitive, like Debezium (Pattern.CASE_INSENSITIVE over the
+		// whole identifier), for both the regex and the literal fast path.
+		{"mixed-case literal include", map[string]string{"table.include.list": "Public.Orders"}, "public.orders", true},
+		{"mixed-case id matches lowercase include", map[string]string{"table.include.list": "public.orders"}, "Public.Orders", true},
+		{"mixed-case regex include", map[string]string{"table.include.list": `Public\.Order.*`}, "public.order_items", true},
+		{"mixed-case regex include filters others", map[string]string{"table.include.list": `Public\.Order.*`}, "public.items", false},
+		{"mixed-case regex exclude wins", map[string]string{"table.include.list": "public.*", "table.exclude.list": `Public\.Order_Items`}, "public.order_items", false},
+		{"mixed-case regex exclude keeps the rest", map[string]string{"table.include.list": "public.*", "table.exclude.list": `Public\.Order_Items`}, "public.orders", true},
+		{"mixed-case fast-path literal include", map[string]string{"schema.include.list": "Public"}, "public.orders", true},
+		{"mixed-case fast-path literal exclude wins", map[string]string{"schema.exclude.list": "PUBLIC"}, "public.orders", false},
+		// Invalid regex entries fall back to literal comparison.
+		{"invalid regex matches literally", map[string]string{"table.include.list": "public.["}, "public.[", true},
+		{"invalid regex is not a wildcard", map[string]string{"table.include.list": "public.["}, "public.orders", false},
+		{"invalid exclude entry", map[string]string{"table.include.list": "public.*", "table.exclude.list": "public.["}, "public.[", false},
+		// Several comma-separated entries, mixed literal and regex.
+		{"several mixed entries literal", map[string]string{"table.include.list": `public.orders, public.order_items,public.events_.*`}, "public.orders", true},
+		{"several mixed entries regex", map[string]string{"table.include.list": `public.orders, public.order_items,public.events_.*`}, "public.events_2026", true},
+		{"several mixed entries unlisted", map[string]string{"table.include.list": `public.orders, public.order_items,public.events_.*`}, "public.users", false},
+		// Schema-level lists match the schema part only.
+		{"schema include", map[string]string{"schema.include.list": "public"}, "public.orders", true},
+		{"schema include filters other schema", map[string]string{"schema.include.list": "public"}, "sales.orders", false},
+		{"schema include regex", map[string]string{"schema.include.list": "pub.*"}, "public.orders", true},
+		{"schema exclude wins", map[string]string{"schema.include.list": "public|sales", "schema.exclude.list": "sales"}, "sales.orders", false},
+		{"schema and table lists combine schema", map[string]string{"schema.include.list": "public", "table.include.list": `public\.orders`}, "sales.orders", false},
+		{"schema and table lists combine table", map[string]string{"schema.include.list": "public", "table.include.list": `public\.orders`}, "public.items", false},
+		{"schema and table lists combine match", map[string]string{"schema.include.list": "public", "table.include.list": `public\.orders`}, "public.orders", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := streamsTable(tc.cfg, tc.table, nil); got != tc.want {
+				t.Fatalf("streamsTable(%q) = %v, want %v", tc.table, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInvalidListEntryWarnsOnce(t *testing.T) {
+	var buf strings.Builder
+	b := newBuilder(testOwners(), nil, nil, nil, nil,
+		slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	// Unique entry so a stray shared cache could not influence the count.
+	cfg := map[string]string{"table.include.list": "logonce_test_entry.["}
+	want := []bool{true, true, true}
+	for i := range want {
+		if got := streamsTable(cfg, "logonce_test_entry.[", b.warnBadListEntry); got != want[i] {
+			t.Fatalf("call %d: streamsTable = %v, want %v (literal fallback)", i, got, want[i])
+		}
+	}
+	if n := strings.Count(buf.String(), "logonce_test_entry.["); n != 1 {
+		t.Fatalf("bad entry logged %d times, want 1:\n%s", n, buf.String())
+	}
+}
+
+// TestBadListEntryWarnsOncePerBuilder proves the warn dedupe lives on the
+// builder instance and covers both the Build and the Trace matching paths:
+// one Build + one Trace warn once, Trace alone on a fresh builder warns again
+// (nothing is shared module-wide).
+func TestBadListEntryWarnsOncePerBuilder(t *testing.T) {
+	cfg := map[string]string{"topic.prefix": "pg", "table.include.list": "public.["}
+	connect := &fakeConnect{config: map[string]map[string]string{"pg-orders-connector": cfg}}
+	newTestBuilder := func(buf *strings.Builder) *builder {
+		return newBuilder(testOwners(), connect, &fakeKafka{}, &fakeSource{}, &fakeWarehouse{},
+			slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	}
+
+	var buf strings.Builder
+	b := newTestBuilder(&buf)
+	if _, err := b.Build(context.Background(), "orders"); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// Trace resolves its connector through the same matching; the builder has
+	// already reported this entry, so Trace must not log it again.
+	if _, err := b.Trace(context.Background(), "orders", "public.orders", "7"); !errors.Is(err, ErrBadInput) {
+		t.Fatalf("Trace err = %v, want ErrBadInput", err)
+	}
+	if n := strings.Count(buf.String(), "public.["); n != 1 {
+		t.Fatalf("bad entry logged %d times for one builder, want 1:\n%s", n, buf.String())
+	}
+
+	// A new builder has its own dedupe set: Trace alone warns once again.
+	var buf2 strings.Builder
+	b2 := newTestBuilder(&buf2)
+	if _, err := b2.Trace(context.Background(), "orders", "public.orders", "7"); !errors.Is(err, ErrBadInput) {
+		t.Fatalf("Trace err = %v, want ErrBadInput", err)
+	}
+	if n := strings.Count(buf2.String(), "public.["); n != 1 {
+		t.Fatalf("bad entry logged %d times from Trace on a fresh builder, want 1:\n%s", n, buf2.String())
 	}
 }
 
@@ -362,6 +499,109 @@ func TestBuildUnknownPipeline(t *testing.T) {
 	if _, err := b.Build(context.Background(), "nope"); err == nil {
 		t.Fatal("expected error for unknown pipeline")
 	} else if !errors.Is(err, ErrBadInput) {
+		t.Fatalf("error %v does not wrap ErrBadInput", err)
+	}
+}
+
+// TestBuildRegexIncludeList proves the pipeline map for a connector whose
+// table.include.list is a Debezium regex (public.order.*) rather than a list
+// of literal table names.
+func TestBuildRegexIncludeList(t *testing.T) {
+	o := testOwners()
+	o.Pipelines[0].SourceTables = []string{"public.orders", "public.order_items"}
+	now := time.Now()
+	b := NewBuilder(
+		o,
+		&fakeConnect{
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.order.*", "slot.name": "pg-orders-connector"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
+		},
+		&fakeKafka{
+			lags: map[string]clients.GroupLag{"order-sync": {State: "Stable", TotalLag: 0}},
+			offsets: map[string][]clients.PartitionOffsets{
+				"pg.public.orders":      {{Partition: 0, LastTimestamp: now.Add(-time.Minute)}},
+				"pg.public.order_items": {{Partition: 0, LastTimestamp: now.Add(-time.Minute)}},
+			},
+		},
+		&fakeSource{slots: []clients.ReplicationSlot{{Name: "pg-orders-connector", Active: true, RetainedWALBytes: 10}}},
+		&fakeWarehouse{fresh: map[string]time.Time{"analytics.orders": now.Add(-time.Minute)}},
+	)
+
+	g, err := b.Build(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	topics := map[string]bool{}
+	for _, n := range g.Nodes {
+		if n.Kind != KindTopic {
+			continue
+		}
+		topics[n.Name] = true
+		// A real topic (not a placeholder) was health-checked via collectTopics.
+		if n.Facts["newest_record"] == "" || n.Facts["newest_record"] == "never" {
+			t.Fatalf("topic %s was not health-checked: %+v", n.Name, n.Facts)
+		}
+	}
+	if len(topics) != 2 || !topics["pg.public.orders"] || !topics["pg.public.order_items"] {
+		t.Fatalf("topics = %v, want pg.public.orders and pg.public.order_items", topics)
+	}
+	for _, n := range g.Nodes {
+		if n.Kind == KindSourceTable && n.Facts["slot"] != "" {
+			t.Fatalf("source node %s failed to resolve its slot: %+v", n.Name, n.Facts)
+		}
+	}
+}
+
+// TestTraceRegexIncludeList proves a trace resolves the connector and topic
+// when the include list is a regex; the old literal comparison reported
+// ErrBadInput for such a table.
+func TestTraceRegexIncludeList(t *testing.T) {
+	o := testOwners()
+	o.Pipelines[0].SourceTables = []string{"public.orders", "public.order_items"}
+	b := NewBuilder(
+		o,
+		&fakeConnect{
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": `public\.order.*`, "slot.name": "pg-orders-connector"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
+		},
+		&fakeKafka{},
+		&fakeSource{rows: map[string]map[string]any{"public.order_items|7": {"id": "7", "updated_at": time.Now().Format(time.RFC3339Nano)}}},
+		&fakeWarehouse{},
+	)
+
+	stages, err := b.Trace(context.Background(), "orders", "public.order_items", "7")
+	if err != nil {
+		t.Fatalf("Trace: %v", err)
+	}
+	if stages[1].Name != "pg-orders-connector" {
+		t.Fatalf("connector stage = %q, want pg-orders-connector", stages[1].Name)
+	}
+	if stages[2].Name != "pg.public.order_items" {
+		t.Fatalf("topic stage = %q, want pg.public.order_items", stages[2].Name)
+	}
+}
+
+// TestTraceExcludedTable proves table.exclude.list is respected: a table in
+// the include list pattern but on the exclude list has no streaming connector.
+func TestTraceExcludedTable(t *testing.T) {
+	o := testOwners()
+	o.Pipelines[0].SourceTables = []string{"public.orders", "public.order_items"}
+	b := NewBuilder(
+		o,
+		&fakeConnect{
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.*", "table.exclude.list": "public.order_items"}},
+		},
+		&fakeKafka{},
+		&fakeSource{},
+		&fakeWarehouse{},
+	)
+
+	_, err := b.Trace(context.Background(), "orders", "public.order_items", "7")
+	if err == nil {
+		t.Fatal("expected error for an excluded table")
+	}
+	if !errors.Is(err, ErrBadInput) {
 		t.Fatalf("error %v does not wrap ErrBadInput", err)
 	}
 }
@@ -691,6 +931,95 @@ func TestBuildConnectorMissing(t *testing.T) {
 				t.Fatalf("deleted connector facts = %v, want missing=true", n.Facts)
 			}
 		}
+	}
+}
+
+// TestSinkNodeCarriesTSColumn proves every sink node carries the pipeline's
+// ts_column fact in each branch (fresh, stale, unreachable), next to the facts
+// that branch already sets. The recovery check reads the column from here.
+func TestSinkNodeCarriesTSColumn(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name       string
+		fresh      time.Time
+		freshErr   error
+		wantHealth Health
+		wantKey    string
+		wantVal    string // empty: only require the key to be present
+	}{
+		{"healthy", now.Add(-time.Minute), nil, HealthOK, "stale_for", ""},
+		{"stale", now.Add(-31 * time.Minute), nil, HealthFail, "stale_for", ""},
+		{"unreachable", time.Time{}, errors.New("warehouse down"), HealthUnknown, "error", "unreachable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wh := &fakeWarehouse{fresh: map[string]time.Time{"analytics.orders": tc.fresh}}
+			if tc.freshErr != nil {
+				wh.freshErr = map[string]error{"analytics.orders": tc.freshErr}
+			}
+			b := NewBuilder(
+				testOwners(),
+				&fakeConnect{
+					config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders", "slot.name": "pg-orders-connector"}},
+					status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING", Tasks: []clients.TaskStatus{{State: "RUNNING"}}}},
+				},
+				&fakeKafka{
+					lags:    map[string]clients.GroupLag{"order-sync": {State: "Stable", TotalLag: 0}},
+					offsets: map[string][]clients.PartitionOffsets{"pg.public.orders": {{Partition: 0, LastTimestamp: now.Add(-time.Minute)}}},
+				},
+				&fakeSource{slots: []clients.ReplicationSlot{{Name: "pg-orders-connector", Active: true, RetainedWALBytes: 10}}},
+				wh,
+			)
+			g, err := b.Build(context.Background(), "orders")
+			if err != nil {
+				t.Fatalf("Build: %v", err)
+			}
+
+			var sink *Node
+			for i := range g.Nodes {
+				if g.Nodes[i].Kind == KindSinkTable {
+					sink = &g.Nodes[i]
+				}
+			}
+			if sink == nil {
+				t.Fatalf("sink node missing: %+v", g.Nodes)
+			}
+			if sink.Health != tc.wantHealth {
+				t.Fatalf("sink health = %s, want %s", sink.Health, tc.wantHealth)
+			}
+			if sink.Facts["ts_column"] != "updated_at" {
+				t.Fatalf("ts_column = %q, want updated_at (facts %v)", sink.Facts["ts_column"], sink.Facts)
+			}
+			if v := sink.Facts[tc.wantKey]; v == "" || (tc.wantVal != "" && v != tc.wantVal) {
+				t.Fatalf("fact %s = %q, want set (%q); facts %v", tc.wantKey, v, tc.wantVal, sink.Facts)
+			}
+
+			// The Data the pipeline_map tool returns is the Graph itself; check
+			// the JSON key path the agent and the UI see.
+			raw, err := json.Marshal(g)
+			if err != nil {
+				t.Fatalf("marshal graph: %v", err)
+			}
+			var shape struct {
+				Nodes []struct {
+					Kind  NodeKind          `json:"kind"`
+					Facts map[string]string `json:"facts"`
+				} `json:"nodes"`
+			}
+			if err := json.Unmarshal(raw, &shape); err != nil {
+				t.Fatalf("unmarshal graph: %v", err)
+			}
+			for _, n := range shape.Nodes {
+				if n.Kind == KindSinkTable && n.Facts["ts_column"] != "updated_at" {
+					t.Fatalf("JSON nodes[kind=sink_table].facts.ts_column = %q, want updated_at", n.Facts["ts_column"])
+				}
+			}
+
+			if !strings.Contains(b.Render(g), "wh:analytics.orders [warehouse, owner meera]") ||
+				!strings.Contains(b.Render(g), "ts_column=updated_at") {
+				t.Fatalf("Render does not show ts_column for the sink node:\n%s", b.Render(g))
+			}
+		})
 	}
 }
 

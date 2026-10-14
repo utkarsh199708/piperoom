@@ -1,0 +1,47 @@
+{
+  "v": 3,
+  "createdOnFiles": { "v": 1, "at": "2026-10-13T17:05:00Z" },
+  "title": "Piperoom UI",
+  "launch": { "view": "canvas" },
+  "pages": [],
+  "boards": {
+    "Main.dc.html": { "x": 0, "y": 0, "w": 1440, "h": 900, "title": "Rooms", "expand": "fill" },
+    "Room-Investigating.dc.html": { "x": 1520, "y": 0, "w": 1440, "h": 900, "title": "Room — investigating (Kabir drives, you suggest)", "expand": "fill" },
+    "Room-Approval.dc.html": { "x": 3040, "y": 0, "w": 1440, "h": 900, "title": "Room — approval moment", "expand": "fill" },
+    "Command-Menu.dc.html": { "x": 4560, "y": 0, "w": 1440, "h": 900, "title": "Command menu (⌘K)", "expand": "fill" },
+    "Sign-In.dc.html": { "x": 6080, "y": 0, "w": 1440, "h": 900, "title": "Sign in", "expand": "fill" },
+    "Room-NoDriver.dc.html": { "x": 0, "y": 1020, "w": 1440, "h": 900, "title": "Room — no driver", "expand": "fill" },
+    "Room-Viewer.dc.html": { "x": 1520, "y": 1020, "w": 1440, "h": 900, "title": "Room — viewer (read-only)", "expand": "fill" },
+    "Solo-Confirm.dc.html": { "x": 3040, "y": 1020, "w": 1440, "h": 900, "title": "Solo mode — typed confirm", "expand": "fill" },
+    "Stale-409.dc.html": { "x": 4560, "y": 1020, "w": 1440, "h": 900, "title": "Proposal changed (409) toast", "expand": "fill" },
+    "Room-Investigating-Light.dc.html": { "x": 6080, "y": 1020, "w": 1440, "h": 900, "title": "Room — investigating · Light", "expand": "fill" },
+    "Rooms-Empty.dc.html": { "x": 0, "y": 2040, "w": 1440, "h": 900, "title": "Rooms — empty", "expand": "fill" },
+    "Room-Loading.dc.html": { "x": 1520, "y": 2040, "w": 1440, "h": 900, "title": "Room — loading skeleton", "expand": "fill" },
+    "Foundations.dc.html": { "x": 3040, "y": 2040, "w": 1440, "h": 900, "title": "Foundations — tokens, type, spacing" },
+    "Components.dc.html": { "x": 4560, "y": 2040, "w": 1440, "h": 1200, "title": "Components — shadcn anatomy" },
+    "Handoff.dc.html": { "x": 6080, "y": 2040, "w": 1440, "h": 1700, "title": "Handoff — tokens → shadcn/Tailwind, components → shadcn/ui" }
+  },
+  "order": [
+    "Main.dc.html",
+    "Room-Investigating.dc.html",
+    "Room-Approval.dc.html",
+    "Command-Menu.dc.html",
+    "Sign-In.dc.html",
+    "Room-NoDriver.dc.html",
+    "Room-Viewer.dc.html",
+    "Solo-Confirm.dc.html",
+    "Stale-409.dc.html",
+    "Room-Investigating-Light.dc.html",
+    "Rooms-Empty.dc.html",
+    "Room-Loading.dc.html",
+    "Foundations.dc.html",
+    "Components.dc.html",
+    "Handoff.dc.html"
+  ],
+  "notes": {
+    "t-screens": { "x": 0, "y": -300, "text": "Screens · 1440×900 · dark first", "kind": "title1", "maxW": 7520 },
+    "t-states": { "x": 0, "y": 720, "text": "States and modes", "kind": "title1", "maxW": 7520 },
+    "t-foundations": { "x": 0, "y": 1740, "text": "Empty, loading, foundations, components, handoff", "kind": "title1", "maxW": 7520 }
+  },
+  "designSystems": []
+}

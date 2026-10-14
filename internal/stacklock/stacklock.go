@@ -8,21 +8,21 @@
 package stacklock
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 // EnvPath overrides the lock file location (used by tests and non-default
 // checkouts).
 const EnvPath = "PIPEROOM_STACK_LOCK"
-
-// DefaultPath is the lock file shared by all agents through the bus directory.
-const DefaultPath = `C:\Users\Utkarsh\Desktop\interview\piperoom-bus\stack.lock`
 
 // Record is the content of the lock file.
 type Record struct {
@@ -36,12 +36,54 @@ type Lock struct {
 }
 
 // Path returns the configured lock file path: $PIPEROOM_STACK_LOCK if set,
-// otherwise DefaultPath.
+// otherwise the default derived from the git common dir.
 func Path() string {
 	if p := os.Getenv(EnvPath); p != "" {
 		return p
 	}
-	return DefaultPath
+	return DefaultPath()
+}
+
+// DefaultPath derives the shared lock file location from the git common dir.
+// The bus directory (piperoom-bus) is a sibling of the shared repo, so the lock
+// lives at <repo-parent>/piperoom-bus/stack.lock, where <repo-parent> is the
+// parent of the repo root (the parent of the .git directory). When git is
+// unavailable it returns "" (fail closed): the lock operations refuse an empty
+// path, so two agents can never silently fall back to different per-cwd lock
+// files.
+func DefaultPath() string {
+	common, err := gitCommonDir()
+	if err != nil {
+		return ""
+	}
+	return defaultPath(common)
+}
+
+// defaultPath maps a git common dir (<repo>/.git) to the bus lock path:
+// <repo-parent>/piperoom-bus/stack.lock.
+func defaultPath(commonDir string) string {
+	repoRoot := filepath.Dir(filepath.Clean(commonDir))
+	return filepath.Join(filepath.Dir(repoRoot), "piperoom-bus", "stack.lock")
+}
+
+// gitCommonDir runs `git rev-parse --git-common-dir` and resolves it to an
+// absolute path.
+func gitCommonDir() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--git-common-dir").Output()
+	if err != nil {
+		return "", fmt.Errorf("stacklock: git rev-parse --git-common-dir: %w", err)
+	}
+	dir := strings.TrimSpace(string(out))
+	if dir == "" {
+		return "", errors.New("stacklock: empty git common dir")
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("stacklock: resolve git common dir %q: %w", dir, err)
+	}
+	return abs, nil
 }
 
 // New returns a Lock for path. An empty path means Path().
@@ -55,10 +97,24 @@ func New(path string) *Lock {
 // Path returns the lock file path this Lock manages.
 func (l *Lock) Path() string { return l.path }
 
+// requirePath fails closed when the lock has no resolved path: without git and
+// without $PIPEROOM_STACK_LOCK there is no single shared lock file to agree on,
+// so mutating the shared stack must be refused rather than silently using a
+// per-cwd relative file.
+func (l *Lock) requirePath() error {
+	if l.path == "" {
+		return fmt.Errorf("stacklock: no lock path (git unavailable and %s is not set)", EnvPath)
+	}
+	return nil
+}
+
 // Acquire atomically creates the lock file for owner. Acquiring a lock already
 // held by the same owner is a no-op (re-entrant). On success it returns the
 // current record (the new one, or the existing one on re-entry).
 func (l *Lock) Acquire(owner string) (*Record, error) {
+	if err := l.requirePath(); err != nil {
+		return nil, err
+	}
 	if owner == "" {
 		return nil, errors.New("stacklock: empty owner")
 	}
@@ -107,6 +163,9 @@ func (l *Lock) Acquire(owner string) (*Record, error) {
 
 // Release removes the lock file, but only when owner currently holds it.
 func (l *Lock) Release(owner string) error {
+	if err := l.requirePath(); err != nil {
+		return err
+	}
 	cur, err := l.Status()
 	if err != nil {
 		return fmt.Errorf("stacklock: read lock: %w", err)
@@ -129,6 +188,9 @@ func (l *Lock) Release(owner string) error {
 // timestamped with the file's modification time, so it stays stealable and
 // callers can skip rather than fail.
 func (l *Lock) Status() (*Record, error) {
+	if err := l.requirePath(); err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(l.path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -150,6 +212,9 @@ func (l *Lock) Status() (*Record, error) {
 // Steal removes a lock that is older than maxAge, returning the record it
 // removed. A fresh lock is never stolen.
 func (l *Lock) Steal(maxAge time.Duration) (*Record, error) {
+	if err := l.requirePath(); err != nil {
+		return nil, err
+	}
 	cur, err := l.Status()
 	if err != nil {
 		return nil, fmt.Errorf("stacklock: read lock: %w", err)

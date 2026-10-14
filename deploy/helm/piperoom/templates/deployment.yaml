@@ -1,0 +1,158 @@
+{{- include "piperoom.validate" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "piperoom.fullname" . }}
+  labels:
+    {{- include "piperoom.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  # Recreate: with one replica and background workers, two pods must not run
+  # side by side during a rollout (see replicaCount in values.yaml).
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "piperoom.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if not .Values.files.existingConfigMap }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "piperoom.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "piperoom.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: piperoom
+          image: {{ include "piperoom.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8090
+              protocol: TCP
+          env:
+            - name: PIPEROOM_HTTP_ADDR
+              value: 0.0.0.0:8090
+            - name: OWNERS_FILE
+              value: {{ printf "%s/owners.yaml" .Values.files.mountPath | quote }}
+            - name: USERS_FILE
+              value: {{ printf "%s/users.yaml" .Values.files.mountPath | quote }}
+            {{- $url := include "piperoom.publicURL" . }}
+            {{- if $url }}
+            - name: PIPEROOM_PUBLIC_URL
+              value: {{ $url | quote }}
+            {{- end }}
+            # Always set explicitly: the image defaults to dev mode with
+            # PIPEROOM_DEV_ALLOW_NONLOOPBACK=1.
+            - name: PIPEROOM_AUTH_MODE
+              value: {{ include "piperoom.authMode" . | quote }}
+            - name: PIPEROOM_DEV_ALLOW_NONLOOPBACK
+              value: {{ ternary "" "1" (eq (include "piperoom.authMode" .) "oidc") | quote }}
+            {{- range $k, $v := .Values.env }}
+            {{- if and (not (kindIs "invalid" $v)) (ne $k "PIPEROOM_PUBLIC_URL") (ne $k "PIPEROOM_AUTH_MODE") (or (ne (toString $v) "") (eq $k "PIPEROOM_OIDC_GROUPS_CLAIM")) }}
+            - name: {{ $k }}
+              value: {{ include "piperoom.envValue" $v | quote }}
+            {{- end }}
+            {{- end }}
+            {{- $s := .Values.secrets }}
+            {{- range $s.requiredKeys }}
+            {{- if not (hasKey $s.refs .) }}
+            - name: {{ . }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $s.existingSecret }}
+                  key: {{ . }}
+            {{- end }}
+            {{- end }}
+            {{- range $s.optionalKeys }}
+            {{- if not (hasKey $s.refs .) }}
+            - name: {{ . }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $s.existingSecret }}
+                  key: {{ . }}
+                  optional: true
+            {{- end }}
+            {{- end }}
+            {{- range $name, $ref := $s.refs }}
+            - name: {{ $name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $ref.name }}
+                  key: {{ $ref.key }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: {{ .Values.files.mountPath }}
+              readOnly: true
+            # The root file system is read-only; /tmp is the only writable path.
+            - name: tmp
+              mountPath: /tmp
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "piperoom.configMapName" . }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

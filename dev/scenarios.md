@@ -1,4 +1,4 @@
-# Failure scenarios (observed on the dev stack, 2026-10-11)
+# Failure scenarios (observed on the dev stack, 2026-10-11/12)
 
 Start clean with `go run ./cmd/devctl reset`. Use `devctl status` to watch, and `devctl load --rate 20`
 in a second terminal to create traffic (needed to grow WAL or lag).
@@ -28,6 +28,74 @@ slot        debezium_orders active=true retained=26 kB
 consumer    order-sync: state Stable, members 1, total lag 0
 warehouse   analytics.orders: 100 rows, newest updated_at …, stale <60 s
 ```
+
+---
+
+## Health check: `devctl health`
+
+One read-only command that says whether the pipeline is healthy. It takes no lock, changes nothing,
+and checks five layers concurrently. Each layer has its own 15 s timeout; a layer that errors or
+times out is reported as FAIL and the other layers still run.
+
+```
+go run ./cmd/devctl health
+```
+
+Exit codes: **0** when every layer is OK; **1** when any layer FAILs (the report names the layer and its
+owner from `dev/owners.yaml`); **2** when the check could not run at all (not inside the repo,
+`dev/owners.yaml` unreadable or missing the `orders` pipeline, bad arguments) or when Ctrl+C cuts the
+check short (a cancel is not an unhealthy pipeline). `devctl demo` prints the health report before the
+break. After `--fix` it re-runs the check every 5 s for about 90 s, because the backlog drains after the
+fix returns, and then prints the settled report. The window is checked between runs, so the last run can
+finish a few seconds past 90 s.
+
+Each layer:
+
+| Layer (owner) | Check | FAIL when |
+|---|---|---|
+| `postgres` (priya) | slot `debezium_orders` | missing, `active=false`, or retained WAL > **100 MB** |
+| `kafka-connect` (arjun) | connector `pg-orders-connector` and its tasks (Connect REST) | connector not `RUNNING`, no tasks, or any task not `RUNNING` |
+| `kafka` (arjun) | topic `pg.public.orders` | the oldest source change not yet in the topic has waited **> 60 s** |
+| `consumer` (kabir) | group `order-sync` (from `dev/owners.yaml`) | state not `Stable`, no members, or total lag **> 100** |
+| `warehouse` (meera) | `analytics.orders` | the oldest source change not yet loaded has waited **> 60 s** |
+
+Notes on the thresholds:
+- The topic and warehouse layers measure the **age of the oldest change that has not arrived yet**
+  (`updated_at` of the source rows newer than the newest topic record / warehouse row), not the age of
+  the newest row. So an idle stack is OK, and a burst that never gets through still FAILs after 60 s.
+  The age is computed on the source database clock; the topic line also prints the age of its newest
+  record (wall clock, for humans only).
+- Precision: the warehouse comparison uses exact microseconds (a row is pending only if it is strictly
+  newer than the newest loaded row). Kafka record timestamps are milliseconds, so for the topic a row in
+  the same millisecond as the newest record counts as delivered.
+- Kafka's newest record is read at each partition's last offset. A topic whose last offset is a
+  transaction marker never answers and shows as `no answer within 15s`.
+- The retained-WAL limit is 100 MB; the observed demo values (26 kB healthy, about 1–2 MB broken) are far
+  below it, so a slot that is active but not moving (`long-transaction`) is **not** flagged. Watch
+  `restart_lsn` with `devctl status` for that case.
+
+Output format (from the unit-test fakes; not yet checked against the live stack):
+
+```
+OK   postgres      slot debezium_orders: active=true, retained 26 kB (limit 100.0 MB)
+OK   kafka-connect pg-orders-connector: RUNNING, tasks 0=RUNNING
+OK   kafka         topic pg.public.orders: newest record 4 s old, oldest unsent change 0 s (limit 60 s)
+FAIL consumer      order-sync: state Empty, members 0, total lag 1471 (limit 100)
+OK   warehouse     analytics.orders: newest updated_at 08:04:12 UTC, oldest unloaded change 0 s (limit 60 s)
+pipeline UNHEALTHY: consumer (kabir)
+```
+
+Expected health per scenario, derived from the symptoms above (**not yet verified with `devctl health`**):
+
+| Scenario | Layers that should FAIL | Layers that stay OK |
+|---|---|---|
+| `schema-change` | kafka-connect (task 0 FAILED), postgres (slot inactive); kafka and warehouse once 60 s pass | consumer |
+| `connector-down` (PAUSED) | kafka-connect; kafka and warehouse after 60 s | postgres (slot still active), consumer |
+| `consumer-stuck` | consumer; warehouse after 60 s | kafka-connect, postgres, kafka |
+| `consumer-lag` | consumer (no members, lag); warehouse after 60 s | kafka-connect, postgres, kafka |
+| `slot-inactive` | kafka-connect (STOPPED); postgres; kafka and warehouse after 60 s | consumer |
+| `connector-auth` | postgres (slot inactive); kafka and warehouse after 60 s | kafka-connect (task stays RUNNING, see §7), consumer |
+| `long-transaction` | nothing until retained WAL passes 100 MB | all |
 
 ---
 
@@ -67,6 +135,8 @@ ALTER TABLE | public.orders | ALTER TABLE orders ALTER COLUMN amount TYPE numeri
 
 **Fix (`devctl fix schema-change`):** set subject compatibility to `NONE`, restart task 0, wait for the
 new schema version to register (version 2 of the subject), set compatibility back to `BACKWARD`.
+It is idempotent: when the new schema is already registered and task 0 is RUNNING (the agent fixed it
+first), it skips the wait and the restart, and it still ends at `BACKWARD`.
 The consumer reads both versions (int and decimal); missed rows reach the warehouse. No data loss.
 
 ---
@@ -82,7 +152,8 @@ slot        debezium_orders active=true retained=330 kB     ← slot stays ACTIV
 consumer    order-sync: state Stable, members 1, total lag 0
 warehouse   stale
 ```
-Retained WAL grows with load. **Fix:** `PUT …/resume`. Missed changes flow; no data loss.
+Retained WAL grows with load. **Fix:** the agent proposes `connect_resume_connector`, which runs only
+after the kafka-connect owner approves. (Manual equivalent: `PUT …/resume`.) Missed changes flow; no data loss.
 
 ---
 
@@ -120,3 +191,104 @@ warehouse   fresh (stale 1 s) — new data still flows!
 Nothing looks broken except `restart_lsn` not moving and retained WAL rising. `pg_stat_activity` shows the
 open transaction (`xact_start` minutes ago, state `idle in transaction` or running `pg_sleep`).
 **Fix:** `pg_terminate_backend(pid)`. Retained WAL dropped to 96 kB right away.
+
+---
+
+## 5. `slot-inactive` — stopped connector, WAL piling up
+
+**Break:** `PUT /connectors/pg-orders-connector/stop` (Connect REST `stop`). `pause` is *not* enough:
+a paused connector keeps its replication connection, so the slot stays active (see §2).
+
+**Symptoms** (observed 2026-10-12 with `load --rate 20` running; before the break the status showed
+`slot debezium_orders active=true retained=965 kB`). `devctl break slot-inactive` logs:
+```
+level=INFO msg="broken: connector STOPPED, slot debezium_orders inactive — run `devctl load` to grow retained WAL further" retained_before_bytes=1089824 retained_after_bytes=1129008
+```
+(the two byte counts are its own proof: one 100-row INSERT while stopped; the base is larger than the
+965 kB above because `load` kept writing in between). After ~40 s of load:
+```
+connector   pg-orders-connector: STOPPED, tasks                 ← stopped connector has no tasks
+slot        debezium_orders active=false retained=1332 kB      ← slot INACTIVE; grows with every commit
+consumer    order-sync: state Stable, members 1, total lag 0   ← Kafka side healthy: problem is upstream
+warehouse   analytics.orders: 648 rows, newest updated_at …, stale 59 s
+```
+`pg_stat_replication` is empty: nothing confirms WAL, `restart_lsn` stops moving, and retained
+(`pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)`) grows with the load.
+
+**Fix:** the agent proposes `connect_resume_connector`, which runs only after the kafka-connect owner
+approves (manual equivalent: `devctl fix slot-inactive`, i.e. `PUT …/resume`). Debezium keeps the slot and its offsets
+(no re-snapshot) and replays the retained WAL: slot back `active=true`, retained fell 1332 kB → 804 kB
+right after resume and order-sync lag drained to 0; the warehouse caught up (648 → 1725 rows, stale 1 s).
+No data loss.
+
+---
+
+## 6. `consumer-lag` — stopped consumer, lag grows
+
+**Break:** `docker compose stop devconsumer` (the `order-sync` group leaves; `docker ps` shows
+`piperoom-dev-devconsumer-1 Exited (0)`), while `load --rate 20` keeps writing. Before the break:
+`consumer order-sync: state Stable, members 1, total lag 0` and a fresh warehouse.
+
+**Symptoms** (observed 2026-10-12). `devctl break consumer-lag` logs
+`total_lag=204` from its own 50-row proof INSERT; after ~45 s of load:
+```
+connector   pg-orders-connector: RUNNING, tasks 0=RUNNING   ← upstream healthy (unlike §2/§5)
+slot        debezium_orders active=true retained=417 kB
+consumer    order-sync: state Empty, members 0, total lag 1471  ← grows with load
+warehouse   analytics.orders: 3495 rows, newest updated_at …, stale 78 s  ← nothing consumes
+```
+
+**Fix (`devctl fix consumer-lag`):** `docker compose start devconsumer`. It rejoins the group,
+lag 1471 → 0, warehouse catches up (3495 → 5295 rows, stale 0 s).
+Do **not** use `docker compose up -d devconsumer` here: `up` recreates any container that does not
+match the compose file (we hit this once — it recreated Postgres and killed the running `devctl load`).
+`compose start` only starts the stopped container.
+
+---
+
+## 7. `connector-auth` — permission denied on the publication (matches C7 `publication-permission-denied`)
+
+A real Postgres permission break, aligned with the C7 eval scenario
+`evals/scenarios/publication-permission-denied.yaml` (same symptom wording).
+
+**Break (`devctl break connector-auth`):** a DBA moves `public.orders` ownership to a dedicated
+role (`orders_owner`), and the connector is pointed at the least-privilege role `debezium`
+(non-superuser). Concretely, `break` runs:
+
+```
+CREATE ROLE debezium LOGIN REPLICATION PASSWORD 'piperoom-dev'   (if absent)
+CREATE ROLE orders_owner LOGIN                                   (if absent)
+GRANT CONNECT ON DATABASE orders TO debezium
+GRANT USAGE ON SCHEMA public TO debezium
+GRANT SELECT ON public.orders TO debezium
+ALTER PUBLICATION dbz_publication OWNER TO debezium
+ALTER TABLE public.orders OWNER TO orders_owner
+```
+then re-registers the connector with `database.user=debezium` and restarts task 0.
+
+**Root cause:** with `publication.autocreate.mode=filtered`, Debezium 3.2 runs
+`ALTER PUBLICATION dbz_publication SET TABLE "public"."orders"` on every task start, which requires
+owning the table. `debezium` owns the publication but not the table, so the task fails with
+`must be owner of table orders`. The superuser `piperoom` would bypass that check, which is why the
+connector must be switched to the non-superuser `debezium` for the break to bite.
+
+**Real error text** (observed in `docker logs piperoom-dev-connect-1`, repeated on every retry):
+```
+org.apache.kafka.connect.errors.ConnectException: Unable to update filtered publication dbz_publication for "public"."orders"
+Caused by: org.postgresql.util.PSQLException: ERROR: must be owner of table orders
+```
+This is exactly the trace C7's `connect_status` recording shows.
+
+**Symptoms** (observed 2026-10-12). Note Debezium treats the failure as *retriable*, so Kafka
+Connect still reports `tasks 0=RUNNING` — but the task crash-loops and streaming never starts:
+```
+connector   pg-orders-connector: RUNNING, tasks 0=RUNNING   ← crash-looping; the error is in the connect log
+slot        debezium_orders active=false retained=6906 kB   ← slot INACTIVE (never starts streaming)
+consumer    order-sync: state Stable, members 1, total lag 0
+warehouse   analytics.orders: stale                          ← no new records flow
+```
+
+**Fix (`devctl fix connector-auth`):** give ownership back and restart the task:
+`ALTER TABLE public.orders OWNER TO piperoom`, `ALTER PUBLICATION dbz_publication OWNER TO piperoom`,
+re-register the connector with `database.user=piperoom`, restart task 0. The slot goes back
+`active=true` and the next insert reaches the warehouse (verified: 103 → 104 rows, stale 9 s).

@@ -28,10 +28,17 @@ func pipelineMapTool(d Deps) tools.Tool {
 			if input.PipelineID == "" {
 				return tools.Result{}, fmt.Errorf("%w: pipeline_id is required", tools.ErrBadInput)
 			}
+			sc, err := d.scope(ctx)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			if err := sc.CheckPipelineID(input.PipelineID); err != nil {
+				return tools.Result{}, err
+			}
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
-			g, err := d.Builder.Build(ctx, input.PipelineID)
+			g, err := d.Builder.Build(ctx, sc.PipelineID(input.PipelineID))
 			if err != nil {
 				return tools.Result{}, wrapErr("pipeline_map", err)
 			}
@@ -68,10 +75,20 @@ func traceRecordTool(d Deps) tools.Tool {
 			if input.Key == "" {
 				return tools.Result{}, fmt.Errorf("%w: key is required", tools.ErrBadInput)
 			}
+			sc, err := d.scope(ctx)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			if err := sc.CheckPipelineID(input.PipelineID); err != nil {
+				return tools.Result{}, err
+			}
+			if err := sc.CheckSourceTable(input.Table); err != nil {
+				return tools.Result{}, err
+			}
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
-			stages, err := d.Builder.Trace(ctx, input.PipelineID, input.Table, input.Key)
+			stages, err := d.Builder.Trace(ctx, sc.PipelineID(input.PipelineID), input.Table, input.Key)
 			if err != nil {
 				return tools.Result{}, wrapErr("trace_record", err)
 			}

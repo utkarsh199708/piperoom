@@ -2,10 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/hamba/avro/v2"
 )
 
 type scenario struct {
@@ -18,6 +24,9 @@ var scenarios = map[string]scenario{
 	"connector-down":   {breakConnectorDown, fixConnectorDown},
 	"consumer-stuck":   {breakConsumerStuck, fixConsumerStuck},
 	"long-transaction": {breakLongTransaction, fixLongTransaction},
+	"slot-inactive":    {breakSlotInactive, fixSlotInactive},
+	"consumer-lag":     {breakConsumerLag, fixConsumerLag},
+	"connector-auth":   {breakConnectorAuth, fixConnectorAuth},
 }
 
 // schema-change: a migration changes orders.amount from integer to
@@ -45,38 +54,162 @@ func breakSchemaChange(ctx context.Context, s *stack) error {
 
 // The fix: allow the new schema version, restart the task, then restore the
 // compatibility rule so the next breaking change is caught again.
+//
+// The fix is idempotent. The break may still be active, half-fixed (compatibility
+// NONE, schema not registered yet) or fully fixed by someone else. Every case
+// ends with task 0 RUNNING and compatibility BACKWARD.
 func fixSchemaChange(ctx context.Context, s *stack) error {
-	if err := s.setCompatibility(ctx, valueSubject, "NONE"); err != nil {
-		return err
-	}
-	// Count the registered versions before restarting, so we can tell when the
-	// task has registered the new one.
-	before, err := s.schemaVersions(ctx, valueSubject)
+	// "New schema already registered" is decided from the latest value version,
+	// not from a version count. A count taken before a restart cannot tell a new
+	// version from an old one, and on an already fixed stack no new version comes,
+	// so waiting for one would time out. The schema from before the migration has
+	// amount as Avro int, so amount as bytes/decimal in the latest version means
+	// the new schema is in the registry.
+	registered, err := s.latestAmountIsDecimal(ctx, valueSubject)
 	if err != nil {
 		return err
 	}
-	if err := s.restartTask(ctx, 0); err != nil {
-		return err
+	var before []int
+	if registered {
+		s.log.Info("skipped: new schema version already registered, no wait for a new version")
+	} else {
+		if err := s.setCompatibility(ctx, valueSubject, "NONE"); err != nil {
+			return err
+		}
+		// Count the registered versions before restarting, so we can tell when the
+		// task has registered the new one.
+		if before, err = s.schemaVersions(ctx, valueSubject); err != nil {
+			return err
+		}
+	}
+	// Restart unless the schema is registered and task 0 is already RUNNING. A
+	// task that shows RUNNING can still fail again on the 409, so when the schema
+	// is not registered the restart always happens.
+	restart := true
+	if registered {
+		st, err := s.connectorStatus(ctx)
+		if err != nil {
+			return err
+		}
+		restart = len(st.Tasks) == 0 || st.Tasks[0].State != "RUNNING"
+		if !restart {
+			s.log.Info("skipped: task 0 already RUNNING, no restart")
+		}
+	}
+	if restart {
+		if err := s.restartTask(ctx, 0); err != nil {
+			return err
+		}
 	}
 	if err := s.waitConnector(ctx, "RUNNING", 60*time.Second); err != nil {
 		return err
 	}
 	// Wait until the new schema version is registered before restoring BACKWARD;
 	// otherwise the task fails again on the next record.
-	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
-		vs, err := s.schemaVersions(ctx, valueSubject)
-		if err != nil {
-			return false, nil
+	if !registered {
+		if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
+			vs, err := s.schemaVersions(ctx, valueSubject)
+			if err != nil {
+				return false, nil
+			}
+			return len(vs) > len(before), nil
+		}); err != nil {
+			return fmt.Errorf("devctl: new schema version was not registered: %w", err)
 		}
-		return len(vs) > len(before), nil
-	}); err != nil {
-		return fmt.Errorf("devctl: new schema version was not registered: %w", err)
 	}
 	if err := s.setCompatibility(ctx, valueSubject, "BACKWARD"); err != nil {
 		return err
 	}
 	s.log.Info("fixed: new schema registered, task 0 RUNNING, compatibility back to BACKWARD")
 	return nil
+}
+
+// latestAmountIsDecimal reports whether the latest value schema of subject has
+// orders.amount as Avro bytes with logicalType decimal, the shape Debezium
+// registers after the numeric(12,2) migration.
+func (s *stack) latestAmountIsDecimal(ctx context.Context, subject string) (bool, error) {
+	b, err := s.do(ctx, http.MethodGet, s.cfg.SchemaRegistryURL+"/subjects/"+url.PathEscape(subject)+"/versions/latest", nil, http.StatusOK)
+	if err != nil {
+		return false, err
+	}
+	var v struct {
+		Version int    `json:"version"`
+		Schema  string `json:"schema"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return false, fmt.Errorf("devctl: decode latest schema of %s: %w", subject, err)
+	}
+	ok, err := amountIsDecimal(v.Schema)
+	if err != nil {
+		return false, fmt.Errorf("devctl: latest schema of %s (version %d): %w", subject, v.Version, err)
+	}
+	return ok, nil
+}
+
+// amountIsDecimal reports whether the value schema's after record has amount as
+// Avro bytes with logicalType decimal. Debezium defines the row record once,
+// inside before, and refers to it by name from after, so the schema is parsed
+// with hamba/avro (which resolves those references) before the fields are read.
+func amountIsDecimal(schema string) (bool, error) {
+	// A fresh cache per call: hamba/avro's default cache is package-global, so a
+	// name defined by an earlier schema would resolve here without being defined.
+	root, err := avro.ParseWithCache(schema, "", &avro.SchemaCache{})
+	if err != nil {
+		return false, fmt.Errorf("parse value schema: %w", err)
+	}
+	env, ok := root.(*avro.RecordSchema)
+	if !ok {
+		return false, fmt.Errorf("value schema is %s, want a record", root.Type())
+	}
+	after, ok := fieldByName(env, "after")
+	if !ok {
+		return false, errors.New("value schema has no after field")
+	}
+	row, ok := rowRecord(after)
+	if !ok {
+		return false, errors.New("after field has no record branch")
+	}
+	amount, ok := fieldByName(row, "amount")
+	if !ok {
+		return false, errors.New("row record has no amount field")
+	}
+	return isDecimalBytes(amount), nil
+}
+
+// rowRecord returns the record a field type points to: the record itself, a
+// named reference to it, or the record inside a union such as ["null", Value].
+func rowRecord(t avro.Schema) (*avro.RecordSchema, bool) {
+	switch v := t.(type) {
+	case *avro.RecordSchema:
+		return v, true
+	case *avro.RefSchema:
+		rec, ok := v.Schema().(*avro.RecordSchema)
+		return rec, ok
+	case *avro.UnionSchema:
+		for _, m := range v.Types() {
+			if rec, ok := rowRecord(m); ok {
+				return rec, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// fieldByName returns the declared type of a field of rec.
+func fieldByName(rec *avro.RecordSchema, name string) (avro.Schema, bool) {
+	for _, f := range rec.Fields() {
+		if f.Name() == name {
+			return f.Type(), true
+		}
+	}
+	return nil, false
+}
+
+// isDecimalBytes reports whether an Avro type is bytes with logicalType decimal.
+// Debezium writes numeric columns this way (precise decimal mode).
+func isDecimalBytes(t avro.Schema) bool {
+	p, ok := t.(*avro.PrimitiveSchema)
+	return ok && p.Type() == avro.Bytes && p.Logical() != nil && p.Logical().Type() == avro.Decimal
 }
 
 // connector-down: the connector is paused, so the replication slot goes
@@ -174,5 +307,245 @@ func fixLongTransaction(ctx context.Context, s *stack) error {
 		return err
 	}
 	s.log.Info("fixed: terminated long transactions", "count", strings.TrimSpace(out))
+	return nil
+}
+
+// slot-inactive: the Debezium connector is stopped (Connect REST `stop`). A
+// stopped connector closes its replication connection — unlike the paused
+// connector of `connector-down`, which keeps the slot ACTIVE — so the slot
+// debezium_orders has no WAL sender: nothing confirms WAL and Postgres keeps
+// every segment written after restart_lsn.
+func breakSlotInactive(ctx context.Context, s *stack) error {
+	if _, err := s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/stop", nil, http.StatusNoContent, http.StatusAccepted, http.StatusOK); err != nil {
+		return err
+	}
+	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
+		st, err := s.connectorStatus(ctx)
+		if err != nil {
+			return false, nil
+		}
+		return st.Connector.State == "STOPPED", nil
+	}); err != nil {
+		return fmt.Errorf("devctl: connector did not stop: %w", err)
+	}
+	// The WAL sender closes shortly after the task stops.
+	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
+		active, err := s.slotActive(ctx)
+		if err != nil {
+			return false, nil
+		}
+		return !active, nil
+	}); err != nil {
+		return fmt.Errorf("devctl: slot %s did not go inactive: %w", slotName, err)
+	}
+	// Prove that WAL is really retained: sample the slot's retained bytes,
+	// write one batch of orders, and check that the number grew (nobody
+	// confirms the new WAL anymore).
+	before, err := s.retainedWALBytes(ctx)
+	if err != nil {
+		return err
+	}
+	if _, err := s.psql(ctx, "orders", "INSERT INTO orders (customer_id, amount) SELECT g, 100 + g FROM generate_series(1, 100) g"); err != nil {
+		return err
+	}
+	var after int64
+	if err := s.waitFor(ctx, 30*time.Second, func() (bool, error) {
+		n, err := s.retainedWALBytes(ctx)
+		if err != nil {
+			return false, nil
+		}
+		after = n
+		return n > before, nil
+	}); err != nil {
+		return fmt.Errorf("devctl: retained WAL did not grow (stayed at %d bytes): %w", before, err)
+	}
+	s.log.Info("broken: connector STOPPED, slot "+slotName+" inactive — run `devctl load` to grow retained WAL further", "retained_before_bytes", before, "retained_after_bytes", after)
+	return nil
+}
+
+// The fix: resume the stopped connector. It keeps streaming from the slot
+// (offsets are intact, no re-snapshot), the slot becomes active again, and
+// after it has replayed the retained WAL the consumer lag drains back to 0.
+func fixSlotInactive(ctx context.Context, s *stack) error {
+	if _, err := s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/resume", nil, http.StatusAccepted, http.StatusOK, http.StatusNoContent); err != nil {
+		return err
+	}
+	if err := s.waitConnector(ctx, "RUNNING", 60*time.Second); err != nil {
+		return err
+	}
+	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
+		active, err := s.slotActive(ctx)
+		if err != nil {
+			return false, nil
+		}
+		return active, nil
+	}); err != nil {
+		return fmt.Errorf("devctl: slot %s did not become active: %w", slotName, err)
+	}
+	if err := s.waitLag(ctx, "order-sync", 90*time.Second); err != nil {
+		return err
+	}
+	s.log.Info("fixed: slot " + slotName + " active, connector RUNNING, order-sync lag 0")
+	return nil
+}
+
+// consumer-lag: devconsumer (group order-sync) is stopped while `devctl load`
+// keeps writing orders. Nothing upstream is broken — the connector produces —
+// but nothing consumes: group lag grows and the warehouse stays stale.
+func breakConsumerLag(ctx context.Context, s *stack) error {
+	if err := s.compose(ctx, nil, "stop", "devconsumer"); err != nil {
+		return err
+	}
+	// Wait until the member left the group, so no more offsets are committed
+	// and every new record shows up as lag.
+	if err := s.waitGroup(ctx, "order-sync", "Empty", 0, 60*time.Second); err != nil {
+		return fmt.Errorf("devctl: devconsumer did not leave the group: %w", err)
+	}
+	// Prove that lag grows: write one batch of orders and wait for it to show
+	// up in the group's total lag.
+	if _, err := s.psql(ctx, "orders", "INSERT INTO orders (customer_id, amount) SELECT g, 400 + g FROM generate_series(1, 50) g"); err != nil {
+		return err
+	}
+	var lag int64 = -1
+	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
+		l, err := s.describeGroup(ctx, "order-sync")
+		if err != nil {
+			return false, nil
+		}
+		lag = l.Lag.Total()
+		return lag > 0, nil
+	}); err != nil {
+		return fmt.Errorf("devctl: order-sync lag did not grow after stopping devconsumer: %w", err)
+	}
+	s.log.Info("broken: devconsumer stopped, order-sync lag growing — run `devctl load` to grow it further", "total_lag", lag)
+	return nil
+}
+
+// The fix: start devconsumer (order-sync) again; it rejoins the group, drains
+// the backlog, and the warehouse catches up. `compose start` only starts the
+// stopped container — plain `up -d` would recreate it (and any drifted
+// dependency, e.g. Postgres) whenever it is not byte-identical to the compose
+// file, which kills the running pipeline and any `devctl load`.
+func fixConsumerLag(ctx context.Context, s *stack) error {
+	if err := s.compose(ctx, nil, "start", "devconsumer"); err != nil {
+		return err
+	}
+	if err := s.waitGroup(ctx, "order-sync", "Stable", 1, 60*time.Second); err != nil {
+		return fmt.Errorf("devctl: devconsumer did not rejoin the group: %w", err)
+	}
+	if err := s.waitLag(ctx, "order-sync", 90*time.Second); err != nil {
+		return err
+	}
+	s.log.Info("fixed: devconsumer running, order-sync lag 0, warehouse catching up")
+	return nil
+}
+
+// connector-auth: a DBA moved ownership of public.orders to orders_owner and
+// the connector now authenticates as the least-privilege role `debezium`
+// (non-superuser). With publication.autocreate.mode=filtered Debezium runs
+// `ALTER PUBLICATION dbz_publication SET TABLE "public"."orders"` on every task
+// start, which requires owning the table. debezium owns the publication but not
+// the table, so task 0 fails with "must be owner of table orders"; streaming
+// never starts, so the slot goes inactive and the warehouse goes stale.
+func breakConnectorAuth(ctx context.Context, s *stack) error {
+	if _, err := s.psql(ctx, "orders",
+		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'debezium') THEN EXECUTE 'CREATE ROLE debezium LOGIN REPLICATION PASSWORD ''piperoom-dev'''; END IF; END $$",
+		"DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'orders_owner') THEN EXECUTE 'CREATE ROLE orders_owner LOGIN'; END IF; END $$",
+		"GRANT CONNECT ON DATABASE orders TO debezium",
+		"GRANT USAGE ON SCHEMA public TO debezium",
+		"GRANT SELECT ON public.orders TO debezium",
+		"ALTER PUBLICATION dbz_publication OWNER TO debezium",
+		"ALTER TABLE public.orders OWNER TO orders_owner"); err != nil {
+		return err
+	}
+	if err := s.registerConnectorUser(ctx, "debezium", "piperoom-dev"); err != nil {
+		return err
+	}
+	if err := s.restartTask(ctx, 0); err != nil {
+		return err
+	}
+	// The task reports RUNNING but crash-loops on the publication update; the
+	// observable symptom is the slot going inactive (streaming never starts).
+	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
+		active, err := s.slotActive(ctx)
+		if err != nil {
+			return false, nil
+		}
+		return !active, nil
+	}); err != nil {
+		return fmt.Errorf("devctl: slot %s did not go inactive after the permission break: %w", slotName, err)
+	}
+	s.log.Info("broken: connector user debezium cannot update dbz_publication — task 0 fails with \"must be owner of table orders\", slot inactive")
+	return nil
+}
+
+// The fix: give ownership back (orders and the publication return to piperoom),
+// point the connector back at piperoom, and restart the task.
+func fixConnectorAuth(ctx context.Context, s *stack) error {
+	if _, err := s.psql(ctx, "orders",
+		"ALTER TABLE public.orders OWNER TO piperoom",
+		"ALTER PUBLICATION dbz_publication OWNER TO piperoom"); err != nil {
+		return err
+	}
+	if err := s.registerConnector(ctx); err != nil {
+		return err
+	}
+	if err := s.restartTask(ctx, 0); err != nil {
+		return err
+	}
+	if err := s.waitConnector(ctx, "RUNNING", 60*time.Second); err != nil {
+		return err
+	}
+	if err := s.waitFor(ctx, 60*time.Second, func() (bool, error) {
+		active, err := s.slotActive(ctx)
+		if err != nil {
+			return false, nil
+		}
+		return active, nil
+	}); err != nil {
+		return fmt.Errorf("devctl: slot %s did not become active after the fix: %w", slotName, err)
+	}
+	s.log.Info("fixed: orders and dbz_publication owner restored to piperoom, connector re-registered, task 0 RUNNING, slot active")
+	return nil
+}
+
+// slotName is the Debezium replication slot on the source Postgres.
+const slotName = "debezium_orders"
+
+// slotActive reports whether the replication slot has an active WAL sender.
+func (s *stack) slotActive(ctx context.Context) (bool, error) {
+	out, err := s.psql(ctx, "orders", "SELECT active FROM pg_replication_slots WHERE slot_name = '"+slotName+"'")
+	if err != nil {
+		return false, err
+	}
+	return out == "t", nil
+}
+
+// retainedWALBytes is how much WAL the slot retains, from restart_lsn to the
+// current write position.
+func (s *stack) retainedWALBytes(ctx context.Context) (int64, error) {
+	out, err := s.psql(ctx, "orders", "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint FROM pg_replication_slots WHERE slot_name = '"+slotName+"'")
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("devctl: parse retained WAL %q: %w", out, err)
+	}
+	return n, nil
+}
+
+// waitLag waits until the consumer group is stable with total lag 0, i.e. the
+// backlog is drained.
+func (s *stack) waitLag(ctx context.Context, group string, timeout time.Duration) error {
+	if err := s.waitFor(ctx, timeout, func() (bool, error) {
+		l, err := s.describeGroup(ctx, group)
+		if err != nil {
+			return false, nil
+		}
+		return l.State == "Stable" && l.Lag.Total() == 0, nil
+	}); err != nil {
+		return fmt.Errorf("devctl: %s lag did not drain to 0: %w", group, err)
+	}
 	return nil
 }

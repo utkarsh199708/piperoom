@@ -1,0 +1,5 @@
+# Throwaway try-out: passwordless dev login, no Ingress, reached with
+# kubectl port-forward. Used by helm lint / helm template in CI and in the README.
+allowDevMode: true
+env:
+  PIPEROOM_AUTH_MODE: dev

@@ -54,7 +54,8 @@ func (d *DB) Close() {
 	}
 }
 
-// ReplicationSlots lists logical replication slots with the retained WAL size.
+// ReplicationSlots lists logical replication slots with the retained WAL size
+// and the safe_wal_size left before the slot is invalidated (PG13+, like wal_status).
 func (d *DB) ReplicationSlots(ctx context.Context) ([]clients.ReplicationSlot, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
@@ -64,7 +65,8 @@ func (d *DB) ReplicationSlots(ctx context.Context) ([]clients.ReplicationSlot, e
 		       COALESCE(restart_lsn::text, ''),
 		       COALESCE(confirmed_flush_lsn::text, ''),
 		       COALESCE(wal_status, ''),
-		       COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint, 0)
+		       COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint, 0),
+		       safe_wal_size
 		FROM pg_replication_slots
 		ORDER BY slot_name`)
 	if err != nil {
@@ -75,7 +77,7 @@ func (d *DB) ReplicationSlots(ctx context.Context) ([]clients.ReplicationSlot, e
 	var out []clients.ReplicationSlot
 	for rows.Next() {
 		var s clients.ReplicationSlot
-		if err := rows.Scan(&s.Name, &s.Plugin, &s.Active, &s.RestartLSN, &s.ConfirmedFlushLSN, &s.WALStatus, &s.RetainedWALBytes); err != nil {
+		if err := rows.Scan(&s.Name, &s.Plugin, &s.Active, &s.RestartLSN, &s.ConfirmedFlushLSN, &s.WALStatus, &s.RetainedWALBytes, &s.SafeWALBytes); err != nil {
 			return nil, fmt.Errorf("postgres: scan replication slot: %w", err)
 		}
 		out = append(out, s)
@@ -153,7 +155,11 @@ func (d *DB) recentDDL(ctx context.Context, since time.Time, table string, limit
 }
 
 // LongTransactions lists transactions open longer than olderThan, excluding
-// this backend.
+// this backend. It never returns query text: pg_stat_activity.query often holds
+// literal row values, so only the statement verb (first keyword) is selected.
+// Read-only transactions are listed too (they block DDL and VACUUM); HasXID
+// (backend_xid IS NOT NULL) tells writers apart, because only a writer holds
+// the WAL horizon for a replication slot. Callers that care filter on HasXID.
 func (d *DB) LongTransactions(ctx context.Context, olderThan time.Duration) ([]clients.Transaction, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
@@ -161,9 +167,12 @@ func (d *DB) LongTransactions(ctx context.Context, olderThan time.Duration) ([]c
 	rows, err := d.pool.Query(ctx, `
 		SELECT pid,
 		       COALESCE(usename, ''),
+		       COALESCE(application_name, ''),
 		       COALESCE(state, ''),
 		       EXTRACT(EPOCH FROM (now() - xact_start))::bigint,
-		       COALESCE(left(query, 500), '')
+		       COALESCE(wait_event_type || ':' || wait_event, ''),
+		       COALESCE(upper(substring(ltrim(query, E' \t\r\n') from '^[A-Za-z]+')), ''),
+		       backend_xid IS NOT NULL
 		FROM pg_stat_activity
 		WHERE xact_start IS NOT NULL
 		  AND xact_start < now() - make_interval(secs => $1)
@@ -178,7 +187,7 @@ func (d *DB) LongTransactions(ctx context.Context, olderThan time.Duration) ([]c
 	for rows.Next() {
 		var t clients.Transaction
 		var ageSec int64
-		if err := rows.Scan(&t.PID, &t.Username, &t.State, &ageSec, &t.Query); err != nil {
+		if err := rows.Scan(&t.PID, &t.Username, &t.ApplicationName, &t.State, &ageSec, &t.WaitEvent, &t.Query, &t.HasXID); err != nil {
 			return nil, fmt.Errorf("postgres: scan transaction: %w", err)
 		}
 		t.Age = time.Duration(ageSec) * time.Second

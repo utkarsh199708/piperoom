@@ -37,3 +37,16 @@ export function ageLabel(iso: string, now = Date.now()): string {
   if (diff < DAY) return `${Math.floor(diff / HOUR)}h`
   return `${Math.floor(diff / DAY)}d`
 }
+
+// "updated Ns ago" label for the pipeline panel. Seconds precision under a
+// minute, then minutes/hours. Empty when there is no last-update time yet.
+export function updatedAgoLabel(updatedAt: number | null, now = Date.now()): string {
+  if (updatedAt === null) return ''
+  const diff = Math.max(0, now - updatedAt)
+  const s = Math.floor(diff / 1000)
+  if (s < 5) return 'updated just now'
+  if (s < 60) return `updated ${s}s ago`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `updated ${m}m ago`
+  return `updated ${Math.floor(m / 60)}h ago`
+}

@@ -1,0 +1,10 @@
+{
+  "cpus": 4,
+  "gomaxprocs": 4,
+  "cpu_model": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+  "mem_total": "16479424 kB",
+  "kernel": "6.18.44-fc-v114",
+  "go_version": "go1.27.0",
+  "postgres": "16.15 (Debian 16.15-1.pgdg13+2)",
+  "note": "shared box: other agents' builds and tests ran at the same time; numbers are a floor, not a target"
+}

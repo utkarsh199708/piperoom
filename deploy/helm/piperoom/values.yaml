@@ -1,0 +1,310 @@
+# Piperoom Helm chart values. Variable names match internal/config/config.go and
+# deploy/pilot.env.example. An empty string means "use the server default (or off)".
+
+# Replicas. Keep 1: the agent runner, the watcher, the retention sweep and the
+# action executor run inside every server process and nothing elects a leader
+# (no lease or advisory lock in the code), so a second replica would run the
+# same investigations, watcher checks and approved fixes twice. The event log
+# fan-out (LISTEN/NOTIFY) and the HTTP/WebSocket layer would cope with more,
+# but the background workers do not. See deploy/helm/README.md.
+replicaCount: 1
+
+# The chart refuses env.PIPEROOM_AUTH_MODE=dev (passwordless login) unless this
+# is true, and never together with an Ingress. For a throwaway try-out only;
+# reach the pod with kubectl port-forward.
+allowDevMode: false
+
+image:
+  repository: piperoom      # build from the repo Dockerfile and push it to your registry
+  tag: pilot                # prefer an immutable tag; the digest below wins
+  digest: ""                # optional sha256:... (overrides tag)
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  # For Bedrock on EKS (IRSA): eks.amazonaws.com/role-arn: arn:aws:iam::...
+  annotations: {}
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Shutdown stops the watcher (up to 15 s) then the HTTP server (up to 10 s).
+terminationGracePeriodSeconds: 30
+
+service:
+  type: ClusterIP
+  port: 8090
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""             # e.g. nginx
+  # The defaults suit ingress-nginx and keep WebSockets alive (long timeouts;
+  # ingress-nginx upgrades the connection by itself). For other controllers
+  # replace them.
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  host: piperoom.example.com
+  path: /
+  pathType: Prefix
+  # Secret holding the TLS certificate. Empty = no tls block (TLS ends in front
+  # of the controller). oidc mode needs an https PIPEROOM_PUBLIC_URL.
+  tlsSecretName: ""
+
+# Plain (non-secret) environment variables. "" values are not rendered (the
+# server default applies), except PIPEROOM_OIDC_GROUPS_CLAIM, where an explicit
+# "" turns group rights off.
+env:
+  # --- login (docs/design/auth.md). oidc is the default in this chart. ---
+  PIPEROOM_AUTH_MODE: oidc            # dev | oidc. dev has no password: never on a shared cluster.
+  # Public https URL of the UI; the OIDC redirect URI is this plus /auth/callback.
+  # If empty and ingress.enabled with tlsSecretName, the chart uses https://<ingress.host>.
+  # REQUIRED in oidc mode.
+  PIPEROOM_PUBLIC_URL: ""
+  PIPEROOM_OIDC_ISSUER: ""
+  PIPEROOM_OIDC_CLIENT_ID: ""
+  PIPEROOM_OIDC_PUBLIC_CLIENT: ""     # "1" = PKCE only, no client secret
+  PIPEROOM_OIDC_SCOPES: ""            # default: openid email profile
+  PIPEROOM_OIDC_GROUPS_CLAIM: groups
+  PIPEROOM_AUTH_VIEWER_GROUPS: ""
+  PIPEROOM_SESSION_IDLE: ""           # default 8h
+  PIPEROOM_SESSION_MAX: ""            # default 12h
+  PIPEROOM_SOLO_USER: ""
+  # Extra Host values. The public URL host is allowed already; if it differs from
+  # ingress.host, list ingress.host here (the chart fails otherwise).
+  PIPEROOM_ALLOWED_HOSTS: ""
+  # With an Ingress, set this to the ingress controller pod CIDR. Otherwise the
+  # server sees the controller's address for everyone and all users share one
+  # login rate-limit bucket (300 a minute).
+  PIPEROOM_TRUSTED_PROXIES: ""
+
+  # --- the pipeline (non-secret parts; the DB URLs with passwords are secrets) ---
+  KAFKA_BROKERS: ""
+  CONNECT_URL: ""
+  # Your registry URL, or `off` when the pipelines use none. The chart skips empty
+  # values, so "" is unset and the server falls back to the dev default
+  # http://localhost:8081 (unreachable in a pod: the map shows the registry as unknown).
+  SCHEMA_REGISTRY_URL: ""
+  WAREHOUSE_KIND: postgres            # postgres | snowflake
+
+  # --- agent and model ---
+  PIPEROOM_MODEL_PROVIDER: ""         # anthropic | bedrock | vertex (empty = anthropic)
+  PIPEROOM_MODEL: ""                  # default claude-opus-5-5
+  PIPEROOM_EFFORT: ""                 # default high
+  PIPEROOM_MAX_AGENTS: ""             # default 3
+  PIPEROOM_TRIAGE_MODEL: ""
+  PIPEROOM_ROOM_TOKEN_BUDGET: ""      # default 2000000, 0 = no cap
+  ANTHROPIC_WORKSPACE_ID: ""          # only for user keys (sk-ant-usr-...)
+  AWS_REGION: ""                      # bedrock
+  # A named profile only works with a mounted config file (extraVolumes). On EKS
+  # prefer IRSA (serviceAccount.annotations) and leave this empty.
+  AWS_PROFILE: ""
+  VERTEX_PROJECT_ID: ""               # vertex
+  VERTEX_REGION: ""
+  GOOGLE_APPLICATION_CREDENTIALS: ""  # path in the container, e.g. a mounted key file
+
+  # --- watcher and retention ---
+  PIPEROOM_WATCH_MODE: ""             # off | log | rooms (default log)
+  PIPEROOM_WATCH_INTERVAL: ""         # default 60s, minimum 15s
+  PIPEROOM_WATCH_CHECK_TIMEOUT: ""    # default 10s, maximum 10s
+  PIPEROOM_WATCH_COOLDOWN: ""         # default 60m
+  PIPEROOM_RETENTION_DAYS: ""         # empty/0 = keep everything
+
+  # --- shadow mode (docs/design/shadow.md; which pipelines are shadow is set in owners.yaml) ---
+  PIPEROOM_SHADOW_GRACE: ""           # Go duration a run may continue after close; default 0 = cancel at close
+  PIPEROOM_SHADOW_TOKEN_BUDGET: ""    # tokens per shadow room; default 500000, 0 = no cap
+  PIPEROOM_SHADOW_MAX_TURNS: ""       # model turns per shadow run; default 20
+
+  # --- Kafka security (empty protocol = PLAINTEXT) ---
+  KAFKA_SECURITY_PROTOCOL: ""
+  KAFKA_SASL_MECHANISM: ""
+  KAFKA_SASL_USERNAME: ""
+  KAFKA_TLS_CA_FILE: ""               # paths inside the container, see extraVolumes
+  KAFKA_TLS_CERT_FILE: ""
+  KAFKA_TLS_KEY_FILE: ""
+  KAFKA_TLS_SERVER_NAME: ""
+
+  # --- Schema Registry and Connect login ---
+  SCHEMA_REGISTRY_USERNAME: ""
+  SCHEMA_REGISTRY_TLS_CA_FILE: ""
+  SCHEMA_REGISTRY_TLS_CERT_FILE: ""
+  SCHEMA_REGISTRY_TLS_KEY_FILE: ""
+  CONNECT_USERNAME: ""
+  CONNECT_TLS_CA_FILE: ""
+  CONNECT_TLS_CERT_FILE: ""
+  CONNECT_TLS_KEY_FILE: ""
+
+  # --- Slack mirror and alert routing (their secrets are below) ---
+  SLACK_CHANNEL_ID: ""
+  PAGERDUTY_SERVICES: ""
+  DEFAULT_ALERT_PIPELINE: ""
+
+  # --- outbound proxy (a proxy URL with a password is a secret: use secrets.refs) ---
+  HTTPS_PROXY: ""
+  HTTP_PROXY: ""
+  NO_PROXY: ""
+
+# Secrets are never put in values. They are read from Kubernetes Secrets you
+# create yourself (or sync with External Secrets / Sealed Secrets).
+secrets:
+  # One Secret whose keys are the environment variable names. You create it.
+  existingSecret: piperoom-secrets
+  # Variables the pod needs; a missing key keeps the pod from starting.
+  # PIPEROOM_DB_URL is the external room database; SOURCE_DB_URL and
+  # WAREHOUSE_DB_URL carry the read-only role passwords.
+  requiredKeys:
+    - PIPEROOM_DB_URL
+    - SOURCE_DB_URL
+    - WAREHOUSE_DB_URL
+  # Variables used only when their key exists in the Secret.
+  optionalKeys:
+    - ANTHROPIC_API_KEY
+    - PIPEROOM_OIDC_CLIENT_SECRET
+    - KAFKA_SASL_PASSWORD
+    - SCHEMA_REGISTRY_PASSWORD
+    - CONNECT_PASSWORD
+    - SLACK_BOT_TOKEN
+    - ALERTMANAGER_TOKEN
+    - GRAFANA_ALERT_SECRET
+    - PAGERDUTY_ALERT_SECRET
+    - DATADOG_ALERT_TOKEN
+    - GENERIC_ALERT_SECRET
+    - AWS_BEARER_TOKEN_BEDROCK
+    - AWS_ACCESS_KEY_ID
+    - AWS_SECRET_ACCESS_KEY
+    - AWS_SESSION_TOKEN
+  # Per-variable references to other Secrets, for example
+  #   refs:
+  #     HTTPS_PROXY: {name: proxy-secret, key: url}
+  # A variable listed here is skipped in requiredKeys/optionalKeys.
+  refs: {}
+
+# Who may do what. Start from deploy/config/*.example.yaml. The server refuses
+# to start if the two files disagree.
+files:
+  # Use a ConfigMap you manage (keys owners.yaml and users.yaml)...
+  existingConfigMap: ""
+  # ...or give the content here and the chart creates one.
+  owners: ""
+  users: ""
+  mountPath: /config        # OWNERS_FILE and USERS_FILE point into it
+
+# Extra volumes, for example Kafka/Connect TLS files from a Secret at /certs.
+extraVolumes: []
+#  - name: certs
+#    secret: {secretName: piperoom-certs}
+extraVolumeMounts: []
+#  - name: certs
+#    mountPath: /certs
+#    readOnly: true
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+# GET /healthz and /readyz skip the server's Host allow-list, so kubelet probes
+# work with the pod IP as Host. The chart's Host: localhost header is optional.
+probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 10
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    path: /readyz            # also pings the room database
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+networkPolicy:
+  enabled: false
+  # Who may reach the pod on 8090. Default: pods in the ingress-nginx namespace.
+  # Replace with your controller.
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+  # DNS (kube-dns) on port 53.
+  dns:
+    to:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+  # Notes: in-cluster alert senders (Alertmanager, Grafana) call the Service, so
+  # add their namespace to ingressFrom. DNS assumes k8s-app=kube-dns; with
+  # NodeLocal DNSCache add the node-local address through extraEgress. The https
+  # group allows 443 to ANYWHERE, which is a data-exfiltration path: narrow "to"
+  # to your IdP and model endpoints. An HTTPS_PROXY on another port needs an
+  # extraEgress rule for the proxy.
+  # Egress groups. "to" uses NetworkPolicy peer syntax (ipBlock, namespaceSelector,
+  # podSelector). An EMPTY "to" opens the ports to any destination, because the
+  # chart cannot know your addresses: narrow it to your CIDRs for production.
+  # Set a group to null to drop it.
+  egress:
+    postgres:             # room DB, source DB, warehouse
+      to: []
+      ports: [5432]
+    kafka:
+      to: []
+      # 9092 PLAINTEXT (Apache Kafka, MSK plaintext)
+      # 9093 TLS (Apache Kafka SSL listener, Strimzi)
+      # 9094 TLS (MSK TLS listener)
+      # 9096 SASL/SCRAM over TLS (MSK)
+      # 9098 SASL/IAM over TLS (MSK)
+      # Remove the ports your brokers do not use.
+      ports: [9092, 9093, 9094, 9096, 9098]
+    connect:
+      to: []
+      ports: [8083]
+    schemaRegistry:
+      to: []
+      ports: [8081]
+    https:                # IdP (OIDC issuer), model API, Slack, https Registry/Connect
+      to: []
+      ports: [443]
+    # Cloud metadata server, opt-in (null = closed). Needed when the pod gets
+    # its cloud credentials from the metadata server: instance roles on the
+    # node (EC2 / EKS without IRSA) or GKE Workload Identity. Not needed for
+    # IRSA (that uses STS over 443) or for static keys from the Secret. Any
+    # extra key here is one more group, so you can add both under different names.
+    #   AWS / most clouds, instance metadata (IMDS):
+    #     metadata:
+    #       to: [{ipBlock: {cidr: 169.254.169.254/32}}]
+    #       ports: [80]
+    #   GKE Workload Identity (GKE metadata server on the node):
+    #     metadataGke:
+    #       to: [{ipBlock: {cidr: 169.254.169.252/32}}]
+    #       ports: [988]
+    metadata: null
+  # Extra raw egress rules appended as-is.
+  extraEgress: []

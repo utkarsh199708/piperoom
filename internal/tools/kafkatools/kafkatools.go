@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 )
 
@@ -18,9 +20,27 @@ type Deps struct {
 	Connect  clients.ConnectClient
 	Registry clients.SchemaRegistryClient
 	Kafka    clients.KafkaAdmin
+	// Owners resolves the room's pipeline id (tools.WithPipelineID) to its
+	// connectors, topics, groups and tables, and pipeline_id + source table to
+	// the pipeline's topic ("<topic_prefix>.<source_table>") for
+	// kafka_topic_config. The wiring must pass it; every tool reports a clear
+	// error when it is missing and the context carries only a pipeline id.
+	Owners *owners.Owners
+	// DLQStats is optional: how many records the watcher saw arrive in a DLQ
+	// topic within its window. It is set only when the watcher runs in this
+	// process (cmd/server); nil in cmd/investigate and the evals, where
+	// dlq_peek then says the arrival rate is unknown.
+	DLQStats func(topic string) (newInWindow int64, window time.Duration, ok bool)
 }
 
 const timeout = 10 * time.Second
+
+// scope resolves the room's pipeline scope for one tool call (finding F11).
+// A tool calls it first, and checks every name it got against the result
+// before it uses a client.
+func (d Deps) scope(ctx context.Context) (tools.Scope, error) {
+	return tools.ScopeFor(ctx, d.Owners)
+}
 
 // Register adds every kafkatools tool to reg.
 func Register(reg *tools.Registry, d Deps) error {
@@ -35,6 +55,8 @@ func Register(reg *tools.Registry, d Deps) error {
 		&listGroups{d: d},
 		&consumerLag{d: d},
 		&findByKey{d: d},
+		&topicConfig{d: d},
+		&dlqPeek{d: d},
 	} {
 		if err := reg.Register(t); err != nil {
 			return err
@@ -56,6 +78,17 @@ func parse[T any](raw json.RawMessage) (T, error) {
 		return v, fmt.Errorf("%w: %v", tools.ErrBadInput, err)
 	}
 	return v, nil
+}
+
+// appendLine adds line to sb on a line of its own; an empty line adds nothing.
+func appendLine(sb *strings.Builder, line string) {
+	if line == "" {
+		return
+	}
+	if sb.Len() > 0 {
+		sb.WriteString("\n")
+	}
+	sb.WriteString(line)
 }
 
 // res builds a Result with the summary truncated.

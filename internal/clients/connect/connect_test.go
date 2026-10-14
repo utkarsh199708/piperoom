@@ -129,6 +129,82 @@ func TestRestartConnectorQuery(t *testing.T) {
 	}
 }
 
+func TestResumePutsRightPath(t *testing.T) {
+	var gotMethod, gotPath string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.WriteHeader(http.StatusAccepted)
+	})
+	if err := c.Resume(context.Background(), "pg-orders-connector"); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if gotMethod != http.MethodPut || gotPath != "/connectors/pg-orders-connector/resume" {
+		t.Fatalf("method/path %s %s", gotMethod, gotPath)
+	}
+}
+
+func TestResumeStatuses(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr bool
+		wantNF  bool
+		wantSub string
+	}{
+		{name: "202 accepted", status: http.StatusAccepted},
+		{name: "204 no content", status: http.StatusNoContent},
+		{name: "404 unknown connector", status: http.StatusNotFound, wantErr: true, wantNF: true},
+		{name: "409 conflict", status: http.StatusConflict, body: "rebalance in progress", wantErr: true, wantSub: "status 409"},
+		{name: "500 worker error", status: http.StatusInternalServerError, body: "boom", wantErr: true, wantSub: "status 500"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPut {
+					t.Errorf("method %s, want PUT", r.Method)
+				}
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.body)
+			})
+			err := c.Resume(context.Background(), "pg-orders-connector")
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("Resume: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("want error, got nil")
+			}
+			if tc.wantNF && !errors.Is(err, clients.ErrNotFound) {
+				t.Fatalf("want ErrNotFound, got %v", err)
+			}
+			if tc.wantSub != "" && !strings.Contains(err.Error(), tc.wantSub) {
+				t.Fatalf("error %q does not contain %q", err, tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestResumeDeadline(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	c := New(srv.URL, srv.Client())
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := c.Resume(ctx, "pg-orders-connector"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want context.DeadlineExceeded, got %v", err)
+	}
+}
+
 func TestNotFoundWrapsErrNotFound(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)

@@ -6,6 +6,7 @@ import type {
   AgentStatusPayload,
   HandoffSummary,
   HypothesisSummary,
+  Identity,
   ProposalStep,
   RoomSnapshot,
   TraceStage,
@@ -72,6 +73,17 @@ export interface SuggestionState {
   text: string
 }
 
+/** Who decided a layer, how they logged in, and the hash they decided on. */
+export interface DecisionState {
+  outcome: 'approved' | 'rejected'
+  by: Actor
+  identity?: Identity
+  params_hash?: string
+  reason?: string
+  /** When the decision was made (the event's time); absent on a decision built without an event. */
+  at?: string
+}
+
 export interface ProposalState {
   proposal_id: string
   title: string
@@ -80,6 +92,13 @@ export interface ProposalState {
   rollback: string
   required_layers: string[]
   approvals: Record<string, ApprovalValue>
+  /** Per layer, for the layers that have been decided. */
+  decisions: Record<string, DecisionState>
+  /**
+   * The params_hash the UI shows and sends back with approve and reject. Taken from
+   * proposal.created (or the snapshot for an older event); "" when there is none.
+   */
+  params_hash: string
   status: 'open' | 'approved' | 'rejected'
   executed: ActionExecutedPayload[]
 }
@@ -108,6 +127,12 @@ export interface HandoffState {
   status: 'pending' | 'accepted'
 }
 
+/** The alert that opened the room, from room.created's `alert` webhook body. */
+export interface AlertInfo {
+  /** Best-effort source inferred from the raw body shape; null when unknown. */
+  source: string | null
+}
+
 export interface ActivityEntry {
   seq: number
   at: string
@@ -126,6 +151,8 @@ export interface RoomState {
   resolution?: string
   last_seq: number
   driver: DriverInfo | null
+  /** Set when room.created carried an alert webhook body (alert-opened room). */
+  alert: AlertInfo | null
   agent_status: AgentStatusState
   hypothesis: HypothesisState | null
   steps: StepState[]
@@ -133,6 +160,12 @@ export interface RoomState {
   comments: CommentState[]
   suggestions: SuggestionState[]
   proposals: ProposalState[]
+  /**
+   * proposal_id -> params_hash from the snapshot's open_proposals. The server computes
+   * it for proposals whose proposal.created event predates the hash, so the reducer
+   * falls back to it when the event has none.
+   */
+  snapshot_hashes: Record<string, string>
   members: MemberState[]
   control_requests: ControlRequestState[]
   trace: TraceState | null
@@ -150,6 +183,7 @@ export function emptyRoomState(id: string): RoomState {
     opened_at: '',
     last_seq: 0,
     driver: null,
+    alert: null,
     agent_status: { state: 'idle' },
     hypothesis: null,
     steps: [],
@@ -157,6 +191,7 @@ export function emptyRoomState(id: string): RoomState {
     comments: [],
     suggestions: [],
     proposals: [],
+    snapshot_hashes: {},
     members: [],
     control_requests: [],
     trace: null,
@@ -182,6 +217,11 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     closed_at: snapshot.closed_at,
     resolution: snapshot.resolution,
     last_seq: 0,
+    snapshot_hashes: Object.fromEntries(
+      (snapshot.open_proposals ?? [])
+        .filter((p) => p.params_hash)
+        .map((p) => [p.proposal_id, p.params_hash as string]),
+    ),
     driver: snapshot.driver
       ? { id: snapshot.driver.id, name: snapshot.driver.name, lease_until: snapshot.driver.lease_until }
       : null,

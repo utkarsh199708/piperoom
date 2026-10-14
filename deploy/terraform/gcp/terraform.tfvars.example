@@ -1,0 +1,44 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is git-ignored.
+# Nothing in this file is a secret: secret values go into Secret Manager with
+# gcloud (README step 5), never into Terraform variables.
+
+project_id = "my-piperoom-pilot"
+region     = "us-central1"
+
+# Host name people will use. You create its DNS A record after the first apply.
+domain = "piperoom.corp.example"
+
+# The image you built from the repository Dockerfile and pushed (README step 2),
+# BY DIGEST (docker push prints it). Tags are refused.
+piperoom_image = "us-central1-docker.pkg.dev/my-piperoom-pilot/piperoom/piperoom@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+# A named Debian 12 image (README step 2 shows how to list current ones).
+vm_image = "<debian-12-bookworm-vYYYYMMDD>"
+
+# Single sign-on. Register https://<domain>/auth/callback at the IdP.
+oidc_issuer    = "https://login.corp.example"
+oidc_client_id = "piperoom"
+
+# vertex = Claude on Vertex AI with the VM's service account (no key).
+# anthropic = Anthropic API; then store the key in the anthropic-api-key secret.
+model_provider = "vertex"
+# REQUIRED with vertex (plan fails without them). The model must be a Vertex
+# model id and the region one where it is served: take both from Model Garden.
+# The server default model id is an Anthropic API id and does not work on Vertex.
+model         = "<vertex model id>"
+vertex_region = "<region where that model is served, or global / us / eu>"
+
+# Optional Cloud Armor allow-list (office / VPN egress ranges AND your alert
+# senders). Empty = reachable from the whole internet behind OIDC login.
+allowed_cidrs = []
+# allowed_cidrs = ["203.0.113.0/24", "198.51.100.17/32"]
+
+# Cloud SQL. Keep protection on; set false only to destroy (README, Destroy).
+db_deletion_protection = true
+db_availability_type   = "ZONAL"
+
+# Extra NON-secret server settings (stored in VM metadata and in state).
+# extra_env = {
+#   PIPEROOM_WATCH_MODE     = "log"
+#   PIPEROOM_RETENTION_DAYS = "90"
+# }

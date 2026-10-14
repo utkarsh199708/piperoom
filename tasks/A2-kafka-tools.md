@@ -81,7 +81,7 @@ Each implements `actions.Action`. Provide `func Register(reg *actions.Registry, 
 | `schema_register` | `schema-registry` | `subject`, `schema` (Avro JSON string) |
 
 `Validate` checks params and that targets exist (read calls only). `Execute` returns a short
-result like `restarted pg-orders-connector task 0 (state now RUNNING)` — re-read the state after the write.
+result like `restarted pg-orders-connector task 0 (RUNNING)` — re-read the state after the write.
 
 ## Tests
 

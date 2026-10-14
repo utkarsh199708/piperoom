@@ -1,0 +1,195 @@
+# Piperoom pilot stack: the server (with the web UI built in) and its own
+# Postgres for room state. It does NOT include the dev CDC stack: Piperoom
+# connects to YOUR source database, Kafka, Connect, Schema Registry and warehouse.
+#
+#   cp deploy/pilot.env.example deploy/.env      # then fill it in
+#   mkdir -p deploy/config && cp deploy/config/owners.example.yaml deploy/config/owners.yaml  # same for users
+#   docker compose -f deploy/docker-compose.pilot.yml up -d
+#
+# See deploy/README.md. Compose reads deploy/.env (next to this file) for the
+# ${...} values below; the server gets only the settings listed under
+# "environment" (not the Postgres password).
+
+name: piperoom
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: piperoom
+      POSTGRES_DB: piperoom
+      POSTGRES_PASSWORD: ${PIPEROOM_POSTGRES_PASSWORD:?set PIPEROOM_POSTGRES_PASSWORD in deploy/.env}
+    volumes:
+      - piperoom-pgdata:/var/lib/postgresql/data
+    # No "ports": only the server, on this compose network, can reach the database.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U piperoom -d piperoom"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  piperoom:
+    # Built from the Dockerfile at the repo root. To use a prebuilt image, replace
+    # "build" with the image name.
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: piperoom:pilot
+    restart: unless-stopped
+    # Shutdown stops the watcher (up to 15s) and then the HTTP server (up to 10s),
+    # which is more than Docker's default 10s before it kills the container.
+    stop_grace_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Every variable is listed on purpose, instead of passing all of deploy/.env
+    # with env_file: that would also hand the server container the Postgres
+    # password and the compose-only settings (PIPEROOM_BIND, PIPEROOM_PORT).
+    # An empty value means "use the server default" (or "off"). Add a variable
+    # here if you add a setting to deploy/.env.
+    environment:
+      # The bundled database, unless PIPEROOM_DB_URL is set in deploy/.env.
+      # The password is used only to build this URL.
+      PIPEROOM_DB_URL: ${PIPEROOM_DB_URL:-postgres://piperoom:${PIPEROOM_POSTGRES_PASSWORD}@postgres:5432/piperoom?sslmode=disable}
+      # Fixed by the image and the mounts below.
+      PIPEROOM_HTTP_ADDR: 0.0.0.0:8090
+      PIPEROOM_WEB_DIR: /web
+      # Auth (docs/design/auth.md). The image sets dev mode and the non-loopback
+      # switch; they are repeated here with the same defaults, because a
+      # variable listed here replaces the image's value (with "" if unset).
+      # dev = pick a user in the UI, no password. oidc = real login through your
+      # identity provider; a TLS reverse proxy is supported in oidc mode only.
+      # See "Single sign-on (OIDC)" in deploy/README.md.
+      PIPEROOM_AUTH_MODE: ${PIPEROOM_AUTH_MODE:-dev}
+      # Dev mode only: lets it listen on 0.0.0.0 inside the container. Ignored
+      # (with a warning) in oidc mode.
+      PIPEROOM_DEV_ALLOW_NONLOOPBACK: ${PIPEROOM_DEV_ALLOW_NONLOOPBACK:-1}
+      # Extra Host values for a tunnel or proxy that rewrites Host.
+      PIPEROOM_ALLOWED_HOSTS: ${PIPEROOM_ALLOWED_HOSTS:-}
+      # CIDRs whose X-Forwarded-For is trusted. oidc mode only.
+      PIPEROOM_TRUSTED_PROXIES: ${PIPEROOM_TRUSTED_PROXIES:-}
+      # OIDC login (oidc mode). Needs an https PIPEROOM_PUBLIC_URL, below.
+      PIPEROOM_OIDC_ISSUER: ${PIPEROOM_OIDC_ISSUER:-}
+      PIPEROOM_OIDC_CLIENT_ID: ${PIPEROOM_OIDC_CLIENT_ID:-}
+      PIPEROOM_OIDC_CLIENT_SECRET: ${PIPEROOM_OIDC_CLIENT_SECRET:-}
+      PIPEROOM_OIDC_PUBLIC_CLIENT: ${PIPEROOM_OIDC_PUBLIC_CLIENT:-}
+      PIPEROOM_OIDC_SCOPES: ${PIPEROOM_OIDC_SCOPES:-}
+      # Do NOT write this as ${PIPEROOM_OIDC_GROUPS_CLAIM:-}: an explicit empty
+      # value turns group rights off. The "-" form (no colon) passes "groups"
+      # when the variable is unset and keeps an intentional empty value.
+      PIPEROOM_OIDC_GROUPS_CLAIM: ${PIPEROOM_OIDC_GROUPS_CLAIM-groups}
+      PIPEROOM_AUTH_VIEWER_GROUPS: ${PIPEROOM_AUTH_VIEWER_GROUPS:-}
+      PIPEROOM_SESSION_IDLE: ${PIPEROOM_SESSION_IDLE:-}
+      PIPEROOM_SESSION_MAX: ${PIPEROOM_SESSION_MAX:-}
+      PIPEROOM_SOLO_USER: ${PIPEROOM_SOLO_USER:-}
+      OWNERS_FILE: /config/owners.yaml
+      USERS_FILE: /config/users.yaml
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_WORKSPACE_ID: ${ANTHROPIC_WORKSPACE_ID:-}
+      SOURCE_DB_URL: ${SOURCE_DB_URL:-}
+      WAREHOUSE_DB_URL: ${WAREHOUSE_DB_URL:-}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-}
+      CONNECT_URL: ${CONNECT_URL:-}
+      SCHEMA_REGISTRY_URL: ${SCHEMA_REGISTRY_URL:?set SCHEMA_REGISTRY_URL in deploy/.env (your registry URL, or off)}
+      PIPEROOM_MODEL: ${PIPEROOM_MODEL:-}
+      PIPEROOM_EFFORT: ${PIPEROOM_EFFORT:-}
+      PIPEROOM_MAX_AGENTS: ${PIPEROOM_MAX_AGENTS:-}
+      PIPEROOM_WATCH_MODE: ${PIPEROOM_WATCH_MODE:-}
+      PIPEROOM_WATCH_INTERVAL: ${PIPEROOM_WATCH_INTERVAL:-}
+      PIPEROOM_WATCH_CHECK_TIMEOUT: ${PIPEROOM_WATCH_CHECK_TIMEOUT:-}
+      PIPEROOM_WATCH_COOLDOWN: ${PIPEROOM_WATCH_COOLDOWN:-}
+      PIPEROOM_TRIAGE_MODEL: ${PIPEROOM_TRIAGE_MODEL:-}
+      PIPEROOM_ROOM_TOKEN_BUDGET: ${PIPEROOM_ROOM_TOKEN_BUDGET:-}
+      # Model provider: anthropic (default) | bedrock | vertex. See deploy/README.md.
+      PIPEROOM_MODEL_PROVIDER: ${PIPEROOM_MODEL_PROVIDER:-}
+      # Bedrock. Credentials come from, in this order of ease: a Bedrock API key,
+      # static AWS keys, an AWS_PROFILE (needs the commented ~/.aws mount below),
+      # or an instance/task role (nothing to set here).
+      AWS_REGION: ${AWS_REGION:-}
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      AWS_PROFILE: ${AWS_PROFILE:-}
+      # Vertex AI. GOOGLE_APPLICATION_CREDENTIALS is a path INSIDE the container,
+      # for example /config/gcp-sa.json (see the optional mount below).
+      VERTEX_PROJECT_ID: ${VERTEX_PROJECT_ID:-}
+      VERTEX_REGION: ${VERTEX_REGION:-}
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
+      # ANTHROPIC_BASE_URL is deliberately NOT passed. The Anthropic SDK reads it
+      # from the process environment, so passing it would let a value from the
+      # host (the shell of whoever runs compose, or a stray line in .env) send the
+      # API key and every prompt to another server. Only the variables listed in
+      # this block reach the container, so a host value cannot redirect model
+      # traffic. Do not add it here without a security review.
+      PIPEROOM_RETENTION_DAYS: ${PIPEROOM_RETENTION_DAYS:-}
+      # Outbound proxy for the Anthropic/Bedrock/Vertex APIs, Slack, and HTTP(S)
+      # Connect / Schema Registry / Snowflake. Kafka and Postgres use plain TCP and
+      # do not go through it. Loopback is never proxied.
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+      PIPEROOM_PUBLIC_URL: ${PIPEROOM_PUBLIC_URL:-}
+      KAFKA_SECURITY_PROTOCOL: ${KAFKA_SECURITY_PROTOCOL:-}
+      KAFKA_SASL_MECHANISM: ${KAFKA_SASL_MECHANISM:-}
+      KAFKA_SASL_USERNAME: ${KAFKA_SASL_USERNAME:-}
+      KAFKA_SASL_PASSWORD: ${KAFKA_SASL_PASSWORD:-}
+      KAFKA_TLS_CA_FILE: ${KAFKA_TLS_CA_FILE:-}
+      KAFKA_TLS_CERT_FILE: ${KAFKA_TLS_CERT_FILE:-}
+      KAFKA_TLS_KEY_FILE: ${KAFKA_TLS_KEY_FILE:-}
+      KAFKA_TLS_SERVER_NAME: ${KAFKA_TLS_SERVER_NAME:-}
+      SCHEMA_REGISTRY_USERNAME: ${SCHEMA_REGISTRY_USERNAME:-}
+      SCHEMA_REGISTRY_PASSWORD: ${SCHEMA_REGISTRY_PASSWORD:-}
+      SCHEMA_REGISTRY_TLS_CA_FILE: ${SCHEMA_REGISTRY_TLS_CA_FILE:-}
+      SCHEMA_REGISTRY_TLS_CERT_FILE: ${SCHEMA_REGISTRY_TLS_CERT_FILE:-}
+      SCHEMA_REGISTRY_TLS_KEY_FILE: ${SCHEMA_REGISTRY_TLS_KEY_FILE:-}
+      CONNECT_USERNAME: ${CONNECT_USERNAME:-}
+      CONNECT_PASSWORD: ${CONNECT_PASSWORD:-}
+      CONNECT_TLS_CA_FILE: ${CONNECT_TLS_CA_FILE:-}
+      CONNECT_TLS_CERT_FILE: ${CONNECT_TLS_CERT_FILE:-}
+      CONNECT_TLS_KEY_FILE: ${CONNECT_TLS_KEY_FILE:-}
+      WAREHOUSE_KIND: ${WAREHOUSE_KIND:-}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_CHANNEL_ID: ${SLACK_CHANNEL_ID:-}
+      ALERTMANAGER_TOKEN: ${ALERTMANAGER_TOKEN:-}
+      GRAFANA_ALERT_SECRET: ${GRAFANA_ALERT_SECRET:-}
+      PAGERDUTY_ALERT_SECRET: ${PAGERDUTY_ALERT_SECRET:-}
+      PAGERDUTY_SERVICES: ${PAGERDUTY_SERVICES:-}
+      DATADOG_ALERT_TOKEN: ${DATADOG_ALERT_TOKEN:-}
+      GENERIC_ALERT_SECRET: ${GENERIC_ALERT_SECRET:-}
+      DEFAULT_ALERT_PIPELINE: ${DEFAULT_ALERT_PIPELINE:-}
+    ports:
+      # Loopback by default: dev login has no password (see deploy/README.md).
+      - "${PIPEROOM_BIND:-127.0.0.1}:${PIPEROOM_PORT:-8090}:8090"
+    volumes:
+      # owners.yaml and users.yaml: who owns which layer, and who may approve.
+      - ./config:/config:ro
+      # Optional TLS files for Kafka / Registry / Connect (KAFKA_TLS_CA_FILE=/certs/ca.pem ...).
+      - ./certs:/certs:ro
+      # Optional, Vertex AI with a service-account key file. deploy/config is
+      # already mounted at /config above, so a key saved as deploy/config/gcp-sa.json
+      # is visible at /config/gcp-sa.json with no extra line; just set
+      # GOOGLE_APPLICATION_CREDENTIALS=/config/gcp-sa.json in deploy/.env. To keep
+      # the key outside deploy/config, uncomment this and point the variable at
+      # the container path:
+      # - ./secrets/gcp-sa.json:/config/gcp-sa.json:ro
+      #
+      # Optional, Bedrock with a named AWS profile (AWS_PROFILE). Off by default so
+      # the container never sees a developer's whole ~/.aws. Prefer a Bedrock API
+      # key, static keys in deploy/.env, or an instance role. Mount only a file
+      # that holds the one profile. The container runs as uid 65532: give it the
+      # files with  sudo chown 65532:65532 <file> && chmod 0400 <file>  (a 0600
+      # file owned by you is unreadable inside the container).
+      # - ./secrets/aws-config:/home/nonroot/.aws/config:ro
+      # - ./secrets/aws-credentials:/home/nonroot/.aws/credentials:ro
+    # The image has a HEALTHCHECK (GET /healthz). Logs: docker compose logs -f piperoom
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  piperoom-pgdata:

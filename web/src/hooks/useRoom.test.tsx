@@ -1,13 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, renderHook, waitFor } from '@testing-library/react'
+import { act, render, renderHook, screen, waitFor, fireEvent } from '@testing-library/react'
+import { toast } from 'sonner'
 import type { Event, EventsPage, RoomSnapshot } from '../api/types'
+
+vi.mock('sonner', () => ({
+  toast: Object.assign(vi.fn(), { warning: vi.fn(), dismiss: vi.fn() }),
+}))
 
 // The hook reads the current user from context; provide a fixed user so it can
 // render without a router/provider.
+const session = vi.hoisted(() => ({ epoch: 0 }))
+
 vi.mock('../context/user', () => ({
   useCurrentUser: () => ({
-    user: { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka', 'schema-registry'] },
+    user: { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] },
     setUserId: vi.fn(),
+    logout: vi.fn(),
+    sessionEpoch: session.epoch,
   }),
 }))
 
@@ -21,14 +30,21 @@ vi.mock('../api/client', async (importOriginal) => {
     openRoomWs: vi.fn(),
     api: {
       ...actual.api,
+      me: vi.fn(),
       room: vi.fn(),
       events: vi.fn(),
+      grantControl: vi.fn(),
+      approve: vi.fn(),
+      reject: vi.fn(),
     },
   }
 })
 
-import { api, openRoomWs } from '../api/client'
+import { ApiClientError, api, openRoomWs } from '../api/client'
+import { onAuthProblem } from '../lib/auth'
+import type { AuthProblem } from '../lib/auth'
 import { useRoom } from './useRoom'
+import { ProposalsPanel } from '../components/ProposalsPanel'
 
 class FakeWebSocket {
   static CONNECTING = 0
@@ -40,7 +56,7 @@ class FakeWebSocket {
   closed = false
   onopen: (() => void) | null = null
   onmessage: ((m: { data: string }) => void) | null = null
-  onclose: (() => void) | null = null
+  onclose: ((ev: { reason: string }) => void) | null = null
   onerror: (() => void) | null = null
   send(data: string) {
     this.sent.push(data)
@@ -91,6 +107,7 @@ function wsMessage(event: Event) {
 beforeEach(() => {
   vi.stubGlobal('WebSocket', FakeWebSocket)
   vi.resetAllMocks()
+  session.epoch = 0
 })
 
 describe('useRoom transport', () => {
@@ -107,7 +124,7 @@ describe('useRoom transport', () => {
     vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
 
     const { result } = renderHook(() => useRoom('r1'))
-    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 'arjun', 0))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
     socket.onopen?.()
 
     await act(async () => {
@@ -117,7 +134,7 @@ describe('useRoom transport', () => {
     })
 
     await waitFor(() => expect(result.current.state?.last_seq).toBe(3))
-    expect(api.events).toHaveBeenCalledWith('arjun', 'r1', 0)
+    expect(api.events).toHaveBeenCalledWith('r1', 0)
     expect(result.current.state?.comments).toHaveLength(2)
   })
 
@@ -128,7 +145,7 @@ describe('useRoom transport', () => {
     vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
 
     const { result } = renderHook(() => useRoom('r1'))
-    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 'arjun', 0))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
     socket.onopen?.()
 
     await act(async () => {
@@ -154,7 +171,7 @@ describe('useRoom transport', () => {
     vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
 
     const { result } = renderHook(() => useRoom('r1'))
-    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 'arjun', 0))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
     socket.onopen?.()
 
     // Two messages while the first gap fetch is still pending.
@@ -170,7 +187,418 @@ describe('useRoom transport', () => {
 
     await waitFor(() => expect(result.current.state?.last_seq).toBe(4))
     expect(api.events).toHaveBeenCalledTimes(2)
-    expect(api.events).toHaveBeenNthCalledWith(1, 'arjun', 'r1', 0)
-    expect(api.events).toHaveBeenNthCalledWith(2, 'arjun', 'r1', 2)
+    expect(api.events).toHaveBeenNthCalledWith(1, 'r1', 0)
+    expect(api.events).toHaveBeenNthCalledWith(2, 'r1', 2)
+  })
+
+  it('shows short user text for a lease_held error instead of the raw message', async () => {
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+
+    const { result } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
+    socket.onopen?.()
+
+    await act(async () => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'error',
+          error: { code: 'lease_held', message: 'control/grant: someone holds the lease' },
+        }),
+      })
+    })
+
+    expect(result.current.error).toBe('someone else holds control')
+  })
+
+  it('maps a lease_held rejection from control/grant (self-grant race) to the friendly text', async () => {
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    vi.mocked(api.grantControl).mockRejectedValue(
+      new ApiClientError(409, 'lease_held', 'control/grant: kabir holds the lease until 10:35'),
+    )
+
+    const { result } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
+    socket.onopen?.()
+
+    // The no-driver banner grants control to the current user.
+    await act(async () => {
+      result.current.actions.grantControl('arjun')
+    })
+
+    await waitFor(() => expect(result.current.error).toBe('someone else holds control'))
+    expect(api.grantControl).toHaveBeenCalledWith('r1', 'arjun')
+  })
+})
+
+describe('useRoom approve', () => {
+  async function setup() {
+    const socket = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(socket as unknown as WebSocket)
+    const hook = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledWith('r1', 0))
+    socket.onopen?.()
+    return hook
+  }
+
+  it('the real solo-mode server error becomes needsConfirm, not an error banner', async () => {
+    vi.mocked(api.approve).mockRejectedValue(
+      new ApiClientError(400, 'validation', 'solo mode: type confirm "orders/kafka" to approve'),
+    )
+    const { result } = await setup()
+    let res: unknown
+    await act(async () => {
+      res = await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
+    })
+    expect(res).toEqual({ ok: false, needsConfirm: true })
+    expect(result.current.error).toBeNull()
+  })
+
+  it('passes confirm through and resolves ok', async () => {
+    vi.mocked(api.approve).mockResolvedValue(ev(1))
+    const { result } = await setup()
+    let res: unknown
+    await act(async () => {
+      res = await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1', confirm: 'orders/kafka' })
+    })
+    expect(res).toEqual({ ok: true })
+    expect(api.approve).toHaveBeenCalledWith('p1', 'kafka', { params_hash: 'h1', confirm: 'orders/kafka' })
+  })
+
+  it('any other error is shown in the banner and is not needsConfirm', async () => {
+    vi.mocked(api.approve).mockRejectedValue(
+      new ApiClientError(403, 'not_layer_owner', 'user arjun does not own layer "kafka"'),
+    )
+    const { result } = await setup()
+    let res: unknown
+    await act(async () => {
+      res = await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
+    })
+    expect(res).toEqual({ ok: false })
+    expect(result.current.error).toBe('user arjun does not own layer "kafka"')
+  })
+
+  it('409 params_mismatch on approve raises the stale flag, reloads the room and does not retry', async () => {
+    vi.mocked(api.approve).mockRejectedValue(
+      new ApiClientError(409, 'params_mismatch', 'params_hash does not match the proposal'),
+    )
+    const { result } = await setup()
+    expect(api.room).toHaveBeenCalledTimes(1)
+    let res: unknown
+    await act(async () => {
+      res = await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
+    })
+    expect(res).toEqual({ ok: false, mismatch: true })
+    expect(result.current.stale).toEqual({ proposalId: 'p1', sentHash: 'h1' })
+    // Not the generic error banner, and no second approve call.
+    expect(result.current.error).toBeNull()
+    // The room state is fetched again (snapshot), which is the reload.
+    await waitFor(() => expect(api.room).toHaveBeenCalledTimes(2))
+    expect(api.approve).toHaveBeenCalledTimes(1)
+    // The flag survives the reload until it is dismissed.
+    expect(result.current.stale).toEqual({ proposalId: 'p1', sentHash: 'h1' })
+    act(() => result.current.dismissStale())
+    expect(result.current.stale).toBeNull()
+  })
+
+  it('409 params_mismatch on reject sends the rendered hash, raises the stale flag and does not retry', async () => {
+    vi.mocked(api.reject).mockRejectedValue(
+      new ApiClientError(409, 'params_mismatch', 'params_hash does not match the proposal'),
+    )
+    const { result } = await setup()
+    act(() => result.current.actions.reject('p1', 'kafka', 'wrong', 'h1'))
+    await waitFor(() => expect(result.current.stale).toEqual({ proposalId: 'p1', sentHash: 'h1' }))
+    expect(api.reject).toHaveBeenCalledWith('p1', 'kafka', 'wrong', 'h1')
+    await waitFor(() => expect(api.room).toHaveBeenCalledTimes(2))
+    expect(api.reject).toHaveBeenCalledTimes(1)
+    expect(result.current.error).toBeNull()
+  })
+
+  it('a 409 that is not params_mismatch (already_decided) stays an ordinary error', async () => {
+    vi.mocked(api.approve).mockRejectedValue(
+      new ApiClientError(409, 'already_decided', 'layer "kafka" already decided'),
+    )
+    const { result } = await setup()
+    await act(async () => {
+      await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
+    })
+    expect(result.current.stale).toBeNull()
+    expect(result.current.error).toBe('layer "kafka" already decided')
+    expect(api.room).toHaveBeenCalledTimes(1)
+    expect(toast.warning).not.toHaveBeenCalled()
+  })
+
+  it('raises the stale toast once, where the 409 happens, and Reload closes it for good', async () => {
+    vi.mocked(api.approve).mockRejectedValue(
+      new ApiClientError(409, 'params_mismatch', 'params_hash does not match the proposal'),
+    )
+    const { result } = await setup()
+    expect(toast.warning).not.toHaveBeenCalled()
+    await act(async () => {
+      await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
+    })
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+    const [title, options] = vi.mocked(toast.warning).mock.calls[0]
+    expect(title).toBe('Proposal changed since you looked')
+    expect(options?.duration).toBe(Infinity)
+    expect(options?.action).toMatchObject({ label: 'Reload' })
+    await waitFor(() => expect(api.room).toHaveBeenCalledTimes(2))
+    vi.mocked(toast.dismiss).mockClear()
+
+    // Reload (the banner button, or the toast's own action) closes it ...
+    act(() => result.current.reload())
+    expect(toast.dismiss).toHaveBeenCalledWith('stale-params-mismatch')
+    await waitFor(() => expect(api.room).toHaveBeenCalledTimes(3))
+    await act(async () => {
+      await sleep(20)
+    })
+    // ... and nothing raises it again, although the stale state (the banner) is still there.
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+    expect(result.current.stale).not.toBeNull()
+
+    // The toast action is the same reload.
+    const action = options?.action as unknown as { onClick: () => void }
+    vi.mocked(toast.dismiss).mockClear()
+    act(() => action.onClick())
+    expect(toast.dismiss).toHaveBeenCalledWith('stale-params-mismatch')
+    expect(toast.warning).toHaveBeenCalledTimes(1)
+  })
+
+  it('dismissing the stale state, or a decision that goes through, takes the toast down', async () => {
+    vi.mocked(api.approve).mockRejectedValueOnce(
+      new ApiClientError(409, 'params_mismatch', 'params_hash does not match the proposal'),
+    )
+    const { result } = await setup()
+    await act(async () => {
+      await result.current.actions.approve('p1', 'kafka', { params_hash: 'h1' })
+    })
+    vi.mocked(toast.dismiss).mockClear()
+    act(() => result.current.dismissStale())
+    expect(toast.dismiss).toHaveBeenCalledWith('stale-params-mismatch')
+
+    vi.mocked(api.approve).mockResolvedValueOnce(ev(1))
+    await act(async () => {
+      await result.current.actions.approve('p1', 'kafka', { params_hash: 'h2' })
+    })
+    expect(result.current.stale).toBeNull()
+  })
+
+  it('leaving the room takes the toast down', async () => {
+    const { unmount } = await setup()
+    vi.mocked(toast.dismiss).mockClear()
+    unmount()
+    expect(toast.dismiss).toHaveBeenCalledWith('stale-params-mismatch')
+  })
+})
+
+describe('the stale note through a real room reload', () => {
+  const H1 = 'a'.repeat(64)
+  const H2 = 'b'.repeat(64)
+  const created = (hash: string) =>
+    ev(1, 'proposal.created', {
+      proposal_id: 'p1',
+      title: 'Restart the task',
+      steps: [],
+      risk: 'low',
+      rollback: 'none',
+      required_layers: ['kafka'],
+      params_hash: hash,
+    })
+  const user = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] }
+
+  // The room as RoomScreen uses it: no state means "Loading room…" and the panel is unmounted.
+  function Harness() {
+    const { state, actions, stale } = useRoom('r1')
+    if (!state) return <p>Loading room…</p>
+    return <ProposalsPanel state={state} user={user} actions={actions} stale={stale} />
+  }
+
+  it('the panel is unmounted by the reload, and the note is back when the new hash arrives', async () => {
+    const s1 = new FakeWebSocket()
+    const s2 = new FakeWebSocket()
+    // The second snapshot is held back, so "Loading room…" can be seen.
+    let releaseSnapshot: (s: RoomSnapshot) => void = () => undefined
+    vi.mocked(api.room)
+      .mockResolvedValueOnce(snapshot('r1'))
+      .mockReturnValueOnce(new Promise<RoomSnapshot>((r) => (releaseSnapshot = r)))
+    vi.mocked(openRoomWs)
+      .mockReturnValueOnce(s1 as unknown as WebSocket)
+      .mockReturnValueOnce(s2 as unknown as WebSocket)
+    vi.mocked(api.approve).mockRejectedValue(
+      new ApiClientError(409, 'params_mismatch', 'params_hash does not match the proposal'),
+    )
+
+    render(<Harness />)
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    act(() => s1.onopen?.())
+    await act(async () => {
+      s1.onmessage?.(wsMessage(created(H1)))
+    })
+    const approveButton = await screen.findByRole('button', { name: 'Approve' })
+    expect(screen.queryByText('You looked at')).not.toBeInTheDocument()
+
+    fireEvent.click(approveButton)
+    // The reload takes the panel away ...
+    await waitFor(() => expect(screen.getByText('Loading room…')).toBeInTheDocument())
+    expect(screen.queryByRole('region', { name: 'Proposals' })).not.toBeInTheDocument()
+    // ... and brings it back with the server's hash, plus what the person looked at.
+    await act(async () => releaseSnapshot(snapshot('r1')))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2))
+    act(() => s2.onopen?.())
+    await act(async () => {
+      s2.onmessage?.(wsMessage(created(H2)))
+    })
+    expect(await screen.findByText('You looked at')).toBeInTheDocument()
+    expect(screen.getByText('aaaa aaaa … aaaa').closest('span[title]')).toHaveClass('line-through')
+    expect(screen.getAllByText('bbbb bbbb … bbbb')).toHaveLength(2)
+    expect(api.approve).toHaveBeenCalledTimes(1)
+    expect(api.approve).toHaveBeenCalledWith('p1', 'kafka', { params_hash: H1 })
+  })
+})
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+describe('useRoom session epochs and reconnects', () => {
+  it('an epoch bump closes the old socket and opens exactly one new socket with after=0', async () => {
+    const s1 = new FakeWebSocket()
+    const s2 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs)
+      .mockReturnValueOnce(s1 as unknown as WebSocket)
+      .mockReturnValueOnce(s2 as unknown as WebSocket)
+
+    const { rerender } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    s1.onopen?.()
+    await act(async () => {
+      s1.onmessage?.(wsMessage(ev(1)))
+    })
+
+    session.epoch = 1 // a login or logout happened
+    rerender()
+
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2))
+    expect(s1.closed).toBe(true)
+    expect(openRoomWs).toHaveBeenNthCalledWith(2, 'r1', 0) // full replay, not lastSeq
+    await sleep(50)
+    expect(openRoomWs).toHaveBeenCalledTimes(2)
+
+    // The old socket closing later (server side) must not reconnect or report.
+    const seen: AuthProblem[] = []
+    const off = onAuthProblem((p) => seen.push(p))
+    s1.onclose?.({ reason: 'session_expired' })
+    s1.onmessage?.({ data: JSON.stringify({ type: 'error', error: { code: 'session_expired', message: 'x' } }) })
+    off()
+    expect(seen).toEqual([])
+    await sleep(50)
+    expect(openRoomWs).toHaveBeenCalledTimes(2)
+  })
+
+  it('a close with reason session_expired reports the epoch and stops reconnects', async () => {
+    const s1 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(s1 as unknown as WebSocket)
+    const seen: AuthProblem[] = []
+    const off = onAuthProblem((p) => seen.push(p))
+
+    const { result } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    s1.onopen?.()
+    act(() => {
+      s1.onclose?.({ reason: 'session_expired' })
+    })
+    off()
+
+    expect(seen).toEqual([{ kind: 'session_expired', message: 'session_expired', epoch: 0 }])
+    expect(result.current.conn).toBe('error')
+    await sleep(1300) // longer than the first backoff
+    expect(openRoomWs).toHaveBeenCalledTimes(1)
+  })
+
+  it('error frames viewer and proxy_identity become banners', async () => {
+    const s1 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(s1 as unknown as WebSocket)
+    const seen: AuthProblem[] = []
+    const off = onAuthProblem((p) => seen.push(p))
+
+    renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    s1.onopen?.()
+    for (const code of ['viewer', 'proxy_identity']) {
+      act(() => {
+        s1.onmessage?.({ data: JSON.stringify({ type: 'error', error: { code, message: 'm' } }) })
+      })
+    }
+    off()
+    expect(seen.map((p) => p.kind)).toEqual(['viewer', 'proxy_identity'])
+  })
+
+  it('an upgrade refused before open asks /api/me, but only once per outage', async () => {
+    const s1 = new FakeWebSocket()
+    const s2 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(api.me).mockResolvedValue({ id: 'arjun', name: 'Arjun', layers: [] })
+    vi.mocked(openRoomWs)
+      .mockReturnValueOnce(s1 as unknown as WebSocket)
+      .mockReturnValueOnce(s2 as unknown as WebSocket)
+
+    renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    act(() => {
+      s1.readyState = FakeWebSocket.CLOSED
+      s1.onclose?.({ reason: '' }) // never opened
+    })
+    expect(api.me).toHaveBeenCalledTimes(1)
+
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2), { timeout: 3000 })
+    act(() => {
+      s2.readyState = FakeWebSocket.CLOSED
+      s2.onclose?.({ reason: '' }) // refused again
+    })
+    expect(api.me).toHaveBeenCalledTimes(1) // not re-probed on every retry
+  })
+
+  it('a socket that opened and dropped does not probe /api/me', async () => {
+    const s1 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs).mockReturnValue(s1 as unknown as WebSocket)
+    renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    s1.onopen?.()
+    act(() => {
+      s1.readyState = FakeWebSocket.CLOSED
+      s1.onclose?.({ reason: '' })
+    })
+    expect(api.me).not.toHaveBeenCalled()
+  })
+
+  it('a reconnect in the same epoch resumes from lastSeq', async () => {
+    const s1 = new FakeWebSocket()
+    const s2 = new FakeWebSocket()
+    vi.mocked(api.room).mockResolvedValue(snapshot('r1'))
+    vi.mocked(openRoomWs)
+      .mockReturnValueOnce(s1 as unknown as WebSocket)
+      .mockReturnValueOnce(s2 as unknown as WebSocket)
+
+    const { result } = renderHook(() => useRoom('r1'))
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(1))
+    expect(openRoomWs).toHaveBeenNthCalledWith(1, 'r1', 0)
+    s1.onopen?.()
+    await act(async () => {
+      s1.onmessage?.(wsMessage(ev(1)))
+    })
+    await waitFor(() => expect(result.current.state?.last_seq).toBe(1))
+
+    act(() => {
+      s1.readyState = FakeWebSocket.CLOSED
+      s1.onclose?.({ reason: '' })
+    })
+    await waitFor(() => expect(openRoomWs).toHaveBeenCalledTimes(2), { timeout: 3000 })
+    expect(openRoomWs).toHaveBeenNthCalledWith(2, 'r1', 1)
   })
 })

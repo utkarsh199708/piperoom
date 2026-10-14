@@ -22,9 +22,16 @@ import (
 
 // Deps are the collaborators the tools read from.
 type Deps struct {
-	Src     clients.SourceDB
-	Wh      clients.Warehouse
-	Builder topology.Builder
+	Src clients.SourceDB
+	Wh  clients.Warehouse
+	// WarehouseKind is "postgres" (or empty) or "snowflake". It only decides
+	// which table and column names the warehouse tools accept as input.
+	WarehouseKind string
+	Builder       topology.Builder
+	// Connect reads live Kafka Connect connector configs. Only
+	// pg_publication_tables uses it, so it is nil-able; the tool reports a
+	// clear error when it needs Connect and the field is nil.
+	Connect clients.ConnectClient
 	// Owners is the loaded owners config, used by the row tools to scope reads
 	// to the pipeline named by pipeline_id (security finding F4). It must be
 	// non-nil; the row tools refuse to run without it.
@@ -43,6 +50,28 @@ func (d Deps) pipeline(id string) (owners.Pipeline, error) {
 		return owners.Pipeline{}, fmt.Errorf("%w: pipeline %q not found", tools.ErrBadInput, id)
 	}
 	return p, nil
+}
+
+// scope resolves the room's pipeline scope for one tool call (finding F11).
+// A tool calls it first and checks every name it got against the result before
+// it uses a client; a call with no room pipeline and no explicit opt-out is
+// refused.
+func (d Deps) scope(ctx context.Context) (tools.Scope, error) {
+	return tools.ScopeFor(ctx, d.Owners)
+}
+
+// resolve returns the pipeline a tool works on. Scoped, it is the room's
+// pipeline, and a pipeline_id in the input that differs from it is refused
+// (the input is never trusted). Unscoped (explicit opt-out), it is the
+// pipeline the input names.
+func (d Deps) resolve(sc tools.Scope, inputID string) (owners.Pipeline, error) {
+	if sc.Unscoped() {
+		return d.pipeline(inputID)
+	}
+	if err := sc.CheckPipelineID(inputID); err != nil {
+		return owners.Pipeline{}, err
+	}
+	return sc.Pipeline(), nil
 }
 
 // scopedTable returns an ErrBadInput error when table is not one of the
@@ -67,6 +96,7 @@ func Register(reg *tools.Registry, d Deps) error {
 		pgRecentDDLTool(d),
 		pgLongTransactionsTool(d),
 		pgRowTool(d),
+		pgPublicationTablesTool(d),
 		warehouseFreshnessTool(d),
 		warehouseRowTool(d),
 		pipelineMapTool(d),
@@ -144,6 +174,46 @@ func validTable(name string) bool {
 	parts := strings.Split(name, ".")
 	return len(parts) == 2 && identRe.MatchString(parts[0]) && identRe.MatchString(parts[1])
 }
+
+// snowflakeIdentRe is identRe plus '$', which Snowflake allows in unquoted
+// names and internal/clients/snowflake accepts, so both layers agree.
+var snowflakeIdentRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_$]*$`)
+
+// isSnowflake reports whether the warehouse is Snowflake. Empty means the
+// default, Postgres.
+func (d Deps) isSnowflake() bool {
+	return strings.EqualFold(strings.TrimSpace(d.WarehouseKind), "snowflake")
+}
+
+// whIdentRe is the identifier regex for the configured warehouse kind.
+func (d Deps) whIdentRe() *regexp.Regexp {
+	if d.isSnowflake() {
+		return snowflakeIdentRe
+	}
+	return identRe
+}
+
+// validWarehouseTable reports whether name is a valid warehouse table. Postgres
+// takes "schema.table". A Snowflake sink table can live in another database
+// than the DSN's default one, so Snowflake also takes "db.schema.table". Each
+// part has to match the kind's identifier regex (AGENTS.md section 4, rule 6);
+// the client quotes it again.
+func (d Deps) validWarehouseTable(name string) bool {
+	parts := strings.Split(name, ".")
+	if len(parts) != 2 && !(len(parts) == 3 && d.isSnowflake()) {
+		return false
+	}
+	re := d.whIdentRe()
+	for _, p := range parts {
+		if !re.MatchString(p) {
+			return false
+		}
+	}
+	return true
+}
+
+// validWarehouseColumn is validColumn for the configured warehouse kind.
+func (d Deps) validWarehouseColumn(name string) bool { return d.whIdentRe().MatchString(name) }
 
 func validColumn(name string) bool { return identRe.MatchString(name) }
 

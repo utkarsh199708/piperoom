@@ -136,17 +136,36 @@ export interface ProposalCreatedPayload {
   risk: string
   rollback: string
   required_layers: string[]
+  /** Hex SHA-256 of the frozen proposal (auth PR 4). Absent on events written before it. */
+  params_hash?: string
+}
+
+/**
+ * Who made a decision and how they logged in (auth PR 4, docs/design/auth.md 3.2).
+ * `grant` is "user:…", "group:…", "backup:…" or "solo"; `method` is "oidc" or "dev".
+ */
+export interface Identity {
+  iss?: string
+  sub?: string
+  session_id?: string
+  method: string
+  grant?: string
+  auth_time?: string
 }
 
 export interface ApprovalGivenPayload {
   proposal_id: string
   layer: string
+  params_hash?: string
+  identity?: Identity
 }
 
 export interface ApprovalRejectedPayload {
   proposal_id: string
   layer: string
   reason: string
+  params_hash?: string
+  identity?: Identity
 }
 
 export interface ActionExecutedPayload {
@@ -154,6 +173,8 @@ export interface ActionExecutedPayload {
   step_index: number
   ok: boolean
   output: string
+  /** The proposal's params_hash the executor checked before this step ran (auth PR 4). */
+  params_hash?: string
 }
 
 export interface HandoffSummary {
@@ -216,6 +237,8 @@ export interface ProposalSummary {
   rollback: string
   required_layers: string[]
   approvals: Record<string, ApprovalValue>
+  /** After auth PR 4. "" only for a proposal that cannot be hashed. */
+  params_hash?: string
 }
 
 export interface SuggestionSummary {
@@ -268,7 +291,7 @@ export interface RoomSnapshot {
 
 export interface TopologyNode {
   id: string
-  kind: 'source_table' | 'connector' | 'topic' | 'consumer_group' | 'sink_table'
+  kind: 'source_table' | 'connector' | 'topic' | 'dlq_topic' | 'consumer_group' | 'sink_table'
   name: string
   layer: string
   owner: string
@@ -291,6 +314,20 @@ export interface Me {
   id: string
   name: string
   layers: string[]
+  /** After auth PR 3; absent on an older server (treated as member). */
+  role?: 'member' | 'viewer'
+  /** The IdP sent no groups claim (docs/design/auth.md 2.2). */
+  groups_missing?: boolean
+  /** This user is PIPEROOM_SOLO_USER (omitted otherwise): approvals need a typed confirm. */
+  solo?: boolean
+}
+
+/** One row of GET /api/people: a person a driver may grant control or hand off to. */
+export interface Person {
+  id: string
+  name: string
+  /** Only for IdP users with a verified email. */
+  email?: string
 }
 
 export interface PresenceMember {

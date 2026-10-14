@@ -4,11 +4,13 @@ export interface DevUser {
   id: string
   name: string
   layers: string[]
+  /** Absent means member. A viewer can read rooms and change nothing. */
+  role?: 'member' | 'viewer'
 }
 
 export const DEV_USERS: DevUser[] = [
-  { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka', 'schema-registry'] },
-  { id: 'priya', name: 'Priya', layers: ['postgres'] },
+  { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] },
+  { id: 'priya', name: 'Priya', layers: ['postgres', 'schema-registry'] },
   { id: 'meera', name: 'Meera', layers: ['warehouse'] },
   { id: 'kabir', name: 'Kabir', layers: ['consumer'] },
 ]

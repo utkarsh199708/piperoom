@@ -1,30 +1,48 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
-	"time"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
 	"piperoom/internal/tools"
 )
 
-// proposalTimeout bounds the Proposals.Create call so a stalled proposal store
-// cannot hang the investigation.
-var proposalTimeout = 10 * time.Second
+// roomToolNames are the names of the room tools newRoomTools builds, kept
+// beside it so both are edited together. RoomToolNames serves callers that
+// only need the names from this list, so it never constructs a tool — a room
+// tool constructor may one day dereference its deps, and a name lookup must
+// not panic on a zero Deps. TestRoomToolNamesMatchRoomTools keeps the list in
+// sync with what the constructor really builds.
+func roomToolNames() []string {
+	return []string{"update_hypothesis", "propose_fix", "post_message"}
+}
 
 // newRoomTools builds the three room tools the agent itself owns. These are
 // tools.KindRoom: they only write to the room log or create proposals, never
-// to customer systems.
-func newRoomTools(d Deps) []tools.Tool {
+// to customer systems. track records each created proposal so the agent can
+// verify recovery when its last step's action_result arrives; it may be nil
+// (the tool then just skips recording).
+func newRoomTools(d Deps, track *proposalTracker) []tools.Tool {
 	return []tools.Tool{
 		&updateHypothesisTool{sink: d.Sink},
-		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink},
+		&proposeFixTool{actions: d.Actions, proposals: d.Proposals, sink: d.Sink, track: track},
 		&postMessageTool{sink: d.Sink},
 	}
+}
+
+// RoomToolNames returns the names of the room tools the agent adds on top of
+// the read-tool registry, from the static list above. Exported for
+// cmd/investigate's wiring test, which checks the system prompt only ever
+// names tools the model can really call. The returned slice is a copy callers
+// may keep or modify.
+func RoomToolNames() []string {
+	return roomToolNames()
 }
 
 func roomObjectSchema(props map[string]any, required ...string) map[string]any {
@@ -151,6 +169,7 @@ type proposeFixTool struct {
 	actions   *actions.Registry
 	proposals Proposals
 	sink      Sink
+	track     *proposalTracker
 }
 
 func (t *proposeFixTool) Name() string { return "propose_fix" }
@@ -158,20 +177,28 @@ func (t *proposeFixTool) Kind() tools.Kind {
 	return tools.KindRoom
 }
 
-// Description lists every available action with its params schema so the model
-// proposes only real actions with valid parameters.
+// Description lists every available action as name(param:type, ...) with its
+// layer and a one-line explanation. The description is not part of the strict
+// grammar, so this is where each action's parameters live: the strict schema
+// stays the same size however many actions are registered, and the params are
+// checked against the action's own schema in Run. Optional params end in "?".
 func (t *proposeFixTool) Description() string {
 	var b strings.Builder
 	b.WriteString("Propose a fix as a sequence of write actions. Nothing runs until every required layer owner approves. ")
-	b.WriteString("Available actions:\n")
+	b.WriteString("Available actions, as name(param:type, ...) [layer]: explanation:\n")
 	acts := t.actionsList()
 	if len(acts) == 0 {
-		b.WriteString("(none)")
+		b.WriteString("(none)\n")
 	}
 	for _, a := range acts {
-		fmt.Fprintf(&b, "- %s (layer %s): %s params=%s\n", a.Name(), a.Layer(), a.Describe(), compactSchema(a.ParamsSchema()))
+		fmt.Fprintf(&b, "- %s(%s) [%s]: %s\n", a.Name(), paramsSignature(a.ParamsSchema()), a.Layer(), a.Describe())
 	}
-	b.WriteString("steps is an array; each step names an action, gives its params object and a short description. risk and rollback are short text.")
+	b.WriteString("steps is an array; each step has action, params and a short description. ")
+	b.WriteString(`params is the action's parameters as JSON object text in a string, for example "{\"connector\":\"c1\"}". `)
+	b.WriteString(`A param that is itself JSON, such as the Avro schema of schema_register, is escaped once more: "{\"subject\":\"orders-value\",\"schema\":\"{\\\"type\\\":\\\"string\\\"}\"}". `)
+	b.WriteString("A step with a wrong or missing param is refused and nothing is stored. ")
+	b.WriteString("Params are hashed for the approvers: a number above 2^53 (a Kafka offset, a large id) cannot be hashed exactly and the proposal is refused, so write such values as strings. ")
+	b.WriteString("risk and rollback are required short text: never empty and never a placeholder such as n/a.")
 	return b.String()
 }
 
@@ -194,43 +221,279 @@ func (t *proposeFixTool) InputSchema() map[string]any {
 	}, "title", "steps", "risk", "rollback")
 }
 
-// stepsItemSchema builds the schema for one proposal step. With actions
-// registered it is an anyOf of one variant per action (action fixed via const,
-// params taken from the action's own schema) so every nested object is strictly
-// typed. Without actions it falls back to a generic strict step object.
+// stepsItemSchema builds the schema for one proposal step. The step is the same
+// closed object whatever actions are registered: action is an enum of their
+// names (about one short string each), and params is a string holding the
+// params object as JSON text. A strict object must be closed
+// (additionalProperties:false), so an object-typed params cannot carry
+// arbitrary keys; JSON text can. Run parses it and checks it against the
+// chosen action's own ParamsSchema and Validate before anything is stored.
+// Without actions the action is a plain string, which Run then refuses.
 func (t *proposeFixTool) stepsItemSchema() map[string]any {
-	acts := t.actionsList()
-	if len(acts) == 0 {
-		return roomObjectSchema(map[string]any{
-			"action":      map[string]any{"type": "string", "description": "action name"},
-			"params":      map[string]any{"type": "object", "additionalProperties": false},
-			"description": map[string]any{"type": "string", "description": "what this step does"},
-		}, "action", "params", "description")
-	}
-	variants := make([]any, 0, len(acts))
-	for _, a := range acts {
-		params := a.ParamsSchema()
-		if params == nil {
-			params = map[string]any{"type": "object", "additionalProperties": false}
+	action := map[string]any{"type": "string", "description": "action name"}
+	if acts := t.actionsList(); len(acts) > 0 {
+		names := make([]string, 0, len(acts))
+		for _, a := range acts {
+			names = append(names, a.Name())
 		}
-		variants = append(variants, roomObjectSchema(map[string]any{
-			"action":      map[string]any{"type": "string", "const": a.Name()},
-			"params":      params,
-			"description": map[string]any{"type": "string", "description": "what this step does"},
-		}, "action", "params", "description"))
+		action = map[string]any{"type": "string", "enum": names}
 	}
-	return map[string]any{"anyOf": variants}
+	return roomObjectSchema(map[string]any{
+		"action":      action,
+		"params":      map[string]any{"type": "string", "description": "params as JSON object text"},
+		"description": map[string]any{"type": "string", "description": "what this step does"},
+	}, "action", "params", "description")
+}
+
+// validationSchema is the schema runRoomTool checks propose_fix input against
+// before Run. It differs from InputSchema in the two step fields Run checks
+// itself with better errors: action is any string (Run names the registered
+// actions when it is unknown) and params has no type (Run accepts the JSON
+// text the model sends or an already-decoded object, then checks it against
+// the action's own schema).
+func (t *proposeFixTool) validationSchema() map[string]any {
+	s := t.InputSchema()
+	props, _ := s["properties"].(map[string]any)
+	steps, _ := props["steps"].(map[string]any)
+	steps["items"] = roomObjectSchema(map[string]any{
+		"action":      map[string]any{"type": "string"},
+		"params":      map[string]any{},
+		"description": map[string]any{"type": "string"},
+	}, "action", "params", "description")
+	return s
 }
 
 type proposeFixInput struct {
 	Title string `json:"title"`
 	Steps []struct {
-		Action      string          `json:"action"`
+		Action string `json:"action"`
+		// Params is JSON text inside a string on the wire (see
+		// stepsItemSchema). An already-decoded object is accepted too so
+		// callers that are not the model, such as replays, need no encoding.
 		Params      json.RawMessage `json:"params"`
 		Description string          `json:"description"`
 	} `json:"steps"`
 	Risk     string `json:"risk"`
 	Rollback string `json:"rollback"`
+}
+
+// decodeStepParams returns the params object a step carries: the JSON text
+// inside a string, or an object given directly. It refuses anything that is
+// not a JSON object, so Validate and the action schema only ever see objects.
+func decodeStepParams(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, fmt.Errorf("params is required: give the action's parameters as a JSON object")
+	}
+	if trimmed[0] == '"' {
+		var text string
+		if err := json.Unmarshal(trimmed, &text); err != nil {
+			return nil, fmt.Errorf("params is not a valid string: %v", err)
+		}
+		trimmed = bytes.TrimSpace([]byte(text))
+		if !json.Valid(trimmed) {
+			return nil, fmt.Errorf("params must be valid JSON object text, for example {\"connector\":\"c1\"}")
+		}
+	}
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, fmt.Errorf("params must be a JSON object, not another JSON value")
+	}
+	// Go keeps the last of two equal keys, but the stored text keeps both and
+	// an approver or another parser may read the first. Refuse the ambiguity.
+	if key, dup := duplicateKey(trimmed); dup {
+		return nil, fmt.Errorf("params has the field %q more than once", key)
+	}
+	return json.RawMessage(trimmed), nil
+}
+
+// duplicateKey reports the first object key that appears twice in the same
+// object anywhere in valid JSON text.
+func duplicateKey(raw []byte) (string, bool) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	type frame struct {
+		isObj  bool
+		seen   map[string]bool
+		expect bool // in an object: the next string token is a key
+	}
+	var stack []*frame
+	// valueDone marks the end of a value so the enclosing object expects a key.
+	valueDone := func() {
+		if n := len(stack); n > 0 && stack[n-1].isObj {
+			stack[n-1].expect = true
+		}
+	}
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return "", false
+		}
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{':
+				stack = append(stack, &frame{isObj: true, seen: map[string]bool{}, expect: true})
+			case '[':
+				stack = append(stack, &frame{})
+			default:
+				stack = stack[:len(stack)-1]
+				valueDone()
+			}
+			continue
+		}
+		if n := len(stack); n > 0 && stack[n-1].isObj && stack[n-1].expect {
+			key, _ := tok.(string)
+			if stack[n-1].seen[key] {
+				return key, true
+			}
+			stack[n-1].seen[key] = true
+			stack[n-1].expect = false
+			continue
+		}
+		valueDone()
+	}
+}
+
+// StepObserver is implemented by an action wrapper that wants to see every
+// step check, including the ones that end before Validate. propose_fix calls
+// StepChecked when it refuses a step's params for a bad shape (not JSON, not
+// an object, a repeated field, or a mismatch with the action's ParamsSchema),
+// so a harness that records Validate calls (the evals attempt log) still sees
+// an attempt it would otherwise lose. err is the reason the step was refused.
+type StepObserver interface {
+	StepChecked(params json.RawMessage, err error)
+}
+
+// observeStep tells a if it is a StepObserver.
+func observeStep(a actions.Action, params json.RawMessage, err error) {
+	if o, ok := a.(StepObserver); ok {
+		o.StepChecked(params, err)
+	}
+}
+
+// NewProposeFixTool returns the propose_fix room tool over reg and proposals,
+// for harnesses (the evals) that drive it without a model. Proposals created
+// through it go through the same checks as the agent's own tool.
+func NewProposeFixTool(reg *actions.Registry, proposals Proposals) tools.Tool {
+	return &proposeFixTool{actions: reg, proposals: proposals}
+}
+
+// checkStep resolves a step to its action and decoded params, or returns the
+// error the model sees. Order: the action must exist, params must be a JSON
+// object that fits the action's ParamsSchema (types, required fields, enums,
+// no unknown fields), then the action's own Validate. None of it stores
+// anything. The schema check runs first because it names the bad field, which
+// the action's Validate usually does not.
+func (t *proposeFixTool) checkStep(i int, action string, rawParams json.RawMessage) (actions.Action, json.RawMessage, error) {
+	if t.actions == nil {
+		return nil, nil, fmt.Errorf("agent: no actions are available")
+	}
+	a, ok := t.actions.Get(action)
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: step %d: unknown action %q; available: %s", tools.ErrBadInput, i+1, action, t.actionNames())
+	}
+	params, err := decodeStepParams(rawParams)
+	if err != nil {
+		observeStep(a, rawParams, err)
+		return nil, nil, fmt.Errorf("%w: step %d (%s): %v", tools.ErrBadInput, i+1, action, err)
+	}
+	if schema := a.ParamsSchema(); schema != nil {
+		if err := validateInput(schema, params); err != nil {
+			observeStep(a, params, err)
+			return nil, nil, fmt.Errorf("%w: step %d (%s): params: %v", tools.ErrBadInput, i+1, action, err)
+		}
+	}
+	if err := a.Validate(params); err != nil {
+		return nil, nil, fmt.Errorf("%w: step %d (%s): %v", tools.ErrBadInput, i+1, action, err)
+	}
+	return a, params, nil
+}
+
+func (t *proposeFixTool) actionNames() string {
+	acts := t.actionsList()
+	names := make([]string, 0, len(acts))
+	for _, a := range acts {
+		names = append(names, a.Name())
+	}
+	return strings.Join(names, ", ")
+}
+
+// paramsSignature renders an action's params schema as "name:type, ..." for
+// the tool description. Required params come first in schema order, optional
+// ones follow sorted and end in "?". An enum shows its values and a property
+// description shows in brackets, so allowed values stay visible to the model
+// even though they are no longer in the strict schema.
+func paramsSignature(schema map[string]any) string {
+	props, _ := schema["properties"].(map[string]any)
+	if len(props) == 0 {
+		return ""
+	}
+	var required []string
+	switch r := schema["required"].(type) {
+	case []string:
+		required = r
+	case []any:
+		for _, x := range r {
+			if s, ok := x.(string); ok {
+				required = append(required, s)
+			}
+		}
+	}
+	isReq := map[string]bool{}
+	var names []string
+	for _, n := range required {
+		if _, ok := props[n]; ok && !isReq[n] {
+			isReq[n] = true
+			names = append(names, n)
+		}
+	}
+	var optional []string
+	for n := range props {
+		if !isReq[n] {
+			optional = append(optional, n)
+		}
+	}
+	sort.Strings(optional)
+	names = append(names, optional...)
+
+	parts := make([]string, 0, len(names))
+	for _, n := range names {
+		sub, _ := props[n].(map[string]any)
+		s := n
+		if !isReq[n] {
+			s += "?"
+		}
+		s += ":" + schemaTypeText(sub)
+		if desc, _ := sub["description"].(string); desc != "" {
+			s += " [" + desc + "]"
+		}
+		parts = append(parts, s)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// schemaTypeText is the short type name of one param: its enum values joined
+// with "|" when it has an enum, else its JSON type, with array<T> for arrays.
+func schemaTypeText(s map[string]any) string {
+	if enum := schemaEnum(s); len(enum) > 0 {
+		vals := make([]string, len(enum))
+		for i, v := range enum {
+			vals[i] = fmt.Sprint(v)
+		}
+		return strings.Join(vals, "|")
+	}
+	typ, _ := s["type"].(string)
+	switch typ {
+	case "":
+		return "any"
+	case "array":
+		if items, ok := s["items"].(map[string]any); ok {
+			return "array<" + schemaTypeText(items) + ">"
+		}
+	case "object":
+		if _, ok := s["properties"]; ok {
+			return "{" + paramsSignature(s) + "}"
+		}
+	}
+	return typ
 }
 
 func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -244,30 +507,29 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	if len(in.Steps) == 0 {
 		return tools.Result{}, fmt.Errorf("%w: at least one step is required", tools.ErrBadInput)
 	}
+	if err := checkProposalText("risk", in.Risk); err != nil {
+		return tools.Result{}, err
+	}
+	if err := checkProposalText("rollback", in.Rollback); err != nil {
+		return tools.Result{}, err
+	}
 	if t.proposals == nil {
 		return tools.Result{}, fmt.Errorf("agent: proposals are not available")
 	}
 
-	reg := t.actions
 	steps := make([]events.ProposalStep, 0, len(in.Steps))
 	seenLayers := map[string]bool{}
 	var layers []string
-	for _, s := range in.Steps {
-		if reg == nil {
-			return tools.Result{}, fmt.Errorf("agent: no actions are available")
-		}
-		a, ok := reg.Get(s.Action)
-		if !ok {
-			return tools.Result{}, fmt.Errorf("%w: unknown action %q", tools.ErrBadInput, s.Action)
-		}
-		if err := a.Validate(s.Params); err != nil {
-			return tools.Result{}, fmt.Errorf("%w: action %q: %v", tools.ErrBadInput, s.Action, err)
+	for i, s := range in.Steps {
+		a, params, err := t.checkStep(i, s.Action, s.Params)
+		if err != nil {
+			return tools.Result{}, err
 		}
 		layer := a.Layer()
 		steps = append(steps, events.ProposalStep{
 			Action:      s.Action,
 			Layer:       layer,
-			Params:      s.Params,
+			Params:      params,
 			Description: s.Description,
 		})
 		if !seenLayers[layer] {
@@ -288,15 +550,40 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("agent: create proposal: %w", err)
 	}
-	return tools.Result{Summary: fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(layers, ", "))}, nil
+	if t.track != nil {
+		t.track.record(id, steps)
+	}
+	return tools.Result{
+		Summary: fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(layers, ", ")),
+		Data:    proposeFixResult{ProposalID: id},
+	}, nil
 }
 
-// compactSchema renders a JSON Schema object as a compact string for tool
-// descriptions (the propose_fix description must list action param schemas).
-func compactSchema(s map[string]any) string {
-	b, err := json.Marshal(s)
-	if err != nil {
-		return "{}"
+// proposeFixResult is the structured result of a created proposal. The runner
+// reads the ID to take the proposal's creation baseline.
+type proposeFixResult struct {
+	ProposalID string `json:"proposal_id"`
+}
+
+// isPlaceholderText reports the values a model sends when it has nothing real
+// to put in risk or rollback. A live run stored them as "<no value>" for the
+// approvers to read, so they are refused the same as an empty string. v is
+// already trimmed and lower-cased.
+func isPlaceholderText(v string) bool {
+	switch v {
+	case "<no value>", "n/a", "none", "-", "tbd":
+		return true
 	}
-	return string(b)
+	return false
+}
+
+// checkProposalText refuses a risk or rollback that is empty, whitespace-only or
+// a placeholder (compared case-insensitively). The error wraps tools.ErrBadInput
+// so the model sees it as a failed tool call and retries with a real answer.
+func checkProposalText(field, value string) error {
+	v := strings.ToLower(strings.TrimSpace(value))
+	if v == "" || isPlaceholderText(v) {
+		return fmt.Errorf("%w: %s must describe the actual %s in words; empty or placeholder values such as n/a are refused", tools.ErrBadInput, field, field)
+	}
+	return nil
 }

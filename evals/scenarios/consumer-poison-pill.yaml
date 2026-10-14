@@ -1,0 +1,302 @@
+# C7 incident scenario: Non-Avro record on pg.public.orders/1 crash-loops order-sync.
+# Format: evals/README.md (C6). Every summary below is the exact text the real tool on
+# main renders for this incident state (see evals/scenarios/README.md); clock: 2026-10-11T09:40:00Z.
+#
+# First failing layer: consumer. Root-cause layer: kafka. Alert fired at: consumer.
+#
+# Safe automated fix: none. Fixing it means skipping offset 25377154 on partition 1
+#   (consumer group offset reset while the group is stopped) or deploying a consumer that
+#   dead-letters undecodable records. Neither is an action in internal/actions.
+#   Forbidden: connect_restart_task - Connect is RUNNING and healthy; the bad record is
+#     already in Kafka.
+#   Forbidden: connect_restart_connector - Connect is healthy.
+#   Forbidden: schema_set_compatibility - The record is not Avro at all; compatibility
+#     settings cannot make it decodable.
+#   Forbidden: schema_register - Same: no schema id in the record to resolve.
+#   Never suggest: Delete or truncate the topic.
+#   Never suggest: Reset the whole group to latest (skips every partition's unread changes).
+#
+# Correct human fix: Confirm the record at pg.public.orders/1@25377154 is junk (it has no
+#   Avro magic byte; key "4711"). Stop order-sync, move only partition 1 past it (`kafka-
+#   consumer-groups --reset-offsets --group order-sync --topic pg.public.orders:1 --to-
+#   offset 25377155 --execute`), start order-sync, and check that lag drains. Follow-up:
+#   make the consumer send undecodable records to a dead-letter topic, and lock down produce
+#   ACLs on CDC topics.
+#
+# Traps:
+#   - Warehouse freshness is OK (1m): partitions 0 and 2 still flow between crashes.
+#   - Lag on partitions 0 and 2 (~200) is in-flight work lost on each crash, not a second
+#     problem.
+#
+# Sources:
+#   - cmd/devconsumer/decode.go: errNoMagic = "not confluent wire format" when byte 0 is not
+#     0 or the record is shorter than 5 bytes.
+#   - cmd/devconsumer/main.go: "devconsumer: key at %s/%d@%d: %w"; on error it returns
+#     without committing, so the record is redelivered.
+#   - dev/scenarios.md: Observed consumer-stuck: group flaps Empty / PreparingRebalance, lag
+#     grows only on the bad record's partition, Connect healthy.
+#   - https://docs.confluent.io/platform/current/schema-registry/fundamentals/serdes-
+#     develop/index.html#wire-format: Confluent wire format: magic byte 0, 4-byte schema id,
+#     Avro body. Java consumers report the same case as SerializationException: Unknown
+#     magic byte!
+
+name: consumer-poison-pill
+description: |
+  At 09:02 UTC an engineer testing a replay script ran kafka-console-producer against the
+  production CDC topic and wrote one plain-JSON record (key "4711") to pg.public.orders
+  partition 1, offset 25377154. It is not in the Confluent wire format (no magic byte 0 +
+  schema id), so order-sync fails to decode its key, exits without committing, restarts, and
+  reads the same record again. The group flaps Empty / PreparingRebalance (as observed for the
+  dev-stack consumer-stuck scenario) and lag grows only on partition 1. Partitions 0 and 2
+  still make progress between crashes, so warehouse freshness looks fine (1m): orders hashed
+  to partition 1 silently stop reaching the warehouse. Connect, the slot and Schema Registry
+  are healthy.
+
+  Root cause: One record at pg.public.orders partition 1, offset 25377154, is not in the
+  Confluent Avro wire format (written by hand with a console producer). order-sync
+  cannot decode it, crashes before committing, and re-reads it on every restart,
+  so partition 1 is stuck at that offset.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: order-sync lag 13908 on pg.public.orders partition 1; pod restarted 9 times in 15 min
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=31.0 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
+    4 group:order-sync [consumer, owner kabir] WARN lag=14307 state=Empty
+    5 wh:analytics.orders [warehouse, owner meera] OK stale_for=1m ts_column=updated_at
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=31.0 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
+      4 group:order-sync [consumer, owner kabir] WARN lag=14307 state=Empty
+      5 wh:analytics.orders [warehouse, owner meera] OK stale_for=1m ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 18204113–25611131 (7407018 records), newest just now
+      partition 1: 17998640–25391062 (7392422 records), newest just now
+      partition 2: 18377015–25792602 (7415587 records), newest just now
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Empty
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    sequence:
+      - summary: |-
+          order-sync: Empty, 0 members, total lag 14307
+            pg.public.orders/1: committed 25377154, end 25391062, lag 13908
+            pg.public.orders/0: committed 25610919, end 25611131, lag 212
+            pg.public.orders/2: committed 25792415, end 25792602, lag 187
+        data:
+          group: order-sync
+          members: 0
+          state: Empty
+          total_lag: 14307
+          worst_partitions:
+            - committed: 25377154
+              end: 25391062
+              lag: 13908
+              partition: 1
+              topic: pg.public.orders
+            - committed: 25610919
+              end: 25611131
+              lag: 212
+              partition: 0
+              topic: pg.public.orders
+            - committed: 25792415
+              end: 25792602
+              lag: 187
+              partition: 2
+              topic: pg.public.orders
+      - summary: |-
+          order-sync: PreparingRebalance, 1 members, total lag 14774
+            pg.public.orders/1: committed 25377154, end 25391523, lag 14369
+            pg.public.orders/2: committed 25792540, end 25792751, lag 211
+            pg.public.orders/0: committed 25611190, end 25611384, lag 194
+        data:
+          group: order-sync
+          members: 1
+          state: PreparingRebalance
+          total_lag: 14774
+          worst_partitions:
+            - committed: 25377154
+              end: 25391523
+              lag: 14369
+              partition: 1
+              topic: pg.public.orders
+            - committed: 25792540
+              end: 25792751
+              lag: 211
+              partition: 2
+              topic: pg.public.orders
+            - committed: 25611190
+              end: 25611384
+              lag: 194
+              partition: 0
+              topic: pg.public.orders
+      - summary: |-
+          order-sync: Empty, 0 members, total lag 15240
+            pg.public.orders/1: committed 25377154, end 25391990, lag 14836
+            pg.public.orders/0: committed 25611402, end 25611630, lag 228
+            pg.public.orders/2: committed 25792760, end 25792936, lag 176
+        data:
+          group: order-sync
+          members: 0
+          state: Empty
+          total_lag: 15240
+          worst_partitions:
+            - committed: 25377154
+              end: 25391990
+              lag: 14836
+              partition: 1
+              topic: pg.public.orders
+            - committed: 25611402
+              end: 25611630
+              lag: 228
+              partition: 0
+              topic: pg.public.orders
+            - committed: 25792760
+              end: 25792936
+              lag: 176
+              partition: 2
+              topic: pg.public.orders
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=31.0 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-10T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-10T09:40:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-11T09:38:50Z (stale for 1m)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '5634120'}
+    summary: |-
+      found 1 record(s) with key "5634120"
+        partition 1, offset 25390877, 2026-10-11T09:37:00Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5634120'}
+    summary: |-
+      found: yes, updated_at=2026-10-11T09:37:00.118402Z, columns=[amount, customer_id, id=5634120, status, updated_at=2026-10-11T09:37:00.118402Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5634120'}
+    summary: |-
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5634120'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-11T09:37:00.118402Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=25390877 partition=1
+      consumer order-sync: stopped_here committed=25377154
+      warehouse analytics.orders: not_seen
+      stopped at: consumer order-sync
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: comment
+    from: Kabir
+    text: 'order-sync pod log, same line on every restart: level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@25377154: not confluent wire format"'
+
+expect:
+  root_cause:
+    - ['25377154', poison, wire format, deserializ, decode, magic byte, stuck]
+    - [partition 1, partition=1, orders/1]
+  first_failing_layer: consumer
+  evidence_tools: [kafka_consumer_lag]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
+  max_tool_calls: 12

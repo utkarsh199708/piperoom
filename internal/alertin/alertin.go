@@ -45,9 +45,13 @@ const (
 	PagerDuty    Source = "pagerduty"
 	Datadog      Source = "datadog"
 	Generic      Source = "generic"
+	// Watcher is the built-in watcher (internal/watch). It builds its Alert
+	// itself, so it has no HTTP route, no secret, and is not in Sources.
+	Watcher Source = "watcher"
 )
 
-// Sources lists every supported source.
+// Sources lists every source that arrives over HTTP. Watcher is left out on
+// purpose: nothing may post as the watcher from outside the process.
 var Sources = []Source{Alertmanager, Grafana, PagerDuty, Datadog, Generic}
 
 // Alert statuses.
@@ -134,9 +138,10 @@ func (a Alert) RoomCreated() events.RoomCreatedPayload {
 
 var pipelineIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 
-// validPipelineID reports whether id looks like an owners.yaml pipeline id.
+// ValidPipelineID reports whether id looks like an owners.yaml pipeline id
+// (the room service and cmd/server use it too, so the shape lives in one place).
 // Anything else in an alert label is ignored rather than trusted.
-func validPipelineID(id string) bool {
+func ValidPipelineID(id string) bool {
 	return pipelineIDRe.MatchString(id)
 }
 

@@ -20,7 +20,7 @@ func (t *registrySubjects) InputSchema() map[string]any {
 	return objectSchema(map[string]any{"prefix": strProp("optional subject prefix filter")})
 }
 func (t *registrySubjects) Description() string {
-	return "Lists schema registry subjects, optionally filtered by a prefix."
+	return "Lists the pipeline's schema registry subjects, optionally filtered by a prefix."
 }
 
 func (t *registrySubjects) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -30,19 +30,32 @@ func (t *registrySubjects) Run(ctx context.Context, input json.RawMessage) (tool
 	if err := json.Unmarshal(input, &p); err != nil {
 		return tools.Result{}, fmt.Errorf("%w: %v", tools.ErrBadInput, err)
 	}
+	sc, err := t.d.scope(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	subjects, err := t.d.Registry.Subjects(cctx)
 	if err != nil {
 		return tools.Result{}, err
 	}
+	// Only subjects derived from this room's pipeline topics; the others are
+	// only counted, before the prefix filter, so a prefix cannot probe for
+	// other subjects' names through the count.
+	all := len(subjects)
+	subjects = sc.FilterSubjects(subjects)
+	other := all - len(subjects)
 	var out []string
 	for _, s := range subjects {
 		if p.Prefix == "" || strings.HasPrefix(s, p.Prefix) {
 			out = append(out, s)
 		}
 	}
-	return res(strings.Join(out, "\n"), out), nil
+	var sb strings.Builder
+	sb.WriteString(strings.Join(out, "\n"))
+	appendLine(&sb, tools.NotShown(other, "subject", "subjects"))
+	return res(sb.String(), out), nil
 }
 
 // ---- schema_registry_versions ----
@@ -64,6 +77,13 @@ func (t *registryVersions) Run(ctx context.Context, input json.RawMessage) (tool
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Subject == "" {
 		return tools.Result{}, fmt.Errorf("%w: subject is required", tools.ErrBadInput)
+	}
+	sc, err := t.d.scope(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if err := sc.CheckSubject(p.Subject); err != nil {
+		return tools.Result{}, err
 	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
@@ -118,6 +138,13 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 	}
 	if err := json.Unmarshal(input, &p); err != nil || p.Subject == "" {
 		return tools.Result{}, fmt.Errorf("%w: subject is required", tools.ErrBadInput)
+	}
+	sc, err := t.d.scope(ctx)
+	if err != nil {
+		return tools.Result{}, err
+	}
+	if err := sc.CheckSubject(p.Subject); err != nil {
+		return tools.Result{}, err
 	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()

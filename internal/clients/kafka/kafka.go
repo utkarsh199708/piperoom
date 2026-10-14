@@ -16,6 +16,7 @@ import (
 
 	"github.com/hamba/avro/v2"
 	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"piperoom/internal/clients"
@@ -32,6 +33,11 @@ type Client struct {
 	adm      *kadm.Client
 	cl       *kgo.Client
 	sr       *schemareg.Client
+
+	// offs and consumerFn are test seams for the DLQ reader; nil means the
+	// real kadm/kgo clients.
+	offs       offsetLister
+	consumerFn func(map[string]map[int32]kgo.Offset) (dlqConsumer, error)
 
 	srMu    sync.Mutex
 	srCache map[int]avro.Schema
@@ -138,6 +144,93 @@ func (c *Client) TopicOffsets(ctx context.Context, topic string) ([]clients.Part
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Partition < out[j].Partition })
 	return out, nil
+}
+
+// TopicConfig is one topic's key configuration and shape, as returned by
+// DescribeTopicConfigs. Config values are the raw Kafka strings; "-1" means
+// unlimited where the config allows it. It lives in this package until
+// clients.KafkaAdmin gains the method (contract change request in the PR);
+// it is then meant to move to package clients unchanged.
+type TopicConfig struct {
+	Topic             string `json:"topic"`
+	Partitions        int    `json:"partitions"`
+	ReplicationFactor int    `json:"replication_factor"`
+	RetentionMS       string `json:"retention_ms"`
+	RetentionBytes    string `json:"retention_bytes"`
+	CleanupPolicy     string `json:"cleanup_policy"`
+	MinInsyncReplicas string `json:"min_insync_replicas"`
+}
+
+// DescribeTopicConfigs returns the topic's key configs (retention.ms,
+// retention.bytes, cleanup.policy, min.insync.replicas) plus its partition
+// count and replication factor. Values are effective: a broker default counts
+// when the topic carries no override. An unknown topic is reported as
+// clients.ErrNotFound.
+func (c *Client) DescribeTopicConfigs(ctx context.Context, topic string) (TopicConfig, error) {
+	rcs, err := c.adm.DescribeTopicConfigs(ctx, topic)
+	if err != nil {
+		return TopicConfig{}, fmt.Errorf("kafka: topic configs %s: %w", topic, mapNotFound(err))
+	}
+	var rc *kadm.ResourceConfig
+	for i := range rcs {
+		if rcs[i].Name == topic {
+			rc = &rcs[i]
+			break
+		}
+	}
+	if rc == nil {
+		return TopicConfig{}, fmt.Errorf("kafka: topic configs %s: %w", topic, clients.ErrNotFound)
+	}
+	if rc.Err != nil {
+		return TopicConfig{}, fmt.Errorf("kafka: topic configs %s: %w", topic, mapNotFound(rc.Err))
+	}
+
+	tds, err := c.adm.ListTopics(ctx, topic)
+	if err != nil {
+		return TopicConfig{}, fmt.Errorf("kafka: topic details %s: %w", topic, err)
+	}
+	td, ok := tds[topic]
+	if !ok {
+		return TopicConfig{}, fmt.Errorf("kafka: topic details %s: %w", topic, clients.ErrNotFound)
+	}
+	if td.Err != nil {
+		return TopicConfig{}, fmt.Errorf("kafka: topic details %s: %w", topic, mapNotFound(td.Err))
+	}
+	return topicConfigFrom(topic, *rc, td), nil
+}
+
+// topicConfigFrom maps kadm's config entries and partition details onto the
+// DTO. Only the keys the tool reports are read, so no other (possibly
+// sensitive) config value can leak into the result.
+func topicConfigFrom(topic string, rc kadm.ResourceConfig, td kadm.TopicDetail) TopicConfig {
+	cfg := TopicConfig{
+		Topic:             topic,
+		Partitions:        len(td.Partitions),
+		ReplicationFactor: td.Partitions.NumReplicas(),
+	}
+	for i := range rc.Configs {
+		switch rc.Configs[i].Key {
+		case "retention.ms":
+			cfg.RetentionMS = rc.Configs[i].MaybeValue()
+		case "retention.bytes":
+			cfg.RetentionBytes = rc.Configs[i].MaybeValue()
+		case "cleanup.policy":
+			cfg.CleanupPolicy = rc.Configs[i].MaybeValue()
+		case "min.insync.replicas":
+			cfg.MinInsyncReplicas = rc.Configs[i].MaybeValue()
+		}
+	}
+	return cfg
+}
+
+// mapNotFound turns the broker's UNKNOWN_TOPIC_OR_PARTITION into
+// clients.ErrNotFound so callers can tell "no such topic" from a broker
+// failure. kadm reports it as the kerr sentinel pointer.
+func mapNotFound(err error) error {
+	if errors.Is(err, kerr.UnknownTopicOrPartition) {
+		return clients.ErrNotFound
+	}
+	return err
 }
 
 // ConsumerGroups lists consumer group names.
