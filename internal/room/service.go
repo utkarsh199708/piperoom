@@ -63,6 +63,12 @@ type Deps struct {
 	ShadowGrace time.Duration
 	Logger      *slog.Logger
 	Now         func() time.Time
+	// LeaseTicker, when set, replaces the ticker of the driver lease expiry
+	// check (lease_expiry.go): it returns the tick channel for period d and a
+	// stop func. Tests pass a channel they feed by hand, together with Now,
+	// so a check runs exactly when and at the time the test says. Nil uses
+	// time.NewTicker.
+	LeaseTicker func(d time.Duration) (<-chan time.Time, func())
 
 	// MaxAgents caps agent runs working at the same time on this replica,
 	// across all its rooms; a room over the cap waits in a queue that is
@@ -214,6 +220,12 @@ type Service struct {
 	resumeOnTakeover bool
 	coordOnce        sync.Once
 
+	// Driver lease expiry (lease_expiry.go). leaseTickDone, when set (tests
+	// only), runs after each check of the loop.
+	leaseTicker   func(d time.Duration) (<-chan time.Time, func())
+	leaseOnce     sync.Once
+	leaseTickDone func()
+
 	// ctx is the service lifetime: every goroutine the service starts (agent
 	// supervisors, executor queues) derives from it. Close cancels it and
 	// waits.
@@ -290,6 +302,7 @@ func New(d Deps) *Service {
 		viewerGroups: groupSet(d.ViewerGroups),
 		soloUser:     d.SoloUser,
 		limits:       d.Limits,
+		leaseTicker:  d.LeaseTicker,
 		ctx:          ctx,
 		cancel:       cancel,
 		rooms:        map[string]*roomState{},
@@ -367,6 +380,7 @@ func (s *Service) Load(ctx context.Context) error {
 		return err
 	}
 	s.startCoordination()
+	s.startLeaseExpiry()
 	return nil
 }
 

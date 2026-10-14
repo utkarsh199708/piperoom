@@ -29,6 +29,11 @@ type Driver struct {
 	Name       string    `json:"name"`
 	Verified   bool      `json:"verified"`
 	LeaseUntil time.Time `json:"lease_until"`
+	// LeaseExpired is the "nobody is driving" signal (docs/api.md, Lease
+	// expiry): the last control.lease_expired names this driver and the
+	// lease_until of the control.granted that set the current lease. The
+	// next control.granted clears it. Omitted when false.
+	LeaseExpired bool `json:"lease_expired,omitempty"`
 }
 
 // AgentStatus mirrors events.AgentStatusPayload.
@@ -101,6 +106,12 @@ type RoomSnapshot struct {
 	// the newest room.retention_warning. Only the service reads them.
 	extendedUntil *time.Time
 	warnedFor     *time.Time
+
+	// grantedLease is lease_until of the last control.granted: the lease as
+	// the log knows it. Driver.LeaseUntil can be later (unlogged renewals,
+	// see touchDriverLease); control.lease_expired names grantedLease, so
+	// every client folding the log matches it (lease_expiry.go).
+	grantedLease time.Time
 
 	// Shadow facts folded from the log after room.closed. Unexported: they are
 	// not part of the snapshot JSON (docs/api.md), only the service reads them.
@@ -302,7 +313,11 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			snap.Members = setRole(snap.Members, snap.Driver.ID, "watching")
 		}
 		snap.Driver = &Driver{ID: p.To.ID, Name: p.To.Name, Verified: p.To.Verified, LeaseUntil: p.LeaseUntil}
+		snap.grantedLease = p.LeaseUntil
 		snap.Members = upsertMember(snap.Members, p.To, "driver")
+
+	case events.ControlLeaseExpired:
+		applyLeaseExpired(&snap, e)
 
 	case events.ProposalCreated:
 		p, ok := decode[events.ProposalCreatedPayload](e)
