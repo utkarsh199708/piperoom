@@ -1,0 +1,34 @@
+import { useId, useState } from 'react'
+import { cn } from '@/lib/utils'
+
+/** Prose longer than this (or with more lines) starts collapsed. */
+const COLLAPSE_CHARS = 280
+const COLLAPSE_LINES = 4
+
+function isLongText(text: string): boolean {
+  return text.length > COLLAPSE_CHARS || text.split('\n').length > COLLAPSE_LINES
+}
+
+// Long agent prose folds to three lines so a room that ran for hours stays scannable.
+// Tool steps are not wrapped in this: they stay visible. Short text renders as is.
+export function CollapsibleText({ text, className }: { text: string; className?: string }) {
+  const [open, setOpen] = useState(false)
+  const id = useId()
+  if (!isLongText(text)) return <span className={className}>{text}</span>
+  return (
+    <span className={cn('flex flex-col items-start gap-0.5', className)}>
+      <span id={id} className={cn('whitespace-pre-line break-words', !open && 'line-clamp-3')}>
+        {text}
+      </span>
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={id}
+        onClick={() => setOpen((o) => !o)}
+        className="rounded-sm text-xs text-agent-foreground underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {open ? 'Show less' : 'Show more'}
+      </button>
+    </span>
+  )
+}

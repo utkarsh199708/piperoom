@@ -47,6 +47,7 @@ describe('SteerBox', () => {
           suggestion_id: 'g1',
           from: { kind: 'human' as const, id: 'kabir', name: 'Kabir' },
           text: 'check the config',
+          status: 'pending' as const,
         },
       ],
     }

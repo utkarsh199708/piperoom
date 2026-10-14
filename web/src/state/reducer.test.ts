@@ -143,14 +143,16 @@ describe('applyEvent — every event type', () => {
     expect(s.comments[0].author.id).toBe('arjun')
   })
 
-  it('steer.suggested adds a pending suggestion; steer.sent with id removes it', () => {
+  it('steer.suggested adds a pending suggestion; steer.sent with id marks it accepted', () => {
     let s = applyEvent(
       base(),
       ev(1, 'steer.suggested', { suggestion_id: 'g1', text: 'try X' }, human),
     )
     expect(s.suggestions).toHaveLength(1)
+    expect(s.suggestions[0].status).toBe('pending')
     s = applyEvent(s, ev(2, 'steer.sent', { suggestion_id: 'g1', text: 'try X' }, human))
-    expect(s.suggestions).toHaveLength(0)
+    expect(s.suggestions).toHaveLength(1)
+    expect(s.suggestions[0].status).toBe('accepted')
   })
 
   it('control.requested and control.granted move the driver', () => {

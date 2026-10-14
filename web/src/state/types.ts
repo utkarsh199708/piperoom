@@ -67,10 +67,20 @@ export interface CommentState {
   replies: AgentMessageState[]
 }
 
+/**
+ * pending: waiting in the driver's queue. accepted: the driver sent it (steer.sent with its id).
+ * declined: HOOK(R10) - no declined event exists in docs/api.md or events.go yet, so the reducer
+ * never produces this value; it is here so the UI renders it the day the contract adds one.
+ */
+export type SuggestionStatus = 'pending' | 'accepted' | 'declined'
+
 export interface SuggestionState {
   suggestion_id: string
   from: Actor
   text: string
+  status: SuggestionStatus
+  /** When the suggestion was made. */
+  at?: string
 }
 
 /** Who decided a layer, how they logged in, and the hash they decided on. */
@@ -150,6 +160,11 @@ export interface RoomState {
   closed_at?: string
   resolution?: string
   last_seq: number
+  /**
+   * The snapshot's last_seq: how many events the first replay (after=0) has to fold. 0 when
+   * unknown (fixtures, empty room). Drives the replay progress bar.
+   */
+  replay_target: number
   driver: DriverInfo | null
   /** Set when room.created carried an alert webhook body (alert-opened room). */
   alert: AlertInfo | null
@@ -182,6 +197,7 @@ export function emptyRoomState(id: string): RoomState {
     status: 'open',
     opened_at: '',
     last_seq: 0,
+    replay_target: 0,
     driver: null,
     alert: null,
     agent_status: { state: 'idle' },
@@ -217,6 +233,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     closed_at: snapshot.closed_at,
     resolution: snapshot.resolution,
     last_seq: 0,
+    replay_target: snapshot.last_seq ?? 0,
     snapshot_hashes: Object.fromEntries(
       (snapshot.open_proposals ?? [])
         .filter((p) => p.params_hash)
