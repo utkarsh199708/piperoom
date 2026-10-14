@@ -1,7 +1,8 @@
 # Vulnerability report 2026-10: govulncheck and npm audit
 
-Agent C3 (cloud), 2026-10-13. Branch `c3/vuln-report`. Scanned at `1b31e7a` (base `2fb0055`). Current `main`
-is `85fa78d`; the reviewer's rescan of current `main` at `85fa78d` gave identical govulncheck results.
+Agent C3 (cloud), 2026-10-13. Branch `c3/vuln-report`. Scanned at `1b31e7a` (base `2fb0055`). At review,
+`main` was `09473b2`; it is now `f902c5a` after #87 and #90. Those merges do not change the Go call paths or web
+lockfile discussed here. The reviewer's rescan at `09473b2` gave identical govulncheck results.
 
 ## Summary
 
@@ -17,8 +18,12 @@ is `85fa78d`; the reviewer's rescan of current `main` at `85fa78d` gave identica
     `github.com/iskorotkov/avro/v2` v2.33.0 fixes all three (5048 only with `Config.MaxMapAllocSize` set).
   - **Correction from the previous revision:** the avro findings are reachable from production, not only from
     `cmd/devctl`. The Kafka client decodes untrusted record keys (see the table and "Priority" below).
-- **npm, production dependencies (`--omit=dev`): 0 vulnerabilities.** Full `npm audit` (dev included) reports 3
-  advisories, all in dev tooling, listed below. The web lockfile is unchanged in this PR.
+- **npm, production dependencies (`--omit=dev`): 0 vulnerabilities.** On this PR's lockfile, full `npm audit`
+  reports 3 dev-tooling advisories. On current `main`, the full audit reports 10 advisories (3 moderate, 5 high,
+  2 critical), all dev-only; the added UI dependencies include `braces` (high) and
+  `postcss-selector-parser` (moderate). Both are pulled in through Tailwind CSS. The npm fix for those two requires
+  Tailwind CSS 4.3.3, a breaking major upgrade, so there is no safe patch in the current major. The web lockfile is
+  unchanged in this PR.
 - **Upgrades in this PR:** `go.mod`/`go.sum` only, aws-sdk-go-v2 and smithy-go minor/patch bumps (listed below).
   No major upgrades.
 
@@ -41,7 +46,8 @@ through one of those is noise on its own. The findings below cite only paths tha
 | Go toolchain before (`go.mod` `go 1.27.0`) | go1.27.0 linux/amd64 |
 | Go toolchain after (verified, not yet pinned) | go1.27.2 linux/amd64 |
 | govulncheck | v1.9.0, built with `GOTOOLCHAIN=go1.27.0` |
-| Node / npm (this session) | v22.22.0 / 10.9.4 (target is Node 24, see npm section) |
+| Node / npm (original report scan) | v22.22.0 / 10.9.4 |
+| Node (reviewer re-run on current main) | v24.19.0 (npm version not recorded) |
 
 `go install golang.org/x/vuln/cmd/govulncheck@latest` resolves to v1.9.0, which built with go1.26 and fails to load
 go1.27 packages. Building it with `GOTOOLCHAIN=go1.27.0` fixed that.
@@ -99,14 +105,17 @@ GO-2026-5764 (aws-sdk-go-v2 `service/s3` v1.53.1 and `eventstream` v1.6.3, panic
 The Kafka client decodes record keys from topics that pipeline producers write, and the key carries the schema id
 in its first bytes. `decodeKey` (kafka.go:434-436) parses a schema from the registry, then calls `Decoder.Decode`
 on the key bytes. The `Decode` call takes no context, so the 15 s deadline on `FindByKey` does not stop it. The
-read-tool goroutine in `internal/agent/run.go` (goroutine starts at line 619, `wg.Wait()` at line 634) has no
-`recover()` (none in `internal/agent/run.go`).
+read-tool goroutine in `internal/agent/run.go` starts at line 631 and recovers a panic at line 634. `Run` waits
+for the tool goroutines at line 657, then re-panics with the first captured panic. In `cmd/server`,
+`internal/room/service.go:904-912` (`runGuarded`) catches that panic and turns it into a failed room run; it does not
+bring down the server. `cmd/investigate` has no such outer guard.
 
 Per the advisories:
-- GO-2026-5046: a block count can be attacker-chosen up to MaxInt64 followed by EOF, so one payload spins a core
-  until the process is killed. Blocking the `wg.Wait()` at run.go:634 would hang the room.
+- GO-2026-5046: a block count can be attacker-chosen up to MaxInt64 followed by EOF, so one payload can spin a core
+  indefinitely. `Decode` has no context cancellation; the room run remains blocked waiting at `run.go:657`.
 - GO-2026-5047: three sub-issues panic or bypass caps on any platform (cumulative size overflow, MinInt negation,
-  negative block size). A panic in the read-tool goroutine with no `recover()` takes down the server.
+  negative block size). The panic is recovered in the tool goroutine and re-panicked by `Run` after its sibling calls
+  finish. The server's `runGuarded` turns it into a failed room run; `cmd/investigate` still sees the panic.
 - GO-2026-5048: unbounded map growth, OOM.
 
 Exploitability (reviewer analysis): anyone who can produce to a pipeline topic controls the key bytes, including the
@@ -125,8 +134,6 @@ Recommended follow-ups (not in this PR; owners to assign):
   `NewDecoderForSchema` or `Unmarshal` for untrusted input: they use `DefaultConfig` (decoder.go:24-25), which sets no
   limits, so GO-2026-5048 stays open (`MaxMapAllocSize` 0 means unbounded). Refuse keys larger than 64 KiB, refuse key
   schemas containing array or map types, and add a `defer recover()` in `decodeKey`.
-- **A4 (owns `internal/agent/**`):** add a `recover()` in the read-tool goroutine (run.go, around line 619) so one
-  hostile key cannot crash the server.
 - The fork's config fields (`MaxByteSliceSize`, `MaxSliceAllocSize`, `MaxMapAllocSize`) and `Config.Freeze` were
   checked in a scratch module against v2.33.0. Switching the import path also needs the `go.mod` change, which is
   not in this PR.
@@ -188,9 +195,10 @@ module path, a follow-up for A2), gosnowflake v1.x (latest v1.19.1).
 
 After the bump, the AWS modules are not all on the same release train. Still at older versions in `go.mod`:
 `github.com/aws/aws-sdk-go-v2/config` v1.27.27, `credentials` v1.17.27, `service/sts` v1.30.3,
-`service/sso` v1.22.4, `service/ssooidc` v1.26.4, `feature/ec2/imds` v1.16.11. The core module is at v1.41.5.
-These credential-chain modules feed the Bedrock and MSK IAM credentials. The build and tests pass, but a coordinated
-bump of all of them is the recommended follow-up.
+`service/sso` v1.22.4, `service/ssooidc` v1.26.4, `feature/ec2/imds` v1.16.11. The core module is a direct
+requirement (`go.mod:7`) at v1.41.5. These credential-chain modules feed the Bedrock and MSK IAM credentials. The
+build and unit tests pass, but there are no integration tests for those signing paths; a coordinated bump of all of
+them is the recommended follow-up.
 
 ## Go toolchain
 
@@ -212,16 +220,19 @@ These lines are recommended and **not applied in this commit**:
 ## npm (web)
 
 - Production dependencies (`npm audit --omit=dev`): 0 vulnerabilities.
-- Full audit (`npm audit`, dev included): 3 advisories, all dev-only, all through `vitest`:
+- Full audit of this PR's lockfile (`npm audit`, dev included): 3 advisories, all dev-only, through `vitest`:
   - `tinypool` 1.1.1 (installed; audit range `<= 2.1.1`): critical, prototype pollution gadgets leading to RCE,
     GHSA-5gmw-xhrv-c9v3 and GHSA-85c8-ppgw-ccpr.
   - `@vitest/mocker` 3.2.4 (audit range `2.1.0 - 4.1.10`): moderate, path traversal via redirect mock,
     GHSA-82fw-gwwq-j7x9.
   - Root: `vitest` pinned at `3.2.4` in `web/package.json` (line 34).
+- Current `main` also reports `braces` (high) and `postcss-selector-parser` (moderate), both pulled in through
+  Tailwind CSS. The current-major Tailwind line has no safe fix; npm's suggested `tailwindcss@4.3.3` is a breaking
+  major upgrade. These are development dependencies; `npm audit --omit=dev` remains at zero.
 - Fix: `vitest` 3.2.7 (npm's suggested target). This needs a `web/package.json` and lockfile change, which is owned by
   A6. Not applied here.
-- Node: this session ran Node v22.22.0. The Dockerfile uses `node:24-alpine`, and the target is Node 24. The audit
-  result was read on Node 22; re-run on Node 24 before closing the npm item.
+- Node: the original report used v22.22.0, but the reviewer re-ran the audit on Node v24.19.0. The Dockerfile uses
+  `node:24-alpine`; the Node 24 re-run is complete. The npm version for that re-run was not recorded.
 
 ## Flaky tests observed
 
@@ -236,11 +247,13 @@ These lines are recommended and **not applied in this commit**:
 
 - The gosnowflake mitigation in the code (steps 1-2 above) is not applied in this PR. `internal/clients/snowflake/**`
   is owned by C3 (AGENTS.md §2), so it is a follow-up for C3, not A2.
-- The avro switch to the fork, the bounded decode config, and the `recover()` in `decodeKey` and the read-tool
-  goroutine are follow-ups for A2 and A4.
+- The avro switch to the fork, bounded decode config, and `recover()` in `decodeKey` are follow-ups for A2. The
+  read-tool goroutine already recovers panics on current `main`; `cmd/server` also contains the `runGuarded` panic
+  boundary described above.
 - The `go` directive and Dockerfile pin are recommended, not applied.
 - The vitest bump to 3.2.7 is for A6.
-- Node 24 re-run of `npm audit` is pending.
+- `npm audit` on the current main lockfile still reports dev-only findings; upgrading Tailwind to v4 is a separate
+  breaking-change decision for A6.
 
 ## New dependencies
 
