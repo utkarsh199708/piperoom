@@ -1,4 +1,5 @@
 // Maps domain values to chip tone names (see .chip--* in index.css).
+import { humanStatus } from './status'
 export function severityTone(severity: string): string {
   switch (severity) {
     case 'sev1':
@@ -27,6 +28,6 @@ export function agentStatusChip(state: string, detail?: string): { tone: string;
     case 'idle':
       return { tone: 'info', label: 'idle' }
     default:
-      return { tone: 'muted', label: detail ? `${state} · ${detail}` : state }
+      return { tone: 'muted', label: detail ? `${humanStatus(state)} · ${detail}` : humanStatus(state) }
   }
 }

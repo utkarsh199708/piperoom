@@ -237,6 +237,30 @@ body {
   font-size: 13px;
   line-height: 18px;
   -webkit-font-smoothing: antialiased;
+  /* A long token (a URL, a run of AAAA…) breaks instead of running out of its column into the rail. */
+  overflow-wrap: break-word;
+}
+
+/*
+ * Titles, names, messages and params come from people and the agent and may carry bidi controls
+ * (U+202E). Each inline element is its own bidi isolate, like <bdi>, so an override inside it cannot
+ * reorder the UI text around it. Sentences built as one string isolate their values (lib/bidi.ts).
+ */
+span,
+strong,
+em,
+code,
+a,
+label,
+time,
+bdi,
+h1,
+h2,
+h3,
+p,
+li,
+td {
+  unicode-bidi: isolate;
 }
 
 /* Visible keyboard focus everywhere (WCAG 2.4.7). shadcn parts add their own ring on top. */

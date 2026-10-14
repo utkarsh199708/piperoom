@@ -55,9 +55,16 @@ export interface CloseResult {
 
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
 
+/** How long the socket may be (re)connecting before the room says live updates are down. */
+export const LIVE_GRACE_MS = 4000
+
 export interface RoomActions {
   comment: (text: string, stepId?: string) => void
-  steer: (text: string) => void
+  /**
+   * Resolves true once the server has the steer (or suggestion), false when it failed; the
+   * error is in the room error banner. The composer keeps the text until it is true.
+   */
+  steer: (text: string) => Promise<boolean>
   sendSuggestion: (suggestionId: string) => void
   requestControl: () => void
   grantControl: (to: string) => void
@@ -107,6 +114,9 @@ export function useRoom(roomId: string) {
   // reload it triggers clears `error`, and the banner must outlive the reload.
   const [stale, setStale] = useState<StaleInfo | null>(null)
   const [reloadKey, setReloadKey] = useState(0)
+  // The socket has been (re)connecting for longer than LIVE_GRACE_MS: what is on screen may be
+  // only the snapshot, or stale. Cleared when a socket opens.
+  const [liveDown, setLiveDown] = useState(false)
 
   const lastSeqRef = useRef(0)
   const stateRef = useRef<RoomState | null>(null)
@@ -130,6 +140,7 @@ export function useRoom(roomId: string) {
     lastSeqRef.current = 0
     setError(null)
     setPresence([])
+    setLiveDown(false)
 
     if (isFixtures()) {
       const snapshot = fixtureRoom(roomId) ?? emptySnapshot(roomId, roomId, 'sev3', 'orders')
@@ -256,6 +267,7 @@ export function useRoom(roomId: string) {
         opened = true
         probed = false
         backoff = 1000
+        setLiveDown(false)
         setConn('live')
         setError(null)
         sendPresence('viewing')
@@ -342,6 +354,12 @@ export function useRoom(roomId: string) {
     }
   }, [roomId, user.id, user.name, sessionEpoch, reloadKey])
 
+  useEffect(() => {
+    if (conn !== 'connecting' && conn !== 'reconnecting') return
+    const t = window.setTimeout(() => setLiveDown(true), LIVE_GRACE_MS)
+    return () => window.clearTimeout(t)
+  }, [conn])
+
   // Fetch the snapshot and replay the log again (a fresh socket, after=0).
   // Reload closes the stale toast and it stays closed: the toast is raised only where the 409
   // happens (onMismatch), never when the banner mounts.
@@ -419,9 +437,18 @@ export function useRoom(roomId: string) {
           isDriver ? 'steer.sent' : 'steer.suggested',
           isDriver ? { text } : { suggestion_id: nextLocalId(), text },
         )
-        return
+        return Promise.resolve(true)
       }
-      void runAction(api.steer(roomId, text))
+      return api.steer(roomId, text).then(
+        () => {
+          setError(null)
+          return true
+        },
+        (e: unknown) => {
+          setError(errorText(e))
+          return false
+        },
+      )
     },
     sendSuggestion: (suggestionId) => {
       if (isFixtures()) {
@@ -570,5 +597,5 @@ export function useRoom(roomId: string) {
     },
   }
 
-  return { state, presence, conn, error, actions, stale, dismissStale, reload }
+  return { state, presence, conn, liveDown: liveDown && conn !== 'live', error, actions, stale, dismissStale, reload }
 }

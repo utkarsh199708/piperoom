@@ -3,6 +3,7 @@ import type { Event, RoomSnapshot } from '../api/types'
 import { FIXTURE_ROOM_ID, fixtureEvents } from '../fixtures/player'
 import { applyEvent, detectGap } from './reducer'
 import { emptyRoomState, fromSnapshot } from './types'
+import { stripIsolates } from '../lib/bidi'
 
 const human = { kind: 'human' as const, id: 'arjun', name: 'Arjun' }
 const agent = { kind: 'agent' as const, id: 'agent', name: 'Agent' }
@@ -356,7 +357,7 @@ describe('applyEvent — control.granted wording', () => {
       s,
       ev(2, 'control.granted', { to: arjun, lease_until: '2026-10-11T10:30:00Z' }, arjun),
     )
-    expect(s.activity[0].text).toBe('Arjun renewed the lease')
+    expect(stripIsolates(s.activity[0].text)).toBe('Arjun renewed the lease')
     expect(s.driver?.id).toBe('arjun')
   })
 
@@ -366,7 +367,7 @@ describe('applyEvent — control.granted wording', () => {
       s,
       ev(2, 'control.granted', { to: kabir, lease_until: '2026-10-11T10:35:00Z' }, kabir),
     )
-    expect(s.activity[0].text).toBe('Kabir took control')
+    expect(stripIsolates(s.activity[0].text)).toBe('Kabir took control')
     expect(s.driver?.id).toBe('kabir')
   })
 
@@ -376,7 +377,7 @@ describe('applyEvent — control.granted wording', () => {
       s,
       ev(2, 'control.granted', { to: kabir, lease_until: '2026-10-11T10:35:00Z' }, arjun),
     )
-    expect(s.activity[0].text).toBe('Arjun handed control to Kabir')
+    expect(stripIsolates(s.activity[0].text)).toBe('Arjun handed control to Kabir')
   })
 })
 
@@ -443,8 +444,8 @@ describe('schema-change fixture activity', () => {
       textBySeq.set(e.seq, s.activity[0].text)
     }
     expect(s.last_seq).toBe(34)
-    expect(textBySeq.get(2)).toBe('Arjun renewed the lease')
-    expect(textBySeq.get(33)).toBe('Kabir took control')
+    expect(stripIsolates(textBySeq.get(2) ?? '')).toBe('Arjun renewed the lease')
+    expect(stripIsolates(textBySeq.get(33) ?? '')).toBe('Kabir took control')
   })
 })
 

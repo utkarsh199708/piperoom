@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Topology } from '../api/types'
-import { api, isFixtures } from '../api/client'
+import { ApiClientError, api, isFixtures } from '../api/client'
 import { fixtureTopology } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 
@@ -25,13 +25,17 @@ export function useTopology(pipelineId: string, options: TopologyOptions = {}) {
 
   const refreshKey = options.refreshKey ?? 0
   const active = options.active !== false
+  // Pipelines (per session) the server answered 404 for. An unknown pipeline stays unknown for
+  // the life of the room, so it is not asked again on every tick and every executed action (QA9).
+  const notFound = useRef(new Set<string>())
 
   useEffect(() => {
     let cancelled = false
     let inFlight = false
+    const key = `${sessionEpoch}|${pipelineId}`
 
     const load = async () => {
-      if (inFlight || cancelled) return
+      if (inFlight || cancelled || notFound.current.has(key)) return
       inFlight = true
       try {
         if (isFixtures()) {
@@ -47,6 +51,8 @@ export function useTopology(pipelineId: string, options: TopologyOptions = {}) {
           setUpdatedAt(Date.now())
         }
       } catch (e) {
+        // Later ticks see the key and return without a request.
+        if (e instanceof ApiClientError && e.status === 404) notFound.current.add(key)
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
       } finally {
         inFlight = false
@@ -61,6 +67,7 @@ export function useTopology(pipelineId: string, options: TopologyOptions = {}) {
       return
     }
 
+    if (notFound.current.has(key)) return
     void load()
     if (!active) return
 

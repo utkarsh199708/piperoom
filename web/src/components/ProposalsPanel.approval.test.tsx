@@ -164,16 +164,58 @@ describe('the panel', () => {
 })
 
 describe('keys A and R', () => {
-  it('A approves the layer you own with the hash on screen', async () => {
+  // A and R only count with focus inside the proposal card.
+  const card = () => screen.getByRole('article', { hidden: true })
+
+  it('A in the card opens the confirm dialog; Approve there sends the hash on screen', async () => {
     approve.mockResolvedValue({ ok: true })
     show(arjun)
-    fireEvent.keyDown(window, { key: 'a' })
+    fireEvent.keyDown(card(), { key: 'a' })
+    // A key press alone never approves.
+    expect(approve).not.toHaveBeenCalled()
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByRole('heading')).toHaveTextContent('Approve kafka-connect?')
+    // Focus starts on Cancel, so a stray Enter does not approve; there is nothing to type.
+    expect(within(dialog).getByRole('button', { name: /Cancel/ })).toHaveFocus()
+    expect(within(dialog).queryByRole('textbox')).not.toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Approve' }))
     await waitFor(() => expect(approve).toHaveBeenCalledWith('p1', 'kafka-connect', { params_hash: HASH }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('a stray A outside the card does nothing: no approve, no dialog (QA9)', () => {
+    show(arjun)
+    fireEvent.keyDown(window, { key: 'a' })
+    fireEvent.keyDown(document.body, { key: 'a', bubbles: true })
+    const elsewhere = document.createElement('button')
+    document.body.appendChild(elsewhere)
+    elsewhere.focus()
+    fireEvent.keyDown(elsewhere, { key: 'a', bubbles: true })
+    fireEvent.keyDown(elsewhere, { key: 'r', bubbles: true })
+    expect(approve).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Rejection reason for kafka-connect')).not.toBeInTheDocument()
+    elsewhere.remove()
+  })
+
+  it('Cancel on the confirm dialog closes it without approving', () => {
+    show(arjun)
+    fireEvent.keyDown(card(), { key: 'a' })
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /Cancel/ }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(approve).not.toHaveBeenCalled()
+  })
+
+  it('in solo mode A opens the typed confirm', () => {
+    show({ ...arjun, solo: true })
+    fireEvent.keyDown(card(), { key: 'a' })
+    expect(screen.getByLabelText(/Solo mode: type orders\/kafka-connect to approve/)).toBeInTheDocument()
+    expect(approve).not.toHaveBeenCalled()
   })
 
   it('R opens the reason field', () => {
     show(arjun)
-    fireEvent.keyDown(window, { key: 'r' })
+    fireEvent.keyDown(card(), { key: 'r' })
     expect(screen.getByLabelText('Rejection reason for kafka-connect')).toBeInTheDocument()
   })
 
@@ -185,7 +227,7 @@ describe('keys A and R', () => {
 
   it('never fire inside a field', () => {
     show(arjun)
-    fireEvent.keyDown(window, { key: 'r' })
+    fireEvent.keyDown(card(), { key: 'r' })
     const reason = screen.getByLabelText('Rejection reason for kafka-connect')
     fireEvent.keyDown(reason, { key: 'a', bubbles: true })
     expect(approve).not.toHaveBeenCalled()
@@ -199,8 +241,8 @@ describe('keys A and R', () => {
 
   it('ignore modifier combinations', () => {
     show(arjun)
-    fireEvent.keyDown(window, { key: 'a', ctrlKey: true })
-    fireEvent.keyDown(window, { key: 'a', metaKey: true })
+    fireEvent.keyDown(card(), { key: 'a', ctrlKey: true })
+    fireEvent.keyDown(card(), { key: 'a', metaKey: true })
     expect(approve).not.toHaveBeenCalled()
   })
 
@@ -215,8 +257,9 @@ describe('keys A and R', () => {
       </DropdownMenu>,
     )
     expect(await screen.findByRole('menu')).toBeInTheDocument()
-    fireEvent.keyDown(window, { key: 'a' })
-    fireEvent.keyDown(window, { key: 'r' })
+    fireEvent.keyDown(card(), { key: 'a' })
+    fireEvent.keyDown(card(), { key: 'r' })
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
     expect(approve).not.toHaveBeenCalled()
     expect(screen.queryByLabelText('Rejection reason for kafka-connect')).not.toBeInTheDocument()
   })
@@ -226,8 +269,9 @@ describe('keys A and R', () => {
     const overlay = document.createElement('div')
     overlay.setAttribute('role', role)
     document.body.appendChild(overlay)
-    fireEvent.keyDown(window, { key: 'a' })
-    fireEvent.keyDown(window, { key: 'r' })
+    fireEvent.keyDown(card(), { key: 'a' })
+    fireEvent.keyDown(card(), { key: 'r' })
+    expect(screen.queryAllByRole('dialog')).toHaveLength(0)
     expect(approve).not.toHaveBeenCalled()
     expect(screen.queryByLabelText('Rejection reason for kafka-connect')).not.toBeInTheDocument()
     overlay.remove()
@@ -235,15 +279,17 @@ describe('keys A and R', () => {
 
   it('ignore key repeat and IME composition', () => {
     show(arjun)
-    fireEvent.keyDown(window, { key: 'a', repeat: true })
-    fireEvent.keyDown(window, { key: 'a', isComposing: true })
+    fireEvent.keyDown(card(), { key: 'a', repeat: true })
+    fireEvent.keyDown(card(), { key: 'a', isComposing: true })
     expect(approve).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('A does nothing without a hash', () => {
     show(arjun, { ...proposal, params_hash: '' })
-    fireEvent.keyDown(window, { key: 'a' })
+    fireEvent.keyDown(card(), { key: 'a' })
     expect(approve).not.toHaveBeenCalled()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 })
 
@@ -272,6 +318,7 @@ describe('the solo confirm dialog', () => {
     show(soloUser)
     fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
     fireEvent.keyDown(window, { key: 'a' })
+    fireEvent.keyDown(screen.getByRole('article', { hidden: true }), { key: 'a' })
     expect(screen.getAllByRole('dialog')).toHaveLength(1)
     expect(approve).not.toHaveBeenCalled()
   })

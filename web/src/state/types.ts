@@ -166,6 +166,12 @@ export interface RoomState {
    * falls back to it when the event has none.
    */
   snapshot_hashes: Record<string, string>
+  /**
+   * The snapshot's open_proposals, kept apart from `proposals` (which the log replay rebuilds,
+   * so seeding it would duplicate). Shown only while nothing has been replayed and the live
+   * socket is down, so the room does not claim "no proposals" when the server has one.
+   */
+  snapshot_proposals: ProposalState[]
   members: MemberState[]
   control_requests: ControlRequestState[]
   trace: TraceState | null
@@ -192,6 +198,7 @@ export function emptyRoomState(id: string): RoomState {
     suggestions: [],
     proposals: [],
     snapshot_hashes: {},
+    snapshot_proposals: [],
     members: [],
     control_requests: [],
     trace: null,
@@ -222,6 +229,19 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
         .filter((p) => p.params_hash)
         .map((p) => [p.proposal_id, p.params_hash as string]),
     ),
+    snapshot_proposals: (snapshot.open_proposals ?? []).map((p) => ({
+      proposal_id: p.proposal_id,
+      title: p.title,
+      steps: p.steps ?? [],
+      risk: p.risk,
+      rollback: p.rollback,
+      required_layers: p.required_layers ?? [],
+      approvals: p.approvals ?? {},
+      decisions: {},
+      params_hash: p.params_hash ?? '',
+      status: 'open' as const,
+      executed: [],
+    })),
     driver: snapshot.driver
       ? { id: snapshot.driver.id, name: snapshot.driver.name, lease_until: snapshot.driver.lease_until }
       : null,

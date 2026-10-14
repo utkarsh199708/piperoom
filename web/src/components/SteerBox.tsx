@@ -1,11 +1,12 @@
 import { useRef, useState } from 'react'
-import type { FormEvent, KeyboardEvent } from 'react'
+import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
 import { Eye, Lock } from 'lucide-react'
 import type { RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canRequestControl, canSteer, canTakeControl, isViewer } from '../state/permissions'
 import type { RoomActions } from '../hooks/useRoom'
 import { modKeyLabel } from '@/lib/envLabel'
+import { isolate } from '@/lib/bidi'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { Textarea } from '@/components/ui/textarea'
@@ -69,6 +70,8 @@ export function SteerBox({
 }) {
   const [text, setText] = useState('')
   const [granting, setGranting] = useState(false)
+  // A steer is in flight: the text stays in the field until the server has it (QA9: a 500 lost it).
+  const [sending, setSending] = useState(false)
   const ref = useRef<HTMLTextAreaElement>(null)
   const now = useNow()
   const isDriver = canSteer(state, user)
@@ -99,20 +102,33 @@ export function SteerBox({
   const mod = modKeyLabel()
   const left = minutesLeft(state.driver?.lease_until, now)
 
-  const send = () => {
-    if (!text.trim() || noDriver) return
-    actions.steer(text.trim())
-    setText('')
+  // The field is cleared only once the request succeeds; on a failure the text is still there
+  // (the room error banner says what went wrong) and can be sent again.
+  const send = async () => {
+    if (!text.trim() || noDriver || sending) return
+    const sent = text
+    setSending(true)
+    let ok: boolean | void
+    try {
+      ok = await actions.steer(sent.trim())
+    } catch {
+      ok = false
+    } finally {
+      setSending(false)
+    }
+    if (ok === false) return
+    // Anything typed while the request ran is kept.
+    setText((cur) => (cur === sent ? '' : cur))
     if (ref.current) ref.current.style.height = ''
   }
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    send()
+    void send()
   }
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
       e.preventDefault()
-      send()
+      void send()
     }
   }
   // Grow with the text, up to about six lines.
@@ -121,16 +137,22 @@ export function SteerBox({
     el.style.height = `${Math.min(el.scrollHeight, 140)}px`
   }
 
-  let status: string
-  // minutesLeft is 0 only once the lease has run out (it rounds up while time remains).
+  let status: ReactNode
+  // minutesLeft is 0 only once the lease has run out (it is at least 1 while time remains).
   if (isDriver) {
     status = left === 0 ? 'You are driving · lease expired' : left != null ? `You are driving · lease ${left}m` : 'You are driving'
   } else if (noDriver) {
     status = 'No driver · take control to steer the agent'
   } else {
-    const name = state.driver?.name ?? 'Someone'
+    // <bdi>: the driver's name must not reorder the rest of the line (U+202E in a name).
+    const name = <bdi>{state.driver?.name ?? 'Someone'}</bdi>
     const lease = left === 0 ? ' · lease expired' : left != null ? ` · lease ${left}m left` : ''
-    status = `${name} is driving${lease} · your message goes to ${name}'s queue`
+    status = (
+      <>
+        {name} is driving{lease} · your message goes to {name}
+        {"'s queue"}
+      </>
+    )
   }
 
   return (
@@ -145,7 +167,7 @@ export function SteerBox({
               <PersonAvatar actor={s.from} size={20} className="mt-0.5" />
               <div className="min-w-0 flex-1">
                 <strong className="font-medium">{s.from.name}</strong>
-                <p className="m-0 break-words text-muted-foreground">{s.text}</p>
+                <p className="m-0 text-muted-foreground [overflow-wrap:anywhere]">{s.text}</p>
               </div>
               <Button size="sm" onClick={() => actions.sendSuggestion(s.suggestion_id)}>
                 Send to agent
@@ -177,7 +199,9 @@ export function SteerBox({
 
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <StatusDot tone={noDriver ? 'warn' : 'accent'} />
-        <span className="text-xs text-muted-foreground">{status}</span>
+        <span className="min-w-0 text-xs text-muted-foreground [overflow-wrap:anywhere]" data-testid="steer-status">
+          {status}
+        </span>
         <div className="ml-auto flex items-center gap-1">
           {isDriver && (
             <Button variant="ghost" className="h-7" aria-expanded={granting} onClick={() => setGranting((g) => !g)}>
@@ -218,7 +242,7 @@ export function SteerBox({
               ? 'Take control to steer the agent'
               : isDriver
                 ? 'Steer the agent…'
-                : `Suggest a step for ${state.driver?.name ?? 'the driver'}…`
+                : `Suggest a step for ${isolate(state.driver?.name ?? 'the driver')}…`
           }
           aria-label="Steer the agent"
           rows={1}
@@ -230,7 +254,8 @@ export function SteerBox({
               type="submit"
               variant={isDriver ? 'default' : 'secondary'}
               className="ml-auto"
-              disabled={!text.trim()}
+              disabled={!text.trim() || sending}
+              aria-busy={sending || undefined}
               aria-keyshortcuts={`${mod === '⌘' ? 'Meta' : 'Control'}+Enter`}
             >
               {isDriver ? 'Send to agent' : 'Suggest'}

@@ -61,12 +61,19 @@ function room(over: Partial<RoomState> = {}): RoomState {
   }
 }
 
-function show(user: CurrentUser, state: RoomState | null, conn: ConnState = 'live', error: string | null = null) {
+function show(
+  user: CurrentUser,
+  state: RoomState | null,
+  conn: ConnState = 'live',
+  error: string | null = null,
+  liveDown = false,
+) {
   ctx.user = user
   vi.mocked(useRoom).mockReturnValue({
     state,
     presence: [],
     conn,
+    liveDown,
     error,
     actions,
     stale: null,
@@ -114,7 +121,7 @@ describe('RoomScreen header', () => {
     show(arjun, room())
     const people = screen.getByRole('list', { name: 'People in the room' })
     expect(within(people).getByRole('img', { name: 'Kabir · driving' })).toBeInTheDocument()
-    expect(screen.getByText('Kabir is driving')).toBeInTheDocument()
+    expect(screen.getByTestId('driver-line')).toHaveTextContent(/^Kabir is driving$/)
     expect(screen.getByText('2 here')).toBeInTheDocument()
   })
 
@@ -236,6 +243,7 @@ describe('RoomScreen close room', () => {
       state: room({ status: 'closed', resolution: 'Connector restarted' }),
       presence: [],
       conn: 'live',
+      liveDown: false,
       error: null,
       actions,
       stale: null,
