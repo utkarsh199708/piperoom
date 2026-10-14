@@ -536,8 +536,13 @@ func TestSafetyPollWhileListening(t *testing.T) {
 		}
 	}
 	// An event written without pg_notify, as if its notification was lost.
-	execSQL(t, schema, `UPDATE rooms SET last_seq = 1 WHERE id = $1`, roomID)
-	execSQL(t, schema, `INSERT INTO room_events (room_id, seq, type, actor, payload, at) VALUES ($1, 1, 'comment.added', '{"kind":"human","id":"arjun","name":"Arjun"}', '{"comment_id":"c_silent","text":"x"}', now())`, roomID)
+	// last_seq and the event are one statement, as in PG.Append (one
+	// transaction): as two statements, a feed whose first read landed between
+	// them learned last_seq = 1 with no event yet, and nothing ever woke the
+	// subscriber for an event that was already behind its tail (a flake under
+	// load, never a state the server produces).
+	execSQL(t, schema, `WITH r AS (UPDATE rooms SET last_seq = 1 WHERE id = $1)
+INSERT INTO room_events (room_id, seq, type, actor, payload, at) VALUES ($1, 1, 'comment.added', '{"kind":"human","id":"arjun","name":"Arjun"}', '{"comment_id":"c_silent","text":"x"}', now())`, roomID)
 	select {
 	case e := <-ch:
 		if e.Seq != 1 {
