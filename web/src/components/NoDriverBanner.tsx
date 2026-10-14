@@ -32,7 +32,7 @@ export function NoDriverBanner({
       <span>No one is driving — take control to steer the agent.</span>
       {age && <span className="text-xs font-normal text-muted-foreground">opened {age} ago</span>}
       <Button
-        className="ml-auto h-7 px-2.5"
+        className="ml-auto h-7 px-2.5 coarse:h-11 coarse:px-4"
         aria-keyshortcuts="T"
         onClick={() => actions.grantControl(user.id)}
       >

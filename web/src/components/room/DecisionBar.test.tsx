@@ -102,3 +102,25 @@ describe('DecisionBar', () => {
     expect(screen.queryByRole('region', { name: 'Decision' })).not.toBeInTheDocument()
   })
 })
+
+describe('DecisionBar as a bottom sheet', () => {
+  it('is fixed at the bottom with full-width Reject / Approve buttons and no key caps', () => {
+    render(
+      <DecisionHandleContext.Provider value={{ get: () => handle, set: () => undefined }}>
+        <DecisionBar state={room(prop())} user={arjun} placement="sheet" />
+      </DecisionHandleContext.Provider>,
+    )
+    const bar = screen.getByRole('region', { name: 'Decision' })
+    expect(bar).toHaveAttribute('data-placement', 'sheet')
+    expect(bar.className).toContain('fixed')
+    expect(bar.className).toContain('bottom-0')
+    const approve = screen.getByRole('button', { name: 'Approve kafka-connect' })
+    const reject = screen.getByRole('button', { name: 'Reject' })
+    expect(approve.className).toContain('h-11')
+    expect(reject.className).toContain('h-11')
+    expect(bar.querySelector('kbd')).toBeNull()
+    expect(screen.queryByRole('button', { name: /View steps/ })).not.toBeInTheDocument()
+    fireEvent.click(approve)
+    expect(handle.approve).toHaveBeenCalledTimes(1)
+  })
+})

@@ -152,3 +152,12 @@ describe('RoomHeader actions below md', () => {
     expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument()
   })
 })
+
+describe('touch sizing', () => {
+  it('lays out at 390 without the rail and with the tab list', () => {
+    setWidth(390)
+    show(arjun, room())
+    expect(screen.getByRole('tablist', { name: 'Room sections' })).toBeInTheDocument()
+    expect(screen.getAllByRole('tab').every((t) => t.className.includes('coarse:h-11'))).toBe(true)
+  })
+})

@@ -36,8 +36,8 @@ export function DecisionBar({
 }: {
   state: RoomState
   user: CurrentUser
-  /** Only 'top' today; F7c adds the phone sheet through this prop. */
-  placement?: 'top'
+  /** 'top': sticky under the header. 'sheet': fixed to the bottom on phones, buttons full width (F7c). */
+  placement?: 'top' | 'sheet'
 }) {
   const registry = useContext(DecisionHandleContext)
   const decision = decisionFor(state, user)
@@ -45,21 +45,24 @@ export function DecisionBar({
   const memory = useRef(new Set<string>())
   const barRef = useRef<HTMLDivElement>(null)
   const shown = decision !== null
-  // Publishes the bar's height so the tab list can stick right under it (F7c).
+  const sheet = placement === 'sheet'
+  const heightVar = sheet ? '--sheet-h' : '--decision-h'
+  // Publishes the bar's height so the tab list can stick right under it, or, as a sheet, so the composer
+  // and <main> keep clear of it (F7c).
   useEffect(() => {
     const el = barRef.current
     if (!el) return
     const root = document.documentElement
-    const write = () => root.style.setProperty('--decision-h', `${Math.round(el.getBoundingClientRect().height)}px`)
+    const write = () => root.style.setProperty(heightVar, `${Math.round(el.getBoundingClientRect().height)}px`)
     write()
-    if (typeof ResizeObserver === 'undefined') return () => root.style.removeProperty('--decision-h')
+    if (typeof ResizeObserver === 'undefined') return () => root.style.removeProperty(heightVar)
     const ro = new ResizeObserver(write)
     ro.observe(el)
     return () => {
       ro.disconnect()
-      root.style.removeProperty('--decision-h')
+      root.style.removeProperty(heightVar)
     }
-  }, [shown])
+  }, [shown, heightVar])
 
   // "done ok" shows for 3 s, and only when this screen saw the proposal in some other state first
   // (a finished fix in an old room must not flash on load).
@@ -106,15 +109,27 @@ export function DecisionBar({
       )
       actions = (
         <>
-          <Button variant="ghost-danger" size="sm" aria-keyshortcuts="R" onClick={() => handle()?.reject()}>
+          <Button
+            variant="ghost-danger"
+            size="sm"
+            className={sheet ? 'h-11 flex-1' : 'coarse:h-11'}
+            aria-keyshortcuts="R"
+            onClick={() => handle()?.reject()}
+          >
             Reject
-            <Kbd aria-hidden="true">R</Kbd>
+            {!sheet && <Kbd aria-hidden="true">R</Kbd>}
           </Button>
-          <Button variant="success" size="sm" aria-keyshortcuts="A" onClick={() => handle()?.approve()}>
+          <Button
+            variant="success"
+            size="sm"
+            className={sheet ? 'h-11 flex-1' : 'coarse:h-11'}
+            aria-keyshortcuts="A"
+            onClick={() => handle()?.approve()}
+          >
             Approve {decision.layer}
-            <Kbd aria-hidden="true">A</Kbd>
+            {!sheet && <Kbd aria-hidden="true">A</Kbd>}
           </Button>
-          {view}
+          {!sheet && view}
         </>
       )
       break
@@ -183,11 +198,25 @@ export function DecisionBar({
       aria-label="Decision"
       data-placement={placement}
       data-kind={(decision as Decision).kind}
-      className="sticky top-0 z-20 bg-background motion-safe:transition-opacity motion-safe:duration-200"
+      className={cn(
+        'bg-background motion-safe:transition-opacity motion-safe:duration-200',
+        sheet ? 'fixed inset-x-0 bottom-0 z-30 border-t border-border shadow-lg' : 'sticky top-0 z-20',
+      )}
     >
-      <div className={cn(BAR, tone)}>
+      <div
+        className={cn(
+          BAR,
+          tone,
+          sheet && 'border-b-0 px-4 pt-3 pb-[max(env(safe-area-inset-bottom),12px)] sm:px-4',
+          sheet && decision.kind === 'needs-you' && 'flex-col items-stretch',
+        )}
+      >
         <div className="flex min-w-0 flex-1 items-center gap-2">{text}</div>
-        {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
+        {actions && (
+          <div className={cn('flex flex-wrap items-center gap-2', sheet && decision.kind === 'needs-you' ? 'w-full flex-nowrap' : 'shrink-0')}>
+            {actions}
+          </div>
+        )}
         {decision.kind === 'executing' && (
           <Progress className="h-0.5 basis-full bg-transparent" indicatorClassName="bg-agent" aria-label="Running the fix" />
         )}
