@@ -11,7 +11,7 @@ import (
 // the agent sink, so it gets the same checks and, in a shadow room, goes to the
 // shadow log.
 func (s *Service) EmitAgentUsage(ctx context.Context, roomID string, p events.AgentUsagePayload) error {
-	return s.agentEmit(ctx, roomID, events.AgentUsage, p)
+	return s.agentEmit(ctx, roomID, outsideRun, events.AgentUsage, p)
 }
 
 // CanReadPipelineUsage decides who may read GET /api/usage for a pipeline

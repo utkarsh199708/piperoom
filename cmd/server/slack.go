@@ -50,6 +50,9 @@ type mirrors struct {
 	mu     sync.Mutex // orders closed against wg.Add
 	closed bool
 	wg     sync.WaitGroup
+	// lead is the context mirrors start under: ctx while this replica leads
+	// "slack" (always, until elect is called), nil while another replica does.
+	lead context.Context
 }
 
 // newMirrors builds the Slack bridge. With neither token nor channel set it
@@ -75,7 +78,7 @@ func newMirrors(ctx context.Context, st events.Store, threads slackbridge.Thread
 	}
 	mctx, cancel := context.WithCancel(ctx)
 	log.Info("slack bridge enabled", "channel", s.ChannelID)
-	return &mirrors{bridge: b, log: log, ctx: mctx, cancel: cancel}, nil
+	return &mirrors{bridge: b, log: log, ctx: mctx, cancel: cancel, lead: mctx}, nil
 }
 
 // onRoomOpened is the room.Deps.OnRoomOpened hook, or nil when the bridge is
@@ -104,23 +107,31 @@ func (m *mirrors) startOpen(ctx context.Context, svc *room.Service) error {
 	return nil
 }
 
-// start mirrors one room until it closes or shutdown begins.
+// start mirrors one room until it closes, shutdown begins, or this replica
+// stops leading "slack". On a replica that does not lead it does nothing: the
+// leader's rescan picks the room up.
 func (m *mirrors) start(roomID string) {
 	m.mu.Lock()
-	if m.closed {
+	if m.closed || m.lead == nil {
 		m.mu.Unlock()
 		return
 	}
+	ctx := m.lead
 	m.wg.Add(1)
 	m.mu.Unlock()
 	go func() {
 		defer m.wg.Done()
-		err := m.bridge.Run(m.ctx, roomID)
+		// The leadership term must not outlive shutdown either.
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		stopOnShutdown := context.AfterFunc(m.ctx, cancel)
+		defer stopOnShutdown()
+		err := m.bridge.Run(ctx, roomID)
 		switch {
 		case err == nil:
 		case errors.Is(err, slackbridge.ErrAlreadyRunning):
 			m.log.Debug("slack mirror already running", "room_id", roomID)
-		case m.ctx.Err() != nil:
+		case ctx.Err() != nil:
 			m.log.Debug("slack mirror stopped for shutdown", "room_id", roomID)
 		default:
 			// The bridge already logged the Slack code; the error text could

@@ -2,59 +2,113 @@ package room
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
+	"piperoom/internal/store"
 )
 
-// DefaultMaxAgents is the cap on concurrent agent runs when Deps.MaxAgents is
-// not set. One Connect failure can open dozens of rooms at once; without a
-// cap each of them would start an Opus run.
+// DefaultMaxAgents is the cap on concurrent agent runs on one replica when
+// Deps.MaxAgents is not set. One Connect failure can open dozens of rooms at
+// once; without a cap each of them would start an Opus run.
 const DefaultMaxAgents = 3
 
 // slotWaiter is one room's place in the agent queue.
 type slotWaiter struct {
-	ready   chan struct{} // closed when a slot is granted
-	granted bool          // guarded by agentSlots.mu
+	ready    chan struct{} // closed when a slot is granted
+	pipeline string
+	granted  bool // guarded by agentSlots.mu
 }
 
-// agentSlots is the global limit on concurrent agent runs across all rooms. A
-// room that wants to run asks for a slot with request; when none is free it
-// waits in a FIFO queue and is granted one as slots are released. It never
-// calls back into the Service, so it is safe to use while holding Service.mu.
+// agentSlots is this replica's limit on concurrent agent runs across all its
+// rooms (PIPEROOM_MAX_AGENTS). A room that wants to run asks for a slot with
+// request; when none is free it waits in a queue and is granted one as slots
+// are released. The queue is round-robin across pipelines and FIFO within a
+// pipeline, so one pipeline with many rooms cannot starve another
+// (docs/design/replicas.md section 4.4). It never calls back into the Service,
+// so it is safe to use while holding Service.mu.
 type agentSlots struct {
 	mu    sync.Mutex
 	max   int
 	inUse int
-	queue []*slotWaiter
+	// queues holds the waiters of each pipeline in arrival order; order is
+	// the rotation of pipelines that have waiters, and next is the index in
+	// order of the pipeline served next.
+	queues map[string][]*slotWaiter
+	order  []string
+	next   int
+	queued int
 }
 
 func newAgentSlots(max int) *agentSlots {
 	if max < 1 {
 		max = DefaultMaxAgents
 	}
-	return &agentSlots{max: max}
+	return &agentSlots{max: max, queues: map[string][]*slotWaiter{}}
 }
 
-// request takes a slot if one is free and nobody is queued ahead, otherwise it
-// joins the back of the queue. ahead is the number of rooms queued before the
-// caller.
-func (a *agentSlots) request() (w *slotWaiter, ahead int) {
+// request takes a slot if one is free and nobody is queued, otherwise it joins
+// its pipeline's queue. ahead is the number of rooms that will be granted a
+// slot before the caller, in round-robin order.
+func (a *agentSlots) request(pipeline string) (w *slotWaiter, ahead int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	w = &slotWaiter{ready: make(chan struct{})}
-	if a.inUse < a.max && len(a.queue) == 0 {
+	w = &slotWaiter{ready: make(chan struct{}), pipeline: pipeline}
+	if a.inUse < a.max && a.queued == 0 {
 		a.inUse++
 		w.granted = true
 		close(w.ready)
 		return w, 0
 	}
-	ahead = len(a.queue)
-	a.queue = append(a.queue, w)
+	if len(a.queues[pipeline]) == 0 {
+		// A pipeline that had no waiter joins the rotation just before the
+		// pipeline served next: it waits one full round at most, and never
+		// jumps ahead of pipelines already waiting their turn.
+		a.order = append(a.order, "")
+		copy(a.order[a.next+1:], a.order[a.next:])
+		a.order[a.next] = pipeline
+		a.next++
+		if a.next >= len(a.order) {
+			a.next = 0
+		}
+	}
+	a.queues[pipeline] = append(a.queues[pipeline], w)
+	a.queued++
+	for i, q := range a.grantOrderLocked() {
+		if q == w {
+			ahead = i
+			break
+		}
+	}
 	return w, ahead
+}
+
+// grantOrderLocked returns every queued waiter in the order pump would grant
+// them. Caller holds a.mu.
+func (a *agentSlots) grantOrderLocked() []*slotWaiter {
+	out := make([]*slotWaiter, 0, a.queued)
+	if len(a.order) == 0 {
+		return out
+	}
+	taken := make(map[string]int, len(a.order))
+	for len(out) < a.queued {
+		before := len(out)
+		for i := 0; i < len(a.order); i++ {
+			p := a.order[(a.next+i)%len(a.order)]
+			if k := taken[p]; k < len(a.queues[p]) {
+				out = append(out, a.queues[p][k])
+				taken[p] = k + 1
+			}
+		}
+		if len(out) == before {
+			break // never spin under the lock, whatever the counters say
+		}
+	}
+	return out
 }
 
 // isWaiting reports whether w is still queued (not yet granted).
@@ -64,7 +118,7 @@ func (a *agentSlots) isWaiting(w *slotWaiter) bool {
 	return !w.granted
 }
 
-// release returns one slot and grants it to the head of the queue.
+// release returns one slot and grants it to the next waiter.
 func (a *agentSlots) release() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -82,19 +136,53 @@ func (a *agentSlots) cancel(w *slotWaiter) {
 		a.pumpLocked()
 		return
 	}
-	for i, q := range a.queue {
-		if q == w {
-			a.queue = append(a.queue[:i], a.queue[i+1:]...)
+	q := a.queues[w.pipeline]
+	for i, x := range q {
+		if x == w {
+			a.queues[w.pipeline] = append(q[:i:i], q[i+1:]...)
+			a.queued--
+			if len(a.queues[w.pipeline]) == 0 {
+				a.dropPipelineLocked(w.pipeline)
+			}
 			return
 		}
 	}
 }
 
+// dropPipelineLocked takes a pipeline with no waiters out of the rotation,
+// keeping next on the pipeline that was due. Caller holds a.mu.
+func (a *agentSlots) dropPipelineLocked(p string) {
+	delete(a.queues, p)
+	for i, x := range a.order {
+		if x != p {
+			continue
+		}
+		a.order = append(a.order[:i], a.order[i+1:]...)
+		if i < a.next {
+			a.next--
+		}
+		if a.next >= len(a.order) {
+			a.next = 0
+		}
+		return
+	}
+}
+
+// pumpLocked grants free slots, one pipeline at a time in rotation. Caller
+// holds a.mu.
 func (a *agentSlots) pumpLocked() {
-	for a.inUse < a.max && len(a.queue) > 0 {
-		w := a.queue[0]
-		a.queue[0] = nil
-		a.queue = a.queue[1:]
+	for a.inUse < a.max && a.queued > 0 {
+		p := a.order[a.next]
+		q := a.queues[p]
+		w := q[0]
+		q[0] = nil
+		a.queues[p] = q[1:]
+		a.queued--
+		if len(a.queues[p]) == 0 {
+			a.dropPipelineLocked(p) // next now points at the pipeline after p
+		} else {
+			a.next = (a.next + 1) % len(a.order)
+		}
 		w.granted = true
 		a.inUse++
 		close(w.ready)
@@ -105,21 +193,45 @@ func (a *agentSlots) pumpLocked() {
 func (a *agentSlots) stats() (inUse, queued int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.inUse, len(a.queue)
+	return a.inUse, a.queued
 }
 
-// agentGate is one room's handle on the global slots. The room holds a slot
-// while its agent can call the model and gives it back while the agent waits
-// for input, so rooms parked on a human do not starve rooms that need to run.
+// globalSlots is the cap across replicas (PIPEROOM_MAX_AGENTS_GLOBAL), taken
+// after this replica's own slot. coordSlots implements it on the store; tests
+// use a fake.
+type globalSlots interface {
+	// take tries to take a slot for the room; false means the cap is full.
+	take(ctx context.Context, roomID string) (bool, error)
+	// give returns the room's slot.
+	give(roomID string)
+	// limit is the cap, for the queued status text.
+	limit() int
+}
+
+// globalSlotRetry is how often a room waiting for a global slot tries again;
+// after a database error it backs off up to globalSlotMaxBackoff.
+const (
+	globalSlotRetry      = time.Second
+	globalSlotMaxBackoff = 10 * time.Second
+)
+
+// agentGate is one room's handle on the slots. The room holds a slot while
+// its agent can call the model and gives it back while the agent waits for
+// input, so rooms parked on a human do not starve rooms that need to run.
 // gatedInbox drives it.
 type agentGate struct {
-	s      *Service
-	st     *roomState
-	roomID string
+	s        *Service
+	st       *roomState
+	roomID   string
+	pipeline string
 
 	mu   sync.Mutex
 	held bool
 	w    *slotWaiter // the pending request, shared by concurrent acquires
+
+	// gmu serializes the global part of acquire; globalHeld is guarded by it.
+	gmu        sync.Mutex
+	globalHeld bool
 }
 
 func (g *agentGate) isHeld() bool {
@@ -128,56 +240,137 @@ func (g *agentGate) isHeld() bool {
 	return g.held
 }
 
-// acquire blocks until the room holds a slot or ctx ends. While the room has to
-// wait it shows agent.status "queued". Concurrent callers share one queue
-// entry, so a room is never queued twice.
+// acquire blocks until the room holds a slot (this replica's, then the
+// global one when a global cap is set) or ctx ends. While the room has to wait
+// it shows agent.status "queued". Concurrent callers share one queue entry,
+// so a room is never queued twice.
 func (g *agentGate) acquire(ctx context.Context) error {
-	g.mu.Lock()
-	if g.held {
-		g.mu.Unlock()
-		return nil
+	shown, err := g.acquireLocal(ctx)
+	if err != nil {
+		return err
 	}
-	w, owner, ahead := g.w, false, 0
-	if w == nil {
-		w, ahead = g.s.slots.request()
-		g.w, owner = w, true
-		if ahead == 0 && !g.s.slots.isWaiting(w) {
-			g.held, g.w = true, nil
-			g.mu.Unlock()
-			return nil
+	// Close sets closed before it cancels the service context, and the
+	// cancel reaches the rooms one at a time: a room granted the slot that a
+	// cancelled room just gave back can still see a live context. It must not
+	// start a run on a closing service.
+	if g.s.isClosed() {
+		g.release()
+		return context.Canceled
+	}
+	if g.s.global != nil {
+		got, err := g.acquireGlobal(ctx, shown)
+		if err != nil {
+			g.release()
+			return err
 		}
+		shown = shown || got
 	}
-	g.mu.Unlock()
-
-	shown := false
-	if owner {
-		shown = g.s.emitQueued(g, w, ahead)
-	}
-	select {
-	case <-w.ready:
-	case <-ctx.Done():
-		g.mu.Lock()
-		if g.w == w {
-			g.s.slots.cancel(w)
-			g.w = nil
-		}
-		g.mu.Unlock()
-		return ctx.Err()
-	}
-	g.mu.Lock()
-	if g.w == w {
-		g.held, g.w = true, nil
-	}
-	g.mu.Unlock()
 	if shown {
 		g.s.emitSlotAcquired(ctx, g)
 	}
 	return nil
 }
 
-// release gives the slot back. It is a no-op when none is held, so callers can
-// call it on every exit path.
+// acquireLocal is acquire on this replica's slots. shown reports whether a
+// "queued" status was written while waiting.
+func (g *agentGate) acquireLocal(ctx context.Context) (shown bool, err error) {
+	g.mu.Lock()
+	if g.held {
+		g.mu.Unlock()
+		return false, nil
+	}
+	w, owner, ahead := g.w, false, 0
+	if w == nil {
+		w, ahead = g.s.slots.request(g.pipeline)
+		g.w, owner = w, true
+		if ahead == 0 && !g.s.slots.isWaiting(w) {
+			g.held, g.w = true, nil
+			g.mu.Unlock()
+			return false, nil
+		}
+	}
+	g.mu.Unlock()
+
+	if owner {
+		shown = g.s.emitQueued(g, func() bool { return g.s.slots.isWaiting(w) },
+			fmt.Sprintf("waiting for an agent slot (%d ahead)", ahead))
+	}
+	select {
+	case <-w.ready:
+	case <-ctx.Done():
+	}
+	// A grant and a cancel can arrive together (the service closing frees a
+	// slot and cancels every queued room at once): a cancelled room gives the
+	// slot back instead of starting a run on a dead context.
+	if err := ctx.Err(); err != nil {
+		g.mu.Lock()
+		if g.w == w {
+			g.s.slots.cancel(w)
+			g.w = nil
+		}
+		g.mu.Unlock()
+		return shown, err
+	}
+	g.mu.Lock()
+	if g.w == w {
+		g.held, g.w = true, nil
+	}
+	g.mu.Unlock()
+	return shown, nil
+}
+
+// acquireGlobal takes a slot under the cross-replica cap, retrying every
+// globalSlotRetry while the cap is full. shown reports whether it wrote a
+// "queued" status (localShown: one was written already for this wait).
+func (g *agentGate) acquireGlobal(ctx context.Context, localShown bool) (shown bool, err error) {
+	g.gmu.Lock()
+	defer g.gmu.Unlock()
+	if g.globalHeld {
+		return false, nil
+	}
+	backoff := globalSlotRetry
+	for {
+		ok, err := g.s.global.take(ctx, g.roomID)
+		wait := globalSlotRetry
+		switch {
+		case err != nil && (ctx.Err() != nil || errors.Is(err, store.ErrLeaseLost)):
+			return shown, err
+		case err != nil:
+			// A database error says nothing about the cap: retry with
+			// backoff rather than leave the room with an agent that never
+			// runs (docs/design/replicas.md 4.4).
+			g.s.log.Warn("room: take global agent slot failed; retrying", "room", g.roomID, "in", backoff.String(), "err", err)
+			wait = backoff
+			backoff = min(2*backoff, globalSlotMaxBackoff)
+		case ok:
+			g.globalHeld = true
+			return shown, nil
+		default:
+			backoff = globalSlotRetry
+			if !shown && !localShown {
+				shown = g.s.emitQueued(g, func() bool { return true },
+					fmt.Sprintf("waiting for an agent slot (all %d across the servers are in use)", g.s.global.limit()))
+			}
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return shown, ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
+// release gives the slots back. It is a no-op when none is held, so callers
+// can call it on every exit path.
 func (g *agentGate) release() {
+	g.gmu.Lock()
+	if g.globalHeld {
+		g.globalHeld = false
+		g.s.global.give(g.roomID)
+	}
+	g.gmu.Unlock()
 	g.mu.Lock()
 	if !g.held {
 		g.mu.Unlock()
@@ -192,17 +385,17 @@ func (g *agentGate) release() {
 // checks, under s.mu, that the room is still open and still waiting: the
 // agent's own "working" status needs s.mu too, so a late "queued" can never
 // land after it. Reports whether the event was written.
-func (s *Service) emitQueued(g *agentGate, w *slotWaiter, ahead int) bool {
+func (s *Service) emitQueued(g *agentGate, waiting func() bool, detail string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed || !s.roomOpen(g.st) || !s.slots.isWaiting(w) {
+	if s.closed || !s.roomOpen(g.st) || !waiting() {
 		return false
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 	defer cancel()
 	_, err := s.emitLocked(ctx, g.st, g.roomID, events.AgentStatus, events.AgentActor, events.AgentStatusPayload{
 		State:  "queued",
-		Detail: fmt.Sprintf("waiting for an agent slot (%d ahead)", ahead),
+		Detail: detail,
 	})
 	if err != nil {
 		s.log.Warn("room: emit queued status failed", "room", g.roomID, "err", err)

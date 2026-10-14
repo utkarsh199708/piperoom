@@ -111,15 +111,16 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 	ctx, cancel := context.WithCancel(s.ctx)
 	st.agentCancel = cancel
 	st.agentRun++
+	run := st.agentRun
 	st.shadowActive = true
-	gate := &agentGate{s: s, st: st, roomID: roomID}
+	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		defer cancel()
 		defer gate.release()
 		var tokens atomic.Int64
-		status := s.superviseShadow(ctx, roomID, title, pipelineID, raw, st, gate, &tokens)
+		status := s.superviseShadow(ctx, roomID, title, pipelineID, raw, st, gate, &tokens, run)
 		gate.release()
 		s.finishShadow(roomID, st, status, tokens.Load())
 	}()
@@ -129,7 +130,7 @@ func (s *Service) startShadowLocked(roomID, title, pipelineID string, raw json.R
 // "" when the run row could not be created (then nothing ran and nothing is
 // written). A nil return maps to ShadowHypothesised here; finishShadow lowers
 // it to no_hypothesis when the run emitted none.
-func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID string, raw json.RawMessage, st *roomState, gate *agentGate, tokens *atomic.Int64) string {
+func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID string, raw json.RawMessage, st *roomState, gate *agentGate, tokens *atomic.Int64, run uint64) string {
 	// Second try (the first was at open): no row means nothing could store
 	// the run's output, so no tokens are spent on it.
 	cctx, ccancel := context.WithTimeout(ctx, shadowWriteTimeout)
@@ -144,7 +145,7 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 	deps := agent.Deps{
 		Tools:  s.toolsFor(pipelineID),
 		Inbox:  gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
-		Sink:   roomSink{s: s, roomID: roomID},
+		Sink:   roomSink{s: s, roomID: roomID, run: run},
 		Logger: s.log,
 		Usage:  func(used int64) { tokens.Store(used) },
 	}
@@ -188,7 +189,7 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 		}
 		s.log.Warn("room: shadow run returned error", "room", roomID, "attempt", attempt, "err", err)
 		ectx, ecancel := context.WithTimeout(s.ctx, 5*time.Second)
-		_ = s.agentEmit(ectx, roomID, events.AgentStatus, events.AgentStatusPayload{State: "error", Detail: truncateDetail(err.Error())})
+		_ = s.agentEmit(ectx, roomID, run, events.AgentStatus, events.AgentStatusPayload{State: "error", Detail: truncateDetail(err.Error())})
 		ecancel()
 		if attempt >= maxAgentAttempts {
 			s.log.Error("room: shadow run gave up after repeated failures", "room", roomID, "attempts", attempt)
@@ -278,6 +279,9 @@ func (s *Service) finishShadow(roomID string, st *roomState, status string, toke
 		st.graceTimer.Stop()
 		st.graceTimer = nil
 	}
+	// A shadow run is one-shot: once it has ended, the room needs no agent
+	// owner (a shadow room keeps its lease through the grace after close).
+	s.dropLeaseLocked(roomID, st)
 	if status != "" {
 		now := s.now().UTC()
 		closedAt := st.snap.ClosedAt
@@ -400,9 +404,23 @@ func (s *Service) sweepShadowLocked(ctx context.Context) {
 	if s.shadow == nil {
 		return
 	}
+	// With a shared store, a room with an agent lease has its run on another
+	// replica (live) or is taken over by the coordination loop (expired): not
+	// this sweep's.
+	var leases map[string]store.RoomLease
+	if s.coord != nil {
+		var err error
+		if leases, err = s.coord.RoomLeases(ctx); err != nil {
+			s.log.Warn("room: shadow sweep: list agent leases failed; sweep skipped", "err", err)
+			return
+		}
+	}
 	now := s.now().UTC()
 	for id, st := range s.rooms {
 		if !st.snap.Shadow {
+			continue
+		}
+		if _, held := leases[id]; held {
 			continue
 		}
 		run, err := s.shadow.GetShadowRun(ctx, id)
@@ -502,6 +520,8 @@ const (
 // ShadowLabel records the blind label of a closed shadow room (POST
 // /api/rooms/{id}/shadow/blind). Once per room.
 func (s *Service) ShadowLabel(ctx context.Context, user User, roomID, actualLayer string, terms []string) (events.Event, error) {
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.closedShadowLocked(ctx, roomID)
@@ -543,6 +563,8 @@ func (s *Service) ShadowLabel(ctx context.Context, user User, roomID, actualLaye
 // ShadowGrade records a grade of the revealed run (POST
 // /api/rooms/{id}/shadow/grade). Re-grading appends another; the last wins.
 func (s *Service) ShadowGrade(ctx context.Context, user User, roomID string, layerCorrect bool, rootCause, notes string) (events.Event, error) {
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.closedShadowLocked(ctx, roomID)

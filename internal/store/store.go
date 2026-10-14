@@ -30,6 +30,10 @@ var ErrRoomNotEmpty = errors.New("store: room has events")
 // (e.g. a second decision on the same proposal layer).
 var ErrAlreadyExists = errors.New("store: already exists")
 
+// ErrSeqConflict is returned (wrapped) by AppendIfLast when another writer
+// appended to the room after the expected seq.
+var ErrSeqConflict = errors.New("store: room changed since the expected seq")
+
 // ErrParamsHashConflict is returned by SetProposalParamsHash when the row
 // already holds a different, non-empty params_hash.
 var ErrParamsHashConflict = errors.New("store: proposal already has a different params_hash")
@@ -150,19 +154,39 @@ func New(ctx context.Context, connString string, log *slog.Logger) (*PG, error) 
 		pool.Close()
 		return nil, fmt.Errorf("store: ping: %w", err)
 	}
-	return newPG(pool, connString, log), nil
+	return newPG(pool, connString, log, Options{}), nil
 }
 
 // NewPool wraps an existing pool. Tests use it to pin search_path to a fresh
 // schema; the returned Store must be closed with Close.
 func NewPool(pool *pgxpool.Pool, connString string, log *slog.Logger) *PG {
+	return NewPoolOptions(pool, connString, log, Options{})
+}
+
+// Options tune a PG store. The zero value is what the server uses.
+type Options struct {
+	// NoListen keeps the hub from opening its LISTEN connection, so every
+	// room feed and append watcher runs on the poll fallback alone. Tests of
+	// that fallback use it; the server never sets it.
+	NoListen bool
+	// PollInterval is the fallback poll period while LISTEN is down; zero
+	// means DefaultPollInterval.
+	PollInterval time.Duration
+	// SafetyPoll is how often every feed and watcher re-reads while LISTEN is
+	// up, so a notification lost on a socket that died silently is caught;
+	// zero means DefaultSafetyPoll. It is checked on the PollInterval tick.
+	SafetyPoll time.Duration
+}
+
+// NewPoolOptions is NewPool with Options.
+func NewPoolOptions(pool *pgxpool.Pool, connString string, log *slog.Logger, opts Options) *PG {
 	if log == nil {
 		log = slog.Default()
 	}
-	return newPG(pool, connString, log)
+	return newPG(pool, connString, log, opts)
 }
 
-func newPG(pool *pgxpool.Pool, connString string, log *slog.Logger) *PG {
+func newPG(pool *pgxpool.Pool, connString string, log *slog.Logger, opts Options) *PG {
 	hubCtx, cancel := context.WithCancel(context.Background())
 	s := &PG{
 		pool:       pool,
@@ -171,11 +195,14 @@ func newPG(pool *pgxpool.Pool, connString string, log *slog.Logger) *PG {
 		now:        time.Now,
 		cancel:     cancel,
 	}
-	s.hub = newHub(s, connString, listenAppName(), log)
+	s.hub = newHub(hubCtx, s, connString, listenAppName(), log, !opts.NoListen, opts.PollInterval)
+	if opts.SafetyPoll > 0 {
+		s.hub.safetyPoll = opts.SafetyPoll
+	}
 	s.hubWg.Add(1)
 	go func() {
 		defer s.hubWg.Done()
-		s.hub.run(hubCtx)
+		s.hub.run()
 	}()
 	return s
 }
@@ -442,6 +469,24 @@ func (s *PG) RoomUsage(ctx context.Context, roomID string) (Usage, error) {
 // cap plus ReservePercent, room.closed never (classOf). A refused event wraps
 // ErrLogFull and uses no seq. The bytes counted are len(Event.Payload).
 func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
+	return s.appendEvent(ctx, roomID, -1, typ, actor, payload)
+}
+
+// AppendIfLast is Append that only writes when the room's last seq is still
+// expectSeq: the caller checked a rule against the log up to expectSeq, and
+// the rule must still hold when the event lands. Another writer in between
+// wraps ErrSeqConflict and nothing is written (docs/design/replicas.md 9.1).
+func (s *PG) AppendIfLast(ctx context.Context, roomID string, expectSeq int64, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
+	if expectSeq < 0 {
+		return events.Event{}, fmt.Errorf("store: append to %s: negative expected seq %d: %w", roomID, expectSeq, ErrSeqConflict)
+	}
+	return s.appendEvent(ctx, roomID, expectSeq, typ, actor, payload)
+}
+
+// appendEvent appends one event; expectSeq < 0 means unconditionally. The
+// seq condition and the log caps are checked by the same UPDATE of the rooms
+// row; when it matches nothing, the row says which rule refused the event.
+func (s *PG) appendEvent(ctx context.Context, roomID string, expectSeq int64, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	ctx, cancel := dbCtx(ctx)
 	defer cancel()
 	payloadJSON, err := json.Marshal(payload)
@@ -468,9 +513,11 @@ func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor e
 			`UPDATE rooms SET last_seq = last_seq + 1, byte_size = byte_size + $2
 			 WHERE id = $1 AND ($3::bigint = 0 OR last_seq + 1 <= $3)
 			   AND ($4::bigint = 0 OR byte_size IS NULL OR byte_size + $2 <= $4)
-			 RETURNING last_seq`, roomID, size, maxEvents, maxBytes).Scan(&seq)
+			   AND ($5::bigint < 0 OR last_seq = $5)
+			 RETURNING last_seq`, roomID, size, maxEvents, maxBytes, expectSeq).Scan(&seq)
 		if errors.Is(err, pgx.ErrNoRows) {
-			// Missing room or over the cap: the row (or its absence) says which.
+			// Missing room, another writer first, or over the cap: the row
+			// (or its absence) says which.
 			var n int64
 			var b *int64
 			err := tx.QueryRow(ctx, `SELECT last_seq, byte_size FROM rooms WHERE id = $1`, roomID).Scan(&n, &b)
@@ -479,6 +526,9 @@ func (s *PG) Append(ctx context.Context, roomID string, typ events.Type, actor e
 			}
 			if err != nil {
 				return fmt.Errorf("store: reserve seq for %s: %w", roomID, err)
+			}
+			if expectSeq >= 0 && n != expectSeq {
+				return fmt.Errorf("store: append to %s after seq %d: %w", roomID, expectSeq, ErrSeqConflict)
 			}
 			return fmt.Errorf("store: append %s to %s (%d events, %s bytes): %w", typ, roomID, n, byteText(b), ErrLogFull)
 		}
@@ -572,7 +622,7 @@ func scanEvent(roomID string, row scanner) (events.Event, error) {
 const SubscribeBuffer = 16
 
 // Subscribe replays events after afterSeq then streams new ones live from the
-// shared LISTEN hub. The channel closes when ctx ends.
+// room's shared feed (hub.go). The channel closes when ctx ends.
 func (s *PG) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-chan events.Event, error) {
 	if _, err := s.GetRoom(ctx, roomID); err != nil {
 		return nil, err
@@ -583,7 +633,9 @@ func (s *PG) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-ch
 		ch:      make(chan events.Event, SubscribeBuffer),
 		wake:    make(chan struct{}, 1),
 	}
-	s.hub.register(sub)
+	if !s.hub.register(sub) {
+		return nil, fmt.Errorf("store: subscribe %s: store is closed", roomID)
+	}
 	go s.runSub(ctx, sub)
 	return sub.ch, nil
 }

@@ -63,6 +63,13 @@ func sanitizeProposal(p events.ProposalCreatedPayload) events.ProposalCreatedPay
 // scope, derives the required approval layers from the step layers, and stores
 // the proposal (and its proposal.created event). It never executes anything.
 func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor) (string, error) {
+	return s.createProposal(ctx, roomID, p, actor, nil)
+}
+
+// createProposal is CreateProposal with an optional fence, checked under s.mu
+// before anything is written: the agent's proposals refuse a run that lost its
+// lease (fenceLocked).
+func (s *Service) createProposal(ctx context.Context, roomID string, p events.ProposalCreatedPayload, actor events.Actor, fence func(st *roomState) error) (string, error) {
 	p = sanitizeProposal(p)
 	if len(p.Steps) == 0 {
 		return "", validation("proposal requires at least one step")
@@ -98,11 +105,18 @@ func (s *Service) CreateProposal(ctx context.Context, roomID string, p events.Pr
 		}
 	}
 
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, err := s.getStateLocked(ctx, roomID)
 	if err != nil {
 		return "", err
+	}
+	if fence != nil {
+		if err := fence(st); err != nil {
+			return "", err
+		}
 	}
 	if !s.roomOpen(st) {
 		return "", roomClosed("room is closed")
@@ -201,6 +215,7 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 	}
 	var prow store.ProposalRow
 	var ev events.Event
+	s.syncProposalRoom(ctx, proposalID)
 
 	if err := func() error {
 		s.mu.Lock()
@@ -291,6 +306,7 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 	}
 	// An empty params_hash is allowed only for a proposal that cannot be
 	// hashed; checkParamsHash decides once it has the row.
+	s.syncProposalRoom(ctx, proposalID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

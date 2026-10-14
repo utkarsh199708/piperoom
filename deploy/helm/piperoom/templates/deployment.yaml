@@ -7,10 +7,17 @@ metadata:
     {{- include "piperoom.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
-  # Recreate: with one replica and background workers, two pods must not run
-  # side by side during a rollout (see replicaCount in values.yaml).
+  # One replica: Recreate, so a rollout has no surge pod. More: RollingUpdate;
+  # replicas share the work through Postgres (docs/design/replicas.md).
   strategy:
+    {{- if gt (int .Values.replicaCount) 1 }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.rollingUpdate.maxSurge }}
+      maxUnavailable: {{ .Values.rollingUpdate.maxUnavailable }}
+    {{- else }}
     type: Recreate
+    {{- end }}
   selector:
     matchLabels:
       {{- include "piperoom.selectorLabels" . | nindent 6 }}
@@ -66,8 +73,14 @@ spec:
               value: {{ include "piperoom.authMode" . | quote }}
             - name: PIPEROOM_DEV_ALLOW_NONLOOPBACK
               value: {{ ternary "" "1" (eq (include "piperoom.authMode" .) "oidc") | quote }}
+            # The replica's name in agent leases, executor claims and leader
+            # logs; the server adds a per-process suffix.
+            - name: PIPEROOM_REPLICA_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             {{- range $k, $v := .Values.env }}
-            {{- if and (not (kindIs "invalid" $v)) (ne $k "PIPEROOM_PUBLIC_URL") (ne $k "PIPEROOM_AUTH_MODE") (or (ne (toString $v) "") (eq $k "PIPEROOM_OIDC_GROUPS_CLAIM")) }}
+            {{- if and (not (kindIs "invalid" $v)) (ne $k "PIPEROOM_PUBLIC_URL") (ne $k "PIPEROOM_AUTH_MODE") (ne $k "PIPEROOM_REPLICA_ID") (or (ne (toString $v) "") (eq $k "PIPEROOM_OIDC_GROUPS_CLAIM")) }}
             - name: {{ $k }}
               value: {{ include "piperoom.envValue" $v | quote }}
             {{- end }}

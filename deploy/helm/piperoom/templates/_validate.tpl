@@ -49,9 +49,17 @@
   {{- if and (regexMatch "(?i)_PROXY$" $k) (regexMatch "://[^/?#@]*@" (toString (default "" $v))) -}}
   {{- fail (printf "env.%s has a user name or password in the URL (://user:pass@...): a proxy URL with credentials is a secret, so put it in the Secret and reference it with secrets.refs" $k) -}}
   {{- end -}}
-  {{- if has $k (list "PIPEROOM_HTTP_ADDR" "OWNERS_FILE" "USERS_FILE" "PIPEROOM_DEV_ALLOW_NONLOOPBACK") -}}
+  {{- if has $k (list "PIPEROOM_HTTP_ADDR" "OWNERS_FILE" "USERS_FILE" "PIPEROOM_DEV_ALLOW_NONLOOPBACK" "PIPEROOM_REPLICA_ID") -}}
   {{- fail (printf "env.%s is set by the chart and cannot be overridden" $k) -}}
   {{- end -}}
+{{- end -}}
+{{- /* A PDB that keeps every replica would block every node drain. */ -}}
+{{- $replicas := int .Values.replicaCount -}}
+{{- if and (gt $replicas 1) .Values.podDisruptionBudget.enabled (ge (int .Values.podDisruptionBudget.minAvailable) $replicas) -}}
+  {{- fail (printf "podDisruptionBudget.minAvailable=%d must be below replicaCount=%d, or no node could ever be drained" (int .Values.podDisruptionBudget.minAvailable) $replicas) -}}
+{{- end -}}
+{{- if and (gt $replicas 1) (eq (int .Values.rollingUpdate.maxSurge) 0) (eq (int .Values.rollingUpdate.maxUnavailable) 0) -}}
+  {{- fail "rollingUpdate.maxSurge and rollingUpdate.maxUnavailable cannot both be 0" -}}
 {{- end -}}
 {{- $pub := include "piperoom.publicURL" . -}}
 {{- if and .Values.ingress.enabled $pub -}}
