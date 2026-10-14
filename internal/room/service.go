@@ -53,7 +53,14 @@ type Deps struct {
 	Owners       *owners.Owners // pipeline definitions for actions.Scoped checks
 	Run          agent.Runner
 	WriteHandoff agent.HandoffWriter
-	Options      agent.Options
+	// Triage, when set, runs the triage pass (F6) for every room opened in
+	// this process, before its agent waits for a slot; not for shadow rooms
+	// or rooms restored by Load. TriagePassTimeout is the pass's deadline
+	// (agent.Endpoint.FirstLook); the agent waits for the pass at most that
+	// plus 5 s. 0 means the default.
+	Triage            agent.Triager
+	TriagePassTimeout time.Duration
+	Options           agent.Options
 	// ShadowOptions are the agent options of a shadow room's run
 	// (docs/design/shadow.md section 3.3): the same model, fewer turns and a
 	// lower token budget (config.ParseShadow).
@@ -146,6 +153,9 @@ type roomState struct {
 	execCancel      context.CancelFunc // cancels the room's executor on close
 	exec            *execQueue         // nil until the first proposal is approved
 	dedupKey        string             // alert index key of an alert room; "" otherwise
+	// firstLook is set on a room opened in this process until its agent
+	// starts: only such a room gets the triage pass (service_triage.go).
+	firstLook bool
 
 	// Shadow run state (shadow.go). shadowActive is true from the start of
 	// the shadow supervisor until it has written the run's final status.
@@ -193,6 +203,9 @@ type Service struct {
 	owners       *owners.Owners
 	run          agent.Runner
 	writeHandoff agent.HandoffWriter
+	triage       agent.Triager
+	triageWait   time.Duration
+	triageSem    chan struct{} // maxTriagePasses
 	opts         agent.Options
 	shadowOpts   agent.Options
 	shadowGrace  time.Duration
@@ -293,6 +306,9 @@ func New(d Deps) *Service {
 		owners:       d.Owners,
 		run:          run,
 		writeHandoff: wh,
+		triage:       d.Triage,
+		triageWait:   triageWaitFor(d.TriagePassTimeout),
+		triageSem:    make(chan struct{}, maxTriagePasses),
 		opts:         d.Options,
 		shadowOpts:   d.ShadowOptions,
 		shadowGrace:  d.ShadowGrace,
@@ -901,6 +917,9 @@ func mapStoreErr(err error) error {
 type inbox struct {
 	mu    sync.Mutex
 	items []agent.HumanInput
+	// quiet is the pending alert update (pushQuiet): Drain hands it out,
+	// Wait is never woken for it, and a newer one replaces it.
+	quiet *agent.HumanInput
 	wake  chan struct{}
 	// closed is set for a shadow room: nothing is ever delivered, and Wait
 	// returns agent.ErrInboxClosed so the run ends at its first end_turn.
@@ -961,7 +980,20 @@ func (in *inbox) push(inp agent.HumanInput) {
 	}
 }
 
-// Drain returns all pending inputs without blocking.
+// pushQuiet sets the room's pending alert update, replacing one not yet
+// drained. It does not wake a waiting agent: an alert update is new numbers
+// for the next turn, not a reason for one (agent.HumanInput "alert_update").
+func (in *inbox) pushQuiet(inp agent.HumanInput) {
+	if in.closed {
+		return
+	}
+	in.mu.Lock()
+	in.quiet = &inp
+	in.mu.Unlock()
+}
+
+// Drain returns all pending inputs without blocking, the pending alert update
+// first.
 func (in *inbox) Drain(ctx context.Context) ([]agent.HumanInput, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -969,6 +1001,10 @@ func (in *inbox) Drain(ctx context.Context) ([]agent.HumanInput, error) {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	out := in.items
+	if in.quiet != nil {
+		out = append([]agent.HumanInput{*in.quiet}, out...)
+		in.quiet = nil
+	}
 	in.items = nil
 	return out, nil
 }
@@ -1142,6 +1178,13 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	st.agentRun++
 	run := st.agentRun
 	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
+	var firstLook <-chan agent.TriageResult
+	if st.firstLook && s.triage != nil {
+		// Before the slot: a room queued behind the cap still gets its
+		// diagnosis. It runs once per room, never on a restart.
+		firstLook = s.startTriageLocked(ctx, roomID, run, agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw})
+	}
+	st.firstLook = false
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -1181,6 +1224,12 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 					}
 					tcancel()
 				}
+			}
+			if firstLook != nil {
+				// The run holds its slot now; it waits for the pass only
+				// up to its deadline, so a slow pass cannot hold the slot.
+				alert.Triage = s.awaitTriage(ctx, roomID, firstLook)
+				firstLook = nil
 			}
 			err := s.runGuarded(ctx, roomID, alert, deps, s.opts)
 			gate.release()
