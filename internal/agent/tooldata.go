@@ -41,7 +41,8 @@ func encodeToolData(v any) (out json.RawMessage, n int, err error) {
 //
 // The preview is cut mid-token on purpose: this is the shape the room service
 // and the UI already read (events.TruncatedData). A valid-JSON cut would need a
-// new shape, which is a contract change.
+// new shape, which is a contract change. The model sees nothing different: it
+// reads Summary only, never Data.
 func capToolDataJSON(raw json.RawMessage) (json.RawMessage, bool, error) {
 	if len(raw) <= maxToolDataBytes {
 		return raw, false, nil
