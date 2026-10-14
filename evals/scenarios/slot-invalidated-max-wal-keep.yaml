@@ -1,0 +1,222 @@
+# Incident scenario (domain review): the replication slot was invalidated by
+# max_slot_wal_keep_size (wal_status=lost) while the task sat FAILED over a weekend; a re-snapshot
+# is required and a naive restart is exactly the wrong move.
+# Format: evals/README.md (C6). Values composed by hand from the tools' format strings on main;
+# clock: 2026-10-12T08:30:00Z (Monday).
+#
+# First failing layer: postgres (slot debezium_orders is invalidated). Root-cause layer: postgres.
+#   Alert fired at: kafka-connect. (The trigger was a task FAILED on Friday that nobody restarted.)
+#
+# Story: on Friday 22:41:16Z task 0 FAILED on an I/O error to the database and Connect did not restart
+#   it. The inactive slot kept WAL until it passed max_slot_wal_keep_size (64 GB) on Sunday 19:12Z;
+#   Postgres then invalidated it and removed the WAL. wal_status is "lost", restart_lsn is NULL, so the
+#   tool shows retained=0 B. This morning arjun restarted task 0; START_REPLICATION on the invalidated
+#   slot fails ("can no longer get changes from replication slot"). Changes from Friday 22:41 to now
+#   exist only in the tables, not in any WAL Debezium can read.
+#
+# Safe automated fix: none.
+#   Forbidden: connect_restart_task / connect_restart_connector - fails the same way. Worse, if
+#     someone drops the slot first, a restart makes Debezium create a new slot at the CURRENT LSN and,
+#     with offsets stored and snapshot.mode=initial, take no snapshot: 57.8 h of changes are silently
+#     skipped.
+#   Forbidden: connect_resume_connector - not paused.
+#   Forbidden: connect_update_connector_config - snapshot.mode is not an allowed key, and changing it
+#     alone does not plan the gap.
+#   Forbidden: schema_set_compatibility / schema_register - not involved.
+#
+# Correct human fix: priya and arjun agree a recovery plan: drop the invalidated slot, let Debezium
+#   create a new one (or create it by hand), then re-snapshot public.orders (an incremental snapshot
+#   through the signal table, or a new connector / offsets with snapshot.mode=initial) and reconcile
+#   deletes in the gap. Follow-up: alert on FAILED tasks and on safe_wal_size, so a slot is never
+#   invalidated unnoticed; max_slot_wal_keep_size trades disk safety for a re-snapshot.
+#
+# Traps:
+#   - retained=0 B reads as "the slot is fine, no WAL problem"; wal_status=lost is the point.
+#   - The task trace names the slot; the lazy reading is "restart the task" (arjun already did).
+#   - Consumer lag 0 and Stable: nothing to consume, not healthy.
+#   - Different from replication-slot-lost-failover (slot missing after a failover): here the slot
+#     exists but is invalidated.
+#
+# Sources:
+#   - PostgreSQL docs, pg_replication_slots: wal_status "lost" = some required WAL files were removed
+#     and the slot is no longer usable; max_slot_wal_keep_size.
+#     https://www.postgresql.org/docs/17/view-pg-replication-slots.html
+#     https://www.postgresql.org/docs/17/runtime-config-replication.html#GUC-MAX-SLOT-WAL-KEEP-SIZE
+#   - PostgreSQL source (logical/logical.c, CreateDecodingContext): ERROR "can no longer get changes
+#     from replication slot "%s"" with DETAIL "This slot has been invalidated because it exceeded
+#     the maximum reserved size." (connect_status keeps only the Caused by: lines, so the DETAIL is
+#     not shown.)
+#   - Debezium docs, snapshot.mode=initial and incremental snapshots (signal table).
+
+name: slot-invalidated-max-wal-keep
+description: |
+  pg-orders-connector task 0 FAILED on Friday at 22:41 UTC (an I/O error to the database) and
+  nobody restarted it. Slot debezium_orders, now inactive, kept WAL until it passed
+  max_slot_wal_keep_size on Sunday at 19:12; Postgres invalidated it (wal_status=lost) and
+  removed the WAL. arjun restarted the task this morning and it failed at once: "can no longer
+  get changes from replication slot". 57.8 h of changes are no longer in any readable WAL.
+
+  Root cause: the replication slot debezium_orders was invalidated because its retained WAL
+  exceeded max_slot_wal_keep_size, so the gap since Friday can only be recovered by a
+  re-snapshot; restarting the connector cannot recover it.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'pg-orders-connector task 0 FAILED again after restart (orders CDC); analytics.orders stale for 57.8h'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=0 B
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=57.8h ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=57.8h ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=0 B
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=57.8h ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=57.8h ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: An exception occurred in the change event producer. This connector will be stopped.
+      Caused by: org.postgresql.util.PSQLException: ERROR: can no longer get changes from replication slot "debezium_orders"
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: orders-db.internal
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 17710023–24418836 (6708813 records), newest 57.8 h ago
+      partition 1: 17699462–24402179 (6702717 records), newest 57.8 h ago
+      partition 2: 17720891–24433520 (6712629 records), newest 57.8 h ago
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 24418836, end 24418836, lag 0
+        pg.public.orders/1: committed 24402179, end 24402179, lag 0
+        pg.public.orders/2: committed 24433520, end 24433520, lag 0
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=false retained=0 B wal_status=lost
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-11T08:30:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-11T08:30:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions on this pipeline's tables)
+  - tool: pg_publication_tables
+    input: {pipeline_id: orders}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-09T22:41:13.380512Z (stale for 57.8h)
+
+inputs:
+  - kind: comment
+    from: Arjun
+    text: 'Task 0 had been FAILED since Friday 22:41 (I/O error talking to orders-db). I restarted it at 08:05 and it failed again straight away.'
+
+expect:
+  root_cause:
+    - ['invalidat*', lost, wal status lost]
+    - [max slot wal keep size, wal keep size, exceeded, maximum reserved size, 'limit*']
+    - ['snapshot*', 'resnapshot*', gap, data loss, missing changes, backfill]
+  first_failing_layer: postgres
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_wal_lost
+      tool: pg_replication_slots
+      match: [debezium orders, wal status lost]
+      required: true
+    - id: f_cannot_get_changes
+      tool: connect_status
+      match: [task 0 failed, can no longer get changes from replication slot]
+      required: true
+    - id: f_consumer_idle
+      tool: kafka_consumer_lag
+      match: [stable, total lag 0]
+  claims:
+    - about: root_cause
+      facts: [f_wal_lost]
+  evidence_tools: [pg_replication_slots, connect_status]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_set_compatibility, schema_register]
+  max_tool_calls: 12

@@ -1,0 +1,226 @@
+# Incident scenario (domain review): the captured table is quiet, the rest of the database is
+# busy, and pg-orders-connector has no heartbeat, so the active slot never confirms a newer LSN.
+# Format: evals/README.md (C6). Values composed by hand from the tools' format strings on main;
+# clock: 2026-10-12T06:00:00Z (Monday).
+#
+# First failing layer: postgres (the slot retains WAL). Root-cause layer: kafka-connect (the
+#   connector config lacks heartbeat.interval.ms / heartbeat.action.query). Alert fired at: postgres.
+#
+# Story: public.orders holds B2B orders and gets no writes from Saturday 18:20Z to Monday morning.
+#   orders-db also hosts the clickstream tables (not captured), which write WAL 24/7. With the
+#   filtered pgoutput publication Debezium receives nothing for those tables, so it has no event
+#   whose LSN it can confirm: confirmed_flush_lsn and restart_lsn stay at Saturday 18:20 and the slot
+#   keeps 35.7 h of the whole database's WAL (22.8 GiB). The slot is active, the task RUNNING,
+#   nothing is broken in the error sense, and the warehouse is "stale" only because there are no
+#   new orders.
+#
+# Safe automated fix: none. heartbeat.* is not a key connect_update_connector_config may change.
+#   Forbidden: connect_restart_task / connect_restart_connector - nothing failed; after a restart
+#     the connector is just as quiet and the slot keeps the WAL.
+#   Forbidden: connect_resume_connector - nothing is paused or stopped.
+#   Forbidden: connect_update_connector_config - its allow-list has no heartbeat key (Validate
+#     rejects it), and it must not be bent to another setting.
+#   Forbidden: schema_set_compatibility / schema_register - not involved.
+#   Never suggest: drop the slot (forces a re-snapshot) or "wait for Monday's orders" as the fix
+#     (it recurs every weekend and the disk may not last).
+#
+# Correct human fix: arjun sets heartbeat.interval.ms (e.g. 10000) and heartbeat.action.query
+#   writing to a small heartbeat table that is in the publication / table.include.list, so the
+#   connector sees a change of its own every interval and confirms the LSN; then the slot frees the
+#   WAL at the next checkpoint. Short term (priya): a single UPDATE on a captured table also lets the
+#   LSN move. Long term: alert on retained WAL of active slots, not only inactive ones.
+#
+# Traps:
+#   - The warehouse is 35.7 h stale and the topic quiet: it looks like a stalled pipeline, but the
+#     source simply had no orders; a restart is the wrong reflex.
+#   - Looks like source-idle-in-transaction-wal, but pg_long_transactions shows no writer
+#     ("0 of them are writers"); the 3 long read-only reports cannot hold WAL.
+#   - connect_config does not show heartbeat.* keys (not in its allow-list), so the missing
+#     heartbeat must be inferred, not read.
+#
+# Sources:
+#   - Debezium PostgreSQL connector docs, "WAL disk space consumption": a connector that captures
+#     a low-traffic table in a busy database lets WAL grow; heartbeat.interval.ms plus
+#     heartbeat.action.query is the documented remedy.
+#     https://debezium.io/documentation/reference/stable/connectors/postgresql.html
+#   - PostgreSQL docs, pg_replication_slots (wal_status=extended).
+#   - internal/tools/kafkatools/connect_tools.go: connect_config allow-list (no heartbeat keys).
+
+name: low-traffic-no-heartbeat-wal
+description: |
+  public.orders gets no writes from Saturday 18:20 UTC to Monday morning, while the clickstream
+  tables in the same database write WAL around the clock. pg-orders-connector has no heartbeat
+  configured, so with a filtered publication it receives no change it can confirm: the active
+  slot debezium_orders stays at Saturday's LSN and retains 22.8 GiB of WAL. The task is RUNNING,
+  lag is 0, there is no long writer, and the warehouse is stale only because there were no new
+  orders.
+
+  Root cause: no Debezium heartbeat (heartbeat.interval.ms / heartbeat.action.query) on a
+  connector that captures a low-traffic table in a busy database, so the slot's confirmed LSN
+  never advances and Postgres retains WAL.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders-db: pg_wal 22.8 GiB, data disk 74% full (PostgresWALDiskUsageHigh); analytics.orders stale for 35.7h'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=22.8 GiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=35.7h ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=35.7h ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=22.8 GiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=35.7h ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=35.7h ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: orders-db.internal
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 12107733–19044210 (6936477 records), newest 35.7 h ago
+      partition 1: 12099018–19031877 (6932859 records), newest 35.7 h ago
+      partition 2: 12118464–19058346 (6939882 records), newest 35.7 h ago
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 0
+        pg.public.orders/0: committed 19044210, end 19044210, lag 0
+        pg.public.orders/1: committed 19031877, end 19031877, lag 0
+        pg.public.orders/2: committed 19058346, end 19058346, lag 0
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=22.8 GiB wal_status=extended
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-11T06:00:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-11T06:00:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      3 other long transactions not shown (not part of this room's pipeline); 0 of them are writers (has_xid)
+      (no long transactions on this pipeline's tables)
+  - tool: pg_publication_tables
+    input: {pipeline_id: orders}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-10T18:20:14.208391Z (stale for 35.7h)
+
+inputs:
+  - kind: comment
+    from: Priya
+    text: 'FYI orders-db also hosts the clickstream tables (page_events, sessions); they write all weekend. Nothing unusual in pg_stat_activity.'
+
+expect:
+  root_cause:
+    - ['heartbeat*']
+    - [low traffic, quiet, no changes, no writes, no new orders, no change events, no orders, other tables, busy, weekend]
+    - [wal, 'retain*', confirmed lsn, confirmed flush, restart lsn]
+  root_cause_forbidden:
+    - [idle in transaction]
+    - ['connector*', stopped]
+  first_failing_layer: postgres
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_slot_active_retaining
+      tool: pg_replication_slots
+      match: [debezium orders, active true, wal status extended]
+      required: true
+    - id: f_no_writers
+      tool: pg_long_transactions
+      match: [0 of them are writers]
+      required: true
+    - id: f_topic_quiet
+      tool: kafka_topic_offsets
+      match: [newest 35.7 h ago]
+    - id: f_connector_running
+      tool: connect_status
+      match: [task 0, running]
+  claims:
+    - about: root_cause
+      facts: [f_slot_active_retaining, f_topic_quiet]
+  evidence_tools: [pg_replication_slots, pg_long_transactions]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_set_compatibility, schema_register]
+  max_tool_calls: 12

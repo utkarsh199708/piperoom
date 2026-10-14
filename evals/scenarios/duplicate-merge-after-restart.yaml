@@ -1,0 +1,225 @@
+# Incident scenario (domain review): at-least-once delivery. A Connect worker died, Debezium
+# re-emitted the changes after its last flushed offset, and order-sync's MERGE into Snowflake fails on
+# the duplicate keys in one batch.
+# Format: evals/README.md (C6). Values composed by hand from the tools' format strings on main;
+# clock: 2026-10-14T04:02:00Z.
+#
+# First failing layer: consumer. Root-cause layer: consumer (a loader that does not de-duplicate
+#   an at-least-once stream). Trigger: the worker crash in kafka-connect. Alert fired at: consumer.
+#
+# Story: at 03:10:05Z worker connect-1 was OOM-killed; task 0 moved to connect-2 and started at
+#   03:10:41Z from the last offset Connect had flushed (offset.flush.interval.ms=60000), so Debezium
+#   sent about 50 s of changes a second time. That is the documented at-least-once behaviour. order-sync
+#   stages each micro-batch and runs MERGE INTO analytics.orders ... ON id; a batch that contains two
+#   events for the same id makes the MERGE nondeterministic and Snowflake fails it ("Duplicate row
+#   detected during DML action"). order-sync exits before committing and crash-loops: group Empty,
+#   lag 125420 on every partition, warehouse 51 min stale.
+#
+# Safe automated fix: none.
+#   Forbidden: connect_restart_task / connect_restart_connector - Connect is healthy; another restart
+#     can only re-emit more duplicates.
+#   Forbidden: connect_resume_connector - nothing is paused.
+#   Forbidden: connect_update_connector_config - not a source setting.
+#   Forbidden: schema_set_compatibility / schema_register - not involved.
+#   Never suggest: reset order-sync to latest (skips 125420 changes); deleting records from the topic.
+#
+# Correct human fix: kabir de-duplicates each batch before the MERGE (keep the last event per id by
+#   source LSN / source.ts_ms, e.g. QUALIFY ROW_NUMBER() OVER (PARTITION BY id ORDER BY lsn DESC) = 1)
+#   and redeploys; order-sync then resumes from its committed offsets with no loss. Long term: the
+#   sink must be idempotent; Debezium exactly-once (Kafka 3.3+, exactly.once.support) narrows but
+#   does not replace that.
+#
+# Traps:
+#   - The worker crash is visible (connect_status now says connect-2) and tempts a Connect story or a
+#     restart; Connect is RUNNING and is not where it fails.
+#   - Group Empty with lag on all partitions looks like the poison-pill or rebalance scenarios; the
+#     key finding is the same key twice (kafka_find_by_key), not an undecodable record.
+#   - The duplicate is in one partition (same key), so per-key order is intact: not an ordering bug.
+#
+# Sources:
+#   - Debezium docs, "Kafka Connect process crashes" / delivery guarantees: after a crash the
+#     connector restarts from the last recorded offset, so consumers can see duplicate events.
+#     https://debezium.io/documentation/reference/stable/connectors/postgresql.html
+#   - Kafka Connect offset.flush.interval.ms (default 60000).
+#   - Snowflake docs, MERGE "Duplicate join behavior": ERROR_ON_NONDETERMINISTIC_MERGE (default TRUE)
+#     raises "Duplicate row detected during DML action" when one target row joins several source rows.
+#     https://docs.snowflake.com/en/sql-reference/sql/merge
+
+name: duplicate-merge-after-restart
+description: |
+  At 03:10:05 UTC Connect worker connect-1 was OOM-killed. pg-orders-connector's task 0 moved
+  to connect-2 and resumed from the last flushed offset, so Debezium re-emitted about 50 seconds
+  of change events (at-least-once delivery). order-sync loads micro-batches into Snowflake with
+  MERGE ... ON id; a batch holding two events for the same id fails with "Duplicate row detected
+  during DML action", order-sync exits before committing and crash-loops. Group Empty, lag 125420,
+  warehouse 51 min stale; Connect, the slot and the schema are healthy.
+
+  Root cause: order-sync's MERGE does not de-duplicate keys within a batch, so the duplicate
+  events Debezium legitimately re-sent after the worker restart make every load fail.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'order-sync lag 125420 and rising, consumer group Empty; analytics.orders stale for 51 min'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=41.6 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] WARN lag=125420 state=Empty
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=51m ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=41.6 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] WARN lag=125420 state=Empty
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] FAIL stale_for=51m ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-2:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: orders-db.internal
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 4122019–9161207 (5039188 records), newest just now
+      partition 1: 4118833–9154489 (5035656 records), newest just now
+      partition 2: 4125508–9168032 (5042524 records), newest just now
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Empty
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Empty, 0 members, total lag 125420
+        pg.public.orders/1: committed 9112390, end 9154489, lag 42099
+        pg.public.orders/2: committed 9126007, end 9168032, lag 42025
+        pg.public.orders/0: committed 9119911, end 9161207, lag 41296
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=41.6 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-13T04:02:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-13T04:02:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions on this pipeline's tables)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-14T03:10:38.842907Z (stale for 51m)
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '7702113'}
+    summary: |-
+      found 2 record(s) with key "7702113"
+        partition 1, offset 9112406, 2026-10-14T03:09:52Z
+        partition 1, offset 9113377, 2026-10-14T03:10:44Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '7702113'}
+    summary: |-
+      found: yes, updated_at=2026-10-14T03:09:51.880214Z, columns=[amount, customer_id, id=7702113, status, updated_at=2026-10-14T03:09:51.880214Z]
+
+inputs:
+  - kind: comment
+    from: Kabir
+    text: 'order-sync crash-loops since 03:10. Every attempt logs: MERGE INTO ANALYTICS.ORDERS failed: 100090 (42P18): Duplicate row detected during DML action Row Values: [7702113, ...]'
+  - kind: comment
+    from: Arjun
+    text: 'connect-1 was OOM-killed at 03:10; its tasks moved to connect-2. Connect looks fine now.'
+
+expect:
+  root_cause:
+    - ['duplicate*', twice, 'replay*', 're-emit*', 'redeliver*', 're-sent', resent, at least once, same key]
+    - [merge, 'dedup*', 'de-dup*', 'upsert*', batch]
+  root_cause_forbidden:
+    - ['reset*', latest]
+  first_failing_layer: consumer
+  root_cause_layer: consumer
+  expected_facts:
+    - id: f_group_crashlooping
+      tool: kafka_consumer_lag
+      match: [empty, 0 members, total lag 125420]
+      required: true
+    - id: f_key_twice
+      tool: kafka_find_by_key
+      match: [found 2 record, '7702113']
+    - id: f_task_moved
+      tool: connect_status
+      match: [connect 2, task 0, running]
+  claims:
+    - about: root_cause
+      facts: [f_key_twice, f_group_crashlooping]
+  evidence_tools: [kafka_consumer_lag]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_set_compatibility, schema_register]
+  max_tool_calls: 12

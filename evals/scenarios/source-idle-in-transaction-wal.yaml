@@ -1,0 +1,225 @@
+# Incident scenario (domain review): an idle-in-transaction session on the source pins the
+# slot's restart_lsn, so WAL grows while the connector is RUNNING and data still flows.
+# Format: evals/README.md (C6). Values composed by hand from the tools' format strings on main
+# (pipeline_map with its legend and from: lines, scoped pg_long_transactions); clock: 2026-10-14T10:00:00Z.
+#
+# First failing layer: postgres. Root-cause layer: postgres. Alert fired at: postgres (disk).
+#
+# Story: at 02:41:37Z someone opened psql on orders-db through the bastion, ran BEGIN and an
+#   UPDATE on public.customers (not a pipeline table) and left the session "idle in transaction"
+#   (pid 48213). The transaction has an xid. Logical decoding cannot move a slot's restart_lsn past
+#   the start of the oldest running transaction that has an xid (it may still need to decode it
+#   when it commits), so debezium_orders keeps every WAL segment written since 02:41, although
+#   pg-orders-connector is RUNNING, confirmed_flush_lsn advances, lag is 37 and the warehouse is fresh.
+#
+# Safe automated fix: none. No action ends a Postgres session.
+#   Forbidden: connect_restart_task / connect_restart_connector - nothing failed; a restart does not
+#     end pid 48213, restart_lsn stays pinned and the restart only adds duplicate events.
+#   Forbidden: connect_resume_connector - nothing is paused or stopped.
+#   Forbidden: connect_update_connector_config - none of its keys touches the cause.
+#   Forbidden: schema_set_compatibility / schema_register - Schema Registry is not involved.
+#   Never suggest: drop the replication slot (loses the position, forces a re-snapshot) or
+#     raise max_wal_size (does not release slot-held WAL).
+#
+# Correct human fix: priya (DBA) identifies pid 48213 (pg_stat_activity: usename, client_addr,
+#   query), asks its owner, then ends it with pg_terminate_backend(48213) (its UPDATE rolls back).
+#   restart_lsn then jumps forward at the next checkpoint and the WAL is recycled. Long term: set
+#   idle_in_transaction_session_timeout for human roles and alert on long writers.
+#
+# Traps:
+#   - Connector RUNNING, lag 37, warehouse fresh: a "connector stopped / failed" story is wrong.
+#   - Looks like the low-traffic heartbeat case (low-traffic-no-heartbeat-wal), but public.orders is
+#     busy (topic newest 1s ago), so a missing heartbeat does not explain it.
+#   - The session is outside the pipeline's tables, so the scoped pg_long_transactions shows it only
+#     in the anonymised "oldest writers outside this pipeline's tables" block, under
+#     "(no long transactions on this pipeline's tables)". An agent that reads only the last line misses it.
+#   - The second long transaction (a read-only report, no xid) is counted but cannot hold WAL.
+#
+# Sources:
+#   - PostgreSQL docs, "Logical Decoding Concepts" / pg_replication_slots: restart_lsn is the oldest
+#     WAL the slot's consumer may still need; wal_status=extended = past max_wal_size, kept by a slot.
+#     https://www.postgresql.org/docs/17/view-pg-replication-slots.html
+#   - Debezium PostgreSQL connector docs, "WAL disk space consumption" (long-running transactions).
+#     https://debezium.io/documentation/reference/stable/connectors/postgresql.html
+#   - PostgreSQL docs, idle_in_transaction_session_timeout; pg_stat_activity state
+#     "idle in transaction", wait event ClientRead (wait_event_type Client).
+#   - internal/tools/dbtools/pg.go: scoped pg_long_transactions output.
+
+name: source-idle-in-transaction-wal
+description: |
+  At 02:41:37 UTC a psql session on orders-db (pid 48213) ran BEGIN and an UPDATE on
+  public.customers and was left idle in transaction. Its xid is the oldest running transaction,
+  so logical decoding cannot advance the restart_lsn of slot debezium_orders past it: Postgres
+  has kept every WAL segment since then (37.4 GiB in 7.3 h, wal_status=extended) and the disk
+  is filling. pg-orders-connector is RUNNING, change events flow (lag 37), the warehouse is
+  fresh, and there is no DDL.
+
+  Root cause: a long-running idle-in-transaction writer (pid 48213, open 7.3 h, outside the
+  pipeline's tables) holds back the restart_lsn of the active slot debezium_orders, so Postgres
+  retains WAL even though Debezium keeps up.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'orders-db: pg_wal 37.4 GiB, data disk 78% full (PostgresWALDiskUsageHigh); replication slot WAL retention up about 5 GiB/h since 02:45'
+  pipeline_map: |
+    pipeline orders
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=37.4 GiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      from: pg:public.orders
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      from: connect:pg-orders-connector
+    4 group:order-sync [consumer, owner kabir] OK lag=37 state=Stable
+      from: topic:pg.public.orders
+    5 wh:analytics.orders [warehouse, owner meera] OK stale_for=24s ts_column=updated_at
+      from: group:order-sync (unconfirmed)
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.orders [postgres, owner priya] WARN slot_active=true slot_retained=37.4 GiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+        from: pg:public.orders
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+        from: connect:pg-orders-connector
+      4 group:order-sync [consumer, owner kabir] OK lag=37 state=Stable
+        from: topic:pg.public.orders
+      5 wh:analytics.orders [warehouse, owner meera] OK stale_for=24s ts_column=updated_at
+        from: group:order-sync (unconfirmed)
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: orders-db.internal
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 21400112–26018876 (4618764 records), newest just now
+      partition 1: 21388090–26004519 (4616429 records), newest just now
+      partition 2: 21412007–26031945 (4619938 records), newest just now
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 37
+        pg.public.orders/0: committed 26018861, end 26018876, lag 15
+        pg.public.orders/2: committed 26031933, end 26031945, lag 12
+        pg.public.orders/1: committed 26004509, end 26004519, lag 10
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=37.4 GiB wal_status=extended
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-13T10:00:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-13T10:00:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      2 other long transactions not shown (not part of this room's pipeline); 1 of them is a writer (has_xid)
+      oldest writers outside this pipeline's tables (they hold back every logical slot's restart_lsn; no user, application, database or query shown):
+        pid=48213 same_database=yes state=idle in transaction age=7.3h xid_age=2184530 wait_type=Client
+      (no long transactions on this pipeline's tables)
+  - tool: pg_publication_tables
+    input: {pipeline_id: orders}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-14T09:59:35.902117Z (stale for 24s)
+
+inputs:
+  - kind: comment
+    from: Priya
+    text: 'pid 48213 is a psql session from the bastion host (client 10.20.4.17), started 02:41 UTC. I have not touched it yet.'
+
+expect:
+  root_cause:
+    - [idle in transaction, long transaction, long running transaction, open transaction, uncommitted transaction, never committed]
+    - ['48213', restart lsn, oldest xid, holds back, held back, pins, pinned, pinning]
+    - [wal, 'retain*']
+  # The heartbeat story belongs to low-traffic-no-heartbeat-wal; here public.orders is busy.
+  root_cause_forbidden:
+    - ['heartbeat*']
+    - ['connector*', stopped]
+  first_failing_layer: postgres
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_idle_writer
+      tool: pg_long_transactions
+      match: [pid 48213, idle in transaction]
+      required: true
+    - id: f_slot_active_retaining
+      tool: pg_replication_slots
+      match: [debezium orders, active true, wal status extended]
+      required: true
+    - id: f_connector_running
+      tool: connect_status
+      match: [task 0, running]
+  claims:
+    - about: root_cause
+      facts: [f_idle_writer]
+  evidence_tools: [pg_long_transactions, pg_replication_slots]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_set_compatibility, schema_register]
+  max_tool_calls: 12
