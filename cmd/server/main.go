@@ -103,6 +103,12 @@ func run() error {
 		return err
 	}
 
+	// A bad PIPEROOM_POSTMORTEM_MODEL stops the server.
+	pmMode, err := config.ParsePostmortemModel(cfg)
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
+
 	// Shadow mode numbers (docs/design/shadow.md 5.3): a bad
 	// PIPEROOM_SHADOW_* value stops the server like a bad watcher value. Which
 	// pipelines are shadow comes from owners.yaml.
@@ -264,7 +270,10 @@ func run() error {
 		topo     topology.Builder
 		run      = agent.Run
 		write    = agent.WriteHandoff
-		stacks   *wiring.Stacks // nil in demo mode
+		// writePM is room.Deps.WritePostmortem; nil gives the events-only
+		// draft (PIPEROOM_POSTMORTEM_MODEL=off, or no writer wired yet).
+		writePM agent.PostmortemWriter
+		stacks  *wiring.Stacks // nil in demo mode
 		// stackFor is room.Deps.StackFor: nil in demo mode, where every
 		// room uses acts and toolsReg.
 		stackFor func(string) room.PipelineStack
@@ -291,6 +300,9 @@ func run() error {
 		topo = demo.Builder{}
 		run = demo.Run
 		write = demo.WriteHandoff
+		if pmMode == config.PostmortemModelAuto {
+			writePM = demo.WritePostmortem
+		}
 	} else {
 		// The model endpoint first: a wrong provider, region, project or token
 		// budget should stop the server before it opens any connection.
@@ -332,15 +344,16 @@ func run() error {
 	}
 
 	svc := newRoomService(room.Deps{
-		Store:        st,
-		Actions:      acts,
-		Tools:        toolsReg,
-		StackFor:     stackFor,
-		Topology:     topo,
-		Users:        users,
-		Owners:       own,
-		Run:          run,
-		WriteHandoff: write,
+		Store:           st,
+		Actions:         acts,
+		Tools:           toolsReg,
+		StackFor:        stackFor,
+		Topology:        topo,
+		Users:           users,
+		Owners:          own,
+		Run:             run,
+		WriteHandoff:    write,
+		WritePostmortem: writePM,
 		Options: agent.Options{
 			Model:    cfg.Model,
 			Effort:   cfg.Effort,

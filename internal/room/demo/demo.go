@@ -23,8 +23,9 @@ import (
 )
 
 var (
-	_ agent.Runner        = Run
-	_ agent.HandoffWriter = WriteHandoff
+	_ agent.Runner           = Run
+	_ agent.HandoffWriter    = WriteHandoff
+	_ agent.PostmortemWriter = WritePostmortem
 )
 
 // Action names the demo proposal references.
@@ -181,6 +182,13 @@ func WriteHandoff(ctx context.Context, roomEvents []events.Event, opts agent.Opt
 		Open:      []string{"Consider pinning decimal.handling.mode"},
 		Risks:     []string{"BACKWARD compatibility is off until re-enabled"},
 	}, nil
+}
+
+// WritePostmortem is a fake closing-summary writer returning the fixture
+// summary, with no grounding violations.
+func WritePostmortem(ctx context.Context, roomEvents []events.Event, opts agent.Options) (agent.PostmortemDraft, error) {
+	s, err := WriteHandoff(ctx, roomEvents, opts)
+	return agent.PostmortemDraft{Summary: s}, err
 }
 
 // Builder is a fake topology.Builder for the orders pipeline.
