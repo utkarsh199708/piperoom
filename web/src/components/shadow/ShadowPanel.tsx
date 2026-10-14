@@ -57,9 +57,7 @@ export function ShadowPanel({ state, user }: { state: RoomState; user: CurrentUs
         showData={withData}
         onToggleData={() => setWithData((v) => !v)}
       />
-      {/* key: a new grade from the server remounts the form with its values */}
       <GradeForm
-        key={data.room?.graded?.seq ?? 'none'}
         roomId={state.id}
         current={current}
         revealed={data.run.revealed_at !== null || state.shadow_revealed === true}

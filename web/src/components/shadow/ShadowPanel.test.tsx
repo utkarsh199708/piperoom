@@ -102,6 +102,17 @@ describe('ShadowPanel', () => {
     expect(screen.queryByText(HYP)).not.toBeInTheDocument()
   })
 
+  it('reloads into the run when someone else labelled first (409 already_decided)', async () => {
+    const shadow = vi.spyOn(api, 'shadow').mockRejectedValueOnce(notLabelled())
+    vi.spyOn(api, 'shadowBlind').mockRejectedValue(new ApiClientError(409, 'already_decided', 'already labelled'))
+    render(<ShadowPanel state={room} user={member} />)
+    fireEvent.click(await screen.findByRole('radio', { name: 'kafka' }))
+    fireEvent.change(screen.getByLabelText('Root cause terms'), { target: { value: 'lag' } })
+    shadow.mockResolvedValueOnce(response())
+    fireEvent.click(screen.getByRole('button', { name: /Save label/ }))
+    expect(await screen.findByText(HYP)).toBeInTheDocument()
+  })
+
   it('gives a viewer no forms before the label', async () => {
     vi.spyOn(api, 'shadow').mockRejectedValue(notLabelled())
     render(<ShadowPanel state={room} user={viewer} />)
@@ -110,7 +121,16 @@ describe('ShadowPanel', () => {
   })
 
   it('grades the run and sends notes only when given', async () => {
-    vi.spyOn(api, 'shadow').mockResolvedValue(response())
+    // After the save the panel refetches and the server now returns the grade (a new seq).
+    const shadow = vi.spyOn(api, 'shadow').mockResolvedValueOnce(response())
+    shadow.mockResolvedValue(
+      response({
+        room: {
+          labelled: ev('shadow.labelled', { actual_layer: 'schema-registry', root_cause_terms: ['compatibility'] }),
+          graded: ev('shadow.graded', { layer_correct: true, root_cause: 'partial' }, { seq: 9 }),
+        },
+      }),
+    )
     const grade = vi.spyOn(api, 'shadowGrade').mockResolvedValue(ev('shadow.graded', {}))
     render(<ShadowPanel state={room} user={member} />)
     await screen.findByText(HYP)
@@ -122,7 +142,11 @@ describe('ShadowPanel', () => {
     expect(save).toBeEnabled()
     fireEvent.click(save)
     await waitFor(() => expect(grade).toHaveBeenCalledWith('r1', { layer_correct: true, root_cause: 'partial' }))
+    // The confirmation must survive the refetch that brings the new grade in.
     expect(await screen.findByText('Grade saved.')).toBeInTheDocument()
+    await waitFor(() => expect(shadow).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('Grade saved.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Update grade' })).toBeInTheDocument()
   })
 
   it('starts the grade form from the current grade and allows a re-grade', async () => {

@@ -36,6 +36,19 @@ describe('shadow rooms in the reducer', () => {
     expect(next.activity[0].text).toMatch(/Shadow run finished/)
   })
 
+  it('drops agent events in a shadow room so they cannot un-blind the labeller', () => {
+    const agent = { kind: 'agent' as const, id: 'agent', name: 'Agent' }
+    const start = { ...emptyRoomState('r1'), shadow: true, last_seq: 4 }
+    const hyp = ev(5, 'agent.hypothesis', { text: 'secret', based_on_steps: [], confidence: 'high', confirmed: false }, agent)
+    const next = applyEvent(applyEvent(start, hyp), ev(6, 'agent.message', { text: 'secret' }, agent))
+    expect(next.hypothesis).toBeNull()
+    expect(next.messages).toHaveLength(0)
+    expect(next.activity).toHaveLength(0)
+    expect(next.last_seq).toBe(6)
+    // a live room still shows them
+    expect(applyEvent({ ...start, shadow: false }, hyp).hypothesis?.text).toBe('secret')
+  })
+
   it('shadow.labelled and shadow.graded describe the actor, not the content', () => {
     expect(describeEvent(ev(7, 'shadow.labelled', { actual_layer: 'kafka', root_cause_terms: ['secret term'] }, human))).toBe(
       'Arjun recorded a blind label',

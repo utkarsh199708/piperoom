@@ -10,7 +10,7 @@ export const MAX_NOTES = 2000
 export function formatSeconds(s: number | null | undefined): string {
   if (s == null || s < 0 || !Number.isFinite(s)) return 'n/a'
   if (s < 60) return `${Math.round(s)} s`
-  if (s < 3600) return `${Math.round(s / 60)} min`
+  if (Math.round(s / 60) < 60) return `${Math.round(s / 60)} min`
   return `${(s / 3600).toFixed(1)} h`
 }
 

@@ -13,6 +13,7 @@ export function useShadowMetrics(pipeline: string, since: string): MetricsView {
   const [view, setView] = useState<MetricsView>({ phase: 'loading' })
   useEffect(() => {
     let cancelled = false
+    setView({ phase: 'loading' }) // the old filter's numbers must not stay on screen
     api
       .shadowMetrics({ pipeline: pipeline || undefined, since: since || undefined })
       .then((metrics) => !cancelled && setView({ phase: 'ready', metrics }))

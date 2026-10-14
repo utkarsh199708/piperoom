@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useShadowMetrics } from '@/hooks/useShadowMetrics'
 import { formatSeconds, formatTokens, metricsHeadline, sinceParam, STATUS_LABEL } from '@/lib/shadow'
@@ -14,7 +14,13 @@ export function ShadowMetricsPage() {
   const [pipeline, setPipeline] = useState('')
   const [date, setDate] = useState('')
   const [copied, setCopied] = useState(false)
-  const view = useShadowMetrics(pipeline.trim(), sinceParam(date))
+  // One request per pause in typing, not per keystroke.
+  const [debounced, setDebounced] = useState('')
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebounced(pipeline.trim()), 300)
+    return () => window.clearTimeout(t)
+  }, [pipeline])
+  const view = useShadowMetrics(debounced, sinceParam(date))
 
   const copy = (text: string) => {
     if (!navigator.clipboard) return

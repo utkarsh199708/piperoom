@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
-import { api } from '@/api/client'
+import { ApiClientError, api } from '@/api/client'
 import { LAYERS } from '@/api/types'
 import { errorText } from '@/lib/errors'
 import { MAX_TERM_LEN, MAX_TERMS, parseTerms, termsProblem } from '@/lib/shadow'
@@ -40,6 +40,11 @@ export function BlindLabelForm({
       await api.shadowBlind(roomId, { actual_layer: layer, root_cause_terms: terms })
       onDone()
     } catch (err) {
+      // Someone else labelled first (another tab or person): reload and show the run.
+      if (err instanceof ApiClientError && err.status === 409 && err.code === 'already_decided') {
+        onDone()
+        return
+      }
       setError(errorText(err))
     } finally {
       setBusy(false)

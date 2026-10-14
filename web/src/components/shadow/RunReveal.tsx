@@ -84,8 +84,8 @@ export function RunReveal({
             Layer <Badge variant="outline">{label.actual_layer}</Badge>
           </p>
           <ul className="m-0 flex list-disc flex-col gap-0.5 pl-5 text-sm">
-            {label.root_cause_terms.map((t) => (
-              <li key={t}>{t}</li>
+            {label.root_cause_terms.map((t, i) => (
+              <li key={`${i}-${t}`}>{t}</li>
             ))}
           </ul>
         </Card>

@@ -24,6 +24,7 @@ describe('formatSeconds', () => {
     [45, '45 s'],
     [240, '4 min'],
     [3120, '52 min'],
+    [3599, '1.0 h'],
     [7200, '2.0 h'],
   ])('%s -> %s', (s, want) => expect(formatSeconds(s)).toBe(want))
   it('treats null and NaN as n/a', () => {

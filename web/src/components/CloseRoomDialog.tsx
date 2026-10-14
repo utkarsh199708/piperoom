@@ -66,7 +66,7 @@ export function CloseRoomDialog({ actions, onClose }: { actions: RoomActions; on
         <DialogHeader>
           <DialogTitle>Close the room</DialogTitle>
           <DialogDescription>
-            Closing stops the agent and ends the incident. Say what fixed it: the resolution stays with the room and
+            Closing ends the incident and stops the agent (in a shadow room it may be allowed to finish first). Say what fixed it: the resolution stays with the room and
             its export.
           </DialogDescription>
         </DialogHeader>
