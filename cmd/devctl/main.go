@@ -5,7 +5,7 @@
 //	devctl health                     read-only; exit 1 if a layer is unhealthy
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
-//	devctl demo [--fix] <scenario>
+//	devctl demo [--fix] <scenario> | devctl demo --rehearse [scenario]
 //	devctl identities unbind <user>   move a user to a new IdP account
 //	devctl rooms delete <id> --reason <text> --as <admin> [--archive]
 //
@@ -37,6 +37,7 @@ const usage = `devctl — local pipeline control
   devctl break <scenario>   cause a failure
   devctl fix <scenario>     apply the correct manual fix
   devctl demo [--fix] <scenario>   one-command live demo (locks, resets, breaks)
+  devctl demo --rehearse    run the schema-change demo once against the server (reset, break, wait for room, reset)
   devctl lock --owner <tag> take the shared stack lock
   devctl unlock --owner <tag>  release the shared stack lock
   devctl lock status        show who holds the lock
