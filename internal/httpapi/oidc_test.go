@@ -777,6 +777,8 @@ func TestOIDCViewerIsReadOnly(t *testing.T) {
 		{"/api/proposals/p_x/reject", `{"layer":"postgres","reason":"no"}`},
 		{"/api/rooms/" + snap.ID + "/suggestions/g_x/send", `{}`},
 		{"/api/rooms/" + snap.ID + "/suggestions/g_x/decline", `{"reason":"no"}`},
+		{"/api/rooms/" + snap.ID + "/label", `{"cause":"x"}`},
+		{"/api/rooms/" + snap.ID + "/checklist", `{"step_id":"s","tool_use_id":"t","hit":0,"item":0,"done":true}`},
 		{"/api/alerts/webhook", `{}`},
 	}
 	for _, p := range posts {

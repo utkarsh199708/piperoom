@@ -8,7 +8,6 @@ const SHOW_RESOLVED = 5
 const LABEL: Record<SuggestionStatus, string> = {
   pending: 'Pending',
   accepted: 'Sent to agent',
-  // HOOK(R10): the reducer never sets this until the API has a declined event (see state/types.ts).
   declined: 'Declined',
 }
 const VARIANT: Record<SuggestionStatus, 'warning' | 'success' | 'destructive'> = {

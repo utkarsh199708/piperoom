@@ -11,6 +11,8 @@ export interface RoomShortcuts {
   trace?: () => void
   /** T: take control, or request it (the room screen passes whichever applies). */
   control?: () => void
+  /** Esc: clear the lane's layer filter (offered only while one is on). */
+  clearFilter?: () => void
 }
 
 // The keys the buttons show in their Kbd. They only act when the person is not typing, no
@@ -28,6 +30,12 @@ export function useRoomShortcuts(shortcuts: RoomShortcuts): void {
       if (isEditableTarget(e.target)) return
       // A dialog, an alert dialog or an open menu has the keyboard: the keys are not ours then.
       if (document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) return
+      if (e.key === 'Escape') {
+        if (!latest.current.clearFilter) return
+        e.preventDefault()
+        latest.current.clearFilter()
+        return
+      }
       const key = e.key.toLowerCase()
       const s = latest.current
       let run: (() => void) | undefined
