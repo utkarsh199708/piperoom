@@ -195,7 +195,9 @@ func TestReadyzWarnRateLimited(t *testing.T) {
 	}
 }
 
-// GET /healthz reports the linked build version (docs/api.md).
+// GET /healthz reports the linked build version (docs/api.md). It sets the
+// package-level version.Version, so neither it nor any other test in this
+// package may call t.Parallel.
 func TestHealthzVersion(t *testing.T) {
 	srv, _ := newProbeServer(t)
 	for _, tc := range []struct{ set, want string }{{"", "dev"}, {"v9.9.9", "v9.9.9"}} {

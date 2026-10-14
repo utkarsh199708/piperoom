@@ -61,9 +61,9 @@ func TestNewLoggerRefusesBadValues(t *testing.T) {
 	}
 }
 
-// -version prints what -ldflags -X linked in, and "dev" for a plain build.
-// It builds the real binary, so it checks the flag and the linker path end to
-// end without a network or a database.
+// -version prints what -ldflags -X linked in. It builds the real binary once,
+// so it checks the flag and the linker path end to end without a network or a
+// database; the "dev" default is internal/version's own test.
 func TestVersionFlag(t *testing.T) {
 	gobin, err := exec.LookPath("go")
 	if err != nil {
@@ -71,7 +71,6 @@ func TestVersionFlag(t *testing.T) {
 	}
 	dir := t.TempDir()
 	for _, tc := range []struct{ ldflags, want string }{
-		{"", "dev"},
 		{"-X piperoom/internal/version.Version=v1.2.3-test", "v1.2.3-test"},
 	} {
 		bin := filepath.Join(dir, "server")
