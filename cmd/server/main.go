@@ -71,7 +71,8 @@ func run() error {
 	// PIPEROOM_SECRET_PROVIDERS, or a reference that cannot be read, refuses
 	// start.
 	cfg = secretFileRootsForOS(cfg, log)
-	secretReg, err := newSecretsRegistry(context.Background(), cfg, log)
+	secretHook := &secretChangeHook{}
+	secretReg, err := newSecretsRegistry(context.Background(), cfg, log, secretHook)
 	if err != nil {
 		return err
 	}
@@ -80,6 +81,10 @@ func run() error {
 	if err := resolveEnvSecrets(context.Background(), &cfg, secretReg); err != nil {
 		return err
 	}
+	if err := spliceDBPasswords(&cfg); err != nil {
+		return err
+	}
+	reservedValues := processSecretValues(cfg)
 	// PIPEROOM_ADMINS (docs/api.md "Who is admin"): a bad entry refuses start.
 	admins, err := httpapi.ParseAdmins(cfg.Admins)
 	if err != nil {
@@ -267,7 +272,7 @@ func run() error {
 		write = demo.WriteHandoff
 		// Demo mode has the full Integrations page over an in-memory store;
 		// saving a row builds no client (the demo's clients are fakes).
-		ints, err := newIntegrations(cfg, intOptions{Store: intStore, Secrets: secretReg, Notifier: notifier, Env: envView, Log: log, Demo: true, ReservedRefs: reservedRefs})
+		ints, err := newIntegrations(cfg, intOptions{Store: intStore, Secrets: secretReg, Notifier: notifier, Env: envView, Log: log, Demo: true, ReservedRefs: reservedRefs, ReservedValues: reservedValues})
 		if err != nil {
 			return err
 		}
@@ -326,7 +331,7 @@ func run() error {
 			log.Info("server: no data-stack environment variables are set: starting in setup mode; connect the stack on the Integrations page")
 		}
 
-		ints, err := newIntegrations(cfg, intOptions{Store: intStore, Secrets: secretReg, Live: live, Notifier: notifier, Env: envView, Log: log, ReservedRefs: reservedRefs})
+		ints, err := newIntegrations(cfg, intOptions{Store: intStore, Secrets: secretReg, Live: live, Notifier: notifier, Env: envView, Log: log, ReservedRefs: reservedRefs, ReservedValues: reservedValues, SecretHook: secretHook})
 		if err != nil {
 			return err
 		}
@@ -408,7 +413,9 @@ func run() error {
 
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions),
 		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities),
-		httpapi.WithIntegrations(httpapi.Integrations{Service: intSvc, Admins: admins, AlertRestartRequired: true})}
+		httpapi.WithIntegrations(httpapi.Integrations{Service: intSvc, Admins: admins, AlertRestartRequired: true,
+			// newIntegrations refused a key that does not parse, so set means usable.
+			SecretKeySet: cfg.SecretKey != ""})}
 	if oidcRP != nil {
 		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
 	}

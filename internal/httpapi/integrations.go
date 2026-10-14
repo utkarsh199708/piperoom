@@ -35,6 +35,10 @@ type Integrations struct {
 	// secret is accepted only after a server restart: the signed alert routes
 	// read their secrets once, at start, until httpapi can swap them live.
 	AlertRestartRequired bool
+	// SecretKeySet is whether PIPEROOM_SECRET_KEY is set: without it typed-in
+	// secrets cannot be saved (references still can), and the page says so
+	// before the admin types one (GET /api/integrations/status).
+	SecretKeySet bool
 }
 
 // WithIntegrations mounts /api/integrations/* and turns on the admin field of
@@ -125,6 +129,7 @@ func (s *Server) mountIntegrations(r chi.Router) {
 		a.Use(s.requireAdmin)
 		a.Post("/catalog/{kind}/setup-script", s.handleIntSetupScript)
 		a.Get("/", s.handleIntList)
+		a.Get("/status", s.handleIntStatus)
 		a.Post("/", s.handleIntCreate)
 		a.Post("/test", s.handleIntTest)
 		a.Get("/alerts/{source}/setup", s.handleIntAlertSetup)
@@ -239,6 +244,8 @@ func (s *Server) writeIntegrationErr(w http.ResponseWriter, err error) {
 	var ve *spec.ValidationError
 	var cf *spec.ChecksFailedError
 	var re *room.Error
+	var iu *spec.InUseError
+	var sre *spec.SecretRefError
 	switch {
 	case errors.As(err, &cf):
 		s.writeIntegrationJSON(w, http.StatusUnprocessableEntity, map[string]any{
@@ -269,6 +276,25 @@ func (s *Server) writeIntegrationErr(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "managed_by_env", "this is set by environment variables on the server")
 	case errors.Is(err, spec.ErrSecretKeyMissing):
 		writeError(w, http.StatusConflict, "secret_key_missing", "typed-in secrets need PIPEROOM_SECRET_KEY on the server")
+	case errors.Is(err, spec.ErrSecretKeyMismatch):
+		writeError(w, http.StatusConflict, "secret_key_mismatch",
+			"the saved typed-in secrets cannot be opened with the server's PIPEROOM_SECRET_KEY or PIPEROOM_SECRET_KEY_PREVIOUS; set the key they were saved with as PIPEROOM_SECRET_KEY_PREVIOUS, or enter them again")
+	case errors.As(err, &iu):
+		deps := iu.Dependents
+		if deps == nil {
+			deps = []spec.Dependent{}
+		}
+		names := make([]string, 0, len(deps))
+		for _, d := range deps {
+			names = append(names, d.Title+" ("+d.ID+")")
+		}
+		s.writeIntegrationJSON(w, http.StatusConflict, map[string]any{
+			"error": map[string]string{"code": "in_use", "message": "enabled integrations read secrets from this manager: " +
+				strings.Join(names, ", ") + "; move them to another secret manager or disable them first"},
+			"dependents": deps,
+		})
+	case errors.As(err, &sre):
+		s.writeSecretRefErr(w, sre)
 	case errors.Is(err, spec.ErrRateLimited):
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "at most 10 tests a minute")
 	case errors.Is(err, spec.ErrProviderUnreachable):
@@ -278,6 +304,29 @@ func (s *Server) writeIntegrationErr(w http.ResponseWriter, err error) {
 		s.log.Error("http: integrations request failed", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal error")
 	}
+}
+
+// writeSecretRefErr answers a reference (or listing prefix) that cannot be
+// read. Messages are fixed text naming the field, never the reference.
+func (s *Server) writeSecretRefErr(w http.ResponseWriter, e *spec.SecretRefError) {
+	status, code, msg := http.StatusBadRequest, "validation", "the secret reference cannot be read"
+	switch e.Reason {
+	case spec.SecretRefInvalid:
+		msg = "not a valid secret:// reference or prefix"
+	case spec.SecretRefUnknownProvider:
+		msg = "the reference names a secret manager that is not connected in this workspace"
+	case spec.SecretRefDenied:
+		status, code, msg = http.StatusForbidden, "secret_access_denied",
+			"the secret manager refused this read: it is outside the provider's prefix or file roots, or its policy does not allow it"
+	case spec.SecretRefNotFound:
+		status, code, msg = http.StatusNotFound, "not_found", "the referenced secret, or its key, was not found"
+	case spec.SecretRefUnreachable:
+		writeError(w, http.StatusBadGateway, "provider_unreachable", "the secret manager did not answer")
+		return
+	default:
+		s.log.Warn("http: integrations: a secret reference cannot be read", "field", e.Field, "err", e.Err)
+	}
+	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": msg, "field": e.Field}})
 }
 
 // ---- body ----
@@ -352,8 +401,11 @@ func ifMatch(r *http.Request) (int64, error) {
 	raw = strings.TrimPrefix(raw, "W/")
 	raw = strings.Trim(raw, `"`)
 	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || n < 1 {
-		return 0, &spec.ValidationError{Field: "If-Match", Message: "If-Match must be the integration's version, a positive integer"}
+	// 0 is the version of env rows (docs/api.md), so a PUT that sends it
+	// reaches the service and gets 409 managed_by_env; a db row starts at 1,
+	// so 0 still fails its version check.
+	if err != nil || n < 0 {
+		return 0, &spec.ValidationError{Field: "If-Match", Message: "If-Match must be the integration's version, a non-negative integer"}
 	}
 	return n, nil
 }
@@ -399,6 +451,10 @@ func (s *Server) handleIntList(w http.ResponseWriter, r *http.Request) {
 		views = []spec.View{}
 	}
 	s.writeIntegrationJSON(w, http.StatusOK, views)
+}
+
+func (s *Server) handleIntStatus(w http.ResponseWriter, _ *http.Request) {
+	s.writeIntegrationJSON(w, http.StatusOK, map[string]bool{"secret_key_set": s.ints.SecretKeySet})
 }
 
 func (s *Server) handleIntTest(w http.ResponseWriter, r *http.Request) {

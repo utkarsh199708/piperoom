@@ -169,7 +169,21 @@ func newRestoreEnv(t *testing.T, env integrations.Env) *restoreEnv {
 		reg: testKinds(t, prov), keys: keys, store: st, secrets: sreg,
 		applier: &intApplier{live: live, secrets: sreg, log: log}, env: env, log: log,
 	}
-	return &restoreEnv{setup: s, live: live, store: st, keys: keys, logs: logs, prov: prov}
+	e := &restoreEnv{setup: s, live: live, store: st, keys: keys, logs: logs, prov: prov}
+	e.withKeys(t, keys)
+	return e
+}
+
+// withKeys rebuilds the service restore reads rows through, with keys.
+func (e *restoreEnv) withKeys(t *testing.T, keys *integrations.Keyring) {
+	t.Helper()
+	s := e.setup
+	svc, err := integrations.NewService(integrations.Options{Store: s.store, Registry: s.reg, Keys: keys, Resolver: s.secrets,
+		Applier: s.applier, Env: s.env, Log: s.log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.svc, s.keys = svc, keys
 }
 
 // addRow stores a row with typed secrets sealed like the service does.
@@ -254,9 +268,9 @@ func TestRestoreLeavesBrokenRowsNotConfigured(t *testing.T) {
 func TestRestoreWithoutKeyOrWithWrongKey(t *testing.T) {
 	e := newRestoreEnv(t, integrations.Env{})
 	e.addRow(t, "int_a", spec.CategoryConnect, "fake-connect", map[string]any{"url": "http://c"}, map[string]netsec.Secret{"password": srvCanary}, true)
-	e.setup.keys = nil
+	e.withKeys(t, nil)
 	e.setup.restore(context.Background())
-	e.setup.keys = testKeyring(t)
+	e.withKeys(t, testKeyring(t))
 	e.setup.restore(context.Background())
 	if len(e.live.applied) != 0 {
 		t.Fatal("a row whose secrets cannot be opened must not apply")

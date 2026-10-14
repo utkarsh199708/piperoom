@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -38,12 +39,41 @@ const startupRestoreTimeout = 60 * time.Second
 // secretBrowseTimeout bounds one name or key listing for the picker.
 const secretBrowseTimeout = 10 * time.Second
 
+// secretChangeTimeout bounds rebuilding the clients after one changed secret.
+const secretChangeTimeout = 60 * time.Second
+
+// secretChangeHook is the registry's OnChange. The registry is built before
+// the integrations service (env references are resolved first), so the
+// service is set later; until then a change is only logged by the registry.
+type secretChangeHook struct {
+	svc atomic.Pointer[integrations.Service]
+}
+
+func (h *secretChangeHook) set(s *integrations.Service) { h.svc.Store(s) }
+
+// onChange runs on its own goroutine (secrets.Options.OnChange).
+func (h *secretChangeHook) onChange(ws string, ref secrets.Ref) {
+	svc := h.svc.Load()
+	if svc == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), secretChangeTimeout)
+	defer cancel()
+	svc.SecretChanged(ctx, ws, ref.Provider, ref.Path)
+}
+
 // newSecretsRegistry builds the process's secret resolver. A bad
 // PIPEROOM_SECRET_PROVIDERS or PIPEROOM_SECRET_CACHE_TTL refuses start.
-func newSecretsRegistry(ctx context.Context, cfg config.Config, log *slog.Logger) (*secrets.Registry, error) {
+// A changed mounted file or a lost lease reaches hook, which rebuilds the
+// clients of the rows that read it.
+func newSecretsRegistry(ctx context.Context, cfg config.Config, log *slog.Logger, hook *secretChangeHook) (*secrets.Registry, error) {
 	// Every built-in provider, Azure and Google included, for env-declared
 	// managers; the catalog cards use the same factories.
-	reg, err := secrets.FromConfig(ctx, cfg, secrets.ConfigOptions{Factories: secretkinds.Factories(), Logger: log})
+	opts := secrets.ConfigOptions{Factories: secretkinds.Factories(), Logger: log}
+	if hook != nil {
+		opts.OnChange = hook.onChange
+	}
+	reg, err := secrets.FromConfig(ctx, cfg, opts)
 	if err != nil {
 		return nil, fmt.Errorf("server: secret providers: %w", err)
 	}
@@ -62,6 +92,8 @@ func envSecretVars(cfg *config.Config) []envSecretVar {
 		{"PIPEROOM_DB_URL", &cfg.RoomDBURL},
 		{"SOURCE_DB_URL", &cfg.SourceDBURL},
 		{"WAREHOUSE_DB_URL", &cfg.WarehouseDBURL},
+		{"SOURCE_DB_PASSWORD", &cfg.SourceDBPassword},
+		{"WAREHOUSE_DB_PASSWORD", &cfg.WarehouseDBPassword},
 		{"KAFKA_SASL_PASSWORD", &cfg.KafkaSASLPassword},
 		{"SCHEMA_REGISTRY_PASSWORD", &cfg.SchemaRegistryPassword},
 		{"CONNECT_PASSWORD", &cfg.ConnectPassword},
@@ -112,6 +144,57 @@ func resolveEnvSecrets(ctx context.Context, cfg *config.Config, r spec.Resolver)
 	return nil
 }
 
+// spliceDBPasswords puts SOURCE_DB_PASSWORD and WAREHOUSE_DB_PASSWORD (after
+// resolveEnvSecrets) into their URLs, which must then leave the password
+// out. Errors name the variables, never a value.
+func spliceDBPasswords(cfg *config.Config) error {
+	for _, d := range []struct {
+		urlVar, pwVar string
+		url           *string
+		pw            string
+	}{
+		{"SOURCE_DB_URL", "SOURCE_DB_PASSWORD", &cfg.SourceDBURL, cfg.SourceDBPassword},
+		{"WAREHOUSE_DB_URL", "WAREHOUSE_DB_PASSWORD", &cfg.WarehouseDBURL, cfg.WarehouseDBPassword},
+	} {
+		if d.pw == "" {
+			continue
+		}
+		u, err := url.Parse(*d.url)
+		if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") || u.Host == "" {
+			return fmt.Errorf("server: %s is set, but %s is not a postgres:// URL", d.pwVar, d.urlVar)
+		}
+		if u.User == nil || u.User.Username() == "" {
+			return fmt.Errorf("server: %s is set, but %s names no user", d.pwVar, d.urlVar)
+		}
+		if _, has := u.User.Password(); has {
+			return fmt.Errorf("server: %s and a password in %s are both set; leave the password out of the URL", d.pwVar, d.urlVar)
+		}
+		u.User = url.UserPassword(u.User.Username(), d.pw)
+		*d.url = u.String()
+	}
+	return nil
+}
+
+// processSecretValues are the values of the process's own secret variables,
+// after resolveEnvSecrets, plus the passwords inside its database URLs. A
+// page reference that resolves to one of them is refused (any spelling).
+func processSecretValues(cfg config.Config) []netsec.Secret {
+	var out []netsec.Secret
+	for _, f := range envSecretVars(&cfg) {
+		v := strings.TrimSpace(*f.p)
+		if v == "" {
+			continue
+		}
+		out = append(out, netsec.Secret(v))
+		if u, err := url.Parse(v); err == nil && u.User != nil {
+			if pw, ok := u.User.Password(); ok && pw != "" {
+				out = append(out, netsec.Secret(pw))
+			}
+		}
+	}
+	return out
+}
+
 // intSetup is what newIntegrations builds.
 type intSetup struct {
 	svc     *integrations.Service
@@ -139,6 +222,12 @@ type intOptions struct {
 	// ReservedRefs are the references process variables use
 	// (processSecretRefs); page rows may not use them.
 	ReservedRefs []string
+	// ReservedValues are the process's own secret values
+	// (processSecretValues); no page reference may resolve to one.
+	ReservedValues []netsec.Secret
+	// SecretHook, when set, receives the service, so a changed secret
+	// rebuilds the clients that read it.
+	SecretHook *secretChangeHook
 }
 
 func newIntegrations(cfg config.Config, o intOptions) (*intSetup, error) {
@@ -172,7 +261,7 @@ func newIntegrations(cfg config.Config, o intOptions) (*intSetup, error) {
 	ap := &intApplier{live: o.Live, secrets: o.Secrets, demo: o.Demo, log: log, envProviders: envProviderIDs(cfg)}
 	opts := integrations.Options{
 		Store: o.Store, Registry: reg, Keys: keys, Notifier: o.Notifier, Env: o.Env,
-		PublicURL: cfg.PublicURL, Log: log, Applier: ap, ReservedRefs: o.ReservedRefs,
+		PublicURL: cfg.PublicURL, Log: log, Applier: ap, ReservedRefs: o.ReservedRefs, ReservedValues: o.ReservedValues,
 	}
 	if o.Secrets != nil {
 		opts.Resolver = o.Secrets
@@ -181,6 +270,9 @@ func newIntegrations(cfg config.Config, o intOptions) (*intSetup, error) {
 	svc, err := integrations.NewService(opts)
 	if err != nil {
 		return nil, fmt.Errorf("server: %w", err)
+	}
+	if o.SecretHook != nil && !o.Demo {
+		o.SecretHook.set(svc)
 	}
 	return &intSetup{svc: svc, reg: reg, keys: keys, store: o.Store, secrets: o.Secrets, applier: ap, env: o.Env, log: log}, nil
 }
@@ -226,11 +318,13 @@ func (s *intSetup) restore(ctx context.Context) restoreResult {
 		k, ok := s.reg.Kind(r.Kind)
 		if !ok {
 			s.log.Warn("server: integrations: saved row has an unknown kind; left not configured", "id", r.ID, "kind", r.Kind)
+			s.svc.MarkNotLive(r.ID, "not connected at start: ", fmt.Errorf("unknown kind %s", r.Kind))
 			continue
 		}
-		v, err := s.storedValues(ctx, r, k)
+		v, err := s.svc.OpenRow(ctx, r)
 		if err != nil {
 			s.log.Warn("server: integrations: cannot read a saved row's secrets; left not configured", "id", r.ID, "category", string(r.Category), "err", err)
+			s.svc.MarkNotLive(r.ID, "not connected at start: ", err)
 			continue
 		}
 		if r.Category == spec.CategoryAlerts {
@@ -241,6 +335,7 @@ func (s *intSetup) restore(ctx context.Context) restoreResult {
 		}
 		if err := s.applier.Apply(ctx, r, k, v); err != nil {
 			s.log.Warn("server: integrations: cannot connect a saved integration; left not configured", "id", r.ID, "category", string(r.Category), "err", err)
+			s.svc.MarkNotLive(r.ID, "not connected at start: ", err)
 			continue
 		}
 		if !seen[r.Category] {
@@ -257,64 +352,6 @@ func (s *intSetup) envManages(r spec.Integration) bool {
 	}
 	_, ok := s.env.Categories[r.Category]
 	return ok
-}
-
-// storedValues opens a saved row into what its kind's Build takes: the
-// non-secret fields (with defaults), the sealed typed-in secrets and the
-// resolved references. It mirrors the integrations service's own reading of
-// a row, which that package does not export.
-func (s *intSetup) storedValues(ctx context.Context, r spec.Integration, k spec.Kind) (spec.Values, error) {
-	v := spec.Values{Config: map[string]string{}, Secrets: map[string]netsec.Secret{}}
-	if len(r.Sealed) > 0 {
-		if s.keys == nil {
-			return v, spec.ErrSecretKeyMissing
-		}
-		typed, err := s.keys.Open(integrations.SealAAD(r.WorkspaceID, r.ID, r.Category), r.Sealed, r.KeyID)
-		if err != nil {
-			return v, fmt.Errorf("server: unsealing %s: %w", r.ID, err)
-		}
-		for name, val := range typed {
-			v.Secrets[name] = val
-		}
-	}
-	for _, f := range k.Fields {
-		raw, present := r.Config[f.Name]
-		if !f.Type.IsSecret() {
-			t, _ := raw.(string)
-			if t == "" {
-				t = f.Default
-			}
-			if t != "" {
-				v.Config[f.Name] = t
-			}
-			continue
-		}
-		ref, isRef := storedRef(raw)
-		if !present || !isRef {
-			continue
-		}
-		if s.secrets == nil {
-			return v, fmt.Errorf("server: %s: field %s is a secret:// reference but no secret resolver is configured", r.ID, f.Name)
-		}
-		rctx, cancel := context.WithTimeout(ctx, secrets.DefaultResolveTimeout)
-		val, err := s.secrets.Resolve(rctx, r.WorkspaceID, ref)
-		cancel()
-		if err != nil {
-			return v, fmt.Errorf("server: %s: resolving field %s: %w", r.ID, f.Name, err)
-		}
-		v.Secrets[f.Name] = val
-	}
-	return v, nil
-}
-
-// storedRef reads a stored {"$ref": "secret://…"}.
-func storedRef(v any) (string, bool) {
-	m, ok := v.(map[string]any)
-	if !ok {
-		return "", false
-	}
-	ref, ok := m[spec.RefKey].(string)
-	return ref, ok && secrets.IsRef(ref)
 }
 
 // alertSourceOf is the source of an alert kind id ("alerts-grafana" → "grafana").
@@ -485,7 +522,7 @@ func (b secretBrowser) Names(ctx context.Context, rec spec.Integration, prefix s
 	ctx, cancel := context.WithTimeout(ctx, secretBrowseTimeout)
 	defer cancel()
 	names, err := p.List(ctx, prefix, limit)
-	return names, browseErr(err)
+	return names, browseErr("prefix", err)
 }
 
 // Keys implements integrations.SecretBrowser.
@@ -501,12 +538,15 @@ func (b secretBrowser) Keys(ctx context.Context, rec spec.Integration, ref strin
 	ctx, cancel := context.WithTimeout(ctx, secretBrowseTimeout)
 	defer cancel()
 	keys, err := p.Keys(ctx, r)
-	return keys, browseErr(err)
+	return keys, browseErr("ref", err)
 }
 
-// browseErr keeps ErrListUnsupported and maps a manager that did not answer
-// to ErrProviderUnreachable (502); other errors pass through (500, logged).
-func browseErr(err error) error {
+// browseErr keeps ErrListUnsupported, maps a manager that did not answer to
+// ErrProviderUnreachable (502), and turns the refusals an admin can fix
+// (bad prefix, outside the provider's prefix or roots, no such secret) into
+// a *spec.SecretRefError naming field (400/403/404). Anything else passes
+// through (500, logged).
+func browseErr(field string, err error) error {
 	switch {
 	case err == nil:
 		return nil
@@ -514,6 +554,9 @@ func browseErr(err error) error {
 		return err
 	case errors.Is(err, context.DeadlineExceeded):
 		return fmt.Errorf("server: secret manager timed out: %w", spec.ErrProviderUnreachable)
+	case errors.Is(err, secrets.ErrInvalidRef), errors.Is(err, secrets.ErrAccessDenied), errors.Is(err, secrets.ErrOutsideRoots),
+		errors.Is(err, secrets.ErrNotFound), errors.Is(err, secrets.ErrKeyNotFound):
+		return integrations.SecretRefErr(field, err)
 	}
 	return err
 }

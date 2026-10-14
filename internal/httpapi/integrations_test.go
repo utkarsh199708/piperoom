@@ -57,6 +57,7 @@ type intEnvOpts struct {
 	settings auth.Settings
 	solo     string
 	noKey    bool
+	env      integrations.Env
 }
 
 func newIntEnv(t *testing.T, o intEnvOpts) *intEnv {
@@ -99,7 +100,7 @@ func newIntEnv(t *testing.T, o intEnvOpts) *intEnv {
 	}
 	isvc, err := integrations.NewService(integrations.Options{
 		Store: memstore.NewIntegrations(), Registry: reg, Keys: keys, Notifier: svc,
-		PublicURL: "https://piperoom.example", TestsPerMinute: 1000,
+		PublicURL: "https://piperoom.example", TestsPerMinute: 1000, Env: o.env,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +114,7 @@ func newIntEnv(t *testing.T, o intEnvOpts) *intEnv {
 		settings = auth.Default()
 	}
 	api := httpapi.New(svc, st, nil, httpapi.WithAuth(settings), httpapi.WithSessions(sessions),
-		httpapi.WithIntegrations(httpapi.Integrations{Service: isvc, Admins: admins}))
+		httpapi.WithIntegrations(httpapi.Integrations{Service: isvc, Admins: admins, SecretKeySet: keys != nil}))
 	srv := httptest.NewServer(api)
 	t.Cleanup(func() { srv.Close(); api.Close() })
 	return &intEnv{srv: srv, room: svc, sessions: sessions}
