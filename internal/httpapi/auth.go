@@ -458,7 +458,7 @@ func (s *Server) handleDevLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	user, ok := s.svc.LookupUser(body.User)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthenticated", "unknown user "+body.User)
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "unknown user "+clip(body.User, maxEchoedUser))
 		return
 	}
 
@@ -551,4 +551,23 @@ func viewerGuard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// maxEchoedUser bounds how much of an unknown dev-login name the 401 repeats:
+// enough to spot a typo, not a way to reflect arbitrary input.
+const maxEchoedUser = 64
+
+// clip cuts s to at most n bytes on a rune boundary, marking the cut.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := 0
+	for i := range s {
+		if i > n {
+			break
+		}
+		cut = i
+	}
+	return s[:cut] + "…"
 }

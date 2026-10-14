@@ -287,24 +287,24 @@ func TestEveryRouteRequiresXUser(t *testing.T) {
 	resp.Body.Close()
 }
 
-// TestBodyCap: request bodies over 1 MB are refused with 400 validation.
+// TestBodyCap: request bodies over 1 MB are refused with 413 too_large.
 func TestBodyCap(t *testing.T) {
 	srv, _ := newServer(t)
 	big := strings.Repeat("a", 2<<20)
 
 	resp := doJSON(t, http.MethodPost, srv.URL+"/api/rooms", "arjun",
 		`{"title":"`+big+`","severity":"sev2","pipeline_id":"orders"}`)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("oversized create: want 400, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized create: want 413, got %d", resp.StatusCode)
 	}
 	body := decode[map[string]any](t, resp)
-	if body["error"].(map[string]any)["code"] != "validation" {
+	if body["error"].(map[string]any)["code"] != "too_large" {
 		t.Fatalf("oversized create: bad envelope %+v", body)
 	}
 
 	resp = doJSON(t, http.MethodPost, srv.URL+"/api/alerts/webhook", "arjun", `{"x":"`+big+`"}`)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("oversized webhook: want 400, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized webhook: want 413, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 }

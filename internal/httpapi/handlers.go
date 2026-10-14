@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -9,6 +11,7 @@ import (
 
 	"piperoom/internal/events"
 	"piperoom/internal/room"
+	"piperoom/internal/store"
 )
 
 // meResponse is GET /api/me. layers is what this session may approve, computed
@@ -91,7 +94,12 @@ func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
-		s.writeErr(w, validation("request body too large or unreadable"))
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "too_large", "request body over 1 MB")
+			return
+		}
+		s.writeErr(w, validation("unreadable request body"))
 		return
 	}
 	if !json.Valid(raw) {
@@ -149,12 +157,28 @@ type eventsResponse struct {
 	LastSeq int64          `json:"last_seq"`
 }
 
+// maxTypedText caps comment and steer text, in bytes. A person's message
+// that long is a paste; more would only bloat the log every viewer replays
+// and the agent's context.
+const maxTypedText = 16 << 10
+
+func checkTypedText(text string) error {
+	if len(text) > maxTypedText {
+		return validation(fmt.Sprintf("text is longer than %d bytes", maxTypedText))
+	}
+	return nil
+}
+
 func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		StepID string `json:"step_id"`
 		Text   string `json:"text"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	if err := checkTypedText(body.Text); err != nil {
 		s.writeErr(w, err)
 		return
 	}
@@ -171,6 +195,10 @@ func (s *Server) handleSteer(w http.ResponseWriter, r *http.Request) {
 		Text string `json:"text"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	if err := checkTypedText(body.Text); err != nil {
 		s.writeErr(w, err)
 		return
 	}
@@ -266,6 +294,31 @@ func (s *Server) handleTrace(w http.ResponseWriter, r *http.Request) {
 	writeEvent(w, http.StatusOK, ev)
 }
 
+// checkDecision answers what approve and reject must answer before the
+// service looks at the body: an unknown proposal, or one in a room the caller
+// cannot see, is 404 whatever else is wrong with the request; then an empty
+// layer is 400 (it names no layer, so it is not a permission question).
+func (s *Server) checkDecision(r *http.Request, layer string) error {
+	p, err := s.store.GetProposal(r.Context(), chi.URLParam(r, "pid"))
+	if errors.Is(err, store.ErrNotFound) {
+		return &room.Error{Status: http.StatusNotFound, Code: "not_found", Msg: "proposal not found"}
+	}
+	if err != nil {
+		return fmt.Errorf("httpapi: look up proposal: %w", err)
+	}
+	if err := s.svc.CheckRoomVisible(r.Context(), userFrom(r.Context()), p.RoomID); err != nil {
+		var re *room.Error
+		if errors.As(err, &re) && re.Status == http.StatusNotFound {
+			return &room.Error{Status: http.StatusNotFound, Code: "not_found", Msg: "proposal not found"}
+		}
+		return err
+	}
+	if layer == "" {
+		return validation("layer is required")
+	}
+	return nil
+}
+
 func (s *Server) handleApproveProposal(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Layer string `json:"layer"`
@@ -277,6 +330,10 @@ func (s *Server) handleApproveProposal(w http.ResponseWriter, r *http.Request) {
 		Confirm string `json:"confirm"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	if err := s.checkDecision(r, body.Layer); err != nil {
 		s.writeErr(w, err)
 		return
 	}
@@ -295,6 +352,10 @@ func (s *Server) handleRejectProposal(w http.ResponseWriter, r *http.Request) {
 		ParamsHash string `json:"params_hash"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
+		s.writeErr(w, err)
+		return
+	}
+	if err := s.checkDecision(r, body.Layer); err != nil {
 		s.writeErr(w, err)
 		return
 	}
