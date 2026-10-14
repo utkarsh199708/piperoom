@@ -57,7 +57,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.loginFailure(w, r, "idp_unavailable")
 		return
 	}
-	ret := auth.SafeReturn(r.URL.Query().Get("return"))
+	ret := safeReturnPath(r.URL.Query().Get("return"))
 
 	state, err1 := auth.NewStateNonce()
 	nonce, err2 := auth.NewStateNonce()
@@ -219,7 +219,7 @@ func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, s.sessionCookie(token, sess.ExpiresAt, int(s.authSettings.Max.Seconds())))
 	// 7. Back to where the person was going; re-checked even though login
 	// checked it, because the row is only as safe as its writer.
-	http.Redirect(w, r, auth.SafeReturn(row.ReturnPath), http.StatusFound)
+	http.Redirect(w, r, safeReturnPath(row.ReturnPath), http.StatusFound)
 }
 
 // mapIdentity turns verified claims into a Piperoom user id (design §2.1):
