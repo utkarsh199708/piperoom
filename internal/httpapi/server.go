@@ -125,6 +125,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	// request budget; /readyz bounds its store check with probeTimeout.
 	// Room links from Slack and alerts (deeplink.go).
 	r.Get("/rooms/{id}", s.handleRoomDeepLink(notFound.ServeHTTP))
+	r.Head("/rooms/{id}", s.handleRoomDeepLink(notFound.ServeHTTP))
 
 	r.Get(pathHealthz, s.handleHealthz)
 	r.Get(pathReadyz, s.handleReadyz)
@@ -140,6 +141,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 			a.Get("/callback", s.handleCallback)
 		} else {
 			a.Post("/dev-login", s.handleDevLogin)
+			// The login picker: before login, so outside authenticate.
+			a.Get("/users", s.handleAuthUsers)
 		}
 	})
 
@@ -207,6 +210,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/proposals/{pid}/approve", s.handleApproveProposal)
 				short.Post("/proposals/{pid}/reject", s.handleRejectProposal)
 				short.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)
+				short.Get("/pipelines", s.handlePipelines)
 				short.Get("/pipelines/{pid}/topology", s.pipelineVisible(s.handleTopology))
 			})
 		})

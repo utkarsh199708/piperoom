@@ -21,7 +21,7 @@ import (
 // anything else is not a room link and goes to the web app's 404 handling.
 var deepLinkIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// handleRoomDeepLink is GET /rooms/{id}. Signed in (or dev mode, whose login
+// handleRoomDeepLink is GET (and HEAD) /rooms/{id}. Signed in (or dev mode, whose login
 // is the in-app picker and keeps the hash): 302 to /#/rooms/{id}. Signed out
 // in oidc mode: 302 to /auth/login?return=/rooms/{id}; the callback brings the
 // browser back here, now signed in. Whether the room exists or is visible is
