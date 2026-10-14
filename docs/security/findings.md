@@ -338,7 +338,8 @@ hardening, or dev-only exposure).
   - A caller with no pipeline cannot inherit another room's scope: `WithPipelineID(ctx, "")`
     clears it, and a guard test (`cmd/investigate/scope_guard_test.go`) checks that after
     `wiring.RegisterTools` every read tool except `runbook_lookup` refuses `context.Background()`.
-- **Still database-wide (by design):**
+- **Still database-wide (by design)** — superseded by T2: both tools are now scoped to the
+  pipeline and other objects appear only as a count (`docs/security/tool-scope.md`). As it was:
   - `pg_replication_slots` returns slot metadata (name, plugin, active flag, retained WAL,
     `wal_status`) for every slot in the source database, not only the pipeline's. `owners.yaml`
     names no slot. It holds no row data. A per-pipeline slot list in `owners.yaml` would let

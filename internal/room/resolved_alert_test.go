@@ -123,6 +123,10 @@ func TestResolvedAlertJoinsOpenRoomAndKeepsItOpen(t *testing.T) {
 		t.Fatalf("want one room, got %d", len(rooms))
 	}
 	waitFor(t, 5*time.Second, func() bool { return hooks.Load() == 1 })
+	// The firing alert's agent starts on its own goroutine, so wait for that
+	// one start before asserting the resolved join did not add a second.
+	waitFor(t, 5*time.Second, func() bool { return runs.Load() >= 1 })
+	settle()
 	if runs.Load() != 1 {
 		t.Fatalf("resolved join started an agent: %d starts, want 1", runs.Load())
 	}

@@ -111,8 +111,11 @@ func (t *listGroups) Run(ctx context.Context, input json.RawMessage) (tools.Resu
 	if err != nil {
 		return tools.Result{}, err
 	}
-	// Only this room's groups; the others get no GroupLag call either.
+	// Only this room's groups; the others get no GroupLag call either and are
+	// only counted.
+	all := len(groups)
 	groups = sc.FilterGroups(groups)
+	other := all - len(groups)
 	type row struct {
 		Group string `json:"group"`
 		State string `json:"state"`
@@ -136,6 +139,7 @@ func (t *listGroups) Run(ctx context.Context, input json.RawMessage) (tools.Resu
 		}
 		fmt.Fprintf(&sb, "%s: %s", r.Group, r.State)
 	}
+	appendLine(&sb, tools.NotShown(other, "consumer group", "consumer groups"))
 	return res(sb.String(), rows), nil
 }
 
@@ -183,6 +187,7 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 	}
 	// Only the pipeline's topics: a group can read topics of other pipelines.
 	parts := lag.Partitions
+	other := 0
 	if !sc.Unscoped() {
 		parts = nil
 		var total int64
@@ -190,6 +195,8 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 			if sc.TopicInScope(pl.Topic) {
 				parts = append(parts, pl)
 				total += pl.Lag
+			} else {
+				other++
 			}
 		}
 		lag.TotalLag = total
@@ -203,6 +210,9 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 	}
 	for _, pl := range worst {
 		fmt.Fprintf(&sb, "\n  %s/%d: committed %d, end %d, lag %d", pl.Topic, pl.Partition, pl.Committed, pl.End, pl.Lag)
+	}
+	if line := tools.NotShown(other, "topic partition", "topic partitions"); line != "" {
+		appendLine(&sb, line+"; the total lag above counts only this pipeline's partitions")
 	}
 	return res(sb.String(), map[string]any{
 		"group": lag.Group, "state": lag.State, "members": lag.Members,

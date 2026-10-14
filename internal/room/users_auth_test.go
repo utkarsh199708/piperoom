@@ -35,7 +35,7 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-func TestValidateUsersSkipsGroupLayers(t *testing.T) {
+func TestValidateUsersGroupLayers(t *testing.T) {
 	users := mustUsers([]User{
 		{ID: "arjun", Name: "Arjun", Layers: []string{"kafka"}},
 		{ID: "priya", Name: "Priya", Layers: []string{"postgres"}},
@@ -98,8 +98,16 @@ func TestValidateUsersSkipsGroupLayers(t *testing.T) {
 		}
 	})
 
-	t.Run("user lists a layer whose owners entry has a group: skipped", func(t *testing.T) {
+	t.Run("user lists a layer whose owners entry has only groups: refused (A-AP-3)", func(t *testing.T) {
 		own := ownersFromYAML(t, "layers:\n  postgres: priya\n  kafka: [group:oncall]\n")
+		err := ValidateUsers(users, own)
+		if err == nil || !strings.Contains(err.Error(), `"arjun"`) || !strings.Contains(err.Error(), `"kafka"`) {
+			t.Fatalf("got %v", err)
+		}
+	})
+
+	t.Run("user lists a layer where owners has user plus group: fine", func(t *testing.T) {
+		own := ownersFromYAML(t, "layers:\n  postgres: priya\n  kafka: [user:arjun, group:oncall]\n")
 		if err := ValidateUsers(users, own); err != nil {
 			t.Fatalf("ValidateUsers: %v", err)
 		}
