@@ -299,6 +299,8 @@ export function RoomScreen() {
       selfId={user.id}
       canDecide={!viewer && state.status === 'open'}
       onVerdict={actions.hypothesisVerdict}
+      pipelineId={state.pipeline_id}
+      insight={state.insight}
     />
   ) : null
   const proposalsCard = showProposals ? (

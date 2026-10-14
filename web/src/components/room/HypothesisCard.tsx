@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import { Check, X } from 'lucide-react'
-import type { HypothesisHistoryEntry, HypothesisState, StepState } from '@/state/types'
-import type { HypothesisVerdict } from '@/api/types'
+import type { AgentStats, HypothesisVerdict } from '@/api/types'
+import type { HypothesisHistoryEntry, HypothesisState, InsightState, StepState } from '@/state/types'
+import { useAgentStats } from '@/hooks/useAgentStats'
+import { recordText } from '@/lib/insight'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -21,6 +23,14 @@ function basedOn(ids: string[], steps: StepState[]): string {
   return `based on ${nums.length === 1 ? 'step' : 'steps'} ${nums.join(', ')}`
 }
 
+function recordTitle(stats: AgentStats): string {
+  const rows = stats.by_confidence.map((b) => `${b.confidence} ${b.correct}/${b.runs}`)
+  if (stats.median_time_to_first_hypothesis_s >= 0) {
+    rows.push(`median first insight ${stats.median_time_to_first_hypothesis_s} s`)
+  }
+  return rows.join(' · ')
+}
+
 export function HypothesisCard({
   hypothesis,
   steps,
@@ -28,6 +38,8 @@ export function HypothesisCard({
   selfId,
   canDecide = false,
   onVerdict,
+  pipelineId = '',
+  insight,
 }: {
   hypothesis: HypothesisState
   steps: StepState[]
@@ -37,7 +49,15 @@ export function HypothesisCard({
   /** A member of an open room: Confirm and Dispute show. */
   canDecide?: boolean
   onVerdict?: (verdict: HypothesisVerdict, note?: string) => void
+  /** The pipeline whose track record is shown (F11). */
+  pipelineId?: string
+  /** The room's insight: the first-hypothesis time (F11). */
+  insight?: InsightState
 }) {
+  const stats = useAgentStats(pipelineId)
+  const record = stats ? recordText(stats, hypothesis.confidence) : null
+  const noRecord = stats !== null && stats.graded === 0
+  const firstS = insight?.time_to_first_hypothesis_s ?? -1
   const based = hypothesis.based_on_steps ?? []
   const verdicts = hypothesis.verdicts ?? []
   const mine = verdicts.find((v) => v.by.id === selfId)?.verdict
@@ -62,7 +82,14 @@ export function HypothesisCard({
         <h2 id="hypothesis-heading" className="m-0 text-sm font-medium">
           Hypothesis
         </h2>
-        <Badge variant="agent">{hypothesis.confidence} confidence</Badge>
+        <Badge variant="agent" title={noRecord ? 'no labelled rooms yet' : undefined}>
+          {hypothesis.confidence} confidence
+        </Badge>
+        {record && stats && (
+          <Badge variant="outline" title={recordTitle(stats)}>
+            {record}
+          </Badge>
+        )}
         {verdicts.map((v) => {
           const name = v.by.name || v.by.id
           const when = clockTime(v.at)
@@ -80,7 +107,12 @@ export function HypothesisCard({
             </Badge>
           )
         })}
-        {based.length > 0 && <span className="ml-auto text-xs text-subtle-foreground">{basedOn(based, steps)}</span>}
+        {(based.length > 0 || firstS >= 0) && (
+          <span className="ml-auto flex flex-wrap gap-x-2 text-xs text-subtle-foreground">
+            {firstS >= 0 && <span>first hypothesis in {firstS} s</span>}
+            {based.length > 0 && <span>{basedOn(based, steps)}</span>}
+          </span>
+        )}
       </div>
       {history.length > 1 && (
         <p className="m-0 text-xs tabular-nums text-subtle-foreground" data-testid="confidence-path">
