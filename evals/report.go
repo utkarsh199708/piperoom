@@ -22,6 +22,9 @@ type Report struct {
 	Overall    Summary           `json:"overall"`
 	Scenarios  []ScenarioSummary `json:"scenarios"`
 	Results    []RunResult       `json:"results"`
+	// RunUsage is each run's latency, tokens and cost (stats.go); set by
+	// UsageCollector.Apply.
+	RunUsage []RunUsage `json:"run_usage,omitempty"`
 }
 
 // Summary aggregates runs. Rates are 0..1. In Report.Overall every scenario
@@ -40,6 +43,9 @@ type Summary struct {
 	Misses                   int     `json:"misses"`
 	RejectedAttempts         int     `json:"rejected_attempts"`
 	Errors                   int     `json:"errors"`
+	// Usage holds the latency percentiles, tokens, cost and model routing
+	// (stats.go); nil until UsageCollector.Apply fills it.
+	Usage *UsageSummary `json:"usage,omitempty"`
 }
 
 // ScenarioSummary aggregates one scenario's runs.
@@ -192,6 +198,7 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 		writeSummaryRow(&b, s.Name, s.Summary)
 	}
 	writeSummaryRow(&b, "**overall**", r.Overall)
+	writeUsageTable(&b, r)
 	var failed []string
 	for _, res := range r.Results {
 		if !res.Pass {
@@ -211,6 +218,51 @@ func writeSummaryRow(b *strings.Builder, name string, s Summary) {
 	fmt.Fprintf(b, "| %s | %d/%d | %.1f | %.0f%% | %.0f%% | %.1f | %s | %d | %d | %d |\n",
 		mdCell(name), s.Passes, s.Runs, s.MeanScore, 100*s.RootCauseRate, 100*s.LayerRate,
 		s.MeanToolCalls, callsToCause(s.MeanToolCallsToRootCause), s.Misses, s.RejectedAttempts, s.Errors)
+}
+
+// writeUsageTable adds the latency and cost table when the report has usage.
+func writeUsageTable(b *strings.Builder, r Report) {
+	if r.Overall.Usage == nil {
+		return
+	}
+	b.WriteString("\n| scenario | run ms p50/p90/p99 | turn ms p50/p90/p99 | turns | tokens/turn mean (p90) | cost/run mean (p90) | triage share |\n")
+	b.WriteString("|---|---|---|---|---|---|---|\n")
+	for _, s := range r.Scenarios {
+		if s.Usage != nil {
+			writeUsageRow(b, s.Name, s.Usage)
+		}
+	}
+	writeUsageRow(b, "**overall**", r.Overall.Usage)
+}
+
+func writeUsageRow(b *strings.Builder, name string, u *UsageSummary) {
+	cost := "-"
+	if u.CostPerRunUSD != nil {
+		cost = fmt.Sprintf("$%.4f ($%.4f)", u.CostPerRunUSD.Mean, u.CostPerRunUSD.P90)
+		if u.PricedRuns < u.Runs {
+			cost += fmt.Sprintf(" over %d/%d runs", u.PricedRuns, u.Runs)
+		}
+	}
+	share := "-"
+	if u.TriageShare >= 0 {
+		share = fmt.Sprintf("%.0f%%", 100*u.TriageShare)
+	}
+	fmt.Fprintf(b, "| %s | %s | %s | %d | %s | %s | %s |\n", mdCell(name), distCell(u.DurationMS), distCell(u.TurnLatencyMS),
+		u.Turns, meanP90Cell(u.TokensPerTurn), cost, share)
+}
+
+func distCell(d Dist) string {
+	if d.P50 < 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f / %.0f / %.0f", d.P50, d.P90, d.P99)
+}
+
+func meanP90Cell(m MeanP90) string {
+	if m.Mean < 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f (%.0f)", m.Mean, m.P90)
 }
 
 // mdCell keeps text from breaking a markdown table row. Failure reasons can

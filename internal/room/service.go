@@ -701,7 +701,13 @@ var agentEventTypes = map[events.Type]bool{
 	events.AgentToolResult: true,
 	events.AgentMessage:    true,
 	events.AgentHypothesis: true,
+	events.AgentUsage:      true,
 }
+
+// outsideRun is the run number of an agent event written outside any agent run
+// (the hand-off summary's usage): runs are numbered from 1, and such an event
+// is not fenced by a run's lease, since any replica may write the hand-off.
+const outsideRun uint64 = 0
 
 // agentEmit is the agent Sink: the agent's events enter the same log and cache.
 // Only agent.* event types are accepted, so the sink cannot forge
@@ -727,8 +733,10 @@ func (s *Service) agentEmit(ctx context.Context, roomID string, run uint64, typ 
 	if !ok {
 		return fmt.Errorf("room: agent emit on unknown room %q", roomID)
 	}
-	if err := s.fenceLocked(roomID, st, run); err != nil {
-		return err
+	if run != outsideRun {
+		if err := s.fenceLocked(roomID, st, run); err != nil {
+			return err
+		}
 	}
 	_, err = s.emitLocked(ctx, st, roomID, typ, events.AgentActor, payload)
 	return err

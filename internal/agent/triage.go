@@ -83,7 +83,11 @@ func (r *runner) modelTurn(ctx context.Context, messages []anthropic.BetaMessage
 	req.Model = name
 	r.log.Debug("agent: model for turn", "model", name, "reason", reason, "triage_turns_run", r.triageRan)
 
-	resp, err := r.model.Turn(ctx, req)
+	role := events.UsageRoleMain
+	if triage {
+		role = events.UsageRoleTriage
+	}
+	resp, err := r.callModel(ctx, req, role)
 	if !triage {
 		return resp, err
 	}
@@ -95,7 +99,7 @@ func (r *runner) modelTurn(ctx context.Context, messages []anthropic.BetaMessage
 		triageErr := err
 		r.escalated = true
 		req.Model = r.opts.Model
-		resp, err = r.model.Turn(ctx, req)
+		resp, err = r.callModel(ctx, req, events.UsageRoleMain)
 		if err != nil {
 			// (d) The main model fails too, so the problem was not the triage
 			// model. Return the main model's error and leave the switch alone.
@@ -120,7 +124,7 @@ func (r *runner) modelTurn(ctx context.Context, messages []anthropic.BetaMessage
 		"triage_model", name, "model", r.opts.Model)
 	r.escalated = true
 	req.Model = r.opts.Model
-	return r.model.Turn(ctx, req)
+	return r.callModel(ctx, req, events.UsageRoleMain)
 }
 
 // triageRejected reports whether a failed triage call is worth redoing on the
@@ -236,7 +240,7 @@ func TriageModelWarning(id string) string {
 // agent says so in the room and goes idle with the same text as the detail.
 func (r *runner) stopForBudget(ctx context.Context, be *BudgetError) {
 	text := be.Error()
-	r.log.Warn("agent: room token budget reached", "used", be.Used, "limit", be.Limit, "room", r.alert.RoomID)
+	r.log.Warn("agent: spend limit reached", "used", be.Used, "limit", be.Limit, "why", text, "room", r.alert.RoomID)
 	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: text})
 	r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "idle", Detail: text})
 }

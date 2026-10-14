@@ -59,6 +59,11 @@ function upsertMember(members: MemberState[], actor: Actor): MemberState[] {
 export function applyEvent(state: RoomState, event: Event): RoomState {
   if (event.seq <= state.last_seq) return state
 
+  // agent.usage is cost telemetry, one or two per model request. It moves
+  // last_seq on (so the next event is not a gap) and nothing else: it must not
+  // take a slot of the 20-entry activity window or show up as a raw line.
+  if (event.type === 'agent.usage') return { ...state, last_seq: event.seq }
+
   let next: RoomState = state
 
   switch (event.type) {
