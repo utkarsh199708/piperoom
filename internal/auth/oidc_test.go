@@ -121,11 +121,11 @@ func TestIdentitiesBindRules(t *testing.T) {
 	if u, err := m.UserFor(ctx, "iss", "s1"); err != nil || u != "priya" {
 		t.Fatalf("UserFor = %q, %v", u, err)
 	}
-	if n, _ := m.Unbind(ctx, "priya"); n != 1 {
-		t.Fatalf("Unbind = %d", n)
+	if r, _ := m.Unbind(ctx, "priya", time.Now()); r.Unbound != 1 {
+		t.Fatalf("Unbind = %+v", r)
 	}
-	if n, _ := m.Unbind(ctx, "priya"); n != 0 {
-		t.Fatalf("second Unbind = %d, want 0", n)
+	if r, _ := m.Unbind(ctx, "priya", time.Now()); r.Unbound != 0 {
+		t.Fatalf("second Unbind = %+v, want 0", r)
 	}
 	if err := m.Bind(ctx, "iss", "s2", "priya", "p@x.com"); err != nil {
 		t.Fatalf("bind after unbind: %v", err)

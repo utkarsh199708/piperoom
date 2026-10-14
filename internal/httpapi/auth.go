@@ -67,7 +67,8 @@ func (s *Server) normalizeAuth() {
 // hostGuard refuses any Host that is not on the allow-list with 421 bad_host.
 // CrossOriginProtection compares Origin with Host, so a page on a rebound DNS
 // name passes it; this check is what stops that. It runs before every route,
-// probes included, except the signed alert routes (isSignedAlertRoute).
+// probes included, except the signed alert routes (isSignedAlertRoute) and the
+// two health probes (isHealthProbe).
 func (s *Server) hostGuard(next http.Handler) http.Handler {
 	allowed := map[string]bool{}
 	for _, h := range s.authSettings.AllowedHosts {
@@ -78,12 +79,27 @@ func (s *Server) hostGuard(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := strings.ToLower(r.Host)
-		if !isLoopbackHostHeader(h) && !allowed[h] && !isSignedAlertRoute(r) {
+		if !isLoopbackHostHeader(h) && !allowed[h] && !isSignedAlertRoute(r) && !isHealthProbe(r) {
 			writeError(w, http.StatusMisdirectedRequest, "bad_host", "this Host is not allowed; see PIPEROOM_PUBLIC_URL and PIPEROOM_ALLOWED_HOSTS")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isHealthProbe reports whether r is exactly GET /healthz or GET /readyz.
+// Cloud load balancers and kubelets often probe a pod by IP, so the Host is an
+// address no operator can list; they would otherwise get 421 and the pod never
+// becomes ready. DNS rebinding gains nothing here: both bodies are fixed
+// strings ("ok", "ready", or a short reason code), never the raw error, a
+// hostname or any room data (health.go). Only GET: the router answers HEAD
+// with 405, so exempting it would change nothing. The path must be exact
+// (no trailing slash, no case change, no percent-encoded spelling: RawPath is
+// empty unless the client sent a non-default encoding) so no other route
+// can borrow the exemption; a query string is allowed because the handlers
+// ignore it.
+func isHealthProbe(r *http.Request) bool {
+	return r.Method == http.MethodGet && r.URL.RawPath == "" && isProbePath(r.URL.Path)
 }
 
 // isSignedAlertRoute reports whether r is POST /api/alerts/{source} for a

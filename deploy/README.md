@@ -43,8 +43,8 @@ So:
   the image sets. Set `PIPEROOM_ALLOWED_HOSTS`
   (comma-separated, `host` or `host:port`, compared as written) when a tunnel or proxy
   rewrites `Host`, for example an SSH tunnel to `localhost:9000`, or a name the VPN uses
-  for the machine. The signed alert routes `POST /api/alerts/{source}` skip this check
-  (see [Alerts](#alerts)); the unsigned dev webhook does not.
+  for the machine. Signed alert routes `POST /api/alerts/{source}` and `GET /healthz`,
+  `GET /readyz` skip this check. The unsigned dev webhook does not.
 - **Export.** Today a member may export a room, and a viewer may export only if named in
   `auditors:` (see [Identity and rights](#identity-and-rights)). From auth PR 4, members
   who are not owners, backups or auditors cannot export and must be added to `auditors:`.
@@ -74,7 +74,7 @@ Run these from the repository root.
    | `ANTHROPIC_API_KEY` | the agent's API key (`ANTHROPIC_WORKSPACE_ID` too, for a user key). Only for the default `anthropic` provider; for AWS Bedrock or Google Vertex AI see [Model provider](#model-provider) |
    | `PIPEROOM_POSTGRES_PASSWORD` | the bundled Postgres password. Generate it with `openssl rand -hex 32`. It goes into a URL unescaped, so it must not contain `/ @ : # ? % $` |
    | `SOURCE_DB_URL`, `WAREHOUSE_DB_URL` | the read-only connection URLs |
-   | `KAFKA_BROKERS`, `CONNECT_URL`, `SCHEMA_REGISTRY_URL` | your hosts. `localhost` inside the container is the container itself, so use real host names |
+   | `KAFKA_BROKERS`, `CONNECT_URL`, `SCHEMA_REGISTRY_URL` | your hosts (`SCHEMA_REGISTRY_URL`: `off` when the pipelines use no registry; compose requires a value). `localhost` inside the container is the container itself, so use real host names |
 
    Add Kafka/Registry/Connect logins and TLS in sections 5 to 7 of the file if your clusters
    need them. Put certificate files in `deploy/certs/` and refer to them as `/certs/<file>`.
@@ -258,7 +258,7 @@ Other lines you may see:
 | `auth: oidc discovery failed, will retry; new logins answer 503 until it succeeds` | the IdP is not reachable yet (wrong issuer, no network, outbound proxy). Not fatal; it retries |
 | `server: oidc public client: no client secret, PKCE only` | you set `PIPEROOM_OIDC_PUBLIC_CLIENT=1` with an empty secret |
 | `server: PIPEROOM_OIDC_GROUPS_CLAIM is empty: groups give no rights` | group rights are off |
-| `users: layers with group principals are not checked against users.yaml` | normal when `owners.yaml` lists a `group:` for a layer |
+| `users: owners->users check skips layers with group principals (not checked against users.yaml); users->owners is always checked` | normal when `owners.yaml` lists a `group:` for a layer |
 | `server: SOLO MODE: ...` | `PIPEROOM_SOLO_USER` is set |
 | `auth: no groups claim in id token` (per login) | the token had no groups claim, see [Troubleshooting](#troubleshooting) |
 
@@ -340,9 +340,10 @@ users:
 
 `email:` and `sub:` are optional, and each must be unique across the file. Use `sub:` when you
 cannot trust an email (shared mailbox, an IdP that does not verify email), or to pin a user to one
-account. Everyone in `users.yaml` is a **member**. `layers:` still has to agree with `owners.yaml`
-for any layer whose owners are all plain users; the server refuses to start otherwise. A
-layer that lists a `group:` is not checked, and the server logs that once at start-up.
+account. Everyone in `users.yaml` is a **member**. For each layer a user lists in `users.yaml`,
+`owners.yaml` must include that user as `user:<id>`, even when the layer also lists groups; the
+server refuses to start otherwise. The reverse owners-to-users check skips a layer containing any
+group principal because group membership is not available at startup; the server logs skipped layers.
 
 ### `owners.yaml`: who may approve and who may export
 

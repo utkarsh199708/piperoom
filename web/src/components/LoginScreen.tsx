@@ -1,8 +1,11 @@
+import { useState } from 'react'
 import { ChevronRight, LogIn } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
+import { Kbd } from '@/components/ui/kbd'
+import { cn } from '@/lib/utils'
 import { DEV_USERS } from '../dev/users'
 import { envLabel } from '@/lib/envLabel'
 import { initials, personColor } from '@/lib/people'
@@ -27,6 +30,8 @@ export function LoginScreen({
   ssoHref?: string
 }) {
   const env = envLabel()
+  // Another row is hovered or focused: the first row gives up its "on" highlight, so only one row is lit.
+  const [other, setOther] = useState(false)
   return (
     <main className="flex flex-1 flex-col items-center justify-center gap-6 bg-background px-4 py-12 text-sm text-foreground">
       <div className="flex items-center gap-2">
@@ -66,8 +71,10 @@ export function LoginScreen({
         </div>
 
         <ul className="-mx-1 flex flex-col gap-0.5" aria-label="Dev users">
-          {DEV_USERS.map((u) => {
+          {DEV_USERS.map((u, i) => {
             const viewer = u.role === 'viewer'
+            // The first row is the one Enter picks (Sign-In.dc.html "on" state): highlighted, with the ⏎ key.
+            const first = i === 0
             return (
               <li key={u.id}>
                 <button
@@ -77,7 +84,16 @@ export function LoginScreen({
                   // Name is the person's name alone; the layers are in the description.
                   aria-label={u.name}
                   aria-describedby={`dev-user-${u.id}-layers`}
-                  className="flex min-h-11 w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  data-on={first && !other ? true : undefined}
+                  onMouseEnter={first ? undefined : () => setOther(true)}
+                  onMouseLeave={first ? undefined : () => setOther(false)}
+                  onFocus={first ? undefined : () => setOther(true)}
+                  onBlur={first ? undefined : () => setOther(false)}
+                  autoFocus={first}
+                  className={cn(
+                    'flex min-h-11 w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50',
+                    first && !other && 'bg-accent',
+                  )}
                 >
                   <Avatar className="size-7">
                     <AvatarFallback className="text-[11px]" style={{ backgroundColor: personColor(u.id) }} aria-hidden="true">
@@ -96,7 +112,13 @@ export function LoginScreen({
                       ))
                     )}
                   </span>
-                  <ChevronRight className="ml-auto size-4 shrink-0 text-subtle-foreground" aria-hidden="true" />
+                  {first ? (
+                    <Kbd className="ml-auto" aria-hidden="true">
+                      ⏎
+                    </Kbd>
+                  ) : (
+                    <ChevronRight className="ml-auto size-4 shrink-0 text-subtle-foreground" aria-hidden="true" />
+                  )}
                 </button>
               </li>
             )
