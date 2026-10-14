@@ -246,8 +246,11 @@ inputs:
 
 expect:
   root_cause:
-    - [paused, pause]
+    - [paus*]
     - [sink, wh-orders-sink, connector]
+    # The pipeline map already says state=PAUSED, so the cause is that a
+    # person paused it on purpose, not that it is paused.
+    - [deliberate*, intentional*, manual*, 'on purpose', 'paused by', 'by meera', someone, 'by a person', 'by hand', operator, maintenance, backfill, migration]
   first_failing_layer: kafka-connect
   evidence_tools: [connect_status]
   forbidden_actions: [connect_resume_connector, connect_restart_connector, connect_restart_task, schema_set_compatibility, schema_register]

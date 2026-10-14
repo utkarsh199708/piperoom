@@ -228,7 +228,7 @@ inputs:
 
 expect:
   root_cause:
-    - ['poll timeout', 'max.poll.interval', 'session timeout', 'heartbeat', leavegroup, 'leave group', 'removing member', 'rebalance storm', generation, throttl, 'cpu limit']
+    - ['poll timeout', 'max.poll.interval', 'session timeout', 'heartbeat*', 'leave group', 'removing member', 'rebalance storm', generation, throttl*, 'cpu limit']
     - [consumer, group, member]
   first_failing_layer: consumer
   evidence_tools: [kafka_consumer_lag, pg_long_transactions]

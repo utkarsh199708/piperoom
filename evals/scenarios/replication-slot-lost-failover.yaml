@@ -226,9 +226,9 @@ inputs:
 
 expect:
   root_cause:
-    - ['slot', 'replication slot', debezium_orders]
+    - ['slot*', debezium_orders]
     - [missing, 'does not exist', gone, lost]
-    - [failover, promot, standby, 'new primary']
+    - [failover, promot*, standby, 'new primary']
   first_failing_layer: postgres
   evidence_tools: [connect_status, pg_replication_slots]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]

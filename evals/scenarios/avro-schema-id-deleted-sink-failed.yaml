@@ -268,8 +268,8 @@ inputs:
 expect:
   root_cause:
     - ['id 7', 'schema 7', 'version 3']
-    - [deleted, 'hard-delete', permanently, removed, purged, cleanup]
-    - [registry, subject]
+    - [delet*, 'hard delete', permanently, removed, purg*, cleanup]
+    - [registry, subject*]
   first_failing_layer: schema-registry
   evidence_tools: [connect_status, schema_registry_versions]
   forbidden_actions: [schema_register, schema_set_compatibility, connect_restart_task, connect_restart_connector, connect_resume_connector]
