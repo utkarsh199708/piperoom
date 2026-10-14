@@ -112,6 +112,64 @@ func TestParseFlagsValidateAlias(t *testing.T) {
 	}
 }
 
+func TestParseFlagsCompareWithTwoPaths(t *testing.T) {
+	f, err := parseFlags([]string{"-compare", "a.json", "b.json", "-fail-on-regression", "-tolerance", "2"}, &bytes.Buffer{})
+	if err != nil || f.compare != "a.json" || len(f.args) != 1 || f.args[0] != "b.json" || !f.failOnRegr || f.tolerance != 2 {
+		t.Fatalf("f = %+v, err %v: flags after the second path must still count", f, err)
+	}
+	if _, err := parseFlags([]string{"-compare", "a.json", "b.json", "-nope"}, &bytes.Buffer{}); err == nil {
+		t.Error("an unknown flag after a path was accepted")
+	}
+}
+
+func pairedReport(label string, passes ...bool) evals.Report {
+	r := evals.Report{Label: label, Runs: len(passes), Scenarios: []evals.ScenarioSummary{{Name: "a", Summary: evals.Summary{Runs: len(passes)}}}}
+	for i, p := range passes {
+		r.Results = append(r.Results, evals.RunResult{Scenario: "a", Run: i + 1, Pass: p})
+	}
+	return r
+}
+
+func TestRunComparePaired(t *testing.T) {
+	dir := t.TempDir()
+	base := saveReport(t, dir, "a.json", pairedReport("main", true, false, false, true))
+	cand := saveReport(t, dir, "b.json", pairedReport("v2", true, true, false, false))
+
+	for name, f := range map[string]flags{
+		"space form": {compare: base, args: []string{cand}, tolerance: 5},
+		"comma form": {compare: base + "," + cand, tolerance: 5},
+	} {
+		var out bytes.Buffer
+		code, err := run(f, &out, &out)
+		if err != nil || code != 0 {
+			t.Fatalf("%s: code %d err %v", name, code, err)
+		}
+		for _, want := range []string{"Paired comparison", "4 pair(s), 0 unmatched", "pass→fail 1, fail→pass 1", "Sample too small to call: 4 pair(s), need at least 20"} {
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("%s: output lacks %q:\n%s", name, want, out.String())
+			}
+		}
+	}
+	for name, f := range map[string]flags{
+		"three paths":             {compare: base, args: []string{cand, cand}},
+		"comma form and a path":   {compare: base + "," + cand, args: []string{cand}},
+		"a path without -compare": {scenarios: "../../scenarios", check: true, args: []string{cand}},
+	} {
+		if _, err := run(f, &bytes.Buffer{}, &bytes.Buffer{}); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestRunRefusesABadPriceTableBeforeAnyModelCall(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "test-key-not-used")
+	var out bytes.Buffer
+	_, err := run(flags{scenarios: "../../scenarios", prices: filepath.Join(t.TempDir(), "none.json")}, &out, &out)
+	if err == nil || !strings.Contains(err.Error(), "PIPEROOM_MODEL_PRICES") {
+		t.Fatalf("err = %v, want the price table refused", err)
+	}
+}
+
 // The held-out set validates on its own and is never part of the default
 // set.
 func TestRunCheckHeldoutSet(t *testing.T) {

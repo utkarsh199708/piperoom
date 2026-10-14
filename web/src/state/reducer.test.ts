@@ -248,6 +248,62 @@ describe('applyEvent — every event type', () => {
   })
 })
 
+describe('applyEvent — agent.usage (cost telemetry)', () => {
+  const usage = {
+    model: 'claude-opus-5-5',
+    role: 'main',
+    input_tokens: 1200,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 41000,
+    output_tokens: 900,
+    latency_ms: 8123,
+    cost_usd: 0.0412,
+  }
+
+  // A room with a step, a message and a full activity window.
+  function busyRoom() {
+    let s = applyEvent(base(), ev(1, 'room.created', { title: 'T', severity: 'sev2', pipeline_id: 'orders' }, human))
+    s = applyEvent(s, ev(2, 'agent.step.started', { step_id: 's_1', title: 'Check the connector' }))
+    s = applyEvent(s, ev(3, 'agent.message', { text: 'Looking at the connector' }))
+    for (let seq = 4; seq <= 25; seq++) {
+      s = applyEvent(s, ev(seq, 'agent.status', { state: seq % 2 ? 'working' : 'idle' }))
+    }
+    return s
+  }
+
+  it('leaves the activity feed, steps and messages unchanged and only advances last_seq', () => {
+    const s = busyRoom()
+    expect(s.activity).toHaveLength(20)
+    const after = applyEvent(s, ev(26, 'agent.usage', usage))
+    expect(after.last_seq).toBe(26)
+    expect(after.activity).toBe(s.activity)
+    expect(after.steps).toBe(s.steps)
+    expect(after.messages).toBe(s.messages)
+    expect({ ...after, last_seq: s.last_seq }).toEqual(s)
+  })
+
+  it('never takes a slot of the activity window or renders as a raw line', () => {
+    let s = busyRoom()
+    const window = s.activity.map((a) => a.seq)
+    for (let seq = 26; seq <= 60; seq++) {
+      s = applyEvent(s, ev(seq, 'agent.usage', { ...usage, role: seq % 2 ? 'main' : 'compaction' }))
+    }
+    expect(s.activity.map((a) => a.seq)).toEqual(window)
+    expect(s.activity.some((a) => a.text.includes('agent.usage'))).toBe(false)
+  })
+
+  it('is not a gap: the next event applies normally after it', () => {
+    const s = applyEvent(busyRoom(), ev(26, 'agent.usage', usage))
+    const next = ev(27, 'agent.message', { text: 'Found it' })
+    expect(detectGap(s.last_seq, next)).toBe(false)
+    const after = applyEvent(s, next)
+    expect(after.activity[0].seq).toBe(27)
+    expect(after.messages.at(-1)?.text).toBe('Found it')
+    // A replayed usage event is still deduped.
+    expect(applyEvent(after, ev(26, 'agent.usage', usage))).toBe(after)
+  })
+})
+
 describe('applyEvent — robustness', () => {
   it('ignores unknown event types without throwing', () => {
     const s = applyEvent(base(), ev(1, 'does.not.exist' as Event['type'], {}))

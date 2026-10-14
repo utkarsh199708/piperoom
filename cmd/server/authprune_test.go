@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"piperoom/internal/auth"
+	"piperoom/internal/room"
 )
 
 type fakePruner struct {
@@ -49,7 +50,7 @@ func TestAuthPruneRunsEvenWhenRoomRetentionIsOff(t *testing.T) {
 	log := slog.New(slog.DiscardHandler)
 
 	rooms := &fakeExpirer{}
-	stopRooms := startRetention(context.Background(), rooms, 0, time.Millisecond, time.Second, func() time.Time { return now }, log)
+	stopRooms := startRetention(context.Background(), rooms, room.RetentionPolicy{}, time.Millisecond, time.Second, func() time.Time { return now }, log)
 	defer stopRooms()
 
 	p := &fakePruner{}

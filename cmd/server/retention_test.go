@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"piperoom/internal/room"
 	"piperoom/internal/store"
 )
 
@@ -21,9 +22,10 @@ type fakeExpirer struct {
 	block   chan struct{} // when set, PurgeExpired waits for it or ctx
 }
 
-func (f *fakeExpirer) PurgeExpired(ctx context.Context, cutoff time.Time) (store.PurgeResult, error) {
+// PurgeByPolicy records the global cutoff the policy gives at now.
+func (f *fakeExpirer) PurgeByPolicy(ctx context.Context, now time.Time, p room.RetentionPolicy) (store.PurgeResult, error) {
 	f.mu.Lock()
-	f.cutoffs = append(f.cutoffs, cutoff)
+	f.cutoffs = append(f.cutoffs, now.AddDate(0, 0, -p.GlobalDays))
 	f.mu.Unlock()
 	if f.block != nil {
 		select {
@@ -55,7 +57,7 @@ func waitUntil(t *testing.T, cond func() bool) {
 
 func TestRetentionOffDoesNothing(t *testing.T) {
 	f := &fakeExpirer{}
-	stop := startRetention(context.Background(), f, 0, time.Millisecond, time.Second, time.Now, slog.New(slog.DiscardHandler))
+	stop := startRetention(context.Background(), f, room.RetentionPolicy{}, time.Millisecond, time.Second, time.Now, slog.New(slog.DiscardHandler))
 	time.Sleep(20 * time.Millisecond)
 	stop()
 	if n := len(f.calls()); n != 0 {
@@ -66,7 +68,7 @@ func TestRetentionOffDoesNothing(t *testing.T) {
 func TestRetentionRunsAtStartThenOnTicker(t *testing.T) {
 	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
 	f := &fakeExpirer{}
-	stop := startRetention(context.Background(), f, 30, 5*time.Millisecond, time.Second, func() time.Time { return now }, slog.New(slog.DiscardHandler))
+	stop := startRetention(context.Background(), f, room.RetentionPolicy{GlobalDays: 30}, 5*time.Millisecond, time.Second, func() time.Time { return now }, slog.New(slog.DiscardHandler))
 	waitUntil(t, func() bool { return len(f.calls()) >= 3 }) // start-up run + two ticks
 	stop()
 	want := now.AddDate(0, 0, -30)
@@ -85,7 +87,7 @@ func TestRetentionRunsAtStartThenOnTicker(t *testing.T) {
 
 func TestRetentionStopInterruptsRunInFlight(t *testing.T) {
 	f := &fakeExpirer{block: make(chan struct{})}
-	stop := startRetention(context.Background(), f, 7, time.Hour, time.Minute, time.Now, slog.New(slog.DiscardHandler))
+	stop := startRetention(context.Background(), f, room.RetentionPolicy{GlobalDays: 7}, time.Hour, time.Minute, time.Now, slog.New(slog.DiscardHandler))
 	waitUntil(t, func() bool { return len(f.calls()) == 1 })
 	done := make(chan struct{})
 	go func() { stop(); close(done) }()
@@ -101,7 +103,7 @@ func TestRetentionRunTimeoutBoundsOneRun(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 	start := time.Now()
-	runRetention(context.Background(), f, 7, 20*time.Millisecond, time.Now, log)
+	runRetention(context.Background(), f, room.RetentionPolicy{GlobalDays: 7}, 20*time.Millisecond, time.Now, log)
 	if time.Since(start) > 2*time.Second {
 		t.Fatal("run was not bounded by its timeout")
 	}
@@ -123,7 +125,7 @@ func TestRetentionPartialSuccessIsAWarning(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
-	runRetention(context.Background(), f, 30, time.Second, time.Now, log)
+	runRetention(context.Background(), f, room.RetentionPolicy{GlobalDays: 30}, time.Second, time.Now, log)
 	out := buf.String()
 	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "run finished with failed rooms") ||
 		!strings.Contains(out, "purged=2") || !strings.Contains(out, "failed=1") || strings.Contains(out, "purge failed") {
@@ -136,7 +138,7 @@ func TestRetentionLogsCountsOnly(t *testing.T) {
 	f := &fakeExpirer{res: store.PurgeResult{RoomIDs: []string{"r_SECRETID"}, Events: 12, Proposals: 2, Approvals: 3}}
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
-	runRetention(context.Background(), f, 30, time.Second, time.Now, log)
+	runRetention(context.Background(), f, room.RetentionPolicy{GlobalDays: 30}, time.Second, time.Now, log)
 	out := buf.String()
 	if !strings.Contains(out, "rooms=1") || !strings.Contains(out, "events=12") || !strings.Contains(out, "approvals=3") {
 		t.Fatalf("counts missing: %s", out)
@@ -150,7 +152,7 @@ func TestRetentionErrorIsLoggedNotFatal(t *testing.T) {
 	f := &fakeExpirer{err: errors.New("db down")}
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
-	runRetention(context.Background(), f, 30, time.Second, time.Now, log)
+	runRetention(context.Background(), f, room.RetentionPolicy{GlobalDays: 30}, time.Second, time.Now, log)
 	if !strings.Contains(buf.String(), "retention: purge failed") || !strings.Contains(buf.String(), "db down") {
 		t.Fatalf("error not logged: %s", buf.String())
 	}

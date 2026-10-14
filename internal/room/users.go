@@ -28,6 +28,9 @@ type User struct {
 	// are not sent to clients.
 	Email string `json:"-" yaml:"email"`
 	Sub   string `json:"-" yaml:"sub"`
+	// Admin is users.yaml `admin: true`: the user may delete rooms
+	// (docs/design/retention.md section 6). It grants nothing else.
+	Admin bool `json:"-" yaml:"admin"`
 
 	// Groups are the IdP groups of the session this value was built for; nil
 	// when the token had no groups claim, and always nil for a users.yaml entry.

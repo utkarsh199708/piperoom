@@ -203,6 +203,9 @@ type Endpoint struct {
 
 	mu      sync.Mutex
 	budgets map[string]*tokenBudget
+	// spend is the durable spend setup (SetSpend, spend.go); nil = in-memory
+	// budgets only.
+	spend *spendSettings
 }
 
 // NewEndpoint checks cfg and builds the model client. It returns an error for
@@ -268,7 +271,8 @@ func (e *Endpoint) budgetWithLimit(roomID string, limit int64) *tokenBudget {
 
 // Forget drops a room's token count. Call it when a room closes so the map does
 // not grow for the life of the process. A run that is still going keeps its own
-// pointer and finishes its count; a later run for the same room id starts at 0.
+// pointer and finishes its count; a later run for the same room id starts at 0
+// in memory (with a spend store, the room's persisted total still counts).
 func (e *Endpoint) Forget(roomID string) {
 	e.mu.Lock()
 	delete(e.budgets, roomID)
@@ -291,11 +295,12 @@ func (e *Endpoint) Run(ctx context.Context, alert Alert, deps Deps, opts Options
 		// hook cannot change what is reported.
 		defer func() { usage(b.Used()) }()
 	}
-	m := &budgetModel{inner: e.model, budget: b, loop: true}
+	m := &budgetModel{inner: e.model, budget: b, loop: true, guard: e.guard(alert.RoomID, alert.PipelineID)}
 	r, err := newRunnerWith(alert, deps, opts, m)
 	if err != nil {
 		return err
 	}
+	r.prices = e.prices()
 	if e.triageModel != "" && e.triageModel != opts.Model {
 		r.triageModel = e.triageModel
 		r.triageTurns = e.triageTurns
@@ -311,6 +316,5 @@ func (e *Endpoint) WriteHandoff(ctx context.Context, roomEvents []events.Event, 
 	if len(roomEvents) == 0 {
 		return events.HandoffSummary{}, fmt.Errorf("agent: cannot write handoff from an empty room")
 	}
-	m := &budgetModel{inner: e.model, budget: e.budget(roomEvents[0].RoomID)}
-	return writeHandoff(ctx, roomEvents, opts, m)
+	return writeHandoff(ctx, roomEvents, opts, e.handoffModel(roomEvents))
 }
