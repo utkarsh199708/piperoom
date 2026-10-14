@@ -113,6 +113,18 @@ jobs:
       # tests clean up after themselves). It mirrors scenario schema-change in
       # tasks/A1-devstack.md: break waits for task 0 FAILED, fix waits for the
       # schema, RUNNING and compatibility BACKWARD.
+      - name: Let Debezium catch up (the tests wrote WAL into the same Postgres)
+        if: success()
+        # ~4600 integration tests write hundreds of MB of WAL into this cluster.
+        # Debezium advances its replication slot only when it processes a change
+        # in a captured table, so devctl health would (correctly) report the
+        # slot as retaining too much WAL. A few seconds of order changes let the
+        # connector flush; wait-healthy.sh below waits for the offset commit.
+        run: |
+          go build -o "$RUNNER_TEMP/devctl" ./cmd/devctl
+          # SIGINT ends devctl load cleanly (exit 0); --preserve-status keeps
+          # that code, so a real failure (cannot connect) still fails the step.
+          timeout --preserve-status -s INT 15 "$RUNNER_TEMP/devctl" load --rate 20 --owner ci
       - name: devctl status
         if: success()
         run: go run ./cmd/devctl status
