@@ -103,7 +103,7 @@ with the owners above, who carry any follow-up.
 ### R wave (dispatched 2026-10-14)
 
 PR titles start with `[R<N>]` (e.g. `[R5b] wiring: tools get Reader clients`). An R task is done by the agent named
-here, **inside that agent's own folders above**; a task that needs a file outside them asks in its thread (§6 of
+here, **inside that agent's own folders above**; a task that needs a file outside them asks in its thread (§4 of
 `docs/collab.md`), it does not edit it. R0 (the leads) changes the contracts first; "Uses" names the R0 PR 1 items
 (#138) each task codes against.
 
