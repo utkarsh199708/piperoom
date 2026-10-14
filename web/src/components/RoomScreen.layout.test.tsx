@@ -210,6 +210,50 @@ describe('RoomScreen rail and column', () => {
   })
 })
 
+describe('RoomScreen close room', () => {
+  it('the driver sees Close room; it opens the close dialog', () => {
+    show(kabir, room())
+    fireEvent.click(screen.getByRole('button', { name: /Close room/ }))
+    expect(screen.getByRole('dialog', { name: 'Close the room' })).toBeInTheDocument()
+  })
+
+  it('a non-driver, a viewer and a closed room get no Close room button', () => {
+    const a = show(arjun, room())
+    expect(screen.queryByRole('button', { name: /Close room/ })).not.toBeInTheDocument()
+    a.unmount()
+    const v = show(vera, room())
+    expect(screen.queryByRole('button', { name: /Close room/ })).not.toBeInTheDocument()
+    v.unmount()
+    show(kabir, room({ status: 'closed', resolution: 'fixed' }))
+    expect(screen.queryByRole('button', { name: /Close room/ })).not.toBeInTheDocument()
+  })
+
+  it('the dialog goes away once the room is closed and the resolution shows', () => {
+    const { rerender } = show(kabir, room())
+    fireEvent.click(screen.getByRole('button', { name: /Close room/ }))
+    expect(screen.getByRole('dialog', { name: 'Close the room' })).toBeInTheDocument()
+    vi.mocked(useRoom).mockReturnValue({
+      state: room({ status: 'closed', resolution: 'Connector restarted' }),
+      presence: [],
+      conn: 'live',
+      error: null,
+      actions,
+      stale: null,
+      dismissStale: vi.fn(),
+      reload,
+    })
+    rerender(
+      <MemoryRouter initialEntries={['/rooms/r_schema_change']}>
+        <Routes>
+          <Route path="/rooms/:roomId" element={<RoomScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    )
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByText('Connector restarted')).toBeInTheDocument()
+  })
+})
+
 describe('RoomScreen loading and error', () => {
   it('shows the skeleton while the room loads', () => {
     const { container } = show(arjun, null, 'loading')
@@ -235,6 +279,16 @@ describe('RoomScreen keys', () => {
     show(kabir, room())
     press('h')
     expect(screen.getByRole('dialog', { name: 'Hand off the room' })).toBeInTheDocument()
+  })
+
+  it('C opens the close dialog for the driver only', () => {
+    const { unmount } = show(kabir, room())
+    press('c')
+    expect(screen.getByRole('dialog', { name: 'Close the room' })).toBeInTheDocument()
+    unmount()
+    show(arjun, room())
+    press('c')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('H does nothing for someone who cannot hand off', () => {
