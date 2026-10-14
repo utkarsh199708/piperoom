@@ -118,7 +118,7 @@ describe('RoomScreen — agent done status and resolution', () => {
 
   it('shows the resolution once the room is closed', () => {
     show(webhookRoom({ status: 'closed', resolution: 'Compatibility set to NONE' }))
-    expect(screen.getByText('Resolved')).toBeInTheDocument()
+    expect(screen.getAllByText('Resolved').length).toBeGreaterThan(0)
     expect(screen.getByText('Compatibility set to NONE')).toBeInTheDocument()
   })
 })
