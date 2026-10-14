@@ -145,9 +145,13 @@ jobs:
           go test -count=1 -timeout 25m -json -tags integration ./internal/... > test.json
           rc=$?
           set -e
-          # Readable failures in the log; the full stream is the artifact.
-          jq -r 'select(.Action == "output") | .Output' test.json \
-            | grep -E '^(--- FAIL|FAIL|panic:)' || true
+          # Readable failures in the log: the whole output of every failed
+          # test (assertion messages included); the full stream is the artifact.
+          jq -rs '
+            ([.[] | select(.Action == "fail" and (.Test // "") != "") | "\(.Package) \(.Test)"]) as $failed
+            | .[] | select(.Action == "output" and (.Test // "") != ""
+                           and (("\(.Package) \(.Test)") as $k | $failed | index($k)))
+            | .Output' test.json | grep -v '^$' || true
           exit "$rc"
       - name: Skipped integration tests are failures
         if: success() || failure()

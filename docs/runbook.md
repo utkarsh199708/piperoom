@@ -150,7 +150,7 @@ Rooms that existed before it get their byte count in the background after the se
 
 | Job | When | What it needs |
 |---|---|---|
-| `Go integration (full dev stack)` (`ci.yml`) | every PR and push to `main` | nothing; starts `dev/docker-compose.yml`, polls Connect (`.github/scripts/wait-for-stack.sh`), runs `go test -tags integration ./internal/...`. **Any skipped test fails the job** (`fail-on-skips.sh`) |
+| `Go integration (full dev stack)` (`ci.yml`) | every PR and push to `main` | nothing; starts `dev/docker-compose.yml`, polls Connect (`.github/scripts/wait-for-stack.sh`), runs `go test -tags integration ./internal/...`. **Any skipped test fails the job** (`fail-on-skips.sh`), except reviewed non-stack skips in `.github/integration-skip-allow.txt` (owner and review-by date; an expired entry fails) |
 | `Dev-stack smoke` (`ci.yml`) | every PR and push to `main` | `devctl up`, `status`, `health`, `break` + `fix schema-change` |
 | `Live evals` (`evals-live.yml`) | nightly, and PRs touching `internal/agent/**`, `internal/tools/**`, `evals/**` | repo secret `ANTHROPIC_API_KEY`. Without it (forks) the job skips with a notice. Gate: `.github/scripts/eval-gate.sh` (pass rate >= repo variable `EVAL_MIN_PASS_RATE`, default `0.70`; no errored run; `schema-change` passes every run) |
 | `Release image` (`release-image.yml`) | tags `v*` push to `ghcr.io/<owner>/piperoom`; PRs touching the image inputs only build | the digest is in the job summary, the `image-digest` artifact and the job output `digest`. Deploy by digest: `ghcr.io/<owner>/piperoom@sha256:...` |
