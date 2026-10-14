@@ -167,16 +167,21 @@ func TestSessionEndedBeforeRegisterClosesAtOnce(t *testing.T) {
 	}
 }
 
-// waitPresenceWithout reads c until a presence frame whose member list leaves
-// out gone. Any close before that fails the test.
+// waitPresenceWithout reads c until a presence frame that lists gone, then
+// until one that leaves gone out. The dials register in any order, so a
+// connection that registered before gone first sees lists without gone; only a
+// list without gone that follows one with gone is the broadcast of gone
+// leaving. WaitConns(3) before the recheck guarantees every connection is sent
+// the full list. Any close before the second frame fails the test.
 func waitPresenceWithout(t *testing.T, c *websocket.Conn, name, gone string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	seen := false
 	for {
 		_, data, err := c.Read(ctx)
 		if err != nil {
-			t.Fatalf("%s: closed or no presence update without %s: %v", name, gone, err)
+			t.Fatalf("%s: closed or no presence update without %s (saw %s listed: %v): %v", name, gone, gone, seen, err)
 		}
 		var m struct {
 			Type    string      `json:"type"`
@@ -185,7 +190,11 @@ func waitPresenceWithout(t *testing.T, c *websocket.Conn, name, gone string) {
 		if json.Unmarshal(data, &m) != nil || m.Type != "presence" {
 			continue
 		}
-		if !slices.ContainsFunc(m.Members, func(x ws.Member) bool { return x.ID == gone }) {
+		listed := slices.ContainsFunc(m.Members, func(x ws.Member) bool { return x.ID == gone })
+		switch {
+		case listed:
+			seen = true
+		case seen:
 			return
 		}
 	}

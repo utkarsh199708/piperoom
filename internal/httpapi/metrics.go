@@ -44,16 +44,24 @@ type histogram struct {
 // exposition format (version 0.0.4) with the standard library only.
 type metrics struct {
 	start time.Time
-	// conns reports the live WebSocket connection count; nil reports none.
-	conns func() int
+	g     gauges
 
 	mu       sync.Mutex
 	requests map[reqKey]uint64
 	duration map[reqKey]*histogram
 }
 
-func newMetrics(start time.Time, conns func() int) *metrics {
-	return &metrics{start: start, conns: conns, requests: map[reqKey]uint64{}, duration: map[reqKey]*histogram{}}
+// gauges read live values at scrape time; a nil func leaves its series out.
+// None of them may call the store: a scrape every few seconds must not load
+// the database.
+type gauges struct {
+	conns     func() int                 // live WebSocket connections
+	agents    func() (inUse, queued int) // agent slots in use, rooms queued for one
+	openRooms func() int                 // open rooms in the room cache
+}
+
+func newMetrics(start time.Time, g gauges) *metrics {
+	return &metrics{start: start, g: g, requests: map[reqKey]uint64{}, duration: map[reqKey]*histogram{}}
 }
 
 // knownMethods bounds the method label; anything else is "other".
@@ -157,10 +165,16 @@ func (m *metrics) write(w io.Writer, now time.Time) {
 		fmt.Fprintf(w, "piperoom_http_request_duration_seconds_sum{%s} %s\n", k.labels(), formatFloat(h.sum))
 		fmt.Fprintf(w, "piperoom_http_request_duration_seconds_count{%s} %d\n", k.labels(), h.n)
 	}
-	if m.conns != nil {
-		fmt.Fprintln(w, "# HELP piperoom_ws_connections Live WebSocket connections on this replica.")
-		fmt.Fprintln(w, "# TYPE piperoom_ws_connections gauge")
-		fmt.Fprintf(w, "piperoom_ws_connections %d\n", m.conns())
+	if m.g.conns != nil {
+		gauge(w, "piperoom_ws_connections", "Live WebSocket connections on this replica.", m.g.conns())
+	}
+	if m.g.agents != nil {
+		inUse, queued := m.g.agents()
+		gauge(w, "piperoom_agent_slots_in_use", "Agent runs holding a slot on this replica (PIPEROOM_MAX_AGENTS caps it).", inUse)
+		gauge(w, "piperoom_agent_rooms_queued", "Rooms on this replica waiting for an agent slot.", queued)
+	}
+	if m.g.openRooms != nil {
+		gauge(w, "piperoom_rooms_open", "Open rooms in this replica's room cache.", m.g.openRooms())
 	}
 	fmt.Fprintln(w, "# HELP piperoom_goroutines Goroutines in this process.")
 	fmt.Fprintln(w, "# TYPE piperoom_goroutines gauge")
@@ -168,6 +182,10 @@ func (m *metrics) write(w io.Writer, now time.Time) {
 	fmt.Fprintln(w, "# HELP piperoom_uptime_seconds Seconds since this process built its HTTP handler.")
 	fmt.Fprintln(w, "# TYPE piperoom_uptime_seconds gauge")
 	fmt.Fprintf(w, "piperoom_uptime_seconds %s\n", formatFloat(now.Sub(m.start).Seconds()))
+}
+
+func gauge(w io.Writer, name, help string, v int) {
+	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %d\n", name, help, name, name, v)
 }
 
 func (k reqKey) labels() string {

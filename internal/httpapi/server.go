@@ -92,15 +92,17 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	s.normalizeAuth()
 	s.gw.Identify = wsIdentify
 	s.gw.SessionAlive = s.sessionAlive
-	s.metrics = newMetrics(time.Now(), s.gw.Connections)
+	s.metrics = newMetrics(time.Now(), gauges{conns: s.gw.Connections, agents: svc.AgentStats, openRooms: svc.OpenRooms})
 
 	r := chi.NewRouter()
+	// Outside Recoverer, so a handler that panics is counted with the 500
+	// Recoverer writes: that is exactly when an operator looks.
+	r.Use(s.metrics.middleware)
 	r.Use(middleware.Recoverer)
 	if s.webDir != "" {
 		r.Use(s.securityHeaders)
 	}
 	r.Use(requestLog(log, s.clientIP))
-	r.Use(s.metrics.middleware)
 	// Host allow-list first (DNS rebinding, design §1.5), then the cross-origin
 	// check, except signed alert routes and GET /healthz and /readyz (hostGuard).
 	r.Use(s.hostGuard)

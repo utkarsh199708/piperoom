@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"strconv"
@@ -115,6 +116,26 @@ func TestMetricsSkipsHostGuard(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != want {
 			t.Errorf("GET %s with Host 10.1.2.3 = %d, want %d", path, resp.StatusCode, want)
+		}
+	}
+}
+
+// The room gauges come from the service's in-memory state: an open room shows
+// in piperoom_rooms_open, and the agent slot series are always present.
+func TestMetricsRoomGauges(t *testing.T) {
+	srv, svc := newServer(t)
+	u, _ := svc.LookupUser("arjun")
+	if _, err := svc.CreateRoom(context.Background(), u, "t", "sev2", "orders"); err != nil {
+		t.Fatal(err)
+	}
+	_, body := scrape(t, srv.URL)
+	for _, want := range []string{
+		"# TYPE piperoom_rooms_open gauge\npiperoom_rooms_open 1\n",
+		"# TYPE piperoom_agent_slots_in_use gauge\npiperoom_agent_slots_in_use ",
+		"# TYPE piperoom_agent_rooms_queued gauge\npiperoom_agent_rooms_queued 0\n",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %q\n%s", want, body)
 		}
 	}
 }
