@@ -6,6 +6,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -130,8 +131,18 @@ type Config struct {
 
 	// RetentionDays deletes whole closed rooms (events, proposals, approvals,
 	// hand-offs) whose closed_at is older than this many days. Open rooms are
-	// never deleted. Empty or "0" = keep forever.
+	// never deleted. Empty or "0" = keep forever. A pipeline's owners.yaml
+	// retention_days overrides it for that pipeline; when this value is set too,
+	// the shorter of the two wins (docs/design/retention.md section 3).
 	RetentionDays string // PIPEROOM_RETENTION_DAYS
+
+	// Room limits (docs/design/retention.md). Kept as strings like the
+	// watcher fields; ParseLimits types them and names the env var on error.
+	MaxOpenDays       string // PIPEROOM_MAX_OPEN_DAYS: whole days a room may stay open before the server closes it; default 14; "0" = off
+	RoomMaxEvents     string // PIPEROOM_ROOM_MAX_EVENTS: events in one room log; default 20000
+	RoomMaxBytes      string // PIPEROOM_ROOM_MAX_BYTES: stored payload bytes of one room log; default 256MiB
+	EventMaxDataBytes string // PIPEROOM_EVENT_MAX_DATA_BYTES: tool_result.data (and action.executed.output) bytes of one event; default 64KiB
+	ArchiveDir        string // PIPEROOM_ARCHIVE_DIR: absolute directory; when set, retention writes the room's export there before a purge, and an admin delete does when asked (?archive=true); empty = off
 
 	// Login (docs/design/auth.md §6). Raw strings; the auth package parses and
 	// checks them at start-up. Not wired until auth PR 2.
@@ -239,6 +250,12 @@ func Load() Config {
 		PipelineDailyCostUSD:     get("PIPEROOM_PIPELINE_DAILY_COST_USD", ""),
 
 		RetentionDays: get("PIPEROOM_RETENTION_DAYS", ""),
+
+		MaxOpenDays:       get("PIPEROOM_MAX_OPEN_DAYS", DefaultMaxOpenDays),
+		RoomMaxEvents:     get("PIPEROOM_ROOM_MAX_EVENTS", DefaultRoomMaxEvents),
+		RoomMaxBytes:      get("PIPEROOM_ROOM_MAX_BYTES", DefaultRoomMaxBytes),
+		EventMaxDataBytes: get("PIPEROOM_EVENT_MAX_DATA_BYTES", DefaultEventMaxDataBytes),
+		ArchiveDir:        get("PIPEROOM_ARCHIVE_DIR", ""),
 
 		AuthMode:            get("PIPEROOM_AUTH_MODE", DefaultAuthMode),
 		DevAllowNonLoopback: get("PIPEROOM_DEV_ALLOW_NONLOOPBACK", ""),
@@ -446,6 +463,125 @@ func parseWholeNumber(name, v, def string, zeroOK bool) (int64, error) {
 		return 0, fmt.Errorf("config: %s=%q: must be at least 1", name, v)
 	}
 	return n, nil
+}
+
+// Room limit defaults and bounds (docs/design/retention.md).
+const (
+	DefaultMaxOpenDays       = "14"
+	DefaultRoomMaxEvents     = "20000"
+	DefaultRoomMaxBytes      = "256MiB"
+	DefaultEventMaxDataBytes = "64KiB"
+
+	// MaxMaxOpenDays bounds PIPEROOM_MAX_OPEN_DAYS (ten years).
+	MaxMaxOpenDays = 3650
+	// MinRoomMaxEvents keeps a room able to hold its opening events and a
+	// short investigation.
+	MinRoomMaxEvents = 100
+	// MaxRoomMaxEvents keeps the cap plus its 2% reserve under the audit
+	// export's 500000-event limit, so every room can still be exported and
+	// archived (PIPEROOM_ARCHIVE_DIR).
+	MaxRoomMaxEvents = 490000
+	MinRoomMaxBytes  = 1 << 20 // 1 MiB
+	MaxRoomMaxBytes  = 16 << 30
+	MinEventMaxData  = 1 << 10 // 1 KiB
+	MaxEventMaxData  = 16 << 20
+)
+
+// Limits holds the typed room limits.
+type Limits struct {
+	// MaxOpenDays is how long a room may stay open before the server closes
+	// it; 0 = no limit.
+	MaxOpenDays int
+	// RoomMaxEvents and RoomMaxBytes cap one room's event log (count, and
+	// the sum of stored payload sizes). Human, system and close events may go
+	// 2% over them; agent events may not.
+	RoomMaxEvents int64
+	RoomMaxBytes  int64
+	// EventMaxDataBytes caps tool_result.data and action.executed.output of
+	// one event; larger values are stored truncated.
+	EventMaxDataBytes int64
+	// ArchiveDir is where retention writes a room's export before it purges
+	// it, and where an admin delete writes one when asked (?archive=true);
+	// "" = no archive. Always an absolute, cleaned path.
+	ArchiveDir string
+}
+
+// ParseLimits validates the room limit fields (PIPEROOM_MAX_OPEN_DAYS,
+// PIPEROOM_ROOM_MAX_EVENTS, PIPEROOM_ROOM_MAX_BYTES,
+// PIPEROOM_EVENT_MAX_DATA_BYTES, PIPEROOM_ARCHIVE_DIR). Empty fields mean the
+// default. Byte sizes are a whole number of bytes, optionally followed by KiB,
+// MiB or GiB ("64KiB", "268435456"). The error names the env var. Whether
+// ArchiveDir exists and is writable is checked by the server at start, not here.
+func ParseLimits(c Config) (Limits, error) {
+	var l Limits
+	days, err := parseWholeNumber("PIPEROOM_MAX_OPEN_DAYS", c.MaxOpenDays, DefaultMaxOpenDays, true)
+	if err != nil {
+		return Limits{}, err
+	}
+	if days > MaxMaxOpenDays {
+		return Limits{}, fmt.Errorf("config: PIPEROOM_MAX_OPEN_DAYS=%q: at most %d", c.MaxOpenDays, MaxMaxOpenDays)
+	}
+	l.MaxOpenDays = int(days)
+
+	if l.RoomMaxEvents, err = parseWholeNumber("PIPEROOM_ROOM_MAX_EVENTS", c.RoomMaxEvents, DefaultRoomMaxEvents, false); err != nil {
+		return Limits{}, err
+	}
+	if l.RoomMaxEvents < MinRoomMaxEvents || l.RoomMaxEvents > MaxRoomMaxEvents {
+		return Limits{}, fmt.Errorf("config: PIPEROOM_ROOM_MAX_EVENTS=%q: want %d to %d", c.RoomMaxEvents, MinRoomMaxEvents, MaxRoomMaxEvents)
+	}
+	if l.RoomMaxBytes, err = parseByteSize("PIPEROOM_ROOM_MAX_BYTES", c.RoomMaxBytes, DefaultRoomMaxBytes); err != nil {
+		return Limits{}, err
+	}
+	if l.RoomMaxBytes < MinRoomMaxBytes || l.RoomMaxBytes > MaxRoomMaxBytes {
+		return Limits{}, fmt.Errorf("config: PIPEROOM_ROOM_MAX_BYTES=%q: want 1MiB to 16GiB", c.RoomMaxBytes)
+	}
+	if l.EventMaxDataBytes, err = parseByteSize("PIPEROOM_EVENT_MAX_DATA_BYTES", c.EventMaxDataBytes, DefaultEventMaxDataBytes); err != nil {
+		return Limits{}, err
+	}
+	if l.EventMaxDataBytes < MinEventMaxData || l.EventMaxDataBytes > MaxEventMaxData {
+		return Limits{}, fmt.Errorf("config: PIPEROOM_EVENT_MAX_DATA_BYTES=%q: want 1KiB to 16MiB", c.EventMaxDataBytes)
+	}
+	if l.EventMaxDataBytes > l.RoomMaxBytes {
+		return Limits{}, fmt.Errorf("config: PIPEROOM_EVENT_MAX_DATA_BYTES=%q: must not be larger than PIPEROOM_ROOM_MAX_BYTES=%q", c.EventMaxDataBytes, c.RoomMaxBytes)
+	}
+
+	if dir := strings.TrimSpace(c.ArchiveDir); dir != "" {
+		if !filepath.IsAbs(dir) {
+			return Limits{}, fmt.Errorf("config: PIPEROOM_ARCHIVE_DIR=%q: want an absolute path", c.ArchiveDir)
+		}
+		l.ArchiveDir = filepath.Clean(dir)
+	}
+	return l, nil
+}
+
+// parseByteSize parses a whole number of bytes with an optional KiB, MiB or
+// GiB suffix; empty uses def. Zero is refused.
+func parseByteSize(name, v, def string) (int64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		v = def
+	}
+	mult := int64(1)
+	for _, u := range []struct {
+		suffix string
+		mult   int64
+	}{{"KiB", 1 << 10}, {"MiB", 1 << 20}, {"GiB", 1 << 30}} {
+		if strings.HasSuffix(v, u.suffix) {
+			v, mult = strings.TrimSuffix(v, u.suffix), u.mult
+			break
+		}
+	}
+	if v == "" || strings.TrimSpace(v) != v {
+		return 0, fmt.Errorf("config: %s: want a size like 65536, 64KiB or 256MiB", name)
+	}
+	n, err := parseWholeNumber(name, v, "", false)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s: want a size like 65536, 64KiB or 256MiB: %w", name, err)
+	}
+	if n > (1<<62)/mult {
+		return 0, fmt.Errorf("config: %s=%q: too large", name, v)
+	}
+	return n * mult, nil
 }
 
 // Watcher defaults and limits.
