@@ -238,7 +238,7 @@ export function HandoffAcceptBanner({
         <strong>{from}</strong> is handing the room to you.
       </span>
       {/* No blind accept: the only way to take over is through the summary dialog. */}
-      <Button id={HANDOFF_READ_ID} className="ml-auto h-7 px-2.5" onClick={() => setReading(true)}>
+      <Button id={HANDOFF_READ_ID} className="ml-auto h-7 px-2.5 coarse:h-11 coarse:px-4" onClick={() => setReading(true)}>
         Read summary
       </Button>
       {reading && (

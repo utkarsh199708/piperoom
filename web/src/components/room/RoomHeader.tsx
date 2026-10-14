@@ -1,4 +1,4 @@
-import { Check, CircleCheck, Download, Eye, Loader2, Repeat2, UserPlus } from 'lucide-react'
+import { Check, CircleCheck, Download, Eye, Loader2, MoreHorizontal, Repeat2, UserPlus } from 'lucide-react'
 import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
 import { canClose, canHandoff, isViewer } from '@/state/permissions'
@@ -7,7 +7,9 @@ import { clockTime } from '@/lib/time'
 import { roomStatus, statusInputFromState } from '@/lib/roomStatus'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Kbd } from '@/components/ui/kbd'
+import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { AgentPill } from './AgentPill'
 import { CostChip } from './CostChip'
 import { PersonAvatar } from './PersonAvatar'
@@ -65,6 +67,9 @@ export function RoomHeader({
   /** A hand-off summary is being written: the button shows progress and opens the dialog to follow it. */
   handoffBusy?: boolean
 }) {
+  // Below md the four actions would stack ~280px of buttons; they go behind one ⋯ menu. The keys still work:
+  // useRoomShortcuts does not depend on the buttons.
+  const roomy = useMediaQuery('(min-width: 768px)')
   const status = roomStatus(statusInputFromState(state))
   const ordered = [...members].sort((a, b) => Number(b.id === state.driver?.id) - Number(a.id === state.driver?.id))
   const shown = ordered.slice(0, MAX_AVATARS)
@@ -108,39 +113,75 @@ export function RoomHeader({
               {state.agent_status.detail}
             </span>
           )}
-          {canHandoff(state, user) && (
-            <Button variant="secondary" aria-keyshortcuts="H" aria-busy={handoffBusy || undefined} onClick={onHandoff}>
-              {handoffBusy ? (
-                <Loader2 className="animate-spin" aria-hidden="true" />
-              ) : (
-                <Repeat2 aria-hidden="true" />
+          {roomy ? (
+            <>
+              {canHandoff(state, user) && (
+                <Button variant="secondary" aria-keyshortcuts="H" aria-busy={handoffBusy || undefined} onClick={onHandoff}>
+                  {handoffBusy ? (
+                    <Loader2 className="animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Repeat2 aria-hidden="true" />
+                  )}
+                  {handoffBusy ? 'Writing hand-off…' : 'Hand off'}
+                  <Kbd aria-hidden="true">H</Kbd>
+                </Button>
               )}
-              {handoffBusy ? 'Writing hand-off…' : 'Hand off'}
-              <Kbd aria-hidden="true">H</Kbd>
-            </Button>
+              {canClose(state, user) && (
+                <Button variant="outline" aria-keyshortcuts="C" onClick={onCloseRoom}>
+                  <CircleCheck aria-hidden="true" />
+                  Close room
+                  <Kbd aria-hidden="true">C</Kbd>
+                </Button>
+              )}
+              {onExport && (
+                <Button variant="outline" disabled={exporting} onClick={onExport}>
+                  <Download aria-hidden="true" />
+                  {exporting ? 'Exporting…' : 'Export'}
+                </Button>
+              )}
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={onInvite}
+                aria-label={copied ? 'Copied' : 'Invite (copy link)'}
+                title={copied ? 'Link copied' : 'Invite: copy the link to this room'}
+              >
+                {copied ? <Check aria-hidden="true" /> : <UserPlus aria-hidden="true" />}
+              </Button>
+            </>
+          ) : (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="icon" aria-label="More actions" className="coarse:size-11">
+                  <MoreHorizontal aria-hidden="true" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {canHandoff(state, user) && (
+                  <DropdownMenuItem aria-keyshortcuts="H" disabled={handoffBusy} onSelect={onHandoff} className="coarse:min-h-11">
+                    <Repeat2 aria-hidden="true" />
+                    {handoffBusy ? 'Writing hand-off…' : 'Hand off'}
+                  </DropdownMenuItem>
+                )}
+                {canClose(state, user) && (
+                  <DropdownMenuItem aria-keyshortcuts="C" onSelect={onCloseRoom} className="coarse:min-h-11">
+                    <CircleCheck aria-hidden="true" />
+                    Close room
+                  </DropdownMenuItem>
+                )}
+                {onExport && (
+                  <DropdownMenuItem disabled={exporting} onSelect={onExport} className="coarse:min-h-11">
+                    <Download aria-hidden="true" />
+                    {exporting ? 'Exporting…' : 'Export'}
+                  </DropdownMenuItem>
+                )}
+                <DropdownMenuItem onSelect={onInvite} className="coarse:min-h-11">
+                  {copied ? <Check aria-hidden="true" /> : <UserPlus aria-hidden="true" />}
+                  {copied ? 'Copied' : 'Invite (copy link)'}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           )}
-          {canClose(state, user) && (
-            <Button variant="outline" aria-keyshortcuts="C" onClick={onCloseRoom}>
-              <CircleCheck aria-hidden="true" />
-              Close room
-              <Kbd aria-hidden="true">C</Kbd>
-            </Button>
-          )}
-          {onExport && (
-            <Button variant="outline" disabled={exporting} onClick={onExport}>
-              <Download aria-hidden="true" />
-              {exporting ? 'Exporting…' : 'Export'}
-            </Button>
-          )}
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onInvite}
-            aria-label={copied ? 'Copied' : 'Invite (copy link)'}
-            title={copied ? 'Link copied' : 'Invite: copy the link to this room'}
-          >
-            {copied ? <Check aria-hidden="true" /> : <UserPlus aria-hidden="true" />}
-          </Button>
         </div>
       </div>
 
@@ -151,7 +192,7 @@ export function RoomHeader({
             <Sep />
           </>
         )}
-        <span>#{state.id}</span>
+        <span className="hidden sm:inline">#{state.id}</span>
         {!state.shadow && state.opened_at && (
           <>
             <Sep />

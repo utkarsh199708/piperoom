@@ -41,6 +41,7 @@ func TestEveryReadToolRefusesWithoutRoomScope(t *testing.T) {
 		"kafka_topic_config":       `{"pipeline_id":"orders"}`,
 		"debezium_metrics":         `{"connector":"pg-orders-connector"}`,
 		"dlq_peek":                 `{"connector":"pg-orders-sink"}`,
+		"what_changed":             `{}`,
 	}
 	ran := 0
 	for _, tl := range reg.All() {

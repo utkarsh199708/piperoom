@@ -650,7 +650,7 @@ function RoomRow({
         {canTake ? (
           <Button
             variant="outline"
-            className="h-[26px] gap-1.5 px-2 text-xs"
+            className="h-[26px] gap-1.5 px-2 text-xs coarse:h-11 coarse:px-4"
             disabled={taking}
             title={room.driver ? `${room.driver.name}'s lease has expired` : undefined}
             onClick={onTake}

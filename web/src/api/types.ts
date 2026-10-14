@@ -38,6 +38,8 @@ export type EventType =
   | 'handoff.created'
   | 'handoff.accepted'
   | 'trace.pinned'
+  | 'room.labelled'
+  | 'checklist.step_done'
 
 export interface Event {
   room_id: string
@@ -49,6 +51,34 @@ export interface Event {
 }
 
 // ---- payloads (one per Type, matching events.go) ----
+
+/** room.labelled: the human label of a closed room (POST /api/rooms/{id}/label). */
+export interface RoomLabelledPayload {
+  actual_layer?: string
+  cause: string
+  fix_that_worked?: string
+  fix_proposal_id?: string
+  agent_helped?: boolean
+}
+
+/** checklist.step_done: item `item` of hits[`hit`].items of tool result `tool_use_id` ticked or unticked. */
+export interface ChecklistStepDonePayload {
+  step_id: string
+  tool_use_id: string
+  hit: number
+  item: number
+  done: boolean
+  note?: string
+}
+
+/** Body of POST /api/rooms/{id}/label. */
+export interface LabelInput {
+  actual_layer?: string
+  cause: string
+  fix_that_worked?: string
+  fix_proposal_id?: string
+  agent_helped?: boolean
+}
 
 export interface RoomCreatedPayload {
   title: string
@@ -327,6 +357,8 @@ export interface RoomSnapshot {
   open_proposals: ProposalSummary[]
   pending_suggestions: SuggestionSummary[]
   members: MemberSummary[]
+  /** F8: a room.labelled exists. */
+  labelled?: boolean
   /** Shadow room (docs/api.md): its insight is zeros until revealed. */
   shadow?: boolean
   /** F11: cost and clock facts folded server-side; absent on an older server. */

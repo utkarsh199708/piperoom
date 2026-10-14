@@ -20,12 +20,14 @@ type client struct {
 	userName  string
 	verified  bool
 	state     string
-	lastSeen  time.Time
-	send      chan []byte
-	conn      *websocket.Conn
-	cancel    func()
-	onClose   func()
-	once      sync.Once
+	// stateSince is when state last changed (or the connection registered).
+	stateSince time.Time
+	lastSeen   time.Time
+	send       chan []byte
+	conn       *websocket.Conn
+	cancel     func()
+	onClose    func()
+	once       sync.Once
 	// sessionEnded is set (under Gateway.mu) once the session-end frames are
 	// on their way, so a logout and the register-time check never both send
 	// them.
@@ -102,6 +104,7 @@ func (g *Gateway) setPresence(roomID string, c *client, state string) {
 	defer g.mu.Unlock()
 	if c.state != state {
 		c.state = state
+		c.stateSince = g.now()
 		g.broadcastLocked(roomID)
 	}
 	c.lastSeen = g.now()
@@ -113,9 +116,11 @@ func (h *roomHub) members() []Member {
 	for c := range h.conns {
 		m, ok := byID[c.userID]
 		if !ok {
-			m = Member{ID: c.userID, Name: c.userName, Verified: c.verified, State: c.state}
-		} else if c.state == "viewing" {
-			m.State = "viewing"
+			m = Member{ID: c.userID, Name: c.userName, Verified: c.verified, State: c.state, Since: c.stateSince.UTC()}
+		} else if c.state == "viewing" && m.State != "viewing" {
+			m.State, m.Since = "viewing", c.stateSince.UTC()
+		} else if c.state == m.State && c.stateSince.Before(m.Since) {
+			m.Since = c.stateSince.UTC()
 		}
 		byID[c.userID] = m
 	}
@@ -296,22 +301,29 @@ func (g *Gateway) presenceLoop() {
 		case <-g.ctx.Done():
 			return
 		case <-tick.C:
-			g.mu.Lock()
-			now := g.now()
-			for roomID, hub := range g.rooms {
-				changed := false
-				for c := range hub.conns {
-					if c.state == "viewing" && now.After(c.lastSeen.Add(awayAfter)) {
-						c.state = "away"
-						changed = true
-					}
-				}
-				if changed {
-					g.broadcastLocked(roomID)
-				}
-			}
-			g.mu.Unlock()
+			g.markAway()
 			g.recheckSessions()
+		}
+	}
+}
+
+// markAway flips connections silent for longer than awayAfter to away and
+// stamps stateSince, broadcasting each room whose presence changed.
+func (g *Gateway) markAway() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	for roomID, hub := range g.rooms {
+		changed := false
+		for c := range hub.conns {
+			if c.state == "viewing" && now.After(c.lastSeen.Add(awayAfter)) {
+				c.state = "away"
+				c.stateSince = now
+				changed = true
+			}
+		}
+		if changed {
+			g.broadcastLocked(roomID)
 		}
 	}
 }

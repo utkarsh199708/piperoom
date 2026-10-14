@@ -620,13 +620,14 @@ function LayerRow({
 
       {canDecide && !rejecting && (
         <span className="ml-auto inline-flex items-center gap-2">
-          <Button variant="ghost-danger" size="sm" onClick={() => setRejecting(true)} aria-keyshortcuts={shortcuts ? 'R' : undefined}>
+          <Button variant="ghost-danger" size="sm" className="coarse:h-11 coarse:px-4" onClick={() => setRejecting(true)} aria-keyshortcuts={shortcuts ? 'R' : undefined}>
             Reject
             {shortcuts && <Kbd aria-hidden="true">R</Kbd>}
           </Button>
           <Button
             variant="success"
             size="sm"
+            className="coarse:h-11 coarse:px-4"
             ref={approveRef}
             disabled={busy || !hashed}
             aria-describedby={hashed ? undefined : noHashNoteId}
@@ -666,12 +667,13 @@ function LayerRow({
             autoComplete="off"
             autoFocus
           />
-          <Button type="submit" variant="destructive" size="sm" disabled={!reason.trim()}>
+          <Button type="submit" variant="destructive" size="sm" className="coarse:h-11 coarse:px-4" disabled={!reason.trim()}>
             Confirm
           </Button>
           <Button
             variant="ghost"
             size="sm"
+            className="coarse:h-11 coarse:px-4"
             onClick={() => {
               setRejecting(false)
               setReason('')
