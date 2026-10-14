@@ -50,7 +50,7 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
   `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (loud warnings); `--allow-remote` is a deprecated alias for one release. From R9
   it also needs `PIPEROOM_DEV_ACK=dev-login-has-no-password` (`config.ParseDevAck`): the image sets only the switch,
   so the operator must state in their own deployment that dev login has no password. Any other non-empty value stops
-  the start.
+  the start. Not needed on a loopback address, in `oidc` mode (ignored there with one warning), or with `--demo`.
 - **Session.** A server-side session in a cookie: `__Host-piperoom_session` in `oidc` mode (https),
   `piperoom_session` (no `Secure`) in `dev` mode over plain http. The cookie wins over `X-User` when both name the
   same user.
