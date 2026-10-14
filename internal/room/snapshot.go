@@ -107,6 +107,23 @@ type RoomSnapshot struct {
 	shadowRevealed bool
 	shadowLabelled bool
 	shadowGrade    *events.ShadowGradedPayload // the last grade; nil before any
+
+	// handoffReq is the room's latest hand-off request (handoff.requested),
+	// cleared by the handoff.created or handoff.failed with its request_id.
+	// It is in flight while set and before its expires_at (docs/api.md,
+	// Hand-off requests). Unexported, like the shadow facts.
+	handoffReq handoffRequest
+}
+
+// handoffRequest is the fold of the last unfinished handoff.requested.
+type handoffRequest struct {
+	id        string // "" when none is open
+	expiresAt time.Time
+}
+
+// handoffInFlight reports whether a hand-off request is in flight at now.
+func (s RoomSnapshot) handoffInFlight(now time.Time) bool {
+	return s.handoffReq.id != "" && now.Before(s.handoffReq.expiresAt)
 }
 
 // Log cap states of RoomSnapshot.LogCap, and the agent state the system
@@ -291,6 +308,21 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		}
 		if p.SuggestionID != "" {
 			snap.PendingSuggestions = removeSuggestion(snap.PendingSuggestions, p.SuggestionID)
+		}
+
+	case events.HandoffRequested:
+		if p, ok := decode[events.HandoffRequestedPayload](e); ok {
+			snap.handoffReq = handoffRequest{id: p.RequestID, expiresAt: p.ExpiresAt}
+		}
+
+	case events.HandoffCreated:
+		if p, ok := decode[events.HandoffCreatedPayload](e); ok && p.RequestID != "" && p.RequestID == snap.handoffReq.id {
+			snap.handoffReq = handoffRequest{}
+		}
+
+	case events.HandoffFailed:
+		if p, ok := decode[events.HandoffFailedPayload](e); ok && p.RequestID == snap.handoffReq.id {
+			snap.handoffReq = handoffRequest{}
 		}
 
 	case events.ControlGranted:
