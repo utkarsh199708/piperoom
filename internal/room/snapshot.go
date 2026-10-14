@@ -81,6 +81,19 @@ func (h *Hypothesis) deriveConfirmed() {
 	h.Confirmed = confirmed
 }
 
+// Triage is the newest agent.triage (F6): the triage pass's first look,
+// shown as "triage, unverified". A later agent.hypothesis does not clear it.
+type Triage struct {
+	Status         string    `json:"status"`
+	Reason         string    `json:"reason,omitempty"`
+	Headline       string    `json:"headline,omitempty"`
+	SuspectedLayer string    `json:"suspected_layer,omitempty"`
+	Confidence     string    `json:"confidence,omitempty"`
+	EvidenceRefs   []string  `json:"evidence_refs"`
+	NextCheck      string    `json:"next_check,omitempty"`
+	At             time.Time `json:"at"`
+}
+
 // Proposal is a pending fix as shown in a snapshot.
 type Proposal struct {
 	ProposalID     string                `json:"proposal_id"`
@@ -136,6 +149,7 @@ type RoomSnapshot struct {
 	Driver             *Driver      `json:"driver"`
 	AgentStatus        AgentStatus  `json:"agent_status"`
 	Hypothesis         *Hypothesis  `json:"hypothesis"`
+	Triage             *Triage      `json:"triage"`
 	OpenProposals      []Proposal   `json:"open_proposals"`
 	PendingSuggestions []Suggestion `json:"pending_suggestions"`
 	Members            []Member     `json:"members"`
@@ -258,6 +272,11 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 		}
 		h.Verdicts = append([]Verdict{}, s.Hypothesis.Verdicts...)
 		c.Hypothesis = &h
+	}
+	if s.Triage != nil {
+		t := *s.Triage
+		t.EvidenceRefs = append([]string{}, s.Triage.EvidenceRefs...)
+		c.Triage = &t
 	}
 	if s.shadowGrade != nil {
 		g := *s.shadowGrade
@@ -456,6 +475,17 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			at := p.CloseAt.UTC()
 			snap.Extended = true
 			snap.extendedUntil = &at
+		}
+
+	case events.AgentTriage:
+		p, ok := decode[events.AgentTriagePayload](e)
+		if !ok {
+			break
+		}
+		refs := append([]string{}, p.EvidenceRefs...)
+		snap.Triage = &Triage{
+			Status: p.Status, Reason: p.Reason, Headline: p.Headline, SuspectedLayer: p.SuspectedLayer,
+			Confidence: p.Confidence, EvidenceRefs: refs, NextCheck: p.NextCheck, At: e.At,
 		}
 
 	case events.AgentHypothesis:
