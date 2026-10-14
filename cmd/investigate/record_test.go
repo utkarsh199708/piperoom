@@ -49,7 +49,7 @@ func TestRecorderFormat(t *testing.T) {
 	next := &memSink{}
 	rec, err := newRecorder(dir, next, recordMeta{
 		Pipeline: "orders", Title: "orders stale", Model: "claude-opus-5-5", Effort: "high",
-		MaxTurns: 40, PromptSHA256: agent.PromptHash(), Commit: "abc123", FakeTools: true,
+		MaxTurns: 40, PromptHash: agent.PromptHash(), Commit: "abc123", FakeTools: true,
 	}, fixedClock())
 	if err != nil {
 		t.Fatal(err)
@@ -135,8 +135,8 @@ func TestRecorderFormat(t *testing.T) {
 		meta.Commit != want.Commit || !meta.FakeTools {
 		t.Errorf("meta = %+v", meta)
 	}
-	if len(meta.PromptSHA256) != 64 || meta.PromptSHA256 != agent.PromptHash() {
-		t.Errorf("prompt hash = %q", meta.PromptSHA256)
+	if len(meta.PromptHash) != 64 || meta.PromptHash != agent.PromptHash() {
+		t.Errorf("prompt hash = %q", meta.PromptHash)
 	}
 	if !meta.Complete || meta.Events != 4 || meta.ToolCalls != 1 || meta.ToolResults != 1 || meta.Inputs != 1 {
 		t.Errorf("counts/complete wrong: %+v", meta)

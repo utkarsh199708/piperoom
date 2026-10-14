@@ -22,14 +22,15 @@ import (
 
 // Recording format (version recordingFormat), one directory per run:
 //
-//	events.jsonl  one events.Event per line, in emit order: the same JSON the
+//	events.jsonl  one events.Event per line, in emit order, identical in shape to an
+//	              export's events[] entry (RoomID = meta.recording_id). The same JSON the
 //	              room log and the WebSocket carry. Seq counts from 1, At is the
 //	              emit time, RoomID is the recording id. agent.tool_call keeps
 //	              its input; agent.tool_result keeps its summary, is_error and
 //	              took_ms but NOT its data (see recordPayload).
 //	inputs.jsonl  one recordedInput per line: every human input (stdin steers,
 //	              auto-approvals, action results) the agent was given.
-//	meta.json     one recordMeta: model, effort, prompt hash, commit, timings,
+//	meta.json     one recordMeta: model, effort, prompt_hash, commit (<sha>, or <sha>-dirty), timings,
 //	              counts. Written when the run starts (complete=false) and
 //	              again when it ends (complete=true).
 //
@@ -38,24 +39,24 @@ const recordingFormat = "piperoom-recording/1"
 
 // recordMeta is meta.json.
 type recordMeta struct {
-	Format       string    `json:"format"`
-	RecordingID  string    `json:"recording_id"`
-	Pipeline     string    `json:"pipeline"`
-	Title        string    `json:"title"`
-	Model        string    `json:"model"`
-	Effort       string    `json:"effort"`
-	MaxTurns     int       `json:"max_turns"`
-	PromptSHA256 string    `json:"prompt_sha256"`
-	Commit       string    `json:"commit"`
-	FakeTools    bool      `json:"fake_tools"`
-	ApproveAll   bool      `json:"approve_all"`
-	StartedAt    time.Time `json:"started_at"`
-	FinishedAt   time.Time `json:"finished_at,omitzero"`
-	DurationMS   int64     `json:"duration_ms"`
-	Events       int       `json:"events"`
-	Inputs       int       `json:"inputs"`
-	ToolCalls    int       `json:"tool_calls"`
-	ToolResults  int       `json:"tool_results"`
+	Format      string    `json:"format"`
+	RecordingID string    `json:"recording_id"`
+	Pipeline    string    `json:"pipeline"`
+	Title       string    `json:"title"`
+	Model       string    `json:"model"`
+	Effort      string    `json:"effort"`
+	MaxTurns    int       `json:"max_turns"`
+	PromptHash  string    `json:"prompt_hash"`
+	Commit      string    `json:"commit"`
+	FakeTools   bool      `json:"fake_tools"`
+	ApproveAll  bool      `json:"approve_all"`
+	StartedAt   time.Time `json:"started_at"`
+	FinishedAt  time.Time `json:"finished_at,omitzero"`
+	DurationMS  int64     `json:"duration_ms"`
+	Events      int       `json:"events"`
+	Inputs      int       `json:"inputs"`
+	ToolCalls   int       `json:"tool_calls"`
+	ToolResults int       `json:"tool_results"`
 	// Complete is true once the run ended and the files were closed. A false
 	// value means the process died; the event file may be cut short.
 	Complete bool `json:"complete"`
@@ -267,7 +268,7 @@ func (ri recordingInbox) Drain(ctx context.Context) ([]agent.HumanInput, error) 
 	return ins, err
 }
 
-// buildCommit returns the git commit the binary was built from, "+dirty" when
+// buildCommit returns the git commit the binary was built from, "-dirty" when
 // the tree had changes, or "unknown". `go run` and `go test` binaries carry no
 // VCS stamp; the caller may then try `git rev-parse` (see gitHead).
 func buildCommit() string {
@@ -282,7 +283,7 @@ func buildCommit() string {
 			rev = s.Value
 		case "vcs.modified":
 			if s.Value == "true" {
-				dirty = "+dirty"
+				dirty = "-dirty"
 			}
 		}
 	}
@@ -303,7 +304,7 @@ func gitHead(ctx context.Context) string {
 	}
 	rev := strings.TrimSpace(string(out))
 	if st, err := exec.CommandContext(ctx, "git", "status", "--porcelain", "--untracked-files=no").Output(); err == nil && len(strings.TrimSpace(string(st))) > 0 {
-		rev += "+dirty"
+		rev += "-dirty"
 	}
 	return rev
 }

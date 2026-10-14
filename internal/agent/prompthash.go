@@ -5,9 +5,10 @@ import (
 	"encoding/hex"
 )
 
-// PromptHash returns the hex SHA-256 of the fixed system prompt. Recordings of
-// a run carry it so a score can be tied to the exact instructions the model
-// had. Per-run text (alert, tool list) is not part of it.
+// PromptHash returns the hex SHA-256 of the fixed system prompt text. It is
+// the one definition of "prompt hash": cmd/investigate recordings and eval
+// reports record this same value, so runs compare by (commit, model, prompt
+// hash). Tool definitions are not part of it; they are covered by the commit.
 func PromptHash() string {
 	sum := sha256.Sum256([]byte(systemPrompt()))
 	return hex.EncodeToString(sum[:])
