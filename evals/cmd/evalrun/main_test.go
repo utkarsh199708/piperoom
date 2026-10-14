@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"piperoom/evals"
+	"piperoom/internal/owners"
 )
 
 func saveReport(t *testing.T, dir, name string, r evals.Report) string {
@@ -253,5 +254,85 @@ func TestRunCheckPrintsWarnings(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), `warning: ledger-producer-timeout-recovery: phase "orphan" is unreachable`) {
 		t.Errorf("stderr = %q", errOut.String())
+	}
+}
+
+// learnedTree builds a scenarios directory with one reviewed learned scenario
+// and one pending one, both exported from the room fixtures.
+func learnedTree(t *testing.T) (root, reviewed, pending string) {
+	t.Helper()
+	root = t.TempDir()
+	seed, err := os.ReadFile("../../scenarios/schema-change.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "schema-change.yaml"), seed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	own, err := owners.Load("../../../dev/owners.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, evals.LearnedDir)
+	export := func(fixture string) (string, string) {
+		raw, err := os.ReadFile(filepath.Join("../../testdata/rooms", fixture))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, path, err := evals.ExportLearned(raw, evals.LearnedOptions{Owners: own, Dir: dir, Validate: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.Name, path
+	}
+	reviewed, path := export("orders-confirmed.json")
+	if err := os.Rename(path, filepath.Join(dir, reviewed+".yaml")); err != nil { // the person's review
+		t.Fatal(err)
+	}
+	pending, _ = export("orders-hard.json")
+	return root, reviewed, pending
+}
+
+// TestLoadSetReplaysLearnedNeverPending: the default set replays learned/, and
+// learned/pending/ is only returned for validation.
+func TestLoadSetReplaysLearnedNeverPending(t *testing.T) {
+	root, reviewed, pending := learnedTree(t)
+	run, pend, err := loadSet(flags{scenarios: root}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, sc := range run {
+		names[sc.Name] = true
+	}
+	if !names["schema-change"] || !names[reviewed] || names[pending] || len(run) != 2 {
+		t.Errorf("replayed %v: want schema-change and %s, never %s", names, reviewed, pending)
+	}
+	if len(pend) != 1 || pend[0].Name != pending {
+		t.Errorf("pending = %+v", pend)
+	}
+	// The held-out set has no learned scenarios.
+	if _, _, err := loadSet(flags{set: setHeldout}, filepath.Join(root, setHeldout)); err == nil {
+		t.Error("an absent held-out directory must still be an error")
+	}
+}
+
+// TestRunCheckValidatesLearnedAndPending: -check counts both and rejects a
+// malformed pending file by name.
+func TestRunCheckValidatesLearnedAndPending(t *testing.T) {
+	root, _, _ := learnedTree(t)
+	var out bytes.Buffer
+	code, err := run(flags{scenarios: root, check: true}, &out, &out)
+	if err != nil || code != 0 || !strings.Contains(out.String(), "3 scenario(s) OK") {
+		t.Fatalf("code %d err %v out %q", code, err, out.String())
+	}
+	bad := filepath.Join(root, evals.LearnedDir, evals.PendingDir, "broken.yaml")
+	if err := os.WriteFile(bad, []byte("name: broken\nunknown_field: 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	code, err = run(flags{scenarios: root, check: true}, &out, &out)
+	if err == nil || code != 1 || !strings.Contains(err.Error(), "broken.yaml") {
+		t.Fatalf("code %d err %v", code, err)
 	}
 }
