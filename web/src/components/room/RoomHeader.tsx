@@ -3,14 +3,14 @@ import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
 import { canClose, canHandoff, isViewer } from '@/state/permissions'
 import type { ConnState } from '@/hooks/useRoom'
-import { ageLabel, clockTime } from '@/lib/time'
+import { clockTime } from '@/lib/time'
+import { roomStatus, statusInputFromState } from '@/lib/roomStatus'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { AgentPill } from './AgentPill'
 import { PersonAvatar } from './PersonAvatar'
 import { StatusDot } from './StatusDot'
-import type { DotTone } from './StatusDot'
 
 export interface HeaderMember {
   id: string
@@ -64,8 +64,7 @@ export function RoomHeader({
   /** A hand-off summary is being written: the button shows progress and opens the dialog to follow it. */
   handoffBusy?: boolean
 }) {
-  const open = state.status === 'open'
-  const dot: DotTone = !open ? 'ok' : state.severity === 'sev1' ? 'fail' : state.severity === 'sev2' ? 'warn' : 'muted'
+  const status = roomStatus(statusInputFromState(state))
   const ordered = [...members].sort((a, b) => Number(b.id === state.driver?.id) - Number(a.id === state.driver?.id))
   const shown = ordered.slice(0, MAX_AVATARS)
   const extra = ordered.length - shown.length
@@ -83,8 +82,8 @@ export function RoomHeader({
           </Badge>
         )}
         <Badge variant="outline">
-          <StatusDot tone={dot} />
-          {open ? `Open · ${ageLabel(state.opened_at) || 'now'}` : 'Closed'}
+          <StatusDot tone={status.tone} />
+          {status.label}
         </Badge>
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
@@ -100,6 +99,14 @@ export function RoomHeader({
             </span>
           )}
           <AgentPill state={state} />
+          {state.agent_status.state === 'error' && state.agent_status.detail && (
+            <span
+              className="max-w-[48ch] truncate text-xs text-destructive-fg"
+              title={state.agent_status.detail}
+            >
+              {state.agent_status.detail}
+            </span>
+          )}
           {canHandoff(state, user) && (
             <Button variant="secondary" aria-keyshortcuts="H" aria-busy={handoffBusy || undefined} onClick={onHandoff}>
               {handoffBusy ? (
