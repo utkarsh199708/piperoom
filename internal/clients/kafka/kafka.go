@@ -101,11 +101,15 @@ func (c *Client) Topics(ctx context.Context) ([]string, error) {
 
 // TopicOffsets returns per-partition start/end offsets and newest record time.
 func (c *Client) TopicOffsets(ctx context.Context, topic string) ([]clients.PartitionOffsets, error) {
-	starts, err := c.adm.ListStartOffsets(ctx, topic)
+	starts, err := boundCtx(ctx, func(ctx context.Context) (kadm.ListedOffsets, error) {
+		return c.adm.ListStartOffsets(ctx, topic)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("kafka: start offsets %s: %w", topic, err)
 	}
-	ends, err := c.adm.ListEndOffsets(ctx, topic)
+	ends, err := boundCtx(ctx, func(ctx context.Context) (kadm.ListedOffsets, error) {
+		return c.adm.ListEndOffsets(ctx, topic)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("kafka: end offsets %s: %w", topic, err)
 	}
@@ -244,71 +248,59 @@ func (c *Client) ConsumerGroups(ctx context.Context) ([]string, error) {
 	return groups, nil
 }
 
-// GroupLag returns a group's state, member count, and per-partition lag.
+// GroupLag returns a group's state, member count, and per-partition lag. A
+// group the cluster does not know is an error wrapping clients.ErrNotFound.
+// Partitions whose commit or offsets could not be read are left out here;
+// GroupLagReport lists them (and other commit anomalies) separately.
 func (c *Client) GroupLag(ctx context.Context, group string) (clients.GroupLag, error) {
-	dgs, err := c.adm.Lag(ctx, group)
+	rep, err := c.GroupLagReport(ctx, group)
 	if err != nil {
-		return clients.GroupLag{}, fmt.Errorf("kafka: group lag %s: %w", group, err)
+		return clients.GroupLag{}, err
 	}
-	dg, ok := dgs[group]
-	if !ok {
-		return clients.GroupLag{}, fmt.Errorf("kafka: group %s: %w", group, clients.ErrNotFound)
-	}
-	if dg.DescribeErr != nil {
-		return clients.GroupLag{}, fmt.Errorf("kafka: describe %s: %w", group, dg.DescribeErr)
-	}
-	if dg.FetchErr != nil {
-		return clients.GroupLag{}, fmt.Errorf("kafka: fetch offsets %s: %w", group, dg.FetchErr)
-	}
-	out := clients.GroupLag{
-		Group:    dg.Group,
-		State:    dg.State,
-		Members:  len(dg.Members),
-		TotalLag: dg.Lag.Total(),
-	}
-	for _, l := range dg.Lag.Sorted() {
-		if l.Err != nil {
-			continue // skip partitions whose commit/end fetch failed
-		}
-		out.Partitions = append(out.Partitions, clients.PartitionLag{
-			Topic:     l.Topic,
-			Partition: l.Partition,
-			Committed: l.Commit.At,
-			End:       l.End.Offset,
-			Lag:       l.Lag,
-		})
-	}
-	sort.Slice(out.Partitions, func(i, j int) bool {
-		if out.Partitions[i].Topic != out.Partitions[j].Topic {
-			return out.Partitions[i].Topic < out.Partitions[j].Topic
-		}
-		return out.Partitions[i].Partition < out.Partitions[j].Partition
-	})
-	return out, nil
+	return rep.GroupLag, nil
 }
 
 // FindByKey scans the topic from the first offset at or after since and returns
-// records whose decoded key equals key. It stops at maxScan records per
-// partition (or the partition end). A deadline that cuts the scan short is
-// returned as an error, not a false "not found".
+// every record whose decoded key equals key, oldest first (the newest
+// occurrence is last). It scans up to maxScan records per partition or to the
+// partition's last stable offset, whichever is first; only committed records
+// are read. A topic that does not exist is an error wrapping
+// clients.ErrNotFound. A deadline that cuts the scan short is returned as an
+// error, not a false "not found" or a list that may miss the newest record.
+//
+// Multi-field keys are compared as JSON with field order ignored: key
+// `{"b":2,"a":1}` matches a record key {a:1, b:2}. A one-field key matches
+// either its bare value ("1") or its JSON form (`{"id":1}`).
 func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Time, maxScan int) ([]clients.RecordRef, error) {
 	if maxScan <= 0 {
 		maxScan = 5000
 	}
-	offs, err := c.adm.ListOffsetsAfterMilli(ctx, since.UnixMilli(), topic)
+	offs, err := boundCtx(ctx, func(ctx context.Context) (kadm.ListedOffsets, error) {
+		return c.adm.ListOffsetsAfterMilli(ctx, since.UnixMilli(), topic)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("kafka: offsets after %s: %w", since, err)
 	}
-	ends, err := c.adm.ListEndOffsets(ctx, topic)
+	if topicMissing(offs[topic]) {
+		return nil, fmt.Errorf("kafka: find by key %s: %w", topic, clients.ErrNotFound)
+	}
+	// The last stable offset, not the high watermark: a transaction left open
+	// at the tail would make a read-committed consumer wait for records it
+	// cannot read until the transaction ends.
+	ends, err := boundCtx(ctx, func(ctx context.Context) (kadm.ListedOffsets, error) {
+		return c.adm.ListCommittedOffsets(ctx, topic)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("kafka: end offsets %s: %w", topic, err)
 	}
 
 	partOffsets := map[string]map[int32]kgo.Offset{topic: {}}
 	stopAt := map[int32]int64{}
-	finished := map[int32]bool{}
 	for p, lo := range offs[topic] {
-		if lo.Err != nil || lo.Offset < 0 {
+		if lo.Err != nil {
+			return nil, fmt.Errorf("kafka: offsets after %s for %s/%d: %w", since, topic, p, lo.Err)
+		}
+		if lo.Offset < 0 {
 			continue
 		}
 		end := lo.Offset + int64(maxScan)
@@ -316,8 +308,7 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 			end = e.Offset
 		}
 		if end <= lo.Offset {
-			finished[p] = true // nothing to scan in this partition
-			continue
+			continue // nothing to scan in this partition
 		}
 		partOffsets[topic][p] = kgo.NewOffset().At(lo.Offset)
 		stopAt[p] = end
@@ -326,17 +317,26 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 		return nil, nil
 	}
 
-	cl, err := c.newKgo(kgo.ConsumePartitions(partOffsets))
+	// Control records (transaction markers) are kept so that a marker at the
+	// end of the window still tells the scan the partition is done; without
+	// them a window ending in a marker never completes.
+	cl, err := c.newKgo(
+		kgo.ConsumePartitions(partOffsets),
+		kgo.KeepControlRecords(),
+		kgo.FetchIsolationLevel(kgo.ReadCommitted()),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: scan client: %w", err)
 	}
 	defer cl.Close()
 
+	match := newKeyMatcher(key)
 	var found []clients.RecordRef
-	scanned := map[int32]int{}
+	scanned := 0
+	finished := map[int32]bool{}
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	for {
+	for len(finished) < len(stopAt) {
 		fetches := cl.PollFetches(cctx)
 		for _, fe := range fetches.Errors() {
 			if fe.Err != nil && !errors.Is(fe.Err, context.Canceled) && !errors.Is(fe.Err, context.DeadlineExceeded) {
@@ -344,13 +344,21 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 			}
 		}
 		for _, r := range fetches.Records() {
-			if r.Offset >= stopAt[r.Partition] {
-				finished[r.Partition] = true
+			stop, planned := stopAt[r.Partition]
+			if !planned || finished[r.Partition] {
 				continue
 			}
-			scanned[r.Partition]++
+			// Mark done before skipping: a marker or a record past a
+			// compaction gap may be the first thing at or past the end.
+			if r.Offset+1 >= stop {
+				finished[r.Partition] = true
+			}
+			if r.Offset >= stop || r.Attrs.IsControl() {
+				continue
+			}
+			scanned++
 			dk, derr := c.decodeKey(cctx, r.Key)
-			if derr == nil && dk == key {
+			if derr == nil && match.matches(dk) {
 				found = append(found, clients.RecordRef{
 					Topic:     r.Topic,
 					Partition: r.Partition,
@@ -359,36 +367,36 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 					Key:       dk,
 				})
 			}
-			// This is the last record in the scan window for this partition.
-			if r.Offset+1 >= stopAt[r.Partition] {
-				finished[r.Partition] = true
-			}
 		}
-		if len(found) > 0 {
-			return found, nil
-		}
-		allDone := true
-		for p := range partOffsets[topic] {
-			if !finished[p] {
-				allDone = false
-				break
-			}
-		}
-		if allDone {
-			return found, nil // scanned the whole window; key genuinely absent
-		}
-		if cctx.Err() != nil {
-			total := 0
-			for _, n := range scanned {
-				total += n
-			}
-			return nil, fmt.Errorf("kafka: scan %s incomplete after %d records: %w", topic, total, cctx.Err())
+		if len(finished) < len(stopAt) && cctx.Err() != nil {
+			return nil, fmt.Errorf("kafka: scan %s incomplete after %d records (%d matches so far): %w",
+				topic, scanned, len(found), cctx.Err())
 		}
 	}
+	sortRefs(found)
+	return found, nil
+}
+
+// sortRefs orders matches oldest first by timestamp (ties: partition, then
+// offset), so the newest occurrence of the key is last.
+func sortRefs(refs []clients.RecordRef) {
+	sort.Slice(refs, func(i, j int) bool {
+		a, b := refs[i], refs[j]
+		if !a.Timestamp.Equal(b.Timestamp) {
+			return a.Timestamp.Before(b.Timestamp)
+		}
+		if a.Partition != b.Partition {
+			return a.Partition < b.Partition
+		}
+		return a.Offset < b.Offset
+	})
 }
 
 // recordTimestamps fetches one record per partition (at the given offsets) in a
-// single consumer and returns their timestamps.
+// single consumer and returns their timestamps. Control records are kept: on
+// a transactional topic the record at End-1 is usually a commit marker, and a
+// consumer that drops markers would wait for it until the deadline. A marker's
+// timestamp is when the transaction ended, i.e. the last write.
 func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int32]int64) (map[int32]time.Time, error) {
 	if len(at) == 0 {
 		return map[int32]time.Time{}, nil
@@ -397,7 +405,7 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 	for p, off := range at {
 		partOffsets[topic][p] = kgo.NewOffset().At(off)
 	}
-	cl, err := c.newKgo(kgo.ConsumePartitions(partOffsets))
+	cl, err := c.newKgo(kgo.ConsumePartitions(partOffsets), kgo.KeepControlRecords())
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +419,9 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 			if _, done := got[r.Partition]; done {
 				continue
 			}
-			if want, ok := at[r.Partition]; ok && r.Offset == want {
+			// >= rather than ==: a record written after the offsets were
+			// listed is newer still.
+			if want, ok := at[r.Partition]; ok && r.Offset >= want {
 				got[r.Partition] = r.Timestamp
 			}
 		}

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/netsec"
@@ -78,21 +79,35 @@ func (c *Client) Versions(ctx context.Context, subject string) ([]int, error) {
 
 // Schema returns one version of a subject; version -1 means latest.
 func (c *Client) Schema(ctx context.Context, subject string, version int) (clients.SchemaVersion, error) {
+	sv, _, err := c.SchemaTyped(ctx, subject, version)
+	return sv, err
+}
+
+// SchemaTyped is Schema plus the version's schemaType: "AVRO", "JSON" or
+// "PROTOBUF" (the registry omits it for Avro; "AVRO" is returned then). It is
+// not on clients.SchemaRegistryClient yet (contract change request);
+// schema_registry_diff asserts for it.
+func (c *Client) SchemaTyped(ctx context.Context, subject string, version int) (clients.SchemaVersion, string, error) {
 	v := "latest"
 	if version >= 0 {
 		v = fmt.Sprintf("%d", version)
 	}
 	var raw struct {
-		Subject string `json:"subject"`
-		Version int    `json:"version"`
-		ID      int    `json:"id"`
-		Schema  string `json:"schema"`
+		Subject    string `json:"subject"`
+		Version    int    `json:"version"`
+		ID         int    `json:"id"`
+		Schema     string `json:"schema"`
+		SchemaType string `json:"schemaType"`
 	}
 	path := "/subjects/" + url.PathEscape(subject) + "/versions/" + v
 	if err := c.do(ctx, http.MethodGet, path, nil, &raw); err != nil {
-		return clients.SchemaVersion{}, err
+		return clients.SchemaVersion{}, "", err
 	}
-	return clients.SchemaVersion{Subject: raw.Subject, Version: raw.Version, ID: raw.ID, Schema: raw.Schema}, nil
+	typ := strings.ToUpper(raw.SchemaType)
+	if typ == "" {
+		typ = "AVRO"
+	}
+	return clients.SchemaVersion{Subject: raw.Subject, Version: raw.Version, ID: raw.ID, Schema: raw.Schema}, typ, nil
 }
 
 // SchemaByID returns the schema string for a global schema id (for Avro decoding).
@@ -182,13 +197,32 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 	if resp.StatusCode == http.StatusNotFound {
 		var serr Error
 		if err := json.Unmarshal(b, &serr); err == nil && serr.Code != 0 {
+			serr.Message = snippet(serr.Message)
 			return fmt.Errorf("schemareg: %s %s: %w: %w", method, path, clients.ErrNotFound, &serr)
 		}
 		return fmt.Errorf("schemareg: %s %s: %w", method, path, clients.ErrNotFound)
 	}
 	var serr Error
 	if err := json.Unmarshal(b, &serr); err != nil || serr.Code == 0 {
-		return fmt.Errorf("schemareg: %s %s: status %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(b)))
+		return fmt.Errorf("schemareg: %s %s: status %d: %s", method, path, resp.StatusCode, snippet(string(b)))
 	}
+	serr.Message = snippet(serr.Message)
 	return fmt.Errorf("schemareg: %s %s: %w", method, path, &serr)
+}
+
+// maxErrorSnippet caps the error-body text kept in an error: a proxy's HTML
+// error page is noise to the agent and to logs.
+const maxErrorSnippet = 256
+
+// snippet trims s and cuts it to maxErrorSnippet bytes on a rune boundary.
+func snippet(s string) string {
+	s = strings.TrimSpace(strings.ToValidUTF8(s, ""))
+	if len(s) <= maxErrorSnippet {
+		return s
+	}
+	n := maxErrorSnippet
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
 }
