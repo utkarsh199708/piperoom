@@ -34,6 +34,12 @@ type Pipeline struct {
 	// Owners is the optional per-pipeline `owners:` block. A layer listed here
 	// replaces the top-level `layers:` entry for this pipeline.
 	Owners map[string]LayerRights `yaml:"owners"`
+	// RetentionDays is the optional `retention_days:` of the pipeline: closed
+	// rooms of this pipeline are deleted after this many days; with
+	// PIPEROOM_RETENTION_DAYS also set, the shorter wins
+	// (docs/design/retention.md section 3). nil = not set. Load refuses a value
+	// outside 1..MaxRetentionDays. Read it with Retention().
+	RetentionDays *WholeDays `yaml:"retention_days"`
 	// Tenant is the optional tenant (docs/design/tenancy.md); read it with
 	// TenantName, which applies the default.
 	Tenant string `yaml:"tenant"`
@@ -47,6 +53,36 @@ type Pipeline struct {
 
 	// watch is WatchSpec after validation, with defaults applied. Set by Load.
 	watch *WatchConfig
+}
+
+// MaxRetentionDays bounds a pipeline's retention_days (100 years), the same
+// bound as PIPEROOM_RETENTION_DAYS (store.MaxRetentionDays).
+const MaxRetentionDays = 36500
+
+// WholeDays is a number of days written as a YAML integer. yaml.v3 would
+// otherwise turn 1.5 into 1 without a word; a retention policy must never be
+// rounded silently.
+type WholeDays int
+
+// UnmarshalYAML accepts only a plain integer scalar.
+func (d *WholeDays) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.ScalarNode || node.Tag != "!!int" {
+		return fmt.Errorf("line %d: retention_days: want a whole number of days, got %q", node.Line, node.Value)
+	}
+	var n int
+	if err := node.Decode(&n); err != nil {
+		return fmt.Errorf("line %d: retention_days: want a whole number of days: %w", node.Line, err)
+	}
+	*d = WholeDays(n)
+	return nil
+}
+
+// Retention returns the pipeline's retention_days, if set.
+func (p Pipeline) Retention() (int, bool) {
+	if p.RetentionDays == nil {
+		return 0, false
+	}
+	return int(*p.RetentionDays), true
 }
 
 // Owners is the full ownership config.
@@ -131,6 +167,9 @@ func (o *Owners) validate() error {
 		}
 		if len(p.SinkTables) > 0 && p.SinkTSColumn == "" {
 			return fmt.Errorf("pipeline %q: sink_ts_column is required when sink_tables is set", p.ID)
+		}
+		if d := p.RetentionDays; d != nil && (*d < 1 || *d > MaxRetentionDays) {
+			return fmt.Errorf("pipeline %q: retention_days %d: want 1 to %d (leave it out to use PIPEROOM_RETENTION_DAYS)", p.ID, *d, MaxRetentionDays)
 		}
 		w, err := resolveWatch(p.WatchSpec)
 		if err != nil {

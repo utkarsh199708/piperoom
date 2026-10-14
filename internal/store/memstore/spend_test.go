@@ -149,3 +149,23 @@ func TestPurgeDropsRoomSpendAndKeepsThePipelineDay(t *testing.T) {
 		t.Fatalf("pipeline day after the purge = %+v, want it kept", rep)
 	}
 }
+
+// An admin delete (#118) drops the room's spend like a purge does, as the
+// Postgres foreign key's ON DELETE CASCADE would; the pipeline day stays.
+func TestDeleteRoomDropsRoomSpend(t *testing.T) {
+	ctx := context.Background()
+	s := spendStore(t, "gone")
+	if _, err := s.AddSpend(ctx, store.SpendChange{RoomID: "gone", PipelineID: "orders", Day: "2026-01-01", Tokens: 7,
+		Call: &store.SpendCall{Model: "m", InputTokens: 7}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.DeleteRoom(ctx, store.RoomDeletion{RoomID: "gone", DeletedBy: "ada", DeletedAt: time.Now(), Reason: "x"}, -1); err != nil {
+		t.Fatal(err)
+	}
+	if rep, _ := s.RoomSpend(ctx, "gone"); rep.ChargedTokens != 0 || len(rep.ByModel) != 0 {
+		t.Fatalf("deleted room still has spend: %+v", rep)
+	}
+	if rep, _ := s.PipelineSpend(ctx, "orders", "2026-01-01"); rep.ChargedTokens != 7 {
+		t.Fatalf("pipeline day after the delete = %+v, want it kept", rep)
+	}
+}

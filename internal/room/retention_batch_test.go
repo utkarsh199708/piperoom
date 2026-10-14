@@ -56,7 +56,8 @@ type queuePurger struct {
 	excludes [][]string
 }
 
-func (q *queuePurger) PurgeClosedBefore(_ context.Context, _ time.Time, maxRooms int, exclude []string) (store.PurgeResult, error) {
+func (q *queuePurger) PurgeClosed(_ context.Context, pq store.PurgeQuery) (store.PurgeResult, error) {
+	maxRooms, exclude := pq.MaxRooms, pq.Exclude
 	q.excludes = append(q.excludes, append([]string(nil), exclude...))
 	skip := map[string]bool{}
 	for _, id := range exclude {

@@ -106,6 +106,13 @@ func (s *Store) AppendShadow(ctx context.Context, roomID string, typ events.Type
 	if !ok {
 		return events.Event{}, fmt.Errorf("memstore: append shadow to %q: no run row: %w", roomID, store.ErrNotFound)
 	}
+	// The room's log caps hold for its shadow log too, with the same rule as
+	// the Postgres store.
+	size := int64(len(raw))
+	if !s.limits.Fits(typ, actor, run.LastSeq, s.shadowBytes[roomID], size) {
+		return events.Event{}, fmt.Errorf("memstore: append shadow %s to %s (%d events, %d bytes): %w", typ, roomID, run.LastSeq, s.shadowBytes[roomID], store.ErrLogFull)
+	}
+	s.shadowBytes[roomID] += size
 	run.LastSeq++
 	e := events.Event{RoomID: roomID, Seq: run.LastSeq, Type: typ, Actor: actor, Payload: raw, At: s.now().UTC()}
 	s.shadowEvents[roomID] = append(s.shadowEvents[roomID], e)

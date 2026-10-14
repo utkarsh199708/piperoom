@@ -52,7 +52,7 @@ func tenancyOwnersYAML(withTenants bool) string {
 		"\n  - id: pb" + tenant("b") + "\n    topic_prefix: pb\n    source_tables: [public.b]\n    connectors: [pb-c]" + conns("B") + own("bob") +
 		"\n  - id: pbs" + tenant("b") + "\n    topic_prefix: pbs\n    source_tables: [public.s]\n    connectors: [pbs-c]\n    shadow: {enabled: true}" + conns("B") + own("bob") + "\n"
 	if withTenants {
-		y = "tenants:\n  a: {members: [user:ann]}\n  b: {members: [user:ben]}\n" + y
+		y = "tenants:\n  a: {members: [user:ann, user:adam]}\n  b: {members: [user:ben]}\n" + y
 	}
 	return y
 }
@@ -63,6 +63,7 @@ const tenancyUsers = `users:
   - {id: ann, name: Ann}
   - {id: ben, name: Ben}
   - {id: mallory, name: Mallory}
+  - {id: adam, name: Adam, admin: true}
 `
 
 type tenancyEnv struct {
@@ -210,6 +211,7 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"POST", "/api/rooms/{id}/control/request", "/api/rooms/" + f.rb + "/control/request", ""},
 		{"POST", "/api/rooms/{id}/control/grant", "/api/rooms/" + f.rb + "/control/grant", `{"to":"alice"}`},
 		{"POST", "/api/rooms/{id}/close", "/api/rooms/" + f.rb + "/close", `{"resolution":"x"}`},
+		{"POST", "/api/rooms/{id}/extend", "/api/rooms/" + f.rb + "/extend", ""},
 		{"POST", "/api/rooms/{id}/handoffs", "/api/rooms/" + f.rb + "/handoffs", `{"to":"alice"}`},
 		{"POST", "/api/rooms/{id}/trace", "/api/rooms/" + f.rb + "/trace", `{"table":"public.b","key":"1"}`},
 		{"GET", "/api/rooms/{id}/shadow", "/api/rooms/" + f.rbs + "/shadow", ""},
@@ -235,6 +237,13 @@ var aggregateRoutes = []string{
 	"POST /api/alerts/{source}",
 }
 
+// adminRoutes answer 403 to everyone but an admin whatever the id (the role
+// is checked first, so no id leaks), then 404 to an admin outside the room's
+// tenant (TestDeleteHiddenFromAdminOfOtherTenant).
+var adminRoutes = []string{
+	"DELETE /api/rooms/{id}",
+}
+
 // publicRoutes hold no tenant's data: probes, login, the caller's own
 // identity, and the people list (global by design: docs/design/tenancy.md
 // section 8).
@@ -256,7 +265,7 @@ func TestTenantRoutesClassified(t *testing.T) {
 	for _, r := range hiddenRoutes(fixture{}) {
 		known[r.method+" "+r.pattern] = true
 	}
-	for _, r := range slices.Concat(aggregateRoutes, publicRoutes) {
+	for _, r := range slices.Concat(aggregateRoutes, adminRoutes, publicRoutes) {
 		known[r] = true
 	}
 	table := httpapi.RouteTable(e.api)
@@ -351,6 +360,29 @@ func TestOtherTenantGets404Everywhere(t *testing.T) {
 	}
 	// alice's own room is fine.
 	e.mustDo(t, "alice", "GET", "/api/rooms/"+f.ra, "", http.StatusOK)
+}
+
+// TestDeleteHiddenFromAdminOfOtherTenant: an admin of tenant a gets the
+// missing-room 404 for a delete of tenant b's room, and the room stays; a
+// non-admin gets 403 whatever the id.
+func TestDeleteHiddenFromAdminOfOtherTenant(t *testing.T) {
+	e := newTenancyEnv(t, true)
+	f := e.build(t)
+	status, missing := e.do(t, "adam", http.MethodDelete, "/api/rooms/r_doesnotexist?reason=cleanup", "")
+	if status != http.StatusNotFound || !strings.Contains(missing, `"code":"not_found"`) {
+		t.Fatalf("delete of a missing room as adam: %d %s", status, missing)
+	}
+	if status, got := e.do(t, "adam", http.MethodDelete, "/api/rooms/"+f.rb+"?reason=cleanup", ""); status != http.StatusNotFound || got != missing {
+		t.Fatalf("delete of tenant b's room as adam: %d %s, want the missing room's 404 %s", status, got, missing)
+	}
+	e.mustDo(t, "bob", "GET", "/api/rooms/"+f.rb, "", http.StatusOK)
+	for _, id := range []string{f.rb, "r_doesnotexist"} {
+		if status, _ := e.do(t, "alice", http.MethodDelete, "/api/rooms/"+id+"?reason=cleanup", ""); status != http.StatusForbidden {
+			t.Fatalf("delete %s as non-admin alice: %d, want 403", id, status)
+		}
+	}
+	// adam's own tenant's room is deleted.
+	e.mustDo(t, "adam", http.MethodDelete, "/api/rooms/"+f.ra+"?reason=cleanup", "", http.StatusOK)
 }
 
 func roomIDs(t *testing.T, body string) []string {

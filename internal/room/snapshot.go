@@ -89,6 +89,19 @@ type RoomSnapshot struct {
 	PendingSuggestions []Suggestion `json:"pending_suggestions"`
 	Members            []Member     `json:"members"`
 
+	// Room limits (docs/design/retention.md). AutoCloseAt is set by the
+	// service, not by Apply: it depends on PIPEROOM_MAX_OPEN_DAYS. LogCap is
+	// "ok", "warning" (room.log_cap_warning) or "full" (agent.status
+	// log_full).
+	AutoCloseAt *time.Time `json:"auto_close_at"`
+	Extended    bool       `json:"extended"`
+	LogCap      string     `json:"log_cap"`
+
+	// extendedUntil is room.extended.close_at; warnedFor is the close_at of
+	// the newest room.retention_warning. Only the service reads them.
+	extendedUntil *time.Time
+	warnedFor     *time.Time
+
 	// Shadow facts folded from the log after room.closed. Unexported: they are
 	// not part of the snapshot JSON (docs/api.md), only the service reads them.
 	shadowRevealed bool
@@ -96,11 +109,21 @@ type RoomSnapshot struct {
 	shadowGrade    *events.ShadowGradedPayload // the last grade; nil before any
 }
 
+// Log cap states of RoomSnapshot.LogCap, and the agent state the system
+// writes when the log is full.
+const (
+	LogCapOK      = "ok"
+	LogCapWarning = "warning"
+	LogCapFull    = "full"
+	AgentLogFull  = "log_full"
+)
+
 // NewSnapshot returns a zero snapshot with non-nil slices and the agent state
 // "idle" (docs/api.md: a new room's agent is idle; arrays are never null).
 func NewSnapshot() RoomSnapshot {
 	return RoomSnapshot{
 		AgentStatus:        AgentStatus{State: "idle"},
+		LogCap:             LogCapOK,
 		OpenProposals:      []Proposal{},
 		PendingSuggestions: []Suggestion{},
 		Members:            []Member{},
@@ -126,10 +149,21 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 		g := *s.shadowGrade
 		c.shadowGrade = &g
 	}
+	c.AutoCloseAt = cloneTime(s.AutoCloseAt)
+	c.extendedUntil = cloneTime(s.extendedUntil)
+	c.warnedFor = cloneTime(s.warnedFor)
 	c.OpenProposals = cloneProposals(s.OpenProposals)
 	c.PendingSuggestions = append([]Suggestion{}, s.PendingSuggestions...)
 	c.Members = append([]Member{}, s.Members...)
 	return c
+}
+
+func cloneTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	c := *t
+	return &c
 }
 
 func cloneProposals(in []Proposal) []Proposal {
@@ -205,6 +239,27 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			break
 		}
 		snap.AgentStatus = AgentStatus{State: p.State, Detail: p.Detail}
+		if p.State == AgentLogFull {
+			snap.LogCap = LogCapFull
+		}
+
+	case events.RoomLogCapWarning:
+		if snap.LogCap != LogCapFull {
+			snap.LogCap = LogCapWarning
+		}
+
+	case events.RoomRetentionWarning:
+		if p, ok := decode[events.RoomRetentionWarningPayload](e); ok {
+			at := p.CloseAt.UTC()
+			snap.warnedFor = &at
+		}
+
+	case events.RoomExtended:
+		if p, ok := decode[events.RoomExtendedPayload](e); ok {
+			at := p.CloseAt.UTC()
+			snap.Extended = true
+			snap.extendedUntil = &at
+		}
 
 	case events.AgentHypothesis:
 		p, ok := decode[events.AgentHypothesisPayload](e)
@@ -343,6 +398,9 @@ func normalize(snap RoomSnapshot) RoomSnapshot {
 	}
 	if snap.AgentStatus.State == "" {
 		snap.AgentStatus.State = "idle"
+	}
+	if snap.LogCap == "" {
+		snap.LogCap = LogCapOK
 	}
 	if snap.Hypothesis != nil && snap.Hypothesis.BasedOnSteps == nil {
 		h := *snap.Hypothesis
