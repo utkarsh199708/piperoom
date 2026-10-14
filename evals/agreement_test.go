@@ -371,6 +371,11 @@ func TestAgreementSyntheticAccuracy(t *testing.T) {
 	tab.WriteString("\n| scenario | text | agent layer | layer (got/want) | cause (got/want) |\n|---|---|---|---|---|\n")
 	var ok, total, causeOK, layerOK int
 	for _, sc := range scs {
+		// A scenario with no root cause (E2's healthy, abstain and ask
+		// outcomes) has nothing to agree on.
+		if len(sc.Expect.RootCause) == 0 {
+			continue
+		}
 		h, hasH := hypotheses[sc.Name]
 		label, hasL := syntheticLabels[sc.Name]
 		tr, hasT := syntheticTruth[sc.Name]
