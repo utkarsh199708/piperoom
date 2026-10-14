@@ -233,7 +233,8 @@ func TestResumeConnectorOutOfScope(t *testing.T) {
 // noResumeConnect implements clients.ConnectClient but not the local
 // connectorResumer adapter: the action must refuse it with a clear error.
 type noResumeConnect struct {
-	names []string
+	names       []string
+	allowWrites bool
 }
 
 func (f *noResumeConnect) ListConnectors(context.Context) ([]string, error) { return f.names, nil }
@@ -241,8 +242,18 @@ func (f *noResumeConnect) Status(context.Context, string) (clients.ConnectorStat
 	return clients.ConnectorStatus{Name: "pg-orders-connector", State: "RUNNING"}, nil
 }
 func (f *noResumeConnect) Config(context.Context, string) (map[string]string, error) { return nil, nil }
-func (f *noResumeConnect) RestartTask(context.Context, string, int) error            { return nil }
-func (f *noResumeConnect) RestartConnector(context.Context, string) error            { return nil }
+func (f *noResumeConnect) RestartTask(context.Context, string, int) error {
+	if !f.allowWrites {
+		return refuseWrite("noResumeConnect", "RestartTask")
+	}
+	return nil
+}
+func (f *noResumeConnect) RestartConnector(context.Context, string) error {
+	if !f.allowWrites {
+		return refuseWrite("noResumeConnect", "RestartConnector")
+	}
+	return nil
+}
 
 func TestResumeConnectorUnsupportedClient(t *testing.T) {
 	d := testDeps()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,12 +19,23 @@ import (
 
 // ---- fakes ----
 
+// errWriteRefused is returned by a fake's write method unless the test sets
+// allowWrites. Read-only tools must never reach a write, so one that does
+// fails here instead of quietly changing a fake.
+var errWriteRefused = errors.New("fake write refused: allowWrites is off")
+
+func refuseWrite(fake, method string) error {
+	return fmt.Errorf("%s.%s: %w", fake, method, errWriteRefused)
+}
+
 type fakeConnect struct {
 	listFn     func(context.Context) ([]string, error)
 	statusFn   func(context.Context, string) (clients.ConnectorStatus, error)
 	configFn   func(context.Context, string) (map[string]string, error)
 	restartTFn func(context.Context, string, int) error
 	restartCFn func(context.Context, string) error
+	// allowWrites lets the write methods call their hooks. Off by default.
+	allowWrites bool
 }
 
 func (f *fakeConnect) ListConnectors(ctx context.Context) ([]string, error) { return f.listFn(ctx) }
@@ -34,9 +46,15 @@ func (f *fakeConnect) Config(ctx context.Context, n string) (map[string]string, 
 	return f.configFn(ctx, n)
 }
 func (f *fakeConnect) RestartTask(ctx context.Context, n string, t int) error {
+	if !f.allowWrites {
+		return refuseWrite("fakeConnect", "RestartTask")
+	}
 	return f.restartTFn(ctx, n, t)
 }
 func (f *fakeConnect) RestartConnector(ctx context.Context, n string) error {
+	if !f.allowWrites {
+		return refuseWrite("fakeConnect", "RestartConnector")
+	}
 	return f.restartCFn(ctx, n)
 }
 
@@ -47,6 +65,8 @@ type fakeRegistry struct {
 	compatFn   func(context.Context, string) (string, bool, error)
 	setFn      func(context.Context, string, string) error
 	registerFn func(context.Context, string, string) (int, error)
+	// allowWrites lets SetCompatibility and Register call their hooks. Off by default.
+	allowWrites bool
 }
 
 func (f *fakeRegistry) Subjects(ctx context.Context) ([]string, error) { return f.subjectsFn(ctx) }
@@ -60,9 +80,15 @@ func (f *fakeRegistry) Compatibility(ctx context.Context, s string) (string, boo
 	return f.compatFn(ctx, s)
 }
 func (f *fakeRegistry) SetCompatibility(ctx context.Context, s, l string) error {
+	if !f.allowWrites {
+		return refuseWrite("fakeRegistry", "SetCompatibility")
+	}
 	return f.setFn(ctx, s, l)
 }
 func (f *fakeRegistry) Register(ctx context.Context, s, sc string) (int, error) {
+	if !f.allowWrites {
+		return 0, refuseWrite("fakeRegistry", "Register")
+	}
 	return f.registerFn(ctx, s, sc)
 }
 

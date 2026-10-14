@@ -21,6 +21,8 @@ type configConnect struct {
 	storeAs   string // when set, UpdateConfig stores this instead of the value
 	rereadErr error  // Config fails after the first successful write
 	updates   []string
+	// allowWrites lets UpdateConfig take effect. Off by default.
+	allowWrites bool
 }
 
 func (f *configConnect) Config(context.Context, string) (map[string]string, error) {
@@ -35,6 +37,9 @@ func (f *configConnect) Config(context.Context, string) (map[string]string, erro
 }
 
 func (f *configConnect) UpdateConfig(_ context.Context, name, key, value string) error {
+	if !f.allowWrites {
+		return refuseWrite("configConnect", "UpdateConfig")
+	}
 	if f.updateErr != nil {
 		return f.updateErr
 	}
@@ -49,6 +54,7 @@ func (f *configConnect) UpdateConfig(_ context.Context, name, key, value string)
 func newConfigConnect(script ...clients.ConnectorStatus) *configConnect {
 	return &configConnect{
 		scriptedConnect: scriptedConnect{script: script},
+		allowWrites:     true,
 		cfg:             map[string]string{"connector.class": "x", "decimal.handling.mode": "precise", "database.password": "hunter2"},
 	}
 }
