@@ -163,11 +163,19 @@ export interface AlertInfo {
   source: string | null
 }
 
+export type { ActivityKind } from './describe'
+import type { ActivityKind } from './describe'
+
 export interface ActivityEntry {
   seq: number
   at: string
   actor: Actor
   text: string
+  /** Full sentence behind a clamped row (tooltip), when there is more to say. */
+  detail?: string
+  kind: ActivityKind
+  /** The tool name the `{tool}` placeholder in `text` stands for. */
+  tool?: string
 }
 
 export interface RoomState {

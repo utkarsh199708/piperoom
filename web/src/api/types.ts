@@ -29,6 +29,7 @@ export type EventType =
   | 'steer.declined'
   | 'control.requested'
   | 'control.granted'
+  | 'control.lease_expired'
   | 'proposal.created'
   | 'approval.given'
   | 'approval.rejected'
@@ -135,6 +136,12 @@ export interface SteerSentPayload {
 export interface SteerDeclinedPayload {
   suggestion_id: string
   reason?: string
+}
+
+/** System actor; the driver's lease ran out with no renewal and no new driver. */
+export interface ControlLeaseExpiredPayload {
+  driver: Actor
+  lease_until: string
 }
 
 export type ControlRequestedPayload = Record<string, never>

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { PresencePanel } from './PresencePanel'
 import { ActivityFeed } from './ActivityFeed'
@@ -53,21 +53,61 @@ describe('ActivityFeed', () => {
       at: '2026-10-11T10:02:00Z',
       actor: { kind: 'human', id: 'priya', name: 'Priya' },
       text: 'Priya commented on step 3',
+      kind: 'human',
     },
     {
       seq: 1,
       at: '2026-10-11T10:00:00Z',
       actor: { kind: 'system', id: 'alertin', name: 'Alertmanager' },
       text: 'Alertmanager opened the room',
+      kind: 'system',
     },
   ]
 
-  it('lists what happened with a time for each', () => {
+  afterEach(() => localStorage.clear())
+
+  it('lists the curated rows with a time for each; system rows wait behind Show all events', () => {
     render(<ActivityFeed activity={activity} />)
     const list = screen.getByRole('list')
-    expect(within(list).getAllByRole('listitem')).toHaveLength(2)
+    expect(within(list).getAllByRole('listitem')).toHaveLength(1)
     expect(screen.getByText('Priya commented on step 3')).toBeInTheDocument()
+    expect(screen.queryByText('Alertmanager opened the room')).not.toBeInTheDocument()
+    const toggle = screen.getByRole('button', { name: 'Show all events' })
+    expect(toggle).toHaveAttribute('aria-pressed', 'false')
+    fireEvent.click(toggle)
+    expect(screen.getByText('Alertmanager opened the room')).toBeInTheDocument()
     expect(list.querySelectorAll('time')).toHaveLength(2)
+    expect(localStorage.getItem('piperoom.activity.all')).toBe('1')
+    expect(screen.getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('clamps the line and puts the detail in the tooltip; the tool name is code', () => {
+    const row: ActivityEntry = {
+      seq: 5,
+      at: '2026-10-11T10:05:00Z',
+      actor: { kind: 'agent', id: 'agent', name: 'Agent' },
+      text: 'Step 1 · {tool} failed',
+      tool: 'connect_status',
+      detail: 'Task 0 error: a very long stack trace',
+      kind: 'step',
+    }
+    render(<ActivityFeed activity={[row]} />)
+    const line = screen.getByTitle('Task 0 error: a very long stack trace')
+    expect(line).toHaveClass('line-clamp-1')
+    expect(line.querySelector('code')).toHaveTextContent('connect_status')
+    expect(line).toHaveTextContent('Step 1 · connect_status failed')
+  })
+
+  it('groups rows per five minutes once the room is over an hour old', () => {
+    const rows: ActivityEntry[] = ['10:12', '10:03'].map((hm, i) => ({
+      seq: 10 - i,
+      at: `2026-10-11T${hm}:00Z`,
+      actor: { kind: 'human', id: 'priya', name: 'Priya' },
+      text: `row ${hm}`,
+      kind: 'human' as const,
+    }))
+    render(<ActivityFeed activity={rows} openedAt="2026-10-11T08:00:00Z" />)
+    expect(document.querySelectorAll('li[role="presentation"]')).toHaveLength(2)
   })
 
   it('says so when there is nothing yet', () => {

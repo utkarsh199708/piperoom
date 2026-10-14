@@ -28,6 +28,7 @@ import type {
   TracePinnedPayload,
 } from '../api/types'
 import { describeEvent } from './describe'
+import type { DescribeContext } from './describe'
 import { alertSource } from '../lib/alerts'
 import type { MemberState, RoomState, StepState } from './types'
 
@@ -59,12 +60,35 @@ function upsertMember(members: MemberState[], actor: Actor): MemberState[] {
   return members.map((m) => (m.id === actor.id ? { ...m, name: actor.name } : m))
 }
 
+const ACTIVITY_WINDOW = 50
+
+function describeContext(before: RoomState, after: RoomState): DescribeContext {
+  const stepIndex: Record<string, number> = {}
+  const stepTitles: Record<string, string> = {}
+  after.steps.forEach((s, i) => {
+    stepIndex[s.id] = i + 1
+    stepTitles[s.id] = s.title
+  })
+  const proposalTitles: Record<string, string> = {}
+  for (const p of after.proposals) proposalTitles[p.proposal_id] = p.title
+  const suggesters: Record<string, string> = {}
+  for (const s of after.suggestions) suggesters[s.suggestion_id] = s.from.name
+  return {
+    driverBefore: before.driver?.id ?? null,
+    stepTitles,
+    proposalTitles,
+    stepIndex,
+    suggesters,
+    confidenceBefore: before.hypothesis?.confidence ?? null,
+  }
+}
+
 export function applyEvent(state: RoomState, event: Event): RoomState {
   if (event.seq <= state.last_seq) return state
 
   // agent.usage is cost telemetry, one or two per model request. It moves
   // last_seq on (so the next event is not a gap) and nothing else: it must not
-  // take a slot of the 20-entry activity window or show up as a raw line.
+  // take a slot of the 50-entry activity window or show up as a raw line.
   if (event.type === 'agent.usage') return { ...state, last_seq: event.seq }
 
   let next: RoomState = state
@@ -528,11 +552,12 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         seq: event.seq,
         at: event.at,
         actor: event.actor,
-        // state is the pre-event state: describeEvent needs the driver before
-        // this event to tell a lease renewal from a take-over.
-        text: describeEvent(event, state.driver?.id ?? null),
+        // The driver and hypothesis come from the pre-event state (a renewal is not a
+        // take-over; raised needs the old confidence). Step and suggestion names come
+        // from the post-event state so a step that starts now already has its number.
+        ...describeEvent(event, describeContext(state, next)),
       },
       ...next.activity,
-    ].slice(0, 20),
+    ].slice(0, ACTIVITY_WINDOW),
   }
 }
