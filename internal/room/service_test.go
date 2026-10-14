@@ -51,8 +51,13 @@ type fakeAction struct {
 	name, layer string
 	fail        bool
 	scopeErr    error
-	mu          sync.Mutex
-	calls       int
+	// started, when set, receives once per Execute before it runs; gate, when
+	// set, holds Execute until closed. Tests use them to pin an approval
+	// against a step that is running instead of racing the executor.
+	started chan struct{}
+	gate    chan struct{}
+	mu      sync.Mutex
+	calls   int
 }
 
 func (a *fakeAction) Name() string     { return a.name }
@@ -73,6 +78,16 @@ func (a *fakeAction) Execute(ctx context.Context, params json.RawMessage) (strin
 	a.mu.Lock()
 	a.calls++
 	a.mu.Unlock()
+	if a.started != nil {
+		a.started <- struct{}{}
+	}
+	if a.gate != nil {
+		select {
+		case <-a.gate:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
 	if a.fail {
 		return "", errors.New("boom")
 	}
@@ -353,23 +368,71 @@ func TestApproveRequiresLayerOwnership(t *testing.T) {
 	}
 }
 
+// A second approval of the same layer is 409 already_decided whether the
+// executor is still running the steps or has finished them. The first
+// approval completes the only required layer, so the executor starts at once:
+// the test pins each ordering with the action's channels instead of racing it,
+// and reads the params hash once, while the proposal is still open (after the
+// steps ran it is no longer in OpenProposals).
 func TestDoubleApprovalConflict(t *testing.T) {
-	svc, _, _ := newTestService(t, &fakeAction{name: "postgres_action", layer: "postgres"})
-	roomID := createRoom(t, svc, "arjun").ID
-	pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
-		Risk: "low", Rollback: "revert the change",
-		Title:          "fix",
-		Steps:          []events.ProposalStep{{Action: "postgres_action", Layer: "postgres", Params: json.RawMessage("{}")}},
-		RequiredLayers: []string{"postgres"},
-	}, events.AgentActor)
+	newProposal := func(t *testing.T, act *fakeAction) (*room.Service, *memstore.Store, string, string, string) {
+		t.Helper()
+		svc, st, _ := newTestService(t, act)
+		roomID := createRoom(t, svc, "arjun").ID
+		pid, err := svc.CreateProposal(context.Background(), roomID, events.ProposalCreatedPayload{
+			Risk: "low", Rollback: "revert the change",
+			Title:          "fix",
+			Steps:          []events.ProposalStep{{Action: "postgres_action", Layer: "postgres", Params: json.RawMessage("{}")}},
+			RequiredLayers: []string{"postgres"},
+		}, events.AgentActor)
+		if err != nil {
+			t.Fatalf("create proposal: %v", err)
+		}
+		return svc, st, roomID, pid, proposalHash(t, svc, pid)
+	}
+	approve := func(svc *room.Service, pid, hash string) error {
+		_, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", hash)
+		return err
+	}
+
+	t.Run("while the step runs", func(t *testing.T) {
+		act := &fakeAction{name: "postgres_action", layer: "postgres", started: make(chan struct{}, 1), gate: make(chan struct{})}
+		svc, _, _, pid, hash := newProposal(t, act)
+		if err := approve(svc, pid, hash); err != nil {
+			t.Fatalf("first approve: %v", err)
+		}
+		<-act.started
+		wantCode(t, approve(svc, pid, hash), "already_decided")
+		close(act.gate)
+	})
+
+	t.Run("after the step ran", func(t *testing.T) {
+		act := &fakeAction{name: "postgres_action", layer: "postgres"}
+		svc, st, roomID, pid, hash := newProposal(t, act)
+		if err := approve(svc, pid, hash); err != nil {
+			t.Fatalf("first approve: %v", err)
+		}
+		waitEvent(t, st, roomID, events.ActionExecuted)
+		wantCode(t, approve(svc, pid, hash), "already_decided")
+	})
+}
+
+// waitEvent blocks until the room's log holds an event of type typ, reading
+// the store's subscription (replay from the start, so none is missed).
+func waitEvent(t *testing.T, st *memstore.Store, roomID string, typ events.Type) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ch, err := st.Subscribe(ctx, roomID, 0)
 	if err != nil {
-		t.Fatalf("create proposal: %v", err)
+		t.Fatalf("subscribe: %v", err)
 	}
-	if _, err := svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid)); err != nil {
-		t.Fatalf("first approve: %v", err)
+	for e := range ch {
+		if e.Type == typ {
+			return
+		}
 	}
-	_, err = svc.ApproveProposal(context.Background(), mustUser(t, svc, "priya"), pid, "postgres", proposalHash(t, svc, pid))
-	wantCode(t, err, "already_decided")
+	t.Fatalf("no %s event in room %s: %v", typ, roomID, ctx.Err())
 }
 
 func TestLeaseExpiryAllowsTakeover(t *testing.T) {

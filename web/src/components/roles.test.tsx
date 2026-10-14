@@ -147,6 +147,7 @@ describe('role-aware room screen', () => {
       ],
     })
     expect(screen.queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Read summary' })).not.toBeInTheDocument()
   })
 })
 

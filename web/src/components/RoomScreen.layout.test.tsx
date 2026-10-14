@@ -203,7 +203,7 @@ describe('RoomScreen rail and column', () => {
     show(arjun, room({ driver: null, steps: [], agent_status: { state: 'idle' } }))
     expect(screen.getByText('Agent idle · waiting for a driver')).toBeInTheDocument()
     expect(screen.getByLabelText('Steer the agent')).toBeDisabled()
-    expect(screen.getByText('The agent has not started yet.')).toBeInTheDocument()
+    expect(screen.getByText('The agent is idle and has not started yet.')).toBeInTheDocument()
     // Banner, plus the empty state's own button.
     fireEvent.click(screen.getByRole('button', { name: 'Take control and steer' }))
     expect(actions.grantControl).toHaveBeenCalledWith('arjun')

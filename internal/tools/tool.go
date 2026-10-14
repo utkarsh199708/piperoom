@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // MaxSummaryBytes caps Result.Summary. The summary is what the model reads,
@@ -66,20 +67,154 @@ type Result struct {
 	Data any `json:"data,omitempty"`
 	// Truncated is true when Summary or Data was cut to fit limits.
 	Truncated bool `json:"truncated,omitempty"`
+	// Provenance lists the reads behind this result (see Call). A tool may
+	// set it; the agent also merges the calls recorded under its context
+	// (WithRecorder), tool-set calls first, and applies the caps. It is
+	// stored on agent.tool_result.provenance, outside Data and its cap.
+	Provenance []Call `json:"provenance,omitempty"`
+}
+
+// Call kinds for Call.Kind.
+const (
+	CallSQL      = "sql"      // a SQL statement with $1/? placeholders
+	CallHTTP     = "http"     // a Kafka Connect REST request
+	CallKafka    = "kafka"    // a kadm/kgo admin or fetch request
+	CallRegistry = "registry" // a Schema Registry REST request
+)
+
+// Call is one read a tool made against a customer system: the receipt behind
+// the tool's summary. Text is what a person would re-run: SQL with its
+// placeholders (never values), "GET /connectors/x/status", "kadm.Lag(group)".
+// ParamsRedacted holds the arguments as "$1=value" / "name=value" after the
+// client's redaction; a record key or value is never in it. Target names the
+// system (host, database, brokers), never credentials.
+type Call struct {
+	Kind           string    `json:"kind"`
+	Target         string    `json:"target"`
+	Text           string    `json:"text"`
+	ParamsRedacted []string  `json:"params_redacted,omitempty"`
+	At             time.Time `json:"at"`
+	TookMS         int64     `json:"took_ms"`
+}
+
+// Provenance caps, applied by the agent before a call reaches the room log.
+const (
+	MaxProvenanceCalls = 16   // calls per Result; the first 16 are kept
+	MaxCallTextBytes   = 2048 // Call.Text; cut with Truncate's marker on a rune boundary
+	MaxCallParamBytes  = 200  // each ParamsRedacted item
+)
+
+// Recorder collects the Calls made under a context. A client records with
+// Record(ctx, call); a caller that wants receipts installs one with
+// WithRecorder and reads Calls after the tool ran. Safe for concurrent use.
+type Recorder struct {
+	mu    sync.Mutex
+	calls []Call
+}
+
+// NewRecorder returns an empty Recorder.
+func NewRecorder() *Recorder { return &Recorder{} }
+
+// Record appends c. A nil Recorder ignores it.
+func (r *Recorder) Record(c Call) {
+	if r == nil {
+		return
+	}
+	c.ParamsRedacted = append([]string(nil), c.ParamsRedacted...)
+	r.mu.Lock()
+	r.calls = append(r.calls, c)
+	r.mu.Unlock()
+}
+
+// Calls returns a copy of the recorded calls, in call order.
+func (r *Recorder) Calls() []Call {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]Call, len(r.calls))
+	for i, c := range r.calls {
+		c.ParamsRedacted = append([]string(nil), c.ParamsRedacted...)
+		out[i] = c
+	}
+	return out
+}
+
+type recorderKey struct{}
+
+// WithRecorder returns ctx carrying r. RecorderFrom returns it.
+func WithRecorder(ctx context.Context, r *Recorder) context.Context {
+	return context.WithValue(ctx, recorderKey{}, r)
+}
+
+// RecorderFrom returns the Recorder installed by WithRecorder, if any; a nil
+// Recorder counts as none.
+func RecorderFrom(ctx context.Context) (*Recorder, bool) {
+	r, ok := ctx.Value(recorderKey{}).(*Recorder)
+	return r, ok && r != nil
+}
+
+// Record adds c to the recorder in ctx; without one it does nothing. Clients
+// call it after every request, on success and on error. It never blocks.
+func Record(ctx context.Context, c Call) {
+	if r, ok := RecorderFrom(ctx); ok {
+		r.Record(c)
+	}
+}
+
+// CapProvenance applies the caps above and reports whether anything was cut.
+// It returns a new slice; calls is not modified.
+func CapProvenance(calls []Call) ([]Call, bool) {
+	if len(calls) == 0 {
+		return nil, false
+	}
+	cut := false
+	n := len(calls)
+	if n > MaxProvenanceCalls {
+		n, cut = MaxProvenanceCalls, true
+	}
+	out := make([]Call, n)
+	for i, c := range calls[:n] {
+		var c1 bool
+		c.Text, c1 = truncateTo(c.Text, MaxCallTextBytes)
+		cut = cut || c1
+		if len(c.ParamsRedacted) > 0 {
+			ps := make([]string, len(c.ParamsRedacted))
+			for j, p := range c.ParamsRedacted {
+				var c2 bool
+				ps[j], c2 = truncateTo(p, MaxCallParamBytes)
+				cut = cut || c2
+			}
+			c.ParamsRedacted = ps
+		}
+		out[i] = c
+	}
+	return out, cut
 }
 
 // Truncate cuts s to MaxSummaryBytes and reports whether it cut anything.
 func Truncate(s string) (string, bool) {
-	if len(s) <= MaxSummaryBytes {
+	return truncateTo(s, MaxSummaryBytes)
+}
+
+// truncateMarker ends every string cut by Truncate or CapProvenance.
+const truncateMarker = "\n…[truncated]"
+
+// truncateTo cuts s to at most limit bytes, marker included, on a rune boundary.
+func truncateTo(s string, limit int) (string, bool) {
+	if len(s) <= limit {
 		return s, false
 	}
-	const marker = "\n…[truncated]"
-	cut := MaxSummaryBytes - len(marker)
+	cut := limit - len(truncateMarker)
+	if cut < 0 {
+		cut = 0
+	}
 	// Do not split a UTF-8 rune.
 	for cut > 0 && s[cut]&0xC0 == 0x80 {
 		cut--
 	}
-	return s[:cut] + marker, true
+	return s[:cut] + truncateMarker, true
 }
 
 // Registry holds tools in registration order. The order is stable so the

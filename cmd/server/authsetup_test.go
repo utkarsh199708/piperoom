@@ -46,6 +46,7 @@ func TestAuthSetupWarnsWithSwitchOrFlag(t *testing.T) {
 		log, buf := testLog()
 		cfg := devCfg("0.0.0.0:8090")
 		cfg.DevAllowNonLoopback = "1"
+		cfg.DevAck = config.DevAckValue
 		s, err := authSetup(cfg, false, false, log)
 		if err != nil {
 			t.Fatal(err)
@@ -63,7 +64,9 @@ func TestAuthSetupWarnsWithSwitchOrFlag(t *testing.T) {
 	})
 	t.Run("old flag", func(t *testing.T) {
 		log, buf := testLog()
-		s, err := authSetup(devCfg("0.0.0.0:8090"), true, false, log)
+		cfg := devCfg("0.0.0.0:8090")
+		cfg.DevAck = config.DevAckValue
+		s, err := authSetup(cfg, true, false, log)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -213,4 +216,88 @@ func TestAuthSetupParsesSessionsAndHosts(t *testing.T) {
 			t.Fatalf("%+v: want an error", bad)
 		}
 	}
+}
+
+// Off loopback the switch is not enough: the server also needs the written
+// acknowledgement, exactly config.DevAckValue (R0 contract, enforced here).
+func TestAuthSetupNeedsDevAck(t *testing.T) {
+	for _, tc := range []struct {
+		name, ack string
+		flag      bool
+		want      error
+	}{
+		{name: "switch without ack", want: errDevAckMissing},
+		{name: "flag without ack", flag: true, want: errDevAckMissing},
+		{name: "ack is 1", ack: "1"},
+		{name: "ack is true", ack: "true"},
+		{name: "ack with other text", ack: "dev-login-has-no-password!"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log, _ := testLog()
+			cfg := devCfg("0.0.0.0:8090")
+			if !tc.flag {
+				cfg.DevAllowNonLoopback = "1"
+			}
+			cfg.DevAck = tc.ack
+			_, err := authSetup(cfg, tc.flag, false, log)
+			if err == nil {
+				t.Fatal("started without a valid PIPEROOM_DEV_ACK")
+			}
+			if tc.want != nil && !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if !strings.Contains(err.Error(), "PIPEROOM_DEV_ACK") {
+				t.Fatalf("the error should name PIPEROOM_DEV_ACK: %v", err)
+			}
+		})
+	}
+	// The rule is BOTH: a valid ack alone must not open a non-loopback port.
+	t.Run("ack without switch", func(t *testing.T) {
+		log, _ := testLog()
+		cfg := devCfg("0.0.0.0:8090")
+		cfg.DevAck = config.DevAckValue
+		_, err := authSetup(cfg, false, false, log)
+		if !errors.Is(err, errNonLoopback) {
+			t.Fatalf("err = %v, want errNonLoopback", err)
+		}
+		for _, name := range []string{"PIPEROOM_DEV_ALLOW_NONLOOPBACK=1", "PIPEROOM_DEV_ACK=" + config.DevAckValue} {
+			if !strings.Contains(err.Error(), name) {
+				t.Fatalf("the error should name %s: %v", name, err)
+			}
+		}
+	})
+	t.Run("ack with spaces is accepted", func(t *testing.T) {
+		log, _ := testLog()
+		cfg := devCfg("0.0.0.0:8090")
+		cfg.DevAllowNonLoopback = "1"
+		cfg.DevAck = "  " + config.DevAckValue + " "
+		if _, err := authSetup(cfg, false, false, log); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("loopback needs no ack", func(t *testing.T) {
+		log, _ := testLog()
+		if _, err := authSetup(devCfg("127.0.0.1:8090"), false, false, log); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("demo needs no ack", func(t *testing.T) {
+		log, _ := testLog()
+		cfg := devCfg("0.0.0.0:8090")
+		cfg.DevAllowNonLoopback = "1"
+		if _, err := authSetup(cfg, false, true, log); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("oidc ignores a bad ack with a warning", func(t *testing.T) {
+		log, buf := testLog()
+		cfg := oidcCfg()
+		cfg.DevAck = "1"
+		if _, err := authSetup(cfg, false, false, log); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(buf.String(), "PIPEROOM_DEV_ACK") || !strings.Contains(buf.String(), "ignored in oidc mode") {
+			t.Fatalf("no ignore warning:\n%s", buf.String())
+		}
+	})
 }
