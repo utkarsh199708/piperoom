@@ -142,6 +142,21 @@ func TestRateLimitedAlertRetryIsNotDuplicate(t *testing.T) {
 	wantStatus(t, postAlert(t, srv, gen.src, h, body), http.StatusTooManyRequests)
 }
 
+// Replays of one captured request are dropped before the rate limit, so they
+// cannot spend the source's budget and lock its real alerts out.
+func TestAlertReplaysDoNotSpendRateLimit(t *testing.T) {
+	gen := alertCases()[4]
+	srv, _ := newAlertServerOpts(t, alertCfg(gen.now), httpapi.WithAlertRateLimit(2, time.Hour))
+	body := []byte(`{"title":"a","pipeline_id":"orders","dedup_key":"a"}`)
+	h := gen.sign(gen.secret, body, gen.now)
+	wantStatus(t, postAlert(t, srv, gen.src, h, body), http.StatusCreated)
+	for i := 0; i < 10; i++ {
+		wantStatus(t, postAlert(t, srv, gen.src, h, body), http.StatusAccepted)
+	}
+	real := []byte(`{"title":"b","pipeline_id":"orders","dedup_key":"b"}`)
+	wantStatus(t, postAlert(t, srv, gen.src, gen.sign(gen.secret, real, gen.now), real), http.StatusCreated)
+}
+
 // Headers are checked before the body is read: a wrong bearer token, or a
 // missing or malformed signature header, is 401 even with a body over the
 // limit (not 413).

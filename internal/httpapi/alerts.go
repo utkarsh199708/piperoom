@@ -95,26 +95,30 @@ func (s *Server) handleSignedAlert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only verified alerts count against the source's budget, so forged
-	// requests cannot lock the real sender out.
 	now := s.alerts.Now
 	if now == nil {
 		now = time.Now
 	}
 	at := now()
-	if !s.alertLimit.allow(string(src), at) {
-		s.refuseWarn.refused(s.log, src, r, "rate limited")
-		w.Header().Set("Retry-After", strconv.Itoa(int(s.alertLimit.window.Seconds())))
-		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many alerts from this source")
-		return
-	}
 	// A verified request whose exact bytes (body and signed time) were already
 	// processed is a copy: a replay of a captured request, or a bearer
 	// sender's burst. It is acknowledged and dropped, without touching the
-	// room or returning its content.
+	// room or returning its content. This runs before the rate limit so that
+	// copies of one captured request cannot spend the source's budget.
 	key := s.alerts.DeliveryKey(src, r.Header, body)
 	if s.alertSeen.Seen(key, s.alerts.ReplayWindow(src), at) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"ignored": true, "reason": "duplicate delivery"})
+		return
+	}
+	// Only verified, first-seen alerts count against the source's budget, so
+	// neither forged requests nor replays can lock the real sender out.
+	if !s.alertLimit.allow(string(src), at) {
+		// Not processed: the sender's retry of the same bytes must not be
+		// taken for a copy.
+		s.alertSeen.Forget(key)
+		s.refuseWarn.refused(s.log, src, r, "rate limited")
+		w.Header().Set("Retry-After", strconv.Itoa(int(s.alertLimit.window.Seconds())))
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many alerts from this source")
 		return
 	}
 
