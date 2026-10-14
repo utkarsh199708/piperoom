@@ -1019,6 +1019,7 @@ func TestRetentionArchivesBeforePurge(t *testing.T) {
 	if _, err := broken.CloseRoom(ctx, mustUser(t, broken, "arjun"), snap.ID, "done"); err != nil {
 		t.Fatal(err)
 	}
+	waitPM(t, st, snap.ID) // the closing draft event must not land mid-archive
 	c.Advance(40 * 24 * time.Hour)
 
 	res, err := broken.PurgeExpired(ctx, c.Now().AddDate(0, 0, -30))
