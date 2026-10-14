@@ -95,7 +95,7 @@ func TestListHubCoalesces(t *testing.T) {
 	}
 
 	// A room gone from the cache is a deletion.
-	s.evictRooms([]string{snap.ID})
+	s.evictRooms([]string{snap.ID}, func(string, int64) events.Event { return events.Event{} })
 	for deleted := false; !deleted; {
 		select {
 		case up := <-ch:

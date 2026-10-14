@@ -144,6 +144,18 @@ type Deps struct {
 	// without the pipeline prefix; it is "" for a room opened by hand or by an
 	// alert with no key. Nil means no-op.
 	OnRoomClosed func(ctx context.Context, roomID, pipelineID, dedupKey string)
+
+	// OnRoomDeleted, when set, is called once per room this replica forgets
+	// because it is gone from the store: deleted here (DeleteRoom), purged
+	// here by retention, or deleted by another replica and noticed here (the
+	// follower, a re-list, a command's re-read). deleted is the room.deleted
+	// frame its WebSockets get last (docs/api.md, WebSocket), or the zero
+	// Event when the room's audit row cannot be read (then only the close goes
+	// out). It never runs under the service lock and must return promptly;
+	// cmd/server points it at the WebSocket gateway's CloseRoom, which is
+	// idempotent, so a room reported twice closes its sockets once. Nil means
+	// no-op.
+	OnRoomDeleted func(roomID string, deleted events.Event)
 }
 
 type roomState struct {
@@ -220,6 +232,7 @@ type Service struct {
 	now             func() time.Time
 	onRoomOpened    func(ctx context.Context, roomID string)
 	onRoomClosed    func(ctx context.Context, roomID, pipelineID, dedupKey string)
+	onRoomDeleted   func(roomID string, deleted events.Event)
 	slots           *agentSlots // global cap on concurrent agent runs
 	exportMax       int64
 	sessions        auth.Store
@@ -326,6 +339,7 @@ func New(d Deps) *Service {
 		now:             now,
 		onRoomOpened:    d.OnRoomOpened,
 		onRoomClosed:    d.OnRoomClosed,
+		onRoomDeleted:   d.OnRoomDeleted,
 		slots:           newAgentSlots(d.MaxAgents),
 		exportMax:       d.ExportMaxEvents,
 		sessions:        d.Sessions,

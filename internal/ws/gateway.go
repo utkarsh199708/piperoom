@@ -366,7 +366,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ch, err := g.store.Subscribe(ctx, roomID, lastSeq)
 	if err != nil {
-		c.shutdown(websocket.StatusInternalError, "subscribe failed")
+		if errors.Is(err, store.ErrNotFound) {
+			// Deleted since the lookup above; CloseRoom may have run already
+			// (shutdown happens once).
+			c.shutdown(websocket.StatusNormalClosure, RoomDeletedReason)
+		} else {
+			c.shutdown(websocket.StatusInternalError, "subscribe failed")
+		}
 		return
 	}
 
@@ -384,7 +390,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	go func() {
 		defer g.wg.Done()
-		g.eventLoop(ctx, c, ch)
+		g.eventLoop(ctx, roomID, c, ch)
 	}()
 }
 
@@ -485,13 +491,14 @@ func (g *Gateway) readLoop(ctx context.Context, roomID string, c *client) {
 	}
 }
 
-func (g *Gateway) eventLoop(ctx context.Context, c *client, ch <-chan events.Event) {
+func (g *Gateway) eventLoop(ctx context.Context, roomID string, c *client, ch <-chan events.Event) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case e, ok := <-ch:
 			if !ok {
+				g.feedEnded(ctx, roomID, c)
 				return
 			}
 			b, err := json.Marshal(serverMsg{Type: "event", Event: &e})
@@ -504,6 +511,32 @@ func (g *Gateway) eventLoop(ctx context.Context, c *client, ch <-chan events.Eve
 			}
 		}
 	}
+}
+
+// feedEndedTimeout bounds the audit-row read of feedEnded.
+const feedEndedTimeout = 5 * time.Second
+
+// feedEnded handles a room subscription that closed while its connection was
+// still live. Both stores close it when the room is gone (deleted by an admin
+// or by retention, on any replica), so this ends a deleted room's sockets even
+// when no CloseRoom reached them, with the same room.deleted frame (from the
+// room's audit row) and close. A feed that ended for any other reason closes
+// with an internal error, and the client reconnects with after=.
+func (g *Gateway) feedEnded(ctx context.Context, roomID string, c *client) {
+	if ctx.Err() != nil {
+		return // the connection is closing already
+	}
+	dctx, cancel := context.WithTimeout(ctx, feedEndedTimeout)
+	deleted, gone := g.svc.DeletedEvent(dctx, roomID)
+	cancel()
+	if !gone {
+		c.shutdown(websocket.StatusInternalError, "subscription ended")
+		return
+	}
+	frame := g.deletedFrame(roomID, deleted)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.spawnRoomDeleted(c, frame)
 }
 
 func parseAfterQuery(r *http.Request) (int64, error) {

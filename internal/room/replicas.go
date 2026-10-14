@@ -687,6 +687,16 @@ func (s *Service) followRoom(roomID string, seq int64) {
 		return // our own append, already folded
 	}
 	evs, err := s.store.Since(ctx, roomID, after, 1000)
+	if errors.Is(err, store.ErrNotFound) {
+		// Deleted by another replica (an admin or its retention) after the
+		// append that woke us.
+		s.mu.Lock()
+		if s.rooms[roomID] == st && !s.closed {
+			s.evictLocked(roomID, st)
+		}
+		s.mu.Unlock()
+		return
+	}
 	if err != nil {
 		if s.ctx.Err() == nil {
 			s.log.Warn("room: follow: read events failed", "room", roomID, "err", err)
@@ -863,7 +873,8 @@ func (s *Service) closedElsewhereLocked(ctx context.Context, roomID string, st *
 	}
 }
 
-// evictLocked forgets a room that is gone from the store. Caller holds s.mu.
+// evictLocked forgets a room that is gone from the store, and tells the
+// OnRoomDeleted hook (goneElsewhereLocked). Caller holds s.mu.
 func (s *Service) evictLocked(roomID string, st *roomState) {
 	if st.agentCancel != nil {
 		st.agentCancel()
@@ -878,6 +889,26 @@ func (s *Service) evictLocked(roomID string, st *roomState) {
 	}
 	delete(s.rooms, roomID)
 	s.markListDirtyLocked(roomID)
+	s.goneElsewhereLocked(roomID)
+}
+
+// goneElsewhereLocked hands the room.deleted frame of a room another replica
+// deleted to the OnRoomDeleted hook, on its own goroutine: the frame comes
+// from the room's audit row, a store read that must not run under s.mu. When
+// the row cannot be read the hook gets the zero Event and the sockets get only
+// the close. Caller holds s.mu.
+func (s *Service) goneElsewhereLocked(roomID string) {
+	if s.onRoomDeleted == nil || s.closed {
+		return
+	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
+		deleted, _ := s.DeletedEvent(ctx, roomID)
+		cancel()
+		s.roomDeleted(roomID, deleted)
+	}()
 }
 
 // refreshAll brings the whole cache up to the store: rooms other replicas
