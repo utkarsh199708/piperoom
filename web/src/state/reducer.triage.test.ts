@@ -63,7 +63,7 @@ describe('agent.triage', () => {
   })
 
   it('describes the first look in the activity feed', () => {
-    expect(describeEvent(ev(1, 'agent.triage', ok))).toBe('First look: task 0 FAILED')
-    expect(describeEvent(ev(2, 'agent.triage', { status: 'failed', reason: 'budget' }))).toBe('First look failed (budget)')
+    expect(describeEvent(ev(1, 'agent.triage', ok)).text).toBe('First look: task 0 FAILED')
+    expect(describeEvent(ev(2, 'agent.triage', { status: 'failed', reason: 'budget' })).text).toBe('First look failed (budget)')
   })
 })

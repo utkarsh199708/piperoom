@@ -144,7 +144,9 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'agent.triage': {
       const p = as<AgentTriagePayload>(e)
-      return p.status === 'ok' && p.headline ? `First look: ${p.headline}` : `First look failed (${p.reason || 'unknown'})`
+      return p.status === 'ok' && p.headline
+        ? { text: `First look: ${clip(p.headline, 120)}`, detail: p.headline.length > 120 ? clip(p.headline, 200) : undefined, kind: 'step' }
+        : { text: `First look failed (${clip(p.reason || 'unknown', 40)})`, kind: 'step' }
     }
     case 'agent.hypothesis': {
       const p = as<AgentHypothesisPayload>(e)
