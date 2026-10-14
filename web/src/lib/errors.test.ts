@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ApiClientError } from '../api/client'
-import { errorText, friendlyError } from './errors'
+import { OFFLINE_TEXT, errorText, friendlyError, isNetworkError } from './errors'
 
 describe('friendlyError', () => {
   it('maps lease_held and stale_handoff to short user text', () => {
@@ -38,5 +38,19 @@ describe('errorText', () => {
     )
     expect(errorText(new Error('boom'))).toBe('boom')
     expect(errorText('oops')).toBe('oops')
+  })
+})
+
+describe('isNetworkError', () => {
+  it('is true for a fetch TypeError and the browsers\' wording, false for an API error', () => {
+    expect(isNetworkError(new TypeError('Failed to fetch'))).toBe(true)
+    expect(isNetworkError(new Error('NetworkError when attempting to fetch resource.'))).toBe(true)
+    expect(isNetworkError(new Error('Load failed'))).toBe(true)
+    expect(isNetworkError(new ApiClientError(409, 'room_closed', 'closed'))).toBe(false)
+    expect(isNetworkError(new Error('boom'))).toBe(false)
+  })
+  it('errorText answers OFFLINE_TEXT for them', () => {
+    expect(errorText(new TypeError('Failed to fetch'))).toBe(OFFLINE_TEXT)
+    expect(OFFLINE_TEXT).toMatch(/your message is kept/)
   })
 })

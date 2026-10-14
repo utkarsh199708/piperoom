@@ -1,4 +1,4 @@
-import { useCallback, useContext, useMemo, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowDown } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useParams, useSearchParams } from 'react-router-dom'
@@ -8,6 +8,7 @@ import { errorText } from '../lib/errors'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
 import { useMediaQuery } from '../hooks/useMediaQuery'
+import { rememberRoomTitle } from '../lib/signinNotice'
 import { useJumpToLatest } from '../hooks/useJumpToLatest'
 import { useRoomAttention } from '../hooks/useRoomAttention'
 import { useCurrentUser } from '../context/user'
@@ -123,10 +124,15 @@ export function RoomScreen() {
     () => (state ? state.proposals.reduce((n, p) => n + p.executed.length, 0) : 0),
     [state],
   )
-  const { topology, updatedAt } = useTopology(state?.pipeline_id ?? '', {
+  const { topology, updatedAt, notFound, retry: retryTopology } = useTopology(state?.pipeline_id ?? '', {
     refreshKey: executedCount,
     active: state?.status === 'open',
   })
+  // The sign-in screen names this room if the session ends while it is open.
+  useEffect(() => {
+    rememberRoomTitle(state?.title)
+    return () => rememberRoomTitle(undefined)
+  }, [state?.title])
   const [layerFilter, setLayerFilter] = useState<string | null>(null)
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
@@ -263,6 +269,8 @@ export function RoomScreen() {
     <PipelineMap
       topology={topology}
       updatedAt={updatedAt}
+        notFound={notFound}
+        onRetry={retryTopology}
       pipelineId={state.pipeline_id}
       stalledFor={stalledFor}
       onTrace={viewer ? undefined : () => setTraceOpen(true)}
@@ -448,7 +456,7 @@ export function RoomScreen() {
             </button>
           )}
 
-          <SteerBox state={state} user={user} actions={actions} prefill={prefill} />
+          <SteerBox state={state} user={user} actions={actions} prefill={prefill} conn={conn} />
         </div>
 
         {wide && (
