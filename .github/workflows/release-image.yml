@@ -70,6 +70,10 @@ jobs:
           push: ${{ steps.name.outputs.push == 'true' }}
           load: ${{ steps.name.outputs.push != 'true' }}
           tags: ${{ steps.name.outputs.tags }}
+          # Names the build in GET /healthz and the start-up log (internal/version;
+          # Dockerfile ARG VERSION). A tag build reports the tag, others the short sha.
+          build-args: |
+            VERSION=${{ github.ref_type == 'tag' && github.ref_name || format('ci-{0}', github.sha) }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
