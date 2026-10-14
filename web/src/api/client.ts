@@ -11,6 +11,7 @@ import type {
   AuthUser,
   Event,
   EventsPage,
+  HypothesisVerdict,
   Me,
   Person,
   PipelineInfo,
@@ -149,6 +150,17 @@ export const api = {
   sendSuggestion: (roomId: string, suggestionId: string) =>
     request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/send`, {
       method: 'POST',
+    }),
+  // F9: any member may decide; the server answers 409 already_decided for a repeat.
+  hypothesis: (roomId: string, verdict: HypothesisVerdict, note?: string) =>
+    request<Event>(`${room(roomId)}/hypothesis`, {
+      method: 'POST',
+      body: JSON.stringify(note ? { verdict, note } : { verdict }),
+    }),
+  nudge: (roomId: string, proposalId: string, layer: string) =>
+    request<Event>(`${room(roomId)}/nudge`, {
+      method: 'POST',
+      body: JSON.stringify({ proposal_id: proposalId, layer }),
     }),
   requestControl: (roomId: string) =>
     request<Event>(`${room(roomId)}/control/request`, { method: 'POST' }),

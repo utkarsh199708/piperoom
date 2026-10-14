@@ -13,6 +13,7 @@ import { canClose, canHandoff, canRequestControl, canTakeControl, isViewer } fro
 import { ageLabel } from '../lib/time'
 import { handoffInFlight } from '../lib/handoff'
 import { useNow } from './room/useNow'
+import { usePeople } from '../hooks/usePeople'
 import { PipelineMap } from './PipelineMap'
 import { Timeline } from './Timeline'
 import { SteerBox } from './SteerBox'
@@ -73,6 +74,9 @@ export function RoomScreen() {
     () => ({ get: () => handleRef.current, set: (h: DecisionHandle | null) => void (handleRef.current = h) }),
     [],
   )
+  // One GET /api/people per room mount: layers for the presence rows and the pending layers. A viewer gets none.
+  const peopleState = usePeople()
+  const people = peopleState.status === 'ready' ? peopleState.people : undefined
   const now = useNow(5_000) // a request past expires_at stops counting as in flight
 
   const headerMembers = useMemo(() => {
@@ -233,11 +237,20 @@ export function RoomScreen() {
               onTrace={viewer ? undefined : () => setTraceOpen(true)}
             />
 
-            {state.hypothesis && <HypothesisCard hypothesis={state.hypothesis} steps={state.steps} />}
+            {state.hypothesis && (
+              <HypothesisCard
+                hypothesis={state.hypothesis}
+                steps={state.steps}
+                history={state.hypothesis_history}
+                selfId={user.id}
+                canDecide={!viewer && state.status === 'open'}
+                onVerdict={actions.hypothesisVerdict}
+              />
+            )}
 
             {showProposals && (
               <div id={PROPOSAL_ANCHOR} tabIndex={-1} className="scroll-mt-4 focus:outline-none">
-                <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} />
+                <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} people={people} presence={presence} />
               </div>
             )}
 
@@ -295,6 +308,7 @@ export function RoomScreen() {
             selfId={user.id}
             selfName={user.name}
             selfIsViewer={viewer}
+            people={people}
           />
           <div className="h-px shrink-0 bg-border" />
           <SuggestionsPanel suggestions={state.suggestions} />

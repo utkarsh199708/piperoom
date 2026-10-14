@@ -680,3 +680,65 @@ describe('fromSnapshot', () => {
     expect(s.members).toEqual([])
   })
 })
+
+describe('applyEvent — hypothesis verdicts and nudges (F9)', () => {
+  const kabir = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+  const priya = { kind: 'human' as const, id: 'priya', name: 'Priya' }
+  const hypo = (seq: number, confidence: string) =>
+    ev(seq, 'agent.hypothesis', { text: 'h', based_on_steps: [], confidence, confirmed: true })
+
+  it('derives confirmed from verdicts, ignoring the agent flag', () => {
+    let s = applyEvent(base(), hypo(1, 'low'))
+    expect(s.hypothesis?.confirmed).toBe(false)
+    expect(s.hypothesis?.seq).toBe(1)
+    s = applyEvent(s, ev(2, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, kabir))
+    expect(s.hypothesis?.confirmed).toBe(true)
+    s = applyEvent(s, ev(3, 'hypothesis.verdict', { verdict: 'disputed', note: 'DDL never ran', hypothesis_seq: 1 }, priya))
+    expect(s.hypothesis?.confirmed).toBe(false)
+    expect(s.hypothesis?.verdicts.map((v) => `${v.by.id}:${v.verdict}`)).toEqual(['kabir:confirmed', 'priya:disputed'])
+    expect(s.hypothesis?.verdicts[1].note).toBe('DDL never ran')
+  })
+
+  it('keeps the latest verdict per person, moved to the end', () => {
+    let s = applyEvent(base(), hypo(1, 'low'))
+    s = applyEvent(s, ev(2, 'hypothesis.verdict', { verdict: 'disputed', hypothesis_seq: 1 }, priya))
+    s = applyEvent(s, ev(3, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, kabir))
+    s = applyEvent(s, ev(4, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, priya))
+    expect(s.hypothesis?.verdicts.map((v) => v.by.id)).toEqual(['kabir', 'priya'])
+    expect(s.hypothesis?.confirmed).toBe(true)
+  })
+
+  it('a new hypothesis clears verdicts; a stale verdict or none at all changes nothing', () => {
+    let s = applyEvent(base(), ev(1, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, kabir))
+    expect(s.hypothesis).toBeNull()
+    s = applyEvent(s, hypo(2, 'low'))
+    s = applyEvent(s, ev(3, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 2 }, kabir))
+    s = applyEvent(s, hypo(4, 'high'))
+    expect(s.hypothesis?.verdicts).toEqual([])
+    expect(s.hypothesis?.confirmed).toBe(false)
+    s = applyEvent(s, ev(5, 'hypothesis.verdict', { verdict: 'disputed', hypothesis_seq: 2 }, priya))
+    expect(s.hypothesis?.verdicts).toEqual([])
+  })
+
+  it('keeps the confidence path: repeats dropped, capped at 20', () => {
+    let s = applyEvent(base(), hypo(1, 'low'))
+    s = applyEvent(s, hypo(2, 'low'))
+    s = applyEvent(s, hypo(3, 'medium'))
+    s = applyEvent(s, hypo(4, 'high'))
+    expect(s.hypothesis_history.map((h) => h.confidence)).toEqual(['low', 'medium', 'high'])
+    let long = base()
+    for (let i = 1; i <= 30; i++) long = applyEvent(long, hypo(i, i % 2 ? 'low' : 'high'))
+    expect(long.hypothesis_history).toHaveLength(20)
+    expect(long.hypothesis_history[19].seq).toBe(30)
+  })
+
+  it('records a nudge and describes the new events', () => {
+    const s = applyEvent(base(), ev(1, 'approval.nudged', { proposal_id: 'p1', layer: 'kafka-connect' }, priya))
+    expect(s.nudges['p1/kafka-connect'].by.id).toBe('priya')
+    expect(s.activity[0].text).toBe('Priya nudged kafka-connect owners')
+    const v = applyEvent(applyEvent(base(), hypo(1, 'low')), ev(2, 'hypothesis.verdict', { verdict: 'disputed', note: 'no', hypothesis_seq: 1 }, priya))
+    expect(v.activity[0].text).toBe('Priya disputed the hypothesis: no')
+    const c = applyEvent(v, ev(3, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, kabir))
+    expect(c.activity[0].text).toBe('Kabir confirmed the hypothesis')
+  })
+})

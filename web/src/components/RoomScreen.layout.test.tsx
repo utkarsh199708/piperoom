@@ -33,6 +33,8 @@ const actions: RoomActions = {
   handoff: vi.fn(),
   acceptHandoff: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 const reload = vi.fn()
 
@@ -181,6 +183,8 @@ describe('RoomScreen rail and column', () => {
           based_on_steps: ['s2', 's1'],
           confidence: 'high',
           confirmed: false,
+          seq: 3,
+          verdicts: [],
         },
       }),
     )

@@ -6,6 +6,8 @@ import { ApiClientError } from '../api/client'
 const FRIENDLY_TEXT: Record<string, string> = {
   lease_held: 'someone else holds control',
   stale_handoff: 'this hand-off is out of date',
+  no_hypothesis: 'there is no hypothesis to decide on yet',
+  already_nudged: 'already nudged a few minutes ago',
   handoff_in_progress: 'a hand-off is already being written for this room. Wait for it to finish.',
 }
 
