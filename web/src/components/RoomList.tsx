@@ -637,6 +637,11 @@ function RoomRow({
             </Badge>
           )}
           <span className="truncate font-mono text-xs text-muted-foreground md:hidden">{room.pipeline_id}</span>
+          {room.status === 'open' && !room.shadow && (room.insight?.time_to_first_hypothesis_s ?? -1) >= 0 && (
+            <span className="whitespace-nowrap font-mono text-xs tabular-nums text-muted-foreground">
+              · insight {room.insight?.time_to_first_hypothesis_s} s
+            </span>
+          )}
         </div>
         {showResolution && resolved && room.resolution && (
           <p className="m-0 line-clamp-1 whitespace-normal text-xs text-muted-foreground">{room.resolution.slice(0, 100)}</p>
