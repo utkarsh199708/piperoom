@@ -194,7 +194,7 @@ describe('RoomScreen rail and column', () => {
     show(vera, room({ driver: null }))
     expect(screen.getByText('View only')).toBeInTheDocument()
     expect(screen.queryByLabelText('Steer the agent')).not.toBeInTheDocument()
-    for (const name of ['Hand off', 'Trace one record', 'Take control', 'Take control and steer', 'Request control']) {
+    for (const name of ['Hand off', 'Trace a record', 'Take control', 'Take control and steer', 'Request control']) {
       expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
     }
     expect(screen.getByText(/you can read this room but not steer it/)).toBeInTheDocument()
