@@ -59,6 +59,13 @@ The error strings come from:
 Wildcard recordings after the exact ones answer unknown names with the real tools' not-found
 results, so a run has no misses unless the agent asks for something truly new.
 
+Two scenarios are time-aware (E3, see `../README.md`, "Phases, sequences and executed fixes"):
+`slot-inactive-wal-growth` moves to a `recovered` phase when the approved resume is executed, and
+`consumer-poison-pill` answers `kafka_consumer_lag` with lag that grows over three reads. Those added
+recordings come from the committed generator `evals/gen` (`go run -tags evalgen ./evals/gen`), which
+continues from the state above. C7's own recordings are unchanged, except that the order-sync lag
+recording of `consumer-poison-pill` is now a sequence whose first result is the original one.
+
 Checked with C6's harness (branch `claude/jolly-gates-o8xtay`):
 
 - `go run ./evals/cmd/evalrun -check` passes: `11 scenario(s) OK` (6 originally).
