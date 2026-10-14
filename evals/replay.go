@@ -1,6 +1,7 @@
 package evals
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -463,6 +464,13 @@ func (r *replayer) skip(why string) {
 	r.unexecuted = append(r.unexecuted, why)
 }
 
+// setEvents sets the event counter the marks are stamped with.
+func (r *replayer) setEvents(count func() int) {
+	r.mu.Lock()
+	r.events = count
+	r.mu.Unlock()
+}
+
 // currentPhase is the phase the run is in now.
 func (r *replayer) currentPhase() string {
 	r.mu.Lock()
@@ -603,9 +611,16 @@ type ActionAttempt struct {
 }
 
 // attemptLog records every Validate call on the wrapped actions of one run.
+// On the room path the same valid step is validated again by the room
+// (CreateProposal) and by its executor; a passing call identical to one
+// already logged is not logged twice, so the log stays "what the agent
+// tried". Failed calls are always logged.
 type attemptLog struct {
 	mu       sync.Mutex
 	attempts []ActionAttempt
+	// exec plays the writes of approved steps; nil keeps the actions'
+	// own Execute, which fails on the replay clients.
+	exec *execScript
 }
 
 // wrap returns a registry whose actions record each Validate call in l and
@@ -654,8 +669,24 @@ func (a *recordingAction) record(params json.RawMessage, err error) {
 		at.Error = err.Error()
 	}
 	a.log.mu.Lock()
+	defer a.log.mu.Unlock()
+	if err == nil {
+		for _, prev := range a.log.attempts {
+			if prev.Error == "" && prev.Action == at.Action && bytes.Equal(prev.Params, at.Params) {
+				return
+			}
+		}
+	}
 	a.log.attempts = append(a.log.attempts, at)
-	a.log.mu.Unlock()
+}
+
+// Execute plays the write through the run's execScript (the room's executor
+// calls it once every layer approved).
+func (a *recordingAction) Execute(ctx context.Context, params json.RawMessage) (string, error) {
+	if a.log.exec == nil {
+		return a.Action.Execute(ctx, params)
+	}
+	return a.log.exec.execute(a.Name(), params)
 }
 
 // CheckScope keeps the wrapper honest about scope: it delegates when the

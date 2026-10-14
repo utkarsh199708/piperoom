@@ -210,6 +210,10 @@ var legacyTerms = map[string][][]string{
 // (a plausible wrong story). The lazy parrot is built from the scenario's own
 // alert and pipeline map: what the agent was handed, handed back.
 var hypotheses = map[string]struct{ good, wrong string }{
+	"watcher-start": {
+		good:  watcherCause,
+		wrong: "pg-orders-connector task 0 failed because the Schema Registry rejected an incompatible schema after an ALTER TABLE.",
+	},
 	"consumer-poison-pill": {
 		good:  "order-sync is stuck on a poison pill: the record at offset 25377154 on partition 1 of pg.public.orders is not Avro (no magic byte), so deserialization fails on every restart. Connect is healthy. Do not reset the group to latest: that skips every partition's unread changes.",
 		wrong: "order-sync is stuck on partition 1 after a bad deploy; reset the group to latest to skip the backlog.",
