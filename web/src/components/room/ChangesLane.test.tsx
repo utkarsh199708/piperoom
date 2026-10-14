@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import { vi } from 'vitest'
 import { ChangesLane } from './ChangesLane'
 import type { StepState } from '@/state/types'
 
@@ -80,5 +81,17 @@ describe('ChangesLane', () => {
   it('ignores rows that are not changes', () => {
     render(<ChangesLane steps={stepWith({ changes: [null, 5, { kind: 'ddl' }, change({})] })} alertAt="2026-10-14T03:10:00Z" now={NOW} />)
     expect(screen.getByText('1 change')).toBeInTheDocument()
+  })
+
+  it('a row filters the stream to its layer, and a second click clears it', () => {
+    const onSelectLayer = vi.fn()
+    const data = { changes: [change({ kind: 'connector_state', object: 'pg-orders' })] }
+    const { rerender } = render(<ChangesLane steps={stepWith(data)} alertAt="2026-10-14T03:10:00Z" now={NOW} onSelectLayer={onSelectLayer} />)
+    fireEvent.click(screen.getByRole('button', { name: /Show only kafka-connect steps/ }))
+    expect(onSelectLayer).toHaveBeenLastCalledWith('kafka-connect')
+    rerender(<ChangesLane steps={stepWith(data)} alertAt="2026-10-14T03:10:00Z" now={NOW} selectedLayer="kafka-connect" onSelectLayer={onSelectLayer} />)
+    expect(screen.getByRole('button', { name: /Show only kafka-connect steps/ })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(screen.getByRole('button', { name: /Show only kafka-connect steps/ }))
+    expect(onSelectLayer).toHaveBeenLastCalledWith(null)
   })
 })

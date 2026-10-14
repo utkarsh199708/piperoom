@@ -289,7 +289,12 @@ export function RoomScreen() {
               </div>
             )}
 
-            <ChangesLane steps={state.steps} alertAt={state.opened_at} />
+            <ChangesLane
+              steps={state.steps}
+              alertAt={state.opened_at}
+              selectedLayer={layerFilter ?? undefined}
+              onSelectLayer={setLayerFilter}
+            />
 
             <section aria-labelledby="investigation-heading" className="flex flex-col gap-2">
               <div className="flex items-center gap-2 pt-1">

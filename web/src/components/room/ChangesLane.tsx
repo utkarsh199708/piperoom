@@ -7,15 +7,42 @@ import { Badge, layerVariant } from '@/components/ui/badge'
 
 const utc = (iso: string) => `${iso.replace('T', ' ').replace(/\.\d+Z$|Z$/, '')} UTC`
 
-function ChangeItem({ row, now }: { row: ChangeRow; now: number }) {
+function ChangeItem({
+  row,
+  now,
+  selectedLayer,
+  onSelectLayer,
+}: {
+  row: ChangeRow
+  now: number
+  selectedLayer?: string
+  onSelectLayer?: (layer: string | null) => void
+}) {
   const before = diffText(row.before)
   const after = diffText(row.after)
+  const layer = changeLayer(row.kind)
+  const badge = (
+    <Badge variant={layerVariant(layer)} mono>
+      {row.kind}
+    </Badge>
+  )
   return (
     <li className="flex flex-col gap-1 border-l-2 border-border pl-3">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <Badge variant={layerVariant(changeLayer(row.kind))} mono>
-          {row.kind}
-        </Badge>
+        {onSelectLayer ? (
+          // Row click filters the step stream to this change's layer (F7); click again to clear.
+          <button
+            type="button"
+            aria-pressed={selectedLayer === layer}
+            aria-label={`Show only ${layer} steps (${row.kind})`}
+            onClick={() => onSelectLayer(selectedLayer === layer ? null : layer)}
+            className="rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-pressed:ring-2 aria-pressed:ring-ring"
+          >
+            {badge}
+          </button>
+        ) : (
+          badge
+        )}
         <span className="min-w-0 break-all font-mono text-xs">{row.object}</span>
         <time dateTime={row.at} title={utc(row.at)} className="ml-auto text-xs text-subtle-foreground">
           {timeAgo(row.at, now)}
@@ -54,10 +81,15 @@ export function ChangesLane({
   steps,
   alertAt,
   now = Date.now(),
+  selectedLayer,
+  onSelectLayer,
 }: {
   steps: StepState[]
   alertAt: string
   now?: number
+  /** The layer the step stream is filtered to, and the setter (F7's filter); without it rows are not clickable. */
+  selectedLayer?: string
+  onSelectLayer?: (layer: string | null) => void
 }) {
   const { changes, seen } = latestChanges(steps)
   const [open, setOpen] = useState(() =>
@@ -75,7 +107,7 @@ export function ChangesLane({
   )
   const items: React.ReactNode[] = changes.map((c, i) => [
     i === firstBefore ? rule : null,
-    <ChangeItem key={`${c.kind}:${c.object}:${c.at}:${c.id}:${i}`} row={c} now={now} />,
+    <ChangeItem key={`${c.kind}:${c.object}:${c.at}:${c.id}:${i}`} row={c} now={now} selectedLayer={selectedLayer} onSelectLayer={onSelectLayer} />,
   ])
   if (changes.length > 0 && firstBefore === -1 && !Number.isNaN(alertMs)) items.push(rule)
   return (
