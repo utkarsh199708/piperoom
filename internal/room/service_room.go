@@ -31,6 +31,9 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	if err := rejectUnstorable(title); err != nil {
 		return RoomSnapshot{}, err
 	}
+	if err := checkLen("title", title, MaxTitleChars); err != nil {
+		return RoomSnapshot{}, err
+	}
 	// The shape check applies even without an owners config (demo, unit
 	// tests): it does not depend on anything being loaded.
 	if !pipelineIDRe.MatchString(pipelineID) {
@@ -186,6 +189,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	if title == "" {
 		title = "New alert"
 	}
+	title = clipTitle(title)
 	if !severities[severity] {
 		severity = "sev3"
 	}

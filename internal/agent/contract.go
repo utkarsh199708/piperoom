@@ -70,7 +70,10 @@ type Alert struct {
 
 // Deps are the agent's collaborators.
 type Deps struct {
-	Tools     *tools.Registry   // read-only tools from A2 and A3
+	// Tools are the read-only tools (A2, A3 and the other tool packages). It
+	// must be built with tools.NewReadOnlyRegistry; from R5b the runner
+	// refuses a registry whose ReadOnly() is false.
+	Tools     *tools.Registry
 	Actions   *actions.Registry // write actions the agent may PROPOSE (never run)
 	Inbox     Inbox
 	Sink      Sink

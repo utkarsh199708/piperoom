@@ -50,7 +50,7 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
   `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (loud warnings); `--allow-remote` is a deprecated alias for one release. From R9
   it also needs `PIPEROOM_DEV_ACK=dev-login-has-no-password` (`config.ParseDevAck`): the image sets only the switch,
   so the operator must state in their own deployment that dev login has no password. Any other non-empty value stops
-  the start.
+  the start. Not needed on a loopback address, in `oidc` mode (ignored there with one warning), or with `--demo`.
 - **Session.** A server-side session in a cookie: `__Host-piperoom_session` in `oidc` mode (https),
   `piperoom_session` (no `Secure`) in `dev` mode over plain http. The cookie wins over `X-User` when both name the
   same user.
@@ -121,8 +121,8 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB) |
 | 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight) |
-| 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list) |
-| 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client) |
+| 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list). R4: a browser `GET` outside `/api` and `/auth` that sends `Accept: text/html` gets a short HTML page instead (what happened and which of `PIPEROOM_PUBLIC_URL` / `PIPEROOM_ALLOWED_HOSTS` to set; the Host is HTML-escaped and clipped to 100 bytes; its own CSP `default-src 'none'`, no script). Every other request gets the JSON body, whose message never echoes the Host |
+| 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client); R4: `too_many_connections` (WebSocket, before the upgrade; see WebSocket) |
 | 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}?archive=true` could not write the archive, so nothing was deleted) |
 | 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working) |
 
@@ -230,17 +230,18 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 
 | Method | Path | Body | Result | Notes |
 |---|---|---|---|---|
+| GET | `/rooms/{id}` | – | `302` | R4. Deep link (the room link Slack posts); outside `/api`, so no JSON. Signed in, or in dev mode: `302 /#/rooms/{id}`. Signed out in `oidc` mode: `302 /auth/login?return=/rooms/{id}`, and the callback lands back on the link. `{id}` must match `^[A-Za-z0-9_-]{1,64}$`; anything else is never redirected and falls to the web UI or `404`. `HEAD` answers the same |
 | GET | `/healthz` | – | `{status: "ok", version}` | outside `/api`, no auth, exempt from the Host allow-list (probes). `version` (R0; server R9) is the build version linked in with `-ldflags "-X piperoom/internal/version.Version=<v>"` (`internal/version`), `"dev"` for a plain `go build`. Liveness only: it checks nothing else. `GET /readyz` is unchanged (`{status, checks}`, `503` when the store does not answer) |
 | GET | `/api/people` | – | `[{id, name, email?, verified}]` | after auth PR 3: the people a driver may grant control or hand off to: `users.yaml` users plus members with a live session (`LookupPerson`). `email` only for IdP users; pickers show `id` or `email` next to `name`. `verified` is `true` for `users.yaml` users only. Members only: a viewer gets `403 viewer` (the list holds emails and viewers cannot grant or hand off anyway) |
 | GET | `/api/me` | – | `{id,name,layers,verified}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request; `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise); `admin: true` when this user has `admin: true` in users.yaml (omitted otherwise); `verified` as for event actors |
 | GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first; with `tenants:` only the rooms of your tenants (see Tenants above) |
-| POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation` |
+| POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation`. R4: `title` at most 200 characters (Unicode code points), else `400 validation` (the message gives the length and the limit, never the text). An alert's title is clipped to 200 with `…` instead, so an alert is never refused for it |
 | POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |
 | POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert (label, `PAGERDUTY_SERVICES` map, owners match, or `DEFAULT_ALERT_PIPELINE`); the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name) and `dedup_key`. With a `tenants:` block in `owners.yaml` the `200`/`201` body is `{"room_id": "r_…", "created": true\|false}` instead of the `RoomSnapshot`: a source secret is shared by every tenant, so the reply carries no room content. |
 | GET | `/api/rooms/{id}` | – | `RoomSnapshot` | |
 | GET | `/api/rooms/{id}/events?after=0&limit=500` | – | `{events:[Event], last_seq}` | limit max 1000; `events` is `[]` when nothing is after `after` |
-| POST | `/api/rooms/{id}/comments` | `{step_id?, text}` | `Event` | `@agent` in text sets `mentions_agent` |
-| POST | `/api/rooms/{id}/steer` | `{text}` | `Event` | driver → `steer.sent`; others → `steer.suggested` |
+| POST | `/api/rooms/{id}/comments` | `{step_id?, text}` | `Event` | `@agent` in text sets `mentions_agent`. R4: `text` at most 4000 characters (code points), else `400 validation` |
+| POST | `/api/rooms/{id}/steer` | `{text}` | `Event` | driver → `steer.sent`; others → `steer.suggested`. R4: `text` at most 4000 characters (code points), else `400 validation` |
 | POST | `/api/rooms/{id}/suggestions/{sid}/send` | – | `Event` | driver only; emits `steer.sent` with `suggestion_id` |
 | POST | `/api/rooms/{id}/suggestions/{sid}/decline` | `{reason?}` | `Event` (`steer.declined`) | R0; server R11. Driver only (`403 not_driver`); open rooms only (`409 room_closed`); unknown `sid`, or one of another room, `404 not_found`; a suggestion that is no longer pending (sent or declined) `409 already_decided`, the same answer as a second `send`, so a retry after a lost response is safe to treat as done. `reason` optional, at most 500 characters, typed-text rule above (else `400 validation`). The suggestion leaves `pending_suggestions`; the agent never sees it |
 | POST | `/api/rooms/{id}/control/request` | – | `Event` | |
@@ -276,6 +277,10 @@ renews the lease with a `control.granted` to themselves (which ends the signal),
 `control/grant`. Not written for a closed room or a room with no driver. A client shows the signal from the last
 `control.lease_expired` whose `lease_until` equals the driver's current `lease_until`.
 
+Proposals: a step's action must implement `actions.Scoped`; the server calls `Validate` and then
+`CheckScope(room's pipeline, params)` when the proposal is created and again right before `Execute`. Params are
+frozen at creation; approvals bind to those exact steps.
+
 ### Hand-off requests (R0; server R4, web R3)
 
 `handoff.requested {request_id, to, stay_as_watcher, expires_at}` (actor: the driver) is appended when
@@ -284,10 +289,6 @@ the first of: `handoff.created` with the same `request_id` (the normal end), `ha
 (system actor; `reason` ∈ `summary_failed | not_driver | room_closed | internal_error`, never error text), or
 `expires_at` (request time + 3 min, the summary deadline; covers a server that stopped mid-request). The server and
 clients use this same rule. `handoff.created` gains `request_id` (absent on events from before R0).
-
-Proposals: a step's action must implement `actions.Scoped`; the server calls `Validate` and then
-`CheckScope(room's pipeline, params)` when the proposal is created and again right before `Execute`. Params are
-frozen at creation; approvals bind to those exact steps.
 
 ### Watcher alerts (`alert_source: "watcher"`)
 
@@ -388,6 +389,9 @@ never shows shadow output.
 `GET /api/rooms/{id}/ws?after=<seq>`
 
 The WebSocket uses the session cookie (dev: or `X-User` for non-browser clients); no credentials → `401`.
+R4: at most 200 live connections per room and 20 per user, per server process (with several replicas the caps apply on
+each). Over either cap the request answers `429 too_many_connections` before the upgrade, with a message naming which
+cap was hit; a closed connection frees its slot.
 
 Server → client messages:
 ```json
