@@ -1039,7 +1039,7 @@ func inputFor(e events.Event) *agent.HumanInput {
 		approved := true
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
-			Text:       fmt.Sprintf("layer %q approved proposal %s", p.Layer, p.ProposalID),
+			Text:       fmt.Sprintf("layer %q approved your proposal", p.Layer),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
 		}
 	case events.ApprovalRejected:
@@ -1050,7 +1050,7 @@ func inputFor(e events.Event) *agent.HumanInput {
 		approved := false
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
-			Text:       fmt.Sprintf("layer %q rejected proposal %s: %s", p.Layer, p.ProposalID, p.Reason),
+			Text:       fmt.Sprintf("layer %q rejected your proposal: %s", p.Layer, p.Reason),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
 		}
 	case events.ActionExecuted:
@@ -1070,7 +1070,7 @@ func inputFor(e events.Event) *agent.HumanInput {
 		stepIndex := p.StepIndex
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "action_result",
-			Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, p.StepIndex, p.Output),
+			Text: fmt.Sprintf("step %d: %s", p.StepIndex+1, p.Output),
 			OK:   okp, ProposalID: p.ProposalID, StepIndex: &stepIndex,
 		}
 	}
