@@ -63,6 +63,13 @@ func (s *spy) LongTransactions(context.Context, time.Duration) ([]clients.Transa
 	s.hit("LongTransactions")
 	return nil, nil
 }
+
+// LongTransactionsOnTables lets pg_long_transactions run: since #107 it
+// refuses a source client that cannot filter by table.
+func (s *spy) LongTransactionsOnTables(context.Context, time.Duration, []string) (postgres.TableTransactions, error) {
+	s.hit("LongTransactionsOnTables")
+	return postgres.TableTransactions{}, nil
+}
 func (s *spy) Row(_ context.Context, _, _, pk string) (map[string]any, bool, error) {
 	s.hit("Row")
 	return map[string]any{"id": pk}, true, nil
