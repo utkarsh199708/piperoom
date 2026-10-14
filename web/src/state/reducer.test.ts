@@ -143,6 +143,15 @@ describe('applyEvent — every event type', () => {
     expect(s.comments[0].author.id).toBe('arjun')
   })
 
+  it('steer.declined marks the suggestion declined with who and why', () => {
+    let s = applyEvent(base(), ev(1, 'steer.suggested', { suggestion_id: 'g1', text: 'try X' }, { kind: 'human', id: 'kabir', name: 'Kabir' }))
+    s = applyEvent(s, ev(2, 'steer.declined', { suggestion_id: 'g1', reason: 'not now' }, human))
+    expect(s.suggestions[0]).toMatchObject({ status: 'declined', declined_by: human, reason: 'not now' })
+    // An unknown id changes nothing.
+    const t = applyEvent(s, ev(3, 'steer.declined', { suggestion_id: 'nope' }, human))
+    expect(t.suggestions).toEqual(s.suggestions)
+  })
+
   it('steer.suggested adds a pending suggestion; steer.sent with id marks it accepted', () => {
     let s = applyEvent(
       base(),

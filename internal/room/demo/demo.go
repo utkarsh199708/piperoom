@@ -108,7 +108,7 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Root cause found: the schema change on orders.amount is incompatible under BACKWARD compatibility for pg.public.orders-value. I've written a fix proposal."})
 
-	proposalID, err := deps.Proposals.Create(ctx, events.ProposalCreatedPayload{
+	_, err := deps.Proposals.Create(ctx, events.ProposalCreatedPayload{
 		Title: "Set subject compatibility to NONE and restart the connector task",
 		Steps: []events.ProposalStep{
 			{
@@ -139,8 +139,8 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 		}
 		return err
 	}
-	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Proposal " + proposalID + " is waiting for schema-registry and kafka-connect owners."})
-	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: "proposal " + proposalID})
+	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "The fix proposal is waiting for the schema-registry and kafka-connect owners."})
+	_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "waiting_approval", Detail: "1 proposal open"})
 	return waitForInput(ctx, deps, emit)
 }
 

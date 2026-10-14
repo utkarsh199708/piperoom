@@ -24,6 +24,8 @@ func TestEveryReadToolRefusesWithoutRoomScope(t *testing.T) {
 		"pg_publication_tables":    `{"pipeline_id":"orders"}`,
 		"warehouse_freshness":      `{"table":"analytics.orders","ts_column":"updated_at"}`,
 		"warehouse_row":            `{"pipeline_id":"orders","table":"analytics.orders","pk_column":"id","key":"1"}`,
+		"warehouse_load_errors":    `{"table":"analytics.orders"}`,
+		"reconcile":                `{"table":"public.orders","since":"2026-10-11T00:00:00Z","until":"2026-10-11T01:00:00Z"}`,
 		"pipeline_map":             `{"pipeline_id":"orders"}`,
 		"trace_record":             `{"pipeline_id":"orders","table":"public.orders","key":"1"}`,
 		"connect_list_connectors":  `{}`,
@@ -37,6 +39,7 @@ func TestEveryReadToolRefusesWithoutRoomScope(t *testing.T) {
 		"kafka_consumer_lag":       `{"group":"order-sync"}`,
 		"kafka_find_by_key":        `{"topic":"pg.public.orders","key":"1","since":"2026-10-11T00:00:00Z"}`,
 		"kafka_topic_config":       `{"pipeline_id":"orders"}`,
+		"debezium_metrics":         `{"connector":"pg-orders-connector"}`,
 		"dlq_peek":                 `{"connector":"pg-orders-sink"}`,
 	}
 	ran := 0

@@ -54,7 +54,11 @@ func (w *Watcher) evaluate(now time.Time, ts []target, bySet map[string]*observa
 			snaps = map[string]dlqSnap{}
 		}
 		ps := w.pipe(t.p.ID)
-		cr := classifyConnectors(t.connectors, obs)
+		var loops map[string]loopInfo
+		if t.cfg.ConnectorDown.Enabled {
+			loops = recordTasks(now, t, ps, obs)
+		}
+		cr := classifyConnectors(t.connectors, obs, loops, t.cfg.ConnectorCrashLoop.Window)
 		if t.cfg.ConnectorDown.Enabled {
 			w.apply(now, t, ps, owners.SignalConnectorDown, t.cfg.ConnectorDown, cr.reading(), fired)
 		}
@@ -62,6 +66,7 @@ func (w *Watcher) evaluate(now time.Time, ts []target, bySet map[string]*observa
 			w.evaluateSlot(now, t, ps, cr, obs, fired)
 		}
 		w.evaluateDLQ(now, t, ps, obs, snaps, fired)
+		w.evaluateLag(now, t, ps, obs, fired)
 		w.logStill(now, t, ps)
 	}
 	return fired
@@ -186,8 +191,9 @@ func (c connResult) allRunning() bool { return !c.anyBad && !c.anyUnknown }
 // classifyConnectors applies the devctl rule (health.go): healthy means the
 // connector is RUNNING, has at least one task, and every task is RUNNING.
 // FAILED and a missing connector are sev2; PAUSED/STOPPED alone are sev3 (often
-// maintenance, but WAL still grows).
-func classifyConnectors(names []string, obs *observation) connResult {
+// maintenance, but WAL still grows). A task in loops (crashloop.go) is bad at
+// sev2 even while it reads RUNNING; window is the crash-loop window, for the label.
+func classifyConnectors(names []string, obs *observation, loops map[string]loopInfo, window time.Duration) connResult {
 	res := connResult{sev: "sev9"}
 	for _, name := range names {
 		co := obs.conns[name]
@@ -199,7 +205,7 @@ func classifyConnectors(names []string, obs *observation) connResult {
 		case co.statusErr != nil:
 			res.unknown(co.statusErr)
 		default:
-			sev, desc, ev := classifyOne(name, co.status)
+			sev, desc, ev := classifyOne(name, co.status, loops, window)
 			if desc != "" {
 				res.bad(sev, desc, ev)
 			}
@@ -223,7 +229,7 @@ func (c *connResult) unknown(err error) {
 }
 
 // classifyOne returns a description ("" = healthy) for one connector.
-func classifyOne(name string, st clients.ConnectorStatus) (sev, desc string, ev map[string]any) {
+func classifyOne(name string, st clients.ConnectorStatus, loops map[string]loopInfo, window time.Duration) (sev, desc string, ev map[string]any) {
 	var bad []string // non-RUNNING states seen
 	var what []string
 	if st.State != "RUNNING" {
@@ -233,19 +239,37 @@ func classifyOne(name string, st clients.ConnectorStatus) (sev, desc string, ev 
 	tasks := make([]map[string]any, 0, min(len(st.Tasks), maxEvidenceTasks))
 	traces, failedTasks := 0, 0
 	for _, tk := range st.Tasks {
-		if tk.State == "RUNNING" {
+		li, looping := loops[taskKey(name, tk.ID)]
+		if tk.State == "RUNNING" && !looping {
 			continue // only the tasks that are not running go in the evidence
 		}
-		bad = append(bad, tk.State)
+		if looping && tk.State == "RUNNING" {
+			bad = append(bad, "CRASH_LOOP")
+		} else {
+			bad = append(bad, tk.State)
+		}
 		failedTasks++
 		if failedTasks <= 3 { // the title names a few tasks, not hundreds
-			what = append(what, fmt.Sprintf("task %d %s", tk.ID, clean(tk.State, 24)))
+			if looping {
+				what = append(what, loopLabel(tk.ID, li, window))
+			} else {
+				what = append(what, fmt.Sprintf("task %d %s", tk.ID, clean(tk.State, 24)))
+			}
 		}
 		if failedTasks > maxEvidenceTasks {
 			continue
 		}
 		te := map[string]any{"id": tk.ID, "state": clean(tk.State, 24)}
-		if line := firstLine(tk.Trace, maxTraceChars); line != "" && traces < maxEvidenceTraces {
+		line := firstLine(tk.Trace, maxTraceChars)
+		if looping {
+			te["crash_loop"] = true
+			te["restarts"] = li.restarts
+			te["restart_window_seconds"] = int64(window.Seconds())
+			if line == "" {
+				line = li.trace // RUNNING now: the last FAILED trace
+			}
+		}
+		if line != "" && traces < maxEvidenceTraces {
 			te["trace"] = line
 			traces++
 		}

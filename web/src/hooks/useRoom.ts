@@ -59,6 +59,8 @@ export interface RoomActions {
   comment: (text: string, stepId?: string) => void
   steer: (text: string) => void
   sendSuggestion: (suggestionId: string) => void
+  /** The driver declines a pending suggestion, with an optional note to its author. */
+  declineSuggestion: (suggestionId: string, reason?: string) => void
   requestControl: () => void
   grantControl: (to: string) => void
   /**
@@ -434,6 +436,24 @@ export function useRoom(roomId: string) {
         return
       }
       void runAction(api.sendSuggestion(roomId, suggestionId))
+    },
+    declineSuggestion: (suggestionId, reason) => {
+      if (isFixtures()) {
+        synthesize('steer.declined', { suggestion_id: suggestionId, reason })
+        return
+      }
+      // already_decided is also the approval code ("layer ... already decided"), so its friendlier
+      // wording for a suggestion lives here and not in lib/errors.ts.
+      api
+        .declineSuggestion(roomId, suggestionId, reason)
+        .then(() => setError(null))
+        .catch((e: unknown) =>
+          setError(
+            e instanceof ApiClientError && e.code === 'already_decided'
+              ? 'this suggestion was already sent or declined'
+              : errorText(e),
+          ),
+        )
     },
     requestControl: () => {
       if (isFixtures()) {
