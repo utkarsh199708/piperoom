@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { AgentPill } from './AgentPill'
+import { CostChip } from './CostChip'
 import { PersonAvatar } from './PersonAvatar'
 import { StatusDot } from './StatusDot'
 
@@ -151,6 +152,12 @@ export function RoomHeader({
           </>
         )}
         <span>#{state.id}</span>
+        {!state.shadow && state.opened_at && (
+          <>
+            <Sep />
+            <CostChip state={state} />
+          </>
+        )}
         {state.opened_at && (
           <>
             <Sep />

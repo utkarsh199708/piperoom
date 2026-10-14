@@ -257,7 +257,14 @@ export function RoomScreen() {
               onSelectLayer={setLayerFilter}
             />
 
-            {state.hypothesis && <HypothesisCard hypothesis={state.hypothesis} steps={state.steps} />}
+            {state.hypothesis && (
+              <HypothesisCard
+                hypothesis={state.hypothesis}
+                steps={state.steps}
+                pipelineId={state.pipeline_id}
+                insight={state.insight}
+              />
+            )}
 
             {showProposals && (
               <div id={PROPOSAL_ANCHOR} tabIndex={-1} className="scroll-mt-4 focus:outline-none">

@@ -55,6 +55,8 @@ export interface RoomCreatedPayload {
   severity: string // "sev1".."sev4"
   pipeline_id: string
   alert?: unknown
+  /** Shadow mode: the agent runs silently and its numbers are revealed after close. */
+  shadow?: boolean
 }
 
 export interface RoomClosedPayload {
@@ -106,7 +108,7 @@ export interface AgentHypothesisPayload {
 // Cost telemetry: the reducer keeps it out of the activity feed and the steps.
 export interface AgentUsagePayload {
   model: string
-  role: 'triage' | 'main' | 'handoff' | 'compaction'
+  role: string // triage | main | handoff | compaction | postmortem | first_look | judge
   input_tokens: number
   cache_creation_input_tokens: number
   cache_read_input_tokens: number
@@ -325,6 +327,48 @@ export interface RoomSnapshot {
   open_proposals: ProposalSummary[]
   pending_suggestions: SuggestionSummary[]
   members: MemberSummary[]
+  /** Shadow room (docs/api.md): its insight is zeros until revealed. */
+  shadow?: boolean
+  /** F11: cost and clock facts folded server-side; absent on an older server. */
+  insight?: RoomInsight
+}
+
+/** RoomSnapshot.insight (docs/api.md, F11). */
+export interface RoomInsight {
+  first_hypothesis_at: string | null
+  /** Whole seconds from opened_at to the first hypothesis; -1 before one exists. */
+  time_to_first_hypothesis_s: number
+  final_confidence: string
+  steps: number
+  tool_calls: number
+  tool_errors: number
+  usage: {
+    calls: number
+    unpriced_calls: number
+    tokens: number
+    cost_usd: number | null
+    latency_ms_total: number
+  }
+}
+
+/** GET /api/pipelines/{pid}/agent-stats (F11): the agent's track record on one pipeline. */
+export interface AgentStats {
+  pipeline_id: string
+  window_days: number
+  generated_at: string
+  rooms: number
+  hypothesised: number
+  labelled: number
+  graded: number
+  layer_correct: number
+  root_cause: { yes: number; partial: number; no: number }
+  by_confidence: { confidence: string; runs: number; correct: number; accuracy: number }[]
+  median_time_to_first_hypothesis_s: number
+  median_human_mttr_s: number
+  median_cost_usd: number
+  cost_available: boolean
+  enough_data: boolean
+  shadow: { rooms: number; graded: number; layer_correct: number }
 }
 
 export interface TopologyNode {
