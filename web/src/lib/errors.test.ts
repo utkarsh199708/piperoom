@@ -12,6 +12,10 @@ describe('friendlyError', () => {
     )
   })
 
+  it('maps handoff_in_progress to a friendly line (409 from a second hand-off click)', () => {
+    expect(friendlyError('handoff_in_progress', 'a hand-off is in progress')).toMatch(/already being written/)
+  })
+
   it('keeps other server codes as they are', () => {
     expect(friendlyError('not_driver', 'only the driver may steer')).toBe('only the driver may steer')
     expect(friendlyError('room_closed', 'the room is closed')).toBe('the room is closed')

@@ -17,6 +17,8 @@ import type {
   Event,
   HandoffAcceptedPayload,
   HandoffCreatedPayload,
+  HandoffFailedPayload,
+  HandoffRequestedPayload,
   ProposalCreatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
@@ -391,10 +393,39 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       break
     }
 
+    case 'handoff.requested': {
+      const p = as<HandoffRequestedPayload>(event)
+      next = {
+        ...state,
+        handoff_request: {
+          request_id: p.request_id,
+          to: p.to,
+          stay_as_watcher: p.stay_as_watcher,
+          expires_at: p.expires_at,
+        },
+        handoff_failure: null,
+      }
+      break
+    }
+
+    case 'handoff.failed': {
+      const p = as<HandoffFailedPayload>(event)
+      next = {
+        ...state,
+        handoff_request: state.handoff_request?.request_id === p.request_id ? null : state.handoff_request,
+        handoff_failure: { request_id: p.request_id, reason: p.reason },
+      }
+      break
+    }
+
     case 'handoff.created': {
       const p = as<HandoffCreatedPayload>(event)
       next = {
         ...state,
+        // Ends the request it completes; an event from before R0 carries no request_id and ends any.
+        handoff_request:
+          !p.request_id || state.handoff_request?.request_id === p.request_id ? null : state.handoff_request,
+        handoff_failure: null,
         handoffs: [
           ...state.handoffs,
           {

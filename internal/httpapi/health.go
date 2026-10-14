@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"piperoom/internal/version"
 )
 
 // DefaultProbeTimeout bounds GET /readyz. Orchestrators usually give a probe a
@@ -71,6 +73,9 @@ func isProbePath(p string) bool { return p == pathHealthz || p == pathReadyz || 
 
 type healthBody struct {
 	Status string `json:"status"`
+	// Version is the linked build version (internal/version), "dev" for a
+	// plain go build: it names a build, not a secret (docs/api.md).
+	Version string `json:"version"`
 }
 
 type readyBody struct {
@@ -81,7 +86,7 @@ type readyBody struct {
 // handleHealthz answers as long as the process serves HTTP; it checks nothing
 // else, so a slow database never gets the process restarted.
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, healthBody{Status: "ok"})
+	writeJSON(w, http.StatusOK, healthBody{Status: "ok", Version: version.String()})
 }
 
 // handleReadyz reports whether the store answers within the probe timeout.
