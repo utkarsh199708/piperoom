@@ -206,7 +206,7 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	// connector configs plus "<topic_prefix>.<table>" from owners.yaml, so
 	// the filter still knows them while Connect is down.
 	ownTopics := map[string]bool{}
-	for _, t := range topics {
+	for _, t := range fp.topics {
 		ownTopics[t] = true
 	}
 	if p.TopicPrefix != "" {
