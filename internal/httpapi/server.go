@@ -123,6 +123,9 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 
 	// Liveness/readiness probes: outside /api, so no X-User and no 60 s
 	// request budget; /readyz bounds its store check with probeTimeout.
+	// Room links from Slack and alerts (deeplink.go).
+	r.Get("/rooms/{id}", s.handleRoomDeepLink(notFound.ServeHTTP))
+
 	r.Get(pathHealthz, s.handleHealthz)
 	r.Get(pathReadyz, s.handleReadyz)
 
