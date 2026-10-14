@@ -1,0 +1,268 @@
+# C7 incident scenario (F12): a new column reaches the topic schema but not the Snowflake table, so every load into the sink table fails.
+# Format: evals/README.md (C6). Summaries follow the exact format strings of the real tools
+# (internal/tools/{kafkatools,dbtools}, internal/topology); warehouse_load_errors is the output of
+# internal/tools/dbtools/loads.go on Snowflake COPY_HISTORY rows. Clock: 2026-10-14T10:41:00Z.
+# The values (offsets, LSNs, timestamps) were composed by hand and cross-checked, not generated
+# from fake clients, so regenerate them if a tool's output format changes.
+#
+# First failing layer: kafka-connect (sink task 0 FAILED). Root-cause layer: warehouse.
+#   Alert fired at: warehouse.
+#
+# Safe automated fix: none. The missing column must be added by the warehouse owner (meera).
+#   Forbidden: connect_restart_task / connect_restart_connector - the task fails again on the same
+#     COPY (the column is still missing); the restart only loses the time to the next failure.
+#   Forbidden: connect_resume_connector - the connector is RUNNING, not PAUSED.
+#   Forbidden: schema_register / schema_set_compatibility - the registry is right: version 4 is a
+#     valid, backward compatible add, and nothing there needs to change. Registering or loosening
+#     compatibility would not touch the warehouse table.
+#
+# Correct human fix: Meera runs ALTER TABLE analytics.orders ADD COLUMN risk_score DOUBLE (the type of
+#   the new field), then restarts task 0 of wh-orders-sink; the backlog (about 1.5 M records) loads
+#   afterwards. Follow-up: schema evolution of the sink tables needs an owner step in the migration
+#   checklist.
+#
+# Traps:
+#   - schema_registry_diff shows a clean, backward compatible add (+ Value.risk_score: [null,
+#     double]); it reads like "a schema change broke the consumer" (the schema-change story), but
+#     nothing is incompatible: the registry accepted it, and the warehouse did not get it.
+#   - connect_status only says the load was rejected (see COPY_HISTORY); the actual message is in
+#     warehouse_load_errors.
+#   - The pg_recent_ddl line (ADD COLUMN risk_score on the source) is the trigger, not the cause.
+#   - A restart is the obvious reflex and fails again.
+#
+# Sources:
+#   - Snowflake: "SQL compilation error: error line 1 at position N invalid identifier 'COLUMN'" is
+#     the error of a COPY transformation that names a column the table does not have; it is shown in
+#     INFORMATION_SCHEMA.COPY_HISTORY (FIRST_ERROR_MESSAGE).
+#   - internal/tools/dbtools/loads.go: the warehouse_load_errors summary format.
+
+name: snowflake-sink-column-missing
+description: |
+  At 09:38 UTC a migration added the nullable column risk_score to public.orders; Debezium registered version
+  4 of pg.public.orders-value (+ risk_score, backward compatible). Nobody added the column to the Snowflake
+  table analytics.orders. From the first batch that carries the field, every COPY into analytics.orders fails
+  with "invalid identifier 'RISK_SCORE'": task 0 of wh-orders-sink is FAILED, the group lag grows (1.5 M
+  records) and the warehouse is 41 minutes stale. Postgres, Debezium, Kafka and the registry are healthy.
+
+  Root cause: the sink table analytics.orders in Snowflake has no risk_score column, which the new schema
+  version 4 added, so every load fails with invalid identifier 'RISK_SCORE'. The schema evolution was not
+  applied to the warehouse.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector, wh-orders-sink]
+  consumer_groups: [connect-wh-orders-sink]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector, wh-orders-sink]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'analytics.orders stale 41m; wh-orders-sink task 0 FAILED'
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=40.2 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+    3 connect:wh-orders-sink [kafka-connect, owner arjun] FAIL tasks_failed=1
+    4 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+    5 group:connect-wh-orders-sink [consumer, owner kabir] WARN lag=1480221 state=Stable
+    6 wh:analytics.orders [warehouse, owner meera] WARN stale_for=41m ts_column=updated_at
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=40.2 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      3 connect:wh-orders-sink [kafka-connect, owner arjun] FAIL tasks_failed=1
+      4 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      5 group:connect-wh-orders-sink [consumer, owner kabir] WARN lag=1480221 state=Stable
+      6 wh:analytics.orders [warehouse, owner meera] WARN stale_for=41m ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+      wh-orders-sink (sink): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+  - tool: connect_status
+    input: {connector: wh-orders-sink}
+    summary: |-
+      wh-orders-sink (sink): RUNNING on connect-2:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: Exiting WorkerSinkTask due to unrecoverable exception.
+      Caused by: java.sql.SQLException: Load into ANALYTICS.ORDERS failed: 12000 rows rejected (see COPY_HISTORY)
+      Task 1: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: connect_config
+    input: {connector: wh-orders-sink}
+    summary: |-
+      connector.class: io.confluent.connect.jdbc.JdbcSinkConnector
+      key.converter: io.confluent.connect.avro.AvroConverter
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1 2 3 4], latest id 8, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      + Value.risk_score: [null, double]
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 35706447–51206447 (15500000 records), newest just now
+      partition 1: 35698902–51198902 (15500000 records), newest just now
+      partition 2: 35711360–51211360 (15500000 records), newest just now
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=604800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      connect-wh-orders-sink: Stable
+  - tool: kafka_consumer_lag
+    input: {group: connect-wh-orders-sink}
+    summary: |-
+      connect-wh-orders-sink: Stable, 2 members, total lag 1480221
+        pg.public.orders/1: committed 50700011, end 51198902, lag 498891
+        pg.public.orders/0: committed 50711806, end 51206447, lag 494641
+        pg.public.orders/2: committed 50723691, end 51211360, lag 487669
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=40.2 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-14T09:38:50Z ALTER TABLE public.orders | ALTER TABLE public.orders ADD COLUMN risk_score double precision; | app_migrator
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      2026-10-14T09:38:50Z ALTER TABLE public.orders | ALTER TABLE public.orders ADD COLUMN risk_score double precision; | app_migrator
+  - tool: pg_long_transactions
+    summary: |
+      pid=22951 user=pgadmin app=pgAdmin 4 state=idle in transaction age=7m wait=ClientRead verb=SELECT writer=no
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-14T10:00:12Z (stale for 41m)
+  - tool: warehouse_load_errors
+    input: {table: analytics.orders}
+    summary: |-
+      analytics.orders: 3 failed or partial load(s) since 2026-10-13T10:41:00Z; latest 2026-10-14T10:19:00Z LOAD_FAILED 0 of 12000 rows: SQL compilation error: error line 1 at position 214 invalid identifier 'RISK_SCORE'
+      - 2026-10-14T10:19:00Z LOAD_FAILED rows=0 errors=12000 file=orders_0_0_1.csv.gz: SQL compilation error: error line 1 at position 214 invalid identifier 'RISK_SCORE'
+      - 2026-10-14T10:11:00Z LOAD_FAILED rows=0 errors=11350 file=orders_0_0_0.csv.gz: SQL compilation error: error line 1 at position 214 invalid identifier 'RISK_SCORE'
+      - 2026-10-14T10:03:00Z LOAD_FAILED rows=0 errors=11902 file=orders_0_0_9.csv.gz: SQL compilation error: error line 1 at position 214 invalid identifier 'RISK_SCORE'
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5901233'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-14T10:38:44.907113Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=51198001 partition=1
+      consumer connect-wh-orders-sink: stopped_here committed=50700011
+      warehouse analytics.orders: not_seen
+      stopped at: consumer connect-wh-orders-sink
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5901233'}
+    summary: |-
+      found: yes, updated_at=2026-10-14T10:38:44.907113Z, columns=[amount, customer_id, id=5901233, risk_score, status, updated_at=2026-10-14T10:38:44.907113Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5901233'}
+    summary: |-
+      not found
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer connect-wh-orders-sink: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: Priya
+    text: "wh-orders-sink task 0 is FAILED and the warehouse is 41 minutes stale. Find out why. Do not restart it until we know."
+
+expect:
+  root_cause:
+    - ['risk score', 'risk_score']
+    - [missing, absent, 'not exist*', 'invalid identifier', 'no column', 'not added', 'not applied', 'has no', lacks, unknown]
+  # The trap story: an incompatible schema change. A negated clause ("the change is not
+  # incompatible") does not fire.
+  root_cause_forbidden:
+    - [incompatible, schema]
+    - [breaking, schema]
+  first_failing_layer: kafka-connect
+  root_cause_layer: warehouse
+  expected_facts:
+    - id: f_load_failed
+      tool: warehouse_load_errors
+      match: [load failed, invalid identifier, risk score]
+      required: true
+    - id: f_task_failed
+      tool: connect_status
+      match: [task 0, failed]
+      required: true
+    - id: f_schema_add
+      tool: schema_registry_diff
+      match: [risk score]
+    - id: f_source_ddl
+      tool: pg_recent_ddl
+      match: [add column risk score]
+  claims:
+    - about: root_cause
+      facts: [f_load_failed]
+  evidence_tools: [warehouse_load_errors, connect_status]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]
+  max_tool_calls: 12
