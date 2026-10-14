@@ -15,6 +15,7 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/netsec"
+	"piperoom/internal/tools"
 )
 
 // Client is a thin Kafka Connect REST client.
@@ -154,8 +155,23 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 	return c.doBody(ctx, method, path, nil, out)
 }
 
-// doBody is do with an optional JSON request body (nil sends none).
+// doBody is do with an optional JSON request body (nil sends none). It records
+// one provenance call per request, on success and on error. The call holds the
+// method and path only: a request body can carry a config value.
 func (c *Client) doBody(ctx context.Context, method, path string, in, out any) error {
+	start := time.Now()
+	err := c.roundTrip(ctx, method, path, in, out)
+	tools.Record(ctx, tools.Call{
+		Kind:   tools.CallHTTP,
+		Target: c.baseURL,
+		Text:   method + " " + path,
+		At:     start,
+		TookMS: time.Since(start).Milliseconds(),
+	})
+	return err
+}
+
+func (c *Client) roundTrip(ctx context.Context, method, path string, in, out any) error {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)

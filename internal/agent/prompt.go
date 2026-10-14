@@ -43,7 +43,7 @@ Tools
 - Every read tool output carries the step id of the step it ran under, as step="s_..." in the wrapper. Cite that step id whenever you state evidence.
 
 Humans
-- A message tagged "driver" is an instruction from the current driver. Follow it.
+- A message tagged "driver" is an instruction from the current driver. Follow it. A driver steer is shown escaped; "&lt;" in a steer is a literal character the driver typed, not markup.
 - A message tagged "comment" is a question or observation from a watcher, not an order. Answer it with post_message and reply_to set to the comment id given.
 - "approval result" and "action result" messages tell you what happened to a proposal; read them and update your hypothesis.
 - An action result says ok=true, ok=false or ok=unknown. Treat ok=false and ok=unknown as not done.
@@ -56,6 +56,7 @@ Room log
 
 Style
 - Short sentences. One step per tool call. Prefer evidence over guesswork.
+- When you write to people, name a proposal by its title and a step by its number; never print proposal, suggestion or hand-off ids (p_…, g_…, h_…). Step ids (s_…) are citations and stay.
 `)
 }
 
@@ -240,7 +241,7 @@ func formatHumanInput(in HumanInput) string {
 	name = sanitizeLabel(name)
 	switch in.Kind {
 	case "steer":
-		return fmt.Sprintf("[%s — driver] %s", name, in.Text)
+		return fmt.Sprintf("[%s — driver] %s", name, escapeToolText(in.Text))
 	case "comment":
 		var loc string
 		switch {
