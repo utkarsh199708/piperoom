@@ -98,8 +98,9 @@ describe('role-aware room screen', () => {
     showRoom(busyRoom())
     expect(screen.getByRole('button', { name: 'Hand off' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Trace one record' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Approve' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Reject' })).toBeInTheDocument()
+    // The card's buttons and the decision bar's.
+    expect(screen.getAllByRole('button', { name: /^Approve/ }).length).toBeGreaterThan(0)
+    expect(screen.getAllByRole('button', { name: /^Reject/ }).length).toBeGreaterThan(0)
     expect(screen.getByLabelText('Steer the agent')).toBeInTheDocument()
     expect(screen.getByLabelText('Comment on this step')).toBeInTheDocument()
     expect(screen.queryByText('View only')).not.toBeInTheDocument()

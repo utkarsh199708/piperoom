@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { ArrowDown } from 'lucide-react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
@@ -24,7 +24,9 @@ import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import { CloseRoomDialog } from './CloseRoomDialog'
 import { NoDriverBanner } from './NoDriverBanner'
 import { StaleBanner } from './StaleBanner'
-import { useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
+import { DecisionHandleContext, useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
+import type { DecisionHandle } from './shell/context'
+import { DecisionBar } from './room/DecisionBar'
 import { HypothesisCard } from './room/HypothesisCard'
 import { PROPOSAL_ANCHOR, ProposalsSummary } from './room/ProposalsSummary'
 import { RoomError } from './room/RoomError'
@@ -66,6 +68,11 @@ export function RoomScreen() {
   const [closeOpen, setCloseOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const handleRef = useRef<DecisionHandle | null>(null)
+  const decisionRegistry = useMemo(
+    () => ({ get: () => handleRef.current, set: (h: DecisionHandle | null) => void (handleRef.current = h) }),
+    [],
+  )
   const now = useNow(5_000) // a request past expires_at stops counting as in flight
 
   const headerMembers = useMemo(() => {
@@ -176,6 +183,7 @@ export function RoomScreen() {
   const showProposals = state.proposals.length > 0 || user.solo === true
 
   return (
+    <DecisionHandleContext.Provider value={decisionRegistry}>
     <div className="flex min-h-full flex-col text-sm">
       {stale && <StaleBanner onReload={reload} onDismiss={dismissStale} />}
       {error && (
@@ -214,6 +222,7 @@ export function RoomScreen() {
             exporting={exporting}
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
           />
+          <DecisionBar state={state} user={user} />
 
           <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
             <PipelineMap
@@ -228,7 +237,7 @@ export function RoomScreen() {
 
             {showProposals && (
               <div id={PROPOSAL_ANCHOR} tabIndex={-1} className="scroll-mt-4 focus:outline-none">
-                <ProposalsPanel state={state} user={user} actions={actions} stale={stale} />
+                <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} />
               </div>
             )}
 
@@ -304,5 +313,6 @@ export function RoomScreen() {
         <CloseRoomDialog actions={actions} onClose={() => setCloseOpen(false)} />
       )}
     </div>
+    </DecisionHandleContext.Provider>
   )
 }
