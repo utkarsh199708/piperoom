@@ -8,6 +8,8 @@ import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
 import { useJumpToLatest } from '../hooks/useJumpToLatest'
 import { useRoomAttention } from '../hooks/useRoomAttention'
+import { useCatchUp } from '../hooks/useCatchUp'
+import { CatchUpStrip } from './room/CatchUpStrip'
 import { useCurrentUser } from '../context/user'
 import { canClose, canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
 import { ageLabel } from '../lib/time'
@@ -52,6 +54,7 @@ export function RoomScreen() {
   const replaying =
     replayTarget > 0 && (state?.last_seq ?? 0) < replayTarget && conn !== 'error' && conn !== 'not_found'
   const { permission, enable: enableNotify } = useRoomAttention(state, user, replaying)
+  const catchUp = useCatchUp(state, conn, user)
   const { sentinelRef, unseen, jump } = useJumpToLatest(state?.activity ?? [], replaying)
   // One topology refetch per executed action, plus the hook's 30 s refresh
   // while the room is open (stops once closed).
@@ -222,6 +225,7 @@ export function RoomScreen() {
             exporting={exporting}
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
           />
+          <CatchUpStrip strip={catchUp.strip} onDismiss={catchUp.dismiss} />
           <DecisionBar state={state} user={user} />
 
           <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">

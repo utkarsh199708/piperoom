@@ -11,6 +11,7 @@ import type {
   ApprovalRejectedPayload,
   CommentAddedPayload,
   ControlGrantedPayload,
+  ControlLeaseExpiredPayload,
   Event,
   HandoffCreatedPayload,
   HandoffRequestedPayload,
@@ -88,6 +89,10 @@ export function describeEvent(e: Event, driverBefore: string | null = null): str
           : `${who} took control`
       }
       return `${who} handed control to ${p.to.name}`
+    }
+    case 'control.lease_expired': {
+      const p = as<ControlLeaseExpiredPayload>(e)
+      return `${p.driver?.name || 'The driver'}'s lease expired`
     }
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(e)

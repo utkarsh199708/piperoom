@@ -680,3 +680,24 @@ describe('fromSnapshot', () => {
     expect(s.members).toEqual([])
   })
 })
+
+describe('applyEvent — lease expiry (F9)', () => {
+  const lease = '2026-10-11T10:30:00Z'
+  const granted = (seq: number) => ev(seq, 'control.granted', { to: human, lease_until: lease }, human)
+  const expired = (seq: number, until = lease) => ev(seq, 'control.lease_expired', { driver: human, lease_until: until })
+
+  it('folds the signal for the current lease only, and the next grant clears it', () => {
+    let s = applyEvent(base(), granted(1))
+    s = applyEvent(s, expired(2, '2026-10-11T09:00:00Z'))
+    expect(s.driver?.lease_expired).toBeUndefined()
+    s = applyEvent(s, expired(3))
+    expect(s.driver?.lease_expired).toBe(true)
+    expect(s.driver?.id).toBe('arjun') // nothing moves
+    s = applyEvent(s, ev(4, 'control.granted', { to: human, lease_until: '2026-10-11T11:00:00Z' }, human))
+    expect(s.driver?.lease_expired).toBeUndefined()
+  })
+
+  it('ignores the signal when nobody drives', () => {
+    expect(applyEvent(base(), expired(1)).driver).toBeNull()
+  })
+})

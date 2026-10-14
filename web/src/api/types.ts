@@ -37,6 +37,7 @@ export type EventType =
   | 'handoff.created'
   | 'handoff.accepted'
   | 'trace.pinned'
+  | 'control.lease_expired'
 
 export interface Event {
   room_id: string
@@ -132,6 +133,12 @@ export interface SteerSentPayload {
 }
 
 export type ControlRequestedPayload = Record<string, never>
+
+/** control.lease_expired (R0): the system actor's note that this driver's lease ran out. */
+export interface ControlLeaseExpiredPayload {
+  driver: Actor
+  lease_until: string
+}
 
 export interface ControlGrantedPayload {
   to: Actor
