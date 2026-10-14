@@ -2,7 +2,7 @@ import { useId, useState } from 'react'
 import { emptyStateFor } from '../lib/emptyState'
 import type { FormEvent } from 'react'
 import { Check, ChevronRight, X } from 'lucide-react'
-import type { AgentMessageState, CommentState, StepState, ToolCallState } from '../state/types'
+import type { AgentMessageState, ChecklistTick, CommentState, StepState, ToolCallState } from '../state/types'
 import { clockTime } from '../lib/time'
 import { argTags, formatMs, toolLayer } from '../lib/toolLayers'
 import { cn } from '@/lib/utils'
@@ -13,6 +13,9 @@ import { Kbd } from '@/components/ui/kbd'
 import { Progress } from '@/components/ui/progress'
 import { PersonAvatar } from './room/PersonAvatar'
 import { CollapsibleText } from './room/CollapsibleText'
+import { Checklist } from './room/Checklist'
+import type { ChecklistAccess } from './room/Checklist'
+import type { ChecklistStepDonePayload } from '../api/types'
 
 const AGENT = { kind: 'agent', id: 'agent', name: 'Agent' } as const
 
@@ -45,7 +48,15 @@ function rawJson(t: ToolCallState): string {
 
 // One tool call as evidence: tool badge, arg tags, the summary the agent got back,
 // and the raw input/result behind a <details>. Plain text only (never HTML or links).
-function Evidence({ step }: { step: StepState }) {
+/** What the timeline needs to show a runbook_lookup result as a checklist. */
+export interface ChecklistWiring {
+  done: Record<string, ChecklistTick>
+  access: ChecklistAccess
+  onTick: (p: ChecklistStepDonePayload) => void
+  onAsk: (text: string) => void
+}
+
+function Evidence({ step, checklist }: { step: StepState; checklist?: ChecklistWiring }) {
   if (step.tool_calls.length === 0) return null
   return (
     <ul className="m-0 flex list-none flex-col gap-3 p-0">
@@ -69,6 +80,17 @@ function Evidence({ step }: { step: StepState }) {
             >
               {t.summary}
             </pre>
+          )}
+          {checklist && t.tool === 'runbook_lookup' && !t.is_error && (
+            <Checklist
+              stepId={step.id}
+              toolUseId={t.tool_use_id}
+              data={t.data}
+              done={checklist.done}
+              access={checklist.access}
+              onTick={checklist.onTick}
+              onAsk={checklist.onAsk}
+            />
           )}
           {(t.input != null || t.data !== undefined) && (
             <details className="text-xs">
@@ -241,14 +263,17 @@ function DoneStep({
   comments,
   onComment,
   readOnly,
+  checklist,
 }: {
   step: StepState
   n: number
   comments: CommentState[]
   onComment: (text: string, stepId?: string) => void
   readOnly: boolean
+  checklist?: ChecklistWiring
 }) {
-  const [open, setOpen] = useState(false)
+  // A step that fetched a runbook starts open: its checklist is for doing, not for reading later.
+  const [open, setOpen] = useState(() => !!checklist && step.tool_calls.some((t) => t.tool === 'runbook_lookup'))
   const regionId = useId()
   const first = step.tool_calls[0]
   const tags = first ? argTags(first.input) : []
@@ -288,7 +313,7 @@ function DoneStep({
       </button>
 
       <div id={regionId} hidden={!open} className={cn("ml-10 flex-col gap-3 pb-1", open ? "flex" : "hidden")}>
-        <Evidence step={step} />
+        <Evidence step={step} checklist={checklist} />
         {!readOnly && <ReplyBox onSubmit={(t) => onComment(t, step.id)} />}
       </div>
 
@@ -309,12 +334,14 @@ function LiveStep({
   comments,
   onComment,
   readOnly,
+  checklist,
 }: {
   step: StepState
   n: number
   comments: CommentState[]
   onComment: (text: string, stepId?: string) => void
   readOnly: boolean
+  checklist?: ChecklistWiring
 }) {
   const first = step.tool_calls[0]
   const tags = first ? argTags(first.input) : []
@@ -337,7 +364,7 @@ function LiveStep({
         className="h-0.5 rounded-sm bg-agent-subtle"
         indicatorClassName="rounded-sm bg-agent"
       />
-      <Evidence step={step} />
+      <Evidence step={step} checklist={checklist} />
       <StepExtras step={step} comments={comments} onComment={onComment} readOnly={readOnly} showReplyBox />
     </li>
   )
@@ -352,6 +379,7 @@ export function Timeline({
   working = false,
   onTakeControl,
   agent,
+  checklist,
 }: {
   steps: StepState[]
   messages: AgentMessageState[]
@@ -365,6 +393,8 @@ export function Timeline({
   onTakeControl?: () => void
   /** The agent's status: the empty state says what it is doing instead of a fixed line. */
   agent?: { state: string; detail?: string }
+  /** Shows the items of a runbook_lookup result as a checklist when set. */
+  checklist?: ChecklistWiring
 }) {
   const unanchored = comments.filter((c) => !c.step_id)
   if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
@@ -406,6 +436,7 @@ export function Timeline({
               comments={stepComments}
               onComment={onComment}
               readOnly={readOnly}
+              checklist={checklist}
             />
           ) : (
             <DoneStep
@@ -415,6 +446,7 @@ export function Timeline({
               comments={stepComments}
               onComment={onComment}
               readOnly={readOnly}
+              checklist={checklist}
             />
           )
         })}

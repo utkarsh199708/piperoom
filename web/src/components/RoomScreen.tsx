@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from 'react'
 import { ArrowDown } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { exportRoom, isFixtures } from '../api/client'
@@ -23,6 +24,10 @@ import { TracePanel } from './TracePanel'
 import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import { CloseRoomDialog } from './CloseRoomDialog'
 import { NoDriverBanner } from './NoDriverBanner'
+import { ChangesLane } from './room/ChangesLane'
+import { LabelDialog } from './room/LabelDialog'
+import { SimilarCard } from './room/SimilarCard'
+import type { ChecklistWiring } from './Timeline'
 import { StaleBanner } from './StaleBanner'
 import { DecisionHandleContext, useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
 import type { DecisionHandle } from './shell/context'
@@ -66,6 +71,9 @@ export function RoomScreen() {
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [closeOpen, setCloseOpen] = useState(false)
+  const [labelOpen, setLabelOpen] = useState(false)
+  // "Ask the agent" on a checklist item fills the composer; n makes the same text count again.
+  const [prefill, setPrefill] = useState<{ text: string; n: number } | undefined>()
   const [copied, setCopied] = useState(false)
   const [exporting, setExporting] = useState(false)
   const handleRef = useRef<DecisionHandle | null>(null)
@@ -181,6 +189,13 @@ export function RoomScreen() {
   const viewer = isViewer(user)
   const stalledFor = state.status === 'open' && state.opened_at ? ageLabel(state.opened_at) : undefined
   const showProposals = state.proposals.length > 0 || user.solo === true
+  const roomOpen = state.status === 'open'
+  const checklist: ChecklistWiring = {
+    done: state.checklist_done,
+    access: { canTick: roomOpen && !viewer, canAsk: roomOpen && !viewer },
+    onTick: actions.checklist,
+    onAsk: (text) => setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 })),
+  }
 
   return (
     <DecisionHandleContext.Provider value={decisionRegistry}>
@@ -201,6 +216,15 @@ export function RoomScreen() {
         >
           <span>Resolved</span>
           <span className="font-normal text-muted-foreground">{state.resolution}</span>
+          {state.labelled ? (
+            <span className="font-normal text-muted-foreground">· labelled</span>
+          ) : (
+            !viewer && (
+              <Button size="sm" variant="outline" className="ml-auto" onClick={() => setLabelOpen(true)}>
+                Add label
+              </Button>
+            )
+          )}
         </div>
       )}
       {replaying && <ReplayProgress done={state.last_seq} total={replayTarget} />}
@@ -241,6 +265,8 @@ export function RoomScreen() {
               </div>
             )}
 
+            <ChangesLane steps={state.steps} alertAt={state.opened_at} />
+
             <section aria-labelledby="investigation-heading" className="flex flex-col gap-2">
               <div className="flex items-center gap-2 pt-1">
                 <h2 id="investigation-heading" className="m-0 text-sm font-medium">
@@ -261,6 +287,7 @@ export function RoomScreen() {
                 working={state.agent_status.state === 'working'}
                 onTakeControl={takeControl}
                 agent={state.agent_status}
+                checklist={checklist}
               />
             </section>
             <div ref={sentinelRef} aria-hidden="true" />
@@ -280,13 +307,14 @@ export function RoomScreen() {
             </button>
           )}
 
-          <SteerBox state={state} user={user} actions={actions} />
+          <SteerBox state={state} user={user} actions={actions} prefill={prefill} />
         </div>
 
         <aside
           aria-label="Room details"
           className="flex w-full shrink-0 flex-col border-t border-border xl:w-[300px] xl:border-l xl:border-t-0"
         >
+          <SimilarCard steps={state.steps} />
           <ProposalsSummary proposals={state.proposals} />
           <div className="h-px shrink-0 bg-border" />
           <PresencePanel
@@ -310,7 +338,10 @@ export function RoomScreen() {
       )}
       {/* Gone once room.closed arrives: the "Resolved" strip above takes over. */}
       {closeOpen && state.status === 'open' && (
-        <CloseRoomDialog actions={actions} onClose={() => setCloseOpen(false)} />
+        <CloseRoomDialog state={state} actions={actions} onClose={() => setCloseOpen(false)} />
+      )}
+      {labelOpen && state.status === 'closed' && !state.labelled && (
+        <LabelDialog state={state} onSubmit={actions.label} onClose={() => setLabelOpen(false)} />
       )}
     </div>
     </DecisionHandleContext.Provider>
