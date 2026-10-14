@@ -732,7 +732,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		})
 		return toolResult{
 			toolUseID: u.id,
-			content:   wrapToolOutput(u.name, stepID, msg),
+			content:   r.wrapReadToolOutput(u.name, stepID, summary),
 			isError:   true,
 		}
 	}
@@ -752,7 +752,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	})
 	return toolResult{
 		toolUseID: u.id,
-		content:   wrapToolOutput(u.name, stepID, summary),
+		content:   r.wrapReadToolOutput(u.name, stepID, summary),
 		isError:   false,
 	}
 }
