@@ -65,6 +65,9 @@ type Server struct {
 
 	// Model spend routes (WithSpend): usage.go.
 	spend Spend
+
+	// GET /metrics: metrics.go.
+	metrics *metrics
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -89,6 +92,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	s.normalizeAuth()
 	s.gw.Identify = wsIdentify
 	s.gw.SessionAlive = s.sessionAlive
+	s.metrics = newMetrics(time.Now(), s.gw.Connections)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
@@ -96,6 +100,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 		r.Use(s.securityHeaders)
 	}
 	r.Use(requestLog(log, s.clientIP))
+	r.Use(s.metrics.middleware)
 	// Host allow-list first (DNS rebinding, design §1.5), then the cross-origin
 	// check, except signed alert routes and GET /healthz and /readyz (hostGuard).
 	r.Use(s.hostGuard)
@@ -125,6 +130,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	// request budget; /readyz bounds its store check with probeTimeout.
 	r.Get(pathHealthz, s.handleHealthz)
 	r.Get(pathReadyz, s.handleReadyz)
+	r.Get(pathMetrics, s.metrics.handle)
 
 	// Login routes (auth.go, auth_oidc.go). Dev login exists only in dev mode;
 	// the two OIDC routes only in oidc mode.

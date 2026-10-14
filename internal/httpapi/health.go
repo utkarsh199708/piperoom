@@ -65,7 +65,9 @@ func WithClock(now func() time.Time) Option {
 	}
 }
 
-func isProbePath(p string) bool { return p == pathHealthz || p == pathReadyz }
+// isProbePath covers the scrape path too: like the probes it is hit every few
+// seconds, often by pod IP, and its body holds only aggregate counts.
+func isProbePath(p string) bool { return p == pathHealthz || p == pathReadyz || p == pathMetrics }
 
 type healthBody struct {
 	Status string `json:"status"`

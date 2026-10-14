@@ -67,8 +67,8 @@ func (s *Server) normalizeAuth() {
 // hostGuard refuses any Host that is not on the allow-list with 421 bad_host.
 // CrossOriginProtection compares Origin with Host, so a page on a rebound DNS
 // name passes it; this check is what stops that. It runs before every route,
-// probes included, except the signed alert routes (isSignedAlertRoute) and the
-// two health probes (isHealthProbe).
+// probes included, except the signed alert routes (isSignedAlertRoute), the
+// health probes and the metrics scrape (isHealthProbe).
 func (s *Server) hostGuard(next http.Handler) http.Handler {
 	allowed := map[string]bool{}
 	for _, h := range s.authSettings.AllowedHosts {
@@ -87,12 +87,13 @@ func (s *Server) hostGuard(next http.Handler) http.Handler {
 	})
 }
 
-// isHealthProbe reports whether r is exactly GET /healthz or GET /readyz.
-// Cloud load balancers and kubelets often probe a pod by IP, so the Host is an
-// address no operator can list; they would otherwise get 421 and the pod never
-// becomes ready. DNS rebinding gains nothing here: both bodies are fixed
-// strings ("ok", "ready", or a short reason code), never the raw error, a
-// hostname or any room data (health.go). Only GET: the router answers HEAD
+// isHealthProbe reports whether r is exactly GET /healthz, /readyz or
+// /metrics. Cloud load balancers, kubelets and Prometheus often reach a pod by
+// IP, so the Host is an address no operator can list; they would otherwise get
+// 421 and the pod never becomes ready. DNS rebinding gains nothing here: the
+// probe bodies are fixed strings ("ok", "ready", or a short reason code), and
+// /metrics holds only aggregate counts labelled by route pattern, never the
+// raw error, a hostname, an id or any room data (health.go, metrics.go). Only GET: the router answers HEAD
 // with 405, so exempting it would change nothing. The path must be exact
 // (no trailing slash, no case change, no percent-encoded spelling: RawPath is
 // empty unless the client sent a non-default encoding) so no other route
