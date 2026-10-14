@@ -551,6 +551,33 @@ Fixtures: `evals/testdata/rooms/*.json` are real export documents, written by
 (`-rooms -check` shows a stale file). They include the shapes the exporter must refuse (shadow, unlabelled, open,
 fix not recovered) and a room with a planted credential.
 
+## CI (evals-live)
+
+`.github/workflows/evals-live.yml` runs `go run ./evals/cmd/evalrun -runs 3 -label ci -out cand.json` against the
+hosted model, on `workflow_dispatch` and nightly (`schedule`). The `pull_request` trigger (limited to
+`internal/agent/**`, `internal/wiring/model.go`, `internal/config/config.go`, `evals/scenarios/**`) is switched
+off in the job (`if: false`) until `evals/baseline/default.json` is on `main`; one more PR then turns it on. The
+repository is public, so the job never uses `pull_request_target`, runs PRs only from this repository's own
+branches, and uploads only the report of the committed synthetic scenarios (`cand.json`, 14 days). The learned
+set stays in a private store and is never passed with `-learned`. When a baseline file exists the run adds
+`-baseline evals/baseline/default.json -fail-on-regression`: the job fails on a regression by the rule above
+or when `misses` grew. It prints the paired comparison and the cost-per-run delta, and never fails on cost alone.
+
+**Add the secret.** Settings → Environments → New environment `evals`. Add `ANTHROPIC_API_KEY` as an
+*environment* secret there (not a repository secret), and add the owner under *Required reviewers* so no run
+spends money without approval. Without the secret the job prints a `::notice::` and exits 0.
+
+**Produce and commit the baseline.** Run the workflow by hand (Actions → evals-live → Run workflow) with
+`make_baseline: true` on `main`, approve the environment, download the `baseline-default` artifact, and commit it
+as `evals/baseline/default.json` in a PR. Read the diff of the report, not just the code. Refresh it in the
+same PR as any *intended* prompt change. The held-out set is never part of CI or the baseline.
+
+**Cost.** Not yet measured: the first `make_baseline` run prices one full `-runs 3` pass if
+`PIPEROOM_MODEL_PRICES` is set; record the number here. Above $5, run only the learned and schema-change sets
+on PRs and the full set nightly.
+
+`go test ./...` and `go test ./evals/...` never need the key.
+
 ## Held-out set
 
 [`scenarios/heldout/`](scenarios/heldout/) holds incidents on pipelines the prompt was never tuned on
