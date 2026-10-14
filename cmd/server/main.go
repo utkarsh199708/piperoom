@@ -147,6 +147,11 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("server: load owners file %s: %w", cfg.OwnersFile, err)
 	}
+	// A layer nobody owns would stall every proposal touching it with no
+	// visible cause, so refuse to start instead.
+	if err := own.CheckLayerOwners(); err != nil {
+		return fmt.Errorf("server: owners file %s: %w", cfg.OwnersFile, err)
+	}
 	if err := room.ValidateUsers(users, own); err != nil {
 		return fmt.Errorf("server: users/owners config: %w", err)
 	}

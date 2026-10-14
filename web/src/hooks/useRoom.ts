@@ -196,6 +196,7 @@ export function useRoom(roomId: string) {
 
     let backoff = 1000
     let probed = false
+    let headProbed = false
     let firstConnect = true
     let queue: Promise<void> = Promise.resolve()
 
@@ -266,6 +267,7 @@ export function useRoom(roomId: string) {
         if (cancelled) return
         opened = true
         probed = false
+        headProbed = false
         backoff = 1000
         setLiveDown(false)
         setConn('live')
@@ -312,6 +314,19 @@ export function useRoom(roomId: string) {
           // 403/421 banner would come back every few seconds.
           probed = true
           void api.me().catch(() => undefined)
+        }
+        if (!opened && !headProbed && lastSeqRef.current > 0) {
+          // The server refuses after= past the end of the log (HTTP 400, which a
+          // browser only sees as a bare close). That happens when the log was
+          // reset under us; retrying with the same after would never succeed, so
+          // check the head once per failure streak and rebuild from the snapshot.
+          headProbed = true
+          void api
+            .events(roomId, lastSeqRef.current)
+            .then((page) => {
+              if (!cancelled && page.last_seq < lastSeqRef.current) setReloadKey((k) => k + 1)
+            })
+            .catch(() => undefined)
         }
         setConn('reconnecting')
         reconnectTimer = window.setTimeout(connect, backoff)

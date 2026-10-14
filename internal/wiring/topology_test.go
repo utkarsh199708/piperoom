@@ -26,6 +26,10 @@ func (downKafka) GroupLag(context.Context, string) (clients.GroupLag, error) {
 	return clients.GroupLag{}, errDown
 }
 
+func (downKafka) TopicOffsets(context.Context, string) ([]clients.PartitionOffsets, error) {
+	return nil, errDown
+}
+
 type downSource struct{ clients.SourceDB }
 
 func (downSource) ReplicationSlots(context.Context) ([]clients.ReplicationSlot, error) {
