@@ -9,8 +9,10 @@
 import type {
   ApiError,
   AuthUser,
+  ChecklistStepDonePayload,
   Event,
   EventsPage,
+  LabelInput,
   Me,
   Person,
   PipelineInfo,
@@ -150,6 +152,11 @@ export const api = {
     request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/send`, {
       method: 'POST',
     }),
+  declineSuggestion: (roomId: string, suggestionId: string, reason?: string) =>
+    request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/decline`, {
+      method: 'POST',
+      body: JSON.stringify(reason ? { reason } : {}),
+    }),
   requestControl: (roomId: string) =>
     request<Event>(`${room(roomId)}/control/request`, { method: 'POST' }),
   grantControl: (roomId: string, to: string) =>
@@ -180,6 +187,10 @@ export const api = {
     }),
   acceptHandoff: (handoffId: string) =>
     request<Event>(`/api/handoffs/${encodeURIComponent(handoffId)}/accept`, { method: 'POST' }),
+  label: (roomId: string, body: LabelInput) =>
+    request<Event>(`${room(roomId)}/label`, { method: 'POST', body: JSON.stringify(body) }),
+  checklist: (roomId: string, body: ChecklistStepDonePayload) =>
+    request<Event>(`${room(roomId)}/checklist`, { method: 'POST', body: JSON.stringify(body) }),
   trace: (roomId: string, table: string, key: string) =>
     request<Event>(`${room(roomId)}/trace`, {
       method: 'POST',

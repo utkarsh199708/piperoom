@@ -53,9 +53,46 @@ describe('attentionItems', () => {
   it('a driver change notifies others but not the new driver, and a lease renewal is no change', () => {
     const next = { ...prev, driver: { id: 'kabir', name: 'Kabir' } }
     expect(attentionItems(prev, next, meera)[0]).toMatchObject({ kind: 'driver_changed', body: 'Kabir is driving' })
-    expect(attentionItems(prev, next, actor('kabir', 'Kabir') as never)).toEqual([])
+    // The new driver is told they have control, not that someone else drives.
+    expect(attentionItems(prev, next, actor('kabir', 'Kabir') as never).map((i) => i.kind)).toEqual(['control_granted'])
     const renewed = { ...prev, driver: { id: 'arjun', name: 'Arjun', lease_until: '2026-10-11T12:00:00Z' } }
     expect(attentionItems(prev, renewed, meera)).toEqual([])
+  })
+})
+
+describe('new kinds', () => {
+  const base = { ...emptyRoomState('r1'), title: 'Orders stale', driver: { id: 'arjun', name: 'Arjun' } }
+
+  it('control granted to me: only when I was not the driver before', () => {
+    const next = { ...base, driver: { id: 'meera', name: 'Meera' } }
+    expect(attentionItems(base, next, meera)).toMatchObject([{ kind: 'control_granted', title: 'You now drive "Orders stale"' }])
+    expect(attentionItems(next, { ...next }, meera)).toEqual([])
+  })
+
+  it('agent_error body never carries the status detail', () => {
+    const next = { ...base, agent_status: { state: 'error', detail: 'password=hunter2 row {"id":4}' } }
+    const [item] = attentionItems(base, next, meera)
+    expect(item.kind).toBe('agent_error')
+    expect(JSON.stringify(item)).not.toMatch(/hunter2|password|row/)
+    expect(item.body).toBe('The agent stopped. Open the room to steer it.')
+    expect(attentionItems(next, { ...next }, meera)).toEqual([])
+  })
+
+  it('resolved when the room turns closed, naming who closed it from the activity feed', () => {
+    const next = {
+      ...base,
+      status: 'closed' as const,
+      activity: [{ seq: 1, at: '', actor: { kind: 'human' as const, id: 'k', name: 'Kabir' }, text: 'closed the room' }],
+    }
+    expect(attentionItems(base, next, meera)).toMatchObject([{ kind: 'resolved', body: 'Closed by Kabir' }])
+  })
+
+  it('approval_needed carries the layer and a cleaned, capped title', () => {
+    const long = 'x'.repeat(200)
+    const next = { ...base, proposals: [{ ...proposal(['warehouse']), title: long }] }
+    const [item] = attentionItems(base, next, meera)
+    expect(item).toMatchObject({ kind: 'approval_needed', layer: 'warehouse' })
+    expect(item.body.length).toBeLessThanOrEqual(120)
   })
 })
 

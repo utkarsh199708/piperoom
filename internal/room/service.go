@@ -53,6 +53,10 @@ type Deps struct {
 	Owners       *owners.Owners // pipeline definitions for actions.Scoped checks
 	Run          agent.Runner
 	WriteHandoff agent.HandoffWriter
+	// WritePostmortem writes the closing summary of a room that never handed
+	// off after its fix (F2). Nil gives the events-only draft:
+	// cmd/server leaves it nil for PIPEROOM_POSTMORTEM_MODEL=off.
+	WritePostmortem agent.PostmortemWriter
 	// Triage, when set, runs the triage pass (F6) for every room opened in
 	// this process, before its agent waits for a slot; not for shadow rooms
 	// or rooms restored by Load. TriagePassTimeout is the pass's deadline
@@ -203,24 +207,26 @@ type Service struct {
 	owners       *owners.Owners
 	run          agent.Runner
 	writeHandoff agent.HandoffWriter
-	triage       agent.Triager
-	triageWait   time.Duration
-	triageSem    chan struct{} // maxTriagePasses
-	opts         agent.Options
-	shadowOpts   agent.Options
-	shadowGrace  time.Duration
-	shadow       store.ShadowStore // nil when the store cannot hold shadow runs
-	log          *slog.Logger
-	now          func() time.Time
-	onRoomOpened func(ctx context.Context, roomID string)
-	onRoomClosed func(ctx context.Context, roomID, pipelineID, dedupKey string)
-	slots        *agentSlots // global cap on concurrent agent runs
-	exportMax    int64
-	sessions     auth.Store
-	sessionIdle  time.Duration
-	viewerGroups map[string]struct{}
-	soloUser     string
-	limits       config.Limits
+	// writePostmortem is nil for an events-only draft (Deps.WritePostmortem).
+	writePostmortem agent.PostmortemWriter
+	triage          agent.Triager
+	triageWait      time.Duration
+	triageSem       chan struct{} // maxTriagePasses
+	opts            agent.Options
+	shadowOpts      agent.Options
+	shadowGrace     time.Duration
+	shadow          store.ShadowStore // nil when the store cannot hold shadow runs
+	log             *slog.Logger
+	now             func() time.Time
+	onRoomOpened    func(ctx context.Context, roomID string)
+	onRoomClosed    func(ctx context.Context, roomID, pipelineID, dedupKey string)
+	slots           *agentSlots // global cap on concurrent agent runs
+	exportMax       int64
+	sessions        auth.Store
+	sessionIdle     time.Duration
+	viewerGroups    map[string]struct{}
+	soloUser        string
+	limits          config.Limits
 	// deleteMu serialises DeleteRoom calls: deletions are rare, and one at a
 	// time makes a concurrent repeat find the first one's audit row.
 	deleteMu sync.Mutex
@@ -258,6 +264,8 @@ type Service struct {
 
 	// list pushes rooms-list changes to SubscribeRooms (listhub.go).
 	list *listHub
+	// statsCache serves GET /api/pipelines/{pid}/agent-stats (agentstats.go).
+	statsCache agentStatsCache
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -297,39 +305,40 @@ func New(d Deps) *Service {
 	shadowStore, _ := d.Store.(store.ShadowStore)
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
-		store:        d.Store,
-		actions:      acts,
-		tools:        tls,
-		stackFor:     d.StackFor,
-		topo:         topo,
-		users:        users,
-		owners:       d.Owners,
-		run:          run,
-		writeHandoff: wh,
-		triage:       d.Triage,
-		triageWait:   triageWaitFor(d.TriagePassTimeout),
-		triageSem:    make(chan struct{}, maxTriagePasses),
-		opts:         d.Options,
-		shadowOpts:   d.ShadowOptions,
-		shadowGrace:  d.ShadowGrace,
-		shadow:       shadowStore,
-		log:          log,
-		now:          now,
-		onRoomOpened: d.OnRoomOpened,
-		onRoomClosed: d.OnRoomClosed,
-		slots:        newAgentSlots(d.MaxAgents),
-		exportMax:    d.ExportMaxEvents,
-		sessions:     d.Sessions,
-		sessionIdle:  d.SessionIdle,
-		viewerGroups: groupSet(d.ViewerGroups),
-		soloUser:     d.SoloUser,
-		limits:       d.Limits,
-		leaseTicker:  d.LeaseTicker,
-		ctx:          ctx,
-		cancel:       cancel,
-		rooms:        map[string]*roomState{},
-		alertRooms:   map[string]string{},
-		list:         newListHub(),
+		store:           d.Store,
+		actions:         acts,
+		tools:           tls,
+		stackFor:        d.StackFor,
+		topo:            topo,
+		users:           users,
+		owners:          d.Owners,
+		run:             run,
+		writeHandoff:    wh,
+		writePostmortem: d.WritePostmortem,
+		triage:          d.Triage,
+		triageWait:      triageWaitFor(d.TriagePassTimeout),
+		triageSem:       make(chan struct{}, maxTriagePasses),
+		opts:            d.Options,
+		shadowOpts:      d.ShadowOptions,
+		shadowGrace:     d.ShadowGrace,
+		shadow:          shadowStore,
+		log:             log,
+		now:             now,
+		onRoomOpened:    d.OnRoomOpened,
+		onRoomClosed:    d.OnRoomClosed,
+		slots:           newAgentSlots(d.MaxAgents),
+		exportMax:       d.ExportMaxEvents,
+		sessions:        d.Sessions,
+		sessionIdle:     d.SessionIdle,
+		viewerGroups:    groupSet(d.ViewerGroups),
+		soloUser:        d.SoloUser,
+		limits:          d.Limits,
+		leaseTicker:     d.LeaseTicker,
+		ctx:             ctx,
+		cancel:          cancel,
+		rooms:           map[string]*roomState{},
+		alertRooms:      map[string]string{},
+		list:            newListHub(),
 	}
 	if coord, ok := d.Store.(store.Coordinator); ok {
 		s.coord = coord
@@ -397,6 +406,7 @@ func (s *Service) Load(ctx context.Context) error {
 	err := s.ensureAllLoadedLocked(ctx, true)
 	if err == nil {
 		s.sweepShadowLocked(ctx)
+		s.sweepPostmortemsLocked()
 	}
 	s.mu.Unlock()
 	if err != nil {
@@ -656,6 +666,11 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, []a
 		snap.ID = roomID
 	}
 	s.setDeadline(&snap)
+	if snap.Status == "closed" && snap.Postmortem.Status == PostmortemDrafting && snap.ClosedAt != nil && s.now().Sub(*snap.ClosedAt) > postmortemRestartWindow {
+		// A room closed before drafts existed, or whose drafter died long ago:
+		// it is not drafting any more (the GET still renders events-only).
+		snap.Postmortem = PostmortemState{Status: PostmortemNone}
+	}
 	if row, err := s.store.GetRoom(ctx, roomID); err == nil {
 		if row.DriverID != "" && snap.Driver != nil && snap.Driver.ID == row.DriverID && row.DriverLeaseUntil != nil && row.DriverLeaseUntil.After(snap.Driver.LeaseUntil) {
 			// docs/api.md: times are RFC 3339 UTC; a persisted lease read back
@@ -1072,6 +1087,18 @@ func inputFor(e events.Event) *agent.HumanInput {
 			return nil
 		}
 		return &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "comment", StepID: p.StepID, CommentID: p.CommentID, Text: p.Text}
+	case events.HypothesisVerdict:
+		p, ok := decode[events.HypothesisVerdictPayload](e)
+		if !ok {
+			return nil
+		}
+		// Delivered like an @agent comment (no ids): a dispute must reach the
+		// model and a confirm lets it move on to propose_fix.
+		text := p.Verdict + " the current hypothesis"
+		if p.Note != "" {
+			text += ": " + p.Note
+		}
+		return &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "comment", Text: text}
 	case events.ApprovalGiven:
 		p, ok := decode[events.ApprovalGivenPayload](e)
 		if !ok {
@@ -1080,7 +1107,7 @@ func inputFor(e events.Event) *agent.HumanInput {
 		approved := true
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
-			Text:       fmt.Sprintf("layer %q approved proposal %s", p.Layer, p.ProposalID),
+			Text:       fmt.Sprintf("layer %q approved your proposal", p.Layer),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
 		}
 	case events.ApprovalRejected:
@@ -1091,7 +1118,7 @@ func inputFor(e events.Event) *agent.HumanInput {
 		approved := false
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
-			Text:       fmt.Sprintf("layer %q rejected proposal %s: %s", p.Layer, p.ProposalID, p.Reason),
+			Text:       fmt.Sprintf("layer %q rejected your proposal: %s", p.Layer, p.Reason),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
 		}
 	case events.ActionExecuted:
@@ -1111,7 +1138,7 @@ func inputFor(e events.Event) *agent.HumanInput {
 		stepIndex := p.StepIndex
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "action_result",
-			Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, p.StepIndex, p.Output),
+			Text: fmt.Sprintf("step %d: %s", p.StepIndex+1, p.Output),
 			OK:   okp, ProposalID: p.ProposalID, StepIndex: &stepIndex,
 		}
 	}

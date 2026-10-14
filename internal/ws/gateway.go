@@ -194,6 +194,10 @@ type Member struct {
 	Name     string `json:"name"`
 	Verified bool   `json:"verified"`
 	State    string `json:"state"` // "viewing" | "away"
+	// Since is when the member entered State on the server (connect time for a
+	// new member), UTC; clients show "away 12m" from it. With several
+	// connections it is the earliest among those in the winning state.
+	Since time.Time `json:"since"`
 }
 
 // Identity is who a connection belongs to. SessionID is the public id of the
@@ -253,15 +257,16 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(4096)
 
 	c := &client{
-		sessionID: ident.SessionID,
-		userID:    user.ID,
-		userName:  user.Name,
-		verified:  user.Verified,
-		state:     "viewing",
-		lastSeen:  g.now(),
-		send:      make(chan []byte, sendBuffer),
-		conn:      conn,
-		once:      sync.Once{},
+		sessionID:  ident.SessionID,
+		userID:     user.ID,
+		userName:   user.Name,
+		verified:   user.Verified,
+		state:      "viewing",
+		lastSeen:   g.now(),
+		stateSince: g.now(),
+		send:       make(chan []byte, sendBuffer),
+		conn:       conn,
+		once:       sync.Once{},
 	}
 	ctx, cancel := context.WithCancel(g.ctx)
 	c.cancel = cancel

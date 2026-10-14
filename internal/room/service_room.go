@@ -565,6 +565,12 @@ func (s *Service) closeRoom(ctx context.Context, roomID string, actor events.Act
 	pipelineID := st.snap.PipelineID
 	hookKey := hookDedupKey(pipelineID, st.dedupKey)
 	runHook := s.onRoomClosed != nil && !s.closed
+	// A shadow room's log has no agent events: no draft. wg.Add under s.mu,
+	// like Close sets closed, so Close's Wait cannot miss the goroutine.
+	runDraft := !st.snap.Shadow && !s.closed
+	if runDraft {
+		s.wg.Add(1)
+	}
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -575,6 +581,9 @@ func (s *Service) closeRoom(ctx context.Context, roomID string, actor events.Act
 	// Outside s.mu, so the hook may call OpenRoomForPipeline and the like.
 	if runHook {
 		s.onRoomClosed(s.ctx, roomID, pipelineID, hookKey)
+	}
+	if runDraft {
+		go s.draftPostmortem(roomID, true)
 	}
 	return e, nil
 }

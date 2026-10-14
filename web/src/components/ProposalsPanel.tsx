@@ -6,7 +6,7 @@
 //    A 409 is never retried: the stale banner and toast tell the person, they look again.
 //  - `canDecideLayer` is the only gate for the buttons (plus "no hash" and "busy", which only
 //    switch them off). A viewer or a non-owner gets no buttons at all.
-import { useEffect, useId, useRef, useState } from 'react'
+import { useContext, useEffect, useId, useRef, useState } from 'react'
 import { CircleCheck, CircleX, Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
 import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
@@ -17,6 +17,9 @@ import { clockTime, timeAgo } from '../lib/time'
 import { cn } from '@/lib/utils'
 import type { RoomActions, StaleInfo } from '../hooks/useRoom'
 import { isEditableTarget } from './shell/keys'
+import { DecisionHandleContext } from './shell/context'
+import { completesSet } from '../lib/decision'
+import { PROPOSAL_ANCHOR } from './room/ProposalsSummary'
 import { PersonAvatar } from './room/PersonAvatar'
 import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -353,6 +356,71 @@ function SoloConfirmDialog({
   )
 }
 
+// The approval that completes the set runs the fix right away. One more look, with the steps
+// that will run, before a production change (Enter or Ctrl/⌘⏎ confirms, Esc cancels).
+function RunConfirmDialog({
+  proposal,
+  layer,
+  busy,
+  onConfirm,
+  onCancel,
+  onClosed,
+}: {
+  proposal: ProposalState
+  layer: string
+  busy: boolean
+  onConfirm: () => void
+  onCancel: () => void
+  onClosed: () => void
+}) {
+  const n = proposal.steps.length
+  const layers = [...new Set(proposal.steps.map((s) => s.layer))]
+  return (
+    <Dialog open onOpenChange={(open) => !open && onCancel()}>
+      <DialogContent
+        hideClose
+        role="alertdialog"
+        className="max-w-[480px]"
+        onCloseAutoFocus={(e) => {
+          e.preventDefault()
+          onClosed()
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !busy && !(e.target instanceof HTMLButtonElement && e.target.dataset.cancel)) {
+            e.preventDefault()
+            onConfirm()
+          }
+        }}
+      >
+        <DialogHeader className="gap-1.5">
+          <DialogTitle>Run this fix now?</DialogTitle>
+          <DialogDescription>
+            Your approval completes the set. Piperoom runs {n} {n === 1 ? 'step' : 'steps'} on {layers.join(' and ') || layer}{' '}
+            right away.
+          </DialogDescription>
+        </DialogHeader>
+        <ul className="m-0 flex list-none flex-col gap-1 rounded-lg border border-border bg-muted p-3 font-mono text-xs">
+          {proposal.steps.map((s, i) => (
+            <li key={i}>
+              {i + 1}. {s.layer} · {s.action}
+            </li>
+          ))}
+        </ul>
+        <DialogFooter className="items-center">
+          <Button variant="ghost" data-cancel="1" onClick={onCancel}>
+            Cancel
+            <Kbd aria-hidden="true">esc</Kbd>
+          </Button>
+          <Button variant="success" disabled={busy} autoFocus onClick={onConfirm}>
+            Approve and run
+            <Kbd aria-hidden="true">⏎</Kbd>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // One row of the approval matrix: a layer, who decided it (grant and method), when, and for
 // the layer you own, the buttons.
 function LayerRow({
@@ -382,6 +450,7 @@ function LayerRow({
   const [rejecting, setRejecting] = useState(false)
   const [reason, setReason] = useState('')
   const [confirming, setConfirming] = useState(false)
+  const [runConfirm, setRunConfirm] = useState(false)
   const [busy, setBusy] = useState(false)
   const [refused, setRefused] = useState(false)
   const approveRef = useRef<HTMLButtonElement>(null)
@@ -434,13 +503,15 @@ function LayerRow({
   const hashed = proposal.params_hash !== ''
   const canDecide = canDecideLayer(proposal, user, layer)
 
-  const startApprove = () => (user.solo ? setConfirming(true) : void approve())
+  // Solo: the typed box. The approval that completes the set: the run confirm. Otherwise at once.
+  const completing = completesSet(proposal, layer)
+  const startApprove = () => (user.solo ? setConfirming(true) : completing ? setRunConfirm(true) : void approve())
 
   // A and R. The listener is added once; it calls the handler of the latest render.
   const latest = useRef<(key: 'a' | 'r') => boolean>(() => false)
   useEffect(() => {
     latest.current = (key) => {
-      if (!canDecide || rejecting || confirming || busy) return false
+      if (!canDecide || rejecting || confirming || runConfirm || busy) return false
       if (key === 'a') {
         if (!hashed) return false
         startApprove()
@@ -461,6 +532,23 @@ function LayerRow({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [shortcuts])
+
+  // The decision bar acts through this row, so A, R, the bar and the buttons share startApprove.
+  const registry = useContext(DecisionHandleContext)
+  useEffect(() => {
+    if (!shortcuts) return
+    registry?.set({
+      approve: () => void latest.current('a'),
+      reject: () => void latest.current('r'),
+      scrollTo: () => {
+        const el = document.getElementById(PROPOSAL_ANCHOR)
+        const calm = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+        el?.scrollIntoView?.({ behavior: calm ? 'auto' : 'smooth', block: 'start' })
+        document.getElementById(headingId)?.focus({ preventScroll: true })
+      },
+    })
+    return () => registry?.set(null)
+  })
 
   const reasonText = decision?.outcome === 'rejected' ? decision.reason : undefined
   const decidedAt = decision?.at ? clockTime(decision.at) : ''
@@ -532,13 +620,14 @@ function LayerRow({
 
       {canDecide && !rejecting && (
         <span className="ml-auto inline-flex items-center gap-2">
-          <Button variant="ghost-danger" size="sm" onClick={() => setRejecting(true)} aria-keyshortcuts={shortcuts ? 'R' : undefined}>
+          <Button variant="ghost-danger" size="sm" className="coarse:h-11 coarse:px-4" onClick={() => setRejecting(true)} aria-keyshortcuts={shortcuts ? 'R' : undefined}>
             Reject
             {shortcuts && <Kbd aria-hidden="true">R</Kbd>}
           </Button>
           <Button
             variant="success"
             size="sm"
+            className="coarse:h-11 coarse:px-4"
             ref={approveRef}
             disabled={busy || !hashed}
             aria-describedby={hashed ? undefined : noHashNoteId}
@@ -578,12 +667,13 @@ function LayerRow({
             autoComplete="off"
             autoFocus
           />
-          <Button type="submit" variant="destructive" size="sm" disabled={!reason.trim()}>
+          <Button type="submit" variant="destructive" size="sm" className="coarse:h-11 coarse:px-4" disabled={!reason.trim()}>
             Confirm
           </Button>
           <Button
             variant="ghost"
             size="sm"
+            className="coarse:h-11 coarse:px-4"
             onClick={() => {
               setRejecting(false)
               setReason('')
@@ -592,6 +682,19 @@ function LayerRow({
             Cancel
           </Button>
         </form>
+      )}
+      {canDecide && runConfirm && (
+        <RunConfirmDialog
+          proposal={proposal}
+          layer={layer}
+          busy={busy}
+          onCancel={() => setRunConfirm(false)}
+          onConfirm={() => {
+            setRunConfirm(false)
+            void approve()
+          }}
+          onClosed={restoreFocus}
+        />
       )}
       {canDecide && confirming && (
         <SoloConfirmDialog
@@ -671,6 +774,7 @@ function Proposal({
   pipelineId,
   shortcutLayer,
   sentHash,
+  ribbon,
   onSolo,
 }: {
   proposal: ProposalState
@@ -681,6 +785,8 @@ function Proposal({
   shortcutLayer: string | undefined
   /** The hash the person looked at when the server answered 409 for this proposal (kept by useRoom). */
   sentHash: string | null
+  /** False while the decision bar already says "Needs your approval": one amber per fact. */
+  ribbon: boolean
   onSolo: () => void
 }) {
   const titleId = useId()
@@ -698,7 +804,7 @@ function Proposal({
 
   return (
     <article className="flex flex-col rounded-lg border border-border bg-card text-sm text-card-foreground" aria-labelledby={titleId}>
-      {mine.length > 0 && (
+      {ribbon && mine.length > 0 && (
         <div className="flex min-h-9 flex-wrap items-center gap-x-2 gap-y-0.5 rounded-t-lg border-b border-border bg-warning-subtle px-3.5 py-1.5 text-sm font-medium text-warning-foreground">
           <TriangleAlert className="size-3.5 shrink-0" aria-hidden="true" />
           <span>Needs your approval · {mine.join(' · ')}</span>
@@ -815,12 +921,15 @@ export function ProposalsPanel({
   user,
   actions,
   stale = null,
+  ribbon = true,
 }: {
   state: RoomState
   user: CurrentUser
   actions: RoomActions
   /** From useRoom: the 409 that is being shown, if any. Survives the room reload. */
   stale?: StaleInfo | null
+  /** Draw each card's amber "Needs your approval" ribbon. RoomScreen turns it off when the decision bar shows it. */
+  ribbon?: boolean
 }) {
   const proposals = state.proposals
   // `/api/me.solo` says so up front; on an older server the first approve that
@@ -865,6 +974,7 @@ export function ProposalsPanel({
               pipelineId={state.pipeline_id}
               sentHash={stale?.proposalId === p.proposal_id ? stale.sentHash : null}
               shortcutLayer={shortcutKey.startsWith(`${p.proposal_id}/`) ? shortcutKey.slice(p.proposal_id.length + 1) : undefined}
+              ribbon={ribbon}
               onSolo={() => setSoloSeen(true)}
             />
           ))}

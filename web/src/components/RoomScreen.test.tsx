@@ -24,6 +24,7 @@ const actions: RoomActions = {
   comment: vi.fn(),
   steer: vi.fn(),
   sendSuggestion: vi.fn(),
+  declineSuggestion: vi.fn(),
   requestControl: vi.fn(),
   grantControl: vi.fn(),
   close: vi.fn(),
@@ -31,6 +32,8 @@ const actions: RoomActions = {
   reject: vi.fn(),
   handoff: vi.fn(),
   acceptHandoff: vi.fn(),
+  label: vi.fn(),
+  checklist: vi.fn(),
   trace: vi.fn(),
 }
 const staleOff = { stale: null, dismissStale: vi.fn(), reload: vi.fn() }
@@ -118,7 +121,7 @@ describe('RoomScreen — agent done status and resolution', () => {
 
   it('shows the resolution once the room is closed', () => {
     show(webhookRoom({ status: 'closed', resolution: 'Compatibility set to NONE' }))
-    expect(screen.getByText('Resolved')).toBeInTheDocument()
+    expect(screen.getAllByText('Resolved').length).toBeGreaterThan(0)
     expect(screen.getByText('Compatibility set to NONE')).toBeInTheDocument()
   })
 })

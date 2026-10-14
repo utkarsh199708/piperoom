@@ -340,3 +340,14 @@ func (e *Endpoint) WriteHandoff(ctx context.Context, roomEvents []events.Event, 
 	}
 	return writeHandoff(ctx, roomEvents, opts, e.handoffModel(roomEvents))
 }
+
+// WritePostmortem is an agent.PostmortemWriter: the closing summary of a closed
+// room, grounded like a hand-off. Its tokens count against the room's budget
+// (never refused) and are reported with role events.UsageRolePostmortem.
+func (e *Endpoint) WritePostmortem(ctx context.Context, roomEvents []events.Event, opts Options) (PostmortemDraft, error) {
+	opts = opts.withDefaults()
+	if len(roomEvents) == 0 {
+		return PostmortemDraft{}, fmt.Errorf("agent: cannot write postmortem from an empty room")
+	}
+	return writePostmortem(ctx, roomEvents, opts, e.summaryModel(roomEvents, events.UsageRolePostmortem))
+}
