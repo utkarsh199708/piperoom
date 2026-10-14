@@ -193,7 +193,7 @@ func connectorGone(co *connObs) bool {
 // observeDLQ makes the one DLQOffsets call of the tick, for every DLQ topic of
 // every target, de-duplicated. No topics: no call (a client may list the whole
 // cluster for an empty list). The call has its own deadline and its own error.
-func (w *Watcher) observeDLQ(ctx context.Context, ts []target, obs *observation, kafka clients.DLQReader) {
+func (w *Watcher) observeDLQ(ctx context.Context, ts []target, obs *observation, kafka clients.DLQReader, pre dlqPrefetch) {
 	obs.plan = w.planDLQ(ts, obs)
 	if kafka == nil {
 		obs.dlqNoReader = true
@@ -203,6 +203,19 @@ func (w *Watcher) observeDLQ(ctx context.Context, ts []target, obs *observation,
 		return
 	}
 	obs.dlqTried = true
+	if pre.covers(obs.plan.want) {
+		obs.dlqErr = pre.err
+		if pre.err == nil {
+			obs.dlqOffsets = make(map[string][]clients.PartitionOffsets, len(obs.plan.want))
+			for _, t := range obs.plan.want {
+				if ps, ok := pre.res[t]; ok {
+					obs.dlqOffsets[t] = ps
+				}
+			}
+		}
+		return
+	}
+	// New topics (first tick, changed config): one more call for all of them.
 	obs.dlqOffsets, obs.dlqErr = call(ctx, w.cfg.CheckTimeout, "read DLQ offsets", func(c context.Context) (map[string][]clients.PartitionOffsets, error) {
 		return kafka.DLQOffsets(c, obs.plan.want...)
 	})

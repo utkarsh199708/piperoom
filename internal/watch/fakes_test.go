@@ -162,6 +162,8 @@ type fakeConnect struct {
 	cfgErr    map[string]error
 	// hang makes Status block on the channel and ignore its context.
 	hang map[string]chan struct{}
+	// delay makes Status and Config each take this long (a slow Connect).
+	delay time.Duration
 }
 
 func newFakeConnect() *fakeConnect {
@@ -176,7 +178,9 @@ func (f *fakeConnect) Status(ctx context.Context, name string) (clients.Connecto
 	f.mu.Lock()
 	h := f.hang[name]
 	st, err := f.status[name], f.statusErr[name]
+	d := f.delay
 	f.mu.Unlock()
+	time.Sleep(d)
 	if h != nil {
 		<-h
 	}
@@ -184,6 +188,10 @@ func (f *fakeConnect) Status(ctx context.Context, name string) (clients.Connecto
 }
 
 func (f *fakeConnect) Config(ctx context.Context, name string) (map[string]string, error) {
+	f.mu.Lock()
+	d := f.delay
+	f.mu.Unlock()
+	time.Sleep(d)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return maps(f.cfg[name]), f.cfgErr[name]
