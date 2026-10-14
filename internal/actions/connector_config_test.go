@@ -54,7 +54,6 @@ func (f *configConnect) UpdateConfig(_ context.Context, name, key, value string)
 func newConfigConnect(script ...clients.ConnectorStatus) *configConnect {
 	return &configConnect{
 		scriptedConnect: scriptedConnect{script: script},
-		allowWrites:     true,
 		cfg:             map[string]string{"connector.class": "x", "decimal.handling.mode": "precise", "database.password": "hunter2"},
 	}
 }
@@ -70,6 +69,7 @@ const updateIn = `{"connector":"pg-orders-connector","key":"decimal.handling.mod
 // that a restart finished.
 func TestUpdateConnectorConfigExecuteHappyPath(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
+	c.allowWrites = true
 	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -92,6 +92,7 @@ func TestUpdateConnectorConfigExecuteHappyPath(t *testing.T) {
 // A task that is not RUNNING at the first read is reported, not an error.
 func TestUpdateConnectorConfigTaskNotRunningAtFirstRead(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "FAILED"))
+	c.allowWrites = true
 	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
 		t.Fatalf("a non-RUNNING task after the write must not be an error: %v", err)
@@ -147,6 +148,7 @@ func TestUpdateConnectorConfigSendsOnlyOneKey(t *testing.T) {
 
 func TestUpdateConnectorConfigUnsetOldValue(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
+	c.allowWrites = true
 	delete(c.cfg, "decimal.handling.mode")
 	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
@@ -159,6 +161,7 @@ func TestUpdateConnectorConfigUnsetOldValue(t *testing.T) {
 
 func TestUpdateConnectorConfigAlreadySetMakesNoWrite(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
+	c.allowWrites = true
 	c.cfg["decimal.handling.mode"] = "double"
 	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
@@ -171,6 +174,7 @@ func TestUpdateConnectorConfigAlreadySetMakesNoWrite(t *testing.T) {
 
 func TestUpdateConnectorConfigRereadMismatch(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
+	c.allowWrites = true
 	c.storeAs = "precise"
 	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
@@ -183,6 +187,7 @@ func TestUpdateConnectorConfigRereadMismatch(t *testing.T) {
 
 func TestUpdateConnectorConfigRereadFailsIsNotError(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
+	c.allowWrites = true
 	c.rereadErr = errors.New("boom")
 	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
@@ -195,6 +200,7 @@ func TestUpdateConnectorConfigRereadFailsIsNotError(t *testing.T) {
 
 func TestUpdateConnectorConfigStatusFailsIsNotError(t *testing.T) {
 	c := newConfigConnect()
+	c.allowWrites = true
 	c.statusErr = errors.New("status unavailable")
 	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
@@ -208,6 +214,7 @@ func TestUpdateConnectorConfigStatusFailsIsNotError(t *testing.T) {
 func TestUpdateConnectorConfigClientErrorsAreWrapped(t *testing.T) {
 	sentinel := errors.New("connect: PATCH /connectors/pg-orders-connector/config: status 409")
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
+	c.allowWrites = true
 	c.updateErr = sentinel
 	_, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
 	if !errors.Is(err, sentinel) || !strings.HasPrefix(err.Error(), "actions: update config pg-orders-connector: ") {
@@ -451,6 +458,7 @@ func TestVisibilityGuards(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
+			c.allowWrites = true
 			c.cfg = tc.cfg
 			a := configAction(c)
 			check := func(what string, err error) {
