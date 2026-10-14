@@ -1031,6 +1031,18 @@ func inputFor(e events.Event) *agent.HumanInput {
 			return nil
 		}
 		return &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "comment", StepID: p.StepID, CommentID: p.CommentID, Text: p.Text}
+	case events.HypothesisVerdict:
+		p, ok := decode[events.HypothesisVerdictPayload](e)
+		if !ok {
+			return nil
+		}
+		// Delivered like an @agent comment (no ids): a dispute must reach the
+		// model and a confirm lets it move on to propose_fix.
+		text := p.Verdict + " the current hypothesis"
+		if p.Note != "" {
+			text += ": " + p.Note
+		}
+		return &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "comment", Text: text}
 	case events.ApprovalGiven:
 		p, ok := decode[events.ApprovalGivenPayload](e)
 		if !ok {
