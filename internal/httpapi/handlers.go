@@ -21,6 +21,9 @@ type meResponse struct {
 	Layers        []string `json:"layers"`
 	Role          string   `json:"role"`
 	GroupsMissing bool     `json:"groups_missing"`
+	// Verified is true for a users.yaml person only (docs/design/auth.md
+	// section 2.1).
+	Verified bool `json:"verified"`
 	// Solo is true only for the PIPEROOM_SOLO_USER; left out for everyone else
 	// so the web app shows the typed-confirm box for this user alone.
 	Solo bool `json:"solo,omitempty"`
@@ -30,7 +33,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r.Context())
 	writeJSON(w, http.StatusOK, meResponse{
 		ID: u.ID, Name: u.Name, Layers: s.svc.LayersFor(u), Role: roleFrom(r.Context()), GroupsMissing: u.GroupsMissing,
-		Solo: s.svc.IsSolo(u.ID),
+		Verified: u.Verified, Solo: s.svc.IsSolo(u.ID),
 	})
 }
 
@@ -51,7 +54,7 @@ func (s *Server) handlePeople(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListRooms(w http.ResponseWriter, r *http.Request) {
-	snaps, err := s.svc.ListRooms(r.Context())
+	snaps, err := s.svc.ListRoomsFor(r.Context(), userFrom(r.Context()))
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -99,6 +102,13 @@ func (s *Server) handleAlertWebhook(w http.ResponseWriter, r *http.Request) {
 		PipelineID string `json:"pipeline_id"`
 	}
 	_ = json.Unmarshal(raw, &probe)
+	// The dev webhook has a session: it may open or join rooms only in the
+	// caller's tenants (an unknown pipeline is in none). The answer is the
+	// 404 of an unknown pipeline.
+	if !s.svc.CanSeePipeline(userFrom(r.Context()), probe.PipelineID) {
+		writeError(w, http.StatusNotFound, "not_found", "pipeline not found")
+		return
+	}
 	snap, created, err := s.svc.CreateRoomFromAlert(r.Context(), probe.Title, probe.Severity, probe.PipelineID, json.RawMessage(raw))
 	s.writeAlertRoom(w, snap, created, err)
 }

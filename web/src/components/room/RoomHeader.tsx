@@ -1,7 +1,7 @@
-import { Check, Eye, Repeat2, UserPlus } from 'lucide-react'
+import { Check, CircleCheck, Eye, Repeat2, UserPlus } from 'lucide-react'
 import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
-import { canHandoff, isViewer } from '@/state/permissions'
+import { canClose, canHandoff, isViewer } from '@/state/permissions'
 import type { ConnState } from '@/hooks/useRoom'
 import { ageLabel, clockTime } from '@/lib/time'
 import { Badge } from '@/components/ui/badge'
@@ -44,6 +44,7 @@ export function RoomHeader({
   conn,
   copied,
   onHandoff,
+  onCloseRoom,
   onInvite,
 }: {
   state: RoomState
@@ -52,6 +53,7 @@ export function RoomHeader({
   conn: ConnState
   copied: boolean
   onHandoff: () => void
+  onCloseRoom: () => void
   onInvite: () => void
 }) {
   const open = state.status === 'open'
@@ -95,6 +97,13 @@ export function RoomHeader({
               <Repeat2 aria-hidden="true" />
               Hand off
               <Kbd aria-hidden="true">H</Kbd>
+            </Button>
+          )}
+          {canClose(state, user) && (
+            <Button variant="outline" aria-keyshortcuts="C" onClick={onCloseRoom}>
+              <CircleCheck aria-hidden="true" />
+              Close room
+              <Kbd aria-hidden="true">C</Kbd>
             </Button>
           )}
           <Button

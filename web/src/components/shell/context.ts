@@ -19,6 +19,7 @@ export interface RoomCommands {
   requestControl?: () => void
   handoff?: () => void
   trace?: () => void
+  closeRoom?: () => void
   invite?: () => void
 }
 

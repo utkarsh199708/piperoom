@@ -13,6 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"piperoom/internal/auth"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 )
@@ -41,12 +42,21 @@ type User struct {
 	// approval. The zero value means no session (a dev-mode X-User request, a
 	// test): approvals then record method "dev" and no session id.
 	Identity events.Identity `json:"-" yaml:"-"`
+
+	// Verified is true for a users.yaml entry and false for a person known only
+	// to the IdP (docs/design/auth.md section 2.1). GET /api/me and WebSocket
+	// presence show it; event actors take it from users.yaml directly.
+	Verified bool `json:"verified" yaml:"-"`
 }
 
 // Users is the user directory parsed from dev/users.yaml.
 type Users struct {
 	byID  map[string]User
 	order []User
+	// skeletons maps the look-alike form (auth.Skeleton) of every id, name and
+	// email to the first user it belongs to, so an IdP name that renders like
+	// one of them is found (security audit A-ID-2).
+	skeletons map[string]string
 }
 
 type usersFile struct {
@@ -106,10 +116,40 @@ func ParseUsers(data []byte) (*Users, error) {
 			}
 			subs[user.Sub] = user.ID
 		}
+		user.Verified = true
 		u.byID[user.ID] = user
 		u.order = append(u.order, user)
 	}
+	u.indexSkeletons()
 	return u, nil
+}
+
+// indexSkeletons fills u.skeletons. A skeleton shared by two users (two people
+// called Alex) keeps the first; a look-up only needs to know that one exists.
+func (u *Users) indexSkeletons() {
+	u.skeletons = map[string]string{}
+	for _, user := range u.order {
+		for _, s := range []string{user.ID, user.Name, user.Email} {
+			k := auth.Skeleton(s)
+			if _, seen := u.skeletons[k]; k != "" && !seen {
+				u.skeletons[k] = user.ID
+			}
+		}
+	}
+}
+
+// Lookalike returns the users.yaml user whose id, name or email renders like
+// name (same auth.Skeleton), for the display-name rule of design section 2.1.
+func (u *Users) Lookalike(name string) (User, bool) {
+	k := auth.Skeleton(name)
+	if k == "" {
+		return User{}, false
+	}
+	id, ok := u.skeletons[k]
+	if !ok {
+		return User{}, false
+	}
+	return u.byID[id], true
 }
 
 // LoadUsers reads and parses the users file at path.
@@ -203,7 +243,7 @@ func ValidateUsers(users *Users, own *owners.Owners) error {
 // the check passes. Otherwise it returns an error when
 //   - the solo user is not in users.yaml, or
 //   - owners.yaml names any principal other than user:<soloUser> (in layers:,
-//     any pipeline owners: block, or auditors:). A group counts as another
+//     any pipeline owners: block, auditors:, or tenants: members). A group counts as another
 //     principal.
 //
 // own may be nil (no owners file), which passes the second rule. The caller
@@ -246,9 +286,11 @@ func DefaultUsers() *Users {
 func mustUsers(users []User) *Users {
 	u := &Users{byID: map[string]User{}}
 	for _, user := range users {
+		user.Verified = true
 		u.byID[user.ID] = user
 		u.order = append(u.order, user)
 	}
+	u.indexSkeletons()
 	return u
 }
 

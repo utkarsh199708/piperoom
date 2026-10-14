@@ -216,19 +216,20 @@ func roleFrom(ctx context.Context) string {
 
 // person builds the room.User for a session (or an X-User request) and applies
 // the login gate and role rule to it (design §2.1). ok is false when the gate
-// now refuses the person. A users.yaml entry supplies the name and layers; a
-// person who is only in owners.yaml or a viewer group has the session's name.
-func (s *Server) person(id, name string, groups []string, groupsMissing bool) (room.User, string, bool) {
+// now refuses the person. A users.yaml entry supplies the name and layers and
+// is the only verified person; someone who is only in owners.yaml or a viewer
+// group has the session's name, re-checked on every request against the
+// users.yaml look-alikes (ShownName), so a users.yaml entry added after the
+// login, or a session made before the rule, cannot pass for that person.
+func (s *Server) person(id, name, email string, groups []string, groupsMissing bool) (room.User, string, bool) {
 	role, ok := s.svc.RoleFor(id, groups)
 	if !ok {
 		return room.User{}, "", false
 	}
 	u, inFile := s.svc.LookupUser(id)
 	if !inFile {
-		u = room.User{ID: id, Name: name, Layers: []string{}}
-		if u.Name == "" {
-			u.Name = id
-		}
+		shown, _ := s.svc.ShownName(id, name, email)
+		u = room.User{ID: id, Name: shown, Layers: []string{}, Verified: false}
 	}
 	u.Groups, u.GroupsMissing = groups, groupsMissing
 	return u, role, true
@@ -289,7 +290,7 @@ func (s *Server) resolve(r *http.Request) (principal, *authError) {
 		// groups (design §1.3): removed from users.yaml, owners.yaml or the
 		// viewer groups means out at once, not at the 12 h cap. Stale IdP group
 		// membership lasts until the next login.
-		user, role, ok := s.person(sess.UserID, sess.Name, sess.Groups, sess.GroupsMissing)
+		user, role, ok := s.person(sess.UserID, sess.Name, sess.Email, sess.Groups, sess.GroupsMissing)
 		if !ok || s.pinMismatch(sess) {
 			return principal{}, &authError{http.StatusUnauthorized, "session_expired", "this user is no longer allowed to sign in"}
 		}
@@ -297,9 +298,11 @@ func (s *Server) resolve(r *http.Request) (principal, *authError) {
 			return principal{}, &authError{http.StatusForbidden, "proxy_identity", proxyIdentityMsg}
 		}
 		s.touch(r.Context(), sess)
+		// Email is the session's verified IdP email ("" otherwise); the room
+		// falls back to the users.yaml email for the decision record.
 		user.Identity = events.Identity{
 			Iss: sess.Iss, Sub: sess.Sub, SessionID: sess.ID,
-			Method: sess.Method, AuthTime: sess.AuthTime.UTC(),
+			Method: sess.Method, AuthTime: sess.AuthTime.UTC(), Email: sess.Email,
 		}
 		return principal{user: user, role: role, sessionID: sess.ID}, nil
 	}
@@ -318,7 +321,7 @@ func (s *Server) resolve(r *http.Request) (principal, *authError) {
 	if _, ok := s.svc.LookupUser(xuser); !ok {
 		return principal{}, &authError{http.StatusUnauthorized, "unauthenticated", "unknown user " + xuser}
 	}
-	user, role, ok := s.person(xuser, "", nil, false)
+	user, role, ok := s.person(xuser, "", "", nil, false)
 	if !ok {
 		return principal{}, &authError{http.StatusUnauthorized, "unauthenticated", "unknown user " + xuser}
 	}
@@ -384,7 +387,7 @@ func (s *Server) sessionAlive(ctx context.Context, id ws.Identity) bool {
 	if sess.Check(s.now(), s.authSettings.Idle) != nil {
 		return false
 	}
-	_, _, ok := s.person(sess.UserID, sess.Name, sess.Groups, sess.GroupsMissing)
+	_, _, ok := s.person(sess.UserID, sess.Name, sess.Email, sess.Groups, sess.GroupsMissing)
 	return ok && !s.pinMismatch(sess)
 }
 
