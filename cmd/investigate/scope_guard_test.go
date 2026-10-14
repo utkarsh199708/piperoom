@@ -39,6 +39,7 @@ func TestEveryReadToolRefusesWithoutRoomScope(t *testing.T) {
 		"kafka_consumer_lag":       `{"group":"order-sync"}`,
 		"kafka_find_by_key":        `{"topic":"pg.public.orders","key":"1","since":"2026-10-11T00:00:00Z"}`,
 		"kafka_topic_config":       `{"pipeline_id":"orders"}`,
+		"debezium_metrics":         `{"connector":"pg-orders-connector"}`,
 		"dlq_peek":                 `{"connector":"pg-orders-sink"}`,
 	}
 	ran := 0

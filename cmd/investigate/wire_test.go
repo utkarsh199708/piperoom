@@ -158,6 +158,7 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"kafka_topic_offsets", "kafka_list_groups", "kafka_consumer_lag", "kafka_find_by_key",
 		"kafka_topic_config",
 		"dlq_peek",
+		"debezium_metrics",
 		"runbook_lookup",
 	}
 	got := make([]string, 0, len(reg.All()))
