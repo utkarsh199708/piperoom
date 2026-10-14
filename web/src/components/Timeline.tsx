@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Progress } from '@/components/ui/progress'
+import { OfflineStrip } from './room/OfflineStrip'
 import { PersonAvatar } from './room/PersonAvatar'
 import { CollapsibleText } from './room/CollapsibleText'
 import { Checklist } from './room/Checklist'
@@ -193,26 +194,39 @@ function CommentThread({
   )
 }
 
-function ReplyBox({ onSubmit }: { onSubmit: (text: string) => void }) {
+function ReplyBox({ onSubmit }: { onSubmit: (text: string) => void | Promise<boolean> }) {
   const [text, setText] = useState('')
+  const [sending, setSending] = useState(false)
+  const [offline, setOffline] = useState(false)
+  // The field clears only once the server took the comment; a failed send keeps the words.
+  const send = async () => {
+    const t = text.trim()
+    if (!t || sending) return
+    setSending(true)
+    const ok = (await onSubmit(t)) !== false
+    setSending(false)
+    setOffline(!ok)
+    if (ok) setText('')
+  }
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    if (!text.trim()) return
-    onSubmit(text.trim())
-    setText('')
+    void send()
   }
   return (
-    <form className="flex items-center gap-2" onSubmit={submit}>
-      <Input
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="Comment on this step…"
-        aria-label="Comment on this step"
-      />
-      <Button type="submit" variant="secondary" size="sm" disabled={!text.trim()}>
-        Comment
-      </Button>
-    </form>
+    <div className="flex flex-col gap-1.5">
+      <form className="flex items-center gap-2" onSubmit={submit}>
+        <Input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Comment on this step…"
+          aria-label="Comment on this step"
+        />
+        <Button type="submit" variant="secondary" size="sm" disabled={!text.trim() || sending}>
+          {sending ? 'Sending…' : 'Comment'}
+        </Button>
+      </form>
+      {offline && <OfflineStrip onRetry={() => void send()} disabled={sending} />}
+    </div>
   )
 }
 
@@ -239,7 +253,7 @@ function StepExtras({
 }: {
   step: StepState
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void
+  onComment: (text: string, stepId?: string) => void | Promise<boolean>
   readOnly: boolean
   showReplyBox: boolean
 }) {
@@ -268,7 +282,7 @@ function DoneStep({
   step: StepState
   n: number
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void
+  onComment: (text: string, stepId?: string) => void | Promise<boolean>
   readOnly: boolean
   checklist?: ChecklistWiring
 }) {
@@ -340,7 +354,7 @@ function LiveStep({
   step: StepState
   n: number
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void
+  onComment: (text: string, stepId?: string) => void | Promise<boolean>
   readOnly: boolean
   checklist?: ChecklistWiring
   /** The step is outside the active layer filter: kept so the live work stays visible. */
@@ -392,7 +406,7 @@ export function Timeline({
   steps: StepState[]
   messages: AgentMessageState[]
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void
+  onComment: (text: string, stepId?: string) => void | Promise<boolean>
   /** A viewer reads comments but cannot write any. */
   readOnly?: boolean
   /** The agent is working: the last step is the live one. */

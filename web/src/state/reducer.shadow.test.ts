@@ -58,10 +58,10 @@ describe('shadow rooms in the reducer', () => {
   })
 
   it('shadow.labelled and shadow.graded describe the actor, not the content', () => {
-    expect(describeEvent(ev(7, 'shadow.labelled', { actual_layer: 'kafka', root_cause_terms: ['secret term'] }, human))).toBe(
+    expect(describeEvent(ev(7, 'shadow.labelled', { actual_layer: 'kafka', root_cause_terms: ['secret term'] }, human)).text).toBe(
       'Arjun recorded a blind label',
     )
-    expect(describeEvent(ev(8, 'shadow.graded', { layer_correct: true, root_cause: 'yes', notes: 'n' }, human))).toBe(
+    expect(describeEvent(ev(8, 'shadow.graded', { layer_correct: true, root_cause: 'yes', notes: 'n' }, human)).text).toBe(
       'Arjun graded the shadow run',
     )
   })

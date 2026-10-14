@@ -69,7 +69,7 @@ function registered(user: CurrentUser, state: RoomState): RoomCommands | null {
     dismissStale: vi.fn(),
     reload: vi.fn(),
   })
-  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null })
+  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null, notFound: false, retry: () => undefined })
   let current: RoomCommands | null = null
   const registry = { get: () => current, set: (c: RoomCommands | null) => (current = c) }
   const { unmount } = render(

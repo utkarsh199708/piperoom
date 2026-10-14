@@ -1,10 +1,16 @@
-import { HashRouter, Route, Routes } from 'react-router-dom'
+import { HashRouter, Route, Routes, useParams } from 'react-router-dom'
 import { ThemeProvider } from './context/ThemeContext'
 import { UserProvider } from './context/UserContext'
 import { AppShell } from './components/shell/AppShell'
 import { RoomList } from './components/RoomList'
 import { RoomScreen } from './components/RoomScreen'
 import { ShadowMetricsPage } from './components/shadow/ShadowMetricsPage'
+
+// Keyed by the room id, so every per-room useState (dialogs, tabs, filters) resets on a jump to another room.
+export function RoomScreenRoute() {
+  const { roomId } = useParams()
+  return <RoomScreen key={roomId} />
+}
 
 export default function App() {
   return (
@@ -14,7 +20,7 @@ export default function App() {
           <Routes>
             <Route element={<AppShell />}>
               <Route path="/" element={<RoomList />} />
-              <Route path="/rooms/:roomId" element={<RoomScreen />} />
+              <Route path="/rooms/:roomId" element={<RoomScreenRoute />} />
               <Route path="/shadow" element={<ShadowMetricsPage />} />
               <Route path="*" element={<RoomList />} />
             </Route>
