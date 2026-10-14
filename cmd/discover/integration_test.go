@@ -10,11 +10,13 @@ import (
 
 	"piperoom/internal/config"
 	"piperoom/internal/discover"
+	"piperoom/internal/testenv"
 )
 
 // TestDiscoverDevStack runs discovery against the dev stack
 // (go run ./cmd/devctl up) and checks the orders pipeline it seeds.
 func TestDiscoverDevStack(t *testing.T) {
+	testenv.RequireConnect(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 

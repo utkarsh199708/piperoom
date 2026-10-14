@@ -105,6 +105,7 @@ var needsPipeline = map[string]bool{
 	"TestTopicOffsets":                                       true,
 	"TestConsumerGroupsAndLag":                               true,
 	"TestFindByKeyRealData":                                  true,
+	"TestFindByKeyAbsentKey":                                 true,
 	"TestDescribeTopicConfigs":                               true,
 	"TestPgPublicationTablesIntegration":                     true,
 }
