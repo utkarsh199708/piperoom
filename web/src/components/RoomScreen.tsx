@@ -74,6 +74,7 @@ export function RoomScreen() {
   const handleRef = useRef<DecisionHandle | null>(null)
   // Below 1280px the rail becomes tabs; the chosen one is remembered per room for this visit.
   const wide = useMediaQuery('(min-width: 1280px)')
+  const phone = !useMediaQuery('(min-width: 768px)')
   const tabKey = `piperoom.tab.${roomId}`
   const [tab, setTabState] = useState<RoomTab>(() => readTab(tabKey))
   const setTab = useCallback(
@@ -314,7 +315,7 @@ export function RoomScreen() {
             exporting={exporting}
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
           />
-          <DecisionBar state={state} user={user} />
+          <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} />
 
           {wide ? (
             <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
@@ -368,7 +369,7 @@ export function RoomScreen() {
             <button
               type="button"
               onClick={jump}
-              className="fixed bottom-36 right-4 z-20 flex min-h-11 items-center gap-1.5 rounded-full border border-border bg-card px-4 text-sm font-medium shadow-md hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:right-6 xl:right-[324px]"
+              className="fixed bottom-[calc(9rem+var(--sheet-h,0px))] right-4 z-20 flex min-h-11 items-center gap-1.5 rounded-full border border-border bg-card px-4 text-sm font-medium shadow-md hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:right-6 xl:right-[324px]"
             >
               <ArrowDown aria-hidden="true" className="size-4" />
               Jump to latest

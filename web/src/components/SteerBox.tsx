@@ -57,7 +57,7 @@ function GrantPicker({
 // The composer sticks to the bottom of the room column. Same field for everyone, but
 // what it does depends on who you are: the driver steers the agent, anyone else leaves a
 // suggestion in the driver's queue, a viewer reads. (Roles: docs/api.md, state/permissions.ts.)
-const BAR = 'sticky bottom-0 z-10 mt-auto border-t border-border bg-background px-4 pb-4 pt-3 sm:px-6'
+const BAR = 'sticky bottom-[var(--sheet-h,0px)] z-10 mt-auto border-t border-border bg-background px-4 pb-4 pt-3 sm:px-6'
 
 // Publishes the composer's height as --composer-h so <main> can keep scroll targets above it
 // (AppShell scroll-padding-bottom). Cleared on unmount.
@@ -215,19 +215,19 @@ export function SteerBox({
         </span>
         <div className="ml-auto flex items-center gap-1">
           {isDriver && (
-            <Button variant="ghost" className="h-7" aria-expanded={granting} onClick={() => setGranting((g) => !g)}>
+            <Button variant="ghost" className="h-7 coarse:h-11" aria-expanded={granting} onClick={() => setGranting((g) => !g)}>
               Give control to…
             </Button>
           )}
           {/* With no driver the banner (and the empty state) already offer it; an expired lease still shows it here. */}
           {take && !noDriver && (
-            <Button variant="ghost" className="h-7" aria-keyshortcuts="T" onClick={() => actions.grantControl(user.id)}>
+            <Button variant="ghost" className="h-7 coarse:h-11" aria-keyshortcuts="T" onClick={() => actions.grantControl(user.id)}>
               Take control
               <Kbd aria-hidden="true">T</Kbd>
             </Button>
           )}
           {request && (
-            <Button variant="ghost" className="h-7" aria-keyshortcuts="T" onClick={actions.requestControl}>
+            <Button variant="ghost" className="h-7 coarse:h-11" aria-keyshortcuts="T" onClick={actions.requestControl}>
               Request control
               <Kbd aria-hidden="true">T</Kbd>
             </Button>

@@ -263,7 +263,7 @@ function DoneStep({
         aria-expanded={open}
         aria-controls={regionId}
         onClick={() => setOpen((o) => !o)}
-        className="flex min-h-9 w-full items-center gap-2.5 rounded-md px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex min-h-9 coarse:min-h-11 w-full items-center gap-2.5 rounded-md px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <ChevronRight
           aria-hidden="true"
