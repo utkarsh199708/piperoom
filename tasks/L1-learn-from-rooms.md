@@ -137,9 +137,10 @@ already scopes by pipeline).
 
 ## Dependencies and merge order
 
-L1a first (it defines the file shape the other two assume). L1b and L1c in parallel after it. L1c's job
-is added disabled on PRs (`if: false` on the PR trigger) until the baseline file is in `main`, then one more
-C1 PR turns it on.
+L1a and L1b start in parallel: L1b reads `similar_incidents`, not the exported files, so it does not wait for
+the exporter. L1c starts when L1a is merged (the baseline report needs `learned/` to exist). L1c's job is added
+disabled on PRs (`if: false` on the PR trigger) until the baseline file is in `main`, then one more C1 PR turns it
+on. `learned-example-used.yaml` (C7) follows L1b.
 
 ## Done when
 
