@@ -63,6 +63,18 @@ export interface NudgeState {
   by: Actor
 }
 
+/** The newest agent.triage (F6): the first look, shown as "triage, unverified". */
+export interface TriageState {
+  status: 'ok' | 'failed'
+  reason?: string
+  headline?: string
+  suspected_layer?: string
+  confidence?: string
+  evidence_refs: string[]
+  next_check?: string
+  at: string
+}
+
 export interface ToolCallState {
   tool_use_id: string
   tool: string
@@ -279,6 +291,7 @@ export interface RoomState {
   alert: AlertInfo | null
   agent_status: AgentStatusState
   hypothesis: HypothesisState | null
+  triage: TriageState | null
   /** The confidence path, capped at 20; a repeat of the same confidence is not added. */
   hypothesis_history: HypothesisHistoryEntry[]
   /** `${proposal_id}/${layer}` -> the last nudge. */
@@ -325,6 +338,7 @@ export function emptyRoomState(id: string): RoomState {
     alert: null,
     agent_status: { state: 'idle' },
     hypothesis: null,
+    triage: null,
     hypothesis_history: [],
     nudges: {},
     steps: [],
@@ -387,6 +401,9 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
           seq: snapshot.hypothesis.seq ?? 0,
           verdicts: [],
         }
+      : null,
+    triage: snapshot.triage
+      ? { ...snapshot.triage, evidence_refs: snapshot.triage.evidence_refs ?? [] }
       : null,
   }
 }

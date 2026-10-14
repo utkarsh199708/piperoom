@@ -9,6 +9,7 @@ import type {
   AgentStepStartPayload,
   AgentToolCallPayload,
   AgentToolResultPayload,
+  AgentTriagePayload,
   ApprovalGivenPayload,
   ApprovalRejectedPayload,
   ChecklistStepDonePayload,
@@ -141,6 +142,12 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
         return { text: p.step_id ? `Agent replied on ${step(p.step_id)}` : 'Agent replied to a comment', detail: clip(p.text, 200), kind: 'step' }
       }
       return { text: `Agent: ${clip(p.text, 120)}`, detail: p.text.length > 120 ? clip(p.text, 200) : undefined, kind: 'step' }
+    }
+    case 'agent.triage': {
+      const p = as<AgentTriagePayload>(e)
+      return p.status === 'ok' && p.headline
+        ? { text: `First look: ${clip(p.headline, 120)}`, detail: p.headline.length > 120 ? clip(p.headline, 200) : undefined, kind: 'step' }
+        : { text: `First look failed (${clip(p.reason || 'unknown', 40)})`, kind: 'step' }
     }
     case 'agent.hypothesis': {
       const p = as<AgentHypothesisPayload>(e)

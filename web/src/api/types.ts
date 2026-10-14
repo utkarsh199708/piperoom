@@ -23,6 +23,7 @@ export type EventType =
   | 'agent.message'
   | 'agent.hypothesis'
   | 'agent.usage'
+  | 'agent.triage'
   | 'comment.added'
   | 'steer.suggested'
   | 'steer.sent'
@@ -137,6 +138,22 @@ export interface AgentHypothesisPayload {
   based_on_steps: string[]
   confidence: string // "low" | "medium" | "high"
   confirmed: boolean
+}
+
+/**
+ * The triage pass's first look (F6): one line shown as "triage, unverified". `failed` has no
+ * headline and a fixed `reason` (timeout | model_error | budget | refused | no_tools | off).
+ */
+export interface AgentTriagePayload {
+  status: 'ok' | 'failed'
+  reason?: string
+  headline?: string
+  suspected_layer?: string
+  confidence?: string
+  evidence_refs: string[]
+  next_check?: string
+  model: string
+  took_ms: number
 }
 
 // One model request's tokens, latency and estimated cost (docs/design/cost.md).
@@ -439,6 +456,18 @@ export interface ApprovalNudgedPayload {
   layer: string
 }
 
+/** The newest agent.triage of a room (snapshot `triage`, F6). */
+export interface TriageSummary {
+  status: 'ok' | 'failed'
+  reason?: string
+  headline?: string
+  suspected_layer?: string
+  confidence?: string
+  evidence_refs: string[]
+  next_check?: string
+  at: string
+}
+
 export interface RoomSnapshot {
   id: string
   title: string
@@ -452,6 +481,8 @@ export interface RoomSnapshot {
   driver: DriverSummary | null
   agent_status: AgentStatusSummary
   hypothesis: HypothesisSummary | null
+  /** F6: absent on an older server; null until the first agent.triage. */
+  triage?: TriageSummary | null
   open_proposals: ProposalSummary[]
   pending_suggestions: SuggestionSummary[]
   members: MemberSummary[]
@@ -574,6 +605,13 @@ export interface EventsPage {
   events: Event[]
   last_seq: number
 }
+
+/** Frames of the room list socket (GET /api/rooms/ws, F6). */
+export type ListWsServerMessage =
+  | { type: 'rooms'; rooms: RoomSnapshot[] }
+  | { type: 'room'; room: RoomSnapshot }
+  | { type: 'room_deleted'; room_id: string }
+  | { type: 'error'; error: { code: string; message: string } }
 
 export type WsServerMessage =
   | { type: 'event'; event: Event }
