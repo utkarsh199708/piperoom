@@ -761,6 +761,22 @@ func TestLogoutClosesWebSocket(t *testing.T) {
 			t.Fatalf("dial: %v", err)
 		}
 		t.Cleanup(func() { conn.CloseNow() })
+		// Dial returns before the gateway registers the connection, and a logout
+		// that ran first would find nothing to close. The gateway sends a
+		// presence frame only after it has registered the connection, so reading
+		// up to that frame makes the logout below race-free.
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				t.Fatalf("waiting for the presence frame: %v", err)
+			}
+			var m struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(data, &m) == nil && m.Type == "presence" {
+				break
+			}
+		}
 		return conn
 	}
 	pConn := dial(priya)
