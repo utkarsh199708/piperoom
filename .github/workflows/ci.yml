@@ -116,6 +116,8 @@ jobs:
       # The state the integration tests expect: owner of the stack lock, so
       # testenv.Require does not skip on a lock held by someone else.
       PIPEROOM_STACK_OWNER: ci
+      # The default lock dir (a sibling of the checkout) does not exist on a runner.
+      PIPEROOM_STACK_LOCK: /tmp/piperoom-ci/stack.lock
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -134,6 +136,7 @@ jobs:
         run: .github/scripts/wait-for-stack.sh 300
       - name: Register the connector (devctl up is idempotent)
         run: |
+          mkdir -p "$(dirname "$PIPEROOM_STACK_LOCK")"
           go run ./cmd/devctl lock --owner ci
           go run ./cmd/devctl up --owner ci
       - name: go test -tags integration ./internal/...
@@ -170,6 +173,8 @@ jobs:
     timeout-minutes: 30
     env:
       PIPEROOM_STACK_OWNER: ci
+      # The default lock dir (a sibling of the checkout) does not exist on a runner.
+      PIPEROOM_STACK_LOCK: /tmp/piperoom-ci/stack.lock
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -182,6 +187,7 @@ jobs:
           cache: true
       - name: Lock and bring the stack up (devctl up waits for Connect and the connector)
         run: |
+          mkdir -p "$(dirname "$PIPEROOM_STACK_LOCK")"
           go run ./cmd/devctl lock --owner ci
           go run ./cmd/devctl up --owner ci
       - name: Wait until Connect and the Schema Registry answer
