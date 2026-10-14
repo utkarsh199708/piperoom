@@ -33,6 +33,11 @@ func EndpointConfig(cfg config.Config) agent.EndpointConfig {
 func NewAgentEndpoint(ctx context.Context, cfg config.Config, log *slog.Logger, awsCfg *aws.Config) (*agent.Endpoint, error) {
 	ec := EndpointConfig(cfg)
 	ec.AWSConfig = awsCfg
+	tp, err := config.ParseTriagePass(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("wiring: model endpoint: %w", err)
+	}
+	ec.TriagePass, ec.TriagePassModel, ec.TriagePassTimeout = tp.On, tp.Model, tp.Timeout
 	ep, err := agent.NewEndpoint(ctx, ec, log)
 	if err != nil {
 		return nil, fmt.Errorf("wiring: model endpoint: %w", err)
@@ -51,11 +56,20 @@ func NewAgentEndpoint(ctx context.Context, cfg config.Config, log *slog.Logger, 
 			log.Warn("PIPEROOM_TRIAGE_MODEL is known not to work with the investigation loop", "value", cfg.TriageModel, "why", why)
 		}
 	}
+	if tp.On {
+		if ep.Provider() == agent.ProviderBedrock {
+			warnIfNotBedrockModelID(log, "PIPEROOM_TRIAGE_PASS_MODEL", tp.Model)
+		}
+		if why := agent.TriageModelWarning(tp.Model); why != "" {
+			log.Warn("PIPEROOM_TRIAGE_PASS_MODEL is known not to work", "value", tp.Model, "why", why)
+		}
+	}
 	limit := "no cap"
 	if n := ep.TokenLimit(); n > 0 {
 		limit = fmt.Sprint(n)
 	}
-	log.Info("model endpoint ready", "provider", ep.Provider(), "model", cfg.Model, "triage_model", cfg.TriageModel, "room_token_budget", limit)
+	log.Info("model endpoint ready", "provider", ep.Provider(), "model", cfg.Model, "triage_model", cfg.TriageModel,
+		"first_look", tp.On, "first_look_model", tp.Model, "first_look_timeout", tp.Timeout.String(), "room_token_budget", limit)
 	return ep, nil
 }
 

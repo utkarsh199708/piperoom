@@ -98,7 +98,7 @@ describe('role-aware room screen', () => {
   it('a member sees the action controls', () => {
     showRoom(busyRoom())
     expect(screen.getByRole('button', { name: 'Hand off' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Trace one record' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Trace a record' })).toBeInTheDocument()
     // The card's buttons and the decision bar's.
     expect(screen.getAllByRole('button', { name: /^Approve/ }).length).toBeGreaterThan(0)
     expect(screen.getAllByRole('button', { name: /^Reject/ }).length).toBeGreaterThan(0)
@@ -117,7 +117,7 @@ describe('role-aware room screen', () => {
     expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Hand off' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Trace one record' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Trace a record' })).not.toBeInTheDocument()
     // control: grant, request and take
     expect(screen.queryByRole('button', { name: /Give control/ })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Request control' })).not.toBeInTheDocument()

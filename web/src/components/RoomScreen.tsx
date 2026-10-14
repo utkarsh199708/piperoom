@@ -85,6 +85,7 @@ export function RoomScreen() {
     refreshKey: executedCount,
     active: state?.status === 'open',
   })
+  const [layerFilter, setLayerFilter] = useState<string | null>(null)
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [closeOpen, setCloseOpen] = useState(false)
@@ -177,6 +178,7 @@ export function RoomScreen() {
     close: openClose,
     trace: openTrace,
     control: takeControl ?? requestControl,
+    clearFilter: layerFilter ? () => setLayerFilter(null) : undefined,
   })
 
   // `?loading=1` previews the skeleton in fixture mode, where the room loads at once.
@@ -251,6 +253,8 @@ export function RoomScreen() {
               pipelineId={state.pipeline_id}
               stalledFor={stalledFor}
               onTrace={viewer ? undefined : () => setTraceOpen(true)}
+              selectedLayer={layerFilter ?? undefined}
+              onSelectLayer={setLayerFilter}
             />
 
             {state.hypothesis && <HypothesisCard hypothesis={state.hypothesis} steps={state.steps} />}
@@ -281,6 +285,8 @@ export function RoomScreen() {
                 working={state.agent_status.state === 'working'}
                 onTakeControl={takeControl}
                 agent={state.agent_status}
+                filterLayer={layerFilter ?? undefined}
+                onClearFilter={() => setLayerFilter(null)}
               />
             </section>
             <div ref={sentinelRef} aria-hidden="true" />

@@ -152,12 +152,13 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 	want := []string{
 		"pg_replication_slots", "pg_recent_ddl", "pg_long_transactions", "pg_row",
 		"pg_publication_tables",
-		"warehouse_freshness", "warehouse_row", "warehouse_load_errors", "pipeline_map", "trace_record",
+		"warehouse_freshness", "warehouse_row", "warehouse_load_errors", "reconcile", "pipeline_map", "trace_record",
 		"connect_list_connectors", "connect_status", "connect_config",
 		"schema_registry_subjects", "schema_registry_versions", "schema_registry_diff",
 		"kafka_topic_offsets", "kafka_list_groups", "kafka_consumer_lag", "kafka_find_by_key",
 		"kafka_topic_config",
 		"dlq_peek",
+		"debezium_metrics",
 		"runbook_lookup",
 	}
 	got := make([]string, 0, len(reg.All()))
