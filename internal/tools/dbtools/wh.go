@@ -53,8 +53,18 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 			if ts.IsZero() {
 				summary = "no rows (empty table)"
 				data["newest"] = nil
+			} else if ahead := time.Until(ts); ahead > 0 {
+				// A newest value in the future says nothing about freshness:
+				// the column is not a load time (bad data, a scheduled date) or
+				// a clock is wrong. Shown as "stale for 0s" it would read as
+				// perfectly fresh while loading may have stopped.
+				summary = fmt.Sprintf("newest=%s is IN THE FUTURE by %s (bad data or clock skew; freshness cannot be judged from %s)",
+					topology.FormatTS(ts), topology.HumanAge(ahead), input.TSColumn)
+				data["newest"] = topology.FormatTS(ts)
+				data["in_future"] = true
+				data["ahead_by"] = topology.HumanAge(ahead)
 			} else {
-				stale := time.Since(ts)
+				stale := -ahead
 				summary = fmt.Sprintf("newest=%s (stale for %s)", topology.FormatTS(ts), topology.HumanAge(stale))
 				data["newest"] = topology.FormatTS(ts)
 				data["stale_for"] = topology.HumanAge(stale)
@@ -126,13 +136,15 @@ func warehouseRowTool(d Deps) tools.Tool {
 	}
 }
 
-// redactWhRow mirrors whRowSummary: only the timestamp column values are kept,
-// every other column is dropped, so the full warehouse row never leaves the
-// tool (finding F3).
+// redactWhRow mirrors whRowSummary: only the values of timestamp-named
+// columns whose value is a date/time are kept (the warehouse client reports
+// no column types, so the value is checked: a text "note_at" column is
+// dropped), every other column is dropped, so the full warehouse row never
+// leaves the tool (finding F3).
 func redactWhRow(row map[string]any) map[string]any {
 	out := make(map[string]any, len(row))
 	for name, v := range row {
-		if isTimestampColumn(name) {
+		if isTimeValueColumn(name, v, nil) {
 			out[name] = v
 		}
 	}
@@ -144,7 +156,7 @@ func whRowSummary(row map[string]any) string {
 	var sb strings.Builder
 	sb.WriteString("found: yes")
 	for _, name := range sortedKeys(row) {
-		if isTimestampColumn(name) {
+		if isTimeValueColumn(name, row[name], nil) {
 			sb.WriteString(", " + name + "=" + fmt.Sprintf("%v", row[name]))
 		}
 	}

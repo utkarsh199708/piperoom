@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/pgconv"
 )
@@ -44,20 +46,25 @@ type PublicationTable struct {
 func (d *DB) PublicationTables(ctx context.Context, publication, role string, tables []string) ([]PublicationTable, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
+	tx, err := d.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer d.end(ctx, tx)
 
 	var exists bool
-	if err := d.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)`, publication).Scan(&exists); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)`, publication).Scan(&exists); err != nil {
 		return nil, fmt.Errorf("postgres: check publication %q: %w", publication, err)
 	}
 	if !exists {
 		return nil, fmt.Errorf("postgres: publication %q: %w", publication, clients.ErrNotFound)
 	}
 
-	members, err := d.publicationMembers(ctx, publication, role)
+	members, err := publicationMembers(ctx, tx, publication, role)
 	if err != nil {
 		return nil, err
 	}
-	sources, err := d.sourcePrivileges(ctx, publication, role, tables)
+	sources, err := sourcePrivileges(ctx, tx, publication, role, tables)
 	if err != nil {
 		return nil, err
 	}
@@ -80,8 +87,8 @@ func (d *DB) PublicationTables(ctx context.Context, publication, role string, ta
 // publicationMembers lists the relations in publication with role's SELECT
 // privilege on each. The relation oid is resolved through pg_class so the
 // privilege check can use the oid form of has_table_privilege.
-func (d *DB) publicationMembers(ctx context.Context, publication, role string) ([]PublicationTable, error) {
-	rows, err := d.pool.Query(ctx, `
+func publicationMembers(ctx context.Context, tx pgx.Tx, publication, role string) ([]PublicationTable, error) {
+	rows, err := tx.Query(ctx, `
 		SELECT pt.schemaname, pt.tablename,
 		       has_table_privilege($2::name, c.oid, 'SELECT')
 		FROM pg_publication_tables pt
@@ -119,7 +126,7 @@ type sourceTable struct {
 // of publication and whether role has SELECT on it. Membership is checked
 // against pg_publication_tables so FOR ALL TABLES / FOR TABLES IN SCHEMA
 // publications are handled correctly.
-func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tables []string) ([]PublicationTable, error) {
+func sourcePrivileges(ctx context.Context, tx pgx.Tx, publication, role string, tables []string) ([]PublicationTable, error) {
 	sources := make([]sourceTable, 0, len(tables))
 	for _, t := range tables {
 		schema, tbl, err := splitTable(t)
@@ -153,7 +160,7 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 		LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = v.tablename
 		ORDER BY v.pos`)
 
-	rows, err := d.pool.Query(ctx, sb.String(), args...)
+	rows, err := tx.Query(ctx, sb.String(), args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: check publication %q source privileges: %w", publication, err)
 	}
