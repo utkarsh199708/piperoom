@@ -193,7 +193,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Get("/rooms/{id}/shadow", visible(s.handleShadow))
 				short.Post("/rooms/{id}/shadow/grade", visible(s.handleShadowGrade))
 				short.Get("/shadow/metrics", s.handleShadowMetrics)
-				short.Get("/rooms/{id}/usage", s.handleRoomUsage)
+				short.Get("/rooms/{id}/usage", visible(s.handleRoomUsage))
 				short.Get("/usage", s.handlePipelineUsage)
 				short.Post("/proposals/{pid}/approve", s.handleApproveProposal)
 				short.Post("/proposals/{pid}/reject", s.handleRejectProposal)

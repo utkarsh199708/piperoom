@@ -52,17 +52,17 @@ const usageUsers = `users:
 // newUsageServer serves the usage routes over a memstore, on a fixed clock.
 func newUsageServer(t *testing.T, withSpend bool) (*httptest.Server, *memstore.Store) {
 	t.Helper()
-	return newUsageServerWith(t, withSpend, nil)
+	return newUsageServerWith(t, withSpend, usageOwners)
 }
 
-func newUsageServerWith(t *testing.T, withSpend bool, vis httpapi.UsageVisibility) (*httptest.Server, *memstore.Store) {
+func newUsageServerWith(t *testing.T, withSpend bool, ownersYAML string) (*httptest.Server, *memstore.Store) {
 	t.Helper()
 	users, err := room.ParseUsers([]byte(usageUsers))
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "owners.yaml")
-	if err := os.WriteFile(path, []byte(usageOwners), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(ownersYAML), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	own, err := owners.Load(path)
@@ -79,7 +79,7 @@ func newUsageServerWith(t *testing.T, withSpend bool, vis httpapi.UsageVisibilit
 	var opts []httpapi.Option
 	if withSpend {
 		opts = append(opts, httpapi.WithSpend(httpapi.Spend{
-			Store: st, Visibility: vis, RoomTokens: 2_000_000, PipelineDailyTokens: 5_000_000, PipelineDailyCostUSD: 50,
+			Store: st, RoomTokens: 2_000_000, PipelineDailyTokens: 5_000_000, PipelineDailyCostUSD: 50,
 			Now: func() time.Time { return time.Date(2026, 10, 13, 23, 0, 0, 0, time.UTC) },
 		}))
 	}
@@ -242,45 +242,56 @@ func TestPipelineUsage(t *testing.T) {
 	wantErr(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=orders", "", ""), http.StatusUnauthorized, "session_expired")
 }
 
-// tenantVisibility stands in for #112's tenancy: hidden maps a user to the
-// rooms and pipelines of other tenants.
-type tenantVisibility struct {
-	hiddenRooms     map[string]map[string]bool
-	hiddenPipelines map[string]map[string]bool
+// usageTenantOwners puts orders in tenant a (arjun owns its layers) and
+// other in tenant b (kabir owns its layers); audrey is an auditor in no
+// tenant. Each pipeline has its own connection references, as tenancy needs.
+func usageTenantOwners() string {
+	own := func(user string) string {
+		var b strings.Builder
+		b.WriteString("\n    owners:")
+		for _, l := range events.Layers {
+			b.WriteString("\n      " + l + ": {approvers: [user:" + user + "]}")
+		}
+		return b.String()
+	}
+	conns := func(p string) string {
+		return "\n    connections: {source_db_url: {env: " + p + "_SRC}, warehouse_db_url: {env: " + p + "_WH}, kafka_brokers: {env: " + p +
+			"_K}, connect_url: {env: " + p + "_C}, schema_registry_url: {env: " + p + "_SR}}"
+	}
+	return "tenants:\n  a: {members: []}\n  b: {members: []}\nauditors: [user:audrey]\npipelines:" +
+		"\n  - id: orders\n    tenant: a\n    topic_prefix: pg\n    source_tables: [public.orders]\n    connectors: [c1]" + conns("A") + own("arjun") +
+		"\n  - id: other\n    tenant: b\n    topic_prefix: ot\n    source_tables: [public.other]\n    connectors: [c2]" + conns("B") + own("kabir") + "\n"
 }
 
-func (v tenantVisibility) UsageRoomVisible(u room.User, snap room.RoomSnapshot) bool {
-	return !v.hiddenRooms[u.ID][snap.ID]
-}
-
-func (v tenantVisibility) UsagePipelineVisible(u room.User, pipelineID string) bool {
-	return !v.hiddenPipelines[u.ID][pipelineID]
-}
-
+// TestUsageTenancyComesBeforeTheRoleCheck uses #112's real tenancy: an owner
+// of another tenant's pipeline and an auditor outside the tenant get the
+// missing room's and the unknown pipeline's 404, never a 403 that would
+// confirm the object exists.
 func TestUsageTenancyComesBeforeTheRoleCheck(t *testing.T) {
-	vis := tenantVisibility{hiddenRooms: map[string]map[string]bool{}, hiddenPipelines: map[string]map[string]bool{
-		"kabir":  {"orders": true}, // owns a layer of orders, but in another tenant
-		"audrey": {"orders": true}, // an auditor outside the tenant
-	}}
-	srv, st := newUsageServerWith(t, true, vis)
+	srv, st := newUsageServerWith(t, true, usageTenantOwners())
 	resp := doJSON(t, http.MethodPost, srv.URL+"/api/rooms", "arjun", `{"title":"t","severity":"sev2","pipeline_id":"orders"}`)
 	wantStatus(t, resp, http.StatusCreated)
 	roomID := decode[room.RoomSnapshot](t, resp).ID
-	vis.hiddenRooms["kabir"] = map[string]bool{roomID: true}
 	addSpend(t, st, store.SpendChange{RoomID: roomID, PipelineID: "orders", Day: "2026-10-13", Tokens: 9})
 
-	missing := doJSON(t, http.MethodGet, srv.URL+"/api/rooms/r_nope/usage", "kabir", "")
-	hidden := doJSON(t, http.MethodGet, srv.URL+"/api/rooms/"+roomID+"/usage", "kabir", "")
-	wantStatus(t, hidden, http.StatusNotFound)
-	if a, b := decode[json.RawMessage](t, missing), decode[json.RawMessage](t, hidden); string(a) != string(b) {
-		t.Fatalf("a hidden room's body %s differs from a missing room's %s", b, a)
+	for _, user := range []string{"kabir", "audrey"} {
+		missing := doJSON(t, http.MethodGet, srv.URL+"/api/rooms/r_nope/usage", user, "")
+		hidden := doJSON(t, http.MethodGet, srv.URL+"/api/rooms/"+roomID+"/usage", user, "")
+		wantStatus(t, hidden, http.StatusNotFound)
+		if a, b := decode[json.RawMessage](t, missing), decode[json.RawMessage](t, hidden); string(a) != string(b) {
+			t.Fatalf("%s: a hidden room's body %s differs from a missing room's %s", user, b, a)
+		}
+		unknown := doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=nope", user, "")
+		hiddenP := doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=orders", user, "")
+		wantStatus(t, hiddenP, http.StatusNotFound)
+		if a, b := decode[json.RawMessage](t, unknown), decode[json.RawMessage](t, hiddenP); string(a) != string(b) {
+			t.Fatalf("%s: a hidden pipeline's body %s differs from an unknown one's %s", user, b, a)
+		}
 	}
 	wantStatus(t, doJSON(t, http.MethodGet, srv.URL+"/api/rooms/"+roomID+"/usage", "arjun", ""), http.StatusOK)
-
-	for _, user := range []string{"kabir", "audrey"} {
-		wantErr(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=orders", user, ""), http.StatusNotFound, "not_found")
-	}
 	wantStatus(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=orders", "arjun", ""), http.StatusOK)
+	// kabir sees his own tenant's pipeline (no spend yet: an empty report).
+	wantStatus(t, doJSON(t, http.MethodGet, srv.URL+"/api/usage?pipeline=other", "kabir", ""), http.StatusOK)
 }
 
 func TestUsageRoutesStayMountedWithoutAStore(t *testing.T) {

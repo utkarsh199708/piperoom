@@ -15,22 +15,11 @@ import (
 // maxPipelineIDLen bounds the pipeline query parameter of GET /api/usage.
 const maxPipelineIDLen = 200
 
-// UsageVisibility is what the usage routes check before any role check
-// (tenancy, docs/design/tenancy.md): a room or pipeline the caller cannot see
-// answers 404. *room.Service implements it with an adapter until #112 merges;
-// it then switches to #112's roomVisible / CanSeePipeline.
-type UsageVisibility interface {
-	UsageRoomVisible(user room.User, snap room.RoomSnapshot) bool
-	UsagePipelineVisible(user room.User, pipelineID string) bool
-}
-
 // Spend configures the usage routes (docs/api.md, docs/design/cost.md 4).
 type Spend struct {
 	// Store holds the spend tables; nil = both routes answer 404 (they stay
 	// mounted, so route walks see them).
 	Store store.SpendStore
-	// Visibility decides what a caller can see; nil = the room service.
-	Visibility UsageVisibility
 	// The configured caps, shown as "limit"; 0 = off.
 	RoomTokens           int64
 	PipelineDailyTokens  int64
@@ -137,17 +126,10 @@ type pipelineUsageResponse struct {
 // caller cannot see is told apart from nothing.
 var errNotFound = &room.Error{Status: http.StatusNotFound, Code: "not_found", Msg: "not found"}
 
-// visibility returns the configured visibility check.
-func (s *Server) visibility() UsageVisibility {
-	if s.spend.Visibility != nil {
-		return s.spend.Visibility
-	}
-	return s.svc
-}
-
 // handleRoomUsage serves GET /api/rooms/{id}/usage: anyone who can see and
-// read the room, since its agent.usage events carry the same numbers. A room
-// the caller cannot see is a 404 like a missing one. A shadow room's spend
+// read the room, since its agent.usage events carry the same numbers. The
+// route is wrapped in roomVisible (tenancy, #112), so a room of another
+// tenant is the same 404 as a missing one before anything here runs. A shadow room's spend
 // stays hidden until it closes, like the rest of its run.
 func (s *Server) handleRoomUsage(w http.ResponseWriter, r *http.Request) {
 	if s.spend.Store == nil {
@@ -157,10 +139,6 @@ func (s *Server) handleRoomUsage(w http.ResponseWriter, r *http.Request) {
 	snap, err := s.svc.GetRoom(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
 		s.writeErr(w, err)
-		return
-	}
-	if !s.visibility().UsageRoomVisible(userFrom(r.Context()), snap) {
-		s.writeErr(w, errNotFound)
 		return
 	}
 	if snap.Shadow && snap.Status != "closed" {
@@ -204,7 +182,7 @@ func (s *Server) handlePipelineUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := userFrom(r.Context())
-	if !s.visibility().UsagePipelineVisible(user, pipelineID) {
+	if !s.svc.UsagePipelineVisible(user, pipelineID) {
 		writeError(w, http.StatusNotFound, "not_found", "pipeline not found")
 		return
 	}
