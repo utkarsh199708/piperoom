@@ -12,6 +12,7 @@ import type {
   AgentToolResultPayload,
   ApprovalGivenPayload,
   ApprovalRejectedPayload,
+  ChecklistStepDonePayload,
   CommentAddedPayload,
   ControlGrantedPayload,
   Event,
@@ -19,17 +20,23 @@ import type {
   HandoffCreatedPayload,
   HandoffFailedPayload,
   HandoffRequestedPayload,
+  HypothesisVerdictPayload,
+  ApprovalNudgedPayload,
   ProposalCreatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
+  RoomLabelledPayload,
   SteerDeclinedPayload,
   SteerSentPayload,
   SteerSuggestedPayload,
   TracePinnedPayload,
 } from '../api/types'
 import { describeEvent } from './describe'
+import type { DescribeContext } from './describe'
 import { alertSource } from '../lib/alerts'
-import type { MemberState, RoomState, StepState } from './types'
+import { runbookHits } from '../lib/f8'
+import { checklistKey } from './types'
+import type { HypothesisHistoryEntry, MemberState, RoomState, StepState, VerdictState } from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
@@ -59,12 +66,59 @@ function upsertMember(members: MemberState[], actor: Actor): MemberState[] {
   return members.map((m) => (m.id === actor.id ? { ...m, name: actor.name } : m))
 }
 
+const ACTIVITY_WINDOW = 50
+
+function describeContext(before: RoomState, after: RoomState): DescribeContext {
+  const stepIndex: Record<string, number> = {}
+  const stepTitles: Record<string, string> = {}
+  after.steps.forEach((s, i) => {
+    stepIndex[s.id] = i + 1
+    stepTitles[s.id] = s.title
+  })
+  const proposalTitles: Record<string, string> = {}
+  for (const p of after.proposals) proposalTitles[p.proposal_id] = p.title
+  const suggesters: Record<string, string> = {}
+  for (const s of after.suggestions) suggesters[s.suggestion_id] = s.from.name
+  return {
+    driverBefore: before.driver?.id ?? null,
+    stepTitles,
+    proposalTitles,
+    stepIndex,
+    suggesters,
+    confidenceBefore: before.hypothesis?.confidence ?? null,
+    runbookItem: (id, hit, item) => runbookItemOf(before, id, hit, item),
+  }
+}
+
+function derivedConfirmed(verdicts: VerdictState[]): boolean {
+  return verdicts.some((v) => v.verdict === 'confirmed') && !verdicts.some((v) => v.verdict === 'disputed')
+}
+
+const HISTORY_CAP = 20
+
+// The confidence path: a repeat of the same confidence is not a step on it.
+function pushConfidence(history: HypothesisHistoryEntry[], event: Event, confidence: string): HypothesisHistoryEntry[] {
+  if (history.length > 0 && history[history.length - 1].confidence === confidence) return history
+  return [...history, { seq: event.seq, at: event.at, confidence }].slice(-HISTORY_CAP)
+}
+
+// The text and section of a runbook item, looked up in the runbook_lookup result already in the
+// state (used for the activity line of a tick).
+function runbookItemOf(state: RoomState, toolUseId: string, hit: number, item: number) {
+  for (const s of state.steps) {
+    const t = s.tool_calls.find((c) => c.tool_use_id === toolUseId && c.tool === 'runbook_lookup')
+    const h = t ? runbookHits(t.data)[hit] : undefined
+    if (h && h.items[item] !== undefined) return { section: h.section, text: h.items[item] }
+  }
+  return null
+}
+
 export function applyEvent(state: RoomState, event: Event): RoomState {
   if (event.seq <= state.last_seq) return state
 
   // agent.usage is cost telemetry, one or two per model request. It moves
   // last_seq on (so the next event is not a gap) and nothing else: it must not
-  // take a slot of the 20-entry activity window or show up as a raw line.
+  // take a slot of the 50-entry activity window or show up as a raw line.
   if (event.type === 'agent.usage') return { ...state, last_seq: event.seq }
 
   let next: RoomState = state
@@ -203,12 +257,39 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       const p = as<AgentHypothesisPayload>(event)
       next = {
         ...state,
+        // confirmed is derived from the verdicts, never from the agent's flag; a new
+        // hypothesis starts over with no verdicts.
         hypothesis: {
           text: p.text,
           based_on_steps: p.based_on_steps ?? [],
           confidence: p.confidence,
-          confirmed: p.confirmed,
+          confirmed: false,
+          seq: event.seq,
+          verdicts: [],
         },
+        hypothesis_history: pushConfidence(state.hypothesis_history, event, p.confidence),
+      }
+      break
+    }
+
+    case 'hypothesis.verdict': {
+      const p = as<HypothesisVerdictPayload>(event)
+      const h = state.hypothesis
+      // A verdict on a replaced hypothesis is stale.
+      if (!h || p.hypothesis_seq !== h.seq) break
+      const verdicts = [
+        ...(h.verdicts ?? []).filter((v) => v.by.id !== event.actor.id),
+        { verdict: p.verdict, by: event.actor, note: p.note || undefined, at: event.at },
+      ]
+      next = { ...state, hypothesis: { ...h, verdicts, confirmed: derivedConfirmed(verdicts) } }
+      break
+    }
+
+    case 'approval.nudged': {
+      const p = as<ApprovalNudgedPayload>(event)
+      next = {
+        ...state,
+        nudges: { ...state.nudges, [`${p.proposal_id}/${p.layer}`]: { at: event.at, by: event.actor } },
       }
       break
     }
@@ -500,6 +581,21 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       break
     }
 
+    case 'room.labelled': {
+      next = { ...state, labelled: as<RoomLabelledPayload>(event) }
+      break
+    }
+
+    case 'checklist.step_done': {
+      const p = as<ChecklistStepDonePayload>(event)
+      const key = checklistKey(p.tool_use_id, p.hit, p.item)
+      const done = { ...state.checklist_done }
+      if (p.done) done[key] = { by: event.actor, at: event.at, note: p.note }
+      else delete done[key]
+      next = { ...state, checklist_done: done }
+      break
+    }
+
     case 'trace.pinned': {
       const p = as<TracePinnedPayload>(event)
       next = {
@@ -528,11 +624,12 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         seq: event.seq,
         at: event.at,
         actor: event.actor,
-        // state is the pre-event state: describeEvent needs the driver before
-        // this event to tell a lease renewal from a take-over.
-        text: describeEvent(event, state.driver?.id ?? null),
+        // The driver and hypothesis come from the pre-event state (a renewal is not a
+        // take-over; raised needs the old confidence). Step and suggestion names come
+        // from the post-event state so a step that starts now already has its number.
+        ...describeEvent(event, describeContext(state, next)),
       },
       ...next.activity,
-    ].slice(0, 20),
+    ].slice(0, ACTIVITY_WINDOW),
   }
 }

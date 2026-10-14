@@ -572,7 +572,7 @@ func (s *Service) recordInterruption(sp store.StaleProposal) {
 		_ = json.Unmarshal(row.Steps, &p.Steps) // no steps: only the event is written
 	}
 	next := s.interruptedStep(ctx, sp.RoomID, p)
-	output := fmt.Sprintf("outcome unknown: the server running this proposal stopped before it recorded the result of step %d; check the target before you retry with a new proposal", next)
+	output := fmt.Sprintf("outcome unknown: the server running this proposal stopped before it recorded the result of step %d; check the target before you retry with a new proposal", next+1)
 	if sp.ClaimedBy == "" {
 		output = "the proposal was approved, but the server that should have run it stopped before it started; create a new proposal to retry"
 	}
@@ -801,6 +801,7 @@ func (s *Service) foldLocked(ctx context.Context, roomID string, st *roomState, 
 	s.setDeadline(&st.snap)
 	trackPending(st, e)
 	s.feedInbox(st, e)
+	s.markListDirtyLocked(roomID)
 	if remote && wasOpen && !s.roomOpen(st) {
 		s.closedElsewhereLocked(ctx, roomID, st)
 	}
@@ -876,6 +877,7 @@ func (s *Service) evictLocked(roomID string, st *roomState) {
 		delete(s.alertRooms, st.dedupKey)
 	}
 	delete(s.rooms, roomID)
+	s.markListDirtyLocked(roomID)
 }
 
 // refreshAll brings the whole cache up to the store: rooms other replicas
@@ -972,6 +974,7 @@ func (s *Service) refreshAll(ctx context.Context) error {
 		if b.snap.Status == "open" {
 			s.indexAlertRoomLocked(ctx, id, st)
 		}
+		s.markListDirtyLocked(id)
 	}
 	return nil
 }

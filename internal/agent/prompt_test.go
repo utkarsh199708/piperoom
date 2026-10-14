@@ -268,7 +268,7 @@ func TestSanitizeLabelMapsLookalikes(t *testing.T) {
 func TestPromptToolNamesAreMentionedInPrompt(t *testing.T) {
 	prompt := systemPrompt()
 	got := PromptToolNames()
-	want := []string{"connect_status", "update_hypothesis", "propose_fix", "schema_set_compatibility", "schema_register", "post_message"}
+	want := []string{"what_changed", "connect_status", "update_hypothesis", "propose_fix", "schema_set_compatibility", "schema_register", "post_message"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("PromptToolNames() = %v, want %v (a prompt edit changed the tool mentions; update this test and the wiring test)", got, want)
 	}
@@ -595,3 +595,20 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 }
 
 func actor(name string) events.Actor { return events.Actor{Name: name} }
+
+// TestPromptMakesWhatChangedTheSecondRead pins the F8g method line: the agent
+// reads what changed right after its first look, and a change is a suspect.
+func TestPromptMakesWhatChangedTheSecondRead(t *testing.T) {
+	p := systemPrompt()
+	i := strings.Index(p, "what_changed")
+	if i < 0 {
+		t.Fatal("prompt does not name what_changed")
+	}
+	line := p[i:]
+	line = line[:strings.Index(line, "\n")]
+	for _, w := range []string{"second read", "suspect", "not a proven cause"} {
+		if !strings.Contains(line, w) {
+			t.Errorf("method line lacks %q: %s", w, line)
+		}
+	}
+}

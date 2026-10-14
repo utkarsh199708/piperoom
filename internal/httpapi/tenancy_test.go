@@ -204,11 +204,14 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"GET", "/api/rooms/{id}", "/api/rooms/" + f.rb, ""},
 		{"GET", "/api/rooms/{id}/events", "/api/rooms/" + f.rb + "/events", ""},
 		{"GET", "/api/rooms/{id}/export", "/api/rooms/" + f.rb + "/export", ""},
+		{"GET", "/api/rooms/{id}/postmortem.md", "/api/rooms/" + f.rb + "/postmortem.md", ""},
 		{"GET", "/api/rooms/{id}/ws", "/api/rooms/" + f.rb + "/ws", ""},
 		{"POST", "/api/rooms/{id}/comments", "/api/rooms/" + f.rb + "/comments", `{"text":"hi"}`},
 		{"POST", "/api/rooms/{id}/steer", "/api/rooms/" + f.rb + "/steer", `{"text":"go"}`},
 		{"POST", "/api/rooms/{id}/suggestions/{sid}/send", "/api/rooms/" + f.rb + "/suggestions/g_x/send", ""},
 		{"POST", "/api/rooms/{id}/suggestions/{sid}/decline", "/api/rooms/" + f.rb + "/suggestions/g_x/decline", ""},
+		{"POST", "/api/rooms/{id}/hypothesis", "/api/rooms/" + f.rb + "/hypothesis", `{"verdict":"confirmed"}`},
+		{"POST", "/api/rooms/{id}/nudge", "/api/rooms/" + f.rb + "/nudge", `{"proposal_id":"p_x","layer":"kafka"}`},
 		{"POST", "/api/rooms/{id}/control/request", "/api/rooms/" + f.rb + "/control/request", ""},
 		{"POST", "/api/rooms/{id}/control/grant", "/api/rooms/" + f.rb + "/control/grant", `{"to":"alice"}`},
 		{"POST", "/api/rooms/{id}/close", "/api/rooms/" + f.rb + "/close", `{"resolution":"x"}`},
@@ -224,6 +227,7 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 		{"POST", "/api/proposals/{pid}/reject", "/api/proposals/" + f.open + "/reject", `{"layer":"kafka-connect","reason":"no","params_hash":"x"}`},
 		{"POST", "/api/handoffs/{hid}/accept", "/api/handoffs/" + f.handoff + "/accept", ""},
 		{"GET", "/api/pipelines/{pid}/topology", "/api/pipelines/pb/topology", ""},
+		{"GET", "/api/pipelines/{pid}/agent-stats", "/api/pipelines/pb/agent-stats", ""},
 		{"GET", "/api/rooms/{id}/usage", "/api/rooms/" + f.rb + "/usage", ""},
 		{"GET", "/api/usage", "/api/usage?pipeline=pb", ""},
 	}
@@ -231,9 +235,10 @@ func hiddenRoutes(f fixture) []struct{ method, pattern, path, body string } {
 
 // aggregateRoutes return or act on several pipelines' objects; each filters by
 // tenant and has its own test here (TestRoomListAndMetricsAreFiltered,
-// TestCreateAndAlertRoutingRespectTenants).
+// TestCreateAndAlertRoutingRespectTenants, TestListGatewayTenancyFilter).
 var aggregateRoutes = []string{
 	"GET /api/rooms",
+	"GET /api/rooms/ws",
 	"GET /api/shadow/metrics",
 	"POST /api/rooms",
 	"GET /api/pipelines",

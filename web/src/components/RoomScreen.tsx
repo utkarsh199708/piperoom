@@ -1,11 +1,14 @@
-import { useContext, useMemo, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowDown } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { toast } from 'sonner'
 import { exportRoom, isFixtures } from '../api/client'
 import { errorText } from '../lib/errors'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
+import { useMediaQuery } from '../hooks/useMediaQuery'
+import { rememberRoomTitle } from '../lib/signinNotice'
 import { useJumpToLatest } from '../hooks/useJumpToLatest'
 import { useRoomAttention } from '../hooks/useRoomAttention'
 import { useCurrentUser } from '../context/user'
@@ -14,6 +17,7 @@ import { ageLabel } from '../lib/time'
 import { needsYou } from '../lib/rooms'
 import { handoffInFlight } from '../lib/handoff'
 import { useNow } from './room/useNow'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { PipelineMap } from './PipelineMap'
 import { Timeline } from './Timeline'
 import { SteerBox } from './SteerBox'
@@ -24,11 +28,16 @@ import { TracePanel } from './TracePanel'
 import { HANDOFF_READ_ID, HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import { CloseRoomDialog } from './CloseRoomDialog'
 import { NoDriverBanner } from './NoDriverBanner'
+import { ChangesLane } from './room/ChangesLane'
+import { LabelDialog } from './room/LabelDialog'
+import { SimilarCard } from './room/SimilarCard'
+import type { ChecklistWiring } from './Timeline'
 import { StaleBanner } from './StaleBanner'
 import { DecisionHandleContext, RoomListContext, useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
 import type { DecisionHandle } from './shell/context'
 import { DecisionBar } from './room/DecisionBar'
 import { HypothesisCard } from './room/HypothesisCard'
+import { usePeople } from '../hooks/usePeople'
 import { PROPOSAL_ANCHOR, ProposalsSummary } from './room/ProposalsSummary'
 import { RoomError } from './room/RoomError'
 import { RoomHeader } from './room/RoomHeader'
@@ -48,9 +57,43 @@ export function RoomScreen() {
   const [searchParams] = useSearchParams()
   const { user } = useCurrentUser()
   const handleRef = useRef<DecisionHandle | null>(null)
+  // Below 1280px the rail becomes tabs; the chosen one is remembered per room for this visit.
+  const wide = useMediaQuery('(min-width: 1280px)')
+  const phone = !useMediaQuery('(min-width: 768px)')
+  const tabKey = `piperoom.tab.${roomId}`
+  const [tab, setTabState] = useState<RoomTab>(() => readTab(tabKey))
+  const setTab = useCallback(
+    (next: RoomTab) => {
+      setTabState(next)
+      try {
+        sessionStorage.setItem(tabKey, next)
+      } catch {
+        // storage blocked: the tab lasts until reload
+      }
+    },
+    [tabKey],
+  )
+  const narrowRef = useRef(!wide)
+  narrowRef.current = !wide
   const decisionRegistry = useMemo(
-    () => ({ get: () => handleRef.current, set: (h: DecisionHandle | null) => void (handleRef.current = h) }),
-    [],
+    () => ({
+      // "View steps" must land on a visible card: on the tabbed layout the Fix tab opens first.
+      get: (): DecisionHandle | null => {
+        const h = handleRef.current
+        if (!h) return null
+        return {
+          ...h,
+          scrollTo: () => {
+            if (narrowRef.current) {
+              setTab('fix')
+              window.requestAnimationFrame(() => h.scrollTo())
+            } else h.scrollTo()
+          },
+        }
+      },
+      set: (h: DecisionHandle | null) => void (handleRef.current = h),
+    }),
+    [setTab],
   )
   const roomList = useContext(RoomListContext)
   const elsewhereNeedsMe = useMemo(
@@ -68,7 +111,7 @@ export function RoomScreen() {
     replaying,
     {
       approve: () => handleRef.current?.approve(),
-      view: () => handleRef.current?.scrollTo(),
+      view: () => decisionRegistry.get()?.scrollTo(),
       readHandoff: () => document.getElementById(HANDOFF_READ_ID)?.click(),
       steer: () => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Steer the agent"]')?.focus(),
     },
@@ -81,16 +124,27 @@ export function RoomScreen() {
     () => (state ? state.proposals.reduce((n, p) => n + p.executed.length, 0) : 0),
     [state],
   )
-  const { topology, updatedAt } = useTopology(state?.pipeline_id ?? '', {
+  const { topology, updatedAt, notFound, retry: retryTopology } = useTopology(state?.pipeline_id ?? '', {
     refreshKey: executedCount,
     active: state?.status === 'open',
   })
+  // The sign-in screen names this room if the session ends while it is open.
+  useEffect(() => {
+    rememberRoomTitle(state?.title)
+    return () => rememberRoomTitle(undefined)
+  }, [state?.title])
   const [layerFilter, setLayerFilter] = useState<string | null>(null)
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [closeOpen, setCloseOpen] = useState(false)
+  const [labelOpen, setLabelOpen] = useState(false)
+  // "Ask the agent" on a checklist item fills the composer; n makes the same text count again.
+  const [prefill, setPrefill] = useState<{ text: string; n: number } | undefined>()
   const [copied, setCopied] = useState(false)
   const [exporting, setExporting] = useState(false)
+  // One GET /api/people per room mount: layers for the presence rows and the pending layers. A viewer gets none.
+  const peopleState = usePeople()
+  const peopleList = peopleState.status === 'ready' ? peopleState.people : undefined
   const now = useNow(5_000) // a request past expires_at stops counting as in flight
 
   const headerMembers = useMemo(() => {
@@ -203,6 +257,90 @@ export function RoomScreen() {
   const viewer = isViewer(user)
   const stalledFor = state.status === 'open' && state.opened_at ? ageLabel(state.opened_at) : undefined
   const showProposals = state.proposals.length > 0 || user.solo === true
+  const roomOpen = state.status === 'open'
+  const checklist: ChecklistWiring = {
+    done: state.checklist_done,
+    access: { canTick: roomOpen && !viewer, canAsk: roomOpen && !viewer },
+    onTick: actions.checklist,
+    onAsk: (text) => setPrefill((p) => ({ text, n: (p?.n ?? 0) + 1 })),
+  }
+
+  const lane = (
+    <PipelineMap
+      topology={topology}
+      updatedAt={updatedAt}
+        notFound={notFound}
+        onRetry={retryTopology}
+      pipelineId={state.pipeline_id}
+      stalledFor={stalledFor}
+      onTrace={viewer ? undefined : () => setTraceOpen(true)}
+      selectedLayer={layerFilter ?? undefined}
+      onSelectLayer={setLayerFilter}
+    />
+  )
+  const hypothesis = state.hypothesis ? (
+    <HypothesisCard
+      hypothesis={state.hypothesis}
+      steps={state.steps}
+      history={state.hypothesis_history}
+      selfId={user.id}
+      canDecide={!viewer && state.status === 'open'}
+      onVerdict={actions.hypothesisVerdict}
+    />
+  ) : null
+  const proposalsCard = showProposals ? (
+    <div id={PROPOSAL_ANCHOR} tabIndex={-1} className="scroll-mt-4 focus:outline-none">
+      <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} people={peopleList} presence={presence} />
+    </div>
+  ) : null
+  const investigation = (
+    <>
+      <ChangesLane
+        steps={state.steps}
+        alertAt={state.opened_at}
+        selectedLayer={layerFilter ?? undefined}
+        onSelectLayer={setLayerFilter}
+      />
+    <section aria-labelledby="investigation-heading" className="flex flex-col gap-2">
+      <div className="flex items-center gap-2 pt-1">
+        <h2 id="investigation-heading" className="m-0 text-sm font-medium">
+          Investigation
+        </h2>
+        {state.steps.length > 0 && (
+          <span className="text-xs tabular-nums text-subtle-foreground">
+            {state.steps.length} {state.steps.length === 1 ? 'step' : 'steps'}
+          </span>
+        )}
+      </div>
+      <Timeline
+        steps={state.steps}
+        messages={state.messages}
+        comments={state.comments}
+        onComment={actions.comment}
+        readOnly={viewer}
+        working={state.agent_status.state === 'working'}
+        onTakeControl={takeControl}
+        agent={state.agent_status}
+        checklist={checklist}
+        filterLayer={layerFilter ?? undefined}
+        onClearFilter={() => setLayerFilter(null)}
+      />
+    </section>
+    </>
+  )
+  const similar = <SimilarCard steps={state.steps} />
+  const people = (
+    <PresencePanel
+      members={state.members}
+      presence={presence}
+      selfId={user.id}
+      selfName={user.name}
+      selfIsViewer={viewer}
+      people={peopleList}
+    />
+  )
+  const suggestions = <SuggestionsPanel suggestions={state.suggestions} />
+  const openProposals = state.proposals.filter((p) => p.status === 'open').length
 
   return (
     <DecisionHandleContext.Provider value={decisionRegistry}>
@@ -223,6 +361,15 @@ export function RoomScreen() {
         >
           <span>Resolved</span>
           <span className="font-normal text-muted-foreground">{state.resolution}</span>
+          {state.labelled ? (
+            <span className="font-normal text-muted-foreground">· labelled</span>
+          ) : (
+            !viewer && (
+              <Button size="sm" variant="outline" className="ml-auto" onClick={() => setLabelOpen(true)}>
+                Add label
+              </Button>
+            )
+          )}
         </div>
       )}
       {replaying && <ReplayProgress done={state.last_seq} total={replayTarget} />}
@@ -244,59 +391,62 @@ export function RoomScreen() {
             exporting={exporting}
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
           />
-          <DecisionBar state={state} user={user} />
+          <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} />
 
-          <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
-            <PipelineMap
-              topology={topology}
-              updatedAt={updatedAt}
-              pipelineId={state.pipeline_id}
-              stalledFor={stalledFor}
-              onTrace={viewer ? undefined : () => setTraceOpen(true)}
-              selectedLayer={layerFilter ?? undefined}
-              onSelectLayer={setLayerFilter}
-            />
-
-            {state.hypothesis && <HypothesisCard hypothesis={state.hypothesis} steps={state.steps} />}
-
-            {showProposals && (
-              <div id={PROPOSAL_ANCHOR} tabIndex={-1} className="scroll-mt-4 focus:outline-none">
-                <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} />
-              </div>
-            )}
-
-            <section aria-labelledby="investigation-heading" className="flex flex-col gap-2">
-              <div className="flex items-center gap-2 pt-1">
-                <h2 id="investigation-heading" className="m-0 text-sm font-medium">
-                  Investigation
-                </h2>
-                {state.steps.length > 0 && (
-                  <span className="text-xs tabular-nums text-subtle-foreground">
-                    {state.steps.length} {state.steps.length === 1 ? 'step' : 'steps'}
-                  </span>
-                )}
-              </div>
-              <Timeline
-                steps={state.steps}
-                messages={state.messages}
-                comments={state.comments}
-                onComment={actions.comment}
-                readOnly={viewer}
-                working={state.agent_status.state === 'working'}
-                onTakeControl={takeControl}
-                agent={state.agent_status}
-                filterLayer={layerFilter ?? undefined}
-                onClearFilter={() => setLayerFilter(null)}
-              />
-            </section>
-            <div ref={sentinelRef} aria-hidden="true" />
-          </div>
+          {wide ? (
+            <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
+              {lane}
+              {hypothesis}
+              {proposalsCard}
+              {investigation}
+              <div ref={sentinelRef} aria-hidden="true" />
+            </div>
+          ) : (
+            <Tabs value={tab} onValueChange={(v) => setTab(v as RoomTab)} className="flex min-w-0 flex-col">
+              <TabsList
+                aria-label="Room sections"
+                className="sticky top-[var(--decision-h,0px)] z-10 flex w-full overflow-x-auto bg-background px-2 sm:px-4"
+              >
+                <TabsTrigger value="investigation" className="coarse:h-11">Investigation</TabsTrigger>
+                <TabsTrigger value="fix" className="coarse:h-11">
+                  Fix
+                  {openProposals > 0 && <span className="font-mono text-[11px] text-subtle-foreground">{openProposals}</span>}
+                </TabsTrigger>
+                <TabsTrigger value="people" className="coarse:h-11">
+                  People
+                  <span className="font-mono text-[11px] text-subtle-foreground">{headerMembers.length}</span>
+                </TabsTrigger>
+                <TabsTrigger value="activity" className="coarse:h-11">Activity</TabsTrigger>
+              </TabsList>
+              {/* Every panel stays mounted (hidden) so half-written comments survive a tab change. */}
+              <TabsContent value="investigation" forceMount hidden={tab !== 'investigation'} className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
+                {lane}
+                {hypothesis}
+                {similar}
+                {investigation}
+                <div ref={sentinelRef} aria-hidden="true" />
+              </TabsContent>
+              <TabsContent value="fix" forceMount hidden={tab !== 'fix'} className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
+                {proposalsCard}
+                <ProposalsSummary proposals={state.proposals} />
+              </TabsContent>
+              <TabsContent value="people" forceMount hidden={tab !== 'people'}>
+                {people}
+              </TabsContent>
+              <TabsContent value="activity" forceMount hidden={tab !== 'activity'}>
+                {suggestions}
+                <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
+                <div className="h-px shrink-0 bg-border" />
+                <ActivityFeed activity={state.activity} openedAt={state.opened_at} />
+              </TabsContent>
+            </Tabs>
+          )}
 
           {unseen > 0 && (
             <button
               type="button"
               onClick={jump}
-              className="fixed bottom-36 right-4 z-20 flex min-h-11 items-center gap-1.5 rounded-full border border-border bg-card px-4 text-sm font-medium shadow-md hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:right-6 xl:right-[324px]"
+              className="fixed bottom-[calc(9rem+var(--sheet-h,0px))] right-4 z-20 flex min-h-11 items-center gap-1.5 rounded-full border border-border bg-card px-4 text-sm font-medium shadow-md hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:right-6 xl:right-[324px]"
             >
               <ArrowDown aria-hidden="true" className="size-4" />
               Jump to latest
@@ -306,28 +456,22 @@ export function RoomScreen() {
             </button>
           )}
 
-          <SteerBox state={state} user={user} actions={actions} />
+          <SteerBox state={state} user={user} actions={actions} prefill={prefill} conn={conn} />
         </div>
 
-        <aside
-          aria-label="Room details"
-          className="flex w-full shrink-0 flex-col border-t border-border xl:w-[300px] xl:border-l xl:border-t-0"
-        >
-          <ProposalsSummary proposals={state.proposals} />
-          <div className="h-px shrink-0 bg-border" />
-          <PresencePanel
-            members={state.members}
-            presence={presence}
-            selfId={user.id}
-            selfName={user.name}
-            selfIsViewer={viewer}
-          />
-          <div className="h-px shrink-0 bg-border" />
-          <SuggestionsPanel suggestions={state.suggestions} />
-          <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
-          <div className="h-px shrink-0 bg-border" />
-          <ActivityFeed activity={state.activity} />
-        </aside>
+        {wide && (
+          <aside aria-label="Room details" className="flex w-full shrink-0 flex-col border-t border-border xl:w-[300px] xl:border-l xl:border-t-0">
+            {similar}
+            <ProposalsSummary proposals={state.proposals} />
+            <div className="h-px shrink-0 bg-border" />
+            {people}
+            <div className="h-px shrink-0 bg-border" />
+            {suggestions}
+            <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
+            <div className="h-px shrink-0 bg-border" />
+            <ActivityFeed activity={state.activity} openedAt={state.opened_at} />
+          </aside>
+        )}
       </div>
 
       {traceOpen && !viewer && <TracePanel trace={state.trace} actions={actions} onClose={() => setTraceOpen(false)} />}
@@ -336,9 +480,24 @@ export function RoomScreen() {
       )}
       {/* Gone once room.closed arrives: the "Resolved" strip above takes over. */}
       {closeOpen && state.status === 'open' && (
-        <CloseRoomDialog actions={actions} onClose={() => setCloseOpen(false)} />
+        <CloseRoomDialog state={state} actions={actions} onClose={() => setCloseOpen(false)} />
+      )}
+      {labelOpen && state.status === 'closed' && !state.labelled && (
+        <LabelDialog state={state} onSubmit={actions.label} onClose={() => setLabelOpen(false)} />
       )}
     </div>
     </DecisionHandleContext.Provider>
   )
+}
+
+type RoomTab = 'investigation' | 'fix' | 'people' | 'activity'
+const TABS: RoomTab[] = ['investigation', 'fix', 'people', 'activity']
+
+function readTab(key: string): RoomTab {
+  try {
+    const v = sessionStorage.getItem(key)
+    return TABS.find((t) => t === v) ?? 'investigation'
+  } catch {
+    return 'investigation'
+  }
 }

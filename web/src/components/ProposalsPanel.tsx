@@ -10,7 +10,7 @@ import { useContext, useEffect, useId, useRef, useState } from 'react'
 import { CircleCheck, CircleX, Copy, Hash, Lock, RotateCcw, TriangleAlert, Check, X } from 'lucide-react'
 import type { ProposalState, RoomState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
-import { canDecideLayer } from '../state/permissions'
+import { canDecideLayer, isViewer } from '../state/permissions'
 import { soloConfirmText } from '../lib/solo'
 import { describeIdentity, identityDetails, shortHash } from '../lib/hash'
 import { clockTime, timeAgo } from '../lib/time'
@@ -22,6 +22,19 @@ import { DecisionHandleContext } from './shell/context'
 import { completesSet } from '../lib/decision'
 import { PROPOSAL_ANCHOR } from './room/ProposalsSummary'
 import { PersonAvatar } from './room/PersonAvatar'
+import { WaitingFor } from './room/WaitingFor'
+import type { Person, PresenceMember } from '../api/types'
+import type { NudgeState } from '../state/types'
+
+/** What a pending layer row needs to say who it waits on and to nudge them (F9). */
+export interface WaitingContext {
+  roomId: string
+  roomTitle: string
+  people?: Person[]
+  presence: PresenceMember[]
+  nudges: Record<string, NudgeState>
+  canNudge: boolean
+}
 import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -434,6 +447,7 @@ function LayerRow({
   noHashNoteId,
   headingId,
   onSolo,
+  waiting,
 }: {
   proposal: ProposalState
   layer: string
@@ -447,6 +461,7 @@ function LayerRow({
   headingId: string
   /** The server asked for a solo confirm: the panel shows the solo banner. */
   onSolo: () => void
+  waiting?: WaitingContext
 }) {
   const [rejecting, setRejecting] = useState(false)
   const [reason, setReason] = useState('')
@@ -617,6 +632,18 @@ function LayerRow({
           <span className="font-mono text-xs text-muted-foreground">user:{user.id}</span>
           <span className="text-xs font-medium text-warning-foreground">pending · your layer</span>
         </>
+      ) : waiting && state === 'pending' ? (
+        <WaitingFor
+          proposalId={proposal.proposal_id}
+          layer={layer}
+          roomId={waiting.roomId}
+          roomTitle={waiting.roomTitle}
+          people={waiting.people}
+          presence={waiting.presence}
+          nudge={waiting.nudges[`${proposal.proposal_id}/${layer}`]}
+          canNudge={waiting.canNudge}
+          actions={actions}
+        />
       ) : (
         <Badge className="ml-auto" variant="neutral">
           <span className="size-1.5 rounded-full bg-warning" aria-hidden="true" />
@@ -626,13 +653,14 @@ function LayerRow({
 
       {canDecide && !rejecting && (
         <span className="ml-auto inline-flex items-center gap-2">
-          <Button variant="ghost-danger" size="sm" onClick={() => setRejecting(true)} aria-keyshortcuts={shortcuts ? 'R' : undefined}>
+          <Button variant="ghost-danger" size="sm" className="coarse:h-11 coarse:px-4" onClick={() => setRejecting(true)} aria-keyshortcuts={shortcuts ? 'R' : undefined}>
             Reject
             {shortcuts && <Kbd aria-hidden="true">R</Kbd>}
           </Button>
           <Button
             variant="success"
             size="sm"
+            className="coarse:h-11 coarse:px-4"
             ref={approveRef}
             disabled={busy || !hashed}
             aria-describedby={hashed ? undefined : noHashNoteId}
@@ -672,12 +700,13 @@ function LayerRow({
             autoComplete="off"
             autoFocus
           />
-          <Button type="submit" variant="destructive" size="sm" disabled={!reason.trim()}>
+          <Button type="submit" variant="destructive" size="sm" className="coarse:h-11 coarse:px-4" disabled={!reason.trim()}>
             Confirm
           </Button>
           <Button
             variant="ghost"
             size="sm"
+            className="coarse:h-11 coarse:px-4"
             onClick={() => {
               setRejecting(false)
               setReason('')
@@ -780,6 +809,7 @@ function Proposal({
   sentHash,
   ribbon,
   onSolo,
+  waiting,
 }: {
   proposal: ProposalState
   user: CurrentUser
@@ -792,6 +822,7 @@ function Proposal({
   /** False while the decision bar already says "Needs your approval": one amber per fact. */
   ribbon: boolean
   onSolo: () => void
+  waiting: WaitingContext
 }) {
   const titleId = useId()
   const noteId = useId()
@@ -912,6 +943,7 @@ function Proposal({
             noHashNoteId={noteId}
             headingId={titleId}
             onSolo={onSolo}
+            waiting={waiting}
           />
         ))}
       </div>
@@ -926,6 +958,8 @@ export function ProposalsPanel({
   actions,
   stale = null,
   ribbon = true,
+  people,
+  presence = [],
 }: {
   state: RoomState
   user: CurrentUser
@@ -934,7 +968,18 @@ export function ProposalsPanel({
   stale?: StaleInfo | null
   /** Draw each card's amber "Needs your approval" ribbon. RoomScreen turns it off when the decision bar shows it. */
   ribbon?: boolean
+  /** From RoomScreen: GET /api/people (members only) and the presence frame. */
+  people?: Person[]
+  presence?: PresenceMember[]
 }) {
+  const waiting: WaitingContext = {
+    roomId: state.id,
+    roomTitle: state.title,
+    people,
+    presence,
+    nudges: state.nudges,
+    canNudge: !isViewer(user) && state.status === 'open',
+  }
   const proposals = state.proposals
   // `/api/me.solo` says so up front; on an older server the first approve that
   // asks for a confirm tells us.
@@ -980,6 +1025,7 @@ export function ProposalsPanel({
               shortcutLayer={shortcutKey.startsWith(`${p.proposal_id}/`) ? shortcutKey.slice(p.proposal_id.length + 1) : undefined}
               ribbon={ribbon}
               onSolo={() => setSoloSeen(true)}
+              waiting={waiting}
             />
           ))}
         </div>

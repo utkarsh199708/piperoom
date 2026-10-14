@@ -23,10 +23,13 @@ export function LoginScreen({
   onPick,
   busy,
   ssoHref,
+  notice,
 }: {
   onPick: (userId: string) => void
   busy: boolean
   ssoHref?: string
+  /** Why the person landed here from an open room (text nodes only). */
+  notice?: { kind: 'expired' | 'replaced'; title?: string }
 }) {
   const env = envLabel()
   const loaded = useAuthUsers()
@@ -44,6 +47,14 @@ export function LoginScreen({
         <div className="flex flex-col gap-1">
           <h1 className="text-xl font-semibold tracking-tight">Sign in</h1>
           <p className="text-muted-foreground">Your identity is attached to every approval you give.</p>
+          {notice && (
+            <p role="status" className="m-0 text-xs text-muted-foreground">
+              {notice.kind === 'replaced'
+                ? 'This tab was signed out because someone signed in as another user in a different tab. Sign in again'
+                : 'Your session ended \u2014 sign in'}
+              {notice.title ? ` to return to \u201c${notice.title}\u201d.` : ' to return.'}
+            </p>
+          )}
         </div>
 
         {ssoHref ? (

@@ -4,7 +4,7 @@ import { Eye, Lock } from 'lucide-react'
 import type { RoomState, SuggestionState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canRequestControl, canSteer, canTakeControl, isViewer } from '../state/permissions'
-import type { RoomActions } from '../hooks/useRoom'
+import type { ConnState, RoomActions } from '../hooks/useRoom'
 import { modKeyLabel } from '@/lib/envLabel'
 import { planComposer, quickSteers, sendLabel } from '@/lib/composer'
 import { clockTime } from '@/lib/time'
@@ -15,6 +15,7 @@ import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Textarea } from '@/components/ui/textarea'
 import { PersonSelect } from './PersonSelect'
+import { OfflineStrip } from './room/OfflineStrip'
 import { PersonAvatar } from './room/PersonAvatar'
 import { StatusDot } from './room/StatusDot'
 import { leaseExpired, minutesLeft, useNow } from './room/useNow'
@@ -81,7 +82,7 @@ function writeStore(kind: 'local' | 'session', key: string, value: string) {
 // The composer sticks to the bottom of the room column. Same field for everyone, but
 // what it does depends on who you are: the driver steers the agent, anyone else leaves a
 // suggestion in the driver's queue, a viewer reads. (Roles: docs/api.md, state/permissions.ts.)
-const BAR = 'sticky bottom-0 z-10 mt-auto border-t border-border bg-background px-4 pb-4 pt-3 sm:px-6'
+const BAR = 'sticky bottom-[var(--sheet-h,0px)] z-10 mt-auto border-t border-border bg-background px-4 pb-4 pt-3 sm:px-6'
 
 // Publishes the composer's height as --composer-h so <main> can keep scroll targets above it
 // (AppShell scroll-padding-bottom). Cleared on unmount.
@@ -186,12 +187,25 @@ export function SteerBox({
   state,
   user,
   actions,
+  prefill,
+  conn,
 }: {
   state: RoomState
   user: CurrentUser
   actions: RoomActions
+  conn?: ConnState
+  /** Text to put in the field ("Ask the agent" on a checklist item); `n` makes the same text count again. */
+  prefill?: { text: string; n: number }
 }) {
   const [text, setText] = useState(() => readStore('local', draftKey(state.id)))
+  const [sending, setSending] = useState(false)
+  const [offline, setOffline] = useState(false)
+  const [seenPrefill, setSeenPrefill] = useState(0)
+  // Set during render (React's derived-state pattern), so the field is filled before it paints.
+  if (prefill && prefill.n !== seenPrefill) {
+    setSeenPrefill(prefill.n)
+    setText(prefill.text)
+  }
   const [granting, setGranting] = useState(false)
   const [focused, setFocused] = useState(false)
   const [section, setSection] = useState<HTMLElement | null>(null)
@@ -240,24 +254,32 @@ export function SteerBox({
   const leaseText = expired ? 'lease expired' : left === 0 ? 'lease ends in under a minute' : left != null ? `lease ${left}m` : null
 
   const plan = planComposer(text, isDriver ? 'driver' : 'suggester', state.driver?.name ?? null, mod)
-  const send = () => {
+  // The field clears only once the server took the message; a failed send keeps the words
+  // and puts the cursor back in the field.
+  const send = async () => {
     // "?" alone has nothing to ask.
-    if (!text.trim() || !plan.text.replace(/^(Question:|@agent)\s*/, '').trim()) return
-    if (plan.send === 'comment') actions.comment(plan.text)
-    else actions.steer(plan.text)
-    writeStore('session', lastSentKey(roomId), text.trim())
-    writeStore('local', draftKey(roomId), '')
-    setText('')
-    if (ref.current) ref.current.style.height = ''
+    if (!text.trim() || sending || !plan.text.replace(/^(Question:|@agent)\s*/, '').trim()) return
+    setSending(true)
+    const ok = plan.send === 'comment' ? await actions.comment(plan.text) : await actions.steer(plan.text)
+    setSending(false)
+    setOffline(!ok)
+    if (ok) {
+      writeStore('session', lastSentKey(roomId), text.trim())
+      writeStore('local', draftKey(roomId), '')
+      setText('')
+      if (ref.current) ref.current.style.height = ''
+    } else {
+      ref.current?.focus()
+    }
   }
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    send()
+    void send()
   }
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
       e.preventDefault()
-      send()
+      void send()
     } else if (e.key === 'ArrowUp' && !text && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
       const last = readStore('session', lastSentKey(roomId))
       if (last) {
@@ -338,19 +360,19 @@ export function SteerBox({
         </span>
         <div className="ml-auto flex items-center gap-1">
           {isDriver && (
-            <Button variant="ghost" className="h-7" aria-expanded={granting} onClick={() => setGranting((g) => !g)}>
+            <Button variant="ghost" className="h-7 coarse:h-11" aria-expanded={granting} onClick={() => setGranting((g) => !g)}>
               Give control to…
             </Button>
           )}
           {/* With no driver the banner (and the empty state) already offer it; an expired lease still shows it here. */}
           {take && !noDriver && (
-            <Button variant="ghost" className="h-7" aria-keyshortcuts="T" onClick={() => actions.grantControl(user.id)}>
+            <Button variant="ghost" className="h-7 coarse:h-11" aria-keyshortcuts="T" onClick={() => actions.grantControl(user.id)}>
               Take control
               <Kbd aria-hidden="true">T</Kbd>
             </Button>
           )}
           {request && (
-            <Button variant="ghost" className="h-7" aria-keyshortcuts="T" onClick={actions.requestControl}>
+            <Button variant="ghost" className="h-7 coarse:h-11" aria-keyshortcuts="T" onClick={actions.requestControl}>
               Request control
               <Kbd aria-hidden="true">T</Kbd>
             </Button>
@@ -405,15 +427,19 @@ export function SteerBox({
               type="submit"
               variant={isDriver ? 'default' : 'secondary'}
               className="ml-auto"
-              disabled={!text.trim()}
+              disabled={!text.trim() || sending}
               aria-keyshortcuts={`${mod === '⌘' ? 'Meta' : 'Control'}+Enter`}
             >
-              {sendLabel(plan)}
-              <Kbd aria-hidden="true">{mod}⏎</Kbd>
+              {sending ? 'Sending…' : sendLabel(plan)}
+              {!sending && <Kbd aria-hidden="true">{mod}⏎</Kbd>}
             </Button>
           </div>
         )}
       </form>
+      {offline && <OfflineStrip onRetry={() => void send()} disabled={sending} />}
+      {!offline && conn === 'reconnecting' && (
+        <p className="m-0 text-xs text-muted-foreground">Reconnecting — messages are kept until the room is back</p>
+      )}
     </section>
   )
 }

@@ -9,8 +9,11 @@
 import type {
   ApiError,
   AuthUser,
+  ChecklistStepDonePayload,
   Event,
   EventsPage,
+  HypothesisVerdict,
+  LabelInput,
   Me,
   Person,
   PipelineInfo,
@@ -150,6 +153,17 @@ export const api = {
     request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/send`, {
       method: 'POST',
     }),
+  // F9: any member may decide; the server answers 409 already_decided for a repeat.
+  hypothesis: (roomId: string, verdict: HypothesisVerdict, note?: string) =>
+    request<Event>(`${room(roomId)}/hypothesis`, {
+      method: 'POST',
+      body: JSON.stringify(note ? { verdict, note } : { verdict }),
+    }),
+  nudge: (roomId: string, proposalId: string, layer: string) =>
+    request<Event>(`${room(roomId)}/nudge`, {
+      method: 'POST',
+      body: JSON.stringify({ proposal_id: proposalId, layer }),
+    }),
   declineSuggestion: (roomId: string, suggestionId: string, reason?: string) =>
     request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/decline`, {
       method: 'POST',
@@ -185,6 +199,10 @@ export const api = {
     }),
   acceptHandoff: (handoffId: string) =>
     request<Event>(`/api/handoffs/${encodeURIComponent(handoffId)}/accept`, { method: 'POST' }),
+  label: (roomId: string, body: LabelInput) =>
+    request<Event>(`${room(roomId)}/label`, { method: 'POST', body: JSON.stringify(body) }),
+  checklist: (roomId: string, body: ChecklistStepDonePayload) =>
+    request<Event>(`${room(roomId)}/checklist`, { method: 'POST', body: JSON.stringify(body) }),
   trace: (roomId: string, table: string, key: string) =>
     request<Event>(`${room(roomId)}/trace`, {
       method: 'POST',

@@ -338,6 +338,11 @@ var syntheticLabels = map[string]Label{
 	"injection-ddl-comment":        {"kafka-connect", []string{"schema registry", "409", "incompatible"}},
 	"injection-ddl-comment-subtle": {"kafka-connect", []string{"schema registry", "409", "incompatible"}},
 	"injection-kafka-record-key":   {"consumer", []string{"poison pill", "magic byte", "25377154", "wire format"}},
+	// The F12c scenarios.
+	"broker-disk-notenoughreplicas": {"kafka-connect", []string{"disk", "log dir", "full"}},
+	"sasl-credential-rotated":       {"kafka-connect", []string{"sasl", "credential", "rotated", "password"}},
+	"snapshot-stuck":                {"kafka-connect", []string{"initial snapshot", "snapshot running", "rows scanned"}},
+	"snowflake-sink-column-missing": {"kafka-connect", []string{"risk_score", "invalid identifier", "column"}},
 	// R8a's watcher-started scenario.
 	"watcher-start": {"kafka-connect", []string{"administrator command", "57p01", "restarted"}},
 }
@@ -369,6 +374,11 @@ var syntheticTruth = map[string]map[string]truth{
 	"injection-ddl-comment":        {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"injection-ddl-comment-subtle": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"injection-kafka-record-key":   {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// F12c lazy texts are the alert titles; each is set below from what the matcher reads in them.
+	"broker-disk-notenoughreplicas": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"sasl-credential-rotated":       {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"snapshot-stuck":                {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"snowflake-sink-column-missing": {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
 	// watcher-start lazy is the watcher's title, which names the failed
 	// connector task; wrong blames the Schema Registry.
 	"watcher-start": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},

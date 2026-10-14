@@ -2,7 +2,7 @@ import { useId, useState } from 'react'
 import { emptyStateFor } from '../lib/emptyState'
 import type { FormEvent } from 'react'
 import { Check, ChevronRight, X } from 'lucide-react'
-import type { AgentMessageState, CommentState, StepState, ToolCallState } from '../state/types'
+import type { AgentMessageState, ChecklistTick, CommentState, StepState, ToolCallState } from '../state/types'
 import { argTags, formatMs, toolLayer } from '../lib/toolLayers'
 import { cn } from '@/lib/utils'
 import { Badge, layerVariant } from '@/components/ui/badge'
@@ -11,8 +11,12 @@ import { Input } from '@/components/ui/input'
 import { Kbd } from '@/components/ui/kbd'
 import { Progress } from '@/components/ui/progress'
 import { Clock } from './room/Clock'
+import { OfflineStrip } from './room/OfflineStrip'
 import { PersonAvatar } from './room/PersonAvatar'
 import { CollapsibleText } from './room/CollapsibleText'
+import { Checklist } from './room/Checklist'
+import type { ChecklistAccess } from './room/Checklist'
+import type { ChecklistStepDonePayload } from '../api/types'
 
 const AGENT = { kind: 'agent', id: 'agent', name: 'Agent' } as const
 
@@ -45,7 +49,15 @@ function rawJson(t: ToolCallState): string {
 
 // One tool call as evidence: tool badge, arg tags, the summary the agent got back,
 // and the raw input/result behind a <details>. Plain text only (never HTML or links).
-function Evidence({ step }: { step: StepState }) {
+/** What the timeline needs to show a runbook_lookup result as a checklist. */
+export interface ChecklistWiring {
+  done: Record<string, ChecklistTick>
+  access: ChecklistAccess
+  onTick: (p: ChecklistStepDonePayload) => void
+  onAsk: (text: string) => void
+}
+
+function Evidence({ step, checklist }: { step: StepState; checklist?: ChecklistWiring }) {
   if (step.tool_calls.length === 0) return null
   return (
     <ul className="m-0 flex list-none flex-col gap-3 p-0">
@@ -69,6 +81,17 @@ function Evidence({ step }: { step: StepState }) {
             >
               {t.summary}
             </pre>
+          )}
+          {checklist && t.tool === 'runbook_lookup' && !t.is_error && (
+            <Checklist
+              stepId={step.id}
+              toolUseId={t.tool_use_id}
+              data={t.data}
+              done={checklist.done}
+              access={checklist.access}
+              onTick={checklist.onTick}
+              onAsk={checklist.onAsk}
+            />
           )}
           {(t.input != null || t.data !== undefined) && (
             <details className="text-xs">
@@ -171,26 +194,39 @@ function CommentThread({
   )
 }
 
-function ReplyBox({ onSubmit }: { onSubmit: (text: string) => void }) {
+function ReplyBox({ onSubmit }: { onSubmit: (text: string) => void | Promise<boolean> }) {
   const [text, setText] = useState('')
+  const [sending, setSending] = useState(false)
+  const [offline, setOffline] = useState(false)
+  // The field clears only once the server took the comment; a failed send keeps the words.
+  const send = async () => {
+    const t = text.trim()
+    if (!t || sending) return
+    setSending(true)
+    const ok = (await onSubmit(t)) !== false
+    setSending(false)
+    setOffline(!ok)
+    if (ok) setText('')
+  }
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    if (!text.trim()) return
-    onSubmit(text.trim())
-    setText('')
+    void send()
   }
   return (
-    <form className="flex items-center gap-2" onSubmit={submit}>
-      <Input
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder="Comment on this step…"
-        aria-label="Comment on this step"
-      />
-      <Button type="submit" variant="secondary" size="sm" disabled={!text.trim()}>
-        Comment
-      </Button>
-    </form>
+    <div className="flex flex-col gap-1.5">
+      <form className="flex items-center gap-2" onSubmit={submit}>
+        <Input
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Comment on this step…"
+          aria-label="Comment on this step"
+        />
+        <Button type="submit" variant="secondary" size="sm" disabled={!text.trim() || sending}>
+          {sending ? 'Sending…' : 'Comment'}
+        </Button>
+      </form>
+      {offline && <OfflineStrip onRetry={() => void send()} disabled={sending} />}
+    </div>
   )
 }
 
@@ -217,7 +253,7 @@ function StepExtras({
 }: {
   step: StepState
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void
+  onComment: (text: string, stepId?: string) => void | Promise<boolean>
   readOnly: boolean
   showReplyBox: boolean
 }) {
@@ -241,14 +277,17 @@ function DoneStep({
   comments,
   onComment,
   readOnly,
+  checklist,
 }: {
   step: StepState
   n: number
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void
+  onComment: (text: string, stepId?: string) => void | Promise<boolean>
   readOnly: boolean
+  checklist?: ChecklistWiring
 }) {
-  const [open, setOpen] = useState(false)
+  // A step that fetched a runbook starts open: its checklist is for doing, not for reading later.
+  const [open, setOpen] = useState(() => !!checklist && step.tool_calls.some((t) => t.tool === 'runbook_lookup'))
   const regionId = useId()
   const first = step.tool_calls[0]
   const tags = first ? argTags(first.input) : []
@@ -263,7 +302,7 @@ function DoneStep({
         aria-expanded={open}
         aria-controls={regionId}
         onClick={() => setOpen((o) => !o)}
-        className="flex min-h-9 w-full items-center gap-2.5 rounded-md px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        className="flex min-h-9 coarse:min-h-11 w-full items-center gap-2.5 rounded-md px-2 text-left transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <ChevronRight
           aria-hidden="true"
@@ -288,7 +327,7 @@ function DoneStep({
       </button>
 
       <div id={regionId} hidden={!open} className={cn("ml-10 flex-col gap-3 pb-1", open ? "flex" : "hidden")}>
-        <Evidence step={step} />
+        <Evidence step={step} checklist={checklist} />
         {!readOnly && <ReplyBox onSubmit={(t) => onComment(t, step.id)} />}
       </div>
 
@@ -309,13 +348,15 @@ function LiveStep({
   comments,
   onComment,
   readOnly,
+  checklist,
   offFilter = false,
 }: {
   step: StepState
   n: number
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void
+  onComment: (text: string, stepId?: string) => void | Promise<boolean>
   readOnly: boolean
+  checklist?: ChecklistWiring
   /** The step is outside the active layer filter: kept so the live work stays visible. */
   offFilter?: boolean
 }) {
@@ -342,7 +383,7 @@ function LiveStep({
         className="h-0.5 rounded-sm bg-agent-subtle"
         indicatorClassName="rounded-sm bg-agent"
       />
-      <Evidence step={step} />
+      <Evidence step={step} checklist={checklist} />
       <StepExtras step={step} comments={comments} onComment={onComment} readOnly={readOnly} showReplyBox />
     </li>
   )
@@ -357,13 +398,14 @@ export function Timeline({
   working = false,
   onTakeControl,
   agent,
+  checklist,
   filterLayer,
   onClearFilter,
 }: {
   steps: StepState[]
   messages: AgentMessageState[]
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void
+  onComment: (text: string, stepId?: string) => void | Promise<boolean>
   /** A viewer reads comments but cannot write any. */
   readOnly?: boolean
   /** The agent is working: the last step is the live one. */
@@ -372,6 +414,8 @@ export function Timeline({
   onTakeControl?: () => void
   /** The agent's status: the empty state says what it is doing instead of a fixed line. */
   agent?: { state: string; detail?: string }
+  /** Shows the items of a runbook_lookup result as a checklist when set. */
+  checklist?: ChecklistWiring
   /** Show only steps that called a tool of this layer (the live step is always kept). */
   filterLayer?: string
   onClearFilter?: () => void
@@ -441,6 +485,7 @@ export function Timeline({
               comments={stepComments}
               onComment={onComment}
               readOnly={readOnly}
+              checklist={checklist}
               offFilter={!hit}
             />
           ) : (
@@ -451,6 +496,7 @@ export function Timeline({
               comments={stepComments}
               onComment={onComment}
               readOnly={readOnly}
+              checklist={checklist}
             />
           )
         })}

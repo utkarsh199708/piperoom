@@ -6,8 +6,10 @@ import type {
   AgentStatusPayload,
   HandoffSummary,
   HypothesisSummary,
+  HypothesisVerdict,
   Identity,
   ProposalStep,
+  RoomLabelledPayload,
   RoomSnapshot,
   TraceStage,
 } from '../api/types'
@@ -27,11 +29,36 @@ export interface AgentStatusState {
   detail?: string
 }
 
+export interface VerdictState {
+  verdict: HypothesisVerdict
+  by: Actor
+  note?: string
+  at: string
+}
+
 export interface HypothesisState {
   text: string
   based_on_steps: string[]
   confidence: HypothesisSummary['confidence']
+  /** Derived (F9): at least one confirmed and no disputed verdict on this hypothesis. */
   confirmed: boolean
+  /** seq of the agent.hypothesis event; hypothesis.verdict answers it. */
+  seq?: number
+  /** Latest verdict per person, in the order they were given. */
+  verdicts?: VerdictState[]
+}
+
+/** One entry of the confidence path under the hypothesis heading. */
+export interface HypothesisHistoryEntry {
+  seq: number
+  at: string
+  confidence: string
+}
+
+/** approval.nudged: when and by whom a pending layer was last nudged. */
+export interface NudgeState {
+  at: string
+  by: Actor
 }
 
 export interface ToolCallState {
@@ -163,11 +190,31 @@ export interface AlertInfo {
   source: string | null
 }
 
+export type { ActivityKind } from './describe'
+import type { ActivityKind } from './describe'
+
+/** Who ticked one runbook item and when (checklist.step_done). */
+export interface ChecklistTick {
+  by: Actor
+  at: string
+  note?: string
+}
+
+/** Key of RoomState.checklist_done: "<tool_use_id>:<hit>:<item>". */
+export function checklistKey(toolUseId: string, hit: number, item: number): string {
+  return `${toolUseId}:${hit}:${item}`
+}
+
 export interface ActivityEntry {
   seq: number
   at: string
   actor: Actor
   text: string
+  /** Full sentence behind a clamped row (tooltip), when there is more to say. */
+  detail?: string
+  kind: ActivityKind
+  /** The tool name the `{tool}` placeholder in `text` stands for. */
+  tool?: string
 }
 
 export interface RoomState {
@@ -190,6 +237,10 @@ export interface RoomState {
   alert: AlertInfo | null
   agent_status: AgentStatusState
   hypothesis: HypothesisState | null
+  /** The confidence path, capped at 20; a repeat of the same confidence is not added. */
+  hypothesis_history: HypothesisHistoryEntry[]
+  /** `${proposal_id}/${layer}` -> the last nudge. */
+  nudges: Record<string, NudgeState>
   steps: StepState[]
   messages: AgentMessageState[]
   comments: CommentState[]
@@ -208,6 +259,10 @@ export interface RoomState {
   /** In flight until handoff.created / handoff.failed with its id, or `expires_at`. */
   handoff_request: HandoffRequestState | null
   handoff_failure: HandoffFailureState | null
+  /** The last room.labelled (re-labelling appends another, the last wins); null before any. */
+  labelled: RoomLabelledPayload | null
+  /** Ticked runbook items; the last event per key wins and an untick removes the key. */
+  checklist_done: Record<string, ChecklistTick>
   activity: ActivityEntry[]
 }
 
@@ -225,6 +280,8 @@ export function emptyRoomState(id: string): RoomState {
     alert: null,
     agent_status: { state: 'idle' },
     hypothesis: null,
+    hypothesis_history: [],
+    nudges: {},
     steps: [],
     messages: [],
     comments: [],
@@ -237,6 +294,8 @@ export function emptyRoomState(id: string): RoomState {
     handoffs: [],
     handoff_request: null,
     handoff_failure: null,
+    labelled: null,
+    checklist_done: {},
     activity: [],
   }
 }
@@ -277,6 +336,8 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
           based_on_steps: snapshot.hypothesis.based_on_steps ?? [],
           confidence: snapshot.hypothesis.confidence,
           confirmed: snapshot.hypothesis.confirmed,
+          seq: snapshot.hypothesis.seq ?? 0,
+          verdicts: [],
         }
       : null,
   }

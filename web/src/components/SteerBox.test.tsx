@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SteerBox } from './SteerBox'
 import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
@@ -17,7 +17,11 @@ const actions: RoomActions = {
   reject: vi.fn(),
   handoff: vi.fn(),
   acceptHandoff: vi.fn(),
+  label: vi.fn(),
+  checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 
 const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka'] }
@@ -63,8 +67,8 @@ describe('SteerBox', () => {
 const inAnHour = () => new Date(Date.now() + 24 * 60_000).toISOString()
 
 describe('SteerBox composer (U3)', () => {
-  it('the driver sees "You are driving" with the lease and sends with the button', () => {
-    vi.mocked(actions.steer).mockClear()
+  it('the driver sees "You are driving" with the lease and sends with the button', async () => {
+    vi.mocked(actions.steer).mockReset().mockResolvedValue(true)
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
     render(<SteerBox state={state} user={arjun} actions={actions} />)
     expect(screen.getByText(/You are driving · lease 2[34]m/)).toBeInTheDocument()
@@ -76,7 +80,30 @@ describe('SteerBox composer (U3)', () => {
     fireEvent.change(box, { target: { value: 'check the DDL log' } })
     fireEvent.click(send)
     expect(actions.steer).toHaveBeenCalledWith('check the DDL log')
-    expect(box).toHaveValue('')
+    await waitFor(() => expect(box).toHaveValue(''))
+  })
+
+  it('keeps the text, shows the offline strip and retries when the send did not reach the server', async () => {
+    vi.mocked(actions.steer).mockReset().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    render(<SteerBox state={state} user={arjun} actions={actions} />)
+    const box = screen.getByLabelText('Steer the agent')
+    fireEvent.focus(box)
+    fireEvent.change(box, { target: { value: 'look at the slot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent("Can't reach Piperoom")
+    expect(box).toHaveValue('look at the slot')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(box).toHaveValue(''))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(actions.steer).toHaveBeenCalledTimes(2)
+  })
+
+  it('says messages are kept while the socket reconnects', () => {
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    render(<SteerBox state={state} user={arjun} actions={actions} conn="reconnecting" />)
+    expect(screen.getByText(/messages are kept until the room is back/)).toBeInTheDocument()
   })
 
   it('Ctrl+Enter sends too', () => {
@@ -233,7 +260,8 @@ describe('SteerBox idle row (F1b)', () => {
       expect(actions.steer).not.toHaveBeenCalled()
     })
 
-    it('keeps the draft across a remount and clears it on send', () => {
+    it('keeps the draft across a remount and clears it on send', async () => {
+      vi.mocked(actions.steer).mockResolvedValue(true)
       vi.useFakeTimers()
       const first = render(<SteerBox state={driverState} user={arjun} actions={actions} />)
       fireEvent.change(field(), { target: { value: 'half a thought' } })
@@ -243,15 +271,18 @@ describe('SteerBox idle row (F1b)', () => {
       first.unmount()
       render(<SteerBox state={driverState} user={arjun} actions={actions} />)
       expect(field()).toHaveValue('half a thought')
-      fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+      })
       expect(localStorage.getItem('piperoom.draft.r1')).toBeNull()
     })
 
-    it('arrow up on an empty field recalls the last sent message', () => {
+    it('arrow up on an empty field recalls the last sent message', async () => {
+      vi.mocked(actions.steer).mockResolvedValue(true)
       render(<SteerBox state={driverState} user={arjun} actions={actions} />)
       fireEvent.change(field(), { target: { value: 'look at lag' } })
       fireEvent.keyDown(field(), { key: 'Enter', ctrlKey: true })
-      expect(field()).toHaveValue('')
+      await waitFor(() => expect(field()).toHaveValue(''))
       fireEvent.keyDown(field(), { key: 'ArrowUp' })
       expect(field()).toHaveValue('look at lag')
     })

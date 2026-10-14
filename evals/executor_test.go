@@ -56,7 +56,7 @@ func TestFailedStepStopsTheProposal(t *testing.T) {
 		t.Fatalf("phases = %s, want broken only", got)
 	}
 	msgs := strings.Join(messages(tr), "\n")
-	if strings.Contains(msgs, "step 1:") {
+	if strings.Contains(msgs, "step 2:") {
 		t.Errorf("the step after the failed one ran:\n%s", msgs)
 	}
 	if len(r.UnexecutedInputs) != 1 || !strings.HasPrefix(r.UnexecutedInputs[0], "inputs[1]:") {
@@ -74,7 +74,7 @@ func TestNamingAnEarlierStepRunsTheRest(t *testing.T) {
 		t.Fatalf("phases = %s", got)
 	}
 	msgs := strings.Join(messages(tr), "\n")
-	for _, want := range []string{"ack: proposal p_1 step 0: pg.public.orders-value compatibility", "ack: proposal p_1 step 1: succeeded"} {
+	for _, want := range []string{"ack: step 1: pg.public.orders-value compatibility", "ack: step 2: succeeded"} {
 		if !strings.Contains(msgs, want) {
 			t.Errorf("inputs lack %q:\n%s", want, msgs)
 		}
@@ -99,7 +99,7 @@ func TestWrongParamsDoNotRecover(t *testing.T) {
 	if got := strings.Join(r.PhasesVisited, ","); got != "broken" {
 		t.Errorf("phases = %s", got)
 	}
-	if msgs := strings.Join(messages(tr), "\n"); !strings.Contains(msgs, `step 0: actions: connect_restart_task {"connector":"pg-ledger-connector","task":7}: not found`) {
+	if msgs := strings.Join(messages(tr), "\n"); !strings.Contains(msgs, `step 1: actions: connect_restart_task {"connector":"pg-ledger-connector","task":7}: not found`) {
 		t.Errorf("wrong-params result:\n%s", msgs)
 	}
 	mismatch := false
@@ -147,7 +147,7 @@ func TestInputBindsToNewestProposal(t *testing.T) {
 	script := append(goodSchemaChangeScript()[:4], step{proposeFix: restart}, step{proposeFix: restart}, step{idle: true})
 	_, tr := evalOnce(t, sc, script)
 	msgs := strings.Join(messages(tr), "\n")
-	if !strings.Contains(msgs, "ack: proposal p_2 step 0: restarted") || strings.Contains(msgs, "proposal p_1") {
+	if !strings.Contains(msgs, "ack: step 1: restarted pg-orders-connector task 0 (RUNNING) [p_2]") || strings.Contains(msgs, "[p_1]") {
 		t.Errorf("not bound to the newest proposal:\n%s", msgs)
 	}
 }
@@ -163,7 +163,7 @@ func TestApprovalsOncePerProposal(t *testing.T) {
 	r, tr := evalOnce(t, sc, script)
 	approvals := 0
 	for _, m := range messages(tr) {
-		if strings.Contains(m, "approved proposal p_1") {
+		if strings.Contains(m, "approved your proposal [p_1]") {
 			approvals++
 		}
 	}
