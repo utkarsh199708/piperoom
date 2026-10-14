@@ -125,6 +125,10 @@ services:
       # this block reach the container, so a host value cannot redirect model
       # traffic. Do not add it here without a security review.
       PIPEROOM_RETENTION_DAYS: ${PIPEROOM_RETENTION_DAYS:-}
+      # Server log level (debug|info|warn|error) and format (text|json); empty
+      # = info / text. A bad value stops the start.
+      PIPEROOM_LOG_LEVEL: ${PIPEROOM_LOG_LEVEL:-}
+      PIPEROOM_LOG_FORMAT: ${PIPEROOM_LOG_FORMAT:-}
       # Outbound proxy for the Anthropic/Bedrock/Vertex APIs, Slack, and HTTP(S)
       # Connect / Schema Registry / Snowflake. Kafka and Postgres use plain TCP and
       # do not go through it. Loopback is never proxied.

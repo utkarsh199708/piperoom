@@ -27,7 +27,12 @@ COPY internal ./internal
 COPY migrations ./migrations
 # CGO off: a static binary that runs on distroless/static. -trimpath keeps the
 # build machine's paths out of the binary and makes the build reproducible.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/piperoom ./cmd/server
+# VERSION names the build (GET /healthz, start-up log). Pass it with
+# --build-arg VERSION=$(git describe --tags --always --dirty). The linker
+# ignores -X for a symbol that does not exist, so this is safe on a tree
+# without internal/version.
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X piperoom/internal/version.Version=${VERSION}" -o /out/piperoom ./cmd/server
 
 # ---- stage 3: runtime --------------------------------------------------------
 # distroless/static has CA certificates (needed for api.anthropic.com and TLS to
@@ -60,6 +65,9 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
 # can pick any user, including approving fixes), so it must be asked for
 # explicitly at run time: deploy/docker-compose.dev-auth.yml, or
 # -e PIPEROOM_AUTH_MODE=dev -e PIPEROOM_DEV_ALLOW_NONLOOPBACK=1.
+# From R9 dev mode off loopback (which a container always is) also needs the
+# acknowledgement -e PIPEROOM_DEV_ACK=dev-login-has-no-password, which the image
+# never sets: the operator states it in their own deployment.
 #
 # The image starts in oidc mode and fails fast, with a message naming the
 # missing variable, unless PIPEROOM_PUBLIC_URL (https), PIPEROOM_OIDC_ISSUER,

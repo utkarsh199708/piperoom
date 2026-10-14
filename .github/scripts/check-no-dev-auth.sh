@@ -20,6 +20,13 @@ if grep -vE '^\s*#' Dockerfile | grep -E 'COPY[^#]*users\.yaml|COPY[^#]*dev/'; t
   fail=1
 fi
 
+# The acknowledgement is typed by the operator; no shipped file may set it.
+if grep -vE '^\s*#' Dockerfile deploy/docker-compose.dev-auth.yml deploy/docker-compose.pilot.yml \
+    | grep -E 'PIPEROOM_DEV_ACK[:=] *"?dev-login-has-no-password'; then
+  echo "::error::PIPEROOM_DEV_ACK must never be set by a shipped file; the operator types it"
+  fail=1
+fi
+
 # 2. The pilot compose file, resolved with no auth variables set, must be oidc.
 export PIPEROOM_POSTGRES_PASSWORD=ci-only SCHEMA_REGISTRY_URL=off
 unset PIPEROOM_AUTH_MODE PIPEROOM_DEV_ALLOW_NONLOOPBACK

@@ -21,6 +21,8 @@ Piperoom has two login modes (`PIPEROOM_AUTH_MODE`):
   who can reach the port can pick any user, **including approving fixes**. The image does not
   contain it and the pilot compose file does not enable it. You ask for it on purpose with
   `docker compose -f deploy/docker-compose.pilot.yml -f deploy/docker-compose.dev-auth.yml up -d`.
+  From R9 it also needs `PIPEROOM_DEV_ACK=dev-login-has-no-password` in `deploy/.env`: the
+  override forwards it but never sets it, so you must type the sentence yourself.
 
 So:
 
@@ -665,6 +667,9 @@ room. A fix that was approved but not finished is marked failed, not re-run
 | Exits with `users/owners config` | `users.yaml` and `owners.yaml` disagree about a layer owner |
 | Exits with `load users file` or `load owners file` | `deploy/config/users.yaml` or `owners.yaml` is missing (step 3) |
 | Exits with `PIPEROOM_PUBLIC_URL ... invalid host` (or similar) | the URL has a wildcard, a user name, a query or a bad port (see above) |
+| Exits with `config: PIPEROOM_DEV_ACK: want exactly "dev-login-has-no-password" (or unset)` | `PIPEROOM_DEV_ACK` holds anything but that exact sentence (`1` and `true` are refused on purpose). Set it exactly, or clear it |
+| Dev mode exits, naming `PIPEROOM_DEV_ACK` (from R9) | dev login off loopback needs both `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` (the dev-auth override sets it) and `PIPEROOM_DEV_ACK=dev-login-has-no-password` in `deploy/.env`. Not needed in `oidc` mode or with `--demo` |
+| Exits with `config: PIPEROOM_LOG_LEVEL=... want debug, info, warn or error` or `PIPEROOM_LOG_FORMAT=... want text or json` | fix or clear the variable. Defaults are `info` and `text` |
 | Exits with `auth: PIPEROOM_AUTH_MODE=oidc needs ...` | `oidc` mode needs `PIPEROOM_PUBLIC_URL` (https), `PIPEROOM_OIDC_ISSUER`, `PIPEROOM_OIDC_CLIENT_ID`, and `PIPEROOM_OIDC_CLIENT_SECRET` or `PIPEROOM_OIDC_PUBLIC_CLIENT=1`. The message names the missing one |
 | Exits with `PIPEROOM_OIDC_SCOPES must include openid`, or with an error about `PIPEROOM_SESSION_IDLE`, `PIPEROOM_SESSION_MAX` or `PIPEROOM_TRUSTED_PROXIES` | fix the named variable (durations look like `30m` or `8h`; proxies are CIDRs like `10.0.0.0/8` or plain addresses) |
 | Exits with `solo mode: ...` | `PIPEROOM_SOLO_USER` is not in `users.yaml`, or `owners.yaml` names someone else. Remove the variable or the other owners |

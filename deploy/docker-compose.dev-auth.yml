@@ -7,7 +7,8 @@
 #
 #   docker compose -f deploy/docker-compose.pilot.yml -f deploy/docker-compose.dev-auth.yml up -d
 #
-# It changes nothing else, so the same deploy/.env works. Leave
+# It changes nothing else, so the same deploy/.env works, plus
+# PIPEROOM_DEV_ACK=dev-login-has-no-password in deploy/.env (see below). Leave
 # PIPEROOM_BIND=127.0.0.1 (the default) when using it.
 
 services:
@@ -17,3 +18,10 @@ services:
       # Dev mode refuses to listen on 0.0.0.0 (needed inside a container)
       # without this; the server then logs a loud warning at every start.
       PIPEROOM_DEV_ALLOW_NONLOOPBACK: "1"
+      # From R9 the server also needs this acknowledgement to start in dev mode
+      # on a non-loopback address (it listens on 0.0.0.0 inside the container).
+      # It is NOT set here on purpose: whoever starts dev login must type the
+      # sentence themselves, in deploy/.env or the shell:
+      #   PIPEROOM_DEV_ACK=dev-login-has-no-password
+      # Any other non-empty value stops the start. Older servers ignore it.
+      PIPEROOM_DEV_ACK: ${PIPEROOM_DEV_ACK:-}
