@@ -321,7 +321,7 @@ func TestCancelledContextAndDuplicateRegister(t *testing.T) {
 func TestRunbookHitItems(t *testing.T) {
 	tl := New([]Runbook{{ID: "rb", Title: "RB", Keywords: []string{"zebra"},
 		Sections: []Section{{Heading: "Steps", Text: "Intro zebra.\n- Resume the connector\n  - nested\n- Check lag\nTrailer"}, {Heading: "Prose", Text: "zebra only prose"}},
-		Sources: []string{"https://debezium.io/documentation/"}}})
+		Sources:  []string{"https://debezium.io/documentation/"}}})
 	res, err := tl.Run(context.Background(), json.RawMessage(`{"query":"zebra","max_results":5}`))
 	if err != nil {
 		t.Fatal(err)
