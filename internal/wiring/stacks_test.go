@@ -87,6 +87,10 @@ func (s *spy) Freshness(context.Context, string, string) (time.Time, error) {
 	s.hit("Freshness")
 	return time.Now(), nil
 }
+func (s *spy) LoadErrors(context.Context, string, time.Time, int) ([]clients.LoadError, error) {
+	s.hit("LoadErrors")
+	return nil, nil
+}
 func (s *spy) ListConnectors(context.Context) ([]string, error) {
 	s.hit("ListConnectors")
 	return []string{"pa-connector", "pb-connector"}, nil
