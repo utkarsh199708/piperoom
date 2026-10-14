@@ -36,8 +36,9 @@ const (
 	MaxInputBytes = 64 << 10
 	// DefaultFrames is how many stack frames Normalize keeps per cause.
 	DefaultFrames = 5
-	// MaxCauses is the longest cause chain kept: the first MaxCauses-1 causes
-	// and always the final one, which is the root cause.
+	// MaxCauses is the longest cause chain kept: the first MaxCauses-2 causes,
+	// then the last class-bearing cause (the root) and at most one bare
+	// message line (ERROR:, Detail:) after it.
 	MaxCauses = 32
 	// MaxMessageBytes caps one masked message, so a huge details blob does
 	// not matter and a cut-off tail does not change the fingerprint.
@@ -108,6 +109,8 @@ func Normalize(trace string) Template { return NormalizeFrames(trace, DefaultFra
 type rawCause struct {
 	line   string
 	frames []string
+	// logged and class are set only for tail causes (see classify).
+	logged, class bool
 }
 
 // NormalizeFrames is Normalize with a chosen number of frames kept per cause.
@@ -117,8 +120,20 @@ func NormalizeFrames(trace string, frames int) Template {
 	}
 	trace = prepare(trace)
 	var head []*rawCause
-	var tail *rawCause
+	// tail holds the causes past the cap or budget: the newest class-bearing
+	// line (the root) and the newest bare line after it. Log lines past the cap
+	// never displace them, so trailing log noise cannot hide the root.
+	var tail []*rawCause
 	var cur *rawCause
+	discard := &rawCause{}
+	inTail := func(rc *rawCause) bool {
+		for _, t := range tail {
+			if t == rc {
+				return true
+			}
+		}
+		return false
+	}
 	budget := budgetBytes
 	for len(trace) > 0 {
 		var line string
@@ -138,9 +153,13 @@ func NormalizeFrames(trace string, frames int) Template {
 				cur = &rawCause{}
 				head = append(head, cur)
 			}
-			if len(cur.frames) < frames && (cur == tail || budget > 0) {
+			if cur == discard {
+				continue
+			}
+			tailCause := inTail(cur)
+			if len(cur.frames) < frames && (tailCause || budget > 0) {
 				cur.frames = append(cur.frames, m)
-				if cur != tail {
+				if !tailCause {
 					budget -= len(m)
 				}
 			}
@@ -149,19 +168,28 @@ func NormalizeFrames(trace string, frames int) Template {
 		if reMoreFrames.MatchString(line) {
 			continue
 		}
-		if len(head) < MaxCauses-1 && budget > 0 {
+		if len(head) < MaxCauses-2 && budget > 0 {
 			cur = &rawCause{line: line}
 			head = append(head, cur)
 			budget -= len(line)
-		} else {
-			// Keep only the newest cause past the cap: the root is the last.
-			tail = &rawCause{line: line}
-			cur = tail
+			continue
+		}
+		logged, class := classify(line)
+		anchored := len(tail) > 0 && tail[0].class
+		switch {
+		case class, !anchored && (!logged || len(tail) == 0 || tail[0].logged):
+			// A new root, or a better placeholder than what is held.
+			cur = &rawCause{line: line, logged: logged, class: class}
+			tail = []*rawCause{cur}
+		case anchored && !logged:
+			// The newest bare line after the root names the real error.
+			cur = &rawCause{line: line}
+			tail = append(tail[:1], cur)
+		default:
+			cur = discard
 		}
 	}
-	if tail != nil {
-		head = append(head, tail)
-	}
+	head = append(head, tail...)
 	t := Template{Causes: make([]Cause, 0, len(head))}
 	for _, rc := range head {
 		c := parseCause(rc.line)
@@ -221,12 +249,72 @@ func parseCause(line string) Cause {
 	if line == "" {
 		return Cause{}
 	}
-	logged := false
+	line, logged, class, msg := splitCause(line)
+	if class != "" {
+		return Cause{Class: class, Message: maskMessage(msg), Log: logged}
+	}
+	return Cause{Message: maskMessage(line), Log: logged}
+}
+
+// classify reports what parseCause would set for Log and whether Class would
+// be non-empty, without masking. It runs on every line past the cap, so it
+// skips each regexp when a byte check shows it cannot match, and finds the
+// class with a byte scanner (TestClassifyMatchesParse keeps them in step).
+func classify(line string) (logged, class bool) {
+	if line != "" && (line[0] == '[' || line[0] >= '0' && line[0] <= '9') {
+		if loc := reLogPrefix.FindStringIndex(line); loc != nil && loc[1] > 0 {
+			logged = true
+			line = line[loc[1]:]
+		}
+	}
+	if hasLevelKey(line) {
+		logged = true
+	}
+	line = strings.TrimPrefix(line, "Caused by:")
+	line = strings.TrimPrefix(line, "Suppressed:")
+	line = strings.TrimLeft(line, " \t")
+	// Unwrapping only changes the start of the line, where a class must
+	// stand, when the line starts with a logfmt value.
+	if strings.HasPrefix(line, `msg="`) || strings.HasPrefix(line, `err="`) || strings.HasPrefix(line, `error="`) {
+		line = reLogfmt.ReplaceAllString(line, "$1")
+	}
+	name := classPrefix(line)
+	return logged, name != "" && looksLikeClass(name) && (!logged || looksLikeException(name))
+}
+
+// classPrefix is reClass without the regexp: it returns the dotted name (two
+// or more segments) that is the whole line or is followed by ':', else "".
+func classPrefix(line string) string {
+	segs, i := 0, 0
+	for {
+		if i >= len(line) || !(isWord(line[i]) && !(line[i] >= '0' && line[i] <= '9') || line[i] == '$') {
+			return ""
+		}
+		for i < len(line) && (isWord(line[i]) || line[i] == '$') {
+			i++
+		}
+		segs++
+		if i < len(line) && line[i] == '.' {
+			i++
+			continue
+		}
+		break
+	}
+	if segs < 2 || i < len(line) && line[i] != ':' {
+		return ""
+	}
+	return line[:i]
+}
+
+// splitCause strips the log prefix and "Caused by:" and unwraps logfmt values.
+// It returns the remaining line, whether it was a log line, and the exception
+// class and its message when the line names one.
+func splitCause(line string) (rest string, logged bool, class, msg string) {
 	if loc := reLogPrefix.FindStringIndex(line); loc != nil && loc[1] > 0 {
 		logged = true
 		line = line[loc[1]:]
 	}
-	if strings.Contains(line, "level=") {
+	if hasLevelKey(line) {
 		logged = true
 	}
 	line = strings.TrimPrefix(line, "Caused by:")
@@ -239,10 +327,26 @@ func parseCause(line string) Cause {
 		// After a log prefix "pkg.Logger: text" is a logger name, not a
 		// thrown exception; only exception-shaped names count as classes.
 		if !logged || looksLikeException(m[1]) {
-			return Cause{Class: m[1], Message: maskMessage(m[2]), Log: logged}
+			return line, logged, m[1], m[2]
 		}
 	}
-	return Cause{Message: maskMessage(line), Log: logged}
+	return line, logged, "", ""
+}
+
+// hasLevelKey reports a logfmt "level=" key at the start of the line or after
+// whitespace, so "wal_level=logical" in a message is not a log line.
+func hasLevelKey(line string) bool {
+	for i := strings.Index(line, "level="); i >= 0; {
+		if i == 0 || line[i-1] == ' ' || line[i-1] == '\t' {
+			return true
+		}
+		j := strings.Index(line[i+1:], "level=")
+		if j < 0 {
+			return false
+		}
+		i += 1 + j
+	}
+	return false
 }
 
 func looksLikeException(class string) bool {
@@ -613,7 +717,13 @@ func (t Template) canonical(forHash bool) string {
 // characters of the SHA-256 of its canonical text. All frames of the outer
 // causes count, but only the first RootFrames frames of the root cause, because
 // tools.Truncate can cut the rest.
+//
+// A template with no causes (empty or whitespace-only input) has no
+// fingerprint: Fingerprint returns "", so blank texts are never grouped.
 func (t Template) Fingerprint() string {
+	if len(t.Causes) == 0 {
+		return ""
+	}
 	sum := sha256.Sum256([]byte(t.canonical(true)))
 	return hex.EncodeToString(sum[:])[:FingerprintLen]
 }
@@ -621,13 +731,19 @@ func (t Template) Fingerprint() string {
 // Fingerprint normalises trace and returns the template fingerprint.
 func Fingerprint(trace string) string { return Normalize(trace).Fingerprint() }
 
-// clip returns at most n bytes of s without splitting a UTF-8 rune.
+// clip returns at most n bytes of s without splitting a UTF-8 rune. When s
+// starts with continuation bytes up to n there is no rune to keep whole, so it
+// cuts at n rather than returning "".
 func clip(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
 	}
-	return s[:n]
+	if cut == 0 && !utf8.RuneStart(s[0]) {
+		return s[:n]
+	}
+	return s[:cut]
 }
