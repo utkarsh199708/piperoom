@@ -251,6 +251,21 @@ func TestAuthSetupNeedsDevAck(t *testing.T) {
 			}
 		})
 	}
+	// The rule is BOTH: a valid ack alone must not open a non-loopback port.
+	t.Run("ack without switch", func(t *testing.T) {
+		log, _ := testLog()
+		cfg := devCfg("0.0.0.0:8090")
+		cfg.DevAck = config.DevAckValue
+		_, err := authSetup(cfg, false, false, log)
+		if !errors.Is(err, errNonLoopback) {
+			t.Fatalf("err = %v, want errNonLoopback", err)
+		}
+		for _, name := range []string{"PIPEROOM_DEV_ALLOW_NONLOOPBACK=1", "PIPEROOM_DEV_ACK=" + config.DevAckValue} {
+			if !strings.Contains(err.Error(), name) {
+				t.Fatalf("the error should name %s: %v", name, err)
+			}
+		}
+	})
 	t.Run("ack with spaces is accepted", func(t *testing.T) {
 		log, _ := testLog()
 		cfg := devCfg("0.0.0.0:8090")
