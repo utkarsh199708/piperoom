@@ -157,3 +157,63 @@ func TestRetentionErrorIsLoggedNotFatal(t *testing.T) {
 		t.Fatalf("error not logged: %s", buf.String())
 	}
 }
+
+type fakeChangesPurger struct {
+	mu      sync.Mutex
+	cutoffs []time.Time
+	n       int64
+	err     error
+}
+
+func (f *fakeChangesPurger) PurgeChangesBefore(_ context.Context, cutoff time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cutoffs = append(f.cutoffs, cutoff)
+	return f.n, f.err
+}
+
+func (f *fakeChangesPurger) calls() []time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]time.Time(nil), f.cutoffs...)
+}
+
+func TestChangesRetentionRuns(t *testing.T) {
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	p := &fakeChangesPurger{n: 3}
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	stop := startChangesRetention(context.Background(), p, 30, time.Hour, time.Second, func() time.Time { return now }, log)
+	waitUntil(t, func() bool { return len(p.calls()) >= 1 })
+	stop()
+	if got, want := p.calls()[0], now.AddDate(0, 0, -30); !got.Equal(want) {
+		t.Errorf("cutoff = %v, want %v", got, want)
+	}
+	if !strings.Contains(buf.String(), "rows=3") {
+		t.Errorf("log lacks the count: %s", buf.String())
+	}
+}
+
+func TestChangesRetentionOffAndErrors(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	for _, days := range []int{0, -1} {
+		p := &fakeChangesPurger{}
+		stop := startChangesRetention(context.Background(), p, days, time.Millisecond, time.Second, time.Now, log)
+		time.Sleep(20 * time.Millisecond)
+		stop()
+		if len(p.calls()) != 0 {
+			t.Errorf("days=%d: purge ran", days)
+		}
+	}
+	stop := startChangesRetention(context.Background(), nil, 30, time.Millisecond, time.Second, time.Now, log)
+	stop() // a nil purger starts nothing
+
+	var buf bytes.Buffer
+	p := &fakeChangesPurger{err: errors.New("db down")}
+	stop = startChangesRetention(context.Background(), p, 30, time.Hour, time.Second, time.Now, slog.New(slog.NewTextHandler(&buf, nil)))
+	waitUntil(t, func() bool { return len(p.calls()) >= 1 })
+	stop()
+	if !strings.Contains(buf.String(), "purge failed") {
+		t.Errorf("error not logged: %s", buf.String())
+	}
+}
