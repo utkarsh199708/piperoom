@@ -35,6 +35,11 @@ type target struct {
 	src   SourceDB
 	conn  ConnectClient
 	kafka clients.DLQReader
+	// reg and ddl feed the change feed; subjects are the pipeline's Schema
+	// Registry subjects, derived from its topics through the tool scope.
+	reg      clients.SchemaRegistryReader
+	ddl      DDLReader
+	subjects []string
 }
 
 // connObs is what one tick learned about one connector.
@@ -63,6 +68,9 @@ type observation struct {
 	dlqErr      error
 	dlqTried    bool
 	dlqNoReader bool
+
+	// chg is the change feed's read of the set (nil when the feed is off).
+	chg *setChanges
 }
 
 // targets lists the pipelines to watch, in owners order. A pipeline that opted
@@ -85,11 +93,16 @@ func (w *Watcher) targets(ctx context.Context) []target {
 		}
 		t.connectors = sc.FilterConnectors(p.Connectors)
 		t.cdcTopics = sc.Topics()
+		for _, topic := range t.cdcTopics {
+			t.subjects = append(t.subjects, topic+"-key", topic+"-value")
+		}
 		if w.clientsFor != nil {
 			pc := w.clientsFor(p.ID)
 			t.set, t.src, t.conn, t.kafka = pc.Set, pc.Source, pc.Connect, pc.Kafka
+			t.reg, t.ddl = pc.Registry, pc.DDL
 		} else {
 			t.src, t.conn, t.kafka = w.src, w.conn, w.kafka
+			t.reg, t.ddl = w.registry, w.ddl
 		}
 		out = append(out, t)
 	}
@@ -148,7 +161,7 @@ func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src S
 			if _, ok := obs.conns[c]; !ok {
 				obs.conns[c] = &connObs{}
 			}
-			if slotCfg {
+			if slotCfg || w.changes != nil {
 				needCfg[c] = true // slot name and heartbeat come from the config
 			}
 		}
@@ -190,6 +203,9 @@ func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src S
 	wg.Wait()
 	// After the configs: the DLQ topics are discovered from them.
 	w.observeDLQ(ctx, ts, obs, kafka)
+	if w.changes != nil {
+		obs.chg = w.readChanges(ctx, ts)
+	}
 	return obs
 }
 
