@@ -2,6 +2,7 @@ package snowflake
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -44,6 +45,9 @@ func (r *fakeRows) Scan(dest ...any) error {
 			*p = row[i]
 		case **time.Time:
 			*p, _ = row[i].(*time.Time)
+		case *sql.NullInt64:
+			n, ok := row[i].(int64)
+			*p = sql.NullInt64{Int64: n, Valid: ok}
 		default:
 			return errors.New("fakeRows: unsupported dest type")
 		}
@@ -63,6 +67,8 @@ type fakeQuerier struct {
 	lastQuery string
 	lastArgs  []any
 	onQuery   func(ctx context.Context)
+	size      *fakeRows // answer to Row's size probe; nil derives one from rows
+	queries   int
 }
 
 func (q *fakeQuerier) QueryContext(ctx context.Context, query string, args ...any) (sqlRows, error) {
@@ -71,8 +77,20 @@ func (q *fakeQuerier) QueryContext(ctx context.Context, query string, args ...an
 	}
 	q.lastQuery = query
 	q.lastArgs = args
+	q.queries++
 	if q.err != nil {
 		return nil, q.err
+	}
+	if strings.Contains(query, "OBJECT_CONSTRUCT(*)") {
+		// Row's size probe: canned when set, else a small row whenever the
+		// canned result has one.
+		if q.size != nil {
+			return q.size, nil
+		}
+		if q.rows != nil && len(q.rows.data) > 0 {
+			return &fakeRows{cols: []string{"LEN"}, data: [][]any{{int64(10)}}}, nil
+		}
+		return &fakeRows{cols: []string{"LEN"}}, nil
 	}
 	return q.rows, nil
 }
@@ -250,6 +268,29 @@ func TestRowOtherError(t *testing.T) {
 	}
 	if errors.Is(err, clients.ErrNotFound) {
 		t.Fatal("a generic error must not be mapped to clients.ErrNotFound")
+	}
+}
+
+// QA4: a huge row is refused by the size probe; its values are never fetched.
+func TestRowTooLarge(t *testing.T) {
+	fq := &fakeQuerier{
+		rows: &fakeRows{cols: []string{"ID"}, data: [][]any{{"1"}}},
+		size: &fakeRows{cols: []string{"LEN"}, data: [][]any{{int64(maxRowBytes + 1)}}},
+	}
+	db := &DB{q: fq}
+	_, found, err := db.Row(context.Background(), "analytics.orders", "id", "1")
+	if !errors.Is(err, ErrRowTooLarge) || found {
+		t.Fatalf("Row = found %v, err %v; want ErrRowTooLarge", found, err)
+	}
+	if fq.queries != 1 || !strings.Contains(fq.lastQuery, "OBJECT_CONSTRUCT(*)") {
+		t.Fatalf("row was fetched after the probe refused it: %d queries, last %q", fq.queries, fq.lastQuery)
+	}
+}
+
+func TestRowSizeProbeNotFound(t *testing.T) {
+	fq := &fakeQuerier{err: &gosnowflake.SnowflakeError{Number: errObjectDoesNotExist}}
+	if _, _, err := (&DB{q: fq}).Row(context.Background(), "analytics.gone", "id", "1"); !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
 
