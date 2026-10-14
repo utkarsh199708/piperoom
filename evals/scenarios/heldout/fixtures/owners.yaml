@@ -1,0 +1,68 @@
+# Owners config of the held-out eval set (evals/scenarios/heldout). These pipelines exist
+# only here: none of them is the dev stack's `orders` pipeline, and their shapes differ
+# from it on purpose (a JDBC sink connector, two source connectors on one topic prefix,
+# a non-updated_at sink column). evals/gen scopes the real tools with this file when it
+# records the scenarios, and every heldout scenario's `pipeline:` block is copied from it.
+pipelines:
+  # (a) Postgres -> Debezium -> Kafka -> JDBC sink connector -> warehouse. The sink
+  # connector reads the topic as consumer group connect-jdbc-payments-sink.
+  - id: payments
+    title: Payments to warehouse (JDBC sink)
+    topic_prefix: pay
+    source_tables: [public.payments]
+    connectors: [pg-payments-source, jdbc-payments-sink]
+    consumer_groups: [connect-jdbc-payments-sink]
+    sink_tables: [analytics.payments]
+    sink_ts_column: updated_at
+  # (b) Two source tables, each streamed by its own connector, both with topic.prefix inv.
+  - id: inventory
+    title: Inventory CDC (two connectors, one topic prefix)
+    topic_prefix: inv
+    source_tables: [public.stock_levels, public.sites]
+    connectors: [pg-inventory-stock, pg-inventory-sites]
+    consumer_groups: [inventory-sync]
+    sink_tables: [analytics.stock_levels, analytics.sites]
+    sink_ts_column: updated_at
+  # (c) A Schema Registry compatibility override lets an incompatible schema through.
+  - id: users
+    title: User profiles CDC
+    topic_prefix: usr
+    source_tables: [public.users]
+    connectors: [pg-users-connector]
+    consumer_groups: [user-profile-sync]
+    sink_tables: [analytics.user_profiles]
+    sink_ts_column: updated_at
+  # (d) Healthy pipeline, noisy lag alert.
+  - id: shipments
+    title: Shipments CDC
+    topic_prefix: shp
+    source_tables: [public.shipments]
+    connectors: [pg-shipments-connector]
+    consumer_groups: [shipment-tracker]
+    sink_tables: [analytics.shipments]
+    sink_ts_column: updated_at
+  # (e) Connect REST times out: the cause cannot be known.
+  - id: billing
+    title: Billing CDC
+    topic_prefix: bill
+    source_tables: [public.invoices]
+    connectors: [pg-billing-connector]
+    consumer_groups: [invoice-loader]
+    sink_tables: [analytics.invoices]
+    sink_ts_column: updated_at
+  # (f) Phased recovery: a fix runs and the agent must re-check.
+  - id: ledger
+    title: Ledger CDC
+    topic_prefix: ldg
+    source_tables: [public.ledger_entries]
+    connectors: [pg-ledger-connector]
+    consumer_groups: [ledger-sink]
+    sink_tables: [analytics.ledger_entries]
+    sink_ts_column: posted_at
+layers:
+  postgres: nadia
+  kafka-connect: tomas
+  schema-registry: nadia
+  kafka: tomas
+  consumer: lena
+  warehouse: omar

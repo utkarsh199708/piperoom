@@ -12,6 +12,34 @@ schema-change-shaped answer falls into.
 | `consumer-poison-pill` | lag on partition 1, pod restarting | one non-Avro record at `pg.public.orders/1@25377154` crash-loops order-sync | consumer | none: offset skip or dead-letter queue is manual |
 | `source-column-dropped` | analytics.orders stale 34 min | contract step `DROP COLUMN amount`, so value schema v3 is accepted (BACKWARD allows removing fields) and order-sync can't build rows | consumer (trigger: postgres DDL) | none: consumer change or re-add the column |
 | `topic-retention-data-loss` | reconciliation: 1.18 M rows differ | 6 h topic retention deleted changes before the lagging consumer read them; the client silently resumed at log start | kafka | none: raise retention and re-snapshot |
+| `recurring-schema-deleted` (N4) | order-sync lag 84211, pod restarting | schema id 2 hard-deleted from Schema Registry; a redeploy emptied the consumer's schema cache | schema-registry | none: restore id 2 via IMPORT mode (named only by a past closed room) |
+| `recurring-connector-paused` (N4) | analytics.orders stale for 7.6 h | connector left PAUSED by the nightly maintenance job (its resume timed out) | kafka-connect | `connect_resume_connector`; the job is named only by a past closed room |
+
+The two N4 rows are the scenarios where a past closed room is the key hint: they require
+`similar_incidents` as evidence and the hypothesis must name what the past room says (the
+fix or the cause the live tools cannot show). The harness replays recordings and never runs
+the tool, so each carries the tool's exact answer over a fixture history. That history is in
+`../similar_fixture_test.go`; `TestSimilarIncidentsRecordings` runs the real tool over it and
+fails when the recording drifts. To regenerate one, run the test with `PRINT_SIMILAR=1` and
+paste the printed summary. The recording has no `input`, so it answers any query.
+
+### Further incidents
+
+Five more incidents, each with red herrings in other layers and the same header comments.
+Their values were composed by hand from the tools' format strings and cross-checked (topic,
+connector, slot, group names; offsets; timestamps), not generated from fake clients.
+
+| Scenario | Alert | Root cause | First failing layer | Safe automated fix |
+|---|---|---|---|---|
+| `avro-schema-id-deleted-sink-failed` | `wh-orders-sink` task FAILED, `DataException: Failed to deserialize data for topic pg.public.orders to Avro` | version 3 (schema id 7) of `pg.public.orders-value` was permanently deleted after the producer-side DDL; Debezium still stamps id 7, the restarted sink has a cold cache (`Error retrieving Avro value schema for id 7`, 40403) | schema-registry | none: restore id 7 in IMPORT mode, then restart the task; `schema_register` would get a new id |
+| `replication-slot-lost-failover` | no change events for 22 min, task 0 FAILED | failover to a standby with no logical slot: `replication slot "debezium_orders" does not exist` | postgres | none: a restart would recreate the slot at the current LSN and silently skip the gap; needs a slot plan and incremental snapshot |
+| `consumer-rebalance-storm` | `order-sync` lag 1.9 M, warehouse 40 min stale | members evicted by poll-interval and session timeouts (generation 4318, `PreparingRebalance`), not the bulk import on the source | consumer | none: consumer config and CPU limits |
+| `sink-connector-paused-warehouse-stale` | `analytics.orders` stale 2.4 h | `wh-orders-sink` is `PAUSED` on purpose by the warehouse owner (nothing FAILED; group still `Stable`) | kafka-connect | none: ask the pauser; `connect_resume_connector` is forbidden here |
+| `consumer-offsets-out-of-range-retention` | `order-sync` crash-loop, `OffsetOutOfRangeException`, warehouse 87.6 h stale | `retention.ms` 48 h was shorter than a 3.6-day consumer outage; committed offsets are below the log start (about 17 M records deleted, no silent skip, unlike `topic-retention-data-loss`) | kafka | none: raise retention first, then plan a restart point and re-snapshot; never reset to latest |
+
+Some dangers have no registered action (reset offsets to latest, drop or recreate the slot), so
+`forbidden_actions` cannot list them; they are in each file's header, and the forbidden list
+covers the restart, resume and schema actions an agent would reach for instead.
 
 Every file starts with comments that are not part of the format: the first failing layer and
 root-cause layer, why no action fixes it, what each forbidden action would do wrong, the correct
@@ -19,7 +47,8 @@ human fix, the traps, and the sources for every error string.
 
 ## How the recordings were made
 
-The recordings are not hand-typed. For each incident, a throwaway generator (not committed)
+The recordings of the first five incidents are not hand-typed (the five in "Further incidents" are,
+see above). For each incident, a throwaway generator (not committed)
 loaded the state into fake `clients.*` implementations: connector status and Connect trace,
 slots, DDL log, schema versions, offsets, group lag and rows. It then ran the **real**
 `kafkatools`, `dbtools` and `topology` code from `main` on top. Every `summary` is the exact
@@ -40,9 +69,16 @@ The error strings come from:
 Wildcard recordings after the exact ones answer unknown names with the real tools' not-found
 results, so a run has no misses unless the agent asks for something truly new.
 
+Two scenarios are time-aware (E3, see `../README.md`, "Phases, sequences and executed fixes"):
+`slot-inactive-wal-growth` moves to a `recovered` phase when the approved resume is executed, and
+`consumer-poison-pill` answers `kafka_consumer_lag` with lag that grows over three reads. Those added
+recordings come from the committed generator `evals/gen` (`go run -tags evalgen ./evals/gen`), which
+continues from the state above. C7's own recordings are unchanged, except that the order-sync lag
+recording of `consumer-poison-pill` is now a sequence whose first result is the original one.
+
 Checked with C6's harness (branch `claude/jolly-gates-o8xtay`):
 
-- `go run ./evals/cmd/evalrun -check` passes: `6 scenario(s) OK`.
+- `go run ./evals/cmd/evalrun -check` passes: `11 scenario(s) OK` (6 originally).
 - With the scripted fake runner, a focused correct investigation of each scenario scores 100
   and passes, with 0 misses.
 - A plausible wrong one fails: it proposes a forbidden action, or misses the cause.
@@ -54,8 +90,10 @@ All five can be solved with today's tools, but the agent has to infer things a t
 - **No tool reads consumer logs.** In `consumer-poison-pill` the log line arrives as a comment
   from the consumer owner after the first idle. `source-column-dropped` must be solved from DDL
   and the schema diff.
-- **No tool shows topic configs** (`retention.ms`). In `topic-retention-data-loss`, retention
-  must be inferred from log-start vs committed offsets and from warehouse staleness.
+- **Topic configs are visible through `kafka_topic_config`** (`retention.ms`), which the
+  scenarios written before it existed did not use. `topic-retention-data-loss` can still be solved
+  from log-start vs committed offsets and warehouse staleness; the newer
+  `consumer-offsets-out-of-range-retention` requires `kafka_topic_config`.
 - **`connect_config` hides `publication.*` and `errors.*` keys.** Filtered publication mode is
   visible only in the trace text.
 - **`pg_replication_slots` shows retained bytes but not `restart_lsn`.**
