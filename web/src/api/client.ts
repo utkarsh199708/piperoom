@@ -95,6 +95,30 @@ export interface ApproveExtras {
   confirm?: string
 }
 
+/**
+ * Download the room's export document (GET /api/rooms/{id}/export). Returned as text, not parsed, so the
+ * saved file is byte-for-byte what the server hashed; `sha256` is the X-Piperoom-Export-SHA256 header.
+ */
+export async function exportRoom(roomId: string): Promise<{ text: string; sha256?: string }> {
+  const epoch = getAuthEpoch()
+  const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/export`, { credentials: 'same-origin' })
+  if (!res.ok) {
+    let code = 'unknown'
+    let message = res.statusText
+    try {
+      const body = (await res.json()) as ApiError
+      code = body.error?.code ?? code
+      message = body.error?.message ?? message
+    } catch {
+      // non-JSON error body; keep statusText
+    }
+    const problem = classifyAuthProblem(res.status, code, message, undefined)
+    if (problem) reportAuthProblem({ ...problem, epoch })
+    throw new ApiClientError(res.status, code, message)
+  }
+  return { text: await res.text(), sha256: res.headers.get('X-Piperoom-Export-SHA256') ?? undefined }
+}
+
 const room = (roomId: string) => `/api/rooms/${encodeURIComponent(roomId)}`
 
 export const api = {

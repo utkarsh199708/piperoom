@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
-import { isFixtures } from '../api/client'
+import { toast } from 'sonner'
+import { exportRoom, isFixtures } from '../api/client'
+import { errorText } from '../lib/errors'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
 import { useCurrentUser } from '../context/user'
@@ -49,6 +51,7 @@ export function RoomScreen() {
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [closeOpen, setCloseOpen] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [exporting, setExporting] = useState(false)
 
   const headerMembers = useMemo(() => {
     const ids = new Set<string>()
@@ -71,6 +74,24 @@ export function RoomScreen() {
     if (!ids.has(user.id)) rows.push({ id: user.id, name: user.name })
     return rows
   }, [presence, state, user.id, user.name])
+
+  const exportTranscript = () => {
+    if (!roomId || exporting) return
+    setExporting(true)
+    exportRoom(roomId)
+      .then(({ text }) => {
+        const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `piperoom-${roomId}.json`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        URL.revokeObjectURL(url)
+      })
+      .catch((e: unknown) => toast.error(`Could not export the room: ${errorText(e)}`))
+      .finally(() => setExporting(false))
+  }
 
   const invite = () => {
     const url = window.location.href
@@ -173,6 +194,8 @@ export function RoomScreen() {
             onHandoff={() => setHandoffOpen(true)}
             onCloseRoom={() => setCloseOpen(true)}
             onInvite={invite}
+            onExport={viewer ? undefined : exportTranscript}
+            exporting={exporting}
           />
 
           <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
@@ -211,6 +234,7 @@ export function RoomScreen() {
                 readOnly={viewer}
                 working={state.agent_status.state === 'working'}
                 onTakeControl={takeControl}
+                agent={state.agent_status}
               />
             </section>
           </div>

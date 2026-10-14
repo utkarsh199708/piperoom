@@ -1,4 +1,4 @@
-import { Check, CircleCheck, Eye, Repeat2, UserPlus } from 'lucide-react'
+import { Check, CircleCheck, Download, Eye, Repeat2, UserPlus } from 'lucide-react'
 import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
 import { canClose, canHandoff, isViewer } from '@/state/permissions'
@@ -46,6 +46,8 @@ export function RoomHeader({
   onHandoff,
   onCloseRoom,
   onInvite,
+  onExport,
+  exporting = false,
 }: {
   state: RoomState
   user: CurrentUser
@@ -55,6 +57,9 @@ export function RoomHeader({
   onHandoff: () => void
   onCloseRoom: () => void
   onInvite: () => void
+  /** Download the room transcript. Left out for viewers: the server refuses the export for them. */
+  onExport?: () => void
+  exporting?: boolean
 }) {
   const open = state.status === 'open'
   const dot: DotTone = !open ? 'ok' : state.severity === 'sev1' ? 'fail' : state.severity === 'sev2' ? 'warn' : 'muted'
@@ -104,6 +109,12 @@ export function RoomHeader({
               <CircleCheck aria-hidden="true" />
               Close room
               <Kbd aria-hidden="true">C</Kbd>
+            </Button>
+          )}
+          {onExport && (
+            <Button variant="outline" disabled={exporting} onClick={onExport}>
+              <Download aria-hidden="true" />
+              {exporting ? 'Exporting…' : 'Export'}
             </Button>
           )}
           <Button
