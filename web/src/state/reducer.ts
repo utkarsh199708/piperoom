@@ -21,6 +21,8 @@ import type {
   HandoffCreatedPayload,
   HandoffFailedPayload,
   HandoffRequestedPayload,
+  HypothesisVerdictPayload,
+  ApprovalNudgedPayload,
   ProposalCreatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
@@ -34,7 +36,7 @@ import { describeEvent } from './describe'
 import { alertSource } from '../lib/alerts'
 import { runbookHits } from '../lib/f8'
 import { checklistKey } from './types'
-import type { MemberState, RoomState, StepState } from './types'
+import type { HypothesisHistoryEntry, MemberState, RoomState, StepState, VerdictState } from './types'
 
 function as<T>(e: Event): T {
   return e.payload as T
@@ -62,6 +64,18 @@ function upsertMember(members: MemberState[], actor: Actor): MemberState[] {
   if (!existing) return [...members, { id: actor.id, name: actor.name, role: 'watching' }]
   if (existing.name === actor.name) return members
   return members.map((m) => (m.id === actor.id ? { ...m, name: actor.name } : m))
+}
+
+function derivedConfirmed(verdicts: VerdictState[]): boolean {
+  return verdicts.some((v) => v.verdict === 'confirmed') && !verdicts.some((v) => v.verdict === 'disputed')
+}
+
+const HISTORY_CAP = 20
+
+// The confidence path: a repeat of the same confidence is not a step on it.
+function pushConfidence(history: HypothesisHistoryEntry[], event: Event, confidence: string): HypothesisHistoryEntry[] {
+  if (history.length > 0 && history[history.length - 1].confidence === confidence) return history
+  return [...history, { seq: event.seq, at: event.at, confidence }].slice(-HISTORY_CAP)
 }
 
 // The text and section of a runbook item, looked up in the runbook_lookup result already in the
@@ -238,12 +252,39 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       const p = as<AgentHypothesisPayload>(event)
       next = {
         ...state,
+        // confirmed is derived from the verdicts, never from the agent's flag; a new
+        // hypothesis starts over with no verdicts.
         hypothesis: {
           text: p.text,
           based_on_steps: p.based_on_steps ?? [],
           confidence: p.confidence,
-          confirmed: p.confirmed,
+          confirmed: false,
+          seq: event.seq,
+          verdicts: [],
         },
+        hypothesis_history: pushConfidence(state.hypothesis_history, event, p.confidence),
+      }
+      break
+    }
+
+    case 'hypothesis.verdict': {
+      const p = as<HypothesisVerdictPayload>(event)
+      const h = state.hypothesis
+      // A verdict on a replaced hypothesis is stale.
+      if (!h || p.hypothesis_seq !== h.seq) break
+      const verdicts = [
+        ...(h.verdicts ?? []).filter((v) => v.by.id !== event.actor.id),
+        { verdict: p.verdict, by: event.actor, note: p.note || undefined, at: event.at },
+      ]
+      next = { ...state, hypothesis: { ...h, verdicts, confirmed: derivedConfirmed(verdicts) } }
+      break
+    }
+
+    case 'approval.nudged': {
+      const p = as<ApprovalNudgedPayload>(event)
+      next = {
+        ...state,
+        nudges: { ...state.nudges, [`${p.proposal_id}/${p.layer}`]: { at: event.at, by: event.actor } },
       }
       break
     }

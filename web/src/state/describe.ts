@@ -16,6 +16,8 @@ import type {
   Event,
   HandoffCreatedPayload,
   HandoffRequestedPayload,
+  HypothesisVerdictPayload,
+  ApprovalNudgedPayload,
   ProposalCreatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
@@ -74,6 +76,14 @@ export function describeEvent(
     case 'agent.hypothesis': {
       const p = as<AgentHypothesisPayload>(e)
       return `Agent hypothesis (${p.confidence}): ${p.text}`
+    }
+    case 'hypothesis.verdict': {
+      const p = as<HypothesisVerdictPayload>(e)
+      return `${who} ${p.verdict} the hypothesis${p.note ? `: ${p.note}` : ''}`
+    }
+    case 'approval.nudged': {
+      const p = as<ApprovalNudgedPayload>(e)
+      return `${who} nudged ${p.layer} owners`
     }
     case 'comment.added': {
       const p = as<CommentAddedPayload>(e)
