@@ -195,7 +195,20 @@ jobs:
       - name: devctl status
         run: go run ./cmd/devctl status
       - name: devctl health (the pipeline is healthy end to end)
-        run: go run ./cmd/devctl health
+        # devctl up returns when the connector runs; the consumer group and the
+        # first snapshot rows in the warehouse arrive a little later (devctl
+        # reset waits for them, up does not). Retry for at most 3 minutes, then
+        # fail with the last health report.
+        run: |
+          go build -o "$RUNNER_TEMP/devctl" ./cmd/devctl
+          deadline=$((SECONDS + 180))
+          until "$RUNNER_TEMP/devctl" health; do
+            if ((SECONDS >= deadline)); then
+              echo "::error::pipeline still unhealthy after 180s"
+              exit 1
+            fi
+            sleep 10
+          done
       - name: Break and fix a scenario (schema-change)
         run: |
           go run ./cmd/devctl break --owner ci schema-change
