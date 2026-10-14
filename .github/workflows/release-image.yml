@@ -8,6 +8,9 @@ on:
   push:
     tags: ["v*"]
   pull_request:
+    # A cost trade-off: only the files that define the image build it on a PR.
+    # A change under internal/** or web/src/** is built at the next tag (and by
+    # any PR that also touches one of these paths).
     paths:
       - "Dockerfile"
       - "go.mod"

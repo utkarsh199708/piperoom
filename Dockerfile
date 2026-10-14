@@ -27,7 +27,12 @@ COPY internal ./internal
 COPY migrations ./migrations
 # CGO off: a static binary that runs on distroless/static. -trimpath keeps the
 # build machine's paths out of the binary and makes the build reproducible.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/piperoom ./cmd/server
+# VERSION names the build (GET /healthz, start-up log). Pass it with
+# --build-arg VERSION=$(git describe --tags --always --dirty). The linker
+# ignores -X for a symbol that does not exist, so this is safe on a tree
+# without internal/version.
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X piperoom/internal/version.Version=${VERSION}" -o /out/piperoom ./cmd/server
 
 # ---- stage 3: runtime --------------------------------------------------------
 # distroless/static has CA certificates (needed for api.anthropic.com and TLS to
