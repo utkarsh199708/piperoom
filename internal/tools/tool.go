@@ -108,9 +108,10 @@ func NewReadOnlyRegistry() *Registry {
 // ReadOnly reports whether r was made by NewReadOnlyRegistry.
 func (r *Registry) ReadOnly() bool { return r.readOnly }
 
-// Register adds t. It fails on an empty or duplicate name, on a Kind other
-// than KindRead or KindRoom, and, in a read-only registry, on any Kind other
-// than KindRead (ErrNotReadOnly). Kind is read once, here.
+// Register adds t. It fails on an empty or duplicate name; in a read-only
+// registry on any Kind other than KindRead (wrapping ErrNotReadOnly, unknown
+// kinds included); elsewhere on a Kind other than KindRead or KindRoom. Kind
+// is read once, here.
 func (r *Registry) Register(t Tool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -119,10 +120,10 @@ func (r *Registry) Register(t Tool) error {
 		return errors.New("tools: empty tool name")
 	}
 	switch k := t.Kind(); {
-	case k != KindRead && k != KindRoom:
-		return fmt.Errorf("tools: tool %q has unknown kind %q", name, k)
 	case r.readOnly && k != KindRead:
 		return fmt.Errorf("tools: tool %q has kind %q in a read-only registry: %w", name, k, ErrNotReadOnly)
+	case k != KindRead && k != KindRoom:
+		return fmt.Errorf("tools: tool %q has unknown kind %q", name, k)
 	}
 	if _, dup := r.byKey[name]; dup {
 		return fmt.Errorf("tools: duplicate tool %q", name)
