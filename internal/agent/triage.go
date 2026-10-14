@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync/atomic"
 
@@ -149,8 +151,9 @@ func triageRejected(err error) bool {
 
 // modelRejectionMarkers are lower-case fragments of the API error body that say
 // the model, or the request shape for this model, is the problem.
+// "model" itself is matched as a whole word by modelWordRe.
 var modelRejectionMarkers = []string{
-	"model", "not supported", "does not support", "unsupported",
+	"not supported", "does not support", "unsupported",
 	"thinking", "effort", "adaptive", "context_management", "compact",
 	"cache_control", "eager_input_streaming", "extra inputs",
 	"access to the model", // Bedrock AccessDeniedException
@@ -179,11 +182,14 @@ func modelRejection(err error) bool {
 	default:
 		return false
 	}
-	body := strings.ToLower(apierr.RawJSON())
+	body := strings.ToLower(apiErrorMessage(apierr))
 	for _, m := range perRunMarkers {
 		if strings.Contains(body, m) {
 			return false
 		}
+	}
+	if modelWordRe.MatchString(body) {
+		return true
 	}
 	for _, m := range modelRejectionMarkers {
 		if strings.Contains(body, m) {
@@ -191,6 +197,35 @@ func modelRejection(err error) bool {
 		}
 	}
 	return false
+}
+
+// modelWordRe matches "model" as a word of its own ("the model", "model
+// identifier"), not inside an identifier the error quotes back (a tool input
+// field data_model_version, a request id): those say nothing about the model.
+var modelWordRe = regexp.MustCompile(`(?:^|[^a-z0-9_.-])models?(?:$|[^a-z0-9_-])`)
+
+// apiErrorMessage returns the human message of an API error body
+// ({"error":{"message":...}} on the Anthropic API and Vertex, {"message":...}
+// on Bedrock), or the raw body when it has neither. Matching the message only
+// keeps request ids, error type names and other fields out of the markers.
+func apiErrorMessage(e *anthropic.Error) string {
+	raw := e.RawJSON()
+	var body struct {
+		Message string `json:"message"`
+		Error   struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(raw), &body) != nil {
+		return raw
+	}
+	switch {
+	case body.Error.Message != "":
+		return body.Error.Message
+	case body.Message != "":
+		return body.Message
+	}
+	return raw
 }
 
 func asAPIError(err error) *anthropic.Error {

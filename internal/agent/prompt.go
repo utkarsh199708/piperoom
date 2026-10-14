@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"piperoom/internal/events"
+	"piperoom/internal/redact"
 )
 
 // systemPrompt is the fixed instruction set given to the model. It must stay
@@ -153,15 +155,23 @@ func lookalikeBracket(r rune) bool {
 }
 
 // invisibleRune reports the characters that show nothing or reorder the text
-// around them: zero-width spaces and joiners, the word joiner, the BOM, soft
-// hyphen, the Mongolian vowel separator, variation selector-16, and the bidi
-// embedding, override and isolate controls.
+// around them: every Unicode format character (Cf: zero-width spaces and
+// joiners, the word joiner, invisible operators U+2061..U+2064, the BOM, soft
+// hyphen, LRM/RLM, the Arabic letter mark, the bidi embedding, override and
+// isolate controls, and the tag characters U+E0000..U+E007F that smuggle
+// hidden ASCII past a reader), the Mongolian vowel separator, the combining
+// grapheme joiner, the variation selectors and the Hangul fillers.
 func invisibleRune(r rune) bool {
-	switch r {
-	case 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, 0x180E, 0xFE0F:
+	switch {
+	case unicode.Is(unicode.Cf, r),
+		r >= 0xE0000 && r <= 0xE007F, // tags, including unassigned ones
+		r >= 0xFE00 && r <= 0xFE0F,   // variation selectors
+		r >= 0xE0100 && r <= 0xE01EF, // variation selectors supplement
+		r == 0x180E, r == 0x034F,
+		r == 0x115F, r == 0x1160, r == 0x3164, r == 0xFFA0: // Hangul fillers
 		return true
 	}
-	return (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
+	return false
 }
 
 // escapeToolText escapes the three characters that can break out of an
@@ -179,9 +189,19 @@ func escapeToolText(s string) string {
 
 // wrapUntrusted marks text as untrusted data. The system and hand-off prompts
 // tell the model to treat anything inside the wrapper as data, never
-// instructions.
+// instructions. Secrets and PII are masked first: alert titles, comments and
+// action outputs are typed or pasted by people and systems, and a pasted DSN
+// or customer row must not reach the model any more than a tool's would.
 func wrapUntrusted(text string) string {
-	return "<untrusted>" + escapeToolText(text) + "</untrusted>"
+	return "<untrusted>" + escapeToolText(redactPrompt(text)) + "</untrusted>"
+}
+
+// redactPrompt masks secrets and PII (redact.Text) in human or alert text
+// bound for a prompt. Read-tool output is masked earlier, in scrubToolResult;
+// masking is idempotent, so text that passes both is unchanged by the second.
+func redactPrompt(text string) string {
+	out, _ := redact.Text(text)
+	return out
 }
 
 // sanitizeLabel makes a name or id safe to embed inside a "[...]" prompt
@@ -240,7 +260,9 @@ func formatHumanInput(in HumanInput) string {
 	name = sanitizeLabel(name)
 	switch in.Kind {
 	case "steer":
-		return fmt.Sprintf("[%s — driver] %s", name, in.Text)
+		// Trusted as an instruction, but still masked: a driver who pastes a
+		// connection string into a steer must not send its password on.
+		return fmt.Sprintf("[%s — driver] %s", name, redactPrompt(in.Text))
 	case "comment":
 		var loc string
 		switch {

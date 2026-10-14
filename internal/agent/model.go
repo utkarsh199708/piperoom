@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -90,6 +91,13 @@ func (m *anthropicModel) Turn(ctx context.Context, params anthropic.BetaMessageN
 		}
 	}
 	if err := stream.Err(); err != nil {
+		var apiErr *anthropic.Error
+		if !errors.As(err, &apiErr) && msg.ID == "" {
+			// No HTTP response and no stream event: the request never reached
+			// the API (no credentials, refused connection, cancelled before
+			// sending), so it used no tokens and no agent.usage is written.
+			return msg, fmt.Errorf("agent: stream: %w: %w", errNotSent, err)
+		}
 		return msg, fmt.Errorf("agent: stream: %w", err)
 	}
 	m.log.Debug("anthropic turn complete",
