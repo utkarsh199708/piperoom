@@ -73,10 +73,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	resumeOnTakeover, err := parseResumeOnTakeover(cfg.ResumeOnTakeover)
+	if err != nil {
+		return err
+	}
 	// The name of this process in room leases, executor claims and leader
 	// logs (docs/design/replicas.md section 2).
 	replica := replicaID(cfg.ReplicaID)
-	log.Info("server: agent cap", "max_agents_per_replica", maxAgents, "max_agents_global", maxAgentsGlobal, "replica", replica)
+	log.Info("server: agent cap", "max_agents_per_replica", maxAgents, "max_agents_global", maxAgentsGlobal, "replica", replica, "resume_on_takeover", resumeOnTakeover)
 
 	// A bad retention value stops the server: a typo must never silently keep
 	// (or delete) incident data.
@@ -288,18 +292,19 @@ func run() error {
 			Effort:   cfg.Effort,
 			MaxTurns: 40,
 		},
-		ShadowOptions:   shadowAgentOptions(cfg, shadowCfg),
-		ShadowGrace:     shadowCfg.Grace,
-		Logger:          log,
-		MaxAgents:       maxAgents,
-		ReplicaID:       replica,
-		MaxAgentsGlobal: maxAgentsGlobal,
-		Sessions:        sessions,
-		SessionIdle:     authSettings.Idle,
-		ViewerGroups:    authSettings.ViewerGroups,
-		SoloUser:        soloUser,
-		OnRoomOpened:    slack.onRoomOpened(),
-		OnRoomClosed:    closedHook.onClosed,
+		ShadowOptions:    shadowAgentOptions(cfg, shadowCfg),
+		ShadowGrace:      shadowCfg.Grace,
+		Logger:           log,
+		MaxAgents:        maxAgents,
+		ReplicaID:        replica,
+		MaxAgentsGlobal:  maxAgentsGlobal,
+		ResumeOnTakeover: resumeOnTakeover,
+		Sessions:         sessions,
+		SessionIdle:      authSettings.Idle,
+		ViewerGroups:     authSettings.ViewerGroups,
+		SoloUser:         soloUser,
+		OnRoomOpened:     slack.onRoomOpened(),
+		OnRoomClosed:     closedHook.onClosed,
 	})
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)

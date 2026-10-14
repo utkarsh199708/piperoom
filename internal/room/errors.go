@@ -30,6 +30,13 @@ const (
 	codeLeaseHeld      = "lease_held"
 )
 
+// errConflict is 409 conflict: another replica changed the room between the
+// check and the write of a checked command three times in a row
+// (docs/design/replicas.md section 9.1). The client may retry.
+func errConflict() *Error {
+	return &Error{Status: 409, Code: "conflict", Msg: "the room changed on another server while the request was checked; retry"}
+}
+
 func validation(msg string) *Error {
 	return &Error{Status: 400, Code: codeValidation, Msg: msg}
 }

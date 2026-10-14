@@ -2,12 +2,14 @@ package room
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
+	"piperoom/internal/store"
 )
 
 // DefaultMaxAgents is the cap on concurrent agent runs on one replica when
@@ -206,8 +208,12 @@ type globalSlots interface {
 	limit() int
 }
 
-// globalSlotRetry is how often a room waiting for a global slot tries again.
-const globalSlotRetry = time.Second
+// globalSlotRetry is how often a room waiting for a global slot tries again;
+// after a database error it backs off up to globalSlotMaxBackoff.
+const (
+	globalSlotRetry      = time.Second
+	globalSlotMaxBackoff = 10 * time.Second
+)
 
 // agentGate is one room's handle on the slots. The room holds a slot while
 // its agent can call the model and gives it back while the agent waits for
@@ -329,20 +335,31 @@ func (g *agentGate) acquireGlobal(ctx context.Context, localShown bool) (shown b
 	if g.globalHeld {
 		return false, nil
 	}
+	backoff := globalSlotRetry
 	for {
 		ok, err := g.s.global.take(ctx, g.roomID)
-		if err != nil {
+		wait := globalSlotRetry
+		switch {
+		case err != nil && (ctx.Err() != nil || errors.Is(err, store.ErrLeaseLost)):
 			return shown, err
-		}
-		if ok {
+		case err != nil:
+			// A database error says nothing about the cap: retry with
+			// backoff rather than leave the room with an agent that never
+			// runs (docs/design/replicas.md 4.4).
+			g.s.log.Warn("room: take global agent slot failed; retrying", "room", g.roomID, "in", backoff.String(), "err", err)
+			wait = backoff
+			backoff = min(2*backoff, globalSlotMaxBackoff)
+		case ok:
 			g.globalHeld = true
 			return shown, nil
+		default:
+			backoff = globalSlotRetry
+			if !shown && !localShown {
+				shown = g.s.emitQueued(g, func() bool { return true },
+					fmt.Sprintf("waiting for an agent slot (all %d across the servers are in use)", g.s.global.limit()))
+			}
 		}
-		if !shown && !localShown {
-			shown = g.s.emitQueued(g, func() bool { return true },
-				fmt.Sprintf("waiting for an agent slot (all %d across the servers are in use)", g.s.global.limit()))
-		}
-		t := time.NewTimer(globalSlotRetry)
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			t.Stop()

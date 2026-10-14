@@ -32,6 +32,10 @@ const feedBuffer = 64
 // re-reads while the LISTEN connection is down or reconnecting.
 const DefaultPollInterval = 2 * time.Second
 
+// DefaultSafetyPoll is how often every feed and watcher re-reads while the
+// LISTEN connection is up, in case a notification was lost silently.
+const DefaultSafetyPoll = 15 * time.Second
+
 // retryAfterError is how long a feed or a subscriber waits before it reads
 // again after a failed read when no notify wakes it sooner.
 const retryAfterError = 2 * time.Second
@@ -144,6 +148,7 @@ type hub struct {
 	log        *slog.Logger
 	listen     bool          // false: never LISTEN, poll only (tests of the fallback)
 	poll       time.Duration // poll interval while not listening
+	safetyPoll time.Duration // poll interval while listening
 
 	ctx context.Context // the hub's lifetime; feeds derive from it
 
@@ -167,6 +172,7 @@ func newHub(ctx context.Context, store *PG, connString, appName string, log *slo
 		log:        log,
 		listen:     listen,
 		poll:       poll,
+		safetyPoll: DefaultSafetyPoll,
 		ctx:        ctx,
 		feeds:      map[string]*roomFeed{},
 		watchers:   map[*AppendWatch]struct{}{},
@@ -259,16 +265,21 @@ func (h *hub) run() {
 
 // pollLoop wakes every feed and every watcher each poll interval while the
 // LISTEN connection is down (the fallback when a NOTIFY may be missed).
+// While it is up, a slow safety poll (every safetyPoll) does the same, so a
+// notification lost without the connection noticing costs seconds, never a
+// stuck room.
 func (h *hub) pollLoop(ctx context.Context) {
 	t := time.NewTicker(h.poll)
 	defer t.Stop()
+	last := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
-		if !h.isListening() {
+		if !h.isListening() || time.Since(last) >= h.safetyPoll {
+			last = time.Now()
 			h.resyncAll()
 		}
 	}

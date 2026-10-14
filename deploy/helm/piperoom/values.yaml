@@ -116,6 +116,7 @@ env:
   PIPEROOM_EFFORT: ""                 # default high
   PIPEROOM_MAX_AGENTS: ""             # per replica; default 3
   PIPEROOM_MAX_AGENTS_GLOBAL: ""      # across all replicas; empty/0 = off
+  PIPEROOM_RESUME_ON_TAKEOVER: ""     # 1 = resume a working agent on the replica that takes its room over; default off
   # PIPEROOM_REPLICA_ID is set by the chart to the pod name.
   PIPEROOM_TRIAGE_MODEL: ""
   PIPEROOM_ROOM_TOKEN_BUDGET: ""      # default 2000000, 0 = no cap

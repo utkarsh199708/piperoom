@@ -299,6 +299,12 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	g.addClient(roomID, c)
+	// A logout (or revoke) that ran between Identify and addClient found no
+	// connection to close, and the presence tick would only notice it up to
+	// 20 s later. The session is revoked in the store before CloseSession
+	// runs, so asking once more now that the client is registered closes
+	// that gap: a logout after this point finds the client itself.
+	g.recheckNewClient(ctx, c, ident)
 
 	ch, err := g.store.Subscribe(ctx, roomID, lastSeq)
 	if err != nil {
@@ -322,6 +328,23 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer g.wg.Done()
 		g.eventLoop(ctx, c, ch)
 	}()
+}
+
+// recheckNewClient ends c's session at once when SessionAlive says the session
+// is already gone. Connections without a cookie session are not checked.
+func (g *Gateway) recheckNewClient(ctx context.Context, c *client, ident Identity) {
+	if g.SessionAlive == nil || c.sessionID == "" {
+		return
+	}
+	actx, cancel := context.WithTimeout(ctx, recheckTimeout)
+	alive := g.SessionAlive(actx, ident)
+	cancel()
+	if alive {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.spawnSessionEnd(c)
 }
 
 func (g *Gateway) writeLoop(ctx context.Context, c *client) {

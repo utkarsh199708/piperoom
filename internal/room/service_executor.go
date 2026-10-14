@@ -37,6 +37,18 @@ func (q *execQueue) push(p store.ProposalRow) {
 	}
 }
 
+// queuedIDs lists the proposals waiting in the queue (their claims are
+// refreshed while they wait: docs/design/replicas.md section 5).
+func (q *execQueue) queuedIDs() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make([]string, 0, len(q.items))
+	for _, p := range q.items {
+		out = append(out, p.ProposalID)
+	}
+	return out
+}
+
 // pop returns the next queued proposal, if any.
 func (q *execQueue) pop() (store.ProposalRow, bool) {
 	q.mu.Lock()
@@ -50,10 +62,30 @@ func (q *execQueue) pop() (store.ProposalRow, bool) {
 }
 
 // enqueueExecutionLocked queues an approved proposal and lazily starts the
-// room's single executor worker. Caller must hold s.mu.
+// room's single executor worker. With a shared store the proposal is claimed
+// here, when it is queued (docs/design/replicas.md section 5): a proposal that
+// waits behind a long one in this room's queue is then a live claim this
+// replica refreshes, never "approved and unclaimed". A claim another executor
+// already holds queues nothing. Caller must hold s.mu.
 func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
 	if s.closed {
 		return
+	}
+	if s.coord != nil {
+		ctx, cancel := s.coordCtx()
+		claimed, err := s.coord.ClaimProposal(ctx, p.ProposalID, s.replica)
+		cancel()
+		if err != nil {
+			// Unknown whether the claim landed: queue nothing. If it did
+			// not, the proposal reads "approved, unclaimed" and the stale
+			// sweep records it after its grace; if it did, as a dead claim.
+			s.log.Error("room: claim approved proposal failed; not queued", "proposal", p.ProposalID, "err", err)
+			return
+		}
+		if !claimed {
+			s.log.Info("room: proposal already claimed by another executor; not queued here", "proposal", p.ProposalID)
+			return
+		}
 	}
 	if st.exec == nil {
 		st.exec = newExecQueue()
@@ -75,7 +107,7 @@ func (s *Service) runExecutor(ctx context.Context, roomID string, q *execQueue) 
 			if !ok {
 				break
 			}
-			if err := s.executeProposal(p); err != nil && !errors.Is(err, context.Canceled) {
+			if err := s.executeProposal(p, true); err != nil && !errors.Is(err, context.Canceled) {
 				s.log.Warn("room: executor stopped", "room", roomID, "proposal", p.ProposalID, "err", err)
 			}
 		}
@@ -163,7 +195,11 @@ func (s *Service) resultCtx() (context.Context, context.CancelFunc) {
 // step order violation, store failure): that is an operational problem, not a
 // failed action. A failing action is a normal outcome recorded as
 // action.executed plus proposal status "failed".
-func (s *Service) executeProposal(p store.ProposalRow) error {
+//
+// claimed says the caller already holds the proposal's claim (the queue path
+// claims at enqueue); otherwise it is claimed here first. With a shared store
+// every write below holds only while this replica holds the claim.
+func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 	ctx := s.ctx
 
 	// One executor per approved proposal across replicas
@@ -171,13 +207,15 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 	// that writes, so a losing executor leaves no trace. With an error the
 	// claim may or may not have landed; nothing runs, and if it landed the
 	// stale-claim sweep records the outcome later.
-	claimed, err := s.claimExecution(ctx, p.ProposalID)
-	if err != nil {
-		return fmt.Errorf("room: proposal %s: claim: %w", p.ProposalID, err)
-	}
 	if !claimed {
-		s.log.Info("room: proposal already claimed by another executor; not run here", "proposal", p.ProposalID)
-		return nil
+		ok, err := s.claimExecution(ctx, p.ProposalID)
+		if err != nil {
+			return fmt.Errorf("room: proposal %s: claim: %w", p.ProposalID, err)
+		}
+		if !ok {
+			s.log.Info("room: proposal already claimed by another executor; not run here", "proposal", p.ProposalID)
+			return nil
+		}
 	}
 
 	// approved is the hash the approvers approved (the queued row, filled at
@@ -221,11 +259,20 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 		// the proposal does not stay open. Any other error (shutdown, store
 		// failure) leaves the claim state unknown, so no outcome is recorded:
 		// the proposal stays open and is re-evaluated after the next restart.
-		if err := s.store.StartProposalStep(ctx, p.ProposalID, i); err != nil {
+		// With a shared store the start holds only while this replica holds
+		// the proposal's claim: a step can never start after the sweep
+		// declared the claim dead and recorded its outcome.
+		if err := s.startStep(ctx, p.ProposalID, i); err != nil {
+			if errors.Is(err, store.ErrClaimLost) {
+				s.log.Warn("room: executor claim was declared dead; step not run", "proposal", p.ProposalID, "step", i)
+				return nil
+			}
 			if errors.Is(err, ErrStepOrder) {
-				output := fmt.Sprintf("step %d was already claimed by an earlier run: %v", i, err)
-				s.finishClaimedStep(p.ProposalID, i, output)
-				s.failProposal(p.RoomID, p.ProposalID, i, p.ParamsHash, output)
+				// An earlier run started this step and never recorded its
+				// result: its outcome is unknown, and it never runs again.
+				output := fmt.Sprintf("outcome unknown: step %d was started by an earlier run that did not record its result; check the target before you retry with a new proposal", i)
+				s.finishOwnStep(p.ProposalID, i, output)
+				s.failProposalOutcome(p.RoomID, p.ProposalID, i, p.ParamsHash, output, true)
 				return fmt.Errorf("room: proposal %s: claim step %d: %w", p.ProposalID, i, err)
 			}
 			return fmt.Errorf("room: proposal %s: start step %d: %w", p.ProposalID, i, err)
@@ -264,10 +311,17 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 			output = err.Error()
 		}
 		if err := s.finishStep(p.RoomID, p.ProposalID, p.ParamsHash, tracker, i, err == nil, output); err != nil {
+			if errors.Is(err, store.ErrClaimLost) {
+				// The sweep declared this run dead while the step ran and
+				// has recorded the outcome; a second event would contradict
+				// it.
+				s.log.Warn("room: step finished after its claim was declared dead; result not recorded", "proposal", p.ProposalID, "step", i)
+				return nil
+			}
 			// The local or store transition failed: finish the store row
 			// directly (best effort) and record the outcome anyway, so the
 			// proposal never stays open without an event.
-			s.finishClaimedStep(p.ProposalID, i, output)
+			s.finishOwnStep(p.ProposalID, i, output)
 			s.failProposal(p.RoomID, p.ProposalID, i, p.ParamsHash, output)
 			return err
 		}
@@ -286,8 +340,11 @@ func (s *Service) executeProposal(p store.ProposalRow) error {
 // room UI never learns the step stopped but not why.
 func (s *Service) stopOnStep(t *stepTracker, p store.ProposalRow, i int, output string) {
 	if err := s.finishStep(p.RoomID, p.ProposalID, p.ParamsHash, t, i, false, output); err != nil {
+		if errors.Is(err, store.ErrClaimLost) {
+			return // the sweep recorded the outcome
+		}
 		s.log.Warn("room: record step stop failed", "proposal", p.ProposalID, "step", i, "err", err)
-		s.finishClaimedStep(p.ProposalID, i, output)
+		s.finishOwnStep(p.ProposalID, i, output)
 		s.failStep(p.RoomID, p.ProposalID, i, p.ParamsHash, output)
 	}
 	s.setProposalStatus(p.ProposalID, "failed")
@@ -352,7 +409,7 @@ func (s *Service) finishStep(roomID, proposalID, paramsHash string, t *stepTrack
 	}
 	rctx, cancel := s.resultCtx()
 	defer cancel()
-	if err := s.store.FinishProposalStep(rctx, proposalID, i, status, output); err != nil {
+	if err := s.finishStepRow(rctx, proposalID, i, status, output); err != nil {
 		return fmt.Errorf("room: proposal %s step %d: %w", proposalID, i, err)
 	}
 	// The DB state is authoritative; a failed event append must not undo it.
@@ -369,18 +426,38 @@ func (s *Service) finishStep(roomID, proposalID, paramsHash string, t *stepTrack
 // "failed". It is used on stop paths where the local tracker did not (or could
 // not) finish a step: decode error, closed room, failed claim.
 func (s *Service) failProposal(roomID, proposalID string, stepIndex int, paramsHash, output string) {
-	s.failStep(roomID, proposalID, stepIndex, paramsHash, output)
+	s.failProposalOutcome(roomID, proposalID, stepIndex, paramsHash, output, false)
+}
+
+// failProposalOutcome is failProposal with the outcome-unknown mark. With a
+// shared store the status is written first and only while this replica holds
+// the claim; a lost claim writes no event (the sweep wrote the outcome).
+func (s *Service) failProposalOutcome(roomID, proposalID string, stepIndex int, paramsHash, output string, unknown bool) {
+	if s.coord != nil {
+		if !s.setProposalStatus(proposalID, "failed") {
+			return
+		}
+		s.failStepOutcome(roomID, proposalID, stepIndex, paramsHash, output, unknown)
+		return
+	}
+	s.failStepOutcome(roomID, proposalID, stepIndex, paramsHash, output, unknown)
 	s.setProposalStatus(proposalID, "failed")
 }
 
 // failStep emits a failing action.executed for a step that was never claimed
 // (so there is no step state to finish).
 func (s *Service) failStep(roomID, proposalID string, i int, paramsHash, output string) {
+	s.failStepOutcome(roomID, proposalID, i, paramsHash, output, false)
+}
+
+// failStepOutcome is failStep with the outcome-unknown mark
+// (events.ActionExecutedPayload.OutcomeUnknown).
+func (s *Service) failStepOutcome(roomID, proposalID string, i int, paramsHash, output string, unknown bool) {
 	output = sanitizeAgentText(output)
 	rctx, cancel := s.resultCtx()
 	defer cancel()
 	if err := s.executorEmit(rctx, roomID, events.ActionExecuted, events.ActionExecutedPayload{
-		ProposalID: proposalID, StepIndex: i, OK: false, Output: output, ParamsHash: paramsHash,
+		ProposalID: proposalID, StepIndex: i, OK: false, Output: output, ParamsHash: paramsHash, OutcomeUnknown: unknown,
 	}); err != nil {
 		s.log.Warn("room: emit action.executed failed", "proposal", proposalID, "step", i, "err", err)
 	}
@@ -395,6 +472,24 @@ func (s *Service) finishClaimedStep(proposalID string, i int, output string) {
 	rctx, cancel := s.resultCtx()
 	defer cancel()
 	if err := s.store.FinishProposalStep(rctx, proposalID, i, "failed", output); err != nil && !errors.Is(err, ErrStepOrder) {
+		s.log.Warn("room: finish claimed step failed", "proposal", proposalID, "step", i, "err", err)
+	}
+}
+
+// finishOwnStep is finishClaimedStep for the executor's own fallback paths.
+// With a shared store the write holds only while this replica still holds the
+// proposal's claim, so a run the stale sweep declared dead never overwrites
+// the outcome the sweep recorded.
+func (s *Service) finishOwnStep(proposalID string, i int, output string) {
+	if s.coord == nil {
+		s.finishClaimedStep(proposalID, i, output)
+		return
+	}
+	output = sanitizeAgentText(output)
+	rctx, cancel := s.resultCtx()
+	defer cancel()
+	err := s.coord.FinishClaimedStep(rctx, proposalID, i, s.replica, "failed", output)
+	if err != nil && !errors.Is(err, ErrStepOrder) && !errors.Is(err, store.ErrClaimLost) {
 		s.log.Warn("room: finish claimed step failed", "proposal", proposalID, "step", i, "err", err)
 	}
 }
@@ -433,13 +528,44 @@ func (s *Service) roomPipeline(ctx context.Context, roomID string) string {
 }
 
 // setProposalStatus persists a proposal status using resultCtx, so the write
-// survives a concurrent Close.
-func (s *Service) setProposalStatus(proposalID, status string) {
+// survives a concurrent Close. With a shared store it holds only while this
+// replica holds the proposal's claim. It reports whether the status was
+// written; false with a lost claim means the stale sweep decided the proposal.
+func (s *Service) setProposalStatus(proposalID, status string) bool {
 	rctx, cancel := s.resultCtx()
 	defer cancel()
-	if err := s.store.SetProposalStatus(rctx, proposalID, status); err != nil {
+	var err error
+	if s.coord != nil {
+		err = s.coord.SetClaimedProposalStatus(rctx, proposalID, s.replica, status)
+	} else {
+		err = s.store.SetProposalStatus(rctx, proposalID, status)
+	}
+	if errors.Is(err, store.ErrClaimLost) {
+		s.log.Warn("room: proposal status not written: its claim was declared dead", "proposal", proposalID, "status", status)
+		return false
+	}
+	if err != nil {
 		s.log.Warn("room: set proposal status failed", "proposal", proposalID, "status", status, "err", err)
 	}
+	return true
+}
+
+// startStep marks step i started; with a shared store only while this
+// replica holds the proposal's claim (store.ErrClaimLost otherwise).
+func (s *Service) startStep(ctx context.Context, proposalID string, i int) error {
+	if s.coord != nil {
+		return s.coord.StartClaimedStep(ctx, proposalID, i, s.replica)
+	}
+	return s.store.StartProposalStep(ctx, proposalID, i)
+}
+
+// finishStepRow records step i's result; with a shared store only while this
+// replica holds the claim, which it refreshes in the same transaction.
+func (s *Service) finishStepRow(ctx context.Context, proposalID string, i int, status, output string) error {
+	if s.coord != nil {
+		return s.coord.FinishClaimedStep(ctx, proposalID, i, s.replica, status, output)
+	}
+	return s.store.FinishProposalStep(ctx, proposalID, i, status, output)
 }
 
 func (s *Service) isRoomOpen(ctx context.Context, roomID string) bool {

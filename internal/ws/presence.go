@@ -24,6 +24,10 @@ type client struct {
 	cancel    func()
 	onClose   func()
 	once      sync.Once
+	// sessionEnded is set (under Gateway.mu) once the session-end frames are
+	// on their way, so a logout and the register-time check never both send
+	// them.
+	sessionEnded bool
 }
 
 // roomHub is the set of connections for one room.
@@ -165,9 +169,10 @@ const sessionExpiredReason = "session_expired"
 // session_expired (docs/api.md), then a close with the same reason text. Like
 // spawnShutdown it runs on its own goroutine and the caller holds g.mu.
 func (g *Gateway) spawnSessionEnd(c *client) {
-	if g.closed {
+	if g.closed || c.sessionEnded {
 		return
 	}
+	c.sessionEnded = true
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()

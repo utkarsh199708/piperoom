@@ -114,7 +114,7 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
   - each room's agent runs on one replica, which holds a lease row renewed every 10 s (TTL 30 s).
     Steers and comments sent to any replica reach that agent through the event log. When a pod
     stops, its rooms are handed over and stay paused until someone steers. With
-    `PIPEROOM_RESUME_ON_TAKEOVER=true` an agent that was working resumes on another replica (a new
+    `PIPEROOM_RESUME_ON_TAKEOVER=1` an agent that was working resumes on another replica (a new
     run that gets the room's unanswered input and its open proposals), at most 3 times per room per
     hour;
   - an approved fix runs exactly once: the executor claims the proposal in Postgres first. A step

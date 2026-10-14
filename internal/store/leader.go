@@ -228,6 +228,9 @@ func (e *PGElector) connect(ctx context.Context, name string) (*pgx.Conn, error)
 	cfg.RuntimeParams["tcp_keepalives_idle"] = "10"
 	cfg.RuntimeParams["tcp_keepalives_interval"] = "5"
 	cfg.RuntimeParams["tcp_keepalives_count"] = "3"
+	// And a write to a vanished client fails after 4 s instead of the kernel's
+	// minutes of retransmits (milliseconds; Postgres 12+).
+	cfg.RuntimeParams["tcp_user_timeout"] = "4000"
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	conn, err := pgx.ConnectConfig(cctx, cfg)

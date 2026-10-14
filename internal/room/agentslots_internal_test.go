@@ -238,3 +238,58 @@ func TestAgentSlotsGlobalCap(t *testing.T) {
 		t.Fatalf("global slots held after both runs ended = %d", n)
 	}
 }
+
+// Review mutant M16: a room granted the slot that another room just gave
+// back while the service is closing never starts a run, whatever its context
+// says (Close cancels the rooms one at a time).
+func TestAgentGateRefusesOnClosingService(t *testing.T) {
+	release := make(chan struct{})
+	var mu sync.Mutex
+	started := map[string]int{}
+	run := func(ctx context.Context, a agent.Alert, _ agent.Deps, _ agent.Options) error {
+		mu.Lock()
+		started[a.RoomID]++
+		mu.Unlock()
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	}
+	s := New(Deps{Store: memstore.New(), Users: DefaultUsers(), Run: run, MaxAgents: 1})
+	arjun, _ := s.LookupUser("arjun")
+	waitFor := func(cond func() bool) {
+		deadline := time.Now().Add(5 * time.Second)
+		for !cond() && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	r1, err := s.CreateRoom(context.Background(), arjun, "a", "sev3", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(func() bool { mu.Lock(); defer mu.Unlock(); return started[r1.ID] == 1 })
+	r2, err := s.CreateRoom(context.Background(), arjun, "b", "sev3", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(func() bool { _, q := s.slots.stats(); return q == 1 })
+	if inUse, q := s.slots.stats(); inUse != 1 || q != 1 {
+		mu.Lock()
+		t.Fatalf("setup: in use %d, queued %d, started %v", inUse, q, started)
+	}
+	// Close has begun (closed is set) but no context is cancelled yet: r1
+	// finishes and gives its slot to the queued r2.
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	close(release)
+	time.Sleep(300 * time.Millisecond)
+	s.cancel()
+	s.wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if started[r2.ID] != 0 {
+		t.Fatal("a room started a run on a closing service")
+	}
+}

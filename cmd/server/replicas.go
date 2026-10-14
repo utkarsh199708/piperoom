@@ -91,27 +91,24 @@ func parseMaxAgentsGlobal(raw string) (int, error) {
 	return n, nil
 }
 
-// withMigrationLock runs fn while holding the "migrations" session advisory
-// lock on a connection of db, so replicas that start together migrate one at
-// a time: the first applies the migrations, the others then find none to
-// apply.
+// parseResumeOnTakeover reads PIPEROOM_RESUME_ON_TAKEOVER: empty or "0" =
+// off (the default), "1" = on (docs/design/replicas.md section 4.3). Any other
+// value stops the start: a typo must not silently turn resumes on or off.
+func parseResumeOnTakeover(raw string) (bool, error) {
+	switch strings.TrimSpace(raw) {
+	case "", "0":
+		return false, nil
+	case "1":
+		return true, nil
+	}
+	return false, fmt.Errorf("server: PIPEROOM_RESUME_ON_TAKEOVER %q must be 1 (on) or 0/empty (off)", raw)
+}
+
+// withMigrationLock runs fn while holding the "migrations" advisory lock
+// (store.WithMigrationLock), so replicas that start together migrate one at a
+// time.
 func withMigrationLock(ctx context.Context, db *sql.DB, fn func() error) error {
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("server: migrations lock: connect: %w", err)
-	}
-	// Closing the connection also frees the lock on every path.
-	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(hashtext(current_schema()), hashtext('migrations'))`); err != nil {
-		return fmt.Errorf("server: migrations lock: %w", err)
-	}
-	ferr := fn()
-	uctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	if _, err := conn.ExecContext(uctx, `SELECT pg_advisory_unlock(hashtext(current_schema()), hashtext('migrations'))`); err != nil && ferr == nil {
-		return fmt.Errorf("server: migrations unlock: %w", err)
-	}
-	return ferr
+	return store.WithMigrationLock(ctx, db, fn)
 }
 
 // runElected runs fn on this replica whenever it is the leader of name, until

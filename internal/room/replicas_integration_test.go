@@ -8,6 +8,7 @@ package room
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -285,15 +286,26 @@ func TestReplicasOneAgentPerRoom(t *testing.T) {
 	room := snap.ID
 	eventually(t, 5*time.Second, "agent started on r0", func() bool { return len(log.runsOf(room)) == 1 })
 
+	// Driver steers from two replicas race on the conditional append; after
+	// three tries the spec answers 409 conflict (the caller retries), so a
+	// steer that got 409 sent no input and is not expected in the inbox.
 	var wg sync.WaitGroup
+	var sent atomic.Int64
 	for i := 0; i < 10; i++ {
 		for _, s := range []*Service{b, c} {
 			wg.Add(1)
 			go func(s *Service, i int) {
 				defer wg.Done()
-				if _, err := s.Steer(ctx, arjun, room, fmt.Sprintf("steer %s %d", s.replica, i)); err != nil {
+				_, err := s.Steer(ctx, arjun, room, fmt.Sprintf("steer %s %d", s.replica, i))
+				var re *Error
+				switch {
+				case err == nil:
+					sent.Add(1)
+				case errors.As(err, &re) && re.Code == "conflict":
+				default:
 					t.Errorf("steer on %s: %v", s.replica, err)
 				}
+				sent.Add(1) // the comment below
 				if _, err := s.AddComment(ctx, user(t, s, "priya"), room, "", fmt.Sprintf("@agent look %s %d", s.replica, i)); err != nil {
 					t.Errorf("comment on %s: %v", s.replica, err)
 				}
@@ -301,7 +313,11 @@ func TestReplicasOneAgentPerRoom(t *testing.T) {
 		}
 	}
 	wg.Wait()
-	eventually(t, 10*time.Second, "the owner's inbox gets all 40 inputs", func() bool { return len(log.inputsOf("r0", room)) == 40 })
+	accepted := int(sent.Load())
+	if accepted <= 20 {
+		t.Fatalf("only %d of 40 inputs were accepted: no driver steer got through", accepted)
+	}
+	eventually(t, 10*time.Second, fmt.Sprintf("the owner's inbox gets all %d accepted inputs", accepted), func() bool { return len(log.inputsOf("r0", room)) == accepted })
 	time.Sleep(500 * time.Millisecond)
 	if runs := log.runsOf(room); len(runs) != 1 || runs[0].replica != "r0" {
 		t.Fatalf("runs = %+v, want exactly one on r0", runs)
@@ -314,8 +330,11 @@ func TestReplicasOneAgentPerRoom(t *testing.T) {
 	norm := func(s RoomSnapshot) []byte {
 		s.OpenedAt = s.OpenedAt.Truncate(time.Microsecond)
 		if s.Driver != nil {
+			// A driver lease renewal that is not logged lives only on the
+			// rooms row: a replica adopts it before its next command
+			// (syncRoom), while a GET answers from the cache.
 			d := *s.Driver
-			d.LeaseUntil = d.LeaseUntil.Truncate(time.Microsecond)
+			d.LeaseUntil = time.Time{}
 			s.Driver = &d
 		}
 		b, _ := json.Marshal(s)
@@ -327,11 +346,20 @@ func TestReplicasOneAgentPerRoom(t *testing.T) {
 	}
 	wantJSON := norm(want)
 	for _, s := range svcs {
-		got, err := s.GetRoom(ctx, room)
-		if err != nil {
-			t.Fatal(err)
+		// Reads answer from the cache the follower keeps: give it a moment.
+		var gotJSON []byte
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			got, err := s.GetRoom(ctx, room)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotJSON = norm(got); string(gotJSON) == string(wantJSON) || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
 		}
-		if gotJSON := norm(got); string(gotJSON) != string(wantJSON) {
+		if string(gotJSON) != string(wantJSON) {
 			t.Fatalf("snapshot on %s differs from the log:\n got %s\nwant %s", s.replica, gotJSON, wantJSON)
 		}
 	}
@@ -408,8 +436,10 @@ func TestReplicasLeaseTakeover(t *testing.T) {
 	schema := pgSchema(t)
 	log := newAgentLog()
 	fa := &faultyCoord{PG: pgReplicaStore(t, schema, store.Options{})}
-	a := newReplica(t, fa, "r0", log, nil)
-	b := newReplica(t, pgReplicaStore(t, schema, store.Options{}), "r1", log, nil)
+	// The action is registered so a late proposal from r0 would be valid:
+	// only the fence may refuse it.
+	a := newReplica(t, fa, "r0", log, &itAction{})
+	b := newReplica(t, pgReplicaStore(t, schema, store.Options{}), "r1", log, &itAction{}, func(d *Deps) { d.ResumeOnTakeover = true })
 	ctx := context.Background()
 	arjun := user(t, a, "arjun")
 
@@ -423,6 +453,17 @@ func TestReplicasLeaseTakeover(t *testing.T) {
 	time.Sleep(2 * fastTimings.LeaseTTL)
 	if runs := log.runsOf(room); len(runs) != 1 || !runs[0].end.IsZero() {
 		t.Fatalf("runs with a healthy owner = %+v", runs)
+	}
+
+	// r0's run proposes a fix before its replica stalls; the resumed run
+	// must be told it is already open, so it does not propose it again.
+	openPID, err := (proposalCreator{s: a, roomID: room, run: 1}).Create(ctx, events.ProposalCreatedPayload{
+		Title: "restart the sink task", Risk: "low", Rollback: "none needed",
+		Steps:          []events.ProposalStep{{Action: "it_fix", Layer: "kafka", Params: json.RawMessage(`{}`)}},
+		RequiredLayers: []string{"kafka"},
+	})
+	if err != nil {
+		t.Fatalf("proposal from the owner's run: %v", err)
 	}
 
 	fa.failRenew.Store(true)
@@ -451,17 +492,65 @@ func TestReplicasLeaseTakeover(t *testing.T) {
 		}
 		return false
 	})
-	// The old owner's agent may no longer write.
-	if err := a.agentEmit(ctx, room, events.AgentMessage, events.AgentMessagePayload{Text: "late"}); err == nil {
+	eventually(t, 5*time.Second, "the resumed run is told about the open proposal", func() bool {
+		for _, in := range log.inputsOf("r1", room) {
+			if strings.Contains(in, openPID) && strings.Contains(in, "do not propose them again") {
+				return true
+			}
+		}
+		return false
+	})
+	// The old owner's run (generation 1) may no longer write: no events and
+	// no proposals.
+	if err := a.agentEmit(ctx, room, 1, events.AgentMessage, events.AgentMessagePayload{Text: "late"}); err == nil {
 		t.Fatal("the replica that lost the lease could still write agent events")
 	}
-	// Everyone sees the resume notice.
-	got, err := a.GetRoom(ctx, room)
+	if pid, err := (proposalCreator{s: a, roomID: room, run: 1}).Create(ctx, events.ProposalCreatedPayload{
+		Title: "late fix", Risk: "low", Rollback: "restart the task again",
+		Steps:          []events.ProposalStep{{Action: "it_fix", Layer: "kafka", Params: json.RawMessage(`{}`)}},
+		RequiredLayers: []string{"kafka"},
+	}); err == nil {
+		t.Fatalf("the replica that lost the lease created proposal %s", pid)
+	}
+	// Everyone sees the resumed agent working.
+	eventually(t, 5*time.Second, "r0 sees the resumed agent", func() bool {
+		got, err := a.GetRoom(ctx, room)
+		return err == nil && got.AgentStatus.State == "working"
+	})
+}
+
+// With PIPEROOM_RESUME_ON_TAKEOVER off (the default) a takeover pauses the
+// agent, as a restart does on main: notice, no new run, lease dropped.
+func TestReplicasTakeoverPausesByDefault(t *testing.T) {
+	schema := pgSchema(t)
+	log := newAgentLog()
+	fa := &faultyCoord{PG: pgReplicaStore(t, schema, store.Options{})}
+	a := newReplica(t, fa, "r0", log, nil)
+	b := newReplica(t, pgReplicaStore(t, schema, store.Options{}), "r1", log, nil, func(d *Deps) { d.ResumeOnTakeover = false })
+	ctx := context.Background()
+	snap, err := a.CreateRoom(ctx, user(t, a, "arjun"), "lag", "sev2", "orders")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.AgentStatus.State != "working" {
-		t.Fatalf("agent status on r0 = %+v, want working", got.AgentStatus)
+	room := snap.ID
+	eventually(t, 5*time.Second, "agent on r0", func() bool { return len(log.runsOf(room)) == 1 })
+	fa.failRenew.Store(true)
+	eventually(t, 4*fastTimings.LeaseTTL, "r1 pauses the room", func() bool {
+		for _, e := range lrEvents(t, b, room) {
+			if e.Type == events.AgentStatus {
+				if p, _ := decode[events.AgentStatusPayload](e); p.Detail == restartDetail {
+					return true
+				}
+			}
+		}
+		return false
+	})
+	time.Sleep(time.Second)
+	if n := len(log.runsOf(room)); n != 1 {
+		t.Fatalf("%d runs; with the flag off a takeover must not start one", n)
+	}
+	if leases, _ := b.coord.RoomLeases(ctx); len(leases) != 0 {
+		t.Fatalf("lease kept after a pause: %+v", leases)
 	}
 }
 
@@ -505,7 +594,7 @@ func TestReplicasExecutorExactlyOnce(t *testing.T) {
 		go func(s *Service) {
 			defer wg.Done()
 			<-start
-			if err := s.executeProposal(row); err != nil {
+			if err := s.executeProposal(row, false); err != nil {
 				t.Errorf("execute on %s: %v", s.replica, err)
 			}
 		}(svcs[i%3])
@@ -700,5 +789,21 @@ func TestReplicasCacheFollowsLog(t *testing.T) {
 	// B's watcher view: the open room for the pipeline is that alert room.
 	if id, ok := b.OpenRoomForPipeline("orders"); !ok || id != ids[0] {
 		t.Fatalf("OpenRoomForPipeline on B = %q %v, want %q", id, ok, ids[0])
+	}
+	// The alert room is closed on A; B (whose cache may not have folded the
+	// close yet) reads the log before it decides: the closed room is reported
+	// closed, and the same alert opens a new room instead of joining it.
+	if _, err := a.GrantControl(ctx, priya, ids[0], "priya"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.CloseRoom(ctx, priya, ids[0], "fixed"); err != nil {
+		t.Fatal(err)
+	}
+	if id, closedAt, ok := b.LastRoomForKey("orders", "alertmanager:lag"); !ok || id != ids[0] || closedAt == nil {
+		t.Fatalf("LastRoomForKey on B after the close on A = %q %v %v, want %q closed", id, closedAt, ok, ids[0])
+	}
+	again, isNew, err := b.OpenAlertRoom(ctx, alert)
+	if err != nil || !isNew || again.ID == ids[0] {
+		t.Fatalf("alert after the close on A: %s new=%v err=%v, want a new room", again.ID, isNew, err)
 	}
 }

@@ -48,6 +48,8 @@ func (s *Service) Trace(ctx context.Context, user User, roomID, table, key strin
 		return events.Event{}, err
 	}
 
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	st, err := s.getStateLocked(ctx, roomID)
 	if err != nil {
@@ -76,9 +78,6 @@ func (s *Service) Trace(ctx context.Context, user User, roomID, table, key strin
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st2 := s.rooms[roomID]
-	if st2 != nil && s.syncLocked(ctx, roomID, st2) != nil {
-		st2 = nil // deleted meanwhile (shared store)
-	}
 	if st2 == nil {
 		return events.Event{}, notFound("room not found")
 	}

@@ -209,14 +209,17 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 		return RoomSnapshot{}, false, err
 	}
 	defer unlock()
+	// Shared store: bring the key's room up to the log (or load the one
+	// another replica opened) before s.mu, so no store read holds the lock.
+	shared := s.prepareAlertKeyRoom(ctx, indexKey)
 
 	s.mu.Lock()
 	// The same alert while its room is still open joins that room: no second
 	// room, no second agent, and the hook is not called again (the room was
 	// opened before).
-	existing, ok := s.openAlertRoomLocked(ctx, indexKey)
+	existing, ok := s.openAlertRoomLocked(indexKey)
 	if !ok {
-		existing, ok = s.openAlertRoomSharedLocked(ctx, indexKey)
+		existing, ok = s.openAlertRoomSharedLocked(indexKey, shared)
 	}
 	if ok {
 		st := s.rooms[existing]
@@ -306,9 +309,10 @@ func alertIndexKey(pipelineID, dedupKey string) string {
 
 // openAlertRoomLocked returns the open room that already holds indexKey (see
 // alertIndexKey), if any. A key whose room is closed is not a match. With a
-// shared store the room is first brought up to the log, so a close on another
-// replica counts. Caller must hold s.mu.
-func (s *Service) openAlertRoomLocked(ctx context.Context, indexKey string) (string, bool) {
+// shared store the caller has brought the room up to the log first
+// (prepareAlertKeyRoom), so a close on another replica counts. Caller must
+// hold s.mu.
+func (s *Service) openAlertRoomLocked(indexKey string) (string, bool) {
 	if indexKey == "" {
 		return "", false
 	}
@@ -320,7 +324,7 @@ func (s *Service) openAlertRoomLocked(ctx context.Context, indexKey string) (str
 	if !ok {
 		return "", false
 	}
-	if err := s.syncLocked(ctx, roomID, st); err != nil || !s.roomOpen(st) {
+	if !s.roomOpen(st) {
 		return "", false
 	}
 	return roomID, true
@@ -416,11 +420,12 @@ func (s *Service) GetRoom(ctx context.Context, roomID string) (RoomSnapshot, err
 
 // ListRooms returns every room, open rooms first.
 func (s *Service) ListRooms(ctx context.Context) ([]RoomSnapshot, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.refreshCacheLocked(ctx); err != nil {
+	// Reads happen outside s.mu; only the folds take it (refreshAll).
+	if err := s.refreshAll(ctx); err != nil {
 		return nil, err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]RoomSnapshot, 0, len(s.rooms))
 	for _, st := range s.rooms {
 		out = append(out, st.snap.Clone())
@@ -466,6 +471,8 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 	if err := rejectUnstorable(resolution); err != nil {
 		return events.Event{}, err
 	}
+	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
 	st, err := s.getStateLocked(ctx, roomID)
 	if err != nil {
@@ -485,7 +492,17 @@ func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution s
 		s.mu.Unlock()
 		return events.Event{}, validation("a shadow room needs a resolution to grade against")
 	}
-	e, err := s.emitLocked(ctx, st, roomID, events.RoomClosed, humanActor(user), events.RoomClosedPayload{Resolution: resolution})
+	// Checked append: a close and a control change on two replicas at once
+	// cannot both pass (docs/design/replicas.md 9.1).
+	e, err := s.emitCheckedLocked(ctx, st, roomID, func() error {
+		if !s.roomOpen(st) {
+			return roomClosed("room already closed")
+		}
+		if !s.isDriver(st, user.ID) {
+			return ErrNotDriver()
+		}
+		return nil
+	}, events.RoomClosed, humanActor(user), events.RoomClosedPayload{Resolution: resolution})
 	if err != nil {
 		s.mu.Unlock()
 		return events.Event{}, err
