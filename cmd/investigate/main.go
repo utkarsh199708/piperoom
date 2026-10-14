@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
@@ -31,10 +32,17 @@ func main() {
 		model     = flag.String("model", "", "model override (default from config)")
 		effort    = flag.String("effort", "", "effort override (default from config)")
 		maxTurns  = flag.Int("max-turns", 0, "max turns (default 40)")
+		record    = flag.String("record", "", "write a recording of the run (events, tool calls, model, prompt hash, commit, timings) to this new directory")
+		approve   = flag.Bool("approve-all", false, "DEV STACK ONLY: approve and EXECUTE every proposal. Refused unless every address is local and -confirm-dev-stack (or "+approveConfirmEnv+") is set")
+		confirm   = flag.Bool("confirm-dev-stack", false, "confirm that -approve-all runs against the local dev stack")
 	)
 	flag.Parse()
 
-	os.Exit(exitCode(run(*pipeline, *title, *fakeTools, *model, *effort, *maxTurns), os.Stderr))
+	o := runOptions{
+		Pipeline: *pipeline, Title: *title, FakeTools: *fakeTools, Model: *model, Effort: *effort,
+		MaxTurns: *maxTurns, RecordDir: *record, ApproveAll: *approve, ConfirmDevStack: *confirm,
+	}
+	os.Exit(exitCode(run(o), os.Stderr))
 }
 
 // exitCode prints err (if any) as one line to w and returns the process exit
@@ -54,8 +62,42 @@ func exitCode(err error, w io.Writer) int {
 	return 1
 }
 
-func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns int) error {
+// runOptions are the command-line settings of one run.
+type runOptions struct {
+	Pipeline, Title string
+	FakeTools       bool
+	Model, Effort   string
+	MaxTurns        int
+	RecordDir       string
+	ApproveAll      bool
+	ConfirmDevStack bool
+}
+
+func run(o runOptions) (err error) {
+	pipeline, title, fakeTools := o.Pipeline, o.Title, o.FakeTools
+	model, effort, maxTurns := o.Model, o.Effort, o.MaxTurns
 	cfg := config.Load()
+
+	// The owners file is read first: the approve-all guard must see the
+	// pipeline's connections before anything is opened.
+	var own *owners.Owners
+	if !fakeTools {
+		own, err = owners.Load(cfg.OwnersFile)
+		if err != nil {
+			return fmt.Errorf("investigate: %w", err)
+		}
+	}
+	var pipe owners.Pipeline
+	var havePipe bool
+	if own != nil {
+		pipe, havePipe = own.Pipeline(pipeline)
+	}
+	if o.ApproveAll {
+		if err := checkApproveAll(cfg, pipe, havePipe, o.ConfirmDevStack, os.Getenv); err != nil {
+			return fmt.Errorf("investigate: %w", err)
+		}
+		fmt.Fprint(os.Stderr, approveAllWarning)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -79,10 +121,6 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 			return fmt.Errorf("investigate: register fake tools: %w", err)
 		}
 	} else {
-		own, err := owners.Load(cfg.OwnersFile)
-		if err != nil {
-			return fmt.Errorf("investigate: %w", err)
-		}
 		// Only the investigated pipeline's client set is opened: its own
 		// connections: from owners.yaml, or the process-wide settings
 		// (docs/design/tenancy.md). No other pipeline's credentials are read.
@@ -104,8 +142,34 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 	}
 
 	inbox := newStdinInbox()
-	sink := newTerminalSink(os.Stdout)
-	proposals := &rejectProposals{}
+	var sink agent.Sink = newTerminalSink(os.Stdout)
+	var agentInbox agent.Inbox = inbox
+	var proposals agent.Proposals = &rejectProposals{}
+	if o.ApproveAll {
+		proposals = &approveProposals{acts: areg, pipe: pipe, havePipe: havePipe, inbox: inbox, out: os.Stdout, ctx: ctx}
+	}
+	if o.RecordDir != "" {
+		commit := buildCommit()
+		if commit == "" {
+			commit = gitHead(ctx)
+		}
+		if commit == "" {
+			commit = "unknown"
+		}
+		rec, rerr := newRecorder(o.RecordDir, sink, recordMeta{
+			Pipeline: pipeline, Title: title, Model: opts.Model, Effort: opts.Effort, MaxTurns: opts.MaxTurns,
+			PromptSHA256: agent.PromptHash(), Commit: commit, FakeTools: fakeTools, ApproveAll: o.ApproveAll,
+		}, time.Now)
+		if rerr != nil {
+			return fmt.Errorf("investigate: %w", rerr)
+		}
+		defer func() {
+			if cerr := rec.Close(err); cerr != nil && err == nil {
+				err = fmt.Errorf("investigate: %w", cerr)
+			}
+		}()
+		sink, agentInbox = rec, recordingInbox{Inbox: inbox, rec: rec}
+	}
 
 	alert := agent.Alert{
 		Title:      title,
@@ -117,7 +181,7 @@ postgres: public.orders  ->  connect: pg-orders-connector  ->  topic: pg.public.
 	err = ep.Run(ctx, alert, agent.Deps{
 		Tools:     reg,
 		Actions:   areg,
-		Inbox:     inbox,
+		Inbox:     agentInbox,
 		Sink:      sink,
 		Proposals: proposals,
 	}, opts)
