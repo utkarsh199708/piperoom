@@ -252,6 +252,23 @@ func (d *Database) Drop() {
 	_, _ = conn.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{d.Name}.Sanitize()+" WITH (FORCE)")
 }
 
+// isImagePullError reports a docker CLI failure to fetch an image (registry
+// rate limit, no access, unreachable registry): an environment problem, not a
+// test result. The CLI gives only text on stderr, so this reads the message.
+func isImagePullError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, s := range []string{"toomanyrequests", "429 too many requests", "pull rate limit",
+		"pull access denied", "failed to resolve reference", "error pulling image", "manifest unknown"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
 // DockerAvailable reports whether the docker CLI can reach a daemon.
 func DockerAvailable(ctx context.Context) error {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)

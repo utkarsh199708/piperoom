@@ -345,6 +345,8 @@ func fanoutOnce(ctx context.Context, env *Env, p Params, n int, res *Result) (Fa
 	t := run.Totals
 	res.add(labeled(label, seqCheck(t)))
 	res.check(label+"comments accepted", run.PostErrors == 0 && run.Posted > 0, "posted %d, errors %d", run.Posted, run.PostErrors)
+	// Against the window, not postDur: the last tick wait is not server time.
+	res.add(labeled(label, rateCheck(run.OfferedPerSec, float64(run.Posted)/p.Dur("window").Seconds())))
 	res.add(labeled(label, leakCheck(run.GoroutinesBefore, run.GoroutinesAfter)))
 	res.check(label+"no append errors", sumAppendErrors(srv) == 0, "append errors %d", sumAppendErrors(srv))
 	return run, nil

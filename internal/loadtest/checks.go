@@ -108,6 +108,20 @@ func leakCheck(before, after int) Check {
 // goroutineSlack allows for timers and pool goroutines that come and go.
 const goroutineSlack = 5
 
+// minAcceptedRatio is the share of the offered comment rate the server must
+// accept. Without it a run that posted 67 of 90 comments/s still passed.
+const minAcceptedRatio = 0.9
+
+// rateCheck fails when the server accepted less than minAcceptedRatio of the
+// offered rate (the posting loop fell behind because posts were slow).
+func rateCheck(offered, achieved float64) Check {
+	return Check{
+		Name:   "accepted rate keeps up with offered",
+		OK:     offered > 0 && achieved >= minAcceptedRatio*offered,
+		Detail: fmt.Sprintf("offered %.1f/s, accepted %.1f/s (need >= %.0f%%)", offered, achieved, 100*minAcceptedRatio),
+	}
+}
+
 // labeled prefixes a check's name.
 func labeled(label string, c Check) Check {
 	c.Name = label + c.Name
