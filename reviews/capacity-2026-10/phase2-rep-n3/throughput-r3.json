@@ -1,0 +1,912 @@
+{
+  "profile": "throughput",
+  "short": false,
+  "replicas": 3,
+  "params": {
+    "max_agents": "3,10,30",
+    "max_agents_global": "0",
+    "model_latency": "500ms",
+    "model_tokens": "300",
+    "propose": "true",
+    "rooms": "60",
+    "subs_per_room": "2",
+    "timeout": "15m",
+    "tool_latency": "50ms",
+    "tool_summary_bytes": "1024",
+    "turns": "5"
+  },
+  "started": "2026-10-13T18:52:27.908799841Z",
+  "wall_s": 51.084,
+  "data": {
+    "runs": [
+      {
+        "max_agents": 3,
+        "rooms": 60,
+        "model_turns": 360,
+        "makespan_ms": 24267.635,
+        "turns_per_sec": 14.835,
+        "ideal_turns_per_sec": 16.031,
+        "events": 1528,
+        "events_per_sec": 62.965,
+        "queue_wait": {
+          "n": 60,
+          "min_ms": 15.894,
+          "p50_ms": 10150.709,
+          "p95_ms": 20314.924,
+          "p99_ms": 20376.248,
+          "max_ms": 20376.248,
+          "mean_ms": 9751.959
+        },
+        "time_to_first_turn": {
+          "n": 60,
+          "min_ms": 560.971,
+          "p50_ms": 10671.921,
+          "p95_ms": 20852.373,
+          "p99_ms": 20904.039,
+          "max_ms": 20904.039,
+          "mean_ms": 10302.894
+        },
+        "run_hold": {
+          "n": 60,
+          "min_ms": 3270.464,
+          "p50_ms": 3368.479,
+          "p95_ms": 3729.461,
+          "p99_ms": 3986.999,
+          "max_ms": 3986.999,
+          "mean_ms": 3429.491
+        },
+        "event_insert_latency": {
+          "n": 394,
+          "min_ms": 1.222,
+          "p50_ms": 4.069,
+          "p95_ms": 22.527,
+          "p99_ms": 55.329,
+          "max_ms": 111.128,
+          "mean_ms": 7.067
+        },
+        "pool": [
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 2141,
+            "empty_acquires": 149,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 458.341,
+            "acquire_ms": 459.799,
+            "samples": 495,
+            "samples_at_max": 4,
+            "max_acquired": 4,
+            "saturated_ratio": 0.008
+          },
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 2184,
+            "empty_acquires": 155,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 603.873,
+            "acquire_ms": 605.544,
+            "samples": 495,
+            "samples_at_max": 2,
+            "max_acquired": 4,
+            "saturated_ratio": 0.004
+          },
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 2143,
+            "empty_acquires": 101,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 285.36,
+            "acquire_ms": 287.134,
+            "samples": 494,
+            "samples_at_max": 4,
+            "max_acquired": 4,
+            "saturated_ratio": 0.008
+          }
+        ],
+        "peak_heap_inuse": 11165696,
+        "peak_goroutines": 246,
+        "model": {
+          "requests": 405,
+          "bad_requests": 0,
+          "max_in_flight": 9,
+          "rooms_with_more_than_one_run_start": 0,
+          "rooms_with_concurrent_model_calls": 0
+        },
+        "subs": {
+          "subs": 120,
+          "received": 3012,
+          "bytes": 1662672,
+          "gaps": 0,
+          "dups": 0,
+          "reconnects": 0,
+          "dial_errors": 0,
+          "parse_mismatches": 0,
+          "server_closes": {},
+          "send_buffer_full_closes": 0,
+          "missing_at_end": 0
+        },
+        "cpu": {
+          "wall_s": 24.618,
+          "server_cpu_s": 3.233,
+          "driver_cpu_s": 0.723,
+          "postgres_cpu_s": 1.787
+        },
+        "exec": {
+          "proposals": 60,
+          "approved": 60,
+          "approve_errors": 0,
+          "executions": 60,
+          "duplicate_executions": 0,
+          "missing_executions": 0,
+          "action_executed_events": 60,
+          "duplicate_action_executed_events": 0
+        },
+        "server": [
+          {
+            "replica": 0,
+            "replica_id": "lt-r0-a89b12",
+            "pid": 6913,
+            "goroutines": 243,
+            "peak_goroutines": 246,
+            "heap_inuse": 10108928,
+            "peak_heap_inuse": 11165696,
+            "heap_alloc": 8257296,
+            "sys": 23189768,
+            "total_alloc": 36457712,
+            "num_gc": 10,
+            "rss": 50520064,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 2141,
+              "empty_acquires": 149,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 458.341,
+              "acquire_ms": 459.799,
+              "samples": 495,
+              "samples_at_max": 4,
+              "max_acquired": 4,
+              "saturated_ratio": 0.008
+            },
+            "appends": {
+              "n": 394,
+              "min_ms": 1.222,
+              "p50_ms": 4.069,
+              "p95_ms": 22.527,
+              "p99_ms": 55.329,
+              "max_ms": 111.128,
+              "mean_ms": 7.067
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 80,
+            "action_runs": {},
+            "cpu_seconds": 1.055121
+          },
+          {
+            "replica": 1,
+            "replica_id": "lt-r1-fc6342",
+            "pid": 6930,
+            "goroutines": 242,
+            "peak_goroutines": 245,
+            "heap_inuse": 10805248,
+            "peak_heap_inuse": 10764288,
+            "heap_alloc": 9352984,
+            "sys": 23451912,
+            "total_alloc": 36775656,
+            "num_gc": 10,
+            "rss": 50577408,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 2184,
+              "empty_acquires": 155,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 603.873,
+              "acquire_ms": 605.544,
+              "samples": 495,
+              "samples_at_max": 2,
+              "max_acquired": 4,
+              "saturated_ratio": 0.004
+            },
+            "appends": {
+              "n": 394,
+              "min_ms": 1.192,
+              "p50_ms": 4.223,
+              "p95_ms": 22.077,
+              "p99_ms": 49.107,
+              "max_ms": 72.229,
+              "mean_ms": 6.957
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 80,
+            "action_runs": {},
+            "cpu_seconds": 1.154411
+          },
+          {
+            "replica": 2,
+            "replica_id": "lt-r2-5f610e",
+            "pid": 6961,
+            "goroutines": 243,
+            "peak_goroutines": 246,
+            "heap_inuse": 11141120,
+            "peak_heap_inuse": 11124736,
+            "heap_alloc": 9311472,
+            "sys": 27646216,
+            "total_alloc": 36849832,
+            "num_gc": 10,
+            "rss": 50790400,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 2143,
+              "empty_acquires": 101,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 285.36,
+              "acquire_ms": 287.134,
+              "samples": 494,
+              "samples_at_max": 4,
+              "max_acquired": 4,
+              "saturated_ratio": 0.008
+            },
+            "appends": {
+              "n": 394,
+              "min_ms": 1.035,
+              "p50_ms": 3.942,
+              "p95_ms": 18.566,
+              "p99_ms": 60.042,
+              "max_ms": 93.671,
+              "mean_ms": 6.481
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 80,
+            "action_runs": {},
+            "cpu_seconds": 1.086707
+          }
+        ]
+      },
+      {
+        "max_agents": 10,
+        "rooms": 60,
+        "model_turns": 360,
+        "makespan_ms": 7588.983,
+        "turns_per_sec": 47.437,
+        "ideal_turns_per_sec": 51.439,
+        "events": 1506,
+        "events_per_sec": 198.446,
+        "queue_wait": {
+          "n": 60,
+          "min_ms": 11.341,
+          "p50_ms": 118.286,
+          "p95_ms": 3523.416,
+          "p99_ms": 3537.358,
+          "max_ms": 3537.358,
+          "mean_ms": 1740.894
+        },
+        "time_to_first_turn": {
+          "n": 60,
+          "min_ms": 563.916,
+          "p50_ms": 720.77,
+          "p95_ms": 4045.119,
+          "p99_ms": 4059.226,
+          "max_ms": 4059.226,
+          "mean_ms": 2280.235
+        },
+        "run_hold": {
+          "n": 60,
+          "min_ms": 3315.218,
+          "p50_ms": 3499.272,
+          "p95_ms": 3637.904,
+          "p99_ms": 3745.485,
+          "max_ms": 3745.485,
+          "mean_ms": 3511.499
+        },
+        "event_insert_latency": {
+          "n": 380,
+          "min_ms": 1.279,
+          "p50_ms": 4.229,
+          "p95_ms": 19.072,
+          "p99_ms": 54.7,
+          "max_ms": 110.428,
+          "mean_ms": 6.778
+        },
+        "pool": [
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 2017,
+            "empty_acquires": 175,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 602.38,
+            "acquire_ms": 603.427,
+            "samples": 159,
+            "samples_at_max": 1,
+            "max_acquired": 4,
+            "saturated_ratio": 0.006
+          },
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 2022,
+            "empty_acquires": 244,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 261.809,
+            "acquire_ms": 262.628,
+            "samples": 159,
+            "samples_at_max": 1,
+            "max_acquired": 4,
+            "saturated_ratio": 0.006
+          },
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 2003,
+            "empty_acquires": 164,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 378.29,
+            "acquire_ms": 379.51,
+            "samples": 158,
+            "samples_at_max": 2,
+            "max_acquired": 4,
+            "saturated_ratio": 0.013
+          }
+        ],
+        "peak_heap_inuse": 12304384,
+        "peak_goroutines": 259,
+        "model": {
+          "requests": 420,
+          "bad_requests": 0,
+          "max_in_flight": 30,
+          "rooms_with_more_than_one_run_start": 0,
+          "rooms_with_concurrent_model_calls": 0
+        },
+        "subs": {
+          "subs": 120,
+          "received": 3012,
+          "bytes": 1735872,
+          "gaps": 0,
+          "dups": 0,
+          "reconnects": 0,
+          "dial_errors": 0,
+          "parse_mismatches": 0,
+          "server_closes": {},
+          "send_buffer_full_closes": 0,
+          "missing_at_end": 0
+        },
+        "cpu": {
+          "wall_s": 7.727,
+          "server_cpu_s": 2.18,
+          "driver_cpu_s": 0.438,
+          "postgres_cpu_s": 1.393
+        },
+        "exec": {
+          "proposals": 60,
+          "approved": 60,
+          "approve_errors": 0,
+          "executions": 60,
+          "duplicate_executions": 0,
+          "missing_executions": 0,
+          "action_executed_events": 60,
+          "duplicate_action_executed_events": 0
+        },
+        "server": [
+          {
+            "replica": 0,
+            "replica_id": "lt-r0-eb6afe",
+            "pid": 9285,
+            "goroutines": 242,
+            "peak_goroutines": 259,
+            "heap_inuse": 10067968,
+            "peak_heap_inuse": 12304384,
+            "heap_alloc": 6626136,
+            "sys": 27646216,
+            "total_alloc": 36373944,
+            "num_gc": 9,
+            "rss": 52875264,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 2017,
+              "empty_acquires": 175,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 602.38,
+              "acquire_ms": 603.427,
+              "samples": 159,
+              "samples_at_max": 1,
+              "max_acquired": 4,
+              "saturated_ratio": 0.006
+            },
+            "appends": {
+              "n": 380,
+              "min_ms": 1.279,
+              "p50_ms": 4.229,
+              "p95_ms": 19.072,
+              "p99_ms": 54.7,
+              "max_ms": 110.428,
+              "mean_ms": 6.778
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 80,
+            "action_runs": {},
+            "cpu_seconds": 0.752233
+          },
+          {
+            "replica": 1,
+            "replica_id": "lt-r1-0db15a",
+            "pid": 9300,
+            "goroutines": 242,
+            "peak_goroutines": 259,
+            "heap_inuse": 11059200,
+            "peak_heap_inuse": 11264000,
+            "heap_alloc": 8569928,
+            "sys": 27453720,
+            "total_alloc": 36905264,
+            "num_gc": 11,
+            "rss": 51769344,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 2022,
+              "empty_acquires": 244,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 261.809,
+              "acquire_ms": 262.628,
+              "samples": 159,
+              "samples_at_max": 1,
+              "max_acquired": 4,
+              "saturated_ratio": 0.006
+            },
+            "appends": {
+              "n": 380,
+              "min_ms": 1.238,
+              "p50_ms": 4.038,
+              "p95_ms": 17.943,
+              "p99_ms": 46.375,
+              "max_ms": 63.224,
+              "mean_ms": 6.424
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 80,
+            "action_runs": {},
+            "cpu_seconds": 0.759357
+          },
+          {
+            "replica": 2,
+            "replica_id": "lt-r2-a6d207",
+            "pid": 9312,
+            "goroutines": 242,
+            "peak_goroutines": 259,
+            "heap_inuse": 11288576,
+            "peak_heap_inuse": 11476992,
+            "heap_alloc": 9013112,
+            "sys": 23451912,
+            "total_alloc": 36604872,
+            "num_gc": 9,
+            "rss": 52510720,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 2003,
+              "empty_acquires": 164,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 378.29,
+              "acquire_ms": 379.51,
+              "samples": 158,
+              "samples_at_max": 2,
+              "max_acquired": 4,
+              "saturated_ratio": 0.013
+            },
+            "appends": {
+              "n": 380,
+              "min_ms": 1.13,
+              "p50_ms": 4.247,
+              "p95_ms": 17.346,
+              "p99_ms": 41.08,
+              "max_ms": 137.802,
+              "mean_ms": 6.348
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 80,
+            "action_runs": {},
+            "cpu_seconds": 0.725448
+          }
+        ]
+      },
+      {
+        "max_agents": 30,
+        "rooms": 60,
+        "model_turns": 360,
+        "makespan_ms": 6568.315,
+        "turns_per_sec": 54.809,
+        "ideal_turns_per_sec": 75.584,
+        "events": 1400,
+        "events_per_sec": 213.144,
+        "queue_wait": {
+          "n": 60,
+          "min_ms": 10.531,
+          "p50_ms": 239.36,
+          "p95_ms": 979.625,
+          "p99_ms": 1013.01,
+          "max_ms": 1013.01,
+          "mean_ms": 380.114
+        },
+        "time_to_first_turn": {
+          "n": 60,
+          "min_ms": 706.022,
+          "p50_ms": 1085.87,
+          "p95_ms": 1870.616,
+          "p99_ms": 2040.405,
+          "max_ms": 2040.405,
+          "mean_ms": 1183.072
+        },
+        "run_hold": {
+          "n": 60,
+          "min_ms": 4011.379,
+          "p50_ms": 4762.94,
+          "p95_ms": 5387.884,
+          "p99_ms": 5415.521,
+          "max_ms": 5415.521,
+          "mean_ms": 4799.879
+        },
+        "event_insert_latency": {
+          "n": 360,
+          "min_ms": 1.256,
+          "p50_ms": 5.564,
+          "p95_ms": 41.337,
+          "p99_ms": 124.046,
+          "max_ms": 157.245,
+          "mean_ms": 11.268
+        },
+        "pool": [
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 1704,
+            "empty_acquires": 130,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 1111.386,
+            "acquire_ms": 1112.233,
+            "samples": 140,
+            "samples_at_max": 3,
+            "max_acquired": 4,
+            "saturated_ratio": 0.021
+          },
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 1727,
+            "empty_acquires": 120,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 464.911,
+            "acquire_ms": 465.497,
+            "samples": 141,
+            "samples_at_max": 5,
+            "max_acquired": 4,
+            "saturated_ratio": 0.035
+          },
+          {
+            "max_conns": 4,
+            "total_conns": 4,
+            "acquired_conns": 0,
+            "idle_conns": 4,
+            "acquires": 1779,
+            "empty_acquires": 171,
+            "canceled_acquires": 0,
+            "empty_wait_ms": 1157.743,
+            "acquire_ms": 1159.423,
+            "samples": 142,
+            "samples_at_max": 6,
+            "max_acquired": 4,
+            "saturated_ratio": 0.042
+          }
+        ],
+        "peak_heap_inuse": 13115392,
+        "peak_goroutines": 280,
+        "model": {
+          "requests": 420,
+          "bad_requests": 0,
+          "max_in_flight": 60,
+          "rooms_with_more_than_one_run_start": 0,
+          "rooms_with_concurrent_model_calls": 0
+        },
+        "subs": {
+          "subs": 120,
+          "received": 2800,
+          "bytes": 1681730,
+          "gaps": 0,
+          "dups": 0,
+          "reconnects": 0,
+          "dial_errors": 0,
+          "parse_mismatches": 0,
+          "server_closes": {},
+          "send_buffer_full_closes": 0,
+          "missing_at_end": 0
+        },
+        "cpu": {
+          "wall_s": 7.006,
+          "server_cpu_s": 2.123,
+          "driver_cpu_s": 0.455,
+          "postgres_cpu_s": 1.258
+        },
+        "exec": {
+          "proposals": 60,
+          "approved": 60,
+          "approve_errors": 0,
+          "executions": 60,
+          "duplicate_executions": 0,
+          "missing_executions": 0,
+          "action_executed_events": 60,
+          "duplicate_action_executed_events": 0
+        },
+        "server": [
+          {
+            "replica": 0,
+            "replica_id": "lt-r0-ed64c2",
+            "pid": 10292,
+            "goroutines": 242,
+            "peak_goroutines": 279,
+            "heap_inuse": 9994240,
+            "peak_heap_inuse": 13000704,
+            "heap_alloc": 6277072,
+            "sys": 31648024,
+            "total_alloc": 35900920,
+            "num_gc": 9,
+            "rss": 54169600,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 1704,
+              "empty_acquires": 130,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 1111.386,
+              "acquire_ms": 1112.233,
+              "samples": 140,
+              "samples_at_max": 3,
+              "max_acquired": 4,
+              "saturated_ratio": 0.021
+            },
+            "appends": {
+              "n": 360,
+              "min_ms": 1.256,
+              "p50_ms": 5.564,
+              "p95_ms": 41.337,
+              "p99_ms": 124.046,
+              "max_ms": 157.245,
+              "mean_ms": 11.268
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 80,
+            "action_runs": {},
+            "cpu_seconds": 0.736633
+          },
+          {
+            "replica": 1,
+            "replica_id": "lt-r1-7e6c9a",
+            "pid": 10309,
+            "goroutines": 243,
+            "peak_goroutines": 280,
+            "heap_inuse": 12222464,
+            "peak_heap_inuse": 13115392,
+            "heap_alloc": 9719424,
+            "sys": 27453720,
+            "total_alloc": 35621160,
+            "num_gc": 8,
+            "rss": 54042624,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 1727,
+              "empty_acquires": 120,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 464.911,
+              "acquire_ms": 465.497,
+              "samples": 141,
+              "samples_at_max": 5,
+              "max_acquired": 4,
+              "saturated_ratio": 0.035
+            },
+            "appends": {
+              "n": 360,
+              "min_ms": 0.996,
+              "p50_ms": 5.216,
+              "p95_ms": 39.799,
+              "p99_ms": 100.419,
+              "max_ms": 214.186,
+              "mean_ms": 10.707
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 80,
+            "action_runs": {},
+            "cpu_seconds": 0.726447
+          },
+          {
+            "replica": 2,
+            "replica_id": "lt-r2-2c3209",
+            "pid": 10330,
+            "goroutines": 243,
+            "peak_goroutines": 280,
+            "heap_inuse": 12222464,
+            "peak_heap_inuse": 12812288,
+            "heap_alloc": 10164952,
+            "sys": 27384072,
+            "total_alloc": 35612792,
+            "num_gc": 8,
+            "rss": 54558720,
+            "pool": {
+              "max_conns": 4,
+              "total_conns": 4,
+              "acquired_conns": 0,
+              "idle_conns": 4,
+              "acquires": 1779,
+              "empty_acquires": 171,
+              "canceled_acquires": 0,
+              "empty_wait_ms": 1157.743,
+              "acquire_ms": 1159.423,
+              "samples": 142,
+              "samples_at_max": 6,
+              "max_acquired": 4,
+              "saturated_ratio": 0.042
+            },
+            "appends": {
+              "n": 360,
+              "min_ms": 0.664,
+              "p50_ms": 5.083,
+              "p95_ms": 30.608,
+              "p99_ms": 121.357,
+              "max_ms": 213.789,
+              "mean_ms": 10.483
+            },
+            "append_errors": 0,
+            "appends_dropped": 0,
+            "probe_runs": 80,
+            "action_runs": {},
+            "cpu_seconds": 0.7252
+          }
+        ]
+      }
+    ]
+  },
+  "findings": [
+    "max_agents=3: 14.84 turns/s (93% of the 16.03 an ideal 9-slot pool gives at the measured turn time), insert p99 55.3 ms, queue wait p95 20315 ms, pool 4/4; 1%; 149 waits 458 ms + 4/4; 0%; 155 waits 604 ms + 4/4; 1%; 101 waits 285 ms.",
+    "max_agents=10: 47.44 turns/s (92% of the 51.44 an ideal 30-slot pool gives at the measured turn time), insert p99 54.7 ms, queue wait p95 3523 ms, pool 4/4; 1%; 175 waits 602 ms + 4/4; 1%; 244 waits 262 ms + 4/4; 1%; 164 waits 378 ms.",
+    "max_agents=30: 54.81 turns/s (73% of the 75.58 an ideal 60-slot pool gives at the measured turn time), insert p99 124.0 ms, queue wait p95 980 ms, pool 4/4; 2%; 130 waits 1111 ms + 4/4; 4%; 120 waits 465 ms + 4/4; 4%; 171 waits 1158 ms.",
+    "Raising max_agents 10 -\u003e 30 gained less than 20% turns/s: the server, not the cap, limits throughput here."
+  ],
+  "checks": [
+    {
+      "name": "max_agents=3: agent cap respected",
+      "ok": true,
+      "detail": "max in-flight 9, limit 9 (3 per replica x 3 replicas, global 0)"
+    },
+    {
+      "name": "max_agents=3: no duplicate agent runs",
+      "ok": true,
+      "detail": "rooms with \u003e1 run start 0, with concurrent model calls 0"
+    },
+    {
+      "name": "max_agents=3: every run made all its turns",
+      "ok": true,
+      "detail": "model turns 360, want 360"
+    },
+    {
+      "name": "max_agents=3: every approved fix executed exactly once",
+      "ok": true,
+      "detail": "proposals 60 approved 60 approve errors 0; executions 60 (duplicate 0, missing 0); action.executed events 60 (duplicate 0)"
+    },
+    {
+      "name": "max_agents=3: viewers saw gap-free logs",
+      "ok": true,
+      "detail": "gaps 0 dups 0 parse mismatches 0"
+    },
+    {
+      "name": "max_agents=3: no append errors",
+      "ok": true,
+      "detail": "append errors 0"
+    },
+    {
+      "name": "max_agents=10: agent cap respected",
+      "ok": true,
+      "detail": "max in-flight 30, limit 30 (10 per replica x 3 replicas, global 0)"
+    },
+    {
+      "name": "max_agents=10: no duplicate agent runs",
+      "ok": true,
+      "detail": "rooms with \u003e1 run start 0, with concurrent model calls 0"
+    },
+    {
+      "name": "max_agents=10: every run made all its turns",
+      "ok": true,
+      "detail": "model turns 360, want 360"
+    },
+    {
+      "name": "max_agents=10: every approved fix executed exactly once",
+      "ok": true,
+      "detail": "proposals 60 approved 60 approve errors 0; executions 60 (duplicate 0, missing 0); action.executed events 60 (duplicate 0)"
+    },
+    {
+      "name": "max_agents=10: viewers saw gap-free logs",
+      "ok": true,
+      "detail": "gaps 0 dups 0 parse mismatches 0"
+    },
+    {
+      "name": "max_agents=10: no append errors",
+      "ok": true,
+      "detail": "append errors 0"
+    },
+    {
+      "name": "max_agents=30: agent cap respected",
+      "ok": true,
+      "detail": "max in-flight 60, limit 90 (30 per replica x 3 replicas, global 0)"
+    },
+    {
+      "name": "max_agents=30: no duplicate agent runs",
+      "ok": true,
+      "detail": "rooms with \u003e1 run start 0, with concurrent model calls 0"
+    },
+    {
+      "name": "max_agents=30: every run made all its turns",
+      "ok": true,
+      "detail": "model turns 360, want 360"
+    },
+    {
+      "name": "max_agents=30: every approved fix executed exactly once",
+      "ok": true,
+      "detail": "proposals 60 approved 60 approve errors 0; executions 60 (duplicate 0, missing 0); action.executed events 60 (duplicate 0)"
+    },
+    {
+      "name": "max_agents=30: viewers saw gap-free logs",
+      "ok": true,
+      "detail": "gaps 0 dups 0 parse mismatches 0"
+    },
+    {
+      "name": "max_agents=30: no append errors",
+      "ok": true,
+      "detail": "append errors 0"
+    }
+  ],
+  "loadavg_start_end": [
+    "26.80 34.56 38.34",
+    "23.49 32.20 37.30"
+  ]
+}

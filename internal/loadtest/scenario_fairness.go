@@ -33,7 +33,8 @@ func fairnessProfile() Profile {
 			{Name: "big_rooms", Kind: KindInt, Full: "50", Short: "6", Min: 1, Help: "rooms pipeline A opens"},
 			{Name: "small_rooms", Kind: KindInt, Full: "3", Short: "1", Min: 1, Help: "rooms pipelines B and C open each"},
 			{Name: "small_delay", Kind: KindDuration, Full: "500ms", Short: "50ms", Help: "B and C open this long after A starts"},
-			{Name: "max_agents", Kind: KindInt, Full: "3", Short: "2", Min: 1, Help: "PIPEROOM_MAX_AGENTS"},
+			{Name: "max_agents", Kind: KindInt, Full: "3", Short: "2", Min: 1, Help: "PIPEROOM_MAX_AGENTS (per replica)"},
+			{Name: "max_agents_global", Kind: KindInt, Full: "0", Min: 0, Help: "PIPEROOM_MAX_AGENTS_GLOBAL (0 = off)"},
 			{Name: "tool_calls", Kind: KindInt, Full: "2", Short: "1", Min: 0, Help: "read-tool calls per agent run"},
 			{Name: "timeout", Kind: KindDuration, Full: "10m", Short: "60s", Min: float64(time.Second)},
 		}, modelSpecs("300ms", "20ms")...),
@@ -99,7 +100,7 @@ func runFairness(ctx context.Context, env *Env, p Params) (*Result, error) {
 	pipes := []string{"pa", "pb", "pc"}
 	maxAgents := p.Int("max_agents")
 	st, err := env.newStack(ctx, "fairness", ServerConfig{
-		MaxAgents: maxAgents, ToolLatency: p.Dur("tool_latency"), ToolSummaryBytes: p.Int("tool_summary_bytes"), Pipelines: pipes,
+		MaxAgents: maxAgents, MaxAgentsGlobal: p.Int("max_agents_global"), ToolLatency: p.Dur("tool_latency"), ToolSummaryBytes: p.Int("tool_summary_bytes"), Pipelines: pipes,
 	}, nil)
 	if err != nil {
 		return nil, err
@@ -197,7 +198,7 @@ func runFairness(ctx context.Context, env *Env, p Params) (*Result, error) {
 		}
 	}
 	res.check("every room got a first agent turn", missing == 0, "%d of %d rooms without slot or first turn", missing, len(tls))
-	res.add(agentCapCheck(mst.MaxInFlight, maxAgents, env.Replicas, 0))
+	res.add(agentCapCheck(mst.MaxInFlight, maxAgents, env.Replicas, p.Int("max_agents_global")))
 	res.add(dupRunCheck(data.Model))
 	res.check("no append errors", sumAppendErrors(srv) == 0, "append errors %d", sumAppendErrors(srv))
 
