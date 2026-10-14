@@ -136,7 +136,7 @@ export function useRoom(roomId: string) {
       const events = fixtureEvents(roomId)
       dispatch({ type: 'init', snapshot })
       lastSeqRef.current = 0
-      setPresence(snapshot.members.map((m) => ({ id: m.id, name: m.name, state: 'viewing' })))
+      setPresence(snapshot.members.map((m) => ({ id: m.id, name: m.name, verified: m.verified, state: 'viewing' })))
       setConn('live')
 
       storyPlayingRef.current = events.length > 0

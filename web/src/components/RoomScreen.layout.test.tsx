@@ -114,7 +114,8 @@ describe('RoomScreen header', () => {
     show(arjun, room())
     const people = screen.getByRole('list', { name: 'People in the room' })
     expect(within(people).getByRole('img', { name: 'Kabir · driving' })).toBeInTheDocument()
-    expect(screen.getByText('Kabir is driving')).toBeInTheDocument()
+    const driving = screen.getAllByText(/^\s*is driving$/).find((el) => within(el).queryByText('Kabir'))
+    expect(driving).toBeDefined()
     expect(screen.getByText('2 here')).toBeInTheDocument()
   })
 

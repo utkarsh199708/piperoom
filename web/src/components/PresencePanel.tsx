@@ -1,3 +1,4 @@
+import { PersonName } from '@/components/VerifiedBadge'
 import type { PresenceMember } from '../api/types'
 import type { MemberState } from '../state/types'
 import { cn } from '@/lib/utils'
@@ -22,16 +23,17 @@ export function PresencePanel({
 }) {
   const rows = members.map((m) => {
     const p = presence.find((x) => x.id === m.id)
-    return { id: m.id, name: m.name, role: m.role, state: p?.state ?? 'viewing' }
+    // Both reports are server-set; the badge shows verified only if every report that exists agrees.
+    return { id: m.id, name: m.name, role: m.role, state: p?.state ?? 'viewing', verified: [m.verified, p?.verified] }
   })
   for (const p of presence) {
     if (!rows.some((r) => r.id === p.id)) {
-      rows.push({ id: p.id, name: p.name, role: 'watching', state: p.state })
+      rows.push({ id: p.id, name: p.name, role: 'watching', state: p.state, verified: [p.verified] })
     }
   }
 
   if (selfId && selfName && !rows.some((r) => r.id === selfId)) {
-    rows.push({ id: selfId, name: selfName, role: 'watching', state: 'viewing' })
+    rows.push({ id: selfId, name: selfName, role: 'watching', state: 'viewing', verified: [] as (boolean | undefined)[] })
   }
 
   return (
@@ -47,7 +49,7 @@ export function PresencePanel({
           return (
             <li key={r.id} className={cn('flex min-h-8 items-center gap-2', away && 'opacity-70')}>
               <PersonAvatar actor={{ id: r.id, name: r.name }} driver={driver} className={driver ? 'mx-0.5' : undefined} />
-              <span className="min-w-0 truncate font-medium">{r.name}</span>
+              <PersonName person={{ id: r.id, name: r.name }} verified={r.verified} nameClassName="font-medium" />
               {r.id === selfId && <span className="text-xs text-muted-foreground">you</span>}
               {driver && <Badge variant="accent">Driver</Badge>}
               {r.id === selfId && selfIsViewer && <Badge variant="outline">viewer</Badge>}

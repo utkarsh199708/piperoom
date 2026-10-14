@@ -1,3 +1,4 @@
+import { PersonName } from '@/components/VerifiedBadge'
 import { useId, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Check, ChevronRight, X } from 'lucide-react'
@@ -127,7 +128,7 @@ function CommentThread({
         <PersonAvatar actor={comment.author} size={20} className="mt-px" />
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2">
-            <strong className="font-medium">{comment.author.name}</strong>
+            <PersonName person={comment.author} nameClassName="font-medium" />
             <span className="text-xs text-subtle-foreground">{clockTime(comment.at)}</span>
           </div>
           <p className="m-0 break-words text-muted-foreground">{comment.text}</p>

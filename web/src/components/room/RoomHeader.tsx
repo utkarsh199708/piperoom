@@ -10,6 +10,8 @@ import { Kbd } from '@/components/ui/kbd'
 import { AgentPill } from './AgentPill'
 import { PersonAvatar } from './PersonAvatar'
 import { StatusDot } from './StatusDot'
+import { PersonName, VerifiedBadge } from '@/components/VerifiedBadge'
+import { alertSourceLabel, alertVerification, neutralizeBadgeText } from '@/lib/verification'
 import type { DotTone } from './StatusDot'
 
 export interface HeaderMember {
@@ -23,6 +25,13 @@ const MAX_AVATARS = 4
 function avatarLabel(name: string, you: boolean, driver: boolean): string {
   if (you) return driver ? `${name} · you, driving` : `${name} · you`
   return driver ? `${name} · driving` : name
+}
+
+// The server-set source names the chip when there is one; the body-inferred
+// source (untrusted) is only a fallback label and is neutralized like a name.
+function alertChipLabel(alert: NonNullable<RoomState['alert']>): string {
+  const source = alertSourceLabel(alert.alert_source) ?? (alert.source ? neutralizeBadgeText(alert.source) : null)
+  return source ? `alert · ${source}` : 'alert'
 }
 
 function Sep() {
@@ -70,9 +79,13 @@ export function RoomHeader({
           {state.severity}
         </Badge>
         {state.alert && (
-          <Badge variant="info" title="This room was opened by an alert webhook">
-            {state.alert.source ? `alert · ${state.alert.source}` : 'alert'}
-          </Badge>
+          <span className="inline-flex items-center gap-1">
+            <Badge variant="info" title="This room was opened by an alert">
+              {alertChipLabel(state.alert)}
+            </Badge>
+            {/* Reads only the server-set alert_source, never the alert body. */}
+            <VerifiedBadge verification={alertVerification(state.alert.alert_source)} />
+          </span>
         )}
         <Badge variant="outline">
           <StatusDot tone={dot} />
@@ -166,8 +179,14 @@ export function RoomHeader({
             )}
           </ul>
         )}
-        <span className="text-muted-foreground">
-          {state.driver ? `${state.driver.name} is driving` : 'No driver'}
+        <span className="inline-flex min-w-0 items-center gap-1 text-muted-foreground">
+          {state.driver ? (
+            <>
+              <PersonName person={state.driver} /> is driving
+            </>
+          ) : (
+            'No driver'
+          )}
         </span>
         <Sep />
         <span className="text-subtle-foreground">{members.length} here</span>

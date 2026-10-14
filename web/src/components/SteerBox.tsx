@@ -1,3 +1,4 @@
+import { PersonName } from '@/components/VerifiedBadge'
 import { useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
 import { Eye, Lock } from 'lucide-react'
@@ -144,7 +145,7 @@ export function SteerBox({
             >
               <PersonAvatar actor={s.from} size={20} className="mt-0.5" />
               <div className="min-w-0 flex-1">
-                <strong className="font-medium">{s.from.name}</strong>
+                <PersonName person={s.from} nameClassName="font-medium" />
                 <p className="m-0 break-words text-muted-foreground">{s.text}</p>
               </div>
               <Button size="sm" onClick={() => actions.sendSuggestion(s.suggestion_id)}>
@@ -164,7 +165,7 @@ export function SteerBox({
             >
               <PersonAvatar actor={r.from} size={20} />
               <div className="min-w-0 flex-1">
-                <strong className="font-medium">{r.from.name}</strong>
+                <PersonName person={r.from} nameClassName="font-medium" />
                 <span className="text-muted-foreground"> wants control</span>
               </div>
               <Button size="sm" variant="secondary" onClick={() => actions.grantControl(r.from.id)}>
