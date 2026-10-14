@@ -39,17 +39,29 @@ const (
 	CommentAdded   Type = "comment.added"
 	SteerSuggested Type = "steer.suggested"
 	SteerSent      Type = "steer.sent"
+	// SteerDeclined closes a pending suggestion without sending it
+	// (POST /api/rooms/{id}/suggestions/{sid}/decline, driver only).
+	SteerDeclined Type = "steer.declined"
 
 	ControlRequested Type = "control.requested"
 	ControlGranted   Type = "control.granted"
+	// ControlLeaseExpired says the driver's lease ran out with no renewal and
+	// no new driver: the room has nobody actively steering. System actor.
+	ControlLeaseExpired Type = "control.lease_expired"
 
 	ProposalCreated  Type = "proposal.created"
 	ApprovalGiven    Type = "approval.given"
 	ApprovalRejected Type = "approval.rejected"
 	ActionExecuted   Type = "action.executed"
 
-	HandoffCreated  Type = "handoff.created"
-	HandoffAccepted Type = "handoff.accepted"
+	// HandoffRequested is written when the driver asks for a hand-off, before
+	// the agent writes the summary (which can take minutes). It ends with
+	// handoff.created or handoff.failed for the same request_id, or at its
+	// expires_at. While one is in flight a second request answers 409.
+	HandoffRequested Type = "handoff.requested"
+	HandoffFailed    Type = "handoff.failed"
+	HandoffCreated   Type = "handoff.created"
+	HandoffAccepted  Type = "handoff.accepted"
 
 	TracePinned Type = "trace.pinned"
 
@@ -309,8 +321,36 @@ type SteerSentPayload struct {
 	Text         string `json:"text"`
 }
 
+// SteerDeclinedPayload closes a pending suggestion (steer.suggested) without
+// sending it to the agent. Only the driver may decline (403 not_driver), only a
+// suggestion that is still pending (a sent or declined one answers
+// 409 already_decided, exactly like a second send), and at most once: the
+// suggestion then leaves snapshot.pending_suggestions and can never be sent.
+// Reason is the driver's optional note to the person who suggested it; text a
+// person types, so it follows the NUL / invalid UTF-8 rule of docs/api.md and
+// is at most 500 characters. The agent never sees a declined suggestion.
+type SteerDeclinedPayload struct {
+	SuggestionID string `json:"suggestion_id"`
+	Reason       string `json:"reason,omitempty"`
+}
+
 // ControlRequestedPayload asks the driver for control.
 type ControlRequestedPayload struct{}
+
+// ControlLeaseExpiredPayload is written by the system actor once per lease:
+// when Driver's lease (LeaseUntil, the value of the control.granted that set
+// it) has passed and nobody renewed it or took control. It is the room's
+// "no active driver" signal for clients and for paging (Slack). It does not
+// move the driver role: as before (docs/api.md, Driver lease), the driver's
+// next action renews the lease (a control.granted to the same driver, which
+// clears the signal), and anyone may now take control with control/grant.
+// One event per (room, LeaseUntil): with several replicas only the replica
+// holding the room's lease writes it, and a restart does not repeat it. Not
+// written for a closed room or a room that never had a driver.
+type ControlLeaseExpiredPayload struct {
+	Driver     Actor     `json:"driver"`
+	LeaseUntil time.Time `json:"lease_until"`
+}
 
 // ControlGrantedPayload moves the driver role.
 type ControlGrantedPayload struct {
@@ -400,9 +440,43 @@ type HandoffSummary struct {
 	Risks     []string `json:"risks"`
 }
 
+// HandoffRequestedPayload is written, with the driver as actor, when
+// POST /api/rooms/{id}/handoffs passes its checks and before the agent writes
+// the summary. The request is "in flight" from this event until the first of:
+// a handoff.created or handoff.failed carrying the same RequestID, or
+// ExpiresAt (the server's summary deadline, now + 3 min; it covers a server
+// that stopped mid-request and wrote neither). While a request is in flight
+// another POST to the route answers 409 handoff_in_progress, whoever sends
+// it. Clients fold the same rule to show "writing hand-off…".
+type HandoffRequestedPayload struct {
+	RequestID     string    `json:"request_id"` // "hr_" + ULID
+	To            Actor     `json:"to"`
+	StayAsWatcher bool      `json:"stay_as_watcher"`
+	ExpiresAt     time.Time `json:"expires_at"`
+}
+
+// Reasons in HandoffFailedPayload.Reason. Fixed codes, never error text: a
+// model or store error can quote room content.
+const (
+	HandoffFailedSummary   = "summary_failed" // the summary call failed or timed out
+	HandoffFailedNotDriver = "not_driver"     // the requester stopped being the driver meanwhile
+	HandoffFailedClosed    = "room_closed"    // the room closed meanwhile
+	HandoffFailedInternal  = "internal_error" // anything else; details only in the server log
+)
+
+// HandoffFailedPayload ends an in-flight hand-off request without a hand-off.
+// Written by the system actor; the route answers the error it maps to.
+type HandoffFailedPayload struct {
+	RequestID string `json:"request_id"`
+	Reason    string `json:"reason"` // see HandoffFailed*
+}
+
 // HandoffCreatedPayload proposes moving the driver role to another person.
+// RequestID is the handoff.requested it completes; empty on events written
+// before handoff.requested existed.
 type HandoffCreatedPayload struct {
 	HandoffID     string         `json:"handoff_id"`
+	RequestID     string         `json:"request_id,omitempty"`
 	To            Actor          `json:"to"`
 	Summary       HandoffSummary `json:"summary"`
 	StayAsWatcher bool           `json:"stay_as_watcher"`

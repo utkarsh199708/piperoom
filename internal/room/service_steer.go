@@ -33,6 +33,9 @@ func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, tex
 	if err := rejectUnstorable(stepID, text); err != nil {
 		return events.Event{}, err
 	}
+	if err := checkLen("text", text, MaxMessageChars); err != nil {
+		return events.Event{}, err
+	}
 	// Shared store: fold what other replicas wrote, reading outside s.mu.
 	s.syncRoom(ctx, roomID)
 	s.mu.Lock()
@@ -64,6 +67,9 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 		return events.Event{}, validation("text is required")
 	}
 	if err := rejectUnstorable(text); err != nil {
+		return events.Event{}, err
+	}
+	if err := checkLen("text", text, MaxMessageChars); err != nil {
 		return events.Event{}, err
 	}
 	// Shared store: fold what other replicas wrote, reading outside s.mu.
