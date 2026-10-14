@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Kbd } from '@/components/ui/kbd'
 import { cn } from '@/lib/utils'
-import { DEV_USERS } from '../dev/users'
+import { useAuthUsers } from '../hooks/useAuthUsers'
 import { envLabel } from '@/lib/envLabel'
 import { initials, personColor } from '@/lib/people'
 import { BrandMark } from './shell/BrandMark'
@@ -18,8 +18,7 @@ import { BrandMark } from './shell/BrandMark'
 // `ssoHref` is where "Continue with SSO" goes. This screen is only shown when the
 // server runs dev auth, which has no SSO; without a link the button is there but off.
 //
-// A read-only account (role "viewer") gets the viewer badge instead of layer badges.
-// The dev list mirrors dev/users.yaml, which has no viewer today; the badge is for when it does.
+// The people come from GET /auth/users, so the list is the server's users.yaml and nothing is baked in here.
 export function LoginScreen({
   onPick,
   busy,
@@ -30,6 +29,8 @@ export function LoginScreen({
   ssoHref?: string
 }) {
   const env = envLabel()
+  const loaded = useAuthUsers()
+  const users = loaded.status === 'ready' ? loaded.data : []
   // Another row is hovered or focused: the first row gives up its "on" highlight, so only one row is lit.
   const [other, setOther] = useState(false)
   return (
@@ -70,9 +71,25 @@ export function LoginScreen({
           <span className="h-px flex-1 bg-border" />
         </div>
 
-        <ul className="-mx-1 flex flex-col gap-0.5" aria-label="Dev users">
-          {DEV_USERS.map((u, i) => {
-            const viewer = u.role === 'viewer'
+        {loaded.status === 'loading' && (
+          <p role="status" className="m-0 text-muted-foreground">
+            Loading users…
+          </p>
+        )}
+        {loaded.status === 'error' && (
+          <div role="alert" className="flex flex-col items-start gap-2">
+            <p className="m-0 text-destructive-fg">Could not load the user list: {loaded.message}</p>
+            <Button variant="secondary" onClick={loaded.reload}>
+              Try again
+            </Button>
+          </div>
+        )}
+        {loaded.status === 'ready' && users.length === 0 && (
+          <p className="m-0 text-muted-foreground">The server has no users to sign in as. Check its users.yaml.</p>
+        )}
+
+        <ul className="-mx-1 flex flex-col gap-0.5" aria-label="Dev users" hidden={users.length === 0}>
+          {users.map((u, i) => {
             // The first row is the one Enter picks (Sign-In.dc.html "on" state): highlighted, with the ⏎ key.
             const first = i === 0
             return (
@@ -102,15 +119,11 @@ export function LoginScreen({
                   </Avatar>
                   <span className="font-medium">{u.name}</span>
                   <span id={`dev-user-${u.id}-layers`} className="flex min-w-0 flex-wrap items-center gap-1.5">
-                    {viewer ? (
-                      <Badge variant="outline">viewer</Badge>
-                    ) : (
-                      u.layers.map((l) => (
-                        <Badge key={l} variant={layerVariant(l)} mono>
-                          {l}
-                        </Badge>
-                      ))
-                    )}
+                    {u.layers.map((l) => (
+                      <Badge key={l} variant={layerVariant(l)} mono>
+                        {l}
+                      </Badge>
+                    ))}
                   </span>
                   {first ? (
                     <Kbd className="ml-auto" aria-hidden="true">

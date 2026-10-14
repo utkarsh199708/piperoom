@@ -67,10 +67,20 @@ export interface CommentState {
   replies: AgentMessageState[]
 }
 
+/**
+ * pending: waiting in the driver's queue. accepted: the driver sent it (steer.sent with its id).
+ * declined: HOOK(R10) - no declined event exists in docs/api.md or events.go yet, so the reducer
+ * never produces this value; it is here so the UI renders it the day the contract adds one.
+ */
+export type SuggestionStatus = 'pending' | 'accepted' | 'declined'
+
 export interface SuggestionState {
   suggestion_id: string
   from: Actor
   text: string
+  status: SuggestionStatus
+  /** When the suggestion was made. */
+  at?: string
 }
 
 /** Who decided a layer, how they logged in, and the hash they decided on. */
@@ -127,6 +137,20 @@ export interface HandoffState {
   status: 'pending' | 'accepted'
 }
 
+/** A hand-off the agent is still writing the summary for (handoff.requested, R0). */
+export interface HandoffRequestState {
+  request_id: string
+  to: Actor
+  stay_as_watcher: boolean
+  expires_at: string
+}
+
+/** The last hand-off request that ended without a hand-off (handoff.failed). */
+export interface HandoffFailureState {
+  request_id: string
+  reason: string
+}
+
 /** The alert that opened the room, from room.created's `alert` webhook body. */
 export interface AlertInfo {
   /** Best-effort source inferred from the raw body shape; null when unknown. */
@@ -150,6 +174,11 @@ export interface RoomState {
   closed_at?: string
   resolution?: string
   last_seq: number
+  /**
+   * The snapshot's last_seq: how many events the first replay (after=0) has to fold. 0 when
+   * unknown (fixtures, empty room). Drives the replay progress bar.
+   */
+  replay_target: number
   driver: DriverInfo | null
   /** Set when room.created carried an alert webhook body (alert-opened room). */
   alert: AlertInfo | null
@@ -170,6 +199,9 @@ export interface RoomState {
   control_requests: ControlRequestState[]
   trace: TraceState | null
   handoffs: HandoffState[]
+  /** In flight until handoff.created / handoff.failed with its id, or `expires_at`. */
+  handoff_request: HandoffRequestState | null
+  handoff_failure: HandoffFailureState | null
   activity: ActivityEntry[]
 }
 
@@ -182,6 +214,7 @@ export function emptyRoomState(id: string): RoomState {
     status: 'open',
     opened_at: '',
     last_seq: 0,
+    replay_target: 0,
     driver: null,
     alert: null,
     agent_status: { state: 'idle' },
@@ -196,6 +229,8 @@ export function emptyRoomState(id: string): RoomState {
     control_requests: [],
     trace: null,
     handoffs: [],
+    handoff_request: null,
+    handoff_failure: null,
     activity: [],
   }
 }
@@ -217,6 +252,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     closed_at: snapshot.closed_at,
     resolution: snapshot.resolution,
     last_seq: 0,
+    replay_target: snapshot.last_seq ?? 0,
     snapshot_hashes: Object.fromEntries(
       (snapshot.open_proposals ?? [])
         .filter((p) => p.params_hash)

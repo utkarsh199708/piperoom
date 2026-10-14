@@ -67,8 +67,8 @@ spec:
             - name: PIPEROOM_PUBLIC_URL
               value: {{ $url | quote }}
             {{- end }}
-            # Always set explicitly: the image defaults to dev mode with
-            # PIPEROOM_DEV_ALLOW_NONLOOPBACK=1.
+            # Always set explicitly, so a change of the image default cannot
+            # change the mode of a release.
             - name: PIPEROOM_AUTH_MODE
               value: {{ include "piperoom.authMode" . | quote }}
             - name: PIPEROOM_DEV_ALLOW_NONLOOPBACK

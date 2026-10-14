@@ -6,6 +6,7 @@ import { ApiClientError } from '../api/client'
 const FRIENDLY_TEXT: Record<string, string> = {
   lease_held: 'someone else holds control',
   stale_handoff: 'this hand-off is out of date',
+  handoff_in_progress: 'a hand-off is already being written for this room. Wait for it to finish.',
 }
 
 /** Friendly text for a server error code, or the server message unchanged. */

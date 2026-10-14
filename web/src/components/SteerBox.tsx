@@ -72,6 +72,8 @@ export function SteerBox({
   const ref = useRef<HTMLTextAreaElement>(null)
   const now = useNow()
   const isDriver = canSteer(state, user)
+  // Sent suggestions stay in state for the suggestions panel; the queue shows only the waiting ones.
+  const pending = state.suggestions.filter((s) => s.status === 'pending')
 
   if (isViewer(user)) {
     return (
@@ -135,9 +137,9 @@ export function SteerBox({
 
   return (
     <section aria-label="Steer" className={`${BAR} flex flex-col gap-2`}>
-      {isDriver && state.suggestions.length > 0 && (
+      {isDriver && pending.length > 0 && (
         <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
-          {state.suggestions.map((s) => (
+          {pending.map((s) => (
             <li
               key={s.suggestion_id}
               className="flex items-start gap-2.5 rounded-md border border-border bg-card px-3 py-2"

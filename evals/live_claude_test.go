@@ -11,7 +11,9 @@ import (
 	"piperoom/internal/agent"
 )
 
-// TestLiveSchemaChange runs the real agent and model on the seed scenario. It
+// TestLiveSchemaChange runs the seed scenario through a room on the real
+// Endpoint (wiring.NewAgentEndpoint, configured from the environment) and
+// model. It
 // needs ANTHROPIC_API_KEY and the claude build tag:
 //
 //	go test -tags claude ./evals -run TestLiveSchemaChange -v

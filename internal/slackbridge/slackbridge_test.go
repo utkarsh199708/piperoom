@@ -210,6 +210,9 @@ func TestImportantTable(t *testing.T) {
 	if len(allTypes) != 20 {
 		t.Fatal("type list out of date")
 	}
+	if !Important(events.ControlLeaseExpired) {
+		t.Error("control.lease_expired must be mirrored")
+	}
 	for _, ty := range allTypes {
 		if Important(ty) != want[ty] {
 			t.Errorf("%s: got %v", ty, Important(ty))

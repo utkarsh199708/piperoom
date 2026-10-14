@@ -1,11 +1,18 @@
 import { useMemo, useState } from 'react'
+import { ArrowDown } from 'lucide-react'
 import { useParams, useSearchParams } from 'react-router-dom'
-import { isFixtures } from '../api/client'
+import { toast } from 'sonner'
+import { exportRoom, isFixtures } from '../api/client'
+import { errorText } from '../lib/errors'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
+import { useJumpToLatest } from '../hooks/useJumpToLatest'
+import { useRoomAttention } from '../hooks/useRoomAttention'
 import { useCurrentUser } from '../context/user'
 import { canClose, canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
 import { ageLabel } from '../lib/time'
+import { handoffInFlight } from '../lib/handoff'
+import { useNow } from './room/useNow'
 import { PipelineMap } from './PipelineMap'
 import { Timeline } from './Timeline'
 import { SteerBox } from './SteerBox'
@@ -23,6 +30,9 @@ import { PROPOSAL_ANCHOR, ProposalsSummary } from './room/ProposalsSummary'
 import { RoomError } from './room/RoomError'
 import { RoomHeader } from './room/RoomHeader'
 import { RoomSkeleton } from './room/RoomSkeleton'
+import { ReplayProgress } from './room/ReplayProgress'
+import { SuggestionsPanel } from './room/SuggestionsPanel'
+import { NotifyToggle } from './room/NotifyToggle'
 import { useRoomShortcuts } from './room/useRoomShortcuts'
 
 // The room screen (docs/design/ui-v2: Room-Investigating, -NoDriver, -Viewer, -Loading).
@@ -35,6 +45,12 @@ export function RoomScreen() {
   const [searchParams] = useSearchParams()
   const { user } = useCurrentUser()
   const { state, presence, conn, error, actions, stale, dismissStale, reload } = useRoom(roomId)
+  // R10: the first replay is done once the log has been folded up to the snapshot's last_seq.
+  const replayTarget = state?.replay_target ?? 0
+  const replaying =
+    replayTarget > 0 && (state?.last_seq ?? 0) < replayTarget && conn !== 'error' && conn !== 'not_found'
+  const { permission, enable: enableNotify } = useRoomAttention(state, user, replaying)
+  const { sentinelRef, unseen, jump } = useJumpToLatest(state?.activity ?? [], replaying)
   // One topology refetch per executed action, plus the hook's 30 s refresh
   // while the room is open (stops once closed).
   const executedCount = useMemo(
@@ -49,6 +65,8 @@ export function RoomScreen() {
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [closeOpen, setCloseOpen] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const now = useNow(5_000) // a request past expires_at stops counting as in flight
 
   const headerMembers = useMemo(() => {
     const ids = new Set<string>()
@@ -71,6 +89,24 @@ export function RoomScreen() {
     if (!ids.has(user.id)) rows.push({ id: user.id, name: user.name })
     return rows
   }, [presence, state, user.id, user.name])
+
+  const exportTranscript = () => {
+    if (!roomId || exporting) return
+    setExporting(true)
+    exportRoom(roomId)
+      .then(({ text }) => {
+        const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `piperoom-${roomId}.json`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        URL.revokeObjectURL(url)
+      })
+      .catch((e: unknown) => toast.error(`Could not export the room: ${errorText(e)}`))
+      .finally(() => setExporting(false))
+  }
 
   const invite = () => {
     const url = window.location.href
@@ -159,6 +195,7 @@ export function RoomScreen() {
           <span className="font-normal text-muted-foreground">{state.resolution}</span>
         </div>
       )}
+      {replaying && <ReplayProgress done={state.last_seq} total={replayTarget} />}
       <NoDriverBanner state={state} user={user} actions={actions} />
       <HandoffAcceptBanner state={state} user={user} actions={actions} />
 
@@ -173,6 +210,9 @@ export function RoomScreen() {
             onHandoff={() => setHandoffOpen(true)}
             onCloseRoom={() => setCloseOpen(true)}
             onInvite={invite}
+            onExport={viewer ? undefined : exportTranscript}
+            exporting={exporting}
+            handoffBusy={state ? handoffInFlight(state, now) !== null : false}
           />
 
           <div className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
@@ -211,9 +251,25 @@ export function RoomScreen() {
                 readOnly={viewer}
                 working={state.agent_status.state === 'working'}
                 onTakeControl={takeControl}
+                agent={state.agent_status}
               />
             </section>
+            <div ref={sentinelRef} aria-hidden="true" />
           </div>
+
+          {unseen > 0 && (
+            <button
+              type="button"
+              onClick={jump}
+              className="fixed bottom-36 right-4 z-20 flex min-h-11 items-center gap-1.5 rounded-full border border-border bg-card px-4 text-sm font-medium shadow-md hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:right-6 xl:right-[324px]"
+            >
+              <ArrowDown aria-hidden="true" className="size-4" />
+              Jump to latest
+              <span className="rounded-full bg-primary px-1.5 font-mono text-xs tabular-nums text-primary-foreground">
+                {unseen >= 20 ? '20+' : unseen}
+              </span>
+            </button>
+          )}
 
           <SteerBox state={state} user={user} actions={actions} />
         </div>
@@ -231,6 +287,9 @@ export function RoomScreen() {
             selfName={user.name}
             selfIsViewer={viewer}
           />
+          <div className="h-px shrink-0 bg-border" />
+          <SuggestionsPanel suggestions={state.suggestions} />
+          <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
           <div className="h-px shrink-0 bg-border" />
           <ActivityFeed activity={state.activity} />
         </aside>

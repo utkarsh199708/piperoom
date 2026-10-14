@@ -1,6 +1,6 @@
 import { isDev } from '../lib/env'
 import { isFixtures } from '../api/client'
-import { DEV_USERS } from '../dev/users'
+import { useAuthUsers } from '../hooks/useAuthUsers'
 import { useCurrentUser } from '../context/user'
 import { isViewer } from '../state/permissions'
 import { useInShell } from './shell/context'
@@ -18,18 +18,7 @@ export function UserSwitcher() {
       {isDev ? (
         <label className="user-switcher">
           <span className="user-switcher__label">You are</span>
-          <select
-            value={user.id}
-            onChange={(e) => setUserId(e.target.value)}
-            disabled={busy}
-            aria-label="Switch user"
-          >
-            {DEV_USERS.map((u) => (
-              <option key={u.id} value={u.id}>
-                {u.name}
-              </option>
-            ))}
-          </select>
+          <DevUserSelect value={user.id} name={user.name} busy={busy} onChange={setUserId} />
         </label>
       ) : (
         <span className="user-switcher__label">{user.name}</span>
@@ -45,5 +34,30 @@ export function UserSwitcher() {
         </button>
       )}
     </span>
+  )
+}
+
+// Options come from GET /auth/users; until they load (or if that fails) the select shows only the current user.
+function DevUserSelect({
+  value,
+  name,
+  busy,
+  onChange,
+}: {
+  value: string
+  name: string
+  busy?: boolean
+  onChange: (id: string) => void
+}) {
+  const users = useAuthUsers()
+  const options = users.status === 'ready' ? users.data : [{ id: value, name }]
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} disabled={busy} aria-label="Switch user">
+      {options.map((u) => (
+        <option key={u.id} value={u.id}>
+          {u.name}
+        </option>
+      ))}
+    </select>
   )
 }

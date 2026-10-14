@@ -17,6 +17,8 @@ import type {
   Event,
   HandoffAcceptedPayload,
   HandoffCreatedPayload,
+  HandoffFailedPayload,
+  HandoffRequestedPayload,
   ProposalCreatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
@@ -236,7 +238,13 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
         ...state,
         suggestions: [
           ...state.suggestions,
-          { suggestion_id: p.suggestion_id, from: event.actor, text: p.text },
+          {
+            suggestion_id: p.suggestion_id,
+            from: event.actor,
+            text: p.text,
+            status: 'pending' as const,
+            at: event.at,
+          },
         ],
       }
       break
@@ -247,13 +255,18 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       if (p.suggestion_id) {
         next = {
           ...state,
-          suggestions: state.suggestions.filter(
-            (s) => s.suggestion_id !== p.suggestion_id,
+          // Kept, not dropped: the room shows what became of each suggestion.
+          suggestions: state.suggestions.map((s) =>
+            s.suggestion_id === p.suggestion_id ? { ...s, status: 'accepted' as const } : s,
           ),
         }
       }
       break
     }
+
+    // HOOK(R10): a suggestion the driver declines. No such event is in docs/api.md or
+    // events.go yet. When the contract adds one, add its case here and set the matching
+    // suggestion's status to 'declined'; the suggestions panel already renders that state.
 
     case 'control.requested': {
       if (state.control_requests.some((r) => r.from.id === event.actor.id)) break
@@ -391,10 +404,39 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       break
     }
 
+    case 'handoff.requested': {
+      const p = as<HandoffRequestedPayload>(event)
+      next = {
+        ...state,
+        handoff_request: {
+          request_id: p.request_id,
+          to: p.to,
+          stay_as_watcher: p.stay_as_watcher,
+          expires_at: p.expires_at,
+        },
+        handoff_failure: null,
+      }
+      break
+    }
+
+    case 'handoff.failed': {
+      const p = as<HandoffFailedPayload>(event)
+      next = {
+        ...state,
+        handoff_request: state.handoff_request?.request_id === p.request_id ? null : state.handoff_request,
+        handoff_failure: { request_id: p.request_id, reason: p.reason },
+      }
+      break
+    }
+
     case 'handoff.created': {
       const p = as<HandoffCreatedPayload>(event)
       next = {
         ...state,
+        // Ends the request it completes; an event from before R0 carries no request_id and ends any.
+        handoff_request:
+          !p.request_id || state.handoff_request?.request_id === p.request_id ? null : state.handoff_request,
+        handoff_failure: null,
         handoffs: [
           ...state.handoffs,
           {

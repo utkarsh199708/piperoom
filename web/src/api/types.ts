@@ -32,6 +32,8 @@ export type EventType =
   | 'approval.given'
   | 'approval.rejected'
   | 'action.executed'
+  | 'handoff.requested'
+  | 'handoff.failed'
   | 'handoff.created'
   | 'handoff.accepted'
   | 'trace.pinned'
@@ -200,8 +202,24 @@ export interface HandoffSummary {
   risks: string[]
 }
 
+/** handoff.requested (R0): a hand-off is being written; in flight until created / failed / expires_at. */
+export interface HandoffRequestedPayload {
+  request_id: string
+  to: Actor
+  stay_as_watcher: boolean
+  expires_at: string
+}
+
+/** handoff.failed (R0): ends a request without a hand-off. `reason` is a fixed code, never error text. */
+export interface HandoffFailedPayload {
+  request_id: string
+  reason: 'summary_failed' | 'not_driver' | 'room_closed' | 'internal_error' | string
+}
+
 export interface HandoffCreatedPayload {
   handoff_id: string
+  /** The handoff.requested it completes; absent on events from before R0. */
+  request_id?: string
   to: Actor
   summary: HandoffSummary
   stay_as_watcher: boolean
@@ -341,6 +359,20 @@ export interface Me {
 }
 
 /** One row of GET /api/people: a person a driver may grant control or hand off to. */
+/** One row of GET /auth/users (dev mode only): who the dev login screen may pick. */
+export interface AuthUser {
+  id: string
+  name: string
+  layers: string[]
+}
+
+/** One row of GET /api/pipelines. */
+export interface PipelineInfo {
+  id: string
+  title: string
+  shadow: boolean
+}
+
 export interface Person {
   id: string
   name: string

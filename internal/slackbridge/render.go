@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"piperoom/internal/events"
 )
@@ -25,7 +26,8 @@ func Important(t events.Type) bool {
 	switch t {
 	case events.RoomCreated, events.AgentHypothesis, events.ProposalCreated,
 		events.ApprovalGiven, events.ApprovalRejected, events.ActionExecuted,
-		events.HandoffCreated, events.HandoffAccepted, events.RoomClosed:
+		events.HandoffCreated, events.HandoffAccepted, events.RoomClosed,
+		events.ControlLeaseExpired:
 		return true
 	}
 	return false
@@ -215,6 +217,20 @@ func (r *renderer) reply(e events.Event) (m message, ok bool, err error) {
 	case events.HandoffAccepted:
 		t := who + " accepted the hand-off and is now the driver."
 		return message{Text: fallback("Hand-off accepted by ", actorName(e.Actor)), Blocks: []block{section(t)}}, true, nil
+
+	case events.ControlLeaseExpired:
+		p, err := events.Decode[events.ControlLeaseExpiredPayload](e)
+		if err != nil {
+			return m, false, err
+		}
+		// The time comes from a decoded time.Time, so it is ours, not event text.
+		t := ":warning: *No active driver.* The lease of " + clip(actorName(p.Driver), 100) + " ran out at " +
+			p.LeaseUntil.UTC().Format(time.RFC3339) + " and nobody renewed it. Anyone can take control in Piperoom."
+		blocks := []block{section(t)}
+		if link := r.linkElement(e.RoomID); link != nil {
+			blocks = append(blocks, block{Type: "context", Elements: link})
+		}
+		return message{Text: fallback("No active driver: ", actorName(p.Driver)), Blocks: blocks}, true, nil
 
 	case events.RoomClosed:
 		p, err := events.Decode[events.RoomClosedPayload](e)
