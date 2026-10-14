@@ -491,11 +491,9 @@ func TestPhaseWarnings(t *testing.T) {
 			{Kind: "action_result", Action: "connect_restart_task", OK: okp(true), Text: "ok"},
 			{Kind: "action_result", Action: "connect_resume_connector", OK: okp(false), Text: "failed"},
 		},
-		Expect: Expect{Pending: map[string]any{"outcome": "healthy", "claims": nil}},
 	}
 	got := strings.Join(s.Warnings(), "\n")
 	for _, want := range []string{
-		`expect: claims, outcome accepted but not scored`,
 		`phase "orphan" is unreachable`,
 		"transitions[1]: no input executes connect_resume_connector with a matching ok",
 	} {
@@ -549,13 +547,10 @@ expect:
 	if in := s.Inputs[0]; in.Action != "connect_restart_task" || in.OK == nil || !*in.OK {
 		t.Errorf("input = %+v", in)
 	}
-	// Before E2's typed fields exist the shared-schema keys land in Pending;
-	// after, they are typed fields and Pending is empty. Either way they
-	// parse.
-	if got := strings.Join(sortedKeys(s.Expect.Pending), ","); got != "" && got != "claims,expected_facts,outcome,root_cause_layer" {
-		t.Errorf("pending expect keys = %s", got)
+	if e := s.Expect; e.Outcome != "diagnose" || e.RootCauseLayer != "postgres" || len(e.ExpectedFacts) != 1 || len(e.Claims) != 1 {
+		t.Errorf("shared-schema expect keys did not land in the typed fields: %+v", e)
 	}
-	// Only the shared-schema keys are tolerated; any other unknown key in
+	// The shared-schema keys are E2's typed fields; any other unknown key in
 	// expect, and unknown keys in the new blocks, still fail.
 	for _, bad := range []string{
 		"name: x\nexpect:\n  outcome_typo: healthy\n",

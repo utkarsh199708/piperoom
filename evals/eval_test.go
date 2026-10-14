@@ -96,6 +96,9 @@ func TestEvaluateReplaysRecordedResults(t *testing.T) {
 func TestEvaluateRecordsMisses(t *testing.T) {
 	sc := loadSeed()
 	sc.Recordings = sc.Recordings[:1] // only pipeline_map
+	// Facts need their tools' recordings; validation refuses facts no run
+	// could establish.
+	sc.Expect.ExpectedFacts, sc.Expect.Claims = nil, nil
 	rep, err := Evaluate(context.Background(), []Scenario{sc}, Config{
 		Runner: scriptedRunner(goodSchemaChangeScript()), Logger: quietLogger(),
 	})
@@ -106,8 +109,8 @@ func TestEvaluateRecordsMisses(t *testing.T) {
 	if len(r.Misses) != 2 || r.Misses[0].Tool != "connect_status" || r.Misses[1].Tool != "pg_recent_ddl" {
 		t.Fatalf("misses = %+v", r.Misses)
 	}
-	if r.ToolErrors != 2 {
-		t.Errorf("tool errors = %d, want 2", r.ToolErrors)
+	if r.ToolErrors != 2 || r.ToolCalls != 3 || r.ToolCallsOK != 1 {
+		t.Errorf("tool calls attempted/ok/errors = %d/%d/%d, want 3/1/2", r.ToolCalls, r.ToolCallsOK, r.ToolErrors)
 	}
 	if rep.Overall.Misses != 2 {
 		t.Errorf("overall misses = %d", rep.Overall.Misses)
@@ -136,6 +139,23 @@ func TestEvaluateDeliversInputsOnIdle(t *testing.T) {
 	}
 	if strings.Join(acks, "|") != "ack: check the registry|ack: why?" {
 		t.Errorf("acks = %q", acks)
+	}
+	// The harness logs each delivered steer and comment as the room would.
+	var logged []string
+	for _, ev := range tr.Events {
+		switch ev.Type {
+		case events.SteerSent:
+			var p events.SteerSentPayload
+			_ = json.Unmarshal(ev.Payload, &p)
+			logged = append(logged, "steer:"+p.Text)
+		case events.CommentAdded:
+			var p events.CommentAddedPayload
+			_ = json.Unmarshal(ev.Payload, &p)
+			logged = append(logged, "comment:"+p.CommentID+":"+p.Text)
+		}
+	}
+	if strings.Join(logged, "|") != "steer:check the registry|comment:c_1:why?" {
+		t.Errorf("logged inputs = %q", logged)
 	}
 	if tr.Idles != 3 {
 		t.Errorf("idles = %d, want 3 (two inputs, then closed)", tr.Idles)

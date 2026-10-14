@@ -721,19 +721,24 @@ func nativeNumbers(v any) (any, error) {
 	return v, nil
 }
 
+// cleanTerms turns human label terms into scenario terms. Each is stored in
+// the matcher's word form (lower-case words joined by spaces, see tokenize):
+// a label is free text, so "*" is not meant as the prefix operator, and a
+// term like "0x1F" or "LeaveGroup" would otherwise fail Validate. A term with
+// no words is dropped like a blank one.
 func cleanTerms(in []string) ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
 	for _, t := range in {
-		t = strings.TrimSpace(t)
+		if utf8.RuneCountInString(strings.TrimSpace(t)) > maxTermLen {
+			return nil, fmt.Errorf("%w: a root_cause_terms entry is longer than %d characters", ErrShadowMalformed, maxTermLen)
+		}
+		t = strings.Join(tokenize(t), " ")
 		if t == "" {
 			continue
 		}
-		if utf8.RuneCountInString(t) > maxTermLen {
-			return nil, fmt.Errorf("%w: a root_cause_terms entry is longer than %d characters", ErrShadowMalformed, maxTermLen)
-		}
-		if k := strings.ToLower(t); !seen[k] {
-			seen[k] = true
+		if !seen[t] {
+			seen[t] = true
 			out = append(out, t)
 		}
 	}

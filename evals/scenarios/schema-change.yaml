@@ -6,6 +6,9 @@
 # drops it (kafkatools join lines with "\n" and end without one).
 # Example-only values: the worker id 172.18.0.6:8083, every timestamp and age,
 # the partition offsets and record counts, and the order keys 101 and 102.
+#
+# First failing layer: kafka-connect (task 0 FAILED). Root-cause layer: postgres
+#   (the ALTER TABLE that changed amount; the registry only enforced BACKWARD).
 name: schema-change
 description: >-
   ALTER TABLE orders ALTER COLUMN amount TYPE numeric(12,2), then 2 inserts.
@@ -161,10 +164,30 @@ recordings:
 
 expect:
   root_cause:
-    - [amount]
+    - [amount*]
     - [numeric, decimal, bytes]
-    - [schema registry, registry, avro, compatib, "409"]
+    - [schema registry, registry, avro, compatib*, "409"]
   first_failing_layer: kafka-connect
+  root_cause_layer: postgres
+  # Every term is in a successful recording of its tool (validation checks).
+  expected_facts:
+    - id: f_task_failed
+      tool: connect_status
+      match: [task 0, failed]
+      required: true
+    - id: f_schema_incompatible
+      tool: connect_status
+      match: [incompatible, "409"]
+      required: true
+    - id: f_amount_type_change
+      tool: connect_status
+      match: [value amount, decimal]
+    - id: f_ddl_amount
+      tool: pg_recent_ddl
+      match: [alter column amount, numeric]
+  claims:
+    - about: root_cause
+      facts: [f_schema_incompatible, f_amount_type_change, f_ddl_amount]
   evidence_tools: [connect_status]
   fix:
     - [schema_set_compatibility]

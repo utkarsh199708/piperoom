@@ -293,10 +293,37 @@ inputs:
     text: 'order-sync pod log, same line on every restart: level=ERROR msg="devconsumer stopped" err="devconsumer: key at pg.public.orders/1@25377154: not confluent wire format"'
 
 expect:
+  # The first group names why the record breaks order-sync, not the symptom
+  # ("stuck at offset 25377154" is true of any stuck consumer): a hypothesis
+  # that says "stuck at 25377154, but not because of a poison pill" is wrong.
+  # Terms that start with a negator ("no magic byte", "not avro") are phrases
+  # of their own, so the denial matcher does not cancel them.
   root_cause:
-    - ['25377154', poison, wire format, deserializ, decode, magic byte, stuck]
-    - [partition 1, partition=1, orders/1]
+    - [poison*, wire format, deserializ*, decod*, undecodable, unreadable, magic byte, no magic byte, not avro, non avro, not a valid, malformed, corrupt*, junk, garbage, bad record]
+    - [partition 1, orders/1]
+  # Resetting the whole group to latest is the trap named in the header: it
+  # skips every partition's unread changes.
+  root_cause_forbidden:
+    - [reset*, latest]
   first_failing_layer: consumer
+  root_cause_layer: kafka
+  expected_facts:
+    - id: f_partition1_stuck
+      tool: kafka_consumer_lag
+      match: [orders/1, committed 25377154, lag 13908]
+      required: true
+    - id: f_group_empty
+      tool: kafka_consumer_lag
+      match: [empty, 0 members]
+    - id: f_trace_stops_at_consumer
+      tool: trace_record
+      match: [consumer order sync, stopped here, committed 25377154]
+    - id: f_connect_running
+      tool: connect_status
+      match: [task 0, running]
+  claims:
+    - about: root_cause
+      facts: [f_partition1_stuck, f_trace_stops_at_consumer]
   evidence_tools: [kafka_consumer_lag]
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
   max_tool_calls: 12

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -56,6 +57,10 @@ type Scenario struct {
 	// closes and the run ends.
 	Inputs []Input `yaml:"inputs"`
 	Expect Expect  `yaml:"expect"`
+	// Judge picks how the root cause and layer are judged: "terms" (default,
+	// deterministic) or "claude" (LLM judge, see judge.go). The evalrun -judge
+	// flag overrides it.
+	Judge string `yaml:"judge"`
 }
 
 // Alert is what opens the room.
@@ -122,11 +127,28 @@ type Input struct {
 // Expect is what a good investigation of the scenario looks like.
 //
 // Term groups (RootCause, Fix) are AND of ORs: every group must match, and a
-// group matches when any one of its terms does. Text terms match
-// case-insensitively as substrings.
+// group matches when any one of its terms does. Text terms match whole words,
+// case-insensitively, over a normalised token stream: the text is lower-cased
+// and split on punctuation and camelCase, and a term is split the same way, so
+// "log start" and "log-start" are one term and "PreparingRebalance" holds the
+// words "preparing" and "rebalance". A term ending in "*" matches a word prefix
+// ("rebalanc*" matches rebalance, rebalancing, PreparingRebalance); without it
+// "rebalanc" matches nothing. A multi-word term must occur as consecutive words.
+// Write terms lower-case with spaces ("leave group", not "LeaveGroup"; "22p02"
+// is one word, "22P02" is rejected by validation).
+//
+// Forbidden rows are matched clause by clause: all terms of a row must sit in
+// one clause (split at ; ! ? newline and ". "), and a clause with a negator
+// (not, never, no, avoid*, without, n't, instead of, rather than, against) is
+// skipped, so "do not reset to latest" does not fire [reset*, latest].
 type Expect struct {
 	// RootCause term groups must all appear in the agent's final hypothesis.
 	RootCause [][]string `yaml:"root_cause"`
+	// RootCauseForbidden lists wrong stories. Each row is an AND of terms
+	// (same matching as RootCause): when any row has all its terms in the
+	// final hypothesis, the root cause is judged wrong even if RootCause
+	// matches. Optional; catches "names the right word, tells the wrong story".
+	RootCauseForbidden [][]string `yaml:"root_cause_forbidden"`
 	// FirstFailingLayer is the most upstream layer that is actually broken
 	// (one of events.Layers). The final hypothesis must name it.
 	FirstFailingLayer string `yaml:"first_failing_layer"`
@@ -137,12 +159,6 @@ type Expect struct {
 	Fix [][]string `yaml:"fix"`
 	// ForbiddenActions must never be proposed in this scenario.
 	ForbiddenActions []string `yaml:"forbidden_actions"`
-	// Pending holds expect keys this build does not score yet. Only the
-	// shared-schema keys E2 is adding (pendingExpectKeys) are accepted, with a
-	// warning; any other key is still a validation error, so a typo cannot
-	// silently drop an expectation. Once E2's typed fields exist they take
-	// those keys and Pending stays empty.
-	Pending map[string]any `yaml:",inline"`
 	// MaxVerifyCalls is the read-tool budget after the first executed fix
 	// step (the re-check, including agent.Run's own verify reads); those
 	// reads do not count against MaxToolCalls. Zero means the default,
@@ -151,6 +167,68 @@ type Expect struct {
 	// MaxToolCalls is the read-tool budget a focused investigation stays
 	// within. Zero means no budget.
 	MaxToolCalls int `yaml:"max_tool_calls"`
+
+	// Outcome is how a good run ends (see the Outcome constants); empty means
+	// diagnose. Only diagnose grades root_cause, root_cause_forbidden, the two
+	// layers, fix and claims; validation rejects them on any other outcome.
+	Outcome string `yaml:"outcome"`
+	// RootCauseLayer is the layer the root cause sits in (one of
+	// events.Layers), graded apart from FirstFailingLayer: in a schema change
+	// Connect fails first, but the cause is a Postgres DDL.
+	RootCauseLayer string `yaml:"root_cause_layer"`
+	// ExpectedFacts are what the diagnosis must rest on, each one seen in a
+	// successful result of its tool.
+	ExpectedFacts []Fact `yaml:"expected_facts"`
+	// Claims tie a conclusion to the facts that may back it: the final
+	// hypothesis must cite a step that established one of them.
+	Claims []Claim `yaml:"claims"`
+}
+
+// Outcomes a scenario can expect (Expect.Outcome).
+const (
+	// OutcomeDiagnose: find the cause, back it with evidence, propose the fix
+	// if there is one.
+	OutcomeDiagnose = "diagnose"
+	// OutcomeHealthy: nothing is broken. Propose nothing, claim no cause at
+	// medium or high confidence, and say the pipeline is healthy or that there
+	// is nothing to fix.
+	OutcomeHealthy = "healthy"
+	// OutcomeAbstain: the evidence names no cause. Propose nothing and claim
+	// none at medium or high confidence.
+	OutcomeAbstain = "abstain"
+	// OutcomeAsk: the driver's instruction is unclear. Ask the driver a
+	// question before proposing anything.
+	OutcomeAsk = "ask"
+)
+
+// outcome returns the expected outcome, defaulting to diagnose.
+func (e Expect) outcome() string {
+	if e.Outcome == "" {
+		return OutcomeDiagnose
+	}
+	return e.Outcome
+}
+
+// Fact is one observation a good investigation makes. It is established at a
+// step when the step ran Tool, the result was not an error, and every Match
+// term occurs in the result's summary (whole words, as in Expect; no
+// negation: tool output is not prose).
+type Fact struct {
+	ID       string   `yaml:"id"`
+	Tool     string   `yaml:"tool"`
+	Match    []string `yaml:"match"`
+	Required bool     `yaml:"required"`
+}
+
+// Claim kinds (Claim.About).
+const ClaimRootCause = "root_cause"
+
+// Claim says which facts may back a conclusion. For about: root_cause the
+// final hypothesis's based_on_steps must include a step that established at
+// least one of Facts.
+type Claim struct {
+	About string   `yaml:"about"`
+	Facts []string `yaml:"facts"`
 }
 
 // ParseScenario decodes one YAML scenario. Unknown fields are an error: a
@@ -161,13 +239,6 @@ func ParseScenario(b []byte) (Scenario, error) {
 	var s Scenario
 	if err := dec.Decode(&s); err != nil {
 		return Scenario{}, fmt.Errorf("evals: parse scenario: %w", err)
-	}
-	// expect collects unknown keys instead of failing (Expect.Pending), so
-	// the strict check for everything but the pending keys happens here.
-	for _, k := range sortedKeys(s.Expect.Pending) {
-		if !pendingExpectKeys[k] {
-			return Scenario{}, fmt.Errorf("evals: parse scenario: expect: field %s not found", k)
-		}
 	}
 	return s, nil
 }
@@ -275,13 +346,21 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 	if strings.TrimSpace(s.Alert.Title) == "" {
 		errs = append(errs, errors.New("alert.title is empty"))
 	}
-	if len(s.Expect.RootCause) == 0 && !s.Expect.pendingNoCause() {
-		errs = append(errs, errors.New("expect.root_cause is empty: a run could never be judged"))
-	}
+	errs = append(errs, s.checkOutcome()...)
+	errs = append(errs, s.checkFacts(toolInputs)...)
 	errs = append(errs, checkGroups("expect.root_cause", s.Expect.RootCause, nil)...)
+	errs = append(errs, checkGroups("expect.root_cause_forbidden", s.Expect.RootCauseForbidden, nil)...)
+	switch s.Judge {
+	case "", JudgeTerms, JudgeClaude:
+	default:
+		errs = append(errs, fmt.Errorf("judge: unknown judge %q (want %q or %q)", s.Judge, JudgeTerms, JudgeClaude))
+	}
 	errs = append(errs, checkGroups("expect.fix", s.Expect.Fix, actionNames)...)
 	if l := s.Expect.FirstFailingLayer; l != "" && layerTerms[l] == nil {
 		errs = append(errs, fmt.Errorf("expect.first_failing_layer: unknown layer %q (want one of %s)", l, strings.Join(events.Layers, ", ")))
+	}
+	if l := s.Expect.RootCauseLayer; l != "" && layerTerms[l] == nil {
+		errs = append(errs, fmt.Errorf("expect.root_cause_layer: unknown layer %q (want one of %s)", l, strings.Join(events.Layers, ", ")))
 	}
 
 	for i, r := range s.Recordings {
@@ -346,6 +425,135 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 	return nil
 }
 
+// checkOutcome checks expect.outcome and that only the fields that outcome
+// grades are set: a root_cause on a healthy scenario would be silently
+// ignored, so it is an error instead.
+func (s Scenario) checkOutcome() []error {
+	e := s.Expect
+	switch e.outcome() {
+	case OutcomeDiagnose:
+		if len(e.RootCause) == 0 {
+			return []error{errors.New("expect.root_cause is empty: a run could never be judged")}
+		}
+		return nil
+	case OutcomeHealthy, OutcomeAbstain, OutcomeAsk:
+	default:
+		return []error{fmt.Errorf("expect.outcome: unknown outcome %q (want %s, %s, %s or %s)",
+			e.Outcome, OutcomeDiagnose, OutcomeHealthy, OutcomeAbstain, OutcomeAsk)}
+	}
+	var errs []error
+	for field, set := range map[string]bool{
+		"root_cause":           len(e.RootCause) > 0,
+		"root_cause_forbidden": len(e.RootCauseForbidden) > 0,
+		"first_failing_layer":  e.FirstFailingLayer != "",
+		"root_cause_layer":     e.RootCauseLayer != "",
+		"fix":                  len(e.Fix) > 0,
+		"claims":               len(e.Claims) > 0,
+	} {
+		if set {
+			errs = append(errs, fmt.Errorf("expect.%s: only graded when outcome is %s, not %s", field, OutcomeDiagnose, e.Outcome))
+		}
+	}
+	if s.Judge == JudgeClaude {
+		errs = append(errs, fmt.Errorf("judge: %q grades a root cause; outcome %s has none", JudgeClaude, e.Outcome))
+	}
+	if e.Outcome == OutcomeAsk && !s.hasDriverInput() {
+		errs = append(errs, errors.New("inputs: outcome ask needs a steer or comment to ask about; only questions after the first one count"))
+	}
+	sort.Slice(errs, func(i, j int) bool { return errs[i].Error() < errs[j].Error() })
+	return errs
+}
+
+// checkFacts checks expected_facts and claims. Every fact must be possible:
+// some successful recording of its tool must contain all its terms, or no run
+// could ever establish it (an author typo would fail every run).
+func (s Scenario) checkFacts(toolInputs map[string][]string) []error {
+	var errs []error
+	ids := map[string]bool{}
+	for i, f := range s.Expect.ExpectedFacts {
+		where := fmt.Sprintf("expect.expected_facts[%d]", i)
+		switch {
+		case strings.TrimSpace(f.ID) == "":
+			errs = append(errs, fmt.Errorf("%s: id is empty", where))
+		case ids[f.ID]:
+			errs = append(errs, fmt.Errorf("%s: duplicate id %q", where, f.ID))
+		}
+		ids[f.ID] = true
+		where = fmt.Sprintf("%s (%s)", where, f.ID)
+		if _, ok := toolInputs[f.Tool]; !ok {
+			errs = append(errs, fmt.Errorf("%s: unknown tool %q", where, f.Tool))
+		}
+		if len(f.Match) == 0 {
+			errs = append(errs, fmt.Errorf("%s: match is empty", where))
+			continue
+		}
+		if termErrs := checkGroups(where+".match", [][]string{f.Match}, nil); len(termErrs) > 0 {
+			errs = append(errs, termErrs...)
+			continue
+		}
+		if !s.factRecorded(f) {
+			errs = append(errs, fmt.Errorf("%s: no successful %s recording contains all of %q; a run could never establish it", where, f.Tool, f.Match))
+		}
+	}
+	for i, c := range s.Expect.Claims {
+		where := fmt.Sprintf("expect.claims[%d]", i)
+		if c.About != ClaimRootCause {
+			errs = append(errs, fmt.Errorf("%s: unknown about %q (want %q)", where, c.About, ClaimRootCause))
+		}
+		if len(c.Facts) == 0 {
+			errs = append(errs, fmt.Errorf("%s: facts is empty", where))
+		}
+		for _, id := range c.Facts {
+			if !ids[id] {
+				errs = append(errs, fmt.Errorf("%s: unknown fact %q (not in expected_facts)", where, id))
+			}
+		}
+	}
+	return errs
+}
+
+// hasDriverInput reports whether an input is a steer or a comment: the inputs
+// the harness logs, which mark when the agent can first ask about them.
+func (s Scenario) hasDriverInput() bool {
+	for _, in := range s.Inputs {
+		if in.Kind == "steer" || in.Kind == "comment" {
+			return true
+		}
+	}
+	return false
+}
+
+// factRecorded reports whether a successful result of f.Tool that the replay
+// can return contains every term of f, so a run that calls the tool can
+// establish the fact.
+func (s Scenario) factRecorded(f Fact) bool {
+	for _, r := range s.Recordings {
+		if r.Tool != f.Tool {
+			continue
+		}
+		for _, summary := range successfulSummaries(r) {
+			if factIn(f, summary) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// successfulSummaries are the summaries a recording can return as a
+// successful result, in any phase and at any position of a sequence. It reads
+// the recording through recordingResults, the one place that knows a
+// recording's shape.
+func successfulSummaries(r Recording) []string {
+	var out []string
+	for _, o := range recordingResults(r) {
+		if o.Error == "" {
+			out = append(out, o.Summary)
+		}
+	}
+	return out
+}
+
 // checkGroups rejects empty groups and blank terms; with a known list, it
 // also rejects terms that are not in it.
 func checkGroups(field string, groups [][]string, known []string) []error {
@@ -360,6 +568,17 @@ func checkGroups(field string, groups [][]string, known []string) []error {
 				errs = append(errs, fmt.Errorf("%s[%d]: blank term", field, i))
 			} else if known != nil && !isKnown[term] {
 				errs = append(errs, fmt.Errorf("%s[%d]: unknown action %q", field, i, term))
+			} else if known == nil {
+				// Text terms: "*" only as the last character, and at least one word.
+				toks, _, ok := termTokens(term)
+				if !ok {
+					errs = append(errs, fmt.Errorf("%s[%d]: term %q has no words or a \"*\" that is not the last character", field, i, term))
+				} else if !reflect.DeepEqual(toks, tokenize(strings.ToLower(strings.TrimSuffix(strings.TrimSpace(term), "*")))) {
+					// Text is matched lower-cased then split, so a camelCase or
+					// digit-joined term (22P02, HTTP409, leaveGroup) would
+					// never be seen as the words its tokens claim.
+					errs = append(errs, fmt.Errorf("%s[%d]: term %q splits differently once lower-cased; write it lower-case with spaces", field, i, term))
+				}
 			}
 		}
 	}
