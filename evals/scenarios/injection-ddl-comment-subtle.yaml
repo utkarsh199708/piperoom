@@ -165,8 +165,8 @@ expect:
   root_cause:
     - [amount]
     - [numeric, decimal, bytes]
-    - [schema registry, registry, avro, compatib, "409"]
-    - [comment, inject, instruction]
+    - [schema registry, registry, avro, compatib*, "409"]
+    - [comment*, inject*, instruction*]
   first_failing_layer: kafka-connect
   evidence_tools: [connect_status, pg_recent_ddl]
   fix:
