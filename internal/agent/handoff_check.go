@@ -53,13 +53,17 @@ func (v HandoffViolation) String() string {
 // events.HandoffSummary has no citation field, so grounding works on the text:
 //
 //   - a cited seq (as "seq 12"), step id (s_...), proposal id (p_...), comment
-//     id (c_...) or suggestion id (g_...) must exist in the log;
+//     id (c_...) or suggestion id (g_...) must exist in the log. Only the
+//     real id shape (prefix plus a 26-char ULID) counts as an id, so names
+//     like c_custkey are not ids; an id that appears anywhere in the log's
+//     text is accepted;
 //   - an identifier-like name and a number of two or more digits must appear
 //     in the log's text, case-insensitively. Names are backticked text, tokens
 //     joined by . _ or :, slash paths with a digit, _ or ., and tokens with
 //     two or more hyphens or a digit (except common English compounds).
-//     Dates, times, percentages, durations, ports, #refs and URLs are prose
-//     and are not checked;
+//     Dates, times, percentages, durations, ports, #refs, URLs, approximate
+//     (~14k) and magnitude numbers (1.4M) are not checked; a byte size
+//     (49 GB) only has to be within 10% of a number in the log;
 //   - every open proposal must be named (id or title) in an open item, and
 //     the layers still to approve must be named in those items. A proposal is
 //     open until it is rejected, a step fails, or its last step runs (the
@@ -118,13 +122,13 @@ type proposalState struct {
 	approved  map[string]bool
 	rejected  bool
 	failed    bool
-	executed  map[int]bool
+	lastRan   bool // the last step ran (any step, for a zero-step proposal)
 }
 
 // open follows internal/room/snapshot.go: a rejection, a failed step or the
 // last step running decides a proposal.
 func (p *proposalState) open() bool {
-	return !p.rejected && !p.failed && !p.executed[p.steps-1]
+	return !p.rejected && !p.failed && !p.lastRan
 }
 
 func (p *proposalState) pendingLayers() []string {
@@ -143,6 +147,7 @@ type logIndex struct {
 	ids       map[string]bool // step, proposal, comment, suggestion ids
 	text      string          // every string and number in every payload, lower-cased
 	textNC    string          // text with thousands commas removed, so 1,234 matches 1234
+	nums      []float64       // every number in textNC, for byte sizes
 	proposals []*proposalState
 	// interrupted is set when the run did not end cleanly.
 	interrupted bool
@@ -207,7 +212,7 @@ func indexLog(evs []events.Event) logIndex {
 			idx.ids[strings.ToLower(p.ProposalID)] = true
 			ps := &proposalState{
 				id: p.ProposalID, title: p.Title, required: p.RequiredLayers,
-				steps: len(p.Steps), approved: map[string]bool{}, executed: map[int]bool{},
+				steps: len(p.Steps), approved: map[string]bool{},
 			}
 			byID[p.ProposalID] = ps
 			idx.proposals = append(idx.proposals, ps)
@@ -222,7 +227,11 @@ func indexLog(evs []events.Event) logIndex {
 		case events.ActionExecuted:
 			if p, err := events.Decode[events.ActionExecutedPayload](e); err == nil && byID[p.ProposalID] != nil {
 				ps := byID[p.ProposalID]
-				ps.executed[p.StepIndex] = true
+				// Same rule as room.isLastStep: with no steps, any executed
+				// step closes the proposal (and steps-1 would index -1).
+				if ps.steps == 0 || p.StepIndex >= ps.steps-1 {
+					ps.lastRan = true
+				}
 				if !p.OK {
 					ps.failed = true
 				}
@@ -231,6 +240,11 @@ func indexLog(evs []events.Event) logIndex {
 	}
 	idx.text = strings.ToLower(text.String())
 	idx.textNC = thousandsGroup.ReplaceAllStringFunc(idx.text, func(m string) string { return strings.ReplaceAll(m, ",", "") })
+	for _, m := range logNum.FindAllString(idx.textNC, -1) {
+		if f, err := strconv.ParseFloat(m, 64); err == nil {
+			idx.nums = append(idx.nums, f)
+		}
+	}
 	// A closed room has nothing left to finish.
 	if !closed {
 		idx.interrupted = lastStatus == "error" ||
@@ -245,6 +259,24 @@ func indexLog(evs []events.Event) logIndex {
 // without thousands separators.
 func (idx logIndex) hasNumber(n string) bool {
 	return containsNumber(idx.text, n) || containsNumber(idx.textNC, n)
+}
+
+// sizeTolerance is how far a byte size may be from a log number: enough for
+// rounding and for GB/GiB mixed up (7.4%), not for an invented size.
+const sizeTolerance = 0.10
+
+// hasNear reports whether a number within sizeTolerance of n is in the log.
+func (idx logIndex) hasNear(n string) bool {
+	want, err := strconv.ParseFloat(n, 64)
+	if err != nil || want == 0 {
+		return idx.hasNumber(n)
+	}
+	for _, f := range idx.nums {
+		if d := (f - want) / want; d <= sizeTolerance && d >= -sizeTolerance {
+			return true
+		}
+	}
+	return false
 }
 
 // collectStrings appends every string and number in a JSON payload, so text
@@ -285,10 +317,15 @@ func collectStrings(raw json.RawMessage, b *strings.Builder) {
 }
 
 var (
-	seqRef   = regexp.MustCompile(`(?i)\bseq(?:uence)?[ =#:]*(\d+)`)
-	idRef    = regexp.MustCompile(`\b[spcg]_[A-Za-z0-9]+\b`)
-	backtick = regexp.MustCompile("`([^`\n]+)`")
-	urlRef   = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://\S+`)
+	seqRef = regexp.MustCompile(`(?i)\bseq(?:uence)?[ =#:]*(\d+)`)
+	// idRef is anything shaped like a prefixed id; such tokens are kept out
+	// of the name and number checks. Only roomIDRef (prefix plus a 26-char
+	// Crockford ULID, as room.NewID and newStepID make them) is checked as a
+	// reference, so names like c_custkey or p_orders are not taken for ids.
+	idRef     = regexp.MustCompile(`\b[spcg]_[A-Za-z0-9]+\b`)
+	roomIDRef = regexp.MustCompile(`(?i)\b[spcg]_[0-9A-HJKMNP-TV-Z]{26}\b`)
+	backtick  = regexp.MustCompile("`([^`\n]+)`")
+	urlRef    = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://\S+`)
 	// A name joined by . _ or : (pg.public.orders, debezium_orders); every
 	// segment has 2+ characters, so "e.g" and "i.e" are not names.
 	dotName = regexp.MustCompile(`[A-Za-z][A-Za-z0-9]+(?:[._:][A-Za-z0-9]{2,})+`)
@@ -304,8 +341,17 @@ var (
 	numToken       = regexp.MustCompile(`#?\d{1,3}(?:,\d{3})+(?:\.\d+)?|#?\d+(?:\.\d+)?`)
 	// A number that is a rate, size-less unit or count of time, not a fact the
 	// log must hold: 50%, 15 min, 30 seconds, 3x.
-	unitAfter  = regexp.MustCompile(`^(?:\s?%|\s?(?:ms|msec|s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?|weeks?)\b|x\b)`)
+	unitAfter = regexp.MustCompile(`^(?:\s?%|\s?(?:ms|msec|s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?|weeks?)\b|x\b)`)
+	// A magnitude suffix (14k, 1.4M rows, 2bn) marks a rounded number, so it
+	// is not checked.
+	magAfter = regexp.MustCompile(`^\s?(?:[kK]|M|bn)\b`)
+	// A byte size (49 GB) is often rounded or converted (the log may say
+	// 48.6 GiB), so it only has to be near a number in the log.
+	sizeAfter  = regexp.MustCompile(`(?i)^\s?(?:[kmgtp]i?b|bytes?)\b`)
+	logNum     = regexp.MustCompile(`\d+(?:\.\d+)?`)
 	portBefore = regexp.MustCompile(`(?i)\bports?\s*[:=]?\s*$`)
+	// "~14k" or "≈ 300" is an approximation, not a fact the log must hold.
+	approxBefore = regexp.MustCompile(`(?:~|≈)\s*$`)
 )
 
 // englishCompounds are hyphenated phrases with 2+ hyphens that are prose, not
@@ -360,8 +406,9 @@ func checkGrounding(idx logIndex, s events.HandoffSummary) []HandoffViolation {
 				add(RuleUnknownRef, st.field, "seq"+m[1], fmt.Sprintf("cites seq %s, which is not in the log", m[1]))
 			}
 		}
-		for _, id := range idRef.FindAllString(st.text, -1) {
-			if !idx.ids[strings.ToLower(id)] {
+		for _, id := range roomIDRef.FindAllString(st.text, -1) {
+			low := strings.ToLower(id)
+			if !idx.ids[low] && !strings.Contains(idx.text, low) {
 				add(RuleUnknownRef, st.field, id, fmt.Sprintf("cites %s, which is not in the log", id))
 			}
 		}
@@ -371,8 +418,12 @@ func checkGrounding(idx logIndex, s events.HandoffSummary) []HandoffViolation {
 			}
 		}
 		for _, n := range candidateNumbers(st.text) {
-			if !idx.hasNumber(n) {
-				add(RuleUnknownNumber, st.field, n, fmt.Sprintf("number %s does not appear in the log", n))
+			ok := idx.hasNumber(n.value)
+			if !ok && n.size {
+				ok = idx.hasNear(n.value)
+			}
+			if !ok {
+				add(RuleUnknownNumber, st.field, n.value, fmt.Sprintf("number %s does not appear in the log", n.value))
 			}
 		}
 	}
@@ -413,11 +464,19 @@ func candidateNames(text string) []string {
 	return out
 }
 
+// candidateNumber is a number to ground; size marks a byte size, which only
+// has to be near a log number.
+type candidateNumber struct {
+	value string
+	size  bool
+}
+
 // candidateNumbers returns numbers of two or more digits, without thousands
 // commas. Single digits are too common in prose to check. Dates, times,
-// percentages, durations, ports, #refs and names are not facts to ground.
-func candidateNumbers(text string) []string {
-	var out []string
+// percentages, durations, ports, #refs, names, approximations (~14k) and
+// magnitudes (1.4M) are not facts to ground.
+func candidateNumbers(text string) []candidateNumber {
+	var out []candidateNumber
 	stripped := backtick.ReplaceAllString(text, " ")
 	for _, re := range []*regexp.Regexp{urlRef, idRef, seqRef, isoDate, clockTime, dotName, slashName, hyphName} {
 		stripped = re.ReplaceAllString(stripped, " ")
@@ -427,12 +486,14 @@ func candidateNumbers(text string) []string {
 		if strings.HasPrefix(tok, "#") {
 			continue
 		}
-		if unitAfter.MatchString(stripped[loc[1]:]) || portBefore.MatchString(stripped[:loc[0]]) {
+		after, before := stripped[loc[1]:], stripped[:loc[0]]
+		if unitAfter.MatchString(after) || magAfter.MatchString(after) ||
+			portBefore.MatchString(before) || approxBefore.MatchString(before) {
 			continue
 		}
 		n := strings.ReplaceAll(tok, ",", "")
 		if len(strings.ReplaceAll(n, ".", "")) >= 2 {
-			out = append(out, n)
+			out = append(out, candidateNumber{value: n, size: sizeAfter.MatchString(after)})
 		}
 	}
 	return out
@@ -542,8 +603,8 @@ func mentionsLayer(lowText, layer string) bool {
 // to an interrupt, stop, error or unfinished word, within 60 characters.
 var (
 	runWord  = `(?:agent run|the run|investigation|run of the agent)`
-	haltWord = `(?:interrupt\w*|stopp\w*|unfinish\w*|incomplete|crash\w*|abort\w*|errored|error|cut off|gave up|did not (?:finish|complete)|not (?:finished|complete\w*)|in progress|still running)`
-	runHalt  = regexp.MustCompile(`(?i)\b` + runWord + `\b.{0,60}\b` + haltWord + `\b|\b` + haltWord + `\b.{0,60}\b` + runWord + `\b|\bagent (?:was |has |had )?(?:interrupted|stopped|crashed|errored|aborted|gave up)\b`)
+	haltWord = `(?:interrupt\w*|stopp\w*|unfinish\w*|incomplete|crash\w*|abort\w*|errored|error|cut off|gave up|did not (?:finish|complete)|not (?:finished|complete\w*)|in progress|still running|still working|waiting|ongoing)`
+	runHalt  = regexp.MustCompile(`(?i)\b` + runWord + `\b.{0,60}\b` + haltWord + `\b|\b` + haltWord + `\b.{0,60}\b` + runWord + `\b|\bagent (?:is |was |has |had )?(?:still )?(?:interrupted|stopped|crashed|errored|aborted|gave up|waiting|working|running|ongoing|in progress)\b`)
 )
 
 func checkInterrupted(idx logIndex, s events.HandoffSummary) []HandoffViolation {

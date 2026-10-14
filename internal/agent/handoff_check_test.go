@@ -26,6 +26,8 @@ func extraCases() []handoffCase {
 		{"restarted-run", (&logBuilder{}).room("x").status("working").callOnly("connect_status").
 			status("working").tool("connect_status", "ok").status("done").evs, base},
 		{"order-sync-1", (&logBuilder{}).room("x").tool("kafka_list_groups", "group order-sync-1 Stable").evs, base},
+		{"zero-step-executed", (&logBuilder{}).room("x").propose("p_0", "Note only").executed("p_0", 0, "ok").status("done").evs, base},
+		{"zero-step-open", (&logBuilder{}).room("x").propose("p_0", "Note only").status("waiting_approval").evs, base},
 	}
 }
 
@@ -79,10 +81,10 @@ func TestCheckHandoffViolations(t *testing.T) {
 			func(s *events.HandoffSummary) { s.Done = []string{"Saw the failure (seq 3)"} },
 			nil, []string{RuleUnknownRef}},
 		{"unknown step id", "schema-change",
-			func(s *events.HandoffSummary) { s.Done = []string{"See step s_42"} },
+			func(s *events.HandoffSummary) { s.Done = []string{"See step s_01J9ZQ4K7M2X8N3P5R6S7T8V9W"} },
 			[]string{RuleUnknownRef}, nil},
 		{"unknown proposal id", "schema-change",
-			func(s *events.HandoffSummary) { s.Done = []string{"Approved p_404"} },
+			func(s *events.HandoffSummary) { s.Done = []string{"Approved p_01J9ZQ4K7M2X8N3P5R6S7T8V9W"} },
 			[]string{RuleUnknownRef}, nil},
 		{"open proposal dropped", "open-proposal-two-layers",
 			func(s *events.HandoffSummary) { s.Open = nil },
@@ -125,13 +127,13 @@ func TestCheckHandoffViolations(t *testing.T) {
 			func(s *events.HandoffSummary) { s.Why = " " },
 			[]string{RuleEmptyField}, nil},
 		{"unknown comment id", "consumer-poison-pill",
-			func(s *events.HandoffSummary) { s.Open = []string{"See comment c_99"} },
+			func(s *events.HandoffSummary) { s.Open = []string{"See comment c_01J9ZQ4K7M2X8N3P5R6S7T8V9W"} },
 			[]string{RuleUnknownRef}, nil},
 		{"known comment id", "consumer-poison-pill",
 			func(s *events.HandoffSummary) { s.Open = []string{"See comment c_1"} },
 			nil, []string{RuleUnknownRef}},
 		{"unknown suggestion id", "suggestion",
-			func(s *events.HandoffSummary) { s.Open = []string{"See suggestion g_404"} },
+			func(s *events.HandoffSummary) { s.Open = []string{"See suggestion g_01J9ZQ4K7M2X8N3P5R6S7T8V9W"} },
 			[]string{RuleUnknownRef}, nil},
 		{"known suggestion id", "suggestion",
 			func(s *events.HandoffSummary) { s.Open = []string{"See suggestion g_1"} },
@@ -206,6 +208,30 @@ func TestCheckHandoffViolations(t *testing.T) {
 		{"trailing digit hyphen name in the log", "order-sync-1",
 			func(s *events.HandoffSummary) { s.Why = "order-sync-1 is lagging" },
 			nil, []string{RuleUnknownName}},
+		{"agent waiting is a run note", "interrupted-run",
+			func(s *events.HandoffSummary) {
+				s.Open = []string{"The agent is waiting for step results"}
+				s.Risks = nil
+			},
+			nil, []string{RuleInterruptedRun}},
+		{"agent still working is a run note", "interrupted-run",
+			func(s *events.HandoffSummary) {
+				s.Open = []string{"The agent is still working on connect_status"}
+				s.Risks = nil
+			},
+			nil, []string{RuleInterruptedRun}},
+		{"ongoing investigation is a run note", "interrupted-run",
+			func(s *events.HandoffSummary) {
+				s.Open = nil
+				s.Risks = []string{"The investigation is ongoing"}
+			},
+			nil, []string{RuleInterruptedRun}},
+		{"zero-step proposal closes on execution", "zero-step-executed",
+			func(s *events.HandoffSummary) { s.Open = nil },
+			nil, []string{RuleOpenProposal}},
+		{"zero-step proposal not executed stays open", "zero-step-open",
+			func(s *events.HandoffSummary) { s.Open = nil },
+			[]string{RuleOpenProposal}, nil},
 		{"empty list item", "schema-change",
 			func(s *events.HandoffSummary) { s.Done = append(s.Done, "") },
 			[]string{RuleEmptyField}, nil},
@@ -324,6 +350,83 @@ func TestCheckHandoffStillFlagsInventions(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("%q: %s not reported", tt.text, tt.rule)
+		}
+	}
+}
+
+// TestCheckHandoffRealNamesAreNotIDs: names that start like an id prefix
+// (c_custkey, p_orders, s_status, g_total) are names, not room ids.
+func TestCheckHandoffRealNamesAreNotIDs(t *testing.T) {
+	log := (&logBuilder{}).room("orders stale").
+		tool("wh_query", "column c_custkey null; p_orders has 12 rows; s_status ok").evs
+	for _, text := range []string{
+		"column `c_custkey` is null",
+		"c_custkey is null in p_orders",
+		"s_status is ok",
+		"g_total was not touched", // not in the log, but not an id shape either
+	} {
+		s := events.HandoffSummary{WhatBroke: "orders stale.", Why: text, Done: []string{}, RuledOut: []string{}, Open: []string{}, Risks: []string{}}
+		for _, v := range CheckHandoff(log, s) {
+			if v.Rule == RuleUnknownRef {
+				t.Errorf("%q flagged: %s", text, v)
+			}
+		}
+	}
+}
+
+// TestCheckHandoffIDInLogText: a ULID-shaped id the index does not hold (a
+// proposal id quoted in a comment, say) is grounded by the log text.
+func TestCheckHandoffIDInLogText(t *testing.T) {
+	const id = "p_01J9ZQ4K7M2X8N3P5R6S7T8V9W"
+	log := (&logBuilder{}).room("x").comment("c_1", "see "+id+" from yesterday").status("done").evs
+	refs := func(text string) int {
+		n := 0
+		s := events.HandoffSummary{WhatBroke: "x.", Why: text, Done: []string{}, RuledOut: []string{}, Open: []string{}, Risks: []string{}}
+		for _, v := range CheckHandoff(log, s) {
+			if v.Rule == RuleUnknownRef {
+				n++
+			}
+		}
+		return n
+	}
+	if n := refs("Earlier fix " + strings.ToLower(id)); n != 0 {
+		t.Errorf("id in log text flagged %d times", n)
+	}
+	if n := refs("Earlier fix p_01J9ZQ4K7M2X8N3P5R6S7T8V9X"); n != 1 {
+		t.Errorf("unknown ULID id: %d unknown_reference, want 1", n)
+	}
+}
+
+// TestCheckHandoffRoundedNumbers: approximations, magnitudes and converted
+// sizes are not flagged; a size far from any log number still is.
+func TestCheckHandoffRoundedNumbers(t *testing.T) {
+	log := (&logBuilder{}).room("x").
+		tool("pg_replication_slots", "slot debezium_orders retained=48.6 GiB").
+		tool("kafka_consumer_lag", "lag 13,912 records over 1,412,334 rows").evs
+	tests := []struct {
+		text string
+		want bool // unknown_number expected
+	}{
+		{"lag is ~14k records", false},
+		{"lag is ~ 13900", false},
+		{"1.4M rows were read", false},
+		{"retained 49 GB of WAL", false},
+		{"retained 52 GB of WAL", false}, // 48.6 GiB in GB
+		{"retained 48.6 GiB of WAL", false},
+		{"retained 91.2 GiB of WAL", true},
+		{"retained 120 MB of WAL", true},
+		{"lag is 48213 records", true},
+	}
+	for _, tt := range tests {
+		s := events.HandoffSummary{WhatBroke: "x.", Why: tt.text, Done: []string{}, RuledOut: []string{}, Open: []string{}, Risks: []string{}}
+		got := false
+		for _, v := range CheckHandoff(log, s) {
+			if v.Rule == RuleUnknownNumber {
+				got = true
+			}
+		}
+		if got != tt.want {
+			t.Errorf("%q: unknown_number=%v, want %v", tt.text, got, tt.want)
 		}
 	}
 }
