@@ -1784,8 +1784,8 @@ func TestActionResultCarriesStepOutcome(t *testing.T) {
 			if in.StepIndex == nil || *in.StepIndex != 0 || in.Layer != "" || in.Approved != nil {
 				t.Fatalf("action_result fields: want StepIndex 0 and no Layer/Approved, got %+v", in)
 			}
-			if !strings.Contains(in.Text, in.ProposalID) {
-				t.Fatalf("action_result text must keep naming the proposal: %+v", in)
+			if strings.Contains(in.Text, in.ProposalID) || !strings.HasPrefix(in.Text, "step 1:") {
+				t.Fatalf("action_result text must be id-free and 1-based: %+v", in)
 			}
 			got[in.ProposalID] = in.OK
 		case "approval_result":
