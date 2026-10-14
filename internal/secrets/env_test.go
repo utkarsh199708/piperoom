@@ -69,3 +69,24 @@ func TestEnvProvider(t *testing.T) {
 		t.Fatalf("missing sample should fail: %+v", checks)
 	}
 }
+
+// The split-out database passwords are the server's own secrets too: a
+// prefix that covers them must not make them readable.
+func TestEnvProviderRefusesDBPasswords(t *testing.T) {
+	env := map[string]string{"SOURCE_DB_PASSWORD": "src", "WAREHOUSE_DB_PASSWORD": "wh"}
+	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+	p, err := NewEnvProvider(EnvOptions{Prefix: "S", LookupEnv: lookup, Environ: func() []string { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Resolve(context.Background(), Ref{Path: "SOURCE_DB_PASSWORD"}); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("SOURCE_DB_PASSWORD err = %v", err)
+	}
+	p, err = NewEnvProvider(EnvOptions{Prefix: "W", LookupEnv: lookup, Environ: func() []string { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Resolve(context.Background(), Ref{Path: "WAREHOUSE_DB_PASSWORD"}); !errors.Is(err, ErrAccessDenied) {
+		t.Fatalf("WAREHOUSE_DB_PASSWORD err = %v", err)
+	}
+}
