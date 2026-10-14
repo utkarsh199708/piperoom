@@ -479,6 +479,78 @@ lists every executed step, transition and phase-tagged answer (with `changed`). 
 what a recording shows (fact checks, for example) must read every sequence element
 (`recordingResults` in `phases.go`), not only the top-level `summary`.
 
+## Learned scenarios
+
+**Where they live: a private directory, never this repository.** This repository is public. Even redacted, a
+learned scenario names tables, connectors, consumer groups and hosts, which describe a customer's systems. Keep
+learned scenarios in a private repository checkout or a local folder; `evals/scenarios/learned/` here holds only a
+`.gitignore` (`*`, `!.gitignore`), so a file dropped there by mistake is never committed. `roomcase` refuses an
+`-out` inside this working tree (resolved with `git rev-parse --show-toplevel`, symlinks followed), and has no
+default for it.
+
+A closed room that people labelled and confirmed holds everything a scenario needs: the alert, every tool call
+and result, the steers, the executed fix and its verification, and two human judgements (`hypothesis.verdict`,
+`room.labelled`). `roomcase` turns one such room into a scenario. The input is the room's export, so it needs
+no database and no network and runs on any laptop:
+
+```sh
+curl -H ... http://piperoom/api/rooms/$ID/export > room.json     # or the download in the UI
+go run ./evals/cmd/roomcase -export room.json -owners dev/owners.yaml -out ~/piperoom-learned   # [-force]
+go run ./evals/cmd/evalrun -validate -learned ~/piperoom-learned          # also checks pending/
+go run ./evals/cmd/evalrun -learned ~/piperoom-learned -runs 3 -out cand.json   # replays the reviewed ones
+```
+
+It verifies `integrity.sha256` first (a changed or truncated export is refused), then writes
+`<out>/pending/<pipeline>-<yyyy-mm-dd>-<short room id>.yaml`. **Nothing replays `pending/`**: `evalrun -learned DIR`
+adds `DIR/*.yaml` to the default set, and `-validate` also parses and checks `DIR/pending/` so a fresh export is at
+least well-formed. Without `-learned`, nothing learned is read. A person reviews the file and moves it from
+`pending/` up into `DIR` (in the private repository, as a pull request there); the move is the review.
+
+**Who is eligible** (the exporter says which rule failed): the room is closed, `room.created.shadow` is false,
+the last `room.labelled` by a person has `cause` and `actual_layer`, and a person confirmed a hypothesis. If a fix
+was executed, its `agent.verification` must say `recovered: true`. A room where every verdict is `disputed` is
+exported as a **hard case**: `expect.outcome: abstain`, and `hard: true` plus the disputed hypothesis' terms in the
+`description`. Scenario validation grades an `abstain` outcome on its own (it rejects `root_cause`,
+`root_cause_forbidden` and the layer fields there), so the denied story lives in the description for the reviewer,
+not in a field. A hard case is never used as a worked example.
+
+**What is written** (no new scenario fields):
+
+| scenario field | from |
+|---|---|
+| `name`, `description` | file name; the alert title + the label's `cause` |
+| `pipeline`, `resources` | the `owners.yaml` entry of `room.created.pipeline_id` (no `owners:`, `watch`, connections); the pipeline's connectors, plus the connector or subject an executed step names |
+| `alert.title`, `alert.pipeline_map` | `room.created`; the first successful `pipeline_map` result |
+| `recordings` | each `agent.tool_call` joined to its `agent.tool_result` by `tool_use_id`. Inputs lose the keys the model picks freely (`droppedInputKeys` in `learned.go`: `since`, `until`, `limit`, `max_scan`, `window`, `older_than_minutes`, `max_results`, `query`, `from`, `to`, `at`, `timestamp`). `data` over 4 KB, or a cut `data` (`truncated: true`), is dropped. Two calls with the same tool and input keep their order as a `sequence`. `similar_incidents` is never recorded (it quotes other rooms) |
+| `phases`, `transitions`, `inputs` | an executed, verified fix gives `[broken, recovered]`, a transition on its first successful action, and results after that step get `phase: recovered`. Steers, comments (display name only) and the executed steps (`action_result` with `action`, `ok`, `params`) follow in log order |
+| `expect` | `outcome: diagnose`; `root_cause_layer` = `actual_layer`; `root_cause` = one single-term group each for the identifiers (`pg-orders-connector`, `public.orders`), numbers (`409`) and the three longest specific words of `cause`, with terms that only repeat the alert title left out (a hypothesis that merely echoes the alert must not pass); `fix` = the action names of the labelled `fix_proposal_id` |
+
+**No customer data in git.** Every string goes through `redact.Text` / `redact.JSON` (summaries, `data`, inputs,
+steers, comments, labels, names); then the finished file is read back and a second redaction pass over every
+string must change nothing, or nothing is written. This catches rooms closed before the room log was redacted.
+Redaction masks secrets (passwords, tokens, DSN credentials, emails). It does not know what a customer name or
+a row value is: that is the reviewer's job.
+
+**Dedup and cap.** The first line of the file is `# fingerprint: <pipeline>|<layer>|<sorted cause terms>`. The
+exporter refuses a fingerprint already in the learned directory or its `pending/` unless `-force` (a file without the
+line is compared by the terms it expects), and allows at most 10 scenarios per pipeline there (learned plus pending); `-force` does not
+lift the cap. A neighbour file that cannot be read stops the export, so it cannot hide from the cap.
+
+**Review checklist** (the reviewer of the pull request that moves the file):
+
+1. Read every `summary` and `input`: no row values, DSNs, hostnames of customers, or personal names survive.
+2. `expect` says what the person on the room would have said: the layer, the cause terms and the fix.
+3. `description` and the alert title carry no customer name; the pipeline block is the pipeline, nothing more.
+4. `evalrun -validate` is clean and the file's `# fingerprint:` line is still the first non-comment header.
+
+The learned directory is never tuned by hand. A wrong expectation is fixed by re-labelling the room and exporting it again
+(`-force` replaces the pending file); an edit of a learned file by hand is a review comment, not a fix.
+
+Fixtures: `evals/testdata/rooms/*.json` are real export documents, written by
+`go run -tags evalgen ./evals/gen -rooms` from the gen fakes and the real tools through `room.Service`
+(`-rooms -check` shows a stale file). They include the shapes the exporter must refuse (shadow, unlabelled, open,
+fix not recovered) and a room with a planted credential.
+
 ## Held-out set
 
 [`scenarios/heldout/`](scenarios/heldout/) holds incidents on pipelines the prompt was never tuned on
