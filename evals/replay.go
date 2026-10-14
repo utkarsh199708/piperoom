@@ -16,6 +16,7 @@ import (
 	"piperoom/internal/tools/dbtools"
 	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/tools/runbooks"
+	"piperoom/internal/tools/similarincidents"
 )
 
 // errNoRecording is what the model sees when it calls a tool with an input the
@@ -56,6 +57,11 @@ func LiveTools() ([]tools.Tool, error) {
 	if err := runbooks.Register(reg); err != nil {
 		return nil, fmt.Errorf("evals: runbook tool definitions: %w", err)
 	}
+	// Definition only (no room store): scenarios record its answers, the
+	// harness never runs it. See similar_fixture_test.go.
+	if err := similarincidents.Register(reg, similarincidents.Deps{}); err != nil {
+		return nil, fmt.Errorf("evals: similar_incidents tool definition: %w", err)
+	}
 	return reg.All(), nil
 }
 
@@ -79,12 +85,11 @@ func LiveActions(res Resources, recs []Recording) (*actions.Registry, error) {
 }
 
 // connectStatusData is the part of connect_status's Data that action
-// validation reads (see kafkatools connectStatus: name, state, worker, tasks).
+// validation reads (name, state, and task ids/states).
 type connectStatusData struct {
-	Name   string `json:"name"`
-	State  string `json:"state"`
-	Worker string `json:"worker"`
-	Tasks  []struct {
+	Name  string `json:"name"`
+	State string `json:"state"`
+	Tasks []struct {
 		ID    int    `json:"id"`
 		State string `json:"state"`
 	} `json:"tasks"`
@@ -119,7 +124,7 @@ func connectStatuses(recs []Recording) (map[string]clients.ConnectorStatus, erro
 		if err := json.Unmarshal(b, &d); err != nil {
 			return nil, fmt.Errorf("evals: recordings[%d] (connect_status): data is not a connector status: %w", i, err)
 		}
-		st := clients.ConnectorStatus{Name: d.Name, State: d.State, WorkerID: d.Worker}
+		st := clients.ConnectorStatus{Name: d.Name, State: d.State}
 		if st.Name == "" {
 			st.Name = name
 		}

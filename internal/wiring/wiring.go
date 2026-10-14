@@ -7,6 +7,7 @@ package wiring
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ import (
 	"piperoom/internal/tools/dbtools"
 	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/tools/runbooks"
+	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 )
 
@@ -54,6 +56,11 @@ type Wired struct {
 	Builder topology.Builder
 	// Owners is the loaded owners config.
 	Owners *owners.Owners
+	// Rooms is where similar_incidents reads past closed rooms (the room
+	// store). The caller that owns the store sets it after Open, before
+	// RegisterTools; nil leaves the tool unregistered (CLI runs have no room
+	// store).
+	Rooms similarincidents.Source
 
 	// close is the closer built by Open: it releases the database pools and
 	// the Kafka client. Only Open sets it, so a zero Wired is safe to Close.
@@ -87,18 +94,23 @@ type a2Clients struct {
 // user for it). The caller owns the Kafka client and must close it.
 func buildA2Clients(cfg config.Config, awsCfg *aws.Config) (*a2Clients, error) {
 	// The Schema Registry client comes first: the Kafka client uses it to
-	// decode Avro keys.
-	registry, err := schemareg.NewSecure(cfg.SchemaRegistryURL, netsec.HTTP{
-		Username: cfg.SchemaRegistryUsername,
-		Password: netsec.Secret(cfg.SchemaRegistryPassword),
-		TLS: netsec.TLS{
-			CAFile:   cfg.SchemaRegistryTLSCAFile,
-			CertFile: cfg.SchemaRegistryTLSCertFile,
-			KeyFile:  cfg.SchemaRegistryTLSKeyFile,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("wiring: schema registry client: %w", err)
+	// decode Avro keys. SCHEMA_REGISTRY_URL "" or "off" (config stores "")
+	// means none: registry stays nil.
+	var registry *schemareg.Client
+	if cfg.SchemaRegistryURL != "" {
+		r, err := schemareg.NewSecure(cfg.SchemaRegistryURL, netsec.HTTP{
+			Username: cfg.SchemaRegistryUsername,
+			Password: netsec.Secret(cfg.SchemaRegistryPassword),
+			TLS: netsec.TLS{
+				CAFile:   cfg.SchemaRegistryTLSCAFile,
+				CertFile: cfg.SchemaRegistryTLSCertFile,
+				KeyFile:  cfg.SchemaRegistryTLSKeyFile,
+			},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("wiring: schema registry client: %w", err)
+		}
+		registry = r
 	}
 
 	connectClient, err := connect.NewSecure(cfg.ConnectURL, netsec.HTTP{
@@ -157,13 +169,19 @@ func kafkaSecurity(cfg config.Config, awsCfg *aws.Config) (netsec.Kafka, error) 
 // error. On a partial failure it closes what it already opened and returns a
 // wrapped error naming the failing step.
 func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, error) {
-	ctx, cancel := context.WithTimeout(ctx, openTimeout)
-	defer cancel()
-
 	o, err := owners.Load(cfg.OwnersFile)
 	if err != nil {
 		return nil, fmt.Errorf("wiring: load owners: %w", err)
 	}
+	return openClients(ctx, cfg, awsCfg, o)
+}
+
+// openClients builds one client set from the connection settings of cfg and
+// gives it o as its owners config. OpenStacks calls it once per set, with the
+// owners view of the pipelines that set serves.
+func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *owners.Owners) (*Wired, error) {
+	ctx, cancel := context.WithTimeout(ctx, openTimeout)
+	defer cancel()
 
 	// A bad WAREHOUSE_KIND is a config mistake: fail before any client is built.
 	whKind, err := warehouseKind(cfg)
@@ -202,28 +220,72 @@ func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, e
 	}
 	opened = append(opened, closeWh)
 
+	return assemble(o, whKind, a2, src, wh, closeOpened), nil
+}
+
+// assemble builds the Wired that Open returns from the clients it opened,
+// the topology builder included. It is apart from Open so a test can check
+// the assembly without a database.
+func assemble(o *owners.Owners, whKind string, a2 *a2Clients, src clients.SourceDB, wh clients.Warehouse, closeAll func()) *Wired {
 	var once sync.Once
-	return &Wired{
+	w := &Wired{
 		Source:        src,
 		Warehouse:     wh,
 		WarehouseKind: whKind,
 		Connect:       a2.Connect,
 		Kafka:         a2.Kafka,
-		Registry:      a2.Registry,
-		Builder:       topology.NewBuilder(o, a2.Connect, a2.Kafka, src, wh),
 		Owners:        o,
-		close:         func() { once.Do(closeOpened) },
-	}, nil
+		close:         func() { once.Do(closeAll) },
+	}
+	// A nil *schemareg.Client in the interface would read as configured.
+	if a2.Registry != nil {
+		w.Registry = a2.Registry
+	}
+	w.Builder = newTopologyBuilder(w)
+	return w
+}
+
+// newTopologyBuilder is the one place a Builder is made from w's clients, the
+// Schema Registry included, for Open and RegisterTools alike.
+func newTopologyBuilder(w *Wired) topology.Builder {
+	return topology.NewBuilder(w.Owners, w.Connect, w.Kafka, w.Source, w.Warehouse, topology.WithSchemaRegistry(w.Registry))
+}
+
+// errNoRegistry is what the write actions get from the registry when none is
+// configured, so proposing a schema action fails validation cleanly.
+var errNoRegistry = errors.New("wiring: Schema Registry not configured (SCHEMA_REGISTRY_URL is empty or off)")
+
+// noRegistry stands in for the registry in the write actions only; the read
+// tools and the builder take nil and say "not configured" themselves.
+type noRegistry struct{}
+
+func (noRegistry) Subjects(context.Context) ([]string, error)             { return nil, errNoRegistry }
+func (noRegistry) Versions(context.Context, string) ([]int, error)        { return nil, errNoRegistry }
+func (noRegistry) SetCompatibility(context.Context, string, string) error { return errNoRegistry }
+func (noRegistry) Register(context.Context, string, string) (int, error)  { return 0, errNoRegistry }
+func (noRegistry) Schema(context.Context, string, int) (clients.SchemaVersion, error) {
+	return clients.SchemaVersion{}, errNoRegistry
+}
+func (noRegistry) Compatibility(context.Context, string) (string, bool, error) {
+	return "", false, errNoRegistry
+}
+
+// actionRegistry is w's registry for the write actions, never nil.
+func actionRegistry(w *Wired) clients.SchemaRegistryClient {
+	if w.Registry == nil {
+		return noRegistry{}
+	}
+	return w.Registry
 }
 
 // RegisterTools registers the A3 db tools, A2's read-only Kafka/Connect/
-// Schema Registry tools, C11's runbook_lookup and the write actions the agent may propose (never
+// Schema Registry tools, C11's runbook_lookup, similar_incidents (when w.Rooms is set) and the write actions the agent may propose (never
 // run), reading every client from w. If w.Builder is nil it is built from
 // w's clients and stored back on w, so callers can use it afterwards.
 func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error {
 	b := w.Builder
 	if b == nil {
-		b = topology.NewBuilder(w.Owners, w.Connect, w.Kafka, w.Source, w.Warehouse)
+		b = newTopologyBuilder(w)
 		w.Builder = b
 	}
 	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: w.Connect}); err != nil {
@@ -236,7 +298,14 @@ func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error 
 	if err := runbooks.Register(reg); err != nil {
 		return fmt.Errorf("wiring: register runbooks: %w", err)
 	}
-	if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: w.Registry}); err != nil {
+	// similar_incidents needs the room store, which only the room service
+	// owns, so it is registered when the caller provided one.
+	if w.Rooms != nil {
+		if err := similarincidents.Register(reg, similarincidents.Deps{Source: w.Rooms, Owners: w.Owners}); err != nil {
+			return fmt.Errorf("wiring: register similar_incidents: %w", err)
+		}
+	}
+	if err := actions.Register(areg, actions.Deps{Connect: w.Connect, Registry: actionRegistry(w)}); err != nil {
 		return fmt.Errorf("wiring: register actions: %w", err)
 	}
 	return nil

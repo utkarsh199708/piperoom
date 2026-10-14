@@ -50,6 +50,7 @@ func TestTrackPendingMatchesAgentByKind(t *testing.T) {
 		agent events.Actor
 	}{
 		{"agent actor", events.AgentActor},
+		{"stored before Verified existed", events.Actor{Kind: events.ActorAgent, ID: "agent", Name: "Agent"}},
 		{"agent kind, other name", events.Actor{Kind: events.ActorAgent, ID: "agent", Name: "Claude"}},
 		{"agent kind, other id", events.Actor{Kind: events.ActorAgent, ID: "agent-v2", Name: "Agent"}},
 	} {

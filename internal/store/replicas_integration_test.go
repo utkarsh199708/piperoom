@@ -94,7 +94,9 @@ func TestElectorOneLeaderTakeover(t *testing.T) {
 	stores := []*store.PG{s0, openReplica(t, schema, store.Options{}), openReplica(t, schema, store.Options{})}
 	electors := make([]*store.PGElector, len(stores))
 	for i, s := range stores {
-		e := s.Elector(fmt.Sprintf("r%d", i))
+		// Replica names unique per run: leader connections are found by
+		// application_name, and other packages' tests run electors at once.
+		e := s.Elector(fmt.Sprintf("%s-r%d", schema, i))
 		// The others retry faster than the leader checks its connection, so
 		// without the settle delay a new loop would start while the old one
 		// still runs; Settle > Check + CheckTimeout is what prevents it.

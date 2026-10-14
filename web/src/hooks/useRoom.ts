@@ -47,6 +47,12 @@ export interface StaleInfo {
   sentHash: string
 }
 
+/** What a close attempt came to; `error` is the text for the person. */
+export interface CloseResult {
+  ok: boolean
+  error?: string
+}
+
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
 
 export interface RoomActions {
@@ -55,7 +61,11 @@ export interface RoomActions {
   sendSuggestion: (suggestionId: string) => void
   requestControl: () => void
   grantControl: (to: string) => void
-  close: (resolution: string) => void
+  /**
+   * Resolves when the call is done. On a failure the error is also in the room error
+   * banner; `ok: false` lets the close dialog, which covers that banner, show it too.
+   */
+  close: (resolution: string) => Promise<CloseResult>
   /**
    * Resolves when the call is done. `needsConfirm` means the server wants the
    * solo-mode string (docs/design/auth.md 5.3): the caller asks for it and calls
@@ -442,12 +452,20 @@ export function useRoom(roomId: string) {
       }
       void runAction(api.grantControl(roomId, to))
     },
-    close: (resolution) => {
+    close: async (resolution) => {
       if (isFixtures()) {
         synthesize('room.closed', { resolution })
-        return
+        return { ok: true }
       }
-      void runAction(api.closeRoom(roomId, resolution))
+      try {
+        await api.closeRoom(roomId, resolution)
+        setError(null)
+        return { ok: true }
+      } catch (e) {
+        const text = errorText(e)
+        setError(text)
+        return { ok: false, error: text }
+      }
     },
     approve: async (proposalId, layer, extra) => {
       if (isFixtures()) {

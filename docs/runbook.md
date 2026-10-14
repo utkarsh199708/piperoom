@@ -130,3 +130,18 @@ lands.
   hand-offs are unaffected; only that room's Slack mirror stops. Other codes are logged at
   Warn as `slack post failed` and that one message is skipped. How a stopped mirror is
   restarted after the fix is part of the PR #24 wiring.
+
+## Upgrading to room limits (migration 00012)
+
+Migration `00012` (per-room log caps, `docs/design/retention.md`) adds two nullable columns and the
+`room_deletions` table. It rewrites no row, so it takes an instant whatever the size of the room database.
+Rooms that existed before it get their byte count in the background after the server starts:
+
+- Look for `byte_size backfill done rooms=N shadow_runs=M took=...` in the server log (or
+  `another replica holds the lock` on the other replicas). A shutdown during the backfill is fine: the next
+  start continues where it stopped.
+- Until then an old room's byte cap (`PIPEROOM_ROOM_MAX_BYTES`) is not enforced; its event cap is.
+- Expected duration: about 45 s per GB of stored event payloads (7 to 8 minutes for 10 GB), measured at
+  24 MB/s on postgres:16; see `docs/design/retention.md` section 5.2. Appends wait only for the batch of
+  500 rooms being counted.
+- Rooms not yet counted: `SELECT count(*) FROM rooms WHERE byte_size IS NULL;`

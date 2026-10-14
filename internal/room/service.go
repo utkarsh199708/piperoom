@@ -39,9 +39,14 @@ var ErrStepOrder = store.ErrStepOrder
 // get a safe default (used by tests), except Owners: scope checks fail closed
 // without it.
 type Deps struct {
-	Store        store.Store
-	Actions      *actions.Registry
-	Tools        *tools.Registry
+	Store   store.Store
+	Actions *actions.Registry
+	Tools   *tools.Registry
+	// StackFor, when set, gives each room the read tools and write actions
+	// built over its own pipeline's clients (docs/design/tenancy.md section
+	// 5), and Tools and Actions are not used. A nil field in the result
+	// means none (fail closed), never the process-wide registry.
+	StackFor     func(pipelineID string) PipelineStack
 	Topology     topology.Builder
 	Users        *Users
 	Owners       *owners.Owners // pipeline definitions for actions.Scoped checks
@@ -151,6 +156,7 @@ type Service struct {
 	store        store.Store
 	actions      *actions.Registry
 	tools        *tools.Registry
+	stackFor     func(pipelineID string) PipelineStack
 	topo         topology.Builder
 	users        *Users
 	owners       *owners.Owners
@@ -237,6 +243,7 @@ func New(d Deps) *Service {
 		store:        d.Store,
 		actions:      acts,
 		tools:        tls,
+		stackFor:     d.StackFor,
 		topo:         topo,
 		users:        users,
 		owners:       d.Owners,
@@ -744,8 +751,8 @@ func (s *Service) touchDriverLease(ctx context.Context, st *roomState, roomID st
 	if remaining >= leaseLogThreshold {
 		return
 	}
-	if _, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, humanActor(User{ID: d.ID, Name: d.Name}), events.ControlGrantedPayload{
-		To:         events.Actor{Kind: events.ActorHuman, ID: d.ID, Name: d.Name},
+	if _, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, s.humanActor(User{ID: d.ID, Name: d.Name}), events.ControlGrantedPayload{
+		To:         s.humanActor(User{ID: d.ID, Name: d.Name}),
 		LeaseUntil: lease,
 	}); err != nil {
 		s.log.Warn("room: emit lease renewal failed", "room", roomID, "err", err)
@@ -778,13 +785,17 @@ func (s *Service) proposalsDisabled(st *roomState) bool {
 	return s.owners != nil && st.snap.PipelineID != "" && !s.knownPipeline(st.snap.PipelineID)
 }
 
-func humanActor(u User) events.Actor {
-	return events.Actor{Kind: events.ActorHuman, ID: u.ID, Name: u.Name}
+// humanActor is the event actor for a person. Verified comes from users.yaml
+// itself, never from the caller's User value, so no code path can mark an IdP
+// person as vouched for (design section 2.1, security audit A-ID-2).
+func (s *Service) humanActor(u User) events.Actor {
+	_, inFile := s.users.Get(u.ID)
+	return events.Actor{Kind: events.ActorHuman, ID: u.ID, Name: u.Name, Verified: inFile}
 }
 
-var systemActor = events.Actor{Kind: events.ActorSystem, ID: "system", Name: "System"}
+var systemActor = events.Actor{Kind: events.ActorSystem, ID: "system", Name: "System", Verified: true}
 
-var executorActor = events.Actor{Kind: events.ActorSystem, ID: "executor", Name: "Executor"}
+var executorActor = events.Actor{Kind: events.ActorSystem, ID: "executor", Name: "Executor", Verified: true}
 
 func mapStoreErr(err error) error {
 	if errors.Is(err, store.ErrNotFound) {
@@ -1048,8 +1059,8 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 		defer gate.release()
 		alert := agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw}
 		deps := agent.Deps{
-			Tools:     s.tools,
-			Actions:   s.actions,
+			Tools:     s.toolsFor(pipelineID),
+			Actions:   s.actionsFor(pipelineID),
 			Inbox:     gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
 			Sink:      roomSink{s: s, roomID: roomID, run: run},
 			Proposals: proposalCreator{s: s, roomID: roomID, run: run},
