@@ -75,9 +75,7 @@ func (s *Service) DeclineSuggestion(ctx context.Context, user User, roomID, sugg
 	}
 	// A failed status write leaves the row saying pending; the snapshot check
 	// in send and decline still refuses the suggestion, so this only warns.
-	if err := s.store.SetSuggestionStatus(ctx, suggestionID, "declined"); err != nil {
-		s.log.Warn("room: mark suggestion declined failed", "suggestion", suggestionID, "err", err)
-	}
+	s.afterAppend(roomID, "mark suggestion declined", s.store.SetSuggestionStatus(ctx, suggestionID, "declined"), "suggestion", suggestionID)
 	// A driver action renews the driver lease (docs/api.md), as send does.
 	s.touchDriverLease(ctx, st, roomID)
 	return e, nil

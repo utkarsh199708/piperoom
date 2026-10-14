@@ -203,9 +203,7 @@ func (s *Service) completeHandoff(ctx context.Context, user, to User, roomID, re
 	s.touchDriverLease(ctx, st2, roomID)
 	// A new handoff supersedes every older pending one (review item 10):
 	// accepting a superseded handoff is stale, never driver-moving.
-	if err := s.store.VoidHandoffs(ctx, roomID, handoffID); err != nil {
-		s.log.Warn("room: void older handoffs failed", "room", roomID, "handoff", handoffID, "err", err)
-	}
+	s.afterAppend(roomID, "void older handoffs", s.store.VoidHandoffs(ctx, roomID, handoffID), "handoff", handoffID)
 	return e, nil
 }
 
@@ -245,7 +243,9 @@ func (s *Service) failHandoff(ctx context.Context, roomID, requestID, reason str
 
 // AcceptHandoff completes a hand-off: it moves the driver role
 // (control.granted) and emits handoff.accepted. Only the handoff recipient may
-// accept, and only while the handoff's creator is still the driver.
+// accept, and only while the handoff's creator is still the driver, or while
+// the recipient drives because an earlier accept of it moved the role but
+// failed before handoff.accepted (the retry then finishes it).
 func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string) (events.Event, error) {
 	s.syncHandoffRoom(ctx, handoffID)
 	s.mu.Lock()
@@ -277,8 +277,12 @@ func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string
 		return events.Event{}, roomClosed("room is closed")
 	}
 	// A stale hand-off (the creator is no longer the driver) must not move the
-	// role.
+	// role. The recipient may already drive because an earlier accept of
+	// this hand-off moved the role and then failed: the log decides.
 	if !s.isDriver(st, h.FromID) {
+		if s.isDriver(st, h.ToID) {
+			return s.finishHandoffLocked(ctx, st, user, h)
+		}
 		return events.Event{}, staleHandoff("the handoff creator is no longer the driver")
 	}
 	to := s.humanActor(User{ID: h.ToID, Name: h.ToName})
@@ -299,18 +303,93 @@ func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string
 	}); err != nil {
 		return events.Event{}, err
 	}
-	if err := s.store.UpdateDriver(ctx, h.RoomID, h.ToID, h.ToName, lease); err != nil {
-		s.log.Warn("room: persist accepted driver failed", "room", h.RoomID, "err", err)
-	}
-	if err := s.store.SetHandoffStatus(ctx, handoffID, "accepted"); err != nil {
-		return events.Event{}, err
-	}
-	if err := s.store.VoidHandoffs(ctx, h.RoomID, handoffID); err != nil {
-		s.log.Warn("room: void other handoffs failed", "room", h.RoomID, "err", err)
-	}
-	return s.emitLocked(ctx, st, h.RoomID, events.HandoffAccepted, s.humanActor(user), events.HandoffAcceptedPayload{
+	// The role has moved, so nothing below undoes the accept (afterAppend).
+	// The row is marked only after handoff.accepted is logged: if that append
+	// fails, the row stays pending and the recipient's retry finishes the
+	// accept (finishHandoffLocked).
+	s.afterAppend(h.RoomID, "persist accepted driver", s.store.UpdateDriver(ctx, h.RoomID, h.ToID, h.ToName, lease), "handoff", handoffID)
+	e, err := s.emitLocked(ctx, st, h.RoomID, events.HandoffAccepted, s.humanActor(user), events.HandoffAcceptedPayload{
 		HandoffID: handoffID,
 	})
+	if err != nil {
+		return events.Event{}, err
+	}
+	s.afterAppend(h.RoomID, "mark handoff accepted", s.store.SetHandoffStatus(ctx, handoffID, "accepted"), "handoff", handoffID)
+	s.afterAppend(h.RoomID, "void other handoffs", s.store.VoidHandoffs(ctx, h.RoomID, handoffID), "handoff", handoffID)
+	return e, nil
+}
+
+// finishHandoffLocked answers an accept of a pending hand-off whose recipient
+// already drives the room. The handoffs row is written after the events, best
+// effort, so the log says how far an earlier accept got:
+//   - handoff.accepted is logged: only the row write failed. The row is
+//     brought in line and the accept is a repeat (already_decided), as it is
+//     when the row says accepted.
+//   - the recipient's own control.granted is logged after handoff.created but
+//     handoff.accepted is not: the earlier accept moved the role and failed
+//     before it finished. The retry finishes it and returns handoff.accepted.
+//   - neither: someone else gave the recipient the role (a direct grant), so
+//     the hand-off is stale as before.
+//
+// Other pending hand-offs are not voided here: one created after the role
+// moved belongs to the new driver and is live. Caller holds s.mu.
+func (s *Service) finishHandoffLocked(ctx context.Context, st *roomState, user User, h store.HandoffRow) (events.Event, error) {
+	took, accepted, err := s.handoffInLog(ctx, h)
+	if err != nil {
+		return events.Event{}, fmt.Errorf("room: accept handoff: read events: %w", err)
+	}
+	if accepted {
+		s.afterAppend(h.RoomID, "mark handoff accepted", s.store.SetHandoffStatus(ctx, h.HandoffID, "accepted"), "handoff", h.HandoffID)
+		return events.Event{}, alreadyDecided("handoff already accepted")
+	}
+	if !took {
+		return events.Event{}, staleHandoff("the handoff creator is no longer the driver")
+	}
+	e, err := s.emitCheckedLocked(ctx, st, h.RoomID, func() error {
+		if !s.roomOpen(st) {
+			return roomClosed("room is closed")
+		}
+		if !s.isDriver(st, h.ToID) {
+			return staleHandoff("the handoff recipient is no longer the driver")
+		}
+		return nil
+	}, events.HandoffAccepted, s.humanActor(user), events.HandoffAcceptedPayload{
+		HandoffID: h.HandoffID,
+	})
+	if err != nil {
+		return events.Event{}, err
+	}
+	s.afterAppend(h.RoomID, "mark handoff accepted", s.store.SetHandoffStatus(ctx, h.HandoffID, "accepted"), "handoff", h.HandoffID)
+	return e, nil
+}
+
+// handoffInLog reads the room log for hand-off h: took is true when, after its
+// handoff.created, the recipient granted the role to themselves (the
+// control.granted an accept writes); accepted is true when a handoff.accepted
+// for it is logged.
+func (s *Service) handoffInLog(ctx context.Context, h store.HandoffRow) (took, accepted bool, err error) {
+	evs, err := s.allEvents(ctx, h.RoomID)
+	if err != nil {
+		return false, false, err
+	}
+	created := false
+	for _, e := range evs {
+		switch e.Type {
+		case events.HandoffCreated:
+			if p, ok := decode[events.HandoffCreatedPayload](e); ok && p.HandoffID == h.HandoffID {
+				created = true
+			}
+		case events.ControlGranted:
+			if p, ok := decode[events.ControlGrantedPayload](e); ok && created && e.Actor.ID == h.ToID && p.To.ID == h.ToID {
+				took = true
+			}
+		case events.HandoffAccepted:
+			if p, ok := decode[events.HandoffAcceptedPayload](e); ok && p.HandoffID == h.HandoffID {
+				accepted = true
+			}
+		}
+	}
+	return took, accepted, nil
 }
 
 func (s *Service) allEvents(ctx context.Context, roomID string) ([]events.Event, error) {

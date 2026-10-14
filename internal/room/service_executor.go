@@ -121,11 +121,12 @@ func (s *Service) enqueueExecutionLocked(st *roomState, p store.ProposalRow) {
 }
 
 // runExecutor drains the room's queue one proposal at a time until its room
-// context ends (the room closes) or the service lifetime ends.
+// context ends (the room closes) or the service lifetime ends. Then nothing
+// more runs, and what is still queued is recorded as failed (abandonQueued).
 func (s *Service) runExecutor(ctx context.Context, roomID string, q *execQueue) {
 	defer s.wg.Done()
 	for {
-		for {
+		for ctx.Err() == nil {
 			p, ok := q.pop()
 			if !ok {
 				break
@@ -135,11 +136,37 @@ func (s *Service) runExecutor(ctx context.Context, roomID string, q *execQueue) 
 			}
 			q.done()
 		}
+		// A proposal approved just before the close may still be queued: when
+		// its wake and the close are both ready, select picks either.
 		select {
 		case <-ctx.Done():
+			s.abandonQueued(roomID, q)
 			return
 		case <-q.wake:
 		}
+	}
+}
+
+// abandonQueued records every proposal still queued when the executor stops
+// as failed, with the failing action.executed for its first step, so a fully
+// approved proposal never stays open (or keeps a claim this replica refreshes
+// forever, or keeps DeleteRoom answering "executing"). None of them started a
+// step. Each was claimed by this replica when it was queued, and with a shared
+// store failProposal writes only while that claim holds, so a proposal the
+// stale sweep already recorded is not recorded again.
+func (s *Service) abandonQueued(roomID string, q *execQueue) {
+	output := "the server stopped before this proposal ran; create a new proposal to retry"
+	if !s.isRoomOpen(s.ctx, roomID) {
+		output = "room closed before this step ran"
+	}
+	for {
+		p, ok := q.pop()
+		if !ok {
+			return
+		}
+		s.log.Warn("room: approved proposal not run; recorded as failed", "room", roomID, "proposal", p.ProposalID)
+		s.failProposal(p.RoomID, p.ProposalID, 0, p.ParamsHash, output)
+		q.done()
 	}
 }
 

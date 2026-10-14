@@ -74,14 +74,15 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 		s.mu.Unlock()
 		return RoomSnapshot{}, mapUnstorable(err)
 	}
+	// room.created is logged, so the room exists (afterAppend): a failed
+	// grant leaves it without a driver, like an alert room, and anyone may
+	// take control. An error here would make the client open a second room.
 	if _, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, s.humanActor(user), events.ControlGrantedPayload{
 		To: s.humanActor(user), LeaseUntil: lease,
 	}); err != nil {
-		s.mu.Unlock()
-		return RoomSnapshot{}, err
-	}
-	if err := s.store.UpdateDriver(ctx, roomID, user.ID, user.Name, lease); err != nil {
-		s.log.Warn("room: persist creator driver failed", "room", roomID, "err", err)
+		s.afterAppend(roomID, "grant control to the room's creator", err, "user", user.ID)
+	} else {
+		s.afterAppend(roomID, "persist creator driver", s.store.UpdateDriver(ctx, roomID, user.ID, user.Name, lease))
 	}
 	snap := st.snap.Clone()
 	st.firstLook = true
@@ -277,12 +278,12 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 			s.log.Warn("room: alert room for a pipeline owners.yaml does not define is visible to no tenant",
 				"room", roomID, "pipeline", pipelineID, "alert_source", alertSource)
 		}
-		if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
+		// Only a note: proposals stay disabled without it (proposalsDisabled
+		// reads the pipeline id), and the room is already open (afterAppend).
+		_, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
 			Text: fmt.Sprintf("pipeline %q is unknown; proposals are disabled for this room", pipelineID),
-		}); err != nil {
-			s.mu.Unlock()
-			return RoomSnapshot{}, false, err
-		}
+		})
+		s.afterAppend(roomID, "unknown pipeline note", err, "pipeline", pipelineID)
 	}
 	snap := st.snap.Clone()
 	st.firstLook = true
@@ -548,9 +549,7 @@ func (s *Service) closeRoom(ctx context.Context, roomID string, actor events.Act
 	// A closed room no longer takes repeats of its alert: the next one opens a
 	// new room.
 	s.releaseAlertKeyLocked(roomID, st)
-	if err := s.store.CloseRoom(ctx, roomID, s.now().UTC()); err != nil {
-		s.log.Warn("room: persist close failed", "room", roomID, "err", err)
-	}
+	s.afterAppend(roomID, "persist close", s.store.CloseRoom(ctx, roomID, s.now().UTC()))
 	cancel := st.agentCancel
 	if st.snap.Shadow {
 		// Grace, the error-row upsert and the reveal (shadow.go). It keeps

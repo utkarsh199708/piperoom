@@ -254,8 +254,6 @@ func (s *Service) GrantControl(ctx context.Context, user User, roomID, toID stri
 	if err != nil {
 		return events.Event{}, err
 	}
-	if err := s.store.UpdateDriver(ctx, roomID, to.ID, to.Name, lease); err != nil {
-		s.log.Warn("room: persist granted driver failed", "room", roomID, "err", err)
-	}
+	s.afterAppend(roomID, "persist granted driver", s.store.UpdateDriver(ctx, roomID, to.ID, to.Name, lease))
 	return e, nil
 }

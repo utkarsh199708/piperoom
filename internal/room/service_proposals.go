@@ -289,9 +289,8 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 		}
 		s.log.Info("room: approval given", "proposal", proposalID, "layer", layer, "user", user.ID, "grant", grant)
 		if strings.HasPrefix(grant, owners.GrantBackupPrefix) {
-			if _, err := s.emitLocked(ctx, st, p.RoomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: backupNote(user, layer, grant)}); err != nil {
-				s.log.Warn("room: backup approval note failed", "proposal", proposalID, "err", err)
-			}
+			_, err := s.emitLocked(ctx, st, p.RoomID, events.AgentMessage, systemActor, events.AgentMessagePayload{Text: backupNote(user, layer, grant)})
+			s.afterAppend(p.RoomID, "backup approval note", err, "proposal", proposalID)
 		}
 		if allApproved(st.snap, proposalID) {
 			// Approved in full: queue the steps on the room's single executor so
@@ -366,9 +365,7 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 		return events.Event{}, err
 	}
 	s.log.Info("room: rejection given", "proposal", proposalID, "layer", layer, "user", user.ID, "grant", grant)
-	if err := s.store.SetProposalStatus(ctx, proposalID, "rejected"); err != nil {
-		s.log.Warn("room: set proposal rejected failed", "proposal", proposalID, "err", err)
-	}
+	s.afterAppend(p.RoomID, "set proposal rejected", s.store.SetProposalStatus(ctx, proposalID, "rejected"), "proposal", proposalID)
 	return ev, nil
 }
 
