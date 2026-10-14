@@ -87,6 +87,10 @@ func (definitionKafka) PartitionRates(context.Context, time.Time, ...string) ([]
 	return nil, errNotReplayed
 }
 
+func (definitionKafka) ACLs(context.Context, []string, []string) ([]clients.ACLEntry, error) {
+	return nil, errNotReplayed
+}
+
 // LiveActions returns the production write actions, backed by replay clients
 // that know only res and the connector states in recs. The agent can propose
 // them (their real Validate runs against that) but nothing can execute: every
