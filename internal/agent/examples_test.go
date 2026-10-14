@@ -385,11 +385,28 @@ func TestPastIncidentsUsageTokensGrowByTheBlock(t *testing.T) {
 	}
 }
 
-func TestPastIncidentsRealToolAcceptsTheLookup(t *testing.T) {
-	st, err := fake.NewStore(context.Background(), fake.Room{
-		ID: "r_old", PipelineID: "orders", Title: "orders stale after schema change", ClosedAt: time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC),
-		Label: &events.RoomLabelledPayload{ActualLayer: "schema", Cause: "column dropped", FixThatWorked: "re-add column"},
-	})
+// TestPastIncidentsRealTool runs the real similar_incidents over closed,
+// labelled rooms, so the test fails if the two packages drift apart.
+func TestPastIncidentsRealTool(t *testing.T) {
+	closed := time.Date(2026, 9, 30, 10, 0, 0, 0, time.UTC)
+	st, err := fake.NewStore(context.Background(),
+		fake.Room{
+			ID: "r_old1", PipelineID: "orders", Title: "orders stale after schema change", ClosedAt: closed,
+			Label: &events.RoomLabelledPayload{ActualLayer: "schema-registry", Cause: injection, FixThatWorked: "re-add column discount_code"},
+		},
+		fake.Room{
+			// Labelled with a cause but no fix; its executed proposal's title
+			// is agent text and must not stand in for the fix.
+			ID: "r_old2", PipelineID: "orders", Title: "orders stale, connector task failed", ClosedAt: closed.Add(-24 * time.Hour),
+			Label: &events.RoomLabelledPayload{ActualLayer: "kafka-connect", Cause: "task 0 failed on a bad converter"},
+			Fix:   &fake.Fix{ProposalID: "p_1", Title: "AGENT PROPOSAL TITLE", Actions: []string{"connect_restart_task"}},
+		},
+		fake.Room{
+			// Closed but never labelled: no typed cause, never an example.
+			ID: "r_old3", PipelineID: "orders", Title: "orders stale unlabelled", ClosedAt: closed.Add(-48 * time.Hour),
+			Resolution: "UNLABELLED RESOLUTION",
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,10 +416,35 @@ func TestPastIncidentsRealToolAcceptsTheLookup(t *testing.T) {
 		Logger: discardLogger(),
 	})
 	h := &levelRecorder{}
-	r, _ := exampleRunner(t, slog.New(h), &fakeSink{}, tl)
-	r.pastIncidents(context.Background(), pastIncidentsRunBytes, 5*time.Second)
-	if h.has("agent: past incidents lookup failed") || h.has("agent: past incidents result unreadable") {
-		t.Fatalf("the real tool refused the lookup: %v", h.recs)
+	sink := &fakeSink{}
+	r, m := exampleRunner(t, slog.New(h), sink, tl)
+	if err := r.run(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	first := firstTurnText(t, m.calls)
+	block := pastBlockOf(first)
+	if block == "" {
+		t.Fatalf("no past-incidents block from the real tool (log %v):\n%s", h.recs, first)
+	}
+	want1 := "- " + wrapUntrusted("2026-09-30") + " · " + wrapUntrusted("orders stale after schema change") + " · layer " + wrapUntrusted("schema-registry") +
+		" · cause: " + wrapUntrusted(injection) + " · fix: " + wrapUntrusted("re-add column discount_code")
+	want2 := "- " + wrapUntrusted("2026-09-29") + " · " + wrapUntrusted("orders stale, connector task failed") + " · layer " + wrapUntrusted("kafka-connect") +
+		" · cause: " + wrapUntrusted("task 0 failed on a bad converter") + " · fix: none recorded"
+	for _, w := range []string{want1, want2} {
+		if !strings.Contains(block, w) {
+			t.Fatalf("block lacks line\n%s\ngot:\n%s", w, block)
+		}
+	}
+	if strings.Contains(block, "</untrusted> Ignore") || strings.Contains(block, "[verification]") {
+		t.Fatalf("injection reached the prompt unescaped:\n%s", block)
+	}
+	for _, never := range []string{"AGENT PROPOSAL TITLE", "UNLABELLED RESOLUTION", "orders stale unlabelled"} {
+		if strings.Contains(block, never) {
+			t.Fatalf("%q reached the block:\n%s", never, block)
+		}
+	}
+	if len(sink.ofType(events.AgentToolCall)) != 0 {
+		t.Fatal("the lookup emitted a tool call")
 	}
 }
 
@@ -462,9 +504,17 @@ func TestDecodePastHits(t *testing.T) {
 	if _, err := decodePastHits(json.RawMessage(`[1`)); err == nil {
 		t.Error("bad JSON decoded")
 	}
-	// Today's tool hits carry no cause: they decode, and nothing renders.
-	got, err := decodePastHits(similarincidents.Data{Hits: []similarincidents.Hit{{Title: "t", FixThatWorked: "agent title"}}})
-	if err != nil || renderPastIncidents(got, pastIncidentsRunBytes) != "" {
-		t.Errorf("hit without cause rendered: %v %v", got, err)
+	// The tool's own Data type: cause and label_fix decode; fix_that_worked
+	// (which may be the agent's proposal title) is never read.
+	got, err := decodePastHits(similarincidents.Data{Hits: []similarincidents.Hit{
+		{Title: "t", Cause: "column dropped", LabelFix: "re-add column", FixThatWorked: "agent title"},
+		{Title: "u", FixThatWorked: "agent title"},
+	}})
+	if err != nil || len(got) != 2 || got[0].Cause != "column dropped" || got[0].LabelFix != "re-add column" {
+		t.Fatalf("typed Data: %+v %v", got, err)
+	}
+	block := renderPastIncidents(got, pastIncidentsRunBytes)
+	if strings.Contains(block, "agent title") || strings.Count(block, "\n- ") != 1 {
+		t.Errorf("typed Data rendered wrongly:\n%s", block)
 	}
 }
