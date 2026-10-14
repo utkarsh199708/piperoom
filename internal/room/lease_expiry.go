@@ -66,7 +66,8 @@ func applyLeaseExpired(snap *RoomSnapshot, e events.Event) {
 // s.mu.
 func (s *Service) leaseExpiryDueLocked(st *roomState) (events.ControlLeaseExpiredPayload, bool) {
 	d := st.snap.Driver
-	if st.deleting || !s.roomOpen(st) || d == nil || d.LeaseExpired || st.snap.grantedLease.IsZero() {
+	if st.deleting || !s.roomOpen(st) || d == nil || d.LeaseExpired || st.snap.grantedLease.IsZero() ||
+		st.leaseLogFullFor.Equal(st.snap.grantedLease) {
 		return events.ControlLeaseExpiredPayload{}, false
 	}
 	if s.now().Before(d.LeaseUntil) {
@@ -91,24 +92,26 @@ func (s *Service) startLeaseExpiry() {
 		if closed {
 			return
 		}
+		// The ticker is made here, not in the goroutine, so that a Load after
+		// Close provably never creates one (tests count the calls).
+		newTicker := s.leaseTicker
+		if newTicker == nil {
+			newTicker = func(d time.Duration) (<-chan time.Time, func()) {
+				t := time.NewTicker(d)
+				return t.C, t.Stop
+			}
+		}
+		tick, stop := newTicker(LeaseCheckEvery)
 		go func() {
 			defer s.wg.Done()
-			s.runLeaseExpiry()
+			defer stop()
+			s.runLeaseExpiry(tick)
 		}()
 	})
 }
 
 // runLeaseExpiry checks the driver leases at every tick until Close.
-func (s *Service) runLeaseExpiry() {
-	newTicker := s.leaseTicker
-	if newTicker == nil {
-		newTicker = func(d time.Duration) (<-chan time.Time, func()) {
-			t := time.NewTicker(d)
-			return t.C, t.Stop
-		}
-	}
-	tick, stop := newTicker(LeaseCheckEvery)
-	defer stop()
+func (s *Service) runLeaseExpiry(tick <-chan time.Time) {
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -200,6 +203,13 @@ func (s *Service) emitLeaseExpired(ctx context.Context, roomID string) {
 	}, events.ControlLeaseExpired, systemActor, p)
 	switch {
 	case errors.Is(err, errLeaseNotDue):
+		return
+	case errors.Is(err, store.ErrLogFull):
+		// A full log keeps refusing system events until the room closes, so
+		// retrying every tick would only repeat this line. The mark is per
+		// lease and in memory: a new lease or a restart tries once more.
+		st.leaseLogFullFor = p.LeaseUntil
+		s.log.Warn("room: lease expiry: room log is full; control.lease_expired not written", "room", roomID, "lease_until", p.LeaseUntil)
 		return
 	case err != nil:
 		s.log.Warn("room: lease expiry: append control.lease_expired failed; retry at the next check", "room", roomID, "err", err)

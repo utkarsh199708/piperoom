@@ -136,13 +136,16 @@ type Deps struct {
 }
 
 type roomState struct {
-	snap        RoomSnapshot
-	inbox       *inbox
-	agentCancel context.CancelFunc
-	agentRun    uint64             // generation of the latest agent start; see releaseAgent
-	execCancel  context.CancelFunc // cancels the room's executor on close
-	exec        *execQueue         // nil until the first proposal is approved
-	dedupKey    string             // alert index key of an alert room; "" otherwise
+	snap RoomSnapshot
+	// leaseLogFullFor is the logged lease whose control.lease_expired a full
+	// room log refused (lease_expiry.go); the check skips it from then on.
+	leaseLogFullFor time.Time
+	inbox           *inbox
+	agentCancel     context.CancelFunc
+	agentRun        uint64             // generation of the latest agent start; see releaseAgent
+	execCancel      context.CancelFunc // cancels the room's executor on close
+	exec            *execQueue         // nil until the first proposal is approved
+	dedupKey        string             // alert index key of an alert room; "" otherwise
 
 	// Shadow run state (shadow.go). shadowActive is true from the start of
 	// the shadow supervisor until it has written the run's final status.

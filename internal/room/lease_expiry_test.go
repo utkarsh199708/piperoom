@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ type leaseRig struct {
 	done   chan struct{}
 	stops  chan struct{}
 	period time.Duration
+	made   atomic.Int32 // LeaseTicker calls
 }
 
 func newLeaseRig(t *testing.T, st store.Store, c *testClock) *leaseRig {
@@ -43,6 +45,7 @@ func newLeaseRig(t *testing.T, st store.Store, c *testClock) *leaseRig {
 		Now: c.Now,
 		LeaseTicker: func(d time.Duration) (<-chan time.Time, func()) {
 			r.period = d
+			r.made.Add(1)
 			return r.ticks, func() { r.stops <- struct{}{} }
 		},
 	})
@@ -314,14 +317,46 @@ func TestLeaseExpiryLoopStopsOnClose(t *testing.T) {
 	if n := runtime.NumGoroutine(); n > before {
 		t.Fatalf("goroutines: %d after Close, %d before", n, before)
 	}
-	// Load after Close starts nothing.
+	// Load after Close starts nothing: no ticker is even made.
 	r2 := newLeaseRig(t, memstore.NewWithClock(c.Now), c)
 	r2.svc.Close()
 	_ = r2.svc.Load(context.Background())
-	select {
-	case r2.ticks <- time.Time{}:
-		t.Fatal("a lease loop runs after Close")
-	default:
+	if n := r2.made.Load(); n != 0 {
+		t.Fatalf("LeaseTicker called %d times after Close, want 0", n)
+	}
+}
+
+// fullLogStore refuses control.lease_expired as a room log past its cap and
+// reserve would, and counts the attempts.
+type fullLogStore struct {
+	*memstore.Store
+	attempts atomic.Int32
+}
+
+func (f *fullLogStore) Append(ctx context.Context, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
+	if typ == events.ControlLeaseExpired {
+		f.attempts.Add(1)
+		return events.Event{}, fmt.Errorf("fake: %w", store.ErrLogFull)
+	}
+	return f.Store.Append(ctx, roomID, typ, actor, payload)
+}
+
+func TestLeaseExpiryFullLogTriesOncePerLease(t *testing.T) {
+	ctx := context.Background()
+	c := &testClock{t: leaseT0}
+	fs := &fullLogStore{Store: memstore.NewWithClock(c.Now)}
+	r := newLeaseRig(t, fs, c)
+	r.load()
+	arjun := leaseUser(t, r.svc, "arjun")
+	if _, err := r.svc.CreateRoom(ctx, arjun, "lag", "sev2", "orders"); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(DriverLease)
+	r.tick()
+	r.tick()
+	r.tick()
+	if n := fs.attempts.Load(); n != 1 {
+		t.Fatalf("append attempts on a full log = %d, want 1", n)
 	}
 }
 
