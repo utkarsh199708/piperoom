@@ -233,6 +233,12 @@ func (s *Server) handleCloseRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateHandoff(w http.ResponseWriter, r *http.Request) {
+	// In flight comes before every other check but visibility (docs/api.md),
+	// so before the body is even read.
+	if err := s.svc.HandoffInFlight(r.Context(), chi.URLParam(r, "id")); err != nil {
+		s.writeErr(w, err)
+		return
+	}
 	var body struct {
 		To            string `json:"to"`
 		StayAsWatcher bool   `json:"stay_as_watcher"`

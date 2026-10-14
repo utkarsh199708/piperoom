@@ -3,6 +3,17 @@
 // warehouse). Tools and actions depend on these interfaces, so they can be
 // tested with fakes.
 //
+// Reader / Writer split: every system has a *Reader interface with only the
+// methods that read. A read-only tool (tools.KindRead), the topology builder,
+// the watcher and discovery take Readers only, so the compiler keeps writes
+// out of them. A type assertion from a Reader to a Writer or a *Client in such
+// a package defeats this and fails review. Writers exist only for Kafka
+// Connect and Schema Registry, and only package actions (and wiring, which
+// builds them) may hold one. The full *Client
+// interfaces are Reader + Writer, so one concrete client implements both.
+// KafkaAdmin, SourceDB and Warehouse have no write methods: their Reader is
+// the same method set under the name tools should use.
+//
 // CONTRACT FILE — owned by the reviewer. Do not edit; request changes in your PR.
 package clients
 
@@ -17,13 +28,25 @@ var ErrNotFound = errors.New("not found")
 
 // ---- Kafka Connect (REST) ----
 
-type ConnectClient interface {
+// ConnectReader is the read half of the Kafka Connect client.
+type ConnectReader interface {
 	ListConnectors(ctx context.Context) ([]string, error)
 	Status(ctx context.Context, name string) (ConnectorStatus, error)
 	Config(ctx context.Context, name string) (map[string]string, error)
-	// Write — used only by actions after approval.
+}
+
+// ConnectWriter is the write half: used only by actions after approval.
+// (Resume and UpdateConfig are still optional adapter interfaces in package
+// actions until a contract change request moves them here.)
+type ConnectWriter interface {
 	RestartTask(ctx context.Context, name string, task int) error
 	RestartConnector(ctx context.Context, name string) error
+}
+
+// ConnectClient is the whole Kafka Connect client.
+type ConnectClient interface {
+	ConnectReader
+	ConnectWriter
 }
 
 type ConnectorStatus struct {
@@ -43,16 +66,26 @@ type TaskStatus struct {
 
 // ---- Schema Registry (Confluent REST API) ----
 
-type SchemaRegistryClient interface {
+// SchemaRegistryReader is the read half of the Schema Registry client.
+type SchemaRegistryReader interface {
 	Subjects(ctx context.Context) ([]string, error)
 	Versions(ctx context.Context, subject string) ([]int, error)
 	// Schema returns one version; version -1 means latest.
 	Schema(ctx context.Context, subject string, version int) (SchemaVersion, error)
 	// Compatibility returns the subject level, falling back to the global level.
 	Compatibility(ctx context.Context, subject string) (level string, subjectLevel bool, err error)
-	// Write — used only by actions after approval.
+}
+
+// SchemaRegistryWriter is the write half: used only by actions after approval.
+type SchemaRegistryWriter interface {
 	SetCompatibility(ctx context.Context, subject, level string) error
 	Register(ctx context.Context, subject, schema string) (id int, err error)
+}
+
+// SchemaRegistryClient is the whole Schema Registry client.
+type SchemaRegistryClient interface {
+	SchemaRegistryReader
+	SchemaRegistryWriter
 }
 
 type SchemaVersion struct {
@@ -64,7 +97,9 @@ type SchemaVersion struct {
 
 // ---- Kafka (admin + small reads) ----
 
-type KafkaAdmin interface {
+// KafkaReader is the Kafka client as read-only tools take it. KafkaAdmin has
+// no write method, so the two are the same method set.
+type KafkaReader interface {
 	Topics(ctx context.Context) ([]string, error)
 	TopicOffsets(ctx context.Context, topic string) ([]PartitionOffsets, error)
 	ConsumerGroups(ctx context.Context) ([]string, error)
@@ -73,6 +108,12 @@ type KafkaAdmin interface {
 	// returns records whose key matches (string compare of the decoded key).
 	// It stops at maxScan records per partition.
 	FindByKey(ctx context.Context, topic, key string, since time.Time, maxScan int) ([]RecordRef, error)
+}
+
+// KafkaAdmin is the whole Kafka client (admin + small reads). It adds nothing
+// to KafkaReader; a write method added here later must not go into KafkaReader.
+type KafkaAdmin interface {
+	KafkaReader
 }
 
 type PartitionOffsets struct {
@@ -154,7 +195,8 @@ type DLQReader interface {
 
 // ---- Source Postgres (the CDC source) ----
 
-type SourceDB interface {
+// SourceReader is the source Postgres client as read-only tools take it.
+type SourceReader interface {
 	ReplicationSlots(ctx context.Context) ([]ReplicationSlot, error)
 	// RecentDDL reads the DDL audit table written by an event trigger
 	// (see dev/postgres-init). Newest first.
@@ -165,6 +207,12 @@ type SourceDB interface {
 	LongTransactions(ctx context.Context, olderThan time.Duration) ([]Transaction, error)
 	// Row reads one row by primary key. table is "schema.table".
 	Row(ctx context.Context, table, pkColumn, pk string) (map[string]any, bool, error)
+}
+
+// SourceDB is the whole source Postgres client. It adds nothing to
+// SourceReader (the source role is read-only, docs/pilot/permissions.md).
+type SourceDB interface {
+	SourceReader
 }
 
 type ReplicationSlot struct {
@@ -211,8 +259,14 @@ type Transaction struct {
 
 // ---- Warehouse (Snowflake in production; Postgres in dev) ----
 
-type Warehouse interface {
+// WarehouseReader is the warehouse client as read-only tools take it.
+type WarehouseReader interface {
 	// Freshness returns max(tsColumn) of table. table is "schema.table".
 	Freshness(ctx context.Context, table, tsColumn string) (time.Time, error)
 	Row(ctx context.Context, table, pkColumn, pk string) (map[string]any, bool, error)
+}
+
+// Warehouse is the whole warehouse client. It adds nothing to WarehouseReader.
+type Warehouse interface {
+	WarehouseReader
 }
