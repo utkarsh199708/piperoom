@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import type { ChecklistStepDonePayload, Event, LabelInput, PresenceMember, RoomSnapshot, WsServerMessage } from '../api/types'
+import type {
+  ChecklistStepDonePayload,
+  Event,
+  HypothesisVerdict,
+  LabelInput,
+  PresenceMember,
+  RoomSnapshot,
+  WsServerMessage,
+} from '../api/types'
 import { ApiClientError, api, isFixtures, openRoomWs } from '../api/client'
 import type { ApproveExtras } from '../api/client'
 import { isSoloConfirmError } from '../lib/solo'
@@ -47,6 +55,12 @@ export interface StaleInfo {
   sentHash: string
 }
 
+/** What a nudge came to; `code` is the server error code on a failure. */
+export interface NudgeResult {
+  ok: boolean
+  code?: string
+}
+
 /** What a close attempt came to; `error` is the text for the person. */
 export interface CloseResult {
   ok: boolean
@@ -74,6 +88,13 @@ export interface RoomActions {
   declineSuggestion: (suggestionId: string, reason?: string) => void
   requestControl: () => void
   grantControl: (to: string) => void
+  /** Confirm or dispute the agent's current hypothesis (F9). Errors go to the room error banner. */
+  hypothesisVerdict: (verdict: HypothesisVerdict, note?: string) => void
+  /**
+   * Ask a pending layer's owners to look (F9). Resolves with what happened; an
+   * `already_nudged` answer is for the caller's toast and stays out of the banner.
+   */
+  nudge: (proposalId: string, layer: string) => Promise<NudgeResult>
   /**
    * Resolves when the call is done. On a failure the error is also in the room error
    * banner; `ok: false` lets the close dialog, which covers that banner, show it too.
@@ -523,6 +544,30 @@ export function useRoom(roomId: string) {
         return
       }
       void runAction(api.grantControl(roomId, to))
+    },
+    hypothesisVerdict: (verdict, note) => {
+      const h = stateRef.current?.hypothesis
+      if (!h) return
+      if (isFixtures()) {
+        synthesize('hypothesis.verdict', { verdict, ...(note ? { note } : {}), hypothesis_seq: h.seq })
+        return
+      }
+      void runAction(api.hypothesis(roomId, verdict, note))
+    },
+    nudge: async (proposalId, layer) => {
+      if (isFixtures()) {
+        synthesize('approval.nudged', { proposal_id: proposalId, layer })
+        return { ok: true }
+      }
+      try {
+        await api.nudge(roomId, proposalId, layer)
+        setError(null)
+        return { ok: true }
+      } catch (e) {
+        const code = e instanceof ApiClientError ? e.code : undefined
+        if (code !== 'already_nudged') setError(errorText(e))
+        return { ok: false, code }
+      }
     },
     close: async (resolution) => {
       if (isFixtures()) {

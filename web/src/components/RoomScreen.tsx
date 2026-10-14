@@ -37,6 +37,7 @@ import { DecisionHandleContext, RoomListContext, useBreadcrumbTail, useRegisterR
 import type { DecisionHandle } from './shell/context'
 import { DecisionBar } from './room/DecisionBar'
 import { HypothesisCard } from './room/HypothesisCard'
+import { usePeople } from '../hooks/usePeople'
 import { PROPOSAL_ANCHOR, ProposalsSummary } from './room/ProposalsSummary'
 import { RoomError } from './room/RoomError'
 import { RoomHeader } from './room/RoomHeader'
@@ -141,6 +142,9 @@ export function RoomScreen() {
   const [prefill, setPrefill] = useState<{ text: string; n: number } | undefined>()
   const [copied, setCopied] = useState(false)
   const [exporting, setExporting] = useState(false)
+  // One GET /api/people per room mount: layers for the presence rows and the pending layers. A viewer gets none.
+  const peopleState = usePeople()
+  const peopleList = peopleState.status === 'ready' ? peopleState.people : undefined
   const now = useNow(5_000) // a request past expires_at stops counting as in flight
 
   const headerMembers = useMemo(() => {
@@ -274,10 +278,19 @@ export function RoomScreen() {
       onSelectLayer={setLayerFilter}
     />
   )
-  const hypothesis = state.hypothesis ? <HypothesisCard hypothesis={state.hypothesis} steps={state.steps} /> : null
+  const hypothesis = state.hypothesis ? (
+    <HypothesisCard
+      hypothesis={state.hypothesis}
+      steps={state.steps}
+      history={state.hypothesis_history}
+      selfId={user.id}
+      canDecide={!viewer && state.status === 'open'}
+      onVerdict={actions.hypothesisVerdict}
+    />
+  ) : null
   const proposalsCard = showProposals ? (
     <div id={PROPOSAL_ANCHOR} tabIndex={-1} className="scroll-mt-4 focus:outline-none">
-      <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} />
+      <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} people={peopleList} presence={presence} />
     </div>
   ) : null
   const investigation = (
@@ -323,6 +336,7 @@ export function RoomScreen() {
       selfId={user.id}
       selfName={user.name}
       selfIsViewer={viewer}
+      people={peopleList}
     />
   )
   const suggestions = <SuggestionsPanel suggestions={state.suggestions} />
@@ -423,7 +437,7 @@ export function RoomScreen() {
                 {suggestions}
                 <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
                 <div className="h-px shrink-0 bg-border" />
-                <ActivityFeed activity={state.activity} />
+                <ActivityFeed activity={state.activity} openedAt={state.opened_at} />
               </TabsContent>
             </Tabs>
           )}
@@ -455,7 +469,7 @@ export function RoomScreen() {
             {suggestions}
             <NotifyToggle permission={permission} onEnable={() => void enableNotify()} />
             <div className="h-px shrink-0 bg-border" />
-            <ActivityFeed activity={state.activity} />
+            <ActivityFeed activity={state.activity} openedAt={state.opened_at} />
           </aside>
         )}
       </div>
