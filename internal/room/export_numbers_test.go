@@ -139,6 +139,9 @@ func fixedVectorDoc(t *testing.T) (string, []byte) {
 // small Node script (sorted keys, ECMAScript number text, 1e400 as a string),
 // from the document this test builds, so a change to the canonicalization or to
 // the document shape fails here instead of silently changing every hash.
+// It is the same value as before events.Actor gained "verified" (A-ID-2): the
+// key is omitempty and these actors are not verified, so an export of a room
+// written before the field keeps its hash.
 const fixedVectorSHA256 = "03cab4ddbc8aa8aa07e5511b3cc63c4e64ace9dd959f0a7d6a50e4109a2d31a5"
 
 func TestExportFixedVector(t *testing.T) {
