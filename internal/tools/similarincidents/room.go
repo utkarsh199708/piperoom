@@ -26,12 +26,15 @@ const (
 	maxListItems      = 4
 	maxTerms          = 8
 	maxTermBytes      = 60
+	fixEventLimit     = 64 // newest proposal.created / action.executed events read per room
+	maxFixActions     = 6
 )
 
 var (
-	rareTypes    = []events.Type{events.RoomCreated, events.RoomClosed, events.ShadowLabelled}
+	rareTypes    = []events.Type{events.RoomCreated, events.RoomClosed, events.ShadowLabelled, events.RoomLabelled}
 	handoffTypes = []events.Type{events.HandoffCreated}
 	resTypes     = []events.Type{events.AgentToolResult}
+	fixTypes     = []events.Type{events.ProposalCreated, events.ActionExecuted}
 )
 
 // pastRoom is what is kept of one closed room. Everything in it is text that
@@ -47,6 +50,18 @@ type pastRoom struct {
 	// was actually broken first, and the root-cause words. Empty if unlabelled.
 	Layer string
 	Terms []string
+	// Cause, FixThatWorked and FixProposalID come from the last room.labelled
+	// (typed by a person). FixProposal is the proposal whose every executed
+	// step succeeded: its title and the action names of its steps.
+	Cause         string
+	FixThatWorked string
+	FixProposalID string
+	FixTitle      string
+	FixActions    []string
+	// Duration is room open to close; ClosedBy is the closer's name, kept
+	// only when the server vouched for it (events.Actor.Verified).
+	Duration time.Duration
+	ClosedBy string
 	// Hand-off summary fields of the last hand-off (index only, never returned).
 	WhatBroke string
 	Why       string
@@ -90,8 +105,25 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 				pr.Title = clipRunes(scrub(p.Title), maxTitleBytes)
 			}
 		case events.RoomClosed:
-			if p, err := events.Decode[events.RoomClosedPayload](e); err == nil {
-				pr.Resolution = clipBytes(scrub(p.Resolution), maxFieldBytes)
+			// Gap 10: a resolution typed by someone the server cannot vouch
+			// for must not steer future rooms, so it is not indexed or shown.
+			if e.Actor.Verified {
+				pr.ClosedBy = clipBytes(oneLine(scrub(e.Actor.Name)), 60)
+				if p, err := events.Decode[events.RoomClosedPayload](e); err == nil {
+					pr.Resolution = clipBytes(scrub(p.Resolution), maxFieldBytes)
+				}
+			}
+		case events.RoomLabelled:
+			// Re-labelling appends another; the last wins.
+			p, err := events.Decode[events.RoomLabelledPayload](e)
+			if err != nil {
+				continue
+			}
+			pr.Cause = clipBytes(scrub(p.Cause), maxFieldBytes)
+			pr.FixThatWorked = clipBytes(scrub(p.FixThatWorked), maxFieldBytes)
+			pr.FixProposalID = p.FixProposalID
+			if slices.Contains(events.Layers, p.ActualLayer) {
+				pr.Layer = p.ActualLayer
 			}
 		case events.ShadowLabelled:
 			// One label per room; the last wins if there were ever two.
@@ -105,9 +137,17 @@ func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pas
 			}
 		}
 	}
+	if !r.OpenedAt.IsZero() && pr.ClosedAt.After(r.OpenedAt) {
+		pr.Duration = pr.ClosedAt.Sub(r.OpenedAt)
+	}
 	if !agentTextOK {
 		return pr, nil
 	}
+	fix, err := src.EventsOfTypes(ctx, r.ID, fixTypes, fixEventLimit)
+	if err != nil {
+		return pastRoom{}, fmt.Errorf("similarincidents: room %s: %w", r.ID, err)
+	}
+	pr.addFix(fix)
 	hand, err := src.EventsOfTypes(ctx, r.ID, handoffTypes, handoffEventLimit)
 	if err != nil {
 		return pastRoom{}, fmt.Errorf("similarincidents: room %s: %w", r.ID, err)
@@ -171,4 +211,61 @@ func (pr *pastRoom) addTraces(res []events.Event) {
 		}
 	}
 	pr.traceText = clipBytes(text.String(), maxTraceTextKeep)
+}
+
+// addFix finds the proposal that fixed the room: every action.executed of it
+// is ok and at least one ran; the label's fix_proposal_id picks it when set,
+// otherwise the last such proposal wins. Its title is agent text, so this runs
+// only for rooms whose agent text is trusted (not shadow).
+func (pr *pastRoom) addFix(evs []events.Event) {
+	type prop struct {
+		title   string
+		actions []string
+		ran, ok int
+	}
+	props := map[string]*prop{}
+	var order []string
+	for _, e := range evs {
+		switch e.Type {
+		case events.ProposalCreated:
+			p, err := events.Decode[events.ProposalCreatedPayload](e)
+			if err != nil {
+				continue
+			}
+			x := &prop{title: clipBytes(oneLine(scrub(p.Title)), maxSummaryField)}
+			for _, st := range p.Steps[:min(len(p.Steps), maxFixActions)] {
+				x.actions = append(x.actions, clipBytes(oneLine(scrub(st.Action)), maxTermBytes))
+			}
+			if _, seen := props[p.ProposalID]; !seen {
+				order = append(order, p.ProposalID)
+			}
+			props[p.ProposalID] = x
+		case events.ActionExecuted:
+			p, err := events.Decode[events.ActionExecutedPayload](e)
+			if err != nil {
+				continue
+			}
+			if x := props[p.ProposalID]; x != nil {
+				x.ran++
+				if p.OK && !p.OutcomeUnknown {
+					x.ok++
+				}
+			}
+		}
+	}
+	chosen := ""
+	for _, id := range order {
+		x := props[id]
+		if x.ran == 0 || x.ran != x.ok {
+			continue
+		}
+		if id == pr.FixProposalID {
+			chosen = id
+			break
+		}
+		chosen = id
+	}
+	if chosen != "" {
+		pr.FixTitle, pr.FixActions = props[chosen].title, props[chosen].actions
+	}
 }
