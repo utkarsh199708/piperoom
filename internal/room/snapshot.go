@@ -93,6 +93,8 @@ type RoomSnapshot struct {
 	OpenProposals      []Proposal   `json:"open_proposals"`
 	PendingSuggestions []Suggestion `json:"pending_suggestions"`
 	Members            []Member     `json:"members"`
+	// Insight is the room's cost and clock facts (F11), folded from the log.
+	Insight Insight `json:"insight"`
 
 	// Room limits (docs/design/retention.md). AutoCloseAt is set by the
 	// service, not by Apply: it depends on PIPEROOM_MAX_OPEN_DAYS. LogCap is
@@ -151,6 +153,7 @@ const (
 func NewSnapshot() RoomSnapshot {
 	return RoomSnapshot{
 		AgentStatus:        AgentStatus{State: "idle"},
+		Insight:            Insight{TimeToFirstHypothesisS: -1},
 		LogCap:             LogCapOK,
 		OpenProposals:      []Proposal{},
 		PendingSuggestions: []Suggestion{},
@@ -176,6 +179,11 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 	if s.shadowGrade != nil {
 		g := *s.shadowGrade
 		c.shadowGrade = &g
+	}
+	c.Insight.FirstHypothesisAt = cloneTime(s.Insight.FirstHypothesisAt)
+	if s.Insight.Usage.CostUSD != nil {
+		v := *s.Insight.Usage.CostUSD
+		c.Insight.Usage.CostUSD = &v
 	}
 	c.AutoCloseAt = cloneTime(s.AutoCloseAt)
 	c.extendedUntil = cloneTime(s.extendedUntil)
@@ -223,6 +231,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	snap.Members = append([]Member(nil), snap.Members...)
 	snap.OpenProposals = append([]Proposal(nil), snap.OpenProposals...)
 	snap.PendingSuggestions = append([]Suggestion(nil), snap.PendingSuggestions...)
+	snap.Insight = foldInsight(snap, e)
 	if e.Actor.Kind == events.ActorHuman {
 		snap.Members = upsertMember(snap.Members, e.Actor, "watching")
 	}
