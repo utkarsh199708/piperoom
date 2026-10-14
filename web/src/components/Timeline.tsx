@@ -1,4 +1,5 @@
 import { useId, useState } from 'react'
+import { emptyStateFor } from '../lib/emptyState'
 import type { FormEvent } from 'react'
 import { Check, ChevronRight, X } from 'lucide-react'
 import type { AgentMessageState, CommentState, StepState, ToolCallState } from '../state/types'
@@ -347,6 +348,7 @@ export function Timeline({
   readOnly = false,
   working = false,
   onTakeControl,
+  agent,
 }: {
   steps: StepState[]
   messages: AgentMessageState[]
@@ -358,20 +360,24 @@ export function Timeline({
   working?: boolean
   /** Offered in the empty state when the room has no driver and this person may take control. */
   onTakeControl?: () => void
+  /** The agent's status: the empty state says what it is doing instead of a fixed line. */
+  agent?: { state: string; detail?: string }
 }) {
   const unanchored = comments.filter((c) => !c.step_id)
   if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
+    const empty = emptyStateFor(agent)
     return (
       <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border bg-card p-6 text-center">
-        <PersonAvatar actor={AGENT} size={28} className="opacity-70" />
-        <p className="m-0 text-base font-medium">The agent has not started yet.</p>
-        {onTakeControl && (
+        <PersonAvatar actor={AGENT} size={28} className={empty.busy ? 'animate-pulse' : 'opacity-70'} />
+        <p className="m-0 text-base font-medium">{empty.title}</p>
+        {empty.hint && <p className="m-0 max-w-[48ch] text-muted-foreground">{empty.hint}</p>}
+        {empty.offerSteer && onTakeControl && (
           <p className="m-0 max-w-[48ch] text-muted-foreground">
-            Take control and send a steer to start. A good first steer: &ldquo;check consumer group orders-sync for a
+            Take control and send a steer to start. A good first steer: &ldquo;check the consumer lag and look for a
             stuck partition&rdquo;.
           </p>
         )}
-        {onTakeControl && (
+        {empty.offerSteer && onTakeControl && (
           <Button className="mt-1" aria-keyshortcuts="T" onClick={onTakeControl}>
             Take control and steer
             <Kbd aria-hidden="true">T</Kbd>

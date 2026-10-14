@@ -10,7 +10,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { isFixtures } from '@/api/client'
-import { DEV_USERS } from '@/dev/users'
+import { useAuthUsers } from '@/hooks/useAuthUsers'
 import { useCurrentUser } from '@/context/user'
 import { useTheme } from '@/context/theme'
 import { isDev } from '@/lib/env'
@@ -63,21 +63,14 @@ export function AccountMenu({ onNavigate }: { onNavigate?: () => void }) {
             <>
               <DropdownMenuSeparator />
               <DropdownMenuLabel>Switch user (dev)</DropdownMenuLabel>
-              {DEV_USERS.map((u) => (
-                <DropdownMenuItem
-                  key={u.id}
-                  disabled={busy || u.id === user.id}
-                  aria-label={`Switch user to ${u.name}`}
-                  onSelect={() => {
-                    setUserId(u.id)
-                    onNavigate?.()
-                  }}
-                >
-                  <User aria-hidden="true" />
-                  {u.name}
-                  {u.id === user.id && <span className="ml-auto text-xs text-subtle-foreground">you</span>}
-                </DropdownMenuItem>
-              ))}
+              <DevUserItems
+                selfId={user.id}
+                busy={busy}
+                onPick={(id) => {
+                  setUserId(id)
+                  onNavigate?.()
+                }}
+              />
             </>
           )}
           {!isFixtures() && (
@@ -92,5 +85,31 @@ export function AccountMenu({ onNavigate }: { onNavigate?: () => void }) {
         </DropdownMenuContent>
       </DropdownMenu>
     </div>
+  )
+}
+
+// The dev switcher's rows come from GET /auth/users. A separate component so the fetch happens only
+// where the rows are drawn (dev builds, menu open).
+function DevUserItems({ selfId, busy, onPick }: { selfId: string; busy?: boolean; onPick: (id: string) => void }) {
+  const users = useAuthUsers()
+  if (users.status === 'loading') return <DropdownMenuLabel className="font-normal">Loading users…</DropdownMenuLabel>
+  if (users.status === 'error') {
+    return <DropdownMenuLabel className="font-normal text-destructive-fg">Could not load users</DropdownMenuLabel>
+  }
+  return (
+    <>
+      {users.data.map((u) => (
+        <DropdownMenuItem
+          key={u.id}
+          disabled={busy || u.id === selfId}
+          aria-label={`Switch user to ${u.name}`}
+          onSelect={() => onPick(u.id)}
+        >
+          <User aria-hidden="true" />
+          {u.name}
+          {u.id === selfId && <span className="ml-auto text-xs text-subtle-foreground">you</span>}
+        </DropdownMenuItem>
+      ))}
+    </>
   )
 }

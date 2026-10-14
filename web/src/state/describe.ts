@@ -13,6 +13,7 @@ import type {
   ControlGrantedPayload,
   Event,
   HandoffCreatedPayload,
+  HandoffRequestedPayload,
   ProposalCreatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
@@ -104,6 +105,12 @@ export function describeEvent(e: Event, driverBefore: string | null = null): str
       const p = as<ActionExecutedPayload>(e)
       return `Step ${p.step_index + 1} ${p.ok ? 'succeeded' : 'failed'}`
     }
+    case 'handoff.requested': {
+      const p = as<HandoffRequestedPayload>(e)
+      return `${who} asked for a hand-off to ${p.to.name}`
+    }
+    case 'handoff.failed':
+      return 'The hand-off could not be written'
     case 'handoff.created': {
       const p = as<HandoffCreatedPayload>(e)
       return `${who} started a hand-off to ${p.to.name}`

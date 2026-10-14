@@ -127,6 +127,20 @@ export interface HandoffState {
   status: 'pending' | 'accepted'
 }
 
+/** A hand-off the agent is still writing the summary for (handoff.requested, R0). */
+export interface HandoffRequestState {
+  request_id: string
+  to: Actor
+  stay_as_watcher: boolean
+  expires_at: string
+}
+
+/** The last hand-off request that ended without a hand-off (handoff.failed). */
+export interface HandoffFailureState {
+  request_id: string
+  reason: string
+}
+
 /** The alert that opened the room, from room.created's `alert` webhook body. */
 export interface AlertInfo {
   /** Best-effort source inferred from the raw body shape; null when unknown. */
@@ -170,6 +184,9 @@ export interface RoomState {
   control_requests: ControlRequestState[]
   trace: TraceState | null
   handoffs: HandoffState[]
+  /** In flight until handoff.created / handoff.failed with its id, or `expires_at`. */
+  handoff_request: HandoffRequestState | null
+  handoff_failure: HandoffFailureState | null
   activity: ActivityEntry[]
 }
 
@@ -196,6 +213,8 @@ export function emptyRoomState(id: string): RoomState {
     control_requests: [],
     trace: null,
     handoffs: [],
+    handoff_request: null,
+    handoff_failure: null,
     activity: [],
   }
 }

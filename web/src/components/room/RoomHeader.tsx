@@ -1,4 +1,4 @@
-import { Check, CircleCheck, Eye, Repeat2, UserPlus } from 'lucide-react'
+import { Check, CircleCheck, Download, Eye, Loader2, Repeat2, UserPlus } from 'lucide-react'
 import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
 import { canClose, canHandoff, isViewer } from '@/state/permissions'
@@ -46,6 +46,9 @@ export function RoomHeader({
   onHandoff,
   onCloseRoom,
   onInvite,
+  onExport,
+  exporting = false,
+  handoffBusy = false,
 }: {
   state: RoomState
   user: CurrentUser
@@ -55,6 +58,11 @@ export function RoomHeader({
   onHandoff: () => void
   onCloseRoom: () => void
   onInvite: () => void
+  /** Download the room transcript. Left out for viewers (read-only users); the server can still refuse with not_allowed. */
+  onExport?: () => void
+  exporting?: boolean
+  /** A hand-off summary is being written: the button shows progress and opens the dialog to follow it. */
+  handoffBusy?: boolean
 }) {
   const open = state.status === 'open'
   const dot: DotTone = !open ? 'ok' : state.severity === 'sev1' ? 'fail' : state.severity === 'sev2' ? 'warn' : 'muted'
@@ -93,9 +101,13 @@ export function RoomHeader({
           )}
           <AgentPill state={state} />
           {canHandoff(state, user) && (
-            <Button variant="secondary" aria-keyshortcuts="H" onClick={onHandoff}>
-              <Repeat2 aria-hidden="true" />
-              Hand off
+            <Button variant="secondary" aria-keyshortcuts="H" aria-busy={handoffBusy || undefined} onClick={onHandoff}>
+              {handoffBusy ? (
+                <Loader2 className="animate-spin" aria-hidden="true" />
+              ) : (
+                <Repeat2 aria-hidden="true" />
+              )}
+              {handoffBusy ? 'Writing hand-off…' : 'Hand off'}
               <Kbd aria-hidden="true">H</Kbd>
             </Button>
           )}
@@ -104,6 +116,12 @@ export function RoomHeader({
               <CircleCheck aria-hidden="true" />
               Close room
               <Kbd aria-hidden="true">C</Kbd>
+            </Button>
+          )}
+          {onExport && (
+            <Button variant="outline" disabled={exporting} onClick={onExport}>
+              <Download aria-hidden="true" />
+              {exporting ? 'Exporting…' : 'Export'}
             </Button>
           )}
           <Button
