@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/testenv"
 )
 
@@ -152,6 +153,102 @@ func TestRowAfterAlterIntegration(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("row not found after ALTER")
+	}
+}
+
+// QA4: a missing sink table or column is clients.ErrNotFound, not an outage.
+func TestNotFoundIntegration(t *testing.T) {
+	db := warehouseDB(t)
+	conn := writeConn(t, testenv.Require(t).WarehouseDBURL)
+	table := testenv.Name("whnf")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS analytics."+table)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := conn.Exec(ctx, "CREATE TABLE analytics."+table+" (id bigint primary key, ts timestamptz)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	if _, err := db.Freshness(ctx, "analytics.it_no_such_table_x", "ts"); !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("Freshness missing table err = %v, want ErrNotFound", err)
+	}
+	if _, err := db.Freshness(ctx, "analytics."+table, "no_such_col"); !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("Freshness missing column err = %v, want ErrNotFound", err)
+	}
+	if _, _, err := db.Row(ctx, "analytics.it_no_such_table_x", "id", "1"); !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("Row missing table err = %v, want ErrNotFound", err)
+	}
+}
+
+// A date column is a day, not midnight: a row dated today is fresh, and the
+// returned time never lies ahead of now.
+func TestFreshnessDateColumnIntegration(t *testing.T) {
+	db := warehouseDB(t)
+	conn := writeConn(t, testenv.Require(t).WarehouseDBURL)
+	table := testenv.Name("whdate")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS analytics."+table)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := conn.Exec(ctx, "CREATE TABLE analytics."+table+" (id bigint primary key, d date)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	if _, err := conn.Exec(ctx, "INSERT INTO analytics."+table+" VALUES (1, $1), (2, $2)", today.AddDate(0, 0, -3), today); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	ts, err := db.Freshness(ctx, "analytics."+table, "d")
+	if err != nil {
+		t.Fatalf("Freshness: %v", err)
+	}
+	if ts.After(time.Now()) || time.Since(ts) > time.Minute {
+		t.Fatalf("freshness of a row dated today = %v, want ~now", ts)
+	}
+	if _, err := conn.Exec(ctx, "DELETE FROM analytics."+table+" WHERE id = 2"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	ts, err = db.Freshness(ctx, "analytics."+table, "d")
+	if err != nil {
+		t.Fatalf("Freshness: %v", err)
+	}
+	if want := today.AddDate(0, 0, -2); !ts.Equal(want) {
+		t.Fatalf("freshness of a row dated 3 days ago = %v, want end of that day %v", ts, want)
+	}
+}
+
+// A row larger than maxRowBytes is refused, not loaded into memory whole.
+func TestRowSizeCapIntegration(t *testing.T) {
+	db := warehouseDB(t)
+	conn := writeConn(t, testenv.Require(t).WarehouseDBURL)
+	table := testenv.Name("whbig")
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS analytics."+table)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := conn.Exec(ctx, "CREATE TABLE analytics."+table+" (id bigint primary key, blob text)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := conn.Exec(ctx, "INSERT INTO analytics."+table+" VALUES (1, repeat('x', $1::int)), (2, 'small')", maxRowBytes+1); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if _, _, err := db.Row(ctx, "analytics."+table, "id", "1"); !errors.Is(err, ErrRowTooLarge) {
+		t.Fatalf("Row of a huge row err = %v, want ErrRowTooLarge", err)
+	}
+	row, found, err := db.Row(ctx, "analytics."+table, "id", "2")
+	if err != nil || !found || row["blob"] != "small" {
+		t.Fatalf("small row = %v, %v, %v", row, found, err)
+	}
+	if _, found, err := db.Row(ctx, "analytics."+table, "id", "3"); err != nil || found {
+		t.Fatalf("absent row found=%v err=%v", found, err)
 	}
 }
 

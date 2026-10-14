@@ -2,6 +2,7 @@ package topology
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -227,21 +228,52 @@ func groupHealth(lag clients.GroupLag, t Thresholds) (Health, map[string]string)
 	return HealthOK, facts
 }
 
-// topicHealth is ok as long as Kafka answers; a quiet topic is not an error.
+// futureSkew is how far ahead of this server's clock a newest timestamp may
+// be and still read as "now". Beyond it the clocks disagree (skew, a timestamp
+// without time zone written in another zone) or the row is bad: the age is
+// then unknown, and a negative age clamped to 0s would hide a stale table.
+const futureSkew = time.Minute
+
+// futureFacts returns the facts for a newest timestamp ahead of now by more
+// than futureSkew, or nil when it is not.
+func futureFacts(newest, now time.Time) map[string]string {
+	ahead := newest.Sub(now)
+	if ahead <= futureSkew {
+		return nil
+	}
+	return map[string]string{"future_timestamp": HumanAge(ahead) + " ahead"}
+}
+
+// topicHealth decides a topic's health. A quiet topic is not an error; a
+// topic Kafka says does not exist fails; any other error is unknown.
 func topicHealth(err error, newest, now time.Time) (Health, map[string]string) {
 	if err != nil {
-		return HealthUnknown, nil
+		if errors.Is(err, clients.ErrNotFound) {
+			return HealthFail, map[string]string{"missing": "true"}
+		}
+		return HealthUnknown, map[string]string{"error": "unreachable"}
 	}
 	if newest.IsZero() {
 		return HealthOK, map[string]string{"newest_record": "never"}
+	}
+	if f := futureFacts(newest, now); f != nil {
+		f["newest_record"] = "unknown"
+		return HealthWarn, f
 	}
 	return HealthOK, map[string]string{"newest_record": HumanAge(now.Sub(newest)) + " ago"}
 }
 
 // sinkHealth decides a sink table's health from its newest row timestamp.
+// The age is absolute: now minus max(ts_column), i.e. how long nothing newer
+// was written, not end-to-end replication lag. A newest row in the future
+// warns with future_timestamp and an unknown age.
 func sinkHealth(ts, now time.Time, t Thresholds) (Health, map[string]string) {
 	if ts.IsZero() {
 		return HealthWarn, map[string]string{"stale_for": "never"}
+	}
+	if f := futureFacts(ts, now); f != nil {
+		f["stale_for"] = "unknown"
+		return HealthWarn, f
 	}
 	stale := now.Sub(ts)
 	facts := map[string]string{"stale_for": HumanAge(stale)}
@@ -274,7 +306,9 @@ func HumanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), suffixes[exp])
 }
 
-// HumanAge renders a duration compactly, clamped to zero.
+// HumanAge renders a duration compactly, clamped to zero. Callers that can
+// see a negative age (a timestamp ahead of the clock) check futureFacts first
+// so the clamp never hides it.
 func HumanAge(d time.Duration) string {
 	if d < 0 {
 		d = 0

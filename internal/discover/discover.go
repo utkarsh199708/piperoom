@@ -10,11 +10,32 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/redact"
 )
 
 const pgSourceClass = "io.debezium.connector.postgresql.PostgresConnector"
+
+// maxLoggedErr caps the error text a warning carries. A client error can
+// quote a whole HTTP response body (Connect echoes connector config, password
+// included, in some 500s); the head is enough to diagnose.
+const maxLoggedErr = 512
+
+// logErr is the form of a client error that goes into a log record: secrets
+// masked (internal/redact), then cut to maxLoggedErr bytes on a rune boundary.
+func logErr(err error) string {
+	s, _ := redact.Text(err.Error())
+	if len(s) <= maxLoggedErr {
+		return s
+	}
+	cut := maxLoggedErr
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + fmt.Sprintf("... [%d bytes cut]", len(s)-cut)
+}
 
 // plainTable is a schema.table include entry with no regex metacharacters.
 var plainTable = regexp.MustCompile(`^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$`)
@@ -126,7 +147,7 @@ func (r *runner) connector(name string, topics map[string]bool) (*draft, []strin
 		r.skip(name, "deleted during discovery")
 		return nil, nil
 	case err != nil:
-		r.o.Logger.Warn("discover: connector config read failed", "connector", name, "err", err)
+		r.o.Logger.Warn("discover: connector config read failed", "connector", name, "err", logErr(err))
 		r.skip(name, "config read failed")
 		return nil, nil
 	}
@@ -293,7 +314,7 @@ func (r *runner) warnSharedPrefixes(drafts []*draft) {
 func (r *runner) checkSubjects(drafts []*draft) {
 	subjects, err := call(r, r.d.Registry.Subjects)
 	if err != nil {
-		r.o.Logger.Warn("discover: list subjects failed", "err", err)
+		r.o.Logger.Warn("discover: list subjects failed", "err", logErr(err))
 		r.warn("schema registry subjects could not be listed: subject checks skipped")
 		return
 	}
@@ -315,7 +336,7 @@ func (r *runner) checkSubjects(drafts []*draft) {
 func (r *runner) matchGroups(drafts []*draft) {
 	groups, err := call(r, r.d.Kafka.ConsumerGroups)
 	if err != nil {
-		r.o.Logger.Warn("discover: list consumer groups failed", "err", err)
+		r.o.Logger.Warn("discover: list consumer groups failed", "err", logErr(err))
 		r.warn("consumer groups could not be listed: consumer_groups left empty")
 		return
 	}
@@ -330,7 +351,7 @@ func (r *runner) matchGroups(drafts []*draft) {
 			continue
 		}
 		if err != nil {
-			r.o.Logger.Warn("discover: group lag read failed", "group", g, "err", err)
+			r.o.Logger.Warn("discover: group lag read failed", "group", g, "err", logErr(err))
 			r.warn("consumer group %s: lag could not be read", g)
 			continue
 		}
@@ -363,7 +384,7 @@ func (r *runner) checkSlots(drafts []*draft) {
 	}
 	slots, err := call(r, r.d.Source.ReplicationSlots)
 	if err != nil {
-		r.o.Logger.Warn("discover: list replication slots failed", "err", err)
+		r.o.Logger.Warn("discover: list replication slots failed", "err", logErr(err))
 		r.warn("replication slots could not be listed: slot checks skipped")
 		return
 	}

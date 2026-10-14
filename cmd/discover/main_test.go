@@ -361,6 +361,26 @@ func TestDiscoverErrorAndWarningsHideAddresses(t *testing.T) {
 	}
 }
 
+// QA4: an HTTP error body can quote a secret no env var names (Connect echoes
+// connector config); it must be masked and the body cut.
+func TestDiscoverErrorBodyMaskedAndCut(t *testing.T) {
+	const secret = "Sup3rS3cr3tPassw0rd!"
+	r := testRunner(new(bool))
+	r.discover = func(context.Context, discover.Deps, discover.Options) (discover.Result, error) {
+		return discover.Result{}, errors.New(`connect: GET /connectors: status 500: {"message":"database.password=` + secret + `"}` + strings.Repeat("x", 10000))
+	}
+	code, _, stderr := runT(t, r, "-out", filepath.Join(t.TempDir(), "x.yaml"))
+	if code != exitError {
+		t.Fatalf("exit = %d; stderr:\n%s", code, stderr)
+	}
+	if strings.Contains(stderr, secret) {
+		t.Fatalf("secret printed: %s", stderr)
+	}
+	if len(stderr) > 2*maxLine {
+		t.Fatalf("stderr is %d bytes, want the body cut near %d", len(stderr), maxLine)
+	}
+}
+
 func TestRealBuilderErrorsHideAddresses(t *testing.T) {
 	// Each case makes a client constructor fail before any network I/O.
 	tests := []struct {

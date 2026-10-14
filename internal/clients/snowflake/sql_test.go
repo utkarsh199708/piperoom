@@ -32,6 +32,14 @@ func TestRowSQL(t *testing.T) {
 	}
 }
 
+func TestRowSizeSQL(t *testing.T) {
+	got, err := rowSizeSQL("analytics.orders", "id")
+	want := `SELECT LENGTH(TO_JSON(OBJECT_CONSTRUCT(*))) FROM "ANALYTICS"."ORDERS" WHERE "ID" = ? LIMIT 1`
+	if err != nil || got != want {
+		t.Fatalf("rowSizeSQL = %q, %v; want %q", got, err, want)
+	}
+}
+
 // injections are table, column or key strings an LLM or a user could supply.
 var injections = []string{
 	`orders; DROP TABLE x`,
@@ -58,6 +66,12 @@ func TestSQLBuildersRefuseInjection(t *testing.T) {
 		}
 		if q, err := rowSQL("analytics.orders", bad); err == nil {
 			t.Errorf("rowSQL(column %q) built %q, want error", bad, q)
+		}
+		if q, err := rowSizeSQL("analytics."+bad, "id"); err == nil {
+			t.Errorf("rowSizeSQL(table part %q) built %q, want error", bad, q)
+		}
+		if q, err := rowSizeSQL("analytics.orders", bad); err == nil {
+			t.Errorf("rowSizeSQL(column %q) built %q, want error", bad, q)
 		}
 	}
 }

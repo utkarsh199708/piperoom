@@ -5,12 +5,15 @@ package warehouse
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"piperoom/internal/clients"
@@ -55,8 +58,39 @@ func (d *DB) Close() {
 	}
 }
 
+// maxRowBytes caps the text size of one row Row loads. Row feeds a trace diff
+// and a tool summary, so a multi-megabyte JSON or text column is never needed
+// and must not be pulled into memory whole.
+const maxRowBytes = 1 << 20
+
+// ErrRowTooLarge is returned by Row when the row's text form exceeds
+// maxRowBytes. The row exists; it is not loaded.
+var ErrRowTooLarge = errors.New("warehouse: row too large")
+
+// wrapErr wraps a query error, mapping a missing table, schema or column
+// (SQLSTATE 42P01 undefined_table, 3F000 invalid_schema_name, 42703
+// undefined_column) to clients.ErrNotFound, as the Snowflake client does, so
+// callers tell "does not exist" from "warehouse unreachable" with errors.Is.
+func wrapErr(op, table string, err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "42P01", "3F000", "42703":
+			return fmt.Errorf("warehouse: %s %s: %w: %w", op, table, clients.ErrNotFound, err)
+		}
+	}
+	return fmt.Errorf("warehouse: %s %s: %w", op, table, err)
+}
+
 // Freshness returns max(tsColumn) of table. A zero time means the table has
-// no rows.
+// no rows. The caller computes an absolute age (now minus this time): how long
+// nothing newer was written, not replication lag.
+//
+// A date column has no time of day, so its newest value is read as the end of
+// that day (UTC), not its midnight: a row dated today is fresh. The end of
+// today is clamped to now so it never reads as a future timestamp; a date
+// after today is returned as its midnight, which callers flag as future. The
+// age of a date column is therefore only accurate to a day.
 func (d *DB) Freshness(ctx context.Context, table, tsColumn string) (time.Time, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
@@ -66,18 +100,48 @@ func (d *DB) Freshness(ctx context.Context, table, tsColumn string) (time.Time, 
 		return time.Time{}, err
 	}
 	q := fmt.Sprintf("SELECT max(%s) FROM %s", pgx.Identifier{col}.Sanitize(), pgx.Identifier{schema, tbl}.Sanitize())
+	rows, err := d.pool.Query(ctx, q)
+	if err != nil {
+		return time.Time{}, wrapErr("freshness of", table, err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return time.Time{}, wrapErr("freshness of", table, err)
+		}
+		return time.Time{}, nil
+	}
+	isDate := len(rows.FieldDescriptions()) > 0 && rows.FieldDescriptions()[0].DataTypeOID == pgtype.DateOID
 	var ts *time.Time
-	if err := d.pool.QueryRow(ctx, q).Scan(&ts); err != nil {
-		return time.Time{}, fmt.Errorf("warehouse: freshness of %s: %w", table, err)
+	if err := rows.Scan(&ts); err != nil {
+		return time.Time{}, wrapErr("freshness of", table, err)
 	}
 	if ts == nil {
 		return time.Time{}, nil
 	}
+	if isDate {
+		return endOfDay(*ts, time.Now()), nil
+	}
 	return *ts, nil
+}
+
+// endOfDay reads a date (midnight UTC) as the end of that day, clamped to
+// now; a date after today keeps its midnight so it still reads as future.
+func endOfDay(day, now time.Time) time.Time {
+	if day.After(now) {
+		return day
+	}
+	end := day.AddDate(0, 0, 1)
+	if end.After(now) {
+		return now
+	}
+	return end
 }
 
 // Row reads one row by primary key. table is "schema.table". Values are
 // converted to JSON-friendly types (numbers -> strings, times -> RFC 3339).
+// A row whose text form is larger than maxRowBytes is not loaded:
+// Row returns ErrRowTooLarge.
 func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]any, bool, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
@@ -86,22 +150,27 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 	if err != nil {
 		return nil, false, err
 	}
-	q := fmt.Sprintf("SELECT * FROM %s WHERE %s = $1 LIMIT 1", pgx.Identifier{schema, tbl}.Sanitize(), pgx.Identifier{col}.Sanitize())
+	ident := pgx.Identifier{schema, tbl}.Sanitize()
+	pkIdent := pgx.Identifier{col}.Sanitize()
+	// The size check runs in the database so an oversized row never crosses
+	// the wire. (r.*)::text is the whole row, whatever its column names.
+	q := fmt.Sprintf("SELECT r.* FROM %s AS r WHERE r.%s = $1 AND octet_length((r.*)::text) <= $2 LIMIT 1", ident, pkIdent)
 
 	// DescribeExec re-describes the statement on every call, so a concurrent
 	// schema change cannot break a cached plan.
-	rows, err := d.pool.Query(ctx, q, pgx.QueryExecModeDescribeExec, pk)
+	rows, err := d.pool.Query(ctx, q, pgx.QueryExecModeDescribeExec, pk, maxRowBytes)
 	if err != nil {
-		return nil, false, fmt.Errorf("warehouse: query row: %w", err)
+		return nil, false, wrapErr("query row from", table, err)
 	}
 	defer rows.Close()
 
 	cols := rows.FieldDescriptions()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
-			return nil, false, fmt.Errorf("warehouse: read row: %w", err)
+			return nil, false, wrapErr("read row from", table, err)
 		}
-		return nil, false, nil
+		rows.Close()
+		return nil, false, d.tooLarge(ctx, ident, pkIdent, table, pk)
 	}
 	vals, err := rows.Values()
 	if err != nil {
@@ -114,6 +183,22 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 		}
 	}
 	return m, true, nil
+}
+
+// tooLarge tells "no such row" (nil) from "a row too large to load"
+// (ErrRowTooLarge) after the size-capped read found nothing.
+func (d *DB) tooLarge(ctx context.Context, ident, pkIdent, table, pk string) error {
+	q := fmt.Sprintf("SELECT true FROM %s AS r WHERE r.%s = $1 LIMIT 1", ident, pkIdent)
+	var exists bool
+	err := d.pool.QueryRow(ctx, q, pgx.QueryExecModeDescribeExec, pk).Scan(&exists)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil
+	case err != nil:
+		return wrapErr("read row from", table, err)
+	default:
+		return fmt.Errorf("%w: %s row over %d bytes", ErrRowTooLarge, table, maxRowBytes)
+	}
 }
 
 var identRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
