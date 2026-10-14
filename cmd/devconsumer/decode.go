@@ -20,6 +20,16 @@ import (
 // errNoMagic means the bytes are not in the Confluent wire format.
 var errNoMagic = errors.New("not confluent wire format")
 
+// errUndecodable marks a record that can never be decoded (bad framing, bad
+// Avro, trailing bytes, not an orders change). Retrying it cannot help, so the
+// consumer logs and skips it instead of crash-looping on it.
+var errUndecodable = errors.New("undecodable record")
+
+// maxAvroBytes caps one Avro bytes/string field. hamba/avro's default is 1 MiB,
+// smaller than a Kafka record can be (message.max.bytes is often raised), so a
+// legal large value made the consumer crash-loop.
+const maxAvroBytes = 64 << 20
+
 // splitWire splits Confluent wire-format bytes into schema ID and Avro body:
 // byte 0 is magic 0, bytes 1-4 are the big-endian schema ID.
 func splitWire(b []byte) (int, []byte, error) {
@@ -34,6 +44,7 @@ func splitWire(b []byte) (int, []byte, error) {
 type schemaCache struct {
 	baseURL string
 	http    *http.Client
+	api     avro.API
 	mu      sync.Mutex
 	byID    map[int]avro.Schema
 }
@@ -42,6 +53,7 @@ func newSchemaCache(baseURL string) *schemaCache {
 	return &schemaCache{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		http:    &http.Client{Timeout: 10 * time.Second},
+		api:     avro.Config{MaxByteSliceSize: maxAvroBytes}.Freeze(),
 		byID:    map[int]avro.Schema{},
 	}
 }
@@ -89,15 +101,24 @@ func (c *schemaCache) get(ctx context.Context, id int) (avro.Schema, error) {
 func (c *schemaCache) decode(ctx context.Context, b []byte) (any, error) {
 	id, body, err := splitWire(b)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("devconsumer: %w: %w", errUndecodable, err)
 	}
 	s, err := c.get(ctx, id)
 	if err != nil {
-		return nil, err
+		return nil, err // Registry trouble is transient: do not skip the record
 	}
+	// A Reader, not avro.Unmarshal: Unmarshal ignores bytes after the value,
+	// which hides a payload that was framed or written wrong.
+	r := avro.NewReader(nil, 0, avro.WithReaderConfig(c.api)).Reset(body)
 	var v any
-	if err := avro.Unmarshal(s, body, &v); err != nil {
-		return nil, fmt.Errorf("devconsumer: avro decode (schema %d): %w", id, err)
+	r.ReadVal(s, &v)
+	if r.Error != nil && !errors.Is(r.Error, io.EOF) {
+		return nil, fmt.Errorf("devconsumer: avro decode (schema %d): %w: %w", id, errUndecodable, r.Error)
+	}
+	if r.Error == nil {
+		if r.Peek(); r.Error == nil {
+			return nil, fmt.Errorf("devconsumer: avro decode (schema %d): %w: trailing bytes after the value", id, errUndecodable)
+		}
 	}
 	return v, nil
 }

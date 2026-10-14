@@ -97,7 +97,7 @@ func lockCmd(args []string) error {
 		return printLockStatus(lk)
 	}
 	if len(fs.Args()) != 0 {
-		return fmt.Errorf("usage: devctl lock [--owner <tag>] [--steal] | status")
+		return usagef("usage: devctl lock [--owner <tag>] [--steal] | status")
 	}
 
 	if *steal {
@@ -137,7 +137,7 @@ func unlockCmd(args []string) error {
 		return err
 	}
 	if len(fs.Args()) != 0 {
-		return fmt.Errorf("usage: devctl unlock --owner <tag>")
+		return usagef("usage: devctl unlock --owner <tag>")
 	}
 	if *owner == "" {
 		return fmt.Errorf("devctl: unlock requires --owner <tag> or %s", ownerEnv)

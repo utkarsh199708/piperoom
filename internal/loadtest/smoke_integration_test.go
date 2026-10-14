@@ -126,6 +126,9 @@ func TestRemoveStale(t *testing.T) {
 		name := fmt.Sprintf("%s-pg-%s", prefix, randHex(3))
 		if _, err := docker(ctx, "run", "-d", "--rm", "--name", name, "--label", labelPrefix+"="+prefix,
 			"--label", fmt.Sprintf("%s=%d", labelOwner, owner), "--entrypoint", "sleep", PostgresImage, "120"); err != nil {
+			if isImagePullError(err) {
+				t.Skipf("cannot pull %s (registry, not RemoveStale): %v", PostgresImage, err)
+			}
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _, _ = docker(context.Background(), "rm", "-f", name) })

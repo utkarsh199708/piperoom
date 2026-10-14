@@ -261,6 +261,9 @@ securityContext:
     drop: [ALL]
 
 networkPolicy:
+  # Off by default: the defaults below admit only ingress-nginx and leave egress
+  # "to" empty (any address), so set ingressFrom and narrow egress first (see
+  # deploy/README.md, Not covered here).
   enabled: false
   # Who may reach the pod on 8090. Default: pods in the ingress-nginx namespace.
   # Replace with your controller.

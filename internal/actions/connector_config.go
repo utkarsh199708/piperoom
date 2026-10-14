@@ -125,7 +125,10 @@ type updateConnectorConfigParams struct {
 // ("Decimal.Handling.Mode", a trailing U+200B, a Cyrillic letter) is refused.
 func (a *updateConnectorConfig) parseParams(raw json.RawMessage) (updateConnectorConfigParams, error) {
 	var p updateConnectorConfigParams
-	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" || p.Key == "" {
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return p, fmt.Errorf("actions: decode params: %w", err)
+	}
+	if p.Connector == "" || p.Key == "" {
 		return p, fmt.Errorf("actions: connector, key and value are required")
 	}
 	if looksSecret(p.Key) {

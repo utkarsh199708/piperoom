@@ -701,6 +701,21 @@ Moving to the version with OIDC login (auth PR 3):
 
 ## Not covered here
 
+- Database role and TLS. The bundled Postgres creates `piperoom` through the image's
+  `POSTGRES_USER`, which makes it a **superuser** of that container. It is reachable only on the
+  compose network, but the server does not need superuser rights. With your own database
+  (`PIPEROOM_DB_URL`), use a role that owns only the `piperoom` database and
+  `sslmode=verify-full` with the CA in `sslrootcert` (files in `deploy/certs` are mounted at
+  `/certs`). `sslmode=require` encrypts but does not check the server certificate. The source and
+  warehouse URLs take the read-only roles from
+  [docs/pilot/permissions.md](../docs/pilot/permissions.md), with the same TLS advice.
+- Helm `networkPolicy.enabled` defaults to `false`. The chart's policy does not work in every
+  cluster as it stands: ingress is allowed only from the `ingress-nginx` namespace, so GKE/ALB
+  load balancers that send traffic straight to pod IPs, other ingress controllers, in-cluster
+  alert senders and Prometheus are blocked until you add them to `ingressFrom`; and its egress
+  groups with an empty `to` open their ports to any address. Turn it on once you have set
+  `ingressFrom` for your ingress and narrowed each egress `to` to your CIDRs (see the comments
+  in `deploy/helm/piperoom/values.yaml`).
 - Images are pinned by tag, not digest (`node:24-alpine`, `golang:1.27-alpine`,
   `distroless/static-debian13:nonroot`, `postgres:17`). Pin digests for a regulated site.
 - The UI loads two fonts from Google Fonts. On a network with no internet the page still works

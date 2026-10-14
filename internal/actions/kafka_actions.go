@@ -217,7 +217,10 @@ type restartTaskParams struct {
 
 func (a *restartTask) Validate(raw json.RawMessage) error {
 	var p restartTaskParams
-	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" || p.Task < 0 {
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return fmt.Errorf("actions: decode params: %w", err)
+	}
+	if p.Connector == "" || p.Task < 0 {
 		return fmt.Errorf("actions: connector and non-negative task are required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -236,7 +239,7 @@ func (a *restartTask) CheckScope(p owners.Pipeline, raw json.RawMessage) error {
 func (a *restartTask) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
 	var p restartTaskParams
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return "", err
+		return "", fmt.Errorf("actions: decode params: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -285,7 +288,10 @@ type restartConnectorParams struct {
 
 func (a *restartConnector) Validate(raw json.RawMessage) error {
 	var p restartConnectorParams
-	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" {
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return fmt.Errorf("actions: decode params: %w", err)
+	}
+	if p.Connector == "" {
 		return fmt.Errorf("actions: connector is required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -304,7 +310,7 @@ func (a *restartConnector) CheckScope(p owners.Pipeline, raw json.RawMessage) er
 func (a *restartConnector) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
 	var p restartConnectorParams
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return "", err
+		return "", fmt.Errorf("actions: decode params: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -390,7 +396,10 @@ const resumePollInterval = 250 * time.Millisecond
 
 func (a *resumeConnector) Validate(raw json.RawMessage) error {
 	var p resumeConnectorParams
-	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" {
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return fmt.Errorf("actions: decode params: %w", err)
+	}
+	if p.Connector == "" {
 		return fmt.Errorf("actions: connector is required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -482,7 +491,10 @@ type setCompatibilityParams struct {
 
 func (a *setCompatibility) Validate(raw json.RawMessage) error {
 	var p setCompatibilityParams
-	if err := json.Unmarshal(raw, &p); err != nil || p.Subject == "" {
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return fmt.Errorf("actions: decode params: %w", err)
+	}
+	if p.Subject == "" {
 		return fmt.Errorf("actions: subject is required")
 	}
 	if !compatLevels[p.Level] {
@@ -504,7 +516,7 @@ func (a *setCompatibility) CheckScope(p owners.Pipeline, raw json.RawMessage) er
 func (a *setCompatibility) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
 	var p setCompatibilityParams
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return "", err
+		return "", fmt.Errorf("actions: decode params: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -558,7 +570,10 @@ type registerSchemaParams struct {
 
 func (a *registerSchema) Validate(raw json.RawMessage) error {
 	var p registerSchemaParams
-	if err := json.Unmarshal(raw, &p); err != nil || p.Subject == "" || p.Schema == "" {
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return fmt.Errorf("actions: decode params: %w", err)
+	}
+	if p.Subject == "" || p.Schema == "" {
 		return fmt.Errorf("actions: subject and schema are required")
 	}
 	if _, err := avro.Parse(p.Schema); err != nil {
@@ -580,7 +595,7 @@ func (a *registerSchema) CheckScope(p owners.Pipeline, raw json.RawMessage) erro
 func (a *registerSchema) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
 	var p registerSchemaParams
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return "", err
+		return "", fmt.Errorf("actions: decode params: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

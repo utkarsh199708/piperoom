@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -398,7 +399,7 @@ func (s *stack) loadHealthPlan() (healthPlan, error) {
 
 // slot reads the replication slot. Only the slotName constant is concatenated into the SQL.
 func (s *stack) slot(ctx context.Context) (slotHealth, error) {
-	out, err := s.psql(ctx, "orders", "SELECT CASE WHEN active THEN 'active' ELSE 'inactive' END || ' ' || coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint::text, '-1') FROM pg_replication_slots WHERE slot_name = '"+slotName+"'")
+	out, err := queryText(ctx, s.cfg.SourceDBURL, "SELECT CASE WHEN active THEN 'active' ELSE 'inactive' END || ' ' || coalesce(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint::text, '-1') FROM pg_replication_slots WHERE slot_name = $1", slotName)
 	if err != nil {
 		return slotHealth{}, err
 	}
@@ -421,6 +422,31 @@ func parseSlotRow(out string) (slotHealth, error) {
 	return slotHealth{Exists: true, Active: fields[0] == "active", RetainedBytes: retained}, nil
 }
 
+// queryText runs a one-value query over the configured URL (SOURCE_DB_URL or
+// WAREHOUSE_DB_URL, via config.Load), not `docker exec psql`, so health also
+// works against a stack that is not the local compose one. No row is "", like
+// psql -At.
+func queryText(ctx context.Context, dsn, sql string, args ...any) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	c, err := pgx.Connect(ctx, dsn)
+	if err != nil {
+		return "", fmt.Errorf("devctl: health: connect: %w", err)
+	}
+	defer c.Close(context.WithoutCancel(ctx))
+	var out *string
+	if err := c.QueryRow(ctx, sql, args...).Scan(&out); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("devctl: health: query: %w", err)
+	}
+	if out == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(*out), nil
+}
+
 func (s *stack) connector(ctx context.Context) (connectorStatus, error) {
 	return s.connectorStatus(ctx)
 }
@@ -429,7 +455,7 @@ func (s *stack) connector(ctx context.Context) (connectorStatus, error) {
 // cast) keeps the exact value: a rounded or truncated timestamp makes already
 // loaded rows look pending.
 func (s *stack) warehouseNewest(ctx context.Context) (time.Time, error) {
-	out, err := s.psql(ctx, "warehouse", "SELECT coalesce(round(extract(epoch FROM max(updated_at)) * 1000000)::bigint, 0) FROM analytics.orders")
+	out, err := queryText(ctx, s.cfg.WarehouseDBURL, "SELECT coalesce(round(extract(epoch FROM max(updated_at)) * 1000000)::bigint, 0)::text FROM analytics.orders")
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -440,7 +466,7 @@ func (s *stack) warehouseNewest(ctx context.Context) (time.Time, error) {
 // use the same clock. The age is capped at zero for rows timestamped in the future.
 // The only SQL interpolated here is pendingWhere's formatted timestamp.
 func (s *stack) unsynced(ctx context.Context, from time.Time) (time.Duration, error) {
-	out, err := s.psql(ctx, "orders", "SELECT coalesce(round(extract(epoch FROM now() - min(updated_at)) * 1000000)::bigint, 0) FROM orders WHERE "+pendingWhere(from))
+	out, err := queryText(ctx, s.cfg.SourceDBURL, "SELECT coalesce(round(extract(epoch FROM now() - min(updated_at)) * 1000000)::bigint, 0)::text FROM orders WHERE "+pendingWhere(from))
 	if err != nil {
 		return 0, err
 	}

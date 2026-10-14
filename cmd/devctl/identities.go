@@ -17,7 +17,7 @@ import (
 // refused because the email is bound to another account.
 func identitiesCmd(ctx context.Context, st *stack, args []string, out io.Writer) error {
 	if len(args) != 2 || args[0] != "unbind" || args[1] == "" {
-		return fmt.Errorf("usage: devctl identities unbind <user>")
+		return usagef("usage: devctl identities unbind <user>")
 	}
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()

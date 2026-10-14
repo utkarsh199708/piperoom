@@ -193,7 +193,7 @@ func connectorGone(co *connObs) bool {
 // observeDLQ makes the one DLQOffsets call of the tick, for every DLQ topic of
 // every target, de-duplicated. No topics: no call (a client may list the whole
 // cluster for an empty list). The call has its own deadline and its own error.
-func (w *Watcher) observeDLQ(ctx context.Context, ts []target, obs *observation, kafka clients.DLQReader) {
+func (w *Watcher) observeDLQ(ctx context.Context, ts []target, obs *observation, kafka clients.DLQReader, pre dlqPrefetch) {
 	obs.plan = w.planDLQ(ts, obs)
 	if kafka == nil {
 		obs.dlqNoReader = true
@@ -203,6 +203,19 @@ func (w *Watcher) observeDLQ(ctx context.Context, ts []target, obs *observation,
 		return
 	}
 	obs.dlqTried = true
+	if pre.covers(obs.plan.want) {
+		obs.dlqErr = pre.err
+		if pre.err == nil {
+			obs.dlqOffsets = make(map[string][]clients.PartitionOffsets, len(obs.plan.want))
+			for _, t := range obs.plan.want {
+				if ps, ok := pre.res[t]; ok {
+					obs.dlqOffsets[t] = ps
+				}
+			}
+		}
+		return
+	}
+	// New topics (first tick, changed config): one more call for all of them.
 	obs.dlqOffsets, obs.dlqErr = call(ctx, w.cfg.CheckTimeout, "read DLQ offsets", func(c context.Context) (map[string][]clients.PartitionOffsets, error) {
 		return kafka.DLQOffsets(c, obs.plan.want...)
 	})
@@ -421,6 +434,7 @@ func (w *Watcher) evaluateDLQ(now time.Time, t target, ps *pipeState, obs *obser
 	}
 	id := t.p.ID
 	topics := obs.plan.topics[id]
+	ss := ps.sig(owners.SignalDLQGrowth)
 	var r reading
 	switch {
 	case obs.dlqErr != nil:
@@ -431,13 +445,15 @@ func (w *Watcher) evaluateDLQ(now time.Time, t target, ps *pipeState, obs *obser
 		r = reading{v: vClear, value: "no DLQ topic", threshold: dlqThreshold(t.cfg.DLQGrowth)}
 	default:
 		r = w.dlqGrowthReading(now, t, ps, obs, topics, snaps)
-		if r.v != vBreach && obs.plan.cfgFail[id] {
+		if r.v != vBreach && obs.plan.cfgFail[id] && ss.phase == phaseOK {
 			// A connector config could not be read, so a DLQ topic may be missing
-			// from the list: clear or hold would be a guess.
+			// from the list: clear or hold would be a guess. Once firing, the
+			// topics that fired are in the list (declared, or read from a config
+			// earlier), so their quiet window may end the episode; an unread
+			// connector's own DLQ fires on its own once its config reads again.
 			r = reading{v: vUnknown, err: errDLQConfig}
 		}
 	}
-	ss := ps.sig(owners.SignalDLQGrowth)
 	w.apply(now, t, ps, owners.SignalDLQGrowth, t.cfg.DLQGrowth.WatchSignal, r, fired)
 	// A quiet window ends the episode: the next rise gets a new first_seen.
 	if r.v == vClear && ss.phase == phaseOK {

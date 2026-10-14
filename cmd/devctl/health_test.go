@@ -643,19 +643,29 @@ func TestHealthOneMicrosecondAfterWarehouseIsPending(t *testing.T) {
 }
 
 func TestExitCode(t *testing.T) {
+	failed := errors.New("boom")
 	tests := []struct {
 		cmd  string
+		err  error
 		want int
 	}{
-		{"health", 2}, // setup errors and cancelled runs
-		{"status", 1},
-		{"demo", 1},
-		{"break", 1},
-		{"", 1},
+		{"health", failed, 2}, // setup errors and cancelled runs
+		{"status", failed, 1},
+		{"demo", failed, 1},
+		{"break", failed, 1},
+		{"break", usagef("unknown scenario %q", "x"), 2},
+		{"up", usagef("usage: devctl up"), 2},
+		{"frobnicate", failed, 2}, // e.g. newStack failed outside the repo
+		{"", failed, 2},
 	}
 	for _, tt := range tests {
-		if got := exitCode(tt.cmd); got != tt.want {
-			t.Errorf("exitCode(%q) = %d, want %d", tt.cmd, got, tt.want)
+		if got := exitCode(tt.cmd, tt.err); got != tt.want {
+			t.Errorf("exitCode(%q, %v) = %d, want %d", tt.cmd, tt.err, got, tt.want)
 		}
+	}
+	// runCommand's own unknown-command error is a usage error.
+	err := runCommand(context.Background(), &stack{}, "frobnicate", nil)
+	if got := exitCode("frobnicate", err); got != 2 {
+		t.Errorf("unknown command exits %d, want 2", got)
 	}
 }

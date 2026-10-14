@@ -1,18 +1,20 @@
 SHELL := /bin/sh
 
-.PHONY: ci go-ci web-ci fmt vet build test evals discover-draft web-install web-lint web-build web-test
+.PHONY: ci go-ci web-ci fmt vet build test evals discover-draft web-install web-gomod web-lint web-build web-test
 
 ci: go-ci web-ci
 
 go-ci: fmt vet build test evals
 
+# node_modules can hold Go files of npm packages (flatted): not ours to format.
 fmt:
-	test -z "$$(gofmt -l .)"
+	test -z "$$(find . -name '*.go' -not -path '*/node_modules/*' -not -path './.git/*' | xargs gofmt -l)"
 
 vet:
 	go vet ./...
 	go vet -tags integration ./...
-	go vet -tags claude ./internal/agent/...
+	go vet -tags claude ./internal/agent/... ./evals/...
+	go vet -tags evalgen,e2e ./...
 
 build:
 	go build ./...
@@ -30,7 +32,11 @@ evals:
 discover-draft:
 	go run ./cmd/discover -out owners.draft.yaml
 
-web-ci: web-install web-lint web-build web-test
+web-ci: web-install web-gomod web-lint web-build web-test
+
+# web/go.mod keeps the Go files npm installs (flatted) out of `go ./...`.
+web-gomod:
+	test -z "$$(go list ./... | grep node_modules)"
 
 web-install:
 	cd web && npm ci --ignore-scripts && node node_modules/esbuild/install.js

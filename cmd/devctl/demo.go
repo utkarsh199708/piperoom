@@ -25,11 +25,11 @@ func demoCmd(ctx context.Context, s *stack, args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
-		return fmt.Errorf("usage: devctl demo [--fix] <scenario> (%s)", strings.Join(scenarioNames(), ", "))
+		return usagef("usage: devctl demo [--fix] <scenario> (%s)", strings.Join(scenarioNames(), ", "))
 	}
 	sc, ok := scenarios[rest[0]]
 	if !ok {
-		return fmt.Errorf("unknown scenario %q (%s)", rest[0], strings.Join(scenarioNames(), ", "))
+		return usagef("unknown scenario %q (%s)", rest[0], strings.Join(scenarioNames(), ", "))
 	}
 
 	if *fix {

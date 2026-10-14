@@ -8,8 +8,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"piperoom/internal/clients"
 	"piperoom/internal/owners"
+)
+
+// errSlotMissing marks a known slot name that pg_replication_slots does not
+// list: the slot was dropped, so the source WAL for the pipeline is gone.
+var errSlotMissing = errors.New("not found in pg_replication_slots")
+
+// SQLSTATEs that mean the source is a standby (pg_current_wal_lsn() refused
+// during recovery) or older than PostgreSQL 13 (no safe_wal_size column).
+const (
+	sqlstateNotInPrerequisiteState = "55000"
+	sqlstateUndefinedColumn        = "42703"
 )
 
 // maxTraceChars caps a task trace line in the evidence (design §5, I6).
@@ -72,7 +85,13 @@ func (w *Watcher) evaluateSlot(now time.Time, t target, ps *pipeState, cr connRe
 	unknown := reading{v: vUnknown, err: err}
 	if err != nil {
 		if t.cfg.SlotInactive.Enabled {
-			w.apply(now, t, ps, owners.SignalSlotInactive, t.cfg.SlotInactive, unknown, fired)
+			r := unknown
+			if errors.Is(err, errSlotMissing) {
+				// A dropped slot is worse than an inactive one: the WAL the
+				// connector still needs is gone, so it must fire, not wait.
+				r = slotMissingReading(ps.slot)
+			}
+			w.apply(now, t, ps, owners.SignalSlotInactive, t.cfg.SlotInactive, r, fired)
 		}
 		if t.cfg.SlotWAL.Enabled {
 			w.apply(now, t, ps, owners.SignalSlotWAL, t.cfg.SlotWAL.WatchSignal, unknown, fired)
@@ -144,12 +163,21 @@ func (w *Watcher) noteError(pipeline, signal string, ss *sigState, err error) {
 	ss.errText = msg
 	args := []any{"mode", string(w.cfg.Mode), "pipeline", pipeline, "signal", signal, "err", msg}
 	// A standby has no pg_current_wal_lsn(); an old server has no safe_wal_size.
-	// One clear line tells the operator what to fix (design §3, I8). It reads the
-	// message text because the driver only gives a server error string.
-	if strings.Contains(msg, "recovery is in progress") || strings.Contains(msg, "safe_wal_size") {
+	// One clear line tells the operator what to fix (design §3, I8).
+	if needsPrimaryPG13(err) {
 		args = append(args, "hint", "SOURCE_DB_URL must be the primary and PostgreSQL 13 or newer")
 	}
 	w.log.Warn("watch: check failed, signal state unchanged", args...)
+}
+
+// needsPrimaryPG13 reports a server error that means the source is a standby
+// or a server without safe_wal_size, by SQLSTATE rather than message text.
+func needsPrimaryPG13(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == sqlstateNotInPrerequisiteState || pgErr.Code == sqlstateUndefinedColumn
 }
 
 // logStill writes the periodic "still firing" line (log mode and rooms mode).
@@ -329,7 +357,7 @@ func slotRow(t target, ps *pipeState, obs *observation) (clients.ReplicationSlot
 			return r, nil
 		}
 	}
-	return clients.ReplicationSlot{}, fmt.Errorf("watch: pipeline %s: slot %q not found in pg_replication_slots", t.p.ID, name)
+	return clients.ReplicationSlot{}, fmt.Errorf("watch: pipeline %s: slot %q %w", t.p.ID, name, errSlotMissing)
 }
 
 // slotFromConfigs reads slot.name from the pipeline's connector configs. Only
@@ -404,6 +432,19 @@ func slotInactiveReading(slot string, row clients.ReplicationSlot) reading {
 		r.v = vBreach
 	}
 	return r
+}
+
+// slotMissingReading is the slot_inactive breach for a slot that no longer
+// exists (sev1: re-snapshot or data loss, like wal_status=lost).
+func slotMissingReading(slot string) reading {
+	return reading{
+		v: vBreach, sev: "sev1", label: "slot " + slot + " missing", withDur: true,
+		value: "missing", threshold: "active=true",
+		ev: map[string]any{
+			"signal": owners.SignalSlotInactive, "severity": "sev1", "slot": slot,
+			"missing": true,
+		},
+	}
 }
 
 // ---- slot_wal ----

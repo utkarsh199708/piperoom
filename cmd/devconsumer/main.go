@@ -113,6 +113,12 @@ func run(ctx context.Context, o options, log *slog.Logger) error {
 				return
 			}
 			procErr = handle(ctx, r, schemas, pool, o)
+			if errors.Is(procErr, errUndecodable) {
+				// Park it in the log and move on: redelivery cannot fix it. The
+				// FAIL_ON_ID poison pill is not undecodable and still stalls.
+				log.Warn("skipping undecodable record", "topic", r.Topic, "partition", r.Partition, "offset", r.Offset, "err", procErr)
+				procErr = nil
+			}
 			if o.delay > 0 {
 				// Wait in a ctx-aware way so SIGTERM stops a delayed batch.
 				select {
@@ -150,7 +156,7 @@ func handle(ctx context.Context, r *kgo.Record, schemas *schemaCache, pool *pgxp
 	}
 	c, err := toChange(key, val)
 	if err != nil {
-		return fmt.Errorf("devconsumer: record %s/%d@%d: %w", r.Topic, r.Partition, r.Offset, err)
+		return fmt.Errorf("devconsumer: record %s/%d@%d: %w: %w", r.Topic, r.Partition, r.Offset, errUndecodable, err)
 	}
 	if o.failOnID != 0 && c.ID == o.failOnID {
 		return fmt.Errorf("devconsumer: cannot process order %d at %s/%d@%d (poison pill)", c.ID, r.Topic, r.Partition, r.Offset)

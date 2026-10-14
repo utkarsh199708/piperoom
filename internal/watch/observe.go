@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -133,10 +134,12 @@ func (w *Watcher) observe(ctx context.Context, ts []target) map[string]*observat
 }
 
 // observeSet makes the calls of one client set. The source is read once and the
-// rows are fanned out to the pipelines later; each connector is read in its own
-// goroutine. Every call has its own deadline and its own error, so one slow or
-// broken layer never holds up or hides another (same shape as devctl's
-// runHealth).
+// rows are fanned out to the pipelines later; each connector's status and
+// config are read in their own goroutines, and the DLQ offsets of the topics
+// expected from the last tick are read at the same time. Every call has its
+// own deadline and its own error, so one slow or broken layer never holds up
+// or hides another (same shape as devctl's runHealth), and a tick takes about
+// one CheckTimeout, not one per layer.
 func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src SourceDB, conn ConnectClient, kafka clients.DLQReader) *observation {
 	obs := &observation{set: set, conns: map[string]*connObs{}}
 	needCfg := map[string]bool{}
@@ -177,20 +180,98 @@ func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src S
 				co.status, co.statusErr = call(ctx, w.cfg.CheckTimeout, "connector status", func(c context.Context) (clients.ConnectorStatus, error) {
 					return conn.Status(c, name)
 				})
-				if co.statusErr != nil || !needCfg[name] {
-					return
-				}
-				co.cfgTried = true
+			}()
+			if !needCfg[name] {
+				continue
+			}
+			co.cfgTried = true
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
 				co.cfg, co.cfgErr = call(ctx, w.cfg.CheckTimeout, "connector config", func(c context.Context) (map[string]string, error) {
 					return conn.Config(c, name)
 				})
 			}()
 		}
 	}
+	// The DLQ topics come from the configs, which are being read right now; the
+	// topics found last tick are almost always the same, so read those now.
+	spec := w.predictDLQ(ts)
+	var specRes map[string][]clients.PartitionOffsets
+	var specErr error
+	if kafka != nil && len(spec) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			specRes, specErr = call(ctx, w.cfg.CheckTimeout, "read DLQ offsets", func(c context.Context) (map[string][]clients.PartitionOffsets, error) {
+				return kafka.DLQOffsets(c, spec...)
+			})
+		}()
+	}
 	wg.Wait()
-	// After the configs: the DLQ topics are discovered from them.
-	w.observeDLQ(ctx, ts, obs, kafka)
+	for _, co := range obs.conns {
+		// A config read only counts next to a good status, as when it was read
+		// after it: a status error already says what is wrong with the connector.
+		if co.statusErr != nil {
+			co.cfg, co.cfgErr, co.cfgTried = nil, nil, false
+		}
+	}
+	w.observeDLQ(ctx, ts, obs, kafka, dlqPrefetch{topics: spec, res: specRes, err: specErr})
 	return obs
+}
+
+// dlqPrefetch is a DLQOffsets call made before the configs were known.
+type dlqPrefetch struct {
+	topics []string // sorted
+	res    map[string][]clients.PartitionOffsets
+	err    error
+}
+
+// covers reports whether the prefetch read every topic of want.
+func (p dlqPrefetch) covers(want []string) bool {
+	if len(p.topics) == 0 {
+		return false
+	}
+	for _, t := range want {
+		if _, ok := slices.BinarySearch(p.topics, t); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// predictDLQ is the DLQ topic list the plan will most likely ask for: the
+// declared topics plus the topics the connectors' configs named last time.
+func (w *Watcher) predictDLQ(ts []target) []string {
+	want := map[string]bool{}
+	w.mu.Lock()
+	for _, t := range ts {
+		if !t.cfg.DLQGrowth.Enabled && !t.cfg.ConfigRisk.Enabled {
+			continue
+		}
+		mine := map[string]bool{}
+		for _, d := range t.cfg.DLQTopics {
+			mine[d.Topic] = true
+		}
+		for _, c := range t.connectors {
+			if s, ok := w.dlqSeen[t.p.ID+"/"+c]; ok && s.ec.Topic != "" {
+				mine[s.ec.Topic] = true
+			}
+		}
+		for _, c := range t.cdcTopics {
+			delete(mine, c)
+		}
+		for tp := range mine {
+			want[tp] = true
+		}
+	}
+	w.mu.Unlock()
+	out := make([]string, 0, len(want))
+	for t := range want {
+		out = append(out, t)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // call runs fn under its own deadline. fn runs in its own goroutine, so a client
