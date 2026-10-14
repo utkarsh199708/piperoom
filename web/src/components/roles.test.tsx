@@ -44,7 +44,7 @@ const actions: RoomActions = {
   acceptHandoff: vi.fn(),
   trace: vi.fn(),
 }
-const staleOff = { stale: false, dismissStale: vi.fn(), reload: vi.fn() }
+const staleOff = { stale: null, dismissStale: vi.fn(), reload: vi.fn() }
 
 const member: CurrentUser = { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'], role: 'member' }
 const viewer: CurrentUser = { id: 'vera', name: 'Vera', layers: ['kafka-connect'], role: 'viewer' }

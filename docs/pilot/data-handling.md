@@ -116,11 +116,11 @@ Two more things follow from this list:
 
 | Tool | Exposes to the agent and the room | Does **not** expose |
 |---|---|---|
-| `pg_replication_slots` | slot name, plugin, active flag, WAL retained | data |
+| `pg_replication_slots` | the room pipeline's slots only (`owners.yaml` `watch.slot`, else `slot.name` from its connector config): slot name, plugin, active flag, WAL retained; other slots only as a count | data; other slots' names |
 | `pg_recent_ddl` | DDL command, object, **full statement text**, user, time | row data |
-| `pg_long_transactions` | pid, user, application name (client-set free text, shown as-is), state, transaction age, wait event, and at most the statement verb (first keyword, e.g. `UPDATE`). Database-wide: it lists sessions of every pipeline, because it cannot be tied to one pipeline. Each row has `has_xid` (summary `writer=yes\|no`): only writers hold the WAL horizon, but long read-only sessions are listed too since they block DDL and VACUUM | query text (never selected, never returned) |
+| `pg_long_transactions` | pid, user, application name (client-set free text, shown as-is), state, transaction age, wait event, and at most the statement verb (first keyword, e.g. `UPDATE`). In a room it lists only sessions of the source database that hold or wait for a lock on the pipeline's source tables; every other long transaction is counted, and the oldest 5 other writers (which hold back every logical slot) are shown with pid, same-database flag, state, ages and wait event type only. Each row has `has_xid` (summary `writer=yes\|no`): only writers hold the WAL horizon, but long read-only sessions are listed too since they block DDL and VACUUM | query text (never selected, never returned) |
 | `pg_row` | row **column names**; values only for the key and timestamp columns, others `null` (`pg.go:264,272-282`). Key and timestamp columns are chosen **by name**: the key is the column you pass in, and timestamp columns are `at` or names ending in `_at` (`dbtools.go:242-244`) | other column values |
-| `pg_publication_tables` | the publication name, the connector role, and only the pipeline's own source tables | other tables of a `FOR ALL TABLES` publication |
+| `pg_publication_tables` | the publication name, the connector role, and only the pipeline's own source tables; the publication's other tables only as a count | other tables of a `FOR ALL TABLES` publication |
 | `warehouse_freshness` | max timestamp of the sink table, lag | row data |
 | `warehouse_row` | **timestamp-named columns only** (`at` or `*_at`), by name, not by type. The key and every other column are dropped, from both Summary and Data (`wh.go:124,132-140`; `dbtools.go:242-244`). The same on Snowflake, where column names come back lower-cased (`internal/clients/snowflake/snowflake.go:148`) | key value, all other columns |
 | `pipeline_map` | the pipeline's tables, connectors, topics, consumer groups and sink tables, with owners and health (`map.go:14-46`) | row data |
@@ -165,10 +165,10 @@ guarantee. The controls that do not depend on the model are:
    consumer group, subject or table that is not the room pipeline's own, before it calls any
    client. List tools return only the pipeline's own items. By default a read is refused: a room
    with no pipeline gets no reads (only `runbook_lookup` works), and only a CLI or dev caller can
-   opt out in code. Two tools stay database-wide because the pipeline cannot be told from
-   `owners.yaml`: `pg_replication_slots` (slot metadata for every slot, no row data) and
-   `pg_long_transactions` (long sessions of every pipeline, no query text, since any long
-   transaction holds the WAL horizon). Database grants, Kafka ACLs, Connect proxy rules and
+   opt out in code. Database-wide and cluster-wide metadata is scoped too (T2):
+   `pg_replication_slots` shows only the pipeline's slots and `pg_long_transactions` only the
+   sessions that lock the pipeline's tables; other objects appear only as a count, never by
+   name ([tool-scope.md](../security/tool-scope.md)). Database grants, Kafka ACLs, Connect proxy rules and
    Registry ACLs remain the real boundary; keep them to the pipeline's own objects (see
    [permissions.md](permissions.md)).
 
