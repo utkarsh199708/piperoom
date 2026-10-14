@@ -2,8 +2,8 @@ package evals
 
 import "testing"
 
-// Map keys are untrusted too. Whatever a key says, the data either comes back
-// equal or is dropped; it is never altered.
+// Map keys in tool data are untrusted. Unknown fields are removed by the
+// connect_status projection and never retained in the scenario.
 func TestScenarioFromShadowHostileKeys(t *testing.T) {
 	for _, k := range []string{"<<", "---", "? x", "- a", "&a", "*a", "!!str", "=", "null", "a: b", "# c", "\n", "", " lead", "y", "~", "0o7", "1e3"} {
 		m := sampleDoc(t)
@@ -19,12 +19,8 @@ func TestScenarioFromShadowHostileKeys(t *testing.T) {
 			continue
 		}
 		for _, r := range res.Scenario.Recordings {
-			if r.Tool != "connect_status" || r.Data == nil {
-				continue
-			}
-			want := map[string]any{k: 1, "z": []any{map[string]any{k: "v"}}}
-			if !sameJSON(r.Data, want) {
-				t.Errorf("key %q came back as %#v", k, r.Data)
+			if r.Tool == "connect_status" && r.Data != nil {
+				t.Errorf("unknown key %q remained in data: %#v", k, r.Data)
 			}
 		}
 	}

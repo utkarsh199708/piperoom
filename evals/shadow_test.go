@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -66,9 +67,11 @@ func TestScenarioFromShadowSample(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScenarioFromShadow: %v", err)
 	}
-	// The only warning on a complete run is the one about production values in data.
-	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "production values") {
-		t.Errorf("warnings = %q, want the data review warning only", res.Warnings)
+	// A complete run still needs a production-data review: summaries and the
+	// alert map can contain sensitive text even though raw result data is dropped.
+	joinedWarnings := strings.Join(res.Warnings, "\n")
+	if !strings.Contains(joinedWarnings, "production values") || !strings.Contains(joinedWarnings, "raw data omitted") {
+		t.Errorf("warnings = %q, want sensitivity and omission warnings", res.Warnings)
 	}
 
 	// Round trip through the real loader and validator, from a file, as
@@ -117,7 +120,7 @@ func TestScenarioFromShadowSample(t *testing.T) {
 		t.Errorf("description = %q", sc.Description)
 	}
 
-	// Recordings: exact summaries, why stripped, errors as errors, data kept.
+	// Recordings: exact summaries, why stripped, errors as errors, result data omitted.
 	if len(sc.Recordings) != 4 {
 		t.Fatalf("%d recordings, want 4", len(sc.Recordings))
 	}
@@ -133,8 +136,12 @@ func TestScenarioFromShadowSample(t *testing.T) {
 	if cs.Summary != want {
 		t.Errorf("connect_status summary changed in the round trip:\n got %q\nwant %q", cs.Summary, want)
 	}
-	if m, _ := cs.Data.(map[string]any); m == nil || m["state"] != "RUNNING" {
-		t.Errorf("connect_status data = %#v", cs.Data)
+	wantStatus := map[string]any{
+		"name": "pg-orders-connector", "state": "RUNNING",
+		"tasks": []any{map[string]any{"id": int64(0), "state": "FAILED"}},
+	}
+	if !sameJSON(cs.Data, wantStatus) {
+		t.Errorf("connect_status data projection = %#v, want %#v", cs.Data, wantStatus)
 	}
 	// The agent loop's "error: " prefix is stripped once; replay adds its own.
 	if r := byTool["schema_registry_diff"]; r.Summary != "" || !strings.HasPrefix(r.Error, "schemareg: GET ") {
@@ -190,12 +197,7 @@ func TestScenarioFromShadowErrors(t *testing.T) {
 			part(m, "labelled")["root_cause_terms"] = []any{strings.Repeat("a", maxTermLen+1)}
 		}, want: ErrShadowMalformed},
 		{name: "missing include=room", mutate: func(m map[string]any) { delete(m, "room") },
-			want: ErrShadowNoRoom, text: "include=data,room"},
-		{name: "missing include=data", mutate: func(m map[string]any) {
-			for _, e := range evList(m) {
-				delete(sub(e.(map[string]any), "payload"), "data")
-			}
-		}, want: ErrShadowNoData, text: "include=data,room"},
+			want: ErrShadowNoRoom, text: "include=room"},
 		{name: "run still running", mutate: func(m map[string]any) { sub(m, "run")["status"] = "running" },
 			want: ErrShadowNotFinished},
 		{name: "run queued", mutate: func(m map[string]any) { sub(m, "run")["status"] = "queued" },
@@ -351,7 +353,9 @@ func TestScenarioFromShadowHostileText(t *testing.T) {
 				p := sub(ev, "payload")
 				if ev["type"] == "agent.tool_result" && p["tool_use_id"] == "toolu_01" {
 					p["summary"] = h
-					p["data"] = map[string]any{"state": h, "list": []any{h, 12345678901234567, 1.5}}
+					p["data"] = map[string]any{"name": h, "state": h, "worker": "private-worker",
+						"tasks": []any{map[string]any{"id": 0, "state": h, "error": "private-task-error"}},
+						"list":  []any{h, 12345678901234567, 1.5}}
 				}
 			}
 			part(m, "created")["title"] = h + "x"
@@ -376,12 +380,22 @@ func TestScenarioFromShadowHostileText(t *testing.T) {
 				t.Errorf("summary %q came back as %q", h, cs.Summary)
 			}
 			data := cs.Data.(map[string]any)
-			if data["state"] != h {
-				t.Errorf("data.state %q came back as %#v", h, data["state"])
+			if data["name"] != h || data["state"] != h {
+				t.Errorf("allow-listed status fields changed: %#v", data)
 			}
-			list := data["list"].([]any)
-			if list[1] != 12345678901234567 { // an offset must stay an integer
-				t.Errorf("large integer came back as %#v", list[1])
+			if _, ok := data["worker"]; ok {
+				t.Errorf("worker host leaked into projected data: %#v", data)
+			}
+			if _, ok := data["list"]; ok {
+				t.Errorf("unknown data fields leaked into projection: %#v", data)
+			}
+			tasks := data["tasks"].([]any)
+			task := tasks[0].(map[string]any)
+			if task["id"] != int64(0) || task["state"] != h {
+				t.Errorf("task projection = %#v", task)
+			}
+			if _, ok := task["error"]; ok {
+				t.Errorf("task error leaked into projection: %#v", task)
 			}
 			if sc.Alert.Title != h+"x" || sc.Alert.PipelineMap != h {
 				t.Errorf("alert text changed: %q / %q", sc.Alert.Title, sc.Alert.PipelineMap)
@@ -390,6 +404,109 @@ func TestScenarioFromShadowHostileText(t *testing.T) {
 				t.Errorf("hostile text changed the structure: name=%q pipeline=%q recordings=%d", sc.Name, sc.Pipeline.ID, len(sc.Recordings))
 			}
 		})
+	}
+}
+
+func TestScenarioFromShadowRedactsRawToolData(t *testing.T) {
+	m := sampleDoc(t)
+	const rowSecret = "private-row-canary-93a2"
+	const ddlSecret = "private-ddl-canary-146b"
+	const hostSecret = "private-worker-canary-725c"
+	const taskErrorSecret = "private-task-error-canary-8841"
+	for _, e := range evList(m) {
+		p := sub(e.(map[string]any), "payload")
+		if p["tool_use_id"] == "toolu_01" {
+			p["data"] = map[string]any{
+				"name": "pg-orders-connector", "state": "RUNNING", "worker": hostSecret,
+				"tasks": []any{map[string]any{"id": 0, "state": "FAILED", "error": taskErrorSecret}},
+			}
+		}
+	}
+	evs := evList(m)
+	n := len(evs)
+	appendResult := func(offset int, id, tool string, input, data map[string]any) {
+		evs = append(evs,
+			map[string]any{"room_id": "r", "seq": n + 2*offset + 1, "type": "agent.tool_call", "shadow": true,
+				"payload": map[string]any{"step_id": "s3", "tool_use_id": id, "tool": tool, "input": input}},
+			map[string]any{"room_id": "r", "seq": n + 2*offset + 2, "type": "agent.tool_result", "shadow": true,
+				"payload": map[string]any{"step_id": "s3", "tool_use_id": id, "tool": tool, "summary": "result", "is_error": false, "data": data}})
+	}
+	appendResult(0, "toolu_private_row", "pg_row", map[string]any{
+		"pipeline_id": "orders", "table": "public.orders", "pk_column": "id", "key": "7",
+	}, map[string]any{"row": map[string]any{"customer_note": rowSecret}})
+	appendResult(1, "toolu_private_ddl", "pg_recent_ddl", map[string]any{
+		"table": "public.orders", "since": "2026-10-11T09:00:00Z",
+	}, map[string]any{"ddl": ddlSecret})
+	m["events"] = evs
+
+	res, err := ScenarioFromShadow(encode(t, m), lookupOrders, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{rowSecret, ddlSecret, hostSecret, taskErrorSecret} {
+		if bytes.Contains(res.YAML, []byte(secret)) {
+			t.Errorf("private value %q leaked into scenario YAML", secret)
+		}
+	}
+	var connectorData any
+	for _, rec := range res.Scenario.Recordings {
+		if rec.Tool == "connect_status" {
+			connectorData = rec.Data
+		}
+		if rec.Tool == "pg_row" || rec.Tool == "pg_recent_ddl" {
+			if rec.Data != nil {
+				t.Errorf("raw %s result data retained: %#v", rec.Tool, rec.Data)
+			}
+		}
+	}
+	data, ok := connectorData.(map[string]any)
+	if !ok || data["name"] != "pg-orders-connector" || data["state"] != "RUNNING" {
+		t.Fatalf("connect_status projection = %#v", connectorData)
+	}
+	if _, ok := data["worker"]; ok {
+		t.Errorf("connector worker host retained: %#v", data)
+	}
+	tasks := data["tasks"].([]any)
+	if len(tasks) != 1 || !sameJSON(tasks[0], map[string]any{"id": int64(0), "state": "FAILED"}) {
+		t.Errorf("connector task projection = %#v", tasks)
+	}
+}
+
+func TestScenarioFromShadowExcludesAgentText(t *testing.T) {
+	m := sampleDoc(t)
+	const marker = "model-only-canary-5b73"
+	sub(m, "run")["final_hypothesis"].(map[string]any)["text"] = marker
+	for _, e := range evList(m) {
+		ev := e.(map[string]any)
+		if ev["type"] == "agent.hypothesis" {
+			sub(ev, "payload")["text"] = marker
+		}
+	}
+	part(m, "graded")["notes"] = marker
+	evs := evList(m)
+	evs = append(evs, map[string]any{"room_id": "r", "seq": len(evs) + 1,
+		"type": "agent.message", "shadow": true, "payload": map[string]any{"text": marker}})
+	m["events"] = evs
+
+	res, err := ScenarioFromShadow(encode(t, m), lookupOrders, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(res.YAML, []byte(marker)) {
+		t.Fatalf("agent/grade text leaked into scenario YAML:\n%s", res.YAML)
+	}
+	if got := strings.Join(res.Scenario.Expect.RootCause[0], ","); got != "amount,numeric,schema registry,409" {
+		t.Errorf("human label was not retained as ground truth: %q", got)
+	}
+}
+
+func TestCleanTermsDeduplicatesCaseInsensitively(t *testing.T) {
+	got, err := cleanTerms([]string{"Amount", " amount ", "409"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"Amount", "409"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("cleanTerms = %q, want %q", got, want)
 	}
 }
 
@@ -404,7 +521,7 @@ func TestScenarioFromShadowCaps(t *testing.T) {
 		switch p["tool_use_id"] {
 		case "toolu_01":
 			p["summary"] = strings.Repeat("é", 20000) // over MaxSummaryBytes
-			p["data"] = map[string]any{"blob": strings.Repeat("x", maxRecordingData)}
+			p["data"] = map[string]any{"state": "RUNNING", "blob": strings.Repeat("x", maxRecordingData)}
 		case "toolu_03":
 			p["data"] = map[string]any{"ok": true}
 		}
@@ -425,7 +542,7 @@ func TestScenarioFromShadowCaps(t *testing.T) {
 			t.Errorf("summary %d bytes, truncated=%v", len(r.Summary), r.Truncated)
 		}
 		if r.Data != nil {
-			t.Errorf("oversized data kept")
+			t.Errorf("oversized connector data kept")
 		}
 	}
 	if !strings.Contains(strings.Join(res.Warnings, "\n"), "data dropped") {
@@ -496,10 +613,9 @@ func TestScenarioFromShadowRejectedCalls(t *testing.T) {
 	}
 }
 
-// yaml.v3 writes a "<<" key unquoted, and the loader reads it as a merge key:
-// data {"<<": {"injected": 1}, "a": 2} would come back with "injected" at the
-// top. Data that does not survive is dropped; input that does not survive
-// refuses the run.
+// Unknown connector data is removed by the projection, including values with
+// YAML merge keys. Merge keys in tool inputs still refuse conversion because
+// changing an input could make a recording replay against the wrong call.
 func TestScenarioFromShadowMergeKey(t *testing.T) {
 	cases := map[string]any{
 		"top level": map[string]any{"<<": map[string]any{"injected": 1}, "a": 2},
@@ -522,15 +638,15 @@ func TestScenarioFromShadowMergeKey(t *testing.T) {
 			for _, r := range res.Scenario.Recordings {
 				if r.Tool == "connect_status" {
 					if r.Data != nil {
-						t.Errorf("data that reads back differently was kept: %#v", r.Data)
+						t.Errorf("unallow-listed data was kept: %#v", r.Data)
 					}
 					if r.Summary == "" {
 						t.Error("summary lost with the data")
 					}
 				}
 			}
-			if !strings.Contains(strings.Join(res.Warnings, "\n"), `"<<" key`) {
-				t.Errorf("no warning: %q", res.Warnings)
+			if !strings.Contains(strings.Join(res.Warnings, "\n"), "raw data omitted") {
+				t.Errorf("no omission warning: %q", res.Warnings)
 			}
 		})
 	}

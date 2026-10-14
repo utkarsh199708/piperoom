@@ -27,10 +27,7 @@ var (
 	ErrShadowMalformed = errors.New("evals: malformed shadow response")
 	// ErrShadowNoRoom is returned when the response lacks the "room" member
 	// (it was saved without ?include=room).
-	ErrShadowNoRoom = errors.New("evals: shadow response has no room (save it with ?include=data,room)")
-	// ErrShadowNoData is returned when no tool_result carries data (the
-	// response was saved without ?include=data).
-	ErrShadowNoData = errors.New("evals: shadow response has no tool_result data (save it with ?include=data,room)")
+	ErrShadowNoRoom = errors.New("evals: shadow response has no room (save it with ?include=room)")
 	// ErrShadowUnlabelled is returned when there is no usable human label. The
 	// label is the only ground truth a scenario can have.
 	ErrShadowUnlabelled = errors.New("evals: shadow run has no human label")
@@ -167,7 +164,7 @@ type outExpect struct {
 const shadowYAMLHeader = "# Built by `evalrun -from-shadow` from a graded shadow run. Review before committing:\n" +
 	"# recordings cover only the path that run took (see evals/README.md, \"Scenarios from shadow runs\").\n"
 
-// ScenarioFromShadow builds a scenario from one saved GET /api/rooms/{id}/shadow?include=data,room
+// ScenarioFromShadow builds a scenario from one saved GET /api/rooms/{id}/shadow?include=room
 // response. lookup resolves the room's pipeline id (owners.yaml). name, when
 // set, replaces the default "shadow-<room id>".
 //
@@ -265,10 +262,6 @@ func ScenarioFromShadow(raw []byte, lookup func(id string) (owners.Pipeline, boo
 	if len(recs) == 0 {
 		return ShadowResult{}, fmt.Errorf("%w (%d call(s) seen, status %s)", ErrShadowNothingToReplay, observed, run.Status)
 	}
-	if !anyData(recs) && hasNonErrorResult(recs) {
-		return ShadowResult{}, ErrShadowNoData
-	}
-
 	sc := outScenario{
 		Name:        scenarioName(name, run.RoomID),
 		Description: describe(run, label, doc.Room.Graded, observed, skipped, &warnings),
@@ -288,9 +281,7 @@ func ScenarioFromShadow(raw []byte, lookup func(id string) (owners.Pipeline, boo
 		},
 	}
 	warnings = append(warnings, freeChoiceWarnings(recs)...)
-	if anyData(recs) {
-		warnings = append(warnings, "recorded tool data may contain production values (hosts, IPs, record values, names); review and redact the scenario before committing it")
-	}
+	warnings = append(warnings, "review alert, pipeline map, tool inputs, and summaries before committing: they may contain production values such as hosts, keys, or DDL; raw tool data is omitted except for the allow-listed connect_status name, state, and task id/state fields")
 	if run.Status != "hypothesised" {
 		warnings = append(warnings, fmt.Sprintf("partial run (status %s): the recordings stop where the agent stopped; see evals/README.md", run.Status))
 	}
@@ -467,7 +458,7 @@ func recordingsFromEvents(evs []shadowEvent, toolInputs map[string][]string, war
 	observed = len(order)
 
 	seen := map[string]bool{}
-	var live, dups, bigData, mergeData, orphan, rejected int
+	var live, dups, bigData, omittedData, invalidStatusData, orphan, rejected int
 	for _, id := range order {
 		c := calls[id]
 		res, ok := results[id]
@@ -538,14 +529,37 @@ func recordingsFromEvents(evs []shadowEvent, toolInputs map[string][]string, war
 			r.Summary, cut = tools.Truncate(res.Summary)
 			r.Truncated = r.Truncated || cut
 			if !isNullJSON(res.Data) {
-				if len(res.Data) > maxRecordingData {
+				if c.tool != "connect_status" {
+					omittedData++
+				} else if len(res.Data) > maxRecordingData {
 					bigData++
-				} else if v, err := jsonToNative(res.Data); err != nil {
-					return nil, 0, 0, fmt.Errorf("%w: tool_result %q data: %v", ErrShadowMalformed, clip(id, 40), err)
-				} else if hasMergeKey(v) {
-					mergeData++ // yaml.v3 writes "<<" unquoted and the loader merges it
 				} else {
-					r.Data = v
+					// Connector status is the only tool data used by replay validation.
+					// Decode into an allow-list so worker hosts, task errors, and any
+					// future fields from Connect never enter the committed scenario.
+					var status struct {
+						Name  string `json:"name"`
+						State string `json:"state"`
+						Tasks []struct {
+							ID    int    `json:"id"`
+							State string `json:"state"`
+						} `json:"tasks"`
+					}
+					if err := json.Unmarshal(res.Data, &status); err != nil {
+						invalidStatusData++
+					} else if status.Name != "" || status.State != "" || status.Tasks != nil {
+						projected, err := json.Marshal(status)
+						if err != nil {
+							return nil, 0, 0, fmt.Errorf("%w: tool_result %q connect_status projection: %v", ErrShadowMalformed, clip(id, 40), err)
+						}
+						v, err := jsonToNative(projected)
+						if err != nil {
+							return nil, 0, 0, fmt.Errorf("%w: tool_result %q connect_status projection: %v", ErrShadowMalformed, clip(id, 40), err)
+						}
+						r.Data = v
+					} else {
+						omittedData++
+					}
 				}
 			}
 		}
@@ -566,8 +580,11 @@ func recordingsFromEvents(evs []shadowEvent, toolInputs map[string][]string, war
 	if rejected > 0 {
 		*warnings = append(*warnings, fmt.Sprintf("%d call(s) the agent loop rejected before running (unknown tool or input the schema does not allow) were not recorded; they still count toward max_tool_calls", rejected))
 	}
-	if mergeData > 0 {
-		*warnings = append(*warnings, fmt.Sprintf("data dropped from %d recording(s) holding a \"<<\" key (YAML reads it as a merge)", mergeData))
+	if omittedData > 0 {
+		*warnings = append(*warnings, fmt.Sprintf("raw data omitted from %d recording(s); only allow-listed connect_status fields are retained", omittedData))
+	}
+	if invalidStatusData > 0 {
+		*warnings = append(*warnings, fmt.Sprintf("connect_status data omitted from %d recording(s) because it did not match the allow-listed shape", invalidStatusData))
 	}
 	if bigData > 0 {
 		*warnings = append(*warnings, fmt.Sprintf("data dropped from %d recording(s) larger than %d bytes", bigData, maxRecordingData))
@@ -775,24 +792,6 @@ func describe(run *shadowRun, label events.ShadowLabelledPayload, graded json.Ra
 	}
 	fmt.Fprintf(&b, " Grade of that run: layer_correct=%t, root_cause=%s.", g.LayerCorrect, rc)
 	return b.String()
-}
-
-func anyData(recs []outRecord) bool {
-	for _, r := range recs {
-		if r.Data != nil {
-			return true
-		}
-	}
-	return false
-}
-
-func hasNonErrorResult(recs []outRecord) bool {
-	for _, r := range recs {
-		if r.Error == "" {
-			return true
-		}
-	}
-	return false
 }
 
 func contains(xs []string, x string) bool {

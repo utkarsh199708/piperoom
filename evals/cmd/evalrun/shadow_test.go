@@ -44,6 +44,24 @@ func TestRunFromShadowOutPassesCheck(t *testing.T) {
 	}
 }
 
+func TestRunFromShadowDoesNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "existing.yaml")
+	want := []byte("keep this file")
+	if err := os.WriteFile(path, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code, err := run(flags{fromShadow: shadowSample, owners: devOwners, out: path}, &out, &out)
+	if err == nil || code == 0 || !strings.Contains(err.Error(), path) {
+		t.Fatalf("code %d err %v, want refusal naming %s", code, err, path)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil || !bytes.Equal(got, want) {
+		t.Fatalf("existing file changed: got %q err %v", got, readErr)
+	}
+}
+
 func TestRunFromShadowErrors(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad.json")

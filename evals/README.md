@@ -163,17 +163,19 @@ A graded shadow room (`docs/design/shadow.md`) is a real incident with a human l
 scenario:
 
 ```sh
-# save the run as the labeller sees it (after the blind label), data included
-curl -s -H "X-User: you" "$SERVER/api/rooms/$ROOM/shadow?include=data,room" > run.json
+# After signing in through the browser, use a private cookie jar containing the
+# active session cookie (OIDC: __Host-piperoom_session; dev: piperoom_session).
+curl -sS --cookie "$COOKIE_JAR" "$SERVER/api/rooms/$ROOM/shadow?include=room" > run.json
 go run ./evals/cmd/evalrun -from-shadow run.json -o evals/scenarios/my-incident.yaml   # or stdout
 go run ./evals/cmd/evalrun -check
 ```
 
-`-from-shadow` reads one `GET /api/rooms/{id}/shadow?include=data,room` response and writes a scenario
+`-from-shadow` reads one `GET /api/rooms/{id}/shadow?include=room` response and writes a scenario
 YAML to `-o`/`-out` (stdout when neither is given, so it pipes; warnings go to stderr). It runs the same
 validation as `-check` before it writes anything, so a file it writes loads. `-owners` picks the
 `owners.yaml` the room's `pipeline_id` is looked up in (default `OWNERS_FILE`, else `dev/owners.yaml`);
-`-name` overrides the scenario name (default `shadow-<room id>`). It never calls a model.
+`-name` overrides the scenario name (default `shadow-<room id>`). It never calls a model. With `-o`,
+it refuses to overwrite an existing file.
 
 | scenario field | from |
 |---|---|
@@ -181,7 +183,7 @@ validation as `-check` before it writes anything, so a file it writes loads. `-o
 | `resources.subjects` | derived: `<topic_prefix>.<table>-key` and `-value` for each source table |
 | `alert.title` | `room.created.title` |
 | `alert.pipeline_map` | `run.pipeline_map` (capped at 16 KiB) |
-| `recordings[]` | each `agent.tool_call` paired with its `agent.tool_result` by `tool_use_id`: `input` without the model's `why`, `summary` (cut to the tool limit), `data`, `truncated`; a failed call (`is_error`) becomes `error` |
+| `recordings[]` | each `agent.tool_call` paired with its `agent.tool_result` by `tool_use_id`: `input` without the model's `why`, `summary` (cut to the tool limit), allow-listed `connect_status` data only (`name`, `state`, `tasks[{id,state}]`), `truncated`; a failed call (`is_error`) becomes `error` |
 | `expect.first_failing_layer` | the human label's `actual_layer` (must be one of the six layers) |
 | `expect.root_cause` | the label's `root_cause_terms`, as **one OR group** (any term matches) |
 | `expect.max_tool_calls` | calls the run made + 5 |
@@ -196,19 +198,20 @@ Things to know before you commit the file:
   never called; those calls miss (`no data available for this request`) and show in the report's
   misses. Add recordings by hand for the other branches you want to test. Calls repeated with identical
   input are folded into the first result; `runbook_lookup` is not recorded (it runs for real in an eval).
-- **`data` must be in the response.** Without `include=data` the file is refused, because replayed
-  `data` is what `connect_resume_connector` validates against. `include=room` is required too: it carries
-  the alert and the label.
-- **Recorded `data` may hold production values** (hosts, IPs, record values, names) because the agent
-  read them from the real stack. Review and redact the file before you commit it. The command prints
-  this warning whenever any recording has `data`.
+- **`include=room` is required** because it carries the alert and human label. Tool data is optional.
+  Raw result data is omitted except for the `connect_status` fields replay validation needs: connector
+  `name`, `state`, and task `id`/`state`. Worker hosts, task errors, row values, DDL result objects,
+  and other tool data are not copied into the scenario.
+- **Review the generated file before committing it.** Alert text, the pipeline map, tool inputs, and
+  summaries can still contain production values such as hosts, keys, or DDL. The command prints this
+  warning for every generated scenario. Keep the saved response and cookie jar private and delete them
+  when no longer needed.
 - **Everything in the response is untrusted** (agent and tool output). It is written only through the
   YAML encoder as string and number values and never executed. After encoding, the file is read back
   and compared with what was meant (every recording, the alert, the label terms). That check exists
-  because YAML can change meaning on the way back: a `"<<"` map key is a merge key, so a recording whose
-  `data` holds one has its `data` dropped (with a warning), and a call whose `input` holds one fails the
-  conversion. Sizes are capped (summary 8000 bytes, data 64 KiB per recording, 200 recordings, 16 MiB
-  input); data over the cap is dropped with a warning.
+  because YAML can change meaning on the way back: a `"<<"` map key is a merge key, so a call whose
+  `input` holds one fails conversion. Sizes are capped (summary 8000 bytes, connector data 64 KiB per
+  recording, 200 recordings, 16 MiB input); oversized connector data is dropped with a warning.
 - **Failed calls.** An `is_error` result becomes an `error` recording (a leading `error: ` is removed,
   the replay adds its own). A call the agent loop rejected before running it (unknown tool, or input the
   schema does not allow) is skipped with a warning and still counts toward `max_tool_calls`. A

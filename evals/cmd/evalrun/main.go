@@ -101,7 +101,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.BoolVar(&f.failOnRegr, "fail-on-regression", false, "exit 2 when a comparison finds a regression")
 	fs.BoolVar(&f.check, "check", false, "validate scenarios against the live tool and action definitions and exit; no model calls")
 	fs.BoolVar(&f.check, "validate", false, "same as -check")
-	fs.StringVar(&f.fromShadow, "from-shadow", "", "build a scenario from a saved GET /api/rooms/{id}/shadow?include=data,room response and exit; YAML goes to stdout or -out/-o; no model calls")
+	fs.StringVar(&f.fromShadow, "from-shadow", "", "build a scenario from a saved GET /api/rooms/{id}/shadow?include=room response and exit; YAML goes to stdout or -out/-o; no model calls")
 	fs.StringVar(&f.owners, "owners", "", "owners.yaml for -from-shadow (default OWNERS_FILE, else dev/owners.yaml)")
 	fs.StringVar(&f.name, "name", "", "scenario name for -from-shadow (default shadow-<room id>)")
 	fs.StringVar(&f.out, "o", "", "same as -out")
@@ -292,6 +292,19 @@ func writeFile(path string, write func(io.Writer) error) (err error) {
 	return write(fh)
 }
 
+func writeNewFile(path string, write func(io.Writer) error) (err error) {
+	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create %s without overwriting: %w", path, err)
+	}
+	defer func() {
+		if cerr := fh.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close %s: %w", path, cerr)
+		}
+	}()
+	return write(fh)
+}
+
 func writeTranscript(dir string, r evals.RunResult, tr evals.Transcript) error {
 	// Scenario names come from YAML files; keep them from escaping dir.
 	name := unsafeChars.ReplaceAllString(r.Scenario, "_")
@@ -343,7 +356,7 @@ func runFromShadow(f flags, stdout, stderr io.Writer) (int, error) {
 		}
 		return 0, nil
 	}
-	if err := writeFile(f.out, func(w io.Writer) error {
+	if err := writeNewFile(f.out, func(w io.Writer) error {
 		_, err := w.Write(res.YAML)
 		return err
 	}); err != nil {

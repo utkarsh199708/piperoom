@@ -79,12 +79,11 @@ func LiveActions(res Resources, recs []Recording) (*actions.Registry, error) {
 }
 
 // connectStatusData is the part of connect_status's Data that action
-// validation reads (see kafkatools connectStatus: name, state, worker, tasks).
+// validation reads (name, state, and task ids/states).
 type connectStatusData struct {
-	Name   string `json:"name"`
-	State  string `json:"state"`
-	Worker string `json:"worker"`
-	Tasks  []struct {
+	Name  string `json:"name"`
+	State string `json:"state"`
+	Tasks []struct {
 		ID    int    `json:"id"`
 		State string `json:"state"`
 	} `json:"tasks"`
@@ -116,7 +115,7 @@ func connectStatuses(recs []Recording) (map[string]clients.ConnectorStatus, erro
 		if err := json.Unmarshal(b, &d); err != nil {
 			return nil, fmt.Errorf("evals: recordings[%d] (connect_status): data is not a connector status: %w", i, err)
 		}
-		st := clients.ConnectorStatus{Name: d.Name, State: d.State, WorkerID: d.Worker}
+		st := clients.ConnectorStatus{Name: d.Name, State: d.State}
 		if st.Name == "" {
 			st.Name = name
 		}

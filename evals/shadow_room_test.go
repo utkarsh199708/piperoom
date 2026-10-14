@@ -40,7 +40,7 @@ const roomUsersYAML = `users:
 
 // TestScenarioFromRealShadowView drives a real shadow room (room.Service over
 // memstore, a fake agent), takes the body room.Service.Shadow returns for
-// include=data,room, marshals it the way the HTTP handler does, and builds a
+// include=room, marshals it the way the HTTP handler does, and builds a
 // scenario from it. The input is the server's own type, so the format the
 // builder reads cannot drift from what the server writes.
 func TestScenarioFromRealShadowView(t *testing.T) {
@@ -86,8 +86,9 @@ func TestScenarioFromRealShadowView(t *testing.T) {
 		}
 		return nil
 	}
+	ms := memstore.New()
 	svc := room.New(room.Deps{
-		Store: memstore.New(), Users: users, Owners: own, Run: runner,
+		Store: ms, Users: users, Owners: own, Run: runner,
 		WriteHandoff: func(ctx context.Context, evs []events.Event, o agent.Options) (events.HandoffSummary, error) {
 			return events.HandoffSummary{}, nil
 		},
@@ -109,12 +110,22 @@ func TestScenarioFromRealShadowView(t *testing.T) {
 	if _, err := svc.GrantControl(ctx, arjun, snap.ID, "arjun"); err != nil {
 		t.Fatal(err)
 	}
-	// Let the run finish before the close, so the close writes the reveal.
+	// Wait on the run's persisted finished timestamp; room creation alone does
+	// not mean the asynchronous shadow investigation has completed.
 	retry(t, func() error {
 		_, err := svc.GetRoom(ctx, snap.ID)
-		return err
+		if err != nil {
+			return err
+		}
+		run, err := ms.GetShadowRun(ctx, snap.ID)
+		if err != nil {
+			return err
+		}
+		if !run.Finished() {
+			return errors.New("shadow run has not finished")
+		}
+		return nil
 	})
-	time.Sleep(200 * time.Millisecond)
 	if _, err := svc.CloseRoom(ctx, arjun, snap.ID, "schema change; set compatibility NONE"); err != nil {
 		t.Fatalf("CloseRoom: %v", err)
 	}
@@ -125,7 +136,7 @@ func TestScenarioFromRealShadowView(t *testing.T) {
 		_, err := svc.ShadowGrade(ctx, priya, snap.ID, true, "yes", "")
 		return err
 	})
-	view, err := svc.Shadow(ctx, snap.ID, room.ShadowReadOptions{Data: true, Room: true})
+	view, err := svc.Shadow(ctx, snap.ID, room.ShadowReadOptions{Room: true})
 	if err != nil {
 		t.Fatalf("Shadow: %v", err)
 	}
@@ -144,7 +155,7 @@ func TestScenarioFromRealShadowView(t *testing.T) {
 		t.Fatalf("%d recordings, want 2: %+v", len(sc.Recordings), sc.Recordings)
 	}
 	cs := sc.Recordings[0]
-	if cs.Tool != "connect_status" || cs.Summary != connectSummary || len(cs.Input) != 1 || cs.Data == nil {
+	if cs.Tool != "connect_status" || cs.Summary != connectSummary || len(cs.Input) != 1 || cs.Data != nil {
 		t.Errorf("connect_status recording = %+v", cs)
 	}
 	if e := sc.Recordings[1]; e.Tool != "kafka_list_groups" || e.Error != "kafka: connection refused" {
