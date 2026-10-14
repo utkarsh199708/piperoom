@@ -43,7 +43,9 @@ jobs:
       - name: go vet (integration-tagged files; compile only, these need the dev stack to run)
         run: go vet -tags integration ./...
       - name: go vet (claude-tagged files; compile only, these need ANTHROPIC_API_KEY to run)
-        run: go vet -tags claude ./internal/agent/...
+        run: go vet -tags claude ./internal/agent/... ./evals/...
+      - name: go vet (evalgen and e2e tagged files; compile only)
+        run: go vet -tags evalgen,e2e ./...
       - name: go build
         run: go build ./...
       - name: go test (unit only; integration tests are build-tagged and need the dev stack)
@@ -90,9 +92,10 @@ jobs:
       - name: go test -tags integration (room database only)
         # Only the room Postgres exists here. Tests that need the dev stack
         # (Kafka, Connect, Schema Registry, source and warehouse Postgres) call
-        # testenv.Require and skip cleanly when Connect at CONNECT_URL is
-        # unreachable, so internal/store and internal/room run for real and the
-        # client/tool packages report SKIP. cmd/discover is excluded: its
+        # testenv.Require, which skips per dependency: a service that does not
+        # answer (or a source/warehouse database that refuses the dev login on
+        # this room-only Postgres) skips the test, so internal/store and
+        # internal/room run for real and the client/tool packages report SKIP. cmd/discover is excluded: its
         # TestDiscoverDevStack has no skip guard and fails without the stack.
         run: |
           set -o pipefail
