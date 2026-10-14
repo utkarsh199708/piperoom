@@ -145,3 +145,16 @@ Rooms that existed before it get their byte count in the background after the se
   24 MB/s on postgres:16; see `docs/design/retention.md` section 5.2. Appends wait only for the batch of
   500 rooms being counted.
 - Rooms not yet counted: `SELECT count(*) FROM rooms WHERE byte_size IS NULL;`
+
+## CI: full-stack, smoke, live evals, release image
+
+| Job | When | What it needs |
+|---|---|---|
+| `Go integration (full dev stack)` (`ci.yml`) | every PR and push to `main` | nothing; starts `dev/docker-compose.yml`, polls Connect (`.github/scripts/wait-for-stack.sh`), runs `go test -tags integration ./internal/...`. **Any skipped test fails the job** (`fail-on-skips.sh`) |
+| `Dev-stack smoke` (`ci.yml`) | every PR and push to `main` | `devctl up`, `status`, `health`, `break` + `fix schema-change` |
+| `Live evals` (`evals-live.yml`) | nightly, and PRs touching `internal/agent/**`, `internal/tools/**`, `evals/**` | repo secret `ANTHROPIC_API_KEY`. Without it (forks) the job skips with a notice. Gate: `.github/scripts/eval-gate.sh` (pass rate >= repo variable `EVAL_MIN_PASS_RATE`, default `0.70`; no errored run; `schema-change` passes every run) |
+| `Release image` (`release-image.yml`) | tags `v*` push to `ghcr.io/<owner>/piperoom`; PRs touching the image inputs only build | the digest is in the job summary, the `image-digest` artifact and the job output `digest`. Deploy by digest: `ghcr.io/<owner>/piperoom@sha256:...` |
+
+Reproduce a full-stack failure locally: `go run ./cmd/devctl lock --owner me && go run ./cmd/devctl up --owner me`,
+then `PIPEROOM_STACK_OWNER=me go test -count=1 -json -tags integration ./internal/... > test.json` and
+`.github/scripts/fail-on-skips.sh test.json`.

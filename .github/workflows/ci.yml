@@ -108,6 +108,99 @@ jobs:
           # And the DB tests must have really run, not just not skipped.
           grep -E '^ok[[:space:]]+piperoom/internal/(store|room)[[:space:]]' it.log
 
+  fullstack:
+    name: Go integration (full dev stack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      # The state the integration tests expect: owner of the stack lock, so
+      # testenv.Require does not skip on a lock held by someone else.
+      PIPEROOM_STACK_OWNER: ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Start the dev stack (postgres, kafka, schema registry, connect, devconsumer)
+        # No --wait: wait-for-stack.sh polls Connect's REST API itself, with a
+        # bounded timeout, and dumps the container logs when it gives up.
+        run: docker compose -f dev/docker-compose.yml up -d --build
+      - name: Wait until Connect and the Schema Registry answer
+        run: .github/scripts/wait-for-stack.sh 300
+      - name: Register the connector (devctl up is idempotent)
+        run: |
+          go run ./cmd/devctl lock --owner ci
+          go run ./cmd/devctl up --owner ci
+      - name: go test -tags integration ./internal/...
+        run: |
+          set +e
+          go test -count=1 -timeout 25m -json -tags integration ./internal/... > test.json
+          rc=$?
+          set -e
+          # Readable failures in the log; the full stream is the artifact.
+          jq -r 'select(.Action == "output") | .Output' test.json \
+            | grep -E '^(--- FAIL|FAIL|panic:)' || true
+          exit "$rc"
+      - name: Skipped integration tests are failures
+        if: success() || failure()
+        run: .github/scripts/fail-on-skips.sh test.json
+      - name: Dump stack logs
+        if: failure()
+        run: docker compose -f dev/docker-compose.yml logs --no-color --tail=300
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fullstack-test-json
+          path: test.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Tear down
+        if: always()
+        run: docker compose -f dev/docker-compose.yml down -v --remove-orphans
+
+  smoke:
+    name: Dev-stack smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PIPEROOM_STACK_OWNER: ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Lock and bring the stack up (devctl up waits for Connect and the connector)
+        run: |
+          go run ./cmd/devctl lock --owner ci
+          go run ./cmd/devctl up --owner ci
+      - name: Wait until Connect and the Schema Registry answer
+        run: .github/scripts/wait-for-stack.sh 60
+      - name: devctl status
+        run: go run ./cmd/devctl status
+      - name: devctl health (the pipeline is healthy end to end)
+        run: go run ./cmd/devctl health
+      - name: Break and fix a scenario (schema-change)
+        run: |
+          go run ./cmd/devctl break --owner ci schema-change
+          go run ./cmd/devctl fix --owner ci schema-change
+      - name: Dump stack logs
+        if: failure()
+        run: docker compose -f dev/docker-compose.yml logs --no-color --tail=300
+      - name: Tear down
+        if: always()
+        run: docker compose -f dev/docker-compose.yml down -v --remove-orphans
+
   race:
     name: Go race detector
     runs-on: ubuntu-latest
