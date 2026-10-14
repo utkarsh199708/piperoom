@@ -190,7 +190,7 @@ export function AppShell() {
                     <ThemeToggle />
                   </div>
                 </header>
-                <main id="main" tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden focus:outline-none">
+                <main id="main" tabIndex={-1} className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden focus:outline-none">
                   <div className="min-h-full">
                     <Outlet />
                   </div>
