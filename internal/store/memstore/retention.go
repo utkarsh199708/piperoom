@@ -170,6 +170,7 @@ func (s *Store) deleteLocked(id string) store.PurgeResult {
 		delete(s.shadowBytes, id)
 		delete(s.shadowRuns, id)
 	}
+	s.dropRoomSpendLocked(id)
 	return res
 }
 

@@ -88,6 +88,14 @@ func run() error {
 		return fmt.Errorf("server: %w", err)
 	}
 
+	// Spend limits and the price table (docs/design/cost.md): a bad value
+	// stops the server before it connects to anything.
+	spend, err := spendSetup(cfg)
+	if err != nil {
+		return err
+	}
+	spend.logSettings(log)
+
 	// Login settings (docs/design/auth.md): a bad PIPEROOM_AUTH_MODE or oidc
 	// config refuses start, and so does a reachable-from-outside listen
 	// address in dev mode without PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 (security
@@ -236,7 +244,15 @@ func run() error {
 		// closedHook is room.Deps.OnRoomClosed: it forgets the room's token
 		// count and tells the watcher, which is set once it exists.
 		closedHook = &roomClosedHook{}
+		// usage hands the hand-off's agent.usage events to the room service
+		// once it exists.
+		usage = &usageRelay{log: log}
 	)
+	// Both stores keep the spend tables; the in-memory one only for --demo.
+	spendStore, ok := st.(store.SpendStore)
+	if !ok {
+		return errors.New("server: the room store keeps no spend tables")
+	}
 	if *demoMode {
 		// The real actions over the demo's in-memory clients (LEAD-ARCH round
 		// 4, item 3): the proposal path -- scope check, approval, executor --
@@ -258,6 +274,11 @@ func run() error {
 		}
 		ep, err := wiring.NewAgentEndpoint(ctx, cfg, log, awsCfg)
 		if err != nil {
+			return fmt.Errorf("server: %w", err)
+		}
+		// Spend limits are checked against the room database, so a restart
+		// does not reset them.
+		if err := ep.SetSpend(spend.options(spendStore, usage)); err != nil {
 			return fmt.Errorf("server: %w", err)
 		}
 		run = ep.Run
@@ -283,7 +304,7 @@ func run() error {
 		topo = sets
 	}
 
-	svc := room.New(room.Deps{
+	svc := newRoomService(room.Deps{
 		Store:        st,
 		Actions:      acts,
 		Tools:        toolsReg,
@@ -309,7 +330,7 @@ func run() error {
 		Limits:        limits,
 		OnRoomOpened:  slack.onRoomOpened(),
 		OnRoomClosed:  closedHook.onClosed,
-	})
+	}, usage)
 
 	loadCtx, cancelLoad := context.WithTimeout(ctx, 30*time.Second)
 	loadErr := svc.Load(loadCtx)
@@ -353,7 +374,13 @@ func run() error {
 	defer stopAuthPrune()
 
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions),
-		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities)}
+		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities),
+		httpapi.WithSpend(httpapi.Spend{
+			Store:                spendStore,
+			RoomTokens:           spend.roomLimit,
+			PipelineDailyTokens:  spend.cost.PipelineDailyTokens,
+			PipelineDailyCostUSD: spend.cost.PipelineDailyCostUSD,
+		})}
 	if oidcRP != nil {
 		httpOpts = append(httpOpts, httpapi.WithOIDC(oidcRP))
 	}

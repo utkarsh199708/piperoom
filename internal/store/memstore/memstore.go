@@ -35,6 +35,8 @@ type Store struct {
 
 	limits    store.Limits                  // per-room caps (SetLimits); zero = none
 	deletions map[string]store.RoomDeletion // room_deletions rows by room id
+
+	spend spendTables
 }
 
 type roomLog struct {
@@ -67,6 +69,8 @@ func New() *Store {
 		shadowEvents: map[string][]events.Event{},
 		shadowBytes:  map[string]int64{},
 		deletions:    map[string]store.RoomDeletion{},
+
+		spend: newSpendTables(),
 	}
 }
 

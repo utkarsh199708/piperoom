@@ -98,6 +98,9 @@ type runner struct {
 	escalated bool
 	// triageSw is the endpoint-wide "triage is off" flag; nil outside an Endpoint.
 	triageSw *triageSwitch
+
+	// prices estimate the cost in agent.usage events; nil omits it.
+	prices Prices
 }
 
 // Run investigates a pipeline incident: it calls Claude, executes read-only
@@ -311,6 +314,23 @@ func (r *runner) run(ctx context.Context) error {
 			// reaches end_turn, so it can read the verification note and reply.
 		}
 	}
+}
+
+// callModel sends one request and reports its usage to the room as an
+// agent.usage event (docs/design/cost.md): role is triage or main, the model
+// the triage rules picked. A request that was never sent (a budget refused it)
+// is not reported.
+func (r *runner) callModel(ctx context.Context, req anthropic.BetaMessageNewParams, role string) (anthropic.BetaMessage, error) {
+	start := time.Now()
+	resp, err := r.model.Turn(ctx, req)
+	if wasSent(err) {
+		ectx, cancel := detached(ctx)
+		defer cancel()
+		for _, p := range usagePayloads(req.Model, role, resp, time.Since(start), r.prices) {
+			r.emit(ectx, events.AgentUsage, p)
+		}
+	}
+	return resp, err
 }
 
 // request assembles one model request. The system prompt and tool list are
