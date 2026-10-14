@@ -80,7 +80,7 @@ func (s *Server) hostGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := strings.ToLower(r.Host)
 		if !isLoopbackHostHeader(h) && !allowed[h] && !isSignedAlertRoute(r) && !isHealthProbe(r) {
-			writeError(w, http.StatusMisdirectedRequest, "bad_host", "this Host is not allowed; see PIPEROOM_PUBLIC_URL and PIPEROOM_ALLOWED_HOSTS")
+			writeBadHost(w, r)
 			return
 		}
 		next.ServeHTTP(w, r)

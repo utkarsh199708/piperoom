@@ -29,3 +29,10 @@ func (g *Gateway) WaitConns(ctx context.Context, n int) error {
 		}
 	}
 }
+
+// Slots is how many connection slots roomID and userID hold now.
+func (g *Gateway) Slots(roomID, userID string) (perRoom, perUser int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.roomSlots[roomID], g.userSlots[userID]
+}

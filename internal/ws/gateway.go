@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -43,6 +44,16 @@ const replayBatch = 500
 // this deadline and every frame is written with writeTimeout.
 const replayTimeout = 30 * time.Second
 
+// Default connection caps. A browser tab holds one connection, so 20 per user
+// covers anyone with a few rooms open on two machines; a page that reconnects
+// in a loop without closing hits the cap instead of exhausting the server.
+// 200 per room is far above any incident team and bounds the fan-out cost of
+// one room's events.
+const (
+	DefaultMaxConnsPerRoom = 200
+	DefaultMaxConnsPerUser = 20
+)
+
 // Gateway serves /api/rooms/{id}/ws.
 type Gateway struct {
 	svc   *room.Service
@@ -74,13 +85,22 @@ type Gateway struct {
 	// session's connections with "session_expired". Set before serving.
 	SessionAlive func(ctx context.Context, id Identity) bool
 
+	// MaxConnsPerRoom and MaxConnsPerUser cap live connections (counted from
+	// the upgrade until the connection ends, replay included). An upgrade
+	// over either cap is refused with 429 too_many_connections before the
+	// handshake. Zero means the Default value. Set before serving.
+	MaxConnsPerRoom int
+	MaxConnsPerUser int
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu     sync.Mutex
-	closed bool
-	rooms  map[string]*roomHub
+	mu        sync.Mutex
+	closed    bool
+	rooms     map[string]*roomHub
+	roomSlots map[string]int // connections per room, held from reserve to release
+	userSlots map[string]int // connections per user id
 	// connsChanged is closed and replaced (under mu) whenever a connection
 	// registers or leaves, so a waiter wakes on the change itself.
 	connsChanged chan struct{}
@@ -92,7 +112,8 @@ func NewGateway(svc *room.Service, st store.Store, log *slog.Logger) *Gateway {
 		log = slog.Default()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	g := &Gateway{svc: svc, store: st, log: log, now: time.Now, ctx: ctx, cancel: cancel, rooms: map[string]*roomHub{}, connsChanged: make(chan struct{})}
+	g := &Gateway{svc: svc, store: st, log: log, now: time.Now, ctx: ctx, cancel: cancel, rooms: map[string]*roomHub{},
+		roomSlots: map[string]int{}, userSlots: map[string]int{}, connsChanged: make(chan struct{})}
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
@@ -212,6 +233,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Counted before the handshake so a refusal is a plain HTTP error the
+	// client can read, and held until the connection ends.
+	release, msg := g.reserve(roomID, user.ID)
+	if release == nil {
+		writeHTTPError(w, http.StatusTooManyRequests, "too_many_connections", msg)
+		return
+	}
+
 	origins := g.OriginPatterns
 	if origins == nil {
 		origins = []string{"localhost:5173", "127.0.0.1:5173"}
@@ -221,6 +250,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		// Accept already wrote the response.
+		release()
 		return
 	}
 	conn.SetReadLimit(4096)
@@ -238,7 +268,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithCancel(g.ctx)
 	c.cancel = cancel
-	c.onClose = func() { g.removeClient(roomID, c) }
+	c.onClose = func() {
+		g.removeClient(roomID, c)
+		release()
+	}
 
 	// Replay the backlog with blocking writes so a slow client cannot overflow
 	// the live send buffer while catching up. The whole replay is bounded by
@@ -351,6 +384,42 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer g.wg.Done()
 		g.eventLoop(ctx, c, ch)
 	}()
+}
+
+// reserve takes one connection slot for roomID and userID. It returns a
+// release func that gives the slot back (safe to call more than once), or nil
+// and the reason when either cap is reached.
+func (g *Gateway) reserve(roomID, userID string) (func(), string) {
+	perRoom, perUser := g.MaxConnsPerRoom, g.MaxConnsPerUser
+	if perRoom <= 0 {
+		perRoom = DefaultMaxConnsPerRoom
+	}
+	if perUser <= 0 {
+		perUser = DefaultMaxConnsPerUser
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.userSlots[userID] >= perUser {
+		return nil, fmt.Sprintf("you already have %d live connections; close some Piperoom tabs and retry", perUser)
+	}
+	if g.roomSlots[roomID] >= perRoom {
+		return nil, fmt.Sprintf("this room already has %d live connections; retry later", perRoom)
+	}
+	g.userSlots[userID]++
+	g.roomSlots[roomID]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if g.userSlots[userID]--; g.userSlots[userID] <= 0 {
+				delete(g.userSlots, userID)
+			}
+			if g.roomSlots[roomID]--; g.roomSlots[roomID] <= 0 {
+				delete(g.roomSlots, roomID)
+			}
+		})
+	}, ""
 }
 
 // recheckNewClient ends c's session at once when SessionAlive says the session
