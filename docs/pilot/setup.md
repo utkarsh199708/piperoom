@@ -40,7 +40,8 @@ for those before you plan the install.
   Connect and Schema Registry are not contacted at start-up, so a wrong URL shows up on the first
   tool or action that uses it. For Bedrock, the AWS credentials are fetched once at start-up, and
   for Vertex the Google default credentials are looked up (section 1).
-- **The credentials** from [permissions.md](permissions.md). One credential set per process (F7).
+- **The credentials** from [permissions.md](permissions.md). One credential set per process, or one
+  per pipeline with `connections:` in `owners.yaml` (section 2a, F7).
 - Read [README.md](README.md#read-this-first-pilot-limits) for the current limits.
 
 ## 1. Configure the environment
@@ -259,6 +260,44 @@ Rules of thumb:
   `wal_headroom_bytes`. `watch.slot_wal.fire` also sets the slot-WAL warning threshold of the pipeline
   map (`internal/topology/builder.go:55`). Without the block, the defaults apply. See
   [docs/design/watcher.md](../design/watcher.md).
+
+### 2a. Tenancy
+
+Design and every rule: [docs/design/tenancy.md](../design/tenancy.md).
+
+- **Separate customers or legal entities: one deployment each.** This is the only hard boundary.
+  Install the Helm chart once per tenant (own namespace, Secret, values, ingress host, OIDC client),
+  or run one Terraform apply or one compose project per tenant, each with an `owners.yaml` that lists
+  only that tenant's pipelines.
+- **Teams within one organisation: one deployment, in-process tenants.** In `owners.yaml`:
+  - `tenants: {<name>: {members: [group:..., user:...]}}` turns the room filter on: a person sees only
+    the rooms of pipelines in their tenants. A person is in a tenant when listed in its `members:` or
+    when they may approve any layer of one of its pipelines (so a top-level `layers:` owner is in every
+    tenant whose pipelines do not override that layer: give each pipeline its own `owners:` block).
+    Everything else answers `404`.
+  - `tenant: <name>` on a pipeline (default `default`).
+  - `connections:` on a pipeline names the **environment variables or files** that hold its DSNs, URLs
+    and logins, for example `source_db_url: {env: PAYMENTS_SOURCE_DB_URL}` or
+    `kafka_sasl_password: {file: /run/secrets/payments/kafka-password}`. Never put a secret in
+    `owners.yaml`. A pipeline with `connections:` gets its own clients, tools, actions and watcher
+    reads, and takes nothing from the process-wide `SOURCE_DB_URL`, `KAFKA_*` and so on; a pipeline
+    without it uses those, as before.
+  - The start fails when two tenants use the same variable or file (pipelines without `connections:`
+    count as using the process-wide variables, and a TLS client key or certificate counts by its real
+    path however it was named) unless every pipeline involved sets `shared_connections: true`. A CA
+    bundle may be shared.
+  - With any `connections:` block, unset the libpq variables (`PGPASSWORD`, `PGUSER`, `PGHOST`,
+    `PGDATABASE`, `PGPASSFILE`, `PGSERVICE`, `PGSERVICEFILE`, `PGSSLCERT`, `PGSSLKEY`, `PGSSLPASSWORD`)
+    and remove `~/.pgpass`, `~/.pg_service.conf` and `~/.postgresql/postgresql.key` on the Piperoom
+    host: pgx would add them to a DSN that leaves something out, so the start refuses them.
+  - A `tenants:`, `connections:` or `tenant:` key with no value (or with every entry commented out) is
+    refused; remove the key instead.
+  - Set `PIPEROOM_TENANCY_MODE=teams` so the server refuses to start if the `tenants:` block is ever
+    lost. The start-up log prints the mode and which pipelines use their own connections.
+  - On Helm, mount per-team secret files with `extraVolumes`/`extraVolumeMounts`, or add per-team
+    variables with `secrets.refs`.
+- Not per tenant in one deployment: the model key and its cost, `PIPEROOM_MAX_AGENTS`, the room
+  database, the Slack channel and the people list.
 
 ## 3. Prepare the source database
 

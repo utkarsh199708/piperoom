@@ -111,3 +111,25 @@ func TestParseWatchModeCaseAndEmpty(t *testing.T) {
 		t.Fatalf("got %+v, want mode off and default interval", w)
 	}
 }
+
+func TestParseTenancyMode(t *testing.T) {
+	t.Setenv("PIPEROOM_TENANCY_MODE", "")
+	if got := Load().TenancyMode; got != TenancyAuto {
+		t.Fatalf("default TenancyMode = %q, want %q", got, TenancyAuto)
+	}
+	t.Setenv("PIPEROOM_TENANCY_MODE", "teams")
+	if got := Load().TenancyMode; got != "teams" {
+		t.Fatalf("PIPEROOM_TENANCY_MODE not read: %q", got)
+	}
+	for in, want := range map[string]string{"": TenancyAuto, "auto": TenancyAuto, " Single ": TenancySingle, "TEAMS": TenancyTeams} {
+		got, err := ParseTenancyMode(Config{TenancyMode: in})
+		if err != nil || got != want {
+			t.Fatalf("ParseTenancyMode(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"team", "multi", "on"} {
+		if _, err := ParseTenancyMode(Config{TenancyMode: bad}); err == nil || !strings.Contains(err.Error(), "PIPEROOM_TENANCY_MODE") {
+			t.Fatalf("ParseTenancyMode(%q) err = %v, want one naming PIPEROOM_TENANCY_MODE", bad, err)
+		}
+	}
+}
