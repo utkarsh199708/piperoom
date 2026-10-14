@@ -10,7 +10,10 @@ func TestWithoutBrackets(t *testing.T) {
 		"Priya":                     "Priya",
 		"Pri(x)ya":                  "Priya",
 		"Priya ((a) b)":             "Priya ",
-		"Priya [ops] {x} <y>":       "Priya   <y>",
+		"Priya [ops] {x} <y>":       "Priya   ",
+		"Priya <priya@example.com>": "Priya ",
+		"Priya \u2039x\u203a":       "Priya ",
+		"Priya \u00abx\u00bb":       "Priya ",
 		"Priya\uff08x\uff09":        "Priya",
 		"Priya\ufe59x\ufe5a":        "Priya",
 		"Priya \u3008x\u3009":       "Priya ",
@@ -35,13 +38,23 @@ func TestHasSuffixShape(t *testing.T) {
 		"Bob \uff08x\uff20y\uff09",
 		"Priya (priya@example.com",
 		"Bob (x@y) and more",
+		// LEAD-REVIEW round 1: ASCII angle brackets, guillemets, and an
+		// email-shaped word with no brackets at all.
+		"Priya <priya@example.com>",
+		"Priya \u2039priya@example.com\u203a",
+		"Priya \u00abpriya@example.com\u00bb",
+		"Bob <u_0123456789ab>",
+		"Priya - priya@example.com",
+		"Priya priya@example.com",
+		"Priya, \"priya@example.com\".",
+		"Priya \u2014 ops@vendor.example",
 	}
 	for _, s := range yes {
 		if !HasSuffixShape(s) {
 			t.Errorf("HasSuffixShape(%q) = false, want true", s)
 		}
 	}
-	no := []string{"Bob", "Bob (contractor)", "a@b", "Bob (Ops) u_x", "Bob ()", "Bob (uu_x)"}
+	no := []string{"Bob", "Bob (contractor)", "a@b", "Bob (Ops) u_x", "Bob ()", "Bob (uu_x)", "Bob <ops>", "Bob \u00abOps\u00bb", "a@b.", "@example.com", "Bob@"}
 	for _, s := range no {
 		if HasSuffixShape(s) {
 			t.Errorf("HasSuffixShape(%q) = true, want false", s)

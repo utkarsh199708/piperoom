@@ -128,19 +128,33 @@ func LooksLike(a, b string) bool {
 	return sa != "" && sa == Skeleton(b)
 }
 
+// openBracket and closeBracket report whether r opens or closes a bracketed
+// part. Unicode Ps/Pe (parentheses, square, curly, CJK brackets), the
+// initial/final quotes Pi/Pf (‹›«» and curly quotes), and ASCII < > (category
+// Sm, so not caught by Ps/Pe) all count: "Priya <priya@example.com>" reads
+// like the server's own "Priya (priya@example.com)" to a person.
+func openBracket(r rune) bool {
+	return r == '<' || unicode.In(r, unicode.Ps, unicode.Pi)
+}
+
+func closeBracket(r rune) bool {
+	return r == '>' || unicode.In(r, unicode.Pe, unicode.Pf)
+}
+
 // WithoutBrackets returns the name with every bracketed part removed, brackets
 // included, so "Priya (priya@example.com)" compares as "Priya". Any opening
 // and closing punctuation counts (parentheses, square and curly brackets,
-// angle and CJK brackets), after NFKC so fullwidth and small forms count too;
-// nesting is followed, and an unmatched closing bracket is dropped.
+// angle and CJK brackets, ASCII < >, guillemets and other initial/final
+// quotes), after NFKC so fullwidth and small forms count too; nesting is
+// followed, and an unmatched closing bracket is dropped.
 func WithoutBrackets(s string) string {
 	var b strings.Builder
 	depth := 0
 	for _, r := range norm.NFKC.String(s) {
 		switch {
-		case unicode.Is(unicode.Ps, r):
+		case openBracket(r):
 			depth++
-		case unicode.Is(unicode.Pe, r):
+		case closeBracket(r):
 			if depth > 0 {
 				depth--
 			}
@@ -151,22 +165,27 @@ func WithoutBrackets(s string) string {
 	return b.String()
 }
 
-// HasSuffixShape reports whether the name holds a bracketed part that looks
-// like the suffix the server appends to a look-alike name: an email ("@"
-// inside) or a derived id ("u_" first). Such a name could otherwise forge the
-// server's own marking ("Priya (priya@example.com)"), so it is suffixed too.
-// Compared after NFKC, so a fullwidth "@" or bracket counts.
+// HasSuffixShape reports whether the name looks like it carries the suffix
+// the server appends to a look-alike name: a bracketed part holding an email
+// ("@" inside) or a derived id ("u_" first), or an email-shaped word anywhere
+// ("Priya - priya@example.com"). Such a name could otherwise forge the
+// server's own marking, so it is suffixed too. Compared after NFKC, so a
+// fullwidth "@" or bracket counts.
 func HasSuffixShape(s string) bool {
+	s = norm.NFKC.String(s)
+	if hasEmailToken(s) {
+		return true
+	}
 	depth := 0
 	var inner strings.Builder
-	for _, r := range norm.NFKC.String(s) {
+	for _, r := range s {
 		switch {
-		case unicode.Is(unicode.Ps, r):
+		case openBracket(r):
 			if depth == 0 {
 				inner.Reset()
 			}
 			depth++
-		case unicode.Is(unicode.Pe, r) && depth > 0:
+		case closeBracket(r) && depth > 0:
 			depth--
 			if depth == 0 && suffixLike(inner.String()) {
 				return true
@@ -183,6 +202,27 @@ func HasSuffixShape(s string) bool {
 func suffixLike(inner string) bool {
 	inner = strings.TrimFunc(inner, func(r rune) bool { return unicode.IsSpace(r) || ignorable(r) })
 	return strings.Contains(inner, "@") || strings.HasPrefix(strings.ToLower(inner), "u_")
+}
+
+// hasEmailToken reports whether s holds a word shaped like an email: text,
+// "@", and a domain with a dot in it ("a@b" alone is not one). Words are split
+// on spaces, brackets and quotes, and trimmed of surrounding punctuation.
+func hasEmailToken(s string) bool {
+	words := strings.FieldsFunc(s, func(r rune) bool {
+		return unicode.IsSpace(r) || ignorable(r) || openBracket(r) || closeBracket(r)
+	})
+	for _, w := range words {
+		w = strings.TrimFunc(w, func(r rune) bool { return unicode.IsPunct(r) && r != '@' })
+		at := strings.LastIndex(w, "@")
+		if at <= 0 || at == len(w)-1 {
+			continue
+		}
+		domain := w[at+1:]
+		if dot := strings.Index(domain, "."); dot > 0 && dot < len(domain)-1 {
+			return true
+		}
+	}
+	return false
 }
 
 // MixesLatin reports whether the name has a Latin rune and a rune of another

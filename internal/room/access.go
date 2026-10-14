@@ -135,7 +135,8 @@ const (
 // ShownName is the name the room shows for a person (design section 2.1,
 // security audit A-ID-2). A users.yaml person is shown with their users.yaml
 // name. Anyone else chose their own name in the IdP, so it is shown as
-// "<name> (<email>)", or "<name> (<id>)" without a verified email, when
+// "<name> (<email>)", or "<name> (<id>)" without a verified email or when the
+// email itself is non-ASCII or looks like a users.yaml person (suffixTag), when
 //
 //   - the whole name, or the name with its bracketed parts removed, renders
 //     like a users.yaml id, name or email, or a server actor (auth.Skeleton);
@@ -161,11 +162,23 @@ func (s *Service) ShownName(id, name, email string) (shown, resembles string) {
 	if resembles == "" {
 		return name, ""
 	}
-	tag := email
-	if tag == "" {
-		tag = id
+	return name + " (" + s.suffixTag(id, email) + ")", resembles
+}
+
+// suffixTag is what ShownName puts in brackets: the verified email, unless the
+// email could repeat the forgery it marks. An IdP's email_verified only proves
+// the mailbox, not that it differs visibly from a users.yaml person's, so an
+// email with a non-ASCII rune ("priya@example.com" with a Cyrillic a) or one
+// that renders like a users.yaml id, name or email ("priya@examp1e.com") is
+// replaced by the derived u_ id, which the server minted and cannot be chosen.
+func (s *Service) suffixTag(id, email string) string {
+	if email == "" || !isASCII(email) {
+		return id
 	}
-	return name + " (" + tag + ")", resembles
+	if _, ok := s.users.Lookalike(email); ok {
+		return id
+	}
+	return email
 }
 
 // resembles is ShownName's test; see there.
