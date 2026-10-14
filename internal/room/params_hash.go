@@ -122,11 +122,19 @@ const paramsMismatchMsg = "params_hash does not match this proposal; reload the 
 // identityFor builds the identity recorded with a decision: the session facts
 // the HTTP layer put on the user, plus how the right to decide was derived
 // (the grant). A user with no session (a dev-mode X-User request, a test) gets
-// method "dev" and no session id; the identity is never empty.
-func identityFor(u User, grant string) events.Identity {
+// method "dev" and no session id; the identity is never empty. The email is the
+// session's verified IdP email, else the users.yaml email: of the user, so the
+// decision is tied to a mailbox and not only to a display name (design section
+// 2.1, security audit A-ID-2).
+func (s *Service) identityFor(u User, grant string) events.Identity {
 	id := u.Identity
 	if id.Method == "" {
 		id.Method = "dev"
+	}
+	if id.Email == "" {
+		if f, ok := s.users.Get(u.ID); ok {
+			id.Email = f.Email
+		}
 	}
 	id.Grant = grant
 	if !id.AuthTime.IsZero() {

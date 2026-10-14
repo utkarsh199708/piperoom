@@ -5,6 +5,8 @@ import { isEditableTarget } from '../shell/keys'
 export interface RoomShortcuts {
   /** H */
   handoff?: () => void
+  /** C: close the room (driver only). */
+  close?: () => void
   /** Shift+T */
   trace?: () => void
   /** T: take control, or request it (the room screen passes whichever applies). */
@@ -30,6 +32,7 @@ export function useRoomShortcuts(shortcuts: RoomShortcuts): void {
       const s = latest.current
       let run: (() => void) | undefined
       if (key === 'h' && !e.shiftKey) run = s.handoff
+      else if (key === 'c' && !e.shiftKey) run = s.close
       else if (key === 't') run = e.shiftKey ? s.trace : s.control
       if (!run) return
       e.preventDefault()

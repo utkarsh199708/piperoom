@@ -7,22 +7,27 @@ import (
 )
 
 // Person is a bare identity (no role/state), used inside suggestions.
+// Verified mirrors events.Actor.Verified (docs/design/auth.md section 2.1),
+// as do the Verified fields of Member and Driver.
 type Person struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Verified bool   `json:"verified"`
 }
 
 // Member is someone who has participated in a room.
 type Member struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Role string `json:"role"` // "driver" | "watching"
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Verified bool   `json:"verified"`
+	Role     string `json:"role"` // "driver" | "watching"
 }
 
 // Driver is the current driver with their lease.
 type Driver struct {
 	ID         string    `json:"id"`
 	Name       string    `json:"name"`
+	Verified   bool      `json:"verified"`
 	LeaseUntil time.Time `json:"lease_until"`
 }
 
@@ -157,7 +162,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	snap.OpenProposals = append([]Proposal(nil), snap.OpenProposals...)
 	snap.PendingSuggestions = append([]Suggestion(nil), snap.PendingSuggestions...)
 	if e.Actor.Kind == events.ActorHuman {
-		snap.Members = upsertMember(snap.Members, e.Actor.ID, e.Actor.Name, "watching")
+		snap.Members = upsertMember(snap.Members, e.Actor, "watching")
 	}
 	switch e.Type {
 	case events.RoomCreated:
@@ -220,7 +225,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		}
 		snap.PendingSuggestions = append(snap.PendingSuggestions, Suggestion{
 			SuggestionID: p.SuggestionID,
-			From:         Person{ID: e.Actor.ID, Name: e.Actor.Name},
+			From:         Person{ID: e.Actor.ID, Name: e.Actor.Name, Verified: e.Actor.Verified},
 			Text:         p.Text,
 		})
 
@@ -241,8 +246,8 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		if snap.Driver != nil && snap.Driver.ID != p.To.ID {
 			snap.Members = setRole(snap.Members, snap.Driver.ID, "watching")
 		}
-		snap.Driver = &Driver{ID: p.To.ID, Name: p.To.Name, LeaseUntil: p.LeaseUntil}
-		snap.Members = upsertMember(snap.Members, p.To.ID, p.To.Name, "driver")
+		snap.Driver = &Driver{ID: p.To.ID, Name: p.To.Name, Verified: p.To.Verified, LeaseUntil: p.LeaseUntil}
+		snap.Members = upsertMember(snap.Members, p.To, "driver")
 
 	case events.ProposalCreated:
 		p, ok := decode[events.ProposalCreatedPayload](e)
@@ -356,23 +361,25 @@ func decode[T any](e events.Event) (T, bool) {
 	return v, true
 }
 
-// upsertMember adds or updates a member without mutating the input slice.
-func upsertMember(members []Member, id, name, role string) []Member {
+// upsertMember adds or updates a member without mutating the input slice. The
+// name and verified flag follow the latest event of that person.
+func upsertMember(members []Member, a events.Actor, role string) []Member {
 	for i := range members {
-		if members[i].ID == id {
-			if members[i].Name == name && (role != "driver" || members[i].Role == "driver") {
+		if members[i].ID == a.ID {
+			if members[i].Name == a.Name && members[i].Verified == a.Verified && (role != "driver" || members[i].Role == "driver") {
 				return members
 			}
 			// Copy-on-write so a shared backing array is not mutated.
 			out := append([]Member(nil), members...)
-			out[i].Name = name
+			out[i].Name = a.Name
+			out[i].Verified = a.Verified
 			if role == "driver" {
 				out[i].Role = "driver"
 			}
 			return out
 		}
 	}
-	return append(members, Member{ID: id, Name: name, Role: role})
+	return append(members, Member{ID: a.ID, Name: a.Name, Verified: a.Verified, Role: role})
 }
 
 // setRole changes a member's role without mutating the input slice.
