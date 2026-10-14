@@ -194,11 +194,16 @@ func (s *Server) sanitizeView(v spec.View) spec.View {
 		if !ok {
 			continue
 		}
-		if f.Type.IsSecret() {
+		// AllowRef fields (a lease's username) may be stored as a reference;
+		// dropping it here would make the drawer show the field empty.
+		if f.Type.IsSecret() || f.AllowRef {
 			if ref, ok := refValue(val); ok {
 				cfg[name] = map[string]any{spec.RefKey: ref}
+				continue
 			}
-			continue
+			if f.Type.IsSecret() {
+				continue
+			}
 		}
 		switch val.(type) {
 		case string, bool, float64, json.Number:
