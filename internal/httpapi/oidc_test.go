@@ -187,7 +187,7 @@ func newOIDCEnv(t *testing.T, o oidcOpts) *oidcEnv {
 	settings.Mode = auth.ModeOIDC
 	settings.ViewerGroups = []string{"viewers"}
 	settings.TrustedProxies = o.trusted
-	states, idents := auth.NewMemLoginStates(), auth.NewMemIdentities()
+	states, idents := auth.NewMemLoginStates(), auth.NewMemIdentities().WithSessions(sessions)
 	api := httpapi.New(svc, st, log,
 		httpapi.WithAuth(settings), httpapi.WithSessions(sessions), httpapi.WithLoginStates(states),
 		httpapi.WithIdentities(idents), httpapi.WithOIDC(rp),
@@ -715,8 +715,8 @@ func TestOIDCIdentityMapping(t *testing.T) {
 	}
 
 	// Unbind (devctl identities unbind priya): the new account can bind.
-	if n, err := e.idents.Unbind(ctx, "priya"); err != nil || n != 1 {
-		t.Fatalf("unbind = %d, %v", n, err)
+	if r, err := e.idents.Unbind(ctx, "priya", time.Now()); err != nil || r.Unbound != 1 {
+		t.Fatalf("unbind = %+v, %v", r, err)
 	}
 	if got := user(e.mustLogin(t, recycled)); got != "priya" {
 		t.Fatalf("after unbind: %q, want priya", got)

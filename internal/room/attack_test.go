@@ -304,11 +304,13 @@ func TestAttack_ShippedUsersFilesStillLoad(t *testing.T) {
 	}
 }
 
-// A-AP-3 (design, documented). users.yaml layers still grant approval rights,
-// and ValidateUsers skips any layer whose owners.yaml entry names a group
-// (design section 2.3). So a users.yaml entry can claim a group-owned layer
-// that owners.yaml never gives it, and the server starts. This test pins the
-// current behaviour; see the report for the proposed check.
+// A-AP-3 (fixed). A user who lists a layer in users.yaml must be a user:
+// principal of it in owners.yaml even when the layer also lists groups: the
+// server cannot vouch for group membership at start-up. ValidateUsers refuses
+// to start and names the user and the layer; and should such a config reach
+// the service anyway, the users.yaml layer grants nothing (design section 2.3,
+// revision 5; the approve path is covered over HTTP in
+// httpapi TestLifecycle_UsersLayerOverGroupLayer).
 func TestAttack_UsersYAMLLayerOverGroupLayer(t *testing.T) {
 	users, err := room.ParseUsers([]byte("users:\n  - {id: kabir, layers: [consumer]}\n  - {id: mallory, layers: [consumer]}\n"))
 	if err != nil {
@@ -317,13 +319,23 @@ func TestAttack_UsersYAMLLayerOverGroupLayer(t *testing.T) {
 	own := &owners.Owners{Layers: map[string]owners.Principals{
 		"consumer": {{Kind: owners.KindUser, Name: "kabir"}, {Kind: owners.KindGroup, Name: "consumers"}},
 	}}
-	if err := room.ValidateUsers(users, own); err != nil {
-		t.Fatalf("design changed? ValidateUsers now refuses: %v", err)
+	err = room.ValidateUsers(users, own)
+	if err == nil || !strings.Contains(err.Error(), `"mallory"`) || !strings.Contains(err.Error(), `"consumer"`) {
+		t.Fatalf("ValidateUsers = %v, want an error naming mallory and consumer", err)
+	}
+	// The layer the user really owns still validates.
+	okUsers, _ := room.ParseUsers([]byte("users:\n  - {id: kabir, layers: [consumer]}\n"))
+	if err := room.ValidateUsers(okUsers, own); err != nil {
+		t.Fatalf("kabir alone: %v", err)
 	}
 	svc := room.New(room.Deps{Store: memstore.New(), Users: users, Owners: own, Run: fakeRun, WriteHandoff: fakeWrite})
 	t.Cleanup(svc.Close)
 	mallory, _ := svc.LookupUser("mallory")
-	if got := svc.LayersFor(mallory); len(got) != 1 || got[0] != "consumer" {
-		t.Fatalf("design changed? mallory may approve %v", got)
+	if got := svc.LayersFor(mallory); len(got) != 0 {
+		t.Fatalf("mallory may approve %v without the start check, want nothing", got)
+	}
+	kabir, _ := svc.LookupUser("kabir")
+	if got := svc.LayersFor(kabir); len(got) != 1 || got[0] != "consumer" {
+		t.Fatalf("kabir may approve %v, want [consumer]", got)
 	}
 }

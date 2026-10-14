@@ -34,6 +34,10 @@ type Thresholds struct {
 	SinkStaleFail time.Duration
 	// HealthBudget caps the parallel health-gathering phase.
 	HealthBudget time.Duration
+	// DLQRecentWarn is how young a dead-letter topic's newest record must be
+	// for the topic to warn. Build overrides it per pipeline with owners
+	// watch.dlq_growth.window (ThresholdsFor); this is the base default.
+	DLQRecentWarn time.Duration
 }
 
 // DefaultThresholds returns the thresholds the task specifies.
@@ -44,15 +48,20 @@ func DefaultThresholds() Thresholds {
 		SinkStaleWarn:         10 * time.Minute,
 		SinkStaleFail:         30 * time.Minute,
 		HealthBudget:          5 * time.Second,
+		DLQRecentWarn:         time.Hour,
 	}
 }
 
 // ThresholdsFor returns base with the pipeline's watch settings applied. It is
 // the one owners -> Thresholds mapping: the slot_wal "fire" size in owners.yaml
 // is also the retained-WAL level where pipeline_map warns, so the map and the
-// watcher cannot disagree about what "too much WAL" means.
+// watcher cannot disagree about what "too much WAL" means. The dlq_growth
+// window is likewise the age under which a dead-letter record still counts as
+// new, so the map warns exactly when the watcher would count the record.
 func ThresholdsFor(base Thresholds, p owners.Pipeline) Thresholds {
-	base.SlotRetainedWarnBytes = p.Watch().SlotWAL.FireBytes
+	w := p.Watch()
+	base.SlotRetainedWarnBytes = w.SlotWAL.FireBytes
+	base.DLQRecentWarn = w.DLQGrowth.Window
 	return base
 }
 
@@ -65,6 +74,8 @@ type builder struct {
 	wh      clients.Warehouse
 	t       Thresholds
 	log     *slog.Logger
+	// now is the clock for ages in node facts; tests replace it.
+	now func() time.Time
 
 	// warnMu guards warned, the set of invalid include/exclude list entries
 	// already reported by this builder instance.
@@ -91,6 +102,7 @@ func newBuilder(o *owners.Owners, connect clients.ConnectClient, kafka clients.K
 		wh:      wh,
 		t:       DefaultThresholds(),
 		log:     log,
+		now:     time.Now,
 		warned:  map[string]bool{},
 	}
 }
@@ -117,7 +129,9 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	var topics []string
 	connTopics := map[string][]string{}
 	placeholder := map[string]bool{}
+	connIdx := map[string]int{}
 	for _, cn := range p.Connectors {
+		connIdx[cn] = len(g.Nodes)
 		g.Nodes = append(g.Nodes, b.connectorNode(p, cn, info))
 		var ts []string
 		isFallback := false
@@ -148,7 +162,22 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 			realTopics = append(realTopics, t)
 		}
 	}
-	b.collectTopics(cctx, realTopics, info)
+	dlqs := discoverDLQs(p, info)
+	queried := slices.Clone(realTopics)
+	for _, d := range dlqs {
+		// A DLQ that is also a CDC topic is refused when owners.yaml loads;
+		// the guard only keeps one Kafka call per name.
+		if !slices.Contains(queried, d.topic) {
+			queried = append(queried, d.topic)
+		}
+	}
+	b.collectTopics(cctx, queried, info)
+
+	// Connector DLQ facts need the DLQ topic reading (dlq_topic_missing), so
+	// they are added after the Kafka phase; node order is unchanged.
+	for _, cn := range p.Connectors {
+		b.addConnectorDLQFacts(&g.Nodes[connIdx[cn]], info.connect[cn], info)
+	}
 
 	for _, t := range topics {
 		if placeholder[t] {
@@ -157,8 +186,24 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 			g.Nodes = append(g.Nodes, b.topicNode(p, t, info))
 		}
 	}
+	th := ThresholdsFor(b.t, p)
+	for _, d := range dlqs {
+		g.Nodes = append(g.Nodes, b.dlqNode(d, th, info))
+	}
+	// The pipeline's topics, for the group lag: the ones derived from the
+	// connector configs plus "<topic_prefix>.<table>" from owners.yaml, so
+	// the filter still knows them while Connect is down.
+	ownTopics := map[string]bool{}
+	for _, t := range topics {
+		ownTopics[t] = true
+	}
+	if p.TopicPrefix != "" {
+		for _, t := range p.SourceTables {
+			ownTopics[p.TopicPrefix+"."+t] = true
+		}
+	}
 	for _, gr := range p.ConsumerGroups {
-		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info))
+		g.Nodes = append(g.Nodes, b.groupNode(p, gr, info, ownTopics))
 	}
 	for _, s := range p.SinkTables {
 		g.Nodes = append(g.Nodes, b.sinkNode(p, s, info))
@@ -183,6 +228,12 @@ func (b *builder) Build(ctx context.Context, pipelineID string) (Graph, error) {
 	for _, gr := range p.ConsumerGroups {
 		for _, s := range p.SinkTables {
 			g.Edges = append(g.Edges, Edge{From: "group:" + gr, To: "wh:" + s})
+		}
+	}
+	// DLQ edges are side edges into the dead-letter node; nothing leaves it.
+	for _, d := range dlqs {
+		for _, w := range d.writerIDs() {
+			g.Edges = append(g.Edges, Edge{From: w, To: "dlq:" + d.topic})
 		}
 	}
 
@@ -298,7 +349,7 @@ func (b *builder) placeholderTopicNode(p owners.Pipeline, topic string) Node {
 	return n
 }
 
-func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected) Node {
+func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected, ownTopics map[string]bool) Node {
 	n := Node{
 		ID:     "group:" + gr,
 		Kind:   KindConsumerGroup,
@@ -312,8 +363,43 @@ func (b *builder) groupNode(p owners.Pipeline, gr string, info *collected) Node 
 		n.Facts = map[string]string{"error": "unreachable"}
 		return n
 	}
-	n.Health, n.Facts = groupHealth(snap.lag, b.t)
+	lag, ok := pipelineLag(snap.lag, ownTopics)
+	if !ok {
+		// The group reads partitions, but none of this pipeline's topics (a
+		// RegexRouter or topic-routing SMT renames them, or the group reads
+		// other topics only). Its lag is unknown here, not zero.
+		n.Facts = map[string]string{"lag": lagUnknown, "state": lag.State}
+		return n
+	}
+	n.Health, n.Facts = groupHealth(lag, b.t)
 	return n
+}
+
+// lagUnknown is the lag fact of a group none of whose partitions is one of the
+// pipeline's topics.
+const lagUnknown = "unknown (no partition of this pipeline's topics)"
+
+// pipelineLag keeps only the partitions of the pipeline's own topics and sums
+// the lag again from them. A group can also read other pipelines' topics:
+// their lag is not this pipeline's health and must not show on its map (the
+// same rule as kafka_consumer_lag). ok is false when the group has partitions
+// but none of them is the pipeline's: the lag is then unknown, never 0. A lag
+// without partitions is kept as it is: there is nothing to tell apart, and the
+// real client only returns one when the group has no readable partition.
+func pipelineLag(l clients.GroupLag, ownTopics map[string]bool) (clients.GroupLag, bool) {
+	if len(l.Partitions) == 0 {
+		return l, true
+	}
+	var kept []clients.PartitionLag
+	var total int64
+	for _, pl := range l.Partitions {
+		if ownTopics[pl.Topic] {
+			kept = append(kept, pl)
+			total += pl.Lag
+		}
+	}
+	l.Partitions, l.TotalLag = kept, total
+	return l, len(kept) > 0
 }
 
 func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {

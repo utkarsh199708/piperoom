@@ -590,8 +590,8 @@ func (s *Service) touchDriverLease(ctx context.Context, st *roomState, roomID st
 	if remaining >= leaseLogThreshold {
 		return
 	}
-	if _, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, humanActor(User{ID: d.ID, Name: d.Name}), events.ControlGrantedPayload{
-		To:         events.Actor{Kind: events.ActorHuman, ID: d.ID, Name: d.Name},
+	if _, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, s.humanActor(User{ID: d.ID, Name: d.Name}), events.ControlGrantedPayload{
+		To:         s.humanActor(User{ID: d.ID, Name: d.Name}),
 		LeaseUntil: lease,
 	}); err != nil {
 		s.log.Warn("room: emit lease renewal failed", "room", roomID, "err", err)
@@ -624,13 +624,17 @@ func (s *Service) proposalsDisabled(st *roomState) bool {
 	return s.owners != nil && st.snap.PipelineID != "" && !s.knownPipeline(st.snap.PipelineID)
 }
 
-func humanActor(u User) events.Actor {
-	return events.Actor{Kind: events.ActorHuman, ID: u.ID, Name: u.Name}
+// humanActor is the event actor for a person. Verified comes from users.yaml
+// itself, never from the caller's User value, so no code path can mark an IdP
+// person as vouched for (design section 2.1, security audit A-ID-2).
+func (s *Service) humanActor(u User) events.Actor {
+	_, inFile := s.users.Get(u.ID)
+	return events.Actor{Kind: events.ActorHuman, ID: u.ID, Name: u.Name, Verified: inFile}
 }
 
-var systemActor = events.Actor{Kind: events.ActorSystem, ID: "system", Name: "System"}
+var systemActor = events.Actor{Kind: events.ActorSystem, ID: "system", Name: "System", Verified: true}
 
-var executorActor = events.Actor{Kind: events.ActorSystem, ID: "executor", Name: "Executor"}
+var executorActor = events.Actor{Kind: events.ActorSystem, ID: "executor", Name: "Executor", Verified: true}
 
 func mapStoreErr(err error) error {
 	if errors.Is(err, store.ErrNotFound) {

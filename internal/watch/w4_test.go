@@ -263,7 +263,7 @@ func TestStormFollowersWaitForALeaderThatJoinedAnotherRoom(t *testing.T) {
 func TestTargetsCountsWatchedPipelines(t *testing.T) {
 	pipes := []pipeSpec{
 		{id: "off", watch: "    watch:\n      enabled: false\n"},
-		{id: "none", watch: "    watch:\n      signals:\n        connector_down: {enabled: false}\n        slot_inactive: {enabled: false}\n        slot_wal: {enabled: false}\n"},
+		{id: "none", watch: "    watch:\n      signals:\n        connector_down: {enabled: false}\n        slot_inactive: {enabled: false}\n        slot_wal: {enabled: false}\n        dlq_growth: {enabled: false}\n        config_risk: {enabled: false}\n"},
 		{id: "some", watch: "    watch:\n      signals:\n        connector_down: {enabled: false}\n"},
 		{id: "all"},
 	}

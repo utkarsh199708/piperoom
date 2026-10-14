@@ -48,8 +48,9 @@ are refused until the server restarts, and a restart is also needed to change th
 Closing a room drops its count: the server calls `Endpoint.Forget` from the room-closed hook
 (`cmd/server/watch.go`; `internal/agent/endpoint.go:236-250`), so the counts of closed rooms do not stay in memory.
 - **Room event log (`room_events`, `migrations/00001_init.sql:16`).** Every tool call, result `Data`,
-  comment, steer, proposal and approval is stored **permanently** in the Piperoom database and shown
-  to everyone who can open the room. There is no per-event redaction after the fact. Redaction
+  comment, steer, proposal and approval is stored in the Piperoom database until the room is deleted
+  by retention or by an admin (section 4), and shown to everyone who can open the room. There is no
+  per-event redaction after the fact: to remove one thing, delete the whole room. Redaction
   happens before the event is written: `pg_row` and `warehouse_row` return redacted `Data`
   (`internal/tools/dbtools/pg.go:264`, `wh.go:124`).
 - **Warehouse (Snowflake, only with `WAREHOUSE_KIND=snowflake`).** Warehouse queries go to the
@@ -115,11 +116,11 @@ Two more things follow from this list:
 
 | Tool | Exposes to the agent and the room | Does **not** expose |
 |---|---|---|
-| `pg_replication_slots` | slot name, plugin, active flag, WAL retained | data |
+| `pg_replication_slots` | the room pipeline's slots only (`owners.yaml` `watch.slot`, else `slot.name` from its connector config): slot name, plugin, active flag, WAL retained; other slots only as a count | data; other slots' names |
 | `pg_recent_ddl` | DDL command, object, **full statement text**, user, time | row data |
-| `pg_long_transactions` | pid, user, application name (client-set free text, shown as-is), state, transaction age, wait event, and at most the statement verb (first keyword, e.g. `UPDATE`). Database-wide: it lists sessions of every pipeline, because it cannot be tied to one pipeline. Each row has `has_xid` (summary `writer=yes\|no`): only writers hold the WAL horizon, but long read-only sessions are listed too since they block DDL and VACUUM | query text (never selected, never returned) |
+| `pg_long_transactions` | pid, user, application name (client-set free text, shown as-is), state, transaction age, wait event, and at most the statement verb (first keyword, e.g. `UPDATE`). In a room it lists only sessions of the source database that hold or wait for a lock on the pipeline's source tables; every other long transaction is counted, and the oldest 5 other writers (which hold back every logical slot) are shown with pid, same-database flag, state, ages and wait event type only. Each row has `has_xid` (summary `writer=yes\|no`): only writers hold the WAL horizon, but long read-only sessions are listed too since they block DDL and VACUUM | query text (never selected, never returned) |
 | `pg_row` | row **column names**; values only for the key and timestamp columns, others `null` (`pg.go:264,272-282`). Key and timestamp columns are chosen **by name**: the key is the column you pass in, and timestamp columns are `at` or names ending in `_at` (`dbtools.go:242-244`) | other column values |
-| `pg_publication_tables` | the publication name, the connector role, and only the pipeline's own source tables | other tables of a `FOR ALL TABLES` publication |
+| `pg_publication_tables` | the publication name, the connector role, and only the pipeline's own source tables; the publication's other tables only as a count | other tables of a `FOR ALL TABLES` publication |
 | `warehouse_freshness` | max timestamp of the sink table, lag | row data |
 | `warehouse_row` | **timestamp-named columns only** (`at` or `*_at`), by name, not by type. The key and every other column are dropped, from both Summary and Data (`wh.go:124,132-140`; `dbtools.go:242-244`). The same on Snowflake, where column names come back lower-cased (`internal/clients/snowflake/snowflake.go:148`) | key value, all other columns |
 | `pipeline_map` | the pipeline's tables, connectors, topics, consumer groups and sink tables, with owners and health (`map.go:14-46`) | row data |
@@ -164,19 +165,47 @@ guarantee. The controls that do not depend on the model are:
    consumer group, subject or table that is not the room pipeline's own, before it calls any
    client. List tools return only the pipeline's own items. By default a read is refused: a room
    with no pipeline gets no reads (only `runbook_lookup` works), and only a CLI or dev caller can
-   opt out in code. Two tools stay database-wide because the pipeline cannot be told from
-   `owners.yaml`: `pg_replication_slots` (slot metadata for every slot, no row data) and
-   `pg_long_transactions` (long sessions of every pipeline, no query text, since any long
-   transaction holds the WAL horizon). Database grants, Kafka ACLs, Connect proxy rules and
+   opt out in code. Database-wide and cluster-wide metadata is scoped too (T2):
+   `pg_replication_slots` shows only the pipeline's slots and `pg_long_transactions` only the
+   sessions that lock the pipeline's tables; other objects appear only as a count, never by
+   name ([tool-scope.md](../security/tool-scope.md)). Database grants, Kafka ACLs, Connect proxy rules and
    Registry ACLs remain the real boundary; keep them to the pipeline's own objects (see
    [permissions.md](permissions.md)).
 
 ## 4. Retention and deletion
 
-- Retention is live (F6, partly closed). `PIPEROOM_RETENTION_DAYS` deletes closed rooms older than N
-  days, checked every 6 hours; an empty value or `0` keeps everything. Open rooms are never deleted.
-  Export a room first with `GET /api/rooms/{id}/export` if you must keep it. The event log still has
-  no size cap, and there is no UI for deletion.
+Design: `docs/design/retention.md`. Every value below is read at start; a bad value stops the server.
+
+- **Closed rooms.** `PIPEROOM_RETENTION_DAYS` deletes closed rooms older than N days, checked every 6
+  hours; an empty value or `0` keeps everything. A pipeline's `retention_days:` in `owners.yaml` sets
+  its own value; when both are set, the shorter wins. Rooms of a pipeline that is not in `owners.yaml`
+  use `PIPEROOM_RETENTION_DAYS`.
+- **Open rooms.** `PIPEROOM_MAX_OPEN_DAYS` (default 14, `0` = off) closes a room that has been open that
+  long. The room gets a warning 24 hours before; the driver can extend it once by the same number of
+  days. After the close, the closed-room retention above applies.
+- **Rooms from before the upgrade.** The byte cap of a room created before the upgrade that added the caps
+  applies once the server has counted its stored bytes, which it does in the background after the first start
+  (see `docs/runbook.md`, "Upgrading to room limits"); its event cap applies at once.
+- **Size of one room.** A room's log holds at most `PIPEROOM_ROOM_MAX_EVENTS` events (default 20000)
+  and `PIPEROOM_ROOM_MAX_BYTES` of stored payloads (default 256 MiB). At 90% the room gets a warning; at
+  100% the agent stops and its events are refused. People can still comment, approve, hand off and close,
+  within a 2% reserve. A tool result's `Data` over `PIPEROOM_EVENT_MAX_DATA_BYTES` (default 64 KiB) is
+  stored truncated (a preview and the original size), and so is a long action output.
+- **Deleting one room.** A users.yaml user with `admin: true` can erase a room, open or closed, with
+  `DELETE /api/rooms/{id}?reason=...` or `devctl rooms delete <id> --reason "..." --as <admin>`. It
+  removes the room's events, proposals, approvals, suggestions, hand-offs, Slack thread state and shadow
+  data from the Piperoom database, keeps no copy, and closes open WebSockets of the room. It does not
+  remove messages already posted to Slack or data already sent to the model provider.
+- **Audit of deletions.** Every deleted room, by an admin or by retention, leaves one row in
+  `room_deletions`: the room id, pipeline, who (`system` for retention), when, the reason
+  (`retention: closed N days` for retention) and the event count, and nothing else.
+- **Archive (optional).** With `PIPEROOM_ARCHIVE_DIR` set, retention always, and an admin delete only when
+  asked (`archive=true`, or `devctl rooms delete ... --archive`), first write the room's export (the same
+  document as `GET /api/rooms/{id}/export`) to `<dir>/<pipeline>/<room>.json`, readable only by the
+  server's user (mode `0600`). If the write fails, the room is not deleted. **The archive keeps the
+  room's content**: such a purge or delete removes the room from Piperoom but not from that directory.
+  Protect, back up and expire the directory under your own policy.
+- Without an archive, export a room first with `GET /api/rooms/{id}/export` if you must keep it.
 - Deleting the Piperoom database deletes the room history, the Slack thread state and everything
   else in it. Data sent to the model provider (Anthropic, Bedrock or Vertex), and messages already posted to Slack, are governed by
   your agreements with those providers, not by Piperoom.

@@ -29,6 +29,20 @@
       "facts": { "newest_record": "48m ago" }
     },
     {
+      "id": "dlq:orders-dlq",
+      "kind": "dlq_topic",
+      "name": "orders-dlq",
+      "layer": "kafka-connect",
+      "owner": "arjun",
+      "health": "warn",
+      "facts": {
+        "newest_record": "3m ago",
+        "records": "1204",
+        "recent": "true",
+        "writer": "pg-orders-connector"
+      }
+    },
+    {
       "id": "group:order-sync",
       "kind": "consumer_group",
       "name": "order-sync",
@@ -51,6 +65,7 @@
     { "from": "pg:public.orders", "to": "connect:pg-orders-connector" },
     { "from": "connect:pg-orders-connector", "to": "topic:pg.public.orders" },
     { "from": "topic:pg.public.orders", "to": "group:order-sync" },
-    { "from": "group:order-sync", "to": "wh:analytics.orders" }
+    { "from": "group:order-sync", "to": "wh:analytics.orders" },
+    { "from": "connect:pg-orders-connector", "to": "dlq:orders-dlq" }
   ]
 }
