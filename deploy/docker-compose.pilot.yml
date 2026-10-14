@@ -55,16 +55,17 @@ services:
       # Fixed by the image and the mounts below.
       PIPEROOM_HTTP_ADDR: 0.0.0.0:8090
       PIPEROOM_WEB_DIR: /web
-      # Auth (docs/design/auth.md). The image sets dev mode and the non-loopback
-      # switch; they are repeated here with the same defaults, because a
-      # variable listed here replaces the image's value (with "" if unset).
-      # dev = pick a user in the UI, no password. oidc = real login through your
-      # identity provider; a TLS reverse proxy is supported in oidc mode only.
-      # See "Single sign-on (OIDC)" in deploy/README.md.
-      PIPEROOM_AUTH_MODE: ${PIPEROOM_AUTH_MODE:-dev}
-      # Dev mode only: lets it listen on 0.0.0.0 inside the container. Ignored
-      # (with a warning) in oidc mode.
-      PIPEROOM_DEV_ALLOW_NONLOOPBACK: ${PIPEROOM_DEV_ALLOW_NONLOOPBACK:-1}
+      # Auth (docs/design/auth.md). Defaults to oidc: real login through your
+      # identity provider. With oidc and no PIPEROOM_PUBLIC_URL, OIDC_ISSUER,
+      # OIDC_CLIENT_ID or OIDC_CLIENT_SECRET the server refuses to start and the
+      # error names the missing one (docker compose logs piperoom). Dev login (no
+      # password) is NOT available from this file: use the explicit override
+      # deploy/docker-compose.dev-auth.yml. See "Single sign-on (OIDC)" in
+      # deploy/README.md.
+      PIPEROOM_AUTH_MODE: ${PIPEROOM_AUTH_MODE:-oidc}
+      # Dev mode only (set by docker-compose.dev-auth.yml); ignored, with a
+      # warning, in oidc mode. Empty here on purpose.
+      PIPEROOM_DEV_ALLOW_NONLOOPBACK: ${PIPEROOM_DEV_ALLOW_NONLOOPBACK:-}
       # Extra Host values for a tunnel or proxy that rewrites Host.
       PIPEROOM_ALLOWED_HOSTS: ${PIPEROOM_ALLOWED_HOSTS:-}
       # CIDRs whose X-Forwarded-For is trusted. oidc mode only.
