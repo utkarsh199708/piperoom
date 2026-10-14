@@ -83,11 +83,15 @@ func runMigrateDown(ctx context.Context, db downDB, o migrateDownOpts, out io.Wr
 		fmt.Fprintf(out, "  down %d  %s%s\n", s.Version, s.Path, note)
 	}
 	if !o.apply {
-		hint := fmt.Sprintf("-migrate-down %d -migrate-down-apply -migrate-down-confirm=%d", o.n, plan.Current)
+		fmt.Fprintf(out, "migrate-down: dry run, nothing changed. To apply: -migrate-down %d -migrate-down-apply -migrate-down-confirm=%d\n", o.n, plan.Current)
+		// The migration lock only holds off a starting replica; a running one
+		// keeps querying tables the rollback removes. Nothing here can see it.
+		fmt.Fprintln(out, "migrate-down: stop every server replica before applying; a running one fails once its tables or columns are gone")
+		// The second guard is never part of the printed command: pasting the
+		// hint must not confirm the loss of the incident log.
 		if plan.DropsEvents() {
-			hint += " -migrate-down-drop-events"
+			fmt.Fprintln(out, "migrate-down: this rollback deletes room_events data (the incident log, which nothing can rebuild); add -migrate-down-drop-events only if that is what you mean")
 		}
-		fmt.Fprintf(out, "migrate-down: dry run, nothing changed. To apply: %s\n", hint)
 		return nil
 	}
 	if err := checkDownGuards(o, plan); err != nil {

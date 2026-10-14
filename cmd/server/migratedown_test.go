@@ -72,11 +72,31 @@ func TestMigrateDownDryRunPrintsPlanAndHint(t *testing.T) {
 	for _, want := range []string{
 		"database at version 2; rolling back 2 migration(s) to version 0",
 		"down 1  00001_init.sql  [DELETES room_events DATA]",
-		"-migrate-down 2 -migrate-down-apply -migrate-down-confirm=2 -migrate-down-drop-events",
+		"To apply: -migrate-down 2 -migrate-down-apply -migrate-down-confirm=2\n",
+		"stop every server replica before applying",
+		"this rollback deletes room_events data (the incident log, which nothing can rebuild); add -migrate-down-drop-events only if that is what you mean",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}
+	}
+	// The second guard must never be handed out for copy-paste: the apply
+	// hint line carries no -migrate-down-drop-events.
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, "To apply:") && strings.Contains(line, "-migrate-down-drop-events") {
+			t.Fatalf("apply hint includes the second guard: %q", line)
+		}
+	}
+}
+
+// A plan that keeps room_events gets no data-loss sentence.
+func TestMigrateDownDryRunSafePlanNoWarning(t *testing.T) {
+	var out bytes.Buffer
+	if err := runMigrateDown(context.Background(), &fakeDownDB{plan: safePlan}, migrateDownOpts{n: 2}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "drop-events") || strings.Contains(out.String(), "DELETES") {
+		t.Fatalf("safe plan mentions event loss:\n%s", out.String())
 	}
 }
 
