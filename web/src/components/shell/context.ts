@@ -21,6 +21,8 @@ export interface RoomCommands {
   trace?: () => void
   closeRoom?: () => void
   invite?: () => void
+  /** Opens the hand-off summary dialog of a hand-off to me (the banner's Read summary). */
+  readHandoff?: () => void
 }
 
 /** A plain holder: the room screen writes every render, the menu reads when it opens or runs. */

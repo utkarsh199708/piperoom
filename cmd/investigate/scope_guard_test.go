@@ -24,6 +24,7 @@ func TestEveryReadToolRefusesWithoutRoomScope(t *testing.T) {
 		"pg_publication_tables":    `{"pipeline_id":"orders"}`,
 		"warehouse_freshness":      `{"table":"analytics.orders","ts_column":"updated_at"}`,
 		"warehouse_row":            `{"pipeline_id":"orders","table":"analytics.orders","pk_column":"id","key":"1"}`,
+		"warehouse_load_errors":    `{"table":"analytics.orders"}`,
 		"pipeline_map":             `{"pipeline_id":"orders"}`,
 		"trace_record":             `{"pipeline_id":"orders","table":"public.orders","key":"1"}`,
 		"connect_list_connectors":  `{}`,

@@ -69,3 +69,18 @@ describe('TracePanel as a dialog', () => {
     expect(actions.trace).toHaveBeenCalledWith('public.orders', '7')
   })
 })
+
+describe('TracePanel verdict and layout', () => {
+  it('leads with the verdict, before the stages, and indexes the stages', () => {
+    render(<TracePanel trace={trace} actions={actions} onClose={vi.fn()} />)
+    const dialog = screen.getByRole('dialog', { name: 'Trace a record' })
+    const verdict = within(dialog).getByRole('status')
+    expect(verdict).toHaveTextContent('Stopped at warehouse analytics.orders')
+    const stages = within(dialog).getByRole('group', { name: /Trace stages/ })
+    expect(verdict.compareDocumentPosition(stages) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(within(dialog).getByLabelText('Stage 5 of 5')).toBeInTheDocument()
+    expect(stages.className).not.toContain('overflow-x-auto')
+    expect(dialog.querySelectorAll('[data-worst]')).toHaveLength(1)
+    expect(dialog.className).toContain('right-0')
+  })
+})
