@@ -167,6 +167,8 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 			// runs outside the request timeout: the connection outlives the
 			// request. Replay has its own deadline in the gateway.
 			protected.Get("/rooms/{id}/ws", visible(s.gw.ServeHTTP))
+			// The rooms list socket (F6): filtered per person in the gateway.
+			protected.Get("/rooms/ws", s.gw.ServeRoomsHTTP)
 
 			// The hand-off route is exempt from the default budget.
 			protected.Post("/rooms/{id}/handoffs", withTimeout(handoffTimeout, visible(s.handleCreateHandoff)))
