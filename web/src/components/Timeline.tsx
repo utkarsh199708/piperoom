@@ -373,7 +373,7 @@ export function Timeline({
         {empty.hint && <p className="m-0 max-w-[48ch] text-muted-foreground">{empty.hint}</p>}
         {empty.offerSteer && onTakeControl && (
           <p className="m-0 max-w-[48ch] text-muted-foreground">
-            Take control and send a steer to start. A good first steer: &ldquo;check consumer group orders-sync for a
+            Take control and send a steer to start. A good first steer: &ldquo;check the consumer lag and look for a
             stuck partition&rdquo;.
           </p>
         )}

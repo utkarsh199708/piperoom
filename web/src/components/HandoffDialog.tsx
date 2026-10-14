@@ -234,11 +234,9 @@ export function HandoffAcceptBanner({
       <span>
         <strong>{from}</strong> is handing the room to you.
       </span>
-      <Button variant="secondary" className="ml-auto h-7 px-2.5" onClick={() => setReading(true)}>
+      {/* No blind accept: the only way to take over is through the summary dialog. */}
+      <Button className="ml-auto h-7 px-2.5" onClick={() => setReading(true)}>
         Read summary
-      </Button>
-      <Button className="h-7 px-2.5" onClick={() => actions.acceptHandoff(mine.handoff_id)}>
-        Accept
       </Button>
       {reading && (
         <HandoffReceiveDialog

@@ -152,6 +152,8 @@ describe('the receiver reads the summary before accepting', () => {
   it('Read summary opens the summary with Accept and take over; Not yet closes it', () => {
     const accept = vi.fn()
     render(<HandoffAcceptBanner state={state} user={me} actions={{ ...actions, acceptHandoff: accept }} />)
+    // The banner has no one-click Accept: the summary comes first.
+    expect(screen.queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Read summary' }))
     const dialog = screen.getByRole('dialog', { name: 'Hand-off from Arjun' })
     expect(within(dialog).getByText(/Consumer lag spiked/)).toBeInTheDocument()
