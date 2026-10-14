@@ -160,6 +160,7 @@ func TestRegisterToolsWiresAllTools(t *testing.T) {
 		"dlq_peek",
 		"debezium_metrics",
 		"runbook_lookup",
+		"what_changed",
 	}
 	got := make([]string, 0, len(reg.All()))
 	for _, tl := range reg.All() {
