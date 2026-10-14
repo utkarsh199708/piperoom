@@ -88,3 +88,13 @@ func leaseHeld(msg string) *Error {
 func paramsMismatch(msg string) *Error {
 	return &Error{Status: 409, Code: "params_mismatch", Msg: msg}
 }
+
+// noHypothesis is 409 no_hypothesis: the agent has not stated one yet (F9).
+func noHypothesis() *Error {
+	return &Error{Status: 409, Code: "no_hypothesis", Msg: "there is no hypothesis to decide on yet"}
+}
+
+// alreadyNudged is 409 already_nudged; msg says how long ago (F9).
+func alreadyNudged(msg string) *Error {
+	return &Error{Status: 409, Code: "already_nudged", Msg: msg}
+}
