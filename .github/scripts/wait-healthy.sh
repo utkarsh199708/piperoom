@@ -15,6 +15,14 @@ deadline=$((SECONDS + timeout))
 until "$bin" health; do
   if ((SECONDS >= deadline)); then
     echo "::error::pipeline still unhealthy after ${timeout}s"
+    # Facts for the next look: where the slot is and what holds the WAL back.
+    pg=(docker compose -f dev/docker-compose.yml exec -T postgres psql -U piperoom -d orders -x -c)
+    echo "::group::replication slots"
+    "${pg[@]}" "SELECT slot_name, active, restart_lsn, confirmed_flush_lsn, pg_current_wal_lsn(), pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained FROM pg_replication_slots" || true
+    echo "::endgroup::"
+    echo "::group::open transactions"
+    "${pg[@]}" "SELECT pid, datname, state, now() - xact_start AS open_for, left(query, 120) AS query FROM pg_stat_activity WHERE xact_start IS NOT NULL ORDER BY xact_start" || true
+    echo "::endgroup::"
     exit 1
   fi
   sleep 10
