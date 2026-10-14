@@ -47,7 +47,7 @@ devctl shadow up --owner <tag> --grace 10m --token-budget 200000 --max-turns 12 
 
 1. Open http://127.0.0.1:8090, choose a user (e.g. Arjun).
 2. Break something: `go run ./cmd/devctl break connector-down --owner <tag>` (scenarios: `dev/scenarios.md`).
-   Within about a minute the watcher opens a room. It is a shadow room: a "Shadow" chip marks it (also after close), the steer
+   Within about a minute the watcher opens a room. It is a shadow room: a "Shadow" chip marks it on the room screen (also after close; the room list has no chip yet), the steer
    box is hidden, and the room log shows no agent output.
 3. Take control (a watcher room has no driver), investigate by hand, then
    `go run ./cmd/devctl fix connector-down --owner <tag>` and **close the room with a resolution**
@@ -86,6 +86,15 @@ go run ./cmd/server
 `go run ./cmd/server --demo` with `OWNERS_FILE` set to a copy of `dev/owners.shadow.yaml` runs the
 scripted demo agent on an in-memory store: no stack, no key, no tokens (`tokens` shows as not counted).
 Use it for UI work, not for judging the agent.
+
+`POST /api/rooms` (the "New room" form) never makes a shadow room, in demo or real mode. Open one with an
+alert instead: the watcher (not in `--demo`, which forces it off), or the generic webhook with a body that
+names the pipeline, e.g.
+
+```
+curl -X POST http://127.0.0.1:8090/api/alerts/webhook -H 'Content-Type: application/json' \
+  -d '{"title":"orders sink stale","severity":"sev2","pipeline_id":"orders"}'
+```
 
 ## First-run checklist (not automated)
 
