@@ -51,7 +51,7 @@ func metaConnect() *fakeConnect {
 func twoPipelineSlots() []clients.ReplicationSlot {
 	return []clients.ReplicationSlot{
 		{Name: "hr_" + foreignMark + "_slot", Plugin: "pgoutput", Active: true, WALStatus: "reserved"},
-		{Name: "orders_slot", Plugin: "pgoutput", Active: true, RetainedWALBytes: 2048, WALStatus: "reserved"},
+		{Name: "orders_slot", Plugin: "pgoutput", Active: true, RestartLSN: "0/16B3748", RetainedWALBytes: 2048, WALStatus: "reserved"},
 		{Name: "pay_" + foreignMark + "_slot", Plugin: "pgoutput", Active: false, RetainedWALBytes: 1 << 30, WALStatus: "extended"},
 	}
 }

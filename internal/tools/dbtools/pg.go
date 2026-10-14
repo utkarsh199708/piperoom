@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/postgres"
 	"piperoom/internal/tools"
@@ -22,7 +24,13 @@ func pgReplicationSlotsTool(d Deps) tools.Tool {
 		name:   "pg_replication_slots",
 		desc:   "List the room pipeline's replication slots on the source Postgres (owners.yaml watch.slot, else slot.name from its Debezium connector config): active state, retained WAL size and wal_status. Other slots are only counted.",
 		schema: objSchema(map[string]any{}),
-		run: func(ctx context.Context, _ json.RawMessage) (tools.Result, error) {
+		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
+			if len(in) > 0 {
+				// No parameters: any field is unknown and refused.
+				if err := decode(in, &struct{}{}); err != nil {
+					return tools.Result{}, err
+				}
+			}
 			sc, err := d.scope(ctx)
 			if err != nil {
 				return tools.Result{}, err
@@ -71,8 +79,7 @@ func pgReplicationSlotsTool(d Deps) tools.Tool {
 func slotsResult(slots []clients.ReplicationSlot, extra string) tools.Result {
 	var sb strings.Builder
 	for _, s := range slots {
-		fmt.Fprintf(&sb, "slot %s: active=%t retained=%s wal_status=%s\n",
-			s.Name, s.Active, topology.HumanBytes(s.RetainedWALBytes), s.WALStatus)
+		sb.WriteString(slotLine(s) + "\n")
 	}
 	if len(slots) == 0 && extra == "" {
 		sb.WriteString("(no replication slots)\n")
@@ -80,6 +87,27 @@ func slotsResult(slots []clients.ReplicationSlot, extra string) tools.Result {
 	sb.WriteString(extra)
 	summary, truncated := tools.Truncate(sb.String())
 	return tools.Result{Summary: summary, Data: slots, Truncated: truncated}
+}
+
+// slotLine renders one slot. A slot without restart_lsn holds no WAL, so its
+// retained size is not a measurement: it reads "n/a", never "0 B", and a lost
+// (invalidated) slot says plainly that it cannot be resumed. An empty plugin
+// is a physical slot (clients.ReplicationSlot has no slot type field).
+func slotLine(s clients.ReplicationSlot) string {
+	kind := ""
+	if s.Plugin == "" {
+		kind = " (physical)"
+	}
+	retained := topology.HumanBytes(s.RetainedWALBytes)
+	if s.RestartLSN == "" {
+		retained = "n/a (no restart_lsn)"
+	}
+	line := fmt.Sprintf("slot %s%s: active=%t retained=%s wal_status=%s",
+		s.Name, kind, s.Active, retained, orDash(s.WALStatus))
+	if s.WALStatus == "lost" {
+		line += " (slot is invalidated: required WAL is gone, a consumer cannot resume from it; it must be re-created and the data re-snapshotted)"
+	}
+	return line
 }
 
 // namedSlotLister is implemented by SourceDB implementations that filter slots
@@ -111,10 +139,10 @@ func (d Deps) namedSlots(ctx context.Context, names []string) ([]clients.Replica
 func pgRecentDDLTool(d Deps) tools.Tool {
 	return &tool{
 		name: "pg_recent_ddl",
-		desc: "Show recent DDL changes on the source Postgres, newest first.",
+		desc: "Show recent DDL changes on the source Postgres, newest first. With a table (or in a room, for the pipeline's tables), DDL on the table's columns, indexes, constraints and triggers is included.",
 		schema: objSchema(map[string]any{
 			"since": strProp("Only changes at or after this RFC 3339 timestamp."),
-			"table": strProp("Optional \"schema.table\" filter."),
+			"table": strProp("Optional \"schema.table\" filter, exact (case-sensitive) catalog names."),
 		}, "since"),
 		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
 			var input struct {
@@ -456,26 +484,84 @@ func pgRowTool(d Deps) tools.Tool {
 
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
-			row, found, err := d.Src.Row(ctx, input.Table, input.PKColumn, input.Key)
+			// pk_column is shown with its value, so it must really be the key:
+			// otherwise "pk_column":"ssn" with a guessed key would confirm and
+			// echo any column's value.
+			verified, err := d.checkPrimaryKey(ctx, input.Table, input.PKColumn)
+			if err != nil {
+				return tools.Result{}, err
+			}
+			// A client that cannot report primary keys (not the real one) still
+			// reads the row, but then pk_column is just a column: its value is
+			// redacted like any other.
+			shownPK := input.PKColumn
+			if !verified {
+				shownPK = ""
+			}
+			row, types, found, err := d.readSourceRow(ctx, input.Table, input.PKColumn, input.Key)
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_row: %w", err)
 			}
 			if !found {
 				return tools.Result{Summary: "not found", Data: map[string]any{"found": false}}, nil
 			}
-			summary, truncated := tools.Truncate(rowSummary(row, input.PKColumn))
-			return tools.Result{Summary: summary, Data: redactRow(row, input.PKColumn), Truncated: truncated}, nil
+			summary, truncated := tools.Truncate(rowSummary(row, shownPK, types))
+			return tools.Result{Summary: summary, Data: redactRow(row, shownPK, types), Truncated: truncated}, nil
 		},
 	}
 }
 
-// redactRow returns the same values rowSummary exposes: the primary-key and
-// timestamp column values, with every other column kept as a name only (nil
+// pkColumner is implemented by SourceDB implementations that report a table's
+// primary key column (internal/clients/postgres).
+type pkColumner interface {
+	PrimaryKeyColumn(ctx context.Context, table string) (string, error)
+}
+
+// checkPrimaryKey refuses pk_column unless it is the table's primary key
+// column. verified is false when the client cannot report primary keys; the
+// caller must then not treat pk_column as a key.
+func (d Deps) checkPrimaryKey(ctx context.Context, table, pkColumn string) (verified bool, err error) {
+	p, ok := d.Src.(pkColumner)
+	if !ok {
+		return false, nil
+	}
+	actual, err := p.PrimaryKeyColumn(ctx, table)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("%w: table %s has no primary key", tools.ErrBadInput, table)
+	}
+	if err != nil {
+		return false, fmt.Errorf("dbtools: pg_row: primary key of %s: %w", table, err)
+	}
+	if actual != pkColumn {
+		return false, fmt.Errorf("%w: pk_column %q is not the primary key of %s (it is %q)", tools.ErrBadInput, pkColumn, table, actual)
+	}
+	return true, nil
+}
+
+// typedRowReader is implemented by SourceDB implementations that also report
+// each column's type OID (internal/clients/postgres).
+type typedRowReader interface {
+	RowTyped(ctx context.Context, table, pkColumn, pk string) (map[string]any, map[string]uint32, bool, error)
+}
+
+// readSourceRow reads a row and, when the client can tell, its column types.
+// types is nil otherwise.
+func (d Deps) readSourceRow(ctx context.Context, table, pkColumn, key string) (map[string]any, map[string]uint32, bool, error) {
+	if r, ok := d.Src.(typedRowReader); ok {
+		return r.RowTyped(ctx, table, pkColumn, key)
+	}
+	row, found, err := d.Src.Row(ctx, table, pkColumn, key)
+	return row, nil, found, err
+}
+
+// redactRow returns the same values rowSummary exposes: the primary-key value
+// and the values of date/time columns with a timestamp name
+// (isTimeValueColumn), with every other column kept as a name only (nil
 // value), so the full row never leaves the tool (finding F3).
-func redactRow(row map[string]any, pkColumn string) map[string]any {
+func redactRow(row map[string]any, pkColumn string, types map[string]uint32) map[string]any {
 	out := make(map[string]any, len(row))
 	for name, v := range row {
-		if name == pkColumn || isTimestampColumn(name) {
+		if name == pkColumn || isTimeValueColumn(name, v, types) {
 			out[name] = v
 		} else {
 			out[name] = nil
@@ -485,16 +571,18 @@ func redactRow(row map[string]any, pkColumn string) map[string]any {
 }
 
 // rowSummary lists column names, with values only for the key column and
-// timestamp columns (never full row values).
-func rowSummary(row map[string]any, pkColumn string) string {
+// date/time columns (never full row values).
+func rowSummary(row map[string]any, pkColumn string, types map[string]uint32) string {
 	var sb strings.Builder
 	sb.WriteString("found: yes")
-	if ts := tsValue(row, "updated_at"); ts != "" {
-		sb.WriteString(", updated_at=" + ts)
+	if v, ok := row["updated_at"]; ok && isTimeValueColumn("updated_at", v, types) {
+		if ts := tsValue(row, "updated_at"); ts != "" {
+			sb.WriteString(", updated_at=" + ts)
+		}
 	}
 	parts := make([]string, 0, len(row))
 	for _, name := range sortedKeys(row) {
-		if name == pkColumn || isTimestampColumn(name) {
+		if name == pkColumn || isTimeValueColumn(name, row[name], types) {
 			parts = append(parts, name+"="+fmt.Sprintf("%v", row[name]))
 		} else {
 			parts = append(parts, name)
@@ -506,7 +594,7 @@ func rowSummary(row map[string]any, pkColumn string) string {
 
 func tsValue(row map[string]any, name string) string {
 	v, ok := row[name]
-	if !ok {
+	if !ok || v == nil {
 		return ""
 	}
 	s, ok := v.(string)
@@ -548,7 +636,7 @@ func (d Deps) recentDDLTables(ctx context.Context, since time.Time, tables []str
 			return nil, err
 		}
 		for _, c := range all {
-			if slices.Contains(tables, c.ObjectIdentity) {
+			if slices.ContainsFunc(tables, func(t string) bool { return ddlMatchesTable(c.ObjectIdentity, t) }) {
 				out = append(out, c)
 			}
 		}
@@ -561,19 +649,48 @@ func (d Deps) recentDDLTables(ctx context.Context, since time.Time, tables []str
 }
 
 // tableDDLFilterer is implemented by SourceDB implementations that can filter
-// DDL by table inside SQL (exact object_identity match, before LIMIT).
+// DDL by table inside SQL (the table, its columns, attached objects and
+// indexes, before LIMIT).
 type tableDDLFilterer interface {
 	RecentDDLTable(ctx context.Context, since time.Time, table string, limit int) ([]clients.DDLChange, error)
 }
 
-// filterDDL is the exact-match fallback for SourceDB implementations without a
-// SQL table filter.
+// filterDDL is the in-memory fallback for SourceDB implementations without a
+// SQL table filter (ddlMatchesTable).
 func filterDDL(changes []clients.DDLChange, table string) []clients.DDLChange {
 	out := changes[:0]
 	for _, c := range changes {
-		if c.ObjectIdentity == table {
+		if ddlMatchesTable(c.ObjectIdentity, table) {
 			out = append(out, c)
 		}
 	}
 	return out
+}
+
+// ddlMatchesTable reports whether a DDL object_identity is about table
+// ("schema.table", exact catalog names): the table itself, one of its
+// columns (schema.table.column) or an object attached to it ("name on
+// schema.table": constraint, trigger, rule, policy). Postgres writes the
+// identity with quote_ident, so the names are quoted the same way. Indexes
+// need the catalog (their identity names only the index) and are matched by
+// the SQL filter of internal/clients/postgres only.
+func ddlMatchesTable(identity, table string) bool {
+	schema, tbl, ok := strings.Cut(table, ".")
+	if !ok {
+		return false
+	}
+	ident := quoteIdent(schema) + "." + quoteIdent(tbl)
+	return identity == ident ||
+		strings.HasPrefix(identity, ident+".") ||
+		strings.HasSuffix(identity, " on "+ident)
+}
+
+// quoteIdent is Postgres quote_ident for names that already match identRe:
+// a name with an upper-case letter is double-quoted. (quote_ident also
+// quotes reserved keywords such as "user"; the SQL filter handles those.)
+func quoteIdent(name string) string {
+	if strings.ToLower(name) == name {
+		return name
+	}
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }

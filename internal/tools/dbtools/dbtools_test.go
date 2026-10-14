@@ -24,6 +24,20 @@ type fakeSource struct {
 	rowCalls  int
 	pubTables []postgres.PublicationTable
 	pubErr    error
+	// pk is the primary key column PrimaryKeyColumn reports ("" means "id");
+	// pkErr its error.
+	pk    string
+	pkErr error
+}
+
+func (f *fakeSource) PrimaryKeyColumn(context.Context, string) (string, error) {
+	if f.pkErr != nil {
+		return "", f.pkErr
+	}
+	if f.pk == "" {
+		return "id", nil
+	}
+	return f.pk, nil
 }
 
 func (f *fakeSource) ReplicationSlots(context.Context) ([]clients.ReplicationSlot, error) {

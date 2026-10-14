@@ -229,12 +229,17 @@ func TestScopeOtherPipelineTableRefused(t *testing.T) {
 // room's pipeline id, never the input's.
 func TestScopePipelineIDMismatchRefused(t *testing.T) {
 	d, c := scopedDeps(false)
+	// Each tool gets only its own fields: unknown fields are refused as bad
+	// input before the scope check.
+	inputs := map[string]string{
+		"pipeline_map":          `{"pipeline_id":"payments"}`,
+		"trace_record":          `{"pipeline_id":"payments","table":"public.orders","key":"7"}`,
+		"pg_publication_tables": `{"pipeline_id":"payments"}`,
+		"pg_row":                `{"pipeline_id":"payments","table":"public.orders","pk_column":"id","key":"7"}`,
+		"warehouse_row":         `{"pipeline_id":"payments","table":"analytics.orders","pk_column":"id","key":"7"}`,
+	}
 	for _, tool := range []string{"pipeline_map", "trace_record", "pg_publication_tables", "pg_row", "warehouse_row"} {
-		in := `{"pipeline_id":"payments","table":"public.orders","pk_column":"id","key":"7"}`
-		if tool == "warehouse_row" {
-			in = `{"pipeline_id":"payments","table":"analytics.orders","pk_column":"id","key":"7"}`
-		}
-		_, err := scopedTool(t, d, tool).Run(roomCtx(), json.RawMessage(in))
+		_, err := scopedTool(t, d, tool).Run(roomCtx(), json.RawMessage(inputs[tool]))
 		if !errors.Is(err, tools.ErrOutOfScope) || !strings.Contains(err.Error(), "pipeline_id") {
 			t.Errorf("%s: err = %v, want a pipeline_id ErrOutOfScope", tool, err)
 		}

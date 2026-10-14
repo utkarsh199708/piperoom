@@ -3,16 +3,20 @@
 package dbtools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/owners"
@@ -157,12 +161,20 @@ func wrapErr(toolName string, err error) error {
 }
 
 // decode unmarshals tool input, reporting bad input with tools.ErrBadInput.
+// Every schema says additionalProperties:false, so an unknown field (a typo
+// such as "pk_colum", or a parameter the tool does not have) is refused
+// instead of silently ignored, as is anything after the JSON object.
 func decode(input json.RawMessage, v any) error {
 	if len(input) == 0 {
 		return fmt.Errorf("%w: missing input", tools.ErrBadInput)
 	}
-	if err := json.Unmarshal(input, v); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(input))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
 		return fmt.Errorf("%w: %v", tools.ErrBadInput, err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("%w: unexpected data after the input object", tools.ErrBadInput)
 	}
 	return nil
 }
@@ -239,8 +251,64 @@ func cutShort(s string, n int) string {
 	return string([]rune(s)[:n]) + "…"
 }
 
+// isTimestampColumn is the name test only: a column called "at" or "*_at".
+// It is never enough to expose a value; see isTimeValueColumn.
 func isTimestampColumn(name string) bool {
 	return name == "at" || strings.HasSuffix(name, "_at")
+}
+
+// dateTimeOIDs are the Postgres date/time types (category D) whose values a
+// row tool may show.
+var dateTimeOIDs = map[uint32]bool{
+	pgtype.DateOID: true, pgtype.TimeOID: true, pgtype.TimetzOID: true,
+	pgtype.TimestampOID: true, pgtype.TimestamptzOID: true,
+}
+
+// isTimeValueColumn reports whether a row tool may show the value of column
+// name: it must have a timestamp name AND a date/time type. A text column
+// called "secret_at" is redacted like any other column (QA3). types holds the
+// column type OIDs when the client reports them; without them (a warehouse
+// row, or a source client without RowTyped) the value itself must be a date/
+// time rendering, so free text never passes.
+func isTimeValueColumn(name string, v any, types map[string]uint32) bool {
+	if !isTimestampColumn(name) {
+		return false
+	}
+	if types != nil {
+		return dateTimeOIDs[types[name]]
+	}
+	return looksLikeDateTime(v)
+}
+
+// dateTimeLayouts are the renderings of date/time values the clients produce
+// (pgconv.ValueToJSON and the Snowflake client) plus Postgres's own text form.
+var dateTimeLayouts = []string{
+	time.RFC3339Nano,
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02 15:04:05.999999999Z07:00",
+	"2006-01-02 15:04:05.999999999Z07",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02",
+	"15:04:05.999999999",
+}
+
+// looksLikeDateTime reports whether v is a time or a string that parses as a
+// date/time rendering (or ±infinity). nil is allowed: a NULL time stays NULL.
+func looksLikeDateTime(v any) bool {
+	switch t := v.(type) {
+	case nil, time.Time:
+		return true
+	case string:
+		if t == "infinity" || t == "-infinity" {
+			return true
+		}
+		for _, l := range dateTimeLayouts {
+			if _, err := time.Parse(l, t); err == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func sortedKeys(m map[string]any) []string {
