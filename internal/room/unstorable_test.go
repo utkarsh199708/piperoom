@@ -64,6 +64,11 @@ func TestUserTextUnstorableIs400AndWritesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create proposal: %v", err)
 	}
+	// The system previews the proposal asynchronously; let that event land so
+	// it does not move last_seq under the checks below.
+	waitFor(t, 5*time.Second, func() bool {
+		return len(eventsOf[events.ProposalPreviewedPayload](t, svc, roomID, events.ProposalPreviewed)) > 0
+	})
 
 	for name, bad := range badTexts {
 		t.Run(name, func(t *testing.T) {

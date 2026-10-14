@@ -294,7 +294,7 @@ func (s *Service) executeProposal(p store.ProposalRow, claimed bool) error {
 			if errors.Is(err, ErrStepOrder) {
 				// An earlier run started this step and never recorded its
 				// result: its outcome is unknown, and it never runs again.
-				output := fmt.Sprintf("outcome unknown: step %d was started by an earlier run that did not record its result; check the target before you retry with a new proposal", i)
+				output := fmt.Sprintf("outcome unknown: step %d was started by an earlier run that did not record its result; check the target before you retry with a new proposal", i+1)
 				s.finishOwnStep(p.ProposalID, i, output)
 				s.failProposalOutcome(p.RoomID, p.ProposalID, i, p.ParamsHash, output, true)
 				return fmt.Errorf("room: proposal %s: claim step %d: %w", p.ProposalID, i, err)

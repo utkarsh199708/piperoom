@@ -183,3 +183,27 @@ describe('Timeline step stream', () => {
     expect(screen.queryByText(/idle/)).not.toBeInTheDocument()
   })
 })
+
+describe('Timeline layer filter', () => {
+  it('shows only matching steps with a status line, keeps the live step with (live)', () => {
+    const onClear = vi.fn()
+    render(
+      <Timeline steps={steps} messages={[]} comments={[]} onComment={vi.fn()} filterLayer="kafka-connect" onClearFilter={onClear} />,
+    )
+    expect(screen.getByRole('status')).toHaveTextContent('Showing 1 step on kafka-connect')
+    expect(screen.getByRole('button', { name: /Check the Debezium connector/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Confirm no rows/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    expect(onClear).toHaveBeenCalled()
+  })
+
+  it('keeps the live step even when it does not match', () => {
+    render(<Timeline steps={steps} messages={[]} comments={[]} onComment={vi.fn()} working filterLayer="kafka-connect" />)
+    expect(screen.getByText('(live)')).toBeInTheDocument()
+  })
+
+  it('says so when no step matches', () => {
+    render(<Timeline steps={steps} messages={[]} comments={[]} onComment={vi.fn()} filterLayer="postgres" />)
+    expect(screen.getByRole('status')).toHaveTextContent('No steps on postgres yet')
+  })
+})

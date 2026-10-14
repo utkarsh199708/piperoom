@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
-import type { Event, PresenceMember, RoomSnapshot, WsServerMessage } from '../api/types'
+import type { ChecklistStepDonePayload, Event, LabelInput, PresenceMember, RoomSnapshot, WsServerMessage } from '../api/types'
 import { ApiClientError, api, isFixtures, openRoomWs } from '../api/client'
 import type { ApproveExtras } from '../api/client'
 import { isSoloConfirmError } from '../lib/solo'
@@ -59,6 +59,8 @@ export interface RoomActions {
   comment: (text: string, stepId?: string) => void
   steer: (text: string) => void
   sendSuggestion: (suggestionId: string) => void
+  /** The driver declines a pending suggestion, with an optional note to its author. */
+  declineSuggestion: (suggestionId: string, reason?: string) => void
   requestControl: () => void
   grantControl: (to: string) => void
   /**
@@ -79,6 +81,13 @@ export interface RoomActions {
   handoff: (to: string, stayAsWatcher: boolean) => void
   acceptHandoff: (handoffId: string) => void
   trace: (table: string, key: string) => void
+  /**
+   * Label the closed room (POST /api/rooms/{id}/label). Resolves when the call is done; a failure
+   * is returned, not put in the room banner, so the label form keeps its text and shows it.
+   */
+  label: (input: LabelInput) => Promise<CloseResult>
+  /** Tick or untick one runbook item (POST /api/rooms/{id}/checklist). A failure shows in the room banner. */
+  checklist: (step: ChecklistStepDonePayload) => void
 }
 
 type RoomAction =
@@ -435,6 +444,24 @@ export function useRoom(roomId: string) {
       }
       void runAction(api.sendSuggestion(roomId, suggestionId))
     },
+    declineSuggestion: (suggestionId, reason) => {
+      if (isFixtures()) {
+        synthesize('steer.declined', { suggestion_id: suggestionId, reason })
+        return
+      }
+      // already_decided is also the approval code ("layer ... already decided"), so its friendlier
+      // wording for a suggestion lives here and not in lib/errors.ts.
+      api
+        .declineSuggestion(roomId, suggestionId, reason)
+        .then(() => setError(null))
+        .catch((e: unknown) =>
+          setError(
+            e instanceof ApiClientError && e.code === 'already_decided'
+              ? 'this suggestion was already sent or declined'
+              : errorText(e),
+          ),
+        )
+    },
     requestControl: () => {
       if (isFixtures()) {
         synthesize('control.requested', {})
@@ -551,6 +578,25 @@ export function useRoom(roomId: string) {
         return
       }
       void runAction(api.acceptHandoff(handoffId))
+    },
+    label: async (input) => {
+      if (isFixtures()) {
+        synthesize('room.labelled', input)
+        return { ok: true }
+      }
+      try {
+        await api.label(roomId, input)
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, error: errorText(e) }
+      }
+    },
+    checklist: (step) => {
+      if (isFixtures()) {
+        synthesize('checklist.step_done', step)
+        return
+      }
+      void runAction(api.checklist(roomId, step))
     },
     trace: (table, key) => {
       if (isFixtures()) {

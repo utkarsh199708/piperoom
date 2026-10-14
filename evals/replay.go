@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"time"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
@@ -15,6 +16,7 @@ import (
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/dbtools"
+	"piperoom/internal/tools/debeziumtools"
 	"piperoom/internal/tools/kafkatools"
 	"piperoom/internal/tools/runbooks"
 	"piperoom/internal/tools/similarincidents"
@@ -47,13 +49,19 @@ type Miss struct {
 // runsLive) are the exception and run for real.
 func LiveTools() ([]tools.Tool, error) {
 	reg := tools.NewRegistry()
-	if err := kafkatools.Register(reg, kafkatools.Deps{}); err != nil {
+	// kafkatools registers the F12 reads only for a client that has them, so the
+	// definition-only client below says it does.
+	if err := kafkatools.Register(reg, kafkatools.Deps{Kafka: definitionKafka{}}); err != nil {
 		return nil, fmt.Errorf("evals: kafka tool definitions: %w", err)
 	}
 	// dbtools refuses a nil Owners (a wiring guard); an empty one is enough
 	// for definitions.
 	if err := dbtools.Register(reg, dbtools.Deps{Owners: &owners.Owners{}}); err != nil {
 		return nil, fmt.Errorf("evals: db tool definitions: %w", err)
+	}
+	// Definition only: no Connect client and no metrics URL; the harness never runs it.
+	if err := debeziumtools.Register(reg, debeziumtools.Deps{Owners: &owners.Owners{}}); err != nil {
+		return nil, fmt.Errorf("evals: debezium tool definitions: %w", err)
 	}
 	if err := runbooks.Register(reg); err != nil {
 		return nil, fmt.Errorf("evals: runbook tool definitions: %w", err)
@@ -64,6 +72,23 @@ func LiveTools() ([]tools.Tool, error) {
 		return nil, fmt.Errorf("evals: similar_incidents tool definition: %w", err)
 	}
 	return reg.All(), nil
+}
+
+// definitionKafka is a Kafka client for tool definitions only. It implements the
+// optional F12 readers so kafkatools registers their tools; no method is ever
+// called, because the harness replays recordings.
+type definitionKafka struct{ clients.KafkaAdmin }
+
+func (definitionKafka) ClusterHealth(context.Context, ...string) (clients.ClusterHealth, error) {
+	return clients.ClusterHealth{}, errNotReplayed
+}
+
+func (definitionKafka) PartitionRates(context.Context, time.Time, ...string) ([]clients.PartitionRate, error) {
+	return nil, errNotReplayed
+}
+
+func (definitionKafka) ACLs(context.Context, []string, []string) ([]clients.ACLEntry, error) {
+	return nil, errNotReplayed
 }
 
 // LiveActions returns the production write actions, backed by replay clients

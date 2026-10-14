@@ -26,6 +26,7 @@ export type EventType =
   | 'comment.added'
   | 'steer.suggested'
   | 'steer.sent'
+  | 'steer.declined'
   | 'control.requested'
   | 'control.granted'
   | 'proposal.created'
@@ -38,6 +39,8 @@ export type EventType =
   | 'handoff.accepted'
   | 'trace.pinned'
   | 'control.lease_expired'
+  | 'room.labelled'
+  | 'checklist.step_done'
 
 export interface Event {
   room_id: string
@@ -49,6 +52,34 @@ export interface Event {
 }
 
 // ---- payloads (one per Type, matching events.go) ----
+
+/** room.labelled: the human label of a closed room (POST /api/rooms/{id}/label). */
+export interface RoomLabelledPayload {
+  actual_layer?: string
+  cause: string
+  fix_that_worked?: string
+  fix_proposal_id?: string
+  agent_helped?: boolean
+}
+
+/** checklist.step_done: item `item` of hits[`hit`].items of tool result `tool_use_id` ticked or unticked. */
+export interface ChecklistStepDonePayload {
+  step_id: string
+  tool_use_id: string
+  hit: number
+  item: number
+  done: boolean
+  note?: string
+}
+
+/** Body of POST /api/rooms/{id}/label. */
+export interface LabelInput {
+  actual_layer?: string
+  cause: string
+  fix_that_worked?: string
+  fix_proposal_id?: string
+  agent_helped?: boolean
+}
 
 export interface RoomCreatedPayload {
   title: string
@@ -130,6 +161,11 @@ export interface SteerSuggestedPayload {
 export interface SteerSentPayload {
   suggestion_id?: string // set when forwarding a suggestion
   text: string
+}
+
+export interface SteerDeclinedPayload {
+  suggestion_id: string
+  reason?: string
 }
 
 export type ControlRequestedPayload = Record<string, never>
@@ -326,6 +362,8 @@ export interface RoomSnapshot {
   open_proposals: ProposalSummary[]
   pending_suggestions: SuggestionSummary[]
   members: MemberSummary[]
+  /** F8: a room.labelled exists. */
+  labelled?: boolean
 }
 
 export interface TopologyNode {
