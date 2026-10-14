@@ -35,6 +35,9 @@ type target struct {
 	src   SourceDB
 	conn  ConnectClient
 	kafka clients.DLQReader
+	lag   LagReader
+	// groups are the pipeline's consumer groups, filtered through the scope.
+	groups []string
 }
 
 // connObs is what one tick learned about one connector.
@@ -63,6 +66,14 @@ type observation struct {
 	dlqErr      error
 	dlqTried    bool
 	dlqNoReader bool
+
+	// Consumer groups: one GroupLag per group of the set, then one offsets
+	// call for the log start of the CDC topics they read (lag_signals.go).
+	lags          map[string]*lagObs
+	lagNoReader   bool
+	logStart      map[string][]clients.PartitionOffsets
+	logStartErr   error
+	logStartTried bool
 }
 
 // targets lists the pipelines to watch, in owners order. A pipeline that opted
@@ -72,7 +83,8 @@ func (w *Watcher) targets(ctx context.Context) []target {
 	for _, p := range w.own.Pipelines {
 		cfg := p.Watch()
 		if !cfg.Enabled || !(cfg.ConnectorDown.Enabled || cfg.SlotInactive.Enabled || cfg.SlotWAL.Enabled ||
-			cfg.DLQGrowth.Enabled || cfg.ConfigRisk.Enabled) {
+			cfg.DLQGrowth.Enabled || cfg.ConfigRisk.Enabled || cfg.ConsumerLag.Enabled || cfg.GroupUnstable.Enabled ||
+			cfg.OffsetBelowLogStart.Enabled) {
 			continue
 		}
 		t := target{p: p, cfg: cfg}
@@ -85,11 +97,12 @@ func (w *Watcher) targets(ctx context.Context) []target {
 		}
 		t.connectors = sc.FilterConnectors(p.Connectors)
 		t.cdcTopics = sc.Topics()
+		t.groups = sc.FilterGroups(p.ConsumerGroups)
 		if w.clientsFor != nil {
 			pc := w.clientsFor(p.ID)
-			t.set, t.src, t.conn, t.kafka = pc.Set, pc.Source, pc.Connect, pc.Kafka
+			t.set, t.src, t.conn, t.kafka, t.lag = pc.Set, pc.Source, pc.Connect, pc.Kafka, pc.Lag
 		} else {
-			t.src, t.conn, t.kafka = w.src, w.conn, w.kafka
+			t.src, t.conn, t.kafka, t.lag = w.src, w.conn, w.kafka, w.lag
 		}
 		out = append(out, t)
 	}
@@ -122,7 +135,7 @@ func (w *Watcher) observe(ctx context.Context, ts []target) map[string]*observat
 		go func() {
 			defer wg.Done()
 			// Every target of a set has that set's clients.
-			o := w.observeSet(ctx, set, g, g[0].src, g[0].conn, g[0].kafka)
+			o := w.observeSet(ctx, set, g, g[0].src, g[0].conn, g[0].kafka, g[0].lag)
 			mu.Lock()
 			out[set] = o
 			mu.Unlock()
@@ -137,7 +150,7 @@ func (w *Watcher) observe(ctx context.Context, ts []target) map[string]*observat
 // goroutine. Every call has its own deadline and its own error, so one slow or
 // broken layer never holds up or hides another (same shape as devctl's
 // runHealth).
-func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src SourceDB, conn ConnectClient, kafka clients.DLQReader) *observation {
+func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src SourceDB, conn ConnectClient, kafka clients.DLQReader, lr LagReader) *observation {
 	obs := &observation{set: set, conns: map[string]*connObs{}}
 	needCfg := map[string]bool{}
 	for _, t := range ts {
@@ -155,6 +168,12 @@ func (w *Watcher) observeSet(ctx context.Context, set string, ts []target, src S
 	}
 
 	var wg sync.WaitGroup
+	// Group reads need nothing from the configs, so they run alongside.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w.observeLag(ctx, ts, obs, lr, kafka)
+	}()
 	if needsSlots(ts) && src == nil {
 		obs.slotsErr = errNoSource
 	} else if needsSlots(ts) {

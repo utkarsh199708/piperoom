@@ -52,6 +52,8 @@ func sanitizeProposal(p events.ProposalCreatedPayload) events.ProposalCreatedPay
 		st.Action = sanitizeAgentText(st.Action)
 		st.Layer = sanitizeAgentText(st.Layer)
 		st.Description = sanitizeAgentText(st.Description)
+		// Verify is optional, so checkPlanText does not apply to it.
+		st.Verify = truncateDetail(sanitizeAgentText(st.Verify))
 		st.Params = store.SanitizeJSON(st.Params)
 		steps[i] = st
 	}
@@ -189,6 +191,13 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		}
 		return "", err
 	}
+	// Preview runs outside s.mu, on the service lifetime context; it waits for
+	// this call to release the lock before it appends anything.
+	s.wg.Add(1)
+	go func(pipelineID string, steps []events.ProposalStep) {
+		defer s.wg.Done()
+		s.previewProposal(s.ctx, roomID, pipelineID, p.ProposalID, steps)
+	}(st.snap.PipelineID, p.Steps)
 	return p.ProposalID, nil
 }
 

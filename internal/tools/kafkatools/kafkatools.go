@@ -62,6 +62,18 @@ func Register(reg *tools.Registry, d Deps) error {
 			return err
 		}
 	}
+	// The F12a reads are optional on a KafkaAdmin: a client (or fake, or eval
+	// replay) without them gets no tool the model could call in vain.
+	if _, ok := d.Kafka.(clients.ClusterReader); ok {
+		if err := reg.Register(&clusterHealth{d: d}); err != nil {
+			return err
+		}
+	}
+	if _, ok := d.Kafka.(clients.RateReader); ok {
+		if err := reg.Register(&partitionRates{d: d}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -1,5 +1,8 @@
 import { act, fireEvent, render, renderHook, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+const toast = vi.hoisted(() => vi.fn())
+vi.mock('sonner', () => ({ toast }))
+
 import { emptyRoomState, fromSnapshot } from '../../state/types'
 import type { RoomState } from '../../state/types'
 import type { RoomSnapshot } from '../../api/types'
@@ -115,14 +118,14 @@ describe('useRoomAttention', () => {
     const h = run(false, [a])
     act(() => h.rerender({ s: { ...a, proposals: [proposal] }, r: false }))
     expect(h.result.current.unread).toBe(1)
-    expect(document.title).toBe('(1) Piperoom')
+    expect(document.title).toBe('(1) ● Needs you — Orders · Piperoom')
     expect(notes[0][0]).toMatch(/Your approval is needed/)
     hidden = false
     act(() => {
       document.dispatchEvent(new Event('visibilitychange'))
     })
     expect(h.result.current.unread).toBe(0)
-    expect(document.title).toBe('Piperoom')
+    expect(document.title).toBe('● Needs you — Orders · Piperoom')
   })
 
   it('treats the last replayed event as history, then notifies for the next live one', () => {
@@ -204,5 +207,51 @@ describe('useJumpToLatest', () => {
     act(() => cb([{ isIntersecting: false }]))
     rerender(<Harness activity={[act1(1), act1(2), act1(3)]} replaying />)
     expect(screen.queryByRole('button')).toBeNull()
+  })
+})
+
+describe('useRoomAttention toasts and tab', () => {
+  const user = { id: 'meera', name: 'Meera', layers: ['warehouse'] }
+  const proposal = {
+    proposal_id: 'p1', title: 'Reset', steps: [], risk: '', rollback: '', required_layers: ['warehouse'],
+    approvals: { warehouse: 'pending' as const }, decisions: {}, params_hash: '', status: 'open' as const, executed: [],
+  }
+  beforeEach(() => {
+    toast.mockClear()
+    document.head.innerHTML = '<link id="favicon" rel="icon" href="/favicon.svg">'
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false })
+  })
+  const run = (a: RoomState, replaying = false, actions = {}) =>
+    renderHook(({ s, r }) => useRoomAttention(s, user, r, actions), { initialProps: { s: a, r: replaying } })
+
+  it('toasts in the foreground with Approve and View, and swaps the favicon', () => {
+    const approve = vi.fn()
+    const a = { ...emptyRoomState('r1'), title: 'Orders' }
+    const h = run(a, false, { approve })
+    act(() => h.rerender({ s: { ...a, proposals: [proposal] }, r: false }))
+    expect(toast).toHaveBeenCalledTimes(1)
+    const [title, opts] = toast.mock.calls[0]
+    expect(title).toBe('Needs your approval · warehouse')
+    expect(opts).toMatchObject({ id: 'proposal:p1', duration: 8000, description: 'Reset' })
+    opts.action.onClick()
+    expect(approve).toHaveBeenCalled()
+    expect(document.getElementById('favicon')?.getAttribute('href')).toBe('/favicon-alert.svg')
+    expect(h.result.current.unread).toBe(0) // visible: no title count
+  })
+
+  it('never toasts during or right after the replay', () => {
+    const a = { ...emptyRoomState('r1'), title: 'Orders' }
+    const h = run(a, true)
+    act(() => h.rerender({ s: { ...a, proposals: [proposal] }, r: true }))
+    act(() => h.rerender({ s: { ...a, proposals: [proposal] }, r: false }))
+    expect(toast).not.toHaveBeenCalled()
+  })
+
+  it('an agent error toasts with a fixed body, not the status detail', () => {
+    const a = { ...emptyRoomState('r1'), title: 'Orders' }
+    const h = run(a)
+    act(() => h.rerender({ s: { ...a, agent_status: { state: 'error', detail: 'secret=abc' } }, r: false }))
+    expect(toast).toHaveBeenCalledWith('Agent error', expect.objectContaining({ description: 'The agent stopped. Open the room to steer it.' }))
+    expect(JSON.stringify(toast.mock.calls)).not.toContain('secret')
   })
 })
