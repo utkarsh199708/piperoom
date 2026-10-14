@@ -15,15 +15,6 @@ import (
 // tools find them with a type assertion, the same pattern as
 // PublicationTables.
 
-const slotColumns = `
-		SELECT slot_name, plugin, active,
-		       COALESCE(restart_lsn::text, ''),
-		       COALESCE(confirmed_flush_lsn::text, ''),
-		       COALESCE(wal_status, ''),
-		       COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint, 0),
-		       safe_wal_size
-		FROM pg_replication_slots`
-
 // ReplicationSlotsNamed returns the replication slots whose name is in names
 // (same columns as ReplicationSlots) and the number of other slots, which are
 // counted in SQL and never read. No names returns no slots and counts them all.
@@ -33,28 +24,25 @@ func (d *DB) ReplicationSlotsNamed(ctx context.Context, names []string) ([]clien
 	if names == nil {
 		names = []string{} // a NULL array would make "<> ALL" NULL, and count nothing
 	}
+	tx, err := d.begin(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer d.end(ctx, tx)
 
-	rows, err := d.pool.Query(ctx, slotColumns+`
+	rows, err := tx.Query(ctx, slotColumns+`
 		WHERE slot_name = ANY($1::text[])
 		ORDER BY slot_name`, names)
 	if err != nil {
 		return nil, 0, fmt.Errorf("postgres: list named replication slots: %w", err)
 	}
-	defer rows.Close()
-	var out []clients.ReplicationSlot
-	for rows.Next() {
-		var s clients.ReplicationSlot
-		if err := rows.Scan(&s.Name, &s.Plugin, &s.Active, &s.RestartLSN, &s.ConfirmedFlushLSN, &s.WALStatus, &s.RetainedWALBytes, &s.SafeWALBytes); err != nil {
-			return nil, 0, fmt.Errorf("postgres: scan replication slot: %w", err)
-		}
-		out = append(out, s)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("postgres: read named replication slots: %w", err)
+	out, err := scanSlots(rows)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	var other int
-	if err := d.pool.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		SELECT count(*) FROM pg_replication_slots
 		WHERE slot_name <> ALL($1::text[])`, names).Scan(&other); err != nil {
 		return nil, 0, fmt.Errorf("postgres: count other replication slots: %w", err)
@@ -153,8 +141,13 @@ func (d *DB) LongTransactionsOnTables(ctx context.Context, olderThan time.Durati
 		names = append(names, tbl)
 	}
 	secs := olderThan.Seconds()
+	tx, err := d.begin(ctx)
+	if err != nil {
+		return TableTransactions{}, err
+	}
+	defer d.end(ctx, tx)
 
-	rows, err := d.pool.Query(ctx, longTxnScope+`
+	rows, err := tx.Query(ctx, longTxnScope+`
 	SELECT pid,
 	       COALESCE(usename, ''),
 	       COALESCE(application_name, ''),
@@ -184,7 +177,7 @@ func (d *DB) LongTransactionsOnTables(ctx context.Context, olderThan time.Durati
 		return TableTransactions{}, fmt.Errorf("postgres: read long transactions on tables: %w", err)
 	}
 
-	if err := d.pool.QueryRow(ctx, longTxnScope+`
+	if err := tx.QueryRow(ctx, longTxnScope+`
 	SELECT count(*), count(*) FILTER (WHERE backend_xid IS NOT NULL)
 	FROM lt
 	WHERE NOT on_tables`, secs, schemas, names).Scan(&out.Other, &out.OtherWriters); err != nil {
@@ -193,7 +186,7 @@ func (d *DB) LongTransactionsOnTables(ctx context.Context, olderThan time.Durati
 
 	// Only the allow-listed columns of the oldest other writers. Readers
 	// (no xid) cannot hold a slot's restart_lsn back and stay a count.
-	wrows, err := d.pool.Query(ctx, longTxnScope+`
+	wrows, err := tx.Query(ctx, longTxnScope+`
 	SELECT pid,
 	       COALESCE(datname = current_database(), false),
 	       COALESCE(state, ''),
@@ -229,15 +222,20 @@ func (d *DB) LongTransactionsOnTables(ctx context.Context, olderThan time.Durati
 func (d *DB) PublicationSourceTables(ctx context.Context, publication, role string, tables []string) ([]PublicationTable, int, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
+	tx, err := d.begin(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer d.end(ctx, tx)
 
 	var exists bool
-	if err := d.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)`, publication).Scan(&exists); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = $1)`, publication).Scan(&exists); err != nil {
 		return nil, 0, fmt.Errorf("postgres: check publication %q: %w", publication, err)
 	}
 	if !exists {
 		return nil, 0, fmt.Errorf("postgres: publication %q: %w", publication, clients.ErrNotFound)
 	}
-	sources, err := d.sourcePrivileges(ctx, publication, role, tables)
+	sources, err := sourcePrivileges(ctx, tx, publication, role, tables)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -253,7 +251,7 @@ func (d *DB) PublicationSourceTables(ctx context.Context, publication, role stri
 		names = append(names, tbl)
 	}
 	var other int
-	if err := d.pool.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		SELECT count(*)
 		FROM pg_publication_tables pt
 		WHERE pt.pubname = $1

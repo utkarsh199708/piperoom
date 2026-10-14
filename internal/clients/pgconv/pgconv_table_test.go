@@ -153,8 +153,8 @@ func TestToJSONBytesAndUUIDs(t *testing.T) {
 		in   any
 		want any
 	}{
-		{"empty bytes", []byte{}, ""},
-		{"bytes with NUL and high bytes", []byte("a\x00\xff"), "a\x00\xff"},
+		{"empty bytes", []byte{}, `\x`},
+		{"bytes with NUL and high bytes", []byte("a\x00\xff"), `\x6100ff`},
 		{"zero UUID array", [16]byte{}, "00000000-0000-0000-0000-000000000000"},
 		{"UUID array", uuid, "123e4567-e89b-12d3-a456-426614400000"},
 		{"pgtype.UUID valid", pgtype.UUID{Bytes: uuid, Valid: true}, "123e4567-e89b-12d3-a456-426614400000"},
@@ -197,13 +197,13 @@ func TestNumericStringTable(t *testing.T) {
 }
 
 func TestNumericStringZeroWithPositiveExponentIsSkipped(t *testing.T) {
-	// BUG (see reviews/coverage-2026-10.md): zero with a positive exponent
-	// renders as "000" because the trailing zeros are appended to the digit
-	// string "0". The canonical form is "0". Kept out of the pass/fail set
-	// until the fix lands in pgconv.go.
-	t.Skip("BUG: NumericString(Int=0, Exp=2) returns \"000\", want \"0\"; see reviews/coverage-2026-10.md")
-	if got := NumericString(pgtype.Numeric{Int: big.NewInt(0), Exp: 2, Valid: true}); got != "0" {
-		t.Fatalf("got %q, want \"0\"", got)
+	// Was a known bug (reviews/coverage-2026-10.md): zero with a positive
+	// exponent rendered as "000". The canonical form is "0". The name is kept
+	// so the coverage report's reference still resolves.
+	for _, exp := range []int32{1, 2, 20} {
+		if got := NumericString(pgtype.Numeric{Int: big.NewInt(0), Exp: exp, Valid: true}); got != "0" {
+			t.Fatalf("NumericString(0e%d) = %q, want \"0\"", exp, got)
+		}
 	}
 }
 
