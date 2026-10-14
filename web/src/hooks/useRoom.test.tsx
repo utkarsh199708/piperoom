@@ -442,6 +442,7 @@ describe('the stale note through a real room reload', () => {
     expect(screen.queryByText('You looked at')).not.toBeInTheDocument()
 
     fireEvent.click(approveButton)
+    fireEvent.click(await screen.findByRole('button', { name: 'Approve and run' })) // completes the set
     // The reload takes the panel away ...
     await waitFor(() => expect(screen.getByText('Loading room…')).toBeInTheDocument())
     expect(screen.queryByRole('region', { name: 'Proposals' })).not.toBeInTheDocument()

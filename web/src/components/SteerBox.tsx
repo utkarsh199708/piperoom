@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
 import { Eye, Lock } from 'lucide-react'
 import type { RoomState } from '../state/types'
@@ -6,6 +6,7 @@ import type { CurrentUser } from '../state/permissions'
 import { canRequestControl, canSteer, canTakeControl, isViewer } from '../state/permissions'
 import type { RoomActions } from '../hooks/useRoom'
 import { modKeyLabel } from '@/lib/envLabel'
+import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { Textarea } from '@/components/ui/textarea'
@@ -58,6 +59,24 @@ function GrantPicker({
 // suggestion in the driver's queue, a viewer reads. (Roles: docs/api.md, state/permissions.ts.)
 const BAR = 'sticky bottom-0 z-10 mt-auto border-t border-border bg-background px-4 pb-4 pt-3 sm:px-6'
 
+// Publishes the composer's height as --composer-h so <main> can keep scroll targets above it
+// (AppShell scroll-padding-bottom). Cleared on unmount.
+function useComposerHeight(el: HTMLElement | null) {
+  useEffect(() => {
+    if (!el) return
+    const root = document.documentElement
+    const write = () => root.style.setProperty('--composer-h', `${Math.round(el.getBoundingClientRect().height)}px`)
+    write()
+    if (typeof ResizeObserver === 'undefined') return () => root.style.removeProperty('--composer-h')
+    const ro = new ResizeObserver(write)
+    ro.observe(el)
+    return () => {
+      ro.disconnect()
+      root.style.removeProperty('--composer-h')
+    }
+  }, [el])
+}
+
 export function SteerBox({
   state,
   user,
@@ -69,6 +88,9 @@ export function SteerBox({
 }) {
   const [text, setText] = useState('')
   const [granting, setGranting] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const [section, setSection] = useState<HTMLElement | null>(null)
+  useComposerHeight(section)
   const ref = useRef<HTMLTextAreaElement>(null)
   const now = useNow()
   const isDriver = canSteer(state, user)
@@ -77,7 +99,7 @@ export function SteerBox({
 
   if (isViewer(user)) {
     return (
-      <section aria-label="Steer" className={`${BAR} flex items-center gap-2 pb-3`}>
+      <section ref={setSection} aria-label="Steer" className={`${BAR} flex items-center gap-2 pb-3`}>
         <Eye className="size-3.5 shrink-0 text-subtle-foreground" aria-hidden="true" />
         <p className="m-0 text-muted-foreground">
           View only: you can read this room but not steer it. Ask a member to take control.
@@ -88,7 +110,7 @@ export function SteerBox({
 
   if (state.status !== 'open') {
     return (
-      <section aria-label="Steer" className={`${BAR} flex items-center gap-2 pb-3`}>
+      <section ref={setSection} aria-label="Steer" className={`${BAR} flex items-center gap-2 pb-3`}>
         <Lock className="size-3.5 shrink-0 text-subtle-foreground" aria-hidden="true" />
         <p className="m-0 text-muted-foreground">This room is closed. Nothing more to steer.</p>
       </section>
@@ -135,8 +157,17 @@ export function SteerBox({
     status = `${name} is driving${lease} · your message goes to ${name}'s queue`
   }
 
+  // Empty and not focused: one row (status, then the field as a placeholder). It grows on focus or text.
+  const idle =
+    !text && !focused && !granting && !(isDriver && (pending.length > 0 || state.control_requests.length > 0))
+
   return (
-    <section aria-label="Steer" className={`${BAR} flex flex-col gap-2`}>
+    <section
+      ref={setSection}
+      aria-label="Steer"
+      data-idle={idle || undefined}
+      className={cn(BAR, idle ? 'flex h-14 flex-row items-center gap-3 py-0' : 'flex flex-col gap-2')}
+    >
       {isDriver && pending.length > 0 && (
         <ul className="m-0 flex list-none flex-col gap-1.5 p-0">
           {pending.map((s) => (
@@ -177,9 +208,11 @@ export function SteerBox({
         </ul>
       )}
 
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <div className={cn('flex items-center gap-x-2 gap-y-1', idle ? 'min-w-0 max-w-[45%] shrink-0' : 'flex-wrap')}>
         <StatusDot tone={noDriver ? 'warn' : 'accent'} />
-        <span className="text-xs text-muted-foreground">{status}</span>
+        <span className={cn('text-xs text-muted-foreground', idle && 'truncate')} title={idle ? status : undefined}>
+          {status}
+        </span>
         <div className="ml-auto flex items-center gap-1">
           {isDriver && (
             <Button variant="ghost" className="h-7" aria-expanded={granting} onClick={() => setGranting((g) => !g)}>
@@ -206,7 +239,7 @@ export function SteerBox({
         <GrantPicker user={user} open={granting} onClose={() => setGranting(false)} onGrant={actions.grantControl} />
       )}
 
-      <form className="flex flex-col gap-2" onSubmit={submit}>
+      <form className={cn('flex gap-2', idle ? 'min-w-0 flex-1' : 'flex-col')} onSubmit={submit}>
         <Textarea
           ref={ref}
           value={text}
@@ -215,6 +248,9 @@ export function SteerBox({
             grow(e.currentTarget)
           }}
           onKeyDown={onKeyDown}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          className={idle ? 'min-h-8 py-1' : undefined}
           placeholder={
             noDriver
               ? 'Take control to steer the agent'
@@ -226,7 +262,7 @@ export function SteerBox({
           rows={1}
           disabled={noDriver}
         />
-        {!noDriver && (
+        {!noDriver && !idle && (
           <div className="flex items-center gap-2">
             <Button
               type="submit"

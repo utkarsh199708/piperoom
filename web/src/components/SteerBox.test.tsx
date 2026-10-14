@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { SteerBox } from './SteerBox'
 import type { RoomActions } from '../hooks/useRoom'
@@ -26,6 +26,7 @@ describe('SteerBox', () => {
   it('driver sees "Send to agent" and no "Request control"', () => {
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
     render(<SteerBox state={state} user={arjun} actions={actions} />)
+    fireEvent.focus(screen.getByLabelText('Steer the agent')) // idle is one row without the button
     expect(screen.getByRole('button', { name: 'Send to agent' })).toBeInTheDocument()
     expect(screen.queryByText('Request control')).not.toBeInTheDocument()
   })
@@ -34,6 +35,7 @@ describe('SteerBox', () => {
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
     render(<SteerBox state={state} user={kabir} actions={actions} />)
     expect(screen.getByText(/Arjun's queue/)).toBeInTheDocument()
+    fireEvent.focus(screen.getByLabelText('Steer the agent'))
     expect(screen.getByRole('button', { name: 'Suggest' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Request control' })).toBeInTheDocument()
   })
@@ -67,6 +69,7 @@ describe('SteerBox composer (U3)', () => {
     expect(screen.getByText(/You are driving · lease 2[34]m/)).toBeInTheDocument()
     const box = screen.getByLabelText('Steer the agent')
     expect(box).toBeEnabled()
+    fireEvent.focus(box)
     const send = screen.getByRole('button', { name: 'Send to agent' })
     expect(send).toBeDisabled()
     fireEvent.change(box, { target: { value: 'check the DDL log' } })
@@ -134,5 +137,50 @@ describe('SteerBox composer (U3)', () => {
     render(<SteerBox state={state} user={arjun} actions={actions} />)
     fireEvent.click(screen.getByRole('button', { name: 'Grant control' }))
     expect(actions.grantControl).toHaveBeenCalledWith('kabir')
+  })
+})
+
+describe('SteerBox idle row (F1b)', () => {
+  const driving = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    document.documentElement.style.removeProperty('--composer-h')
+  })
+
+  it('idle composer is one row and grows on focus', () => {
+    render(<SteerBox state={driving} user={arjun} actions={actions} />)
+    const section = screen.getByRole('region', { name: 'Steer' })
+    expect(section).toHaveAttribute('data-idle', 'true')
+    expect(screen.queryByRole('button', { name: 'Send to agent' })).not.toBeInTheDocument()
+    fireEvent.focus(screen.getByLabelText('Steer the agent'))
+    expect(section).not.toHaveAttribute('data-idle')
+    expect(screen.getByRole('button', { name: 'Send to agent' })).toBeInTheDocument()
+    fireEvent.blur(screen.getByLabelText('Steer the agent'))
+    expect(section).toHaveAttribute('data-idle', 'true')
+    fireEvent.change(screen.getByLabelText('Steer the agent'), { target: { value: 'x' } })
+    expect(section).not.toHaveAttribute('data-idle')
+  })
+
+  it('sets --composer-h from the section height and clears it on unmount', () => {
+    let notify: () => void = () => undefined
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(cb: () => void) {
+          notify = cb
+        }
+        observe() {}
+        disconnect() {}
+      },
+    )
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ height: 57 } as DOMRect)
+    const { unmount } = render(<SteerBox state={driving} user={arjun} actions={actions} />)
+    expect(document.documentElement.style.getPropertyValue('--composer-h')).toBe('57px')
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({ height: 120 } as DOMRect)
+    notify()
+    expect(document.documentElement.style.getPropertyValue('--composer-h')).toBe('120px')
+    unmount()
+    expect(document.documentElement.style.getPropertyValue('--composer-h')).toBe('')
+    vi.restoreAllMocks()
   })
 })
