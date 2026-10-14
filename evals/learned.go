@@ -34,14 +34,11 @@ import (
 //  5. a fingerprint already in learned/ or learned/pending/ is refused, and a
 //     pipeline holds at most MaxLearnedPerPipeline scenarios.
 
-// Directories under evals/scenarios.
-const (
-	// LearnedDir holds reviewed learned scenarios; the default set replays it.
-	LearnedDir = "learned"
-	// PendingDir (under LearnedDir) holds fresh exports. Nothing replays it;
-	// -check only validates it.
-	PendingDir = "pending"
-)
+// PendingDir (under a learned directory) holds fresh exports. Nothing replays
+// it; -check only validates it. The learned directory itself is private: this
+// repository is public and describes no customer's systems, so learned
+// scenarios never live in it (see evals/README.md).
+const PendingDir = "pending"
 
 // MaxLearnedPerPipeline caps learned plus pending scenarios per pipeline, so
 // one noisy pipeline cannot take over the set (and the eval bill).
@@ -1073,17 +1070,15 @@ func ExportLearned(raw []byte, o LearnedOptions) (LearnedResult, string, error) 
 	return res, path, nil
 }
 
-// LoadLearned reads the reviewed learned scenarios (learned/*.yaml under the
-// scenarios directory) for the default set. A missing or empty directory is no
-// scenarios, not an error. It never reads pending/.
-func LoadLearned(scenariosDir string) ([]Scenario, error) {
-	return loadOptionalDir(filepath.Join(scenariosDir, LearnedDir))
-}
+// LoadLearned reads the reviewed learned scenarios (dir/*.yaml) of a private
+// learned directory, for evalrun -learned. A missing or empty directory is no
+// scenarios, not an error. It never reads dir/pending.
+func LoadLearned(dir string) ([]Scenario, error) { return loadOptionalDir(dir) }
 
-// LoadPending reads learned/pending/*.yaml. Only validation uses it; nothing
+// LoadPending reads dir/pending/*.yaml. Only validation uses it; nothing
 // replays a pending file.
-func LoadPending(scenariosDir string) ([]Scenario, error) {
-	return loadOptionalDir(filepath.Join(scenariosDir, LearnedDir, PendingDir))
+func LoadPending(dir string) ([]Scenario, error) {
+	return loadOptionalDir(filepath.Join(dir, PendingDir))
 }
 
 func loadOptionalDir(dir string) ([]Scenario, error) {

@@ -336,8 +336,7 @@ func TestLearnedRefusesWhenASecondPassChangesTheFile(t *testing.T) {
 // ---- guardrail 5: dedup and cap ----
 
 func TestLearnedPendingLandsInPendingAndIsNotReplayed(t *testing.T) {
-	root := t.TempDir() // stands for evals/scenarios
-	dir := filepath.Join(root, LearnedDir)
+	dir := t.TempDir() // stands for the private learned directory
 	res, path, err := ExportLearned(fixture(t, fixConfirmed), LearnedOptions{Owners: devOwners(t), Dir: dir, Validate: true})
 	if err != nil {
 		t.Fatal(err)
@@ -349,10 +348,10 @@ func TestLearnedPendingLandsInPendingAndIsNotReplayed(t *testing.T) {
 	if _, err := LoadScenario(path); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := LoadLearned(root); err != nil || len(got) != 0 {
+	if got, err := LoadLearned(dir); err != nil || len(got) != 0 {
 		t.Errorf("LoadLearned = %d scenarios, %v: a pending file must not be replayed", len(got), err)
 	}
-	pend, err := LoadPending(root)
+	pend, err := LoadPending(dir)
 	if err != nil || len(pend) != 1 || pend[0].Name != res.Name {
 		t.Fatalf("LoadPending = %v, %v", pend, err)
 	}
@@ -360,7 +359,7 @@ func TestLearnedPendingLandsInPendingAndIsNotReplayed(t *testing.T) {
 	if err := os.Rename(path, filepath.Join(dir, res.Name+".yaml")); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := LoadLearned(root); err != nil || len(got) != 1 {
+	if got, err := LoadLearned(dir); err != nil || len(got) != 1 {
 		t.Errorf("after the move LoadLearned = %d, %v", len(got), err)
 	}
 }

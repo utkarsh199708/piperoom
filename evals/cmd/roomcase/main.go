@@ -1,12 +1,14 @@
 // Command roomcase turns one closed, labelled room into a pending eval scenario.
 //
-//	go run ./evals/cmd/roomcase -export room.json -owners owners.yaml [-force] [-out DIR]
+//	go run ./evals/cmd/roomcase -export room.json -owners owners.yaml -out DIR [-force]
 //
 // room.json is a GET /api/rooms/{id}/export document; its integrity hash is
 // verified first. Nothing else is read: no database, no network, so this runs
-// on any laptop. The scenario lands in DIR/pending/ (default
-// evals/scenarios/learned), which evalrun never replays; a person reviews it
-// and moves it into DIR in a pull request (evals/README.md, "Learned scenarios").
+// on any laptop. The scenario lands in DIR/pending/, which evalrun never
+// replays; a person reviews it and moves it up into DIR. DIR is required and
+// must be outside this repository's working tree: the repository is public and
+// a learned scenario, even redacted, describes a customer's systems
+// (evals/README.md, "Learned scenarios").
 package main
 
 import (
@@ -15,6 +17,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"piperoom/evals"
 	"piperoom/internal/owners"
@@ -35,7 +40,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	export := fs.String("export", "", "room export JSON (GET /api/rooms/{id}/export)")
 	own := fs.String("owners", "", "owners.yaml with the room's pipeline")
-	out := fs.String("out", "evals/scenarios/learned", "learned scenarios directory; the file goes to its pending/ subdirectory")
+	out := fs.String("out", "", "private learned scenarios directory (required, outside this repository); the file goes to its pending/ subdirectory")
 	force := fs.Bool("force", false, "allow a fingerprint that already exists and overwrite the output file (the per-pipeline cap stays)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -43,8 +48,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
-	if *export == "" || *own == "" {
-		return errors.New("-export and -owners are required")
+	if *export == "" || *own == "" || *out == "" {
+		return errors.New("-export, -owners and -out are required (-out is a private directory outside this repository; there is no default)")
+	}
+	if err := refuseInsideRepo(*out); err != nil {
+		return err
 	}
 	raw, err := readCapped(*export)
 	if err != nil {
@@ -64,6 +72,67 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "wrote %s: %s\nreview every summary and input before moving it out of pending/\n", path, kind)
 	return nil
+}
+
+// refuseInsideRepo refuses a directory inside the working tree this command
+// runs in. The tree is `git rev-parse --show-toplevel` when git answers, else
+// the nearest ancestor holding go.mod. Symlinks are resolved on both sides, so
+// a link into the tree is no way round; a directory that does not exist yet is
+// judged by its nearest existing ancestor.
+func refuseInsideRepo(dir string) error {
+	root, err := repoRoot()
+	if err != nil {
+		return err
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve -out: %w", err)
+	}
+	probe := abs
+	for {
+		if _, err := os.Stat(probe); err == nil {
+			break
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			break
+		}
+		probe = parent
+	}
+	real, err := filepath.EvalSymlinks(probe)
+	if err != nil {
+		return fmt.Errorf("resolve -out: %w", err)
+	}
+	if rel, err := filepath.Rel(root, real); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("-out %s is inside the repository %s, which is public: learned scenarios describe customers' systems and must live in a private directory", dir, root)
+	}
+	return nil
+}
+
+func repoRoot() (string, error) {
+	var root string
+	if b, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		root = strings.TrimSpace(string(b))
+	} else {
+		wd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("working directory: %w", err)
+		}
+		for d := wd; ; d = filepath.Dir(d) {
+			if _, err := os.Stat(filepath.Join(d, "go.mod")); err == nil {
+				root = d
+				break
+			}
+			if filepath.Dir(d) == d {
+				return "", errors.New("cannot tell where this repository is (no git, no go.mod above the working directory); refusing to write")
+			}
+		}
+	}
+	real, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository root: %w", err)
+	}
+	return real, nil
 }
 
 // readCapped reads the export, refusing one larger than the exporter accepts.

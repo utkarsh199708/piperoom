@@ -60,6 +60,7 @@ type flags struct {
 	compare     string
 	agreement   string
 	tolerance   float64
+	learned     string
 	failOnRegr  bool
 	check       bool
 	fromShadow  string
@@ -110,6 +111,7 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs.StringVar(&f.out, "out", "", "write the JSON report here")
 	fs.StringVar(&f.md, "md", "", "also write the markdown table here")
 	fs.StringVar(&f.transcripts, "transcripts", "", "write each run's full transcript and result as JSON into this directory")
+	fs.StringVar(&f.learned, "learned", "", "private directory of learned scenarios (evals/README.md): its *.yaml join the default set, and -check also validates its pending/ subdirectory, which is never replayed; without the flag nothing learned is read")
 	fs.StringVar(&f.baseline, "baseline", "", "after the run, compare against this earlier report")
 	fs.StringVar(&f.compare, "compare", "", "BASE.json CANDIDATE.json (or BASE.json,CANDIDATE.json): compare two reports, with a paired run-by-run comparison, and exit; no model calls")
 	fs.StringVar(&f.prices, "prices", "", "model price table (JSON, as PIPEROOM_MODEL_PRICES) for cost per run; default PIPEROOM_MODEL_PRICES")
@@ -500,21 +502,22 @@ const (
 )
 
 // loadSet reads the scenarios a run replays and the pending ones only -check
-// validates. The default set replays the scenarios directory and its reviewed
-// learned/ subdirectory (L1a); the held-out set has neither. learned/pending/
-// is returned apart so no run can replay it by accident.
+// validates. The default set is the scenarios directory plus, when -learned
+// names a private directory, its reviewed *.yaml (L1a). learned/pending/ is
+// returned apart so no run can replay it by accident. The held-out set and a
+// run without -learned read nothing learned.
 func loadSet(f flags, dir string) (run, pending []evals.Scenario, err error) {
 	run, err = evals.LoadScenarios(dir)
 	if err != nil {
 		return nil, nil, err
 	}
-	if f.set == "" || f.set == setDefault {
-		learned, err := evals.LoadLearned(dir)
+	if f.learned != "" && (f.set == "" || f.set == setDefault) {
+		learned, err := evals.LoadLearned(f.learned)
 		if err != nil {
 			return nil, nil, err
 		}
 		run = append(run, learned...)
-		if pending, err = evals.LoadPending(dir); err != nil {
+		if pending, err = evals.LoadPending(f.learned); err != nil {
 			return nil, nil, err
 		}
 	}

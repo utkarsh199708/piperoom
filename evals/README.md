@@ -481,6 +481,13 @@ what a recording shows (fact checks, for example) must read every sequence eleme
 
 ## Learned scenarios
 
+**Where they live: a private directory, never this repository.** This repository is public. Even redacted, a
+learned scenario names tables, connectors, consumer groups and hosts, which describe a customer's systems. Keep
+learned scenarios in a private repository checkout or a local folder; `evals/scenarios/learned/` here holds only a
+`.gitignore` (`*`, `!.gitignore`), so a file dropped there by mistake is never committed. `roomcase` refuses an
+`-out` inside this working tree (resolved with `git rev-parse --show-toplevel`, symlinks followed), and has no
+default for it.
+
 A closed room that people labelled and confirmed holds everything a scenario needs: the alert, every tool call
 and result, the steers, the executed fix and its verification, and two human judgements (`hypothesis.verdict`,
 `room.labelled`). `roomcase` turns one such room into a scenario. The input is the room's export, so it needs
@@ -488,15 +495,16 @@ no database and no network and runs on any laptop:
 
 ```sh
 curl -H ... http://piperoom/api/rooms/$ID/export > room.json     # or the download in the UI
-go run ./evals/cmd/roomcase -export room.json -owners dev/owners.yaml          # [-force] [-out evals/scenarios/learned]
-go run ./evals/cmd/evalrun -validate                                           # also checks learned/ and learned/pending/
+go run ./evals/cmd/roomcase -export room.json -owners dev/owners.yaml -out ~/piperoom-learned   # [-force]
+go run ./evals/cmd/evalrun -validate -learned ~/piperoom-learned          # also checks pending/
+go run ./evals/cmd/evalrun -learned ~/piperoom-learned -runs 3 -out cand.json   # replays the reviewed ones
 ```
 
 It verifies `integrity.sha256` first (a changed or truncated export is refused), then writes
-`evals/scenarios/learned/pending/<pipeline>-<yyyy-mm-dd>-<short room id>.yaml`. **Nothing replays `pending/`**:
-`evalrun` replays the scenarios directory plus `learned/*.yaml`, and `-validate` also parses and checks
-`learned/pending/` so a fresh export is at least well-formed. A person moves the file into `learned/` in a pull
-request; the move is the review.
+`<out>/pending/<pipeline>-<yyyy-mm-dd>-<short room id>.yaml`. **Nothing replays `pending/`**: `evalrun -learned DIR`
+adds `DIR/*.yaml` to the default set, and `-validate` also parses and checks `DIR/pending/` so a fresh export is at
+least well-formed. Without `-learned`, nothing learned is read. A person reviews the file and moves it from
+`pending/` up into `DIR` (in the private repository, as a pull request there); the move is the review.
 
 **Who is eligible** (the exporter says which rule failed): the room is closed, `room.created.shadow` is false,
 the last `room.labelled` by a person has `cause` and `actual_layer`, and a person confirmed a hypothesis. If a fix
@@ -524,8 +532,8 @@ Redaction masks secrets (passwords, tokens, DSN credentials, emails). It does no
 a row value is: that is the reviewer's job.
 
 **Dedup and cap.** The first line of the file is `# fingerprint: <pipeline>|<layer>|<sorted cause terms>`. The
-exporter refuses a fingerprint already in `learned/` or `learned/pending/` unless `-force` (a file without the
-line is compared by the terms it expects), and allows at most 10 scenarios per pipeline there; `-force` does not
+exporter refuses a fingerprint already in the learned directory or its `pending/` unless `-force` (a file without the
+line is compared by the terms it expects), and allows at most 10 scenarios per pipeline there (learned plus pending); `-force` does not
 lift the cap. A neighbour file that cannot be read stops the export, so it cannot hide from the cap.
 
 **Review checklist** (the reviewer of the pull request that moves the file):
@@ -535,7 +543,7 @@ lift the cap. A neighbour file that cannot be read stops the export, so it canno
 3. `description` and the alert title carry no customer name; the pipeline block is the pipeline, nothing more.
 4. `evalrun -validate` is clean and the file's `# fingerprint:` line is still the first non-comment header.
 
-`learned/` is never tuned by hand. A wrong expectation is fixed by re-labelling the room and exporting it again
+The learned directory is never tuned by hand. A wrong expectation is fixed by re-labelling the room and exporting it again
 (`-force` replaces the pending file); an edit of a learned file by hand is a review comment, not a fix.
 
 Fixtures: `evals/testdata/rooms/*.json` are real export documents, written by

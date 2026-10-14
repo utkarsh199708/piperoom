@@ -259,7 +259,7 @@ func TestRunCheckPrintsWarnings(t *testing.T) {
 
 // learnedTree builds a scenarios directory with one reviewed learned scenario
 // and one pending one, both exported from the room fixtures.
-func learnedTree(t *testing.T) (root, reviewed, pending string) {
+func learnedTree(t *testing.T) (root, dir, reviewed, pending string) {
 	t.Helper()
 	root = t.TempDir()
 	seed, err := os.ReadFile("../../scenarios/schema-change.yaml")
@@ -273,7 +273,7 @@ func learnedTree(t *testing.T) (root, reviewed, pending string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(root, evals.LearnedDir)
+	dir = filepath.Join(root, "private-learned")
 	export := func(fixture string) (string, string) {
 		raw, err := os.ReadFile(filepath.Join("../../testdata/rooms", fixture))
 		if err != nil {
@@ -290,14 +290,14 @@ func learnedTree(t *testing.T) (root, reviewed, pending string) {
 		t.Fatal(err)
 	}
 	pending, _ = export("orders-hard.json")
-	return root, reviewed, pending
+	return root, dir, reviewed, pending
 }
 
 // TestLoadSetReplaysLearnedNeverPending: the default set replays learned/, and
 // learned/pending/ is only returned for validation.
 func TestLoadSetReplaysLearnedNeverPending(t *testing.T) {
-	root, reviewed, pending := learnedTree(t)
-	run, pend, err := loadSet(flags{scenarios: root}, root)
+	root, dir, reviewed, pending := learnedTree(t)
+	run, pend, err := loadSet(flags{scenarios: root, learned: dir}, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,6 +311,10 @@ func TestLoadSetReplaysLearnedNeverPending(t *testing.T) {
 	if len(pend) != 1 || pend[0].Name != pending {
 		t.Errorf("pending = %+v", pend)
 	}
+	// Without -learned nothing learned is read.
+	if run, pend, err := loadSet(flags{scenarios: root}, root); err != nil || len(run) != 1 || len(pend) != 0 {
+		t.Errorf("without -learned: %d scenarios, %d pending, %v", len(run), len(pend), err)
+	}
 	// The held-out set has no learned scenarios.
 	if _, _, err := loadSet(flags{set: setHeldout}, filepath.Join(root, setHeldout)); err == nil {
 		t.Error("an absent held-out directory must still be an error")
@@ -320,18 +324,18 @@ func TestLoadSetReplaysLearnedNeverPending(t *testing.T) {
 // TestRunCheckValidatesLearnedAndPending: -check counts both and rejects a
 // malformed pending file by name.
 func TestRunCheckValidatesLearnedAndPending(t *testing.T) {
-	root, _, _ := learnedTree(t)
+	root, dir, _, _ := learnedTree(t)
 	var out bytes.Buffer
-	code, err := run(flags{scenarios: root, check: true}, &out, &out)
+	code, err := run(flags{scenarios: root, learned: dir, check: true}, &out, &out)
 	if err != nil || code != 0 || !strings.Contains(out.String(), "3 scenario(s) OK") {
 		t.Fatalf("code %d err %v out %q", code, err, out.String())
 	}
-	bad := filepath.Join(root, evals.LearnedDir, evals.PendingDir, "broken.yaml")
+	bad := filepath.Join(dir, evals.PendingDir, "broken.yaml")
 	if err := os.WriteFile(bad, []byte("name: broken\nunknown_field: 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()
-	code, err = run(flags{scenarios: root, check: true}, &out, &out)
+	code, err = run(flags{scenarios: root, learned: dir, check: true}, &out, &out)
 	if err == nil || code != 1 || !strings.Contains(err.Error(), "broken.yaml") {
 		t.Fatalf("code %d err %v", code, err)
 	}

@@ -38,13 +38,16 @@ func TestRunRefusals(t *testing.T) {
 		args []string
 		want string
 	}{
-		"no flags":      {nil, "-export and -owners are required"},
-		"extra args":    {[]string{"-export", "x", "-owners", own, "stray"}, "unexpected arguments"},
-		"missing file":  {[]string{"-export", filepath.Join(out, "nope.json"), "-owners", own, "-out", out}, "open export"},
-		"shadow room":   {[]string{"-export", fixtures + "orders-shadow.json", "-owners", own, "-out", out}, "shadow rooms"},
-		"unlabelled":    {[]string{"-export", fixtures + "orders-unlabelled.json", "-owners", own, "-out", out}, "no human label"},
-		"bad owners":    {[]string{"-export", fixtures + "orders-confirmed.json", "-owners", filepath.Join(out, "none.yaml"), "-out", out}, "load owners"},
-		"hash mismatch": {[]string{"-export", tamper(t, out), "-owners", own, "-out", out}, "hash mismatch"},
+		"no flags":                {nil, "are required"},
+		"no -out":                 {[]string{"-export", fixtures + "orders-confirmed.json", "-owners", own}, "-out"},
+		"out in repo":             {[]string{"-export", fixtures + "orders-confirmed.json", "-owners", own, "-out", "../../scenarios/learned"}, "inside the repository"},
+		"out in repo, new subdir": {[]string{"-export", fixtures + "orders-confirmed.json", "-owners", own, "-out", "../../testdata/new/deeper"}, "inside the repository"},
+		"extra args":              {[]string{"-export", "x", "-owners", own, "stray"}, "unexpected arguments"},
+		"missing file":            {[]string{"-export", filepath.Join(out, "nope.json"), "-owners", own, "-out", out}, "open export"},
+		"shadow room":             {[]string{"-export", fixtures + "orders-shadow.json", "-owners", own, "-out", out}, "shadow rooms"},
+		"unlabelled":              {[]string{"-export", fixtures + "orders-unlabelled.json", "-owners", own, "-out", out}, "no human label"},
+		"bad owners":              {[]string{"-export", fixtures + "orders-confirmed.json", "-owners", filepath.Join(out, "none.yaml"), "-out", out}, "load owners"},
+		"hash mismatch":           {[]string{"-export", tamper(t, out), "-owners", own, "-out", out}, "hash mismatch"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var buf bytes.Buffer
