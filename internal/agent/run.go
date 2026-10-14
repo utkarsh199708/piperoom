@@ -128,6 +128,9 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	if deps.Tools == nil {
 		return nil, errors.New("agent: Deps.Tools is nil")
 	}
+	if err := checkReadOnly(deps.Tools); err != nil {
+		return nil, err
+	}
 	if deps.Sink == nil {
 		return nil, errors.New("agent: Deps.Sink is nil")
 	}

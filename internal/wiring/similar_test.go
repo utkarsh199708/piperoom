@@ -16,7 +16,7 @@ func TestRegisterToolsAddsSimilarIncidentsOnlyWithARoomStore(t *testing.T) {
 		if withRooms {
 			w.Rooms = similarincidents.FromStore(memstore.New())
 		}
-		reg := tools.NewRegistry()
+		reg := tools.NewReadOnlyRegistry()
 		if err := RegisterTools(reg, actions.NewRegistry(), w); err != nil {
 			t.Fatalf("RegisterTools(rooms=%v): %v", withRooms, err)
 		}

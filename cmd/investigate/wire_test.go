@@ -130,7 +130,7 @@ func testOwners() *owners.Owners {
 func wireFakes(t *testing.T) (*tools.Registry, *actions.Registry, *fakeClients) {
 	t.Helper()
 	f := newFakeClients()
-	reg := tools.NewRegistry()
+	reg := tools.NewReadOnlyRegistry()
 	areg := actions.NewRegistry()
 	w := &wiring.Wired{
 		Source:    f,

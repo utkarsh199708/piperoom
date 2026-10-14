@@ -246,9 +246,10 @@ func assemble(o *owners.Owners, whKind string, a2 *a2Clients, src clients.Source
 }
 
 // newTopologyBuilder is the one place a Builder is made from w's clients, the
-// Schema Registry included, for Open and RegisterTools alike.
+// Schema Registry included, for Open and RegisterTools alike. The builder only
+// reads, and the db tools reach clients through it, so it gets read-only ones.
 func newTopologyBuilder(w *Wired) topology.Builder {
-	return topology.NewBuilder(w.Owners, w.Connect, w.Kafka, w.Source, w.Warehouse, topology.WithSchemaRegistry(w.Registry))
+	return topology.NewBuilder(w.Owners, readConnect(w), w.Kafka, w.Source, w.Warehouse, topology.WithSchemaRegistry(readRegistry(w)))
 }
 
 // errNoRegistry is what the write actions get from the registry when none is
@@ -282,16 +283,24 @@ func actionRegistry(w *Wired) clients.SchemaRegistryClient {
 // Schema Registry tools, C11's runbook_lookup, similar_incidents (when w.Rooms is set) and the write actions the agent may propose (never
 // run), reading every client from w. If w.Builder is nil it is built from
 // w's clients and stored back on w, so callers can use it afterwards.
+//
+// reg must come from tools.NewReadOnlyRegistry: it is agent.Deps.Tools, so a
+// tool that is not KindRead fails here, at start, never in a room. The tools
+// get read-only Connect and Schema Registry clients (readonly.go); only the
+// actions get the writers.
 func RegisterTools(reg *tools.Registry, areg *actions.Registry, w *Wired) error {
+	if !reg.ReadOnly() {
+		return fmt.Errorf("wiring: register tools: %w: registry is not from tools.NewReadOnlyRegistry", tools.ErrNotReadOnly)
+	}
 	b := w.Builder
 	if b == nil {
 		b = newTopologyBuilder(w)
 		w.Builder = b
 	}
-	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: w.Connect}); err != nil {
+	if err := dbtools.Register(reg, dbtools.Deps{Src: w.Source, Wh: w.Warehouse, WarehouseKind: w.WarehouseKind, Builder: b, Owners: w.Owners, Connect: readConnect(w)}); err != nil {
 		return fmt.Errorf("wiring: register db tools: %w", err)
 	}
-	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: w.Connect, Registry: w.Registry, Kafka: w.Kafka, Owners: w.Owners}); err != nil {
+	if err := kafkatools.Register(reg, kafkatools.Deps{Connect: readConnect(w), Registry: readRegistry(w), Kafka: w.Kafka, Owners: w.Owners}); err != nil {
 		return fmt.Errorf("wiring: register kafka tools: %w", err)
 	}
 	// The runbook library is embedded in the binary, so it needs no client.
