@@ -38,7 +38,7 @@ func (f *configConnect) Config(context.Context, string) (map[string]string, erro
 
 func (f *configConnect) UpdateConfig(_ context.Context, name, key, value string) error {
 	if !f.allowWrites {
-		return refuseWrite("configConnect", "UpdateConfig")
+		return refuseWrite(&f.refusals, "configConnect", "UpdateConfig")
 	}
 	if f.updateErr != nil {
 		return f.updateErr
@@ -58,8 +58,13 @@ func newConfigConnect(script ...clients.ConnectorStatus) *configConnect {
 	}
 }
 
-func configAction(c *configConnect) *updateConnectorConfig {
-	return &updateConnectorConfig{d: Deps{Connect: c, Registry: &fakeRegistry{}}}
+// configAction builds the action on c and guards both fakes: a refused write
+// to either one fails the test.
+func configAction(t *testing.T, c *configConnect) *updateConnectorConfig {
+	t.Helper()
+	a := &updateConnectorConfig{d: Deps{Connect: c, Registry: &fakeRegistry{}}}
+	guardDeps(t, a.d)
+	return a
 }
 
 const updateIn = `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"double"}`
@@ -70,7 +75,7 @@ const updateIn = `{"connector":"pg-orders-connector","key":"decimal.handling.mod
 func TestUpdateConnectorConfigExecuteHappyPath(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
 	c.allowWrites = true
-	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
+	out, err := configAction(t, c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -93,7 +98,7 @@ func TestUpdateConnectorConfigExecuteHappyPath(t *testing.T) {
 func TestUpdateConnectorConfigTaskNotRunningAtFirstRead(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "FAILED"))
 	c.allowWrites = true
-	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
+	out, err := configAction(t, c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
 		t.Fatalf("a non-RUNNING task after the write must not be an error: %v", err)
 	}
@@ -150,7 +155,7 @@ func TestUpdateConnectorConfigUnsetOldValue(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
 	c.allowWrites = true
 	delete(c.cfg, "decimal.handling.mode")
-	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
+	out, err := configAction(t, c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +168,7 @@ func TestUpdateConnectorConfigAlreadySetMakesNoWrite(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
 	c.allowWrites = true
 	c.cfg["decimal.handling.mode"] = "double"
-	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
+	out, err := configAction(t, c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +181,7 @@ func TestUpdateConnectorConfigRereadMismatch(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
 	c.allowWrites = true
 	c.storeAs = "precise"
-	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
+	out, err := configAction(t, c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
 		t.Fatalf("a mismatch after the write must not be an error: %v", err)
 	}
@@ -189,7 +194,7 @@ func TestUpdateConnectorConfigRereadFailsIsNotError(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
 	c.allowWrites = true
 	c.rereadErr = errors.New("boom")
-	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
+	out, err := configAction(t, c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
 		t.Fatalf("error after the write: %v", err)
 	}
@@ -202,7 +207,7 @@ func TestUpdateConnectorConfigStatusFailsIsNotError(t *testing.T) {
 	c := newConfigConnect()
 	c.allowWrites = true
 	c.statusErr = errors.New("status unavailable")
-	out, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
+	out, err := configAction(t, c).Execute(context.Background(), json.RawMessage(updateIn))
 	if err != nil {
 		t.Fatalf("error after the write: %v", err)
 	}
@@ -216,7 +221,7 @@ func TestUpdateConnectorConfigClientErrorsAreWrapped(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
 	c.allowWrites = true
 	c.updateErr = sentinel
-	_, err := configAction(c).Execute(context.Background(), json.RawMessage(updateIn))
+	_, err := configAction(t, c).Execute(context.Background(), json.RawMessage(updateIn))
 	if !errors.Is(err, sentinel) || !strings.HasPrefix(err.Error(), "actions: update config pg-orders-connector: ") {
 		t.Fatalf("err %v", err)
 	}
@@ -224,6 +229,7 @@ func TestUpdateConnectorConfigClientErrorsAreWrapped(t *testing.T) {
 
 func TestUpdateConnectorConfigClientWithoutUpdateConfig(t *testing.T) {
 	a := &updateConnectorConfig{d: Deps{Connect: &fakeConnect{names: []string{"pg-orders-connector"}}, Registry: &fakeRegistry{}}}
+	guardDeps(t, a.d)
 	_, err := a.Execute(context.Background(), json.RawMessage(updateIn))
 	if err == nil || !strings.Contains(err.Error(), "does not support UpdateConfig") {
 		t.Fatalf("err %v", err)
@@ -310,7 +316,7 @@ func TestUpdateConnectorConfigExactMatchOnly(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
-			a := configAction(c)
+			a := configAction(t, c)
 			p := paramsJSON(t, tc.key, tc.value)
 			if err := a.Validate(p); err == nil {
 				t.Fatal("Validate accepted a lookalike")
@@ -460,7 +466,7 @@ func TestVisibilityGuards(t *testing.T) {
 			c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
 			c.allowWrites = true
 			c.cfg = tc.cfg
-			a := configAction(c)
+			a := configAction(t, c)
 			check := func(what string, err error) {
 				t.Helper()
 				switch {

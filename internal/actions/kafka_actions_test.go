@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"piperoom/internal/clients"
@@ -15,8 +16,41 @@ import (
 // allowWrites flag, so a write that a test did not ask for fails loudly.
 var errWriteRefused = errors.New("fake write refused: allowWrites is off")
 
-func refuseWrite(fake, method string) error {
+// refuseWrite counts the refusal (so guardWrites can fail the test) and
+// returns the wrapped error.
+func refuseWrite(refusals *atomic.Int32, fake, method string) error {
+	refusals.Add(1)
 	return fmt.Errorf("%s.%s: %w", fake, method, errWriteRefused)
+}
+
+// writeCounter is implemented by every fake that has write methods.
+type writeCounter interface{ refusedWrites() int32 }
+
+// guardWrites fails the test at cleanup if any of the fakes refused a write,
+// so a path that swallows the refusal error still fails.
+func guardWrites(t *testing.T, fakes ...writeCounter) {
+	t.Helper()
+	t.Cleanup(func() {
+		for _, f := range fakes {
+			if n := f.refusedWrites(); n > 0 {
+				t.Errorf("%d write(s) refused by a fake: the test reached a write it did not opt in to", n)
+			}
+		}
+	})
+}
+
+// guardDeps runs guardWrites on every fake in d. An action must write only
+// through the client it is meant to change; a stray write to the other one
+// fails the test.
+func guardDeps(t *testing.T, d Deps) {
+	t.Helper()
+	var fakes []writeCounter
+	for _, c := range []any{d.Connect, d.Registry} {
+		if w, ok := c.(writeCounter); ok {
+			fakes = append(fakes, w)
+		}
+	}
+	guardWrites(t, fakes...)
 }
 
 // testDeps opts in to writes: the action tests that use it execute actions
@@ -35,7 +69,10 @@ type fakeConnect struct {
 	resumed     string
 	// allowWrites lets the write methods record their call. Off by default.
 	allowWrites bool
+	refusals    atomic.Int32
 }
+
+func (f *fakeConnect) refusedWrites() int32 { return f.refusals.Load() }
 
 func (f *fakeConnect) ListConnectors(context.Context) ([]string, error) { return f.names, nil }
 func (f *fakeConnect) Status(context.Context, string) (clients.ConnectorStatus, error) {
@@ -44,21 +81,21 @@ func (f *fakeConnect) Status(context.Context, string) (clients.ConnectorStatus, 
 func (f *fakeConnect) Config(context.Context, string) (map[string]string, error) { return nil, nil }
 func (f *fakeConnect) RestartTask(_ context.Context, n string, task int) error {
 	if !f.allowWrites {
-		return refuseWrite("fakeConnect", "RestartTask")
+		return refuseWrite(&f.refusals, "fakeConnect", "RestartTask")
 	}
 	f.restarted, f.restartTask = n, task
 	return nil
 }
 func (f *fakeConnect) RestartConnector(_ context.Context, n string) error {
 	if !f.allowWrites {
-		return refuseWrite("fakeConnect", "RestartConnector")
+		return refuseWrite(&f.refusals, "fakeConnect", "RestartConnector")
 	}
 	f.restarted = n
 	return nil
 }
 func (f *fakeConnect) Resume(_ context.Context, n string) error {
 	if !f.allowWrites {
-		return refuseWrite("fakeConnect", "Resume")
+		return refuseWrite(&f.refusals, "fakeConnect", "Resume")
 	}
 	f.resumed = n
 	return nil
@@ -71,7 +108,10 @@ type fakeRegistry struct {
 	regID       int
 	// allowWrites lets SetCompatibility and Register take effect. Off by default.
 	allowWrites bool
+	refusals    atomic.Int32
 }
+
+func (f *fakeRegistry) refusedWrites() int32 { return f.refusals.Load() }
 
 func (f *fakeRegistry) Subjects(context.Context) ([]string, error)      { return f.subjects, nil }
 func (f *fakeRegistry) Versions(context.Context, string) ([]int, error) { return nil, nil }
@@ -86,14 +126,14 @@ func (f *fakeRegistry) Compatibility(context.Context, string) (string, bool, err
 }
 func (f *fakeRegistry) SetCompatibility(_ context.Context, _ string, level string) error {
 	if !f.allowWrites {
-		return refuseWrite("fakeRegistry", "SetCompatibility")
+		return refuseWrite(&f.refusals, "fakeRegistry", "SetCompatibility")
 	}
 	f.compatLevel = level
 	return nil
 }
 func (f *fakeRegistry) Register(context.Context, string, string) (int, error) {
 	if !f.allowWrites {
-		return 0, refuseWrite("fakeRegistry", "Register")
+		return 0, refuseWrite(&f.refusals, "fakeRegistry", "Register")
 	}
 	return f.regID, nil
 }

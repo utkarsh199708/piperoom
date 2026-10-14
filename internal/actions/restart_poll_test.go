@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,7 +22,10 @@ type scriptedConnect struct {
 	restartErr  error
 	statusCalls int
 	allowWrites bool
+	refusals    atomic.Int32
 }
+
+func (f *scriptedConnect) refusedWrites() int32 { return f.refusals.Load() }
 
 func (f *scriptedConnect) ListConnectors(context.Context) ([]string, error) {
 	return []string{"pg-orders-connector"}, nil
@@ -45,14 +49,14 @@ func (f *scriptedConnect) Config(context.Context, string) (map[string]string, er
 
 func (f *scriptedConnect) RestartTask(context.Context, string, int) error {
 	if !f.allowWrites {
-		return refuseWrite("scriptedConnect", "RestartTask")
+		return refuseWrite(&f.refusals, "scriptedConnect", "RestartTask")
 	}
 	return f.restartErr
 }
 
 func (f *scriptedConnect) RestartConnector(context.Context, string) error {
 	if !f.allowWrites {
-		return refuseWrite("scriptedConnect", "RestartConnector")
+		return refuseWrite(&f.refusals, "scriptedConnect", "RestartConnector")
 	}
 	return f.restartErr
 }
@@ -95,6 +99,7 @@ const restartConnectorIn = `{"connector":"pg-orders-connector"}`
 func TestRestartTaskReportsRunningAfterPolling(t *testing.T) {
 	sc := &scriptedConnect{allowWrites: true, script: taskStates("RESTARTING", "RESTARTING", "RUNNING")}
 	a := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(context.Background(), json.RawMessage(restartTaskIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -116,6 +121,7 @@ func TestRestartTaskMissingFromStatusKeepsPolling(t *testing.T) {
 	}
 	sc := &scriptedConnect{allowWrites: true, script: script}
 	a := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(context.Background(), json.RawMessage(restartTaskIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -148,6 +154,7 @@ func TestRestartTaskNeverRunningTimesOut(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			sc := &scriptedConnect{allowWrites: true, script: tc.script}
 			a := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+			guardDeps(t, a.d)
 			out, err := a.Execute(pollCtx(t, 30*time.Millisecond), json.RawMessage(restartTaskIn))
 			if err != nil {
 				t.Fatalf("Execute after an accepted restart returned error: %v", err)
@@ -164,6 +171,7 @@ func TestRestartTaskNeverRunningTimesOut(t *testing.T) {
 func TestRestartTaskStatusReadFailsAfterRestart(t *testing.T) {
 	sc := &scriptedConnect{allowWrites: true, statusErr: errors.New("connect 503")}
 	a := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(context.Background(), json.RawMessage(restartTaskIn))
 	if err != nil {
 		t.Fatalf("Execute returned error after an accepted restart: %v", err)
@@ -180,6 +188,7 @@ func TestRestartTaskRestartCallFails(t *testing.T) {
 	boom := errors.New("connect 500")
 	sc := &scriptedConnect{allowWrites: true, restartErr: boom, script: taskStates("RUNNING")}
 	a := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	_, err := a.Execute(context.Background(), json.RawMessage(restartTaskIn))
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the restart error", err)
@@ -198,6 +207,7 @@ func TestRestartConnectorWaitsForTasksToRun(t *testing.T) {
 		connectorWithTasks("RUNNING", "RUNNING"),
 	}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(context.Background(), json.RawMessage(restartConnectorIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -214,6 +224,7 @@ func TestRestartConnectorWaitsForTasksToRun(t *testing.T) {
 func TestRestartConnectorTaskStaysFailedTimesOut(t *testing.T) {
 	sc := &scriptedConnect{allowWrites: true, script: []clients.ConnectorStatus{connectorWithTasks("RUNNING", "FAILED")}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(pollCtx(t, 30*time.Millisecond), json.RawMessage(restartConnectorIn))
 	if err != nil {
 		t.Fatalf("Execute after an accepted restart returned error: %v", err)
@@ -229,6 +240,7 @@ func TestRestartConnectorTaskStaysFailedTimesOut(t *testing.T) {
 func TestRestartConnectorNoTasksListedTimesOut(t *testing.T) {
 	sc := &scriptedConnect{allowWrites: true, script: []clients.ConnectorStatus{connectorWithTasks("RUNNING")}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(pollCtx(t, 30*time.Millisecond), json.RawMessage(restartConnectorIn))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -242,6 +254,7 @@ func TestRestartConnectorNoTasksListedTimesOut(t *testing.T) {
 func TestRestartConnectorStatusReadFailsAfterRestart(t *testing.T) {
 	sc := &scriptedConnect{allowWrites: true, statusErr: errors.New("connect 503")}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(context.Background(), json.RawMessage(restartConnectorIn))
 	if err != nil {
 		t.Fatalf("Execute returned error after an accepted restart: %v", err)
@@ -256,6 +269,7 @@ func TestRestartConnectorRestartCallFails(t *testing.T) {
 	boom := errors.New("connect 500")
 	sc := &scriptedConnect{allowWrites: true, restartErr: boom, script: []clients.ConnectorStatus{connectorWithTasks("RUNNING", "RUNNING")}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	_, err := a.Execute(context.Background(), json.RawMessage(restartConnectorIn))
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want the restart error", err)
@@ -371,7 +385,7 @@ type inheritedUntilSet struct {
 
 func (f *inheritedUntilSet) SetCompatibility(ctx context.Context, subject, level string) error {
 	if !f.fakeRegistry.allowWrites {
-		return refuseWrite("inheritedUntilSet", "SetCompatibility")
+		return refuseWrite(&f.fakeRegistry.refusals, "inheritedUntilSet", "SetCompatibility")
 	}
 	f.set = true
 	return f.fakeRegistry.SetCompatibility(ctx, subject, level)
@@ -407,6 +421,7 @@ func TestSetCompatibilityMarksInheritedOldLevel(t *testing.T) {
 func TestRestartConnectorConnectorNotRunningTimesOut(t *testing.T) {
 	sc := &scriptedConnect{allowWrites: true, script: []clients.ConnectorStatus{connectorWithTasks("FAILED", "RUNNING")}}
 	a := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}, pollInterval: time.Millisecond}
+	guardDeps(t, a.d)
 	out, err := a.Execute(pollCtx(t, 30*time.Millisecond), json.RawMessage(restartConnectorIn))
 	if err != nil {
 		t.Fatalf("Execute after an accepted restart returned error: %v", err)
@@ -441,14 +456,17 @@ func TestWriteErrorsCarryActionContext(t *testing.T) {
 	boom := errors.New("connect 500")
 	sc := &scriptedConnect{allowWrites: true, restartErr: boom}
 	task := &restartTask{d: Deps{Connect: sc, Registry: &fakeRegistry{}}}
+	guardDeps(t, task.d)
 	if _, err := task.Execute(context.Background(), json.RawMessage(restartTaskIn)); err == nil || !strings.Contains(err.Error(), "actions: restart pg-orders-connector task 0") {
 		t.Fatalf("restart task error %v", err)
 	}
 	conn := &restartConnector{d: Deps{Connect: sc, Registry: &fakeRegistry{}}}
+	guardDeps(t, conn.d)
 	if _, err := conn.Execute(context.Background(), json.RawMessage(restartConnectorIn)); err == nil || !strings.Contains(err.Error(), "actions: restart pg-orders-connector") {
 		t.Fatalf("restart connector error %v", err)
 	}
 	comp := &setCompatibility{d: Deps{Connect: sc, Registry: &compatSetFails{fakeRegistry: &fakeRegistry{allowWrites: true}, err: boom}}}
+	guardDeps(t, comp.d)
 	if _, err := comp.Execute(context.Background(), json.RawMessage(`{"subject":"pg.public.orders-value","level":"NONE"}`)); err == nil || !strings.Contains(err.Error(), "actions: set compatibility pg.public.orders-value") || !errors.Is(err, boom) {
 		t.Fatalf("set compatibility error %v", err)
 	}
@@ -462,7 +480,7 @@ type compatSetFails struct {
 
 func (f *compatSetFails) SetCompatibility(context.Context, string, string) error {
 	if !f.fakeRegistry.allowWrites {
-		return refuseWrite("compatSetFails", "SetCompatibility")
+		return refuseWrite(&f.fakeRegistry.refusals, "compatSetFails", "SetCompatibility")
 	}
 	return f.err
 }
