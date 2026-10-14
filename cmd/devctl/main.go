@@ -62,7 +62,7 @@ func main() {
 	st, err := newStack(log)
 	if err != nil {
 		log.Error("devctl", "err", err)
-		os.Exit(exitCode(os.Args[1]))
+		os.Exit(exitCode(os.Args[1], err))
 	}
 	if err := runCommand(ctx, st, os.Args[1], os.Args[2:]); err != nil {
 		if errors.Is(err, errUnhealthy) {
@@ -70,19 +70,34 @@ func main() {
 			os.Exit(1)
 		}
 		log.Error("devctl "+os.Args[1]+" failed", "err", err)
-		os.Exit(exitCode(os.Args[1]))
+		os.Exit(exitCode(os.Args[1], err))
 	}
 }
 
-// exitCode is 2 for a failed `health` run (setup: not in the repo, owners.yaml
-// unreadable, bad arguments) so it is never confused with "unhealthy" (1). Other
-// commands keep 1.
-func exitCode(cmd string) int {
-	if cmd == "health" {
+// exitCode is 2 for a usage error (unknown command or scenario, bad arguments)
+// of any command, and for a failed `health` run (setup: not in the repo,
+// owners.yaml unreadable) so it is never confused with "unhealthy" (1). Other
+// failures are 1.
+func exitCode(cmd string, err error) int {
+	var ue usageError
+	if cmd == "health" || errors.As(err, &ue) || !knownCommands[cmd] {
 		return 2
 	}
 	return 1
 }
+
+// knownCommands are the commands runCommand accepts.
+var knownCommands = map[string]bool{
+	"up": true, "down": true, "reset": true, "status": true, "health": true, "load": true,
+	"lock": true, "unlock": true, "break": true, "fix": true, "demo": true, "identities": true, "rooms": true,
+}
+
+// usageError is a mistake on the command line: devctl exits 2 for it.
+type usageError struct{ msg string }
+
+func (e usageError) Error() string { return e.msg }
+
+func usagef(format string, a ...any) error { return usageError{fmt.Sprintf(format, a...)} }
 
 func runCommand(ctx context.Context, st *stack, cmd string, args []string) error {
 	switch cmd {
@@ -92,7 +107,7 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 			return err
 		}
 		if len(rest) != 0 {
-			return fmt.Errorf("usage: devctl up")
+			return usagef("usage: devctl up")
 		}
 		if err := requireLock(owner); err != nil {
 			return err
@@ -104,7 +119,7 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 			return err
 		}
 		if len(rest) != 0 {
-			return fmt.Errorf("usage: devctl down")
+			return usagef("usage: devctl down")
 		}
 		if err := requireLock(owner); err != nil {
 			return err
@@ -116,7 +131,7 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 			return err
 		}
 		if len(rest) != 0 {
-			return fmt.Errorf("usage: devctl reset")
+			return usagef("usage: devctl reset")
 		}
 		if err := requireLock(owner); err != nil {
 			return err
@@ -126,7 +141,7 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		return st.status(ctx, os.Stdout)
 	case "health":
 		if len(args) != 0 {
-			return fmt.Errorf("usage: devctl health")
+			return usagef("usage: devctl health")
 		}
 		return st.health(ctx, os.Stdout)
 	case "load":
@@ -141,7 +156,7 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 			return err
 		}
 		if fs.NArg() != 0 {
-			return fmt.Errorf("usage: devctl load [--rate N] [--owner <tag>]")
+			return usagef("usage: devctl load [--rate N] [--owner <tag>]")
 		}
 		if err := requireLock(owner); err != nil {
 			return err
@@ -157,11 +172,11 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 			return err
 		}
 		if len(rest) != 1 {
-			return fmt.Errorf("usage: devctl %s <scenario> (%s)", cmd, strings.Join(scenarioNames(), ", "))
+			return usagef("usage: devctl %s <scenario> (%s)", cmd, strings.Join(scenarioNames(), ", "))
 		}
 		sc, ok := scenarios[rest[0]]
 		if !ok {
-			return fmt.Errorf("unknown scenario %q (%s)", rest[0], strings.Join(scenarioNames(), ", "))
+			return usagef("unknown scenario %q (%s)", rest[0], strings.Join(scenarioNames(), ", "))
 		}
 		if err := requireLock(owner); err != nil {
 			return err
@@ -177,7 +192,7 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 	case "rooms":
 		return roomsCmd(ctx, st, args, os.Stdout)
 	}
-	return fmt.Errorf("unknown command %q", cmd)
+	return usagef("unknown command %q", cmd)
 }
 
 func scenarioNames() []string {
