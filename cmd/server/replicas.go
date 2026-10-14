@@ -31,6 +31,7 @@ const (
 	loopRetention = "retention"
 	loopAuthPrune = "auth-prune"
 	loopSlack     = "slack"
+	loopOpenLimit = "open-limit"
 )
 
 // slackRescan is how often the Slack mirror's leader looks for open rooms it
@@ -131,12 +132,26 @@ func runElected(ctx context.Context, el store.Elector, name string, fn func(ctx 
 
 // startElectedRetention is startRetention on the leader of "retention" only.
 // With retention off nothing is elected.
-func startElectedRetention(ctx context.Context, el store.Elector, svc expirer, days int, every, timeout time.Duration, now func() time.Time, log *slog.Logger) (stop func()) {
-	if days <= 0 {
-		return startRetention(ctx, svc, days, every, timeout, now, log)
+func startElectedRetention(ctx context.Context, el store.Elector, svc expirer, policy room.RetentionPolicy, every, timeout time.Duration, now func() time.Time, log *slog.Logger) (stop func()) {
+	if policy.Off() {
+		return startRetention(ctx, svc, policy, every, timeout, now, log)
 	}
 	return runElected(ctx, el, loopRetention, func(lctx context.Context) {
-		stopTerm := startRetention(lctx, svc, days, every, timeout, now, log)
+		stopTerm := startRetention(lctx, svc, policy, every, timeout, now, log)
+		<-lctx.Done()
+		stopTerm()
+	})
+}
+
+// startElectedOpenLimit is startOpenLimit on the leader of "open-limit" only,
+// so replicas do not race to close the same old room. With the limit off
+// nothing is elected.
+func startElectedOpenLimit(ctx context.Context, el store.Elector, svc openLimiter, days int, every, timeout time.Duration, log *slog.Logger) (stop func()) {
+	if days <= 0 {
+		return startOpenLimit(ctx, svc, days, every, timeout, log)
+	}
+	return runElected(ctx, el, loopOpenLimit, func(lctx context.Context) {
+		stopTerm := startOpenLimit(lctx, svc, days, every, timeout, log)
 		<-lctx.Done()
 		stopTerm()
 	})

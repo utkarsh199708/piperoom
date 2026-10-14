@@ -795,6 +795,10 @@ func (s *Service) catchUpLocked(ctx context.Context, roomID string, st *roomStat
 func (s *Service) foldLocked(ctx context.Context, roomID string, st *roomState, e events.Event, remote bool) {
 	wasOpen := s.roomOpen(st)
 	st.snap = Apply(st.snap, e)
+	// The store counts the same bytes (len of the payload JSON) for the
+	// room's log cap, whichever replica appended the event.
+	st.logBytes += int64(len(e.Payload))
+	s.setDeadline(&st.snap)
 	trackPending(st, e)
 	s.feedInbox(st, e)
 	if remote && wasOpen && !s.roomOpen(st) {

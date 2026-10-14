@@ -16,6 +16,7 @@ import (
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
 	"piperoom/internal/auth"
+	"piperoom/internal/config"
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/store"
@@ -108,6 +109,13 @@ type Deps struct {
 	// the hook must return promptly once ctx ends because Close waits for it.
 	OnRoomOpened func(ctx context.Context, roomID string)
 
+	// Limits are the room limits (config.ParseLimits, docs/design/retention.md):
+	// the open-room limit, the tool data cap and the archive directory. The
+	// log caps (RoomMaxEvents, RoomMaxBytes) are enforced by the store, which
+	// the caller configures with store.Capped.SetLimits. The zero value turns
+	// every limit off (unit tests).
+	Limits config.Limits
+
 	// OnRoomClosed, when set, is called once per room closed by CloseRoom, after
 	// room.closed is appended, the alert key released and the close persisted,
 	// and after s.mu is released. It runs on the closing request, before
@@ -148,6 +156,20 @@ type roomState struct {
 	leased     bool
 	leaseValid time.Time
 	pending    []agent.HumanInput
+
+	// shadowLogFull is set when the shadow log reached the room's cap: the
+	// run is cancelled and ends with status budget.
+	shadowLogFull bool
+
+	// deleting is set while DeleteRoom archives and deletes the room: every
+	// append through the service is refused, so the archive and the delete
+	// see the same log.
+	deleting bool
+	// logBytes is the room log's stored payload bytes as the store counts
+	// them (store.Capped): read once when the room is loaded, then grown by
+	// len(Payload) of each event appended. With snap.LastSeq (the event
+	// count) it drives the cap warning without a query per append.
+	logBytes int64
 }
 
 // Service is the room domain logic. All state derives from the event log; the
@@ -176,6 +198,10 @@ type Service struct {
 	sessionIdle  time.Duration
 	viewerGroups map[string]struct{}
 	soloUser     string
+	limits       config.Limits
+	// deleteMu serialises DeleteRoom calls: deletions are rare, and one at a
+	// time makes a concurrent repeat find the first one's audit row.
+	deleteMu sync.Mutex
 
 	// Multi-replica coordination (replicas.go). coord is nil with a store that
 	// belongs to one process (memstore); then nothing below runs.
@@ -263,6 +289,7 @@ func New(d Deps) *Service {
 		sessionIdle:  d.SessionIdle,
 		viewerGroups: groupSet(d.ViewerGroups),
 		soloUser:     d.SoloUser,
+		limits:       d.Limits,
 		ctx:          ctx,
 		cancel:       cancel,
 		rooms:        map[string]*roomState{},
@@ -385,6 +412,7 @@ func (s *Service) loadRowsLocked(ctx context.Context, rooms []store.Room, restar
 		}
 		st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
 		s.rooms[r.ID] = st
+		s.loadUsageLocked(ctx, r.ID, st)
 		if snap.Status == "open" {
 			s.indexAlertRoomLocked(ctx, r.ID, st)
 			// With a shared store a proposal may be running on another
@@ -448,7 +476,8 @@ func (s *Service) noteRestartLocked(ctx context.Context, roomID string, st *room
 func (s *Service) ensureAgentLocked(ctx context.Context, roomID string, st *roomState) {
 	// A shadow run is one-shot: steers, suggestions and @agent comments are
 	// logged but never start or restart it (docs/design/shadow.md 3.3).
-	if st.snap.Shadow || st.agentCancel != nil || !s.roomOpen(st) {
+	// A full log never gets its agent back: every agent event would be refused.
+	if st.snap.Shadow || st.agentCancel != nil || !s.roomOpen(st) || st.snap.LogCap == LogCapFull || st.deleting {
 		return
 	}
 	s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, s.rawAlert(ctx, roomID), st)
@@ -555,6 +584,7 @@ func (s *Service) getStateLocked(ctx context.Context, roomID string) (*roomState
 	}
 	st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
 	s.rooms[roomID] = st
+	s.loadUsageLocked(ctx, roomID, st)
 	if snap.Status == "open" {
 		s.indexAlertRoomLocked(ctx, roomID, st)
 	}
@@ -588,6 +618,7 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, []a
 	if snap.ID == "" {
 		snap.ID = roomID
 	}
+	s.setDeadline(&snap)
 	if row, err := s.store.GetRoom(ctx, roomID); err == nil {
 		if row.DriverID != "" && snap.Driver != nil && snap.Driver.ID == row.DriverID && row.DriverLeaseUntil != nil && row.DriverLeaseUntil.After(snap.Driver.LeaseUntil) {
 			// docs/api.md: times are RFC 3339 UTC; a persisted lease read back
@@ -606,18 +637,37 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, []a
 // decides it. With a shared store, events other replicas appended since the
 // last fold are folded first, so the snapshot never skips a seq. Caller must
 // hold s.mu.
+//
+// It also applies the room log caps (docs/design/retention.md section 5.3):
+// the store refuses an event over the cap with store.ErrLogFull, and after
+// each append the room's usage (the seq, and the payload bytes added up)
+// decides the one 90% warning and the log_full stop. A room being deleted
+// refuses every append.
 func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	if st.snap.Shadow && actor == events.AgentActor {
-		return s.appendShadowLocked(ctx, roomID, typ, payload)
+		e, err := s.appendShadowLocked(ctx, roomID, typ, payload)
+		if errors.Is(err, store.ErrLogFull) {
+			s.shadowLogFullLocked(roomID, st)
+		}
+		return e, err
+	}
+	if st.deleting {
+		return events.Event{}, fmt.Errorf("room: append %s: %w", typ, errRoomDeleting())
 	}
 	e, err := s.store.Append(ctx, roomID, typ, actor, payload)
 	if err != nil {
+		if errors.Is(err, store.ErrLogFull) {
+			s.logFullLocked(ctx, st, roomID)
+		}
 		return events.Event{}, fmt.Errorf("room: append %s: %w", typ, err)
 	}
 	if s.coord != nil && e.Seq > st.snap.LastSeq+1 {
 		s.fillGapLocked(ctx, roomID, st, e.Seq)
 	}
 	s.foldLocked(ctx, roomID, st, e, false)
+	// Only the replica that wrote the event decides the cap warning, so the
+	// warning is written once.
+	s.checkCapLocked(ctx, st, roomID)
 	return e, nil
 }
 
@@ -666,6 +716,11 @@ func (s *Service) agentEmit(ctx context.Context, roomID string, run uint64, typ 
 	if err != nil {
 		return err
 	}
+	if typ == events.AgentToolResult {
+		if payload, err = s.capToolData(payload); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st, ok := s.rooms[roomID]
@@ -701,6 +756,10 @@ func (s *Service) fenceLocked(roomID string, st *roomState, run uint64) error {
 
 // executorEmit appends an event on behalf of the action executor.
 func (s *Service) executorEmit(ctx context.Context, roomID string, typ events.Type, payload any) error {
+	if p, ok := payload.(events.ActionExecutedPayload); ok {
+		p.Output = s.capOutput(p.Output)
+		payload = p
+	}
 	return s.emitAs(ctx, roomID, executorActor, typ, payload)
 }
 

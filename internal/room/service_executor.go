@@ -19,7 +19,10 @@ import (
 type execQueue struct {
 	mu    sync.Mutex
 	items []store.ProposalRow
-	wake  chan struct{}
+	// running is true from the pop of a proposal until its run returns, so
+	// busy sees a proposal either queued or running, never neither.
+	running bool
+	wake    chan struct{}
 }
 
 func newExecQueue() *execQueue {
@@ -49,7 +52,8 @@ func (q *execQueue) queuedIDs() []string {
 	return out
 }
 
-// pop returns the next queued proposal, if any.
+// pop returns the next queued proposal, if any, and marks the queue running
+// until done is called.
 func (q *execQueue) pop() (store.ProposalRow, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -58,7 +62,26 @@ func (q *execQueue) pop() (store.ProposalRow, bool) {
 	}
 	p := q.items[0]
 	q.items = q.items[1:]
+	q.running = true
 	return p, true
+}
+
+// done marks the end of the run of the proposal pop returned.
+func (q *execQueue) done() {
+	q.mu.Lock()
+	q.running = false
+	q.mu.Unlock()
+}
+
+// busy reports whether an approved proposal is queued or running. A nil
+// queue (no proposal ever approved in the room) is idle.
+func (q *execQueue) busy() bool {
+	if q == nil {
+		return false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.running || len(q.items) > 0
 }
 
 // enqueueExecutionLocked queues an approved proposal and lazily starts the
@@ -110,6 +133,7 @@ func (s *Service) runExecutor(ctx context.Context, roomID string, q *execQueue) 
 			if err := s.executeProposal(p, true); err != nil && !errors.Is(err, context.Canceled) {
 				s.log.Warn("room: executor stopped", "room", roomID, "proposal", p.ProposalID, "err", err)
 			}
+			q.done()
 		}
 		select {
 		case <-ctx.Done():

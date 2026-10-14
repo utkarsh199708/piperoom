@@ -271,13 +271,6 @@ func (g *agentGate) acquire(ctx context.Context) error {
 	return nil
 }
 
-// isClosed reports whether Close has begun.
-func (s *Service) isClosed() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closed
-}
-
 // acquireLocal is acquire on this replica's slots. shown reports whether a
 // "queued" status was written while waiting.
 func (g *agentGate) acquireLocal(ctx context.Context) (shown bool, err error) {

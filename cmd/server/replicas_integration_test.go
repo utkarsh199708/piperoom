@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"piperoom/internal/config"
+	"piperoom/internal/room"
 	"piperoom/internal/store"
 	"piperoom/internal/testenv"
 	"piperoom/internal/watch"
@@ -110,7 +111,7 @@ type replicaExpirer struct {
 	replica int
 }
 
-func (e replicaExpirer) PurgeExpired(ctx context.Context, cutoff time.Time) (store.PurgeResult, error) {
+func (e replicaExpirer) PurgeByPolicy(ctx context.Context, now time.Time, p room.RetentionPolicy) (store.PurgeResult, error) {
 	e.log.mu.Lock()
 	e.log.calls = append(e.log.calls, purgeCall{replica: e.replica, at: time.Now()})
 	e.log.mu.Unlock()
@@ -152,7 +153,7 @@ func TestLeaderLoopsOneReplicaAndTakeover(t *testing.T) {
 		// other packages' tests run electors on the same server at once.
 		electors[i] = st.Elector(fmt.Sprintf("%s-r%d", schema, i))
 		hooks[i] = &roomClosedHook{}
-		stops = append(stops, startElectedRetention(ctx, electors[i], replicaExpirer{log: plog, replica: i}, 30, 100*time.Millisecond, time.Second, time.Now, discardLog()))
+		stops = append(stops, startElectedRetention(ctx, electors[i], replicaExpirer{log: plog, replica: i}, room.RetentionPolicy{GlobalDays: 30}, 100*time.Millisecond, time.Second, time.Now, discardLog()))
 		stop, err := startElectedWatcher(ctx, electors[i], watch.Deps{
 			Owners: loadTestOwners(t), Config: config.Watch{Mode: config.WatchLog, Interval: time.Minute},
 			Jitter: func(time.Duration) time.Duration { return 0 },
