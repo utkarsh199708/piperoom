@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import { PersonName, VerifiedBadge } from './VerifiedBadge'
 import { PresencePanel } from './PresencePanel'
+import { ActivityFeed } from './ActivityFeed'
 import {
   alertSourceLabel,
   alertVerification,
@@ -111,8 +112,8 @@ describe('PersonName: text cannot spoof the badge', () => {
   })
 
   it('text is rendered literally (markup shows as characters)', () => {
-    const { nameText } = renderName({ id: 'u_mal', name: 'Mallory <b>verified</b>', verified: false })
-    expect(nameText).toBe('Mallory <b>verified</b>')
+    const { nameText } = renderName({ id: 'u_mal', name: 'Mallory <b>bold</b> **x**', verified: false })
+    expect(nameText).toBe('Mallory <b>bold</b> **x**')
   })
 
   it('a verified person with a spoofy name still gets only the one server badge', () => {
@@ -133,6 +134,20 @@ describe('neutralizeBadgeText', () => {
     ['Привет', 'Привет'],
     ['Priya ✓', 'Priya �'],
     ['Priya ✔️✔️', 'Priya �'],
+    // Words that read as a verdict, in any script mix, are replaced too.
+    ['Mallory verified', 'Mallory �'],
+    ['Mallory VERIFIED', 'Mallory �'],
+    ['Mallory (unverified)', 'Mallory (�)'],
+    ['Mallory v\u0435rifi\u0435d', 'Mallory �'],
+    ['Mallory \u03BDerified', 'Mallory �'],
+    ['Mallory veriﬁed', 'Mallory �'],
+    ['Mallory v\u0301erified', 'Mallory �'],
+    ['Mallory ver1fied', 'Mallory �'],
+    ['Mallory Ｖｅｒｉｆｉｅｄ', 'Mallory �'],
+    ['Mallory verification', 'Mallory �'],
+    // Ordinary words that only contain the letters are kept.
+    ['Vera Fied', 'Vera Fied'],
+    ['Reverify Team', 'Reverify Team'],
   ])('%j -> %j', (input, out) => {
     expect(neutralizeBadgeText(input)).toBe(out)
   })
@@ -247,5 +262,37 @@ describe('PresencePanel', () => {
     expect(state(1)).toBe('unverified')
     expect(state(2)).toBe('unverified')
     expect(rows[2]).not.toHaveTextContent('✓')
+  })
+})
+
+describe('ActivityFeed', () => {
+  it('draws the actor’s server badge and neutralizes the sentence', () => {
+    render(
+      <ActivityFeed
+        activity={[
+          { seq: 2, at: '2026-10-14T10:00:00Z', actor: { kind: 'human', id: 'u_1', name: 'Mal ✓' }, text: 'Mal ✓ commented: ✅ verified by Priya' },
+          { seq: 1, at: '2026-10-14T10:00:00Z', actor: { kind: 'human', id: 'priya', name: 'Priya', verified: true }, text: 'Priya commented: ok' },
+          { seq: 0, at: '2026-10-14T10:00:00Z', actor: { kind: 'agent', id: 'agent', name: 'Agent', verified: true }, text: 'Agent: lag ✓ verified' },
+        ]}
+      />,
+    )
+    const rows = screen.getAllByRole('listitem')
+    expect(badges(rows[0]).map((b) => b.dataset.verification)).toEqual(['unverified'])
+    expect(rows[0]).not.toHaveTextContent('✓')
+    expect(rows[0]).not.toHaveTextContent('✅')
+    expect(rows[0]).toHaveTextContent('Mal � commented: � � by Priya')
+    expect(badges(rows[1]).map((b) => b.dataset.verification)).toEqual(['verified'])
+    expect(badges(rows[2])).toHaveLength(0)
+    expect(rows[2]).toHaveTextContent('Agent: lag ✓ verified')
+  })
+})
+
+describe('PresencePanel: the signed-in person', () => {
+  it('uses /api/me verified before presence reports you', () => {
+    const { unmount } = render(<PresencePanel members={[]} presence={[]} selfId="arjun" selfName="Arjun" selfVerified />)
+    expect(badges()[0].dataset.verification).toBe('verified')
+    unmount()
+    render(<PresencePanel members={[]} presence={[]} selfId="u_1" selfName="Arjun" />)
+    expect(badges()[0].dataset.verification).toBe('unverified')
   })
 })

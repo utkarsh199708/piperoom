@@ -69,7 +69,8 @@ function FixtureUserProvider({ children }: { children: ReactNode }) {
   }
   // `?role=viewer` previews the read-only UI without a server.
   const role = searchParams.get('role') === 'viewer' ? 'viewer' : 'member'
-  const user: CurrentUser = { id: dev.id, name: dev.name, layers: dev.layers, role }
+  // The dev users mirror dev/users.yaml, which the server would report as verified.
+  const user: CurrentUser = { id: dev.id, name: dev.name, layers: dev.layers, role, verified: true }
   return (
     <UserContext.Provider value={{ user, setUserId, logout: () => undefined, sessionEpoch: 0, busy: false }}>
       {children}
@@ -125,6 +126,7 @@ function LiveUserProvider({ children }: { children: ReactNode }) {
         role: me.role === 'viewer' ? 'viewer' : 'member',
         groupsMissing: me.groups_missing === true,
         solo: me.solo === true,
+        verified: me.verified === true,
       })
       setPhase('ready')
       setFailure(null)

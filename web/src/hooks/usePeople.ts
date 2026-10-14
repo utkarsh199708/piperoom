@@ -14,7 +14,7 @@ export type PeopleState =
 /**
  * The people a driver may grant control or hand off to (GET /api/people).
  * Used in dev mode too: the server answers in both modes. Fixture mode has no
- * server, so the built-in dev users stand in.
+ * server, so the built-in dev users stand in (as users.yaml people: verified).
  */
 export function usePeople(): PeopleState & { reload: () => void } {
   const [state, setState] = useState<PeopleState>({ status: 'loading' })
@@ -23,7 +23,7 @@ export function usePeople(): PeopleState & { reload: () => void } {
   useEffect(() => {
     let cancelled = false
     if (isFixtures()) {
-      setState({ status: 'ready', people: DEV_USERS.map((u) => ({ id: u.id, name: u.name })) })
+      setState({ status: 'ready', people: DEV_USERS.map((u) => ({ id: u.id, name: u.name, verified: true })) })
       return
     }
     setState({ status: 'loading' })

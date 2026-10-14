@@ -29,11 +29,12 @@ const actions: RoomActions = {
 
 const arjun: CurrentUser = { id: 'arjun', name: 'Arjun', layers: [] }
 
-// What the server sends: users.yaml users have no email, IdP users may.
+// What the server sends: users.yaml users have no email and are verified; IdP users may have
+// an email and are not.
 const people = [
-  { id: 'arjun', name: 'Arjun' },
-  { id: 'priya', name: 'Priya' },
-  { id: 'u_0a1b2c3d4e5f', name: 'Meera Rao', email: 'meera@example.com' },
+  { id: 'arjun', name: 'Arjun', verified: true },
+  { id: 'priya', name: 'Priya', verified: true },
+  { id: 'u_0a1b2c3d4e5f', name: 'Meera Rao', email: 'meera@example.com', verified: false },
 ]
 
 beforeEach(() => {
@@ -49,7 +50,12 @@ describe('hand-off picker', () => {
 
     const select = await screen.findByLabelText('Hand off to')
     const labels = Array.from(select.querySelectorAll('option')).map((o) => o.textContent)
-    expect(labels).toEqual(['Priya (priya)', 'Meera Rao <meera@example.com>'])
+    expect(labels).toEqual(['Priya (priya)', 'Meera Rao <meera@example.com> — unverified'])
+    // The option text cannot draw a badge, so the chosen person's drawn badge sits under the list.
+    expect((await screen.findByTestId('handoff-to-selected')).querySelector('[data-slot="verified-badge"]')).toHaveAttribute(
+      'data-verification',
+      'verified',
+    )
     expect(api.people).toHaveBeenCalledTimes(1)
   })
 
@@ -98,7 +104,7 @@ describe('grant-control picker', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Give control to/ }))
     const select = await screen.findByLabelText('Give control to')
-    expect(screen.getByRole('option', { name: 'Meera Rao <meera@example.com>' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Meera Rao <meera@example.com> — unverified' })).toBeInTheDocument()
     fireEvent.change(select, { target: { value: 'priya' } })
     fireEvent.click(screen.getByRole('button', { name: 'Give control' }))
     await waitFor(() => expect(actions.grantControl).toHaveBeenCalledWith('priya'))

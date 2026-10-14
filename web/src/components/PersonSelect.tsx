@@ -1,5 +1,7 @@
 import { useEffect, useMemo } from 'react'
 import { personLabel, usePeople } from '../hooks/usePeople'
+import { PersonName } from './VerifiedBadge'
+import { neutralizeBadgeText } from '@/lib/verification'
 
 // Picker for "who gets control" and "who gets the hand-off". The list comes from
 // GET /api/people in every mode. A viewer gets 403 viewer from it: no picker then.
@@ -40,13 +42,24 @@ export function PersonSelect({
     )
   }
   if (options.length === 0) return <p className="muted">No one else is available right now.</p>
+  const selected = options.find((p) => p.id === value)
   return (
-    <select id={id} value={value} onChange={(e) => onChange(e.target.value)}>
-      {options.map((p) => (
-        <option key={p.id} value={p.id}>
-          {personLabel(p)}
-        </option>
-      ))}
-    </select>
+    <>
+      {/* An <option> holds only text, so it can say "unverified" but cannot draw the badge;
+          the drawn badge for the chosen person sits under the list. */}
+      <select id={id} value={value} onChange={(e) => onChange(e.target.value)}>
+        {options.map((p) => (
+          <option key={p.id} value={p.id}>
+            {neutralizeBadgeText(personLabel(p))}
+            {p.verified === true ? '' : ' — unverified'}
+          </option>
+        ))}
+      </select>
+      {selected && (
+        <p className="m-0 mt-1 text-sm" data-testid={`${id}-selected`}>
+          <PersonName person={{ id: selected.id, name: selected.name, kind: 'human', verified: selected.verified }} />
+        </p>
+      )}
+    </>
   )
 }

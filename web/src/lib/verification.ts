@@ -102,11 +102,41 @@ const BADGE_LOOKALIKES =
 // More than two combining marks in a row only stack glyphs out of the line box.
 const MARK_PILE = /(\p{Mn}{2})\p{Mn}+/gu
 
+// Lower-case Cyrillic, Greek and other letters that look like the Latin ones in
+// "verified" / "unverified" / "verify" (in the spirit of the server's TR39
+// skeleton, docs/design/auth.md §2.1, cut down to the letters these words use).
+const CONFUSABLE: Record<string, string> = {
+  'а': 'a', 'е': 'e', 'ё': 'e', 'і': 'i', 'ї': 'i', 'ј': 'j', 'о': 'o',
+  'р': 'p', 'с': 'c', 'у': 'y', 'х': 'x', 'ѵ': 'v', 'ԁ': 'd', 'һ': 'h',
+  'ո': 'n', 'ս': 'u', 'ν': 'v', 'ε': 'e', 'ι': 'i', 'ο': 'o', 'ρ': 'p',
+  'υ': 'u', 'ϝ': 'f', 'ı': 'i', 'ɩ': 'i', '1': 'i', l: 'i', '|': 'i', '!': 'i',
+}
+
+function skeleton(word: string): string {
+  let out = ''
+  for (const ch of word.normalize('NFKD').toLowerCase()) {
+    if (/\p{M}/u.test(ch)) continue
+    out += CONFUSABLE[ch] ?? ch
+  }
+  return out.replace(/[^a-z]/g, '')
+}
+
+// A word that reads as "verified" (or "unverified", "verify", "verification")
+// would put a second, fake verdict next to the real badge. "l" folds to "i" in
+// the skeleton, so the pattern is written in folded form.
+const VERDICT_SKELETON = /^(un)?verif/
+
 /**
  * Untrusted text shown next to a badge (a person's name, an alert label), with
- * every badge look-alike replaced by U+FFFD so the reader sees something was there.
- * React still renders the result as plain text: no HTML or markdown is ever parsed.
+ * every badge look-alike replaced by U+FFFD so the reader sees something was there:
+ * check marks, emoji, enclosing marks, bidi and invisible code points, and words
+ * that read as "verified" in any mix of scripts. React still renders the result as
+ * plain text: no HTML or markdown is ever parsed.
  */
 export function neutralizeBadgeText(text: string): string {
-  return text.replace(BADGE_LOOKALIKES, '�').replace(MARK_PILE, '$1').replace(/�+/g, '�')
+  return text
+    .replace(BADGE_LOOKALIKES, '\uFFFD')
+    .replace(MARK_PILE, '$1')
+    .replace(/[\p{L}\p{N}\p{M}|!]+/gu, (word) => (VERDICT_SKELETON.test(skeleton(word)) ? '\uFFFD' : word))
+    .replace(/\uFFFD+/g, '\uFFFD')
 }

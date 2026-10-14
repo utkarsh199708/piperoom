@@ -11,6 +11,7 @@ export function PresencePanel({
   selfId,
   selfName,
   selfIsViewer = false,
+  selfVerified,
 }: {
   members: MemberState[]
   presence: PresenceMember[]
@@ -20,6 +21,8 @@ export function PresencePanel({
   selfName?: string
   /** The signed-in person is a viewer: that row says "viewer". */
   selfIsViewer?: boolean
+  /** `/api/me.verified` for the signed-in person (server-set). */
+  selfVerified?: boolean
 }) {
   const rows = members.map((m) => {
     const p = presence.find((x) => x.id === m.id)
@@ -33,7 +36,7 @@ export function PresencePanel({
   }
 
   if (selfId && selfName && !rows.some((r) => r.id === selfId)) {
-    rows.push({ id: selfId, name: selfName, role: 'watching', state: 'viewing', verified: [] as (boolean | undefined)[] })
+    rows.push({ id: selfId, name: selfName, role: 'watching', state: 'viewing', verified: [selfVerified] })
   }
 
   return (

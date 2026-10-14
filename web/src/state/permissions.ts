@@ -16,6 +16,8 @@ export interface CurrentUser {
   groupsMissing?: boolean
   /** `/api/me.solo`: show the solo banner and ask for the typed confirm up front. */
   solo?: boolean
+  /** `/api/me.verified` (server-set); absent in fixture mode, which counts as unverified. */
+  verified?: boolean
 }
 
 /** A viewer sees everything and changes nothing; the server enforces it, the UI hides the controls. */
