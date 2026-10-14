@@ -21,6 +21,19 @@ vi.mock('../context/user', () => ({
   }),
 }))
 
+vi.mock('../hooks/useAuthUsers', () => ({
+  useAuthUsers: () => ({
+    status: 'ready',
+    reload: vi.fn(),
+    data: [
+  { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] },
+  { id: 'priya', name: 'Priya', layers: ['postgres', 'schema-registry'] },
+  { id: 'meera', name: 'Meera', layers: ['warehouse'] },
+  { id: 'kabir', name: 'Kabir', layers: ['consumer'] },
+],
+  }),
+}))
+
 import { UserSwitcher } from './UserSwitcher'
 
 describe('UserSwitcher dev gating', () => {

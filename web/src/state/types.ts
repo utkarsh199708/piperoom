@@ -6,8 +6,10 @@ import type {
   AgentStatusPayload,
   HandoffSummary,
   HypothesisSummary,
+  HypothesisVerdict,
   Identity,
   ProposalStep,
+  RoomLabelledPayload,
   RoomSnapshot,
   TraceStage,
 } from '../api/types'
@@ -27,11 +29,36 @@ export interface AgentStatusState {
   detail?: string
 }
 
+export interface VerdictState {
+  verdict: HypothesisVerdict
+  by: Actor
+  note?: string
+  at: string
+}
+
 export interface HypothesisState {
   text: string
   based_on_steps: string[]
   confidence: HypothesisSummary['confidence']
+  /** Derived (F9): at least one confirmed and no disputed verdict on this hypothesis. */
   confirmed: boolean
+  /** seq of the agent.hypothesis event; hypothesis.verdict answers it. */
+  seq?: number
+  /** Latest verdict per person, in the order they were given. */
+  verdicts?: VerdictState[]
+}
+
+/** One entry of the confidence path under the hypothesis heading. */
+export interface HypothesisHistoryEntry {
+  seq: number
+  at: string
+  confidence: string
+}
+
+/** approval.nudged: when and by whom a pending layer was last nudged. */
+export interface NudgeState {
+  at: string
+  by: Actor
 }
 
 export interface ToolCallState {
@@ -67,10 +94,26 @@ export interface CommentState {
   replies: AgentMessageState[]
 }
 
+/**
+ * pending: waiting in the driver's queue. accepted: the driver sent it (steer.sent with its id).
+ * declined: the driver declined it (steer.declined); `declined_by` and `reason` say who and why.
+ */
+export type SuggestionStatus = 'pending' | 'accepted' | 'declined'
+
 export interface SuggestionState {
   suggestion_id: string
   from: Actor
   text: string
+  status: SuggestionStatus
+  /** When the suggestion was made. */
+  at?: string
+  /** Who forwarded it to the agent, and when (steer.sent with its id). */
+  sent_by?: Actor
+  sent_at?: string
+  /** Who declined it, when, and the optional note (steer.declined). */
+  declined_by?: Actor
+  declined_at?: string
+  reason?: string
 }
 
 /** Who decided a layer, how they logged in, and the hash they decided on. */
@@ -127,10 +170,36 @@ export interface HandoffState {
   status: 'pending' | 'accepted'
 }
 
+/** A hand-off the agent is still writing the summary for (handoff.requested, R0). */
+export interface HandoffRequestState {
+  request_id: string
+  to: Actor
+  stay_as_watcher: boolean
+  expires_at: string
+}
+
+/** The last hand-off request that ended without a hand-off (handoff.failed). */
+export interface HandoffFailureState {
+  request_id: string
+  reason: string
+}
+
 /** The alert that opened the room, from room.created's `alert` webhook body. */
 export interface AlertInfo {
   /** Best-effort source inferred from the raw body shape; null when unknown. */
   source: string | null
+}
+
+/** Who ticked one runbook item and when (checklist.step_done). */
+export interface ChecklistTick {
+  by: Actor
+  at: string
+  note?: string
+}
+
+/** Key of RoomState.checklist_done: "<tool_use_id>:<hit>:<item>". */
+export function checklistKey(toolUseId: string, hit: number, item: number): string {
+  return `${toolUseId}:${hit}:${item}`
 }
 
 export interface ActivityEntry {
@@ -150,11 +219,20 @@ export interface RoomState {
   closed_at?: string
   resolution?: string
   last_seq: number
+  /**
+   * The snapshot's last_seq: how many events the first replay (after=0) has to fold. 0 when
+   * unknown (fixtures, empty room). Drives the replay progress bar.
+   */
+  replay_target: number
   driver: DriverInfo | null
   /** Set when room.created carried an alert webhook body (alert-opened room). */
   alert: AlertInfo | null
   agent_status: AgentStatusState
   hypothesis: HypothesisState | null
+  /** The confidence path, capped at 20; a repeat of the same confidence is not added. */
+  hypothesis_history: HypothesisHistoryEntry[]
+  /** `${proposal_id}/${layer}` -> the last nudge. */
+  nudges: Record<string, NudgeState>
   steps: StepState[]
   messages: AgentMessageState[]
   comments: CommentState[]
@@ -170,6 +248,13 @@ export interface RoomState {
   control_requests: ControlRequestState[]
   trace: TraceState | null
   handoffs: HandoffState[]
+  /** In flight until handoff.created / handoff.failed with its id, or `expires_at`. */
+  handoff_request: HandoffRequestState | null
+  handoff_failure: HandoffFailureState | null
+  /** The last room.labelled (re-labelling appends another, the last wins); null before any. */
+  labelled: RoomLabelledPayload | null
+  /** Ticked runbook items; the last event per key wins and an untick removes the key. */
+  checklist_done: Record<string, ChecklistTick>
   activity: ActivityEntry[]
   /** Shadow room: the agent ran silently; the shadow panel replaces steering once closed. */
   shadow?: boolean
@@ -186,10 +271,13 @@ export function emptyRoomState(id: string): RoomState {
     status: 'open',
     opened_at: '',
     last_seq: 0,
+    replay_target: 0,
     driver: null,
     alert: null,
     agent_status: { state: 'idle' },
     hypothesis: null,
+    hypothesis_history: [],
+    nudges: {},
     steps: [],
     messages: [],
     comments: [],
@@ -200,6 +288,10 @@ export function emptyRoomState(id: string): RoomState {
     control_requests: [],
     trace: null,
     handoffs: [],
+    handoff_request: null,
+    handoff_failure: null,
+    labelled: null,
+    checklist_done: {},
     activity: [],
   }
 }
@@ -222,6 +314,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     resolution: snapshot.resolution,
     shadow: snapshot.shadow === true,
     last_seq: 0,
+    replay_target: snapshot.last_seq ?? 0,
     snapshot_hashes: Object.fromEntries(
       (snapshot.open_proposals ?? [])
         .filter((p) => p.params_hash)
@@ -240,6 +333,8 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
           based_on_steps: snapshot.hypothesis.based_on_steps ?? [],
           confidence: snapshot.hypothesis.confidence,
           confirmed: snapshot.hypothesis.confirmed,
+          seq: snapshot.hypothesis.seq ?? 0,
+          verdicts: [],
         }
       : null,
   }

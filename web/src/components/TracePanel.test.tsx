@@ -8,6 +8,7 @@ const actions: RoomActions = {
   comment: vi.fn(),
   steer: vi.fn(),
   sendSuggestion: vi.fn(),
+  declineSuggestion: vi.fn(),
   requestControl: vi.fn(),
   grantControl: vi.fn(),
   close: vi.fn(),
@@ -15,7 +16,11 @@ const actions: RoomActions = {
   reject: vi.fn(),
   handoff: vi.fn(),
   acceptHandoff: vi.fn(),
+  label: vi.fn(),
+  checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 
 const trace: TraceState = {
@@ -46,7 +51,9 @@ describe('TracePanel as a dialog', () => {
     render(<TracePanel trace={trace} actions={actions} onClose={vi.fn()} />)
     const dialog = screen.getByRole('dialog', { name: 'Trace a record' })
     expect(within(dialog).getByText('stopped here')).toBeInTheDocument()
-    expect(within(dialog).getByLabelText('Table')).toHaveValue('public.orders')
+    // No made-up table or key: the person types both.
+    expect(within(dialog).getByLabelText('Table')).toHaveValue('')
+    expect(within(dialog).getByLabelText('Key')).toHaveValue('')
   })
 
   it('Esc and the X both ask to close', () => {
@@ -60,8 +67,25 @@ describe('TracePanel as a dialog', () => {
 
   it('submitting traces the table and key', () => {
     render(<TracePanel trace={null} actions={actions} onClose={vi.fn()} />)
+    expect(screen.getByRole('button', { name: 'Trace' })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Table'), { target: { value: 'public.orders' } })
     fireEvent.change(screen.getByLabelText('Key'), { target: { value: '7' } })
     fireEvent.click(screen.getByRole('button', { name: 'Trace' }))
     expect(actions.trace).toHaveBeenCalledWith('public.orders', '7')
+  })
+})
+
+describe('TracePanel verdict and layout', () => {
+  it('leads with the verdict, before the stages, and indexes the stages', () => {
+    render(<TracePanel trace={trace} actions={actions} onClose={vi.fn()} />)
+    const dialog = screen.getByRole('dialog', { name: 'Trace a record' })
+    const verdict = within(dialog).getByRole('status')
+    expect(verdict).toHaveTextContent('Stopped at warehouse analytics.orders')
+    const stages = within(dialog).getByRole('group', { name: /Trace stages/ })
+    expect(verdict.compareDocumentPosition(stages) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(within(dialog).getByLabelText('Stage 5 of 5')).toBeInTheDocument()
+    expect(stages.className).not.toContain('overflow-x-auto')
+    expect(dialog.querySelectorAll('[data-worst]')).toHaveLength(1)
+    expect(dialog.className).toContain('right-0')
   })
 })

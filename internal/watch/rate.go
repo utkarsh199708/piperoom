@@ -38,13 +38,18 @@ func trimSamples(s []sample, now time.Time) []sample {
 // the samples no older than window. ok is false when there are fewer than 3
 // samples or they span less than 30 minutes.
 func slope(samples []sample, now time.Time, window time.Duration) (perSec float64, ok bool) {
+	return slopeMin(samples, now, window, minSpan)
+}
+
+// slopeMin is slope with its own least span (consumer lag uses a shorter one).
+func slopeMin(samples []sample, now time.Time, window, span time.Duration) (perSec float64, ok bool) {
 	cutoff := now.Add(-window)
 	i := 0
 	for i < len(samples) && samples[i].at.Before(cutoff) {
 		i++
 	}
 	pts := samples[i:]
-	if len(pts) < minSamples || pts[len(pts)-1].at.Sub(pts[0].at) < minSpan {
+	if len(pts) < minSamples || pts[len(pts)-1].at.Sub(pts[0].at) < span {
 		return 0, false
 	}
 	t0, y0 := pts[0].at, pts[0].retained

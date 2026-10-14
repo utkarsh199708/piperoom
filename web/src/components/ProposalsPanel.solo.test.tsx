@@ -11,6 +11,7 @@ const actions: RoomActions = {
   comment: vi.fn(),
   steer: vi.fn(),
   sendSuggestion: vi.fn(),
+  declineSuggestion: vi.fn(),
   requestControl: vi.fn(),
   grantControl: vi.fn(),
   close: vi.fn(),
@@ -18,7 +19,11 @@ const actions: RoomActions = {
   reject: vi.fn(),
   handoff: vi.fn(),
   acceptHandoff: vi.fn(),
+  label: vi.fn(),
+  checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 
 const solo: CurrentUser = { id: 'sam', name: 'Sam', layers: ['kafka-connect'] }
@@ -32,8 +37,9 @@ const proposal: ProposalState = {
   steps: [],
   risk: 'low',
   rollback: 'none',
-  required_layers: ['kafka-connect'],
-  approvals: { 'kafka-connect': 'pending' },
+  // A second layer still pending: this approval does not complete the set, so no run confirm.
+  required_layers: ['kafka-connect', 'consumer'],
+  approvals: { 'kafka-connect': 'pending', consumer: 'pending' },
   status: 'open',
   decisions: {},
   params_hash: HASH,

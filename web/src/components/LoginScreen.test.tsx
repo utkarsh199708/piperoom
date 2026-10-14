@@ -1,7 +1,19 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen } from '@testing-library/react'
 import { LoginScreen } from './LoginScreen'
-import { DEV_USERS } from '../dev/users'
+
+const DEV_USERS = [
+  { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] },
+  { id: 'priya', name: 'Priya', layers: ['postgres', 'schema-registry'] },
+  { id: 'meera', name: 'Meera', layers: ['warehouse'] },
+  { id: 'kabir', name: 'Kabir', layers: ['consumer'] },
+]
+const loaded = vi.hoisted(() => ({ value: {} as Record<string, unknown> }))
+vi.mock('../hooks/useAuthUsers', () => ({ useAuthUsers: () => loaded.value }))
+
+beforeEach(() => {
+  loaded.value = { status: 'ready', reload: vi.fn(), data: DEV_USERS }
+})
 
 describe('LoginScreen', () => {
   it('has the Sign in heading and one button per dev user, named by the person', () => {
@@ -61,5 +73,25 @@ describe('LoginScreen', () => {
     expect(screen.getByRole('button', { name: 'Continue with SSO' })).toBeDisabled()
     rerender(<LoginScreen onPick={vi.fn()} busy={false} ssoHref="/auth/login" />)
     expect(screen.getByRole('link', { name: 'Continue with SSO' })).toHaveAttribute('href', '/auth/login')
+  })
+
+  it('shows the load state, then an error with Try again, never a built-in list', () => {
+    const reload = vi.fn()
+    loaded.value = { status: 'loading', reload }
+    const { rerender } = render(<LoginScreen onPick={vi.fn()} busy={false} />)
+    expect(screen.getByText('Loading users…')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Priya' })).not.toBeInTheDocument()
+    loaded.value = { status: 'error', message: 'not_found: nope', reload }
+    rerender(<LoginScreen onPick={vi.fn()} busy={false} />)
+    expect(screen.getByRole('alert')).toHaveTextContent('Could not load the user list: not_found: nope')
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(reload).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: 'Priya' })).not.toBeInTheDocument()
+  })
+
+  it('an empty list says the server has no users', () => {
+    loaded.value = { status: 'ready', reload: vi.fn(), data: [] }
+    render(<LoginScreen onPick={vi.fn()} busy={false} />)
+    expect(screen.getByText(/no users to sign in as/)).toBeInTheDocument()
   })
 })

@@ -210,6 +210,27 @@ var legacyTerms = map[string][][]string{
 // (a plausible wrong story). The lazy parrot is built from the scenario's own
 // alert and pipeline map: what the agent was handed, handed back.
 var hypotheses = map[string]struct{ good, wrong string }{
+	// F12c scenarios.
+	"broker-disk-notenoughreplicas": {
+		good:  "pg-orders-connector task 0 failed with NotEnoughReplicasException because broker 2's log dir is 98% used (disk full): its replicas of p3 and p5 left the ISR, below min insync replicas 2.",
+		wrong: "pg-orders-connector task 0 failed because min.insync.replicas=2 is too strict; lower min.insync.replicas to 1.",
+	},
+	"sasl-credential-rotated": {
+		good:  "pg-payments-connector task 0 failed with SaslAuthenticationException: the SCRAM credential of the Kafka user debezium was rotated and the connector still uses the old password, so the Kafka broker rejects its authentication; the ACLs are intact.",
+		wrong: "pg-payments-connector task 0 failed because the ACLs of User:debezium are missing; grant the ACLs again.",
+	},
+	"snapshot-stuck": {
+		good:  "pg-orders-connector is still running its initial snapshot of public.orders (snapshot running=true, rows scanned rising); streaming has not started and nothing failed. A restart would restart the snapshot from zero.",
+		wrong: "The replication slot debezium_orders is inactive and retains 61.4 GiB of WAL, so pg-orders-connector stopped streaming.",
+	},
+	"snowflake-sink-column-missing": {
+		good:  "The wh-orders-sink connector failed on task 0: every load into Snowflake fails with invalid identifier 'RISK_SCORE', because the sink table has no risk_score column that schema version 4 added.",
+		wrong: "wh-orders-sink task 0 failed because schema version 4 of pg.public.orders-value is an incompatible, breaking schema change.",
+	},
+	"watcher-start": {
+		good:  watcherCause,
+		wrong: "pg-orders-connector task 0 failed because the Schema Registry rejected an incompatible schema after an ALTER TABLE.",
+	},
 	"consumer-poison-pill": {
 		good:  "order-sync is stuck on a poison pill: the record at offset 25377154 on partition 1 of pg.public.orders is not Avro (no magic byte), so deserialization fails on every restart. Connect is healthy. Do not reset the group to latest: that skips every partition's unread changes.",
 		wrong: "order-sync is stuck on partition 1 after a bad deploy; reset the group to latest to skip the backlog.",

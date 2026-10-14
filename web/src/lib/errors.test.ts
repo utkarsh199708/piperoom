@@ -12,11 +12,15 @@ describe('friendlyError', () => {
     )
   })
 
-  it('maps the shadow-only codes, and leaves already_decided to the server text', () => {
+  it('maps the shadow codes, and leaves already_decided to the server text', () => {
     expect(friendlyError('not_revealed', 'raw')).toMatch(/still finishing/)
     expect(friendlyError('not_labelled', 'raw')).toMatch(/blind label/)
-    expect(friendlyError('room_open', 'raw')).toMatch(/close it first/)
+    expect(friendlyError('room_open', 'raw')).toMatch(/still open; this is available once it is closed/)
     expect(friendlyError('already_decided', 'layer already decided')).toBe('layer already decided')
+  })
+
+  it('maps handoff_in_progress to a friendly line (409 from a second hand-off click)', () => {
+    expect(friendlyError('handoff_in_progress', 'a hand-off is in progress')).toMatch(/already being written/)
   })
 
   it('keeps other server codes as they are', () => {

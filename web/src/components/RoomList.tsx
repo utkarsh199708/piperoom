@@ -10,6 +10,7 @@ import { isViewer } from '../state/permissions'
 import type { CurrentUser } from '../state/permissions'
 import { addFixtureRoom, emptySnapshot, fixtureRooms } from '../fixtures/player'
 import { useRoomList } from '../hooks/useRoomList'
+import { usePipelines } from '../hooks/usePipelines'
 import { ageLabel, updatedAgoLabel } from '../lib/time'
 import {
   ROOM_TABS,
@@ -356,7 +357,7 @@ export function RoomList() {
       )}
 
       {!viewer && (
-        <NewRoomDialog open={newOpen} onOpenChange={setNewOpen} pipelines={pipelines} defaultPipeline={pipeline} />
+        <NewRoomDialog open={newOpen} onOpenChange={setNewOpen} defaultPipeline={pipeline} />
       )}
     </div>
   )
@@ -644,7 +645,7 @@ function RoomRow({
         {canTake ? (
           <Button
             variant="outline"
-            className="h-[26px] gap-1.5 px-2 text-xs"
+            className="h-[26px] gap-1.5 px-2 text-xs coarse:h-11 coarse:px-4"
             disabled={taking}
             title={room.driver ? `${room.driver.name}'s lease has expired` : undefined}
             onClick={onTake}
@@ -828,46 +829,40 @@ const FIELD_LABEL = 'text-xs font-medium text-muted-foreground'
 function NewRoomDialog({
   open,
   onOpenChange,
-  pipelines,
   defaultPipeline,
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
-  pipelines: string[]
   defaultPipeline: string | null
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
-        <NewRoomForm onClose={() => onOpenChange(false)} pipelines={pipelines} defaultPipeline={defaultPipeline} />
+        <NewRoomForm onClose={() => onOpenChange(false)} defaultPipeline={defaultPipeline} />
       </DialogContent>
     </Dialog>
   )
 }
 
-function NewRoomForm({
-  onClose,
-  pipelines,
-  defaultPipeline,
-}: {
-  onClose: () => void
-  pipelines: string[]
-  defaultPipeline: string | null
-}) {
+function NewRoomForm({ onClose, defaultPipeline }: { onClose: () => void; defaultPipeline: string | null }) {
+  const loaded = usePipelines()
+  const pipelines = loaded.status === 'ready' ? loaded.data : []
   const navigate = useNavigate()
   const [title, setTitle] = useState('')
   const [severity, setSeverity] = useState('sev2')
-  const [pipelineId, setPipelineId] = useState(defaultPipeline ?? pipelines[0] ?? 'orders')
+  const [pipelineId, setPipelineId] = useState(defaultPipeline ?? '')
   const [busy, setBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  // The choice must be one the server lists; until the person picks, the first (or the filter on screen).
+  const chosen = pipelines.some((p) => p.id === pipelineId) ? pipelineId : (pipelines[0]?.id ?? '')
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault()
-    if (!title.trim()) return
+    if (!title.trim() || !chosen) return
     setBusy(true)
     setCreateError(null)
     try {
-      const pipeline = pipelineId.trim() || 'orders'
+      const pipeline = chosen
       let id: string
       if (isFixtures()) {
         const snapshot = emptySnapshot(`r_${Date.now().toString(36)}`, title.trim(), severity, pipeline)
@@ -899,7 +894,7 @@ function NewRoomForm({
               id="new-title"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="Warehouse orders stale"
+              placeholder="What is wrong?"
               required
               autoFocus
             />
@@ -926,21 +921,35 @@ function NewRoomForm({
               <label htmlFor="new-pipeline" className={FIELD_LABEL}>
                 Pipeline
               </label>
-              <Input
+              <select
                 id="new-pipeline"
-                className="font-mono"
-                list="new-pipeline-options"
-                value={pipelineId}
+                value={chosen}
                 onChange={(e) => setPipelineId(e.target.value)}
-                placeholder="orders"
-              />
-              <datalist id="new-pipeline-options">
+                disabled={pipelines.length === 0}
+                className="h-8 w-full rounded-md border border-input-border bg-background px-2 font-mono text-sm text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30 disabled:opacity-60"
+              >
+                {pipelines.length === 0 && <option value="">{loaded.status === 'loading' ? 'Loading…' : 'None'}</option>}
                 {pipelines.map((p) => (
-                  <option key={p} value={p} />
+                  <option key={p.id} value={p.id}>
+                    {p.title && p.title !== p.id ? `${p.id} · ${p.title}` : p.id}
+                  </option>
                 ))}
-              </datalist>
+              </select>
             </div>
           </div>
+          {loaded.status === 'error' && (
+            <div role="alert" className="flex items-center gap-2 text-sm text-destructive-fg">
+              <span>Could not load the pipelines: {loaded.message}</span>
+              <Button type="button" variant="secondary" onClick={loaded.reload}>
+                Try again
+              </Button>
+            </div>
+          )}
+          {loaded.status === 'ready' && pipelines.length === 0 && (
+            <p role="status" className="m-0 text-sm text-muted-foreground">
+              This server has no pipelines configured, so a room cannot be opened by hand. Add one to owners.yaml.
+            </p>
+          )}
           {createError && (
             <p role="alert" className="text-sm text-destructive-fg">
               {createError}
@@ -950,7 +959,7 @@ function NewRoomForm({
             <Button type="button" variant="ghost" onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy || !title.trim()}>
+            <Button type="submit" disabled={busy || !title.trim() || !chosen}>
               Open room
             </Button>
           </DialogFooter>

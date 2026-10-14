@@ -95,6 +95,7 @@ function SoonItem({ icon, label }: { icon: ReactNode; label: string }) {
 
 export function SidebarContent({
   openRooms,
+  needsYou = 0,
   pipelines,
   currentPipelineId,
   navKey,
@@ -102,6 +103,8 @@ export function SidebarContent({
   onNavigate,
 }: {
   openRooms: number
+  /** Open rooms with a layer waiting on this person. */
+  needsYou?: number
   pipelines: PipelineSummary[]
   /** The pipeline of the room on screen, if any. */
   currentPipelineId?: string
@@ -151,11 +154,18 @@ export function SidebarContent({
               to="/"
               className={cn(itemClass, onList && activeClass)}
               aria-current={onList ? 'page' : undefined}
+              aria-label={needsYou > 0 ? `Rooms, ${needsYou} need you` : undefined}
               onClick={onNavigate}
             >
               <Inbox aria-hidden="true" />
               Rooms
-              <Count>{openRooms}</Count>
+              {needsYou > 0 ? (
+                <Badge variant="warning" className="ml-auto">
+                  Needs you {needsYou}
+                </Badge>
+              ) : (
+                <Count>{openRooms}</Count>
+              )}
             </Link>
           </li>
           <li>

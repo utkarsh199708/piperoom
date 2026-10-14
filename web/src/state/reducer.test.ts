@@ -143,14 +143,25 @@ describe('applyEvent — every event type', () => {
     expect(s.comments[0].author.id).toBe('arjun')
   })
 
-  it('steer.suggested adds a pending suggestion; steer.sent with id removes it', () => {
+  it('steer.declined marks the suggestion declined with who and why', () => {
+    let s = applyEvent(base(), ev(1, 'steer.suggested', { suggestion_id: 'g1', text: 'try X' }, { kind: 'human', id: 'kabir', name: 'Kabir' }))
+    s = applyEvent(s, ev(2, 'steer.declined', { suggestion_id: 'g1', reason: 'not now' }, human))
+    expect(s.suggestions[0]).toMatchObject({ status: 'declined', declined_by: human, reason: 'not now' })
+    // An unknown id changes nothing.
+    const t = applyEvent(s, ev(3, 'steer.declined', { suggestion_id: 'nope' }, human))
+    expect(t.suggestions).toEqual(s.suggestions)
+  })
+
+  it('steer.suggested adds a pending suggestion; steer.sent with id marks it accepted', () => {
     let s = applyEvent(
       base(),
       ev(1, 'steer.suggested', { suggestion_id: 'g1', text: 'try X' }, human),
     )
     expect(s.suggestions).toHaveLength(1)
+    expect(s.suggestions[0].status).toBe('pending')
     s = applyEvent(s, ev(2, 'steer.sent', { suggestion_id: 'g1', text: 'try X' }, human))
-    expect(s.suggestions).toHaveLength(0)
+    expect(s.suggestions).toHaveLength(1)
+    expect(s.suggestions[0].status).toBe('accepted')
   })
 
   it('control.requested and control.granted move the driver', () => {
@@ -230,6 +241,40 @@ describe('applyEvent — every event type', () => {
     s = applyEvent(s, ev(2, 'handoff.accepted', { handoff_id: 'h1' }, { kind: 'human', id: 'kabir', name: 'Kabir' }))
     expect(s.handoffs[0].status).toBe('accepted')
     expect(s.driver?.id).toBe('kabir')
+  })
+
+  it('handoff.requested is in flight until handoff.created / handoff.failed with its request_id', () => {
+    const to = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+    const summary = { what_broke: '', why: '', done: [], ruled_out: [], open: [], risks: [] }
+    const requested = ev(
+      1,
+      'handoff.requested',
+      { request_id: 'hr_1', to, stay_as_watcher: true, expires_at: '2026-10-11T10:03:00Z' },
+      human,
+    )
+    let s = applyEvent(base(), requested)
+    expect(s.handoff_request).toMatchObject({ request_id: 'hr_1', stay_as_watcher: true })
+
+    // Another request's ending does not end this one.
+    const other = applyEvent(s, ev(2, 'handoff.failed', { request_id: 'hr_other', reason: 'summary_failed' }, agent))
+    expect(other.handoff_request?.request_id).toBe('hr_1')
+
+    const done = applyEvent(
+      s,
+      ev(2, 'handoff.created', { handoff_id: 'h1', request_id: 'hr_1', to, summary, stay_as_watcher: true }, human),
+    )
+    expect(done.handoff_request).toBeNull()
+    expect(done.handoffs).toHaveLength(1)
+
+    s = applyEvent(s, ev(2, 'handoff.failed', { request_id: 'hr_1', reason: 'summary_failed' }, agent))
+    expect(s.handoff_request).toBeNull()
+    expect(s.handoff_failure).toEqual({ request_id: 'hr_1', reason: 'summary_failed' })
+    // A new request clears the old failure.
+    s = applyEvent(
+      s,
+      ev(3, 'handoff.requested', { request_id: 'hr_2', to, stay_as_watcher: false, expires_at: '2026-10-11T10:06:00Z' }, human),
+    )
+    expect(s.handoff_failure).toBeNull()
   })
 
   it('trace.pinned stores the trace', () => {
@@ -642,5 +687,67 @@ describe('fromSnapshot', () => {
     expect(s.proposals).toEqual([])
     expect(s.suggestions).toEqual([])
     expect(s.members).toEqual([])
+  })
+})
+
+describe('applyEvent — hypothesis verdicts and nudges (F9)', () => {
+  const kabir = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+  const priya = { kind: 'human' as const, id: 'priya', name: 'Priya' }
+  const hypo = (seq: number, confidence: string) =>
+    ev(seq, 'agent.hypothesis', { text: 'h', based_on_steps: [], confidence, confirmed: true })
+
+  it('derives confirmed from verdicts, ignoring the agent flag', () => {
+    let s = applyEvent(base(), hypo(1, 'low'))
+    expect(s.hypothesis?.confirmed).toBe(false)
+    expect(s.hypothesis?.seq).toBe(1)
+    s = applyEvent(s, ev(2, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, kabir))
+    expect(s.hypothesis?.confirmed).toBe(true)
+    s = applyEvent(s, ev(3, 'hypothesis.verdict', { verdict: 'disputed', note: 'DDL never ran', hypothesis_seq: 1 }, priya))
+    expect(s.hypothesis?.confirmed).toBe(false)
+    expect(s.hypothesis?.verdicts?.map((v) => `${v.by.id}:${v.verdict}`)).toEqual(['kabir:confirmed', 'priya:disputed'])
+    expect(s.hypothesis?.verdicts?.[1].note).toBe('DDL never ran')
+  })
+
+  it('keeps the latest verdict per person, moved to the end', () => {
+    let s = applyEvent(base(), hypo(1, 'low'))
+    s = applyEvent(s, ev(2, 'hypothesis.verdict', { verdict: 'disputed', hypothesis_seq: 1 }, priya))
+    s = applyEvent(s, ev(3, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, kabir))
+    s = applyEvent(s, ev(4, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, priya))
+    expect(s.hypothesis?.verdicts?.map((v) => v.by.id)).toEqual(['kabir', 'priya'])
+    expect(s.hypothesis?.confirmed).toBe(true)
+  })
+
+  it('a new hypothesis clears verdicts; a stale verdict or none at all changes nothing', () => {
+    let s = applyEvent(base(), ev(1, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, kabir))
+    expect(s.hypothesis).toBeNull()
+    s = applyEvent(s, hypo(2, 'low'))
+    s = applyEvent(s, ev(3, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 2 }, kabir))
+    s = applyEvent(s, hypo(4, 'high'))
+    expect(s.hypothesis?.verdicts).toEqual([])
+    expect(s.hypothesis?.confirmed).toBe(false)
+    s = applyEvent(s, ev(5, 'hypothesis.verdict', { verdict: 'disputed', hypothesis_seq: 2 }, priya))
+    expect(s.hypothesis?.verdicts).toEqual([])
+  })
+
+  it('keeps the confidence path: repeats dropped, capped at 20', () => {
+    let s = applyEvent(base(), hypo(1, 'low'))
+    s = applyEvent(s, hypo(2, 'low'))
+    s = applyEvent(s, hypo(3, 'medium'))
+    s = applyEvent(s, hypo(4, 'high'))
+    expect(s.hypothesis_history.map((h) => h.confidence)).toEqual(['low', 'medium', 'high'])
+    let long = base()
+    for (let i = 1; i <= 30; i++) long = applyEvent(long, hypo(i, i % 2 ? 'low' : 'high'))
+    expect(long.hypothesis_history).toHaveLength(20)
+    expect(long.hypothesis_history[19].seq).toBe(30)
+  })
+
+  it('records a nudge and describes the new events', () => {
+    const s = applyEvent(base(), ev(1, 'approval.nudged', { proposal_id: 'p1', layer: 'kafka-connect' }, priya))
+    expect(s.nudges['p1/kafka-connect'].by.id).toBe('priya')
+    expect(s.activity[0].text).toBe('Priya nudged kafka-connect owners')
+    const v = applyEvent(applyEvent(base(), hypo(1, 'low')), ev(2, 'hypothesis.verdict', { verdict: 'disputed', note: 'no', hypothesis_seq: 1 }, priya))
+    expect(v.activity[0].text).toBe('Priya disputed the hypothesis: no')
+    const c = applyEvent(v, ev(3, 'hypothesis.verdict', { verdict: 'confirmed', hypothesis_seq: 1 }, kabir))
+    expect(c.activity[0].text).toBe('Kabir confirmed the hypothesis')
   })
 })

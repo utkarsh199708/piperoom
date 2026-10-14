@@ -38,6 +38,7 @@ import (
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
+	"piperoom/internal/version"
 	"piperoom/internal/watch"
 	"piperoom/internal/wiring"
 	"piperoom/migrations"
@@ -56,14 +57,25 @@ func run() error {
 	demoMode := flag.Bool("demo", false, "run a scripted fake agent (no real tools/agent)")
 	allowRemote := flag.Bool("allow-remote", false, "DEPRECATED alias of PIPEROOM_DEV_ALLOW_NONLOOPBACK=1: allow dev auth on a non-loopback PIPEROOM_HTTP_ADDR")
 	probe := flag.Bool("healthcheck", false, "probe GET /healthz on PIPEROOM_HTTP_ADDR and exit 0 if healthy (for the container HEALTHCHECK)")
+	showVersion := flag.Bool("version", false, "print the build version and exit")
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Println(version.String())
+		return nil
+	}
 	cfg := config.Load()
 	if *probe {
 		return healthcheck(context.Background(), cfg.HTTPAddr)
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	// A bad PIPEROOM_LOG_LEVEL or _FORMAT stops the start before anything is
+	// logged in a format the collector would not parse.
+	log, err := newLogger(cfg, os.Stderr)
+	if err != nil {
+		return err
+	}
 	slog.SetDefault(log)
+	log.Info("server: starting", "version", version.String())
 
 	// The agent cap is cost control: parse it first so a bad value stops the
 	// server before it connects to anything.
@@ -89,6 +101,12 @@ func run() error {
 	watchCfg, err := watchConfig(cfg, *demoMode, log)
 	if err != nil {
 		return err
+	}
+
+	// A bad PIPEROOM_POSTMORTEM_MODEL stops the server.
+	pmMode, err := config.ParsePostmortemModel(cfg)
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
 	}
 
 	// Shadow mode numbers (docs/design/shadow.md 5.3): a bad
@@ -252,7 +270,10 @@ func run() error {
 		topo     topology.Builder
 		run      = agent.Run
 		write    = agent.WriteHandoff
-		stacks   *wiring.Stacks // nil in demo mode
+		// writePM is room.Deps.WritePostmortem; nil gives the events-only
+		// draft (PIPEROOM_POSTMORTEM_MODEL=off, or no writer wired yet).
+		writePM agent.PostmortemWriter
+		stacks  *wiring.Stacks // nil in demo mode
 		// stackFor is room.Deps.StackFor: nil in demo mode, where every
 		// room uses acts and toolsReg.
 		stackFor func(string) room.PipelineStack
@@ -279,6 +300,9 @@ func run() error {
 		topo = demo.Builder{}
 		run = demo.Run
 		write = demo.WriteHandoff
+		if pmMode == config.PostmortemModelAuto {
+			writePM = demo.WritePostmortem
+		}
 	} else {
 		// The model endpoint first: a wrong provider, region, project or token
 		// budget should stop the server before it opens any connection.
@@ -320,15 +344,16 @@ func run() error {
 	}
 
 	svc := newRoomService(room.Deps{
-		Store:        st,
-		Actions:      acts,
-		Tools:        toolsReg,
-		StackFor:     stackFor,
-		Topology:     topo,
-		Users:        users,
-		Owners:       own,
-		Run:          run,
-		WriteHandoff: write,
+		Store:           st,
+		Actions:         acts,
+		Tools:           toolsReg,
+		StackFor:        stackFor,
+		Topology:        topo,
+		Users:           users,
+		Owners:          own,
+		Run:             run,
+		WriteHandoff:    write,
+		WritePostmortem: writePM,
 		Options: agent.Options{
 			Model:    cfg.Model,
 			Effort:   cfg.Effort,
@@ -394,6 +419,14 @@ func run() error {
 	sessionPruner, loginStatePruner := authPruners(sessions, loginStates)
 	stopAuthPrune := startElectedAuthPrune(ctx, elector, sessionPruner, loginStatePruner, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopAuthPrune()
+	// The change log keeps PIPEROOM_CHANGES_RETENTION_DAYS (default 30) of rows.
+	changesDays, err := config.ParseChangesRetentionDays(cfg)
+	if err != nil {
+		return err
+	}
+	changesPurge, _ := st.(changesPurger)
+	stopChangesRetention := startElectedChangesRetention(ctx, elector, changesPurge, changesDays, retentionInterval, retentionRunTimeout, time.Now, log)
+	defer stopChangesRetention()
 
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions),
 		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities),

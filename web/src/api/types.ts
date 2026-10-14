@@ -26,18 +26,25 @@ export type EventType =
   | 'comment.added'
   | 'steer.suggested'
   | 'steer.sent'
+  | 'steer.declined'
   | 'control.requested'
   | 'control.granted'
   | 'proposal.created'
   | 'approval.given'
   | 'approval.rejected'
   | 'action.executed'
+  | 'handoff.requested'
+  | 'handoff.failed'
   | 'handoff.created'
   | 'handoff.accepted'
   | 'trace.pinned'
   | 'shadow.revealed'
   | 'shadow.labelled'
   | 'shadow.graded'
+  | 'hypothesis.verdict'
+  | 'approval.nudged'
+  | 'room.labelled'
+  | 'checklist.step_done'
 
 export interface Event {
   room_id: string
@@ -49,6 +56,34 @@ export interface Event {
 }
 
 // ---- payloads (one per Type, matching events.go) ----
+
+/** room.labelled: the human label of a closed room (POST /api/rooms/{id}/label). */
+export interface RoomLabelledPayload {
+  actual_layer?: string
+  cause: string
+  fix_that_worked?: string
+  fix_proposal_id?: string
+  agent_helped?: boolean
+}
+
+/** checklist.step_done: item `item` of hits[`hit`].items of tool result `tool_use_id` ticked or unticked. */
+export interface ChecklistStepDonePayload {
+  step_id: string
+  tool_use_id: string
+  hit: number
+  item: number
+  done: boolean
+  note?: string
+}
+
+/** Body of POST /api/rooms/{id}/label. */
+export interface LabelInput {
+  actual_layer?: string
+  cause: string
+  fix_that_worked?: string
+  fix_proposal_id?: string
+  agent_helped?: boolean
+}
 
 export interface RoomCreatedPayload {
   title: string
@@ -134,6 +169,11 @@ export interface SteerSentPayload {
   text: string
 }
 
+export interface SteerDeclinedPayload {
+  suggestion_id: string
+  reason?: string
+}
+
 export type ControlRequestedPayload = Record<string, never>
 
 export interface ControlGrantedPayload {
@@ -205,8 +245,24 @@ export interface HandoffSummary {
   risks: string[]
 }
 
+/** handoff.requested (R0): a hand-off is being written; in flight until created / failed / expires_at. */
+export interface HandoffRequestedPayload {
+  request_id: string
+  to: Actor
+  stay_as_watcher: boolean
+  expires_at: string
+}
+
+/** handoff.failed (R0): ends a request without a hand-off. `reason` is a fixed code, never error text. */
+export interface HandoffFailedPayload {
+  request_id: string
+  reason: 'summary_failed' | 'not_driver' | 'room_closed' | 'internal_error' | string
+}
+
 export interface HandoffCreatedPayload {
   handoff_id: string
+  /** The handoff.requested it completes; absent on events from before R0. */
+  request_id?: string
   to: Actor
   summary: HandoffSummary
   stay_as_watcher: boolean
@@ -288,6 +344,25 @@ export interface HypothesisSummary {
   based_on_steps: string[]
   confidence: string
   confirmed: boolean
+  /** F9: seq of the agent.hypothesis event. */
+  seq?: number
+  /** F9: latest verdict per person on `seq`. */
+  verdicts?: { verdict: HypothesisVerdict; by: { id: string; name: string; verified?: boolean }; note?: string; at: string }[]
+}
+
+export type HypothesisVerdict = 'confirmed' | 'disputed'
+
+/** hypothesis.verdict (F9). hypothesis_seq is the agent.hypothesis it answers. */
+export interface HypothesisVerdictPayload {
+  verdict: HypothesisVerdict
+  note?: string
+  hypothesis_seq: number
+}
+
+/** approval.nudged (F9): ids only. */
+export interface ApprovalNudgedPayload {
+  proposal_id: string
+  layer: string
 }
 
 export interface RoomSnapshot {
@@ -308,6 +383,8 @@ export interface RoomSnapshot {
   members: MemberSummary[]
   /** True when the room opened as a shadow room: the agent ran silently, no proposals. */
   shadow?: boolean
+  /** F8: a room.labelled exists. */
+  labelled?: boolean
 }
 
 export interface TopologyNode {
@@ -348,17 +425,35 @@ export interface Me {
 }
 
 /** One row of GET /api/people: a person a driver may grant control or hand off to. */
+/** One row of GET /auth/users (dev mode only): who the dev login screen may pick. */
+export interface AuthUser {
+  id: string
+  name: string
+  layers: string[]
+}
+
+/** One row of GET /api/pipelines. */
+export interface PipelineInfo {
+  id: string
+  title: string
+  shadow: boolean
+}
+
 export interface Person {
   id: string
   name: string
   /** Only for IdP users with a verified email. */
   email?: string
+  /** F9: the layers the person may approve; absent from an old server. */
+  layers?: string[]
 }
 
 export interface PresenceMember {
   id: string
   name: string
   state: 'viewing' | 'away'
+  /** F9: when the member entered `state`, RFC 3339 UTC; absent from an old server. */
+  since?: string
 }
 
 export interface EventsPage {

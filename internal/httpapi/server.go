@@ -167,11 +167,15 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 			// runs outside the request timeout: the connection outlives the
 			// request. Replay has its own deadline in the gateway.
 			protected.Get("/rooms/{id}/ws", visible(s.gw.ServeHTTP))
+			// The rooms list socket (F6): filtered per person in the gateway.
+			protected.Get("/rooms/ws", s.gw.ServeRoomsHTTP)
 
 			// The hand-off route is exempt from the default budget.
 			protected.Post("/rooms/{id}/handoffs", withTimeout(handoffTimeout, visible(s.handleCreateHandoff)))
 			// The audit export reads the whole log, so it has its own budget.
 			protected.Get("/rooms/{id}/export", withTimeout(exportTimeout, visible(s.handleExportRoom)))
+			// The post-mortem draft reads the whole log too.
+			protected.Get("/rooms/{id}/postmortem.md", withTimeout(exportTimeout, visible(s.handleRoomPostmortem)))
 			// Deletion may write the same export to the archive first. Not
 			// wrapped in visible: the admin check answers first (403 for
 			// anyone else, whatever the id), then DeleteRoom answers 404 for
@@ -196,11 +200,16 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/rooms/{id}/comments", visible(s.handleAddComment))
 				short.Post("/rooms/{id}/steer", visible(s.handleSteer))
 				short.Post("/rooms/{id}/suggestions/{sid}/send", visible(s.handleSendSuggestion))
+				short.Post("/rooms/{id}/suggestions/{sid}/decline", visible(s.handleDeclineSuggestion))
+				short.Post("/rooms/{id}/hypothesis", visible(s.handleHypothesisVerdict))
+				short.Post("/rooms/{id}/nudge", visible(s.handleNudge))
 				short.Post("/rooms/{id}/control/request", visible(s.handleRequestControl))
 				short.Post("/rooms/{id}/control/grant", visible(s.handleGrantControl))
 				short.Post("/rooms/{id}/close", visible(s.handleCloseRoom))
 				short.Post("/rooms/{id}/extend", visible(s.handleExtendRoom))
 				short.Post("/rooms/{id}/trace", visible(s.handleTrace))
+				short.Post("/rooms/{id}/label", visible(s.handleLabel))
+				short.Post("/rooms/{id}/checklist", visible(s.handleChecklist))
 				short.Post("/rooms/{id}/shadow/blind", visible(s.handleShadowBlind))
 				short.Get("/rooms/{id}/shadow", visible(s.handleShadow))
 				short.Post("/rooms/{id}/shadow/grade", visible(s.handleShadowGrade))
@@ -212,6 +221,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)
 				short.Get("/pipelines", s.handlePipelines)
 				short.Get("/pipelines/{pid}/topology", s.pipelineVisible(s.handleTopology))
+				short.Get("/pipelines/{pid}/agent-stats", s.handleAgentStats)
 			})
 		})
 	})
