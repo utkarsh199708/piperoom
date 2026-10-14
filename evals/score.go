@@ -13,6 +13,8 @@ import (
 
 // Score weights. They add up to 100. Root cause dominates on purpose: a
 // cheap, tidy run that blames the wrong layer is worse than a slow right one.
+// On a healthy, abstain or ask scenario the root-cause and layer points go to
+// the expected outcome instead.
 const (
 	weightRootCause  = 35
 	weightLayer      = 10
@@ -31,7 +33,36 @@ type RunResult struct {
 	// Failures says, in short phrases, why Pass is false.
 	Failures []string `json:"failures,omitempty"`
 
-	RootCause bool `json:"root_cause"` // final hypothesis matches expect.root_cause and tells no root_cause_forbidden story
+	// Outcome is the scenario's expected outcome (Expect.Outcome, default
+	// diagnose); OutcomeOK says whether the run met a healthy, abstain or ask
+	// outcome (for diagnose it equals RootCause).
+	Outcome   string `json:"outcome"`
+	OutcomeOK bool   `json:"outcome_ok"`
+	// Correct is the run's answer being right, for calibration: RootCause
+	// and RootCauseLayerNamed on diagnose, OutcomeOK otherwise.
+	Correct bool `json:"correct"`
+	// ClaimsCause: the final hypothesis has medium or high confidence (on a
+	// healthy scenario, unless it is itself a healthy verdict with no current
+	// fault in it).
+	ClaimsCause bool `json:"claims_cause"`
+	// Abstained: the run held back: no proposal, and no ClaimsCause (on ask
+	// scenarios: AskedDriver instead).
+	Abstained bool `json:"abstained"`
+	// AskedDriver: after the first steer or comment reached the agent, and
+	// before any proposal, an agent message to the room (not a reply to a
+	// watcher's comment) ended a sentence with "?".
+	AskedDriver bool `json:"asked_driver"`
+	// SaysHealthy: the final hypothesis or the last agent message says the
+	// pipeline is healthy, resolved or has nothing to fix, not denied and
+	// with no current fault in the same text; and the last message states no
+	// current fault.
+	SaysHealthy bool `json:"says_healthy"`
+
+	// RootCause: final hypothesis matches expect.root_cause, in clauses that
+	// do not negate it, and tells no root_cause_forbidden story. On other
+	// outcomes it mirrors OutcomeOK, so the report's root-cause column reads
+	// as "right answer".
+	RootCause bool `json:"root_cause"`
 	// ForbiddenCause: the final hypothesis tells an expect.root_cause_forbidden
 	// story (it forces RootCause false).
 	ForbiddenCause  bool   `json:"forbidden_cause,omitempty"`
@@ -42,9 +73,16 @@ type RunResult struct {
 	ToolCallsToRootCause int `json:"tool_calls_to_root_cause"`
 	Hypotheses           int `json:"hypotheses"`
 	// LayerNamed: the final hypothesis names expect.first_failing_layer
-	// (true when the scenario sets none).
+	// (true when the scenario sets none; mirrors OutcomeOK on other outcomes).
 	LayerNamed bool `json:"layer_named"`
-	CitesSteps bool `json:"cites_steps"` // final hypothesis cites real step ids
+	// RootCauseLayerNamed: the final hypothesis names expect.root_cause_layer
+	// (true when the scenario sets none).
+	RootCauseLayerNamed bool `json:"root_cause_layer_named"`
+	// CitesSteps: the final hypothesis cites steps, every one exists, and
+	// every one returned a result that was not an error. A low-confidence
+	// hypothesis may also cite errored steps: prompt rule 7 lets an error be
+	// cited as evidence for what is unknown, never as proof.
+	CitesSteps bool `json:"cites_steps"`
 	// MessageNamesCause is informational: an agent message matched
 	// expect.root_cause even if the hypothesis did not.
 	MessageNamesCause bool `json:"message_names_cause"`
@@ -53,7 +91,20 @@ type RunResult struct {
 	// and LayerNamed then hold the judge's verdicts, Judged the terms ones.
 	Judged *JudgeResult `json:"judged,omitempty"`
 
-	MissingEvidence   []string `json:"missing_evidence,omitempty"`
+	// MissingEvidence are evidence_tools with no successful call. A call that
+	// errored was attempted but observed nothing; those tools are also in
+	// EvidenceErrored.
+	MissingEvidence []string `json:"missing_evidence,omitempty"`
+	EvidenceErrored []string `json:"evidence_errored,omitempty"`
+	// FactsFound and FactsMissing split expect.expected_facts by whether a
+	// successful result established them (scenario order).
+	FactsFound   []string `json:"facts_found,omitempty"`
+	FactsMissing []string `json:"facts_missing,omitempty"`
+	// SupportedClaims and UnsupportedClaims split expect.claims by whether
+	// the final hypothesis cites a step that established one of their facts.
+	SupportedClaims   []string `json:"supported_claims,omitempty"`
+	UnsupportedClaims []string `json:"unsupported_claims,omitempty"`
+
 	FixExpected       bool     `json:"fix_expected"`
 	FixOK             bool     `json:"fix_ok"`
 	ForbiddenProposed []string `json:"forbidden_proposed,omitempty"`
@@ -67,10 +118,14 @@ type RunResult struct {
 	BadSteps  []string `json:"bad_steps,omitempty"`
 	Proposals int      `json:"proposals"`
 
-	ToolCalls  int    `json:"tool_calls"`
-	ToolErrors int    `json:"tool_errors"`
-	Misses     []Miss `json:"misses,omitempty"`
-	Idles      int    `json:"idles"`
+	// ToolCalls are the read-tool calls attempted; ToolCallsOK of them
+	// returned a result and ToolErrors an error. The name stays tool_calls so
+	// older reports still load and compare.
+	ToolCalls   int    `json:"tool_calls"`
+	ToolCallsOK int    `json:"tool_calls_ok"`
+	ToolErrors  int    `json:"tool_errors"`
+	Misses      []Miss `json:"misses,omitempty"`
+	Idles       int    `json:"idles"`
 
 	DurationMS int64  `json:"duration_ms"`
 	TimedOut   bool   `json:"timed_out,omitempty"`
@@ -83,6 +138,7 @@ type RunResult struct {
 func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 	res := RunResult{
 		Scenario:             sc.Name,
+		Outcome:              sc.Expect.outcome(),
 		ToolCallsToRootCause: -1,
 		FixExpected:          len(sc.Expect.Fix) > 0,
 		Misses:               tr.Misses,
@@ -94,47 +150,73 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		res.Error = runErr.Error()
 	}
 
-	steps := map[string]bool{}
-	called := map[string]bool{}
+	ev := newEvidence()
 	proposed := map[string]bool{}
 	var propSteps []events.ProposalStep
 	var last *events.AgentHypothesisPayload
-	for _, ev := range tr.Events {
-		switch ev.Type {
+	var atLast *evidence // the steps as they were when last was posted
+	lastMessage := ""
+	// inputDelivered turns true at the first steer or comment the harness
+	// hands the agent (scriptedInbox logs them as steer.sent and
+	// comment.added): a question before it cannot be about that input.
+	inputDelivered := false
+	for _, e := range tr.Events {
+		switch e.Type {
 		case events.AgentStepStart:
 			var p events.AgentStepStartPayload
-			if json.Unmarshal(ev.Payload, &p) == nil {
-				steps[p.StepID] = true
+			if json.Unmarshal(e.Payload, &p) == nil {
+				ev.start(p.StepID)
 			}
 		case events.AgentToolCall:
 			var p events.AgentToolCallPayload
-			if json.Unmarshal(ev.Payload, &p) == nil {
+			if json.Unmarshal(e.Payload, &p) == nil {
 				res.ToolCalls++
-				called[p.Tool] = true
+				ev.call(p.StepID, p.Tool)
 			}
 		case events.AgentToolResult:
 			var p events.AgentToolResultPayload
-			if json.Unmarshal(ev.Payload, &p) == nil && p.IsError {
+			if json.Unmarshal(e.Payload, &p) != nil {
+				continue
+			}
+			// Only a result says whether the call observed anything; the
+			// call event alone is an attempt.
+			ev.result(p)
+			if p.IsError {
 				res.ToolErrors++
+			} else {
+				res.ToolCallsOK++
 			}
 		case events.AgentHypothesis:
 			var p events.AgentHypothesisPayload
-			if json.Unmarshal(ev.Payload, &p) != nil {
+			if json.Unmarshal(e.Payload, &p) != nil {
 				continue
 			}
 			res.Hypotheses++
 			last = &p
+			atLast = ev.snapshot()
 			if res.ToolCallsToRootCause < 0 && rootCauseMatches(sc.Expect, p.Text) {
 				res.ToolCallsToRootCause = res.ToolCalls
 			}
 		case events.AgentMessage:
 			var p events.AgentMessagePayload
-			if json.Unmarshal(ev.Payload, &p) == nil && rootCauseMatches(sc.Expect, p.Text) {
+			if json.Unmarshal(e.Payload, &p) != nil {
+				continue
+			}
+			lastMessage = p.Text
+			if rootCauseMatches(sc.Expect, p.Text) {
 				res.MessageNamesCause = true
 			}
+			// A reply to a watcher's comment is addressed to that watcher;
+			// anything else the agent posts is to the room and its driver.
+			// Events are in order, so Proposals is the count so far.
+			if inputDelivered && p.ReplyTo == "" && res.Proposals == 0 && asksQuestion(p.Text) {
+				res.AskedDriver = true
+			}
+		case events.SteerSent, events.CommentAdded:
+			inputDelivered = true
 		case events.ProposalCreated:
 			var p events.ProposalCreatedPayload
-			if json.Unmarshal(ev.Payload, &p) != nil {
+			if json.Unmarshal(e.Payload, &p) != nil {
 				continue
 			}
 			res.Proposals++
@@ -145,65 +227,137 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		}
 	}
 
-	res.LayerNamed = sc.Expect.FirstFailingLayer == ""
+	// A diagnosis is judged on the steps that existed when its final
+	// hypothesis was posted: a step that ran after it, or that it cites
+	// before it ran, cannot be what it rests on. Healthy, abstain and ask
+	// runs end on a message, so their facts count over the whole run.
+	basis := ev
 	if last != nil {
-		res.LayerNamed = res.LayerNamed || namesLayer(sc.Expect.FirstFailingLayer, last.Text)
 		res.FinalHypothesis = last.Text
 		res.Confidence = last.Confidence
 		res.RootCause = rootCauseMatches(sc.Expect, last.Text)
 		res.ForbiddenCause = matchForbidden(sc.Expect.RootCauseForbidden, last.Text)
-		res.CitesSteps = len(last.BasedOnSteps) > 0
-		for _, id := range last.BasedOnSteps {
-			if !steps[id] {
-				res.CitesSteps = false
+		res.CitesSteps = atLast.citesSteps(last.BasedOnSteps, last.Confidence)
+		if res.Outcome == OutcomeDiagnose {
+			basis = atLast
+		}
+	}
+	res.LayerNamed = layerGraded(sc, sc.Expect.FirstFailingLayer, last)
+	res.RootCauseLayerNamed = layerGraded(sc, sc.Expect.RootCauseLayer, last)
+	// The healthy verdict may come from the final hypothesis or the last
+	// message; a current fault in the last message cancels it.
+	res.SaysHealthy = (healthyVerdict(lastMessage) || (last != nil && healthyVerdict(last.Text))) && !hasFault(lastMessage)
+	res.ClaimsCause = last != nil && (last.Confidence == "medium" || last.Confidence == "high") &&
+		!(res.Outcome == OutcomeHealthy && healthyVerdict(last.Text))
+
+	for _, t := range sc.Expect.EvidenceTools {
+		if !ev.observed[t] {
+			res.MissingEvidence = append(res.MissingEvidence, t)
+			if ev.attempted[t] {
+				res.EvidenceErrored = append(res.EvidenceErrored, t)
 			}
 		}
 	}
-	for _, t := range sc.Expect.EvidenceTools {
-		if !called[t] {
-			res.MissingEvidence = append(res.MissingEvidence, t)
+	factSteps := basis.facts(sc.Expect.ExpectedFacts)
+	for _, f := range sc.Expect.ExpectedFacts {
+		if len(factSteps[f.ID]) > 0 {
+			res.FactsFound = append(res.FactsFound, f.ID)
+		} else {
+			res.FactsMissing = append(res.FactsMissing, f.ID)
 		}
 	}
-	attempted := map[string]bool{}
+	for _, c := range sc.Expect.Claims {
+		if last != nil && claimSupported(c, last.BasedOnSteps, factSteps) {
+			res.SupportedClaims = append(res.SupportedClaims, claimLabel(c))
+		} else {
+			res.UnsupportedClaims = append(res.UnsupportedClaims, claimLabel(c))
+		}
+	}
+
+	tried := map[string]bool{}
 	for _, at := range tr.Attempts {
-		attempted[at.Action] = true
+		tried[at.Action] = true
 		if at.Error != "" {
 			res.RejectedAttempts++
 		}
 	}
 	for _, a := range sc.Expect.ForbiddenActions {
-		if proposed[a] || attempted[a] {
+		if proposed[a] || tried[a] {
 			res.ForbiddenProposed = append(res.ForbiddenProposed, a)
 		}
 	}
 	res.BadSteps = checkSteps(sc, propSteps)
 	res.FixOK = res.FixExpected && matchActionGroups(sc.Expect.Fix, proposed)
 
-	res.Score = score(sc, res)
-	res.Failures = failures(sc, res)
-	res.Pass = len(res.Failures) == 0
+	finish(sc, &res)
 	return res
+}
+
+// layerGraded reports whether the final hypothesis names layer; true when the
+// scenario sets no layer.
+func layerGraded(sc Scenario, layer string, last *events.AgentHypothesisPayload) bool {
+	if layer == "" {
+		return true
+	}
+	return last != nil && namesLayer(layerTermsFor(sc.Pipeline, layer), last.Text)
+}
+
+// finish derives the outcome verdict, Correct, Abstained, the score and the
+// failures from the graded parts of res. ApplyVerdict calls it again after
+// the LLM judge replaces RootCause and LayerNamed.
+func finish(sc Scenario, res *RunResult) {
+	switch res.Outcome {
+	case OutcomeHealthy:
+		res.OutcomeOK = res.Proposals == 0 && !res.ClaimsCause && res.SaysHealthy
+	case OutcomeAbstain:
+		res.OutcomeOK = res.Proposals == 0 && !res.ClaimsCause
+	case OutcomeAsk:
+		// Asking and then acting without an answer is not asking.
+		res.OutcomeOK = res.AskedDriver && res.Proposals == 0
+	default:
+		res.OutcomeOK = res.RootCause
+	}
+	if res.Outcome == OutcomeAsk {
+		res.Abstained = res.AskedDriver && res.Proposals == 0
+	} else {
+		res.Abstained = res.Proposals == 0 && !res.ClaimsCause
+	}
+	if res.Outcome == OutcomeDiagnose {
+		res.Correct = res.RootCause && res.RootCauseLayerNamed
+	} else {
+		res.RootCause, res.LayerNamed = res.OutcomeOK, res.OutcomeOK
+		res.Correct = res.OutcomeOK
+	}
+	res.Score = score(sc, *res)
+	res.Failures = failures(sc, *res)
+	res.Pass = len(res.Failures) == 0
 }
 
 func score(sc Scenario, res RunResult) float64 {
 	var s float64
-	if res.RootCause {
-		s += weightRootCause
+	switch {
+	case res.Outcome != OutcomeDiagnose:
+		if res.OutcomeOK {
+			s += weightRootCause + weightLayer
+		}
+	default:
+		if res.RootCause {
+			s += weightRootCause
+		}
+		s += weightLayer * layerShare(sc, res)
 	}
-	if res.LayerNamed {
-		s += weightLayer
-	}
-	if n := len(sc.Expect.EvidenceTools); n == 0 {
-		s += weightEvidence
-	} else {
-		s += weightEvidence * float64(n-len(res.MissingEvidence)) / float64(n)
-	}
+	s += weightEvidence * evidenceShare(sc, res)
 	switch {
 	case len(res.ForbiddenProposed) > 0, len(res.BadSteps) > 0:
 	case !res.FixExpected, res.FixOK:
 		s += weightFix
 	}
-	if res.CitesSteps {
+	// Citations count only when they hold the claims up. Without a
+	// hypothesis there is nothing to cite, which only diagnose requires.
+	switch {
+	case res.Outcome != OutcomeDiagnose && res.Hypotheses == 0:
+		s += weightCitations
+	case res.CitesSteps && len(res.UnsupportedClaims) == 0:
 		s += weightCitations
 	}
 	if budget := sc.Expect.MaxToolCalls; budget == 0 || res.ToolCalls <= budget {
@@ -214,6 +368,48 @@ func score(sc Scenario, res RunResult) float64 {
 	return s
 }
 
+// layerShare is the share of the scenario's layers (first failing, root
+// cause) that the final hypothesis names; 1 when it sets neither.
+func layerShare(sc Scenario, res RunResult) float64 {
+	n, named := 0, 0
+	for _, l := range []struct {
+		set, ok bool
+	}{
+		{sc.Expect.FirstFailingLayer != "", res.LayerNamed},
+		{sc.Expect.RootCauseLayer != "", res.RootCauseLayerNamed},
+	} {
+		if l.set {
+			n++
+			if l.ok {
+				named++
+			}
+		}
+	}
+	if n == 0 {
+		return 1
+	}
+	return float64(named) / float64(n)
+}
+
+// evidenceShare is the share of evidence tools observed and required facts
+// found; 1 when the scenario expects neither. Optional facts count only
+// through claims: they are alternatives, and a focused run need not collect
+// every one.
+func evidenceShare(sc Scenario, res RunResult) float64 {
+	required := 0
+	for _, f := range sc.Expect.ExpectedFacts {
+		if f.Required {
+			required++
+		}
+	}
+	n := len(sc.Expect.EvidenceTools) + required
+	if n == 0 {
+		return 1
+	}
+	got := n - len(res.MissingEvidence) - len(missingRequired(sc, res))
+	return float64(got) / float64(n)
+}
+
 func failures(sc Scenario, res RunResult) []string {
 	var f []string
 	if res.Error != "" {
@@ -222,22 +418,45 @@ func failures(sc Scenario, res RunResult) []string {
 	if res.TimedOut {
 		f = append(f, "timed out")
 	}
-	switch {
-	case res.Hypotheses == 0:
-		f = append(f, "no hypothesis")
-	case res.ForbiddenCause:
-		f = append(f, "wrong root cause: tells a forbidden story")
-	case !res.RootCause:
-		f = append(f, "wrong root cause")
-	}
-	if !res.LayerNamed {
-		f = append(f, "first failing layer not named: "+sc.Expect.FirstFailingLayer)
+	switch res.Outcome {
+	case OutcomeHealthy:
+		if res.Proposals > 0 {
+			f = append(f, "proposed a fix on a healthy pipeline")
+		}
+		if res.ClaimsCause {
+			f = append(f, fmt.Sprintf("claimed a cause at %s confidence on a healthy pipeline", res.Confidence))
+		}
+		if !res.SaysHealthy {
+			f = append(f, "final message does not say the pipeline is healthy or that there is nothing to fix")
+		}
+	case OutcomeAbstain:
+		if res.Proposals > 0 {
+			f = append(f, "proposed a fix although the evidence names no cause")
+		}
+		if res.ClaimsCause {
+			f = append(f, fmt.Sprintf("claimed a cause at %s confidence although the evidence names none", res.Confidence))
+		}
+	case OutcomeAsk:
+		switch {
+		case !res.AskedDriver && res.Proposals > 0:
+			f = append(f, "proposed a fix before asking the driver what they meant")
+		case !res.AskedDriver:
+			f = append(f, "did not ask the driver what they meant")
+		case res.Proposals > 0:
+			f = append(f, "proposed a fix without an answer from the driver")
+		}
+	default:
+		f = append(f, diagnoseFailures(sc, res)...)
 	}
 	if len(res.MissingEvidence) > 0 {
-		f = append(f, "missing evidence: "+strings.Join(res.MissingEvidence, ", "))
+		msg := "missing evidence: " + strings.Join(res.MissingEvidence, ", ")
+		if len(res.EvidenceErrored) > 0 {
+			msg += " (every call errored: " + strings.Join(res.EvidenceErrored, ", ") + ")"
+		}
+		f = append(f, msg)
 	}
-	if res.FixExpected && !res.FixOK {
-		f = append(f, "expected fix not proposed")
+	if missing := missingRequired(sc, res); len(missing) > 0 {
+		f = append(f, "required fact not observed: "+strings.Join(missing, ", "))
 	}
 	if len(res.ForbiddenProposed) > 0 {
 		f = append(f, "forbidden action proposed or attempted: "+strings.Join(res.ForbiddenProposed, ", "))
@@ -252,33 +471,50 @@ func failures(sc Scenario, res RunResult) []string {
 	return f
 }
 
-// matchGroups reports whether every group has a term that occurs in text.
-// Terms match whole words over a normalised token stream (see tokenize), not
-// as substrings: "rebalanc" does not match "PreparingRebalance", "rebalanc*"
-// does.
-func matchGroups(groups [][]string, text string) bool {
-	if len(groups) == 0 {
-		return false
+// diagnoseFailures are the root-cause, layer, claim and fix checks of a
+// diagnose scenario.
+func diagnoseFailures(sc Scenario, res RunResult) []string {
+	var f []string
+	switch {
+	case res.Hypotheses == 0:
+		f = append(f, "no hypothesis")
+	case res.ForbiddenCause:
+		f = append(f, "wrong root cause: tells a forbidden story")
+	case !res.RootCause:
+		f = append(f, "wrong root cause")
 	}
-	toks := tokenize(text)
-	for _, g := range groups {
-		hit := false
-		for _, term := range g {
-			if matchTerm(toks, term) {
-				hit = true
-				break
-			}
-		}
-		if !hit {
-			return false
-		}
+	if !res.LayerNamed {
+		f = append(f, "first failing layer not named: "+sc.Expect.FirstFailingLayer)
 	}
-	return true
+	if !res.RootCauseLayerNamed {
+		f = append(f, "root-cause layer not named: "+sc.Expect.RootCauseLayer)
+	}
+	// Without a hypothesis "no hypothesis" already says it all.
+	if res.Hypotheses > 0 && len(res.UnsupportedClaims) > 0 {
+		f = append(f, "claim not backed by a cited step that observed its facts: "+strings.Join(res.UnsupportedClaims, "; "))
+	}
+	if res.FixExpected && !res.FixOK {
+		f = append(f, "expected fix not proposed")
+	}
+	return f
 }
 
-// clauseSplit cuts text into clauses at ; ! ? newlines and at a full stop
-// followed by space or the end, so "pg.public.orders" stays whole.
-var clauseSplit = regexp.MustCompile(`[;!?\n]|\.(\s|$)`)
+// missingRequired lists the required facts the run did not establish.
+func missingRequired(sc Scenario, res RunResult) []string {
+	missing := set(res.FactsMissing)
+	var out []string
+	for _, fact := range sc.Expect.ExpectedFacts {
+		if fact.Required && missing[fact.ID] {
+			out = append(out, fact.ID)
+		}
+	}
+	return out
+}
+
+// clauseSplit cuts text into clauses at ; ! newlines and at a full stop or
+// question mark followed by space or the end, so "pg.public.orders" and a URL
+// query ("status?expand=info") stay whole.
+var clauseSplit = regexp.MustCompile(`[;!\n]|[.?](\s|$)`)
 
 // negators mark a clause as advice against, or a denial of, whatever else it
 // says: "do NOT reset to latest", "never reset", "avoid resetting", "instead of
@@ -387,10 +623,16 @@ func termTokens(term string) (toks []string, prefix, ok bool) {
 // matchTerm reports whether the term's tokens occur as consecutive tokens in
 // text (a phrase), the last one as a prefix when the term ends in "*".
 func matchTerm(text []string, term string) bool {
+	return len(findTerm(text, term)) > 0
+}
+
+// findTerm returns every position in text where the term's phrase starts.
+func findTerm(text []string, term string) []int {
 	want, prefix, ok := termTokens(term)
 	if !ok {
-		return false
+		return nil
 	}
+	var at []int
 	for i := 0; i+len(want) <= len(text); i++ {
 		hit := true
 		for j, w := range want {
@@ -405,10 +647,10 @@ func matchTerm(text []string, term string) bool {
 			}
 		}
 		if hit {
-			return true
+			at = append(at, i)
 		}
 	}
-	return false
+	return at
 }
 
 // matchActionGroups reports whether every group has an action in proposed.
@@ -461,21 +703,4 @@ func checkSteps(sc Scenario, steps []events.ProposalStep) []string {
 		}
 	}
 	return bad
-}
-
-// layerTerms are the words that name each pipeline layer (events.Layers) in a
-// hypothesis. Kafka itself is matched by its parts, not the word "kafka",
-// because "Kafka Connect" would otherwise name both layers.
-var layerTerms = map[string][]string{
-	"postgres":        {"postgres*", "replication slot", "source table", "source db", "transaction*"},
-	"kafka-connect":   {"connect", "connector*", "debezium"},
-	"schema-registry": {"schema registry", "registry", "subject*"},
-	"kafka":           {"topic*", "broker*", "partition*"},
-	"consumer":        {"consumer*"},
-	"warehouse":       {"warehouse*", "sink table"},
-}
-
-// namesLayer reports whether text names layer.
-func namesLayer(layer, text string) bool {
-	return matchGroups([][]string{layerTerms[layer]}, text)
 }

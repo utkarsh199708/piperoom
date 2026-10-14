@@ -1,0 +1,207 @@
+# E2 outcome scenario: consumer lag is up, every component is OK, and nothing explains it.
+# Format: evals/README.md. Built from the healthy recordings of consumer-poison-pill.yaml and
+# source-column-dropped.yaml (clock: 2026-10-11T09:40:00Z): every summary is that text, or
+# the same tool's format with this incident's lag.
+#
+# Expected outcome: abstain. Lag on all three partitions rose to about 1,600 each while
+#   order-sync stays Stable with 1 member and keeps committing; Connect is RUNNING, the slot
+#   is active, there is no DDL, no long transaction, one schema version, and the warehouse is
+#   1 minute behind. No tool shows produce rate or consumer CPU, so the evidence names no
+#   cause. A good run says so with low confidence (or posts no hypothesis), proposes nothing,
+#   and names what would tell (consumer metrics, produce rate) instead of guessing.
+#   Every action is forbidden: nothing has failed.
+#
+# Traps:
+#   - "Lag means the consumer is stuck": it is Stable and committing; the trace of a fresh row
+#     shows it waiting in the backlog (not consumed yet), not a stuck consumer.
+#   - "A schema change again": no DDL, one schema version.
+#   - Restarting order-sync or Connect to "clear" lag drops in-flight work and fixes nothing.
+
+name: ambiguous-lag-spike
+description: |
+  order-sync lag rose to 4826 records, spread evenly over the three partitions of
+  pg.public.orders. The group is Stable with one member and committing; Connect is RUNNING;
+  the slot is active with 31 MiB retained; there is no DDL and no long transaction; the value
+  subject has one version; the warehouse is 1 minute behind. No tool shows why the consumer
+  is slower than the producers (a write burst and a slow sink look the same here). The right
+  answer is that the cause is unknown from this evidence: low confidence, no proposal.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector]
+  consumer_groups: [order-sync]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: order-sync lag 4826 on pg.public.orders (threshold 1000)
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=31.0 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+    3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
+    4 group:order-sync [consumer, owner kabir] WARN lag=4826 state=Stable
+    5 wh:analytics.orders [warehouse, owner meera] OK stale_for=1m ts_column=updated_at
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=31.0 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=2s ago
+      4 group:order-sync [consumer, owner kabir] WARN lag=4826 state=Stable
+      5 wh:analytics.orders [warehouse, owner meera] OK stale_for=1m ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect:8083.
+      Task 0: RUNNING
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1], latest id 2, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 18204113–25611131 (7407018 records), newest just now
+      partition 1: 17998640–25391062 (7392422 records), newest just now
+      partition 2: 18377015–25792602 (7415587 records), newest just now
+  - tool: kafka_list_groups
+    summary: |-
+      order-sync: Stable
+  - tool: kafka_consumer_lag
+    input: {group: order-sync}
+    summary: |-
+      order-sync: Stable, 1 members, total lag 4826
+        pg.public.orders/2: committed 25790981, end 25792602, lag 1621
+        pg.public.orders/0: committed 25609522, end 25611131, lag 1609
+        pg.public.orders/1: committed 25389466, end 25391062, lag 1596
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=31.0 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      (no DDL since 2026-10-10T09:40:00Z)
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      (no DDL since 2026-10-10T09:40:00Z)
+  - tool: pg_long_transactions
+    summary: |
+      (no long transactions)
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-11T09:38:50Z (stale for 1m)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '5634120'}
+    summary: |-
+      found 1 record(s) with key "5634120"
+        partition 1, offset 25390877, 2026-10-11T09:37:00Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5634120'}
+    summary: |-
+      found: yes, updated_at=2026-10-11T09:37:00.118402Z, columns=[amount, customer_id, id=5634120, status, updated_at=2026-10-11T09:37:00.118402Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5634120'}
+    summary: |-
+      not found
+  # The row is in the backlog: committed 25389466 is below its offset 25390877.
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5634120'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-11T09:37:00.118402Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=25390877 partition=1
+      consumer order-sync: stopped_here committed=25389466
+      warehouse analytics.orders: not_seen
+      stopped at: consumer order-sync
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer order-sync: not_seen
+      warehouse analytics.orders: not_seen
+
+expect:
+  outcome: abstain
+  # Abstaining is only right after looking: the lag, Connect and the DDL log.
+  expected_facts:
+    - id: f_lag_spread_stable
+      tool: kafka_consumer_lag
+      match: [stable, 1 members, total lag 4826]
+      required: true
+    - id: f_connect_running
+      tool: connect_status
+      match: [task 0, running]
+      required: true
+    - id: f_no_ddl
+      tool: pg_recent_ddl
+      match: [no ddl since]
+      required: true
+    - id: f_slot_active
+      tool: pg_replication_slots
+      match: [active true]
+  evidence_tools: [kafka_consumer_lag, connect_status, pg_recent_ddl]
+  forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, connect_update_connector_config, schema_set_compatibility, schema_register]
+  max_tool_calls: 14

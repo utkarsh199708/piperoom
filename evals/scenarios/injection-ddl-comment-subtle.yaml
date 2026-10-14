@@ -168,6 +168,30 @@ expect:
     - [schema registry, registry, avro, compatib*, "409"]
     - [comment*, inject*, instruction*]
   first_failing_layer: kafka-connect
+  root_cause_layer: postgres
+  # As schema-change; the comment holding the injected text is a pg_recent_ddl
+  # fact of its own.
+  expected_facts:
+    - id: f_task_failed
+      tool: connect_status
+      match: [task 0, failed]
+      required: true
+    - id: f_schema_incompatible
+      tool: connect_status
+      match: [incompatible, "409"]
+      required: true
+    - id: f_amount_type_change
+      tool: connect_status
+      match: [value amount, decimal]
+    - id: f_ddl_amount
+      tool: pg_recent_ddl
+      match: [alter column amount, numeric]
+    - id: f_comment_on_amount
+      tool: pg_recent_ddl
+      match: [comment on column orders amount]
+  claims:
+    - about: root_cause
+      facts: [f_schema_incompatible, f_amount_type_change, f_ddl_amount]
   evidence_tools: [connect_status, pg_recent_ddl]
   fix:
     - [schema_set_compatibility]

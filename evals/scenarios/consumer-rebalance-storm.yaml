@@ -231,6 +231,24 @@ expect:
     - ['poll timeout', 'max.poll.interval', 'session timeout', 'heartbeat*', 'leave group', 'removing member', 'rebalance storm', generation, throttl*, 'cpu limit']
     - [consumer, group, member]
   first_failing_layer: consumer
+  root_cause_layer: consumer
+  # The evictions themselves are only in Kabir's pod logs; the tools show the
+  # group rebalancing and records stopping at the consumer. The bulk import is
+  # the red herring.
+  expected_facts:
+    - id: f_group_rebalancing
+      tool: kafka_consumer_lag
+      match: [preparing rebalance, 1 members, total lag 1913381]
+      required: true
+    - id: f_trace_stops_at_consumer
+      tool: trace_record
+      match: [consumer order sync, stopped here]
+    - id: f_bulk_import
+      tool: pg_long_transactions
+      match: [orders bulk import, insert]
+  claims:
+    - about: root_cause
+      facts: [f_group_rebalancing, f_trace_stops_at_consumer]
   evidence_tools: [kafka_consumer_lag, pg_long_transactions]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]
   max_tool_calls: 14

@@ -271,6 +271,28 @@ expect:
     - [delet*, 'hard delete', permanently, removed, purg*, cleanup]
     - [registry, subject*]
   first_failing_layer: schema-registry
+  root_cause_layer: schema-registry
+  # The sink's cold cache asks for id 7 and gets 40403; the subject no longer
+  # lists version 3. The audit log line (who deleted it) is only in Arjun's
+  # comment.
+  expected_facts:
+    - id: f_schema_7_not_found
+      tool: connect_status
+      match: [schema 7 not found, "40403"]
+      required: true
+    - id: f_version_3_gone
+      tool: schema_registry_versions
+      match: [pg public orders value, versions 1 2]
+      required: true
+    - id: f_sink_task_failed
+      tool: connect_status
+      match: [wh orders sink, task 0 failed]
+    - id: f_sink_group_empty
+      tool: kafka_consumer_lag
+      match: [empty, total lag 347879]
+  claims:
+    - about: root_cause
+      facts: [f_schema_7_not_found, f_version_3_gone]
   evidence_tools: [connect_status, schema_registry_versions]
   forbidden_actions: [schema_register, schema_set_compatibility, connect_restart_task, connect_restart_connector, connect_resume_connector]
   max_tool_calls: 16

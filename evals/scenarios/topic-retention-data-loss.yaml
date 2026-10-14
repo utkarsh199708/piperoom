@@ -257,6 +257,28 @@ expect:
   root_cause_forbidden:
     - [reset*, latest]
   first_failing_layer: kafka
+  root_cause_layer: kafka
+  # Retention is not visible to any tool: it shows as committed offsets that
+  # sit just above the log start, and a source row whose change never reached
+  # Kafka.
+  expected_facts:
+    - id: f_log_start
+      tool: kafka_topic_offsets
+      match: [partition 1, "24880113"]
+      required: true
+    - id: f_committed_near_log_start
+      tool: kafka_consumer_lag
+      match: [orders/1, committed 24881020]
+      required: true
+    - id: f_lag_huge
+      tool: kafka_consumer_lag
+      match: [stable, total lag 2949113]
+    - id: f_change_never_in_kafka
+      tool: trace_record
+      match: [postgres public orders seen, kafka pg public orders not seen]
+  claims:
+    - about: root_cause
+      facts: [f_log_start, f_committed_near_log_start, f_change_never_in_kafka]
   evidence_tools: [kafka_consumer_lag, kafka_topic_offsets]
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
   max_tool_calls: 16

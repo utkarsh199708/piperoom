@@ -219,7 +219,7 @@ var hypotheses = map[string]struct{ good, wrong string }{
 		wrong: "Debezium task 0 failed to publish to Kafka because a broker is unreachable; restart the connector.",
 	},
 	"schema-change": {
-		good:  "Kafka Connect task 0 failed: the Schema Registry rejected (409, BACKWARD) the new Avro schema after amount changed int -> numeric(12,2).",
+		good:  "Kafka Connect task 0 failed: the Schema Registry rejected (409, BACKWARD) the new Avro schema after an ALTER TABLE in Postgres changed amount int -> numeric(12,2).",
 		wrong: "The consumer order-sync is stuck on a poison pill.",
 	},
 	"slot-inactive-wal-growth": {
@@ -304,6 +304,10 @@ func TestScoringOldVsNew(t *testing.T) {
 		return "fail"
 	}
 	for _, sc := range scs {
+		// Healthy, abstain and ask scenarios have no root cause to match.
+		if sc.Expect.outcome() != OutcomeDiagnose {
+			continue
+		}
 		// legacyTerms exist only for scenarios migrated by N2; a scenario added
 		// later has no old terms and shows "n/a" for the old matcher. Its
 		// good/wrong texts are required: add them to hypotheses.
@@ -373,9 +377,9 @@ func TestGoodScriptsStillPass(t *testing.T) {
 // --- LLM judge ----------------------------------------------------------------
 
 func TestParseVerdict(t *testing.T) {
-	ok := `{"layer_correct": true, "root_cause_correct": false, "reason": "blames the import"}`
+	ok := `{"layer_correct": true, "root_cause_correct": false, "root_cause_layer_correct": true, "reason": "blames the import"}`
 	v, err := parseVerdict(ok)
-	if err != nil || !v.LayerCorrect || v.RootCauseCorrect || v.Reason != "blames the import" {
+	if err != nil || !v.LayerCorrect || v.RootCauseCorrect || !v.RootCauseLayerCorrect || v.Reason != "blames the import" {
 		t.Fatalf("parse: %+v, %v", v, err)
 	}
 	if _, err := parseVerdict("```json\n" + ok + "\n```"); err != nil {
@@ -386,7 +390,8 @@ func TestParseVerdict(t *testing.T) {
 		"trailing text": ok + " thanks",
 		"two objects":   ok + ok,
 		"missing field": `{"layer_correct": true, "reason": "x"}`,
-		"unknown field": `{"layer_correct": true, "root_cause_correct": true, "reason": "x", "extra": 1}`,
+		"missing layer": `{"layer_correct": true, "root_cause_correct": true, "reason": "x"}`,
+		"unknown field": `{"layer_correct": true, "root_cause_correct": true, "root_cause_layer_correct": true, "reason": "x", "extra": 1}`,
 		"string bool":   `{"layer_correct": "yes", "root_cause_correct": true, "reason": "x"}`,
 		"empty":         "",
 	} {
@@ -415,7 +420,7 @@ func TestJudgePromptWrapsHypothesisAsUntrusted(t *testing.T) {
 	}
 	// The ground truth is in the prompt, outside the wrapper.
 	head := p[:strings.Index(p, "<untrusted>")]
-	for _, want := range []string{"schema-change", "First failing layer: kafka-connect", "bulk import", "numeric"} {
+	for _, want := range []string{"schema-change", "First failing layer: kafka-connect", "Root-cause layer: postgres", "bulk import", "numeric"} {
 		if !strings.Contains(head, want) {
 			t.Errorf("rubric lacks %q", want)
 		}
@@ -453,7 +458,7 @@ func TestEvaluateWithJudge(t *testing.T) {
 
 	// The judge disagrees with the terms: its verdict wins and the terms
 	// verdict is kept for comparison.
-	fj := &fakeJudge{v: Verdict{LayerCorrect: true, RootCauseCorrect: false, Reason: "says nothing about the schema"}}
+	fj := &fakeJudge{v: Verdict{LayerCorrect: true, RootCauseCorrect: false, RootCauseLayerCorrect: true, Reason: "says nothing about the schema"}}
 	rep, err := run(Config{JudgeClient: fj})
 	if err != nil {
 		t.Fatal(err)
@@ -467,6 +472,19 @@ func TestEvaluateWithJudge(t *testing.T) {
 	}
 	if r.Score != 65 { // 100 minus the root-cause weight
 		t.Errorf("score = %v, want 65", r.Score)
+	}
+
+	// With -judge the judge also decides the root-cause layer; the terms
+	// verdict for it is kept beside.
+	fj = &fakeJudge{v: Verdict{LayerCorrect: true, RootCauseCorrect: true, RootCauseLayerCorrect: false, Reason: "puts the cause in Connect"}}
+	rep, err = run(Config{JudgeClient: fj})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r = rep.Results[0]
+	if r.RootCauseLayerNamed || r.Correct || r.Pass || r.Judged == nil || !r.Judged.TermsRootCauseLayer ||
+		!strings.Contains(strings.Join(r.Failures, ";"), "root-cause layer not named: postgres") || r.Score != 95 {
+		t.Errorf("root-cause layer verdict not applied: %+v", r)
 	}
 
 	// -judge terms forces the deterministic path: the client is never called.
@@ -492,7 +510,7 @@ func TestTextJudgeUsesRubricAndParsesReply(t *testing.T) {
 	var sys, usr string
 	j := NewTextJudge(func(_ context.Context, system, user string) (string, error) {
 		sys, usr = system, user
-		return `{"layer_correct": true, "root_cause_correct": true, "reason": "ok"}`, nil
+		return `{"layer_correct": true, "root_cause_correct": true, "root_cause_layer_correct": true, "reason": "ok"}`, nil
 	})
 	v, err := j.JudgeHypothesis(context.Background(), loadSeed(), "hyp")
 	if err != nil || !v.RootCauseCorrect || sys != judgeSystem || !strings.Contains(usr, "<untrusted>hyp</untrusted>") {
@@ -538,4 +556,34 @@ func TestJudgeAgreement(t *testing.T) {
 		}
 	}
 	t.Logf("judge vs terms agreement on root cause: %d/%d", agree, total)
+}
+
+// TestJudgeSkipsOutcomesWithoutRootCause: a healthy, abstain or ask scenario
+// has no root cause, so the LLM judge is never called for it and a verdict
+// changes nothing, even when -judge claude forces the judge everywhere.
+func TestJudgeSkipsOutcomesWithoutRootCause(t *testing.T) {
+	sc, err := LoadScenario("scenarios/ambiguous-lag-spike.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := []step{
+		{tool: "kafka_consumer_lag", input: map[string]any{"group": "order-sync"}},
+		{tool: "connect_status", input: map[string]any{"connector": "pg-orders-connector"}},
+		{tool: "pg_recent_ddl", input: map[string]any{}},
+		{hypothesis: "Cause unknown from this evidence.", confidence: "low"},
+	}
+	fj := &fakeJudge{v: Verdict{RootCauseCorrect: false, LayerCorrect: false, Reason: "no"}}
+	rep, err := Evaluate(context.Background(), []Scenario{sc}, Config{
+		Runner: scriptedRunner(script), Logger: quietLogger(), Judge: JudgeClaude, JudgeClient: fj,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := rep.Results[0]
+	if fj.calls != 0 || r.Judged != nil || !r.Pass {
+		t.Errorf("judge calls %d judged %+v pass %v failures %v", fj.calls, r.Judged, r.Pass, r.Failures)
+	}
+	if got := ApplyVerdict(sc, r, fj.v); got.Judged != nil || !got.Pass || !got.RootCause {
+		t.Errorf("verdict applied to an abstain run: %+v", got)
+	}
 }

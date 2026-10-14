@@ -223,7 +223,9 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	}
 	rec := newRecorder()
 	rp.events = rec.count
-	inbox := newScenarioInbox(sc, newExecutor(sc, rec, rp))
+	// rec is also the inbox's log: delivered steers and comments become
+	// steer.sent / comment.added, which the ask outcome reads.
+	inbox := newScenarioInbox(sc, newExecutor(sc, rec, rp), rec)
 	alert := sc.agentAlert(fmt.Sprintf("eval_%s_%d", sc.Name, run))
 
 	runCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
@@ -251,7 +253,8 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	tr := Transcript{Events: rec.snapshot(), Misses: rp.Misses(), Attempts: attempts.snapshot(), Idles: inbox.idleCount(), Replay: rp.trace()}
 	res := Judge(sc, tr, err, timedOut)
 	// Nothing to grade without a hypothesis; the terms verdict already says so.
-	if effectiveJudge(cfg.Judge, sc) == JudgeClaude && res.FinalHypothesis != "" {
+	// Healthy, abstain and ask scenarios have no root cause for a judge.
+	if effectiveJudge(cfg.Judge, sc) == JudgeClaude && res.FinalHypothesis != "" && sc.Expect.outcome() == OutcomeDiagnose {
 		v, jerr := cfg.JudgeClient.JudgeHypothesis(ctx, sc, res.FinalHypothesis)
 		if jerr != nil {
 			return RunResult{}, Transcript{}, jerr

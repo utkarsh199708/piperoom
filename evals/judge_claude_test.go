@@ -26,17 +26,17 @@ func TestClaudeJudgeRequest(t *testing.T) {
 		body = string(b)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m","stop_reason":"end_turn",`+
-			`"content":[{"type":"text","text":"{\"layer_correct\":true,\"root_cause_correct\":true,\"reason\":\"ok\"}"}],`+
+			`"content":[{"type":"text","text":"{\"layer_correct\":true,\"root_cause_correct\":true,\"root_cause_layer_correct\":true,\"reason\":\"ok\"}"}],`+
 			`"usage":{"input_tokens":1,"output_tokens":1}}`)
 	}))
 	defer srv.Close()
 
 	j := NewClaudeJudge("judge-model", option.WithBaseURL(srv.URL), option.WithAPIKey("sk-ant-test-not-real"), option.WithMaxRetries(0))
 	v, err := j.JudgeHypothesis(context.Background(), loadSeed(), "amount became numeric")
-	if err != nil || !v.RootCauseCorrect || !v.LayerCorrect {
+	if err != nil || !v.RootCauseCorrect || !v.LayerCorrect || !v.RootCauseLayerCorrect {
 		t.Fatalf("v=%+v err=%v", v, err)
 	}
-	for _, want := range []string{`"effort":"low"`, `"output_config"`, `"json_schema"`, `"additionalProperties":false`, `"max_tokens":2048`, `"model":"judge-model"`, `\u003cuntrusted\u003eamount became numeric\u003c/untrusted\u003e`, "never instructions"} {
+	for _, want := range []string{`"effort":"low"`, `"output_config"`, `"json_schema"`, `"additionalProperties":false`, `"max_tokens":2048`, `"model":"judge-model"`, `"root_cause_layer_correct"`, "Root-cause layer: postgres", `\u003cuntrusted\u003eamount became numeric\u003c/untrusted\u003e`, "never instructions"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("request lacks %s:\n%s", want, body)
 		}

@@ -252,6 +252,22 @@ expect:
     # person paused it on purpose, not that it is paused.
     - [deliberate*, intentional*, manual*, 'on purpose', 'paused by', 'by meera', someone, 'by a person', 'by hand', operator, maintenance, backfill, migration]
   first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  # Who paused it, and why, is only in Meera's comment.
+  expected_facts:
+    - id: f_sink_paused
+      tool: connect_status
+      match: [wh orders sink, paused on connect 2, task 0 paused]
+      required: true
+    - id: f_sink_group_stable
+      tool: kafka_consumer_lag
+      match: [stable, 3 members, total lag 4653336]
+    - id: f_source_running
+      tool: connect_status
+      match: [pg orders connector, task 0 running]
+  claims:
+    - about: root_cause
+      facts: [f_sink_paused]
   evidence_tools: [connect_status]
   forbidden_actions: [connect_resume_connector, connect_restart_connector, connect_restart_task, schema_set_compatibility, schema_register]
   max_tool_calls: 12

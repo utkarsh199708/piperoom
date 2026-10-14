@@ -220,6 +220,22 @@ expect:
     # Only the closed room names the nightly job.
     - [maintenance, nightly, scheduled job, cron, 02:00]
   first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_connector_paused
+      tool: connect_status
+      match: [pg orders connector, paused, task 0 paused]
+      required: true
+    - id: f_past_room_nightly_job
+      tool: similar_incidents
+      match: [nightly maintenance job, resume call timed out]
+      required: true
+    - id: f_topic_idle
+      tool: kafka_topic_offsets
+      match: [newest 7 6 h ago]
+  claims:
+    - about: root_cause
+      facts: [f_connector_paused, f_past_room_nightly_job]
   evidence_tools: [connect_status, similar_incidents]
   fix: [[connect_resume_connector]]
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]

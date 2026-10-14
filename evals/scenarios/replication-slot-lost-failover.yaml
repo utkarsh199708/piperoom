@@ -230,6 +230,26 @@ expect:
     - [missing, 'does not exist', gone, lost]
     - [failover, promot*, standby, 'new primary']
   first_failing_layer: postgres
+  root_cause_layer: postgres
+  # The failover itself is only in Priya's comment.
+  expected_facts:
+    - id: f_slot_does_not_exist
+      tool: connect_status
+      match: [task 0 failed, replication slot debezium orders does not exist]
+      required: true
+    - id: f_no_slots
+      tool: pg_replication_slots
+      match: [no replication slots]
+      required: true
+    - id: f_consumer_caught_up
+      tool: kafka_consumer_lag
+      match: [stable, total lag 0]
+    - id: f_trace_stops_at_connector
+      tool: trace_record
+      match: [stopped at, kafka connect pg orders connector]
+  claims:
+    - about: root_cause
+      facts: [f_slot_does_not_exist, f_no_slots]
   evidence_tools: [connect_status, pg_replication_slots]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]
   max_tool_calls: 12

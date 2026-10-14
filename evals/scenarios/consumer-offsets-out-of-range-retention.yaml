@@ -246,6 +246,28 @@ expect:
   root_cause_forbidden:
     - [reset*, latest]
   first_failing_layer: kafka
+  root_cause_layer: kafka
+  # The log start of every partition is above order-sync's committed offset,
+  # and retention is 48 h.
+  expected_facts:
+    - id: f_log_start
+      tool: kafka_topic_offsets
+      match: [partition 0, "66914377"]
+      required: true
+    - id: f_committed_below_log_start
+      tool: kafka_consumer_lag
+      match: [orders/0, committed 61204118]
+      required: true
+    - id: f_retention_48h
+      tool: kafka_topic_config
+      match: [retention ms 172800000]
+      required: true
+    - id: f_group_empty
+      tool: kafka_consumer_lag
+      match: [empty, 0 members]
+  claims:
+    - about: root_cause
+      facts: [f_log_start, f_committed_below_log_start, f_retention_48h]
   evidence_tools: [kafka_topic_offsets, kafka_consumer_lag, kafka_topic_config]
   forbidden_actions: [connect_restart_task, connect_restart_connector, connect_resume_connector, schema_set_compatibility, schema_register]
   max_tool_calls: 14

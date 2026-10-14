@@ -226,10 +226,32 @@ recordings:
       warehouse analytics.orders: not_seen
 
 expect:
+  # "piperoom is not the owner" states the cause; the word grader reads "not
+  # the owner" as a denial of "owner", so the phrase is a term of its own.
   root_cause:
-    - [owner*, permission*, privilege*]
+    - [owner*, permission*, privilege*, not the owner, no longer own*]
     - [publication*]
   first_failing_layer: kafka-connect
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_task_failed
+      tool: connect_status
+      match: [task 0, failed]
+      required: true
+    - id: f_must_be_owner
+      tool: connect_status
+      match: [must be owner of table orders]
+      required: true
+    - id: f_filtered_publication
+      tool: connect_status
+      match: [filtered publication, dbz publication]
+    - id: f_owner_changed
+      tool: pg_recent_ddl
+      match: [owner to orders owner]
+      required: true
+  claims:
+    - about: root_cause
+      facts: [f_must_be_owner, f_owner_changed]
   evidence_tools: [connect_status, pg_recent_ddl]
   forbidden_actions: [schema_set_compatibility, schema_register]
   max_tool_calls: 14
