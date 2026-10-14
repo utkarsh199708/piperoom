@@ -9,8 +9,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
+
+	"piperoom/internal/dlq"
 )
 
 // Pipeline is one named data pipeline.
@@ -142,6 +148,118 @@ func (o *Owners) Pipeline(id string) (Pipeline, bool) {
 	return Pipeline{}, false
 }
 
+var (
+	// sqlIdentRE is AGENTS.md rule 6: the only identifiers the SQL clients
+	// interpolate. A source table must pass it to be readable at all.
+	sqlIdentRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+	// whIdentRE also allows '$', which Snowflake permits in unquoted names.
+	whIdentRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_$]*$`)
+)
+
+// maxNameLen bounds connector and consumer group names (Kafka's limit for
+// group ids is the topic limit in practice; Connect has none of its own).
+const maxNameLen = 249
+
+// validateNames checks every name a pipeline declares: these names reach SQL,
+// URL paths and the model's prompt, so a malformed one is refused at load
+// instead of failing (or forging map lines) later. A duplicate entry would
+// give the pipeline map two nodes with the same id.
+func validateNames(p Pipeline) error {
+	if !dlq.ValidTopic(p.TopicPrefix) {
+		return fmt.Errorf("topic_prefix %q: want a legal Kafka topic name ([A-Za-z0-9._-], at most 249 bytes)", p.TopicPrefix)
+	}
+	if err := checkList("source_tables", p.SourceTables, func(s string) bool { return qualifiedName(s, sqlIdentRE, 2, 2) },
+		`want "schema.table" with each part matching [a-zA-Z_][a-zA-Z0-9_]*`); err != nil {
+		return err
+	}
+	if err := checkList("sink_tables", p.SinkTables, func(s string) bool { return qualifiedName(s, whIdentRE, 2, 3) },
+		`want "schema.table" or "db.schema.table" with each part an unquoted identifier`); err != nil {
+		return err
+	}
+	if p.SinkTSColumn != "" && !whIdentRE.MatchString(p.SinkTSColumn) {
+		return fmt.Errorf("sink_ts_column %q: want an unquoted column name", p.SinkTSColumn)
+	}
+	const wantName = "want a non-empty name without surrounding blanks or control characters"
+	if err := checkList("connectors", p.Connectors, plainName, wantName); err != nil {
+		return err
+	}
+	return checkList("consumer_groups", p.ConsumerGroups, plainName, wantName)
+}
+
+// checkList refuses a list entry that fails ok, and any duplicate.
+func checkList(key string, list []string, ok func(string) bool, want string) error {
+	seen := make(map[string]bool, len(list))
+	for _, s := range list {
+		if !ok(s) {
+			return fmt.Errorf("%s: %q: %s", key, s, want)
+		}
+		if seen[s] {
+			return fmt.Errorf("%s: duplicate entry %q", key, s)
+		}
+		seen[s] = true
+	}
+	return nil
+}
+
+// qualifiedName reports whether s is min to max dot-separated parts, each
+// matching re.
+func qualifiedName(s string, re *regexp.Regexp, min, max int) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) < min || len(parts) > max {
+		return false
+	}
+	for _, part := range parts {
+		if !re.MatchString(part) {
+			return false
+		}
+	}
+	return true
+}
+
+// plainName accepts a connector or group name: 1 to maxNameLen bytes of
+// printable text (Connect allows "Legacy Billing"), with no surrounding
+// blanks and no control characters, since it goes into URL paths and prompts.
+func plainName(s string) bool {
+	if strings.TrimSpace(s) != s || s == "" || len(s) > maxNameLen || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// CheckLayerOwners reports every pipeline layer in use that nobody owns:
+// without an owner, a proposed fix on that layer waits for an approval nobody
+// can give. Source tables, connectors and their topics are always in use; the
+// consumer and warehouse layers only when the pipeline lists groups or sink
+// tables. schema-registry is optional because not every stack has one.
+//
+// Load does not call it: many single-layer configs (tests, the watcher's
+// fixtures) are valid on purpose. A server that runs approvals should call it
+// at start and refuse to run, or at least warn, on an error.
+func (o *Owners) CheckLayerOwners() error {
+	var errs []error
+	for _, p := range o.Pipelines {
+		used := []string{"postgres", "kafka-connect", "kafka"}
+		if len(p.ConsumerGroups) > 0 {
+			used = append(used, "consumer")
+		}
+		if len(p.SinkTables) > 0 {
+			used = append(used, "warehouse")
+		}
+		for _, layer := range used {
+			approvers, backup := o.rightsFor(p.ID, layer)
+			if len(approvers) == 0 && len(backup) == 0 {
+				errs = append(errs, fmt.Errorf("owners: pipeline %q: layer %q has no owner: add it under layers: or the pipeline's owners:", p.ID, layer))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func (o *Owners) validate() error {
 	if err := o.validateRights(); err != nil {
 		return err
@@ -167,6 +285,9 @@ func (o *Owners) validate() error {
 		}
 		if len(p.SinkTables) > 0 && p.SinkTSColumn == "" {
 			return fmt.Errorf("pipeline %q: sink_ts_column is required when sink_tables is set", p.ID)
+		}
+		if err := validateNames(p); err != nil {
+			return fmt.Errorf("pipeline %q: %w", p.ID, err)
 		}
 		if d := p.RetentionDays; d != nil && (*d < 1 || *d > MaxRetentionDays) {
 			return fmt.Errorf("pipeline %q: retention_days %d: want 1 to %d (leave it out to use PIPEROOM_RETENTION_DAYS)", p.ID, *d, MaxRetentionDays)
