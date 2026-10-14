@@ -795,9 +795,14 @@ func (s *Service) catchUpLocked(ctx context.Context, roomID string, st *roomStat
 func (s *Service) foldLocked(ctx context.Context, roomID string, st *roomState, e events.Event, remote bool) {
 	wasOpen := s.roomOpen(st)
 	st.snap = Apply(st.snap, e)
-	// The store counts the same bytes (len of the payload JSON) for the
-	// room's log cap, whichever replica appended the event.
-	st.logBytes += int64(len(e.Payload))
+	// The store counts the same bytes (store.StoredSize of the payload JSON)
+	// for the room's log cap, whichever replica appended the event.
+	st.logBytes += store.StoredSize(e.Payload)
+	if e.Type == events.AgentStatus {
+		if p, ok := decode[events.AgentStatusPayload](e); ok && p.State == "error" {
+			st.agentErrorSeq = e.Seq
+		}
+	}
 	s.setDeadline(&st.snap)
 	trackPending(st, e)
 	s.feedInbox(st, e)
@@ -1071,6 +1076,9 @@ func (s *Service) emitCheckedLocked(ctx context.Context, st *roomState, roomID s
 		if err == nil {
 			s.foldLocked(ctx, roomID, st, e, false)
 			return e, nil
+		}
+		if errors.Is(err, store.ErrRoomClosed) {
+			return events.Event{}, s.closedByOtherLocked(ctx, roomID, st)
 		}
 		if !errors.Is(err, store.ErrSeqConflict) {
 			return events.Event{}, fmt.Errorf("room: append %s: %w", typ, err)

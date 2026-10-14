@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"piperoom/internal/events"
@@ -82,7 +83,15 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 	summary, err := s.writeHandoff(wctx, roomEvents, s.opts)
 	cancel()
 	if err != nil {
-		return events.Event{}, fmt.Errorf("room: handoff: write summary: %w", err)
+		if ctx.Err() != nil {
+			return events.Event{}, fmt.Errorf("room: handoff: write summary: %w", err)
+		}
+		// The model is down, out of credentials or timed out. The shift
+		// change must still happen (QA sweep 2026-10-14): hand over with a
+		// summary built from the log alone, marked as such. The model error
+		// is logged here and never shown in the room.
+		s.log.Warn("room: handoff summary from the model failed; using the auto summary", "room", roomID, "err", err)
+		summary = autoHandoffSummary(roomEvents)
 	}
 	summary = sanitizeHandoff(summary)
 
@@ -233,4 +242,67 @@ func (s *Service) allEvents(ctx context.Context, roomID string) ([]events.Event,
 			return out, nil
 		}
 	}
+}
+
+// autoSummaryMark starts the what_broke of a hand-off summary written without
+// the model, so the recipient knows nobody reasoned over it.
+const autoSummaryMark = "auto summary (model unavailable)"
+
+// autoHandoffSummary is the hand-off summary when the model cannot write one:
+// built from the room log only, deterministically. It carries the room title,
+// the latest hypothesis, the proposals still waiting for a decision and the
+// most recent investigation steps.
+func autoHandoffSummary(roomEvents []events.Event) events.HandoffSummary {
+	var snap RoomSnapshot
+	var steps []string
+	for _, e := range roomEvents {
+		snap = Apply(snap, e)
+		if e.Type == events.AgentStepStart {
+			if p, ok := decode[events.AgentStepStartPayload](e); ok && strings.TrimSpace(p.Title) != "" {
+				steps = append(steps, p.Title)
+			}
+		}
+	}
+	sum := events.HandoffSummary{
+		WhatBroke: autoSummaryMark,
+		Why:       "No hypothesis yet.",
+		Done:      []string{},
+		RuledOut:  []string{},
+		Open:      []string{},
+		Risks:     []string{"This summary was not written by the agent; read the room log before acting."},
+	}
+	if t := strings.TrimSpace(snap.Title); t != "" {
+		sum.WhatBroke = autoSummaryMark + ": " + t
+	}
+	if h := snap.Hypothesis; h != nil && strings.TrimSpace(h.Text) != "" {
+		conf := h.Confidence
+		if conf == "" {
+			conf = "unknown"
+		}
+		sum.Why = fmt.Sprintf("Latest hypothesis (%s confidence): %s", conf, h.Text)
+	}
+	// The most recent steps, newest last.
+	if len(steps) > handoffListMax {
+		steps = steps[len(steps)-handoffListMax:]
+	}
+	for _, t := range steps {
+		sum.Done = append(sum.Done, "Step: "+t)
+	}
+	for _, p := range snap.OpenProposals {
+		var waiting []string
+		for _, layer := range p.RequiredLayers {
+			if p.Approvals[layer] != "approved" {
+				waiting = append(waiting, layer)
+			}
+		}
+		item := "Proposal " + p.ProposalID + ": " + p.Title
+		if len(waiting) > 0 {
+			item += " (waiting for " + strings.Join(waiting, ", ") + ")"
+		}
+		sum.Open = append(sum.Open, item)
+	}
+	if n := len(snap.PendingSuggestions); n > 0 {
+		sum.Open = append(sum.Open, fmt.Sprintf("%d pending suggestion(s) not yet sent to the agent", n))
+	}
+	return sum
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"piperoom/internal/alertin"
 	"piperoom/internal/store"
 )
 
@@ -51,6 +52,13 @@ func checkJSONBStorable(raw []byte) error {
 	// Rooms that already hold such a number still export (see service_export.go).
 	if hasOutOfRangeNumber(raw) {
 		return validation("alert body contains a number outside the double range (for example 1e400)")
+	}
+	// jsonb renders numbers without an exponent: 1e308 is stored as 309
+	// digits, so a 1 MiB body of such tokens would be stored as ~54 MB and
+	// slip past the body cap (QA sweep 2026-10-14). The body is held to the
+	// same cap at the size it is stored at.
+	if store.StoredSize(raw) > alertin.MaxBodyBytes {
+		return validation(fmt.Sprintf("alert body is larger than %d bytes once its numbers are written out in full (for example 1e308 is 309 digits)", alertin.MaxBodyBytes))
 	}
 	return nil
 }

@@ -190,6 +190,11 @@ func (s *PG) purgeRoom(ctx context.Context, id string, q PurgeQuery, wantSeq int
 // them. The caller holds the room row lock in tx.
 func deleteRoomTx(ctx context.Context, tx pgx.Tx, id string) (PurgeResult, error) {
 	var res PurgeResult
+	// room_events refuses DELETE unless this transaction says it is the
+	// purge (migration 00015). is_local = true: the setting ends with tx.
+	if _, err := tx.Exec(ctx, `SELECT set_config('piperoom.purge', 'on', true)`); err != nil {
+		return res, fmt.Errorf("store: purge %s: allow event delete: %w", id, err)
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return res, fmt.Errorf("store: purge %s: %w", id, err)

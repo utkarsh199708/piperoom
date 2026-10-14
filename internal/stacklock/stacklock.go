@@ -161,25 +161,29 @@ func (l *Lock) Acquire(owner string) (*Record, error) {
 	return &rec, nil
 }
 
-// Release removes the lock file, but only when owner currently holds it.
+// Release removes the lock file, but only when owner currently holds it. The
+// check and the removal run under the guard file (withGuard), so they are one
+// step against Steal and other Releases.
 func (l *Lock) Release(owner string) error {
 	if err := l.requirePath(); err != nil {
 		return err
 	}
-	cur, err := l.Status()
-	if err != nil {
-		return fmt.Errorf("stacklock: read lock: %w", err)
-	}
-	if cur == nil {
-		return errors.New("stacklock: no lock held")
-	}
-	if cur.Owner != owner {
-		return fmt.Errorf("stacklock: lock held by %q, not %q", cur.Owner, owner)
-	}
-	if err := os.Remove(l.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("stacklock: remove lock: %w", err)
-	}
-	return nil
+	return l.withGuard(func() error {
+		cur, err := l.Status()
+		if err != nil {
+			return fmt.Errorf("stacklock: read lock: %w", err)
+		}
+		if cur == nil {
+			return errors.New("stacklock: no lock held")
+		}
+		if cur.Owner != owner {
+			return fmt.Errorf("stacklock: lock held by %q, not %q", cur.Owner, owner)
+		}
+		if err := os.Remove(l.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("stacklock: remove lock: %w", err)
+		}
+		return nil
+	})
 }
 
 // Status returns the current lock record, or (nil, nil) when there is no lock.
@@ -211,38 +215,80 @@ func (l *Lock) Status() (*Record, error) {
 
 // Steal removes a lock that is older than maxAge, returning the record it
 // removed. A fresh lock is never stolen.
+//
+// The age check and the removal run under the guard file (withGuard). Only a
+// guard holder ever removes the lock file, and Acquire can only create it when
+// it is absent, so while the guard is held the record read here is the one
+// removed: a fresh lock taken after a release is never deleted (QA sweep
+// 2026-10-14; the earlier re-read narrowed this race but did not close it).
 func (l *Lock) Steal(maxAge time.Duration) (*Record, error) {
 	if err := l.requirePath(); err != nil {
 		return nil, err
 	}
-	cur, err := l.Status()
+	var stolen *Record
+	err := l.withGuard(func() error {
+		cur, err := l.Status()
+		if err != nil {
+			return fmt.Errorf("stacklock: read lock: %w", err)
+		}
+		if cur == nil {
+			return errors.New("stacklock: no lock to steal")
+		}
+		if age := time.Since(cur.At); age < maxAge {
+			return fmt.Errorf("stacklock: lock held by %q is %s old; only steal locks older than %s",
+				cur.Owner, age.Round(time.Second), maxAge)
+		}
+		if err := os.Remove(l.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("stacklock: remove stale lock: %w", err)
+		}
+		stolen = cur
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("stacklock: read lock: %w", err)
+		return nil, err
 	}
-	if cur == nil {
-		return nil, errors.New("stacklock: no lock to steal")
+	return stolen, nil
+}
+
+// guardWait bounds how long Release and Steal wait for the guard file.
+const guardWait = 5 * time.Second
+
+// guardStale is the age after which a guard file is taken to be left behind by
+// a process that died while holding it. A guard is held for a read and a
+// remove only, so a live holder never comes close.
+const guardStale = 30 * time.Second
+
+// withGuard runs fn while holding <path>.guard, created with O_EXCL (atomic on
+// every OS, NTFS included). Every removal of the lock file (Release, Steal)
+// runs under it, which makes "check the record, then remove the file" one
+// step. Acquire does not need it: os.Link only creates the lock file when it
+// is absent, never replaces it.
+func (l *Lock) withGuard(fn func() error) error {
+	guard := l.path + ".guard"
+	deadline := time.Now().Add(guardWait)
+	for {
+		f, err := os.OpenFile(guard, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			if cerr := f.Close(); cerr != nil {
+				_ = os.Remove(guard)
+				return fmt.Errorf("stacklock: close guard: %w", cerr)
+			}
+			defer os.Remove(guard)
+			return fn()
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("stacklock: create guard: %w", err)
+		}
+		if st, serr := os.Stat(guard); serr == nil && time.Since(st.ModTime()) > guardStale {
+			// Left by a process that died holding it.
+			_ = os.Remove(guard)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("stacklock: guard %s is busy; retry", guard)
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
-	if age := time.Since(cur.At); age < maxAge {
-		return nil, fmt.Errorf("stacklock: lock held by %q is %s old; only steal locks older than %s",
-			cur.Owner, age.Round(time.Second), maxAge)
-	}
-	// Re-read just before removing: the stale holder may have released and a
-	// third agent re-acquired since the first Status. Only remove when the
-	// record is unchanged, so a fresh lock is never deleted.
-	cur2, err := l.Status()
-	if err != nil {
-		return nil, fmt.Errorf("stacklock: re-read lock: %w", err)
-	}
-	if cur2 == nil {
-		return nil, errors.New("stacklock: no lock to steal")
-	}
-	if cur2.Owner != cur.Owner || !cur2.At.Equal(cur.At) {
-		return nil, fmt.Errorf("stacklock: lock changed while stealing (%q -> %q); retry", cur.Owner, cur2.Owner)
-	}
-	if err := os.Remove(l.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("stacklock: remove stale lock: %w", err)
-	}
-	return cur, nil
 }
 
 func holderName(cur *Record) string {

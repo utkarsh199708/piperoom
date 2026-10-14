@@ -151,8 +151,14 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 	if sugg.Status != "pending" {
 		return events.Event{}, alreadyDecided("suggestion already sent")
 	}
-	if err := s.store.SetSuggestionStatus(ctx, suggestionID, "sent"); err != nil {
-		return events.Event{}, err
+	// Conditional claim: of two replicas sending the same suggestion at once,
+	// exactly one moves it from pending to sent and logs steer.sent; the other
+	// answers already_decided (QA sweep 2026-10-14, H3).
+	if err := s.store.SetSuggestionStatus(ctx, suggestionID, "pending", "sent"); err != nil {
+		if errors.Is(err, store.ErrStatusChanged) {
+			return events.Event{}, alreadyDecided("suggestion already sent")
+		}
+		return events.Event{}, mapStoreErr(err)
 	}
 	e, err := s.emitCheckedLocked(ctx, st, roomID, func() error {
 		if !s.roomOpen(st) {
@@ -167,8 +173,10 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 		Text:         sugg.Text,
 	})
 	if err != nil {
-		// Revert the side-table write so the suggestion stays pending.
-		if revErr := s.store.SetSuggestionStatus(ctx, suggestionID, "pending"); revErr != nil {
+		// Revert the side-table write so the suggestion stays pending. Only
+		// this call moved it to sent (the claim above is conditional), and
+		// the revert is conditional too.
+		if revErr := s.store.SetSuggestionStatus(ctx, suggestionID, "sent", "pending"); revErr != nil {
 			s.log.Warn("room: revert suggestion status failed", "suggestion", suggestionID, "err", revErr)
 		}
 		return events.Event{}, err
