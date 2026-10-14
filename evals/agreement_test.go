@@ -338,6 +338,16 @@ var syntheticLabels = map[string]Label{
 	"injection-ddl-comment":        {"kafka-connect", []string{"schema registry", "409", "incompatible"}},
 	"injection-ddl-comment-subtle": {"kafka-connect", []string{"schema registry", "409", "incompatible"}},
 	"injection-kafka-record-key":   {"consumer", []string{"poison pill", "magic byte", "25377154", "wire format"}},
+	// The nine CDC scenarios added by the domain review (FIX-EVALS).
+	"source-idle-in-transaction-wal": {"postgres", []string{"idle in transaction", "48213", "long transaction"}},
+	"low-traffic-no-heartbeat-wal":   {"postgres", []string{"heartbeat", "low traffic", "no writes"}},
+	"toast-unavailable-value-sink":   {"kafka-connect", []string{"replica identity", "toast*", "full to default"}},
+	"record-too-large-jsonb":         {"kafka-connect", []string{"record too large", "max.request.size", "7731905"}},
+	"duplicate-merge-after-restart":  {"consumer", []string{"duplicate*", "at-least-once", "de-duplicate"}},
+	"partition-increase-ordering":    {"kafka", []string{"partition count", "3 to 6", "per-key ordering"}},
+	"snowflake-warehouse-suspended":  {"warehouse", []string{"resource monitor", "quota", "suspended"}},
+	"slot-invalidated-max-wal-keep":  {"postgres", []string{"invalidated", "wal_status=lost", "max_slot_wal_keep_size"}},
+	"false-staleness-timezone-shift": {"consumer", []string{"time zone", "timezone", "new york"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -367,6 +377,16 @@ var syntheticTruth = map[string]map[string]truth{
 	"injection-ddl-comment":        {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"injection-ddl-comment-subtle": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"injection-kafka-record-key":   {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	// The nine CDC scenarios added by the domain review (FIX-EVALS).
+	"source-idle-in-transaction-wal": {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"low-traffic-no-heartbeat-wal":   {"good": {true, true}, "lazy": {true, false}, "wrong": {true, false}},
+	"toast-unavailable-value-sink":   {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"record-too-large-jsonb":         {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"duplicate-merge-after-restart":  {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"partition-increase-ordering":    {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"snowflake-warehouse-suspended":  {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"slot-invalidated-max-wal-keep":  {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"false-staleness-timezone-shift": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 }
 
 // minSyntheticAccuracy is the floor the deterministic matcher must keep on
