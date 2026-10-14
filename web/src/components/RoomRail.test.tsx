@@ -31,7 +31,7 @@ describe('PresencePanel (Who’s here)', () => {
     const arjun = within(region).getByText('Arjun').closest('li') as HTMLElement
     expect(within(arjun).getByText('you')).toBeInTheDocument()
     const meera = within(region).getByText('Meera').closest('li') as HTMLElement
-    expect(within(meera).getByText('away')).toBeInTheDocument()
+    expect(within(meera).getByText('away')).toBeInTheDocument() // no since: plain away
   })
 
   it('adds someone who is present but not a member, as watching', () => {
@@ -43,6 +43,48 @@ describe('PresencePanel (Who’s here)', () => {
   it('a viewer sees themself marked viewer', () => {
     render(<PresencePanel members={members} presence={[]} selfId="meera" selfIsViewer />)
     expect(screen.getByText('viewer')).toBeInTheDocument()
+  })
+})
+
+describe('PresencePanel layers and state (F9)', () => {
+  const people = [
+    { id: 'priya', name: 'Priya', layers: ['postgres', 'schema-registry', 'kafka', 'consumer'] },
+    { id: 'arjun', name: 'Arjun', layers: ['kafka-connect'] },
+  ]
+
+  it('shows layer badges (at most 3, then +N) and away from the server-side since', () => {
+    const since = new Date(Date.now() - 12 * 60_000).toISOString()
+    render(
+      <PresencePanel
+        members={members}
+        presence={[
+          { id: 'kabir', name: 'Kabir', state: 'viewing' },
+          { id: 'priya', name: 'Priya', state: 'away', since },
+        ]}
+        people={people}
+        selfId="kabir"
+      />,
+    )
+    const priya = screen.getByText('Priya').closest('li') as HTMLElement
+    expect(within(priya).getByLabelText('owns postgres')).toBeInTheDocument()
+    expect(within(priya).getByLabelText('owns kafka')).toBeInTheDocument()
+    expect(within(priya).queryByLabelText('owns consumer')).not.toBeInTheDocument()
+    expect(within(priya).getByText('+1')).toHaveAttribute('title', 'consumer')
+    expect(within(priya).getByText('away 12m')).toBeInTheDocument()
+  })
+
+  it('says "not here" for a member with no presence entry and "here" for a viewing one', () => {
+    render(<PresencePanel members={members} presence={[{ id: 'kabir', name: 'Kabir', state: 'viewing' }]} people={people} selfId="kabir" />)
+    const arjun = screen.getByText('Arjun').closest('li') as HTMLElement
+    expect(within(arjun).getByText('not here')).toBeInTheDocument()
+    expect(within(arjun).getByLabelText('owns kafka-connect')).toBeInTheDocument()
+    const kabir = screen.getByText('Kabir').closest('li') as HTMLElement
+    expect(within(kabir).getByText('here')).toBeInTheDocument()
+  })
+
+  it('shows no layer badges without people (a viewer)', () => {
+    render(<PresencePanel members={members} presence={[]} selfId="kabir" />)
+    expect(screen.queryByLabelText(/^owns /)).not.toBeInTheDocument()
   })
 })
 
