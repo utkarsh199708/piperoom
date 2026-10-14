@@ -132,7 +132,7 @@ export function AppShell() {
         <TopBarSlotContext.Provider value={slotEl}>
          <BreadcrumbTailContext.Provider value={setCrumbPipeline}>
           <TooltipProvider>
-            <div className="flex min-h-0 flex-1 bg-background text-sm text-foreground">
+            <div className="flex min-h-0 flex-1 overflow-hidden bg-background text-sm text-foreground">
               <a
                 href="#main"
                 className="sr-only focus:not-sr-only focus:fixed focus:left-2 focus:top-2 focus:z-[60] focus:rounded-md focus:bg-primary focus:px-3 focus:py-2 focus:text-primary-foreground"
@@ -191,7 +191,7 @@ export function AppShell() {
                   </div>
                 </header>
                 <main id="main" tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden focus:outline-none">
-                  <div className="legacy-surface min-h-full">
+                  <div className="min-h-full">
                     <Outlet />
                   </div>
                 </main>
