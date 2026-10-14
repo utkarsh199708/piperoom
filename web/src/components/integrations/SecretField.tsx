@@ -305,6 +305,7 @@ export function SecretField({
   lookup = integrationsApi,
   error,
   disabled,
+  typedOff = false,
 }: {
   field: Field
   state: SecretFieldState
@@ -313,6 +314,8 @@ export function SecretField({
   lookup?: SecretsLookup
   error?: string
   disabled?: boolean
+  /** PIPEROOM_SECRET_KEY is not set: a typed-in value cannot be saved, references still can. */
+  typedOff?: boolean
 }) {
   const id = useId()
   const helpId = `${id}-help`
@@ -370,7 +373,8 @@ export function SecretField({
             key={mode}
             type="button"
             aria-pressed={state.mode === mode}
-            disabled={disabled}
+            disabled={disabled || (mode === 'value' && typedOff)}
+            title={mode === 'value' && typedOff ? 'Typed-in secrets need PIPEROOM_SECRET_KEY on the server' : undefined}
             onClick={() => setMode(mode)}
             className={cn(
               'inline-flex h-7 items-center gap-1.5 rounded px-2.5 text-xs font-medium text-muted-foreground transition-colors',
@@ -444,7 +448,13 @@ export function SecretField({
               />
             </>
           )}
-          <p className="m-0 text-xs text-subtle-foreground">Write-only: Piperoom never shows a stored secret again.</p>
+          {typedOff ? (
+            <p className="m-0 text-xs text-destructive-fg">
+              Typed-in secrets cannot be saved: PIPEROOM_SECRET_KEY is not set on the server. Use a secret manager reference.
+            </p>
+          ) : (
+            <p className="m-0 text-xs text-subtle-foreground">Write-only: Piperoom never shows a stored secret again.</p>
+          )}
         </div>
       )}
 

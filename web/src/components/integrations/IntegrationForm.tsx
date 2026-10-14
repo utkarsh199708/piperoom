@@ -129,6 +129,7 @@ export function IntegrationForm({
   managers,
   lookup,
   disabled,
+  typedSecretsOff = false,
 }: {
   kind: CatalogKind
   form: FormState
@@ -137,6 +138,8 @@ export function IntegrationForm({
   managers: Integration[]
   lookup?: SecretsLookup
   disabled?: boolean
+  /** PIPEROOM_SECRET_KEY is not set on the server: only references can be saved. */
+  typedSecretsOff?: boolean
 }) {
   if (kind.fields.length === 0) {
     return <p className="m-0 text-sm text-muted-foreground">This card has nothing to fill in.</p>
@@ -154,6 +157,7 @@ export function IntegrationForm({
             lookup={lookup}
             error={errors[f.name]}
             disabled={disabled}
+            typedOff={typedSecretsOff}
           />
         ) : (
           <FieldInput

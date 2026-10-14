@@ -233,3 +233,18 @@ describe('ConnectForm', () => {
     expect(await screen.findByText('This secret is set by an environment variable; change it on the server.')).toBeInTheDocument()
   })
 })
+
+describe('ConnectForm without PIPEROOM_SECRET_KEY', () => {
+  it('says so and offers references only for new secrets', () => {
+    renderForm(fakeApi(), { secretKeySet: false })
+    expect(screen.getByRole('status').textContent).toMatch(/PIPEROOM_SECRET_KEY is not set/)
+    const enter = screen.getByRole('button', { name: /Enter value/ })
+    expect((enter as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: /From a secret manager/ }).getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('keeps the value option when the key is set', () => {
+    renderForm(fakeApi())
+    expect((screen.getByRole('button', { name: /Enter value/ }) as HTMLButtonElement).disabled).toBe(false)
+  })
+})

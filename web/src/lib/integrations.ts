@@ -137,6 +137,9 @@ export function initialForm(kind: CatalogKind, existing: Integration | undefined
     }
     if (f.type === 'bool') {
       config[f.name] = stored === undefined || isRefValue(stored) ? f.default === 'true' : stored === true || stored === 'true'
+    } else if (f.allow_ref && isRefValue(stored)) {
+      // Shown as the reference text; configBody sends it back as {"$ref"}.
+      config[f.name] = stored.$ref
     } else {
       config[f.name] = stored === undefined || isRefValue(stored) ? f.default : String(stored)
     }
@@ -156,6 +159,10 @@ export function configBody(kind: CatalogKind, form: FormState): WriteBody['confi
     }
     const s = typeof v === 'string' ? v.trim() : ''
     if (s === '') continue
+    if (f.allow_ref && s.startsWith('secret://')) {
+      out[f.name] = { $ref: s }
+      continue
+    }
     if (f.type === 'number') {
       const n = Number(s)
       // A non-number goes as text so the server answers 400 validation for this field.
@@ -263,6 +270,10 @@ export function validateForm(kind: CatalogKind, form: FormState, existing?: Inte
       if (f.required) errors[f.name] = 'Required'
       continue
     }
+    if (f.allow_ref && v.startsWith('secret://')) {
+      if (!parseRef(v)) errors[f.name] = 'A reference looks like secret://<manager>/<name>#<key>'
+      continue
+    }
     if (f.type === 'number' && !Number.isFinite(Number(v))) errors[f.name] = 'Enter a number'
     else if (f.type === 'select' && f.options.length > 0 && !f.options.includes(v)) errors[f.name] = 'Pick one of the options'
     else if (!patternOk(f.pattern, v)) errors[f.name] = 'This value has the wrong format'
@@ -314,6 +325,9 @@ const STATUS_RANK: Record<RowStatus, number> = {
 
 /** A stored row's server status as a pill status. */
 export function viewStatus(i: Integration): RowStatus {
+  // Env rows are never tested from the page, but the server opened them at start (a failure
+  // there refuses start), so the checklist counts them as connected.
+  if (i.source === 'env' && i.status === 'untested') return 'connected'
   switch (i.status) {
     case 'connected':
       return 'connected'

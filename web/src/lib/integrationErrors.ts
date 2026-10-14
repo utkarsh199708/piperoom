@@ -22,6 +22,12 @@ export function integrationErrorText(e: unknown): string {
       return 'Integration changes are off while the server uses dev sign-in on a network address.'
     case 'provider_unreachable':
       return 'The secret manager did not answer.'
+    case 'secret_key_mismatch':
+      return 'The saved typed-in secrets cannot be opened with the server\'s PIPEROOM_SECRET_KEY. Ask the operator to set the old key as PIPEROOM_SECRET_KEY_PREVIOUS, or enter the secrets again and save.'
+    case 'secret_access_denied':
+      return 'The secret manager refused this read: it is outside the provider\'s prefix or file roots, or its policy does not allow it.'
+    case 'in_use':
+      return e.message
     default:
       return e.message
   }
@@ -33,8 +39,9 @@ export function checksOf(e: unknown): Check[] | null {
   return Array.isArray(b?.checks) ? (b.checks as Check[]) : []
 }
 
+/** The form field an error names: 400 validation, and the secret-reference errors (403, 404). */
 export function fieldOf(e: unknown): string | null {
-  if (!(e instanceof ApiClientError) || e.code !== 'validation') return null
+  if (!(e instanceof ApiClientError) || !['validation', 'secret_access_denied', 'not_found'].includes(e.code)) return null
   const b = e.body as { error?: { field?: unknown } } | undefined
   return typeof b?.error?.field === 'string' ? b.error.field : null
 }

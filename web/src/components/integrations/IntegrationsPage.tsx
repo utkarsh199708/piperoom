@@ -33,6 +33,7 @@ export function IntegrationsPage({ api = integrationsApi }: { api?: DrawerApi })
   const [error, setError] = useState<string | null>(null)
   const [target, setTarget] = useState<Target | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [secretKeySet, setSecretKeySet] = useState(true)
 
   const loadList = useCallback(async () => {
     if (!admin) return
@@ -57,6 +58,23 @@ export function IntegrationsPage({ api = integrationsApi }: { api?: DrawerApi })
   useEffect(() => {
     void load()
   }, [load])
+
+  // Whether typed-in secrets can be saved; on any error the drawer stays as it was.
+  useEffect(() => {
+    if (!admin) return
+    let live = true
+    void (async () => {
+      try {
+        const st = await api.status()
+        if (live) setSecretKeySet(st.secret_key_set)
+      } catch {
+        // An older server without the route: keep the default.
+      }
+    })()
+    return () => {
+      live = false
+    }
+  }, [api, admin])
 
   const rows = useMemo(() => checklistRows(catalog ?? [], list), [catalog, list])
   const managers = useMemo(() => secretManagers(list), [list])
@@ -151,6 +169,7 @@ export function IntegrationsPage({ api = integrationsApi }: { api?: DrawerApi })
           onDeleted={onDeleted}
           onReload={loadList}
           onRefresh={() => void loadList()}
+          secretKeySet={secretKeySet}
         />
       )}
     </div>

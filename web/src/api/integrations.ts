@@ -43,6 +43,11 @@ export interface Field {
   options: string[]
   /** An RE2 regexp the server enforces; "" = none. */
   pattern: string
+  /**
+   * A non-secret field that may hold a `secret://` reference instead of text (the user of a
+   * Vault database lease); sent as `{"$ref": …}` in config.
+   */
+  allow_ref?: boolean
 }
 
 export interface CatalogKind {
@@ -137,7 +142,7 @@ export interface WriteBody {
   kind: string
   /** POST /test only: stored secrets of this row fill the secret fields the body leaves out. */
   id?: string
-  config: Record<string, string | number | boolean>
+  config: Record<string, string | number | boolean | SecretRefValue>
   secrets: Record<string, SecretWrite>
 }
 
@@ -158,6 +163,8 @@ export const integrationsApi = {
       body: JSON.stringify({ config }),
     }),
   list: () => request<Integration[]>(base),
+  /** Whether typed-in secrets can be saved (PIPEROOM_SECRET_KEY is set). */
+  status: () => request<{ secret_key_set: boolean }>(`${base}/status`),
   test: (body: WriteBody) =>
     request<{ checks: Check[] }>(`${base}/test`, { method: 'POST', body: JSON.stringify(body) }),
   create: (body: WriteBody) =>

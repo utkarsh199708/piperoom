@@ -4,7 +4,7 @@ import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { ChevronDown, ChevronRight, Download, Power, ShieldCheck, Trash2, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { ApiClientError } from '../../api/client'
-import { integrationsApi } from '../../api/integrations'
+import { integrationsApi, isSecretField } from '../../api/integrations'
 import type { CatalogKind, Check, Integration } from '../../api/integrations'
 import {
   CATEGORY_LABEL,
@@ -207,6 +207,8 @@ export interface ConnectFormProps {
   onReload: () => Promise<void>
   /** Reload the list without resetting the form (an alert secret was generated). */
   onRefresh?: () => void
+  /** PIPEROOM_SECRET_KEY is set (GET /api/integrations/status); false = references only. */
+  secretKeySet?: boolean
 }
 
 /**
@@ -224,10 +226,20 @@ export function ConnectForm({
   onDeleted,
   onReload,
   onRefresh,
+  secretKeySet = true,
 }: ConnectFormProps) {
   const env = existing?.source === 'env'
   const readOnly = !admin || env
-  const [form, setFormState] = useState<FormState>(() => initialForm(kind, existing, managers.length > 0))
+  const hasSecretFields = kind.fields.some((f) => isSecretField(f.type))
+  const [form, setFormState] = useState<FormState>(() => {
+    const f = initialForm(kind, existing, managers.length > 0)
+    if (secretKeySet) return f
+    // Without the key a typed value cannot be saved: start new values on the reference.
+    const secrets = Object.fromEntries(
+      Object.entries(f.secrets).map(([name, s]) => [name, s.mode === 'value' && !s.stored ? { ...s, mode: 'manager' as const } : s]),
+    )
+    return { ...f, secrets }
+  })
   const [checks, setChecks] = useState<Check[] | null>(existing && existing.last_test.length > 0 ? existing.last_test : null)
   const [stale, setStale] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -396,15 +408,24 @@ export function ConnectForm({
               </dl>
             </section>
           ) : (
-            <IntegrationForm
-              kind={kind}
-              form={form}
-              onChange={setForm}
-              errors={errors}
-              managers={managers}
-              lookup={api}
-              disabled={busy !== null}
-            />
+            <>
+              {!secretKeySet && hasSecretFields && (
+                <p role="status" className="m-0 mb-3 rounded-md border border-border bg-sidebar px-3 py-2 text-sm text-muted-foreground">
+                  PIPEROOM_SECRET_KEY is not set on the server, so typed-in secrets cannot be saved. Use a secret manager
+                  reference, or ask the operator to set the key.
+                </p>
+              )}
+              <IntegrationForm
+                kind={kind}
+                form={form}
+                onChange={setForm}
+                errors={errors}
+                managers={managers}
+                lookup={api}
+                disabled={busy !== null}
+                typedSecretsOff={!secretKeySet}
+              />
+            </>
           ))}
 
         {kind.has_setup_script && admin && <SetupScript kind={kind} config={configJson} api={api} />}
