@@ -32,6 +32,8 @@ const actions: RoomActions = {
   reject: vi.fn(),
   handoff: vi.fn(),
   acceptHandoff: vi.fn(),
+  label: vi.fn(),
+  checklist: vi.fn(),
   trace: vi.fn(),
 }
 const reload = vi.fn()
@@ -150,5 +152,14 @@ describe('RoomHeader actions below md', () => {
     show(kabir, room())
     expect(screen.getByRole('button', { name: 'Hand off' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument()
+  })
+})
+
+describe('touch sizing', () => {
+  it('lays out at 390 without the rail and with the tab list', () => {
+    setWidth(390)
+    show(arjun, room())
+    expect(screen.getByRole('tablist', { name: 'Room sections' })).toBeInTheDocument()
+    expect(screen.getAllByRole('tab').every((t) => t.className.includes('coarse:h-11'))).toBe(true)
   })
 })

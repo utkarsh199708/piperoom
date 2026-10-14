@@ -13,6 +13,7 @@ const ctx: DescribeContext = {
   stepIndex: { s_aaaaaaaa: 2 },
   suggesters: { g_bbbbbbbb: 'Kabir' },
   confidenceBefore: 'low',
+  runbookItem: () => null,
 }
 const ev = (type: Event['type'], payload: unknown, actor: Event['actor'] = arjun): Event => ({
   room_id: 'r1',
@@ -59,6 +60,8 @@ describe('describeEvent', () => {
     ['handoff.accepted', ev('handoff.accepted', { handoff_id: 'h_1' }), { text: 'Arjun accepted the hand-off', kind: 'control' }],
     ['trace.pinned', ev('trace.pinned', { table: 'orders', key: '42', stages: [] }), { text: 'Arjun traced orders · 42', kind: 'human' }],
     ['room.closed', ev('room.closed', { resolution: 'fixed' }), { text: 'Arjun closed the room', detail: 'fixed', kind: 'decision' }],
+    ['room.labelled', ev('room.labelled', { cause: 'schema change', fix_that_worked: 'restart task' }), { text: 'Arjun labelled the room: cause schema change · fix restart task', kind: 'human' }],
+    ['checklist tick unknown item', ev('checklist.step_done', { tool_use_id: 'tu', hit: 0, item: 1, done: true }), { text: 'Arjun ticked step 2 of a runbook', kind: 'human' }],
     ['unknown', ev('agent.usage' as Event['type'], {}, agent), { text: 'agent.usage', kind: 'system' }],
   ]
   it.each(cases)('%s', (_n, e, want) => {

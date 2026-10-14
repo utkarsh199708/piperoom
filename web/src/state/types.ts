@@ -8,6 +8,7 @@ import type {
   HypothesisSummary,
   Identity,
   ProposalStep,
+  RoomLabelledPayload,
   RoomSnapshot,
   TraceStage,
 } from '../api/types'
@@ -166,6 +167,18 @@ export interface AlertInfo {
 export type { ActivityKind } from './describe'
 import type { ActivityKind } from './describe'
 
+/** Who ticked one runbook item and when (checklist.step_done). */
+export interface ChecklistTick {
+  by: Actor
+  at: string
+  note?: string
+}
+
+/** Key of RoomState.checklist_done: "<tool_use_id>:<hit>:<item>". */
+export function checklistKey(toolUseId: string, hit: number, item: number): string {
+  return `${toolUseId}:${hit}:${item}`
+}
+
 export interface ActivityEntry {
   seq: number
   at: string
@@ -216,6 +229,10 @@ export interface RoomState {
   /** In flight until handoff.created / handoff.failed with its id, or `expires_at`. */
   handoff_request: HandoffRequestState | null
   handoff_failure: HandoffFailureState | null
+  /** The last room.labelled (re-labelling appends another, the last wins); null before any. */
+  labelled: RoomLabelledPayload | null
+  /** Ticked runbook items; the last event per key wins and an untick removes the key. */
+  checklist_done: Record<string, ChecklistTick>
   activity: ActivityEntry[]
 }
 
@@ -245,6 +262,8 @@ export function emptyRoomState(id: string): RoomState {
     handoffs: [],
     handoff_request: null,
     handoff_failure: null,
+    labelled: null,
+    checklist_done: {},
     activity: [],
   }
 }

@@ -10,6 +10,7 @@ import type {
   AgentToolResultPayload,
   ApprovalGivenPayload,
   ApprovalRejectedPayload,
+  ChecklistStepDonePayload,
   CommentAddedPayload,
   ControlGrantedPayload,
   ControlLeaseExpiredPayload,
@@ -20,6 +21,7 @@ import type {
   RoomClosedPayload,
   RoomCreatedPayload,
   SteerDeclinedPayload,
+  RoomLabelledPayload,
   SteerSentPayload,
   SteerSuggestedPayload,
   TracePinnedPayload,
@@ -46,6 +48,8 @@ export interface DescribeContext {
   suggesters?: Record<string, string>
   /** The hypothesis confidence before this event, to say raised or lowered. */
   confidenceBefore?: string | null
+  /** Finds a runbook item's section and text for a checklist tick, in the room's state. */
+  runbookItem?: (toolUseId: string, hit: number, item: number) => { section: string; text: string } | null
 }
 
 export const EMPTY_CONTEXT: DescribeContext = { driverBefore: null, stepTitles: {}, proposalTitles: {}, stepIndex: {} }
@@ -216,6 +220,23 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'handoff.accepted':
       return { text: `${who} accepted the hand-off`, kind: 'control' }
+    case 'room.labelled': {
+      const p = as<RoomLabelledPayload>(e)
+      return {
+        text: `${who} labelled the room: cause ${clip(p.cause, 40)}${p.fix_that_worked ? ` · fix ${clip(p.fix_that_worked, 40)}` : ''}`,
+        kind: 'human',
+      }
+    }
+    case 'checklist.step_done': {
+      const p = as<ChecklistStepDonePayload>(e)
+      const found = ctx.runbookItem?.(p.tool_use_id, p.hit, p.item)
+      const verb = p.done ? 'ticked' : 'unticked'
+      if (!found) return { text: `${who} ${verb} step ${p.item + 1} of a runbook`, kind: 'human' }
+      return {
+        text: `${who} ${verb} "${clip(found.text, 80)}" (step ${p.item + 1}${found.section ? ` of ${clip(found.section, 40)}` : ''})`,
+        kind: 'human',
+      }
+    }
     case 'trace.pinned': {
       const p = as<TracePinnedPayload>(e)
       return { text: `${who} traced ${clip(p.table, 40)} · ${clip(p.key, 40)}`, kind: 'human' }

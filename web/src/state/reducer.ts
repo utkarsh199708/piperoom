@@ -12,6 +12,7 @@ import type {
   AgentToolResultPayload,
   ApprovalGivenPayload,
   ApprovalRejectedPayload,
+  ChecklistStepDonePayload,
   CommentAddedPayload,
   ControlGrantedPayload,
   Event,
@@ -22,6 +23,7 @@ import type {
   ProposalCreatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
+  RoomLabelledPayload,
   SteerDeclinedPayload,
   SteerSentPayload,
   SteerSuggestedPayload,
@@ -30,6 +32,8 @@ import type {
 import { describeEvent } from './describe'
 import type { DescribeContext } from './describe'
 import { alertSource } from '../lib/alerts'
+import { runbookHits } from '../lib/f8'
+import { checklistKey } from './types'
 import type { MemberState, RoomState, StepState } from './types'
 
 function as<T>(e: Event): T {
@@ -80,7 +84,19 @@ function describeContext(before: RoomState, after: RoomState): DescribeContext {
     stepIndex,
     suggesters,
     confidenceBefore: before.hypothesis?.confidence ?? null,
+    runbookItem: (id, hit, item) => runbookItemOf(before, id, hit, item),
   }
+}
+
+// The text and section of a runbook item, looked up in the runbook_lookup result already in the
+// state (used for the activity line of a tick).
+function runbookItemOf(state: RoomState, toolUseId: string, hit: number, item: number) {
+  for (const s of state.steps) {
+    const t = s.tool_calls.find((c) => c.tool_use_id === toolUseId && c.tool === 'runbook_lookup')
+    const h = t ? runbookHits(t.data)[hit] : undefined
+    if (h && h.items[item] !== undefined) return { section: h.section, text: h.items[item] }
+  }
+  return null
 }
 
 export function applyEvent(state: RoomState, event: Event): RoomState {
@@ -521,6 +537,21 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
               ]
           : state.members,
       }
+      break
+    }
+
+    case 'room.labelled': {
+      next = { ...state, labelled: as<RoomLabelledPayload>(event) }
+      break
+    }
+
+    case 'checklist.step_done': {
+      const p = as<ChecklistStepDonePayload>(event)
+      const key = checklistKey(p.tool_use_id, p.hit, p.item)
+      const done = { ...state.checklist_done }
+      if (p.done) done[key] = { by: event.actor, at: event.at, note: p.note }
+      else delete done[key]
+      next = { ...state, checklist_done: done }
       break
     }
 

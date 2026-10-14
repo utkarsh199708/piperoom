@@ -53,7 +53,11 @@ type Deps struct {
 	Owners       *owners.Owners // pipeline definitions for actions.Scoped checks
 	Run          agent.Runner
 	WriteHandoff agent.HandoffWriter
-	Options      agent.Options
+	// WritePostmortem writes the closing summary of a room that never handed
+	// off after its fix (F2). Nil gives the events-only draft:
+	// cmd/server leaves it nil for PIPEROOM_POSTMORTEM_MODEL=off.
+	WritePostmortem agent.PostmortemWriter
+	Options         agent.Options
 	// ShadowOptions are the agent options of a shadow room's run
 	// (docs/design/shadow.md section 3.3): the same model, fewer turns and a
 	// lower token budget (config.ParseShadow).
@@ -193,21 +197,23 @@ type Service struct {
 	owners       *owners.Owners
 	run          agent.Runner
 	writeHandoff agent.HandoffWriter
-	opts         agent.Options
-	shadowOpts   agent.Options
-	shadowGrace  time.Duration
-	shadow       store.ShadowStore // nil when the store cannot hold shadow runs
-	log          *slog.Logger
-	now          func() time.Time
-	onRoomOpened func(ctx context.Context, roomID string)
-	onRoomClosed func(ctx context.Context, roomID, pipelineID, dedupKey string)
-	slots        *agentSlots // global cap on concurrent agent runs
-	exportMax    int64
-	sessions     auth.Store
-	sessionIdle  time.Duration
-	viewerGroups map[string]struct{}
-	soloUser     string
-	limits       config.Limits
+	// writePostmortem is nil for an events-only draft (Deps.WritePostmortem).
+	writePostmortem agent.PostmortemWriter
+	opts            agent.Options
+	shadowOpts      agent.Options
+	shadowGrace     time.Duration
+	shadow          store.ShadowStore // nil when the store cannot hold shadow runs
+	log             *slog.Logger
+	now             func() time.Time
+	onRoomOpened    func(ctx context.Context, roomID string)
+	onRoomClosed    func(ctx context.Context, roomID, pipelineID, dedupKey string)
+	slots           *agentSlots // global cap on concurrent agent runs
+	exportMax       int64
+	sessions        auth.Store
+	sessionIdle     time.Duration
+	viewerGroups    map[string]struct{}
+	soloUser        string
+	limits          config.Limits
 	// deleteMu serialises DeleteRoom calls: deletions are rare, and one at a
 	// time makes a concurrent repeat find the first one's audit row.
 	deleteMu sync.Mutex
@@ -284,35 +290,36 @@ func New(d Deps) *Service {
 	shadowStore, _ := d.Store.(store.ShadowStore)
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
-		store:        d.Store,
-		actions:      acts,
-		tools:        tls,
-		stackFor:     d.StackFor,
-		topo:         topo,
-		users:        users,
-		owners:       d.Owners,
-		run:          run,
-		writeHandoff: wh,
-		opts:         d.Options,
-		shadowOpts:   d.ShadowOptions,
-		shadowGrace:  d.ShadowGrace,
-		shadow:       shadowStore,
-		log:          log,
-		now:          now,
-		onRoomOpened: d.OnRoomOpened,
-		onRoomClosed: d.OnRoomClosed,
-		slots:        newAgentSlots(d.MaxAgents),
-		exportMax:    d.ExportMaxEvents,
-		sessions:     d.Sessions,
-		sessionIdle:  d.SessionIdle,
-		viewerGroups: groupSet(d.ViewerGroups),
-		soloUser:     d.SoloUser,
-		limits:       d.Limits,
-		leaseTicker:  d.LeaseTicker,
-		ctx:          ctx,
-		cancel:       cancel,
-		rooms:        map[string]*roomState{},
-		alertRooms:   map[string]string{},
+		store:           d.Store,
+		actions:         acts,
+		tools:           tls,
+		stackFor:        d.StackFor,
+		topo:            topo,
+		users:           users,
+		owners:          d.Owners,
+		run:             run,
+		writeHandoff:    wh,
+		writePostmortem: d.WritePostmortem,
+		opts:            d.Options,
+		shadowOpts:      d.ShadowOptions,
+		shadowGrace:     d.ShadowGrace,
+		shadow:          shadowStore,
+		log:             log,
+		now:             now,
+		onRoomOpened:    d.OnRoomOpened,
+		onRoomClosed:    d.OnRoomClosed,
+		slots:           newAgentSlots(d.MaxAgents),
+		exportMax:       d.ExportMaxEvents,
+		sessions:        d.Sessions,
+		sessionIdle:     d.SessionIdle,
+		viewerGroups:    groupSet(d.ViewerGroups),
+		soloUser:        d.SoloUser,
+		limits:          d.Limits,
+		leaseTicker:     d.LeaseTicker,
+		ctx:             ctx,
+		cancel:          cancel,
+		rooms:           map[string]*roomState{},
+		alertRooms:      map[string]string{},
 	}
 	if coord, ok := d.Store.(store.Coordinator); ok {
 		s.coord = coord
@@ -380,6 +387,7 @@ func (s *Service) Load(ctx context.Context) error {
 	err := s.ensureAllLoadedLocked(ctx, true)
 	if err == nil {
 		s.sweepShadowLocked(ctx)
+		s.sweepPostmortemsLocked()
 	}
 	s.mu.Unlock()
 	if err != nil {
@@ -639,6 +647,11 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, []a
 		snap.ID = roomID
 	}
 	s.setDeadline(&snap)
+	if snap.Status == "closed" && snap.Postmortem.Status == PostmortemDrafting && snap.ClosedAt != nil && s.now().Sub(*snap.ClosedAt) > postmortemRestartWindow {
+		// A room closed before drafts existed, or whose drafter died long ago:
+		// it is not drafting any more (the GET still renders events-only).
+		snap.Postmortem = PostmortemState{Status: PostmortemNone}
+	}
 	if row, err := s.store.GetRoom(ctx, roomID); err == nil {
 		if row.DriverID != "" && snap.Driver != nil && snap.Driver.ID == row.DriverID && row.DriverLeaseUntil != nil && row.DriverLeaseUntil.After(snap.Driver.LeaseUntil) {
 			// docs/api.md: times are RFC 3339 UTC; a persisted lease read back
