@@ -192,10 +192,16 @@ Different customers will want different things. Build one UI and one API, and su
 | Updates | customer pulls a release | continuous |
 | Customer separation | separate installs | workspaces: tenant id on every row, per-tenant key, per-tenant model budget |
 
-The code from `integrations.md` works for both. Hosted adds a tenant id to the `integrations` and room tables and
-Piperoom Link. Build **in your network first**, because that is what enterprise pilots accept today
-(`docs/pilot/README.md`), and keep every API tenant-ready (no global state, per AGENTS.md §4 rule 5) so hosted does
-not need a rewrite.
+**Decision (2026-10-14): both shapes from the start.** Customers may pick either, so neither is "later":
+
+- One codebase and one UI. The hosted service is the same server with a workspace id on every row (integrations,
+  rooms, sessions, audit), a per-workspace encryption key and a per-workspace model budget. Self-hosted is one
+  workspace. Every API is workspace-scoped from the first PR, so there is no rewrite later.
+- **Piperoom Link moves to phase 2.** Hosted customers with private databases cannot start without it.
+- AWS, Azure and Google connections in hosted mode use cross-account trust (role with external ID, federated
+  identity, service account), never long-lived keys.
+- Secret managers work in both shapes (`docs/design/secret-providers.md` §7), including a strict hosted mode where
+  credentials never leave the customer network.
 
 ## 7. What "easy" is measured by
 
@@ -215,12 +221,15 @@ customer.
 | Phase | Ships | Why first |
 |---|---|---|
 | 1 | Checklist, catalog, connect drawer with live checks and fix text, setup scripts, *Verified read-only*, sample room, test alert; cards: Postgres, Kafka, Confluent Cloud, Connect REST, Schema Registry, Snowflake, Anthropic, alert snippets, Slack | removes headaches 2, 4 and most of 3; the server side is `integrations.md` PRs 1–5 |
-| 2 | **Ask someone** hand-off, stack tiles with discovery, pick pipelines, owners from SSO groups, health page, secret-manager references, environments, data access summary PDF, four-eyes | removes headache 1, the biggest one |
-| 3 | AWS one-role discovery, Terraform provider and YAML export, Piperoom Link, hosted workspaces, SAML and SCIM | removes headache 5 and opens hosted |
+| 2 | **Ask someone** hand-off, stack tiles with discovery, pick pipelines, owners from SSO groups, health page, secret managers tier 1 (AWS Secrets Manager, SSM, Vault, Azure Key Vault, Google, Kubernetes, mounted files), environments, data access summary PDF, four-eyes, **hosted workspaces and Piperoom Link** | removes headache 1, the biggest one, and opens hosted |
+| 3 | AWS one-role discovery, Terraform provider and YAML export, secret managers tier 2, strict hosted mode (Link runs the reads), SAML and SCIM | removes headache 5 |
 
-## 9. Open questions
+## 9. Decisions (2026-10-14)
 
-1. Is the first enterprise customer self-hosted or hosted? This decides whether Piperoom Link is phase 2 or 3.
-2. Which secret manager do the first customers use? Build that one first.
-3. Should the hand-off page work for someone **outside** the customer's SSO (for example a contractor DBA)? The draft
-   says no: SSO only, which is safer.
+1. **Deployment: both shapes**, chosen by each customer (§6). Piperoom Link is phase 2.
+2. **Secret managers: all of them**, through built-in providers, a universal mounted-file adapter and a small provider
+   interface. Design: `docs/design/secret-providers.md`.
+3. **Hand-off links need the customer's SSO.** A contractor DBA is added to the customer's identity provider (most
+   support guest accounts) before the link works. Reasons: the customer stays in control of who touches their
+   systems, every action is tied to a real identity, and a forwarded link is useless to anyone else. The hand-off
+   page says this plainly when an outsider opens it: "Ask Utkarsh to add you to Acme's sign-in".

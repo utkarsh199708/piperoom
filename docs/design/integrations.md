@@ -38,8 +38,8 @@ Non-goals (v1):
 - Write access set up from the UI. Integrations are read-only by default. Write actions stay off unless the owner of
   that layer turns them on, one layer at a time (same rule as `docs/pilot/setup.md` §7).
 - One credential set per pipeline (F7). v1 keeps one set per process. §9 shows how the data model allows more later.
-- A hosted multi-tenant Piperoom. This design is for one self-hosted install. §6 says what changes if Piperoom is
-  hosted.
+- Hosted multi-tenant details. Both shapes are required (`integrations-ux.md` §6); this doc describes one
+  workspace, and every table and route here gains a workspace id for hosted.
 - Inbound Slack (approvals in Slack). Slack stays outbound only (`internal/slackbridge/bridge.go:3-4`).
 
 ## 3. The catalog
@@ -384,7 +384,8 @@ Contract changes (lead commit, PR 0):
 PRs 1, 2 and 5 can start at once against the contracts. PR 3 needs PR 1's interfaces. PR 4 needs PRs 1 and 3.
 
 For the product and enterprise UX (stack picker, hand-off links, health page, deployment shapes) see
-`docs/design/integrations-ux.md`. It answers question 1 below: build self-hosted first, keep the API tenant-ready.
+`docs/design/integrations-ux.md`. Decisions (2026-10-14): both deployment shapes, every secret manager (`docs/design/secret-providers.md`),
+hand-off links behind the customer's SSO only. Question 1 below is answered by those.
 
 ## 12. Open questions for the product owner
 
