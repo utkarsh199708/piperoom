@@ -68,7 +68,7 @@ type Rate struct {
 	Rate float64 `json:"rate"`
 }
 
-func rate(n, d int) Rate {
+func agreeRate(n, d int) Rate {
 	r := Rate{N: n, Of: d}
 	if d > 0 {
 		r.Rate = float64(n) / float64(d)
@@ -332,9 +332,9 @@ func Summarise(rows []AgreementRow, skipped []Skipped) AgreementSummary {
 			}
 		}
 	}
-	s.LayerAgree, s.CauseAgree, s.BothAgree = rate(layer, len(rows)), rate(cause, len(rows)), rate(both, len(rows))
+	s.LayerAgree, s.CauseAgree, s.BothAgree = agreeRate(layer, len(rows)), agreeRate(cause, len(rows)), agreeRate(both, len(rows))
 	if h.Graded > 0 {
-		h.CauseMatch, h.LayerMatch = rate(causeEq, causeCmp), rate(layerEq, h.Graded)
+		h.CauseMatch, h.LayerMatch = agreeRate(causeEq, causeCmp), agreeRate(layerEq, h.Graded)
 		s.Human = &h
 	}
 	return s
@@ -362,10 +362,10 @@ func (s AgreementSummary) WriteTable(w io.Writer) error {
 	if n := len(s.Skipped); n > 0 {
 		fmt.Fprintf(w, " (%d skipped)", n)
 	}
-	fmt.Fprintf(w, "\nlayer agrees: %s\ncause agrees: %s\nboth agree:   %s\n", pct(s.LayerAgree), pct(s.CauseAgree), pct(s.BothAgree))
+	fmt.Fprintf(w, "\nlayer agrees: %s\ncause agrees: %s\nboth agree:   %s\n", agreePct(s.LayerAgree), agreePct(s.CauseAgree), agreePct(s.BothAgree))
 	if h := s.Human; h != nil {
 		fmt.Fprintf(w, "with human grade (%d graded rooms):\n  cause: auto equals human %s (%d partial grades left out; auto yes/human no %d, auto no/human yes %d)\n  layer: auto equals human %s\n",
-			h.Graded, pct(h.CauseMatch), h.Partial, h.AutoYesHumNo, h.AutoNoHumYes, pct(h.LayerMatch))
+			h.Graded, agreePct(h.CauseMatch), h.Partial, h.AutoYesHumNo, h.AutoNoHumYes, agreePct(h.LayerMatch))
 	} else {
 		fmt.Fprintln(w, "with human grade: no graded rooms")
 	}
@@ -382,7 +382,7 @@ func yn(b bool) string {
 	return "no"
 }
 
-func pct(r Rate) string {
+func agreePct(r Rate) string {
 	if r.Of == 0 {
 		return "n/a (0 rooms)"
 	}

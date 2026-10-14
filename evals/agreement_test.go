@@ -324,6 +324,12 @@ var syntheticLabels = map[string]Label{
 	"slot-inactive-wal-growth":      {"kafka-connect", []string{"stopped", "inactive", "retains wal"}},
 	"source-column-dropped":         {"consumer", []string{"dropped", "migration"}},
 	"topic-retention-data-loss":     {"kafka", []string{"retention", "log start"}},
+	// The five scenarios added by #87.
+	"avro-schema-id-deleted-sink-failed":      {"schema-registry", []string{"schema id 7", "permanently deleted", "cleanup job"}},
+	"consumer-offsets-out-of-range-retention": {"kafka", []string{"retention", "log start", "data loss"}},
+	"consumer-rebalance-storm":                {"consumer", []string{"rebalance storm", "max.poll.interval", "session timeout"}},
+	"replication-slot-lost-failover":          {"postgres", []string{"failover", "promoted", "new primary"}},
+	"sink-connector-paused-warehouse-stale":   {"kafka-connect", []string{"deliberate*", "on purpose", "manual*", "maintenance"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -335,10 +341,17 @@ var syntheticTruth = map[string]map[string]truth{
 	"slot-inactive-wal-growth":      {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"source-column-dropped":         {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"topic-retention-data-loss":     {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	// avro wrong: "broke Avro compatibility in the registry" still blames the
+	// registry. rebalance lazy: the title names the consumer group's lag.
+	"avro-schema-id-deleted-sink-failed":      {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	"consumer-offsets-out-of-range-retention": {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"consumer-rebalance-storm":                {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
+	"replication-slot-lost-failover":          {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	"sink-connector-paused-warehouse-stale":   {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 }
 
 // minSyntheticAccuracy is the floor the deterministic matcher must keep on
-// the synthetic cases (36 booleans: 6 scenarios x 3 texts x layer and cause).
+// the synthetic cases (66 booleans: 11 scenarios x 3 texts x layer and cause).
 // The measured value is in the PR; raise this when it improves.
 const minSyntheticAccuracy = 0.90
 

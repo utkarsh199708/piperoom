@@ -59,6 +59,10 @@ func (s *cSource) LongTransactions(ctx context.Context, d time.Duration) ([]clie
 	s.c.add("src.txns")
 	return s.fakeSource.LongTransactions(ctx, d)
 }
+func (s *cSource) LongTransactionsOnTables(ctx context.Context, d time.Duration, tables []string) (postgres.TableTransactions, error) {
+	s.c.add("src.txns.tables:" + strings.Join(tables, ","))
+	return s.fakeSource.LongTransactionsOnTables(ctx, d, tables)
+}
 func (s *cSource) Row(ctx context.Context, table, pk, key string) (map[string]any, bool, error) {
 	s.c.add("src.row:" + table)
 	return s.fakeSource.Row(ctx, table, pk, key)

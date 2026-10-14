@@ -171,12 +171,12 @@ type occurrence struct {
 	negated    bool
 }
 
-// findTerm lists the occurrences of term in one clause. A term is negated by
+// findAgreeTerm lists the occurrences of term in one clause. A term is negated by
 // a negator in the negWindow words before it or a clearing word in the
 // negWindow words after it (neither scan passes a contrast word, except that
 // the clearing scan follows "but it ..."), by a negator that ended an earlier
 // clause of the sentence, or by a later bare denial clause.
-func findTerm(c clause, term string) []occurrence {
+func findAgreeTerm(c clause, term string) []occurrence {
 	toks := c.toks
 	want, prefix, ok := termTokens(term)
 	if !ok {
@@ -231,7 +231,7 @@ func findTerm(c clause, term string) []occurrence {
 // whether it occurs at all only negated (neg).
 func termHits(clauses []clause, term string) (hit, neg bool) {
 	for _, c := range clauses {
-		for _, o := range findTerm(c, term) {
+		for _, o := range findAgreeTerm(c, term) {
 			if o.negated {
 				neg = true
 			} else {

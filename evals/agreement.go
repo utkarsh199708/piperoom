@@ -247,7 +247,7 @@ func agentLayer(text string, names map[string]string) (layer, why string, also [
 			if wantFailure {
 				live := false
 				for _, m := range failureMarkers {
-					for _, o := range findTerm(c, m) {
+					for _, o := range findAgreeTerm(c, m) {
 						live = live || !o.negated
 					}
 				}
@@ -258,7 +258,7 @@ func agentLayer(text string, names map[string]string) (layer, why string, also [
 			var hits []hit
 			for l, ts := range terms {
 				for _, t := range ts {
-					for _, o := range findTerm(c, t) {
+					for _, o := range findAgreeTerm(c, t) {
 						if !o.negated {
 							hits = append(hits, hit{o.start, l, t})
 						}

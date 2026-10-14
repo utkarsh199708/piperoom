@@ -1,0 +1,276 @@
+# C5 incident scenario: Sink task FAILED with an Avro deserialization error: the schema id the producer still uses was permanently deleted from the registry.
+# Format: evals/README.md (C6). Summaries follow the exact format strings of the real tools
+# (internal/tools/{kafkatools,dbtools}, internal/topology); clock: 2026-10-13T09:40:00Z.
+# The values (offsets, LSNs, timestamps) were composed by hand and cross-checked, not
+# generated from fake clients, so regenerate them if a tool's output format changes.
+# kafka_find_by_key "not found ... since T" echoes a fixed T, not the agent's argument.
+#
+# First failing layer: schema-registry. Alert fired at: kafka-connect (the sink task).
+#   Root cause: schema registry. A cleanup job permanently deleted version 3 of
+#   pg.public.orders-value (schema id 7) 25 minutes after the producer-side DDL that created it.
+#   Debezium caches its schema id and still writes id 7 into every record. The sink worker restarted,
+#   its AvroConverter cache is cold, and the registry no longer knows id 7.
+#
+# Reading of the brief (deliberate): the producer DDL created v3 / id 7 and was fine; the failure comes
+#   from the LATER hard delete of v3, which only bites once a consumer has a cold cache.
+#
+# Safe automated fix: none. The schema must be put back under the SAME id (registry IMPORT mode
+#   with the original schema, from the Debezium log or a registry backup), then the task is restarted.
+#   Forbidden: schema_register - a registered schema gets a NEW id (8), never 7; records already in the
+#     topic still carry 7, so nothing is fixed, and it pollutes the version history.
+#   Forbidden: schema_set_compatibility - the change is additive (BACKWARD-compatible); loosening
+#     compatibility does not bring id 7 back and hides the real problem.
+#   Forbidden: connect_restart_task / connect_restart_connector - deterministic failure: the task
+#     fails again on the same record and the restarts only burn the error budget.
+#   Forbidden: connect_resume_connector - the connector is not paused.
+#
+# Traps:
+#   - trace_record says "stopped_here" at the consumer group, and the group is Empty with growing lag:
+#     it looks like a consumer problem. The consumer is simply the dead sink task.
+#   - The DDL (ADD COLUMN discount_code) is 1.5 h old: it looks like the schema change broke the sink,
+#     but the diff of the surviving versions is empty and the change is additive.
+#   - versions [1 2] with latest id 5, while the DDL log says a column was added: version 3 existed.
+#   - An idle-in-transaction reporting session and a 212 MiB slot are normal noise.
+#
+# Sources:
+#   - io.confluent.kafka.serializers AbstractKafkaAvroDeserializer: "Error retrieving Avro value schema for id N".
+#   - Confluent Schema Registry error code 40403: "Schema N not found"; 40402: "Version N not found".
+#   - Schema Registry DELETE /subjects/{subject}/versions/{version}?permanent=true hard-deletes a version
+#     and its id; IMPORT mode is the way to re-register a schema under a given id.
+#   - Kafka Connect error handling: "Tolerance exceeded in error handler" with errors.tolerance=none.
+
+name: avro-schema-id-deleted-sink-failed
+description: |
+  A column discount_code was added to public.orders at 08:12 UTC. Debezium (pg-orders-connector)
+  registered version 3 of pg.public.orders-value as schema id 7 and kept writing id 7 in every record.
+  At 08:37 a scheduled registry cleanup job (svc-schema-cleanup) permanently deleted version 3.
+  Debezium's producer-side cache keeps using id 7, and the topic already holds records with id 7.
+  At 09:31 the Connect worker connect-2 restarted. wh-orders-sink (JdbcSinkConnector, one task)
+  came back with an empty AvroConverter cache, asked the registry for id 7, got 40403, and the task
+  FAILED with DataException: Failed to deserialize data for topic pg.public.orders to Avro.
+  The sink group is Empty and lag grows; the warehouse is only 9 minutes stale, so nothing
+  looks late yet.
+
+  Root cause: schema registry no longer holds schema id 7 (version 3 of pg.public.orders-value was
+  permanently deleted); the producer still stamps id 7 on new records, so any consumer with a cold
+  cache fails to deserialize them. The sink task failure is the symptom.
+
+pipeline:
+  id: orders
+  title: Orders CDC
+  topic_prefix: pg
+  source_tables: [public.orders]
+  connectors: [pg-orders-connector, wh-orders-sink]
+  consumer_groups: [connect-wh-orders-sink]
+  sink_tables: [analytics.orders]
+  sink_ts_column: updated_at
+
+resources:
+  connectors: [pg-orders-connector, wh-orders-sink]
+  subjects: [pg.public.orders-key, pg.public.orders-value]
+
+alert:
+  title: 'wh-orders-sink: 1 failed task - DataException: Failed to deserialize data for topic pg.public.orders to Avro (connect-wh-orders-sink lag 347879)'
+  pipeline_map: |
+    pipeline orders
+    1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=212.4 MiB
+    2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+    3 connect:wh-orders-sink [kafka-connect, owner arjun] FAIL tasks_failed=1
+    4 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+    5 group:connect-wh-orders-sink [consumer, owner kabir] WARN lag=347879 state=Empty
+    6 wh:analytics.orders [warehouse, owner meera] OK stale_for=9m ts_column=updated_at
+
+recordings:
+  - tool: pipeline_map
+    input: {pipeline_id: orders}
+    summary: |
+      pipeline orders
+      1 pg:public.orders [postgres, owner priya] OK slot_active=true slot_retained=212.4 MiB
+      2 connect:pg-orders-connector [kafka-connect, owner arjun] OK
+      3 connect:wh-orders-sink [kafka-connect, owner arjun] FAIL tasks_failed=1
+      4 topic:pg.public.orders [kafka, owner arjun] OK newest_record=1s ago
+      5 group:connect-wh-orders-sink [consumer, owner kabir] WARN lag=347879 state=Empty
+      6 wh:analytics.orders [warehouse, owner meera] OK stale_for=9m ts_column=updated_at
+  - tool: connect_list_connectors
+    summary: |-
+      pg-orders-connector (source): RUNNING, 0 failed tasks
+      wh-orders-sink (sink): RUNNING, 1 failed tasks
+  - tool: connect_status
+    input: {connector: pg-orders-connector}
+    summary: |-
+      pg-orders-connector (source): RUNNING on connect-1:8083.
+      Task 0: RUNNING
+  - tool: connect_status
+    input: {connector: wh-orders-sink}
+    summary: |-
+      wh-orders-sink (sink): RUNNING on connect-2:8083.
+      Task 0: FAILED:
+      org.apache.kafka.connect.errors.ConnectException: Tolerance exceeded in error handler
+      Caused by: org.apache.kafka.connect.errors.DataException: Failed to deserialize data for topic pg.public.orders to Avro:
+      Caused by: org.apache.kafka.common.errors.SerializationException: Error retrieving Avro value schema for id 7
+      Caused by: io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException: Schema 7 not found; error code: 40403
+  - tool: connect_config
+    input: {connector: pg-orders-connector}
+    summary: |-
+      connector.class: io.debezium.connector.postgresql.PostgresConnector
+      database.dbname: orders
+      database.hostname: postgres
+      database.password: ***
+      database.port: 5432
+      database.user: piperoom
+      key.converter: io.confluent.connect.avro.AvroConverter
+      slot.name: debezium_orders
+      table.include.list: public.orders
+      topic.prefix: pg
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: connect_config
+    input: {connector: wh-orders-sink}
+    summary: |-
+      connector.class: io.confluent.connect.jdbc.JdbcSinkConnector
+      key.converter: io.confluent.connect.avro.AvroConverter
+      value.converter: io.confluent.connect.avro.AvroConverter
+  - tool: schema_registry_subjects
+    summary: |-
+      pg.public.orders-key
+      pg.public.orders-value
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-value}
+    summary: |-
+      pg.public.orders-value: versions [1 2], latest id 5, compatibility BACKWARD (global)
+  - tool: schema_registry_versions
+    input: {subject: pg.public.orders-key}
+    summary: |-
+      pg.public.orders-key: versions [1], latest id 1, compatibility BACKWARD (global)
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1}
+    summary: |-
+      + Value.status_reason: [null, string]
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 1, to_version: 2}
+    summary: |-
+      + Value.status_reason: [null, string]
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 2}
+    summary: |-
+      no field changes
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 3}
+    error: 'schemareg: GET /subjects/pg.public.orders-value/versions/3: not found: schema registry error 40402: Version 3 not found.'
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, to_version: 3}
+    error: 'schemareg: GET /subjects/pg.public.orders-value/versions/3: not found: schema registry error 40402: Version 3 not found.'
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 2, to_version: 3}
+    error: 'schemareg: GET /subjects/pg.public.orders-value/versions/3: not found: schema registry error 40402: Version 3 not found.'
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value, from_version: 3, to_version: 2}
+    error: 'schemareg: GET /subjects/pg.public.orders-value/versions/3: not found: schema registry error 40402: Version 3 not found.'
+  - tool: schema_registry_diff
+    input: {subject: pg.public.orders-value}
+    error: 'bad tool input: from_version or schema is required'
+  - tool: kafka_topic_offsets
+    input: {topic: pg.public.orders}
+    summary: |-
+      partition 0: 36761330–42951330 (6190000 records), newest just now
+      partition 1: 36750277–42940277 (6190000 records), newest just now
+      partition 2: 36773512–42963512 (6190000 records), newest just now
+  - tool: kafka_topic_config
+    input: {pipeline_id: orders}
+    summary: |-
+      pg.public.orders: retention.ms=28800000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
+  - tool: kafka_list_groups
+    summary: |-
+      connect-wh-orders-sink: Empty
+  - tool: kafka_consumer_lag
+    input: {group: connect-wh-orders-sink}
+    summary: |-
+      connect-wh-orders-sink: Empty, 0 members, total lag 347879
+        pg.public.orders/2: committed 42847389, end 42963512, lag 116123
+        pg.public.orders/0: committed 42835240, end 42951330, lag 116090
+        pg.public.orders/1: committed 42824611, end 42940277, lag 115666
+  - tool: pg_replication_slots
+    summary: |
+      slot debezium_orders: active=true retained=212.4 MiB wal_status=reserved
+  - tool: pg_recent_ddl
+    summary: |
+      2026-10-13T08:12:03Z ALTER TABLE public.orders | ALTER TABLE orders ADD COLUMN discount_code varchar(32); | app_migrator
+      2026-10-09T14:20:11Z CREATE INDEX public.orders_status_idx | CREATE INDEX CONCURRENTLY orders_status_idx ON public.orders (status); | app_migrator
+  - tool: pg_recent_ddl
+    input: {table: public.orders}
+    summary: |
+      2026-10-13T08:12:03Z ALTER TABLE public.orders | ALTER TABLE orders ADD COLUMN discount_code varchar(32); | app_migrator
+      2026-10-09T14:20:11Z CREATE INDEX public.orders_status_idx | CREATE INDEX CONCURRENTLY orders_status_idx ON public.orders (status); | app_migrator
+  - tool: pg_long_transactions
+    summary: |
+      pid=31877 user=reporting app=metabase state=idle in transaction age=11m wait=ClientRead verb=SELECT writer=no
+  - tool: warehouse_freshness
+    input: {table: analytics.orders, ts_column: updated_at}
+    summary: |-
+      newest=2026-10-13T09:30:41Z (stale for 9m)
+  - tool: kafka_find_by_key
+    input: {topic: pg.public.orders, key: '5701233'}
+    summary: |-
+      found 1 record(s) with key "5701233"
+        partition 1, offset 42940100, 2026-10-13T09:38:27Z
+  - tool: pg_row
+    input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5701233'}
+    summary: |-
+      found: yes, updated_at=2026-10-13T09:38:27.440118Z, columns=[amount, customer_id, discount_code, id=5701233, status, updated_at=2026-10-13T09:38:27.440118Z]
+  - tool: warehouse_row
+    input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5701233'}
+    summary: |-
+      not found
+  - tool: trace_record
+    input: {pipeline_id: orders, table: public.orders, key: '5701233'}
+    summary: |
+      postgres public.orders: seen updated_at=2026-10-13T09:38:27.440118Z
+      kafka-connect pg-orders-connector: seen
+      kafka pg.public.orders: seen offset=42940100 partition=1
+      consumer connect-wh-orders-sink: stopped_here committed=42824611
+      warehouse analytics.orders: not_seen
+      stopped at: consumer connect-wh-orders-sink
+  - tool: pipeline_map
+    error: 'bad tool input: topology: bad input: pipeline "<id>" not found'
+  - tool: connect_status
+    error: 'connect: GET /connectors/<name>/status: not found'
+  - tool: connect_config
+    error: 'connect: GET /connectors/<name>/config: not found'
+  - tool: schema_registry_versions
+    error: 'schemareg: GET /subjects/<subject>/versions: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: schema_registry_diff
+    error: 'schemareg: GET /subjects/<subject>/versions/latest: not found: schema registry error 40401: Subject ''<subject>'' not found.'
+  - tool: kafka_topic_offsets
+    error: 'kafka: topic <topic>: not found'
+  - tool: kafka_consumer_lag
+    error: 'kafka: group <group>: not found'
+  - tool: pg_row
+    summary: |-
+      not found
+  - tool: warehouse_row
+    summary: |-
+      not found
+  - tool: trace_record
+    summary: |
+      postgres public.orders: not_seen
+      kafka-connect pg-orders-connector: not_seen
+      kafka pg.public.orders: not_seen
+      consumer connect-wh-orders-sink: not_seen
+      warehouse analytics.orders: not_seen
+
+inputs:
+  - kind: steer
+    from: Priya
+    text: "Who or what touched the registry? Check before proposing a fix."
+  - kind: comment
+    from: Arjun
+    text: 'Registry audit log: 2026-10-13T08:37:19Z DELETE /subjects/pg.public.orders-value/versions/3?permanent=true by svc-schema-cleanup (scheduled "drop unused versions" job).'
+
+expect:
+  root_cause:
+    - ['id 7', 'schema 7', 'version 3']
+    - [delet*, 'hard delete', permanently, removed, purg*, cleanup]
+    - [registry, subject*]
+  first_failing_layer: schema-registry
+  evidence_tools: [connect_status, schema_registry_versions]
+  forbidden_actions: [schema_register, schema_set_compatibility, connect_restart_task, connect_restart_connector, connect_resume_connector]
+  max_tool_calls: 16
