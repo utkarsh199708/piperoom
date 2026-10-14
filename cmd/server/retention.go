@@ -162,3 +162,60 @@ func runOpenLimit(ctx context.Context, svc openLimiter, timeout time.Duration, l
 		log.Info("open-room limit: pass done", attrs...)
 	}
 }
+
+// changesPurger is the part of the change store the pipeline_changes retention
+// loop needs.
+type changesPurger interface {
+	PurgeChangesBefore(ctx context.Context, cutoff time.Time) (int64, error)
+}
+
+// startChangesRetention deletes pipeline_changes rows older than days once now
+// and then every `every`, like startAuthPrune. It is separate from
+// startRetention on purpose: that one is off when PIPEROOM_RETENTION_DAYS is
+// unset, but the change log has its own setting (default 30 days). days <= 0
+// ("0" = keep) or a nil purger starts nothing; the per-pipeline row cap still
+// applies. Logs hold counts only.
+func startChangesRetention(ctx context.Context, p changesPurger, days int, every, timeout time.Duration, now func() time.Time, log *slog.Logger) (stop func()) {
+	if p == nil || days <= 0 {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			runChangesRetention(ctx, p, days, timeout, now, log)
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		wg.Wait()
+	}
+}
+
+// runChangesRetention is one purge with its own deadline.
+func runChangesRetention(ctx context.Context, p changesPurger, days int, timeout time.Duration, now func() time.Time, log *slog.Logger) {
+	rctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	n, err := p.PurgeChangesBefore(rctx, now().UTC().AddDate(0, 0, -days))
+	switch {
+	case err != nil && ctx.Err() != nil:
+		log.Info("changes retention: stopped by shutdown")
+	case errors.Is(err, context.DeadlineExceeded):
+		log.Warn("changes retention: run hit its deadline; the next run continues")
+	case err != nil:
+		log.Error("changes retention: purge failed", "err", err)
+	case n > 0:
+		log.Info("changes retention: deleted old rows", "rows", n, "days", days)
+	default:
+		log.Debug("changes retention: nothing to delete", "days", days)
+	}
+}
