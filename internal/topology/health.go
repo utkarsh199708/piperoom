@@ -37,8 +37,19 @@ type collected struct {
 	groups    map[string]groupSnapshot
 	freshness map[string]freshSnapshot
 
-	topicNewest map[string]time.Time
-	topicErr    map[string]error
+	topicNewest  map[string]time.Time
+	topicRecords map[string]int64 // sum of end-start over partitions
+	topicErr     map[string]error
+
+	// srListed is the registry's subject listing and srErr its error; both
+	// stay empty when the builder has no Schema Registry client.
+	srListed map[string]bool
+	srErr    error
+	subjects map[string]subjectSnapshot
+
+	// matchers are the include/exclude lists of each readable source
+	// connector, compiled once per Build (Build fills them after collect).
+	matchers map[string]streamMatcher
 
 	now time.Time
 }
@@ -46,12 +57,15 @@ type collected struct {
 // collect gathers health for every system in parallel under ctx's budget.
 func (b *builder) collect(ctx context.Context, p owners.Pipeline) *collected {
 	c := &collected{
-		connect:     map[string]connectSnapshot{},
-		groups:      map[string]groupSnapshot{},
-		freshness:   map[string]freshSnapshot{},
-		topicNewest: map[string]time.Time{},
-		topicErr:    map[string]error{},
-		now:         time.Now(),
+		connect:      map[string]connectSnapshot{},
+		groups:       map[string]groupSnapshot{},
+		freshness:    map[string]freshSnapshot{},
+		topicNewest:  map[string]time.Time{},
+		topicRecords: map[string]int64{},
+		topicErr:     map[string]error{},
+		srListed:     map[string]bool{},
+		subjects:     map[string]subjectSnapshot{},
+		now:          b.now(),
 	}
 
 	var wg sync.WaitGroup
@@ -64,6 +78,17 @@ func (b *builder) collect(ctx context.Context, p owners.Pipeline) *collected {
 		}()
 	}
 
+	if b.sr != nil {
+		run(func() {
+			subs, err := b.sr.Subjects(ctx)
+			mu.Lock()
+			c.srErr = err
+			for _, s := range subs {
+				c.srListed[s] = true
+			}
+			mu.Unlock()
+		})
+	}
 	run(func() {
 		slots, err := b.src.ReplicationSlots(ctx)
 		mu.Lock()
@@ -120,15 +145,20 @@ func (b *builder) collectTopics(ctx context.Context, topics []string, c *collect
 			defer wg.Done()
 			offs, err := b.kafka.TopicOffsets(ctx, t)
 			var newest time.Time
+			var records int64
 			if err == nil {
 				for _, p := range offs {
 					if p.LastTimestamp.After(newest) {
 						newest = p.LastTimestamp
 					}
+					if p.End > p.Start {
+						records += p.End - p.Start
+					}
 				}
 			}
 			mu.Lock()
 			c.topicNewest[t] = newest
+			c.topicRecords[t] = records
 			c.topicErr[t] = err
 			mu.Unlock()
 		}()

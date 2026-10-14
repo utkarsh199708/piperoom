@@ -80,6 +80,20 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 - **Proxy guard (dev mode).** `POST /auth/dev-login` on a request carrying `X-User`, or a request with a session
   cookie plus an `X-User` naming a different user → `403 proxy_identity`. A reverse proxy needs
   `PIPEROOM_AUTH_MODE=oidc` (or the git tag `pre-auth`).
+- **Verified people (design §2.1).** Every person the API returns carries `verified`: `true` for a `users.yaml`
+  person, `false` for someone known only to the IdP (a derived `u_` id). This covers event `actor`s (agent and system
+  actors are `true`), `control.granted.to` and `handoff.created.to`, the snapshot's `driver`,
+  `pending_suggestions[].from` and `members[]`, `/api/me`, `/api/people` and WebSocket presence `members`. In events
+  (`events.Actor`, also inside the export) the key is **omitted when false** (`omitempty`), so events written before
+  the field, and exports of old rooms, are unchanged; a missing `verified` counts as `false` everywhere. The other
+  objects always carry `true` or `false`. Clients show an unverified person with a badge and their id or email next
+  to the name. **The web badge is pending (A6 follow-up)**, so security audit A-ID-2 stays open until it ships. An
+  IdP name that looks like a `users.yaml` person is shown as `"<name> (<email>)"`, or `"<name> (<id>)"` without a
+  verified email, and the login is logged, not refused. "Looks like": the whole name, or the name with its bracketed
+  parts removed, equals a `users.yaml` id, name or email after the design §2.1 skeleton (default-ignorable code points
+  dropped, compatibility forms, Unicode case folding, Cyrillic/Greek/Armenian/Cherokee/Lisu look-alikes); also any
+  name that mixes Latin with another script, and any name that ends in the server's own suffix shape (`(…@…)` or
+  `(u_…)`). A name with extra words (`Priya S.`) is not suffixed and relies on the badge.
 
 ## Errors
 
@@ -112,10 +126,11 @@ or the hand-off was voided by a newer one. A second `send` of an already-sent su
 Exactly `events.Event` from `internal/events/events.go`:
 ```json
 { "room_id": "r_01J...", "seq": 12, "type": "comment.added",
-  "actor": { "kind": "human", "id": "kabir", "name": "Kabir" },
+  "actor": { "kind": "human", "id": "kabir", "name": "Kabir", "verified": true },
   "payload": { "comment_id": "c_01J...", "step_id": "s_2", "text": "Wrong service?", "mentions_agent": false },
   "at": "2026-10-11T10:59:03Z" }
 ```
+`actor.verified` is decided when the event is written (see **Verified people** under Login).
 
 ### Agent usage (`agent.usage`)
 One event per model request the agent sends (design `docs/design/cost.md`), actor `agent`: every investigation
@@ -148,7 +163,7 @@ trace or activity feed** — to render a room, the client replays the full event
   "pipeline_id": "orders", "status": "open", "opened_at": "...", "closed_at": null, "resolution": "",
   "shadow": false,                 // true when the room's pipeline had shadow enabled at open (room.created.shadow): the agent ran silently, no proposals; see Shadow mode
   "last_seq": 42,
-  "driver": { "id": "arjun", "name": "Arjun", "lease_until": "..." },
+  "driver": { "id": "arjun", "name": "Arjun", "verified": true, "lease_until": "..." },
   "agent_status": { "state": "working", "detail": "step 6" },     // "idle" for a new room; states: working | idle | done | waiting_approval | queued ("waiting for an agent slot (N ahead)" when PIPEROOM_MAX_AGENTS runs are busy) | log_full (the room log hit its cap; the agent stopped for good); in a shadow room the agent writes no status to the room log, so it stays "idle"
   "auto_close_at": "...",          // open-room limit: when the server closes this open room (opened_at + PIPEROOM_MAX_OPEN_DAYS, or room.extended.close_at, or a later room.retention_warning.close_at); null when the limit is off or the room is closed
   "extended": false,               // the room's one extension was used (room.extended)
@@ -157,8 +172,8 @@ trace or activity feed** — to render a room, the client replays the full event
   "open_proposals": [ { "proposal_id": "p_01J...", "title": "...", "steps": [], "risk": "...", "rollback": "...",   // after auth PR 4 also "params_hash"
                         "required_layers": ["schema-registry","kafka-connect"],
                         "approvals": { "schema-registry": "approved", "kafka-connect": "pending" } } ],
-  "pending_suggestions": [ { "suggestion_id": "g_01J...", "from": {"id":"kabir","name":"Kabir"}, "text": "..." } ],
-  "members": [ { "id": "priya", "name": "Priya", "role": "watching" } ]
+  "pending_suggestions": [ { "suggestion_id": "g_01J...", "from": {"id":"kabir","name":"Kabir","verified":true}, "text": "..." } ],
+  "members": [ { "id": "priya", "name": "Priya", "verified": true, "role": "watching" } ]
 }
 ```
 `closed_at` and `resolution` are set by `room.closed`. `required_layers` is always the set of the steps' layers
@@ -203,8 +218,8 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 
 | Method | Path | Body | Result | Notes |
 |---|---|---|---|---|
-| GET | `/api/people` | – | `[{id, name, email?}]` | after auth PR 3: the people a driver may grant control or hand off to: `users.yaml` users plus members with a live session (`LookupPerson`). `email` only for IdP users; pickers show `id` or `email` next to `name`. Members only: a viewer gets `403 viewer` (the list holds emails and viewers cannot grant or hand off anyway) |
-| GET | `/api/me` | – | `{id,name,layers}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request; `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise); `admin: true` when this user has `admin: true` in users.yaml (omitted otherwise) |
+| GET | `/api/people` | – | `[{id, name, email?, verified}]` | after auth PR 3: the people a driver may grant control or hand off to: `users.yaml` users plus members with a live session (`LookupPerson`). `email` only for IdP users; pickers show `id` or `email` next to `name`. `verified` is `true` for `users.yaml` users only. Members only: a viewer gets `403 viewer` (the list holds emails and viewers cannot grant or hand off anyway) |
+| GET | `/api/me` | – | `{id,name,layers,verified}` | after auth PR 3 also `role` (`member`\|`viewer`) and `groups_missing` (the IdP sent no groups claim); `layers` is computed per request; `solo: true` when `PIPEROOM_SOLO_USER` is this user (omitted otherwise); `admin: true` when this user has `admin: true` in users.yaml (omitted otherwise); `verified` as for event actors |
 | GET | `/api/rooms` | – | `[RoomSnapshot]` | open rooms first; with `tenants:` only the rooms of your tenants (see Tenants above) |
 | POST | `/api/rooms` | `{title, severity, pipeline_id}` | `RoomSnapshot` | creator becomes driver; agent starts; unknown `pipeline_id` → `400 validation` |
 | POST | `/api/alerts/webhook` | any JSON | `RoomSnapshot` | generic alert; maps `title`/`severity`/`pipeline_id` if the body is an object; the raw body is stored verbatim in `room.created.alert`; unknown pipeline → room opens with a system message and proposals are disabled; driver = none until someone takes control. **Dedup:** the same alert (same `dedup_key`, else a byte-identical body) for the same pipeline while its room is open joins that room → `200` with that `RoomSnapshot` (a resolved repeat is noted in the room; it never closes the room); a new room → `201`. A **resolved** alert (`status: "resolved"`) that matches no open room — no `dedup_key` and no byte-identical open match, or its room is already closed — opens nothing: `202` with `{"ignored": true, "reason": "resolved alert with no open room"}` (nothing stored, no agent, no hook). Webhook auth: see `docs/design/webhook-auth.md` (C9) |
@@ -219,7 +234,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/rooms/{id}/close` | `{resolution}` | `Event` | driver only; a shadow room refuses an empty resolution with `400 validation`. A full room log never refuses `room.closed` |
 | POST | `/api/rooms/{id}/extend` | – | `Event` (`room.extended`) | driver only (`403 not_driver`); open rooms only (`409 room_closed`); once per room (`409 already_extended`); `400 validation` when `PIPEROOM_MAX_OPEN_DAYS=0`. Moves the auto-close deadline by `PIPEROOM_MAX_OPEN_DAYS` days and renews the driver lease. See Room limits |
 | DELETE | `/api/rooms/{id}?reason=&archive=` | – (send `Content-Type: application/json` like every non-GET) | `{room_id, pipeline_id, deleted_by, deleted_at, reason, event_count, archived, archive_removed}` | admin only (users.yaml `admin: true`): any other member `403 not_allowed`, a viewer `403 viewer`, checked first, before the `archive` value and before the room is looked up. Then tenancy: a room whose pipeline the admin may not see (the live room's pipeline, or the pipeline in its audit row) answers `404 not_found` like a room that never existed. `reason` 1–500 characters, else `400 validation`. **A delete is an erase**: it hard-deletes the room (open or closed) with its events, proposals, approvals, steps, suggestions, hand-offs, Slack thread state and shadow rows, keeps no copy, and writes one content-free audit row (`room_deletions`). `archive=true` writes the room's export to `PIPEROOM_ARCHIVE_DIR` first (`400 validation` when the server has no archive directory, or for a value other than `true`/`false`; a failed write is `500 archive_failed` and nothing is deleted). `event_count` is the number of events deleted; `archived` is true when an export of the room is in the archive directory. An erase (no `archive=true`) also removes an export of the room left in `PIPEROOM_ARCHIVE_DIR` by an earlier failed attempt or retention run, after the database delete commits; `archive_removed` is then true. Idempotent: a room already deleted, by an admin or by retention, answers `200` with its audit row (`deleted_by: "system"` for retention) and changes nothing; an id that never existed is `404 not_found`. Open WebSockets of the room get a last `room.deleted` frame and close (see WebSocket) |
-| POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step (`{proposal_id, step_index, ok, output, params_hash, outcome_unknown?}`; `outcome_unknown: true` with `ok: false` when the server running the step stopped before it recorded the result: the step is never run again, check the target before retrying). After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode) |
+| POST | `/api/proposals/{pid}/approve` | `{layer}`; after auth PR 4 `{layer, params_hash}`, plus `confirm: "<pipeline_id>/<layer>"` in solo mode | `Event` | caller must own `layer`; when all layers approved the server runs the steps in order and emits `action.executed` per step (`{proposal_id, step_index, ok, output, params_hash, outcome_unknown?}`; `outcome_unknown: true` with `ok: false` when the server running the step stopped before it recorded the result: the step is never run again, check the target before retrying). After auth PR 4: missing `params_hash` → `400 validation`, different from the stored one → `409 params_mismatch`; `approval.given` carries `params_hash` and `identity` (`grant: "solo"` in solo mode); `identity.email` is the session's verified IdP email, else the `users.yaml` `email:` (omitted when neither exists), so a decision is tied to the actor id and a mailbox, never to the name alone. `approval.rejected`, `shadow.labelled` and `shadow.graded` carry the same `identity.email` |
 | POST | `/api/proposals/{pid}/reject` | `{layer, reason}`; after auth PR 4 `{layer, reason, params_hash}` | `Event` | same hash rule as approve |
 | GET | `/api/rooms/{id}/export` | – | the room as one JSON document | header `X-Piperoom-Export-SHA256` = SHA-256 of the RFC 8785 (JCS) form without the top-level `integrity` member. Today any user may export. After auth PR 4: only an approver or backup for any layer of the room's pipeline (in dev mode: `users.yaml` `layers`) or an `auditors:` principal; the driver is not on the list; others → `403 not_allowed`. Proposals, approvals and action results then carry `params_hash`, and approvals also `identity`. `?include=shadow` (closed rooms only, else `409 room_open`; `409 not_labelled` before the blind label) adds a top-level `"shadow": {run, events}` member (with `data`) after `"schema"`; it is inside the hashed document, so the hash differs from the plain export. Same access rule |
 | POST | `/api/rooms/{id}/handoffs` | `{to, stay_as_watcher}` | `Event` | driver only; server asks the agent for the summary (can take up to 3 min; this route is exempt from the 60 s request timeout) |
@@ -345,7 +360,7 @@ The WebSocket uses the session cookie (dev: or `X-User` for non-browser clients)
 Server → client messages:
 ```json
 { "type": "event", "event": { ...Event } }
-{ "type": "presence", "members": [ { "id": "priya", "name": "Priya", "state": "viewing" } ] }
+{ "type": "presence", "members": [ { "id": "priya", "name": "Priya", "verified": true, "state": "viewing" } ] }
 { "type": "error", "error": { "code": "...", "message": "..." } }
 ```
 Client → server:

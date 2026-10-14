@@ -1,7 +1,7 @@
 import { useRef } from 'react'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Copy, GitCompareArrows, Hand, Inbox, LogOut, Moon, Route, Sun, UserCheck } from 'lucide-react'
+import { CircleCheck, Copy, GitCompareArrows, Hand, Inbox, LogOut, Moon, Route, Sun, UserCheck } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import {
   CommandDialog,
@@ -90,7 +90,7 @@ export function CommandMenu({
       <CommandList>
         <CommandEmpty>No results.</CommandEmpty>
 
-        {room && (room.takeControl || room.requestControl || room.handoff || room.trace || room.invite) && (
+        {room && (room.takeControl || room.requestControl || room.handoff || room.trace || room.closeRoom || room.invite) && (
           <CommandGroup heading="Room">
             {room.takeControl && (
               <CommandItem
@@ -130,6 +130,16 @@ export function CommandMenu({
               >
                 <Route aria-hidden="true" />
                 Trace a record through the pipeline
+              </CommandItem>
+            )}
+            {room.closeRoom && (
+              <CommandItem
+                value="close the room"
+                keywords={['resolve', 'resolution', 'finish', 'done']}
+                onSelect={() => run(() => registry.get()?.closeRoom?.(), true)}
+              >
+                <CircleCheck aria-hidden="true" />
+                Close the room
               </CommandItem>
             )}
             {room.invite && (
