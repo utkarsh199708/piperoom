@@ -215,6 +215,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 				short.Post("/handoffs/{hid}/accept", s.handleAcceptHandoff)
 				short.Get("/pipelines", s.handlePipelines)
 				short.Get("/pipelines/{pid}/topology", s.pipelineVisible(s.handleTopology))
+				short.Get("/pipelines/{pid}/agent-stats", s.handleAgentStats)
 			})
 		})
 	})
