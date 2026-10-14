@@ -22,6 +22,7 @@ import type {
   ProposalCreatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
+  SteerDeclinedPayload,
   SteerSentPayload,
   SteerSuggestedPayload,
   TracePinnedPayload,
@@ -264,9 +265,18 @@ export function applyEvent(state: RoomState, event: Event): RoomState {
       break
     }
 
-    // HOOK(R10): a suggestion the driver declines. No such event is in docs/api.md or
-    // events.go yet. When the contract adds one, add its case here and set the matching
-    // suggestion's status to 'declined'; the suggestions panel already renders that state.
+    case 'steer.declined': {
+      const p = as<SteerDeclinedPayload>(event)
+      next = {
+        ...state,
+        suggestions: state.suggestions.map((s) =>
+          s.suggestion_id === p.suggestion_id
+            ? { ...s, status: 'declined' as const, decline_reason: p.reason || undefined }
+            : s,
+        ),
+      }
+      break
+    }
 
     case 'control.requested': {
       if (state.control_requests.some((r) => r.from.id === event.actor.id)) break

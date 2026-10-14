@@ -17,6 +17,7 @@ import type {
   ProposalCreatedPayload,
   RoomClosedPayload,
   RoomCreatedPayload,
+  SteerDeclinedPayload,
   SteerSentPayload,
   SteerSuggestedPayload,
   TracePinnedPayload,
@@ -75,6 +76,10 @@ export function describeEvent(e: Event, driverBefore: string | null = null): str
     case 'steer.sent': {
       const p = as<SteerSentPayload>(e)
       return `${who} steered the agent: ${p.text}`
+    }
+    case 'steer.declined': {
+      const p = as<SteerDeclinedPayload>(e)
+      return p.reason ? `${who} declined a suggestion: ${p.reason}` : `${who} declined a suggestion`
     }
     case 'control.requested':
       return `${who} requested control`
