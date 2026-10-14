@@ -330,6 +330,9 @@ var syntheticLabels = map[string]Label{
 	"consumer-rebalance-storm":                {"consumer", []string{"rebalance storm", "max.poll.interval", "session timeout"}},
 	"replication-slot-lost-failover":          {"postgres", []string{"failover", "promoted", "new primary"}},
 	"sink-connector-paused-warehouse-stale":   {"kafka-connect", []string{"deliberate*", "on purpose", "manual*", "maintenance"}},
+	// The two scenarios added by #100.
+	"recurring-connector-paused": {"kafka-connect", []string{"nightly maintenance", "maintenance job", "resume call timed out"}},
+	"recurring-schema-deleted":   {"schema-registry", []string{"hard-deleted", "schema id 2", "40403"}},
 }
 
 type truth struct{ layer, cause bool }
@@ -348,10 +351,14 @@ var syntheticTruth = map[string]map[string]truth{
 	"consumer-rebalance-storm":                {"good": {true, true}, "lazy": {true, false}, "wrong": {false, false}},
 	"replication-slot-lost-failover":          {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 	"sink-connector-paused-warehouse-stale":   {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
+	// recurring-connector-paused wrong: blames the connector's task, the
+	// right layer for the wrong reason.
+	"recurring-connector-paused": {"good": {true, true}, "lazy": {false, false}, "wrong": {true, false}},
+	"recurring-schema-deleted":   {"good": {true, true}, "lazy": {false, false}, "wrong": {false, false}},
 }
 
 // minSyntheticAccuracy is the floor the deterministic matcher must keep on
-// the synthetic cases (66 booleans: 11 scenarios x 3 texts x layer and cause).
+// the synthetic cases (78 booleans: 13 scenarios x 3 texts x layer and cause).
 // The measured value is in the PR; raise this when it improves.
 const minSyntheticAccuracy = 0.90
 
