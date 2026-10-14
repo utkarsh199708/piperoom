@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/testenv"
 )
 
@@ -169,5 +170,49 @@ func TestReadOnlyPoolIntegration(t *testing.T) {
 	}
 	if pgErr.Code != "25006" {
 		t.Fatalf("SQLSTATE = %s, want 25006 (read_only_sql_transaction)", pgErr.Code)
+	}
+}
+
+// TestTableActivityIntegration is the Postgres warehouse's answer to
+// warehouse_load_errors: no load history, but write counters of the table.
+func TestTableActivityIntegration(t *testing.T) {
+	db := warehouseDB(t)
+	conn := writeConn(t, testenv.Require(t).WarehouseDBURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	table := testenv.Name("act")
+	if _, err := conn.Exec(ctx, "CREATE TABLE analytics."+table+" (id int)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(c, "DROP TABLE IF EXISTS analytics."+table)
+	})
+	if _, err := conn.Exec(ctx, "INSERT INTO analytics."+table+" SELECT g FROM generate_series(1, 5) g"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	if _, err := db.LoadErrors(ctx, "analytics."+table, time.Now().Add(-time.Hour), 5); !errors.Is(err, clients.ErrNotSupported) {
+		t.Fatalf("LoadErrors err = %v, want ErrNotSupported", err)
+	}
+	// Statistics are reported asynchronously: poll briefly for the inserts.
+	var a TableActivity
+	for i := 0; i < 20; i++ {
+		var err error
+		if a, err = db.TableActivity(ctx, "analytics."+table); err != nil {
+			t.Fatalf("TableActivity: %v", err)
+		}
+		if a.Inserts >= 5 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if a.Inserts < 5 || a.LockWaiters != 0 {
+		t.Errorf("activity = %+v, want >= 5 inserts and no lock waiters", a)
+	}
+	if _, err := db.TableActivity(ctx, "analytics.no_such_"+table); !errors.Is(err, clients.ErrNotFound) {
+		t.Errorf("missing table err = %v, want ErrNotFound", err)
 	}
 }

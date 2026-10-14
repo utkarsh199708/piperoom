@@ -99,6 +99,7 @@ func Register(reg *tools.Registry, d Deps) error {
 		pgPublicationTablesTool(d),
 		warehouseFreshnessTool(d),
 		warehouseRowTool(d),
+		warehouseLoadErrorsTool(d),
 		pipelineMapTool(d),
 		traceRecordTool(d),
 	}
