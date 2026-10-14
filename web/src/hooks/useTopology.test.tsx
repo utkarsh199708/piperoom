@@ -21,7 +21,7 @@ vi.mock('../api/client', async (importOriginal) => {
   }
 })
 
-import { api } from '../api/client'
+import { ApiClientError, api } from '../api/client'
 import { TOPOLOGY_REFRESH_MS, useTopology } from './useTopology'
 
 const topology: Topology = { pipeline_id: 'orders', nodes: [], edges: [] }
@@ -151,5 +151,33 @@ describe('useTopology — refresh cadence', () => {
       vi.advanceTimersByTime(TOPOLOGY_REFRESH_MS)
     })
     expect(api.topology).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('useTopology — unknown pipeline', () => {
+  it('stops at a 404: no timer retry, no refreshKey retry, retry() resumes', async () => {
+    vi.mocked(api.topology).mockRejectedValue(new ApiClientError(404, 'not_found', 'unknown pipeline'))
+    const { result, rerender } = renderHook(({ k }) => useTopology('payments', { active: true, refreshKey: k }), {
+      initialProps: { k: 0 },
+    })
+    await flush()
+    expect(result.current.notFound).toBe(true)
+    expect(api.topology).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      vi.advanceTimersByTime(TOPOLOGY_REFRESH_MS * 3)
+    })
+    expect(api.topology).toHaveBeenCalledTimes(1)
+
+    rerender({ k: 1 })
+    await flush()
+    expect(api.topology).toHaveBeenCalledTimes(1)
+
+    vi.mocked(api.topology).mockResolvedValue(topology)
+    act(() => result.current.retry())
+    await flush()
+    expect(api.topology).toHaveBeenCalledTimes(2)
+    expect(result.current.notFound).toBe(false)
+    expect(result.current.topology).toEqual(topology)
   })
 })

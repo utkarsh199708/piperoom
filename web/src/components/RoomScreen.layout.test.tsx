@@ -78,7 +78,7 @@ function show(user: CurrentUser, state: RoomState | null, conn: ConnState = 'liv
     dismissStale: vi.fn(),
     reload,
   })
-  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null })
+  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null, notFound: false, retry: () => undefined })
   return render(
     <MemoryRouter initialEntries={['/rooms/r_schema_change']}>
       <Routes>
@@ -271,7 +271,7 @@ describe('RoomScreen loading and error', () => {
 
   it('shows an error state with Try again and Back to rooms', () => {
     show(arjun, null, 'error', 'boom')
-    expect(screen.getByText('Could not load room: boom')).toBeInTheDocument()
+    expect(screen.getByText('boom')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(reload).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('link', { name: 'Back to rooms' }))

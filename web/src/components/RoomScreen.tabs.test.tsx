@@ -76,7 +76,7 @@ function show(user: CurrentUser, state: RoomState | null, conn: ConnState = 'liv
     dismissStale: vi.fn(),
     reload,
   })
-  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null })
+  vi.mocked(useTopology).mockReturnValue({ topology: null, error: null, updatedAt: null, notFound: false, retry: () => undefined })
   return render(
     <MemoryRouter initialEntries={['/rooms/r_schema_change']}>
       <Routes>
