@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"piperoom/internal/clients/connect"
 	"piperoom/internal/clients/kafka"
@@ -31,7 +32,11 @@ import (
 	"piperoom/internal/clients/schemareg"
 	"piperoom/internal/config"
 	"piperoom/internal/discover"
+	"piperoom/internal/redact"
 )
+
+// maxLine caps one stderr line or log value.
+const maxLine = 2048
 
 const (
 	exitOK    = 0
@@ -366,6 +371,17 @@ func newRedactor(cfg config.Config) redactor {
 // a connector name or error text cannot inject terminal escapes or fake lines.
 func (red redactor) line(s string) string {
 	s = red.r.Replace(s)
+	// Configured values are known; a secret quoted in an HTTP error body
+	// (Connect echoes connector config in some 500s) is not, so the generic
+	// masker runs too, and an unbounded body is cut.
+	s, _ = redact.Text(s)
+	if len(s) > maxLine {
+		cut := maxLine
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + fmt.Sprintf("... [%d bytes cut]", len(s)-cut)
+	}
 	return strings.Map(func(c rune) rune {
 		if c < 0x20 || c == 0x7f {
 			return ' '
