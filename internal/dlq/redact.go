@@ -194,6 +194,13 @@ func scrub(rs []rune, m mode) []rune {
 	for i := 0; i < len(rs); {
 		r := rs[i]
 		switch {
+		case m.keepStructure && r == '{' && recordGroupAt(rs, i):
+			end := groupEnd(rs, i)
+			if end < 0 {
+				return append(out, redactedRunes...) // the rest is the record
+			}
+			out = append(out, redactRecordGroup(rs[i+1:end])...)
+			i = end + 1
 		case m.keepStructure && (r == '{' || r == '[' || r == '}' || r == ']'):
 			out = append(out, r)
 			i++
@@ -440,4 +447,84 @@ func groupEnd(rs []rune, i int) int {
 		}
 	}
 	return -1
+}
+
+var structWord = []rune("Struct")
+
+// recordGroupAt reports whether the '{' at i opens a printed record: Kafka
+// Connect's Struct.toString ("Struct{id=7,name=Jane Doe}") or a Java
+// Map.toString ("{id=7, name=Jane Doe}", a '{' not glued to a word whose
+// first entry is name=). Named groups such as "SinkRecord{kafkaOffset=5}"
+// are metadata and are kept.
+func recordGroupAt(rs []rune, i int) bool {
+	if n := len(structWord); i >= n && string(rs[i-n:i]) == string(structWord) && wordStart(rs, i-n) {
+		return true
+	}
+	if !wordStart(rs, i) {
+		return false
+	}
+	k := i + 1
+	for k < len(rs) && rs[k] == ' ' {
+		k++
+	}
+	_, ok := fieldName(rs[k:])
+	return ok
+}
+
+// fieldName returns the length of a leading "name=" (name as in
+// isIdentifier), or false.
+func fieldName(rs []rune) (int, bool) {
+	for k, r := range rs {
+		if r == '=' {
+			return k + 1, isIdentifier(rs[:k])
+		}
+		if !(isWordRune(r) || r == '_' || r == '.' || r == '$' || r == '-') {
+			return 0, false
+		}
+	}
+	return 0, false
+}
+
+// redactRecordGroup rewrites the inside of a printed record as
+// {name=<redacted>,...}: field names are evidence of the schema, values are
+// record data. A value is replaced wholesale, nested structs included, and a
+// part with no name= (a value that held a comma) is replaced too.
+func redactRecordGroup(body []rune) []rune {
+	out := []rune{'{'}
+	flush := func(part []rune) {
+		lead := 0
+		for lead < len(part) && part[lead] == ' ' {
+			lead++
+		}
+		out = append(out, part[:lead]...)
+		rest := part[lead:]
+		if len(rest) == 0 {
+			return
+		}
+		if n, ok := fieldName(rest); ok {
+			out = append(out, rest[:n]...)
+		}
+		out = append(out, redactedRunes...)
+	}
+	start, depth := 0, 0
+	for k := 0; k < len(body); k++ {
+		switch body[k] {
+		case '"':
+			if e := quoteEnd(body, k); e >= 0 {
+				k = e
+			}
+		case '{', '[', '(':
+			depth++
+		case '}', ']', ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				flush(body[start:k])
+				out = append(out, ',')
+				start = k + 1
+			}
+		}
+	}
+	flush(body[start:])
+	return append(out, '}')
 }
