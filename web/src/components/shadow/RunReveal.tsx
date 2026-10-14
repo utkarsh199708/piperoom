@@ -1,5 +1,5 @@
 import type { AgentToolResultPayload, ShadowEvent, ShadowLabelledPayload, ShadowResponse } from '@/api/types'
-import { formatSeconds, STATUS_LABEL } from '@/lib/shadow'
+import { formatSeconds, statusLabel } from '@/lib/shadow'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
@@ -56,13 +56,13 @@ export function RunReveal({
           <h2 id="shadow-answer-heading" className="m-0 text-sm font-medium">
             Agent’s conclusion
           </h2>
-          <Badge variant={run.status === 'hypothesised' ? 'agent' : 'warning'}>{STATUS_LABEL[run.status]}</Badge>
+          <Badge variant={run.status === 'hypothesised' ? 'agent' : 'warning'}>{statusLabel(run.status)}</Badge>
           {hyp && <Badge variant="agent">{hyp.confidence} confidence</Badge>}
         </div>
         {hyp ? (
           <p className="m-0 max-w-[72ch] text-base">{hyp.text}</p>
         ) : (
-          <p className="m-0 text-sm text-muted-foreground">The agent did not reach a hypothesis ({STATUS_LABEL[run.status]}).</p>
+          <p className="m-0 text-sm text-muted-foreground">The agent did not reach a hypothesis ({statusLabel(run.status)}).</p>
         )}
         <dl className="m-0 grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-4">
           <Stat label="Agent, final answer" value={formatSeconds(toFinal)} />
@@ -84,7 +84,7 @@ export function RunReveal({
             Layer <Badge variant="outline">{label.actual_layer}</Badge>
           </p>
           <ul className="m-0 flex list-disc flex-col gap-0.5 pl-5 text-sm">
-            {label.root_cause_terms.map((t, i) => (
+            {(label.root_cause_terms ?? []).map((t, i) => (
               <li key={`${i}-${t}`}>{t}</li>
             ))}
           </ul>

@@ -6,6 +6,11 @@ import { ApiClientError } from '../api/client'
 const FRIENDLY_TEXT: Record<string, string> = {
   lease_held: 'someone else holds control',
   stale_handoff: 'this hand-off is out of date',
+  // Shadow mode (docs/api.md). Only codes no other route uses: already_decided also means
+  // "this layer was decided" for approvals, so it keeps the server's text.
+  not_revealed: 'the agent is still finishing its run; grading opens when it ends',
+  not_labelled: 'record your blind label first',
+  room_open: 'the room is still open; close it first',
 }
 
 /** Friendly text for a server error code, or the server message unchanged. */

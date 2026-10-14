@@ -198,6 +198,55 @@ describe('ShadowPanel', () => {
     expect(await screen.findByText(/"state": "FAILED"/)).toBeInTheDocument()
   })
 
+  it('shows the friendly text when a grade is refused with 409 not_revealed', async () => {
+    vi.spyOn(api, 'shadow').mockResolvedValue(response())
+    vi.spyOn(api, 'shadowGrade').mockRejectedValue(new ApiClientError(409, 'not_revealed', 'raw server text'))
+    render(<ShadowPanel state={room} user={member} />)
+    await screen.findByText(HYP)
+    fireEvent.click(screen.getByRole('radio', { name: 'Yes' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'Yes, same cause' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save grade' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/still finishing its run/)
+    expect(screen.queryByText('Grade saved.')).not.toBeInTheDocument()
+  })
+
+  it('shows the server text when a grade is refused with 403 not_allowed', async () => {
+    vi.spyOn(api, 'shadow').mockResolvedValue(response())
+    vi.spyOn(api, 'shadowGrade').mockRejectedValue(
+      new ApiClientError(403, 'not_allowed', 'labelling or grading a shadow room needs a member of its pipeline'),
+    )
+    render(<ShadowPanel state={room} user={member} />)
+    await screen.findByText(HYP)
+    fireEvent.click(screen.getByRole('radio', { name: 'Yes' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'Yes, same cause' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save grade' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/needs a member of its pipeline/)
+    // the form stays, so the person can see what was refused
+    expect(screen.getByRole('button', { name: 'Save grade' })).toBeEnabled()
+  })
+
+  it('shows the error card with Try again when GET /shadow answers 409 room_open (a race with a reopen)', async () => {
+    const shadow = vi.spyOn(api, 'shadow').mockRejectedValueOnce(new ApiClientError(409, 'room_open', 'raw'))
+    render(<ShadowPanel state={room} user={member} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(/room is still open/)
+    expect(screen.queryByRole('heading', { name: 'Record your answer first' })).not.toBeInTheDocument()
+    shadow.mockResolvedValueOnce(response())
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(await screen.findByText(HYP)).toBeInTheDocument()
+  })
+
+  it('does not crash on a label without terms or a run status it does not know', async () => {
+    vi.spyOn(api, 'shadow').mockResolvedValue(
+      response({
+        run: run({ status: 'paused' as ShadowRun['status'], final_hypothesis: null }),
+        room: { labelled: ev('shadow.labelled', { actual_layer: 'kafka' }) },
+      }),
+    )
+    render(<ShadowPanel state={room} user={member} />)
+    expect(await screen.findByRole('heading', { name: 'Your blind label' })).toBeInTheDocument()
+    expect(screen.getAllByText(/paused/).length).toBeGreaterThan(0)
+  })
+
   it('shows a load error with a retry', async () => {
     const shadow = vi.spyOn(api, 'shadow').mockRejectedValueOnce(new ApiClientError(500, 'internal', 'boom'))
     render(<ShadowPanel state={room} user={member} />)

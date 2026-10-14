@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useShadowMetrics } from '@/hooks/useShadowMetrics'
-import { formatSeconds, formatTokens, metricsHeadline, sinceParam, STATUS_LABEL } from '@/lib/shadow'
+import { formatSeconds, formatTokens, metricsHeadline, sinceParam, statusLabel } from '@/lib/shadow'
 import type { ShadowMetrics, ShadowStatus } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -120,7 +120,7 @@ function Results({ metrics: m, copied, onCopy }: { metrics: ShadowMetrics; copie
           <span className="text-xs text-subtle-foreground">Run status</span>
           {statuses.map(([s, n]) => (
             <Badge key={s} variant="neutral">
-              {STATUS_LABEL[s] ?? s} {n}
+              {statusLabel(s)} {n}
             </Badge>
           ))}
         </div>
@@ -151,7 +151,7 @@ function Results({ metrics: m, copied, onCopy }: { metrics: ShadowMetrics; copie
                 </td>
                 <td className="py-2 pr-3">{r.pipeline_id}</td>
                 <td className="py-2 pr-3">{r.alert_source || '–'}</td>
-                <td className="py-2 pr-3">{STATUS_LABEL[r.status] ?? r.status}</td>
+                <td className="py-2 pr-3">{statusLabel(r.status)}</td>
                 <td className="py-2 pr-3">{gradeText(r)}</td>
                 <td className="py-2 pr-3 text-right tabular-nums">{formatSeconds(r.time_to_final_s)}</td>
                 <td className="py-2 pr-3 text-right tabular-nums">{formatSeconds(r.human_mttr_s)}</td>

@@ -45,6 +45,11 @@ export const STATUS_LABEL: Record<ShadowStatus, string> = {
   interrupted: 'interrupted',
 }
 
+/** Label for a run status; a status this UI does not know yet shows as the raw value, never blank. */
+export function statusLabel(s: string): string {
+  return (STATUS_LABEL as Record<string, string | undefined>)[s] ?? s
+}
+
 /** One term per line (commas stay inside a term); blank lines are dropped, terms trimmed. */
 export function parseTerms(text: string): string[] {
   return text

@@ -12,6 +12,13 @@ describe('friendlyError', () => {
     )
   })
 
+  it('maps the shadow-only codes, and leaves already_decided to the server text', () => {
+    expect(friendlyError('not_revealed', 'raw')).toMatch(/still finishing/)
+    expect(friendlyError('not_labelled', 'raw')).toMatch(/blind label/)
+    expect(friendlyError('room_open', 'raw')).toMatch(/close it first/)
+    expect(friendlyError('already_decided', 'layer already decided')).toBe('layer already decided')
+  })
+
   it('keeps other server codes as they are', () => {
     expect(friendlyError('not_driver', 'only the driver may steer')).toBe('only the driver may steer')
     expect(friendlyError('room_closed', 'the room is closed')).toBe('the room is closed')
