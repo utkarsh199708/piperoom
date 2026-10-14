@@ -178,6 +178,9 @@ func (s *Service) GrantControl(ctx context.Context, user User, roomID, toID stri
 	if !s.isDriver(st, user.ID) && !s.leaseExpired(st) {
 		return events.Event{}, leaseHeld("another user's driver lease is still live")
 	}
+	if err := s.checkTargetVisible(to, st.snap.PipelineID); err != nil {
+		return events.Event{}, err
+	}
 	lease := s.now().UTC().Add(DriverLease)
 	e, err := s.emitLocked(ctx, st, roomID, events.ControlGranted, s.humanActor(user), events.ControlGrantedPayload{
 		To:         s.humanActor(to),

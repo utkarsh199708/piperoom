@@ -66,6 +66,10 @@ func (s *Service) CreateHandoff(ctx context.Context, user User, roomID, toID str
 		s.mu.Unlock()
 		return events.Event{}, validation("cannot hand off to yourself")
 	}
+	if err := s.checkTargetVisible(to, st.snap.PipelineID); err != nil {
+		s.mu.Unlock()
+		return events.Event{}, err
+	}
 	s.mu.Unlock()
 
 	roomEvents, err := s.allEvents(ctx, roomID)
@@ -142,6 +146,9 @@ func (s *Service) AcceptHandoff(ctx context.Context, user User, handoffID string
 	h, err := s.store.GetHandoff(ctx, handoffID)
 	if err != nil {
 		return events.Event{}, mapStoreErr(err)
+	}
+	if err := s.checkVisibleLocked(ctx, user, h.RoomID); err != nil {
+		return events.Event{}, err
 	}
 	if h.Status == "voided" {
 		// A handoff is voided when a newer one supersedes it (review item 10):

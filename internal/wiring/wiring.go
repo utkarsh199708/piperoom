@@ -169,13 +169,19 @@ func kafkaSecurity(cfg config.Config, awsCfg *aws.Config) (netsec.Kafka, error) 
 // error. On a partial failure it closes what it already opened and returns a
 // wrapped error naming the failing step.
 func Open(ctx context.Context, cfg config.Config, awsCfg *aws.Config) (*Wired, error) {
-	ctx, cancel := context.WithTimeout(ctx, openTimeout)
-	defer cancel()
-
 	o, err := owners.Load(cfg.OwnersFile)
 	if err != nil {
 		return nil, fmt.Errorf("wiring: load owners: %w", err)
 	}
+	return openClients(ctx, cfg, awsCfg, o)
+}
+
+// openClients builds one client set from the connection settings of cfg and
+// gives it o as its owners config. OpenStacks calls it once per set, with the
+// owners view of the pipelines that set serves.
+func openClients(ctx context.Context, cfg config.Config, awsCfg *aws.Config, o *owners.Owners) (*Wired, error) {
+	ctx, cancel := context.WithTimeout(ctx, openTimeout)
+	defer cancel()
 
 	// A bad WAREHOUSE_KIND is a config mistake: fail before any client is built.
 	whKind, err := warehouseKind(cfg)

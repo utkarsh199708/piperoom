@@ -117,7 +117,7 @@ func (s *Server) handleShadowMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 		since = t
 	}
-	m, err := s.svc.ShadowMetrics(r.Context(), q.Get("pipeline"), since)
+	m, err := s.svc.ShadowMetricsFor(r.Context(), userFrom(r.Context()), q.Get("pipeline"), since)
 	if err != nil {
 		s.writeErr(w, err)
 		return
