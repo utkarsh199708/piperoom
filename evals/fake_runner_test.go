@@ -115,7 +115,13 @@ func scriptedRunner(script []step) agent.Runner {
 					}
 					if len(in) > 0 {
 						for _, h := range in {
-							_ = d.Sink.Emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: "ack: " + h.Text})
+							// The room's text carries no ids; the structured ProposalID is echoed
+							// so tests can still tell which proposal an input is bound to.
+							ack := "ack: " + h.Text
+							if h.ProposalID != "" {
+								ack += " [" + h.ProposalID + "]"
+							}
+							_ = d.Sink.Emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: ack})
 						}
 						break
 					}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -300,22 +299,27 @@ func TestLeaseExpiryAfterUnloggedRenewal(t *testing.T) {
 }
 
 func TestLeaseExpiryLoopStopsOnClose(t *testing.T) {
-	before := runtime.NumGoroutine()
 	c := &testClock{t: leaseT0}
 	r := newLeaseRig(t, memstore.NewWithClock(c.Now), c)
 	r.load()
 	r.tick() // the loop is running
 	r.svc.Close()
+	// The loop goroutine stops its ticker in a defer after runLeaseExpiry
+	// returns, and it holds s.wg, which Close waits on. So a stop already sent
+	// when Close returns proves the goroutine has exited. This replaces a
+	// process-wide runtime.NumGoroutine comparison, which also counted
+	// goroutines that are not the service's (CI: "3 after Close, 2 before").
 	select {
 	case <-r.stops:
 	default:
-		t.Fatal("Close returned but the lease ticker was not stopped")
+		t.Fatal("Close returned but the lease loop had not stopped its ticker")
 	}
-	for i := 0; i < 10000 && runtime.NumGoroutine() > before; i++ {
-		runtime.Gosched()
-	}
-	if n := runtime.NumGoroutine(); n > before {
-		t.Fatalf("goroutines: %d after Close, %d before", n, before)
+	// The loop exits on Close alone, not on a tick: one more tick has no
+	// reader, so it must not be consumed.
+	select {
+	case r.ticks <- time.Time{}:
+		t.Fatal("the lease loop read a tick after Close")
+	default:
 	}
 	// Load after Close starts nothing: no ticker is even made.
 	r2 := newLeaseRig(t, memstore.NewWithClock(c.Now), c)

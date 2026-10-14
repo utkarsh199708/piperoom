@@ -111,6 +111,11 @@ type PipelineClients struct {
 	// Kafka reads DLQ offsets on the set's own cluster (nil: dlq_growth is
 	// off for the set's pipelines, as with Deps.Kafka).
 	Kafka clients.DLQReader
+	// Registry reads subject versions and DDL reads the source's DDL audit
+	// table for the change feed (nil: that kind of change is not recorded for
+	// the set's pipelines, as with Deps.Registry and Deps.DDL).
+	Registry clients.SchemaRegistryReader
+	DDL      DDLReader
 	// Lag reads consumer-group lag on the set's cluster (nil: the
 	// consumer-group signals stay unknown, as with Deps.Lag).
 	Lag LagReader
@@ -127,6 +132,13 @@ type Deps struct {
 	// `deps.Kafka, _ = admin.(clients.DLQReader)`): dlq_growth is then off
 	// with one log line, and config_risk cannot tell a missing DLQ topic.
 	Kafka clients.DLQReader
+	// Changes, when set, turns on the change feed: every tick the watcher
+	// records connector config and state changes, schema version changes and
+	// DDL audit rows of each pipeline through it. Registry and DDL feed it;
+	// both may be nil, and ClientsFor then gives them per client set.
+	Changes  clients.ChangeWriter
+	Registry clients.SchemaRegistryReader
+	DDL      DDLReader
 	// Lag reads consumer-group lag (wire it from the same Kafka client). Nil:
 	// consumer_lag, group_unstable and offset_below_log_start stay unknown,
 	// with one log line. offset_below_log_start also needs Kafka for the
@@ -266,6 +278,15 @@ type Watcher struct {
 	// for the ring window (see planDLQ).
 	dlqSeen           map[string]dlqSeen
 	dlqNoReaderLogged bool
+
+	// Change feed (changes.go); chg is touched by the tick goroutine only.
+	changes    clients.ChangeWriter
+	registry   clients.SchemaRegistryReader
+	ddl        DDLReader
+	chg        map[string]*changeBase // pipeline -> baseline
+	ddlOK      map[string]time.Time   // client set -> last tick whose DDL rows were all recorded
+	ddlWarned  map[string]bool
+	chgFailing bool
 	// lagNoReaderLogged keeps the "no lag reader" line to one.
 	lagNoReaderLogged bool
 }
@@ -311,6 +332,8 @@ func New(d Deps) (*Watcher, error) {
 		cfg: cfg, maxRooms: d.MaxOpenRooms, clock: d.Clock, log: d.Log, jitter: d.Jitter,
 		pipes: map[string]*pipeState{}, closed: map[string]bool{}, storms: map[string][]string{},
 		dlqState: map[string]*dlqTopicState{}, dlqSeen: map[string]dlqSeen{},
+		changes: d.Changes, registry: d.Registry, ddl: d.DDL,
+		chg: map[string]*changeBase{}, ddlOK: map[string]time.Time{}, ddlWarned: map[string]bool{},
 	}
 	if w.maxRooms <= 0 {
 		w.maxRooms = defaultMaxOpenRooms
@@ -400,6 +423,10 @@ func (w *Watcher) tick(ctx context.Context) {
 		return // cancelled: errors from cancelled calls say nothing about the pipeline
 	}
 	now := w.clock.Now()
+	w.recordChanges(ctx, now, ts, obs)
+	if ctx.Err() != nil {
+		return
+	}
 	w.mu.Lock()
 	fired := w.evaluate(now, ts, obs)
 	w.mu.Unlock()

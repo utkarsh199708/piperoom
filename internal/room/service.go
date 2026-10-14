@@ -242,6 +242,9 @@ type Service struct {
 	// alertRooms maps the dedup key of each open webhook room to that room, so
 	// a repeat of the same alert joins the room instead of opening another.
 	alertRooms map[string]string
+
+	// statsCache serves GET /api/pipelines/{pid}/agent-stats (agentstats.go).
+	statsCache agentStatsCache
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -1039,7 +1042,7 @@ func inputFor(e events.Event) *agent.HumanInput {
 		approved := true
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
-			Text:       fmt.Sprintf("layer %q approved proposal %s", p.Layer, p.ProposalID),
+			Text:       fmt.Sprintf("layer %q approved your proposal", p.Layer),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
 		}
 	case events.ApprovalRejected:
@@ -1050,7 +1053,7 @@ func inputFor(e events.Event) *agent.HumanInput {
 		approved := false
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
-			Text:       fmt.Sprintf("layer %q rejected proposal %s: %s", p.Layer, p.ProposalID, p.Reason),
+			Text:       fmt.Sprintf("layer %q rejected your proposal: %s", p.Layer, p.Reason),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
 		}
 	case events.ActionExecuted:
@@ -1070,7 +1073,7 @@ func inputFor(e events.Event) *agent.HumanInput {
 		stepIndex := p.StepIndex
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "action_result",
-			Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, p.StepIndex, p.Output),
+			Text: fmt.Sprintf("step %d: %s", p.StepIndex+1, p.Output),
 			OK:   okp, ProposalID: p.ProposalID, StepIndex: &stepIndex,
 		}
 	}
