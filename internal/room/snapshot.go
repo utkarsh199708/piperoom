@@ -304,6 +304,11 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			snap.PendingSuggestions = removeSuggestion(snap.PendingSuggestions, p.SuggestionID)
 		}
 
+	case events.SteerDeclined:
+		if p, ok := decode[events.SteerDeclinedPayload](e); ok && p.SuggestionID != "" {
+			snap.PendingSuggestions = removeSuggestion(snap.PendingSuggestions, p.SuggestionID)
+		}
+
 	case events.ControlGranted:
 		p, ok := decode[events.ControlGrantedPayload](e)
 		if !ok {

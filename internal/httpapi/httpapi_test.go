@@ -253,6 +253,7 @@ func TestEveryRouteRequiresXUser(t *testing.T) {
 		{http.MethodPost, "/api/rooms/r1/comments", `{"text":"x"}`},
 		{http.MethodPost, "/api/rooms/r1/steer", `{"text":"x"}`},
 		{http.MethodPost, "/api/rooms/r1/suggestions/s1/send", ""},
+		{http.MethodPost, "/api/rooms/r1/suggestions/s1/decline", ""},
 		{http.MethodPost, "/api/rooms/r1/control/request", ""},
 		{http.MethodPost, "/api/rooms/r1/control/grant", `{"to":"arjun"}`},
 		{http.MethodPost, "/api/rooms/r1/close", `{"resolution":"x"}`},
