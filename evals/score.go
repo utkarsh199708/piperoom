@@ -75,6 +75,7 @@ type RunResult struct {
 	DurationMS int64  `json:"duration_ms"`
 	TimedOut   bool   `json:"timed_out,omitempty"`
 	Error      string `json:"error,omitempty"`
+	ReplayResult
 }
 
 // Judge scores one transcript against the scenario's expectations. runErr is
@@ -247,6 +248,7 @@ func failures(sc Scenario, res RunResult) []string {
 	if budget := sc.Expect.MaxToolCalls; budget > 0 && res.ToolCalls > budget {
 		f = append(f, fmt.Sprintf("over tool budget: %d > %d", res.ToolCalls, budget))
 	}
+	f = append(f, verifyFailures(sc, res)...)
 	return f
 }
 

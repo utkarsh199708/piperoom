@@ -3,6 +3,7 @@ package dbtools
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,10 +18,58 @@ import (
 type txnSource struct {
 	*fakeSource
 	txns []clients.Transaction
+	// locks maps a pid to the tables its transaction locks. With locks set,
+	// LongTransactionsOnTables keeps a transaction only when it locks one of
+	// the tables asked for and counts the rest, like the SQL; nil keeps all.
+	locks map[int][]string
+	// otherDB marks the pids whose session is in another database.
+	otherDB map[int]bool
 }
 
 func (s *txnSource) LongTransactions(context.Context, time.Duration) ([]clients.Transaction, error) {
 	return s.txns, nil
+}
+
+// LongTransactionsOnTables models the SQL: the sessions that lock one of the
+// tables (and are in this database) are listed, every other one is counted,
+// and the oldest other writers come back as postgres.OtherWriter.
+func (s *txnSource) LongTransactionsOnTables(_ context.Context, _ time.Duration, tables []string) (postgres.TableTransactions, error) {
+	var out postgres.TableTransactions
+	var writers []clients.Transaction
+	for _, t := range s.txns {
+		if s.locks == nil || (!s.otherDB[t.PID] && slices.ContainsFunc(s.locks[t.PID], func(x string) bool { return slices.Contains(tables, x) })) {
+			out.Transactions = append(out.Transactions, t)
+			continue
+		}
+		out.Other++
+		if t.HasXID {
+			out.OtherWriters++
+			writers = append(writers, t)
+		}
+	}
+	slices.SortStableFunc(writers, func(a, b clients.Transaction) int { return int(b.Age - a.Age) })
+	for _, w := range writers[:min(len(writers), postgres.MaxOtherWriters)] {
+		waitType, _, _ := strings.Cut(w.WaitEvent, ":")
+		out.OldestOtherWriters = append(out.OldestOtherWriters, postgres.OtherWriter{
+			PID: w.PID, SameDatabase: !s.otherDB[w.PID], State: w.State,
+			AgeSeconds: int64(w.Age / time.Second), XIDAge: int64(1000 + w.PID), WaitEventType: waitType,
+		})
+	}
+	return out, nil
+}
+
+// txnRows returns the pipeline's own rows of a pg_long_transactions result:
+// all of Data when unscoped, Data.Transactions when scoped.
+func txnRows(t *testing.T, data any) []longTxn {
+	t.Helper()
+	switch d := data.(type) {
+	case []longTxn:
+		return d
+	case scopedTxns:
+		return d.Transactions
+	}
+	t.Fatalf("pg_long_transactions data is %T", data)
+	return nil
 }
 
 func TestLongTransactionsReturnNoQueryText(t *testing.T) {
@@ -47,7 +96,7 @@ func TestLongTransactionsReturnNoQueryText(t *testing.T) {
 			t.Errorf("summary missing %q: %s", want, r.Summary)
 		}
 	}
-	rows := r.Data.([]longTxn)
+	rows := txnRows(t, r.Data)
 	if rows[0].Verb != "UPDATE" || rows[1].Verb != "" || rows[2].Verb != "UPDATE" {
 		t.Errorf("verbs = %q %q %q", rows[0].Verb, rows[1].Verb, rows[2].Verb)
 	}
@@ -67,7 +116,7 @@ func TestLongTransactionsMarkWriters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows := r.Data.([]longTxn)
+	rows := txnRows(t, r.Data)
 	if len(rows) != 2 || !rows[0].HasXID || rows[1].HasXID {
 		t.Fatalf("HasXID = %+v, want [true false]", rows)
 	}

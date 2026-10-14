@@ -69,6 +69,11 @@ func (c Config) withDefaults() Config {
 // ctx's.
 func Evaluate(ctx context.Context, scenarios []Scenario, cfg Config) (Report, error) {
 	cfg = cfg.withDefaults()
+	for _, sc := range scenarios {
+		for _, w := range sc.Warnings() {
+			cfg.Logger.Warn("evals: scenario warning", "scenario", sc.Name, "warning", w)
+		}
+	}
 	defs, err := LiveTools()
 	if err != nil {
 		return Report{}, err
@@ -199,7 +204,7 @@ func ToolInputs(defs []tools.Tool) map[string][]string {
 // runOne runs the agent once on sc. The returned error is a harness failure
 // (the run could not even start); agent failures are recorded in RunResult.
 func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Config) (RunResult, Transcript, error) {
-	rp, err := newReplayer(sc.Recordings)
+	rp, err := newScenarioReplayer(sc)
 	if err != nil {
 		return RunResult{}, Transcript{}, err
 	}
@@ -217,7 +222,8 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 		return RunResult{}, Transcript{}, err
 	}
 	rec := newRecorder()
-	inbox := newScriptedInbox(sc.humanInputs())
+	rp.events = rec.count
+	inbox := newScenarioInbox(sc, newExecutor(sc, rec, rp))
 	alert := sc.agentAlert(fmt.Sprintf("eval_%s_%d", sc.Name, run))
 
 	runCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
@@ -242,7 +248,7 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 		return RunResult{}, Transcript{}, ctx.Err()
 	}
 
-	tr := Transcript{Events: rec.snapshot(), Misses: rp.Misses(), Attempts: attempts.snapshot(), Idles: inbox.idleCount()}
+	tr := Transcript{Events: rec.snapshot(), Misses: rp.Misses(), Attempts: attempts.snapshot(), Idles: inbox.idleCount(), Replay: rp.trace()}
 	res := Judge(sc, tr, err, timedOut)
 	// Nothing to grade without a hypothesis; the terms verdict already says so.
 	if effectiveJudge(cfg.Judge, sc) == JudgeClaude && res.FinalHypothesis != "" {
@@ -254,5 +260,6 @@ func runOne(ctx context.Context, sc Scenario, run int, defs []tools.Tool, cfg Co
 	}
 	res.Run = run
 	res.DurationMS = took.Milliseconds()
+	res = withReplayChecks(sc, tr, res)
 	return res, tr, nil
 }
