@@ -48,7 +48,10 @@ function Node({
   worst,
   selected,
   onSelect,
+  healed = false,
 }: {
+  /** The node just went from fail/warn to ok: it flashes once. */
+  healed?: boolean
   node: TopologyNode
   compact: boolean
   worst: boolean
@@ -63,6 +66,7 @@ function Node({
     node.health === 'fail' ? 'border-destructive' : 'border-border',
     node.health === 'unknown' && 'border-dashed',
     selected && 'ring-2 ring-ring',
+    healed && 'motion-safe:animate-heal',
   )
   if (compact) {
     return (
@@ -243,6 +247,17 @@ export function PipelineMap({
   const worst = worstNode(nodes)
   const worstId = worst && worst.health !== 'ok' ? worst.id : null
 
+  // Nodes that went from fail/warn to ok since the last render flash once (animate-heal, 600 ms). The ref is
+  // read while rendering and written after it, so a re-render for another reason does not replay the flash
+  // beyond the next tick (the clock re-renders every second, longer than the animation).
+  const prevHealth = useRef<Map<string, string>>(new Map())
+  const healedIds = new Set(
+    nodes.filter((n) => n.health === 'ok' && ['fail', 'warn'].includes(prevHealth.current.get(n.id) ?? '')).map((n) => n.id),
+  )
+  useEffect(() => {
+    prevHealth.current = new Map(nodes.map((n) => [n.id, n.health]))
+  })
+
   const scroller = useRef<HTMLDivElement>(null)
   const overflow = useLaneOverflow(scroller, [nodes.length, compact, !!topology])
 
@@ -344,6 +359,7 @@ export function PipelineMap({
                     node={n}
                     compact={compact}
                     worst={n.id === worstId}
+                    healed={healedIds.has(n.id)}
                     selected={selectedLayer === n.layer}
                     onSelect={onSelectLayer ? () => onSelectLayer(selectedLayer === n.layer ? null : n.layer) : undefined}
                   />

@@ -121,7 +121,8 @@ export function RoomScreen() {
   // One topology refetch per executed action, plus the hook's 30 s refresh
   // while the room is open (stops once closed).
   const executedCount = useMemo(
-    () => (state ? state.proposals.reduce((n, p) => n + p.executed.length, 0) : 0),
+    // A verdict also re-polls at once, so the lane shows the healed node without waiting 30 s.
+    () => (state ? state.proposals.reduce((n, p) => n + p.executed.length + (p.verification ? 1 : 0), 0) : 0),
     [state],
   )
   const { topology, updatedAt, notFound, retry: retryTopology } = useTopology(state?.pipeline_id ?? '', {
@@ -137,6 +138,7 @@ export function RoomScreen() {
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [closeOpen, setCloseOpen] = useState(false)
+  const [closeText, setCloseText] = useState('')
   const [labelOpen, setLabelOpen] = useState(false)
   // "Ask the agent" on a checklist item fills the composer; n makes the same text count again.
   const [prefill, setPrefill] = useState<{ text: string; n: number } | undefined>()
@@ -206,7 +208,18 @@ export function RoomScreen() {
     state && !takeControl && canRequestControl(state, user) ? actions.requestControl : undefined
   const openHandoff = state && canHandoff(state, user) ? () => setHandoffOpen(true) : undefined
   const openTrace = state && !isViewer(user) ? () => setTraceOpen(true) : undefined
-  const openClose = state && canClose(state, user) ? () => setCloseOpen(true) : undefined
+  const canCloseHere = !!state && canClose(state, user)
+  const openClose = canCloseHere
+    ? () => {
+        setCloseText('')
+        setCloseOpen(true)
+      }
+    : undefined
+  // The verified-fix nudge opens the same dialog with the resolution filled in.
+  const closeWith = (text: string) => {
+    setCloseText(text)
+    setCloseOpen(true)
+  }
 
   // The command menu (⌘K) offers what this room offers right now. Same permission
   // checks and callbacks as the buttons below; a viewer gets none of the writes.
@@ -290,7 +303,7 @@ export function RoomScreen() {
   ) : null
   const proposalsCard = showProposals ? (
     <div id={PROPOSAL_ANCHOR} tabIndex={-1} className="scroll-mt-4 focus:outline-none">
-      <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} people={peopleList} presence={presence} topology={topology} />
+      <ProposalsPanel state={state} user={user} actions={actions} stale={stale} ribbon={false} people={peopleList} presence={presence} topology={topology} onCloseRoom={canCloseHere ? closeWith : undefined} />
     </div>
   ) : null
   const investigation = (
@@ -480,7 +493,7 @@ export function RoomScreen() {
       )}
       {/* Gone once room.closed arrives: the "Resolved" strip above takes over. */}
       {closeOpen && state.status === 'open' && (
-        <CloseRoomDialog state={state} actions={actions} onClose={() => setCloseOpen(false)} />
+        <CloseRoomDialog state={state} actions={actions} initialText={closeText} onClose={() => setCloseOpen(false)} />
       )}
       {labelOpen && state.status === 'closed' && !state.labelled && (
         <LabelDialog state={state} onSubmit={actions.label} onClose={() => setLabelOpen(false)} />

@@ -31,13 +31,16 @@ export function CloseRoomDialog({
   actions,
   onClose,
   state,
+  initialText = '',
 }: {
   actions: RoomActions
   onClose: () => void
   /** The room, for the label form's pre-filled values. Without it the dialog only closes. */
   state?: RoomState
+  /** Pre-filled resolution, e.g. `Fixed by "<title>"` from the close nudge. */
+  initialText?: string
 }) {
-  const [text, setText] = useState('')
+  const [text, setText] = useState(initialText)
   const [draft, setDraft] = useState(() => (state ? initialDraft(state) : null))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)

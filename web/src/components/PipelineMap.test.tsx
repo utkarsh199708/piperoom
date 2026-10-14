@@ -222,3 +222,17 @@ describe('PipelineMap — pipeline not configured', () => {
     expect(retry).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('PipelineMap — heal flash', () => {
+  const node = (health: 'fail' | 'ok') => ({ ...topology.nodes[0], health })
+  it('flashes a node that goes from fail to ok, and not one that was already ok', () => {
+    const { rerender, container } = render(<PipelineMap topology={{ ...topology, nodes: [node('fail')] }} />)
+    expect(container.querySelector('.motion-safe\\:animate-heal')).toBeNull()
+    rerender(<PipelineMap topology={{ ...topology, nodes: [node('ok')] }} />)
+    expect(container.querySelector('[data-node]')?.className).toContain('motion-safe:animate-heal')
+  })
+  it('does not flash on first render with an ok node', () => {
+    const { container } = render(<PipelineMap topology={{ ...topology, nodes: [node('ok')] }} />)
+    expect(container.querySelector('[data-node]')?.className).not.toContain('animate-heal')
+  })
+})
