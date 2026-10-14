@@ -12,11 +12,13 @@ package demo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"piperoom/internal/agent"
 	"piperoom/internal/events"
+	"piperoom/internal/room"
 	"piperoom/internal/topology"
 )
 
@@ -127,6 +129,14 @@ func Run(ctx context.Context, alert agent.Alert, deps agent.Deps, opts agent.Opt
 		RequiredLayers: []string{"schema-registry", "kafka-connect"},
 	})
 	if err != nil {
+		// An unconfigured pipeline disables proposals; that is an end state,
+		// not a failure to retry (a retry would replay the whole story).
+		var re *room.Error
+		if errors.As(err, &re) && re.Code == "validation" {
+			_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "I cannot propose a fix in this room: " + re.Msg})
+			_ = emit(events.AgentStatus, events.AgentStatusPayload{State: "idle", Detail: "proposals disabled"})
+			return waitForInput(ctx, deps, emit)
+		}
 		return err
 	}
 	_ = emit(events.AgentMessage, events.AgentMessagePayload{Text: "Proposal " + proposalID + " is waiting for schema-registry and kafka-connect owners."})
