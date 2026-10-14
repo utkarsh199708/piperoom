@@ -55,6 +55,7 @@
           "type": "object",
           "additionalProperties": {
             "type": ["object", "null"],
+            "required": ["ports"],
             "properties": {
               "to": {"type": "array"},
               "ports": {
