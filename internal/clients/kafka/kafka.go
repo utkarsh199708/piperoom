@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/netsec"
 	"piperoom/internal/clients/schemareg"
+	"piperoom/internal/tools"
 )
 
 // Client is a Kafka admin + small-reads client.
@@ -79,12 +81,29 @@ func (c *Client) newKgo(extra ...kgo.Opt) (*kgo.Client, error) {
 	return kgo.NewClient(opts...)
 }
 
+// record adds one provenance call for a kadm/kgo request that started at
+// start. text is the literal method with argument names; params carry the
+// argument values the tool already shows. A record key or value never goes
+// in either.
+func (c *Client) record(ctx context.Context, start time.Time, text string, params ...string) {
+	tools.Record(ctx, tools.Call{
+		Kind:           tools.CallKafka,
+		Target:         "kafka " + strings.Join(c.brokers, ","),
+		Text:           text,
+		ParamsRedacted: params,
+		At:             start,
+		TookMS:         time.Since(start).Milliseconds(),
+	})
+}
+
 // Close releases the underlying client.
 func (c *Client) Close() { c.cl.Close() }
 
 // Topics lists non-internal topic names, sorted.
 func (c *Client) Topics(ctx context.Context) ([]string, error) {
+	start := time.Now()
 	td, err := c.adm.ListTopics(ctx)
+	c.record(ctx, start, "kadm.ListTopics()")
 	if err != nil {
 		return nil, fmt.Errorf("kafka: list topics: %w", err)
 	}
@@ -101,11 +120,16 @@ func (c *Client) Topics(ctx context.Context) ([]string, error) {
 
 // TopicOffsets returns per-partition start/end offsets and newest record time.
 func (c *Client) TopicOffsets(ctx context.Context, topic string) ([]clients.PartitionOffsets, error) {
+	tparam := "topic=" + topic
+	start := time.Now()
 	starts, err := c.adm.ListStartOffsets(ctx, topic)
+	c.record(ctx, start, "kadm.ListStartOffsets(topic)", tparam)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: start offsets %s: %w", topic, err)
 	}
+	start = time.Now()
 	ends, err := c.adm.ListEndOffsets(ctx, topic)
+	c.record(ctx, start, "kadm.ListEndOffsets(topic)", tparam)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: end offsets %s: %w", topic, err)
 	}
@@ -167,7 +191,9 @@ type TopicConfig struct {
 // when the topic carries no override. An unknown topic is reported as
 // clients.ErrNotFound.
 func (c *Client) DescribeTopicConfigs(ctx context.Context, topic string) (TopicConfig, error) {
+	start := time.Now()
 	rcs, err := c.adm.DescribeTopicConfigs(ctx, topic)
+	c.record(ctx, start, "kadm.DescribeTopicConfigs(topic)", "topic="+topic)
 	if err != nil {
 		return TopicConfig{}, fmt.Errorf("kafka: topic configs %s: %w", topic, mapNotFound(err))
 	}
@@ -185,7 +211,9 @@ func (c *Client) DescribeTopicConfigs(ctx context.Context, topic string) (TopicC
 		return TopicConfig{}, fmt.Errorf("kafka: topic configs %s: %w", topic, mapNotFound(rc.Err))
 	}
 
+	start = time.Now()
 	tds, err := c.adm.ListTopics(ctx, topic)
+	c.record(ctx, start, "kadm.ListTopics(topic)", "topic="+topic)
 	if err != nil {
 		return TopicConfig{}, fmt.Errorf("kafka: topic details %s: %w", topic, err)
 	}
@@ -235,7 +263,9 @@ func mapNotFound(err error) error {
 
 // ConsumerGroups lists consumer group names.
 func (c *Client) ConsumerGroups(ctx context.Context) ([]string, error) {
+	start := time.Now()
 	lg, err := c.adm.ListGroups(ctx)
+	c.record(ctx, start, "kadm.ListGroups()")
 	if err != nil {
 		return nil, fmt.Errorf("kafka: list groups: %w", err)
 	}
@@ -246,7 +276,9 @@ func (c *Client) ConsumerGroups(ctx context.Context) ([]string, error) {
 
 // GroupLag returns a group's state, member count, and per-partition lag.
 func (c *Client) GroupLag(ctx context.Context, group string) (clients.GroupLag, error) {
+	start := time.Now()
 	dgs, err := c.adm.Lag(ctx, group)
+	c.record(ctx, start, "kadm.Lag(group)", "group="+group)
 	if err != nil {
 		return clients.GroupLag{}, fmt.Errorf("kafka: group lag %s: %w", group, err)
 	}
@@ -295,11 +327,16 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 	if maxScan <= 0 {
 		maxScan = 5000
 	}
+	tparam := "topic=" + topic
+	start := time.Now()
 	offs, err := c.adm.ListOffsetsAfterMilli(ctx, since.UnixMilli(), topic)
+	c.record(ctx, start, "kadm.ListOffsetsAfterMilli(topic, since)", tparam, "since="+since.UTC().Format(time.RFC3339))
 	if err != nil {
 		return nil, fmt.Errorf("kafka: offsets after %s: %w", since, err)
 	}
+	start = time.Now()
 	ends, err := c.adm.ListEndOffsets(ctx, topic)
+	c.record(ctx, start, "kadm.ListEndOffsets(topic)", tparam)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: end offsets %s: %w", topic, err)
 	}
@@ -331,6 +368,13 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 		return nil, fmt.Errorf("kafka: scan client: %w", err)
 	}
 	defer cl.Close()
+	// One receipt for the whole scan, on every exit path. The key is a record
+	// value (it can name a customer), so it is never recorded.
+	scanStart := time.Now()
+	defer func() {
+		c.record(ctx, scanStart, "kgo.PollFetches(topic, since, maxScan)",
+			tparam, "since="+since.UTC().Format(time.RFC3339), "max_scan="+strconv.Itoa(maxScan), "key=<redacted>")
+	}()
 
 	var found []clients.RecordRef
 	scanned := map[int32]int{}
@@ -402,6 +446,9 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 		return nil, err
 	}
 	defer cl.Close()
+	rctx := ctx
+	pollStart := time.Now()
+	defer func() { c.record(rctx, pollStart, "kgo.PollFetches(topic, offsets)", "topic="+topic) }()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	got := map[int32]time.Time{}
