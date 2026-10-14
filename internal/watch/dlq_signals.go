@@ -193,9 +193,9 @@ func connectorGone(co *connObs) bool {
 // observeDLQ makes the one DLQOffsets call of the tick, for every DLQ topic of
 // every target, de-duplicated. No topics: no call (a client may list the whole
 // cluster for an empty list). The call has its own deadline and its own error.
-func (w *Watcher) observeDLQ(ctx context.Context, ts []target, obs *observation) {
+func (w *Watcher) observeDLQ(ctx context.Context, ts []target, obs *observation, kafka clients.DLQReader) {
 	obs.plan = w.planDLQ(ts, obs)
-	if w.kafka == nil {
+	if kafka == nil {
 		obs.dlqNoReader = true
 		return
 	}
@@ -204,7 +204,7 @@ func (w *Watcher) observeDLQ(ctx context.Context, ts []target, obs *observation)
 	}
 	obs.dlqTried = true
 	obs.dlqOffsets, obs.dlqErr = call(ctx, w.cfg.CheckTimeout, "read DLQ offsets", func(c context.Context) (map[string][]clients.PartitionOffsets, error) {
-		return w.kafka.DLQOffsets(c, obs.plan.want...)
+		return kafka.DLQOffsets(c, obs.plan.want...)
 	})
 }
 
@@ -237,9 +237,29 @@ type dlqSnap struct {
 	endSum     int64
 }
 
-// recordDLQ appends this tick's sample to the ring of every topic read. It runs
-// once per tick, so pipelines that share a topic do not add it twice. Caller
-// holds w.mu.
+// dlqStateKey is the key of a topic's ring in w.dlqState. A topic name is
+// unique only within one Kafka cluster, so with per-pipeline client sets
+// (docs/design/tenancy.md) the key carries the set: two clusters may both have
+// a DLQ topic of that name. Without sets (set "") the key is the topic alone.
+// "|" cannot occur in a Kafka topic name, so the two parts never run together.
+func dlqStateKey(set, topic string) string {
+	if set == "" {
+		return topic
+	}
+	return set + "|" + topic
+}
+
+// dlqStateSet is the set part of a dlqStateKey.
+func dlqStateSet(key string) string {
+	if i := strings.LastIndex(key, "|"); i >= 0 {
+		return key[:i]
+	}
+	return ""
+}
+
+// recordDLQ appends this tick's sample to the ring of every topic read in one
+// client set (obs). It runs once per set per tick, so pipelines that share a
+// topic do not add it twice. Caller holds w.mu.
 func (w *Watcher) recordDLQ(now time.Time, ts []target, obs *observation) map[string]dlqSnap {
 	snaps := map[string]dlqSnap{}
 	if obs.plan == nil {
@@ -248,23 +268,25 @@ func (w *Watcher) recordDLQ(now time.Time, ts []target, obs *observation) map[st
 	keep := dlqKeep(ts)
 	// Forget topics nobody has asked for during the whole ring window.
 	for _, name := range obs.plan.want {
-		if st := w.dlqState[name]; st != nil {
+		if st := w.dlqState[dlqStateKey(obs.set, name)]; st != nil {
 			st.lastWanted = now
 		}
 	}
-	for name, st := range w.dlqState {
-		if now.Sub(st.lastWanted) > keep {
-			delete(w.dlqState, name)
+	for key, st := range w.dlqState {
+		// Only this set's topics: another set's keep may differ.
+		if dlqStateSet(key) == obs.set && now.Sub(st.lastWanted) > keep {
+			delete(w.dlqState, key)
 		}
 	}
 	if !obs.dlqTried || obs.dlqErr != nil {
 		return snaps // unknown: rings and timers stay as they are
 	}
 	for _, name := range obs.plan.want {
-		st := w.dlqState[name]
+		key := dlqStateKey(obs.set, name)
+		st := w.dlqState[key]
 		if st == nil {
 			st = &dlqTopicState{lastWanted: now}
-			w.dlqState[name] = st
+			w.dlqState[key] = st
 		}
 		parts, ok := obs.dlqOffsets[name]
 		if !ok {
@@ -433,7 +455,7 @@ func (w *Watcher) dlqGrowthReading(now time.Time, t target, ps *pipeState, obs *
 	rs := make([]dlqTopicReading, 0, len(topics))
 	for _, d := range topics {
 		tr := dlqTopicReading{t: d, snap: snaps[d.name]}
-		st := w.dlqState[d.name]
+		st := w.dlqState[dlqStateKey(t.set, d.name)]
 		var first time.Time
 		if tr.snap.exists {
 			tr.newN, tr.rate, tr.rateOK, first, tr.rising = windowed(st, now, sc.Window, 2*w.cfg.Interval)
@@ -519,7 +541,7 @@ func (w *Watcher) dlqGrowthReading(now time.Time, t target, ps *pipeState, obs *
 	if p.contexts != "" {
 		ev["context_headers"] = p.contexts == "true"
 	}
-	if codes := w.dlqRiskCodes(p.t, snaps); len(codes) > 0 && t.cfg.ConfigRisk.Enabled {
+	if codes := w.dlqRiskCodes(t.set, p.t, snaps); len(codes) > 0 && t.cfg.ConfigRisk.Enabled {
 		ev["risks"] = codes
 	}
 	if len(rs) > 1 {
@@ -553,10 +575,10 @@ func contextHeaders(d dlqTopic) string {
 }
 
 // dlqRiskCodes are the risk codes of the connectors that write the topic.
-func (w *Watcher) dlqRiskCodes(d dlqTopic, snaps map[string]dlqSnap) []string {
+func (w *Watcher) dlqRiskCodes(set string, d dlqTopic, snaps map[string]dlqSnap) []string {
 	var codes []string
 	for _, c := range d.cfgs {
-		for _, code := range dlq.Codes(dlq.Risks(c, w.existsOf(c, snaps))) {
+		for _, code := range dlq.Codes(dlq.Risks(c, w.existsOf(set, c, snaps))) {
 			if !slices.Contains(codes, code) {
 				codes = append(codes, code)
 			}
@@ -565,9 +587,9 @@ func (w *Watcher) dlqRiskCodes(d dlqTopic, snaps map[string]dlqSnap) []string {
 	return codes
 }
 
-// existsOf is the watcher's last reading of the connector's DLQ topic: nil
-// when the connector has none or the offsets were not read.
-func (w *Watcher) existsOf(c dlq.ErrorsConfig, snaps map[string]dlqSnap) *bool {
+// existsOf is the watcher's last reading of the connector's DLQ topic on the
+// set's cluster: nil when the connector has none or the offsets were not read.
+func (w *Watcher) existsOf(set string, c dlq.ErrorsConfig, snaps map[string]dlqSnap) *bool {
 	if c.Topic == "" {
 		return nil
 	}
@@ -577,7 +599,7 @@ func (w *Watcher) existsOf(c dlq.ErrorsConfig, snaps map[string]dlqSnap) *bool {
 	}
 	// This tick's read failed: the last good answer stands (offsets errors are
 	// "unknown", never "resolved").
-	if st := w.dlqState[c.Topic]; st != nil && st.known {
+	if st := w.dlqState[dlqStateKey(set, c.Topic)]; st != nil && st.known {
 		e := st.exists
 		return &e
 	}
@@ -642,7 +664,7 @@ func (w *Watcher) evaluateConfigRisk(now time.Time, t target, ps *pipeState, obs
 			continue
 		}
 		ec := dlq.Parse(co.cfg)
-		ex := w.existsOf(ec, snaps)
+		ex := w.existsOf(t.set, ec, snaps)
 		if ex == nil && ec.IsSink && ec.Topic != "" && obs.dlqErr != nil {
 			existsUnknown = true // dlq_topic_missing cannot be judged this tick
 		}

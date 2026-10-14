@@ -39,9 +39,14 @@ var ErrStepOrder = store.ErrStepOrder
 // get a safe default (used by tests), except Owners: scope checks fail closed
 // without it.
 type Deps struct {
-	Store        store.Store
-	Actions      *actions.Registry
-	Tools        *tools.Registry
+	Store   store.Store
+	Actions *actions.Registry
+	Tools   *tools.Registry
+	// StackFor, when set, gives each room the read tools and write actions
+	// built over its own pipeline's clients (docs/design/tenancy.md section
+	// 5), and Tools and Actions are not used. A nil field in the result
+	// means none (fail closed), never the process-wide registry.
+	StackFor     func(pipelineID string) PipelineStack
 	Topology     topology.Builder
 	Users        *Users
 	Owners       *owners.Owners // pipeline definitions for actions.Scoped checks
@@ -123,6 +128,7 @@ type Service struct {
 	store        store.Store
 	actions      *actions.Registry
 	tools        *tools.Registry
+	stackFor     func(pipelineID string) PipelineStack
 	topo         topology.Builder
 	users        *Users
 	owners       *owners.Owners
@@ -198,6 +204,7 @@ func New(d Deps) *Service {
 		store:        d.Store,
 		actions:      acts,
 		tools:        tls,
+		stackFor:     d.StackFor,
 		topo:         topo,
 		users:        users,
 		owners:       d.Owners,
@@ -852,8 +859,8 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 		defer gate.release()
 		alert := agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw}
 		deps := agent.Deps{
-			Tools:     s.tools,
-			Actions:   s.actions,
+			Tools:     s.toolsFor(pipelineID),
+			Actions:   s.actionsFor(pipelineID),
 			Inbox:     gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
 			Sink:      roomSink{s: s, roomID: roomID},
 			Proposals: proposalCreator{s: s, roomID: roomID},

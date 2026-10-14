@@ -18,6 +18,7 @@ import (
 	"piperoom/internal/agent"
 	"piperoom/internal/agent/fake"
 	"piperoom/internal/config"
+	"piperoom/internal/owners"
 	"piperoom/internal/tools"
 	"piperoom/internal/wiring"
 )
@@ -78,14 +79,20 @@ func run(pipeline, title string, fakeTools bool, model, effort string, maxTurns 
 			return fmt.Errorf("investigate: register fake tools: %w", err)
 		}
 	} else {
-		w, err := wiring.Open(ctx, cfg, awsCfg)
+		own, err := owners.Load(cfg.OwnersFile)
 		if err != nil {
-			return err
+			return fmt.Errorf("investigate: %w", err)
 		}
-		defer w.Close()
-		if err := wiring.RegisterTools(reg, areg, w); err != nil {
-			return err
+		// Only the investigated pipeline's client set is opened: its own
+		// connections: from owners.yaml, or the process-wide settings
+		// (docs/design/tenancy.md). No other pipeline's credentials are read.
+		sets, err := wiring.OpenStacks(ctx, cfg, awsCfg, own, wiring.StackOptions{Only: []string{pipeline}})
+		if err != nil {
+			return fmt.Errorf("investigate: %w", err)
 		}
+		defer sets.Close()
+		set := sets.For(pipeline)
+		reg, areg = set.Tools, set.Actions
 	}
 
 	opts := agent.Options{Model: model, Effort: effort, MaxTurns: maxTurns}

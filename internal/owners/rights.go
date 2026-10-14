@@ -191,7 +191,8 @@ func (o *Owners) LayerOwner(layer string) (string, bool) {
 }
 
 // NamedPrincipals returns every distinct principal the file names (layers,
-// pipeline owners approvers and backups, auditors), sorted by canonical form.
+// pipeline owners approvers and backups, auditors, tenant members), sorted by
+// canonical form.
 func (o *Owners) NamedPrincipals() []Principal {
 	if o == nil {
 		return nil
@@ -207,6 +208,9 @@ func (o *Owners) NamedPrincipals() []Principal {
 		add(backup)
 	})
 	add(o.Auditors)
+	for _, t := range o.Tenants {
+		add(t.Members)
+	}
 	out := make([]Principal, 0, len(set))
 	for p := range set {
 		out = append(out, p)

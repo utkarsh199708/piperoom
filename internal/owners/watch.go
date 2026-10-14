@@ -126,7 +126,7 @@ func checkKeys(node *yaml.Node, where string, allowed ...string) error {
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		k := node.Content[i]
 		if !slices.Contains(allowed, k.Value) {
-			return fmt.Errorf("line %d: %s: unknown field %q (allowed: %s)", k.Line, where, k.Value, strings.Join(allowed, ", "))
+			return fmt.Errorf("line %d: %s: unknown field %s (allowed: %s)", k.Line, where, quoteName(k.Value), strings.Join(allowed, ", "))
 		}
 	}
 	return nil
@@ -504,10 +504,13 @@ func resolveDLQTopics(p Pipeline, w *WatchConfig) error {
 // any pipeline's CDC topic, and a topic declared by several pipelines must be
 // marked shared by all of them, so sharing is a written-down decision.
 func (o *Owners) validateDLQ() error {
+	// Topic names are unique per Kafka cluster, and with per-pipeline
+	// connections (tenancy.go) pipelines may sit on different clusters: the
+	// checks compare names within one cluster (kafkaClusterKey).
 	cdc := map[string]bool{}
 	for _, p := range o.Pipelines {
 		for _, t := range p.SourceTables {
-			cdc[p.TopicPrefix+"."+t] = true
+			cdc[p.kafkaClusterKey()+"|"+p.TopicPrefix+"."+t] = true
 		}
 	}
 	type decl struct {
@@ -516,22 +519,27 @@ func (o *Owners) validateDLQ() error {
 	}
 	byTopic := map[string][]decl{}
 	var order []string
+	topicOf := map[string]string{}
 	for _, p := range o.Pipelines {
 		if p.watch == nil {
 			continue
 		}
+		cluster := p.kafkaClusterKey()
 		for _, d := range p.watch.DLQTopics {
-			if cdc[d.Topic] {
+			if cdc[cluster+"|"+d.Topic] {
 				return fmt.Errorf("pipeline %q: watch.dlq_topics: topic %q is a CDC topic; a DLQ must be a different topic", p.ID, d.Topic)
 			}
-			if _, ok := byTopic[d.Topic]; !ok {
-				order = append(order, d.Topic)
+			key := cluster + "|" + d.Topic
+			if _, ok := byTopic[key]; !ok {
+				order = append(order, key)
+				topicOf[key] = d.Topic
 			}
-			byTopic[d.Topic] = append(byTopic[d.Topic], decl{p.ID, d.Shared})
+			byTopic[key] = append(byTopic[key], decl{p.ID, d.Shared})
 		}
 	}
-	for _, topic := range order {
-		ds := byTopic[topic]
+	for _, key := range order {
+		topic := topicOf[key]
+		ds := byTopic[key]
 		if len(ds) < 2 {
 			continue
 		}
