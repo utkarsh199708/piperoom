@@ -217,10 +217,28 @@ inputs:
 expect:
   root_cause:
     - [schema, registry]
-    - [id 2, version 1, 40403, not found, deleted]
+    - [id 2, version 1, 40403, not found, delet*]
     # Only the closed room says how to get it back.
     - [import mode, import, original id, same id, same schema id]
   first_failing_layer: schema-registry
+  root_cause_layer: schema-registry
+  # The 40403 is only in Kabir's comment; the subject no longer lists
+  # version 1, and only the closed room says how to restore the id.
+  expected_facts:
+    - id: f_version_1_gone
+      tool: schema_registry_versions
+      match: [pg public orders value, versions 2]
+      required: true
+    - id: f_past_room_import_mode
+      tool: similar_incidents
+      match: [original id 2, import mode]
+      required: true
+    - id: f_group_empty
+      tool: kafka_consumer_lag
+      match: [empty, 0 members, total lag 84211]
+  claims:
+    - about: root_cause
+      facts: [f_version_1_gone, f_past_room_import_mode]
   evidence_tools: [similar_incidents, kafka_consumer_lag]
   forbidden_actions: [schema_register, schema_set_compatibility, connect_restart_task, connect_restart_connector, connect_resume_connector]
   max_tool_calls: 12

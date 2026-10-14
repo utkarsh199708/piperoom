@@ -64,30 +64,6 @@ type Observation struct {
 	Error     string `yaml:"error"`
 }
 
-// pendingExpectKeys are the expect keys of the shared eval schema that E2's
-// scoring adds. Until that lands they are accepted and reported as warnings,
-// so the held-out scenarios can carry them already.
-var pendingExpectKeys = map[string]bool{
-	"outcome": true, "root_cause_layer": true, "expected_facts": true, "claims": true,
-}
-
-// pendingOutcome is the not yet scored expect.outcome, "" when absent.
-func (e Expect) pendingOutcome() string {
-	s, _ := e.Pending["outcome"].(string)
-	return s
-}
-
-// pendingNoCause reports whether the pending outcome is one that has no root
-// cause (healthy, abstain, ask). E2's validation rejects root_cause on those,
-// so until its scoring lands such a scenario may leave root_cause out.
-func (e Expect) pendingNoCause() bool {
-	switch e.pendingOutcome() {
-	case "healthy", "abstain", "ask":
-		return true
-	}
-	return false
-}
-
 // recordingResults returns every result a recording can give: its sequence,
 // or its top-level fields as one result. Anything that reads what a
 // recording shows (such as E2's factRecorded, which must find a fact that
@@ -306,13 +282,9 @@ func checkExecutedInput(i int, in Input, isAction map[string]bool) []error {
 }
 
 // Warnings are problems that do not make a scenario invalid but probably make
-// it wrong: expect keys this build does not score yet, phases nothing leads
-// to, and action transitions no input can fire.
+// it wrong: phases nothing leads to, and action transitions no input can fire.
 func (s Scenario) Warnings() []string {
 	var w []string
-	if keys := sortedKeys(s.Expect.Pending); len(keys) > 0 {
-		w = append(w, fmt.Sprintf("expect: %s accepted but not scored by this build (E2 adds them)", strings.Join(keys, ", ")))
-	}
 	if len(s.Phases) == 0 {
 		return w
 	}

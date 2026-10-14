@@ -1,0 +1,106 @@
+{
+  "run": {
+    "room_id": "room_partial_grade",
+    "status": "hypothesised",
+    "model": "claude-opus-5-5",
+    "pipeline_map": "pipeline orders\n1 pg:public.orders [postgres, owner priya] WARN slot_active=false slot_retained=213.0 KiB\n2 connect:pg-orders-connector [kafka-connect, owner arjun] FAIL tasks_failed=1\n3 topic:pg.public.orders [kafka, owner arjun] OK newest_record=14m ago\n4 group:order-sync [consumer, owner kabir] OK lag=0 state=Stable\n5 wh:analytics.orders [warehouse, owner meera] WARN stale_for=14m ts_column=updated_at\n",
+    "started_at": "2026-10-11T09:54:58Z",
+    "first_hypothesis_at": "2026-10-11T09:55:30Z",
+    "final_hypothesis_at": "2026-10-11T09:55:30Z",
+    "finished_at": "2026-10-11T09:55:31Z",
+    "finished_after_close": false,
+    "final_hypothesis": {
+      "text": "pg-orders-connector task 0 failed because of a schema problem on pg.public.orders; details are still unclear.",
+      "based_on_steps": [
+        "s1"
+      ],
+      "confidence": "medium",
+      "confirmed": false
+    },
+    "tool_calls": 4,
+    "tokens": 18420,
+    "revealed_at": "2026-10-11T10:20:02Z"
+  },
+  "events": [
+    {
+      "room_id": "room_partial_grade",
+      "seq": 1,
+      "type": "agent.step.started",
+      "actor": {
+        "kind": "agent",
+        "id": "agent",
+        "name": "Agent"
+      },
+      "payload": {
+        "step_id": "s1",
+        "title": "Check the connector"
+      },
+      "at": "2026-10-11T09:54:05Z",
+      "shadow": true
+    }
+  ],
+  "room": {
+    "created": {
+      "room_id": "room_partial_grade",
+      "seq": 1,
+      "type": "room.created",
+      "actor": {
+        "kind": "human",
+        "id": "arjun",
+        "name": "Arjun"
+      },
+      "payload": {
+        "title": "orders stale",
+        "severity": "sev2",
+        "pipeline_id": "orders",
+        "alert_source": "webhook",
+        "shadow": true
+      },
+      "at": "2026-10-11T09:54:50Z"
+    },
+    "labelled": {
+      "room_id": "room_partial_grade",
+      "seq": 9,
+      "type": "shadow.labelled",
+      "actor": {
+        "kind": "human",
+        "id": "priya",
+        "name": "Priya"
+      },
+      "payload": {
+        "actual_layer": "kafka-connect",
+        "root_cause_terms": [
+          "schema registry",
+          "409",
+          "numeric",
+          "decimal"
+        ],
+        "identity": {
+          "method": "dev",
+          "grant": "user:priya"
+        }
+      },
+      "at": "2026-10-11T10:21:10Z"
+    },
+    "graded": {
+      "room_id": "room_partial_grade",
+      "seq": 10,
+      "type": "shadow.graded",
+      "actor": {
+        "kind": "human",
+        "id": "priya",
+        "name": "Priya"
+      },
+      "payload": {
+        "layer_correct": true,
+        "root_cause": "partial",
+        "notes": "Layer right, cause vague.",
+        "identity": {
+          "method": "dev",
+          "grant": "user:priya"
+        }
+      },
+      "at": "2026-10-11T10:25:40Z"
+    }
+  }
+}

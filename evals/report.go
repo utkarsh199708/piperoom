@@ -22,6 +22,10 @@ type Report struct {
 	Overall    Summary           `json:"overall"`
 	Scenarios  []ScenarioSummary `json:"scenarios"`
 	Results    []RunResult       `json:"results"`
+	// Calibration and Evidence are over every run (calibration.go). Nil in
+	// reports written before they existed.
+	Calibration *Calibration    `json:"calibration,omitempty"`
+	Evidence    *EvidenceTotals `json:"evidence,omitempty"`
 	// RunUsage is each run's latency, tokens and cost (stats.go); set by
 	// UsageCollector.Apply.
 	RunUsage []RunUsage `json:"run_usage,omitempty"`
@@ -78,6 +82,8 @@ func buildReport(cfg Config, scenarios []Scenario, results []RunResult, started 
 		}
 	}
 	rep.Overall = combine(withRuns)
+	cal, ev := calibrate(results), evidenceTotals(results)
+	rep.Calibration, rep.Evidence = &cal, &ev
 	return rep
 }
 
@@ -198,6 +204,7 @@ func (r Report) WriteMarkdown(w io.Writer) error {
 		writeSummaryRow(&b, s.Name, s.Summary)
 	}
 	writeSummaryRow(&b, "**overall**", r.Overall)
+	writeQuality(&b, r.Calibration, r.Evidence)
 	writeUsageTable(&b, r)
 	var failed []string
 	for _, res := range r.Results {

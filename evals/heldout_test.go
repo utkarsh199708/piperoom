@@ -106,11 +106,6 @@ func TestHeldoutFocusedRunsPass(t *testing.T) {
 	for name, script := range heldoutScripts(t) {
 		t.Run(name, func(t *testing.T) {
 			sc := loadScenario(t, filepath.Join(heldoutDir, name+".yaml"))
-			if sc.Expect.pendingNoCause() {
-				// Only E2's scoring can pass a healthy or abstain run; the
-				// script is written to its rules and runs once it lands.
-				t.Skipf("outcome %q is not graded by this build", sc.Expect.pendingOutcome())
-			}
 			r, _ := evalOnce(t, sc, script)
 			if !r.Pass {
 				t.Fatalf("failures = %v", r.Failures)
@@ -165,11 +160,6 @@ func TestHeldoutWrongAnswersFail(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sc := loadScenario(t, filepath.Join(heldoutDir, tt.name+".yaml"))
-			if sc.Expect.pendingNoCause() {
-				// Without E2's outcome grading every run on it fails, the
-				// right one too, so a failing wrong answer proves nothing.
-				t.Skipf("outcome %q is not graded by this build", sc.Expect.pendingOutcome())
-			}
 			if r, _ := evalOnce(t, sc, tt.script); r.Pass {
 				t.Fatalf("wrong answer passed: %+v", r)
 			}

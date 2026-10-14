@@ -469,9 +469,28 @@ inputs:
 expect:
   root_cause:
     - [stopped]
-    - [slot]
-    - [wal, retain]
+    - [slot*]
+    - [wal, retain*]
   first_failing_layer: kafka-connect
+  root_cause_layer: kafka-connect
+  expected_facts:
+    - id: f_connector_stopped
+      tool: connect_status
+      match: [stopped]
+      required: true
+    - id: f_slot_inactive
+      tool: pg_replication_slots
+      match: [debezium orders, active false]
+      required: true
+    - id: f_wal_extended
+      tool: pg_replication_slots
+      match: [retained 48.6, wal status extended]
+    - id: f_no_failed_tasks
+      tool: connect_list_connectors
+      match: [stopped, 0 failed tasks]
+  claims:
+    - about: root_cause
+      facts: [f_connector_stopped, f_slot_inactive]
   evidence_tools: [connect_status, pg_replication_slots]
   fix: [[connect_resume_connector]]
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]

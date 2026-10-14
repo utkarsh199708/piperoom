@@ -32,6 +32,29 @@ func TestRunCheck(t *testing.T) {
 	}
 }
 
+// TestRunCheckRejectsFactTypo: -validate catches an expected fact whose terms
+// no recording of its tool contains, so an author typo fails before any run.
+func TestRunCheckRejectsFactTypo(t *testing.T) {
+	b, err := os.ReadFile("../../scenarios/schema-change.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := `match: [incompatible, "409"]`
+	if !bytes.Contains(b, []byte(good)) {
+		t.Fatalf("seed no longer has %s", good)
+	}
+	dir := t.TempDir()
+	typo := bytes.Replace(b, []byte(good), []byte(`match: [incompatable, "409"]`), 1)
+	if err := os.WriteFile(filepath.Join(dir, "schema-change.yaml"), typo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code, err := run(flags{scenarios: dir, check: true}, &out, &out)
+	if err == nil || code != 1 || !strings.Contains(err.Error(), `(f_schema_incompatible): no successful connect_status recording contains all of ["incompatable" "409"]`) {
+		t.Fatalf("code %d err %v", code, err)
+	}
+}
+
 func TestRunUnknownScenario(t *testing.T) {
 	var out bytes.Buffer
 	if _, err := run(flags{scenarios: "../../scenarios", only: "nope", check: true}, &out, &out); err == nil {
@@ -86,6 +109,43 @@ func TestParseFlagsValidateAlias(t *testing.T) {
 	}
 	if _, err := parseFlags([]string{"-nope"}, &bytes.Buffer{}); err == nil {
 		t.Error("unknown flag accepted")
+	}
+}
+
+func TestRunAgreement(t *testing.T) {
+	var out bytes.Buffer
+	sum := filepath.Join(t.TempDir(), "sum.json")
+	code, err := run(flags{agreement: "../../testdata/shadow-agreement", out: sum}, &out, &out)
+	if err != nil || code != 0 {
+		t.Fatalf("code %d err %v out %q", code, err, out.String())
+	}
+	for _, want := range []string{"room_agree_both", "both agree:", "with human grade"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("table lacks %q:\n%s", want, out.String())
+		}
+	}
+	if b, err := os.ReadFile(sum); err != nil || !strings.Contains(string(b), `"agreement_with_human_grade"`) {
+		t.Errorf("summary: %v %q", err, b)
+	}
+}
+
+func TestRunAgreementRefusesRunningRoom(t *testing.T) {
+	dir := t.TempDir()
+	doc := `{"run":{"room_id":"r","status":"running"},"room":{}}`
+	if err := os.WriteFile(filepath.Join(dir, "r.json"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code, err := run(flags{agreement: dir}, &out, &out)
+	if err == nil || code == 0 || !strings.Contains(err.Error(), "refusing") || out.Len() != 0 {
+		t.Fatalf("code %d err %v out %q", code, err, out.String())
+	}
+}
+
+func TestRunAgreementUnknownJudge(t *testing.T) {
+	var out bytes.Buffer
+	if _, err := run(flags{agreement: "../../testdata/shadow-agreement", judge: "bogus"}, &out, &out); err == nil {
+		t.Error("unknown judge accepted")
 	}
 }
 

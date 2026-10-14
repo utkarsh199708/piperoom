@@ -105,6 +105,74 @@ func TestValidate(t *testing.T) {
 		{"bad input kind", func(s *Scenario) { s.Inputs = []Input{{Kind: "shout", Text: "hi"}} }, "unknown kind"},
 		{"empty input", func(s *Scenario) { s.Inputs = []Input{{Kind: "steer"}} }, "text is empty"},
 		{"negative budget", func(s *Scenario) { s.Expect.MaxToolCalls = -1 }, "negative"},
+
+		// E2: outcomes, layers, facts and claims.
+		{"unknown root cause layer", func(s *Scenario) { s.Expect.RootCauseLayer = "network" }, "expect.root_cause_layer: unknown layer"},
+		{"unknown outcome", func(s *Scenario) { s.Expect.Outcome = "shrug" }, `unknown outcome "shrug"`},
+		{"healthy needs no root cause", func(s *Scenario) { s.Expect.Outcome, s.Expect.RootCause = OutcomeHealthy, nil }, ""},
+		{"root cause on a healthy scenario", func(s *Scenario) { s.Expect.Outcome = OutcomeHealthy }, "expect.root_cause: only graded when outcome is diagnose"},
+		{"fix on an abstain scenario", func(s *Scenario) {
+			s.Expect.Outcome, s.Expect.RootCause, s.Expect.Fix = OutcomeAbstain, nil, [][]string{{"connect_restart_task"}}
+		}, "expect.fix: only graded"},
+		{"claude judge on an ask scenario", func(s *Scenario) { s.Expect.Outcome, s.Expect.RootCause, s.Judge = OutcomeAsk, nil, JudgeClaude }, "outcome ask has none"},
+		{"valid fact and claim", func(s *Scenario) {
+			s.Expect.ExpectedFacts = []Fact{{ID: "f_ok", Tool: "connect_status", Match: []string{"ok"}, Required: true}}
+			s.Expect.Claims = []Claim{{About: ClaimRootCause, Facts: []string{"f_ok"}}}
+		}, ""},
+		{"fact term in no recording", func(s *Scenario) {
+			s.Expect.ExpectedFacts = []Fact{{ID: "f_x", Tool: "connect_status", Match: []string{"okay"}}}
+		}, `expect.expected_facts[0] (f_x): no successful connect_status recording contains all of ["okay"]`},
+		{"fact terms split over two recordings", func(s *Scenario) {
+			s.Recordings = append(s.Recordings, Recording{Tool: "connect_status", Input: map[string]any{"connector": "c"}, Summary: "running"})
+			s.Expect.ExpectedFacts = []Fact{{ID: "f_x", Tool: "connect_status", Match: []string{"ok", "running"}}}
+		}, "no successful connect_status recording contains all of"},
+		{"fact only in an error recording", func(s *Scenario) {
+			s.Recordings = append(s.Recordings, Recording{Tool: "connect_status", Input: map[string]any{"connector": "c"}, Summary: "task FAILED", Error: "connect: 503"})
+			s.Expect.ExpectedFacts = []Fact{{ID: "f_x", Tool: "connect_status", Match: []string{"failed"}}}
+		}, "no successful connect_status recording contains"},
+		{"fact on another tool's recording", func(s *Scenario) {
+			s.Expect.ExpectedFacts = []Fact{{ID: "f_x", Tool: "connect_list_connectors", Match: []string{"ok"}}}
+		}, "no successful connect_list_connectors recording"},
+		{"fact with unknown tool", func(s *Scenario) {
+			s.Expect.ExpectedFacts = []Fact{{ID: "f_x", Tool: "nope", Match: []string{"ok"}}}
+		}, `(f_x): unknown tool "nope"`},
+		{"fact without id", func(s *Scenario) {
+			s.Expect.ExpectedFacts = []Fact{{Tool: "connect_status", Match: []string{"ok"}}}
+		}, "expected_facts[0]: id is empty"},
+		{"duplicate fact id", func(s *Scenario) {
+			f := Fact{ID: "f_x", Tool: "connect_status", Match: []string{"ok"}}
+			s.Expect.ExpectedFacts = []Fact{f, f}
+		}, `duplicate id "f_x"`},
+		{"fact without terms", func(s *Scenario) {
+			s.Expect.ExpectedFacts = []Fact{{ID: "f_x", Tool: "connect_status"}}
+		}, "match is empty"},
+		{"fact term in camelCase", func(s *Scenario) {
+			s.Expect.ExpectedFacts = []Fact{{ID: "f_x", Tool: "connect_status", Match: []string{"taskFailed"}}}
+		}, "write it lower-case"},
+		{"claim on an unknown fact", func(s *Scenario) {
+			s.Expect.Claims = []Claim{{About: ClaimRootCause, Facts: []string{"f_nope"}}}
+		}, `unknown fact "f_nope"`},
+		{"claim about something else", func(s *Scenario) {
+			s.Expect.ExpectedFacts = []Fact{{ID: "f_ok", Tool: "connect_status", Match: []string{"ok"}}}
+			s.Expect.Claims = []Claim{{About: "fix", Facts: []string{"f_ok"}}}
+		}, `unknown about "fix"`},
+		{"claim without facts", func(s *Scenario) { s.Expect.Claims = []Claim{{About: ClaimRootCause}} }, "facts is empty"},
+		{"root cause layer on a healthy scenario", func(s *Scenario) {
+			s.Expect.Outcome, s.Expect.RootCause, s.Expect.RootCauseLayer = OutcomeHealthy, nil, "postgres"
+		}, "expect.root_cause_layer: only graded when outcome is diagnose"},
+		{"claims on an abstain scenario", func(s *Scenario) {
+			s.Expect.Outcome, s.Expect.RootCause = OutcomeAbstain, nil
+			s.Expect.ExpectedFacts = []Fact{{ID: "f_ok", Tool: "connect_status", Match: []string{"ok"}}}
+			s.Expect.Claims = []Claim{{About: ClaimRootCause, Facts: []string{"f_ok"}}}
+		}, "expect.claims: only graded when outcome is diagnose"},
+		{"ask without a steer or comment", func(s *Scenario) {
+			s.Expect.Outcome, s.Expect.RootCause = OutcomeAsk, nil
+			s.Inputs = []Input{{Kind: "approval_result", Text: "approved"}}
+		}, "outcome ask needs a steer or comment"},
+		{"ask with a steer", func(s *Scenario) {
+			s.Expect.Outcome, s.Expect.RootCause = OutcomeAsk, nil
+			s.Inputs = []Input{{Kind: "steer", Text: "fix it"}}
+		}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -125,7 +125,7 @@ func goodSchemaChangeScript() []step {
 		{tool: "pipeline_map", input: map[string]any{"pipeline_id": "orders"}},
 		{tool: "connect_status", input: map[string]any{"connector": "pg-orders-connector"}},
 		{tool: "pg_recent_ddl", input: map[string]any{"since": "2026-10-11T10:00:00Z"}},
-		{hypothesis: "Kafka Connect task 0 failed: the Schema Registry rejected (409, BACKWARD) the new Avro schema after amount changed int -> numeric(12,2)."},
+		{hypothesis: "Kafka Connect task 0 failed: the Schema Registry rejected (409, BACKWARD) the new Avro schema after an ALTER TABLE in Postgres changed amount int -> numeric(12,2)."},
 		{proposal: &events.ProposalCreatedPayload{
 			Title: "Allow the new schema and restart task 0",
 			Steps: []events.ProposalStep{

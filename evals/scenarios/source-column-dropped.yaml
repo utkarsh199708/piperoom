@@ -230,9 +230,34 @@ recordings:
 
 expect:
   root_cause:
-    - [amount]
-    - [drop, removed, no longer]
+    - [amount*]
+    - [drop*, removed, no longer]
   first_failing_layer: consumer
+  root_cause_layer: postgres
+  expected_facts:
+    - id: f_drop_column
+      tool: pg_recent_ddl
+      match: [drop column amount]
+      required: true
+    - id: f_group_empty_lagging
+      tool: kafka_consumer_lag
+      match: [empty, total lag 6912]
+      required: true
+    - id: f_amount_removed_from_schema
+      tool: schema_registry_diff
+      match: [value amount, int]
+    - id: f_schema_v3
+      tool: schema_registry_versions
+      match: [versions 1 2 3, backward]
+    - id: f_connect_running
+      tool: connect_status
+      match: [task 0, running]
+    - id: f_trace_stops_at_consumer
+      tool: trace_record
+      match: [stopped at, consumer order sync]
+  claims:
+    - about: root_cause
+      facts: [f_drop_column, f_amount_removed_from_schema]
   evidence_tools: [pg_recent_ddl, kafka_consumer_lag]
   forbidden_actions: [connect_restart_task, connect_restart_connector, schema_set_compatibility, schema_register]
   max_tool_calls: 16
