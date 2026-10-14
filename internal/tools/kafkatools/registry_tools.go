@@ -7,6 +7,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hamba/avro/v2"
+
+	"piperoom/internal/clients"
 	"piperoom/internal/tools"
 )
 
@@ -126,13 +129,13 @@ func (t *registryDiff) Kind() tools.Kind { return tools.KindRead }
 func (t *registryDiff) InputSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"subject":      strProp("subject name"),
-		"from_version": map[string]any{"type": "integer", "description": "registered version to diff from"},
-		"to_version":   map[string]any{"type": "integer", "description": "registered version to diff to (default latest)"},
-		"schema":       strProp("optional raw Avro schema JSON; when set, diffs it against to_version (default latest) instead of from_version"),
+		"from_version": map[string]any{"type": "integer", "description": "registered version to diff from (default latest)"},
+		"to_version":   map[string]any{"type": "integer", "description": "registered version to diff to (default latest); not with schema"},
+		"schema":       strProp("optional raw schema (same type as the subject's, e.g. Avro JSON); when set it is the 'to' side, diffed against from_version (default latest)"),
 	}, "subject")
 }
 func (t *registryDiff) Description() string {
-	return "Field-level diff of two Avro record schemas (added/removed/type-changed). Diff either two registered versions, or a raw schema against a version."
+	return "Field-level diff of two schemas of a subject (added/removed/type-changed fields; Avro records and JSON Schema properties). Diff two registered versions, or a registered version (from) against a raw schema (to)."
 }
 
 func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -142,8 +145,16 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 		ToVersion   int    `json:"to_version"`
 		Schema      string `json:"schema"`
 	}
-	if err := json.Unmarshal(input, &p); err != nil || p.Subject == "" {
+	if err := json.Unmarshal(input, &p); err != nil {
+		return tools.Result{}, fmt.Errorf("%w: invalid input (subject: string, from_version/to_version: integer, schema: string): %v", tools.ErrBadInput, err)
+	}
+	switch {
+	case p.Subject == "":
 		return tools.Result{}, fmt.Errorf("%w: subject is required", tools.ErrBadInput)
+	case p.FromVersion < 0 || p.ToVersion < 0:
+		return tools.Result{}, fmt.Errorf("%w: from_version and to_version must be positive (omit them for latest)", tools.ErrBadInput)
+	case p.Schema != "" && p.ToVersion > 0:
+		return tools.Result{}, fmt.Errorf("%w: set either to_version or schema, not both: schema is the 'to' side", tools.ErrBadInput)
 	}
 	if t.d.Registry == nil {
 		return notConfigured(), nil
@@ -158,45 +169,131 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 
-	toVersion := p.ToVersion
-	if toVersion <= 0 {
-		latest, err := t.d.Registry.Schema(cctx, p.Subject, -1)
-		if err != nil {
-			return tools.Result{}, err
-		}
-		toVersion = latest.Version
-	}
-	to, err := t.d.Registry.Schema(cctx, p.Subject, toVersion)
+	from, fromType, err := t.schema(cctx, p.Subject, p.FromVersion)
 	if err != nil {
 		return tools.Result{}, err
 	}
+	data := map[string]any{"subject": p.Subject, "from_version": from.Version, "schema_type": fromType}
 
-	var fromSchema string
-	fromVersion := p.FromVersion
+	var toSchema, toType string
 	if p.Schema != "" {
-		fromSchema = p.Schema
-		fromVersion = 0 // 0 = raw schema, not a registered version
-	} else {
-		if p.FromVersion <= 0 {
-			return tools.Result{}, fmt.Errorf("%w: from_version or schema is required", tools.ErrBadInput)
+		// A raw schema is checked against the subject's type: the registry
+		// would accept it only as that type.
+		toSchema, toType = p.Schema, fromType
+		if err := validateRaw(toType, toSchema); err != nil {
+			return tools.Result{}, err
 		}
-		from, err := t.d.Registry.Schema(cctx, p.Subject, p.FromVersion)
+		data["to_version"] = 0 // 0 = the raw schema, not a registered version
+	} else {
+		to, typ, err := t.schema(cctx, p.Subject, p.ToVersion)
 		if err != nil {
 			return tools.Result{}, err
 		}
-		fromSchema = from.Schema
+		toSchema, toType = to.Schema, typ
+		data["to_version"] = to.Version
 	}
 
-	changes, err := diffFields(fromSchema, to.Schema)
-	if err != nil {
-		return tools.Result{}, fmt.Errorf("diff schemas: %w", err)
+	if fromType != toType {
+		data["supported"] = false
+		return res(fmt.Sprintf("cannot diff a %s schema against a %s schema", fromType, toType), data), nil
 	}
-	return res(formatChanges(changes), map[string]any{
-		"subject": p.Subject, "from_version": fromVersion, "to_version": toVersion, "changes": changes,
-	}), nil
+	var changes []fieldChange
+	switch fromType {
+	case schemaAvro:
+		changes, err = diffFields(from.Schema, toSchema)
+	case schemaJSON:
+		changes, err = diffJSONSchema(from.Schema, toSchema)
+	default:
+		data["supported"] = false
+		return res(fmt.Sprintf("diff not supported for %s schemas (subject %s); compare the versions' schemas with the registry directly", fromType, p.Subject), data), nil
+	}
+	if err != nil {
+		return tools.Result{}, fmt.Errorf("kafkatools: schema_registry_diff %s: %w", p.Subject, err)
+	}
+	data["changes"] = changes
+	return res(formatChanges(changes), data), nil
 }
 
-// fieldChange is one field-level difference between two Avro schemas.
+// Schema types as the registry names them; an empty schemaType means AVRO.
+const (
+	schemaAvro     = "AVRO"
+	schemaJSON     = "JSON"
+	schemaProtobuf = "PROTOBUF"
+)
+
+// typedRegistry is the local adapter for the registry's schemaType until
+// clients.SchemaVersion carries it (contract change request): the real
+// client implements it; for other clients the type is inferred from the text.
+type typedRegistry interface {
+	SchemaTyped(ctx context.Context, subject string, version int) (clients.SchemaVersion, string, error)
+}
+
+// schema fetches a version (0 = latest) and its schema type.
+func (t *registryDiff) schema(ctx context.Context, subject string, version int) (clients.SchemaVersion, string, error) {
+	if version <= 0 {
+		version = -1
+	}
+	if tr, ok := t.d.Registry.(typedRegistry); ok {
+		sv, typ, err := tr.SchemaTyped(ctx, subject, version)
+		if err != nil {
+			return clients.SchemaVersion{}, "", err
+		}
+		if typ == "" {
+			typ = schemaAvro
+		}
+		return sv, strings.ToUpper(typ), nil
+	}
+	sv, err := t.d.Registry.Schema(ctx, subject, version)
+	if err != nil {
+		return clients.SchemaVersion{}, "", err
+	}
+	return sv, sniffSchemaType(sv.Schema), nil
+}
+
+// sniffSchemaType guesses a schema's type from its text: Protobuf is not
+// JSON; JSON Schema is an object without Avro's "fields" that has
+// "$schema" or "properties".
+func sniffSchemaType(s string) string {
+	t := strings.TrimSpace(s)
+	if t == "" || (t[0] != '{' && t[0] != '[' && t[0] != '"') {
+		return schemaProtobuf
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(t), &m) != nil {
+		return schemaAvro
+	}
+	if _, ok := m["fields"]; ok {
+		return schemaAvro
+	}
+	_, hasSchema := m["$schema"]
+	_, hasProps := m["properties"]
+	if hasSchema || hasProps {
+		return schemaJSON
+	}
+	return schemaAvro
+}
+
+// validateRaw rejects a raw schema that is not a valid schema of typ, so a
+// typo reads as bad input instead of a misleading "no field changes".
+func validateRaw(typ, schema string) error {
+	switch typ {
+	case schemaAvro:
+		if _, err := avro.ParseWithCache(schema, "", &avro.SchemaCache{}); err != nil {
+			return fmt.Errorf("%w: schema is not a valid Avro schema: %v", tools.ErrBadInput, err)
+		}
+		if _, err := recordFields(schema); err != nil {
+			return fmt.Errorf("%w: schema is not valid JSON: %v", tools.ErrBadInput, err)
+		}
+	case schemaJSON:
+		var m map[string]any
+		if err := json.Unmarshal([]byte(schema), &m); err != nil {
+			return fmt.Errorf("%w: schema is not a valid JSON Schema object: %v", tools.ErrBadInput, err)
+		}
+	}
+	return nil
+}
+
+// fieldChange is one field-level difference between two schemas.
 type fieldChange struct {
 	Field string `json:"field"`
 	Kind  string `json:"kind"` // added | removed | changed

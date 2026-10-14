@@ -243,7 +243,9 @@ func TestRedactMessageKnownResidual(t *testing.T) {
 	if got := RedactMessage("Duplicate entry 'jane' for key 'users.email'"); got != "Duplicate entry 'jane' for key 'users.email'" {
 		t.Fatalf("identifier-shaped value changed: %q", got)
 	}
-	if got := RedactMessage("bad \u201cjane@example.com\u201d here"); !strings.Contains(got, "jane@example.com") {
+	// The e-mail rule masks an address whatever quotes it; other text in
+	// typographic quotes stays.
+	if got := RedactMessage("bad \u201cjane doe\u201d here"); !strings.Contains(got, "jane doe") {
 		t.Fatalf("typographic quotes are now handled: %q (update the PR note)", got)
 	}
 }

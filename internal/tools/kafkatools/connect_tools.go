@@ -3,6 +3,7 @@ package kafkatools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -10,6 +11,8 @@ import (
 	"unicode/utf8"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/connect"
+	"piperoom/internal/dlq"
 	"piperoom/internal/tools"
 )
 
@@ -49,10 +52,30 @@ func (t *connectList) Run(ctx context.Context, _ json.RawMessage) (tools.Result,
 		FailedTasks int    `json:"failed_tasks"`
 	}
 	var rows []row
+	unchecked := 0
 	for _, n := range names {
+		// Once the time budget is spent, the remaining connectors are not
+		// asked about at all, and the summary says so; an UNKNOWN row would
+		// read as a connector in trouble.
+		if cctx.Err() != nil {
+			rows = append(rows, row{Name: n, State: stateNotChecked})
+			unchecked++
+			continue
+		}
 		st, err := t.d.Connect.Status(cctx, n)
+		if partialStatus(st, err) {
+			err = nil // state and the tasks read so far are enough for a row
+		}
 		if err != nil {
-			rows = append(rows, row{Name: n, State: "UNKNOWN"})
+			state := "UNKNOWN"
+			switch {
+			case cctx.Err() != nil:
+				state = stateNotChecked
+				unchecked++
+			case errors.Is(err, clients.ErrNotFound):
+				state = "NOT_FOUND" // deleted between list and status
+			}
+			rows = append(rows, row{Name: n, State: state})
 			continue
 		}
 		failed := 0
@@ -68,11 +91,23 @@ func (t *connectList) Run(ctx context.Context, _ json.RawMessage) (tools.Result,
 		if i > 0 {
 			sb.WriteString("\n")
 		}
+		if r.State == stateNotChecked {
+			fmt.Fprintf(&sb, "%s: not checked (time budget ran out)", r.Name)
+			continue
+		}
 		fmt.Fprintf(&sb, "%s (%s): %s, %d failed tasks", r.Name, r.Type, r.State, r.FailedTasks)
+	}
+	if unchecked > 0 {
+		appendLine(&sb, fmt.Sprintf("INCOMPLETE: the %s time budget ran out after %d of %d connectors; %d not checked (Connect slow or overloaded). Use connect_status on the ones you need.",
+			timeout, len(rows)-unchecked, len(rows), unchecked))
 	}
 	appendLine(&sb, tools.NotShown(other, "connector", "connectors"))
 	return res(sb.String(), rows), nil
 }
+
+// stateNotChecked marks a connector whose status was not read because the
+// call's time budget ran out first.
+const stateNotChecked = "NOT_CHECKED"
 
 // ---- connect_status ----
 
@@ -104,26 +139,43 @@ func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.R
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	st, err := t.d.Connect.Status(cctx, p.Connector)
-	if err != nil {
+	partial := partialStatus(st, err)
+	if err != nil && !partial {
 		return tools.Result{}, err
 	}
 	var sb strings.Builder
+	if partial {
+		sb.WriteString("PARTIAL: Connect's status response exceeds 4 MiB; showing the part read (tasks after the cut are missing).\n")
+	}
 	fmt.Fprintf(&sb, "%s (%s): %s", st.Name, st.Type, st.State)
 	if st.WorkerID != "" {
 		fmt.Fprintf(&sb, " on %s", st.WorkerID)
 	}
 	sb.WriteString(".")
 	type taskRow struct {
-		ID    int    `json:"id"`
-		State string `json:"state"`
-		Error string `json:"error,omitempty"`
+		ID     int    `json:"id"`
+		State  string `json:"state"`
+		Error  string `json:"error,omitempty"`
+		SameAs *int   `json:"same_error_as_task,omitempty"`
 	}
 	var tasks []taskRow
+	// Tasks of one connector usually fail on the same record or schema:
+	// each distinct trace is shown once.
+	firstWithTrace := map[string]int{}
 	for _, ts := range st.Tasks {
 		sb.WriteString(fmt.Sprintf("\nTask %d: %s", ts.ID, ts.State))
 		tr := taskRow{ID: ts.ID, State: ts.State}
 		if ts.State == "FAILED" && ts.Trace != "" {
+			// Keyed on the condensed text: raw traces differ in task ids
+			// and thread names inside the stack frames.
 			cond := condenseTrace(ts.Trace)
+			if first, ok := firstWithTrace[cond]; ok {
+				tr.SameAs = &first
+				fmt.Fprintf(&sb, ": same error as task %d", first)
+				tasks = append(tasks, tr)
+				continue
+			}
+			firstWithTrace[cond] = ts.ID
 			if t.d.Registry != nil {
 				if line := rejectedSchemaLine(cctx, t.d.Registry, sc, ts.Trace); line != "" {
 					cond += "\n" + line
@@ -137,9 +189,19 @@ func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.R
 		}
 		tasks = append(tasks, tr)
 	}
-	return res(sb.String(), map[string]any{
+	data := map[string]any{
 		"name": st.Name, "state": st.State, "worker": st.WorkerID, "tasks": tasks,
-	}), nil
+	}
+	if partial {
+		data["partial"] = true
+	}
+	return res(sb.String(), data), nil
+}
+
+// partialStatus reports whether err is the Connect client's "response too
+// large" with a usable partial status (the connector state was read).
+func partialStatus(st clients.ConnectorStatus, err error) bool {
+	return errors.Is(err, connect.ErrResponseTooLarge) && st.State != ""
 }
 
 // ---- connect_config ----
@@ -276,7 +338,8 @@ func truncateRunes(s string, n int) string {
 }
 
 // condenseTrace keeps the top exception line and every "Caused by:" line,
-// dropping stack frames and stripping embedded schema JSON blobs.
+// dropping stack frames, stripping embedded schema JSON blobs and redacting
+// record values (dlq.RedactTrace).
 func condenseTrace(trace string) string {
 	var out []string
 	for _, line := range strings.Split(trace, "\n") {
@@ -285,7 +348,9 @@ func condenseTrace(trace string) string {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "Caused by:") || len(out) == 0 {
-			out = append(out, sanitizeTrace(trimmed))
+			// Converters and drivers quote the failing record in their
+			// messages; the line is evidence, the record values are not.
+			out = append(out, dlq.RedactTrace(sanitizeTrace(trimmed)))
 		}
 	}
 	return strings.Join(out, "\n")

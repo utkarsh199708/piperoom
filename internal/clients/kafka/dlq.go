@@ -77,7 +77,9 @@ type dlqConsumer interface {
 // principal may not describe (TopicAuthorizationFailed) fails the whole call,
 // not just that topic; callers that pass several topics should know that.
 // end-start is an upper bound on the records present: compaction gaps and
-// transaction markers occupy offsets without being records.
+// transaction markers occupy offsets without being records. The caller's
+// deadline holds even against a broker that accepts connections and never
+// answers (boundCtx).
 func (c *Client) DLQOffsets(ctx context.Context, topics ...string) (map[string][]clients.PartitionOffsets, error) {
 	topics = uniqueNonEmpty(topics)
 	if len(topics) == 0 {
@@ -87,11 +89,15 @@ func (c *Client) DLQOffsets(ctx context.Context, topics ...string) (map[string][
 	defer cancel()
 
 	lister := c.lister()
-	starts, err := lister.ListStartOffsets(ctx, topics...)
+	starts, err := boundCtx(ctx, func(ctx context.Context) (kadm.ListedOffsets, error) {
+		return lister.ListStartOffsets(ctx, topics...)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("kafka: dlq start offsets: %w", err)
 	}
-	ends, err := lister.ListEndOffsets(ctx, topics...)
+	ends, err := boundCtx(ctx, func(ctx context.Context) (kadm.ListedOffsets, error) {
+		return lister.ListEndOffsets(ctx, topics...)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("kafka: dlq end offsets: %w", err)
 	}
@@ -197,7 +203,9 @@ func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]client
 // the transaction ends. DLQOffsets keeps the high watermark (the watcher
 // counts growth with it); only a peek needs the readable end.
 func (c *Client) clampToStable(ctx context.Context, topic string, parts []clients.PartitionOffsets) ([]clients.PartitionOffsets, error) {
-	lso, err := c.lister().ListCommittedOffsets(ctx, topic)
+	lso, err := boundCtx(ctx, func(ctx context.Context) (kadm.ListedOffsets, error) {
+		return c.lister().ListCommittedOffsets(ctx, topic)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("last stable offsets: %w", err)
 	}

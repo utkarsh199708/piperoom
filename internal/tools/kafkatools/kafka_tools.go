@@ -3,6 +3,7 @@ package kafkatools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -181,8 +182,12 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
-	lag, err := t.d.Kafka.GroupLag(cctx, p.Group)
+	lag, anomalies, err := groupLag(cctx, t.d.Kafka, p.Group)
 	if err != nil {
+		if errors.Is(err, clients.ErrNotFound) {
+			return res(fmt.Sprintf("not found: consumer group %q does not exist", p.Group),
+				map[string]any{"group": p.Group, "found": false}), nil
+		}
 		return tools.Result{}, err
 	}
 	// Only the pipeline's topics: a group can read topics of other pipelines.
@@ -200,6 +205,15 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 			}
 		}
 		lag.TotalLag = total
+		var kept []kafka.LagAnomaly
+		for _, a := range anomalies {
+			if sc.TopicInScope(a.Topic) {
+				kept = append(kept, a)
+			} else {
+				other++
+			}
+		}
+		anomalies = kept
 	}
 	sort.Slice(parts, func(i, j int) bool { return parts[i].Lag > parts[j].Lag })
 	var sb strings.Builder
@@ -211,13 +225,53 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 	for _, pl := range worst {
 		fmt.Fprintf(&sb, "\n  %s/%d: committed %d, end %d, lag %d", pl.Topic, pl.Partition, pl.Committed, pl.End, pl.Lag)
 	}
+	for _, a := range anomalies {
+		appendLine(&sb, "  "+anomalyLine(a))
+	}
 	if line := tools.NotShown(other, "topic partition", "topic partitions"); line != "" {
 		appendLine(&sb, line+"; the total lag above counts only this pipeline's partitions")
 	}
-	return res(sb.String(), map[string]any{
+	data := map[string]any{
 		"group": lag.Group, "state": lag.State, "members": lag.Members,
 		"total_lag": lag.TotalLag, "worst_partitions": worst,
-	}), nil
+	}
+	if len(anomalies) > 0 {
+		data["anomalies"] = anomalies
+	}
+	return res(sb.String(), data), nil
+}
+
+// lagReporter is the local adapter for GroupLagReport until
+// clients.PartitionLag can carry commit anomalies (contract change request):
+// the real client implements it; other KafkaAdmins get plain GroupLag.
+type lagReporter interface {
+	GroupLagReport(ctx context.Context, group string) (kafka.LagReport, error)
+}
+
+func groupLag(ctx context.Context, k clients.KafkaAdmin, group string) (clients.GroupLag, []kafka.LagAnomaly, error) {
+	if r, ok := k.(lagReporter); ok {
+		rep, err := r.GroupLagReport(ctx, group)
+		if err != nil {
+			return clients.GroupLag{}, nil, err
+		}
+		return rep.GroupLag, rep.Anomalies, nil
+	}
+	lag, err := k.GroupLag(ctx, group)
+	return lag, nil, err
+}
+
+// anomalyLine explains one suspect commit in a sentence the agent can act on.
+func anomalyLine(a kafka.LagAnomaly) string {
+	where := fmt.Sprintf("%s/%d", a.Topic, a.Partition)
+	switch a.Kind {
+	case kafka.AnomalyTopicMissing:
+		return fmt.Sprintf("WARNING %s: committed %d on a topic/partition that no longer exists (deleted or recreated); not counted in the lag", where, a.Committed)
+	case kafka.AnomalyCommitBeyondEnd:
+		return fmt.Sprintf("WARNING %s: committed %d is past the log end %d (topic recreated or truncated?); the lag of 0 shown for it is not real", where, a.Committed, a.End)
+	case kafka.AnomalyCommitBelowLogStart:
+		return fmt.Sprintf("WARNING %s: committed %d is below the log start %d: retention deleted %d unread records; the consumer will reset per auto.offset.reset", where, a.Committed, a.Start, a.Start-a.Committed)
+	}
+	return fmt.Sprintf("WARNING %s: offsets unavailable, not counted in the lag", where)
 }
 
 // ---- kafka_find_by_key ----
@@ -262,19 +316,56 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
 	refs, err := t.d.Kafka.FindByKey(cctx, p.Topic, p.Key, since, p.MaxScan)
+	if errors.Is(err, clients.ErrNotFound) {
+		return res(fmt.Sprintf("not found: topic %q does not exist", p.Topic),
+			map[string]any{"topic": p.Topic, "key": p.Key, "found": false, "topic_exists": false}), nil
+	}
 	if err != nil {
 		return tools.Result{}, err
 	}
+	// Oldest first, so the newest occurrence (latest update or tombstone) is
+	// the one marked and, when the list is long, the one kept.
+	sortRefsOldestFirst(refs)
 	var sb strings.Builder
 	if len(refs) == 0 {
 		fmt.Fprintf(&sb, "not found: no record with key %q since %s", p.Key, p.Since)
 	} else {
-		fmt.Fprintf(&sb, "found %d record(s) with key %q", len(refs), p.Key)
-		for _, r := range refs {
+		fmt.Fprintf(&sb, "found %d record(s) with key %q, oldest first", len(refs), p.Key)
+		shown := refs
+		if len(shown) > maxRefsShown {
+			fmt.Fprintf(&sb, "\n  (%d older not shown)", len(shown)-maxRefsShown)
+			shown = shown[len(shown)-maxRefsShown:]
+		}
+		for i, r := range shown {
 			fmt.Fprintf(&sb, "\n  partition %d, offset %d, %s", r.Partition, r.Offset, r.Timestamp.Format(time.RFC3339))
+			if i == len(shown)-1 {
+				sb.WriteString(" (newest)")
+			}
 		}
 	}
-	return res(sb.String(), map[string]any{"topic": p.Topic, "key": p.Key, "found": len(refs) > 0, "records": refs}), nil
+	data := map[string]any{"topic": p.Topic, "key": p.Key, "found": len(refs) > 0, "records": refs}
+	if len(refs) > 0 {
+		data["newest"] = refs[len(refs)-1]
+	}
+	return res(sb.String(), data), nil
+}
+
+// maxRefsShown caps the matches listed in the summary; Data has them all.
+const maxRefsShown = 10
+
+// sortRefsOldestFirst puts the newest match last whatever order the client
+// returned them in (ties: partition, then offset).
+func sortRefsOldestFirst(refs []clients.RecordRef) {
+	sort.SliceStable(refs, func(i, j int) bool {
+		a, b := refs[i], refs[j]
+		if !a.Timestamp.Equal(b.Timestamp) {
+			return a.Timestamp.Before(b.Timestamp)
+		}
+		if a.Partition != b.Partition {
+			return a.Partition < b.Partition
+		}
+		return a.Offset < b.Offset
+	})
 }
 
 // ---- kafka_topic_config ----

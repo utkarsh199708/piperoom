@@ -54,37 +54,164 @@ func (c *Client) ListConnectors(ctx context.Context) ([]string, error) {
 }
 
 // Status returns the flat connector status.
+//
+// A status body larger than 4 MiB (a connector with many tasks failing on
+// huge traces) is read up to the cap: Status then returns the part it read,
+// with TruncatedTrace in the trace that was cut, together with an error
+// wrapping ErrResponseTooLarge. Callers that can use a partial status check
+// for that error; the rest treat it like any other error.
 func (c *Client) Status(ctx context.Context, name string) (clients.ConnectorStatus, error) {
-	var raw struct {
-		Name      string `json:"name"`
-		Type      string `json:"type"`
-		Connector struct {
-			State    string `json:"state"`
-			WorkerID string `json:"worker_id"`
-		} `json:"connector"`
-		Tasks []struct {
-			ID       int    `json:"id"`
-			State    string `json:"state"`
-			WorkerID string `json:"worker_id"`
-			Trace    string `json:"trace"`
-		} `json:"tasks"`
-	}
 	path := "/connectors/" + url.PathEscape(name) + "/status"
-	if err := c.do(ctx, http.MethodGet, path, &raw); err != nil {
+	var cs clients.ConnectorStatus
+	err := c.doRaw(ctx, http.MethodGet, path, nil, func(r io.Reader) error {
+		var derr error
+		cs, derr = decodeStatus(r)
+		return derr
+	})
+	if err != nil && !errors.Is(err, ErrResponseTooLarge) {
 		return clients.ConnectorStatus{}, err
 	}
-	cs := clients.ConnectorStatus{
-		Name:     raw.Name,
-		Type:     raw.Type,
-		State:    raw.Connector.State,
-		WorkerID: raw.Connector.WorkerID,
+	return cs, err
+}
+
+// TruncatedTrace replaces the rest of a task trace that did not fit in the
+// response cap.
+const TruncatedTrace = "\n[trace cut: Connect status response exceeds 4 MiB]"
+
+// decodeStatus streams the status JSON token by token, so a body cut at the
+// cap still yields the connector state and every task read before the cut.
+func decodeStatus(r io.Reader) (clients.ConnectorStatus, error) {
+	var cs clients.ConnectorStatus
+	dec := json.NewDecoder(r)
+	if err := expectDelim(dec, '{'); err != nil {
+		return cs, err
 	}
-	for _, t := range raw.Tasks {
-		cs.Tasks = append(cs.Tasks, clients.TaskStatus{
-			ID: t.ID, State: t.State, WorkerID: t.WorkerID, Trace: t.Trace,
-		})
+	for dec.More() {
+		key, err := objectKey(dec)
+		if err != nil {
+			return cs, err
+		}
+		switch key {
+		case "name":
+			err = dec.Decode(&cs.Name)
+		case "type":
+			err = dec.Decode(&cs.Type)
+		case "connector":
+			var conn struct {
+				State    string `json:"state"`
+				WorkerID string `json:"worker_id"`
+			}
+			err = dec.Decode(&conn)
+			cs.State, cs.WorkerID = conn.State, conn.WorkerID
+		case "tasks":
+			err = decodeTasks(dec, &cs)
+		default:
+			var skip json.RawMessage
+			err = dec.Decode(&skip)
+		}
+		if err != nil {
+			return cs, err
+		}
 	}
 	return cs, nil
+}
+
+func decodeTasks(dec *json.Decoder, cs *clients.ConnectorStatus) error {
+	if err := expectDelim(dec, '['); err != nil {
+		return err
+	}
+	for dec.More() {
+		if err := expectDelim(dec, '{'); err != nil {
+			return err
+		}
+		var t clients.TaskStatus
+		for dec.More() {
+			key, err := objectKey(dec)
+			if err == nil {
+				switch key {
+				case "id":
+					err = dec.Decode(&t.ID)
+				case "state":
+					err = dec.Decode(&t.State)
+				case "worker_id":
+					err = dec.Decode(&t.WorkerID)
+				case "trace":
+					err = dec.Decode(&t.Trace)
+					if errors.Is(err, ErrResponseTooLarge) {
+						// The exception's first line is the useful part.
+						t.Trace = firstLineOfPartialString(dec.Buffered())
+					}
+				default:
+					var skip json.RawMessage
+					err = dec.Decode(&skip)
+				}
+			}
+			if err != nil {
+				if errors.Is(err, ErrResponseTooLarge) && t.State != "" {
+					t.Trace += TruncatedTrace
+					cs.Tasks = append(cs.Tasks, t)
+				}
+				return err
+			}
+		}
+		if err := expectDelim(dec, '}'); err != nil {
+			return err
+		}
+		cs.Tasks = append(cs.Tasks, t)
+	}
+	return expectDelim(dec, ']')
+}
+
+// firstLineOfPartialString decodes the first line of a JSON string value
+// whose end was cut off: r holds the unread rest of the body, starting at the
+// value (json.Decoder.Buffered after a failed Decode). It returns "" when
+// that is not a string.
+func firstLineOfPartialString(r io.Reader) string {
+	buf, _ := io.ReadAll(io.LimitReader(r, 16<<10))
+	buf = bytes.TrimLeft(buf, " \t\r\n:")
+	if len(buf) == 0 || buf[0] != '"' {
+		return ""
+	}
+	body := buf[1:]
+	if i := bytes.Index(body, []byte(`\n`)); i >= 0 {
+		body = body[:i]
+	} else if i := bytes.IndexByte(body, '"'); i >= 0 {
+		body = body[:i]
+	}
+	if len(body) > 2048 {
+		body = body[:2048]
+	}
+	// A cut may split an escape (é or \"): drop bytes until it decodes.
+	for n := len(body); n >= 0 && n > len(body)-8; n-- {
+		var s string
+		if json.Unmarshal(append(append([]byte{'"'}, body[:n]...), '"'), &s) == nil {
+			return s
+		}
+	}
+	return ""
+}
+
+func expectDelim(dec *json.Decoder, want json.Delim) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if d, ok := tok.(json.Delim); !ok || d != want {
+		return fmt.Errorf("unexpected token %v, want %v", tok, want)
+	}
+	return nil
+}
+
+func objectKey(dec *json.Decoder) (string, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return "", err
+	}
+	key, ok := tok.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected token %v, want an object key", tok)
+	}
+	return key, nil
 }
 
 // Config returns the connector's full config.
@@ -156,6 +283,52 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 
 // doBody is do with an optional JSON request body (nil sends none).
 func (c *Client) doBody(ctx context.Context, method, path string, in, out any) error {
+	var handle func(io.Reader) error
+	if out != nil {
+		handle = func(r io.Reader) error { return json.NewDecoder(r).Decode(out) }
+	}
+	return c.doRaw(ctx, method, path, in, handle)
+}
+
+// maxResponseBytes caps every response body read (AGENTS.md rule 7).
+const maxResponseBytes = 4 << 20
+
+// maxErrorSnippet caps the error-body text kept in a statusError: a proxy's
+// HTML error page is noise to the agent and to logs.
+const maxErrorSnippet = 256
+
+// ErrResponseTooLarge is wrapped when a response body exceeds 4 MiB.
+var ErrResponseTooLarge = errors.New("response larger than 4 MiB")
+
+// capReader reads at most n bytes and then fails with ErrResponseTooLarge
+// rather than io.EOF, so a decoder cut at the cap reports why, not
+// "unexpected EOF".
+type capReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *capReader) Read(p []byte) (int, error) {
+	if c.n <= 0 {
+		// One more byte tells a body of exactly n bytes from a longer one.
+		var one [1]byte
+		k, err := c.r.Read(one[:])
+		if k > 0 {
+			return 0, ErrResponseTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(p)) > c.n {
+		p = p[:c.n]
+	}
+	k, err := c.r.Read(p)
+	c.n -= int64(k)
+	return k, err
+}
+
+// doRaw sends the request and hands a 2xx body, capped at maxResponseBytes,
+// to handle (nil skips reading it).
+func (c *Client) doRaw(ctx context.Context, method, path string, in any, handle func(io.Reader) error) error {
 	var body io.Reader
 	if in != nil {
 		b, err := json.Marshal(in)
@@ -182,14 +355,25 @@ func (c *Client) doBody(ctx context.Context, method, path string, in, out any) e
 		return fmt.Errorf("connect: %s %s: %w", method, path, clients.ErrNotFound)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return &statusError{Method: method, Path: path, Code: resp.StatusCode, Body: strings.TrimSpace(string(b))}
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorSnippet))
+		return &statusError{Method: method, Path: path, Code: resp.StatusCode, Body: snippet(b)}
 	}
-	if out == nil {
+	if handle == nil {
 		return nil
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(out); err != nil {
+	if err := handle(&capReader{r: resp.Body, n: maxResponseBytes}); err != nil {
 		return fmt.Errorf("connect: %s %s: decode: %w", method, path, err)
 	}
 	return nil
+}
+
+// snippet makes an error body printable: valid UTF-8, trimmed, and marked
+// when it was cut at maxErrorSnippet bytes.
+// A rune split by the cut is invalid UTF-8 and dropped with the rest.
+func snippet(b []byte) string {
+	s := strings.TrimSpace(strings.ToValidUTF8(string(b), ""))
+	if len(b) >= maxErrorSnippet {
+		s += "…"
+	}
+	return s
 }

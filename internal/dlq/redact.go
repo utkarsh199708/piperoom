@@ -44,12 +44,49 @@ var tailMarkers = [][]rune{[]rune("[source:"), []rune("detail:"), []rune("where:
 // Limits: a bare identifier-shaped value in single quotes ('jane') is kept,
 // because 'amount' (a column name) looks the same. Typographic and fullwidth
 // quotes are not recognised.
+//
+// Unquoted values are masked too (rule 6): e-mail addresses, card numbers
+// (Luhn-checked), SSN-like and phone-like numbers, and the values of
+// key=value / key: value credentials (password, secret, token, api key, ...),
+// plus everything internal/redact finds. Offsets, LSNs, epoch timestamps and
+// dates are kept.
 func RedactMessage(s string) string {
+	return redactFixed(s, messageMode)
+}
+
+// MaxTraceLineRunes caps one line of RedactTrace's output.
+const MaxTraceLineRunes = 1000
+
+// RedactTrace is RedactMessage for one line of a Java stack trace or a
+// Connect task trace, where the structure is evidence: {...} and [...]
+// groups are kept (their quoted contents are still scrubbed), a
+// double-quoted identifier such as a subject name ("pg.public.orders-value")
+// is kept, and the cap is MaxTraceLineRunes. Everything else is as in
+// RedactMessage: the tail after "Detail:", "Where:" or "[Source:", quoted
+// values, Jackson token operands, VALUES tuples and unquoted PII are removed.
+func RedactTrace(line string) string {
+	return redactFixed(line, traceMode)
+}
+
+// mode selects how much structure the scrub keeps.
+type mode struct {
+	cap int
+	// keepStructure keeps {...} and [...] groups and identifier-shaped
+	// double-quoted strings.
+	keepStructure bool
+}
+
+var (
+	messageMode = mode{cap: MaxMessageRunes}
+	traceMode   = mode{cap: MaxTraceLineRunes, keepStructure: true}
+)
+
+func redactFixed(s string, m mode) string {
 	// The first pass removes everything the rules name; the loop only runs
 	// again when a removal joined text into something a rule matches.
 	out := s
 	for i := 0; i < 8; i++ {
-		next := redactOnce(out)
+		next := redactOnce(out, m)
 		if next == out {
 			break
 		}
@@ -58,23 +95,24 @@ func RedactMessage(s string) string {
 	return out
 }
 
-func redactOnce(s string) string {
-	rs := capRunes([]rune(s))
+func redactOnce(s string, m mode) string {
+	rs := capRunes([]rune(s), m.cap)
 	rs = tidy(rs)
 	rs = cutTail(rs)
-	rs = scrub(rs)
+	rs = scrub(rs, m)
+	rs = []rune(maskPII(string(rs)))
 	// Markers can make the text longer than what went in ("" -> "<redacted>"),
 	// so the cap runs again at the end.
-	return string(capRunes(tidy(rs)))
+	return string(capRunes(tidy(rs), m.cap))
 }
 
 // capRunes is the one capping mechanism. It never leaves half a marker
 // ("<redacted") or a trailing space at the cut.
-func capRunes(rs []rune) []rune {
-	if len(rs) <= MaxMessageRunes {
+func capRunes(rs []rune, n int) []rune {
+	if len(rs) <= n {
 		return rs
 	}
-	rs = rs[:MaxMessageRunes]
+	rs = rs[:n]
 	for n := len(redactedRunes) - 1; n >= 1; n-- {
 		if len(rs) >= n && string(rs[len(rs)-n:]) == string(redactedRunes[:n]) {
 			rs = rs[:len(rs)-n]
@@ -151,11 +189,25 @@ func hasPrefixFold(rs, p []rune) bool {
 
 // scrub replaces quoted strings, balanced groups, the Jackson token operand
 // and VALUES tuples.
-func scrub(rs []rune) []rune {
+func scrub(rs []rune, m mode) []rune {
 	out := make([]rune, 0, len(rs))
 	for i := 0; i < len(rs); {
 		r := rs[i]
 		switch {
+		case m.keepStructure && (r == '{' || r == '[' || r == '}' || r == ']'):
+			out = append(out, r)
+			i++
+		case m.keepStructure && r == '"':
+			end := quoteEnd(rs, i)
+			if end < 0 {
+				return append(out, redactedRunes...)
+			}
+			if isIdentifier(rs[i+1 : end]) {
+				out = append(out, rs[i:end+1]...)
+			} else {
+				out = append(out, redactedRunes...)
+			}
+			i = end + 1
 		case r == '"' || r == '{' || r == '[':
 			end := quoteEnd(rs, i)
 			if r != '"' {
