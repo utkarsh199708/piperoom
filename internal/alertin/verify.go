@@ -257,12 +257,22 @@ func verifyPagerDuty(h http.Header, body []byte, secret string) error {
 // verifyGeneric checks "t=<unix>,v1=<hex>[,v1=<hex>...]" where each v1 is
 // HMAC-SHA256(secret, t + "." + body). Several v1 values allow secret rotation.
 func verifyGeneric(h http.Header, body []byte, secret string, now time.Time, skew time.Duration) error {
-	v := h.Get(GenericSignatureHeader)
-	if v == "" {
-		return fmt.Errorf("%w: missing %s header", ErrUnauthenticated, GenericSignatureHeader)
+	ts, sigs, err := genericHeaderFields(h, now, skew)
+	if err != nil {
+		return err
 	}
-	var ts string
-	var sigs []string
+	want := hmacSHA256(secret, []byte(ts), []byte("."), body)
+	for _, s := range sigs {
+		if hexMACMatches(s, want) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: wrong generic signature", ErrUnauthenticated)
+}
+
+// parseGenericHeader splits "t=<unix>,v1=<hex>[,v1=<hex>...]" into the first
+// t value and every v1 value.
+func parseGenericHeader(v string) (ts string, sigs []string) {
 	for _, part := range strings.Split(v, ",") {
 		k, val, ok := strings.Cut(strings.TrimSpace(part), "=")
 		switch {
@@ -273,17 +283,85 @@ func verifyGeneric(h http.Header, body []byte, secret string, now time.Time, ske
 			sigs = append(sigs, val)
 		}
 	}
+	return ts, sigs
+}
+
+// genericHeaderFields checks everything about the generic signature header
+// that does not need the body: present, has t= and v1=, fresh timestamp.
+func genericHeaderFields(h http.Header, now time.Time, skew time.Duration) (string, []string, error) {
+	v := h.Get(GenericSignatureHeader)
+	if v == "" {
+		return "", nil, fmt.Errorf("%w: missing %s header", ErrUnauthenticated, GenericSignatureHeader)
+	}
+	ts, sigs := parseGenericHeader(v)
 	if ts == "" || len(sigs) == 0 {
-		return fmt.Errorf("%w: %s needs t= and v1=", ErrUnauthenticated, GenericSignatureHeader)
+		return "", nil, fmt.Errorf("%w: %s needs t= and v1=", ErrUnauthenticated, GenericSignatureHeader)
 	}
 	if err := checkTimestamp(ts, now, skew); err != nil {
-		return err
+		return "", nil, err
 	}
-	want := hmacSHA256(secret, []byte(ts), []byte("."), body)
-	for _, s := range sigs {
-		if hexMACMatches(s, want) {
-			return nil
+	return ts, sigs, nil
+}
+
+// isSHA256Hex reports whether s (trimmed) is 64 hex digits, the shape of every
+// HMAC-SHA256 signature the sources send.
+func isSHA256Hex(s string) bool {
+	b, err := hex.DecodeString(strings.TrimSpace(s))
+	return err == nil && len(b) == sha256.Size
+}
+
+// PreVerify checks what can be checked from the headers alone, so the caller
+// can refuse a request before reading its body (docs/api.md: 401 before the
+// body is read). Token sources are verified in full here. HMAC sources need
+// the body for the MAC, so only the presence and shape of the signature
+// headers and the signed timestamp are checked; Verify (or Ingest) must still
+// run on the body. Errors wrap ErrUnauthenticated.
+func (c Config) PreVerify(src Source, h http.Header) error {
+	c = c.withDefaults()
+	if !c.Enabled(src) {
+		return fmt.Errorf("%w: source %q is not configured", ErrUnauthenticated, src)
+	}
+	switch src {
+	case Alertmanager:
+		return verifyBearer(h, c.AlertmanagerToken)
+	case Datadog:
+		return verifyHeaderToken(h, c.DatadogTokenHeader, c.DatadogToken)
+	case Grafana:
+		sig := h.Get(c.GrafanaSignatureHeader)
+		if sig == "" {
+			return fmt.Errorf("%w: missing %s header", ErrUnauthenticated, c.GrafanaSignatureHeader)
 		}
+		if !isSHA256Hex(sig) {
+			return fmt.Errorf("%w: malformed %s header", ErrUnauthenticated, c.GrafanaSignatureHeader)
+		}
+		ts := strings.TrimSpace(h.Get(c.GrafanaTimestampHeader))
+		if ts == "" {
+			return fmt.Errorf("%w: missing %s header", ErrUnauthenticated, c.GrafanaTimestampHeader)
+		}
+		return checkTimestamp(ts, c.Now(), c.MaxSkew)
+	case PagerDuty:
+		v := h.Get(PagerDutySignatureHeader)
+		if v == "" {
+			return fmt.Errorf("%w: missing %s header", ErrUnauthenticated, PagerDutySignatureHeader)
+		}
+		for _, part := range strings.Split(v, ",") {
+			ver, sig, ok := strings.Cut(strings.TrimSpace(part), "=")
+			if ok && ver == "v1" && isSHA256Hex(sig) {
+				return nil
+			}
+		}
+		return fmt.Errorf("%w: no well-formed v1 pagerduty signature", ErrUnauthenticated)
+	case Generic:
+		_, sigs, err := genericHeaderFields(h, c.Now(), c.MaxSkew)
+		if err != nil {
+			return err
+		}
+		for _, s := range sigs {
+			if isSHA256Hex(s) {
+				return nil
+			}
+		}
+		return fmt.Errorf("%w: malformed %s header", ErrUnauthenticated, GenericSignatureHeader)
 	}
-	return fmt.Errorf("%w: wrong generic signature", ErrUnauthenticated)
+	return fmt.Errorf("%w: unknown source %q", ErrUnauthenticated, src)
 }

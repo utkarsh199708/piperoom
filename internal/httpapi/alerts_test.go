@@ -327,7 +327,10 @@ func TestSignedAlertRepeatJoinsOpenRoom(t *testing.T) {
 			wantStatus(t, resp, http.StatusCreated)
 			first := decode[room.RoomSnapshot](t, resp)
 
-			resp = postAlert(t, srv, c.src, c.sign(c.secret, body, c.now), body)
+			// A real repeat is a new delivery with new bytes (an identical
+			// copy is a replay: TestSignedAlertReplayIsIgnored).
+			repeat := append(append([]byte{}, body...), '\n')
+			resp = postAlert(t, srv, c.src, c.sign(c.secret, repeat, c.now), repeat)
 			wantStatus(t, resp, http.StatusOK)
 			if again := decode[room.RoomSnapshot](t, resp); again.ID != first.ID {
 				t.Fatalf("repeat joined room %s, want %s", again.ID, first.ID)

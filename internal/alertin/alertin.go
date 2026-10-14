@@ -171,8 +171,8 @@ func firstSeverity(candidates ...string) string {
 }
 
 // cleanTitle makes alert text safe to show as a one-line title: control
-// characters (newlines included) become spaces, runs of spaces collapse, and
-// the result is capped. Keeping it on one line stops an alert from faking
+// characters (newlines included) become spaces, format characters (Cf) are
+// dropped, runs of spaces collapse, and the result is capped. Keeping it on one line stops an alert from faking
 // extra lines (e.g. "Pipeline: ...") in the agent's opening message.
 func cleanTitle(s string, fallback string) string {
 	if !utf8.ValidString(s) {
@@ -182,6 +182,12 @@ func cleanTitle(s string, fallback string) string {
 	space := false
 	n := 0
 	for _, r := range s {
+		// Format characters (bidi overrides and isolates, zero-width
+		// characters, tag characters) render as nothing or reorder the text
+		// around them, so a title could show one thing and say another.
+		if unicode.Is(unicode.Cf, r) {
+			continue
+		}
 		if unicode.IsControl(r) || unicode.IsSpace(r) || r == ' ' || r == ' ' {
 			space = true
 			continue

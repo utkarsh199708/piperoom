@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -22,6 +23,21 @@ func WithAlertIngest(cfg alertin.Config) Option {
 	return func(s *Server) { s.alerts = cfg }
 }
 
+// Alert intake limits. Verified alerts per source per window: each one may
+// open a room and start an agent run, so a leaked secret or a misconfigured
+// sender must not open rooms without bound. Generous for real senders, which
+// group alerts (Alertmanager group_interval is minutes).
+const (
+	alertRateLimit  = 60
+	alertRateWindow = time.Minute
+)
+
+// WithAlertRateLimit sets how many verified alerts one source may send per
+// window before the route answers 429 rate_limited (default 60 per minute).
+func WithAlertRateLimit(n int, window time.Duration) Option {
+	return func(s *Server) { s.alertLimit = newRateLimiter(n, window) }
+}
+
 // handleSignedAlert is POST /api/alerts/{source}: the sender's signature or
 // token (checked by alertin) is the auth, so there is no X-User. The body is
 // read up to alertin.MaxBodyBytes, verified and parsed in one alertin call,
@@ -33,9 +49,11 @@ func (s *Server) handleSignedAlert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "unknown alert source")
 		return
 	}
-	// A source with no secret is refused before the body is read.
-	if !s.alerts.Enabled(src) {
-		s.refuseWarn.refused(s.log, src, r, "source is not configured")
+	// Everything the headers alone can settle (a disabled source, a wrong
+	// token, a missing, malformed or stale signature header) is refused
+	// before the body is read, so a body nobody signed costs no read.
+	if err := s.alerts.PreVerify(src, r.Header); err != nil {
+		s.refuseWarn.refused(s.log, src, r, err.Error())
 		writeError(w, http.StatusUnauthorized, "unauthenticated", "alert authentication failed")
 		return
 	}
@@ -77,7 +95,35 @@ func (s *Server) handleSignedAlert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only verified alerts count against the source's budget, so forged
+	// requests cannot lock the real sender out.
+	now := s.alerts.Now
+	if now == nil {
+		now = time.Now
+	}
+	at := now()
+	if !s.alertLimit.allow(string(src), at) {
+		s.refuseWarn.refused(s.log, src, r, "rate limited")
+		w.Header().Set("Retry-After", strconv.Itoa(int(s.alertLimit.window.Seconds())))
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many alerts from this source")
+		return
+	}
+	// A verified request whose exact bytes (body and signed time) were already
+	// processed is a copy: a replay of a captured request, or a bearer
+	// sender's burst. It is acknowledged and dropped, without touching the
+	// room or returning its content.
+	key := s.alerts.DeliveryKey(src, r.Header, body)
+	if s.alertSeen.Seen(key, s.alerts.ReplayWindow(src), at) {
+		writeJSON(w, http.StatusAccepted, map[string]any{"ignored": true, "reason": "duplicate delivery"})
+		return
+	}
+
 	snap, created, err := s.svc.OpenAlertRoom(r.Context(), a)
+	if err != nil && !errors.Is(err, room.ErrResolvedAlertNoRoom) {
+		// Not processed: the sender's retry of the same bytes must not be
+		// taken for a copy.
+		s.alertSeen.Forget(key)
+	}
 	s.writeSignedAlertRoom(w, snap, created, err)
 }
 
