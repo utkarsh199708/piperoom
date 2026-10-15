@@ -132,6 +132,18 @@ func Load(path string) (*Owners, error) {
 	return &o, nil
 }
 
+// firstDuplicate returns the first name that appears twice in names, or "".
+func firstDuplicate(names []string) string {
+	seen := make(map[string]bool, len(names))
+	for _, n := range names {
+		if seen[n] {
+			return n
+		}
+		seen[n] = true
+	}
+	return ""
+}
+
 // Pipeline returns the pipeline with the given id.
 func (o *Owners) Pipeline(id string) (Pipeline, bool) {
 	for _, p := range o.Pipelines {
@@ -164,6 +176,18 @@ func (o *Owners) validate() error {
 		}
 		if len(p.Connectors) == 0 {
 			return fmt.Errorf("pipeline %q: no connectors", p.ID)
+		}
+		for _, l := range []struct {
+			name  string
+			names []string
+		}{
+			{"source_tables", p.SourceTables}, {"connectors", p.Connectors},
+			{"consumer_groups", p.ConsumerGroups}, {"sink_tables", p.SinkTables},
+		} {
+			// A repeated name becomes two graph nodes with one id.
+			if d := firstDuplicate(l.names); d != "" {
+				return fmt.Errorf("pipeline %q: %s lists %q twice", p.ID, l.name, d)
+			}
 		}
 		if len(p.SinkTables) > 0 && p.SinkTSColumn == "" {
 			return fmt.Errorf("pipeline %q: sink_ts_column is required when sink_tables is set", p.ID)
