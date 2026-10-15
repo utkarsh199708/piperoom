@@ -1,11 +1,14 @@
 package kafkatools
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/tools"
 )
 
 // traceRow is one trace text from the #430 review corpus. Each row runs as a
@@ -89,6 +92,11 @@ func TestTraceOracleURLs(t *testing.T) {
 		{"quoted user", listenerRefused + "jdbc:oracle:thin:\"Loader\"/QuPw55z@wh:1521:ORCL", []string{"QuPw55z"}, []string{"@wh:1521:ORCL"}},
 		{"quoted upper user", listenerRefused + "jdbc:oracle:thin:\"LOADER\"/QuS3rPw77@wh:1521:ORCL", []string{"QuS3rPw77"}, []string{"@wh:1521:ORCL"}},
 		{"no host", listenerRefused + "jdbc:oracle:thin:loader/NoAtPw99 (connection refused)", []string{"NoAtPw99"}, []string{"jdbc:oracle:thin:loader/", "(connection refused)"}},
+		// Escaped quotes, as in a trace that echoes JSON config, and an SQL
+		// doubled quote inside a quoted password.
+		{"escaped quoted user", listenerRefused + `jdbc:oracle:thin:\"Loader\"/EscU5erPw9@wh:1521:ORCL`, []string{"EscU5erPw9"}, []string{"@wh:1521:ORCL"}},
+		{"escaped quoted password in json", `org.apache.kafka.connect.errors.ConnectException: bad config: {\"connection.url\":\"jdbc:oracle:thin:loader/\"p w0rdJs0nTail\"@wh:1521:ORCL\"}`, []string{"w0rdJs0nTail"}, []string{"jdbc:oracle:thin:loader/", "@wh:1521:ORCL"}},
+		{"doubled quote in quoted password", listenerRefused + `jdbc:oracle:thin:loader/"Dq""Pw0rdTail"@wh:1521:ORCL`, []string{"Pw0rdTail"}, []string{"@wh:1521:ORCL"}},
 		// No credentials: nothing to mask, the address is the diagnosis.
 		{"no credentials, service", listenerRefused + "jdbc:oracle:thin:@//wh:1521/svc", nil, []string{"jdbc:oracle:thin:@//wh:1521/svc"}},
 		{"no credentials, sid", listenerRefused + "jdbc:oracle:thin:@wh:1521:ORCL", nil, []string{"jdbc:oracle:thin:@wh:1521:ORCL"}},
@@ -105,6 +113,17 @@ func TestTraceSQLServerBracedPassword(t *testing.T) {
 		{"braced with at", nsd + "jdbc:sqlserver://wh:1433;user=loader;password={Br@ce;Pw42x};encrypt=true", []string{"Br@ce", "Pw42x"}, []string{"jdbc:sqlserver://wh:1433", "user=loader", "encrypt=true"}},
 		{"braced", nsd + "jdbc:sqlserver://wh:1433;user=loader;password={Br4ce;S3cr3tT4il};encrypt=true", []string{"Br4ce", "S3cr3tT4il"}, []string{"jdbc:sqlserver://wh:1433", "user=loader"}},
 		{"braced pwd, escaped brace", nsd + "jdbc:sqlserver://wh:1433;user=loader;pwd={a}}b;Esc4peTail};encrypt=true", []string{"Esc4peTail"}, []string{"jdbc:sqlserver://wh:1433", "user=loader"}},
+		// Compound MS JDBC keys take braced values the same way.
+		{"trustStorePassword", nsd + "jdbc:sqlserver://wh:1433;user=loader;password=Pl41nPwZx;trustStorePassword={Tr@st;StPw42Zx};encrypt=true", []string{"Pl41nPwZx", "Tr@st", "StPw42Zx"}, []string{"jdbc:sqlserver://wh:1433", "user=loader", "encrypt=true"}},
+		{"keyStorePassword", nsd + "jdbc:sqlserver://wh:1433;user=loader;keyStorePassword={Ks;St0reP4ssTail}", []string{"St0reP4ssTail"}, []string{"jdbc:sqlserver://wh:1433", "user=loader"}},
+		{"keyStoreSecret", nsd + "jdbc:sqlserver://wh:1433;user=loader;keyStoreSecret={K3y;Secr3tTailQ}", []string{"Secr3tTailQ"}, []string{"jdbc:sqlserver://wh:1433", "user=loader"}},
+		{"clientKeyPassword", nsd + "jdbc:sqlserver://wh:1433;user=loader;clientKeyPassword={Cl1ent@Key;TailW9}", []string{"Cl1ent@Key", "TailW9"}, []string{"jdbc:sqlserver://wh:1433", "user=loader"}},
+		{"aadSecurePrincipalSecret", nsd + "jdbc:sqlserver://wh:1433;user=loader;aadSecurePrincipalSecret={Aad;Pr1ncTail8}", []string{"Pr1ncTail8"}, []string{"jdbc:sqlserver://wh:1433", "user=loader"}},
+		{"database_password", nsd + "jdbc:sqlserver://wh:1433;user=loader;database_password={Us;Und3rTail}", []string{"Und3rTail"}, []string{"jdbc:sqlserver://wh:1433", "user=loader"}},
+		// Malformed: no closing brace; the value runs to the end of the line.
+		{"unclosed brace", nsd + "jdbc:sqlserver://wh:1433;user=loader;password={Br@ce;Unc1osedTail", []string{"Br@ce", "Unc1osedTail"}, []string{"jdbc:sqlserver://wh:1433", "user=loader"}},
+		// Keys that do not end in password, pwd or secret keep their values.
+		{"unrelated braced keys", nsd + "jdbc:sqlserver://wh:1433;user=loader;passwordPolicy={min=12};cwd={C:/app};encrypt=true", nil, []string{"jdbc:sqlserver://wh:1433", "user=loader", "passwordPolicy={min=12}", "cwd={C:/app}"}},
 	})
 }
 
@@ -152,6 +171,16 @@ func TestTraceRedactGaps(t *testing.T) {
 		{"gap: redact.Text, see #455: using password NO", "java.sql.SQLException: Access denied for user 'debezium'@'172.18.0.7' (using password: NO)", "(using password: [redacted"},
 		{"gap: redact.Text, see #455: using password YES", "java.sql.SQLException: Access denied for user 'debezium'@'172.18.0.7' (using password: YES)", "(using password: [redacted"},
 		{"gap: redact.Text, see #455: scram login module", "javax.security.auth.login.LoginException: ScramLoginModule required", "[redacted"},
+		// "must" reads as a value after "ssl.key.password:".
+		{"gap: redact.Text, see #455: must be non-empty", "org.apache.kafka.common.config.ConfigException: Missing value for configuration ssl.key.password: must be non-empty", ": [redacted 8] be non-empty"},
+		// An unbraced password with '@' reads as URL user info: the port and
+		// user are masked and the tail leaks.
+		{"gap: redact.Text, see #455: unbraced at password", "java.sql.SQLException: No suitable driver found for jdbc:sqlserver://wh:1433;user=loader;password=P@ssUnbr42Zx;encrypt=true", "@ssUnbr42Zx"},
+		// The SQL '' escape ends the quoted value early; the tail leaks.
+		{"gap: redact.Text, see #455: sql doubled quote", "Caused by: java.sql.BatchUpdateException: Batch entry 0 UPDATE \"users\" SET \"password\" = 'It''sS3cret99' WHERE \"id\" = 7 was aborted", "sS3cret99"},
+		// Not a redact gap: per-line masking cannot follow a quote opened on
+		// the line before (main's whole-text scrub did). Contrived; pinned.
+		{"known: quote across lines", "org.apache.kafka.connect.errors.ConnectException: bad jaas config: password=\"QHead99\nCaused by: QTail99Zx\";", "QTail99Zx"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			for path, got := range bothPaths(t, tt.line) {
@@ -160,5 +189,102 @@ func TestTraceRedactGaps(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// bigSchema is an Avro record schema over redact.MaxScan (64 KiB).
+func bigSchema() string {
+	var sb strings.Builder
+	sb.WriteString(`{"type":"record","name":"Envelope","fields":[`)
+	for i := 0; i < 1100; i++ {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, `{"name":"field_%06d_padding","type":["null","string"],"default":null}`, i)
+	}
+	sb.WriteString(`]}`)
+	return sb.String()
+}
+
+// TestTraceLargeSchemaKeepsTail: schema blobs are stripped before credential
+// masking. redact.Text masks text past 64 KiB as one block, and a blob cut
+// that way has no closing brace or quote, so stripping it afterwards took the
+// error code, compatibility level and subject with it.
+func TestTraceLargeSchemaKeepsTail(t *testing.T) {
+	big := bigSchema()
+	if len(big) <= 64<<10 {
+		t.Fatalf("test setup: schema is %d bytes, want over 64 KiB", len(big))
+	}
+	checkRows(t, []traceRow{
+		{"old schema over 64 KiB", "Caused by: io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException: Schema being registered is incompatible with an earlier schema for subject \"orders-value\", details: [{errorType:'MISSING_UNION_BRANCH', description:'The new schema is missing a type'}, {oldSchemaVersion: 1}, {oldSchema: '" + big + "'}, {compatibility: 'BACKWARD'}]; error code: 409",
+			nil, []string{"error code: 409", "compatibility: 'BACKWARD'", "orders-value", "oldSchema: <schema>"}},
+		{"registered schema over 64 KiB", "org.apache.kafka.connect.errors.DataException: Error registering Avro schema" + big + " for subject orders-value; error code: 409",
+			nil, []string{"error code: 409", "orders-value", "Error registering Avro schema<schema>"}},
+	})
+}
+
+// TestTraceOracleOvermask pins a known over-mask: an unquoted Oracle password
+// runs to the last '@' of its token, so text glued after the URL up to a later
+// '@' is masked with it. Nothing leaks; the host reads wrong. Stopping earlier
+// would leak a password that holds '@' (TestTraceOracleURLs).
+func TestTraceOracleOvermask(t *testing.T) {
+	for _, line := range []string{
+		`org.apache.kafka.connect.errors.ConnectException: bad config {"url":"jdbc:oracle:thin:loader/Js0nPw9@wh:1521:ORCL","owner":"ops@corp.example"}`,
+		listenerRefused + "jdbc:oracle:thin:loader/Js0nPw9@wh:1521:ORCL;principal=dbz@EXAMPLE.COM",
+	} {
+		for path, got := range bothPaths(t, line) {
+			for _, text := range got {
+				if strings.Contains(text, "Js0nPw9") || !strings.Contains(text, "loader/[redacted]@") {
+					t.Errorf("%s path: want the password masked (over-mask allowed):\n%s", path, text)
+				}
+			}
+		}
+	}
+}
+
+// TestCleanTraceMasksBeforeCap: cleanTrace masks the whole condensed text
+// before its 2000-byte cap, so a URL password across the cut is masked whole.
+func TestCleanTraceMasksBeforeCap(t *testing.T) {
+	const pre = "org.apache.kafka.connect.errors.ConnectException: Cannot connect to "
+	url := "postgresql://loader:CapS3cretPassw0rd@wh:5432/dw"
+	pad := strings.Repeat("retry ", (maxTraceText-len(pre)-len("postgresql://loader:")-6)/6)
+	in := pre + pad + url
+	if i := strings.Index(in, "CapS3cret"); i >= maxTraceText || i+len("CapS3cretPassw0rd") <= maxTraceText {
+		t.Fatalf("test setup: secret at %d does not straddle %d", i, maxTraceText)
+	}
+	if got := cleanTrace(in); strings.Contains(got, "CapS3c") {
+		t.Fatalf("cleanTrace leaks the password head:\n...%s", got[len(got)-120:])
+	}
+}
+
+// TestConnectStatusRejectedSchemaLineMasked: the rejected-schema diff is added
+// to a task's condensed trace after condenseTrace, so only cleanTrace masks
+// it. Field names come from the trace and the registry: untrusted.
+func TestConnectStatusRejectedSchemaLineMasked(t *testing.T) {
+	const leak = "postgresql://loader:Fn4meLeakPw@wh/dw"
+	trace := "org.apache.kafka.connect.errors.ConnectException: Tolerance exceeded in error handler\n" +
+		`Caused by: org.apache.kafka.common.errors.SerializationException: Error registering Avro schema{"type":"record","name":"R","fields":[{"name":"id","type":"long"},{"name":"` + leak + `","type":"string"}]}` + "\n" +
+		`Caused by: RestClientException: Schema being registered is incompatible with an earlier schema for subject "pg.public.orders-value"; error code: 409`
+	fc := &fakeConnect{statusFn: func(ctx context.Context, n string) (clients.ConnectorStatus, error) {
+		return clients.ConnectorStatus{Name: n, Type: "source", State: "RUNNING",
+			Tasks: []clients.TaskStatus{{ID: 0, State: "FAILED", Trace: trace}}}, nil
+	}}
+	fr := &fakeRegistry{schemaFn: func(context.Context, string, int) (clients.SchemaVersion, error) {
+		return clients.SchemaVersion{Subject: "pg.public.orders-value", Version: 3, Schema: `{"type":"record","name":"R","fields":[{"name":"id","type":"long"}]}`}, nil
+	}}
+	reg := tools.NewRegistry()
+	if err := Register(reg, Deps{Connect: fc, Registry: fr}); err != nil {
+		t.Fatal(err)
+	}
+	tool, _ := reg.Get("connect_status")
+	r := runTool(t, tool, `{"connector":"pg-orders"}`)
+	if !strings.Contains(r.Summary, "Rejected schema vs pg.public.orders-value v3") {
+		t.Fatalf("test setup: no rejected-schema line:\n%s", r.Summary)
+	}
+	data, _ := json.Marshal(r.Data)
+	for _, where := range []struct{ name, text string }{{"summary", r.Summary}, {"data", string(data)}} {
+		if strings.Contains(where.text, "Fn4meLeakPw") {
+			t.Errorf("%s carries the password from the rejected-schema line:\n%s", where.name, where.text)
+		}
 	}
 }

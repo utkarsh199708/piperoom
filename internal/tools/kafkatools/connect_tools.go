@@ -158,18 +158,22 @@ const maxTraceText = 2000
 
 // oracleThinCreds matches an Oracle JDBC URL with credentials,
 // jdbc:oracle:<driver>:user/password@host..., which DriverManager quotes
-// whole in "No suitable driver" and listener errors. The user may be quoted;
-// group 2 is the rest of the token, where maskOracleThin finds the password.
-// A URL with no credentials (jdbc:oracle:thin:@host...) does not match: its
-// user part would start with '@'. redact.Text has no rule for this form yet
-// (#449); drop this local mask once that rule lands.
-var oracleThinCreds = regexp.MustCompile(`(?i)(jdbc:oracle:[a-z0-9]+:(?:"[^"\n]*"|[^\s/@:;"']+)/)("[^"\n]*"|\S+)`)
+// whole in "No suitable driver" and listener errors. The user may be quoted,
+// and a quote may be escaped (\", a trace echoing JSON config) or doubled
+// inside ("", SQL style); group 2 is the rest of the token, where
+// maskOracleThin finds the password. A URL with no credentials
+// (jdbc:oracle:thin:@host...) does not match: its user part would start with
+// '@'. redact.Text has no rule for this form yet (#449); drop this local mask
+// once that rule lands.
+var oracleThinCreds = regexp.MustCompile(`(?i)(jdbc:oracle:[a-z0-9]+:(?:\\?"(?:[^"\n]|"")*"|[^\s/@:;"'\\]+)/)(\\?"(?:[^"\n]|"")*"|\S+)`)
 
-// bracedPassword matches a password=/pwd= value in MS JDBC braces, which may
-// hold ';' and '@' ('}}' escapes '}'). redact.Text reads such a value as URL
-// user info: it masks the port and user and leaks the tail. The key and the
-// rest of the connection string stay visible.
-var bracedPassword = regexp.MustCompile(`(?i)(\b(?:password|pwd)\s*=\s*)\{(?:[^}]|\}\})*\}`)
+// bracedPassword matches an MS JDBC value in braces, which may hold ';' and
+// '@' ('}}' escapes '}'), for every key that ends in password, pwd or secret
+// (trustStorePassword, keyStoreSecret, ...). redact.Text reads such a value as
+// URL user info: it masks the port and user and leaks the tail. A brace that
+// is never closed runs to the end of the line. The key and the rest of the
+// connection string stay visible.
+var bracedPassword = regexp.MustCompile(`(?im)(\b\w*(?:password|pwd|secret)\s*=\s*)\{(?:[^}\n]|\}\})*(?:\}|$)`)
 
 // redactedPassword replaces a locally masked password, in redact's style.
 const redactedPassword = "[redacted]"
@@ -180,7 +184,7 @@ const redactedPassword = "[redacted]"
 func maskOracleThin(m string) string {
 	sub := oracleThinCreds.FindStringSubmatch(m)
 	head, rest := sub[1], sub[2]
-	if strings.HasPrefix(rest, `"`) {
+	if strings.HasPrefix(rest, `"`) || strings.HasPrefix(rest, `\"`) {
 		return head + redactedPassword // a quoted password, host unmatched after it
 	}
 	if at := strings.LastIndex(rest, "@"); at > 0 {
@@ -192,10 +196,10 @@ func maskOracleThin(m string) string {
 }
 
 // maskCreds masks the credentials in untrusted trace text: the local masks
-// for forms redact.Text gets wrong, then redact.Text. condenseTrace runs it on
-// each line before record masking, which drops a quoted column name a
-// key/value rule needs and caps a line at 300 runes (dlq.RedactMessage); so
-// neither can expose a credential.
+// for forms redact.Text gets wrong, then redact.Text. sanitizeTrace runs it on
+// each line after stripping schema blobs and before record masking, which
+// drops a quoted column name a key/value rule needs and caps a line at 300
+// runes (dlq.RedactMessage); so neither can expose a credential.
 func maskCreds(s string) string {
 	s = oracleThinCreds.ReplaceAllStringFunc(s, maskOracleThin)
 	s = bracedPassword.ReplaceAllString(s, "${1}"+redactedPassword)
@@ -359,18 +363,22 @@ func condenseTrace(trace string) string {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "Caused by:") || len(out) == 0 {
-			out = append(out, sanitizeTrace(maskCreds(trimmed)))
+			out = append(out, sanitizeTrace(trimmed))
 		}
 	}
 	return strings.Join(out, "\n")
 }
 
-// sanitizeTrace strips the embedded Avro schema JSON blobs from a trace line
-// and masks the failing record's values where a driver or converter quotes
-// them.
+// sanitizeTrace strips the embedded Avro schema JSON blobs from a trace line,
+// masks credentials, and masks the failing record's values where a driver or
+// converter quotes them.
 func sanitizeTrace(s string) string {
+	// Schemas go first: redact.Text masks text past 64 KiB as one block, and
+	// a blob cut that way has no closing brace or quote to strip up to, so the
+	// error code, compatibility level and subject after it would go too.
 	s = stripSchemaAfter(s, "Error registering Avro schema")
 	s = stripOldSchema(s)
+	s = maskCreds(s)
 	if recordSnippet.MatchString(s) {
 		// dlq.RedactMessage drops a "Failing row contains (...)" tuple only
 		// after a "Detail:" prefix; some drivers print it without one.
