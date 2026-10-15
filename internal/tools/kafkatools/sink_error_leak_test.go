@@ -135,6 +135,35 @@ func TestTraceSinkErrorsMaskMoreValues(t *testing.T) {
 		{"elasticsearch date field with preview",
 			bulk + "[{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse field [created] of type [date] in document with id 'k1'. Preview of field's value: '" + value + "'\",\"caused_by\":{\"type\":\"illegal_argument_exception\",\"reason\":\"failed to parse date field [" + value + "] with format [epoch_millis]\"}}]",
 			[]string{"Leakwood"}, []string{"ConnectException: Bulk request failed"}},
+
+		// PR #528 review: values that contain a field end or end marker.
+		{"postgres date/time value containing hint",
+			pg + "date/time field value out of range: \"Alice  Hint: Leakwood 42\"",
+			[]string{"Leakwood"}, []string{"date/time field value out of range"}},
+		{"postgres date/time value containing position",
+			pg + "date/time field value out of range: \"Alice  Position: Leakwood 42\"",
+			[]string{"Leakwood"}, []string{"date/time field value out of range"}},
+		{"postgres date/time value containing where",
+			pg + "date/time field value out of range: \"Alice  Where: Leakwood 42\"",
+			[]string{"Leakwood"}, []string{"date/time field value out of range"}},
+		{"postgres malformed array literal value containing hint",
+			pg + "malformed array literal: \"Alice  Hint: Leakwood 42\"",
+			[]string{"Leakwood"}, []string{"malformed array literal"}},
+		{"postgres malformed array literal value containing position",
+			pg + "malformed array literal: \"Alice  Position: Leakwood 42\"",
+			[]string{"Leakwood"}, []string{"malformed array literal"}},
+		{"postgres malformed array literal value containing where",
+			pg + "malformed array literal: \"Alice  Where: Leakwood 42\"",
+			[]string{"Leakwood"}, []string{"malformed array literal"}},
+		{"elasticsearch date value containing the format marker",
+			"Caused by: org.elasticsearch.ElasticsearchException: Elasticsearch exception [type=illegal_argument_exception, reason=failed to parse date field [Alice] with format [Leakwood] with format [epoch_millis]]",
+			[]string{"Leakwood"}, []string{"failed to parse date field"}},
+		{"java.time value containing the parse marker",
+			"Caused by: java.time.format.DateTimeParseException: Text 'Alice' could not be parsed Leakwood' could not be parsed at index 0",
+			[]string{"Leakwood"}, []string{"DateTimeParseException", "Text '"}},
+		{"elasticsearch date field then nested reason",
+			"Caused by: org.elasticsearch.ElasticsearchException: Elasticsearch exception [type=illegal_argument_exception, reason=failed to parse date field [" + value + "]]; nested: Elasticsearch exception [type=date_time_parse_exception, reason=Text '" + value + "' could not be parsed at index 0]",
+			[]string{"Leakwood"}, []string{"ElasticsearchException", "failed to parse date field"}},
 	})
 }
 
@@ -145,6 +174,12 @@ func TestTraceSinkValueMaskKeepsCategories(t *testing.T) {
 		"failed to parse field [created] of type [date] in document with id 'k1'",
 		"date/time field value out of range",
 		"Schema being registered is incompatible with an earlier schema for subject \"orders-value\"",
+		// PR #528 review: "Invalid format" and "is malformed at" outside
+		// Joda's quoted form are diagnoses main keeps whole.
+		"Caused by: org.apache.kafka.common.errors.SerializationException: Invalid format: magic byte 0x07 unknown",
+		"DataException: Invalid format: expected Avro, got JSON",
+		"SerializationException: Invalid format: magic byte 0x7b  Hint: check the producer's serializer",
+		"JSON is malformed at line 3 column 5",
 	} {
 		if got := sanitizeTrace(line); got != line {
 			t.Errorf("sanitizeTrace(%q) = %q, want unchanged", line, got)
