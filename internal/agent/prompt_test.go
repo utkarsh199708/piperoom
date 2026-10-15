@@ -764,6 +764,8 @@ func TestSystemPromptCarriesE6aRules(t *testing.T) {
 // saying the same, so no open-items summary repeats the old fault after it;
 // without what_changed the agent still checks the source for DDL; and a read
 // is not re-run with other versions or windows once the room has its answer.
+// From the C7 review (#374): Connect never pauses a connector by itself, so a
+// pause with no record that a failed job left it is treated as deliberate.
 func TestSystemPromptCarriesE7aRules(t *testing.T) {
 	prompt := systemPrompt()
 	for _, want := range []string{
@@ -773,6 +775,7 @@ func TestSystemPromptCarriesE7aRules(t *testing.T) {
 		"without it, read pg_recent_ddl",
 		`as is re-running a read with other versions or windows; "not found" is the finding.`,
 		"the pipeline map and list reads are summaries, not status reads",
+		"Connect never pauses itself: without a record (comments, past rooms) that a failed job left it, a pause is on purpose.",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing %q", want)
@@ -795,6 +798,12 @@ func TestSystemPromptCarriesE7aRules(t *testing.T) {
 	drv = drv[:strings.Index(drv, "\n")]
 	if !strings.Contains(drv, "Do a read the driver asks for next") {
 		t.Errorf("driver-read rule is not in the driver bullet: %s", drv)
+	}
+	// The presumption of a deliberate pause sits between the deliberate-pause
+	// rule and the failed-job exception it narrows, so a pause nobody explained
+	// is asked about, not resumed under "nobody recorded why".
+	if i, j, k := strings.Index(prompt, "A pause a person made on purpose"), strings.Index(prompt, "Connect never pauses itself"), strings.Index(prompt, "A pause a failed job left"); i < 0 || j < i || k < j {
+		t.Error("the pause presumption must sit between the deliberate-pause rule and the failed-job exception")
 	}
 	// The healthy closing rule must stay inside rule 8 of the method.
 	method := prompt[strings.Index(prompt, "Method\n"):strings.Index(prompt, "Past incidents\n")]
