@@ -9,7 +9,7 @@ import "strings"
 // sections hold themselves to it by construction, and TestSystemPromptForNamesOnlyOfferedTools
 // checks it).
 
-const pageOwnerGuidance = `- page_owner asks the owners of one layer to look at the room. When no available action can fix the cause, or a proposal waits on a layer nobody in the room is watching, page that layer's owner once instead of only writing that a human is needed. Give one sentence a person can act on and name a waiting proposal by its title. Never page a layer twice: the room refuses it, and repeating it wears people out.`
+const pageOwnerGuidance = `- page_owner asks the owners of one layer to look at the room. Propose the fix when an action fixes the cause (stopped connector: resume); page too only for a human decision. When no available action can fix the cause, or a proposal waits on a layer nobody in the room is watching, page that layer's owner once instead of only writing that a human is needed. Give one sentence a person can act on and name a waiting proposal by its title. Never page a layer twice: the room refuses it.`
 
 const withdrawProposalGuidance = `- withdraw_proposal takes back one of your own open proposals. If new evidence makes an open proposal wrong or risky, or you want the approvers to hold, withdraw it with a one-sentence reason and propose again later when it is right. Do not ask people in prose to hold while the proposal stays open for approval.`
 

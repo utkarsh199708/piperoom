@@ -541,12 +541,15 @@ func (v verifyOutcome) word() string {
 }
 
 // failedStepText tells the room a fix step did not succeed. Recovery is not
-// checked in that case, and the agent keeps investigating.
+// checked in that case. step is the 0-based index from the action result; the
+// text uses the 1-based number the action result and the UI show. The model
+// runs next on this note, so the text promises only that it reads the failure
+// and reports, not an open-ended investigation.
 func failedStepText(id string, step int, parsed bool) string {
 	if !parsed {
-		return "A fix step failed. I have not verified recovery and will keep investigating."
+		return "A fix step failed. I have not verified recovery. Next I read the failure and say here what I find."
 	}
-	return fmt.Sprintf("Fix step failed: proposal %q step %d did not succeed. I have not verified recovery and will keep investigating.", id, step)
+	return fmt.Sprintf("Fix step failed: proposal %q step %d did not succeed. I have not verified recovery. Next I read the failure and say here what I find.", id, step+1)
 }
 
 // unknownOutcomeText tells the model a step's outcome is unknown, so it does not
@@ -555,7 +558,7 @@ func unknownOutcomeText(id string, step int, parsed bool) string {
 	if !parsed {
 		return "not verified: a step outcome is unknown; recovery is not claimed."
 	}
-	return fmt.Sprintf("not verified: the outcome of proposal %q step %d is unknown; recovery is not claimed.", id, step)
+	return fmt.Sprintf("not verified: the outcome of proposal %q step %d is unknown; recovery is not claimed.", id, step+1)
 }
 
 // verifyOutcome is the verdict on one proposal, before it is announced.
