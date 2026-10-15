@@ -5,6 +5,8 @@ in a second terminal to create traffic (needed to grow WAL or lag).
 
 Everything below was **observed**, not guessed. If you see something different, update this file.
 
+Shadow mode (the agent investigates a break silently, you grade it): `dev/shadow.md`.
+
 ## Shared stack lock
 
 The dev stack is shared by several agents, so every mutating command (`reset`, `break`, `fix`, `down`,
