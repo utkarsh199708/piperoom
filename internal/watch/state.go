@@ -86,8 +86,8 @@ type sigState struct {
 	etaSince time.Time
 	// notified: a room or join already carries this signal.
 	notified bool
-	// ackSev is the severity when the driver closed the room; a rise to sev1
-	// after that re-opens the incident once.
+	// ackSev is the severity when the driver closed the room; a rise above it
+	// re-opens the incident (reviveWorse).
 	ackSev string
 	// last is the latest known (non-error) reading.
 	last reading
