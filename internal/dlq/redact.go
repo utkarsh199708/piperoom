@@ -38,7 +38,8 @@ var tailMarkers = [][]rune{[]rune("[source:"), []rune("detail:"), []rune("where:
 //     offending bytes there, even when they look like an identifier), the
 //     tuples after VALUES (batch SQL with the row's values) and the tuple
 //     after "Failing row contains" (PostgreSQL's row, which some drivers
-//     print without a Detail: prefix; with no tuple the rest is replaced);
+//     print without a Detail: prefix; its values are unquoted, so everything
+//     after the phrase is replaced);
 //  6. replace unquoted values: e-mail addresses, Luhn-valid card numbers,
 //     SSN-like and phone-like numbers, the value after a credential key
 //     (password=, token:, api_key=, ...) and what internal/redact finds (a
@@ -305,11 +306,15 @@ func redactTokenOperand(out, rs []rune, i int) ([]rune, int, bool) {
 }
 
 // redactFailingRow handles "Failing row contains (7, jane@example.com, -1)".
-// The tuple is the row's values, so it goes whole; without a tuple the rest of
-// the text goes, since the row is then in some other shape. Text that is
-// already redacted stays, which keeps the function idempotent.
+// PostgreSQL prints the row's values unquoted, so no rule can tell where the
+// tuple ends (a value may hold ")" or ", "): the rest of the text goes, as in
+// the "Detail:" tail. Text that is already redacted stays, which keeps the
+// function idempotent.
 func redactFailingRow(out, rs []rune, i int) ([]rune, int, bool) {
 	j := i + len(failingRowPhrase)
+	if j < len(rs) && isWordRune(rs[j]) {
+		return append(out, rs[i:j]...), j, false // "failing row containsX" is not the phrase
+	}
 	k := j
 	for k < len(rs) && rs[k] == ' ' {
 		k++
@@ -319,16 +324,9 @@ func redactFailingRow(out, rs []rune, i int) ([]rune, int, bool) {
 		return append(out, rs[i:j]...), j, false // phrase at the end: nothing to hide
 	case strings.HasPrefix(string(rs[k:]), Redacted):
 		return append(out, rs[i:k]...), k, false
-	case rs[k] != '(':
-		out = append(out, rs[i:k]...)
-		return append(out, redactedRunes...), len(rs), true
 	}
-	out = append(out, rs[i:k]...)
-	e := parenEnd(rs, k)
-	if e < 0 {
-		return append(out, redactedRunes...), len(rs), true
-	}
-	return append(out, redactedRunes...), e + 1, false
+	out = append(out, rs[i:j]...)
+	return append(append(out, ' '), redactedRunes...), len(rs), true
 }
 
 // redactValues handles "VALUES (..), (..)": the tuples hold a row's values.

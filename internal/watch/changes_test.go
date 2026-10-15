@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/tools"
 )
 
 // ---- fakes of the change feed ----
@@ -213,6 +214,43 @@ func TestDDLRecordsColumnAndMixedCaseTables(t *testing.T) {
 	want := []string{`public."Mixed"`, `public."Mixed".note`, "public.t.b"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("recorded %v, want %v", got, want)
+	}
+}
+
+// An owners entry in the quoted form keeps matching, as it did on main, and
+// malformed identities fall back to the exact match only.
+func TestDDLInScopeQuotedOwnersAndMalformed(t *testing.T) {
+	tests := []struct {
+		name   string
+		tables string
+		id     string
+		want   bool
+	}{
+		{"quoted owners entry, table", `['public."Mixed"']`, `public."Mixed"`, true},
+		{"quoted owners entry, column", `['public."Mixed"']`, `public."Mixed".col`, true},
+		{"quoted owners entry, other table", `['public."Mixed"']`, `public."Other"`, false},
+		{"catalog owners entry, quoted column", "[public.Mixed]", `public."Mixed"."Col"`, true},
+		{"unterminated quote", "[public.Mixed]", `public."Mix`, false},
+		{"empty quoted part", "[public.Mixed]", `public."".x`, false},
+		{"trailing dot", "[public.t]", "public.t.", false},
+		{"too many parts", "[public.t]", "other.public.t.b", false},
+		{"exact match of an odd identity", `['public."Mix']`, `public."Mix`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHarness(t, opts{pipes: []pipeSpec{{id: "orders", tables: tt.tables}}})
+			p, ok := h.deps.Owners.Pipeline("orders")
+			if !ok {
+				t.Fatal("pipeline orders missing")
+			}
+			sc, err := tools.ScopeFor(tools.WithPipeline(context.Background(), p), h.deps.Owners)
+			if err != nil {
+				t.Fatalf("ScopeFor: %v", err)
+			}
+			if got := ddlInScope(sc, tt.id); got != tt.want {
+				t.Fatalf("ddlInScope(%q) with %s = %v, want %v", tt.id, tt.tables, got, tt.want)
+			}
+		})
 	}
 }
 

@@ -420,54 +420,67 @@ func (w *Watcher) recordVersions(ctx context.Context, now time.Time, t target, b
 
 // ddlInScope reports whether an audit row is about a source table of the
 // pipeline: the table itself or one of its columns (a column rename or comment
-// is logged as schema.table.column). The trigger quotes a mixed-case name
-// (public."Name"), while the owners file holds catalog names, so the identity
-// is also tried with its quotes removed (same rule as ddlInScope in
-// internal/tools/changes, plus the quoted form).
+// is logged as schema.table.column). The identity is tried as written first
+// (an owners entry in the quoted form public."Name"), then with the quotes
+// removed (an owners entry holds the catalog name public.Name, while the audit
+// trigger quotes a mixed-case one). Same rule as ddlInScope in
+// internal/tools/changes, plus the quoted forms.
 func ddlInScope(sc tools.Scope, identity string) bool {
-	parts, ok := splitIdentity(identity)
-	if !ok {
-		return sc.SourceTableInScope(identity)
+	if sc.SourceTableInScope(identity) {
+		return true
 	}
-	// The table itself has two parts (schema.table); a column has a third.
-	if len(parts) == 2 || len(parts) == 3 {
-		return sc.SourceTableInScope(strings.Join(parts[:2], "."))
+	raw, plain, ok := splitIdentity(identity)
+	if !ok || len(plain) < 2 || len(plain) > 3 {
+		return false
 	}
-	return sc.SourceTableInScope(identity)
+	// A third part is a column: the table is what precedes it.
+	if len(plain) == 3 && sc.SourceTableInScope(strings.Join(raw[:2], ".")) {
+		return true
+	}
+	return sc.SourceTableInScope(strings.Join(plain[:2], "."))
 }
 
-// splitIdentity splits an object_identity on the dots outside double quotes
-// and removes the quotes ("" inside quotes is one quote). It reports false for
-// an unterminated quote or an empty part.
-func splitIdentity(s string) ([]string, bool) {
-	var parts []string
-	var cur strings.Builder
+// splitIdentity splits an object_identity on the dots outside double quotes.
+// raw keeps each part as written, plain has the quotes removed ("" inside
+// quotes is one quote). It reports false for an unterminated quote or an empty
+// part.
+func splitIdentity(s string) (raw, plain []string, ok bool) {
+	var cur, curRaw strings.Builder
 	inQ := false
 	rs := []rune(s)
+	flush := func() {
+		plain, raw = append(plain, cur.String()), append(raw, curRaw.String())
+		cur.Reset()
+		curRaw.Reset()
+	}
 	for i := 0; i < len(rs); i++ {
-		switch r := rs[i]; {
+		r := rs[i]
+		if r == '.' && !inQ {
+			flush()
+			continue
+		}
+		curRaw.WriteRune(r)
+		switch {
 		case r == '"' && inQ && i+1 < len(rs) && rs[i+1] == '"':
 			cur.WriteRune('"')
+			curRaw.WriteRune('"')
 			i++
 		case r == '"':
 			inQ = !inQ
-		case r == '.' && !inQ:
-			parts = append(parts, cur.String())
-			cur.Reset()
 		default:
 			cur.WriteRune(r)
 		}
 	}
 	if inQ {
-		return nil, false
+		return nil, nil, false
 	}
-	parts = append(parts, cur.String())
-	for _, p := range parts {
-		if p == "" {
-			return nil, false
+	flush()
+	for k := range plain {
+		if plain[k] == "" {
+			return nil, nil, false
 		}
 	}
-	return parts, true
+	return raw, plain, true
 }
 
 // recordDDL writes the audit rows of the pipeline's source tables. The row
