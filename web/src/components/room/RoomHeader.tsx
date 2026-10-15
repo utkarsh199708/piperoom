@@ -1,4 +1,4 @@
-import { Check, CircleCheck, Download, Eye, Loader2, MoreHorizontal, Repeat2, ShieldAlert, UserPlus } from 'lucide-react'
+import { Check, CircleCheck, Copy, Download, Ellipsis, Eye, FileText, Loader2, MoreHorizontal, Repeat2, ShieldAlert, UserPlus } from 'lucide-react'
 import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
 import { canClose, canHandoff, isViewer } from '@/state/permissions'
@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils'
 import { PersonName, VerifiedBadge } from '@/components/VerifiedBadge'
 import { alertSourceLabel, alertVerification, neutralizeBadgeText, personVerification } from '@/lib/verification'
 import { TriageCard } from './TriageCard'
+import { durationLabel } from '@/lib/time'
 
 export interface HeaderMember {
   id: string
@@ -68,6 +69,7 @@ export function RoomHeader({
   onCloseRoom,
   onInvite,
   onExport,
+  onPostmortem,
   exporting = false,
   handoffBusy = false,
   onCite,
@@ -83,6 +85,8 @@ export function RoomHeader({
   /** Download the room transcript. Left out for viewers (read-only users); the server can still refuse with not_allowed. */
   onExport?: () => void
   exporting?: boolean
+  /** Open the post-mortem draft (F2). Every member may read it, viewers included. */
+  onPostmortem?: () => void
   /** A hand-off summary is being written: the button shows progress and opens the dialog to follow it. */
   handoffBusy?: boolean
   /** A first-look step chip was clicked. */
@@ -95,6 +99,8 @@ export function RoomHeader({
   const ordered = [...members].sort((a, b) => Number(b.id === state.driver?.id) - Number(a.id === state.driver?.id))
   const shown = ordered.slice(0, MAX_AVATARS)
   const extra = ordered.length - shown.length
+  const closed = state.status === 'closed'
+  const exportLabel = exporting ? 'Exporting…' : 'Export JSON'
 
   return (
     <header className="flex flex-col gap-2 px-4 pt-4 sm:px-6">
@@ -129,8 +135,9 @@ export function RoomHeader({
               View only
             </span>
           )}
-          <AgentPill state={state} />
-          {state.agent_status.state === 'error' && state.agent_status.detail && (
+          {/* The driver role and the agent are retired at close: no pill on a closed room. */}
+          {!closed && <AgentPill state={state} />}
+          {!closed && state.agent_status.state === 'error' && state.agent_status.detail && (
             <span
               className="max-w-[48ch] truncate text-xs text-destructive-fg"
               title={state.agent_status.detail}
@@ -158,12 +165,31 @@ export function RoomHeader({
                   <Kbd aria-hidden="true">C</Kbd>
                 </Button>
               )}
-              {onExport && (
-                <Button variant="outline" disabled={exporting} onClick={onExport}>
-                  <Download aria-hidden="true" />
-                  {exporting ? 'Exporting…' : 'Export'}
-                </Button>
-              )}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon" aria-label="More room actions">
+                    <Ellipsis aria-hidden="true" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  {onExport && (
+                    <DropdownMenuItem disabled={exporting} onSelect={onExport}>
+                      <Download aria-hidden="true" />
+                      {exportLabel}
+                    </DropdownMenuItem>
+                  )}
+                  {onPostmortem && (
+                    <DropdownMenuItem onSelect={onPostmortem}>
+                      <FileText aria-hidden="true" />
+                      Post-mortem draft
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem onSelect={onInvite}>
+                    <Copy aria-hidden="true" />
+                    Copy invite link
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <Button
                 variant="ghost"
                 size="icon"
@@ -197,7 +223,13 @@ export function RoomHeader({
                 {onExport && (
                   <DropdownMenuItem disabled={exporting} onSelect={onExport} className="coarse:min-h-11">
                     <Download aria-hidden="true" />
-                    {exporting ? 'Exporting…' : 'Export'}
+                    {exportLabel}
+                  </DropdownMenuItem>
+                )}
+                {onPostmortem && (
+                  <DropdownMenuItem onSelect={onPostmortem} className="coarse:min-h-11">
+                    <FileText aria-hidden="true" />
+                    Post-mortem draft
                   </DropdownMenuItem>
                 )}
                 <DropdownMenuItem onSelect={onInvite} className="coarse:min-h-11">
@@ -226,70 +258,129 @@ export function RoomHeader({
             <CostChip state={state} />
           </>
         )}
-        {state.opened_at && (
+        {closed && state.closed_at ? (
           <>
             <Sep />
-            <span>opened <Clock iso={state.opened_at} /></span>
+            <span>
+              Closed <Clock iso={state.closed_at} />
+            </span>
+            {state.opened_at && durationLabel(state.opened_at, state.closed_at) && (
+              <>
+                <Sep />
+                <span>{durationLabel(state.opened_at, state.closed_at)}</span>
+              </>
+            )}
+            {state.closed_by && (
+              <>
+                <Sep />
+                <span className="inline-flex min-w-0 items-center gap-1 font-sans">
+                  closed by{' '}
+                  {state.closed_by.kind === 'human' ? (
+                    <PersonName person={state.closed_by} />
+                  ) : (
+                    // A retention close: the system, not a person.
+                    'Piperoom'
+                  )}
+                </span>
+              </>
+            )}
           </>
-        )}
-        {state.closed_at && (
-          <>
-            <Sep />
-            <span>closed <Clock iso={state.closed_at} /></span>
-          </>
+        ) : (
+          state.opened_at && (
+            <>
+              <Sep />
+              <span>opened <Clock iso={state.opened_at} /></span>
+            </>
+          )
         )}
       </p>
 
-      <div className="flex flex-wrap items-center gap-2.5">
-        {shown.length > 0 && (
-          <ul aria-label="People in the room" className="m-0 flex list-none items-center p-0">
-            {shown.map((m, i) => {
-              const driver = m.id === state.driver?.id
-              return (
-                <li
-                  key={m.id}
-                  className={cn('relative', i === 0 ? '' : '-ml-1.5')}
-                  data-verification={personVerification(m).state}
-                >
-                  <PersonAvatar
-                    actor={{ id: m.id, name: m.name }}
-                    driver={driver}
-                    stacked
-                    label={avatarLabel(m, m.id === user.id, driver)}
-                    className={driver ? 'ring-offset-0' : undefined}
-                  />
-                  {personVerification(m).state !== 'verified' && (
-                    // Drawn mark, like the badge: avatars have no room for the full pill.
-                    <ShieldAlert
-                      aria-hidden="true"
-                      strokeWidth={2.5}
-                      className="absolute -bottom-1 -right-1 size-3 rounded-full bg-warning-subtle text-warning-foreground"
+      {closed && (onExport || onPostmortem) && (
+        <div className="flex flex-wrap items-center gap-2">
+          <ClosedRoomActions onExport={onExport} onPostmortem={onPostmortem} exporting={exporting} />
+        </div>
+      )}
+
+      {!closed && (
+        <div className="flex flex-wrap items-center gap-2.5">
+          {shown.length > 0 && (
+            <ul aria-label="People in the room" className="m-0 flex list-none items-center p-0">
+              {shown.map((m, i) => {
+                const driver = m.id === state.driver?.id
+                return (
+                  <li
+                    key={m.id}
+                    className={cn('relative', i === 0 ? '' : '-ml-1.5')}
+                    data-verification={personVerification(m).state}
+                  >
+                    <PersonAvatar
+                      actor={{ id: m.id, name: m.name }}
+                      driver={driver}
+                      stacked
+                      label={avatarLabel(m, m.id === user.id, driver)}
+                      className={driver ? 'ring-offset-0' : undefined}
                     />
-                  )}
+                    {personVerification(m).state !== 'verified' && (
+                      // Drawn mark, like the badge: avatars have no room for the full pill.
+                      <ShieldAlert
+                        aria-hidden="true"
+                        strokeWidth={2.5}
+                        className="absolute -bottom-1 -right-1 size-3 rounded-full bg-warning-subtle text-warning-foreground"
+                      />
+                    )}
+                  </li>
+                )
+              })}
+              {extra > 0 && (
+                <li className="-ml-1.5">
+                  <span className="relative flex size-6 items-center justify-center rounded-full border-2 border-background bg-muted text-[10px] font-semibold text-muted-foreground">
+                    +{extra}
+                  </span>
                 </li>
-              )
-            })}
-            {extra > 0 && (
-              <li className="-ml-1.5">
-                <span className="relative flex size-6 items-center justify-center rounded-full border-2 border-background bg-muted text-[10px] font-semibold text-muted-foreground">
-                  +{extra}
-                </span>
-              </li>
-            )}
-          </ul>
-        )}
-        <span className="inline-flex min-w-0 items-center gap-1 text-muted-foreground">
-          {state.driver ? (
-            <>
-              <PersonName person={state.driver} /> is driving
-            </>
-          ) : (
-            'No driver'
+              )}
+            </ul>
           )}
-        </span>
-        <Sep />
-        <span className="text-subtle-foreground">{members.length} here</span>
-      </div>
+          <span className="inline-flex min-w-0 items-center gap-1 text-muted-foreground">
+            {state.driver ? (
+              <>
+                <PersonName person={state.driver} /> is driving
+              </>
+            ) : (
+              'No driver'
+            )}
+          </span>
+          <Sep />
+          <span className="text-subtle-foreground">{members.length} here</span>
+        </div>
+      )}
     </header>
+  )
+}
+
+/** What a closed room offers next (F2): the signed export and the post-mortem draft. */
+export function ClosedRoomActions({
+  onExport,
+  onPostmortem,
+  exporting = false,
+}: {
+  onExport?: () => void
+  onPostmortem?: () => void
+  exporting?: boolean
+}) {
+  return (
+    <>
+      {onExport && (
+        <Button size="sm" variant="secondary" className="h-8 coarse:h-11" disabled={exporting} onClick={onExport}>
+          <Download aria-hidden="true" />
+          {exporting ? 'Exporting…' : 'Export JSON'}
+        </Button>
+      )}
+      {onPostmortem && (
+        <Button size="sm" variant="secondary" className="h-8 coarse:h-11" onClick={onPostmortem}>
+          <FileText aria-hidden="true" />
+          Post-mortem draft
+        </Button>
+      )}
+    </>
   )
 }

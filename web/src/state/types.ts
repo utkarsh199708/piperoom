@@ -9,6 +9,7 @@ import type {
   HypothesisSummary,
   HypothesisVerdict,
   Identity,
+  PostmortemSource,
   ProposalPreviewedPayload,
   ProposalStep,
   RoomLabelledPayload,
@@ -204,7 +205,23 @@ export interface HandoffState {
   status: 'pending' | 'accepted' | 'voided'
   /** The driver when it was created; the server voids it once someone else drives. */
   from_id?: string
+  /** handoff.created's actor: the driver who handed off. */
+  from: Actor
+  /** handoff.created's time. */
+  created_at: string
+  /** handoff.accepted's time and actor, once accepted. */
+  accepted_at?: string
+  accepted_by?: Actor
 }
+
+/**
+ * The post-mortem draft (F2): `drafting` from room.closed until postmortem.drafted or
+ * postmortem.failed. The Markdown itself is always available from the server (events-only render).
+ */
+export type PostmortemState =
+  | { status: 'drafting' }
+  | { status: 'drafted'; source: PostmortemSource; summary_ref?: string; at: string }
+  | { status: 'failed'; reason: string }
 
 /** A hand-off the agent is still writing the summary for (handoff.requested, R0). */
 export interface HandoffRequestState {
@@ -345,6 +362,10 @@ export interface RoomState {
   /** Shadow room: no cost chip until its numbers are revealed; the shadow panel replaces steering once closed. */
   shadow: boolean
   insight: InsightState
+  /** room.closed's actor (snapshot closed_by); closed rooms only. */
+  closed_by?: Actor
+  /** F2: null on open rooms, shadow rooms and closed rooms from before F2. */
+  postmortem: PostmortemState | null
 }
 
 export function emptyRoomState(id: string): RoomState {
@@ -381,6 +402,7 @@ export function emptyRoomState(id: string): RoomState {
     activity: [],
     shadow: false,
     insight: emptyInsight(),
+    postmortem: null,
   }
 }
 
@@ -400,6 +422,8 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     opened_at: snapshot.opened_at,
     closed_at: snapshot.closed_at,
     resolution: snapshot.resolution,
+    closed_by: snapshot.closed_by,
+    postmortem: postmortemFromSnapshot(snapshot),
     last_seq: 0,
     shadow: snapshot.shadow === true,
     replay_target: snapshot.last_seq ?? 0,
@@ -435,5 +459,21 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
     triage: snapshot.triage && snapshot.shadow !== true
       ? { ...snapshot.triage, evidence_refs: snapshot.triage.evidence_refs ?? [] }
       : null,
+  }
+}
+
+// The snapshot carries status and source only; the replay of postmortem.drafted fills in the rest.
+function postmortemFromSnapshot(snapshot: RoomSnapshot): PostmortemState | null {
+  const pm = snapshot.postmortem
+  if (!pm || snapshot.shadow === true) return null
+  switch (pm.status) {
+    case 'drafting':
+      return { status: 'drafting' }
+    case 'drafted':
+      return { status: 'drafted', source: pm.source ?? 'events', at: snapshot.closed_at ?? '' }
+    case 'failed':
+      return { status: 'failed', reason: pm.reason ?? 'internal_error' }
+    default:
+      return null
   }
 }

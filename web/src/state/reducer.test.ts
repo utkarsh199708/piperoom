@@ -921,3 +921,60 @@ describe('applyEvent — stale hand-offs', () => {
     expect(s.handoffs[0].status).toBe('voided')
   })
 })
+
+describe('F2: hand-off cards and the post-mortem draft', () => {
+  const kabir = { kind: 'human' as const, id: 'kabir', name: 'Kabir' }
+  const system = { kind: 'system' as const, id: 'system', name: 'Piperoom' }
+  const summary = { what_broke: 'x', why: '', done: [], ruled_out: [], open: [], risks: [] }
+  const created = (seq: number, id: string) =>
+    ev(seq, 'handoff.created', { handoff_id: id, to: kabir, summary, stay_as_watcher: false }, human)
+
+  it('handoff.created records who handed off and when; a newer one voids the pending one', () => {
+    let s = applyEvent(base(), created(1, 'h1'))
+    expect(s.handoffs[0]).toMatchObject({ status: 'pending', from: human, created_at: '2026-10-11T10:00:01Z' })
+    s = applyEvent(s, created(2, 'h2'))
+    expect(s.handoffs.map((h) => h.status)).toEqual(['voided', 'pending'])
+  })
+
+  it('handoff.accepted records the time and the actor', () => {
+    let s = applyEvent(base(), created(1, 'h1'))
+    s = applyEvent(s, ev(2, 'handoff.accepted', { handoff_id: 'h1' }, kabir))
+    expect(s.handoffs[0]).toMatchObject({ status: 'accepted', accepted_at: '2026-10-11T10:00:02Z', accepted_by: kabir })
+  })
+
+  it('room.closed starts drafting and records who closed; drafted and failed land after it', () => {
+    let s = applyEvent(base(), ev(1, 'room.closed', { resolution: 'fixed' }, human))
+    expect(s.postmortem).toEqual({ status: 'drafting' })
+    expect(s.closed_by).toEqual(human)
+    const drafted = applyEvent(s, ev(2, 'postmortem.drafted', { source: 'handoff', summary_ref: 'h_1' }, system))
+    expect(drafted.postmortem).toEqual({ status: 'drafted', source: 'handoff', summary_ref: 'h_1', at: '2026-10-11T10:00:02Z' })
+    expect(drafted.activity[0].text).toBe('Post-mortem draft ready')
+    s = applyEvent(s, ev(2, 'postmortem.failed', { reason: 'summary_failed' }, system))
+    expect(s.postmortem).toEqual({ status: 'failed', reason: 'summary_failed' })
+    expect(s.activity[0].text).toBe('Post-mortem draft failed')
+  })
+
+  it('room.closed keeps a draft that already exists (snapshot seeded) and a shadow room gets none', () => {
+    const seeded = { ...base(), postmortem: { status: 'drafted' as const, source: 'model' as const, at: '' } }
+    expect(applyEvent(seeded, ev(1, 'room.closed', { resolution: 'x' }, human)).postmortem?.status).toBe('drafted')
+    const shadow = { ...base(), shadow: true }
+    expect(applyEvent(shadow, ev(1, 'room.closed', { resolution: 'x' }, human)).postmortem).toBeNull()
+  })
+
+  it('fromSnapshot seeds postmortem and closed_by; none and shadow seed nothing', () => {
+    const snap = {
+      id: 'r1', title: 't', severity: 'sev2', pipeline_id: 'orders', status: 'closed', opened_at: '', closed_at: 'c',
+      last_seq: 9, driver: null, agent_status: { state: 'idle' }, hypothesis: null, open_proposals: [],
+      pending_suggestions: [], members: [],
+    } as unknown as RoomSnapshot
+    expect(fromSnapshot({ ...snap, closed_by: human, postmortem: { status: 'drafted', source: 'handoff' } })).toMatchObject({
+      closed_by: human,
+      postmortem: { status: 'drafted', source: 'handoff' },
+    })
+    expect(fromSnapshot({ ...snap, postmortem: { status: 'failed' } }).postmortem).toEqual({ status: 'failed', reason: 'internal_error' })
+    expect(fromSnapshot({ ...snap, postmortem: { status: 'drafting' } }).postmortem).toEqual({ status: 'drafting' })
+    expect(fromSnapshot({ ...snap, postmortem: { status: 'none' } }).postmortem).toBeNull()
+    expect(fromSnapshot({ ...snap, shadow: true, postmortem: { status: 'drafting' } }).postmortem).toBeNull()
+    expect(fromSnapshot(snap).postmortem).toBeNull()
+  })
+})

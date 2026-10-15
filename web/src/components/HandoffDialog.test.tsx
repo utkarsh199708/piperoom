@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { useState } from 'react'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { HANDOFF_READ_ID, HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
 import { emptyRoomState } from '../state/types'
@@ -46,6 +46,7 @@ const pendingHandoff: HandoffState = {
   },
   stay_as_watcher: false,
   status: 'pending',
+  from: { kind: 'human' as const, id: 'arjun', name: 'Arjun' }, created_at: '2026-10-14T10:05:00Z',
 }
 
 describe('HandoffDialog plain-text rendering (P5)', () => {
@@ -133,14 +134,18 @@ describe('hand-off names carry the server badge', () => {
     expect(badges(screen.getByText(/Summary prepared for/))).toEqual(['verified'])
   })
 
-  it('the accept banner shows the handing-off driver’s badge', () => {
-    const toMe: HandoffState = { ...pendingHandoff, to: { kind: 'human', id: 'arjun', name: 'Arjun', verified: true } }
+  it('the accept banner shows the handing-off driver’s badge (the hand-off event actor)', () => {
+    const toMe: HandoffState = {
+      ...pendingHandoff,
+      to: { kind: 'human', id: 'arjun', name: 'Arjun', verified: true },
+      from: { kind: 'human', id: 'u_3', name: 'Kabir verified' },
+    }
     const state = { ...emptyRoomState('r1'), handoffs: [toMe], driver: { id: 'u_3', name: 'Kabir verified' } }
     render(<HandoffAcceptBanner state={state} user={user} actions={actions} />)
     const banner = screen.getByRole('status')
     expect(badges(banner)).toEqual(['unverified'])
     expect(banner).toHaveTextContent('(u_3)')
-    expect(banner).toHaveTextContent('is handing the room to you.')
+    expect(banner).toHaveTextContent('is handing the room to you — read the summary below.')
   })
 })
 
@@ -176,7 +181,7 @@ describe('hand-off in flight (R0 handoff.requested)', () => {
   })
 })
 
-describe('the receiver reads the summary before accepting', () => {
+describe('the receiver reads the summary before accepting (F2a: inline card)', () => {
   const me: CurrentUser = { id: 'priya', name: 'Priya', layers: [] }
   const state = {
     ...emptyRoomState('r1'),
@@ -184,23 +189,69 @@ describe('the receiver reads the summary before accepting', () => {
     handoffs: [{ ...pendingHandoff, stay_as_watcher: true }],
   }
 
-  it('Read summary opens the summary with Accept and take over; Not yet closes it', () => {
+  it('shows the summary expanded under the banner with Accept in the card footer; Not yet collapses it', () => {
     const accept = vi.fn()
     render(<HandoffAcceptBanner state={state} user={me} actions={{ ...actions, acceptHandoff: accept }} />)
-    // The banner has no one-click Accept: the summary comes first.
-    expect(screen.queryByRole('button', { name: 'Accept' })).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Read summary' }))
-    const dialog = screen.getByRole('dialog', { name: /^Hand-off from Arjun/ })
-    expect(within(dialog).getByText(/Consumer lag spiked/)).toBeInTheDocument()
-    expect(dialog).toHaveTextContent(/Arjun.*stays in the room as a watcher/)
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Not yet' }))
+    // No dialog and no one-click Accept in the banner: the summary is on the page.
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const card = screen.getByRole('region', { name: /Shift 1/ })
+    expect(card).toHaveAttribute('data-handoff-status', 'pending')
+    expect(within(card).getByText(/Consumer lag spiked/)).toBeVisible()
+    expect(card).toHaveTextContent(/Arjun.*stays in the room as a watcher/)
+    expect(within(card).getByText(/waiting for Priya/)).toBeInTheDocument()
+    const toggle = within(card).getByRole('button', { name: 'Shift 1 summary' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+    fireEvent.click(within(card).getByRole('button', { name: 'Not yet' }))
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(within(card).queryByText(/Consumer lag spiked/)).not.toBeVisible()
     expect(accept).not.toHaveBeenCalled()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Read summary' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Accept and take over' }))
+    fireEvent.click(toggle)
+    fireEvent.click(within(card).getByRole('button', { name: /Accept and take over/ }))
     expect(accept).toHaveBeenCalledWith('h1')
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('⌘⏎ / Ctrl+⏎ inside the card accepts', () => {
+    const accept = vi.fn()
+    render(<HandoffAcceptBanner state={state} user={me} actions={{ ...actions, acceptHandoff: accept }} />)
+    const card = screen.getByRole('region', { name: /Shift 1/ })
+    fireEvent.keyDown(within(card).getByRole('button', { name: /Accept and take over/ }), { key: 'Enter', ctrlKey: true })
+    expect(accept).toHaveBeenCalledWith('h1')
+  })
+
+  it('"Read summary" focus on the card opens it again', () => {
+    render(<HandoffAcceptBanner state={state} user={me} actions={actions} />)
+    const card = screen.getByRole('region', { name: /Shift 1/ })
+    fireEvent.click(within(card).getByRole('button', { name: 'Not yet' }))
+    expect(card.id).toBe(HANDOFF_READ_ID)
+    act(() => card.focus())
+    expect(within(card).getByRole('button', { name: 'Shift 1 summary' })).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('anyone else sees the pending card collapsed with "waiting for", and no Accept', () => {
+    const accept = vi.fn()
+    render(<HandoffAcceptBanner state={state} user={user} actions={{ ...actions, acceptHandoff: accept }} />)
+    expect(screen.queryByText(/is handing the room to you/)).not.toBeInTheDocument()
+    const card = screen.getByRole('region', { name: /Shift 1/ })
+    expect(within(card).getByRole('button', { name: 'Shift 1 summary' })).toHaveAttribute('aria-expanded', 'false')
+    expect(within(card).getByText(/waiting for Priya/)).toBeInTheDocument()
+    expect(within(card).queryByRole('button', { name: /Accept/ })).toBeNull()
+    fireEvent.keyDown(card, { key: 'Enter', metaKey: true })
+    expect(accept).not.toHaveBeenCalled()
+  })
+
+  it('a viewer named as recipient gets no Accept (permissions rule)', () => {
+    const viewer: CurrentUser = { id: 'priya', name: 'Priya', layers: [], role: 'viewer' }
+    render(<HandoffAcceptBanner state={state} user={viewer} actions={actions} />)
+    expect(screen.queryByRole('button', { name: /Accept/ })).toBeNull()
+  })
+
+  it('renders nothing without a pending hand-off', () => {
+    const { container } = render(
+      <HandoffAcceptBanner state={{ ...state, handoffs: [{ ...pendingHandoff, status: 'accepted' }] }} user={me} actions={actions} />,
+    )
+    expect(container).toBeEmptyDOMElement()
   })
 })
 
