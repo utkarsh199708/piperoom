@@ -179,11 +179,13 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 		return tools.Result{}, err
 	}
 
-	var fromSchema string
-	fromVersion := p.FromVersion
+	// The registered version is always the "from" side when a raw schema is
+	// given: the raw schema is the candidate, so what it adds shows as added.
+	fromSchema, toSchema := "", to.Schema
+	fromVersion, outTo := p.FromVersion, toVersion
 	if p.Schema != "" {
-		fromSchema = p.Schema
-		fromVersion = 0 // 0 = raw schema, not a registered version
+		fromSchema, toSchema = to.Schema, p.Schema
+		fromVersion, outTo = toVersion, 0 // 0 = raw schema, not a registered version
 	} else {
 		if p.FromVersion <= 0 {
 			return tools.Result{}, fmt.Errorf("%w: from_version or schema is required", tools.ErrBadInput)
@@ -195,12 +197,12 @@ func (t *registryDiff) Run(ctx context.Context, input json.RawMessage) (tools.Re
 		fromSchema = from.Schema
 	}
 
-	changes, err := diffFields(fromSchema, to.Schema)
+	changes, err := diffFields(fromSchema, toSchema)
 	if err != nil {
 		return tools.Result{}, fmt.Errorf("diff schemas: %w", err)
 	}
 	return res(formatChanges(changes), map[string]any{
-		"subject": p.Subject, "from_version": fromVersion, "to_version": toVersion, "changes": changes,
+		"subject": p.Subject, "from_version": fromVersion, "to_version": outTo, "changes": changes,
 	}), nil
 }
 
@@ -317,11 +319,27 @@ func canonType(t any) string {
 		return v
 	case map[string]any:
 		vt, _ := v["type"].(string)
+		if _, nested := v["type"].(map[string]any); nested {
+			return canonType(v["type"]) // {"type":{"type":"array",...}}
+		}
 		if lt, ok := v["logicalType"].(string); ok {
 			if vt == "bytes" && lt == "decimal" {
 				return fmt.Sprintf("bytes(decimal %v,%v)", v["precision"], v["scale"])
 			}
 			return vt + "(" + lt + ")"
+		}
+		switch vt {
+		case "array":
+			return "array<" + canonType(v["items"]) + ">"
+		case "map":
+			return "map<" + canonType(v["values"]) + ">"
+		case "enum":
+			// Symbols are part of the type: dropping one breaks old data.
+			var syms []string
+			for _, x := range anySlice(v["symbols"]) {
+				syms = append(syms, fmt.Sprint(x))
+			}
+			return "enum:" + fmt.Sprint(v["name"]) + "{" + strings.Join(syms, ",") + "}"
 		}
 		if name, ok := v["name"].(string); ok {
 			if vt == "" {
@@ -341,6 +359,11 @@ func canonType(t any) string {
 		return "[" + strings.Join(parts, ", ") + "]"
 	}
 	return fmt.Sprint(t)
+}
+
+func anySlice(v any) []any {
+	s, _ := v.([]any)
+	return s
 }
 
 // notConfigured is a schema tool's answer when the deployment has no Schema

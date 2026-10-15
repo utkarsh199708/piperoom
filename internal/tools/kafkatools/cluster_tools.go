@@ -64,7 +64,7 @@ func (t *clusterHealth) Run(ctx context.Context, input json.RawMessage) (tools.R
 func clusterSummary(h clients.ClusterHealth, topics []string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "cluster %s (%d brokers, controller %d)", orUnknown(h.ClusterID), len(h.Brokers), h.Controller)
-	var notPermitted, other int
+	var notPermitted, other, measured, over int
 	for _, b := range h.Brokers {
 		switch {
 		case b.LogDirErr == kafka.LogDirNotPermitted:
@@ -72,8 +72,10 @@ func clusterSummary(h clients.ClusterHealth, topics []string) string {
 		case b.LogDirErr != "":
 			other++
 		case b.LogDirTotalBytes > 0 && b.LogDirUsableBytes >= 0:
+			measured++
 			used := 100 - b.LogDirUsableBytes*100/b.LogDirTotalBytes
 			if used >= diskWarnPct {
+				over++
 				fmt.Fprintf(&sb, "; broker %d (%s) log dir %d%% used (%s free of %s)",
 					b.NodeID, b.Host, used, humanBytes(b.LogDirUsableBytes), humanBytes(b.LogDirTotalBytes))
 			}
@@ -84,6 +86,10 @@ func clusterSummary(h clients.ClusterHealth, topics []string) string {
 		sb.WriteString("; log dirs: not permitted (needs DescribeConfigs on Cluster, docs/pilot/permissions.md)")
 	case other > 0:
 		sb.WriteString("; log dirs: unavailable")
+	case over > 0:
+		// The broker lines above already name the full ones.
+	case measured < len(h.Brokers):
+		sb.WriteString("; log dir disk usage unknown for " + fmt.Sprint(len(h.Brokers)-measured) + " of " + fmt.Sprint(len(h.Brokers)) + " brokers")
 	default:
 		sb.WriteString("; log dirs below " + fmt.Sprint(diskWarnPct) + "% used")
 	}
@@ -110,7 +116,7 @@ func clusterSummary(h clients.ClusterHealth, topics []string) string {
 			}
 			if isBelow {
 				belowMin++
-				verdicts = append(verdicts, fmt.Sprintf("p%d", p.Partition))
+				verdicts = append(verdicts, fmt.Sprintf("%s/p%d", topic, p.Partition))
 			}
 			if isOffline {
 				offline++
@@ -139,6 +145,13 @@ func clusterSummary(h clients.ClusterHealth, topics []string) string {
 		appendLine(&sb, line)
 	}
 	if len(verdicts) > 0 {
+		// Name the topic only when several are involved: "p3" alone would be
+		// ambiguous across topics, but a single-topic answer stays terse.
+		if len(topics) == 1 {
+			for i, v := range verdicts {
+				verdicts[i] = v[strings.LastIndex(v, "/")+1:]
+			}
+		}
 		slices.Sort(verdicts)
 		appendLine(&sb, "NotEnoughReplicas is expected for writes to "+strings.Join(slices.Compact(verdicts), ", "))
 	}
