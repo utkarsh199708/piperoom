@@ -455,9 +455,9 @@ func TestKFakeStuckPartitionBesideBusyOne(t *testing.T) {
 		}
 	})
 	within(t, func(ctx context.Context) {
-		rep, err := c.FindByKeyReport(ctx, kfTopic, "k1", ts.Add(-time.Hour), 100)
+		rep, err := c.FindByKeyScan(ctx, kfTopic, "k1", ts.Add(-time.Hour), 100)
 		if err != nil || len(rep.Refs) != 1 || rep.Refs[0].Partition != 1 || len(rep.Truncated) != 0 {
-			t.Fatalf("FindByKeyReport = %+v, %v; want k1 at 1/0, nothing truncated", rep, err)
+			t.Fatalf("FindByKeyScan = %+v, %v; want k1 at 1/0, nothing truncated", rep, err)
 		}
 	})
 }
@@ -511,5 +511,28 @@ func TestTopicOffsetsUndecidedProbeIsAnError(t *testing.T) {
 	}
 	if offs != nil {
 		t.Fatalf("offsets = %+v, want none", offs)
+	}
+}
+
+// TestFindByKeyScanStuckPartitionIsIncomplete: a partition the probe cannot
+// close (the probe fails) is never counted as scanned. At the deadline the
+// match found elsewhere is returned and the stuck partition is reported as
+// truncated, so the scan is never read as complete.
+func TestFindByKeyScanStuckPartitionIsIncomplete(t *testing.T) {
+	now := time.Now()
+	l := &fakeLister{
+		starts: merge(listed("d", map[int32]int64{0: 0, 1: 0})),
+		ends:   merge(listed("d", map[int32]int64{0: 1, 1: 5})),
+	}
+	c := clientWith(l, &fakeConsumer{polls: []kgo.Fetches{fetchOf("d", rec(0, 0, now))}})
+	c.probeFn = func(context.Context, string, map[int32]readWindow) map[int32]int64 { return nil }
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	got, err := c.FindByKeyScan(ctx, "d", "key", now.Add(-time.Hour), 0)
+	if err != nil {
+		t.Fatalf("FindByKeyScan: %v", err)
+	}
+	if len(got.Refs) != 1 || got.Refs[0].Partition != 0 || len(got.Truncated) != 1 || got.Truncated[0] != 1 {
+		t.Fatalf("scan = %+v, want the match on 0 and partition 1 reported as truncated", got)
 	}
 }
