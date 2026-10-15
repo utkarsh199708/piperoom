@@ -237,14 +237,17 @@ func (p *pager) message(r *renderer, e events.Event) (m message, keys []pageKey,
 			return m, nil, err
 		}
 		// Only the nudged layer's owners are paged; the layer is a map key.
-		// One page per (proposal, layer) and user; the server already allows
-		// one nudge per 10 minutes, and check adds the per-user limits.
+		// The key is the event seq: one nudge event pages once, even when the
+		// stream is redelivered, and the re-nudge the server allows every 10
+		// minutes is a new event that pages again. check adds the per-user limits.
 		var ms []string
+		picked := map[string]bool{}
 		for _, id := range p.layers[pl.Layer] {
-			k := pageKey{e.RoomID, id, "nudge:" + pl.ProposalID + ":" + pl.Layer}
-			if len(ms) >= maxPagedUsers || !p.check(k, keys) {
+			k := pageKey{e.RoomID, id, "nudge:" + strconv.FormatInt(e.Seq, 10)}
+			if picked[id] || len(ms) >= maxPagedUsers || !p.check(k, keys) {
 				continue
 			}
+			picked[id] = true
 			keys = append(keys, k)
 			ms = append(ms, mention(id))
 		}

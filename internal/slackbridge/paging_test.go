@@ -130,19 +130,24 @@ func TestPagingInjectionInEveryTextField(t *testing.T) {
 				ev(8, events.HandoffAccepted, a, struct{}{}),
 				ev(9, events.ControlLeaseExpired, "system", events.ControlLeaseExpiredPayload{
 					Driver: events.Actor{ID: "ana", Name: a}, LeaseUntil: time.Unix(1700000000, 0)}),
-				ev(10, events.RoomClosed, a, events.RoomClosedPayload{Resolution: a}),
+				ev(10, events.ApprovalNudged, a, events.ApprovalNudgedPayload{ProposalID: a, Layer: "kafka"}),
+				ev(11, events.RoomClosed, a, events.RoomClosedPayload{Resolution: a}),
 			}
 			fs := &fakeSlack{}
-			b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) { o.Paging = pagingOpts() })
+			// A tiny gap lets owner1 be paged by both the proposal and the nudge.
+			b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) {
+				o.Paging = pagingOpts()
+				o.Paging.Limits.UserRoomInterval = time.Nanosecond
+			})
 			if err := b.Run(context.Background(), "r1"); err != nil {
 				t.Fatal(err)
 			}
-			if fs.count() != 13 { // 10 mirrored + proposal, hand-off and lease pages
-				t.Fatalf("requests = %d, want 13", fs.count())
+			if fs.count() != 15 { // 11 mirrored + proposal, hand-off, lease and nudge pages
+				t.Fatalf("requests = %d, want 15", fs.count())
 			}
 			assertOnlyTrustedMarkup(t, fs.reqs, a)
 			n, ids := mentionCount(fs.reqs)
-			if n != 3 || len(ids) != 4 || ids[owner1] == 0 || ids[owner2] == 0 || ids[owner3] == 0 || ids[oncall] == 0 {
+			if n != 4 || len(ids) != 4 || ids[owner1] == 0 || ids[owner2] == 0 || ids[owner3] == 0 || ids[oncall] == 0 {
 				t.Errorf("mentions: messages=%d ids=%v", n, ids)
 			}
 			raw, _ := json.Marshal(fs.reqs)
@@ -494,22 +499,46 @@ func nudgeEvent(seq int64, proposal, layer string) events.Event {
 }
 
 // A nudge is a thread reply for everyone and a page for the nudged layer's
-// owners only; other layers' owners, the driver and on-call are not paged.
+// owners only. One event pages once (a redelivery does not repeat it) and a
+// re-nudge 10 minutes later pages again.
 func TestPagingNudge(t *testing.T) {
 	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"})
 	opts := pagingOpts()
+	opts.Layers["kafka"] = []string{owner1, owner1} // a duplicate ID is mentioned once
 	opts.Layers["postgres"] = []string{owner2}
+	first := nudgeEvent(2, "p1", "kafka")
+	st := &fakeStore{evs: []events.Event{created, first, first}} // same seq delivered twice
 	fs := &fakeSlack{}
-	b, _, _ := newBridge(t, &fakeStore{evs: []events.Event{created, nudgeEvent(2, "p1", "kafka"), nudgeEvent(3, "p1", "kafka")}}, fs,
-		func(o *Options) { o.Paging = opts })
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-	_ = b.Run(ctx, "r1")
-	if fs.count() != 4 { // parent, 2 notices, 1 page (repeat is not paged again)
-		t.Fatalf("requests = %d", fs.count())
+	// A tiny gap isolates the seq de-dup from the per-user-per-room gap.
+	opts.Limits.UserRoomInterval = time.Nanosecond
+	b, _, _ := newBridge(t, st, fs, func(o *Options) { o.Paging = opts })
+	now := time.Unix(1700000000, 0)
+	// Every read moves the clock on, so the 1ns gap is always over and only the
+	// seq key can stop a repeated page.
+	b.pager.now = func() time.Time { now = now.Add(time.Millisecond); return now }
+	run := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		_ = b.Run(ctx, "r1")
 	}
-	if n, ids := mentionCount(fs.reqs); n != 1 || len(ids) != 1 || ids[owner1] == 0 {
-		t.Errorf("pages=%d ids=%v, want one page for %s only", n, ids, owner1)
+	run()
+	if n, ids := mentionCount(fs.reqs); n != 1 || len(ids) != 1 || ids[owner1] != 2 { // block text + fallback text
+		t.Fatalf("after first nudge: pages=%d ids=%v, want one page for %s only", n, ids, owner1)
+	}
+	// A replay of the same event (a stream redelivery after the thread state
+	// was lost) must not page again.
+	if err := b.threads.Put(context.Background(), "r1", Thread{Channel: "CCONF", TS: "1700000000.000100", LastSeq: 1}); err != nil {
+		t.Fatal(err)
+	}
+	run()
+	if n, _ := mentionCount(fs.reqs); n != 1 {
+		t.Fatalf("redelivered nudge paged again: pages=%d reqs=%d", n, fs.count())
+	}
+	now = now.Add(10 * time.Minute)
+	st.evs = append(st.evs, nudgeEvent(3, "p1", "kafka"))
+	run()
+	if n, ids := mentionCount(fs.reqs); n != 2 || len(ids) != 1 {
+		t.Errorf("re-nudge: pages=%d ids=%v, want 2 pages in total", n, ids)
 	}
 	assertOnlyTrustedMarkup(t, fs.reqs, "nudge")
 }
