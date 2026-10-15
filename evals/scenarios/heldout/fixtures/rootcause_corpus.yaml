@@ -11,6 +11,9 @@
 #                    opposite of want_root_cause); when a change fixes it the test fails with
 #                    'gap fixed: drop gap and keep want'. The value is the reason.
 #
+# Quoted fragments are verbatim; completions around them are neutral, except where a completion restores context
+# from the reviewer's evidence (e.g. risk_score in the rebuilt r1 payments text, next to its verbatim quote).
+#
 # Add a reviewer's new text here FIRST, then change rows or denial detection. Gaps measured once,
 # against origin/main af1b3148 (rows identical to this branch's).
 entries:
@@ -44,7 +47,7 @@ entries:
     want_root_cause: false
     source: "r1"
   - scenario: users-compat-none-consumer
-    text: "The usr.public.users-value subject compatibility is BACKWARD compatible, so the v4 loyalty_tier change was checked; user-profile-sync has a bug and none of its pods start."
+    text: "The usr.public.users-value subject compatibility is BACKWARD compatible, so v4's loyalty_tier change was checked; user-profile-sync has a bug and none of its pods start."
     want_root_cause: false
     source: "r1"
   - scenario: users-compat-none-consumer
@@ -64,7 +67,7 @@ entries:
     want_root_cause: false
     source: "r2"
   - scenario: users-compat-none-consumer
-    text: "user-profile-sync crash-loops on the loyalty_tier change because its auto.offset.reset is set to none."
+    text: "The loyalty_tier change broke it: user-profile-sync crash-loops because its auto.offset.reset is set to none."
     want_root_cause: false
     source: "r2"
   - scenario: users-compat-none-consumer
@@ -248,7 +251,7 @@ entries:
     text: "Schema v4 with risk_score is an incompatible change that broke jdbc-payments-sink, so every record goes to the DLQ."
     want_root_cause: false
     source: "#332"
-    gap: "main has no root_cause_forbidden for this scenario, so this 'the registry rejected/blocked v4' story passes; the #332 redo (after #395) must reject it without rejecting right answers."
+    gap: "main has no root_cause_forbidden for this scenario, so the 'v4 is an incompatible change' story passes; the #332 redo (after #395) must reject it without rejecting a right answer that calls the sink-side schema mismatch incompatible."
   - scenario: payments-sink-dlq
     text: "risk_score was rejected by the schema registry, so every record goes to the DLQ."
     want_root_cause: false
@@ -718,4 +721,23 @@ entries:
     text: "v4 adding risk_score is an incompatible schema change, so the jdbc-payments-sink DLQ fills."
     want_root_cause: false
     source: "r4"
-    gap: "main has no root_cause_forbidden for this scenario, so this 'the registry rejected/blocked v4' story passes; the #332 redo (after #395) must reject it without rejecting right answers."
+    gap: "main has no root_cause_forbidden for this scenario, so the 'v4 is an incompatible change' story passes; the #332 redo (after #395) must reject it without rejecting a right answer that calls the sink-side schema mismatch incompatible."
+  - scenario: users-compat-none-consumer
+    text: "usr.public.users-value compatibility was set to NONE, so schema v4 with loyalty_tier registered."
+    want_root_cause: true
+    source: "#332"
+    gap: "main's six NONE phrasings do not contain this wording, so main rejects the ticket's own right-answer wording 'compatibility was set to NONE'; the #332 redo (after #395) must make this pass without flipping a non-gap trap such as 'Compatibility was set to NONE in staging, not in production'."
+  - scenario: payments-sink-dlq
+    text: "the v4 records are incompatible with analytics.payments, which lacks the column, so errors.tolerance=all sends them to the DLQ."
+    want_root_cause: true
+    source: "r1"
+    gap: "main's root_cause needs the term risk_score and this verbatim r1 quote omits it, so main rejects a right answer; the #332 redo decides whether to accept it."
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 of pg-ledger-connector timed out during a short Kafka outage caused by the 08:52 rolling restart."
+    want_root_cause: true
+    source: "r4"
+  - scenario: ledger-producer-timeout-recovery
+    text: "Task 0 of pg-ledger-connector failed with a producer timeout because of an ongoing Kafka outage."
+    want_root_cause: false
+    source: "r4"
+    gap: "main has no root_cause_forbidden for this scenario, so this present-tense 'Kafka outage' story passes; the #332 redo (after #395) must reject it without rejecting the past-tense 'short Kafka outage caused by the 08:52 rolling restart' right answer."

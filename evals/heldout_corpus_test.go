@@ -1,6 +1,7 @@
 package evals
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -86,9 +87,9 @@ func TestHeldoutRootCauseCorpusShape(t *testing.T) {
 	}
 }
 
-// TestHeldoutRootCauseCorpusGapReasons fails an entry whose gap key is present but empty: yaml
-// decodes `gap: ""` to the zero value, the same as no gap, so the raw document
-// is checked for it.
+// TestHeldoutRootCauseCorpusGapReasons checks the raw document: yaml decodes a
+// missing want_root_cause and `gap: ""` to zero values (a trap, and no gap), so
+// both are checked before decoding.
 func TestHeldoutRootCauseCorpusGapReasons(t *testing.T) {
 	b, err := os.ReadFile(filepath.FromSlash(rootCauseCorpusPath))
 	if err != nil {
@@ -101,6 +102,9 @@ func TestHeldoutRootCauseCorpusGapReasons(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, e := range doc.Entries {
+		if _, ok := e["want_root_cause"].(bool); !ok {
+			t.Errorf("entry %d (%q): want_root_cause must be a boolean", i, e["text"])
+		}
 		if g, ok := e["gap"]; ok {
 			if s, _ := g.(string); strings.TrimSpace(s) == "" {
 				t.Errorf("entry %d (%q): gap needs a reason", i, e["text"])
@@ -117,7 +121,7 @@ func TestHeldoutRootCauseCorpusGapReasons(t *testing.T) {
 func TestHeldoutRootCauseCorpus(t *testing.T) {
 	scripts := heldoutScripts(t)
 	for i, e := range loadRootCauseCorpus(t) {
-		t.Run(e.Scenario+"/"+e.Source, func(t *testing.T) {
+		t.Run(fmt.Sprintf("%03d/%s/%s", i, e.Scenario, e.Source), func(t *testing.T) {
 			sc := loadScenario(t, filepath.Join(heldoutDir, e.Scenario+".yaml"))
 			got := rootCauseMatches(sc.Expect, e.Text)
 			if e.Gap != "" {
