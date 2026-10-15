@@ -29,13 +29,21 @@ text. Values the DSN sets explicitly (`ocspFailOpen`, `disableOCSPChecks`,
 does not second-guess them, except that `disableOCSPChecks=true` logs a warning at startup
 (without the DSN). `tracing` and `clientConfigFile` are refused.
 
-The OAuth parameters `oauthTokenRequestUrl` and `oauthAuthorizationUrl`, when set, must be
-absolute `https://` URLs without credentials in them (`user:password@`); anything else is
-refused at startup (#496), because the token endpoint receives the client secret and returns
-the access token. The error names the parameter, never the URL. Left unset, the driver uses the
-account host over the (https) `protocol`. An Okta `authenticator` URL must be `https` too (the
-driver refuses it otherwise). `oauthRedirectUri` is not checked: its default is a loopback
-`http://127.0.0.1` listener on the local host.
+Token endpoints must be `https` too (#496). Exactly these DSN parameters are checked at startup:
+
+- `oauthTokenRequestUrl` and `oauthAuthorizationUrl`, when set, must be absolute `https://` URLs
+  without credentials in them (`user:password@`). The token endpoint receives the client secret
+  and returns the access token.
+- `workloadIdentityHost` (the AWS STS endpoint for workload identity) must not name a scheme
+  other than `https`. A bare host (`sts.example.com`) is fine: the driver prefixes `https://`.
+  The STS calls carry the signed AWS session token and return temporary credentials or the
+  web-identity JWT used to log in.
+
+The error names the parameter, never the value. Left unset, the driver uses the account host over
+the (https) `protocol`, or the regional STS endpoint. An Okta `authenticator` URL must be `https`
+too (the driver refuses it otherwise). `oauthRedirectUri` is not checked: the driver only reads
+its port for a local listener, the IdP must have the URI registered, and the code it carries is
+bound to the PKCE verifier; an explicit `http` value for another host is still accepted.
 
 Always URL-encode the password (for example with `url.QueryEscape`). The driver
 unescapes it, so a raw `%` breaks it, a raw `+` turns into a space, and a raw `?`,

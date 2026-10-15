@@ -326,12 +326,16 @@ func TestHardenedConfigOAuthURLsMustBeHTTPS(t *testing.T) {
 			{"unparseable", "https://idp.example/%zz", "https"},
 			{"http with userinfo", "http://c:us3rinfopw@idp.example/oauth", "https"},
 			{"https with userinfo", "https://c:us3rinfopw@idp.example/oauth", "credentials"},
+			{"scheme-relative", "//idp.example/oauth", "https"},
+			{"leading space https", " https://idp.example/oauth", "https"},
+			{"leading space http", " http://idp.example/oauth", "https"},
 		} {
 			t.Run(param+"/"+tc.name, func(t *testing.T) {
 				dsn := base + "&" + param + "=" + url.QueryEscape(tc.value)
-				cfg, err := hardenedConfig(dsn)
+				// The parsed config holds the DSN password: never print it.
+				_, err := hardenedConfig(dsn)
 				if err == nil {
-					t.Fatalf("hardenedConfig = %+v; want %s refused", cfg, param)
+					t.Fatalf("hardenedConfig accepted %s=%q; want it refused", param, tc.value)
 				}
 				msg := err.Error()
 				if !strings.Contains(msg, param) || !strings.Contains(msg, tc.wantMsg) {
@@ -384,5 +388,61 @@ func TestHardenedConfigOAuthURLsMustBeHTTPS(t *testing.T) {
 	mixed := "&oauthTokenRequestUrl=" + url.QueryEscape("https://idp.example/token") + "&oauthAuthorizationUrl=" + url.QueryEscape("http://idp.example/auth")
 	if _, err := hardenedConfig(base + mixed); err == nil || !strings.Contains(err.Error(), "oauthAuthorizationUrl") {
 		t.Errorf("hardenedConfig(mixed) = %v; want oauthAuthorizationUrl refused", err)
+	}
+}
+
+// workloadIdentityHost is the AWS STS endpoint for workload identity: its
+// calls carry the signed session token and return temporary credentials or
+// the JWT used to log in. gosnowflake accepts http there; hardenedConfig must
+// not. A bare host is what the driver expects (it prefixes https://).
+func TestHardenedConfigWorkloadIdentityHostMustBeHTTPS(t *testing.T) {
+	const base = "user:s3cretpw@acct/db/sch?warehouse=wh&authenticator=WORKLOAD_IDENTITY&workloadIdentityProvider=AWS"
+	secrets := []string{"s3cretpw", "us3rinfopw", "sts.example", "acct"}
+	for _, tc := range []struct{ name, value string }{
+		{"http", "http://sts.example"},
+		{"HTTP upper-case", "HTTP://sts.example"},
+		{"http with spaces", "  http://sts.example  "},
+		{"http with port and path", "http://sts.example:8080/sts"},
+		{"ftp", "ftp://sts.example"},
+		{"scheme without host", "https://"},
+		{"https with userinfo", "https://k:us3rinfopw@sts.example"},
+		{"spaces only", "   "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dsn := base + "&workloadIdentityHost=" + url.QueryEscape(tc.value)
+			// The parsed config holds the DSN password: never print it.
+			_, err := hardenedConfig(dsn)
+			if err == nil {
+				t.Fatalf("hardenedConfig accepted workloadIdentityHost=%q; want it refused", tc.value)
+			}
+			_, nerr := New(context.Background(), dsn)
+			for _, e := range []error{err, nerr} {
+				if e == nil || !strings.Contains(e.Error(), "workloadIdentityHost") {
+					t.Fatalf("err = %v; want it to name workloadIdentityHost", e)
+				}
+				for _, s := range secrets {
+					if strings.Contains(e.Error(), s) {
+						t.Errorf("err = %q leaks %q", e, s)
+					}
+				}
+			}
+		})
+	}
+	for _, tc := range []struct{ name, value string }{
+		{"https", "https://sts.example"},
+		{"HTTPS upper-case", "HTTPS://sts.example"},
+		{"bare host", "sts.example"},
+		{"bare host with port and spaces", " sts.example:8443 "},
+		{"empty", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := hardenedConfig(base + "&workloadIdentityHost=" + url.QueryEscape(tc.value))
+			if err != nil {
+				t.Fatalf("hardenedConfig = %v; want %q accepted", err, tc.value)
+			}
+			if cfg.WorkloadIdentityHost != tc.value {
+				t.Errorf("WorkloadIdentityHost = %q; want %q kept as written", cfg.WorkloadIdentityHost, tc.value)
+			}
+		})
 	}
 }

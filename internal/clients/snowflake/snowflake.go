@@ -21,13 +21,18 @@
 // Transport: the DSN protocol parameter must be https. A DSN with
 // protocol=http (or any other protocol) is refused, because the login, the
 // password or key-pair JWT and the session token would travel in clear text.
-// The OAuth parameters oauthTokenRequestUrl and oauthAuthorizationUrl, when
-// set, must be absolute https URLs without userinfo: the token endpoint gets
-// the client secret and returns the access token, and the authorization URL
-// starts the login (#496). Left empty, the driver derives both from the
-// (https) account host. An Okta authenticator URL is already refused by the
-// driver unless it is https. oauthRedirectUri is not checked: its default is
-// a loopback http://127.0.0.1 listener, which never leaves the host. Values the DSN sets
+// The token endpoints must be https too (#496). Exactly these DSN parameters
+// are checked: oauthTokenRequestUrl and oauthAuthorizationUrl, when set, must
+// be absolute https URLs without userinfo (the token endpoint gets the client
+// secret and returns the access token); workloadIdentityHost, the AWS STS
+// endpoint for workload identity, must not name a scheme other than https
+// (a bare host is fine: the driver prefixes https://). Left empty, the driver
+// derives all three from the (https) account host or the regional STS
+// default. An Okta authenticator URL is already refused by the driver unless
+// it is https. oauthRedirectUri is not checked: the driver only reads its
+// port for a local listener, the IdP must have the URI registered, and the
+// code it carries is bound to the PKCE verifier; an explicit http value for
+// another host is still accepted. Values the DSN sets
 // explicitly (ocspFailOpen, disableOCSPChecks, certRevocationCheckMode) are
 // the operator's choice and are kept as parsed; disableOCSPChecks=true is
 // accepted but logged as a warning.
@@ -128,9 +133,12 @@ func hardenedConfig(dsn string) (*gosnowflake.Config, error) {
 		{"oauthTokenRequestUrl", cfg.OauthTokenRequestURL},
 		{"oauthAuthorizationUrl", cfg.OauthAuthorizationURL},
 	} {
-		if err := checkOAuthURL(p.name, p.value); err != nil {
+		if err := checkHTTPSURL(p.name, p.value); err != nil {
 			return nil, err
 		}
+	}
+	if err := checkWorkloadIdentityHost(cfg.WorkloadIdentityHost); err != nil {
+		return nil, err
 	}
 	if cfg.DisableOCSPChecks {
 		slog.Warn("snowflake: disableOCSPChecks=true in the DSN: certificate revocation is not checked, a revoked Snowflake or proxy certificate is accepted")
@@ -147,11 +155,11 @@ func hardenedConfig(dsn string) (*gosnowflake.Config, error) {
 	return cfg, nil
 }
 
-// checkOAuthURL refuses a set OAuth endpoint that is not an absolute https
+// checkHTTPSURL refuses a set token endpoint that is not an absolute https
 // URL, or that carries userinfo. Empty means the driver default (the https
 // account host) and is allowed. The error names the parameter only: the URL
 // can hold credentials, and url.Parse errors quote the whole URL.
-func checkOAuthURL(param, raw string) error {
+func checkHTTPSURL(param, raw string) error {
 	if raw == "" {
 		return nil
 	}
@@ -163,6 +171,26 @@ func checkOAuthURL(param, raw string) error {
 		return fmt.Errorf("snowflake: dsn parameter %s must not carry credentials in the URL (user:password@); refused", param)
 	}
 	return nil
+}
+
+// checkWorkloadIdentityHost mirrors gosnowflake's own parsing of
+// workloadIdentityHost (trim spaces, a value without "://" is a bare host
+// that gets https://), but refuses http, which the driver allows: the STS
+// calls carry the signed AWS session token and return temporary credentials
+// or the web-identity JWT used as the Snowflake login.
+func checkWorkloadIdentityHost(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	host := strings.TrimSpace(raw)
+	if host == "" {
+		// The driver refuses this too, but only when it connects.
+		return errors.New("snowflake: dsn parameter workloadIdentityHost is blank; refused")
+	}
+	if !strings.Contains(host, "://") {
+		host = "https://" + host
+	}
+	return checkHTTPSURL("workloadIdentityHost", host)
 }
 
 // Close releases the underlying connection pool.
