@@ -40,6 +40,7 @@ import { describeEvent } from './describe'
 import type { DescribeContext } from './describe'
 import { alertSource } from '../lib/alerts'
 import { runbookHits } from '../lib/f8'
+import { stripBidi } from '../lib/title'
 import { checklistKey } from './types'
 import type { HypothesisHistoryEntry, InsightState, MemberState, RoomState, StepState, VerdictState } from './types'
 
@@ -203,7 +204,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
           : { source: alertSource(p.alert), alert_source: alertSourceField }
       next = {
         ...state,
-        title: p.title,
+        title: stripBidi(p.title),
         severity: p.severity as RoomState['severity'],
         pipeline_id: p.pipeline_id,
         shadow: p.shadow ?? state.shadow,
@@ -390,7 +391,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
           {
             id: p.comment_id,
             step_id: p.step_id,
-            text: p.text,
+            text: stripBidi(p.text),
             mentions_agent: p.mentions_agent,
             author: event.actor,
             at: event.at,
@@ -410,7 +411,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
           {
             suggestion_id: p.suggestion_id,
             from: event.actor,
-            text: p.text,
+            text: stripBidi(p.text),
             status: 'pending' as const,
             at: event.at,
           },

@@ -261,6 +261,7 @@ export function emptyInsight(): InsightState {
 
 export type { ActivityKind } from './describe'
 import type { ActivityKind } from './describe'
+import { stripBidi } from '../lib/title'
 
 /** Who ticked one runbook item and when (checklist.step_done). */
 export interface ChecklistTick {
@@ -389,7 +390,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
   return {
     ...emptyRoomState(snapshot.id),
     id: snapshot.id,
-    title: snapshot.title,
+    title: stripBidi(snapshot.title),
     severity: snapshot.severity as Severity,
     pipeline_id: snapshot.pipeline_id,
     status: snapshot.status as RoomStatus,

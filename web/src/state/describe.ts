@@ -2,6 +2,7 @@
 // and nothing here builds HTML (the feed renders `text` as text nodes, `{tool}` as <code>).
 import { neutralizeBadgeText } from '../lib/verification'
 import { verdictKind, verdictWords } from '../lib/execution'
+import { stripBidi } from '../lib/title'
 import type {
   ActionExecutedPayload,
   AgentVerificationPayload,
@@ -72,7 +73,8 @@ function as<T>(e: Event): T {
 /** Clip to `max` code points (never splits a surrogate pair), with an ellipsis. */
 export function clip(s: string | undefined, max: number): string {
   // Server ids (ULID-shaped) in free text are noise to a reader; drop them.
-  const plain = (s ?? '').replace(ID_IN_TEXT, '…')
+  // Bidi controls go too: clipped text is typed or model text, and they would reorder the row.
+  const plain = stripBidi(s ?? '').replace(ID_IN_TEXT, '…')
   const chars = Array.from(plain.replace(/\s+/g, ' ').trim())
   return chars.length <= max ? chars.join('') : `${chars.slice(0, max - 1).join('')}…`
 }

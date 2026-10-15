@@ -862,3 +862,24 @@ describe('applyEvent — preview and verification', () => {
     expect(s.proposals[0].verification?.repeat).toBe(true)
   })
 })
+
+describe('applyEvent — bidi controls in typed text', () => {
+  const RLO = '‮'
+  it('strips them from the title, comments and suggestions, keeping newlines', () => {
+    let s = applyEvent(base(), ev(1, 'room.created', { title: `orders ${RLO}gal`, severity: 'sev2', pipeline_id: 'p' }, human))
+    s = applyEvent(s, ev(2, 'comment.added', { comment_id: 'c1', text: `line 1\n${RLO}line 2`, mentions_agent: false }, human))
+    s = applyEvent(s, ev(3, 'steer.suggested', { suggestion_id: 'g1', text: `check ⁧the slot⁩` }, human))
+    expect(s.title).toBe('orders gal')
+    expect(s.comments[0].text).toBe('line 1\nline 2')
+    expect(s.suggestions[0].text).toBe('check the slot')
+    expect(s.activity.some((a) => a.text.includes(RLO) || (a.detail ?? '').includes(RLO))).toBe(false)
+  })
+
+  it('strips them from the snapshot title', () => {
+    const snap: RoomSnapshot = {
+      id: 'r1', title: `a${RLO}b`, severity: 'sev2', pipeline_id: 'p', status: 'open', opened_at: '', last_seq: 0,
+      driver: null, agent_status: { state: 'idle' }, hypothesis: null, open_proposals: [], pending_suggestions: [], members: [],
+    }
+    expect(fromSnapshot(snap).title).toBe('ab')
+  })
+})
