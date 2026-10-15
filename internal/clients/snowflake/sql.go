@@ -17,16 +17,17 @@ func freshnessSQL(table, tsColumn string) (string, error) {
 	return fmt.Sprintf("SELECT MAX(%s) FROM %s", col, qualified), nil
 }
 
-// rowSQL builds the single-row lookup. The primary key value is a "?" bind
-// parameter, never part of the text.
+// rowSQL builds the single-row lookup. pkColumn is quoted exactly as given
+// (it is the column's stored name, see DB.resolveKeyColumn), not upper-cased:
+// a quoted "id" and an unquoted ID are different columns. The primary key
+// value is a "?" bind parameter, never part of the text.
 func rowSQL(table, pkColumn string) (string, error) {
 	qualified, err := quoteTable(table)
 	if err != nil {
 		return "", err
 	}
-	col, err := quoteIdent(pkColumn)
-	if err != nil {
-		return "", err
+	if !identRe.MatchString(pkColumn) {
+		return "", fmt.Errorf("snowflake: invalid identifier %q", pkColumn)
 	}
-	return fmt.Sprintf("SELECT * FROM %s WHERE %s = ? LIMIT 1", qualified, col), nil
+	return fmt.Sprintf("SELECT * FROM %s WHERE %s = ? LIMIT 1", qualified, quote(pkColumn)), nil
 }
