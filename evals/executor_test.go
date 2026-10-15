@@ -84,7 +84,9 @@ func TestNamingAnEarlierStepRunsTheRest(t *testing.T) {
 // A step with params other than the scripted ones is the wrong fix: it
 // fails with a not-found result and the stack does not move.
 func TestWrongParamsDoNotRecover(t *testing.T) {
-	sc := loadScenario(t, "scenarios/heldout/ledger-producer-timeout-recovery.yaml")
+	// Task 7 is listed, so the proposal passes validation (Q6 U6) and the
+	// wrong target shows at execution; the recovery needs task 0.
+	sc := withListedTasks(t, loadScenario(t, "scenarios/heldout/ledger-producer-timeout-recovery.yaml"), "pg-ledger-connector", 7)
 	r, tr := evalOnce(t, sc, []step{
 		{tool: "connect_status", input: map[string]any{"connector": "pg-ledger-connector"}},
 		{hypothesis: ledgerHypothesis},

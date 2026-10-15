@@ -205,7 +205,10 @@ func TestEndpointRoomRefusesWhatOnlyTheRoomChecks(t *testing.T) {
 		{"action": "connect_restart_task", "params": `{"connector":"pg-orders-connector","task":9007199254740993}`, "description": "restart"},
 	}
 	fake := newFakeModel(t, turns)
-	rep, err := Evaluate(context.Background(), []Scenario{loadSeed()}, endpointConfig(t, fake))
+	// The task is listed, so Validate (Q6 U6) lets it through and the refusal
+	// can only come from the room.
+	sc := withListedTasks(t, loadSeed(), "pg-orders-connector", 9007199254740993)
+	rep, err := Evaluate(context.Background(), []Scenario{sc}, endpointConfig(t, fake))
 	if err != nil {
 		t.Fatal(err)
 	}
