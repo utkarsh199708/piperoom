@@ -23,11 +23,13 @@ const (
 	// topic may lack before the bucket counts as a gap (updates and late rows
 	// make the three counts differ a little).
 	reconcileTolerance = 0.02
-	// reconcileSettle is how long a source row may legitimately still be on
-	// its way to the sink. A bucket that ends inside this margin before now is
-	// reported "in flight" and given no verdict: the rows missing from it are
-	// the normal replication lag of a healthy pipeline, not loss.
-	reconcileSettle = 2 * time.Minute
+	// defaultSettle is how long a source row may legitimately still be on its
+	// way to the sink. The window is cut that long before now, so the rows
+	// of a healthy pipeline that are still in flight are never counted as
+	// lost; everything older is judged as before. maxSettle bounds the
+	// optional "settle" input.
+	defaultSettle = 2 * time.Minute
+	maxSettle     = time.Hour
 )
 
 // ReconcileRow is one bucket of the comparison. Topic is -1 when topic rates
@@ -37,8 +39,6 @@ type ReconcileRow struct {
 	Source int64     `json:"source"`
 	Topic  int64     `json:"topic"`
 	Sink   int64     `json:"sink"`
-	// InFlight marks a bucket too new to judge (see reconcileSettle).
-	InFlight bool `json:"in_flight,omitempty"`
 }
 
 func reconcileTool(d Deps) tools.Tool {
@@ -46,11 +46,13 @@ func reconcileTool(d Deps) tools.Tool {
 		name: "reconcile",
 		desc: "Compare row counts per time bucket (at most 12) between the source table, the Kafka topic and the warehouse sink table, " +
 			"and say on which side the rows are lost: the connector side (topic is missing them) or the consumer side (topic has them, sink does not). " +
-			"Counts only, never a value or a key. Source and sink counts use the pipeline's sink_ts_column; the topic count is the number of change events.",
+			"Counts only, never a value or a key. Source and sink counts use the pipeline's sink_ts_column; the topic count is the number of change events. " +
+			"Rows newer than the settle margin (default 2m) are treated as still in flight and not judged: the window is cut that long before now. If the consumer lags more than that, pass a larger settle or an earlier until.",
 		schema: objSchema(map[string]any{
 			"table":      strProp("Source table, \"schema.table\", one of the room's source tables."),
 			"since":      strProp("Start of the window, RFC 3339. The window is at most 6 hours."),
-			"until":      strProp("End of the window, RFC 3339. Default: now."),
+			"until":      strProp("End of the window, RFC 3339. Default: now minus settle. Never later than now minus settle."),
+			"settle":     strProp("Optional margin for rows still in flight, a Go duration such as \"5m\" (0 to 1h). Default 2m."),
 			"sink_table": strProp("Sink table, only needed when the pipeline has several sink tables and none has the source table's name."),
 		}, "table", "since"),
 		run: func(ctx context.Context, in json.RawMessage) (tools.Result, error) {
@@ -58,6 +60,7 @@ func reconcileTool(d Deps) tools.Tool {
 				Table     string `json:"table"`
 				Since     string `json:"since"`
 				Until     string `json:"until"`
+				Settle    string `json:"settle"`
 				SinkTable string `json:"sink_table"`
 			}
 			if err := decode(in, &input); err != nil {
@@ -70,7 +73,14 @@ func reconcileTool(d Deps) tools.Tool {
 			if err != nil {
 				return tools.Result{}, err
 			}
-			until := time.Now()
+			settle := defaultSettle
+			if input.Settle != "" {
+				if settle, err = time.ParseDuration(input.Settle); err != nil || settle < 0 || settle > maxSettle {
+					return tools.Result{}, fmt.Errorf("%w: settle must be a duration from 0 to %s", tools.ErrBadInput, maxSettle)
+				}
+			}
+			now := time.Now()
+			until := now
 			if input.Until != "" {
 				if until, err = parseRFC3339(input.Until); err != nil {
 					return tools.Result{}, err
@@ -78,6 +88,16 @@ func reconcileTool(d Deps) tools.Tool {
 			}
 			if !until.After(since) {
 				return tools.Result{}, fmt.Errorf("%w: until must be after since", tools.ErrBadInput)
+			}
+			// Cut the window at now−settle. Only that slice goes unjudged; the
+			// rest of the newest bucket is still compared.
+			var note string
+			if cut := now.Add(-settle); until.After(cut) {
+				if cut.Sub(since) < time.Minute { // under one bucket of settled data
+					return tools.Result{}, fmt.Errorf("%w: no verdict possible: the window ends %s before now (rows newer than that are still in flight) but less than a minute of it is after since; move since back or lower settle", tools.ErrBadInput, settle)
+				}
+				until = cut
+				note = fmt.Sprintf("\nnote: rows newer than %s (the last %s) are in flight and not judged", topology.FormatTS(cut), settle)
 			}
 			if until.Sub(since) > maxReconcileWindow {
 				return tools.Result{}, fmt.Errorf("%w: the window is %s, at most %s", tools.ErrBadInput, until.Sub(since).Round(time.Minute), maxReconcileWindow)
@@ -124,8 +144,7 @@ func reconcileTool(d Deps) tools.Tool {
 			if err != nil {
 				return tools.Result{}, err
 			}
-			markInFlight(rows, width, until, time.Now())
-			summary := reconcileSummary(input.Table, sink, topic, p.SinkTSColumn, width, rows)
+			summary := reconcileSummary(input.Table, sink, topic, p.SinkTSColumn, width, rows) + note
 			summary, truncated := tools.Truncate(summary)
 			return tools.Result{Summary: summary, Data: rows, Truncated: truncated}, nil
 		},
@@ -262,23 +281,10 @@ func topicBuckets(ctx context.Context, rr clients.RateReader, topic string, sinc
 	return out, nil
 }
 
-// markInFlight flags the buckets that end within reconcileSettle of now.
-// Buckets of a window that ended long ago are never flagged.
-func markInFlight(rows []ReconcileRow, width time.Duration, until, now time.Time) {
-	for i := range rows {
-		end := rows[i].Bucket.Add(width)
-		if end.After(until) {
-			end = until
-		}
-		rows[i].InFlight = end.After(now.Add(-reconcileSettle))
-	}
-}
-
 // reconcileSummary renders the table and the verdict.
 func reconcileSummary(source, sink, topic, tsCol string, width time.Duration, rows []ReconcileRow) string {
 	var sb strings.Builder
 	haveTopic := rows[0].Topic >= 0
-	inFlight := 0
 	fmt.Fprintf(&sb, "reconcile %s → %s → %s by %s, buckets of %s from %s\n", source, topic, sink, tsCol, width, topology.FormatTS(rows[0].Bucket))
 	sb.WriteString("bucket | source | topic | sink | sink−source\n")
 	for _, r := range rows {
@@ -286,24 +292,13 @@ func reconcileSummary(source, sink, topic, tsCol string, width time.Duration, ro
 		if r.Topic >= 0 {
 			t = fmt.Sprint(r.Topic)
 		}
-		mark := ""
-		if r.InFlight {
-			mark = " (in flight)"
-		}
-		fmt.Fprintf(&sb, "%s | %d | %s | %d | %+d%s\n", r.Bucket.Format("15:04"), r.Source, t, r.Sink, r.Sink-r.Source, mark)
-		if r.InFlight {
-			inFlight++
-		}
-	}
-	note := ""
-	if inFlight > 0 {
-		note = fmt.Sprintf(" (%d newest bucket(s) still in flight, not judged)", inFlight)
+		fmt.Fprintf(&sb, "%s | %d | %s | %d | %+d\n", r.Bucket.Format("15:04"), r.Source, t, r.Sink, r.Sink-r.Source)
 	}
 	first, last := -1, -1
 	var missing, srcSum, topicSum int64
 	for i, r := range rows {
 		gap := r.Source - r.Sink
-		if !r.InFlight && gap >= 1 && float64(gap) > reconcileTolerance*float64(r.Source) {
+		if gap >= 1 && float64(gap) > reconcileTolerance*float64(r.Source) {
 			if first < 0 {
 				first = i
 			}
@@ -311,7 +306,7 @@ func reconcileSummary(source, sink, topic, tsCol string, width time.Duration, ro
 		}
 	}
 	if first < 0 {
-		sb.WriteString("verdict: the sink matches the source in every bucket (within 2%)" + note)
+		sb.WriteString("verdict: the sink matches the source in every bucket (within 2%)")
 		return sb.String()
 	}
 	for _, r := range rows[first : last+1] {
@@ -329,6 +324,5 @@ func reconcileSummary(source, sink, topic, tsCol string, width time.Duration, ro
 	default:
 		fmt.Fprintf(&sb, "verdict: sink is missing %d rows in %s; topic is missing them (connector side)", missing, span)
 	}
-	sb.WriteString(note)
 	return sb.String()
 }

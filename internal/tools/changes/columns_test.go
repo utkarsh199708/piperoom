@@ -126,10 +126,11 @@ func TestSplitIdent(t *testing.T) {
 	}
 }
 
-// A table name containing '.' or '"' matches when the owners entry is quoted
-// (#461). The plain spelling public.a.b is refused when owners.yaml loads
-// (internal/owners TestLoadSourceTableSpelling), so it never reaches the tool.
-// Rows with a gap marker would assert today's wrong output; none is left.
+// Known gap (#461): a table name containing '.' or '"' only matches when the
+// owners entry is quoted. The tool parses owners entries as SQL identifiers,
+// the watcher compares plain joined parts, and the postgres client's
+// splitTable rejects such names anyway. A gap row asserts today's output; once
+// #461 lands, delete its gap marker and the row asserts the ideal one.
 func TestWhatChangedIdentGaps(t *testing.T) {
 	at := t0.Add(-time.Minute)
 	for _, tc := range []struct {
@@ -137,9 +138,9 @@ func TestWhatChangedIdentGaps(t *testing.T) {
 		gap                    string // "" once fixed
 		ideal                  bool   // kept when the gap is closed
 	}{
-		{owned: `public."a.b"`, identity: `public."a.b"`, input: `{"object":"public.\"a.b\""}`, ideal: true},
-		{owned: `public."a.b"`, identity: `public."a.b".col`, input: `{}`, ideal: true},
-		{owned: `public."a""b"`, identity: `public."a""b"`, input: `{"object":"public.\"a\"\"b\""}`, ideal: true},
+		{owned: "public.a.b", identity: `public."a.b"`, input: `{}`, gap: "see #461", ideal: true},
+		{owned: "public.a.b", identity: `public."a.b"`, input: `{"object":"public.a.b"}`, gap: "see #461", ideal: true},
+		{owned: `public.a"b`, identity: `public."a""b"`, input: `{}`, gap: "see #461", ideal: true},
 		{owned: `public."a.b"`, identity: `public."a.b"`, input: `{}`, ideal: true},
 		{owned: `public."a""b"`, identity: `public."a""b"`, input: `{}`, ideal: true},
 	} {

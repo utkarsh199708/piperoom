@@ -229,32 +229,70 @@ func TestReconcileInputErrors(t *testing.T) {
 	}
 }
 
-// A healthy pipeline whose newest bucket is still being delivered must not be
-// reported as losing rows (#421); a real loss in an older bucket still is.
-func TestReconcileNewestBucketInFlight(t *testing.T) {
-	now := time.Now()
-	since := now.Add(-59 * time.Minute) // 12 buckets of 5 min
-	in := fmt.Sprintf(`{"table":"public.orders","since":%q}`, since.Format(time.RFC3339Nano))
-	run := func(snk []int64) tools.Result {
-		src := &countSrc{counts: []int64{60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60}}
-		res, err := rcRun(t, rcDeps(src, &countWh{counts: snk}, nil), "orders", in)
-		if err != nil {
-			t.Fatal(err)
+// The newest slice (settle margin) is cut off the window, not a whole bucket
+// (#421). Loss in the rest of the newest bucket is still reported.
+func TestReconcileSettleCutsOnlyTheNewestSlice(t *testing.T) {
+	flat := []int64{600, 600, 600, 600, 600, 600, 600, 600, 600, 600, 600, 600}
+	in := func(since time.Duration, extra string) string {
+		return fmt.Sprintf(`{"table":"public.orders","since":%q%s}`, time.Now().Add(-since).Format(time.RFC3339Nano), extra)
+	}
+	run := func(src, snk []int64, input string) (tools.Result, *countSrc, error) {
+		s := &countSrc{counts: src}
+		res, err := rcRun(t, rcDeps(s, &countWh{counts: snk}, nil), "orders", input)
+		return res, s, err
+	}
+	last := func(v int64) []int64 { c := append([]int64(nil), flat...); c[11] = v; return c }
+
+	// 6 h window, 12 buckets of 30 min, nothing in the newest bucket.
+	res, s, err := run(flat, last(0), in(6*time.Hour, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Summary, "sink is missing 600 rows") {
+		t.Errorf("loss in the newest bucket hidden:\n%s", res.Summary)
+	}
+	if want := time.Now().Add(-defaultSettle); s.got.until.After(want) || want.Sub(s.got.until) > time.Minute {
+		t.Errorf("until = %s, want about now−2m", s.got.until)
+	}
+	if !strings.Contains(res.Summary, "last 2m0s) are in flight and not judged") {
+		t.Errorf("margin not named:\n%s", res.Summary)
+	}
+
+	// A consumer that stalled: 200 of 600 in the newest bucket.
+	if res, _, err = run(flat, last(200), in(6*time.Hour, "")); err != nil || !strings.Contains(res.Summary, "sink is missing 400 rows") {
+		t.Errorf("stall: err=%v\n%s", err, res.Summary)
+	}
+
+	// Healthy: every bucket complete, the verdict says so and names the margin.
+	if res, _, err = run(flat, flat, in(6*time.Hour, "")); err != nil || !strings.Contains(res.Summary, "matches the source in every bucket") {
+		t.Errorf("healthy: err=%v\n%s", err, res.Summary)
+	}
+
+	// An explicit until in the future is cut too; settle widens the margin.
+	if _, s, err = run(flat, flat, in(2*time.Hour, fmt.Sprintf(`,"until":%q,"settle":"10m"`, time.Now().Add(time.Hour).Format(time.RFC3339)))); err != nil {
+		t.Fatal(err)
+	} else if d := time.Since(s.got.until); d < 9*time.Minute || d > 11*time.Minute {
+		t.Errorf("until is %s before now, want about 10m", d)
+	}
+
+	// A window that lies entirely inside the margin gives no verdict at all.
+	_, _, err = run([]int64{600, 600, 0}, nil, in(2*time.Minute, ""))
+	if !errors.Is(err, tools.ErrBadInput) || !strings.Contains(err.Error(), "no verdict possible") {
+		t.Errorf("window inside the margin: err = %v", err)
+	}
+	for _, bad := range []string{"2x", "-1m", "2h"} {
+		if _, _, err = run(flat, flat, in(time.Hour, fmt.Sprintf(`,"settle":%q`, bad))); !errors.Is(err, tools.ErrBadInput) {
+			t.Errorf("settle %q: err = %v", bad, err)
 		}
-		return res
 	}
 
-	res := run([]int64{60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 60, 40})
-	if strings.Contains(res.Summary, "missing") || !strings.Contains(res.Summary, "in flight") {
-		t.Errorf("healthy pipeline, newest bucket short:\n%s", res.Summary)
+	// The margin is documented for the agent.
+	reg := tools.NewRegistry()
+	if err := Register(reg, rcDeps(&countSrc{}, &countWh{}, nil)); err != nil {
+		t.Fatal(err)
 	}
-	rows := res.Data.([]ReconcileRow)
-	if !rows[11].InFlight || rows[10].InFlight {
-		t.Errorf("in flight = %v (last), %v (previous)", rows[11].InFlight, rows[10].InFlight)
-	}
-
-	res = run([]int64{60, 60, 60, 20, 60, 60, 60, 60, 60, 60, 60, 40})
-	if !strings.Contains(res.Summary, "sink is missing 40 rows") || !strings.Contains(res.Summary, "in flight") {
-		t.Errorf("real loss in an older bucket:\n%s", res.Summary)
+	tl, _ := reg.Get("reconcile")
+	if !strings.Contains(tl.Description(), "settle margin (default 2m)") {
+		t.Errorf("description lacks the margin: %s", tl.Description())
 	}
 }

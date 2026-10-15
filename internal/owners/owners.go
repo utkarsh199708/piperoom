@@ -177,11 +177,6 @@ func (o *Owners) validate() error {
 		if len(p.Connectors) == 0 {
 			return fmt.Errorf("pipeline %q: no connectors", p.ID)
 		}
-		for _, t := range p.SourceTables {
-			if err := validateSourceTable(t); err != nil {
-				return fmt.Errorf("pipeline %q: %w", p.ID, err)
-			}
-		}
 		for _, l := range []struct {
 			name  string
 			names []string

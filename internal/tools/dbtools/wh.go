@@ -53,6 +53,12 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 			if ts.IsZero() {
 				summary = "no rows (empty table)"
 				data["newest"] = nil
+			} else if ts.Year() >= 9999 {
+				// The warehouse client's stand-in for a Postgres 'infinity':
+				// no row holds this time, so neither a time nor an age is shown.
+				summary = fmt.Sprintf("newest=infinity (a sentinel or bad value in %s): staleness cannot be judged", input.TSColumn)
+				data["newest"] = "infinity"
+				data["in_future"] = true
 			} else if ahead := time.Until(ts); ahead > topology.FutureSkew {
 				// Clamped to "stale for 0s" this would read as fresh while
 				// loading may have stopped: the column is not comparable with
