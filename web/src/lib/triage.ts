@@ -57,3 +57,17 @@ export function triageLine(
   if (Number.isFinite(opened) && now - opened < TRIAGE_PENDING_MS) return { kind: 'pending' }
   return { kind: 'none' }
 }
+
+/**
+ * Scrolls to and briefly highlights a step of the room. Step links are not `#step-` hrefs: the app
+ * uses HashRouter, where a fragment is the route, so following one leaves the room (QA F19).
+ */
+export function goToStep(stepId: string): void {
+  const el = document.getElementById(stepAnchor(stepId))
+  if (!el) return
+  el.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+  el.setAttribute('tabindex', '-1')
+  el.focus({ preventScroll: true })
+  el.classList.add('ring-2', 'ring-ring')
+  window.setTimeout(() => el.classList.remove('ring-2', 'ring-ring'), 2000)
+}

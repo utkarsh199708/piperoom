@@ -18,54 +18,48 @@ const good = {
   fix_that_worked: 'connect_resume_connector', duration_s: 720,
 }
 
-describe('SimilarCard only shows history worth reading', () => {
-  it('a room with a resolution and nothing else (QA: "test", "Closed by the QA run...") is not offered', () => {
-    const { container } = renderCard(steps(junk))
+const empty = { room_id: 'r_empty', title: '', date: '', resolution: '' }
+const placeholder = { room_id: 'r_ph', title: 'orders', layer: 'kafka-connect', resolution: '(no resolution text)' }
+
+describe('SimilarCard trusts the server selection (QA F20)', () => {
+  it('a hit with nothing at all to show is not offered', () => {
+    const { container } = renderCard(steps(empty))
     expect(container).toBeEmptyDOMElement()
   })
 
-  it('a room with no resolution is not offered, even with a fix', () => {
-    const { container } = renderCard(steps({ ...good, resolution: '   ' }))
-    expect(container).toBeEmptyDOMElement()
-  })
-
-  it('a resolution plus a fix that worked is offered', () => {
-    renderCard(steps(good))
+  it('a hit the server judged an incident is shown even without a resolution (unverified closer)', () => {
+    renderCard(steps({ ...good, resolution: '' }))
     expect(screen.getByRole('region', { name: 'Similar incident' })).toBeInTheDocument()
   })
 
-  it('a resolution plus the actions of an executed fix is offered', () => {
-    renderCard(steps({ ...junk, fix_actions: ['connect_restart_task'] }))
-    expect(screen.getByText(/fixed by connect_restart_task/)).toBeInTheDocument()
-  })
-
-  it('a resolution plus a label (the layer a person named) is offered', () => {
-    renderCard(steps({ ...junk, layer: 'kafka-connect' }))
+  it('a hypothesis-only room (title, no fix, no label) is shown', () => {
+    renderCard(steps({ ...junk, resolution: '' }))
     expect(screen.getByRole('region', { name: 'Similar incident' })).toBeInTheDocument()
   })
 
-  it('skips an unusable best hit and shows the next usable one', () => {
-    renderCard(steps(junk, good))
+  it('never shows the "(no resolution text)" placeholder', () => {
+    renderCard(steps(placeholder))
+    expect(screen.getByRole('region', { name: 'Similar incident' })).toBeInTheDocument()
+    expect(screen.queryByText(/no resolution text/)).toBeNull()
+  })
+
+  it('skips an empty best hit and shows the next one', () => {
+    renderCard(steps(empty, good))
     expect(screen.getByRole('link', { name: /Open room/ })).toHaveAttribute('href', '/rooms/r_good')
-    expect(screen.queryByText(/Closed by the QA run/)).toBeNull()
-  })
-
-  it('shows nothing when every hit is unusable', () => {
-    const { container } = renderCard(steps(junk, { ...junk, room_id: 'r_2' }))
-    expect(container).toBeEmptyDOMElement()
   })
 })
 
 describe('isUsableHit / topSimilarHit', () => {
   const hit = (over: Partial<SimilarHit> = {}): SimilarHit => ({
-    room_id: 'r', title: '', date: '', fix_that_worked: '', fix_actions: [], layer: '', duration_s: 0, closed_by: '', resolution: 'done', ...over,
+    room_id: 'r', title: '', date: '', fix_that_worked: '', fix_actions: [], layer: '', duration_s: 0, closed_by: '', resolution: '', ...over,
   })
 
   it.each([
     [{}, false],
-    [{ resolution: '' }, false],
-    [{ fix_that_worked: 'x', resolution: '' }, false],
-    [{ fix_that_worked: ' ' }, false],
+    [{ resolution: '  ' }, false],
+    [{ resolution: '(no resolution text)' }, false],
+    [{ resolution: 'done' }, true],
+    [{ title: 'orders' }, true],
     [{ fix_that_worked: 'x' }, true],
     [{ fix_actions: ['a'] }, true],
     [{ layer: 'kafka' }, true],
