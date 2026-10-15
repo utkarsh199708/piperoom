@@ -121,7 +121,7 @@ func TestReplicationSlotsNamedRecordsCall(t *testing.T) {
 	if c.Kind != tools.CallSQL || c.Target != "postgres orders@db.internal:5432" {
 		t.Fatalf("call = %+v", c)
 	}
-	if !strings.HasPrefix(c.Text, "SELECT slot_name, plugin, active") || strings.Contains(c.Text, "\n") {
+	if !strings.HasPrefix(c.Text, "SELECT slot_name, COALESCE(plugin, ''), active") || strings.Contains(c.Text, "\n") {
 		t.Fatalf("text = %q", c.Text)
 	}
 	if len(c.ParamsRedacted) != 1 || c.ParamsRedacted[0] != "$1=[debezium_orders]" {

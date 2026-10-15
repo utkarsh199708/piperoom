@@ -384,3 +384,166 @@ func TestReplicationSlotsSafeWALIntegration(t *testing.T) {
 	}
 	t.Fatalf("slot %s not in %+v", slot, slots)
 }
+
+// A physical slot (a streaming standby's) has plugin NULL. It must be listed
+// with an empty plugin, not fail the whole read (QA sweep H2): a primary with
+// a standby would otherwise break every slot tool, topology health and the
+// watcher.
+func TestReplicationSlotsPhysicalIntegration(t *testing.T) {
+	db := sourceDB(t)
+	conn := writeConn(t, testenv.Require(t).SourceDBURL)
+
+	slot := testenv.Name("phys")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := conn.Exec(ctx, "SELECT pg_create_physical_replication_slot($1, true)", slot); err != nil {
+		t.Fatalf("create physical slot: %v", err)
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(c, "SELECT pg_drop_replication_slot($1)", slot)
+	})
+
+	slots, err := db.ReplicationSlots(ctx)
+	if err != nil {
+		t.Fatalf("ReplicationSlots: %v", err)
+	}
+	named, _, err := db.ReplicationSlotsNamed(ctx, []string{slot})
+	if err != nil {
+		t.Fatalf("ReplicationSlotsNamed: %v", err)
+	}
+	if len(named) != 1 || named[0].Name != slot || named[0].Plugin != "" {
+		t.Fatalf("named = %+v, want the physical slot %s with no plugin", named, slot)
+	}
+	for _, s := range slots {
+		if s.Name == slot {
+			if s.Plugin != "" {
+				t.Fatalf("physical slot plugin = %q, want empty", s.Plugin)
+			}
+			return
+		}
+	}
+	t.Fatalf("physical slot %s not in %+v", slot, slots)
+}
+
+// A function a read calls can change session settings with set_config. On a
+// pooled connection the change used to outlive the query: the next read on
+// that connection ran read-write with an attacker's search_path (QA sweep,
+// "read-only is only a session GUC"). Every read now runs in its own READ ONLY
+// transaction that is rolled back, which also undoes the settings.
+func TestReadOnlySurvivesSetConfigIntegration(t *testing.T) {
+	cfg := testenv.Require(t)
+	conn := writeConn(t, cfg.SourceDBURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	fn := testenv.Name("flip")
+	for _, q := range []string{
+		"CREATE FUNCTION public." + fn + "() RETURNS int LANGUAGE sql VOLATILE AS $$" +
+			" SELECT set_config('default_transaction_read_only', 'off', false);" +
+			" SELECT set_config('search_path', 'pg_temp, public', false); SELECT 1 $$",
+		"CREATE VIEW public." + fn + "_v AS SELECT public." + fn + "() AS id",
+	} {
+		if _, err := conn.Exec(ctx, q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(c, "DROP VIEW IF EXISTS public."+fn+"_v")
+		_, _ = conn.Exec(c, "DROP FUNCTION IF EXISTS public."+fn+"()")
+	})
+
+	// One connection, so the second read reuses the session of the first.
+	u, err := url.Parse(cfg.SourceDBURL)
+	if err != nil {
+		t.Fatalf("parse url: %v", err)
+	}
+	qs := u.Query()
+	qs.Set("pool_max_conns", "1")
+	u.RawQuery = qs.Encode()
+	db, err := New(ctx, u.String())
+	if err != nil {
+		t.Fatalf("source postgres unreachable (%s): %v", hostPort(cfg.SourceDBURL), err)
+	}
+	t.Cleanup(db.Close)
+
+	if _, found, err := db.Row(ctx, "public."+fn+"_v", "id", "1"); err != nil || !found {
+		t.Fatalf("Row on the view: found=%v err=%v", found, err)
+	}
+	var readOnly, searchPath string
+	if err := db.queryRow(ctx, "SELECT current_setting('default_transaction_read_only'), current_setting('search_path')").Scan(&readOnly, &searchPath); err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if readOnly != "on" || strings.Contains(searchPath, "pg_temp") {
+		t.Fatalf("after the read: default_transaction_read_only=%s search_path=%q; want on and the original path", readOnly, searchPath)
+	}
+	rows, err := db.query(ctx, "CREATE TABLE public."+fn+"_w (id int)")
+	if err == nil {
+		rows.Close()
+		err = rows.Err()
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "25006" {
+		_, _ = conn.Exec(ctx, "DROP TABLE IF EXISTS public."+fn+"_w")
+		t.Fatalf("write through the client: err = %v, want SQLSTATE 25006", err)
+	}
+}
+
+// The audit trigger logs a column rename or a column comment under the
+// column (schema.table.column), and a mixed-case table quoted
+// (public."Name"). An exact object_identity match missed both, so
+// pg_recent_ddl did not show the rename that broke the pipeline (QA sweep).
+func TestRecentDDLTableColumnsAndMixedCaseIntegration(t *testing.T) {
+	db := sourceDB(t)
+	conn := writeConn(t, testenv.Require(t).SourceDBURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	lower := testenv.Name("ren")
+	mixed := "It_Mixed_" + lower[len(lower)-6:]
+	other := lower + "x" // a longer name must not match
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(c, `DROP TABLE IF EXISTS public.`+lower+`, public.`+other+`, public."`+mixed+`"`)
+	})
+	since := time.Now().Add(-time.Minute)
+	for _, q := range []string{
+		"CREATE TABLE public." + lower + " (id int primary key, a int)",
+		"CREATE TABLE public." + other + " (id int primary key, a int)",
+		"ALTER TABLE public." + lower + " RENAME COLUMN a TO b",
+		"ALTER TABLE public." + other + " RENAME COLUMN a TO b",
+		`CREATE TABLE public."` + mixed + `" (id int primary key)`,
+		`ALTER TABLE public."` + mixed + `" ADD COLUMN note text`,
+	} {
+		if _, err := conn.Exec(ctx, q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+
+	got, err := db.RecentDDLTable(ctx, since, "public."+lower, 100)
+	if err != nil {
+		t.Fatalf("RecentDDLTable: %v", err)
+	}
+	var rename bool
+	for _, c := range got {
+		if strings.Contains(c.ObjectIdentity, other) {
+			t.Fatalf("matched the other table: %+v", c)
+		}
+		rename = rename || c.ObjectIdentity == "public."+lower+".b"
+	}
+	if !rename {
+		t.Fatalf("column rename of public.%s not found in %+v", lower, got)
+	}
+
+	got, err = db.RecentDDLTable(ctx, since, "public."+mixed, 100)
+	if err != nil {
+		t.Fatalf("RecentDDLTable mixed case: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("mixed-case table: %d changes, want CREATE and ALTER: %+v", len(got), got)
+	}
+}
