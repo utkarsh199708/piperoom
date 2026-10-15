@@ -74,6 +74,8 @@ type pastRoom struct {
 	// raw trace: record values and DSNs must not become index terms.
 	traceText string
 	fetched   time.Time
+	// lastSeq is the room's last event seq when it was read.
+	lastSeq int64
 }
 
 // loadRoom reads one closed room into a pastRoom. Agent-written text (the
@@ -83,7 +85,7 @@ type pastRoom struct {
 // "not shadow". The shadow-agent run itself lives in the shadow log, which this
 // tool never reads.
 func loadRoom(ctx context.Context, src Source, r store.Room, now time.Time) (pastRoom, error) {
-	pr := pastRoom{RoomID: r.ID, PipelineID: r.PipelineID, Title: clipRunes(scrub(r.Title), maxTitleBytes), fetched: now}
+	pr := pastRoom{RoomID: r.ID, PipelineID: r.PipelineID, Title: clipRunes(scrub(r.Title), maxTitleBytes), fetched: now, lastSeq: r.LastSeq}
 	if r.ClosedAt != nil {
 		pr.ClosedAt = *r.ClosedAt
 	}
