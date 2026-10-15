@@ -27,8 +27,13 @@
 #   - trace_record shows not_seen downstream of Postgres with no stopped_here stage: the
 #     record is not stuck, it is gone.
 #   - Connect is RUNNING; restarting it does not re-emit deleted changes.
-#   - No tool shows topic configs (retention.ms) or the consumer's logs; the agent must
-#     infer retention from log-start offsets vs committed offsets and staleness.
+#   - kafka_topic_config shows retention.ms=21600000 (6 h); no tool shows the consumer's
+#     logs. A 6 h retention is not a fault by itself: the agent must connect it with
+#     committed offsets that sit just above the log start and the 6 h staleness to call it
+#     data loss.
+#   - reconcile says "topic is missing them (connector side)": it counts the records still
+#     in the log, and segments retention deleted look like records never written. It points
+#     at kafka-connect; the connector is healthy and streamed every change.
 #
 # Sources:
 #   - go doc github.com/twmb/franz-go/pkg/kgo.ConsumeResetOffset: "If instead the client
@@ -46,7 +51,7 @@
 name: topic-retention-data-loss
 description: |
   pg.public.orders has retention.ms=21600000 (6 h), lowered two weeks ago to save broker disk
-  (topic configs are not visible to any agent tool). Between 01:00 and 03:00 UTC a re-pricing
+  (kafka_topic_config shows it). Between 01:00 and 03:00 UTC a re-pricing
   job updated 7.9 M orders. Debezium streamed every change; order-sync (about 350 records/s)
   fell more than 6 hours behind. Kafka deleted log segments before order-sync read them.
   franz-go (the consumer's client) resumes at the log start without an error when its position
@@ -258,31 +263,42 @@ recordings:
     summary: |-
       pg.public.orders: retention.ms=21600000, retention.bytes=-1, cleanup.policy=delete, min.insync.replicas=2, 3 partitions, replication factor 3
   - tool: kafka_partition_rates
-    input: {table: "public.orders", window: "15m"}
     summary: |-
-      pg.public.orders last 15m: 41700 records (46/s); p0 13978 (33%), p2 13923, p1 13799; median 13923, max 13978, max/median 1.0x → even
+      pg.public.orders last 5m: 41100 records (137/s); p0 13777 (33%), p2 13723, p1 13600; median 13723, max 13777, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "15m"}
+    summary: |-
+      pg.public.orders last 15m: 123300 records (137/s); p0 41330 (33%), p2 41170, p1 40800; median 41170, max 41330, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "30m"}
+    summary: |-
+      pg.public.orders last 30m: 246600 records (137/s); p0 82660 (33%), p2 82340, p1 81600; median 82340, max 82660, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "1h"}
+    summary: |-
+      pg.public.orders last 1h: 493200 records (137/s); p0 165321 (33%), p2 164679, p1 163200; median 164679, max 165321, max/median 1.0x → even
   - tool: reconcile
-    input: {table: "public.orders"}
+    input: {table: "public.orders", since: "2026-10-11T00:00:00Z", until: "2026-10-11T06:00:00Z"}
     summary: |-
       reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 30m0s from 2026-10-11T00:00:00Z
       bucket | source | topic | sink | sink−source
-      00:00 | 83000 | 0 | 83000 | +0
-      00:30 | 83000 | 0 | 83000 | +0
-      01:00 | 1975000 | 0 | 0 | -1975000
-      01:30 | 1975000 | 0 | 0 | -1975000
-      02:00 | 1975000 | 0 | 0 | -1975000
-      02:30 | 1975000 | 0 | 0 | -1975000
-      03:00 | 83000 | 0 | 0 | -83000
-      03:30 | 83000 | 61000 | 24300 | -58700
-      04:00 | 83000 | 83000 | 0 | -83000
-      04:30 | 83000 | 83000 | 0 | -83000
-      05:00 | 83000 | 83000 | 0 | -83000
-      05:30 | 83000 | 83000 | 0 | -83000
-      verdict: sink is missing 8373700 rows in 01:00–06:00; topic is missing them (connector side)
+      00:00 | 246600 | 0 | 246600 | +0
+      00:30 | 246600 | 0 | 246600 | +0
+      01:00 | 2221200 | 0 | 2221200 | +0
+      01:30 | 2221200 | 0 | 2221200 | +0
+      02:00 | 2221200 | 0 | 2221200 | +0
+      02:30 | 2221200 | 0 | 755208 | -1465992
+      03:00 | 246600 | 0 | 24660 | -221940
+      03:30 | 246600 | 164400 | 8220 | -238380
+      04:00 | 246600 | 246600 | 0 | -246600
+      04:30 | 246600 | 246600 | 0 | -246600
+      05:00 | 246600 | 246600 | 0 | -246600
+      05:30 | 246600 | 246600 | 0 | -246600
+      verdict: sink is missing 2912712 rows in 02:30–06:00; topic is missing them (connector side)
   - tool: debezium_metrics
     input: {connector: "pg-orders-connector"}
     summary: |-
-      pg-orders-connector: streaming connected=true, 0.5 s behind source, last event 0.8 s ago, queue 0/8192, 8153206 events seen; snapshot running=false, completed=true, paused=false
+      pg-orders-connector: streaming connected=true, 0.5 s behind source, last event 0.8 s ago, queue 0/8192, 8153206 events seen; snapshot running=false, completed=true, paused=false, rows scanned of table public.orders 4120338, 4120338 events seen
   - tool: pg_publication_tables
     input: {pipeline_id: "orders"}
     summary: |
@@ -298,9 +314,9 @@ expect:
     - [reset*, latest]
   first_failing_layer: kafka
   root_cause_layer: kafka
-  # Retention is not visible to any tool: it shows as committed offsets that
-  # sit just above the log start, and a source row whose change never reached
-  # Kafka.
+  # kafka_topic_config shows the 6 h retention; the loss shows as committed
+  # offsets that sit just above the log start, and a source row whose change
+  # never reached Kafka.
   expected_facts:
     - id: f_log_start
       tool: kafka_topic_offsets

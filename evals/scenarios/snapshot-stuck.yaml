@@ -28,6 +28,10 @@
 #   - The warehouse is stale although the sink is RUNNING with tiny lag: the topic carries snapshot
 #     rows whose updated_at values are old, so max(updated_at) does not move.
 #   - A restart is the obvious reflex and the one thing that loses all progress.
+#   - reconcile says "sink is missing ... rows; topic has them (consumer side)": the topic
+#     column counts the snapshot records as they are produced, the sink column counts rows by
+#     their old updated_at, so the comparison points at the consumer. The sink keeps up (lag
+#     about 2 k); the rows are old.
 #   - The pipeline map says OK for the connector.
 #
 # Sources:
@@ -239,31 +243,42 @@ recordings:
     summary: |-
       wh-orders-sink has no DLQ topic (errors.deadletterqueue.topic.name is not set)
   - tool: reconcile
-    input: {table: "public.orders"}
+    input: {table: "public.orders", since: "2026-10-14T00:00:00Z"}
     summary: |-
-      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 25m0s from 2026-10-14T00:00:00Z
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 26m0s from 2026-10-14T00:00:00Z
       bucket | source | topic | sink | sink−source
-      00:00 | 69000 | 0 | 25530 | -43470
-      00:25 | 70242 | 0 | 25989 | -44253
-      00:50 | 68172 | 0 | 25223 | -42949
-      01:15 | 71070 | 0 | 26295 | -44775
-      01:40 | 67447 | 0 | 24955 | -42492
-      02:05 | 69621 | 20550000 | 0 | -69621
-      02:30 | 66930 | 20550000 | 0 | -66930
-      02:55 | 70035 | 20550000 | 0 | -70035
-      03:20 | 68586 | 20550000 | 0 | -68586
-      03:45 | 70759 | 20550000 | 0 | -70759
-      04:10 | 67861 | 20550000 | 0 | -67861
-      04:35 | 69310 | 20550000 | 0 | -69310
-      verdict: sink is missing 701041 rows in 00:00–05:00; topic has them (consumer side)
+      00:00 | 71760 | 0 | 26551 | -45209
+      00:26 | 71760 | 0 | 26551 | -45209
+      00:52 | 71760 | 0 | 26551 | -45209
+      01:18 | 71760 | 0 | 26551 | -45209
+      01:44 | 71760 | 8010600 | 16339 | -55421
+      02:10 | 71760 | 20827560 | 0 | -71760
+      02:36 | 71760 | 20827560 | 0 | -71760
+      03:02 | 71760 | 20827560 | 0 | -71760
+      03:28 | 71760 | 20827560 | 0 | -71760
+      03:54 | 71760 | 20827560 | 0 | -71760
+      04:20 | 71760 | 20827560 | 0 | -71760
+      04:46 | 52440 | 15220140 | 0 | -52440
+      verdict: sink is missing 719257 rows in 00:00–05:12; topic has them (consumer side)
   - tool: warehouse_load_errors
     input: {table: "analytics.orders"}
     summary: |-
       postgres warehouse has no load history. analytics.orders: 148201266 rows inserted since stats reset, 2310 dead tuples, last autovacuum 2026-10-14T04:41:12Z, 0 session(s) waiting on a lock
   - tool: kafka_partition_rates
+    summary: |-
+      pg.public.orders last 5m: 4005300 records (13351/s); p0 1342577 (33%), p2 1337369, p1 1325354; median 1337369, max 1342577, max/median 1.0x → even
+  - tool: kafka_partition_rates
     input: {window: "15m"}
     summary: |-
-      pg.public.orders last 15m: 12330000 records (13700/s); p0 4133016 (33%), p2 4116987, p1 4079997; median 4116987, max 4133016, max/median 1.0x → even
+      pg.public.orders last 15m: 12015900 records (13351/s); p0 4027730 (33%), p2 4012109, p1 3976061; median 4012109, max 4027730, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "30m"}
+    summary: |-
+      pg.public.orders last 30m: 24031800 records (13351/s); p0 8055459 (33%), p2 8024218, p1 7952123; median 8024218, max 8055459, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "1h"}
+    summary: |-
+      pg.public.orders last 1h: 48063600 records (13351/s); p0 16110919 (33%), p2 16048436, p1 15904245; median 16048436, max 16110919, max/median 1.0x → even
   - tool: kafka_acls
     input: {principal: "User:piperoom"}
     summary: |-

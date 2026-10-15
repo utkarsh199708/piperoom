@@ -29,6 +29,9 @@
 #   - The slot is active=true (PAUSED keeps the walsender connected, dev/scenarios.md), so this
 #     is not the STOPPED / inactive-slot story of slot-inactive-wal-growth.
 #   - "Why was it paused?" has no live answer; only the closed room names the nightly job.
+#   - debezium_metrics shows connected=true and queue 8192/8192: a paused task is not polled,
+#     so Debezium's streaming thread filled its change event queue and blocks on it. That is
+#     the pause, not a Debezium fault; "last event 7.6 h ago" is when the queue filled.
 #
 # Correct fix: resume the connector, watch WAL retention shrink and the warehouse catch up, and
 # fix the job (retry the resume, alert while still paused).
@@ -215,25 +218,25 @@ recordings:
   - tool: debezium_metrics
     input: {connector: "pg-orders-connector"}
     summary: |-
-      pg-orders-connector: streaming connected=true, 0.4 s behind source, last event 7.6 h ago, queue 0/8192, 7369415 events seen; snapshot running=false, completed=true, paused=false
+      pg-orders-connector: streaming connected=true, 0.4 s behind source, last event 7.6 h ago, queue 8192/8192, 7369415 events seen; snapshot running=false, completed=true, paused=false, rows scanned of table public.orders 4120338, 4120338 events seen
   - tool: reconcile
-    input: {table: "public.orders"}
+    input: {table: "public.orders", since: "2026-10-11T04:00:00Z"}
     summary: |-
       reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 29m0s from 2026-10-11T04:00:00Z
       bucket | source | topic | sink | sink−source
-      04:00 | 80000 | 0 | 0 | -80000
-      04:29 | 81440 | 0 | 0 | -81440
-      04:58 | 79040 | 0 | 0 | -79040
-      05:27 | 82400 | 0 | 0 | -82400
-      05:56 | 78200 | 0 | 0 | -78200
-      06:25 | 80719 | 0 | 0 | -80719
-      06:54 | 77600 | 0 | 0 | -77600
-      07:23 | 81199 | 0 | 0 | -81199
-      07:52 | 79520 | 0 | 0 | -79520
-      08:21 | 82040 | 0 | 0 | -82040
-      08:50 | 78680 | 0 | 0 | -78680
+      04:00 | 80040 | 0 | 0 | -80040
+      04:29 | 81480 | 0 | 0 | -81480
+      04:58 | 79079 | 0 | 0 | -79079
+      05:27 | 82441 | 0 | 0 | -82441
+      05:56 | 78199 | 0 | 0 | -78199
+      06:25 | 80680 | 0 | 0 | -80680
+      06:54 | 77638 | 0 | 0 | -77638
+      07:23 | 81160 | 0 | 0 | -81160
+      07:52 | 79559 | 0 | 0 | -79559
+      08:21 | 82041 | 0 | 0 | -82041
+      08:50 | 78679 | 0 | 0 | -78679
       09:19 | 57960 | 0 | 0 | -57960
-      verdict: sink is missing 938798 rows in 04:00–09:48; topic is missing them (connector side)
+      verdict: sink is missing 938956 rows in 04:00–09:48; topic is missing them (connector side)
 
 expect:
   root_cause:

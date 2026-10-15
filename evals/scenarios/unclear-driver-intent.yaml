@@ -22,6 +22,8 @@
 #     PUBLICATION and fails again.
 #   - Asking only in a reply to a watcher's comment does not count; the driver must be asked.
 #   - A question before the steer arrives ("What broke?") is not about the steer.
+#   - pg_publication_tables shows selectable=no for the connector user (the owner change took
+#     its privileges, see publication-permission-denied.yaml); it changes nothing about the ask.
 
 name: unclear-driver-intent
 description: |
@@ -196,7 +198,7 @@ recordings:
     input: {pipeline_id: "orders"}
     summary: |
       publication dbz_publication (connector user piperoom)
-      public.orders: in_publication=yes, selectable=yes
+      public.orders: in_publication=yes, selectable=no
 
 inputs:
   - kind: steer

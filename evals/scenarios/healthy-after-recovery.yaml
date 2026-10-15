@@ -185,26 +185,37 @@ recordings:
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
   - tool: kafka_partition_rates
-    input: {table: "public.orders", window: "15m"}
     summary: |-
-      pg.public.orders last 15m: 41700 records (46/s); p0 13978 (33%), p2 13923, p1 13799; median 13923, max 13978, max/median 1.0x → even
+      pg.public.orders last 5m: 5400 records (18/s); p0 1810 (33%), p2 1803, p1 1787; median 1803, max 1810, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "15m"}
+    summary: |-
+      pg.public.orders last 15m: 16200 records (18/s); p0 5430 (33%), p2 5409, p1 5361; median 5409, max 5430, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "30m"}
+    summary: |-
+      pg.public.orders last 30m: 32400 records (18/s); p0 10860 (33%), p2 10819, p1 10721; median 10819, max 10860, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "1h"}
+    summary: |-
+      pg.public.orders last 1h: 64800 records (18/s); p0 21721 (33%), p2 21637, p1 21442; median 21637, max 21721, max/median 1.0x → even
   - tool: reconcile
-    input: {table: "public.orders"}
+    input: {table: "public.orders", since: "2026-10-11T08:30:00Z"}
     summary: |-
       reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 6m0s from 2026-10-11T08:30:00Z
       bucket | source | topic | sink | sink−source
-      08:30 | 16560 | 16560 | 16560 | +0
-      08:36 | 16858 | 16858 | 16858 | +0
-      08:42 | 16361 | 16361 | 16361 | +0
-      08:48 | 17056 | 17056 | 17056 | +0
-      08:54 | 16187 | 16187 | 16187 | +0
-      09:00 | 16709 | 16710 | 16709 | +0
-      09:06 | 16063 | 16063 | 16063 | +0
-      09:12 | 16808 | 16808 | 16808 | +0
-      09:18 | 16460 | 16460 | 16460 | +0
-      09:24 | 16982 | 16982 | 16982 | +0
-      09:30 | 16286 | 16286 | 16286 | +0
-      09:36 | 11040 | 11040 | 11007 | -33
+      08:30 | 6480 | 6480 | 6480 | +0
+      08:36 | 6480 | 6480 | 6480 | +0
+      08:42 | 6480 | 6480 | 6480 | +0
+      08:48 | 6480 | 6480 | 6480 | +0
+      08:54 | 6480 | 6480 | 6480 | +0
+      09:00 | 6480 | 6481 | 6480 | +0
+      09:06 | 6480 | 6480 | 6480 | +0
+      09:12 | 6480 | 6480 | 6480 | +0
+      09:18 | 6480 | 6480 | 6480 | +0
+      09:24 | 6480 | 6480 | 6480 | +0
+      09:30 | 6480 | 6480 | 6480 | +0
+      09:36 | 4320 | 4320 | 4320 | +0
       verdict: the sink matches the source in every bucket (within 2%)
 
 expect:

@@ -268,7 +268,7 @@ recordings:
   - tool: debezium_metrics
     input: {connector: "pg-orders-connector"}
     summary: |-
-      pg-orders-connector: streaming connected=true, 0.6 s behind source, last event 1.1 s ago, queue 7/8192, 418233 events seen; snapshot running=false, completed=true, paused=false
+      pg-orders-connector: streaming connected=true, 0.6 s behind source, last event 1.1 s ago, queue 7/8192, 418233 events seen; snapshot running=false, completed=true, paused=false, rows scanned of table public.orders 4120338, 4120338 events seen
 
 inputs:
   - kind: steer
