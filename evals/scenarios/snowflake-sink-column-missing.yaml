@@ -251,6 +251,9 @@ expect:
     - [schema, 'is incompatible']
     - ['incompatible schema']
     - ['incompatible change']
+    - ['was incompatible']
+    - ['as incompatible']
+    - ['incompatible with']
     - [breaking, schema]
   first_failing_layer: kafka-connect
   root_cause_layer: warehouse

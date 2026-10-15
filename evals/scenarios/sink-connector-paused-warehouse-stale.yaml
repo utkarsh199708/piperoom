@@ -267,7 +267,12 @@ expect:
   root_cause_forbidden:
     - [paus*, itself]
     - [paus*, automatic*]
-    - [paus*, error*]
+    # Phrases: "paused on purpose, with 0 errors" is right.
+    - ['paused after errors']
+    - ['paused after write errors']
+    - ['errors caused the pause']
+    - [paus*, 'because of errors']
+    - [paus*, 'due to errors']
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   # Who paused it, and why, is only in Meera's comment.

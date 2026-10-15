@@ -491,10 +491,14 @@ expect:
     - [stop*]
     - [slot*]
     - [wal, retain*]
-  # The header's trap: no task failed; a person stopped the connector.
+  # The header's trap: no task failed; a person stopped the connector. Assertive phrases: the
+  # recording itself says "0 failed tasks", which a right answer may quote.
   root_cause_forbidden:
-    - [task*, fail*]
-    - [task*, crash*]
+    - ['task failed']
+    - ['task 0 failed']
+    - ['failed task']
+    - ['task crashed']
+    - ['task 0 crashed']
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   expected_facts:

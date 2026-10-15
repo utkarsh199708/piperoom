@@ -148,6 +148,10 @@ expect:
     # Phrases: "pg_recent_ddl shows nothing changed" and "the slot still exists, nothing is
     # lost" are right ("nothing" is no negator in forbidden.go).
     - ['ddl change*']
+    - ['ddl changed']
+    - ['ddl was run']
+    - [ddl, 'changed the']
+    - [ddl, 'schema change']
     - [consumer, crash*]
     - [order-sync, crash*]
     - [poison pill]
@@ -156,6 +160,10 @@ expect:
     - ['slot is lost']
     - ['lost the slot']
     - ['lost its slot']
+    - ['slot lost']
+    - ['slot has been lost']
+    - ['slot got lost']
+    - ['lost slot']
     - [slot, dropped]
     - [broker, down]
     - [rebalanc*]

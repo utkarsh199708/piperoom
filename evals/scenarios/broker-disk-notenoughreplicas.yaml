@@ -254,12 +254,16 @@ expect:
     - [isr, 'in sync', 'under replicated', 'min insync replicas', 'not enough replicas', 'under min']
   # The trap story: calling the min.insync.replicas setting the problem and lowering it. A
   # negated clause ("do not lower min.insync.replicas") does not fire. The rows name the fix as
-  # a phrase: a bare lower* also hits the comparative ("the ISR fell lower than
-  # min.insync.replicas=2"), which is the right answer.
+  # a verb phrase ("lower the", "lowering the", "reduce"): a bare lower* also hits the
+  # comparative ("the ISR fell lower than min.insync.replicas=2"), which is the right answer.
   root_cause_forbidden:
     - ['lower min insync replicas']
     - ['lowering min insync replicas']
-    - ['lower the min insync replicas']
+    - ['lower the', 'min insync replicas']
+    - ['lowering the', 'min insync replicas']
+    - ['lower it']
+    - [reduc*, 'min insync replicas']
+    - ['set min insync replicas']
     - ['min insync replicas to 1']
     - ['min insync replicas 1']
     - [misconfigur*, 'min insync replicas']
