@@ -25,7 +25,27 @@ const (
 	connectorName = "pg-orders-connector"
 	valueSubject  = "pg.public.orders-value"
 	pgContainer   = "piperoom-dev-postgres-1"
+
+	// roomDBService is the room service's database in dev/docker-compose.yml. It
+	// is not part of the pipeline: `devctl reset` keeps it (QA G19).
+	roomDBService = "roomdb"
+	// roomDBVolume is its named volume as Docker names it (project_volume).
+	roomDBVolume = "piperoom-dev_roomdb"
+
+	// cdcInitFile is the idempotent init script with the heartbeat table and the
+	// publication, at its path inside the Postgres container (dev/postgres-init
+	// is mounted at /docker-entrypoint-initdb.d).
+	cdcInitFile = "/docker-entrypoint-initdb.d/04-cdc.sql"
 )
+
+// pipelineServices are the compose services `devctl reset` removes together
+// with their anonymous volumes: every service except roomDBService. A unit test
+// checks the list against dev/docker-compose.yml.
+var pipelineServices = []string{"postgres", "kafka", "schema-registry", "connect", "devconsumer"}
+
+// workerLogDir is where the Connect container writes its worker log on the host
+// (dev/docker-compose.yml mounts it; CONNECT_WORKER_LOG_FILE points into it).
+var workerLogDir = filepath.Join("dev", ".logs", "connect")
 
 // stack knows where the repo is and how to reach every service.
 type stack struct {
@@ -33,6 +53,9 @@ type stack struct {
 	cfg  config.Config
 	http *http.Client
 	log  *slog.Logger
+	poll time.Duration // waitFor's interval; zero means 2 s (tests shorten it)
+	// cdcInit, when set, replaces the docker exec of ensureCDCObjects (tests).
+	cdcInit func(ctx context.Context) error
 }
 
 func newStack(log *slog.Logger) (*stack, error) {
@@ -91,11 +114,35 @@ func (s *stack) psql(ctx context.Context, db string, sql ...string) (string, err
 	return strings.TrimSpace(out.String()), nil
 }
 
+// upArgs are the compose arguments of `devctl up`. --remove-orphans clears
+// containers of services that left the compose file.
+func upArgs() []string {
+	return []string{"up", "-d", "--build", "--wait", "--remove-orphans"}
+}
+
+// resetArgs are the compose commands `devctl reset` runs before `up`. The default
+// removes the pipeline containers with their anonymous volumes (Postgres data,
+// Kafka topics, Connect offsets, schemas) and keeps roomdb and its named volume,
+// so rooms survive. With rooms, `down -v` removes every volume, the rooms too.
+func resetArgs(rooms bool) [][]string {
+	if rooms {
+		return [][]string{{"down", "-v", "--remove-orphans"}}
+	}
+	rm := append([]string{"rm", "--stop", "--force", "--volumes"}, pipelineServices...)
+	return [][]string{rm}
+}
+
 func (s *stack) up(ctx context.Context) error {
-	if err := s.compose(ctx, nil, "up", "-d", "--build", "--wait"); err != nil {
+	if err := s.prepareWorkerLogDir(); err != nil {
+		return err
+	}
+	if err := s.compose(ctx, nil, upArgs()...); err != nil {
 		return err
 	}
 	if err := s.waitHTTP(ctx, s.cfg.ConnectURL+"/connectors", 2*time.Minute); err != nil {
+		return err
+	}
+	if err := s.ensureCDCObjects(ctx); err != nil {
 		return err
 	}
 	if err := s.registerConnector(ctx); err != nil {
@@ -104,13 +151,57 @@ func (s *stack) up(ctx context.Context) error {
 	if err := s.waitConnector(ctx, "RUNNING", 90*time.Second); err != nil {
 		return err
 	}
-	s.log.Info("stack is up", "connect", s.cfg.ConnectURL, "registry", s.cfg.SchemaRegistryURL, "kafka", s.cfg.KafkaBrokers)
+	s.log.Info("stack is up", "connect", s.cfg.ConnectURL, "registry", s.cfg.SchemaRegistryURL, "kafka", s.cfg.KafkaBrokers,
+		"room_db", "localhost:5433/piperoom", "worker_log", filepath.Join(workerLogDir, "connect.log"))
 	return nil
 }
 
-func (s *stack) reset(ctx context.Context) error {
-	if err := s.compose(ctx, nil, "down", "-v", "--remove-orphans"); err != nil {
-		return err
+// prepareWorkerLogDir creates dev/.logs/connect writable for everyone. The
+// Connect image runs as a non-root user; on a Linux host it could not write
+// into a directory Docker creates as root. (Docker Desktop ignores the mode.)
+func (s *stack) prepareWorkerLogDir() error {
+	dir := filepath.Join(s.root, workerLogDir)
+	if err := os.MkdirAll(dir, 0o777); err != nil {
+		return fmt.Errorf("devctl: create worker log dir: %w", err)
+	}
+	if err := os.Chmod(dir, 0o777); err != nil {
+		return fmt.Errorf("devctl: make worker log dir writable: %w", err)
+	}
+	return nil
+}
+
+// ensureCDCObjects runs the idempotent CDC init script (heartbeat table, the
+// publication with both tables) again. A fresh volume already has them; a volume
+// created before the script existed, or a publication that a "filtered" connector
+// rewrote, gets them back before the connector is registered.
+func (s *stack) ensureCDCObjects(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if s.cdcInit != nil {
+		return s.cdcInit(ctx)
+	}
+	args := []string{"exec", pgContainer, "psql", "-U", "piperoom", "-d", "orders", "-v", "ON_ERROR_STOP=1", "-q", "-f", cdcInitFile}
+	var out bytes.Buffer
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("devctl: apply %s: %w: %s", cdcInitFile, err, strings.TrimSpace(out.String()))
+	}
+	return nil
+}
+
+// reset wipes the pipeline and starts it clean. The room database survives
+// unless rooms is set (`devctl reset --rooms --yes`).
+func (s *stack) reset(ctx context.Context, rooms bool) error {
+	for _, args := range resetArgs(rooms) {
+		if err := s.compose(ctx, nil, args...); err != nil {
+			return err
+		}
+	}
+	if rooms {
+		s.log.Warn("reset: room database deleted with the pipeline", "volume", roomDBVolume)
+	} else {
+		s.log.Info("reset: pipeline data removed; the room database is kept", "service", roomDBService, "volume", roomDBVolume)
 	}
 	if err := s.up(ctx); err != nil {
 		return err
@@ -126,35 +217,59 @@ func (s *stack) reset(ctx context.Context) error {
 	})
 }
 
+// registerConnector registers dev/connectors/pg-orders-connector.json as is.
 func (s *stack) registerConnector(ctx context.Context) error {
-	body, err := os.ReadFile(filepath.Join(s.root, "dev", "connectors", connectorName+".json"))
+	return s.registerConnectorWith(ctx, nil)
+}
+
+// registerConnectorWith re-registers the dev connector config with some keys
+// overridden, so a scenario can e.g. point the connector at a different role.
+// PUT /config creates or updates, so this is safe to repeat.
+func (s *stack) registerConnectorWith(ctx context.Context, overrides map[string]string) error {
+	base, err := os.ReadFile(filepath.Join(s.root, "dev", "connectors", connectorName+".json"))
 	if err != nil {
 		return fmt.Errorf("devctl: read connector config: %w", err)
 	}
-	// PUT /config creates or updates, so this is safe to repeat.
-	_, err = s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/config", body, http.StatusOK, http.StatusCreated)
+	body, err := connectorConfig(base, overrides)
+	if err != nil {
+		return err
+	}
+	return s.putConnectorConfig(ctx, body)
+}
+
+// connectorConfig returns the JSON config base with overrides applied.
+func connectorConfig(base []byte, overrides map[string]string) ([]byte, error) {
+	var cfg map[string]string
+	if err := json.Unmarshal(base, &cfg); err != nil {
+		return nil, fmt.Errorf("devctl: decode connector config: %w", err)
+	}
+	for k, v := range overrides {
+		cfg[k] = v
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("devctl: encode connector config: %w", err)
+	}
+	return b, nil
+}
+
+func (s *stack) putConnectorConfig(ctx context.Context, body []byte) error {
+	_, err := s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/config", body, http.StatusOK, http.StatusCreated)
 	return err
 }
 
-// registerConnectorUser re-registers the connector with database.user/password
-// overridden, so a scenario can point the connector at a different role.
-func (s *stack) registerConnectorUser(ctx context.Context, user, pass string) error {
-	body, err := os.ReadFile(filepath.Join(s.root, "dev", "connectors", connectorName+".json"))
+// liveConnectorConfig is the config Connect runs now, which may differ from the
+// file (an approved agent fix changes it).
+func (s *stack) liveConnectorConfig(ctx context.Context) (map[string]string, error) {
+	b, err := s.do(ctx, http.MethodGet, s.cfg.ConnectURL+"/connectors/"+connectorName+"/config", nil, http.StatusOK)
 	if err != nil {
-		return fmt.Errorf("devctl: read connector config: %w", err)
+		return nil, err
 	}
-	var cfg map[string]any
-	if err := json.Unmarshal(body, &cfg); err != nil {
-		return fmt.Errorf("devctl: decode connector config: %w", err)
+	var cfg map[string]string
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return nil, fmt.Errorf("devctl: decode live connector config: %w", err)
 	}
-	cfg["database.user"] = user
-	cfg["database.password"] = pass
-	b, err := json.Marshal(cfg)
-	if err != nil {
-		return fmt.Errorf("devctl: encode connector config: %w", err)
-	}
-	_, err = s.do(ctx, http.MethodPut, s.cfg.ConnectURL+"/connectors/"+connectorName+"/config", b, http.StatusOK, http.StatusCreated)
-	return err
+	return cfg, nil
 }
 
 type connectorStatus struct {
@@ -241,7 +356,39 @@ func (s *stack) do(ctx context.Context, method, u string, body []byte, okCodes .
 			return b, nil
 		}
 	}
-	return nil, fmt.Errorf("devctl: %s %s: HTTP %d: %s", method, u, resp.StatusCode, strings.TrimSpace(string(b)))
+	return nil, &httpStatusError{Method: method, URL: u, Code: resp.StatusCode, Body: strings.TrimSpace(string(b))}
+}
+
+// httpStatusError is an answer with an unexpected status code.
+type httpStatusError struct {
+	Method, URL string
+	Code        int
+	Body        string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("devctl: %s %s: HTTP %d: %s", e.Method, e.URL, e.Code, e.Body)
+}
+
+// restartTaskSettled restarts a task, retrying while Connect answers 409: right
+// after a config change the worker group rebalances and refuses restarts.
+func (s *stack) restartTaskSettled(ctx context.Context, task int, timeout time.Duration) error {
+	var last error
+	isConflict := func(err error) bool {
+		var he *httpStatusError
+		return errors.As(err, &he) && he.Code == http.StatusConflict
+	}
+	err := s.waitFor(ctx, timeout, func() (bool, error) {
+		last = s.restartTask(ctx, task)
+		if isConflict(last) {
+			return false, nil
+		}
+		return true, last
+	})
+	if err != nil && isConflict(last) {
+		return fmt.Errorf("devctl: restart task %d: %w (Connect still answers: %w)", task, err, last)
+	}
+	return err
 }
 
 func (s *stack) waitHTTP(ctx context.Context, u string, timeout time.Duration) error {
@@ -254,7 +401,11 @@ func (s *stack) waitHTTP(ctx context.Context, u string, timeout time.Duration) e
 func (s *stack) waitFor(ctx context.Context, timeout time.Duration, cond func() (bool, error)) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	t := time.NewTicker(2 * time.Second)
+	every := s.poll
+	if every <= 0 {
+		every = 2 * time.Second
+	}
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		ok, err := cond()

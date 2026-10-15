@@ -1,7 +1,7 @@
 // Command devctl starts, breaks and fixes the local CDC pipeline used to
 // develop and test Piperoom. Run it from anywhere inside the repo.
 //
-//	devctl up | down | reset | status
+//	devctl up | down | reset [--rooms --yes] | status
 //	devctl health                     read-only; exit 1 if a layer is unhealthy
 //	devctl load [--rate 5]
 //	devctl break <scenario> | fix <scenario>
@@ -19,6 +19,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -29,8 +30,9 @@ import (
 const usage = `devctl — local pipeline control
 
   devctl up                 start the stack, register the connector, start devconsumer
-  devctl down               stop the stack
-  devctl reset              remove all data and start clean
+  devctl down               stop the stack (keeps all data)
+  devctl reset              remove the pipeline's data and start clean; keeps the room database
+  devctl reset --rooms --yes   the same, and also delete the room database (every room)
   devctl status             one-screen pipeline health (for humans)
   devctl health             read-only check per layer; exit 1 unhealthy, 2 setup error
   devctl load [--rate N]    insert/update orders N per second until Ctrl+C
@@ -115,13 +117,14 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		if err != nil {
 			return err
 		}
-		if len(rest) != 0 {
-			return fmt.Errorf("usage: devctl reset")
+		rooms, err := parseResetFlags(rest)
+		if err != nil {
+			return err
 		}
 		if err := requireLock(owner); err != nil {
 			return err
 		}
-		return st.reset(ctx)
+		return st.reset(ctx, rooms)
 	case "status":
 		return st.status(ctx, os.Stdout)
 	case "health":
@@ -178,6 +181,31 @@ func runCommand(ctx context.Context, st *stack, cmd string, args []string) error
 		return roomsCmd(ctx, st, args, os.Stdout)
 	}
 	return fmt.Errorf("unknown command %q", cmd)
+}
+
+const resetUsage = "usage: devctl reset [--rooms --yes]"
+
+// parseResetFlags reads `devctl reset [--rooms --yes]`. --rooms also deletes the
+// room database, which a plain reset keeps (QA G19); it is refused without --yes
+// so a habit of typing reset cannot erase every room.
+func parseResetFlags(args []string) (rooms bool, err error) {
+	fs := flag.NewFlagSet("reset", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	roomsFlag := fs.Bool("rooms", false, "also delete the room database (every room, event and approval)")
+	yes := fs.Bool("yes", false, "confirm --rooms")
+	if err := fs.Parse(args); err != nil {
+		return false, fmt.Errorf("%s: %w", resetUsage, err)
+	}
+	if fs.NArg() != 0 {
+		return false, errors.New(resetUsage)
+	}
+	switch {
+	case *roomsFlag && !*yes:
+		return false, fmt.Errorf("devctl: reset --rooms deletes every room, event and approval in the room database (volume %s); add --yes to confirm", roomDBVolume)
+	case *yes && !*roomsFlag:
+		return false, fmt.Errorf("devctl: --yes only confirms --rooms; a plain reset keeps the room database and needs no confirmation\n%s", resetUsage)
+	}
+	return *roomsFlag, nil
 }
 
 func scenarioNames() []string {

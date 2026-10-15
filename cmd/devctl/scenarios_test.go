@@ -58,6 +58,41 @@ type fakeLayers struct {
 
 	noRegister bool // a restart does not register the new schema (timeout path)
 	failLatest bool // GET .../versions/latest returns 500 (registry down path)
+
+	config     map[string]string // the live connector config; nil means the dev default (disabled)
+	configPuts int
+	conflicts  int // the next restarts answer 409 (rebalance after a config change)
+
+	// corruptLog, when set, is a worker log file: a task start in corruptMode
+	// appends the G17 decode error there and registers nothing, as Debezium does
+	// in filtered mode.
+	corruptLog  string
+	corruptMode string
+	t           testing.TB
+
+	cdcInits int   // runs of the CDC init script (stack.cdcInit, never docker in tests)
+	cdcErr   error // what the CDC init script returns
+}
+
+// liveConfig returns the connector config, the dev default when none is set.
+func (f *fakeLayers) liveConfig() map[string]string {
+	if f.config == nil {
+		f.config = map[string]string{"name": connectorName, "publication.autocreate.mode": "disabled"}
+	}
+	return f.config
+}
+
+// startTask is what a task start does: it streams, and registers the new schema
+// when the subject allows it, unless filtered mode makes it fail to decode.
+func (f *fakeLayers) startTask() {
+	f.taskState = "RUNNING"
+	if f.corruptLog != "" && publicationMode(f.liveConfig()) == f.corruptMode {
+		appendFile(f.t, f.corruptLog, g17LogExcerpt)
+		return
+	}
+	if f.compat == "NONE" && !f.noRegister && f.latestIsInt() {
+		f.schemas = append(f.schemas, f.nextSchema)
+	}
 }
 
 func (f *fakeLayers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -67,12 +102,27 @@ func (f *fakeLayers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && path == "/connectors/"+connectorName+"/status":
 		writeJSON(w, http.StatusOK, fmt.Sprintf(`{"connector":{"state":%q},"tasks":[{"id":0,"state":%q}]}`, f.connState, f.taskState))
-	case r.Method == http.MethodPost && path == "/connectors/"+connectorName+"/tasks/0/restart":
-		f.restarts++
-		f.taskState = "RUNNING"
-		if f.compat == "NONE" && !f.noRegister && !f.latestIsDecimal() {
-			f.schemas = append(f.schemas, f.nextSchema)
+	case r.Method == http.MethodGet && path == "/connectors/"+connectorName+"/config":
+		b, _ := json.Marshal(f.liveConfig())
+		writeJSON(w, http.StatusOK, string(b))
+	case r.Method == http.MethodPut && path == "/connectors/"+connectorName+"/config":
+		var cfg map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+			writeJSON(w, http.StatusBadRequest, `{"error_code":400}`)
+			return
 		}
+		f.config = cfg
+		f.configPuts++
+		f.startTask() // Connect restarts the tasks for a new config
+		writeJSON(w, http.StatusOK, `{}`)
+	case r.Method == http.MethodPost && path == "/connectors/"+connectorName+"/tasks/0/restart":
+		if f.conflicts > 0 {
+			f.conflicts--
+			writeJSON(w, http.StatusConflict, `{"error_code":409,"message":"Cannot complete request because of a conflicting operation (e.g. worker rebalance)"}`)
+			return
+		}
+		f.restarts++
+		f.startTask()
 		w.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodPut && path == "/config/"+valueSubject:
 		var body struct {
@@ -103,9 +153,33 @@ func (f *fakeLayers) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (f *fakeLayers) latestIsDecimal() bool {
-	ok, err := amountIsDecimal(f.schemas[len(f.schemas)-1])
-	return err == nil && ok
+func (f *fakeLayers) latestIsInt() bool {
+	shape, err := amountShape(f.schemas[len(f.schemas)-1])
+	return err == nil && shape == "int"
+}
+
+// g17LogExcerpt is the worker log of a task that cannot decode the WAL from
+// before the ALTER, shortened from the dev stack (Kafka layout of the stand-in).
+const g17LogExcerpt = `[2026-10-15 00:22:16,917] INFO Processing messages (io.debezium.connector.postgresql.PostgresStreamingChangeEventSource)
+[2026-10-15 00:22:16,938] ERROR Producer failure (io.debezium.pipeline.ErrorHandler)
+org.postgresql.util.PSQLException: ERROR: compressed lz4 data is corrupt
+	at org.postgresql.core.v3.QueryExecutorImpl.receiveErrorResponse(QueryExecutorImpl.java:2734)
+	at org.postgresql.core.v3.CopyDualImpl.receiveCopyData(CopyDualImpl.java:31)
+[2026-10-15 00:22:16,939] INFO Connected metrics set to 'false' (io.debezium.pipeline.ChangeEventSourceCoordinator)
+`
+
+// appendFile appends text to path. It runs on the fake server's goroutine, so it
+// reports with Errorf (safe there), not Fatal.
+func appendFile(t testing.TB, path, text string) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Errorf("append to %s: %v", path, err)
+		return
+	}
+	defer f.Close()
+	if _, err := f.WriteString(text); err != nil {
+		t.Errorf("append to %s: %v", path, err)
+	}
 }
 
 // snapshot returns the state the tests assert on, under the lock the handler uses.
@@ -113,6 +187,13 @@ func (f *fakeLayers) snapshot() (compat, taskState string, versions, restarts in
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.compat, f.taskState, len(f.schemas), f.restarts
+}
+
+// configSnapshot returns the live publication mode and how often the config was PUT.
+func (f *fakeLayers) configSnapshot() (mode string, puts int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return publicationMode(f.liveConfig()), f.configPuts
 }
 
 func writeJSON(w http.ResponseWriter, code int, body string) {
@@ -128,9 +209,16 @@ func newTestStack(t *testing.T, f *fakeLayers) (*stack, *bytes.Buffer) {
 	t.Cleanup(srv.Close)
 	var logs bytes.Buffer
 	return &stack{
-		cfg:  config.Config{ConnectURL: srv.URL, SchemaRegistryURL: srv.URL},
+		cfg:  config.Config{ConnectURL: srv.URL, SchemaRegistryURL: srv.URL, ConnectWorkerLogFile: f.corruptLog},
 		http: &http.Client{Timeout: 5 * time.Second},
 		log:  slog.New(slog.NewTextHandler(&logs, nil)),
+		poll: 10 * time.Millisecond,
+		cdcInit: func(context.Context) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.cdcInits++
+			return f.cdcErr
+		},
 	}, &logs
 }
 

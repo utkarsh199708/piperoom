@@ -61,8 +61,8 @@ func demoCmd(ctx context.Context, s *stack, args []string) error {
 		}
 	}()
 
-	s.log.Info("demo: reset to a clean seeded state", "scenario", rest[0])
-	if err := s.reset(ctx); err != nil {
+	s.log.Info("demo: reset to a clean seeded state (rooms are kept)", "scenario", rest[0])
+	if err := s.reset(ctx, false); err != nil {
 		return err
 	}
 	s.log.Info("demo: loading a short burst of traffic")
