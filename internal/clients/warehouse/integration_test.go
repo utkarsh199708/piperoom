@@ -178,7 +178,7 @@ func TestReadOnlyPoolIntegration(t *testing.T) {
 func TestTableActivityIntegration(t *testing.T) {
 	db := warehouseDB(t)
 	conn := writeConn(t, testenv.Require(t).WarehouseDBURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	table := testenv.Name("act")
@@ -197,17 +197,22 @@ func TestTableActivityIntegration(t *testing.T) {
 	if _, err := db.LoadErrors(ctx, "analytics."+table, time.Now().Add(-time.Hour), 5); !errors.Is(err, clients.ErrNotSupported) {
 		t.Fatalf("LoadErrors err = %v, want ErrNotSupported", err)
 	}
-	// Statistics are reported asynchronously: poll briefly for the inserts.
+	// Since PG 15 a backend keeps its counters until it has been idle for up
+	// to 10 s, so ask the writer to flush at the end of its next statement
+	// (best effort: the function is missing before PG 15). Then poll with a
+	// deadline past that idle flush, because the flush is still asynchronous.
+	_, _ = conn.Exec(ctx, "SELECT pg_stat_force_next_flush()")
 	var a TableActivity
-	for i := 0; i < 20; i++ {
+	deadline := time.Now().Add(15 * time.Second)
+	for {
 		var err error
 		if a, err = db.TableActivity(ctx, "analytics."+table); err != nil {
 			t.Fatalf("TableActivity: %v", err)
 		}
-		if a.Inserts >= 5 {
+		if a.Inserts >= 5 || time.Now().After(deadline) {
 			break
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 	}
 	if a.Inserts < 5 || a.LockWaiters != 0 {
 		t.Errorf("activity = %+v, want >= 5 inserts and no lock waiters", a)
@@ -247,5 +252,27 @@ func TestCountByBucketIntegration(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].Count != 3 || !got[0].Bucket.Equal(since) || got[1].Count != 2 || !got[1].Bucket.Equal(since.Add(10*time.Minute)) {
 		t.Errorf("got %+v", got)
+	}
+}
+
+// A missing sink table, schema or column is clients.ErrNotFound, so the
+// pipeline map can show a dropped table as failed rather than unreachable.
+func TestMissingObjectsAreNotFoundIntegration(t *testing.T) {
+	db := warehouseDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	missing := testenv.Name("gone")
+	for _, tc := range []struct{ table, col string }{
+		{"analytics." + missing, "loaded_at"},
+		{missing + ".orders", "loaded_at"},
+		{"analytics.orders", missing},
+	} {
+		if _, err := db.Freshness(ctx, tc.table, tc.col); !errors.Is(err, clients.ErrNotFound) {
+			t.Errorf("Freshness(%s, %s) err = %v, want ErrNotFound", tc.table, tc.col, err)
+		}
+		if _, _, err := db.Row(ctx, tc.table, tc.col, "1"); !errors.Is(err, clients.ErrNotFound) {
+			t.Errorf("Row(%s, %s) err = %v, want ErrNotFound", tc.table, tc.col, err)
+		}
 	}
 }

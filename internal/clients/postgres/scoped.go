@@ -16,7 +16,7 @@ import (
 // PublicationTables.
 
 const slotColumns = `
-		SELECT slot_name, plugin, active,
+		SELECT slot_name, COALESCE(plugin, ''), active,
 		       COALESCE(restart_lsn::text, ''),
 		       COALESCE(confirmed_flush_lsn::text, ''),
 		       COALESCE(wal_status, ''),

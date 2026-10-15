@@ -5,11 +5,14 @@ package dbtools
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"piperoom/internal/clients/connect"
 	"piperoom/internal/clients/postgres"
 	"piperoom/internal/owners"
 	"piperoom/internal/testenv"
@@ -38,7 +41,9 @@ func repoRoot(t *testing.T) string {
 
 // TestPgPublicationTablesIntegration runs the pg_publication_tables tool end
 // to end against the dev stack: it resolves the orders pipeline from
-// dev/owners.yaml and reads the real dbz_publication from the source Postgres.
+// dev/owners.yaml, reads the connector user and publication name from the
+// dev stack's Connect (the tool has no default role) and reads the real
+// dbz_publication from the source Postgres.
 func TestPgPublicationTablesIntegration(t *testing.T) {
 	cfg := testenv.Require(t)
 
@@ -54,7 +59,8 @@ func TestPgPublicationTablesIntegration(t *testing.T) {
 	}
 
 	reg := tools.NewRegistry()
-	if err := Register(reg, Deps{Src: db, Owners: o}); err != nil {
+	cc := connect.New(cfg.ConnectURL, &http.Client{Timeout: 10 * time.Second})
+	if err := Register(reg, Deps{Src: db, Owners: o, Connect: cc}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	tt, ok := reg.Get("pg_publication_tables")

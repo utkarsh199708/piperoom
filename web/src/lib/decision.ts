@@ -37,13 +37,17 @@ export function decisionFor(state: RoomState, user: CurrentUser): Decision | nul
   const approved = newest(proposals, 'approved')
   if (approved) {
     const total = approved.steps.length
+    // A finished fix is news only until the agent proposes the next one: then the bar follows that one.
+    const superseded = proposals.indexOf(approved) < proposals.length - 1
     const failed = approved.executed.findIndex((e) => !e.ok)
-    if (failed >= 0) return { kind: 'done', proposal: approved, ok: false, failedStep: failed + 1 }
-    if (approved.executed.length < total) {
+    if (failed >= 0) {
+      if (!superseded) return { kind: 'done', proposal: approved, ok: false, failedStep: failed + 1 }
+    } else if (approved.executed.length < total) {
       const i = approved.executed.length
       return { kind: 'executing', proposal: approved, step: i + 1, total, action: approved.steps[i].action }
+    } else if (approved.executed.length > 0 && !superseded) {
+      return { kind: 'done', proposal: approved, ok: true }
     }
-    if (approved.executed.length > 0) return { kind: 'done', proposal: approved, ok: true }
   }
 
   const waiting = proposals.find((p) => p.status === 'open' && p.required_layers.some((l) => p.approvals[l] === 'pending'))

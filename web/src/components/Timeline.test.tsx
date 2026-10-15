@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { Timeline } from './Timeline'
 import type { AgentMessageState, CommentState, StepState } from '../state/types'
 
@@ -114,6 +114,20 @@ describe('Timeline step stream', () => {
     fireEvent.change(screen.getByLabelText('Reply to comment'), { target: { value: 'ack' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     expect(onComment).toHaveBeenCalledWith('ack', 's1')
+  })
+
+  // The hook reports false for a send that never reached the server: the reply keeps its words.
+  it('a failed reply keeps the text and offers Retry', async () => {
+    const onComment = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    render(<Timeline steps={steps} messages={[]} comments={comments} onComment={onComment} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Reply' }))
+    fireEvent.change(screen.getByLabelText('Reply to comment'), { target: { value: 'ack' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument())
+    expect(screen.getByLabelText('Reply to comment')).toHaveValue('ack')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.queryByLabelText('Reply to comment')).not.toBeInTheDocument())
+    expect(onComment).toHaveBeenCalledTimes(2)
   })
 
   it('a member comments on a step', () => {

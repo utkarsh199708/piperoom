@@ -24,3 +24,24 @@ export function executionPhase(p: ProposalState): ExecutionInfo {
   if (p.status === 'approved') return { phase: 'running', step: Math.min(okSteps.size + 1, of), of }
   return { phase: 'pending', step: 0, of }
 }
+
+/** What a verdict says. `recovered: false` covers three of them. */
+export type VerdictKind = 'recovered' | 'not-recovered' | 'not-verified' | 'inconclusive'
+
+/**
+ * The payload has one boolean for three outcomes: the agent also sends `recovered: false` when it
+ * could not check at all ("not verified: …", e.g. a step's outcome is unknown) or the checks were
+ * inconclusive. Only the verdict's first words tell them apart (internal/agent/verify.go).
+ */
+export function verdictKind(v: { recovered: boolean; verdict?: string }): VerdictKind {
+  if (v.recovered) return 'recovered'
+  const head = (v.verdict ?? '').trimStart().toLowerCase()
+  if (head.startsWith('not verified')) return 'not-verified'
+  if (head.startsWith('inconclusive')) return 'inconclusive'
+  return 'not-recovered'
+}
+
+/** The verdict in two or three words: "recovered", "not recovered", "not verified", "inconclusive". */
+export function verdictWords(kind: VerdictKind): string {
+  return kind.replace('-', ' ')
+}

@@ -124,3 +124,26 @@ describe('DecisionBar as a bottom sheet', () => {
     expect(handle.approve).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('DecisionBar height variable', () => {
+  // On load a finished fix keeps the bar empty while `decision` is set; when a new proposal then
+  // needs you, the sheet must publish its height or it covers the composer.
+  it('publishes --sheet-h when the bar appears after rendering nothing', () => {
+    const root = document.documentElement
+    root.style.removeProperty('--sheet-h')
+    const done = { ...prop({ status: 'approved', approvals: { 'schema-registry': 'approved', 'kafka-connect': 'approved' } }), executed: [ex(0), ex(1)] }
+    const ui = (s: RoomState) => (
+      <DecisionHandleContext.Provider value={{ get: () => handle, set: () => undefined }}>
+        <DecisionBar state={s} user={arjun} placement="sheet" />
+      </DecisionHandleContext.Provider>
+    )
+    const { rerender, unmount } = render(ui(room(done)))
+    expect(screen.queryByRole('region', { name: 'Decision' })).not.toBeInTheDocument()
+    expect(root.style.getPropertyValue('--sheet-h')).toBe('')
+    rerender(ui({ ...room(done), proposals: [done, prop({ proposal_id: 'p2' })] }))
+    expect(screen.getByRole('region', { name: 'Decision' })).toBeInTheDocument()
+    expect(root.style.getPropertyValue('--sheet-h')).toMatch(/^\d+px$/)
+    unmount()
+    expect(root.style.getPropertyValue('--sheet-h')).toBe('')
+  })
+})

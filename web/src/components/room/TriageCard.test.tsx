@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import type { StepState, TriageState } from '@/state/types'
 import { TriageCard } from './TriageCard'
 
@@ -34,10 +34,21 @@ describe('TriageCard', () => {
     expect(screen.getByText(/MISSING_UNION_BRANCH <img src=x/)).toBeInTheDocument()
     expect(container.querySelector('img')).toBeNull()
     expect(screen.getByText(/MISSING_UNION_BRANCH/)).toHaveAttribute('aria-live', 'polite')
-    expect(screen.getByRole('link', { name: '2' })).toHaveAttribute('href', '#step-s_b')
-    expect(screen.queryByRole('link', { name: '1' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Go to step 2' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Go to step 1' })).toBeNull()
     expect(region).toHaveTextContent('Next: schema_registry_diff orders-value')
     expect(screen.getAllByRole('region')).toHaveLength(1)
+  })
+
+  // Under HashRouter a "#step-…" link replaces the route and drops the user on the room list.
+  it('step chips jump through onCite and never change the URL hash', () => {
+    window.location.hash = '#/rooms/r_x'
+    const onCite = vi.fn()
+    const { container } = render(<TriageCard state={{ triage: triage(), hypothesis: null, steps }} onCite={onCite} />)
+    expect(container.querySelector('a[href^="#"]')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Go to step 2' }))
+    expect(onCite).toHaveBeenCalledWith('s_b')
+    expect(window.location.hash).toBe('#/rooms/r_x')
   })
 
   it('collapses to one muted line once a hypothesis exists', () => {

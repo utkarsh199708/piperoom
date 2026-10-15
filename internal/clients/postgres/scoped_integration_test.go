@@ -464,7 +464,7 @@ func TestReplicationSlotsNamedRecordsProvenanceIntegration(t *testing.T) {
 		t.Fatal("no call recorded")
 	}
 	c := calls[0]
-	if !strings.HasPrefix(c.Text, "SELECT slot_name, plugin, active") || len(c.ParamsRedacted) != 1 || c.ParamsRedacted[0] != "$1=["+f.slotMine+"]" {
+	if !strings.HasPrefix(c.Text, "SELECT slot_name, COALESCE(plugin, ''), active") || len(c.ParamsRedacted) != 1 || c.ParamsRedacted[0] != "$1=["+f.slotMine+"]" {
 		t.Fatalf("call = %+v", c)
 	}
 	if strings.Contains(c.Target, "@") && strings.Contains(c.Target, ":") && !strings.HasPrefix(c.Target, "postgres ") {

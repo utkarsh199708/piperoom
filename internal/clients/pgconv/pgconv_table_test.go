@@ -196,12 +196,9 @@ func TestNumericStringTable(t *testing.T) {
 	}
 }
 
-func TestNumericStringZeroWithPositiveExponentIsSkipped(t *testing.T) {
-	// BUG (see reviews/coverage-2026-10.md): zero with a positive exponent
-	// renders as "000" because the trailing zeros are appended to the digit
-	// string "0". The canonical form is "0". Kept out of the pass/fail set
-	// until the fix lands in pgconv.go.
-	t.Skip("BUG: NumericString(Int=0, Exp=2) returns \"000\", want \"0\"; see reviews/coverage-2026-10.md")
+// Zero with a positive exponent used to render as "000": the trailing zeros
+// were appended to the digit string "0" (reviews/coverage-2026-10.md).
+func TestNumericStringZeroWithPositiveExponent(t *testing.T) {
 	if got := NumericString(pgtype.Numeric{Int: big.NewInt(0), Exp: 2, Valid: true}); got != "0" {
 		t.Fatalf("got %q, want \"0\"", got)
 	}
@@ -240,4 +237,17 @@ func TestWithDeadlineErrorPaths(t *testing.T) {
 			t.Fatalf("after cancel, ctx.Err() = %v, want Canceled", ctx.Err())
 		}
 	})
+}
+
+// Infinite timestamps and dates decode to pgtype.InfinityModifier; they must
+// read as Postgres prints them, not as the numbers 1 and -1.
+func TestToJSONInfinity(t *testing.T) {
+	for in, want := range map[pgtype.InfinityModifier]string{
+		pgtype.Infinity:         "infinity",
+		pgtype.NegativeInfinity: "-infinity",
+	} {
+		if got := ToJSON(in); got != want {
+			t.Errorf("ToJSON(%d) = %v, want %q", in, got, want)
+		}
+	}
 }
