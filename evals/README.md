@@ -86,6 +86,52 @@ English: when the two disagree, trust the judge.
 `go test -tags claude ./evals -run TestJudgeAgreement -v` (needs the key) measures judge-vs-terms
 agreement. Default tests and CI never call the network.
 
+### Ambiguous answers: tri-state keyword pass and the cached judge (#454)
+
+evalrun's default judge mode is **`auto`** (a scenario's `judge:` field or `-judge` overrides it;
+the `evals.Config` library default stays `terms`). The keyword pass grades the root cause, the first
+failing layer and the root-cause layer as **pass**, **fail** or **ambiguous** (`tristate.go`). An item
+is ambiguous when, in one clause, a negator, rule-out or hedge (the `forbiddenDenials` spans of
+`forbidden.go` and the hedge list of `hedge.go`) sits with the item's words (any `root_cause` term or
+every term of a `root_cause_forbidden` row; a layer's words for a layer), or when a forbidden row fires
+in a clause that has any negator. Every other text keeps exactly the keyword grade.
+
+When any item of a run's final hypothesis is ambiguous, one `HypothesisJudge` verdict replaces the
+keyword verdicts of the root cause and both layers, as `-judge claude` does; the keyword ones stay in
+the result (`judged`, `ambiguity`). The verdict comes from:
+
+1. the **recorded verdict cache** `evals/judgecache/` (`judgecache.go`): one file per verdict, named
+   `sha256(JudgePromptVersion NUL scenario name NUL hypothesis)`. Bumping `JudgePromptVersion` in
+   `judge.go` invalidates every entry (`TestJudgePromptVersionPinned` fails when the prompt changes
+   without a bump); an entry recorded against other scenario truth (description, layers, `root_cause`,
+   `root_cause_forbidden`) is stale and an error, never a verdict. **Only synthetic texts** are cached:
+   the fill reads nothing but the committed manifest, and a run never writes the cache;
+2. on a miss, the **live judge** (a `-tags claude` build), at most `-judge-max-calls` (default 50) calls
+   per run. Past the cap, or with no live judge, the ambiguous items are reported
+   **ambiguous (unjudged)** and count as **not passed**.
+
+`-judge-cache-only` reads only the cache and **fails the run on a miss** (unit tests and CI replays):
+a miss never falls back to the keyword grade. `-judge terms` forces the keyword grade (the ambiguity is
+still recorded). The report shows `judge: N ambiguous · J judged (C cached, L live) · U ambiguous
+(unjudged) · live calls · judge tokens`, and each failed run's ambiguous items and their reasons.
+
+The **ambiguous-set manifest** `evals/judgecache/ambiguous.json` lists every pinned corpus text
+(`TestGoldenCorpus` scenario rows and `rootcause_corpus.yaml`) the pass marks ambiguous, with its label
+and main's keyword grade. `TestAmbiguousCorpusSet` keeps it equal to the pass
+(`go test ./evals -run TestAmbiguousCorpusSet -update-ambiguous`, then review the diff);
+`TestTriStateNoFlip` proves a clear text never reaches the judge; `TestJudgedCorpusGrades` checks the
+recorded verdicts against the labels and skips while the cache is empty. Filling the cache is a **paid
+run that needs the owner's approval**:
+
+```sh
+go run ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -dry-run -prices prices.json   # estimate only
+go run -tags claude ./evals/cmd/evalrun -judge-fill evals/judgecache/ambiguous.json -judge-max-calls 200   # PAID
+```
+
+The negation, denial and hedge heuristics in `forbidden.go` and `textmatch.go` are **frozen**: a
+change there must fix a pinned corpus row with zero flips. A misgraded wording goes into the corpus
+with its correct, judge-checked label instead.
+
 | flag | default | meaning |
 |---|---|---|
 | `-scenarios` | `evals/scenarios` | directory of `*.yaml` scenarios |
@@ -103,6 +149,11 @@ agreement. Default tests and CI never call the network.
 | `-fail-on-regression` | off | exit 2 if any scenario regressed |
 | `-commit` | VCS stamp, else `git rev-parse HEAD` (+`-dirty`) | revision recorded in every result |
 | `-no-tap` | off | skip the model tap; results record `prompt_hash: untapped` |
+| `-judge` / `-judge-model` | scenario's `judge`, else `auto` / `PIPEROOM_MODEL` | `terms`, `claude` or `auto` (above) |
+| `-judge-cache DIR` | `evals/judgecache` | recorded verdicts `auto` reads first |
+| `-judge-cache-only` | off | `auto` reads only the cache; a miss fails the run |
+| `-judge-max-calls N` | 50 | live judge calls per run in `auto` (and per `-judge-fill`); past it, ambiguous (unjudged) |
+| `-judge-fill MANIFEST` / `-dry-run` | — | record verdicts for the manifest's texts (paid, owner approval) / estimate only |
 
 A scenario **regresses** when its pass rate drops, its mean score drops by more than `-tolerance`,
 or it is missing from the candidate report.
