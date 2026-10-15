@@ -91,7 +91,6 @@ func TestRedactMessageCapNeverSplitsAValue(t *testing.T) {
 		{"ssn 123-45-6789", "123-45"},
 		{"phone 555-123-4567", "555-123"},
 		{"card 4111 1111 1111 1111", "4111 1111"},
-		{"intl +44 20 7946 0958", "7946"},
 		{"jdbc:postgresql://app:S3cretPw@db:5432/orders", "S3cr"},
 		{"card 2223 0031 2200 3222", "2223 0031"},
 		{"card 2223-0031-2200-3222", "2223-0031"},
@@ -103,6 +102,8 @@ func TestRedactMessageCapNeverSplitsAValue(t *testing.T) {
 		{"phone 555  123  4567", "555 123"},
 		{"card 4111  1111  1111  1111", "4111 1111"},
 		{"card 4111\t1111\t1111\t1111", "4111 1111"},
+		{"card 41111111-11111111", "41111111"},
+		{"token=:xyz789abc", "xyz789"},
 	}
 	for _, v := range values {
 		for pad := 260; pad <= 300; pad++ {
@@ -149,38 +150,25 @@ func TestRedactMessageCapKeepsEvidence(t *testing.T) {
 			t.Errorf("RedactMessage(%.20q...) = %q, want %q", in, got, want)
 		}
 	}
-	// An offset the phone rule keeps is not cut out at the cap either.
-	got := RedactMessage(strings.Repeat("x ", 140) + "y offset 555 123 4567 next")
-	if !strings.Contains(got, "offset 555 123") {
-		t.Errorf("offset at the cap lost: ...%q", got[len(got)-30:])
-	}
 }
 
 // TestRedactCorpus is the redaction corpus (docs/agents/org.md §12): every
 // text a review quoted is a row. mask: the secret part is gone. keep: the text
-// comes back unchanged (main keeps it too). gap: a value main leaks as well,
-// pinned at today's output until its follow-up ticket fixes it.
+// comes back unchanged. gap: main gives the same output; the row pins it, with
+// the ticket that will change it, until that ticket flips it.
 func TestRedactCorpus(t *testing.T) {
 	tests := []struct {
 		kind, in string
 		gone     string // mask: the part that must be gone
 		want     string // gap: today's output
+		why      string // gap: the ticket
 	}{
-		// #426: international phones and a bare bearer token are masked.
-		{kind: "mask", in: "phone +44 20 7946 0958 now", gone: "7946"},
-		{kind: "mask", in: "phone +15551234567 now", gone: "5551234567"},
-		{kind: "mask", in: "tel +49-30-1234-5678.", gone: "1234-5678"},
-		{kind: "mask", in: "phone +91-98765-43210 now", gone: "98765"},
-		{kind: "mask", in: "tel +91 98765 43210 now", gone: "98765"},
-		{kind: "mask", in: "customer at offset +44 20 7946 0958", gone: "7946"},
-		{kind: "mask", in: "phone.offset: 555-123-4567", gone: "555-123"},
 		{kind: "mask", in: "call 555 123 4567 now", gone: "555 123"},
+		{kind: "mask", in: "phone.offset: 555-123-4567", gone: "555-123"},
 		{kind: "mask", in: "call +1 2 3 4 5 555-123-4567 now", gone: "123-4567"},
-		{kind: "mask", in: "auth header bearer abcdef123456 sent", gone: "abcdef123456"},
-		{kind: "mask", in: "got Bearer eyJhbGciOi.x.y here", gone: "eyJhbGciOi"},
-		{kind: "mask", in: "Authorization: Bearer x", gone: " x"},
 		{kind: "mask", in: "authorization=Basic dXNlcjpwYXNz retry", gone: "dXNlcjpwYXNz"},
-		// Cards main masks: 2-series and Mir, and every Luhn-valid grouping.
+		// Cards main masks: 2-series and Mir, and every Luhn-valid grouping,
+		// dash-joined halves included.
 		{kind: "mask", in: "card 2223 0031 2200 3222 declined", gone: "2223"},
 		{kind: "mask", in: "card 2223-0031-2200-3222 declined", gone: "2223"},
 		{kind: "mask", in: "card 2221 0000 0000 0009 rejected", gone: "2221"},
@@ -196,19 +184,51 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "mask", in: "card 4222 2222 2222 2 rejected", gone: "4222"},
 		{kind: "mask", in: "card 3782 822463 10005 ok", gone: "822463"},
 		{kind: "mask", in: "ids 1234 5678 9012 3452", gone: "1234"},
-		// #426: Kafka positions and offset ranges are kept.
-		{kind: "keep", in: "skipped offsets 1234520-1234619 on orders-0"},
+		{kind: "mask", in: "card 41111111-11111111 declined", gone: "41111111-11111111"},
+		{kind: "mask", in: "pan=41111111-11111111", gone: "41111111-11111111"},
+		{kind: "mask", in: "card 411111-1111111111 declined", gone: "411111-1111111111"},
+		{kind: "mask", in: "card 4111111111-111111 declined", gone: "4111111111-111111"},
+		{kind: "mask", in: "card 4111111-111111111 declined", gone: "4111111-111111111"},
+		{kind: "mask", in: "card 378282-246310005 declined", gone: "378282-246310005"},
+		{kind: "mask", in: "pan 378282-246310005 rejected", gone: "378282-246310005"},
+		{kind: "mask", in: "card 5555555555-554444 declined", gone: "5555555555-554444"},
+		{kind: "mask", in: "card 555555-5555554444 declined", gone: "555555-5555554444"},
+		{kind: "mask", in: "card 55555555-55554444 declined", gone: "55555555-55554444"},
+		{kind: "mask", in: "card 222300-3122003222 declined", gone: "222300-3122003222"},
+		{kind: "mask", in: "card 22230031-22003222 x", gone: "22230031-22003222"},
+		{kind: "mask", in: "card 6011000990-139424 declined", gone: "6011000990-139424"},
+		{kind: "mask", in: "card 601111-1111111117 declined", gone: "601111-1111111117"},
+		{kind: "mask", in: "pan 4222222-222222 rejected", gone: "4222222-222222"},
+		// A credential value that starts with ':' is still a value.
+		{kind: "mask", in: "token=:xyz789", gone: "xyz789"},
+		{kind: "mask", in: "token: :xyz789 rejected", gone: "xyz789"},
+		{kind: "mask", in: "token = :xyz789 rejected", gone: "xyz789"},
+		{kind: "mask", in: "auth_token=:abc123 rejected", gone: "abc123"},
+		{kind: "mask", in: "access_token = :Zx9 failed", gone: "Zx9"},
+		{kind: "mask", in: "access_token=:s3cr3t", gone: "s3cr3t"},
+		{kind: "mask", in: "api_token: :s3cr3t99", gone: "s3cr3t99"},
+		{kind: "mask", in: "session_token=:a1b2c3 failed", gone: "a1b2c3"},
+		{kind: "mask", in: "refresh_token=:abc failed", gone: "abc"},
+		{kind: "mask", in: "x-api-token=:k3y", gone: "k3y"},
+		{kind: "mask", in: "token=::abc123def", gone: "abc123def"},
+		{kind: "mask", in: "token: ::eyJabc", gone: "eyJabc"},
+		{kind: "mask", in: "token: Bearer :abc123def", gone: "abc123def"},
+		{kind: "mask", in: "token=Basic :dXNlcjpw", gone: "dXNlcjpw"},
+		// Phone formats after a position word.
+		{kind: "mask", in: "partition (555) 123-4567", gone: "(555) 123-4567"},
+		{kind: "mask", in: "partition: (555) 123-4567 owner", gone: "(555) 123-4567"},
+		{kind: "mask", in: "customer at offset (555) 123-4567", gone: "(555) 123-4567"},
+		{kind: "mask", in: "offset (555) 123-4567", gone: "(555) 123-4567"},
+		{kind: "mask", in: "offsets: 555.123.4567", gone: "555.123.4567"},
+		{kind: "mask", in: "offsets 555.123.4567", gone: "555.123.4567"},
+		// Prose and counts main keeps.
 		{kind: "keep", in: "offsets 123456789-123456999 skipped"},
-		{kind: "keep", in: "Topic orders-dlq partition 0 offset 555 123 4567"},
-		{kind: "keep", in: "partitions: 555-123-4567"},
-		// Prose around "bearer" is kept.
 		{kind: "keep", in: "bearer token expired"},
 		{kind: "keep", in: "the Bearer scheme is required by the sink"},
 		{kind: "keep", in: "HTTP 401 invalid bearer token for sink"},
 		{kind: "keep", in: "missing bearer header"},
 		{kind: "keep", in: "WWW-Authenticate: Bearer realm=api, error=invalid_token"},
 		{kind: "keep", in: "Bearer realm=example rejected"},
-		// Counts, builds and zone offsets are not phones.
 		{kind: "keep", in: "consumer lag grew +12500000 messages"},
 		{kind: "keep", in: "consumer lag grew by +12500000 in 5m"},
 		{kind: "keep", in: "lag delta +123456789 records"},
@@ -218,16 +238,32 @@ func TestRedactCorpus(t *testing.T) {
 		{kind: "keep", in: "retry +1 2026-10-15 scheduled"},
 		{kind: "keep", in: "retry +1 2 3 times"},
 		{kind: "keep", in: "lag +12 at 10:00"},
-		// Known gaps: main leaks these too (follow-up ticket in the PR).
-		{kind: "gap", in: "tel 0049-30-123456 now", want: "tel 0049-30-123456 now"},
-		{kind: "gap", in: "phone +44 (0)20 7946 0958 now", want: "phone +44 (0)20 7946 0958 now"},
-		{kind: "gap", in: "phone +49 30 1234567 now", want: "phone +49 30 1234567 now"},
-		{kind: "gap", in: "phone +49 30 12345678 now", want: "phone +49 30 12345678 now"},
-		{kind: "gap", in: "phone 020 7946 0958 now", want: "phone 020 7946 0958 now"},
-		{kind: "gap", in: "phone: 5551234567 now", want: "phone: 5551234567 now"},
-		{kind: "gap", in: "header bearer: abc123def456 rejected", want: "header bearer: abc123def456 rejected"},
-		{kind: "gap", in: "ssn 123 45 6789 invalid", want: "ssn 123 45 6789 invalid"},
-		{kind: "gap", in: "card 2223003122003222 rejected", want: "card 2223003122003222 rejected"},
+		// #426 is split out of #435 (org.md §12): main's output, pinned.
+		{kind: "gap", in: "phone +44 20 7946 0958 now", want: "phone +44 20 7946 0958 now", why: "#426, split out"},
+		{kind: "gap", in: "phone +15551234567 now", want: "phone +15551234567 now", why: "#426, split out"},
+		{kind: "gap", in: "tel +49-30-1234-5678.", want: "tel +49-30-1234-5678.", why: "#426, split out"},
+		{kind: "gap", in: "phone +91-98765-43210 now", want: "phone +91-98765-43210 now", why: "#426, split out"},
+		{kind: "gap", in: "tel +91 98765 43210 now", want: "tel +91 98765 43210 now", why: "#426, split out"},
+		{kind: "gap", in: "customer at offset +44 20 7946 0958", want: "customer at offset +44 20 7946 0958", why: "#426, split out"},
+		{kind: "gap", in: "auth header bearer abcdef123456 sent", want: "auth header bearer abcdef123456 sent", why: "#426, split out"},
+		{kind: "gap", in: "got Bearer eyJhbGciOi.x.y here", want: "got Bearer eyJhbGciOi.x.y here", why: "#426, split out"},
+		{kind: "gap", in: "Authorization: Bearer x", want: "Authorization: Bearer x", why: "#426, split out"},
+		{kind: "gap", in: "skipped offsets 1234520-1234619 on orders-0", want: "skipped offsets <redacted> on orders-0", why: "#426, split out (over-mask)"},
+		{kind: "gap", in: "Topic orders-dlq partition 0 offset 555 123 4567", want: "Topic orders-dlq partition 0 offset <redacted>", why: "#426, split out (over-mask)"},
+		{kind: "gap", in: "partitions: 555-123-4567", want: "partitions: <redacted>", why: "#426, split out (over-mask)"},
+		// Known gaps main shares, tracked in #469.
+		{kind: "gap", in: "tel 0049-30-123456 now", want: "tel 0049-30-123456 now", why: "#469"},
+		{kind: "gap", in: "phone +44 (0)20 7946 0958 now", want: "phone +44 (0)20 7946 0958 now", why: "#469"},
+		{kind: "gap", in: "phone +49 30 1234567 now", want: "phone +49 30 1234567 now", why: "#469"},
+		{kind: "gap", in: "phone +49 30 12345678 now", want: "phone +49 30 12345678 now", why: "#469"},
+		{kind: "gap", in: "phone 020 7946 0958 now", want: "phone 020 7946 0958 now", why: "#469"},
+		{kind: "gap", in: "phone: 5551234567 now", want: "phone: 5551234567 now", why: "#469"},
+		{kind: "gap", in: "header bearer: abc123def456 rejected", want: "header bearer: abc123def456 rejected", why: "#469"},
+		{kind: "gap", in: "ssn 123 45 6789 invalid", want: "ssn 123 45 6789 invalid", why: "#469"},
+		{kind: "gap", in: "card 2223003122003222 rejected", want: "card 2223003122003222 rejected", why: "#469"},
+		{kind: "gap", in: "card 4111 1111 1111 1111 2 items", want: "card 4111 1111 1111 1111 2 items", why: "#469"},
+		{kind: "gap", in: "phone+44 20 7946 0958", want: "phone+44 20 7946 0958", why: "#469"},
+		{kind: "gap", in: "bearer=abc123def456 rejected", want: "bearer=abc123def456 rejected", why: "#469"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.kind+" "+tt.in, func(t *testing.T) {
@@ -243,13 +279,37 @@ func TestRedactCorpus(t *testing.T) {
 				}
 			case "gap":
 				if got != tt.want {
-					t.Errorf("known gap changed: RedactMessage(%q) = %q, want %q (fixed? flip the row to mask)", tt.in, got, tt.want)
+					t.Errorf("gap (%s) changed: RedactMessage(%q) = %q, want %q (fixed? flip the row)", tt.why, tt.in, got, tt.want)
 				}
 			}
 			if again := RedactMessage(got); again != got {
 				t.Errorf("not idempotent: %q -> %q", got, again)
 			}
 		})
+	}
+}
+
+// A message over the cap only because of white space keeps main's quote rule:
+// the cut is decided on the text as it came, so an open single quote is a
+// value that runs past the cut, not an apostrophe.
+func TestRedactMessageCutCountsTheOriginalText(t *testing.T) {
+	for in, want := range map[string]string{
+		"Batch entry 0 INSERT INTO t (a) SELECT 'Jane Doe, 42 Elm St" + strings.Repeat("\"\\n        \"", 40) + "was aborted": "Batch entry 0 INSERT INTO t (a) SELECT " + Redacted,
+		"insert failed for value 'jane doe 555" + strings.Repeat(" ", 300) + "x":                                              "insert failed for value " + Redacted,
+	} {
+		if got := RedactMessage(in); got != want {
+			t.Errorf("RedactMessage(%.40q...) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A long token that only internal/redact knows is cut where the cap falls:
+// main does the same (#469).
+func TestRedactMessageCapLongJWTGap(t *testing.T) {
+	jwt := "eyJhbGciOiJIUzI1NiJ9." + strings.Repeat("eyJzdWIiOiJqYW5lQGV4YW1wbGUuY29tIn0", 6) + ".c2lnbmF0dXJl"
+	in := strings.Repeat("x", 109) + " token " + jwt + " rejected"
+	if got, want := RedactMessage(in), in[:MaxMessageRunes]; got != want {
+		t.Errorf("gap (#469) changed: RedactMessage(...) = %q, want %q (fixed? flip the row)", got, want)
 	}
 }
 

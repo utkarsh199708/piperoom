@@ -143,18 +143,28 @@ func TestOneLineCorpus(t *testing.T) {
 		"COMMENT ON TABLE public.t IS 'bearer token rotation policy'",
 		"ALTER TABLE public.t ALTER COLUMN ts SET DEFAULT 'UTC+1 2026-10-15 18:00'",
 		"ConnectException: lag +12500000 behind",
+		"CREATE POLICY tenant ON public.sessions USING (session_token = current_setting('app.session')::text)",
+		"CREATE INDEX users_token_idx ON public.users (token) WHERE token = NULL",
+		"COMMENT ON TABLE public.t IS 'requires Bearer authentication.'",
+		"ALTER TABLE public.t ALTER COLUMN l SET DEFAULT 'lag +12.345.678'",
+		"ALTER TABLE public.t ALTER COLUMN d SET DEFAULT '+1 15.10.2026'",
 	} {
 		if got := oneLine(keep); got != keep {
 			t.Errorf("oneLine(%q) = %q, want it unchanged", keep, got)
 		}
 	}
 	for in, gone := range map[string]string{
-		"ALTER TABLE public.t ADD CONSTRAINT c CHECK (phone <> '+44 20 7946 0958')":   "7946",
 		"ALTER TABLE public.t ADD CONSTRAINT c CHECK (card <> '2223 0031 2200 3222')": "2223",
 		"ALTER ROLE app SET my.password = hunter2":                                    "hunter2",
 	} {
 		if got := oneLine(in); strings.Contains(got, gone) {
 			t.Errorf("oneLine(%q) = %q, still has %q", in, got, gone)
 		}
+	}
+	// #426 is split out of #435 (org.md §12): international phones are kept,
+	// as on main.
+	gap := "ALTER TABLE public.t ADD CONSTRAINT c CHECK (phone <> '+44 20 7946 0958')"
+	if got := oneLine(gap); got != gap {
+		t.Errorf("gap (#426) changed: oneLine(%q) = %q (fixed? flip the row)", gap, got)
 	}
 }

@@ -26,10 +26,10 @@ var tailMarkers = [][]rune{[]rune("[source:"), []rune("detail:"), []rune("where:
 // drivers quote the failing record in their messages, and a 300-rune cap
 // keeps exactly the part where the snippet sits, so:
 //
-//  1. cap at 300 runes (after white space is tidied, so a tab or a double
-//     space counts as one space); a value a rule of step 6 masks that the cut
-//     would split is replaced whole, so no part of it survives the cut; else
-//     a word of up to 160 runes the cut would split is dropped;
+//  1. cap at 300 runes; a value that step 6's own patterns match (not one
+//     only internal/redact finds) and that the cut would split is replaced
+//     whole, also when tabs or runs of spaces separate its groups; else a
+//     word of up to 160 runes the cut would split is dropped;
 //  2. drop everything from "[Source:", "Detail:" or "Where:" (any case) to
 //     the end;
 //  3. replace every balanced {...} and [...] (an unbalanced opener takes the
@@ -71,9 +71,7 @@ func RedactMessage(s string) string {
 }
 
 func redactOnce(s string) string {
-	// Tidy first: the cut must see the separators the masks see, or a
-	// "555\t123\t4567" at the cap is not found as a phone.
-	rs := tidy([]rune(s))
+	rs := []rune(s)
 	// A cut can drop the closing quote of a value: then an open single quote
 	// is a value, not an apostrophe (scrub).
 	cut := len(rs) > MaxMessageRunes
@@ -81,6 +79,7 @@ func redactOnce(s string) string {
 		rs = safeCut(rs)
 	}
 	rs = capRunes(rs)
+	rs = tidy(rs)
 	rs = cutTail(rs)
 	rs = scrub(rs, cut)
 	rs = []rune(maskUnquoted(string(rs)))
@@ -99,20 +98,30 @@ const (
 	maxCutToken = 160
 )
 
-// safeCut makes the first cut of rs (len(rs) > MaxMessageRunes, tidied). A
-// cut value no longer matches its mask ("jane.doe@exam", "123-45-678") and
-// went out in part. So a masked value that straddles the cap (also one with
-// spaces, "4111 1111 1111 1111") is replaced by Redacted from its start;
-// otherwise the cut moves back to the start of a word that straddles the cap.
-// The word rule does not follow the value rule: it would drop the key of
+// safeCut makes the first cut of rs (len(rs) > MaxMessageRunes). A cut value
+// no longer matches its mask ("jane.doe@exam", "123-45-678") and went out in
+// part. So a value that maskUnquoted's own patterns match and that straddles
+// the cap (also one with spaces, "4111 1111 1111 1111") is replaced by
+// Redacted from its start; otherwise the cut moves back to the start of a word
+// that straddles the cap. The values are found in the tidied window, as the
+// masks see it ("555\t123\t4567" is a phone), and mapped back to rs. The word
+// rule does not follow the value rule: it would drop the key of
 // "password=<value>" and could empty the message.
 func safeCut(rs []rune) []rune {
 	at := MaxMessageRunes
-	win := string(rs[:min(len(rs), MaxMessageRunes+cutLookahead)])
-	capByte := len(string(rs[:MaxMessageRunes]))
+	tw, raw := tidyIndex(rs[:min(len(rs), MaxMessageRunes+cutLookahead)])
+	capT := len(tw) // tidied runes that come from before the cap
+	for j, i := range raw {
+		if i >= MaxMessageRunes {
+			capT = j
+			break
+		}
+	}
+	win := string(tw)
+	capByte := len(string(tw[:capT]))
 	for _, sp := range piiSpans(win) {
 		if sp[0] < capByte && sp[1] > capByte {
-			at = min(at, utf8.RuneCountInString(win[:sp[0]]))
+			at = min(at, raw[utf8.RuneCountInString(win[:sp[0]])])
 		}
 	}
 	if at < MaxMessageRunes {
@@ -154,26 +163,34 @@ func capRunes(rs []rune) []rune {
 // (zero-width joiners, bidi overrides) and trims. Dropping, not spacing, the
 // others means "Det\x00ail:" still reads as "Detail:" to the tail rule.
 func tidy(rs []rune) []rune {
+	out, _ := tidyIndex(rs)
+	return out
+}
+
+// tidyIndex is tidy that also returns, for each rune of the result, its index
+// in rs.
+func tidyIndex(rs []rune) ([]rune, []int) {
 	out := make([]rune, 0, len(rs))
+	idx := make([]int, 0, len(rs))
 	space := true // true at the start, so leading spaces are dropped
-	for _, r := range rs {
+	for i, r := range rs {
 		switch {
 		case unicode.IsSpace(r):
 			if !space {
-				out = append(out, ' ')
+				out, idx = append(out, ' '), append(idx, i)
 				space = true
 			}
 		case unicode.IsControl(r), unicode.Is(unicode.Cf, r):
 			// dropped
 		default:
-			out = append(out, r)
+			out, idx = append(out, r), append(idx, i)
 			space = false
 		}
 	}
 	if n := len(out); n > 0 && out[n-1] == ' ' {
-		out = out[:n-1]
+		out, idx = out[:n-1], idx[:n-1]
 	}
-	return out
+	return out, idx
 }
 
 // cutTail replaces everything from the first tail marker with one Redacted.
