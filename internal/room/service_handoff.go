@@ -325,7 +325,9 @@ func (s *Service) completeHandoff(ctx context.Context, user, to User, roomID, re
 		Manual:        manual != nil,
 	})
 	if err != nil {
-		if delErr := s.store.DeleteHandoff(ctx, handoffID); delErr != nil {
+		dctx, cancel := compensateCtx(ctx)
+		defer cancel()
+		if delErr := s.store.DeleteHandoff(dctx, handoffID); delErr != nil {
 			s.log.Warn("room: compensate failed handoff row", "handoff", handoffID, "err", delErr)
 		}
 		return events.Event{}, err

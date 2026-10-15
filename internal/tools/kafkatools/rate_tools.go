@@ -143,9 +143,15 @@ func rateSummary(topic string, window time.Duration, rates []clients.PartitionRa
 	return sb.String()
 }
 
+// shortDur labels the window exactly: "5m", "1h", "1m30s" (the rate divides
+// by the whole window, so the label must not round it).
 func shortDur(d time.Duration) string {
-	if d%time.Hour == 0 {
-		return fmt.Sprintf("%dh", d/time.Hour)
+	s := d.String() // "5m0s", "1h0m0s", "1m30s"
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
 	}
-	return fmt.Sprintf("%dm", int(d.Minutes()))
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }

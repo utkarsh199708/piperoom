@@ -192,7 +192,14 @@ func ValidateAll(scenarios []Scenario, defs []tools.Tool) error {
 		actionNames = append(actionNames, a.Name())
 	}
 	var errs []error
+	seen := map[string]bool{}
 	for _, sc := range scenarios {
+		// Two scenarios of one name would share one report row and count
+		// every run twice; LoadScenarios refuses them, other callers too.
+		if seen[sc.Name] {
+			errs = append(errs, fmt.Errorf("evals: duplicate scenario name %q", sc.Name))
+		}
+		seen[sc.Name] = true
 		errs = append(errs, sc.Validate(toolInputs, actionNames))
 		if fe := sc.checkFixTargets(areg); len(fe) > 0 {
 			errs = append(errs, fmt.Errorf("evals: scenario %q: %w", sc.Name, errors.Join(fe...)))

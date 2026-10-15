@@ -247,3 +247,14 @@ func TestCompareSubsetVersusFull(t *testing.T) {
 		})
 	}
 }
+
+// A run listed twice in a report (two reports joined, a re-run appended)
+// pairs once, and Unmatched never goes negative.
+func TestComparePairedDuplicateRunPairsOnce(t *testing.T) {
+	base := Report{Results: []RunResult{{Scenario: "a", Run: 1, Pass: true}}}
+	cand := Report{Results: []RunResult{{Scenario: "a", Run: 1}, {Scenario: "a", Run: 1}}}
+	pc := ComparePaired(base, cand)
+	if pc.Pairs != 1 || pc.Unmatched != 0 || pc.PassToFail != 1 {
+		t.Fatalf("pairs %d unmatched %d pass→fail %d, want 1 0 1", pc.Pairs, pc.Unmatched, pc.PassToFail)
+	}
+}

@@ -229,10 +229,9 @@ type pipeState struct {
 	follower bool
 	// episode: a signal fired and the pipeline has not cleared yet.
 	episode bool
-	// reopened: a rise to sev1 re-opened an acked incident once in this
-	// episode; bypassCooldown lets that one open (or an escalation's) skip
-	// the cooldown.
-	reopened, bypassCooldown bool
+	// bypassCooldown: a severity rise re-opened an acked incident
+	// (reviveWorse), or an escalation did; the next open skips the cooldown.
+	bypassCooldown bool
 	// lastPost is when the watcher last wrote to the room; postedSev the
 	// severity at that time.
 	lastPost  time.Time

@@ -150,11 +150,16 @@ func negatorAt(toks []string, i int) bool {
 		next = toks[i+1]
 	}
 	switch t := toks[i]; {
-	case t == "no":
-		return next != "longer" // "no longer carry amount" states a fact
+	case t == "no" || t == "without":
+		// "no longer carry amount" states a fact; "no doubt the slot was
+		// dropped" affirms it.
+		if strings.HasPrefix(next, "doubt") || (t == "no" && next == "question") {
+			return false
+		}
+		return t == "without" || next != "longer"
 	case t == "not" && (next == "only" || next == "just"):
 		return false // "not only X but also Y" asserts X
-	case t == "not", t == "never", t == "t", t == "without", t == "against", t == "neither", t == "nor", strings.HasPrefix(t, "avoid"):
+	case t == "not", t == "never", t == "t", t == "against", t == "neither", t == "nor", strings.HasPrefix(t, "avoid"):
 		return true
 	case t == "instead":
 		return next == "of"
@@ -219,7 +224,8 @@ func findAgreeTerm(c clause, term string) []occurrence {
 				}
 				break
 			}
-			o.negated = clearedWords[toks[k]]
+			// "the connector is not healthy" does not clear it.
+			o.negated = clearedWords[toks[k]] && !negatorAt(toks, k-1) && !(k >= 2 && negatorAt(toks, k-2))
 		}
 		out = append(out, o)
 	}

@@ -137,9 +137,17 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 	}, wantSeq)
 	if err != nil {
 		undo()
-		if errors.Is(err, store.ErrNotFound) {
+		switch {
+		case errors.Is(err, store.ErrNotFound):
 			// Retention removed it in between.
 			return s.priorDeletion(ctx, del, user, roomID)
+		case errors.Is(err, store.ErrRoomExecuting):
+			// Another replica's executor holds a claim in this room.
+			return Deletion{}, errExecuting()
+		case errors.Is(err, store.ErrRoomChanged):
+			// Another replica (the agent's) appended after the archive; a
+			// retry archives the longer log.
+			return Deletion{}, errConflict()
 		}
 		return Deletion{}, fmt.Errorf("room: delete %s: %w", roomID, err)
 	}

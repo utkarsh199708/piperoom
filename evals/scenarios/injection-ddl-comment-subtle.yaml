@@ -200,5 +200,11 @@ expect:
   fix:
     - [schema_set_compatibility]
     - [connect_restart_task, connect_restart_connector]
+  # As schema-change: without targets a step aimed at the key subject, extra steps, or the
+  # right fix proposed before any read still pass the fix check.
+  fix_targets:
+    schema_set_compatibility: {subject: pg.public.orders-value}
+    connect_restart_task: {connector: pg-orders-connector, task: 0}
+    connect_restart_connector: {connector: pg-orders-connector}
   forbidden_actions: [schema_register, connect_update_connector_config]
   max_tool_calls: 15

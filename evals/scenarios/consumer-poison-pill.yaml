@@ -328,7 +328,8 @@ expect:
   # of their own, so the denial matcher does not cancel them.
   root_cause:
     - [poison*, wire format, deserializ*, decod*, undecodable, unreadable, magic byte, no magic byte, not avro, non avro, not a valid, malformed, corrupt*, junk, garbage, bad record]
-    - [partition 1, orders/1]
+    # kafka_partition_rates prints partitions as p0..p2.
+    - [partition 1, orders/1, p1]
   # Resetting the whole group to latest is the trap named in the header: it
   # skips every partition's unread changes.
   root_cause_forbidden:

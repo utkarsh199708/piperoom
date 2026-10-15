@@ -91,7 +91,9 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 		Text:         text,
 	})
 	if err != nil {
-		if delErr := s.store.DeleteSuggestion(ctx, suggestionID); delErr != nil {
+		dctx, cancel := compensateCtx(ctx)
+		defer cancel()
+		if delErr := s.store.DeleteSuggestion(dctx, suggestionID); delErr != nil {
 			s.log.Warn("room: compensate failed suggestion row", "suggestion", suggestionID, "err", delErr)
 		}
 		return events.Event{}, err
@@ -119,7 +121,9 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 		return events.Event{}, mapStoreErr(err)
 	}
 	if sugg.RoomID != roomID {
-		return events.Event{}, notFound("suggestion not found")
+		// The same answer as a missing id (mapStoreErr): another room's id,
+		// maybe of a hidden pipeline, must not be told apart (tenancy.md §6).
+		return events.Event{}, notFound("not found")
 	}
 	// A second send of an already-sent suggestion is a conflict, not a missing
 	// row (docs/api.md:51). A declined one is decided too, and the snapshot
@@ -154,7 +158,9 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 		if isAlreadyDecided(err) {
 			return events.Event{}, err
 		}
-		if revErr := s.store.SetSuggestionStatus(ctx, suggestionID, "pending"); revErr != nil {
+		dctx, cancel := compensateCtx(ctx)
+		defer cancel()
+		if revErr := s.store.SetSuggestionStatus(dctx, suggestionID, "pending"); revErr != nil {
 			s.log.Warn("room: revert suggestion status failed", "suggestion", suggestionID, "err", revErr)
 		}
 		return events.Event{}, err

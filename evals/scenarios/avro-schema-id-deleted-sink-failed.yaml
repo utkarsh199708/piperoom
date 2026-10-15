@@ -279,9 +279,19 @@ inputs:
 
 expect:
   root_cause:
-    - ['id 7', 'schema 7', 'version 3']
+    - ['id 7', 'schema 7', 'version 3', v3]
     - [delet*, 'hard delete', permanently, removed, purg*, cleanup]
     - [registry, subject*]
+  # The header's trap: "the schema change broke the sink". incompatib*, not compatib*: the
+  # right answer may say the DDL was BACKWARD-compatible.
+  root_cause_forbidden:
+    - [discount_code, incompatib*]
+    # Anchored to what it broke: "the DDL broke nothing" is right ("nothing" is no negator).
+    - [discount_code, 'broke the']
+    - [discount_code, 'broke avro']
+    - [ddl, 'broke the']
+    - [ddl, 'broke avro']
+    - ['change broke the']
   first_failing_layer: schema-registry
   root_cause_layer: schema-registry
   # The sink's cold cache asks for id 7 and gets 40403; the subject no longer

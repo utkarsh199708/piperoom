@@ -50,7 +50,7 @@ type view struct {
 	sev        string // most severe of active
 	postedSev  string
 	lastPost   time.Time
-	bypass     bool             // skip the cooldown (a rise to sev1 or an escalation re-opened the incident)
+	bypass     bool             // skip the cooldown (a severity rise or an escalation re-opened the incident)
 	risks      []map[string]any // current config findings (codes only)
 	// note is the escalation's reason, for the title and the evidence.
 	note string
@@ -146,23 +146,27 @@ func (w *Watcher) roomLedLocked(roomID string) bool {
 	return false
 }
 
-// reviveSev1 re-opens an acked incident when its severity has risen after the
-// driver closed the room: connector_down going from PAUSED (sev3) to FAILED or
-// crash-looping (sev2), or any signal rising to sev1 (the slot is really about
-// to be lost). That is a new incident, so it skips the cooldown. Rates (DLQ,
-// lag) flip between sev2 and sev3 with load, so only those two count. ackSev
-// follows each ack, so every further rise counts once, and a signal that stays
-// at the same severity does not. Caller holds w.mu.
-func (w *Watcher) reviveSev1(id string, ps *pipeState, t target) {
+// reviveWorse re-opens an acked incident when it got worse than what the
+// driver saw when they closed the room: any signal that rose to sev1 (a slot
+// about to be lost), and a connector_down that rose at all (a PAUSED
+// connector, sev3, that went FAILED or crash-loops, sev2). connector_down's
+// severity changes only with the failure class; the other signals' sev3 ->
+// sev2 follows volume or duration (a DLQ trickle, lag rising for 2×for), which
+// the driver already saw, so those stay acked. The open skips the cooldown.
+// ackSev moves to the new severity at the next close, so each level re-opens at
+// most once. Caller holds w.mu.
+func (w *Watcher) reviveWorse(id string, ps *pipeState, t target) {
 	for _, sid := range signalIDs {
 		sc := signalCfg(t.cfg, sid)
 		ss := ps.sigs[sid]
 		if ss == nil || !sc.Enabled || sc.Action != owners.ActionRoom || ss.phase != phaseAcked {
 			continue
 		}
-		if sevRank(ss.last.sev) < sevRank(ss.ackSev) && (sid == owners.SignalConnectorDown || ss.last.sev == "sev1") && ss.clearingSince.IsZero() {
+		rose := sevRank(ss.last.sev) < sevRank(ss.ackSev)
+		worse := ss.last.sev == "sev1" || sid == owners.SignalConnectorDown
+		if rose && worse && ss.clearingSince.IsZero() {
 			ss.phase, ss.notified = phaseFiring, false
-			ps.reopened, ps.bypassCooldown = true, true
+			ps.bypassCooldown = true
 			w.log.Warn("watch: severity rose after the room was closed, re-opening",
 				"mode", string(w.cfg.Mode), "pipeline", id, "signal", sid, "was", ss.ackSev, "now", ss.last.sev)
 			return
@@ -269,7 +273,7 @@ func (w *Watcher) emitPipeline(ctx context.Context, now time.Time, t target, sto
 		w.mu.Unlock()
 		return
 	}
-	w.reviveSev1(id, ps, t)
+	w.reviveWorse(id, ps, t)
 	w.escalateLocked(now, id, ps, t)
 	v := w.viewOf(t, ps)
 	w.mu.Unlock()
@@ -734,7 +738,7 @@ func (w *Watcher) resolve(ctx context.Context, now time.Time, t target, v view) 
 	ps := w.pipes[id]
 	ps.episode, ps.roomID, ps.owned, ps.follower = false, "", false, false
 	ps.postedSev, ps.lastPost = "", time.Time{}
-	ps.reopened, ps.bypassCooldown = false, false
+	ps.bypassCooldown = false
 	ps.note, ps.blocked = "", ""
 	ps.warnedCooldown, ps.warnedMax, ps.warnedOpen, ps.warnedResolve = false, false, false, false
 	ps.warnedStale, ps.warnedFlagged, ps.erroredMax = false, false, false

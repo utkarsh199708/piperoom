@@ -209,7 +209,11 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 		worst = worst[:5]
 	}
 	for _, pl := range worst {
-		fmt.Fprintf(&sb, "\n  %s/%d: committed %d, end %d, lag %d", pl.Topic, pl.Partition, pl.Committed, pl.End, pl.Lag)
+		committed := fmt.Sprintf("committed %d", pl.Committed)
+		if pl.Committed < 0 {
+			committed = "no committed offset" // kadm's -1 is not a position
+		}
+		fmt.Fprintf(&sb, "\n  %s/%d: %s, end %d, lag %d", pl.Topic, pl.Partition, committed, pl.End, pl.Lag)
 	}
 	if line := tools.NotShown(other, "topic partition", "topic partitions"); line != "" {
 		appendLine(&sb, line+"; the total lag above counts only this pipeline's partitions")
@@ -295,20 +299,49 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
-	refs, err := t.d.Kafka.FindByKey(cctx, p.Topic, p.Key, since, maxScan)
+	scan, err := findKey(cctx, t.d.Kafka, p.Topic, p.Key, since, maxScan)
 	if err != nil {
 		return tools.Result{}, err
 	}
+	refs := scan.Refs
 	var sb strings.Builder
-	if len(refs) == 0 {
+	switch {
+	case len(refs) == 0 && len(scan.Truncated) > 0:
+		fmt.Fprintf(&sb, "not found in the scanned window: no record with key %q since %s", p.Key, p.Since)
+	case len(refs) == 0:
 		fmt.Fprintf(&sb, "not found: no record with key %q since %s", p.Key, p.Since)
-	} else {
+	default:
 		fmt.Fprintf(&sb, "found %d record(s) with key %q", len(refs), p.Key)
 		for _, r := range refs {
 			fmt.Fprintf(&sb, "\n  partition %d, offset %d, %s", r.Partition, r.Offset, r.Timestamp.Format(time.RFC3339))
 		}
 	}
-	return res(sb.String(), map[string]any{"topic": p.Topic, "key": p.Key, "found": len(refs) > 0, "records": refs}), nil
+	data := map[string]any{"topic": p.Topic, "key": p.Key, "found": len(refs) > 0, "records": refs,
+		"truncated": len(scan.Truncated) > 0}
+	if len(scan.Truncated) > 0 {
+		// Matches past the cut would be newer than any listed: say so before
+		// the list can be read as complete.
+		fmt.Fprintf(&sb, "\nthe scan stopped (max_scan %d or the time limit) before the end of partition(s) %v: newer matches may exist there; use a later since or a larger max_scan", maxScan, scan.Truncated)
+		data["truncated_partitions"] = scan.Truncated
+	}
+	return res(sb.String(), data), nil
+}
+
+// keyScanner is the local adapter for kafka.Client.FindByKeyReport until
+// clients.KafkaReader can report a truncated scan (contract change request
+// in the PR).
+type keyScanner interface {
+	FindByKeyReport(ctx context.Context, topic, key string, since time.Time, maxScan int) (kafka.KeyScan, error)
+}
+
+// findKey uses FindByKeyReport when the client has it; any other client's
+// FindByKey result carries no truncation report.
+func findKey(ctx context.Context, k clients.KafkaReader, topic, key string, since time.Time, maxScan int) (kafka.KeyScan, error) {
+	if ks, ok := k.(keyScanner); ok {
+		return ks.FindByKeyReport(ctx, topic, key, since, maxScan)
+	}
+	refs, err := k.FindByKey(ctx, topic, key, since, maxScan)
+	return kafka.KeyScan{Refs: refs}, err
 }
 
 // ---- kafka_topic_config ----

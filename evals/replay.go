@@ -439,6 +439,7 @@ func (r *replayer) countCall(tool string) {
 	for i, t := range r.transitions {
 		if ac := t.On.AfterCalls; ac != nil && t.On.Action == "" && ac.Tool == tool && ac.N == r.calls[tool] && r.inFrom(t) {
 			r.enter(t.To, i)
+			return // the first that matches fires, as for executed
 		}
 	}
 }

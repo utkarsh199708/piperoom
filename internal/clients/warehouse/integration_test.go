@@ -276,3 +276,36 @@ func TestMissingObjectsAreNotFoundIntegration(t *testing.T) {
 		}
 	}
 }
+
+// PrimaryKeyColumn names the key warehouse_row must be called with; a table
+// without one is ErrNotFound.
+func TestPrimaryKeyColumnIntegration(t *testing.T) {
+	db := warehouseDB(t)
+	conn := writeConn(t, testenv.Require(t).WarehouseDBURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	keyed, bare := testenv.Name("pk"), testenv.Name("nopk")
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(c, "DROP TABLE IF EXISTS analytics."+keyed+", analytics."+bare)
+	})
+	for _, q := range []string{
+		"CREATE TABLE analytics." + keyed + " (email text, order_id bigint PRIMARY KEY)",
+		"CREATE TABLE analytics." + bare + " (id int)",
+	} {
+		if _, err := conn.Exec(ctx, q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+	if col, err := db.PrimaryKeyColumn(ctx, "analytics."+keyed); err != nil || col != "order_id" {
+		t.Fatalf("keyed table: %q, %v; want order_id", col, err)
+	}
+	if _, err := db.PrimaryKeyColumn(ctx, "analytics."+bare); !errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("table without a key: err = %v, want ErrNotFound", err)
+	}
+	if _, err := db.PrimaryKeyColumn(ctx, "analytics.x;drop"); err == nil {
+		t.Fatal("bad table name accepted")
+	}
+}

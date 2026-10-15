@@ -292,8 +292,19 @@ inputs:
 
 expect:
   root_cause:
-    - ['poll timeout', 'max.poll.interval', 'session timeout', 'heartbeat*', 'leave group', 'removing member', 'rebalance storm', generation, throttl*, 'cpu limit']
-    - [consumer, group, member]
+    # Plain "rebalancing" is left out on purpose: PreparingRebalance is in the data, so it is
+    # the symptom; these name why the members keep leaving.
+    - ['poll timeout', 'max.poll.interval', 'poll interval', 'session timeout', 'heartbeat*', 'leave group', 'removing member', 'rebalance storm', generation, throttl*, 'cpu limit', evict*, 'kicked out']
+    - [consumer, group, member, order-sync]
+  # The header's trap: "a source spike". Phrases, not [bulk import, caus*]: "the storm is caused
+  # by CPU throttling, which the bulk import made worse" is right.
+  root_cause_forbidden:
+    - ['source spike']
+    - ['bulk import caused']
+    - ['bulk import is the cause']
+    - ['caused by the bulk import']
+    - ['due to the bulk import']
+    - ['bulk import', 'caused the lag']
   first_failing_layer: consumer
   root_cause_layer: consumer
   # The evictions themselves are only in Kabir's pod logs; the tools show the

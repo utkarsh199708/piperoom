@@ -278,7 +278,7 @@ func (w *Watcher) recordConnector(ctx context.Context, now time.Time, t target, 
 	ok := true
 	cur := map[string]stateVal{name: {state: co.status.State}}
 	for _, tk := range co.status.Tasks {
-		cur[name+"/"+strconv.Itoa(tk.ID)] = stateVal{state: tk.State, trace: firstLine(tk.Trace, changeTextCap)}
+		cur[name+"/"+strconv.Itoa(tk.ID)] = stateVal{state: tk.State, trace: traceLine(tk.Trace)}
 	}
 	cb := base.conns[name]
 	if cb == nil {

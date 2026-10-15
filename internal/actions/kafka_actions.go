@@ -599,7 +599,10 @@ func (a *registerSchema) Validate(ctx context.Context, raw json.RawMessage) erro
 	if err := json.Unmarshal(raw, &p); err != nil || p.Subject == "" || p.Schema == "" {
 		return fmt.Errorf("actions: subject and schema are required")
 	}
-	if _, err := avro.Parse(p.Schema); err != nil {
+	// A fresh cache per call: avro.Parse shares a process-wide cache, so a
+	// name defined by an earlier Validate (any room) would satisfy a
+	// reference this schema never defines.
+	if _, err := avro.ParseWithCache(p.Schema, "", &avro.SchemaCache{}); err != nil {
 		return fmt.Errorf("actions: schema is not valid Avro: %v", err)
 	}
 	ctx, cancel := a.d.validateContext(ctx)

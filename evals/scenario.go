@@ -436,6 +436,15 @@ func (s Scenario) Validate(toolInputs map[string][]string, actionNames []string)
 			errs = append(errs, fmt.Errorf("expect.forbidden_actions: unknown action %q", a))
 		}
 	}
+	// A fix action that is also forbidden fails every run that proposes it.
+	forbidden := set(s.Expect.ForbiddenActions)
+	for i, g := range s.Expect.Fix {
+		for _, a := range g {
+			if forbidden[a] {
+				errs = append(errs, fmt.Errorf("expect.fix[%d]: action %q is also in expect.forbidden_actions", i, a))
+			}
+		}
+	}
 	for i, in := range s.Inputs {
 		switch in.Kind {
 		case "steer", "comment", "approval_result", "action_result":
