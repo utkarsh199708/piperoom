@@ -104,15 +104,28 @@ function readHit(h: unknown): SimilarHit | null {
   }
 }
 
+// The server's text for a room with no resolution to show (hitOf in similar_incidents).
+const NO_RESOLUTION = '(no resolution text)'
+
+/** The resolution to show: '' for none or for the server's placeholder (QA F20). */
+export function resolutionText(h: SimilarHit): string {
+  const r = h.resolution.trim()
+  return r === NO_RESOLUTION ? '' : r
+}
+
 /**
- * Whether a past room is worth offering as history (QA G7: a room titled "test", closed with a one-line
- * note, was shown as "Seen before"). It needs a resolution and something the room learned: a fix that
- * worked or ran, or a label naming the layer. The hit carries no event count and no hypothesis, so a
- * short room that has both is still shown; the server-side similar_incidents filter is the other half.
+ * Whether a hit is worth showing. The server's similar_incidents filter already requires a resolution,
+ * a hypothesis or label and enough events, and it withholds the resolution of an unverified closer; so
+ * the web trusts its selection and drops only a hit with nothing to show at all (QA F20).
  */
 export function isUsableHit(h: SimilarHit): boolean {
-  if (!h.resolution.trim()) return false
-  return h.fix_that_worked.trim() !== '' || h.fix_actions.length > 0 || h.layer.trim() !== ''
+  return (
+    resolutionText(h) !== '' ||
+    h.title.trim() !== '' ||
+    h.fix_that_worked.trim() !== '' ||
+    h.fix_actions.length > 0 ||
+    h.layer.trim() !== ''
+  )
 }
 
 /**

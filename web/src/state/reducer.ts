@@ -572,7 +572,12 @@ function applyCore(state: RoomState, event: Event): RoomState {
         ...state,
         proposals: state.proposals.map((prop) => {
           if (prop.proposal_id !== p.proposal_id) return prop
-          return prop.status === 'withdrawn' ? { ...prop, withdrawn } : endIfOpen(prop, withdrawn)
+          if (prop.status === 'withdrawn') return { ...prop, withdrawn }
+          // The server logs proposal.withdrawn only for a proposal that did not run (a claim that lost the
+          // race writes nothing), so it ends an 'approved' one with no executed step too (QA F7). An
+          // executed step means the fix ran: the log says so, and the later action.executed wins.
+          if (prop.status === 'approved' && prop.executed.length === 0) return { ...prop, status: 'withdrawn', withdrawn }
+          return endIfOpen(prop, withdrawn)
         }),
       }
       break
@@ -598,6 +603,8 @@ function applyCore(state: RoomState, event: Event): RoomState {
         ...state,
         proposals: state.proposals.map((prop) => {
           if (prop.proposal_id !== p.proposal_id) return prop
+          // A stray approval after proposal.withdrawn (cross-replica race) changes nothing (QA F7).
+          if (prop.status === 'withdrawn') return prop
           const approvals = { ...prop.approvals, [p.layer]: 'approved' as const }
           const allApproved = (prop.required_layers ?? []).every(
             (l) => approvals[l] === 'approved',
@@ -655,9 +662,12 @@ function applyCore(state: RoomState, event: Event): RoomState {
       next = {
         ...state,
         proposals: state.proposals.map((prop) =>
-          prop.proposal_id === p.proposal_id
-            ? { ...prop, executed: [...prop.executed, p] }
-            : prop,
+          prop.proposal_id !== p.proposal_id
+            ? prop
+            : prop.status === 'withdrawn'
+              ? // It ran after all: never both withdrawn and executed (QA F7).
+                { ...prop, status: 'approved', withdrawn: undefined, executed: [...prop.executed, p] }
+              : { ...prop, executed: [...prop.executed, p] },
         ),
       }
       break

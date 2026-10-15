@@ -1,6 +1,6 @@
 import type { RoomState } from '@/state/types'
 import { Badge, layerVariant } from '@/components/ui/badge'
-import { TRIAGE_FAILED_SHOW_MS, stepAnchor, triageReasonText, triageStepNumbers } from '@/lib/triage'
+import { TRIAGE_FAILED_SHOW_MS, goToStep, stepAnchor, triageReasonText, triageStepNumbers } from '@/lib/triage'
 import { useNow } from './useNow'
 
 // The triage pass's first look (F6) under the room title: the one-line diagnosis the
@@ -59,6 +59,7 @@ export function TriageCard({ state }: { state: Pick<RoomState, 'triage' | 'hypot
                 <a
                   key={r.id}
                   href={`#${stepAnchor(r.id)}`}
+ onClick={(e) => { e.preventDefault(); goToStep(r.id) }}
                   className="rounded-sm border border-border px-1 font-mono text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   {r.n}

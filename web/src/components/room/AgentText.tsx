@@ -1,6 +1,6 @@
 import { createContext, Fragment, useContext, useMemo, type ReactNode } from 'react'
 import { splitStepRefs, stepNumbers, type StepNumbers } from '@/lib/stepRefs'
-import { stepAnchor } from '@/lib/triage'
+import { goToStep, stepAnchor } from '@/lib/triage'
 import type { StepState } from '@/state/types'
 
 const NO_STEPS: StepNumbers = new Map()
@@ -30,6 +30,7 @@ export function AgentText({ text }: { text: string }) {
           <a
             key={i}
             href={`#${stepAnchor(part.id)}`}
+ onClick={(e) => { e.preventDefault(); goToStep(part.id) }}
             className="rounded-sm font-medium text-foreground underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             step {part.n}

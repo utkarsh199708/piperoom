@@ -60,14 +60,13 @@ describe('proposal.withdrawn', () => {
     expect(after.last_seq).toBe(2)
   })
 
-  it('does not undo an approval: an approved or rejected proposal keeps its outcome', () => {
+  it('a rejected proposal keeps its outcome; a fully approved one that never ran is withdrawn (QA F7)', () => {
     const approved = fold([
       ev(1, 'proposal.created', created('p1', { required_layers: ['kafka-connect'] })),
       ev(2, 'approval.given', { proposal_id: 'p1', layer: 'kafka-connect' }, human),
       ev(3, 'proposal.withdrawn', { proposal_id: 'p1', reason: 'late' }),
     ])
-    expect(approved.proposals[0].status).toBe('approved')
-    expect(approved.proposals[0].withdrawn).toBeUndefined()
+    expect(approved.proposals[0].status).toBe('withdrawn')
     const rejected = fold([
       ev(1, 'proposal.created', created('p1', { required_layers: ['kafka-connect'] })),
       ev(2, 'approval.rejected', { proposal_id: 'p1', layer: 'kafka-connect', reason: 'no' }, human),
@@ -124,6 +123,31 @@ describe('a closed room waits on nobody', () => {
       ev(6, 'room.closed', { resolution: 'done' }, human),
     ])
     expect(s.proposals.map((p) => p.status)).toEqual(['approved', 'rejected', 'withdrawn'])
+  })
+})
+
+describe('withdraw racing the last approval (QA F7)', () => {
+  const one = created('p1', { required_layers: ['kafka-connect'] })
+  const executed = { proposal_id: 'p1', step: 0, tool: 'connect_restart_task', ok: true }
+  it('approval.given then proposal.withdrawn: withdrawn', () => {
+    const s = fold([ev(1, 'proposal.created', one), ev(2, 'approval.given', { proposal_id: 'p1', layer: 'kafka-connect' }, human), ev(3, 'proposal.withdrawn', { proposal_id: 'p1', reason: 'x' })])
+    expect(s.proposals[0].status).toBe('withdrawn')
+    expect(s.proposals[0].withdrawn).toBeDefined()
+  })
+  it('proposal.withdrawn then approval.given: stays withdrawn', () => {
+    const s = fold([ev(1, 'proposal.created', one), ev(2, 'proposal.withdrawn', { proposal_id: 'p1', reason: 'x' }), ev(3, 'approval.given', { proposal_id: 'p1', layer: 'kafka-connect' }, human)])
+    expect(s.proposals[0].status).toBe('withdrawn')
+  })
+  it('action.executed after proposal.withdrawn: it ran, never both', () => {
+    const s = fold([ev(1, 'proposal.created', one), ev(2, 'approval.given', { proposal_id: 'p1', layer: 'kafka-connect' }, human), ev(3, 'proposal.withdrawn', { proposal_id: 'p1', reason: 'x' }), ev(4, 'action.executed', executed)])
+    expect(s.proposals[0].status).toBe('approved')
+    expect(s.proposals[0].withdrawn).toBeUndefined()
+    expect(s.proposals[0].executed).toHaveLength(1)
+  })
+  it('withdrawal after a step ran does not undo it', () => {
+    const s = fold([ev(1, 'proposal.created', one), ev(2, 'approval.given', { proposal_id: 'p1', layer: 'kafka-connect' }, human), ev(3, 'action.executed', executed), ev(4, 'proposal.withdrawn', { proposal_id: 'p1', reason: 'x' })])
+    expect(s.proposals[0].status).toBe('approved')
+    expect(s.proposals[0].withdrawn).toBeUndefined()
   })
 })
 

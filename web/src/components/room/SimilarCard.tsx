@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import type { StepState } from '@/state/types'
-import { durationLabel, latestSimilarHit } from '@/lib/f8'
+import { durationLabel, latestSimilarHit, resolutionText } from '@/lib/f8'
 import { Card } from '@/components/ui/card'
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -17,6 +17,7 @@ function dayLabel(iso: string): string {
 export function SimilarCard({ steps }: { steps: StepState[] }) {
   const hit = latestSimilarHit(steps)
   if (!hit) return null
+  const resolution = resolutionText(hit)
   const day = dayLabel(hit.date)
   const fix = hit.fix_that_worked || hit.fix_actions.join(', ')
   const parts = [
@@ -29,7 +30,7 @@ export function SimilarCard({ steps }: { steps: StepState[] }) {
     <Card role="region" aria-label="Similar incident" className="flex flex-col gap-1.5 px-3.5 py-3">
       <h2 className="m-0 text-sm font-medium">Seen before</h2>
       <p className="m-0 break-words text-sm">{parts.join(' · ')}</p>
-      {hit.resolution && <p className="m-0 line-clamp-2 break-words text-xs text-muted-foreground">{hit.resolution}</p>}
+      {resolution && <p className="m-0 line-clamp-2 break-words text-xs text-muted-foreground">{resolution}</p>}
       <Link
         to={`/rooms/${encodeURIComponent(hit.room_id)}`}
         className="w-fit rounded-sm text-xs font-medium text-primary-fg underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
