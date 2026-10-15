@@ -5,4 +5,3 @@
 GO-2026-5048 | hamba/avro v2.31.0 unbounded map allocations; no fixed version upstream; unreachable for untrusted keys since PR 222 (decodeKey refuses map/array key schemas and bounds every schema it decodes); fork upgrade pending owner approval | A2 | 2026-11-13
 GO-2026-5047 | hamba/avro v2.31.0 integer overflow in the decoder; no fixed version upstream; the block paths are unreachable for untrusted keys since PR 222, as for GO-2026-5048 | A2 | 2026-11-13
 GO-2026-5046 | hamba/avro v2.31.0 CPU exhaustion in the decoder; no fixed version upstream; the block-count path is unreachable for untrusted keys since PR 222, as for GO-2026-5048 | A2 | 2026-11-13
-GO-2026-6665 | gosnowflake v1.19.1 logs sensitive information; no fixed version upstream; the Snowflake client is opt-in | A2 | 2026-11-13

@@ -478,7 +478,7 @@ func TestKafkaFindByKey(t *testing.T) {
 		t.Fatalf("summary %q", r.Summary)
 	}
 	r = runTool(t, tool, `{"topic":"t","key":"missing","since":"2026-10-11T00:00:00Z"}`)
-	if !strings.Contains(r.Summary, "not found") {
+	if !strings.Contains(r.Summary, "no record with key") {
 		t.Fatalf("summary %q", r.Summary)
 	}
 }

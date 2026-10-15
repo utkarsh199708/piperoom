@@ -9,12 +9,20 @@
 // docs/pilot/permissions.md for the exact grants). The driver has no session-level read-only switch, so a
 // role with write grants could still write; keep this role SELECT-only.
 //
-// Driver logging (GO-2026-6665): gosnowflake v1 logs session tokens when its
-// level is raised, and New pins it to error and refuses the tracing and
-// clientConfigFile DSN parameters. The driver's easy logging can still read
-// a client config file on the first connection, so deployments must keep
-// SF_CLIENT_CONFIG_FILE unset and must not place sf_client_config.json in the
-// executable's or the home directory. Remove this once on gosnowflake v2.
+// Driver logging (GO-2026-6665): gosnowflake v1 logged session tokens when its
+// level was raised; v2 fixes that at the source (secret masking in the driver
+// logger). As defence in depth New still pins the driver logger to error and
+// refuses the tracing and clientConfigFile DSN parameters, so a debug-level
+// driver log can never be switched on through the DSN. The driver's easy
+// logging can still read a client config file on the first connection, so
+// deployments should keep SF_CLIENT_CONFIG_FILE unset and not place
+// sf_client_config.json in the executable's or the home directory.
+//
+// TLS revocation (OCSP): gosnowflake v2.3.0 turned OCSP checking off by
+// default, which accepts a revoked Snowflake or proxy certificate. New opts
+// in to fail-open OCSP (as v1 did) unless the DSN sets ocspFailOpen,
+// disableOCSPChecks or a certRevocationCheckMode itself. The operator escape
+// hatch SF_DISABLE_OCSP_CHECKS=true still switches fail-open OCSP off.
 package snowflake
 
 import (
@@ -26,12 +34,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/snowflakedb/gosnowflake" // registers the "snowflake" sql.DB driver on import
+	"github.com/snowflakedb/gosnowflake/v2" // registers the "snowflake" sql.DB driver on import
 
 	"piperoom/internal/clients"
 )
 
 const defaultTimeout = 10 * time.Second
+
+// ocspNotSet is gosnowflake's zero OCSPFailOpenMode ("unset"); the driver's
+// own constant for it is not exported.
+const ocspNotSet gosnowflake.OCSPFailOpenMode = 0
 
 // DB is a connection to Snowflake, implementing clients.Warehouse.
 type DB struct {
@@ -66,13 +78,15 @@ func New(ctx context.Context, dsn string) (*DB, error) {
 	return &DB{db: db, q: dbQuerier{db: db}, target: targetFromDSN(dsn)}, nil
 }
 
-// hardenedConfig is the mitigation for GO-2026-6665 (gosnowflake v1 logs
-// session tokens and response bodies once its log level is raised; the fix is
-// only in v2). It pins the driver logger to error, refuses the DSN parameters
-// that raise the level or load a client config file (easy logging, which can
-// also raise it on the first connection), and returns the parsed config to
-// open through NewConnector. The logger is pinned even when the DSN is
-// refused. See reviews/vuln-report-2026-10.md.
+// hardenedConfig is defence in depth after the GO-2026-6665 fix (gosnowflake
+// v1 logged session tokens and response bodies once its log level was
+// raised; v2 masks secrets in the driver logger). It pins the driver logger
+// to error, refuses the DSN parameters that raise the level or load a client
+// config file (easy logging, which can also raise it on the first
+// connection), and returns the parsed config to open through NewConnector.
+// The logger is pinned even when the DSN is refused. It also restores
+// certificate revocation checking, which v2.3.0 turned off by default: see
+// the OCSP note on the package. See reviews/vuln-report-2026-10.md.
 func hardenedConfig(dsn string) (*gosnowflake.Config, error) {
 	if err := gosnowflake.GetLogger().SetLogLevel("error"); err != nil {
 		return nil, fmt.Errorf("snowflake: set driver log level: %w", err)
@@ -82,10 +96,19 @@ func hardenedConfig(dsn string) (*gosnowflake.Config, error) {
 		return nil, fmt.Errorf("snowflake: parse dsn: %w", err)
 	}
 	if cfg.Tracing != "" {
-		return nil, errors.New("snowflake: dsn parameter tracing is not allowed: it raises the driver log level, which logs session tokens")
+		return nil, errors.New("snowflake: dsn parameter tracing is not allowed: it raises the driver log level; refused as defence in depth (GO-2026-6665)")
 	}
 	if cfg.ClientConfigFile != "" {
-		return nil, errors.New("snowflake: dsn parameter clientConfigFile is not allowed: it can raise the driver log level, which logs session tokens")
+		return nil, errors.New("snowflake: dsn parameter clientConfigFile is not allowed: it can raise the driver log level; refused as defence in depth (GO-2026-6665)")
+	}
+	// gosnowflake v2.3.0 stopped checking certificate revocation unless asked
+	// (v1.19.1 and v2.2.0 defaulted to OCSP fail-open). Opt back in, but only
+	// when the DSN left every revocation setting at its default: an explicit
+	// ocspFailOpen=false (fail-closed), disableOCSPChecks or a CRL mode is the
+	// operator's choice and stays as parsed.
+	if cfg.OCSPFailOpen == ocspNotSet && !cfg.DisableOCSPChecks &&
+		cfg.CertRevocationCheckMode == gosnowflake.CertRevocationCheckDisabled {
+		cfg.OCSPFailOpen = gosnowflake.OCSPFailOpenTrue
 	}
 	return cfg, nil
 }
