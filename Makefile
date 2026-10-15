@@ -12,11 +12,11 @@ go_pkgs = $$(go list $(1) ./... | grep -v '/web/node_modules/')
 GO_PKGS = $(call go_pkgs,)
 TAGGED_ONLY := evalgen,e2e
 
-.PHONY: ci go-ci web-ci fmt vet build build-server test evals discover-draft web-install web-lint web-build web-test
+.PHONY: ci go-ci web-ci fmt vet build build-server test evals evals-gen-check discover-draft web-install web-lint web-build web-test
 
 ci: go-ci web-ci
 
-go-ci: fmt vet build test evals
+go-ci: fmt vet build test evals evals-gen-check
 
 # gofmt prints a parse error to stderr and nothing to stdout, so the exit status
 # of the pipeline is checked on its own: `test -z "$(...)"` alone would pass.
@@ -45,6 +45,11 @@ test:
 # no API key, no network, so it is safe in go-ci.
 evals:
 	go run ./evals/cmd/evalrun -validate
+
+# Fails and lists the stale files when the generated eval files differ from
+# evals/gen output. Fix: go run -tags evalgen ./evals/gen
+evals-gen-check:
+	go run -tags evalgen ./evals/gen -check
 
 # Reads the cluster from the config env vars; refuses to overwrite an existing
 # draft (run cmd/discover with -force for that). Not part of ci: needs a cluster.

@@ -66,6 +66,14 @@ jobs:
         run: go test ./...
       - name: eval scenarios (validate only; no model calls, no API key, no network)
         run: go run ./evals/cmd/evalrun -validate
+      - name: "evals: generated files are current"
+        # LEAD-ARCH rule: a PR that changes tool output regenerates the eval
+        # files in the same PR. -check lists the stale files and exits 1.
+        run: |
+          if ! go run -tags evalgen ./evals/gen -check; then
+            echo "::error::Generated eval files are stale (listed above). Regenerate and commit: go run -tags evalgen ./evals/gen"
+            exit 1
+          fi
 
   fullstack:
     name: Go integration (full dev stack)
