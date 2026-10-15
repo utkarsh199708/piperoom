@@ -131,7 +131,7 @@ describe('useRoom offline sends', () => {
 
     let ok = false
     await act(async () => {
-      ok = await hook.result.current.actions.steer('restart connector')
+      ok = await hook.result.current.actions.steer('restart connector', { retry: true })
     })
     expect(ok).toBe(true)
     expect(api.steer).toHaveBeenCalledTimes(2)
@@ -139,6 +139,105 @@ describe('useRoom offline sends', () => {
     // Only that one retry is absorbed: sending the same words again later is a new message.
     await act(async () => {
       await hook.result.current.actions.steer('restart connector')
+    })
+    expect(api.steer).toHaveBeenCalledTimes(3)
+  })
+})
+
+// #390: one Retry is one steer, whatever the reconnect timing.
+describe('useRoom retry after a reconnect', () => {
+  async function failOnce(text: string) {
+    const opened = await openRoom()
+    vi.mocked(api.steer).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    await act(async () => {
+      await opened.hook.result.current.actions.steer(text)
+    })
+    return opened
+  }
+
+  it('a Retry pressed while the reconnect drain is in flight waits for it and does not post again', async () => {
+    const { hook, socket } = await failOnce('restart connector')
+    let resolveDrain = () => {}
+    vi.mocked(api.steer).mockImplementationOnce(
+      () => new Promise<never>((r) => (resolveDrain = r as unknown as () => void)),
+    )
+    vi.mocked(api.steer).mockResolvedValue(undefined as never)
+    act(() => socket.onopen?.())
+    expect(api.steer).toHaveBeenCalledTimes(2)
+
+    let ok = false
+    let retry!: Promise<void>
+    act(() => {
+      retry = hook.result.current.actions.steer('restart connector', { retry: true }).then((v) => {
+        ok = v
+      })
+    })
+    await act(async () => {
+      resolveDrain()
+      await retry
+    })
+    expect(ok).toBe(true)
+    expect(api.steer).toHaveBeenCalledTimes(2)
+  })
+
+  it('a Retry pressed while the drain is in flight posts once when the drain fails', async () => {
+    const { hook, socket } = await failOnce('restart connector')
+    let rejectDrain: (e: unknown) => void = () => {}
+    vi.mocked(api.steer).mockImplementationOnce(() => new Promise<never>((_, r) => (rejectDrain = r)))
+    vi.mocked(api.steer).mockResolvedValue(undefined as never)
+    act(() => socket.onopen?.())
+
+    let ok = false
+    let retry!: Promise<void>
+    act(() => {
+      retry = hook.result.current.actions.steer('restart connector', { retry: true }).then((v) => {
+        ok = v
+      })
+    })
+    await act(async () => {
+      rejectDrain(new TypeError('Failed to fetch'))
+      await retry
+    })
+    // The drain never reached the server, so the person's Retry is the one that does.
+    expect(ok).toBe(true)
+    expect(api.steer).toHaveBeenCalledTimes(3)
+  })
+
+  it('a Retry pressed long after the drain delivered the words does not post again', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { hook, socket } = await failOnce('restart connector')
+      vi.mocked(api.steer).mockResolvedValue(undefined as never)
+      act(() => socket.onopen?.())
+      await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(2))
+      await act(async () => {
+        vi.advanceTimersByTime(3 * 60_000)
+      })
+      let ok = false
+      await act(async () => {
+        ok = await hook.result.current.actions.steer('restart connector', { retry: true })
+      })
+      expect(ok).toBe(true)
+      expect(api.steer).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('tells a listener when the drain delivered kept words, and a taken delivery is not absorbed again', async () => {
+    const { hook, socket } = await failOnce('restart connector')
+    const heard: unknown[] = []
+    const off = hook.result.current.actions.onDelivered?.((sent) => {
+      heard.push(sent)
+      return true
+    })
+    vi.mocked(api.steer).mockResolvedValue(undefined as never)
+    act(() => socket.onopen?.())
+    await waitFor(() => expect(heard).toEqual([{ kind: 'steer', text: 'restart connector' }]))
+    off?.()
+    // The composer took it (cleared its field), so typing the same words again is a new steer.
+    await act(async () => {
+      await hook.result.current.actions.steer('restart connector', { retry: true })
     })
     expect(api.steer).toHaveBeenCalledTimes(3)
   })

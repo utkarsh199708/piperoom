@@ -69,25 +69,49 @@ export interface CloseResult {
 }
 
 /** A steer or comment that could not reach the server, kept for one retry. */
-interface PendingSend {
+export interface PendingSend {
   kind: 'steer' | 'comment'
   text: string
   stepId?: string
 }
 
+/** How a steer or comment is sent. */
+export interface SendOptions {
+  /**
+   * The person is retrying words whose send failed (the composer's Retry). If the reconnect
+   * is already sending them, or has sent them, the retry waits for that send instead of
+   * posting a second copy (#390).
+   */
+  retry?: boolean
+}
+
+/**
+ * Called when the reconnect delivered words a composer still holds. Return true when the
+ * composer took them (cleared its field): a later retry of the same words is then a new message.
+ */
+export type DeliveredListener = (sent: PendingSend) => boolean
+
 const MAX_PENDING = 5
-/** A manual retry this soon after the reconnect delivered the same words is the same message. */
-const DELIVERED_DEDUPE_MS = 2 * 60_000
 
 const samePending = (a: PendingSend, b: PendingSend) => a.kind === b.kind && a.text === b.text && a.stepId === b.stepId
+
+/** Removes one delivered copy of `item`; true when there was one. */
+function takeDelivered(ref: { current: PendingSend[] }, item: PendingSend): boolean {
+  const i = ref.current.findIndex((d) => samePending(d, item))
+  if (i < 0) return false
+  ref.current = ref.current.filter((_, j) => j !== i)
+  return true
+}
 
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
 
 export interface RoomActions {
   /** Resolves true when the server took it. A failed network call is kept and retried once when the socket reopens. */
-  comment: (text: string, stepId?: string) => Promise<boolean>
+  comment: (text: string, stepId?: string, opts?: SendOptions) => Promise<boolean>
   /** Same contract as `comment`. */
-  steer: (text: string) => Promise<boolean>
+  steer: (text: string, opts?: SendOptions) => Promise<boolean>
+  /** Hear about kept words the reconnect delivered; returns the unsubscribe function. */
+  onDelivered?: (listener: DeliveredListener) => () => void
   sendSuggestion: (suggestionId: string) => void
   /** The driver declines a pending suggestion, with an optional note to its author. */
   declineSuggestion: (suggestionId: string, reason?: string) => void
@@ -162,8 +186,12 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   const stateRef = useRef<RoomState | null>(null)
   const localIdRef = useRef(0)
   const pendingRef = useRef<PendingSend[]>([])
-  // What the reconnect drain sent: the composer still shows those words with a Retry button.
-  const deliveredRef = useRef<{ item: PendingSend; at: number }[]>([])
+  // What the reconnect drain is sending now; `done` resolves true once the server took it.
+  const inflightRef = useRef<{ item: PendingSend; done: Promise<boolean> }[]>([])
+  // What the drain sent and no composer has taken yet: a Retry of those words is absorbed,
+  // however late it comes, so there is no time window to outlast.
+  const deliveredRef = useRef<PendingSend[]>([])
+  const deliveredListenersRef = useRef(new Set<DeliveredListener>())
   // Fixture mode: buffer synthetic (user) events until the story replay ends so
   // their seq can never collide with an upcoming story event's seq.
   const storyPlayingRef = useRef(false)
@@ -325,6 +353,8 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         sendPresence(currentPresence())
         // Messages typed while the server was away: one retry each, in order. Success
         // emits nothing here (the event arrives over the socket); a failure shows its text.
+        // Each item is marked in flight before its request starts, so a Retry pressed
+        // meanwhile waits for this send instead of posting a second copy.
         const kept = pendingRef.current
         pendingRef.current = []
         for (const item of kept) {
@@ -332,11 +362,25 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
             item.kind === 'steer'
               ? api.steer(roomId, item.text)
               : api.comment(roomId, { step_id: item.stepId, text: item.text })
-          call
-            .then(() => {
-              deliveredRef.current = [...deliveredRef.current, { item, at: Date.now() }].slice(-MAX_PENDING)
-            })
-            .catch((e: unknown) => setError(errorText(e)))
+          const entry = {
+            item,
+            done: call.then(
+              () => {
+                let taken = false
+                for (const l of deliveredListenersRef.current) taken = l(item) || taken
+                if (!taken) deliveredRef.current = [...deliveredRef.current, item].slice(-MAX_PENDING)
+                return true
+              },
+              (e: unknown) => {
+                setError(errorText(e))
+                return false
+              },
+            ),
+          }
+          inflightRef.current = [...inflightRef.current, entry]
+          void entry.done.then(() => {
+            inflightRef.current = inflightRef.current.filter((x) => x !== entry)
+          })
         }
       }
       sock.onmessage = (m) => {
@@ -458,16 +502,23 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   // Steer and comment keep the person's words: a call that never reached the server is
   // queued (max 5) and the caller learns it failed, so the field is not cleared.
   const sendKept = useCallback(
-    async (item: PendingSend): Promise<boolean> => {
-      // A manual retry replaces the queued copy, so the text is not sent twice.
+    async (item: PendingSend, opts?: SendOptions): Promise<boolean> => {
+      // A manual send replaces the queued copy, so the text is not sent twice.
+      const queued = pendingRef.current.some((p) => samePending(p, item))
       pendingRef.current = pendingRef.current.filter((p) => !samePending(p, item))
-      // The reconnect already sent it: posting again would steer the agent twice.
-      const fresh = deliveredRef.current.filter((d) => Date.now() - d.at < DELIVERED_DEDUPE_MS)
-      const sent = fresh.findIndex((d) => samePending(d.item, item))
-      deliveredRef.current = sent >= 0 ? fresh.filter((_, i) => i !== sent) : fresh
-      if (sent >= 0) {
-        setError(null)
-        return true
+      if (opts?.retry && !queued) {
+        // The reconnect is sending these words now: wait for it rather than post a second copy.
+        const flying = inflightRef.current.find((f) => samePending(f.item, item))
+        if (flying && (await flying.done)) {
+          takeDelivered(deliveredRef, item)
+          setError(null)
+          return true
+        }
+        // The reconnect already sent them: posting again would steer the agent twice.
+        if (!flying && takeDelivered(deliveredRef, item)) {
+          setError(null)
+          return true
+        }
       }
       try {
         await (item.kind === 'steer'
@@ -476,13 +527,25 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         setError(null)
         return true
       } catch (e) {
-        if (isNetworkError(e) && pendingRef.current.length < MAX_PENDING) pendingRef.current.push(item)
+        if (isNetworkError(e) && pendingRef.current.length < MAX_PENDING) {
+          pendingRef.current.push(item)
+          // An older delivery of the same words is not what this new failure's Retry means.
+          takeDelivered(deliveredRef, item)
+        }
         setError(errorText(e))
         return false
       }
     },
     [roomId],
   )
+
+  const onDelivered = useCallback((listener: DeliveredListener) => {
+    const set = deliveredListenersRef.current
+    set.add(listener)
+    return () => {
+      set.delete(listener)
+    }
+  }, [])
 
   const runAction = useCallback((p: Promise<unknown>) => {
     p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))
@@ -514,7 +577,8 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   }, [])
 
   const actions: RoomActions = {
-    comment: async (text, stepId) => {
+    onDelivered,
+    comment: async (text, stepId, opts) => {
       if (isFixtures()) {
         synthesize('comment.added', {
           comment_id: nextLocalId(),
@@ -524,9 +588,9 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         })
         return true
       }
-      return sendKept({ kind: 'comment', text, stepId })
+      return sendKept({ kind: 'comment', text, stepId }, opts)
     },
-    steer: async (text) => {
+    steer: async (text, opts) => {
       if (isFixtures()) {
         const s = stateRef.current
         const isDriver = s?.driver?.id === user.id
@@ -536,7 +600,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         )
         return true
       }
-      return sendKept({ kind: 'steer', text })
+      return sendKept({ kind: 'steer', text }, opts)
     },
     sendSuggestion: (suggestionId) => {
       if (isFixtures()) {

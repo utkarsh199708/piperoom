@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SteerBox } from './SteerBox'
-import type { RoomActions } from '../hooks/useRoom'
+import type { DeliveredListener, RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
 import { emptyRoomState } from '../state/types'
 
@@ -98,6 +98,78 @@ describe('SteerBox composer (U3)', () => {
     await waitFor(() => expect(box).toHaveValue(''))
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(actions.steer).toHaveBeenCalledTimes(2)
+  })
+
+  it('marks the Retry as a retry, so the hook can skip a copy the reconnect sent', async () => {
+    vi.mocked(actions.steer).mockReset().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    render(<SteerBox state={state} user={arjun} actions={actions} />)
+    const box = screen.getByLabelText('Steer the agent')
+    fireEvent.change(box, { target: { value: 'look at the slot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(box).toHaveValue(''))
+    expect(actions.steer).toHaveBeenNthCalledWith(1, 'look at the slot')
+    expect(actions.steer).toHaveBeenNthCalledWith(2, 'look at the slot', { retry: true })
+  })
+
+  // #390 scenario B: the reconnect sent the words; the field and the Retry strip go away
+  // without waiting for the person, so there is no late Retry to steer twice.
+  it('clears the field and the Retry strip when the reconnect delivered the failed words', async () => {
+    let listener: DeliveredListener | null = null
+    const withSignal: RoomActions = {
+      ...actions,
+      steer: vi.fn().mockResolvedValue(false),
+      onDelivered: (l) => {
+        listener = l
+        return () => {
+          listener = null
+        }
+      },
+    }
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    render(<SteerBox state={state} user={arjun} actions={withSignal} />)
+    const box = screen.getByLabelText('Steer the agent')
+    fireEvent.change(box, { target: { value: 'look at the slot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    // Other words are not the composer's: it leaves them to the hook.
+    let taken = true
+    act(() => {
+      taken = listener!({ kind: 'steer', text: 'something else' })
+    })
+    expect(taken).toBe(false)
+    act(() => {
+      taken = listener!({ kind: 'steer', text: 'look at the slot' })
+    })
+    expect(taken).toBe(true)
+    expect(box).toHaveValue('')
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    expect(withSignal.steer).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps edited words when the reconnect delivered the old ones', async () => {
+    let listener: DeliveredListener | null = null
+    const withSignal: RoomActions = {
+      ...actions,
+      steer: vi.fn().mockResolvedValue(false),
+      onDelivered: (l) => {
+        listener = l
+        return () => {}
+      },
+    }
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
+    render(<SteerBox state={state} user={arjun} actions={withSignal} />)
+    const box = screen.getByLabelText('Steer the agent')
+    fireEvent.change(box, { target: { value: 'look at the slot' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
+    await screen.findByRole('button', { name: 'Retry' })
+    fireEvent.change(box, { target: { value: 'look at the slot and the lag' } })
+    act(() => {
+      listener!({ kind: 'steer', text: 'look at the slot' })
+    })
+    expect(box).toHaveValue('look at the slot and the lag')
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
   })
 
   it('says messages are kept while the socket reconnects', () => {

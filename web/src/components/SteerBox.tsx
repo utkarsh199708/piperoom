@@ -235,6 +235,32 @@ export function SteerBox({
   const ref = useRef<HTMLTextAreaElement>(null)
   const now = useNow()
   const roomId = state.id
+  // The words whose send failed (the Retry strip is up for them), and the field as it is now,
+  // for the listener below, which runs outside render.
+  const failedRef = useRef<{ kind: 'steer' | 'comment'; text: string; typed: string } | null>(null)
+  const textRef = useRef(text)
+  useEffect(() => {
+    textRef.current = text
+  }, [text])
+  // The reconnect delivered the failed words (#390): take the Retry strip down and clear the
+  // field if it still holds them, so no Retry is left to send them twice.
+  const onDelivered = actions.onDelivered
+  useEffect(() => {
+    if (!onDelivered) return
+    return onDelivered((sent) => {
+      const failed = failedRef.current
+      if (!failed || sent.stepId !== undefined || sent.kind !== failed.kind || sent.text !== failed.text) return false
+      failedRef.current = null
+      setOffline(false)
+      if (textRef.current === failed.typed) {
+        writeStore('session', lastSentKey(roomId), failed.typed.trim())
+        writeStore('local', draftKey(roomId), '')
+        setText('')
+        if (ref.current) ref.current.style.height = ''
+      }
+      return true
+    })
+  }, [onDelivered, roomId])
   // Debounced so typing is not a storage write per key; a send clears it at once (see send).
   useEffect(() => {
     const t = setTimeout(() => writeStore('local', draftKey(roomId), text), 300)
@@ -283,9 +309,18 @@ export function SteerBox({
     // "?" alone has nothing to ask.
     if (!text.trim() || sending || !plan.text.replace(/^(Question:|@agent)\s*/, '').trim()) return
     setSending(true)
-    const ok = plan.send === 'comment' ? await actions.comment(plan.text) : await actions.steer(plan.text)
+    // While the Retry strip is up, this send is that retry: the hook then waits for, or
+    // skips, a copy the reconnect is sending or has sent.
+    const ok = offline
+      ? plan.send === 'comment'
+        ? await actions.comment(plan.text, undefined, { retry: true })
+        : await actions.steer(plan.text, { retry: true })
+      : plan.send === 'comment'
+        ? await actions.comment(plan.text)
+        : await actions.steer(plan.text)
     setSending(false)
     setOffline(!ok)
+    failedRef.current = ok ? null : { kind: plan.send, text: plan.text, typed: text }
     if (ok) {
       writeStore('session', lastSentKey(roomId), text.trim())
       writeStore('local', draftKey(roomId), '')
