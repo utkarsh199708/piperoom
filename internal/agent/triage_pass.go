@@ -290,7 +290,7 @@ func (p *triagePass) tableReads(body watcherBody) []toolUse {
 		}
 	case "slot_inactive":
 		wants = []tableRead{statusOrList(""), {"pg_replication_slots", map[string]any{}}}
-	case "slot_wal":
+	case "slot_wal", "slot_stall":
 		wants = []tableRead{{"pg_long_transactions", map[string]any{}}, {"pg_replication_slots", map[string]any{}}}
 	case "dlq_growth":
 		writer := firstName(sig["writers"])

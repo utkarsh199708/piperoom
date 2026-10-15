@@ -227,6 +227,7 @@ func TestTriagePassTableForEverySignal(t *testing.T) {
 	}{
 		{map[string]any{"signal": "slot_inactive", "slot": "debezium_orders"}, []string{"connect_list_connectors", "pg_replication_slots"}},
 		{map[string]any{"signal": "slot_wal", "slot": "debezium_orders"}, []string{"pg_long_transactions", "pg_replication_slots"}},
+		{map[string]any{"signal": "slot_stall", "slot": "debezium_orders"}, []string{"pg_long_transactions", "pg_replication_slots"}},
 		{map[string]any{"signal": "dlq_growth", "topic": "dlq.orders", "writers": []any{"orders-sink"}}, []string{"dlq_peek", "connect_status"}},
 		{map[string]any{"signal": "dlq_growth", "topic": "dlq.orders", "writers": []any{}}, []string{"dlq_peek", "connect_list_connectors"}},
 		{map[string]any{"signal": "consumer_lag", "group": "order-sync"}, []string{"kafka_consumer_lag", "connect_list_connectors"}},
