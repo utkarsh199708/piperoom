@@ -12,6 +12,7 @@ import (
 
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
+	"piperoom/internal/alertin"
 	"piperoom/internal/events"
 	"piperoom/internal/room"
 	"piperoom/internal/store"
@@ -301,4 +302,122 @@ type nulOutputAction struct{ fakeAction }
 
 func (a *nulOutputAction) Execute(context.Context, json.RawMessage) (string, error) {
 	return "out\x00\xff", nil
+}
+
+// Bidi embedding, override and isolate controls reorder the text for every
+// reader that does not strip them (#358): typed text holding one is refused
+// with a 400 and nothing is written; an alert title keeps its text without
+// them.
+func TestBidiControlsRefusedInTypedTextStrippedFromAlertTitles(t *testing.T) {
+	ctx := context.Background()
+	svc, st, _ := newTestService(t)
+	arjun := mustUser(t, svc, "arjun")
+	roomID := createRoom(t, svc, "arjun").ID
+	for _, r := range []rune{0x202A, 0x202E, 0x2066, 0x2069} {
+		bad := "orders " + string(r) + "gal gnissim"
+		before := lastSeq(t, st, roomID)
+		calls := map[string]func() error{
+			"room title": func() error {
+				_, err := svc.CreateRoom(ctx, arjun, bad, "sev2", "orders")
+				return err
+			},
+			"comment": func() error {
+				_, err := svc.AddComment(ctx, arjun, roomID, "", bad)
+				return err
+			},
+			"steer": func() error {
+				_, err := svc.Steer(ctx, arjun, roomID, bad)
+				return err
+			},
+		}
+		for name, call := range calls {
+			var re *room.Error
+			if err := call(); !errors.As(err, &re) || re.Status != http.StatusBadRequest || re.Code != "validation" || !strings.Contains(re.Msg, "bidirectional") {
+				t.Fatalf("%s with U+%04X: err = %v, want 400 validation (bidirectional)", name, r, err)
+			}
+		}
+		if after := lastSeq(t, st, roomID); after != before {
+			t.Fatalf("U+%04X: last_seq %d -> %d, want no write", r, before, after)
+		}
+	}
+	if rooms, _ := st.ListRooms(ctx); len(rooms) != 1 {
+		t.Fatalf("rooms = %d, want only the first one", len(rooms))
+	}
+
+	snap, _, err := svc.OpenAlertRoom(ctx, alertin.Alert{
+		Source: alertin.Generic, Status: alertin.StatusFiring, Title: "orders ‮gal gnissim‬",
+		Severity: "sev2", PipelineID: "orders", Raw: json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("alert room: %v", err)
+	}
+	if snap.Title != "orders gal gnissim" {
+		t.Fatalf("alert title = %q, want the bidi controls dropped", snap.Title)
+	}
+}
+
+// A watcher note is evidence, not typed text: bidi controls are dropped and
+// the note is kept (#358).
+func TestRoomNoteDropsBidiControls(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _ := newTestService(t)
+	roomID := createRoom(t, svc, "arjun").ID
+	if err := svc.PostRoomNote(ctx, roomID, "lag ‮gal‬ on ⁦orders⁩"); err != nil {
+		t.Fatalf("post note: %v", err)
+	}
+	msgs := eventsOf[events.AgentMessagePayload](t, svc, roomID, events.AgentMessage)
+	if len(msgs) == 0 || msgs[len(msgs)-1].Text != "lag gal on orders" {
+		t.Fatalf("notes = %+v, want the last one %q", msgs, "lag gal on orders")
+	}
+}
+
+// The label form is pre-filled from the agent's hypothesis, which may carry
+// bidi controls: they are dropped from cause and fix, not refused (#358).
+func TestLabelDropsBidiControlsFromAgentText(t *testing.T) {
+	ctx := context.Background()
+	svc, _, _ := newTestService(t)
+	arjun := mustUser(t, svc, "arjun")
+	roomID := createRoom(t, svc, "arjun").ID
+	if _, err := svc.CloseRoom(ctx, arjun, roomID, "done"); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := svc.Label(ctx, arjun, roomID, room.LabelInput{Cause: "column ⁦amount⁩ dropped", FixThatWorked: "‪restart‬"})
+	if err != nil {
+		t.Fatalf("label: %v", err)
+	}
+	p, err := events.Decode[events.RoomLabelledPayload](ev)
+	if err != nil || p.Cause != "column amount dropped" || p.FixThatWorked != "restart" {
+		t.Fatalf("label = %+v, %v; want the controls dropped", p, err)
+	}
+}
+
+// Agent text loses bidi controls, so the web forms pre-filled from it pass:
+// a proposal title is stored without them, and a close resolution built from
+// it (the verified-fix nudge) is accepted; one typed with them is dropped of
+// them too, since an older room may still carry them in its titles (#358).
+func TestAgentTextDropsBidiAndPrefilledCloseIsAccepted(t *testing.T) {
+	ctx := context.Background()
+	act := &fakeAction{name: "pg_act", layer: "postgres"}
+	svc, _, _ := newTestService(t, act)
+	arjun := mustUser(t, svc, "arjun")
+	roomID := createRoom(t, svc, "arjun").ID
+	title := "restart ⁦orders⁩ connector"
+	if _, err := svc.CreateProposal(ctx, roomID, events.ProposalCreatedPayload{
+		Title: title, Risk: "low", Rollback: "revert",
+		Steps: []events.ProposalStep{{Action: "pg_act", Layer: "postgres", Params: json.RawMessage("{}")}},
+	}, events.AgentActor); err != nil {
+		t.Fatalf("create proposal: %v", err)
+	}
+	created := eventsOf[events.ProposalCreatedPayload](t, svc, roomID, events.ProposalCreated)
+	if len(created) != 1 || created[0].Title != "restart orders connector" {
+		t.Fatalf("stored proposal titles = %+v, want the bidi controls dropped", created)
+	}
+	ev, err := svc.CloseRoom(ctx, arjun, roomID, `Fixed by "`+title+`"`)
+	if err != nil {
+		t.Fatalf("close with a resolution pre-filled from a proposal title: %v", err)
+	}
+	p, err := events.Decode[events.RoomClosedPayload](ev)
+	if err != nil || p.Resolution != `Fixed by "restart orders connector"` {
+		t.Fatalf("resolution = %q, %v; want the bidi controls dropped", p.Resolution, err)
+	}
 }

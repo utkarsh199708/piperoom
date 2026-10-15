@@ -8,7 +8,18 @@ import (
 
 	"piperoom/internal/auth"
 	"piperoom/internal/config"
+	"piperoom/internal/room"
 )
+
+// withRoomAuth sets the room.Deps fields that come from the auth settings:
+// the session liveness rule, the same one every request is held to (#417),
+// so the room's person lookup and people list never count a session the HTTP
+// layer would refuse; and the viewer groups.
+func withRoomAuth(d room.Deps, s auth.Settings) room.Deps {
+	d.SessionLive = s.Liveness()
+	d.ViewerGroups = s.ViewerGroups
+	return d
+}
 
 // devNonLoopbackWarning is the loud warning for dev auth on a reachable
 // address (docs/design/auth.md §5.1). httpapi logs the same text on every dev

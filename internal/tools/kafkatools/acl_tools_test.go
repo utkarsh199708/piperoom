@@ -125,3 +125,47 @@ func TestKafkaACLsInput(t *testing.T) {
 		t.Errorf("plain client: %v", err)
 	}
 }
+
+// TestACLSummaryHosts (#304): an ALLOW limited to one host is shown with its
+// host and is not a full WRITE grant; a host-specific DENY applies only to
+// that host.
+func TestACLSummaryHosts(t *testing.T) {
+	const topic = "pg.public.orders"
+	onHost := func(e clients.ACLEntry, host string) clients.ACLEntry { e.Host = host; return e }
+	allowAll := ent("User:debezium", "TOPIC", topic, "LITERAL", "WRITE", "ALLOW")
+	for _, tc := range []struct {
+		name    string
+		entries []clients.ACLEntry
+		want    []string
+		notWant []string
+	}{
+		{"allow from one host", []clients.ACLEntry{onHost(allowAll, "10.9.9.9")},
+			[]string{"ALLOW WRITE topic pg.public.orders (LITERAL) from 10.9.9.9",
+				"WRITE on topic pg.public.orders for User:debezium is allowed only from 10.9.9.9"},
+			[]string{"missing: WRITE"}},
+		{"deny from one host", []clients.ACLEntry{allowAll, onHost(ent("User:debezium", "TOPIC", topic, "LITERAL", "WRITE", "DENY"), "10.1.1.1")},
+			[]string{"DENY WRITE topic pg.public.orders (LITERAL) from 10.1.1.1",
+				"WRITE on topic pg.public.orders for User:debezium is denied from 10.1.1.1"},
+			[]string{"missing: WRITE"}},
+		{"allow and deny on the same host", []clients.ACLEntry{onHost(allowAll, "10.9.9.9"), onHost(ent("User:debezium", "TOPIC", topic, "LITERAL", "ALL", "DENY"), "10.9.9.9")},
+			[]string{"missing: WRITE on topic pg.public.orders"}, nil},
+		{"deny from every host", []clients.ACLEntry{allowAll, ent("User:debezium", "TOPIC", topic, "LITERAL", "WRITE", "DENY")},
+			[]string{"missing: WRITE on topic pg.public.orders"}, []string{" from "}},
+		{"full grant", []clients.ACLEntry{allowAll},
+			nil, []string{"missing: WRITE", "allowed only", "denied from", " from "}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := aclSummary(tc.entries, []string{topic}, "User:debezium")
+			for _, w := range tc.want {
+				if !strings.Contains(s, w) {
+					t.Errorf("summary lacks %q:\n%s", w, s)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(s, w) {
+					t.Errorf("summary has %q:\n%s", w, s)
+				}
+			}
+		})
+	}
+}
