@@ -359,10 +359,28 @@ func (s *Server) sessionFromToken(ctx context.Context, token string) (auth.Sessi
 		s.log.Error("auth: load session", "err", err)
 		return auth.Session{}, &authError{http.StatusInternalServerError, "internal_error", "internal error"}
 	}
-	if sess.Check(s.now(), s.authSettings.Idle) != nil {
+	if !s.sessionUsable(sess) {
 		return auth.Session{}, expired
 	}
 	return sess, nil
+}
+
+// sessionUsable is the per-request and presence-tick check of a stored
+// session. Besides revocation and the idle and absolute expiry, it holds the
+// row to the server's current settings: sessions outlive a restart in
+// Postgres, so a dev-login session (no IdP, no sub: pin) made before a switch
+// to oidc mode, or a row minted by a dev server sharing the room DB, must not
+// act in oidc mode; and a lowered PIPEROOM_SESSION_MAX applies to sessions
+// made under the old, longer one.
+func (s *Server) sessionUsable(sess auth.Session) bool {
+	now := s.now()
+	if sess.Check(now, s.authSettings.Idle) != nil {
+		return false
+	}
+	if s.authSettings.IsOIDC() && sess.Method != auth.MethodOIDC {
+		return false
+	}
+	return s.authSettings.Max <= 0 || now.Before(sess.CreatedAt.Add(s.authSettings.Max))
 }
 
 // touch writes last_seen_at at most once a minute. A failure only means the
@@ -385,7 +403,7 @@ func (s *Server) sessionAlive(ctx context.Context, id ws.Identity) bool {
 		// closes the connection.
 		return !errors.Is(err, auth.ErrNotFound)
 	}
-	if sess.Check(s.now(), s.authSettings.Idle) != nil {
+	if !s.sessionUsable(sess) {
 		return false
 	}
 	_, _, ok := s.person(sess.UserID, sess.Name, sess.Email, sess.Groups, sess.GroupsMissing)
