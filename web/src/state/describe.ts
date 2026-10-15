@@ -18,7 +18,9 @@ import type {
   ControlLeaseExpiredPayload,
   Event,
   HandoffCreatedPayload,
+  HandoffFailedPayload,
   HandoffRequestedPayload,
+  OwnerPagedPayload,
   HypothesisVerdictPayload,
   ApprovalNudgedPayload,
   ProposalCreatedPayload,
@@ -50,6 +52,8 @@ export interface DescribeContext {
   stepIndex: Record<string, number>
   /** suggestion_id -> name of who suggested it. */
   suggesters?: Record<string, string>
+  /** user id -> display name of the room's members, for the owners an owner.paged names. */
+  names?: Record<string, string>
   /** The hypothesis confidence before this event, to say raised or lowered. */
   confidenceBefore?: string | null
   /** Finds a runbook item's section and text for a checklist tick, in the room's state. */
@@ -166,6 +170,7 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'comment.added': {
       const p = as<CommentAddedPayload>(e)
+      if (p.kind === 'fix_note') return { text: `${who} logged a fix`, detail: clip(p.text, 200), kind: 'human' }
       return {
         text: p.step_id ? `${who} commented on ${step(p.step_id)}` : `${who} commented`,
         detail: clip(p.text, 200),
@@ -210,6 +215,20 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       const p = as<ControlLeaseExpiredPayload>(e)
       return { text: `${p.driver?.name || 'The driver'}'s lease expired · no one is driving`, kind: 'control' }
     }
+    case 'owner.paged': {
+      // Owners are user ids; the room's member names stand in where the room knows them.
+      const p = as<OwnerPagedPayload>(e)
+      const layer = clip(p.layer, 40)
+      const owners = (p.owners ?? []).map((id) => clip(ctx.names?.[id] ?? id, 40))
+      const target = owners.length > 0 ? `${owners.join(', ')} (${layer})` : `the ${layer} owners (nobody listed)`
+      const reason = clip(p.reason, 80)
+      const lead = p.auto ? 'Piperoom auto-paged' : `${who} paged`
+      return {
+        text: `${lead} ${target}${reason ? `: ${reason}` : ''}`,
+        detail: (p.reason ?? '').length > 80 ? clip(p.reason, 300) : undefined,
+        kind: 'human',
+      }
+    }
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(e)
       return { text: `Agent proposed a fix · ${clip(p.title, 80)}`, kind: 'decision' }
@@ -236,11 +255,20 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       const p = as<HandoffRequestedPayload>(e)
       return { text: `${who} asked for a hand-off to ${p.to.name}`, kind: 'control' }
     }
-    case 'handoff.failed':
-      return { text: 'The hand-off could not be written', kind: 'control' }
+    case 'handoff.failed': {
+      const p = as<HandoffFailedPayload>(e)
+      return {
+        text: 'The hand-off could not be written',
+        detail: p.reason === 'summary_failed' ? 'The agent could not write the summary. The driver can retry or write it.' : undefined,
+        kind: 'control',
+      }
+    }
     case 'handoff.created': {
       const p = as<HandoffCreatedPayload>(e)
-      return { text: `${who} started a hand-off to ${p.to.name}`, kind: 'control' }
+      return {
+        text: p.manual ? `${who} wrote a hand-off summary for ${p.to.name}` : `${who} started a hand-off to ${p.to.name}`,
+        kind: 'control',
+      }
     }
     case 'handoff.accepted':
       return { text: `${who} accepted the hand-off`, kind: 'control' }

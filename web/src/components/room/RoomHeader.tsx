@@ -1,4 +1,4 @@
-import { Check, CircleCheck, Download, Eye, Loader2, MoreHorizontal, Repeat2, UserPlus } from 'lucide-react'
+import { BellRing, Check, CircleCheck, Download, Eye, Loader2, MoreHorizontal, Repeat2, UserPlus, Wrench } from 'lucide-react'
 import type { RoomState } from '@/state/types'
 import type { CurrentUser } from '@/state/permissions'
 import { canClose, canHandoff, isViewer } from '@/state/permissions'
@@ -53,6 +53,8 @@ export function RoomHeader({
   onExport,
   exporting = false,
   handoffBusy = false,
+  onPageOwner,
+  onLogFix,
 }: {
   state: RoomState
   user: CurrentUser
@@ -67,6 +69,10 @@ export function RoomHeader({
   exporting?: boolean
   /** A hand-off summary is being written: the button shows progress and opens the dialog to follow it. */
   handoffBusy?: boolean
+  /** Ask a layer's owners to look (Q0, G2). Left out when this person may not page, or the room is closed. */
+  onPageOwner?: () => void
+  /** Log a fix made outside Piperoom (Q0, G10). Left out when this person may not, or a closed room is past 24 h. */
+  onLogFix?: () => void
 }) {
   // Below md the four actions would stack ~280px of buttons; they go behind one ⋯ menu. The keys still work:
   // useRoomShortcuts does not depend on the buttons.
@@ -116,6 +122,18 @@ export function RoomHeader({
           )}
           {roomy ? (
             <>
+              {onPageOwner && (
+                <Button variant="outline" onClick={onPageOwner}>
+                  <BellRing aria-hidden="true" />
+                  Page owner
+                </Button>
+              )}
+              {onLogFix && (
+                <Button variant="outline" onClick={onLogFix}>
+                  <Wrench aria-hidden="true" />
+                  Log a fix
+                </Button>
+              )}
               {canHandoff(state, user) && (
                 <Button variant="secondary" aria-keyshortcuts="H" aria-busy={handoffBusy || undefined} onClick={onHandoff}>
                   {handoffBusy ? (
@@ -158,6 +176,18 @@ export function RoomHeader({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                {onPageOwner && (
+                  <DropdownMenuItem onSelect={onPageOwner} className="coarse:min-h-11">
+                    <BellRing aria-hidden="true" />
+                    Page owner
+                  </DropdownMenuItem>
+                )}
+                {onLogFix && (
+                  <DropdownMenuItem onSelect={onLogFix} className="coarse:min-h-11">
+                    <Wrench aria-hidden="true" />
+                    Log a fix
+                  </DropdownMenuItem>
+                )}
                 {canHandoff(state, user) && (
                   <DropdownMenuItem aria-keyshortcuts="H" disabled={handoffBusy} onSelect={onHandoff} className="coarse:min-h-11">
                     <Repeat2 aria-hidden="true" />

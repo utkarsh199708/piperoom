@@ -24,6 +24,7 @@ import type {
   HandoffCreatedPayload,
   HandoffFailedPayload,
   HandoffRequestedPayload,
+  OwnerPagedPayload,
   HypothesisVerdictPayload,
   ApprovalNudgedPayload,
   ProposalCreatedPayload,
@@ -115,6 +116,8 @@ function foldInsight(state: RoomState, event: Event): InsightState {
 }
 
 const ACTIVITY_WINDOW = 50
+/** Pages kept per room; one per layer per 10 minutes, so this is far more than a room sees. */
+const PAGES_CAP = 50
 
 function describeContext(before: RoomState, after: RoomState): DescribeContext {
   const stepIndex: Record<string, number> = {}
@@ -127,7 +130,10 @@ function describeContext(before: RoomState, after: RoomState): DescribeContext {
   for (const p of after.proposals) proposalTitles[p.proposal_id] = p.title
   const suggesters: Record<string, string> = {}
   for (const s of after.suggestions) suggesters[s.suggestion_id] = s.from.name
+  const names: Record<string, string> = {}
+  for (const m of after.members) names[m.id] = m.name
   return {
+    names,
     driverBefore: before.driver?.id ?? null,
     stepTitles,
     proposalTitles,
@@ -382,8 +388,31 @@ function applyCore(state: RoomState, event: Event): RoomState {
             author: event.actor,
             at: event.at,
             replies: [],
+            // An unknown kind is a plain comment: only "fix_note" is styled apart.
+            kind: p.kind === 'fix_note' ? 'fix_note' : undefined,
           },
         ],
+      }
+      break
+    }
+
+    case 'owner.paged': {
+      const p = as<OwnerPagedPayload>(event)
+      next = {
+        ...state,
+        pages: [
+          ...state.pages,
+          {
+            seq: event.seq,
+            at: event.at,
+            by: event.actor,
+            layer: p.layer,
+            owners: p.owners ?? [],
+            reason: p.reason,
+            proposal_id: p.proposal_id || undefined,
+            auto: p.auto === true,
+          },
+        ].slice(-PAGES_CAP),
       }
       break
     }
@@ -637,6 +666,8 @@ function applyCore(state: RoomState, event: Event): RoomState {
             summary: p.summary,
             stay_as_watcher: p.stay_as_watcher,
             status: 'pending' as const,
+            // A manual summary was written by the driver who sent the request (the event's actor).
+            ...(p.manual ? { manual: true, written_by: event.actor } : {}),
           },
         ],
       }

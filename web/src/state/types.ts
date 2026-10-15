@@ -5,6 +5,7 @@ import type {
   Actor,
   AgentStatusPayload,
   AgentVerificationPayload,
+  CommentKind,
   HandoffSummary,
   HypothesisSummary,
   HypothesisVerdict,
@@ -106,6 +107,21 @@ export interface CommentState {
   author: Actor
   at: string
   replies: AgentMessageState[]
+  /** "fix_note": a person logged a fix made outside Piperoom (Q0, G10). Absent for a plain comment. */
+  kind?: CommentKind
+}
+
+/** One owner.paged (Q0, G2): who asked which layer's owners to look, and why. `owners` are user ids. */
+export interface PageState {
+  seq: number
+  at: string
+  by: Actor
+  layer: string
+  owners: string[]
+  reason: string
+  proposal_id?: string
+  /** The server paged on its own (no driver for a while). */
+  auto: boolean
 }
 
 /**
@@ -188,6 +204,9 @@ export interface HandoffState {
   summary: HandoffSummary
   stay_as_watcher: boolean
   status: 'pending' | 'accepted'
+  /** The driver wrote the summary themselves (Q0, G4); `written_by` is that driver. */
+  manual?: boolean
+  written_by?: Actor
 }
 
 /** A hand-off the agent is still writing the summary for (handoff.requested, R0). */
@@ -299,6 +318,8 @@ export interface RoomState {
   steps: StepState[]
   messages: AgentMessageState[]
   comments: CommentState[]
+  /** Every owner.paged of the room, oldest first (capped). */
+  pages: PageState[]
   suggestions: SuggestionState[]
   proposals: ProposalState[]
   /**
@@ -344,6 +365,7 @@ export function emptyRoomState(id: string): RoomState {
     steps: [],
     messages: [],
     comments: [],
+    pages: [],
     suggestions: [],
     proposals: [],
     snapshot_hashes: {},

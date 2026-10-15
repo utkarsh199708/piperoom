@@ -82,15 +82,14 @@ export interface SimilarHit {
   date: string
   fix_that_worked: string
   fix_actions: string[]
+  /** The layer a person labelled as the cause; '' when the room has no label. */
+  layer: string
   duration_s: number
   closed_by: string
   resolution: string
 }
 
-/** The top hit of a similar_incidents result, or null. `closed_by` is only ever the server's verified name. */
-export function topSimilarHit(data: unknown): SimilarHit | null {
-  if (!isObj(data) || !Array.isArray(data.hits) || data.hits.length === 0) return null
-  const h = data.hits[0]
+function readHit(h: unknown): SimilarHit | null {
   if (!isObj(h) || !str(h.room_id)) return null
   return {
     room_id: str(h.room_id),
@@ -98,10 +97,35 @@ export function topSimilarHit(data: unknown): SimilarHit | null {
     date: str(h.date) || str(h.closed_at) || str(h.opened_at),
     fix_that_worked: str(h.fix_that_worked),
     fix_actions: Array.isArray(h.fix_actions) ? h.fix_actions.filter((a): a is string => typeof a === 'string') : [],
+    layer: str(h.layer),
     duration_s: typeof h.duration_s === 'number' ? h.duration_s : 0,
     closed_by: str(h.closed_by),
     resolution: str(h.resolution),
   }
+}
+
+/**
+ * Whether a past room is worth offering as history (QA G7: a room titled "test", closed with a one-line
+ * note, was shown as "Seen before"). It needs a resolution and something the room learned: a fix that
+ * worked or ran, or a label naming the layer. The hit carries no event count and no hypothesis, so a
+ * short room that has both is still shown; the server-side similar_incidents filter is the other half.
+ */
+export function isUsableHit(h: SimilarHit): boolean {
+  if (!h.resolution.trim()) return false
+  return h.fix_that_worked.trim() !== '' || h.fix_actions.length > 0 || h.layer.trim() !== ''
+}
+
+/**
+ * The best usable hit of a similar_incidents result (hits come best first), or null. Hits that are not
+ * worth showing are skipped, not just the first one. `closed_by` is only ever the server's verified name.
+ */
+export function topSimilarHit(data: unknown): SimilarHit | null {
+  if (!isObj(data) || !Array.isArray(data.hits)) return null
+  for (const raw of data.hits) {
+    const hit = readHit(raw)
+    if (hit && isUsableHit(hit)) return hit
+  }
+  return null
 }
 
 export interface RunbookHit {
@@ -146,7 +170,7 @@ export function latestChanges(steps: StepState[]): { changes: ChangeRow[]; seen:
 }
 
 
-/** The top hit of the newest similar_incidents result that has one. */
+/** The top usable hit of the newest similar_incidents result that has one. */
 export function latestSimilarHit(steps: StepState[]): SimilarHit | null {
   for (let i = steps.length - 1; i >= 0; i--) {
     const calls = steps[i].tool_calls
