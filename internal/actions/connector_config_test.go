@@ -251,7 +251,8 @@ func TestUpdateConnectorConfigValidate(t *testing.T) {
 		{"errors.tolerance all removed", `{"connector":"pg-orders-connector","key":"errors.tolerance","value":"all"}`, "not allowed"},
 		{"key not allowed", `{"connector":"pg-orders-connector","key":"tasks.max","value":"4"}`, "not allowed"},
 		{"bad value", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"float"}`, "not allowed for"},
-		{"value of another key", `{"connector":"pg-orders-connector","key":"tombstones.on.delete","value":"double"}`, "not allowed for"},
+		{"value of another key", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"true"}`, "not allowed for"},
+		{"value of another key reversed", `{"connector":"pg-orders-connector","key":"tombstones.on.delete","value":"precise"}`, "not allowed for"},
 		{"empty value", `{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":""}`, "not allowed for"},
 		{"password key", `{"connector":"pg-orders-connector","key":"database.password","value":"x"}`, "credential"},
 		{"secret key", `{"connector":"pg-orders-connector","key":"client.secret","value":"x"}`, "credential"},
@@ -294,7 +295,7 @@ func TestUpdateConnectorConfigExactMatchOnly(t *testing.T) {
 		{"value leading space", key, " string"},
 		{"value trailing space", key, "string "},
 		{"value trailing zero width space", key, "string​"},
-		{"value cyrillic lookalike", key, "strіng"}, // U+043E
+		{"value cyrillic lookalike", key, "strіng"}, // U+0456 (Cyrillic і)
 		{"value newline", key, "string\n"},
 	}
 	for _, tc := range cases {
@@ -409,7 +410,10 @@ func TestUpdateConnectorConfigSchemaAndRegistry(t *testing.T) {
 			t.Errorf("Describe does not name %q", k)
 		}
 	}
-	for _, bad := range []string{"low-risk", "errors.tolerance", "precise|double", "double|string"} {
+	if !strings.Contains(d, "precise|string") {
+		t.Errorf("Describe %q does not offer precise|string", d)
+	}
+	for _, bad := range []string{"low-risk", "errors.tolerance", "double|", "|double"} {
 		if strings.Contains(d, bad) {
 			t.Errorf("Describe contains %q", bad)
 		}
@@ -466,5 +470,21 @@ func TestVisibilityGuards(t *testing.T) {
 				t.Fatalf("a refused change was written: %v", c.updates)
 			}
 		})
+	}
+}
+
+// The executor path refuses double too, and writes nothing.
+func TestUpdateConnectorConfigExecuteRefusesDouble(t *testing.T) {
+	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
+	_, err := configAction(c).Execute(context.Background(),
+		json.RawMessage(`{"connector":"pg-orders-connector","key":"decimal.handling.mode","value":"double"}`))
+	if err == nil || !strings.Contains(err.Error(), "double loses precision") {
+		t.Fatalf("err %v", err)
+	}
+	if len(c.updates) != 0 {
+		t.Fatalf("a refused value must not be written: %v", c.updates)
+	}
+	if c.cfg["decimal.handling.mode"] != "precise" {
+		t.Fatalf("config changed: %v", c.cfg)
 	}
 }
