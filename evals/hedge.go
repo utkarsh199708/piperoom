@@ -1,5 +1,7 @@
 package evals
 
+import "slices"
+
 // A diagnosis that lists several candidate causes names the right one by
 // construction: the root-cause terms match whatever the truth is. Such an
 // answer must not count as finding the cause, or a vaguer agent scores
@@ -34,16 +36,55 @@ var hedgeMarkers = []string{
 	"hard to say whether", "hard to say which",
 }
 
+// hedgeDenials just before a marker turn it into a commitment: "there are no
+// other possibilities", "I ruled out the other possible causes".
+var hedgeDenials = []string{"no", "not", "t", "without", "rule out", "rules out", "ruled out", "ruling out"}
+
 // causeHedge reports whether text offers several causes instead of one, and the
-// first marker it found.
+// first marker it found. A marker counts per clause: "either" only with an
+// "or" after it ("the registry did not change either" commits), and no marker
+// right after a denial.
 func causeHedge(text string) (string, bool) {
-	toks := tokenize(text)
+	// clauseSplit, not clausesOf: a question still offers its alternatives.
+	var cls [][]string
+	for _, c := range clauseSplit.Split(text, -1) {
+		cls = append(cls, tokenize(c))
+	}
 	for _, m := range hedgeMarkers {
-		if matchTerm(toks, m) {
-			return m, true
+		for _, toks := range cls {
+			for _, i := range findTerm(toks, m) {
+				if m == "either" && !slices.Contains(toks[i+1:], "or") {
+					continue
+				}
+				if hedgeDenied(toks, i) {
+					continue
+				}
+				return m, true
+			}
 		}
 	}
 	return "", false
+}
+
+// hedgeDenied reports whether a hedge denial ends in the three words before
+// toks[i], with only determiners or "other" between them.
+func hedgeDenied(toks []string, i int) bool {
+	for k := max(0, i-4); k < i; k++ {
+		l := phraseAt(toks, k, hedgeDenials)
+		if l == 0 || k+l > i {
+			continue
+		}
+		gap := true
+		for _, t := range toks[k+l : i] {
+			if t != "the" && t != "other" && t != "all" && t != "any" {
+				gap = false
+			}
+		}
+		if gap {
+			return true
+		}
+	}
+	return false
 }
 
 // Notes are advice about a valid scenario: what its expectations cannot
