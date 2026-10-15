@@ -292,6 +292,12 @@ type Service struct {
 	leaseOnce     sync.Once
 	leaseTickDone func()
 
+	// retryAfter, when set (tests only), replaces time.After for the wait
+	// between failed agent and shadow attempts, so tests need not sit out the
+	// production backoff. globalRetry is globalSlotRetry; tests shorten it.
+	retryAfter  func(d time.Duration) <-chan time.Time
+	globalRetry time.Duration
+
 	// ctx is the service lifetime: every goroutine the service starts (agent
 	// supervisors, executor queues) derives from it. Close cancels it and
 	// waits.
@@ -372,6 +378,7 @@ func New(d Deps) *Service {
 		triage:          d.Triage,
 		triageWait:      triageWaitFor(d.TriagePassTimeout),
 		triageSem:       make(chan struct{}, maxTriagePasses),
+		globalRetry:     globalSlotRetry,
 		opts:            d.Options,
 		shadowOpts:      d.ShadowOptions,
 		shadowGrace:     d.ShadowGrace,
@@ -1361,11 +1368,19 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(backoff):
+			case <-s.backoffAfter(backoff):
 			}
 			backoff *= 2
 		}
 	}()
+}
+
+// backoffAfter is time.After for the retry backoff, or the test's replacement.
+func (s *Service) backoffAfter(d time.Duration) <-chan time.Time {
+	if s.retryAfter != nil {
+		return s.retryAfter(d)
+	}
+	return time.After(d)
 }
 
 // runGuarded calls the agent runner and turns a panic into an error, so a bug

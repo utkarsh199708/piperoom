@@ -850,7 +850,7 @@ func TestSharedStoreStalledRoomKeepsOthersLeased(t *testing.T) {
 	runs := &inputRun{inputs: map[string][]agent.HumanInput{}, live: map[string]context.Context{}}
 	svc := New(Deps{
 		Store: ls, Users: DefaultUsers(), Owners: tenantOwners(), Run: runs.run, ReplicaID: "replica-a",
-		ReplicaTimings: ReplicaTimings{LeaseTTL: 900 * time.Millisecond, LeaseRenew: 150 * time.Millisecond, TakeoverScan: time.Hour, ExecSweep: time.Hour},
+		ReplicaTimings: ReplicaTimings{LeaseTTL: 600 * time.Millisecond, LeaseRenew: 100 * time.Millisecond, TakeoverScan: time.Hour, ExecSweep: time.Hour},
 	})
 	t.Cleanup(svc.Close)
 	ctx := context.Background()
@@ -874,7 +874,7 @@ func TestSharedStoreStalledRoomKeepsOthersLeased(t *testing.T) {
 	ls.lmu.Unlock()
 	w.OnAppend(a, pa.LastSeq+1)
 	renewedBefore := ls.renewals(b)
-	time.Sleep(2 * time.Second) // more than two lease TTLs
+	time.Sleep(1300 * time.Millisecond) // more than two lease TTLs
 
 	if n := ls.renewals(b) - renewedBefore; n < 5 {
 		t.Fatalf("B's lease was renewed %d times while A was stuck, want it kept renewed", n)
@@ -1243,7 +1243,7 @@ func newStalledLeaseRig(t *testing.T) (svc *Service, ls *leaseStore, runs *input
 	runs = &inputRun{inputs: map[string][]agent.HumanInput{}, live: map[string]context.Context{}}
 	svc = New(Deps{
 		Store: ls, Users: DefaultUsers(), Owners: tenantOwners(), Run: runs.run, ReplicaID: "replica-a",
-		ReplicaTimings: ReplicaTimings{LeaseTTL: 900 * time.Millisecond, LeaseRenew: 150 * time.Millisecond,
+		ReplicaTimings: ReplicaTimings{LeaseTTL: 600 * time.Millisecond, LeaseRenew: 100 * time.Millisecond,
 			TakeoverScan: 200 * time.Millisecond, ExecSweep: 200 * time.Millisecond},
 	})
 	t.Cleanup(svc.Close)
@@ -1261,7 +1261,7 @@ func newStalledLeaseRig(t *testing.T) (svc *Service, ls *leaseStore, runs *input
 func keepsLeased(t *testing.T, ls *leaseStore, runs *inputRun, b string) {
 	t.Helper()
 	before := ls.renewals(b)
-	time.Sleep(2 * time.Second)
+	time.Sleep(1300 * time.Millisecond) // more than two lease TTLs
 	if n := ls.renewals(b) - before; n < 5 {
 		t.Fatalf("B's lease was renewed %d times while C was stuck, want it kept renewed", n)
 	}

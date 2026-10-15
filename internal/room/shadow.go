@@ -197,7 +197,7 @@ func (s *Service) superviseShadow(ctx context.Context, roomID, title, pipelineID
 		select {
 		case <-ctx.Done():
 			return store.ShadowInterrupted
-		case <-time.After(backoff):
+		case <-s.backoffAfter(backoff):
 		}
 		backoff *= 2
 	}

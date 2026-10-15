@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -139,6 +140,12 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("condition not met within %s", timeout)
+}
+
+// fastRetry makes svc wait 1/100 of the production backoff between failed
+// agent attempts (10 ms, then 20 ms), so tests need not sit it out.
+func fastRetry(svc *room.Service) {
+	room.SetRetryAfterForTest(svc, func(d time.Duration) <-chan time.Time { return time.After(d / 100) })
 }
 
 func mustUser(t *testing.T, svc *room.Service, id string) room.User {
@@ -1488,6 +1495,7 @@ func TestAgentAutoRestartsAfterFailure(t *testing.T) {
 		},
 	})
 	t.Cleanup(svc.Close)
+	fastRetry(svc)
 	roomID := createRoom(t, svc, "arjun").ID
 
 	select {
@@ -2178,6 +2186,15 @@ func giveUpSetup(t *testing.T) (*room.Service, string, func() int) {
 		},
 	})
 	t.Cleanup(svc.Close)
+	// The first supervisor's backoffs are short so it gives up quickly; later
+	// supervisors wait the production backoff, which the callers rely on.
+	var slow atomic.Bool
+	room.SetRetryAfterForTest(svc, func(d time.Duration) <-chan time.Time {
+		if slow.Load() {
+			return time.After(d)
+		}
+		return time.After(d / 100)
+	})
 	roomID := createRoom(t, svc, "arjun").ID
 	runsOf := func() int {
 		mu.Lock()
@@ -2185,6 +2202,7 @@ func giveUpSetup(t *testing.T) (*room.Service, string, func() int) {
 		return runs
 	}
 	waitFor(t, 15*time.Second, func() bool { return runsOf() >= 3 })
+	slow.Store(true)
 	return svc, roomID, runsOf
 }
 
@@ -2277,12 +2295,14 @@ func TestAgentSupervisorStopsOnUnretryable(t *testing.T) {
 		},
 	})
 	t.Cleanup(svc.Close)
+	fastRetry(svc)
 	roomID := createRoom(t, svc, "arjun").ID
 	waitFor(t, 5*time.Second, func() bool {
 		return len(eventsOf[events.AgentMessagePayload](t, svc, roomID, events.AgentMessage)) >= 1
 	})
-	// A retry would wait out the one-second backoff; give it time to show up.
-	time.Sleep(1500 * time.Millisecond)
+	// A retry would wait out the backoff (10 ms with fastRetry); give it
+	// many times that to show up.
+	time.Sleep(150 * time.Millisecond)
 	mu.Lock()
 	n := runs
 	mu.Unlock()

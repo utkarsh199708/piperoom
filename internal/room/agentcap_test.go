@@ -367,6 +367,7 @@ func TestAgentCapFailedRunReleasesSlot(t *testing.T) {
 				return cr.run(ctx, a, d, o)
 			}
 			svc, _ := newCapService(t, 1, runFirstFails)
+			fastRetry(svc)
 
 			r1 := createRoom(t, svc, "arjun").ID
 			cr.waitStarted(t, 1)

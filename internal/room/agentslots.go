@@ -328,10 +328,10 @@ func (g *agentGate) acquireGlobal(ctx context.Context, localShown bool) (shown b
 	if g.globalHeld {
 		return false, nil
 	}
-	backoff := globalSlotRetry
+	backoff := g.s.globalRetry
 	for {
 		ok, err := g.s.global.take(ctx, g.roomID)
-		wait := globalSlotRetry
+		wait := g.s.globalRetry
 		switch {
 		case err != nil && (ctx.Err() != nil || errors.Is(err, store.ErrLeaseLost)):
 			return shown, err
@@ -346,7 +346,7 @@ func (g *agentGate) acquireGlobal(ctx context.Context, localShown bool) (shown b
 			g.globalHeld = true
 			return shown, nil
 		default:
-			backoff = globalSlotRetry
+			backoff = g.s.globalRetry
 			if !shown && !localShown {
 				shown = g.s.emitQueued(g, func() bool { return true },
 					fmt.Sprintf("waiting for an agent slot (all %d across the servers are in use)", g.s.global.limit()))
