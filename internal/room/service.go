@@ -189,6 +189,12 @@ type roomState struct {
 	// alertRaw is room.created.alert, the raw alert every agent run of the
 	// room starts from; nil for a room opened by hand.
 	alertRaw json.RawMessage
+	// openingFor is the pipeline of a room opened in this process, set before
+	// it is cached and never changed: a registry mirror that tells lookups by
+	// pipeline about a room whose create has not published it yet
+	// (OpenRoomForPipeline). "" for a room loaded from the log, which is
+	// published from the start.
+	openingFor string
 	// firstLook is set on a room opened in this process until its agent
 	// starts: only such a room gets the triage pass (service_triage.go).
 	firstLook bool
@@ -697,6 +703,10 @@ func (l loadedRoom) state() *roomState {
 // the log's byte count. The room.created it folds gives the alert key and the
 // raw alert, so nothing reads that event again.
 func (s *Service) rebuild(ctx context.Context, roomID string) (loadedRoom, error) {
+	// The byte count is read before the log: an event appended meanwhile is
+	// then folded (and counted by foldLocked) but not in the count, which can
+	// trail the store, never count an event twice.
+	logBytes := s.loadUsage(ctx, roomID)
 	st := &roomState{snap: NewSnapshot()}
 	var created *events.RoomCreatedPayload
 	after := int64(0)
@@ -739,7 +749,7 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (loadedRoom, error
 			snap.Driver.LeaseUntil = row.DriverLeaseUntil.UTC()
 		}
 	}
-	l := loadedRoom{snap: snap, pending: st.pending, logBytes: s.loadUsage(ctx, roomID)}
+	l := loadedRoom{snap: snap, pending: st.pending, logBytes: logBytes}
 	if created != nil {
 		l.dedupKey = alertIndexKeyOf(*created, snap.PipelineID)
 		l.alertRaw = created.Alert

@@ -53,8 +53,23 @@ func (s *Service) OpenRoomForPipeline(pipelineID string) (roomID string, ok bool
 		}
 		cancel()
 	}
+	rooms, opening := s.roomsForPipeline(pipelineID)
+	// A room being opened for the pipeline right now is waited for, so the
+	// watcher does not open a second one beside it: its lock is held until
+	// it is published (or dropped, when its room.created failed).
+	for _, id := range opening {
+		st := s.lockCachedRoom(id)
+		if st == nil {
+			continue
+		}
+		if !st.gone {
+			snap := st.snap.Clone()
+			rooms[id] = &snap
+		}
+		s.unlockRoom(st)
+	}
 	var newest *RoomSnapshot
-	for id, p := range s.publishedRooms() {
+	for id, p := range rooms {
 		if p.PipelineID != pipelineID || p.Status != "open" {
 			continue
 		}
@@ -105,20 +120,17 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 		closedAt = &t
 	}
 	// The event log is the source of truth. When the room is cached and its
-	// published snapshot disagrees with the row (the row write after
-	// room.closed failed), the snapshot wins; a close is published before
-	// the closing call returns and runs OnRoomClosed.
+	// published snapshot is closed while the row is not (the row write after
+	// room.closed failed), the snapshot's close counts. It only ever adds a
+	// close: a snapshot still open may just not have published a close in
+	// progress, whose row write already landed.
 	// Shared store: fold a close another replica wrote first, reading the
 	// store outside the room's lock. A room deleted meanwhile is evicted and
 	// simply loses the snapshot vote.
 	s.syncRoom(ctx, row.ID)
-	if p := s.published(row.ID); p != nil {
-		if p.Status == "open" {
-			closedAt = nil
-		} else if p.ClosedAt != nil {
-			t := *p.ClosedAt
-			closedAt = &t
-		}
+	if p := s.published(row.ID); p != nil && p.Status != "open" && p.ClosedAt != nil {
+		t := *p.ClosedAt
+		closedAt = &t
 	}
 	return row.ID, closedAt, true
 }

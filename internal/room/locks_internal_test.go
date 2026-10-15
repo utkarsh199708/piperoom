@@ -27,11 +27,15 @@ import (
 // gatedStore is a memstore that is slow for one room: while it is armed,
 // Append and AppendIfLast for that room wait before they write, and Since
 // for it waits after it has read, until the test releases it (or the call's
-// context ends). Calls for every other room go straight through.
+// context ends). Calls for every other room go straight through. Armed with
+// ops, only those calls wait: "append", "since", "appended" (an Append that
+// has written), "close" (CloseRoom) and "driver" (UpdateDriver). Room "*"
+// is every room.
 type gatedStore struct {
 	*memstore.Store
 	mu      sync.Mutex
 	room    string
+	ops     map[string]bool
 	gate    chan struct{}
 	entered chan string
 	loads   map[string]int // Since(room, 0, ...) calls: rebuilds of each room
@@ -41,11 +45,18 @@ func newGatedStore() *gatedStore {
 	return &gatedStore{Store: memstore.New(), entered: make(chan string, 64), loads: map[string]int{}}
 }
 
-// arm makes roomID slow until release is called. release is idempotent.
-func (g *gatedStore) arm(roomID string) (release func()) {
+// arm makes roomID slow until release is called: the calls ops names, or
+// Append and Since without ops. release is idempotent.
+func (g *gatedStore) arm(roomID string, ops ...string) (release func()) {
+	if len(ops) == 0 {
+		ops = []string{"append", "since"}
+	}
 	gate := make(chan struct{})
 	g.mu.Lock()
-	g.room, g.gate = roomID, gate
+	g.room, g.gate, g.ops = roomID, gate, map[string]bool{}
+	for _, op := range ops {
+		g.ops[op] = true
+	}
 	g.mu.Unlock()
 	var once sync.Once
 	return func() {
@@ -64,7 +75,7 @@ func (g *gatedStore) arm(roomID string) (release func()) {
 func (g *gatedStore) hold(ctx context.Context, op, roomID string) error {
 	g.mu.Lock()
 	gate := g.gate
-	if roomID != g.room {
+	if (roomID != g.room && g.room != "*") || !g.ops[op] {
 		gate = nil
 	}
 	g.mu.Unlock()
@@ -109,7 +120,25 @@ func (g *gatedStore) Append(ctx context.Context, roomID string, typ events.Type,
 	if err := g.hold(ctx, "append", roomID); err != nil {
 		return events.Event{}, err
 	}
-	return g.Store.Append(ctx, roomID, typ, actor, payload)
+	e, err := g.Store.Append(ctx, roomID, typ, actor, payload)
+	if err == nil {
+		_ = g.hold(ctx, "appended", roomID) // written either way
+	}
+	return e, err
+}
+
+func (g *gatedStore) CloseRoom(ctx context.Context, roomID string, closedAt time.Time) error {
+	if err := g.hold(ctx, "close", roomID); err != nil {
+		return err
+	}
+	return g.Store.CloseRoom(ctx, roomID, closedAt)
+}
+
+func (g *gatedStore) UpdateDriver(ctx context.Context, roomID, driverID, driverName string, leaseUntil time.Time) error {
+	if err := g.hold(ctx, "driver", roomID); err != nil {
+		return err
+	}
+	return g.Store.UpdateDriver(ctx, roomID, driverID, driverName, leaseUntil)
 }
 
 func (g *gatedStore) Since(ctx context.Context, roomID string, afterSeq int64, limit int) ([]events.Event, error) {
@@ -758,6 +787,10 @@ func TestSharedStoreStalledRoomKeepsOthersLeased(t *testing.T) {
 	pollUntil(t, func() bool { return runs.running(a) && runs.running(b) })
 
 	release, wait := stallAppend(t, svc, ls.gatedStore, a)
+	// phase B: wake the follower for A while it is stalled, so the test also
+	// shows a stuck room does not hold up the follower: read ls.watch under
+	// ls.lmu and call w.OnAppend(a, <A's last seq>+1) here, before B's
+	// appendElsewhere below.
 	renewedBefore := ls.renewals(b)
 	time.Sleep(2 * time.Second) // more than two lease TTLs
 
@@ -938,4 +971,184 @@ func driverID(s RoomSnapshot) string {
 		return ""
 	}
 	return s.Driver.ID
+}
+
+// A close holds the room's lock from room.closed until it has stopped the
+// executor: isRoomOpen waits for it and then says closed, so no step starts
+// after room.closed is in the log.
+func TestIsRoomOpenWaitsForClose(t *testing.T) {
+	st := newGatedStore()
+	svc := newLockService(t, st)
+	a := createRooms(t, svc, 1)[0]
+	release := st.arm(a, "close")
+	t.Cleanup(release)
+	closed := make(chan error, 1)
+	go func() {
+		_, err := svc.CloseRoom(context.Background(), lockUser(t, svc, "arjun"), a, "fixed")
+		closed <- err
+	}()
+	st.waitHeld(t, "close") // room.closed is logged; the close is not done
+
+	open := make(chan bool, 1)
+	go func() { open <- svc.isRoomOpen(context.Background(), a) }()
+	select {
+	case got := <-open:
+		t.Fatalf("isRoomOpen = %v while the close was in progress, want it to wait", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	select {
+	case got := <-open:
+		if got {
+			t.Fatal("isRoomOpen = true after room.closed")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("isRoomOpen did not return after the close")
+	}
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A room being opened for a pipeline is found by OpenRoomForPipeline, which
+// waits for it, so the watcher does not open a second room beside it.
+func TestOpenRoomForPipelineWaitsForCreate(t *testing.T) {
+	st := newGatedStore()
+	svc := newLockService(t, st)
+	release := st.arm("*", "append")
+	t.Cleanup(release)
+	created := make(chan string, 1)
+	go func() {
+		snap, err := svc.CreateRoom(context.Background(), lockUser(t, svc, "arjun"), "slow", "sev2", "orders")
+		if err != nil {
+			t.Error(err)
+		}
+		created <- snap.ID
+	}()
+	st.waitHeld(t, "append") // cached, room.created not written yet
+
+	type found struct {
+		id string
+		ok bool
+	}
+	res := make(chan found, 1)
+	go func() {
+		id, ok := svc.OpenRoomForPipeline("orders")
+		res <- found{id, ok}
+	}()
+	select {
+	case f := <-res:
+		t.Fatalf("OpenRoomForPipeline = %+v while the room was being opened, want it to wait", f)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	id := <-created
+	select {
+	case f := <-res:
+		if !f.ok || f.id != id {
+			t.Fatalf("OpenRoomForPipeline = %+v, want the room being opened (%s)", f, id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OpenRoomForPipeline did not return after the create")
+	}
+}
+
+// An event already in the store is never above Events' last_seq, even while
+// the command that appended it has not published it yet.
+func TestEventsLastSeqCoversEventsInFlight(t *testing.T) {
+	st := newGatedStore()
+	svc := newLockService(t, st)
+	a := createRooms(t, svc, 1)[0]
+	ctx := context.Background()
+	before, err := svc.GetRoom(ctx, a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := before.LastSeq
+	release := st.arm(a, "appended")
+	t.Cleanup(release)
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.AddComment(ctx, lockUser(t, svc, "arjun"), a, "", "written, not published")
+		done <- err
+	}()
+	st.waitHeld(t, "appended")
+
+	within(t, time.Second, "Events with the new event", func() error {
+		evs, last, err := svc.Events(ctx, a, 0, 100)
+		switch {
+		case err != nil:
+			return err
+		case len(evs) == 0 || evs[len(evs)-1].Seq != base+1:
+			return fmt.Errorf("%d events, want the new one (seq %d) last", len(evs), base+1)
+		case last < base+1:
+			return fmt.Errorf("last_seq %d below the event %d it returned", last, base+1)
+		}
+		return nil
+	})
+	within(t, time.Second, "Events a page short of the new event", func() error {
+		evs, last, err := svc.Events(ctx, a, 0, int(base))
+		switch {
+		case err != nil:
+			return err
+		case int64(len(evs)) != base:
+			return fmt.Errorf("%d events, want %d", len(evs), base)
+		case last < base+1:
+			return fmt.Errorf("last_seq %d, want at least %d: a client paging to it would stop early", last, base+1)
+		}
+		return nil
+	})
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// With a shared store, a room whose command is stuck in the database after
+// its append landed (here: the driver lease write of a steer) does not hold
+// up the room list or another room's hand-off check: neither may wait for the
+// stuck room's lock to fold it.
+func TestSharedStoreSlowCommandReadsDoNotWait(t *testing.T) {
+	t.Skip("enabled in phase B: per-room lock flip")
+	ls := newLeaseStore()
+	svc := New(Deps{
+		Store: ls, Users: DefaultUsers(), Owners: tenantOwners(), Run: idleRun, ReplicaID: "replica-a",
+		ReplicaTimings: ReplicaTimings{TakeoverScan: time.Hour, ExecSweep: time.Hour},
+	})
+	t.Cleanup(svc.Close)
+	ctx := context.Background()
+	if err := svc.Load(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ids := createRooms(t, svc, 2)
+	a, b := ids[0], ids[1]
+	release := ls.arm(a, "driver")
+	t.Cleanup(release)
+	done := make(chan error, 1)
+	go func() {
+		_, err := svc.Steer(ctx, lockUser(t, svc, "arjun"), a, "check the lag")
+		done <- err
+	}()
+	ls.waitHeld(t, "driver") // steer.sent is in the store; A's lock is held
+
+	within(t, time.Second, "ListRooms", func() error {
+		list, err := svc.ListRooms(ctx)
+		if err == nil && len(list) != 2 {
+			err = fmt.Errorf("listed %d rooms, want 2", len(list))
+		}
+		return err
+	})
+	within(t, time.Second, "HandoffInFlight(B)", func() error {
+		return svc.HandoffInFlight(ctx, b)
+	})
+
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the held steer did not finish")
+	}
 }

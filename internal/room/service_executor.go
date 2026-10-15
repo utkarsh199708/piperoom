@@ -631,9 +631,16 @@ func (s *Service) finishStepRow(ctx context.Context, proposalID string, i int, s
 	return s.store.FinishProposalStep(ctx, proposalID, i, status, output)
 }
 
-// isRoomOpen reports whether a cached room is open, as last published: a close
-// is published before its lock is released, so a finished close is seen.
+// isRoomOpen reports whether a cached room is open. It takes the room's lock,
+// not the published snapshot: a close (or a close another replica wrote,
+// being folded) holds the lock from room.closed until it has stopped the
+// executor, and no step may start in that window.
 func (s *Service) isRoomOpen(ctx context.Context, roomID string) bool {
-	p := s.published(roomID)
-	return p != nil && p.Status == "open"
+	st := s.lockCachedRoom(roomID)
+	if st == nil {
+		return false
+	}
+	open := !st.gone && st.snap.Status == "open"
+	s.unlockRoom(st)
+	return open
 }

@@ -63,7 +63,7 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 		s.mu.Unlock()
 		return RoomSnapshot{}, fmt.Errorf("room: create: %w", err)
 	}
-	st := &roomState{snap: NewSnapshot(), inbox: newInbox()}
+	st := &roomState{snap: NewSnapshot(), inbox: newInbox(), openingFor: pipelineID}
 	st.snap.ID = roomID
 	// Locked before it is cached: nobody sees the room before room.created.
 	s.holdRoomLocked(st)
@@ -250,7 +250,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 		s.mu.Unlock()
 		return RoomSnapshot{}, false, fmt.Errorf("room: create from alert: %w", err)
 	}
-	st := &roomState{snap: NewSnapshot(), inbox: newRoomInbox(shadow)}
+	st := &roomState{snap: NewSnapshot(), inbox: newRoomInbox(shadow), openingFor: pipelineID}
 	st.snap.ID = roomID
 	s.holdRoomLocked(st)
 	s.cacheRoom(roomID, st)
@@ -485,7 +485,11 @@ func (s *Service) Events(ctx context.Context, roomID string, afterSeq int64, lim
 	if limit > 1000 {
 		limit = 1000
 	}
-	evs, err := s.store.Since(ctx, roomID, afterSeq, limit)
+	// One event more than asked: when it exists the log goes on past this
+	// page, and last_seq says so even while the published snapshot trails
+	// an append still in flight, so a client paging up to last_seq does not
+	// stop early.
+	evs, err := s.store.Since(ctx, roomID, afterSeq, limit+1)
 	if err != nil {
 		return nil, 0, fmt.Errorf("room: events: %w", err)
 	}
@@ -495,8 +499,11 @@ func (s *Service) Events(ctx context.Context, roomID string, afterSeq int64, lim
 	} else if row, err := s.store.GetRoom(ctx, roomID); err == nil {
 		lastSeq = row.LastSeq
 	}
-	// The published snapshot may trail a command whose event is already in
-	// the store: last_seq is never below an event this answer holds.
+	if len(evs) > limit {
+		lastSeq = max(lastSeq, evs[limit].Seq)
+		evs = evs[:limit]
+	}
+	// Never below an event this answer holds.
 	if n := len(evs); n > 0 {
 		lastSeq = max(lastSeq, evs[n-1].Seq)
 	}

@@ -127,13 +127,23 @@ func (s *Service) published(roomID string) *RoomSnapshot {
 // publishedRooms returns the published snapshot of every cached room that has
 // one, by id; shared and read-only, like published.
 func (s *Service) publishedRooms() map[string]*RoomSnapshot {
+	rooms, _ := s.roomsForPipeline("")
+	return rooms
+}
+
+// roomsForPipeline is publishedRooms, plus the ids of the cached rooms that
+// are still being opened for pipelineID here (cached, not yet published).
+// With pipelineID "" no room counts as opening.
+func (s *Service) roomsForPipeline(pipelineID string) (published map[string]*RoomSnapshot, opening []string) {
 	s.reg.Lock()
 	defer s.reg.Unlock()
-	out := make(map[string]*RoomSnapshot, len(s.rooms))
+	published = make(map[string]*RoomSnapshot, len(s.rooms))
 	for id, st := range s.rooms {
 		if p := st.pub.Load(); p != nil {
-			out[id] = p
+			published[id] = p
+		} else if pipelineID != "" && st.openingFor == pipelineID {
+			opening = append(opening, id)
 		}
 	}
-	return out
+	return published, opening
 }
