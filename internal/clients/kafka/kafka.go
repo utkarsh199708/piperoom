@@ -44,6 +44,24 @@ type Client struct {
 
 	srMu    sync.Mutex
 	srCache map[int]avro.Schema
+	// keyRefused caches, per schema id, that the schema holds array/map types
+	// and is refused for key decoding (the walk runs once per id).
+	keyRefused map[int]bool
+	// keyAPI decodes untrusted keys with size caps; built in New, lazily for
+	// zero-value test clients.
+	keyAPI avro.API
+	// decodeHook runs just before the Avro decode; a test seam, nil in production.
+	decodeHook func()
+}
+
+// maxKeyBytes bounds a record key before any parsing: keys are untrusted and a
+// legitimate Confluent-framed key is far smaller.
+const maxKeyBytes = 64 << 10
+
+// newKeyAPI returns the frozen, bounded Avro config for untrusted keys. The
+// package-level avro decoders use DefaultConfig, which has no caps.
+func newKeyAPI() avro.API {
+	return avro.Config{MaxByteSliceSize: 64 << 10, MaxSliceAllocSize: 1 << 20}.Freeze()
 }
 
 var _ clients.KafkaAdmin = (*Client)(nil)
@@ -52,7 +70,7 @@ var _ clients.KafkaAdmin = (*Client)(nil)
 // connOpts are connection options such as kgo.DialTLSConfig and kgo.SASL; most
 // callers want NewSecure instead.
 func New(brokers []string, sr *schemareg.Client, connOpts ...kgo.Opt) (*Client, error) {
-	c := &Client{brokers: brokers, connOpts: append([]kgo.Opt(nil), connOpts...), sr: sr, srCache: map[int]avro.Schema{}}
+	c := &Client{brokers: brokers, connOpts: append([]kgo.Opt(nil), connOpts...), sr: sr, srCache: map[int]avro.Schema{}, keyRefused: map[int]bool{}, keyAPI: newKeyAPI()}
 	cl, err := c.newKgo()
 	if err != nil {
 		return nil, fmt.Errorf("kafka: new client: %w", err)
@@ -475,18 +493,46 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 
 // decodeKey decodes a Confluent Avro key into a comparable string. Raw
 // (non-Confluent) keys are returned as-is. Parsed schemas are cached by id.
-func (c *Client) decodeKey(ctx context.Context, key []byte) (string, error) {
+//
+// The key is attacker-controlled, including the schema id, so array/map block
+// decoding (GO-2026-5046/5047/5048) is made unreachable: oversized keys and
+// schemas containing array or map types are refused, the decoder is capped
+// (see newKeyAPI), and a decoder panic becomes an error. Decode takes no
+// context; with no array/map in the schema every read is bounded by the key
+// size (at most 64 KiB), so no deadline is needed.
+func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err error) {
 	// Without a Schema Registry (SCHEMA_REGISTRY_URL empty or off) no key is
 	// Avro-decoded: a key that merely starts with 0x00 is compared raw.
 	if c.sr == nil || len(key) < 5 || key[0] != 0x00 {
 		return string(key), nil
 	}
+	if len(key) > maxKeyBytes {
+		return "", fmt.Errorf("kafka: avro key too large (%d bytes)", len(key))
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			out, err = "", fmt.Errorf("kafka: avro key decode panicked: %v", r)
+		}
+	}()
 	id := int(binary.BigEndian.Uint32(key[1:5]))
 	schema, err := c.schemaByID(ctx, id)
 	if err != nil {
 		return "", err
 	}
-	dec := avro.NewDecoderForSchema(schema, bytes.NewReader(key[5:]))
+	c.srMu.Lock()
+	refused := c.keyRefused[id]
+	if c.keyAPI == nil {
+		c.keyAPI = newKeyAPI()
+	}
+	api := c.keyAPI
+	c.srMu.Unlock()
+	if refused {
+		return "", fmt.Errorf("kafka: avro key schema %d has array/map types; refused", id)
+	}
+	if c.decodeHook != nil {
+		c.decodeHook()
+	}
+	dec := api.NewDecoder(schema, bytes.NewReader(key[5:]))
 	var v any
 	if err := dec.Decode(&v); err != nil {
 		return "", err
@@ -504,6 +550,7 @@ func (c *Client) decodeKey(ctx context.Context, key []byte) (string, error) {
 }
 
 // schemaByID returns a parsed schema, cached by id (schema ids are immutable).
+// It also records whether the schema holds array/map types.
 func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 	c.srMu.Lock()
 	s, ok := c.srCache[id]
@@ -519,10 +566,43 @@ func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 	if err != nil {
 		return nil, err
 	}
+	bad := hasArrayOrMap(s, map[string]bool{})
 	c.srMu.Lock()
 	c.srCache[id] = s
+	if c.keyRefused == nil {
+		c.keyRefused = map[int]bool{}
+	}
+	c.keyRefused[id] = bad
 	c.srMu.Unlock()
 	return s, nil
+}
+
+// hasArrayOrMap reports whether s contains an array or map type. Named types
+// are visited once (by full name), so recursive schemas terminate.
+func hasArrayOrMap(s avro.Schema, seen map[string]bool) bool {
+	switch t := s.(type) {
+	case *avro.ArraySchema, *avro.MapSchema:
+		return true
+	case *avro.RefSchema:
+		return hasArrayOrMap(t.Schema(), seen)
+	case *avro.RecordSchema:
+		if seen[t.FullName()] {
+			return false
+		}
+		seen[t.FullName()] = true
+		for _, f := range t.Fields() {
+			if hasArrayOrMap(f.Type(), seen) {
+				return true
+			}
+		}
+	case *avro.UnionSchema:
+		for _, u := range t.Types() {
+			if hasArrayOrMap(u, seen) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isInternal(name string) bool {
