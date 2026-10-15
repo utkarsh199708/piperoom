@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -395,15 +394,12 @@ func (s *Service) adoptRoom(roomID string, start time.Time) {
 		s.dropLeaseLocked(roomID, st)
 	case (agentWasWorking(st) || len(st.pending) > 0) && s.resumeAllowedLocked(ctx, roomID):
 		if _, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
-			Text: "the server that ran this room's agent stopped; the agent resumes on another server",
+			Text: takeoverNoticeText,
 		}); err != nil {
 			s.log.Warn("room: adopt room: resume notice failed", "room", roomID, "err", err)
 		}
-		// The new run has no memory of the old one: tell it which fixes
-		// are already proposed, so it does not propose them again.
-		if in := openProposalsInput(st); in != nil {
-			st.inbox.push(*in)
-		}
+		// The new run has no memory of the old one: its supervisor gives it
+		// the room recap first (primeRecap), with the fixes already proposed.
 		s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, s.rawAlert(ctx, roomID), st)
 	default:
 		if err := s.noteRestartLocked(ctx, roomID, st); err != nil {
@@ -412,6 +408,10 @@ func (s *Service) adoptRoom(roomID string, start time.Time) {
 		s.dropLeaseLocked(roomID, st)
 	}
 }
+
+// takeoverNoticeText is the system message of a takeover that resumes the
+// agent; the post-mortem timeline lists it (Q5 T5).
+const takeoverNoticeText = "the server that ran this room's agent stopped; the agent resumes on another server"
 
 // maxResumesPerHour caps resumes of one room's agent after takeovers, so a
 // run that kills its replica cannot crash-loop across the cluster.
@@ -434,20 +434,6 @@ func (s *Service) resumeAllowedLocked(ctx context.Context, roomID string) bool {
 		s.log.Warn("room: adopt room: resume cap reached; pausing the agent", "room", roomID, "max_per_hour", maxResumesPerHour)
 	}
 	return ok
-}
-
-// openProposalsInput lists the room's open proposals for a resumed run, or
-// nil when there are none.
-func openProposalsInput(st *roomState) *agent.HumanInput {
-	if len(st.snap.OpenProposals) == 0 {
-		return nil
-	}
-	var b strings.Builder
-	b.WriteString("this run resumes an investigation another server started; these fixes are already proposed and open (do not propose them again):")
-	for _, p := range st.snap.OpenProposals {
-		fmt.Fprintf(&b, " %s (%s);", p.ProposalID, p.Title)
-	}
-	return &agent.HumanInput{Seq: st.snap.LastSeq, Actor: systemActor, Kind: "comment", Text: b.String()}
 }
 
 // agentWasWorking reports whether the room's last agent status says a run
@@ -807,6 +793,12 @@ func (s *Service) foldLocked(ctx context.Context, roomID string, st *roomState, 
 		// a room whose agent runs here: a run that ended on its own must
 		// start again to read it (QA F21).
 		s.wakeForIncidentLocked(ctx, roomID, st)
+	}
+	if remote && st.leased && e.Type == events.ActionExecuted && e.Actor == executorActor {
+		// Another replica's executor ran a step of this room: the room's run
+		// here must read it, and a run that ended on its own starts again so
+		// the fix gets verified (Q5 T1, executorEmit).
+		s.wakeForResultLocked(ctx, roomID, st)
 	}
 	if remote && wasOpen && !s.roomOpen(st) {
 		s.closedElsewhereLocked(ctx, roomID, st)

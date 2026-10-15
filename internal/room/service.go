@@ -836,13 +836,43 @@ func (s *Service) fenceLocked(roomID string, st *roomState, run uint64) error {
 }
 
 // executorEmit appends an event on behalf of the action executor.
+//
+// An action.executed also makes sure the room has an agent run to read it
+// (Q5 T1): the run that proposed the fix may be gone (a restart, a run that
+// ended on its own, one that gave up), and then nobody would verify the fix.
+// A room without a live run gets one, the way a steer starts one (agent
+// slots, the room lease); it reads the recap first and then the result. The
+// restart sweeps that record interrupted proposals write through emitLocked
+// and wake nothing: a restart spends no model calls on its own.
 func (s *Service) executorEmit(ctx context.Context, roomID string, typ events.Type, payload any) error {
-	if p, ok := payload.(events.ActionExecutedPayload); ok {
-		// Mask before the cap: a cap must not cut a secret in two.
-		p.Output = s.capOutput(maskExecOutput(p.Output))
-		payload = p
+	p, executed := payload.(events.ActionExecutedPayload)
+	if !executed {
+		return s.emitAs(ctx, roomID, executorActor, typ, payload)
 	}
-	return s.emitAs(ctx, roomID, executorActor, typ, payload)
+	// Mask before the cap: a cap must not cut a secret in two.
+	p.Output = s.capOutput(maskExecOutput(p.Output))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, ok := s.rooms[roomID]
+	if !ok {
+		return fmt.Errorf("room: emit on unknown room %q", roomID)
+	}
+	if _, err := s.emitLocked(ctx, st, roomID, typ, executorActor, p); err != nil {
+		return err
+	}
+	s.wakeForResultLocked(ctx, roomID, st)
+	return nil
+}
+
+// wakeForResultLocked starts a run for an action result when the room has no
+// live one (see executorEmit). Caller holds s.mu.
+func (s *Service) wakeForResultLocked(ctx context.Context, roomID string, st *roomState) {
+	if st.agentCancel != nil && st.agentDone != st.agentRun {
+		return // a live run reads the result from its inbox
+	}
+	if !s.wakeForIncidentLocked(ctx, roomID, st) {
+		s.log.Debug("room: action result recorded; the agent runs elsewhere or cannot start here", "room", roomID)
+	}
 }
 
 func (s *Service) emitAs(ctx context.Context, roomID string, actor events.Actor, typ events.Type, payload any) error {
@@ -1235,6 +1265,9 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 		// diagnosis. It runs once per room, never on a restart.
 		firstLook = s.startTriageLocked(ctx, roomID, run, agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw})
 	}
+	// fresh: the room's first run in this process right after it opened;
+	// every other run resumes an investigation and gets the recap (Q5 T1).
+	fresh := st.firstLook
 	st.firstLook = false
 	s.wg.Add(1)
 	go func() {
@@ -1283,6 +1316,9 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 				alert.Triage = s.awaitTriage(ctx, roomID, firstLook)
 				firstLook = nil
 			}
+			if attempt > 1 || !fresh {
+				s.primeRecap(ctx, roomID, st)
+			}
 			err := s.runGuarded(ctx, roomID, alert, deps, s.opts)
 			gate.release()
 			// A spent token budget is a stop, not a failure: the runner has
@@ -1325,6 +1361,27 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			backoff *= 2
 		}
 	}()
+}
+
+// recapTimeout bounds the log read behind a run's recap.
+const recapTimeout = 10 * time.Second
+
+// primeRecap puts the room recap (service_recap.go) at the head of the
+// room's inbox, so a resumed run reads it before anything else. A failed read
+// only costs the run its context: it is logged, and the run starts anyway.
+func (s *Service) primeRecap(ctx context.Context, roomID string, st *roomState) {
+	rctx, cancel := context.WithTimeout(ctx, recapTimeout)
+	defer cancel()
+	in, err := s.buildRecap(rctx, roomID)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.log.Warn("room: recap for a resumed agent run failed; the run starts without it", "room", roomID, "err", err)
+		}
+		return
+	}
+	if in != nil {
+		st.inbox.pushFront([]agent.HumanInput{*in})
+	}
 }
 
 // runGuarded calls the agent runner and turns a panic into an error, so a bug

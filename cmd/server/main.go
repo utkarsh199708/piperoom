@@ -505,6 +505,7 @@ func run() error {
 		Config:       watchCfg,
 		MaxOpenRooms: watchMaxOpenRooms,
 	}
+	wireWatchChanges(&watchDeps, st)
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)
 	}

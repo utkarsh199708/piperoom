@@ -28,6 +28,10 @@ type pmProposal struct {
 	approvals []string // "layer — name (grant, method) at"
 	rejected  bool
 	ran       map[int]bool // step index -> ok
+	// lastOKAt is the time of the newest successful step; verified is set by
+	// an agent.verification for the proposal (Q5 T1c).
+	lastOKAt  time.Time
+	verified  bool
 	failed    bool
 	withdrawn bool
 	// withdrawReason is the withdrawer's one line (proposal.withdrawn.reason).
@@ -80,6 +84,15 @@ type pmFold struct {
 	cost                                   float64
 	priced, unpriced                       int
 	firstHypS                              int64
+	// firing is whether the room's alert fired at this point of the log: set
+	// by an alert or watcher room.created and the system's firing notes,
+	// cleared by a resolved report or the watcher's all-clear (Q5 T4).
+	// firingAtClose is its value at room.closed.
+	firing, firingAtClose bool
+	// lastAt is the newest event's time: an open room's draft judges the
+	// verification bound against it, so a render stays deterministic.
+	// restartAt is the newest restart or takeover note.
+	lastAt, restartAt time.Time
 }
 
 func newPMFold() *pmFold {
@@ -117,12 +130,14 @@ func identityText(id *events.Identity) string {
 // not fail because one event is odd.
 func (f *pmFold) add(e events.Event) error {
 	f.n++
+	f.lastAt = e.At
 	switch e.Type {
 	case events.RoomCreated:
 		if p, ok := decode[events.RoomCreatedPayload](e); ok {
 			f.id, f.title, f.severity, f.pipeline, f.source = e.RoomID, p.Title, p.Severity, p.PipelineID, p.AlertSource
 		}
 		f.openedAt = e.At
+		f.firing = f.source != ""
 		src := f.source
 		if src == "" {
 			src = "opened by hand"
@@ -130,6 +145,7 @@ func (f *pmFold) add(e events.Event) error {
 		f.row(e, "room opened ("+mdTextN(src, 80)+")")
 	case events.RoomClosed:
 		f.closed, f.closedAt, f.closedSeq, f.closedBy = true, e.At, e.Seq, e.Actor
+		f.firingAtClose = f.firing
 		if p, ok := decode[events.RoomClosedPayload](e); ok {
 			f.resolution = p.Resolution
 		}
@@ -179,14 +195,56 @@ func (f *pmFold) add(e events.Event) error {
 			}
 			f.row(e, "hypothesis "+v)
 		}
+	case events.OwnerPaged:
+		if p, ok := decode[events.OwnerPagedPayload](e); ok {
+			by := "by " + actorName(e.Actor)
+			if p.Auto {
+				by = "automatically"
+			}
+			names := make([]string, 0, len(p.Owners))
+			for _, o := range p.Owners {
+				names = append(names, mdTextN(o, 80))
+			}
+			f.row(e, fmt.Sprintf("owners of %s paged %s (%s): %s", mdTextN(p.Layer, 40), by, strings.Join(names, ", "), mdTextN(p.Reason, pmLineMax)))
+		}
 	case events.AgentMessage:
+		if e.Actor.Kind == events.ActorSystem {
+			// Only the service writes system messages; its restart notes
+			// explain why the agent went quiet (Q5 T5).
+			switch noteAlertState(e) {
+			case alertFiring:
+				f.firing = true
+			case alertResolved:
+				f.firing = false
+			}
+			if p, ok := decode[events.AgentMessagePayload](e); ok {
+				switch p.Text {
+				case restartNoticeText:
+					f.restartAt = e.At
+					f.row(e, "server restarted; the agent was paused")
+				case takeoverNoticeText:
+					f.restartAt = e.At
+					f.row(e, "the agent's server stopped; the agent resumed on another server")
+				}
+			}
+		}
 		if p, ok := decode[events.AgentMessagePayload](e); ok && strings.HasPrefix(p.Text, "[verification] ") {
 			t := mdTextN(strings.TrimPrefix(p.Text, "[verification] "), pmLineMax)
 			f.verification = append(f.verification, t)
+			// The older verdict message names no proposal: it covers every
+			// proposal whose steps had all run by then.
+			for _, pr := range f.props {
+				if len(pr.ev.Steps) > 0 && len(pr.ran) >= len(pr.ev.Steps) {
+					pr.verified = true
+				}
+			}
 			f.row(e, "verification: "+t)
 		}
 	case events.AgentVerification:
 		// A repeated last-step result ran no check: it adds no record.
+		if p, ok := decode[events.AgentVerificationPayload](e); ok && f.props[p.ProposalID] != nil {
+			f.props[p.ProposalID].verified = true
+		}
 		if p, ok := decode[events.AgentVerificationPayload](e); ok && !p.Repeat {
 			t := mdCode(p.ProposalID) + ": " + mdTextN(p.Verdict, pmLineMax)
 			f.verification = append(f.verification, t)
@@ -237,6 +295,8 @@ func (f *pmFold) add(e events.Event) error {
 				pr.ran[p.StepIndex] = p.OK
 				if !p.OK {
 					pr.failed = true
+				} else {
+					pr.lastOKAt = e.At
 				}
 			}
 			f.row(e, fmt.Sprintf("%s step %d %s", mdCode(p.ProposalID), p.StepIndex+1, res))
@@ -505,8 +565,11 @@ func (f *pmFold) hasResolution() bool {
 // closed the room with it. The system's own close (the open-room limit's
 // "retention: ...") records why the room closed, not that anything was fixed
 // (QA F11), so it never does.
+//
+// A close while the room's alert still fired is not one either (Q5 T4):
+// nothing shows the problem went away, whatever the resolution says.
 func (f *pmFold) resolutionIsFix() bool {
-	return f.hasResolution() && f.closedBy.Kind == events.ActorHuman
+	return f.hasResolution() && f.closedBy.Kind == events.ActorHuman && !f.firingAtClose
 }
 
 // fixedByPerson says the problem was fixed outside Piperoom: no step ran from
@@ -751,9 +814,11 @@ func (f *pmFold) writeDone(w func(string, ...any)) {
 // verified it, so the section does not contradict "What was done".
 func (f *pmFold) writeVerification(w func(string, ...any)) {
 	w("\n## Verification\n\n")
+	lines := append(append([]string{}, f.verification...), f.unverified()...)
+	firing := f.closed && f.firingAtClose
 	switch {
-	case len(f.verification) > 0:
-		for _, v := range f.verification {
+	case len(lines) > 0:
+		for _, v := range lines {
 			w("- %s\n", v)
 		}
 	case f.fixedByPerson():
@@ -765,9 +830,50 @@ func (f *pmFold) writeVerification(w func(string, ...any)) {
 			src = "per the fix notes"
 		}
 		w("No agent verification ran: the fix was made outside Piperoom, %s.\n", src)
+	case firing:
+		w("Not verified: the room was closed while its alert was still firing; nothing shows the problem went away.\n")
+		return
 	default:
 		w("No verification recorded.\n")
 	}
+	if firing {
+		w("\nThe room was closed while its alert was still firing.\n")
+	}
+}
+
+// verifyBound is how long after a proposal's last step the draft waits for
+// its agent.verification before it says "not verified" (Q5 T1c). The agent's
+// checks poll for a few minutes while Connect settles; this leaves room.
+const verifyBound = 15 * time.Minute
+
+// unverified is a "not verified: <reason>" line for each proposal whose
+// every step succeeded but that no agent.verification judged (Q5 T1c).
+func (f *pmFold) unverified() []string {
+	var out []string
+	for _, id := range f.propOrder {
+		p := f.props[id]
+		if p.verified || p.failed || len(p.ev.Steps) == 0 || len(p.ran) < len(p.ev.Steps) {
+			continue
+		}
+		end := f.lastAt
+		if f.closed {
+			end = f.closedAt
+		}
+		var why string
+		switch waited := end.Sub(p.lastOKAt); {
+		case waited >= verifyBound:
+			why = fmt.Sprintf("no verification was written within %d min of its last step", int(verifyBound/time.Minute))
+		case f.closed:
+			why = fmt.Sprintf("the room closed %s after its last step ran, before any verification", durationText(waited))
+		default:
+			why = fmt.Sprintf("no verification yet; its last step ran %s before the newest event", durationText(waited))
+		}
+		if f.restartAt.After(p.lastOKAt) {
+			why += " (the server restarted after the step ran)"
+		}
+		out = append(out, mdCode(id)+": not verified: "+why)
+	}
+	return out
 }
 
 // list writes items as bullets (when the prose exists) and returns the count.

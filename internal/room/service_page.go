@@ -143,6 +143,17 @@ type roomFacts struct {
 	// signalKeys are the sorted incident keys of the watcher evidence in
 	// room.created.alert and in the system's notes (RoomSignalKeys).
 	signalKeys []string
+	// joined are the first signals of the new incidents that joined the
+	// room (PostIncidentJSON notes), in log order: each one's layer gets its
+	// own automatic page while nobody has paged it (Q5 T3). Copy-on-write.
+	joined []joinedSignal
+}
+
+// joinedSignal is the first watcher signal of a joined incident.
+type joinedSignal struct {
+	signal  string
+	writers []string
+	layer   string // the evidence's layer, "" if none
 }
 
 // foldRoomFacts is Apply's Q1 step: the snapshot's pages and the room facts.
@@ -163,6 +174,9 @@ func foldRoomFacts(snap *RoomSnapshot, e events.Event) {
 		if e.Actor.Kind == events.ActorSystem {
 			if p, ok := decode[incidentNotePayload](e); ok {
 				snap.facts.signalKeys = mergeKeys(snap.facts.signalKeys, p.SignalKeys)
+				if p.NewIncident && p.Signal != "" {
+					snap.facts.joined = append(slices.Clone(snap.facts.joined), joinedSignal{signal: p.Signal, writers: p.Writers, layer: p.Layer})
+				}
 			}
 		}
 	case events.OwnerPaged:
@@ -652,7 +666,8 @@ func (s *Service) notifyPageLocked(st *roomState, e events.Event, p events.Owner
 	})
 	job := pageJob{
 		body: notify.OwnerPaged{
-			RoomID: e.RoomID, RoomTitle: st.snap.Title, PipelineID: st.snap.PipelineID, Layer: p.Layer,
+			RoomID: e.RoomID, RoomTitle: st.snap.Title, TitleFlags: append([]string{}, st.snap.TitleFlags...),
+			PipelineID: st.snap.PipelineID, Layer: p.Layer,
 			Reason: p.Reason, ProposalID: p.ProposalID, Auto: p.Auto, At: e.At, Seq: e.Seq,
 		},
 		ids: append([]string(nil), p.Owners...),
@@ -870,16 +885,35 @@ func (s *Service) autoPage(ctx context.Context, roomID string) {
 // log, so a restart does not repeat it), and a suspected layer: the watcher's
 // first signal, else the triage pass's suspected_layer. With neither the layer
 // is "" and autoPage falls back. Caller holds s.mu.
+//
+// After that page, each new incident that joined the room (facts.joined)
+// whose layer nobody has paged in the room yet is due a page of its own, on
+// the same undriven rule (Q5 T3): once per layer, since the page itself makes
+// the layer paged, and never inside the 10-minute window of another page of
+// it (page refuses with already_paged).
 func (s *Service) autoPageDueLocked(roomID string, st *roomState) (layer, reason string, ok bool) {
 	after := s.paging.cfg.UndrivenAfter
 	if after <= 0 || st == nil || st.deleting || !s.roomOpen(st) || st.snap.Driver != nil ||
-		st.snap.facts.alertSource == "" || st.snap.facts.autoPaged || st.snap.LogCap == LogCapFull {
+		st.snap.facts.alertSource == "" || st.snap.LogCap == LogCapFull {
 		return "", "", false
 	}
 	if s.now().Sub(st.snap.OpenedAt) < after {
 		return "", "", false
 	}
 	waited := fmtWait(after)
+	if st.snap.facts.autoPaged {
+		for _, j := range st.snap.facts.joined {
+			l := s.signalLayer(st.snap.PipelineID, j.signal, j.writers, j.layer)
+			if l == "" {
+				continue
+			}
+			if _, paged := st.snap.pageOf(l); paged {
+				continue
+			}
+			return l, fmt.Sprintf("nobody has taken the driver role %s after this room opened; a new incident joined the room and its first signal (%s) points at %s", waited, j.signal, l), true
+		}
+		return "", "", false
+	}
 	if sig := st.snap.facts.alertSignal; sig != "" {
 		layer = s.signalLayer(st.snap.PipelineID, sig, st.snap.facts.alertWriters, st.snap.facts.alertLayer)
 		reason = fmt.Sprintf("nobody has taken the driver role %s after this room opened; the watcher's first signal (%s) points at %s", waited, sig, layer)

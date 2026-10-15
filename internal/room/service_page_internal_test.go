@@ -528,7 +528,7 @@ func TestPageNotifierBody(t *testing.T) {
 			{ID: "meera", Name: "Meera"},
 			{ID: "group:night", Name: "group:night"},
 		},
-		Reason: "lag keeps growing", At: ev.At, Seq: ev.Seq,
+		Reason: "lag keeps growing", At: ev.At, Seq: ev.Seq, TitleFlags: []string{},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("body = %+v\nwant  %+v", got, want)
