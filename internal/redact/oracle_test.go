@@ -3,6 +3,7 @@ package redact
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // Corpus for #449: Oracle JDBC URLs with credentials,
@@ -76,10 +77,10 @@ func TestOracleThinMasked(t *testing.T) {
 // far more than the password.
 func TestOracleThinExact(t *testing.T) {
 	tests := []struct{ in, want string }{
-		{"jdbc:oracle:thin:loader/Or4clePw77@wh:1521:ORCL", "jdbc:oracle:thin:loader/[redacted 16]@wh:1521:ORCL"},
-		{"jdbc:oracle:thin:loader/Or4clePw77@//wh:1521/svc", "jdbc:oracle:thin:loader/[redacted 16]@//wh:1521/svc"},
-		{`jdbc:oracle:thin:ops/"Qu0ted p@ss"@//wh:1521/svc`, `jdbc:oracle:thin:ops/[redacted 16]@//wh:1521/svc`},
-		{"jdbc:oracle:thin:loader/NoAtPw99 (connection refused)", "jdbc:oracle:thin:loader/[redacted 8] (connection refused)"},
+		{"jdbc:oracle:thin:loader/Or4clePw77@wh:1521:ORCL", "jdbc:oracle:thin:loader/[redacted]@wh:1521:ORCL"},
+		{"jdbc:oracle:thin:loader/Or4clePw77@//wh:1521/svc", "jdbc:oracle:thin:loader/[redacted]@//wh:1521/svc"},
+		{`jdbc:oracle:thin:ops/"Qu0ted p@ss"@//wh:1521/svc`, `jdbc:oracle:thin:ops/[redacted]@//wh:1521/svc`},
+		{"jdbc:oracle:thin:loader/NoAtPw99 (connection refused)", "jdbc:oracle:thin:loader/[redacted] (connection refused)"},
 	}
 	for _, tc := range tests {
 		if got, _ := Text(tc.in); got != tc.want {
@@ -100,7 +101,7 @@ func TestOracleThinNearMisses(t *testing.T) {
 		"Oracle thin URLs look like jdbc:oracle:thin:@host:port:sid",
 		"jdbc:oracle:thin:/@wh:1521:ORCL", // wallet login: empty user and password
 		"jdbc:oracle:thin:loader/@wh:1521:ORCL",
-		"jdbc:oracle:thin:loader/[redacted 16]@wh:1521:ORCL",
+		"jdbc:oracle:thin:loader/[redacted]@wh:1521:ORCL",
 	} {
 		if got, _ := New(Options{}).Text(in); got != in {
 			t.Errorf("Text(%q)\n got  %q\n want it unchanged", in, got)
@@ -116,6 +117,35 @@ func TestOracleThinIdempotent(t *testing.T) {
 		twice, st := Text(once)
 		if twice != once || st.Total != 0 {
 			t.Errorf("not idempotent:\n in:    %q\n once:  %q\n twice: %q", tc.in, once, twice)
+		}
+	}
+}
+
+// TestOracleThinLinearTime: 64 KiB lines built to make the Oracle pass
+// backtrack or find many matches stay fast.
+func TestOracleThinLinearTime(t *testing.T) {
+	if raceEnabled {
+		t.Skip("timing check; runs without -race")
+	}
+	const ceiling = 50 * time.Millisecond
+	for name, unit := range map[string]string{
+		"glued urls":         "jdbc:oracle:thin:a/",
+		"many short urls":    "jdbc:oracle:thin:a/b@ ",
+		"many ats":           "jdbc:oracle:thin:a/@@@@",
+		"unclosed quotes":    `jdbc:oracle:thin:a/"`,
+		"unclosed user":      `jdbc:oracle:thin:"`,
+		"doubled quotes":     `jdbc:oracle:thin:a/"""`,
+		"escaped quote user": `jdbc:oracle:thin:\"a\"/\"`,
+	} {
+		s := strings.Repeat(unit, (64<<10)/len(unit))
+		best := time.Duration(1 << 62)
+		for range 5 {
+			start := time.Now()
+			Text(s)
+			best = min(best, time.Since(start))
+		}
+		if best > ceiling {
+			t.Errorf("%s: best %v for %d KiB, want under %v", name, best, len(s)>>10, ceiling)
 		}
 	}
 }
