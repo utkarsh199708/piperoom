@@ -1352,12 +1352,19 @@ func (s *Service) syncRoomWith(ctx context.Context, roomID string, try bool) (bu
 		if !lockState(st) {
 			return busy
 		}
-		if !st.gone && !s.isClosed() {
-			s.foldFetchedLocked(ctx, roomID, st, evs)
+		// A room evicted or a service closed meanwhile folds nothing more, so
+		// the next read would fetch the same page again: stop. So does a pass
+		// that did not advance (a gap the catch-up could not fill), instead of
+		// re-reading a full page until ctx ends.
+		if st.gone || s.isClosed() {
+			s.unlockRoom(st)
+			return busy
 		}
+		before := after
+		s.foldFetchedLocked(ctx, roomID, st, evs)
 		after = st.snap.LastSeq
 		s.unlockRoom(st)
-		if len(evs) < 1000 {
+		if len(evs) < 1000 || after <= before {
 			return busy
 		}
 	}

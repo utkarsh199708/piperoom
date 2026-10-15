@@ -633,8 +633,9 @@ func (s *Service) finishStepRow(ctx context.Context, proposalID string, i int, s
 
 // isRoomOpen reports whether a cached room is open. It takes the room's lock,
 // not the published snapshot: a close (or a close another replica wrote,
-// being folded) holds the lock from room.closed until it has stopped the
-// executor, and no step may start in that window.
+// being folded) holds the lock from room.closed until the close is recorded,
+// so a step checked here waits it out and sees the room closed, even before
+// the close cancels the executor after unlocking.
 func (s *Service) isRoomOpen(ctx context.Context, roomID string) bool {
 	st := s.lockCachedRoom(roomID)
 	if st == nil {
