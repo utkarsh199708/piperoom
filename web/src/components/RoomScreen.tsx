@@ -140,18 +140,20 @@ export function RoomScreen() {
     rememberRoomTitle(state?.title)
     return () => rememberRoomTitle(undefined)
   }, [state?.title])
+  const [layerFilter, setLayerFilter] = useState<string | null>(null)
   const [citedStep, setCitedStep] = useState<CitedStep | null>(null)
   const citeNonce = useRef(0)
   // A citation chip: on the tabbed layout the steps live on the Investigation tab, so it opens first.
+  // A layer filter hides the steps outside it, so it is cleared: the chip must land on its row.
   const citeStep = useCallback(
     (id: string) => {
       if (narrowRef.current) setTab('investigation')
+      setLayerFilter(null)
       citeNonce.current += 1
       setCitedStep({ id, nonce: citeNonce.current })
     },
     [setTab],
   )
-  const [layerFilter, setLayerFilter] = useState<string | null>(null)
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [closeOpen, setCloseOpen] = useState(false)
