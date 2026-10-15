@@ -15,10 +15,10 @@ function isLongText(text: string): boolean {
 export function CollapsibleText({ text, className }: { text: string; className?: string }) {
   const [open, setOpen] = useState(false)
   const id = useId()
-  if (!isLongText(text)) return <span className={className}><AgentText text={text} /></span>
+  if (!isLongText(text)) return <span className={cn('[overflow-wrap:anywhere]', className)}><AgentText text={text} /></span>
   return (
-    <span className={cn('flex flex-col items-start gap-0.5', className)}>
-      <span id={id} className={cn('whitespace-pre-line break-words', !open && 'line-clamp-3')}>
+    <span className={cn('flex w-full min-w-0 max-w-full flex-col items-start gap-0.5', className)}>
+      <span id={id} className={cn('block min-w-0 max-w-full whitespace-pre-line break-words [overflow-wrap:anywhere]', !open && 'line-clamp-3')}>
         <AgentText text={text} />
       </span>
       <button

@@ -28,6 +28,7 @@ import { isEditableTarget } from './shell/keys'
 import { DecisionHandleContext } from './shell/context'
 import { completesSet } from '../lib/decision'
 import { PROPOSAL_ANCHOR } from './room/ProposalsSummary'
+import { proposalCardAnchor } from '../lib/triage'
 import { PersonAvatar } from './room/PersonAvatar'
 import { WaitingFor } from './room/WaitingFor'
 import type { Person, PresenceMember, Topology } from '../api/types'
@@ -895,6 +896,7 @@ function Proposal({
     // overflow-wrap:anywhere is inherited by every line of the card: an unbroken risk, rollback, description or
     // reason wraps instead of running under the 300px rail (QA G12), and it lets the flex children below shrink.
     <article
+      id={proposalCardAnchor(proposal.proposal_id)}
       className="flex min-w-0 flex-col rounded-lg border border-border bg-card text-sm text-card-foreground [overflow-wrap:anywhere]"
       aria-labelledby={titleId}
     >

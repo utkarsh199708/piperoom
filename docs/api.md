@@ -132,7 +132,7 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 | 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}?archive=true` could not write the archive, so nothing was deleted) |
 | 503 | after auth PR 3: `idp_unavailable` (new logins while the IdP is down; live sessions keep working); Q0: `summary_failed` (the agent could not write a hand-off summary, even after one repair; the message tells the driver to retry or send `summary` themselves) |
 
-Text a person types (titles, comments, steers, resolutions, trace keys, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD).
+Text a person types (titles, comments, steers, resolutions, trace keys, approve/reject layer and reason) that contains a NUL character or invalid UTF-8 is refused with `400 validation` ("text contains characters that cannot be stored") and nothing is written. Q5 (QA T8): so is typed text containing a bidirectional override or isolate character (U+202A–U+202E, U+2066–U+2069), which can make text read differently from what is stored; alert titles and watcher text are not refused but get the `bidi_override` title flag. Text from the agent, tools and actions is cleaned instead (bad characters become U+FFFD).
 
 `lease_held`: `control/grant` called by a non-driver while another user's lease is still live. All other
 driver-only endpoints answer `403 not_driver`. `stale_handoff`: the hand-off's creator is no longer the driver,
@@ -233,7 +233,8 @@ Additive like the F-wave events: unknown types are ignored, new fields are omitt
   ```json
   { "type": "owner.paged", "room_id": "r_…", "room_title": "…", "room_url": "https://…/rooms/r_…",
     "pipeline_id": "orders", "layer": "consumer", "owners": [ { "id": "kabir", "name": "Kabir", "email": "…" } ],
-    "reason": "…", "proposal_id": "", "auto": false, "at": "…", "seq": 42 }
+    "reason": "…", "proposal_id": "", "auto": false, "at": "…", "seq": 42,
+    "title_flags": [] }                                   // Q5: injectscan kinds of the room title, [] when clean
   ```
   with `X-Piperoom-Signature: sha256=<hex HMAC-SHA256 of the body with PIPEROOM_NOTIFY_WEBHOOK_SECRET>` when the
   secret is set, `X-Piperoom-Event: owner.paged`, `Content-Type: application/json`. `room_url` is
@@ -331,7 +332,7 @@ as its empty value. The shapes are fixed here.
 - `pages` (Q0): open rooms only, the newest `owner.paged` per layer, in seq order; `[]` on closed rooms. `GET
   /api/rooms` rows carry it, so the room list socket tells a client that its user was paged: the web app shows a
   banner (and a browser notification when allowed) when the user's id is in `owners` of a page newer than they saw.
-- `title_flags` (Q0): `injectscan.Kinds` of the room title, `[]` when clean. A flagged title is still shown, as
+- `title_flags` (Q0): `injectscan.Kinds` of the room title, `[]` when clean. Q5 adds the kind `bidi_override`. A flagged title is still shown, as
   text, with a "suspicious alert text" chip; the agent already treats it as untrusted data.
 
 IDs are prefixed ULIDs: `r_` room, `s_` step, `c_` comment, `g_` suggestion, `p_` proposal, `h_` hand-off, `hr_` hand-off request (R0).

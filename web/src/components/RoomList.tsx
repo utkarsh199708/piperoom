@@ -1,4 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { plainText } from '@/lib/title'
 import type { FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertTriangle, ChevronDown, Plus, X } from 'lucide-react'
@@ -615,7 +616,7 @@ function RoomRow({
             onFocus={onActivate}
             className="min-w-0 truncate rounded-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-md:basis-full"
           >
-            {room.title}
+            {plainText(room.title, 300)}
           </Link>
           <TitleFlagChip flags={room.title_flags} />
           {tinted && (

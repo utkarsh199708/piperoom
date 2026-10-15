@@ -1,5 +1,6 @@
 import { PersonName } from '@/components/VerifiedBadge'
 import { useEffect, useId, useState } from 'react'
+import { plainText } from '@/lib/title'
 import { emptyStateFor } from '../lib/emptyState'
 import type { ComponentProps, FormEvent } from 'react'
 import { Check, ChevronRight, Wrench, X } from 'lucide-react'
@@ -170,7 +171,7 @@ function CommentThread({
             )}
             <Clock iso={comment.at} className="text-xs text-subtle-foreground" />
           </div>
-          <p className="m-0 break-words text-muted-foreground">{comment.text}</p>
+          <p className="m-0 break-words text-muted-foreground">{plainText(comment.text, Infinity)}</p>
         </div>
       </div>
       {comment.replies.map((r, i) => (
@@ -407,7 +408,7 @@ function LiveStep({
 // The agent prose in the timeline links its step ids to the rows of these steps.
 export function Timeline(props: ComponentProps<typeof TimelineBody>) {
   return (
-    <StepNumbersProvider steps={props.steps}>
+    <StepNumbersProvider steps={props.steps} proposalIds={props.proposalIds}>
       <TimelineBody {...props} />
     </StepNumbersProvider>
   )
@@ -430,6 +431,8 @@ function TimelineBody({
   shadow = false,
 }: {
   steps: StepState[]
+  /** Proposal ids of the room: a raw id in agent prose links to its card. */
+  proposalIds?: readonly string[]
   messages: AgentMessageState[]
   comments: CommentState[]
   onComment: (text: string, stepId?: string) => void | Promise<boolean>

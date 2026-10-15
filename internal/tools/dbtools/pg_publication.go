@@ -98,7 +98,22 @@ type connectorConfig struct {
 	// "filtered" makes Debezium run ALTER PUBLICATION ... SET TABLE at every
 	// task start, which is what turns table ownership into a requirement.
 	autocreate string
+	// connectDown is set when Connect could not be read: only the default
+	// publication name and the pipeline's own tables are known, so nothing
+	// about the connector role is stated (Q5 T6).
+	connectDown bool
 }
+
+// connectDownNote is the plain sentence the summary carries when Connect was
+// unreachable.
+const connectDownNote = "Connect unreachable: role checks need the connector config"
+
+// connectDownError marks a failed read of the connector config that is not a
+// "no such connector" answer: Connect itself could not be asked.
+type connectDownError struct{ err error }
+
+func (e *connectDownError) Error() string { return e.err.Error() }
+func (e *connectDownError) Unwrap() error { return e.err }
 
 // pgPublicationTablesTool shows, for a pipeline, the Debezium publication and
 // its tables, and whether the connector role can SELECT each source table.
@@ -138,6 +153,15 @@ func pgPublicationTablesTool(d Deps) tools.Tool {
 			ctx, cancel := toolCtx(ctx)
 			defer cancel()
 			conn, err := resolveConnector(ctx, p, d.Connect)
+			var down *connectDownError
+			if errors.As(err, &down) {
+				// Fall back to the pipeline's own data: the publication name
+				// Debezium defaults to and the pipeline's source tables. No
+				// role is known, so no role fact is read or stated, and the
+				// source read is still limited to the pipeline's tables.
+				conn = connectorConfig{publication: defaultPublication, publicationSource: "default (Connect unreachable)", connectDown: true}
+				err = nil
+			}
 			if err != nil {
 				return tools.Result{}, err
 			}
@@ -157,10 +181,13 @@ func pgPublicationTablesTool(d Deps) tools.Tool {
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_publication_tables: %w", err)
 			}
-			if facts.info == nil && facts.err == "" {
+			if facts.info == nil && facts.err == "" && !conn.connectDown {
 				facts = readRoleFacts(ctx, d.Src, conn)
 			}
-			findings := publicationFindings(conn, p.SourceTables, tables, facts)
+			var findings []string
+			if !conn.connectDown {
+				findings = publicationFindings(conn, p.SourceTables, tables, facts)
+			}
 
 			text := publicationSummary(conn, p.SourceTables, tables, facts, findings)
 			if !sc.Unscoped() {
@@ -232,7 +259,11 @@ func debeziumSourceConnector(ctx context.Context, connect clients.ConnectClient,
 	for _, name := range names {
 		cfg, err := connect.Config(ctx, name)
 		if err != nil {
-			return "", nil, fmt.Errorf("read connector %q config: %w", name, err)
+			err = fmt.Errorf("read connector %q config: %w", name, err)
+			if !errors.Is(err, clients.ErrNotFound) {
+				err = &connectDownError{err: err}
+			}
+			return "", nil, err
 		}
 		if strings.Contains(cfg["connector.class"], "PostgresConnector") {
 			return name, cfg, nil
@@ -339,6 +370,13 @@ func publicationFindings(c connectorConfig, sourceTables []string, tables []post
 // owner, then the findings.
 func publicationSummary(c connectorConfig, sourceTables []string, tables []postgres.PublicationTable, f roleFacts, findings []string) string {
 	var sb strings.Builder
+	if c.connectDown {
+		fmt.Fprintf(&sb, "publication %s (name assumed: %s)\n", c.publication, connectDownNote)
+		for i, t := range sourceTableFacts(sourceTables, tables) {
+			fmt.Fprintf(&sb, "%s: in_publication=%s\n", sourceTables[i], yesNo(t.InPublication))
+		}
+		return sb.String()
+	}
 	if i := f.info; i != nil {
 		fmt.Fprintf(&sb, "publication %s (owner %s; connector user %s: REPLICATION=%s, SUPERUSER=%s)\n",
 			c.publication, i.Owner, c.role, yesNo(i.RoleReplication), yesNo(i.RoleSuperuser))
@@ -384,6 +422,14 @@ func publicationData(c connectorConfig, sourceTables []string, tables []postgres
 			t = splitPublicationName(st)
 		}
 		sources = append(sources, t)
+	}
+	if c.connectDown {
+		return map[string]any{
+			"publication":         c.publication,
+			"publication_source":  c.publicationSource,
+			"connect_unreachable": true,
+			"publication_tables":  members,
+		}
 	}
 	return map[string]any{
 		"publication":           c.publication,

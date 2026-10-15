@@ -136,7 +136,7 @@ export function HandoffDialog({
         </DialogHeader>
 
         {pending ? (
-          <StepNumbersProvider steps={state.steps} onFollow={follow.onFollow}>
+          <StepNumbersProvider steps={state.steps} proposalIds={state.proposals.map((x) => x.proposal_id)} onFollow={follow.onFollow}>
             <HandoffSummary summary={pending.summary} manual={pending.manual} writtenBy={pending.written_by}>
               <Button type="button" variant="secondary" onClick={onClose}>
                 Close

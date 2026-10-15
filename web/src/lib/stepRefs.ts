@@ -39,3 +39,28 @@ export function splitStepRefs(text: string, numbers: StepNumbers): TextPart[] {
   if (last < text.length) out.push(text.slice(last))
   return out
 }
+
+/**
+ * A proposal id as the server writes it: "p_" and 26 Crockford base32 characters.
+ * Same guards as STEP_ID.
+ */
+const PROPOSAL_ID = /(?<![A-Za-z0-9_])p_[0-9A-HJKMNP-TV-Z]{26}(?![A-Za-z0-9_])/g
+
+/** A run of plain text, or a proposal id of the room with its 1-based place. */
+export type ProposalTextPart = string | { proposalId: string; n: number }
+
+/** Splits text at the proposal ids of the room (T12); an id the room does not know stays text. */
+export function splitProposalRefs(text: string, ids: readonly string[]): ProposalTextPart[] {
+  const out: ProposalTextPart[] = []
+  let last = 0
+  for (const m of text.matchAll(PROPOSAL_ID)) {
+    const i = ids.indexOf(m[0])
+    if (i < 0) continue
+    const at = m.index ?? 0
+    if (at > last) out.push(text.slice(last, at))
+    out.push({ proposalId: m[0], n: i + 1 })
+    last = at + m[0].length
+  }
+  if (last < text.length) out.push(text.slice(last))
+  return out
+}
