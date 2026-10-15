@@ -571,3 +571,21 @@ expect:
 		t.Errorf("empty sequence: %v", err)
 	}
 }
+
+// Two after_calls transitions on one call count, chained by from (a->b,
+// b->c): the first that matches fires, so one call moves one phase.
+func TestAfterCallsFiresFirstMatchOnly(t *testing.T) {
+	recs := []Recording{{Tool: "kafka_lag", Summary: "lag"}}
+	tr := []Transition{
+		{On: TransitionOn{AfterCalls: &AfterCalls{Tool: "kafka_lag", N: 1}}, From: "a", To: "b"},
+		{On: TransitionOn{AfterCalls: &AfterCalls{Tool: "kafka_lag", N: 1}}, From: "b", To: "c"},
+	}
+	r, err := newPhasedReplayer(recs, []string{"a", "b", "c"}, tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.serve("kafka_lag", []byte(`{}`))
+	if got := r.currentPhase(); got != "b" {
+		t.Fatalf("after one call: phase %q, visited %v; want b", got, r.visited)
+	}
+}
