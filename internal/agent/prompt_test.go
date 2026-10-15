@@ -340,7 +340,7 @@ func TestSanitizeLabelMapsLookalikes(t *testing.T) {
 func TestPromptToolNamesAreMentionedInPrompt(t *testing.T) {
 	prompt := systemPrompt()
 	got := PromptToolNames()
-	want := []string{"what_changed", "connect_status", "update_hypothesis", "propose_fix", "connect_update_connector_config", "schema_set_compatibility", "schema_register", "post_message"}
+	want := []string{"what_changed", "connect_status", "update_hypothesis", "similar_incidents", "propose_fix", "connect_update_connector_config", "schema_set_compatibility", "schema_register", "post_message"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("PromptToolNames() = %v, want %v (a prompt edit changed the tool mentions; update this test and the wiring test)", got, want)
 	}
