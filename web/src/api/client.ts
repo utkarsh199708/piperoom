@@ -19,6 +19,10 @@ import type {
   AgentStats,
   PipelineInfo,
   RoomSnapshot,
+  ShadowBlindBody,
+  ShadowGradeBody,
+  ShadowMetrics,
+  ShadowResponse,
   Topology,
 } from './types'
 import { classifyAuthProblem, getAuthEpoch, reportAuthProblem } from '../lib/auth'
@@ -211,6 +215,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ table, key }),
     }),
+  // Shadow mode. shadow() answers 409 not_labelled until the blind label exists, so the
+  // agent's answer cannot be read early; a grade before the reveal answers 409 not_revealed.
+  shadowBlind: (roomId: string, body: ShadowBlindBody) =>
+    request<Event>(`${room(roomId)}/shadow/blind`, { method: 'POST', body: JSON.stringify(body) }),
+  // include: 'data' adds tool_result.data; 'room' adds {created, labelled, graded} (prefills the grade form).
+  shadow: (roomId: string, include: ('data' | 'room')[] = []) =>
+    request<ShadowResponse>(`${room(roomId)}/shadow${include.length ? `?include=${include.join(',')}` : ''}`),
+  shadowGrade: (roomId: string, body: ShadowGradeBody) =>
+    request<Event>(`${room(roomId)}/shadow/grade`, { method: 'POST', body: JSON.stringify(body) }),
+  shadowMetrics: (filter: { pipeline?: string; since?: string } = {}) => {
+    const q = new URLSearchParams()
+    if (filter.pipeline) q.set('pipeline', filter.pipeline)
+    if (filter.since) q.set('since', filter.since)
+    const qs = q.toString()
+    return request<ShadowMetrics>(`/api/shadow/metrics${qs ? `?${qs}` : ''}`)
+  },
 }
 
 /**

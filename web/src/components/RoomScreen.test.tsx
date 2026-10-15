@@ -16,6 +16,7 @@ vi.mock('../context/user', () => ({
 vi.mock('../hooks/useRoom', () => ({ useRoom: vi.fn() }))
 vi.mock('../hooks/useTopology', () => ({ useTopology: vi.fn() }))
 
+import { api } from '../api/client'
 import { useRoom } from '../hooks/useRoom'
 import { useTopology } from '../hooks/useTopology'
 import { RoomScreen } from './RoomScreen'
@@ -74,6 +75,25 @@ function show(state: RoomState, stale: StaleInfo | null = null) {
 
 beforeEach(() => {
   vi.resetAllMocks()
+})
+
+describe('RoomScreen — F8 label in a shadow room', () => {
+  const closed = { status: 'closed' as const, closed_at: '2026-10-11T11:00:00Z', resolution: 'restarted the task' }
+
+  it('offers Add label on a closed live room', () => {
+    show(webhookRoom(closed))
+    expect(screen.getByRole('button', { name: 'Add label' })).toBeInTheDocument()
+  })
+
+  it('holds Add label in a shadow room until the blind label exists (the server answers 409 not_labelled)', () => {
+    // The shadow panel loads the run; keep it pending so only the strip is under test.
+    vi.spyOn(api, 'shadow').mockReturnValue(new Promise(() => {}))
+    const view = show(webhookRoom({ ...closed, shadow: true }))
+    expect(screen.queryByRole('button', { name: 'Add label' })).not.toBeInTheDocument()
+    view.unmount()
+    show(webhookRoom({ ...closed, shadow: true, shadow_labelled: true }))
+    expect(screen.getByRole('button', { name: 'Add label' })).toBeInTheDocument()
+  })
 })
 
 describe('RoomScreen — alert room header and no-driver banner', () => {

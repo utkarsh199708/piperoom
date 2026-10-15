@@ -6,6 +6,12 @@ import { ApiClientError } from '../api/client'
 const FRIENDLY_TEXT: Record<string, string> = {
   lease_held: 'someone else holds control',
   stale_handoff: 'this hand-off is out of date',
+  // Shadow mode (docs/api.md). already_decided keeps the server's text: it also means "this
+  // layer was decided" for approvals. room_open is shared with the F8 label, the shadow export
+  // and a shadow room's usage, so its text names no single action.
+  not_revealed: 'the agent is still finishing its run; grading opens when it ends',
+  not_labelled: 'record your blind label first',
+  room_open: 'the room is still open; this is available once it is closed',
   no_hypothesis: 'there is no hypothesis to decide on yet',
   already_nudged: 'already nudged a few minutes ago',
   handoff_in_progress: 'a hand-off is already being written for this room. Wait for it to finish.',

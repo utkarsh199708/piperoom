@@ -165,6 +165,15 @@ describe('Timeline step stream', () => {
     expect(screen.getByRole('button', { name: 'Take control and steer' })).toBeInTheDocument()
   })
 
+  it('a shadow room says the agent works silently and offers no steer (a steer never reaches it)', () => {
+    render(
+      <Timeline steps={[]} messages={[]} comments={[]} onComment={vi.fn()} onTakeControl={vi.fn()} agent={{ state: 'idle' }} shadow />,
+    )
+    expect(screen.getByText('The agent investigates silently in a shadow room.')).toBeInTheDocument()
+    expect(screen.queryByText('The agent is idle and has not started yet.')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+  })
+
   it('queued and log_full are not "idle": no steer is offered', () => {
     const take = vi.fn()
     const view = (state: string, detail?: string) =>
