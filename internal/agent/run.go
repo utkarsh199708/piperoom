@@ -591,6 +591,22 @@ func (r *runner) emit(ctx context.Context, typ events.Type, payload any) {
 	}
 }
 
+// stepEventTimeout bounds one step event write that no longer follows the
+// run's context.
+const stepEventTimeout = 10 * time.Second
+
+// emitStep writes a step's own events (step.started, tool_call, tool_result)
+// even when ctx is done: a read that hits the first-look pass deadline, or a
+// run cancelled mid-read, must not leave a step whose call is stored and whose
+// result is not, because the stores refuse events on a done context. Each
+// write gets its own deadline instead (runStepID does the same for verify
+// reads).
+func (r *runner) emitStep(ctx context.Context, typ events.Type, payload any) {
+	ectx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stepEventTimeout)
+	defer cancel()
+	r.emit(ectx, typ, payload)
+}
+
 // toolDataJSON marshals a tool's structured data for its tool_result event. A
 // number outside the double range (a NUMERIC column read back as 1e131072, a
 // metric of 1e-16384) is a valid JSON number, but jsonb refuses some of them
@@ -788,8 +804,8 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	}
 	stepID := newStepID()
 
-	r.emit(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: title})
-	r.emit(ctx, events.AgentToolCall, events.AgentToolCallPayload{
+	r.emitStep(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: title})
+	r.emitStep(ctx, events.AgentToolCall, events.AgentToolCallPayload{
 		StepID:    stepID,
 		ToolUseID: u.id,
 		Tool:      u.name,
@@ -815,7 +831,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	if err != nil {
 		msg := "error: " + r.scrubToolError(u.name, err).Error()
 		summary, truncated := tools.Truncate(msg)
-		r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
+		r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 			StepID:     stepID,
 			ToolUseID:  u.id,
 			Tool:       u.name,
@@ -836,7 +852,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	// Defensively re-cap the summary before it reaches the model; a tool that
 	// ignores MaxSummaryBytes must not be able to bloat the request.
 	summary, reTruncated := tools.Truncate(res.Summary)
-	r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
+	r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 		StepID:     stepID,
 		ToolUseID:  u.id,
 		Tool:       u.name,
@@ -862,15 +878,15 @@ func (r *runner) failReadTool(ctx context.Context, u toolUse, title, msg string)
 		title = u.name
 	}
 	stepID := newStepID()
-	r.emit(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: title})
-	r.emit(ctx, events.AgentToolCall, events.AgentToolCallPayload{
+	r.emitStep(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: title})
+	r.emitStep(ctx, events.AgentToolCall, events.AgentToolCallPayload{
 		StepID:    stepID,
 		ToolUseID: u.id,
 		Tool:      u.name,
 		Input:     u.input,
 	})
 	summary, truncated := tools.Truncate("error: " + msg)
-	r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
+	r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 		StepID:    stepID,
 		ToolUseID: u.id,
 		Tool:      u.name,
