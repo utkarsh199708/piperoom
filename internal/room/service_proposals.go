@@ -185,7 +185,9 @@ func (s *Service) createProposal(ctx context.Context, roomID string, p events.Pr
 		return "", err
 	}
 	if _, err := s.emitLocked(ctx, st, roomID, events.ProposalCreated, actor, p); err != nil {
-		if delErr := s.store.DeleteProposal(ctx, p.ProposalID); delErr != nil {
+		dctx, cancel := compensateCtx(ctx)
+		defer cancel()
+		if delErr := s.store.DeleteProposal(dctx, p.ProposalID); delErr != nil {
 			s.log.Warn("room: compensate failed proposal row", "proposal", p.ProposalID, "err", delErr)
 		}
 		return "", err
@@ -274,7 +276,9 @@ func (s *Service) ApproveProposalConfirm(ctx context.Context, user User, proposa
 			ProposalID: proposalID, Layer: layer, ParamsHash: p.ParamsHash, Identity: &ident,
 		})
 		if err != nil {
-			if delErr := s.store.DeleteApproval(ctx, proposalID, layer); delErr != nil {
+			dctx, cancel := compensateCtx(ctx)
+			defer cancel()
+			if delErr := s.store.DeleteApproval(dctx, proposalID, layer); delErr != nil {
 				s.log.Warn("room: compensate failed approval", "proposal", proposalID, "layer", layer, "err", delErr)
 			}
 			return err
@@ -342,7 +346,9 @@ func (s *Service) RejectProposal(ctx context.Context, user User, proposalID, lay
 		ProposalID: proposalID, Layer: layer, Reason: reason, ParamsHash: p.ParamsHash, Identity: &ident,
 	})
 	if err != nil {
-		if delErr := s.store.DeleteApproval(ctx, proposalID, layer); delErr != nil {
+		dctx, cancel := compensateCtx(ctx)
+		defer cancel()
+		if delErr := s.store.DeleteApproval(dctx, proposalID, layer); delErr != nil {
 			s.log.Warn("room: compensate failed rejection", "proposal", proposalID, "layer", layer, "err", delErr)
 		}
 		return events.Event{}, err
