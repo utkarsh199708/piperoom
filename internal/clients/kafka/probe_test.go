@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
@@ -316,6 +317,17 @@ func TestProbeSeam(t *testing.T) {
 			t.Fatalf("probed from %v, want 0, then 2 at once", froms)
 		}
 	})
+	t.Run("an answer for an unplanned partition finishes nothing", func(t *testing.T) {
+		c := probeSeamClient(func(context.Context, string, map[int32]readWindow) map[int32]int64 {
+			return map[int32]int64{7: 99}
+		})
+		ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+		defer cancel()
+		_, err := c.PeekDLQ(ctx, "d", 5)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want the deadline: partition 0 is still unread", err)
+		}
+	})
 	t.Run("progress each round: done within one idle cycle", func(t *testing.T) {
 		c := probeSeamClient(func(_ context.Context, _ string, wins map[int32]readWindow) map[int32]int64 {
 			return map[int32]int64{0: wins[0].from + 1}
@@ -331,4 +343,173 @@ func TestProbeSeam(t *testing.T) {
 			t.Fatalf("took %s: the probe did not keep going while it made progress", d)
 		}
 	})
+}
+
+// kfClusterWith starts a kfake cluster with kfTopic on the given number of
+// brokers and partitions.
+func kfClusterWith(t *testing.T, brokers int, partitions int32) (*kfake.Cluster, []string) {
+	t.Helper()
+	c, err := kfake.NewCluster(kfake.NumBrokers(brokers), kfake.SeedTopics(partitions, kfTopic))
+	if err != nil {
+		t.Fatalf("kfake cluster: %v", err)
+	}
+	t.Cleanup(c.Close)
+	return c, c.ListenAddrs()
+}
+
+// partClient is a producer that writes to the record's Partition field;
+// with txnID it is transactional.
+func partClient(t *testing.T, addrs []string, txnID string) *kgo.Client {
+	t.Helper()
+	opts := []kgo.Opt{kgo.SeedBrokers(addrs...), kgo.RecordPartitioner(kgo.ManualPartitioner())}
+	if txnID != "" {
+		opts = append(opts, kgo.TransactionalID(txnID))
+	}
+	cl, err := kgo.NewClient(opts...)
+	if err != nil {
+		t.Fatalf("producer: %v", err)
+	}
+	t.Cleanup(cl.Close)
+	return cl
+}
+
+func produceTo(t *testing.T, cl *kgo.Client, p int32, key string, ts time.Time) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := cl.ProduceSync(ctx, &kgo.Record{Topic: kfTopic, Partition: p, Key: []byte(key), Value: []byte("v"), Timestamp: ts}).FirstErr(); err != nil {
+		t.Fatalf("produce %s to %d: %v", key, p, err)
+	}
+}
+
+// TestKFakeStuckPartitionBesideBusyOne (#300): partition 1 has a committed
+// k1, then an aborted c0 below an open a0; partition 0 gets a committed
+// record every 100 ms. The consumer is never idle, yet partition 1 is
+// probed on its own and every read returns at once.
+func TestKFakeStuckPartitionBesideBusyOne(t *testing.T) {
+	_, addrs := kfClusterWith(t, 1, 2)
+	c := kfClient(t, addrs)
+	plain := partClient(t, addrs, "")
+	pc := partClient(t, addrs, "kf-busy-abort")
+	pa := partClient(t, addrs, "kf-busy-open")
+	committedTS := time.Now().Add(-20 * time.Second).Truncate(time.Millisecond)
+	ts := time.Now().Add(-time.Minute)
+
+	produceTo(t, plain, 1, "k1", committedTS) // p1: 0
+	for _, step := range []struct {
+		cl  *kgo.Client
+		key string
+	}{{pc, "c0"}, {pa, "a0"}} { // p1: 1 aborted, 2 left open
+		if err := step.cl.BeginTransaction(); err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		produceTo(t, step.cl, 1, step.key, ts)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := pc.EndTransaction(ctx, kgo.TryAbort); err != nil { // p1: abort marker 3; LSO = 2
+		t.Fatalf("abort: %v", err)
+	}
+	cancel()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = pa.EndTransaction(ctx, kgo.TryAbort)
+	})
+
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				_ = plain.ProduceSync(ctx, &kgo.Record{Topic: kfTopic, Partition: 0, Key: []byte("busy"), Value: []byte("v")}).FirstErr()
+				cancel()
+			}
+		}
+	}()
+	t.Cleanup(func() { close(stop); <-stopped })
+	time.Sleep(300 * time.Millisecond) // partition 0 is live before the reads start
+
+	within(t, func(ctx context.Context) {
+		offs, err := c.TopicOffsets(ctx, kfTopic)
+		if err != nil {
+			t.Fatalf("TopicOffsets: %v", err)
+		}
+		if len(offs) != 2 || !offs[1].LastTimestamp.Equal(committedTS) {
+			t.Fatalf("offsets = %+v, want p1 LastTimestamp %s", offs, committedTS)
+		}
+	})
+	within(t, func(ctx context.Context) {
+		// The newest records win the limit, and partition 0 keeps getting
+		// newer ones, so k1 may be cut; what matters is that partition 1
+		// finishes, which within's 2 s bound checks (a stuck partition
+		// waited out the deadline and still returned a nil error).
+		if _, err := c.PeekDLQ(ctx, kfTopic, 5); err != nil {
+			t.Fatalf("PeekDLQ: %v", err)
+		}
+	})
+	within(t, func(ctx context.Context) {
+		rep, err := c.FindByKeyReport(ctx, kfTopic, "k1", ts.Add(-time.Hour), 100)
+		if err != nil || len(rep.Refs) != 1 || rep.Refs[0].Partition != 1 || len(rep.Truncated) != 0 {
+			t.Fatalf("FindByKeyReport = %+v, %v; want k1 at 1/0, nothing truncated", rep, err)
+		}
+	})
+}
+
+// TestKFakeProbeLeaderMove: after the partition moves, the old leader
+// answers with a partition error; the prober drops its cached metadata and
+// the next round asks the new leader.
+func TestKFakeProbeLeaderMove(t *testing.T) {
+	cluster, addrs := kfClusterWith(t, 3, 1)
+	c := kfClient(t, addrs)
+	pc := newKFProducer(t, addrs, "kf-move-abort")
+	pa := newKFProducer(t, addrs, "kf-move-open")
+	ts := time.Now().Add(-time.Minute)
+	pc.begin(ts, "aborted", "c0") // 0
+	pa.begin(ts, "open", "a0")    // 1, left open
+	pc.end(kgo.TryAbort)          // LSO = 1
+	defer pa.end(kgo.TryAbort)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	w := map[int32]readWindow{0: {0, 1}}
+	pr := c.newProber(kfTopic)
+	if got := pr.round(ctx, w); got[0] != 1 {
+		t.Fatalf("round before the move = %v, want {0:1}", got)
+	}
+	leader := pr.leaders[0]
+	if err := cluster.MoveTopicPartition(kfTopic, 0, (leader+1)%3); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	var got map[int32]int64
+	for i := 0; i < 3 && got[0] != 1; i++ {
+		got = pr.round(ctx, w)
+	}
+	if got[0] != 1 {
+		t.Fatalf("rounds after the move = %v, want {0:1} from the new leader", got)
+	}
+}
+
+// TestTopicOffsetsUndecidedProbeIsAnError: when the record at LSO-1 holds
+// nothing readable and the walk back cannot decide, TopicOffsets fails (the
+// node stays Unknown) instead of reporting a zero LastTimestamp ("never").
+func TestTopicOffsetsUndecidedProbeIsAnError(t *testing.T) {
+	c := probeSeamClient(func(_ context.Context, _ string, wins map[int32]readWindow) map[int32]int64 {
+		return map[int32]int64{0: wins[0].end} // [4, 5) holds nothing readable
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	offs, err := c.TopicOffsets(ctx, "d")
+	if !errors.Is(err, errProbe) {
+		t.Fatalf("err = %v, want errProbe (the zero-value client has no broker to walk back on)", err)
+	}
+	if offs != nil {
+		t.Fatalf("offsets = %+v, want none", offs)
+	}
 }

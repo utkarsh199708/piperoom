@@ -525,22 +525,7 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	for {
-		fetches, idle := pollOrIdle(cctx, cl)
-		if idle {
-			// Nothing came: an aborted tail below an open transaction
-			// delivers no record (#300), so ask how far is unreadable.
-			pr.advance(cctx, wait)
-			for p, w := range wait {
-				if w.from >= w.end {
-					finished[p] = true
-					delete(wait, p)
-				}
-			}
-			if len(finished) == len(stopAt) {
-				return keyScan(found, truncated), nil
-			}
-			continue
-		}
+		fetches := pollBounded(cctx, cl)
 		for _, fe := range fetches.Errors() {
 			if fe.Err != nil && !errors.Is(fe.Err, context.Canceled) && !errors.Is(fe.Err, context.DeadlineExceeded) {
 				return KeyScan{}, fmt.Errorf("kafka: scan %s: %w", topic, fe.Err)
@@ -578,6 +563,16 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 					Timestamp: r.Timestamp,
 					Key:       dk,
 				})
+			}
+		}
+		// An aborted tail below an open transaction delivers no record
+		// (#300), while other partitions may keep delivering: probe each
+		// window that stopped moving.
+		pr.stalled(cctx, wait)
+		for p, w := range wait {
+			if w.from >= w.end {
+				finished[p] = true
+				delete(wait, p)
 			}
 		}
 		if len(finished) == len(stopAt) {
@@ -635,26 +630,7 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at, lo map[
 		wait[p] = readWindow{from: off, end: off + 1}
 	}
 	for len(wait) > 0 {
-		fetches, idle := pollOrIdle(ctx, cl)
-		if idle {
-			// An offset the probe passes holds no readable record (an
-			// aborted one, #300): the newest readable one below stands in.
-			pr.advance(ctx, wait)
-			for p, w := range wait {
-				if w.from < w.end {
-					continue
-				}
-				delete(wait, p)
-				ts, ok, err := pr.newestReadable(ctx, p, lo[p], at[p])
-				if err != nil {
-					return got, fmt.Errorf("newest readable record %s/%d: %w", topic, p, err)
-				}
-				if ok {
-					got[p] = ts
-				}
-			}
-			continue
-		}
+		fetches := pollBounded(ctx, cl)
 		for _, r := range fetches.Records() {
 			if _, waiting := wait[r.Partition]; waiting && r.Offset >= at[r.Partition] {
 				got[r.Partition] = r.Timestamp
@@ -663,6 +639,22 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at, lo map[
 		}
 		if err := fetches.Err(); err != nil {
 			return got, err
+		}
+		// An offset the probe passes holds no readable record (an aborted
+		// one, #300): the newest readable one below stands in.
+		pr.stalled(ctx, wait)
+		for p, w := range wait {
+			if w.from < w.end {
+				continue
+			}
+			delete(wait, p)
+			ts, ok, err := pr.newestReadable(ctx, p, lo[p], at[p])
+			if err != nil {
+				return got, fmt.Errorf("newest readable record %s/%d: %w", topic, p, err)
+			}
+			if ok {
+				got[p] = ts
+			}
 		}
 		if ctx.Err() != nil {
 			return got, ctx.Err()

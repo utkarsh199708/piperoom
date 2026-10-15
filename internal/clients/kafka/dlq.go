@@ -196,7 +196,7 @@ func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]client
 	// Headers only leave collectPeek; the receipt holds the topic and limit.
 	pollStart := time.Now()
 	pr := c.newProber(topic)
-	recs, err := collectPeek(ctx, cons, topic, plan, func(w map[int32]readWindow) { pr.advance(ctx, w) })
+	recs, err := collectPeek(ctx, cons, topic, plan, func(w map[int32]readWindow) { pr.stalled(ctx, w) })
 	c.record(ctx, pollStart, "kgo.PollFetches(topic, limit)", "topic="+topic, "limit="+strconv.Itoa(limit))
 	pr.record(ctx)
 	if err != nil {
@@ -311,10 +311,10 @@ func planPeek(parts []clients.PartitionOffsets, limit int) []peekPart {
 // 8 MiB of record bytes were read, or ctx ends. Control records (transaction
 // markers) are delivered because KeepControlRecords is on: they mark a
 // partition done when they sit at its last offset, but are never returned or
-// counted. When a poll brings nothing for stallAfter, advance probes what is
-// left; a partition with nothing readable left is done. Only DLQRecords come
-// out: each *kgo.Record is dropped after its iteration.
-func collectPeek(ctx context.Context, cons pollConsumer, topic string, plan []peekPart, advance func(map[int32]readWindow)) ([]clients.DLQRecord, error) {
+// counted. After every poll, probe asks about the windows that have not
+// moved for stallAfter; a partition with nothing readable left is done. Only
+// DLQRecords come out: each *kgo.Record is dropped after its iteration.
+func collectPeek(ctx context.Context, cons pollConsumer, topic string, plan []peekPart, probe func(map[int32]readWindow)) ([]clients.DLQRecord, error) {
 	ends := map[int32]int64{}
 	wait := map[int32]readWindow{} // what each unfinished partition has left
 	for _, pl := range plan {
@@ -327,19 +327,7 @@ func collectPeek(ctx context.Context, cons pollConsumer, topic string, plan []pe
 		total int
 	)
 	for len(done) < len(ends) {
-		fetches, idle := pollOrIdle(ctx, cons)
-		if idle {
-			// Nothing came: an aborted tail below an open transaction
-			// delivers no record (#300), so ask how far is unreadable.
-			advance(wait)
-			for p, w := range wait {
-				if w.from >= w.end {
-					done[p] = true
-					delete(wait, p)
-				}
-			}
-			continue
-		}
+		fetches := pollBounded(ctx, cons)
 		if fetches.IsClientClosed() {
 			return nil, errors.New("consumer closed")
 		}
@@ -375,6 +363,16 @@ func collectPeek(ctx context.Context, cons pollConsumer, topic string, plan []pe
 			out = append(out, dlqRecordFrom(topic, r))
 			if total >= maxPeekBytes {
 				return out, nil
+			}
+		}
+		// An aborted tail below an open transaction delivers no record
+		// (#300), while other partitions may keep delivering: probe each
+		// window that stopped moving.
+		probe(wait)
+		for p, w := range wait {
+			if w.from >= w.end {
+				done[p] = true
+				delete(wait, p)
 			}
 		}
 		if err := ctx.Err(); err != nil && len(done) < len(ends) {

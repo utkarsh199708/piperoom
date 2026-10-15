@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/twmb/franz-go/pkg/kadm"
+	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
 )
@@ -17,10 +17,11 @@ import (
 // window is such a record (transaction C aborted below transaction A, still
 // open: #300), no record ever reaches the window's end and the read would wait
 // out its deadline. kgo exposes neither its fetch position nor fetches that
-// carry no record, so a read that sees nothing for stallAfter asks the broker
-// directly through a prober.
+// carry no record, so a read asks the broker directly, through a prober,
+// about each window that has not moved for stallAfter. That is decided per
+// partition: other partitions of the topic may keep delivering records.
 
-// stallAfter is how long a read polls without a record before it probes.
+// stallAfter is how long a window may go without moving before it is probed.
 const stallAfter = 500 * time.Millisecond
 
 const (
@@ -42,21 +43,22 @@ var errProbe = errors.New("probe: no usable fetch response")
 // readWindow is what a read still waits on in one partition: offsets [from, end).
 type readWindow struct{ from, end int64 }
 
-// pollOrIdle polls for at most stallAfter. idle is true when nothing but the
-// poll's own timeout came back while ctx is still live.
-func pollOrIdle(ctx context.Context, cons pollConsumer) (fetches kgo.Fetches, idle bool) {
+// pollBounded polls for at most stallAfter, so a read gets back to its
+// stall check even when nothing arrives. A poll that ends on its own timeout
+// with ctx still live returns no fetches: that timeout is not the read's.
+func pollBounded(ctx context.Context, cons pollConsumer) kgo.Fetches {
 	pctx, cancel := context.WithTimeout(ctx, stallAfter)
 	defer cancel()
-	fetches = cons.PollFetches(pctx)
+	fetches := cons.PollFetches(pctx)
 	if ctx.Err() != nil || pctx.Err() == nil || fetches.NumRecords() > 0 {
-		return fetches, false
+		return fetches
 	}
 	for _, fe := range fetches.Errors() {
 		if !errors.Is(fe.Err, context.DeadlineExceeded) && !errors.Is(fe.Err, context.Canceled) {
-			return fetches, false
+			return fetches
 		}
 	}
-	return nil, true
+	return nil
 }
 
 // prober asks the broker about one read's windows. It lives for one read:
@@ -65,17 +67,65 @@ func pollOrIdle(ctx context.Context, cons pollConsumer) (fetches kgo.Fetches, id
 type prober struct {
 	c     *Client
 	topic string
-	md    *kadm.TopicDetail
-	reqs  int
-	start time.Time
+	// id and leaders are the topic's metadata, kept for the read and
+	// dropped when a probe fails or a partition reports an error.
+	id      [16]byte
+	leaders map[int32]int32
+	reqs    int
+	start   time.Time
+	born    time.Time
+	// seen and since hold, per partition, the window start last seen and
+	// when it last moved or was probed.
+	seen  map[int32]int64
+	since map[int32]time.Time
 }
 
-func (c *Client) newProber(topic string) *prober { return &prober{c: c, topic: topic} }
+func (c *Client) newProber(topic string) *prober {
+	return &prober{c: c, topic: topic, born: time.Now()}
+}
 
 // record adds one receipt for every probe request of the read, if any.
 func (pr *prober) record(ctx context.Context) {
 	if pr.reqs > 0 {
 		pr.c.record(ctx, pr.start, "kmsg.FetchRequest(topic, read_committed) probes", "topic="+pr.topic, "requests="+strconv.Itoa(pr.reqs))
+	}
+}
+
+// stalled probes the open windows that have not moved for stallAfter, each
+// at most once per stallAfter, and writes back where the probe got them. Call
+// it after every poll, whether or not records came: a window stuck behind an
+// aborted tail must be probed even while other partitions keep delivering.
+func (pr *prober) stalled(ctx context.Context, wins map[int32]readWindow) {
+	if pr.seen == nil {
+		pr.seen, pr.since = map[int32]int64{}, map[int32]time.Time{}
+	}
+	now := time.Now()
+	due := map[int32]readWindow{}
+	for p, w := range wins {
+		if w.from >= w.end {
+			continue
+		}
+		f, ok := pr.seen[p]
+		switch {
+		case !ok:
+			// A window counts as unmoved since the read began.
+			pr.seen[p], pr.since[p] = w.from, pr.born
+		case f != w.from:
+			pr.seen[p], pr.since[p] = w.from, now
+			continue
+		}
+		if now.Sub(pr.since[p]) >= stallAfter {
+			due[p] = w
+		}
+	}
+	if len(due) == 0 {
+		return
+	}
+	pr.advance(ctx, due)
+	now = time.Now()
+	for p, w := range due {
+		wins[p] = w
+		pr.seen[p], pr.since[p] = w.from, now
 	}
 }
 
@@ -98,7 +148,7 @@ func (pr *prober) advance(ctx context.Context, wins map[int32]readWindow) {
 		}
 		moved := false
 		for p, next := range pr.round(ctx, open) {
-			if w := wins[p]; next > w.from {
+			if w, ok := wins[p]; ok && next > w.from {
 				w.from = min(next, w.end)
 				wins[p] = w
 				moved = true
@@ -133,6 +183,38 @@ func (pr *prober) round(ctx context.Context, wins map[int32]readWindow) map[int3
 	return out
 }
 
+// metadata loads the topic's id and partition leaders with a direct
+// Metadata request. kadm.Metadata would answer from kgo's metadata cache
+// (up to MetadataMinAge old), which still names the old leader right after
+// a partition moves.
+func (pr *prober) metadata(ctx context.Context) bool {
+	req := kmsg.NewPtrMetadataRequest()
+	req.AllowAutoTopicCreation = false
+	rt := kmsg.NewMetadataRequestTopic()
+	rt.Topic = kmsg.StringPtr(pr.topic)
+	req.Topics = append(req.Topics, rt)
+	pr.reqs++
+	resp, err := req.RequestWith(ctx, pr.c.cl)
+	if err != nil {
+		slog.DebugContext(ctx, "kafka: read probe metadata failed", "topic", pr.topic, "err", err)
+		return false
+	}
+	for _, t := range resp.Topics {
+		if t.Topic == nil || *t.Topic != pr.topic || t.ErrorCode != 0 {
+			continue
+		}
+		leaders := map[int32]int32{}
+		for _, p := range t.Partitions {
+			if p.ErrorCode == 0 && p.Leader >= 0 {
+				leaders[p.Partition] = p.Leader
+			}
+		}
+		pr.id, pr.leaders = t.TopicID, leaders
+		return true
+	}
+	return false
+}
+
 // fetched is one partition's probe result: its readable records (data and
 // markers) at or after the probed offset, oldest first, and the offset the
 // next fetch would start at.
@@ -145,29 +227,19 @@ type fetched struct {
 // offsets and decodes each partition as a read_committed consumer would. A
 // partition whose probe failed is absent.
 func (pr *prober) fetch(ctx context.Context, at map[int32]int64) map[int32]fetched {
-	if pr.c.adm == nil || pr.c.cl == nil {
+	if pr.c.cl == nil {
 		return nil // zero-value test client: no broker to ask
 	}
 	if pr.start.IsZero() {
 		pr.start = time.Now()
 	}
-	if pr.md == nil {
-		pr.reqs++
-		md, err := pr.c.adm.Metadata(ctx, pr.topic)
-		if err != nil {
-			slog.DebugContext(ctx, "kafka: read probe metadata failed", "topic", pr.topic, "err", err)
-			return nil
-		}
-		td, ok := md.Topics[pr.topic]
-		if !ok || td.Err != nil {
-			return nil
-		}
-		pr.md = &td
+	if pr.leaders == nil && !pr.metadata(ctx) {
+		return nil
 	}
 	byLeader := map[int32][]int32{}
 	for p := range at {
-		if pd, ok := pr.md.Partitions[p]; ok && pd.Err == nil && pd.Leader >= 0 {
-			byLeader[pd.Leader] = append(byLeader[pd.Leader], p)
+		if l, ok := pr.leaders[p]; ok {
+			byLeader[l] = append(byLeader[l], p)
 		}
 	}
 	out := map[int32]fetched{}
@@ -176,7 +248,7 @@ func (pr *prober) fetch(ctx context.Context, at map[int32]int64) map[int32]fetch
 		req.MaxBytes = int32(min(int64(len(parts)+1)*probePartitionBytes, probeMaxBytes))
 		req.IsolationLevel = 1 // read_committed: the broker lists the aborted transactions
 		rt := kmsg.NewFetchRequestTopic()
-		rt.Topic, rt.TopicID = pr.topic, pr.md.ID // the name up to v12, the id from v13
+		rt.Topic, rt.TopicID = pr.topic, pr.id // the name up to v12, the id from v13
 		for _, p := range parts {
 			rp := kmsg.NewFetchRequestTopicPartition()
 			rp.Partition, rp.FetchOffset, rp.PartitionMaxBytes = p, at[p], probePartitionBytes
@@ -186,7 +258,7 @@ func (pr *prober) fetch(ctx context.Context, at map[int32]int64) map[int32]fetch
 		pr.reqs++
 		resp, err := req.RequestWith(ctx, pr.c.cl.Broker(int(leader)))
 		if err != nil {
-			pr.md = nil // a moved leader shows up as a failure; look it up again next round
+			pr.leaders = nil // the broker may be gone; look the leaders up again next round
 			slog.DebugContext(ctx, "kafka: read probe fetch failed", "topic", pr.topic, "broker", leader, "err", err)
 			continue
 		}
@@ -194,7 +266,16 @@ func (pr *prober) fetch(ctx context.Context, at map[int32]int64) map[int32]fetch
 			for j := range resp.Topics[i].Partitions {
 				rp := &resp.Topics[i].Partitions[j]
 				from, ok := at[rp.Partition]
-				if !ok || rp.ErrorCode != 0 {
+				if !ok {
+					continue
+				}
+				if rp.ErrorCode != 0 {
+					// A moved leader answers with NOT_LEADER_OR_FOLLOWER
+					// (or an epoch error) on the partition, not a failed
+					// request: look the leaders up again next round.
+					pr.leaders = nil
+					slog.DebugContext(ctx, "kafka: read probe partition error", "topic", pr.topic, "partition", rp.Partition,
+						"err", kerr.ErrorForCode(rp.ErrorCode))
 					continue
 				}
 				fp, next := kgo.ProcessFetchPartition(kgo.ProcessFetchPartitionOpts{
@@ -230,21 +311,26 @@ func unreadableUpTo(f fetched, w readWindow) (int64, bool) {
 
 // newestReadable returns the timestamp of the newest readable record (data
 // or marker) in [lo, end) of partition p, and false when there is none. It
-// reads backwards in growing spans, each read forward to end, so a short
-// aborted tail costs one or two requests. A probe that cannot decide is an
-// error: the caller reports it rather than a false "never".
+// reads backwards in growing steps, each step only the offsets the one above
+// it did not cover, so a readable record found in a step is the newest. A
+// probe that cannot decide is an error (the read's deadline, or errProbe):
+// the caller reports it rather than a false "never".
 func (pr *prober) newestReadable(ctx context.Context, p int32, lo, end int64) (time.Time, bool, error) {
-	for span := int64(64); ; span *= 8 {
+	top := end
+	for span := int64(64); top > lo; span *= 8 {
 		from := max(lo, end-span)
 		var newest time.Time
 		found := false
-		for pos := from; pos < end; {
+		for pos := from; pos < top; {
 			f, ok := pr.fetch(ctx, map[int32]int64{p: pos})[p]
 			if !ok {
+				if err := ctx.Err(); err != nil {
+					return time.Time{}, false, err
+				}
 				return time.Time{}, false, errProbe
 			}
 			for _, r := range f.recs {
-				if r.Offset >= pos && r.Offset < end {
+				if r.Offset >= pos && r.Offset < top {
 					newest, found = r.Timestamp, true
 				}
 			}
@@ -256,11 +342,7 @@ func (pr *prober) newestReadable(ctx context.Context, p int32, lo, end int64) (t
 		if found {
 			return newest, true, nil
 		}
-		if from == lo {
-			return time.Time{}, false, nil
-		}
-		if err := ctx.Err(); err != nil {
-			return time.Time{}, false, err
-		}
+		top = from
 	}
+	return time.Time{}, false, nil
 }
