@@ -533,7 +533,8 @@ func TestVerifyAfterFixFailedLastStepNoRecoveredClaim(t *testing.T) {
 	assertNoRecoveryClaim(t, msgs)
 	var sawFailed bool
 	for _, m := range msgs {
-		if strings.Contains(m, `Fix step failed: proposal "p_1" step 1`) {
+		// Step index 1 is the second step; people read it as step 2.
+		if strings.Contains(m, `Fix step failed: proposal "p_1" step 2`) {
 			sawFailed = true
 		}
 	}

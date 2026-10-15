@@ -446,7 +446,8 @@ func isErrorStatus(e events.Event) bool {
 // and run.
 func isHandoffCritical(t events.Type) bool {
 	switch t {
-	case events.AgentHypothesis, events.ProposalCreated, events.ApprovalGiven, events.ApprovalRejected, events.ActionExecuted:
+	case events.AgentHypothesis, events.ProposalCreated, events.ApprovalGiven, events.ApprovalRejected, events.ActionExecuted,
+		events.AgentVerification:
 		return true
 	default:
 		return false
@@ -595,7 +596,20 @@ func renderRoomEvent(e events.Event) string {
 		if !p.OK {
 			result = "FAILED"
 		}
-		return fmt.Sprintf("action %s step %d %s: %s", capFreeText(p.ProposalID), p.StepIndex, result, wrapUntrusted(truncatePromptField(p.Output, handoffActionOutputBytes)))
+		// Steps are numbered from 1, as the room shows them.
+		return fmt.Sprintf("action %s step %d %s: %s", capFreeText(p.ProposalID), p.StepIndex+1, result, wrapUntrusted(truncatePromptField(p.Output, handoffActionOutputBytes)))
+	case events.AgentVerification:
+		p, err := events.Decode[events.AgentVerificationPayload](e)
+		if err != nil || p.Repeat {
+			// A repeat restates a verdict already in the log.
+			return ""
+		}
+		outcome := "recovered"
+		if !p.Recovered {
+			outcome = "NOT recovered"
+		}
+		// The verdict quotes check output, so it is wrapped like tool text.
+		return fmt.Sprintf("verification %s (%s): %s", capFreeText(p.ProposalID), outcome, wrapUntrusted(capFreeText(p.Verdict)))
 	default:
 		return string(e.Type) + " by " + wrapUntrusted(capFreeText(actorName(e.Actor)))
 	}

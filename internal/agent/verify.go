@@ -227,7 +227,7 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		// A repeated last-step result never runs the checks again and never
 		// emits done again; it reports the verdict already reached.
 		repeat := "already verified: " + verdictWord(rec.recovered) + "; no checks were run again"
-		r.emit(ctx, events.AgentVerification, events.AgentVerificationPayload{
+		r.emitVerification(ctx, events.AgentVerificationPayload{
 			ProposalID: id,
 			Checks:     []events.VerificationCheck{},
 			Recovered:  rec.recovered,
@@ -248,11 +248,12 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 		followUp = compatFollowUp(rec.steps)
 	}
 	// The room gets the typed verdict; the model note below keeps the text form.
-	r.emit(ctx, events.AgentVerification, vr.payload(id))
+	r.emitVerification(ctx, vr.payload(id))
 	if followUp != "" {
 		// The room learns of a subject left at NONE now, not only when the model
-		// proposes the restore; the model reads the same line in its note.
-		r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: strings.TrimSpace(followUp)})
+		// proposes the restore. People read a notice; the instruction of how to
+		// restore it stays in the model's note.
+		r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: strings.TrimSpace(compatRoomNotice(rec.steps))})
 	}
 	r.proposals.markVerified(id, recovered)
 	if recovered {
@@ -285,13 +286,25 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 // never parsed here: the model reads it from the action result or the schema
 // tools.
 func compatFollowUp(steps []events.ProposalStep) string {
+	return compatNoneLines(steps, " Propose a separate fix that restores the level shown before \"→\" in the schema_set_compatibility step result (or read it with the schema tools).")
+}
+
+// compatRoomNotice is the room's form of compatFollowUp: the same subjects,
+// worded for people. Instructions meant for the model never go into room text.
+func compatRoomNotice(steps []events.ProposalStep) string {
+	return compatNoneLines(steps, " It should go back to its earlier level with a separate fix.")
+}
+
+// compatNoneLines returns one "follow-up:" line per subject the steps leave at
+// NONE, each starting on a new line and ending with tail.
+func compatNoneLines(steps []events.ProposalStep, tail string) string {
 	order, final := compatFinalLevels(steps)
 	var b strings.Builder
 	for _, subject := range order {
 		if final[subject] != "NONE" {
 			continue
 		}
-		fmt.Fprintf(&b, "\nfollow-up: %s compatibility is still NONE. Propose a separate fix that restores the level shown before \"→\" in the schema_set_compatibility step result (or read it with the schema tools).", followUpSubject(subject))
+		fmt.Fprintf(&b, "\nfollow-up: %s compatibility is still NONE.%s", followUpSubject(subject), tail)
 	}
 	return b.String()
 }
@@ -373,7 +386,8 @@ func failedStepText(id string, step int, parsed bool) string {
 	if !parsed {
 		return "A fix step failed. I have not verified recovery and will keep investigating."
 	}
-	return fmt.Sprintf("Fix step failed: proposal %q step %d did not succeed. I have not verified recovery and will keep investigating.", id, step)
+	// Steps are numbered from 1 for people, as in the room's action results.
+	return fmt.Sprintf("Fix step failed: proposal %q step %d did not succeed. I have not verified recovery and will keep investigating.", id, step+1)
 }
 
 // unknownOutcomeText tells the model a step's outcome is unknown, so it does not
@@ -382,7 +396,7 @@ func unknownOutcomeText(id string, step int, parsed bool) string {
 	if !parsed {
 		return "not verified: a step outcome is unknown; recovery is not claimed."
 	}
-	return fmt.Sprintf("not verified: the outcome of proposal %q step %d is unknown; recovery is not claimed.", id, step)
+	return fmt.Sprintf("not verified: the outcome of proposal %q step %d is unknown; recovery is not claimed.", id, step+1)
 }
 
 // verifyResult is the outcome of verifyProposal: the verdict, the text form
@@ -395,6 +409,24 @@ type verifyResult struct {
 	head   string
 	checks []events.VerificationCheck
 	flow   *events.DataFlowCheck
+}
+
+// emitVerification writes the typed verdict. A room that refuses the event type
+// (a server older than the agent, or one whose sink allow-list lacks it) would
+// otherwise lose the verdict without a trace, so a refused first verdict is
+// posted as an agent.message instead; a refused repeat is only logged.
+func (r *runner) emitVerification(ctx context.Context, p events.AgentVerificationPayload) {
+	r.emitMu.Lock()
+	err := r.deps.Sink.Emit(ctx, events.AgentVerification, p)
+	r.emitMu.Unlock()
+	if err == nil {
+		return
+	}
+	r.log.Warn("agent: verification event not stored", "proposal", p.ProposalID, "err", err)
+	if p.Repeat {
+		return
+	}
+	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: fmt.Sprintf("Verification of proposal %s: %s", p.ProposalID, p.Verdict)})
 }
 
 // payload builds the agent.verification event of proposal id.
