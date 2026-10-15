@@ -30,7 +30,8 @@ var errApproveAllRefused = errors.New("-approve-all refused")
 // the caller confirmed explicitly AND every address in cfg, and in the
 // pipeline's own connection block, points at this machine's dev stack. It
 // fails closed: an address it cannot parse, an empty required one, a login or
-// TLS setting (the dev stack has none) or a warehouse other than the dev
+// TLS setting (the dev stack has none; for Postgres that is sslmode require or
+// verify-*, while disable, prefer and allow pass) or a warehouse other than the dev
 // Postgres all refuse. Nothing is resolved over DNS, so a hostname that merely
 // points at 127.0.0.1 is refused; only "localhost" and loopback IPs pass.
 //
@@ -143,13 +144,29 @@ func localPostgres(v string) error {
 		return errors.New("hostaddr is not supported by pgx and is refused")
 	}
 	hosts := []string{cfg.ConnConfig.Host}
+	tls := []bool{cfg.ConnConfig.TLSConfig != nil}
 	for _, fb := range cfg.ConnConfig.Fallbacks {
 		hosts = append(hosts, fb.Host)
+		tls = append(tls, fb.TLSConfig != nil)
 	}
 	for _, h := range hosts {
 		if h == "" || !isLocalHost(h) {
 			return fmt.Errorf("host %q is not local", h)
 		}
+	}
+	// TLS means a managed or production-like server (a tunnel to one listens
+	// on localhost too). pgx turns sslmode into a list of attempts: disable is
+	// plaintext only; prefer and allow try TLS and plaintext, so a plaintext
+	// attempt exists; require and verify-* are TLS only. The DSN, PGSSLMODE
+	// and a service file all end up in this list. Refuse when every attempt is
+	// TLS. prefer and allow pass on purpose: they are the libpq default, they
+	// do not verify the server, and the dev stack works with them.
+	allTLS := true
+	for _, on := range tls {
+		allTLS = allTLS && on
+	}
+	if allTLS {
+		return errors.New("the connection requires TLS (sslmode require or verify-*): the dev stack is plaintext")
 	}
 	return nil
 }

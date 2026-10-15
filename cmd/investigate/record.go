@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -243,8 +241,8 @@ func redactText(s string) string {
 }
 
 // recordPayload returns the JSON to store for one event: secrets masked with
-// internal/redact, and the Data of a tool result replaced by its size and
-// SHA-256. Data is where record values live (pg_row, kafka_find_by_key,
+// internal/redact, and the Data of a tool result replaced by its byte
+// count only (a digest of a small value could be guessed and confirmed). Data is where record values live (pg_row, kafka_find_by_key,
 // warehouse_row), and a recording is meant to be kept and shared, so the
 // values are never written. The summary the model read is kept: it is what a
 // score needs, and the agent already masks it before it is emitted.
@@ -264,11 +262,9 @@ func recordPayload(typ events.Type, payload any) (json.RawMessage, error) {
 		}
 		{
 			if raw, has := m["data"]; has && string(raw) != "null" {
-				sum := sha256.Sum256(raw)
 				stub, err := json.Marshal(map[string]any{
 					"not_recorded": true,
 					"bytes":        len(raw),
-					"sha256":       hex.EncodeToString(sum[:]),
 				})
 				if err != nil {
 					return nil, fmt.Errorf("encoding %s data stub: %w", typ, err)

@@ -46,6 +46,9 @@ func TestApproveAllAllowsDevStack(t *testing.T) {
 		"several local brokers": {flag: true, getenv: noEnv, mutate: func(c *config.Config) { c.KafkaBrokers = "localhost:29092, 127.0.0.2:29093" }},
 		"pipeline w/o conns":    {flag: true, getenv: noEnv, pipe: owners.Pipeline{ID: "orders"}, havePip: true},
 		"plaintext explicit":    {flag: true, getenv: noEnv, mutate: func(c *config.Config) { c.KafkaSecurityProtocol = "plaintext" }},
+		"sslmode disable":       {flag: true, getenv: noEnv, mutate: func(c *config.Config) { c.SourceDBURL = "postgres://u@localhost/x?sslmode=disable" }},
+		"sslmode prefer":        {flag: true, getenv: noEnv, mutate: func(c *config.Config) { c.SourceDBURL = "host=localhost sslmode=prefer dbname=x" }},
+		"sslmode allow":         {flag: true, getenv: noEnv, mutate: func(c *config.Config) { c.SourceDBURL = "host=localhost sslmode=allow dbname=x" }},
 		"keyword dsn":           {flag: true, getenv: noEnv, mutate: func(c *config.Config) { c.SourceDBURL = "host=localhost port=5432 dbname=orders user=u" }},
 	}
 	for name, tc := range cases {
@@ -120,6 +123,14 @@ func TestApproveAllRefusals(t *testing.T) {
 			mutate: func(c *config.Config) { c.SchemaRegistryTLSCertFile = "/c.pem" }, want: "SCHEMA_REGISTRY_TLS_CERT_FILE"},
 		{name: "registry tls key file", flag: true, getenv: noEnv,
 			mutate: func(c *config.Config) { c.SchemaRegistryTLSKeyFile = "/k.pem" }, want: "SCHEMA_REGISTRY_TLS_KEY_FILE"},
+		{name: "sslmode=require in URL", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.SourceDBURL = "postgres://u@localhost/x?sslmode=require" }, want: "requires TLS"},
+		{name: "sslmode=verify-full keyword", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.SourceDBURL = "host=localhost sslmode=verify-full dbname=x" }, want: "requires TLS"},
+		{name: "sslmode=verify-ca on warehouse", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.WarehouseDBURL = "postgres://u@127.0.0.1/wh?sslmode=verify-ca" }, want: "requires TLS"},
+		{name: "sslmode=require on room db", flag: true, getenv: noEnv,
+			mutate: func(c *config.Config) { c.RoomDBURL = "host=localhost sslmode=require dbname=rooms" }, want: "requires TLS"},
 		{name: "userinfo trick", flag: true, getenv: noEnv,
 			mutate: func(c *config.Config) { c.ConnectURL = "http://localhost@evil.example.com:8083" }, want: "CONNECT_URL"},
 		{name: "localhost lookalike", flag: true, getenv: noEnv,
@@ -194,5 +205,23 @@ func TestApproveAllChecksPGHOSTFallback(t *testing.T) {
 	t.Setenv("PGHOST", "localhost")
 	if err := checkApproveAll(cfg, owners.Pipeline{}, false, true, noEnv); err != nil {
 		t.Fatalf("PGHOST=localhost: err = %v, want nil", err)
+	}
+}
+
+// PGSSLMODE in the environment reaches the parsed config, so the guard sees it
+// whether the DSN names sslmode or not.
+func TestApproveAllChecksPGSSLMODE(t *testing.T) {
+	cfg := devCfg()
+	cfg.SourceDBURL = "host=localhost dbname=orders user=u"
+
+	t.Setenv("PGSSLMODE", "require")
+	err := checkApproveAll(cfg, owners.Pipeline{}, false, true, noEnv)
+	if err == nil || !strings.Contains(err.Error(), "SOURCE_DB_URL") || !strings.Contains(err.Error(), "requires TLS") {
+		t.Fatalf("PGSSLMODE=require: err = %v, want SOURCE_DB_URL refused for TLS", err)
+	}
+
+	t.Setenv("PGSSLMODE", "disable")
+	if err := checkApproveAll(cfg, owners.Pipeline{}, false, true, noEnv); err != nil {
+		t.Fatalf("PGSSLMODE=disable: err = %v, want nil", err)
 	}
 }

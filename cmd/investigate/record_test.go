@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -112,7 +110,7 @@ func TestRecorderFormat(t *testing.T) {
 		t.Errorf("tool_result = %+v", res)
 	}
 	var data map[string]any
-	if err := json.Unmarshal(res.Data, &data); err != nil || data["not_recorded"] != true || data["sha256"] == "" {
+	if err := json.Unmarshal(res.Data, &data); err != nil || data["not_recorded"] != true || data["bytes"] == nil {
 		t.Errorf("tool_result data = %s, want a not_recorded stub", res.Data)
 	}
 
@@ -278,7 +276,7 @@ func TestRecorderRedactsMetaTitleAndPipeline(t *testing.T) {
 }
 
 // Big integers and out-of-range numbers survive recording as written, and the
-// data stub hashes the original bytes.
+// data stub keeps only the original byte count.
 func TestRecordPayloadKeepsNumbers(t *testing.T) {
 	data := json.RawMessage(`{"offset":9007199254740993,"big":1e400}`)
 	out, err := recordPayload(events.AgentToolResult, events.AgentToolResultPayload{
@@ -292,17 +290,20 @@ func TestRecordPayloadKeepsNumbers(t *testing.T) {
 	}
 	var got struct {
 		Data struct {
-			NotRecorded bool   `json:"not_recorded"`
-			Bytes       int    `json:"bytes"`
-			SHA256      string `json:"sha256"`
+			NotRecorded bool `json:"not_recorded"`
+			Bytes       int  `json:"bytes"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256(data)
-	if !got.Data.NotRecorded || got.Data.Bytes != len(data) || got.Data.SHA256 != hex.EncodeToString(sum[:]) {
-		t.Errorf("data stub = %+v, want bytes %d sha256 %x of the original", got.Data, len(data), sum)
+	if !got.Data.NotRecorded || got.Data.Bytes != len(data) {
+		t.Errorf("data stub = %+v, want only the original byte count %d", got.Data, len(data))
+	}
+	// No digest of the unredacted data: a small guessable value could be
+	// confirmed from a shared recording.
+	if strings.Contains(string(out), "sha256") {
+		t.Errorf("data stub carries a digest: %s", out)
 	}
 	if strings.Contains(string(out), "9007199254740992") {
 		t.Errorf("number was rounded: %s", out)
