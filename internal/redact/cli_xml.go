@@ -6,8 +6,8 @@ import (
 )
 
 // The rules of #372 (the flag and XML element entries of baseRules) run
-// first, unchanged but for mainFlagOK. The rules below run after every other
-// rule, on its output, and only add masks for the shapes #372 did not read:
+// first, unchanged. The rules below run after every other rule, on its
+// output, and only add masks for the shapes #372 did not read:
 // quoted values with spaces, flag names with '_' or '.', argument lists, XML
 // attributes, CDATA and values on their own lines (#383). A value that is
 // already masked is skipped, so nothing #372 masked can come back.
@@ -94,30 +94,6 @@ func heldMask(v string, whole bool) (skip bool) {
 		return false
 	}
 	return !whole || maskOnly.MatchString(strings.TrimSpace(v))
-}
-
-// mainFlagOK keeps, out of what the #372 flag rule matches, the evidence
-// #383 names: a --no-* flag (it takes no argument), a bare argument that is
-// a plain lower-case word ("--password requires an argument"), and docker's
-// -u user:group or uid:gid (postgres:postgres, 1000:1000).
-func mainFlagOK(s string, m []int) bool {
-	if m[8] >= 0 {
-		pw := s[m[8]:m[9]]
-		u := m[8] - 1
-		for u > m[0] && !isBlankOrQuote(s[u-1]) {
-			u--
-		}
-		user := s[u : m[8]-1]
-		return !(pw == user || allDigits(pw) && allDigits(user))
-	}
-	ns := m[0]
-	for ns < len(s) && (s[ns] == '-' || isBlankOrQuote(s[ns])) {
-		ns++
-	}
-	if strings.HasPrefix(asciiLower(s[ns:min(len(s), ns+3)]), "no-") {
-		return false
-	}
-	return !(m[6] >= 0 && plainWord(s[m[6]:m[7]]))
 }
 
 // flagWords end a flag or element name that names a secret. A name that only
@@ -222,42 +198,58 @@ func flagFind(s, _ string) [][]int {
 		if ne == ns || !(isLetter(s[ns]) || s[ns] >= '0' && s[ns] <= '9') {
 			continue
 		}
-		if m := f.match(p, ns, ne); m != nil {
+		m, skip := f.match(p, ns, ne)
+		if m != nil {
 			out = append(out, m)
 			i = m[1]
+		} else {
+			// A rejected quoted argument is skipped whole: it may run over
+			// several quotes, and reading it again for each flag inside it
+			// would cost time quadratic in the line.
+			i = max(i, skip)
 		}
 	}
 	return out
 }
 
 // match reads the argument of the flag s[ns:ne] (dashes from p) and returns
-// its match, or nil when it holds no secret.
-func (f *flagScan) match(p, ns, ne int) []int {
+// its match, or nil when it holds no secret, with where the search may go on.
+func (f *flagScan) match(p, ns, ne int) ([]int, int) {
+	m, end, quoted := f.matchArg(p, ns, ne)
+	if m == nil && quoted {
+		return nil, end
+	}
+	return m, ne
+}
+
+// matchArg is match; it also reports where the argument it read ends and
+// whether it was quoted.
+func (f *flagScan) matchArg(p, ns, ne int) ([]int, int, bool) {
 	s := f.s
 	name := s[ns:ne]
 	lname := asciiLower(name)
 	if ns-p >= 2 && (lname == "user" || lname == "proxy-user") || ns-p == 1 && lname == "u" {
-		return f.user(p, ne)
+		return f.user(p, ne), 0, false
 	}
 	if strings.HasPrefix(lname, "no-") || strings.HasPrefix(lname, "no_") {
-		return nil
+		return nil, 0, false
 	}
 	// "with --password. Still failing": a flag named at the end of a
 	// sentence takes no argument.
 	if strings.TrimRight(lname, "._-") != lname || !endsInFlagWord(lname) {
-		return nil
+		return nil, 0, false
 	}
 	v, listForm := flagSep(s, p, ne)
 	if v < 0 {
-		return nil
+		return nil, 0, false
 	}
 	vs, ve, end, quoted := f.value(p, v)
 	if ve <= vs || (listForm && !quoted) {
-		return nil
+		return nil, end, quoted
 	}
 	val := s[vs:ve]
 	if heldMask(val, quoted) {
-		return nil
+		return nil, end, quoted
 	}
 	// In an argument list ["psql", "--password", "-h"] each item is quoted,
 	// so the next item is read like a bare word.
@@ -267,24 +259,24 @@ func (f *flagScan) match(p, ns, ne int) []int {
 	switch {
 	case isReference(val, s[v] == '\''):
 		// --password $PGPASSWORD names where the secret is, not the secret.
-		return nil
+		return nil, end, quoted
 	case listForm && (val[0] == '-' || lowerIdent(val) || strings.HasPrefix(val, "<")):
 		// The next flag, or a name: --password took no argument.
-		return nil
+		return nil, end, quoted
 	case bare && plainWord(val):
 		// "--password requires an argument": prose, not a password.
-		return nil
+		return nil, end, quoted
 	case bare && val == strings.ToUpper(strings.ReplaceAll(name, "-", "_")):
 		// usage: tool [--password PASSWORD]: argparse's metavar.
-		return nil
+		return nil, end, quoted
 	case usage && (capsMetavar(val) || lowerIdent(val)):
-		return nil
+		return nil, end, quoted
 	case !quoted && s[ne] == '=' && secretKey(name) == keyWeak:
 		// --token=v2 is the key/value pair token=v2, which that rule has
 		// already masked if its value looks generated.
-		return nil
+		return nil, end, quoted
 	}
-	return []int{p, end, vs, ve}
+	return []int{p, end, vs, ve}, end, quoted
 }
 
 // lowerIdent reports a lower-case identifier (orders_v2, orders-db).
@@ -374,10 +366,13 @@ func (f *flagScan) value(p, v int) (vs, ve, end int, quoted bool) {
 			case '\\':
 				k++
 			case '"':
-				// "Zx9\"hunter x": the #372 rule masked up to the escaped
-				// quote and took its backslash, so a mask closed by a quote
-				// that does not end the argument runs on to one that does.
-				if k+1 < eol && !argEnd(s[k+1]) && maskOnly.MatchString(s[vs:k]) {
+				// "Zx9\"hunter x": the #372 rule masks up to the escaped
+				// quote and takes its backslash, so a quote glued to more of
+				// the word, with another quote later on the line, does not
+				// end the argument. The rule reads the text alone, not
+				// whether it holds a mask, so a second pass reads the same
+				// argument and Text stays idempotent.
+				if k+1 < eol && isAlnum(s[k+1]) && strings.IndexByte(s[k+1:eol], '"') >= 0 {
 					continue
 				}
 				return vs, k, k + 1, true
@@ -417,9 +412,7 @@ func (f *flagScan) closerEnd(p, v, e int) int {
 	return e
 }
 
-// argEnd reports a character that may follow a closing quote at the end of
-// an argument.
-func argEnd(c byte) bool { return strings.IndexByte(" \t\r,;)]}>&|", c) >= 0 }
+func isAlnum(c byte) bool { return isLetter(c) || c >= '0' && c <= '9' }
 
 func isBlankOrQuote(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '"' || c == '\''
@@ -687,7 +680,8 @@ func oneLine(t string) bool {
 // </password>". A random value stays a value however it is padded.
 func padProse(t string) bool {
 	if capsMetavar(t) {
-		return true
+		// TODO, CHANGE_ME; JBSWY3DPEHPK3PXP is a secret.
+		return !looksRandom(t, 12)
 	}
 	for _, w := range strings.Split(t, " ") {
 		if !plainWord(w) {

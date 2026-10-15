@@ -62,16 +62,18 @@
 //     CDATA or text around a child, in a Hadoop <name>/<value> pair or a
 //     Maven <arg> list, in text that spans lines, after a start tag holding
 //     "/>" or "<x>", or closed by an escaped end tag of another element;
-//   - kept as evidence on purpose (#383): a --no-* flag's next word, a bare
-//     flag argument of at most 12 lower-case letters ("--password requires
-//     an argument"), and -u user:group or uid:gid (postgres:postgres,
-//     1000:1000);
+//   - a generated lower-case token after a flag in an argument list or
+//     usage brackets (["--token", "d41d8cd98f00b204e9800998ecf8427e"]) reads
+//     as a name and is kept;
 //   - over-masking, not leaks: a URL whose path holds "@host" may lose the
 //     host to the mask, and a wrapped tail such as orders_v2 after a
-//     password line is masked although it is evidence; a bare flag value
-//     that is a $VAR, %VAR%, $(...) or the db name after psql --password,
-//     a user:gid pair with a named user, and a closing backtick or tag after
-//     a bare value are masked.
+//     password line is masked although it is evidence; the word after a
+//     #372 flag is masked whatever it is (--password requires an argument,
+//     --no-password orders, -u postgres:postgres; #490), and so are a $VAR,
+//     %VAR%, $(...) or db name there, a user:gid pair, and a closing
+//     backtick or tag after a bare value; the shapes read for #383 mask the
+//     same way (--db_password orders_v2, --sasl.password Required, a quoted
+//     "two words").
 package redact
 
 import (

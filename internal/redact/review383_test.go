@@ -1,6 +1,10 @@
 package redact
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -70,14 +74,7 @@ func TestReview383(t *testing.T) {
 
 	// No secret in any of these: they must pass unchanged.
 	keep := []string{
-		"psql: error: --password requires an argument",
-		"psql --no-password orders",
 		"pg_dump --no_password orders",
-		"Unknown option --api-token used",
-		"docker exec -u postgres:postgres pg psql",
-		"docker run -u 1000:1000 debezium/connect",
-		"the --token flag is deprecated, use --secret-name instead.",
-		"pass --password to prompt for it",
 		"--password-file /etc/pg/pass and --token-ttl 3600",
 		"psql -U postgres orders",
 		"<password/>",
@@ -94,7 +91,6 @@ func TestReview383(t *testing.T) {
 		"WARN no <password> given\nsome evidence orders_v2 lsn 0/16B6C50\n</pre>",
 		"usage: tool [-h] [--password PASSWORD] [--db-password DB_PASSWORD]",
 		"psql --password ${PGPASSWORD} orders",
-		"docker exec -u www-data:www-data app sh",
 		"psql -U postgres -h db orders",
 	}
 	for _, in := range keep {
@@ -149,6 +145,9 @@ var slowLines383 = map[string]func(n int) string{
 	"secret-siblings": func(n int) string { return strings.Repeat("<secret><password>x</password><a/>", n/34) },
 	"eq-token":        func(n int) string { return strings.Repeat("=-token=1", n/9) },
 	"user-pairs":      func(n int) string { return strings.Repeat("-u a:b ", n/7) },
+	// Round 5: quotes glued to more of the word, in rejected arguments.
+	"glued-quotes":  func(n int) string { return strings.Repeat(`--token "{{x"y `, n/15) },
+	"quote-letters": func(n int) string { return "--password \"" + strings.Repeat(`a"b`, n/3) },
 }
 
 // TestReview383LinearTime holds the new finders to TestReviewLinearTime's
@@ -439,6 +438,44 @@ func TestReview383Gaps(t *testing.T) {
 		{"#372 rule: a user:gid pair with a named user is read as user:password",
 			"docker run -u postgres:999 img",
 			"docker run -u postgres:[redacted 8] img", "docker run -u postgres:999 img"},
+		{"#490, split out: the #372 rule masks the word after this flag",
+			"psql: error: --password requires an argument",
+			"psql: error: --password [redacted 8] an argument", "psql: error: --password requires an argument"},
+		{"#490, split out: the #372 rule masks the word after this flag",
+			"psql --no-password orders",
+			"psql --no-password [redacted 8]", "psql --no-password orders"},
+		{"#490, split out: the #372 rule masks the word after this flag",
+			"Unknown option --api-token used",
+			"Unknown option --api-token [redacted 8]", "Unknown option --api-token used"},
+		{"#490, split out: the #372 rule masks the word after this flag",
+			"docker exec -u postgres:postgres pg psql",
+			"docker exec -u postgres:[redacted 8] pg psql", "docker exec -u postgres:postgres pg psql"},
+		{"#490, split out: the #372 rule masks the word after this flag",
+			"docker run -u 1000:1000 debezium/connect",
+			"docker run -u 1000:[redacted 8] debezium/connect", "docker run -u 1000:1000 debezium/connect"},
+		{"#490, split out: the #372 rule masks the word after this flag",
+			"the --token flag is deprecated, use --secret-name instead.",
+			"the --token [redacted 8] is deprecated, use --secret-name instead.", "the --token flag is deprecated, use --secret-name instead."},
+		{"#490, split out: the #372 rule masks the word after this flag",
+			"pass --password to prompt for it",
+			"pass --password [redacted 8] prompt for it", "pass --password to prompt for it"},
+		{"#490, split out: the #372 rule masks the word after this flag",
+			"docker exec -u www-data:www-data app sh",
+			"docker exec -u www-data:[redacted 8] app sh", "docker exec -u www-data:www-data app sh"},
+		// Round 4, item 4: generated lower-case tokens after a flag in an
+		// argument list or usage brackets read as names (main leaks them too).
+		{"#455: a lower-case token in list form reads as a name (main too)",
+			`args: ["--token", "d41d8cd98f00b204e9800998ecf8427e"]`,
+			`args: ["--token", "d41d8cd98f00b204e9800998ecf8427e"]`, `args: ["--token", "[redacted 32]"]`},
+		{"#455: a lower-case token in list form reads as a name (main too)",
+			`args: ["--password", "s3cr3tpassw0rd"]`,
+			`args: ["--password", "s3cr3tpassw0rd"]`, `args: ["--password", "[redacted 16]"]`},
+		{"#455: a lower-case token in list form reads as a name (main too)",
+			`command: ["kafka-acls", "--sasl-password", "a3f9c2e7b1d48e6f"]`,
+			`command: ["kafka-acls", "--sasl-password", "a3f9c2e7b1d48e6f"]`, `command: ["kafka-acls", "--sasl-password", "[redacted 16]"]`},
+		{"#455: a lower-case token after [ reads as a name (main too)",
+			"[--token d41d8cd98f00b204e9800998ecf8427e]",
+			"[--token d41d8cd98f00b204e9800998ecf8427e]", "[--token [redacted 32]]"},
 	}
 	for _, r := range rows {
 		if strings.Contains(r.ideal, "hunter2Qw7") {
@@ -581,5 +618,122 @@ func TestReview383Round4(t *testing.T) {
 		if got, _ := Text(tc.in); got != tc.want {
 			t.Errorf("Text(%q)\n got  %q\n want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// idempotenceSeeds383 are shapes where a quoted value's run-on once broke
+// Text(Text(x)) == Text(x); FuzzText starts from them too.
+var idempotenceSeeds383 = []string{
+	"I ran `psql --password \"Zx9 hunter2Qw7Pa55\"` and it failed",
+	"tool --token \"abc def\"/v1 --url \"http://x\"",
+	"psql -h db --password \"Zx9 hunter2Qw7Pa55\"x -c \"select 1\"",
+	"psql --password \"Zx9 hunter2Qw7Pa55\"\" orders",
+	"Run `mongosh --password \"Zx9hunter2Qw7Pa55\"` then check pg-orders-connector lag",
+	"--password \"Zx9hunter2Qw7Pa55\".",
+}
+
+// TestReview383Round5 holds the rows of the round-4 review of #415.
+func TestReview383Round5(t *testing.T) {
+	// Item 1: a mask the #372 rule closed with a quote is not run on.
+	// Items 2 and 3: values main masks, and secrets in padded XML.
+	exact := []struct{ in, want string }{
+		{"Run `mongosh --password \"Zx9hunter2Qw7Pa55\"` then check pg-orders-connector lag on orders.public.orders",
+			"Run `mongosh --password \"[redacted 24]\"` then check pg-orders-connector lag on orders.public.orders"},
+		{"Use --password \"Zx9hunter2Qw7Pa55\". Then restart pg-orders-connector at lsn 0/16B3748.",
+			"Use --password \"[redacted 24]\". Then restart pg-orders-connector at lsn 0/16B3748."},
+		{"I ran docker login --password \"Zx9hunter2Qw7Pa55\": it failed with 401 on registry.example.com",
+			"I ran docker login --password \"[redacted 24]\": it failed with 401 on registry.example.com"},
+		{"--password \"Zx9hunter2Qw7Pa55\".", "--password \"[redacted 24]\"."},
+		{"mongosh --username debezium --password dbz --authenticationDatabase admin",
+			"mongosh --username debezium --password [redacted 8] --authenticationDatabase admin"},
+		{"kafka-tool --keystore-password changeit --truststore-password changeit",
+			"kafka-tool --keystore-password [redacted 8] --truststore-password [redacted 8]"},
+		{"rpk cluster info --user superuser --password redpanda --sasl-mechanism SCRAM-SHA-256",
+			"rpk cluster info --user superuser --password [redacted 8] --sasl-mechanism SCRAM-SHA-256"},
+		{"docker login -u ci --password letmein registry.example.com", "docker login -u ci --password [redacted 8] registry.example.com"},
+		{"docker login -u admin --password changeme registry.example.com", "docker login -u admin --password [redacted 8] registry.example.com"},
+		{"influx -username admin -password supersecret -host db", "influx -username admin -password [redacted 16] -host db"},
+		{"confluent kafka topic produce orders --api-key ABC --api-secret mysecret",
+			"confluent kafka topic produce orders --api-key ABC --api-secret [redacted 8]"},
+		{"mongosh --username root --password example", "mongosh --username root --password [redacted 8]"},
+		{"clickhouse-client --password secret --query \"select 1\"", "clickhouse-client --password [redacted 8] --query \"select 1\""},
+		{"tool --passphrase hello", "tool --passphrase [redacted 8]"},
+		{"tool --password correcthorse", "tool --password [redacted 16]"},
+		{"helm repo add charts https://x --username u --password qwertyuiopas",
+			"helm repo add charts https://x --username u --password [redacted 16]"},
+	}
+	for _, tc := range exact {
+		if got, _ := Text(tc.in); got != tc.want {
+			t.Errorf("Text(%q)\n got  %q\n want %q", tc.in, got, tc.want)
+		}
+	}
+	leaks := []string{
+		"I ran `psql --password \"Zx9 hunter2Qw7Pa55\"` and it failed",
+		"psql -h db --password \"Zx9 hunter2Qw7Pa55\"x -c \"select 1\"",
+		"psql --password \"Zx9 hunter2Qw7Pa55\"\" orders",
+		// Item 3: upper-case and digit secrets in padded or own-line XML.
+		"<password>\n  JBSWY3DPEHPK3PXP\n</password>",
+		"<token>\n  A94A8FE5CCB19BA61C4C0873D391E987982FBBD3\n</token>",
+		"<sasl.jaas.password>\n  K7Q2M9X4P8R3T6W1\n</sasl.jaas.password>",
+		"<password> JBSWY3DPEHPK3PXP </password>",
+		"<ns:password>\r\n  JBSWY3DPEHPK3PXP\r\n</ns:password>",
+		"<password type=\"plain\">\n  ORACLEPW2024\n</password>",
+	}
+	for _, in := range leaks {
+		got, _ := Text(in)
+		for _, sec := range []string{"hunter2Qw7", "JBSWY3DPEHPK3PXP", "A94A8FE5CCB1", "K7Q2M9X4P8R3T6W1", "ORACLEPW2024"} {
+			if strings.Contains(got, sec) {
+				t.Errorf("leak: %q -> %q", in, got)
+			}
+		}
+	}
+	keep := []string{
+		"<password> TODO </password>",
+		"<password>\n  TODO\n</password>",
+		"<password> CHANGE_ME </password>",
+	}
+	for _, in := range keep {
+		if got, _ := Text(in); got != in {
+			t.Errorf("changed evidence: %q -> %q", in, got)
+		}
+	}
+	for _, in := range append(append([]string{}, idempotenceSeeds383...), leaks...) {
+		once, _ := Text(in)
+		if twice, _ := Text(once); twice != once {
+			t.Errorf("not idempotent: %q\n once  %q\n twice %q", in, once, twice)
+		}
+	}
+}
+
+// TestReview383Idempotent checks Text(Text(x)) == Text(x) over every string
+// literal in this file, alone and with a secret appended in three ways.
+func TestReview383Idempotent(t *testing.T) {
+	fs := token.NewFileSet()
+	f, err := parser.ParseFile(fs, "review383_test.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sec = "Zx9hunter2Qw7Pa55"
+	n := 0
+	ast.Inspect(f, func(node ast.Node) bool {
+		lit, ok := node.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		v, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return true
+		}
+		for _, in := range []string{v, v + sec, v + " " + sec + " tail", v + "\"" + sec + "\" x"} {
+			n++
+			once, _ := Text(in)
+			if twice, _ := Text(once); twice != once {
+				t.Errorf("not idempotent: %q\n once  %q\n twice %q", in, once, twice)
+			}
+		}
+		return true
+	})
+	if n < 1000 {
+		t.Fatalf("only %d inputs", n)
 	}
 }

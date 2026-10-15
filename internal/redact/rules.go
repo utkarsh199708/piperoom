@@ -179,7 +179,6 @@ var baseRules = []rule{
 		groups: []int{1, 2, 3, 4},
 		style:  styleSecret,
 		pre:    containsAny("pass", "secret", "token", "-u"),
-		ok:     mainFlagOK,
 	},
 	// An XML element whose name names a secret: <password>X</password>.
 	{
