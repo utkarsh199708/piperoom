@@ -279,14 +279,27 @@ func kvFind(s, lower string) [][]int {
 	ends := valueEnds{s: s, lower: lower}
 	var out [][]int
 	last := 0
+	// rejFrom/rejTo hold the bare value of the last pair that was not a
+	// secret. A pair inside it can hold no quote or blank, so it is just
+	// key, separator and value to the same end: no regexp needed. Many
+	// keys in one long value (token=a token=a ...) stay linear.
+	rejFrom, rejTo := -1, -1
 	for _, c := range starts {
 		if c.ks < last {
 			continue
 		}
 		var m []int
-		if c.vs >= 0 {
+		switch {
+		case c.vs >= 0:
 			m = kvEncoded(c, &ends)
-		} else {
+		case c.keyS >= rejFrom && c.keyS == c.ks && c.keyE == c.sep && c.sep+1 < rejTo && c.keyE-c.keyS >= 2:
+			m = make([]int, 2*(kvOpenEsc3+1))
+			for k := range m {
+				m[k] = -1
+			}
+			g := 2 * kvBare
+			m[0], m[1], m[2], m[3], m[g], m[g+1] = c.ks, rejTo, c.keyS, c.keyE, c.sep+1, rejTo
+		default:
 			m = kvMatch(s, c, &ends)
 		}
 		if m == nil {
@@ -295,6 +308,9 @@ func kvFind(s, lower string) [][]int {
 		// A pair that is not a secret must not hide the pairs inside its
 		// value: "sasl.jaas.config": "... password=\"x\"".
 		if !kvOK(s, m) {
+			if g := 2 * kvBare; m[g] >= 0 && c.vs < 0 {
+				rejFrom, rejTo = m[g], m[g+1]
+			}
 			continue
 		}
 		out = append(out, m)

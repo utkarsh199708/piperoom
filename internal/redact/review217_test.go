@@ -115,29 +115,40 @@ func TestReviewLeaks(t *testing.T) {
 	}
 }
 
-// slowLines are untrusted lines whose cost grew quadratically: one
-// form-encoded or URL-like line at the scan limit.
-var slowLines = map[string]string{
-	"encoded-pairs": strings.Repeat("password%3Da%26", MaxScan/15),
-	"token-a":       strings.Repeat("token=a", MaxScan/7),
-	"url-prefixes":  strings.Repeat("x://u:", MaxScan/6),
-	"sasl-list":     strings.Repeat("SASL_SSL://broker-1:9093,", MaxScan/25),
-	"encoded-keys":  strings.Repeat("password%3Dx", MaxScan/12),
+// slowLines build untrusted lines whose cost grew quadratically with their
+// length: one form-encoded or URL-like line, repeated up to n bytes.
+var slowLines = map[string]func(n int) string{
+	"encoded-pairs": func(n int) string { return strings.Repeat("password%3Da%26", n/15) },
+	"token-a":       func(n int) string { return strings.Repeat("token=a", n/7) },
+	"url-prefixes":  func(n int) string { return strings.Repeat("x://u:", n/6) },
+	"sasl-list":     func(n int) string { return strings.Repeat("SASL_SSL://broker-1:9093,", n/25) },
+	"encoded-keys":  func(n int) string { return strings.Repeat("password%3Dx", n/12) },
 }
 
+// TestReviewLinearTime checks how cost grows, not a wall-clock bound, so it
+// holds under -race on a slow runner: four times the input may cost at most
+// ten times as much (linear is 4, quadratic 16).
 func TestReviewLinearTime(t *testing.T) {
-	for name, s := range slowLines {
-		start := time.Now()
-		Text(s)
-		if d := time.Since(start); d > 2*time.Second {
-			t.Errorf("%s: %v for %d bytes", name, d, len(s))
+	best := func(s string) time.Duration {
+		d := time.Duration(1 << 62)
+		for range 3 {
+			start := time.Now()
+			Text(s)
+			d = min(d, time.Since(start))
+		}
+		return d
+	}
+	for name, mk := range slowLines {
+		small, large := best(mk(MaxScan/4)), best(mk(MaxScan))
+		if large > 10*max(small, time.Millisecond/4) {
+			t.Errorf("%s: %v for %d KiB but %v for %d KiB: superlinear", name, large, MaxScan>>10, small, MaxScan>>12)
 		}
 	}
 }
 
 func BenchmarkTextHostileLine(b *testing.B) {
 	for _, name := range []string{"encoded-pairs", "url-prefixes"} {
-		s := slowLines[name]
+		s := slowLines[name](MaxScan)
 		b.Run(name, func(b *testing.B) {
 			b.SetBytes(int64(len(s)))
 			for b.Loop() {
