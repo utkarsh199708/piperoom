@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // tags writes s in Unicode tag characters, the way an attacker hides text.
@@ -110,5 +111,28 @@ func TestHiddenTagsOutsideFlags(t *testing.T) {
 				t.Fatalf("Scan(%q): want no findings, got %+v", c.in, got)
 			}
 		})
+	}
+}
+
+// TestStrayTagsLinearTime: 64 KiB lines of flags and tag characters scan fast.
+func TestStrayTagsLinearTime(t *testing.T) {
+	const ceiling = 50 * time.Millisecond
+	for name, unit := range map[string]string{
+		"flag runs":       "\U0001F3F4" + tags("ignore"),
+		"near-real flags": "\U0001F3F4" + tags("gbenx") + "\U000E007F",
+		"real flags":      "\U0001F3F4" + tags("gbeng") + "\U000E007F",
+		"bare flags":      "\U0001F3F4",
+		"split tags":      tags("a") + " ",
+	} {
+		s := strings.Repeat(unit, (64<<10)/len(unit))
+		best := time.Duration(1 << 62)
+		for range 5 {
+			start := time.Now()
+			Scan(s)
+			best = min(best, time.Since(start))
+		}
+		if best > ceiling {
+			t.Errorf("%s: best %v for %d KiB, want under %v", name, best, len(s)>>10, ceiling)
+		}
 	}
 }

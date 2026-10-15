@@ -138,6 +138,7 @@ func scanWindow(s string, base int) []Finding {
 	}
 	found = append(found, scanBase64(norm, origin)...)
 	found = append(found, scanHiddenTags(s)...)
+	found = append(found, scanStrayTags(s)...)
 	for i := range found {
 		found[i].Offset += base
 	}
