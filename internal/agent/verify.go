@@ -92,25 +92,46 @@ type proposalRecord struct {
 	// slots is the replication slots when the proposal was made, for the
 	// source side of the idle-source rule. Nil when not taken.
 	slots []slotPosition
+	// tables is the change counters of the pipeline's source tables
+	// (pg_table_activity) when the proposal was made. Nil when not taken.
+	tables map[string]tableCount
 	// verdict names the verdict once verified: "recovered", "NOT recovered" or
 	// "inconclusive". A repeated last-step result repeats it.
 	verdict string
 }
 
-// proposalTracker remembers the proposals the agent created during this run. It
-// is per-runner state, never global. It does not survive a restart: after a
-// restart the agent has no record of earlier proposals, so their action results
-// are not verified (the room waits for a steer after a restart), and their
-// creation baselines are gone too.
+// proposalTracker remembers the proposals the agent created during this run,
+// and the proposals of earlier runs of the room that this run learned about (a
+// room recap, or a lookup when their step results arrive; resume.go). It is
+// per-runner state, never global. Proposals of earlier runs have no creation
+// baselines: their checks rely on the check window alone.
 type proposalTracker struct {
 	mu   sync.Mutex
 	byID map[string]proposalRecord
 	// flows follows each proposal from approval to executed steps (approvals.go).
 	flows map[string]*execFlow
+	// unverifiable are proposals of earlier runs that could not be loaded; the
+	// room has been told once that they are not verified.
+	unverifiable map[string]bool
 }
 
 func newProposalTracker() *proposalTracker {
-	return &proposalTracker{byID: map[string]proposalRecord{}, flows: map[string]*execFlow{}}
+	return &proposalTracker{byID: map[string]proposalRecord{}, flows: map[string]*execFlow{}, unverifiable: map[string]bool{}}
+}
+
+// markUnverifiable records that a proposal could not be loaded and reports
+// whether this is the first time, so the room hears it once.
+func (t *proposalTracker) markUnverifiable(id string) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.unverifiable[id] {
+		return false
+	}
+	t.unverifiable[id] = true
+	return true
 }
 
 // record remembers a proposal the agent created. approvers is every layer the
@@ -167,6 +188,21 @@ func (t *proposalTracker) setTopicEnds(id string, ends map[string]int64) {
 		return
 	}
 	rec.topicEnds = ends
+	t.byID[id] = rec
+}
+
+// setTables stores the proposal-time table counters of a proposal already recorded.
+func (t *proposalTracker) setTables(id string, tables map[string]tableCount) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rec, ok := t.byID[id]
+	if !ok {
+		return
+	}
+	rec.tables = tables
 	t.byID[id] = rec
 }
 
@@ -281,8 +317,13 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	}
 	rec, ok := r.proposals.get(id)
 	if !ok {
-		r.log.Warn("agent: action_result for a proposal the agent did not create", "proposal", id)
-		return actionOutcome{}
+		// An earlier run of the room made it (the restart case): load it, so its
+		// last step is verified like this run's own. A proposal that cannot be
+		// loaded is recorded as not verified, never as recovered.
+		var why string
+		if rec, why = r.loadEarlierProposal(ctx, id); why != "" {
+			return r.notVerifiedEarlier(ctx, id, why)
+		}
 	}
 	if step != len(rec.steps)-1 {
 		// Not the last step yet: no verification, the normal loop continues.
@@ -318,7 +359,7 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	if recovered {
 		followUp = compatFollowUp(rec.steps)
 	}
-	r.announceVerdict(ctx, id, v, followUp)
+	r.announceVerdict(ctx, id, v, compatFollowUpRoom(rec.steps), followUp)
 	r.proposals.markVerified(id, recovered, v.word())
 	if recovered {
 		r.trackNoneSubjects(rec.steps)
@@ -344,12 +385,14 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 
 // announceVerdict tells the room the verdict on a proposal, once: as the typed
 // agent.verification event, which replaces the plain-text verdict message.
+// roomNote is the follow-up written for people (compatFollowUpRoom); followUp
+// is the model's version with its guidance, which never reaches the room.
 //
 // A room service that does not know the type yet refuses it (an older build
 // during a rolling upgrade). Then the same verdict goes out as one agent.message
 // so the room is never left without it; the message is the fallback, never sent
 // next to the event.
-func (r *runner) announceVerdict(ctx context.Context, proposalID string, v verifyOutcome, followUp string) {
+func (r *runner) announceVerdict(ctx context.Context, proposalID string, v verifyOutcome, roomNote, followUp string) {
 	err := r.tryEmit(ctx, events.AgentVerification, events.AgentVerificationPayload{
 		ProposalID: proposalID,
 		Checks:     v.checks,
@@ -360,13 +403,13 @@ func (r *runner) announceVerdict(ctx context.Context, proposalID string, v verif
 	if err == nil {
 		// The follow-up is a warning about what the fix left behind, not a second
 		// announcement of the verdict: the room keeps seeing it.
-		if note := strings.TrimSpace(followUp); note != "" {
+		if note := strings.TrimSpace(roomNote); note != "" {
 			r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: note})
 		}
 		return
 	}
 	r.log.Warn("agent: verification event not accepted; announcing the verdict as a message", "proposal", proposalID, "err", err)
-	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: v.head + v.evidence + followUp})
+	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: v.head + v.evidence + roomNote})
 }
 
 // tryEmit is emit that returns the sink's error instead of logging it.
@@ -391,6 +434,21 @@ func compatFollowUp(steps []events.ProposalStep) string {
 			continue
 		}
 		fmt.Fprintf(&b, "\nfollow-up: %s compatibility is still NONE. Propose a separate fix that restores the level shown before \"→\" in the schema_set_compatibility step result (or read it with the schema tools).", followUpSubject(subject))
+	}
+	return b.String()
+}
+
+// compatFollowUpRoom is compatFollowUp for people: the same subjects, each on a
+// new line, with a sentence that says what is still off. How to restore it is
+// guidance for the model (QA T11): it stays in the [verification] note.
+func compatFollowUpRoom(steps []events.ProposalStep) string {
+	order, final := compatFinalLevels(steps)
+	var b strings.Builder
+	for _, subject := range order {
+		if final[subject] != "NONE" {
+			continue
+		}
+		fmt.Fprintf(&b, "\nfollow-up: %s compatibility is still NONE, so data the old schema cannot read can get through. Its earlier level should be restored with a separate fix.", followUpSubject(subject))
 	}
 	return b.String()
 }
@@ -580,7 +638,11 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) verifyO
 	case !flow.verified:
 		out.head = "NOT recovered: data flow not verified.\n"
 	case !flow.fresh && flow.source == sourceQuiet:
-		out.flow = &events.DataFlowCheck{Checked: false, Detail: idleDetail}
+		detail := idleDetail
+		if flow.idleDetail != "" {
+			detail = flow.idleDetail
+		}
+		out.flow = &events.DataFlowCheck{Checked: false, Detail: detail}
 		out.recovered = true
 		out.head = recoveredIdleHead
 	case !flow.fresh && flow.source == sourceUnproven:
@@ -789,6 +851,9 @@ type flowResult struct {
 	// failure. sourceLine is its evidence.
 	source     sourceState
 	sourceLine string
+	// idleDetail replaces idleDetail as the data-flow detail of a quiet
+	// source when the proof came from somewhere else than the slots.
+	idleDetail string
 }
 
 // sinkTable is one warehouse table the alert's pipeline loads, with the column
@@ -907,7 +972,7 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 	if wait && anyPending(states) && !anyPassed(states) {
 		// Only a failing check pays for the source reads (the idle-source rule
 		// above sourceIdle).
-		res.source, res.sourceLine = r.sourceIdle(ctx, rec)
+		res.source, res.sourceLine, res.idleDetail = r.judgeSource(ctx, rec)
 	}
 	for _, st := range states {
 		sc := events.SinkCheck{Table: st.table.name, Newest: st.newest, Passed: st.passed, PassedBy: st.passedBy}
@@ -977,7 +1042,9 @@ const (
 // must survive Debezium heartbeats, which move the slot without any data change
 // (they write only the heartbeat topic, which sourceTopics leaves out).
 //
-// No read tool exposes per-table change counts (pg_stat_user_tables), so the
+// When pg_table_activity is offered, the pipeline's own tables decide first
+// (judgeSource, verify_tables.go): unchanged counters are quiet, changed ones
+// are active. Without it, or when its readings cannot be compared, the
 // source-side signal is the replication slots (pg_replication_slots), read at
 // proposal time when that reading exists, else at both ends of one
 // freshnessWait:
@@ -1225,6 +1292,11 @@ func (r *runner) snapshotBaseline(ctx context.Context, proposalID string) {
 		base[s.name] = newest
 	}
 	r.proposals.setBaseline(proposalID, base)
+	// Best effort: the source tables' change counters, so the idle rule can see
+	// a write to the pipeline's tables anywhere since the proposal.
+	if tables, ok := r.readTables(ctx, "baseline"); ok {
+		r.proposals.setTables(proposalID, tables)
+	}
 	// Best effort: source topic offsets at proposal time, so the idle rule can
 	// tell "no change since the fix" from "no change during the check".
 	if topics, ok := r.sourceTopics(ctx, "baseline"); ok {
