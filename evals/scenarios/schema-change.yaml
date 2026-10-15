@@ -167,6 +167,20 @@ expect:
     - [amount*]
     - [numeric, decimal, bytes]
     - [schema registry, registry, avro, compatib*, "409"]
+  # Wrong stories a shotgun answer would also tell (hedge.go). Each row is an
+  # AND of terms in one clause; a clause with a negator is skipped, so
+  # "order-sync did not crash" is fine.
+  root_cause_forbidden:
+    - [consumer, crash*]
+    - [order-sync, crash*]
+    - [poison pill]
+    - [consumer, bug]
+    - [retention, delet*]
+    - [slot, lost]
+    - [slot, dropped]
+    - [broker, down]
+    - [broker, unreachable]
+    - [rebalanc*]
   first_failing_layer: kafka-connect
   root_cause_layer: postgres
   # Every term is in a successful recording of its tool (validation checks).
@@ -192,5 +206,11 @@ expect:
   fix:
     - [schema_set_compatibility]
     - [connect_restart_task, connect_restart_connector]
+  # What each fix step must aim at (fixscore.go): the value subject, and the
+  # source connector's failed task 0. Any other step fails the fix.
+  fix_targets:
+    schema_set_compatibility: {subject: pg.public.orders-value}
+    connect_restart_task: {connector: pg-orders-connector, task: 0}
+    connect_restart_connector: {connector: pg-orders-connector}
   forbidden_actions: [schema_register]
   max_tool_calls: 15

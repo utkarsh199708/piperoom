@@ -118,6 +118,19 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// The watcher's open-room cap is its own (F6), not the agent pool's: a
+	// room beyond PIPEROOM_MAX_AGENTS queues for an agent but still gets its
+	// first look.
+	watchMaxOpenRooms, err := config.ParseWatchMaxOpenRooms(cfg)
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
+
+	// A bad PIPEROOM_POSTMORTEM_MODEL stops the server.
+	pmMode, err := config.ParsePostmortemModel(cfg)
+	if err != nil {
+		return fmt.Errorf("server: %w", err)
+	}
 
 	// Shadow mode numbers (docs/design/shadow.md 5.3): a bad
 	// PIPEROOM_SHADOW_* value stops the server like a bad watcher value. Which
@@ -280,7 +293,13 @@ func run() error {
 		topo     topology.Builder
 		run      = agent.Run
 		write    = agent.WriteHandoff
-		stacks   *wiring.Stacks // nil in demo mode
+		// writePM is room.Deps.WritePostmortem; nil gives the events-only
+		// draft (PIPEROOM_POSTMORTEM_MODEL=off, or no writer wired yet).
+		writePM agent.PostmortemWriter
+		// triage is the first look (F6); nil in --demo, which has no model.
+		triage        agent.Triager
+		triageTimeout time.Duration
+		stacks        *wiring.Stacks // nil in demo mode
 		// stackFor is room.Deps.StackFor: nil in demo mode, where every
 		// room uses acts and toolsReg.
 		stackFor func(string) room.PipelineStack
@@ -307,6 +326,9 @@ func run() error {
 		topo = demo.Builder{}
 		run = demo.Run
 		write = demo.WriteHandoff
+		if pmMode == config.PostmortemModelAuto {
+			writePM = demo.WritePostmortem
+		}
 	} else {
 		// The model endpoint first: a wrong provider, region, project or token
 		// budget should stop the server before it opens any connection.
@@ -326,6 +348,10 @@ func run() error {
 		}
 		run = ep.Run
 		write = ep.WriteHandoff
+		// With PIPEROOM_TRIAGE_PASS=off the pass still writes agent.triage
+		// "failed"/"off" (no model call), so the UI never waits for one.
+		triage = ep.Triage
+		_, _, triageTimeout = ep.FirstLook()
 		closedHook.setForget(ep)
 
 		// One client set per pipeline with connections: in owners.yaml, plus
@@ -348,15 +374,18 @@ func run() error {
 	}
 
 	svc := newRoomService(room.Deps{
-		Store:        st,
-		Actions:      acts,
-		Tools:        toolsReg,
-		StackFor:     stackFor,
-		Topology:     topo,
-		Users:        users,
-		Owners:       own,
-		Run:          run,
-		WriteHandoff: write,
+		Store:             st,
+		Actions:           acts,
+		Tools:             toolsReg,
+		StackFor:          stackFor,
+		Topology:          topo,
+		Users:             users,
+		Owners:            own,
+		Run:               run,
+		WriteHandoff:      write,
+		WritePostmortem:   writePM,
+		Triage:            triage,
+		TriagePassTimeout: triageTimeout,
 		Options: agent.Options{
 			Model:    cfg.Model,
 			Effort:   cfg.Effort,
@@ -422,6 +451,14 @@ func run() error {
 	sessionPruner, loginStatePruner := authPruners(sessions, loginStates)
 	stopAuthPrune := startElectedAuthPrune(ctx, elector, sessionPruner, loginStatePruner, retentionInterval, retentionRunTimeout, time.Now, log)
 	defer stopAuthPrune()
+	// The change log keeps PIPEROOM_CHANGES_RETENTION_DAYS (default 30) of rows.
+	changesDays, err := config.ParseChangesRetentionDays(cfg)
+	if err != nil {
+		return err
+	}
+	changesPurge, _ := st.(changesPurger)
+	stopChangesRetention := startElectedChangesRetention(ctx, elector, changesPurge, changesDays, retentionInterval, retentionRunTimeout, time.Now, log)
+	defer stopChangesRetention()
 
 	httpOpts := []httpapi.Option{httpapi.WithReady(ready), httpapi.WithAlertIngest(alerts), httpapi.WithPublicOrigin(publicOrigin), httpapi.WithAuth(authSettings), httpapi.WithSessions(sessions),
 		httpapi.WithLoginStates(loginStates), httpapi.WithIdentities(identities),
@@ -459,7 +496,7 @@ func run() error {
 		Owners:       own,
 		Rooms:        watchRooms{svc: svc},
 		Config:       watchCfg,
-		MaxOpenRooms: maxAgents,
+		MaxOpenRooms: watchMaxOpenRooms,
 	}
 	if stacks != nil {
 		watchDeps.ClientsFor = watchClients(stacks)

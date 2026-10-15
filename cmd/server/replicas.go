@@ -32,6 +32,7 @@ const (
 	loopAuthPrune = "auth-prune"
 	loopSlack     = "slack"
 	loopOpenLimit = "open-limit"
+	loopChanges   = "changes-retention"
 )
 
 // slackRescan is how often the Slack mirror's leader looks for open rooms it
@@ -152,6 +153,19 @@ func startElectedOpenLimit(ctx context.Context, el store.Elector, svc openLimite
 	}
 	return runElected(ctx, el, loopOpenLimit, func(lctx context.Context) {
 		stopTerm := startOpenLimit(lctx, svc, days, every, timeout, log)
+		<-lctx.Done()
+		stopTerm()
+	})
+}
+
+// startElectedChangesRetention is startChangesRetention on the leader of
+// "changes-retention" only. With days <= 0 nothing is elected.
+func startElectedChangesRetention(ctx context.Context, el store.Elector, p changesPurger, days int, every, timeout time.Duration, now func() time.Time, log *slog.Logger) (stop func()) {
+	if p == nil || days <= 0 {
+		return func() {}
+	}
+	return runElected(ctx, el, loopChanges, func(lctx context.Context) {
+		stopTerm := startChangesRetention(lctx, p, days, every, timeout, now, log)
 		<-lctx.Done()
 		stopTerm()
 	})

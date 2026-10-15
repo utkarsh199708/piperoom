@@ -80,7 +80,7 @@ function proposal(approvals: Record<string, 'pending' | 'approved'>) {
 
 const reload = vi.fn()
 function mockList(rooms: RoomSnapshot[], extra: Partial<ReturnType<typeof useRoomList>> = {}) {
-  vi.mocked(useRoomList).mockReturnValue({ rooms, loading: false, error: null, reload, ...extra })
+  vi.mocked(useRoomList).mockReturnValue({ rooms, loading: false, error: null, reload, mode: 'push', updatedAt: null, ...extra })
 }
 
 function Where() {
@@ -193,6 +193,31 @@ describe('RoomList table', () => {
   })
 })
 
+describe('first-insight span', () => {
+  const insight = (s: number) => ({
+    first_hypothesis_at: null,
+    time_to_first_hypothesis_s: s,
+    final_confidence: '',
+    steps: 0,
+    tool_calls: 0,
+    tool_errors: 0,
+    usage: { calls: 0, unpriced_calls: 0, tokens: 0, cost_usd: null, latency_ms_total: 0 },
+  })
+
+  it('shows "insight 48 s" for an open room with a hypothesis, nothing for -1, closed or shadow rooms', () => {
+    mockList([
+      room({ id: 'with', insight: insight(48) }),
+      room({ id: 'without', insight: insight(-1) }),
+      room({ id: 'old' }),
+      room({ id: 'done', status: 'closed', closed_at: '2026-10-11T11:00:00Z', insight: insight(30) }),
+      room({ id: 'shadowed', shadow: true, insight: insight(30) }),
+    ])
+    renderList('/?tab=all')
+    expect(screen.getAllByText(/insight \d+ s/)).toHaveLength(1)
+    expect(screen.getByText(/insight 48 s/)).toBeInTheDocument()
+  })
+})
+
 describe('Needs you', () => {
   it('tints and badges only the rooms waiting on a layer the person owns', () => {
     mockList([
@@ -219,7 +244,7 @@ describe('Needs you', () => {
       expect(within(r).queryByText('Needs you')).not.toBeInTheDocument()
       expect(r.className).not.toMatch(/bg-warning-subtle/)
       // Still readable as a status: someone has to approve.
-      expect(within(r).getByText('Needs approval')).toBeInTheDocument()
+      expect(within(r).getByText(/^Needs approval/)).toBeInTheDocument()
     }
     // The stat counts the rooms that need this person, with the layer in the caption.
     const strip = screen.getByRole('group', { name: 'Summary' })
@@ -568,11 +593,18 @@ describe('keyboard', () => {
 })
 
 describe('refresh', () => {
-  it('reloads once when the tab becomes visible again', () => {
-    renderList()
-    expect(reload).not.toHaveBeenCalled()
-    document.dispatchEvent(new Event('visibilitychange'))
-    expect(reload).toHaveBeenCalledTimes(1)
+  // F6: the list hook keeps the rows current (push, or its own poll fallback); the screen
+  // no longer runs a timer or reloads on visibility.
+  it('the screen itself does not poll or reload on visibility', () => {
+    vi.useFakeTimers()
+    try {
+      renderList()
+      document.dispatchEvent(new Event('visibilitychange'))
+      vi.advanceTimersByTime(60_000)
+      expect(reload).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('in the shell it reads the shell list and does not load its own', () => {
@@ -589,10 +621,17 @@ describe('refresh', () => {
     )
     expect(titlesInOrder()).toEqual(['From the shell'])
     expect(vi.mocked(useRoomList)).toHaveBeenCalledWith({ enabled: false })
-    // Take control and the refresh go through the shell's reload, so the sidebar updates too.
-    document.dispatchEvent(new Event('visibilitychange'))
-    expect(shellReload).toHaveBeenCalledTimes(1)
     expect(reload).not.toHaveBeenCalled()
+  })
+
+  it('a polled list shows how old it is; a pushed one just says live', () => {
+    mockList([], { mode: 'poll', updatedAt: Date.now() - 5_000 })
+    const { unmount } = renderList()
+    expect(screen.getByText(/^live · updated/)).toBeInTheDocument()
+    unmount()
+    mockList([], { mode: 'push', updatedAt: null })
+    renderList()
+    expect(screen.getByText(/^live$/)).toBeInTheDocument()
   })
 })
 
@@ -628,5 +667,46 @@ describe('top bar', () => {
     renderList()
     expect(screen.getByRole('heading', { level: 1, name: 'Rooms' })).toBeInTheDocument()
     expect(screen.getByText(/^live/)).toBeInTheDocument()
+  })
+})
+
+describe('New room — Ctrl+Enter', () => {
+  it('submits the form from the keyboard like the close and hand-off dialogs', async () => {
+    vi.mocked(api.createRoom).mockResolvedValueOnce(room({ id: 'r_kbd' }))
+    renderList()
+    fireEvent.click(screen.getAllByRole('button', { name: 'New room' })[0])
+    const title = screen.getByLabelText('Title')
+    fireEvent.change(title, { target: { value: 'From the keyboard' } })
+    fireEvent.keyDown(title, { key: 'Enter', ctrlKey: true })
+    await waitFor(() => expect(api.createRoom).toHaveBeenCalledTimes(1))
+  })
+
+  it('shows the shortcut on the button', () => {
+    renderList()
+    fireEvent.click(screen.getAllByRole('button', { name: 'New room' })[0])
+    expect(screen.getByRole('button', { name: 'Open room' })).toHaveAttribute('aria-keyshortcuts')
+  })
+})
+
+describe('resolved rows', () => {
+  it('read Resolved · duration, no driver, agent resolved, closed ago with a UTC title, and the resolution', () => {
+    mockList([
+      room({
+        id: 'c1',
+        title: 'Old one',
+        status: 'closed',
+        opened_at: '2026-10-11T10:00:00Z',
+        closed_at: '2026-10-11T10:06:00Z',
+        resolution: 'Restarted the connector task after the schema fix.',
+      }),
+    ])
+    renderList()
+    fireEvent.click(screen.getByRole('button', { name: 'See resolved rooms' }))
+    const row = screen.getByText('Old one').closest('tr')!
+    expect(within(row).getByText('Resolved · 6 min')).toBeInTheDocument()
+    expect(within(row).getByText('resolved')).toBeInTheDocument()
+    expect(within(row).getByText('—')).toBeInTheDocument()
+    expect(within(row).getByText(/^closed .* ago$/)).toHaveAttribute('title', '2026-10-11 10:06:00 UTC')
+    expect(within(row).getByText('Restarted the connector task after the schema fix.')).toBeInTheDocument()
   })
 })

@@ -9,10 +9,14 @@
 import type {
   ApiError,
   AuthUser,
+  ChecklistStepDonePayload,
   Event,
   EventsPage,
+  HypothesisVerdict,
+  LabelInput,
   Me,
   Person,
+  AgentStats,
   PipelineInfo,
   RoomSnapshot,
   Topology,
@@ -142,6 +146,8 @@ export const api = {
     request<EventsPage>(`${room(roomId)}/events?after=${after}&limit=${limit}`),
   topology: (pipelineId: string) =>
     request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`),
+  agentStats: (pipelineId: string) =>
+    request<AgentStats>(`/api/pipelines/${encodeURIComponent(pipelineId)}/agent-stats?days=90`),
   comment: (roomId: string, body: { step_id?: string; text: string }) =>
     request<Event>(`${room(roomId)}/comments`, { method: 'POST', body: JSON.stringify(body) }),
   steer: (roomId: string, text: string) =>
@@ -149,6 +155,22 @@ export const api = {
   sendSuggestion: (roomId: string, suggestionId: string) =>
     request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/send`, {
       method: 'POST',
+    }),
+  // F9: any member may decide; the server answers 409 already_decided for a repeat.
+  hypothesis: (roomId: string, verdict: HypothesisVerdict, note?: string) =>
+    request<Event>(`${room(roomId)}/hypothesis`, {
+      method: 'POST',
+      body: JSON.stringify(note ? { verdict, note } : { verdict }),
+    }),
+  nudge: (roomId: string, proposalId: string, layer: string) =>
+    request<Event>(`${room(roomId)}/nudge`, {
+      method: 'POST',
+      body: JSON.stringify({ proposal_id: proposalId, layer }),
+    }),
+  declineSuggestion: (roomId: string, suggestionId: string, reason?: string) =>
+    request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/decline`, {
+      method: 'POST',
+      body: JSON.stringify(reason ? { reason } : {}),
     }),
   requestControl: (roomId: string) =>
     request<Event>(`${room(roomId)}/control/request`, { method: 'POST' }),
@@ -180,6 +202,10 @@ export const api = {
     }),
   acceptHandoff: (handoffId: string) =>
     request<Event>(`/api/handoffs/${encodeURIComponent(handoffId)}/accept`, { method: 'POST' }),
+  label: (roomId: string, body: LabelInput) =>
+    request<Event>(`${room(roomId)}/label`, { method: 'POST', body: JSON.stringify(body) }),
+  checklist: (roomId: string, body: ChecklistStepDonePayload) =>
+    request<Event>(`${room(roomId)}/checklist`, { method: 'POST', body: JSON.stringify(body) }),
   trace: (roomId: string, table: string, key: string) =>
     request<Event>(`${room(roomId)}/trace`, {
       method: 'POST',
@@ -202,4 +228,14 @@ export function roomWsUrl(
 
 export function openRoomWs(roomId: string, after: number): WebSocket {
   return new WebSocket(roomWsUrl(roomId, after))
+}
+
+/** WebSocket URL of the room list push (GET /api/rooms/ws, F6): same origin, no cursor. */
+export function roomsWsUrl(loc: Pick<Location, 'protocol' | 'host'> = window.location): string {
+  const scheme = loc.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${scheme}//${loc.host}/api/rooms/ws`
+}
+
+export function openListWs(): WebSocket {
+  return new WebSocket(roomsWsUrl())
 }

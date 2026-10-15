@@ -63,7 +63,7 @@ func (v view) hasPending(sig string) bool {
 	return slices.ContainsFunc(v.active, func(s sigSnap) bool { return s.pending && s.id == sig })
 }
 
-// signalCfg returns the shared settings of a v1 signal.
+// signalCfg returns the shared settings of a signal.
 func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 	switch id {
 	case owners.SignalConnectorDown:
@@ -74,6 +74,12 @@ func signalCfg(cfg owners.WatchConfig, id string) owners.WatchSignal {
 		return cfg.DLQGrowth.WatchSignal
 	case owners.SignalConfigRisk:
 		return cfg.ConfigRisk
+	case owners.SignalConsumerLag:
+		return cfg.ConsumerLag.WatchSignal
+	case owners.SignalGroupUnstable:
+		return cfg.GroupUnstable.WatchSignal
+	case owners.SignalOffsetBelowLogStart:
+		return cfg.OffsetBelowLogStart
 	}
 	return cfg.SlotWAL.WatchSignal
 }
@@ -312,7 +318,7 @@ func (w *Watcher) updateRoom(ctx context.Context, now time.Time, t target, v vie
 		return
 	}
 	title, ev := compose(t.p.ID, now, v, reason, nil)
-	if !w.post(ctx, v.roomID, fmt.Sprintf("watcher: %s (%s)\nevidence: %s", title, reason, ev)) {
+	if !w.post(ctx, v.roomID, fmt.Sprintf("watcher: %s (%s)\nevidence: %s", title, reason, ev), ev) {
 		return
 	}
 	if w.recordPost(now, t.p.ID, v, v.roomID, v.owned, v.follower) {
@@ -355,7 +361,7 @@ func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view,
 		// the evidence instead of a second room (B1).
 		if other, ok := w.rooms.OpenRoomForPipeline(id); ok {
 			title, ev := compose(id, now, v, "joined an open room", affected)
-			if !w.post(ctx, other, fmt.Sprintf("watcher: %s\nevidence: %s", title, ev)) {
+			if !w.post(ctx, other, fmt.Sprintf("watcher: %s\nevidence: %s", title, ev), ev) {
 				return
 			}
 			if w.recordPost(now, id, v, other, false, false) {
@@ -410,7 +416,7 @@ func (w *Watcher) openRoom(ctx context.Context, now time.Time, t target, v view,
 	if !created {
 		// The service only writes "fired again" with the title on a join; the
 		// numbers go in as evidence (a room that survived a restart).
-		w.post(ctx, roomID, fmt.Sprintf("watcher: %s (re-attached after a restart)\nevidence: %s", title, ev))
+		w.post(ctx, roomID, fmt.Sprintf("watcher: %s (re-attached after a restart)\nevidence: %s", title, ev), ev)
 	}
 	w.assignFollowers(now, id, roomID, storm, led)
 	if len(affected) > 1 {
@@ -474,13 +480,20 @@ func (w *Watcher) once(id string, flag func(*pipeState) *bool, log func()) {
 }
 
 // post writes one system message to a room under its own deadline. It reports
-// success. When the sink says the room is closed, the pipeline is acked, as if
+// success. ev, when not nil, is the evidence JSON of the message: a sink that
+// implements EvidenceSink gets it as data (the service feeds it to the agent as
+// an alert_update), any other sink gets the text alone. When the sink says the room is closed, the pipeline is acked, as if
 // OnRoomClosed had arrived (a missed close event must not leave the watcher
 // posting into a closed room).
-func (w *Watcher) post(ctx context.Context, roomID, text string) bool {
+func (w *Watcher) post(ctx context.Context, roomID, text string, ev json.RawMessage) bool {
 	sctx, cancel := context.WithTimeout(ctx, w.cfg.CheckTimeout)
 	defer cancel()
-	err := w.rooms.PostEvidence(sctx, roomID, text)
+	var err error
+	if es, ok := w.rooms.(EvidenceSink); ok {
+		err = es.PostEvidenceJSON(sctx, roomID, text, ev)
+	} else {
+		err = w.rooms.PostEvidence(sctx, roomID, text)
+	}
 	if err == nil {
 		return true
 	}
@@ -566,7 +579,7 @@ func (w *Watcher) resolve(ctx context.Context, now time.Time, t target, v view) 
 				}
 				return
 			}
-		} else if !w.post(ctx, v.roomID, "watcher: "+id+": all watcher signals are clear") {
+		} else if !w.post(ctx, v.roomID, "watcher: "+id+": all watcher signals are clear", nil) {
 			// post acks the pipeline itself when the room is closed; then the
 			// incident is over too.
 			w.mu.Lock()

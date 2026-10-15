@@ -27,3 +27,32 @@ func TestInputForSteerDeclined(t *testing.T) {
 		}
 	}
 }
+
+// F5b: the text the agent reads carries no ids and counts steps from 1.
+func TestInputForActionResultIsOneBasedAndIdFree(t *testing.T) {
+	raw, _ := json.Marshal(events.ActionExecutedPayload{ProposalID: "p_01M4ZZZZZZZZZZZZZZZZZZZZZZ", StepIndex: 0, OK: true, Output: "task restarted"})
+	in := inputFor(events.Event{Seq: 1, Type: events.ActionExecuted, Actor: executorActor, Payload: raw})
+	if in == nil || in.Text != "step 1: task restarted" {
+		t.Fatalf("input = %+v, want text %q", in, "step 1: task restarted")
+	}
+	if in.ProposalID == "" || in.StepIndex == nil || *in.StepIndex != 0 {
+		t.Fatalf("structured fields changed: %+v", in)
+	}
+}
+
+func TestInputForApprovalResultIsIdFree(t *testing.T) {
+	for _, tc := range []struct {
+		typ     events.Type
+		payload any
+		want    string
+	}{
+		{events.ApprovalGiven, events.ApprovalGivenPayload{ProposalID: "p_1", Layer: "kafka-connect"}, `layer "kafka-connect" approved your proposal`},
+		{events.ApprovalRejected, events.ApprovalRejectedPayload{ProposalID: "p_1", Layer: "kafka-connect", Reason: "too risky"}, `layer "kafka-connect" rejected your proposal: too risky`},
+	} {
+		raw, _ := json.Marshal(tc.payload)
+		in := inputFor(events.Event{Seq: 1, Type: tc.typ, Actor: events.Actor{Kind: events.ActorHuman, ID: "a"}, Payload: raw})
+		if in == nil || in.Text != tc.want || in.ProposalID != "p_1" {
+			t.Fatalf("%s input = %+v, want text %q and proposal id kept", tc.typ, in, tc.want)
+		}
+	}
+}

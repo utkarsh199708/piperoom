@@ -1,6 +1,7 @@
 package room
 
 import (
+	"strconv"
 	"time"
 
 	"piperoom/internal/events"
@@ -47,7 +48,50 @@ type Hypothesis struct {
 	Text         string   `json:"text"`
 	BasedOnSteps []string `json:"based_on_steps"`
 	Confidence   string   `json:"confidence"`
-	Confirmed    bool     `json:"confirmed"`
+	// Confirmed is derived (F9): at least one confirmed and no disputed
+	// verdict on Seq. The agent-written flag in the event is ignored.
+	Confirmed bool `json:"confirmed"`
+	// Seq is the seq of the agent.hypothesis event this state came from;
+	// hypothesis.verdict answers it.
+	Seq int64 `json:"seq"`
+	// Verdicts is the latest verdict per person on Seq, in seq order.
+	Verdicts []Verdict `json:"verdicts"`
+}
+
+// Verdict is one person's current confirm or dispute of the hypothesis.
+type Verdict struct {
+	Verdict string    `json:"verdict"`
+	By      Person    `json:"by"`
+	Note    string    `json:"note"`
+	At      time.Time `json:"at"`
+}
+
+// deriveConfirmed sets Confirmed from the verdicts.
+func (h *Hypothesis) deriveConfirmed() {
+	confirmed := false
+	for _, v := range h.Verdicts {
+		if v.Verdict == "disputed" {
+			h.Confirmed = false
+			return
+		}
+		if v.Verdict == "confirmed" {
+			confirmed = true
+		}
+	}
+	h.Confirmed = confirmed
+}
+
+// Triage is the newest agent.triage (F6): the triage pass's first look,
+// shown as "triage, unverified". A later agent.hypothesis does not clear it.
+type Triage struct {
+	Status         string    `json:"status"`
+	Reason         string    `json:"reason,omitempty"`
+	Headline       string    `json:"headline,omitempty"`
+	SuspectedLayer string    `json:"suspected_layer,omitempty"`
+	Confidence     string    `json:"confidence,omitempty"`
+	EvidenceRefs   []string  `json:"evidence_refs"`
+	NextCheck      string    `json:"next_check,omitempty"`
+	At             time.Time `json:"at"`
 }
 
 // Proposal is a pending fix as shown in a snapshot.
@@ -63,6 +107,21 @@ type Proposal struct {
 	// sends it back with approve and reject. "" only for a proposal that
 	// predates the hash and cannot be hashed.
 	ParamsHash string `json:"params_hash"`
+	// Preview is what each step would do, written once by the system after
+	// the proposal exists (proposal.previewed, F4). Informational: it is not
+	// part of ParamsHash. nil until the event arrives.
+	Preview *events.ProposalPreviewedPayload `json:"preview,omitempty"`
+}
+
+// ChecklistTick says who ticked one runbook item and when.
+type ChecklistTick struct {
+	By Person    `json:"by"`
+	At time.Time `json:"at"`
+}
+
+// checklistKey is the key of RoomSnapshot.ChecklistDone.
+func checklistKey(toolUseID string, hit, item int) string {
+	return toolUseID + ":" + strconv.Itoa(hit) + ":" + strconv.Itoa(item)
 }
 
 // Suggestion is a non-driver's pending steer.
@@ -90,9 +149,19 @@ type RoomSnapshot struct {
 	Driver             *Driver      `json:"driver"`
 	AgentStatus        AgentStatus  `json:"agent_status"`
 	Hypothesis         *Hypothesis  `json:"hypothesis"`
+	Triage             *Triage      `json:"triage"`
 	OpenProposals      []Proposal   `json:"open_proposals"`
 	PendingSuggestions []Suggestion `json:"pending_suggestions"`
 	Members            []Member     `json:"members"`
+	// Insight is the room's cost and clock facts (F11), folded from the log.
+	Insight Insight `json:"insight"`
+
+	// Labelled is true once a room.labelled exists (F8). ChecklistDone holds
+	// the ticked runbook items, keyed "<tool_use_id>:<hit>:<item>" (see
+	// checklistKey); the last checklist.step_done per key wins and an untick
+	// removes the key. Never null.
+	Labelled      bool                     `json:"labelled"`
+	ChecklistDone map[string]ChecklistTick `json:"checklist_done"`
 
 	// Room limits (docs/design/retention.md). AutoCloseAt is set by the
 	// service, not by Apply: it depends on PIPEROOM_MAX_OPEN_DAYS. LogCap is
@@ -116,8 +185,20 @@ type RoomSnapshot struct {
 	// Shadow facts folded from the log after room.closed. Unexported: they are
 	// not part of the snapshot JSON (docs/api.md), only the service reads them.
 	shadowRevealed bool
+	// nudges is when each (proposal, layer) was last nudged (approval.nudged);
+	// copy-on-write in Apply.
+	nudges         map[string]time.Time
 	shadowLabelled bool
 	shadowGrade    *events.ShadowGradedPayload // the last grade; nil before any
+	// pendingPreviews holds a proposal.previewed seen before its
+	// proposal.created (a replay over a snapshot); it is attached when the
+	// proposal appears.
+	pendingPreviews map[string]events.ProposalPreviewedPayload
+
+	// Postmortem is the closing draft's state (F2): "none", "drafting" from
+	// room.closed until postmortem.drafted or postmortem.failed, "drafted" or
+	// "failed". The Markdown is rendered on request, never stored.
+	Postmortem PostmortemState `json:"postmortem"`
 
 	// handoffReq is the room's latest hand-off request (handoff.requested),
 	// cleared by the handoff.created or handoff.failed with its request_id.
@@ -125,6 +206,21 @@ type RoomSnapshot struct {
 	// Hand-off requests). Unexported, like the shadow facts.
 	handoffReq handoffRequest
 }
+
+// PostmortemState mirrors the snapshot's postmortem member (docs/api.md).
+type PostmortemState struct {
+	Status string `json:"status"`           // none | drafting | drafted | failed
+	Source string `json:"source,omitempty"` // handoff | model | events, when drafted
+	Reason string `json:"reason,omitempty"` // fixed code, when failed
+}
+
+// Postmortem states of PostmortemState.Status.
+const (
+	PostmortemNone     = "none"
+	PostmortemDrafting = "drafting"
+	PostmortemDrafted  = "drafted"
+	PostmortemFailed   = "failed"
+)
 
 // handoffRequest is the fold of the last unfinished handoff.requested.
 type handoffRequest struct {
@@ -151,10 +247,13 @@ const (
 func NewSnapshot() RoomSnapshot {
 	return RoomSnapshot{
 		AgentStatus:        AgentStatus{State: "idle"},
+		Insight:            Insight{TimeToFirstHypothesisS: -1},
 		LogCap:             LogCapOK,
+		Postmortem:         PostmortemState{Status: PostmortemNone},
 		OpenProposals:      []Proposal{},
 		PendingSuggestions: []Suggestion{},
 		Members:            []Member{},
+		ChecklistDone:      map[string]ChecklistTick{},
 	}
 }
 
@@ -171,11 +270,28 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 		if s.Hypothesis.BasedOnSteps != nil {
 			h.BasedOnSteps = append([]string{}, s.Hypothesis.BasedOnSteps...)
 		}
+		h.Verdicts = append([]Verdict{}, s.Hypothesis.Verdicts...)
 		c.Hypothesis = &h
+	}
+	if s.Triage != nil {
+		t := *s.Triage
+		t.EvidenceRefs = append([]string{}, s.Triage.EvidenceRefs...)
+		c.Triage = &t
 	}
 	if s.shadowGrade != nil {
 		g := *s.shadowGrade
 		c.shadowGrade = &g
+	}
+	c.Insight.FirstHypothesisAt = cloneTime(s.Insight.FirstHypothesisAt)
+	if s.Insight.Usage.CostUSD != nil {
+		v := *s.Insight.Usage.CostUSD
+		c.Insight.Usage.CostUSD = &v
+	}
+	if s.pendingPreviews != nil {
+		c.pendingPreviews = make(map[string]events.ProposalPreviewedPayload, len(s.pendingPreviews))
+		for k, v := range s.pendingPreviews {
+			c.pendingPreviews[k] = v
+		}
 	}
 	c.AutoCloseAt = cloneTime(s.AutoCloseAt)
 	c.extendedUntil = cloneTime(s.extendedUntil)
@@ -183,7 +299,16 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 	c.OpenProposals = cloneProposals(s.OpenProposals)
 	c.PendingSuggestions = append([]Suggestion{}, s.PendingSuggestions...)
 	c.Members = append([]Member{}, s.Members...)
+	c.ChecklistDone = cloneTicks(s.ChecklistDone)
 	return c
+}
+
+func cloneTicks(in map[string]ChecklistTick) map[string]ChecklistTick {
+	out := make(map[string]ChecklistTick, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func cloneTime(t *time.Time) *time.Time {
@@ -194,12 +319,34 @@ func cloneTime(t *time.Time) *time.Time {
 	return &c
 }
 
+func clonePreview(in *events.ProposalPreviewedPayload) *events.ProposalPreviewedPayload {
+	if in == nil {
+		return nil
+	}
+	c := *in
+	c.Steps = make([]events.StepPreview, len(in.Steps))
+	for i, sp := range in.Steps {
+		c.Steps[i] = sp
+		if sp.Preview != nil {
+			pv := *sp.Preview
+			pv.Downstream = append([]string(nil), sp.Preview.Downstream...)
+			if sp.Preview.DryRun != nil {
+				dr := *sp.Preview.DryRun
+				pv.DryRun = &dr
+			}
+			c.Steps[i].Preview = &pv
+		}
+	}
+	return &c
+}
+
 func cloneProposals(in []Proposal) []Proposal {
 	out := make([]Proposal, len(in))
 	for i, p := range in {
 		out[i] = p
 		out[i].Steps = append([]events.ProposalStep{}, p.Steps...)
 		out[i].RequiredLayers = append([]string{}, p.RequiredLayers...)
+		out[i].Preview = clonePreview(p.Preview)
 		if p.Approvals != nil {
 			out[i].Approvals = make(map[string]string, len(p.Approvals))
 			for k, v := range p.Approvals {
@@ -223,6 +370,8 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	snap.Members = append([]Member(nil), snap.Members...)
 	snap.OpenProposals = append([]Proposal(nil), snap.OpenProposals...)
 	snap.PendingSuggestions = append([]Suggestion(nil), snap.PendingSuggestions...)
+	snap.Insight = foldInsight(snap, e)
+	snap.ChecklistDone = cloneTicks(snap.ChecklistDone)
 	if e.Actor.Kind == events.ActorHuman {
 		snap.Members = upsertMember(snap.Members, e.Actor, "watching")
 	}
@@ -239,6 +388,31 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Shadow = p.Shadow
 		snap.Status = "open"
 		snap.OpenedAt = e.At
+
+	case events.ApprovalNudged:
+		if p, ok := decode[events.ApprovalNudgedPayload](e); ok {
+			m := make(map[string]time.Time, len(snap.nudges)+1)
+			for k, v := range snap.nudges {
+				m[k] = v
+			}
+			m[nudgeKey(p.ProposalID, p.Layer)] = e.At
+			snap.nudges = m
+		}
+
+	case events.RoomLabelled:
+		snap.Labelled = true
+
+	case events.ChecklistStepDone:
+		p, ok := decode[events.ChecklistStepDonePayload](e)
+		if !ok {
+			break
+		}
+		key := checklistKey(p.ToolUseID, p.Hit, p.Item)
+		if p.Done {
+			snap.ChecklistDone[key] = ChecklistTick{By: Person{ID: e.Actor.ID, Name: e.Actor.Name, Verified: e.Actor.Verified}, At: e.At}
+		} else {
+			delete(snap.ChecklistDone, key)
+		}
 
 	case events.ShadowRevealed:
 		snap.shadowRevealed = true
@@ -260,6 +434,20 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Status = "closed"
 		snap.ClosedAt = &at
 		snap.Resolution = p.Resolution
+		// A shadow room's log holds no agent events: no draft.
+		if !snap.Shadow && snap.Postmortem.Status == PostmortemNone {
+			snap.Postmortem = PostmortemState{Status: PostmortemDrafting}
+		}
+
+	case events.PostmortemDrafted:
+		if p, ok := decode[events.PostmortemDraftedPayload](e); ok {
+			snap.Postmortem = PostmortemState{Status: PostmortemDrafted, Source: p.Source}
+		}
+
+	case events.PostmortemFailed:
+		if p, ok := decode[events.PostmortemFailedPayload](e); ok {
+			snap.Postmortem = PostmortemState{Status: PostmortemFailed, Reason: p.Reason}
+		}
 
 	case events.AgentStatus:
 		p, ok := decode[events.AgentStatusPayload](e)
@@ -289,6 +477,17 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			snap.extendedUntil = &at
 		}
 
+	case events.AgentTriage:
+		p, ok := decode[events.AgentTriagePayload](e)
+		if !ok {
+			break
+		}
+		refs := append([]string{}, p.EvidenceRefs...)
+		snap.Triage = &Triage{
+			Status: p.Status, Reason: p.Reason, Headline: p.Headline, SuspectedLayer: p.SuspectedLayer,
+			Confidence: p.Confidence, EvidenceRefs: refs, NextCheck: p.NextCheck, At: e.At,
+		}
+
 	case events.AgentHypothesis:
 		p, ok := decode[events.AgentHypothesisPayload](e)
 		if !ok {
@@ -298,8 +497,29 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			Text:         p.Text,
 			BasedOnSteps: p.BasedOnSteps,
 			Confidence:   p.Confidence,
-			Confirmed:    p.Confirmed,
+			Seq:          e.Seq,
+			Verdicts:     []Verdict{},
 		}
+
+	case events.HypothesisVerdict:
+		p, ok := decode[events.HypothesisVerdictPayload](e)
+		// A verdict for a hypothesis that was replaced is stale: ignore it.
+		if !ok || snap.Hypothesis == nil || p.HypothesisSeq != snap.Hypothesis.Seq {
+			break
+		}
+		// Copy first: Apply must not mutate the caller's snapshot.
+		cur := *snap.Hypothesis
+		snap.Hypothesis = &cur
+		v := Verdict{Verdict: p.Verdict, By: Person{ID: e.Actor.ID, Name: e.Actor.Name, Verified: e.Actor.Verified}, Note: p.Note, At: e.At}
+		// Latest per person, in seq order: a changed mind moves to the end.
+		kept := make([]Verdict, 0, len(snap.Hypothesis.Verdicts)+1)
+		for _, old := range snap.Hypothesis.Verdicts {
+			if old.By.ID != v.By.ID {
+				kept = append(kept, old)
+			}
+		}
+		snap.Hypothesis.Verdicts = append(kept, v)
+		snap.Hypothesis.deriveConfirmed()
 
 	case events.SteerSuggested:
 		p, ok := decode[events.SteerSuggestedPayload](e)
@@ -365,7 +585,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		for _, layer := range p.RequiredLayers {
 			approvals[layer] = "pending"
 		}
-		snap.OpenProposals = append(snap.OpenProposals, Proposal{
+		np := Proposal{
 			ProposalID:     p.ProposalID,
 			Title:          p.Title,
 			Steps:          p.Steps,
@@ -374,7 +594,42 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			RequiredLayers: p.RequiredLayers,
 			Approvals:      approvals,
 			ParamsHash:     eventParamsHash(e.RoomID, p),
-		})
+		}
+		if pv, ok := snap.pendingPreviews[p.ProposalID]; ok {
+			np.Preview = &pv
+			rest := make(map[string]events.ProposalPreviewedPayload, len(snap.pendingPreviews))
+			for k, v := range snap.pendingPreviews {
+				if k != p.ProposalID {
+					rest[k] = v
+				}
+			}
+			snap.pendingPreviews = rest
+		}
+		snap.OpenProposals = append(snap.OpenProposals, np)
+
+	case events.ProposalPreviewed:
+		p, ok := decode[events.ProposalPreviewedPayload](e)
+		if !ok {
+			break
+		}
+		found := false
+		for i := range snap.OpenProposals {
+			if snap.OpenProposals[i].ProposalID == p.ProposalID {
+				// A second event replaces the first (a future refresh).
+				pv := p
+				snap.OpenProposals[i].Preview = &pv
+				found = true
+				break
+			}
+		}
+		if !found {
+			m := make(map[string]events.ProposalPreviewedPayload, len(snap.pendingPreviews)+1)
+			for k, v := range snap.pendingPreviews {
+				m[k] = v
+			}
+			m[p.ProposalID] = p
+			snap.pendingPreviews = m
+		}
 
 	case events.ApprovalGiven:
 		p, ok := decode[events.ApprovalGivenPayload](e)
@@ -454,9 +709,14 @@ func normalize(snap RoomSnapshot) RoomSnapshot {
 	if snap.LogCap == "" {
 		snap.LogCap = LogCapOK
 	}
-	if snap.Hypothesis != nil && snap.Hypothesis.BasedOnSteps == nil {
+	if snap.Hypothesis != nil && (snap.Hypothesis.BasedOnSteps == nil || snap.Hypothesis.Verdicts == nil) {
 		h := *snap.Hypothesis
-		h.BasedOnSteps = []string{}
+		if h.BasedOnSteps == nil {
+			h.BasedOnSteps = []string{}
+		}
+		if h.Verdicts == nil {
+			h.Verdicts = []Verdict{}
+		}
 		snap.Hypothesis = &h
 	}
 	return snap

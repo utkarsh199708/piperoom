@@ -27,6 +27,26 @@ export function clockTime(iso: string): string {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+/** "2026-10-14 06:06:12 UTC" for hover titles; an invalid time comes back unchanged. */
+export function utcLabel(iso: string): string {
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return iso
+  return new Date(t).toISOString().slice(0, 19).replace('T', ' ') + ' UTC'
+}
+
+/** How long a room was open: "6 min", "1 h 12 min", "2 d 3 h". Empty for an invalid or negative span. */
+export function durationLabel(openedIso: string, closedIso: string): string {
+  const a = Date.parse(openedIso)
+  const b = Date.parse(closedIso)
+  if (Number.isNaN(a) || Number.isNaN(b) || b < a) return ''
+  const mins = Math.floor((b - a) / MINUTE)
+  if (mins < 60) return `${Math.max(mins, 1)} min`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return mins % 60 ? `${hours} h ${mins % 60} min` : `${hours} h`
+  const days = Math.floor(hours / 24)
+  return hours % 24 ? `${days} d ${hours % 24} h` : `${days} d`
+}
+
 // Age of an open room, e.g. "12m" / "3h" / "2d".
 export function ageLabel(iso: string, now = Date.now()): string {
   const t = Date.parse(iso)

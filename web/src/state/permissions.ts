@@ -84,7 +84,7 @@ export function canSendSuggestionToAgent(
   user: CurrentUser,
   suggestion: SuggestionState,
 ): boolean {
-  return !isViewer(user) && isOpen(state) && isDriver(state, user) && suggestion.suggestion_id != null
+  return !isViewer(user) && isOpen(state) && isDriver(state, user) && suggestion.suggestion_id != null && suggestion.status === 'pending'
 }
 
 /**

@@ -223,3 +223,48 @@ func TestParseTenancyMode(t *testing.T) {
 		}
 	}
 }
+
+// PIPEROOM_SLACK_PAGE_NO_DRIVER: Load splits and trims; ParseSlackMemberIDs
+// checks the Slack member ID shape (C12 #130 paging allow-list).
+func TestSlackPageNoDriver(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		want    []string
+		wantErr bool
+	}{
+		{"empty", "", nil, false},
+		{"spaces only", " , ", nil, false},
+		{"one", "U012ABC", []string{"U012ABC"}, false},
+		{"several, trimmed, deduplicated", " U012ABC, W0XYZ99 ,,U012ABC", []string{"U012ABC", "W0XYZ99"}, false},
+		{"invalid prefix", "C012ABC", nil, true},
+		{"invalid lowercase", "u012abc", nil, true},
+		{"invalid too short", "U1", nil, true},
+		{"invalid mention syntax", "<@U012ABC>", nil, true},
+		{"one invalid among valid", "U012ABC,bob", nil, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PIPEROOM_SLACK_PAGE_NO_DRIVER", tc.env)
+			c := Load()
+			got, err := ParseSlackMemberIDs("PIPEROOM_SLACK_PAGE_NO_DRIVER", c.SlackPageNoDriver)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				if !strings.Contains(err.Error(), "PIPEROOM_SLACK_PAGE_NO_DRIVER") {
+					t.Fatalf("error does not name the variable: %v", err)
+				}
+				return
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}

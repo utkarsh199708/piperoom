@@ -53,7 +53,18 @@ type Deps struct {
 	Owners       *owners.Owners // pipeline definitions for actions.Scoped checks
 	Run          agent.Runner
 	WriteHandoff agent.HandoffWriter
-	Options      agent.Options
+	// WritePostmortem writes the closing summary of a room that never handed
+	// off after its fix (F2). Nil gives the events-only draft:
+	// cmd/server leaves it nil for PIPEROOM_POSTMORTEM_MODEL=off.
+	WritePostmortem agent.PostmortemWriter
+	// Triage, when set, runs the triage pass (F6) for every room opened in
+	// this process, before its agent waits for a slot; not for shadow rooms
+	// or rooms restored by Load. TriagePassTimeout is the pass's deadline
+	// (agent.Endpoint.FirstLook); the agent waits for the pass at most that
+	// plus 5 s. 0 means the default.
+	Triage            agent.Triager
+	TriagePassTimeout time.Duration
+	Options           agent.Options
 	// ShadowOptions are the agent options of a shadow room's run
 	// (docs/design/shadow.md section 3.3): the same model, fewer turns and a
 	// lower token budget (config.ParseShadow).
@@ -146,6 +157,9 @@ type roomState struct {
 	execCancel      context.CancelFunc // cancels the room's executor on close
 	exec            *execQueue         // nil until the first proposal is approved
 	dedupKey        string             // alert index key of an alert room; "" otherwise
+	// firstLook is set on a room opened in this process until its agent
+	// starts: only such a room gets the triage pass (service_triage.go).
+	firstLook bool
 
 	// Shadow run state (shadow.go). shadowActive is true from the start of
 	// the shadow supervisor until it has written the run's final status.
@@ -193,21 +207,26 @@ type Service struct {
 	owners       *owners.Owners
 	run          agent.Runner
 	writeHandoff agent.HandoffWriter
-	opts         agent.Options
-	shadowOpts   agent.Options
-	shadowGrace  time.Duration
-	shadow       store.ShadowStore // nil when the store cannot hold shadow runs
-	log          *slog.Logger
-	now          func() time.Time
-	onRoomOpened func(ctx context.Context, roomID string)
-	onRoomClosed func(ctx context.Context, roomID, pipelineID, dedupKey string)
-	slots        *agentSlots // global cap on concurrent agent runs
-	exportMax    int64
-	sessions     auth.Store
-	sessionIdle  time.Duration
-	viewerGroups map[string]struct{}
-	soloUser     string
-	limits       config.Limits
+	// writePostmortem is nil for an events-only draft (Deps.WritePostmortem).
+	writePostmortem agent.PostmortemWriter
+	triage          agent.Triager
+	triageWait      time.Duration
+	triageSem       chan struct{} // maxTriagePasses
+	opts            agent.Options
+	shadowOpts      agent.Options
+	shadowGrace     time.Duration
+	shadow          store.ShadowStore // nil when the store cannot hold shadow runs
+	log             *slog.Logger
+	now             func() time.Time
+	onRoomOpened    func(ctx context.Context, roomID string)
+	onRoomClosed    func(ctx context.Context, roomID, pipelineID, dedupKey string)
+	slots           *agentSlots // global cap on concurrent agent runs
+	exportMax       int64
+	sessions        auth.Store
+	sessionIdle     time.Duration
+	viewerGroups    map[string]struct{}
+	soloUser        string
+	limits          config.Limits
 	// deleteMu serialises DeleteRoom calls: deletions are rare, and one at a
 	// time makes a concurrent repeat find the first one's audit row.
 	deleteMu sync.Mutex
@@ -242,6 +261,11 @@ type Service struct {
 	// alertRooms maps the dedup key of each open webhook room to that room, so
 	// a repeat of the same alert joins the room instead of opening another.
 	alertRooms map[string]string
+
+	// list pushes rooms-list changes to SubscribeRooms (listhub.go).
+	list *listHub
+	// statsCache serves GET /api/pipelines/{pid}/agent-stats (agentstats.go).
+	statsCache agentStatsCache
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -281,35 +305,40 @@ func New(d Deps) *Service {
 	shadowStore, _ := d.Store.(store.ShadowStore)
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
-		store:        d.Store,
-		actions:      acts,
-		tools:        tls,
-		stackFor:     d.StackFor,
-		topo:         topo,
-		users:        users,
-		owners:       d.Owners,
-		run:          run,
-		writeHandoff: wh,
-		opts:         d.Options,
-		shadowOpts:   d.ShadowOptions,
-		shadowGrace:  d.ShadowGrace,
-		shadow:       shadowStore,
-		log:          log,
-		now:          now,
-		onRoomOpened: d.OnRoomOpened,
-		onRoomClosed: d.OnRoomClosed,
-		slots:        newAgentSlots(d.MaxAgents),
-		exportMax:    d.ExportMaxEvents,
-		sessions:     d.Sessions,
-		sessionIdle:  d.SessionIdle,
-		viewerGroups: groupSet(d.ViewerGroups),
-		soloUser:     d.SoloUser,
-		limits:       d.Limits,
-		leaseTicker:  d.LeaseTicker,
-		ctx:          ctx,
-		cancel:       cancel,
-		rooms:        map[string]*roomState{},
-		alertRooms:   map[string]string{},
+		store:           d.Store,
+		actions:         acts,
+		tools:           tls,
+		stackFor:        d.StackFor,
+		topo:            topo,
+		users:           users,
+		owners:          d.Owners,
+		run:             run,
+		writeHandoff:    wh,
+		writePostmortem: d.WritePostmortem,
+		triage:          d.Triage,
+		triageWait:      triageWaitFor(d.TriagePassTimeout),
+		triageSem:       make(chan struct{}, maxTriagePasses),
+		opts:            d.Options,
+		shadowOpts:      d.ShadowOptions,
+		shadowGrace:     d.ShadowGrace,
+		shadow:          shadowStore,
+		log:             log,
+		now:             now,
+		onRoomOpened:    d.OnRoomOpened,
+		onRoomClosed:    d.OnRoomClosed,
+		slots:           newAgentSlots(d.MaxAgents),
+		exportMax:       d.ExportMaxEvents,
+		sessions:        d.Sessions,
+		sessionIdle:     d.SessionIdle,
+		viewerGroups:    groupSet(d.ViewerGroups),
+		soloUser:        d.SoloUser,
+		limits:          d.Limits,
+		leaseTicker:     d.LeaseTicker,
+		ctx:             ctx,
+		cancel:          cancel,
+		rooms:           map[string]*roomState{},
+		alertRooms:      map[string]string{},
+		list:            newListHub(),
 	}
 	if coord, ok := d.Store.(store.Coordinator); ok {
 		s.coord = coord
@@ -377,6 +406,7 @@ func (s *Service) Load(ctx context.Context) error {
 	err := s.ensureAllLoadedLocked(ctx, true)
 	if err == nil {
 		s.sweepShadowLocked(ctx)
+		s.sweepPostmortemsLocked()
 	}
 	s.mu.Unlock()
 	if err != nil {
@@ -636,6 +666,11 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (RoomSnapshot, []a
 		snap.ID = roomID
 	}
 	s.setDeadline(&snap)
+	if snap.Status == "closed" && snap.Postmortem.Status == PostmortemDrafting && snap.ClosedAt != nil && s.now().Sub(*snap.ClosedAt) > postmortemRestartWindow {
+		// A room closed before drafts existed, or whose drafter died long ago:
+		// it is not drafting any more (the GET still renders events-only).
+		snap.Postmortem = PostmortemState{Status: PostmortemNone}
+	}
 	if row, err := s.store.GetRoom(ctx, roomID); err == nil {
 		if row.DriverID != "" && snap.Driver != nil && snap.Driver.ID == row.DriverID && row.DriverLeaseUntil != nil && row.DriverLeaseUntil.After(snap.Driver.LeaseUntil) {
 			// docs/api.md: times are RFC 3339 UTC; a persisted lease read back
@@ -719,6 +754,7 @@ var agentEventTypes = map[events.Type]bool{
 	events.AgentMessage:    true,
 	events.AgentHypothesis: true,
 	events.AgentUsage:      true,
+	events.AgentTriage:     true,
 }
 
 // outsideRun is the run number of an agent event written outside any agent run
@@ -782,7 +818,8 @@ func (s *Service) fenceLocked(roomID string, st *roomState, run uint64) error {
 // executorEmit appends an event on behalf of the action executor.
 func (s *Service) executorEmit(ctx context.Context, roomID string, typ events.Type, payload any) error {
 	if p, ok := payload.(events.ActionExecutedPayload); ok {
-		p.Output = s.capOutput(p.Output)
+		// Mask before the cap: a cap must not cut a secret in two.
+		p.Output = s.capOutput(maskExecOutput(p.Output))
 		payload = p
 	}
 	return s.emitAs(ctx, roomID, executorActor, typ, payload)
@@ -895,6 +932,9 @@ func mapStoreErr(err error) error {
 type inbox struct {
 	mu    sync.Mutex
 	items []agent.HumanInput
+	// quiet is the pending alert update (pushQuiet): Drain hands it out,
+	// Wait is never woken for it, and a newer one replaces it.
+	quiet *agent.HumanInput
 	wake  chan struct{}
 	// closed is set for a shadow room: nothing is ever delivered, and Wait
 	// returns agent.ErrInboxClosed so the run ends at its first end_turn.
@@ -955,7 +995,20 @@ func (in *inbox) push(inp agent.HumanInput) {
 	}
 }
 
-// Drain returns all pending inputs without blocking.
+// pushQuiet sets the room's pending alert update, replacing one not yet
+// drained. It does not wake a waiting agent: an alert update is new numbers
+// for the next turn, not a reason for one (agent.HumanInput "alert_update").
+func (in *inbox) pushQuiet(inp agent.HumanInput) {
+	if in.closed {
+		return
+	}
+	in.mu.Lock()
+	in.quiet = &inp
+	in.mu.Unlock()
+}
+
+// Drain returns all pending inputs without blocking, the pending alert update
+// first.
 func (in *inbox) Drain(ctx context.Context) ([]agent.HumanInput, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -963,6 +1016,10 @@ func (in *inbox) Drain(ctx context.Context) ([]agent.HumanInput, error) {
 	in.mu.Lock()
 	defer in.mu.Unlock()
 	out := in.items
+	if in.quiet != nil {
+		out = append([]agent.HumanInput{*in.quiet}, out...)
+		in.quiet = nil
+	}
 	in.items = nil
 	return out, nil
 }
@@ -1030,6 +1087,18 @@ func inputFor(e events.Event) *agent.HumanInput {
 			return nil
 		}
 		return &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "comment", StepID: p.StepID, CommentID: p.CommentID, Text: p.Text}
+	case events.HypothesisVerdict:
+		p, ok := decode[events.HypothesisVerdictPayload](e)
+		if !ok {
+			return nil
+		}
+		// Delivered like an @agent comment (no ids): a dispute must reach the
+		// model and a confirm lets it move on to propose_fix.
+		text := p.Verdict + " the current hypothesis"
+		if p.Note != "" {
+			text += ": " + p.Note
+		}
+		return &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "comment", Text: text}
 	case events.ApprovalGiven:
 		p, ok := decode[events.ApprovalGivenPayload](e)
 		if !ok {
@@ -1038,7 +1107,7 @@ func inputFor(e events.Event) *agent.HumanInput {
 		approved := true
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
-			Text:       fmt.Sprintf("layer %q approved proposal %s", p.Layer, p.ProposalID),
+			Text:       fmt.Sprintf("layer %q approved your proposal", p.Layer),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
 		}
 	case events.ApprovalRejected:
@@ -1049,7 +1118,7 @@ func inputFor(e events.Event) *agent.HumanInput {
 		approved := false
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "approval_result",
-			Text:       fmt.Sprintf("layer %q rejected proposal %s: %s", p.Layer, p.ProposalID, p.Reason),
+			Text:       fmt.Sprintf("layer %q rejected your proposal: %s", p.Layer, p.Reason),
 			ProposalID: p.ProposalID, Layer: p.Layer, Approved: &approved,
 		}
 	case events.ActionExecuted:
@@ -1069,7 +1138,7 @@ func inputFor(e events.Event) *agent.HumanInput {
 		stepIndex := p.StepIndex
 		return &agent.HumanInput{
 			Seq: e.Seq, Actor: e.Actor, Kind: "action_result",
-			Text: fmt.Sprintf("proposal %s step %d: %s", p.ProposalID, p.StepIndex, p.Output),
+			Text: fmt.Sprintf("step %d: %s", p.StepIndex+1, p.Output),
 			OK:   okp, ProposalID: p.ProposalID, StepIndex: &stepIndex,
 		}
 	}
@@ -1136,6 +1205,13 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 	st.agentRun++
 	run := st.agentRun
 	gate := &agentGate{s: s, st: st, roomID: roomID, pipeline: pipelineID}
+	var firstLook <-chan agent.TriageResult
+	if st.firstLook && s.triage != nil {
+		// Before the slot: a room queued behind the cap still gets its
+		// diagnosis. It runs once per room, never on a restart.
+		firstLook = s.startTriageLocked(ctx, roomID, run, agent.Alert{RoomID: roomID, Title: title, PipelineID: pipelineID, Raw: raw})
+	}
+	st.firstLook = false
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -1176,6 +1252,12 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 					tcancel()
 				}
 			}
+			if firstLook != nil {
+				// The run holds its slot now; it waits for the pass only
+				// up to its deadline, so a slow pass cannot hold the slot.
+				alert.Triage = s.awaitTriage(ctx, roomID, firstLook)
+				firstLook = nil
+			}
 			err := s.runGuarded(ctx, roomID, alert, deps, s.opts)
 			gate.release()
 			// A spent token budget is a stop, not a failure: the runner has
@@ -1188,6 +1270,20 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			ectx, ecancel := context.WithTimeout(s.ctx, 5*time.Second)
 			_ = s.agentEmit(ectx, roomID, run, events.AgentStatus, events.AgentStatusPayload{State: "error", Detail: truncateDetail(err.Error())})
 			ecancel()
+			if isUnretryable(err) {
+				// The same input fails the same way each time, and a replay
+				// would repeat the story the agent already told.
+				s.log.Warn("room: agent stopped (unretryable)", "room", roomID, "err", err)
+				reason := truncateDetail(err.Error())
+				if s.proposalsDisabled(st) {
+					reason = fmt.Sprintf("proposals are disabled in this room because pipeline %q is not configured — add it to owners.yaml and restart the server", pipelineID)
+				}
+				mctx, mcancel := context.WithTimeout(s.ctx, 5*time.Second)
+				_ = s.agentEmit(mctx, roomID, run, events.AgentMessage, events.AgentMessagePayload{Text: "The agent stopped: " + reason})
+				mcancel()
+				s.releaseAgent(st, run, cancel)
+				return
+			}
 			if attempt >= maxAgentAttempts {
 				s.log.Error("room: agent gave up after repeated failures", "room", roomID, "attempts", attempt)
 				s.releaseAgent(st, run, cancel)
@@ -1220,6 +1316,16 @@ func (s *Service) runGuarded(ctx context.Context, roomID string, alert agent.Ale
 func isBudgetStop(err error) bool {
 	var be *agent.BudgetError
 	return errors.As(err, &be)
+}
+
+// isUnretryable reports an error a second attempt cannot cure: bad input, a
+// validation failure or a closed room.
+func isUnretryable(err error) bool {
+	if errors.Is(err, tools.ErrBadInput) || errors.Is(err, topology.ErrBadInput) {
+		return true
+	}
+	var re *Error
+	return errors.As(err, &re) && (re.Code == codeValidation || re.Code == codeRoomClosed)
 }
 
 // releaseAgent frees the room's agent slot when its supervisor gives up, so the
