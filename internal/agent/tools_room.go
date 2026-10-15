@@ -614,6 +614,23 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 			approvers = append(approvers, l)
 		}
 	}
+	// Create returns only the id, so apply the server's rule here: each step
+	// action that implements actions.Impacting adds its layers (known ones).
+	for _, s := range steps {
+		a, ok := t.actions.Get(s.Action)
+		if !ok {
+			continue
+		}
+		im, ok := a.(actions.Impacting)
+		if !ok {
+			continue
+		}
+		for _, l := range im.Impact(s.Params).Layers {
+			if slices.Contains(events.Layers, l) && !slices.Contains(approvers, l) {
+				approvers = append(approvers, l)
+			}
+		}
+	}
 	return tools.Result{
 		Summary: fmt.Sprintf("proposal %s waiting for approval from: %s", id, strings.Join(approvers, ", ")),
 		Data:    proposeFixResult{ProposalID: id},

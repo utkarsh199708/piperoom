@@ -433,7 +433,7 @@ func isErrorStatus(e events.Event) bool {
 // and run.
 func isHandoffCritical(t events.Type) bool {
 	switch t {
-	case events.AgentHypothesis, events.ProposalCreated, events.ApprovalGiven, events.ApprovalRejected, events.ActionExecuted:
+	case events.AgentHypothesis, events.ProposalCreated, events.ProposalWithdrawn, events.AgentVerification, events.ApprovalGiven, events.ApprovalRejected, events.ActionExecuted:
 		return true
 	default:
 		return false
@@ -561,6 +561,28 @@ func renderRoomEvent(e events.Event) string {
 		// required_layers is what a hand-off needs to say who still has to approve.
 		return "proposal " + capFreeText(p.ProposalID) + ": " + wrapUntrusted(capFreeText(p.Title)) +
 			" needs: " + wrapUntrusted(capFreeText(strings.Join(p.RequiredLayers, ", ")))
+	case events.ProposalWithdrawn:
+		p, err := events.Decode[events.ProposalWithdrawnPayload](e)
+		if err != nil {
+			return ""
+		}
+		// The id lets the hand-off match this line to its proposal.created
+		// line: a withdrawn fix no longer waits for approvals.
+		return fmt.Sprintf("withdrawal %s by %s: %s", capFreeText(p.ProposalID), wrapUntrusted(capFreeText(actorName(e.Actor))), wrapUntrusted(capFreeText(p.Reason)))
+	case events.AgentVerification:
+		p, err := events.Decode[events.AgentVerificationPayload](e)
+		if err != nil {
+			return ""
+		}
+		outcome := "NOT recovered"
+		if p.Recovered {
+			outcome = "recovered"
+		}
+		line := fmt.Sprintf("verification %s (%s): %s", capFreeText(p.ProposalID), outcome, wrapUntrusted(capFreeText(p.Verdict)))
+		if p.Repeat {
+			line += " (repeat)"
+		}
+		return line
 	case events.ApprovalGiven:
 		p, err := events.Decode[events.ApprovalGivenPayload](e)
 		if err != nil {
