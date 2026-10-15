@@ -73,8 +73,8 @@ func (c *capRunner) run(ctx context.Context, alert agent.Alert, _ agent.Deps, _ 
 	notify := c.startCh
 	c.mu.Unlock()
 	if notify != nil {
-		// Non-blocking so a late start after the test closed the channel
-		// cannot panic; startedIDs() still records it and fails the test.
+		// Non-blocking so a start the test no longer reads (buffer full)
+		// cannot block the runner; startedIDs() still records it.
 		select {
 		case notify <- id:
 		default:

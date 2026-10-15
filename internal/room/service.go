@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"piperoom/internal/actions"
@@ -266,6 +267,10 @@ type Service struct {
 	list *listHub
 	// statsCache serves GET /api/pipelines/{pid}/agent-stats (agentstats.go).
 	statsCache agentStatsCache
+
+	// openRoomsSeen is the last open-room count OpenRooms computed, served
+	// when s.mu is busy (see metrics.go).
+	openRoomsSeen atomic.Int64
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.

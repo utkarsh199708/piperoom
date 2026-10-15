@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 )
 
 func scrape(t *testing.T, url string) (http.Header, string) {
@@ -137,5 +140,38 @@ func TestMetricsRoomGauges(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics missing %q\n%s", want, body)
 		}
+	}
+}
+
+// piperoom_ws_connections counts the room-list sockets too: the web room list
+// always opens one, so a scrape with one list and one room socket reads 2.
+func TestMetricsWSConnectionsCountListSockets(t *testing.T) {
+	srv, svc := newServer(t)
+	u, _ := svc.LookupUser("arjun")
+	snap, err := svc.CreateRoom(context.Background(), u, "t", "sev2", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := strings.Replace(srv.URL, "http", "ws", 1)
+	for _, path := range []string{"/api/rooms/ws", "/api/rooms/" + snap.ID + "/ws?after=0"} {
+		conn, _, err := websocket.Dial(context.Background(), base+path, &websocket.DialOptions{
+			HTTPHeader: http.Header{"X-User": {"arjun"}},
+		})
+		if err != nil {
+			t.Fatalf("dial %s: %v", path, err)
+		}
+		t.Cleanup(func() { conn.CloseNow() })
+	}
+	// Dial returns before the server registers the connection, so poll.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, body := scrape(t, srv.URL)
+		if strings.Contains(body, "piperoom_ws_connections 2\n") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("piperoom_ws_connections never reached 2:\n%s", body)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

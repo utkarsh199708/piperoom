@@ -225,7 +225,7 @@ func (g *Gateway) CloseSession(sessionID string) {
 }
 
 // Connections is how many connections the gateway has registered across all
-// rooms (the /metrics gauge).
+// rooms plus the room-list sockets (the /metrics gauge).
 func (g *Gateway) Connections() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -237,7 +237,7 @@ func (g *Gateway) connectionsLocked() int {
 	for _, hub := range g.rooms {
 		n += len(hub.conns)
 	}
-	return n
+	return n + len(g.lists)
 }
 
 // RoomDeletedReason is the close reason of a deleted room's connections
