@@ -684,13 +684,14 @@ recordings:
     error: 'out of scope: consumer group "ledger-consumer" is not part of this room''s pipeline "ledger" (allowed consumer groups: ledger-sink)'
   - tool: kafka_find_by_key
     summary: |-
-      not found: no record with key "1" since 2026-10-11T09:30:00Z
+      no record with key "1" found since 2026-10-11T09:30:00Z in the scanned window
+      this client cannot report whether the scan was cut (max_scan 5000 or the time limit): matches may exist past the scanned window
     data:
       found: false
       key: "1"
       records: null
       topic: ldg.public.ledger_entries
-      truncated: false
+      truncation_unknown: true
   - tool: pg_row
     summary: |-
       not found
