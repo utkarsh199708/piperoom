@@ -26,7 +26,7 @@ import (
 
 type corpusRow struct {
 	src      string
-	kind     string // scenario | forbidden | groups | hedge | layer | agree
+	kind     string // scenario | correct | forbidden | groups | hedge | layer | agree
 	scenario string // scenario id, or "heldout/<id>"
 	terms    [][]string
 	layer    string
@@ -55,6 +55,12 @@ func ly(src, layer, text string, want bool) corpusRow {
 // the labelled layer.
 func ag(src, layer string, causeTerms []string, text string, want bool) corpusRow {
 	return corpusRow{src: src, kind: "agree", layer: layer, terms: [][]string{causeTerms}, text: text, want: want}
+}
+
+// co is a scenario row graded as a whole: want is whether the root cause
+// matches and the root-cause layer is named (Correct in score.go).
+func co(src, scenario, text string, want bool) corpusRow {
+	return corpusRow{src: src, kind: "correct", scenario: scenario, text: text, want: want}
 }
 
 func sc(src, scenario, text string, want bool) corpusRow {
@@ -241,10 +247,10 @@ var corpusMatcherRows = []corpusRow{
 	gap(hg("r3.11", "Root cause: the slot was dropped. Fix: recreate a slot, e.g. debezium_orders; alternatively, restart Debezium.", false), "e.g. inside a fix sentence"),
 
 	// #335: an SMT names Connect; SASL, SCRAM and the Kafka user name Kafka.
-	ly("#335", "kafka-connect", "Root cause: one row's promised_at is not a date, the TimestampConverter SMT throws, errors.tolerance=none fails task 0.", true),
-	ly("#335", "kafka", "pg-payments-connector task 0 fails SASL authentication: the SCRAM password of the Kafka user debezium changed.", true),
-	ly("#335", "kafka", "Kafka rejects the SASL login.", true),
-	ly("#335", "kafka", "The Kafka user debezium lost its password.", true),
+	gap(ly("#335", "kafka-connect", "Root cause: one row's promised_at is not a date, the TimestampConverter SMT throws, errors.tolerance=none fails task 0.", true), "#335, split out, via #454"),
+	gap(ly("#335", "kafka", "pg-payments-connector task 0 fails SASL authentication: the SCRAM password of the Kafka user debezium changed.", true), "#335, split out, via #454"),
+	gap(ly("#335", "kafka", "Kafka rejects the SASL login.", true), "#335, split out, via #454"),
+	gap(ly("#335", "kafka", "The Kafka user debezium lost its password.", true), "#335, split out, via #454"),
 	ly("#335", "kafka", "Kafka Connect restarted.", false),
 	ly("#335", "kafka", "Debezium is up, cannot reach the brokers.", true),
 	// Review round 2, nit 7.
@@ -525,6 +531,15 @@ var corpusReviewScenarioRows = []corpusRow{
 	sc("r4", "publication-permission-denied", "Root cause: the debezium role has REPLICATION, not table owner, so it cannot alter the publication.", true),
 	sc("r4", "publication-permission-denied", "Root cause: Debezium's role has REPLICATION, not table ownership, so it cannot alter the publication.", true),
 	sc("r4", "publication-permission-denied", "Root cause: the orders table owner changed; the debezium role still owns its slot, not publications.", true),
+	// Round 6: a Postgres SCRAM/SASL login is sasl-credential-rotated's trap
+	// ("looks like a Postgres problem"): its cause words match, but it does
+	// not name the Kafka layer, so the answer is not correct.
+	co("r6.1", "sasl-credential-rotated", "Root cause: the SCRAM password of the Postgres replication user debezium was rotated, so Debezium cannot log in to the source database and pg-payments-connector task 0 failed.", false),
+	co("r6.1", "sasl-credential-rotated", "Root cause: Postgres rejects Debezium's SCRAM-SHA-256 login: the password of the database user debezium was rotated.", false),
+	co("r6.1", "sasl-credential-rotated", "Root cause: the source database's pg_hba.conf now requires scram-sha-256 and the debezium password was rotated, so the connector cannot authenticate.", false),
+	co("r6.1", "sasl-credential-rotated", "Root cause: SASL authentication to Postgres fails because the debezium database password was rotated.", false),
+	co("r6.1", "sasl-credential-rotated", "Root cause: the replication slot is inactive because Postgres refuses the debezium login: its SCRAM secret was rotated by the DBA.", false),
+	co("r6.1 control", "sasl-credential-rotated", "Root cause: the SCRAM password of the Kafka user debezium was rotated, so the broker rejects the connector's SASL login.", true),
 	// Round 4, nit 10: round 3 item 3 on topic-retention-data-loss.
 	sc("r4.10", "topic-retention-data-loss", "Retention is 6 h and records were lost. "+"We can't yet, however, rule out a reset to latest.", false),
 	sc("r4.10", "topic-retention-data-loss", "Retention is 6 h and records were lost. "+"We cannot fully, though, rule out a reset to latest.", false),
@@ -599,6 +614,12 @@ func (r corpusRow) eval(t *testing.T, scs map[string]Scenario) (bool, error) {
 	case "agree":
 		res, err := Agreement(r.text, Label{Layer: r.layer, RootCauseTerms: r.terms[0]})
 		return res.LayerAgree, err
+	case "correct":
+		s, ok := scs[r.scenario]
+		if !ok {
+			return false, fmt.Errorf("unknown scenario %q", r.scenario)
+		}
+		return rootCauseMatches(s.Expect, r.text) && namesLayer(layerTermsFor(s.Pipeline, s.Expect.RootCauseLayer), r.text), nil
 	case "scenario":
 		s, ok := scs[r.scenario]
 		if !ok {

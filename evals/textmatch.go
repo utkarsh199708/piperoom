@@ -277,22 +277,11 @@ var layerTerms = map[string][]string{
 	"postgres": {"postgres*", "replication slot", "source table", "source db", "source database", "transaction*",
 		"ddl", "alter table", "drop column", "migration*", "publication*", "table owner*", "wal",
 		"postgre sql"}, // tokenize splits "PostgreSQL" into "postgre sql"
-	// An SMT runs inside a Connect task.
-	"kafka-connect":   {"connect", "connector*", "debezium", "smt", "smts", "single message transform*"},
+	"kafka-connect":   {"connect", "connector*", "debezium"},
 	"schema-registry": {"schema registry", "registry", "subject*"},
 	"kafka":           {"topic*", "broker*", "partition*", "retention", "log start"},
 	"consumer":        {"consumer*"},
 	"warehouse":       {"warehouse*", "sink table"},
-}
-
-// scorerLayerTerms name a layer for the scorer (namesLayer) only. Shadow
-// agreement (agreement.go) picks the first layer word of a failure clause,
-// and these words lead correct answers that blame another layer: "SASL
-// authentication fails for pg-payments-connector task 0" blames Connect.
-var scorerLayerTerms = map[string][]string{
-	// SASL and SCRAM are Kafka's own login; "kafka user" is the principal
-	// it checks.
-	"kafka": {"sasl", "scram", "kafka user*"},
 }
 
 // layerTermsFor adds the pipeline's own names to a layer's words: its
@@ -300,7 +289,7 @@ var scorerLayerTerms = map[string][]string{
 // (topic_prefix.source_table, "pg.public.orders/1") Kafka, its connectors
 // Connect and its sink tables the warehouse.
 func layerTermsFor(p owners.Pipeline, layer string) []string {
-	terms := append(append([]string(nil), layerTerms[layer]...), scorerLayerTerms[layer]...)
+	terms := append([]string(nil), layerTerms[layer]...)
 	switch layer {
 	case "consumer":
 		terms = append(terms, p.ConsumerGroups...)
