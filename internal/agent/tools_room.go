@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/events"
@@ -194,7 +195,7 @@ func (t *proposeFixTool) Description() string {
 	for _, a := range acts {
 		fmt.Fprintf(&b, "- %s(%s) [%s]: %s\n", a.Name(), paramsSignature(a.ParamsSchema()), a.Layer(), a.Describe())
 	}
-	b.WriteString("steps is an array; each step has action, params and a short description. ")
+	b.WriteString("steps is an array; each step has action, params and a short description, and may have verify (at most 200 characters): what you will check after the step runs, for example \"task 0 RUNNING within 60 s\". ")
 	b.WriteString(`params is the action's parameters as JSON object text in a string, for example "{\"connector\":\"c1\"}". `)
 	b.WriteString(`A param that is itself JSON, such as the Avro schema of schema_register, is escaped once more: "{\"subject\":\"orders-value\",\"schema\":\"{\\\"type\\\":\\\"string\\\"}\"}". `)
 	b.WriteString("A step with a wrong or missing param is refused and nothing is stored. ")
@@ -243,6 +244,7 @@ func (t *proposeFixTool) stepsItemSchema() map[string]any {
 		"action":      action,
 		"params":      map[string]any{"type": "string", "description": "params as JSON object text"},
 		"description": map[string]any{"type": "string", "description": "what this step does"},
+		"verify":      map[string]any{"type": "string", "description": "optional: what you will check after this step runs"},
 	}, "action", "params", "description")
 }
 
@@ -260,9 +262,13 @@ func (t *proposeFixTool) validationSchema() map[string]any {
 		"action":      map[string]any{"type": "string"},
 		"params":      map[string]any{},
 		"description": map[string]any{"type": "string"},
+		"verify":      map[string]any{"type": "string"},
 	}, "action", "params", "description")
 	return s
 }
+
+// maxStepVerifyChars caps ProposalStep.Verify (contract: 200 characters).
+const maxStepVerifyChars = 200
 
 type proposeFixInput struct {
 	Title string `json:"title"`
@@ -273,6 +279,7 @@ type proposeFixInput struct {
 		// callers that are not the model, such as replays, need no encoding.
 		Params      json.RawMessage `json:"params"`
 		Description string          `json:"description"`
+		Verify      string          `json:"verify"`
 	} `json:"steps"`
 	Risk     string `json:"risk"`
 	Rollback string `json:"rollback"`
@@ -527,11 +534,16 @@ func (t *proposeFixTool) Run(ctx context.Context, input json.RawMessage) (tools.
 			return tools.Result{}, err
 		}
 		layer := a.Layer()
+		verify := strings.TrimSpace(s.Verify)
+		if n := utf8.RuneCountInString(verify); n > maxStepVerifyChars {
+			return tools.Result{}, fmt.Errorf("%w: step %d: verify is %d characters; the limit is %d", tools.ErrBadInput, i+1, n, maxStepVerifyChars)
+		}
 		steps = append(steps, events.ProposalStep{
 			Action:      s.Action,
 			Layer:       layer,
 			Params:      params,
 			Description: s.Description,
+			Verify:      verify,
 		})
 		if !seenLayers[layer] {
 			seenLayers[layer] = true

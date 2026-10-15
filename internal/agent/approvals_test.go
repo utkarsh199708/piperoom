@@ -748,8 +748,9 @@ func TestCompatRestoreOfTrackedSubjectIsConfigOnlyAndClearsTracking(t *testing.T
 			t.Fatalf("unexpected NOT recovered verdict: %q", m)
 		}
 	}
-	if len(verdicts) != 2 || !strings.Contains(verdicts[1], "information only") {
-		t.Fatalf("the restore must be judged config-only, got %q", verdicts)
+	vs := verifications(sink)
+	if len(verdicts) != 2 || len(vs) != 2 || vs[1].DataFlow == nil || !strings.Contains(vs[1].DataFlow.Detail, "information only") {
+		t.Fatalf("the restore must be judged config-only, got %q %+v", verdicts, vs)
 	}
 	if len(r.noneSubjects) != 0 {
 		t.Fatalf("the tracked set must be empty after the restore verifies, got %v", r.noneSubjects)
