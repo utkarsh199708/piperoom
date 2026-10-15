@@ -316,10 +316,15 @@ func publicationFindings(c connectorConfig, sourceTables []string, tables []post
 	if i == nil {
 		return out
 	}
+	// Connect returns a config-provider reference unresolved, so the role name
+	// is not the real one and nothing about the role can be stated.
+	if strings.Contains(c.role, "${") {
+		return append(out, fmt.Sprintf("UNKNOWN connector user %s is a config-provider reference that Connect does not resolve, so Piperoom could not check the role's rights; read the real database.user from the secret store and look it up with pg_roles.", c.role))
+	}
 	if !i.RoleExists {
 		return append(out, fmt.Sprintf("PROBLEM connector user %s does not exist as a role (pg_roles has no such name), so the connector cannot log in.", c.role))
 	}
-	if !i.RoleReplication && !i.RoleSuperuser {
+	if !i.RoleReplication && !i.RoleSuperuser && !i.RoleManagedReplication {
 		out = append(out, fmt.Sprintf("PROBLEM connector user %s has no REPLICATION attribute and is not a superuser, so it cannot start logical replication (on managed Postgres a role such as rds_replication can stand in).", c.role))
 	}
 	if filtered && i.Owner != "" && !i.RoleMemberOfOwner {

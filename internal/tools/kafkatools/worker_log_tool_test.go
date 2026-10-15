@@ -208,8 +208,8 @@ func TestConnectWorkerLogBounds(t *testing.T) {
 
 	// "warning" is WARN; omitted values take the defaults.
 	runLog(t, tool, `{"min_level":"warning"}`)
-	if fl.queries[1].MinLevel != "WARN" || fl.queries[1].MaxLines != 50 {
-		t.Errorf("query = %+v", fl.queries[1])
+	if fl.queries[len(fl.queries)-1].MinLevel != "WARN" || fl.queries[len(fl.queries)-1].MaxLines != 50 {
+		t.Errorf("query = %+v", fl.queries[len(fl.queries)-1])
 	}
 }
 

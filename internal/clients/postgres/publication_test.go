@@ -255,32 +255,37 @@ func TestPublicationTablesMemberIsOwnedByRole(t *testing.T) {
 func TestPublicationInfo(t *testing.T) {
 	cases := []struct {
 		name string
-		info []any // owner, role name (nil = no role), replication, superuser, member
+		info []any // owner, role name (nil = no role), replication, superuser, member, rds_replication member
 		want PublicationInfo
 	}{
 		{
 			"role owns neither: the connector-auth break",
-			[]any{"orders_owner", "debezium", true, false, false},
+			[]any{"orders_owner", "debezium", true, false, false, false},
 			PublicationInfo{Publication: "dbz_publication", Owner: "orders_owner", Role: "debezium", RoleExists: true, RoleReplication: true},
 		},
 		{
 			"role owns the publication",
-			[]any{"debezium", "debezium", true, false, true},
+			[]any{"debezium", "debezium", true, false, true, false},
 			PublicationInfo{Publication: "dbz_publication", Owner: "debezium", Role: "debezium", RoleExists: true, RoleReplication: true, RoleIsOwner: true, RoleMemberOfOwner: true},
 		},
 		{
 			"no REPLICATION attribute",
-			[]any{"dba", "debezium", false, false, false},
+			[]any{"dba", "debezium", false, false, false, false},
 			PublicationInfo{Publication: "dbz_publication", Owner: "dba", Role: "debezium", RoleExists: true},
 		},
 		{
 			"superuser",
-			[]any{"dba", "debezium", false, true, true},
+			[]any{"dba", "debezium", false, true, true, false},
 			PublicationInfo{Publication: "dbz_publication", Owner: "dba", Role: "debezium", RoleExists: true, RoleSuperuser: true, RoleMemberOfOwner: true},
 		},
 		{
+			"REPLICATION through rds_replication",
+			[]any{"dba", "debezium", false, false, false, true},
+			PublicationInfo{Publication: "dbz_publication", Owner: "dba", Role: "debezium", RoleExists: true, RoleManagedReplication: true},
+		},
+		{
 			"role was dropped",
-			[]any{"dba", nil, false, false, false},
+			[]any{"dba", nil, false, false, false, false},
 			PublicationInfo{Publication: "dbz_publication", Owner: "dba", Role: "debezium"},
 		},
 	}

@@ -71,6 +71,10 @@ type PublicationInfo struct {
 	RoleReplication bool `json:"role_replication"`
 	// RoleSuperuser is pg_roles.rolsuper.
 	RoleSuperuser bool `json:"role_superuser"`
+	// RoleManagedReplication is true when the role is a member of
+	// rds_replication, which RDS and Aurora use instead of the REPLICATION
+	// attribute; rolreplication stays false for such a role.
+	RoleManagedReplication bool `json:"role_managed_replication"`
 	// RoleIsOwner and RoleMemberOfOwner are the same facts as on
 	// PublicationTable, for the publication: ALTER PUBLICATION needs its owner.
 	RoleIsOwner       bool `json:"role_is_owner"`
@@ -250,11 +254,13 @@ func (d *DB) PublicationInfo(ctx context.Context, publication, role string) (Pub
 		       r.rolname::text,
 		       COALESCE(r.rolreplication, false),
 		       COALESCE(r.rolsuper, false),
-		       (r.oid IS NOT NULL AND pg_has_role(r.oid, p.pubowner, 'USAGE'))
+		       (r.oid IS NOT NULL AND pg_has_role(r.oid, p.pubowner, 'USAGE')),
+		       EXISTS (SELECT 1 FROM pg_roles m
+		               WHERE m.rolname = 'rds_replication' AND pg_has_role(r.oid, m.oid, 'USAGE'))
 		FROM pg_publication p
 		LEFT JOIN pg_roles r ON r.rolname = $2::name
 		WHERE p.pubname = $1`, publication, role).
-		Scan(&info.Owner, &roleName, &info.RoleReplication, &info.RoleSuperuser, &info.RoleMemberOfOwner)
+		Scan(&info.Owner, &roleName, &info.RoleReplication, &info.RoleSuperuser, &info.RoleMemberOfOwner, &info.RoleManagedReplication)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PublicationInfo{}, fmt.Errorf("postgres: publication %q: %w", publication, clients.ErrNotFound)
 	}

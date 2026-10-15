@@ -88,6 +88,10 @@ type logGroup struct {
 	newest, oldest time.Time
 }
 
+// configLookupTimeout bounds the Connect config lookup, which only refines
+// which names the log is searched for.
+const configLookupTimeout = 2 * time.Second
+
 func (t *connectWorkerLog) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
 	if t.d.ConnectLog == nil {
 		return res(noWorkerLogText, nil), nil
@@ -118,9 +122,14 @@ func (t *connectWorkerLog) Run(ctx context.Context, input json.RawMessage) (tool
 		return tools.Result{}, err
 	}
 
+	// The config lookup gets its own short deadline: when Connect's REST API
+	// hangs, the file read, which needs no Connect, still has its full time.
+	names, connectSilent := t.logNames(ctx, sc, connector)
+	if connectSilent {
+		notes = append(notes, "Connect did not answer the config lookup, so the log was searched by the connector name and the pipeline's topic prefix")
+	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
-	names := t.logNames(cctx, sc, connector, fromDefault)
 	var lines []clients.LogLine
 	for _, n := range names {
 		got, err := t.d.ConnectLog.WorkerLog(cctx, clients.WorkerLogQuery{
@@ -137,7 +146,10 @@ func (t *connectWorkerLog) Run(ctx context.Context, input json.RawMessage) (tool
 		}
 		lines = append(lines, got...)
 	}
-	lines = mergeLogLines(lines, t.otherConnectors(cctx, sc, names), in.MaxLines)
+	octx, ocancel := context.WithTimeout(ctx, configLookupTimeout)
+	others := t.otherConnectors(octx, sc, names)
+	ocancel()
+	lines = mergeLogLines(lines, others, in.MaxLines)
 
 	// Everything from the log is masked before it reaches a summary or Data.
 	safe := make([]clients.LogLine, len(lines))
@@ -152,6 +164,9 @@ func (t *connectWorkerLog) Run(ctx context.Context, input json.RawMessage) (tool
 		"min_level":     in.MinLevel,
 		"counts":        countLevels(safe),
 		"lines":         shown,
+	}
+	if connectSilent {
+		data["connect_config"] = "unavailable"
 	}
 	if fromDefault {
 		data["connector_source"] = "the pipeline's source connector"
@@ -170,28 +185,38 @@ func (t *connectWorkerLog) Run(ctx context.Context, input json.RawMessage) (tool
 // its logical name (topic.prefix / database.server.name). Debezium logs its own
 // lines, including the "must be owner of table" failure, with that name in its
 // log context and thread names, never with the Connect connector name (Q2 F14).
-func (t *connectWorkerLog) logNames(ctx context.Context, sc tools.Scope, connector string, fromDefault bool) []string {
+//
+// The second result is true when Connect did not return the config; the
+// pipeline's topic.prefix then stands in for it.
+func (t *connectWorkerLog) logNames(ctx context.Context, sc tools.Scope, connector string) ([]string, bool) {
 	names := []string{connector}
 	add := func(n string) {
 		if n != "" && !slices.Contains(names, n) {
 			names = append(names, n)
 		}
 	}
-	found := false
+	found, silent := false, false
 	if t.d.Connect != nil {
-		if cfg, err := t.d.Connect.Config(ctx, connector); err == nil {
+		lctx, cancel := context.WithTimeout(ctx, configLookupTimeout)
+		cfg, err := t.d.Connect.Config(lctx, connector)
+		cancel()
+		if err == nil {
 			for _, k := range []string{"topic.prefix", "database.server.name"} {
 				if cfg[k] != "" {
 					found = true
 				}
 				add(cfg[k])
 			}
+		} else {
+			silent = true
 		}
 	}
-	if !found && fromDefault && !sc.Unscoped() {
+	// The connector passed CheckConnector, so it is this pipeline's and so is
+	// its prefix, whether the name came from the model or from the default.
+	if !found && !sc.Unscoped() {
 		add(sc.Pipeline().TopicPrefix)
 	}
-	return names
+	return names, silent
 }
 
 // otherConnectors lists connectors of other pipelines on the shared worker:
