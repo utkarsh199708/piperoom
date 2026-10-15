@@ -41,8 +41,10 @@ func TestTraceSinkErrorsMaskRecordValues(t *testing.T) {
 
 // TestTraceSinkErrorsMaskMoreValues (#505): PostgreSQL date/time and
 // malformed-literal errors and Elasticsearch date-parse errors quote the
-// failing value after the error's category words. Only the value is masked:
-// the category words are the diagnosis and must stay. PostgreSQL rows come
+// failing value after the error's category words. The category words are
+// the diagnosis and must stay; the value is masked to the end of its line,
+// since a value can hold any end marker (PR #528 review), so text after the
+// value on that line is not asserted. PostgreSQL rows come
 // quoted and unquoted, with DETAIL/HINT on the same line or on lines of their
 // own, and inside a Connect trace; Elasticsearch rows come with and without
 // "Preview of field's value" and with a nested caused_by reason.
@@ -60,7 +62,7 @@ func TestTraceSinkErrorsMaskMoreValues(t *testing.T) {
 			[]string{"Leakwood"}, []string{"PSQLException", "malformed array literal"}},
 		{"elasticsearch failed to parse date field",
 			bulk + "[{\"type\":\"illegal_argument_exception\",\"reason\":\"failed to parse date field [" + value + "] with format [strict_date_optional_time||epoch_millis]\"}]",
-			[]string{"Leakwood"}, []string{"illegal_argument_exception", "failed to parse date field", "with format [strict_date_optional_time||epoch_millis]"}},
+			[]string{"Leakwood"}, []string{"illegal_argument_exception", "failed to parse date field"}},
 
 		// PostgreSQL variants.
 		{"postgres date/time unquoted",
@@ -68,10 +70,10 @@ func TestTraceSinkErrorsMaskMoreValues(t *testing.T) {
 			[]string{"Leakwood"}, []string{"PSQLException", "date/time field value out of range"}},
 		{"postgres date/time with hint on the line",
 			pg + "date/time field value out of range: \"" + value + "\"  Hint: Perhaps you need a different \"datestyle\" setting.",
-			[]string{"Leakwood"}, []string{"date/time field value out of range", "Hint:"}},
+			[]string{"Leakwood"}, []string{"date/time field value out of range"}},
 		{"postgres date/time unquoted with hint on the line",
 			pg + "date/time field value out of range: " + value + "  Hint: Perhaps you need a different \"datestyle\" setting.",
-			[]string{"Leakwood"}, []string{"date/time field value out of range", "Hint:"}},
+			[]string{"Leakwood"}, []string{"date/time field value out of range"}},
 		{"postgres date/time hint on its own line",
 			pg + "date/time field value out of range: \"" + value + "\"\n  Hint: Perhaps you need a different \"datestyle\" setting.\n  Position: 52",
 			[]string{"Leakwood"}, []string{"date/time field value out of range"}},
@@ -117,19 +119,19 @@ func TestTraceSinkErrorsMaskMoreValues(t *testing.T) {
 			[]string{"Leakwood"}, []string{"failed to parse date field"}},
 		{"elasticsearch date field value with brackets",
 			bulk + "[{\"type\":\"illegal_argument_exception\",\"reason\":\"failed to parse date field [Alice] Leakwood [42] with format [epoch_millis]\"}]",
-			[]string{"Leakwood"}, []string{"failed to parse date field", "with format [epoch_millis]"}},
+			[]string{"Leakwood"}, []string{"failed to parse date field"}},
 		{"elasticsearch exception form",
 			"Caused by: org.elasticsearch.ElasticsearchException: Elasticsearch exception [type=illegal_argument_exception, reason=failed to parse date field [" + value + "] with format [strict_date_optional_time||epoch_millis]]",
 			[]string{"Leakwood"}, []string{"ElasticsearchException", "failed to parse date field"}},
 		{"elasticsearch nested caused_by reason",
 			bulk + "[{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse field [created] of type [date] in document with id 'k1'\",\"caused_by\":{\"type\":\"illegal_argument_exception\",\"reason\":\"failed to parse date field [" + value + "] with format [strict_date_optional_time||epoch_millis]\",\"caused_by\":{\"type\":\"date_time_parse_exception\",\"reason\":\"Text '" + value + "' could not be parsed at index 0\"}}}]",
-			[]string{"Leakwood"}, []string{"mapper_parsing_exception", "failed to parse field [created] of type [date]", "failed to parse date field", "date_time_parse_exception", "could not be parsed at index 0"}},
+			[]string{"Leakwood"}, []string{"mapper_parsing_exception", "failed to parse field [created] of type [date]", "failed to parse date field"}},
 		{"elasticsearch exception nested reason",
 			"Caused by: org.elasticsearch.ElasticsearchException: Elasticsearch exception [type=illegal_argument_exception, reason=failed to parse date field [" + value + "] with format [epoch_millis]]; nested: Elasticsearch exception [type=date_time_parse_exception, reason=Text '" + value + "' could not be parsed at index 0]",
-			[]string{"Leakwood"}, []string{"failed to parse date field", "date_time_parse_exception", "could not be parsed at index 0"}},
+			[]string{"Leakwood"}, []string{"failed to parse date field"}},
 		{"elasticsearch joda invalid format",
 			bulk + "[{\"type\":\"illegal_argument_exception\",\"reason\":\"Invalid format: \\\"" + value + "\\\" is malformed at \\\"Leakwood 42\\\"\"}]",
-			[]string{"Leakwood"}, []string{"Invalid format:", "is malformed at"}},
+			[]string{"Leakwood"}, []string{"illegal_argument_exception", "Invalid format:"}},
 		// With a preview the line already gets main's dlq_peek redaction,
 		// which masks the whole quoted reason; this pass cannot unmask it.
 		{"elasticsearch date field with preview",
@@ -189,8 +191,8 @@ func TestTraceSinkValueMaskKeepsCategories(t *testing.T) {
 
 // TestTraceSinkValueMaskHostile: maskSinkValues on a 64 KiB line of repeated
 // openers stays linear, and a value after the last opener is still masked.
-// (sanitizeTrace as a whole is dominated by main's passes, about 45 ms for
-// any 64 KiB line, so the budget is on this pass.)
+// The budget is on this pass: sanitizeTrace as a whole is dominated by main's
+// passes (32-56 ms for any 64 KiB line, about 600 ms under -race), #533.
 func TestTraceSinkValueMaskHostile(t *testing.T) {
 	for _, tt := range []struct {
 		unit   string
