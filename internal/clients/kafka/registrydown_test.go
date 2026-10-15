@@ -95,3 +95,19 @@ func TestFindByKeyUnknownSchemaIsNonMatch(t *testing.T) {
 
 var _ = avro.Schema(nil)
 var _ clients.KeyScan
+
+// GAP (follow-up #520, same on main): a bare 404 from the registry, with no
+// Confluent error body (a proxy, a wrong URL path), is read as "unknown schema
+// id" and the key as a definite non-match, so the scan reads as complete. This
+// pins today's behaviour; when #520 lands, flip it to expect an incomplete scan.
+func TestGapFindByKeyBare404IsNonMatch(t *testing.T) {
+	c := registryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}, avroKeyRec(0, 0))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	scan, err := c.FindByKeyScan(ctx, "t", "k", epoch, 0)
+	if err != nil || len(scan.Refs) != 0 || len(scan.Truncated) != 0 {
+		t.Fatalf("got %+v, %v; the pinned gap behaviour changed (see #520)", scan, err)
+	}
+}
