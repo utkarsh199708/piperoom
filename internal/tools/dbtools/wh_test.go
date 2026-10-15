@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"piperoom/internal/tools"
 )
@@ -66,5 +68,44 @@ func TestWarehouseToolsPostgresThreePartIsBadInput(t *testing.T) {
 		if _, err := tt.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(in)); !errors.Is(err, tools.ErrBadInput) {
 			t.Errorf("%s: err = %v, want ErrBadInput", name, err)
 		}
+	}
+}
+
+// A newest value ahead of the clock must not read as fresh (QA sweep H5):
+// within a minute it is skew and reads as 0s; beyond that the tool says the
+// value is in the future and gives no staleness.
+func TestWarehouseFreshnessFutureTimestamp(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		ahead      time.Duration
+		wantFuture bool
+	}{
+		{"skew", 30 * time.Second, false},
+		{"future", 3 * time.Hour, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := testDeps()
+			d.Wh.(*fakeWarehouse).fresh = time.Now().Add(tc.ahead)
+			reg := tools.NewRegistry()
+			if err := Register(reg, d); err != nil {
+				t.Fatal(err)
+			}
+			tt, _ := reg.Get("warehouse_freshness")
+			r, err := tt.Run(tools.WithPipelineID(context.Background(), "orders"), json.RawMessage(`{"table":"analytics.orders","ts_column":"updated_at"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			data := r.Data.(map[string]any)
+			_, hasStale := data["stale_for"]
+			if tc.wantFuture {
+				if !strings.Contains(r.Summary, "IN THE FUTURE") || hasStale || data["in_future"] != true {
+					t.Fatalf("summary %q data %v: want the future warning and no stale_for", r.Summary, data)
+				}
+				return
+			}
+			if !strings.Contains(r.Summary, "stale for 0s") || data["stale_for"] != "0s" {
+				t.Fatalf("summary %q data %v: want stale for 0s", r.Summary, data)
+			}
+		})
 	}
 }

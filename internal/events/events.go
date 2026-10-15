@@ -675,6 +675,21 @@ type HandoffSummary struct {
 	Violations []HandoffViolation `json:"violations,omitempty"`
 }
 
+// MarshalJSON keeps "checked and clean" on the wire: omitempty alone drops a
+// non-nil empty Violations, so [] would read as "not checked". A nil
+// Violations is still omitted, so a summary written before F3 marshals byte
+// for byte as before (export hashes).
+func (h HandoffSummary) MarshalJSON() ([]byte, error) {
+	type plain HandoffSummary
+	if h.Violations == nil || len(h.Violations) > 0 {
+		return json.Marshal(plain(h))
+	}
+	return json.Marshal(struct {
+		plain
+		Violations []HandoffViolation `json:"violations"`
+	}{plain(h), h.Violations})
+}
+
 // HandoffViolation is one failed hand-off check (agent.HandoffViolation's
 // wire form). Detail may quote the summary; it is agent text, ≤ 200 bytes. (F3)
 type HandoffViolation struct {

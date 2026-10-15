@@ -76,6 +76,10 @@ interface PendingSend {
 }
 
 const MAX_PENDING = 5
+/** A manual retry this soon after the reconnect delivered the same words is the same message. */
+const DELIVERED_DEDUPE_MS = 2 * 60_000
+
+const samePending = (a: PendingSend, b: PendingSend) => a.kind === b.kind && a.text === b.text && a.stepId === b.stepId
 
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
 
@@ -158,6 +162,8 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   const stateRef = useRef<RoomState | null>(null)
   const localIdRef = useRef(0)
   const pendingRef = useRef<PendingSend[]>([])
+  // What the reconnect drain sent: the composer still shows those words with a Retry button.
+  const deliveredRef = useRef<{ item: PendingSend; at: number }[]>([])
   // Fixture mode: buffer synthetic (user) events until the story replay ends so
   // their seq can never collide with an upcoming story event's seq.
   const storyPlayingRef = useRef(false)
@@ -241,6 +247,8 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
     let firstConnect = true
     let queue: Promise<void> = Promise.resolve()
 
+    // A hidden tab is away: the heartbeat and a reconnect must not flip it back to viewing.
+    const currentPresence = (): PresenceMember['state'] => (document.hidden ? 'away' : 'viewing')
     const sendPresence = (pstate: PresenceMember['state']) => {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'presence', state: pstate }))
@@ -314,7 +322,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         backoff = 1000
         setConn('live')
         setError(null)
-        sendPresence('viewing')
+        sendPresence(currentPresence())
         // Messages typed while the server was away: one retry each, in order. Success
         // emits nothing here (the event arrives over the socket); a failure shows its text.
         const kept = pendingRef.current
@@ -324,7 +332,11 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
             item.kind === 'steer'
               ? api.steer(roomId, item.text)
               : api.comment(roomId, { step_id: item.stepId, text: item.text })
-          call.catch((e: unknown) => setError(errorText(e)))
+          call
+            .then(() => {
+              deliveredRef.current = [...deliveredRef.current, { item, at: Date.now() }].slice(-MAX_PENDING)
+            })
+            .catch((e: unknown) => setError(errorText(e)))
         }
       }
       sock.onmessage = (m) => {
@@ -360,6 +372,13 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
           setConn('error')
           return
         }
+        if (ev?.reason === 'room deleted') {
+          // An admin or retention erased the room (docs/api.md WebSocket): a reconnect gets 404,
+          // so retrying forever would only keep showing a room that no longer exists.
+          setConn('not_found')
+          setError('This room was deleted.')
+          return
+        }
         if (!opened && !probed) {
           // A refused upgrade (401/403/421) shows up as a bare close. Ask the API
           // why, once until a connection succeeds: api.me() reports an auth
@@ -388,14 +407,14 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         connect()
       } catch (e) {
         if (cancelled) return
-        setConn('error')
+        setConn(e instanceof ApiClientError && e.status === 404 ? 'not_found' : 'error')
         setError(errorText(e))
       }
     })()
-    const presenceTimer = window.setInterval(() => sendPresence('viewing'), 20000)
+    const presenceTimer = window.setInterval(() => sendPresence(currentPresence()), 20000)
 
     const onVisibility = () => {
-      sendPresence(document.hidden ? 'away' : 'viewing')
+      sendPresence(currentPresence())
     }
     document.addEventListener('visibilitychange', onVisibility)
 
@@ -441,7 +460,15 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   const sendKept = useCallback(
     async (item: PendingSend): Promise<boolean> => {
       // A manual retry replaces the queued copy, so the text is not sent twice.
-      pendingRef.current = pendingRef.current.filter((p) => !(p.kind === item.kind && p.text === item.text && p.stepId === item.stepId))
+      pendingRef.current = pendingRef.current.filter((p) => !samePending(p, item))
+      // The reconnect already sent it: posting again would steer the agent twice.
+      const fresh = deliveredRef.current.filter((d) => Date.now() - d.at < DELIVERED_DEDUPE_MS)
+      const sent = fresh.findIndex((d) => samePending(d.item, item))
+      deliveredRef.current = sent >= 0 ? fresh.filter((_, i) => i !== sent) : fresh
+      if (sent >= 0) {
+        setError(null)
+        return true
+      }
       try {
         await (item.kind === 'steer'
           ? api.steer(roomId, item.text)

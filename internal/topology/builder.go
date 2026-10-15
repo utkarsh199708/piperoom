@@ -416,9 +416,14 @@ func (b *builder) sinkNode(p owners.Pipeline, s string, info *collected) Node {
 		Health: HealthUnknown,
 	}
 	snap := info.freshness[s]
-	if snap.err != nil {
+	switch {
+	case errors.Is(snap.err, clients.ErrNotFound):
+		// The table or its timestamp column is gone: nothing can load.
+		n.Health = HealthFail
+		n.Facts = map[string]string{"missing": "true"}
+	case snap.err != nil:
 		n.Facts = map[string]string{"error": "unreachable"}
-	} else {
+	default:
 		n.Health, n.Facts = sinkHealth(snap.ts, info.now, b.t)
 	}
 	// The timestamp column is set on every sink node, including unreachable

@@ -407,6 +407,12 @@ function RunConfirmDialog({
           onClosed()
         }}
         onKeyDown={(e) => {
+          // A held Enter that opened this dialog must not also confirm it, not even through the
+          // focused button's own activation: the repeats are swallowed.
+          if (e.key === 'Enter' && e.repeat) {
+            e.preventDefault()
+            return
+          }
           if (e.key === 'Enter' && !busy && !(e.target instanceof HTMLButtonElement && e.target.dataset.cancel)) {
             e.preventDefault()
             onConfirm()
@@ -971,6 +977,10 @@ export function ProposalsPanel({
     canNudge: !isViewer(user) && state.status === 'open',
   }
   const proposals = state.proposals
+  // A closed room takes no decisions (the server answers 409 room_closed), but its proposals keep
+  // status "open": with no decidable layers no card shows Approve, Reject or a "your layer" row,
+  // and A and R do nothing, matching the decision bar, which already hides on a closed room.
+  const decider: CurrentUser = state.status === 'open' ? user : { ...user, layers: [] }
   const nudge: CloseNudge = {
     roomOpen: state.status === 'open',
     driver: state.driver ?? undefined,
@@ -985,7 +995,7 @@ export function ProposalsPanel({
   // A and R belong to one row at a time: the first layer you can decide, in the first such proposal.
   let shortcutKey = ''
   for (const p of proposals) {
-    const layer = p.required_layers.find((l) => canDecideLayer(p, user, l))
+    const layer = p.required_layers.find((l) => canDecideLayer(p, decider, l))
     if (layer) {
       shortcutKey = `${p.proposal_id}/${layer}`
       break
@@ -1014,7 +1024,7 @@ export function ProposalsPanel({
             <Proposal
               key={p.proposal_id}
               proposal={p}
-              user={user}
+              user={decider}
               actions={actions}
               pipelineId={state.pipeline_id}
               sentHash={stale?.proposalId === p.proposal_id ? stale.sentHash : null}

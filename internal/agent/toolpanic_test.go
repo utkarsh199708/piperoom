@@ -98,7 +98,7 @@ func TestReadToolPanicKeepsOneOfSeveral(t *testing.T) {
 }
 
 func TestRoomToolPanicReachesCallerAndUsageRunsOnce(t *testing.T) {
-	turn := mustMessage(t, toolTurnJSON("update_hypothesis", `{"text":"x","based_on_steps":[],"confidence":"high"}`))
+	turn := mustMessage(t, toolTurnJSON("update_hypothesis", `{"text":"x","based_on_steps":[],"confidence":"low"}`))
 	ep := testEndpoint(&scriptedModel{turns: []anthropic.BetaMessage{turn}}, 0)
 	u := &usageRecorder{}
 	sink := &panicOnSink{on: events.AgentHypothesis}

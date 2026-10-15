@@ -203,3 +203,21 @@ describe('the receiver reads the summary before accepting', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 })
+
+// The server voids a pending hand-off when the driver creates a newer one, so the driver can
+// redo it (another person) instead of being stuck on the old summary.
+describe('redoing a pending hand-off', () => {
+  it('Hand off to someone else opens the new hand-off form', () => {
+    const handoff = vi.fn()
+    const state = { ...emptyRoomState('r1'), status: 'open' as const, handoffs: [pendingHandoff] }
+    render(<HandoffDialog state={state} user={user} actions={{ ...actions, handoff }} onClose={() => {}} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Hand off to someone else' }))
+    expect(screen.getByRole('button', { name: /Start hand-off/ })).toBeInTheDocument()
+  })
+
+  it('a closed room offers no redo', () => {
+    const state = { ...emptyRoomState('r1'), status: 'closed' as const, handoffs: [pendingHandoff] }
+    render(<HandoffDialog state={state} user={user} actions={actions} onClose={() => {}} />)
+    expect(screen.queryByRole('button', { name: 'Hand off to someone else' })).toBeNull()
+  })
+})

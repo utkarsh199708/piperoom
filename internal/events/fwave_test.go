@@ -53,6 +53,44 @@ func TestFWaveFieldsAreOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+// A checked, clean hand-off keeps "violations": [] so clients can tell it from
+// an unchecked one, and the field round-trips.
+func TestHandoffViolationsCheckedAndClean(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		v    []events.HandoffViolation
+		want string
+	}{
+		{"not checked", nil, `{"what_broke":"x","why":"","done":null,"ruled_out":null,"open":null,"risks":null}`},
+		{"checked and clean", []events.HandoffViolation{}, `{"what_broke":"x","why":"","done":null,"ruled_out":null,"open":null,"risks":null,"violations":[]}`},
+		{"one violation", []events.HandoffViolation{{Rule: "unknown_number", Field: "why", Detail: "42"}},
+			`{"what_broke":"x","why":"","done":null,"ruled_out":null,"open":null,"risks":null,"violations":[{"rule":"unknown_number","field":"why","detail":"42"}]}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			in := events.HandoffSummary{WhatBroke: "x", Violations: tt.v}
+			b, err := json.Marshal(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(b) != tt.want {
+				t.Fatalf("got  %s\nwant %s", b, tt.want)
+			}
+			var out events.HandoffSummary
+			if err := json.Unmarshal(b, &out); err != nil {
+				t.Fatal(err)
+			}
+			if (out.Violations == nil) != (tt.v == nil) || len(out.Violations) != len(tt.v) {
+				t.Fatalf("round trip: got %#v, want %#v", out.Violations, tt.v)
+			}
+			// As a pointer and inside a payload too.
+			p, _ := json.Marshal(&in)
+			if string(p) != tt.want {
+				t.Fatalf("pointer: got %s", p)
+			}
+		})
+	}
+}
+
 func TestFWaveWireNames(t *testing.T) {
 	types := map[events.Type]string{
 		events.ProposalPreviewed: "proposal.previewed",

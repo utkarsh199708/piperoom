@@ -620,6 +620,9 @@ docker compose -f deploy/docker-compose.pilot.yml -f deploy/docker-compose.dev-a
   run --rm --no-deps --service-ports piperoom --demo
 ```
 
+`--demo` keeps everything in memory (no Postgres, no migrations); every restart empties the rooms.
+Set `PIPEROOM_DB_URL` only for the real mode.
+
 `--no-deps` keeps the bundled Postgres from starting. `--demo` always runs in dev mode, and inside
 the container the server listens on `0.0.0.0`, so it needs the non-loopback switch, which only the
 dev-auth override sets (the image and the pilot file do not). Without the override the server exits

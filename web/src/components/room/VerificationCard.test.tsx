@@ -73,3 +73,17 @@ describe('VerificationCard', () => {
     expect(screen.queryByText('Pipeline recovered.')).not.toBeInTheDocument()
   })
 })
+
+describe('VerificationCard third states', () => {
+  // recovered=false also covers "nothing could be checked" and "inconclusive": neither is a verified failure.
+  it.each([
+    ['not verified: the outcome of proposal "p_1" step 1 is unknown; recovery is not claimed.', 'Not verified'],
+    ['inconclusive: no source changes observed', 'Inconclusive'],
+    ['NOT recovered: a layer check did not pass.', 'Verified · not recovered'],
+  ])('%j heads the card %j', (verdict, heading) => {
+    render(<VerificationCard verification={{ ...base, recovered: false, verdict }} title="t" nudge={nudge} />)
+    expect(screen.getByText(heading)).toBeInTheDocument()
+    expect(screen.queryByText('Pipeline recovered.')).toBeNull()
+    if (heading !== 'Verified · not recovered') expect(screen.queryByText(/^Verified ·/)).toBeNull()
+  })
+})

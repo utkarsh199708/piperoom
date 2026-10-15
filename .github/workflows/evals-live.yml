@@ -160,18 +160,29 @@ jobs:
           fi
           # Misses (tool calls the scenario had no recording for) growing means
           # the agent left the recorded path; fail on that. Cost is only printed.
-          base_miss="$(jq '.overall.misses // 0' evals/baseline/default.json)"
-          cand_miss="$(jq '.overall.misses // 0' cand.json)"
+          # Compare misses per run over the scenarios both reports ran: an -only
+          # run covers a subset of the baseline, and a report sums the misses of
+          # all its runs, so the overall totals of two reports do not compare.
+          read -r n_shared base_miss cand_miss < <(jq -n -r \
+            --slurpfile b evals/baseline/default.json --slurpfile c cand.json '
+            def rate(s): (s | map(.misses) | add // 0) / ([(s | map(.runs) | add // 0), 1] | max);
+            ($c[0].scenarios // [] | map(.name)) as $cand
+            | ($b[0].scenarios // [] | map(select(.name | IN($cand[])))) as $bs
+            | ($bs | map(.name)) as $shared
+            | ($c[0].scenarios // [] | map(select(.name | IN($shared[])))) as $cs
+            | "\($shared | length) \(rate($bs)) \(rate($cs))"')
           base_cost="$(jq '.overall.usage.cost_per_run_usd.mean // empty' evals/baseline/default.json)"
           cand_cost="$(jq '.overall.usage.cost_per_run_usd.mean // empty' cand.json)"
-          echo "misses: baseline ${base_miss}, candidate ${cand_miss}"
+          echo "misses per run over ${n_shared} shared scenario(s): baseline ${base_miss}, candidate ${cand_miss}"
           if [ -n "$base_cost" ] && [ -n "$cand_cost" ]; then
             jq -n --argjson b "$base_cost" --argjson c "$cand_cost" \
               '"cost per run: baseline $\($b), candidate $\($c), delta $\($c - $b) (informational; cost alone never fails the job)"' -r
           else
             echo "cost per run: not priced in one of the reports (set PIPEROOM_MODEL_PRICES to see it)"
           fi
-          if [ "$cand_miss" -gt "$base_miss" ]; then
-            echo "::error::misses grew from ${base_miss} to ${cand_miss}."
+          if [ "$n_shared" = "0" ]; then
+            echo "::notice::no scenario of this run is in the baseline; misses not compared."
+          elif jq -n -e --argjson b "$base_miss" --argjson c "$cand_miss" '$c > $b' >/dev/null; then
+            echo "::error::misses per run grew from ${base_miss} to ${cand_miss} over ${n_shared} shared scenario(s)."
             exit 1
           fi

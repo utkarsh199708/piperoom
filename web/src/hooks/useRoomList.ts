@@ -6,6 +6,7 @@ import { useCurrentUser } from '../context/user'
 import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
 import { sortRoomsForList } from '../lib/rooms'
 import { equalJitter } from '../lib/backoff'
+import { stripBidi } from '../lib/title'
 
 /** Poll period when the push socket is not available (fixtures, refused, failing). */
 export const POLL_MS = 15_000
@@ -20,14 +21,20 @@ const PING_MS = 20_000
 /** How the list stays current: pushed over GET /api/rooms/ws, or polled. */
 export type RoomListMode = 'push' | 'poll'
 
+// Titles are typed text: the bidi controls in one would reorder it in every list, menu and notification.
+function cleanRoom(r: RoomSnapshot): RoomSnapshot {
+  const title = stripBidi(r.title)
+  return title === r.title ? r : { ...r, title }
+}
+
 /** Folds one push frame into the list. Exported for tests. */
 export function foldListFrame(rooms: RoomSnapshot[], msg: ListWsServerMessage): RoomSnapshot[] {
   switch (msg.type) {
     case 'rooms':
-      return sortRoomsForList(msg.rooms ?? [])
+      return sortRoomsForList((msg.rooms ?? []).map(cleanRoom))
     case 'room': {
       const rest = rooms.filter((r) => r.id !== msg.room.id)
-      return sortRoomsForList([...rest, msg.room])
+      return sortRoomsForList([...rest, cleanRoom(msg.room)])
     }
     case 'room_deleted':
       return rooms.filter((r) => r.id !== msg.room_id)
@@ -73,7 +80,7 @@ export function useRoomList({
         // A copy: the fixture array is edited in place (new room, take control).
         setRooms([...fixtureRooms])
       } else {
-        setRooms(await api.rooms())
+        setRooms((await api.rooms()).map(cleanRoom))
       }
       setError(null) // a Retry that works clears the error
       if (modeRef.current === 'poll') setUpdatedAt(Date.now())

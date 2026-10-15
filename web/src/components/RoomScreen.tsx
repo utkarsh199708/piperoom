@@ -34,7 +34,7 @@ import { NoDriverBanner } from './NoDriverBanner'
 import { ChangesLane } from './room/ChangesLane'
 import { LabelDialog } from './room/LabelDialog'
 import { SimilarCard } from './room/SimilarCard'
-import type { ChecklistWiring } from './Timeline'
+import type { ChecklistWiring, CitedStep } from './Timeline'
 import { StaleBanner } from './StaleBanner'
 import { Badge } from '@/components/ui/badge'
 import { ShadowPanel } from './shadow/ShadowPanel'
@@ -86,15 +86,15 @@ export function RoomScreen() {
       get: (): DecisionHandle | null => {
         const h = handleRef.current
         if (!h) return null
-        return {
-          ...h,
-          scrollTo: () => {
-            if (narrowRef.current) {
-              setTab('fix')
-              window.requestAnimationFrame(() => h.scrollTo())
-            } else h.scrollTo()
-          },
+        // Reject opens a reason field in the card: in a hidden Fix panel it could not take focus,
+        // and the card would then refuse every later Approve/Reject while "rejecting".
+        const onFixTab = (run: () => void) => () => {
+          if (narrowRef.current) {
+            setTab('fix')
+            window.requestAnimationFrame(run)
+          } else run()
         }
+        return { ...h, reject: onFixTab(() => h.reject()), scrollTo: onFixTab(() => h.scrollTo()) }
       },
       set: (h: DecisionHandle | null) => void (handleRef.current = h),
     }),
@@ -141,6 +141,19 @@ export function RoomScreen() {
     return () => rememberRoomTitle(undefined)
   }, [state?.title])
   const [layerFilter, setLayerFilter] = useState<string | null>(null)
+  const [citedStep, setCitedStep] = useState<CitedStep | null>(null)
+  const citeNonce = useRef(0)
+  // A citation chip: on the tabbed layout the steps live on the Investigation tab, so it opens first.
+  // A layer filter hides the steps outside it, so it is cleared: the chip must land on its row.
+  const citeStep = useCallback(
+    (id: string) => {
+      if (narrowRef.current) setTab('investigation')
+      setLayerFilter(null)
+      citeNonce.current += 1
+      setCitedStep({ id, nonce: citeNonce.current })
+    },
+    [setTab],
+  )
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [closeOpen, setCloseOpen] = useState(false)
@@ -317,6 +330,7 @@ export function RoomScreen() {
       onVerdict={actions.hypothesisVerdict}
       pipelineId={state.pipeline_id}
       insight={state.insight}
+      onCite={citeStep}
     />
   ) : null
   const proposalsCard = showProposals ? (
@@ -356,6 +370,7 @@ export function RoomScreen() {
         filterLayer={layerFilter ?? undefined}
         onClearFilter={() => setLayerFilter(null)}
         shadow={state.shadow}
+        citedStep={citedStep}
       />
     </section>
     </>
@@ -440,6 +455,7 @@ export function RoomScreen() {
             onExport={viewer ? undefined : exportTranscript}
             exporting={exporting}
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
+            onCite={citeStep}
           />
           <CatchUpStrip strip={catchUp.strip} onDismiss={catchUp.dismiss} />
           <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} />

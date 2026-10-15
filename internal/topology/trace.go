@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -76,8 +77,13 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 		if errors.Is(cerr, ErrBadInput) {
 			return nil, cerr
 		}
+		// No connector config to tell which tables the pipeline streams:
+		// owners.yaml decides, or any table of the database could be read.
+		if !slices.Contains(p.SourceTables, table) {
+			return nil, fmt.Errorf("%w: table %q is not a source table of pipeline %q (Connect is unreachable, so only %v can be traced)", ErrBadInput, table, p.ID, p.SourceTables)
+		}
 		conn = p.Connectors[0]
-		topic = fallbackTopic(table)
+		topic = fallbackTopic(p.TopicPrefix, table)
 		f.connectorErr = cerr
 	}
 	f.connector, f.topic = conn, topic
@@ -179,10 +185,14 @@ func (b *builder) connectorForTable(ctx context.Context, p owners.Pipeline, tabl
 }
 
 // fallbackTopic is used when connector config is unavailable, so the trace
-// keeps a topic stage. The Debezium topic prefix is unknown, so the
-// fully-qualified table name stands in for the topic.
-func fallbackTopic(table string) string {
-	return table
+// keeps a topic stage: Debezium's default name <topic_prefix>.<table>, with
+// owners.yaml's topic_prefix (required there). Without one the table name
+// stands in.
+func fallbackTopic(prefix, table string) string {
+	if prefix == "" {
+		return table
+	}
+	return prefix + "." + table
 }
 
 func (b *builder) pkColumn(ctx context.Context, table string) (string, error) {
