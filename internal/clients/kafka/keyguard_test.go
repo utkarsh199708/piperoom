@@ -78,6 +78,36 @@ func TestDecodeKeyGuard(t *testing.T) {
 		})
 	}
 
+	t.Run("redefined name cannot shadow across schema ids", func(t *testing.T) {
+		const safe = `{"type":"record","name":"ShadowX","fields":[{"name":"v","type":"long"}]}`
+		const hostile = `{"type":"record","name":"Top","fields":[{"name":"a","type":["null","ShadowX"]},{"name":"b","type":{"type":"record","name":"ShadowX","fields":[{"name":"arr","type":{"type":"array","items":"long"}}]}}]}`
+		c := testClientWithRegistry(t, func(w http.ResponseWriter, r *http.Request) {
+			schemas := map[string]string{"/schemas/ids/1": safe, "/schemas/ids/2": hostile}
+			sc, ok := schemas[r.URL.Path]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			b, _ := json.Marshal(map[string]string{"schema": sc})
+			w.Write(b)
+		})
+		// id 1 first, so a process-wide name cache would hold ShadowX{v}.
+		if got, err := c.decodeKey(context.Background(), framed(zigzag(5))); err != nil || got != "5" {
+			t.Fatalf("id 1: %q, %v", got, err)
+		}
+		key := []byte{0x00, 0, 0, 0, 2}
+		key = append(key, framed(raw(0))[5:]...)
+		key = append(key, zigzag(3)...)
+		key = append(key, zigzag(1)...)
+		key = append(key, zigzag(2)...)
+		key = append(key, 0)
+		// With a private parse cache the unresolved ShadowX reference fails the
+		// parse; with the shared cache it parsed and the array was decoded.
+		if got, err := c.decodeKey(context.Background(), key); err == nil {
+			t.Fatalf("decoded %q, want an error", got)
+		}
+	})
+
 	t.Run("refusal verdict cached per id", func(t *testing.T) {
 		var n int
 		c := registryWith(t, arr, &n)
@@ -99,7 +129,6 @@ func TestDecodeKeyGuard(t *testing.T) {
 		{"record string+long", `{"type":"record","name":"K","fields":[{"name":"s","type":"string"},{"name":"n","type":"long"}]}`,
 			framed(zigzag(2), raw('a', 'b'), zigzag(7)), `{"n":7,"s":"ab"}`},
 		{"single long field", `{"type":"record","name":"K","fields":[{"name":"id","type":"long"}]}`, framed(zigzag(42)), "42"},
-		{"recursive without array", recNoArr, framed(zigzag(3), raw(0)), `{"id":3,"next":null}`},
 	}
 	for _, tt := range good {
 		t.Run("ok "+tt.name, func(t *testing.T) {

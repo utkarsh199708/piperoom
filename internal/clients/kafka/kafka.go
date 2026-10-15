@@ -44,9 +44,9 @@ type Client struct {
 
 	srMu    sync.Mutex
 	srCache map[int]avro.Schema
-	// keyRefused caches, per schema id, that the schema holds array/map types
-	// and is refused for key decoding (the walk runs once per id).
-	keyRefused map[int]bool
+	// keyRefused caches, per schema id, why the schema is refused for key
+	// decoding ("" = fine); the walk runs once per id.
+	keyRefused map[int]string
 	// keyAPI decodes untrusted keys with size caps; built in New, lazily for
 	// zero-value test clients.
 	keyAPI avro.API
@@ -70,7 +70,7 @@ var _ clients.KafkaAdmin = (*Client)(nil)
 // connOpts are connection options such as kgo.DialTLSConfig and kgo.SASL; most
 // callers want NewSecure instead.
 func New(brokers []string, sr *schemareg.Client, connOpts ...kgo.Opt) (*Client, error) {
-	c := &Client{brokers: brokers, connOpts: append([]kgo.Opt(nil), connOpts...), sr: sr, srCache: map[int]avro.Schema{}, keyRefused: map[int]bool{}, keyAPI: newKeyAPI()}
+	c := &Client{brokers: brokers, connOpts: append([]kgo.Opt(nil), connOpts...), sr: sr, srCache: map[int]avro.Schema{}, keyRefused: map[int]string{}, keyAPI: newKeyAPI()}
 	cl, err := c.newKgo()
 	if err != nil {
 		return nil, fmt.Errorf("kafka: new client: %w", err)
@@ -411,6 +411,14 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 				finished[r.Partition] = true
 				continue
 			}
+			if cctx.Err() != nil {
+				// Check between records so a batch of slow keys cannot run past the scan deadline.
+				total := 0
+				for _, n := range scanned {
+					total += n
+				}
+				return nil, fmt.Errorf("kafka: scan %s incomplete after %d records: %w", topic, total, cctx.Err())
+			}
 			scanned[r.Partition]++
 			dk, derr := c.decodeKey(cctx, r.Key)
 			if derr == nil && dk == key {
@@ -494,12 +502,14 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 // decodeKey decodes a Confluent Avro key into a comparable string. Raw
 // (non-Confluent) keys are returned as-is. Parsed schemas are cached by id.
 //
-// The key is attacker-controlled, including the schema id, so array/map block
-// decoding (GO-2026-5046/5047/5048) is made unreachable: oversized keys and
-// schemas containing array or map types are refused, the decoder is capped
-// (see newKeyAPI), and a decoder panic becomes an error. Decode takes no
-// context; with no array/map in the schema every read is bounded by the key
-// size (at most 64 KiB), so no deadline is needed.
+// The key is attacker-controlled, including the schema id, so the decode is
+// bounded by construction (GO-2026-5046/5047/5048): keys over 64 KiB are
+// refused; key schemas are parsed in a private cache and refused if they hold
+// array/map types, recursion, fixed sizes or decimal precision/scale beyond
+// the caps in checkKeySchema; the decoder is capped (see newKeyAPI); and a
+// decoder panic becomes an error. Decode takes no context, so these limits,
+// not a deadline, are what bound its time and memory; FindByKey also checks
+// its deadline between records.
 func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err error) {
 	// Without a Schema Registry (SCHEMA_REGISTRY_URL empty or off) no key is
 	// Avro-decoded: a key that merely starts with 0x00 is compared raw.
@@ -521,13 +531,14 @@ func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err err
 	}
 	c.srMu.Lock()
 	refused := c.keyRefused[id]
+
 	if c.keyAPI == nil {
 		c.keyAPI = newKeyAPI()
 	}
 	api := c.keyAPI
 	c.srMu.Unlock()
-	if refused {
-		return "", fmt.Errorf("kafka: avro key schema %d has array/map types; refused", id)
+	if refused != "" {
+		return "", fmt.Errorf("kafka: avro key schema %d refused: %s", id, refused)
 	}
 	if c.decodeHook != nil {
 		c.decodeHook()
@@ -562,47 +573,90 @@ func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, err = avro.Parse(schemaStr)
+	// A fresh cache per schema: avro.Parse shares a process-wide cache, so a
+	// name defined by an earlier (safe) schema would shadow a hostile
+	// redefinition in this one and hide it from the walk below.
+	s, err = avro.ParseWithCache(schemaStr, "", &avro.SchemaCache{})
 	if err != nil {
 		return nil, err
 	}
-	bad := hasArrayOrMap(s, map[string]bool{})
+	var bad string
+	if err := checkKeySchema(s); err != nil {
+		bad = err.Error()
+	}
 	c.srMu.Lock()
 	c.srCache[id] = s
 	if c.keyRefused == nil {
-		c.keyRefused = map[int]bool{}
+		c.keyRefused = map[int]string{}
 	}
 	c.keyRefused[id] = bad
 	c.srMu.Unlock()
 	return s, nil
 }
 
-// hasArrayOrMap reports whether s contains an array or map type. Named types
-// are visited once (by full name), so recursive schemas terminate.
-func hasArrayOrMap(s avro.Schema, seen map[string]bool) bool {
+// maxDecimalDigits is the DECIMAL256 maximum; hamba computes 10^scale on every
+// decode, so larger values are a cheap amplification.
+const maxDecimalDigits = 76
+
+// checkKeySchema returns an error if decoding a key with s could allocate or
+// spin beyond what the 64 KiB key implies: arrays and maps (block counts),
+// recursive records, fixed sizes above the key cap (hamba allocates at decoder
+// build time), and oversized decimal precision/scale. Named records are
+// tracked by pointer, never by name, so a redefinition cannot hide.
+func checkKeySchema(s avro.Schema) error {
+	w := &keyWalk{onPath: map[*avro.RecordSchema]bool{}, done: map[*avro.RecordSchema]bool{}}
+	return w.walk(s)
+}
+
+type keyWalk struct {
+	onPath, done map[*avro.RecordSchema]bool
+	fixedTotal   int
+}
+
+func (w *keyWalk) walk(s avro.Schema) error {
 	switch t := s.(type) {
 	case *avro.ArraySchema, *avro.MapSchema:
-		return true
+		return errors.New("array/map type")
 	case *avro.RefSchema:
-		return hasArrayOrMap(t.Schema(), seen)
+		return w.walk(t.Schema())
 	case *avro.RecordSchema:
-		if seen[t.FullName()] {
-			return false
+		if w.onPath[t] {
+			return errors.New("recursive record " + t.FullName())
 		}
-		seen[t.FullName()] = true
+		if w.done[t] {
+			return nil
+		}
+		w.onPath[t] = true
+		defer delete(w.onPath, t)
 		for _, f := range t.Fields() {
-			if hasArrayOrMap(f.Type(), seen) {
-				return true
+			if err := w.walk(f.Type()); err != nil {
+				return err
 			}
 		}
+		w.done[t] = true
 	case *avro.UnionSchema:
 		for _, u := range t.Types() {
-			if hasArrayOrMap(u, seen) {
-				return true
+			if err := w.walk(u); err != nil {
+				return err
 			}
 		}
+	case *avro.FixedSchema:
+		w.fixedTotal += t.Size()
+		if t.Size() < 0 || w.fixedTotal > maxKeyBytes {
+			return errors.New("fixed size above key cap")
+		}
+		return checkDecimal(t.Logical())
+	case *avro.PrimitiveSchema:
+		return checkDecimal(t.Logical())
 	}
-	return false
+	return nil
+}
+
+func checkDecimal(l avro.LogicalSchema) error {
+	if d, ok := l.(*avro.DecimalLogicalSchema); ok && (d.Precision() > maxDecimalDigits || d.Scale() > maxDecimalDigits) {
+		return errors.New("decimal precision/scale above cap")
+	}
+	return nil
 }
 
 func isInternal(name string) bool {
