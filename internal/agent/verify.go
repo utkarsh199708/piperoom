@@ -469,9 +469,16 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) verifyR
 	var checks []events.VerificationCheck
 	layersOK := true
 	for _, c := range verifyChecks(rec.steps) {
-		ok, line := r.runVerifyCheck(ctx, c)
+		ok, line, ids := r.runVerifyCheck(ctx, c)
 		layersOK = layersOK && ok
-		lines = append(lines, c.name+": "+line)
+		// The model gets the step ids of the reads, so it can cite this
+		// re-check instead of reading the same component again; the room's
+		// check detail stays free of ids.
+		label := c.name
+		if len(ids) > 0 {
+			label += " (step " + strings.Join(ids, ", step ") + ")"
+		}
+		lines = append(lines, label+": "+line)
 		checks = append(checks, events.VerificationCheck{Layer: c.layer, Name: c.name, OK: ok, Detail: clipLine(line)})
 	}
 	if !layersOK {
@@ -981,50 +988,62 @@ func pgSlotsRecovered(res tools.Result) bool {
 }
 
 // runVerifyCheck runs one layer check. A settling check must also pass a second
-// read after settleWait. It returns whether the check passed and an evidence
-// line.
-func (r *runner) runVerifyCheck(ctx context.Context, c verifyCheck) (bool, string) {
-	ok, line := r.readCheck(ctx, c)
+// read after settleWait. It returns whether the check passed, an evidence
+// line, and the step ids of the reads that ran.
+func (r *runner) runVerifyCheck(ctx context.Context, c verifyCheck) (bool, string, []string) {
+	ok, line, id := r.readCheck(ctx, c)
+	ids := appendID(nil, id)
 	if !ok || !c.settle {
-		return ok, line
+		return ok, line, ids
 	}
 	if err := r.clk.Sleep(ctx, r.timing.settleWait); err != nil {
-		return false, "settling: " + err.Error()
+		return false, "settling: " + err.Error(), ids
 	}
-	ok, again := r.readCheck(ctx, c)
-	return ok, line + "; read again after " + r.timing.settleWait.String() + ": " + again
+	ok, again, id := r.readCheck(ctx, c)
+	return ok, line + "; read again after " + r.timing.settleWait.String() + ": " + again, appendID(ids, id)
+}
+
+// appendID appends a step id when one was made.
+func appendID(ids []string, id string) []string {
+	if id == "" {
+		return ids
+	}
+	return append(ids, id)
 }
 
 // readCheck reads one layer check once and judges it. It returns whether the
-// check passed and the evidence line (a tool summary, or an error message).
-func (r *runner) readCheck(ctx context.Context, c verifyCheck) (bool, string) {
-	res, err := r.runVerifyTool(ctx, c.name, c.input)
+// check passed, the evidence line (a tool summary, or an error message) and
+// the read's step id ("" when no step was started).
+func (r *runner) readCheck(ctx context.Context, c verifyCheck) (bool, string, string) {
+	res, id, err := r.runStepID(ctx, "verify", c.name, c.input)
 	if err != nil {
-		return false, "error: " + err.Error()
+		return false, "error: " + err.Error(), id
 	}
-	return c.judge(res), clipLine(res.Summary)
+	return c.judge(res), clipLine(res.Summary), id
 }
 
-// runVerifyTool executes one read tool for verification, emitting the same
+// runStep executes one read tool for verification, emitting the same
 // step/tool events a normal read-tool call produces, and returns the raw
-// result so the caller can judge it.
-func (r *runner) runVerifyTool(ctx context.Context, name string, input json.RawMessage) (tools.Result, error) {
-	return r.runStep(ctx, "verify", name, input)
+// result so the caller can judge it. The room step is titled verb + " " +
+// name, so the room tells a creation baseline read ("baseline ...") from a
+// check read ("verify ...").
+func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawMessage) (tools.Result, error) {
+	res, _, err := r.runStepID(ctx, verb, name, input)
+	return res, err
 }
 
-// runStep is runVerifyTool with the room step titled verb + " " + name, so the
-// room tells a creation baseline read ("baseline ...") from a check read
-// ("verify ...").
-func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawMessage) (tools.Result, error) {
+// runStepID is runStep that also returns the step id it recorded in the
+// ledger ("" when the read was refused before a step started).
+func (r *runner) runStepID(ctx context.Context, verb, name string, input json.RawMessage) (tools.Result, string, error) {
 	entry, ok := r.toolList.byName[name]
 	if !ok {
-		return tools.Result{}, fmt.Errorf("agent: verify: unknown tool %q", name)
+		return tools.Result{}, "", fmt.Errorf("agent: verify: unknown tool %q", name)
 	}
 	if entry.isRoom {
-		return tools.Result{}, fmt.Errorf("agent: verify: %q is not a read tool", name)
+		return tools.Result{}, "", fmt.Errorf("agent: verify: %q is not a read tool", name)
 	}
 	if err := validateInput(entry.schema, input); err != nil {
-		return tools.Result{}, fmt.Errorf("agent: verify: invalid input for %s: %w", name, err)
+		return tools.Result{}, "", fmt.Errorf("agent: verify: invalid input for %s: %w", name, err)
 	}
 
 	stepID := newStepID()
@@ -1066,7 +1085,7 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 			Provenance: prov,
 		})
 		r.steps.addWithInput(stepID, name, string(input), summary, true)
-		return tools.Result{}, err
+		return tools.Result{}, stepID, err
 	}
 	summary, reTruncated := tools.Truncate(res.Summary)
 	r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
@@ -1076,7 +1095,7 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 		Provenance: prov,
 	})
 	r.steps.addWithInput(stepID, name, string(input), summary, false)
-	return res, nil
+	return res, stepID, nil
 }
 
 // stringParam reads one string field from a proposal step's action params.

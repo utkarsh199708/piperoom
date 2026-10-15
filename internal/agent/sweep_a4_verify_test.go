@@ -124,3 +124,34 @@ func TestUntrustedWrapperRemovesTagText(t *testing.T) {
 		t.Fatalf("the hidden run must be marked once: %q", got)
 	}
 }
+
+// The verification note names the step ids of its reads, and each is in the
+// ledger, so the model can cite the re-check instead of reading again.
+func TestVerificationNoteCarriesCitableStepIDs(t *testing.T) {
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	sink, out, r := verifyOnce(t, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps(), "proposal p_1 step 1: backfilled")
+	var ids []string
+	for _, e := range sink.ofType(events.AgentStepStart) {
+		var p events.AgentStepStartPayload
+		if json.Unmarshal(e.payload, &p) == nil && p.Title == "verify connect_status" {
+			ids = append(ids, p.StepID)
+		}
+	}
+	if len(ids) == 0 || len(out.notes) != 1 {
+		t.Fatalf("steps %v, notes %q", ids, out.notes)
+	}
+	for _, id := range ids {
+		if !strings.Contains(out.notes[0], "step "+id) {
+			t.Fatalf("note lacks step %s: %q", id, out.notes[0])
+		}
+		if _, ok := r.steps.get(id); !ok {
+			t.Fatalf("step %s not in the ledger", id)
+		}
+	}
+	// The room's check detail stays free of step ids.
+	for _, c := range verifications(sink)[0].Checks {
+		if strings.Contains(c.Detail, "s_") {
+			t.Fatalf("check detail carries an id: %q", c.Detail)
+		}
+	}
+}
