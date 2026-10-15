@@ -31,4 +31,19 @@ describe('NoDriverBanner and owner pages', () => {
     expect(screen.getByText(/No one is driving/)).toBeInTheDocument()
     expect(screen.queryByText(/Owners paged/)).not.toBeInTheDocument()
   })
+
+  // QA R5 (G2): a page that named nobody must not read as "Owners paged".
+  it('a page with no owner listed says the layer was paged, not that owners were', () => {
+    const state = { ...emptyRoomState('r_webhook'), pages: [{ ...paged('postgres', 1), owners: [] }] }
+    render(<NoDriverBanner state={state} user={arjun} actions={actions} />)
+    expect(screen.getByText('postgres paged, no owner listed')).toBeInTheDocument()
+    expect(screen.queryByText(/Owners paged/)).not.toBeInTheDocument()
+  })
+
+  it('a layer with an owner is listed as paged; one without is named separately', () => {
+    const state = { ...emptyRoomState('r_webhook'), pages: [paged('consumer', 1), { ...paged('postgres', 2), owners: [] }] }
+    render(<NoDriverBanner state={state} user={arjun} actions={actions} />)
+    expect(screen.getByText('Owners paged: consumer')).toBeInTheDocument()
+    expect(screen.getByText('postgres paged, no owner listed')).toBeInTheDocument()
+  })
 })

@@ -22,7 +22,7 @@ import { AgentText, StepNumbersProvider } from './room/AgentText'
 import { RoomDialogClose } from './room/RoomDialogClose'
 import { SummaryFields } from './room/SummaryFields'
 import { useNow } from './room/useNow'
-import { useRestoreFocus } from './room/useRestoreFocus'
+import { useFollowClose, useRestoreFocus } from './room/useRestoreFocus'
 
 function SummaryList({ title, items }: { title: string; items: string[] }) {
   if (!items || items.length === 0) return null
@@ -62,6 +62,7 @@ export function HandoffDialog({
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState<{ code?: string; text: string } | null>(null)
   const restoreFocus = useRestoreFocus()
+  const follow = useFollowClose(onClose, restoreFocus)
   const pending = state.handoffs.find((h) => h.status === 'pending')
   const now = useNow(5_000)
   const inFlight = pending ? null : handoffInFlight(state, now)
@@ -108,7 +109,7 @@ export function HandoffDialog({
         hideClose
         className="max-h-[85vh] overflow-y-auto"
         onKeyDown={pending || inFlight ? undefined : onKeyDown}
-        onCloseAutoFocus={restoreFocus}
+        onCloseAutoFocus={follow.onCloseAutoFocus}
       >
         <RoomDialogClose label="Close hand-off dialog" />
         <DialogHeader>
@@ -125,7 +126,7 @@ export function HandoffDialog({
         </DialogHeader>
 
         {pending ? (
-          <StepNumbersProvider steps={state.steps}>
+          <StepNumbersProvider steps={state.steps} onFollow={follow.onFollow}>
             <HandoffSummary summary={pending.summary} writtenBy={pending.manual ? (pending.written_by?.name ?? 'the driver') : undefined}>
               <Button type="button" variant="secondary" onClick={onClose}>
                 Close
@@ -271,9 +272,10 @@ function HandoffReceiveDialog({
   onClose: () => void
 }) {
   const restoreFocus = useRestoreFocus()
+  const follow = useFollowClose(onClose, restoreFocus)
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent hideClose className="max-h-[85vh] overflow-y-auto" onCloseAutoFocus={restoreFocus}>
+      <DialogContent hideClose className="max-h-[85vh] overflow-y-auto" onCloseAutoFocus={follow.onCloseAutoFocus}>
         <RoomDialogClose label="Close hand-off summary" />
         <DialogHeader>
           <DialogTitle>Hand-off from {from}</DialogTitle>
@@ -282,7 +284,7 @@ function HandoffReceiveDialog({
             {handoff.stay_as_watcher ? `; ${from} stays in the room as a watcher.` : '.'}
           </DialogDescription>
         </DialogHeader>
-        <StepNumbersProvider steps={steps}>
+        <StepNumbersProvider steps={steps} onFollow={follow.onFollow}>
           <HandoffSummary summary={handoff.summary} writtenBy={handoff.manual ? (handoff.written_by?.name ?? from) : undefined}>
             <Button type="button" variant="ghost" onClick={onClose}>
               Not yet

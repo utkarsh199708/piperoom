@@ -59,15 +59,30 @@ export function triageLine(
 }
 
 /**
- * Scrolls to and briefly highlights a step of the room. Step links are not `#step-` hrefs: the app
- * uses HashRouter, where a fragment is the route, so following one leaves the room (QA F19).
+ * Fired on window when a step link names a step that is not in the DOM. The timeline listens and
+ * clears a layer filter that hides the step (QA R18), so the step renders and can be shown.
  */
-export function goToStep(stepId: string): void {
+export const REVEAL_STEP_EVENT = 'piperoom:reveal-step'
+
+function focusStep(stepId: string): boolean {
   const el = document.getElementById(stepAnchor(stepId))
-  if (!el) return
+  if (!el) return false
   el.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
   el.setAttribute('tabindex', '-1')
   el.focus({ preventScroll: true })
   el.classList.add('ring-2', 'ring-ring')
   window.setTimeout(() => el.classList.remove('ring-2', 'ring-ring'), 2000)
+  return true
+}
+
+/**
+ * Scrolls to and briefly highlights a step of the room. Step links are not `#step-` hrefs: the app
+ * uses HashRouter, where a fragment is the route, so following one leaves the room (QA F19).
+ * A step that is not rendered (a layer filter hides it) is revealed through REVEAL_STEP_EVENT, then
+ * found on the next tick, once React has rendered the change.
+ */
+export function goToStep(stepId: string): void {
+  if (focusStep(stepId)) return
+  window.dispatchEvent(new CustomEvent<string>(REVEAL_STEP_EVENT, { detail: stepId }))
+  window.setTimeout(() => focusStep(stepId), 0)
 }
