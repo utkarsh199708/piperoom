@@ -1,6 +1,7 @@
 package kafkatools
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -350,9 +351,6 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 		fmt.Fprintf(&sb, "not found: no record with key %q since %s", p.Key, p.Since)
 	default:
 		fmt.Fprintf(&sb, "found %d record(s) with key %q", len(refs), p.Key)
-		for _, r := range refs {
-			fmt.Fprintf(&sb, "\n  partition %d, offset %d, %s", r.Partition, r.Offset, r.Timestamp.Format(time.RFC3339))
-		}
 	}
 	data := map[string]any{"topic": p.Topic, "key": p.Key, "found": len(refs) > 0, "records": refs}
 	switch {
@@ -375,7 +373,37 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	default:
 		data["truncated"] = false
 	}
+	// The list goes after the notes, so a long one cannot push them past
+	// MaxSummaryBytes.
+	writeNewestRefs(&sb, refs)
 	return res(sb.String(), data), nil
+}
+
+// findMaxListed caps the matches kafka_find_by_key lists in Summary: about 45
+// bytes each, so the list stays well inside tools.MaxSummaryBytes. Data keeps
+// every match.
+const findMaxListed = 100
+
+// writeNewestRefs lists at most findMaxListed matches, newest first: a hot
+// CDC key can match hundreds of records, and the newest are the ones an
+// investigation needs. A last line counts the older ones left out.
+func writeNewestRefs(sb *strings.Builder, refs []clients.RecordRef) {
+	byAge := slices.Clone(refs)
+	slices.SortStableFunc(byAge, func(a, b clients.RecordRef) int {
+		if c := b.Timestamp.Compare(a.Timestamp); c != 0 {
+			return c
+		}
+		if a.Partition != b.Partition {
+			return cmp.Compare(a.Partition, b.Partition)
+		}
+		return cmp.Compare(b.Offset, a.Offset)
+	})
+	for _, r := range byAge[:min(len(byAge), findMaxListed)] {
+		fmt.Fprintf(sb, "\n  partition %d, offset %d, %s", r.Partition, r.Offset, r.Timestamp.Format(time.RFC3339))
+	}
+	if n := len(byAge) - findMaxListed; n > 0 {
+		fmt.Fprintf(sb, "\n%d older match(es) not listed; Data.records has them all", n)
+	}
 }
 
 // findKey uses clients.KeyScanReader when the client has it; reported is
