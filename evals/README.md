@@ -553,15 +553,23 @@ fix not recovered) and a room with a planted credential.
 
 ## CI (evals-live)
 
-`.github/workflows/evals-live.yml` runs `go run ./evals/cmd/evalrun -runs 3 -label ci -out cand.json` against the
-hosted model, on `workflow_dispatch` and nightly (`schedule`). The `pull_request` trigger (limited to
-`internal/agent/**`, `internal/wiring/model.go`, `internal/config/config.go`, `evals/scenarios/**`) is switched
-off in the job (`if: false`) until `evals/baseline/default.json` is on `main`; one more PR then turns it on. The
+`.github/workflows/evals-live.yml` runs `evalrun -label ci -out cand.json` against the hosted model. Today it
+runs only on `workflow_dispatch`, whose inputs pick the scope: `only` (scenario names, or `all`; default
+`schema-change`), `runs` (default 1) and `max_turns` (default 25). The nightly `schedule` is commented out
+while the API budget is small. The `pull_request` trigger (limited to `internal/agent/**`,
+`internal/wiring/model.go`, `internal/config/config.go`, `evals/scenarios/**`) is switched off in the job
+(`false &&`); a later PR turns it on. The
 repository is public, so the job never uses `pull_request_target`, runs PRs only from this repository's own
 branches, and uploads only the report of the committed synthetic scenarios (`cand.json`, 14 days). The learned
 set stays in a private store and is never passed with `-learned`. When a baseline file exists the run adds
-`-baseline evals/baseline/default.json -fail-on-regression`: the job fails on a regression by the rule above
-or when `misses` grew. It prints the paired comparison and the cost-per-run delta, and never fails on cost alone.
+`-baseline evals/baseline/default.json -fail-on-regression`: the job fails on a regression by the rule above,
+or when misses per run grew over the scenarios both reports ran (an `-only` run is compared with the same
+scenarios of the baseline, and a 3-run report with a 1-run baseline per run, not by totals). It prints the
+paired comparison and the cost-per-run delta, and never fails on cost alone.
+
+With `runs: 1`, one flipped result fails the job: missing the expected fix alone costs 20 points, over the
+tolerance of 5. Treat a 1-run failure as a lead, not a verdict: run the same scenarios again with `runs: 3`
+on the branch and on `main`, and compare the two.
 
 **Add the secret.** Settings → Environments → New environment `evals`. Add `ANTHROPIC_API_KEY` as an
 *environment* secret there (not a repository secret), and add the owner under *Required reviewers* so no run
@@ -572,9 +580,10 @@ spends money without approval. Without the secret the job prints a `::notice::` 
 as `evals/baseline/default.json` in a PR. Read the diff of the report, not just the code. Refresh it in the
 same PR as any *intended* prompt change. The held-out set is never part of CI or the baseline.
 
-**Cost.** Not yet measured: the first `make_baseline` run prices one full `-runs 3` pass if
-`PIPEROOM_MODEL_PRICES` is set; record the number here. Above $5, run only the learned and schema-change sets
-on PRs and the full set nightly.
+**Cost.** The workflow prices every run (`-prices`, `docs/design/cost.md`). The 1-run baseline of 2026-10-14
+(25 scenarios, Opus 5.5, effort high) cost $0.22 per episode on average, so a full `-runs 3` pass (75
+episodes) is about $17. That is above $5, so PR runs should cover only the scenarios the change touches,
+and the full set runs by hand (or nightly, once the schedule is back on).
 
 `go test ./...` and `go test ./evals/...` never need the key.
 
