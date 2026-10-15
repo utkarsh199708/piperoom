@@ -48,6 +48,12 @@ export function CommandMenu({
   // 'dialog' = an action that opens a dialog (it keeps the focus), 'other' = anything else.
   const closedBy = useRef<'dialog' | 'other' | null>(null)
   const mod = modKeyLabel()
+  // What had focus before the palette opened. Read while rendering the opening frame, before
+  // Radix moves focus into the palette. Dialogs note document.activeElement when they mount, and
+  // the palette is gone by then, so run() puts the focus back here first.
+  const opener = useRef<Element | null>(null)
+  if (!open) opener.current = null
+  else if (opener.current === null && typeof document !== 'undefined') opener.current = document.activeElement
 
   // Read when the menu renders, i.e. when it opens: the room screen wrote it by then.
   const room = open ? registry.get() : null
@@ -55,9 +61,17 @@ export function CommandMenu({
 
   const run = (fn: () => void, opensDialog = false) => {
     closedBy.current = opensDialog ? 'dialog' : 'other'
+    const from = opener.current
     onOpenChange(false)
     // After the menu has closed, so a dialog it opens (hand-off, trace) keeps the focus.
-    window.setTimeout(fn, 0)
+    window.setTimeout(() => {
+      // The dialog records the focused element when it mounts: make that the pre-palette one.
+      // A gone or hidden element is skipped, so the dialog falls back to #main.
+      if (opensDialog && from instanceof HTMLElement && from.isConnected && !from.closest('[hidden]')) {
+        from.focus({ preventScroll: true })
+      }
+      fn()
+    }, 0)
   }
 
   return (
