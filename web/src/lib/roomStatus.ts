@@ -4,6 +4,7 @@ import type { RoomSnapshot } from '../api/types'
 import type { RoomState } from '../state/types'
 import type { Dot } from './rooms'
 import { ageLabel } from './time'
+import { verdictKind, verdictWords } from './execution'
 
 /** Precedence is this order: the first kind that applies wins. */
 export type StatusKind =
@@ -37,6 +38,8 @@ export interface StatusProposal {
   /** Steps in the proposal; 0 when unknown (the list snapshot has none). */
   steps: number
   executed: { ok: boolean }[]
+  /** The agent's verdict on the fix, once it ran (the list snapshot has none). */
+  verification?: { recovered: boolean; verdict?: string }
 }
 
 export interface RoomStatusInput {
@@ -85,7 +88,13 @@ export function roomStatus(input: RoomStatusInput, now = Date.now()): RoomStatus
       const k = approved.executed.length + 1
       return info('executing', `Executing fix · ${k} of ${approved.steps}`, 'agent', k)
     }
-    if (approved.executed.length > 0 && agent !== 'done') return info('fixed', 'Fix ran · verifying', 'ok')
+    if (approved.executed.length > 0 && agent !== 'done') {
+      // The verdict is in: a fix that did not recover the pipeline must not read as a green "verifying".
+      const v = approved.verification ? verdictKind(approved.verification) : null
+      if (v === 'not-recovered') return info('fix-failed', 'Fix ran · not recovered', 'fail')
+      if (v === 'not-verified' || v === 'inconclusive') return info('fixed', `Fix ran · ${verdictWords(v)}`, 'warn')
+      return info('fixed', v === 'recovered' ? 'Fix ran · recovered' : 'Fix ran · verifying', 'ok')
+    }
   }
 
   const awaiting = input.proposals.some(
@@ -116,6 +125,7 @@ export function statusInputFromState(s: RoomState): RoomStatusInput {
       approvals: p.approvals,
       steps: p.steps.length,
       executed: p.executed,
+      verification: p.verification,
     })),
     steps: s.steps.length,
   }

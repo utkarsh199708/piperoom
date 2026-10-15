@@ -204,6 +204,32 @@ describe('ProposalsSummary', () => {
     expect(screen.getByText('2 of 2')).toBeInTheDocument()
   })
 
+  // "Approved 1 of 1" on a fix whose step failed, or that was verified NOT recovered, hides the news.
+  it.each([
+    ['a failed step', [{ proposal_id: 'p1', step_index: 0, ok: false, output: 'boom' }], undefined, 'Step 1 failed'],
+    ['an unknown outcome', [{ proposal_id: 'p1', step_index: 0, ok: false, output: '', outcome_unknown: true }], undefined, 'Step 1 outcome unknown'],
+    ['no verdict yet', [{ proposal_id: 'p1', step_index: 0, ok: true, output: 'ok' }], undefined, 'Ran · verifying'],
+    ['NOT recovered', [{ proposal_id: 'p1', step_index: 0, ok: true, output: 'ok' }], { recovered: false, verdict: 'NOT recovered: a layer check did not pass.' }, 'Ran · not recovered'],
+    ['recovered', [{ proposal_id: 'p1', step_index: 0, ok: true, output: 'ok' }], { recovered: true, verdict: 'recovered: all good' }, 'Ran · recovered'],
+  ])('an approved proposal after %s reads %j', (_, executed, v, word) => {
+    const verification = v && { proposal_id: 'p1', checks: [], ...v }
+    render(
+      <ProposalsSummary
+        proposals={[
+          proposal({
+            status: 'approved',
+            steps: [{ action: 'connect_restart_task', layer: 'kafka-connect', params: {}, description: 'restart' }],
+            approvals: { 'schema-registry': 'approved', 'kafka-connect': 'approved' },
+            executed,
+            verification,
+          }),
+        ]}
+      />,
+    )
+    expect(screen.getByText(word)).toBeInTheDocument()
+    expect(screen.queryByText('Approved')).toBeNull()
+  })
+
   it('jumps to the proposal on the page without touching the hash route', () => {
     const target = document.createElement('div')
     target.id = PROPOSAL_ANCHOR

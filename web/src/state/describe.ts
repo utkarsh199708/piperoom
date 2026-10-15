@@ -1,6 +1,7 @@
 // Turns an event into one curated line for the activity feed. Pure: no ids ever reach the text,
 // and nothing here builds HTML (the feed renders `text` as text nodes, `{tool}` as <code>).
 import { neutralizeBadgeText } from '../lib/verification'
+import { verdictKind, verdictWords } from '../lib/execution'
 import type {
   ActionExecutedPayload,
   AgentVerificationPayload,
@@ -225,7 +226,9 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       return { text: 'Previewed what the fix will do', kind: 'decision' }
     case 'agent.verification': {
       const p = as<AgentVerificationPayload>(e)
-      return { text: `Verification: ${p.recovered ? 'recovered' : 'not recovered'}`, kind: 'decision' }
+      // A repeat re-states the first verdict (no check ran again): one line already announced it.
+      if (p.repeat) return { text: 'Verification already recorded', kind: 'system' }
+      return { text: `Verification: ${verdictWords(verdictKind(p))}`, kind: 'decision' }
     }
     case 'approval.given': {
       const p = as<ApprovalGivenPayload>(e)
