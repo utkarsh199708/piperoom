@@ -129,3 +129,22 @@ func TestProposeFixVerifyTooLong(t *testing.T) {
 		}
 	}
 }
+
+// A data-flow check that could not read a table puts the read error in
+// DataFlowCheck.Detail; it is clipped like a per-check detail.
+func TestVerificationDataFlowDetailIsClipped(t *testing.T) {
+	long := strings.Repeat("x", 3*verifyEvidenceBytes)
+	got := (flowResult{detail: long}).dataFlowCheck("").Detail
+	if len(got) > verifyEvidenceBytes+len("…") || !strings.HasSuffix(got, "…") {
+		t.Fatalf("detail not clipped: %d bytes", len(got))
+	}
+}
+
+// A recovered verdict with no NONE subject posts no follow-up message.
+func TestVerificationNoFollowUpMessageWhenNoneAbsent(t *testing.T) {
+	connect := &fakeVerifyTool{name: "connect_status", schema: connectSchema(), result: connectRecoveredResult()}
+	sink, _, _ := verifyOnce(t, []tools.Tool{connect, pipelineMapTool("analytics.orders"), freshWarehouseTool()}, recoveredSteps(), "proposal p_1 step 1: backfilled")
+	if n := len(sink.ofType(events.AgentMessage)); n != 0 {
+		t.Fatalf("no agent.message expected, got %d", n)
+	}
+}

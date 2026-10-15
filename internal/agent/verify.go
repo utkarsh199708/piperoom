@@ -249,6 +249,11 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	}
 	// The room gets the typed verdict; the model note below keeps the text form.
 	r.emit(ctx, events.AgentVerification, vr.payload(id))
+	if followUp != "" {
+		// The room learns of a subject left at NONE now, not only when the model
+		// proposes the restore; the model reads the same line in its note.
+		r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: strings.TrimSpace(followUp)})
+	}
 	r.proposals.markVerified(id, recovered)
 	if recovered {
 		r.trackNoneSubjects(rec.steps)
@@ -411,7 +416,7 @@ func (v verifyResult) payload(id string) events.AgentVerificationPayload {
 func (f flowResult) dataFlowCheck(detail string) *events.DataFlowCheck {
 	d := &events.DataFlowCheck{Checked: f.verified, Fresh: f.fresh, Detail: detail}
 	if !f.verified {
-		d.Detail = f.detail
+		d.Detail = clipLine(f.detail)
 	}
 	for _, st := range f.sinks {
 		sc := events.SinkCheck{Table: st.table.name, Newest: st.newest, Passed: st.passed, PassedBy: st.passedBy}
