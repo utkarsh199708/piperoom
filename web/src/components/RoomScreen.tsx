@@ -145,6 +145,9 @@ export function RoomScreen() {
   // "Ask the agent" on a checklist item fills the composer; n makes the same text count again.
   const [prefill, setPrefill] = useState<{ text: string; n: number } | undefined>()
   const [copied, setCopied] = useState(false)
+  const copiedTimer = useRef<number | undefined>(undefined)
+  // Stop the "Copied" reset when the screen goes away, so it cannot fire after unmount.
+  useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
   const [exporting, setExporting] = useState(false)
   // One GET /api/people per room mount: layers for the presence rows and the pending layers. A viewer gets none.
   const peopleState = usePeople()
@@ -197,7 +200,8 @@ export function RoomScreen() {
     void navigator.clipboard.writeText(url).then(
       () => {
         setCopied(true)
-        window.setTimeout(() => setCopied(false), 1500)
+        window.clearTimeout(copiedTimer.current)
+        copiedTimer.current = window.setTimeout(() => setCopied(false), 1500)
       },
       () => undefined,
     )
