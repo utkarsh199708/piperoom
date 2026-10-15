@@ -102,6 +102,11 @@ type fakeRoomSvc struct {
 	pipeline string
 	gotAlert alertin.Alert
 	gotPost  [2]string
+	// Q1 (watch_q1_test.go).
+	info        room.WatchRoomInfo
+	infoOK      bool
+	gotEvidence string
+	gotIncident bool
 }
 
 func (f *fakeRoomSvc) OpenAlertRoom(_ context.Context, a alertin.Alert) (room.RoomSnapshot, bool, error) {

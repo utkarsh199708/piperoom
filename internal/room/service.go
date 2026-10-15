@@ -144,6 +144,11 @@ type Deps struct {
 	// without the pipeline prefix; it is "" for a room opened by hand or by an
 	// alert with no key. Nil means no-op.
 	OnRoomClosed func(ctx context.Context, roomID, pipelineID, dedupKey string)
+
+	// Paging is owner.paged delivery and the automatic page of an undriven
+	// alert room (service_page.go, QA G2). The zero value pages in-app only
+	// and never pages on its own.
+	Paging Paging
 }
 
 type roomState struct {
@@ -154,6 +159,7 @@ type roomState struct {
 	inbox           *inbox
 	agentCancel     context.CancelFunc
 	agentRun        uint64             // generation of the latest agent start; see releaseAgent
+	agentDone       uint64             // agentRun of a run that ended on its own (markAgentDone); a new incident restarts it
 	execCancel      context.CancelFunc // cancels the room's executor on close
 	exec            *execQueue         // nil until the first proposal is approved
 	dedupKey        string             // alert index key of an alert room; "" otherwise
@@ -266,6 +272,9 @@ type Service struct {
 	list *listHub
 	// statsCache serves GET /api/pipelines/{pid}/agent-stats (agentstats.go).
 	statsCache agentStatsCache
+
+	// paging is Deps.Paging and its runtime state (service_page.go).
+	paging *pagingState
 }
 
 // New builds a Service. Missing deps fall back to safe defaults.
@@ -339,6 +348,7 @@ func New(d Deps) *Service {
 		rooms:           map[string]*roomState{},
 		alertRooms:      map[string]string{},
 		list:            newListHub(),
+		paging:          newPagingState(d.Paging),
 	}
 	if coord, ok := d.Store.(store.Coordinator); ok {
 		s.coord = coord
@@ -414,6 +424,7 @@ func (s *Service) Load(ctx context.Context) error {
 	}
 	s.startCoordination()
 	s.startLeaseExpiry()
+	s.startAutoPage()
 	return nil
 }
 
@@ -512,10 +523,15 @@ func (s *Service) noteRestartLocked(ctx context.Context, roomID string, st *room
 		return err
 	}
 	_, err := s.emitLocked(ctx, st, roomID, events.AgentMessage, systemActor, events.AgentMessagePayload{
-		Text: "server restarted — the agent is paused; the driver can steer, or anyone can mention @agent, to resume",
+		Text: restartNoticeText,
 	})
 	return err
 }
+
+// restartNoticeText is the system message noteRestartLocked writes. It is
+// not room activity (foldRoomFacts): a restart must not make an old room look
+// recent to the watcher.
+const restartNoticeText = "server restarted — the agent is paused; the driver can steer, or anyone can mention @agent, to resume"
 
 // ensureAgentLocked starts the room's agent run if the room has none yet. A
 // room restored by Load has none until someone steers it or mentions the agent;
@@ -1224,6 +1240,7 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			Inbox:     gatedInbox{in: st.inbox, g: gate, runCtx: ctx},
 			Sink:      roomSink{s: s, roomID: roomID, run: run},
 			Proposals: proposalCreator{s: s, roomID: roomID, run: run},
+			Pager:     roomPager{s: s, roomID: roomID, run: run}, // never a shadow room: startShadowLocked above
 			Logger:    s.log,
 		}
 		backoff := agentRetryBackoff
@@ -1264,6 +1281,9 @@ func (s *Service) startAgentLocked(roomID, title, pipelineID string, raw json.Ra
 			// already written the idle status and the message, so no retry
 			// and no "error" status (agent.Runner contract).
 			if err == nil || ctx.Err() != nil || isBudgetStop(err) {
+				if err == nil && ctx.Err() == nil {
+					s.markAgentDone(st, run)
+				}
 				return
 			}
 			s.log.Warn("room: agent run returned error", "room", roomID, "attempt", attempt, "err", err)

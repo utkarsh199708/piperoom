@@ -9,15 +9,16 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"piperoom/internal/agent"
 	"piperoom/internal/events"
 	"piperoom/internal/store"
 )
 
 // This file holds the room-service surface the built-in watcher (internal/watch)
-// uses: the OnRoomClosed hook (see Deps), and the three queries and one write
-// below. The watcher opens, joins and resolves through OpenAlertRoom with
-// Source alertin.Watcher and DedupKey "watcher:<pipeline>"; nothing here starts
-// an agent.
+// uses: the OnRoomClosed hook (see Deps), and the queries and writes below.
+// The watcher opens, joins and resolves through OpenAlertRoom with Source
+// alertin.Watcher and DedupKey "watcher:<pipeline>". Only PostIncidentJSON (a
+// different incident joined the room, QA G1) wakes or starts an agent.
 
 // maxNoteBytes caps a PostRoomNote text. Evidence is a few lines of numbers; a
 // runaway caller must not fill the event log.
@@ -151,6 +152,23 @@ func (s *Service) PostRoomNote(ctx context.Context, roomID, text string) error {
 // agent), and an old first look is re-run (alertUpdateLocked). Empty evidence
 // is a plain note.
 func (s *Service) PostRoomEvidence(ctx context.Context, roomID, text string, evidence json.RawMessage) error {
+	return s.postWatcherNote(ctx, roomID, text, evidence, false)
+}
+
+// PostIncidentJSON is PostRoomEvidence for a join whose signals are new to the
+// room: a different incident (watch.IncidentSink, QA G1). After the note the
+// agent gets an "alert_update" with NewIncident set, which wakes an idle agent
+// (agent.HumanInput.NewIncident). A room with no agent run (never started
+// after a restart, given up, or one whose run ended on its own) gets a new run
+// first, the way a steer starts one: through the agent slots and, with a
+// shared store, the room lease, so there are never two runs. A shadow room only
+// gets the note: its run is one-shot. evidence may be nil.
+func (s *Service) PostIncidentJSON(ctx context.Context, roomID, text string, evidence json.RawMessage) error {
+	return s.postWatcherNote(ctx, roomID, text, evidence, true)
+}
+
+// postWatcherNote is PostRoomEvidence and PostIncidentJSON.
+func (s *Service) postWatcherNote(ctx context.Context, roomID, text string, evidence json.RawMessage, newIncident bool) error {
 	text = sanitizeAgentText(text)
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -189,8 +207,111 @@ func (s *Service) PostRoomEvidence(ctx context.Context, roomID, text string, evi
 		}
 		return fmt.Errorf("room: post note: %w", mapUnstorable(err))
 	}
-	if len(evidence) > 0 {
+	switch {
+	case newIncident:
+		s.newIncidentLocked(ctx, roomID, st, e.Seq, text, evidence)
+	case len(evidence) > 0:
 		s.alertUpdateLocked(roomID, st, e.Seq, evidence)
 	}
 	return nil
+}
+
+// newIncidentLocked gives the room's agent a new incident: it starts a run
+// when the room has none and queues a waking "alert_update" with NewIncident
+// set. With a shared store only the lease owner's inbox takes it. Caller holds
+// s.mu.
+func (s *Service) newIncidentLocked(ctx context.Context, roomID string, st *roomState, seq int64, note string, raw json.RawMessage) {
+	if st.snap.Shadow || st.inbox == nil || st.deleting || !s.roomOpen(st) {
+		return
+	}
+	if st.agentCancel != nil && st.agentDone == st.agentRun {
+		// The run ended on its own and its supervisor is gone: free the room
+		// for a new run, as releaseAgent would have.
+		st.agentCancel()
+		st.agentCancel = nil
+	}
+	s.ensureAgentLocked(ctx, roomID, st)
+	if st.agentCancel == nil || (s.coord != nil && !st.leased) {
+		// Not started here (log full, service closing, another replica holds
+		// the room): the note is in the room for the people.
+		s.log.Info("room: new incident joined; no agent run here to tell", "room", roomID)
+		return
+	}
+	text := note
+	if len(raw) > 0 {
+		text = agent.AlertEvidenceText(raw)
+	}
+	// After ensureAgentLocked: a lease taken there resets the inbox.
+	st.inbox.push(agent.HumanInput{Seq: seq, Actor: systemActor, Kind: "alert_update", Text: text, NewIncident: true})
+	if len(raw) > 0 {
+		s.refireTriageLocked(roomID, st, raw)
+	}
+}
+
+// markAgentDone records that run ended on its own (Run returned nil while the
+// room's context was live): its supervisor has returned, so a new incident may
+// start another run (newIncidentLocked).
+func (s *Service) markAgentDone(st *roomState, run uint64) {
+	s.mu.Lock()
+	if st.agentRun == run {
+		st.agentDone = run
+	}
+	s.mu.Unlock()
+}
+
+// WatchRoomInfo is the open room of a pipeline as the watcher's join rule
+// sees it (watch.RoomInfo; cmd/server adapts it).
+type WatchRoomInfo struct {
+	RoomID string
+	// AlertSource is room.created.alert_source: "watcher", a signed source or
+	// "webhook"; "" for a room a person opened.
+	AlertSource string
+	OpenedAt    time.Time
+	// LastEventAt is the time of the room's newest activity: every event but
+	// the service's own bookkeeping (countsAsActivity), so a server restart or
+	// a status change does not make an old room look recent.
+	LastEventAt time.Time
+}
+
+// OpenRoomInfo describes the open room OpenRoomForPipeline picks for
+// pipelineID (the newest), from its room.created event and its newest
+// activity, both folded from the log. ok is false when the pipeline has no
+// open room.
+func (s *Service) OpenRoomInfo(pipelineID string) (WatchRoomInfo, bool) {
+	roomID, ok := s.OpenRoomForPipeline(pipelineID)
+	if !ok {
+		return WatchRoomInfo{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st, cached := s.rooms[roomID]
+	if !cached || !s.roomOpen(st) {
+		return WatchRoomInfo{}, false
+	}
+	last := st.snap.facts.lastActivity
+	if last.IsZero() {
+		last = st.snap.OpenedAt
+	}
+	return WatchRoomInfo{RoomID: roomID, AlertSource: st.snap.facts.alertSource, OpenedAt: st.snap.OpenedAt, LastEventAt: last}, true
+}
+
+// countsAsActivity reports whether e is room activity for LastEventAt:
+// room.created and everything people, the agent and the executor write, and
+// the system's notes (watcher evidence, a re-fired alert). Not: agent.status
+// (the service writes queued, working and the restart's idle), the restart
+// notice, and the system's other events (lease expiry, limits, its own pages).
+func countsAsActivity(e events.Event) bool {
+	switch {
+	case e.Type == events.RoomCreated:
+		return true
+	case e.Type == events.AgentStatus:
+		return false
+	case e.Actor.Kind == events.ActorSystem && e.Actor.ID == systemActor.ID:
+		if e.Type != events.AgentMessage {
+			return false
+		}
+		p, ok := decode[events.AgentMessagePayload](e)
+		return ok && p.Text != restartNoticeText
+	}
+	return true
 }
