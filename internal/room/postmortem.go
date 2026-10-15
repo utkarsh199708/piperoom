@@ -339,7 +339,15 @@ func (f *pmFold) prose() pmProse {
 		}
 	case "model":
 		if f.draft.Summary != nil {
-			p = pmProse{sum: *f.draft.Summary, have: true, source: "model", what: "closing summary", asOfSeq: f.draftSeq, asOfAt: f.draftAt, violations: f.draft.Violations}
+			// The model read the log once, right after the close, and the
+			// call can take minutes: a fix note logged meanwhile lands below
+			// postmortem.drafted but was never seen (QA F13). The close is the
+			// newest event the summary surely covers.
+			seq, at := f.draftSeq, f.draftAt
+			if f.closed && f.closedSeq > 0 && f.closedSeq < seq {
+				seq, at = f.closedSeq, f.closedAt
+			}
+			p = pmProse{sum: *f.draft.Summary, have: true, source: "model", what: "closing summary", asOfSeq: seq, asOfAt: at, violations: f.draft.Violations}
 		}
 	}
 	if !p.have {
@@ -439,9 +447,9 @@ type pmEvidence struct {
 }
 
 // fixEvidence returns the newest sign of a fix: a successful executed step, a
-// fix note, or, in a room closed with a resolution where nothing ran from
-// Piperoom and nobody logged a fix, the resolution itself (a person fixed it
-// outside and said so on closing).
+// fix note, or, in a room a person closed with a resolution where nothing ran
+// from Piperoom and nobody logged a fix, the resolution itself (a person fixed
+// it outside and said so on closing; see resolutionIsFix).
 func (f *pmFold) fixEvidence() (pmEvidence, bool) {
 	var ev pmEvidence
 	if f.execSeq > 0 {
@@ -451,7 +459,7 @@ func (f *pmFold) fixEvidence() (pmEvidence, bool) {
 		last := f.fixNotes[n-1]
 		ev = pmEvidence{seq: last.seq, at: last.at, what: "fix note"}
 	}
-	if ev.seq == 0 && f.hasResolution() {
+	if ev.seq == 0 && f.resolutionIsFix() {
 		ev = pmEvidence{seq: f.closedSeq, at: f.closedAt, what: "resolution"}
 	}
 	return ev, ev.seq > 0
@@ -461,10 +469,18 @@ func (f *pmFold) hasResolution() bool {
 	return f.closed && strings.TrimSpace(f.resolution) != ""
 }
 
+// resolutionIsFix says the resolution counts as a sign of a fix: a person
+// closed the room with it. The system's own close (the open-room limit's
+// "retention: ...") records why the room closed, not that anything was fixed
+// (QA F11), so it never does.
+func (f *pmFold) resolutionIsFix() bool {
+	return f.hasResolution() && f.closedBy.Kind == events.ActorHuman
+}
+
 // fixedByPerson says the problem was fixed outside Piperoom: no step ran from
 // it, and a person logged a fix or closed the room with a resolution.
 func (f *pmFold) fixedByPerson() bool {
-	return f.execSeq == 0 && (len(f.fixNotes) > 0 || f.hasResolution())
+	return f.execSeq == 0 && (len(f.fixNotes) > 0 || f.resolutionIsFix())
 }
 
 func hhmm(t time.Time) string { return t.UTC().Format("15:04") }
@@ -703,7 +719,7 @@ func (f *pmFold) writeVerification(w func(string, ...any)) {
 	case f.fixedByPerson():
 		src := "per the resolution"
 		switch {
-		case len(f.fixNotes) > 0 && f.hasResolution():
+		case len(f.fixNotes) > 0 && f.resolutionIsFix():
 			src = "per the fix notes and the resolution"
 		case len(f.fixNotes) > 0:
 			src = "per the fix notes"
