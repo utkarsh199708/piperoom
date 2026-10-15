@@ -32,18 +32,20 @@ import (
 var (
 	forbiddenNegators = []string{"not", "never", "no", "t", "cannot", "without", "against", "avoid*",
 		"instead of", "rather than", "neither", "nor"}
-	// conditionals right after a story make it a warning, not the story:
-	// "resetting the group to latest would skip every unread change". They
-	// deny only the term directly before them, with nothing between: a story
-	// with any other word or a comma before would/could ("the reset to
+	// conditionals right after a story, followed by a harm verb, make it a
+	// warning, not the story: "resetting the group to latest would skip
+	// every unread change". They deny only the term directly before them: a
+	// story with any other word or a comma before would/could ("the reset to
 	// latest meant order-sync could ...", "... latest and would skip ...") is
-	// still told. Not before "be", "have", "explain", "account" or "cause",
-	// adverbs skipped ("a reset to latest could well be the cause", "...
-	// would likely explain the gap"), nor before a negator or rule-out ("...
-	// could not be ruled out"), which the rules below read.
-	conditionals    = []string{"would", "could"}
-	conditionalNext = []string{"be", "have", "explain*", "account*", "cause*"}
-	conditionalPrev = []string{"which", "that", "this", "it"}
+	// still told. Any other verb after them (adverbs skipped) recommends or
+	// explains the story ("... would fix the lag", "... could well be the
+	// cause"), and "would have"/"would've" tells it in the past.
+	conditionals = []string{"would", "could"}
+	harmVerbs    = []string{"skip*", "los*", "miss*", "drop*", "delet*", "discard*", "break*", "wipe*",
+		"corrupt*", "hide", "mask*"}
+	// exceptions after "nothing" tell what they name: "nothing crashed
+	// except order-sync".
+	exceptions = []string{"except", "but", "besides", "other than", "apart from", "save"}
 	// adverbs are skipped after a conditional; any -ly word counts too.
 	adverbs = map[string]bool{"yet": true, "even": true, "ever": true, "still": true, "also": true,
 		"well": true, "then": true, "really": true, "quite": true, "perhaps": true, "maybe": true}
@@ -100,17 +102,26 @@ func forbiddenDenials(toks []string, brk []bool) []denialSpan {
 			for next < len(toks) && isAdverb(toks[next]) {
 				next++
 			}
-			if phraseAt(toks, next, conditionalNext) == 0 && phraseAt(toks, next, forbiddenNegators) == 0 &&
-				phraseAt(toks, next, ruleOuts) == 0 && (i == 0 || phraseAt(toks, i-1, conditionalPrev) == 0) {
+			if next < len(toks) && toks[next] != "have" && toks[next] != "ve" && phraseAt(toks, next, harmVerbs) > 0 {
 				spans = append(spans, denialSpan{start: i, end: i + 1, conditional: true})
 			}
 			continue
 		}
 		// "nothing" is a subject: it denies its own predicate's first word
-		// ("nothing is lost", "nothing changed", "nothing incompatible") and
-		// nothing else, so no story after it is hidden.
+		// ("nothing is lost", "nothing has been lost", "nothing changed") and
+		// nothing else, so no story after it is hidden; with an exception in
+		// its comma part it denies nothing ("nothing crashed except X").
 		if toks[i] == "nothing" {
-			spans = append(spans, denialSpan{start: i, end: i + 1, nothing: true})
+			exc := false
+			for k := i + 1; k < len(toks) && !brk[k]; k++ {
+				if phraseAt(toks, k, exceptions) > 0 {
+					exc = true
+					break
+				}
+			}
+			if !exc {
+				spans = append(spans, denialSpan{start: i, end: i + 1, nothing: true})
+			}
 			continue
 		}
 		l := phraseAt(toks, i, forbiddenNegators)
@@ -154,7 +165,7 @@ func forbiddenDenied(toks []string, brk []bool, spans []denialSpan, s, e int) bo
 	for _, d := range spans {
 		switch {
 		case d.nothing:
-			if s == d.end || s == d.end+1 && auxVerbs[toks[d.end]] {
+			if s >= d.end && s-d.end <= 2 && auxOrAdverbs(toks[d.end:s]) {
 				return true
 			}
 		case d.end <= s:
@@ -184,14 +195,59 @@ func forbiddenDenied(toks []string, brk []bool, spans []denialSpan, s, e int) bo
 }
 
 // governs reports whether a negator ending at from governs a rule-out
-// starting at to: no new subject between, and no comma or colon unless one
-// opens an aside right after the negator.
+// starting at to. Adverbs right after the negator are skipped ("can't yet,
+// however, rule out"). A pair of commas around at most two words is an
+// aside, read through whatever it holds ("cannot, however, rule out", "can't,
+// I think, rule out"). Outside asides, a new subject or an unpaired comma or
+// colon blocks ("did not crash, I ruled out X", "not touched, ruling out
+// X"), except a comma right before an "or"/"nor" that joins the rule-out
+// ("cannot confirm, or rule out, X"). At most two words that are neither
+// adverbs nor aside may stand between.
 func governs(toks []string, brk []bool, from, to int) bool {
-	if from < len(brk) && !brk[from] && breakBetween(brk, from, to) {
-		return false
+	i := from
+	for i < to && !brk[i] && isAdverb(toks[i]) {
+		i++
 	}
-	for _, t := range toks[from:to] {
-		if newSubjects[t] {
+	words, closed := 0, -1
+	for i <= to {
+		if i < to && brk[i] && i != closed {
+			if c := asideEnd(brk, i, to); c > 0 {
+				i, closed = c, c
+				continue
+			}
+		}
+		if brk[i] && i != closed && !(i+1 == to && (toks[i] == "or" || toks[i] == "nor")) {
+			return false
+		}
+		if i == to {
+			break
+		}
+		if newSubjects[toks[i]] {
+			return false
+		}
+		if !isAdverb(toks[i]) {
+			words++
+		}
+		i++
+	}
+	return words <= 2
+}
+
+// asideEnd returns the index of the token after the closing comma of an
+// aside that opens before toks[at] and holds at most two tokens, or 0.
+func asideEnd(brk []bool, at, to int) int {
+	for k := at + 1; k <= at+2 && k <= to; k++ {
+		if brk[k] {
+			return k
+		}
+	}
+	return 0
+}
+
+// auxOrAdverbs reports whether every token is an auxiliary or an adverb.
+func auxOrAdverbs(toks []string) bool {
+	for _, t := range toks {
+		if !auxVerbs[t] && !isAdverb(t) {
 			return false
 		}
 	}

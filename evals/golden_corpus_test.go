@@ -147,6 +147,24 @@ var corpusMatcherRows = []corpusRow{
 	// Nit 8: exclusive constructions.
 	fb("r2.8", []string{"reset*", "latest"}, "Nothing explains the gap except a reset to latest.", true),
 	fb("r2.8", []string{"reset*", "latest"}, "The cause was nothing other than a reset to latest.", true),
+	// Review round 3, item 1: only a harm verb after would/could makes a
+	// warning; "would've" is "would have".
+	fb("r3.1", []string{"reset*", "latest"}, "A reset to latest would've skipped every unread record.", true),
+	// Item 2: "nothing ... except" tells the exception.
+	fb("r3.2", []string{"order-sync", "crash*"}, "Nothing crashed except order-sync.", true),
+	fb("r3.2", []string{"slot", "lost"}, "Nothing was lost except the slot.", true),
+	// Nit 9: "nothing" before two auxiliaries or an adverb.
+	fb("r3.9", []string{"slot", "lost"}, "The slot is intact and nothing has been lost.", false),
+	fb("r3.9", []string{"slot", "lost"}, "The slot is intact and nothing was ever lost.", false),
+	fb("r3.11", []string{"slot", "drop*"}, "The slot is fine and nothing has been dropped.", false),
+	// Nit 11: wrong on main and here alike; logged so the next change is
+	// measured against them.
+	gap(fb("r3.11", []string{"reset*", "latest"}, "I can neither confirm nor rule out a reset to latest.", true), "neither ... nor rule out"),
+	gap(fb("r3.11", []string{"reset*", "latest"}, "Nobody has ruled out a reset to latest.", true), "nobody as the negator of a rule-out"),
+	gap(fb("r3.11", []string{"reset*", "latest"}, "Resetting the group to latest here would skip every unread change.", false), "a word between the story and would"),
+	gap(fb("r3.11", []string{"reset*", "latest"}, "Resetting the group to latest now would skip every unread change.", false), "a word between the story and would"),
+	gap(fb("r3.11", []string{"reset*", "latest"}, "Resetting the group to latest would be unsafe.", false), "would be + adjective"),
+	gap(fb("r3.11", []string{"ddl", "chang*"}, "Nothing in the DDL log changed the schema.", false), "nothing + prepositional phrase"),
 
 	// #283: ", not X" contrasts a layer name with what came before it.
 	gr("contrast", [][]string{{"debezium"}}, "The slot was dropped by a DBA, not Debezium.", false),
@@ -171,6 +189,9 @@ var corpusMatcherRows = []corpusRow{
 	gr("r2.1", [][]string{{"compatib*"}}, "The registry rejected v3, not compatible with v2.", true),
 	gr("r2.1", [][]string{{"avro"}}, "Task 0 failed, not valid Avro.", true),
 	gr("r2.7", [][]string{{"wire format"}}, "Order-sync stops at offset 42 on partition 1, not in wire format.", true),
+	// Review round 3, item 4: a layer word that starts a longer phrase
+	// describes the failure.
+	gr("r3.4", [][]string{{"publication*"}}, "Root cause: the table owner changed, so Debezium's user has REPLICATION, not publication ownership.", true),
 
 	// #283: alternatives after a "Fix:" label are fixes, not causes.
 	hg("fix label", "Root cause: the connector task failed. Fix: restart the connector; alternatively, delete and recreate it.", false),
@@ -193,6 +214,17 @@ var corpusMatcherRows = []corpusRow{
 	hg("r2.4", "Root cause: the slot was dropped.\nFix:\n- recreate the slot\nAlternatively, the registry could be at fault.", true),
 	hg("r2.4", "Root cause: the slot was dropped.\nProposed fix:\n1. Recreate the slot.\nAlternatively the registry rejected the schema.", true),
 	hg("r2.4", "Root cause: the slot was dropped by a DBA.\nFix:\nRecreate the slot and restart the connector. The registry could also be at fault.", true),
+	// Review round 3, item 6: inside a fix scope only fix alternatives are
+	// skipped; a cause hedge still counts.
+	hg("r3.6", "Root cause: the slot was dropped. Fix: recreate the slot; the cause could also be the registry.", true),
+	// Nit 10: an ellipsis ends the fix sentence.
+	hg("r3.10", "Root cause: the slot was dropped. Fix: recreate it… alternatively the registry is down.", true),
+	// Nit 11: fix labels the rule does not see (wrong on main too).
+	gap(hg("r3.11", "Root cause: the slot was dropped.\n- Fix: recreate it; alternatively, restart Debezium.", false), "list-item fix label"),
+	gap(hg("r3.11", "Root cause: the slot was dropped. **Fix:** recreate it; alternatively, restart Debezium.", false), "markdown fix label"),
+	gap(hg("r3.11", "Root cause: the slot was dropped. Suggested fix: recreate it; alternatively, restart Debezium.", false), "suggested fix label"),
+	gap(hg("r3.11", "Root cause: the slot was dropped.\nProposed fix:\n\n1. Recreate the slot.\n2. Alternatively, restart Debezium.", false), "blank line after the fix label"),
+	gap(hg("r3.11", "Root cause: the slot was dropped. Fix: recreate a slot, e.g. debezium_orders; alternatively, restart Debezium.", false), "e.g. inside a fix sentence"),
 
 	// #335: an SMT names Connect; SASL, SCRAM and the Kafka user name Kafka.
 	ly("#335", "kafka-connect", "Root cause: one row's promised_at is not a date, the TimestampConverter SMT throws, errors.tolerance=none fails task 0.", true),
@@ -204,6 +236,10 @@ var corpusMatcherRows = []corpusRow{
 	// Review round 2, nit 7.
 	ly("r2.7", "kafka-connect", "Order-sync is healthy, not Debezium.", true),
 	ly("r2.7", "schema-registry", "Schema id 7 was hard-deleted, not in the registry.", true),
+	// Review round 3, item 5: the usual names of the layers.
+	ly("r3.5", "kafka-connect", "Root cause: an ALTER TABLE in Postgres changed amount to numeric; the registry rejected it, not Kafka Connect.", false),
+	ly("r3.5", "kafka-connect", "Root cause: an ALTER TABLE in Postgres changed amount to numeric; the registry rejected it, not Connect.", false),
+	ly("r3.5", "schema-registry", "The connector failed, not Confluent Schema Registry.", false),
 }
 
 // corpusReviewScenarioRows are the review texts read with real scenario
@@ -226,6 +262,27 @@ var corpusReviewScenarioRows = []corpusRow{
 	sc("r2.1", "consumer-poison-pill", "Root cause: order-sync is stuck on partition 1; the record at offset 25377154 is there, not decodable.", true),
 	// Round 2, item 4: a shotgun after a fix list.
 	sc("r2.4", "schema-change", seedCause+"\nFix:\n1. Set compatibility to NONE and restart task 0.\nIt could also be a network problem between Connect and the registry.", false),
+	// Round 3, item 1: a recommendation or explanation with would/could.
+	sc("r3.1", "consumer-offsets-out-of-range-retention", retentionCause+" A reset to latest could've caused this gap too.", false),
+	sc("r3.1", "consumer-offsets-out-of-range-retention", retentionCause+" A reset to latest would fit the gap as well.", false),
+	sc("r3.1", "consumer-offsets-out-of-range-retention", retentionCause+" Resetting the group to latest would fix the lag.", false),
+	sc("r3.1", "consumer-poison-pill", "Root cause: a poison pill on partition 1 that order-sync cannot deserialize. Resetting the group to latest would clear it.", false),
+	sc("r3.1", "topic-retention-data-loss", "Retention is 6 h and records were lost: a reset to latest would've skipped them.", false),
+	// Item 2: "nothing ... except" on the demo scenario.
+	sc("r3.2", "schema-change", seedCause+" Nothing crashed except order-sync.", false),
+	sc("r3.2", "schema-change", seedCause+" Nothing crashed but the order-sync consumer.", false),
+	sc("r3.2", "schema-change", seedCause+" Nothing was lost except the replication slot.", false),
+	// Item 3: negated rule-outs with an adverb, an aside or ", or".
+	sc("r3.3", "consumer-offsets-out-of-range-retention", retentionCause+" We can't yet, however, rule out a reset to latest.", false),
+	sc("r3.3", "consumer-offsets-out-of-range-retention", retentionCause+" We cannot fully, though, rule out a reset to latest.", false),
+	sc("r3.3", "consumer-offsets-out-of-range-retention", retentionCause+" We cannot confirm, or rule out, a reset to latest.", false),
+	sc("r3.3", "consumer-offsets-out-of-range-retention", retentionCause+" We can't, I think, rule out a reset to latest.", false),
+	sc("r3.3", "consumer-offsets-out-of-range-retention", retentionCause+" We cannot, it seems, rule out a reset to latest.", false),
+	// Item 4: a correct cause with "not publication ownership".
+	sc("r3.4", "publication-permission-denied", "Root cause: the table owner changed, so Debezium's user has REPLICATION, not publication ownership.", true),
+	// Item 6: cause hedges inside an inline fix scope.
+	sc("r3.6", "schema-change", seedCause+" Fix: set compatibility to NONE; the root cause could also be a network problem between Connect and the registry.", false),
+	sc("r3.6", "schema-change", seedCause+" Fix: set compatibility to NONE; I am not sure whether order-sync also crashed.", false),
 }
 
 // heldoutWrongHypotheses are the wrong final hypotheses of

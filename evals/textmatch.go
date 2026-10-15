@@ -212,10 +212,11 @@ func forwardDenial(toks []string, j int) int {
 }
 
 // contrastNot returns 1 for a bare "not" that opens a short sub after a
-// comma or "and" in its back segment and names a pipeline layer ("dropped by
-// a DBA, not Debezium"), or 0. Only a layer word counts as the contrasted
-// name: after "not" anything else, an adjective ("not compatible"), a verb
-// ("not committing"), a preposition ("not in the registry") or "only", more
+// comma or "and" in its back segment and is exactly one layer name (see
+// isLayerName: "dropped by a DBA, not Debezium", "..., not Kafka Connect"),
+// or 0. Anything else after "not", an adjective ("not compatible"), a verb
+// ("not committing"), a preposition ("not in the registry"), "only" or a
+// layer word that starts a longer phrase ("not publication ownership"), more
 // likely describes the failure. After an exonerator ("order-sync is healthy,
 // not Debezium") the "not" clears nothing.
 func contrastNot(c clauseToks, j int) int {
@@ -226,7 +227,7 @@ func contrastNot(c clauseToks, j int) int {
 	for end < len(c.toks) && c.sub[end] == c.sub[j] {
 		end++
 	}
-	if end == j+1 || end-(j+1) > contrastNotMax || !startsLayerTerm(c.toks, j+1) {
+	if end == j+1 || end-(j+1) > contrastNotMax || !isLayerName(c.toks[j+1:end]) {
 		return 0
 	}
 	for i := j - 1; i >= 0 && c.sub[i] == c.sub[j-1]; i-- {
@@ -238,14 +239,26 @@ func contrastNot(c clauseToks, j int) int {
 }
 
 // contrastNotMax is the longest sub, in tokens after the negator, that
-// contrastNot reads as a name: "Schema Registry" is two.
+// contrastNot reads as a name: "Confluent Schema Registry" is three.
 const contrastNotMax = 3
 
-// startsLayerTerm reports whether one of layerTerms starts at toks[i].
-func startsLayerTerm(toks []string, i int) bool {
+// isLayerName reports whether toks is exactly one layer term, after an
+// optional vendor word and before an optional "itself" or "alone": "Debezium",
+// "Kafka Connect", "Confluent Schema Registry", "the registry itself" is not
+// (a determiner is read by forwardDenial). "publication ownership" is no
+// name: a layer word that starts a longer phrase describes the failure.
+func isLayerName(toks []string) bool {
+	if len(toks) > 1 && (toks[0] == "kafka" || toks[0] == "apache" || toks[0] == "confluent") {
+		toks = toks[1:]
+	}
+	if n := len(toks); n > 1 && (toks[n-1] == "itself" || toks[n-1] == "alone") {
+		toks = toks[:n-1]
+	}
 	for _, terms := range layerTerms {
-		if phraseAt(toks, i, terms) > 0 {
-			return true
+		for _, term := range terms {
+			if want, _, ok := termTokens(term); ok && len(want) == len(toks) && phraseAt(toks, 0, []string{term}) == len(toks) {
+				return true
+			}
 		}
 	}
 	return false
