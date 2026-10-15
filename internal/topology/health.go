@@ -245,8 +245,22 @@ func groupHealth(lag clients.GroupLag, t Thresholds) (Health, map[string]string)
 	if lag.State == "Dead" {
 		return HealthFail, facts
 	}
+	// Unreadable partitions (a broker down) are not in TotalLag, which is
+	// then only a lower bound: the lag is "at least" it, and a group is never
+	// OK on that alone (#508, #495).
+	if n := len(lag.Unknown); n > 0 {
+		facts["unknown_partitions"] = strconv.Itoa(n)
+		if len(lag.Partitions) == 0 {
+			facts["lag"] = fmt.Sprintf("unknown (%d partition(s) unreadable)", n)
+		} else {
+			facts["lag"] = fmt.Sprintf("at least %d (%d partition(s) unreadable)", lag.TotalLag, n)
+		}
+	}
 	if lag.State == "Empty" || lag.TotalLag > t.GroupLagWarn {
 		return HealthWarn, facts
+	}
+	if len(lag.Unknown) > 0 {
+		return HealthUnknown, facts
 	}
 	return HealthOK, facts
 }
