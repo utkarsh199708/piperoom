@@ -125,6 +125,16 @@ recordings:
     input: {table: analytics.orders, ts_column: updated_at}
     summary: |-
       newest=2026-10-11T09:40:09.877412Z (stale for 4m)
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: pg_publication_tables
+    input: {pipeline_id: "orders"}
+    summary: |
+      publication dbz_publication (connector user piperoom)
+      public.orders: in_publication=yes, selectable=yes
 expect:
   # The cause is the Postgres restart that cut the replication connection,
   # not "the task failed" (the symptom) and not the restart that fixes it:

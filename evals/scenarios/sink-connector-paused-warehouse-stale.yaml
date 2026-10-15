@@ -235,6 +235,19 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer connect-wh-orders-sink: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: dlq_peek
+    input: {connector: "wh-orders-sink"}
+    summary: |-
+      wh-orders-sink has no DLQ topic (errors.deadletterqueue.topic.name is not set)
+  - tool: warehouse_load_errors
+    input: {table: "analytics.orders"}
+    summary: |-
+      postgres warehouse has no load history. analytics.orders: 18204331 rows inserted since stats reset, 9120 dead tuples, last autovacuum 2026-10-13T07:12:44Z, 0 session(s) waiting on a lock
 
 inputs:
   - kind: steer

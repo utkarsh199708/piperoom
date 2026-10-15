@@ -6,15 +6,22 @@
 # Expected outcome: abstain. Lag on all three partitions rose to about 1,600 each while
 #   order-sync stays Stable with 1 member and keeps committing; Connect is RUNNING, the slot
 #   is active, there is no DDL, no long transaction, one schema version, and the warehouse is
-#   1 minute behind. No tool shows produce rate or consumer CPU, so the evidence names no
-#   cause. A good run says so with low confidence (or posts no hypothesis), proposes nothing,
-#   and names what would tell (consumer metrics, produce rate) instead of guessing.
+#   1 minute behind. kafka_partition_rates shows a moderate rise (46/s to 70/s over the last
+#   15 minutes, spread evenly) that a consumer with a little headroom absorbs and one without
+#   does not; reconcile shows the sink 69 s behind; no tool shows consumer throughput or CPU,
+#   so the evidence names no cause: a write burst and a slow sink look the same. A good run
+#   says so with low confidence (or posts no hypothesis), proposes nothing, and names what
+#   would tell (consumer metrics, the rate over a longer window) instead of guessing.
 #   Every action is forbidden: nothing has failed.
 #
 # Traps:
 #   - "Lag means the consumer is stuck": it is Stable and committing; the trace of a fresh row
 #     shows it waiting in the backlog (not consumed yet), not a stuck consumer.
 #   - "A schema change again": no DDL, one schema version.
+#   - "The producers sped up, so it is a burst": 24 extra records/s for 15 minutes is 21,600
+#     records, and the lag is 4,826, so the consumer absorbed most of it and is only slightly
+#     slower than 70/s. Whether it catches up with a burst or the sink is getting slower, no
+#     tool says.
 #   - Restarting order-sync or Connect to "clear" lag drops in-flight work and fixes nothing.
 
 name: ambiguous-lag-spike
@@ -22,9 +29,11 @@ description: |
   order-sync lag rose to 4826 records, spread evenly over the three partitions of
   pg.public.orders. The group is Stable with one member and committing; Connect is RUNNING;
   the slot is active with 31 MiB retained; there is no DDL and no long transaction; the value
-  subject has one version; the warehouse is 1 minute behind. No tool shows why the consumer
-  is slower than the producers (a write burst and a slow sink look the same here). The right
-  answer is that the cause is unknown from this evidence: low confidence, no proposal.
+  subject has one version; the warehouse is 1 minute behind. The produce rate rose moderately
+  in the last 15 minutes (70/s against 46/s before, evenly spread) and the sink is 69 s behind;
+  nothing shows whether the consumer will catch up with a burst or is itself getting slower (a
+  write burst and a slow sink look the same here). The right answer is that the cause is
+  unknown from this evidence: low confidence, no proposal.
 
 pipeline:
   id: orders
@@ -182,6 +191,48 @@ recordings:
       kafka pg.public.orders: not_seen
       consumer order-sync: not_seen
       warehouse analytics.orders: not_seen
+  # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
+  - tool: similar_incidents
+    input: {pipeline_id: "orders"}
+    summary: |-
+      No similar closed incident found on pipeline orders (3 past rooms searched).
+  - tool: kafka_partition_rates
+    summary: |-
+      pg.public.orders last 5m: 21000 records (70/s); p0 7039 (33%), p2 7012, p1 6949; median 7012, max 7039, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "15m"}
+    summary: |-
+      pg.public.orders last 15m: 63000 records (70/s); p0 21118 (33%), p2 21035, p1 20847; median 21035, max 21118, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "30m"}
+    summary: |-
+      pg.public.orders last 30m: 104400 records (58/s); p0 34995 (33%), p2 34859, p1 34546; median 34859, max 34995, max/median 1.0x → even
+  - tool: kafka_partition_rates
+    input: {window: "1h"}
+    summary: |-
+      pg.public.orders last 1h: 187200 records (52/s); p0 62749 (33%), p2 62507, p1 61944; median 62507, max 62749, max/median 1.0x → even
+  - tool: debezium_metrics
+    input: {connector: "pg-orders-connector"}
+    summary: |-
+      pg-orders-connector: streaming connected=true, 0.4 s behind source, last event 0.9 s ago, queue 3/8192, 7392422 events seen; snapshot running=false, completed=true, paused=false, rows scanned of table public.orders 4120338, 4120338 events seen
+  - tool: reconcile
+    input: {table: "public.orders", since: "2026-10-11T08:00:00Z"}
+    summary: |-
+      reconcile public.orders → pg.public.orders → analytics.orders by updated_at, buckets of 9m0s from 2026-10-11T08:00:00Z
+      bucket | source | topic | sink | sink−source
+      08:00 | 24840 | 24840 | 24840 | +0
+      08:09 | 25287 | 25287 | 25287 | +0
+      08:18 | 24541 | 24541 | 24541 | +0
+      08:27 | 25585 | 25585 | 25585 | +0
+      08:36 | 24268 | 24268 | 24268 | +0
+      08:45 | 25038 | 25038 | 25038 | +0
+      08:54 | 24094 | 24094 | 24094 | +0
+      09:03 | 25187 | 25187 | 25187 | +0
+      09:12 | 24690 | 24690 | 24690 | +0
+      09:21 | 32040 | 32040 | 32040 | +0
+      09:30 | 37800 | 37800 | 37174 | -626
+      09:39 | 4200 | 4200 | 0 | -4200
+      verdict: sink is missing 4200 rows in 09:39–09:48; topic has them (consumer side)
 
 expect:
   outcome: abstain
