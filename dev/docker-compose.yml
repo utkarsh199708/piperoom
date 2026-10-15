@@ -1,11 +1,14 @@
 # Local pipeline for building and testing Piperoom:
 # Postgres (logical WAL) -> Debezium (Kafka Connect) -> Kafka -> consumers,
-# with Confluent Schema Registry for Avro schemas.
+# with Confluent Schema Registry for Avro schemas, plus the room service's own
+# database (roomdb). `devctl reset` wipes the pipeline services only; roomdb's
+# named volume survives it (dev/scenarios.md, "Room database").
 name: piperoom-dev
 
 services:
   postgres:
-    image: postgres:17
+    # Pinned: dev/scenarios.md records what was observed on this exact version.
+    image: postgres:17.11
     command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=10", "-c", "max_wal_senders=10"]
     environment:
       POSTGRES_USER: piperoom
@@ -16,6 +19,23 @@ services:
       - ./postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "piperoom", "-d", "orders"]
+      interval: 5s
+      retries: 20
+
+  # The room service database (PIPEROOM_DB_URL default: localhost:5433/piperoom).
+  # Not part of the pipeline: no scenario touches it, and `devctl reset` keeps its
+  # volume. `devctl reset --rooms --yes` (or `docker compose down -v`) deletes it.
+  roomdb:
+    image: postgres:17.11
+    environment:
+      POSTGRES_USER: piperoom
+      POSTGRES_PASSWORD: piperoom-dev
+      POSTGRES_DB: piperoom
+    ports: ["5433:5432"]
+    volumes:
+      - roomdb:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "piperoom", "-d", "piperoom"]
       interval: 5s
       retries: 20
 
@@ -54,6 +74,12 @@ services:
   connect:
     build: ./connect
     image: piperoom-dev/connect:3.2.0
+    # The image's own start command, run under worker-log.sh, which also copies the
+    # worker log to dev/.logs/connect/connect.log on the host (CONNECT_WORKER_LOG_FILE),
+    # rotated at WORKER_LOG_MAX_BYTES (QA G3). `devctl up` creates that directory
+    # writable for the image's non-root user.
+    entrypoint: ["/bin/bash", "/piperoom/worker-log.sh"]
+    command: ["/docker-entrypoint.sh", "start"]
     depends_on:
       kafka: { condition: service_healthy }
       postgres: { condition: service_healthy }
@@ -71,6 +97,11 @@ services:
       VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
       CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      WORKER_LOG_DIR: /piperoom/logs
+      WORKER_LOG_MAX_BYTES: "10485760"
+    volumes:
+      - ./connect/worker-log.sh:/piperoom/worker-log.sh:ro
+      - ./.logs/connect:/piperoom/logs
     ports: ["8083:8083"]
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors >/dev/null"]
@@ -108,6 +139,7 @@ services:
     restart: on-failure
     depends_on:
       postgres: { condition: service_healthy }
+      roomdb: { condition: service_healthy }
       kafka: { condition: service_healthy }
       schema-registry: { condition: service_started }
       connect: { condition: service_healthy }
@@ -117,7 +149,8 @@ services:
       - ./owners.shadow.yaml:/config/owners.yaml:ro
       - ./users.yaml:/config/users.yaml:ro
     environment:
-      PIPEROOM_DB_URL: postgres://piperoom:piperoom-dev@postgres:5432/piperoom?sslmode=disable
+      # The roomdb service, not the pipeline Postgres: `devctl reset` keeps it (QA G19).
+      PIPEROOM_DB_URL: postgres://piperoom:piperoom-dev@roomdb:5432/piperoom?sslmode=disable
       SOURCE_DB_URL: postgres://piperoom:piperoom-dev@postgres:5432/orders?sslmode=disable
       WAREHOUSE_DB_URL: postgres://piperoom:piperoom-dev@postgres:5432/warehouse?sslmode=disable
       KAFKA_BROKERS: kafka:9092
@@ -142,3 +175,8 @@ services:
       PIPEROOM_SHADOW_GRACE: ${PIPEROOM_SHADOW_GRACE:-0}
       PIPEROOM_SHADOW_TOKEN_BUDGET: ${PIPEROOM_SHADOW_TOKEN_BUDGET:-500000}
       PIPEROOM_SHADOW_MAX_TURNS: ${PIPEROOM_SHADOW_MAX_TURNS:-20}
+
+volumes:
+  # The room database. Named, so `devctl reset` (which removes the pipeline
+  # containers with their anonymous volumes) leaves it alone.
+  roomdb:

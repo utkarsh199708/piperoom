@@ -178,12 +178,13 @@ func stackHostPort(raw string) (string, error) {
 	return host + ":" + port, nil
 }
 
-// checkRoomDB refuses a profile whose room database is the Postgres that
-// `devctl reset` wipes (docker compose down -v): the rehearsal would delete
-// the rooms it waits for, and the server migrates only at start, so it would
-// not recreate them. roomURL is PIPEROOM_DB_URL from the profile (empty =
-// the config default, which is the dev stack's Postgres); stackURL is the
-// stack's source database URL.
+// checkRoomDB refuses a profile whose room database is the pipeline's Postgres,
+// the one `devctl reset` wipes (it removes the pipeline containers with their
+// volumes): the rehearsal would delete the rooms it waits for, and the server
+// migrates only at start, so it would not recreate them. roomURL is
+// PIPEROOM_DB_URL from the profile (empty = the config default, the stack's own
+// roomdb service on :5433, which reset keeps; only `devctl reset --rooms --yes`
+// deletes it, QA G19); stackURL is the stack's source database URL.
 func checkRoomDB(roomURL, stackURL string) error {
 	if strings.TrimSpace(roomURL) == "" {
 		// The server's own default.
@@ -198,7 +199,7 @@ func checkRoomDB(roomURL, stackURL string) error {
 		return fmt.Errorf("devctl: SOURCE_DB_URL: %w", err)
 	}
 	if room == stack {
-		return fmt.Errorf("devctl: the demo profile's room database (%s) is the dev stack's Postgres, which `devctl reset` wipes with `docker compose down -v`; set PIPEROOM_DB_URL in dev/demo.env to the separate room database (docker compose -f dev/demo-room-db.yml up -d --wait) and restart the server", room)
+		return fmt.Errorf("devctl: the demo profile's room database (%s) is the pipeline's Postgres, which `devctl reset` wipes; point PIPEROOM_DB_URL in dev/demo.env at the stack's roomdb service (localhost:5433/piperoom, also the default; reset keeps it) and restart the server", room)
 	}
 	return nil
 }
@@ -410,7 +411,7 @@ type stackSteps struct {
 	sc scenario
 }
 
-func (p stackSteps) Reset(ctx context.Context) error { return p.s.reset(ctx) }
+func (p stackSteps) Reset(ctx context.Context) error { return p.s.reset(ctx, false) }
 
 func (p stackSteps) Load(ctx context.Context) error {
 	lctx, cancel := context.WithTimeout(ctx, 6*time.Second)

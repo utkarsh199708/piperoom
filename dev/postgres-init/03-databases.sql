@@ -1,6 +1,7 @@
--- The dev warehouse (sink of the pipeline) and the room service database.
+-- The dev warehouse (sink of the pipeline). The room service's database is not
+-- here: it is the separate `roomdb` service (localhost:5433, db piperoom), so a
+-- pipeline reset never deletes rooms (QA G19, dev/scenarios.md "Room database").
 CREATE DATABASE warehouse;
-CREATE DATABASE piperoom;
 
 \connect warehouse
 

@@ -22,17 +22,14 @@ say who you are each time you switch.
 
 ## Before the audience arrives (T-30 min)
 
-**One rule: `devctl reset` runs `docker compose down -v`, which deletes the dev Postgres, including the
-`piperoom` database the server would keep its rooms in.** So the server uses its own Postgres
-(`dev/demo-room-db.yml`, port 5433, a separate compose project that reset does not touch), and the order
-below matters: room database first, server second, and the server is started **once**, after the last
-`reset` you plan before the show. Resets during the rehearsal are fine because the server's rooms are not
-in the wiped database.
+**One rule: `devctl reset` deletes the pipeline's data (its Postgres on 5432, topics, offsets), not the rooms.**
+The server keeps its rooms in the stack's `roomdb` service (port 5433, its own volume), which reset keeps;
+only `devctl reset --rooms --yes` deletes it (dev/scenarios.md, "What `reset` keeps"). Start the server
+**once**, after the stack is up; resets during the rehearsal are fine.
 
 1. Docker running. Take the stack lock and keep it until the very end: `go run ./cmd/devctl lock --owner demo`
-2. Room database: `docker compose -f dev/demo-room-db.yml up -d --wait`
-3. Pipeline stack: `go run ./cmd/devctl up --owner demo`
-4. Start the server with the demo profile (`dev/demo.env`: watcher in `rooms` mode, 15 s interval, 30 s cooldown,
+2. Stack, room database included: `go run ./cmd/devctl up --owner demo`
+3. Start the server with the demo profile (`dev/demo.env`: watcher in `rooms` mode, 15 s interval, 30 s cooldown,
    room database on port 5433):
    ```
    export ANTHROPIC_API_KEY=...        # from your shell, never from a file
@@ -41,13 +38,13 @@ in the wiped database.
    ```
    (PowerShell: see the header of `dev/demo.env`.) The log shows `server: watcher starting` with mode `rooms`.
    Do not restart the server after this unless a fallback says so.
-5. Start the web app (`cd web && npm run dev`) and open it as arjun, kabir and priya.
-6. **Rehearse once:** `go run ./cmd/devctl demo --rehearse --owner demo`. It checks the profile, **refuses to run if the
+4. Start the web app (`cd web && npm run dev`) and open it as arjun, kabir and priya.
+5. **Rehearse once:** `go run ./cmd/devctl demo --rehearse --owner demo`. It checks the profile, **refuses to run if the
    profile's room database is the one reset wipes**, resets the pipeline, breaks it, waits for the room, resets the
    pipeline again, and prints `PASS: break -> room in <time>`. Note that time. It keeps your lock. The server and
    its rooms are untouched by the resets, so the room it opened is really there: open it, then **close it** in the UI
    (the next run refuses to start while one is open).
-7. The rehearsal ended with a reset, so the pipeline is clean and the schema is back to integer. Confirm with
+6. The rehearsal ended with a reset, so the pipeline is clean and the schema is back to integer. Confirm with
    `go run ./cmd/devctl health` (exit 0). Do **not** run a second `break` or `demo` without another `reset`: `break`
    needs a fresh seeded schema, and a reset takes 1–3 minutes, which you do not want live. While a reset runs the
    watcher cannot reach Connect; this has not been observed on a real run, so if it opens a room during a reset, close it.
@@ -135,4 +132,4 @@ presenter keeps talking about the architecture.
   (amount is numeric), so the next `break` needs `go run ./cmd/devctl reset --owner demo` first.
 - Release the lock you took in pre-flight: `go run ./cmd/devctl unlock --owner demo`.
 - Stop the server and the web app. `go run ./cmd/devctl down --owner demo` if you are done with the stack, and
-  `docker compose -f dev/demo-room-db.yml down -v` to forget the demo rooms.
+  `go run ./cmd/devctl reset --rooms --yes --owner demo` to forget the demo rooms.

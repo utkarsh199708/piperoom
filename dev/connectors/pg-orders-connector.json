@@ -8,7 +8,10 @@
   "topic.prefix": "pg",
   "plugin.name": "pgoutput",
   "slot.name": "debezium_orders",
-  "publication.autocreate.mode": "filtered",
+  "publication.name": "dbz_publication",
+  "publication.autocreate.mode": "disabled",
   "table.include.list": "public.orders",
+  "heartbeat.interval.ms": "10000",
+  "heartbeat.action.query": "UPDATE debezium.heartbeat SET beat_at = now() WHERE id = 1",
   "tasks.max": "1"
 }
