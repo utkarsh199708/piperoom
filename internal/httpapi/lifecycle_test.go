@@ -174,6 +174,9 @@ func (sh *lifeShared) start(t *testing.T, c lifeConfig) (*oidcEnv, func(), error
 	}
 	logs := &syncBuf{}
 	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	settings := auth.Default()
+	settings.Mode = c.mode
+	settings.ViewerGroups = []string{"viewers"}
 	svc := room.New(room.Deps{
 		Store: sh.st, Users: users, Owners: own, Actions: sh.reg, Logger: log,
 		Run: func(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
@@ -183,15 +186,12 @@ func (sh *lifeShared) start(t *testing.T, c lifeConfig) (*oidcEnv, func(), error
 		WriteHandoff: func(context.Context, []events.Event, agent.Options) (events.HandoffSummary, error) {
 			return events.HandoffSummary{WhatBroke: "x"}, nil
 		},
-		Sessions: sh.sessions, SessionIdle: 8 * time.Hour, ViewerGroups: []string{"viewers"},
+		Sessions: sh.sessions, SessionLive: settings.Liveness(), ViewerGroups: []string{"viewers"},
 	})
 	if err := svc.Load(context.Background()); err != nil {
 		svc.Close()
 		t.Fatalf("load: %v", err)
 	}
-	settings := auth.Default()
-	settings.Mode = c.mode
-	settings.ViewerGroups = []string{"viewers"}
 	opts := []httpapi.Option{httpapi.WithAuth(settings), httpapi.WithSessions(sh.sessions),
 		httpapi.WithLoginStates(sh.states), httpapi.WithIdentities(sh.idents)}
 	var rp *auth.OIDC

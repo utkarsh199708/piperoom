@@ -16,6 +16,8 @@ const handoff: HandoffState = {
   summary: { what_broke: `Lag began at ${STEP}`, why: '', done: [], ruled_out: [], open: [], risks: [] },
   stay_as_watcher: false,
   status: 'pending',
+  from: { kind: 'human', id: 'arjun', name: 'Arjun' },
+  created_at: '2026-10-15T10:00:00Z',
 }
 
 describe('hand-off dialog step links', () => {

@@ -326,6 +326,10 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       return { text: `${who} recorded a blind label`, kind: 'human' }
     case 'shadow.graded':
       return { text: `${who} graded the shadow run`, kind: 'human' }
+    case 'postmortem.drafted':
+      return { text: 'Post-mortem draft ready', kind: 'system' }
+    case 'postmortem.failed':
+      return { text: 'Post-mortem draft failed', kind: 'system' }
     default:
       return { text: clip(e.type, 60), kind: 'system' }
   }

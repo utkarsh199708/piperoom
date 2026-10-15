@@ -310,6 +310,12 @@ func objectInScope(sc tools.Scope, name string) bool {
 	if sc.CheckSourceTable(name) == nil || sc.CheckConnector(name) == nil || sc.CheckSubject(name) == nil {
 		return true
 	}
+	if o, ok := splitIdent(name, false); ok && len(o) == 2 && sc.AnySourceTable(func(owned string) bool {
+		p, ok := splitIdent(owned, false)
+		return ok && slices.Equal(p, o)
+	}) {
+		return true
+	}
 	if conn, _, ok := strings.Cut(name, "/"); ok {
 		return sc.CheckConnector(conn) == nil
 	}
@@ -318,26 +324,90 @@ func objectInScope(sc tools.Scope, name string) bool {
 
 // ddlInScope reports whether an audit row is about a source table of the
 // pipeline: the table itself or one of its columns (a column rename or
-// comment is logged as schema.table.column).
+// comment is logged as schema.table.column). object_identity quotes a name
+// that needs it ("public"."Mixed"), so both sides are compared as parsed
+// parts, never as text.
 func ddlInScope(sc tools.Scope, identity string) bool {
-	if sc.SourceTableInScope(identity) {
-		return true
+	parts, ok := splitIdent(identity, true)
+	if !ok || len(parts) < 2 || len(parts) > 3 {
+		return sc.SourceTableInScope(identity)
 	}
-	table, _, ok := cutLast(identity, ".")
-	return ok && strings.Contains(table, ".") && sc.SourceTableInScope(table)
+	return sc.AnySourceTable(func(owned string) bool {
+		o, ok := splitIdent(owned, false)
+		return ok && slices.Equal(o, parts[:2])
+	})
 }
 
-// cutLast is strings.Cut at the last sep.
-func cutLast(s, sep string) (before, after string, found bool) {
-	if i := strings.LastIndex(s, sep); i >= 0 {
-		return s[:i], s[i+len(sep):], true
+// asciiLower folds A-Z only, like Postgres' downcase_identifier; Unicode
+// case mapping would equate names Postgres keeps apart.
+func asciiLower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + 'a' - 'A'
+		}
+		return r
+	}, s)
+}
+
+// splitIdent splits a dotted SQL identifier into its parts, removing quotes
+// ("" inside quotes is one quote) and not splitting at a dot inside quotes.
+// An unquoted part is lower-cased when fold is set, as Postgres does for
+// object_identity text; owners.yaml names and tool inputs are parsed as SQL
+// identifiers without folding (fold false), so their case is kept. A table
+// name that contains '.' or '"' must therefore be written quoted in owners.yaml
+// (public."a.b"); the plain form public.a.b is read as three parts and matches
+// nothing (gap: see #461). A quoted part always keeps its case, // so "Orders" and orders stay two tables. ok is false for an unbalanced quote
+// or an empty part.
+func splitIdent(s string, fold bool) (parts []string, ok bool) {
+	var cur strings.Builder
+	inQ, quoted := false, false
+	flush := func() bool {
+		p := cur.String()
+		if p == "" {
+			return false
+		}
+		if !quoted && fold {
+			p = asciiLower(p)
+		}
+		parts = append(parts, p)
+		cur.Reset()
+		quoted = false
+		return true
 	}
-	return s, "", false
+	rs := []rune(s)
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		switch {
+		case r == '"' && inQ && i+1 < len(rs) && rs[i+1] == '"':
+			cur.WriteRune('"')
+			i++
+		case r == '"':
+			inQ, quoted = !inQ, true
+		case r == '.' && !inQ:
+			if !flush() {
+				return nil, false
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if inQ || !flush() {
+		return nil, false
+	}
+	return parts, true
 }
 
 // objectMatches reports whether a change is about object: the object itself,
 // for a connector one of its tasks, for a table DDL on one of its columns.
+// DDL identities are compared as parsed parts (see splitIdent).
 func objectMatches(c clients.PipelineChange, object string) bool {
+	if c.Kind == clients.ChangeDDL {
+		id, ok1 := splitIdent(c.Object, true)
+		o, ok2 := splitIdent(object, false)
+		if ok1 && ok2 {
+			return len(o) <= len(id) && slices.Equal(o, id[:len(o)])
+		}
+	}
 	return c.Object == object || strings.HasPrefix(c.Object, object+"/") ||
 		(c.Kind == clients.ChangeDDL && strings.HasPrefix(c.Object, object+"."))
 }

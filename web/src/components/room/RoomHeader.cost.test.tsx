@@ -88,8 +88,8 @@ describe('RoomHeader closed room', () => {
       priya,
     )
     expect(screen.queryByText(/is driving/)).toBeNull()
-    // The name is a PersonName (with its verified badge), so "Closed by" and "Kabir" are separate nodes.
-    expect(within(screen.getByText(/^\s*Closed by$/)).getByText('Kabir')).toBeInTheDocument()
+    // The name is a PersonName (with its verified badge), so "closed by" and "Kabir" are separate nodes.
+    expect(within(screen.getByText(/^\s*closed by$/)).getByText('Kabir')).toBeInTheDocument()
   })
 
   it('still says "is driving" while open', () => {

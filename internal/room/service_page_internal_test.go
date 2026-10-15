@@ -388,7 +388,7 @@ func pageOwnersService(t *testing.T, sessions auth.Store, n PageNotifier) *Servi
 		t.Fatal(err)
 	}
 	svc := New(Deps{
-		Store: memstore.New(), Owners: own, Sessions: sessions, SessionIdle: time.Hour,
+		Store: memstore.New(), Owners: own, Sessions: sessions, SessionLive: auth.Liveness{Idle: time.Hour},
 		Users: mustUsers([]User{
 			{ID: "arjun", Name: "Arjun", Email: "arjun@example.com"},
 			{ID: "priya", Name: "Priya"},

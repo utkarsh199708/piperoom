@@ -476,6 +476,71 @@ func (w *Watcher) recordVersions(ctx context.Context, now time.Time, t target, b
 	return ok
 }
 
+// ddlInScope reports whether an audit row is about a source table of the
+// pipeline: the table itself or one of its columns (a column rename or comment
+// is logged as schema.table.column). The identity is tried as written first
+// (an owners entry in the quoted form public."Name"), then with the quotes
+// removed (an owners entry holds the catalog name public.Name, while the audit
+// trigger quotes a mixed-case one). Same rule as ddlInScope in
+// internal/tools/changes, plus the quoted forms.
+func ddlInScope(sc tools.Scope, identity string) bool {
+	if sc.SourceTableInScope(identity) {
+		return true
+	}
+	raw, plain, ok := splitIdentity(identity)
+	if !ok || len(plain) < 2 || len(plain) > 3 {
+		return false
+	}
+	// A third part is a column: the table is what precedes it.
+	if len(plain) == 3 && sc.SourceTableInScope(strings.Join(raw[:2], ".")) {
+		return true
+	}
+	return sc.SourceTableInScope(strings.Join(plain[:2], "."))
+}
+
+// splitIdentity splits an object_identity on the dots outside double quotes.
+// raw keeps each part as written, plain has the quotes removed ("" inside
+// quotes is one quote). It reports false for an unterminated quote or an empty
+// part.
+func splitIdentity(s string) (raw, plain []string, ok bool) {
+	var cur, curRaw strings.Builder
+	inQ := false
+	rs := []rune(s)
+	flush := func() {
+		plain, raw = append(plain, cur.String()), append(raw, curRaw.String())
+		cur.Reset()
+		curRaw.Reset()
+	}
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		if r == '.' && !inQ {
+			flush()
+			continue
+		}
+		curRaw.WriteRune(r)
+		switch {
+		case r == '"' && inQ && i+1 < len(rs) && rs[i+1] == '"':
+			cur.WriteRune('"')
+			curRaw.WriteRune('"')
+			i++
+		case r == '"':
+			inQ = !inQ
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if inQ {
+		return nil, nil, false
+	}
+	flush()
+	for k := range plain {
+		if plain[k] == "" {
+			return nil, nil, false
+		}
+	}
+	return raw, plain, true
+}
+
 // recordDDL writes the audit rows of the pipeline's source tables. The row
 // carries its own time; the fingerprint is (at, object, query), so reading the
 // same row on the next tick writes nothing.
@@ -500,7 +565,7 @@ func (w *Watcher) recordDDL(ctx context.Context, t target, sc *setChanges) bool 
 	rows := slices.Clone(sc.ddl)
 	slices.SortFunc(rows, func(a, b clients.DDLChange) int { return a.At.Compare(b.At) })
 	for _, r := range rows {
-		if !scope.SourceTableInScope(r.ObjectIdentity) {
+		if !ddlInScope(scope, r.ObjectIdentity) {
 			continue
 		}
 		summary := strings.TrimSpace(r.CommandTag+" "+r.ObjectIdentity) + " | " + r.Query

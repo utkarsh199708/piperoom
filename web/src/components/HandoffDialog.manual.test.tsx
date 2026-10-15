@@ -1,7 +1,7 @@
 // Q1-web-b (G4): a hand-off whose summary the agent could not write, and the summary the driver writes instead.
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
+import { HANDOFF_READ_ID, HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import type { RoomActions } from '../hooks/useRoom'
 import type { HandoffResult } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
@@ -154,6 +154,8 @@ describe('a hand-off the driver wrote says so', () => {
     summary,
     stay_as_watcher: false,
     status: 'pending',
+    from: { kind: 'human', id: 'arjun', name: 'Arjun' },
+    created_at: '2026-10-15T10:00:00Z',
     ...over,
   })
 
@@ -178,9 +180,9 @@ describe('a hand-off the driver wrote says so', () => {
       handoffs: [handoff({ manual: true, written_by: { kind: 'human', id: 'arjun', name: 'Arjun' } })],
     }
     render(<HandoffAcceptBanner state={state} user={me} actions={actionsWith(async () => ({ ok: true }))} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Read summary' }))
-    const dialog = screen.getByRole('dialog', { name: /^Hand-off from Arjun/ })
-    expect(within(dialog).getByText(/^Written by/)).toHaveTextContent(/^Written by Arjun\b.*, not by the agent\.$/)
+    // The receiver's card opens inline, summary first, Accept under it (F2a).
+    const card = document.getElementById(HANDOFF_READ_ID) as HTMLElement
+    expect(within(card).getByText(/^Written by/)).toHaveTextContent(/^Written by Arjun\b.*, not by the agent\.$/)
   })
 
   it('the summary text is still plain text', () => {

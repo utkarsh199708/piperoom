@@ -126,7 +126,7 @@ PRs 2 and 3 are live (dev sessions, Host allow-list, proxy guard, OIDC login, id
 | 403 | `not_driver`, `not_layer_owner`, `not_recipient` (hand-off accept by someone other than `to`); after auth PRs: `viewer`, `proxy_identity`, `not_allowed` (export; also: label or grade a shadow room without being a member of its pipeline; delete a room without `admin: true`; F8: `POST /api/rooms/{id}/label` without being a member of its pipeline), `not_provisioned` (login gate) |
 | 404 | `not_found` |
 | 413 | `too_large` (signed alert body over 1 MB) |
-| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; Q0: `proposal_withdrawn` (approve, reject or withdraw of a withdrawn proposal), `proposal_running` (withdraw after the executor claimed a step), `already_paged` (a second page of the same layer within 10 minutes; the message says how long ago) |
+| 409 | `already_decided`, `room_closed`, `lease_held`, `stale_handoff`; with several server replicas: `conflict` (another replica changed the room between the check and the write three times in a row; retry); after auth PR 4: `params_mismatch`; shadow mode: `room_open` (shadow route on an open room, or `?include=shadow` on an open room), `not_labelled` (shadow data read before the blind label), `not_revealed` (grade before `shadow.revealed`: the run is still going during the grace period); room limits: `already_extended` (a second `extend`), `log_full` (the room log is over its cap and its reserve; see Room limits); R0: `handoff_in_progress` (a hand-off request of the room is in flight); F9: `no_hypothesis` (a verdict before the room has a hypothesis), `already_nudged` (a second nudge of the same proposal and layer within 10 minutes; the message says how long ago, e.g. "nudged 4 min ago"); F8: `room_open` also answers `POST /api/rooms/{id}/label` on an open room; Q0: `proposal_withdrawn` (approve, reject or withdraw of a withdrawn proposal), `proposal_running` (withdraw after the executor claimed a step), `already_paged` (a second page of the same layer within 10 minutes; the message says how long ago); #459: `client_id_reused` (an idempotency key sent again with another route or body) |
 | 421 | `bad_host` (after auth PR 2: `Host` not on the allow-list). R4: a browser `GET` outside `/api` and `/auth` that sends `Accept: text/html` gets a short HTML page instead (what happened and which of `PIPEROOM_PUBLIC_URL` / `PIPEROOM_ALLOWED_HOSTS` to set; the Host is HTML-escaped and clipped to 100 bytes; its own CSP `default-src 'none'`, no script). Every other request gets the JSON body, whose message never echoes the Host |
 | 429 | after auth PR 3: `rate_limited` (`/auth/login` over 300 per minute per client); R4: `too_many_connections` (WebSocket, before the upgrade; see WebSocket) |
 | 500 | `internal_error`; `archive_failed` (`DELETE /api/rooms/{id}?archive=true` could not write the archive, so nothing was deleted) |
@@ -408,8 +408,8 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | POST | `/api/alerts/{source}` | the sender's own JSON (`source` = `alertmanager`, `grafana`, `pagerduty`, `datadog` or `generic`) | `RoomSnapshot` | **No `X-User`**: the sender's signature or token is the auth (`internal/alertin/README.md`); a source with no secret configured answers `401`. Same dedup / resolved / room rules as `/api/alerts/webhook`, keyed on the source's own dedup key: new room `201`; repeat while its room is open `200` (join); resolved with no open room `202 {"ignored": true, "reason": "resolved alert with no open room"}`; a verified non-alert (PagerDuty ping, ack) `202 {"ignored": true, "reason": ...}`. Errors: bad / missing / stale signature or disabled source `401 unauthenticated` (checked before the body is read); body over 1 MB `413 too_large`; verified but unparseable `400 validation`; unknown `{source}` `404 not_found`. Title, severity and pipeline come from the alert (label, `PAGERDUTY_SERVICES` map, owners match, or `DEFAULT_ALERT_PIPELINE`); the raw body is stored in `room.created.alert`. `room.created` also records `alert_source` (`webhook` or the source name), `dedup_key`, and `alert_verified: true` with `alert_verified_by` (see Event under Objects; R3 #135, A5 implements). With a `tenants:` block in `owners.yaml` the `200`/`201` body is `{"room_id": "r_…", "created": true\|false}` instead of the `RoomSnapshot`: a source secret is shared by every tenant, so the reply carries no room content. |
 | GET | `/api/rooms/{id}` | – | `RoomSnapshot` | |
 | GET | `/api/rooms/{id}/events?after=0&limit=500` | – | `{events:[Event], last_seq}` | limit max 1000; `events` is `[]` when nothing is after `after` |
-| POST | `/api/rooms/{id}/comments` | `{step_id?, text, kind?}` | `Event` | `@agent` in text sets `mentions_agent`. R4: `text` at most 4000 characters (code points), else `400 validation`. Q0 (QA G10): `kind` is absent/`""` or `"fix_note"` (a person logs what they did outside Piperoom; the post-mortem lists it under "What was done"); any other value `400 validation`. A fix note may be added to an open room, or to a closed one by its closer or a member of its pipeline (the label rule) for 24 h after the close |
-| POST | `/api/rooms/{id}/steer` | `{text}` | `Event` | driver → `steer.sent`; others (also when no one drives or the lease expired) → `steer.suggested`, kept for the next driver (F5, implemented by A5; existing behaviour: a suggestion stays in `pending_suggestions` across `control.granted` and never wakes the agent; viewers `403 viewer`, closed rooms `409 room_closed`). R4: `text` at most 4000 characters (code points), else `400 validation` |
+| POST | `/api/rooms/{id}/comments` | `{step_id?, text, kind?, client_id?}` | `Event` | `@agent` in text sets `mentions_agent`. R4: `text` at most 4000 characters (code points), else `400 validation`. Q0 (QA G10): `kind` is absent/`""` or `"fix_note"` (a person logs what they did outside Piperoom; the post-mortem lists it under "What was done"); any other value `400 validation`. A fix note may be added to an open room, or to a closed one by its closer or a member of its pipeline (the label rule) for 24 h after the close. `client_id`: optional idempotency key, see Idempotent posts (`409 client_id_reused`) |
+| POST | `/api/rooms/{id}/steer` | `{text, client_id?}` | `Event` | driver → `steer.sent`; others (also when no one drives or the lease expired) → `steer.suggested`, kept for the next driver (F5, implemented by A5; existing behaviour: a suggestion stays in `pending_suggestions` across `control.granted` and never wakes the agent; viewers `403 viewer`, closed rooms `409 room_closed`). R4: `text` at most 4000 characters (code points), else `400 validation`. `client_id`: optional idempotency key, see Idempotent posts (`409 client_id_reused`) |
 | POST | `/api/rooms/{id}/suggestions/{sid}/send` | – | `Event` | driver only; emits `steer.sent` with `suggestion_id` and `from` (the suggester's actor; the event's actor is the driver). The agent reads a forwarded suggestion as the suggester's words, wrapped as untrusted data, not as a driver instruction |
 | POST | `/api/rooms/{id}/suggestions/{sid}/decline` | `{reason?}` | `Event` (`steer.declined`) | R0; server R11. Driver only (`403 not_driver`); open rooms only (`409 room_closed`); unknown `sid`, or one of another room, `404 not_found`; a suggestion that is no longer pending (sent or declined) `409 already_decided`, the same answer as a second `send`, so a retry after a lost response is safe to treat as done. `reason` optional, at most 500 characters, typed-text rule above (else `400 validation`). The suggestion leaves `pending_suggestions`; the agent never sees it |
 | POST | `/api/rooms/{id}/control/request` | – | `Event` | |
@@ -589,6 +589,37 @@ never shows shadow output.
   `<dir>/<pipeline_id>/<room_id>.json`, mode `0600`. If that write fails the room is not deleted: retention logs
   the error and tries again on its next run; `DELETE …&archive=true` answers `500 archive_failed`.
 
+### Idempotent posts (#459; server A5, web A6)
+
+`POST /api/rooms/{id}/comments` and `POST /api/rooms/{id}/steer` take an optional `client_id`: an idempotency key
+the client generates once per user action (a UUID v4 is recommended) and sends again, unchanged, on every retry of
+that action. It is 1–64 characters of `[A-Za-z0-9_-]`, compared exactly (case-sensitive), else `400 validation`. It
+must not be derived from user data: it is visible to everyone who can read the room (event payload, WebSocket,
+export). Another user's request with the same value is a different key.
+
+- **Key.** `(room, the caller's user id, client_id)`, across both routes, for the life of the room. The server enforces
+  it in the store, so it holds with several replicas and for two requests racing each other: exactly one event is
+  appended.
+- **Order.** Authentication, viewer, tenancy; then the JSON body and the `client_id` format (`400 validation`); then
+  the repeat check; then the route's own checks (text required, typed-text rule, 4000 characters, `room_closed`,
+  `log_full`, driver). So a used key answers `200` or `409 client_id_reused` even when its new body would fail
+  validation, and the retry of an action that landed still answers `200` after the room closed, the log filled or the
+  driver changed (a steer that landed as `steer.sent` stays that event).
+- **Repeat.** A request whose key was already used, with the same route and the same body, appends nothing, wakes
+  nothing, renews no lease and answers `200` (the same status as the first answer) with the original `Event` as
+  stored: same `room_id`, `seq`, `type` and payload values; compare by `seq`, not by bytes. Same body means `text`
+  equal byte for byte (no trimming or normalisation) and the same `step_id` (absent and `""` are the same).
+- **Reuse.** The same key with another route or another body answers `409 client_id_reused` and appends nothing.
+- **Race.** The request that loses the race answers as a repeat: `200` with the winner's event, or
+  `409 client_id_reused` if its body differs. A refused request (any error, nothing appended) uses no key; its retry
+  is checked as a new request.
+- **Payload.** The event carries the key: `comment.added`, `steer.suggested` and `steer.sent` have `client_id`
+  (omitted when the request had none; a `steer.sent` that forwards a suggestion has none, because the forward is the
+  driver's action, not the suggester's request). Clients reconcile their pending copies by it, never by matching text.
+- **Without a key** nothing changes: every request appends, so a client that cannot tell whether a request landed
+  must not re-send it without a key. A server without this feature ignores the field, so a client retries
+  automatically only when the answer's event carries `client_id`.
+
 ## WebSocket
 
 `GET /api/rooms/{id}/ws?after=<seq>`
@@ -614,6 +645,17 @@ The server marks a member `away` after 45 s without any client message (2× the 
 member; with several connections, the earliest among those in the winning state), RFC 3339 UTC; clients show
 `away 12m` from it, never from a client-measured time.
 Rules: the server first replays every event with `seq > after`, then streams live events. Events are never skipped or repeated. **On first open of a room the client connects with `after=0`** (full replay); on reconnect it passes its highest seen seq. Presence is not stored in the event log.
+
+Stale position (#287): `after` greater than the last seq of the room's stored event log would start the stream past
+the log head and skip the events in between, so the server refuses it. The server checks the store, never a cached
+room snapshot, which can trail an append in flight or another replica. It accepts the upgrade (a browser cannot read the status of a
+refused upgrade), sends one frame `{ "type": "error", "error": { "code": "stale_position", "message": "after N is past
+the room's last event M" } }` and closes with status 1008 and close reason `stale_position`. Nothing is replayed. The
+client drops its room state and reconnects with `after=0` (full replay), once, silently; the error frame is shown only
+on a second `stale_position` in a row (which `after=0` cannot cause, so it means a client bug), not retried. Clients
+tell this close apart by its reason, like `session_expired` and `room deleted`: the other 1008 closes (`replay
+timeout`, `read timeout`, `send buffer full`) keep reconnecting with the highest seen seq. `after` that is not a
+non-negative integer still answers `400 bad_request` before the upgrade.
 
 Room deleted: when an admin deletes the room, each open connection gets one last frame
 `{ "type": "event", "event": { "room_id": "r_…", "seq": <last_seq + 1>, "type": "room.deleted", "actor": <the admin>, "payload": { "reason": "…" }, "at": "…" } }`

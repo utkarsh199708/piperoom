@@ -131,9 +131,13 @@ func warehouseRowTool(d Deps) tools.Tool {
 				if err != nil {
 					return tools.Result{}, fmt.Errorf("dbtools: warehouse_row: %w", err)
 				}
-				if input.PKColumn != pk {
+				// Snowflake folds unquoted names to upper case and reports the
+				// key in its own case, so "ID" and "id" are the same column
+				// there. Postgres is case-sensitive. Row gets the canonical pk.
+				if input.PKColumn != pk && !(d.isSnowflake() && strings.EqualFold(input.PKColumn, pk)) {
 					return tools.Result{}, fmt.Errorf("%w: pk_column must be the primary key column of %s (%q)", tools.ErrBadInput, input.Table, pk)
 				}
+				input.PKColumn = pk
 			}
 			row, found, err := d.Wh.Row(ctx, input.Table, input.PKColumn, input.Key)
 			if err != nil {

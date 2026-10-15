@@ -628,7 +628,7 @@ func (s *Service) pageCandidates(ctx context.Context) []User {
 	if s.sessions == nil {
 		return out
 	}
-	live, err := s.sessions.LiveSessions(ctx, s.now(), s.sessionIdle, maxPeople)
+	live, err := s.sessions.LiveSessions(ctx, s.now(), s.sessionLive, maxPeople)
 	if err != nil {
 		if ctx.Err() == nil {
 			s.log.Warn("room: page: list live sessions failed; paging users.yaml owners only", "err", err)
@@ -725,7 +725,7 @@ func (s *Service) pageContacts(ctx context.Context, ids []string) []notify.Owner
 			}
 			o.Email = u.Email
 		} else if s.sessions != nil {
-			if sess, err := s.sessions.LiveByUserID(ctx, id, s.now(), s.sessionIdle); err == nil {
+			if sess, err := s.sessions.LiveByUserID(ctx, id, s.now(), s.sessionLive); err == nil {
 				name, _ := s.ShownName(sess.UserID, sess.Name, sess.Email)
 				if name != "" {
 					o.Name = name

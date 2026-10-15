@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
-import { HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
+import { render, screen, within } from '@testing-library/react'
+import { HANDOFF_READ_ID, HandoffAcceptBanner, HandoffDialog } from './HandoffDialog'
 import type { RoomActions } from '../hooks/useRoom'
 import type { CurrentUser } from '../state/permissions'
 import { emptyRoomState } from '../state/types'
@@ -19,6 +19,8 @@ const handoff: HandoffState = {
   summary: { what_broke: `Lag began at ${STEP}`, why: '', done: [], ruled_out: [], open: [], risks: [] },
   stay_as_watcher: false,
   status: 'pending',
+  from: { kind: 'human', id: 'arjun', name: 'Arjun' },
+  created_at: '2026-10-15T10:00:00Z',
 }
 
 describe('hand-off summary step links', () => {
@@ -34,8 +36,8 @@ describe('hand-off summary step links', () => {
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' }, steps, handoffs: [handoff] }
     const me: CurrentUser = { id: 'priya', name: 'Priya', layers: [] }
     render(<HandoffAcceptBanner state={state} user={me} actions={actions} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Read summary' }))
-    const dialog = screen.getByRole('dialog', { name: /^Hand-off from Arjun/ })
-    expect(within(dialog).getByRole('link', { name: 'step 1' })).toHaveAttribute('href', `#step-${STEP}`)
+    // The receiver's card opens inline, summary first, Accept under it (F2a).
+    const card = document.getElementById(HANDOFF_READ_ID) as HTMLElement
+    expect(within(card).getByRole('link', { name: 'step 1' })).toHaveAttribute('href', `#step-${STEP}`)
   })
 })

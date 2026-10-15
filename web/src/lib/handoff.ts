@@ -1,5 +1,5 @@
 import type { HandoffSummary } from '../api/types'
-import type { RoomState } from '../state/types'
+import type { HandoffState, RoomState } from '../state/types'
 
 /** The hand-off request still being written at `now`: handoff.requested not yet ended and not past expires_at. */
 export function handoffInFlight(state: RoomState, now: number) {
@@ -89,4 +89,10 @@ export function parseSummaryDraft(d: SummaryDraft): { summary: HandoffSummary | 
 /** The failure reasons after which the form offers "Write the summary yourself". */
 export function canWriteByHand(reason: string | undefined): boolean {
   return reason === 'summary_failed'
+}
+
+/** "Shift N" counts the hand-offs that were real shifts or still may be: superseded ones are not. */
+export function shiftIndex(handoffs: HandoffState[], h: HandoffState): number {
+  const live = handoffs.filter((x) => x.status !== 'voided' || x === h)
+  return Math.max(0, live.indexOf(h))
 }

@@ -665,6 +665,8 @@ type pipeSpec struct {
 	watch string // already indented under the pipeline (4 spaces)
 	// extraConn are connectors besides pg-<id> (Q4).
 	extraConn []string
+	// tables is the YAML flow list of source_tables; empty means [public.t].
+	tables string
 }
 
 func ownersYAML(ps ...pipeSpec) string {
@@ -675,8 +677,12 @@ func ownersYAML(ps ...pipeSpec) string {
 		for _, c := range p.extraConn {
 			extra += ", " + c
 		}
-		fmt.Fprintf(&b, "  - id: %s\n    title: %s\n    topic_prefix: %s\n    source_tables: [public.t]\n    connectors: [pg-%s%s]\n    consumer_groups: [g-%s]\n",
-			p.id, p.id, p.id, p.id, extra, p.id)
+		tables := p.tables
+		if tables == "" {
+			tables = "[public.t]"
+		}
+		fmt.Fprintf(&b, "  - id: %s\n    title: %s\n    topic_prefix: %s\n    source_tables: %s\n    connectors: [pg-%s%s]\n    consumer_groups: [g-%s]\n",
+			p.id, p.id, p.id, tables, p.id, extra, p.id)
 		b.WriteString(p.watch)
 	}
 	return b.String()

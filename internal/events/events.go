@@ -470,7 +470,8 @@ type CommentAddedPayload struct {
 	// they did outside Piperoom ("restarted order-sync by hand"). The agent
 	// reads it as a comment; the post-mortem lists fix notes under "What was
 	// done" and treats the room as fixed by a person. (Q0, QA G10)
-	Kind string `json:"kind,omitempty"`
+	Kind     string `json:"kind,omitempty"`
+	ClientID string `json:"client_id,omitempty"` // the request's idempotency key (docs/api.md, Idempotent posts; #459)
 }
 
 // CommentKindFixNote is CommentAddedPayload.Kind for a logged manual fix. (Q0)
@@ -480,6 +481,7 @@ const CommentKindFixNote = "fix_note"
 type SteerSuggestedPayload struct {
 	SuggestionID string `json:"suggestion_id"`
 	Text         string `json:"text"`
+	ClientID     string `json:"client_id,omitempty"` // the steer request's idempotency key (#459)
 }
 
 // SteerSentPayload is an instruction delivered to the agent by the driver.
@@ -491,6 +493,7 @@ type SteerSentPayload struct {
 	SuggestionID string `json:"suggestion_id,omitempty"` // set when forwarding a suggestion
 	From         *Actor `json:"from,omitempty"`          // the suggester; set only with SuggestionID
 	Text         string `json:"text"`
+	ClientID     string `json:"client_id,omitempty"` // the steer request's idempotency key (#459); none on a forward: the forward is the driver's action, not the suggester's request
 }
 
 // SteerDeclinedPayload closes a pending suggestion (steer.suggested) without

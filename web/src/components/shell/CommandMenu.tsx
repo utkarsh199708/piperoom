@@ -2,7 +2,7 @@ import { useRef } from 'react'
 import { plainText } from '@/lib/title'
 import type { ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { CircleCheck, Copy, GitCompareArrows, Hand, Inbox, LogOut, Moon, Route, Sun, UserCheck } from 'lucide-react'
+import { CircleCheck, Copy, Download, FileText, GitCompareArrows, Hand, Inbox, LogOut, Moon, Route, Sun, UserCheck } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import {
   CommandDialog,
@@ -91,7 +91,7 @@ export function CommandMenu({
       <CommandList>
         <CommandEmpty>No results.</CommandEmpty>
 
-        {room && (room.takeControl || room.requestControl || room.handoff || room.trace || room.closeRoom || room.invite) && (
+        {room && (room.takeControl || room.requestControl || room.handoff || room.trace || room.closeRoom || room.invite || room.exportJson || room.postmortem) && (
           <CommandGroup heading="Room">
             {room.takeControl && (
               <CommandItem
@@ -151,6 +151,26 @@ export function CommandMenu({
               >
                 <Copy aria-hidden="true" />
                 Copy invite link
+              </CommandItem>
+            )}
+            {room.exportJson && (
+              <CommandItem
+                value="export room as json"
+                keywords={['download', 'audit', 'hash']}
+                onSelect={() => run(() => registry.get()?.exportJson?.())}
+              >
+                <Download aria-hidden="true" />
+                Export room as JSON
+              </CommandItem>
+            )}
+            {room.postmortem && (
+              <CommandItem
+                value="post-mortem draft"
+                keywords={['markdown', 'retro', 'summary']}
+                onSelect={() => run(() => registry.get()?.postmortem?.(), true)}
+              >
+                <FileText aria-hidden="true" />
+                Post-mortem draft
               </CommandItem>
             )}
           </CommandGroup>

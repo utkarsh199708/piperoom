@@ -56,6 +56,8 @@ export type EventType =
   | 'checklist.step_done'
   | 'proposal.previewed'
   | 'agent.verification'
+  | 'postmortem.drafted'
+  | 'postmortem.failed'
 
 export interface Event {
   room_id: string
@@ -604,6 +606,30 @@ export interface RoomSnapshot {
   insight?: RoomInsight
   /** Q0: injection kinds found in the title (`[]` when clean). The title is still shown, as text. */
   title_flags?: string[]
+  /** F2: the post-mortem draft's state; absent on an older server. */
+  postmortem?: PostmortemSummary
+}
+
+/** RoomSnapshot.postmortem (docs/api.md, F2). */
+export interface PostmortemSummary {
+  status: 'none' | 'drafting' | 'drafted' | 'failed'
+  source?: PostmortemSource
+  reason?: string
+}
+
+export type PostmortemSource = 'handoff' | 'model' | 'events'
+
+/** postmortem.drafted (F2): system actor, after room.closed. `violations` are rule names only. */
+export interface PostmortemDraftedPayload {
+  source: PostmortemSource
+  summary_ref?: string
+  summary?: HandoffSummary
+  violations?: string[]
+}
+
+/** postmortem.failed (F2): reason is summary_failed | internal_error, never error text. */
+export interface PostmortemFailedPayload {
+  reason: string
 }
 
 /** RoomSnapshot.insight (docs/api.md, F11). */

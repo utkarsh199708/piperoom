@@ -27,6 +27,8 @@ import type {
   HandoffRequestedPayload,
   OwnerPagedPayload,
   HypothesisVerdictPayload,
+  PostmortemDraftedPayload,
+  PostmortemFailedPayload,
   ApprovalNudgedPayload,
   ProposalCreatedPayload,
   ProposalWithdrawnPayload,
@@ -266,7 +268,24 @@ function applyCore(state: RoomState, event: Event): RoomState {
         // room.closed, but a log from before Q0 has none and must not show "waiting for approval" forever.
         proposals: state.proposals.map((prop) => endIfOpen(prop, { reason: WITHDRAWN_ROOM_CLOSED, at: event.at })),
         handoffs: voidPending(state.handoffs, () => true),
+        // The server drafts after room.closed (at most 3 min). A shadow room gets no draft.
+        postmortem: state.postmortem ?? (state.shadow ? null : { status: 'drafting' }),
       }
+      break
+    }
+
+    case 'postmortem.drafted': {
+      const p = as<PostmortemDraftedPayload>(event)
+      next = {
+        ...state,
+        postmortem: { status: 'drafted', source: p.source, summary_ref: p.summary_ref, at: event.at },
+      }
+      break
+    }
+
+    case 'postmortem.failed': {
+      const p = as<PostmortemFailedPayload>(event)
+      next = { ...state, postmortem: { status: 'failed', reason: p.reason } }
       break
     }
 
@@ -760,6 +779,8 @@ function applyCore(state: RoomState, event: Event): RoomState {
             // A manual summary was written by the driver who sent the request (the event's actor).
             ...(p.manual ? { manual: true, written_by: event.actor } : {}),
             from_id: state.driver?.id,
+            from: event.actor,
+            created_at: event.at,
           },
         ],
       }
@@ -772,7 +793,9 @@ function applyCore(state: RoomState, event: Event): RoomState {
       next = {
         ...state,
         handoffs: state.handoffs.map((h) =>
-          h.handoff_id === p.handoff_id ? { ...h, status: 'accepted' as const } : h,
+          h.handoff_id === p.handoff_id
+            ? { ...h, status: 'accepted' as const, accepted_at: event.at, accepted_by: event.actor }
+            : h,
         ),
         // The server emits control.granted (driver + lease) immediately before
         // handoff.accepted; keep that lease rather than replacing it with a

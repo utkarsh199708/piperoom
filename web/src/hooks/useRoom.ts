@@ -143,7 +143,8 @@ export interface RoomActions {
    * the summary by hand. A failure of the driver's own summary is only returned, for the form to show.
    */
   handoff: (to: string, stayAsWatcher: boolean, summary?: HandoffSummary) => Promise<HandoffResult>
-  acceptHandoff: (handoffId: string) => void
+  /** Resolves true once the server took the accept, false when it failed (the error is in the room banner). */
+  acceptHandoff: (handoffId: string) => Promise<boolean> | void
   trace: (table: string, key: string) => void
   /**
    * Label the closed room (POST /api/rooms/{id}/label). Resolves when the call is done; a failure
@@ -764,9 +765,18 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
     acceptHandoff: (handoffId) => {
       if (isFixtures()) {
         synthesize('handoff.accepted', { handoff_id: handoffId })
-        return
+        return Promise.resolve(true)
       }
-      void runAction(api.acceptHandoff(handoffId))
+      return api.acceptHandoff(handoffId).then(
+        () => {
+          setError(null)
+          return true
+        },
+        (e: unknown) => {
+          setError(errorText(e))
+          return false
+        },
+      )
     },
     label: async (input) => {
       if (isFixtures()) {
