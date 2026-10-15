@@ -375,6 +375,31 @@ func walkFields(node any, ns string, idx schemaIndex) {
 
 var avroPrimitives = map[string]bool{"null": true, "boolean": true, "int": true, "long": true, "float": true, "double": true, "bytes": true, "string": true}
 
+// structuralTypes are the "type" values that are not a by-name reference.
+var structuralTypes = map[string]bool{"array": true, "map": true, "record": true, "enum": true, "fixed": true, "error": true}
+
+// namedTypeName reports the short name when t names a type by definition
+// ({"type":"record","name":...}), by bare reference ("com.x.Addr") or by an
+// object-wrapped reference ({"type":"com.x.Addr"}); it is the one place that
+// knows these spellings, so none can render differently from another.
+func namedTypeName(t any) (string, bool) {
+	switch v := t.(type) {
+	case string:
+		if avroPrimitives[v] {
+			return "", false
+		}
+		return shortName(v), true
+	case map[string]any:
+		if name, ok := v["name"].(string); ok && name != "" {
+			return shortName(name), true
+		}
+		if vt, ok := v["type"].(string); ok && !avroPrimitives[vt] && !structuralTypes[vt] {
+			return shortName(vt), true
+		}
+	}
+	return "", false
+}
+
 // canon renders an Avro type as a compact, comparable string. Enum symbols are
 // compared separately (see enumChanges), so an enum prints as its name. Inside
 // array items and map values (elem) a named type is written by its short name
@@ -383,19 +408,18 @@ var avroPrimitives = map[string]bool{"null": true, "boolean": true, "int": true,
 // writing a reference short or full is not a change. Outside them the text is
 // unchanged (gap #493).
 func canon(t any, elem bool) string {
+	if elem {
+		if n, ok := namedTypeName(t); ok {
+			return n // every spelling of a named type: one helper, no form missed
+		}
+	}
 	switch v := t.(type) {
 	case string:
-		if elem && !avroPrimitives[v] {
-			return shortName(v)
-		}
 		return v
 	case map[string]any:
 		vt, _ := v["type"].(string)
 		if _, nested := v["type"].(map[string]any); nested {
 			return canon(v["type"], elem) // {"type":{"type":"array",...}}
-		}
-		if name, ok := v["name"].(string); ok && elem {
-			return shortName(name) // before logicalType: a named fixed must match its reference
 		}
 		if lt, ok := v["logicalType"].(string); ok {
 			if vt == "bytes" && lt == "decimal" {
