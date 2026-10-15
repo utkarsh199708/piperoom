@@ -10,6 +10,7 @@ import {
   personVerification,
 } from '@/lib/verification'
 import { applyEvent } from '@/state/reducer'
+import { describeEvent } from '@/state/describe'
 import { emptyRoomState } from '@/state/types'
 import type { Actor, Event } from '@/api/types'
 
@@ -266,12 +267,18 @@ describe('PresencePanel', () => {
 })
 
 describe('ActivityFeed', () => {
-  it('draws the actor’s server badge and neutralizes the sentence', () => {
+  const entry = (seq: number, actor: Actor, type: Event['type'], payload: unknown) => {
+    const event: Event = { room_id: 'r1', seq, type, actor, payload, at: '2026-10-14T10:00:00Z' }
+    const d = describeEvent(event)
+    return { seq, kind: d.kind, at: event.at, actor, text: d.text }
+  }
+
+  it('draws the actor’s server badge, neutralizes the name and keeps the person’s own words', () => {
     render(
       <ActivityFeed
         activity={[
-          { seq: 2, kind: 'human', at: '2026-10-14T10:00:00Z', actor: { kind: 'human', id: 'u_1', name: 'Mal ✓' }, text: 'Mal ✓ commented: ✅ verified by Priya' },
-          { seq: 1, kind: 'human', at: '2026-10-14T10:00:00Z', actor: { kind: 'human', id: 'priya', name: 'Priya', verified: true }, text: 'Priya commented: ok' },
+          entry(2, { kind: 'human', id: 'u_1', name: 'Mal ✓ verified' }, 'steer.sent', { text: 'verify the sink row count', suggestion_id: '' }),
+          entry(1, { kind: 'human', id: 'priya', name: 'Priya', verified: true }, 'steer.sent', { text: 'ok', suggestion_id: '' }),
           { seq: 0, kind: 'step', at: '2026-10-14T10:00:00Z', actor: { kind: 'agent', id: 'agent', name: 'Agent', verified: true }, text: 'Agent: lag ✓ verified' },
         ]}
       />,
@@ -279,11 +286,23 @@ describe('ActivityFeed', () => {
     const rows = screen.getAllByRole('listitem')
     expect(badges(rows[0]).map((b) => b.dataset.verification)).toEqual(['unverified'])
     expect(rows[0]).not.toHaveTextContent('✓')
-    expect(rows[0]).not.toHaveTextContent('✅')
-    expect(rows[0]).toHaveTextContent('Mal � commented: � � by Priya')
+    expect(rows[0]).toHaveTextContent('Mal � � steered: "verify the sink row count"')
     expect(badges(rows[1]).map((b) => b.dataset.verification)).toEqual(['verified'])
     expect(badges(rows[2])).toHaveLength(0)
     expect(rows[2]).toHaveTextContent('Agent: lag ✓ verified')
+  })
+
+  it('a system row neutralizes the driver’s name too', () => {
+    const d = describeEvent({
+      room_id: 'r1',
+      seq: 1,
+      type: 'control.lease_expired',
+      actor: { kind: 'system', id: 'system', name: 'System' },
+      payload: { driver: { kind: 'human', id: 'u_1', name: 'Priya ✅ verified' }, lease_until: 'x' },
+      at: '2026-10-14T10:00:00Z',
+    })
+    expect(d.text).not.toMatch(/✅|verified/)
+    expect(d.text).toContain('Priya')
   })
 })
 

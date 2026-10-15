@@ -1,6 +1,7 @@
 import { Sparkles } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { initials, personColor } from '@/lib/people'
+import { neutralizeBadgeText } from '@/lib/verification'
 import { cn } from '@/lib/utils'
 import type { Actor } from '@/api/types'
 
@@ -41,7 +42,7 @@ export function PersonAvatar({
         stacked && 'border-2 border-background',
         className,
       )}
-      title={label ?? actor.name}
+      title={neutralizeBadgeText(label ?? actor.name)}
       {...a11y}
     >
       <AvatarFallback
@@ -55,7 +56,7 @@ export function PersonAvatar({
         {kind === 'agent' ? (
           <Sparkles className={size === 20 ? 'size-3' : 'size-3.5'} aria-hidden="true" />
         ) : (
-          initials(actor.name || actor.id)
+          initials(actor.name, actor.id)
         )}
       </AvatarFallback>
     </Avatar>

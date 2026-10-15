@@ -75,3 +75,21 @@ describe('names added since the badge PR cannot fake the badge', () => {
     expect(container).not.toHaveTextContent('✓')
   })
 })
+
+describe('status line structure (layout regression)', () => {
+  it('keeps the name in a clipping box and the tail in its own truncating box', () => {
+    const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun' } }
+    const { container } = render(
+      <SteerBox state={state} user={{ id: 'kabir', name: 'Kabir', layers: [] }} actions={actions} />,
+    )
+    const status = container.querySelector('[data-slot="steer-status"]')!
+    const person = status.querySelector('[data-slot="person-name"]')!
+    expect(person.className).toMatch(/overflow-hidden/)
+    expect(person).toHaveTextContent('Arjun')
+    // The tail must be able to shrink: a nowrap flex child that cannot would squeeze the name to 0px.
+    const tail = status.querySelector('[data-slot="steer-status-tail"]')!
+    expect(tail.className).toMatch(/min-w-0/)
+    expect(tail.className).toMatch(/truncate/)
+    expect(tail.parentElement).toBe(status)
+  })
+})

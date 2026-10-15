@@ -20,6 +20,11 @@ const proposal: ProposalState = {
 }
 
 describe('agentPill', () => {
+  it('an open shadow room says the agent works silently, not "idle · waiting for a driver"', () => {
+    const p = agentPill(room({ shadow: true, agent_status: { state: 'idle' } }))
+    expect(p).toMatchObject({ tone: 'agent', text: 'Shadow · agent works silently' })
+    expect(agentPill(room({ shadow: true, status: 'closed' })).text).toBe('Agent stopped')
+  })
   it('working shows the step count', () => {
     const steps = [1, 2, 3].map((i) => ({ id: `s${i}`, title: 't', tool_calls: [], messages: [] }))
     expect(agentPill(room({ agent_status: { state: 'working', detail: 'x' }, steps }))).toMatchObject({

@@ -26,3 +26,10 @@ describe('list row second line', () => {
     expect(triageLine({ ...base }, now).kind).toBe('pending') // an older server sends no triage field
   })
 })
+
+describe('shadow rooms', () => {
+  it('never claim a first look is in progress', () => {
+    expect(triageLine({ ...base, shadow: true, triage: null }, now).kind).toBe('none')
+    expect(triageLine({ ...base, shadow: true }, now).kind).toBe('none')
+  })
+})

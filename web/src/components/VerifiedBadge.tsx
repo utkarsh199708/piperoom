@@ -29,7 +29,7 @@ export function VerifiedBadge({ verification, className }: { verification: Verif
             tabIndex={0}
             className={cn(
               'inline-flex h-5 shrink-0 select-none items-center gap-1 rounded-full border px-1.5 text-[11px] font-semibold leading-none',
-              'outline-none focus-visible:ring-2 focus-visible:ring-ring',
+              'outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
               ok
                 ? 'border-success bg-success-subtle text-success-foreground'
                 : 'border-dashed border-warning bg-warning-subtle text-warning-foreground',
@@ -80,7 +80,7 @@ export function PersonName({
   const needsId =
     v.state === 'unverified' && shown !== person.id && !shown.endsWith(`(${person.id})`) && !/\([^()]*@[^()]*\)$/.test(shown)
   return (
-    <span className={cn('inline-flex min-w-0 max-w-full items-center gap-1.5', className)} data-slot="person-name">
+    <span className={cn('inline-flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden', className)} data-slot="person-name">
       <span className={cn('min-w-0 truncate', nameClassName)}>{shown}</span>
       {needsId && (
         <span className="shrink-0 font-mono text-xs font-normal text-subtle-foreground">({person.id})</span>

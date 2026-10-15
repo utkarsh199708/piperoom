@@ -75,9 +75,9 @@ export function PresencePanel({
                   : 'away'
                 : 'not here'
           return (
-            <li key={r.id} className={cn('flex min-h-8 items-center gap-2', away && 'opacity-70')}>
+            <li key={r.id} className={cn('flex min-h-8 flex-wrap items-center gap-x-2 gap-y-1 py-0.5', away && 'opacity-70')}>
               <PersonAvatar actor={{ id: r.id, name: r.name }} driver={driver} className={driver ? 'mx-0.5' : undefined} />
-              <PersonName person={{ id: r.id, name: r.name }} verified={r.verified} nameClassName="font-medium" />
+              <PersonName person={{ id: r.id, name: r.name }} verified={r.verified} className="shrink-0" nameClassName="font-medium" />
               {r.id === selfId && <span className="text-xs text-muted-foreground">you</span>}
               {driver && <Badge variant="accent">Driver</Badge>}
               {r.id === selfId && selfIsViewer && <Badge variant="outline">viewer</Badge>}

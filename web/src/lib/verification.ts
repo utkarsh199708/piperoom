@@ -97,7 +97,7 @@ export function alertVerification(alertSource: unknown): Verification {
 // check marks and ballot boxes, emoji and pictographs, enclosing combining marks
 // (U+20DD…), bidi controls and other default-ignorable code points.
 const BADGE_LOOKALIKES =
-  /[✓✔✅☑☒☐√⍻\u{1F5F8}\u{1F5F9}\u{10102}\u{1F6E1}]|\p{Extended_Pictographic}|\p{Emoji_Presentation}|\p{Regional_Indicator}|\p{Me}|\p{Default_Ignorable_Code_Point}|[‪-‮⁦-⁩‎‏؜]/gu
+  /[✓✔✅☑☒☐√⍻\u{1F5F8}-\u{1F5FA}\u{10102}\u{1F6E1}\u{1FBB1}]|\p{Extended_Pictographic}|\p{Emoji_Presentation}|\p{Regional_Indicator}|\p{Me}|\p{Default_Ignorable_Code_Point}|[‪-‮⁦-⁩‎‏؜]/gu
 
 // More than two combining marks in a row only stack glyphs out of the line box.
 const MARK_PILE = /(\p{Mn}{2})\p{Mn}+/gu
@@ -110,13 +110,22 @@ const CONFUSABLE: Record<string, string> = {
   'р': 'p', 'с': 'c', 'у': 'y', 'х': 'x', 'ѵ': 'v', 'ԁ': 'd', 'һ': 'h',
   'ո': 'n', 'ս': 'u', 'ν': 'v', 'ε': 'e', 'ι': 'i', 'ο': 'o', 'ρ': 'p',
   'υ': 'u', 'ϝ': 'f', 'ı': 'i', 'ɩ': 'i', '1': 'i', l: 'i', '|': 'i', '!': 'i',
+  'ʋ': 'v', // U+028B
+  // Small capitals (U+1D00 block and IPA): "ᴠᴇʀɪꜰɪᴇᴅ".
+  '\u1d20': 'v', '\u1d07': 'e', '\u0280': 'r', '\u026a': 'i', '\ua730': 'f', '\u1d05': 'd', '\u1d1c': 'u', '\u0274': 'n',
+  // Lisu: "ꓦꓰꓣꓲꓝꓲꓰꓓ".
+  '\ua4e6': 'v', '\ua4f0': 'e', '\ua4e3': 'r', '\ua4f2': 'i', '\ua4dd': 'f', '\ua4d3': 'd', '\ua4f4': 'u', '\ua4e0': 'n',
+  // Cherokee capitals (they lower-case to U+AB70…, so the lookup tries the raw letter first): "ᏙᎬᎡᏆᎰᏆᎬᎠ".
+  '\u13d9': 'v', '\u13ac': 'e', '\u13a1': 'r', '\u13c6': 'i', '\u13b0': 'f', '\u13a0': 'd',
 }
 
 function skeleton(word: string): string {
   let out = ''
-  for (const ch of word.normalize('NFKD').toLowerCase()) {
+  // NFKD already turns circled and full-width letters ("ⓥⓔⓡⓘⓕⓘⓔⓓ") into plain ones.
+  for (const ch of word.normalize('NFKD')) {
     if (/\p{M}/u.test(ch)) continue
-    out += CONFUSABLE[ch] ?? ch
+    const low = ch.toLowerCase()
+    out += CONFUSABLE[ch] ?? CONFUSABLE[low] ?? low
   }
   return out.replace(/[^a-z]/g, '')
 }
@@ -137,6 +146,6 @@ export function neutralizeBadgeText(text: string): string {
   return text
     .replace(BADGE_LOOKALIKES, '\uFFFD')
     .replace(MARK_PILE, '$1')
-    .replace(/[\p{L}\p{N}\p{M}|!]+/gu, (word) => (VERDICT_SKELETON.test(skeleton(word)) ? '\uFFFD' : word))
+    .replace(/[\p{L}\p{N}\p{M}\p{So}|!]+/gu, (word) => (VERDICT_SKELETON.test(skeleton(word)) ? '\uFFFD' : word))
     .replace(/\uFFFD+/g, '\uFFFD')
 }

@@ -119,7 +119,9 @@ describe('SteerBox composer (U3)', () => {
   it('a watcher is told whose queue the message goes to, and the lease', () => {
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
     render(<SteerBox state={state} user={kabir} actions={actions} />)
-    expect(screen.getByText(/is driving · lease 2[34]m left · your message goes to their queue/)).toHaveTextContent(/^Arjun.* is driving/)
+    expect(document.querySelector('[data-slot="steer-status"]')).toHaveTextContent(
+      /^Arjun.* is driving · lease 2[34]m left · your message goes to their queue/,
+    )
     expect(screen.getByPlaceholderText(/Suggest a step for Arjun/)).toBeInTheDocument()
   })
 
@@ -326,6 +328,7 @@ describe('SteerBox idle row (F1b)', () => {
       fireEvent.focus(field())
       expect(screen.getByText(/^Queued for/)).toHaveTextContent(/^Queued for Arjun/)
       expect(screen.getByText(/^Sent by/)).toHaveTextContent(/^Sent by Arjun.* · /)
+      expect(screen.getByText(/^Declined by/)).toHaveTextContent(/^Declined by Arjun/)
       expect(screen.getByText(/^Declined by/)).toHaveAttribute('title', 'not now')
     })
 
@@ -347,7 +350,7 @@ describe('SteerBox lease copy', () => {
   })
   it('under a minute is not expired', () => {
     render(<SteerBox state={drive(new Date(Date.now() + 30_000).toISOString())} user={arjun} actions={actions} />)
-    expect(screen.getByText('You are driving · lease ends in under a minute')).toBeInTheDocument()
+    expect(screen.getByText('Lease ends in under a minute — any action renews')).toBeInTheDocument()
   })
   it('a lapsed lease reads expired', () => {
     render(<SteerBox state={drive(new Date(Date.now() - 1000).toISOString())} user={arjun} actions={actions} />)

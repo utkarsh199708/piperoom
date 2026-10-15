@@ -667,7 +667,7 @@ function RoomRow({
                 style={{ backgroundColor: personColor(room.driver.id) }}
                 aria-hidden="true"
               >
-                {initials(room.driver.name)}
+                {initials(room.driver.name, room.driver.id)}
               </AvatarFallback>
             </Avatar>
             <PersonName person={{ ...room.driver, kind: 'human' }} />

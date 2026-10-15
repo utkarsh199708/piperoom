@@ -1,11 +1,13 @@
 import type { ReactNode } from 'react'
 import type { Actor } from '../api/types'
+import { initials as peopleInitials } from '../lib/people'
+import { neutralizeBadgeText } from '../lib/verification'
 
 export function Avatar({ actor, size = 'md' }: { actor: Actor; size?: 'sm' | 'md' | 'lg' }) {
-  const initials = (actor.name || actor.id || '?').slice(0, 2).toUpperCase()
+  const initials = peopleInitials(actor.name, actor.id)
   const kind = actor.kind === 'agent' ? 'avatar--agent' : actor.kind === 'system' ? 'avatar--system' : ''
   return (
-    <span className={`avatar avatar--${size} ${kind}`} aria-hidden="true" title={actor.name}>
+    <span className={`avatar avatar--${size} ${kind}`} aria-hidden="true" title={neutralizeBadgeText(actor.name)}>
       {initials}
     </span>
   )

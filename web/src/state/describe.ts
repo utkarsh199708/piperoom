@@ -1,5 +1,6 @@
 // Turns an event into one curated line for the activity feed. Pure: no ids ever reach the text,
 // and nothing here builds HTML (the feed renders `text` as text nodes, `{tool}` as <code>).
+import { neutralizeBadgeText } from '../lib/verification'
 import type {
   ActionExecutedPayload,
   AgentVerificationPayload,
@@ -58,6 +59,11 @@ export interface DescribeContext {
 
 export const EMPTY_CONTEXT: DescribeContext = { driverBefore: null, stepTitles: {}, proposalTitles: {}, stepIndex: {} }
 
+/** A person's display name, safe to embed in a sentence (see neutralizeBadgeText). */
+function nm(name: string | undefined): string {
+  return name ? neutralizeBadgeText(name) : ''
+}
+
 function as<T>(e: Event): T {
   return e.payload as T
 }
@@ -87,7 +93,8 @@ function took(ms: number): string {
 }
 
 export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): Described {
-  const who = e.actor.kind === 'agent' ? 'Agent' : e.actor.name || e.actor.id
+  // Every person name below is untrusted, so it goes in neutralized: a name cannot read as a badge or a verdict.
+  const who = e.actor.kind === 'agent' ? 'Agent' : nm(e.actor.name || e.actor.id)
   const step = (id?: string) => {
     const n = id ? ctx.stepIndex[id] : undefined
     return n ? `step ${n}` : 'a step'
@@ -179,14 +186,14 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     case 'steer.sent': {
       const p = as<SteerSentPayload>(e)
       if (p.suggestion_id) {
-        const from = ctx.suggesters?.[p.suggestion_id]
+        const from = nm(ctx.suggesters?.[p.suggestion_id])
         return { text: from ? `${who} sent ${from}'s suggestion` : `${who} sent a suggestion`, detail: clip(p.text, 200), kind: 'human' }
       }
       return { text: `${who} steered: "${clip(p.text, 80)}"`, kind: 'human' }
     }
     case 'steer.declined': {
       const p = as<SteerDeclinedPayload>(e)
-      const from = ctx.suggesters?.[p.suggestion_id]
+      const from = nm(ctx.suggesters?.[p.suggestion_id])
       return {
         text: from ? `${who} declined ${from}'s suggestion` : `${who} declined a suggestion`,
         detail: p.reason ? clip(p.reason, 200) : undefined,
@@ -204,11 +211,11 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
           ? { text: `${who} renewed the lease`, kind: 'system' }
           : { text: `${who} took control`, kind: 'control' }
       }
-      return { text: `${who} handed control to ${p.to.name}`, kind: 'control' }
+      return { text: `${who} handed control to ${nm(p.to.name)}`, kind: 'control' }
     }
     case 'control.lease_expired': {
       const p = as<ControlLeaseExpiredPayload>(e)
-      return { text: `${p.driver?.name || 'The driver'}'s lease expired · no one is driving`, kind: 'control' }
+      return { text: `${nm(p.driver?.name) || 'The driver'}'s lease expired · no one is driving`, kind: 'control' }
     }
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(e)
@@ -234,13 +241,13 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
     }
     case 'handoff.requested': {
       const p = as<HandoffRequestedPayload>(e)
-      return { text: `${who} asked for a hand-off to ${p.to.name}`, kind: 'control' }
+      return { text: `${who} asked for a hand-off to ${nm(p.to.name)}`, kind: 'control' }
     }
     case 'handoff.failed':
       return { text: 'The hand-off could not be written', kind: 'control' }
     case 'handoff.created': {
       const p = as<HandoffCreatedPayload>(e)
-      return { text: `${who} started a hand-off to ${p.to.name}`, kind: 'control' }
+      return { text: `${who} started a hand-off to ${nm(p.to.name)}`, kind: 'control' }
     }
     case 'handoff.accepted':
       return { text: `${who} accepted the hand-off`, kind: 'control' }
@@ -265,6 +272,13 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       const p = as<TracePinnedPayload>(e)
       return { text: `${who} traced ${clip(p.table, 40)} · ${clip(p.key, 40)}`, kind: 'human' }
     }
+    // Shadow events carry no agent text, so these lines cannot un-blind anyone.
+    case 'shadow.revealed':
+      return { text: 'Shadow run finished: its result is ready to read after you label the room', kind: 'system' }
+    case 'shadow.labelled':
+      return { text: `${who} recorded a blind label`, kind: 'human' }
+    case 'shadow.graded':
+      return { text: `${who} graded the shadow run`, kind: 'human' }
     default:
       return { text: clip(e.type, 60), kind: 'system' }
   }

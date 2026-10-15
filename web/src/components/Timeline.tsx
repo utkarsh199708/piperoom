@@ -403,6 +403,7 @@ export function Timeline({
   checklist,
   filterLayer,
   onClearFilter,
+  shadow = false,
 }: {
   steps: StepState[]
   messages: AgentMessageState[]
@@ -421,10 +422,12 @@ export function Timeline({
   /** Show only steps that called a tool of this layer (the live step is always kept). */
   filterLayer?: string
   onClearFilter?: () => void
+  /** Shadow room: the agent works silently, so the empty state neither reports it nor offers a steer. */
+  shadow?: boolean
 }) {
   const unanchored = comments.filter((c) => !c.step_id)
   if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
-    const empty = emptyStateFor(agent)
+    const empty = emptyStateFor(agent, shadow)
     return (
       <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border bg-card p-6 text-center">
         <PersonAvatar actor={AGENT} size={28} className={empty.busy ? 'animate-pulse' : 'opacity-70'} />
