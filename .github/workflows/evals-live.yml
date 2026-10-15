@@ -19,7 +19,7 @@ on:
         type: boolean
         default: false
       only:
-        description: "Comma-separated scenario names to run (empty = all 25). Example: schema-change"
+        description: "Comma-separated scenario names, or all (GitHub replaces an empty value with the default)"
         type: string
         default: "schema-change"
       runs:
@@ -112,7 +112,7 @@ jobs:
           # Episodes run 6 at a time with a 10-minute cap each; one at a time
           # (the evalrun default) cannot finish 75 episodes inside the job limit.
           args=(-runs "$RUNS" -max-turns "$MAX_TURNS" -parallel 6 -timeout 10m -prices "$RUNNER_TEMP/prices.json" -label ci -out cand.json)
-          if [ -n "$ONLY" ]; then args+=(-only "$ONLY"); fi
+          if [ -n "$ONLY" ] && [ "$ONLY" != "all" ]; then args+=(-only "$ONLY"); fi
           if [ "$MAKE_BASELINE" = "true" ]; then
             echo "::notice::make_baseline: no comparison; the report is uploaded as baseline-default."
           elif [ -f evals/baseline/default.json ]; then

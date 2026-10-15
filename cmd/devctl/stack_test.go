@@ -84,11 +84,13 @@ func TestResetArgs(t *testing.T) {
 // composeFile is the part of dev/docker-compose.yml the checks below read.
 type composeFile struct {
 	Services map[string]struct {
-		Image      string   `yaml:"image"`
-		Ports      []string `yaml:"ports"`
-		Volumes    []string `yaml:"volumes"`
-		Entrypoint []string `yaml:"entrypoint"`
-		Command    []string `yaml:"command"`
+		Image       string            `yaml:"image"`
+		Profiles    []string          `yaml:"profiles"`
+		Environment map[string]string `yaml:"environment"`
+		Ports       []string          `yaml:"ports"`
+		Volumes     []string          `yaml:"volumes"`
+		Entrypoint  []string          `yaml:"entrypoint"`
+		Command     []string          `yaml:"command"`
 	} `yaml:"services"`
 	Volumes map[string]any `yaml:"volumes"`
 }
@@ -116,8 +118,10 @@ func TestComposeFile(t *testing.T) {
 		t.Fatalf("parse compose file: %v", err)
 	}
 	var others []string
-	for name := range c.Services {
-		if name != roomDBService {
+	for name, svc := range c.Services {
+		// Profile services (piperoom-shadow) are not pipeline data either: they are
+		// started on request and, like a server run by hand, survive a reset.
+		if name != roomDBService && len(svc.Profiles) == 0 {
 			others = append(others, name)
 		}
 	}
@@ -143,6 +147,13 @@ func TestComposeFile(t *testing.T) {
 	}
 	if !slices.Contains(room.Ports, u.Port()+":5432") {
 		t.Errorf("roomdb ports %v do not publish the PIPEROOM_DB_URL default port %s", room.Ports, u.Port())
+	}
+	// A server the stack starts keeps its rooms in roomdb too, never in the
+	// pipeline Postgres that reset wipes.
+	for name, svc := range c.Services {
+		if db := svc.Environment["PIPEROOM_DB_URL"]; db != "" && !strings.Contains(db, "@"+roomDBService+":5432/") {
+			t.Errorf("service %s: PIPEROOM_DB_URL %q is not the %s service", name, db, roomDBService)
+		}
 	}
 	if pg := c.Services["postgres"]; pg.Image != room.Image || !strings.Contains(pg.Image, ":17.") {
 		t.Errorf("postgres image %q and roomdb image %q: want the same pinned 17.x minor", pg.Image, room.Image)

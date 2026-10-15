@@ -39,7 +39,8 @@ const (
 )
 
 // pipelineServices are the compose services `devctl reset` removes together
-// with their anonymous volumes: every service except roomDBService. A unit test
+// with their anonymous volumes: every service except roomDBService and the
+// profile services (piperoom-shadow), which hold no pipeline data. A unit test
 // checks the list against dev/docker-compose.yml.
 var pipelineServices = []string{"postgres", "kafka", "schema-registry", "connect", "devconsumer"}
 

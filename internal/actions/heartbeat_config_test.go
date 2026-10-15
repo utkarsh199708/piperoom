@@ -64,7 +64,8 @@ func TestHeartbeatIntervalBounds(t *testing.T) {
 			}
 			// Execute applies the same rule: a refused value is never written.
 			c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
-			_, execErr := configAction(c).Execute(context.Background(), p)
+			c.allowWrites = true // a refused value must still not reach the write
+			_, execErr := configAction(t, c).Execute(context.Background(), p)
 			if (execErr == nil) != (tc.wantErr == "") {
 				t.Fatalf("Execute(%q) err = %v, want error = %v", tc.value, execErr, tc.wantErr != "")
 			}
@@ -84,8 +85,9 @@ func TestHeartbeatIntervalBounds(t *testing.T) {
 // The heartbeat fix the QA run could not propose: a slot stuck on a quiet table.
 func TestHeartbeatIntervalExecute(t *testing.T) {
 	c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
+	c.allowWrites = true
 	delete(c.cfg, "heartbeat.interval.ms")
-	out, err := configAction(c).Execute(context.Background(), hbParams(t, "heartbeat.interval.ms", "10000"))
+	out, err := configAction(t, c).Execute(context.Background(), hbParams(t, "heartbeat.interval.ms", "10000"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +98,7 @@ func TestHeartbeatIntervalExecute(t *testing.T) {
 	// Already set: no write, so the tasks are not restarted for nothing.
 	c2 := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
 	c2.cfg["heartbeat.interval.ms"] = "10000"
-	out, err = configAction(c2).Execute(context.Background(), hbParams(t, "heartbeat.interval.ms", "10000"))
+	out, err = configAction(t, c2).Execute(context.Background(), hbParams(t, "heartbeat.interval.ms", "10000"))
 	if err != nil || len(c2.updates) != 0 || !strings.Contains(out, "already 10000") {
 		t.Fatalf("out %q err %v updates %v", out, err, c2.updates)
 	}
@@ -113,7 +115,7 @@ func TestHeartbeatActionQueryIsHumanOnly(t *testing.T) {
 			}
 		}
 		c := newConfigConnect(connectorWithTasks("RUNNING", "RUNNING"))
-		if _, err := configAction(c).Execute(context.Background(), p); err == nil || len(c.updates) != 0 {
+		if _, err := configAction(t, c).Execute(context.Background(), p); err == nil || len(c.updates) != 0 {
 			t.Errorf("Execute(%q) err = %v, updates %v", value, err, c.updates)
 		}
 	}

@@ -87,6 +87,8 @@ shows the last beat. `long-transaction` still shows its symptom with the heartbe
 50-row inserts every 25 s): retained WAL grew 44 kB → 172 kB in two minutes while the transaction was open,
 `restart_lsn` moved only 26 kB in that time, and after `devctl fix long-transaction` retained fell to 10 kB.
 
+Shadow mode (the agent investigates a break silently, you grade it): `dev/shadow.md`.
+
 ## Shared stack lock
 
 The dev stack is shared by several agents, so every mutating command (`reset`, `break`, `fix`, `down`,

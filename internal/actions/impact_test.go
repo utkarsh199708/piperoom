@@ -25,8 +25,8 @@ func TestConnectorConfigImpactTable(t *testing.T) {
 		risk       string
 		reason     []string // substrings
 	}{
-		// The QA case: money as double.
-		{"decimal.handling.mode", "double", both, events.RiskHigh, []string{"NUMERIC/DECIMAL", "money", "lose precision"}},
+		// The QA case, money as double, is refused by the action now (#216): see
+		// TestConnectorConfigImpactNoOpinion and TestConfigImpactDoubleIsHigh.
 		{"decimal.handling.mode", "string", both, events.RiskMedium, []string{"NUMERIC/DECIMAL", "string", "new type"}},
 		{"decimal.handling.mode", "precise", both, events.RiskMedium, []string{"NUMERIC/DECIMAL", "exact decimals"}},
 		{"time.precision.mode", "adaptive", both, events.RiskMedium, []string{"time.precision.mode=adaptive", "date and time columns"}},
@@ -105,19 +105,29 @@ func TestConnectorConfigImpactValueSchemaKeys(t *testing.T) {
 	}
 }
 
+// The action refuses double, so no step reaches this branch; the function still
+// says high for it, in case the allow-list ever offers double again.
+func TestConfigImpactDoubleIsHigh(t *testing.T) {
+	got := configImpact("decimal.handling.mode", "double")
+	if got.RiskLevel != events.RiskHigh || !slices.Equal(got.Layers, []string{"consumer", "warehouse"}) {
+		t.Fatalf("configImpact(double) = %+v", got)
+	}
+}
+
 func TestConnectorConfigImpactNoOpinion(t *testing.T) {
 	a := &updateConnectorConfig{}
 	for name, raw := range map[string]json.RawMessage{
-		"not json":         json.RawMessage(`{`),
-		"empty":            json.RawMessage(`{}`),
-		"key not allowed":  paramsJSON(t, "tasks.max", "4"),
-		"bad value":        paramsJSON(t, "decimal.handling.mode", "float"),
-		"secret key":       paramsJSON(t, "database.password", "x"),
-		"human-only key":   paramsJSON(t, "heartbeat.action.query", "SELECT 1"),
-		"heartbeat range":  paramsJSON(t, "heartbeat.interval.ms", "5"),
-		"a lookalike key":  paramsJSON(t, "Decimal.Handling.Mode", "double"),
-		"a lookalike val":  paramsJSON(t, "decimal.handling.mode", "double "),
-		"wrong json types": json.RawMessage(`{"connector":1,"key":2,"value":3}`),
+		"not json":          json.RawMessage(`{`),
+		"empty":             json.RawMessage(`{}`),
+		"key not allowed":   paramsJSON(t, "tasks.max", "4"),
+		"bad value":         paramsJSON(t, "decimal.handling.mode", "float"),
+		"double is refused": paramsJSON(t, "decimal.handling.mode", "double"),
+		"secret key":        paramsJSON(t, "database.password", "x"),
+		"human-only key":    paramsJSON(t, "heartbeat.action.query", "SELECT 1"),
+		"heartbeat range":   paramsJSON(t, "heartbeat.interval.ms", "5"),
+		"a lookalike key":   paramsJSON(t, "Decimal.Handling.Mode", "double"),
+		"a lookalike val":   paramsJSON(t, "decimal.handling.mode", "double "),
+		"wrong json types":  json.RawMessage(`{"connector":1,"key":2,"value":3}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := a.Impact(raw); got.RiskLevel != "" || got.Reason != "" || len(got.Layers) != 0 {
@@ -129,9 +139,9 @@ func TestConnectorConfigImpactNoOpinion(t *testing.T) {
 
 // A returned slice is the caller's: changing it does not change the next answer.
 func TestConnectorConfigImpactReturnsFreshLayers(t *testing.T) {
-	first := impactOf(t, "decimal.handling.mode", "double")
+	first := impactOf(t, "decimal.handling.mode", "string")
 	first.Layers[0] = "tampered"
-	if again := impactOf(t, "decimal.handling.mode", "double"); again.Layers[0] != "consumer" {
+	if again := impactOf(t, "decimal.handling.mode", "string"); again.Layers[0] != "consumer" {
 		t.Fatalf("Layers shared between calls: %v", again.Layers)
 	}
 }
@@ -155,12 +165,12 @@ func TestOnlyConnectorConfigIsImpacting(t *testing.T) {
 // Impact, on the same params.
 func TestConnectorConfigImpactThroughTheRegistry(t *testing.T) {
 	a := mustGet(t, resumeRegistry(t, testDeps()), "connect_update_connector_config")
-	p := paramsJSON(t, "decimal.handling.mode", "double")
+	p := paramsJSON(t, "decimal.handling.mode", "string")
 	if err := a.Validate(p); err != nil {
 		t.Fatal(err)
 	}
 	imp := a.(Impacting).Impact(p)
-	if imp.RiskLevel != events.RiskHigh || !slices.Equal(imp.Layers, []string{"consumer", "warehouse"}) {
+	if imp.RiskLevel != events.RiskMedium || !slices.Equal(imp.Layers, []string{"consumer", "warehouse"}) {
 		t.Fatalf("Impact = %+v", imp)
 	}
 }

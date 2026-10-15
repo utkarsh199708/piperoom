@@ -13,7 +13,7 @@ import (
 // A group of the pipeline can also read topics of other pipelines; only the
 // pipeline's own partitions and lag are shown.
 func TestConsumerLagShowsOnlyThePipelinesTopics(t *testing.T) {
-	d, _ := scopeFakes()
+	d, _ := scopeFakes(t)
 	d.Kafka.(*fakeKafkaConfig).lagFn = func(_ context.Context, g string) (clients.GroupLag, error) {
 		return clients.GroupLag{Group: g, State: "Stable", Members: 2, TotalLag: 1100, Partitions: []clients.PartitionLag{
 			{Topic: "pg.public.orders", Partition: 0, Lag: 100},

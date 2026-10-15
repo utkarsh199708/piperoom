@@ -31,8 +31,8 @@ func assertNoForeign(t *testing.T, r tools.Result) {
 // markedFakes serves the "orders" pipeline's objects next to the "billing"
 // pipeline's and unowned ones, all of the latter with foreignMark in the name.
 // The pipeline has a second group, order-audit, that reads none of its topics.
-func markedFakes() Deps {
-	d, _ := scopeFakes()
+func markedFakes(t *testing.T) Deps {
+	d, _ := scopeFakes(t)
 	d.Owners.Pipelines[0].ConsumerGroups = append(d.Owners.Pipelines[0].ConsumerGroups, "order-audit")
 	d.Connect.(*fakeConnect).listFn = func(context.Context) ([]string, error) {
 		return []string{"bill-" + foreignMark, "pg-orders-connector", "other-" + foreignMark}, nil
@@ -82,7 +82,7 @@ func TestScopedListsCountOtherObjects(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.tool+" "+tc.in, func(t *testing.T) {
-			r, err := scopeTool(t, markedFakes(), tc.tool).Run(roomCtx(), json.RawMessage(tc.in))
+			r, err := scopeTool(t, markedFakes(t), tc.tool).Run(roomCtx(), json.RawMessage(tc.in))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -113,7 +113,7 @@ func TestUnscopedListsHaveNoCountLine(t *testing.T) {
 		{"kafka_consumer_lag", `{"group":"order-sync"}`},
 	} {
 		t.Run(tc.tool, func(t *testing.T) {
-			r, err := scopeTool(t, markedFakes(), tc.tool).Run(tools.WithUnscoped(context.Background()), json.RawMessage(tc.in))
+			r, err := scopeTool(t, markedFakes(t), tc.tool).Run(tools.WithUnscoped(context.Background()), json.RawMessage(tc.in))
 			if err != nil {
 				t.Fatal(err)
 			}
