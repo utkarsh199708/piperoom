@@ -347,7 +347,7 @@ describe('SteerBox lease copy', () => {
   })
   it('under a minute is not expired', () => {
     render(<SteerBox state={drive(new Date(Date.now() + 30_000).toISOString())} user={arjun} actions={actions} />)
-    expect(screen.getByText('You are driving · lease ends in under a minute')).toBeInTheDocument()
+    expect(screen.getByText('Lease ends in under a minute — any action renews')).toBeInTheDocument()
   })
   it('a lapsed lease reads expired', () => {
     render(<SteerBox state={drive(new Date(Date.now() - 1000).toISOString())} user={arjun} actions={actions} />)
