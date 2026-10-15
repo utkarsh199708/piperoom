@@ -12,6 +12,7 @@ import (
 
 	"piperoom/internal/alertin"
 	"piperoom/internal/events"
+	"piperoom/internal/injectscan"
 	"piperoom/internal/store"
 )
 
@@ -186,7 +187,8 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	if err := checkJSONBStorable(raw); err != nil {
 		return RoomSnapshot{}, false, err
 	}
-	// Machine text: a bidi control is flagged (title_flags), not refused.
+	// Machine text: a bidi control or hidden text is flagged (title_flags),
+	// not refused; the snapshot title drops the hidden characters.
 	if err := checkStorable(title); err != nil {
 		return RoomSnapshot{}, false, err
 	}
@@ -247,8 +249,10 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	if resolved {
 		return RoomSnapshot{}, false, ErrResolvedAlertNoRoom
 	}
+	// The room list shows the title as the snapshot does: without hidden
+	// characters (room.created keeps them for title_flags).
 	if err := s.store.CreateRoom(ctx, store.Room{
-		ID: roomID, Title: title, Severity: severity, PipelineID: pipelineID, Status: "open", OpenedAt: now,
+		ID: roomID, Title: injectscan.StripHidden(title), Severity: severity, PipelineID: pipelineID, Status: "open", OpenedAt: now,
 	}); err != nil {
 		return RoomSnapshot{}, false, fmt.Errorf("room: create from alert: %w", err)
 	}

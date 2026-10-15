@@ -423,7 +423,11 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			break
 		}
 		snap.ID = e.RoomID
-		snap.Title = p.Title
+		// The log keeps the title as it arrived (evidence); the flags are
+		// read from it, so a hidden instruction is still reported, and the
+		// snapshot shows it without the hidden characters (Q6 U1), so
+		// nothing that reads the title passes them on.
+		snap.Title = injectscan.StripHidden(p.Title)
 		snap.TitleFlags = titleFlags(p.Title)
 		snap.Severity = p.Severity
 		snap.PipelineID = p.PipelineID

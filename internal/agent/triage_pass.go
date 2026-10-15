@@ -17,7 +17,6 @@ import (
 
 	"piperoom/internal/config"
 	"piperoom/internal/events"
-	"piperoom/internal/injectscan"
 	"piperoom/internal/redact"
 	"piperoom/internal/tools/runbooks"
 )
@@ -657,7 +656,7 @@ func firstLookBlock(t TriageResult) string {
 			text = "error: " + text
 		}
 		w := wrapToolOutput(sanitizeLabel(s.Tool), s.StepID, text)
-		if s.Tool != runbooks.ToolName && len(injectscan.Scan(s.Summary)) > 0 {
+		if s.Tool != runbooks.ToolName && len(instructionFindings(s.Summary)) > 0 {
 			w = markSuspected(w)
 		}
 		b.WriteString(w)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"piperoom/internal/events"
 )
@@ -174,11 +175,23 @@ var verificationTag = regexp.MustCompile(`(?i)\[verification\]`)
 // visible {U+XXXX} marker. The fullwidth brackets and angle brackets become
 // {U+FF3B}, {U+FF3D}, {U+FF1C} and {U+FF1E}, so they cannot pass for the ASCII
 // brackets of a tag or for a closing </untrusted> that escapeToolText leaves
-// alone. Every other character, the fullwidth letters included, is unchanged.
+// alone. Unicode tag characters (U+E0000–U+E007F) spell ASCII text nobody in
+// the room can see (Q6 U1): they are removed, and each run of them becomes one
+// tagCharsMarker, so the model knows text was hidden there but never reads
+// it. Every other character, the fullwidth letters included, is unchanged.
 func markInvisible(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
+	inTag := false
 	for _, r := range s {
+		if isTagRune(r) {
+			if !inTag {
+				b.WriteString(tagCharsMarker)
+			}
+			inTag = true
+			continue
+		}
+		inTag = false
 		if lookalikeBracket(r) || invisibleRune(r) {
 			fmt.Fprintf(&b, "{U+%04X}", r)
 			continue
@@ -198,16 +211,25 @@ func lookalikeBracket(r rune) bool {
 	return false
 }
 
+// tagCharsMarker stands in for a run of Unicode tag characters in prompt text.
+const tagCharsMarker = "{hidden tag characters removed}"
+
+// isTagRune reports a Unicode tag character, U+E0000–U+E007F.
+func isTagRune(r rune) bool {
+	return r >= 0xE0000 && r <= 0xE007F
+}
+
 // invisibleRune reports the characters that show nothing or reorder the text
-// around them: zero-width spaces and joiners, the word joiner, the BOM, soft
-// hyphen, the Mongolian vowel separator, variation selector-16, and the bidi
-// embedding, override and isolate controls.
+// around them: every format character (Unicode Cf: zero-width spaces and
+// joiners, the word joiner and invisible operators, the BOM, soft hyphen, the
+// bidi marks, embeddings, overrides and isolates), the Mongolian vowel
+// separator and variation selector-16.
 func invisibleRune(r rune) bool {
 	switch r {
-	case 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD, 0x180E, 0xFE0F:
+	case 0x180E, 0xFE0F:
 		return true
 	}
-	return (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
+	return unicode.Is(unicode.Cf, r)
 }
 
 // escapeToolText escapes the three characters that can break out of an
@@ -237,6 +259,8 @@ func wrapUntrusted(text string) string {
 // lookalikes of those characters are mapped too — en dash, horizontal bar and
 // the fullwidth brackets — because the label [name — driver] is only
 // distinguishable if every dash in a name renders as plain ASCII.
+// Tag characters are dropped and other invisible characters marked {U+XXXX},
+// so a name cannot hide text either (Q6 U1).
 func sanitizeLabel(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -251,7 +275,14 @@ func sanitizeLabel(s string) string {
 		case '\n', '\r':
 			b.WriteRune(' ')
 		default:
-			b.WriteRune(r)
+			switch {
+			case isTagRune(r):
+				// Hidden ASCII (Q6 U1): a name must not carry text nobody sees.
+			case invisibleRune(r):
+				fmt.Fprintf(&b, "{U+%04X}", r)
+			default:
+				b.WriteRune(r)
+			}
 		}
 	}
 	return b.String()
