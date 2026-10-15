@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"math"
 	"strings"
@@ -18,118 +19,95 @@ func quotedOfLen(n int) json.RawMessage {
 	return json.RawMessage(`"` + strings.Repeat("a", n-2) + `"`)
 }
 
-func TestCapToolDataJSON(t *testing.T) {
+// newCapRunner builds a runner whose only live parts are the logger and cap.
+func newCapRunner(maxBytes int64) *runner {
+	return &runner{
+		log:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		opts: Options{MaxToolDataBytes: maxBytes},
+	}
+}
+
+func TestToolDataCap(t *testing.T) {
+	const def = 64 << 10
 	tests := []struct {
-		name      string
-		raw       json.RawMessage
-		wantCut   bool
-		wantSame  bool
-		wantValid bool
+		name     string
+		maxBytes int64
+		size     int
+		wantCut  bool
+		limit    int
 	}{
-		{name: "under cap", raw: json.RawMessage(`{"a":1}`), wantSame: true},
-		{name: "exactly at cap", raw: quotedOfLen(maxToolDataBytes), wantSame: true},
-		{name: "one byte over cap", raw: quotedOfLen(maxToolDataBytes + 1), wantCut: true, wantValid: true},
+		{name: "default under cap", maxBytes: 0, size: 100, limit: def},
+		{name: "default exactly at cap", maxBytes: 0, size: def, limit: def},
+		{name: "default one over", maxBytes: 0, size: def + 1, wantCut: true, limit: def},
+		{name: "negative means default", maxBytes: -5, size: def + 1, wantCut: true, limit: def},
+		{name: "smaller cap honoured", maxBytes: 1024, size: 2000, wantCut: true, limit: 1024},
+		{name: "smaller cap not hit", maxBytes: 1024, size: 500, limit: 1024},
+		{name: "larger cap honoured", maxBytes: 200 << 10, size: def * 2, limit: 200 << 10},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out, cut, err := capToolDataJSON(tt.raw)
-			if err != nil {
-				t.Fatalf("capToolDataJSON: %v", err)
-			}
+			r := newCapRunner(tt.maxBytes)
+			// A Go string of n-2 bytes encodes to exactly n JSON bytes.
+			out, cut := r.toolDataJSON("t", strings.Repeat("a", tt.size-2))
 			if cut != tt.wantCut {
 				t.Fatalf("cut = %v, want %v", cut, tt.wantCut)
 			}
-			if tt.wantSame && !bytes.Equal(out, tt.raw) {
-				t.Fatalf("data changed under or at cap:\n got %s\nwant %s", out, tt.raw)
+			if len(out) > tt.limit || !json.Valid(out) {
+				t.Fatalf("len=%d valid=%v, limit %d", len(out), json.Valid(out), tt.limit)
 			}
-			if len(out) > maxToolDataBytes {
-				t.Fatalf("result is %d bytes, cap is %d", len(out), maxToolDataBytes)
+			if !tt.wantCut {
+				return
 			}
-			if tt.wantValid && !json.Valid(out) {
-				t.Fatalf("truncated result is not valid JSON: %.80s", out)
+			var td events.TruncatedData
+			if err := json.Unmarshal(out, &td); err != nil {
+				t.Fatalf("not a TruncatedData object: %v", err)
+			}
+			if !td.Truncated || td.OriginalBytes != int64(tt.size) || td.Preview == "" {
+				t.Fatalf("marker = truncated %v original %d preview %d bytes, want original %d",
+					td.Truncated, td.OriginalBytes, len(td.Preview), tt.size)
 			}
 		})
 	}
 }
 
-// A cut result is the events.TruncatedData shape the room and the UI read.
-func TestCapToolDataJSONShape(t *testing.T) {
-	raw := quotedOfLen(maxToolDataBytes * 3)
-	out, cut, err := capToolDataJSON(raw)
-	if err != nil || !cut {
-		t.Fatalf("cut=%v err=%v, want a cut and no error", cut, err)
+// Zero must mean the 64 KiB default, never "no cap" (events.TruncateData's
+// meaning of max <= 0).
+func TestMaxToolDataZeroIsDefault(t *testing.T) {
+	if got := newCapRunner(0).maxToolData(); got != 64<<10 {
+		t.Fatalf("maxToolData() = %d, want %d", got, 64<<10)
 	}
-	var td events.TruncatedData
-	if err := json.Unmarshal(out, &td); err != nil {
-		t.Fatalf("result is not a TruncatedData object: %v", err)
-	}
-	if !td.Truncated || td.OriginalBytes != int64(len(raw)) {
-		t.Fatalf("marker = %+v, want truncated with original_bytes %d", td, len(raw))
-	}
-	if !strings.HasPrefix(string(raw), td.Preview) || td.Preview == "" {
-		t.Fatalf("preview is not a non-empty prefix of the original JSON")
+	if got := newCapRunner(4096).maxToolData(); got != 4096 {
+		t.Fatalf("maxToolData() = %d, want 4096", got)
 	}
 }
 
-func TestCapToolDataJSONHugeArray(t *testing.T) {
-	big := make([]int, 1_000_000)
-	for i := range big {
-		big[i] = i
-	}
-	raw, n, err := encodeToolData(big)
-	if err != nil || n != 0 {
-		t.Fatalf("encodeToolData: n=%d err=%v", n, err)
-	}
-	out, cut, err := capToolDataJSON(raw)
-	if err != nil || !cut {
-		t.Fatalf("cut=%v err=%v, want a cut", cut, err)
-	}
-	if len(out) > maxToolDataBytes {
-		t.Fatalf("result is %d bytes, cap is %d", len(out), maxToolDataBytes)
-	}
-	var td events.TruncatedData
-	if err := json.Unmarshal(out, &td); err != nil {
-		t.Fatalf("result is not valid JSON: %v", err)
-	}
-	if td.OriginalBytes != int64(len(raw)) {
-		t.Fatalf("original_bytes = %d, want %d", td.OriginalBytes, len(raw))
-	}
-}
-
-func TestCapToolDataJSONDeepNesting(t *testing.T) {
-	// Nested arrays with a padded leaf, deeper than a typical payload, so the
-	// encoded form is over the cap.
-	var v any = strings.Repeat("x", 100)
-	for i := 0; i < 5000; i++ {
-		v = []any{v, strings.Repeat("y", 20)}
-	}
-	raw, _, err := encodeToolData(v)
-	if err != nil {
-		t.Fatalf("encodeToolData: %v", err)
-	}
-	out, cut, err := capToolDataJSON(raw)
-	if err != nil || !cut {
-		t.Fatalf("cut=%v err=%v, want a cut", cut, err)
-	}
-	if len(out) > maxToolDataBytes || !json.Valid(out) {
-		t.Fatalf("result over cap or invalid: len=%d", len(out))
-	}
-}
-
-func TestCapToolDataJSONMultiByteCut(t *testing.T) {
+func TestToolDataMultiByteCut(t *testing.T) {
 	// "é" is two bytes, so a byte cut can land inside a rune.
-	raw := quotedOfLen(maxToolDataBytes*2 + 1)
-	raw = json.RawMessage(strings.ReplaceAll(string(raw), "a", "é"))
-	out, cut, err := capToolDataJSON(raw)
-	if err != nil || !cut {
-		t.Fatalf("cut=%v err=%v", cut, err)
+	r := newCapRunner(1001)
+	out, cut := r.toolDataJSON("t", strings.Repeat("é", 5000))
+	if !cut {
+		t.Fatal("want a cut")
 	}
 	var td events.TruncatedData
 	if err := json.Unmarshal(out, &td); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !utf8.ValidString(td.Preview) {
+	if !utf8.ValidString(td.Preview) || strings.ContainsRune(td.Preview, utf8.RuneError) {
 		t.Fatalf("preview splits a rune")
+	}
+}
+
+// A tool whose MarshalJSON panics must not take the run down: the data is
+// dropped and the panic is logged.
+func TestToolDataPanicRecovered(t *testing.T) {
+	var logs bytes.Buffer
+	r := &runner{log: slog.New(slog.NewJSONHandler(&logs, nil))}
+	out, cut := r.toolDataJSON("t", panicMarshaler{})
+	if out != nil || cut {
+		t.Fatalf("out=%s cut=%v, want dropped", out, cut)
+	}
+	if !strings.Contains(logs.String(), "tool data marshal failed") {
+		t.Fatalf("panic was not logged: %s", logs.String())
 	}
 }
 
@@ -181,10 +159,5 @@ func TestToolDataJSON(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "tool data marshal failed") {
 		t.Fatalf("unencodable data was not logged: %s", logs.String())
-	}
-	big := strings.Repeat("z", maxToolDataBytes*2)
-	out, cut := r.toolDataJSON("t", big)
-	if !cut || len(out) > maxToolDataBytes || !json.Valid(out) {
-		t.Fatalf("big data cut=%v len=%d valid=%v", cut, len(out), json.Valid(out))
 	}
 }

@@ -594,15 +594,24 @@ func (r *runner) toolDataJSON(tool string, v any) (json.RawMessage, bool) {
 	if n > 0 {
 		r.log.Warn("agent: tool data had numbers outside the double range; kept them as strings", "tool", tool, "count", n)
 	}
-	out, cut, err := capToolDataJSON(raw)
-	if err != nil {
-		r.log.Warn("agent: tool data cap failed", "tool", tool, "err", err)
-		return nil, false
-	}
+	out, cut := events.TruncateData(raw, r.maxToolData())
 	if cut {
 		r.log.Info("agent: tool data over cap; sent a preview", "tool", tool, "original_bytes", len(raw))
 	}
 	return out, cut
+}
+
+// defaultMaxToolDataBytes is the room's PIPEROOM_EVENT_MAX_DATA_BYTES default,
+// used when Options.MaxToolDataBytes is unset.
+const defaultMaxToolDataBytes = 64 << 10
+
+// maxToolData is the cap for one tool result's Data. Zero (or less) means the
+// default, never "no cap": events.TruncateData treats max <= 0 as unlimited.
+func (r *runner) maxToolData() int {
+	if r.opts.MaxToolDataBytes <= 0 {
+		return defaultMaxToolDataBytes
+	}
+	return int(r.opts.MaxToolDataBytes)
 }
 
 // stopErr maps a clean shutdown (context.Canceled or a closed inbox) to nil so
