@@ -79,3 +79,35 @@ func TestListGroupsCountsUnknownPartitions(t *testing.T) {
 		t.Fatal("groupReadsTopic ignores Unknown")
 	}
 }
+
+// TestConsumerLagUnknownCapped: during an outage every partition of a large
+// group can be unreadable; Data lists at most maxUnknownShown of them and
+// counts all.
+func TestConsumerLagUnknownCapped(t *testing.T) {
+	var unknown []clients.PartitionLag
+	for p := int32(0); p < 300; p++ {
+		unknown = append(unknown, clients.PartitionLag{Topic: "pg.public.orders", Partition: p, Committed: -1, End: -1, Lag: -1})
+	}
+	d, _ := scopeFakes(t)
+	d.Kafka.(*fakeKafkaConfig).lagFn = func(_ context.Context, g string) (clients.GroupLag, error) {
+		return clients.GroupLag{Group: g, State: "Stable", Members: 1, Unknown: unknown}, nil
+	}
+	r, err := scopeTool(t, d, "kafka_consumer_lag").Run(roomCtx(), json.RawMessage(`{"group":"order-sync"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data struct {
+		Unknown      []clients.PartitionLag `json:"unknown_partitions"`
+		UnknownCount int                    `json:"unknown_count"`
+	}
+	raw, _ := json.Marshal(r.Data)
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Unknown) != 20 || data.UnknownCount != 300 {
+		t.Fatalf("unknown_partitions = %d entries, unknown_count = %d; want 20 and 300", len(data.Unknown), data.UnknownCount)
+	}
+	if !strings.Contains(r.Summary, "lag unknown for 300 partition(s)") || !strings.Contains(r.Summary, "and 295 more") {
+		t.Fatalf("summary = %q", r.Summary)
+	}
+}

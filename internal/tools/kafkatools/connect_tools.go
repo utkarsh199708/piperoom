@@ -156,11 +156,22 @@ func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.R
 // maxTraceText caps one condensed trace in Summary and Data.
 const maxTraceText = 2000
 
+// oracleThinPassword matches the password of an Oracle JDBC URL
+// (jdbc:oracle:thin:user/password@host...), which DriverManager quotes whole
+// in "No suitable driver" and listener errors. redact.Text has no rule for
+// this form yet (#449); drop this local mask once that rule lands. A quoted
+// password ("p@ss w") may hold an '@' or a space.
+var oracleThinPassword = regexp.MustCompile(`(?i)(jdbc:oracle:[a-z0-9]+:@?[^\s/@:;"']+/)("[^"\n]*"|[^@\s]+)(@)`)
+
+// redactedPassword replaces a locally masked password, in redact's style.
+const redactedPassword = "[redacted]"
+
 // cleanTrace redacts credentials in a condensed trace and caps it. Startup
 // failures quote JDBC URLs and connection settings, which sanitizeTrace (record
 // values) does not mask. It redacts before the cap, so a cut never splits a
 // secret into a piece the redactor no longer recognises.
 func cleanTrace(cond string) string {
+	cond = oracleThinPassword.ReplaceAllString(cond, "${1}"+redactedPassword+"${3}")
 	cond, _ = redact.Text(cond)
 	if len(cond) > maxTraceText {
 		cond = truncateRunes(cond, maxTraceText) + "\n…"
@@ -338,11 +349,13 @@ var failingRow = regexp.MustCompile(`(?i)(failing row contains)\s*\(.*`)
 // "Where:", "Key (...)=(...)", "Failing row contains (...)" and "invalid
 // input syntax ... \"...\"", Java's "For input string: \"...\"", Connect's
 // "Cannot parse value ...", Jackson's "[Source: ...]" snippet and
-// "Unrecognized token '...'". Such a line gets the dlq_peek redaction; other
+// "Unrecognized token '...'", pgjdbc's "Batch entry N UPDATE ... SET col =
+// '...'" and Connect's record dumps (SinkRecord{...}, value=Struct{...},
+// "record {...}"). Such a line gets the dlq_peek redaction; other
 // lines (schema registry rejections, class names) stay whole, because their
 // wording is the diagnosis and dlq.RedactMessage would mask the quoted
 // subject in it.
-var recordSnippet = regexp.MustCompile(`(?i)\bvalues\s*\(|\bdetail:|\bwhere:|\[source:|unrecognized token|invalid input syntax|for input string|failing row contains|\bkey\s*\(.*\)\s*=\s*\(|cannot parse`)
+var recordSnippet = regexp.MustCompile(`(?i)\bvalues\s*\(|\bdetail:|\bwhere:|\[source:|unrecognized token|invalid input syntax|for input string|failing row contains|\bkey\s*\(.*\)\s*=\s*\(|cannot parse|\bbatch entry \d+|\bset\s+"?\w+"?\s*=|\b(?:struct|sinkrecord|connectrecord|sourcerecord)\{|\brecord\s*\{`)
 
 // stripSchemaAfter replaces the balanced {…} JSON that follows marker with <schema>.
 func stripSchemaAfter(s, marker string) string {

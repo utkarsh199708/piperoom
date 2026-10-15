@@ -128,18 +128,22 @@ func TestFindByKeyWithoutScanReader(t *testing.T) {
 	}
 	tool, _ := reg.Get("kafka_find_by_key")
 	for _, tt := range []struct {
-		name string
-		refs []clients.RecordRef
-		want string
+		name  string
+		refs  []clients.RecordRef
+		want  string
+		hedge string
 	}{
-		{"none", nil, "no record with key \"k\" found since 2026-10-11T00:00:00Z in the scanned window"},
-		{"one", []clients.RecordRef{{Topic: "t", Partition: 0, Offset: 7, Timestamp: time.Now(), Key: "k"}}, "found 1 record(s)"},
+		// With no match there is nothing for a match to be newer than.
+		{"none", nil, "no record with key \"k\" found since 2026-10-11T00:00:00Z in the scanned window",
+			"this client cannot report whether the scan was cut (max_scan 5000 or the time limit): matches may exist past the scanned window"},
+		{"one", []clients.RecordRef{{Topic: "t", Partition: 0, Offset: 7, Timestamp: time.Now(), Key: "k"}}, "found 1 record(s)",
+			"this client cannot report whether the scan was cut (max_scan 5000 or the time limit): newer matches may exist past the scanned window"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			refs = tt.refs
 			r := runTool(t, tool, `{"topic":"t","key":"k","since":"2026-10-11T00:00:00Z"}`)
-			if !strings.Contains(r.Summary, tt.want) || !strings.Contains(r.Summary, "this client cannot report whether the scan was cut") {
-				t.Fatalf("summary %q: want %q and the unknown-truncation line", r.Summary, tt.want)
+			if !strings.Contains(r.Summary, tt.want) || !strings.Contains(r.Summary, tt.hedge) {
+				t.Fatalf("summary %q: want %q and %q", r.Summary, tt.want, tt.hedge)
 			}
 			if strings.Contains(r.Summary, "not found:") {
 				t.Fatalf("summary %q states absence as fact", r.Summary)
@@ -147,6 +151,10 @@ func TestFindByKeyWithoutScanReader(t *testing.T) {
 			data, _ := r.Data.(map[string]any)
 			if data["truncation_unknown"] != true {
 				t.Fatalf("data %+v: want truncation_unknown", data)
+			}
+			// "truncated": false would claim a complete scan.
+			if _, ok := data["truncated"]; ok {
+				t.Fatalf("data %+v: truncated must be absent when it is not known", data)
 			}
 		})
 	}

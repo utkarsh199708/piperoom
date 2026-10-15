@@ -155,6 +155,9 @@ func groupReadsTopic(lag clients.GroupLag, topic string) bool {
 
 // ---- kafka_consumer_lag ----
 
+// maxUnknownShown caps the unreadable partitions listed in Data.
+const maxUnknownShown = 20
+
 type consumerLag struct{ d Deps }
 
 func (t *consumerLag) Name() string     { return "kafka_consumer_lag" }
@@ -249,7 +252,10 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 		"total_lag": lag.TotalLag, "worst_partitions": worst,
 	}
 	if len(unknown) > 0 {
-		data["unknown_partitions"] = unknown
+		// Bounded like worst_partitions: a large group can lose every
+		// partition in an outage; the count keeps the total.
+		data["unknown_partitions"] = unknown[:min(len(unknown), maxUnknownShown)]
+		data["unknown_count"] = len(unknown)
 	}
 	return res(sb.String(), data), nil
 }
@@ -348,19 +354,26 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 			fmt.Fprintf(&sb, "\n  partition %d, offset %d, %s", r.Partition, r.Offset, r.Timestamp.Format(time.RFC3339))
 		}
 	}
-	data := map[string]any{"topic": p.Topic, "key": p.Key, "found": len(refs) > 0, "records": refs,
-		"truncated": len(scan.Truncated) > 0}
+	data := map[string]any{"topic": p.Topic, "key": p.Key, "found": len(refs) > 0, "records": refs}
 	switch {
 	case !reported:
 		// clients.KeyScanReader: without it a cut scan looks complete, so
-		// neither absence nor the newest match is stated as fact.
-		fmt.Fprintf(&sb, "\nthis client cannot report whether the scan was cut (max_scan %d or the time limit): newer matches may exist past the scanned window", maxScan)
+		// neither absence nor the newest match is stated as fact, and
+		// "truncated" is left out rather than claimed false.
+		newer := "newer "
+		if len(refs) == 0 {
+			newer = ""
+		}
+		fmt.Fprintf(&sb, "\nthis client cannot report whether the scan was cut (max_scan %d or the time limit): %smatches may exist past the scanned window", maxScan, newer)
 		data["truncation_unknown"] = true
 	case len(scan.Truncated) > 0:
 		// Matches past the cut would be newer than any listed: say so before
 		// the list can be read as complete.
 		fmt.Fprintf(&sb, "\nthe scan stopped (max_scan %d or the time limit) before the end of partition(s) %v: newer matches may exist there; use a later since or a larger max_scan", maxScan, scan.Truncated)
+		data["truncated"] = true
 		data["truncated_partitions"] = scan.Truncated
+	default:
+		data["truncated"] = false
 	}
 	return res(sb.String(), data), nil
 }
