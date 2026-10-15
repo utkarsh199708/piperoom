@@ -51,10 +51,12 @@ func TestRoomSessionLiveFromAuthSettings(t *testing.T) {
 	add("u_idle", auth.MethodOIDC, now.Add(-30*time.Minute))
 	add("u_dev", auth.MethodDev, now.Add(-time.Minute))
 
-	svc := room.New(withRoomAuth(room.Deps{
+	// newRoomService is the constructor main uses: the settings are a required
+	// argument, so main cannot build the room without the rule.
+	svc := newRoomService(room.Deps{
 		Store: memstore.New(), Users: room.DefaultUsers(), Owners: own, Sessions: sessions,
 		Now: func() time.Time { return now },
-	}, settings))
+	}, settings, &usageRelay{})
 	t.Cleanup(svc.Close)
 	if _, err := svc.LookupPerson(ctx, "u_live"); err != nil {
 		t.Fatalf("live session: %v", err)
