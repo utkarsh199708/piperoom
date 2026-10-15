@@ -29,3 +29,20 @@ func TestRegisterToolsAddsSimilarIncidentsOnlyWithARoomStore(t *testing.T) {
 		}
 	}
 }
+
+func TestRegisterToolsAlwaysAddsWhatChanged(t *testing.T) {
+	for _, withRooms := range []bool{false, true} {
+		w := &Wired{Owners: &owners.Owners{}}
+		if withRooms {
+			w.Rooms = similarincidents.FromStore(memstore.New())
+		}
+		reg := tools.NewReadOnlyRegistry()
+		if err := RegisterTools(reg, actions.NewRegistry(), w); err != nil {
+			t.Fatalf("RegisterTools(rooms=%v): %v", withRooms, err)
+		}
+		tl, ok := reg.Get("what_changed")
+		if !ok || tl.Kind() != tools.KindRead {
+			t.Errorf("rooms=%v: what_changed registered = %v", withRooms, ok)
+		}
+	}
+}

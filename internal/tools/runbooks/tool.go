@@ -133,6 +133,9 @@ type hit struct {
 	Score   int      `json:"score"`
 	Text    string   `json:"text"`
 	Sources []string `json:"sources"`
+	// Items are the section's "- " list items, in order; the room UI shows them
+	// as a checklist and checklist.step_done addresses them by index.
+	Items []string `json:"items"`
 }
 
 // Run implements tools.Tool. It does no I/O.
@@ -258,7 +261,7 @@ func (t *Tool) search(query string, n int) []hit {
 		rb := t.rbs[r.u.rb]
 		s := rb.Sections[r.u.section]
 		// Score is BM25 x 10, rounded; at least 1 for any match.
-		hits = append(hits, hit{Runbook: rb.ID, Title: rb.Title, Section: s.Heading, Score: max(1, int(math.Round(r.score*10))), Text: s.Text, Sources: rb.Sources})
+		hits = append(hits, hit{Runbook: rb.ID, Title: rb.Title, Section: s.Heading, Score: max(1, int(math.Round(r.score*10))), Text: s.Text, Sources: rb.Sources, Items: listItems(s.Text)})
 	}
 	return hits
 }

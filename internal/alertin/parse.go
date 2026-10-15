@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,10 +22,40 @@ type parsed struct {
 	text     []string // free text (titles, summaries) scanned for owner names
 }
 
+// labelValues returns the values of the label sets, in set order, for
+// pipeline matching. Keys are read in sorted order so the same body always
+// keeps the same values when the cap cuts the list. Each value is cut to
+// MaxLabelRunes and at most MaxLabelValues values are kept.
+func labelValues(sets ...map[string]string) []string {
+	var out []string
+	for _, set := range sets {
+		for _, k := range slices.Sorted(maps.Keys(set)) {
+			if len(out) == MaxLabelValues {
+				return out
+			}
+			out = append(out, truncateRunes(set[k], MaxLabelRunes))
+		}
+	}
+	return out
+}
+
+// matchText cuts each free-text field to MaxMatchTextRunes before the owner
+// scan. The fields are only read for pipeline names, never shown as text.
+func matchText(ss ...string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = truncateRunes(s, MaxMatchTextRunes)
+	}
+	return out
+}
+
 // Parse turns a verified body into an Alert and resolves its pipeline. It
 // does not authenticate; use Ingest for untrusted requests. It returns
 // ErrIgnored for events that are not alerts.
 func (c Config) Parse(src Source, body []byte) (Alert, error) {
+	if err := checkSize(body); err != nil {
+		return Alert{}, err
+	}
 	c = c.withDefaults()
 	var (
 		p   parsed
@@ -143,16 +175,14 @@ func parseAlertmanager(src Source, body []byte) (parsed, error) {
 			URL:      firstNonEmpty(first.GeneratorURL, p.ExternalURL),
 		},
 		explicit: firstNonEmpty(label("pipeline"), label("pipeline_id")),
-		text:     []string{title, p.CommonAnnotations["description"], first.Annotations["description"]},
+		text:     matchText(title, p.CommonAnnotations["description"], first.Annotations["description"]),
 	}
+	// Group labels come first, so the value cap never drops them.
+	sets := []map[string]string{p.CommonLabels}
 	for _, al := range firing {
-		for _, v := range al.Labels {
-			out.values = append(out.values, v)
-		}
+		sets = append(sets, al.Labels)
 	}
-	for _, v := range p.CommonLabels {
-		out.values = append(out.values, v)
-	}
+	out.values = labelValues(sets...)
 	return out, nil
 }
 
@@ -225,8 +255,8 @@ func parsePagerDuty(body []byte) (parsed, error) {
 			OccurredAt: p.Event.OccurredAt,
 		},
 		service: d.Service.ID,
-		values:  []string{d.Service.Summary},
-		text:    []string{d.Title},
+		values:  []string{truncateRunes(d.Service.Summary, MaxLabelRunes)},
+		text:    matchText(d.Title),
 	}, nil
 }
 
@@ -302,13 +332,18 @@ func parseDatadog(body []byte) (parsed, error) {
 			OccurredAt: occurred,
 		},
 		explicit: firstNonEmpty(p.PipelineID, tagValue(p.Tags, "pipeline")),
-		text:     []string{p.Title},
+		text:     matchText(p.Title),
 	}
 	for _, list := range []string{p.Tags, p.Scope} {
 		for _, t := range strings.Split(list, ",") {
-			if _, v, ok := strings.Cut(strings.TrimSpace(t), ":"); ok {
-				out.values = append(out.values, v)
+			_, v, ok := strings.Cut(strings.TrimSpace(t), ":")
+			if !ok {
+				continue
 			}
+			if len(out.values) == MaxLabelValues {
+				return out, nil
+			}
+			out.values = append(out.values, truncateRunes(v, MaxLabelRunes))
 		}
 	}
 	return out, nil
@@ -359,11 +394,13 @@ func parseGeneric(body []byte) (parsed, error) {
 		out.alert.DedupKey = "generic:" + k
 	}
 	out.explicit = str("pipeline_id")
-	out.text = []string{title}
+	out.text = matchText(title)
+	strs := map[string]string{}
 	for k, v := range obj {
 		if s, ok := v.(string); ok && k != "title" {
-			out.values = append(out.values, s)
+			strs[k] = s
 		}
 	}
+	out.values = labelValues(strs)
 	return out, nil
 }

@@ -65,13 +65,28 @@ type RunResult struct {
 	RootCause bool `json:"root_cause"`
 	// ForbiddenCause: the final hypothesis tells an expect.root_cause_forbidden
 	// story (it forces RootCause false).
-	ForbiddenCause  bool   `json:"forbidden_cause,omitempty"`
+	ForbiddenCause bool `json:"forbidden_cause,omitempty"`
+	// Hedged: the final hypothesis offers several causes ("either", "possible
+	// causes", ...); it forces RootCause false (hedge.go). HedgedOn is the
+	// phrase.
+	Hedged          bool   `json:"hedged,omitempty"`
+	HedgedOn        string `json:"hedged_on,omitempty"`
 	FinalHypothesis string `json:"final_hypothesis,omitempty"`
 	Confidence      string `json:"confidence,omitempty"`
 	// ToolCallsToRootCause is how many read-tool calls the agent made before
 	// its first hypothesis that matched; -1 when none did.
 	ToolCallsToRootCause int `json:"tool_calls_to_root_cause"`
 	Hypotheses           int `json:"hypotheses"`
+	// TimeToCause is how long the room took to its first correct hypothesis
+	// (ttc.go); nil when the run's final answer is not the right cause.
+	TimeToCause *CauseTiming `json:"time_to_cause"`
+	// CauseRetracted: after its first correct hypothesis the agent posted
+	// one that was not correct (even if a later one was correct again).
+	CauseRetracted bool `json:"cause_retracted,omitempty"`
+	// firstCorrect is the timing of the first correct hypothesis, kept so
+	// finish can publish it only while RootCause holds (an LLM verdict
+	// can still take it away).
+	firstCorrect *CauseTiming
 	// LayerNamed: the final hypothesis names expect.first_failing_layer
 	// (true when the scenario sets none; mirrors OutcomeOK on other outcomes).
 	LayerNamed bool `json:"layer_named"`
@@ -105,8 +120,15 @@ type RunResult struct {
 	SupportedClaims   []string `json:"supported_claims,omitempty"`
 	UnsupportedClaims []string `json:"unsupported_claims,omitempty"`
 
-	FixExpected       bool     `json:"fix_expected"`
-	FixOK             bool     `json:"fix_ok"`
+	FixExpected bool `json:"fix_expected"`
+	FixOK       bool `json:"fix_ok"`
+	// FixUnexpected are proposed steps that match no expect.fix_targets
+	// entry: a wrong target, or a step outside the expected fix (only with
+	// fix_targets; fixscore.go).
+	FixUnexpected []string `json:"fix_unexpected,omitempty"`
+	// FixUngrounded are proposals that carry a fix step but came before
+	// the evidence for it (only with fix_targets; fixscore.go).
+	FixUngrounded     []string `json:"fix_ungrounded,omitempty"`
 	ForbiddenProposed []string `json:"forbidden_proposed,omitempty"`
 	// Attempts are every action the agent tried to propose (Validate calls),
 	// RejectedAttempts the ones Validate refused. Forbidden actions count
@@ -131,6 +153,7 @@ type RunResult struct {
 	TimedOut   bool   `json:"timed_out,omitempty"`
 	Error      string `json:"error,omitempty"`
 	ReplayResult
+	Provenance
 }
 
 // Judge scores one transcript against the scenario's expectations. runErr is
@@ -157,15 +180,21 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 	var atLast *evidence // the steps as they were when last was posted
 	lastMessage := ""
 	// inputDelivered turns true at the first steer or comment the harness
-	// hands the agent (scriptedInbox logs them as steer.sent and
+	// hands the agent (the room logs them as steer.sent and
 	// comment.added): a question before it cannot be about that input.
 	inputDelivered := false
+	clock := newCauseClock(tr.Events)
+	var fixes []proposalAt
 	for _, e := range tr.Events {
+		if agentOnly(e.Type) && !fromAgent(e) {
+			continue
+		}
 		switch e.Type {
 		case events.AgentStepStart:
 			var p events.AgentStepStartPayload
 			if json.Unmarshal(e.Payload, &p) == nil {
 				ev.start(p.StepID)
+				clock.steps++
 			}
 		case events.AgentToolCall:
 			var p events.AgentToolCallPayload
@@ -194,9 +223,11 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 			res.Hypotheses++
 			last = &p
 			atLast = ev.snapshot()
-			if res.ToolCallsToRootCause < 0 && rootCauseMatches(sc.Expect, p.Text) {
+			correct := rootCauseMatches(sc.Expect, p.Text)
+			if res.ToolCallsToRootCause < 0 && correct {
 				res.ToolCallsToRootCause = res.ToolCalls
 			}
+			clock.hypothesis(e, correct, res.ToolCalls)
 		case events.AgentMessage:
 			var p events.AgentMessagePayload
 			if json.Unmarshal(e.Payload, &p) != nil {
@@ -224,6 +255,7 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 				proposed[s.Action] = true
 			}
 			propSteps = append(propSteps, p.Steps...)
+			fixes = append(fixes, proposalAt{p: p, ev: ev.snapshot(), hypotheses: res.Hypotheses})
 		}
 	}
 
@@ -237,6 +269,7 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 		res.Confidence = last.Confidence
 		res.RootCause = rootCauseMatches(sc.Expect, last.Text)
 		res.ForbiddenCause = matchForbidden(sc.Expect.RootCauseForbidden, last.Text)
+		res.HedgedOn, res.Hedged = causeHedge(last.Text)
 		res.CitesSteps = atLast.citesSteps(last.BasedOnSteps, last.Confidence)
 		if res.Outcome == OutcomeDiagnose {
 			basis = atLast
@@ -288,6 +321,10 @@ func Judge(sc Scenario, tr Transcript, runErr error, timedOut bool) RunResult {
 	}
 	res.BadSteps = checkSteps(sc, propSteps)
 	res.FixOK = res.FixExpected && matchActionGroups(sc.Expect.Fix, proposed)
+	if len(sc.Expect.FixTargets) > 0 {
+		res.FixOK, res.FixUnexpected, res.FixUngrounded = judgeFixTargets(sc, fixes)
+	}
+	res.firstCorrect, res.CauseRetracted = clock.result()
 
 	finish(sc, &res)
 	return res
@@ -321,6 +358,10 @@ func finish(sc Scenario, res *RunResult) {
 		res.Abstained = res.AskedDriver && res.Proposals == 0
 	} else {
 		res.Abstained = res.Proposals == 0 && !res.ClaimsCause
+	}
+	res.TimeToCause = nil
+	if res.Outcome == OutcomeDiagnose && res.RootCause {
+		res.TimeToCause = res.firstCorrect
 	}
 	if res.Outcome == OutcomeDiagnose {
 		res.Correct = res.RootCause && res.RootCauseLayerNamed
@@ -478,6 +519,8 @@ func diagnoseFailures(sc Scenario, res RunResult) []string {
 	switch {
 	case res.Hypotheses == 0:
 		f = append(f, "no hypothesis")
+	case res.Hedged:
+		f = append(f, fmt.Sprintf("wrong root cause: hedges between several causes (%q)", res.HedgedOn))
 	case res.ForbiddenCause:
 		f = append(f, "wrong root cause: tells a forbidden story")
 	case !res.RootCause:
@@ -494,7 +537,14 @@ func diagnoseFailures(sc Scenario, res RunResult) []string {
 		f = append(f, "claim not backed by a cited step that observed its facts: "+strings.Join(res.UnsupportedClaims, "; "))
 	}
 	if res.FixExpected && !res.FixOK {
-		f = append(f, "expected fix not proposed")
+		switch {
+		case len(res.FixUnexpected) > 0:
+			f = append(f, "fix has steps outside the expected fix or aimed at the wrong target: "+strings.Join(res.FixUnexpected, "; "))
+		case len(res.FixUngrounded) > 0:
+			f = append(f, "fix proposed before its evidence: "+strings.Join(res.FixUngrounded, "; "))
+		default:
+			f = append(f, "expected fix not proposed")
+		}
 	}
 	return f
 }
@@ -564,8 +614,12 @@ func negated(toks []string) bool {
 }
 
 // rootCauseMatches is the deterministic root-cause verdict for one text: the
-// expected terms are all there and no forbidden story is told.
+// expected terms are all there, no forbidden story is told, and the text does
+// not hedge between causes (hedge.go).
 func rootCauseMatches(e Expect, text string) bool {
+	if _, h := causeHedge(text); h {
+		return false
+	}
 	return matchGroups(e.RootCause, text) && !matchForbidden(e.RootCauseForbidden, text)
 }
 

@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Topology } from '../api/types'
-import { api, isFixtures } from '../api/client'
+import { ApiClientError, api, isFixtures } from '../api/client'
 import { fixtureTopology } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 
@@ -22,6 +22,12 @@ export function useTopology(pipelineId: string, options: TopologyOptions = {}) {
   const [topology, setTopology] = useState<Topology | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [updatedAt, setUpdatedAt] = useState<number | null>(null)
+  // 404 is terminal for a pipeline id (docs/api.md: unknown pipeline): no timer retries it.
+  // Only a new pipeline, session, or retry() starts fetching again; a refreshKey bump does not.
+  const [notFound, setNotFound] = useState(false)
+  const [retryKey, setRetryKey] = useState(0)
+  const deadKeyRef = useRef<string | null>(null)
+  const retry = useCallback(() => setRetryKey((k) => k + 1), [])
 
   const refreshKey = options.refreshKey ?? 0
   const active = options.active !== false
@@ -29,6 +35,10 @@ export function useTopology(pipelineId: string, options: TopologyOptions = {}) {
   useEffect(() => {
     let cancelled = false
     let inFlight = false
+    const key = `${pipelineId}|${user.id}|${sessionEpoch}|${retryKey}`
+    if (deadKeyRef.current === key) return // already a 404 for exactly this load
+    deadKeyRef.current = null
+    setNotFound(false)
 
     const load = async () => {
       if (inFlight || cancelled) return
@@ -47,7 +57,15 @@ export function useTopology(pipelineId: string, options: TopologyOptions = {}) {
           setUpdatedAt(Date.now())
         }
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+        if (cancelled) return
+        if (e instanceof ApiClientError && e.status === 404) {
+          deadKeyRef.current = key
+          setNotFound(true)
+          setError(null)
+          window.clearInterval(timer)
+          return
+        }
+        setError(e instanceof Error ? e.message : String(e))
       } finally {
         inFlight = false
       }
@@ -61,15 +79,17 @@ export function useTopology(pipelineId: string, options: TopologyOptions = {}) {
       return
     }
 
+    // Declared before load() runs: a 404 on the first call clears it.
+    let timer = 0
     void load()
     if (!active) return
 
-    const timer = window.setInterval(load, TOPOLOGY_REFRESH_MS)
+    timer = window.setInterval(load, TOPOLOGY_REFRESH_MS)
     return () => {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [pipelineId, user.id, sessionEpoch, refreshKey, active])
+  }, [pipelineId, user.id, sessionEpoch, refreshKey, active, retryKey])
 
-  return { topology, error, updatedAt }
+  return { topology, error, updatedAt, notFound, retry }
 }

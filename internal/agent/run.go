@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -101,6 +102,14 @@ type runner struct {
 
 	// prices estimate the cost in agent.usage events; nil omits it.
 	prices Prices
+
+	// held are quiet inputs (alert updates) drained while the agent waited
+	// for a person: they go out with the next batch that wakes it.
+	held []HumanInput
+
+	// past is the worked-examples block of the first user turn (examples.go),
+	// "" when there is none.
+	past string
 }
 
 // Run investigates a pipeline incident: it calls Claude, executes read-only
@@ -173,6 +182,7 @@ func (r *runner) run(ctx context.Context) error {
 	// The model reads the verdict of an early recovery in its first turn. Only
 	// an episode that ends after a recovery parks, in pauseForHumanInput.
 	initialInputs, outcome := r.handleInputs(ctx, initialInputs)
+	r.past = r.pastIncidents(ctx, pastIncidentsRunBytes, pastIncidentsTimeout)
 	messages := []anthropic.BetaMessageParam{r.initialMessage(initialInputs, outcome.notes)}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -310,7 +320,7 @@ func (r *runner) run(ctx context.Context) error {
 				blocks = append(blocks, anthropic.NewBetaTextBlock("Continue."))
 			}
 			messages = appendUser(messages, blocks...)
-			if len(inputs) > 0 {
+			if resetsTurns(inputs) {
 				turns = 0
 			}
 			// No park here: a recovered episode keeps running until the model
@@ -380,7 +390,7 @@ func (r *runner) request(messages []anthropic.BetaMessageParam) anthropic.BetaMe
 }
 
 func (r *runner) initialMessage(inputs []HumanInput, notes []string) anthropic.BetaMessageParam {
-	blocks := []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(firstUserMessage(r.alert))}
+	blocks := openingBlocks(r.alert, r.past)
 	blocks = append(blocks, r.inputBlocks(inputs, notes)...)
 	return anthropic.NewBetaUserMessage(blocks...)
 }
@@ -410,14 +420,25 @@ func (r *runner) humanBlocks(inputs []HumanInput) []anthropic.BetaContentBlockPa
 	return blocks
 }
 
-// drain reads pending human inputs without blocking.
+// drain reads pending human inputs without blocking. Quiet inputs held back
+// by waitForInput come first, in the order they arrived.
 func (r *runner) drain(ctx context.Context) []HumanInput {
 	inputs, err := r.deps.Inbox.Drain(ctx)
 	if err != nil {
 		r.log.Warn("agent: inbox drain failed", "err", err)
-		return nil
+		return r.takeHeld(nil)
 	}
-	return inputs
+	return r.takeHeld(inputs)
+}
+
+// takeHeld returns the held quiet inputs followed by inputs, and forgets them.
+func (r *runner) takeHeld(inputs []HumanInput) []HumanInput {
+	if len(r.held) == 0 {
+		return inputs
+	}
+	out := append(r.held, inputs...)
+	r.held = nil
+	return out
 }
 
 // waitForInput blocks until at least one human input is pending or the context
@@ -442,9 +463,12 @@ func (r *runner) waitForInput(ctx context.Context) ([]HumanInput, error) {
 			}
 			continue
 		}
-		if len(inputs) > 0 {
-			return inputs, nil
+		if slices.ContainsFunc(inputs, func(in HumanInput) bool { return !isQuiet(in) }) {
+			return r.takeHeld(inputs), nil
 		}
+		// Only quiet inputs (or none): they never wake an idle agent. Keep
+		// them for the next batch and wait on.
+		r.held = append(r.held, inputs...)
 		backoff = r.timing.drainBackoffMin
 		if err := r.deps.Inbox.Wait(ctx); err != nil {
 			return nil, err
@@ -523,14 +547,26 @@ func (r *runner) holdAfterRecovery(ctx context.Context, messages *[]anthropic.Be
 }
 
 // hasHumanInput reports whether inputs contain anything a person said, as
-// opposed to executor results. A person's words always get a model turn.
+// opposed to executor results and alert updates. A person's words always get
+// a model turn.
 func hasHumanInput(inputs []HumanInput) bool {
 	for _, in := range inputs {
-		if in.Kind != "action_result" {
+		if in.Kind != "action_result" && in.Kind != "alert_update" {
 			return true
 		}
 	}
 	return false
+}
+
+// isQuiet reports an input that rides along with the next batch but never
+// starts a turn or resets the turn guard on its own: an alert update (the
+// alert fired again, the watcher joined) is new numbers, not a request.
+func isQuiet(in HumanInput) bool { return in.Kind == "alert_update" }
+
+// resetsTurns reports whether a batch resets the per-episode turn guard: any
+// input but a quiet one does.
+func resetsTurns(inputs []HumanInput) bool {
+	return slices.ContainsFunc(inputs, func(in HumanInput) bool { return !isQuiet(in) })
 }
 
 // emit writes one event to the sink, serialized so parallel tool steps cannot

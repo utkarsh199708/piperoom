@@ -18,7 +18,7 @@ import type { RoomSnapshot } from '@/api/types'
 import { useCurrentUser } from '@/context/user'
 import { useTheme } from '@/context/theme'
 import { modKeyLabel } from '@/lib/envLabel'
-import { sortRoomsForList } from '@/lib/rooms'
+import { roomStatusCell, sortRoomsForList } from '@/lib/rooms'
 import type { RoomCommandRegistry } from './context'
 
 const SEVERITY_VARIANT = { sev1: 'sev1', sev2: 'sev2', sev3: 'sev3', sev4: 'sev4' } as const
@@ -167,7 +167,7 @@ export function CommandMenu({
                 <span className="min-w-0 truncate">{r.title}</span>
                 <span className="shrink-0 font-mono text-xs text-subtle-foreground">{r.pipeline_id}</span>
                 <span className="ml-auto flex shrink-0 items-center gap-1.5">
-                  {r.status !== 'open' && <Badge>closed</Badge>}
+                  <span className="text-xs text-muted-foreground">{roomStatusCell(r).label}</span>
                   <Badge variant={SEVERITY_VARIANT[r.severity as keyof typeof SEVERITY_VARIANT] ?? 'neutral'}>
                     {r.severity.toUpperCase()}
                   </Badge>

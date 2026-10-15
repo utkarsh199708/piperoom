@@ -154,10 +154,13 @@ through the env vars above; the token and channel must be set together. Operatio
 
 ## Running a pilot (Docker, login)
 
-`deploy/README.md` is the guide: one image, one compose file, its own Postgres. The image starts in
-**dev** login mode (pick a user, no password), which is only for a laptop, a VPN or an SSH tunnel.
-For real single sign-on set `PIPEROOM_AUTH_MODE=oidc` and connect your identity provider. A TLS
-reverse proxy is supported in that mode only. The setup, the settings, who may log in and what each
+`deploy/README.md` is the guide: one image, one compose file, its own Postgres. The image and the
+compose file start in **oidc** mode (real single sign-on through your identity provider) and refuse
+to start, naming the missing variable, until `PIPEROOM_PUBLIC_URL`, `PIPEROOM_OIDC_ISSUER`,
+`PIPEROOM_OIDC_CLIENT_ID` and `PIPEROOM_OIDC_CLIENT_SECRET` are set. Passwordless **dev** login
+(pick a user, no password) is only for a laptop, a VPN or an SSH tunnel, and exists only if you ask
+for it with `-f deploy/docker-compose.dev-auth.yml`. A TLS reverse proxy is supported in oidc mode
+only. The setup, the settings, who may log in and what each
 role can do, and the troubleshooting table are in
 [deploy/README.md](deploy/README.md#single-sign-on-oidc). The pilot limits are in
 [docs/pilot/README.md](docs/pilot/README.md).
