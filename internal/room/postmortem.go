@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"piperoom/internal/events"
 	"piperoom/internal/version"
@@ -412,7 +413,9 @@ func hasProcessWord(l string, words ...string) bool {
 			if i > 0 && isIdentByte(l[i-1]) {
 				continue
 			}
-			if end < len(l) && isIdentByte(l[end]) {
+			// A '.' ends the sentence unless an identifier goes on after it
+			// ("orders.summary"): "...in the hand-off." holds the word.
+			if end < len(l) && isIdentByte(l[end]) && !(l[end] == '.' && (end+1 >= len(l) || !isIdentByte(l[end+1]))) {
 				continue
 			}
 			next := strings.Fields(strings.TrimLeft(l[end:], " \t,:;"))
@@ -463,6 +466,35 @@ func (f *pmFold) fixEvidence() (pmEvidence, bool) {
 		ev = pmEvidence{seq: f.closedSeq, at: f.closedAt, what: "resolution"}
 	}
 	return ev, ev.seq > 0
+}
+
+// resolutionStop are words a resolution has without saying what was done.
+var resolutionStop = map[string]bool{
+	"fixed": true, "resolved": true, "done": true, "with": true, "that": true, "this": true,
+	"from": true, "have": true, "been": true, "after": true, "were": true, "before": true,
+}
+
+// sharesWords reports whether text and one of items have a word of four letters
+// or more in common (case-insensitive, ignoring resolutionStop).
+func sharesWords(text string, items []string) bool {
+	words := func(s string) map[string]bool {
+		m := map[string]bool{}
+		for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+			if len(w) >= 4 && !resolutionStop[w] {
+				m[w] = true
+			}
+		}
+		return m
+	}
+	t := words(text)
+	for _, it := range items {
+		for w := range words(it) {
+			if t[w] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (f *pmFold) hasResolution() bool {
@@ -555,6 +587,14 @@ func (f *pmFold) render(hash string) []byte {
 	// consumer", a person restarted it and the room closed as fixed. Such lines
 	// are set apart and labelled, never shown as current.
 	ev, haveEv := f.fixEvidence()
+	// A step or note older than the summary does not make the summary current
+	// when a person closed the room with a resolution that speaks of what the
+	// summary lists as open: the resolution is then the sign that comes after it
+	// (QA R8). A bare "fixed" says nothing about those lines and changes nothing.
+	if p.have && (!haveEv || ev.seq <= p.asOfSeq) && f.resolutionIsFix() && f.closedSeq > p.asOfSeq &&
+		sharesWords(f.resolution, append(append([]string(nil), sum.Open...), sum.Risks...)) {
+		ev, haveEv = pmEvidence{seq: f.closedSeq, at: f.closedAt, what: "resolution"}, true
+	}
 	stale := p.have && haveEv && ev.seq > p.asOfSeq
 	staleLabel := ""
 	if stale {
