@@ -1,6 +1,9 @@
 package agent
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // maxLedgerSummaryBytes caps the summary kept per step. It is the summary the
 // model saw (already capped by tools.MaxSummaryBytes); the cap here is a
@@ -67,3 +70,28 @@ func (l *stepLedger) recent(n int) []string {
 
 // s8 reports whether b is a UTF-8 continuation byte.
 func s8(b byte) bool { return b&0xC0 == 0x80 }
+
+// seedTriage adds the reads of the triage pass, which the first message shows as
+// <tool_output step="s_..."> and tells the model to cite instead of repeating.
+// It applies firstLookBlock's own filter (a real step id, at most triagePassReads),
+// so the ledger holds exactly the ids the model was shown.
+func (l *stepLedger) seedTriage(t *TriageResult) {
+	if t == nil {
+		return
+	}
+	n := 0
+	for _, s := range t.Steps {
+		if n == triagePassReads {
+			break
+		}
+		if !triageStepID.MatchString(s.StepID) {
+			continue
+		}
+		n++
+		text := s.Summary
+		if s.IsError && !strings.HasPrefix(text, "error: ") {
+			text = "error: " + text
+		}
+		l.add(s.StepID, s.Tool, text, s.IsError)
+	}
+}

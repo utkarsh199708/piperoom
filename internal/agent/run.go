@@ -155,6 +155,8 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	if m == nil {
 		m = newModel(opts, deps.Logger)
 	}
+	steps := newStepLedger()
+	steps.seedTriage(alert.Triage)
 	return &runner{
 		alert:     alert,
 		deps:      deps,
@@ -164,7 +166,7 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		clk:       realClock{},
 		timing:    defaultTiming(),
 		proposals: newProposalTracker(),
-		steps:     newStepLedger(),
+		steps:     steps,
 
 		noneSubjects: map[string]bool{},
 	}, nil

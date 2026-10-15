@@ -77,33 +77,53 @@ var stepIDRe = regexp.MustCompile(`^s_[0-9A-HJKMNP-TV-Z]{26}$`)
 // maxKnownStepsListed is how many known step ids a refusal lists.
 const maxKnownStepsListed = 8
 
-// checkSteps refuses a hypothesis that cites steps that do not exist, are not
-// ids, or errored, or that claims medium or high confidence with no step. The
-// errors are tools.ErrBadInput: the model sees them and retries. After a
-// restart the ledger is empty, so the model must re-read before it cites.
+// checkSteps refuses a hypothesis that cites ids that are not steps of this run, or
+// that claims medium or high confidence with no step, or high confidence resting
+// only on errored steps. An errored step may be cited: a tool error is a finding
+// (the prompt says to cite it for what is unknown or blocked), so it is allowed
+// and only a high-confidence claim needs a read that worked. The errors are
+// tools.ErrBadInput: the model sees them and retries. After a restart the ledger
+// is empty, so the model must re-read before it cites.
 func (t *updateHypothesisTool) checkSteps(in hypothesisInput) error {
 	if t.steps == nil {
 		return nil
 	}
+	// A step the ledger knows is accepted whatever its shape (the triage pass's ids are
+	// shown to the model as given); only an unknown id is told apart as malformed or stale.
 	for _, id := range in.BasedOnSteps {
+		if _, ok := t.steps.get(id); ok {
+			continue
+		}
 		if !stepIDRe.MatchString(id) {
-			return fmt.Errorf("%w: based_on_steps: %q is not a step id; cite the step= attribute of a tool_output", tools.ErrBadInput, clipID(id))
+			return fmt.Errorf("%w: based_on_steps: %q is not a step id; cite the step= attribute of a tool_output in this run%s", tools.ErrBadInput, clipID(id), t.knownSteps())
 		}
-	}
-	for _, id := range in.BasedOnSteps {
-		if _, ok := t.steps.get(id); !ok {
-			return fmt.Errorf("%w: based_on_steps: %s is not a step of this run (known: %s)", tools.ErrBadInput, id, strings.Join(t.steps.recent(maxKnownStepsListed), ", "))
-		}
-	}
-	for _, id := range in.BasedOnSteps {
-		if f, _ := t.steps.get(id); f.isError {
-			return fmt.Errorf("%w: based_on_steps: %s errored; it supports nothing", tools.ErrBadInput, id)
-		}
+		return fmt.Errorf("%w: based_on_steps: %s is not a step of this run%s", tools.ErrBadInput, id, t.knownSteps())
 	}
 	if len(in.BasedOnSteps) == 0 && in.Confidence != "low" {
 		return fmt.Errorf("%w: medium or high confidence needs at least one supporting step", tools.ErrBadInput)
 	}
+	if in.Confidence == "high" && len(in.BasedOnSteps) > 0 {
+		allErrored := true
+		for _, id := range in.BasedOnSteps {
+			if f, _ := t.steps.get(id); !f.isError {
+				allErrored = false
+				break
+			}
+		}
+		if allErrored {
+			return fmt.Errorf("%w: based_on_steps: every cited step errored; high confidence needs a step that returned a result", tools.ErrBadInput)
+		}
+	}
 	return nil
+}
+
+// knownSteps renders the newest known step ids for a refusal, or says there are none.
+func (t *updateHypothesisTool) knownSteps() string {
+	ids := t.steps.recent(maxKnownStepsListed)
+	if len(ids) == 0 {
+		return " (no steps recorded yet; run a read tool first)"
+	}
+	return " (known: " + strings.Join(ids, ", ") + ")"
 }
 
 // clipID shortens a model-supplied id for an error message.
