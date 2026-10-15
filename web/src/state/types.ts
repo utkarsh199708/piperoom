@@ -200,7 +200,10 @@ export interface HandoffState {
   to: Actor
   summary: HandoffSummary
   stay_as_watcher: boolean
-  status: 'pending' | 'accepted'
+  /** voided: the server no longer accepts it (a newer hand-off, the driver changed, the room closed). */
+  status: 'pending' | 'accepted' | 'voided'
+  /** The driver when it was created; the server voids it once someone else drives. */
+  from_id?: string
 }
 
 /** A hand-off the agent is still writing the summary for (handoff.requested, R0). */
@@ -261,6 +264,7 @@ export function emptyInsight(): InsightState {
 
 export type { ActivityKind } from './describe'
 import type { ActivityKind } from './describe'
+import { stripBidi } from '../lib/title'
 
 /** Who ticked one runbook item and when (checklist.step_done). */
 export interface ChecklistTick {
@@ -389,7 +393,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
   return {
     ...emptyRoomState(snapshot.id),
     id: snapshot.id,
-    title: snapshot.title,
+    title: stripBidi(snapshot.title),
     severity: snapshot.severity as Severity,
     pipeline_id: snapshot.pipeline_id,
     status: snapshot.status as RoomStatus,

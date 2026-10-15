@@ -1,6 +1,8 @@
 // Turns an event into one curated line for the activity feed. Pure: no ids ever reach the text,
 // and nothing here builds HTML (the feed renders `text` as text nodes, `{tool}` as <code>).
 import { neutralizeBadgeText } from '../lib/verification'
+import { verdictKind, verdictWords } from '../lib/execution'
+import { stripBidi } from '../lib/title'
 import type {
   ActionExecutedPayload,
   AgentVerificationPayload,
@@ -71,7 +73,8 @@ function as<T>(e: Event): T {
 /** Clip to `max` code points (never splits a surrogate pair), with an ellipsis. */
 export function clip(s: string | undefined, max: number): string {
   // Server ids (ULID-shaped) in free text are noise to a reader; drop them.
-  const plain = (s ?? '').replace(ID_IN_TEXT, '…')
+  // Bidi controls go too: clipped text is typed or model text, and they would reorder the row.
+  const plain = stripBidi(s ?? '').replace(ID_IN_TEXT, '…')
   const chars = Array.from(plain.replace(/\s+/g, ' ').trim())
   return chars.length <= max ? chars.join('') : `${chars.slice(0, max - 1).join('')}…`
 }
@@ -225,7 +228,9 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       return { text: 'Previewed what the fix will do', kind: 'decision' }
     case 'agent.verification': {
       const p = as<AgentVerificationPayload>(e)
-      return { text: `Verification: ${p.recovered ? 'recovered' : 'not recovered'}`, kind: 'decision' }
+      // A repeat re-states the first verdict (no check ran again): one line already announced it.
+      if (p.repeat) return { text: 'Verification already recorded', kind: 'system' }
+      return { text: `Verification: ${verdictWords(verdictKind(p))}`, kind: 'decision' }
     }
     case 'approval.given': {
       const p = as<ApprovalGivenPayload>(e)

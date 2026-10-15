@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import type { RoomActions } from '../hooks/useRoom'
 import type { ConnState } from '../hooks/useRoom'
@@ -163,5 +163,25 @@ describe('touch sizing', () => {
     show(arjun, room())
     expect(screen.getByRole('tablist', { name: 'Room sections' })).toBeInTheDocument()
     expect(screen.getAllByRole('tab').every((t) => t.className.includes('coarse:h-11'))).toBe(true)
+  })
+})
+
+describe('decision bar on the tabbed layout', () => {
+  // The bar's Reject opens the reason field in the Fix card; from another tab that card is hidden.
+  it('Reject switches to the Fix tab and focuses the reason field', async () => {
+    setWidth(1024)
+    const proposal = {
+      proposal_id: 'p1', title: 'Restart task', steps: [{ action: 'connect_restart_task', layer: 'kafka-connect', params: {}, description: '' }],
+      risk: 'low', rollback: '', required_layers: ['kafka-connect'], approvals: { 'kafka-connect': 'pending' as const },
+      decisions: {}, params_hash: 'abc', status: 'open' as const, executed: [],
+    }
+    show(arjun, room({ proposals: [proposal] }))
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'Investigation' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Investigation' }))
+    const bar = screen.getByRole('region', { name: 'Decision' })
+    fireEvent.click(within(bar).getByRole('button', { name: 'Reject' }))
+    const reason = await screen.findByLabelText('Rejection reason for kafka-connect')
+    expect(screen.getByRole('tab', { name: /^Fix/ })).toHaveAttribute('aria-selected', 'true')
+    await waitFor(() => expect(reason).toHaveFocus())
   })
 })

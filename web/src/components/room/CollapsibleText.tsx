@@ -16,8 +16,10 @@ export function CollapsibleText({ text, className }: { text: string; className?:
   const id = useId()
   if (!isLongText(text)) return <span className={className}>{text}</span>
   return (
-    <span className={cn('flex flex-col items-start gap-0.5', className)}>
-      <span id={id} className={cn('whitespace-pre-line break-words', !open && 'line-clamp-3')}>
+    // items-start sizes a child to its content, so without max-w-full one long line (a trace, a URL)
+    // makes the text wider than its column and it overflows a phone screen instead of wrapping.
+    <span className={cn('flex min-w-0 max-w-full flex-col items-start gap-0.5', className)}>
+      <span id={id} className={cn('max-w-full whitespace-pre-line break-words', !open && 'line-clamp-3')}>
         {text}
       </span>
       <button

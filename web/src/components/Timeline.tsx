@@ -190,18 +190,30 @@ function CommentThread({
   readOnly = false,
 }: {
   comment: CommentState
-  onReply: (text: string) => void
+  onReply: (text: string) => void | Promise<boolean>
   readOnly?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
+  const [sending, setSending] = useState(false)
+  const [offline, setOffline] = useState(false)
 
+  // Like ReplyBox: the reply closes only once the server took it; a failed send keeps the words.
+  const send = async () => {
+    const t = text.trim()
+    if (!t || sending) return
+    setSending(true)
+    const ok = (await onReply(t)) !== false
+    setSending(false)
+    setOffline(!ok)
+    if (ok) {
+      setText('')
+      setOpen(false)
+    }
+  }
   const submit = (e: FormEvent) => {
     e.preventDefault()
-    if (!text.trim()) return
-    onReply(text.trim())
-    setText('')
-    setOpen(false)
+    void send()
   }
 
   return (
@@ -239,7 +251,7 @@ function CommentThread({
             aria-label="Reply to comment"
             autoFocus
           />
-          <Button type="submit" size="sm" disabled={!text.trim()}>
+          <Button type="submit" size="sm" disabled={!text.trim() || sending}>
             Send
           </Button>
         </form>
@@ -247,6 +259,11 @@ function CommentThread({
         <Button variant="link" size="sm" className="ml-7 w-fit text-xs" onClick={() => setOpen(true)}>
           Reply
         </Button>
+      )}
+      {open && offline && (
+        <div className="ml-7">
+          <OfflineStrip onRetry={() => void send()} disabled={sending} />
+        </div>
       )}
     </div>
   )
