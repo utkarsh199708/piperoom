@@ -265,6 +265,13 @@ export function describeEvent(e: Event, ctx: DescribeContext = EMPTY_CONTEXT): D
       const p = as<TracePinnedPayload>(e)
       return { text: `${who} traced ${clip(p.table, 40)} · ${clip(p.key, 40)}`, kind: 'human' }
     }
+    // Shadow events carry no agent text, so these lines cannot un-blind anyone.
+    case 'shadow.revealed':
+      return { text: 'Shadow run finished: its result is ready to read after you label the room', kind: 'system' }
+    case 'shadow.labelled':
+      return { text: `${who} recorded a blind label`, kind: 'human' }
+    case 'shadow.graded':
+      return { text: `${who} graded the shadow run`, kind: 'human' }
     default:
       return { text: clip(e.type, 60), kind: 'system' }
   }

@@ -11,6 +11,8 @@ import { useMediaQuery } from '../hooks/useMediaQuery'
 import { rememberRoomTitle } from '../lib/signinNotice'
 import { useJumpToLatest } from '../hooks/useJumpToLatest'
 import { useRoomAttention } from '../hooks/useRoomAttention'
+import { useCatchUp } from '../hooks/useCatchUp'
+import { CatchUpStrip } from './room/CatchUpStrip'
 import { useCurrentUser } from '../context/user'
 import { canAcceptHandoff, canClose, canHandoff, canRequestControl, canTakeControl, isViewer } from '../state/permissions'
 import { ageLabel } from '../lib/time'
@@ -33,6 +35,8 @@ import { LabelDialog } from './room/LabelDialog'
 import { SimilarCard } from './room/SimilarCard'
 import type { ChecklistWiring } from './Timeline'
 import { StaleBanner } from './StaleBanner'
+import { Badge } from '@/components/ui/badge'
+import { ShadowPanel } from './shadow/ShadowPanel'
 import { DecisionHandleContext, RoomListContext, useBreadcrumbTail, useRegisterRoomCommands } from './shell/context'
 import type { DecisionHandle } from './shell/context'
 import { DecisionBar } from './room/DecisionBar'
@@ -117,6 +121,7 @@ export function RoomScreen() {
     },
     elsewhereNeedsMe,
   )
+  const catchUp = useCatchUp(state, conn, user)
   const { sentinelRef, unseen, jump } = useJumpToLatest(state?.activity ?? [], replaying)
   // One topology refetch per executed action, plus the hook's 30 s refresh
   // while the room is open (stops once closed).
@@ -143,6 +148,9 @@ export function RoomScreen() {
   // "Ask the agent" on a checklist item fills the composer; n makes the same text count again.
   const [prefill, setPrefill] = useState<{ text: string; n: number } | undefined>()
   const [copied, setCopied] = useState(false)
+  const copiedTimer = useRef<number | undefined>(undefined)
+  // Stop the "Copied" reset when the screen goes away, so it cannot fire after unmount.
+  useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
   const [exporting, setExporting] = useState(false)
   // One GET /api/people per room mount: layers for the presence rows and the pending layers. A viewer gets none.
   const peopleState = usePeople()
@@ -195,7 +203,8 @@ export function RoomScreen() {
     void navigator.clipboard.writeText(url).then(
       () => {
         setCopied(true)
-        window.setTimeout(() => setCopied(false), 1500)
+        window.clearTimeout(copiedTimer.current)
+        copiedTimer.current = window.setTimeout(() => setCopied(false), 1500)
       },
       () => undefined,
     )
@@ -339,6 +348,7 @@ export function RoomScreen() {
         checklist={checklist}
         filterLayer={layerFilter ?? undefined}
         onClearFilter={() => setLayerFilter(null)}
+        shadow={state.shadow}
       />
     </section>
     </>
@@ -379,11 +389,28 @@ export function RoomScreen() {
           {state.labelled ? (
             <span className="font-normal text-muted-foreground">· labelled</span>
           ) : (
-            !viewer && (
+            // A shadow room takes the F8 label only after the blind label (409 not_labelled).
+            !viewer && (!state.shadow || state.shadow_labelled) && (
               <Button size="sm" variant="outline" className="ml-auto" onClick={() => setLabelOpen(true)}>
                 Add label
               </Button>
             )
+          )}
+        </div>
+      )}
+      {state.shadow && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-x-2 border-b border-border bg-agent-subtle px-4 py-2 text-agent-foreground sm:px-6"
+        >
+          <Badge variant="agent">Shadow</Badge>
+          {state.status === 'open' ? (
+            <span>
+              The agent is investigating silently and proposes nothing. Work the incident as usual; its answer is
+              shown after you close the room and record your own.
+            </span>
+          ) : (
+            <span>Shadow room: the agent ran silently and proposed nothing.</span>
           )}
         </div>
       )}
@@ -406,6 +433,7 @@ export function RoomScreen() {
             exporting={exporting}
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
           />
+          <CatchUpStrip strip={catchUp.strip} onDismiss={catchUp.dismiss} />
           <DecisionBar state={state} user={user} placement={phone ? 'sheet' : 'top'} />
 
           {wide ? (
@@ -443,7 +471,7 @@ export function RoomScreen() {
               </TabsContent>
               <TabsContent value="fix" forceMount hidden={tab !== 'fix'} className="flex flex-col gap-4 px-4 pb-4 pt-4 sm:px-6">
                 {proposalsCard}
-                <ProposalsSummary proposals={state.proposals} />
+                <ProposalsSummary proposals={state.proposals} shadow={state.shadow} />
               </TabsContent>
               <TabsContent value="people" forceMount hidden={tab !== 'people'}>
                 {people}
@@ -471,13 +499,14 @@ export function RoomScreen() {
             </button>
           )}
 
-          <SteerBox state={state} user={user} actions={actions} prefill={prefill} conn={conn} />
+          {state.shadow && state.status === 'closed' && <ShadowPanel state={state} user={user} />}
+          {!state.shadow && <SteerBox state={state} user={user} actions={actions} prefill={prefill} conn={conn} />}
         </div>
 
         {wide && (
           <aside aria-label="Room details" className="flex w-full shrink-0 flex-col border-t border-border xl:w-[300px] xl:border-l xl:border-t-0">
             {similar}
-            <ProposalsSummary proposals={state.proposals} />
+            <ProposalsSummary proposals={state.proposals} shadow={state.shadow} />
             <div className="h-px shrink-0 bg-border" />
             {people}
             <div className="h-px shrink-0 bg-border" />

@@ -37,6 +37,12 @@ describe('NoDriverBanner', () => {
     expect(screen.getByRole('button', { name: 'Take control' })).toBeInTheDocument()
   })
 
+  it('in a shadow room asks for a driver to run and close the room, not to steer the agent', () => {
+    render(<NoDriverBanner state={{ ...emptyRoomState('r_shadow'), shadow: true }} user={arjun} actions={actions} />)
+    expect(screen.getByText(/run the incident and close the room/)).toBeInTheDocument()
+    expect(screen.queryByText(/steer the agent/)).not.toBeInTheDocument()
+  })
+
   it('grants control to the current user on click', () => {
     render(<NoDriverBanner state={emptyRoomState('r_webhook')} user={arjun} actions={actions} />)
     fireEvent.click(screen.getByRole('button', { name: 'Take control' }))

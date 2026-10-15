@@ -19,6 +19,7 @@ import type {
   ChecklistStepDonePayload,
   CommentAddedPayload,
   ControlGrantedPayload,
+  ControlLeaseExpiredPayload,
   Event,
   HandoffAcceptedPayload,
   HandoffCreatedPayload,
@@ -174,6 +175,11 @@ function applyCore(state: RoomState, event: Event): RoomState {
   // last_seq on (so the next event is not a gap) and nothing else: it must not
   // take a slot of the 50-entry activity window or show up as a raw line.
   if (event.type === 'agent.usage') return { ...state, last_seq: event.seq }
+
+  // A shadow room's log holds no agent events (the server keeps them in a separate log until
+  // the reveal). If one arrives anyway, a bug or an older server, showing it would un-blind
+  // the labeller, so only the seq moves on.
+  if (state.shadow && event.type.startsWith('agent.')) return { ...state, last_seq: event.seq }
 
   let next: RoomState = state
 
@@ -469,6 +475,15 @@ function applyCore(state: RoomState, event: Event): RoomState {
       break
     }
 
+    case 'control.lease_expired': {
+      const p = as<ControlLeaseExpiredPayload>(event)
+      const d = state.driver
+      // Only the signal for the lease the driver holds now counts; a stale one is history.
+      if (!d || !d.lease_until || Date.parse(p.lease_until) !== Date.parse(d.lease_until)) break
+      next = { ...state, driver: { ...d, lease_expired: true } }
+      break
+    }
+
     case 'proposal.created': {
       const p = as<ProposalCreatedPayload>(event)
       // A second proposal.created with the same id (a replay over a snapshot, a retry) is
@@ -703,6 +718,14 @@ function applyCore(state: RoomState, event: Event): RoomState {
       }
       break
     }
+
+    case 'shadow.revealed':
+      next = { ...state, shadow_revealed: true }
+      break
+
+    case 'shadow.labelled':
+      next = { ...state, shadow_labelled: true }
+      break
 
     default:
       break
