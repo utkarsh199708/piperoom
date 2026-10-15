@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -21,6 +22,7 @@ import (
 	"piperoom/internal/config"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/topology"
 	"piperoom/internal/wiring"
 )
 
@@ -116,6 +118,7 @@ func run(o runOptions) (err error) {
 
 	reg := tools.NewReadOnlyRegistry()
 	areg := actions.NewRegistry()
+	var topo topology.Builder
 	if fakeTools {
 		if err := fake.Register(reg); err != nil {
 			return fmt.Errorf("investigate: register fake tools: %w", err)
@@ -130,7 +133,7 @@ func run(o runOptions) (err error) {
 		}
 		defer sets.Close()
 		set := sets.For(pipeline)
-		reg, areg = set.Tools, set.Actions
+		reg, areg, topo = set.Tools, set.Actions, set.Topology
 	}
 
 	opts := agent.Options{Model: model, Effort: effort, MaxTurns: maxTurns}
@@ -172,10 +175,9 @@ func run(o runOptions) (err error) {
 	}
 
 	alert := agent.Alert{
-		Title:      title,
-		PipelineID: pipeline,
-		PipelineMap: fmt.Sprintf(`pipeline %s
-postgres: public.orders  ->  connect: pg-orders-connector  ->  topic: pg.public.orders  ->  consumer: order-sync  ->  warehouse: analytics.orders`, pipeline),
+		Title:       title,
+		PipelineID:  pipeline,
+		PipelineMap: pipelineMapFor(ctx, topo, pipeline, slog.Default()),
 	}
 
 	err = ep.Run(ctx, alert, agent.Deps{
