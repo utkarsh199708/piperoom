@@ -46,6 +46,10 @@ func (s *Service) Label(ctx context.Context, user User, roomID string, in LabelI
 	if !ok {
 		return events.Event{}, errLabelNotAllowed()
 	}
+	// The web form pre-fills cause and fix from the agent's hypothesis, which
+	// may carry bidi controls (agent text is not refused for them): drop them
+	// rather than refuse the untouched form.
+	in.Cause, in.FixThatWorked = stripBidi(in.Cause), stripBidi(in.FixThatWorked)
 	if err := validateLabel(in); err != nil {
 		return events.Event{}, err
 	}

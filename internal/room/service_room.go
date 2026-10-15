@@ -186,6 +186,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	if err := checkJSONBStorable(raw); err != nil {
 		return RoomSnapshot{}, false, err
 	}
+	title = stripBidi(title)
 	if err := rejectUnstorable(title); err != nil {
 		return RoomSnapshot{}, false, err
 	}
@@ -501,6 +502,10 @@ func (s *Service) Events(ctx context.Context, roomID string, afterSeq int64, lim
 
 // CloseRoom closes the room (driver only) and stops the agent.
 func (s *Service) CloseRoom(ctx context.Context, user User, roomID, resolution string) (events.Event, error) {
+	// The web app pre-fills the resolution from a proposal title, which a
+	// room logged before agent text was stripped may still carry bidi
+	// controls in: drop them rather than refuse the untouched form.
+	resolution = stripBidi(resolution)
 	if err := rejectUnstorable(resolution); err != nil {
 		return events.Event{}, err
 	}
