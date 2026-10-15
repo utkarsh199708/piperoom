@@ -157,6 +157,7 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	}
 	steps := newStepLedger()
 	steps.seedTriage(alert.Triage)
+	steps.setBackground(alertBackground(alert))
 	return &runner{
 		alert:     alert,
 		deps:      deps,
@@ -819,7 +820,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 			TookMS:     took,
 			Provenance: prov,
 		})
-		r.steps.add(stepID, u.name, summary, true)
+		r.steps.addWithInput(stepID, u.name, string(cleaned), summary, true)
 		return toolResult{
 			toolUseID: u.id,
 			content:   r.wrapReadToolOutput(u.name, stepID, summary),
@@ -841,7 +842,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		TookMS:     took,
 		Provenance: prov,
 	})
-	r.steps.add(stepID, u.name, summary, false)
+	r.steps.addWithInput(stepID, u.name, string(cleaned), summary, false)
 	return toolResult{
 		toolUseID: u.id,
 		content:   r.wrapReadToolOutput(u.name, stepID, summary),

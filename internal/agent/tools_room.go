@@ -117,6 +117,27 @@ func (t *updateHypothesisTool) checkSteps(in hypothesisInput) error {
 	return nil
 }
 
+// unbacked returns the terms of the hypothesis that neither its cited steps nor
+// the alert background show (see groundTerms). Without a ledger nothing is known about the steps,
+// so nothing is marked.
+func (t *updateHypothesisTool) unbacked(in hypothesisInput) []string {
+	if t.steps == nil {
+		return nil
+	}
+	// What backs a term: the cited steps' summaries and the inputs they were called
+	// with (the model named the connector or topic there), and the alert text and
+	// pipeline map it was handed up front. Naming a component from those is not
+	// inventing it; the note must not push the model to drop it.
+	backing := make([]string, 0, 2*len(in.BasedOnSteps)+1)
+	for _, id := range in.BasedOnSteps {
+		if f, ok := t.steps.get(id); ok {
+			backing = append(backing, f.summary, f.input)
+		}
+	}
+	backing = append(backing, t.steps.backgroundText())
+	return groundTerms(in.Text, backing)
+}
+
 // knownSteps renders the newest known step ids for a refusal, or says there are none.
 func (t *updateHypothesisTool) knownSteps() string {
 	ids := t.steps.recent(maxKnownStepsListed)
@@ -189,15 +210,17 @@ func (t *updateHypothesisTool) Run(ctx context.Context, input json.RawMessage) (
 	if t.sink == nil {
 		return tools.Result{}, fmt.Errorf("agent: no sink available for update_hypothesis")
 	}
+	unbacked := t.unbacked(in)
 	if err := t.sink.Emit(ctx, events.AgentHypothesis, events.AgentHypothesisPayload{
-		Text:         in.Text,
-		BasedOnSteps: in.BasedOnSteps,
-		Confidence:   in.Confidence,
-		Confirmed:    false,
+		Text:          in.Text,
+		BasedOnSteps:  in.BasedOnSteps,
+		Confidence:    in.Confidence,
+		Confirmed:     false,
+		UnbackedTerms: unbacked,
 	}); err != nil {
 		return tools.Result{}, fmt.Errorf("agent: emit hypothesis: %w", err)
 	}
-	return tools.Result{Summary: "hypothesis recorded"}, nil
+	return tools.Result{Summary: "hypothesis recorded" + unbackedNote(unbacked)}, nil
 }
 
 // ---- post_message ----

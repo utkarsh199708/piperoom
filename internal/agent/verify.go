@@ -1033,7 +1033,7 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 			Summary: summary, IsError: true, Truncated: truncated, TookMS: took,
 			Provenance: prov,
 		})
-		r.steps.add(stepID, name, summary, true)
+		r.steps.addWithInput(stepID, name, string(input), summary, true)
 		return tools.Result{}, err
 	}
 	summary, reTruncated := tools.Truncate(res.Summary)
@@ -1043,7 +1043,7 @@ func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawM
 		Truncated: res.Truncated || reTruncated || dataCut, TookMS: took,
 		Provenance: prov,
 	})
-	r.steps.add(stepID, name, summary, false)
+	r.steps.addWithInput(stepID, name, string(input), summary, false)
 	return res, nil
 }
 
