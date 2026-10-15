@@ -12,6 +12,7 @@ vi.mock('../api/client', async (importOriginal) => {
 import { ApiClientError, api } from '../api/client'
 import { HandoffDialog } from './HandoffDialog'
 import { SteerBox } from './SteerBox'
+import { PersonSelect } from './PersonSelect'
 
 const actions: RoomActions = {
   comment: vi.fn(),
@@ -113,5 +114,32 @@ describe('grant-control picker', () => {
     fireEvent.change(select, { target: { value: 'priya' } })
     fireEvent.click(screen.getByRole('button', { name: 'Give control' }))
     await waitFor(() => expect(actions.grantControl).toHaveBeenCalledWith('priya'))
+  })
+})
+
+describe('PersonSelect default and a late effect', () => {
+  // CI flake (#373): the "pick the first person" effect from a render that still had value ''
+  // ran after the user's change and handed off to priya instead of the chosen person.
+  it('a default effect that runs after the pick does not undo it', async () => {
+    vi.mocked(api.people).mockResolvedValue(people)
+    const first = vi.fn()
+    const ui = (onChange: (id: string) => void) => (
+      <>
+        <label htmlFor="p">pick</label>
+        <PersonSelect id="p" selfId="arjun" value="" onChange={onChange} />
+      </>
+    )
+    const { rerender } = render(ui(first))
+    const select = await screen.findByLabelText('pick')
+    expect(select).toHaveValue('priya') // the default shows at once, before the parent stores it
+    await waitFor(() => expect(first).toHaveBeenCalledWith('priya'))
+
+    fireEvent.change(select, { target: { value: 'u_0a1b2c3d4e5f' } })
+    expect(first).toHaveBeenLastCalledWith('u_0a1b2c3d4e5f')
+
+    // The parent has not stored the pick yet (value is still ''), and the effect runs again.
+    const late = vi.fn()
+    rerender(ui(late))
+    expect(late).not.toHaveBeenCalledWith('priya')
   })
 })
