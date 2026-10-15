@@ -345,15 +345,18 @@ func (c *Client) GroupLag(ctx context.Context, group string) (clients.GroupLag, 
 		return clients.GroupLag{}, fmt.Errorf("kafka: fetch offsets %s: %w", group, dg.FetchErr)
 	}
 	out := clients.GroupLag{
-		Group:    dg.Group,
-		State:    dg.State,
-		Members:  len(dg.Members),
-		TotalLag: dg.Lag.Total(),
+		Group:   dg.Group,
+		State:   dg.State,
+		Members: len(dg.Members),
 	}
 	for _, l := range dg.Lag.Sorted() {
 		if l.Err != nil {
-			continue // skip partitions whose commit/end fetch failed
+			// kadm's Lag swallows a broker's shard error into Err: the
+			// partition's lag is not known, which is not "no lag".
+			out.Unknown = append(out.Unknown, unknownLag(l))
+			continue
 		}
+		out.TotalLag += l.Lag
 		out.Partitions = append(out.Partitions, clients.PartitionLag{
 			Topic:     l.Topic,
 			Partition: l.Partition,
@@ -362,13 +365,38 @@ func (c *Client) GroupLag(ctx context.Context, group string) (clients.GroupLag, 
 			Lag:       l.Lag,
 		})
 	}
-	sort.Slice(out.Partitions, func(i, j int) bool {
-		if out.Partitions[i].Topic != out.Partitions[j].Topic {
-			return out.Partitions[i].Topic < out.Partitions[j].Topic
-		}
-		return out.Partitions[i].Partition < out.Partitions[j].Partition
-	})
+	sortLags(out.Partitions)
+	sortLags(out.Unknown)
 	return out, nil
+}
+
+// unknownLag is a partition whose committed or end offset could not be read,
+// with the offsets that were read and -1 for the others (clients.GroupLag).
+// kadm sets Err to the commit error before the end offset error, so Err is
+// the end offset's own error only when the commit was read. When the end
+// offset is missing from the listing, kadm reports that whatever the commit
+// did; the broker answers a failed offset fetch with offset -1, so Commit.At
+// is then -1 anyway.
+func unknownLag(l kadm.GroupMemberLag) clients.PartitionLag {
+	pl := clients.PartitionLag{Topic: l.Topic, Partition: l.Partition, Committed: -1, End: -1, Lag: -1}
+	endRead := l.End.Err == nil
+	if endRead {
+		pl.End = l.End.Offset
+	}
+	if !endRead && errors.Is(l.Err, l.End.Err) {
+		pl.Committed = l.Commit.At
+	}
+	return pl
+}
+
+// sortLags orders partitions by topic, then partition.
+func sortLags(ps []clients.PartitionLag) {
+	sort.Slice(ps, func(i, j int) bool {
+		if ps[i].Topic != ps[j].Topic {
+			return ps[i].Topic < ps[j].Topic
+		}
+		return ps[i].Partition < ps[j].Partition
+	})
 }
 
 const (
@@ -408,52 +436,45 @@ func normalizeMaxScan(maxScan int) int {
 // stable offset: only committed records are read, so a record of an aborted
 // or still open transaction never matches. A deadline that cuts the scan
 // short before any match is returned as an error, not a false "not found";
-// so is an unknown topic (clients.ErrNotFound). FindByKeyReport also says
+// so is an unknown topic (clients.ErrNotFound). FindByKeyScan also says
 // which partitions the scan did not finish.
 func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Time, maxScan int) ([]clients.RecordRef, error) {
-	rep, err := c.FindByKeyReport(ctx, topic, key, since, maxScan)
-	return rep.Refs, err
+	scan, err := c.FindByKeyScan(ctx, topic, key, since, maxScan)
+	return scan.Refs, err
 }
 
-// KeyScan is FindByKey's result plus what clients.RecordRef cannot carry: the
-// partitions whose window the scan did not finish (maxScan, or the scan
-// deadline after a match), so newer matches may exist there.
-type KeyScan struct {
-	Refs      []clients.RecordRef `json:"records"`
-	Truncated []int32             `json:"truncated_partitions,omitempty"`
-}
+var _ clients.KeyScanReader = (*Client)(nil)
 
-// FindByKeyReport is FindByKey that also reports truncated partitions. It is
-// the local adapter until clients.KafkaReader can signal truncation (contract
-// change request in the PR).
-func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since time.Time, maxScan int) (KeyScan, error) {
+// FindByKeyScan is FindByKey that also reports the partitions whose window the
+// scan did not finish (clients.KeyScanReader).
+func (c *Client) FindByKeyScan(ctx context.Context, topic, key string, since time.Time, maxScan int) (clients.KeyScan, error) {
 	maxScan = normalizeMaxScan(maxScan)
 	ms, err := afterMilli(since)
 	if err != nil {
-		return KeyScan{}, err
+		return clients.KeyScan{}, err
 	}
 	tparam := "topic=" + topic
 	start := time.Now()
 	offs, err := c.lister().ListOffsetsAfterMilli(ctx, ms, topic)
 	c.record(ctx, start, "kadm.ListOffsetsAfterMilli(topic, since)", tparam, "since="+since.UTC().Format(time.RFC3339))
 	if err != nil {
-		return KeyScan{}, fmt.Errorf("kafka: offsets after %s: %w", since, err)
+		return clients.KeyScan{}, fmt.Errorf("kafka: offsets after %s: %w", since, err)
 	}
 	if topicMissing(offs[topic]) {
-		return KeyScan{}, fmt.Errorf("kafka: topic %s: %w", topic, clients.ErrNotFound)
+		return clients.KeyScan{}, fmt.Errorf("kafka: topic %s: %w", topic, clients.ErrNotFound)
 	}
 	start = time.Now()
 	ends, err := c.lister().ListEndOffsets(ctx, topic)
 	c.record(ctx, start, "kadm.ListEndOffsets(topic)", tparam)
 	if err != nil {
-		return KeyScan{}, fmt.Errorf("kafka: end offsets %s: %w", topic, err)
+		return clients.KeyScan{}, fmt.Errorf("kafka: end offsets %s: %w", topic, err)
 	}
 
 	var windows []clients.PartitionOffsets
 	for p, lo := range offs[topic] {
 		// A partition left out would turn into a false "not found".
 		if lo.Err != nil {
-			return KeyScan{}, fmt.Errorf("kafka: offset after %s for %s/%d: %w", since, topic, p, lo.Err)
+			return clients.KeyScan{}, fmt.Errorf("kafka: offset after %s for %s/%d: %w", since, topic, p, lo.Err)
 		}
 		if lo.Offset < 0 {
 			continue
@@ -468,7 +489,7 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 	}
 	windows, err = c.clampToStable(ctx, topic, windows)
 	if err != nil {
-		return KeyScan{}, fmt.Errorf("kafka: find by key %s: %w", topic, err)
+		return clients.KeyScan{}, fmt.Errorf("kafka: find by key %s: %w", topic, err)
 	}
 	partOffsets := map[string]map[int32]kgo.Offset{topic: {}}
 	stopAt := map[int32]int64{}
@@ -488,12 +509,12 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 		wait[w.Partition] = readWindow{from: w.Start, end: w.End}
 	}
 	if len(partOffsets[topic]) == 0 {
-		return KeyScan{}, nil
+		return clients.KeyScan{}, nil
 	}
 
 	cl, err := c.newConsumer(partOffsets)
 	if err != nil {
-		return KeyScan{}, fmt.Errorf("kafka: scan client: %w", err)
+		return clients.KeyScan{}, fmt.Errorf("kafka: scan client: %w", err)
 	}
 	defer cl.Close()
 	pr := c.newProber(topic)
@@ -511,9 +532,9 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 	// cut ends the scan at the deadline: matches found so far are kept and
 	// the unfinished partitions reported, since a later match may exist
 	// there; with no match it is an error, never a false "not found".
-	cut := func(cause error) (KeyScan, error) {
+	cut := func(cause error) (clients.KeyScan, error) {
 		if len(found) == 0 {
-			return KeyScan{}, fmt.Errorf("kafka: scan %s incomplete after %d records: %w", topic, scanned, cause)
+			return clients.KeyScan{}, fmt.Errorf("kafka: scan %s incomplete after %d records: %w", topic, scanned, cause)
 		}
 		for p := range stopAt {
 			if !finished[p] && !slices.Contains(truncated, p) {
@@ -528,7 +549,7 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 		fetches := pollBounded(cctx, cl)
 		for _, fe := range fetches.Errors() {
 			if fe.Err != nil && !errors.Is(fe.Err, context.Canceled) && !errors.Is(fe.Err, context.DeadlineExceeded) {
-				return KeyScan{}, fmt.Errorf("kafka: scan %s: %w", topic, fe.Err)
+				return clients.KeyScan{}, fmt.Errorf("kafka: scan %s: %w", topic, fe.Err)
 			}
 		}
 		for _, r := range fetches.Records() {
@@ -586,7 +607,7 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 
 // keyScan orders matches per partition by offset (producer timestamps can go
 // backwards, the log cannot), partitions ascending, and sorts truncated.
-func keyScan(found []clients.RecordRef, truncated []int32) KeyScan {
+func keyScan(found []clients.RecordRef, truncated []int32) clients.KeyScan {
 	sort.Slice(found, func(i, j int) bool {
 		if found[i].Partition != found[j].Partition {
 			return found[i].Partition < found[j].Partition
@@ -594,7 +615,7 @@ func keyScan(found []clients.RecordRef, truncated []int32) KeyScan {
 		return found[i].Offset < found[j].Offset
 	})
 	slices.Sort(truncated)
-	return KeyScan{Refs: found, Truncated: truncated}
+	return clients.KeyScan{Refs: found, Truncated: truncated}
 }
 
 // recordTimestamps fetches one record per partition (at the given offsets) in a

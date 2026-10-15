@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -292,6 +293,13 @@ func (s Scope) TopicInScope(topic string) bool {
 // SourceTableInScope reports whether table is one of the pipeline's source tables.
 func (s Scope) SourceTableInScope(table string) bool {
 	return s.unscoped || contains(s.p.SourceTables, table)
+}
+
+// AnySourceTable reports whether match accepts one of the pipeline's source
+// tables, for callers that must compare names by parsed identifier rather
+// than by exact text.
+func (s Scope) AnySourceTable(match func(table string) bool) bool {
+	return s.unscoped || slices.ContainsFunc(s.p.SourceTables, match)
 }
 
 // FilterConnectors keeps only the pipeline's connectors.

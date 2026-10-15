@@ -53,6 +53,12 @@ func warehouseFreshnessTool(d Deps) tools.Tool {
 			if ts.IsZero() {
 				summary = "no rows (empty table)"
 				data["newest"] = nil
+			} else if ts.Year() >= 9999 {
+				// The warehouse client's stand-in for a Postgres 'infinity':
+				// no row holds this time, so neither a time nor an age is shown.
+				summary = fmt.Sprintf("newest=infinity (a sentinel or bad value in %s): staleness cannot be judged", input.TSColumn)
+				data["newest"] = "infinity"
+				data["in_future"] = true
 			} else if ahead := time.Until(ts); ahead > topology.FutureSkew {
 				// Clamped to "stale for 0s" this would read as fresh while
 				// loading may have stopped: the column is not comparable with
@@ -131,9 +137,13 @@ func warehouseRowTool(d Deps) tools.Tool {
 				if err != nil {
 					return tools.Result{}, fmt.Errorf("dbtools: warehouse_row: %w", err)
 				}
-				if input.PKColumn != pk {
+				// Snowflake folds unquoted names to upper case and reports the
+				// key in its own case, so "ID" and "id" are the same column
+				// there. Postgres is case-sensitive. Row gets the canonical pk.
+				if input.PKColumn != pk && !(d.isSnowflake() && strings.EqualFold(input.PKColumn, pk)) {
 					return tools.Result{}, fmt.Errorf("%w: pk_column must be the primary key column of %s (%q)", tools.ErrBadInput, input.Table, pk)
 				}
+				input.PKColumn = pk
 			}
 			row, found, err := d.Wh.Row(ctx, input.Table, input.PKColumn, input.Key)
 			if err != nil {

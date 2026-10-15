@@ -5,6 +5,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -60,19 +61,13 @@ func (d *DB) Close() {
 // ReplicationSlots lists replication slots with the retained WAL size and the
 // safe_wal_size left before the slot is invalidated (PG13+, like wal_status).
 // A physical slot (a standby's) is listed with an empty Plugin: it holds WAL
-// too, and its NULL plugin must not fail the whole read.
+// too, and its NULL plugin must not fail the whole read. On a hot standby the
+// retained WAL is measured from the received or replayed position (walHead).
 func (d *DB) ReplicationSlots(ctx context.Context) ([]clients.ReplicationSlot, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
-	rows, err := d.query(ctx, `
-		SELECT slot_name, COALESCE(plugin, ''), active,
-		       COALESCE(restart_lsn::text, ''),
-		       COALESCE(confirmed_flush_lsn::text, ''),
-		       COALESCE(wal_status, ''),
-		       COALESCE(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::bigint, 0),
-		       safe_wal_size
-		FROM pg_replication_slots
+	rows, err := d.query(ctx, slotColumns+`
 		ORDER BY slot_name`)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list replication slots: %w", err)
@@ -255,7 +250,12 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 
 // PrimaryKeyColumn returns the first primary key column of a table. It is an
 // optional capability used by the record trace to look up rows without the
-// caller knowing the key column name ahead of time.
+// caller knowing the key column name ahead of time. A table without a primary
+// key is clients.ErrNotFound.
+//
+// It reads pg_catalog, not information_schema: information_schema shows a
+// constraint only to the table's owner or a role with a privilege other than
+// SELECT, so the documented SELECT-only role saw no key on any table (#385).
 func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
@@ -266,16 +266,15 @@ func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error)
 	}
 	var col string
 	err = d.queryRow(ctx, `
-		SELECT kcu.column_name
-		FROM information_schema.table_constraints tc
-		JOIN information_schema.key_column_usage kcu
-		  ON tc.constraint_name = kcu.constraint_name
-		 AND tc.constraint_schema = kcu.constraint_schema
-		WHERE tc.constraint_type = 'PRIMARY KEY'
-		  AND tc.table_schema = $1
-		  AND tc.table_name = $2
-		ORDER BY kcu.ordinal_position
-		LIMIT 1`, schema, tbl).Scan(&col)
+		SELECT a.attname
+		FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = i.indkey[0]
+		WHERE i.indisprimary AND n.nspname = $1 AND c.relname = $2`, schema, tbl).Scan(&col)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("postgres: primary key of %s: %w", table, clients.ErrNotFound)
+	}
 	if err != nil {
 		return "", fmt.Errorf("postgres: primary key of %s: %w", table, err)
 	}

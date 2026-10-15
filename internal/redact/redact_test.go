@@ -178,6 +178,9 @@ func FuzzText(f *testing.F) {
 		f.Add(l)
 	}
 	f.Add("password=\"\\\"x\" token='' postgres://:@ sk-ant-" + strings.Repeat("a1", 15))
+	for _, s := range idempotenceSeeds383 {
+		f.Add(s)
+	}
 	f.Fuzz(func(t *testing.T, s string) {
 		once, _ := Text(s)
 		twice, _ := Text(once)

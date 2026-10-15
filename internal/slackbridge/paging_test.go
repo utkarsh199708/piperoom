@@ -130,19 +130,25 @@ func TestPagingInjectionInEveryTextField(t *testing.T) {
 				ev(8, events.HandoffAccepted, a, struct{}{}),
 				ev(9, events.ControlLeaseExpired, "system", events.ControlLeaseExpiredPayload{
 					Driver: events.Actor{ID: "ana", Name: a}, LeaseUntil: time.Unix(1700000000, 0)}),
-				ev(10, events.RoomClosed, a, events.RoomClosedPayload{Resolution: a}),
+				ev(10, events.ApprovalNudged, a, events.ApprovalNudgedPayload{ProposalID: a, Layer: "kafka"}),
+				ev(11, events.ApprovalNudged, a, events.ApprovalNudgedPayload{ProposalID: a, Layer: a}), // unpaged layer
+				ev(12, events.RoomClosed, a, events.RoomClosedPayload{Resolution: a}),
 			}
 			fs := &fakeSlack{}
-			b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) { o.Paging = pagingOpts() })
+			// A tiny gap lets owner1 be paged by both the proposal and the nudge.
+			b, _, _ := newBridge(t, &fakeStore{evs: evs}, fs, func(o *Options) {
+				o.Paging = pagingOpts()
+				o.Paging.Limits.UserRoomInterval = time.Nanosecond
+			})
 			if err := b.Run(context.Background(), "r1"); err != nil {
 				t.Fatal(err)
 			}
-			if fs.count() != 13 { // 10 mirrored + proposal, hand-off and lease pages
-				t.Fatalf("requests = %d, want 13", fs.count())
+			if fs.count() != 16 { // 12 mirrored + proposal, hand-off, lease and nudge pages
+				t.Fatalf("requests = %d, want 16", fs.count())
 			}
 			assertOnlyTrustedMarkup(t, fs.reqs, a)
 			n, ids := mentionCount(fs.reqs)
-			if n != 3 || len(ids) != 4 || ids[owner1] == 0 || ids[owner2] == 0 || ids[owner3] == 0 || ids[oncall] == 0 {
+			if n != 4 || len(ids) != 4 || ids[owner1] == 0 || ids[owner2] == 0 || ids[owner3] == 0 || ids[oncall] == 0 {
 				t.Errorf("mentions: messages=%d ids=%v", n, ids)
 			}
 			raw, _ := json.Marshal(fs.reqs)
@@ -486,5 +492,120 @@ func TestPagingFatalSlackErrorStopsRoom(t *testing.T) {
 	var ae *APIError
 	if !errors.As(err, &ae) || ae.Code != "not_in_channel" {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func nudgeEvent(seq int64, proposal, layer string) events.Event {
+	return ev(seq, events.ApprovalNudged, "bo", events.ApprovalNudgedPayload{ProposalID: proposal, Layer: layer})
+}
+
+// A nudge is a thread reply for everyone and a page for the nudged layer's
+// owners only. One event pages once (a redelivery does not repeat it) and a
+// re-nudge 10 minutes later pages again.
+func TestPagingNudge(t *testing.T) {
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"})
+	opts := pagingOpts()
+	opts.Layers["kafka"] = []string{owner1, owner1} // a duplicate ID is mentioned once
+	opts.Layers["postgres"] = []string{owner2}
+	first := nudgeEvent(2, "p1", "kafka")
+	st := &fakeStore{evs: []events.Event{created, first, first}} // same seq delivered twice
+	fs := &fakeSlack{}
+	// A tiny gap isolates the seq de-dup from the per-user-per-room gap.
+	opts.Limits.UserRoomInterval = time.Nanosecond
+	b, _, _ := newBridge(t, st, fs, func(o *Options) { o.Paging = opts })
+	now := time.Unix(1700000000, 0)
+	// Every read moves the clock on, so the 1ns gap is always over and only the
+	// seq key can stop a repeated page.
+	b.pager.now = func() time.Time { now = now.Add(time.Millisecond); return now }
+	run := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		_ = b.Run(ctx, "r1")
+	}
+	run()
+	if n, ids := mentionCount(fs.reqs); n != 1 || len(ids) != 1 || ids[owner1] != 2 { // block text + fallback text
+		t.Fatalf("after first nudge: pages=%d ids=%v, want one page for %s only", n, ids, owner1)
+	}
+	// A replay of the same event (a stream redelivery after the thread state
+	// was lost) must not page again.
+	if err := b.threads.Put(context.Background(), "r1", Thread{Channel: "CCONF", TS: "1700000000.000100", LastSeq: 1}); err != nil {
+		t.Fatal(err)
+	}
+	run()
+	if n, _ := mentionCount(fs.reqs); n != 1 {
+		t.Fatalf("redelivered nudge paged again: pages=%d reqs=%d", n, fs.count())
+	}
+	now = now.Add(10 * time.Minute)
+	st.evs = append(st.evs, nudgeEvent(3, "p1", "kafka"))
+	run()
+	if n, ids := mentionCount(fs.reqs); n != 2 || len(ids) != 1 {
+		t.Errorf("re-nudge: pages=%d ids=%v, want 2 pages in total", n, ids)
+	}
+	assertOnlyTrustedMarkup(t, fs.reqs, "nudge")
+}
+
+func TestPagingNudgeUnknownLayerAndInjection(t *testing.T) {
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"})
+	for _, layer := range []string{"unknown", "<@U0EVIL001>", "<!channel>"} {
+		fs := &fakeSlack{}
+		b, _, _ := newBridge(t, &fakeStore{evs: []events.Event{created, nudgeEvent(2, "<!here>", layer)}}, fs,
+			func(o *Options) { o.Paging = pagingOpts() })
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		_ = b.Run(ctx, "r1")
+		cancel()
+		if n, _ := mentionCount(fs.reqs); n != 0 || fs.count() != 2 {
+			t.Errorf("%q: requests=%d pages=%d", layer, fs.count(), n)
+		}
+		assertOnlyTrustedMarkup(t, fs.reqs, layer)
+	}
+}
+
+func TestNudgeWithoutPagingConfigIsReplyOnly(t *testing.T) {
+	created := ev(1, events.RoomCreated, "ana", events.RoomCreatedPayload{Title: "t"})
+	fs := &fakeSlack{}
+	b, _, _ := newBridge(t, &fakeStore{evs: []events.Event{created, nudgeEvent(2, "p1", "kafka")}}, fs, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = b.Run(ctx, "r1")
+	if n, _ := mentionCount(fs.reqs); n != 0 || fs.count() != 2 {
+		t.Errorf("requests=%d pages=%d", fs.count(), n)
+	}
+}
+
+// Nudges skip the per-room gap (the server limits them per proposal and layer)
+// and have their own hourly cap, so a nudge 5 minutes after the proposal page
+// still pages, and nudges never use up the budget for proposal pages.
+func TestPagingNudgeIntervals(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	p := newPrunePager(t, &now, PagingLimits{})
+	if !pageOnce(p, "r1", "proposal:p1") {
+		t.Fatal("proposal page denied")
+	}
+	now = now.Add(5 * time.Minute)
+	if !pageOnce(p, "r1", "nudge:2") {
+		t.Error("nudge 5m after the proposal page paged nobody")
+	}
+	// A re-nudge whose page was stamped late is still allowed at 10m of event time.
+	now = now.Add(9*time.Minute + 58*time.Second)
+	if !pageOnce(p, "r1", "nudge:3") {
+		t.Error("re-nudge after lag paged nobody")
+	}
+}
+
+// Nudge pages cap at UserPerHour per user and leave the other buckets alone.
+func TestPagingNudgesDoNotStarveOtherPages(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	p := newPrunePager(t, &now, PagingLimits{})
+	for i := 0; i < 6; i++ {
+		if !pageOnce(p, "r1", fmt.Sprintf("nudge:%d", i)) {
+			t.Fatalf("nudge %d denied", i)
+		}
+		now = now.Add(5 * time.Minute)
+	}
+	if pageOnce(p, "r1", "nudge:99") {
+		t.Error("a seventh nudge page in the hour was allowed")
+	}
+	if !pageOnce(p, "r2", "proposal:p9") {
+		t.Error("nudges used up the owner's budget for a proposal page in another room")
 	}
 }

@@ -27,7 +27,7 @@ func Important(t events.Type) bool {
 	case events.RoomCreated, events.AgentHypothesis, events.ProposalCreated,
 		events.ApprovalGiven, events.ApprovalRejected, events.ActionExecuted,
 		events.HandoffCreated, events.HandoffAccepted, events.RoomClosed,
-		events.ControlLeaseExpired:
+		events.ControlLeaseExpired, events.ApprovalNudged:
 		return true
 	}
 	return false
@@ -231,6 +231,19 @@ func (r *renderer) reply(e events.Event) (m message, ok bool, err error) {
 			blocks = append(blocks, block{Type: "context", Elements: link})
 		}
 		return message{Text: fallback("No active driver: ", actorName(p.Driver)), Blocks: blocks}, true, nil
+
+	case events.ApprovalNudged:
+		p, err := events.Decode[events.ApprovalNudgedPayload](e)
+		if err != nil {
+			return m, false, err
+		}
+		t := ":bell: Waiting for " + inlineCode(p.Layer, 60) + " owners on " + r.proposalName(p.ProposalID) +
+			" — " + who + " asked for a look"
+		blocks := []block{section(t)}
+		if link := r.linkElement(e.RoomID); link != nil {
+			blocks = append(blocks, block{Type: "context", Elements: link})
+		}
+		return message{Text: fallback("Nudge: ", p.Layer+" / "+actorName(e.Actor)), Blocks: blocks}, true, nil
 
 	case events.RoomClosed:
 		p, err := events.Decode[events.RoomClosedPayload](e)

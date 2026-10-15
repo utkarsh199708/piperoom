@@ -3,6 +3,7 @@ package slackbridge
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,7 +33,8 @@ import (
 
 // The pages are: approval needed (proposal.created, to the required layers'
 // owners), hand-off (handoff.created, to Users[to.id]) and no active driver
-// (control.lease_expired, to Users[driver.id] plus NoDriver).
+// (control.lease_expired, to Users[driver.id] plus NoDriver) and nudge
+// (approval.nudged, to the owners of the nudged layer only).
 
 // slackUserID is the shape of a Slack member ID. It also keeps `|`, `>` and
 // spaces out of a configured ID, so a config typo cannot break the markup.
@@ -42,6 +44,16 @@ const (
 	maxPagedUsers   = 20 // per message
 	maxFallbackPage = 6  // mentions repeated in the notification text
 	maxSeenPages    = 4096
+	// maxTrackedRooms caps the per-room rate-limit maps. A room evicted by the
+	// cap loses its gap and hourly count, which only ever lets one more page
+	// through; the per-user hourly cap still holds.
+	maxTrackedRooms = 4096
+	// pruneEvery spaces the sweeps for idle entries, so record stays cheap.
+	pruneEvery = time.Minute
+	// gapSlack lets a page through slightly before the gap is over: the gap is
+	// stamped after the Slack post, which can trail the event by a second or more,
+	// and the server allows a re-nudge exactly 10 minutes after the last one.
+	gapSlack = 2 * time.Second
 )
 
 // PagingLimits bounds how often people are paged. Zero fields take defaults.
@@ -72,8 +84,13 @@ type pager struct {
 	mu       sync.Mutex
 	last     map[[2]string]time.Time // room, user
 	userHits map[string][]time.Time
-	roomHits map[string][]time.Time
-	seen     map[pageKey]struct{}
+	// nudgeHits counts person-triggered nudge pages per user, apart from userHits,
+	// so a room member's nudges cannot use up an owner's budget for agent pages.
+	nudgeHits map[string][]time.Time
+	roomHits  map[string][]time.Time
+	seen      map[pageKey]struct{}
+	seenQ     []pageKey // insertion order of seen, oldest first
+	lastSwp   time.Time
 }
 
 // newPager validates o. It returns nil when nothing is allow-listed.
@@ -84,7 +101,8 @@ func newPager(o PagingOptions) (*pager, error) {
 	p := &pager{
 		layers: map[string][]string{}, users: map[string]string{}, lim: o.Limits, now: time.Now,
 		last: map[[2]string]time.Time{}, userHits: map[string][]time.Time{},
-		roomHits: map[string][]time.Time{}, seen: map[pageKey]struct{}{},
+		nudgeHits: map[string][]time.Time{},
+		roomHits:  map[string][]time.Time{}, seen: map[pageKey]struct{}{},
 	}
 	if p.lim.UserRoomInterval <= 0 {
 		p.lim.UserRoomInterval = 10 * time.Minute
@@ -124,6 +142,11 @@ func newPager(o PagingOptions) (*pager, error) {
 // pageKey names one page: who, in which room, for which reason.
 type pageKey struct{ room, user, reason string }
 
+// isNudge reports whether k is a person-triggered nudge page. The server already
+// limits nudges to one per (proposal, layer) every 10 minutes, so they skip the
+// per-user-per-room gap and have their own hourly bucket.
+func (k pageKey) isNudge() bool { return strings.HasPrefix(k.reason, "nudge:") }
+
 // check reports whether key may be paged now, counting the pages already
 // planned in the same message. It records nothing; call record once Slack
 // accepted the post. The first rule that fails wins: a repeated reason is
@@ -135,11 +158,23 @@ func (p *pager) check(key pageKey, planned []pageKey) bool {
 		return false
 	}
 	now := p.now()
-	if t, ok := p.last[[2]string{key.room, key.user}]; ok && now.Sub(t) < p.lim.UserRoomInterval {
+	if key.isNudge() {
+		var planned1 int
+		for _, k := range planned {
+			if k.isNudge() && k.user == key.user {
+				planned1++
+			}
+		}
+		return len(recent(p.nudgeHits[key.user], now))+planned1 < p.lim.UserPerHour
+	}
+	if t, ok := p.last[[2]string{key.room, key.user}]; ok && now.Sub(t)+gapSlack < p.lim.UserRoomInterval {
 		return false
 	}
 	var userPlanned, roomPlanned int
 	for _, k := range planned {
+		if k.isNudge() {
+			continue
+		}
 		if k.user == key.user {
 			userPlanned++
 		}
@@ -154,20 +189,106 @@ func (p *pager) check(key pageKey, planned []pageKey) bool {
 	return true
 }
 
-// record books pages that Slack accepted.
+// record books pages that Slack accepted. It also drops state that can no
+// longer change a decision (see prune) and enforces the caps.
 func (p *pager) record(keys []pageKey) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := p.now()
 	for _, k := range keys {
-		if len(p.seen) >= maxSeenPages {
-			clear(p.seen) // the rate limits still hold
+		if _, dup := p.seen[k]; !dup {
+			p.seen[k] = struct{}{}
+			p.seenQ = append(p.seenQ, k)
 		}
-		p.seen[k] = struct{}{}
+		if k.isNudge() {
+			p.nudgeHits[k.user] = append(recent(p.nudgeHits[k.user], now), now)
+			continue
+		}
 		p.last[[2]string{k.room, k.user}] = now
 		p.userHits[k.user] = append(recent(p.userHits[k.user], now), now)
 		p.roomHits[k.room] = append(recent(p.roomHits[k.room], now), now)
 	}
+	p.prune(now)
+}
+
+// prune drops entries that no longer block anything: a gap older than
+// UserRoomInterval and hits older than an hour. Then it evicts the oldest
+// entries over the caps. Callers hold p.mu.
+func (p *pager) prune(now time.Time) {
+	if now.Sub(p.lastSwp) >= pruneEvery || now.Before(p.lastSwp) {
+		p.lastSwp = now
+		for k, t := range p.last {
+			if now.Sub(t) >= p.lim.UserRoomInterval {
+				delete(p.last, k)
+			}
+		}
+		for room, hits := range p.roomHits {
+			if hits = recent(hits, now); len(hits) == 0 {
+				delete(p.roomHits, room)
+			} else {
+				p.roomHits[room] = hits
+			}
+		}
+		for user, hits := range p.userHits {
+			if hits = recent(hits, now); len(hits) == 0 {
+				delete(p.userHits, user)
+			} else {
+				p.userHits[user] = hits
+			}
+		}
+	}
+	if len(p.last) > maxTrackedRooms {
+		evictOldest(p.last, maxTrackedRooms*3/4, func(t time.Time) time.Time { return t })
+	}
+	if len(p.roomHits) > maxTrackedRooms {
+		evictOldest(p.roomHits, maxTrackedRooms*3/4, func(ts []time.Time) time.Time { return ts[len(ts)-1] })
+	}
+	if len(p.seenQ) > maxSeenPages {
+		drop := len(p.seenQ) - maxSeenPages
+		for _, k := range p.seenQ[:drop] {
+			delete(p.seen, k)
+		}
+		p.seenQ = append([]pageKey(nil), p.seenQ[drop:]...)
+	}
+}
+
+// evictOldest deletes entries of m until keep remain, oldest activity first.
+// It trims below the cap so the sort does not run on every record.
+func evictOldest[K comparable, V any](m map[K]V, keep int, at func(V) time.Time) {
+	type kt struct {
+		k K
+		t time.Time
+	}
+	all := make([]kt, 0, len(m))
+	for k, v := range m {
+		all = append(all, kt{k, at(v)})
+	}
+	slices.SortFunc(all, func(a, b kt) int { return a.t.Compare(b.t) })
+	for _, e := range all[:len(all)-keep] {
+		delete(m, e.k)
+	}
+}
+
+// forgetRoom drops everything kept for a room that closed. A deleted room never
+// reaches the bridge (room.deleted is not in the log); prune ages it out.
+func (p *pager) forgetRoom(room string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for k := range p.last {
+		if k[0] == room {
+			delete(p.last, k)
+		}
+	}
+	delete(p.roomHits, room)
+	q := p.seenQ[:0]
+	for _, k := range p.seenQ {
+		if k.room == room {
+			delete(p.seen, k)
+			continue
+		}
+		q = append(q, k)
+	}
+	p.seenQ = q
 }
 
 func recent(ts []time.Time, now time.Time) []time.Time {
@@ -229,6 +350,35 @@ func (p *pager) message(r *renderer, e events.Event) (m message, keys []pageKey,
 		}
 		text := ":handshake: " + mention(id) + " " + clip(actorName(e.Actor), 100) + " is handing this room over to you"
 		return r.pageMessage(e.RoomID, "Hand-off to you: ", []string{mention(id)}, actorName(e.Actor), text, "Accept the hand-off in Piperoom"), []pageKey{k}, nil
+
+	case events.ApprovalNudged:
+		pl, err := events.Decode[events.ApprovalNudgedPayload](e)
+		if err != nil {
+			return m, nil, err
+		}
+		// Only the nudged layer's owners are paged; the layer is a map key.
+		// The key is the event seq: one nudge event pages once, even when the
+		// stream is redelivered, and the re-nudge the server allows every 10
+		// minutes is a new event that pages again. check adds the nudge hourly cap;
+		// the per-room gap does not apply, or a nudge soon after the proposal page
+		// would page nobody.
+		var ms []string
+		picked := map[string]bool{}
+		for _, id := range p.layers[pl.Layer] {
+			k := pageKey{e.RoomID, id, "nudge:" + strconv.FormatInt(e.Seq, 10)}
+			if picked[id] || len(ms) >= maxPagedUsers || !p.check(k, keys) {
+				continue
+			}
+			picked[id] = true
+			keys = append(keys, k)
+			ms = append(ms, mention(id))
+		}
+		if len(keys) == 0 {
+			return m, nil, nil
+		}
+		text := ":bell: " + strings.Join(ms, " ") + " " + clip(actorName(e.Actor), 100) + " asked for your approval of " +
+			inlineCode(pl.ProposalID, 100) + " (layer " + inlineCode(pl.Layer, 60) + ")"
+		return r.pageMessage(e.RoomID, "Your approval is needed: ", ms, actorName(e.Actor), text, "Approve or reject in Piperoom"), keys, nil
 
 	case events.ControlLeaseExpired:
 		pl, err := events.Decode[events.ControlLeaseExpiredPayload](e)
