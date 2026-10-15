@@ -1,0 +1,193 @@
+package kafkatools
+
+import (
+	"context"
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"piperoom/internal/clients/netsec"
+	"piperoom/internal/config"
+	"piperoom/internal/tools"
+)
+
+// CertTarget is one configured endpoint tls_cert_expiry may dial. Targets are
+// built from the process configuration only (CertTargets); the tool takes no
+// address from the model.
+type CertTarget struct {
+	Label string // broker | connect | schema registry | warehouse
+	Addr  string // host:port
+	TLS   bool   // false: the endpoint is configured as plain text
+	// Config carries the roots and server name for the chain check; nil = system roots.
+	Config *tls.Config
+}
+
+// CertTargets lists the endpoints in cfg that the tool may probe: the Kafka
+// brokers, Connect, the Schema Registry and (Snowflake) the warehouse host.
+// A root-CA file that cannot be read is skipped for that endpoint's chain
+// check only (system roots are then used), never a failure.
+func CertTargets(cfg config.Config) []CertTarget {
+	var out []CertTarget
+	kafkaTLS := false
+	switch strings.ToUpper(cfg.KafkaSecurityProtocol) {
+	case "SSL", "SASL_SSL":
+		kafkaTLS = true
+	}
+	kc := tlsRoots(cfg.KafkaTLSCAFile, cfg.KafkaTLSServerName)
+	for _, b := range strings.Split(cfg.KafkaBrokers, ",") {
+		if b = strings.TrimSpace(b); b != "" {
+			out = append(out, CertTarget{Label: "broker", Addr: b, TLS: kafkaTLS, Config: kc})
+		}
+	}
+	if t, ok := urlTarget("connect", cfg.ConnectURL, cfg.ConnectTLSCAFile); ok {
+		out = append(out, t)
+	}
+	if t, ok := urlTarget("schema registry", cfg.SchemaRegistryURL, cfg.SchemaRegistryTLSCAFile); ok {
+		out = append(out, t)
+	}
+	if strings.EqualFold(cfg.WarehouseKind, "snowflake") {
+		if host := snowflakeHost(cfg.WarehouseDBURL); host != "" {
+			out = append(out, CertTarget{Label: "warehouse", Addr: host, TLS: true})
+		}
+	}
+	return out
+}
+
+func tlsRoots(caFile, serverName string) *tls.Config {
+	cfg, err := netsec.TLS{CAFile: caFile, ServerName: serverName}.Config()
+	if err != nil {
+		return nil
+	}
+	return cfg
+}
+
+func urlTarget(label, raw, caFile string) (CertTarget, bool) {
+	if raw == "" {
+		return CertTarget{}, false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return CertTarget{}, false
+	}
+	port := u.Port()
+	if u.Scheme == "https" && port == "" {
+		port = "443"
+	}
+	if port == "" {
+		port = "80"
+	}
+	return CertTarget{Label: label, Addr: net.JoinHostPort(u.Hostname(), port), TLS: u.Scheme == "https", Config: tlsRoots(caFile, "")}, true
+}
+
+// snowflakeHost reads only the account of a Snowflake DSN
+// ("user:password@account/db/schema?..."); the credentials are dropped.
+func snowflakeHost(dsn string) string {
+	i := strings.LastIndex(dsn, "@")
+	if i < 0 {
+		return ""
+	}
+	acct := dsn[i+1:]
+	if j := strings.IndexAny(acct, "/?"); j >= 0 {
+		acct = acct[:j]
+	}
+	if acct == "" {
+		return ""
+	}
+	if !strings.Contains(acct, ".") {
+		acct += ".snowflakecomputing.com"
+	}
+	return acct + ":443"
+}
+
+// ---- tls_cert_expiry ----
+
+type certExpiry struct{ d Deps }
+
+func (t *certExpiry) Name() string     { return "tls_cert_expiry" }
+func (t *certExpiry) Kind() tools.Kind { return tools.KindRead }
+func (t *certExpiry) InputSchema() map[string]any {
+	return objectSchema(map[string]any{})
+}
+func (t *certExpiry) Description() string {
+	return "Days until the TLS certificates of the configured endpoints (Kafka brokers, Connect, Schema Registry, warehouse) expire, " +
+		"and whether the chain is trusted. Use it for sudden handshake or certificate errors. It takes no address: only configured endpoints are read."
+}
+
+// certResult is one endpoint's outcome in Result.Data.
+type certResult struct {
+	Label string           `json:"label"`
+	Addr  string           `json:"addr"`
+	TLS   bool             `json:"tls"`
+	Cert  *netsec.CertInfo `json:"cert,omitempty"`
+	Err   string           `json:"error,omitempty"`
+}
+
+func (t *certExpiry) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
+	if _, err := parse[struct{}](input); err != nil {
+		return tools.Result{}, err
+	}
+	if _, err := t.d.scope(ctx); err != nil {
+		return tools.Result{}, err
+	}
+	probe := t.d.CertProbe
+	if probe == nil {
+		probe = netsec.CertExpiry
+	}
+	cctx, cancel := withTimeout(ctx)
+	defer cancel()
+	results := make([]certResult, len(t.d.CertTargets))
+	var wg sync.WaitGroup
+	for i, tg := range t.d.CertTargets {
+		results[i] = certResult{Label: tg.Label, Addr: tg.Addr, TLS: tg.TLS}
+		if !tg.TLS {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			info, err := probe(cctx, tg.Addr, tg.Config)
+			if err != nil {
+				results[i].Err = err.Error()
+				return
+			}
+			results[i].Cert = &info
+		}()
+	}
+	wg.Wait()
+	var sb strings.Builder
+	for _, r := range results {
+		appendLine(&sb, certLine(r))
+	}
+	if sb.Len() == 0 {
+		sb.WriteString("no endpoints configured")
+	}
+	return res(sb.String(), results), nil
+}
+
+func certLine(r certResult) string {
+	head := r.Label + " " + r.Addr
+	switch {
+	case !r.TLS:
+		return head + ": no TLS configured"
+	case r.Err != "":
+		return head + ": cannot read the certificate: " + r.Err
+	}
+	c := r.Cert
+	var when string
+	switch {
+	case c.DaysLeft < 0:
+		when = fmt.Sprintf("EXPIRED %d d ago (%s)", -c.DaysLeft, c.NotAfter.UTC().Format(time.DateOnly))
+	default:
+		when = fmt.Sprintf("expires in %d d (%s)", c.DaysLeft, c.NotAfter.UTC().Format(time.DateOnly))
+	}
+	chain := "✔ chain ok"
+	if !c.Verified {
+		chain = "✘ chain not trusted by the configured CAs (or the name does not match)"
+	}
+	return fmt.Sprintf("%s %s issuer %s %s", head, when, c.Issuer, chain)
+}

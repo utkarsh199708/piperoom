@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useState } from 'react'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { CloseRoomDialog, MAX_RESOLUTION } from './CloseRoomDialog'
 import type { RoomActions } from '../hooks/useRoom'
+import { emptyRoomState } from '../state/types'
 
 const actions: RoomActions = {
   comment: vi.fn(),
   steer: vi.fn(),
   sendSuggestion: vi.fn(),
+  declineSuggestion: vi.fn(),
   requestControl: vi.fn(),
   grantControl: vi.fn(),
   close: vi.fn(),
@@ -15,7 +17,11 @@ const actions: RoomActions = {
   reject: vi.fn(),
   handoff: vi.fn(),
   acceptHandoff: vi.fn(),
+  label: vi.fn(),
+  checklist: vi.fn(),
   trace: vi.fn(),
+  hypothesisVerdict: vi.fn(),
+  nudge: vi.fn().mockResolvedValue({ ok: true }),
 }
 
 function Harness() {
@@ -113,5 +119,49 @@ describe('CloseRoomDialog', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     await waitFor(() => expect(opener).toHaveFocus())
     expect(actions.close).not.toHaveBeenCalled()
+  })
+
+  describe('label', () => {
+    const hypothesis = { text: 'Compatibility changed to FULL', based_on_steps: [], confidence: 'high' as const, confirmed: true }
+    const roomWithHypothesis = () => ({ ...emptyRoomState('r1'), hypothesis })
+
+    it('closes, then labels with the pre-filled cause', async () => {
+      vi.mocked(actions.label).mockResolvedValue({ ok: true })
+      render(<CloseRoomDialog state={roomWithHypothesis()} actions={actions} onClose={() => {}} />)
+      fireEvent.change(field(), { target: { value: 'fixed' } })
+      fireEvent.click(submitButton())
+      await waitFor(() => expect(actions.label).toHaveBeenCalledWith({ cause: 'Compatibility changed to FULL', actual_layer: 'schema-registry' }))
+      expect(actions.close).toHaveBeenCalledWith('fixed')
+    })
+
+    it('Skip label closes without a label', async () => {
+      render(<CloseRoomDialog state={roomWithHypothesis()} actions={actions} onClose={() => {}} />)
+      fireEvent.change(field(), { target: { value: 'fixed' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Skip label' }))
+      await waitFor(() => expect(actions.close).toHaveBeenCalledWith('fixed'))
+      expect(actions.label).not.toHaveBeenCalled()
+    })
+
+    it('an empty cause closes without a label, and a failed label does not undo the close', async () => {
+      vi.mocked(actions.label).mockResolvedValue({ ok: false, error: 'nope' })
+      render(<CloseRoomDialog state={emptyRoomState('r1')} actions={actions} onClose={() => {}} />)
+      fireEvent.change(field(), { target: { value: 'fixed' } })
+      fireEvent.click(submitButton())
+      await waitFor(() => expect(actions.close).toHaveBeenCalled())
+      expect(actions.label).not.toHaveBeenCalled()
+      cleanup()
+      render(<CloseRoomDialog state={roomWithHypothesis()} actions={actions} onClose={() => {}} />)
+      fireEvent.change(field(), { target: { value: 'fixed' } })
+      fireEvent.click(submitButton())
+      await waitFor(() => expect(actions.label).toHaveBeenCalled())
+      expect(screen.queryByRole('alert')).toBeNull() // the close worked: no error in the dialog
+    })
+  })
+})
+
+describe('CloseRoomDialog initialText', () => {
+  it('starts with the given resolution, so the close nudge can pre-fill it', () => {
+    render(<CloseRoomDialog actions={actions} onClose={() => {}} initialText={'Fixed by "Restart task"'} />)
+    expect(screen.getByRole('textbox')).toHaveValue('Fixed by "Restart task"')
   })
 })

@@ -18,7 +18,9 @@ import (
 
 // DB is a read-only connection pool to the source Postgres.
 type DB struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	q      querier // the pool; a fake in tests
+	target string  // receipt target: database@host:port, never credentials
 }
 
 // New opens a read-only connection pool and verifies it with a ping.
@@ -44,7 +46,7 @@ func New(ctx context.Context, url string) (*DB, error) {
 		pool.Close()
 		return nil, fmt.Errorf("postgres: ping: %w", err)
 	}
-	return &DB{pool: pool}, nil
+	return &DB{pool: pool, q: pool, target: targetOf(pool)}, nil
 }
 
 // Close releases the pool.
@@ -60,7 +62,7 @@ func (d *DB) ReplicationSlots(ctx context.Context) ([]clients.ReplicationSlot, e
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
-	rows, err := d.pool.Query(ctx, `
+	rows, err := d.query(ctx, `
 		SELECT slot_name, plugin, active,
 		       COALESCE(restart_lsn::text, ''),
 		       COALESCE(confirmed_flush_lsn::text, ''),
@@ -113,7 +115,7 @@ func (d *DB) recentDDL(ctx context.Context, since time.Time, table string, limit
 	}
 
 	var installed bool
-	if err := d.pool.QueryRow(ctx, `SELECT to_regclass('piperoom_audit.ddl_log') IS NOT NULL`).Scan(&installed); err != nil {
+	if err := d.queryRow(ctx, `SELECT to_regclass('piperoom_audit.ddl_log') IS NOT NULL`).Scan(&installed); err != nil {
 		return nil, fmt.Errorf("postgres: check ddl audit table: %w", err)
 	}
 	if !installed {
@@ -131,9 +133,9 @@ func (d *DB) recentDDL(ctx context.Context, since time.Time, table string, limit
 	var rows pgx.Rows
 	var err error
 	if table == "" {
-		rows, err = d.pool.Query(ctx, cols+` ORDER BY at DESC LIMIT $2`, since, limit)
+		rows, err = d.query(ctx, cols+` ORDER BY at DESC LIMIT $2`, since, limit)
 	} else {
-		rows, err = d.pool.Query(ctx, cols+` AND object_identity = $2 ORDER BY at DESC LIMIT $3`, since, table, limit)
+		rows, err = d.query(ctx, cols+` AND object_identity = $2 ORDER BY at DESC LIMIT $3`, since, table, limit)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("postgres: read ddl log: %w", err)
@@ -164,7 +166,7 @@ func (d *DB) LongTransactions(ctx context.Context, olderThan time.Duration) ([]c
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
-	rows, err := d.pool.Query(ctx, `
+	rows, err := d.query(ctx, `
 		SELECT pid,
 		       COALESCE(usename, ''),
 		       COALESCE(application_name, ''),
@@ -212,7 +214,7 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 	}
 	// DescribeExec re-describes the statement on every call, so a concurrent
 	// schema change (ALTER COLUMN ... TYPE) cannot break a cached plan.
-	rows, err := d.pool.Query(ctx, q, pgx.QueryExecModeDescribeExec, pk)
+	rows, err := d.query(ctx, q, pgx.QueryExecModeDescribeExec, pk)
 	if err != nil {
 		return nil, false, fmt.Errorf("postgres: query row: %w", err)
 	}
@@ -250,7 +252,7 @@ func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error)
 		return "", err
 	}
 	var col string
-	err = d.pool.QueryRow(ctx, `
+	err = d.queryRow(ctx, `
 		SELECT kcu.column_name
 		FROM information_schema.table_constraints tc
 		JOIN information_schema.key_column_usage kcu

@@ -21,6 +21,8 @@ export interface RoomCommands {
   trace?: () => void
   closeRoom?: () => void
   invite?: () => void
+  /** Opens the hand-off summary dialog of a hand-off to me (the banner's Read summary). */
+  readHandoff?: () => void
 }
 
 /** A plain holder: the room screen writes every render, the menu reads when it opens or runs. */
@@ -51,7 +53,10 @@ export const TopBarSlotContext = createContext<HTMLElement | null>(null)
  * The one room list the shell loads. The sidebar and the room list screen read the same
  * copy, so there is one GET on load and one refresh updates both. Null outside the shell.
  */
-export const RoomListContext = createContext<ReturnType<typeof useRoomList> | null>(null)
+type RoomListHook = ReturnType<typeof useRoomList>
+/** The shell's room list; `mode` and `updatedAt` are optional so a test can pass a plain list. */
+export type RoomListValue = Omit<RoomListHook, 'mode' | 'updatedAt'> & Partial<Pick<RoomListHook, 'mode' | 'updatedAt'>>
+export const RoomListContext = createContext<RoomListValue | null>(null)
 
 /** Where a screen says what to show after "Rooms ›" in the breadcrumb. Null outside the shell. */
 export const BreadcrumbTailContext = createContext<((label: string | null) => void) | null>(null)
@@ -67,3 +72,20 @@ export function useBreadcrumbTail(label: string | undefined): void {
     return () => set?.(null)
   }, [set, label])
 }
+
+/**
+ * What the decision bar can ask of the approval card. The `LayerRow` that owns the A/R shortcuts
+ * registers these every render, so the bar, the keys and the card's own buttons all go through
+ * one `startApprove` (solo typed confirm, run confirm, 409 stale, missing hash stay in one place).
+ */
+export interface DecisionHandle {
+  approve: () => void
+  reject: () => void
+  scrollTo: () => void
+}
+
+/** A plain holder like RoomCommandRegistry: written on render, read on click. Null outside the room screen. */
+export const DecisionHandleContext = createContext<{
+  get(): DecisionHandle | null
+  set(h: DecisionHandle | null): void
+} | null>(null)

@@ -8,10 +8,16 @@
 // the server answers 403 proxy_identity (docs/design/auth.md section 5.2).
 import type {
   ApiError,
+  AuthUser,
+  ChecklistStepDonePayload,
   Event,
   EventsPage,
+  HypothesisVerdict,
+  LabelInput,
   Me,
   Person,
+  AgentStats,
+  PipelineInfo,
   RoomSnapshot,
   Topology,
 } from './types'
@@ -95,6 +101,30 @@ export interface ApproveExtras {
   confirm?: string
 }
 
+/**
+ * Download the room's export document (GET /api/rooms/{id}/export). Returned as text, not parsed, so the
+ * saved file is byte-for-byte what the server hashed; `sha256` is the X-Piperoom-Export-SHA256 header.
+ */
+export async function exportRoom(roomId: string): Promise<{ text: string; sha256?: string }> {
+  const epoch = getAuthEpoch()
+  const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/export`, { credentials: 'same-origin' })
+  if (!res.ok) {
+    let code = 'unknown'
+    let message = res.statusText
+    try {
+      const body = (await res.json()) as ApiError
+      code = body.error?.code ?? code
+      message = body.error?.message ?? message
+    } catch {
+      // non-JSON error body; keep statusText
+    }
+    const problem = classifyAuthProblem(res.status, code, message, undefined)
+    if (problem) reportAuthProblem({ ...problem, epoch })
+    throw new ApiClientError(res.status, code, message)
+  }
+  return { text: await res.text(), sha256: res.headers.get('X-Piperoom-Export-SHA256') ?? undefined }
+}
+
 const room = (roomId: string) => `/api/rooms/${encodeURIComponent(roomId)}`
 
 export const api = {
@@ -104,6 +134,9 @@ export const api = {
   // Dev mode only: issues the piperoom_session cookie for a users.yaml user.
   devLogin: (user: string) =>
     request<void>('/auth/dev-login', { method: 'POST', body: JSON.stringify({ user }) }),
+  // Dev mode only (404 in oidc mode); needs no session: it is called before login.
+  authUsers: () => request<AuthUser[]>('/auth/users'),
+  pipelines: () => request<PipelineInfo[]>('/api/pipelines'),
   logout: () => request<void>('/auth/logout', { method: 'POST' }),
   rooms: () => request<RoomSnapshot[]>('/api/rooms'),
   createRoom: (body: { title: string; severity: string; pipeline_id: string }) =>
@@ -113,6 +146,8 @@ export const api = {
     request<EventsPage>(`${room(roomId)}/events?after=${after}&limit=${limit}`),
   topology: (pipelineId: string) =>
     request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`),
+  agentStats: (pipelineId: string) =>
+    request<AgentStats>(`/api/pipelines/${encodeURIComponent(pipelineId)}/agent-stats?days=90`),
   comment: (roomId: string, body: { step_id?: string; text: string }) =>
     request<Event>(`${room(roomId)}/comments`, { method: 'POST', body: JSON.stringify(body) }),
   steer: (roomId: string, text: string) =>
@@ -120,6 +155,22 @@ export const api = {
   sendSuggestion: (roomId: string, suggestionId: string) =>
     request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/send`, {
       method: 'POST',
+    }),
+  // F9: any member may decide; the server answers 409 already_decided for a repeat.
+  hypothesis: (roomId: string, verdict: HypothesisVerdict, note?: string) =>
+    request<Event>(`${room(roomId)}/hypothesis`, {
+      method: 'POST',
+      body: JSON.stringify(note ? { verdict, note } : { verdict }),
+    }),
+  nudge: (roomId: string, proposalId: string, layer: string) =>
+    request<Event>(`${room(roomId)}/nudge`, {
+      method: 'POST',
+      body: JSON.stringify({ proposal_id: proposalId, layer }),
+    }),
+  declineSuggestion: (roomId: string, suggestionId: string, reason?: string) =>
+    request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/decline`, {
+      method: 'POST',
+      body: JSON.stringify(reason ? { reason } : {}),
     }),
   requestControl: (roomId: string) =>
     request<Event>(`${room(roomId)}/control/request`, { method: 'POST' }),
@@ -151,6 +202,10 @@ export const api = {
     }),
   acceptHandoff: (handoffId: string) =>
     request<Event>(`/api/handoffs/${encodeURIComponent(handoffId)}/accept`, { method: 'POST' }),
+  label: (roomId: string, body: LabelInput) =>
+    request<Event>(`${room(roomId)}/label`, { method: 'POST', body: JSON.stringify(body) }),
+  checklist: (roomId: string, body: ChecklistStepDonePayload) =>
+    request<Event>(`${room(roomId)}/checklist`, { method: 'POST', body: JSON.stringify(body) }),
   trace: (roomId: string, table: string, key: string) =>
     request<Event>(`${room(roomId)}/trace`, {
       method: 'POST',
@@ -173,4 +228,14 @@ export function roomWsUrl(
 
 export function openRoomWs(roomId: string, after: number): WebSocket {
   return new WebSocket(roomWsUrl(roomId, after))
+}
+
+/** WebSocket URL of the room list push (GET /api/rooms/ws, F6): same origin, no cursor. */
+export function roomsWsUrl(loc: Pick<Location, 'protocol' | 'host'> = window.location): string {
+  const scheme = loc.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${scheme}//${loc.host}/api/rooms/ws`
+}
+
+export function openListWs(): WebSocket {
+  return new WebSocket(roomsWsUrl())
 }

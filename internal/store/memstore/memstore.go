@@ -37,6 +37,8 @@ type Store struct {
 	deletions map[string]store.RoomDeletion // room_deletions rows by room id
 
 	spend spendTables
+
+	changes changeTable // pipeline_changes (changes.go)
 }
 
 type roomLog struct {

@@ -17,6 +17,8 @@ export default defineConfig(({ mode }) => {
   const proxy = {
     '^/api(/|$)': { target: api, ws: true },
     '^/auth(/|$)': { target: api },
+    // The Slack deep link: the server answers GET /rooms/{id} with a 302 to /#/rooms/{id}.
+    '^/rooms/': { target: api },
   }
 
   return {

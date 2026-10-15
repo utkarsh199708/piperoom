@@ -136,10 +136,74 @@ describe('Timeline step stream', () => {
   it('an empty timeline says so and offers Take control and steer only when allowed', () => {
     const take = vi.fn()
     const { rerender } = render(<Timeline steps={[]} messages={[]} comments={[]} onComment={vi.fn()} />)
-    expect(screen.getByText('The agent has not started yet.')).toBeInTheDocument()
+    expect(screen.getByText('The agent is idle and has not started yet.')).toBeInTheDocument()
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
     rerender(<Timeline steps={[]} messages={[]} comments={[]} onComment={vi.fn()} onTakeControl={take} />)
     fireEvent.click(screen.getByRole('button', { name: 'Take control and steer' }))
     expect(take).toHaveBeenCalledTimes(1)
+  })
+
+  it('the empty state follows the agent status', () => {
+    const take = vi.fn()
+    const view = (state: string, detail?: string) =>
+      render(
+        <Timeline steps={[]} messages={[]} comments={[]} onComment={vi.fn()} onTakeControl={take} agent={{ state, detail }} />,
+      )
+    const a = view('working')
+    expect(screen.getByText('The agent is investigating…')).toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    a.unmount()
+    const b = view('starting')
+    expect(screen.getByText('The agent is starting…')).toBeInTheDocument()
+    b.unmount()
+    const c = view('error', 'anthropic: 529 overloaded')
+    expect(screen.getByText('The agent failed before its first step.')).toBeInTheDocument()
+    expect(screen.getByText('anthropic: 529 overloaded')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Take control and steer' })).toBeInTheDocument()
+    c.unmount()
+    view('idle')
+    expect(screen.getByRole('button', { name: 'Take control and steer' })).toBeInTheDocument()
+  })
+
+  it('queued and log_full are not "idle": no steer is offered', () => {
+    const take = vi.fn()
+    const view = (state: string, detail?: string) =>
+      render(
+        <Timeline steps={[]} messages={[]} comments={[]} onComment={vi.fn()} onTakeControl={take} agent={{ state, detail }} />,
+      )
+    const a = view('queued', 'waiting for an agent slot (2 ahead)')
+    expect(screen.getByText('The agent is waiting for a free slot.')).toBeInTheDocument()
+    expect(screen.getByText('waiting for an agent slot (2 ahead)')).toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(screen.queryByText(/idle/)).not.toBeInTheDocument()
+    a.unmount()
+    view('log_full')
+    expect(screen.getByText(/log is full/)).toBeInTheDocument()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(screen.queryByText(/idle/)).not.toBeInTheDocument()
+  })
+})
+
+describe('Timeline layer filter', () => {
+  it('shows only matching steps with a status line, keeps the live step with (live)', () => {
+    const onClear = vi.fn()
+    render(
+      <Timeline steps={steps} messages={[]} comments={[]} onComment={vi.fn()} filterLayer="kafka-connect" onClearFilter={onClear} />,
+    )
+    expect(screen.getByRole('status')).toHaveTextContent('Showing 1 step on kafka-connect')
+    expect(screen.getByRole('button', { name: /Check the Debezium connector/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Confirm no rows/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    expect(onClear).toHaveBeenCalled()
+  })
+
+  it('keeps the live step even when it does not match', () => {
+    render(<Timeline steps={steps} messages={[]} comments={[]} onComment={vi.fn()} working filterLayer="kafka-connect" />)
+    expect(screen.getByText('(live)')).toBeInTheDocument()
+  })
+
+  it('says so when no step matches', () => {
+    render(<Timeline steps={steps} messages={[]} comments={[]} onComment={vi.fn()} filterLayer="postgres" />)
+    expect(screen.getByRole('status')).toHaveTextContent('No steps on postgres yet')
   })
 })

@@ -28,6 +28,8 @@ const defaultTimeout = 10 * time.Second
 type DB struct {
 	db *sql.DB
 	q  querier
+	// target is the receipt target, "snowflake <account>/<database>".
+	target string
 }
 
 // New opens a connection pool for dsn (see gosnowflake's DSN syntax,
@@ -51,7 +53,7 @@ func New(ctx context.Context, dsn string) (*DB, error) {
 	// hand the next query a dead session.
 	db.SetConnMaxIdleTime(30 * time.Minute)
 	db.SetConnMaxLifetime(time.Hour)
-	return &DB{db: db, q: dbQuerier{db: db}}, nil
+	return &DB{db: db, q: dbQuerier{db: db}, target: targetFromDSN(dsn)}, nil
 }
 
 // Close releases the underlying connection pool.
@@ -72,7 +74,7 @@ func (d *DB) Freshness(ctx context.Context, table, tsColumn string) (time.Time, 
 	if err != nil {
 		return time.Time{}, err
 	}
-	rows, err := d.q.QueryContext(gosnowflake.WithHigherPrecision(ctx), q)
+	rows, err := d.query(gosnowflake.WithHigherPrecision(ctx), q)
 	if err != nil {
 		return time.Time{}, wrapQueryErr("freshness of", table, err)
 	}
@@ -117,7 +119,7 @@ func (d *DB) Row(ctx context.Context, table, pkColumn, pk string) (map[string]an
 	if err != nil {
 		return nil, false, err
 	}
-	rows, err := d.q.QueryContext(gosnowflake.WithHigherPrecision(ctx), q, pk)
+	rows, err := d.query(gosnowflake.WithHigherPrecision(ctx), q, pk)
 	if err != nil {
 		return nil, false, wrapQueryErr("query row from", table, err)
 	}

@@ -211,6 +211,9 @@ type PersonEntry struct {
 	Name     string `json:"name"`
 	Email    string `json:"email,omitempty"`
 	Verified bool   `json:"verified"`
+	// Layers are the layers the person may approve (LayersFor), [] when none.
+	// Group grants count for an IdP member through the session's groups.
+	Layers []string `json:"layers"`
 }
 
 // maxPeople bounds the list.
@@ -225,7 +228,7 @@ func (s *Service) People(ctx context.Context) ([]PersonEntry, error) {
 	out := make([]PersonEntry, 0, len(s.users.All()))
 	listed := map[string]bool{}
 	for _, u := range s.users.All() {
-		out = append(out, PersonEntry{ID: u.ID, Name: u.Name, Verified: true})
+		out = append(out, PersonEntry{ID: u.ID, Name: u.Name, Verified: true, Layers: s.LayersFor(u)})
 		listed[u.ID] = true
 	}
 	if s.sessions == nil {
@@ -244,7 +247,7 @@ func (s *Service) People(ctx context.Context) ([]PersonEntry, error) {
 			continue
 		}
 		name, _ := s.ShownName(sess.UserID, sess.Name, sess.Email)
-		idp = append(idp, PersonEntry{ID: sess.UserID, Name: name, Email: sess.Email})
+		idp = append(idp, PersonEntry{ID: sess.UserID, Name: name, Email: sess.Email, Layers: s.LayersFor(User{ID: sess.UserID, Groups: sess.Groups})})
 	}
 	sort.Slice(idp, func(i, j int) bool {
 		if idp[i].Name != idp[j].Name {
