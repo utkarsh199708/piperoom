@@ -226,19 +226,34 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	if rec.verified {
 		// A repeated last-step result never runs the checks again and never
 		// emits done again; it reports the verdict already reached.
+		repeat := "already verified: " + verdictWord(rec.recovered) + "; no checks were run again"
+		r.emit(ctx, events.AgentVerification, events.AgentVerificationPayload{
+			ProposalID: id,
+			Checks:     []events.VerificationCheck{},
+			Recovered:  rec.recovered,
+			Verdict:    repeat,
+			Repeat:     true,
+		})
 		return actionOutcome{
 			recovered: rec.recovered,
 			broken:    !rec.recovered,
-			notes:     []string{verifyTag + "already verified: " + verdictWord(rec.recovered) + "; no checks were run again"},
+			notes:     []string{verifyTag + repeat},
 		}
 	}
 
-	recovered, evidence, head := r.verifyProposal(ctx, rec)
+	vr := r.verifyProposal(ctx, rec)
+	recovered, evidence, head := vr.recovered, vr.evidence, vr.head
 	var followUp string
 	if recovered {
 		followUp = compatFollowUp(rec.steps)
 	}
-	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: head + evidence + followUp})
+	// The room gets the typed verdict; the model note below keeps the text form.
+	r.emit(ctx, events.AgentVerification, vr.payload(id))
+	if followUp != "" {
+		// The room learns of a subject left at NONE now, not only when the model
+		// proposes the restore; the model reads the same line in its note.
+		r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: strings.TrimSpace(followUp)})
+	}
 	r.proposals.markVerified(id, recovered)
 	if recovered {
 		r.trackNoneSubjects(rec.steps)
@@ -370,21 +385,72 @@ func unknownOutcomeText(id string, step int, parsed bool) string {
 	return fmt.Sprintf("not verified: the outcome of proposal %q step %d is unknown; recovery is not claimed.", id, step)
 }
 
+// verifyResult is the outcome of verifyProposal: the verdict, the text form
+// the model reads, and the structured form the room shows.
+type verifyResult struct {
+	recovered bool
+	// evidence is one line per check, for the model note.
+	evidence string
+	// head is the verdict head that opens the model note, with its newline.
+	head   string
+	checks []events.VerificationCheck
+	flow   *events.DataFlowCheck
+}
+
+// payload builds the agent.verification event of proposal id.
+func (v verifyResult) payload(id string) events.AgentVerificationPayload {
+	checks := v.checks
+	if checks == nil {
+		checks = []events.VerificationCheck{}
+	}
+	return events.AgentVerificationPayload{
+		ProposalID: id,
+		Checks:     checks,
+		DataFlow:   v.flow,
+		Recovered:  v.recovered,
+		Verdict:    strings.TrimSuffix(v.head, "\n"),
+	}
+}
+
+// dataFlowCheck converts a flowResult to its event form.
+func (f flowResult) dataFlowCheck(detail string) *events.DataFlowCheck {
+	d := &events.DataFlowCheck{Checked: f.verified, Fresh: f.fresh, Detail: detail}
+	if !f.verified {
+		d.Detail = clipLine(f.detail)
+	}
+	for _, st := range f.sinks {
+		sc := events.SinkCheck{Table: st.table.name, Newest: st.newest, Passed: st.passed, PassedBy: st.passedBy}
+		if st.hasProposal {
+			sc.Baseline = st.proposalAt
+		}
+		d.Sinks = append(d.Sinks, sc)
+	}
+	return d
+}
+
 // verifyProposal runs the layer checks and then the data-flow check. It returns
-// whether recovery is confirmed, one evidence line per check, and the verdict
-// head that opens the room message and the model note. The data-flow check runs
-// only after the layer checks pass.
-func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) (bool, string, string) {
+// the verdict, one evidence line per check, the verdict head that opens the
+// model note, and the structured checks. The data-flow check runs only after
+// the layer checks pass.
+func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) verifyResult {
 	var lines []string
+	var checks []events.VerificationCheck
 	layersOK := true
 	for _, c := range verifyChecks(rec.steps) {
 		ok, line := r.runVerifyCheck(ctx, c)
 		layersOK = layersOK && ok
 		lines = append(lines, c.name+": "+line)
+		checks = append(checks, events.VerificationCheck{Layer: c.layer, Name: c.name, OK: ok, Detail: clipLine(line)})
 	}
 	if !layersOK {
-		lines = append(lines, "data flow: not checked because a layer check did not pass")
-		return false, strings.Join(lines, "\n"), "NOT recovered: a layer check did not pass.\n"
+		const skipped = "not checked because a layer check did not pass"
+		lines = append(lines, "data flow: "+skipped)
+		return verifyResult{
+			evidence: strings.Join(lines, "\n"),
+			head:     "NOT recovered: a layer check did not pass.\n",
+			checks:   checks,
+			flow:     &events.DataFlowCheck{Detail: skipped},
+		}
 	}
 
 	if r.recoveredIdle && schemaConfigOnly(rec.steps) && r.restoresTrackedSubjects(rec.steps) {
@@ -398,23 +464,34 @@ func (r *runner) verifyProposal(ctx context.Context, rec proposalRecord) (bool, 
 		flow := r.verifyDataFlow(ctx, rec, false)
 		lines = append(lines, "data flow (information only, not part of this verdict):")
 		lines = append(lines, flow.lines...)
-		return true, strings.Join(lines, "\n"), recoveredConfigHead
+		return verifyResult{
+			recovered: true,
+			evidence:  strings.Join(lines, "\n"),
+			head:      recoveredConfigHead,
+			checks:    checks,
+			flow:      flow.dataFlowCheck("information only, not part of this verdict"),
+		}
 	}
 
 	flow := r.verifyDataFlow(ctx, rec, true)
 	lines = append(lines, flow.lines...)
-	evidence := strings.Join(lines, "\n")
+	res := verifyResult{evidence: strings.Join(lines, "\n"), checks: checks, flow: flow.dataFlowCheck("")}
 	switch {
 	case !flow.verified:
-		return false, evidence, "NOT recovered: data flow not verified.\n"
+		res.head = "NOT recovered: data flow not verified.\n"
 	case !flow.fresh:
-		return false, evidence, "NOT recovered: data flow did not pass; no new rows since the fix.\n"
+		res.head = "NOT recovered: data flow did not pass; no new rows since the fix.\n"
+	default:
+		res.recovered = true
+		res.head = recoveredHead
 	}
-	return true, evidence, recoveredHead
+	return res
 }
 
 // verifyCheck is one read-tool check of a layer in the verification pass.
 type verifyCheck struct {
+	// layer is the pipeline layer the check reads (one of events.Layers).
+	layer string
 	name  string
 	input json.RawMessage
 	judge func(tools.Result) bool
@@ -471,7 +548,7 @@ func compatCheck(s events.ProposalStep, steps []events.ProposalStep) (verifyChec
 	if want == "" {
 		return verifyCheck{}, "", false
 	}
-	return verifyCheck{name: "schema_registry_versions", input: jsonObject("subject", subject), judge: compatibilityIs(want)}, subject, true
+	return verifyCheck{layer: "schema-registry", name: "schema_registry_versions", input: jsonObject("subject", subject), judge: compatibilityIs(want)}, subject, true
 }
 
 // compatibilityIs judges a schema_registry_versions result: the subject's
@@ -564,9 +641,9 @@ func checkForStep(s events.ProposalStep) (verifyCheck, bool) {
 		if !ok {
 			return verifyCheck{}, false
 		}
-		return verifyCheck{name: "connect_status", input: jsonObject("connector", conn), judge: connectRecovered, settle: true}, true
+		return verifyCheck{layer: s.Layer, name: "connect_status", input: jsonObject("connector", conn), judge: connectRecovered, settle: true}, true
 	case "postgres":
-		return verifyCheck{name: "pg_replication_slots", input: json.RawMessage(`{}`), judge: pgSlotsRecovered}, true
+		return verifyCheck{layer: s.Layer, name: "pg_replication_slots", input: json.RawMessage(`{}`), judge: pgSlotsRecovered}, true
 	default:
 		return verifyCheck{}, false
 	}
@@ -582,6 +659,15 @@ type flowResult struct {
 	// lines is the evidence, one line per sink table or per reason it was not
 	// verified.
 	lines []string
+	// detail is the reason the flow was not verified, without the evidence prefix.
+	detail string
+	// sinks is the per-table state, for the verification event.
+	sinks []sinkState
+}
+
+// flowNotVerified is the flowResult of a data-flow check that could not run.
+func flowNotVerified(why string) flowResult {
+	return flowResult{lines: []string{"data flow not verified: " + why}, detail: why}
 }
 
 // sinkTable is one warehouse table the alert's pipeline loads, with the column
@@ -624,7 +710,8 @@ type sinkState struct {
 	hasProposal bool
 	checkAt     time.Time // check baseline: the newest row when the check began
 	passed      bool
-	passedBy    string // "rows since proposal" or "rows during check"
+	passedBy    string    // "rows since proposal" or "rows during check"
+	newest      time.Time // newest row of the latest read
 	lastSummary string
 }
 
@@ -652,7 +739,7 @@ func (st sinkState) readings() string {
 func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bool) flowResult {
 	sinks, why := r.pipelineSinks(ctx, "verify")
 	if why != "" {
-		return flowResult{lines: []string{"data flow not verified: " + why}}
+		return flowNotVerified(why)
 	}
 
 	states := make([]sinkState, len(sinks))
@@ -661,9 +748,10 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 		st.proposalAt, st.hasProposal = rec.baseline[s.name]
 		newest, summary, err := r.readNewest(ctx, "verify", st.input)
 		if err != nil {
-			return flowResult{lines: []string{"data flow not verified: reading " + s.name + ": " + err.Error()}}
+			return flowNotVerified("reading " + s.name + ": " + err.Error())
 		}
 		st.checkAt = newest
+		st.newest = newest
 		st.lastSummary = summary
 		if st.hasProposal && newest.After(st.proposalAt) {
 			st.passed = true
@@ -674,7 +762,7 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 
 	for attempt := 0; wait && attempt < freshnessAttempts && anyPending(states); attempt++ {
 		if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
-			return flowResult{lines: []string{"data flow not verified: waiting for new rows: " + err.Error()}}
+			return flowNotVerified("waiting for new rows: " + err.Error())
 		}
 		for i := range states {
 			st := &states[i]
@@ -683,9 +771,10 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 			}
 			newest, summary, err := r.readNewest(ctx, "verify", st.input)
 			if err != nil {
-				return flowResult{lines: []string{"data flow not verified: reading " + st.table.name + ": " + err.Error()}}
+				return flowNotVerified("reading " + st.table.name + ": " + err.Error())
 			}
 			st.lastSummary = summary
+			st.newest = newest
 			if newest.After(st.checkAt) {
 				st.passed = true
 				st.passedBy = "rows during check"
@@ -693,7 +782,7 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 		}
 	}
 
-	res := flowResult{verified: true, fresh: true}
+	res := flowResult{verified: true, fresh: true, sinks: states}
 	for _, st := range states {
 		if st.passed {
 			res.lines = append(res.lines, fmt.Sprintf("data flow %s: %s (%s)", st.table.name, st.passedBy, st.readings()))

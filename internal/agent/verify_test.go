@@ -206,12 +206,29 @@ func assertNoConsecutiveUsers(t *testing.T, msgs []anthropic.BetaMessageParam) {
 	}
 }
 
+// messageTexts returns the room's agent messages, and the verdict of every
+// agent.verification event after them: the verdict used to be an agent.message.
 func messageTexts(s *fakeSink) []string {
 	var out []string
 	for _, e := range s.ofType(events.AgentMessage) {
 		var p events.AgentMessagePayload
 		if json.Unmarshal(e.payload, &p) == nil {
 			out = append(out, p.Text)
+		}
+	}
+	for _, v := range verifications(s) {
+		out = append(out, v.Verdict)
+	}
+	return out
+}
+
+// verifications returns the agent.verification payloads in emit order.
+func verifications(s *fakeSink) []events.AgentVerificationPayload {
+	var out []events.AgentVerificationPayload
+	for _, e := range s.ofType(events.AgentVerification) {
+		var p events.AgentVerificationPayload
+		if json.Unmarshal(e.payload, &p) == nil {
+			out = append(out, p)
 		}
 	}
 	return out
@@ -987,13 +1004,13 @@ func TestDataFlowMustBeVerifiedForRecovery(t *testing.T) {
 			msgs := messageTexts(sink)
 			assertVerdict(t, msgs, false)
 			var found bool
-			for _, m := range msgs {
-				if strings.Contains(m, c.wantMsg) {
+			for _, v := range verifications(sink) {
+				if strings.Contains(v.Verdict, c.wantMsg) || (v.DataFlow != nil && strings.Contains(v.DataFlow.Detail, c.wantMsg)) {
 					found = true
 				}
 			}
 			if !found {
-				t.Fatalf("expected %q in the verdict, got %q", c.wantMsg, msgs)
+				t.Fatalf("expected %q in the verdict or data-flow detail, got %+v", c.wantMsg, verifications(sink))
 			}
 		})
 	}
@@ -1689,13 +1706,18 @@ func TestCreationBaselinePassesOnRowsSinceProposal(t *testing.T) {
 		}
 	}
 	var evidence bool
-	for _, m := range messageTexts(sink) {
-		if strings.Contains(m, "rows since proposal") && strings.Contains(m, "proposal baseline") {
-			evidence = true
+	for _, v := range verifications(sink) {
+		if v.DataFlow == nil {
+			continue
+		}
+		for _, sc := range v.DataFlow.Sinks {
+			if sc.Passed && sc.PassedBy == "rows since proposal" && !sc.Baseline.IsZero() && sc.Newest.After(sc.Baseline) {
+				evidence = true
+			}
 		}
 	}
 	if !evidence {
-		t.Fatalf("the evidence must show the proposal baseline and rows since proposal: %q", messageTexts(sink))
+		t.Fatalf("the event must show the proposal baseline and rows since proposal: %+v", verifications(sink))
 	}
 }
 
@@ -1739,13 +1761,18 @@ func TestCreationBaselineWindowPathWhenNoRowsSinceProposal(t *testing.T) {
 		t.Fatalf("expected one window wait, slept %v", clk.durations())
 	}
 	var evidence bool
-	for _, m := range messageTexts(sink) {
-		if strings.Contains(m, "rows during check") && strings.Contains(m, "proposal baseline") && strings.Contains(m, "check baseline") {
-			evidence = true
+	for _, v := range verifications(sink) {
+		if v.DataFlow == nil {
+			continue
+		}
+		for _, sc := range v.DataFlow.Sinks {
+			if sc.Passed && sc.PassedBy == "rows during check" && !sc.Baseline.IsZero() && !sc.Newest.IsZero() {
+				evidence = true
+			}
 		}
 	}
 	if !evidence {
-		t.Fatalf("the evidence must show both readings and rows during check: %q", messageTexts(sink))
+		t.Fatalf("the event must show the baseline and rows during check: %+v", verifications(sink))
 	}
 }
 
