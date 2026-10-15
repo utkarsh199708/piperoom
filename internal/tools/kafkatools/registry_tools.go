@@ -247,6 +247,11 @@ func diffFields(fromSchema, toSchema string) ([]fieldChange, error) {
 			changes = append(changes, fieldChange{Field: name, Kind: "removed", From: fromType})
 		}
 	}
+	enumChanges, err := diffEnumSymbols(fromSchema, toSchema)
+	if err != nil {
+		return nil, err
+	}
+	changes = append(changes, enumChanges...)
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Field < changes[j].Field })
 	return changes, nil
 }
@@ -339,6 +344,16 @@ func canonType(t any) string {
 			}
 			return vt + ":" + name
 		}
+		switch vt {
+		case "array":
+			if items, ok := v["items"]; ok {
+				return "array<" + canonElem(items) + ">"
+			}
+		case "map":
+			if values, ok := v["values"]; ok {
+				return "map<" + canonElem(values) + ">"
+			}
+		}
 		if vt != "" {
 			return vt
 		}
@@ -351,6 +366,290 @@ func canonType(t any) string {
 		return "[" + strings.Join(parts, ", ") + "]"
 	}
 	return fmt.Sprint(t)
+}
+
+// avroPrimitives are the Avro type names that are never a named type.
+var avroPrimitives = map[string]bool{
+	"null": true, "boolean": true, "int": true, "long": true,
+	"float": true, "double": true, "bytes": true, "string": true,
+}
+
+// avroNamedKinds are the "type" values that make an object a named type
+// definition; any other object with a "name" property is not one.
+var avroNamedKinds = map[string]bool{"record": true, "error": true, "enum": true, "fixed": true}
+
+// namedTypeName reports the short name a type node names when it is a named
+// type: a definition, a bare reference or an object-wrapped reference
+// ({"type":"com.x.Addr"}, at any wrapping depth). Short names on purpose: a
+// Schema Registry reference may be spelled short in one version and full in
+// the next, and both must compare equal (a namespace-only change is gap #493).
+func namedTypeName(t any) (string, bool) {
+	switch v := t.(type) {
+	case string:
+		if v == "" || avroPrimitives[v] || v == "array" || v == "map" {
+			return "", false
+		}
+		return shortName(v), true
+	case map[string]any:
+		switch vt := v["type"].(type) {
+		case string:
+			if avroNamedKinds[vt] {
+				name, ok := v["name"].(string)
+				if !ok || name == "" {
+					return "", false
+				}
+				return shortName(name), true
+			}
+			return namedTypeName(vt)
+		case map[string]any:
+			return namedTypeName(vt)
+		}
+	}
+	return "", false
+}
+
+// canonElem renders an array item or map value type. Unlike canonType it
+// renders every spelling of one type the same way (definition, bare,
+// full-name or object-wrapped reference; a nested {"type":{...}} wrapper),
+// because inside a container a definition moves between fields freely. It is
+// used only in item/value position: in field position canonType keeps main's
+// rendering, which the diff corpus pins.
+func canonElem(t any) string {
+	if name, ok := namedTypeName(t); ok {
+		// Named first: a fixed with a logicalType renders by name, as its references do.
+		return name
+	}
+	switch v := t.(type) {
+	case string:
+		return v
+	case map[string]any:
+		switch vt := v["type"].(type) {
+		case map[string]any, []any:
+			return canonElem(vt)
+		case string:
+			switch vt {
+			case "array":
+				return "array<" + canonElem(v["items"]) + ">"
+			case "map":
+				return "map<" + canonElem(v["values"]) + ">"
+			}
+			// A primitive ignores any "name" property: it is not a named type.
+			if lt, ok := v["logicalType"].(string); ok {
+				if vt == "bytes" && lt == "decimal" {
+					return fmt.Sprintf("bytes(decimal %v,%v)", v["precision"], v["scale"])
+				}
+				return vt + "(" + lt + ")"
+			}
+			return vt
+		}
+		return "record"
+	case []any:
+		// Member order does not change which values a union in a container
+		// accepts. A union directly inside a union is invalid Avro; flatten it.
+		seen := map[string]bool{}
+		var parts []string
+		var add func(members []any)
+		add = func(members []any) {
+			for _, m := range members {
+				if inner, ok := m.([]any); ok {
+					add(inner)
+					continue
+				}
+				if c := canonElem(m); !seen[c] {
+					seen[c] = true
+					parts = append(parts, c)
+				}
+			}
+		}
+		add(v)
+		sort.Strings(parts)
+		return "[" + strings.Join(parts, ", ") + "]"
+	}
+	return fmt.Sprint(t)
+}
+
+// shortName drops the namespace from a dotted Avro name.
+func shortName(name string) string {
+	if i := strings.LastIndexByte(name, '.'); i >= 0 {
+		return name[i+1:]
+	}
+	return name
+}
+
+// maxSymbolsShown caps each side of an enum symbol delta, so a long enum
+// cannot push the real cause out of a capped summary.
+const maxSymbolsShown = 10
+
+// diffEnumSymbols compares the symbols of every enum defined in both schemas,
+// keyed by full name. An enum defined on one side only is not reported: the
+// field that holds it already has its own added/removed line. Reordering is
+// not a change: readers resolve enum symbols by name.
+func diffEnumSymbols(fromSchema, toSchema string) ([]fieldChange, error) {
+	from, err := schemaEnums(fromSchema)
+	if err != nil {
+		return nil, err
+	}
+	to, err := schemaEnums(toSchema)
+	if err != nil {
+		return nil, err
+	}
+	var changes []fieldChange
+	for full, toSyms := range to {
+		fromSyms, ok := from[full]
+		if !ok || fromSyms == nil || toSyms == nil {
+			continue
+		}
+		delta := symbolDelta(fromSyms, toSyms)
+		if delta == "" {
+			continue
+		}
+		label := shortName(full)
+		if !uniqueShort(label, from, to) {
+			label = full
+		}
+		changes = append(changes, fieldChange{Field: "enum " + label, Kind: "changed", From: "symbols", To: delta})
+	}
+	return changes, nil
+}
+
+// uniqueShort reports whether short names exactly one enum across both schemas.
+func uniqueShort(short string, from, to map[string][]string) bool {
+	full := ""
+	for _, m := range []map[string][]string{from, to} {
+		for f := range m {
+			if shortName(f) != short {
+				continue
+			}
+			if full != "" && full != f {
+				return false
+			}
+			full = f
+		}
+	}
+	return true
+}
+
+// symbolDelta renders removed and added symbols, e.g. "-B +C", or "" if the
+// two lists hold the same symbols.
+func symbolDelta(from, to []string) string {
+	inFrom, inTo := map[string]bool{}, map[string]bool{}
+	for _, s := range from {
+		inFrom[s] = true
+	}
+	for _, s := range to {
+		inTo[s] = true
+	}
+	var parts []string
+	side := func(syms []string, other map[string]bool, sign string) {
+		n := 0
+		for _, s := range syms {
+			if other[s] {
+				continue
+			}
+			if n < maxSymbolsShown {
+				parts = append(parts, sign+s)
+			}
+			n++
+		}
+		if n > maxSymbolsShown {
+			parts = append(parts, fmt.Sprintf("(%d more %s)", n-maxSymbolsShown, sign))
+		}
+	}
+	side(from, inTo, "-")
+	side(to, inFrom, "+")
+	return strings.Join(parts, " ")
+}
+
+// schemaEnums maps the full name of every enum defined in a schema to its
+// symbols. A full name defined twice with different symbols maps to nil
+// (invalid Avro, so no symbol verdict is given for it).
+func schemaEnums(schema string) (map[string][]string, error) {
+	var root any
+	if err := json.Unmarshal([]byte(schema), &root); err != nil {
+		return nil, err
+	}
+	out := map[string][]string{}
+	collectEnums(root, "", out)
+	return out, nil
+}
+
+// fullName applies Avro's namespace rules: a dotted name is already full, else
+// the "namespace" attribute, else the enclosing namespace.
+func fullName(v map[string]any, name, enclosing string) string {
+	if strings.Contains(name, ".") {
+		return name
+	}
+	ns := enclosing
+	if a, ok := v["namespace"].(string); ok {
+		ns = a
+	}
+	if ns == "" {
+		return name
+	}
+	return ns + "." + name
+}
+
+// namespaceOf is the namespace part of a full name.
+func namespaceOf(full string) string {
+	if i := strings.LastIndexByte(full, '.'); i >= 0 {
+		return full[:i]
+	}
+	return ""
+}
+
+func collectEnums(node any, ns string, out map[string][]string) {
+	switch v := node.(type) {
+	case []any:
+		for _, x := range v {
+			collectEnums(x, ns, out)
+		}
+	case map[string]any:
+		switch vt := v["type"].(type) {
+		case map[string]any, []any:
+			collectEnums(vt, ns, out)
+		case string:
+			name, _ := v["name"].(string)
+			switch vt {
+			case "record", "error":
+				inner := ns
+				if name != "" {
+					inner = namespaceOf(fullName(v, name, ns))
+				}
+				fields, _ := v["fields"].([]any)
+				for _, f := range fields {
+					if fm, ok := f.(map[string]any); ok {
+						collectEnums(fm["type"], inner, out)
+					}
+				}
+			case "enum":
+				if name == "" {
+					return
+				}
+				var syms []string
+				list, _ := v["symbols"].([]any)
+				for _, s := range list {
+					if str, ok := s.(string); ok {
+						syms = append(syms, str)
+					}
+				}
+				full := fullName(v, name, ns)
+				if prev, seen := out[full]; seen {
+					if prev == nil || symbolDelta(prev, syms) != "" || len(prev) != len(syms) {
+						out[full] = nil
+					}
+					return
+				}
+				if syms == nil {
+					syms = []string{}
+				}
+				out[full] = syms
+			case "array":
+				collectEnums(v["items"], ns, out)
+			case "map":
+				collectEnums(v["values"], ns, out)
+			}
+		}
+	}
 }
 
 // notConfigured is a schema tool's answer when the deployment has no Schema
