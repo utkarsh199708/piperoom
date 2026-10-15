@@ -156,23 +156,60 @@ func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.R
 // maxTraceText caps one condensed trace in Summary and Data.
 const maxTraceText = 2000
 
-// oracleThinPassword matches the password of an Oracle JDBC URL
-// (jdbc:oracle:thin:user/password@host...), which DriverManager quotes whole
-// in "No suitable driver" and listener errors. redact.Text has no rule for
-// this form yet (#449); drop this local mask once that rule lands. A quoted
-// password ("p@ss w") may hold an '@' or a space.
-var oracleThinPassword = regexp.MustCompile(`(?i)(jdbc:oracle:[a-z0-9]+:@?[^\s/@:;"']+/)("[^"\n]*"|[^@\s]+)(@)`)
+// oracleThinCreds matches an Oracle JDBC URL with credentials,
+// jdbc:oracle:<driver>:user/password@host..., which DriverManager quotes
+// whole in "No suitable driver" and listener errors. The user may be quoted;
+// group 2 is the rest of the token, where maskOracleThin finds the password.
+// A URL with no credentials (jdbc:oracle:thin:@host...) does not match: its
+// user part would start with '@'. redact.Text has no rule for this form yet
+// (#449); drop this local mask once that rule lands.
+var oracleThinCreds = regexp.MustCompile(`(?i)(jdbc:oracle:[a-z0-9]+:(?:"[^"\n]*"|[^\s/@:;"']+)/)("[^"\n]*"|\S+)`)
+
+// bracedPassword matches a password=/pwd= value in MS JDBC braces, which may
+// hold ';' and '@' ('}}' escapes '}'). redact.Text reads such a value as URL
+// user info: it masks the port and user and leaks the tail. The key and the
+// rest of the connection string stay visible.
+var bracedPassword = regexp.MustCompile(`(?i)(\b(?:password|pwd)\s*=\s*)\{(?:[^}]|\}\})*\}`)
 
 // redactedPassword replaces a locally masked password, in redact's style.
 const redactedPassword = "[redacted]"
 
-// cleanTrace redacts credentials in a condensed trace and caps it. Startup
-// failures quote JDBC URLs and connection settings, which sanitizeTrace (record
-// values) does not mask. It redacts before the cap, so a cut never splits a
-// secret into a piece the redactor no longer recognises.
+// maskOracleThin masks the password of an oracleThinCreds match. The password
+// runs to the last '@' of the token, since it may itself hold '@' and '/';
+// with no '@' (no host quoted) the whole token is the password.
+func maskOracleThin(m string) string {
+	sub := oracleThinCreds.FindStringSubmatch(m)
+	head, rest := sub[1], sub[2]
+	if strings.HasPrefix(rest, `"`) {
+		return head + redactedPassword // a quoted password, host unmatched after it
+	}
+	if at := strings.LastIndex(rest, "@"); at > 0 {
+		return head + redactedPassword + rest[at:]
+	} else if at == 0 {
+		return m // empty password: nothing to mask
+	}
+	return head + redactedPassword
+}
+
+// maskCreds masks the credentials in untrusted trace text: the local masks
+// for forms redact.Text gets wrong, then redact.Text. condenseTrace runs it on
+// each line before record masking, which drops a quoted column name a
+// key/value rule needs and caps a line at 300 runes (dlq.RedactMessage); so
+// neither can expose a credential.
+func maskCreds(s string) string {
+	s = oracleThinCreds.ReplaceAllStringFunc(s, maskOracleThin)
+	s = bracedPassword.ReplaceAllString(s, "${1}"+redactedPassword)
+	s, _ = redact.Text(s)
+	return s
+}
+
+// cleanTrace masks credentials in a condensed trace and caps it. condenseTrace
+// already masked each line; this pass covers text added after it (the
+// rejected-schema line) and is idempotent. It masks before the cap, so the
+// 2000-byte cut never splits a secret into a piece the masks no longer
+// recognise.
 func cleanTrace(cond string) string {
-	cond = oracleThinPassword.ReplaceAllString(cond, "${1}"+redactedPassword+"${3}")
-	cond, _ = redact.Text(cond)
+	cond = maskCreds(cond)
 	if len(cond) > maxTraceText {
 		cond = truncateRunes(cond, maxTraceText) + "\n…"
 	}
@@ -322,7 +359,7 @@ func condenseTrace(trace string) string {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "Caused by:") || len(out) == 0 {
-			out = append(out, sanitizeTrace(trimmed))
+			out = append(out, sanitizeTrace(maskCreds(trimmed)))
 		}
 	}
 	return strings.Join(out, "\n")
@@ -349,13 +386,14 @@ var failingRow = regexp.MustCompile(`(?i)(failing row contains)\s*\(.*`)
 // "Where:", "Key (...)=(...)", "Failing row contains (...)" and "invalid
 // input syntax ... \"...\"", Java's "For input string: \"...\"", Connect's
 // "Cannot parse value ...", Jackson's "[Source: ...]" snippet and
-// "Unrecognized token '...'", pgjdbc's "Batch entry N UPDATE ... SET col =
+// "Unrecognized token '...'", MySQL's "Duplicate entry '...'", SQL Server's
+// "The duplicate key value is (...)", pgjdbc's "Batch entry N UPDATE ... SET col =
 // '...'" and Connect's record dumps (SinkRecord{...}, value=Struct{...},
 // "record {...}"). Such a line gets the dlq_peek redaction; other
 // lines (schema registry rejections, class names) stay whole, because their
 // wording is the diagnosis and dlq.RedactMessage would mask the quoted
 // subject in it.
-var recordSnippet = regexp.MustCompile(`(?i)\bvalues\s*\(|\bdetail:|\bwhere:|\[source:|unrecognized token|invalid input syntax|for input string|failing row contains|\bkey\s*\(.*\)\s*=\s*\(|cannot parse|\bbatch entry \d+|\bset\s+"?\w+"?\s*=|\b(?:struct|sinkrecord|connectrecord|sourcerecord)\{|\brecord\s*\{`)
+var recordSnippet = regexp.MustCompile(`(?i)\bvalues\s*\(|\bdetail:|\bwhere:|\[source:|unrecognized token|invalid input syntax|for input string|failing row contains|\bkey\s*\(.*\)\s*=\s*\(|cannot parse|duplicate entry|duplicate key value is|\bbatch entry \d+|\bset\s+"?\w+"?\s*=|\b(?:struct|sinkrecord|connectrecord|sourcerecord)\{|\brecord\s*\{`)
 
 // stripSchemaAfter replaces the balanced {…} JSON that follows marker with <schema>.
 func stripSchemaAfter(s, marker string) string {
