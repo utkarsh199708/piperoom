@@ -71,23 +71,33 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 /**
- * Steer and comment give up after this long. A POST that never answers would otherwise keep the
- * reconnect's copy of the words "in flight" forever, and every Retry of them would wait on it (#390).
- * Shorter than the hook's 15 s wait, so a Retry waiting on a hung copy sees it fail and posts once.
+ * Steer and comment stop waiting for an answer after this long. A POST that never answers would
+ * otherwise keep the reconnect's copy of the words "in flight" forever, and every Retry of them
+ * would wait on it (#390). The server may still store the words (it gives these routes 60 s), so
+ * giving up is not a failure: see SendUnconfirmedError.
  */
 export const SEND_DEADLINE_MS = 12_000
 
 /**
- * `request` with a deadline. A late answer is reported like a network failure (a TypeError), so the
- * words are kept and retried like any other send that did not get through.
+ * The request was sent but no answer came within SEND_DEADLINE_MS. The server may or may not have
+ * stored it, and the API has no idempotency key (docs/api.md), so the caller must not send it again
+ * on its own: useRoom settles it from the room's event stream.
  */
+export class SendUnconfirmedError extends Error {
+  constructor(ms: number) {
+    super(`no answer from Piperoom within ${Math.round(ms / 1000)} s`)
+    this.name = 'SendUnconfirmedError'
+  }
+}
+
+/** `request` with a deadline; past it, the request is aborted and the call rejects with SendUnconfirmedError. */
 async function requestWithin<T>(path: string, init: RequestInit, ms: number): Promise<T> {
   const ctl = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   const late = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       ctl.abort()
-      reject(new TypeError(`Failed to fetch: no answer within ${Math.round(ms / 1000)} s`))
+      reject(new SendUnconfirmedError(ms))
     }, ms)
   })
   try {

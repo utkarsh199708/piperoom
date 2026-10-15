@@ -32,8 +32,24 @@ export function isNetworkError(e: unknown): boolean {
   return e instanceof Error && /failed to fetch|networkerror|load failed/i.test(e.message)
 }
 
+/** A steer or comment got no answer in time; the room's events will show whether it arrived. */
+export const UNCONFIRMED_TEXT =
+  'No answer from Piperoom yet \u2014 checking whether your message arrived before it can be sent again\u2026'
+
+/** The check above found no sign of the message: only the person's own Retry sends it again. */
+export const NOT_CONFIRMED_TEXT = "Piperoom never confirmed your message. Press Retry to send it again."
+
+/**
+ * True for api.steer/api.comment's SendUnconfirmedError. Checked by name so this module keeps
+ * working where tests replace '../api/client' with a partial mock.
+ */
+export function isUnconfirmed(e: unknown): boolean {
+  return e instanceof Error && e.name === 'SendUnconfirmedError'
+}
+
 /** Friendly text for a value thrown by the API layer (fetch rejects). */
 export function errorText(e: unknown): string {
+  if (isUnconfirmed(e)) return UNCONFIRMED_TEXT
   if (isNetworkError(e)) return OFFLINE_TEXT
   if (e instanceof ApiClientError) return friendlyError(e.code, e.message)
   if (e instanceof Error) return e.message

@@ -27,7 +27,7 @@ vi.mock('../api/client', async (importOriginal) => {
 })
 
 import { ApiClientError, api, openRoomWs } from '../api/client'
-import { OFFLINE_TEXT } from '../lib/errors'
+import { NOT_CONFIRMED_TEXT, UNCONFIRMED_TEXT } from '../lib/errors'
 import { rollbackSteer } from '../lib/rollback'
 import { RollbackButton } from '../components/room/RollbackButton'
 import { Timeline } from '../components/Timeline'
@@ -260,10 +260,37 @@ describe('useRoom delivered copies do not outlive their failure', () => {
       return { ...opened, drain }
     }
 
-    it('the next Retry after the 15 s cap posts exactly once', async () => {
+    // Round 4: a copy that never answered may be stored, so it is never posted again on its own.
+    it('later Retries and reconnects do not post while the event stream is checked', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        const { hook, socket } = await hungAfterRetry()
+        expect(hook.result.current.error).toBe(UNCONFIRMED_TEXT)
+        vi.mocked(api.steer).mockResolvedValue(undefined as never)
+        let ok = true
+        await act(async () => {
+          ok = await hook.result.current.actions.steer('stop', { retry: true })
+        })
+        expect(ok).toBe(false)
+        act(() => socket.onopen?.())
+        await act(async () => {
+          await Promise.resolve()
+        })
+        expect(api.steer).toHaveBeenCalledTimes(2)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('with no sign of it in the stream, the words are "not confirmed" and only a click posts them, once', async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true })
       try {
         const { hook } = await hungAfterRetry()
+        await act(async () => {
+          vi.advanceTimersByTime(65_000)
+        })
+        expect(hook.result.current.error).toBe(NOT_CONFIRMED_TEXT)
+        expect(api.steer).toHaveBeenCalledTimes(2)
         vi.mocked(api.steer).mockResolvedValue(undefined as never)
         let ok = false
         await act(async () => {
@@ -277,27 +304,19 @@ describe('useRoom delivered copies do not outlive their failure', () => {
       }
     })
 
-    it('the next reconnect posts the words exactly once', async () => {
+    it('a late success of the old copy settles it: no second post', async () => {
       vi.useFakeTimers({ shouldAdvanceTime: true })
       try {
-        const { socket } = await hungAfterRetry()
-        vi.mocked(api.steer).mockResolvedValue(undefined as never)
-        act(() => socket.onopen?.())
-        await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(3))
-        act(() => socket.onopen?.())
-        expect(api.steer).toHaveBeenCalledTimes(3)
-      } finally {
-        vi.useRealTimers()
-      }
-    })
-
-    it('a late success of the old copy takes the words out of the queue: no second post', async () => {
-      vi.useFakeTimers({ shouldAdvanceTime: true })
-      try {
-        const { socket, drain } = await hungAfterRetry()
+        const { hook, socket, drain } = await hungAfterRetry()
         await act(async () => drain.settle().resolve())
+        expect(hook.result.current.error).toBeNull()
         vi.mocked(api.steer).mockResolvedValue(undefined as never)
         act(() => socket.onopen?.())
+        let ok = false
+        await act(async () => {
+          ok = await hook.result.current.actions.steer('stop', { retry: true })
+        })
+        expect(ok).toBe(true)
         expect(api.steer).toHaveBeenCalledTimes(2)
       } finally {
         vi.useRealTimers()
@@ -305,7 +324,7 @@ describe('useRoom delivered copies do not outlive their failure', () => {
     })
   })
 
-  it('a Retry waits at most 15 s for a hanging reconnect send, then reports offline without posting', async () => {
+  it('a Retry waits at most 15 s for a hanging reconnect send, then reports it unconfirmed without posting', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { hook, socket } = await openRoom()
@@ -325,7 +344,7 @@ describe('useRoom delivered copies do not outlive their failure', () => {
         vi.advanceTimersByTime(15_000)
       })
       await waitFor(() => expect(ok).toBe(false))
-      expect(hook.result.current.error).toBe(OFFLINE_TEXT)
+      expect(hook.result.current.error).toBe(UNCONFIRMED_TEXT)
       expect(api.steer).toHaveBeenCalledTimes(2)
     } finally {
       vi.useRealTimers()

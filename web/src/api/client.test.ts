@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiClientError, SEND_DEADLINE_MS, api, exportRoom, probeSession, roomWsUrl } from './client'
+import { ApiClientError, SEND_DEADLINE_MS, SendUnconfirmedError, api, exportRoom, probeSession, roomWsUrl } from './client'
 import { onAuthProblem, setAuthEpoch } from '../lib/auth'
+import { isNetworkError } from '../lib/errors'
 import type { AuthProblem } from '../lib/auth'
 
 // The retired identity header, spelled out so a repo-wide grep for it stays clean.
@@ -311,7 +312,7 @@ describe('steer and comment deadline', () => {
   it.each([
     ['steer', () => api.steer('r1', 'stop')],
     ['comment', () => api.comment('r1', { step_id: 's1', text: 'stop' })],
-  ])('%s gives up after SEND_DEADLINE_MS with a network error and aborts the request', async (_, send) => {
+  ])('%s gives up after SEND_DEADLINE_MS as unconfirmed (not a network error) and aborts the request', async (_, send) => {
     vi.useFakeTimers()
     try {
       fetchMock.mockImplementation(() => new Promise(() => {}))
@@ -323,7 +324,9 @@ describe('steer and comment deadline', () => {
       expect(lastCall().init.signal?.aborted).toBe(false)
       await vi.advanceTimersByTimeAsync(1)
       const err = await result
-      expect(err).toBeInstanceOf(TypeError)
+      // Not a TypeError: the server may have stored it, so it must not be queued and re-sent.
+      expect(err).toBeInstanceOf(SendUnconfirmedError)
+      expect(isNetworkError(err)).toBe(false)
       expect(lastCall().init.signal?.aborted).toBe(true)
     } finally {
       vi.useRealTimers()
