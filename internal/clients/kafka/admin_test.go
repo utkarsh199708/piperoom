@@ -3,6 +3,7 @@ package kafka
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -586,7 +587,7 @@ func TestGroupLag(t *testing.T) {
 		"a": {
 			1: {Topic: "a", Partition: 1, Commit: kadm.Offset{At: 3}, End: kadm.ListedOffset{Offset: 8}, Lag: 5},
 			0: {Topic: "a", Partition: 0, Commit: kadm.Offset{At: -1}, End: kadm.ListedOffset{Offset: 4}, Lag: 4},
-			2: {Topic: "a", Partition: 2, Lag: -1, Err: kerr.NotLeaderForPartition},
+			2: {Topic: "a", Partition: 2, Commit: kadm.Offset{At: -1}, End: kadm.ListedOffset{Offset: 6}, Lag: -1, Err: kerr.NotLeaderForPartition},
 		},
 	}
 	m := &fakeMeta{lags: kadm.DescribedGroupLags{"g": {
@@ -600,9 +601,44 @@ func TestGroupLag(t *testing.T) {
 		{Topic: "a", Partition: 0, Committed: -1, End: 4, Lag: 4},
 		{Topic: "a", Partition: 1, Committed: 3, End: 8, Lag: 5},
 		{Topic: "b", Partition: 0, Committed: 7, End: 9, Lag: 2},
+	}, Unknown: []clients.PartitionLag{
+		{Topic: "a", Partition: 2, Committed: -1, End: 6, Lag: -1},
 	}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("GroupLag = %+v, want %+v", got, want)
+	}
+}
+
+// TestGroupLagUnknown: kadm's Lag swallows a ListOffsets or OffsetFetch shard
+// error (a broker down) into the partition's Err. Such a partition used to be
+// dropped, so a broker outage read as "total lag 0"; it must be listed in
+// Unknown with the offsets that were read and Lag -1, and stay out of
+// TotalLag.
+func TestGroupLagUnknown(t *testing.T) {
+	endErr := fmt.Errorf("end offsets: %w", kerr.NotLeaderForPartition)
+	lag := kadm.GroupLag{"a": {
+		0: {Topic: "a", Partition: 0, Commit: kadm.Offset{At: 5}, End: kadm.ListedOffset{Offset: 5}, Lag: 0},
+		// End offset unreadable, commit read: Committed kept, End -1.
+		1: {Topic: "a", Partition: 1, Commit: kadm.Offset{At: 40}, End: kadm.ListedOffset{Offset: -1, Err: endErr}, Lag: -1, Err: endErr},
+		// Commit unreadable, end read: Committed -1, End kept.
+		2: {Topic: "a", Partition: 2, Commit: kadm.Offset{At: 12}, End: kadm.ListedOffset{Offset: 90}, Lag: -1, Err: kerr.CoordinatorNotAvailable},
+		// Both unreadable: kadm reports the commit error first.
+		3: {Topic: "a", Partition: 3, Commit: kadm.Offset{At: 3}, End: kadm.ListedOffset{Offset: 8, Err: endErr}, Lag: -1, Err: kerr.CoordinatorNotAvailable},
+	}}
+	m := &fakeMeta{lags: kadm.DescribedGroupLags{"g": {Group: "g", State: "Stable", Lag: lag}}}
+	got, err := (&Client{meta: m}).GroupLag(context.Background(), "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := clients.GroupLag{Group: "g", State: "Stable", TotalLag: 0,
+		Partitions: []clients.PartitionLag{{Topic: "a", Partition: 0, Committed: 5, End: 5, Lag: 0}},
+		Unknown: []clients.PartitionLag{
+			{Topic: "a", Partition: 1, Committed: 40, End: -1, Lag: -1},
+			{Topic: "a", Partition: 2, Committed: -1, End: 90, Lag: -1},
+			{Topic: "a", Partition: 3, Committed: -1, End: -1, Lag: -1},
+		}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("GroupLag =\n %+v\nwant\n %+v", got, want)
 	}
 }
 

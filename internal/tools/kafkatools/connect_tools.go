@@ -11,6 +11,7 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/dlq"
+	"piperoom/internal/redact"
 	"piperoom/internal/tools"
 )
 
@@ -85,7 +86,7 @@ func (t *connectStatus) InputSchema() map[string]any {
 	return objectSchema(map[string]any{"connector": strProp("connector name")}, "connector")
 }
 func (t *connectStatus) Description() string {
-	return "Returns a connector's state and each task's state; for FAILED tasks the exception class, message and every 'Caused by:' line (stack frames and schema blobs stripped)."
+	return "Returns a connector's state and each task's state; for a FAILED connector or task the exception class, message and every 'Caused by:' line (stack frames and schema blobs stripped, record values and credentials masked)."
 }
 
 func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -113,7 +114,16 @@ func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.R
 	if st.WorkerID != "" {
 		fmt.Fprintf(&sb, " on %s", st.WorkerID)
 	}
-	sb.WriteString(".")
+	// A connector that fails at startup has no tasks; its own trace is the
+	// only reason Connect gives (#399). Connect can keep a stale trace on a
+	// connector that recovered, so it is shown only while FAILED.
+	var connErr string
+	if st.State == "FAILED" && st.Trace != "" {
+		connErr = cleanTrace(condenseTrace(st.Trace))
+		sb.WriteString(":\n" + connErr)
+	} else {
+		sb.WriteString(".")
+	}
 	type taskRow struct {
 		ID    int    `json:"id"`
 		State string `json:"state"`
@@ -130,17 +140,32 @@ func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.R
 					cond += "\n" + line
 				}
 			}
-			if len(cond) > 2000 {
-				cond = truncateRunes(cond, 2000) + "\n…"
-			}
+			cond = cleanTrace(cond)
 			tr.Error = cond
 			sb.WriteString(":\n" + cond)
 		}
 		tasks = append(tasks, tr)
 	}
-	return res(sb.String(), map[string]any{
-		"name": st.Name, "state": st.State, "worker": st.WorkerID, "tasks": tasks,
-	}), nil
+	data := map[string]any{"name": st.Name, "state": st.State, "worker": st.WorkerID, "tasks": tasks}
+	if connErr != "" {
+		data["error"] = connErr
+	}
+	return res(sb.String(), data), nil
+}
+
+// maxTraceText caps one condensed trace in Summary and Data.
+const maxTraceText = 2000
+
+// cleanTrace redacts credentials in a condensed trace and caps it. Startup
+// failures quote JDBC URLs and connection settings, which sanitizeTrace (record
+// values) does not mask. It redacts before the cap, so a cut never splits a
+// secret into a piece the redactor no longer recognises.
+func cleanTrace(cond string) string {
+	cond, _ = redact.Text(cond)
+	if len(cond) > maxTraceText {
+		cond = truncateRunes(cond, maxTraceText) + "\n…"
+	}
+	return cond
 }
 
 // ---- connect_config ----

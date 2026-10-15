@@ -144,7 +144,8 @@ func (t *listGroups) Run(ctx context.Context, input json.RawMessage) (tools.Resu
 }
 
 func groupReadsTopic(lag clients.GroupLag, topic string) bool {
-	for _, pl := range lag.Partitions {
+	// An unreadable partition (clients.GroupLag.Unknown) is still read by the group.
+	for _, pl := range slices.Concat(lag.Partitions, lag.Unknown) {
 		if pl.Topic == topic {
 			return true
 		}
@@ -186,10 +187,10 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 		return tools.Result{}, err
 	}
 	// Only the pipeline's topics: a group can read topics of other pipelines.
-	parts := lag.Partitions
+	parts, unknown := lag.Partitions, lag.Unknown
 	other := 0
 	if !sc.Unscoped() {
-		parts = nil
+		parts, unknown = nil, nil
 		var total int64
 		for _, pl := range lag.Partitions {
 			if sc.TopicInScope(pl.Topic) {
@@ -199,11 +200,24 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 				other++
 			}
 		}
+		for _, pl := range lag.Unknown {
+			if sc.TopicInScope(pl.Topic) {
+				unknown = append(unknown, pl)
+			} else {
+				other++
+			}
+		}
 		lag.TotalLag = total
 	}
 	sort.Slice(parts, func(i, j int) bool { return parts[i].Lag > parts[j].Lag })
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%s: %s, %d members, total lag %d", lag.Group, lag.State, lag.Members, lag.TotalLag)
+	// Unreadable partitions are not in the total: it is a lower bound then,
+	// never "no lag" (clients.GroupLag.Unknown).
+	total := fmt.Sprintf("total lag %d", lag.TotalLag)
+	if len(unknown) > 0 {
+		total = fmt.Sprintf("total lag at least %d", lag.TotalLag)
+	}
+	fmt.Fprintf(&sb, "%s: %s, %d members, %s", lag.Group, lag.State, lag.Members, total)
 	worst := parts
 	if len(worst) > 5 {
 		worst = worst[:5]
@@ -215,13 +229,29 @@ func (t *consumerLag) Run(ctx context.Context, input json.RawMessage) (tools.Res
 		}
 		fmt.Fprintf(&sb, "\n  %s/%d: %s, end %d, lag %d", pl.Topic, pl.Partition, committed, pl.End, pl.Lag)
 	}
+	if len(unknown) > 0 {
+		names := make([]string, 0, min(len(unknown), 5))
+		for _, pl := range unknown[:min(len(unknown), 5)] {
+			names = append(names, fmt.Sprintf("%s/%d", pl.Topic, pl.Partition))
+		}
+		more := ""
+		if len(unknown) > len(names) {
+			more = fmt.Sprintf(" and %d more", len(unknown)-len(names))
+		}
+		fmt.Fprintf(&sb, "\n  lag unknown for %d partition(s) (committed or end offset could not be read, e.g. a broker down): %s%s",
+			len(unknown), strings.Join(names, ", "), more)
+	}
 	if line := tools.NotShown(other, "topic partition", "topic partitions"); line != "" {
 		appendLine(&sb, line+"; the total lag above counts only this pipeline's partitions")
 	}
-	return res(sb.String(), map[string]any{
+	data := map[string]any{
 		"group": lag.Group, "state": lag.State, "members": lag.Members,
 		"total_lag": lag.TotalLag, "worst_partitions": worst,
-	}), nil
+	}
+	if len(unknown) > 0 {
+		data["unknown_partitions"] = unknown
+	}
+	return res(sb.String(), data), nil
 }
 
 // ---- kafka_find_by_key ----
@@ -299,13 +329,15 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	}
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
-	scan, err := findKey(cctx, t.d.Kafka, p.Topic, p.Key, since, maxScan)
+	scan, reported, err := findKey(cctx, t.d.Kafka, p.Topic, p.Key, since, maxScan)
 	if err != nil {
 		return tools.Result{}, err
 	}
 	refs := scan.Refs
 	var sb strings.Builder
 	switch {
+	case len(refs) == 0 && !reported:
+		fmt.Fprintf(&sb, "no record with key %q found since %s in the scanned window", p.Key, p.Since)
 	case len(refs) == 0 && len(scan.Truncated) > 0:
 		fmt.Fprintf(&sb, "not found in the scanned window: no record with key %q since %s", p.Key, p.Since)
 	case len(refs) == 0:
@@ -318,7 +350,13 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	}
 	data := map[string]any{"topic": p.Topic, "key": p.Key, "found": len(refs) > 0, "records": refs,
 		"truncated": len(scan.Truncated) > 0}
-	if len(scan.Truncated) > 0 {
+	switch {
+	case !reported:
+		// clients.KeyScanReader: without it a cut scan looks complete, so
+		// neither absence nor the newest match is stated as fact.
+		fmt.Fprintf(&sb, "\nthis client cannot report whether the scan was cut (max_scan %d or the time limit): newer matches may exist past the scanned window", maxScan)
+		data["truncation_unknown"] = true
+	case len(scan.Truncated) > 0:
 		// Matches past the cut would be newer than any listed: say so before
 		// the list can be read as complete.
 		fmt.Fprintf(&sb, "\nthe scan stopped (max_scan %d or the time limit) before the end of partition(s) %v: newer matches may exist there; use a later since or a larger max_scan", maxScan, scan.Truncated)
@@ -327,21 +365,15 @@ func (t *findByKey) Run(ctx context.Context, input json.RawMessage) (tools.Resul
 	return res(sb.String(), data), nil
 }
 
-// keyScanner is the local adapter for kafka.Client.FindByKeyReport until
-// clients.KafkaReader can report a truncated scan (contract change request
-// in the PR).
-type keyScanner interface {
-	FindByKeyReport(ctx context.Context, topic, key string, since time.Time, maxScan int) (kafka.KeyScan, error)
-}
-
-// findKey uses FindByKeyReport when the client has it; any other client's
-// FindByKey result carries no truncation report.
-func findKey(ctx context.Context, k clients.KafkaReader, topic, key string, since time.Time, maxScan int) (kafka.KeyScan, error) {
-	if ks, ok := k.(keyScanner); ok {
-		return ks.FindByKeyReport(ctx, topic, key, since, maxScan)
+// findKey uses clients.KeyScanReader when the client has it; reported is
+// false for any other client, whose FindByKey result may be truncated.
+func findKey(ctx context.Context, k clients.KafkaReader, topic, key string, since time.Time, maxScan int) (scan clients.KeyScan, reported bool, err error) {
+	if ks, ok := k.(clients.KeyScanReader); ok {
+		scan, err = ks.FindByKeyScan(ctx, topic, key, since, maxScan)
+		return scan, true, err
 	}
 	refs, err := k.FindByKey(ctx, topic, key, since, maxScan)
-	return kafka.KeyScan{Refs: refs}, err
+	return clients.KeyScan{Refs: refs}, false, err
 }
 
 // ---- kafka_topic_config ----
