@@ -26,6 +26,8 @@ func hasNewIncident(inputs []HumanInput) bool {
 // fix would stay parked while a second outage went unread (QA G1: a different
 // incident right after a fix).
 func (r *runner) handleBatch(ctx context.Context, inputs []HumanInput) ([]HumanInput, actionOutcome) {
+	// A recap's proposals must be known before any step result is judged.
+	r.absorbRecaps(inputs)
 	inputs, out := r.handleInputs(ctx, inputs)
 	if hasNewIncident(inputs) {
 		r.recoveredIdle = false
