@@ -272,3 +272,40 @@ func TestDefinition(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// QA round 1, S8: a connector pause one minute ago is found, by default and
+// when only the connector_state kind or the connector object is asked for, even
+// when the change log also holds older rows of other kinds.
+func TestWhatChangedFindsRecentConnectorStateChange(t *testing.T) {
+	pause := clients.PipelineChange{
+		Kind: clients.ChangeConnectorState, Object: "pg-orders-connector", At: t0.Add(-time.Minute), Source: "watcher",
+		Fingerprint: "p", Before: json.RawMessage(`{"state":"RUNNING"}`), After: json.RawMessage(`{"state":"PAUSED"}`),
+	}
+	l := &fakeLog{rows: []clients.PipelineChange{
+		{Kind: clients.ChangeConnectorConfig, Object: "pg-orders-connector", At: t0.Add(-3 * time.Hour), Fingerprint: "c", Summary: "cfg"},
+		pause,
+	}}
+	for _, in := range []string{`{}`, `{"kinds":["connector_state"]}`, `{"object":"pg-orders-connector"}`, `{"window":"10m"}`} {
+		res, err := run(t, newTool(l, nil), scoped(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d := dataOf(t, res)
+		if len(d.Changes) == 0 || d.Changes[0].Kind != clients.ChangeConnectorState {
+			t.Fatalf("input %s: changes = %+v, want the pause first", in, d.Changes)
+		}
+		if !strings.Contains(res.Summary, "RUNNING → PAUSED") {
+			t.Errorf("input %s: summary = %q", in, res.Summary)
+		}
+	}
+	// The row's time may be a few ms after the tool's clock (watcher tick vs
+	// tool call on one host): it must still be listed.
+	l.rows[1].At = t0.Add(30 * time.Second)
+	res, err := run(t, newTool(l, nil), scoped(), `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := dataOf(t, res); len(d.Changes) == 0 || d.Changes[0].Kind != clients.ChangeConnectorState {
+		t.Fatalf("row slightly ahead of the clock was dropped: %+v", d.Changes)
+	}
+}
