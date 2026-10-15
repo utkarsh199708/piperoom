@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"piperoom/internal/agent"
 	"piperoom/internal/config"
@@ -38,6 +39,8 @@ func TestNewAgentEndpointStartupErrors(t *testing.T) {
 		{"vertex without project", config.Config{ModelProvider: "vertex", VertexRegion: "global"}, "VERTEX_PROJECT_ID"},
 		{"vertex without region", config.Config{ModelProvider: "vertex", VertexProject: "p"}, "VERTEX_REGION"},
 		{"bad budget", config.Config{ModelProvider: "anthropic", RoomTokenBudget: "-3"}, "PIPEROOM_ROOM_TOKEN_BUDGET"},
+		{"bad first look switch", config.Config{TriagePass: "maybe"}, "PIPEROOM_TRIAGE_PASS"},
+		{"first look timeout too long", config.Config{TriagePassTimeout: "5m"}, "PIPEROOM_TRIAGE_PASS_TIMEOUT"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -63,6 +66,23 @@ func TestNewAgentEndpointDefaultIsAnthropicWithTheDefaultCap(t *testing.T) {
 	}
 	if ep.TokenLimit() != 0 {
 		t.Fatalf("limit = %d, want 0 (no cap)", ep.TokenLimit())
+	}
+}
+
+func TestNewAgentEndpointFirstLookSettings(t *testing.T) {
+	ep, err := NewAgentEndpoint(context.Background(), config.Config{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if on, model, timeout := ep.FirstLook(); !on || model != config.DefaultTriagePassModel || timeout != 40*time.Second {
+		t.Fatalf("default first look = %v %q %s", on, model, timeout)
+	}
+	ep, err = NewAgentEndpoint(context.Background(), config.Config{TriagePass: "OFF", TriagePassModel: "m", TriagePassTimeout: "15s"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if on, model, timeout := ep.FirstLook(); on || model != "m" || timeout != 15*time.Second {
+		t.Fatalf("first look = %v %q %s", on, model, timeout)
 	}
 }
 

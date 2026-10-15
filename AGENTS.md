@@ -54,6 +54,7 @@ Each agent owns folders. **Never edit a file you do not own.**
 | A5 | `tasks/A5-room-service.md` | `migrations/**`, `internal/store/**`, `internal/room/**`, `internal/httpapi/**`, `internal/ws/**`, `cmd/server/**`, `internal/auth/**` (A5 created it in auth PR 2, `e6dc2a1`) |
 | A6 | `tasks/A6-web.md` | `web/**` |
 | A7 | `docs/design/watcher.md` (watcher), `docs/design/dlq.md` | `internal/watch/**`, `internal/dlq/**` |
+| A3 (F wave, new folders) | `tasks/F8-what-changed-checklist.md`, `tasks/F12-deep-signals-scenarios.md` | `internal/tools/changes/**` (F8b), `internal/clients/prom/**` and `internal/tools/debeziumtools/**` (F12b) |
 | C1 (cloud) | `tasks/C1-ci-repo.md` | `.github/**`, `README.md`, `docs/runbook.md`, `Makefile` |
 | C2 (cloud) | `tasks/C2-agent-memory.md` | done — merged `9519d23`; `internal/agent/**` belongs to A4 again |
 | C3 (cloud) | `tasks/C3-snowflake.md` | `internal/clients/snowflake/**` |
@@ -129,6 +130,43 @@ here, **inside that agent's own folders above**; a task that needs a file outsid
 A task split between two agents (R11, R12) is one PR per agent, titled as usual (`[R11] slackbridge: ...`,
 `[R11] agent: ...`); the folders tell the agents apart.
 
+### F wave (dispatched 2026-10-14; plan `docs/product/vision-2026-10.md`)
+
+PR titles start with `[F<N>]` plus the sub-task letter when the task file splits it (e.g. `[F3d] agent: provenance
+ledger`). As in the R wave, each sub-task is done **inside its agent's own folders above** (plus the F-wave rows);
+a sub-task that needs a file outside them asks in its thread (`docs/collab.md` §4), it does not edit it
+(e.g. F8b and F12b need one registration line each in `internal/wiring/wiring.go`, A4's: A3 asks A4).
+F0 (the leads) carries every contract change of the wave; "Uses" names what each task codes against.
+
+| Task | Agents (sub-tasks) | Task file | Uses (F0) |
+|---|---|---|---|
+| F0 | leads (`[LEAD-ARCH]`) | the twelve below | — (contract files, `AGENTS.md`, `docs/api.md`, `docs/design/postmortem.md`) |
+| F1 | A6 (F1a–F1d) | `tasks/F1-decision-bar.md` | none |
+| F2 | A6 (F2a), A5 (F2b), A4 (F2c) | `tasks/F2-handoff-postmortem.md` | `postmortem.drafted`/`failed`, `UsageRolePostmortem`, `agent.PostmortemWriter`, `PIPEROOM_POSTMORTEM_MODEL`, `GET /api/rooms/{id}/postmortem.md`, snapshot `postmortem` |
+| F3 | A2 (F3b), A3 (F3c), A4 (F3d), A6 (F3e, F3g), C3 (F3f) | `tasks/F3-evidence-receipts.md` | `tools.Call`, `tools.Recorder`/`Record`, `Result.Provenance`, `events.ToolCall`, `UnbackedTerms`, `HandoffSummary.Violations` |
+| F4 | A2 (F4b), A5 (F4c), A4 (F4d), A6 (F4e, F4f) | `tasks/F4-fix-ceremony.md` | `actions.Preview`, `proposal.previewed`, `agent.verification`, `ProposalStep.Verify`, snapshot `open_proposals[].preview` |
+| F5 | A6 (F5a), A5 (F5b) | `tasks/F5-suggest-and-feed.md` | `docs/api.md` steer row wording only |
+| F6 | A3 (F6b-owners), A7 (F6b), A4 (F6c), A5 (F6d), A6 (F6e) | `tasks/F6-proactive-triage.md` | `agent.triage`, `UsageRoleFirstLook`, `HumanInput` kind `alert_update`, `Alert.Triage`, `agent.Triager`, `PIPEROOM_TRIAGE_PASS*`, `PIPEROOM_WATCH_MAX_OPEN_ROOMS`, `GET /api/rooms/ws`, snapshot `triage` |
+| F7 | A6 (F7a–F7c) | `tasks/F7-lane-trace-mobile.md` | none |
+| F8 | A3 (F8b), A7 (F8c), A5 (F8d), A6 (F8e), C11 (F8f), A4 (F8g) | `tasks/F8-what-changed-checklist.md` | `clients.PipelineChange`, `ChangeReader`/`ChangeWriter`, `room.labelled`, `checklist.step_done`, `PIPEROOM_CHANGES_RETENTION_DAYS`, label and checklist routes |
+| F9 | A5 (F9b), A6 (F9c1, F9c2); C12 follow-up | `tasks/F9-verdict-presence-catchup.md` | `hypothesis.verdict`, `approval.nudged`, hypothesis and nudge routes, `/api/people` `layers`, presence `since`, snapshot `hypothesis.seq`/`verdicts` |
+| F10 | A6 (F10a), A4 (F10b), A5 (F10c), C1 (F10d) | `tasks/F10-resilience.md` | snapshot `closed_by` (`docs/api.md`) |
+| F11 | A5 (F11a), A6 (F11b), C6 (`evals/README.md`) | `tasks/F11-cost-insight.md` | snapshot `insight`, `GET /api/pipelines/{pid}/agent-stats`, `AgentStats` |
+| F12 | A2 (F12a), A3 (F12b), C7 (F12c), C6 + C1 (F12d) | `tasks/F12-deep-signals-scenarios.md` | optional readers `ClusterReader`, `RateReader`, `ACLReader`, `LoadErrorReader`, `CountReader`, `clients.ErrNotSupported`, `DEBEZIUM_METRICS_URL`/`_PREFIX` |
+
+### L wave (dispatched 2026-10-14)
+
+PR titles start with `[L1a]`, `[L1b]`, `[L1c]`. Same rules as the F wave: each sub-task stays inside its agent's folders.
+L1 needs no contract change.
+
+| Task | Agents (sub-tasks) | Task file | Uses |
+|---|---|---|---|
+| L1 | C6 (L1a exporter, L1c baseline), A4 (L1b examples), C1 (L1c CI job), C7 (`learned-example-used.yaml`) | `tasks/L1-learn-from-rooms.md` | `room.labelled`, `hypothesis.verdict`, `agent.verification`, `GET /api/rooms/{id}/export`, `similar_incidents` |
+
+Merge order (vision §4): **F0 → F1, F5, F7, F10 in parallel → F3, F4 → F2, F9, F11 → F6, F8 → F12.** Inside a
+task, the task file's "Dependencies and merge order" section rules. A task split between agents is one PR per
+agent (and per sub-task when the task file says so).
+
 ### Contract files (read them, code against them, never edit them)
 
 - `internal/tools/tool.go` — `Tool`, `Result`, `Registry`
@@ -136,7 +174,7 @@ A task split between two agents (R11, R12) is one PR per agent, titled as usual 
 - `internal/clients/clients.go` — client interfaces + DTOs
 - `internal/actions/action.go` — `Action`, `Registry`
 - `internal/agent/contract.go` — `Inbox`, `Sink`, `Proposals`, `Alert`, `Deps`, `Options`,
-  `Runner`, `HandoffWriter` (`internal/agent/stubs.go` holds placeholders; A4 replaces it)
+  `Runner`, `HandoffWriter`, `Triager`, `PostmortemWriter` (`internal/agent/stubs.go` holds placeholders; A4 replaces it)
 - `internal/topology/graph.go` — `Graph`, `Node`, `Edge`, `Builder`
 - `internal/config/config.go` — environment variables
 - `internal/version/version.go` — build version (`-ldflags -X`), reported by `/healthz`

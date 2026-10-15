@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { Person } from '../api/types'
 import { ApiClientError, api, isFixtures } from '../api/client'
-import { DEV_USERS } from '../dev/users'
+import { DEV_USERS } from '../fixtures/users'
 import { errorText } from '../lib/errors'
 
 export type PeopleState =
@@ -23,7 +23,7 @@ export function usePeople(): PeopleState & { reload: () => void } {
   useEffect(() => {
     let cancelled = false
     if (isFixtures()) {
-      setState({ status: 'ready', people: DEV_USERS.map((u) => ({ id: u.id, name: u.name })) })
+      setState({ status: 'ready', people: DEV_USERS.map((u) => ({ id: u.id, name: u.name, layers: u.layers })) })
       return
     }
     setState({ status: 'loading' })

@@ -15,7 +15,18 @@ vi.mock('../api/client', async (importOriginal) => {
     ...actual,
     isFixtures: () => false,
     probeSession: vi.fn(),
-    api: { ...actual.api, me: vi.fn(), devLogin: vi.fn(), logout: vi.fn() },
+    api: {
+      ...actual.api,
+      me: vi.fn(),
+      devLogin: vi.fn(),
+      logout: vi.fn(),
+      authUsers: vi.fn().mockResolvedValue([
+  { id: 'arjun', name: 'Arjun', layers: ['kafka-connect', 'kafka'] },
+  { id: 'priya', name: 'Priya', layers: ['postgres', 'schema-registry'] },
+  { id: 'meera', name: 'Meera', layers: ['warehouse'] },
+  { id: 'kabir', name: 'Kabir', layers: ['consumer'] },
+]),
+    },
   }
 })
 
@@ -77,7 +88,8 @@ describe('UserProvider (live mode)', () => {
     })
     renderProvider()
     expect(await screen.findByText('Sign in')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Priya' })).toBeInTheDocument()
+    // The list is GET /auth/users, loaded after the picker shows.
+    expect(await screen.findByRole('button', { name: 'Priya' })).toBeInTheDocument()
     expect(redirectToLogin).not.toHaveBeenCalled()
   })
 

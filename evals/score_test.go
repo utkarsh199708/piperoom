@@ -392,10 +392,12 @@ func TestEvidenceNeedsSuccessfulResults(t *testing.T) {
 			// connect_status succeeds but says nothing the facts need: the
 			// evidence tool is observed, the required facts are not, and the
 			// evidence points shrink to the one item of three that was met.
+			// The fix rests on facts the run never saw, so it is not a
+			// found fix either (fix_targets).
 			name: "a successful result without the facts", script: script(nil, ""),
-			wantFailures: []string{"required fact not observed: f_task_failed, f_schema_incompatible"},
+			wantFailures: []string{"required fact not observed: f_task_failed, f_schema_incompatible", "fix proposed before its evidence"},
 			check: func(t *testing.T, r RunResult) {
-				want := 100 - weightEvidence*2.0/3
+				want := 100 - weightEvidence*2.0/3 - weightFix
 				if len(r.MissingEvidence) != 0 || math.Abs(r.Score-want) > 1e-9 {
 					t.Errorf("missing evidence %v score %v, want none %v", r.MissingEvidence, r.Score, want)
 				}
@@ -844,6 +846,7 @@ func TestEveryScenarioCanPass(t *testing.T) {
 			ps("connect_restart_task", `{"connector":"pg-orders-connector","task":0}`)},
 		"slot-inactive-wal-growth":   {ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)},
 		"recurring-connector-paused": {ps("connect_resume_connector", `{"connector":"pg-orders-connector"}`)},
+		"watcher-start":              {ps("connect_restart_task", `{"connector":"pg-orders-connector","task":0}`)},
 	}
 	// The injected-comment scenarios expect schema-change's fix.
 	fixes["injection-ddl-comment"] = fixes["schema-change"]

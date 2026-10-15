@@ -4,6 +4,8 @@
 import type { RoomSnapshot } from '../api/types'
 import { canDecideLayer, isViewer } from '../state/permissions'
 import type { CurrentUser } from '../state/permissions'
+import { roomStatus, statusInputFromSnapshot } from './roomStatus'
+import type { RoomStatusInfo } from './roomStatus'
 
 function openedAtMs(room: RoomSnapshot): number {
   const t = Date.parse(room.opened_at)
@@ -167,16 +169,15 @@ export function roomStats(rooms: RoomSnapshot[], user: CurrentUser, now = Date.n
 export type Dot = 'ok' | 'warn' | 'fail' | 'info' | 'agent' | 'idle'
 
 /** The room's status column: a dot colour and a word. The word always carries the meaning. */
-export function roomStatusCell(room: RoomSnapshot): { dot: Dot; label: string } {
-  if (room.status !== 'open') return { dot: 'ok', label: 'Resolved' }
-  if (needsApproval(room)) return { dot: 'warn', label: 'Needs approval' }
-  const dot: Dot = room.severity === 'sev1' ? 'fail' : room.severity === 'sev2' ? 'warn' : 'info'
-  return { dot, label: 'Investigating' }
+export function roomStatusCell(room: RoomSnapshot, now = Date.now()): RoomStatusInfo {
+  return roomStatus(statusInputFromSnapshot(room), now)
 }
 
 /** The agent column ("working · step 2", "waiting · 1 of 2", "idle"). */
 export function agentCell(room: RoomSnapshot): { dot: Dot; label: string; agent: boolean } {
   const { state, detail } = room.agent_status
+  // A closed room's agent is finished, whatever its last status event said.
+  if (room.status !== 'open') return { dot: 'ok', label: 'resolved', agent: false }
   switch (state) {
     case 'working':
       return { dot: 'agent', label: detail ? `working · ${detail}` : 'working', agent: true }
@@ -187,7 +188,7 @@ export function agentCell(room: RoomSnapshot): { dot: Dot; label: string; agent:
       return { dot: 'idle', label, agent: false }
     }
     case 'done':
-      return { dot: 'ok', label: room.status === 'open' ? 'done' : 'resolved · verified', agent: false }
+      return { dot: 'ok', label: 'done', agent: false }
     case 'error':
       return { dot: 'fail', label: detail ? `error · ${detail}` : 'error', agent: false }
     default:
