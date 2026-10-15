@@ -247,7 +247,7 @@ func (d *DB) PrimaryKeyColumn(ctx context.Context, table string) (string, error)
 		return "", wrapQueryErr("primary key of", table, err)
 	}
 	if bestSeq < 0 {
-		return "", fmt.Errorf("snowflake: primary key of %s: %w", table, clients.ErrNotFound)
+		return "", fmt.Errorf("snowflake: primary key of %s: table has no declared primary key (it may exist): %w", table, clients.ErrNotFound)
 	}
 	return strings.ToLower(best), nil
 }
