@@ -130,6 +130,32 @@ describe('PinnedHandoffs', () => {
     expect(toggles()[0]).toHaveAttribute('aria-expanded', 'true')
   })
 
+  it('a second hand-off accepted live collapses the first (cards mounted one at a time)', () => {
+    const { rerender } = render(<PinnedHandoffs roomId="r1" handoffs={[first]} />)
+    expect(toggles().map((b) => b.getAttribute('aria-expanded'))).toEqual(['true'])
+    rerender(<PinnedHandoffs roomId="r1" handoffs={[first, second]} />)
+    expect(toggles().map((b) => b.getAttribute('aria-label'))).toEqual(['Shift 2 summary', 'Shift 1 summary'])
+    expect(toggles().map((b) => b.getAttribute('aria-expanded'))).toEqual(['true', 'false'])
+  })
+
+  it('a replay with the newest collapsed in storage ends with both closed, not the reverse', () => {
+    localStorage.setItem('piperoom.handoff.collapsed.r1', 'h3')
+    const { rerender } = render(<PinnedHandoffs roomId="r1" handoffs={[first]} />)
+    // While h1 is still the newest it is open: the stored choice was about h3.
+    expect(toggles()[0]).toHaveAttribute('aria-expanded', 'true')
+    rerender(<PinnedHandoffs roomId="r1" handoffs={[first, second]} />)
+    expect(toggles().map((b) => b.getAttribute('aria-expanded'))).toEqual(['false', 'false'])
+  })
+
+  it('an older card the viewer opened closes again when a newer shift lands', () => {
+    const { rerender } = render(<PinnedHandoffs roomId="r1" handoffs={[first, second]} />)
+    fireEvent.click(toggles()[1])
+    expect(toggles().map((b) => b.getAttribute('aria-expanded'))).toEqual(['true', 'true'])
+    const third = handoff({ handoff_id: 'h5', created_at: '2026-10-14T16:00:00Z' })
+    rerender(<PinnedHandoffs roomId="r1" handoffs={[first, second, third]} />)
+    expect(toggles().map((b) => b.getAttribute('aria-expanded'))).toEqual(['true', 'false', 'false'])
+  })
+
   it('still works when storage throws', () => {
     vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
       throw new Error('blocked')

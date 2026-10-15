@@ -101,6 +101,31 @@ describe('PostmortemDialog', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(text)
   })
 
+  it('a room too large to draft says so and offers no Retry', async () => {
+    vi.spyOn(api, 'postmortem').mockRejectedValue(new ApiClientError(413, 'export_too_large', 'room has 90000 events'))
+    render(<PostmortemDialog state={room()} onClose={() => undefined} />)
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Could not load the draft: this room is too large to draft')
+    expect(alert).not.toHaveTextContent('90000')
+    expect(within(alert).queryByRole('button', { name: 'Retry' })).toBeNull()
+  })
+
+  it('re-fetches when the draft lands while open (drafting → drafted) and shows the new text', async () => {
+    const spy = vi.spyOn(api, 'postmortem').mockResolvedValueOnce('events only\n').mockResolvedValueOnce('with the agent summary\n')
+    const { rerender } = render(<PostmortemDialog state={room({ postmortem: { status: 'drafting' } })} onClose={() => undefined} />)
+    expect(await screen.findByDisplayValue('events only')).toBeInTheDocument()
+    rerender(<PostmortemDialog state={room()} onClose={() => undefined} />)
+    expect(await screen.findByDisplayValue('with the agent summary')).toBeInTheDocument()
+    expect(spy).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText(/is writing the closing summary/)).toBeNull()
+  })
+
+  it.each(['__proto__', 'constructor', 'toString'])('a failure reason %s that names a prototype key gets the fixed text', (reason) => {
+    vi.spyOn(api, 'postmortem').mockResolvedValue(MD)
+    render(<PostmortemDialog state={room({ postmortem: { status: 'failed', reason } })} onClose={() => undefined} />)
+    expect(screen.getByText(/failed on the server; this draft is built from the room log only/)).toBeInTheDocument()
+  })
+
   it('Copy Markdown writes the exact text to the clipboard', async () => {
     vi.spyOn(api, 'postmortem').mockResolvedValue(MD)
     const writeText = vi.fn().mockResolvedValue(undefined)

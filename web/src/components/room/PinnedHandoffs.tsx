@@ -25,13 +25,26 @@ function writeCollapsed(roomId: string, handoffId: string | null) {
 /**
  * Every accepted hand-off, newest first, for the room's whole life (F2a). The newest starts open
  * until this viewer collapses it; the choice is remembered per room by hand-off id, so the next
- * shift's summary opens again.
+ * shift's summary opens again. Every card is controlled here: when a newer shift lands (live, or
+ * one event at a time during the replay) the older ones close, whatever they mounted as.
  */
 export function PinnedHandoffs({ roomId, handoffs }: { roomId: string; handoffs: HandoffState[] }) {
   const [collapsed, setCollapsed] = useState(() => readCollapsed(roomId))
+  // The viewer's own toggles, valid only while `newest` is still the newest shift.
+  const [toggled, setToggled] = useState<{ newest: string; open: Record<string, boolean> }>({ newest: '', open: {} })
   const accepted = handoffs.filter((h) => h.status === 'accepted').reverse()
   if (accepted.length === 0) return null
   const newest = accepted[0].handoff_id
+  const overrides = toggled.newest === newest ? toggled.open : {}
+  const isOpen = (id: string) => overrides[id] ?? (id === newest && collapsed !== newest)
+  const setOpen = (id: string, open: boolean) => {
+    setToggled({ newest, open: { ...overrides, [id]: open } })
+    if (id === newest) {
+      const next = open ? null : newest
+      setCollapsed(next)
+      writeCollapsed(roomId, next)
+    }
+  }
   return (
     <div aria-label="Shift summaries" role="region" className="flex flex-col gap-2">
       {accepted.map((h) => (
@@ -42,16 +55,9 @@ export function PinnedHandoffs({ roomId, handoffs }: { roomId: string; handoffs:
           from={h.from}
           createdAt={h.created_at}
           acceptedAt={h.accepted_at}
-          defaultOpen={h.handoff_id === newest && collapsed !== newest}
-          onOpenChange={
-            h.handoff_id === newest
-              ? (open) => {
-                  const next = open ? null : newest
-                  setCollapsed(next)
-                  writeCollapsed(roomId, next)
-                }
-              : undefined
-          }
+          defaultOpen={false}
+          open={isOpen(h.handoff_id)}
+          onOpenChange={(open) => setOpen(h.handoff_id, open)}
         />
       ))}
     </div>

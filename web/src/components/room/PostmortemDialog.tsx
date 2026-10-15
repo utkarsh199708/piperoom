@@ -13,12 +13,15 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Skeleton } from '@/components/ui/skeleton'
-import { downloadText, postmortemDrafting, postmortemErrorText, postmortemFilename } from '@/lib/postmortem'
+import { downloadText, isTooLarge, postmortemDrafting, postmortemErrorText, postmortemFilename } from '@/lib/postmortem'
 import { RoomDialogClose } from './RoomDialogClose'
 import { useNow } from './useNow'
 import { useRestoreFocus } from './useRestoreFocus'
 
-type Load = { status: 'loading' } | { status: 'ready'; text: string } | { status: 'error'; message: string }
+type Load =
+  | { status: 'loading' }
+  | { status: 'ready'; text: string }
+  | { status: 'error'; message: string; retry: boolean }
 
 // postmortem.failed reasons (docs/api.md) in words; the draft is still the events-only render.
 const FAILED_TEXT: Record<string, string> = {
@@ -50,7 +53,7 @@ export function PostmortemDialog({
     setLoad({ status: 'loading' })
     api.postmortem(state.id).then(
       (text) => live && setLoad({ status: 'ready', text }),
-      (e: unknown) => live && setLoad({ status: 'error', message: postmortemErrorText(e) }),
+      (e: unknown) => live && setLoad({ status: 'error', message: postmortemErrorText(e), retry: !isTooLarge(e) }),
     )
     return () => {
       live = false
@@ -91,7 +94,7 @@ export function PostmortemDialog({
         )}
         {failed && (
           <p role="status" className="m-0 text-sm text-warning-foreground">
-            {FAILED_TEXT[failed] ?? FAILED_TEXT.internal_error}
+            {Object.hasOwn(FAILED_TEXT, failed) ? FAILED_TEXT[failed] : FAILED_TEXT.internal_error}
           </p>
         )}
 
@@ -104,10 +107,13 @@ export function PostmortemDialog({
         {load.status === 'error' && (
           <div role="alert" className="flex flex-wrap items-center gap-2 text-sm text-destructive-fg">
             <span>Could not load the draft: {load.message}</span>
-            <Button type="button" size="sm" variant="outline" onClick={() => setAttempt((n) => n + 1)}>
-              <RotateCw aria-hidden="true" />
-              Retry
-            </Button>
+            {/* A too-large room fails the same way every time: no Retry. */}
+            {load.retry && (
+              <Button type="button" size="sm" variant="outline" onClick={() => setAttempt((n) => n + 1)}>
+                <RotateCw aria-hidden="true" />
+                Retry
+              </Button>
+            )}
           </div>
         )}
         {load.status === 'ready' && (

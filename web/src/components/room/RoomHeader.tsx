@@ -85,7 +85,7 @@ export function RoomHeader({
   /** Download the room transcript. Left out for viewers (read-only users); the server can still refuse with not_allowed. */
   onExport?: () => void
   exporting?: boolean
-  /** Open the post-mortem draft (F2). Every member may read it, viewers included. */
+  /** Open the post-mortem draft (F2). Left out for viewers, like the export (#251 Done-when #3). */
   onPostmortem?: () => void
   /** A hand-off summary is being written: the button shows progress and opens the dialog to follow it. */
   handoffBusy?: boolean
@@ -101,6 +101,7 @@ export function RoomHeader({
   const extra = ordered.length - shown.length
   const closed = state.status === 'closed'
   const exportLabel = exporting ? 'Exporting…' : 'Export JSON'
+  const duration = closed && state.opened_at && state.closed_at ? durationLabel(state.opened_at, state.closed_at) : ''
 
   return (
     <header className="flex flex-col gap-2 px-4 pt-4 sm:px-6">
@@ -264,10 +265,10 @@ export function RoomHeader({
             <span>
               Closed <Clock iso={state.closed_at} />
             </span>
-            {state.opened_at && durationLabel(state.opened_at, state.closed_at) && (
+            {duration && (
               <>
                 <Sep />
-                <span>{durationLabel(state.opened_at, state.closed_at)}</span>
+                <span>{duration}</span>
               </>
             )}
             {state.closed_by && (

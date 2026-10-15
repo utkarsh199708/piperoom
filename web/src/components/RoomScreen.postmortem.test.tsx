@@ -127,10 +127,10 @@ describe('header ⋯ menu (open room)', () => {
     ])
   })
 
-  it('a viewer gets no Export JSON but may read the post-mortem', () => {
+  it('a viewer gets neither Export JSON nor Post-mortem draft (#251 Done-when #3)', () => {
     show(viewer, room())
     const items = within(openMenu()).getAllByRole('menuitem').map((i) => i.textContent)
-    expect(items).toEqual(['Post-mortem draft', 'Copy invite link'])
+    expect(items).toEqual(['Copy invite link'])
   })
 
   it('Post-mortem draft opens the dialog with the server text', async () => {
@@ -138,6 +138,15 @@ describe('header ⋯ menu (open room)', () => {
     fireEvent.click(within(openMenu()).getByRole('menuitem', { name: 'Post-mortem draft' }))
     const dialog = await screen.findByRole('dialog', { name: 'Post-mortem draft' })
     expect(await within(dialog).findByRole('textbox', { name: 'Post-mortem draft (Markdown)' })).toHaveValue('# Post-mortem: Orders stale\n')
+  })
+
+  it('export refused with 413 export_too_large toasts that retrying will not help', async () => {
+    vi.mocked(exportRoom).mockRejectedValue(new ApiClientError(413, 'export_too_large', 'room has 90000 events'))
+    show(member, room())
+    fireEvent.click(within(openMenu()).getByRole('menuitem', { name: 'Export JSON' }))
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith('This room is too large to export. Retrying will not help; page through its events instead.'),
+    )
   })
 
   it('export refused with 403 not_allowed toasts the role it needs, never the raw message', async () => {
@@ -174,9 +183,9 @@ describe('closed room', () => {
     expect(within(dialog).getByText('The agent is writing the closing summary…')).toBeInTheDocument()
   })
 
-  it('a viewer gets only the post-mortem button on a closed room', () => {
+  it('a viewer gets neither button on a closed room, in the header or the Resolved strip', () => {
     show(viewer, closedRoom())
-    expect(within(header()).queryByRole('button', { name: 'Export JSON' })).toBeNull()
-    expect(within(header()).getByRole('button', { name: 'Post-mortem draft' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Export JSON' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Post-mortem draft' })).toBeNull()
   })
 })

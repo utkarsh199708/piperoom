@@ -220,6 +220,39 @@ describe('the receiver reads the summary before accepting (F2a: inline card)', (
     expect(accept).toHaveBeenCalledWith('h1')
   })
 
+  it('a double click and a held ⌘⏎ send exactly one accept; Accept stays disabled meanwhile', async () => {
+    const accept = vi.fn().mockReturnValue(new Promise<boolean>(() => undefined))
+    render(<HandoffAcceptBanner state={state} user={me} actions={{ ...actions, acceptHandoff: accept }} />)
+    const btn = screen.getByRole('button', { name: /Accept and take over/ })
+    fireEvent.click(btn)
+    fireEvent.click(btn)
+    fireEvent.keyDown(btn, { key: 'Enter', ctrlKey: true })
+    fireEvent.keyDown(btn, { key: 'Enter', ctrlKey: true, repeat: true })
+    expect(accept).toHaveBeenCalledTimes(1)
+    expect(btn).toBeDisabled()
+    expect(btn).toHaveAttribute('aria-busy', 'true')
+  })
+
+  it('a held ⌘⏎ (key repeat) never accepts on its own', () => {
+    const accept = vi.fn()
+    render(<HandoffAcceptBanner state={state} user={me} actions={{ ...actions, acceptHandoff: accept }} />)
+    fireEvent.keyDown(screen.getByRole('button', { name: /Accept and take over/ }), { key: 'Enter', metaKey: true, repeat: true })
+    expect(accept).not.toHaveBeenCalled()
+  })
+
+  it('a failed accept enables Accept again', async () => {
+    let fail: (ok: boolean) => void = () => undefined
+    const accept = vi.fn().mockReturnValue(new Promise<boolean>((r) => (fail = r)))
+    render(<HandoffAcceptBanner state={state} user={me} actions={{ ...actions, acceptHandoff: accept }} />)
+    const btn = screen.getByRole('button', { name: /Accept and take over/ })
+    fireEvent.click(btn)
+    expect(btn).toBeDisabled()
+    await act(async () => fail(false))
+    expect(btn).not.toBeDisabled()
+    fireEvent.click(btn)
+    expect(accept).toHaveBeenCalledTimes(2)
+  })
+
   it('"Read summary" focus on the card opens it again', () => {
     render(<HandoffAcceptBanner state={state} user={me} actions={actions} />)
     const card = screen.getByRole('region', { name: /Shift 1/ })

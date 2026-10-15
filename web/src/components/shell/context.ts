@@ -25,7 +25,7 @@ export interface RoomCommands {
   exportJson?: () => void
   /** Open the post-mortem draft (F2). Absent for viewers. */
   postmortem?: () => void
-  /** Opens the hand-off summary dialog of a hand-off to me (the banner's Read summary). */
+  /** Focuses (and so opens) the inline card of a pending hand-off to me; the attention toast's Read summary. */
   readHandoff?: () => void
 }
 

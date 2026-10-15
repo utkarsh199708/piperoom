@@ -417,7 +417,7 @@ export function RoomScreen() {
             )}
             <ClosedRoomActions
               onExport={viewer ? undefined : exportTranscript}
-              onPostmortem={openPostmortem}
+              onPostmortem={viewer ? undefined : openPostmortem}
               exporting={exporting}
             />
           </span>
@@ -455,7 +455,7 @@ export function RoomScreen() {
             onCloseRoom={() => setCloseOpen(true)}
             onInvite={invite}
             onExport={viewer ? undefined : exportTranscript}
-            onPostmortem={openPostmortem}
+            onPostmortem={viewer ? undefined : openPostmortem}
             exporting={exporting}
             handoffBusy={state ? handoffInFlight(state, now) !== null : false}
             onCite={citeStep}
@@ -564,7 +564,7 @@ export function RoomScreen() {
   )
 }
 
-// "Read summary" (toast, ⌘K): the pending card to me takes focus, which opens it.
+// "Read summary" (attention toast): the pending card to me takes focus, which opens it.
 function focusHandoff() {
   const el = document.getElementById(HANDOFF_READ_ID)
   el?.scrollIntoView?.({ block: 'nearest' })

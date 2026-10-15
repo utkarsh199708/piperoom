@@ -13,9 +13,15 @@ export function postmortemDrafting(state: Pick<RoomState, 'postmortem' | 'closed
   return Number.isNaN(closed) || now - closed < DRAFTING_MAX_MS
 }
 
+/** 413 export_too_large: the room's log is past the server's cap, for the export and the draft alike. */
+export function isTooLarge(e: unknown): boolean {
+  return e instanceof ApiClientError && (e.status === 413 || e.code === 'export_too_large')
+}
+
 /** Why the draft did not load, in words. Never the server's message. */
 export function postmortemErrorText(e: unknown): string {
   if (isNetworkError(e)) return "can't reach Piperoom. Check your connection and retry."
+  if (isTooLarge(e)) return 'this room is too large to draft. Read its timeline in the room instead.'
   if (e instanceof ApiClientError) {
     if (e.status === 404) return 'this room was not found.'
     if (e.status === 401) return 'your session ended. Sign in again.'
@@ -30,6 +36,7 @@ export function exportErrorText(e: unknown, pipelineId: string): string {
   if (e instanceof ApiClientError && e.status === 403 && e.code === 'not_allowed') {
     return `Export needs an approver or auditor role for ${pipelineId || 'this pipeline'}`
   }
+  if (isTooLarge(e)) return 'This room is too large to export. Retrying will not help; page through its events instead.'
   if (isNetworkError(e)) return "Could not export the room: can't reach Piperoom"
   return 'Could not export the room. Try again.'
 }

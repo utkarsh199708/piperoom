@@ -155,7 +155,7 @@ export function HandoffDialog({
   )
 }
 
-/** The pending hand-off card: the toast's and ⌘K's "Read summary" focus it, which opens it. */
+/** The pending hand-off card: the attention toast's "Read summary" focuses it, which opens it. */
 export const HANDOFF_READ_ID = 'handoff-read'
 
 /**
@@ -176,13 +176,23 @@ export function HandoffAcceptBanner({
   const pending = mine ?? state.handoffs.find((h) => h.status === 'pending')
   // Keyed by id: a newer hand-off to me opens expanded again even after "Not yet".
   const [closedId, setClosedId] = useState<string | null>(null)
+  // One accept per hand-off: the card stays until handoff.accepted arrives, and a second POST would
+  // answer 409 already_decided into the banner right after a good take-over. Cleared on failure.
+  const [acceptingId, setAcceptingId] = useState<string | null>(null)
   if (!pending) return null
   const open = mine ? closedId !== mine.handoff_id : undefined
-  const accept = () => mine && actions.acceptHandoff(mine.handoff_id)
+  const accepting = !!mine && acceptingId === mine.handoff_id
+  const accept = () => {
+    if (!mine || accepting) return
+    const id = mine.handoff_id
+    setAcceptingId(id)
+    const done = actions.acceptHandoff(id)
+    if (done) void done.then((ok) => !ok && setAcceptingId((cur) => (cur === id ? null : cur)))
+  }
   const onKeyDown = (e: KeyboardEvent) => {
     if (mine && e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
       e.preventDefault()
-      accept()
+      if (!e.repeat) accept()
     }
   }
   return (
@@ -221,7 +231,14 @@ export function HandoffAcceptBanner({
                 <Button type="button" variant="ghost" onClick={() => setClosedId(mine.handoff_id)}>
                   Not yet
                 </Button>
-                <Button type="button" aria-keyshortcuts="Meta+Enter Control+Enter" onClick={accept}>
+                <Button
+                  type="button"
+                  aria-keyshortcuts="Meta+Enter Control+Enter"
+                  disabled={accepting}
+                  aria-busy={accepting || undefined}
+                  onClick={accept}
+                >
+                  {accepting && <Loader2 className="animate-spin motion-reduce:animate-none" aria-hidden="true" />}
                   Accept and take over
                   <Kbd aria-hidden="true">{modKeyLabel()}⏎</Kbd>
                 </Button>
