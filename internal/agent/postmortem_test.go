@@ -46,8 +46,14 @@ func TestWritePostmortemReturnsViolationsWithoutLogText(t *testing.T) {
 	if len(d.Violations) == 0 {
 		t.Fatal("an unknown number and name must be returned as violations")
 	}
+	seen := map[string]bool{}
 	for _, v := range d.Violations {
-		rule, _, _ := strings.Cut(v, " ")
+		// Rule names only, once each, as the contract says.
+		if seen[v] {
+			t.Errorf("violation %q listed twice", v)
+		}
+		seen[v] = true
+		rule := v
 		if rule != RuleUnknownNumber && rule != RuleUnknownName && rule != RuleUnknownRef {
 			t.Errorf("violation %q is not a grounding rule", v)
 		}

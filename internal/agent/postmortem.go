@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"piperoom/internal/events"
 )
@@ -32,8 +33,11 @@ func writePostmortem(ctx context.Context, roomEvents []events.Event, opts Option
 		case RuleEmptyField, RuleListTooLong, RuleStringTooLong:
 			return PostmortemDraft{}, fmt.Errorf("agent: postmortem: summary fails %s at %s", v.Rule, v.Field)
 		case RuleUnknownName, RuleUnknownNumber, RuleUnknownRef:
-			// Rule and field only: the detail quotes the log.
-			violations = append(violations, v.Rule+" "+v.Field)
+			// Rule names only, once each (PostmortemDraft, the
+			// postmortem.drafted payload): the detail quotes the log.
+			if !slices.Contains(violations, v.Rule) {
+				violations = append(violations, v.Rule)
+			}
 		}
 	}
 	return PostmortemDraft{Summary: s, Violations: violations}, nil
