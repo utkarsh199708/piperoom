@@ -224,16 +224,15 @@ type fieldChange struct {
 
 // diffFields compares two Avro record schemas field by field.
 func diffFields(fromSchema, toSchema string) ([]fieldChange, error) {
-	fromIdx, err := recordFields(fromSchema)
+	fromFields, err := recordFields(fromSchema)
 	if err != nil {
 		return nil, err
 	}
-	toIdx, err := recordFields(toSchema)
+	toFields, err := recordFields(toSchema)
 	if err != nil {
 		return nil, err
 	}
-	fromFields, toFields := fromIdx.fields, toIdx.fields
-	changes := enumChanges(fromIdx.enums, toIdx.enums)
+	var changes []fieldChange
 	for name, toType := range toFields {
 		fromType, ok := fromFields[name]
 		switch {
@@ -274,80 +273,28 @@ func formatChanges(changes []fieldChange) string {
 	return sb.String()
 }
 
-// schemaIndex is what a diff compares: every record field's canonical type,
-// plus the symbols of every enum definition, keyed by full name.
-type schemaIndex struct {
-	fields map[string]string
-	enums  map[string][]string // full enum name → symbols
-}
-
 // recordFields flattens every record field in an Avro schema into name→canonical type.
-func recordFields(schema string) (schemaIndex, error) {
+func recordFields(schema string) (map[string]string, error) {
 	var root any
 	if err := json.Unmarshal([]byte(schema), &root); err != nil {
-		return schemaIndex{}, err
+		return nil, err
 	}
-	idx := schemaIndex{fields: map[string]string{}, enums: map[string][]string{}}
-	walkFields(root, "", idx)
-	return idx, nil
+	out := map[string]string{}
+	walkFields(root, out)
+	return out, nil
 }
 
-// namedKind reports whether m defines a named Avro type (record, enum, fixed).
-func namedKind(m map[string]any) (name string, ok bool) {
-	name, _ = m["name"].(string)
-	switch m["type"] {
-	case "record", "enum", "fixed", "error":
-		return name, name != ""
-	}
-	return "", false
-}
-
-// qualify returns the full name of a definition and the namespace its
-// children inherit, following Avro: a dotted name carries its own namespace,
-// else the namespace attribute, else the enclosing one.
-func qualify(m map[string]any, name, enclosing string) (full, ns string) {
-	if i := strings.LastIndex(name, "."); i >= 0 {
-		return name, name[:i]
-	}
-	ns = enclosing
-	if a, ok := m["namespace"].(string); ok {
-		ns = a
-	}
-	if ns == "" {
-		return name, ns
-	}
-	return ns + "." + name, ns
-}
-
-// shortName drops the namespace of a type name.
-func shortName(n string) string { return n[strings.LastIndex(n, ".")+1:] }
-
-func walkFields(node any, ns string, idx schemaIndex) {
+func walkFields(node any, out map[string]string) {
 	switch v := node.(type) {
 	case map[string]any:
-		if v["type"] == "enum" {
-			if name, ok := namedKind(v); ok {
-				full, _ := qualify(v, name, ns)
-				if _, exists := idx.enums[full]; !exists {
-					idx.enums[full] = []string{}
-					for _, x := range anySlice(v["symbols"]) {
-						idx.enums[full] = append(idx.enums[full], fmt.Sprint(x))
-					}
-				}
-			}
-			return
-		}
 		fields, hasFields := v["fields"].([]any)
 		if !hasFields {
 			for _, val := range v {
-				walkFields(val, ns, idx)
+				walkFields(val, out)
 			}
 			return
 		}
 		recordName, _ := v["name"].(string)
-		if recordName != "" {
-			_, ns = qualify(v, recordName, ns)
-		}
 		for _, f := range fields {
 			fm, ok := f.(map[string]any)
 			if !ok {
@@ -361,77 +308,30 @@ func walkFields(node any, ns string, idx schemaIndex) {
 			if recordName != "" {
 				key = recordName + "." + fname
 			}
-			if _, exists := idx.fields[key]; !exists {
-				idx.fields[key] = canon(fm["type"], false)
+			if _, exists := out[key]; !exists {
+				out[key] = canonType(fm["type"])
 			}
-			walkFields(fm["type"], ns, idx)
+			walkFields(fm["type"], out)
 		}
 	case []any:
 		for _, x := range v {
-			walkFields(x, ns, idx)
+			walkFields(x, out)
 		}
 	}
 }
 
-var avroPrimitives = map[string]bool{"null": true, "boolean": true, "int": true, "long": true, "float": true, "double": true, "bytes": true, "string": true}
-
-// structuralTypes are the "type" values that are not a by-name reference.
-var structuralTypes = map[string]bool{"array": true, "map": true, "record": true, "enum": true, "fixed": true, "error": true}
-
-// namedTypeName reports the short name when t names a type by definition
-// ({"type":"record","name":...}), by bare reference ("com.x.Addr") or by an
-// object-wrapped reference ({"type":"com.x.Addr"}); it is the one place that
-// knows these spellings, so none can render differently from another.
-func namedTypeName(t any) (string, bool) {
-	switch v := t.(type) {
-	case string:
-		if avroPrimitives[v] {
-			return "", false
-		}
-		return shortName(v), true
-	case map[string]any:
-		if name, ok := v["name"].(string); ok && name != "" {
-			return shortName(name), true
-		}
-		if vt, ok := v["type"].(string); ok && !avroPrimitives[vt] && !structuralTypes[vt] {
-			return shortName(vt), true
-		}
-	}
-	return "", false
-}
-
-// canon renders an Avro type as a compact, comparable string. Enum symbols are
-// compared separately (see enumChanges), so an enum prints as its name. Inside
-// array items and map values (elem) a named type is written by its short name
-// whether it is defined there, defined elsewhere or only referenced (a type
-// from another subject cannot be resolved here), so moving a definition or
-// writing a reference short or full is not a change. Outside them the text is
-// unchanged (gap #493).
-func canon(t any, elem bool) string {
-	if elem {
-		if n, ok := namedTypeName(t); ok {
-			return n // every spelling of a named type: one helper, no form missed
-		}
-	}
+// canonType renders an Avro type as a compact, comparable string.
+func canonType(t any) string {
 	switch v := t.(type) {
 	case string:
 		return v
 	case map[string]any:
 		vt, _ := v["type"].(string)
-		if _, nested := v["type"].(map[string]any); nested {
-			return canon(v["type"], elem) // {"type":{"type":"array",...}}
-		}
 		if lt, ok := v["logicalType"].(string); ok {
 			if vt == "bytes" && lt == "decimal" {
 				return fmt.Sprintf("bytes(decimal %v,%v)", v["precision"], v["scale"])
 			}
 			return vt + "(" + lt + ")"
-		}
-		switch vt {
-		case "array":
-			return "array<" + canon(v["items"], true) + ">"
-		case "map":
-			return "map<" + canon(v["values"], true) + ">"
 		}
 		if name, ok := v["name"].(string); ok {
 			if vt == "" {
@@ -446,65 +346,11 @@ func canon(t any, elem bool) string {
 	case []any:
 		parts := make([]string, len(v))
 		for i, x := range v {
-			parts[i] = canon(x, elem)
+			parts[i] = canonType(x)
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
 	}
 	return fmt.Sprint(t)
-}
-
-// enumChanges reports enums defined on both sides whose symbols differ, as a
-// compact delta: a long enum must not push the real cause out of the summary.
-func enumChanges(from, to map[string][]string) []fieldChange {
-	var out []fieldChange
-	for name, fs := range from {
-		ts, ok := to[name]
-		if !ok {
-			continue
-		}
-		rm, add := setDiff(fs, ts), setDiff(ts, fs)
-		if len(rm) == 0 && len(add) == 0 {
-			continue
-		}
-		var parts []string
-		for _, x := range capList(rm) {
-			parts = append(parts, "-"+x)
-		}
-		for _, x := range capList(add) {
-			parts = append(parts, "+"+x)
-		}
-		out = append(out, fieldChange{Field: "enum " + name, Kind: "changed", From: "symbols", To: strings.Join(parts, " ")})
-	}
-	return out
-}
-
-// setDiff returns the elements of a that are not in b, in a's order.
-func setDiff(a, b []string) []string {
-	in := map[string]bool{}
-	for _, x := range b {
-		in[x] = true
-	}
-	var out []string
-	for _, x := range a {
-		if !in[x] {
-			out = append(out, x)
-		}
-	}
-	return out
-}
-
-const maxEnumSymbolsShown = 10
-
-func capList(l []string) []string {
-	if len(l) <= maxEnumSymbolsShown {
-		return l
-	}
-	return append(l[:maxEnumSymbolsShown:maxEnumSymbolsShown], fmt.Sprintf("…(%d more)", len(l)-maxEnumSymbolsShown))
-}
-
-func anySlice(v any) []any {
-	s, _ := v.([]any)
-	return s
 }
 
 // notConfigured is a schema tool's answer when the deployment has no Schema

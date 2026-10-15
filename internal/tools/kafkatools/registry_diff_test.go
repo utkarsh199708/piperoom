@@ -58,39 +58,6 @@ func TestDiffRawSchemaWithToVersion(t *testing.T) {
 	}
 }
 
-func TestDiffFieldsNestedTypes(t *testing.T) {
-	rec := func(typ string) string {
-		return `{"type":"record","name":"R","fields":[{"name":"f","type":` + typ + `}]}`
-	}
-	tests := []struct {
-		name, from, to, want string
-	}{
-		{"enum symbol removed", `{"type":"enum","name":"E","symbols":["A","B"]}`, `{"type":"enum","name":"E","symbols":["A"]}`, "enum E"},
-		{"enum symbol added", `{"type":"enum","name":"E","symbols":["A"]}`, `{"type":"enum","name":"E","symbols":["A","B"]}`, "enum E"},
-		{"array items", `{"type":"array","items":"string"}`, `{"type":"array","items":"long"}`, "R.f"},
-		{"map values", `{"type":"map","values":"string"}`, `{"type":"map","values":"long"}`, "R.f"},
-		{"union with array", `["null",{"type":"array","items":"int"}]`, `["null",{"type":"array","items":"long"}]`, "R.f"},
-		{"nested record in array",
-			`{"type":"array","items":{"type":"record","name":"N","fields":[{"name":"x","type":"int"}]}}`,
-			`{"type":"array","items":{"type":"record","name":"N","fields":[{"name":"x","type":"long"}]}}`, "N.x"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ch, err := diffFields(rec(tc.from), rec(tc.to))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(ch) == 0 || ch[0].Field != tc.want {
-				t.Errorf("changes = %+v, want a change on %s", ch, tc.want)
-			}
-		})
-	}
-	same := `{"type":"array","items":{"type":"enum","name":"E","symbols":["A","B"]}}`
-	if ch, _ := diffFields(rec(same), rec(same)); len(ch) != 0 {
-		t.Errorf("identical schemas changed: %+v", ch)
-	}
-}
-
 func TestDiffRawSchemaWithFromVersion(t *testing.T) {
 	reg := &fakeRegistry{schemaFn: func(_ context.Context, _ string, v int) (clients.SchemaVersion, error) {
 		if v == 1 {
@@ -119,36 +86,6 @@ func TestInputSchemaDescribesDirection(t *testing.T) {
 	}
 }
 
-// Named types move between an inline definition and a by-name reference
-// without any change: main answered these correctly.
-func TestDiffNamedTypeDefinitionVsReference(t *testing.T) {
-	enum := `{"type":"enum","name":"S","symbols":["A","B"]}`
-	rec := func(fields ...string) string {
-		return `{"type":"record","name":"R","fields":[` + strings.Join(fields, ",") + `]}`
-	}
-	arr := func(items string) string { return `{"type":"array","items":` + items + `}` }
-	fa := `{"name":"a","type":` + arr(enum) + `}`
-	fb := `{"name":"b","type":` + arr(`"S"`) + `}`
-	reorder, err := diffFields(rec(fa, fb), rec(fb, `{"name":"a","type":`+arr(`"S"`)+`}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// v2 defines nothing; the reference alone matches the old definition.
-	if len(reorder) != 0 {
-		t.Errorf("reorder: %+v, want no changes", reorder)
-	}
-	v1 := rec(`{"name":"status","type":`+enum+`}`, `{"name":"hist","type":`+arr(`"S"`)+`}`)
-	v2 := rec(`{"name":"hist","type":` + arr(enum) + `}`)
-	ch, _ := diffFields(v1, v2)
-	if len(ch) != 1 || ch[0].Field != "R.status" || ch[0].Kind != "removed" {
-		t.Errorf("dropped definition: %+v, want only - R.status", ch)
-	}
-	m, _ := diffFields(rec(`{"name":"m","type":{"type":"map","values":`+enum+`}}`), rec(`{"name":"m","type":{"type":"map","values":"S"}}`))
-	if len(m) != 0 {
-		t.Errorf("map def vs ref: %+v", m)
-	}
-}
-
 // Known gap (follow-up #493), same as main: outside array/map a definition and a by-name
 // reference to the same type render differently. Pinned so a fix is noticed.
 func TestDiffGapPlainFieldDefinitionVsReference(t *testing.T) {
@@ -158,20 +95,6 @@ func TestDiffGapPlainFieldDefinitionVsReference(t *testing.T) {
 	ch, _ := diffFields(v1, v2)
 	if len(ch) != 2 {
 		t.Errorf("gap changed: %+v (was 2 false changes on main)", ch)
-	}
-}
-
-func TestEnumDeltaIsCompact(t *testing.T) {
-	var syms []string
-	for i := 0; i < 600; i++ {
-		syms = append(syms, `"S`+strings.Repeat("x", 3)+string(rune('a'+i%26))+`_`+strings.Repeat("y", i/26)+`"`)
-	}
-	mk := func(s []string) string {
-		return `{"type":"record","name":"R","fields":[{"name":"f","type":{"type":"enum","name":"E","symbols":[` + strings.Join(s, ",") + `]}}]}`
-	}
-	ch, _ := diffFields(mk(syms), mk(syms[:599]))
-	if len(ch) != 1 || len(formatChanges(ch)) > 100 {
-		t.Errorf("changes %+v, text %q", ch, formatChanges(ch))
 	}
 }
 
