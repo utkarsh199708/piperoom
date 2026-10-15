@@ -69,25 +69,38 @@ Other rules you will notice:
 ## Label and grade after the incident
 
 The order is enforced by the server: **resolution at close → blind label → reveal visible → grade.**
-It is meant to stop anyone from grading the agent after reading its answer. All three routes are for a
-**member of the room's pipeline**: an approver or backup for any layer of that pipeline in `owners.yaml`,
-or the solo user (in dev mode also a `users.yaml` user whose `layers:` grant one). Anyone else gets
-`403 not_allowed`, and a viewer gets `403 viewer`. Being in `users.yaml` alone is not enough
-(`docs/api.md`, `shadow/blind` row).
+It is meant to stop anyone from grading the agent after reading its answer. The two **writing** routes,
+`shadow/blind` and `shadow/grade`, are for a **member of the room's pipeline**: an approver or backup for
+any layer of that pipeline in `owners.yaml`, or the solo user (in dev mode also a `users.yaml` user whose
+`layers:` grant one). Anyone else gets `403 not_allowed`, and a viewer gets `403 viewer`. Being in
+`users.yaml` alone is not enough (`docs/api.md`, `shadow/blind` and `shadow/grade` rows). The reading
+route, `GET .../shadow`, is open to any logged-in user, viewers included, once the blind label exists.
 
 **The web app has no screen for these three steps yet.** There is no blind-label form, no run viewer and
-no grade form for shadow rooms in `web/src` (the app only shows the shadow flag, and hides the cost chip).
-Use the API with a session cookie (in `oidc` mode, from the browser's session) or, in dev mode only,
-`X-User`. Every `POST` needs `Content-Type: application/json`. The general "Add label" form of the room
+no grade form for shadow rooms in `web/src`. The app shows no shadow indicator at all; it only uses the
+flag to hide the cost chip, the opened timer and the insight line. Use the API. Every `POST` needs
+`Content-Type: application/json`. Set these once in your shell:
+
+```sh
+BASE=https://piperoom.example.com   # your PIPEROOM_PUBLIC_URL; http://127.0.0.1:8090 for a local dev server
+read -rs SESSION                    # paste the cookie value; -s keeps it out of the screen and the history
+AUTH="Cookie: __Host-piperoom_session=$SESSION"   # oidc mode
+# dev mode only:  AUTH='X-User: <user id>'   (or  Cookie: piperoom_session=...)
+```
+
+In `oidc` mode the session cookie is `HttpOnly`, so copy its value from the browser's developer tools
+(the storage or application panel, cookie `__Host-piperoom_session`). It is a bearer credential: anyone
+who has it acts as you until it expires (`PIPEROOM_SESSION_MAX`), so keep it out of shell history,
+tickets and chat (`internal/auth/settings.go`, `internal/httpapi/auth_oidc.go`). The general "Add label" form of the room
 page posts to `POST /api/rooms/{id}/label`, which on a shadow room answers `409 not_labelled` until the
 blind label below has been written (`docs/api.md`, `label` row).
 
 1. **Blind label**, once per room (a second call is `409 already_decided`):
 
    ```sh
-   curl -X POST -H 'Content-Type: application/json' <auth> \
+   curl -X POST -H 'Content-Type: application/json' -H "$AUTH" \
      -d '{"actual_layer":"kafka-connect","root_cause_terms":["schema change","orders.total"]}' \
-     http://127.0.0.1:8090/api/rooms/<room id>/shadow/blind
+     "$BASE/api/rooms/<room id>/shadow/blind"
    ```
 
    `actual_layer` is one of the six layers (`postgres`, `kafka-connect`, `schema-registry`, `kafka`,
@@ -98,7 +111,7 @@ blind label below has been written (`docs/api.md`, `label` row).
 2. **Read the run** once the label exists (any logged-in user, viewers included):
 
    ```sh
-   curl <auth> 'http://127.0.0.1:8090/api/rooms/<room id>/shadow?include=data'
+   curl -H "$AUTH" "$BASE/api/rooms/<room id>/shadow?include=data"
    ```
 
    You get `{run, events}`: the run's status (`queued`, `running`, `hypothesised`, `no_hypothesis`,
@@ -110,9 +123,9 @@ blind label below has been written (`docs/api.md`, `label` row).
    kept in the log:
 
    ```sh
-   curl -X POST -H 'Content-Type: application/json' <auth> \
+   curl -X POST -H 'Content-Type: application/json' -H "$AUTH" \
      -d '{"layer_correct":true,"root_cause":"partial","notes":"right layer, missed the column"}' \
-     http://127.0.0.1:8090/api/rooms/<room id>/shadow/grade
+     "$BASE/api/rooms/<room id>/shadow/grade"
    ```
 
    `layer_correct` is true or false. `root_cause` is `yes`, `partial` or `no`. `notes` is up to 2,000
@@ -125,7 +138,7 @@ usual export rule (approver, backup or auditor) and only after the blind label.
 ## Measure it: `GET /api/shadow/metrics`
 
 ```sh
-curl <auth> 'http://127.0.0.1:8090/api/shadow/metrics?pipeline=orders&since=2026-10-01T00:00:00Z'
+curl -H "$AUTH" "$BASE/api/shadow/metrics?pipeline=orders&since=2026-10-01T00:00:00Z"
 ```
 
 Any logged-in user may read it. `pipeline` and `since` (RFC 3339, compared with the close time) are
@@ -141,9 +154,13 @@ optional. It counts **every closed shadow room** that matches, whatever happened
 | `total_tokens`, `tokens_available` | tokens spent; false when every run reports zero (demo mode) |
 | `per_room` | one row per room, with `alert_source`, times, status, grade and tokens |
 
-"N of M matched" is `layer_correct` out of `rooms`. A room that was never graded, or whose run ended
-in `error`, `budget`, `interrupted` or `no_hypothesis`, counts as not matched. That is deliberately the
-lower, honest number. Ungraded rooms pull the rate down, so label and grade every closed room.
+"N of M matched" is `layer_correct` out of `rooms`. Only the human grade decides a match: a room counts when
+its grade says `layer_correct: true`, whatever the run's status. A room that was never graded always
+counts as not matched, and so does one graded `false`. A run that ended in `error`, `budget`,
+`interrupted` or `no_hypothesis` can still be graded (a revealed run accepts a grade), and the grader
+should normally mark such a run wrong. The denominator is every closed shadow room, which is
+deliberately the lower, honest number. Ungraded rooms pull the rate down, so label and grade every
+closed room (`shadowMetrics` in `internal/room/shadow.go`).
 
 How many graded rooms are enough, and what hit rate means "go live", is **not decided**. The pilot
 decision proposes 20 closed, labelled rooms with `layer_correct` in at least 70% as a starting bar and
@@ -153,7 +170,7 @@ says that the 70% is not derived from data (`docs/pilot/decision.md` §5.6).
 
 | Setting | Shadow run | Live room | Source |
 |---|---|---|---|
-| Tokens per room | `PIPEROOM_SHADOW_TOKEN_BUDGET`, default **500,000**. `0` means the live room budget, never unlimited | `PIPEROOM_ROOM_TOKEN_BUDGET`, default 2,000,000 | `internal/config/config.go` (`DefaultShadowTokenBudget`), [setup.md](setup.md#1a-triage-model-and-the-token-budget) |
+| Tokens per room | `PIPEROOM_SHADOW_TOKEN_BUDGET`, default **500,000**. `0` means the live room budget (`PIPEROOM_ROOM_TOKEN_BUDGET`), which is itself uncapped if you set that to `0` | `PIPEROOM_ROOM_TOKEN_BUDGET`, default 2,000,000 | `internal/config/config.go` (`DefaultShadowTokenBudget`), [setup.md](setup.md#1a-triage-model-and-the-token-budget) |
 | Model turns | `PIPEROOM_SHADOW_MAX_TURNS`, default **20** | 40 | `internal/config/config.go`, `internal/agent/options.go` |
 | Grace after close | `PIPEROOM_SHADOW_GRACE`, a Go duration, default `0`: the run is cancelled at close. A positive value lets a run that is mid-way finish, holding its agent slot | not applicable | `docs/api.md`, Shadow mode |
 
@@ -177,7 +194,8 @@ says that the 70% is not derived from data (`docs/pilot/decision.md` §5.6).
   `interrupted`, and a closed room whose run was finished but not revealed gets its reveal
   (`docs/design/shadow.md` §3.7; `internal/room/service.go`, `Load`). With several replicas, a replica
   that takes over a shadow room does the same (`internal/room/replicas.go`, `adoptRoom`).
-- An interrupted run counts in the metrics as a room the agent did not match.
+- An interrupted run is in the metrics denominator. It counts as a match only if a person grades it
+  `layer_correct: true`; ungraded, it counts as not matched.
 - A failing run is retried up to 3 attempts while the room is open, then ends `error`. After the room
   is closed it is not retried. Failures are written to the shadow store, not to the room.
 - Shadow data is deleted with its room, by retention (`PIPEROOM_RETENTION_DAYS`) or by an admin delete

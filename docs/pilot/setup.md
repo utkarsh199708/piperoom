@@ -74,7 +74,7 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 | `USERS_FILE` | users and the layers each owns (step 2) |
 | `PIPEROOM_PUBLIC_URL` | optional. The externally visible base URL, used for room links in Slack. It is a WebSocket origin only when `PIPEROOM_WEB_DIR` is set; without a web dir the WebSocket ignores it (section 4). Its host is also the public host in the served UI's content-security policy. Must be a plain `http(s)` host, with no wildcard. An invalid value stops the start (`cmd/server/main.go:84-87`; `internal/httpapi/static.go:41-75`; `internal/httpapi/server.go:150-158`; `internal/ws/gateway.go:186-189`; `internal/httpapi/static.go:195-197`). Empty means no links. **Required in `oidc` mode, and it must be `https` there** (it sets the OIDC redirect URI) |
 | Login: `PIPEROOM_AUTH_MODE`, `PIPEROOM_OIDC_*`, `PIPEROOM_AUTH_VIEWER_GROUPS`, `PIPEROOM_SESSION_IDLE`, `PIPEROOM_SESSION_MAX`, `PIPEROOM_TRUSTED_PROXIES`, `PIPEROOM_ALLOWED_HOSTS`, `PIPEROOM_SOLO_USER` | `PIPEROOM_AUTH_MODE` is `dev` (default) or `oidc`. Every one of these is described in [deploy/README.md](../../deploy/README.md#2-settings-in-deployenv), with the identity provider setup. They are read in `internal/config/config.go` and checked in `internal/auth/settings.go` and `cmd/server/authsetup.go` |
-| `PIPEROOM_WEB_DIR` | **Live.** When set, the server also serves the built web UI (`web/dist`) at `/`, and refuses to start if the directory has no `index.html` (`cmd/server/main.go:242-249`, `checkWebDir` at `:292`; `internal/httpapi/static.go:16-20`). The Docker image sets it to `/web` (`Dockerfile`). Unset, the server serves the API and the probes only |
+| `PIPEROOM_WEB_DIR` | **Live.** When set, the server also serves the built web UI (`web/dist`) at `/`, and refuses to start if the directory has no `index.html` (`checkWebDir` in `cmd/server/main.go`; `internal/httpapi/static.go`). The Docker image sets it to `/web` (`Dockerfile`). Unset, the server serves the API and the probes only |
 | `PIPEROOM_RETENTION_DAYS` | **Live.** Deletes whole closed rooms (events, proposals, approvals, hand-offs) closed more than this many days ago, checked every 6 hours (`cmd/server/retention.go`; `internal/store/retention.go`). Open rooms are never deleted. Empty or `0` keeps everything; a value must be a whole number from 0 to 36500, or the start stops. Deletion cannot be undone: export a room first with `GET /api/rooms/{id}/export` (SHA-256 over the JCS form, `internal/room/service_export.go`) |
 
 **Model provider, triage and token budget**
@@ -105,7 +105,7 @@ exported in the shell that runs compose overrides `deploy/.env`, so run compose 
 
 | Variable | Meaning |
 |---|---|
-| `PIPEROOM_MAX_AGENTS` | caps concurrent agent runs across all rooms **of one replica**; the others queue. Empty or `0` means the default, 3 (`internal/room/agentslots.go:16`; `cmd/server/maxagents.go:12-32`). The start-up log prints the value (`cmd/server/main.go:70`). It is a cost and fairness knob, not a server-capacity knob (see [Supported scale](#supported-scale)). `PIPEROOM_MAX_AGENTS_GLOBAL` caps working agents across all replicas (`internal/config/config.go`) |
+| `PIPEROOM_MAX_AGENTS` | caps concurrent agent runs across all rooms **of one replica**; the others queue. Empty or `0` means the default, 3 (`internal/room/agentslots.go:16`; `cmd/server/maxagents.go:12-32`). The start-up log prints the value (`server: agent cap` in `cmd/server/main.go`). It is a cost and fairness knob, not a server-capacity knob (see [Supported scale](#supported-scale)). `PIPEROOM_MAX_AGENTS_GLOBAL` caps working agents across all replicas (`internal/config/config.go`) |
 | `ALERTMANAGER_TOKEN`, `GRAFANA_ALERT_SECRET`, `PAGERDUTY_ALERT_SECRET`, `DATADOG_ALERT_TOKEN`, `GENERIC_ALERT_SECRET` | Secrets for the signed alert routes `POST /api/alerts/{source}` (section 6). A source is enabled only when its secret is set (`internal/alertin/verify.go:90-102`); unset, its route answers 401 (`internal/httpapi/alerts.go:31-41`). Read in `cmd/server/alerts.go:17-40` (`config.go:148-153`) |
 | `PAGERDUTY_SERVICES`, `DEFAULT_ALERT_PIPELINE` | Used by the signed routes. `PAGERDUTY_SERVICES` maps service ids to pipelines, and a bad entry stops the start. `DEFAULT_ALERT_PIPELINE` is used when an alert names no pipeline, and a bad value stops the start (`cmd/server/alerts.go:17-40`; `config.go:151,154`) |
 
@@ -364,7 +364,7 @@ go run ./cmd/server
 the web UI, and starts it with a compose file that includes its own Postgres. It has its own
 10-minute path: copy `deploy/pilot.env.example` to `deploy/.env`, copy the two example YAML files
 under `deploy/config/`, then start the compose file. The image runs `/piperoom` with `PIPEROOM_AUTH_MODE=oidc` set in its environment and carries no dev auth (`Dockerfile`); it stops at start-up, naming the variable, until the OIDC settings are given. Its health check calls `--healthcheck`. The compose file
-publishes the port on `PIPEROOM_BIND`, which defaults to `127.0.0.1` (`deploy/docker-compose.pilot.yml:133`).
+publishes the port on `PIPEROOM_BIND`, which defaults to `127.0.0.1` (`ports:` in `deploy/docker-compose.pilot.yml`).
 Compose passes only the variables it lists; the list covers every setting in section 1 (see the compose
 note there).
 
@@ -422,17 +422,31 @@ when curl sends no cookie. The signed alert routes need neither. (The full contr
 
 ### What happens on a restart
 
-On start-up the service reloads every room from the event log (`internal/room/service.go:189-234`).
-An open room comes back with its agent **idle**. The service writes an `agent.status` `idle` event
-with the detail "server restarted", and a system message (`service.go:238-261`). The agent does not
-run again until someone resumes it: a driver's steer, a comment that mentions `@agent`, or a sent
-suggestion (`internal/room/service_steer.go:44,68,137`; `service.go:262-267`). The new run starts
-from the room's original alert, not from where the old run stopped (`service.go:266`).
+On start-up the service reloads every room from the event log (`Load` in `internal/room/service.go`).
+**It starts no agent by itself**, because a restart must not spend model calls on rooms nobody is
+watching. What an open room shows depends on what its agent was doing:
 
-With **several replicas** the same rule holds. A room whose server stopped is taken over by another
-replica once its lease (30 s) runs out, and the new server pauses the agent the same way. Only with
-`PIPEROOM_RESUME_ON_TAKEOVER=1` does a working agent resume on the new server, at most 3 times per
-room per hour (`internal/room/replicas.go`, `adoptRoom`). Failover was not tested under load
+- If the agent was **working or queued** when the server stopped, the room is marked idle: an
+  `agent.status` `idle` event with the detail "server restarted" and a system message ("the agent is
+  paused; the driver can steer, or anyone can mention @agent, to resume"). With the Postgres store a
+  stop hands the room's agent lease over at once (a crash lets it run out after 30 s), and the
+  take-over scan, which runs every 10 s, writes the notice (`Close` in `internal/room/service.go`;
+  `adoptRoom` in `internal/room/replicas.go`). With a store that belongs to one process (the `--demo`
+  store) `Load` writes it for every open room.
+- If the agent had already finished or was idle, the room gets **no** "server restarted" message. Its
+  agent is simply not running.
+- The agent runs again when a driver steers, a comment mentions `@agent`, or a suggestion is sent
+  (`internal/room/service_steer.go`, `ensureAgentLocked`). The new run starts from the room's original
+  alert, not from where the old run stopped.
+- **`PIPEROOM_RESUME_ON_TAKEOVER=1` changes this, even with one server.** Then a room whose agent was
+  working (or that has unanswered input) resumes by itself after the restart: a system message, a fresh
+  run with the room's open proposals listed so it does not propose them again, at most 3 times per room
+  per hour. The default is off. This is the only setting that makes a restart resume an agent
+  (`adoptRoom`, `resumeAllowedLocked` in `internal/room/replicas.go`; `cmd/server/replicas.go`).
+
+With **several replicas** it works the same way: a room whose server stopped is taken over by another
+replica, at the next scan after a graceful stop or when its lease (30 s) runs out after a crash, and the
+new server pauses or resumes the agent by the rules above. Failover was not tested under load
 (`reviews/capacity-2026-10.md` §9.4). Shadow rooms are never resumed: a run that was in progress is
 marked `interrupted` ([shadow-rooms.md](shadow-rooms.md#restarts-and-failures)).
 
@@ -462,7 +476,7 @@ The server has two login modes (F1; `docs/api.md` §Login; `docs/design/auth.md`
 In dev mode `cmd/server` refuses to listen on any address other than loopback unless
 `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` is set **and** `PIPEROOM_DEV_ACK=dev-login-has-no-password`
 states that you know dev login has no password (the old `--allow-remote` flag is a deprecated alias of
-the first; `--demo` needs neither). Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any
+the first; `--demo` skips only the acknowledgement and still needs the switch off loopback). Loopback is all of `127.0.0.0/8`, `::1`, and `localhost` in any
 letter case. With both set it starts and logs a loud warning (`cmd/server/listen.go`,
 `cmd/server/authsetup.go`). Keep `PIPEROOM_HTTP_ADDR` on loopback,
 and reach it through an SSH tunnel or a VPN. An authenticating reverse proxy needs
@@ -477,15 +491,17 @@ acknowledgement in `deploy/.env` ([deploy/README.md](../../deploy/README.md)).
 
 ### Supported scale
 
-What one Piperoom replica is **tested** to carry. These are floors measured on a shared 4-vCPU VM with
+What one Piperoom replica is proposed to carry, from what was tested. These are floors measured on a shared 4-vCPU VM with
 Postgres on the same machine, not limits and not a target. The run on managed Postgres over the network,
 which the review calls the most important one, a multi-hour soak and a replica failover under load have
 not been done (`reviews/capacity-2026-10.md` §7, §8, §9.4).
 
-> One replica on 4 vCPUs with the default database pool was tested with up to **60 open rooms**, up to
-> **500 connected viewers** in total, up to **25 room events per second** across all rooms,
-> `PIPEROOM_MAX_AGENTS` up to **10**, and rooms up to **10,000 events**. Beyond these, comments and agent
-> events slow down for every room before anything is dropped.
+> One replica on 4 vCPUs with the default database pool was **tested with up to 60 open rooms** (not a
+> limit: more were not tried). The review proposes it **supports** up to **500 connected viewers** in
+> total, up to **25 room events per second** across all rooms, `PIPEROOM_MAX_AGENTS` up to **10**, and
+> rooms up to **10,000 events**. Each of those figures except the room count is set at about half of
+> where something broke first in the review's runs, so they are floors, not limits. Beyond them,
+> comments and agent events slow down for every room before anything is dropped.
 > (`reviews/capacity-2026-10.md` §7; `docs/pilot/decision.md` §2.3)
 
 A first pilot of one or two pipelines and a handful of engineers is far inside these figures.

@@ -76,13 +76,15 @@ below is from the code.
   watcher (`PIPEROOM_WATCH_*`, design in `docs/design/watcher.md`) is live; the default mode `log` only writes log lines.
   That is not [shadow rooms](shadow-rooms.md), which are a separate, per-pipeline feature. See
   [setup.md](setup.md#1-configure-the-environment).
-- **A restart does not resume the agent.** Open rooms come back with the agent idle and a "server
-  restarted" message (`internal/room/service.go`, `noteRestartLocked`). A driver's steer, an `@agent`
-  mention or a sent suggestion starts it again. A fix that was approved but not finished is marked
-  failed, not re-run. With several replicas, a room whose server stopped is paused the same way, unless
-  `PIPEROOM_RESUME_ON_TAKEOVER=1`. See [setup.md](setup.md#what-happens-on-a-restart).
-- **Scale.** The tested floor is one replica, 60 open rooms, 500 viewers and 25 events per second. More
-  replicas do not raise the write rate. See [setup.md](setup.md#supported-scale).
+- **A restart does not resume the agent, by default.** A room whose agent was working when the server
+  stopped comes back idle with a "server restarted" message; a room whose agent had finished gets no
+  message. A driver's steer, an `@agent` mention or a sent suggestion starts the agent again. Only
+  `PIPEROOM_RESUME_ON_TAKEOVER=1` makes a working agent resume by itself, and it does so after a plain
+  restart of one server too (`Load`, `adoptRoom` in `internal/room`). A fix that was approved but not
+  finished is marked failed, not re-run. See [setup.md](setup.md#what-happens-on-a-restart).
+- **Scale.** One replica was tested with up to 60 open rooms and is proposed to support 500 viewers and
+  25 events per second (floors, about half of where something broke). More replicas do not raise the
+  write rate. See [setup.md](setup.md#supported-scale).
 - **Kafka keys are decoded with an Avro library that has open advisories.** See
   [permissions.md](permissions.md#kafka) and [data-handling.md](data-handling.md#3-prompt-injection-and-untrusted-text).
 - **Listen address is checked.** In dev auth mode the server refuses any non-loopback

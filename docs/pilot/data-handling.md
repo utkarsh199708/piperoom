@@ -174,7 +174,9 @@ guarantee. The controls that do not depend on the model are:
 
 > **Untrusted Kafka keys are decoded by the read tools.** `kafka_find_by_key` and `trace_record` decode
 > record keys with an Avro library that has open advisories (GO-2026-5046, 5047, 5048). A crafted key
-> can stall or fail an investigation, or use a lot of memory. It cannot write anything. The replacement
+> can hold an agent slot until the server is restarted (three such keys block every room on a replica
+> at the default `PIPEROOM_MAX_AGENTS`), fail a run, or run the server out of memory, which takes down
+> every room on it. It cannot write anything. The replacement
 > library is pilot gate G2, a separate change ("[G2] kafka: decode keys with the maintained avro fork"),
 > and `go.mod` on `main` still has the old one. Details and the interim advice are in
 > [permissions.md](permissions.md#kafka). Source: `reviews/vuln-report-2026-10.md` §avro.

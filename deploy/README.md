@@ -83,6 +83,7 @@ Run these from the repository root.
    |---|---|
    | `ANTHROPIC_API_KEY` | the agent's API key (`ANTHROPIC_WORKSPACE_ID` too, for a user key). Only for the default `anthropic` provider; for AWS Bedrock or Google Vertex AI see [Model provider](#model-provider) |
    | `PIPEROOM_POSTGRES_PASSWORD` | the bundled Postgres password. Generate it with `openssl rand -hex 32`. It goes into a URL unescaped, so it must not contain `/ @ : # ? % $` |
+   | `PIPEROOM_PUBLIC_URL`, `PIPEROOM_OIDC_ISSUER`, `PIPEROOM_OIDC_CLIENT_ID`, `PIPEROOM_OIDC_CLIENT_SECRET` | login. `PIPEROOM_AUTH_MODE` defaults to `oidc` here, and the container refuses to start without these (the log names the missing one). `PIPEROOM_PUBLIC_URL` must be `https`. Set up your identity provider first: [Single sign-on](#single-sign-on-oidc). For a quick look with no identity provider use the [demo](#try-the-ui-with-no-stack-demo-mode) or the dev-auth override |
    | `SOURCE_DB_URL`, `WAREHOUSE_DB_URL` | the read-only connection URLs |
    | `KAFKA_BROKERS`, `CONNECT_URL`, `SCHEMA_REGISTRY_URL` | your hosts (`SCHEMA_REGISTRY_URL`: `off` when the pipelines use no registry; compose requires a value). `localhost` inside the container is the container itself, so use real host names |
 
@@ -113,8 +114,10 @@ Run these from the repository root.
 
 5. **Open it:** `http://<host>:8090` (`http://localhost:8090` on the same machine; with the
    default `PIPEROOM_BIND` that is the only place it works). With the default `oidc` mode the
-   address must be your `PIPEROOM_PUBLIC_URL` (https, usually behind a TLS proxy) and you sign in
-   at your identity provider. The rest of this step describes the **dev login**, which exists only
+   address must be your `PIPEROOM_PUBLIC_URL` (https), so a TLS proxy must run in front of the
+   container and reach its published port. With the default `PIPEROOM_BIND=127.0.0.1` that proxy
+   has to run on the same host; for a proxy on another host, set `PIPEROOM_BIND` to the address it
+   can reach (not `0.0.0.0` unless a firewall limits it). You sign in at your identity provider. The rest of this step describes the **dev login**, which exists only
    with the dev-auth override: the login screen lists the users
    from `users.yaml`: pick one. The page sets a session cookie
    (`piperoom_session`) and the user switcher in the UI changes user later. There are no more
@@ -592,8 +595,9 @@ The export carries a SHA-256 over the JCS (RFC 8785) form of the room with the t
 `integrity` member removed (also sent in the `X-Piperoom-Export-SHA256` header), so a plain
 `sha256sum` of the file will not match it. Use it to check later that the file was not changed.
 In `oidc` mode a request needs a session cookie, not `X-User`: export from the browser, or send
-a cookie. Today a member may export, and a viewer may export only if named in `auditors:`.
-A member who is not an owner, backup or auditor cannot export; add them to `auditors:`.
+a cookie. Only an approver or backup for a layer of the room's pipeline, or someone in `auditors:`,
+may export. A plain member and a viewer who is not in `auditors:` get `403 not_allowed`; add the
+people who should export to `auditors:`.
 
 ## Watcher
 
@@ -636,7 +640,7 @@ It needs no API key and no data stack. Do not use demo mode for a real incident.
 | Runs as | uid 65532 (`nonroot`), read-only root filesystem in compose, all capabilities dropped |
 | Listens on | `0.0.0.0:8090` (`PIPEROOM_HTTP_ADDR`); the UI is served from `/web` (`PIPEROOM_WEB_DIR`) at `/`, the API at `/api` |
 | Health | `HEALTHCHECK` runs `/piperoom --healthcheck`, which calls `GET /healthz` (distroless has no curl). `GET /readyz` also checks the room database, and suits a load balancer or Kubernetes readiness probe |
-| Auth | `PIPEROOM_AUTH_MODE=dev` and `PIPEROOM_DEV_ALLOW_NONLOOPBACK=1` are set in the image (dev login, no password; see the top of this file). Set `PIPEROOM_AUTH_MODE=oidc` in `deploy/.env` for real login ([Single sign-on](#single-sign-on-oidc)); the server then ignores the non-loopback switch and logs a warning |
+| Auth | The image sets `PIPEROOM_AUTH_MODE=oidc` and carries no dev auth (no `PIPEROOM_DEV_ALLOW_NONLOOPBACK`). It stops at start-up, naming the missing variable, until the OIDC settings are given ([Single sign-on](#single-sign-on-oidc)). Dev login (no password) is an explicit opt-in at run time: `deploy/docker-compose.dev-auth.yml`, or `-e PIPEROOM_AUTH_MODE=dev -e PIPEROOM_DEV_ALLOW_NONLOOPBACK=1 -e PIPEROOM_DEV_ACK=dev-login-has-no-password` |
 | Browser rules | The UI calls the API and WebSocket on its own origin, so there is no CORS at all (the server sends no `Access-Control-*` headers). Cross-origin browser `POST`s are refused with `403`. The server sends a CSP, `X-Content-Type-Options`, `Referrer-Policy` and `frame-ancestors 'none'` |
 
 Build the image alone: `docker build -t piperoom:pilot .`
@@ -658,12 +662,13 @@ docker compose -f deploy/docker-compose.pilot.yml down            # stop; data s
 docker compose -f deploy/docker-compose.pilot.yml down -v         # stop AND delete the room database
 ```
 
-On a restart the server rebuilds every room from its log. It does **not** start an agent for the
-open rooms: each one comes back with the agent idle (a "server restarted" message), and the agent runs
-again only when a driver steers, someone mentions `@agent`, or a suggestion is sent. A fix that was
-approved but not finished is marked failed, not re-run
-([setup.md](../docs/pilot/setup.md#what-happens-on-a-restart), checked against
-`internal/room/service.go`, `noteRestartLocked`).
+On a restart the server rebuilds every room from its log. By default it does **not** start an agent
+for the open rooms. A room whose agent was working when the server stopped is marked idle with a
+"server restarted" message, and the agent runs again only when a driver steers, someone mentions
+`@agent`, or a suggestion is sent. Only with `PIPEROOM_RESUME_ON_TAKEOVER=1` does an agent that was
+working resume by itself, even on one server. A fix that was approved but not finished is marked
+failed, not re-run ([setup.md](../docs/pilot/setup.md#what-happens-on-a-restart), checked against
+`Load` and `adoptRoom` in `internal/room`).
 
 ## Troubleshooting
 
@@ -699,7 +704,7 @@ approved but not finished is marked failed, not re-run
 | `rate_limited` (`429` on `/auth/login`) | more than 300 logins a minute from one client address. Behind a proxy this usually means everyone shares the proxy's address: set `PIPEROOM_TRUSTED_PROXIES`, and make the proxy send plain addresses (no port) in `X-Forwarded-For`. Wait a minute (`Retry-After: 60`) |
 | `idp_unavailable` (`503`) | the server has not reached the IdP (discovery is retried in the background, 1 s up to 30 s apart, and is not fatal), or the IdP's token endpoint was down during the login. Check `PIPEROOM_OIDC_ISSUER`, DNS, firewall and `HTTPS_PROXY`/`NO_PROXY` (see [Outbound proxy](#outbound-proxy)); watch for `auth: oidc discovery succeeded`. People already signed in are not affected |
 | `viewer` (`403`) | the person is a viewer: in `PIPEROOM_AUTH_VIEWER_GROUPS`, or only in `auditors:`. Viewers can read and watch, not change anything. To make them members, add them to `users.yaml` or as an approver or backup in `owners.yaml`, then restart |
-| `not_allowed` (`403`) on export | a viewer who is not in `auditors:` (see [Roles](#roles)) |
+| `not_allowed` (`403`) on export | the person is not an approver or backup for a layer of the room's pipeline and is not in `auditors:`: a plain member and a viewer both get it (see [Roles](#roles)) |
 | `403 not_layer_owner` "no groups claim in token (IdP overage?)" (`groups_missing`) | the ID token had no groups claim, so a group right could not apply. `GET /api/me` shows `groups_missing: true`; the log has `auth: no groups claim in id token`. Check the claim is in the **ID token** and its name equals `PIPEROOM_OIDC_GROUPS_CLAIM`; with Entra check for overage. Or name the person with `user:`. They must sign in again |
 | `404` on `POST /api/alerts/webhook` | normal in `oidc` mode: that route is not mounted. Use the signed `/api/alerts/generic` |
 | An alert sender gets 401 | its secret in `deploy/.env` is empty or wrong, or the proxy is asking it to log in (see [Alerts](#alerts)) |

@@ -163,14 +163,24 @@ and `trace_record` decode the **keys** of records on the pipeline's topics, and 
 Avro schema id. The Avro library that does this, `github.com/hamba/avro/v2` v2.31.0, has three open
 advisories that are reachable from these tools: GO-2026-5046 (one key can keep a CPU core busy and the
 decode ignores the tool's deadline), GO-2026-5047 (a key can make the decoder panic) and GO-2026-5048
-(unbounded memory use). Anyone who can produce to a pipeline topic controls those bytes. The effect is
-denial of service (a stuck or failed investigation, possibly memory pressure on the server), not a write
-to your systems: the Kafka principal is still read-only. `go.mod` on `main` still lists
-`hamba/avro/v2 v2.31.0`. The fix, pilot gate G2, is a separate change, "[G2] kafka: decode keys with the
+(unbounded map growth, which can run the server out of memory). Anyone who can produce to a pipeline
+topic controls those bytes. The effect is denial of service, not a write to your systems: the Kafka
+principal is still read-only. In practice:
+
+- A key that triggers GO-2026-5046 spins a core forever and the stuck investigation **keeps its agent
+  slot until the server is restarted**. `PIPEROOM_MAX_AGENTS` defaults to 3 per replica, so three such
+  keys can block every live and shadow room on that replica. To recover, restart the server.
+- A key that triggers GO-2026-5048 can get the server process **killed for lack of memory, which takes
+  down every room on that replica** until it restarts.
+- A key that triggers GO-2026-5047 makes one run fail; the server turns the panic into a failed room run
+  and keeps running (`reviews/vuln-report-2026-10.md` §avro).
+
+`go.mod` on `main` still lists `hamba/avro/v2 v2.31.0`. The fix, pilot gate G2, is a separate change, "[G2] kafka: decode keys with the
 maintained avro fork" (`github.com/iskorotkov/avro/v2` v2.33.0, with size limits set). Until it is
 merged and in your build, limit who can produce to the pipeline's topics, and keep the principal's
 `Read` to those topics. Sources: `reviews/vuln-report-2026-10.md` (§Summary, §avro),
 `docs/pilot/decision.md` §2.2 and §4 (G2), `internal/clients/kafka/kafka.go` (`decodeKey`).
+
 Use TLS and SASL on the listener if your cluster has them. The settings exist
 (`KAFKA_SECURITY_PROTOCOL`, `KAFKA_SASL_*`, `KAFKA_TLS_*`, and the same for Schema Registry
 and Connect; see [setup.md](setup.md#1-configure-the-environment)), and `internal/wiring`
@@ -209,14 +219,15 @@ Notes on the table:
   (`defaultConnectorConfigAllowList` in `internal/actions/connector_config.go`):
   `decimal.handling.mode` = `precise|string` (`double` is not offered: it loses precision, which matters
   for money); `time.precision.mode` = `adaptive|adaptive_time_microseconds|connect`;
-  `tombstones.on.delete` = `true|false`; `errors.log.enable` = `true` only (refused when
-  `errors.log.include.messages` is set to true, because that would write record values into the Connect
-  worker log); `errors.deadletterqueue.context.headers.enable` = `true` only, and only on a sink
+  `tombstones.on.delete` = `true|false`; `errors.log.enable` = `true` only (refused
+  unless `errors.log.include.messages` is unset or exactly `false`; a value that is `true` or cannot be
+  read as `false`, such as an unresolved config-provider reference, is refused too, because enabling the
+  error log could then write record values into the Connect worker log); `errors.deadletterqueue.context.headers.enable` = `true` only, and only on a sink
   connector. The two `errors.*` keys add visibility (worker log lines, Connect error headers on DLQ
   records) and never change which records are kept. Turning them off is not offered. `errors.tolerance`
   is deliberately not allowed: on a source connector `all` drops CDC events for good. Keys that look
-  like credentials are refused (`looksSecret` in the same file). This list is as of PR #216 (removes
-  `double`); re-read the function on your release.
+  like credentials are refused (`looksSecret` in the same file). `double` was removed in PR #216 (merged);
+  re-read the function on your release.
 - A config `PATCH` needs Kafka Connect 3.5 or later. An older Connect answers 405, which is
   reported as an error. There is no `PUT` fallback (`Client.UpdateConfig`).
 - Connect restarts the connector's tasks when its config changes, so the update is not free.
