@@ -85,9 +85,10 @@ they assume the stack is in use and skip.
   `devctl up`/`reset` waits on each service's health check, but a cold pull of the Kafka/Connect/
   Schema Registry images can take a few minutes the first time. Re-run `devctl status` once it
   returns.
-- **`goose: command not found`** (once `migrations/` and the room-service migrations land) —
-  install goose (`go install github.com/pressly/goose/v3/cmd/goose@latest`) and make sure
-  `$(go env GOPATH)/bin` is on `PATH`.
+- **Room database migrations** — there is no `goose` CLI to install: the migrations in
+  `migrations/` are embedded in the server, which applies them itself at start (the
+  `pressly/goose` library, not the command). A start that fails with
+  `server: ping for migrations` means `PIPEROOM_DB_URL` does not answer.
 - **Integration tests fail instead of skipping** — they should detect an unreachable stack and
   skip; if one fails hard, that's a bug in that test, not a reason to leave the stack running
   unnecessarily to work around it.

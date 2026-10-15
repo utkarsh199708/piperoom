@@ -74,10 +74,14 @@ make evals                                 # validate eval scenarios — no mode
 cd web && npm ci && npm run lint && npm run build && npx vitest run
 ```
 
-CI (`.github/workflows/ci.yml`) runs the Go unit-test job (including the eval scenario
-check, `go run ./evals/cmd/evalrun -validate`) and the web job on every pull request and on
-push to `main`; integration tests need the dev stack and are not run in CI. Live eval runs
-call the model and need `ANTHROPIC_API_KEY`; see `evals/README.md`.
+CI (`.github/workflows/ci.yml`) runs on every pull request and on push to `main`: the Go
+job (gofmt, vet including the build-tagged files, build, unit tests, and the eval scenario
+check `go run ./evals/cmd/evalrun -validate`), the integration tests against a room-only
+Postgres (`internal/store` and `internal/room` run for real; tests that need the rest of the
+dev stack skip), the race detector, govulncheck, the deploy manifests (Helm, Terraform, no
+dev auth in the image) and the web job. The OIDC end-to-end test runs only by hand
+(`workflow_dispatch`). Live eval runs call the model and need `ANTHROPIC_API_KEY`; see
+`evals/README.md`.
 
 ### Web tooling: npm install scripts
 
