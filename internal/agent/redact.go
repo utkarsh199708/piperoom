@@ -17,14 +17,24 @@ import (
 // truncated, emitted or wrapped for the prompt. Masking before truncation
 // matters: a cut-off secret is harder to recognize.
 
-// scrubToolResult masks secrets in a read tool's summary and data.
-func (r *runner) scrubToolResult(tool string, res tools.Result) tools.Result {
+// scrubToolResult masks secrets in a read tool's summary and data. Encoding
+// the data can run a tool type's own MarshalJSON, which may panic; that must
+// not take the run down, so a panic is returned as an error (masked, never the
+// panic value verbatim) and the result is dropped. Callers treat it like the
+// tool's own error.
+func (r *runner) scrubToolResult(tool string, res tools.Result) (out tools.Result, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			out = tools.Result{}
+			err = fmt.Errorf("agent: tool %s result could not be encoded: panic: %v", tool, scrubPanic(p))
+		}
+	}()
 	summary, st := redact.Text(res.Summary)
 	data, dst := redact.JSONStats(res.Data)
 	res.Summary, res.Data = summary, data
 	r.logRedaction(tool, "result", st)
 	r.logRedaction(tool, "data", dst)
-	return res
+	return res, nil
 }
 
 // scrubToolError masks secrets in a read tool's error text. Driver errors
