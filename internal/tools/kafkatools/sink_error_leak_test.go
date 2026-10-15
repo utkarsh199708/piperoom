@@ -1,9 +1,6 @@
 package kafkatools
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // TestTraceSinkErrorsMaskRecordValues (#382): MySQL, PostgreSQL and
 // Elasticsearch sink errors quote the failing value in wordings that are not
@@ -38,27 +35,115 @@ func TestTraceSinkErrorsMaskRecordValues(t *testing.T) {
 	})
 }
 
-// TestTraceSinkErrorsKnownGaps pins sink wordings that still carry the record
-// value, on main and here: known gaps, not in #382's list, follow-up #505.
-// When #505 masks one, move its row to TestTraceSinkErrorsMaskRecordValues.
-func TestTraceSinkErrorsKnownGaps(t *testing.T) {
+// TestTraceSinkErrorsMaskMoreValues (#505): PostgreSQL date/time and
+// malformed-literal errors and Elasticsearch date-parse errors quote the
+// failing value after the error's category words. Only the value is masked:
+// the category words are the diagnosis and must stay. PostgreSQL rows come
+// quoted and unquoted, with DETAIL/HINT on the same line or on lines of their
+// own, and inside a Connect trace; Elasticsearch rows come with and without
+// "Preview of field's value" and with a nested caused_by reason.
+func TestTraceSinkErrorsMaskMoreValues(t *testing.T) {
 	const value = "Alice Leakwood 42"
-	for _, tt := range []struct{ name, line string }{
+	const pg = "Caused by: org.postgresql.util.PSQLException: ERROR: "
+	const bulk = "Caused by: org.apache.kafka.connect.errors.ConnectException: Bulk request failed: "
+	checkRows(t, []traceRow{
+		// The three #505 forms, pinned as gaps by #501.
 		{"postgres date/time field value out of range",
-			"Caused by: org.postgresql.util.PSQLException: ERROR: date/time field value out of range: \"" + value + "\""},
+			pg + "date/time field value out of range: \"" + value + "\"",
+			[]string{"Leakwood"}, []string{"PSQLException", "date/time field value out of range"}},
 		{"postgres malformed array literal",
-			"Caused by: org.postgresql.util.PSQLException: ERROR: malformed array literal: \"" + value + "\""},
+			pg + "malformed array literal: \"" + value + "\"",
+			[]string{"Leakwood"}, []string{"PSQLException", "malformed array literal"}},
 		{"elasticsearch failed to parse date field",
-			"Caused by: org.apache.kafka.connect.errors.ConnectException: Bulk request failed: [{\"type\":\"illegal_argument_exception\",\"reason\":\"failed to parse date field [" + value + "] with format [strict_date_optional_time||epoch_millis]\"}]"},
+			bulk + "[{\"type\":\"illegal_argument_exception\",\"reason\":\"failed to parse date field [" + value + "] with format [strict_date_optional_time||epoch_millis]\"}]",
+			[]string{"Leakwood"}, []string{"illegal_argument_exception", "failed to parse date field", "with format [strict_date_optional_time||epoch_millis]"}},
+
+		// PostgreSQL variants.
+		{"postgres date/time unquoted",
+			pg + "date/time field value out of range: " + value,
+			[]string{"Leakwood"}, []string{"PSQLException", "date/time field value out of range"}},
+		{"postgres date/time with hint on the line",
+			pg + "date/time field value out of range: \"" + value + "\"  Hint: Perhaps you need a different \"datestyle\" setting.",
+			[]string{"Leakwood"}, []string{"date/time field value out of range", "Hint:"}},
+		{"postgres date/time unquoted with hint on the line",
+			pg + "date/time field value out of range: " + value + "  Hint: Perhaps you need a different \"datestyle\" setting.",
+			[]string{"Leakwood"}, []string{"date/time field value out of range", "Hint:"}},
+		{"postgres date/time hint on its own line",
+			pg + "date/time field value out of range: \"" + value + "\"\n  Hint: Perhaps you need a different \"datestyle\" setting.\n  Position: 52",
+			[]string{"Leakwood"}, []string{"date/time field value out of range"}},
+		{"postgres date/time batch entry",
+			"Caused by: java.sql.BatchUpdateException: Batch entry 0 INSERT INTO \"orders\" (\"id\",\"ts\") VALUES (7,'" + value + "') was aborted: ERROR: date/time field value out of range: \"" + value + "\"  Call getNextException to see other errors in the batch.",
+			[]string{"Leakwood"}, []string{"BatchUpdateException", "date/time field value out of range"}},
+		{"postgres interval field value out of range",
+			pg + "interval field value out of range: \"" + value + "\"",
+			[]string{"Leakwood"}, []string{"interval field value out of range"}},
+		{"postgres timestamp out of range",
+			pg + "timestamp out of range: \"" + value + "\"",
+			[]string{"Leakwood"}, []string{"timestamp out of range"}},
+		{"postgres date out of range",
+			pg + "date out of range: \"" + value + "\"",
+			[]string{"Leakwood"}, []string{"date out of range"}},
+		{"postgres malformed array literal unquoted",
+			pg + "malformed array literal: " + value,
+			[]string{"Leakwood"}, []string{"malformed array literal"}},
+		// "Detail:" sends the line through main's dlq_peek redaction, which
+		// already masks the value (and the rest of the line).
+		{"postgres malformed array literal with detail",
+			pg + "malformed array literal: \"" + value + "\"  Detail: Array value must start with \"{\" or dimension information.",
+			[]string{"Leakwood"}, []string{"malformed array literal"}},
+		{"postgres malformed array literal detail on its own line",
+			pg + "malformed array literal: \"" + value + "\"\n  Detail: Array value must start with \"{\" or dimension information.",
+			[]string{"Leakwood"}, []string{"malformed array literal"}},
+		{"postgres malformed record literal",
+			pg + "malformed record literal: \"" + value + "\"",
+			[]string{"Leakwood"}, []string{"malformed record literal"}},
+		{"postgres malformed range literal",
+			pg + "malformed range literal: \"" + value + "\"",
+			[]string{"Leakwood"}, []string{"malformed range literal"}},
+		{"postgres value with a quote inside",
+			pg + "malformed array literal: \"Alice \"Leakwood\" 42\"",
+			[]string{"Leakwood"}, []string{"malformed array literal"}},
+		{"postgres top line",
+			"org.apache.kafka.connect.errors.ConnectException: org.postgresql.util.PSQLException: ERROR: date/time field value out of range: \"" + value + "\"",
+			[]string{"Leakwood"}, []string{"date/time field value out of range"}},
+
+		// Elasticsearch variants.
+		{"elasticsearch date field no format",
+			bulk + "[{\"type\":\"illegal_argument_exception\",\"reason\":\"failed to parse date field [" + value + "]\"}]",
+			[]string{"Leakwood"}, []string{"failed to parse date field"}},
+		{"elasticsearch date field value with brackets",
+			bulk + "[{\"type\":\"illegal_argument_exception\",\"reason\":\"failed to parse date field [Alice] Leakwood [42] with format [epoch_millis]\"}]",
+			[]string{"Leakwood"}, []string{"failed to parse date field", "with format [epoch_millis]"}},
+		{"elasticsearch exception form",
+			"Caused by: org.elasticsearch.ElasticsearchException: Elasticsearch exception [type=illegal_argument_exception, reason=failed to parse date field [" + value + "] with format [strict_date_optional_time||epoch_millis]]",
+			[]string{"Leakwood"}, []string{"ElasticsearchException", "failed to parse date field"}},
+		{"elasticsearch nested caused_by reason",
+			bulk + "[{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse field [created] of type [date] in document with id 'k1'\",\"caused_by\":{\"type\":\"illegal_argument_exception\",\"reason\":\"failed to parse date field [" + value + "] with format [strict_date_optional_time||epoch_millis]\",\"caused_by\":{\"type\":\"date_time_parse_exception\",\"reason\":\"Text '" + value + "' could not be parsed at index 0\"}}}]",
+			[]string{"Leakwood"}, []string{"mapper_parsing_exception", "failed to parse field [created] of type [date]", "failed to parse date field", "date_time_parse_exception", "could not be parsed at index 0"}},
+		{"elasticsearch exception nested reason",
+			"Caused by: org.elasticsearch.ElasticsearchException: Elasticsearch exception [type=illegal_argument_exception, reason=failed to parse date field [" + value + "] with format [epoch_millis]]; nested: Elasticsearch exception [type=date_time_parse_exception, reason=Text '" + value + "' could not be parsed at index 0]",
+			[]string{"Leakwood"}, []string{"failed to parse date field", "date_time_parse_exception", "could not be parsed at index 0"}},
+		{"elasticsearch joda invalid format",
+			bulk + "[{\"type\":\"illegal_argument_exception\",\"reason\":\"Invalid format: \\\"" + value + "\\\" is malformed at \\\"Leakwood 42\\\"\"}]",
+			[]string{"Leakwood"}, []string{"Invalid format:", "is malformed at"}},
+		// With a preview the line already gets main's dlq_peek redaction,
+		// which masks the whole quoted reason; this pass cannot unmask it.
+		{"elasticsearch date field with preview",
+			bulk + "[{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse field [created] of type [date] in document with id 'k1'. Preview of field's value: '" + value + "'\",\"caused_by\":{\"type\":\"illegal_argument_exception\",\"reason\":\"failed to parse date field [" + value + "] with format [epoch_millis]\"}}]",
+			[]string{"Leakwood"}, []string{"ConnectException: Bulk request failed"}},
+	})
+}
+
+// TestTraceSinkValueMaskKeepsCategories: lines with the #505 category words
+// but no value to mask keep their text.
+func TestTraceSinkValueMaskKeepsCategories(t *testing.T) {
+	for _, line := range []string{
+		"failed to parse field [created] of type [date] in document with id 'k1'",
+		"date/time field value out of range",
+		"Schema being registered is incompatible with an earlier schema for subject \"orders-value\"",
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			for path, got := range bothPaths(t, tt.line) {
-				for i, where := range []string{"summary", "data error"} {
-					if !strings.Contains(got[i], "Leakwood") {
-						t.Errorf("%s path, %s no longer carries the value: #505 fixed it? move the row to the must-mask test:\n%s", path, where, got[i])
-					}
-				}
-			}
-		})
+		if got := sanitizeTrace(line); got != line {
+			t.Errorf("sanitizeTrace(%q) = %q, want unchanged", line, got)
+		}
 	}
 }
