@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/dlq"
 	"piperoom/internal/redact"
 	"piperoom/internal/tools"
 )
@@ -128,11 +129,12 @@ func fingerprint(parts ...string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// oneLine removes control characters, cuts to changeTextCap runes and masks
-// secrets in text that came from a customer system.
+// oneLine removes control characters, masks secrets and PII (e-mail, card,
+// SSN, phone: a DDL statement can hold them as literals) in text that came
+// from a customer system, and only then cuts to changeTextCap runes, so the
+// cut never leaves part of a value unmasked.
 func oneLine(s string) string {
-	s, _ = redact.Text(clean(s, 4*changeTextCap))
-	return clean(s, changeTextCap)
+	return clean(dlq.MaskPII(clean(s, 4*changeTextCap)), changeTextCap)
 }
 
 // readChanges is the registry and DDL part of observeSet: one Versions call per

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"piperoom/internal/clients"
 )
 
 // secretTrace is a Connect task trace whose first line carries a record value
@@ -95,5 +97,39 @@ func TestLongTraceQuoteCutIsRedacted(t *testing.T) {
 	}
 	if n := len([]rune(got)); n > maxTraceChars {
 		t.Fatalf("traceLine is %d runes, cap %d", n, maxTraceChars)
+	}
+}
+
+// A value that straddles the 300-rune cut of a trace line is masked whole.
+// Before, the evidence kept "jane.doe@exam" (#392).
+func TestTraceLineCutKeepsNoPartialEmail(t *testing.T) {
+	trace := "org.apache.kafka.connect.errors.ConnectException: " + strings.Repeat("x", 203) +
+		" failed to write row for customer jane.doe@example.com: constraint\n\tat org.foo.Bar"
+	got := traceLine(trace)
+	if strings.Contains(got, "jane.doe") || !strings.HasPrefix(got, "org.apache.kafka.connect.errors.ConnectException") {
+		t.Fatalf("traceLine = %q", got)
+	}
+}
+
+// DDL text goes into the change log: literals in it are masked as in a DLQ
+// message, and the statement keeps its shape. Before, only redact.Text ran:
+// the card and the SSN were stored and the e-mail kept its domain (#392).
+func TestDDLSummaryMasksPII(t *testing.T) {
+	h := newChangesHarness(t)
+	h.step(0)
+	q := "ALTER TABLE public.t ADD CONSTRAINT c CHECK (email <> 'jane.doe@example.com' AND card <> '4111111111111111' AND ssn <> '123-45-6789')"
+	h.ddl.rows = []clients.DDLChange{{At: t0.Add(30 * time.Second), CommandTag: "ALTER TABLE", ObjectIdentity: "public.t", Query: q, Username: "app_migrator"}}
+	h.step(time.Minute)
+	rows := h.ch.all()
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want one", rows)
+	}
+	for _, leak := range []string{"jane.doe", "example.com", "4111111111111111", "123-45-6789"} {
+		if strings.Contains(rows[0].Summary, leak) {
+			t.Errorf("summary keeps %q: %q", leak, rows[0].Summary)
+		}
+	}
+	if !strings.Contains(rows[0].Summary, "ADD CONSTRAINT c CHECK (email <> '") {
+		t.Errorf("summary lost the statement: %q", rows[0].Summary)
 	}
 }

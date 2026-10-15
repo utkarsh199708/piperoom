@@ -3,6 +3,7 @@ package dlq
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // MaxMessageRunes is the cap on a Connect error-header value (the same 300
@@ -25,7 +26,9 @@ var tailMarkers = [][]rune{[]rune("[source:"), []rune("detail:"), []rune("where:
 // drivers quote the failing record in their messages, and a 300-rune cap
 // keeps exactly the part where the snippet sits, so:
 //
-//  1. cap at 300 runes;
+//  1. cap at 300 runes; a cut that would split a value a rule of step 6
+//     masks, or a word of up to 160 runes, moves back to its start, so no
+//     part of an e-mail or a number survives the cut unmasked;
 //  2. drop everything from "[Source:", "Detail:" or "Where:" (any case) to
 //     the end;
 //  3. replace every balanced {...} and [...] (an unbalanced opener takes the
@@ -71,6 +74,9 @@ func redactOnce(s string) string {
 	// A cut can drop the closing quote of a value: then an open single quote
 	// is a value, not an apostrophe (scrub).
 	cut := len(rs) > MaxMessageRunes
+	if cut {
+		rs = rs[:safeCut(rs)]
+	}
 	rs = capRunes(rs)
 	rs = tidy(rs)
 	rs = cutTail(rs)
@@ -79,6 +85,43 @@ func redactOnce(s string) string {
 	// Markers can make the text longer than what went in ("" -> "<redacted>"),
 	// so the cap runs again at the end.
 	return string(capRunes(tidy(rs)))
+}
+
+// Look-ahead of safeCut past the cap: enough for the longest value a mask
+// rule matches (a 128-rune e-mail local part plus its domain).
+const (
+	cutLookahead = 256
+	// maxCutToken is the longest word the cut drops whole. A longer run
+	// without spaces is cut where the cap falls (it is not a value a mask
+	// rule knows, and dropping it could empty the message).
+	maxCutToken = 160
+)
+
+// safeCut returns where the first cap cuts rs (len(rs) > MaxMessageRunes):
+// at the cap, or earlier at the start of a value the cut would split. A cut
+// value no longer matches its mask ("jane.doe@exam", "123-45-678") and went
+// out in part, so the cut moves to the start of a masked value that straddles
+// the cap (also one with spaces, "4111 1111 1111 1111"), then to the start of
+// a word that straddles it.
+func safeCut(rs []rune) int {
+	at := MaxMessageRunes
+	win := string(rs[:min(len(rs), MaxMessageRunes+cutLookahead)])
+	capByte := len(string(rs[:MaxMessageRunes]))
+	for _, sp := range piiSpans(win) {
+		if sp[0] < capByte && sp[1] > capByte {
+			at = min(at, utf8.RuneCountInString(win[:sp[0]]))
+		}
+	}
+	if at > 0 && at < len(rs) && !unicode.IsSpace(rs[at-1]) && !unicode.IsSpace(rs[at]) {
+		start := at
+		for start > 0 && !unicode.IsSpace(rs[start-1]) {
+			start--
+		}
+		if at-start <= maxCutToken {
+			at = start
+		}
+	}
+	return at
 }
 
 // capRunes is the one capping mechanism. It never leaves half a marker

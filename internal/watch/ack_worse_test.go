@@ -50,3 +50,34 @@ func TestWorseningAfterCloseReopens(t *testing.T) {
 		t.Fatalf("an unchanged severity re-opened: %+v", h.rooms.created())
 	}
 }
+
+// A room closed while the connector is RUNNING again but the signal still
+// clears keeps the severity the driver saw (sev2), not the clear reading's "".
+// Before, ackSev became "" (rank 9), so the same sev2 flap inside the clear
+// window counted as a rise and re-opened a room past the cooldown (#391).
+func TestCloseWhileClearingKeepsBreachSeverity(t *testing.T) {
+	h := newHarness(t, opts{})
+	h.breakConnector("orders", "org.apache.kafka.connect.errors.ConnectException: boom")
+	h.steps(4, time.Minute)
+	rooms := h.rooms.created()
+	if len(rooms) != 1 || rooms[0].alert.Severity != "sev2" {
+		t.Fatalf("setup: want one sev2 room, got %+v", rooms)
+	}
+	h.fixConnector("orders")
+	h.step(20 * time.Second)
+	if h.phase("orders", owners.SignalConnectorDown) != phaseFiring {
+		t.Fatal("setup: the signal must still be clearing (firing) when the room closes")
+	}
+	r1 := rooms[0].roomID
+	h.rooms.closeRoom(r1, h.clk.Now())
+	h.w.OnRoomClosed(r1, "orders", DedupKey("orders"))
+
+	h.breakConnector("orders", "org.apache.kafka.connect.errors.ConnectException: boom")
+	h.steps(3, 20*time.Second)
+	if n := len(h.rooms.created()); n != 1 {
+		t.Fatalf("a same-severity flap after the close re-opened inside the cooldown: %d rooms\n%s", n, h.logs)
+	}
+	if h.phase("orders", owners.SignalConnectorDown) != phaseAcked {
+		t.Fatalf("the flap must stay acked, phase %v", h.phase("orders", owners.SignalConnectorDown))
+	}
+}
