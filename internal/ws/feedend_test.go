@@ -47,6 +47,21 @@ func (e *endingStore) endAll() {
 	e.subs = nil
 }
 
+// subWatchStore signals once the gateway holds a live subscription.
+type subWatchStore struct {
+	*memstore.Store
+	subscribed chan struct{}
+	once       sync.Once
+}
+
+func (w *subWatchStore) Subscribe(ctx context.Context, roomID string, afterSeq int64) (<-chan events.Event, error) {
+	ch, err := w.Store.Subscribe(ctx, roomID, afterSeq)
+	if err == nil {
+		w.once.Do(func() { close(w.subscribed) })
+	}
+	return ch, err
+}
+
 // deleteUsers is a directory with ada, an admin.
 func deleteUsers(t *testing.T) *room.Users {
 	t.Helper()
@@ -94,7 +109,7 @@ func readToClose(t *testing.T, conn *websocket.Conn) (error, []events.Event) {
 // closes the subscription, and the gateway sends the room.deleted frame from
 // the audit row and the room-deleted close.
 func TestFeedEndOfDeletedRoomClosesAsDeleted(t *testing.T) {
-	st := memstore.New()
+	st := &subWatchStore{Store: memstore.New(), subscribed: make(chan struct{})}
 	svc := room.New(room.Deps{Store: st, Users: deleteUsers(t), Run: fakeRun})
 	t.Cleanup(svc.Close)
 	snap, err := svc.CreateRoom(context.Background(), mustUser(t, svc, "priya"), "t", "sev2", "orders")
@@ -104,6 +119,14 @@ func TestFeedEndOfDeletedRoomClosesAsDeleted(t *testing.T) {
 	srv, _ := serveGateway(t, svc, st)
 	conn := dialWS(t, srv, snap.ID, "priya", 0)
 	readPresence(t, conn)
+	// The first presence frame goes out before the gateway subscribes. A
+	// delete that lands in that window is answered by the gateway's own
+	// recheck (1000 without a frame), not by the feed end this test is about.
+	select {
+	case <-st.subscribed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no subscription")
+	}
 
 	d, err := svc.DeleteRoom(context.Background(), mustUser(t, svc, "ada"), snap.ID, "test data", false)
 	if err != nil {
