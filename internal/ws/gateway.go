@@ -324,6 +324,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Code:    StalePositionReason,
 				Message: fmt.Sprintf("after %d is past the room's last event %d", after, row.LastSeq),
 			}})
+			// Best effort: the close reason below tells the client the same.
 			_ = c.write(rctx, b)
 			rcancel()
 			c.shutdown(websocket.StatusPolicyViolation, StalePositionReason)
