@@ -195,8 +195,11 @@ func (k reqKey) labels() string {
 // quoteLabel escapes a label value per the text format: backslash, double
 // quote and newline.
 func quoteLabel(v string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
-	return `"` + r.Replace(v) + `"`
+	return `"` + labelEscaper.Replace(v) + `"`
 }
+
+// labelEscaper is built once: a strings.Replacer is immutable and safe for
+// concurrent use, and rebuilding it per scrape label is wasted work.
+var labelEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
 
 func formatFloat(f float64) string { return strconv.FormatFloat(f, 'g', -1, 64) }

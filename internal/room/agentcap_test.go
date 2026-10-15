@@ -73,7 +73,12 @@ func (c *capRunner) run(ctx context.Context, alert agent.Alert, _ agent.Deps, _ 
 	notify := c.startCh
 	c.mu.Unlock()
 	if notify != nil {
-		notify <- id
+		// Non-blocking so a late start after the test closed the channel
+		// cannot panic; startedIDs() still records it and fails the test.
+		select {
+		case notify <- id:
+		default:
+		}
 	}
 	defer func() {
 		c.mu.Lock()
@@ -515,9 +520,16 @@ func TestAgentCapServiceCloseWithQueuedRooms(t *testing.T) {
 	}
 	// Close waited for every supervisor, so any run that started is already
 	// in the channel.
-	close(cr.startCh)
-	for id := range cr.startCh {
-		t.Errorf("run started for queued room %s during Close", id)
+	// Drain without closing: a send on a closed channel panics even inside a
+	// select, so closing would defeat the non-blocking send in run.
+drain:
+	for {
+		select {
+		case id := <-cr.startCh:
+			t.Errorf("run started for queued room %s during Close", id)
+		default:
+			break drain
+		}
 	}
 	if n := len(cr.startedIDs()); n != 1 {
 		t.Fatalf("%d runs started, want 1", n)
