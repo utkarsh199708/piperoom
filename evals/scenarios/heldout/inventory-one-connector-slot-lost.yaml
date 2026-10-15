@@ -78,8 +78,8 @@ alert:
   pipeline_map: |
     pipeline inventory
     legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-    1 pg:public.stock_levels [postgres, owner nadia] WARN slot_active=false slot_retained=0 B
-    2 pg:public.sites [postgres, owner nadia] OK slot_active=true slot_retained=4.2 MiB
+    1 pg:public.stock_levels [postgres, owner nadia] FAIL slot_active=false slot_retained=unknown wal_status=lost
+    2 pg:public.sites [postgres, owner nadia] OK slot_active=true slot_retained=4.2 MiB wal_status=reserved
     3 connect:pg-inventory-stock [kafka-connect, owner tomas] FAIL tasks_failed=1
       from: pg:public.stock_levels
     4 connect:pg-inventory-sites [kafka-connect, owner tomas] OK
@@ -101,8 +101,8 @@ recordings:
     summary: |
       pipeline inventory
       legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-      1 pg:public.stock_levels [postgres, owner nadia] WARN slot_active=false slot_retained=0 B
-      2 pg:public.sites [postgres, owner nadia] OK slot_active=true slot_retained=4.2 MiB
+      1 pg:public.stock_levels [postgres, owner nadia] FAIL slot_active=false slot_retained=unknown wal_status=lost
+      2 pg:public.sites [postgres, owner nadia] OK slot_active=true slot_retained=4.2 MiB wal_status=reserved
       3 connect:pg-inventory-stock [kafka-connect, owner tomas] FAIL tasks_failed=1
         from: pg:public.stock_levels
       4 connect:pg-inventory-sites [kafka-connect, owner tomas] OK
@@ -140,8 +140,9 @@ recordings:
       nodes:
         - facts:
             slot_active: "false"
-            slot_retained: 0 B
-          health: warn
+            slot_retained: unknown
+            wal_status: lost
+          health: fail
           id: pg:public.stock_levels
           kind: source_table
           layer: postgres
@@ -150,6 +151,7 @@ recordings:
         - facts:
             slot_active: "true"
             slot_retained: 4.2 MiB
+            wal_status: reserved
           health: ok
           id: pg:public.sites
           kind: source_table

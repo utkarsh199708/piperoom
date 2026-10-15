@@ -25,10 +25,15 @@ func TestFreshnessSQL(t *testing.T) {
 }
 
 func TestRowSQL(t *testing.T) {
-	got, err := rowSQL("analytics.orders", "id")
-	want := `SELECT * FROM "ANALYTICS"."ORDERS" WHERE "ID" = ? LIMIT 1`
-	if err != nil || got != want {
-		t.Fatalf("rowSQL = %q, %v; want %q", got, err, want)
+	// The column is quoted as given; Row resolves its stored spelling first.
+	for col, want := range map[string]string{
+		"id": `SELECT * FROM "ANALYTICS"."ORDERS" WHERE "id" = ? LIMIT 1`,
+		"ID": `SELECT * FROM "ANALYTICS"."ORDERS" WHERE "ID" = ? LIMIT 1`,
+	} {
+		got, err := rowSQL("analytics.orders", col)
+		if err != nil || got != want {
+			t.Fatalf("rowSQL(%q) = %q, %v; want %q", col, got, err, want)
+		}
 	}
 }
 
@@ -117,5 +122,15 @@ func TestRowKeyIsBoundNotInterpolated(t *testing.T) {
 	}
 	if len(fq.lastArgs) != 1 || fq.lastArgs[0] != key {
 		t.Fatalf("args = %v, want the key as the only bind argument", fq.lastArgs)
+	}
+}
+
+// A stored key name that is not a plain identifier (an embedded quote or a
+// space) is refused rather than interpolated.
+func TestRowSQLRefusesOddStoredName(t *testing.T) {
+	for _, name := range []string{`a"b`, "my col", `"id"`} {
+		if q, err := rowSQL("analytics.orders", name); err == nil {
+			t.Errorf("rowSQL(%q) built %q, want error", name, q)
+		}
 	}
 }

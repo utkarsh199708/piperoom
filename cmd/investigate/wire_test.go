@@ -301,3 +301,10 @@ func TestSystemPromptNamesOnlyRealTools(t *testing.T) {
 		}
 	}
 }
+
+// FindByKeyScan makes the fake a clients.KeyScanReader with a complete scan,
+// as the real kafka.Client reports one (#306).
+func (f *fakeClients) FindByKeyScan(ctx context.Context, topic, key string, since time.Time, maxScan int) (clients.KeyScan, error) {
+	refs, err := f.FindByKey(ctx, topic, key, since, maxScan)
+	return clients.KeyScan{Refs: refs}, err
+}

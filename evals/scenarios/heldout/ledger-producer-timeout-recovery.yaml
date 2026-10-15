@@ -70,7 +70,7 @@ alert:
   pipeline_map: |
     pipeline ledger
     legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-    1 pg:public.ledger_entries [postgres, owner nadia] WARN slot_active=false slot_retained=4.6 GiB
+    1 pg:public.ledger_entries [postgres, owner nadia] WARN slot_active=false slot_retained=4.6 GiB wal_status=extended
     2 connect:pg-ledger-connector [kafka-connect, owner tomas] FAIL tasks_failed=1
       from: pg:public.ledger_entries
     3 topic:ldg.public.ledger_entries [kafka, owner tomas] OK newest_record=47m ago
@@ -95,7 +95,7 @@ recordings:
     summary: |
       pipeline ledger
       legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-      1 pg:public.ledger_entries [postgres, owner nadia] WARN slot_active=false slot_retained=4.6 GiB
+      1 pg:public.ledger_entries [postgres, owner nadia] WARN slot_active=false slot_retained=4.6 GiB wal_status=extended
       2 connect:pg-ledger-connector [kafka-connect, owner tomas] FAIL tasks_failed=1
         from: pg:public.ledger_entries
       3 topic:ldg.public.ledger_entries [kafka, owner tomas] OK newest_record=47m ago
@@ -119,6 +119,7 @@ recordings:
         - facts:
             slot_active: "false"
             slot_retained: 4.6 GiB
+            wal_status: extended
           health: warn
           id: pg:public.ledger_entries
           kind: source_table
@@ -166,7 +167,7 @@ recordings:
     summary: |
       pipeline ledger
       legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
-      1 pg:public.ledger_entries [postgres, owner nadia] WARN slot_active=true slot_retained=3.9 GiB
+      1 pg:public.ledger_entries [postgres, owner nadia] WARN slot_active=true slot_retained=3.9 GiB wal_status=extended
       2 connect:pg-ledger-connector [kafka-connect, owner tomas] OK
         from: pg:public.ledger_entries
       3 topic:ldg.public.ledger_entries [kafka, owner tomas] OK newest_record=2s ago
@@ -190,6 +191,7 @@ recordings:
         - facts:
             slot_active: "true"
             slot_retained: 3.9 GiB
+            wal_status: extended
           health: warn
           id: pg:public.ledger_entries
           kind: source_table

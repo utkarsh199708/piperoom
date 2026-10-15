@@ -131,7 +131,8 @@ func TestPagingInjectionInEveryTextField(t *testing.T) {
 				ev(9, events.ControlLeaseExpired, "system", events.ControlLeaseExpiredPayload{
 					Driver: events.Actor{ID: "ana", Name: a}, LeaseUntil: time.Unix(1700000000, 0)}),
 				ev(10, events.ApprovalNudged, a, events.ApprovalNudgedPayload{ProposalID: a, Layer: "kafka"}),
-				ev(11, events.RoomClosed, a, events.RoomClosedPayload{Resolution: a}),
+				ev(11, events.ApprovalNudged, a, events.ApprovalNudgedPayload{ProposalID: a, Layer: a}), // unpaged layer
+				ev(12, events.RoomClosed, a, events.RoomClosedPayload{Resolution: a}),
 			}
 			fs := &fakeSlack{}
 			// A tiny gap lets owner1 be paged by both the proposal and the nudge.
@@ -142,8 +143,8 @@ func TestPagingInjectionInEveryTextField(t *testing.T) {
 			if err := b.Run(context.Background(), "r1"); err != nil {
 				t.Fatal(err)
 			}
-			if fs.count() != 15 { // 11 mirrored + proposal, hand-off, lease and nudge pages
-				t.Fatalf("requests = %d, want 15", fs.count())
+			if fs.count() != 16 { // 12 mirrored + proposal, hand-off, lease and nudge pages
+				t.Fatalf("requests = %d, want 16", fs.count())
 			}
 			assertOnlyTrustedMarkup(t, fs.reqs, a)
 			n, ids := mentionCount(fs.reqs)
@@ -595,4 +596,5 @@ func TestPagingNudgeIntervals(t *testing.T) {
 	step(11*time.Minute, nudgeEvent(4, "p1", "kafka"), 2) // after the gap: pages again
 	step(time.Minute, nudgeEvent(5, "p2", "kafka"), 2)    // another proposal inside the gap: blocked
 	step(11*time.Minute, nudgeEvent(6, "p2", "kafka"), 3) // and its own page after the gap
+	step(10*time.Minute, nudgeEvent(7, "p2", "kafka"), 4) // exactly at the boundary: pages
 }
