@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/snowflakedb/gosnowflake"
+	"github.com/snowflakedb/gosnowflake/v2"
 
 	"piperoom/internal/clients"
 )
