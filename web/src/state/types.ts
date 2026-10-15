@@ -396,7 +396,8 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
       state: snapshot.agent_status.state,
       detail: snapshot.agent_status.detail,
     },
-    hypothesis: snapshot.hypothesis
+    // A shadow room shows no agent output, not even on the first render.
+    hypothesis: snapshot.hypothesis && snapshot.shadow !== true
       ? {
           text: snapshot.hypothesis.text,
           based_on_steps: snapshot.hypothesis.based_on_steps ?? [],
@@ -406,7 +407,7 @@ export function fromSnapshot(snapshot: RoomSnapshot): RoomState {
           verdicts: [],
         }
       : null,
-    triage: snapshot.triage
+    triage: snapshot.triage && snapshot.shadow !== true
       ? { ...snapshot.triage, evidence_refs: snapshot.triage.evidence_refs ?? [] }
       : null,
   }

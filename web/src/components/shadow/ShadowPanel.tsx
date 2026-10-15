@@ -14,7 +14,10 @@ import { RunReveal } from './RunReveal'
 // A viewer sees the same screens without the forms, since every write is 403 viewer.
 export function ShadowPanel({ state, user }: { state: RoomState; user: CurrentUser }) {
   const [withData, setWithData] = useState(false)
-  const { view, reload } = useShadowRun(state.id, true, withData)
+  const { view, reload } = useShadowRun(state.id, true, withData, {
+    revealed: state.shadow_revealed,
+    labelled: state.shadow_labelled,
+  })
   const canWrite = !isViewer(user)
 
   if (view.phase === 'loading') {
@@ -60,7 +63,9 @@ export function ShadowPanel({ state, user }: { state: RoomState; user: CurrentUs
       <GradeForm
         roomId={state.id}
         current={current}
-        revealed={data.run.revealed_at !== null || state.shadow_revealed === true}
+        // Only the fetched run decides: the live event can arrive before the refetch, and grading against
+        // an answer the grader has not seen would corrupt the metric.
+        revealed={data.run.revealed_at !== null}
         canWrite={canWrite}
         onDone={reload}
       />

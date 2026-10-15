@@ -711,7 +711,7 @@ export interface ShadowMetricsRoom {
   closed_at: string
   labelled: boolean
   graded: boolean
-  layer_correct: boolean
+  layer_correct: boolean | null
   root_cause: ShadowRootCause | ''
   time_to_first_s: number // -1 when there was no value
   time_to_final_s: number

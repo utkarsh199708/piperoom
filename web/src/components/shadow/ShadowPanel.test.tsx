@@ -255,4 +255,38 @@ describe('ShadowPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(await screen.findByText(HYP)).toBeInTheDocument()
   })
+
+  it('opens grading only from the fetched run, and refetches when shadow.revealed arrives', async () => {
+    const grace = response({ run: run({ status: 'running', final_hypothesis: null, revealed_at: null }) })
+    const shadow = vi.spyOn(api, 'shadow').mockResolvedValue(grace)
+    const early: RoomState = { ...room, shadow_revealed: false, shadow_labelled: true }
+    const { rerender } = render(<ShadowPanel state={early} user={member} />)
+    await screen.findByText(/still finishing its run/)
+    // The live event lands before the server's answer changed: the form must stay closed...
+    shadow.mockResolvedValue(response())
+    rerender(<ShadowPanel state={{ ...early, shadow_revealed: true }} user={member} />)
+    // ...until the refetch brings the revealed run.
+    expect(await screen.findByText(HYP)).toBeInTheDocument()
+    expect(shadow).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText(/still finishing its run/)).not.toBeInTheDocument()
+  })
+
+  it('does not enable grading from the live event alone', async () => {
+    vi.spyOn(api, 'shadow').mockResolvedValue(
+      response({ run: run({ status: 'running', final_hypothesis: null, revealed_at: null }) }),
+    )
+    render(<ShadowPanel state={{ ...room, shadow_revealed: true }} user={member} />)
+    await screen.findByText(/still finishing its run/)
+    expect(screen.queryByRole('button', { name: 'Save grade' })).not.toBeInTheDocument()
+  })
+
+  it('leaves the blind form when someone else labels (shadow.labelled)', async () => {
+    const shadow = vi.spyOn(api, 'shadow').mockRejectedValueOnce(notLabelled())
+    const blind: RoomState = { ...room, shadow_labelled: false }
+    const { rerender } = render(<ShadowPanel state={blind} user={member} />)
+    await screen.findByRole('heading', { name: 'Record your answer first' })
+    shadow.mockResolvedValue(response())
+    rerender(<ShadowPanel state={{ ...blind, shadow_labelled: true }} user={member} />)
+    expect(await screen.findByText(HYP)).toBeInTheDocument()
+  })
 })

@@ -17,7 +17,13 @@ export type ShadowView =
  * Loads GET /api/rooms/{id}/shadow for a closed shadow room. The call doubles as the
  * "is there a label?" probe. `withData` also asks for tool_result.data (a toggle in the UI).
  */
-export function useShadowRun(roomId: string, enabled: boolean, withData: boolean) {
+export function useShadowRun(
+  roomId: string,
+  enabled: boolean,
+  withData: boolean,
+  /** Live shadow.labelled / shadow.revealed flags: a change means the server's answer changed, so ask again. */
+  live: { revealed?: boolean; labelled?: boolean } = {},
+) {
   const [view, setView] = useState<ShadowView>({ phase: 'loading' })
   const [tick, setTick] = useState(0)
 
@@ -38,7 +44,7 @@ export function useShadowRun(roomId: string, enabled: boolean, withData: boolean
     return () => {
       cancelled = true
     }
-  }, [roomId, enabled, withData, tick])
+  }, [roomId, enabled, withData, tick, live.revealed, live.labelled])
 
   const reload = useCallback(() => setTick((n) => n + 1), [])
   return { view, reload }

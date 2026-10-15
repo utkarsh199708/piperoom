@@ -659,6 +659,32 @@ describe('params_hash and approver identity (auth PR 4)', () => {
   })
 })
 
+describe('fromSnapshot — shadow rooms', () => {
+  it('drops the hypothesis and triage on the first render', () => {
+    const snap = {
+      id: 'r1',
+      title: 'T',
+      severity: 'sev2',
+      pipeline_id: 'orders',
+      status: 'open',
+      opened_at: '2026-10-11T10:00:00Z',
+      last_seq: 3,
+      driver: null,
+      shadow: true,
+      agent_status: { state: 'idle' },
+      hypothesis: { text: 'secret', based_on_steps: [], confidence: 'high', confirmed: false },
+      triage: { status: 'ok', headline: 'secret', evidence_refs: [], at: '' },
+      open_proposals: [],
+      pending_suggestions: [],
+      members: [],
+    } as RoomSnapshot
+    const s = fromSnapshot(snap)
+    expect(s.hypothesis).toBeNull()
+    expect(s.triage).toBeNull()
+    expect(fromSnapshot({ ...snap, shadow: false }).hypothesis?.text).toBe('secret')
+  })
+})
+
 describe('fromSnapshot', () => {
   it('defaults null slices and starts last_seq at 0 for the full event replay', () => {
     const snap: RoomSnapshot = {
