@@ -32,6 +32,15 @@ function takeHandedOver(): Element | null {
 }
 
 /**
+ * Take back the handed-over element if no dialog mounted and took it. The palette calls this after
+ * running a dialog command: when the dialog was already open nothing new mounts, and the element
+ * would otherwise be dropped unused, leaving focus on <body>.
+ */
+export function reclaimHandedOver(): Element | null {
+  return takeHandedOver()
+}
+
+/**
  * A menu item unmounts with its menu, so the thing worth returning to is the button that
  * opened the menu. Radix labels the menu with that button's id.
  */
