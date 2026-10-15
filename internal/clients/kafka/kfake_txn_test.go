@@ -255,3 +255,47 @@ func TestKFakePeekDLQTransactional(t *testing.T) {
 	p.end(kgo.TryAbort)
 	within(t, peek)
 }
+
+// TestKFakeAbortedBelowOpenTransaction (#300): transaction C writes offset 0,
+// transaction A (another producer) writes offset 1, then C aborts with its
+// marker at 2 while A is open, so the LSO is 1. The read_committed consumer
+// drops offset 0 and never sees the marker at 2, so no record at or past the
+// planned last offset 0 ever arrives. TopicOffsets, FindByKey and PeekDLQ
+// still return at once: nothing readable is left below the end.
+//
+// Old behaviour: TopicOffsets failed after 5 s, PeekDLQ after its 10 s
+// budget, and a FindByKey miss waited out its 15 s scan deadline.
+func TestKFakeAbortedBelowOpenTransaction(t *testing.T) {
+	addrs := kfCluster(t)
+	c := kfClient(t, addrs)
+	pc := newKFProducer(t, addrs, "kf-aborted")
+	pa := newKFProducer(t, addrs, "kf-open")
+	ts := time.Now().Add(-time.Minute)
+
+	pc.begin(ts, "aborted", "c0") // offset 0
+	pa.begin(ts, "open", "a0")    // offset 1, left open
+	pc.end(kgo.TryAbort)          // abort marker at 2; LSO = 1
+	defer pa.end(kgo.TryAbort)
+
+	within(t, func(ctx context.Context) {
+		offs, err := c.TopicOffsets(ctx, kfTopic)
+		if err != nil {
+			t.Fatalf("TopicOffsets: %v", err)
+		}
+		if len(offs) != 1 || offs[0].End != 3 || !offs[0].LastTimestamp.IsZero() {
+			t.Fatalf("offsets = %+v, want End 3 and no readable record time", offs)
+		}
+	})
+	within(t, func(ctx context.Context) {
+		got, err := c.PeekDLQ(ctx, kfTopic, 5)
+		if err != nil || len(got) != 0 {
+			t.Fatalf("PeekDLQ = %+v, %v; want no records and no error", got, err)
+		}
+	})
+	within(t, func(ctx context.Context) {
+		refs, err := c.FindByKey(ctx, kfTopic, "c0", ts.Add(-time.Minute), 100)
+		if err != nil || len(refs) != 0 {
+			t.Fatalf("FindByKey = %+v, %v; want no match and no error", refs, err)
+		}
+	})
+}

@@ -32,8 +32,8 @@ var knownConnectErrorHeaders = map[string]bool{
 	connectErrorsPrefix + "stage":                true,
 	connectErrorsPrefix + "class.name":           true,
 	connectErrorsPrefix + "exception.class.name": true,
-	headerMessage:                                true,
-	headerStacktrace:                             true,
+	headerMessage:    true,
+	headerStacktrace: true,
 }
 
 const (
@@ -195,7 +195,7 @@ func (c *Client) PeekDLQ(ctx context.Context, topic string, limit int) ([]client
 
 	// Headers only leave collectPeek; the receipt holds the topic and limit.
 	pollStart := time.Now()
-	recs, err := collectPeek(ctx, cons, topic, plan)
+	recs, err := collectPeek(ctx, cons, topic, plan, func(w map[int32]readWindow) { c.advance(ctx, topic, w) })
 	c.record(ctx, pollStart, "kgo.PollFetches(topic, limit)", "topic="+topic, "limit="+strconv.Itoa(limit))
 	if err != nil {
 		return nil, fmt.Errorf("kafka: peek dlq %s: %w", topic, err)
@@ -309,12 +309,15 @@ func planPeek(parts []clients.PartitionOffsets, limit int) []peekPart {
 // 8 MiB of record bytes were read, or ctx ends. Control records (transaction
 // markers) are delivered because KeepControlRecords is on: they mark a
 // partition done when they sit at its last offset, but are never returned or
-// counted. Only DLQRecords come out: each *kgo.Record is dropped after its
-// iteration.
-func collectPeek(ctx context.Context, cons pollConsumer, topic string, plan []peekPart) ([]clients.DLQRecord, error) {
+// counted. When a poll brings nothing for stallAfter, advance probes what is
+// left; a partition with nothing readable left is done. Only DLQRecords come
+// out: each *kgo.Record is dropped after its iteration.
+func collectPeek(ctx context.Context, cons pollConsumer, topic string, plan []peekPart, advance func(map[int32]readWindow)) ([]clients.DLQRecord, error) {
 	ends := map[int32]int64{}
+	wait := map[int32]readWindow{} // what each unfinished partition has left
 	for _, pl := range plan {
 		ends[pl.partition] = pl.end
+		wait[pl.partition] = readWindow{from: pl.from, end: pl.end}
 	}
 	done := map[int32]bool{}
 	var (
@@ -322,7 +325,19 @@ func collectPeek(ctx context.Context, cons pollConsumer, topic string, plan []pe
 		total int
 	)
 	for len(done) < len(ends) {
-		fetches := cons.PollFetches(ctx)
+		fetches, idle := pollOrIdle(ctx, cons)
+		if idle {
+			// Nothing came: an aborted tail below an open transaction
+			// delivers no record (#300), so ask how far is unreadable.
+			advance(wait)
+			for p, w := range wait {
+				if w.from >= w.end {
+					done[p] = true
+					delete(wait, p)
+				}
+			}
+			continue
+		}
 		if fetches.IsClientClosed() {
 			return nil, errors.New("consumer closed")
 		}
@@ -346,6 +361,10 @@ func collectPeek(ctx context.Context, cons pollConsumer, topic string, plan []pe
 			// nothing else ever reaches end-1 then.
 			if r.Offset+1 >= end {
 				done[r.Partition] = true
+				delete(wait, r.Partition)
+			} else if w, ok := wait[r.Partition]; ok && r.Offset >= w.from {
+				w.from = r.Offset + 1
+				wait[r.Partition] = w
 			}
 			if r.Offset >= end || r.Attrs.IsControl() {
 				continue

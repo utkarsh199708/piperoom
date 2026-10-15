@@ -38,12 +38,14 @@ type Client struct {
 	cl       *kgo.Client
 	sr       *schemareg.Client
 
-	// offs, meta, clusterFn and consumerFn are test seams; nil means the real
-	// kadm/kgo clients. consumerFn gets the options newConsumer builds with.
+	// offs, meta, clusterFn, consumerFn and probeFn are test seams; nil means
+	// the real kadm/kgo clients. consumerFn gets the options newConsumer
+	// builds with; probeFn stands in for probeWindows.
 	offs       offsetLister
 	meta       metaReader
 	clusterFn  clusterAdmin
 	consumerFn func(opts []kgo.Opt) (pollConsumer, error)
+	probeFn    func(ctx context.Context, topic string, wins map[int32]readWindow) map[int32]int64
 
 	srMu    sync.Mutex
 	srCache map[int]avro.Schema
@@ -470,6 +472,7 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 	}
 	partOffsets := map[string]map[int32]kgo.Offset{topic: {}}
 	stopAt := map[int32]int64{}
+	wait := map[int32]readWindow{} // what each unfinished partition has left
 	finished := map[int32]bool{}
 	var truncated []int32
 	for _, w := range windows {
@@ -482,6 +485,7 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 		}
 		partOffsets[topic][w.Partition] = kgo.NewOffset().At(w.Start)
 		stopAt[w.Partition] = w.End
+		wait[w.Partition] = readWindow{from: w.Start, end: w.End}
 	}
 	if len(partOffsets[topic]) == 0 {
 		return KeyScan{}, nil
@@ -519,7 +523,22 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	for {
-		fetches := cl.PollFetches(cctx)
+		fetches, idle := pollOrIdle(cctx, cl)
+		if idle {
+			// Nothing came: an aborted tail below an open transaction
+			// delivers no record (#300), so ask how far is unreadable.
+			c.advance(cctx, topic, wait)
+			for p, w := range wait {
+				if w.from >= w.end {
+					finished[p] = true
+					delete(wait, p)
+				}
+			}
+			if len(finished) == len(stopAt) {
+				return keyScan(found, truncated), nil
+			}
+			continue
+		}
 		for _, fe := range fetches.Errors() {
 			if fe.Err != nil && !errors.Is(fe.Err, context.Canceled) && !errors.Is(fe.Err, context.DeadlineExceeded) {
 				return KeyScan{}, fmt.Errorf("kafka: scan %s: %w", topic, fe.Err)
@@ -532,6 +551,10 @@ func (c *Client) FindByKeyReport(ctx context.Context, topic, key string, since t
 			// transaction can leave no record at the last offset.
 			if r.Offset+1 >= stopAt[r.Partition] {
 				finished[r.Partition] = true
+				delete(wait, r.Partition)
+			} else if w, ok := wait[r.Partition]; ok && r.Offset >= w.from {
+				w.from = r.Offset + 1
+				wait[r.Partition] = w
 			}
 			if r.Offset >= stopAt[r.Partition] || r.Attrs.IsControl() {
 				continue
@@ -580,7 +603,8 @@ func keyScan(found []clients.RecordRef, truncated []int32) KeyScan {
 // recordTimestamps fetches one record per partition (at the given offsets) in a
 // single consumer and returns their timestamps. A transaction marker at the
 // offset counts as the record; a later record stands in when the offset
-// itself is never delivered but newer records are.
+// itself is never delivered but newer records are. A partition where nothing
+// readable is left at or after its offset (probeWindows) has no entry.
 func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int32]int64) (map[int32]time.Time, error) {
 	if len(at) == 0 {
 		return map[int32]time.Time{}, nil
@@ -600,14 +624,27 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	got := map[int32]time.Time{}
-	for len(got) < len(at) {
-		fetches := cl.PollFetches(ctx)
-		for _, r := range fetches.Records() {
-			if _, done := got[r.Partition]; done {
-				continue
+	wait := map[int32]readWindow{}
+	for p, off := range at {
+		wait[p] = readWindow{from: off, end: off + 1}
+	}
+	for len(wait) > 0 {
+		fetches, idle := pollOrIdle(ctx, cl)
+		if idle {
+			// An offset the probe passes holds no readable record (an
+			// aborted one, #300): the partition has no timestamp.
+			c.advance(ctx, topic, wait)
+			for p, w := range wait {
+				if w.from >= w.end {
+					delete(wait, p)
+				}
 			}
-			if want, ok := at[r.Partition]; ok && r.Offset >= want {
+			continue
+		}
+		for _, r := range fetches.Records() {
+			if _, waiting := wait[r.Partition]; waiting && r.Offset >= at[r.Partition] {
 				got[r.Partition] = r.Timestamp
+				delete(wait, r.Partition)
 			}
 		}
 		if err := fetches.Err(); err != nil {
