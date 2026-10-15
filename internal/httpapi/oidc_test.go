@@ -172,6 +172,10 @@ func newOIDCEnv(t *testing.T, o oidcOpts) *oidcEnv {
 	sessions := auth.NewMemStore()
 	logs := &syncBuf{}
 	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	settings := auth.Default()
+	settings.Mode = auth.ModeOIDC
+	settings.ViewerGroups = []string{"viewers"}
+	settings.TrustedProxies = o.trusted
 	svc := room.New(room.Deps{
 		Store: st, Users: users, Owners: own, Actions: reg, Logger: log,
 		Run: func(ctx context.Context, _ agent.Alert, _ agent.Deps, _ agent.Options) error {
@@ -181,12 +185,8 @@ func newOIDCEnv(t *testing.T, o oidcOpts) *oidcEnv {
 		WriteHandoff: func(context.Context, []events.Event, agent.Options) (events.HandoffSummary, error) {
 			return events.HandoffSummary{WhatBroke: "x"}, nil
 		},
-		Sessions: sessions, SessionIdle: 8 * time.Hour, ViewerGroups: []string{"viewers"},
+		Sessions: sessions, SessionLive: settings.Liveness(), ViewerGroups: []string{"viewers"},
 	})
-	settings := auth.Default()
-	settings.Mode = auth.ModeOIDC
-	settings.ViewerGroups = []string{"viewers"}
-	settings.TrustedProxies = o.trusted
 	states, idents := auth.NewMemLoginStates(), auth.NewMemIdentities().WithSessions(sessions)
 	api := httpapi.New(svc, st, log,
 		httpapi.WithAuth(settings), httpapi.WithSessions(sessions), httpapi.WithLoginStates(states),
