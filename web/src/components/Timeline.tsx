@@ -1,6 +1,6 @@
 import { useId, useState } from 'react'
 import { emptyStateFor } from '../lib/emptyState'
-import type { FormEvent } from 'react'
+import type { ComponentProps, FormEvent } from 'react'
 import { Check, ChevronRight, X } from 'lucide-react'
 import type { AgentMessageState, ChecklistTick, CommentState, StepState, ToolCallState } from '../state/types'
 import { argTags, formatMs, toolLayer } from '../lib/toolLayers'
@@ -14,6 +14,7 @@ import { Clock } from './room/Clock'
 import { OfflineStrip } from './room/OfflineStrip'
 import { PersonAvatar } from './room/PersonAvatar'
 import { CollapsibleText } from './room/CollapsibleText'
+import { StepNumbersProvider } from './room/AgentText'
 import { stepAnchor } from '@/lib/triage'
 import { Checklist } from './room/Checklist'
 import type { ChecklistAccess } from './room/Checklist'
@@ -390,7 +391,16 @@ function LiveStep({
   )
 }
 
-export function Timeline({
+// The agent prose in the timeline links its step ids to the rows of these steps.
+export function Timeline(props: ComponentProps<typeof TimelineBody>) {
+  return (
+    <StepNumbersProvider steps={props.steps}>
+      <TimelineBody {...props} />
+    </StepNumbersProvider>
+  )
+}
+
+function TimelineBody({
   steps,
   messages,
   comments,

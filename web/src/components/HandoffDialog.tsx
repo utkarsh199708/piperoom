@@ -1,7 +1,7 @@
 import { Loader2 } from 'lucide-react'
 import { useState } from 'react'
 import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
-import type { HandoffState, RoomState } from '../state/types'
+import type { HandoffState, RoomState, StepState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
 import { canAcceptHandoff } from '../state/permissions'
 import type { RoomActions } from '../hooks/useRoom'
@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/dialog'
 import { Kbd } from '@/components/ui/kbd'
 import { PersonSelect } from './PersonSelect'
+import { AgentText, StepNumbersProvider } from './room/AgentText'
 import { RoomDialogClose } from './room/RoomDialogClose'
 import { useNow } from './room/useNow'
 import { useRestoreFocus } from './room/useRestoreFocus'
@@ -30,7 +31,7 @@ function SummaryList({ title, items }: { title: string; items: string[] }) {
       <ul className="m-0 flex list-disc flex-col gap-0.5 pl-5">
         {items.map((it, i) => (
           <li key={i} className="break-words">
-            {it}
+            <AgentText text={it} />
           </li>
         ))}
       </ul>
@@ -95,11 +96,13 @@ export function HandoffDialog({
         </DialogHeader>
 
         {pending ? (
-          <HandoffSummary summary={pending.summary}>
-            <Button type="button" variant="secondary" onClick={onClose}>
-              Close
-            </Button>
-          </HandoffSummary>
+          <StepNumbersProvider steps={state.steps}>
+            <HandoffSummary summary={pending.summary}>
+              <Button type="button" variant="secondary" onClick={onClose}>
+                Close
+              </Button>
+            </HandoffSummary>
+          </StepNumbersProvider>
         ) : inFlight ? (
           <div role="status" className="flex flex-col gap-3">
             <p className="m-0 flex items-center gap-2 text-muted-foreground">
@@ -158,13 +161,17 @@ function HandoffSummary({ summary: s, children }: { summary: HandoffState['summa
       {s.what_broke && (
         <div className="flex flex-col gap-1">
           <h4 className="text-xs font-medium text-muted-foreground">What broke</h4>
-          <p className="m-0 break-words">{s.what_broke}</p>
+          <p className="m-0 break-words">
+            <AgentText text={s.what_broke} />
+          </p>
         </div>
       )}
       {s.why && (
         <div className="flex flex-col gap-1">
           <h4 className="text-xs font-medium text-muted-foreground">Why</h4>
-          <p className="m-0 break-words">{s.why}</p>
+          <p className="m-0 break-words">
+            <AgentText text={s.why} />
+          </p>
         </div>
       )}
       <SummaryList title="Done" items={s.done} />
@@ -180,11 +187,13 @@ function HandoffSummary({ summary: s, children }: { summary: HandoffState['summa
 function HandoffReceiveDialog({
   handoff,
   from,
+  steps,
   onAccept,
   onClose,
 }: {
   handoff: HandoffState
   from: string
+  steps: StepState[]
   onAccept: () => void
   onClose: () => void
 }) {
@@ -200,14 +209,16 @@ function HandoffReceiveDialog({
             {handoff.stay_as_watcher ? `; ${from} stays in the room as a watcher.` : '.'}
           </DialogDescription>
         </DialogHeader>
-        <HandoffSummary summary={handoff.summary}>
-          <Button type="button" variant="ghost" onClick={onClose}>
-            Not yet
-          </Button>
-          <Button type="button" onClick={onAccept}>
-            Accept and take over
-          </Button>
-        </HandoffSummary>
+        <StepNumbersProvider steps={steps}>
+          <HandoffSummary summary={handoff.summary}>
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Not yet
+            </Button>
+            <Button type="button" onClick={onAccept}>
+              Accept and take over
+            </Button>
+          </HandoffSummary>
+        </StepNumbersProvider>
       </DialogContent>
     </Dialog>
   )
@@ -245,6 +256,7 @@ export function HandoffAcceptBanner({
         <HandoffReceiveDialog
           handoff={mine}
           from={from}
+          steps={state.steps}
           onAccept={() => {
             setReading(false)
             actions.acceptHandoff(mine.handoff_id)

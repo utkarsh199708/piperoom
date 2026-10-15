@@ -10,6 +10,7 @@ import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { clockTime } from '@/lib/time'
 import { PersonAvatar } from './PersonAvatar'
+import { AgentText, StepNumbersProvider } from './AgentText'
 
 const AGENT = { kind: 'agent', id: 'agent', name: 'Agent' } as const
 const MAX_NOTE = 500
@@ -119,7 +120,11 @@ export function HypothesisCard({
           {history.map((h) => `${h.confidence} ${clockTime(h.at)}`).join(' → ')}
         </p>
       )}
-      <p className="m-0 max-w-[72ch] text-base">{hypothesis.text}</p>
+      <StepNumbersProvider steps={steps}>
+        <p className="m-0 max-w-[72ch] text-base">
+          <AgentText text={hypothesis.text} />
+        </p>
+      </StepNumbersProvider>
       {canDecide && onVerdict && (
         <div className="flex flex-wrap items-center justify-end gap-2">
           {disputing ? (
