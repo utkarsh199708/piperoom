@@ -141,3 +141,28 @@ func TestPrimaryKeyColumn(t *testing.T) {
 		}
 	})
 }
+
+// gosnowflake v2.3.0 turned OCSP off by default; hardenedConfig must opt back
+// in, and must leave an explicit operator choice alone.
+func TestHardenedConfigOCSP(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		query string
+		want  gosnowflake.OCSPFailOpenMode
+	}{
+		{"default opts in to fail-open", "", gosnowflake.OCSPFailOpenTrue},
+		{"explicit fail-closed is kept", "&ocspFailOpen=false", gosnowflake.OCSPFailOpenFalse},
+		{"explicit fail-open is kept", "&ocspFailOpen=true", gosnowflake.OCSPFailOpenTrue},
+		{"disableOCSPChecks is kept", "&disableOCSPChecks=true", ocspNotSet},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := hardenedConfig("user:pw@acct/db/sch?warehouse=wh" + tc.query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OCSPFailOpen != tc.want {
+				t.Errorf("OCSPFailOpen = %v, want %v", cfg.OCSPFailOpen, tc.want)
+			}
+		})
+	}
+}
