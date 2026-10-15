@@ -65,7 +65,7 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 	}
 	st := &roomState{snap: NewSnapshot(), inbox: newInbox()}
 	st.snap.ID = roomID
-	s.rooms[roomID] = st
+	s.cacheRoomLocked(roomID, st)
 
 	if _, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, s.humanActor(user), events.RoomCreatedPayload{
 		Title: title, Severity: severity, PipelineID: pipelineID,
@@ -106,7 +106,7 @@ func (s *Service) CreateRoom(ctx context.Context, user User, title, severity, pi
 // error for a room that exists; a retry of an alert joins it by its dedup key.
 // Caller must hold s.mu.
 func (s *Service) discardNewRoomLocked(ctx context.Context, roomID string) {
-	delete(s.rooms, roomID)
+	s.uncacheRoomLocked(roomID)
 	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err := s.store.DeleteEmptyRoom(dctx, roomID); err != nil {
@@ -247,7 +247,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	}
 	st := &roomState{snap: NewSnapshot(), inbox: newRoomInbox(shadow)}
 	st.snap.ID = roomID
-	s.rooms[roomID] = st
+	s.cacheRoomLocked(roomID, st)
 
 	if _, err := s.emitLocked(ctx, st, roomID, events.RoomCreated, systemActor, events.RoomCreatedPayload{
 		Title: title, Severity: severity, PipelineID: pipelineID, Alert: raw,

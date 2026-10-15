@@ -182,7 +182,7 @@ func (s *Service) evictRooms(ids []string) {
 		if st.dedupKey != "" && s.alertRooms[st.dedupKey] == id {
 			delete(s.alertRooms, st.dedupKey)
 		}
-		delete(s.rooms, id)
+		s.uncacheRoomLocked(id)
 		s.markListDirtyLocked(id)
 	}
 }
