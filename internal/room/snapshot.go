@@ -214,6 +214,12 @@ type RoomSnapshot struct {
 	// proposal appears.
 	pendingPreviews map[string]events.ProposalPreviewedPayload
 
+	// openAtClose is OpenProposals as room.closed found it: the close empties
+	// OpenProposals (a closed room has none, docs/api.md Q0, whatever
+	// withdrawals follow), and withdrawOnCloseLocked writes the withdrawals
+	// from this list. Never mutated, so copies may share it.
+	openAtClose []Proposal
+
 	// facts are the alert source, suspected layer, newest activity and
 	// auto-page mark the watcher and paging code read (Q1, foldRoomFacts).
 	facts roomFacts
@@ -464,6 +470,11 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		snap.Status = "closed"
 		snap.ClosedAt = &at
 		snap.Resolution = p.Resolution
+		// Derived here, not from proposal.withdrawn: a room closed before the
+		// close withdrew its proposals (Q1) has none either (QA X1).
+		snap.openAtClose = snap.OpenProposals
+		snap.OpenProposals = []Proposal{}
+		snap.pendingPreviews = nil
 		// A shadow room's log holds no agent events: no draft.
 		if !snap.Shadow && snap.Postmortem.Status == PostmortemNone {
 			snap.Postmortem = PostmortemState{Status: PostmortemDrafting}
@@ -608,7 +619,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 
 	case events.ProposalCreated:
 		p, ok := decode[events.ProposalCreatedPayload](e)
-		if !ok {
+		if !ok || snap.Status == "closed" {
 			break
 		}
 		approvals := map[string]string{}
@@ -643,7 +654,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 
 	case events.ProposalPreviewed:
 		p, ok := decode[events.ProposalPreviewedPayload](e)
-		if !ok {
+		if !ok || snap.Status == "closed" {
 			break
 		}
 		found := false
