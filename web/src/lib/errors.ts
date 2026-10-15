@@ -15,6 +15,8 @@ const FRIENDLY_TEXT: Record<string, string> = {
   no_hypothesis: 'there is no hypothesis to decide on yet',
   already_nudged: 'already nudged a few minutes ago',
   handoff_in_progress: 'a hand-off is already being written for this room. Wait for it to finish.',
+  // #459: the client sent one idempotency key with two different messages, a client bug.
+  client_id_reused: 'this message could not be sent (its id was already used). Reload the room and send it again.',
 }
 
 /** Friendly text for a server error code, or the server message unchanged. */
@@ -32,12 +34,17 @@ export function isNetworkError(e: unknown): boolean {
   return e instanceof Error && /failed to fetch|networkerror|load failed/i.test(e.message)
 }
 
-/** A steer or comment got no answer in time; the room's events will show whether it arrived. */
+/** A steer or comment got no answer in time and the server is not known to dedupe retries. */
 export const UNCONFIRMED_TEXT =
-  'No answer from Piperoom yet \u2014 checking whether your message arrived before it can be sent again\u2026'
+  'No answer from Piperoom yet \u2014 waiting a minute before your message can be sent again\u2026'
 
 /** The check above found no sign of the message: only the person's own Retry sends it again. */
 export const NOT_CONFIRMED_TEXT = "Piperoom never confirmed your message. Press Retry to send it again."
+
+/** 409 client_id_reused (docs/api.md, Idempotent posts): one key sent with two different bodies. */
+export function isClientIdReused(e: unknown): boolean {
+  return e instanceof ApiClientError && e.code === 'client_id_reused'
+}
 
 /**
  * True for api.steer/api.comment's SendUnconfirmedError. Checked by name so this module keeps

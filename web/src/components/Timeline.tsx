@@ -7,6 +7,8 @@ import { Check, ChevronRight, Copy, X } from 'lucide-react'
 import type { AgentMessageState, ChecklistTick, CommentState, StepState, ToolCallState } from '../state/types'
 import type { ToolCall } from '../api/types'
 import { argTags, formatMs, toolLayer } from '../lib/toolLayers'
+import { newClientId } from '../lib/clientId'
+import type { SendOptions } from '../hooks/useRoom'
 import { cn } from '@/lib/utils'
 import { Badge, layerVariant } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -190,22 +192,25 @@ function CommentThread({
   readOnly = false,
 }: {
   comment: CommentState
-  onReply: (text: string) => void | Promise<boolean>
+  onReply: (text: string, clientId: string) => void | Promise<boolean>
   readOnly?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [offline, setOffline] = useState(false)
+  const retryOf = useRef<{ text: string; clientId: string } | null>(null)
 
   // Like ReplyBox: the reply closes only once the server took it; a failed send keeps the words.
   const send = async () => {
     const t = text.trim()
     if (!t || sending) return
     setSending(true)
-    const ok = (await onReply(t)) !== false
+    const clientId = actionId(retryOf, t)
+    const ok = (await onReply(t, clientId)) !== false
     setSending(false)
     setOffline(!ok)
+    retryOf.current = ok ? null : { text: t, clientId }
     if (ok) {
       setText('')
       setOpen(false)
@@ -269,18 +274,29 @@ function CommentThread({
   )
 }
 
-function ReplyBox({ onSubmit }: { onSubmit: (text: string) => void | Promise<boolean> }) {
+/**
+ * The client_id for a send (#459): the failed send's id when these are its words (a Retry, so the
+ * server stores the reply at most once), else a new action's id.
+ */
+function actionId(retryOf: { current: { text: string; clientId: string } | null }, text: string): string {
+  return retryOf.current?.text === text ? retryOf.current.clientId : newClientId()
+}
+
+function ReplyBox({ onSubmit }: { onSubmit: (text: string, clientId: string) => void | Promise<boolean> }) {
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [offline, setOffline] = useState(false)
+  const retryOf = useRef<{ text: string; clientId: string } | null>(null)
   // The field clears only once the server took the comment; a failed send keeps the words.
   const send = async () => {
     const t = text.trim()
     if (!t || sending) return
     setSending(true)
-    const ok = (await onSubmit(t)) !== false
+    const clientId = actionId(retryOf, t)
+    const ok = (await onSubmit(t, clientId)) !== false
     setSending(false)
     setOffline(!ok)
+    retryOf.current = ok ? null : { text: t, clientId }
     if (ok) setText('')
   }
   const submit = (e: FormEvent) => {
@@ -328,7 +344,7 @@ function StepExtras({
 }: {
   step: StepState
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void | Promise<boolean>
+  onComment: (text: string, stepId?: string, opts?: SendOptions) => void | Promise<boolean>
   readOnly: boolean
   showReplyBox: boolean
 }) {
@@ -336,9 +352,9 @@ function StepExtras({
     <>
       <AgentMessageList messages={step.messages} />
       {comments.map((c) => (
-        <CommentThread key={c.id} comment={c} onReply={(t) => onComment(t, step.id)} readOnly={readOnly} />
+        <CommentThread key={c.id} comment={c} onReply={(t, clientId) => onComment(t, step.id, { clientId })} readOnly={readOnly} />
       ))}
-      {!readOnly && showReplyBox && <ReplyBox onSubmit={(t) => onComment(t, step.id)} />}
+      {!readOnly && showReplyBox && <ReplyBox onSubmit={(t, clientId) => onComment(t, step.id, { clientId })} />}
     </>
   )
 }
@@ -377,7 +393,7 @@ function DoneStep({
   step: StepState
   n: number
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void | Promise<boolean>
+  onComment: (text: string, stepId?: string, opts?: SendOptions) => void | Promise<boolean>
   readOnly: boolean
   checklist?: ChecklistWiring
   cited?: CitedStep | null
@@ -433,7 +449,7 @@ function DoneStep({
 
       <div id={regionId} hidden={!open} className={cn("ml-10 flex-col gap-3 pb-1", open ? "flex" : "hidden")}>
         <Evidence step={step} checklist={checklist} />
-        {!readOnly && <ReplyBox onSubmit={(t) => onComment(t, step.id)} />}
+        {!readOnly && <ReplyBox onSubmit={(t, clientId) => onComment(t, step.id, { clientId })} />}
       </div>
 
       {(step.messages.length > 0 || comments.length > 0) && (
@@ -460,7 +476,7 @@ function LiveStep({
   step: StepState
   n: number
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void | Promise<boolean>
+  onComment: (text: string, stepId?: string, opts?: SendOptions) => void | Promise<boolean>
   readOnly: boolean
   checklist?: ChecklistWiring
   /** The step is outside the active layer filter: kept so the live work stays visible. */
@@ -523,7 +539,7 @@ export function Timeline({
   steps: StepState[]
   messages: AgentMessageState[]
   comments: CommentState[]
-  onComment: (text: string, stepId?: string) => void | Promise<boolean>
+  onComment: (text: string, stepId?: string, opts?: SendOptions) => void | Promise<boolean>
   /** A viewer reads comments but cannot write any. */
   readOnly?: boolean
   /** The agent is working: the last step is the live one. */
@@ -630,7 +646,7 @@ export function Timeline({
         <section aria-label="Room comments" className="flex flex-col gap-2.5 pt-2">
           <h3 className="m-0 text-sm font-medium">Room comments</h3>
           {unanchored.map((c) => (
-            <CommentThread key={c.id} comment={c} onReply={(t) => onComment(t)} readOnly={readOnly} />
+            <CommentThread key={c.id} comment={c} onReply={(t, clientId) => onComment(t, undefined, { clientId })} readOnly={readOnly} />
           ))}
         </section>
       )}

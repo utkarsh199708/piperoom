@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import {
@@ -9,7 +9,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { newClientId } from '../../lib/clientId'
 import { rollbackSteer } from '../../lib/rollback'
+import type { SendOptions } from '../../hooks/useRoom'
 import { OfflineStrip } from './OfflineStrip'
 
 // There is no rollback route: the undo goes through the same steer path as any instruction, so it
@@ -26,17 +28,25 @@ export function RollbackButton({
   rollback: string
   /** The driver's steer goes to the agent; a member's is a suggestion in the driver's queue. */
   asDriver: boolean
-  onSteer: (text: string) => Promise<boolean>
+  onSteer: (text: string, opts?: SendOptions) => Promise<boolean>
 }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [failed, setFailed] = useState(false)
+  // One rollback request is one action (#459): Retry keeps its client_id, so the server stores it
+  // at most once even if an earlier copy landed; the next request after a success gets a new id.
+  const clientIdRef = useRef<string | null>(null)
   const send = async () => {
     setBusy(true)
-    const ok = await onSteer(rollbackSteer(title, proposalId, rollback))
+    const clientId = clientIdRef.current ?? newClientId()
+    clientIdRef.current = clientId
+    const ok = await onSteer(rollbackSteer(title, proposalId, rollback), { clientId })
     setBusy(false)
     setFailed(!ok)
-    if (ok) setOpen(false)
+    if (ok) {
+      clientIdRef.current = null
+      setOpen(false)
+    }
   }
   return (
     <>

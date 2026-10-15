@@ -1,14 +1,11 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type {
-  CommentAddedPayload,
   ChecklistStepDonePayload,
   Event,
   HypothesisVerdict,
   LabelInput,
   PresenceMember,
   RoomSnapshot,
-  SteerSentPayload,
-  SteerSuggestedPayload,
   WsServerMessage,
 } from '../api/types'
 import { ApiClientError, api, isFixtures, openRoomWs } from '../api/client'
@@ -18,7 +15,10 @@ import { classifyAuthProblem, reportAuthProblem } from '../lib/auth'
 import { emptySnapshot, fixtureEvents, fixtureRoom, FIXTURE_EVENT_DELAY_MS } from '../fixtures/player'
 import { useCurrentUser } from '../context/user'
 import { findUser } from '../fixtures/users'
-import { NOT_CONFIRMED_TEXT, UNCONFIRMED_TEXT, errorText, friendlyError, isNetworkError, isUnconfirmed } from '../lib/errors'
+import { errorText, friendlyError } from '../lib/errors'
+import { newClientId } from '../lib/clientId'
+import { SendLedger } from './sendLedger'
+import type { DeliveredListener, SendItem } from './sendLedger'
 import { mentionsAgent } from '../lib/mentions'
 import { applyEvent } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
@@ -71,124 +71,31 @@ export interface CloseResult {
   error?: string
 }
 
-/** A steer or comment that could not reach the server, kept for one retry. */
-export interface PendingSend {
-  kind: 'steer' | 'comment'
-  text: string
-  stepId?: string
-}
+export type { DeliveredListener, Sent } from './sendLedger'
+/** What a steer or comment says (kept for older imports). */
+export type PendingSend = SendItem
 
 /** How a steer or comment is sent. */
 export interface SendOptions {
   /**
-   * The caller knows this is a retry of words whose last send failed (SteerBox's Retry).
-   * Every send of words the reconnect is sending, or sent less than 2 minutes ago, is already
-   * treated as a retry; the flag stretches the second case to 15 minutes (#390).
+   * The idempotency key of the user action this send belongs to (docs/api.md, Idempotent posts;
+   * #459). A component makes one with newClientId() per click or submit and passes the same id
+   * on every Retry of it; without one, the send is a new action.
    */
-  retry?: boolean
-}
-
-/**
- * Called when the reconnect delivered words a composer still holds. Return true when the
- * composer took them (cleared its field): a later retry of the same words is then a new message.
- */
-export type DeliveredListener = (sent: PendingSend) => boolean
-
-const MAX_PENDING = 5
-/** A send of the same words this soon after the reconnect delivered them is a retry of them (#343). */
-const DELIVERED_DEDUPE_MS = 2 * 60_000
-/** A flagged retry still matches a delivered copy this old; older copies are dropped (#390). */
-const DELIVERED_KEEP_MS = 15 * 60_000
-/** How long a send waits for the reconnect's copy of the same words before it stops waiting. */
-const INFLIGHT_WAIT_MS = 15_000
-/**
- * A send that got no answer (SendUnconfirmedError) is settled from the room's events for this long
- * after it started: the server gives the steer and comment routes 60 s
- * (internal/httpapi/server.go), so a copy it stores at all is stored by then.
- */
-const UNCONFIRMED_WINDOW_MS = 65_000
-/** After a reconnect, the replay of missed events gets this long before an overdue check gives up. */
-const CATCH_UP_MS = 5_000
-
-/**
- * A send whose outcome is unknown. Never posted again on its own: a matching event of the
- * current user after `afterSeq` settles it as delivered; with none by the end of the window it
- * becomes 'unconfirmed', and only the person's next send of those words posts it, once.
- */
-interface Unconfirmed {
-  item: PendingSend
-  afterSeq: number
-  since: number
-  state: 'checking' | 'unconfirmed'
-}
-
-/** The words of an event the current user sent, in the shape sendKept matches on. */
-function ownSend(ev: Event, userId: string): PendingSend | null {
-  if (ev.actor?.kind !== 'human' || ev.actor.id !== userId) return null
-  if (ev.type === 'steer.sent') {
-    const p = ev.payload as SteerSentPayload
-    // A forwarded suggestion carries someone else's words.
-    return p.suggestion_id ? null : { kind: 'steer', text: p.text }
-  }
-  if (ev.type === 'steer.suggested') return { kind: 'steer', text: (ev.payload as SteerSuggestedPayload).text }
-  if (ev.type === 'comment.added') {
-    const p = ev.payload as CommentAddedPayload
-    return { kind: 'comment', text: p.text, stepId: p.step_id }
-  }
-  return null
-}
-
-/** How a reconnect copy's send ended: taken, refused or not sent, or no answer (maybe stored). */
-type SendOutcome = 'ok' | 'failed' | 'unknown'
-
-interface Delivered {
-  item: PendingSend
-  at: number
-}
-
-const samePending = (a: PendingSend, b: PendingSend) =>
-  a.kind === b.kind && a.text === b.text && (a.stepId ?? undefined) === (b.stepId ?? undefined)
-
-/**
- * Removes one delivered copy of `item` younger than `maxAge`; true when there was one.
- * Copies older than DELIVERED_KEEP_MS are dropped on the way, so none lives forever.
- */
-function takeDelivered(ref: { current: Delivered[] }, item: PendingSend, maxAge: number): boolean {
-  const now = Date.now()
-  const live = ref.current.filter((d) => now - d.at < DELIVERED_KEEP_MS)
-  const i = live.findIndex((d) => samePending(d.item, item) && now - d.at < maxAge)
-  ref.current = i < 0 ? live : live.filter((_, j) => j !== i)
-  return i >= 0
-}
-
-/** Forgets every delivered copy of `item`: a newer send of those words supersedes them. */
-function dropDelivered(ref: { current: Delivered[] }, item: PendingSend) {
-  ref.current = ref.current.filter((d) => !samePending(d.item, item))
-}
-
-type Timers = Set<ReturnType<typeof setTimeout>>
-
-/** `done`'s value, or 'timeout' when it has not settled within `ms`. The timer is kept in `timers` so unmount can clear it. */
-function within<T>(done: Promise<T>, ms: number, timers: Timers): Promise<T | 'timeout'> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const late = new Promise<'timeout'>((resolve) => {
-    timer = setTimeout(() => resolve('timeout'), ms)
-    timers.add(timer)
-  })
-  return Promise.race([done, late]).finally(() => {
-    clearTimeout(timer)
-    if (timer !== undefined) timers.delete(timer)
-  })
+  clientId?: string
 }
 
 export type ConnState = 'loading' | 'connecting' | 'live' | 'reconnecting' | 'error' | 'not_found'
 
 export interface RoomActions {
-  /** Resolves true when the server took it. A failed network call is kept and retried once when the socket reopens. */
+  /**
+   * Resolves true when the server took it. A send that did not get through is kept and sent
+   * again, with the same client_id, when the socket reopens (see hooks/sendLedger.ts).
+   */
   comment: (text: string, stepId?: string, opts?: SendOptions) => Promise<boolean>
   /** Same contract as `comment`. */
   steer: (text: string, opts?: SendOptions) => Promise<boolean>
-  /** Hear about kept words the reconnect delivered; returns the unsubscribe function. */
+  /** Hear about actions that landed without their caller hearing (reconnect copy, event stream). */
   onDelivered?: (listener: DeliveredListener) => () => void
   sendSuggestion: (suggestionId: string) => void
   /** The driver declines a pending suggestion, with an optional note to its author. */
@@ -264,71 +171,24 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
   const lastSeqRef = useRef(0)
   const stateRef = useRef<RoomState | null>(null)
   const localIdRef = useRef(0)
-  const pendingRef = useRef<PendingSend[]>([])
-  // What the reconnect drain is sending now; `done` says how that send ended.
-  const inflightRef = useRef<{ item: PendingSend; afterSeq: number; since: number; done: Promise<SendOutcome> }[]>([])
-  // Sends that got no answer in time (see Unconfirmed).
-  const unconfirmedRef = useRef<Unconfirmed[]>([])
-  // The socket is open: an unconfirmed send's window only ends while events can arrive.
-  const liveRef = useRef(false)
-  // The user's own recent sends seen in the stream: the event can arrive before the send that
-  // stored it gives up waiting for the answer.
-  const seenOwnRef = useRef<{ item: PendingSend; seq: number }[]>([])
-  // What the drain sent and no composer has taken yet: a send of those words soon after is
-  // that message's Retry, not a new message (see DELIVERED_DEDUPE_MS / DELIVERED_KEEP_MS).
-  const deliveredRef = useRef<Delivered[]>([])
-  const deliveredListenersRef = useRef(new Set<DeliveredListener>())
-  // Timers of sends waiting on the reconnect's copy and of unconfirmed checks; cleared on unmount.
-  const waitTimersRef = useRef<Timers>(new Set())
+  // Steers and comments not settled yet, keyed by client_id. Its post reads roomIdRef, so it
+  // always posts to the room on screen.
+  const roomIdRef = useRef(roomId)
   useEffect(() => {
-    const timers = waitTimersRef.current
-    return () => {
-      for (const t of timers) clearTimeout(t)
-      timers.clear()
-    }
-  }, [])
-  // Words the server took (an answer, or the user's own event in the stream): tell the composers,
-  // and keep a copy for a Retry of them that no composer took.
-  const announceDelivered = useCallback((item: PendingSend) => {
-    let taken = false
-    for (const l of deliveredListenersRef.current) taken = l(item) || taken
-    if (!taken) deliveredRef.current = [...deliveredRef.current, { item, at: Date.now() }].slice(-MAX_PENDING)
-  }, [])
-
-  const clearUnconfirmedBanner = useCallback(() => {
-    if (unconfirmedRef.current.length > 0) return
-    setError((prev) => (prev === UNCONFIRMED_TEXT || prev === NOT_CONFIRMED_TEXT ? null : prev))
-  }, [])
-
-  // Ends a check's window: with the socket open the words are 'unconfirmed' (only a click sends
-  // them again); with it closed the check waits for the next reconnect's replay (onopen).
-  const armUnconfirmed = useCallback((u: Unconfirmed, ms: number) => {
-    const timers = waitTimersRef.current
-    const t = setTimeout(() => {
-      timers.delete(t)
-      if (!unconfirmedRef.current.includes(u) || u.state !== 'checking' || !liveRef.current) return
-      u.state = 'unconfirmed'
-      setError(NOT_CONFIRMED_TEXT)
-    }, Math.max(ms, 0))
-    timers.add(t)
-  }, [])
-
-  // Returns true when the stream already showed the words arrived: then nothing is left to check.
-  const markUnconfirmed = useCallback(
-    (item: PendingSend, afterSeq: number, since: number): boolean => {
-      if (seenOwnRef.current.some((x) => samePending(x.item, item) && x.seq > afterSeq)) return true
-      unconfirmedRef.current = [
-        ...unconfirmedRef.current.filter((u) => !samePending(u.item, item)),
-        { item, afterSeq, since, state: 'checking' as const },
-      ]
-      const u = unconfirmedRef.current[unconfirmedRef.current.length - 1]
-      armUnconfirmed(u, since + UNCONFIRMED_WINDOW_MS - Date.now())
-      setError(UNCONFIRMED_TEXT)
-      return false
-    },
-    [armUnconfirmed],
+    roomIdRef.current = roomId
+  }, [roomId])
+  const [ledger] = useState(
+    () =>
+      new SendLedger({
+        post: (item, clientId) =>
+          item.kind === 'steer'
+            ? api.steer(roomIdRef.current, item.text, clientId)
+            : api.comment(roomIdRef.current, { step_id: item.stepId, text: item.text, client_id: clientId }),
+        setError,
+        newId: newClientId,
+      }),
   )
-
+  useEffect(() => () => ledger.dispose(), [ledger])
   // Fixture mode: buffer synthetic (user) events until the story replay ends so
   // their seq can never collide with an upcoming story event's seq.
   const storyPlayingRef = useRef(false)
@@ -351,7 +211,6 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
 
     dispatch({ type: 'reset' })
     lastSeqRef.current = 0
-    seenOwnRef.current = [] // the replay from 0 fills it again
     setError(null)
     setPresence([])
 
@@ -425,16 +284,8 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       if (ev.seq <= lastSeqRef.current) return
       dispatch({ type: 'event', event: ev })
       lastSeqRef.current = ev.seq
-      // The stream is the truth for a send that got no answer: the user's own words, stored
-      // after the send started, mean it arrived.
-      const mine = ownSend(ev, user.id)
-      if (mine) seenOwnRef.current = [...seenOwnRef.current, { item: mine, seq: ev.seq }].slice(-20)
-      const u = mine && unconfirmedRef.current.find((x) => samePending(x.item, mine) && ev.seq > x.afterSeq)
-      if (u) {
-        unconfirmedRef.current = unconfirmedRef.current.filter((x) => x !== u)
-        announceDelivered(u.item)
-        clearUnconfirmedBanner()
-      }
+      // The stream settles a send by its client_id (an answer may have been lost).
+      ledger.onEvent(ev, user.id)
     }
 
     // Page /events until the gap before `ev` closes. On failure (fetch throws or
@@ -494,61 +345,15 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       sock.onopen = () => {
         if (cancelled) return
         opened = true
-        liveRef.current = true
         probed = false
         backoff = 1000
         setConn('live')
-        setError(unconfirmedRef.current.length > 0 ? UNCONFIRMED_TEXT : null)
-        // Checks whose window ended while the socket was down: give the replay time to arrive.
-        for (const u of unconfirmedRef.current) {
-          if (u.state === 'checking') armUnconfirmed(u, Math.max(u.since + UNCONFIRMED_WINDOW_MS - Date.now(), CATCH_UP_MS))
-        }
+        setError(ledger.banner())
         sendPresence(currentPresence())
-        // Messages typed while the server was away: one retry each, in order. Success
-        // emits nothing here (the event arrives over the socket); a failure shows its text.
-        // Each item is marked in flight in the same tick its request starts, so a Retry
-        // pressed meanwhile waits for this send instead of posting a second copy.
-        const kept = pendingRef.current
-        pendingRef.current = []
-        for (const item of kept) {
-          const afterSeq = lastSeqRef.current
-          const since = Date.now()
-          const call =
-            item.kind === 'steer'
-              ? api.steer(roomId, item.text)
-              : api.comment(roomId, { step_id: item.stepId, text: item.text })
-          const entry = {
-            item,
-            afterSeq,
-            since,
-            done: call.then(
-              (): SendOutcome => {
-                // A send that stopped waiting on this copy marked it unconfirmed: it arrived after all.
-                const before = unconfirmedRef.current.length
-                unconfirmedRef.current = unconfirmedRef.current.filter((u) => !samePending(u.item, item))
-                if (unconfirmedRef.current.length !== before) clearUnconfirmedBanner()
-                announceDelivered(item)
-                return 'ok'
-              },
-              (e: unknown): SendOutcome => {
-                if (isUnconfirmed(e)) {
-                  // Maybe stored: never posted again on its own, settled from the event stream.
-                  if (!markUnconfirmed(item, afterSeq, since)) return 'unknown'
-                  announceDelivered(item)
-                  return 'ok'
-                }
-                // A real failure: the words were not stored. A waiting or later Retry posts them.
-                unconfirmedRef.current = unconfirmedRef.current.filter((u) => !samePending(u.item, item))
-                setError(errorText(e))
-                return 'failed'
-              },
-            ),
-          }
-          inflightRef.current = [...inflightRef.current, entry]
-          void entry.done.then(() => {
-            inflightRef.current = inflightRef.current.filter((x) => x !== entry)
-          })
-        }
+        // Messages that did not get through: sent again, each with its own client_id, so a
+        // server that already stored one appends nothing (docs/api.md, Idempotent posts).
+        // Success emits nothing here (the event arrives over the socket).
+        ledger.drain()
       }
       sock.onmessage = (m) => {
         if (cancelled) return // a socket from an older session epoch
@@ -576,7 +381,6 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       }
       sock.onclose = (ev: CloseEvent) => {
         if (cancelled) return
-        if (ws === sock) liveRef.current = false
         if (ev?.reason === 'session_expired') {
           // The server closed the socket because the session ended (auth.md 1.6).
           // Stop retrying; the login screen (or redirect) takes over.
@@ -638,7 +442,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
       ws?.close()
       ws = null
     }
-  }, [roomId, user.id, user.name, sessionEpoch, reloadKey, announceDelivered, armUnconfirmed, clearUnconfirmedBanner, markUnconfirmed])
+  }, [roomId, user.id, user.name, sessionEpoch, reloadKey, ledger])
 
   // Fetch the snapshot and replay the log again (a fresh socket, after=0).
   // Reload closes the stale toast and it stays closed: the toast is raised only where the 409
@@ -667,88 +471,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
     [reload],
   )
 
-  // Steer and comment keep the person's words: a call that never reached the server is
-  // queued (max 5) and the caller learns it failed, so the field is not cleared.
-  const sendKept = useCallback(
-    async (item: PendingSend, opts?: SendOptions): Promise<boolean> => {
-      // An earlier send of these words got no answer and may be stored: while the event stream
-      // is checked, no send of them posts. Once the check found nothing, this send is the
-      // person's explicit re-send, and it posts once.
-      const unknown = unconfirmedRef.current.find((u) => samePending(u.item, item))
-      if (unknown?.state === 'checking') {
-        setError(UNCONFIRMED_TEXT)
-        return false
-      }
-      if (unknown) {
-        unconfirmedRef.current = unconfirmedRef.current.filter((u) => u !== unknown)
-        clearUnconfirmedBanner()
-      }
-      // A manual send replaces the queued copy, so the text is not sent twice.
-      const queued = pendingRef.current.some((p) => samePending(p, item))
-      pendingRef.current = pendingRef.current.filter((p) => !samePending(p, item))
-      // Every caller is covered, flag or not: RollbackButton and the Timeline reply boxes
-      // retry with a plain steer/comment call.
-      if (!queued) {
-        const flying = inflightRef.current.find((f) => samePending(f.item, item))
-        if (flying) {
-          // The reconnect is sending these words now: wait for it rather than post a second copy.
-          const outcome = await within(flying.done, INFLIGHT_WAIT_MS, waitTimersRef.current)
-          if (outcome === 'timeout') {
-            // Still unanswered. api.steer/comment give up at SEND_DEADLINE_MS, before this, so
-            // this only guards a client without that deadline: the copy may be stored, so treat
-            // it like one that got no answer.
-            inflightRef.current = inflightRef.current.filter((f) => f !== flying)
-            if (!markUnconfirmed(item, flying.afterSeq, flying.since)) return false
-            announceDelivered(item)
-            takeDelivered(deliveredRef, item, DELIVERED_KEEP_MS)
-            setError(null)
-            return true
-          }
-          if (outcome === 'ok') {
-            takeDelivered(deliveredRef, item, DELIVERED_KEEP_MS)
-            setError(null)
-            return true
-          }
-          if (outcome === 'unknown') return false // marked unconfirmed by the drain
-          // The reconnect's copy failed, so this send is the one that has to reach the server.
-        } else if (takeDelivered(deliveredRef, item, opts?.retry ? DELIVERED_KEEP_MS : DELIVERED_DEDUPE_MS)) {
-          // The reconnect already sent them: posting again would steer the agent twice.
-          setError(null)
-          return true
-        }
-      }
-      // This send supersedes any older delivered copy: a Retry of it must not be answered by one.
-      dropDelivered(deliveredRef, item)
-      const afterSeq = lastSeqRef.current
-      const since = Date.now()
-      try {
-        await (item.kind === 'steer'
-          ? api.steer(roomId, item.text)
-          : api.comment(roomId, { step_id: item.stepId, text: item.text }))
-        setError(null)
-        return true
-      } catch (e) {
-        if (isUnconfirmed(e)) {
-          // Sent, but no answer: maybe stored. Not queued, so no reconnect posts it again.
-          if (!markUnconfirmed(item, afterSeq, since)) return false
-          setError(null) // the stream already showed it arrived
-          return true
-        }
-        if (isNetworkError(e) && pendingRef.current.length < MAX_PENDING) pendingRef.current.push(item)
-        setError(errorText(e))
-        return false
-      }
-    },
-    [roomId, announceDelivered, clearUnconfirmedBanner, markUnconfirmed],
-  )
-
-  const onDelivered = useCallback((listener: DeliveredListener) => {
-    const set = deliveredListenersRef.current
-    set.add(listener)
-    return () => {
-      set.delete(listener)
-    }
-  }, [])
+  const onDelivered = useCallback((listener: DeliveredListener) => ledger.onDelivered(listener), [ledger])
 
   const runAction = useCallback((p: Promise<unknown>) => {
     p.then(() => setError(null)).catch((e: unknown) => setError(errorText(e)))
@@ -791,7 +514,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         })
         return true
       }
-      return sendKept({ kind: 'comment', text, stepId }, opts)
+      return ledger.send({ kind: 'comment', text, stepId }, opts?.clientId)
     },
     steer: async (text, opts) => {
       if (isFixtures()) {
@@ -803,7 +526,7 @@ export function useRoom(roomId: string, random: () => number = Math.random) {
         )
         return true
       }
-      return sendKept({ kind: 'steer', text }, opts)
+      return ledger.send({ kind: 'steer', text }, opts?.clientId)
     },
     sendSuggestion: (suggestionId) => {
       if (isFixtures()) {

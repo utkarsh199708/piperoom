@@ -353,3 +353,15 @@ describe('steer and comment deadline', () => {
     await expect(api.steer('r1', 'stop')).resolves.toEqual({ seq: 1 })
   })
 })
+
+describe('idempotency key (#459)', () => {
+  it('steer and comment send client_id in the body, and leave it out when there is none', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse(200, { seq: 1 }))
+    await api.steer('r1', 'stop', 'k1')
+    expect(JSON.parse(String(lastCall().init.body))).toEqual({ text: 'stop', client_id: 'k1' })
+    await api.comment('r1', { step_id: 's1', text: 'ok', client_id: 'k2' })
+    expect(JSON.parse(String(lastCall().init.body))).toEqual({ step_id: 's1', text: 'ok', client_id: 'k2' })
+    await api.steer('r1', 'stop')
+    expect(JSON.parse(String(lastCall().init.body))).toEqual({ text: 'stop' })
+  })
+})

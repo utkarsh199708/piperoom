@@ -79,7 +79,7 @@ describe('SteerBox composer (U3)', () => {
     expect(send).toBeDisabled()
     fireEvent.change(box, { target: { value: 'check the DDL log' } })
     fireEvent.click(send)
-    expect(actions.steer).toHaveBeenCalledWith('check the DDL log')
+    expect(actions.steer).toHaveBeenCalledWith('check the DDL log', { clientId: expect.any(String) })
     await waitFor(() => expect(box).toHaveValue(''))
   })
 
@@ -100,7 +100,8 @@ describe('SteerBox composer (U3)', () => {
     expect(actions.steer).toHaveBeenCalledTimes(2)
   })
 
-  it('marks the Retry as a retry, so the hook can skip a copy the reconnect sent', async () => {
+  // #459: a Retry is the same action, so it keeps the failed send's client_id.
+  it('the Retry keeps the failed send\'s client_id', async () => {
     vi.mocked(actions.steer).mockReset().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
     const state = { ...emptyRoomState('r1'), driver: { id: 'arjun', name: 'Arjun', lease_until: inAnHour() } }
     render(<SteerBox state={state} user={arjun} actions={actions} />)
@@ -109,8 +110,11 @@ describe('SteerBox composer (U3)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(box).toHaveValue(''))
-    expect(actions.steer).toHaveBeenNthCalledWith(1, 'look at the slot')
-    expect(actions.steer).toHaveBeenNthCalledWith(2, 'look at the slot', { retry: true })
+    const [first, second] = vi.mocked(actions.steer).mock.calls
+    expect(first[0]).toBe('look at the slot')
+    expect(second[0]).toBe('look at the slot')
+    expect(second[1]?.clientId).toBeTruthy()
+    expect(second[1]?.clientId).toBe(first[1]?.clientId)
   })
 
   it('edited words sent while the Retry strip is up are a new message, not a retry', async () => {
@@ -124,12 +128,14 @@ describe('SteerBox composer (U3)', () => {
     fireEvent.change(box, { target: { value: 'look at the lag' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
     await waitFor(() => expect(box).toHaveValue(''))
-    expect(actions.steer).toHaveBeenNthCalledWith(2, 'look at the lag')
+    const [first, second] = vi.mocked(actions.steer).mock.calls
+    expect(second[0]).toBe('look at the lag')
+    expect(second[1]?.clientId).not.toBe(first[1]?.clientId)
   })
 
-  // #390 scenario B: the reconnect sent the words; the field and the Retry strip go away
-  // without waiting for the person, so there is no late Retry to steer twice.
-  it('clears the field and the Retry strip when the reconnect delivered the failed words', async () => {
+  // #390 scenario B: the failed send landed (reconnect copy or its event); the field and the Retry
+  // strip go away without waiting for the person.
+  it('clears the field and the Retry strip when its failed send landed', async () => {
     let listener: DeliveredListener | null = null
     const withSignal: RoomActions = {
       ...actions,
@@ -147,14 +153,15 @@ describe('SteerBox composer (U3)', () => {
     fireEvent.change(box, { target: { value: 'look at the slot' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
     await screen.findByRole('button', { name: 'Retry' })
-    // Other words are not the composer's: it leaves them to the hook.
+    const clientId = vi.mocked(withSignal.steer).mock.calls[0][1]!.clientId!
+    // Another action is not the composer's, even with the same words.
     let taken = true
     act(() => {
-      taken = listener!({ kind: 'steer', text: 'something else' })
+      taken = listener!({ clientId: 'other', kind: 'steer', text: 'look at the slot' })
     })
     expect(taken).toBe(false)
     act(() => {
-      taken = listener!({ kind: 'steer', text: 'look at the slot' })
+      taken = listener!({ clientId, kind: 'steer', text: 'look at the slot' })
     })
     expect(taken).toBe(true)
     expect(box).toHaveValue('')
@@ -179,8 +186,9 @@ describe('SteerBox composer (U3)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send to agent' }))
     await screen.findByRole('button', { name: 'Retry' })
     fireEvent.change(box, { target: { value: 'look at the slot and the lag' } })
+    const clientId = vi.mocked(withSignal.steer).mock.calls[0][1]!.clientId!
     act(() => {
-      listener!({ kind: 'steer', text: 'look at the slot' })
+      listener!({ clientId, kind: 'steer', text: 'look at the slot' })
     })
     expect(box).toHaveValue('look at the slot and the lag')
     expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
@@ -199,7 +207,7 @@ describe('SteerBox composer (U3)', () => {
     const box = screen.getByLabelText('Steer the agent')
     fireEvent.change(box, { target: { value: 'go' } })
     fireEvent.keyDown(box, { key: 'Enter', ctrlKey: true })
-    expect(actions.steer).toHaveBeenCalledWith('go')
+    expect(actions.steer).toHaveBeenCalledWith('go', { clientId: expect.any(String) })
   })
 
   it('a watcher is told whose queue the message goes to, and the lease', () => {
@@ -220,7 +228,7 @@ describe('SteerBox composer (U3)', () => {
     expect(screen.getByText(/No driver · your suggestion is queued for whoever takes control/)).toBeInTheDocument()
     fireEvent.change(field, { target: { value: 'check the connector' } })
     fireEvent.click(screen.getByRole('button', { name: 'Suggest' }))
-    expect(actions.steer).toHaveBeenCalledWith('check the connector')
+    expect(actions.steer).toHaveBeenCalledWith('check the connector', { clientId: expect.any(String) })
   })
 
   it('with no driver the composer has no Take control (the banner offers it); with an expired lease it does', () => {
@@ -322,7 +330,7 @@ describe('SteerBox idle row (F1b)', () => {
       fireEvent.change(field(), { target: { value: '?why is task 0 failing' } })
       expect(screen.getByText('Asking the agent · it answers under Room comments')).toBeInTheDocument()
       fireEvent.click(screen.getByRole('button', { name: 'Ask' }))
-      expect(actions.comment).toHaveBeenCalledWith('@agent why is task 0 failing')
+      expect(actions.comment).toHaveBeenCalledWith('@agent why is task 0 failing', undefined, { clientId: expect.any(String) })
       expect(actions.steer).not.toHaveBeenCalled()
     })
 
@@ -330,7 +338,7 @@ describe('SteerBox idle row (F1b)', () => {
       render(<SteerBox state={driverState} user={arjun} actions={actions} />)
       fireEvent.change(field(), { target: { value: '?why is task 0 failing' } })
       fireEvent.click(screen.getByRole('button', { name: 'Ask' }))
-      expect(actions.steer).toHaveBeenCalledWith('Question: why is task 0 failing')
+      expect(actions.steer).toHaveBeenCalledWith('Question: why is task 0 failing', { clientId: expect.any(String) })
     })
 
     it('a bare ? sends nothing', () => {

@@ -113,7 +113,7 @@ describe('Timeline step stream', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Reply' }))
     fireEvent.change(screen.getByLabelText('Reply to comment'), { target: { value: 'ack' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
-    expect(onComment).toHaveBeenCalledWith('ack', 's1')
+    expect(onComment).toHaveBeenCalledWith('ack', 's1', { clientId: expect.any(String) })
   })
 
   // The hook reports false for a send that never reached the server: the reply keeps its words.
@@ -128,6 +128,25 @@ describe('Timeline step stream', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(screen.queryByLabelText('Reply to comment')).not.toBeInTheDocument())
     expect(onComment).toHaveBeenCalledTimes(2)
+    // #459: the Retry is the same action, so it keeps the client_id.
+    expect(onComment.mock.calls[1][2]).toEqual(onComment.mock.calls[0][2])
+  })
+
+  it('a failed step comment keeps its client_id for Retry; edited words are a new action', async () => {
+    const onComment = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    render(<Timeline steps={steps.slice(0, 1)} messages={[]} comments={[]} onComment={onComment} />)
+    fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
+    const box = screen.getByLabelText('Comment on this step')
+    fireEvent.change(box, { target: { value: 'looks right' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(onComment).toHaveBeenCalledTimes(2))
+    fireEvent.change(box, { target: { value: 'looks right, and lag is 0' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
+    await waitFor(() => expect(onComment).toHaveBeenCalledTimes(3))
+    const ids = onComment.mock.calls.map((c) => (c[2] as { clientId: string }).clientId)
+    expect(ids[1]).toBe(ids[0])
+    expect(ids[2]).not.toBe(ids[0])
   })
 
   it('a member comments on a step', () => {
@@ -137,7 +156,7 @@ describe('Timeline step stream', () => {
     fireEvent.click(screen.getByRole('button', { name: /Check the Debezium connector/ }))
     fireEvent.change(screen.getByLabelText('Comment on this step'), { target: { value: 'looks right' } })
     fireEvent.click(screen.getByRole('button', { name: 'Comment' }))
-    expect(onComment).toHaveBeenCalledWith('looks right', 's1')
+    expect(onComment).toHaveBeenCalledWith('looks right', 's1', { clientId: expect.any(String) })
   })
 
   it('read-only: comments show, no box and no reply button', () => {

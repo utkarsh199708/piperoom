@@ -80,8 +80,8 @@ export const SEND_DEADLINE_MS = 12_000
 
 /**
  * The request was sent but no answer came within SEND_DEADLINE_MS. The server may or may not have
- * stored it, and the API has no idempotency key (docs/api.md), so the caller must not send it again
- * on its own: useRoom settles it from the room's event stream.
+ * stored it: only a retry with the same client_id, to a server that dedupes on it, is safe
+ * (docs/api.md, Idempotent posts). See hooks/sendLedger.ts.
  */
 export class SendUnconfirmedError extends Error {
   constructor(ms: number) {
@@ -205,10 +205,14 @@ export const api = {
     request<Topology>(`/api/pipelines/${encodeURIComponent(pipelineId)}/topology`),
   agentStats: (pipelineId: string) =>
     request<AgentStats>(`/api/pipelines/${encodeURIComponent(pipelineId)}/agent-stats?days=90`),
-  comment: (roomId: string, body: { step_id?: string; text: string }) =>
+  comment: (roomId: string, body: { step_id?: string; text: string; client_id?: string }) =>
     requestWithin<Event>(`${room(roomId)}/comments`, { method: 'POST', body: JSON.stringify(body) }, SEND_DEADLINE_MS),
-  steer: (roomId: string, text: string) =>
-    requestWithin<Event>(`${room(roomId)}/steer`, { method: 'POST', body: JSON.stringify({ text }) }, SEND_DEADLINE_MS),
+  steer: (roomId: string, text: string, clientId?: string) =>
+    requestWithin<Event>(
+      `${room(roomId)}/steer`,
+      { method: 'POST', body: JSON.stringify({ text, client_id: clientId }) },
+      SEND_DEADLINE_MS,
+    ),
   sendSuggestion: (roomId: string, suggestionId: string) =>
     request<Event>(`${room(roomId)}/suggestions/${encodeURIComponent(suggestionId)}/send`, {
       method: 'POST',

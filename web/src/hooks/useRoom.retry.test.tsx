@@ -131,7 +131,7 @@ describe('RollbackButton Retry with the real hook', () => {
     await act(async () => drain.settle().resolve())
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect(api.steer).toHaveBeenCalledTimes(2)
-    expect(api.steer).toHaveBeenLastCalledWith('r1', ROLLBACK)
+    expect(api.steer).toHaveBeenLastCalledWith('r1', ROLLBACK, expect.any(String))
   })
 
   it('Retry after the reconnect delivered the rollback does not steer again', async () => {
@@ -156,7 +156,7 @@ describe('Timeline step reply Retry with the real hook', () => {
     await act(async () => drain.settle().resolve())
     await waitFor(() => expect(screen.getByLabelText('Comment on this step')).toHaveValue(''))
     expect(api.comment).toHaveBeenCalledTimes(2)
-    expect(api.comment).toHaveBeenLastCalledWith('r1', { step_id: 's1', text: 'looks right' })
+    expect(api.comment).toHaveBeenLastCalledWith('r1', { step_id: 's1', text: 'looks right', client_id: expect.any(String) })
   })
 
   it('Retry after the reconnect delivered the comment does not post it again', async () => {
@@ -170,7 +170,7 @@ describe('Timeline step reply Retry with the real hook', () => {
   })
 })
 
-describe('useRoom delivered copies do not outlive their failure', () => {
+describe('useRoom: actions are told apart by client_id, never by their words', () => {
   async function openRoom() {
     const socket = mountSocket()
     const hook = renderHook(() => useRoom('r1'))
@@ -178,14 +178,14 @@ describe('useRoom delivered copies do not outlive their failure', () => {
     return { hook, socket }
   }
 
-  // Review QA-D1: an old, untaken delivery must not answer the Retry of a newer 503.
-  it('a 503 and then Retry posts the steer, even with an older delivered copy around', async () => {
+  // Review QA-D1: an old delivery must not answer the Retry of a newer action's 503.
+  it('a 503 and then Retry posts the steer, even with an older delivered action of the same words', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     try {
       const { hook, socket } = await openRoom()
       vi.mocked(api.steer).mockRejectedValueOnce(offline())
       await act(async () => {
-        await hook.result.current.actions.steer('pause the consumer')
+        await hook.result.current.actions.steer('pause the consumer', { clientId: 'k1' })
       })
       vi.mocked(api.steer).mockResolvedValueOnce(undefined as never)
       act(() => socket.onopen?.())
@@ -194,18 +194,18 @@ describe('useRoom delivered copies do not outlive their failure', () => {
         vi.advanceTimersByTime(3 * 60_000)
       })
 
-      // Later the same words again (a quick-steer chip), answered 503.
+      // Later the same words again (a quick-steer chip): a new action, answered 503.
       vi.mocked(api.steer).mockRejectedValueOnce(new ApiClientError(503, 'unavailable', 'try again'))
       let ok = true
       await act(async () => {
-        ok = await hook.result.current.actions.steer('pause the consumer')
+        ok = await hook.result.current.actions.steer('pause the consumer', { clientId: 'k2' })
       })
       expect(ok).toBe(false)
       expect(api.steer).toHaveBeenCalledTimes(3)
 
       vi.mocked(api.steer).mockResolvedValueOnce(undefined as never)
       await act(async () => {
-        ok = await hook.result.current.actions.steer('pause the consumer', { retry: true })
+        ok = await hook.result.current.actions.steer('pause the consumer', { clientId: 'k2' })
       })
       expect(ok).toBe(true)
       expect(api.steer).toHaveBeenCalledTimes(4)
@@ -214,27 +214,21 @@ describe('useRoom delivered copies do not outlive their failure', () => {
     }
   })
 
-  it('a delivered copy expires: a flagged Retry 20 minutes later posts', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true })
-    try {
-      const { hook, socket } = await openRoom()
-      vi.mocked(api.steer).mockRejectedValueOnce(offline())
-      await act(async () => {
-        await hook.result.current.actions.steer('pause the consumer')
-      })
-      vi.mocked(api.steer).mockResolvedValue(undefined as never)
-      act(() => socket.onopen?.())
-      await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(2))
-      await act(async () => {
-        vi.advanceTimersByTime(20 * 60_000)
-      })
-      await act(async () => {
-        await hook.result.current.actions.steer('pause the consumer', { retry: true })
-      })
-      expect(api.steer).toHaveBeenCalledTimes(3)
-    } finally {
-      vi.useRealTimers()
-    }
+  it('a deliberate repeat of delivered words is a new action and posts', async () => {
+    const { hook, socket } = await openRoom()
+    vi.mocked(api.steer).mockRejectedValueOnce(offline())
+    await act(async () => {
+      await hook.result.current.actions.steer('pause the consumer', { clientId: 'k1' })
+    })
+    vi.mocked(api.steer).mockResolvedValue(undefined as never)
+    act(() => socket.onopen?.())
+    await waitFor(() => expect(api.steer).toHaveBeenCalledTimes(2))
+    // Within seconds, the same words: round 2 swallowed this send for 2 minutes; now it posts.
+    await act(async () => {
+      await hook.result.current.actions.steer('pause the consumer', { clientId: 'k2' })
+    })
+    expect(api.steer).toHaveBeenCalledTimes(3)
+    expect(api.steer).toHaveBeenLastCalledWith('r1', 'pause the consumer', 'k2')
   })
 
   // Round 3: a reconnect copy that never settles must not block those words until reload.
@@ -243,14 +237,14 @@ describe('useRoom delivered copies do not outlive their failure', () => {
       const opened = await openRoom()
       vi.mocked(api.steer).mockRejectedValueOnce(offline())
       await act(async () => {
-        await opened.hook.result.current.actions.steer('stop')
+        await opened.hook.result.current.actions.steer('stop', { clientId: 'k1' })
       })
       const drain = hangingCall()
       vi.mocked(api.steer).mockImplementationOnce(() => drain.p)
       act(() => opened.socket.onopen?.())
       let ok: boolean | undefined
       act(() => {
-        void opened.hook.result.current.actions.steer('stop', { retry: true }).then((v) => (ok = v))
+        void opened.hook.result.current.actions.steer('stop', { clientId: 'k1' }).then((v) => (ok = v))
       })
       await act(async () => {
         vi.advanceTimersByTime(15_000)
@@ -269,7 +263,7 @@ describe('useRoom delivered copies do not outlive their failure', () => {
         vi.mocked(api.steer).mockResolvedValue(undefined as never)
         let ok = true
         await act(async () => {
-          ok = await hook.result.current.actions.steer('stop', { retry: true })
+          ok = await hook.result.current.actions.steer('stop', { clientId: 'k1' })
         })
         expect(ok).toBe(false)
         act(() => socket.onopen?.())
@@ -294,7 +288,7 @@ describe('useRoom delivered copies do not outlive their failure', () => {
         vi.mocked(api.steer).mockResolvedValue(undefined as never)
         let ok = false
         await act(async () => {
-          ok = await hook.result.current.actions.steer('stop', { retry: true })
+          ok = await hook.result.current.actions.steer('stop', { clientId: 'k1' })
         })
         expect(ok).toBe(true)
         expect(api.steer).toHaveBeenCalledTimes(3)
@@ -314,7 +308,7 @@ describe('useRoom delivered copies do not outlive their failure', () => {
         act(() => socket.onopen?.())
         let ok = false
         await act(async () => {
-          ok = await hook.result.current.actions.steer('stop', { retry: true })
+          ok = await hook.result.current.actions.steer('stop', { clientId: 'k1' })
         })
         expect(ok).toBe(true)
         expect(api.steer).toHaveBeenCalledTimes(2)
@@ -330,7 +324,7 @@ describe('useRoom delivered copies do not outlive their failure', () => {
       const { hook, socket } = await openRoom()
       vi.mocked(api.steer).mockRejectedValueOnce(offline())
       await act(async () => {
-        await hook.result.current.actions.steer('pause the consumer')
+        await hook.result.current.actions.steer('pause the consumer', { clientId: 'k1' })
       })
       const drain = hangingCall()
       vi.mocked(api.steer).mockImplementationOnce(() => drain.p)
@@ -338,7 +332,7 @@ describe('useRoom delivered copies do not outlive their failure', () => {
 
       let ok: boolean | undefined
       act(() => {
-        void hook.result.current.actions.steer('pause the consumer').then((v) => (ok = v))
+        void hook.result.current.actions.steer('pause the consumer', { clientId: 'k1' }).then((v) => (ok = v))
       })
       await act(async () => {
         vi.advanceTimersByTime(15_000)
