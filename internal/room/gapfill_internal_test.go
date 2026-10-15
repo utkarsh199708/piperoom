@@ -85,17 +85,18 @@ func TestGapFillSurvivesEndedRequest(t *testing.T) {
 }
 
 // failingSinceCoord is a store whose log reads can fail (failing), answer not
-// found (notFound), leave one seq out of the page (drop), or run afterRead
-// once right after the next read from the start of the log (the rebuild) is
-// taken, to change the store while the rebuild reads. sinces counts reads.
+// found (notFound), leave one seq out of the page (drop), or run the next of
+// afterReads right after a read from the start of the log (a rebuild) is
+// taken, to change the store or block while the rebuild reads. sinces counts
+// reads.
 type failingSinceCoord struct {
 	fakeCoord
 	failing   atomic.Bool
 	notFound  atomic.Bool
 	drop      atomic.Int64
 	sinces    atomic.Int32
-	mu        sync.Mutex
-	afterRead func()
+	mu         sync.Mutex
+	afterReads []func()
 }
 
 func (c *failingSinceCoord) Since(ctx context.Context, roomID string, after int64, limit int) ([]events.Event, error) {
@@ -112,8 +113,10 @@ func (c *failingSinceCoord) Since(ctx context.Context, roomID string, after int6
 	}
 	if after == 0 {
 		c.mu.Lock()
-		f := c.afterRead
-		c.afterRead = nil
+		var f func()
+		if len(c.afterReads) > 0 {
+			f, c.afterReads = c.afterReads[0], c.afterReads[1:]
+		}
 		c.mu.Unlock()
 		if f != nil {
 			f()
@@ -124,7 +127,7 @@ func (c *failingSinceCoord) Since(ctx context.Context, roomID string, after int6
 
 func (c *failingSinceCoord) onRebuildRead(f func()) {
 	c.mu.Lock()
-	c.afterRead = f
+	c.afterReads = append(c.afterReads, f)
 	c.mu.Unlock()
 }
 
@@ -500,5 +503,95 @@ func TestStaleRebuildFeedsGapMarkedDuringRead(t *testing.T) {
 	want := []int64{first.Seq, second.Seq}
 	if seqs := inboxSeqs(st); !slices.Equal(seqs, want) {
 		t.Fatalf("inbox seqs = %v, want %v", seqs, want)
+	}
+}
+
+// blockRead makes the next rebuild read wait, once it has read the log, until
+// release is closed; reading is closed when it starts waiting.
+func (c *failingSinceCoord) blockRead() (reading, release chan struct{}) {
+	reading, release = make(chan struct{}), make(chan struct{})
+	c.onRebuildRead(func() {
+		close(reading)
+		<-release
+	})
+	return reading, release
+}
+
+// Two rebuilds overlap: a command's rebuild reads the log, a remote steer
+// lands, the follower's rebuild reads it too, then the command's rebuild
+// swaps first (without the steer). The follower's rebuild, finding the room
+// no longer stale, must still fold and feed the steer, not drop its read.
+func TestOverlappingRebuildsKeepRemoteSteer(t *testing.T) {
+	r := newStaleRig(t)
+	st := r.leased(t)
+	r.grant(t)
+	r.emitOverFailedGap(t)
+	r.fc.failing.Store(false)
+	ctx := context.Background()
+
+	reading1, release1 := r.fc.blockRead()
+	syncDone := make(chan struct{})
+	go func() {
+		defer close(syncDone)
+		r.svc.syncRoom(ctx, r.roomID) // the command's rebuild (wait)
+	}()
+	<-reading1
+	steer := r.remote(t, events.SteerSent, r.svc.humanActor(r.arjun), events.SteerSentPayload{Text: "late"})
+	reading2, release2 := r.fc.blockRead()
+	followDone := make(chan struct{})
+	go func() {
+		defer close(followDone)
+		r.svc.followRoom(r.roomID, steer.Seq) // the steer's notify
+	}()
+	<-reading2
+	close(release1)
+	<-syncDone
+	close(release2)
+	<-followDone
+
+	if got := mustRoom(t, r.svc, r.roomID); got.LastSeq != steer.Seq {
+		t.Fatalf("last_seq = %d, want the steer's %d", got.LastSeq, steer.Seq)
+	}
+	if seqs := inboxSeqs(st); !slices.Equal(seqs, []int64{steer.Seq}) {
+		t.Fatalf("inbox seqs = %v, want the steer %d once", seqs, steer.Seq)
+	}
+}
+
+// The mirror: the follower's rebuild swaps first with an older read, and the
+// command's rebuild, finding the room no longer stale, must still bring the
+// room up to the row it read, so the command sees the steer.
+func TestOverlappingRebuildsCommandReachesRow(t *testing.T) {
+	r := newStaleRig(t)
+	st := r.leased(t)
+	r.grant(t)
+	r.emitOverFailedGap(t)
+	r.fc.failing.Store(false)
+	ctx := context.Background()
+
+	reading1, release1 := r.fc.blockRead()
+	followDone := make(chan struct{})
+	go func() {
+		defer close(followDone)
+		r.svc.followRoom(r.roomID, 100)
+	}()
+	<-reading1
+	steer := r.remote(t, events.SteerSent, r.svc.humanActor(r.arjun), events.SteerSentPayload{Text: "late"})
+	reading2, release2 := r.fc.blockRead()
+	syncDone := make(chan struct{})
+	go func() {
+		defer close(syncDone)
+		r.svc.syncRoom(ctx, r.roomID)
+	}()
+	<-reading2
+	close(release1)
+	<-followDone
+	close(release2)
+	<-syncDone
+
+	if got := mustRoom(t, r.svc, r.roomID); got.LastSeq != steer.Seq {
+		t.Fatalf("last_seq = %d after the command's sync, want the steer's %d", got.LastSeq, steer.Seq)
+	}
+	if seqs := inboxSeqs(st); !slices.Equal(seqs, []int64{steer.Seq}) {
+		t.Fatalf("inbox seqs = %v, want the steer %d once", seqs, steer.Seq)
 	}
 }
