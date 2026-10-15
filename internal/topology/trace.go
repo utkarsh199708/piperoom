@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strconv"
@@ -46,6 +47,7 @@ type traceFacts struct {
 	// is known; without it every partition may have been cut (#306).
 	scanReported   bool
 	truncated      []int32 // partitions the key scan did not finish
+	newestTied     []int32 // partitions whose last matches tie on the newest timestamp
 	groupErr       error
 	groupCommitted int64 // committed offset for the record's partition; -1 if none
 	groupUnknown   bool  // the record's partition is in GroupLag.Unknown with no committed offset read
@@ -141,7 +143,8 @@ func (b *builder) Trace(ctx context.Context, pipelineID, table, key string) ([]e
 	f.truncated = scan.Truncated
 	if f.topicErr == nil && len(scan.Refs) > 0 {
 		// Use the newest matching record: the consumer commits past it.
-		last := newestRef(scan.Refs)
+		last, tied := newestRef(scan.Refs)
+		f.newestTied = tied
 		f.topicFound = true
 		f.topicOffset = last.Offset
 		f.topicPartition = last.Partition
@@ -181,18 +184,33 @@ func (b *builder) findByKey(ctx context.Context, topic, key string, since time.T
 	return scan, false, err
 }
 
-// newestRef is the newest of refs: the last of its partition (refs are in
-// offset order per partition), and across partitions the one with the latest
-// timestamp, since the last ref overall is only the highest partition's (#306).
-// A tie goes to the later ref.
-func newestRef(refs []clients.RecordRef) clients.RecordRef {
-	best := refs[0]
-	for _, r := range refs[1:] {
-		if r.Partition == best.Partition || !r.Timestamp.Before(best.Timestamp) {
-			best = r
+// newestRef is the newest of refs: in each partition the match with the
+// highest offset (timestamps inside a partition need not be monotonic), then
+// across partitions the one of those with the latest timestamp, since the last
+// ref overall is only the highest partition's (#306). On a timestamp tie the
+// highest partition is returned and tied lists every tied partition
+// (ascending): which match is newest is then not known. tied is nil otherwise.
+func newestRef(refs []clients.RecordRef) (newest clients.RecordRef, tied []int32) {
+	last := map[int32]clients.RecordRef{}
+	for _, r := range refs {
+		if l, ok := last[r.Partition]; !ok || r.Offset > l.Offset {
+			last[r.Partition] = r
 		}
 	}
-	return best
+	parts := slices.Sorted(maps.Keys(last))
+	newest, tied = last[parts[0]], []int32{parts[0]}
+	for _, p := range parts[1:] {
+		switch r := last[p]; {
+		case r.Timestamp.After(newest.Timestamp):
+			newest, tied = r, []int32{p}
+		case r.Timestamp.Equal(newest.Timestamp):
+			newest, tied = r, append(tied, p)
+		}
+	}
+	if len(tied) < 2 {
+		return newest, nil
+	}
+	return newest, tied
 }
 
 // committedFor is the group's committed offset on topic/partition (-1 when
@@ -355,8 +373,8 @@ func decideTrace(f traceFacts) []events.TraceStage {
 	// the topic is the stuck point.
 	// A scan that may have been cut proves neither that the record is not in
 	// the topic nor that the match found is the newest (#306).
-	gap := f.scanGap()
-	missUnknown := f.topicErr == nil && !f.topicFound && gap != ""
+	missUnknown := f.topicErr == nil && !f.topicFound && f.scanGap() != ""
+	gap := f.newestGap()
 	connStatus := "not_seen"
 	connFacts := map[string]string{}
 	stuckFacts := func() {
@@ -375,7 +393,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 		connStatus = "seen"
 	case missUnknown:
 		connStatus = "unknown"
-		connFacts["error"] = gap
+		connFacts["error"] = f.scanGap()
 		stuckFacts()
 	case f.sourceFound && f.topicErr == nil && f.connectorStuck:
 		connStatus = "stopped_here"
@@ -398,7 +416,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 		}
 	} else if missUnknown {
 		topicStatus = "unknown"
-		topicFacts["error"] = gap
+		topicFacts["error"] = f.scanGap()
 	}
 	stage("kafka", f.topic, topicStatus, topicFacts)
 
@@ -430,7 +448,7 @@ func decideTrace(f traceFacts) []events.TraceStage {
 		}
 	case missUnknown:
 		groupStatus = "unknown"
-		groupFacts["error"] = gap
+		groupFacts["error"] = f.scanGap()
 	}
 	stage("consumer", f.group, groupStatus, groupFacts)
 
@@ -461,6 +479,23 @@ func decideTrace(f traceFacts) []events.TraceStage {
 		stages[4].Status = "stopped_here"
 	}
 	return stages
+}
+
+// newestGap is why the match found may not be the newest, "" when it is: a
+// scan that may have been cut, or a timestamp tie between the last matches of
+// several partitions.
+func (f traceFacts) newestGap() string {
+	if g := f.scanGap(); g != "" {
+		return g
+	}
+	if len(f.newestTied) < 2 {
+		return ""
+	}
+	parts := make([]string, len(f.newestTied))
+	for i, p := range f.newestTied {
+		parts[i] = strconv.FormatInt(int64(p), 10)
+	}
+	return "newest match tied on partitions " + strings.Join(parts, ",")
 }
 
 // scanGap is why the key scan may have missed matches, "" when it is known

@@ -2,6 +2,7 @@ package topology
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -181,5 +182,72 @@ func TestTraceGroupForCountsUnknownPartitions(t *testing.T) {
 	}
 	if g := stages[3]; g.Name != "customer-sync" || g.Status != "unknown" || g.Facts["error"] != "partition offsets unreadable" {
 		t.Fatalf("consumer stage = %+v, want customer-sync unknown (partition offsets unreadable)", g)
+	}
+}
+
+// newestRef takes the last match of each partition (offset order), then the
+// newest of those by timestamp; a later ref of one partition must not stand
+// in for another partition's newer match (#479 review).
+func TestNewestRef(t *testing.T) {
+	ts := func(s int) time.Time { return time.Unix(int64(s), 0) }
+	ref := func(p int32, o int64, s int) clients.RecordRef {
+		return clients.RecordRef{Key: "7", Partition: p, Offset: o, Timestamp: ts(s)}
+	}
+	cases := []struct {
+		name     string
+		refs     []clients.RecordRef
+		want     clients.RecordRef
+		wantTied []int32
+	}{
+		{"one partition: last by offset, not by timestamp", []clients.RecordRef{ref(0, 10, 5), ref(0, 11, 3)}, ref(0, 11, 3), nil},
+		{"review example", []clients.RecordRef{ref(0, 4, 10), ref(1, 0, 15), ref(1, 3, 8)}, ref(0, 4, 10), nil},
+		{"non-monotonic partition then another", []clients.RecordRef{ref(0, 10, 5), ref(0, 11, 3), ref(1, 7, 4)}, ref(1, 7, 4), nil},
+		{"tie across partitions: highest partition, both reported", []clients.RecordRef{ref(0, 4, 10), ref(2, 9, 10), ref(1, 1, 2)}, ref(2, 9, 10), []int32{0, 2}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, tied := newestRef(tc.refs)
+			if got != tc.want {
+				t.Fatalf("newestRef = %+v, want %+v", got, tc.want)
+			}
+			if !slices.Equal(tied, tc.wantTied) {
+				t.Fatalf("tied = %v, want %v", tied, tc.wantTied)
+			}
+		})
+	}
+}
+
+// On a timestamp tie across partitions the newest match is not known: a
+// commit past the chosen match does not prove the other one consumed.
+func TestTraceNewestTieIsUnknown(t *testing.T) {
+	now := time.Now()
+	b := NewBuilder(
+		testOwners(),
+		&fakeConnect{
+			config: map[string]map[string]string{"pg-orders-connector": {"topic.prefix": "pg", "table.include.list": "public.orders"}},
+			status: map[string]clients.ConnectorStatus{"pg-orders-connector": {State: "RUNNING"}},
+		},
+		&fakeKafka{
+			findByKey: map[string][]clients.RecordRef{"pg.public.orders": {
+				{Key: "7", Partition: 0, Offset: 5, Timestamp: now},
+				{Key: "7", Partition: 1, Offset: 9, Timestamp: now},
+			}},
+			lags: map[string]clients.GroupLag{"order-sync": {State: "Stable", Partitions: []clients.PartitionLag{
+				{Topic: "pg.public.orders", Partition: 0, Committed: 3},
+				{Topic: "pg.public.orders", Partition: 1, Committed: 10},
+			}}},
+		},
+		&fakeSource{rows: map[string]map[string]any{"public.orders|7": {"id": "7", "updated_at": now.Format(time.RFC3339Nano)}}},
+		&fakeWarehouse{rows: map[string]map[string]any{"analytics.orders|7": {"id": "7"}}},
+	)
+	stages, err := b.Trace(context.Background(), "orders", "public.orders", "7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := stages[3]; g.Status != "unknown" || !strings.Contains(g.Facts["error"], "partitions 0,1") {
+		t.Fatalf("consumer stage = %+v, want unknown (tie on partitions 0,1)", g)
+	}
+	if s := stages[2]; s.Facts["newest"] == "" {
+		t.Fatalf("topic stage = %+v, want a newest: unknown fact", s)
 	}
 }
