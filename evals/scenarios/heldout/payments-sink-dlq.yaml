@@ -25,10 +25,12 @@
 #   alarm turns every sink error into silent data loss.
 #
 # Traps:
-#   - Everything a status check reads is green: both connectors RUNNING, no FAILED task,
-#     consumer lag ~0, slot active. Only warehouse freshness and the DLQ show the problem.
-#   - The DLQ topic is not a pipeline topic, so the Kafka tools refuse it (scope); the agent
-#     must reason from the alert, the DDL and freshness, not read the DLQ.
+#   - Both connectors are RUNNING, no task FAILED, consumer lag ~0, slot active: connect_status
+#     and the lag read look green. Only warehouse freshness, the DLQ node of the pipeline map
+#     (WARN, records=18204, config_risk=dlq_no_log) and the DDL show the problem.
+#   - The DLQ topic is not a pipeline topic, so the Kafka tools refuse to read it (scope) and
+#     no dlq_peek is recorded: the agent reasons from the map, the alert, the DDL and
+#     freshness, not from the dead-lettered records.
 #   - The DDL and schema v4 look like the schema-change seed, but v4 registered fine (adding
 #     an optional field is BACKWARD compatible) and the source connector never failed.
 #   - The tools now show the DLQ: the pipeline map lists the DLQ node (config_risk=dlq_no_log)
@@ -606,7 +608,7 @@ expect:
   root_cause:
     - [risk_score]
     - [dead letter, dead-letter, dlq, errors.tolerance]
-  root_cause_forbidden: [[incompatib*], [schema registry, reject*]]
+  root_cause_forbidden: [[incompatible change], [incompatible schema], [schema, is incompatible], [registry reject*], [rejected by the registry], [rejected by schema registry], [rejected by the schema registry]]
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   evidence_tools: [connect_status, warehouse_freshness]
