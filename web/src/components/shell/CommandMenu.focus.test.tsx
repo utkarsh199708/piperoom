@@ -174,10 +174,10 @@ describe('⌘K: a dialog it opens returns focus to what had it before the palett
     await waitFor(() => expect(document.activeElement).toBe(item))
   })
 
-  // Known gap: an action that opens no dialog (here Toggle theme) sends focus to #main, not to the
+  // Known gap, #500: an action that opens no dialog (here Toggle theme) sends focus to #main, not to the
   // opener, because a link followed or a sign-out may have removed the opener. Flip this row if a
   // ticket changes that.
-  it('GAP: choosing an action that opens nothing lands on #main, not the opener', async () => {
+  it('GAP #500: choosing an action that opens nothing lands on #main, not the opener', async () => {
     render(<Harness />)
     const item = screen.getByRole('button', { name: 'timeline item' })
     item.focus()
