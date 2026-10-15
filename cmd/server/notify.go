@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net"
+	"strings"
 
 	"piperoom/internal/config"
 	"piperoom/internal/notify"
@@ -22,7 +24,7 @@ func pagingSetup(cfg config.Config, log *slog.Logger) (room.Paging, error) {
 	p := room.Paging{UndrivenAfter: n.PageUndrivenAfter}
 	if n.WebhookURL != "" {
 		w, err := notify.NewWebhook(notify.WebhookConfig{
-			URL: n.WebhookURL, Secret: n.WebhookSecret, PublicURL: cfg.PublicURL, Logger: log,
+			URL: n.WebhookURL, Secret: n.WebhookSecret, PublicURL: notifyBaseURL(cfg), Logger: log,
 		})
 		if err != nil {
 			return room.Paging{}, fmt.Errorf("server: PIPEROOM_NOTIFY_WEBHOOK_URL: %w", err)
@@ -34,4 +36,24 @@ func pagingSetup(cfg config.Config, log *slog.Logger) (room.Paging, error) {
 	log.Info("server: paging", "webhook", n.WebhookURL != "", "signed", n.WebhookURL != "" && n.WebhookSecret != "",
 		"page_undriven_after", n.PageUndrivenAfter.String())
 	return p, nil
+}
+
+// notifyBaseURL is the base of the webhook's room_url: PIPEROOM_PUBLIC_URL,
+// else http://<PIPEROOM_HTTP_ADDR> when the server listens on loopback (dev),
+// else "" (no link; a wildcard or remote address is not a reachable link).
+func notifyBaseURL(cfg config.Config) string {
+	if u := strings.TrimSpace(cfg.PublicURL); u != "" {
+		return u
+	}
+	host, _, err := net.SplitHostPort(cfg.HTTPAddr)
+	if err != nil {
+		return ""
+	}
+	if host == "localhost" {
+		return "http://" + cfg.HTTPAddr
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return "http://" + cfg.HTTPAddr
+	}
+	return ""
 }

@@ -3,8 +3,10 @@ package room
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -177,7 +179,7 @@ func TestAutoPageSkips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// An Alertmanager room has no watcher signal: it waits for the first look.
+	// An Alertmanager room has no watcher signal; the triage pass names the layer.
 	am, _, err := r.svc.OpenAlertRoom(ctx, alertin.Alert{
 		Source: alertin.Alertmanager, Status: alertin.StatusFiring, Severity: "sev2", PipelineID: "orders",
 		Title: "lag", DedupKey: "am:lag",
@@ -185,20 +187,19 @@ func TestAutoPageSkips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Advance(6 * time.Minute)
-	r.tick()
-	for _, id := range []string{driven, manual.ID, am.ID} {
-		if n := len(autoPages(t, ms, id)); n != 0 {
-			t.Fatalf("room %s: %d auto pages, want 0", id, n)
-		}
-	}
-	// The triage pass names a layer: the next check pages it.
+	// Triage is in before the check: the auto page names its layer (no fallback).
 	if err := r.svc.emitAs(ctx, am.ID, events.AgentActor, events.AgentTriage, events.AgentTriagePayload{
 		Status: "ok", Headline: "consumer stuck", SuspectedLayer: "consumer", EvidenceRefs: []string{},
 	}); err != nil {
 		t.Fatal(err)
 	}
+	c.Advance(6 * time.Minute)
 	r.tick()
+	for _, id := range []string{driven, manual.ID} {
+		if n := len(autoPages(t, ms, id)); n != 0 {
+			t.Fatalf("room %s: %d auto pages, want 0", id, n)
+		}
+	}
 	got := autoPages(t, ms, am.ID)
 	if len(got) != 1 || got[0].Layer != "consumer" || !reflect.DeepEqual(got[0].Owners, []string{"kabir"}) || !strings.Contains(got[0].Reason, "first look") {
 		t.Fatalf("triage auto page = %+v", got)
@@ -666,3 +667,71 @@ func TestAutoPageToNobodyIsNotSpent(t *testing.T) {
 		t.Fatalf("auto pages = %+v, want one to kabir", got)
 	}
 }
+
+func openAMRoom(t *testing.T, svc *Service, key string, raw string) string {
+	t.Helper()
+	snap, _, err := svc.OpenAlertRoom(context.Background(), alertin.Alert{
+		Source: alertin.Alertmanager, Status: alertin.StatusFiring, Severity: "sev2", PipelineID: "orders",
+		Title: "lag " + key, DedupKey: "am:" + key, Raw: json.RawMessage(raw),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snap.ID
+}
+
+// S4: no watcher signal and no triage layer: the alert's layer label, else the
+// first layer of the pipeline that has someone to page.
+func TestAutoPageFallbackLayer(t *testing.T) {
+	c := &testClock{t: pageT0}
+	ms := memstore.NewWithClock(c.Now)
+	r := newPageRig(t, ms, c, 5*time.Minute, nil)
+	r.load()
+	labelled := openAMRoom(t, r.svc, "a", `{"commonLabels":{"layer":"warehouse"},"alerts":[]}`)
+	badLabel := openAMRoom(t, r.svc, "b", `{"alerts":[{"labels":{"layer":"nonsense"}}]}`)
+	plain := openAMRoom(t, r.svc, "c", ``)
+	c.Advance(6 * time.Minute)
+	r.tick()
+	if got := autoPages(t, ms, labelled); len(got) != 1 || got[0].Layer != "warehouse" {
+		t.Fatalf("label fallback = %+v", got)
+	}
+	for _, id := range []string{badLabel, plain} {
+		got := autoPages(t, ms, id)
+		if len(got) != 1 || !slices.Contains(events.Layers, got[0].Layer) || len(got[0].Owners) == 0 {
+			t.Fatalf("owner-order fallback = %+v", got)
+		}
+	}
+	r.tick()
+	if n := len(autoPages(t, ms, plain)); n != 1 {
+		t.Fatalf("fallback page repeated: %d", n)
+	}
+}
+
+// S4: nobody to page at all logs one WARN and writes no page.
+func TestAutoPageFallbackNobody(t *testing.T) {
+	c := &testClock{t: pageT0}
+	ms := memstore.NewWithClock(c.Now)
+	var buf syncBuf
+	r := newPageRig(t, ms, c, 5*time.Minute, nil)
+	r.svc.log = slog.New(slog.NewTextHandler(&buf, nil))
+	r.svc.users = mustUsers(nil)
+	r.load()
+	id := openAMRoom(t, r.svc, "n", ``)
+	c.Advance(6 * time.Minute)
+	r.tick()
+	r.tick()
+	if n := len(autoPages(t, ms, id)); n != 0 {
+		t.Fatalf("pages = %d, want 0", n)
+	}
+	if got := buf.String(); strings.Count(got, "level=WARN") != 1 || !strings.Contains(got, id) {
+		t.Fatalf("log = %q, want one WARN naming the room", got)
+	}
+}
+
+type syncBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
+func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
