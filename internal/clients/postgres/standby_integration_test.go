@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && standby
 
 package postgres
 
@@ -9,13 +9,17 @@ import (
 )
 
 // TestSlotReadsOnHotStandby runs against a hot standby that has a logical
-// slot (PG 16+, #420). The dev stack has no standby, so the test needs
-// PIPEROOM_IT_STANDBY_URL (a DSN of the standby) and skips without it; the
-// PR description has the pg_basebackup -R setup it was run against.
+// slot (PG 16+, #420). The dev stack has no standby, and the full-stack CI job
+// fails on any skipped test, so it has its own tag:
+//
+//	PIPEROOM_IT_STANDBY_URL=<standby DSN> go test -tags integration,standby -run TestSlotReadsOnHotStandby ./internal/clients/postgres/
+//
+// The standby: a wal_level=logical primary, pg_basebackup -R, and
+// pg_create_logical_replication_slot on the standby.
 func TestSlotReadsOnHotStandby(t *testing.T) {
 	dsn := os.Getenv("PIPEROOM_IT_STANDBY_URL")
 	if dsn == "" {
-		t.Skip("PIPEROOM_IT_STANDBY_URL not set: no hot standby to test against")
+		t.Fatal("PIPEROOM_IT_STANDBY_URL not set: the standby tag needs a hot standby to test against")
 	}
 	ctx := context.Background()
 	db, err := New(ctx, dsn)
