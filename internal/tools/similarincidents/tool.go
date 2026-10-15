@@ -522,9 +522,11 @@ func (t *Tool) build(ctx context.Context, pipeline string, prev map[string]pastR
 	kept := make(map[string]pastRoom, len(list))
 	partial := false
 	for _, r := range list {
+		// A settled room is reused only while its log is unchanged: a label
+		// added after the close appends an event, which forces a re-read.
 		// Rooms that are not incidents are cached like the others, so a
 		// settled test room is not read again on every rebuild.
-		if old, ok := prev[r.ID]; ok && r.ClosedAt != nil && old.fetched.Sub(*r.ClosedAt) >= settledAfter {
+		if old, ok := prev[r.ID]; ok && r.ClosedAt != nil && old.fetched.Sub(*r.ClosedAt) >= settledAfter && old.lastSeq == r.LastSeq {
 			kept[r.ID] = old
 			if isIncident(old) {
 				rooms = append(rooms, old)

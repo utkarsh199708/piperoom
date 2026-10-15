@@ -250,7 +250,8 @@ func TestSettleLayersTable(t *testing.T) {
 			}
 			joined := strings.Join(got.lines, "\n")
 			if c.wantNote == "" {
-				if len(got.lines) != 1 || !strings.HasPrefix(got.lines[0], "connect_status: ") {
+				// The line names the room steps of its reads, then the evidence.
+				if len(got.lines) != 1 || !strings.HasPrefix(got.lines[0], "connect_status (step s_") {
 					t.Fatalf("a one-read verdict keeps the evidence it had before polling, got %q", got.lines)
 				}
 			} else if !strings.Contains(joined, c.wantNote) {
@@ -570,7 +571,7 @@ func TestSettleLoopFallsBackToOneMessageWhenTheEventIsRefused(t *testing.T) {
 	}
 	var verdicts int
 	for _, m := range messageTexts(inner) {
-		if strings.HasPrefix(m, "recovered:") {
+		if strings.HasPrefix(m, "Verification of proposal p_1: recovered:") {
 			verdicts++
 		}
 	}

@@ -14,7 +14,7 @@ import (
 // inside the text. A title can read "orders lag high" on screen and carry a
 // whole instruction to the model (Q6 U1). Normalisation decodes tag
 // characters to ASCII, so the hidden words are scanned by the other rules too.
-const KindHiddenText Kind = "hidden_text"
+// (KindHiddenText itself is declared with the other kinds in injectscan.go.)
 
 // isTagRune reports a Unicode tag character, U+E0000–U+E007F.
 func isTagRune(r rune) bool {
@@ -105,12 +105,31 @@ func StripHidden(s string) string {
 	return b.String()
 }
 
-// scanHidden returns one finding at the first hidden character of s, or none.
-// The excerpt names the code point, never the text around it.
+// scanHidden returns one finding at the first hidden character of s that is
+// not a tag character, or none. The excerpt names the code point, never the
+// text around it.
 func scanHidden(s string) []Finding {
-	i, r := firstHidden(s)
-	if i < 0 {
-		return nil
+	flag := false // inside a subdivision flag: U+1F3F4, tag letters, cancel tag
+	for i, r := range s {
+		switch {
+		case r == blackFlag:
+			flag = true
+			continue
+		case isTagText(r):
+			// Tag letters are scanHiddenTags' (normalize.go): it reports each
+			// run with the text it spells and leaves emoji flags alone.
+			continue
+		case r == 0xE007F && flag:
+			flag = false // the cancel tag that ends a flag
+			continue
+		}
+		flag = false
+		if r < 0x80 {
+			continue
+		}
+		if hiddenAt(s, i, r) {
+			return []Finding{{Kind: KindHiddenText, Offset: i, Excerpt: fmt.Sprintf("U+%04X", r)}}
+		}
 	}
-	return []Finding{{Kind: KindHiddenText, Offset: i, Excerpt: fmt.Sprintf("U+%04X", r)}}
+	return nil
 }

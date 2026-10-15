@@ -234,7 +234,9 @@ func (r *runner) run(ctx context.Context) error {
 				if stop, err := r.holdAfterRecovery(ctx, &messages, &turns); stop {
 					return err
 				}
-			} else if recovered && !outcome.statusSet {
+			} else if !outcome.statusSet {
+				// The run leaves the idle (or done) status it paused on; the
+				// room's failover and the hand-off check read the last status.
 				r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 			}
 			continue
@@ -535,7 +537,10 @@ func (r *runner) pauseForHumanInput(ctx context.Context, messages *[]anthropic.B
 		}
 		return r.holdAfterRecovery(ctx, messages, turns)
 	}
-	if recovered && !outcome.statusSet {
+	if !outcome.statusSet {
+		// The model runs again: leave the idle (or done) status, so the room
+		// does not show an idle agent writing steps, and failover sees a
+		// working run to resume.
 		r.emit(ctx, events.AgentStatus, events.AgentStatusPayload{State: "working"})
 	}
 	return false, nil
@@ -608,6 +613,22 @@ func (r *runner) emit(ctx context.Context, typ events.Type, payload any) {
 		}
 		r.log.Warn("agent: emit failed", "type", typ, "err", err)
 	}
+}
+
+// stepEventTimeout bounds one step event write that no longer follows the
+// run's context.
+const stepEventTimeout = 10 * time.Second
+
+// emitStep writes a step's own events (step.started, tool_call, tool_result)
+// even when ctx is done: a read that hits the first-look pass deadline, or a
+// run cancelled mid-read, must not leave a step whose call is stored and whose
+// result is not, because the stores refuse events on a done context. Each
+// write gets its own deadline instead (runStepEvents does the same for
+// verify reads).
+func (r *runner) emitStep(ctx context.Context, typ events.Type, payload any) {
+	ectx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stepEventTimeout)
+	defer cancel()
+	r.emit(ectx, typ, payload)
 }
 
 // toolDataJSON marshals a tool's structured data for its tool_result event. A
@@ -807,8 +828,8 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	}
 	stepID := newStepID()
 
-	r.emit(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: title})
-	r.emit(ctx, events.AgentToolCall, events.AgentToolCallPayload{
+	r.emitStep(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: title})
+	r.emitStep(ctx, events.AgentToolCall, events.AgentToolCallPayload{
 		StepID:    stepID,
 		ToolUseID: u.id,
 		Tool:      u.name,
@@ -834,7 +855,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	if err != nil {
 		msg := "error: " + r.scrubToolError(u.name, err).Error()
 		summary, truncated := tools.Truncate(msg)
-		r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
+		r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 			StepID:     stepID,
 			ToolUseID:  u.id,
 			Tool:       u.name,
@@ -855,7 +876,7 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	// Defensively re-cap the summary before it reaches the model; a tool that
 	// ignores MaxSummaryBytes must not be able to bloat the request.
 	summary, reTruncated := tools.Truncate(res.Summary)
-	r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
+	r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 		StepID:     stepID,
 		ToolUseID:  u.id,
 		Tool:       u.name,
@@ -881,15 +902,15 @@ func (r *runner) failReadTool(ctx context.Context, u toolUse, title, msg string)
 		title = u.name
 	}
 	stepID := newStepID()
-	r.emit(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: title})
-	r.emit(ctx, events.AgentToolCall, events.AgentToolCallPayload{
+	r.emitStep(ctx, events.AgentStepStart, events.AgentStepStartPayload{StepID: stepID, Title: title})
+	r.emitStep(ctx, events.AgentToolCall, events.AgentToolCallPayload{
 		StepID:    stepID,
 		ToolUseID: u.id,
 		Tool:      u.name,
 		Input:     u.input,
 	})
 	summary, truncated := tools.Truncate("error: " + msg)
-	r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
+	r.emitStep(ctx, events.AgentToolResult, events.AgentToolResultPayload{
 		StepID:    stepID,
 		ToolUseID: u.id,
 		Tool:      u.name,

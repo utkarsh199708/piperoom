@@ -45,7 +45,7 @@ func TestVerificationEventRecovered(t *testing.T) {
 		}
 	}
 	// The model note is the text form, unchanged: tag, head, wrapped evidence.
-	if !out.recovered || len(out.notes) != 1 || !strings.HasPrefix(out.notes[0], verifyTag+recoveredHead) || !strings.Contains(out.notes[0], "connect_status:") {
+	if !out.recovered || len(out.notes) != 1 || !strings.HasPrefix(out.notes[0], verifyTag+recoveredHead) || !strings.Contains(out.notes[0], "connect_status (step s_") {
 		t.Fatalf("model note changed: %q", out.notes)
 	}
 }

@@ -745,3 +745,27 @@ func TestOldIndexIsNotServedForeverWhenTheStoreStaysDown(t *testing.T) {
 		t.Fatal("an index 25 minutes old was served while the store is down")
 	}
 }
+
+// A label added to a settled room (one first read long after it closed) is
+// picked up by the next build: the room's log grew, so it is read again.
+func TestLateLabelOnSettledRoomIsPickedUp(t *testing.T) {
+	ctx := context.Background()
+	st := seeded(t, fake.Room{ID: "r-old", Title: "orders lag", ClosedAt: day(9, 1), Resolution: "Restarted the connector."})
+	now := day(9, 1).Add(30 * time.Hour) // first read more than a day after the close
+	tl := similarincidents.New(similarincidents.Deps{Source: similarincidents.FromStore(st), Now: func() time.Time { return now }, TTL: time.Minute})
+	if _, err := run(t, tl, scoped("orders"), input("orders lag", 3)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Append(ctx, "r-old", events.RoomLabelled, events.Actor{Kind: events.ActorHuman, ID: "a", Name: "A"},
+		events.RoomLabelledPayload{Cause: "zzcause stopped task", FixThatWorked: "restart"}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(5 * time.Minute)
+	res, err := run(t, tl, scoped("orders"), input("zzcause", 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := hitIDs(t, res); !slices.Equal(ids, []string{"r-old"}) {
+		t.Fatalf("label on a settled room not found: %v", ids)
+	}
+}

@@ -155,8 +155,10 @@ func ParseModelPrices(b []byte) (Prices, error) {
 // JSON object, at any depth. Malformed JSON is left to the decoder.
 func noDuplicateKeys(b []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
-	var walk func(path string) error
-	walk = func(path string) error {
+	// encoding/json matches field names ignoring case, so inside a model's
+	// object "Input" and "input" are the same price. Model ids stay exact.
+	var walk func(path string, depth int) error
+	walk = func(path string, depth int) error {
 		tok, err := dec.Token()
 		if err != nil {
 			return nil
@@ -170,18 +172,21 @@ func noDuplicateKeys(b []byte) error {
 					return nil
 				}
 				k, _ := kt.(string)
+				if depth > 0 {
+					k = strings.ToLower(k)
+				}
 				if seen[k] {
 					return fmt.Errorf("key %q appears twice%s", k, path)
 				}
 				seen[k] = true
-				if err := walk(fmt.Sprintf(" in %q", k)); err != nil {
+				if err := walk(fmt.Sprintf(" in %q", k), depth+1); err != nil {
 					return err
 				}
 			}
 			_, _ = dec.Token() // the closing brace
 		case json.Delim('['):
 			for dec.More() {
-				if err := walk(path); err != nil {
+				if err := walk(path, depth); err != nil {
 					return err
 				}
 			}
@@ -189,7 +194,7 @@ func noDuplicateKeys(b []byte) error {
 		}
 		return nil
 	}
-	return walk("")
+	return walk("", 0)
 }
 
 // callTokens is the four token counts of one request, or of its compaction

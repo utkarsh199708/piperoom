@@ -114,9 +114,9 @@ func TestTableActivitySnapshotAtProposal(t *testing.T) {
 }
 
 // T11: the room sees a sentence for people; the model alone gets the guidance.
-func TestCompatFollowUpRoomTextHasNoModelGuidance(t *testing.T) {
+func TestCompatRoomNoticeTextHasNoModelGuidance(t *testing.T) {
 	steps := compatSteps("NONE")
-	room := compatFollowUpRoom(steps)
+	room := compatRoomNotice(steps)
 	if !strings.Contains(room, "follow-up: "+compatSubject+" compatibility is still NONE") {
 		t.Fatalf("room text = %q", room)
 	}

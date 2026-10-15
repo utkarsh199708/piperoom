@@ -360,7 +360,7 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 	if recovered {
 		followUp = compatFollowUp(rec.steps)
 	}
-	r.announceVerdict(ctx, id, v, compatFollowUpRoom(rec.steps), followUp)
+	r.announceVerdict(ctx, id, v, compatRoomNotice(rec.steps), followUp)
 	r.proposals.markVerified(id, recovered, v.word())
 	if recovered {
 		r.trackNoneSubjects(rec.steps)
@@ -386,7 +386,7 @@ func (r *runner) verifyActionResult(ctx context.Context, in HumanInput) actionOu
 
 // announceVerdict tells the room the verdict on a proposal, once: as the typed
 // agent.verification event, which replaces the plain-text verdict message.
-// roomNote is the follow-up written for people (compatFollowUpRoom); followUp
+// roomNote is the follow-up written for people (compatRoomNotice); followUp
 // is the model's version with its guidance, which never reaches the room.
 //
 // A room service that does not know the type yet refuses it (an older build
@@ -410,7 +410,7 @@ func (r *runner) announceVerdict(ctx context.Context, proposalID string, v verif
 		return
 	}
 	r.log.Warn("agent: verification event not accepted; announcing the verdict as a message", "proposal", proposalID, "err", err)
-	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: v.head + v.evidence + roomNote})
+	r.emit(ctx, events.AgentMessage, events.AgentMessagePayload{Text: "Verification of proposal " + proposalID + ": " + v.head + v.evidence + roomNote})
 }
 
 // tryEmit is emit that returns the sink's error instead of logging it.
@@ -428,28 +428,25 @@ func (r *runner) tryEmit(ctx context.Context, typ events.Type, payload any) erro
 // never parsed here: the model reads it from the action result or the schema
 // tools.
 func compatFollowUp(steps []events.ProposalStep) string {
-	order, final := compatFinalLevels(steps)
-	var b strings.Builder
-	for _, subject := range order {
-		if final[subject] != "NONE" {
-			continue
-		}
-		fmt.Fprintf(&b, "\nfollow-up: %s compatibility is still NONE. Propose a separate fix that restores the level shown before \"→\" in the schema_set_compatibility step result (or read it with the schema tools).", followUpSubject(subject))
-	}
-	return b.String()
+	return compatNoneLines(steps, " Propose a separate fix that restores the level shown before \"→\" in the schema_set_compatibility step result (or read it with the schema tools).")
 }
 
-// compatFollowUpRoom is compatFollowUp for people: the same subjects, each on a
-// new line, with a sentence that says what is still off. How to restore it is
-// guidance for the model (QA T11): it stays in the [verification] note.
-func compatFollowUpRoom(steps []events.ProposalStep) string {
+// compatRoomNotice is the room's form of compatFollowUp: the same subjects,
+// worded for people. Instructions meant for the model never go into room text.
+func compatRoomNotice(steps []events.ProposalStep) string {
+	return compatNoneLines(steps, " It should go back to its earlier level with a separate fix.")
+}
+
+// compatNoneLines returns one "follow-up:" line per subject the steps leave at
+// NONE, each starting on a new line and ending with tail.
+func compatNoneLines(steps []events.ProposalStep, tail string) string {
 	order, final := compatFinalLevels(steps)
 	var b strings.Builder
 	for _, subject := range order {
 		if final[subject] != "NONE" {
 			continue
 		}
-		fmt.Fprintf(&b, "\nfollow-up: %s compatibility is still NONE, so data the old schema cannot read can get through. Its earlier level should be restored with a separate fix.", followUpSubject(subject))
+		fmt.Fprintf(&b, "\nfollow-up: %s compatibility is still NONE.%s", followUpSubject(subject), tail)
 	}
 	return b.String()
 }
@@ -549,6 +546,7 @@ func failedStepText(id string, step int, parsed bool) string {
 	if !parsed {
 		return "A fix step failed. I have not verified recovery. Next I read the failure and say here what I find."
 	}
+	// Steps are numbered from 1 for people, as in the room's action results.
 	return fmt.Sprintf("Fix step failed: proposal %q step %d did not succeed. I have not verified recovery. Next I read the failure and say here what I find.", id, step+1)
 }
 
@@ -1479,24 +1477,27 @@ var errVerifyUnrunnable = errors.New("agent: verify: check cannot run")
 // name, so the room tells a creation baseline read ("baseline ...") from a
 // check read ("verify ...").
 func (r *runner) runStep(ctx context.Context, verb, name string, input json.RawMessage) (tools.Result, error) {
-	return r.runStepEvents(ctx, verb, name, input, true)
+	res, _, err := r.runStepEvents(ctx, verb, name, input, true)
+	return res, err
 }
 
 // runStepEvents is runStep with the room events optional. The settle loop
 // reads the same check every few seconds; only its first read goes to the room,
 // so a layer that takes a minute to restart does not fill the log with a dozen
 // identical steps. The result is scrubbed either way, since its summary reaches
-// the model and the verdict.
-func (r *runner) runStepEvents(ctx context.Context, verb, name string, input json.RawMessage, withEvents bool) (tools.Result, error) {
+// the model and the verdict. It also returns the step id it recorded in the
+// step ledger: "" for a read without events, or one refused before a step
+// started.
+func (r *runner) runStepEvents(ctx context.Context, verb, name string, input json.RawMessage, withEvents bool) (tools.Result, string, error) {
 	entry, ok := r.toolList.byName[name]
 	if !ok {
-		return tools.Result{}, fmt.Errorf("%w: unknown tool %q", errVerifyUnrunnable, name)
+		return tools.Result{}, "", fmt.Errorf("%w: unknown tool %q", errVerifyUnrunnable, name)
 	}
 	if entry.isRoom {
-		return tools.Result{}, fmt.Errorf("%w: %q is not a read tool", errVerifyUnrunnable, name)
+		return tools.Result{}, "", fmt.Errorf("%w: %q is not a read tool", errVerifyUnrunnable, name)
 	}
 	if err := validateInput(entry.schema, input); err != nil {
-		return tools.Result{}, fmt.Errorf("%w: invalid input for %s: %w", errVerifyUnrunnable, name, err)
+		return tools.Result{}, "", fmt.Errorf("%w: invalid input for %s: %w", errVerifyUnrunnable, name, err)
 	}
 
 	stepID := newStepID()
@@ -1540,23 +1541,25 @@ func (r *runner) runStepEvents(ctx context.Context, verb, name string, input jso
 				Provenance: prov,
 			})
 			r.steps.addWithInput(stepID, name, string(input), summary, true)
+			return tools.Result{}, stepID, err
 		}
-		return tools.Result{}, err
+		return tools.Result{}, "", err
 	}
 	// A step without events is not in the room, so it never enters the step
 	// ledger the model's citations are checked against.
-	if withEvents {
-		data, dataCut := r.toolDataJSON(name, res.Data)
-		summary, reTruncated := tools.Truncate(res.Summary)
-		r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
-			StepID: stepID, ToolUseID: toolUseID, Tool: name,
-			Summary: summary, Data: data, IsError: false,
-			Truncated: res.Truncated || reTruncated || dataCut, TookMS: took,
-			Provenance: prov,
-		})
-		r.steps.addWithInput(stepID, name, string(input), summary, false)
+	if !withEvents {
+		return res, "", nil
 	}
-	return res, nil
+	data, dataCut := r.toolDataJSON(name, res.Data)
+	summary, reTruncated := tools.Truncate(res.Summary)
+	r.emit(emitCtx, events.AgentToolResult, events.AgentToolResultPayload{
+		StepID: stepID, ToolUseID: toolUseID, Tool: name,
+		Summary: summary, Data: data, IsError: false,
+		Truncated: res.Truncated || reTruncated || dataCut, TookMS: took,
+		Provenance: prov,
+	})
+	r.steps.addWithInput(stepID, name, string(input), summary, false)
+	return res, stepID, nil
 }
 
 // stringParam reads one string field from a proposal step's action params.

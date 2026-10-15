@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"piperoom/internal/events"
@@ -56,6 +57,9 @@ type checkReading struct {
 	// final marks a failure that needs no confirmation: the check cannot run,
 	// and reading it again changes nothing.
 	final bool
+	// ids are the step ids of the reads that went to the room (and the step
+	// ledger), for the model to cite; a silent read adds none.
+	ids []string
 }
 
 // settleOutcome is the result of polling the layer checks.
@@ -101,6 +105,9 @@ func (r *runner) settleLayers(ctx context.Context, checks []verifyCheck) settleO
 		waited     time.Duration
 		failStreak int
 	)
+	// Only round 1 writes its reads to the room, so its step ids are the ones
+	// the model can cite, whatever round decides.
+	stepIDs := make([][]string, len(checks))
 	for round := 1; ; round++ {
 		readings := make([]checkReading, len(checks))
 		allPass, anyPending, need := true, false, 1
@@ -110,6 +117,9 @@ func (r *runner) settleLayers(ctx context.Context, checks []verifyCheck) settleO
 				waited += interval
 			}
 			readings[i] = rd.checkReading
+			if round == 1 {
+				stepIDs[i] = rd.ids
+			}
 			switch rd.state {
 			case checkPass:
 			case checkPending:
@@ -125,7 +135,7 @@ func (r *runner) settleLayers(ctx context.Context, checks []verifyCheck) settleO
 			return settleOutcome{aborted: true}
 		}
 		out := settleOutcome{ok: allPass, rounds: round, waited: waited}
-		out.checks, out.lines = describeReadings(checks, readings)
+		out.checks, out.lines = describeReadings(checks, readings, stepIDs)
 		if allPass {
 			return out.withNote(window, failStreak)
 		}
@@ -171,11 +181,11 @@ func (r *runner) readCheckSettled(ctx context.Context, c verifyCheck, interval t
 		return settledReading{checkReading: first}
 	}
 	if err := r.clk.Sleep(ctx, interval); err != nil {
-		return settledReading{checkReading: checkReading{state: checkPending, line: first.line + "; settling: " + err.Error()}}
+		return settledReading{checkReading: checkReading{state: checkPending, line: first.line + "; settling: " + err.Error(), ids: first.ids}}
 	}
 	again := r.readCheckOnce(ctx, c, withEvents)
 	return settledReading{
-		checkReading: checkReading{state: again.state, line: first.line + "; read again after " + interval.String() + ": " + again.line},
+		checkReading: checkReading{state: again.state, line: first.line + "; read again after " + interval.String() + ": " + again.line, ids: append(first.ids, again.ids...)},
 		slept:        true,
 	}
 }
@@ -185,13 +195,17 @@ func (r *runner) readCheckSettled(ctx context.Context, c verifyCheck, interval t
 // that timed out may succeed next time. A check that cannot run at all is a
 // failure, since waiting changes nothing.
 func (r *runner) readCheckOnce(ctx context.Context, c verifyCheck, withEvents bool) checkReading {
-	res, err := r.runStepEvents(ctx, "verify", c.name, c.input, withEvents)
+	res, id, err := r.runStepEvents(ctx, "verify", c.name, c.input, withEvents)
+	var ids []string
+	if id != "" {
+		ids = []string{id}
+	}
 	if err != nil {
 		line := clipLine("error: " + err.Error())
 		if errors.Is(err, errVerifyUnrunnable) {
-			return checkReading{state: checkFail, line: line, final: true}
+			return checkReading{state: checkFail, line: line, final: true, ids: ids}
 		}
-		return checkReading{state: checkPending, line: line}
+		return checkReading{state: checkPending, line: line, ids: ids}
 	}
 	state := checkFail
 	switch {
@@ -200,17 +214,24 @@ func (r *runner) readCheckOnce(ctx context.Context, c verifyCheck, withEvents bo
 	case c.judge(res):
 		state = checkPass
 	}
-	return checkReading{state: state, line: clipLine(res.Summary)}
+	return checkReading{state: state, line: clipLine(res.Summary), ids: ids}
 }
 
 // describeReadings turns the last reading of every check into the event's
 // check entries and the evidence lines the model and the legacy message get.
-func describeReadings(checks []verifyCheck, readings []checkReading) ([]events.VerificationCheck, []string) {
+// stepIDs are the room steps of each check's reads: the model's line names
+// them, so it can cite the re-check instead of reading the same component
+// again; the room's check detail stays free of ids.
+func describeReadings(checks []verifyCheck, readings []checkReading, stepIDs [][]string) ([]events.VerificationCheck, []string) {
 	vc := make([]events.VerificationCheck, len(checks))
 	lines := make([]string, len(checks))
 	for i, c := range checks {
 		vc[i] = events.VerificationCheck{Layer: c.layer, Name: c.name, OK: readings[i].state == checkPass, Detail: clipLine(readings[i].line)}
-		lines[i] = c.name + ": " + readings[i].line
+		label := c.name
+		if i < len(stepIDs) && len(stepIDs[i]) > 0 {
+			label += " (step " + strings.Join(stepIDs[i], ", step ") + ")"
+		}
+		lines[i] = label + ": " + readings[i].line
 	}
 	return vc, lines
 }

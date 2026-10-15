@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -108,9 +109,15 @@ type sinkEvent struct {
 type fakeSink struct {
 	mu     sync.Mutex
 	events []sinkEvent
+	// refuse lists event types Emit refuses, as a room sink refuses types
+	// outside its allow-list.
+	refuse map[events.Type]bool
 }
 
 func (s *fakeSink) Emit(_ context.Context, typ events.Type, payload any) error {
+	if s.refuse[typ] {
+		return fmt.Errorf("fake sink refused event type %q", typ)
+	}
 	b, _ := json.Marshal(payload)
 	s.mu.Lock()
 	s.events = append(s.events, sinkEvent{typ: typ, payload: b})
