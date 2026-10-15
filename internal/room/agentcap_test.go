@@ -379,7 +379,21 @@ func TestAgentCapFailedRunReleasesSlot(t *testing.T) {
 				return cr.run(ctx, a, d, o)
 			}
 			svc, _ := newCapService(t, 1, runFirstFails)
-			fastRetry(svc)
+			// r1's retry backoff stays open until the test ends it, so r2
+			// can only get the slot by r1's failure releasing it, never by
+			// out-waiting a short backoff (which raced r2's creation).
+			backoffDone := make(chan struct{})
+			var endBackoff sync.Once
+			release := func() { endBackoff.Do(func() { close(backoffDone) }) }
+			t.Cleanup(release)
+			room.SetRetryAfterForTest(svc, func(time.Duration) <-chan time.Time {
+				c := make(chan time.Time, 1)
+				go func() {
+					<-backoffDone
+					c <- time.Now()
+				}()
+				return c
+			})
 
 			r1 := createRoom(t, svc, "arjun").ID
 			cr.waitStarted(t, 1)
@@ -394,6 +408,7 @@ func TestAgentCapFailedRunReleasesSlot(t *testing.T) {
 			if m := cr.maxConcurrent(); m != 1 {
 				t.Fatalf("max concurrent runs = %d, want 1", m)
 			}
+			release()
 
 			// r1's retry queues behind r2 and runs once r2 is done.
 			cr.finish(r2)
