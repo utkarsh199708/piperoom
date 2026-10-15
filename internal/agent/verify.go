@@ -79,6 +79,9 @@ type proposalRecord struct {
 	// Nil when none was taken (for example after an agent restart), and then the
 	// check window alone decides the data flow.
 	baseline map[string]time.Time
+	// topicEnds is the summed end offset of each source data topic when the
+	// proposal was made. Nil when not taken; then the check window decides.
+	topicEnds map[string]int64
 }
 
 // proposalTracker remembers the proposals the agent created during this run. It
@@ -130,6 +133,21 @@ func (t *proposalTracker) markVerified(id string, recovered bool) {
 	}
 	rec.verified = true
 	rec.recovered = recovered
+	t.byID[id] = rec
+}
+
+// setTopicEnds stores the source-topic offsets of a proposal already recorded.
+func (t *proposalTracker) setTopicEnds(id string, ends map[string]int64) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rec, ok := t.byID[id]
+	if !ok {
+		return
+	}
+	rec.topicEnds = ends
 	t.byID[id] = rec
 }
 
@@ -832,7 +850,7 @@ func (r *runner) verifyDataFlow(ctx context.Context, rec proposalRecord, wait bo
 		// Only a failing check pays for the slot reads. Idle means every sink is
 		// stale AND the source slot did not move over one more wait: a source
 		// that wrote while the slot stood still is a real failure.
-		res.idle = r.sourceIdle(ctx)
+		res.idle = r.sourceIdle(ctx, rec)
 	}
 	for _, st := range states {
 		sc := events.SinkCheck{Table: st.table.name, Newest: st.newest, Passed: st.passed, PassedBy: st.passedBy}
@@ -874,9 +892,36 @@ func anyPassed(states []sinkState) bool {
 	return false
 }
 
-// sourceIdle reports whether the replication slots stood still across one
-// freshnessWait. Any read that fails means unknown, which is not idle.
-func (r *runner) sourceIdle(ctx context.Context) bool {
+// sourceIdle reports whether the source had no change to replicate. The
+// signal is the source data topics, which a Debezium heartbeat does not touch
+// (heartbeats go to a separate topic, excluded here): idle means no source
+// topic gained a record since the proposal, or, with no proposal reading, over
+// one freshnessWait. When the topics cannot be read, the replication slots
+// standing still over one freshnessWait is the fallback. Any read that fails
+// means unknown, which is not idle.
+func (r *runner) sourceIdle(ctx context.Context, rec proposalRecord) bool {
+	topics, ok := r.sourceTopics(ctx, "verify")
+	if ok {
+		now, ok := r.topicEnds(ctx, "verify", topics)
+		if ok {
+			before := rec.topicEnds
+			if len(before) == 0 {
+				before = now
+				if err := r.clk.Sleep(ctx, r.timing.freshnessWait); err != nil {
+					return false
+				}
+				if now, ok = r.topicEnds(ctx, "verify", topics); !ok {
+					return false
+				}
+			}
+			for _, t := range topics {
+				if b, have := before[t]; !have || now[t] != b {
+					return false
+				}
+			}
+			return true
+		}
+	}
 	before, ok := r.readSlotPositions(ctx)
 	if !ok {
 		return false
@@ -886,6 +931,59 @@ func (r *runner) sourceIdle(ctx context.Context) bool {
 	}
 	after, ok := r.readSlotPositions(ctx)
 	return ok && after == before
+}
+
+// sourceTopics returns the pipeline's source data topics from pipeline_map,
+// without heartbeat topics. ok is false when none can be named.
+func (r *runner) sourceTopics(ctx context.Context, verb string) ([]string, bool) {
+	if r.alert.PipelineID == "" {
+		return nil, false
+	}
+	res, err := r.runStep(ctx, verb, "pipeline_map", jsonObject("pipeline_id", r.alert.PipelineID))
+	if err != nil {
+		return nil, false
+	}
+	var g struct {
+		Nodes []struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		} `json:"nodes"`
+	}
+	if err := decodeData(res.Data, &g); err != nil {
+		return nil, false
+	}
+	var out []string
+	for _, n := range g.Nodes {
+		if n.Kind == "topic" && n.Name != "" && !strings.Contains(strings.ToLower(n.Name), "heartbeat") {
+			out = append(out, n.Name)
+		}
+	}
+	return out, len(out) > 0
+}
+
+// topicEnds reads the summed end offset of each topic with kafka_topic_offsets.
+func (r *runner) topicEnds(ctx context.Context, verb string, topics []string) (map[string]int64, bool) {
+	out := make(map[string]int64, len(topics))
+	for _, t := range topics {
+		res, err := r.runStep(ctx, verb, "kafka_topic_offsets", jsonObject("topic", t))
+		if err != nil {
+			return nil, false
+		}
+		var d struct {
+			Partitions []struct {
+				End int64 `json:"end"`
+			} `json:"partitions"`
+		}
+		if err := decodeData(res.Data, &d); err != nil || len(d.Partitions) == 0 {
+			return nil, false
+		}
+		var sum int64
+		for _, p := range d.Partitions {
+			sum += p.End
+		}
+		out[t] = sum
+	}
+	return out, true
 }
 
 // readSlotPositions reads the pipeline's replication slots with
@@ -956,6 +1054,13 @@ func (r *runner) snapshotBaseline(ctx context.Context, proposalID string) {
 		base[s.name] = newest
 	}
 	r.proposals.setBaseline(proposalID, base)
+	// Best effort: source topic offsets at proposal time, so the idle rule can
+	// tell "no change since the fix" from "no change during the check".
+	if topics, ok := r.sourceTopics(ctx, "baseline"); ok {
+		if ends, ok := r.topicEnds(ctx, "baseline", topics); ok {
+			r.proposals.setTopicEnds(proposalID, ends)
+		}
+	}
 }
 
 // formatBaseline renders a newest-row time, or "none (empty table)" for a table
