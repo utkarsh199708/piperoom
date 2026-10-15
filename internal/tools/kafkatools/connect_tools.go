@@ -11,6 +11,7 @@ import (
 
 	"piperoom/internal/clients"
 	"piperoom/internal/dlq"
+	"piperoom/internal/redact"
 	"piperoom/internal/tools"
 )
 
@@ -85,7 +86,7 @@ func (t *connectStatus) InputSchema() map[string]any {
 	return objectSchema(map[string]any{"connector": strProp("connector name")}, "connector")
 }
 func (t *connectStatus) Description() string {
-	return "Returns a connector's state and each task's state; for FAILED tasks the exception class, message and every 'Caused by:' line (stack frames and schema blobs stripped)."
+	return "Returns a connector's state and each task's state; for a FAILED connector or task the exception class, message and every 'Caused by:' line (stack frames and schema blobs stripped, record values and credentials masked)."
 }
 
 func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.Result, error) {
@@ -113,7 +114,16 @@ func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.R
 	if st.WorkerID != "" {
 		fmt.Fprintf(&sb, " on %s", st.WorkerID)
 	}
-	sb.WriteString(".")
+	// A connector that fails at startup has no tasks; its own trace is the
+	// only reason Connect gives (#399). Connect can keep a stale trace on a
+	// connector that recovered, so it is shown only while FAILED.
+	var connErr string
+	if st.State == "FAILED" && st.Trace != "" {
+		connErr = cleanTrace(condenseTrace(st.Trace))
+		sb.WriteString(":\n" + connErr)
+	} else {
+		sb.WriteString(".")
+	}
 	type taskRow struct {
 		ID    int    `json:"id"`
 		State string `json:"state"`
@@ -130,17 +140,92 @@ func (t *connectStatus) Run(ctx context.Context, input json.RawMessage) (tools.R
 					cond += "\n" + line
 				}
 			}
-			if len(cond) > 2000 {
-				cond = truncateRunes(cond, 2000) + "\n…"
-			}
+			cond = cleanTrace(cond)
 			tr.Error = cond
 			sb.WriteString(":\n" + cond)
 		}
 		tasks = append(tasks, tr)
 	}
-	return res(sb.String(), map[string]any{
-		"name": st.Name, "state": st.State, "worker": st.WorkerID, "tasks": tasks,
-	}), nil
+	data := map[string]any{"name": st.Name, "state": st.State, "worker": st.WorkerID, "tasks": tasks}
+	if connErr != "" {
+		data["error"] = connErr
+	}
+	return res(sb.String(), data), nil
+}
+
+// maxTraceText caps one condensed trace in Summary and Data.
+const maxTraceText = 2000
+
+// oracleThinCreds matches an Oracle JDBC URL with credentials,
+// jdbc:oracle:<driver>:user/password@host..., which DriverManager quotes
+// whole in "No suitable driver" and listener errors. The user may be quoted,
+// and a quote may be escaped (\", a trace echoing JSON config) or doubled
+// inside ("", SQL style); group 2 is the rest of the token, where
+// maskOracleThin finds the password. A URL with no credentials
+// (jdbc:oracle:thin:@host...) does not match: its user part would start with
+// '@'. redact.Text has no rule for this form yet (#449); drop this local mask
+// once that rule lands.
+var oracleThinCreds = regexp.MustCompile(`(?i)(jdbc:oracle:[a-z0-9]+:(?:\\?"(?:[^"\n]|"")*"|[^\s/@:;"'\\]+)/)(\\?"(?:[^"\n]|"")*"|\S+)`)
+
+// bracedPassword matches an MS JDBC value in braces, which may hold ';' and
+// '@' ('}}' escapes '}'), for every key that ends in password, pwd or secret
+// (trustStorePassword, keyStoreSecret, ...). redact.Text reads such a value as
+// URL user info: it masks the port and user and leaks the tail. A brace that
+// is never closed runs to the end of the line; an empty {} is kept. The key
+// and the rest of the connection string stay visible.
+var bracedPassword = regexp.MustCompile(`(?im)(\b\w*(?:password|pwd|secret)\s*=\s*)\{(?:[^}\n]|\}\})+(?:\}|$)`)
+
+// redactedPassword replaces a locally masked password, in redact's style.
+const redactedPassword = "[redacted]"
+
+// maskOracleThin masks the password of an oracleThinCreds match. The password
+// runs to the last '@' of the token, since it may itself hold '@' and '/';
+// with no '@' (no host quoted) the whole token is the password.
+func maskOracleThin(m string) string {
+	sub := oracleThinCreds.FindStringSubmatch(m)
+	head, rest := sub[1], sub[2]
+	if strings.HasPrefix(rest, redactedPassword) {
+		return m // already masked: a second pass must not move the cut
+	}
+	if strings.HasPrefix(rest, `"`) || strings.HasPrefix(rest, `\"`) {
+		return head + redactedPassword // a quoted password, host unmatched after it
+	}
+	if at := strings.LastIndex(rest, "@"); at > 0 {
+		return head + redactedPassword + rest[at:]
+	} else if at == 0 {
+		return m // empty password: nothing to mask
+	}
+	return head + redactedPassword
+}
+
+// maskCreds masks the credentials in untrusted trace text: the local masks
+// for forms redact.Text gets wrong, then redact.Text. sanitizeTrace runs it on
+// each line after stripping schema blobs and before record masking, which
+// drops a quoted column name a key/value rule needs and caps a line at 300
+// runes (dlq.RedactMessage); so neither can expose a credential.
+func maskCreds(s string) string {
+	// The Oracle mask goes last: its password runs to the last '@' of a token,
+	// and in compact JSON or URL parameters that token reaches a sibling
+	// credential ("connection.password":"Sec@ret..."). Run first, it would eat
+	// that credential's key and leave its tail; run last, the sibling is
+	// already masked and the Oracle pass can only add masks.
+	s = bracedPassword.ReplaceAllString(s, "${1}"+redactedPassword)
+	s, _ = redact.Text(s)
+	s = oracleThinCreds.ReplaceAllStringFunc(s, maskOracleThin)
+	return s
+}
+
+// cleanTrace masks credentials in a condensed trace and caps it. condenseTrace
+// already masked each line; this pass covers text added after it (the
+// rejected-schema line) and is idempotent. It masks before the cap, so the
+// 2000-byte cut never splits a secret into a piece the masks no longer
+// recognise.
+func cleanTrace(cond string) string {
+	cond = maskCreds(cond)
+	if len(cond) > maxTraceText {
+		cond = truncateRunes(cond, maxTraceText) + "\n…"
+	}
+	return cond
 }
 
 // ---- connect_config ----
@@ -280,24 +365,39 @@ func truncateRunes(s string, n int) string {
 // dropping stack frames and stripping embedded schema JSON blobs.
 func condenseTrace(trace string) string {
 	var out []string
+	size := 0
 	for _, line := range strings.Split(trace, "\n") {
+		// cleanTrace keeps maxTraceText bytes; masking past that (plus a margin
+		// for masks that shorten text) is work whose output is cut anyway.
+		if size > maxTraceText+condenseMargin {
+			break
+		}
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "at ") {
 			continue
 		}
 		if strings.HasPrefix(trimmed, "Caused by:") || len(out) == 0 {
-			out = append(out, sanitizeTrace(trimmed))
+			kept := sanitizeTrace(trimmed)
+			out = append(out, kept)
+			size += len(kept) + 1
 		}
 	}
 	return strings.Join(out, "\n")
 }
 
-// sanitizeTrace strips the embedded Avro schema JSON blobs from a trace line
-// and masks the failing record's values where a driver or converter quotes
-// them.
+// condenseMargin is how far past maxTraceText condenseTrace keeps lines.
+const condenseMargin = 512
+
+// sanitizeTrace strips the embedded Avro schema JSON blobs from a trace line,
+// masks credentials, and masks the failing record's values where a driver or
+// converter quotes them.
 func sanitizeTrace(s string) string {
+	// Schemas go first: redact.Text masks text past 64 KiB as one block, and
+	// a blob cut that way has no closing brace or quote to strip up to, so the
+	// error code, compatibility level and subject after it would go too.
 	s = stripSchemaAfter(s, "Error registering Avro schema")
 	s = stripOldSchema(s)
+	s = maskCreds(s)
 	if recordSnippet.MatchString(s) {
 		// dlq.RedactMessage drops a "Failing row contains (...)" tuple only
 		// after a "Detail:" prefix; some drivers print it without one.
@@ -313,11 +413,14 @@ var failingRow = regexp.MustCompile(`(?i)(failing row contains)\s*\(.*`)
 // "Where:", "Key (...)=(...)", "Failing row contains (...)" and "invalid
 // input syntax ... \"...\"", Java's "For input string: \"...\"", Connect's
 // "Cannot parse value ...", Jackson's "[Source: ...]" snippet and
-// "Unrecognized token '...'". Such a line gets the dlq_peek redaction; other
+// "Unrecognized token '...'", MySQL's "Duplicate entry '...'", SQL Server's
+// "The duplicate key value is (...)", pgjdbc's "Batch entry N UPDATE ... SET col =
+// '...'" and Connect's record dumps (SinkRecord{...}, value=Struct{...},
+// "record {...}"). Such a line gets the dlq_peek redaction; other
 // lines (schema registry rejections, class names) stay whole, because their
 // wording is the diagnosis and dlq.RedactMessage would mask the quoted
 // subject in it.
-var recordSnippet = regexp.MustCompile(`(?i)\bvalues\s*\(|\bdetail:|\bwhere:|\[source:|unrecognized token|invalid input syntax|for input string|failing row contains|\bkey\s*\(.*\)\s*=\s*\(|cannot parse`)
+var recordSnippet = regexp.MustCompile(`(?i)\bvalues\s*\(|\bdetail:|\bwhere:|\[source:|unrecognized token|invalid input syntax|for input string|failing row contains|\bkey\s*\(.*\)\s*=\s*\(|cannot parse|duplicate entry|duplicate key value is|\bbatch entry \d+|\bset\s+"?\w+"?\s*=|\b(?:struct|sinkrecord|connectrecord|sourcerecord)\{|\brecord\s*\{`)
 
 // stripSchemaAfter replaces the balanced {…} JSON that follows marker with <schema>.
 func stripSchemaAfter(s, marker string) string {

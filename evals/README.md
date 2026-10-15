@@ -764,6 +764,17 @@ counting (`hedge.go`):
 
 Both apply to every hypothesis, so they also govern `tool_calls_to_root_cause` and time to cause.
 
+**Golden corpus** (`golden_corpus_test.go`): every text the deterministic matcher has been judged on
+in one table: the existing tests' correct, trap, shotgun and wrong-story answers read with the real
+expect of each default and held-out scenario, plus the reproductions of #283, #334 and #335 and every
+text quoted in the #395 reviews, and shadow-agreement rows (`agreement.go`). Each row is pinned at
+the grade the matcher gives today. A row the matcher gets wrong is a **gap** row: it carries the right
+grade and a reason and is logged; it fails once it grades right, so the fix must remove its marker.
+Run the corpus after any change to `textmatch.go`, `forbidden.go`, `negation.go`, `hedge.go`,
+`agreement.go` or `tokenize`: a change that flips a row is not done. The denial and warning gaps of
+#283 and #334 follow the #454 decision: a keyword pass plus the LLM judge, with the keyword
+heuristics frozen.
+
 ## Time to cause
 
 `time_to_cause` (`ttc.go`) is how long the room took to its first correct hypothesis:

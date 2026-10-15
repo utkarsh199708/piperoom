@@ -69,11 +69,16 @@ alert:
   title: 'Warehouse analytics.ledger_entries stale for 47 min (WarehouseFreshness, pipeline ledger); pg-ledger-connector task 0 FAILED'
   pipeline_map: |
     pipeline ledger
-    1 pg:public.ledger_entries [postgres, owner nadia] WARN slot_active=false slot_retained=4.6 GiB
+    legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+    1 pg:public.ledger_entries [postgres, owner nadia] WARN slot_active=false slot_retained=4.6 GiB wal_status=extended
     2 connect:pg-ledger-connector [kafka-connect, owner tomas] FAIL tasks_failed=1
+      from: pg:public.ledger_entries
     3 topic:ldg.public.ledger_entries [kafka, owner tomas] OK newest_record=47m ago
+      from: connect:pg-ledger-connector
     4 group:ledger-sink [consumer, owner lena] OK lag=0 state=Stable
+      from: topic:ldg.public.ledger_entries
     5 wh:analytics.ledger_entries [warehouse, owner omar] FAIL stale_for=47m ts_column=posted_at
+      from: group:ledger-sink (unconfirmed)
 
 phases: [broken, recovered]
 
@@ -89,11 +94,16 @@ recordings:
     phase: broken
     summary: |
       pipeline ledger
-      1 pg:public.ledger_entries [postgres, owner nadia] WARN slot_active=false slot_retained=4.6 GiB
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.ledger_entries [postgres, owner nadia] WARN slot_active=false slot_retained=4.6 GiB wal_status=extended
       2 connect:pg-ledger-connector [kafka-connect, owner tomas] FAIL tasks_failed=1
+        from: pg:public.ledger_entries
       3 topic:ldg.public.ledger_entries [kafka, owner tomas] OK newest_record=47m ago
+        from: connect:pg-ledger-connector
       4 group:ledger-sink [consumer, owner lena] OK lag=0 state=Stable
+        from: topic:ldg.public.ledger_entries
       5 wh:analytics.ledger_entries [warehouse, owner omar] FAIL stale_for=47m ts_column=posted_at
+        from: group:ledger-sink (unconfirmed)
     data:
       edges:
         - from: pg:public.ledger_entries
@@ -103,11 +113,13 @@ recordings:
         - from: topic:ldg.public.ledger_entries
           to: group:ledger-sink
         - from: group:ledger-sink
+          mapping: inferred
           to: wh:analytics.ledger_entries
       nodes:
         - facts:
             slot_active: "false"
             slot_retained: 4.6 GiB
+            wal_status: extended
           health: warn
           id: pg:public.ledger_entries
           kind: source_table
@@ -154,11 +166,16 @@ recordings:
     phase: recovered
     summary: |
       pipeline ledger
-      1 pg:public.ledger_entries [postgres, owner nadia] WARN slot_active=true slot_retained=3.9 GiB
+      legend: listed upstream first. "from:" = data inputs. "depends on:" = needed to work, not a data stage. (unconfirmed) = not proven; implied by owners.yaml or a naming convention; verify it with tools. First failing component and root cause can differ; check upstream dependencies of the first failing component.
+      1 pg:public.ledger_entries [postgres, owner nadia] WARN slot_active=true slot_retained=3.9 GiB wal_status=extended
       2 connect:pg-ledger-connector [kafka-connect, owner tomas] OK
+        from: pg:public.ledger_entries
       3 topic:ldg.public.ledger_entries [kafka, owner tomas] OK newest_record=2s ago
+        from: connect:pg-ledger-connector
       4 group:ledger-sink [consumer, owner lena] WARN lag=18402 state=Stable
+        from: topic:ldg.public.ledger_entries
       5 wh:analytics.ledger_entries [warehouse, owner omar] FAIL stale_for=41m ts_column=posted_at
+        from: group:ledger-sink (unconfirmed)
     data:
       edges:
         - from: pg:public.ledger_entries
@@ -168,11 +185,13 @@ recordings:
         - from: topic:ldg.public.ledger_entries
           to: group:ledger-sink
         - from: group:ledger-sink
+          mapping: inferred
           to: wh:analytics.ledger_entries
       nodes:
         - facts:
             slot_active: "true"
             slot_retained: 3.9 GiB
+            wal_status: extended
           health: warn
           id: pg:public.ledger_entries
           kind: source_table
@@ -588,8 +607,11 @@ recordings:
       (no DDL since 2026-10-10T09:40:00Z)
   - tool: pg_long_transactions
     summary: |
-      (no long transactions)
-    data: []
+      (no long transactions on this pipeline's tables)
+    data:
+      other_not_shown: 0
+      other_writers: 0
+      transactions: []
   - tool: pg_publication_tables
     input: {pipeline_id: ledger}
     summary: |
@@ -668,6 +690,7 @@ recordings:
       key: "1"
       records: null
       topic: ldg.public.ledger_entries
+      truncated: false
   - tool: pg_row
     summary: |-
       not found

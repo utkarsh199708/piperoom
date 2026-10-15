@@ -77,6 +77,12 @@ const maxTapBody = 64 << 20
 // NewModelTap starts a tap that forwards to upstream (scheme and host, with
 // an optional path prefix).
 func NewModelTap(upstream string) (*ModelTap, error) {
+	return newModelTap(upstream, maxTapBody)
+}
+
+// newModelTap is NewModelTap with a body cap: a body over maxBody is
+// forwarded whole and not observed.
+func newModelTap(upstream string, maxBody int64) (*ModelTap, error) {
 	up, err := url.Parse(upstream)
 	if err != nil || up.Scheme == "" || up.Host == "" {
 		return nil, fmt.Errorf("evals: model tap: bad upstream %q", upstream)
@@ -94,14 +100,25 @@ func NewModelTap(upstream string) (*ModelTap, error) {
 			if pr.Out.Body == nil {
 				return
 			}
-			b, err := io.ReadAll(io.LimitReader(pr.Out.Body, maxTapBody))
-			_ = pr.Out.Body.Close()
+			body := pr.Out.Body
+			b, err := io.ReadAll(io.LimitReader(body, maxBody+1))
+			if err != nil || int64(len(b)) > maxBody {
+				// Forward what was read and the rest unchanged, with the
+				// original length: a cut body would break the promise to
+				// forward every request unchanged. A read error reaches
+				// the transport and fails the request.
+				pr.Out.Body = struct {
+					io.Reader
+					io.Closer
+				}{io.MultiReader(bytes.NewReader(b), body), body}
+				pr.Out.GetBody = nil
+				return
+			}
+			_ = body.Close()
 			pr.Out.Body = io.NopCloser(bytes.NewReader(b))
 			pr.Out.ContentLength = int64(len(b))
 			pr.Out.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(b)), nil }
-			if err == nil {
-				t.observe(b)
-			}
+			t.observe(b)
 		},
 	}
 	t.srv = &http.Server{Handler: proxy, ReadHeaderTimeout: 10 * time.Second}

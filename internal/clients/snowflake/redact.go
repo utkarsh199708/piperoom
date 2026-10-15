@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/snowflakedb/gosnowflake"
+	"github.com/snowflakedb/gosnowflake/v2"
 )
 
 const redacted = "***"

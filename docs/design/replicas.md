@@ -279,7 +279,16 @@ lands last, after the parallel `00010`–`00013`.
    replica appended in between (`ErrSeqConflict`), the command folds the new events, runs its check
    again and retries, at most 3 times, then answers `409 conflict`. So two people taking control at
    once get one driver, and a driver replaced on another replica cannot steer as driver afterwards.
-   Commands that cannot conflict (comments, notes, agent events) append unconditionally. Postgres
+   Commands that cannot conflict (comments, `steer.suggested`, notes, agent events) append
+   unconditionally (`emitLocked`, `internal/room/service.go:849`; `AddComment`,
+   `internal/room/service_steer.go:29`; the suggestion path of `Steer`, `service_steer.go:117`).
+   The driver's `steer.sent` is not one of them: it is a checked append
+   (`emitCheckedLocked`, `service_steer.go:88`), as listed above. A comment or steer that carries a `client_id` is not in
+   that group: `docs/api.md` (Idempotent posts, #459) makes `(room, user, client_id)` unique in the
+   store, so exactly one event lands even for two requests racing on different replicas. The store
+   does this with a unique index or the same conditional append, not the replica's service lock.
+   Not implemented on `main` yet: `AddComment` and `Steer` take no `client_id`, and no migration
+   holds the key (`events.go:447-466` only reserves the payload fields). Postgres
    also enforces one decision per approval layer, one start per step, one executor per proposal and
    one room per alert key.
 2. **Presence is per replica.** `ws` presence is in memory; people on different replicas do not see

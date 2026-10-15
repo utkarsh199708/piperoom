@@ -273,6 +273,17 @@ func (s fakeSource) LongTransactions(_ context.Context, olderThan time.Duration)
 	return out, nil
 }
 
+// LongTransactionsOnTables is the scoped read pg_long_transactions needs since #107.
+// The fake world has no lock table, so every long transaction counts as on the
+// tables; nothing is "other".
+func (s fakeSource) LongTransactionsOnTables(ctx context.Context, olderThan time.Duration, _ []string) (postgres.TableTransactions, error) {
+	txns, err := s.LongTransactions(ctx, olderThan)
+	if err != nil {
+		return postgres.TableTransactions{}, err
+	}
+	return postgres.TableTransactions{Transactions: txns}, nil
+}
+
 func (s fakeSource) Row(_ context.Context, table, _, pk string) (map[string]any, bool, error) {
 	r, ok := s.w.srcRows[table][pk]
 	return r, ok, nil
