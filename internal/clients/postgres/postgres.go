@@ -99,15 +99,24 @@ func (d *DB) RecentDDL(ctx context.Context, since time.Time, limit int) ([]clien
 	return d.recentDDL(ctx, since, "", limit)
 }
 
-// RecentDDLTable returns DDL audit rows for one table ("schema.table") newer
-// than since, newest first. The table filter is applied in SQL as an exact
-// object_identity match so rows older than limit are not missed.
+// RecentDDLTable returns DDL audit rows for one table ("schema.table", exact
+// catalog names) and its columns newer than since, newest first. The table
+// filter is applied in SQL (ddlTableFilter) so rows older than limit are not
+// missed.
 func (d *DB) RecentDDLTable(ctx context.Context, since time.Time, table string, limit int) ([]clients.DDLChange, error) {
 	if _, _, err := splitTable(table); err != nil {
 		return nil, err
 	}
 	return d.recentDDL(ctx, since, table, limit)
 }
+
+// ddlTableFilter matches the audit rows of one table ($2 schema, $3 name):
+// the table itself, quoted the way the event trigger's object_identity is
+// (public."MixedCase"), and its columns (schema.table.column), under which a
+// column rename or comment is logged.
+const ddlTableFilter = `
+		  AND (object_identity = quote_ident($2::text) || '.' || quote_ident($3::text)
+		       OR starts_with(object_identity, quote_ident($2::text) || '.' || quote_ident($3::text) || '.'))`
 
 func (d *DB) recentDDL(ctx context.Context, since time.Time, table string, limit int) ([]clients.DDLChange, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
@@ -138,7 +147,8 @@ func (d *DB) recentDDL(ctx context.Context, since time.Time, table string, limit
 	if table == "" {
 		rows, err = d.query(ctx, cols+` ORDER BY at DESC LIMIT $2`, since, limit)
 	} else {
-		rows, err = d.query(ctx, cols+` AND object_identity = $2 ORDER BY at DESC LIMIT $3`, since, table, limit)
+		schema, tbl, _ := splitTable(table) // validated by RecentDDLTable
+		rows, err = d.query(ctx, cols+ddlTableFilter+` ORDER BY at DESC LIMIT $4`, since, schema, tbl, limit)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("postgres: read ddl log: %w", err)

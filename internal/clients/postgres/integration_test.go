@@ -491,3 +491,59 @@ func TestReadOnlySurvivesSetConfigIntegration(t *testing.T) {
 		t.Fatalf("write through the client: err = %v, want SQLSTATE 25006", err)
 	}
 }
+
+// The audit trigger logs a column rename or a column comment under the
+// column (schema.table.column), and a mixed-case table quoted
+// (public."Name"). An exact object_identity match missed both, so
+// pg_recent_ddl did not show the rename that broke the pipeline (QA sweep).
+func TestRecentDDLTableColumnsAndMixedCaseIntegration(t *testing.T) {
+	db := sourceDB(t)
+	conn := writeConn(t, testenv.Require(t).SourceDBURL)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	lower := testenv.Name("ren")
+	mixed := "It_Mixed_" + lower[len(lower)-6:]
+	other := lower + "x" // a longer name must not match
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(c, `DROP TABLE IF EXISTS public.`+lower+`, public.`+other+`, public."`+mixed+`"`)
+	})
+	since := time.Now().Add(-time.Minute)
+	for _, q := range []string{
+		"CREATE TABLE public." + lower + " (id int primary key, a int)",
+		"CREATE TABLE public." + other + " (id int primary key, a int)",
+		"ALTER TABLE public." + lower + " RENAME COLUMN a TO b",
+		"ALTER TABLE public." + other + " RENAME COLUMN a TO b",
+		`CREATE TABLE public."` + mixed + `" (id int primary key)`,
+		`ALTER TABLE public."` + mixed + `" ADD COLUMN note text`,
+	} {
+		if _, err := conn.Exec(ctx, q); err != nil {
+			t.Fatalf("setup %q: %v", q, err)
+		}
+	}
+
+	got, err := db.RecentDDLTable(ctx, since, "public."+lower, 100)
+	if err != nil {
+		t.Fatalf("RecentDDLTable: %v", err)
+	}
+	var rename bool
+	for _, c := range got {
+		if strings.Contains(c.ObjectIdentity, other) {
+			t.Fatalf("matched the other table: %+v", c)
+		}
+		rename = rename || c.ObjectIdentity == "public."+lower+".b"
+	}
+	if !rename {
+		t.Fatalf("column rename of public.%s not found in %+v", lower, got)
+	}
+
+	got, err = db.RecentDDLTable(ctx, since, "public."+mixed, 100)
+	if err != nil {
+		t.Fatalf("RecentDDLTable mixed case: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("mixed-case table: %d changes, want CREATE and ALTER: %+v", len(got), got)
+	}
+}

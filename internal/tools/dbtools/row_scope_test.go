@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"piperoom/internal/clients"
 	"piperoom/internal/tools"
 )
 
@@ -81,5 +82,20 @@ func TestRowToolsShowOnlyTimeValues(t *testing.T) {
 		if data["updated_at"] != "2026-10-11T10:00:00Z" {
 			t.Errorf("%s: updated_at = %v, want the timestamp kept", name, data["updated_at"])
 		}
+	}
+}
+
+// Without a SQL filter the tool filters in memory; a column rename is logged
+// under schema.table.column and must count as DDL on the table, while a
+// longer table name must not.
+func TestFilterDDLKeepsColumnDDL(t *testing.T) {
+	changes := []clients.DDLChange{
+		{ObjectIdentity: "public.orders"},
+		{ObjectIdentity: "public.orders.amount"},
+		{ObjectIdentity: "public.orders_archive"},
+	}
+	got := filterDDL(changes, "public.orders")
+	if len(got) != 2 || got[1].ObjectIdentity != "public.orders.amount" {
+		t.Fatalf("got %+v, want the table and its column", got)
 	}
 }

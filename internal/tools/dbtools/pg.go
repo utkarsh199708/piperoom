@@ -587,7 +587,7 @@ func (d Deps) recentDDLTables(ctx context.Context, since time.Time, tables []str
 			return nil, err
 		}
 		for _, c := range all {
-			if slices.Contains(tables, c.ObjectIdentity) {
+			if slices.ContainsFunc(tables, func(t string) bool { return ddlOnTable(c.ObjectIdentity, t) }) {
 				out = append(out, c)
 			}
 		}
@@ -600,17 +600,23 @@ func (d Deps) recentDDLTables(ctx context.Context, since time.Time, tables []str
 }
 
 // tableDDLFilterer is implemented by SourceDB implementations that can filter
-// DDL by table inside SQL (exact object_identity match, before LIMIT).
+// DDL by table inside SQL (the table and its columns, before LIMIT).
 type tableDDLFilterer interface {
 	RecentDDLTable(ctx context.Context, since time.Time, table string, limit int) ([]clients.DDLChange, error)
 }
 
-// filterDDL is the exact-match fallback for SourceDB implementations without a
-// SQL table filter.
+// ddlOnTable reports whether an audit row's object_identity is table or one
+// of its columns (a column rename is logged as schema.table.column).
+func ddlOnTable(identity, table string) bool {
+	return identity == table || strings.HasPrefix(identity, table+".")
+}
+
+// filterDDL is the fallback for SourceDB implementations without a SQL table
+// filter.
 func filterDDL(changes []clients.DDLChange, table string) []clients.DDLChange {
 	out := changes[:0]
 	for _, c := range changes {
-		if c.ObjectIdentity == table {
+		if ddlOnTable(c.ObjectIdentity, table) {
 			out = append(out, c)
 		}
 	}
