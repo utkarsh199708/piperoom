@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"piperoom/internal/events"
+	"piperoom/internal/injectscan"
 )
 
 // Person is a bare identity (no role/state), used inside suggestions.
@@ -111,6 +112,17 @@ type Proposal struct {
 	// the proposal exists (proposal.previewed, F4). Informational: it is not
 	// part of ParamsHash. nil until the event arrives.
 	Preview *events.ProposalPreviewedPayload `json:"preview,omitempty"`
+	// ImpactedLayers, RiskLevel and ImpactReasons are copied from
+	// proposal.created (Q0, QA G5). The impacted layers are also in
+	// RequiredLayers, so their owners approve like any other layer.
+	// RiskLevel is "" for a proposal from before Q0; the lists are never null.
+	ImpactedLayers []string `json:"impacted_layers"`
+	RiskLevel      string   `json:"risk_level"`
+	ImpactReasons  []string `json:"impact_reasons"`
+
+	// byAgent is true when the agent actor created the proposal: the agent
+	// may withdraw only its own (agent.ProposalWithdrawer). Not in the JSON.
+	byAgent bool
 }
 
 // ChecklistTick says who ticked one runbook item and when.
@@ -133,8 +145,12 @@ type Suggestion struct {
 
 // RoomSnapshot is the derived room state (docs/api.md), folded from events.
 type RoomSnapshot struct {
-	ID         string     `json:"id"`
-	Title      string     `json:"title"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// TitleFlags are the injectscan kinds found in the title (Q0, QA G15):
+	// an alert's text becomes the title, so a title that reads like
+	// instructions is flagged for every viewer. Never null.
+	TitleFlags []string   `json:"title_flags"`
 	Severity   string     `json:"severity"`
 	PipelineID string     `json:"pipeline_id"`
 	Status     string     `json:"status"`
@@ -250,6 +266,7 @@ func NewSnapshot() RoomSnapshot {
 		Insight:            Insight{TimeToFirstHypothesisS: -1},
 		LogCap:             LogCapOK,
 		Postmortem:         PostmortemState{Status: PostmortemNone},
+		TitleFlags:         []string{},
 		OpenProposals:      []Proposal{},
 		PendingSuggestions: []Suggestion{},
 		Members:            []Member{},
@@ -296,6 +313,7 @@ func (s RoomSnapshot) Clone() RoomSnapshot {
 	c.AutoCloseAt = cloneTime(s.AutoCloseAt)
 	c.extendedUntil = cloneTime(s.extendedUntil)
 	c.warnedFor = cloneTime(s.warnedFor)
+	c.TitleFlags = append([]string{}, s.TitleFlags...)
 	c.OpenProposals = cloneProposals(s.OpenProposals)
 	c.PendingSuggestions = append([]Suggestion{}, s.PendingSuggestions...)
 	c.Members = append([]Member{}, s.Members...)
@@ -346,6 +364,8 @@ func cloneProposals(in []Proposal) []Proposal {
 		out[i] = p
 		out[i].Steps = append([]events.ProposalStep{}, p.Steps...)
 		out[i].RequiredLayers = append([]string{}, p.RequiredLayers...)
+		out[i].ImpactedLayers = append([]string{}, p.ImpactedLayers...)
+		out[i].ImpactReasons = append([]string{}, p.ImpactReasons...)
 		out[i].Preview = clonePreview(p.Preview)
 		if p.Approvals != nil {
 			out[i].Approvals = make(map[string]string, len(p.Approvals))
@@ -383,6 +403,7 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		}
 		snap.ID = e.RoomID
 		snap.Title = p.Title
+		snap.TitleFlags = titleFlags(p.Title)
 		snap.Severity = p.Severity
 		snap.PipelineID = p.PipelineID
 		snap.Shadow = p.Shadow
@@ -594,6 +615,10 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			RequiredLayers: p.RequiredLayers,
 			Approvals:      approvals,
 			ParamsHash:     eventParamsHash(e.RoomID, p),
+			ImpactedLayers: append([]string{}, p.ImpactedLayers...),
+			RiskLevel:      p.RiskLevel,
+			ImpactReasons:  append([]string{}, p.ImpactReasons...),
+			byAgent:        e.Actor.Kind == events.ActorAgent,
 		}
 		if pv, ok := snap.pendingPreviews[p.ProposalID]; ok {
 			np.Preview = &pv
@@ -647,6 +672,12 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 		// A rejection decides the proposal; it is no longer open.
 		snap.OpenProposals = removeProposal(snap.OpenProposals, p.ProposalID)
 
+	case events.ProposalWithdrawn:
+		// A withdrawn proposal is decided without running (Q0, QA G8/G9).
+		if p, ok := decode[events.ProposalWithdrawnPayload](e); ok {
+			snap.OpenProposals = removeProposal(snap.OpenProposals, p.ProposalID)
+		}
+
 	case events.ActionExecuted:
 		p, ok := decode[events.ActionExecutedPayload](e)
 		if !ok {
@@ -660,6 +691,15 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 	}
 
 	return normalize(snap)
+}
+
+// titleFlags is title_flags: the injectscan kinds of the title, [] when clean.
+func titleFlags(title string) []string {
+	kinds := injectscan.Kinds(injectscan.Scan(title))
+	if kinds == nil {
+		return []string{}
+	}
+	return kinds
 }
 
 // eventParamsHash is the params_hash a proposal.created event carries. An event
@@ -699,6 +739,15 @@ func normalize(snap RoomSnapshot) RoomSnapshot {
 		if snap.OpenProposals[i].Approvals == nil {
 			snap.OpenProposals[i].Approvals = map[string]string{}
 		}
+		if snap.OpenProposals[i].ImpactedLayers == nil {
+			snap.OpenProposals[i].ImpactedLayers = []string{}
+		}
+		if snap.OpenProposals[i].ImpactReasons == nil {
+			snap.OpenProposals[i].ImpactReasons = []string{}
+		}
+	}
+	if snap.TitleFlags == nil {
+		snap.TitleFlags = []string{}
 	}
 	if snap.PendingSuggestions == nil {
 		snap.PendingSuggestions = []Suggestion{}

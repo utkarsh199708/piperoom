@@ -47,13 +47,18 @@ const (
 	classAgent capClass = iota
 	// classReserve is every human and system event: refused past cap + reserve.
 	classReserve
-	// classAlways is room.closed: never refused, so a full room can be closed.
+	// classAlways is room.closed, and the system actor's proposal.withdrawn
+	// that follows it for every proposal still open: never refused, so a full
+	// room can be closed and its proposals end with it (QA G8). Only the close
+	// writes proposal.withdrawn as the system actor.
 	classAlways
 )
 
 func classOf(typ events.Type, actor events.Actor) capClass {
 	switch {
 	case typ == events.RoomClosed:
+		return classAlways
+	case typ == events.ProposalWithdrawn && actor.Kind == events.ActorSystem:
 		return classAlways
 	case actor.Kind == events.ActorAgent:
 		return classAgent

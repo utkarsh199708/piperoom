@@ -594,10 +594,12 @@ func TestExecutorStopsAtFirstFailure(t *testing.T) {
 	}
 }
 
+// A person who neither drives nor owns a layer of the room's pipeline cannot
+// close it (a layer owner can: TestCloseByLayerOwner).
 func TestCloseRequiresDriver(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	roomID := createRoom(t, svc, "arjun").ID
-	_, err := svc.CloseRoom(context.Background(), mustUser(t, svc, "priya"), roomID, "fixed")
+	_, err := svc.CloseRoom(context.Background(), room.User{ID: "visitor", Name: "Visitor"}, roomID, "fixed")
 	wantCode(t, err, "not_driver")
 }
 

@@ -152,8 +152,8 @@ func TestOnRoomClosedFiresWithIDs(t *testing.T) {
 		t.Fatalf("after close: calls = %v, want [%v]", got, want)
 	}
 
-	// A failed close (not the driver) does not fire the hook.
-	if _, err := svc.CloseRoom(ctx, mustUser(t, svc, "priya"), manual.ID, "no"); err == nil {
+	// A failed close (not the driver, owns no layer) does not fire the hook.
+	if _, err := svc.CloseRoom(ctx, room.User{ID: "visitor", Name: "Visitor"}, manual.ID, "no"); err == nil {
 		t.Fatal("close by a non-driver: want error")
 	}
 	if n := len(h.closedCalls()); n != 1 {

@@ -46,6 +46,11 @@ type Store interface {
 	StartProposalStep(ctx context.Context, proposalID string, stepIndex int) error
 	FinishProposalStep(ctx context.Context, proposalID string, stepIndex int, status, output string) error
 	SetProposalStatus(ctx context.Context, proposalID, status string) error
+	// WithdrawProposal sets an open proposal to ProposalWithdrawn only while
+	// no executor claimed it and none of its steps started (QA G8/G9). A
+	// refusal wraps ErrNotFound, ErrProposalWithdrawn, ErrProposalDecided or
+	// ErrProposalRunning and changes nothing.
+	WithdrawProposal(ctx context.Context, proposalID string) error
 
 	CreateSuggestion(ctx context.Context, r SuggestionRow) error
 	DeleteSuggestion(ctx context.Context, suggestionID string) error

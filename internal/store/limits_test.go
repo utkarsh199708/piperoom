@@ -17,7 +17,8 @@ func TestReserve(t *testing.T) {
 }
 
 // TestFitsByClass pins the three classes at the edges: agent events stop at
-// the cap, human and system events at cap + 2%, room.closed never.
+// the cap, human and system events at cap + 2%, room.closed and the close's
+// proposal.withdrawn never.
 func TestFitsByClass(t *testing.T) {
 	human := events.Actor{Kind: events.ActorHuman, ID: "arjun"}
 	system := events.Actor{Kind: events.ActorSystem, ID: "system"}
@@ -43,6 +44,11 @@ func TestFitsByClass(t *testing.T) {
 		{"agent status by the system uses the reserve", events.AgentStatus, system, 100, 0, 10, true},
 		{"room.closed past everything", events.RoomClosed, human, 1 << 40, 1 << 40, 10, true},
 		{"room.closed by the system", events.RoomClosed, system, 1 << 40, 1 << 40, 10, true},
+		// QA G8: the close withdraws every open proposal, however full the log.
+		{"close withdrawal by the system", events.ProposalWithdrawn, system, 1 << 40, 1 << 40, 10, true},
+		{"driver withdrawal uses the reserve", events.ProposalWithdrawn, human, 101, 0, 10, true},
+		{"driver withdrawal past the reserve", events.ProposalWithdrawn, human, 102, 0, 10, false},
+		{"agent withdrawal stops at the cap", events.ProposalWithdrawn, events.AgentActor, 100, 0, 10, false},
 	}
 	for _, tc := range tests {
 		if got := l.Fits(tc.typ, tc.actor, tc.events, tc.bytes, tc.size); got != tc.want {
