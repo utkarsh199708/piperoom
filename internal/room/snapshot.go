@@ -195,6 +195,12 @@ type RoomSnapshot struct {
 	// proposal appears.
 	pendingPreviews map[string]events.ProposalPreviewedPayload
 
+	// rejected holds the proposals the log rejected (approval.rejected). The
+	// proposal leaves OpenProposals then, so without this a proposals row
+	// whose "rejected" status write was lost would look open and take an
+	// approval (decisionLockedCheck). Copy-on-write in Apply.
+	rejected map[string]bool
+
 	// Postmortem is the closing draft's state (F2): "none", "drafting" from
 	// room.closed until postmortem.drafted or postmortem.failed, "drafted" or
 	// "failed". The Markdown is rendered on request, never stored.
@@ -644,6 +650,12 @@ func Apply(snap RoomSnapshot, e events.Event) RoomSnapshot {
 			break
 		}
 		setApproval(snap.OpenProposals, p.ProposalID, p.Layer, "rejected")
+		rej := make(map[string]bool, len(snap.rejected)+1)
+		for k := range snap.rejected {
+			rej[k] = true
+		}
+		rej[p.ProposalID] = true
+		snap.rejected = rej
 		// A rejection decides the proposal; it is no longer open.
 		snap.OpenProposals = removeProposal(snap.OpenProposals, p.ProposalID)
 

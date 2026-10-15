@@ -739,6 +739,7 @@ func (s *Service) rebuild(ctx context.Context, roomID string) (loadedRoom, error
 		snap.Postmortem = PostmortemState{Status: PostmortemNone}
 	}
 	if row, err := s.store.GetRoom(ctx, roomID); err == nil {
+		s.repairClosedRow(ctx, row, &snap)
 		if row.DriverID != "" && snap.Driver != nil && snap.Driver.ID == row.DriverID && row.DriverLeaseUntil != nil && row.DriverLeaseUntil.After(snap.Driver.LeaseUntil) {
 			// docs/api.md: times are RFC 3339 UTC; a persisted lease read back
 			// from Postgres may carry the session's local zone.
