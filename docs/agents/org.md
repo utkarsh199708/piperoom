@@ -147,3 +147,13 @@ https://claude.ai/artifact/1HWHJXz1Y4bzw3MRt45f7J · ops log issue #250 · daily
 
 Each run is a fresh cloud session that reads its role file and the ops log issue #250. Seed tickets: #251 (F2a),
 #252 (F9 Slack), #253 (F10d), #254 (split the untagged QA PRs).
+
+## 12. Review and merge (added 2026-10-15 16:30 UTC)
+
+Every agent PR gets a LEAD-REVIEW verdict within the hour it opens: the hourly dispatcher run starts the review
+workflow (`docs/agents/roles/review-prs.js`) for every open `[#...]` PR whose newest commit has no `[LEAD-REVIEW]`
+comment. Each PR gets two independent reviewers (the AGENTS.md §7 checklist with the changed packages' tests run, and an
+adversarial reviewer that tries to break the change) and one merged verdict comment, including whether each closed
+ticket is really fixed by a test that fails without the fix. The authoring session is subscribed to its PR and fixes
+CHANGES REQUESTED items. APPROVED + green PRs are sent to the LEAD-ARCH session, which does the architecture check and
+merges. A PR APPROVED and green for more than 2 hours without a merge is reported to the human.
