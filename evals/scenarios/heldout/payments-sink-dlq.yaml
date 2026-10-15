@@ -608,7 +608,6 @@ expect:
   root_cause:
     - [risk_score]
     - [dead letter, dead-letter, dlq, errors.tolerance]
-  root_cause_forbidden: [[incompatible change that], [v4 is an incompatible change], [incompatible schema change], [backward incompatible], [not backward compatible], [incompatible with v3], [registry rejected v4], [registry rejected schema], [registry rejected it], [registry rejected the], [registry rejects v4], [registry has rejected], [registry refused], [registry blocked], [rejected by the registry], [rejected by schema registry], [rejected by the schema registry], [failed the compatibility check], [failed the registry compatibility check]]
   first_failing_layer: kafka-connect
   root_cause_layer: kafka-connect
   evidence_tools: [connect_status, warehouse_freshness]

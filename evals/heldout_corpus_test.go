@@ -3,24 +3,26 @@ package evals
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 )
 
 // rootCauseCorpus is the committed set of right and wrong root-cause wordings
-// for the held-out scenarios whose term rows #332 rewrote (#427). Reviewers kept
-// finding wordings the rows misgraded, so each wording lives here and the rows
-// change only after it is added.
+// for the held-out scenarios whose term rows #332 will rewrite (#427). Reviewers
+// kept finding wordings the rows misgraded, so each wording lives here and the
+// rows change only after it is added. The rows are origin/main's; a text they
+// grade wrong carries a gap and is asserted at the wrong grade, so a change that
+// fixes it (or breaks a text that is not a gap) fails the test.
 const rootCauseCorpusPath = heldoutDir + "/fixtures/rootcause_corpus.yaml"
 
 type corpusEntry struct {
 	Scenario      string `yaml:"scenario"`
 	Text          string `yaml:"text"`
-	WantRootCause bool   `yaml:"want_root_cause"`
-	MainWrong     bool   `yaml:"main_wrong"`
+	WantRootCause bool   `yaml:"want_root_cause"` // the correct grade
 	Source        string `yaml:"source"`
-	Gap           string `yaml:"gap"`
+	Gap           string `yaml:"gap"` // set when the rows grade the text wrong; the reason
 }
 
 func loadRootCauseCorpus(t *testing.T) []corpusEntry {
@@ -58,20 +60,23 @@ func withHypothesis(script []step, text string) []step {
 var corpusLayerTail = map[string]string{
 	"users-compat-none-consumer":       " The consumer user-profile-sync is the first failing layer; the root cause is in the schema-registry layer.",
 	"ledger-producer-timeout-recovery": " The first failing layer is kafka-connect (the connector); the root cause is in the kafka layer, at the broker.",
+	"payments-sink-dlq":                " The failing layer is kafka-connect: the sink connector.",
 }
+
+var corpusSources = map[string]bool{"#332": true, "r1": true, "r2": true, "r3": true, "r4": true}
 
 func TestHeldoutRootCauseCorpusShape(t *testing.T) {
 	entries := loadRootCauseCorpus(t)
-	if len(entries) < 60 {
-		t.Fatalf("%d corpus entries, want at least 60", len(entries))
+	if len(entries) < 150 {
+		t.Fatalf("%d corpus entries, want at least 150", len(entries))
 	}
 	seen := map[string]bool{}
 	for i, e := range entries {
-		if e.Text == "" || e.Scenario == "" || e.Source == "" {
-			t.Errorf("entry %d: scenario, text and source are required: %+v", i, e)
+		if e.Text == "" || e.Scenario == "" {
+			t.Errorf("entry %d: scenario and text are required: %+v", i, e)
 		}
-		if e.MainWrong != (e.Gap != "") {
-			t.Errorf("entry %d (%q): main_wrong and gap go together", i, e.Text)
+		if !corpusSources[e.Source] {
+			t.Errorf("entry %d (%q): source %q is not one of #332, r1..r4", i, e.Text, e.Source)
 		}
 		if k := e.Scenario + "\x00" + e.Text; seen[k] {
 			t.Errorf("entry %d: duplicate text %q", i, e.Text)
@@ -81,23 +86,55 @@ func TestHeldoutRootCauseCorpusShape(t *testing.T) {
 	}
 }
 
+// TestHeldoutRootCauseCorpusGapReasons fails an entry whose gap key is present but empty: yaml
+// decodes `gap: ""` to the zero value, the same as no gap, so the raw document
+// is checked for it.
+func TestHeldoutRootCauseCorpusGapReasons(t *testing.T) {
+	b, err := os.ReadFile(filepath.FromSlash(rootCauseCorpusPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Entries []map[string]any `yaml:"entries"`
+	}
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for i, e := range doc.Entries {
+		if g, ok := e["gap"]; ok {
+			if s, _ := g.(string); strings.TrimSpace(s) == "" {
+				t.Errorf("entry %d (%q): gap needs a reason", i, e["text"])
+			}
+		}
+	}
+}
+
 // Every corpus text is graded by rootCauseMatches against its scenario's
-// expect. A text wanted as a right answer also gets one full run, so a
-// forbidden-story hit or a missing fact fails it, not only the term groups.
+// expect. A gap entry is asserted at the grade the rows give today, the
+// opposite of want_root_cause. A right answer without a gap also gets one full
+// run, so a forbidden-story hit or a missing fact fails it, not only the term
+// groups.
 func TestHeldoutRootCauseCorpus(t *testing.T) {
 	scripts := heldoutScripts(t)
 	for i, e := range loadRootCauseCorpus(t) {
 		t.Run(e.Scenario+"/"+e.Source, func(t *testing.T) {
 			sc := loadScenario(t, filepath.Join(heldoutDir, e.Scenario+".yaml"))
-			if got := rootCauseMatches(sc.Expect, e.Text); got != e.WantRootCause {
-				t.Errorf("entry %d: rootCauseMatches = %v, want %v for %q (%s)", i, got, e.WantRootCause, e.Text, e.Gap)
+			got := rootCauseMatches(sc.Expect, e.Text)
+			if e.Gap != "" {
+				if got == e.WantRootCause {
+					t.Errorf("entry %d: gap fixed: drop gap and keep want (want %v, rows now grade %v) for %q", i, e.WantRootCause, got, e.Text)
+				}
+				return
+			}
+			if got != e.WantRootCause {
+				t.Errorf("entry %d: rootCauseMatches = %v, want %v for %q", i, got, e.WantRootCause, e.Text)
+			}
+			if !e.WantRootCause {
+				return
 			}
 			script, ok := scripts[e.Scenario]
 			if !ok {
 				t.Fatalf("no focused script for %s", e.Scenario)
-			}
-			if !e.WantRootCause || e.MainWrong {
-				return
 			}
 			r, _ := evalOnce(t, sc, withHypothesis(script, e.Text+corpusLayerTail[e.Scenario]))
 			if !r.Pass || r.Score != 100 {

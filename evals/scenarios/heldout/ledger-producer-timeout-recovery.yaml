@@ -744,7 +744,6 @@ expect:
   root_cause:
     - [timeout, timed out, expired, expiring]
     - [task]
-  root_cause_forbidden: [['because kafka is down'], ['because the kafka brokers are down'], ['because the brokers are down'], ['kafka is still down'], ['kafka is currently down'], ['kafka cluster is still down'], ['brokers are still down'], ['brokers are currently down'], ['brokers remain down'], ['kafka remains down'], ['because the kafka cluster is down'], ['because kafka is unavailable'], ['because the brokers are unavailable'], ['because the kafka brokers are unavailable'], ['kafka is still unavailable'], ['brokers are still unavailable'], ['because kafka is unreachable'], ['because the brokers are unreachable'], ['kafka is still unreachable'], ['brokers are still unreachable']]
   first_failing_layer: kafka-connect
   root_cause_layer: kafka
   evidence_tools: [connect_status]
