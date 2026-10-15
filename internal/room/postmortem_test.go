@@ -52,7 +52,7 @@ func schemaChangeLog(t *testing.T, st *memstore.Store, c *clock, id string) {
 		ProposalID: "p_1", Layer: "kafka", Identity: &events.Identity{Method: "dev", Grant: "user:priya"},
 	})
 	app(t, st, c, id, events.ActionExecuted, events.Actor{Kind: events.ActorSystem, ID: "executor", Name: "Executor"}, events.ActionExecutedPayload{ProposalID: "p_1", StepIndex: 0, OK: true, Output: "ok"})
-	app(t, st, c, id, events.AgentMessage, ag, events.AgentMessagePayload{Text: "[verification] task 0 RUNNING"})
+	app(t, st, c, id, events.AgentVerification, ag, events.AgentVerificationPayload{ProposalID: "p_1", Recovered: true, Verdict: "task 0 RUNNING"})
 	app(t, st, c, id, events.RoomClosed, pmHuman("priya", "Priya"), events.RoomClosedPayload{Resolution: "fixed"})
 }
 
@@ -96,7 +96,7 @@ func TestPostmortemContentAndEscaping(t *testing.T) {
 	md := renderRoom(t, svc, r.ID)
 	for _, want := range []string{
 		"Status: closed", "## Timeline", "hypothesis (medium)", "hypothesis confirmed by Kabir",
-		"approval given for `p_1`: Priya (user:priya, dev)", "`p_1` step 1 ok", "verification: task 0 RUNNING",
+		"approval given for `p_1`: Priya (user:priya, dev)", "`p_1` step 1 ok", "verification: `p_1` recovered; task 0 RUNNING",
 		"## Root cause", "## What was done", "kafka — Priya (user:priya, dev)", "Outcome: executed",
 		`{"compat":"NONE"}`, "- tool calls: 1 (1 failed)", "cost: not priced", "summary source: none",
 		`relax \|compat\|`,
@@ -329,5 +329,76 @@ func TestPostmortemRestartFallbackIsEventsOnly(t *testing.T) {
 	s2, err := again.GetRoom(context.Background(), r2.ID)
 	if err != nil || s2.Postmortem.Status != "none" {
 		t.Fatalf("old room postmortem = %+v, %v", s2.Postmortem, err)
+	}
+}
+
+func TestPostmortemVerificationSection(t *testing.T) {
+	ag := events.AgentActor
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name    string
+		evs     []events.AgentVerificationPayload
+		want    []string
+		notWant []string
+	}{
+		{name: "none", want: []string{"No verification recorded."}},
+		{
+			name: "recovered",
+			evs: []events.AgentVerificationPayload{{ProposalID: "p_1", Recovered: true, Verdict: "recovered: all good",
+				Checks: []events.VerificationCheck{{Layer: "kafka", Name: "connect_status", OK: true, Detail: "RUNNING"}},
+				DataFlow: &events.DataFlowCheck{Checked: true, Fresh: true,
+					Sinks: []events.SinkCheck{{Table: "orders", Newest: now, Passed: true}}}}},
+			want:    []string{"- `p_1` recovered; recovered: all good; data flow fresh (orders passed)"},
+			notWant: []string{"No verification recorded", "failed kafka"},
+		},
+		{
+			name: "failed layer check",
+			evs: []events.AgentVerificationPayload{{ProposalID: "p_2", Verdict: "still failing",
+				Checks:   []events.VerificationCheck{{Layer: "kafka", Name: "connect_status", OK: false, Detail: "task 0 FAILED"}},
+				DataFlow: &events.DataFlowCheck{Checked: false, Detail: "warehouse down"}}},
+			want: []string{"`p_2` not recovered; still failing; failed kafka/connect\\_status: task 0 FAILED; data flow not checked: warehouse down"},
+		},
+		{
+			name: "repeat ignored",
+			evs: []events.AgentVerificationPayload{
+				{ProposalID: "p_1", Recovered: true, Verdict: "first verdict"},
+				{ProposalID: "p_1", Recovered: true, Verdict: "second verdict", Repeat: true},
+			},
+			want:    []string{"first verdict"},
+			notWant: []string{"second verdict"},
+		},
+		{
+			name: "hostile detail",
+			evs: []events.AgentVerificationPayload{{ProposalID: "p_3", Verdict: "v",
+				Checks: []events.VerificationCheck{{Layer: "db", Name: "x", Detail: "ok\n# Heading\n[click](http://evil) <script>alert(1)</script> | a |"}}}},
+			want:    []string{"failed db/x: ok \\# Heading \\[click\\]"},
+			notWant: []string{"\n# Heading", "<script>", "[click]("},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, st, c := newTestService(t)
+			r := createRoom(t, svc, "arjun")
+			for _, p := range tc.evs {
+				app(t, st, c, r.ID, events.AgentVerification, ag, p)
+			}
+			md := renderRoom(t, svc, r.ID)
+			i := strings.Index(md, "## Verification")
+			j := strings.Index(md, "## Still open")
+			if i < 0 || j < i {
+				t.Fatalf("no verification section:\n%s", md)
+			}
+			sec := md[i:j]
+			for _, w := range tc.want {
+				if !strings.Contains(sec, w) {
+					t.Errorf("section lacks %q:\n%s", w, sec)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(sec, w) {
+					t.Errorf("section has %q:\n%s", w, sec)
+				}
+			}
+		})
 	}
 }

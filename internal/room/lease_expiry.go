@@ -33,7 +33,7 @@ import (
 // LeaseCheckEvery is how often the service looks for expired driver leases.
 // The signal pages people (Slack) and shows in the room, so a delay of up to
 // one period after the 30-minute lease ends is fine; a check costs one pass
-// over the cached rooms under s.mu and no I/O unless a lease is due.
+// over the cached rooms and no I/O unless a lease is due.
 const LeaseCheckEvery = 15 * time.Second
 
 // leaseCheckTimeout bounds one check: the coordination read and the appends.
@@ -63,11 +63,19 @@ func applyLeaseExpired(snap *RoomSnapshot, e events.Event) {
 // leaseExpiryDueLocked returns the control.lease_expired payload of a room
 // whose driver lease has passed and has not been signalled yet. Not for a
 // closed room, a room being deleted or a room with no driver. Caller holds
-// s.mu.
+// st's lock.
 func (s *Service) leaseExpiryDueLocked(st *roomState) (events.ControlLeaseExpiredPayload, bool) {
-	d := st.snap.Driver
-	if st.deleting || !s.roomOpen(st) || d == nil || d.LeaseExpired || st.snap.grantedLease.IsZero() ||
-		st.leaseLogFullFor.Equal(st.snap.grantedLease) {
+	if st.deleting || st.leaseLogFullFor.Equal(st.snap.grantedLease) {
+		return events.ControlLeaseExpiredPayload{}, false
+	}
+	return s.leaseExpiryDue(&st.snap)
+}
+
+// leaseExpiryDue is leaseExpiryDueLocked as far as the snapshot tells: on a
+// published snapshot, it finds the rooms worth locking.
+func (s *Service) leaseExpiryDue(snap *RoomSnapshot) (events.ControlLeaseExpiredPayload, bool) {
+	d := snap.Driver
+	if snap.Status != "open" || d == nil || d.LeaseExpired || snap.grantedLease.IsZero() {
 		return events.ControlLeaseExpiredPayload{}, false
 	}
 	if s.now().Before(d.LeaseUntil) {
@@ -75,7 +83,7 @@ func (s *Service) leaseExpiryDueLocked(st *roomState) (events.ControlLeaseExpire
 	}
 	return events.ControlLeaseExpiredPayload{
 		Driver:     events.Actor{Kind: events.ActorHuman, ID: d.ID, Name: d.Name, Verified: d.Verified},
-		LeaseUntil: st.snap.grantedLease,
+		LeaseUntil: snap.grantedLease,
 	}, true
 }
 
@@ -83,13 +91,7 @@ func (s *Service) leaseExpiryDueLocked(st *roomState) (events.ControlLeaseExpire
 // when the service lifetime ends (Close).
 func (s *Service) startLeaseExpiry() {
 	s.leaseOnce.Do(func() {
-		s.mu.Lock()
-		closed := s.closed
-		if !closed {
-			s.wg.Add(1)
-		}
-		s.mu.Unlock()
-		if closed {
+		if !s.addWorker() {
 			return
 		}
 		// The ticker is made here, not in the goroutine, so that a Load after
@@ -134,18 +136,17 @@ func (s *Service) runLeaseExpiry(tick <-chan time.Time) {
 // the conditional append (emitCheckedLocked) makes sure only one event lands:
 // the others fold it, find the room no longer due and write nothing.
 func (s *Service) checkLeases(ctx context.Context) {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	if s.isClosed() {
 		return
 	}
+	// Judged on what each room published; only a room that looks due is
+	// locked, and a room busy in a slow call waits for the next check.
 	var due []string
-	for id, st := range s.rooms {
-		if _, ok := s.leaseExpiryDueLocked(st); ok {
+	for id, p := range s.publishedRooms() {
+		if _, ok := s.leaseExpiryDue(p); ok {
 			due = append(due, id)
 		}
 	}
-	s.mu.Unlock()
 	if len(due) == 0 {
 		return
 	}
@@ -173,23 +174,25 @@ func (s *Service) checkLeases(ctx context.Context) {
 		}
 		// Shared store: adopt a renewal another replica persisted on the
 		// rooms row and fold its events before judging the lease.
-		s.syncRoom(ctx, id)
+		if s.trySyncRoom(ctx, id) {
+			continue
+		}
 		s.emitLeaseExpired(ctx, id)
 	}
 }
 
-// emitLeaseExpired re-checks one room under s.mu and appends its
-// control.lease_expired as the system actor.
+// emitLeaseExpired re-checks one room under its lock and appends its
+// control.lease_expired as the system actor. A busy room is left for the next
+// check.
 func (s *Service) emitLeaseExpired(ctx context.Context, roomID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	if s.isClosed() {
 		return
 	}
-	st := s.rooms[roomID]
+	st, _ := s.tryLockCachedRoom(roomID)
 	if st == nil {
 		return
 	}
+	defer s.unlockRoom(st)
 	p, ok := s.leaseExpiryDueLocked(st)
 	if !ok {
 		return

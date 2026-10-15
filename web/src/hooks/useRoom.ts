@@ -23,6 +23,7 @@ import { applyEvent } from '../state/reducer'
 import { fromSnapshot } from '../state/types'
 import type { RoomState } from '../state/types'
 import { hideStaleToast, showStaleToast } from '../lib/staleToast'
+import { equalJitter } from '../lib/backoff'
 
 // HTTP status an error frame code stands for (docs/api.md, Errors).
 const WS_FRAME_STATUS: Record<string, number> = {
@@ -176,7 +177,11 @@ function roomReducer(state: RoomState | null, action: RoomAction): RoomState | n
   }
 }
 
-export function useRoom(roomId: string) {
+/**
+ * `random` is the jitter source for reconnect delays; tests pass a fixed one. It is read through
+ * a ref so a new function on every render does not restart the connection.
+ */
+export function useRoom(roomId: string, random: () => number = Math.random) {
   const { user, sessionEpoch } = useCurrentUser()
   const [state, dispatch] = useReducer(roomReducer, null)
   const [presence, setPresence] = useState<PresenceMember[]>([])
@@ -200,6 +205,11 @@ export function useRoom(roomId: string) {
     stateRef.current = state
   }, [state])
 
+  const randomRef = useRef(random)
+  useEffect(() => {
+    randomRef.current = random
+  }, [random])
+
   useEffect(() => {
     let cancelled = false
     let ws: WebSocket | null = null
@@ -217,7 +227,7 @@ export function useRoom(roomId: string) {
       // R10: the scripted story is not a log replay; last_seq 0 keeps the replay progress bar off.
       dispatch({ type: 'init', snapshot: { ...snapshot, last_seq: 0 } })
       lastSeqRef.current = 0
-      setPresence(snapshot.members.map((m) => ({ id: m.id, name: m.name, state: 'viewing' })))
+      setPresence(snapshot.members.map((m) => ({ id: m.id, name: m.name, verified: m.verified, state: 'viewing' })))
       setConn('live')
 
       storyPlayingRef.current = events.length > 0
@@ -282,15 +292,17 @@ export function useRoom(roomId: string) {
     }
 
     // Page /events until the gap before `ev` closes. On failure (fetch throws or
-    // makes no progress) close the socket so the reconnect replays from lastSeq.
-    const fillGap = async (ev: Event): Promise<boolean> => {
+    // makes no progress) close `from`, the socket that delivered `ev`, so the reconnect
+    // replays from lastSeq. Not `ws`: the fetch is slow, and by the time it fails `ws`
+    // may already be a newer, healthy connection that this event has nothing to do with.
+    const fillGap = async (ev: Event, from: WebSocket): Promise<boolean> => {
       while (ev.seq > lastSeqRef.current + 1) {
         if (cancelled) return false
         let page
         try {
           page = await api.events(roomId, lastSeqRef.current)
         } catch {
-          ws?.close()
+          from.close()
           return false
         }
         if (cancelled) return false
@@ -298,7 +310,7 @@ export function useRoom(roomId: string) {
           .filter((e) => e.seq > lastSeqRef.current)
           .sort((a, b) => a.seq - b.seq)
         if (missing.length === 0) {
-          ws?.close()
+          from.close()
           return false
         }
         let advanced = false
@@ -309,7 +321,7 @@ export function useRoom(roomId: string) {
           advanced = true
         }
         if (!advanced) {
-          ws?.close()
+          from.close()
           return false
         }
       }
@@ -318,10 +330,10 @@ export function useRoom(roomId: string) {
 
     // One event through the single queue, so messages that arrive during a gap
     // fetch still apply in seq order.
-    const processEvent = async (ev: Event) => {
+    const processEvent = async (ev: Event, from: WebSocket) => {
       if (cancelled) return
       if (ev.seq <= lastSeqRef.current) return // duplicate or older — drop
-      const ready = await fillGap(ev)
+      const ready = await fillGap(ev, from)
       if (cancelled || !ready) return
       applyEventSeq(ev)
     }
@@ -329,10 +341,11 @@ export function useRoom(roomId: string) {
     const connect = () => {
       if (cancelled) return
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
-      ws = openRoomWs(roomId, firstConnect ? 0 : lastSeqRef.current)
+      const sock = openRoomWs(roomId, firstConnect ? 0 : lastSeqRef.current)
+      ws = sock
       firstConnect = false
       let opened = false
-      ws.onopen = () => {
+      sock.onopen = () => {
         if (cancelled) return
         opened = true
         probed = false
@@ -352,7 +365,7 @@ export function useRoom(roomId: string) {
           call.catch((e: unknown) => setError(errorText(e)))
         }
       }
-      ws.onmessage = (m) => {
+      sock.onmessage = (m) => {
         if (cancelled) return // a socket from an older session epoch
         let msg: WsServerMessage
         try {
@@ -361,7 +374,7 @@ export function useRoom(roomId: string) {
           return
         }
         if (msg.type === 'event') {
-          queue = queue.then(() => processEvent(msg.event)).catch(() => undefined)
+          queue = queue.then(() => processEvent(msg.event, sock)).catch(() => undefined)
         } else if (msg.type === 'presence') {
           setPresence(msg.members)
         } else if (msg.type === 'error') {
@@ -376,7 +389,7 @@ export function useRoom(roomId: string) {
           setError(friendlyError(msg.error.code, msg.error.message))
         }
       }
-      ws.onclose = (ev: CloseEvent) => {
+      sock.onclose = (ev: CloseEvent) => {
         if (cancelled) return
         if (ev?.reason === 'session_expired') {
           // The server closed the socket because the session ended (auth.md 1.6).
@@ -394,10 +407,10 @@ export function useRoom(roomId: string) {
           void api.me().catch(() => undefined)
         }
         setConn('reconnecting')
-        reconnectTimer = window.setTimeout(connect, backoff)
+        reconnectTimer = window.setTimeout(connect, equalJitter(backoff, randomRef.current))
         backoff = Math.min(backoff * 2, 10000)
       }
-      ws.onerror = () => {
+      sock.onerror = () => {
         // onclose handles reconnect
       }
     }

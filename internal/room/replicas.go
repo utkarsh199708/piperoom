@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"sync"
 	"time"
@@ -115,7 +116,7 @@ func (c coordSlots) limit() int { return c.max }
 // claimLeaseLocked makes sure this replica owns the room's agent lease before
 // it starts the agent. With a single-process store it always succeeds. A
 // newly taken lease primes the inbox with the input the room's log holds for
-// the agent (docs/design/replicas.md section 4.2). Caller holds s.mu.
+// the agent (docs/design/replicas.md section 4.2). Caller holds st's lock.
 func (s *Service) claimLeaseLocked(roomID string, st *roomState) bool {
 	if s.coord == nil || st.leased {
 		return true
@@ -136,23 +137,34 @@ func (s *Service) claimLeaseLocked(roomID string, st *roomState) bool {
 	return true
 }
 
+// setLeased sets leased and its lock-free mirror. Caller holds st's lock.
+func (st *roomState) setLeased(v bool) {
+	st.leased = v
+	st.leasedHint.Store(v)
+}
+
+// leaseDeadline is leaseValid as a time.
+func (st *roomState) leaseDeadline() time.Time {
+	return time.Unix(0, st.leaseValid.Load())
+}
+
 // holdLeaseLocked records a lease this replica just took (at start) and primes
-// the inbox. Caller holds s.mu.
+// the inbox. Caller holds st's lock.
 func (s *Service) holdLeaseLocked(st *roomState, start time.Time) {
-	st.leased = true
-	st.leaseValid = start.Add(s.timing.leaseGrace())
+	st.setLeased(true)
+	st.leaseValid.Store(start.Add(s.timing.leaseGrace()).UnixNano())
 	if !st.snap.Shadow {
 		st.inbox.reset(st.pending)
 	}
 }
 
 // dropLeaseLocked gives the room's lease back (deletes the row) when this
-// replica holds it. Caller holds s.mu.
+// replica holds it. Caller holds st's lock.
 func (s *Service) dropLeaseLocked(roomID string, st *roomState) {
 	if s.coord == nil || !st.leased {
 		return
 	}
-	st.leased = false
+	st.setLeased(false)
 	ctx, cancel := s.coordCtx()
 	defer cancel()
 	if err := s.coord.ReleaseRoomLease(ctx, roomID, s.replica); err != nil {
@@ -164,12 +176,12 @@ func (s *Service) dropLeaseLocked(roomID string, st *roomState) {
 
 // loseLeaseLocked stops the room's agent on this replica because its lease is
 // gone or can no longer be confirmed: another replica may own the room
-// already, or will once the lease expires. Caller holds s.mu.
+// already, or will once the lease expires. Caller holds st's lock.
 func (s *Service) loseLeaseLocked(roomID string, st *roomState, why string) {
 	if !st.leased {
 		return
 	}
-	st.leased = false
+	st.setLeased(false)
 	s.log.Warn("room: lost the agent lease; stopping the agent here", "room", roomID, "replica", s.replica, "why", why)
 	if st.agentCancel != nil {
 		st.agentCancel()
@@ -189,13 +201,7 @@ func (s *Service) startCoordination() {
 		return
 	}
 	s.coordOnce.Do(func() {
-		s.mu.Lock()
-		closed := s.closed
-		if !closed {
-			s.wg.Add(3)
-		}
-		s.mu.Unlock()
-		if closed {
+		if !s.addWorkers(4) {
 			return
 		}
 		s.coord.WatchAppends(s.ctx, store.AppendWatch{OnAppend: s.follow.noteAppend, OnResync: s.follow.noteResync})
@@ -209,16 +215,37 @@ func (s *Service) startCoordination() {
 		}()
 		go func() {
 			defer s.wg.Done()
+			s.runLeaseRenewal()
+		}()
+		go func() {
+			defer s.wg.Done()
 			s.runCoordination()
 		}()
 	})
 }
 
-// runCoordination renews this replica's leases, takes over expired ones and
-// sweeps stale executor claims until the service closes.
-func (s *Service) runCoordination() {
+// runLeaseRenewal renews this replica's leases and refreshes its queued
+// claims until the service closes. It has its own goroutine, and takes no
+// room lock it would wait for: whatever else stalls (a takeover or a sweep
+// waiting for a room stuck in a slow call), the leases of every other room
+// stay renewed, so no other replica takes them over.
+func (s *Service) runLeaseRenewal() {
 	renew := time.NewTicker(s.timing.LeaseRenew)
 	defer renew.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-renew.C:
+			s.renewLeases()
+			s.touchQueuedClaims()
+		}
+	}
+}
+
+// runCoordination takes over expired leases and sweeps stale executor claims
+// until the service closes.
+func (s *Service) runCoordination() {
 	scan := time.NewTicker(s.timing.TakeoverScan)
 	defer scan.Stop()
 	sweep := time.NewTicker(s.timing.ExecSweep)
@@ -229,9 +256,6 @@ func (s *Service) runCoordination() {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-renew.C:
-			s.renewLeases()
-			s.touchQueuedClaims()
 		case <-scan.C:
 			s.takeoverScan()
 		case <-sweep.C:
@@ -243,14 +267,16 @@ func (s *Service) runCoordination() {
 // renewLeases extends every lease this replica holds, in one statement. A
 // lease the store did not extend is lost: its agent stops here at once.
 func (s *Service) renewLeases() {
-	s.mu.Lock()
+	// The lease state is read without the room locks, so a room stuck in a
+	// slow call keeps its lease confirmed like every other.
 	var ids []string
-	for id, st := range s.rooms {
-		if st.leased {
+	held := map[string]*roomState{}
+	for id, st := range s.cachedRooms() {
+		if st.leasedHint.Load() {
 			ids = append(ids, id)
+			held[id] = st
 		}
 	}
-	s.mu.Unlock()
 	if len(ids) == 0 {
 		return
 	}
@@ -269,17 +295,21 @@ func (s *Service) renewLeases() {
 	for _, id := range renewed {
 		ok[id] = true
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	valid := start.Add(s.timing.leaseGrace()).UnixNano()
 	for _, id := range ids {
-		st := s.rooms[id]
-		if st == nil || !st.leased {
+		st := held[id]
+		if ok[id] {
+			st.leaseValid.Store(valid)
 			continue
 		}
-		if ok[id] {
-			st.leaseValid = start.Add(s.timing.leaseGrace())
-		} else {
-			s.loseLeaseLocked(id, st, "the lease expired or another replica took it")
+		// A lost lease stops the agent, under the room's lock. A room busy
+		// in a slow call is left to the watchdog: its agent's writes are
+		// refused once the deadline passes (fenceLocked).
+		if st.mu.TryLock() {
+			if !st.gone {
+				s.loseLeaseLocked(id, st, "the lease expired or another replica took it")
+			}
+			s.unlockRoom(st)
 		}
 	}
 }
@@ -290,14 +320,19 @@ func (s *Service) renewLeases() {
 // section 5). A claim that is gone is left for the executor, which re-checks it
 // before every step.
 func (s *Service) touchQueuedClaims() {
-	s.mu.Lock()
 	var ids []string
-	for _, st := range s.rooms {
+	for id := range s.cachedRooms() {
+		// A room busy in a slow call is skipped: the claims go stale only
+		// after minutes, and the next renew period tries again.
+		st, _ := s.tryLockCachedRoom(id)
+		if st == nil {
+			continue
+		}
 		if st.exec != nil {
 			ids = append(ids, st.exec.queuedIDs()...)
 		}
+		s.unlockRoom(st)
 	}
-	s.mu.Unlock()
 	for _, id := range ids {
 		if s.ctx.Err() != nil {
 			return
@@ -321,13 +356,19 @@ func (s *Service) runLeaseWatchdog() {
 		case <-t.C:
 		}
 		now := time.Now()
-		s.mu.Lock()
-		for id, st := range s.rooms {
-			if st.leased && now.After(st.leaseValid) {
-				s.loseLeaseLocked(id, st, "no renew confirmed the lease in time")
+		for id, st := range s.cachedRooms() {
+			if !st.leasedHint.Load() || !now.After(st.leaseDeadline()) {
+				continue
+			}
+			// A busy room is tried again at the next tick; meanwhile its
+			// agent's writes are refused (fenceLocked).
+			if st.mu.TryLock() {
+				if !st.gone && st.leased && now.After(st.leaseDeadline()) {
+					s.loseLeaseLocked(id, st, "no renew confirmed the lease in time")
+				}
+				s.unlockRoom(st)
 			}
 		}
-		s.mu.Unlock()
 	}
 }
 
@@ -359,7 +400,15 @@ func (s *Service) takeoverScan() {
 			continue // another replica was faster
 		}
 		s.log.Info("room: took over the agent lease", "room", l.RoomID, "from", l.Owner, "replica", s.replica)
-		s.adoptRoom(l.RoomID, start)
+		// Adopting locks the room, which may be stuck in a slow call: on its
+		// own goroutine, so the scan goes on. Closing: the lease taken here
+		// expires again and another replica adopts the room.
+		if s.addWorker() {
+			go func(roomID string) {
+				defer s.wg.Done()
+				s.adoptRoom(roomID, start)
+			}(l.RoomID)
+		}
 	}
 }
 
@@ -372,19 +421,18 @@ func (s *Service) adoptRoom(roomID string, start time.Time) {
 	ctx, cancel := context.WithTimeout(s.ctx, 2*coordTimeout)
 	defer cancel()
 	s.syncRoom(ctx, roomID) // the room as the old owner left it
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		s.log.Warn("room: adopt room: load failed; the lease will expire again", "room", roomID, "err", err)
 		return
 	}
+	defer s.unlockRoom(st)
 	if st.leased && st.agentCancel != nil {
 		return // already ours and running (a renew raced the scan)
 	}
 	s.holdLeaseLocked(st, start)
 	switch {
-	case s.closed:
+	case s.isClosed():
 		return
 	case !s.roomOpen(st):
 		s.dropLeaseLocked(roomID, st)
@@ -404,7 +452,7 @@ func (s *Service) adoptRoom(roomID string, start time.Time) {
 		if in := openProposalsInput(st); in != nil {
 			st.inbox.push(*in)
 		}
-		s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, s.rawAlert(ctx, roomID), st)
+		s.startAgentLocked(roomID, st.snap.Title, st.snap.PipelineID, st.alertRaw, st)
 	default:
 		if err := s.noteRestartLocked(ctx, roomID, st); err != nil {
 			s.log.Warn("room: adopt room: pause notice failed", "room", roomID, "err", err)
@@ -420,7 +468,7 @@ const maxResumesPerHour = 3
 // resumeAllowedLocked reports whether this takeover may resume the room's
 // agent: PIPEROOM_RESUME_ON_TAKEOVER is on and the room has resumed fewer than
 // maxResumesPerHour times in the last hour (counted on the lease row, so the
-// cap holds across replicas). Caller holds s.mu.
+// cap holds across replicas). Caller holds the room's lock.
 func (s *Service) resumeAllowedLocked(ctx context.Context, roomID string) bool {
 	if !s.resumeOnTakeover {
 		return false
@@ -462,7 +510,7 @@ func agentWasWorking(st *roomState) bool {
 
 // interruptShadowRunLocked marks a queued or running shadow run interrupted
 // and reveals a closed room, as the Load sweep does for one room. Caller
-// holds s.mu.
+// holds st's lock.
 func (s *Service) interruptShadowRunLocked(ctx context.Context, roomID string, st *roomState) {
 	if s.shadow == nil {
 		return
@@ -526,37 +574,48 @@ func (s *Service) sweepStaleProposals() {
 		if s.ctx.Err() != nil {
 			return
 		}
+		// The recording locks the room, which may be stuck in a slow call,
+		// so it runs on its own goroutine. Its place is reserved before the
+		// interruption commits: an interruption this replica won must be
+		// recorded, never skipped, so none is won while closing.
+		if !s.addWorker() {
+			return
+		}
 		ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
 		ok, err := s.coord.InterruptProposal(ctx, sp.ProposalID, s.replica, s.timing.ClaimStale, s.timing.UnclaimedStale)
 		cancel()
-		if err != nil {
-			s.log.Warn("room: interrupt stale proposal failed", "proposal", sp.ProposalID, "err", err)
-			continue
-		}
-		if !ok {
+		if err != nil || !ok {
+			s.wg.Done()
+			if err != nil {
+				s.log.Warn("room: interrupt stale proposal failed", "proposal", sp.ProposalID, "err", err)
+			}
 			continue
 		}
 		s.log.Warn("room: proposal's executor stopped; outcome recorded as failed", "proposal", sp.ProposalID, "room", sp.RoomID, "claimed_by", sp.ClaimedBy)
-		s.recordInterruption(sp)
+		go func(sp store.StaleProposal) {
+			defer s.wg.Done()
+			s.recordInterruption(sp)
+		}(sp)
 	}
 }
 
 // recordInterruption writes the outcome of a proposal the sweep interrupted:
 // every started step is finished as failed and one failing action.executed
-// names the step that had not finished.
+// names the step that had not finished. The reads (the proposal, the log scan
+// for the step) and the step writes happen outside the room's lock, which only
+// the append takes: InterruptProposal already decided that this replica
+// records the outcome, so nothing here races another writer of it.
 func (s *Service) recordInterruption(sp store.StaleProposal) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	ctx, cancel := s.resultCtx()
 	defer cancel()
-	st, err := s.getStateLocked(ctx, sp.RoomID)
+	snap, err := s.readRoom(ctx, sp.RoomID)
 	if err != nil {
 		s.log.Warn("room: record interruption: load room failed", "room", sp.RoomID, "err", err)
 		return
 	}
 	var p Proposal
 	found := false
-	for _, op := range st.snap.OpenProposals {
+	for _, op := range snap.OpenProposals {
 		if op.ProposalID == sp.ProposalID {
 			p, found = op, true
 			break
@@ -579,6 +638,12 @@ func (s *Service) recordInterruption(sp store.StaleProposal) {
 	for i := range p.Steps {
 		s.finishClaimedStep(sp.ProposalID, i, output)
 	}
+	st, err := s.lockRoom(ctx, sp.RoomID)
+	if err != nil {
+		s.log.Warn("room: record interruption: load room failed", "room", sp.RoomID, "err", err)
+		return
+	}
+	defer s.unlockRoom(st)
 	if _, err := s.emitLocked(ctx, st, sp.RoomID, events.ActionExecuted, executorActor, events.ActionExecutedPayload{
 		ProposalID: sp.ProposalID, StepIndex: next, OK: false, ParamsHash: p.ParamsHash, Output: output,
 		// Claimed: the step may have run. Never claimed: it did not.
@@ -595,11 +660,24 @@ type follower struct {
 	mu     sync.Mutex
 	dirty  map[string]int64 // room -> highest notified seq
 	resync bool
-	wake   chan struct{}
+	// syncs are rooms a re-list found busy: each is brought up to its row
+	// (trySyncRoom), its driver lease included, once its lock is free.
+	syncs map[string]bool
+	wake  chan struct{}
 }
 
 func newFollower() *follower {
-	return &follower{dirty: map[string]int64{}, wake: make(chan struct{}, 1)}
+	return &follower{dirty: map[string]int64{}, syncs: map[string]bool{}, wake: make(chan struct{}, 1)}
+}
+
+func (f *follower) noteSync(roomID string) {
+	f.mu.Lock()
+	f.syncs[roomID] = true
+	f.mu.Unlock()
+	select {
+	case f.wake <- struct{}{}:
+	default:
+	}
 }
 
 func (f *follower) noteAppend(roomID string, seq int64) {
@@ -624,12 +702,18 @@ func (f *follower) noteResync() {
 	}
 }
 
-func (f *follower) take() (map[string]int64, bool) {
+func (f *follower) take() (dirty map[string]int64, resync bool, syncs map[string]bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	d, r := f.dirty, f.resync
-	f.dirty, f.resync = map[string]int64{}, false
-	return d, r
+	dirty, resync, syncs = f.dirty, f.resync, f.syncs
+	f.dirty, f.resync, f.syncs = map[string]int64{}, false, map[string]bool{}
+	return dirty, resync, syncs
+}
+
+// syncLater queues a busy room for trySyncRoom after a short delay
+// (followLater's sibling for rooms a re-list could not bring up to date).
+func (s *Service) syncLater(roomID string) {
+	time.AfterFunc(followRetry, func() { s.follow.noteSync(roomID) })
 }
 
 // runFollower folds what other replicas append into this replica's cache, so
@@ -642,11 +726,33 @@ func (s *Service) runFollower() {
 			return
 		case <-s.follow.wake:
 		}
-		dirty, resync := s.follow.take()
+		dirty, resync, syncs := s.follow.take()
 		if resync {
 			ctx, cancel := context.WithTimeout(s.ctx, 2*coordTimeout)
-			if err := s.refreshAll(ctx); err != nil && s.ctx.Err() == nil {
+			busy, err := s.refresh(ctx)
+			if err != nil && s.ctx.Err() == nil {
 				s.log.Warn("room: refresh the room cache failed", "err", err)
+			}
+			cancel()
+			for id := range busy {
+				syncs[id] = true
+			}
+		}
+		for roomID := range syncs {
+			if s.ctx.Err() != nil {
+				return
+			}
+			// Not even read while busy: the command holding it may be stuck
+			// in the store.
+			if st := s.cached(roomID); st != nil && !st.mu.TryLock() {
+				s.syncLater(roomID)
+				continue
+			} else if st != nil {
+				st.mu.Unlock()
+			}
+			ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
+			if s.trySyncRoom(ctx, roomID) {
+				s.syncLater(roomID)
 			}
 			cancel()
 		}
@@ -659,86 +765,110 @@ func (s *Service) runFollower() {
 	}
 }
 
+// followRetry is how long the follower waits before it tries again a room
+// whose lock is busy or whose load is in flight.
+const followRetry = 100 * time.Millisecond
+
+// followLater re-queues a room the follower could not fold now. The follower
+// serves every room, so it never waits for one: a room stuck in a slow call
+// would hold up the steers, closes and new rooms of all the others.
+func (s *Service) followLater(roomID string, seq int64) {
+	time.AfterFunc(followRetry, func() { s.follow.noteAppend(roomID, seq) })
+}
+
 // followRoom folds a room's events up to (at least) seq. The read happens
-// outside s.mu; only the fold holds it.
+// outside the room's lock and only the fold takes it; a room whose lock is
+// busy, or whose load is in flight, is re-queued (followLater).
 func (s *Service) followRoom(roomID string, seq int64) {
 	ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
 	defer cancel()
-	s.mu.Lock()
-	st, cached := s.rooms[roomID]
-	var after int64
-	if cached {
-		after = st.snap.LastSeq
-	}
-	if s.closed {
-		s.mu.Unlock()
+	if s.isClosed() {
 		return
 	}
-	s.mu.Unlock()
-	if !cached {
+	st := s.cached(roomID)
+	if st == nil {
 		// A room another replica opened: load it so the alert index, the
 		// room list and OpenRoomForPipeline know it. A purged room is not
-		// found and stays out. The log is read outside s.mu (a long room
-		// must not hold up every other one); only the insert takes it.
-		s.loadNewRoom(ctx, roomID)
+		// found and stays out. The log is read outside every lock (a long
+		// room must not hold up every other one). A load already in flight
+		// may have read the log before this append: try again after it.
+		loaded, _, err := s.loadRoom(ctx, roomID, false)
+		switch {
+		case err != nil && !isNotFound(err) && s.ctx.Err() == nil:
+			s.log.Debug("room: follow: load new room failed", "room", roomID, "err", err)
+		case err == nil && loaded == nil:
+			s.followLater(roomID, seq)
+		}
 		return
 	}
-	if seq <= after {
+	p := st.pub.Load()
+	if p == nil {
+		s.followLater(roomID, seq) // still being opened here
+		return
+	}
+	if seq <= p.LastSeq {
 		return // our own append, already folded
 	}
+	// A room in the middle of a command is not even read now: the command
+	// may be stuck in the store.
+	if !st.mu.TryLock() {
+		s.followLater(roomID, seq)
+		return
+	}
+	after := st.snap.LastSeq
+	s.unlockRoom(st)
+	if seq <= after {
+		return
+	}
 	evs, err := s.store.Since(ctx, roomID, after, 1000)
+	if errors.Is(err, store.ErrNotFound) {
+		// Deleted by another replica (an admin or its retention) after the
+		// append that woke us.
+		if !st.mu.TryLock() {
+			s.followLater(roomID, seq)
+			return
+		}
+		if !st.gone && !s.isClosed() {
+			s.evictLocked(roomID, st)
+		}
+		s.unlockRoom(st)
+		return
+	}
 	if err != nil {
 		if s.ctx.Err() == nil {
 			s.log.Warn("room: follow: read events failed", "room", roomID, "err", err)
 		}
 		return
 	}
-	s.mu.Lock()
-	if s.rooms[roomID] == st && !s.closed {
+	if !st.mu.TryLock() {
+		s.followLater(roomID, seq)
+		return
+	}
+	if !st.gone && !s.isClosed() {
 		s.foldFetchedLocked(ctx, roomID, st, evs)
 	}
-	s.mu.Unlock()
+	s.unlockRoom(st)
 	if len(evs) == 1000 {
 		s.follow.noteAppend(roomID, seq) // more to read
 	}
 }
 
-// loadNewRoom rebuilds a room this replica has not cached yet, reading the
-// store outside s.mu, and caches it unless a command or another fold loaded
-// it meanwhile.
+// loadNewRoom loads a room this replica has not cached yet (loadRoom: outside
+// every lock, shared with any other load of it). A purged room is not found
+// and stays out.
 func (s *Service) loadNewRoom(ctx context.Context, roomID string) {
-	if _, err := s.store.GetRoom(ctx, roomID); err != nil {
-		if !errors.Is(err, store.ErrNotFound) && s.ctx.Err() == nil {
-			s.log.Debug("room: follow: read new room failed", "room", roomID, "err", err)
-		}
+	if s.isClosed() {
 		return
 	}
-	snap, pending, err := s.rebuild(ctx, roomID)
-	if err != nil {
-		if s.ctx.Err() == nil {
-			s.log.Debug("room: follow: load new room failed", "room", roomID, "err", err)
-		}
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return
-	}
-	if _, ok := s.rooms[roomID]; ok {
-		return // loaded meanwhile; that copy may be newer
-	}
-	st := &roomState{snap: snap, inbox: newRoomInbox(snap.Shadow), pending: pending}
-	s.rooms[roomID] = st
-	if snap.Status == "open" {
-		s.indexAlertRoomLocked(ctx, roomID, st)
+	if _, _, err := s.loadRoom(ctx, roomID, true); err != nil && !isNotFound(err) && s.ctx.Err() == nil {
+		s.log.Debug("room: follow: load new room failed", "room", roomID, "err", err)
 	}
 }
 
 // foldFetchedLocked folds events read outside the lock, skipping those the
 // snapshot already has. If they do not continue the snapshot (it moved on and
 // back is impossible; a gap means a newer read is needed) the room catches up
-// from the store instead. Caller holds s.mu.
+// from the store instead. Caller holds st's lock.
 func (s *Service) foldFetchedLocked(ctx context.Context, roomID string, st *roomState, evs []events.Event) {
 	for _, e := range evs {
 		if e.Seq <= st.snap.LastSeq {
@@ -754,20 +884,26 @@ func (s *Service) foldFetchedLocked(ctx context.Context, roomID string, st *room
 
 // adoptRowLeaseLocked takes the driver lease from the rooms row when it is
 // later than the snapshot's: renewals are persisted there and only some are
-// logged. Caller holds s.mu.
+// logged. Caller holds st's lock.
 func (s *Service) adoptRowLeaseLocked(st *roomState, row store.Room) {
-	d := st.snap.Driver
-	if d == nil || row.DriverID == "" || row.DriverID != d.ID || row.DriverLeaseUntil == nil {
+	if !rowLeaseLater(&st.snap, row) {
 		return
 	}
-	if row.DriverLeaseUntil.After(d.LeaseUntil) {
-		nd := *d
-		nd.LeaseUntil = row.DriverLeaseUntil.UTC()
-		st.snap.Driver = &nd
-	}
+	nd := *st.snap.Driver
+	nd.LeaseUntil = row.DriverLeaseUntil.UTC()
+	st.snap.Driver = &nd
+	st.changed = true
 }
 
-// catchUpLocked folds every event after the snapshot. Caller holds s.mu.
+// rowLeaseLater reports whether the rooms row holds a later lease for the
+// snapshot's driver than the snapshot has.
+func rowLeaseLater(snap *RoomSnapshot, row store.Room) bool {
+	d := snap.Driver
+	return d != nil && row.DriverID != "" && row.DriverID == d.ID &&
+		row.DriverLeaseUntil != nil && row.DriverLeaseUntil.After(d.LeaseUntil)
+}
+
+// catchUpLocked folds every event after the snapshot. Caller holds st's lock.
 func (s *Service) catchUpLocked(ctx context.Context, roomID string, st *roomState) {
 	for {
 		evs, err := s.store.Since(ctx, roomID, st.snap.LastSeq, 1000)
@@ -791,7 +927,7 @@ func (s *Service) catchUpLocked(ctx context.Context, roomID string, st *roomStat
 // foldLocked applies one event to the cached room: snapshot, the pending input
 // kept for a future owner, and the inbox (when this replica owns the agent).
 // remote is true for an event another replica appended; when it closes the
-// room, this replica stops what it runs for the room. Caller holds s.mu.
+// room, this replica stops what it runs for the room. Caller holds st's lock.
 func (s *Service) foldLocked(ctx context.Context, roomID string, st *roomState, e events.Event, remote bool) {
 	wasOpen := s.roomOpen(st)
 	st.snap = Apply(st.snap, e)
@@ -801,7 +937,7 @@ func (s *Service) foldLocked(ctx context.Context, roomID string, st *roomState, 
 	s.setDeadline(&st.snap)
 	trackPending(st, e)
 	s.feedInbox(st, e)
-	s.markListDirtyLocked(roomID)
+	st.changed = true
 	if remote && st.leased && incidentInput(e) != nil {
 		// Another replica (the watcher's leader) joined a new incident into
 		// a room whose agent runs here: a run that ended on its own must
@@ -836,7 +972,8 @@ func trackPending(st *roomState, e events.Event) {
 // closedElsewhereLocked does on this replica what CloseRoom does on the one
 // that closed the room: stop the agent (a shadow run gets its grace), stop the
 // executor, free the alert key, give the lease back, and tell the room-closed
-// hook (asynchronously: the hook must not run under s.mu). Caller holds s.mu.
+// hook (asynchronously: the hook must not run under the room's lock). Caller
+// holds st's lock.
 func (s *Service) closedElsewhereLocked(ctx context.Context, roomID string, st *roomState) {
 	s.releaseAlertKeyLocked(roomID, st)
 	cancel := st.agentCancel
@@ -859,9 +996,8 @@ func (s *Service) closedElsewhereLocked(ctx context.Context, roomID string, st *
 	if st.execCancel != nil {
 		st.execCancel()
 	}
-	if s.onRoomClosed != nil && !s.closed {
-		pipelineID, key := st.snap.PipelineID, hookDedupKey(st.snap.PipelineID, st.dedupKey)
-		s.wg.Add(1)
+	if s.onRoomClosed != nil && s.addWorker() {
+		pipelineID, key := st.snap.PipelineID, hookDedupKey(st.snap.PipelineID, s.dedupKeyOf(st))
 		go func() {
 			defer s.wg.Done()
 			s.onRoomClosed(s.ctx, roomID, pipelineID, key)
@@ -869,7 +1005,8 @@ func (s *Service) closedElsewhereLocked(ctx context.Context, roomID string, st *
 	}
 }
 
-// evictLocked forgets a room that is gone from the store. Caller holds s.mu.
+// evictLocked forgets a room that is gone from the store, and tells the
+// OnRoomDeleted hook (goneElsewhereLocked). Caller holds st's lock.
 func (s *Service) evictLocked(roomID string, st *roomState) {
 	if st.agentCancel != nil {
 		st.agentCancel()
@@ -878,68 +1015,126 @@ func (s *Service) evictLocked(roomID string, st *roomState) {
 	if st.execCancel != nil {
 		st.execCancel()
 	}
-	st.leased = false
-	if st.dedupKey != "" && s.alertRooms[st.dedupKey] == roomID {
-		delete(s.alertRooms, st.dedupKey)
+	st.setLeased(false)
+	st.gone = true
+	s.uncacheRoom(roomID, st)
+	s.markListDirty(roomID)
+	s.goneElsewhereLocked(roomID)
+}
+
+// goneElsewhereLocked hands the room.deleted frame of a room another replica
+// deleted to the OnRoomDeleted hook, on its own goroutine: the frame comes
+// from the room's audit row, a store read that must not run under the room's
+// lock. When the row cannot be read the hook gets the zero Event and the
+// sockets get only the close. Caller holds the room's lock.
+func (s *Service) goneElsewhereLocked(roomID string) {
+	if s.onRoomDeleted == nil || !s.addWorker() {
+		return
 	}
-	delete(s.rooms, roomID)
-	s.markListDirtyLocked(roomID)
+	go func() {
+		defer s.wg.Done()
+		ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
+		deleted, _ := s.DeletedEvent(ctx, roomID)
+		cancel()
+		s.roomDeleted(roomID, deleted)
+	}()
 }
 
 // refreshAll brings the whole cache up to the store: rooms other replicas
 // opened are loaded, rooms that are behind are folded, rooms that are gone
-// are evicted. Every read happens outside s.mu (one ListRooms, then one Since
-// per room that is behind and one rebuild per new room); only the folds,
-// inserts and evictions take the lock, so a slow database never holds up
-// every room.
+// are evicted. Every read happens outside every lock (one ListRooms, then one
+// Since per room that is behind and one rebuild per new room), and what each
+// room needs is judged from what it last published, so only a room that has
+// to be folded, evicted or inserted is locked: a cache that is current costs
+// no lock at all.
 func (s *Service) refreshAll(ctx context.Context) error {
+	_, err := s.refresh(ctx)
+	return err
+}
+
+// refresh is refreshAll. A room whose lock is busy (a command in flight, which
+// may be stuck in the store) is not waited for: it is left as it is and
+// returned in busy, for the follower to bring up to its row once it is free
+// (trySyncRoom: the fold, the driver lease, or the eviction refresh skipped).
+func (s *Service) refresh(ctx context.Context) (busy map[string]bool, err error) {
 	if s.coord == nil {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		return s.ensureAllLoadedLocked(ctx, false)
+		return nil, s.loadMissing(ctx)
+	}
+	busy = map[string]bool{}
+	// tryLock locks st for refresh, or records it busy.
+	tryLock := func(id string, st *roomState) bool {
+		if !st.mu.TryLock() {
+			busy[id] = true
+			return false
+		}
+		if st.gone {
+			st.mu.Unlock()
+			return false
+		}
+		return true
 	}
 	// Only rooms cached before the list is read may be evicted for missing
 	// from it: a room opened here meanwhile is not in the list yet.
-	s.mu.Lock()
-	before := make(map[string]*roomState, len(s.rooms))
-	for id, st := range s.rooms {
-		before[id] = st
-	}
-	s.mu.Unlock()
+	before := s.cachedRooms()
 	rows, err := s.store.ListRooms(ctx)
 	if err != nil {
-		return fmt.Errorf("room: refresh: %w", err)
+		return nil, fmt.Errorf("room: refresh: %w", err)
 	}
 	type behind struct {
 		st    *roomState
 		after int64
 	}
-	s.mu.Lock()
+	type leaseRow struct {
+		st  *roomState
+		row store.Room
+	}
 	stale := map[string]behind{}
+	var adopt []leaseRow
 	var missing []store.Room
 	seen := make(map[string]bool, len(rows))
 	for _, r := range rows {
 		seen[r.ID] = true
-		st, ok := s.rooms[r.ID]
-		switch {
-		case !ok && r.LastSeq > 0:
-			missing = append(missing, r)
-		case ok && r.LastSeq > st.snap.LastSeq:
-			stale[r.ID] = behind{st: st, after: st.snap.LastSeq}
+		st := s.cached(r.ID)
+		if st == nil {
+			if r.LastSeq > 0 {
+				missing = append(missing, r)
+			}
+			continue
 		}
-		if ok {
-			s.adoptRowLeaseLocked(st, r)
+		p := st.pub.Load()
+		if p == nil {
+			continue // being opened here; it publishes itself
+		}
+		if r.LastSeq > p.LastSeq {
+			stale[r.ID] = behind{st: st, after: p.LastSeq}
+		}
+		if rowLeaseLater(p, r) {
+			adopt = append(adopt, leaseRow{st, r})
 		}
 	}
 	for id, st := range before {
-		if !seen[id] && s.rooms[id] == st {
-			s.evictLocked(id, st)
+		if seen[id] || !tryLock(id, st) {
+			continue
 		}
+		s.evictLocked(id, st)
+		s.unlockRoom(st)
 	}
-	s.mu.Unlock()
+	for _, a := range adopt {
+		if !tryLock(a.row.ID, a.st) {
+			continue
+		}
+		s.adoptRowLeaseLocked(a.st, a.row)
+		s.unlockRoom(a.st)
+	}
 
 	fetched := make(map[string][]events.Event, len(stale))
 	for id, b := range stale {
+		// A busy room is not even read: its command may be stuck in the
+		// store, and the command folds what it finds when it appends.
+		if !tryLock(id, b.st) {
+			continue
+		}
+		s.unlockRoom(b.st)
 		evs, err := s.store.Since(ctx, id, b.after, 1000)
 		if err != nil {
 			s.log.Warn("room: refresh: read events failed", "room", id, "err", err)
@@ -947,72 +1142,79 @@ func (s *Service) refreshAll(ctx context.Context) error {
 		}
 		fetched[id] = evs
 	}
-	type built struct {
-		snap    RoomSnapshot
-		pending []agent.HumanInput
-	}
-	rebuilt := make(map[string]built, len(missing))
-	for _, r := range missing {
-		snap, pending, err := s.rebuild(ctx, r.ID)
-		if err != nil {
-			s.log.Warn("room: refresh: rebuild failed", "room", r.ID, "err", err)
-			continue
-		}
-		rebuilt[r.ID] = built{snap, pending}
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil
+	if s.isClosed() {
+		return busy, nil
 	}
 	for id, evs := range fetched {
-		if st := s.rooms[id]; st == stale[id].st {
-			s.foldFetchedLocked(ctx, id, st, evs)
+		b := stale[id]
+		if !tryLock(id, b.st) {
+			continue
+		}
+		s.foldFetchedLocked(ctx, id, b.st, evs)
+		s.unlockRoom(b.st)
+	}
+	// New rooms are loaded outside every lock, like any load (loadRoom).
+	for _, r := range missing {
+		if _, _, err := s.loadRoom(ctx, r.ID, false); err != nil && !isNotFound(err) {
+			s.log.Warn("room: refresh: rebuild failed", "room", r.ID, "err", err)
 		}
 	}
-	for id, b := range rebuilt {
-		if _, ok := s.rooms[id]; ok {
-			continue // loaded meanwhile (a command or the follower)
-		}
-		st := &roomState{snap: b.snap, inbox: newRoomInbox(b.snap.Shadow), pending: b.pending}
-		s.rooms[id] = st
-		if b.snap.Status == "open" {
-			s.indexAlertRoomLocked(ctx, id, st)
-		}
-		s.markListDirtyLocked(id)
+	return busy, nil
+}
+
+// loadMissing is refreshAll with a single-process store: it loads every room
+// of the store that is not cached yet, each outside every lock (loadRows), so
+// a current cache costs no lock.
+func (s *Service) loadMissing(ctx context.Context) error {
+	rows, err := s.store.ListRooms(ctx)
+	if err != nil {
+		return fmt.Errorf("room: load: %w", err)
 	}
-	return nil
+	return s.loadRows(ctx, rows, false)
 }
 
 // ---- alert dedup across replicas ----
 
-// lockAlertKey takes the cluster-wide lock on an alert index key, so two
-// replicas that get the same alert at once open one room. It returns a no-op
-// unlock with a single-process store or no key.
+// alertLockStripes is how many in-process alert key locks there are.
+const alertLockStripes = 64
+
+// lockAlertKey takes the lock on an alert index key, so two alerts with the
+// same key at once open one room: first this process's (striped) lock, then,
+// with a shared store, the cluster-wide one, so two replicas do not either.
+// It returns a no-op unlock for no key.
 func (s *Service) lockAlertKey(ctx context.Context, indexKey string) (func(), error) {
-	if s.coord == nil || indexKey == "" {
+	if indexKey == "" {
 		return func() {}, nil
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(indexKey))
+	mu := &s.alertLocks[h.Sum32()%alertLockStripes]
+	mu.Lock()
+	if s.coord == nil {
+		return mu.Unlock, nil
 	}
 	unlock, err := s.coord.LockKey(ctx, "alert:"+indexKey)
 	if err != nil {
+		mu.Unlock()
 		return nil, fmt.Errorf("room: lock alert key: %w", err)
 	}
-	return unlock, nil
+	return func() {
+		unlock()
+		mu.Unlock()
+	}, nil
 }
 
-// prepareAlertKeyRoom runs before OpenAlertRoom takes s.mu, with the alert
+// prepareAlertKeyRoom runs before OpenAlertRoom locks a room, with the alert
 // key lock held: it folds what other replicas appended to the room this
 // replica indexes for indexKey, and finds (and caches) the open room another
 // replica opened for it, whose id it returns ("" when there is none). Every
-// store read happens here, outside s.mu. No-op with a single-process store.
+// store read happens here, outside any room lock. No-op with a single-process
+// store.
 func (s *Service) prepareAlertKeyRoom(ctx context.Context, indexKey string) string {
 	if s.coord == nil || indexKey == "" {
 		return ""
 	}
-	s.mu.Lock()
-	known := s.alertRooms[indexKey]
-	s.mu.Unlock()
+	known, _ := s.alertRoomFor(indexKey)
 	if known != "" {
 		s.syncRoom(ctx, known)
 	}
@@ -1020,10 +1222,7 @@ func (s *Service) prepareAlertKeyRoom(ctx context.Context, indexKey string) stri
 	if err != nil || row.Status != "open" || row.ID == known {
 		return ""
 	}
-	s.mu.Lock()
-	_, cached := s.rooms[row.ID]
-	s.mu.Unlock()
-	if cached {
+	if s.cached(row.ID) != nil {
 		s.syncRoom(ctx, row.ID)
 	} else {
 		s.loadNewRoom(ctx, row.ID)
@@ -1033,17 +1232,19 @@ func (s *Service) prepareAlertKeyRoom(ctx context.Context, indexKey string) stri
 
 // openAlertRoomSharedLocked indexes here the open room another replica opened
 // for indexKey (roomID, found by prepareAlertKeyRoom), whose own index this
-// replica may not know yet. Caller holds s.mu and the alert key lock.
+// replica may not know yet. Caller holds the alert key lock.
 func (s *Service) openAlertRoomSharedLocked(indexKey, roomID string) (string, bool) {
 	if roomID == "" {
 		return "", false
 	}
-	st, ok := s.rooms[roomID]
-	if !ok || !s.roomOpen(st) {
+	st := s.cached(roomID)
+	if st == nil {
 		return "", false
 	}
-	st.dedupKey = indexKey
-	s.alertRooms[indexKey] = roomID
+	if p := st.pub.Load(); p == nil || p.Status != "open" {
+		return "", false
+	}
+	s.setAlertKey(roomID, st, indexKey, true)
 	return roomID, true
 }
 
@@ -1063,8 +1264,8 @@ const checkedAppendTries = 3
 // snapshot's last seq: when another replica appended in between, the room
 // catches up, check runs again, and the append is retried, at most
 // checkedAppendTries times, then 409 conflict. A check that fails returns its
-// error. With a single-process store, s.mu already makes check and append one
-// step. Caller holds s.mu.
+// error. With a single-process store, the room's lock already makes check and
+// append one step. Caller holds st's lock.
 func (s *Service) emitCheckedLocked(ctx context.Context, st *roomState, roomID string, check func() error, typ events.Type, actor events.Actor, payload any) (events.Event, error) {
 	if s.coord == nil {
 		if err := check(); err != nil {
@@ -1090,55 +1291,90 @@ func (s *Service) emitCheckedLocked(ctx context.Context, st *roomState, roomID s
 }
 
 // syncRoom brings a cached room up to the log before a command, with every
-// read made outside s.mu (only the fold takes it): the room row, and the
-// missing events when the row is ahead. A room another replica's retention
-// deleted is evicted (the command then answers not found). A read error leaves
-// the cache as it is; the command's own write fails on the same outage, and a
-// checked command (emitCheckedLocked) catches up on its own conflict. GETs do
-// not call it: they answer from the cache the follower keeps.
+// read made outside the room's lock (only the fold takes it): the room row,
+// and the missing events when the row is ahead. A room another replica's
+// retention deleted is evicted (the command then answers not found). A read
+// error leaves the cache as it is; the command's own write fails on the same
+// outage, and a checked command (emitCheckedLocked) catches up on its own
+// conflict. GETs do not call it: they answer from the cache the follower
+// keeps.
 func (s *Service) syncRoom(ctx context.Context, roomID string) {
+	s.syncRoomWith(ctx, roomID, false)
+}
+
+// trySyncRoom is syncRoom for a background loop: it never waits for the room's
+// lock, and reports busy when the room was locked, so the loop can skip it.
+func (s *Service) trySyncRoom(ctx context.Context, roomID string) (busy bool) {
+	return s.syncRoomWith(ctx, roomID, true)
+}
+
+func (s *Service) syncRoomWith(ctx context.Context, roomID string, try bool) (busy bool) {
 	if s.coord == nil {
-		return
+		return false
+	}
+	lockCached := func() *roomState {
+		if !try {
+			return s.lockCachedRoom(roomID)
+		}
+		st, b := s.tryLockCachedRoom(roomID)
+		busy = busy || b
+		return st
+	}
+	lockState := func(st *roomState) bool {
+		if !try {
+			s.lockState(st)
+			return true
+		}
+		if st.mu.TryLock() {
+			return true
+		}
+		busy = true
+		return false
 	}
 	row, err := s.store.GetRoom(ctx, roomID)
 	if errors.Is(err, store.ErrNotFound) {
-		s.mu.Lock()
-		if st := s.rooms[roomID]; st != nil {
+		if st := lockCached(); st != nil {
 			s.evictLocked(roomID, st)
+			s.unlockRoom(st)
 		}
-		s.mu.Unlock()
-		return
+		return busy
 	}
 	if err != nil {
 		s.log.Debug("room: sync: read room row failed; using the cached state", "room", roomID, "err", err)
-		return
+		return false
 	}
-	s.mu.Lock()
-	st := s.rooms[roomID]
-	var after int64
-	if st != nil {
-		s.adoptRowLeaseLocked(st, row)
-		after = st.snap.LastSeq
+	st := lockCached()
+	if st == nil {
+		return busy
 	}
-	s.mu.Unlock()
-	if st == nil || row.LastSeq <= after {
-		return
-	}
+	s.adoptRowLeaseLocked(st, row)
+	after := st.snap.LastSeq
+	s.unlockRoom(st)
 	for after < row.LastSeq {
 		evs, err := s.store.Since(ctx, roomID, after, 1000)
 		if err != nil || len(evs) == 0 {
-			return
+			return busy
 		}
-		s.mu.Lock()
-		if s.rooms[roomID] == st && !s.closed {
-			s.foldFetchedLocked(ctx, roomID, st, evs)
+		if !lockState(st) {
+			return busy
 		}
+		// A room evicted or a service closed meanwhile folds nothing more, so
+		// the next read would fetch the same page again: stop. So does a pass
+		// that did not advance (a gap the catch-up could not fill), instead of
+		// re-reading a full page until ctx ends.
+		if st.gone || s.isClosed() {
+			s.unlockRoom(st)
+			return busy
+		}
+		before := after
+		s.foldFetchedLocked(ctx, roomID, st, evs)
 		after = st.snap.LastSeq
-		s.mu.Unlock()
-		if len(evs) < 1000 {
-			return
+		s.unlockRoom(st)
+		if len(evs) < 1000 || after <= before {
+			return busy
 		}
 	}
+	return busy
 }
 
 // syncProposalRoom is syncRoom for the room of a proposal (approve, reject).

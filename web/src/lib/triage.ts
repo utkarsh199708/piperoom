@@ -44,9 +44,11 @@ export type TriageLine =
   | { kind: 'none' }
 
 export function triageLine(
-  room: { status: string; opened_at: string; triage?: TriageSummary | null },
+  room: { status: string; opened_at: string; triage?: TriageSummary | null; shadow?: boolean },
   now: number,
 ): TriageLine {
+  // The server never triages a shadow room, so "in progress" would be false.
+  if (room.shadow) return { kind: 'none' }
   const t = room.triage
   if (t) {
     if (t.status === 'ok' && t.headline) return { kind: 'headline', headline: t.headline, layer: t.suspected_layer || undefined }

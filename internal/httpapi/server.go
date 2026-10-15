@@ -65,6 +65,9 @@ type Server struct {
 
 	// Model spend routes (WithSpend): usage.go.
 	spend Spend
+
+	// GET /metrics: metrics.go.
+	metrics *metrics
 }
 
 // New builds the HTTP handler (router). store is passed to the WebSocket
@@ -89,8 +92,12 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 	s.normalizeAuth()
 	s.gw.Identify = wsIdentify
 	s.gw.SessionAlive = s.sessionAlive
+	s.metrics = newMetrics(time.Now(), gauges{conns: s.gw.Connections, agents: svc.AgentSlotStats, openRooms: svc.OpenRooms})
 
 	r := chi.NewRouter()
+	// Outside Recoverer, so a handler that panics is counted with the 500
+	// Recoverer writes: that is exactly when an operator looks.
+	r.Use(s.metrics.middleware)
 	r.Use(middleware.Recoverer)
 	if s.webDir != "" {
 		r.Use(s.securityHeaders)
@@ -129,6 +136,7 @@ func New(svc *room.Service, st store.Store, log *slog.Logger, opts ...Option) *S
 
 	r.Get(pathHealthz, s.handleHealthz)
 	r.Get(pathReadyz, s.handleReadyz)
+	r.Get(pathMetrics, s.metrics.handle)
 
 	// Login routes (auth.go, auth_oidc.go). Dev login exists only in dev mode;
 	// the two OIDC routes only in oidc mode.

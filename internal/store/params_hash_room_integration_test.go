@@ -31,7 +31,7 @@ func (a *pgAction) Describe() string { return "test" }
 func (a *pgAction) ParamsSchema() map[string]any {
 	return map[string]any{"type": "object"}
 }
-func (a *pgAction) Validate(json.RawMessage) error                    { return nil }
+func (a *pgAction) Validate(context.Context, json.RawMessage) error   { return nil }
 func (a *pgAction) CheckScope(owners.Pipeline, json.RawMessage) error { return nil }
 func (a *pgAction) Execute(context.Context, json.RawMessage) (string, error) {
 	if a.runs.Add(1) == 1 && a.hook != nil {

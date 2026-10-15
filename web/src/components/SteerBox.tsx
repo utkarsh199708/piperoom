@@ -1,5 +1,7 @@
+import { PersonName } from '@/components/VerifiedBadge'
+import { neutralizeBadgeText } from '@/lib/verification'
 import { useEffect, useRef, useState } from 'react'
-import type { FormEvent, KeyboardEvent } from 'react'
+import type { FormEvent, KeyboardEvent, ReactNode } from 'react'
 import { Eye, Lock } from 'lucide-react'
 import type { RoomState, SuggestionState } from '../state/types'
 import type { CurrentUser } from '../state/permissions'
@@ -19,6 +21,11 @@ import { OfflineStrip } from './room/OfflineStrip'
 import { PersonAvatar } from './room/PersonAvatar'
 import { StatusDot } from './room/StatusDot'
 import { leaseExpired, minutesLeft, useNow } from './room/useNow'
+
+// The driver lease is 30 minutes (docs/api.md); the bar shows what is left of it, and from
+// LEASE_WARN_MIN minutes on the status line turns amber and offers Renew.
+const LEASE_MIN = 30
+const LEASE_WARN_MIN = 5
 
 // Driver only: give control to anyone GET /api/people lists. Loads the list on open.
 function GrantPicker({
@@ -119,7 +126,7 @@ function QueueRow({
       <div className="flex items-start gap-2.5">
         <PersonAvatar actor={s.from} size={20} className="mt-0.5" />
         <div className="min-w-0 flex-1">
-          <strong className="font-medium">{s.from.name}</strong>
+          <PersonName person={s.from} nameClassName="font-medium" />
           <p className="m-0 break-words text-muted-foreground">{s.text}</p>
         </div>
         <Button size="sm" variant="ghost-danger" aria-expanded={declining} onClick={() => setDeclining((d) => !d)}>
@@ -138,7 +145,7 @@ function QueueRow({
           }}
         >
           <Input
-            aria-label={`Reason for declining ${s.from.name}'s suggestion (optional)`}
+            aria-label={`Reason for declining ${neutralizeBadgeText(s.from.name)}'s suggestion (optional)`}
             placeholder="Reason (optional) · Enter declines"
             maxLength={500}
             value={reason}
@@ -159,17 +166,32 @@ function MySuggestions({ state, user }: { state: RoomState; user: CurrentUser })
     <ul className="m-0 flex list-none flex-wrap gap-1.5 p-0" aria-label="Your suggestions">
       {mine.map((s) => {
         let variant: 'warning' | 'success' | 'destructive' = 'warning'
-        let label: string
+        let label: ReactNode
         let title = s.text
         if (s.status === 'accepted') {
           variant = 'success'
-          label = `Sent by ${s.sent_by?.name ?? 'the driver'}${s.sent_at ? ` · ${clockTime(s.sent_at)}` : ''}`
+          label = (
+            <>
+              Sent by {s.sent_by ? <PersonName person={s.sent_by} /> : 'the driver'}
+              {s.sent_at ? ` · ${clockTime(s.sent_at)}` : ''}
+            </>
+          )
         } else if (s.status === 'declined') {
           variant = 'destructive'
-          label = `Declined by ${s.declined_by?.name ?? 'the driver'}`
+          label = (
+            <>
+              Declined by {s.declined_by ? <PersonName person={s.declined_by} /> : 'the driver'}
+            </>
+          )
           if (s.reason) title = s.reason
         } else {
-          label = state.driver ? `Queued for ${state.driver.name}` : 'Queued · no driver yet'
+          label = state.driver ? (
+            <>
+              Queued for <PersonName person={{ ...state.driver, kind: 'human' }} />
+            </>
+          ) : (
+            'Queued · no driver yet'
+          )
         }
         return (
           <li key={s.suggestion_id}>
@@ -253,7 +275,8 @@ export function SteerBox({
   // "under a minute" while 0 whole minutes remain but the lease is still live.
   const leaseText = expired ? 'lease expired' : left === 0 ? 'lease ends in under a minute' : left != null ? `lease ${left}m` : null
 
-  const plan = planComposer(text, isDriver ? 'driver' : 'suggester', state.driver?.name ?? null, mod)
+  const driverName = neutralizeBadgeText(state.driver?.name ?? 'Someone')
+  const plan = planComposer(text, isDriver ? 'driver' : 'suggester', state.driver ? driverName : null, mod)
   // The field clears only once the server took the message; a failed send keeps the words
   // and puts the cursor back in the field.
   const send = async () => {
@@ -298,15 +321,44 @@ export function SteerBox({
     el.style.height = `${Math.min(el.scrollHeight, 140)}px`
   }
 
+  const driverPerson = state.driver ? { ...state.driver, kind: 'human' as const } : null
+  // The server's lease signal (control.lease_expired) or, before it arrives, a clock that has run out
+  // (minutesLeft rounds down, so it is 0 for the last minute of a live lease: `expired` tells those apart).
+  const signalled = state.driver?.lease_expired === true
+  const isLeaseExpired = signalled || expired
+  const leaseEnding = isDriver && !signalled && !expired && left != null && left <= LEASE_WARN_MIN
+  // `status` is the plain text (a tooltip); `statusNode` is what is drawn, with the driver's server badge.
   let status: string
+  let statusNode: ReactNode
   if (isDriver) {
-    status = leaseText ? `You are driving · ${leaseText}` : 'You are driving'
+    status = signalled
+      ? 'Your lease expired — you still drive until someone takes over'
+      : leaseEnding && left != null
+        ? left > 0
+          ? `Lease ends in ${left}m — any action renews`
+          : 'Lease ends in under a minute — any action renews'
+        : leaseText
+          ? `You are driving · ${leaseText}`
+          : 'You are driving'
+    statusNode = <span className="min-w-0 truncate">{status}</span>
   } else if (noDriver) {
     status = 'No driver · your suggestion is queued for whoever takes control'
+    statusNode = <span className="min-w-0 truncate">{status}</span>
   } else {
-    const name = state.driver?.name ?? 'Someone'
     const lease = leaseText ? ` · ${leaseText.replace(/^lease (\d+m)$/, 'lease $1 left')}` : ''
-    status = `${name} is driving${lease} · your message goes to ${name}'s queue`
+    const tail = signalled
+      ? "'s lease expired · anyone can take control"
+      : ` is driving${lease} · your message goes to their queue`
+    status = `${driverName}${tail}`
+    statusNode = (
+      <>
+        {driverPerson && <PersonName person={driverPerson} className="shrink-0" />}
+        {/* Its own truncating box: a nowrap tail that cannot shrink would squeeze the name to nothing. */}
+        <span data-slot="steer-status-tail" className="min-w-0 truncate">
+          {tail}
+        </span>
+      </>
+    )
   }
 
   // Empty and not focused: one row (status, then the field as a placeholder). It grows on focus or text.
@@ -342,7 +394,7 @@ export function SteerBox({
             >
               <PersonAvatar actor={r.from} size={20} />
               <div className="min-w-0 flex-1">
-                <strong className="font-medium">{r.from.name}</strong>
+                <PersonName person={r.from} nameClassName="font-medium" />
                 <span className="text-muted-foreground"> wants control</span>
               </div>
               <Button size="sm" variant="secondary" onClick={() => actions.grantControl(r.from.id)}>
@@ -353,11 +405,36 @@ export function SteerBox({
         </ul>
       )}
 
-      <div className={cn('flex items-center gap-x-2 gap-y-1', idle ? 'min-w-0 max-w-[45%] shrink-0' : 'flex-wrap')}>
-        <StatusDot tone={noDriver ? 'warn' : 'accent'} />
-        <span className={cn('text-xs text-muted-foreground', idle && 'truncate')} title={idle ? status : undefined}>
-          {status}
+      {isDriver && left != null && (
+        <div className="absolute inset-x-0 top-0 h-0.5 bg-muted" aria-hidden="true">
+          <div
+            className="h-full bg-primary"
+            data-testid="lease-bar"
+            style={{ width: `${Math.min(100, Math.round((left / LEASE_MIN) * 100))}%` }}
+          />
+        </div>
+      )}
+
+      <div className={cn('flex items-center gap-x-2 gap-y-1', idle ? 'min-w-0 max-w-[55%] shrink-0 sm:max-w-[45%]' : 'flex-wrap')}>
+        <StatusDot tone={noDriver || isLeaseExpired ? 'warn' : 'accent'} />
+        <span
+          data-slot="steer-status"
+          className={cn(
+            'inline-flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground',
+            // Floor: a short name plus the icon-only badge always fit, even in the one-row idle composer on a phone.
+            idle && 'min-w-[3.5rem]',
+            (leaseEnding || (isDriver && isLeaseExpired)) && 'text-warning-foreground',
+          )}
+          title={idle ? status : undefined}
+          aria-live="polite"
+        >
+          {statusNode}
         </span>
+        {isDriver && (leaseEnding || isLeaseExpired) && (
+          <Button variant="ghost" className="h-7" onClick={() => actions.grantControl(user.id)}>
+            Renew
+          </Button>
+        )}
         <div className="ml-auto flex items-center gap-1">
           {isDriver && (
             <Button variant="ghost" className="h-7 coarse:h-11" aria-expanded={granting} onClick={() => setGranting((g) => !g)}>
@@ -413,7 +490,7 @@ export function SteerBox({
               ? 'Suggest a first step…'
               : isDriver
                 ? 'Steer the agent…'
-                : `Suggest a step for ${state.driver?.name ?? 'the driver'}…`
+                : `Suggest a step for ${state.driver ? driverName : 'the driver'}…`
           }
           aria-label="Steer the agent"
           rows={1}

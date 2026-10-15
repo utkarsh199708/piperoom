@@ -160,7 +160,8 @@ describe('a hand-off the driver wrote says so', () => {
   it('the driver sees "Written by <driver>" on the pending summary', () => {
     const state = { ...emptyRoomState('r1'), handoffs: [handoff({ manual: true, written_by: { kind: 'human', id: 'arjun', name: 'Arjun' } })] }
     open(state, actionsWith(async () => ({ ok: true })))
-    expect(screen.getByText('Written by Arjun, not by the agent.')).toBeInTheDocument()
+    // The writer is a PersonName (name, id when unverified, badge), so the line is matched as a whole.
+    expect(screen.getByText(/^Written by/)).toHaveTextContent(/^Written by Arjun\b.*, not by the agent\.$/)
   })
 
   it('an agent-written summary has no such line', () => {
@@ -178,8 +179,8 @@ describe('a hand-off the driver wrote says so', () => {
     }
     render(<HandoffAcceptBanner state={state} user={me} actions={actionsWith(async () => ({ ok: true }))} />)
     fireEvent.click(screen.getByRole('button', { name: 'Read summary' }))
-    const dialog = screen.getByRole('dialog', { name: 'Hand-off from Arjun' })
-    expect(within(dialog).getByText('Written by Arjun, not by the agent.')).toBeInTheDocument()
+    const dialog = screen.getByRole('dialog', { name: /^Hand-off from Arjun/ })
+    expect(within(dialog).getByText(/^Written by/)).toHaveTextContent(/^Written by Arjun\b.*, not by the agent\.$/)
   })
 
   it('the summary text is still plain text', () => {

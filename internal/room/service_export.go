@@ -212,14 +212,14 @@ func (s *Service) PrepareExport(ctx context.Context, roomID string) (*Export, er
 // for a live room, 409 room_open while open, 409 not_labelled before the label.
 // The member is inside the hashed document. The caller checks export access.
 func (s *Service) PrepareExportShadow(ctx context.Context, roomID string) (*Export, error) {
-	s.mu.Lock()
-	st, err := s.closedShadowLocked(ctx, roomID)
-	if err == nil && !st.snap.shadowLabelled {
-		err = errNotLabelled()
-	}
-	s.mu.Unlock()
+	st, err := s.lockClosedShadow(ctx, roomID)
 	if err != nil {
 		return nil, err
+	}
+	labelled := st.snap.shadowLabelled
+	s.unlockRoom(st)
+	if !labelled {
+		return nil, errNotLabelled()
 	}
 	run, evs, err := s.readShadow(ctx, roomID, true)
 	if err != nil {

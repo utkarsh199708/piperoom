@@ -156,7 +156,7 @@ type PartitionOffsets struct {
 	Partition     int32     `json:"partition"`
 	Start         int64     `json:"start"`
 	End           int64     `json:"end"`            // next offset to be written
-	LastTimestamp time.Time `json:"last_timestamp"` // timestamp of record End-1; zero if empty
+	LastTimestamp time.Time `json:"last_timestamp"` // timestamp at last stable offset-1 (End-1 unless a transaction is open; a marker counts); zero if none
 }
 
 type GroupLag struct {

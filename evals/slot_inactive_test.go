@@ -94,7 +94,7 @@ func TestConnectStatusDataDrivesResumeValidation(t *testing.T) {
 		if !ok {
 			t.Fatal("connect_resume_connector not registered")
 		}
-		return a.Validate(params)
+		return a.Validate(t.Context(), params)
 	}
 	if err := validate(statusData("STOPPED")); err != nil {
 		t.Errorf("STOPPED refused: %v", err)
@@ -122,7 +122,7 @@ func TestLiveActionsStatusIsReadOnly(t *testing.T) {
 	}
 	a, _ := reg.Get("connect_resume_connector")
 	params := json.RawMessage(`{"connector":"pg-orders-connector"}`)
-	if err := a.Validate(params); err != nil {
+	if err := a.Validate(t.Context(), params); err != nil {
 		t.Fatalf("resume of a recorded STOPPED connector refused: %v", err)
 	}
 	_, err = a.Execute(context.Background(), params)

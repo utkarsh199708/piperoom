@@ -33,15 +33,15 @@ vi.mock('../api/client', async (importOriginal) => {
 import { ApiClientError, api, probeSession } from '../api/client'
 import { getAuthEpoch, reportAuthProblem, redirectToLogin } from '../lib/auth'
 import { UserProvider } from './UserContext'
-import { UserSwitcher } from '../components/UserSwitcher'
 import { useCurrentUser } from './user'
 
 function Who() {
-  const { user, setUserId, logout, sessionEpoch } = useCurrentUser()
+  const { user, setUserId, logout, sessionEpoch, busy } = useCurrentUser()
   return (
     <div>
       <span data-testid="who">{user.id}</span>
       <span data-testid="epoch">{sessionEpoch}</span>
+      <span data-testid="busy">{String(busy)}</span>
       <button onClick={() => setUserId('priya')}>as priya</button>
       <button onClick={logout}>out</button>
     </div>
@@ -290,15 +290,15 @@ describe('UserProvider: roles, groups notice, switcher, login errors', () => {
     expect(screen.queryByText(NOTICE)).not.toBeInTheDocument()
   })
 
-  it('disables Log out while a logout is in flight', async () => {
+  it('is busy while a logout is in flight', async () => {
     vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
     let finish!: () => void
     vi.mocked(api.logout).mockReturnValue(new Promise<void>((r) => (finish = r)))
     vi.mocked(probeSession).mockResolvedValue({ valid: false, mode: 'dev' })
-    renderWith(<UserSwitcher />)
-    const out = await screen.findByRole('button', { name: 'Log out' })
-    fireEvent.click(out)
-    await waitFor(() => expect(out).toBeDisabled())
+    renderWith(<Who />)
+    expect(await screen.findByTestId('busy')).toHaveTextContent('false')
+    fireEvent.click(screen.getByRole('button', { name: 'out' }))
+    await waitFor(() => expect(screen.getByTestId('busy')).toHaveTextContent('true'))
     finish()
     expect(await screen.findByText('Sign in')).toBeInTheDocument()
   })
@@ -317,20 +317,19 @@ describe('UserProvider: roles, groups notice, switcher, login errors', () => {
     expect(await screen.findByTestId('solo')).toHaveTextContent('false')
   })
 
-  it('disables the dev switcher while a dev-login is in flight, then enables it', async () => {
+  it('is busy while a dev-login is in flight, then not', async () => {
     vi.mocked(api.me).mockResolvedValue(meOf('arjun'))
     let finish!: () => void
     vi.mocked(api.devLogin).mockReturnValue(new Promise<void>((r) => (finish = r)))
-    renderWith(<UserSwitcher />)
+    renderWith(<Who />)
 
-    const select = await screen.findByLabelText('Switch user')
-    expect(select).toBeEnabled()
+    expect(await screen.findByTestId('busy')).toHaveTextContent('false')
     vi.mocked(api.me).mockResolvedValue(meOf('priya'))
-    fireEvent.change(select, { target: { value: 'priya' } })
-    await waitFor(() => expect(screen.getByLabelText('Switch user')).toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'as priya' }))
+    await waitFor(() => expect(screen.getByTestId('busy')).toHaveTextContent('true'))
 
     finish()
-    await waitFor(() => expect(screen.getByLabelText('Switch user')).toBeEnabled())
+    await waitFor(() => expect(screen.getByTestId('busy')).toHaveTextContent('false'))
     expect(api.devLogin).toHaveBeenCalledTimes(1)
   })
 

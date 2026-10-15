@@ -32,6 +32,10 @@ func strProp(desc string) map[string]any {
 type Deps struct {
 	Connect  clients.ConnectClient
 	Registry clients.SchemaRegistryClient
+
+	// validateTimeout overrides timeout for the I/O in Validate; tests only.
+	// Zero means the default.
+	validateTimeout time.Duration
 }
 
 // Register adds the Kafka Connect and Schema Registry write actions to reg.
@@ -104,6 +108,19 @@ func inScopeSubject(p owners.Pipeline, subject string) error {
 		}
 	}
 	return fmt.Errorf("actions: subject %q is not part of pipeline %q", subject, p.ID)
+}
+
+// validateContext returns the context for the read-only I/O a Validate does.
+// It derives from the caller's ctx, so a closed room or cancelled request
+// reaches Validate; the deadline stays as a ceiling so a hung Connect or
+// Schema Registry cannot block proposal creation or the executor. Every
+// Validate builds its context here so none can skip it.
+func (d Deps) validateContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	t := timeout
+	if d.validateTimeout > 0 {
+		t = d.validateTimeout
+	}
+	return context.WithTimeout(ctx, t)
 }
 
 // connectorExists checks a connector exists (read-only, for validation).
@@ -215,12 +232,12 @@ type restartTaskParams struct {
 	Task      int    `json:"task"`
 }
 
-func (a *restartTask) Validate(raw json.RawMessage) error {
+func (a *restartTask) Validate(ctx context.Context, raw json.RawMessage) error {
 	var p restartTaskParams
 	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" || p.Task < 0 {
 		return fmt.Errorf("actions: connector and non-negative task are required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := a.d.validateContext(ctx)
 	defer cancel()
 	return a.d.connectorExists(ctx, p.Connector)
 }
@@ -283,12 +300,12 @@ type restartConnectorParams struct {
 	Connector string `json:"connector"`
 }
 
-func (a *restartConnector) Validate(raw json.RawMessage) error {
+func (a *restartConnector) Validate(ctx context.Context, raw json.RawMessage) error {
 	var p restartConnectorParams
 	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" {
 		return fmt.Errorf("actions: connector is required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := a.d.validateContext(ctx)
 	defer cancel()
 	return a.d.connectorExists(ctx, p.Connector)
 }
@@ -388,12 +405,12 @@ type resumeConnectorParams struct {
 // it waits for Connect to apply the resume.
 const resumePollInterval = 250 * time.Millisecond
 
-func (a *resumeConnector) Validate(raw json.RawMessage) error {
+func (a *resumeConnector) Validate(ctx context.Context, raw json.RawMessage) error {
 	var p resumeConnectorParams
 	if err := json.Unmarshal(raw, &p); err != nil || p.Connector == "" {
 		return fmt.Errorf("actions: connector is required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := a.d.validateContext(ctx)
 	defer cancel()
 	if err := a.d.connectorExists(ctx, p.Connector); err != nil {
 		return err
@@ -480,7 +497,7 @@ type setCompatibilityParams struct {
 	Level   string `json:"level"`
 }
 
-func (a *setCompatibility) Validate(raw json.RawMessage) error {
+func (a *setCompatibility) Validate(ctx context.Context, raw json.RawMessage) error {
 	var p setCompatibilityParams
 	if err := json.Unmarshal(raw, &p); err != nil || p.Subject == "" {
 		return fmt.Errorf("actions: subject is required")
@@ -488,7 +505,7 @@ func (a *setCompatibility) Validate(raw json.RawMessage) error {
 	if !compatLevels[p.Level] {
 		return fmt.Errorf("actions: level %q is not a valid compatibility level", p.Level)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := a.d.validateContext(ctx)
 	defer cancel()
 	return a.d.subjectExists(ctx, p.Subject)
 }
@@ -556,7 +573,7 @@ type registerSchemaParams struct {
 	Schema  string `json:"schema"`
 }
 
-func (a *registerSchema) Validate(raw json.RawMessage) error {
+func (a *registerSchema) Validate(ctx context.Context, raw json.RawMessage) error {
 	var p registerSchemaParams
 	if err := json.Unmarshal(raw, &p); err != nil || p.Subject == "" || p.Schema == "" {
 		return fmt.Errorf("actions: subject and schema are required")
@@ -564,7 +581,7 @@ func (a *registerSchema) Validate(raw json.RawMessage) error {
 	if _, err := avro.Parse(p.Schema); err != nil {
 		return fmt.Errorf("actions: schema is not valid Avro: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := a.d.validateContext(ctx)
 	defer cancel()
 	return a.d.subjectExists(ctx, p.Subject)
 }

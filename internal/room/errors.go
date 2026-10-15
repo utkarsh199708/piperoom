@@ -30,6 +30,24 @@ const (
 	codeLeaseHeld      = "lease_held"
 )
 
+// afterAppend is the one rule for a write that follows an event already in the
+// room log: the log is the record, so once the event has landed the command
+// has happened. A failed follow-up (a side-table row such as the driver,
+// handoff, suggestion or proposal status, or an event that only completes the
+// first one) is logged with the room id and the call carries on: an error
+// there would make the client retry against a room that already changed. What
+// the write missed is reconciled from the log by whoever reads it next
+// (AcceptHandoff for handoff rows, the snapshot for suggestions, rebuild for
+// the driver). Only an event that is itself the call's answer (handoff.accepted)
+// returns its error, and the retry finishes the command. A write made before
+// the event is the opposite case: it fails the call, and the row is compensated.
+func (s *Service) afterAppend(roomID, what string, err error, attrs ...any) {
+	if err == nil {
+		return
+	}
+	s.log.Warn("room: "+what+" failed after the event was logged", append([]any{"room", roomID, "err", err}, attrs...)...)
+}
+
 // errConflict is 409 conflict: another replica changed the room between the
 // check and the write of a checked command three times in a row
 // (docs/design/replicas.md section 9.1). The client may retry.

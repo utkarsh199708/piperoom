@@ -47,7 +47,7 @@ func (s *Service) OpenRoomForPipeline(pipelineID string) (roomID string, ok bool
 	}
 	if s.coord != nil {
 		// Shared store: rooms other replicas opened or closed since the last
-		// fold count too. The reads happen outside s.mu (refreshAll); a
+		// fold count too. The reads happen outside every lock (refreshAll); a
 		// failure falls back to the cache (the follower keeps it close).
 		ctx, cancel := context.WithTimeout(s.ctx, lastRoomLookupTimeout)
 		if err := s.refreshAll(ctx); err != nil && s.ctx.Err() == nil {
@@ -55,16 +55,29 @@ func (s *Service) OpenRoomForPipeline(pipelineID string) (roomID string, ok bool
 		}
 		cancel()
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var newest *roomState
-	for id, st := range s.rooms {
-		if st.snap.PipelineID != pipelineID || !s.roomOpen(st) {
+	rooms, opening := s.roomsForPipeline(pipelineID)
+	// A room being opened for the pipeline right now is waited for, so the
+	// watcher does not open a second one beside it: its lock is held until
+	// it is published (or dropped, when its room.created failed).
+	for _, id := range opening {
+		st := s.lockCachedRoom(id)
+		if st == nil {
 			continue
 		}
-		if newest == nil || st.snap.OpenedAt.After(newest.snap.OpenedAt) ||
-			(st.snap.OpenedAt.Equal(newest.snap.OpenedAt) && id < roomID) {
-			newest, roomID = st, id
+		if !st.gone {
+			snap := st.snap.Clone()
+			rooms[id] = &snap
+		}
+		s.unlockRoom(st)
+	}
+	var newest *RoomSnapshot
+	for id, p := range rooms {
+		if p.PipelineID != pipelineID || p.Status != "open" {
+			continue
+		}
+		if newest == nil || p.OpenedAt.After(newest.OpenedAt) ||
+			(p.OpenedAt.Equal(newest.OpenedAt) && id < roomID) {
+			newest, roomID = p, id
 		}
 	}
 	return roomID, newest != nil
@@ -109,22 +122,18 @@ func (s *Service) LastRoomForKey(pipelineID, dedupKey string) (roomID string, cl
 		closedAt = &t
 	}
 	// The event log is the source of truth. When the room is cached and its
-	// snapshot disagrees with the row (the row write after room.closed failed),
-	// the snapshot wins.
+	// published snapshot is closed while the row is not (the row write after
+	// room.closed failed), the snapshot's close counts. It only ever adds a
+	// close: a snapshot still open may just not have published a close in
+	// progress, whose row write already landed.
 	// Shared store: fold a close another replica wrote first, reading the
-	// store before s.mu is taken. A room deleted meanwhile is evicted and
+	// store outside the room's lock. A room deleted meanwhile is evicted and
 	// simply loses the snapshot vote.
 	s.syncRoom(ctx, row.ID)
-	s.mu.Lock()
-	if st, cached := s.rooms[row.ID]; cached {
-		if s.roomOpen(st) {
-			closedAt = nil
-		} else if st.snap.ClosedAt != nil {
-			t := *st.snap.ClosedAt
-			closedAt = &t
-		}
+	if p := s.published(row.ID); p != nil && p.Status != "open" && p.ClosedAt != nil {
+		t := *p.ClosedAt
+		closedAt = &t
 	}
-	s.mu.Unlock()
 	return row.ID, closedAt, true
 }
 
@@ -186,14 +195,13 @@ func (s *Service) postWatcherNote(ctx context.Context, roomID, text string, evid
 	if err := rejectUnstorable(text); err != nil {
 		return err
 	}
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return err
 	}
+	defer s.unlockRoom(st)
 	if !s.roomOpen(st) {
 		return roomClosed("room already closed")
 	}
@@ -270,7 +278,7 @@ func incidentInput(e events.Event) *agent.HumanInput {
 // newIncidentLocked gives the room's agent a new incident on the replica
 // that wrote the note: the note's fold already queued the waking input
 // (inputFor) for the lease owner, so this only starts a run when the room
-// has none, and re-runs an old first look. Caller holds s.mu.
+// has none, and re-runs an old first look. Caller holds st's lock.
 func (s *Service) newIncidentLocked(ctx context.Context, roomID string, st *roomState, raw json.RawMessage) {
 	if !s.wakeForIncidentLocked(ctx, roomID, st) {
 		// Not started here (log full, service closing, another replica holds
@@ -287,7 +295,8 @@ func (s *Service) newIncidentLocked(ctx context.Context, roomID string, st *room
 // new incident: a run that ended on its own is freed and a new one started,
 // the way a steer starts one (agent slots, and with a shared store the room
 // lease). A lease taken here primes the inbox with the pending input, the
-// incident included. It reports whether a run is here. Caller holds s.mu.
+// incident included. It reports whether a run is here. Caller holds st's
+// lock.
 func (s *Service) wakeForIncidentLocked(ctx context.Context, roomID string, st *roomState) bool {
 	if st.snap.Shadow || st.inbox == nil || st.deleting || !s.roomOpen(st) {
 		return false
@@ -298,7 +307,7 @@ func (s *Service) wakeForIncidentLocked(ctx context.Context, roomID string, st *
 		st.agentCancel()
 		st.agentCancel = nil
 	}
-	s.ensureAgentLocked(ctx, roomID, st)
+	s.ensureAgentLocked(roomID, st)
 	return st.agentCancel != nil && (s.coord == nil || st.leased)
 }
 
@@ -306,11 +315,11 @@ func (s *Service) wakeForIncidentLocked(ctx context.Context, roomID string, st *
 // room's context was live): its supervisor has returned, so a new incident may
 // start another run (newIncidentLocked).
 func (s *Service) markAgentDone(st *roomState, run uint64) {
-	s.mu.Lock()
-	if st.agentRun == run {
+	s.lockState(st)
+	if !st.gone && st.agentRun == run {
 		st.agentDone = run
 	}
-	s.mu.Unlock()
+	s.unlockRoom(st)
 }
 
 // WatchRoomInfo is the open room of a pipeline as the watcher's join rule
@@ -336,17 +345,27 @@ func (s *Service) OpenRoomInfo(pipelineID string) (WatchRoomInfo, bool) {
 	if !ok {
 		return WatchRoomInfo{}, false
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, cached := s.rooms[roomID]
-	if !cached || !s.roomOpen(st) {
+	// The published snapshot answers without the room's lock; a room still
+	// being opened has none yet, so its lock is waited for, as
+	// OpenRoomForPipeline does.
+	snap := s.published(roomID)
+	if snap == nil {
+		st := s.lockCachedRoom(roomID)
+		if st == nil {
+			return WatchRoomInfo{}, false
+		}
+		c := st.snap.Clone()
+		s.unlockRoom(st)
+		snap = &c
+	}
+	if snap.Status != "open" {
 		return WatchRoomInfo{}, false
 	}
-	last := st.snap.facts.lastActivity
+	last := snap.facts.lastActivity
 	if last.IsZero() {
-		last = st.snap.OpenedAt
+		last = snap.OpenedAt
 	}
-	return WatchRoomInfo{RoomID: roomID, AlertSource: st.snap.facts.alertSource, OpenedAt: st.snap.OpenedAt, LastEventAt: last}, true
+	return WatchRoomInfo{RoomID: roomID, AlertSource: snap.facts.alertSource, OpenedAt: snap.OpenedAt, LastEventAt: last}, true
 }
 
 // countsAsActivity reports whether e is room activity for LastEventAt:
@@ -394,8 +413,9 @@ func (s *Service) RoomTitleFlags(roomID string) ([]string, bool) {
 	return flags, true
 }
 
-// withRoomFacts runs f on the room's folded snapshot under s.mu; false when
-// the room is unknown or cannot be read.
+// withRoomFacts runs f on the room's folded snapshot (the published one, or
+// the room loaded from the log); false when the room is unknown or cannot be
+// read. f must not keep or change what the snapshot shares.
 func (s *Service) withRoomFacts(roomID string, f func(RoomSnapshot)) bool {
 	if roomID == "" {
 		return false
@@ -403,9 +423,7 @@ func (s *Service) withRoomFacts(roomID string, f func(RoomSnapshot)) bool {
 	ctx, cancel := context.WithTimeout(s.ctx, lastRoomLookupTimeout)
 	defer cancel()
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	snap, err := s.readRoom(ctx, roomID)
 	if err != nil {
 		var re *Error
 		if !errors.As(err, &re) && s.ctx.Err() == nil {
@@ -413,6 +431,6 @@ func (s *Service) withRoomFacts(roomID string, f func(RoomSnapshot)) bool {
 		}
 		return false
 	}
-	f(st.snap)
+	f(*snap)
 	return true
 }

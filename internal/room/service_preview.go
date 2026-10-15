@@ -156,13 +156,12 @@ collect:
 func (s *Service) appendPreview(parent context.Context, roomID, proposalID string, payload events.ProposalPreviewedPayload) {
 	wctx, cancel := context.WithTimeout(parent, previewWriteTimeout)
 	defer cancel()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(wctx, roomID)
+	st, err := s.lockRoom(wctx, roomID)
 	if err != nil {
 		s.log.Warn("room: preview: load room failed", "room", roomID, "proposal", proposalID, "err", err)
 		return
 	}
+	defer s.unlockRoom(st)
 	if !s.roomOpen(st) || findOpenProposal(st.snap, proposalID) == nil {
 		return // decided, withdrawn or closed while previewing
 	}

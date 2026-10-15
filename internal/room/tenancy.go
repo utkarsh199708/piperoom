@@ -68,24 +68,18 @@ func errHidden() *Error { return notFound("not found") }
 // outside the person's tenants. With the filter off it does nothing, so every
 // route keeps its own answers.
 func (s *Service) CheckRoomVisible(ctx context.Context, u User, roomID string) error {
-	if !s.TenancyOn() {
-		return nil
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.checkVisibleLocked(ctx, u, roomID)
+	return s.checkVisible(ctx, u, roomID)
 }
 
-// checkVisibleLocked is CheckRoomVisible for a caller that holds s.mu, for
-// example one that has just loaded a row (proposal, hand-off) of roomID. It
-// must run before any answer that depends on the row (409 already decided,
-// 403 not the recipient), so a person outside the tenant learns nothing from
-// it.
-func (s *Service) checkVisibleLocked(ctx context.Context, u User, roomID string) error {
+// checkVisible is CheckRoomVisible's check, also for a caller that has just
+// loaded a row (proposal, hand-off) of roomID. It must run before any answer
+// that depends on the row (409 already decided, 403 not the recipient), so a
+// person outside the tenant learns nothing from it. It takes no lock.
+func (s *Service) checkVisible(ctx context.Context, u User, roomID string) error {
 	if !s.TenancyOn() {
 		return nil
 	}
-	pipelineID, err := s.roomPipelineLocked(ctx, roomID)
+	pipelineID, err := s.roomPipelineID(ctx, roomID)
 	if err != nil {
 		return err
 	}
@@ -95,12 +89,12 @@ func (s *Service) checkVisibleLocked(ctx context.Context, u User, roomID string)
 	return nil
 }
 
-// roomPipelineLocked returns a room's pipeline id from the cache, else from
-// its rooms row: no snapshot is cloned or rebuilt for a visibility check. A
-// missing room is the 404 of mapStoreErr. Caller must hold s.mu.
-func (s *Service) roomPipelineLocked(ctx context.Context, roomID string) (string, error) {
-	if st, ok := s.rooms[roomID]; ok {
-		return st.snap.PipelineID, nil
+// roomPipelineID returns a room's pipeline id from its published snapshot,
+// else from its rooms row: no lock is waited for, and no snapshot is cloned or
+// rebuilt for a visibility check. A missing room is the 404 of mapStoreErr.
+func (s *Service) roomPipelineID(ctx context.Context, roomID string) (string, error) {
+	if p := s.published(roomID); p != nil {
+		return p.PipelineID, nil
 	}
 	row, err := s.store.GetRoom(ctx, roomID)
 	if err != nil {

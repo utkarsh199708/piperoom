@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"piperoom/internal/events"
 	"piperoom/internal/store"
 )
 
@@ -59,7 +61,8 @@ func (s *Service) IsAdmin(user User) bool {
 // PIPEROOM_ARCHIVE_DIR first (archive without that directory is 400); if the
 // write fails nothing is deleted. A room that is already deleted, by an admin
 // or by retention, answers with its audit row (idempotent); an id that never
-// existed is 404. The caller closes the room's WebSockets.
+// existed is 404. The room's WebSockets are closed through the OnRoomDeleted
+// hook, before DeleteRoom returns; a repeat calls it no more.
 func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason string, archive bool) (Deletion, error) {
 	// The role first, so a non-admin learns nothing about which ids exist.
 	if !s.IsAdmin(user) {
@@ -84,10 +87,8 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 	s.deleteMu.Lock()
 	defer s.deleteMu.Unlock()
 
-	s.mu.Lock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
-		s.mu.Unlock()
 		var re *Error
 		if errors.As(err, &re) && re.Code == codeNotFound {
 			return s.priorDeletion(ctx, del, user, roomID)
@@ -97,13 +98,13 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 	// Tenancy: a room of a pipeline the admin may not see is answered like a
 	// room that does not exist.
 	if !s.CanSeePipeline(user, st.snap.PipelineID) {
-		s.mu.Unlock()
+		s.unlockRoom(st)
 		return Deletion{}, notFound("room not found")
 	}
-	// Checked under s.mu, as the executor queue is fed under s.mu: once
-	// deleting is set no approval can append, so none can queue a run.
+	// Checked under the room's lock, as the executor queue is fed under it:
+	// once deleting is set no approval can append, so none can queue a run.
 	if st.exec.busy() {
-		s.mu.Unlock()
+		s.unlockRoom(st)
 		return Deletion{}, errExecuting()
 	}
 	// From here every append through the service is refused, so the archive
@@ -111,13 +112,13 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 	st.deleting = true
 	wasOpen := s.roomOpen(st)
 	pipelineID := st.snap.PipelineID
-	hookKey := hookDedupKey(pipelineID, st.dedupKey)
-	s.mu.Unlock()
+	hookKey := hookDedupKey(pipelineID, s.dedupKeyOf(st))
+	s.unlockRoom(st)
 
 	undo := func() {
-		s.mu.Lock()
+		s.lockState(st)
 		st.deleting = false
-		s.mu.Unlock()
+		s.unlockRoom(st)
 	}
 	wantSeq := int64(-1)
 	archived := false
@@ -142,7 +143,10 @@ func (s *Service) DeleteRoom(ctx context.Context, user User, roomID, reason stri
 		}
 		return Deletion{}, fmt.Errorf("room: delete %s: %w", roomID, err)
 	}
-	s.evictRooms(res.RoomIDs)
+	// Its WebSockets get the room.deleted frame here, on every replica path
+	// that removes a room (evictRooms, evictLocked), not only in the HTTP
+	// handler.
+	s.evictRooms(res.RoomIDs, func(string, int64) events.Event { return s.deletedEvent(d) })
 	// An open room ends here: forget its token count and let the watcher's
 	// cooldown start, as a close would.
 	if wasOpen && s.onRoomClosed != nil && !s.isClosed() {
@@ -183,10 +187,54 @@ func (s *Service) priorDeletion(ctx context.Context, del store.Deleter, user Use
 	return Deletion{RoomDeletion: d, Archived: s.archiveExists(d.PipelineID, roomID)}, nil
 }
 
-func (s *Service) isClosed() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closed
+// deletedEvent is the room.deleted frame of one deletion (never stored;
+// docs/api.md, WebSocket): seq is the room's last seq + 1, the actor the
+// admin who deleted it, or the system actor for a retention purge.
+func (s *Service) deletedEvent(d store.RoomDeletion) events.Event {
+	actor := systemActor
+	if d.DeletedBy != store.RetentionActor {
+		u, ok := s.users.Get(d.DeletedBy)
+		if !ok {
+			// An admin removed from users.yaml since: the id is all there is.
+			u = User{ID: d.DeletedBy, Name: d.DeletedBy}
+		}
+		actor = s.humanActor(u)
+	}
+	payload, err := json.Marshal(events.RoomDeletedPayload{Reason: d.Reason})
+	if err != nil {
+		payload = []byte("{}") // cannot happen for a struct of one string
+	}
+	return events.Event{
+		RoomID: d.RoomID, Seq: d.EventCount + 1, Type: events.RoomDeleted,
+		Actor: actor, Payload: payload, At: d.DeletedAt.UTC(),
+	}
+}
+
+// DeletedEvent returns the room.deleted frame of a deleted room, built from
+// its audit row. ok is false when there is no audit row to read: the room was
+// never deleted, the store keeps none, or the read failed. The WebSocket
+// gateway asks it when a room's live feed ends under an open connection.
+func (s *Service) DeletedEvent(ctx context.Context, roomID string) (events.Event, bool) {
+	del, ok := s.store.(store.Deleter)
+	if !ok {
+		return events.Event{}, false
+	}
+	d, err := del.GetRoomDeletion(ctx, roomID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) && ctx.Err() == nil {
+			s.log.Warn("room: read the audit row of a deleted room failed", "room", roomID, "err", err)
+		}
+		return events.Event{}, false
+	}
+	return s.deletedEvent(d), true
+}
+
+// roomDeleted hands a deleted room's last frame to the OnRoomDeleted hook.
+// Caller holds no lock of the service.
+func (s *Service) roomDeleted(roomID string, deleted events.Event) {
+	if s.onRoomDeleted != nil {
+		s.onRoomDeleted(roomID, deleted)
+	}
 }
 
 // ---- archive ----

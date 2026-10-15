@@ -36,23 +36,59 @@ type Client struct {
 	cl       *kgo.Client
 	sr       *schemareg.Client
 
-	// offs and consumerFn are test seams for the DLQ reader; nil means the
-	// real kadm/kgo clients.
+	// offs, meta, clusterFn and consumerFn are test seams; nil means the real
+	// kadm/kgo clients. consumerFn gets the options newConsumer builds with.
 	offs       offsetLister
+	meta       metaReader
 	clusterFn  clusterAdmin
-	consumerFn func(map[string]map[int32]kgo.Offset) (dlqConsumer, error)
+	consumerFn func(opts []kgo.Opt) (pollConsumer, error)
 
 	srMu    sync.Mutex
 	srCache map[int]avro.Schema
+	// keyRefused caches, per schema id, why the schema is refused for key
+	// decoding ("" = fine); the walk runs once per id.
+	keyRefused map[int]string
+	// keyAPI decodes untrusted keys with size caps; built in New, lazily for
+	// zero-value test clients.
+	keyAPI avro.API
+	// decodeHook runs just before the Avro decode; a test seam, nil in production.
+	decodeHook func()
+}
+
+// maxKeyBytes bounds a record key before any parsing: keys are untrusted and a
+// legitimate Confluent-framed key is far smaller.
+const maxKeyBytes = 64 << 10
+
+// newKeyAPI returns the frozen, bounded Avro config for untrusted keys. The
+// package-level avro decoders use DefaultConfig, which has no caps.
+func newKeyAPI() avro.API {
+	return avro.Config{MaxByteSliceSize: 64 << 10, MaxSliceAllocSize: 1 << 20}.Freeze()
 }
 
 var _ clients.KafkaAdmin = (*Client)(nil)
+
+// metaReader is the part of *kadm.Client that Topics, ConsumerGroups,
+// GroupLag and DescribeTopicConfigs use; a seam so unit tests run without a
+// broker.
+type metaReader interface {
+	ListTopics(ctx context.Context, topics ...string) (kadm.TopicDetails, error)
+	ListGroups(ctx context.Context, filterStates ...string) (kadm.ListedGroups, error)
+	Lag(ctx context.Context, groups ...string) (kadm.DescribedGroupLags, error)
+	DescribeTopicConfigs(ctx context.Context, topics ...string) (kadm.ResourceConfigs, error)
+}
+
+func (c *Client) metadata() metaReader {
+	if c.meta != nil {
+		return c.meta
+	}
+	return c.adm
+}
 
 // New connects to brokers (e.g. localhost:29092). sr is used to decode Avro keys.
 // connOpts are connection options such as kgo.DialTLSConfig and kgo.SASL; most
 // callers want NewSecure instead.
 func New(brokers []string, sr *schemareg.Client, connOpts ...kgo.Opt) (*Client, error) {
-	c := &Client{brokers: brokers, connOpts: append([]kgo.Opt(nil), connOpts...), sr: sr, srCache: map[int]avro.Schema{}}
+	c := &Client{brokers: brokers, connOpts: append([]kgo.Opt(nil), connOpts...), sr: sr, srCache: map[int]avro.Schema{}, keyRefused: map[int]string{}, keyAPI: newKeyAPI()}
 	cl, err := c.newKgo()
 	if err != nil {
 		return nil, fmt.Errorf("kafka: new client: %w", err)
@@ -103,7 +139,7 @@ func (c *Client) Close() { c.cl.Close() }
 // Topics lists non-internal topic names, sorted.
 func (c *Client) Topics(ctx context.Context) ([]string, error) {
 	start := time.Now()
-	td, err := c.adm.ListTopics(ctx)
+	td, err := c.metadata().ListTopics(ctx)
 	c.record(ctx, start, "kadm.ListTopics()")
 	if err != nil {
 		return nil, fmt.Errorf("kafka: list topics: %w", err)
@@ -120,43 +156,54 @@ func (c *Client) Topics(ctx context.Context) ([]string, error) {
 }
 
 // TopicOffsets returns per-partition start/end offsets and newest record time.
+// End is the high watermark. LastTimestamp is read where a ReadCommitted
+// consumer can read: at the last stable offset - 1, which is End-1 unless a
+// transaction is open at the tail. A transaction marker there counts; its
+// timestamp is when the transaction ended.
 func (c *Client) TopicOffsets(ctx context.Context, topic string) ([]clients.PartitionOffsets, error) {
 	tparam := "topic=" + topic
 	start := time.Now()
-	starts, err := c.adm.ListStartOffsets(ctx, topic)
+	starts, err := c.lister().ListStartOffsets(ctx, topic)
 	c.record(ctx, start, "kadm.ListStartOffsets(topic)", tparam)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: start offsets %s: %w", topic, err)
 	}
 	start = time.Now()
-	ends, err := c.adm.ListEndOffsets(ctx, topic)
+	ends, err := c.lister().ListEndOffsets(ctx, topic)
 	c.record(ctx, start, "kadm.ListEndOffsets(topic)", tparam)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: end offsets %s: %w", topic, err)
 	}
-	sparts, ok := starts[topic]
-	if !ok || len(sparts) == 0 {
+	sparts := starts[topic]
+	// Only UnknownTopicOrPartition means "no such topic"; any other error
+	// (authorization, leader election) is a failure, not an absent topic.
+	if topicMissing(sparts) {
 		return nil, fmt.Errorf("kafka: topic %s: %w", topic, clients.ErrNotFound)
 	}
-	// kadm reports an unknown topic as partition -1 with UnknownTopicOrPartition.
-	for p, s := range sparts {
-		if p < 0 || s.Err != nil {
-			return nil, fmt.Errorf("kafka: topic %s: %w", topic, clients.ErrNotFound)
-		}
-	}
 
-	at := map[int32]int64{}
 	var out []clients.PartitionOffsets
 	for p, s := range sparts {
+		if s.Err != nil {
+			return nil, fmt.Errorf("kafka: start offset %s/%d: %w", topic, p, s.Err)
+		}
 		e, ok := ends.Lookup(topic, p)
-		if !ok || e.Err != nil {
+		if !ok {
+			return nil, fmt.Errorf("kafka: end offset %s/%d: missing from response", topic, p)
+		}
+		if e.Err != nil {
 			return nil, fmt.Errorf("kafka: end offset %s/%d: %w", topic, p, e.Err)
 		}
-		po := clients.PartitionOffsets{Partition: p, Start: s.Offset, End: e.Offset}
-		if e.Offset > s.Offset {
-			at[p] = e.Offset - 1
+		out = append(out, clients.PartitionOffsets{Partition: p, Start: s.Offset, End: e.Offset})
+	}
+	readable, err := c.clampToStable(ctx, topic, out)
+	if err != nil {
+		return nil, fmt.Errorf("kafka: topic offsets %s: %w", topic, err)
+	}
+	at := map[int32]int64{}
+	for _, r := range readable {
+		if r.End > r.Start {
+			at[r.Partition] = r.End - 1
 		}
-		out = append(out, po)
 	}
 	timestamps, terr := c.recordTimestamps(ctx, topic, at)
 	if terr != nil {
@@ -193,7 +240,7 @@ type TopicConfig struct {
 // clients.ErrNotFound.
 func (c *Client) DescribeTopicConfigs(ctx context.Context, topic string) (TopicConfig, error) {
 	start := time.Now()
-	rcs, err := c.adm.DescribeTopicConfigs(ctx, topic)
+	rcs, err := c.metadata().DescribeTopicConfigs(ctx, topic)
 	c.record(ctx, start, "kadm.DescribeTopicConfigs(topic)", "topic="+topic)
 	if err != nil {
 		return TopicConfig{}, fmt.Errorf("kafka: topic configs %s: %w", topic, mapNotFound(err))
@@ -213,7 +260,7 @@ func (c *Client) DescribeTopicConfigs(ctx context.Context, topic string) (TopicC
 	}
 
 	start = time.Now()
-	tds, err := c.adm.ListTopics(ctx, topic)
+	tds, err := c.metadata().ListTopics(ctx, topic)
 	c.record(ctx, start, "kadm.ListTopics(topic)", "topic="+topic)
 	if err != nil {
 		return TopicConfig{}, fmt.Errorf("kafka: topic details %s: %w", topic, err)
@@ -265,7 +312,7 @@ func mapNotFound(err error) error {
 // ConsumerGroups lists consumer group names.
 func (c *Client) ConsumerGroups(ctx context.Context) ([]string, error) {
 	start := time.Now()
-	lg, err := c.adm.ListGroups(ctx)
+	lg, err := c.metadata().ListGroups(ctx)
 	c.record(ctx, start, "kadm.ListGroups()")
 	if err != nil {
 		return nil, fmt.Errorf("kafka: list groups: %w", err)
@@ -278,7 +325,7 @@ func (c *Client) ConsumerGroups(ctx context.Context) ([]string, error) {
 // GroupLag returns a group's state, member count, and per-partition lag.
 func (c *Client) GroupLag(ctx context.Context, group string) (clients.GroupLag, error) {
 	start := time.Now()
-	dgs, err := c.adm.Lag(ctx, group)
+	dgs, err := c.metadata().Lag(ctx, group)
 	c.record(ctx, start, "kadm.Lag(group)", "group="+group)
 	if err != nil {
 		return clients.GroupLag{}, fmt.Errorf("kafka: group lag %s: %w", group, err)
@@ -320,51 +367,100 @@ func (c *Client) GroupLag(ctx context.Context, group string) (clients.GroupLag, 
 	return out, nil
 }
 
+const (
+	defaultMaxScan = 5000
+	// maxFindScan bounds one partition's FindByKey window. The scan deadline
+	// cuts a long scan anyway; the bound keeps start+maxScan from
+	// overflowing into a window that ends before it starts.
+	maxFindScan = 20000
+)
+
+// afterMilli is since as the timestamp of a ListOffsets-by-time request.
+// Kafka reads negative timestamps as special offsets (-1 latest, -2
+// earliest), so a time before the Unix epoch is refused, never sent.
+func afterMilli(since time.Time) (int64, error) {
+	ms := since.UnixMilli()
+	if ms < 0 {
+		return 0, fmt.Errorf("kafka: since %s is before the Unix epoch", since.UTC().Format(time.RFC3339Nano))
+	}
+	return ms, nil
+}
+
+// normalizeMaxScan maps maxScan <= 0 to the default and caps it.
+func normalizeMaxScan(maxScan int) int {
+	switch {
+	case maxScan <= 0:
+		return defaultMaxScan
+	case maxScan > maxFindScan:
+		return maxFindScan
+	}
+	return maxScan
+}
+
 // FindByKey scans the topic from the first offset at or after since and returns
 // records whose decoded key equals key. It stops at maxScan records per
-// partition (or the partition end). A deadline that cuts the scan short is
-// returned as an error, not a false "not found".
+// partition (<= 0 means 5000, capped at 20000), the partition end or the last
+// stable offset: only committed records are read, so a record of an aborted
+// or still open transaction never matches. A deadline that cuts the scan
+// short is returned as an error, not a false "not found"; so is an unknown
+// topic (clients.ErrNotFound).
 func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Time, maxScan int) ([]clients.RecordRef, error) {
-	if maxScan <= 0 {
-		maxScan = 5000
+	maxScan = normalizeMaxScan(maxScan)
+	ms, err := afterMilli(since)
+	if err != nil {
+		return nil, err
 	}
 	tparam := "topic=" + topic
 	start := time.Now()
-	offs, err := c.adm.ListOffsetsAfterMilli(ctx, since.UnixMilli(), topic)
+	offs, err := c.lister().ListOffsetsAfterMilli(ctx, ms, topic)
 	c.record(ctx, start, "kadm.ListOffsetsAfterMilli(topic, since)", tparam, "since="+since.UTC().Format(time.RFC3339))
 	if err != nil {
 		return nil, fmt.Errorf("kafka: offsets after %s: %w", since, err)
 	}
+	if topicMissing(offs[topic]) {
+		return nil, fmt.Errorf("kafka: topic %s: %w", topic, clients.ErrNotFound)
+	}
 	start = time.Now()
-	ends, err := c.adm.ListEndOffsets(ctx, topic)
+	ends, err := c.lister().ListEndOffsets(ctx, topic)
 	c.record(ctx, start, "kadm.ListEndOffsets(topic)", tparam)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: end offsets %s: %w", topic, err)
 	}
 
-	partOffsets := map[string]map[int32]kgo.Offset{topic: {}}
-	stopAt := map[int32]int64{}
-	finished := map[int32]bool{}
+	var windows []clients.PartitionOffsets
 	for p, lo := range offs[topic] {
-		if lo.Err != nil || lo.Offset < 0 {
+		// A partition left out would turn into a false "not found".
+		if lo.Err != nil {
+			return nil, fmt.Errorf("kafka: offset after %s for %s/%d: %w", since, topic, p, lo.Err)
+		}
+		if lo.Offset < 0 {
 			continue
 		}
 		end := lo.Offset + int64(maxScan)
 		if e, ok := ends.Lookup(topic, p); ok && e.Err == nil && e.Offset < end {
 			end = e.Offset
 		}
-		if end <= lo.Offset {
-			finished[p] = true // nothing to scan in this partition
-			continue
+		windows = append(windows, clients.PartitionOffsets{Partition: p, Start: lo.Offset, End: end})
+	}
+	windows, err = c.clampToStable(ctx, topic, windows)
+	if err != nil {
+		return nil, fmt.Errorf("kafka: find by key %s: %w", topic, err)
+	}
+	partOffsets := map[string]map[int32]kgo.Offset{topic: {}}
+	stopAt := map[int32]int64{}
+	finished := map[int32]bool{}
+	for _, w := range windows {
+		if w.End <= w.Start {
+			continue // nothing readable to scan in this partition
 		}
-		partOffsets[topic][p] = kgo.NewOffset().At(lo.Offset)
-		stopAt[p] = end
+		partOffsets[topic][w.Partition] = kgo.NewOffset().At(w.Start)
+		stopAt[w.Partition] = w.End
 	}
 	if len(partOffsets[topic]) == 0 {
 		return nil, nil
 	}
 
-	cl, err := c.newKgo(kgo.ConsumePartitions(partOffsets))
+	cl, err := c.newConsumer(partOffsets)
 	if err != nil {
 		return nil, fmt.Errorf("kafka: scan client: %w", err)
 	}
@@ -389,9 +485,21 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 			}
 		}
 		for _, r := range fetches.Records() {
-			if r.Offset >= stopAt[r.Partition] {
+			// As in collectPeek: a transaction marker can be the last offset
+			// of the window, and it finishes the partition but is no match.
+			if r.Offset+1 >= stopAt[r.Partition] {
 				finished[r.Partition] = true
+			}
+			if r.Offset >= stopAt[r.Partition] || r.Attrs.IsControl() {
 				continue
+			}
+			if cctx.Err() != nil {
+				// Check between records so a batch of slow keys cannot run past the scan deadline.
+				total := 0
+				for _, n := range scanned {
+					total += n
+				}
+				return nil, fmt.Errorf("kafka: scan %s incomplete after %d records: %w", topic, total, cctx.Err())
 			}
 			scanned[r.Partition]++
 			dk, derr := c.decodeKey(cctx, r.Key)
@@ -403,10 +511,6 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 					Timestamp: r.Timestamp,
 					Key:       dk,
 				})
-			}
-			// This is the last record in the scan window for this partition.
-			if r.Offset+1 >= stopAt[r.Partition] {
-				finished[r.Partition] = true
 			}
 		}
 		if len(found) > 0 {
@@ -433,7 +537,9 @@ func (c *Client) FindByKey(ctx context.Context, topic, key string, since time.Ti
 }
 
 // recordTimestamps fetches one record per partition (at the given offsets) in a
-// single consumer and returns their timestamps.
+// single consumer and returns their timestamps. A transaction marker at the
+// offset counts as the record; a later record stands in when the offset
+// itself is never delivered but newer records are.
 func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int32]int64) (map[int32]time.Time, error) {
 	if len(at) == 0 {
 		return map[int32]time.Time{}, nil
@@ -442,7 +548,7 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 	for p, off := range at {
 		partOffsets[topic][p] = kgo.NewOffset().At(off)
 	}
-	cl, err := c.newKgo(kgo.ConsumePartitions(partOffsets))
+	cl, err := c.newConsumer(partOffsets)
 	if err != nil {
 		return nil, err
 	}
@@ -459,7 +565,7 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 			if _, done := got[r.Partition]; done {
 				continue
 			}
-			if want, ok := at[r.Partition]; ok && r.Offset == want {
+			if want, ok := at[r.Partition]; ok && r.Offset >= want {
 				got[r.Partition] = r.Timestamp
 			}
 		}
@@ -475,18 +581,45 @@ func (c *Client) recordTimestamps(ctx context.Context, topic string, at map[int3
 
 // decodeKey decodes a Confluent Avro key into a comparable string. Raw
 // (non-Confluent) keys are returned as-is. Parsed schemas are cached by id.
-func (c *Client) decodeKey(ctx context.Context, key []byte) (string, error) {
+//
+// The key is attacker-controlled, including the schema id, so the decode is
+// bounded by construction (GO-2026-5046/5047/5048): keys over 64 KiB are
+// refused; key schemas are parsed in a private cache and refused if they hold
+// array/map types, recursion, fixed sizes, decimal precision/scale, size or
+// node counts beyond the caps in checkKeySchema (the walk runs before any
+// decoder is built; refusals are cached per id); the decoder is capped (see newKeyAPI); and a
+// decoder panic becomes an error. Decode takes no context, so these limits,
+// not a deadline, are what bound its time and memory; FindByKey also checks
+// its deadline between records.
+func (c *Client) decodeKey(ctx context.Context, key []byte) (out string, err error) {
 	// Without a Schema Registry (SCHEMA_REGISTRY_URL empty or off) no key is
 	// Avro-decoded: a key that merely starts with 0x00 is compared raw.
 	if c.sr == nil || len(key) < 5 || key[0] != 0x00 {
 		return string(key), nil
 	}
+	if len(key) > maxKeyBytes {
+		return "", fmt.Errorf("kafka: avro key too large (%d bytes)", len(key))
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			out, err = "", fmt.Errorf("kafka: avro key decode panicked: %v", r)
+		}
+	}()
 	id := int(binary.BigEndian.Uint32(key[1:5]))
 	schema, err := c.schemaByID(ctx, id)
 	if err != nil {
 		return "", err
 	}
-	dec := avro.NewDecoderForSchema(schema, bytes.NewReader(key[5:]))
+	c.srMu.Lock()
+	if c.keyAPI == nil {
+		c.keyAPI = newKeyAPI()
+	}
+	api := c.keyAPI
+	c.srMu.Unlock()
+	if c.decodeHook != nil {
+		c.decodeHook()
+	}
+	dec := api.NewDecoder(schema, bytes.NewReader(key[5:]))
 	var v any
 	if err := dec.Decode(&v); err != nil {
 		return "", err
@@ -503,9 +636,17 @@ func (c *Client) decodeKey(ctx context.Context, key []byte) (string, error) {
 	return string(b), nil
 }
 
-// schemaByID returns a parsed schema, cached by id (schema ids are immutable).
+// schemaByID returns a parsed, vetted key schema, cached by id (schema ids are
+// immutable). A schema that is too large, does not parse or fails
+// checkKeySchema is refused, and the refusal is cached too so a hostile id
+// costs one fetch and parse, not one per key. Both caches stop growing at
+// maxSchemaCache entries.
 func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 	c.srMu.Lock()
+	if why := c.keyRefused[id]; why != "" {
+		c.srMu.Unlock()
+		return nil, fmt.Errorf("kafka: avro key schema %d refused: %s", id, why)
+	}
 	s, ok := c.srCache[id]
 	c.srMu.Unlock()
 	if ok {
@@ -515,14 +656,117 @@ func (c *Client) schemaByID(ctx context.Context, id int) (avro.Schema, error) {
 	if err != nil {
 		return nil, err
 	}
-	s, err = avro.Parse(schemaStr)
-	if err != nil {
-		return nil, err
+	var why string
+	if len(schemaStr) > maxKeySchemaBytes {
+		why = fmt.Sprintf("schema text too large (%d bytes)", len(schemaStr))
+	} else if s, err = avro.ParseWithCache(schemaStr, "", &avro.SchemaCache{}); err != nil {
+		// A fresh cache per schema: avro.Parse shares a process-wide cache, so
+		// a name defined by an earlier (safe) schema would shadow a hostile
+		// redefinition in this one and hide it from the walk below.
+		why = "does not parse: " + err.Error()
+	} else if werr := checkKeySchema(s); werr != nil {
+		why = werr.Error()
 	}
 	c.srMu.Lock()
-	c.srCache[id] = s
-	c.srMu.Unlock()
+	defer c.srMu.Unlock()
+	if why != "" {
+		if c.keyRefused == nil {
+			c.keyRefused = map[int]string{}
+		}
+		if len(c.keyRefused) < maxSchemaCache {
+			c.keyRefused[id] = why
+		}
+		return nil, fmt.Errorf("kafka: avro key schema %d refused: %s", id, why)
+	}
+	if len(c.srCache) < maxSchemaCache {
+		c.srCache[id] = s
+	}
 	return s, nil
+}
+
+// maxDecimalDigits is the DECIMAL256 maximum; hamba computes 10^scale on every
+// decode, so larger values are a cheap amplification.
+const maxDecimalDigits = 76
+
+// checkKeySchema returns an error if decoding a key with s could allocate or
+// spin beyond what the 64 KiB key implies. hamba decodes every reference to a
+// named type afresh, so the walk visits the schema the way it will be decoded
+// (no shared-node shortcut) and gives up after maxSchemaNodes visits or
+// maxSchemaDepth levels. It refuses array/map types (block counts), recursive
+// records (stack overflow), fixed sizes above the key cap summed per visit
+// (hamba allocates at decoder build time), and oversized decimal
+// precision/scale. Records are tracked by pointer, never by name, so a
+// redefinition cannot hide.
+func checkKeySchema(s avro.Schema) error {
+	w := &keyWalk{onPath: map[*avro.RecordSchema]bool{}}
+	return w.walk(s, 0)
+}
+
+const (
+	maxSchemaNodes = 1000 // fields, union branches and enum symbols count one each
+	maxSchemaDepth = 32
+	// maxKeySchemaBytes caps the schema text before parsing: hamba builds
+	// fingerprint strings quadratically, and a real key schema is tiny.
+	maxKeySchemaBytes = 64 << 10
+	maxSchemaCache    = 1024
+)
+
+type keyWalk struct {
+	onPath     map[*avro.RecordSchema]bool
+	nodes      int
+	fixedTotal int
+}
+
+func (w *keyWalk) walk(s avro.Schema, depth int) error {
+	if depth > maxSchemaDepth {
+		return errors.New("schema nested too deeply")
+	}
+	if w.nodes++; w.nodes > maxSchemaNodes {
+		return errors.New("schema too large (node count)")
+	}
+	switch t := s.(type) {
+	case *avro.ArraySchema, *avro.MapSchema:
+		return errors.New("array/map type")
+	case *avro.RefSchema:
+		return w.walk(t.Schema(), depth+1)
+	case *avro.RecordSchema:
+		if w.onPath[t] {
+			return errors.New("recursive record " + t.FullName())
+		}
+		w.onPath[t] = true
+		defer delete(w.onPath, t)
+		for _, f := range t.Fields() {
+			if err := w.walk(f.Type(), depth+1); err != nil {
+				return err
+			}
+		}
+	case *avro.UnionSchema:
+		for _, u := range t.Types() {
+			if err := w.walk(u, depth+1); err != nil {
+				return err
+			}
+		}
+	case *avro.EnumSchema:
+		if w.nodes += len(t.Symbols()); w.nodes > maxSchemaNodes {
+			return errors.New("schema too large (node count)")
+		}
+	case *avro.FixedSchema:
+		w.fixedTotal += t.Size()
+		if t.Size() < 0 || w.fixedTotal > maxKeyBytes {
+			return errors.New("fixed size above key cap")
+		}
+		return checkDecimal(t.Logical())
+	case *avro.PrimitiveSchema:
+		return checkDecimal(t.Logical())
+	}
+	return nil
+}
+
+func checkDecimal(l avro.LogicalSchema) error {
+	if d, ok := l.(*avro.DecimalLogicalSchema); ok && (d.Precision() > maxDecimalDigits || d.Scale() > maxDecimalDigits) {
+		return errors.New("decimal precision/scale above cap")
+	}
+	return nil
 }
 
 func isInternal(name string) bool {

@@ -166,7 +166,7 @@ func TestOnlyConfigAndSchemaWritesAreImpacting(t *testing.T) {
 func TestConnectorConfigImpactThroughTheRegistry(t *testing.T) {
 	a := mustGet(t, resumeRegistry(t, testDeps()), "connect_update_connector_config")
 	p := paramsJSON(t, "decimal.handling.mode", "string")
-	if err := a.Validate(p); err != nil {
+	if err := a.Validate(t.Context(), p); err != nil {
 		t.Fatal(err)
 	}
 	imp := a.(Impacting).Impact(p)

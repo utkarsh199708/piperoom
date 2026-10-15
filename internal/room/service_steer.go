@@ -43,14 +43,13 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 	if err := checkLen("text", text, MaxMessageChars); err != nil {
 		return events.Event{}, err
 	}
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
@@ -69,7 +68,7 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 		}, events.SteerSent, s.humanActor(user), events.SteerSentPayload{Text: text})
 		if err == nil {
 			s.touchDriverLease(ctx, st, roomID)
-			s.ensureAgentLocked(ctx, roomID, st)
+			s.ensureAgentLocked(roomID, st)
 			return e, nil
 		}
 		if !errors.Is(err, errNoLongerDriver) {
@@ -102,14 +101,13 @@ func (s *Service) Steer(ctx context.Context, user User, roomID, text string) (ev
 
 // SendSuggestion lets the driver forward a pending suggestion to the agent.
 func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggestionID string) (events.Event, error) {
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
@@ -147,6 +145,7 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 		return nil
 	}, events.SteerSent, s.humanActor(user), events.SteerSentPayload{
 		SuggestionID: suggestionID,
+		From:         suggester(st.snap, suggestionID, sugg),
 		Text:         sugg.Text,
 	})
 	if err != nil {
@@ -161,20 +160,19 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 		return events.Event{}, err
 	}
 	s.touchDriverLease(ctx, st, roomID)
-	s.ensureAgentLocked(ctx, roomID, st)
+	s.ensureAgentLocked(roomID, st)
 	return e, nil
 }
 
 // RequestControl asks the current driver for control.
 func (s *Service) RequestControl(ctx context.Context, user User, roomID string) (events.Event, error) {
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
@@ -189,14 +187,13 @@ func (s *Service) GrantControl(ctx context.Context, user User, roomID, toID stri
 	if err != nil {
 		return events.Event{}, err
 	}
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
+	// Shared store: fold what other replicas wrote, reading outside the lock.
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	if !s.roomOpen(st) {
 		return events.Event{}, roomClosed("room is closed")
 	}
@@ -225,8 +222,6 @@ func (s *Service) GrantControl(ctx context.Context, user User, roomID, toID stri
 	if err != nil {
 		return events.Event{}, err
 	}
-	if err := s.store.UpdateDriver(ctx, roomID, to.ID, to.Name, lease); err != nil {
-		s.log.Warn("room: persist granted driver failed", "room", roomID, "err", err)
-	}
+	s.afterAppend(roomID, "persist granted driver", s.store.UpdateDriver(ctx, roomID, to.ID, to.Name, lease))
 	return e, nil
 }

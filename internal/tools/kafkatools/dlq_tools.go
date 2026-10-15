@@ -131,9 +131,11 @@ func (t *dlqPeek) InputSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"connector": strProp("a sink connector of this pipeline: its dead-letter topic is read from its config"),
 		"topic":     strProp("a dead-letter topic declared for this pipeline in owners.yaml (watch.dlq_topics); give exactly one of connector or topic"),
+		// The range is in the description: strict tool use rejects
+		// minimum/maximum, so parseInput enforces it.
 		"limit": map[string]any{
-			"type": "integer", "minimum": 1, "maximum": dlqMaxLimit,
-			"description": "newest records to show in total across partitions; default 5, at most 20",
+			"type":        "integer",
+			"description": "newest records to show in total across partitions, 1 to 20; default 5",
 		},
 	})
 }

@@ -18,7 +18,7 @@ import (
 type HumanInput struct {
 	Seq       int64        `json:"seq"` // room event seq it came from
 	Actor     events.Actor `json:"actor"`
-	Kind      string       `json:"kind"` // "steer" | "comment" | "approval_result" | "action_result" | "alert_update"
+	Kind      string       `json:"kind"` // "steer" | "suggestion" | "comment" | "approval_result" | "action_result" | "alert_update"
 	StepID    string       `json:"step_id,omitempty"`
 	CommentID string       `json:"comment_id,omitempty"`
 	// Text of an "alert_update" is the server's rendering of a re-fired or

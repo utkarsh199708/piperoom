@@ -1,6 +1,8 @@
 // What the room asks of this person right now, as one value the decision bar draws.
 // Pure: the bar owns the 3 s "done" timer and the dismissed-rejection storage.
+import type { Actor } from '../api/types'
 import type { ProposalState, RoomState } from '../state/types'
+import { neutralizeBadgeText } from './verification'
 import type { CurrentUser } from '../state/permissions'
 import { canDecideLayer, isViewer } from '../state/permissions'
 
@@ -9,7 +11,7 @@ export type Decision =
   | { kind: 'waiting'; proposal: ProposalState; pending: string[]; approved: number; total: number }
   | { kind: 'executing'; proposal: ProposalState; step: number; total: number; action: string }
   | { kind: 'done'; proposal: ProposalState; ok: boolean; failedStep?: number }
-  | { kind: 'rejected'; proposal: ProposalState; by: string; layer: string }
+  | { kind: 'rejected'; proposal: ProposalState; by: string; byActor?: Actor; layer: string }
 
 function newest(proposals: ProposalState[], status: ProposalState['status']): ProposalState | undefined {
   return [...proposals].reverse().find((p) => p.status === status)
@@ -60,7 +62,7 @@ export function decisionFor(state: RoomState, user: CurrentUser): Decision | nul
   if (rejected && proposals[proposals.length - 1] === rejected) {
     const layer = rejected.required_layers.find((l) => rejected.decisions?.[l]?.outcome === 'rejected') ?? ''
     const d = layer ? rejected.decisions[layer] : undefined
-    return { kind: 'rejected', proposal: rejected, by: d ? d.by.name || d.by.id : 'a reviewer', layer }
+    return { kind: 'rejected', proposal: rejected, by: d ? neutralizeBadgeText(d.by.name || d.by.id) : 'a reviewer', byActor: d?.by, layer }
   }
   return null
 }

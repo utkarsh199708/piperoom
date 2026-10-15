@@ -24,12 +24,11 @@ func (s *Service) Nudge(ctx context.Context, user User, roomID, proposalID, laye
 		return events.Event{}, validation("layer is not a known layer")
 	}
 	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
+	st, err := s.lockRoom(ctx, roomID)
 	if err != nil {
 		return events.Event{}, err
 	}
+	defer s.unlockRoom(st)
 	check := func() error {
 		if !s.roomOpen(st) {
 			return roomClosed("room is closed")

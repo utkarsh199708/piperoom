@@ -1,4 +1,6 @@
 import { BellRing } from 'lucide-react'
+import { PersonName } from '@/components/VerifiedBadge'
+import { neutralizeBadgeText } from '@/lib/verification'
 import { toast } from 'sonner'
 import type { Person, PresenceMember } from '@/api/types'
 import type { NudgeState } from '@/state/types'
@@ -37,7 +39,7 @@ export function WaitingFor({
   const now = useNow()
   const owners = ownersOf(layer, people, presence, now)
   const shown = owners.slice(0, MAX_NAMES)
-  const first = owners[0]?.name
+  const first = owners[0] ? neutralizeBadgeText(owners[0].name) : undefined
   const nudgedAt = nudge ? Date.parse(nudge.at) : NaN
   const cooling = !Number.isNaN(nudgedAt) && now - nudgedAt < NUDGE_WINDOW_MS
 
@@ -68,11 +70,21 @@ export function WaitingFor({
       <Badge className="ml-auto max-w-full" variant="neutral">
         <span className="size-1.5 shrink-0 rounded-full bg-warning" aria-hidden="true" />
         <span className="truncate">
-          {owners.length === 0
-            ? `Waiting for a ${layer} owner`
-            : `Waiting for ${shown.map((o) => `${o.name} · ${o.presence}`).join(', ')}`}
+          {owners.length === 0 ? (
+            `Waiting for a ${layer} owner`
+          ) : (
+            <>
+              Waiting for{' '}
+              {shown.map((o, i) => (
+                <span key={o.id}>
+                  {i > 0 && ', '}
+                  <PersonName person={o} className="align-middle" /> · {o.presence}
+                </span>
+              ))}
+            </>
+          )}
           {owners.length > MAX_NAMES && (
-            <span title={owners.slice(MAX_NAMES).map((o) => o.name).join(', ')}> +{owners.length - MAX_NAMES}</span>
+            <span title={owners.slice(MAX_NAMES).map((o) => neutralizeBadgeText(o.name)).join(', ')}> +{owners.length - MAX_NAMES}</span>
           )}
         </span>
       </Badge>

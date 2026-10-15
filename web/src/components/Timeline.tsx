@@ -1,3 +1,4 @@
+import { PersonName } from '@/components/VerifiedBadge'
 import { useEffect, useId, useState } from 'react'
 import { plainText } from '@/lib/title'
 import { emptyStateFor } from '../lib/emptyState'
@@ -161,7 +162,7 @@ function CommentThread({
         <PersonAvatar actor={comment.author} size={20} className="mt-px" />
         <div className="min-w-0">
           <div className="flex flex-wrap items-baseline gap-x-2">
-            <strong className="font-medium">{comment.author.name}</strong>
+            <PersonName person={comment.author} nameClassName="font-medium" />
             {fix && (
               <Badge variant="success" className="self-center">
                 <Wrench className="size-3" aria-hidden="true" />
@@ -427,6 +428,7 @@ function TimelineBody({
   onClearFilter,
   pages = [],
   ownerNames,
+  shadow = false,
 }: {
   steps: StepState[]
   /** Proposal ids of the room: a raw id in agent prose links to its card. */
@@ -451,6 +453,8 @@ function TimelineBody({
   pages?: PageState[]
   /** user id -> display name, for the owners a page names. */
   ownerNames?: Record<string, string>
+  /** Shadow room: the agent works silently, so the empty state neither reports it nor offers a steer. */
+  shadow?: boolean
 }) {
   // QA R18 (G11): a step link to a step that the layer filter hides clears the filter.
   useEffect(() => {
@@ -465,7 +469,7 @@ function TimelineBody({
   }, [steps, filterLayer, onClearFilter])
   const unanchored = comments.filter((c) => !c.step_id)
   if (steps.length === 0 && messages.length === 0 && unanchored.length === 0) {
-    const empty = emptyStateFor(agent)
+    const empty = emptyStateFor(agent, shadow)
     return (
       <div className="flex flex-col gap-2">
         <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border bg-card p-6 text-center">

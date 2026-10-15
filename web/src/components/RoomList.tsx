@@ -58,6 +58,8 @@ import { Kbd } from './ui/kbd'
 import { Skeleton } from './ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { TopBarSlot } from './shell/TopBarSlot'
+import { PersonName } from './VerifiedBadge'
+import { neutralizeBadgeText } from '../lib/verification'
 import { RoomListContext, useInShell } from './shell/context'
 import { isEditableTarget } from './shell/keys'
 
@@ -652,7 +654,7 @@ function RoomRow({
             variant="outline"
             className="h-[26px] gap-1.5 px-2 text-xs coarse:h-11 coarse:px-4"
             disabled={taking}
-            title={room.driver ? `${room.driver.name}'s lease has expired` : undefined}
+            title={room.driver ? `${neutralizeBadgeText(room.driver.name)}'s lease has expired` : undefined}
             onClick={onTake}
           >
             Take control
@@ -668,10 +670,10 @@ function RoomRow({
                 style={{ backgroundColor: personColor(room.driver.id) }}
                 aria-hidden="true"
               >
-                {initials(room.driver.name)}
+                {initials(room.driver.name, room.driver.id)}
               </AvatarFallback>
             </Avatar>
-            {room.driver.name}
+            <PersonName person={{ ...room.driver, kind: 'human' }} />
             <span className="sr-only">, driver</span>
           </span>
         ) : (
