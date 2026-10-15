@@ -32,6 +32,8 @@ type sigSnap struct {
 	keys    []string // incident keys (sigState.keys)
 	// fired is when the signal last fired (sigState.firedAt).
 	fired time.Time
+	// clearedFrom is when the signal last started to clear (sigState.clearedFrom).
+	clearedFrom time.Time
 }
 
 // view is a copy of what the output step needs to know about one pipeline.
@@ -123,7 +125,7 @@ func (w *Watcher) viewOf(t target, ps *pipeState) view {
 			v.active = append(v.active, sigSnap{
 				id: id, sev: ss.last.sev, label: ss.last.label, withDur: ss.last.withDur,
 				since: ss.breachingSince, ev: ss.last.ev, pending: !ss.notified, keys: ss.keys(id),
-				fired: ss.firedAt,
+				fired: ss.firedAt, clearedFrom: ss.clearedFrom,
 			})
 		case phaseAcked:
 			v.hasAny = true

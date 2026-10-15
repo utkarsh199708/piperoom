@@ -43,6 +43,25 @@ func (f *fakeChanges) RecordChange(_ context.Context, c clients.PipelineChange) 
 	return true, nil
 }
 
+// ListChanges serves the newest-first read the watcher uses to compare a
+// first sighting with what is stored.
+func (f *fakeChanges) ListChanges(_ context.Context, pid string, _, _ time.Time, kinds []string, limit int) ([]clients.PipelineChange, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []clients.PipelineChange
+	for i := len(f.rows) - 1; i >= 0; i-- {
+		r := f.rows[i]
+		if r.PipelineID != pid || (kinds != nil && !slices.Contains(kinds, r.Kind)) {
+			continue
+		}
+		out = append(out, r)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeChanges) all() []clients.PipelineChange {
 	f.mu.Lock()
 	defer f.mu.Unlock()

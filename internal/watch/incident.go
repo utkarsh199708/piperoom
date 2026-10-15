@@ -162,12 +162,39 @@ func (w *Watcher) cooldownOf(now time.Time, id string, pend []sigSnap, last stri
 			if !ok {
 				return quiet{} // a signal outside every closed incident
 			}
+			if w.clearedLongEnough(s, c.at) {
+				return quiet{} // it recovered for good after the close: a new incident
+			}
 			if q.room == "" || now.Sub(c.at) < q.ago {
 				q.room, q.ago = c.room, now.Sub(c.at)
 			}
 		}
 	}
 	return q
+}
+
+// clearWindow is the longest clear stretch that ends a cooldown early.
+const clearWindow = 10 * time.Minute
+
+// sustainedClear is how long a signal must stay clear after its room closed to
+// be a new incident rather than a flap: clearWindow, or a quarter of the
+// cooldown when that is shorter (Q6 U2).
+func sustainedClear(cooldown time.Duration) time.Duration {
+	return min(clearWindow, cooldown/4)
+}
+
+// clearedLongEnough: the signal s was clear from the later of its clear start
+// and the close at closedAt until the breach that is firing now began, for at
+// least sustainedClear. A flap (a short gap) does not qualify.
+func (w *Watcher) clearedLongEnough(s sigSnap, closedAt time.Time) bool {
+	if s.clearedFrom.IsZero() || s.since.IsZero() {
+		return false
+	}
+	from := s.clearedFrom
+	if closedAt.After(from) {
+		from = closedAt
+	}
+	return s.since.Sub(from) >= sustainedClear(w.cfg.Cooldown)
 }
 
 // recoverClosed asks the room service (ClosedRoomKeysSink) what a closed
@@ -212,7 +239,7 @@ func (w *Watcher) inCooldown(now time.Time, id, sig string) bool {
 	var pend []sigSnap
 	if ps := w.pipes[id]; ps != nil && ps.sigs[sig] != nil {
 		ss := ps.sigs[sig]
-		pend = []sigSnap{{id: sig, keys: ss.keys(sig), fired: ss.firedAt}}
+		pend = []sigSnap{{id: sig, keys: ss.keys(sig), fired: ss.firedAt, since: ss.breachingSince, clearedFrom: ss.clearedFrom}}
 	}
 	return w.cooldownOf(now, id, pend, last, closedAt, found).on
 }
