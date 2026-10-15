@@ -235,7 +235,6 @@ recordings:
       warehouse analytics.orders: not_seen
   # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
   - tool: similar_incidents
-    input: {pipeline_id: "orders"}
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
   - tool: dlq_peek
@@ -251,7 +250,7 @@ recordings:
       00:26 | 71760 | 0 | 26551 | -45209
       00:52 | 71760 | 0 | 26551 | -45209
       01:18 | 71760 | 0 | 26551 | -45209
-      01:44 | 71760 | 8010600 | 16339 | -55421
+      01:44 | 71760 | 8010600 | 10365 | -61395
       02:10 | 71760 | 20827560 | 0 | -71760
       02:36 | 71760 | 20827560 | 0 | -71760
       03:02 | 71760 | 20827560 | 0 | -71760
@@ -259,7 +258,7 @@ recordings:
       03:54 | 71760 | 20827560 | 0 | -71760
       04:20 | 71760 | 20827560 | 0 | -71760
       04:46 | 52440 | 15220140 | 0 | -52440
-      verdict: sink is missing 719257 rows in 00:00–05:12; topic has them (consumer side)
+      verdict: sink is missing 725231 rows in 00:00–05:12; topic has them (consumer side)
   - tool: warehouse_load_errors
     input: {table: "analytics.orders"}
     summary: |-
@@ -282,8 +281,7 @@ recordings:
   - tool: kafka_acls
     input: {principal: "User:piperoom"}
     summary: |-
-      User:piperoom: ALLOW DESCRIBE cluster; ALLOW DESCRIBE group connect-wh-orders-sink (LITERAL); ALLOW DESCRIBE,READ topic pg.public.orders (LITERAL)
-      missing: WRITE on topic pg.public.orders for the connector principal User:piperoom
+      User:piperoom: ALLOW DESCRIBE cluster; ALLOW READ group connect-wh-orders-sink (LITERAL); ALLOW CREATE,DESCRIBE,READ,WRITE topic pg. (PREFIXED)
   - tool: kafka_cluster_health
     summary: |-
       cluster Xk3vN8pQSz2mR1aYb7dEfg (3 brokers, controller 1); log dirs below 85% used

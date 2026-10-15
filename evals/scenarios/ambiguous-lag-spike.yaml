@@ -145,11 +145,11 @@ recordings:
     input: {topic: pg.public.orders, key: '5634120'}
     summary: |-
       found 1 record(s) with key "5634120"
-        partition 1, offset 25390877, 2026-10-11T09:37:00Z
+        partition 1, offset 25390877, 2026-10-11T09:39:52Z
   - tool: pg_row
     input: {pipeline_id: orders, table: public.orders, pk_column: id, key: '5634120'}
     summary: |-
-      found: yes, updated_at=2026-10-11T09:37:00.118402Z, columns=[amount, customer_id, id=5634120, status, updated_at=2026-10-11T09:37:00.118402Z]
+      found: yes, updated_at=2026-10-11T09:39:52.118402Z, columns=[amount, customer_id, id=5634120, status, updated_at=2026-10-11T09:39:52.118402Z]
   - tool: warehouse_row
     input: {pipeline_id: orders, table: analytics.orders, pk_column: id, key: '5634120'}
     summary: |-
@@ -158,7 +158,7 @@ recordings:
   - tool: trace_record
     input: {pipeline_id: orders, table: public.orders, key: '5634120'}
     summary: |
-      postgres public.orders: seen updated_at=2026-10-11T09:37:00.118402Z
+      postgres public.orders: seen updated_at=2026-10-11T09:39:52.118402Z
       kafka-connect pg-orders-connector: seen
       kafka pg.public.orders: seen offset=25390877 partition=1
       consumer order-sync: stopped_here committed=25389466
@@ -193,7 +193,6 @@ recordings:
       warehouse analytics.orders: not_seen
   # E5c: answers for calls the agent made that no recording covered (baseline run 38655252568).
   - tool: similar_incidents
-    input: {pipeline_id: "orders"}
     summary: |-
       No similar closed incident found on pipeline orders (3 past rooms searched).
   - tool: kafka_partition_rates
