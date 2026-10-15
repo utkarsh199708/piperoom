@@ -10,6 +10,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
+	"piperoom/internal/injectscan"
 	"piperoom/internal/redact"
 	"piperoom/internal/tools"
 	"piperoom/internal/tools/similarincidents"
@@ -22,7 +23,8 @@ import (
 // cause, labelled fix), never the hand-off or tool-result text, and every one
 // of them goes through wrapUntrusted. The lookup runs the tool directly, not
 // as a step: an example is history, not evidence about this room, so nothing
-// in it may become a citable step or a backed term (F3 grounding).
+// in it may become a citable step or a backed term (F3 grounding). A hit whose
+// text injectscan flags is left out (screenPastHits).
 
 const (
 	// pastIncidentsMax is how many examples the block shows.
@@ -98,7 +100,31 @@ func (r *runner) pastIncidents(ctx context.Context, maxBytes int, timeout time.D
 		r.log.Debug("agent: past incidents result unreadable", "room", r.alert.RoomID, "err", err)
 		return ""
 	}
-	return renderPastIncidents(hits, maxBytes)
+	return renderPastIncidents(r.screenPastHits(hits), maxBytes)
+}
+
+// screenPastHits drops every hit whose text injectscan flags, and logs the
+// finding kinds as wrapReadToolOutput does (never the text). Dropping, rather
+// than marking as a tool_output is marked, is deliberate: the block is put in
+// front of every later room as a worked example whose fix the model is told
+// to name, so a flagged example would be one to copy. A model that calls
+// similar_incidents itself still sees the hit, flagged.
+func (r *runner) screenPastHits(hits []pastHit) []pastHit {
+	kept := hits[:0:0]
+	for i, h := range hits {
+		var findings []injectscan.Finding
+		for _, f := range []string{h.Title, h.ClosedAt, h.Layer, h.Cause, h.LabelFix} {
+			findings = append(findings, injectscan.Scan(f)...)
+		}
+		if len(findings) > 0 {
+			r.log.Warn("agent: past incident left out of the opening block: instruction-like text",
+				"tool", similarincidents.ToolName, "room", r.alert.RoomID, "hit", i,
+				"kinds", injectscan.Kinds(findings), "count", len(findings))
+			continue
+		}
+		kept = append(kept, h)
+	}
+	return kept
 }
 
 // pastLookupKey marks the context of the room-start lookup.

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,6 +86,10 @@ func TestApproveProposalsApprovesAndExecutes(t *testing.T) {
 	for i, h := range got[2:] {
 		if h.Kind != "action_result" || h.OK == nil || !*h.OK || h.StepIndex == nil || *h.StepIndex != i || h.ProposalID != id {
 			t.Errorf("action result %d = %+v", i, h)
+		}
+		// The text numbers steps from 1, as the room does; StepIndex stays 0-based.
+		if want := fmt.Sprintf("step %d do_", i+1); !strings.HasPrefix(h.Text, want) {
+			t.Errorf("action result %d text = %q, want prefix %q", i, h.Text, want)
 		}
 	}
 	if ran != 2 {

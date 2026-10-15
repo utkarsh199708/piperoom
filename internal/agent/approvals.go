@@ -268,7 +268,8 @@ func pendingResultsNote(late []lateProposal, why string) string {
 		"Report only the step results shown in this message. Say nothing about whether the missing steps ran, and do not say approval is missing. Say only that their results are pending."
 }
 
-// missingSteps renders step indexes such as "missing: steps 1, 2".
+// missingSteps renders 0-based step indexes 1-based, as the room numbers
+// action results (StepIndex+1): indexes 0 and 1 read "missing: steps 1, 2".
 func missingSteps(missing []int) string {
 	shown := missing
 	extra := 0
@@ -277,7 +278,7 @@ func missingSteps(missing []int) string {
 	}
 	nums := make([]string, len(shown))
 	for i, n := range shown {
-		nums[i] = strconv.Itoa(n)
+		nums[i] = strconv.Itoa(n + 1)
 	}
 	label := "missing: step "
 	if len(missing) > 1 {
