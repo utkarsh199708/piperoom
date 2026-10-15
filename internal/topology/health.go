@@ -283,6 +283,11 @@ func topicHealth(err error, newest, now time.Time) (Health, map[string]string) {
 // fresh.
 const FutureSkew = time.Minute
 
+// FarFuture is how far ahead a newest timestamp may be and still be shown
+// with its gap: no clock skew or time zone mistake is a year, so beyond it the
+// value is a sentinel or bad data and its "age" means nothing.
+const FarFuture = 365 * 24 * time.Hour
+
 // sinkHealth decides a sink table's health from its newest row timestamp.
 func sinkHealth(ts, now time.Time, t Thresholds) (Health, map[string]string) {
 	if ts.IsZero() {
@@ -294,10 +299,15 @@ func sinkHealth(ts, now time.Time, t Thresholds) (Health, map[string]string) {
 	if ts.Year() >= 9999 {
 		return HealthWarn, map[string]string{"stale_for": "unknown", "future_timestamp": "infinity (a sentinel or bad value)"}
 	}
-	stale := now.Sub(ts)
-	if -stale > FutureSkew {
-		return HealthWarn, map[string]string{"stale_for": "unknown", "future_timestamp": HumanAge(-stale) + " ahead"}
+	// ts.Sub(now), not -now.Sub(ts): beyond ~292 years the Duration saturates
+	// at its minimum and negating that overflows back to a negative, which
+	// read as "ok, stale_for 0s".
+	if ahead := ts.Sub(now); ahead > FarFuture {
+		return HealthWarn, map[string]string{"stale_for": "unknown", "future_timestamp": "far in the future (a sentinel or bad value)"}
+	} else if ahead > FutureSkew {
+		return HealthWarn, map[string]string{"stale_for": "unknown", "future_timestamp": HumanAge(ahead) + " ahead"}
 	}
+	stale := now.Sub(ts)
 	facts := map[string]string{"stale_for": HumanAge(stale)}
 	switch {
 	case stale > t.SinkStaleFail:

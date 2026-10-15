@@ -52,11 +52,26 @@ func TestSinkNodeMissingTableFails(t *testing.T) {
 }
 
 // A Postgres 'infinity' newest timestamp (the warehouse client's year-9999
-// stand-in) is named as such, not as a saturated "2562047.8h ahead" (#476).
+// stand-in) or any timestamp far ahead is named as a sentinel, never a
+// saturated age or "ok, stale_for 0s" (#476).
 func TestSinkHealthInfinity(t *testing.T) {
-	inf := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
-	got, facts := sinkHealth(inf, time.Now(), DefaultThresholds())
-	if got != HealthWarn || facts["future_timestamp"] != "infinity (a sentinel or bad value)" || facts["stale_for"] != "unknown" {
-		t.Fatalf("infinity: %s %v, want warn, future_timestamp infinity, stale_for unknown", got, facts)
+	now := time.Date(2026, 10, 15, 22, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name   string
+		ts     time.Time
+		future string
+	}{
+		{"infinity", time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC), "infinity (a sentinel or bad value)"},
+		{"year 3000", time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC), "far in the future (a sentinel or bad value)"},
+		{"year 2500", time.Date(2500, 1, 1, 0, 0, 0, 0, time.UTC), "far in the future (a sentinel or bad value)"},
+		{"1h ahead", now.Add(time.Hour), "1.0h ahead"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, facts := sinkHealth(tc.ts, now, DefaultThresholds())
+			if got != HealthWarn || facts["future_timestamp"] != tc.future || facts["stale_for"] != "unknown" {
+				t.Fatalf("%s: %s %v, want warn, future_timestamp %q, stale_for unknown", tc.name, got, facts, tc.future)
+			}
+		})
 	}
 }
