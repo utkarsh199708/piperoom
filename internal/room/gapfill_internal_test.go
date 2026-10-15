@@ -2,7 +2,9 @@ package room
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"piperoom/internal/events"
@@ -77,5 +79,61 @@ func TestGapFillSurvivesEndedRequest(t *testing.T) {
 	after := mustRoom(t, svc, snap.ID)
 	if after.Driver == nil || after.Driver.ID != "priya" {
 		t.Fatalf("remote control.granted (seq %d) lost: driver=%v last_seq=%d", remote.Seq, after.Driver, after.LastSeq)
+	}
+}
+
+// failingSinceCoord fails every log read while failing is set (a store that
+// accepts our append, then drops every read).
+type failingSinceCoord struct {
+	fakeCoord
+	failing atomic.Bool
+}
+
+func (c *failingSinceCoord) Since(ctx context.Context, roomID string, after int64, limit int) ([]events.Event, error) {
+	if c.failing.Load() {
+		return nil, errors.New("connection reset")
+	}
+	return c.fakeCoord.Store.Since(ctx, roomID, after, limit)
+}
+
+// When the gap still cannot be read after the retry, our event is folded over
+// it; the room must then be rebuilt from the log once the store answers, or
+// the other replica's control.granted is skipped here for good (#284).
+func TestGapFillFailureRebuildsFromLog(t *testing.T) {
+	ctx := context.Background()
+	c := &testClock{t: leaseT0}
+	ms := memstore.NewWithClock(c.Now)
+	setup := newLeaseRig(t, ms, c)
+	arjun := leaseUser(t, setup.svc, "arjun")
+	snap, err := setup.svc.CreateRoom(ctx, arjun, "r", "sev2", "orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setup.svc.Close()
+
+	fc := &failingSinceCoord{fakeCoord: fakeCoord{Store: ms, leases: map[string]store.RoomLease{}}}
+	svc := New(Deps{Store: fc, Users: DefaultUsers(), Now: c.Now, ReplicaID: "replica-a"})
+	t.Cleanup(svc.Close)
+	mustRoom(t, svc, snap.ID)
+	priya := leaseUser(t, svc, "priya")
+
+	remote, err := ms.Append(ctx, snap.ID, events.ControlGranted, svc.humanActor(arjun),
+		events.ControlGrantedPayload{To: svc.humanActor(priya), LeaseUntil: leaseT0.Add(DriverLease)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc.failing.Store(true)
+	if err := svc.emitAs(ctx, snap.ID, executorActor, events.AgentMessage, events.AgentMessagePayload{Text: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	fc.failing.Store(false)
+	svc.followRoom(snap.ID, remote.Seq) // the follower's notify for the remote append
+
+	after := mustRoom(t, svc, snap.ID)
+	if after.Driver == nil || after.Driver.ID != "priya" {
+		t.Fatalf("remote control.granted (seq %d) lost after a failed gap read: driver=%v last_seq=%d", remote.Seq, after.Driver, after.LastSeq)
+	}
+	if after.LastSeq != remote.Seq+1 {
+		t.Fatalf("last_seq = %d, want %d", after.LastSeq, remote.Seq+1)
 	}
 }

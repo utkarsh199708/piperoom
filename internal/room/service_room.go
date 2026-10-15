@@ -186,6 +186,7 @@ func (s *Service) openAlertRoom(ctx context.Context, a alertin.Alert, alertSourc
 	if err := checkJSONBStorable(raw); err != nil {
 		return RoomSnapshot{}, false, err
 	}
+	title = stripBidi(title)
 	if err := rejectUnstorable(title); err != nil {
 		return RoomSnapshot{}, false, err
 	}

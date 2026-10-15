@@ -66,11 +66,44 @@ const replacementChar = string(rune(0xFFFD))
 // invalid UTF-8 the request is refused with a 400 validation error before any
 // write. Nothing is changed, because the person should see that the text did
 // not go through. The message never quotes the text.
+//
+// The bidi embedding, override and isolate controls are refused the same way
+// (#358): stored verbatim they reorder the text for every other reader of the
+// log (Slack, the notify webhook, exports, the post-mortem), which do not
+// strip them like the web app does.
 func rejectUnstorable(fields ...string) error {
 	if err := store.CheckText(fields...); err != nil {
 		return validation(unstorableTextMsg)
 	}
+	for _, f := range fields {
+		if strings.IndexFunc(f, bidiControl) >= 0 {
+			return validation(bidiTextMsg)
+		}
+	}
 	return nil
+}
+
+// bidiTextMsg is the 400 message for typed text holding a bidi control.
+const bidiTextMsg = "text contains bidirectional control characters (U+202A-U+202E, U+2066-U+2069)"
+
+// bidiControl reports the bidi embedding, override and isolate controls.
+func bidiControl(r rune) bool {
+	return (r >= 0x202A && r <= 0x202E) || (r >= 0x2066 && r <= 0x2069)
+}
+
+// stripBidi removes the bidi controls from text no person typed (an alert
+// title, a watcher note): it is kept, not refused, but must not reorder what
+// is shown around it.
+func stripBidi(s string) string {
+	if strings.IndexFunc(s, bidiControl) < 0 {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if bidiControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // sanitizeAgentText is the policy for text a model or a tool produced (agent

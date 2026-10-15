@@ -10,9 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/anthropics/anthropic-sdk-go"
 
 	"piperoom/internal/actions"
 	"piperoom/internal/agent"
@@ -172,6 +175,11 @@ type roomState struct {
 	pub atomic.Pointer[RoomSnapshot]
 	// changed says snap changed since it was last published.
 	changed bool
+	// stale is set when an append of ours landed after events of other
+	// replicas that could not be read (fillGapLocked): the snapshot skipped
+	// them, so the follower rebuilds it from the log (rebuildStale). Atomic
+	// so the follower can check it without the lock.
+	stale atomic.Bool
 
 	snap RoomSnapshot
 	// leaseLogFullFor is the logged lease whose control.lease_expired a full
@@ -873,7 +881,9 @@ func (s *Service) emitLocked(ctx context.Context, st *roomState, roomID string, 
 }
 
 // fillGapLocked folds the events between the snapshot and seq (exclusive)
-// that another replica appended. Caller holds st's lock.
+// that another replica appended. If they still cannot be read, the room is
+// marked stale and rebuilt from the log once the store answers again
+// (rebuildStale). Caller holds st's lock.
 //
 // The read runs on a context detached from the caller's: our event is already
 // stored and is folded next whatever happens here, and folding it over a gap
@@ -892,7 +902,9 @@ func (s *Service) fillGapLocked(ctx context.Context, roomID string, st *roomStat
 			continue
 		}
 		if err != nil || len(evs) == 0 {
-			s.log.Error("room: fold events from other replicas failed, the cached room misses them", "room", roomID, "have", st.snap.LastSeq, "want", seq-1, "err", err)
+			s.log.Error("room: fold events from other replicas failed; the cached room is rebuilt from the log", "room", roomID, "have", st.snap.LastSeq, "want", seq-1, "err", err)
+			st.stale.Store(true)
+			s.rebuildLater(roomID, seq)
 			return
 		}
 		for _, ev := range evs {
@@ -1507,10 +1519,19 @@ func isBudgetStop(err error) bool {
 }
 
 // isUnretryable reports an error a second attempt cannot cure: bad input, a
-// validation failure or a closed room.
+// validation failure, a closed room, or a model request the API refused (a
+// 4xx other than 408, 409 and 429: a bad key or an unknown model fails every
+// run the same way, and the SDK has already retried the transient ones).
 func isUnretryable(err error) bool {
 	if errors.Is(err, tools.ErrBadInput) || errors.Is(err, topology.ErrBadInput) {
 		return true
+	}
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		c := apiErr.StatusCode
+		if c >= 400 && c < 500 && c != http.StatusRequestTimeout && c != http.StatusConflict && c != http.StatusTooManyRequests {
+			return true
+		}
 	}
 	var re *Error
 	return errors.As(err, &re) && (re.Code == codeValidation || re.Code == codeRoomClosed)

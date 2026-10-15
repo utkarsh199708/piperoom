@@ -806,6 +806,10 @@ func (s *Service) followRoom(roomID string, seq int64) {
 		s.followLater(roomID, seq) // still being opened here
 		return
 	}
+	if st.stale.Load() {
+		s.rebuildStale(ctx, roomID, st, seq)
+		return
+	}
 	if seq <= p.LastSeq {
 		return // our own append, already folded
 	}
@@ -850,6 +854,58 @@ func (s *Service) followRoom(roomID string, seq int64) {
 	s.unlockRoom(st)
 	if len(evs) == 1000 {
 		s.follow.noteAppend(roomID, seq) // more to read
+	}
+}
+
+// rebuildRetry is how long a stale room waits before its rebuild is tried
+// again: the read that failed is the whole log, not one page.
+const rebuildRetry = time.Second
+
+// rebuildLater queues the rebuild of a stale room on the follower.
+func (s *Service) rebuildLater(roomID string, seq int64) {
+	time.AfterFunc(rebuildRetry, func() { s.follow.noteAppend(roomID, seq) })
+}
+
+// rebuildStale replaces the snapshot of a stale room (fillGapLocked) with one
+// folded from the whole log, as a restart would. The log is read outside the
+// lock; a failed read or a busy lock is tried again later. Events folded by
+// the rebuild do not feed the agent inbox: the pending input it carries is
+// what the next agent run starts from, as for a room loaded from the log.
+func (s *Service) rebuildStale(ctx context.Context, roomID string, st *roomState, seq int64) {
+	l, err := s.rebuild(ctx, roomID)
+	if errors.Is(err, store.ErrNotFound) {
+		return // deleted; the follower's next read or refresh evicts it
+	}
+	if err != nil {
+		if s.ctx.Err() == nil {
+			s.log.Warn("room: rebuild stale room failed; trying again", "room", roomID, "err", err)
+			s.rebuildLater(roomID, seq)
+		}
+		return
+	}
+	if !st.mu.TryLock() {
+		s.followLater(roomID, seq)
+		return
+	}
+	defer s.unlockRoom(st)
+	if st.gone || s.isClosed() {
+		return
+	}
+	if l.snap.LastSeq < st.snap.LastSeq {
+		// Read before an append of ours that the snapshot already has.
+		s.followLater(roomID, seq)
+		return
+	}
+	wasOpen := s.roomOpen(st)
+	full := st.snap.LogCap == LogCapFull
+	st.snap, st.pending, st.logBytes = l.snap, l.pending, l.logBytes
+	if full {
+		st.snap.LogCap = LogCapFull // the in-process stop of logFullLocked
+	}
+	st.changed = true
+	st.stale.Store(false)
+	if wasOpen && !s.roomOpen(st) {
+		s.closedElsewhereLocked(ctx, roomID, st)
 	}
 }
 
@@ -1354,6 +1410,13 @@ func (s *Service) syncRoomWith(ctx context.Context, roomID string, try bool) (bu
 	}
 	st := lockCached()
 	if st == nil {
+		return busy
+	}
+	if st.stale.Load() {
+		// Rebuilt before the command rather than folded: the snapshot
+		// skipped events (fillGapLocked).
+		s.unlockRoom(st)
+		s.rebuildStale(ctx, roomID, st, row.LastSeq)
 		return busy
 	}
 	s.adoptRowLeaseLocked(st, row)
