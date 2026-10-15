@@ -50,3 +50,13 @@ func TestSinkNodeMissingTableFails(t *testing.T) {
 	}
 	t.Fatalf("no sink node in %+v", g.Nodes)
 }
+
+// A Postgres 'infinity' newest timestamp (the warehouse client's year-9999
+// stand-in) is named as such, not as a saturated "2562047.8h ahead" (#476).
+func TestSinkHealthInfinity(t *testing.T) {
+	inf := time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
+	got, facts := sinkHealth(inf, time.Now(), DefaultThresholds())
+	if got != HealthWarn || facts["future_timestamp"] != "infinity (a sentinel or bad value)" || facts["stale_for"] != "unknown" {
+		t.Fatalf("infinity: %s %v, want warn, future_timestamp infinity, stale_for unknown", got, facts)
+	}
+}

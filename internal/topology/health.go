@@ -288,6 +288,12 @@ func sinkHealth(ts, now time.Time, t Thresholds) (Health, map[string]string) {
 	if ts.IsZero() {
 		return HealthWarn, map[string]string{"stale_for": "never"}
 	}
+	// The warehouse client's year-9999 stand-in for a Postgres 'infinity'
+	// (#468): no row holds that time, and its "age" is time.Duration
+	// saturating, so neither is shown (#476), as in warehouse_freshness.
+	if ts.Year() >= 9999 {
+		return HealthWarn, map[string]string{"stale_for": "unknown", "future_timestamp": "infinity (a sentinel or bad value)"}
+	}
 	stale := now.Sub(ts)
 	if -stale > FutureSkew {
 		return HealthWarn, map[string]string{"stale_for": "unknown", "future_timestamp": HumanAge(-stale) + " ahead"}
