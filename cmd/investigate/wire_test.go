@@ -15,6 +15,7 @@ import (
 	"piperoom/internal/events"
 	"piperoom/internal/owners"
 	"piperoom/internal/tools"
+	"piperoom/internal/tools/similarincidents"
 	"piperoom/internal/topology"
 	"piperoom/internal/wiring"
 )
@@ -285,6 +286,10 @@ func TestSystemPromptNamesOnlyRealTools(t *testing.T) {
 	for _, a := range areg.All() {
 		available[a.Name()] = true
 	}
+
+	// similar_incidents exists only when the room service gives wiring a room
+	// store (internal/wiring pins that); the prompt may name it.
+	available[similarincidents.ToolName] = true
 
 	names := agent.PromptToolNames()
 	if len(names) == 0 {
