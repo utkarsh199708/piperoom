@@ -76,7 +76,7 @@ func (a *approveProposals) approveAndRun(id string, p events.ProposalCreatedPayl
 		idx := i
 		a.inbox.push(agent.HumanInput{
 			Actor: system, Kind: "action_result", ProposalID: id, StepIndex: &idx,
-			OK: &ok, Text: fmt.Sprintf("step %d %s: %s", i, st.Action, msg),
+			OK: &ok, Text: fmt.Sprintf("step %d %s: %s", i+1, st.Action, msg),
 		})
 		if !ok {
 			return
