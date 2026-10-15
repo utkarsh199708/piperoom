@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"piperoom/internal/events"
+	"piperoom/internal/store"
 )
 
 // maxDeclineReason caps the driver's note on a declined suggestion, in
@@ -95,4 +96,16 @@ func hasPendingSuggestion(snap RoomSnapshot, suggestionID string) bool {
 		}
 	}
 	return false
+}
+
+// suggester is the author of a pending suggestion as the room recorded it
+// (steer.suggested's actor, with its verified flag), falling back to the
+// suggestion row when the snapshot no longer lists it.
+func suggester(snap RoomSnapshot, suggestionID string, row store.SuggestionRow) *events.Actor {
+	for _, sg := range snap.PendingSuggestions {
+		if sg.SuggestionID == suggestionID {
+			return &events.Actor{Kind: events.ActorHuman, ID: sg.From.ID, Name: sg.From.Name, Verified: sg.From.Verified}
+		}
+	}
+	return &events.Actor{Kind: events.ActorHuman, ID: row.FromID, Name: row.FromName}
 }

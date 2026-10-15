@@ -1154,6 +1154,13 @@ func inputFor(e events.Event) *agent.HumanInput {
 		if !ok {
 			return nil
 		}
+		// A forwarded suggestion is its author's words, not the driver's:
+		// the agent wraps it as untrusted data under the suggester's name.
+		// One logged before From existed has no author to name, so it keeps
+		// the old steer shape.
+		if p.SuggestionID != "" && p.From != nil {
+			return &agent.HumanInput{Seq: e.Seq, Actor: *p.From, Kind: "suggestion", Text: p.Text}
+		}
 		return &agent.HumanInput{Seq: e.Seq, Actor: e.Actor, Kind: "steer", Text: p.Text}
 	case events.CommentAdded:
 		p, ok := decode[events.CommentAddedPayload](e)

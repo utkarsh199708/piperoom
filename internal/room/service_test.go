@@ -824,6 +824,11 @@ func TestSendSuggestionForwards(t *testing.T) {
 	if sent.SuggestionID != sp.SuggestionID || sent.Text != "try the registry" {
 		t.Fatalf("bad steer.sent: %+v", sent)
 	}
+	// The suggester is recorded so the agent can read the text as theirs,
+	// not as the forwarding driver's instruction.
+	if sent.From == nil || sent.From.ID != "priya" || sent.From.Kind != events.ActorHuman || ev.Actor.ID != "arjun" {
+		t.Fatalf("steer.sent from=%+v actor=%+v, want from priya, actor arjun", sent.From, ev.Actor)
+	}
 	snap, _ := svc.GetRoom(context.Background(), roomID)
 	if len(snap.PendingSuggestions) != 0 {
 		t.Fatalf("suggestion should be consumed: %+v", snap.PendingSuggestions)

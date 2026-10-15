@@ -173,6 +173,7 @@ func (s *Service) SendSuggestion(ctx context.Context, user User, roomID, suggest
 		return nil
 	}, events.SteerSent, s.humanActor(user), events.SteerSentPayload{
 		SuggestionID: suggestionID,
+		From:         suggester(st.snap, suggestionID, sugg),
 		Text:         sugg.Text,
 	})
 	if err != nil {

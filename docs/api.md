@@ -363,7 +363,7 @@ summary only (by the pipeline's `watch.dlq_peek.headers` mode) and `tool_result.
 | GET | `/api/rooms/{id}/events?after=0&limit=500` | – | `{events:[Event], last_seq}` | limit max 1000; `events` is `[]` when nothing is after `after` |
 | POST | `/api/rooms/{id}/comments` | `{step_id?, text}` | `Event` | `@agent` in text sets `mentions_agent`. R4: `text` at most 4000 characters (code points), else `400 validation` |
 | POST | `/api/rooms/{id}/steer` | `{text}` | `Event` | driver → `steer.sent`; others (also when no one drives or the lease expired) → `steer.suggested`, kept for the next driver (F5, implemented by A5; existing behaviour: a suggestion stays in `pending_suggestions` across `control.granted` and never wakes the agent; viewers `403 viewer`, closed rooms `409 room_closed`). R4: `text` at most 4000 characters (code points), else `400 validation` |
-| POST | `/api/rooms/{id}/suggestions/{sid}/send` | – | `Event` | driver only; emits `steer.sent` with `suggestion_id` |
+| POST | `/api/rooms/{id}/suggestions/{sid}/send` | – | `Event` | driver only; emits `steer.sent` with `suggestion_id` and `from` (the suggester's actor; the event's actor is the driver). The agent reads a forwarded suggestion as the suggester's words, wrapped as untrusted data, not as a driver instruction |
 | POST | `/api/rooms/{id}/suggestions/{sid}/decline` | `{reason?}` | `Event` (`steer.declined`) | R0; server R11. Driver only (`403 not_driver`); open rooms only (`409 room_closed`); unknown `sid`, or one of another room, `404 not_found`; a suggestion that is no longer pending (sent or declined) `409 already_decided`, the same answer as a second `send`, so a retry after a lost response is safe to treat as done. `reason` optional, at most 500 characters, typed-text rule above (else `400 validation`). The suggestion leaves `pending_suggestions`; the agent never sees it |
 | POST | `/api/rooms/{id}/control/request` | – | `Event` | |
 | POST | `/api/rooms/{id}/control/grant` | `{to}` | `Event` | driver only, or anyone if no driver / lease expired |
@@ -532,9 +532,10 @@ never shows shadow output.
 `GET /api/rooms/{id}/ws?after=<seq>`
 
 The WebSocket uses the session cookie (dev: or `X-User` for non-browser clients); no credentials → `401`.
-R4: at most 200 live connections per room and 20 per user, per server process (with several replicas the caps apply on
-each). Over either cap the request answers `429 too_many_connections` before the upgrade, with a message naming which
-cap was hit; a closed connection frees its slot.
+R4: at most 200 live connections per room, 20 per user and 5000 in all (room and room-list sockets together), per
+server process (with several replicas the caps apply on each). Over any cap the request answers
+`429 too_many_connections` before the upgrade, with a message naming which cap was hit; a closed connection frees its
+slot.
 
 Server → client messages:
 ```json
@@ -556,6 +557,10 @@ Room deleted: when an admin deletes the room, each open connection gets one last
 `{ "type": "event", "event": { "room_id": "r_…", "seq": <last_seq + 1>, "type": "room.deleted", "actor": <the admin>, "payload": { "reason": "…" }, "at": "…" } }`
 and is then closed with status 1000 and close reason `room deleted`. That event is never stored; a reconnect gets `404`.
 A connection that was still replaying when the room was deleted gets only the close (same status and reason).
+A room removed by retention, or deleted on another replica, closes the same way (retention's frame has the system
+actor and reason `retention: closed N days`); if the server cannot tell who deleted it, only the close is sent. If a
+room's live feed ends while the room still exists, the connection is closed with status 1011 and reason
+`subscription ended`; the client reconnects with its highest seen seq.
 
 ### Room list socket (F6, implemented by A5)
 
