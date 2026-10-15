@@ -338,12 +338,25 @@ func ddlInScope(sc tools.Scope, identity string) bool {
 	})
 }
 
+// asciiLower folds A-Z only, like Postgres' downcase_identifier; Unicode
+// case mapping would equate names Postgres keeps apart.
+func asciiLower(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + 'a' - 'A'
+		}
+		return r
+	}, s)
+}
+
 // splitIdent splits a dotted SQL identifier into its parts, removing quotes
 // ("" inside quotes is one quote) and not splitting at a dot inside quotes.
 // An unquoted part is lower-cased when fold is set, as Postgres does for
-// object_identity text; owners.yaml names and tool inputs are catalog names,
-// so they keep their case (fold false). A quoted part always keeps its case,
-// so "Orders" and orders stay two tables. ok is false for an unbalanced quote
+// object_identity text; owners.yaml names and tool inputs are parsed as SQL
+// identifiers without folding (fold false), so their case is kept. A table
+// name that contains '.' or '"' must therefore be written quoted in owners.yaml
+// (public."a.b"); the plain form public.a.b is read as three parts and matches
+// nothing (gap: see #461). A quoted part always keeps its case, // so "Orders" and orders stay two tables. ok is false for an unbalanced quote
 // or an empty part.
 func splitIdent(s string, fold bool) (parts []string, ok bool) {
 	var cur strings.Builder
@@ -354,7 +367,7 @@ func splitIdent(s string, fold bool) (parts []string, ok bool) {
 			return false
 		}
 		if !quoted && fold {
-			p = strings.ToLower(p)
+			p = asciiLower(p)
 		}
 		parts = append(parts, p)
 		cur.Reset()

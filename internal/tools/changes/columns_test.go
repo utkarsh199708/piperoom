@@ -2,13 +2,14 @@ package changes
 
 import (
 	"context"
-	"piperoom/internal/owners"
-	"piperoom/internal/tools"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/owners"
+	"piperoom/internal/tools"
 )
 
 // The DDL audit logs a column rename under schema.table.column. what_changed
@@ -76,4 +77,85 @@ func scopedTables(t *testing.T, tables ...string) context.Context {
 	return tools.WithPipeline(context.Background(), owners.Pipeline{
 		ID: "orders", TopicPrefix: "pg", SourceTables: tables, Connectors: []string{"pg-orders-connector"},
 	})
+}
+
+// Log rows (the watcher's, stored with the quoted identity) take the same
+// object filter as live rows.
+func TestWhatChangedMixedCaseFromLog(t *testing.T) {
+	at := t0.Add(-time.Minute)
+	log := &fakeLog{rows: []clients.PipelineChange{
+		{ID: 1, Kind: clients.ChangeDDL, Object: `public."Mixed"`, At: at, Source: "watcher"},
+		{ID: 2, Kind: clients.ChangeDDL, Object: `public."Mixed".note`, At: at.Add(-time.Second), Source: "watcher"},
+		{ID: 3, Kind: clients.ChangeDDL, Object: `public."MIXED"`, At: at.Add(-2 * time.Second), Source: "watcher"},
+	}}
+	res, err := run(t, newTool(log, &fakeSrc{}), scopedTables(t, "public.Mixed"), `{"object":"public.Mixed"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, ch := range dataOf(t, res).Changes {
+		got = append(got, ch.Object)
+	}
+	if want := []string{`public."Mixed"`, `public."Mixed".note`}; !slices.Equal(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestSplitIdent(t *testing.T) {
+	for _, tc := range []struct {
+		in    string
+		fold  bool
+		want  []string
+		valid bool
+	}{
+		{`public.Orders`, true, []string{"public", "orders"}, true},
+		{`public.Orders`, false, []string{"public", "Orders"}, true},
+		{`public."Orders"`, true, []string{"public", "Orders"}, true},
+		{`public."a.b"`, true, []string{"public", "a.b"}, true},
+		{`public."a""b"`, true, []string{"public", `a"b`}, true},
+		{`public."order"`, true, []string{"public", "order"}, true},
+		{`public."a"b"`, true, nil, false},
+		{`public.a"b`, true, nil, false},
+		{`public..x`, true, nil, false},
+		{"public.\u212Aey", true, []string{"public", "\u212Aey"}, true}, // Kelvin sign: not folded
+	} {
+		got, ok := splitIdent(tc.in, tc.fold)
+		if ok != tc.valid || !slices.Equal(got, tc.want) {
+			t.Errorf("splitIdent(%q, %v) = %q, %v; want %q, %v", tc.in, tc.fold, got, ok, tc.want, tc.valid)
+		}
+	}
+}
+
+// Known gap (#461): a table name containing '.' or '"' only matches when the
+// owners entry is quoted. The tool parses owners entries as SQL identifiers,
+// the watcher compares plain joined parts, and the postgres client's
+// splitTable rejects such names anyway. A gap row asserts today's output; once
+// #461 lands, delete its gap marker and the row asserts the ideal one.
+func TestWhatChangedIdentGaps(t *testing.T) {
+	at := t0.Add(-time.Minute)
+	for _, tc := range []struct {
+		owned, identity, input string
+		gap                    string // "" once fixed
+		ideal                  bool   // kept when the gap is closed
+	}{
+		{owned: "public.a.b", identity: `public."a.b"`, input: `{}`, gap: "see #461", ideal: true},
+		{owned: "public.a.b", identity: `public."a.b"`, input: `{"object":"public.a.b"}`, gap: "see #461", ideal: true},
+		{owned: `public.a"b`, identity: `public."a""b"`, input: `{}`, gap: "see #461", ideal: true},
+		{owned: `public."a.b"`, identity: `public."a.b"`, input: `{}`, ideal: true},
+		{owned: `public."a""b"`, identity: `public."a""b"`, input: `{}`, ideal: true},
+	} {
+		src := &fakeSrc{rows: []clients.DDLChange{{At: at, CommandTag: "ALTER TABLE", ObjectIdentity: tc.identity, Query: "q", Username: "u"}}}
+		res, err := run(t, newTool(&fakeLog{}, src), scopedTables(t, tc.owned), tc.input)
+		if err != nil && tc.gap == "" {
+			t.Fatalf("owned %s input %s: %v", tc.owned, tc.input, err)
+		}
+		kept := err == nil && len(dataOf(t, res).Changes) == 1
+		want := tc.ideal
+		if tc.gap != "" {
+			want = false // today's output
+		}
+		if kept != want {
+			t.Errorf("owned %s identity %s input %s (gap %q): kept = %v, want %v", tc.owned, tc.identity, tc.input, tc.gap, kept, want)
+		}
+	}
 }
