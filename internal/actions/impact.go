@@ -9,7 +9,41 @@ import (
 
 // Compile-time check that the connector-config action says what it changes
 // beyond the kafka-connect layer (Q1, QA G5).
-var _ Impacting = (*updateConnectorConfig)(nil)
+var (
+	_ Impacting = (*updateConnectorConfig)(nil)
+	_ Impacting = (*registerSchema)(nil)
+	_ Impacting = (*setCompatibility)(nil)
+)
+
+// Impact: a new schema version under a topic's subject changes the shape every
+// reader of the topic decodes, so the consumer and the warehouse must approve
+// too (Q2 F10). It decides from params alone.
+func (a *registerSchema) Impact(raw json.RawMessage) Impact {
+	var p registerSchemaParams
+	if json.Unmarshal(raw, &p) != nil || p.Subject == "" {
+		return Impact{}
+	}
+	return Impact{
+		Layers:    []string{"consumer", "warehouse"},
+		RiskLevel: events.RiskMedium,
+		Reason:    fmt.Sprintf("registering a new schema under %s changes the record shape that consumers decode and the warehouse loads.", p.Subject),
+	}
+}
+
+// Impact: compatibility NONE lets any later schema through, including one that
+// breaks every reader and the warehouse load, so it is high risk. Stricter
+// levels only restrict what can be registered later and have no opinion.
+func (a *setCompatibility) Impact(raw json.RawMessage) Impact {
+	var p setCompatibilityParams
+	if json.Unmarshal(raw, &p) != nil || p.Subject == "" || p.Level != "NONE" {
+		return Impact{}
+	}
+	return Impact{
+		Layers:    []string{"consumer", "warehouse"},
+		RiskLevel: events.RiskHigh,
+		Reason:    fmt.Sprintf("compatibility NONE on %s lets any schema be registered, including one that breaks consumers and the warehouse load.", p.Subject),
+	}
+}
 
 // Impact says which other layers a connector-config change reaches, so their
 // owners must approve too, and how risky it is. It decides from the params

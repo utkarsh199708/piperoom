@@ -146,9 +146,9 @@ func TestConnectorConfigImpactReturnsFreshLayers(t *testing.T) {
 	}
 }
 
-// Only the action that can reach past its layer says so; the restarts and the
-// schema actions have no opinion.
-func TestOnlyConnectorConfigIsImpacting(t *testing.T) {
+// Only the actions that can reach past their layer say so (connector config and
+// the two schema registry writes, Q2 F10); the restarts have no opinion.
+func TestOnlyConfigAndSchemaWritesAreImpacting(t *testing.T) {
 	reg := resumeRegistry(t, testDeps())
 	var impacting []string
 	for _, a := range reg.All() {
@@ -156,7 +156,7 @@ func TestOnlyConnectorConfigIsImpacting(t *testing.T) {
 			impacting = append(impacting, a.Name())
 		}
 	}
-	if len(impacting) != 1 || impacting[0] != "connect_update_connector_config" {
+	if !slices.Equal(impacting, []string{"connect_update_connector_config", "schema_set_compatibility", "schema_register"}) {
 		t.Fatalf("Impacting actions = %v", impacting)
 	}
 }

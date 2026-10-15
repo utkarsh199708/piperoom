@@ -268,7 +268,7 @@ func TestConnectWorkerLogDefaultConnector(t *testing.T) {
 		d := Deps{
 			Owners:     two,
 			ConnectLog: fl,
-			Connect: &fakeConnect{configFn: func(_ context.Context, n string) (map[string]string, error) {
+			Connect: &fakeConnect{listFn: func(context.Context) ([]string, error) { return nil, nil }, configFn: func(_ context.Context, n string) (map[string]string, error) {
 				if cfgErr != nil {
 					return nil, cfgErr
 				}

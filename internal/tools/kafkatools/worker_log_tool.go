@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"piperoom/internal/clients"
+	"piperoom/internal/clients/connect"
 	"piperoom/internal/redact"
 	"piperoom/internal/tools"
 )
@@ -118,18 +120,24 @@ func (t *connectWorkerLog) Run(ctx context.Context, input json.RawMessage) (tool
 
 	cctx, cancel := withTimeout(ctx)
 	defer cancel()
-	lines, err := t.d.ConnectLog.WorkerLog(cctx, clients.WorkerLogQuery{
-		Connector: connector,
-		Since:     t.d.now().Add(-time.Duration(in.SinceMinutes) * time.Minute),
-		MinLevel:  in.MinLevel,
-		MaxLines:  in.MaxLines,
-	})
-	switch {
-	case errors.Is(err, clients.ErrNotSupported):
-		return res(noWorkerLogText, nil), nil
-	case err != nil:
-		return tools.Result{}, fmt.Errorf("kafkatools: connect_worker_log: %w", err)
+	names := t.logNames(cctx, sc, connector, fromDefault)
+	var lines []clients.LogLine
+	for _, n := range names {
+		got, err := t.d.ConnectLog.WorkerLog(cctx, clients.WorkerLogQuery{
+			Connector: n,
+			Since:     t.d.now().Add(-time.Duration(in.SinceMinutes) * time.Minute),
+			MinLevel:  in.MinLevel,
+			MaxLines:  in.MaxLines,
+		})
+		if errors.Is(err, clients.ErrNotSupported) {
+			return res(noWorkerLogText, nil), nil
+		}
+		if err != nil {
+			return tools.Result{}, fmt.Errorf("kafkatools: connect_worker_log: %w", err)
+		}
+		lines = append(lines, got...)
 	}
+	lines = mergeLogLines(lines, t.otherConnectors(cctx, sc, names), in.MaxLines)
 
 	// Everything from the log is masked before it reaches a summary or Data.
 	safe := make([]clients.LogLine, len(lines))
@@ -156,6 +164,90 @@ func (t *connectWorkerLog) Run(ctx context.Context, input json.RawMessage) (tool
 		r.Truncated = true
 	}
 	return r, nil
+}
+
+// logNames is every name the log is read for: the connector and, for Debezium,
+// its logical name (topic.prefix / database.server.name). Debezium logs its own
+// lines, including the "must be owner of table" failure, with that name in its
+// log context and thread names, never with the Connect connector name (Q2 F14).
+func (t *connectWorkerLog) logNames(ctx context.Context, sc tools.Scope, connector string, fromDefault bool) []string {
+	names := []string{connector}
+	add := func(n string) {
+		if n != "" && !slices.Contains(names, n) {
+			names = append(names, n)
+		}
+	}
+	found := false
+	if t.d.Connect != nil {
+		if cfg, err := t.d.Connect.Config(ctx, connector); err == nil {
+			for _, k := range []string{"topic.prefix", "database.server.name"} {
+				if cfg[k] != "" {
+					found = true
+				}
+				add(cfg[k])
+			}
+		}
+	}
+	if !found && fromDefault && !sc.Unscoped() {
+		add(sc.Pipeline().TopicPrefix)
+	}
+	return names
+}
+
+// otherConnectors lists connectors of other pipelines on the shared worker:
+// those Connect knows and owners.yaml names that are not this pipeline's.
+func (t *connectWorkerLog) otherConnectors(ctx context.Context, sc tools.Scope, own []string) []string {
+	var all []string
+	if t.d.Connect != nil {
+		if l, err := t.d.Connect.ListConnectors(ctx); err == nil {
+			all = append(all, l...)
+		}
+	}
+	if t.d.Owners != nil {
+		for _, p := range t.d.Owners.Pipelines {
+			all = append(all, p.Connectors...)
+		}
+	}
+	var out []string
+	for _, n := range all {
+		if n == "" || slices.Contains(own, n) || slices.Contains(out, n) {
+			continue
+		}
+		if !sc.Unscoped() && slices.Contains(sc.Pipeline().Connectors, n) {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// mergeLogLines joins the per-name results, newest first without duplicates,
+// and drops entries that name another pipeline's connector: a shared worker
+// logs assignments and rebalances that list every connector, and the room must
+// not see the others (Q2 F17). The cap is applied last.
+func mergeLogLines(lines []clients.LogLine, others []string, limit int) []clients.LogLine {
+	sort.SliceStable(lines, func(i, j int) bool { return lines[i].At.After(lines[j].At) })
+	type key struct {
+		at  time.Time
+		msg string
+	}
+	seen := map[key]bool{}
+	out := make([]clients.LogLine, 0, len(lines))
+	for _, l := range lines {
+		k := key{l.At, l.Message}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		if slices.ContainsFunc(others, func(n string) bool { return connect.MentionsName(l.Message, n) }) {
+			continue
+		}
+		out = append(out, l)
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 // normalizeLogInput applies the defaults and bounds. A value above a maximum is

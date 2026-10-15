@@ -3,9 +3,12 @@ package dbtools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"piperoom/internal/clients"
 	"piperoom/internal/clients/postgres"
@@ -140,11 +143,23 @@ func pgPublicationTablesTool(d Deps) tools.Tool {
 			}
 
 			tables, other, err := read(ctx, conn.publication, conn.role, p.SourceTables)
+			var facts roleFacts
+			if err != nil && isUndefinedObject(err) {
+				// A dropped or renamed connector role makes the privilege
+				// functions fail with 42704. Ask the catalogs about the role
+				// instead: a missing role is a finding, not a raw SQL error.
+				facts = readRoleFacts(ctx, d.Src, conn)
+				if facts.info != nil && !facts.info.RoleExists {
+					err = nil
+					tables, other = nil, 0
+				}
+			}
 			if err != nil {
 				return tools.Result{}, fmt.Errorf("dbtools: pg_publication_tables: %w", err)
 			}
-
-			facts := readRoleFacts(ctx, d.Src, conn)
+			if facts.info == nil && facts.err == "" {
+				facts = readRoleFacts(ctx, d.Src, conn)
+			}
 			findings := publicationFindings(conn, p.SourceTables, tables, facts)
 
 			text := publicationSummary(conn, p.SourceTables, tables, facts, findings)
@@ -236,6 +251,14 @@ func debeziumSourceConnector(ctx context.Context, connect clients.ConnectClient,
 // attributes when the source client can. A failure is kept as text, not
 // returned: the table facts already read are still worth showing, and the
 // summary says what is missing.
+// isUndefinedObject reports a Postgres undefined_object error (SQLSTATE
+// 42704), which is what has_table_privilege and pg_has_role raise for a role
+// that does not exist.
+func isUndefinedObject(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "42704"
+}
+
 func readRoleFacts(ctx context.Context, src clients.SourceDB, c connectorConfig) roleFacts {
 	ic, ok := src.(publicationInfoClient)
 	if !ok {

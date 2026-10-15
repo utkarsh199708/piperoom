@@ -188,7 +188,7 @@ func TestPublicationSourceTablesSQLIsParameterised(t *testing.T) {
 		t.Fatal(err)
 	}
 	sql, args := q.sqlWith(t, "FROM (VALUES")
-	for _, want := range []string{"pg_get_userbyid(c.relowner)", "pg_has_role($2::name, c.relowner, 'MEMBER')"} {
+	for _, want := range []string{"pg_get_userbyid(c.relowner)", "FROM pg_roles WHERE rolname = $2::name", "pg_has_role($2::name, c.relowner, 'USAGE')"} {
 		if !strings.Contains(sql, want) {
 			t.Errorf("SQL lacks %q:\n%s", want, sql)
 		}
@@ -233,7 +233,7 @@ func TestPublicationTablesMembersCarryOwners(t *testing.T) {
 		t.Errorf("member = %+v", got[1])
 	}
 	sql, args := q.sqlWith(t, "JOIN pg_namespace n ON n.nspname = pt.schemaname")
-	if !strings.Contains(sql, "pg_has_role($2::name, c.relowner, 'MEMBER')") || fmt.Sprint(args) != "[dbz_publication debezium]" {
+	if !strings.Contains(sql, "FROM pg_roles WHERE rolname = $2::name") || !strings.Contains(sql, "pg_has_role($2::name, c.relowner, 'USAGE')") || fmt.Sprint(args) != "[dbz_publication debezium]" {
 		t.Errorf("members query:\n%s\nargs %v", sql, args)
 	}
 }

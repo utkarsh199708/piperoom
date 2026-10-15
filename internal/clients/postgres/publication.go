@@ -27,8 +27,14 @@ import (
 //     (§9.27): privilege types include SELECT.
 //   - pg_class.relowner names the table's owner role and
 //     pg_get_userbyid(oid) turns it into a name; pg_has_role([user name|oid],
-//     role name|oid, 'MEMBER') (§9.27) is true when the user is that role or
-//     a member of it (and for a superuser).
+//     role name|oid, 'USAGE') (§9.27) is true when the user is that role or
+//     inherits its privileges through membership (and for a superuser).
+//     'MEMBER' is also true for a NOINHERIT or WITH INHERIT FALSE
+//     membership, which Postgres does not accept as ownership: the ownership
+//     check behind ALTER PUBLICATION ... SET TABLE is object_ownercheck, which
+//     calls has_privs_of_role, the 'USAGE' semantics (PostgreSQL docs,
+//     "System Information Functions", pg_has_role; "Privileges": a member
+//     has the owner's rights only when it inherits them).
 type PublicationTable struct {
 	Schema        string `json:"schema"`
 	Table         string `json:"table"`
@@ -41,10 +47,11 @@ type PublicationTable struct {
 	Owner string `json:"owner,omitempty"`
 	// RoleIsOwner is true when the connector role is Owner itself.
 	RoleIsOwner bool `json:"role_is_owner,omitempty"`
-	// RoleMemberOfOwner is pg_has_role(role, owner, 'MEMBER'): the role is the
-	// owner, a member of it, or a superuser. Adding a table to a publication
-	// needs ownership of the table, which membership gives. Omitted when
-	// false, so check Owner too.
+	// RoleMemberOfOwner is pg_has_role(role, owner, 'USAGE'): the role is the
+	// owner, inherits the owner's privileges through membership, or is a
+	// superuser. Adding a table to a publication needs ownership of the
+	// table, which an inheriting membership gives and a NOINHERIT or WITH
+	// INHERIT FALSE one does not. Omitted when false, so check Owner too.
 	RoleMemberOfOwner bool `json:"role_member_of_owner,omitempty"`
 }
 
@@ -123,9 +130,11 @@ func (d *DB) PublicationTables(ctx context.Context, publication, role string, ta
 func (d *DB) publicationMembers(ctx context.Context, publication, role string) ([]PublicationTable, error) {
 	rows, err := d.query(ctx, `
 		SELECT pt.schemaname, pt.tablename,
-		       has_table_privilege($2::name, c.oid, 'SELECT'),
+		       CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2::name)
+		            THEN has_table_privilege($2::name, c.oid, 'SELECT') ELSE false END,
 		       pg_get_userbyid(c.relowner)::text,
-		       pg_has_role($2::name, c.relowner, 'MEMBER')
+		       CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2::name)
+		            THEN pg_has_role($2::name, c.relowner, 'USAGE') ELSE false END
 		FROM pg_publication_tables pt
 		JOIN pg_namespace n ON n.nspname = pt.schemaname
 		JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = pt.tablename
@@ -180,9 +189,11 @@ func (d *DB) sourcePrivileges(ctx context.Context, publication, role string, tab
 	sb.WriteString(`
 		SELECT v.schemaname, v.tablename,
 		       (pt.pubname IS NOT NULL) AS in_publication,
-		       (c.oid IS NOT NULL AND has_table_privilege($2::name, c.oid, 'SELECT')) AS selectable,
+		       CASE WHEN c.oid IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2::name)
+		            THEN has_table_privilege($2::name, c.oid, 'SELECT') ELSE false END AS selectable,
 		       COALESCE(pg_get_userbyid(c.relowner)::text, '') AS owner,
-		       (c.oid IS NOT NULL AND pg_has_role($2::name, c.relowner, 'MEMBER')) AS role_member
+		       CASE WHEN c.oid IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2::name)
+		            THEN pg_has_role($2::name, c.relowner, 'USAGE') ELSE false END AS role_member
 		FROM (VALUES `)
 	for i := range sources {
 		if i > 0 {
@@ -239,7 +250,7 @@ func (d *DB) PublicationInfo(ctx context.Context, publication, role string) (Pub
 		       r.rolname::text,
 		       COALESCE(r.rolreplication, false),
 		       COALESCE(r.rolsuper, false),
-		       (r.oid IS NOT NULL AND pg_has_role(r.oid, p.pubowner, 'MEMBER'))
+		       (r.oid IS NOT NULL AND pg_has_role(r.oid, p.pubowner, 'USAGE'))
 		FROM pg_publication p
 		LEFT JOIN pg_roles r ON r.rolname = $2::name
 		WHERE p.pubname = $1`, publication, role).
