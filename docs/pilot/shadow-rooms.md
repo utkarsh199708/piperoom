@@ -76,10 +76,22 @@ any layer of that pipeline in `owners.yaml`, or the solo user (in dev mode also 
 `users.yaml` alone is not enough (`docs/api.md`, `shadow/blind` and `shadow/grade` rows). The reading
 route, `GET .../shadow`, is open to any logged-in user, viewers included, once the blind label exists.
 
-**The web app has no screen for these three steps yet.** There is no blind-label form, no run viewer and
-no grade form for shadow rooms in `web/src`. The app shows no shadow indicator at all; it only uses the
-flag to hide the cost chip (with its running duration) and the room-list insight line, and to keep
-usage at zero. Use the API. Every `POST` needs
+**In the web app** a shadow room shows a "Shadow" badge and a banner ("The agent is investigating
+silently and proposes nothing..."), hides the steer box and the cost chip, and, once the room is closed,
+shows a panel that walks through the three steps in order (`web/src/components/shadow/ShadowPanel.tsx`,
+`BlindLabelForm.tsx`, `RunReveal.tsx`, `GradeForm.tsx`):
+
+1. **Blind label:** pick the layer where it actually broke and type root cause terms. Nothing about the
+   agent's answer is shown yet.
+2. **The agent's answer:** the run is revealed with its status, times, tool calls, tokens and final
+   hypothesis, next to the humans' own time to close. A toggle adds the tool data.
+3. **Grade:** was the layer right, how much of the root cause (`yes`, `partial`, `no`), and optional notes.
+
+A viewer sees the same screens without the forms. The sidebar entry **Shadow results** opens a page with
+the metrics below, filtered by pipeline and by close date (`ShadowMetricsPage.tsx`). The room's general
+"Add label" form is offered on a shadow room only after the blind label (`RoomScreen.tsx`).
+
+The API does the same and is the way to script it. Every `POST` needs
 `Content-Type: application/json`. Set these once in your shell:
 
 ```sh
@@ -227,6 +239,5 @@ They combine: the watcher in `rooms` mode on a shadow pipeline opens shadow room
 
 ## Known gaps
 
-- No web screens for the blind label, the run viewer or the grade (use the API above).
 - No Docker Compose pass-through for the `PIPEROOM_SHADOW_*` numbers (the Helm chart has it).
 - The 70% bar is a proposal, not a measured threshold.

@@ -426,7 +426,8 @@ On start-up the service reloads every room from the event log (`Load` in `intern
 **It starts no agent by itself**, because a restart must not spend model calls on rooms nobody is
 watching. What an open room shows depends on what its agent was doing:
 
-- **Nearly every open room gets the notice.** An agent that has finished its answer does not end its
+- **Nearly every open room gets the notice** (shadow rooms excepted: their run is marked `interrupted`
+  and they get no notice, see [shadow-rooms.md](shadow-rooms.md#restarts-and-failures)). An agent that has finished its answer does not end its
   run: it goes idle and waits for input, so its room still holds an agent lease. A stop expires the
   lease at once (a crash lets it run out after 30 s), and the take-over scan, which runs every 10 s,
   adopts the room. Unless the next bullet applies, it writes an `agent.status` `idle` event with the
@@ -459,8 +460,8 @@ doubles (`service.go`). Each failure posts an `agent.status` `error` event, and 
 the agent queue when the cap is reached (`service.go`; `PIPEROOM_MAX_AGENTS`, section 1).
 
 A fix that was fully approved but had not finished when the server stopped is **not re-run**. It is
-marked failed, not immediately: the sweep acts only on a stale claim (`sweepStaleProposals`,
-`recordInterruption` in `internal/room/replicas.go`). The service writes one `action.executed` event with
+marked failed, but not immediately: a sweep fails a fix once it has been stale long enough (`sweepStaleProposals`,
+`recordInterruption` in `internal/room/replicas.go`, two cases below). The service writes one `action.executed` event with
 `ok=false` and sets the proposal to failed:
 
 - A fix whose step was already claimed is failed after the claim goes stale: the step timeout (30 s)

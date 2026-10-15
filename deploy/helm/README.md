@@ -122,7 +122,7 @@ to read a variable from a different Secret. With Bedrock on EKS prefer IRSA
   - each room's agent runs on one replica, which holds a lease row renewed every 10 s (TTL 30 s).
     Steers and comments sent to any replica reach that agent through the event log. When a pod
     stops, its rooms are taken over by another replica (at the next 10 s scan after a graceful stop,
-    after the 30 s lease after a crash). An open room is paused with a "server restarted"
+    after the 30 s lease after a crash). An open room (a shadow room excepted: its run is marked `interrupted`) is paused with a "server restarted"
     message until a driver steers, someone mentions `@agent`, a suggestion is sent, or a member confirms
     or disputes the hypothesis, as after a restart of a single server. With
     `PIPEROOM_RESUME_ON_TAKEOVER=1` an agent that was working resumes on another replica (a new

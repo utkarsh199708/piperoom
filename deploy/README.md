@@ -667,7 +667,8 @@ docker compose -f deploy/docker-compose.pilot.yml down -v         # stop AND del
 
 On a restart the server rebuilds every room from its log. By default it does **not** start an agent
 for the open rooms. Open rooms are marked idle with a "server restarted" message (with Postgres, every
-room that still holds an agent lease, which includes rooms whose agent had finished), and the agent runs
+room that still holds an agent lease, which includes rooms whose agent had finished; shadow rooms are
+excepted, their run is marked `interrupted`), and the agent runs
 again when a driver steers, someone mentions `@agent`, a suggestion is sent, or a member confirms or
 disputes its hypothesis. Only with `PIPEROOM_RESUME_ON_TAKEOVER=1` does an agent that was
 working resume by itself, even on one server. A fix that was approved but not finished is marked
