@@ -384,3 +384,45 @@ func TestReplicationSlotsSafeWALIntegration(t *testing.T) {
 	}
 	t.Fatalf("slot %s not in %+v", slot, slots)
 }
+
+// A physical slot (a streaming standby's) has plugin NULL. It must be listed
+// with an empty plugin, not fail the whole read (QA sweep H2): a primary with
+// a standby would otherwise break every slot tool, topology health and the
+// watcher.
+func TestReplicationSlotsPhysicalIntegration(t *testing.T) {
+	db := sourceDB(t)
+	conn := writeConn(t, testenv.Require(t).SourceDBURL)
+
+	slot := testenv.Name("phys")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := conn.Exec(ctx, "SELECT pg_create_physical_replication_slot($1, true)", slot); err != nil {
+		t.Fatalf("create physical slot: %v", err)
+	}
+	t.Cleanup(func() {
+		c, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(c, "SELECT pg_drop_replication_slot($1)", slot)
+	})
+
+	slots, err := db.ReplicationSlots(ctx)
+	if err != nil {
+		t.Fatalf("ReplicationSlots: %v", err)
+	}
+	named, _, err := db.ReplicationSlotsNamed(ctx, []string{slot})
+	if err != nil {
+		t.Fatalf("ReplicationSlotsNamed: %v", err)
+	}
+	if len(named) != 1 || named[0].Name != slot || named[0].Plugin != "" {
+		t.Fatalf("named = %+v, want the physical slot %s with no plugin", named, slot)
+	}
+	for _, s := range slots {
+		if s.Name == slot {
+			if s.Plugin != "" {
+				t.Fatalf("physical slot plugin = %q, want empty", s.Plugin)
+			}
+			return
+		}
+	}
+	t.Fatalf("physical slot %s not in %+v", slot, slots)
+}

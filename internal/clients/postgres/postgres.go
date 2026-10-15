@@ -56,14 +56,16 @@ func (d *DB) Close() {
 	}
 }
 
-// ReplicationSlots lists logical replication slots with the retained WAL size
-// and the safe_wal_size left before the slot is invalidated (PG13+, like wal_status).
+// ReplicationSlots lists replication slots with the retained WAL size and the
+// safe_wal_size left before the slot is invalidated (PG13+, like wal_status).
+// A physical slot (a standby's) is listed with an empty Plugin: it holds WAL
+// too, and its NULL plugin must not fail the whole read.
 func (d *DB) ReplicationSlots(ctx context.Context) ([]clients.ReplicationSlot, error) {
 	ctx, cancel := pgconv.WithDeadline(ctx, 10*time.Second)
 	defer cancel()
 
 	rows, err := d.query(ctx, `
-		SELECT slot_name, plugin, active,
+		SELECT slot_name, COALESCE(plugin, ''), active,
 		       COALESCE(restart_lsn::text, ''),
 		       COALESCE(confirmed_flush_lsn::text, ''),
 		       COALESCE(wal_status, ''),
