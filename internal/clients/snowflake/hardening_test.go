@@ -184,7 +184,7 @@ func TestHardenedConfigRefusesPlainHTTP(t *testing.T) {
 			}
 		})
 	}
-	for _, q := range []string{"", "&protocol=https"} {
+	for _, q := range []string{"", "&protocol=https", "&protocol=HTTPS"} {
 		if _, err := hardenedConfig("user:pw@acct/db/sch?warehouse=wh" + q); err != nil {
 			t.Errorf("hardenedConfig(%q) = %v, want ok", q, err)
 		}
@@ -304,5 +304,20 @@ func TestRowKeepsBothIdColumns(t *testing.T) {
 	}
 	if row["id"] == row["ID"] {
 		t.Errorf("columns id and ID collapsed: %v", row)
+	}
+}
+
+// Known gap, pinned on purpose (follow-up #496, same on main): the https check
+// reads the protocol parameter only. An http:// OAuth URL is still accepted,
+// so the client secret would go to it in clear text. When #496 lands, flip
+// this test to expect a refusal.
+func TestHardenedConfigGapHTTPOAuthURLsAccepted(t *testing.T) {
+	cfg, err := hardenedConfig("user@acct/db/sch?warehouse=wh&authenticator=OAUTH_CLIENT_CREDENTIALS&oauthClientID=c&oauthClientSecret=s3cret" +
+		"&oauthTokenRequestUrl=http%3A%2F%2Fidp.example%2Ftoken&oauthAuthorizationUrl=http%3A%2F%2Fidp.example%2Fauth")
+	if err != nil {
+		t.Fatalf("hardenedConfig = %v; the gap changed, update this test and #496", err)
+	}
+	if !strings.HasPrefix(cfg.OauthTokenRequestURL, "http://") || !strings.HasPrefix(cfg.OauthAuthorizationURL, "http://") {
+		t.Errorf("urls = %q, %q; want the http:// values kept (gap #496)", cfg.OauthTokenRequestURL, cfg.OauthAuthorizationURL)
 	}
 }

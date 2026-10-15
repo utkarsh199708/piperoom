@@ -124,3 +124,13 @@ func TestRowKeyIsBoundNotInterpolated(t *testing.T) {
 		t.Fatalf("args = %v, want the key as the only bind argument", fq.lastArgs)
 	}
 }
+
+// A stored key name that is not a plain identifier (an embedded quote or a
+// space) is refused rather than interpolated.
+func TestRowSQLRefusesOddStoredName(t *testing.T) {
+	for _, name := range []string{`a"b`, "my col", `"id"`} {
+		if q, err := rowSQL("analytics.orders", name); err == nil {
+			t.Errorf("rowSQL(%q) built %q, want error", name, q)
+		}
+	}
+}

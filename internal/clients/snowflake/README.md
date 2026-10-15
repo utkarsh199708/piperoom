@@ -22,12 +22,13 @@ turns on fail-open OCSP (v1's behaviour) unless the DSN sets `ocspFailOpen`,
 `disableOCSPChecks` or a `certRevocationCheckMode` itself; `ocspFailOpen=false` makes it
 fail-closed. `SF_DISABLE_OCSP_CHECKS=true` in the environment switches fail-open OCSP off.
 
-Only `https` is accepted: a DSN with `protocol=http` (or any other protocol) is refused at
+The DSN `protocol` parameter must be `https`: a DSN with `protocol=http` (or any other protocol) is refused at
 startup, because the login, password or key-pair JWT and session token would travel in clear
 text. Values the DSN sets explicitly (`ocspFailOpen`, `disableOCSPChecks`,
 `certRevocationCheckMode`) are the operator's choice and are kept as written. The client
 does not second-guess them, except that `disableOCSPChecks=true` logs a warning at startup
-(without the DSN). `tracing` and `clientConfigFile` are refused.
+(without the DSN). This checks the `protocol` parameter only; an `http://` `oauthTokenRequestUrl` or
+`oauthAuthorizationUrl` is not refused yet (#496). `tracing` and `clientConfigFile` are refused.
 
 Always URL-encode the password (for example with `url.QueryEscape`). The driver
 unescapes it, so a raw `%` breaks it, a raw `+` turns into a space, and a raw `?`,

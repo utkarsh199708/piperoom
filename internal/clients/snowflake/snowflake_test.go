@@ -58,12 +58,14 @@ func (r *fakeRows) Close() error               { r.closed = true; return nil }
 // fakeQuerier returns a canned response (or error) to every query, and
 // records the last query and args it was called with.
 type fakeQuerier struct {
-	rows      *fakeRows
-	showRows  *fakeRows // answer to SHOW PRIMARY KEYS, when set
-	err       error
-	lastQuery string
-	lastArgs  []any
-	onQuery   func(ctx context.Context)
+	rows        *fakeRows
+	showRows    *fakeRows // answer to SHOW PRIMARY KEYS, when set
+	showErr     error     // error for SHOW PRIMARY KEYS only, when set
+	err         error
+	lastQuery   string
+	lastArgs    []any
+	showQueries int
+	onQuery     func(ctx context.Context)
 }
 
 func (q *fakeQuerier) QueryContext(ctx context.Context, query string, args ...any) (sqlRows, error) {
@@ -71,6 +73,10 @@ func (q *fakeQuerier) QueryContext(ctx context.Context, query string, args ...an
 		q.onQuery(ctx)
 	}
 	if strings.HasPrefix(query, "SHOW PRIMARY KEYS") {
+		q.showQueries++
+		if q.showErr != nil {
+			return nil, q.showErr
+		}
 		if q.showRows != nil {
 			return q.showRows, nil
 		}
@@ -252,7 +258,7 @@ func TestRowTableNotFound(t *testing.T) {
 }
 
 func TestRowOtherError(t *testing.T) {
-	fq := &fakeQuerier{err: errors.New("connection reset")}
+	fq := &fakeQuerier{err: errors.New("connection reset"), showRows: pkShow()}
 	db := &DB{q: fq}
 
 	_, _, err := db.Row(context.Background(), "public.orders", "id", "1")
@@ -294,4 +300,26 @@ func hasCol(cols []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// SHOW PRIMARY KEYS failing with anything but not-found fails the read, and
+// the SELECT never runs.
+func TestRowShowFailureStopsBeforeSelect(t *testing.T) {
+	fq := &fakeQuerier{showErr: errors.New("connection reset"), rows: &fakeRows{cols: []string{"ID"}}}
+	_, _, err := (&DB{q: fq}).Row(context.Background(), "analytics.orders", "id", "1")
+	if err == nil || !strings.Contains(err.Error(), "connection reset") || errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("err = %v, want the wrapped SHOW error, not ErrNotFound", err)
+	}
+	if fq.lastQuery != "" {
+		t.Errorf("SELECT ran after SHOW failed: %q", fq.lastQuery)
+	}
+}
+
+// SHOW works and the SELECT fails: the row error comes back unmapped.
+func TestRowSelectFailureAfterShow(t *testing.T) {
+	fq := &fakeQuerier{showRows: pkShow("ID"), err: errors.New("warehouse suspended")}
+	_, _, err := (&DB{q: fq}).Row(context.Background(), "analytics.orders", "id", "1")
+	if err == nil || !strings.Contains(err.Error(), "row from") || !strings.Contains(err.Error(), "warehouse suspended") || errors.Is(err, clients.ErrNotFound) {
+		t.Fatalf("err = %v, want the unmapped row-from error", err)
+	}
 }

@@ -18,9 +18,11 @@
 // deployments should keep SF_CLIENT_CONFIG_FILE unset and not place
 // sf_client_config.json in the executable's or the home directory.
 //
-// Transport: only https is accepted. A DSN with protocol=http (or any other
-// protocol) is refused, because the login, the password or key-pair JWT and
-// the session token would travel in clear text. Values the DSN sets
+// Transport: the DSN protocol parameter must be https. A DSN with
+// protocol=http (or any other protocol) is refused, because the login, the
+// password or key-pair JWT and the session token would travel in clear text.
+// This covers the protocol parameter only: an http:// oauthTokenRequestUrl or
+// oauthAuthorizationUrl is still accepted today (follow-up #496). Values the DSN sets
 // explicitly (ocspFailOpen, disableOCSPChecks, certRevocationCheckMode) are
 // the operator's choice and are kept as parsed; disableOCSPChecks=true is
 // accepted but logged as a warning.
@@ -114,7 +116,7 @@ func hardenedConfig(dsn string) (*gosnowflake.Config, error) {
 	// else was set on purpose. The message names the parameter, not its value
 	// or the DSN, which holds the password.
 	if !strings.EqualFold(cfg.Protocol, "https") {
-		return nil, errors.New("snowflake: dsn parameter protocol must be https: other protocols send the login, password or key-pair JWT and session token in clear text; refused")
+		return nil, errors.New("snowflake: dsn parameter protocol must be https: any other value sends the login, password or key-pair JWT and session token in clear text; refused")
 	}
 	if cfg.DisableOCSPChecks {
 		slog.Warn("snowflake: disableOCSPChecks=true in the DSN: certificate revocation is not checked, a revoked Snowflake or proxy certificate is accepted")
