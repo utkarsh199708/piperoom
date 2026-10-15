@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"math"
 	"strings"
 	"sync"
 	"time"
@@ -202,7 +201,7 @@ func (s *Service) startCoordination() {
 		return
 	}
 	s.coordOnce.Do(func() {
-		if !s.addWorkers(3) {
+		if !s.addWorkers(4) {
 			return
 		}
 		s.coord.WatchAppends(s.ctx, store.AppendWatch{OnAppend: s.follow.noteAppend, OnResync: s.follow.noteResync})
@@ -216,16 +215,37 @@ func (s *Service) startCoordination() {
 		}()
 		go func() {
 			defer s.wg.Done()
+			s.runLeaseRenewal()
+		}()
+		go func() {
+			defer s.wg.Done()
 			s.runCoordination()
 		}()
 	})
 }
 
-// runCoordination renews this replica's leases, takes over expired ones and
-// sweeps stale executor claims until the service closes.
-func (s *Service) runCoordination() {
+// runLeaseRenewal renews this replica's leases and refreshes its queued
+// claims until the service closes. It has its own goroutine, and takes no
+// room lock it would wait for: whatever else stalls (a takeover or a sweep
+// waiting for a room stuck in a slow call), the leases of every other room
+// stay renewed, so no other replica takes them over.
+func (s *Service) runLeaseRenewal() {
 	renew := time.NewTicker(s.timing.LeaseRenew)
 	defer renew.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-renew.C:
+			s.renewLeases()
+			s.touchQueuedClaims()
+		}
+	}
+}
+
+// runCoordination takes over expired leases and sweeps stale executor claims
+// until the service closes.
+func (s *Service) runCoordination() {
 	scan := time.NewTicker(s.timing.TakeoverScan)
 	defer scan.Stop()
 	sweep := time.NewTicker(s.timing.ExecSweep)
@@ -236,9 +256,6 @@ func (s *Service) runCoordination() {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-renew.C:
-			s.renewLeases()
-			s.touchQueuedClaims()
 		case <-scan.C:
 			s.takeoverScan()
 		case <-sweep.C:
@@ -383,7 +400,15 @@ func (s *Service) takeoverScan() {
 			continue // another replica was faster
 		}
 		s.log.Info("room: took over the agent lease", "room", l.RoomID, "from", l.Owner, "replica", s.replica)
-		s.adoptRoom(l.RoomID, start)
+		// Adopting locks the room, which may be stuck in a slow call: on its
+		// own goroutine, so the scan goes on. Closing: the lease taken here
+		// expires again and another replica adopts the room.
+		if s.addWorker() {
+			go func(roomID string) {
+				defer s.wg.Done()
+				s.adoptRoom(roomID, start)
+			}(l.RoomID)
+		}
 	}
 }
 
@@ -549,18 +574,28 @@ func (s *Service) sweepStaleProposals() {
 		if s.ctx.Err() != nil {
 			return
 		}
+		// The recording locks the room, which may be stuck in a slow call,
+		// so it runs on its own goroutine. Its place is reserved before the
+		// interruption commits: an interruption this replica won must be
+		// recorded, never skipped, so none is won while closing.
+		if !s.addWorker() {
+			return
+		}
 		ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
 		ok, err := s.coord.InterruptProposal(ctx, sp.ProposalID, s.replica, s.timing.ClaimStale, s.timing.UnclaimedStale)
 		cancel()
-		if err != nil {
-			s.log.Warn("room: interrupt stale proposal failed", "proposal", sp.ProposalID, "err", err)
-			continue
-		}
-		if !ok {
+		if err != nil || !ok {
+			s.wg.Done()
+			if err != nil {
+				s.log.Warn("room: interrupt stale proposal failed", "proposal", sp.ProposalID, "err", err)
+			}
 			continue
 		}
 		s.log.Warn("room: proposal's executor stopped; outcome recorded as failed", "proposal", sp.ProposalID, "room", sp.RoomID, "claimed_by", sp.ClaimedBy)
-		s.recordInterruption(sp)
+		go func(sp store.StaleProposal) {
+			defer s.wg.Done()
+			s.recordInterruption(sp)
+		}(sp)
 	}
 }
 
@@ -625,11 +660,24 @@ type follower struct {
 	mu     sync.Mutex
 	dirty  map[string]int64 // room -> highest notified seq
 	resync bool
-	wake   chan struct{}
+	// syncs are rooms a re-list found busy: each is brought up to its row
+	// (trySyncRoom), its driver lease included, once its lock is free.
+	syncs map[string]bool
+	wake  chan struct{}
 }
 
 func newFollower() *follower {
-	return &follower{dirty: map[string]int64{}, wake: make(chan struct{}, 1)}
+	return &follower{dirty: map[string]int64{}, syncs: map[string]bool{}, wake: make(chan struct{}, 1)}
+}
+
+func (f *follower) noteSync(roomID string) {
+	f.mu.Lock()
+	f.syncs[roomID] = true
+	f.mu.Unlock()
+	select {
+	case f.wake <- struct{}{}:
+	default:
+	}
 }
 
 func (f *follower) noteAppend(roomID string, seq int64) {
@@ -654,12 +702,18 @@ func (f *follower) noteResync() {
 	}
 }
 
-func (f *follower) take() (map[string]int64, bool) {
+func (f *follower) take() (dirty map[string]int64, resync bool, syncs map[string]bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	d, r := f.dirty, f.resync
-	f.dirty, f.resync = map[string]int64{}, false
-	return d, r
+	dirty, resync, syncs = f.dirty, f.resync, f.syncs
+	f.dirty, f.resync, f.syncs = map[string]int64{}, false, map[string]bool{}
+	return dirty, resync, syncs
+}
+
+// syncLater queues a busy room for trySyncRoom after a short delay
+// (followLater's sibling for rooms a re-list could not bring up to date).
+func (s *Service) syncLater(roomID string) {
+	time.AfterFunc(followRetry, func() { s.follow.noteSync(roomID) })
 }
 
 // runFollower folds what other replicas append into this replica's cache, so
@@ -672,7 +726,7 @@ func (s *Service) runFollower() {
 			return
 		case <-s.follow.wake:
 		}
-		dirty, resync := s.follow.take()
+		dirty, resync, syncs := s.follow.take()
 		if resync {
 			ctx, cancel := context.WithTimeout(s.ctx, 2*coordTimeout)
 			busy, err := s.refresh(ctx)
@@ -680,9 +734,27 @@ func (s *Service) runFollower() {
 				s.log.Warn("room: refresh the room cache failed", "err", err)
 			}
 			cancel()
-			for id, seq := range busy {
-				s.followLater(id, seq)
+			for id := range busy {
+				syncs[id] = true
 			}
+		}
+		for roomID := range syncs {
+			if s.ctx.Err() != nil {
+				return
+			}
+			// Not even read while busy: the command holding it may be stuck
+			// in the store.
+			if st := s.cached(roomID); st != nil && !st.mu.TryLock() {
+				s.syncLater(roomID)
+				continue
+			} else if st != nil {
+				st.mu.Unlock()
+			}
+			ctx, cancel := context.WithTimeout(s.ctx, coordTimeout)
+			if s.trySyncRoom(ctx, roomID) {
+				s.syncLater(roomID)
+			}
+			cancel()
 		}
 		for roomID, seq := range dirty {
 			if s.ctx.Err() != nil {
@@ -976,17 +1048,17 @@ func (s *Service) refreshAll(ctx context.Context) error {
 
 // refresh is refreshAll. A room whose lock is busy (a command in flight, which
 // may be stuck in the store) is not waited for: it is left as it is and
-// returned in busy, with the last seq its row showed, for the follower to try
-// again.
-func (s *Service) refresh(ctx context.Context) (busy map[string]int64, err error) {
+// returned in busy, for the follower to bring up to its row once it is free
+// (trySyncRoom: the fold, the driver lease, or the eviction refresh skipped).
+func (s *Service) refresh(ctx context.Context) (busy map[string]bool, err error) {
 	if s.coord == nil {
 		return nil, s.loadMissing(ctx)
 	}
-	busy = map[string]int64{}
+	busy = map[string]bool{}
 	// tryLock locks st for refresh, or records it busy.
-	tryLock := func(id string, st *roomState, seq int64) bool {
+	tryLock := func(id string, st *roomState) bool {
 		if !st.mu.TryLock() {
-			busy[id] = max(busy[id], seq)
+			busy[id] = true
 			return false
 		}
 		if st.gone {
@@ -1003,8 +1075,8 @@ func (s *Service) refresh(ctx context.Context) (busy map[string]int64, err error
 		return nil, fmt.Errorf("room: refresh: %w", err)
 	}
 	type behind struct {
-		st         *roomState
-		after, seq int64
+		st    *roomState
+		after int64
 	}
 	type leaseRow struct {
 		st  *roomState
@@ -1028,23 +1100,21 @@ func (s *Service) refresh(ctx context.Context) (busy map[string]int64, err error
 			continue // being opened here; it publishes itself
 		}
 		if r.LastSeq > p.LastSeq {
-			stale[r.ID] = behind{st: st, after: p.LastSeq, seq: r.LastSeq}
+			stale[r.ID] = behind{st: st, after: p.LastSeq}
 		}
 		if rowLeaseLater(p, r) {
 			adopt = append(adopt, leaseRow{st, r})
 		}
 	}
 	for id, st := range before {
-		// A busy room missing from the list is re-read by the follower, whose
-		// read finds it gone (any seq above its own sends it there).
-		if seen[id] || !tryLock(id, st, math.MaxInt64) {
+		if seen[id] || !tryLock(id, st) {
 			continue
 		}
 		s.evictLocked(id, st)
 		s.unlockRoom(st)
 	}
 	for _, a := range adopt {
-		if !tryLock(a.row.ID, a.st, a.row.LastSeq) {
+		if !tryLock(a.row.ID, a.st) {
 			continue
 		}
 		s.adoptRowLeaseLocked(a.st, a.row)
@@ -1055,7 +1125,7 @@ func (s *Service) refresh(ctx context.Context) (busy map[string]int64, err error
 	for id, b := range stale {
 		// A busy room is not even read: its command may be stuck in the
 		// store, and the command folds what it finds when it appends.
-		if !tryLock(id, b.st, b.seq) {
+		if !tryLock(id, b.st) {
 			continue
 		}
 		s.unlockRoom(b.st)
@@ -1071,7 +1141,7 @@ func (s *Service) refresh(ctx context.Context) (busy map[string]int64, err error
 	}
 	for id, evs := range fetched {
 		b := stale[id]
-		if !tryLock(id, b.st, b.seq) {
+		if !tryLock(id, b.st) {
 			continue
 		}
 		s.foldFetchedLocked(ctx, id, b.st, evs)

@@ -597,10 +597,72 @@ type leaseStore struct {
 	leases  map[string]store.RoomLease
 	renewed map[string]int
 	watch   store.AppendWatch
+	// takenOver counts the leases taken over through TakeOverRoomLease.
+	takenOver map[string]int
+	// stale are the proposals StaleProposals reports, each interrupted once;
+	// rows are proposal rows GetProposal returns ahead of the store's.
+	stale       []store.StaleProposal
+	interrupted map[string]bool
+	rows        map[string]store.ProposalRow
 }
 
 func newLeaseStore() *leaseStore {
-	return &leaseStore{gatedStore: newGatedStore(), leases: map[string]store.RoomLease{}, renewed: map[string]int{}}
+	return &leaseStore{gatedStore: newGatedStore(), leases: map[string]store.RoomLease{}, renewed: map[string]int{},
+		takenOver: map[string]int{}, interrupted: map[string]bool{}, rows: map[string]store.ProposalRow{}}
+}
+
+// expireTo hands roomID's lease to another replica that has stopped renewing
+// it: expired, so the takeover scan takes it.
+func (l *leaseStore) expireTo(roomID, owner string) {
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	cur := l.leases[roomID]
+	cur.RoomID, cur.Owner, cur.ExpiresAt = roomID, owner, time.Now().Add(-time.Second)
+	l.leases[roomID] = cur
+}
+
+func (l *leaseStore) takeovers(roomID string) int {
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	return l.takenOver[roomID]
+}
+
+func (l *leaseStore) TakeOverRoomLease(_ context.Context, roomID, owner string, ttl time.Duration) (bool, error) {
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	cur, ok := l.leases[roomID]
+	if !ok || cur.ExpiresAt.After(time.Now()) {
+		return false, nil
+	}
+	cur.Owner, cur.ExpiresAt = owner, time.Now().Add(ttl)
+	l.leases[roomID] = cur
+	l.takenOver[roomID]++
+	return true, nil
+}
+
+func (l *leaseStore) InterruptProposal(_ context.Context, proposalID, _ string, _, _ time.Duration) (bool, error) {
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	if l.interrupted[proposalID] {
+		return false, nil
+	}
+	for _, sp := range l.stale {
+		if sp.ProposalID == proposalID {
+			l.interrupted[proposalID] = true
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (l *leaseStore) GetProposal(ctx context.Context, proposalID string) (store.ProposalRow, error) {
+	l.lmu.Lock()
+	row, ok := l.rows[proposalID]
+	l.lmu.Unlock()
+	if ok {
+		return row, nil
+	}
+	return l.Store.GetProposal(ctx, proposalID)
 }
 
 func (l *leaseStore) AcquireRoomLease(_ context.Context, roomID, owner, pipelineID string, ttl time.Duration) (bool, error) {
@@ -667,7 +729,15 @@ func (l *leaseStore) ExpireRoomLeases(_ context.Context, owner string) error {
 }
 
 func (l *leaseStore) ExpiredRoomLeases(context.Context, int) ([]store.RoomLease, error) {
-	return nil, nil // nobody else's leases to take over
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	var out []store.RoomLease
+	for _, cur := range l.leases {
+		if !cur.ExpiresAt.After(time.Now()) {
+			out = append(out, cur)
+		}
+	}
+	return out, nil
 }
 
 func (l *leaseStore) RoomLeases(context.Context) (map[string]store.RoomLease, error) {
@@ -681,7 +751,15 @@ func (l *leaseStore) RoomLeases(context.Context) (map[string]store.RoomLease, er
 }
 
 func (l *leaseStore) StaleProposals(context.Context, time.Duration, time.Duration, int) ([]store.StaleProposal, error) {
-	return nil, nil
+	l.lmu.Lock()
+	defer l.lmu.Unlock()
+	var out []store.StaleProposal
+	for _, sp := range l.stale {
+		if !l.interrupted[sp.ProposalID] {
+			out = append(out, sp)
+		}
+	}
+	return out, nil
 }
 
 func (l *leaseStore) WatchAppends(_ context.Context, w store.AppendWatch) {
@@ -1154,4 +1232,121 @@ func TestSharedStoreSlowCommandReadsDoNotWait(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the held steer did not finish")
 	}
+}
+
+// newStalledLeaseRig opens rooms C and B on a replica of a shared store with
+// short lease timings, takeover scans and sweeps every 200 ms, and both agents
+// running.
+func newStalledLeaseRig(t *testing.T) (svc *Service, ls *leaseStore, runs *inputRun, c, b string) {
+	t.Helper()
+	ls = newLeaseStore()
+	runs = &inputRun{inputs: map[string][]agent.HumanInput{}, live: map[string]context.Context{}}
+	svc = New(Deps{
+		Store: ls, Users: DefaultUsers(), Owners: tenantOwners(), Run: runs.run, ReplicaID: "replica-a",
+		ReplicaTimings: ReplicaTimings{LeaseTTL: 900 * time.Millisecond, LeaseRenew: 150 * time.Millisecond,
+			TakeoverScan: 200 * time.Millisecond, ExecSweep: 200 * time.Millisecond},
+	})
+	t.Cleanup(svc.Close)
+	if err := svc.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ids := createRooms(t, svc, 2)
+	c, b = ids[0], ids[1]
+	pollUntil(t, func() bool { return runs.running(c) && runs.running(b) })
+	return svc, ls, runs, c, b
+}
+
+// keepsLeased checks, over two lease TTLs, that room b's lease stays renewed
+// and its agent running.
+func keepsLeased(t *testing.T, ls *leaseStore, runs *inputRun, b string) {
+	t.Helper()
+	before := ls.renewals(b)
+	time.Sleep(2 * time.Second)
+	if n := ls.renewals(b) - before; n < 5 {
+		t.Fatalf("B's lease was renewed %d times while C was stuck, want it kept renewed", n)
+	}
+	if l, ok := ls.lease(b); !ok || l.Owner != "replica-a" || !l.ExpiresAt.After(time.Now()) {
+		t.Fatalf("B's lease = %+v (held %v), want held by replica-a and live", l, ok)
+	}
+	if !runs.running(b) {
+		t.Fatal("B's agent was stopped while C was stuck")
+	}
+}
+
+// A room stuck in a slow call whose lease this replica then takes over (it had
+// expired while the room was stuck) is adopted on its own goroutine: the
+// takeover waiting for the room's lock does not stop the other rooms' leases
+// from being renewed.
+func TestSharedStoreStalledRoomTakenOverKeepsOthersLeased(t *testing.T) {
+	svc, ls, runs, c, b := newStalledLeaseRig(t)
+	release, wait := stallAppend(t, svc, ls.gatedStore, c)
+	ls.expireTo(c, "replica-x")
+	pollUntil(t, func() bool { return ls.takeovers(c) > 0 })
+	keepsLeased(t, ls, runs, b)
+	release()
+	if err := wait(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A stale proposal whose room is stuck in a slow call is recorded on its own
+// goroutine: the sweep waiting for that room does not stop the other rooms'
+// leases from being renewed, and the outcome is still written once the room
+// is free (the interruption is committed; skipping it would lose it).
+func TestSharedStoreStaleProposalOfStalledRoomKeepsOthersLeased(t *testing.T) {
+	svc, ls, runs, c, b := newStalledLeaseRig(t)
+	release, wait := stallAppend(t, svc, ls.gatedStore, c)
+	ls.lmu.Lock()
+	ls.rows["p_stale"] = store.ProposalRow{ProposalID: "p_stale", RoomID: c, Status: "open", Steps: []byte("[]")}
+	ls.stale = []store.StaleProposal{{ProposalID: "p_stale", RoomID: c, ClaimedBy: "replica-x"}}
+	ls.lmu.Unlock()
+	pollUntil(t, func() bool {
+		ls.lmu.Lock()
+		defer ls.lmu.Unlock()
+		return ls.interrupted["p_stale"]
+	})
+	keepsLeased(t, ls, runs, b)
+	release()
+	if err := wait(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor := func() bool {
+		evs, err := ls.Store.Since(context.Background(), c, 0, 1000)
+		if err != nil {
+			return false
+		}
+		for _, e := range evs {
+			if p, ok := decode[events.ActionExecutedPayload](e); ok && e.Type == events.ActionExecuted && p.ProposalID == "p_stale" && p.OutcomeUnknown {
+				return true
+			}
+		}
+		return false
+	}
+	pollUntil(t, waitFor)
+}
+
+// A re-list that finds a room busy leaves it for the follower, which brings it
+// up to its row once it is free: a driver lease another replica renewed (on
+// the row only) reaches the cache too.
+func TestSharedStoreBusyRoomAdoptsRowLeaseLater(t *testing.T) {
+	svc, ls, _, c, _ := newStalledLeaseRig(t)
+	ctx := context.Background()
+	release, wait := stallAppend(t, svc, ls.gatedStore, c)
+	later := time.Now().Add(2 * DriverLease).UTC().Truncate(time.Second)
+	if err := ls.Store.UpdateDriver(ctx, c, "arjun", "Arjun", later); err != nil {
+		t.Fatal(err)
+	}
+	ls.lmu.Lock()
+	w := ls.watch
+	ls.lmu.Unlock()
+	w.OnResync()
+	time.Sleep(100 * time.Millisecond) // the re-list finds C busy
+	release()
+	if err := wait(); err != nil {
+		t.Fatal(err)
+	}
+	pollUntil(t, func() bool {
+		snap, err := svc.GetRoom(ctx, c)
+		return err == nil && snap.Driver != nil && snap.Driver.LeaseUntil.Equal(later)
+	})
 }

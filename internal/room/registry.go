@@ -1,5 +1,7 @@
 package room
 
+import "errors"
+
 // The room registry: which rooms are cached or loading, the alert index, and
 // whether the service is closed. s.reg guards it. reg is a leaf lock: no I/O,
 // no hook and no other lock of the service is taken while it is held, so any
@@ -71,6 +73,9 @@ func (s *Service) cancelLoadLocked(roomID string) {
 	}
 }
 
+// errServiceClosed refuses a load that finishes after Close has begun.
+var errServiceClosed = errors.New("room: service is closed")
+
 // startLoad returns roomID's cached state, or the load of it in flight, or
 // starts one (leader: the caller loads and calls finishLoad).
 func (s *Service) startLoad(roomID string) (st *roomState, l *roomLoad, leader bool) {
@@ -102,6 +107,10 @@ func (s *Service) finishLoad(roomID string, l *roomLoad, st *roomState, key stri
 		st = nil
 	case l.cancelled:
 		st, err = nil, notFound("not found")
+	case s.closed:
+		// Nothing must enter the cache once Close has begun: it would start
+		// no goroutine, but would outlive the service's state.
+		st, err = nil, errServiceClosed
 	case s.rooms[roomID] != nil:
 		st = s.rooms[roomID]
 	default:
