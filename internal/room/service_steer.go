@@ -25,39 +25,10 @@ func mentionsAgent(text string) bool {
 	return agentMention.MatchString(text)
 }
 
-// AddComment posts a comment; "@agent" in the text sets mentions_agent.
+// AddComment posts a plain comment; "@agent" in the text sets mentions_agent.
+// A fix note is AddCommentKind with events.CommentKindFixNote.
 func (s *Service) AddComment(ctx context.Context, user User, roomID, stepID, text string) (events.Event, error) {
-	if strings.TrimSpace(text) == "" {
-		return events.Event{}, validation("text is required")
-	}
-	if err := rejectUnstorable(stepID, text); err != nil {
-		return events.Event{}, err
-	}
-	if err := checkLen("text", text, MaxMessageChars); err != nil {
-		return events.Event{}, err
-	}
-	// Shared store: fold what other replicas wrote, reading outside s.mu.
-	s.syncRoom(ctx, roomID)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, err := s.getStateLocked(ctx, roomID)
-	if err != nil {
-		return events.Event{}, err
-	}
-	if !s.roomOpen(st) {
-		return events.Event{}, roomClosed("room is closed")
-	}
-	payload := events.CommentAddedPayload{
-		CommentID:     NewID("c_"),
-		StepID:        stepID,
-		Text:          text,
-		MentionsAgent: mentionsAgent(text),
-	}
-	e, err := s.emitLocked(ctx, st, roomID, events.CommentAdded, s.humanActor(user), payload)
-	if err == nil && payload.MentionsAgent {
-		s.ensureAgentLocked(ctx, roomID, st)
-	}
-	return e, err
+	return s.AddCommentKind(ctx, user, roomID, stepID, text, "")
 }
 
 // Steer sends an instruction. The driver's steer goes straight to the agent

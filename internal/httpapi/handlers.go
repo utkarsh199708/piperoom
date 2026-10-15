@@ -153,12 +153,15 @@ func (s *Server) handleAddComment(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		StepID string `json:"step_id"`
 		Text   string `json:"text"`
+		// Kind is "" or "fix_note" (Q0, QA G10); the service refuses anything
+		// else with 400 validation.
+		Kind string `json:"kind"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		s.writeErr(w, err)
 		return
 	}
-	ev, err := s.svc.AddComment(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.StepID, body.Text)
+	ev, err := s.svc.AddCommentKind(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.StepID, body.Text, body.Kind)
 	if err != nil {
 		s.writeErr(w, err)
 		return
@@ -242,12 +245,33 @@ func (s *Server) handleCreateHandoff(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		To            string `json:"to"`
 		StayAsWatcher bool   `json:"stay_as_watcher"`
+		// Summary is the driver's own summary (Q0, QA G4): when present, no
+		// model call is made. A struct of its own, not events.HandoffSummary,
+		// so the body cannot set violations.
+		Summary *struct {
+			WhatBroke string   `json:"what_broke"`
+			Why       string   `json:"why"`
+			Done      []string `json:"done"`
+			RuledOut  []string `json:"ruled_out"`
+			Open      []string `json:"open"`
+			Risks     []string `json:"risks"`
+		} `json:"summary"`
 	}
 	if err := decodeBody(w, r, &body); err != nil {
 		s.writeErr(w, err)
 		return
 	}
-	ev, err := s.svc.CreateHandoff(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.To, body.StayAsWatcher)
+	var (
+		ev  events.Event
+		err error
+	)
+	if m := body.Summary; m != nil {
+		ev, err = s.svc.CreateHandoffManual(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.To, body.StayAsWatcher, events.HandoffSummary{
+			WhatBroke: m.WhatBroke, Why: m.Why, Done: m.Done, RuledOut: m.RuledOut, Open: m.Open, Risks: m.Risks,
+		})
+	} else {
+		ev, err = s.svc.CreateHandoff(r.Context(), userFrom(r.Context()), chi.URLParam(r, "id"), body.To, body.StayAsWatcher)
+	}
 	if err != nil {
 		s.writeErr(w, err)
 		return
