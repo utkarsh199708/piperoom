@@ -71,6 +71,10 @@ type runner struct {
 	// action_result can be matched to its last step and verified.
 	proposals *proposalTracker
 
+	// steps remembers the steps this run opened, for update_hypothesis to check
+	// the steps a hypothesis cites.
+	steps *stepLedger
+
 	// recoveredIdle is true while the pipeline is verified recovered and nothing
 	// since has broken that (a failed or unknown step, or a NOT recovered
 	// verdict). An episode that ends while it is set stays "done" and waits for
@@ -155,6 +159,9 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 	if m == nil {
 		m = newModel(opts, deps.Logger)
 	}
+	steps := newStepLedger()
+	steps.seedTriage(alert.Triage)
+	steps.setBackground(alertBackground(alert))
 	return &runner{
 		alert:     alert,
 		deps:      deps,
@@ -164,13 +171,14 @@ func newRunnerWith(alert Alert, deps Deps, opts Options, m model) (*runner, erro
 		clk:       realClock{},
 		timing:    defaultTiming(),
 		proposals: newProposalTracker(),
+		steps:     steps,
 
 		noneSubjects: map[string]bool{},
 	}, nil
 }
 
 func (r *runner) run(ctx context.Context) error {
-	r.toolList = buildToolList(r.deps.Tools, newRoomTools(r.deps, r.proposals))
+	r.toolList = buildToolList(r.deps.Tools, newRoomToolsWith(r.deps, r.proposals, r.steps))
 	// The prompt names page_owner, withdraw_proposal and connect_worker_log only
 	// when this run really has them.
 	r.system = systemPromptFor(r.toolList)
@@ -809,9 +817,13 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 
 	tctx, cancel := context.WithTimeout(r.toolScope(ctx), r.timing.toolTimeout)
 	defer cancel()
+	rec := tools.NewRecorder()
+	tctx = tools.WithRecorder(tctx, rec)
 	start := time.Now()
 	res, err := entry.tool.Run(tctx, cleaned)
 	took := time.Since(start).Milliseconds()
+	// An errored read still ran its queries; the receipt explains the error.
+	prov := r.receipt(u.name, res.Provenance, rec)
 
 	res, scrubErr := r.scrubToolResult(u.name, res)
 	if err == nil {
@@ -823,14 +835,16 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 		msg := "error: " + r.scrubToolError(u.name, err).Error()
 		summary, truncated := tools.Truncate(msg)
 		r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
-			StepID:    stepID,
-			ToolUseID: u.id,
-			Tool:      u.name,
-			Summary:   summary,
-			IsError:   true,
-			Truncated: truncated,
-			TookMS:    took,
+			StepID:     stepID,
+			ToolUseID:  u.id,
+			Tool:       u.name,
+			Summary:    summary,
+			IsError:    true,
+			Truncated:  truncated,
+			TookMS:     took,
+			Provenance: prov,
 		})
+		r.steps.addWithInput(stepID, u.name, string(cleaned), summary, true)
 		return toolResult{
 			toolUseID: u.id,
 			content:   r.wrapReadToolOutput(u.name, stepID, summary),
@@ -842,15 +856,17 @@ func (r *runner) runReadTool(ctx context.Context, u toolUse) toolResult {
 	// ignores MaxSummaryBytes must not be able to bloat the request.
 	summary, reTruncated := tools.Truncate(res.Summary)
 	r.emit(ctx, events.AgentToolResult, events.AgentToolResultPayload{
-		StepID:    stepID,
-		ToolUseID: u.id,
-		Tool:      u.name,
-		Summary:   summary,
-		Data:      data,
-		IsError:   false,
-		Truncated: res.Truncated || reTruncated || dataCut,
-		TookMS:    took,
+		StepID:     stepID,
+		ToolUseID:  u.id,
+		Tool:       u.name,
+		Summary:    summary,
+		Data:       data,
+		IsError:    false,
+		Truncated:  res.Truncated || reTruncated || dataCut,
+		TookMS:     took,
+		Provenance: prov,
 	})
+	r.steps.addWithInput(stepID, u.name, string(cleaned), summary, false)
 	return toolResult{
 		toolUseID: u.id,
 		content:   r.wrapReadToolOutput(u.name, stepID, summary),
@@ -881,6 +897,7 @@ func (r *runner) failReadTool(ctx context.Context, u toolUse, title, msg string)
 		IsError:   true,
 		Truncated: truncated,
 	})
+	r.steps.add(stepID, u.name, summary, true)
 	return toolResult{
 		toolUseID: u.id,
 		content:   wrapToolOutput(u.name, stepID, "error: "+msg),

@@ -1,10 +1,12 @@
 import { PersonName } from '@/components/VerifiedBadge'
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
+import type { Dispatch, SetStateAction } from 'react'
 import { plainText } from '@/lib/title'
 import { emptyStateFor } from '../lib/emptyState'
 import type { ComponentProps, FormEvent } from 'react'
-import { Check, ChevronRight, Wrench, X } from 'lucide-react'
+import { Check, ChevronRight, Copy, Wrench, X } from 'lucide-react'
 import type { AgentMessageState, ChecklistTick, CommentState, PageState, StepState, ToolCallState } from '../state/types'
+import type { ToolCall } from '../api/types'
 import { argTags, formatMs, toolLayer } from '../lib/toolLayers'
 import { cn } from '@/lib/utils'
 import { Badge, layerVariant } from '@/components/ui/badge'
@@ -18,6 +20,8 @@ import { PersonAvatar } from './room/PersonAvatar'
 import { CollapsibleText } from './room/CollapsibleText'
 import { StepNumbersProvider } from './room/AgentText'
 import { REVEAL_STEP_EVENT, stepAnchor } from '@/lib/triage'
+import { evidenceFor } from '@/lib/evidence'
+import { Raw } from './room/evidence/Raw'
 import { Checklist } from './room/Checklist'
 import { PagesList } from './room/PagesList'
 import type { ChecklistAccess } from './room/Checklist'
@@ -42,8 +46,18 @@ function totalMs(step: StepState): number | null {
   return times.length > 0 ? times.reduce((a, b) => a + b, 0) : null
 }
 
+// The summary of one tool call: a structured view for the tools that have one, the plain
+// summary text otherwise (an error, a tool with no view, or data that does not fit its view).
+function ToolSummary({ t }: { t: ToolCallState }) {
+  const View = t.is_error ? null : evidenceFor(t.tool)
+  return View ? <View t={t} /> : <Raw t={t} />
+}
+
 function rawJson(t: ToolCallState): string {
-  const raw: Record<string, unknown> = { input: t.input }
+  // With a structured view the summary is no longer on screen, so it is kept here.
+  const raw: Record<string, unknown> = {}
+  if (!t.is_error && evidenceFor(t.tool) && t.summary != null) raw.summary = t.summary
+  raw.input = t.input
   if (t.data !== undefined) raw.data = t.data
   try {
     return JSON.stringify(raw, null, 2)
@@ -62,6 +76,56 @@ export interface ChecklistWiring {
   onAsk: (text: string) => void
 }
 
+/** The step a citation chip asked for; a new `nonce` re-triggers the flash on the same step. */
+export interface CitedStep {
+  id: string
+  nonce: number
+}
+
+// One read the tool made, as a person could re-run it: "Ran" kicker, kind badge (target in its
+// title), the statement, redacted params, the time, and Copy. Every value is a text node.
+function RanLine({ call }: { call: ToolCall }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => {
+    if (!navigator.clipboard) return
+    void navigator.clipboard.writeText(call.text).then(
+      () => {
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 1500)
+      },
+      () => undefined,
+    )
+  }
+  return (
+    <div className="flex items-start gap-2 font-mono text-xs" data-testid="ran-line">
+      <span className="shrink-0 pt-0.5 text-xs font-medium leading-4 text-subtle-foreground">Ran</span>
+      <Badge mono title={call.target} className="shrink-0">
+        {call.kind}
+      </Badge>
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        <code className="max-h-24 overflow-auto break-all text-xs font-normal leading-4">{call.text}</code>
+        {call.params_redacted && call.params_redacted.length > 0 && (
+          <span className="flex flex-wrap gap-x-2">
+            {call.params_redacted.map((p, i) => (
+              <ArgTag key={i}>{p}</ArgTag>
+            ))}
+          </span>
+        )}
+      </div>
+      <span className="shrink-0 pt-0.5 tabular-nums text-subtle-foreground">{formatMs(call.took_ms)}</span>
+      <Button
+        variant="ghost"
+        className="h-7 shrink-0 gap-1 px-1.5 text-xs coarse:h-11"
+        onClick={copy}
+        aria-label={copied ? 'Copied' : 'Copy query'}
+      >
+        {copied ? <Check className="size-3.5" aria-hidden="true" /> : <Copy className="size-3.5" aria-hidden="true" />}
+        <span aria-hidden="true">{copied ? 'Copied' : 'Copy'}</span>
+      </Button>
+    </div>
+  )
+}
+
 function Evidence({ step, checklist }: { step: StepState; checklist?: ChecklistWiring }) {
   if (step.tool_calls.length === 0) return null
   return (
@@ -77,16 +141,8 @@ function Evidence({ step, checklist }: { step: StepState; checklist?: ChecklistW
               <span className="ml-auto font-mono text-xs text-subtle-foreground">{formatMs(t.took_ms)}</span>
             )}
           </div>
-          {t.summary != null && (
-            <pre
-              className={cn(
-                'm-0 whitespace-pre-wrap break-words rounded-md border bg-muted px-2.5 py-2 font-mono text-xs leading-[17px]',
-                t.is_error ? 'border-destructive/50 text-destructive-fg' : 'border-border text-muted-foreground',
-              )}
-            >
-              {t.summary}
-            </pre>
-          )}
+          {t.provenance?.map((c, i) => <RanLine key={i} call={c} />)}
+          {t.summary != null && <ToolSummary t={t} />}
           {checklist && t.tool === 'runbook_lookup' && !t.is_error && (
             <Checklist
               stepId={step.id}
@@ -284,6 +340,25 @@ function StepExtras({
   )
 }
 
+// Scrolls to, opens and flashes the step a citation chip named (F3). The flash is a 600 ms
+// background animation under motion-safe; reduced motion scrolls without smoothing.
+function useCiteFlash(stepId: string, cited: CitedStep | null | undefined, setOpen?: Dispatch<SetStateAction<boolean>>) {
+  const ref = useRef<HTMLLIElement>(null)
+  const [flash, setFlash] = useState(false)
+  useEffect(() => {
+    if (!cited || cited.id !== stepId) return
+    setOpen?.(true)
+    const el = ref.current
+    const calm = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+    el?.scrollIntoView?.({ block: 'center', behavior: calm ? 'auto' : 'smooth' })
+    el?.querySelector<HTMLElement>('button')?.focus({ preventScroll: true })
+    setFlash(true)
+    const t = window.setTimeout(() => setFlash(false), 600)
+    return () => window.clearTimeout(t)
+  }, [cited, stepId, setOpen])
+  return { ref, flash }
+}
+
 // A finished step: one compact row (number, title, tool, args, time, check). The row opens
 // to show the evidence and the comment box. The opened part stays mounted while closed
 // (hidden), so a half-typed comment survives closing the row.
@@ -294,6 +369,7 @@ function DoneStep({
   onComment,
   readOnly,
   checklist,
+  cited,
 }: {
   step: StepState
   n: number
@@ -301,9 +377,11 @@ function DoneStep({
   onComment: (text: string, stepId?: string) => void | Promise<boolean>
   readOnly: boolean
   checklist?: ChecklistWiring
+  cited?: CitedStep | null
 }) {
   // A step that fetched a runbook starts open: its checklist is for doing, not for reading later.
   const [open, setOpen] = useState(() => !!checklist && step.tool_calls.some((t) => t.tool === 'runbook_lookup'))
+  const { ref, flash } = useCiteFlash(step.id, cited, setOpen)
   const regionId = useId()
   const first = step.tool_calls[0]
   const tags = first ? argTags(first.input) : []
@@ -312,7 +390,15 @@ function DoneStep({
   const more = step.tool_calls.length - 1
 
   return (
-    <li id={stepAnchor(step.id)} className="flex flex-col gap-2 scroll-mt-4">
+    <li
+      ref={ref}
+      id={stepAnchor(step.id)}
+      data-cited={flash ? '' : undefined}
+      className={cn(
+        'flex scroll-mt-24 flex-col gap-2 rounded-md data-[cited]:bg-agent-subtle',
+        flash && 'motion-safe:animate-cite',
+      )}
+    >
       <button
         type="button"
         aria-expanded={open}
@@ -366,6 +452,7 @@ function LiveStep({
   readOnly,
   checklist,
   offFilter = false,
+  cited,
 }: {
   step: StepState
   n: number
@@ -375,11 +462,21 @@ function LiveStep({
   checklist?: ChecklistWiring
   /** The step is outside the active layer filter: kept so the live work stays visible. */
   offFilter?: boolean
+  cited?: CitedStep | null
 }) {
+  const { ref, flash } = useCiteFlash(step.id, cited)
   const first = step.tool_calls[0]
   const tags = first ? argTags(first.input) : []
   return (
-    <li id={stepAnchor(step.id)} className="flex scroll-mt-4 flex-col gap-2.5 rounded-lg border border-input bg-card px-3 py-2.5">
+    <li
+      ref={ref}
+      id={stepAnchor(step.id)}
+      data-cited={flash ? '' : undefined}
+      className={cn(
+        'flex scroll-mt-24 flex-col gap-2.5 rounded-lg border border-input bg-card px-3 py-2.5 data-[cited]:bg-agent-subtle',
+        flash && 'motion-safe:animate-cite',
+      )}
+    >
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
         <span
           role="img"
@@ -429,6 +526,7 @@ function TimelineBody({
   pages = [],
   ownerNames,
   shadow = false,
+  citedStep,
 }: {
   steps: StepState[]
   /** Proposal ids of the room: a raw id in agent prose links to its card. */
@@ -455,6 +553,8 @@ function TimelineBody({
   ownerNames?: Record<string, string>
   /** Shadow room: the agent works silently, so the empty state neither reports it nor offers a steer. */
   shadow?: boolean
+  /** The step a hypothesis chip asked for: it opens, scrolls into view and flashes (F3). */
+  citedStep?: CitedStep | null
 }) {
   // QA R18 (G11): a step link to a step that the layer filter hides clears the filter.
   useEffect(() => {
@@ -537,6 +637,7 @@ function TimelineBody({
               readOnly={readOnly}
               checklist={checklist}
               offFilter={!hit}
+              cited={citedStep}
             />
           ) : (
             <DoneStep
@@ -547,6 +648,7 @@ function TimelineBody({
               onComment={onComment}
               readOnly={readOnly}
               checklist={checklist}
+              cited={citedStep}
             />
           )
         })}

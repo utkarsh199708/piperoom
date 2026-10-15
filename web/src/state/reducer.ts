@@ -315,6 +315,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
                   is_error: p.is_error,
                   truncated: p.truncated,
                   took_ms: p.took_ms,
+                  provenance: p.provenance,
                 }
               : t,
           ),
@@ -381,6 +382,7 @@ function applyCore(state: RoomState, event: Event): RoomState {
           based_on_steps: p.based_on_steps ?? [],
           confidence: p.confidence,
           confirmed: false,
+          unbacked_terms: p.unbacked_terms ?? [],
           seq: event.seq,
           verdicts: [],
         },

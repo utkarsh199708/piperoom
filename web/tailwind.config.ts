@@ -111,6 +111,10 @@ const config: Config = {
           '0%': { backgroundColor: 'hsl(var(--success-subtle))' },
           '100%': { backgroundColor: 'transparent' },
         },
+        cite: {
+          '0%': { backgroundColor: 'var(--agent-subtle)' },
+          '100%': { backgroundColor: 'transparent' },
+        },
         shimmer: {
           '0%, 100%': { opacity: '1' },
           '50%': { opacity: '.55' },
@@ -121,6 +125,7 @@ const config: Config = {
         shimmer: 'shimmer 1.6s ease-in-out infinite',
         check: 'check 200ms cubic-bezier(.2,.8,.2,1) both',
         heal: 'heal 600ms cubic-bezier(.2,.8,.2,1) both',
+        cite: 'cite 600ms cubic-bezier(.2,.8,.2,1) both',
       },
     },
   },

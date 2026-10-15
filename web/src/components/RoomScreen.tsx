@@ -39,7 +39,7 @@ import { PageOwnerDialog } from './room/PageOwnerDialog'
 import { FixNoteDialog } from './room/FixNoteDialog'
 import { canPageOwner } from '../lib/pages'
 import { canLogFix } from '../lib/fixNote'
-import type { ChecklistWiring } from './Timeline'
+import type { ChecklistWiring, CitedStep } from './Timeline'
 import { StaleBanner } from './StaleBanner'
 import { Badge } from '@/components/ui/badge'
 import { ShadowPanel } from './shadow/ShadowPanel'
@@ -154,6 +154,19 @@ export function RoomScreen() {
     return () => rememberRoomTitle(undefined)
   }, [state?.title])
   const [layerFilter, setLayerFilter] = useState<string | null>(null)
+  const [citedStep, setCitedStep] = useState<CitedStep | null>(null)
+  const citeNonce = useRef(0)
+  // A citation chip: on the tabbed layout the steps live on the Investigation tab, so it opens first.
+  // A layer filter hides the steps outside it, so it is cleared: the chip must land on its row.
+  const citeStep = useCallback(
+    (id: string) => {
+      if (narrowRef.current) setTab('investigation')
+      setLayerFilter(null)
+      citeNonce.current += 1
+      setCitedStep({ id, nonce: citeNonce.current })
+    },
+    [setTab],
+  )
   const [traceOpen, setTraceOpen] = useState(false)
   const [handoffOpen, setHandoffOpen] = useState(false)
   const [closeOpen, setCloseOpen] = useState(false)
@@ -336,6 +349,7 @@ export function RoomScreen() {
       onVerdict={actions.hypothesisVerdict}
       pipelineId={state.pipeline_id}
       insight={state.insight}
+      onCite={citeStep}
     />
   ) : null
   const proposalsCard = showProposals ? (
@@ -378,6 +392,7 @@ export function RoomScreen() {
         pages={state.pages}
         ownerNames={ownerLabels}
         shadow={state.shadow}
+        citedStep={citedStep}
       />
     </section>
     </>

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -32,9 +33,54 @@ func WriteHandoff(ctx context.Context, roomEvents []events.Event, opts Options) 
 	return writeHandoff(ctx, roomEvents, opts, newModel(opts, nil))
 }
 
-// writeHandoff is the testable seam: the model is injected.
+// writeHandoff is the testable seam: the model is injected. After the summary
+// parses (with its one repair request, summarize) it is checked against the
+// room log (CheckHandoff). On violations the model gets one chance to correct
+// itself; whatever violations remain are stored on the summary, never a reason
+// to refuse it.
 func writeHandoff(ctx context.Context, roomEvents []events.Event, opts Options, m model) (events.HandoffSummary, error) {
-	return writeSummary(ctx, roomEvents, opts, m, handoffPrompt(), "handoff")
+	if len(roomEvents) == 0 {
+		return events.HandoffSummary{}, fmt.Errorf("agent: cannot write %s from an empty room", "handoff")
+	}
+	prompt, input := handoffPrompt(), renderRoomEvents(roomEvents)
+	summary, raw, err := summarizeRaw(ctx, m, opts, prompt, input, "handoff")
+	if err != nil {
+		return events.HandoffSummary{}, err
+	}
+	vs := CheckHandoff(roomEvents, summary)
+	if len(vs) > 0 {
+		retry := summaryRequest(opts, prompt, []anthropic.BetaMessageParam{
+			anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(input)),
+			{
+				Role:    anthropic.BetaMessageParamRoleAssistant,
+				Content: []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(raw)},
+			},
+			anthropic.NewBetaUserMessage(anthropic.NewBetaTextBlock(retryNote(vs))),
+		})
+		// A failed, unusable or late second attempt keeps the first summary and
+		// its violations: the request deadline is shared, so the retry gets
+		// what is left.
+		second, _, bad, rerr := askWith(ctx, m, retry, "handoff")
+		if rerr != nil || bad != nil {
+			// Counts only: the error text can quote the model's output.
+			slog.Warn("agent: handoff self-correction failed; keeping the first summary", "violations", len(vs), "ctx_done", ctx.Err() != nil)
+		} else {
+			summary, vs = second, CheckHandoff(roomEvents, second)
+		}
+	}
+	summary.Violations = toEventViolations(vs)
+	return summary, nil
+}
+
+// retryNote is the user turn that asks for a corrected summary. A violation's
+// Detail quotes the model's own words, which may echo tool text, so it goes in
+// the untrusted wrapper.
+func retryNote(vs []HandoffViolation) string {
+	lines := make([]string, len(vs))
+	for i, v := range vs {
+		lines[i] = v.Rule + " " + v.Field + ": " + wrapUntrusted(v.Detail)
+	}
+	return "The summary failed these checks; fix them and return the corrected JSON:\n- " + strings.Join(lines, "\n- ")
 }
 
 // writeSummary is the request shared by the hand-off and the post-mortem: one
@@ -51,23 +97,31 @@ func writeSummary(ctx context.Context, roomEvents []events.Event, opts Options, 
 // checks the answer. An answer that is unusable but fixable gets exactly one
 // repair request that names what was wrong; whatever that returns is final.
 func summarize(ctx context.Context, m model, opts Options, prompt, input, what string) (events.HandoffSummary, error) {
-	s, bad, err := askSummary(ctx, m, opts, prompt, input, what, nil)
+	s, _, err := summarizeRaw(ctx, m, opts, prompt, input, what)
+	return s, err
+}
+
+// summarizeRaw is summarize that also returns the model's raw text of the
+// summary it returns, which the hand-off's self-correction replays as the
+// assistant turn.
+func summarizeRaw(ctx context.Context, m model, opts Options, prompt, input, what string) (events.HandoffSummary, string, error) {
+	s, raw, bad, err := askSummary(ctx, m, opts, prompt, input, what, nil)
 	if err != nil {
-		return events.HandoffSummary{}, err
+		return events.HandoffSummary{}, "", err
 	}
 	if bad == nil {
-		return s, nil
+		return s, raw, nil
 	}
-	s, again, err := askSummary(ctx, m, opts, prompt, input, what, bad)
+	s, raw, again, err := askSummary(ctx, m, opts, prompt, input, what, bad)
 	if err != nil {
 		// Both the cause (a deadline, a budget stop) and the sentinel stay
 		// matchable with errors.Is.
-		return events.HandoffSummary{}, fmt.Errorf("agent: %s: repair request after %q: %w: %w", what, bad.reason, ErrSummaryInvalid, err)
+		return events.HandoffSummary{}, "", fmt.Errorf("agent: %s: repair request after %q: %w: %w", what, bad.reason, ErrSummaryInvalid, err)
 	}
 	if again != nil {
-		return events.HandoffSummary{}, fmt.Errorf("agent: %s: summary still unusable after one repair (%s): %w", what, again.reason, ErrSummaryInvalid)
+		return events.HandoffSummary{}, "", fmt.Errorf("agent: %s: summary still unusable after one repair (%s): %w", what, again.reason, ErrSummaryInvalid)
 	}
-	return s, nil
+	return s, raw, nil
 }
 
 // summaryProblem says why an answer cannot be used. reason is fixed text plus
@@ -91,21 +145,25 @@ const (
 )
 
 // askSummary makes one summary request. fix is nil for the first request and
-// describes the previous answer's problem for the repair request. err is an
-// error of the call itself, or a refusal, which a repair cannot change;
-// problem is set when the call worked but its answer cannot be used.
-func askSummary(ctx context.Context, m model, opts Options, prompt, input, what string, fix *summaryProblem) (events.HandoffSummary, *summaryProblem, error) {
+// describes the previous answer's problem for the repair request.
+func askSummary(ctx context.Context, m model, opts Options, prompt, input, what string, fix *summaryProblem) (events.HandoffSummary, string, *summaryProblem, error) {
 	user := []anthropic.BetaContentBlockParamUnion{anthropic.NewBetaTextBlock(input)}
 	if fix != nil {
 		user = append(user, anthropic.NewBetaTextBlock(repairNote(*fix)))
 	}
-	params := anthropic.BetaMessageNewParams{
+	return askWith(ctx, m, summaryRequest(opts, prompt, []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(user...)}), what)
+}
+
+// summaryRequest is the structured summary request: the system prompt, then
+// msgs.
+func summaryRequest(opts Options, prompt string, msgs []anthropic.BetaMessageParam) anthropic.BetaMessageNewParams {
+	return anthropic.BetaMessageNewParams{
 		Model:     opts.Model,
 		MaxTokens: handoffMaxTokens,
 		System: []anthropic.BetaTextBlockParam{
 			{Text: prompt, CacheControl: anthropic.NewBetaCacheControlEphemeralParam()},
 		},
-		Messages: []anthropic.BetaMessageParam{anthropic.NewBetaUserMessage(user...)},
+		Messages: msgs,
 		OutputConfig: anthropic.BetaOutputConfigParam{
 			Effort: anthropic.BetaOutputConfigEffort(opts.effort()),
 			Format: anthropic.BetaJSONOutputFormatParam{Schema: handoffSchema()},
@@ -114,24 +172,30 @@ func askSummary(ctx context.Context, m model, opts Options, prompt, input, what 
 			OfAdaptive: &anthropic.BetaThinkingConfigAdaptiveParam{},
 		},
 	}
+}
 
+// askWith sends one summary request and parses the answer. It also returns
+// the model's raw text. err is an error of the call itself, or a refusal,
+// which a repair cannot change; problem is set when the call worked but its
+// answer cannot be used.
+func askWith(ctx context.Context, m model, params anthropic.BetaMessageNewParams, what string) (events.HandoffSummary, string, *summaryProblem, error) {
 	msg, err := m.Turn(ctx, params)
 	if err != nil {
-		return events.HandoffSummary{}, nil, fmt.Errorf("agent: %s request: %w", what, err)
+		return events.HandoffSummary{}, "", nil, fmt.Errorf("agent: %s request: %w", what, err)
 	}
 	if msg.StopReason == anthropic.BetaStopReasonRefusal {
-		return events.HandoffSummary{}, nil, fmt.Errorf("agent: %s: model refused the request: %w", what, ErrSummaryInvalid)
+		return events.HandoffSummary{}, "", nil, fmt.Errorf("agent: %s: model refused the request: %w", what, ErrSummaryInvalid)
 	}
 	cutOff := msg.StopReason == anthropic.BetaStopReasonMaxTokens
 
 	text := extractText(msg.Content)
 	if strings.TrimSpace(text) == "" {
-		return events.HandoffSummary{}, &summaryProblem{reason: "model returned no text", kind: problemEmpty, cutOff: cutOff}, nil
+		return events.HandoffSummary{}, "", &summaryProblem{reason: "model returned no text", kind: problemEmpty, cutOff: cutOff}, nil
 	}
 	var summary events.HandoffSummary
 	if err := json.Unmarshal([]byte(text), &summary); err != nil {
 		// The decoder's message can quote the answer, so it stays out of reason.
-		return events.HandoffSummary{}, &summaryProblem{reason: "model output is not valid JSON", kind: problemNotJSON, cutOff: cutOff}, nil
+		return events.HandoffSummary{}, "", &summaryProblem{reason: "model output is not valid JSON", kind: problemNotJSON, cutOff: cutOff}, nil
 	}
 	var missing []string
 	if strings.TrimSpace(summary.WhatBroke) == "" {
@@ -141,9 +205,9 @@ func askSummary(ctx context.Context, m model, opts Options, prompt, input, what 
 		missing = append(missing, "why")
 	}
 	if len(missing) > 0 {
-		return events.HandoffSummary{}, &summaryProblem{reason: "model omitted " + strings.Join(missing, " and "), missing: missing, cutOff: cutOff}, nil
+		return events.HandoffSummary{}, "", &summaryProblem{reason: "model omitted " + strings.Join(missing, " and "), missing: missing, cutOff: cutOff}, nil
 	}
-	return summary, nil, nil
+	return summary, text, nil, nil
 }
 
 // repairNote is the second user block of the repair request. It names the

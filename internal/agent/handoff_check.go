@@ -240,11 +240,7 @@ func indexLog(evs []events.Event) logIndex {
 	}
 	idx.text = strings.ToLower(text.String())
 	idx.textNC = thousandsGroup.ReplaceAllStringFunc(idx.text, func(m string) string { return strings.ReplaceAll(m, ",", "") })
-	for _, m := range logNum.FindAllString(idx.textNC, -1) {
-		if f, err := strconv.ParseFloat(m, 64); err == nil {
-			idx.nums = append(idx.nums, f)
-		}
-	}
+	idx.nums = numbersIn(idx.textNC)
 	// A closed room has nothing left to finish.
 	if !closed {
 		idx.interrupted = lastStatus == "error" ||
@@ -253,6 +249,17 @@ func indexLog(evs []events.Event) logIndex {
 			(lastStatus == "working" && lastWork == events.AgentToolResult)
 	}
 	return idx
+}
+
+// numbersIn returns every number in text, for the byte-size comparison.
+func numbersIn(text string) []float64 {
+	var out []float64
+	for _, m := range logNum.FindAllString(text, -1) {
+		if f, err := strconv.ParseFloat(m, 64); err == nil {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // hasNumber reports whether n appears in the log as a whole number, with or

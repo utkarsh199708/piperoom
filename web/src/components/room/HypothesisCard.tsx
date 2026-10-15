@@ -9,6 +9,8 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { clockTime } from '@/lib/time'
+import { stepAnchor } from '@/lib/triage'
+import { markTerms } from '@/lib/unbacked'
 import { PersonName } from '@/components/VerifiedBadge'
 import { PersonAvatar } from './PersonAvatar'
 import { AgentText, StepNumbersProvider } from './AgentText'
@@ -16,13 +18,71 @@ import { AgentText, StepNumbersProvider } from './AgentText'
 const AGENT = { kind: 'agent', id: 'agent', name: 'Agent' } as const
 const MAX_NOTE = 500
 
-// "based on steps 1, 3, 4": step ids become the numbers the timeline shows.
-function basedOn(ids: string[], steps: StepState[]): string {
-  const nums = ids.map((id) => {
-    const i = steps.findIndex((s) => s.id === id)
-    return i >= 0 ? String(i + 1) : id
-  })
-  return `based on ${nums.length === 1 ? 'step' : 'steps'} ${nums.join(', ')}`
+/** The DOM id of a step row, shared with the timeline. */
+function rowOf(id: string) {
+  return typeof document === 'undefined' ? null : document.getElementById(stepAnchor(id))
+}
+
+// "based on" + one chip per cited step: the number the timeline shows, a button that jumps to
+// the row. An id the log does not hold (a snapshot before replay, a stale citation) is a
+// disabled "step ?": never the raw id. Hovering a chip marks its row without scrolling.
+function CitationChips({ ids, steps, onCite }: { ids: string[]; steps: StepState[]; onCite?: (stepId: string) => void }) {
+  return (
+    <span className="flex flex-wrap items-center gap-1" data-testid="citations">
+      <span>based on</span>
+      {ids.map((id, k) => {
+        const i = steps.findIndex((s) => s.id === id)
+        const cls =
+          'inline-flex h-5 items-center rounded-md border border-agent/40 px-1.5 font-mono text-[10px] leading-none text-agent-foreground enabled:hover:bg-agent-subtle focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60 coarse:h-7'
+        if (i < 0) {
+          return (
+            <button key={`${id}-${k}`} type="button" disabled className={cls} title="This step is not in the room log">
+              step ?
+            </button>
+          )
+        }
+        return (
+          <button
+            key={`${id}-${k}`}
+            type="button"
+            className={cls}
+            aria-label={`Go to step ${i + 1}: ${steps[i].title}`}
+            onClick={() => onCite?.(id)}
+            onMouseEnter={() => rowOf(id)?.setAttribute('data-cited', '')}
+            onMouseLeave={() => rowOf(id)?.removeAttribute('data-cited')}
+            onFocus={() => rowOf(id)?.setAttribute('data-cited', '')}
+            onBlur={() => rowOf(id)?.removeAttribute('data-cited')}
+          >
+            step {i + 1}
+          </button>
+        )
+      })}
+    </span>
+  )
+}
+
+// The hypothesis text with the terms the cited steps do not show underlined (dotted, warning tone).
+// The rest goes through AgentText, so step and proposal references are links.
+function HypothesisText({ text, terms }: { text: string; terms: string[] }) {
+  return (
+    <p className="m-0 max-w-[72ch] text-base">
+      {markTerms(text, terms).map((r, i) =>
+        r.unbacked ? (
+          <mark
+            key={i}
+            className="unbacked bg-transparent text-inherit underline decoration-warning decoration-dotted underline-offset-4"
+            title="Not found in the cited steps"
+          >
+            {r.text}
+          </mark>
+        ) : (
+          <span key={i}>
+            <AgentText text={r.text} />
+          </span>
+        ),
+      )}
+    </p>
+  )
 }
 
 function recordTitle(stats: AgentStats): string {
@@ -42,6 +102,7 @@ export function HypothesisCard({
   onVerdict,
   pipelineId = '',
   insight,
+  onCite,
 }: {
   hypothesis: HypothesisState
   steps: StepState[]
@@ -55,12 +116,15 @@ export function HypothesisCard({
   pipelineId?: string
   /** The room's insight: the first-hypothesis time (F11). */
   insight?: InsightState
+  /** A citation chip was clicked: scroll to and open that step (F3). */
+  onCite?: (stepId: string) => void
 }) {
   const stats = useAgentStats(pipelineId)
   const record = stats ? recordText(stats, hypothesis.confidence) : null
   const noRecord = stats !== null && stats.graded === 0
   const firstS = insight?.time_to_first_hypothesis_s ?? -1
   const based = hypothesis.based_on_steps ?? []
+  const unbacked = hypothesis.unbacked_terms ?? []
   const verdicts = hypothesis.verdicts ?? []
   const mine = verdicts.find((v) => v.by.id === selfId)?.verdict
   const [disputing, setDisputing] = useState(false)
@@ -108,10 +172,15 @@ export function HypothesisCard({
             </Badge>
           )
         })}
+        {unbacked.length > 0 && (
+          <Badge variant="warning" title="Terms the cited steps do not show">
+            {unbacked.length} unbacked
+          </Badge>
+        )}
         {(based.length > 0 || firstS >= 0) && (
           <span className="ml-auto flex flex-wrap gap-x-2 text-xs text-subtle-foreground">
             {firstS >= 0 && <span>first hypothesis in {firstS} s</span>}
-            {based.length > 0 && <span>{basedOn(based, steps)}</span>}
+            {based.length > 0 && <CitationChips ids={based} steps={steps} onCite={onCite} />}
           </span>
         )}
       </div>
@@ -121,9 +190,7 @@ export function HypothesisCard({
         </p>
       )}
       <StepNumbersProvider steps={steps}>
-        <p className="m-0 max-w-[72ch] text-base">
-          <AgentText text={hypothesis.text} />
-        </p>
+        <HypothesisText text={hypothesis.text} terms={unbacked} />
       </StepNumbersProvider>
       {canDecide && onVerdict && (
         <div className="flex flex-wrap items-center justify-end gap-2">
