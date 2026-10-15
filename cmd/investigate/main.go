@@ -158,7 +158,7 @@ func run(o runOptions) (err error) {
 		}
 		rec, rerr := newRecorder(o.RecordDir, sink, recordMeta{
 			Pipeline: pipeline, Title: title, Model: opts.Model, Effort: opts.Effort, MaxTurns: opts.MaxTurns,
-			PromptHash: agent.PromptHash(), Commit: commit, FakeTools: fakeTools, ApproveAll: o.ApproveAll,
+			SystemPromptSHA256: agent.PromptHash(), Commit: commit, FakeTools: fakeTools, ApproveAll: o.ApproveAll,
 		}, time.Now)
 		if rerr != nil {
 			return fmt.Errorf("investigate: %w", rerr)

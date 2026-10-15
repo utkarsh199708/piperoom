@@ -30,7 +30,7 @@ import (
 //	              took_ms but NOT its data (see recordPayload).
 //	inputs.jsonl  one recordedInput per line: every human input (stdin steers,
 //	              auto-approvals, action results) the agent was given.
-//	meta.json     one recordMeta: model, effort, prompt_hash, commit (<sha>, or <sha>-dirty), timings,
+//	meta.json     one recordMeta: model, effort, system_prompt_sha256, commit (<sha>, or <sha>-dirty), timings,
 //	              counts. Written when the run starts (complete=false) and
 //	              again when it ends (complete=true).
 //
@@ -39,24 +39,24 @@ const recordingFormat = "piperoom-recording/1"
 
 // recordMeta is meta.json.
 type recordMeta struct {
-	Format      string    `json:"format"`
-	RecordingID string    `json:"recording_id"`
-	Pipeline    string    `json:"pipeline"`
-	Title       string    `json:"title"`
-	Model       string    `json:"model"`
-	Effort      string    `json:"effort"`
-	MaxTurns    int       `json:"max_turns"`
-	PromptHash  string    `json:"prompt_hash"`
-	Commit      string    `json:"commit"`
-	FakeTools   bool      `json:"fake_tools"`
-	ApproveAll  bool      `json:"approve_all"`
-	StartedAt   time.Time `json:"started_at"`
-	FinishedAt  time.Time `json:"finished_at,omitzero"`
-	DurationMS  int64     `json:"duration_ms"`
-	Events      int       `json:"events"`
-	Inputs      int       `json:"inputs"`
-	ToolCalls   int       `json:"tool_calls"`
-	ToolResults int       `json:"tool_results"`
+	Format             string    `json:"format"`
+	RecordingID        string    `json:"recording_id"`
+	Pipeline           string    `json:"pipeline"`
+	Title              string    `json:"title"`
+	Model              string    `json:"model"`
+	Effort             string    `json:"effort"`
+	MaxTurns           int       `json:"max_turns"`
+	SystemPromptSHA256 string    `json:"system_prompt_sha256"`
+	Commit             string    `json:"commit"`
+	FakeTools          bool      `json:"fake_tools"`
+	ApproveAll         bool      `json:"approve_all"`
+	StartedAt          time.Time `json:"started_at"`
+	FinishedAt         time.Time `json:"finished_at,omitzero"`
+	DurationMS         int64     `json:"duration_ms"`
+	Events             int       `json:"events"`
+	Inputs             int       `json:"inputs"`
+	ToolCalls          int       `json:"tool_calls"`
+	ToolResults        int       `json:"tool_results"`
 	// Complete is true once the run ended and the files were closed. A false
 	// value means the process died; the event file may be cut short.
 	Complete bool `json:"complete"`
