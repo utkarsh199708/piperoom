@@ -903,11 +903,19 @@ func (s *Service) rebuildStale(ctx context.Context, roomID string, st *roomState
 		s.rebuildLater(roomID, st, seq)
 		return true
 	}
-	skip := st.gone || s.isClosed() || !st.stale.Load()
-	s.unlockRoom(st)
-	if skip {
+	if st.gone || s.isClosed() {
+		s.unlockRoom(st)
 		return false
 	}
+	if !st.stale.Load() {
+		// Rebuilt meanwhile by another caller: only catch up to seq.
+		if seq > st.snap.LastSeq {
+			s.catchUpLocked(ctx, roomID, st)
+		}
+		s.unlockRoom(st)
+		return false
+	}
+	s.unlockRoom(st)
 	var inputs []agent.HumanInput
 	l, err := s.rebuildWith(ctx, roomID, func(e events.Event) {
 		if in := inputFor(e); in != nil {
@@ -938,11 +946,19 @@ func (s *Service) rebuildStale(ctx context.Context, roomID string, st *roomState
 		return true
 	}
 	defer s.unlockRoom(st)
-	if st.gone || s.isClosed() || !st.stale.Load() {
+	if st.gone || s.isClosed() {
 		return false
 	}
-	if !s.swapRebuiltLocked(ctx, roomID, st, l, inputs) {
+	if st.stale.Load() && !s.swapRebuiltLocked(ctx, roomID, st, l, inputs) {
 		s.rebuildLater(roomID, st, seq)
+		return false
+	}
+	// Another rebuild may have swapped first, from an older read, or events
+	// landed after this one's read: what the room still lacks up to what
+	// this rebuild saw (or was asked for) is folded from the log, so its
+	// input is fed like any fold, never dropped with this read.
+	if max(seq, l.snap.LastSeq) > st.snap.LastSeq {
+		s.catchUpLocked(ctx, roomID, st)
 	}
 	return false
 }

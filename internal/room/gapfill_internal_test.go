@@ -91,10 +91,10 @@ func TestGapFillSurvivesEndedRequest(t *testing.T) {
 // reads.
 type failingSinceCoord struct {
 	fakeCoord
-	failing   atomic.Bool
-	notFound  atomic.Bool
-	drop      atomic.Int64
-	sinces    atomic.Int32
+	failing    atomic.Bool
+	notFound   atomic.Bool
+	drop       atomic.Int64
+	sinces     atomic.Int32
 	mu         sync.Mutex
 	afterReads []func()
 }
@@ -590,6 +590,22 @@ func TestOverlappingRebuildsCommandReachesRow(t *testing.T) {
 
 	if got := mustRoom(t, r.svc, r.roomID); got.LastSeq != steer.Seq {
 		t.Fatalf("last_seq = %d after the command's sync, want the steer's %d", got.LastSeq, steer.Seq)
+	}
+	if seqs := inboxSeqs(st); !slices.Equal(seqs, []int64{steer.Seq}) {
+		t.Fatalf("inbox seqs = %v, want the steer %d once", seqs, steer.Seq)
+	}
+}
+
+// A rebuild that finds the room already rebuilt by another caller (between
+// the caller's stale check and the lock) still brings it up to seq, feeding
+// what it folds.
+func TestRebuildOfRebuiltRoomCatchesUp(t *testing.T) {
+	r := newStaleRig(t)
+	st := r.leased(t)
+	steer := r.remote(t, events.SteerSent, r.svc.humanActor(r.arjun), events.SteerSentPayload{Text: "s"})
+	r.svc.rebuildStale(context.Background(), r.roomID, st, steer.Seq, true)
+	if got := mustRoom(t, r.svc, r.roomID); got.LastSeq != steer.Seq {
+		t.Fatalf("last_seq = %d, want %d", got.LastSeq, steer.Seq)
 	}
 	if seqs := inboxSeqs(st); !slices.Equal(seqs, []int64{steer.Seq}) {
 		t.Fatalf("inbox seqs = %v, want the steer %d once", seqs, steer.Seq)
